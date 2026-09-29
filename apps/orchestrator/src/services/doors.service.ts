@@ -25,7 +25,6 @@ import type { CronRuntime } from "./cron-runtime.service.js";
 import {
   alarmClaimsFor,
   positionOf,
-  positionUnknownDue,
   type DoorPosition,
 } from "./door-derivations.js";
 import { createLogger } from "../lib/logger.js";
@@ -55,13 +54,9 @@ export interface DoorView {
   heldOpenSeconds: number;
   status: "active" | "retired";
   retiredAt: Date | null;
-  /**
-   * From the newest position event. Unknown — never closed — until one exists,
-   * and again once that event is older than three missed heartbeats (§9.7);
-   * not_monitored for a `none` door.
-   */
+  /** From the newest position event. Unknown — never closed — until one exists; not_monitored for a `none` door. */
   position: DoorPosition;
-  /** When the newest position event happened: the age of the answer, also when it is `unknown` because it went stale. `null` if none has. */
+  /** When the newest position event happened. `null` if none has, and for a `none` door. */
   positionSince: Date | null;
   /** What this door is able to alarm on (§9.7). The UI says so. */
   claims: { forcedDoor: AccessForcedClaim | null; heldOpen: boolean };
@@ -100,20 +95,13 @@ interface PositionRow {
 }
 
 /**
- * §9.7: a door that has gone quiet for three heartbeats has an UNKNOWN position
- * — "never left at closed". P4a stores no heartbeat, so the newest position
- * event's own time stands in for `lastHeartbeatAt`; `positionUnknownDue` owns
- * the cutoff (~90 s for a lock, ~180 s for a DP-1). `positionSince` still says
- * when that last event was, so a reader sees how old the answer is.
- *
- * The consequence to carry into the access-control service: a device that
- * reports position only on CHANGE would read as unknown after that window, so
- * it must report periodically (a heartbeat that carries position), or this
- * input must move to a stored heartbeat.
+ * The position is the newest report as it stands, never aged out: a report that
+ * only comes on change says nothing about how current it is. It turns `unknown`
+ * when link supervision lapses (§9.7), which ships with the supervision writer
+ * (P1 link), not by the age of the last event.
  */
-function toDoorView(row: AccessPointRow, latest: PositionRow | undefined, now: Date): DoorView {
+function toDoorView(row: AccessPointRow, latest: PositionRow | undefined): DoorView {
   const source = row.doorPositionSource;
-  const stale = latest !== undefined && positionUnknownDue({ source, lastHeartbeatAt: latest.occurredAt, now });
   return {
     id: row.id,
     name: row.name,
@@ -121,7 +109,7 @@ function toDoorView(row: AccessPointRow, latest: PositionRow | undefined, now: D
     heldOpenSeconds: row.heldOpenSeconds,
     status: row.status,
     retiredAt: row.retiredAt,
-    position: stale ? "unknown" : positionOf(source, latest ? { kind: latest.kind, troubleCode: latest.troubleCode } : null),
+    position: positionOf(source, latest ? { kind: latest.kind, troubleCode: latest.troubleCode } : null),
     positionSince: source === "none" ? null : (latest?.occurredAt ?? null),
     claims: alarmClaimsFor(source),
     createdAt: row.createdAt,
@@ -137,7 +125,7 @@ function toDoorView(row: AccessPointRow, latest: PositionRow | undefined, now: D
  */
 export async function listDoors(
   prisma: Pick<PrismaClient, "accessPoint" | "$queryRaw">,
-  opts: { includeRetired: boolean; now: Date },
+  opts: { includeRetired: boolean },
 ): Promise<DoorView[]> {
   const rows = (await prisma.accessPoint.findMany({
     ...(opts.includeRetired ? {} : { where: { status: "active" as const } }),
@@ -157,7 +145,7 @@ export async function listDoors(
       ORDER BY "accessPointId", "occurredAt" DESC, "id" DESC`;
     for (const r of latest) latestByDoor.set(r.accessPointId, r);
   }
-  return rows.map((r) => toDoorView(r, latestByDoor.get(r.id), opts.now));
+  return rows.map((r) => toDoorView(r, latestByDoor.get(r.id)));
 }
 
 /** `<occurredAt ms>_<id>`. Both halves are bounded so a hostile cursor cannot overflow BIGINT (a 503 in P2a). */
@@ -290,7 +278,7 @@ export async function createDoor(
     doorPositionSource: row.doorPositionSource,
     heldOpenSeconds: row.heldOpenSeconds,
   });
-  return toDoorView(row, undefined, ctx.now);
+  return toDoorView(row, undefined);
 }
 
 async function loadDoor(prisma: Pick<PrismaClient, "accessPoint">, id: string): Promise<AccessPointRow> {
@@ -299,7 +287,7 @@ async function loadDoor(prisma: Pick<PrismaClient, "accessPoint">, id: string): 
   return row;
 }
 
-async function viewOf(prisma: Pick<PrismaClient, "accessPoint" | "$queryRaw">, id: string, now: Date): Promise<DoorView> {
+async function viewOf(prisma: Pick<PrismaClient, "accessPoint" | "$queryRaw">, id: string): Promise<DoorView> {
   const row = await loadDoor(prisma, id);
   const latest = row.doorPositionSource === "none" ? [] : await prisma.$queryRaw<PositionRow[]>`
     SELECT DISTINCT ON ("accessPointId") "accessPointId", "kind", "troubleCode", "occurredAt"
@@ -307,7 +295,7 @@ async function viewOf(prisma: Pick<PrismaClient, "accessPoint" | "$queryRaw">, i
     WHERE "accessPointId" = ${id}
       AND ("kind" IN ('door_open', 'door_closed') OR ("kind" = 'trouble' AND "troubleCode" = 'position_unknown'))
     ORDER BY "accessPointId", "occurredAt" DESC, "id" DESC`;
-  return toDoorView(row, latest[0], now);
+  return toDoorView(row, latest[0]);
 }
 
 export async function updateDoor(
@@ -332,7 +320,7 @@ export async function updateDoor(
     data.heldOpenSeconds = patch.heldOpenSeconds;
   }
   const changed = Object.keys(data);
-  if (changed.length === 0) return viewOf(prisma, id, ctx.now);
+  if (changed.length === 0) return viewOf(prisma, id);
 
   // The status guard rides on the write itself: a door retired between the read
   // above and this line must not be quietly edited.
@@ -346,7 +334,7 @@ export async function updateDoor(
     ...(data.doorPositionSource ? { doorPositionSource: { from: current.doorPositionSource, to: data.doorPositionSource } } : {}),
     ...(data.heldOpenSeconds !== undefined ? { heldOpenSeconds: { from: current.heldOpenSeconds, to: data.heldOpenSeconds } } : {}),
   });
-  return viewOf(prisma, id, ctx.now);
+  return viewOf(prisma, id);
 }
 
 /** A door is retired, never deleted: its events are evidence and reference it. Retiring twice is a no-op, not an error. */
@@ -356,13 +344,13 @@ export async function retireDoor(
   ctx: DoorWriteContext,
 ): Promise<DoorView> {
   const current = await loadDoor(prisma, id);
-  if (current.status === "retired") return viewOf(prisma, id, ctx.now);
+  if (current.status === "retired") return viewOf(prisma, id);
   const { count } = await prisma.accessPoint.updateMany({
     where: { id, status: "active" },
     data: { status: "retired", retiredAt: ctx.now },
   });
   if (count === 1) await audit(ctx, "Door retired", current.name, "door.retire", { doorId: id });
-  return viewOf(prisma, id, ctx.now);
+  return viewOf(prisma, id);
 }
 
 // ── retention ───────────────────────────────────────────────────────────

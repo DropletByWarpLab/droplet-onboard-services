@@ -1,8 +1,8 @@
 /**
  * ADR-055 (P4a) — the §9.7 pieces of door state the doors service reads today.
  * Pure: no clock, no I/O, no database. Only what has a caller lives here: a
- * door's position (with the third-missed-heartbeat cutoff) and what a door is
- * able to alarm on. The forced-door, held-open and relock derivations are not
+ * door's position from its newest event, and what a door is able to alarm on.
+ * The forced-door, held-open, relock and position-unknown derivations are not
  * built: nothing writes an event until `services/access-control/` exists, so
  * they have no caller, and the rules below are what its slice must implement.
  *
@@ -15,11 +15,15 @@
  *                 grant or REX", and the row says which claim it is.
  *   held open     door position open past the door's held-open time after a
  *                 grant or REX. A key override authorises an opening (it is
- *                 not forced) but does not start this: nothing granted it.
+ *                 not forced) but NEVER arms this: nothing granted it. The
+ *                 derivation must come back with a test that pins it.
  *   relock        fires on door-closed + latch-extended, NOT on a timer.
- *   unknown       a door whose cell has died cannot report; on the third
- *                 missed heartbeat its position is UNKNOWN — never left at
- *                 "closed". (Built: `positionUnknownDue`, `positionOf`.)
+ *   unknown       a door whose cell has died cannot report; when link
+ *                 supervision lapses its position is UNKNOWN — never left at
+ *                 "closed". NOT built, and not by the age of the last event (a
+ *                 device that reports only on change would read unknown after
+ *                 every close): it needs supervision data, and ships with the
+ *                 supervision writer (P1 link).
  *   none          `doorPositionSource = none` gets no forced-door and no
  *                 held-open claim. An alarm the product cannot derive is not
  *                 one it advertises. (Built: `alarmClaimsFor`; the database
@@ -43,26 +47,6 @@ import type {
 } from "@prisma/client";
 
 // ── position ──────────────────────────────────────────────────────────────
-
-/** §6.4: 30 s actuators (locks), 60 s sensors (DP-1). */
-export const HEARTBEAT_SECONDS = { lock: 30, dp1: 60 } as const;
-/** §6.4: three consecutive misses. */
-export const HEARTBEAT_MISSES_FOR_UNKNOWN = 3;
-
-/**
- * Has a door gone quiet for long enough that its position must be reported
- * unknown? The third missed heartbeat: ~90 s for a lock, ~180 s for a DP-1.
- * A `none` door has no position to lose.
- */
-export function positionUnknownDue(input: {
-  source: DoorPositionSource;
-  lastHeartbeatAt: Date;
-  now: Date;
-}): boolean {
-  if (input.source === "none") return false;
-  const window = HEARTBEAT_SECONDS[input.source] * HEARTBEAT_MISSES_FOR_UNKNOWN * 1000;
-  return input.now.getTime() - input.lastHeartbeatAt.getTime() >= window;
-}
 
 export type DoorPosition = "open" | "closed" | "unknown" | "not_monitored";
 

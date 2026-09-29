@@ -109,9 +109,9 @@ describe("event cursor", () => {
 describe("listDoors", () => {
   it("lists active doors by default and includes retired ones only when asked", async () => {
     const p = makePrisma();
-    await listDoors(asPrisma(p), { includeRetired: false, now: NOW });
+    await listDoors(asPrisma(p), { includeRetired: false });
     expect(p.accessPoint.findMany.mock.calls[0]![0]).toMatchObject({ where: { status: "active" } });
-    await listDoors(asPrisma(p), { includeRetired: true, now: NOW });
+    await listDoors(asPrisma(p), { includeRetired: true });
     expect((p.accessPoint.findMany.mock.calls[1]![0] as { where?: unknown }).where).toBeUndefined();
   });
 
@@ -126,7 +126,7 @@ describe("listDoors", () => {
       { accessPointId: "a", kind: "door_open", troubleCode: null, occurredAt: ago(10) },
       { accessPointId: "c", kind: "trouble", troubleCode: "position_unknown", occurredAt: ago(5) },
     ]);
-    const doors = await listDoors(asPrisma(p), { includeRetired: false, now: NOW });
+    const doors = await listDoors(asPrisma(p), { includeRetired: false });
     expect(doors.map((d) => [d.id, d.position])).toEqual([
       ["a", "open"],
       ["b", "unknown"],
@@ -136,52 +136,37 @@ describe("listDoors", () => {
     expect(doors[1]!.positionSince).toBeNull();
   });
 
-  // §9.7: "on the third missed heartbeat its position is UNKNOWN — never left at
-  // 'closed'". P4a has no heartbeat record, so the newest position report's own
-  // time is the freshness input; positionUnknownDue owns the cutoff (~90 s for a
-  // lock, ~180 s for a DP-1).
-  describe("a position that has gone stale reads unknown, with its since", () => {
+  // §9.7's "never left at closed" is link supervision lapsing, and P4a has no
+  // supervision data. A cutoff on the age of the newest position event would be
+  // the wrong signal: a lock or DP-1 that reports only on change would read
+  // unknown 90 or 180 s after every close. So the position is the newest report
+  // as it stands, and `positionSince` says when that was.
+  describe("the position is the newest report as it stands, however old", () => {
     const listOne = async (source: string, kind: string, secondsOld: number) => {
       const p = makePrisma();
       p.accessPoint.findMany.mockResolvedValue([doorRow({ doorPositionSource: source })]);
       p.$queryRaw.mockResolvedValue([{ accessPointId: "door-1", kind, troubleCode: null, occurredAt: ago(secondsOld) }]);
-      return (await listDoors(asPrisma(p), { includeRetired: false, now: NOW }))[0]!;
+      return (await listDoors(asPrisma(p), { includeRetired: false }))[0]!;
     };
 
-    it("a lock: closed 89 s ago is closed; at the third missed heartbeat (90 s) it is unknown — and says since when", async () => {
-      expect(await listOne("lock", "door_closed", 89)).toMatchObject({ position: "closed", positionSince: ago(89) });
-      expect(await listOne("lock", "door_closed", 90)).toMatchObject({ position: "unknown", positionSince: ago(90) });
+    it.each([["lock"], ["dp1"]])("a %s door closed a day ago is still closed, with its positionSince — never unknown by age", async (source) => {
+      expect(await listOne(source, "door_closed", 86_400)).toMatchObject({ position: "closed", positionSince: ago(86_400) });
+      expect(await listOne(source, "door_open", 86_400)).toMatchObject({ position: "open", positionSince: ago(86_400) });
     });
 
-    it("a DP-1 is on the slower clock: 179 s is closed, 180 s is unknown", async () => {
-      expect(await listOne("dp1", "door_closed", 179)).toMatchObject({ position: "closed" });
-      expect(await listOne("dp1", "door_closed", 180)).toMatchObject({ position: "unknown", positionSince: ago(180) });
-    });
-
-    it("an old `open` is unknown too: a stale reading is not evidence in either direction", async () => {
-      expect(await listOne("lock", "door_open", 3600)).toMatchObject({ position: "unknown", positionSince: ago(3600) });
-    });
-
-    it("the read that follows a write applies the same cutoff (create / update / retire return a view)", async () => {
+    it("the read that follows a write says the same (create / update / retire return a view)", async () => {
       const p = makePrisma();
       p.accessPoint.findUnique.mockResolvedValue(doorRow());
       p.$queryRaw.mockResolvedValue([{ accessPointId: "door-1", kind: "door_closed", troubleCode: null, occurredAt: ago(3600) }]);
       const retired = await retireDoor(asPrisma(p), "door-1", { req: REQ, now: NOW });
-      expect(retired).toMatchObject({ position: "unknown", positionSince: ago(3600) });
-    });
-
-    it("a `none` door is still not_monitored, never unknown", async () => {
-      const p = makePrisma();
-      p.accessPoint.findMany.mockResolvedValue([doorRow({ doorPositionSource: "none" })]);
-      const [door] = await listDoors(asPrisma(p), { includeRetired: false, now: NOW });
-      expect(door).toMatchObject({ position: "not_monitored", positionSince: null });
+      expect(retired).toMatchObject({ position: "closed", positionSince: ago(3600) });
     });
   });
 
   it("a door with no position source is not_monitored and claims neither alarm — without asking the event log", async () => {
     const p = makePrisma();
     p.accessPoint.findMany.mockResolvedValue([doorRow({ id: "n", doorPositionSource: "none" })]);
-    const [door] = await listDoors(asPrisma(p), { includeRetired: false, now: NOW });
+    const [door] = await listDoors(asPrisma(p), { includeRetired: false });
     expect(door).toMatchObject({
       position: "not_monitored",
       positionSince: null,
@@ -197,7 +182,7 @@ describe("listDoors", () => {
       doorRow({ id: "l", doorPositionSource: "lock" }),
       doorRow({ id: "s", doorPositionSource: "dp1" }),
     ]);
-    const doors = await listDoors(asPrisma(p), { includeRetired: false, now: NOW });
+    const doors = await listDoors(asPrisma(p), { includeRetired: false });
     expect(doors.map((d) => d.claims.forcedDoor)).toEqual(["latch_witnessed", "unwitnessed_open"]);
   });
 });

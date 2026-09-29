@@ -107,19 +107,12 @@ describe("GET /api/doors", () => {
     });
   });
 
-  it("carries positionSince, and a position older than three missed heartbeats reads unknown with it (§9.7: never left at closed)", async () => {
-    // The router's clock is 03:00:00Z. A lock's cutoff is 90 s.
+  it("carries positionSince, and an old position is not aged into unknown (that waits for link supervision, P1)", async () => {
     prisma.$queryRaw.mockResolvedValue([
-      { accessPointId: DOOR_ID, kind: "door_closed", troubleCode: null, occurredAt: new Date("2026-09-29T02:58:29Z") },
+      { accessPointId: DOOR_ID, kind: "door_closed", troubleCode: null, occurredAt: new Date("2026-09-28T03:00:00Z") },
     ]);
-    const stale = await request(app()).get("/api/doors");
-    expect(stale.body.doors[0]).toMatchObject({ position: "unknown", positionSince: "2026-09-29T02:58:29.000Z" });
-
-    prisma.$queryRaw.mockResolvedValue([
-      { accessPointId: DOOR_ID, kind: "door_closed", troubleCode: null, occurredAt: new Date("2026-09-29T02:58:31Z") },
-    ]);
-    const fresh = await request(app()).get("/api/doors");
-    expect(fresh.body.doors[0]).toMatchObject({ position: "closed", positionSince: "2026-09-29T02:58:31.000Z" });
+    const res = await request(app()).get("/api/doors");
+    expect(res.body.doors[0]).toMatchObject({ position: "closed", positionSince: "2026-09-28T03:00:00.000Z" });
   });
 
   it.each(["family", "guest", "mcp", "voice", null] as const)("%s is refused, and nothing is read", async (who) => {
