@@ -643,6 +643,106 @@ never grants**: what the person can reach is the same whatever is chosen.
   other code, or none, means the box is older than this route: keep the choice
   on the device.
 
+### Agent runs (`/api/agent-runs/*`, WARP-2915)
+
+Background runs the box works on by itself, and the Tier-2 calls they park on for a
+person's approval. Source of truth: `apps/orchestrator/src/routes/agent-runs.ts`
+(`serializeRun`, `listQuerySchema`, `decideSchema`) and `decideAgentRun` in
+`services/agent-run-worker.service.ts`. Shipped clients: Android (droplet-android #46,
+`AgentRunModels.kt`) and iOS (droplet-ios #63, WARP-2914).
+
+**Who.** Every route requires role `owner` or `admin`; any other role gets
+`403 {"error":"Forbidden: role not permitted"}` (or `"Forbidden: no role on session"`)
+from the role gate, before the handler runs. Key on the status: the `error` is a sentence,
+not a slug. A person sees only their own runs: another person's run id is a
+`404 {"error":"Run not found"}`, never a 403. A native client always acts as itself and
+never sends `onBehalfOf` (that field is for the `_service:mcp` principal acting for a chat
+user), so it never sees the two `403`s that only that principal can reach
+(`"Forbidden: role not permitted to use background runs"`, `"Forbidden: no principal to act for"`).
+
+| Method | Path | Body / query | Returns |
+|---|---|---|---|
+| GET | `/agent-runs` | `?limit` (1-100, default 25), `?cursor`, `?status`, `?workspaceId` | `{ items: Run[], nextCursor: string \| null }` |
+| GET | `/agent-runs/:id` | — | `Run` plus `trace` |
+| POST | `/agent-runs/:id/cancel` | — | `200 { id, status: "cancelled" }` |
+| POST | `/agent-runs/:id/confirm` | `{ decision: "approved" \| "denied" }` | `200 { id, tool, decision, status: "queued" }` |
+
+`POST /agent-runs` (start) and `/agent-runs/schedules` (recurring runs) also exist; the
+mobile apps do not use them, so they are not specified here.
+
+**List.** Ordered newest first by `(createdAt desc, id desc)`. It is **not** parked-first:
+a run awaiting confirmation sits where its `createdAt` puts it, so a client that wants a
+"needs your OK" section filters on `status == "awaiting_confirmation"` (or sends
+`?status=awaiting_confirmation`). `status` is one of `queued`, `running`,
+`awaiting_confirmation`, `succeeded`, `failed`, `cancelled`; treat an unknown value as
+"unknown", not as an error. `nextCursor` is opaque (today `<createdAt ISO>|<id>`): pass it
+back verbatim, never build or parse it. It is `null` when the page returned fewer than
+`limit` rows, so a full last page yields one extra empty request. A malformed cursor is
+`400 {"error":"Invalid cursor"}`; a bad query is `400 {"error":"Invalid query","details":…}`.
+List rows carry no `trace`.
+
+**Run.**
+
+| Field | Type |
+|---|---|
+| `id`, `goal`, `model`, `status` | string |
+| `sessionId`, `startedAt`, `endedAt`, `deadlineAt`, `result`, `stopReason`, `error` | string \| null |
+| `iteration`, `maxIter`, `attempts` | int |
+| `runAfter`, `createdAt`, `updatedAt` | ISO-8601 string |
+| `workspaceId`, `cloudGate`, `offLanProvider`, `offLanWithheldTools` | Workshop / off-LAN metadata; clients that do not render it decode past it |
+| `pending` | `null`, or the parked call (below) |
+| `trace` | detail read only: array of steps |
+
+`pending` is non-null **only** while `status == "awaiting_confirmation"`:
+`{ tool, args, summary, parkedAt, decision, decidedAt }`. `summary` is an **object**
+(`{ tool, fields: [{ key, kind, detail, value? }], truncatedFields }`), not a string: it is
+the PHI-free `ConfirmationSummary` shared with chat confirmations, and `detail` is a size or
+shape, never the value. `args` is the raw argument object. It is present because the caller
+is the run's owner, but native clients should not render it and do not declare it.
+
+Trace step: `{ tool_call_id, tool, args, iteration, dispatchedAt, text?, isError?,
+completedAt?, replayOf?, confirmation?: "parked" \| "confirmed" \| "denied",
+unknownOutcome?: true }`. `unknownOutcome` marks a call whose result was lost when the
+worker restarted. A run re-parked on the same tool that has such a step may already have
+happened, so a client must not tell the person that nothing has been done yet.
+
+**Cancel.** `409 {"error":"Run is already finished","status":<current>}` once the run is
+terminal. 404 / 403 as above.
+
+**Confirm.** Errors are `{ "error": <reason>, "id": <run id> }`, where `reason` is a slug:
+
+| Status | `error` | Meaning |
+|---|---|---|
+| 404 | `not_found` | no such run (the ownership check's 404 says `"Run not found"` instead; treat both the same) |
+| 403 | `not_owner` | the run belongs to someone else. In practice a client gets the `"Run not found"` 404 instead, because the ownership check already runs first; `not_owner` only fires on a race, so do not build UI for it |
+| 403 | `forbidden_tool_for_role` | the deciding person's role may not approve this tool |
+| 409 | `not_parked` | run is not waiting (already decided, cancelled, or finished): re-read it |
+| 409 | `attribution_failed` | the box could not resolve who is deciding; nothing changed and the run is still parked |
+| 400 | `Invalid decision` (+ `details`) | `decision` is not `approved` or `denied` |
+
+The role gate's 403 is a sentence, not a slug (see **Who**, above); key on the status.
+After a successful decision the run is `queued` again and the worker resumes it. There
+is no undo. Do not auto-retry a confirm: re-read the run first.
+
+**Deep link.** A run opens in the native apps as **`droplet://run/<id>`**: exactly one
+path segment, no query, and `<id>` matching `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`. Opening
+it only shows the run; it never approves, declines, or cancels. The box does not send this
+scheme. A push for a run carries the dashboard path
+`url: "/workshop?run=<id>"` (`agentRunLink` in `agent-run-worker.service.ts`; `run` is the
+only query key, and `tag: "agent-run:<id>"` collapses every notification about one run).
+On Android `/workshop?run=<id>`, `/admin/audit?run=<id>` (which forwards to `/workshop`)
+and `/agent-runs/<id>` all open the same run page, and the push handler rewrites them to
+`droplet://run/<id>` for its content intent. Anything else, or an id that fails the
+pattern, opens the inbox.
+
+**Client cross-check (Android #46 vs iOS #63).** No wire mismatch: both read
+`pending.summary` as the chat `ConfirmationSummary` object (the bug WARP-2914 fixed on iOS
+was modelling it as a string), both drop `args`, and both accept the same run-id rule.
+Differences that are not contract issues: iOS handles the 404 in both shapes (the
+`"Run not found"` sentence and the `not_found` slug) while Android keys 404 on status,
+and Android's `parkedCallMayHaveRun` (the `unknownOutcome` re-park case) is Android
+copy that the iOS card may not carry.
+
 ### Security incidents and alert routing (`/api/security/*` — WARP-2981)
 
 > **Added for WARP-2981 (ADR-059 P6, §8).** Android and Windows build the
