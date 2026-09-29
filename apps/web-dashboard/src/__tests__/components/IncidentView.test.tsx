@@ -293,6 +293,25 @@ describe("WARP-3195 — a camera only Droplet linked: the line and Keep (route 2
     expect(h.acceptSecurityLink).toHaveBeenCalledTimes(1);
   });
 
+  it("🔴 the Keep landed but the re-read fails: still the success toast, never an error for a Keep that took", async () => {
+    let kept = false;
+    h.getSecurityIncident.mockImplementation(async () => {
+      if (kept) throw new Error("network down");
+      return atManage();
+    });
+    h.acceptSecurityLink.mockImplementation(async () => {
+      kept = true;
+      return { zone: {}, changed: true };
+    });
+    renderView();
+    fireEvent.click(await screen.findByRole("button", { name: KEEP_BACK }));
+    await waitFor(() => expect(h.toast).toHaveBeenCalledWith(fill(INCIDENT_COPY.keptAlerts, { camera: "Back camera", area: "Stock room" }), "success"));
+    // Let the failed re-read settle, then: no error toast for a Keep that took.
+    await waitFor(() => expect(h.getSecurityIncident.mock.calls.length).toBeGreaterThanOrEqual(2));
+    expect(h.toast.mock.calls.filter(([, kind]) => kind === "error")).toEqual([]);
+    expect(h.acceptSecurityLink).toHaveBeenCalledTimes(1);
+  });
+
   it("outside Inside and Staff only, the toast doesn't promise people-after-hours alerts", async () => {
     let kept = false;
     const entry = { ...BACK, zone: { ...BACK.zone, kind: "entry" as const } };
