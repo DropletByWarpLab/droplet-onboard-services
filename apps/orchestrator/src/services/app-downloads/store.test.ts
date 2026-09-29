@@ -13,7 +13,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { AppDownloadsStore } from "./store.js";
@@ -337,21 +337,41 @@ describe("AppDownloadsStore — caching", () => {
     await expect(store.loadCatalog()).resolves.toMatchObject({ ok: true });
   });
 
-  it("still memoises a SUCCESSFUL catalog read", async () => {
+  it("still memoises a SUCCESSFUL catalog read while the file is unchanged", async () => {
     // The counterweight to the test above: not caching failures must not
-    // turn into not caching at all. A good catalog is read once — re-reading
-    // and re-parsing it per request is the overhead the memo exists to
-    // avoid, and only the DIGESTS are deliberately re-checked every time.
+    // turn into not caching at all. A good catalog is parsed once — only a
+    // stat is paid per request, and only the DIGESTS are re-checked.
     await stage();
     const store = new AppDownloadsStore({ dir });
     await expect(store.loadCatalog()).resolves.toMatchObject({ ok: true });
 
-    // Remove the catalog entirely. A re-read would now fail; the memo must
-    // still answer with the version it already parsed.
-    await rm(path.join(dir, "catalog.json"));
-    await expect(store.loadCatalog()).resolves.toMatchObject({ ok: true });
+    // Make the file unreadable without changing its (ino, size, mtime): a
+    // re-read would now fail, so an ok answer proves the memo served it.
+    if (process.getuid?.() === 0) return; // root reads through mode 000
+    await chmod(path.join(dir, "catalog.json"), 0o000);
+    try {
+      await expect(store.loadCatalog()).resolves.toMatchObject({ ok: true });
+    } finally {
+      await chmod(path.join(dir, "catalog.json"), 0o644);
+    }
+  });
 
-    store.invalidate();
+  it("a catalog replaced under a running process is re-read without invalidate() (WARP-3120)", async () => {
+    // What an OTA update's client-app stage (or stage.sh without its
+    // restart) does: a new catalog.json lands next to a live orchestrator.
+    await stage();
+    const store = new AppDownloadsStore({ dir });
+    const first = await store.loadCatalog();
+    expect(first.ok).toBe(true);
+
+    await stage((c) => {
+      (c.platforms as Array<Record<string, unknown>>)[0]!.version = "10.0.0"; // a different size: coarse mtimes can tie
+    });
+    const second = await store.loadCatalog();
+    expect(second.ok).toBe(true);
+    if (second.ok) expect(second.catalog.platforms[0]!.version).toBe("10.0.0");
+
+    await rm(path.join(dir, "catalog.json"));
     await expect(store.loadCatalog()).resolves.toMatchObject({
       ok: false,
       failureReason: "catalog_missing",

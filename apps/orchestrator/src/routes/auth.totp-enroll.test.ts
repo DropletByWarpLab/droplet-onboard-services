@@ -59,30 +59,45 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
   resolveNcToken: vi.fn().mockResolvedValue("tok"),
 }));
 
+const verifyPassword = vi.fn();
 vi.mock("../services/password.service.js", () => ({
-  verifyPassword: vi.fn(),
+  verifyPassword: (...a: unknown[]) => verifyPassword(...a),
   verifyDummyPassword: vi.fn(),
   hashPassword: vi.fn(),
 }));
 
 const generateTotpEnrollment = vi.fn();
 const encryptTotpSecret = vi.fn();
-const verifyTotpCode = vi.fn();
+const acceptTotpCode = vi.fn();
 vi.mock("../services/totp.service.js", () => ({
   generateTotpEnrollment: (...a: unknown[]) => generateTotpEnrollment(...a),
   encryptTotpSecret: (...a: unknown[]) => encryptTotpSecret(...a),
   decryptTotpSecret: (...a: unknown[]) => `decrypted:${a[0]}`,
-  verifyTotpCode: (...a: unknown[]) => verifyTotpCode(...a),
+  acceptTotpCode: (...a: unknown[]) => acceptTotpCode(...a),
   TOTP_ISSUER: "Droplet",
 }));
 
 const generateRecoveryCodes = vi.fn();
-const findMatchingRecoveryCodeHash = vi.fn();
-vi.mock("../services/recovery.service.js", () => ({
+// WARP-3193 ARCH-3 — the REAL consumeRecoveryCode runs (the route no longer
+// consumes inline). Its argon2 matcher calls the mocked verifyPassword(hash,
+// code) per stored hash, so `matchRecoveryHash("hash-2")` picks the row.
+vi.mock("../services/recovery.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/recovery.service.js")>()),
   generateRecoveryCodes: (...a: unknown[]) => generateRecoveryCodes(...a),
-  findMatchingRecoveryCodeHash: (...a: unknown[]) => findMatchingRecoveryCodeHash(...a),
-  RECOVERY_CODE_COUNT: 10,
 }));
+// WARP-3193 SEC-AUTH-9 — the credential step-up, driven per test. Both the
+// inline form (enroll) and the middleware (verify) route through `stepUp`.
+const stepUp = vi.fn();
+vi.mock("../middleware/require-credential-step-up.js", () => ({
+  passCredentialStepUp: (...a: unknown[]) => stepUp(...a),
+  createRequireCredentialStepUp:
+    (prisma: unknown) => async (req: unknown, res: unknown, next: () => void) => {
+      if (await stepUp(prisma, req, res)) next();
+    },
+}));
+function matchRecoveryHash(hash: string | null): void {
+  verifyPassword.mockImplementation(async (h: unknown) => h === hash);
+}
 
 vi.mock("../services/jwt.service.js", async () => {
   const actual = await vi.importActual<typeof import("../services/jwt.service.js")>(
@@ -227,6 +242,7 @@ function buildApp(prismaMock: any, user: any = { id: "u-1", username: "stefan", 
 
 beforeEach(() => {
   vi.clearAllMocks();
+  verifyPassword.mockReset();
   generateTotpEnrollment.mockReturnValue({
     secret: "BASE32SECRET",
     otpauthUri: "otpauth://totp/Droplet:stefan?secret=BASE32SECRET&issuer=Droplet",
@@ -238,6 +254,47 @@ beforeEach(() => {
   });
   // WARP-247 — clearAllMocks wipes the call log; restore the default return.
   revokeAllSessions.mockResolvedValue(1);
+  stepUp.mockResolvedValue(true);
+});
+
+// WARP-3193 SEC-AUTH-9 — enroll and verify sit behind the credential step-up
+// (its own suite covers the rules). A refusal answers before any write.
+describe("credential step-up on TOTP enroll / verify", () => {
+  function refuse() {
+    stepUp.mockImplementation(async (_p: unknown, _req: unknown, res: any) => {
+      res.status(403).json({ error: "Enter your current password to continue.", code: "STEP_UP_PASSWORD_REQUIRED" });
+      return false;
+    });
+  }
+
+  it("🔴 enroll without a step-up → 403, no secret minted", async () => {
+    refuse();
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma)).post("/api/auth/totp/enroll");
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("STEP_UP_PASSWORD_REQUIRED");
+    expect(generateTotpEnrollment).not.toHaveBeenCalled();
+    expect(prisma.totpCredential.create).not.toHaveBeenCalled();
+  });
+
+  it("enroll still answers 409 for an enabled factor BEFORE the step-up (setup wizard 'already on')", async () => {
+    refuse();
+    const prisma = createPrismaMock({
+      totp: [{ id: "t-1", userId: "u-1", secretEnc: "enc", confirmedAt: new Date() }],
+    });
+    const res = await request(buildApp(prisma)).post("/api/auth/totp/enroll");
+    expect(res.status).toBe(409);
+    expect(stepUp).not.toHaveBeenCalled();
+  });
+
+  it("🔴 verify without a step-up → 403, the factor is not confirmed", async () => {
+    refuse();
+    const prisma = createPrismaMock({ totp: [{ id: "t-1", userId: "u-1", secretEnc: "enc", confirmedAt: null }] });
+    const res = await request(buildApp(prisma)).post("/api/auth/totp/verify").send({ code: "123456" });
+    expect(res.status).toBe(403);
+    expect(acceptTotpCode).not.toHaveBeenCalled();
+    expect(prisma._totp[0].confirmedAt).toBeNull();
+  });
 });
 
 describe("POST /auth/totp/enroll", () => {
@@ -342,7 +399,7 @@ describe("POST /auth/totp/enroll", () => {
 
 describe("POST /auth/totp/verify", () => {
   it("first valid code → enables the factor (confirmedAt set) + returns one-time recovery codes", async () => {
-    verifyTotpCode.mockResolvedValueOnce(true);
+    acceptTotpCode.mockResolvedValueOnce(true);
     const prisma = createPrismaMock({
       totp: [{ id: "t1", userId: "u-1", secretEnc: "enc", confirmedAt: null }],
     });
@@ -354,7 +411,7 @@ describe("POST /auth/totp/verify", () => {
     expect(res.body.enabled).toBe(true);
     expect(res.body.recoveryCodes).toHaveLength(10);
     // Verified against the decrypted secret.
-    expect(verifyTotpCode).toHaveBeenCalledWith("decrypted:enc", "123456");
+    expect(acceptTotpCode).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ secretEnc: "enc" }), "123456");
     // Factor now enabled.
     expect(prisma._totp[0].confirmedAt).toBeInstanceOf(Date);
     // Fresh codes minted + persisted (old ones cleared first).
@@ -364,9 +421,9 @@ describe("POST /auth/totp/verify", () => {
 
   it("WARP-247 — first confirmation revokes every OTHER session", async () => {
     // Arrange exactly as the first-confirmation test above (pending
-    // credential row + verifyTotpCode → true), with the synthetic user
+    // credential row + acceptTotpCode → true), with the synthetic user
     // carrying sid "sid-totp-device".
-    verifyTotpCode.mockResolvedValueOnce(true);
+    acceptTotpCode.mockResolvedValueOnce(true);
     const prisma = createPrismaMock({
       totp: [{ id: "t1", userId: "u-1", secretEnc: "enc", confirmedAt: null }],
     });
@@ -386,7 +443,7 @@ describe("POST /auth/totp/verify", () => {
   });
 
   it("invalid code on a pending enrollment → 401, factor stays disabled, no codes", async () => {
-    verifyTotpCode.mockResolvedValueOnce(false);
+    acceptTotpCode.mockResolvedValueOnce(false);
     const prisma = createPrismaMock({
       totp: [{ id: "t1", userId: "u-1", secretEnc: "enc", confirmedAt: null }],
     });
@@ -408,7 +465,7 @@ describe("POST /auth/totp/verify", () => {
   });
 
   it("valid code when ALREADY enabled → re-challenge 200, no NEW recovery codes", async () => {
-    verifyTotpCode.mockResolvedValueOnce(true);
+    acceptTotpCode.mockResolvedValueOnce(true);
     const prisma = createPrismaMock({
       totp: [{ id: "t1", userId: "u-1", secretEnc: "enc", confirmedAt: new Date("2026-01-01") }],
     });
@@ -442,7 +499,7 @@ describe("POST /auth/totp/verify", () => {
     const prisma = createPrismaMock({
       totp: [{ id: "t1", userId: "u-1", secretEnc: "ENC(A)", confirmedAt: null }],
     });
-    verifyTotpCode.mockImplementationOnce(async () => {
+    acceptTotpCode.mockImplementationOnce(async () => {
       // The re-enroll wins between our read and our confirm write.
       prisma._totp[0].secretEnc = "ENC(B)";
       return true;
@@ -467,7 +524,7 @@ describe("POST /auth/totp/verify", () => {
     const prisma = createPrismaMock({
       totp: [{ id: "t1", userId: "u-1", secretEnc: "ENC(A)", confirmedAt: null }],
     });
-    verifyTotpCode.mockImplementationOnce(async () => {
+    acceptTotpCode.mockImplementationOnce(async () => {
       // The other verify wins the confirm between our read and our write.
       prisma._totp[0].confirmedAt = new Date("2026-07-01T00:00:00Z");
       return true;
@@ -487,7 +544,7 @@ describe("POST /auth/totp/verify", () => {
 
 describe("POST /auth/recovery", () => {
   it("valid unused code → 200 and that code row is marked used", async () => {
-    findMatchingRecoveryCodeHash.mockResolvedValueOnce("hash-2");
+    matchRecoveryHash("hash-2");
     const prisma = createPrismaMock({
       recovery: [
         { id: "rc1", userId: "u-1", codeHash: "hash-1", usedAt: null },
@@ -508,7 +565,7 @@ describe("POST /auth/recovery", () => {
   });
 
   it("no match → 401, nothing consumed", async () => {
-    findMatchingRecoveryCodeHash.mockResolvedValueOnce(null);
+    matchRecoveryHash(null);
     const prisma = createPrismaMock({
       recovery: [{ id: "rc1", userId: "u-1", codeHash: "hash-1", usedAt: null }],
     });
@@ -525,7 +582,7 @@ describe("POST /auth/recovery", () => {
   // write must fail the factor (401 RECOVERY_INVALID), not re-authenticate.
   // The atomic guarded update returns count 0 → treat as already used.
   it("already-used code (lost the race) → 401 RECOVERY_INVALID", async () => {
-    findMatchingRecoveryCodeHash.mockResolvedValueOnce("hash-1");
+    matchRecoveryHash("hash-1");
     const prisma = createPrismaMock({
       // The findMany read still surfaces it as unused (stale read), but the
       // row was consumed by a concurrent racer before our guarded update.

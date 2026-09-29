@@ -235,6 +235,8 @@ export function createSecurityRouter(prisma: PrismaClient, deps: SecurityRouteDe
         incidents,
         alerts,
         links,
+        // WARP-3261 — the raw broker error is for owners and admins only.
+        showRawErrors: ownerOrAdmin,
         now,
       });
       // The threat source is only a row for the people who can see threats.

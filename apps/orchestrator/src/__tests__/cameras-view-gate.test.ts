@@ -64,6 +64,9 @@ vi.mock("../services/frigate.client.js", () => ({
   fetchSnapshot: okAsync(),
   fetchEventThumbnail: okAsync(),
   fetchEventSnapshot: okAsync(),
+  // WARP-3103: resolves an event to its camera for the per-camera guard and
+  // the watch audit; "front" is granted to family below.
+  fetchEventCamera: vi.fn().mockResolvedValue("front"),
   fetchKnownFaces: okAsync(),
   fetchKnownPlates: okAsync(),
   fetchFaceImage: okAsync(),
@@ -195,6 +198,8 @@ const IMAGERY_AND_FOOTAGE: Array<[string, string]> = [
   ["get", "/api/cameras/events/recent"],
   ["get", "/api/cameras/events/abc/thumbnail"],
   ["get", "/api/cameras/events/abc/snapshot"],
+  // WARP-3103: playing an event clip inline stays open to members.
+  ["get", "/api/cameras/clips/event/abc"],
   ["get", "/api/cameras/system"],
   ["get", "/api/cameras/storage"],
 ];
@@ -253,6 +258,87 @@ describe("taking footage off the box is owner/admin only", () => {
       verb
     ](path);
     expect(res.status).not.toBe(403);
+  });
+});
+
+/** WARP-3103 (R-C2): saving footage as a file, the attachment path. */
+const SAVE_FOOTAGE: Array<[string, string]> = [
+  ["get", "/api/cameras/clips/event/abc?download=1"],
+  ["get", "/api/cameras/events/abc/snapshot?download=1"],
+];
+
+/** WARP-3104 (R-C1): turning a camera's detection (or recording) on or off. */
+const DETECTION: Array<[string, string, object?]> = [
+  ["post", "/api/cameras/front/enable"],
+  ["post", "/api/cameras/front/disable"],
+  // The settings route carries the same switches.
+  ["patch", "/api/cameras/front/settings", { detectEnabled: false }],
+  ["patch", "/api/cameras/front/settings", { recordEnabled: false }],
+];
+
+/**
+ * WARP-3104: every other camera CONFIG write ("members don't administer
+ * cameras", 2026-09-25). Members keep their own state: pins, notification
+ * prefs, marking a review seen, regenerating a description.
+ */
+const ADMINISTER: Array<[string, string, object?]> = [
+  ["post", "/api/cameras", { name: "x", rtspUrl: "rtsp://10.0.0.9/s" }],
+  ["post", "/api/cameras/scan"],
+  ["post", "/api/cameras/discovered/abc/accept"],
+  ["post", "/api/cameras/discovered/abc/reject"],
+  ["patch", "/api/cameras/front", { displayName: "Lobby" }],
+  ["delete", "/api/cameras/front"],
+  ["patch", "/api/cameras/front/settings", { zones: [] }],
+  ["post", "/api/cameras/front/ptz", { action: "stop" }],
+  ["post", "/api/cameras/front/ptz/preset", { preset: "home" }],
+  ["post", "/api/cameras/groups", { name: "Dock", icon: null }],
+  ["patch", "/api/cameras/groups/g1", { name: "Dock" }],
+  ["delete", "/api/cameras/groups/g1"],
+  ["post", "/api/cameras/groups/g1/members", { cameraNames: ["front"] }],
+  ["delete", "/api/cameras/groups/g1/members/front"],
+  ["delete", "/api/cameras/faces/sam/images/a.webp"],
+  ["post", "/api/cameras/faces/sam/from-event/abc"],
+  ["put", "/api/cameras/plates/ABC123", { name: "Van" }],
+  ["post", "/api/cameras/command/confirm", { confirmationToken: "t", operation: "delete_camera" }],
+];
+
+describe("saving footage, detection and camera administration are owner/admin only (WARP-3103, WARP-3104)", () => {
+  const call = (role: Role, verb: string, path: string, body?: object) => {
+    const r = (request(appAs(role)) as never as Record<string, (p: string) => { send: (b: object) => Promise<{ status: number }> } & Promise<{ status: number }>>)[verb](path);
+    return body ? r.send(body) : r;
+  };
+  const ALL = [...SAVE_FOOTAGE, ...DETECTION, ...ADMINISTER];
+
+  it.each(ALL)("%s %s %j → 403 for family", async (verb, path, body) => {
+    expect((await call("family", verb, path, body)).status).toBe(403);
+  });
+
+  it.each(ALL)("%s %s %j → 403 for guest", async (verb, path, body) => {
+    expect((await call("guest", verb, path, body)).status).toBe(403);
+  });
+
+  it.each(ALL)("%s %s %j is reachable for owner", async (verb, path, body) => {
+    expect((await call("owner", verb, path, body)).status).not.toBe(403);
+  });
+
+  it.each(ALL)("%s %s %j is reachable for admin", async (verb, path, body) => {
+    expect((await call("admin", verb, path, body)).status).not.toBe(403);
+  });
+
+  it("members keep their own state: pins, notification prefs, review seen", async () => {
+    for (const [verb, path, body] of [
+      ["post", "/api/cameras/pins", { cameraName: "front" }],
+      ["put", "/api/cameras/front/notifications", { onPerson: true }],
+      ["post", "/api/cameras/reviews/r1/viewed", {}],
+    ] as Array<[string, string, object]>) {
+      expect((await call("family", verb, path, body)).status, `${verb} ${path}`).not.toBe(403);
+    }
+  });
+
+  it("restarting the camera engine is owner-only", async () => {
+    expect((await call("admin", "post", "/api/cameras/system/restart")).status).toBe(403);
+    expect((await call("family", "post", "/api/cameras/system/restart")).status).toBe(403);
+    expect((await call("owner", "post", "/api/cameras/system/restart")).status).not.toBe(403);
   });
 });
 

@@ -17,13 +17,21 @@
  * to take to a Warp Lab PR. The route is the boundary (owner/admin PEOPLE
  * only, one audit row per download); the role check here decides only what
  * to render.
+ *
+ * The owner gets `Delete` (`DELETE /api/workspace/:id` is owner-only): the
+ * workspace's repository and row go, its runs stay in the Runs list. Never
+ * while a run works in it, and the route also refuses while it is the source
+ * of an extension that could still be installed; that refusal is shown in
+ * the dialog, which stays open.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Cable, Copy, Download, FileDiff, FlaskConical, FolderGit2, GitCommitHorizontal, History, Play, Tag, X } from "lucide-react";
+import { Cable, Copy, Download, FileDiff, FlaskConical, FolderGit2, GitCommitHorizontal, History, Play, Tag, Trash2, X } from "lucide-react";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useAuth } from "@/lib/auth";
 import { isAdminRole } from "@/lib/access";
 import {
   connectorDraftOf,
+  deleteWorkspace,
   exportWorkspace,
   getWorkspace,
   getWorkspaceDiff,
@@ -62,9 +70,11 @@ export interface WorkspaceContextProps {
   onClose?: () => void;
   onStartRun?: (workspaceId: string) => void;
   onOpenRun?: (runId: string) => void;
+  /** The owner deleted this custom tool; the pane has nothing left to show. */
+  onDeleted?: (workspace: { id: string; name: string }) => void;
 }
 
-export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRun, onOpenRun }: WorkspaceContextProps) {
+export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRun, onOpenRun, onDeleted }: WorkspaceContextProps) {
   const [detail, setDetail] = useState<WorkspaceDetail | null>(null);
   const [log, setLog] = useState<WorkspaceLogEntry[] | null>(null);
   const [diff, setDiff] = useState<{ diff: string; truncated: boolean } | null>(null);
@@ -73,12 +83,17 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
   const [copied, setCopied] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportStatus, setExportStatus] = useState<{ text: string; title?: string } | null>(null);
-  // The pane is reused across workspaces (no key), so an export still running
-  // when the person switches must not write onto the next workspace's pane.
-  // Every switch bumps the generation; an export only reports into its own.
-  const exportGen = useRef(0);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteError, setDeleteError] = useState<{ text: string; title?: string } | null>(null);
+  const deleteTrigger = useRef<HTMLButtonElement>(null);
+  // The pane is reused across workspaces (no key), so an export or a delete
+  // still running when the person switches must not write onto the next
+  // workspace's pane. Every switch bumps the generation; each reports only
+  // into its own.
+  const paneGen = useRef(0);
   const { user } = useAuth();
   const canExport = isAdminRole(user?.role);
+  const canDelete = user?.role === "owner";
 
   const load = useCallback(async () => {
     try {
@@ -108,9 +123,11 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
     setDiff(null);
     setOutput(undefined);
     setError(null);
-    exportGen.current += 1;
+    paneGen.current += 1;
     setExporting(false);
     setExportStatus(null);
+    setDeleteOpen(false);
+    setDeleteError(null);
     void load();
   }, [load]);
 
@@ -131,8 +148,8 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
   };
 
   const exportBundle = async () => {
-    const gen = exportGen.current;
-    const current = () => exportGen.current === gen;
+    const gen = paneGen.current;
+    const current = () => paneGen.current === gen;
     setExporting(true);
     setExportStatus(null);
     try {
@@ -143,6 +160,31 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
     } finally {
       if (current()) setExporting(false);
     }
+  };
+
+  // Rejecting keeps the ConfirmDialog open, so a refusal is read where the
+  // person just clicked. A 409 is the route's reason (a run is working here,
+  // or an extension is built from it) and is shown as is; anything else is
+  // the calm line with the cause in the title.
+  const confirmDelete = async () => {
+    if (!detail) return;
+    const target = { id: detail.id, name: detail.name };
+    const gen = paneGen.current;
+    setDeleteError(null);
+    try {
+      await deleteWorkspace(target.id);
+    } catch (err) {
+      if (paneGen.current === gen) {
+        const reason = err instanceof WorkspaceApiError && err.status === 409 ? err.reason : null;
+        setDeleteError(
+          reason
+            ? { text: `Not deleted: ${reason.replace(/[.\s]+$/, "")}.` }
+            : { text: `Couldn't delete it. ${CALM_ERROR}`, title: err instanceof Error ? err.message : String(err) },
+        );
+      }
+      throw err;
+    }
+    onDeleted?.(target);
   };
 
   const git = detail && !("error" in detail.git) ? detail.git : null;
@@ -239,6 +281,20 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
                 {canExport && (
                   <button type="button" className="btn sm" disabled={exporting} aria-busy={exporting} onClick={() => void exportBundle()}>
                     <Download size={13} aria-hidden /> {exporting ? "Exporting…" : "Export bundle"}
+                  </button>
+                )}
+                {canDelete && !activeRun && (
+                  <button
+                    ref={deleteTrigger}
+                    type="button"
+                    className="btn sm"
+                    aria-label="Delete this custom tool"
+                    onClick={() => {
+                      setDeleteError(null);
+                      setDeleteOpen(true);
+                    }}
+                  >
+                    <Trash2 size={13} aria-hidden /> Delete
                   </button>
                 )}
               </div>
@@ -353,6 +409,25 @@ export function WorkspaceContext({ workspaceId, live, drawer, onClose, onStartRu
           </>
         )}
       </div>
+      {canDelete && detail && (
+        <ConfirmDialog
+          open={deleteOpen}
+          onConfirm={confirmDelete}
+          onCancel={() => setDeleteOpen(false)}
+          triggerRef={deleteTrigger}
+          title={`Delete "${detail.name}"?`}
+          description="Its files, commits and any proposal are removed from your Droplet. This can't be undone. The runs that worked on it stay in your Runs list."
+          confirmLabel="Delete"
+          confirmedIdentifier={detail.id}
+          accessory={
+            deleteError ? (
+              <p className="ws-note" role="alert" title={deleteError.title}>
+                {deleteError.text}
+              </p>
+            ) : undefined
+          }
+        />
+      )}
     </div>
   );
 }

@@ -329,14 +329,24 @@ export function createScheduleApiService(prisma: PrismaClient) {
     });
   }
 
+  /**
+   * WARP-3092: also returns the state it replaced, so the route can audit
+   * old → new. Read-then-write without a transaction: two admins racing on
+   * one device only blur which of them saw which prior state.
+   */
   async function setManualBlock(mac: string, blocked: boolean) {
-    return mapPrismaNotFound("Device", mac, () =>
-      prisma.networkDevice.update({
+    return mapPrismaNotFound("Device", mac, async () => {
+      const before = await prisma.networkDevice.findUnique({
+        where: { mac },
+        select: { manualBlock: true },
+      });
+      const after = await prisma.networkDevice.update({
         where: { mac },
         data: { manualBlock: blocked },
         select: { mac: true, manualBlock: true },
-      }),
-    );
+      });
+      return { ...after, previousManualBlock: before?.manualBlock ?? null };
+    });
   }
 
   return {

@@ -312,6 +312,20 @@ const TURNS: Turn[] = [
     message: "is it normal for someone to be in the stock room at 2 AM?",
     requires: "security_explain_pattern",
   },
+  // WARP-3280 — two sentences from the agent-loop eval that matched NO
+  // domain, so the model never had the tool: it answered "no contact found"
+  // without searching, and did the multiplication in its head. Run through
+  // the real shipping pool, so an exclusion upstream would also show here.
+  {
+    label: "email / a contact looked up by address alone",
+    message: "Look up the contact alice@example.com.",
+    requires: "search_contacts",
+  },
+  {
+    label: "data / bare arithmetic",
+    message: "What is 187 * 43?",
+    requires: "calculate",
+  },
 ];
 
 const select = (t: Turn) =>

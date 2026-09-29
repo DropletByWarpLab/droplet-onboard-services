@@ -41,6 +41,10 @@
  * phrases: "all clear" and "all locked" — the wall faces a room, and nothing on
  * it may read as a verdict on the site ("All reporting" is about the sources).
  *
+ * WARP-2978 (review) adds "family", the code's word for a tier: a role is named
+ * through tierLabel() (lib/access.ts), never a map of a page's own. Whole-word,
+ * so a key such as emptyNoCamerasFamilyBody never trips it.
+ *
  * A negation-aware rule was rejected: "doesn't … arm" and "isn't armed" read
  * the same to a regex as "arm it" after a clause break, so it would let
  * positive claims through whenever a "not" appears earlier in the sentence.
@@ -72,6 +76,7 @@ import * as ReasonList from "./ReasonList";
 import * as ResolveDialog from "./ResolveDialog";
 import * as incidentCopy from "./incident-copy";
 import * as ModeCard from "./ModeCard";
+import * as PatternFlagList from "./PatternFlagList";
 import * as PrecisionCard from "./PrecisionCard";
 import * as SecurityFeed from "./SecurityFeed";
 import * as SecurityWall from "./SecurityWall";
@@ -79,6 +84,7 @@ import * as TimezoneSelect from "./TimezoneSelect";
 import * as UsualGrid from "./UsualGrid";
 import * as WallCameras from "./WallCameras";
 import * as WallNotice from "./WallNotice";
+import * as VerdictBar from "./VerdictBar";
 import * as PatternsCopy from "./patterns-copy";
 import * as WallStatus from "./wall-status";
 import * as SecurityPage from "@/app/security/page";
@@ -106,6 +112,9 @@ const MODULES: Record<string, Record<string, unknown>> = {
   "src/components/security/incident-copy.ts": incidentCopy,
   "src/components/security/IncidentView.tsx": IncidentView,
   "src/components/security/ReasonList.tsx": ReasonList,
+  // WARP-2980 (P5 PR-C) — the verdict and the pattern flags on the incident page.
+  "src/components/security/VerdictBar.tsx": VerdictBar,
+  "src/components/security/PatternFlagList.tsx": PatternFlagList,
   "src/components/security/NoticeList.tsx": NoticeList,
   "src/components/security/AckHistory.tsx": AckHistory,
   "src/components/security/ResolveDialog.tsx": ResolveDialog,
@@ -149,6 +158,8 @@ const BANNED: ReadonlyArray<readonly [name: string, re: RegExp]> = [
   // A verdict on the site, which Droplet never gives (P5 PR-B; WARP-2981 widens the gap to any whitespace).
   ["all clear", /\ball\s+clear\b/i],
   ["all locked", /\ball\s+locked\b/i],
+  // WARP-2978 (review) — the tier's code word; tierLabel() names a role.
+  ["family", /\bfamil(?:y|ies)\b/i],
 ];
 
 /** Sentences cut out of ONE value before the scan. Each must still be there. */
@@ -314,6 +325,8 @@ describe("Security copy lint (spec §8)", () => {
     ["Everything is all clear tonight"],
     ["All locked"],
     ["Doors: all  locked up"],
+    // WARP-2978 (review)
+    ["Family"],
   ])("the matcher catches %j", (text) => {
     expect(violations([{ where: "probe", text }])).not.toEqual([]);
   });
@@ -331,6 +344,8 @@ describe("Security copy lint (spec §8)", () => {
     // WARP-2981
     ["All reporting"],
     ["Clear all filters"],
+    // WARP-2978 (review) — a live SecurityFeed COPY key.
+    ["emptyNoCamerasFamilyBody"],
   ])(
     "the matcher lets %j through",
     (text) => {

@@ -37,10 +37,11 @@
 import type { PrismaClient } from "@prisma/client";
 import { runWithLease } from "./brain-lease.service.js";
 
-/** The work of one pass. Takes no arguments: everything it needs is closed
- *  over where the runners are built, which is the only place that has the
- *  model client and the config. */
-export type PassRunner = () => Promise<void>;
+/** The work of one pass. Everything it needs is closed over where the
+ *  runners are built, which is the only place that has the model client and
+ *  the config. `signal` aborts when the lease is lost (WARP-3193 QUAL-2):
+ *  another worker owns the pass now, so the run must stop writing. */
+export type PassRunner = (signal: AbortSignal) => Promise<void>;
 
 /**
  * A reason this box cannot run this pass AT ALL right now, or `null` to
