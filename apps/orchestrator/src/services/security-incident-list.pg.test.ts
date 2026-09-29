@@ -484,6 +484,42 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
       expect(partials).toBeGreaterThan(10); // partial views were exercised
     });
 
+    // WARP-2979 (P4 §6.12.3; review #2420) — the chat tools' period is judged on HER span, in the SQL itself.
+    it("WARP-2979: a period window — SQL equals the reference, and holds exactly the incidents whose VISIBLE span meets it", async () => {
+      const mine = new Set(await seed(40, 2979));
+      const WINDOWS = [
+        { from: plus(T0, 2 * 60_000), to: plus(T0, 4 * 60_000) },
+        { from: plus(T0, -3_600_000), to: plus(T0, 60_000) },
+        { from: plus(T0, 8 * 60_000), to: plus(T0, 20 * 60_000) },
+      ];
+      let kept = 0;
+      let narrowed = 0;
+      for (const v of VIEWERS) {
+        const projected = await projections(mine, v);
+        for (const activeBetween of WINDOWS) {
+          const f: IncidentListFilters = { state: "all", activeBetween };
+          const label = JSON.stringify({ v: [...(v.visibleCameras as ReadonlySet<string>)], activeBetween });
+          const sql = (await projectedIncidentPage(prisma, v as CameraLimitedViewer, f, 1000)).filter((k) => mine.has(k.id));
+          const ref = (await referenceProjectedIncidentPage(prisma as never, v, f, 1000)).filter((k) => mine.has(k.id));
+          expect(sql.map((k) => [k.id, k.projectedLast.toISOString()]), label).toEqual(ref.map((k) => [k.id, k.projectedLast.toISOString()]));
+          const ids = new Set(sql.map((k) => k.id));
+          // HER span meets the window ⇔ in the page (for an incident she may know exists) — a hidden camera's
+          // activity in the window never pulls one in (review #2420: the cursor must not say it was there).
+          for (const { row, p } of projected) {
+            if (!p) continue;
+            const hers = p.lastActivityAt >= activeBetween.from && p.firstActivityAt <= activeBetween.to;
+            expect(ids.has(row.id), `${label} ${row.id}`).toBe(hers);
+            // Her span lies inside the stored one, so the stored-span prefilter never drops one of hers.
+            if (hers) expect(row.lastActivityAt >= activeBetween.from && row.firstActivityAt <= activeBetween.to, `${label} ${row.id}`).toBe(true);
+            if (!hers && row.lastActivityAt >= activeBetween.from && row.firstActivityAt <= activeBetween.to) narrowed++;
+          }
+          kept += ids.size;
+        }
+      }
+      expect(kept).toBeGreaterThan(20); // not vacuous
+      expect(narrowed).toBeGreaterThan(0); // a hidden camera DID pull an incident into the stored window, and it stayed out
+    });
+
     // Review b7e1 (blocking): the same code on two cameras.
     it("the same code on a hidden camera makes the view partial — in her Needs attention, never in her Acknowledged, at alert and at notice", async () => {
       const ids = await seedSameCode();

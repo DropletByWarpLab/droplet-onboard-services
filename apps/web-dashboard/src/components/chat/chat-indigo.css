@@ -78,6 +78,9 @@
 /* ── Header ─────────────────────────────────────────────────────────── */
 
 .droplet-shell .chat-head {
+  /* Positioned so that below lg the Memory and Context popovers anchor to the
+     bar, not to their own (mid-header) buttons. */
+  position: relative;
   height: 56px;
   flex-shrink: 0;
   display: flex;
@@ -878,6 +881,28 @@
   color: var(--text-muted);
 }
 
+/* ── Header popover fields (Memory, Context pins) ──────────────────── */
+
+/* The popovers' text boxes were authored in utilities with no inset, so the
+   text sat on the edge of the box, unlike every other field in the shell. A
+   tonal fill (surface-2), the input radius and a 10px inset, with the brand
+   ring on focus: the same tone as the `MenuSelect` triggers beside them
+   (`.pick-select`), and no stroke, as the rest of the chat chrome. Compact
+   (32px) because the popovers are. */
+.droplet-shell .chat-field {
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-input);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+}
+.droplet-shell .chat-field::placeholder { color: var(--text-muted); }
+.droplet-shell .chat-field:focus { box-shadow: 0 0 0 2px var(--brand); }
+
 /* ── Mobile (≤760px to match the design; Tailwind lg: still governs the
       rail visibility, this only adjusts paddings) ────────────────────── */
 
@@ -918,6 +943,15 @@
   .droplet-shell .chat-model { height: 44px; }
   /* The composer textarea needs no 44px floor of its own any more: a press
      anywhere on the pill (52px tall) focuses it. */
+
+  /* The header popovers' text boxes owe the same target, and 16px text so iOS
+     Safari doesn't zoom the page when one takes focus. The Add button and the
+     `MenuSelect` trigger share a row with a text box, so they take the height
+     too: a 32px button beside a 44px box is misaligned and under the minimum.
+     `> button` is the row's own Add, not the picker's menu items. */
+  .droplet-shell .chat-field { height: 44px; font-size: 16px; }
+  .droplet-shell .chat-field-row > button,
+  .droplet-shell .chat-field-row .pick-select { height: 44px; }
 }
 
 /* Phones, landscape phones and 200% zoom: a centred pill jumps with the

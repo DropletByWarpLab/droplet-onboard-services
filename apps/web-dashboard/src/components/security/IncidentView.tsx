@@ -115,7 +115,8 @@ export const COPY = {
   back: "Security",
   acknowledge: "Acknowledge",
   // One sentence for every reason the box gives `actionable: false` (DS-005).
-  cantAct: "You can't acknowledge or resolve this incident. An owner or admin can.",
+  // Act-level members can act (the box folds level ≥ act into `actionable`), so not "an owner or admin" (WARP-3185).
+  cantAct: "You can't acknowledge or resolve this incident. Someone who can respond to Security events can.",
   resolve: "Resolve…",
   acknowledgedToast: "Acknowledged",
   resolvedToast: "Resolved",
@@ -156,13 +157,31 @@ export function notificationIdFrom(raw: string | null | undefined): string | nul
   return raw && NOTIFICATION_ID_RE.test(raw) ? raw : null;
 }
 
+/** The /security tab the incident page was opened from (`?from=`), validated: anything else is Incidents. */
+export type BackTab = "incidents" | "everything";
+export function backTabFrom(raw: string | null | undefined): BackTab {
+  return raw === "everything" ? "everything" : "incidents";
+}
+/** Where "‹ Security" goes: back to the tab the person came from. */
+export function backHref(tab: BackTab | undefined): string {
+  return tab === "everything" ? "/security?tab=everything" : "/security";
+}
+
 const isNotFound = (err: unknown): boolean => {
   const e = err as { code?: unknown; status?: unknown } | undefined;
   return e?.code === "INCIDENT_NOT_FOUND" || e?.status === 404;
 };
-const errorCode = (err: unknown): string | undefined => {
-  const c = (err as { code?: unknown } | undefined)?.code;
-  return typeof c === "string" ? c : undefined;
+/** What a refused write said: its typed code and HTTP status, when it had them. */
+interface WriteFailure {
+  code?: string;
+  status?: number;
+}
+const failureOf = (err: unknown): WriteFailure => {
+  const e = err as { code?: unknown; status?: unknown } | undefined;
+  return {
+    code: typeof e?.code === "string" ? e.code : undefined,
+    status: typeof e?.status === "number" ? e.status : undefined,
+  };
 };
 const upperFirst = (s: string): string => (s ? s[0]!.toUpperCase() + s.slice(1) : s);
 
@@ -170,23 +189,26 @@ export interface IncidentViewProps {
   id: string;
   /** The alert notification the page was opened from, already validated (`notificationIdFrom`). */
   notificationId: string | null;
+  /** The /security tab to go back to (`backTabFrom`). Incidents when absent. */
+  backTab?: BackTab;
   now?: Date;
 }
 
-export function IncidentView({ id, notificationId, now: nowProp }: IncidentViewProps) {
+export function IncidentView({ id, notificationId, backTab, now: nowProp }: IncidentViewProps) {
   const valid = UUID_RE.test(id);
   const q = useSecurityIncident(valid ? id : null);
-  if (!valid) return <NotFound />;
-  return <IncidentBody {...q} notificationId={notificationId} now={nowProp} />;
+  const back = backHref(backTab);
+  if (!valid) return <NotFound back={back} />;
+  return <IncidentBody {...q} notificationId={notificationId} back={back} now={nowProp} />;
 }
 
-function NotFound() {
+function NotFound({ back }: { back: string }) {
   return (
     <section className="card" data-testid="incident-not-found">
       <div className="empty">
         <span className="eh">{COPY.notFound}</span>
         <span style={{ maxWidth: "48ch" }}>{COPY.notFoundBody}</span>
-        <Link className="btn" href="/security" style={{ marginTop: 8 }}>
+        <Link className="btn" href={back} style={{ marginTop: 8 }}>
           {COPY.backToSecurity}
         </Link>
       </div>
@@ -206,8 +228,9 @@ function IncidentBody({
   keepLink,
   giveVerdict,
   notificationId,
+  back,
   now: nowProp,
-}: Query & { notificationId: string | null; now?: Date }) {
+}: Query & { notificationId: string | null; back: string; now?: Date }) {
   const now = nowProp ?? new Date();
   const level = useModuleLevel("security");
   const { user } = useAuth();
@@ -267,7 +290,7 @@ function IncidentBody({
   }, [keepFocusAfter, incident]);
 
   const run = useCallback(
-    async (action: Write, write: () => Promise<IncidentActionResult>, done: string): Promise<string | null> => {
+    async (action: Write, write: () => Promise<IncidentActionResult>, done: string): Promise<"BUSY" | WriteFailure | null> => {
       if (busyRef.current) return "BUSY";
       busyRef.current = true;
       setBusy(action);
@@ -278,10 +301,17 @@ function IncidentBody({
         return null;
       } catch (err) {
         // Typed copy only (409 INCIDENT_CONFLICT / NOT_ACTIONABLE / NOT_JUDGEABLE, 503
-        // AUDIT_UNAVAILABLE, …) — never err.message. Then re-read.
+        // AUDIT_UNAVAILABLE, …) — never err.message. Then re-read, and WAIT
+        // for it (WARP-3185 A): a refusal can take the buttons away, and focus
+        // is placed only once the page shows the incident as it now stands —
+        // placed earlier, it lands on a button about to vanish, then <body>.
         toast(translateError(err, "security"), "error");
-        void refresh();
-        return errorCode(err) ?? "UNKNOWN";
+        try {
+          await refresh();
+        } catch {
+          // A failed re-read is the page's own "couldn't refresh" line.
+        }
+        return failureOf(err);
       } finally {
         busyRef.current = false;
         setBusy(null);
@@ -291,7 +321,7 @@ function IncidentBody({
   );
 
   if (error && (isNotFound(error) || !incident)) {
-    if (isNotFound(error)) return <NotFound />;
+    if (isNotFound(error)) return <NotFound back={back} />;
     return (
       <section className="card" role="alert" data-testid="incident-error">
         <div className="empty">
@@ -345,8 +375,11 @@ function IncidentBody({
     void run("resolve", () => resolve({ note }), COPY.resolvedToast).then((failed) => {
       if (failed === "BUSY") return;
       // A note the box refused, or an outage: keep the dialog (and the note) to try again.
-      // The incident moved or went away: close it; the re-read shows where it stands.
-      if (failed === null || failed === "INCIDENT_CONFLICT" || failed === "NOT_ACTIONABLE" || failed === "INCIDENT_NOT_FOUND") {
+      // The incident moved (any 409) or isn't this person's to resolve any more
+      // (any 404 — INCIDENT_NOT_FOUND, or a flat one from the feature gate when
+      // Security or their level went away under the page, WARP-3185): close it;
+      // the re-read shows where it stands.
+      if (failed === null || failed.status === 404 || failed.status === 409) {
         setDialogOpen(false);
         setFocusAfter("resolve");
       }
@@ -421,7 +454,7 @@ function IncidentBody({
   return (
     <>
       <Link
-        href="/security"
+        href={back}
         style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 13, color: "var(--text-muted)", alignSelf: "flex-start" }}
       >
         <ChevronLeft size={14} aria-hidden />

@@ -279,6 +279,16 @@ export function projectedLastActivity(i: IncidentSpanRow, v: IncidentViewer): Da
 
 const NOBODY_IN_VIEW: ReadonlySet<string> = new Set();
 
+/**
+ * The viewer's own FIRST activity (review #2420 — the twin of
+ * `projectedLastActivity`): the earliest `first` of the span entries she sees,
+ * else the stored `firstActivityAt`. The chat tools' period meets HER span.
+ */
+export function projectedFirstActivity(i: IncidentSpanRow & Pick<IncidentRowForView, "firstActivityAt">, v: IncidentViewer): Date {
+  const shown = shownSpans(i, v);
+  return shown ? new Date(Math.min(...shown.map((s) => s.first.getTime()))) : i.firstActivityAt;
+}
+
 /** The viewer's own span and grouping (review #4). */
 function viewerSpan(
   i: IncidentRowForView,
@@ -442,6 +452,16 @@ export interface IncidentListFilters {
   severity?: "alert" | "notice";
   zoneId?: string;
   cursor?: { at: Date; id: string };
+  /**
+   * WARP-2979 (P4 §6.12.3) — the chat tools' period: incidents whose span
+   * AS THIS VIEWER SEES IT (`projectedFirstActivity` … `projectedLastActivity`)
+   * meets `[from, to]`. Review #2420: judged in the query itself — the SQL
+   * page for a camera-limited viewer, the stored columns for a viewer who sees
+   * every camera (the same thing for them) — so a hidden camera's activity
+   * never pulls an incident into her page, and never gives the page a cursor
+   * that leads nowhere (DS-005).
+   */
+  activeBetween?: { from: Date; to: Date };
 }
 
 /**
@@ -504,6 +524,9 @@ export function incidentListWhere(v: IncidentViewer, f: IncidentListFilters): Pr
     });
   }
   if (f.zoneId) and.push({ zoneId: f.zoneId });
+  if (f.activeBetween) {
+    and.push({ lastActivityAt: { gte: f.activeBetween.from }, firstActivityAt: { lte: f.activeBetween.to } });
+  }
   if (f.cursor) {
     and.push({ OR: [{ lastActivityAt: { lt: f.cursor.at } }, { lastActivityAt: f.cursor.at, id: { lt: f.cursor.id } }] });
   }

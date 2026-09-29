@@ -1,4 +1,7 @@
+"use client";
+
 import { Building2, ChevronRight, FolderOpen } from "lucide-react";
+import { useDropTarget } from "./FileManager/internal-drag";
 
 interface BreadcrumbNavProps {
   path: string;
@@ -27,6 +30,52 @@ interface BreadcrumbNavProps {
    * uses the REAL path — the WebDAV listing is keyed by the raw tail.
    */
   labelForSegment?: (segment: string, index: number) => string | undefined;
+  /**
+   * Drag-to-move: every crumb except the current folder is a drop target.
+   * `targetPath` is the crumb's own (space-relative) path. `canDropOn` vetoes
+   * during dragover (the payload is unreadable then).
+   */
+  onDropItems?: (targetPath: string, paths: string[]) => void;
+  canDropOn?: (targetPath: string) => boolean;
+}
+
+/** A crumb button that highlights while an internal drag hovers it. */
+function CrumbButton({
+  path,
+  onNavigate,
+  onDropItems,
+  canDropOn,
+  className,
+  "aria-label": ariaLabel,
+  children,
+}: {
+  path: string;
+  onNavigate: (path: string) => void;
+  onDropItems?: (targetPath: string, paths: string[]) => void;
+  canDropOn?: (targetPath: string) => boolean;
+  className: string;
+  "aria-label"?: string;
+  children: React.ReactNode;
+}) {
+  const { isOver, handlers } = useDropTarget({
+    enabled: !!onDropItems,
+    canDrop: () => canDropOn?.(path) ?? true,
+    onDrop: (paths) => onDropItems?.(path, paths),
+  });
+  return (
+    <button
+      type="button"
+      onClick={() => onNavigate(path)}
+      aria-label={ariaLabel}
+      data-drop-over={isOver ? "1" : undefined}
+      className={`${className} rounded ${
+        isOver ? "bg-[var(--brand-subtle)] ring-2 ring-[var(--brand)]" : ""
+      }`}
+      {...handlers}
+    >
+      {children}
+    </button>
+  );
 }
 
 export function BreadcrumbNav({
@@ -35,6 +84,8 @@ export function BreadcrumbNav({
   prefixCrumb,
   rootLabel = "My files",
   labelForSegment,
+  onDropItems,
+  canDropOn,
 }: BreadcrumbNavProps) {
   const segments = path.split("/").filter(Boolean);
 
@@ -54,14 +105,17 @@ export function BreadcrumbNav({
           <ChevronRight size={12} className="text-[color:var(--text-faint)]" aria-hidden="true" />
         </span>
       )}
-      <button
-        onClick={() => onNavigate("/")}
+      <CrumbButton
+        path="/"
+        onNavigate={onNavigate}
+        onDropItems={onDropItems}
+        canDropOn={canDropOn}
         aria-label={rootLabel}
         className="flex items-center gap-1 type-subheadline text-[color:var(--brand)] hover:text-[color:var(--brand-hover)] transition-colors flex-shrink-0 min-h-[28px]"
       >
         <FolderOpen size={14} aria-hidden="true" />
         <span>{rootLabel}</span>
-      </button>
+      </CrumbButton>
 
       {segments.map((segment, idx) => {
         const segmentPath = "/" + segments.slice(0, idx + 1).join("/");
@@ -76,12 +130,15 @@ export function BreadcrumbNav({
                 {label}
               </span>
             ) : (
-              <button
-                onClick={() => onNavigate(segmentPath)}
+              <CrumbButton
+                path={segmentPath}
+                onNavigate={onNavigate}
+                onDropItems={onDropItems}
+                canDropOn={canDropOn}
                 className="type-subheadline text-[color:var(--brand)] hover:text-[color:var(--brand-hover)] transition-colors"
               >
                 {label}
-              </button>
+              </CrumbButton>
             )}
           </span>
         );

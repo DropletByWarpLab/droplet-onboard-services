@@ -646,7 +646,8 @@ describe("WARP-2978 — incidents on the feed", () => {
   it("a row the engine grouped links to its incident; the link says where it goes", () => {
     render(<SecurityFeed {...props({ events: [event({ incident: { id: "inc-1" } })] })} />);
     const link = screen.getByRole("link", { name: COPY.inIncident });
-    expect(link).toHaveAttribute("href", "/security/incidents/inc-1");
+    // It says which tab it came from, so the incident page's way back returns there (WARP-3185 3).
+    expect(link).toHaveAttribute("href", "/security/incidents/inc-1?from=everything");
   });
 
   it("a row in no incident (or from a box older than P3) has no incident link", () => {
@@ -658,6 +659,38 @@ describe("WARP-2978 — incidents on the feed", () => {
     const { container } = render(<SecurityFeed {...props()} />);
     expect(container).not.toHaveTextContent("Alerts come later");
     expect(COPY).not.toHaveProperty("notAlarm");
+  });
+});
+
+describe("WARP-3185 B — Show older", () => {
+  it("aria-disabled while it loads, never disabled; a second press before the load starts is refused", () => {
+    const onLoadMore = vi.fn();
+    const first = event({ id: "1" });
+    const { rerender } = render(<SecurityFeed {...props({ events: [first], hasMore: true, onLoadMore })} />);
+    const older = screen.getByRole("button", { name: COPY.loadMore });
+    older.focus();
+    fireEvent.click(older);
+    fireEvent.click(older);
+    expect(onLoadMore).toHaveBeenCalledTimes(1);
+    rerender(<SecurityFeed {...props({ events: [first], hasMore: true, isLoadingMore: true, onLoadMore })} />);
+    expect(older).toHaveAttribute("aria-disabled", "true");
+    expect(older).not.toBeDisabled();
+    expect(older).toHaveFocus();
+  });
+
+  it("when the last page lands, focus moves to the first row it added — a row with no link takes focus itself", () => {
+    const onLoadMore = vi.fn();
+    const first = event({ id: "1" });
+    const threat = event({ id: "2", source: "activity_mirror", kind: "threat", camera: null, labels: ["auth"], score: null, summary: "5 failed sign-ins", frigateEventId: null });
+    const { rerender, container } = render(<SecurityFeed {...props({ events: [first], hasMore: true, onLoadMore })} />);
+    const older = screen.getByRole("button", { name: COPY.loadMore });
+    older.focus();
+    fireEvent.click(older);
+    rerender(<SecurityFeed {...props({ events: [first], hasMore: true, isLoadingMore: true, onLoadMore })} />);
+    rerender(<SecurityFeed {...props({ events: [first, threat], hasMore: false, onLoadMore })} />);
+    const row = container.querySelector('[data-kind="threat"]') as HTMLElement;
+    expect(row).toHaveFocus();
+    expect(row).toHaveAttribute("tabindex", "-1");
   });
 });
 

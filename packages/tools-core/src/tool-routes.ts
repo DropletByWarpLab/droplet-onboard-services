@@ -527,4 +527,14 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "workspace_commit", client: "orchestrator", hops: [admit("post", "/api/workspace/:id/commit")] },
   { tool: "workspace_run", client: "orchestrator", hops: [admit("post", "/api/workspace/:id/run")] },
   { tool: "workspace_propose", client: "orchestrator", hops: [admit("post", "/api/workspace/:id/propose")] },
+  // WARP-2979 (ADR-059 P4 §6.12.2) — the Security assistant router admits
+  // ONLY the mcp principal (`requireRoleOrService("_service:mcp")`, no human
+  // role) and resolves the acting person from X-Nextcloud-User. GET only: no
+  // act or manage route is any tool's hop.
+  { tool: "security_list_incidents", client: "orchestrator", hops: [admit("get", "/api/security/assistant/incidents")] },
+  { tool: "security_get_incident", client: "orchestrator", hops: [admit("get", "/api/security/assistant/incidents/:id")] },
+  { tool: "security_search_events", client: "orchestrator", hops: [admit("get", "/api/security/assistant/events")] },
+  { tool: "security_zone_status", client: "orchestrator", hops: [admit("get", "/api/security/assistant/areas")] },
+  // WARP-2980 (ADR-059 P5 PR-E) — A5, the same router and the same two guards.
+  { tool: "security_explain_pattern", client: "orchestrator", hops: [admit("get", "/api/security/assistant/patterns")] },
 ];

@@ -133,15 +133,31 @@ DEFAULT_LLM_MODEL = "qwen2.5:3b-instruct"
 # slower models.
 DEFAULT_LLM_TIMEOUT_S = 120.0
 # Cap the agent loop. The orchestrator hard-caps at 10; we ask for a
-# much lower number so voice replies stay snappy. A voice turn should
-# resolve in at most one tool-call iteration ("list_cameras" → result
-# → final answer). Letting the model take 3-5 iterations on noisy or
-# ambiguous transcripts is the main reason voice replies feel slow —
-# each iteration is a full ai-gateway round-trip (~2-4 s on the POC's
-# 8 B model). 2 is the smallest value that still preserves the "one
-# tool call, then answer" pattern. Override via the request body's
-# max_iter for callers that explicitly need a multi-step plan.
-DEFAULT_LLM_MAX_ITER = 2
+# much lower number so voice replies stay snappy — each iteration is a
+# full ai-gateway round-trip (~2-4 s on the POC's 8 B model), so letting
+# the model wander on noisy transcripts is what makes replies feel slow.
+# But the budget must still cover a realistic multi-tool turn: iteration
+# 0 is the first tool call and the LAST iteration is the answer, so a
+# budget of 2 (the old value) dies on the SECOND tool call with the
+# orchestrator's iteration_limit fallback ("couldn't finish… within my
+# step limit") (WARP-3316). 4 = up to three tool calls (or one tool call
+# plus a TOOL_NOW_AVAILABLE self-heal retry) and then the answer. Tune
+# per box via VOICE_MAX_ITER; a request body's max_iter can still ask
+# for a longer multi-step plan.
+DEFAULT_LLM_MAX_ITER = 4
+# The orchestrator bound (AGENT_MAX_ITER_CAP default 10; routes/llm.ts —
+# int, >= 1). VOICE_MAX_ITER is clamped into this window.
+#
+# COUPLING (WARP-3316): MAX_LLM_MAX_ITER hardcodes the orchestrator's
+# DEFAULT AGENT_MAX_ITER_CAP; voice cannot read the operator's actual value.
+# The route validates the request's max_iter against
+# config.agentMaxIter.capIter (the `max_iter` field of the chat request
+# schema in routes/llm.ts) and answers 400 on overflow. So if an operator
+# lowers AGENT_MAX_ITER_CAP below what voice sends (DEFAULT_LLM_MAX_ITER, or
+# VOICE_MAX_ITER), EVERY voice turn fails with a 400 until VOICE_MAX_ITER is
+# lowered to fit. Keep this constant in step with that default.
+MIN_LLM_MAX_ITER = 1
+MAX_LLM_MAX_ITER = 10
 # WARP-1432 — voice turn shaping (client-side request-shape only).
 #
 # gpt-oss:20b (the box's voice model) spends reasoning-channel tokens
@@ -211,6 +227,13 @@ DEFAULT_VOICE_ALLOWED_TOOLS: tuple[str, ...] = (
 # (apps/orchestrator/data/droplet-identity.md) still rides on every
 # tool-enabled turn server-side; keep this compact so voice turns don't
 # pay for it twice.
+#
+# WARP-3125 — on tool-enabled turns the orchestrator folds this text into
+# its own index-0 system message (after its base prompt), because the
+# gpt-oss chat template drops any system message that is not first. It
+# carries no clock or location — those open the user turn instead
+# (`build_turn_context`) — so it is byte-identical on every turn and stays
+# inside the prompt prefix llama-server can reuse.
 DEFAULT_LLM_SYSTEM_PROMPT = (
     "You're Droplet — the private AI that runs on this business's own "
     "appliance, and you're its voice. You're not a cloud service: "
@@ -230,22 +253,33 @@ DEFAULT_LLM_SYSTEM_PROMPT = (
 DEFAULT_TIMEZONE = "UTC"
 
 
-def build_system_prompt(
-    base: str,
+def build_turn_context(
     *,
     location: Optional[str],
     timezone: str,
     now: Optional[datetime] = None,
 ) -> str:
-    """Compose the system prompt for ONE LLM call.
+    """The one-line context that opens the user turn of ONE LLM call.
 
-    The base prompt (a constant) defines the voice persona. We append a
-    fresh "Right now" footer with current local time + the device's
-    configured location so the model can answer "what time is it?" or
-    "what's the weather in our area?" without freelancing.
+    Current local time (minute resolution, with weekday and zone) and the
+    device's configured location, so the model can answer "what time is
+    it?" or "what's the weather in our area?" without freelancing.
+
+    WARP-3125 — this used to be a "Right now" footer on the system
+    message. It moved to the user turn for two reasons:
+
+    * Prefix caching. llama-server reuses the KV cache only for the prompt
+      prefix that is byte-identical to the previous request, and the
+      system message sits at the front. A minute clock there made the
+      prefix different every minute. The user turn is past the cacheable
+      prefix anyway.
+    * It never reached the model on tool turns. The orchestrator puts its
+      own system message at index 0 on tool-enabled turns, and the gpt-oss
+      chat template drops any system message after index 0. The user turn
+      is rendered on every path.
 
     Pure function — `now` is injectable for tests + the timezone is an
-    explicit arg so we can construct prompts deterministically.
+    explicit arg so we can construct the line deterministically.
     """
     tz = _safe_zone(timezone)
     if now is None:
@@ -258,15 +292,19 @@ def build_system_prompt(
     # "Wednesday, May 14, 2026 at 9:34 PM EDT" — explicit weekday lets
     # the model handle "is it the weekend?" without extra reasoning.
     when = now.strftime("%A, %B %d, %Y at %I:%M %p %Z").replace(" 0", " ")
-    parts = [base, f"\n\nRight now it is {when}."]
-    if location and location.strip():
-        parts.append(f"\nThe Droplet is located in {location.strip()}.")
-    parts.append(
-        "\nIf the user asks for the time, the date, or anything tied "
-        "to location, use the information above directly — do not say "
-        "you don't have access to the time or location."
+    # Collapse whitespace so an operator's multi-line location cannot
+    # split the line.
+    place = " ".join((location or "").split())
+    if place:
+        return (
+            f"[Context: it is {when}; the Droplet is located in {place}. "
+            "Use this for time, date, and location questions; do not say "
+            "you don't have access to them.]"
+        )
+    return (
+        f"[Context: it is {when}. Use this for time and date questions; "
+        "do not say you don't have access to them.]"
     )
-    return "".join(parts)
 
 
 def _safe_zone(name: str) -> ZoneInfo:
@@ -315,6 +353,40 @@ def parse_max_tokens(raw: Optional[str]) -> int:
         )
         return DEFAULT_VOICE_MAX_TOKENS
     return n
+
+
+def parse_max_iter(raw: Optional[str]) -> int:
+    """Resolve VOICE_MAX_ITER → the agent-loop budget voice sends.
+
+    Unset / empty / non-numeric fall back to DEFAULT_LLM_MAX_ITER with a
+    warning. A number outside [1, 10] is clamped to the nearest bound
+    (with a warning) rather than defaulted: the operator clearly wanted
+    "more" or "fewer" steps, and the orchestrator would reject or cap
+    anything beyond its own window anyway. Voice must never break on a
+    fat-fingered env."""
+    s = (raw or "").strip()
+    if not s:
+        return DEFAULT_LLM_MAX_ITER
+    try:
+        n = int(s)
+    except ValueError:
+        logger.warning(
+            "VOICE_MAX_ITER=%r is not an integer — using default %d.",
+            raw,
+            DEFAULT_LLM_MAX_ITER,
+        )
+        return DEFAULT_LLM_MAX_ITER
+    clamped = max(MIN_LLM_MAX_ITER, min(MAX_LLM_MAX_ITER, n))
+    if clamped != n:
+        logger.warning(
+            "VOICE_MAX_ITER=%d is outside the accepted range %d..%d — "
+            "clamping to %d.",
+            n,
+            MIN_LLM_MAX_ITER,
+            MAX_LLM_MAX_ITER,
+            clamped,
+        )
+    return clamped
 
 
 def parse_allowed_tools(raw: Optional[str]) -> list[str]:
@@ -496,7 +568,7 @@ class OrchestratorLLM(LLMClient):
         # Context-enrichment fields. `location` is a free-form string
         # ("Greenwich, CT, USA") — what the operator set in env, no
         # geocoding. `timezone` is an IANA name; we resolve it to a
-        # ZoneInfo at call time (in build_system_prompt) so a typo
+        # ZoneInfo at call time (in build_turn_context) so a typo
         # falls back to UTC instead of crashing reply().
         self._location = location
         self._timezone = timezone
@@ -601,13 +673,15 @@ class OrchestratorLLM(LLMClient):
         Wire shape matches `apps/orchestrator/src/routes/llm.ts`
         `chatRequestSchema` (Zod). Carries all Wave-C turn shaping
         (WARP-1432): ephemeral + max_tokens + the curated allowed_tools
-        scope + the per-turn tool_choice, plus a fresh "right now"
-        timestamp (rebuilt every call) and the WARP-1119 workspace persona
-        on the greeting fast path.
+        scope + the per-turn tool_choice, plus the WARP-1119 workspace
+        persona on the greeting fast path.
+
+        WARP-3125 — the system message is the persona text only, identical
+        on every turn; the live time + location open the user turn instead
+        (`build_turn_context`, rebuilt every call).
         """
-        # Build a fresh system prompt on every call so the embedded
-        # "right now" timestamp is current. Cheap (string concat +
-        # one datetime.now()) — no need to cache.
+        # Resample the clock on every call so the context line is current.
+        # Cheap (string concat + one datetime.now()) — no need to cache.
         now = self._now_provider() if self._now_provider else None
         # WARP-1119 (§14): greeting turns (tool_choice="none") skip the
         # orchestrator base prompt, so the workspace persona block is
@@ -622,8 +696,10 @@ class OrchestratorLLM(LLMClient):
             persona_block = self._persona_fetcher.get_block()
             if persona_block:
                 base_prompt = f"{persona_block}\n\n{self._system_prompt}"
-        system_msg = build_system_prompt(
-            base_prompt,
+        # WARP-3125 — the context line leads the user turn, the transcript
+        # follows on its own line. The system message stays `base_prompt`
+        # verbatim so it is byte-identical turn to turn.
+        context_line = build_turn_context(
             location=self._location,
             timezone=self._timezone,
             now=now,
@@ -642,8 +718,8 @@ class OrchestratorLLM(LLMClient):
         body: dict[str, Any] = {
             "model": self._current_model(),
             "messages": [
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_text.strip()},
+                {"role": "system", "content": base_prompt},
+                {"role": "user", "content": f"{context_line}\n{user_text.strip()}"},
             ],
             "stream": stream,
             "max_iter": self._max_iter,
@@ -1176,10 +1252,13 @@ def build_llm_from_env(
     # breaks the voice loop. VOICE_ALLOWED_TOOLS unset → the curated
     # DEFAULT scope; VOICE_MAX_TOKENS unset → DEFAULT_VOICE_MAX_TOKENS.
     max_tokens = parse_max_tokens(os.environ.get("VOICE_MAX_TOKENS"))
+    max_iter = parse_max_iter(os.environ.get("VOICE_MAX_ITER"))
     allowed_tools = parse_allowed_tools(os.environ.get("VOICE_ALLOWED_TOOLS"))
     logger.info(
-        "voice turn shaping: ephemeral=on, max_tokens=%d, allowed_tools=%d scoped",
+        "voice turn shaping: ephemeral=on, max_tokens=%d, max_iter=%d, "
+        "allowed_tools=%d scoped",
         max_tokens,
+        max_iter,
         len(allowed_tools),
     )
 
@@ -1191,6 +1270,7 @@ def build_llm_from_env(
         # LLM_MODEL) is only the fallback when the orchestrator can't name one.
         follow_active_model=True,
         max_tokens=max_tokens,
+        max_iter=max_iter,
         allowed_tools=allowed_tools,
         location=geo.description,
         timezone=geo.timezone,
