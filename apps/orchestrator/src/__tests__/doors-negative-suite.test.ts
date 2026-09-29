@@ -462,12 +462,14 @@ describe("negative 5 — the module is ABSENT when DOORS_ENABLED is off", () => 
     const doors = MODULE_BY_ID.get("doors" as ModuleId)!;
     // Settings → Features: the module opts out of the "Not installed" row.
     expect(doors.listedWhenUnavailable).toBe(false);
-    // No nav entry, and no preset switches it on.
-    expect(doors.navHrefs).toEqual([]);
+    // Its nav entry is gated on this module in the dashboard (nav-config.ts, and
+    // pinned there), and no preset switches the module on.
+    expect(doors.navHrefs).toEqual(["/doors"]);
     // /tools, /api/llm/tools and MCP tools/list are all built from the tools-core
-    // registry and catalog. P4a ships no doors tool and no doors domain, so there
-    // is nothing for any of them to list; P4b, which adds the tools, replaces this
-    // pin with the module gate that hides them.
+    // registry and catalog. There is no doors tool and no doors domain, so there
+    // is nothing for any of them to list. The tools wait on WARP-2972 (module
+    // gating reaching the chat pool); the change that adds them replaces this pin
+    // with the module gate that hides them.
     expect(doors.toolDomains).toEqual([]);
     expect([...TOOLS.keys()].filter((n) => n.startsWith("doors_"))).toEqual([]);
     expect(TOOL_CATALOG.filter((e) => e.name.startsWith("doors_") || (e.domain as string) === "doors")).toEqual([]);

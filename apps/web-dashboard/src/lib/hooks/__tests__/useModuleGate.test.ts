@@ -17,7 +17,7 @@ vi.mock("../../auth", () => ({
   useAuth: () => ({ user: h.user }),
 }));
 
-import { isModuleEffective, levelAtLeast, moduleLevelFor, useModuleLevel } from "../useModuleGate";
+import { ABSENT_UNLESS_LISTED, isModuleEffective, levelAtLeast, moduleLevelFor, useModuleLevel } from "../useModuleGate";
 
 const view = {
   modules: [
@@ -92,6 +92,43 @@ describe("isModuleEffective — effectiveForUser", () => {
     const empty = { ...view, effectiveForUser: [] };
     expect(isModuleEffective(empty, "cameras")).toBe(true);
     expect(isModuleEffective(empty, "smart_home")).toBe(false);
+  });
+});
+
+// ── ADR-055: a module that ships dark is ABSENT, not merely off ───────
+//
+// `doors` is not listed while DOORS_ENABLED is off (`listedWhenUnavailable:
+// false`), so a switched-off box's payload has no row for it. Every other
+// unlisted id reads as "a module I can't classify: show it"; for these it is
+// the definition of off. The list is explicit and pinned here.
+
+describe("isModuleEffective — modules that ship dark (ADR-055)", () => {
+  const darkOff = { modules: [{ id: "cameras", effective: true }] };
+
+  it("names exactly `doors`", () => {
+    expect([...ABSENT_UNLESS_LISTED]).toEqual(["doors"]);
+  });
+
+  it("reads doors as OFF when a resolved payload does not list it", () => {
+    expect(isModuleEffective(darkOff, "doors")).toBe(false);
+  });
+
+  it("and as OFF when the per-user set does not carry it", () => {
+    const perUser = { ...darkOff, effectiveForUser: [{ moduleId: "cameras", level: "view" as const }] };
+    expect(isModuleEffective(perUser, "doors")).toBe(false);
+  });
+
+  it("reads doors as ON when it is listed effective, and OFF when listed and not", () => {
+    expect(isModuleEffective({ modules: [{ id: "doors", effective: true }] }, "doors")).toBe(true);
+    expect(isModuleEffective({ modules: [{ id: "doors", effective: false }] }, "doors")).toBe(false);
+  });
+
+  it("still fails OPEN while the probe has not answered, for doors as for every module", () => {
+    expect(isModuleEffective(undefined, "doors")).toBe(true);
+  });
+
+  it("does not turn 'unknown id → show' off for anything else", () => {
+    expect(isModuleEffective(darkOff, "mystery_module")).toBe(true);
   });
 });
 

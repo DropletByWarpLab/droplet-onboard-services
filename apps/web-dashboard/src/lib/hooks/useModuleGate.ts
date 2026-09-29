@@ -69,6 +69,8 @@ async function fetchModules(): Promise<ModulesView> {
  *    disagree with the server, which is the authority)
  *  - otherwise: module known → its `effective` flag
  *  - module unknown to the registry → shown (never hide what we can't classify)
+ *    — unless it is one that ships dark and is unlisted while unavailable
+ *    (`ABSENT_UNLESS_LISTED`, ADR-055), for which absent means off
  *
  * An EMPTY `effectiveForUser` is treated as unresolved, not as "nothing" — a
  * malformed/partial payload must not blank the whole nav.
@@ -93,8 +95,28 @@ export function isModuleEffective(
     return perUser.some((f) => f.moduleId === moduleId);
   }
   const m = data.modules.find((x) => x.id === moduleId);
-  return m ? m.effective : true;
+  if (m) return m.effective;
+  // Not in a payload that DID resolve. For a module we can't classify that is
+  // "show it" (above); for one that ships dark it is the definition of off.
+  return !ABSENT_UNLESS_LISTED.has(moduleId);
 }
+
+/**
+ * ADR-055 — the modules that SHIP DARK: while unavailable the orchestrator does
+ * not list them at all (`listedWhenUnavailable: false`), so the module is ABSENT
+ * from `GET /api/modules`, not present-and-off. "Not in the payload" is
+ * therefore not "a module the registry doesn't know" (which stays visible, so
+ * version skew can never blank a shipping page): for these ids it means the
+ * box has not switched the product on. Without this entry, a resolved payload
+ * that carries no per-user set (`effectiveForUser` is omitted when the caller
+ * can't be resolved) would leave Doors' nav entry standing on a box that has
+ * no doors.
+ *
+ * An explicit list, never derived: "unlisted" is a decision made per module in
+ * the registry, and it is only true of the modules named here. Keep it in step
+ * with the registry's `listedWhenUnavailable: false` rows.
+ */
+export const ABSENT_UNLESS_LISTED: ReadonlySet<string> = new Set(["doors"]);
 
 const MODULES_SWR_OPTIONS = {
   // Module state changes only when the owner reconfigures the box. The

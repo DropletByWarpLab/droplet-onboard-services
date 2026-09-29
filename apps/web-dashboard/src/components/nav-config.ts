@@ -22,6 +22,7 @@ import {
   ChartColumn,
   Repeat,
   Cpu,
+  DoorOpen,
   Download,
   Film,
   FlaskConical,
@@ -547,6 +548,28 @@ export const NAV_GROUPS: NavGroup[] = [
           // links and the LLM tool list_clips don't 404.
           { href: "/events", label: "Events", icon: Film },
         ],
+      },
+      // ADR-055 (P4b) — Doors: the doors this box knows about, what each last
+      // reported and when, and the log of what happened at them. Its own
+      // module (`doors`), which SHIPS DARK: DOORS_ENABLED is off by default and
+      // the module is then ABSENT from GET /api/modules rather than listed as
+      // off, so `isModuleEffective` treats "absent" as off for it (see
+      // `ABSENT_UNLESS_LISTED` in useModuleGate). Owner/admin only, mirroring
+      // the API's read floor (`READ_ROLES` in routes/doors.ts): the module's
+      // own grant is the only narrowing until door groups exist, and a page
+      // that would 403 for everyone else is not offered to them. The owner
+      // alone adds, changes and retires doors; the page shows those controls
+      // to no one else.
+      //
+      // The seventeenth top-level row, and the four-groups test's cap moves to
+      // 17 with it (WARP-2967's ≤ 14, plus Security, Workshop and this). It
+      // shows on no box until the flag is set.
+      {
+        href: "/doors",
+        label: "Doors",
+        icon: DoorOpen,
+        roles: ["owner", "admin"],
+        requiresModule: "doors",
       },
       {
         href: "/network",
