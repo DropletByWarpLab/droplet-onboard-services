@@ -814,6 +814,26 @@ export interface BulkOperationResult {
 /** View mode for the file manager — list or grid */
 export type FileViewMode = "list" | "grid";
 
+/**
+ * Finder-tag-style folder colours. Mirrors the orchestrator's `FolderColor`
+ * enum; "no colour" is the absence of a row (clearing deletes it), so it is
+ * deliberately not a member here.
+ */
+export type FolderColor =
+  | "red"
+  | "orange"
+  | "yellow"
+  | "green"
+  | "blue"
+  | "purple"
+  | "gray";
+
+/** One coloured folder, keyed on the Nextcloud fileId a listing entry carries. */
+export interface FolderColorEntry {
+  ncFileId: number;
+  color: FolderColor;
+}
+
 // --- Phase 3: device clients + pairing ---
 
 export interface DeviceClientInfo {
@@ -4464,7 +4484,8 @@ export interface IncidentNarrativeView {
 
 /** POST …/acknowledge and …/resolve → 200. `changed:false` = nothing new (already done). */
 export interface IncidentActionResult {
-  incident: IncidentDetail;
+  /** null when, after the write, this person can no longer see the incident (route 18 would answer 404). */
+  incident: IncidentDetail | null;
   changed: boolean;
 }
 

@@ -17,28 +17,54 @@ interface NetworkDriveInfo {
   macosUrl: string;
 }
 
+/** Wire shape of POST /api/storage/network-drive/personal (orchestrator device-clients.ts). */
+interface PersonalDriveLogin {
+  deviceId: string;
+  username: string;
+  /** Plaintext, returned once — never shown again. */
+  appPassword: string;
+  macosUrl: string;
+  windowsPath: string;
+}
+
+type DrivePlatform = "macos" | "windows";
+
 interface ConnectDriveDialogProps {
   open: boolean;
   onClose: () => void;
+  /**
+   * Also show the device-wide shared SMB "Droplet" share (owner/admin only —
+   * the endpoint 403s other roles). The shared fetch only runs when true.
+   */
+  showSharedDrive?: boolean;
 }
 
 /**
- * "Connect network drive" — step-by-step connect instructions for the SMB
- * "Droplet" share (the compose `samba` service) so the Droplet folder shows
- * up natively in Windows Explorer / macOS Finder.
+ * "Connect as a network drive" — puts a Droplet drive in Windows Explorer /
+ * macOS Finder.
  *
- * Owner/admin surface only: the endpoint 403s other roles because the
- * credential is device-wide (see the route comment in orchestrator
- * routes/storage.ts), and the page hides the trigger for them.
+ * "Your drive" (owner/admin/family, while the owner has turned personal drives
+ * on): mints a personal WebDAV login through Nextcloud
+ * (POST /api/storage/network-drive/personal) — the user's own My Files /
+ * Household / department access, no shared password. The app password is
+ * returned once and shown once; it can be revoked from the devices list. The
+ * on/off flag is `personalDriveEnabled` from GET /api/settings/workspace; while
+ * it is off the section shows a note instead of the create button.
+ *
+ * "Shared Droplet folder" (`showSharedDrive`, owner/admin only): step-by-step
+ * connect instructions for the SMB "Droplet" share (the compose `samba`
+ * service). The endpoint 403s other roles because that credential is
+ * device-wide (see the route comment in orchestrator routes/storage.ts), so
+ * the shared fetch only runs when the flag is set.
  */
-export function ConnectDriveDialog({ open, onClose }: ConnectDriveDialogProps) {
+export function ConnectDriveDialog({ open, onClose, showSharedDrive = false }: ConnectDriveDialogProps) {
   const [info, setInfo] = useState<NetworkDriveInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !showSharedDrive) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -60,7 +86,7 @@ export function ConnectDriveDialog({ open, onClose }: ConnectDriveDialogProps) {
     return () => {
       cancelled = true;
     };
-  }, [open]);
+  }, [open, showSharedDrive]);
 
   return (
     <Dialog open={open} onClose={onClose} labelledBy="connect-drive-title" maxWidth="lg">
@@ -71,15 +97,22 @@ export function ConnectDriveDialog({ open, onClose }: ConnectDriveDialogProps) {
         </h2>
       </div>
       <p className="text-sm opacity-70 mb-4">
-        Your Droplet folder can appear directly in Windows Explorer and macOS
-        Finder — files you drop there also show up here under{" "}
-        <span className="font-medium">Droplet</span>.
+        Your Droplet files can appear directly in Windows Explorer and macOS
+        Finder — files you drop there also show up here.
       </p>
 
-      {loading && <p className="text-sm opacity-70">Loading…</p>}
-      {error && <p className="text-sm text-red-500">{error}</p>}
+      <PersonalDrive open={open} />
 
-      {info && !info.enabled && (
+      {showSharedDrive && (
+        <h3 className="text-sm font-semibold mt-6 mb-1 pt-4 border-t border-black/10 dark:border-white/10">
+          Shared Droplet folder
+        </h3>
+      )}
+
+      {showSharedDrive && loading && <p className="text-sm opacity-70">Loading…</p>}
+      {showSharedDrive && error && <p className="text-sm text-red-500">{error}</p>}
+
+      {showSharedDrive && info && !info.enabled && (
         <p className="text-sm opacity-70">
           The network drive isn&apos;t enabled on this Droplet. It ships on by
           default on the appliance — see the network-drive guide in the device
@@ -87,7 +120,7 @@ export function ConnectDriveDialog({ open, onClose }: ConnectDriveDialogProps) {
         </p>
       )}
 
-      {info && info.enabled && (
+      {showSharedDrive && info && info.enabled && (
         <div className="space-y-4">
           <section>
             <h3 className="text-sm font-semibold mb-1">Windows</h3>
@@ -146,6 +179,201 @@ export function ConnectDriveDialog({ open, onClose }: ConnectDriveDialogProps) {
         </div>
       )}
     </Dialog>
+  );
+}
+
+/** "Your drive": per-user WebDAV login, created on demand and shown once. */
+function PersonalDrive({ open }: { open: boolean }) {
+  // null = not known yet. Only an explicit `true` from the server turns it on.
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [platform, setPlatform] = useState<DrivePlatform>(() =>
+    typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent)
+      ? "windows"
+      : "macos",
+  );
+  const [login, setLogin] = useState<PersonalDriveLogin | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
+
+  // The password is shown once — drop it when the dialog closes.
+  useEffect(() => {
+    if (open) return;
+    setLogin(null);
+    setError(null);
+    setShowPassword(false);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setEnabled(null);
+    setLoadFailed(false);
+    (async () => {
+      try {
+        const res = await authFetch("/api/settings/workspace");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const body = (await res.json()) as { personalDriveEnabled?: boolean };
+        if (!cancelled) setEnabled(body.personalDriveEnabled === true);
+      } catch {
+        if (!cancelled) setLoadFailed(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  const create = async () => {
+    setCreating(true);
+    setError(null);
+    try {
+      const res = await authFetch("/api/storage/network-drive/personal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ platform }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        if (body.error === "personal_drive_disabled") {
+          // The owner switched it off while this dialog was open.
+          setEnabled(false);
+        } else if (body.error === "nc_credential_unavailable") {
+          setError(
+            "To set up your drive, sign out and sign in with your password once, then try again.",
+          );
+        } else if (res.status === 429) {
+          setError("You've created a lot of drive logins. Try again in an hour.");
+        } else {
+          setError("Couldn't create your drive login. Try again in a moment.");
+        }
+        return;
+      }
+      setLogin((await res.json()) as PersonalDriveLogin);
+      setShowPassword(false);
+    } catch {
+      setError("Couldn't create your drive login. Try again in a moment.");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  if (enabled !== true) {
+    return (
+      <section>
+        <h3 className="text-sm font-semibold mb-1">Your drive</h3>
+        {loadFailed ? (
+          <p className="text-sm text-red-500">
+            Couldn&apos;t check whether personal drives are on. Try again in a
+            moment.
+          </p>
+        ) : enabled === null ? (
+          <p className="text-sm opacity-70">Loading…</p>
+        ) : (
+          <p className="text-sm opacity-70">
+            Personal drives aren&apos;t turned on for this Droplet. Your
+            Droplet owner can turn them on in Settings.
+          </p>
+        )}
+      </section>
+    );
+  }
+
+  return (
+    <section>
+      <h3 className="text-sm font-semibold mb-1">Your drive</h3>
+      <p className="text-sm opacity-70 mb-2">
+        Your own files, with your own access — nobody else&apos;s password is
+        involved.
+      </p>
+      <div className="flex gap-2 mb-2" role="group" aria-label="Computer type">
+        {(["macos", "windows"] as const).map((p) => (
+          <button
+            key={p}
+            type="button"
+            className={`btn ${platform === p ? "" : "ghost"}`}
+            aria-pressed={platform === p}
+            onClick={() => setPlatform(p)}
+          >
+            {p === "macos" ? "Mac" : "Windows"}
+          </button>
+        ))}
+      </div>
+
+      {!login && (
+        <button type="button" className="btn" onClick={create} disabled={creating}>
+          {creating ? "Creating…" : "Create my drive login"}
+        </button>
+      )}
+      {error && <p className="text-sm text-red-500 mt-2">{error}</p>}
+
+      {login && (
+        <div>
+          <ol className="text-sm opacity-80 list-decimal ml-4 space-y-0.5">
+            {platform === "macos" ? (
+              <>
+                <li>
+                  In Finder press <span className="font-medium">⌘K</span> (Go →
+                  Connect to Server…)
+                </li>
+                <li>Paste the address below and click Connect.</li>
+                <li>Enter the username and password below.</li>
+                <li>
+                  Tick{" "}
+                  <span className="font-medium">
+                    Remember this password in my keychain
+                  </span>
+                  .
+                </li>
+              </>
+            ) : (
+              <>
+                <li>
+                  Open File Explorer → <span className="font-medium">This PC</span>{" "}
+                  → Map network drive…
+                </li>
+                <li>Paste the address below as the folder.</li>
+                <li>
+                  Tick <span className="font-medium">Reconnect at sign-in</span>{" "}
+                  and{" "}
+                  <span className="font-medium">
+                    Connect using different credentials
+                  </span>
+                  .
+                </li>
+                <li>Enter the username and password below.</li>
+              </>
+            )}
+          </ol>
+          <CopyField
+            label="Your drive address"
+            value={platform === "macos" ? login.macosUrl : login.windowsPath}
+          />
+          <CopyField label="Your drive username" value={login.username} />
+          <CopyField
+            label="Your drive password"
+            value={login.appPassword}
+            masked={!showPassword}
+            trailing={
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() => setShowPassword((v) => !v)}
+                aria-label={showPassword ? "Hide your drive password" : "Show your drive password"}
+              >
+                {showPassword ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+            }
+          />
+          <p className="text-xs opacity-60 mt-2">
+            This password is only shown now — copy it before you close this
+            window. If you lose it, you can remove this login from your devices
+            list and create a new one.
+          </p>
+        </div>
+      )}
+    </section>
   );
 }
 

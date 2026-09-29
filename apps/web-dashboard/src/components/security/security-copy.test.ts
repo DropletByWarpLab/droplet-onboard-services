@@ -75,6 +75,7 @@ import * as NarrativeSection from "./NarrativeSection";
 import * as NoticeList from "./NoticeList";
 import * as ReasonList from "./ReasonList";
 import * as ResolveDialog from "./ResolveDialog";
+import * as ShowOlder from "./show-older";
 import * as incidentCopy from "./incident-copy";
 import * as ModeCard from "./ModeCard";
 import * as PatternFlagList from "./PatternFlagList";
@@ -121,6 +122,8 @@ const MODULES: Record<string, Record<string, unknown>> = {
   "src/components/security/NarrativeSection.tsx": NarrativeSection,
   "src/components/security/AckHistory.tsx": AckHistory,
   "src/components/security/ResolveDialog.tsx": ResolveDialog,
+  // WARP-3185 B — no copy of its own; listed because every module here is.
+  "src/components/security/show-older.ts": ShowOlder,
   "src/components/security/AlertRoutingPanel.tsx": AlertRoutingPanel,
   "src/components/security/AiSettingsPanel.tsx": AiSettingsPanel,
   // WARP-2979 (P4) — Droplet's links.

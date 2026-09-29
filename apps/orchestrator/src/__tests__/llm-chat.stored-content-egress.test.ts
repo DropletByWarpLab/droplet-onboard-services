@@ -301,7 +301,8 @@ describe("the withheld set is DERIVED from the tool catalog", () => {
 
   it("WARP-2979: withholds every Security tool, and the notice says Security stays on the Droplet", () => {
     expect(OFF_LAN_WITHHELD_DOMAINS.has("security")).toBe(true);
-    for (const name of ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status"]) {
+    // WARP-2980 — the fifth, security_explain_pattern, is withheld by its domain like the four.
+    for (const name of ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status", "security_explain_pattern"]) {
       expect(OFF_LAN_WITHHELD_TOOLS.has(name), name).toBe(true);
     }
     expect(withholdStoredContentTools(["security_search_events", "get_network_status"])).toEqual(["get_network_status"]);

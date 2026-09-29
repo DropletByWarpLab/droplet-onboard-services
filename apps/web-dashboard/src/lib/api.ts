@@ -52,6 +52,8 @@ import type {
   MatterGrouped,
   Room,
   FileEntryInfo,
+  FolderColor,
+  FolderColorEntry,
   FileSpaceId,
   FileSpacesResponse,
   FileVersionInfo,
@@ -5163,6 +5165,50 @@ export async function fetchFiles(
   if (!res.ok) throw new Error(`Failed to fetch files: ${res.status}`);
   throwIfFilesDegraded(res);
   return res.json();
+}
+
+// Per-user folder colours. Keyed server-side on the folder's Nextcloud fileId
+// (survives rename/move); `path` here is space-relative, like every other
+// space-threaded write helper.
+export async function fetchFolderColors(): Promise<FolderColorEntry[]> {
+  const res = await authFetch(`${BASE}/api/files/folder-colors`);
+  if (!res.ok) throw new Error(`Failed to fetch folder colors: ${res.status}`);
+  const data = await res.json();
+  return data.colors;
+}
+
+export async function setFolderColor(
+  path: string,
+  color: FolderColor,
+  space: FileSpaceId = "personal"
+): Promise<void> {
+  const res = await authFetch(`${BASE}/api/files/folder-colors`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(
+      space === "personal" ? { path, color } : { path, color, space }
+    ),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to set folder color: ${res.status}`);
+  }
+}
+
+export async function clearFolderColor(
+  path: string,
+  space: FileSpaceId = "personal"
+): Promise<void> {
+  const qs = new URLSearchParams({ path });
+  if (space !== "personal") qs.set("space", space);
+  const res = await authFetch(
+    `${BASE}/api/files/folder-colors?${qs.toString()}`,
+    { method: "DELETE" }
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to clear folder color: ${res.status}`);
+  }
 }
 
 // WARP-883 (ADR-027 WS-5) — which Files spaces exist for this user. Drives the

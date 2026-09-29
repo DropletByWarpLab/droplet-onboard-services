@@ -69,7 +69,9 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.types import Receive, Scope, Send
 
 import connector_draft
 import extensions
@@ -633,16 +635,36 @@ async def workspace_propose(workspace_id: str, req: ProposeRequest):
     return await _in_thread(workspace.propose, workspace_id, req.name, req.version, req.summary, req.author.pair())
 
 
+class _SpoolResponse(StreamingResponse):
+    """Streams an export spool and owns it: the spool is closed when the
+    response ends however it ends. A close in the generator's `finally` is not
+    enough — a client that leaves before the first chunk means the generator
+    never starts. Nor is a BackgroundTask: Starlette skips `background` when
+    `send` raises (ASGI spec 2.4)."""
+
+    def __init__(self, spool: Any, **kwargs: Any) -> None:
+        super().__init__(iter(lambda: spool.read(65_536), b""), **kwargs)
+        self._spool = spool
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._spool.close()
+
+
 @app.get("/workspaces/{workspace_id}/bundle")
 async def workspace_bundle(workspace_id: str):
-    content, head = await _in_thread(gitstore.bundle, workspace_id)
-    return Response(content=content, media_type="application/octet-stream", headers={"X-Bundle-Head": head})
+    built = await _in_thread(gitstore.bundle, workspace_id)
+    return _SpoolResponse(
+        built.file,
+        media_type="application/octet-stream",
+        headers={"X-Bundle-Head": built.head, "X-Bundle-Sha256": built.sha256, "Content-Length": str(built.size)},
+    )
 
 
 def _connector_draft_at(workspace_id: str, ref: str) -> dict[str, Any] | None:
-    if not gitstore.ref_exists(workspace_id, ref):
-        raise gitstore.StoreError(404, f"no {ref} in workspace {workspace_id}")
-    return connector_draft.describe_tree(lambda path: gitstore.show_at(workspace_id, ref, path))
+    return connector_draft.describe_tree(gitstore.reader_at(workspace_id, ref))
 
 
 @app.get("/workspaces/{workspace_id}/connector-draft")

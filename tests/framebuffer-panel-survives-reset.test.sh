@@ -60,19 +60,52 @@ run_block() {
   # $2 = "fb" to create a fake framebuffer, "" for none
   # $3 = virtual_size file contents ('' = unreadable/missing)
   # $4 = "usb" to simulate a PyPortal present
-  local existing="$1" have_fb="$2" size="$3" have_usb="$4"
+  # $5 = existing "LCD_WIDTH,LCD_HEIGHT" already in .env ('' = absent)
+  # $6 = how the framebuffer is chosen (WARP-2128, the operator's FB_DEVICE):
+  #        ''     the DROPLET_FB_DEV / DROPLET_FB_SIZE hooks point at a fake fb0
+  #        'env'  NO hooks: .env carries FB_DEVICE=<fake fb1>, and $3 is that
+  #               device's sysfs virtual_size (<sysfs>/fb1/virtual_size), which
+  #               is where the runtime reads it from
+  #        'hook' .env carries FB_DEVICE=<fake fb1> whose sysfs size is a decoy
+  #               (640x480) AND the hooks point at the fake fb0 — hooks win
+  local existing="$1" have_fb="$2" size="$3" have_usb="$4" prev_geom="${5:-}" devmode="${6:-}"
   local tmp; tmp="$(mktemp -d)"
   local env_target="$tmp/.env"
   : > "$env_target"
   [ -n "$existing" ] && printf 'DISPLAY_BACKEND=%s\n' "$existing" >> "$env_target"
+  if [ -n "$prev_geom" ]; then
+    printf 'LCD_WIDTH=%s\n'  "${prev_geom%%,*}" >> "$env_target"
+    printf 'LCD_HEIGHT=%s\n' "${prev_geom##*,}" >> "$env_target"
+  fi
 
   local fb_dev="$tmp/fb0" size_file="$tmp/virtual_size" usb_pfx="$tmp/tty"
-  [ "$have_fb" = "fb" ] && : > "$fb_dev"
-  [ -n "$size" ] && printf '%s\n' "$size" > "$size_file"
+  local fb1_dev="$tmp/fb1" sysfs="$tmp/sysfs"
+  local hook_dev="$fb_dev" hook_size="$size_file"
+  case "$devmode" in
+    env|hook)
+      mkdir -p "$sysfs/fb1"
+      printf 'FB_DEVICE=%s\n' "$fb1_dev" >> "$env_target" ;;
+  esac
+  case "$devmode" in
+    env)
+      # No hooks: only the operator's FB_DEVICE and its sysfs node decide.
+      hook_dev=""; hook_size=""
+      [ "$have_fb" = "fb" ] && : > "$fb1_dev"
+      [ -n "$size" ] && printf '%s\n' "$size" > "$sysfs/fb1/virtual_size" ;;
+    *)
+      [ "$have_fb" = "fb" ] && : > "$fb_dev"
+      [ -n "$size" ] && printf '%s\n' "$size" > "$size_file"
+      if [ "$devmode" = hook ]; then
+        : > "$fb1_dev"
+        printf '640,480\n' > "$sysfs/fb1/virtual_size"
+      fi ;;
+  esac
   [ "$have_usb" = "usb" ] && : > "${usb_pfx}ACM1"
 
+  # Ends at the end-of-block sentinel, not the first `fi` — the backend decision
+  # and the geometry re-read are two separate `if` blocks now.
   local block
-  block="$(awk '/^  # Test\/dev hooks \(so the detection is unit-testable/,/^  fi$/' "$LIB")"
+  block="$(awk '/^  # Test\/dev hooks \(so the detection is unit-testable/,/^  # --- end display detection/' "$LIB")"
 
   (
     log_info() { :; }; log_warn() { :; }
@@ -81,8 +114,9 @@ run_block() {
       { grep -vE "^${key}=" "$env_target" 2>/dev/null || true; printf '%s=%s\n' "$key" "$val"; } > "$stage"
       mv "$stage" "$env_target"
     }
-    DROPLET_FB_DEV="$fb_dev" DROPLET_FB_SIZE="$size_file" DROPLET_USB_TTY="$usb_pfx"
-    export DROPLET_FB_DEV DROPLET_FB_SIZE DROPLET_USB_TTY
+    DROPLET_FB_DEV="$hook_dev" DROPLET_FB_SIZE="$hook_size" DROPLET_USB_TTY="$usb_pfx"
+    DROPLET_FB_SYSFS="$sysfs"
+    export DROPLET_FB_DEV DROPLET_FB_SIZE DROPLET_USB_TTY DROPLET_FB_SYSFS
     eval "$block"
   ) >/dev/null 2>&1
 
@@ -152,6 +186,121 @@ case "$got" in
   'fb||') ok "garbage virtual_size rejected, no geometry written (got '$got')" ;;
   *)      bad "garbage virtual_size became a geometry (got '$got')" ;;
 esac
+
+# --- PART 3 (WARP-2128): geometry tracks the ATTACHED panel, not the .env ---
+#
+# THE INVARIANT: DISPLAY_BACKEND is an operator choice and survives a re-run;
+# the GEOMETRY is a property of the hardware plugged in right now and must be
+# re-detected EVERY run. Conflating them meant that once DISPLAY_BACKEND=fb was
+# in .env, the "leave the operator's choice alone" branch won and virtual_size
+# was never read again.
+#
+# THE FIELD SEQUENCE: bench HDMI monitor at setup (1920x1080) -> swap in the
+# real rack bar (1424x280) -> re-run setup.sh. The stale 1920x1080 stuck,
+# display.py rendered 1920x1080 into a 1424x280 framebuffer, and fb.py cropped
+# to the top-left, which reads as a broken screen rather than a wrong setting.
+
+# THE REGRESSION: a re-run after a panel swap must pick up the new geometry.
+got="$(run_block 'fb' fb '1424,280' '' '1920,1080')"
+if [ "$got" = "fb|1424|280" ]; then
+  ok "panel swap re-detected on re-run: 1920x1080 -> 1424x280 (got '$got')"
+else
+  bad "STALE GEOMETRY: bench monitor's 1920x1080 survived a swap to the 1424x280 rack bar (got '$got')"
+fi
+
+# The other shipping panel, to prove nothing is special-cased to 1424x280.
+got="$(run_block 'fb' fb '1280,400' '' '1920,1080')"
+if [ "$got" = "fb|1280|400" ]; then
+  ok "panel swap re-detected for the 1280x400 panel too (got '$got')"
+else
+  bad "stale geometry survived a swap to the 1280x400 panel (got '$got')"
+fi
+
+# Re-running with the SAME panel must be a no-op, not a flip-flop.
+got="$(run_block 'fb' fb '1424,280' '' '1424,280')"
+if [ "$got" = "fb|1424|280" ]; then
+  ok "re-run with an unchanged panel is idempotent (got '$got')"
+else
+  bad "idempotent re-run changed the geometry (got '$got')"
+fi
+
+# The backend is STILL an operator choice — re-detection must not resurrect fb
+# on a box the operator deliberately pinned to sim, and must not write a
+# geometry for it either (sim renders to a PNG at whatever size was chosen).
+got="$(run_block 'sim' fb '1424,280' '' '480,320')"
+if [ "$got" = "sim|480|320" ]; then
+  ok "operator's sim choice keeps BOTH its backend and its geometry (got '$got')"
+else
+  bad "geometry re-detection leaked into a non-fb backend (got '$got')"
+fi
+
+# Unreadable virtual_size on a re-run must LEAVE the existing geometry alone.
+# Blanking it here would turn a stale-but-working panel into a dark one.
+got="$(run_block 'fb' fb '' '' '1424,280')"
+if [ "$got" = "fb|1424|280" ]; then
+  ok "unreadable virtual_size leaves the existing geometry intact (got '$got')"
+else
+  bad "unreadable virtual_size clobbered a working geometry (got '$got')"
+fi
+
+# Same for garbage — never overwrite a good geometry with a bad parse.
+got="$(run_block 'fb' fb 'not,anumber' '' '1424,280')"
+if [ "$got" = "fb|1424|280" ]; then
+  ok "garbage virtual_size leaves the existing geometry intact (got '$got')"
+else
+  bad "garbage virtual_size clobbered a working geometry (got '$got')"
+fi
+
+# DISPLAY_BACKEND=fb but the framebuffer is GONE (panel unplugged, headless
+# re-run). Must not blank the geometry the panel will need when it returns.
+got="$(run_block 'fb' '' '' '' '1424,280')"
+if [ "$got" = "fb|1424|280" ]; then
+  ok "no framebuffer present: existing geometry preserved (got '$got')"
+else
+  bad "a headless re-run destroyed the panel geometry (got '$got')"
+fi
+
+# --- PART 4 (WARP-2128): the geometry comes from the operator's FB_DEVICE ----
+#
+# THE INVARIANT: the runtime opens FB_DEVICE and reads its size from
+# /sys/class/graphics/<basename FB_DEVICE>/virtual_size (fb.py `_open_or_raise`).
+# Setup must probe the SAME device, or every run overwrites LCD_WIDTH/LCD_HEIGHT
+# with fb0's size. On a Vault whose GPU exposes a console fbdev, fb0 is the
+# 1920x1080 console and the panel is /dev/fb1 — the exact crop this ticket
+# fixes, recreated on every setup run.
+
+# THE REGRESSION: .env names a second framebuffer; ITS geometry wins.
+got="$(run_block 'fb' fb '1424,280' '' '1920,1080' env)"
+if [ "$got" = "fb|1424|280" ]; then
+  ok "FB_DEVICE from .env is probed via its own sysfs node: 1920x1080 -> 1424x280 (got '$got')"
+else
+  bad "FB_DEVICE ignored: setup did not read the operator's framebuffer geometry (got '$got')"
+fi
+
+# Idempotent for that device too.
+got="$(run_block 'fb' fb '1424,280' '' '1424,280' env)"
+if [ "$got" = "fb|1424|280" ]; then
+  ok "re-run against the operator's FB_DEVICE is idempotent (got '$got')"
+else
+  bad "re-run against FB_DEVICE changed the geometry (got '$got')"
+fi
+
+# Unreadable size on THAT device leaves the existing geometry alone; it must not
+# fall back to some other framebuffer's size.
+got="$(run_block 'fb' fb '' '' '1424,280' env)"
+if [ "$got" = "fb|1424|280" ]; then
+  ok "FB_DEVICE with unreadable virtual_size leaves the existing geometry intact (got '$got')"
+else
+  bad "unreadable FB_DEVICE size clobbered a working geometry (got '$got')"
+fi
+
+# The DROPLET_FB_* hooks still take precedence over .env (unit-test seam).
+got="$(run_block 'fb' fb '1280,400' '' '1920,1080' hook)"
+if [ "$got" = "fb|1280|400" ]; then
+  ok "DROPLET_FB_DEV/DROPLET_FB_SIZE hooks take precedence over .env FB_DEVICE (got '$got')"
+else
+  bad "hooks lost to .env FB_DEVICE (got '$got')"
+fi
 
 printf '\n  %d passed, %d failed\n\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

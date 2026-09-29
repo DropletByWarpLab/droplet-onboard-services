@@ -86,13 +86,11 @@ export async function touchNcToken(userId: string, ttlSeconds: number): Promise<
   }
 }
 
-/** Extract the raw session token from cookie or Authorization header. */
+/** Extract the raw session token from the Authorization header or cookie (Bearer wins — WARP-3038). */
 function extractSessionToken(req: Request): string | null {
-  const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
-  if (cookieToken) return cookieToken;
   const header = req.headers.authorization;
   if (header?.startsWith("Bearer ")) return header.slice(7);
-  return null;
+  return req.cookies?.[SESSION_COOKIE_NAME] ?? null;
 }
 
 /**

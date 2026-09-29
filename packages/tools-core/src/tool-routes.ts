@@ -535,4 +535,6 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "security_get_incident", client: "orchestrator", hops: [admit("get", "/api/security/assistant/incidents/:id")] },
   { tool: "security_search_events", client: "orchestrator", hops: [admit("get", "/api/security/assistant/events")] },
   { tool: "security_zone_status", client: "orchestrator", hops: [admit("get", "/api/security/assistant/areas")] },
+  // WARP-2980 (ADR-059 P5 PR-E) — A5, the same router and the same two guards.
+  { tool: "security_explain_pattern", client: "orchestrator", hops: [admit("get", "/api/security/assistant/patterns")] },
 ];
