@@ -85,7 +85,7 @@ export function ToolApprovalPrompt({
 
   return (
     <div
-      className="mb-2 p-3 rounded-lg bg-system-orange/10 text-system-orange type-caption-1"
+      className="tool-approval mb-2 p-3 rounded-lg bg-system-orange/10 text-system-orange type-caption-1"
       role="group"
       aria-label={`Approval needed for ${toolName}`}
       data-testid="tool-approval-prompt"
@@ -94,7 +94,7 @@ export function ToolApprovalPrompt({
         isExpired ? "expired" : isDenied ? "denied" : isApproved ? "approved" : "pending"
       }
     >
-      <p className="flex items-center gap-1.5 font-medium">
+      <p className="tool-approval-title flex items-center gap-1.5 font-medium">
         {isExpired ? (
           <TimerOff size={14} aria-hidden="true" />
         ) : isDenied ? (
@@ -114,7 +114,7 @@ export function ToolApprovalPrompt({
       </p>
 
       {fields.length > 0 && (
-        <ul className="mt-1.5 space-y-0.5 opacity-90" data-testid="approval-arg-summary">
+        <ul className="tool-approval-detail mt-1.5 space-y-0.5 opacity-90" data-testid="approval-arg-summary">
           {fields.map((f) => (
             <li key={f.key}>{fieldLine(f)}</li>
           ))}
@@ -124,7 +124,7 @@ export function ToolApprovalPrompt({
 
       {isExpired ? (
         <div className="mt-2">
-          <p className="type-caption-2 opacity-80">
+          <p className="tool-approval-detail type-caption-2 opacity-80">
             Approvals are only good for a few minutes. Ask again to get a fresh one.
           </p>
           {onRerequest && (
