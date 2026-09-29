@@ -1339,6 +1339,11 @@ export interface RosterUser extends AuthUser {
    *  storage: storage/upload limits don't apply. Optional for the same
    *  reason; only an explicit false hides the storage controls. */
   hasStorage?: boolean;
+  /** WARP-3113 — explicit deletion state. PENDING: deactivated, files kept
+   *  until `deletionDueAt`, cancellable. PURGING: the nightly job is removing
+   *  the account now. Optional: an older orchestrator sends nothing. */
+  deletionStatus?: "NONE" | "PENDING" | "PURGING" | "HANDING_OVER";
+  deletionDueAt?: string | null;
 }
 
 /** WARP-2984 — see RosterUser.source. */
@@ -2192,6 +2197,9 @@ export interface MatterGrouped {
   covers: MatterDevice[];
   locks: MatterDevice[];
   other: MatterDevice[];
+  /** WARP-3276: set by the orchestrator when the Matter controller is down
+   *  (it answers 200 with empty groups rather than an error). */
+  _status?: "disconnected";
 }
 
 export interface MatterDiscoveredDevice {
@@ -3504,6 +3512,43 @@ export interface ExtensionPromoteResult {
   version: string;
   installed: boolean;
   installError: { code: string; message: string } | null;
+}
+
+/**
+ * WARP-3205 — one `ext-*` row of `GET /api/admin/remote-tools/classifications`,
+ * as the owner's tool review renders it.
+ *
+ * There is deliberately no `wireDescription`: the orchestrator still sends
+ * the row's recorded copy, and nothing here can render it.
+ * `declaredDescription` is the signed manifest's description, sent only when
+ * it and `inputSchema` hash to the row's `inputSchemaHash` (what the review
+ * binds), and is shown only as its author's words.
+ */
+export interface ExtensionToolClassification {
+  serverId: string;
+  toolName: string;
+  requiresWrite: boolean;
+  requiresConfirmation: boolean;
+  denied: boolean;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  /** The review hash (description + arguments) the decision is bound to; sent back with it. */
+  inputSchemaHash: string | null;
+  /** The schema that hash names, or null when the box cannot show it (no review then). */
+  inputSchema: Record<string, unknown> | null;
+  /** The signed description that hash names, beside a non-null `inputSchema`; else null. */
+  declaredDescription: string | null;
+  /** What dispatch does with a call, decided by the orchestrator. */
+  decision: RuntimeToolClassification;
+}
+
+/** The body of `PATCH …/classifications/:serverId/:toolName` for an extension tool. */
+export interface ExtensionToolDecision {
+  requiresWrite: boolean;
+  requiresConfirmation: boolean;
+  denied: boolean;
+  /** The review hash of what the owner was shown (409 STALE_REVIEW if it moved). */
+  inputSchemaHash: string;
 }
 
 // ── WARP-2977 (ADR-059 P2): the Security command center feed ──

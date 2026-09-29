@@ -53,7 +53,7 @@ vi.mock("../services/cache.service.js", () => ({
 }));
 vi.mock("../services/mqtt.service.js", () => ({ publish: vi.fn() }));
 vi.mock("../config.js", () => ({
-  config: { MAX_UPLOAD_SIZE_MB: 10, NODE_ENV: "test", agentMaxIter: { defaultIter: 5, capIter: 10 } },
+  config: { MAX_UPLOAD_SIZE_MB: 10, NODE_ENV: "test", DROPLET_SHARED_FOLDER_NAME: "Household", agentMaxIter: { defaultIter: 5, capIter: 10 } },
 }));
 vi.mock("../services/nextcloud-session.service.js", () => ({
   resolveNcToken: vi.fn().mockResolvedValue("nc-session-token"),
@@ -181,6 +181,7 @@ function buildApp(opts: {
   const findMany = vi.fn(async () => rows);
   const prismaStub = {
     fileCitation: { findMany: vi.fn().mockResolvedValue([]) },
+    department: { findMany: vi.fn().mockResolvedValue([]) },
     user: {
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
         rows.find((r) => r.id === where.id) ?? null,

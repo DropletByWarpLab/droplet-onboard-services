@@ -15,6 +15,7 @@
  */
 import { confirmationRequired } from "../../confirmation.js";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { refuseUnlessOwnerOrAdmin } from "./owner-admin-only.js";
 
 const inputSchema = {
   type: "object",
@@ -38,6 +39,8 @@ async function handler(
   args: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
+  const denied = refuseUnlessOwnerOrAdmin(ctx); // WARP-3104
+  if (denied) return denied;
   const eventId = typeof args.event_id === "string" ? args.event_id.trim() : "";
   if (eventId.length === 0) {
     return {

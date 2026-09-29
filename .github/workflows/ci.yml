@@ -288,6 +288,18 @@ jobs:
               # the leg that runs it; the leg itself is unchanged in cost.
               - "tests/factory-reset-volume-wipe.test.sh"
               - "tests/factory-reset-purge-scope.test.sh"
+              # WARP-3207: Phase 10 of the live-secrets suite is the code-owned
+              # pin for the compose binds of /var/lib/droplet/tpm and
+              # /var/run/droplet (CODEOWNERS is per file, so the mount lines are
+              # owned through this pin), and it grounds the reset's key file in
+              # the sidecar's EXTENSION_KEY_FILE. A pin that does not run when
+              # the pinned file changes pins nothing, so those three inputs fire
+              # the leg too. Measured on stage over 30 days: 22 merged PRs
+              # touched them without already firing this leg, so at ~3 pushes
+              # per PR and ~1 billable min/run, ~70 min/month.
+              - "docker/docker-compose.yml"
+              - "docker/docker-compose.*.yml"
+              - "services/device-identity-svc/extension_signing.py"
             # WARP-2481: the WARP-229 FIPS static source lint, moved here from
             # test-fips.yml so its result reaches branch protection through
             # ci-summary. This list is the EXACT `paths:` test-fips.yml used
@@ -907,7 +919,8 @@ jobs:
   # pool_destroy invariants. Same suites storage-pool-tests.yml runs on
   # manual dispatch; this leg makes them PR-blocking through ci-summary.
   # Stub-based bash unit tests: <10s total, no root, no disks, no Docker —
-  # ~1 billable min/run, and it triggers only on the five storage paths.
+  # ~1 billable min/run, and it triggers only on detect's `storage` filter
+  # (the reset, its libraries and suites, and the compose files Phase 10 pins).
   storage:
     name: storage / shell unit tests
     needs: detect

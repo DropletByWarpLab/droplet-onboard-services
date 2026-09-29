@@ -458,7 +458,7 @@ describe("rail 1 (OWNER_IMMUTABLE) — every owner-targeting mutation, both surf
     [
       "DELETE /api/auth/users/:username",
       "auth",
-      (app) => request(app).delete(`/api/auth/users/${OWNER.nextcloudUsername}`),
+      (app) => request(app).delete(`/api/auth/users/${OWNER.nextcloudUsername}`).send({ disposition: "retention" }),
     ],
   ];
 
@@ -533,7 +533,7 @@ describe("rail 2 (SELF_ACTION_NOT_ALLOWED) — an operator cannot act on themsel
     ],
     [
       "DELETE /api/auth/users/:username",
-      (app, me) => request(app).delete(`/api/auth/users/${me.nextcloudUsername}`),
+      (app, me) => request(app).delete(`/api/auth/users/${me.nextcloudUsername}`).send({ disposition: "retention" }),
     ],
   ];
 
@@ -954,7 +954,7 @@ describe("every guarded mutation opens its transaction at SERIALIZABLE", () => {
     ],
     [
       "DELETE /api/auth/users/:username",
-      (app) => request(app).delete(`/api/auth/users/${FAMILY.nextcloudUsername}`),
+      (app) => request(app).delete(`/api/auth/users/${FAMILY.nextcloudUsername}`).send({ disposition: "retention" }),
     ],
   ];
 

@@ -23,7 +23,8 @@
  * The copy says plainly that an extension's tools start blocked for the
  * assistant: until an owner reviews a tool as read-only, or the
  * confirm-before-change step for runtime tools exists (WARP-2321), every
- * call is refused at dispatch.
+ * call is refused at dispatch. The review itself is the "Tool reviews"
+ * section (components/admin/extensions/ToolReview.tsx).
  */
 import { useState } from "react";
 import { Puzzle } from "lucide-react";
@@ -32,6 +33,7 @@ import { Card, Row, Sect } from "@/components/shell/primitives";
 import { InstalledList } from "@/components/admin/extensions/InstalledList";
 import { ProposalsList } from "@/components/admin/extensions/ProposalsList";
 import { PromoteReadback } from "@/components/admin/extensions/PromoteReadback";
+import { ToolReviews } from "@/components/admin/extensions/ToolReview";
 import {
   EXTENSIONS_SUB,
   OWNER_ONLY,
@@ -252,6 +254,8 @@ export default function ExtensionsAdminPage() {
           </p>
         </Card>
       ) : null}
+
+      <ToolReviews extensions={ext.extensions} canReview={isOwner} />
     </ShellPage>
   );
 }

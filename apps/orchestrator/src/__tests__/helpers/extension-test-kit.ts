@@ -289,6 +289,14 @@ export function extensionPrisma(
     });
   }
   let seq = 0;
+  /**
+   * WARP-3200 — the workspace row lock a promote's store and an enable's
+   * claim take (workspace-source-guard.service.ts), the only raw SQL this
+   * kit answers. `onWorkspaceLock` runs as the lock is granted: where a
+   * suite lands the delete that committed while the writer waited.
+   */
+  const workspaceLocks: Array<{ id: string; mode: string }> = [];
+  let onWorkspaceLock: ((id: string) => void) | null = null;
   const withVersion = (e: Row | undefined) =>
     e ? { ...e, currentVersion: e.currentVersionId ? (versions.get(e.currentVersionId as string) ?? null) : null } : null;
 
@@ -412,7 +420,16 @@ export function extensionPrisma(
         return u ? { ...u } : null;
       }),
     },
-    $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma)),
+    $queryRaw: vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const sql = strings.join("?").replace(/\s+/g, " ").trim();
+      const m = /^SELECT "id" FROM "WorkshopWorkspace" WHERE "id" = \? (FOR UPDATE|FOR KEY SHARE)$/.exec(sql);
+      if (!m) throw new Error(`extension-test-kit: unsupported raw query: ${sql}`);
+      const id = String(values[0]);
+      workspaceLocks.push({ id, mode: m[1] });
+      onWorkspaceLock?.(id);
+      return workspaces.has(id) ? [{ id }] : [];
+    }),
+    $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>, _options?: unknown) => fn(prisma)),
   };
   return {
     prisma: prisma as unknown as PrismaClient,
@@ -422,6 +439,10 @@ export function extensionPrisma(
     workspaces,
     classifications,
     users,
+    workspaceLocks,
+    setOnWorkspaceLock(fn: typeof onWorkspaceLock) {
+      onWorkspaceLock = fn;
+    },
   };
 }
 

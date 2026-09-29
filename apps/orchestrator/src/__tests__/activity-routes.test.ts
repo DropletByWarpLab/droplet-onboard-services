@@ -6,11 +6,27 @@
  * an offline verifier can replay the chain through.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import {
+  createHash,
+  createPrivateKey,
+  generateKeyPairSync,
+  sign as cryptoSign,
+  verify as cryptoVerify,
+  X509Certificate,
+} from "node:crypto";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import express from "express";
 import request from "supertest";
-import { createActivityRouter } from "../routes/activity.js";
+import {
+  createActivityRouter,
+  type ActivityBundleSealer,
+} from "../routes/activity.js";
 import {
   createHmacSigner,
+  hashSignature,
   _setDefaultSignerForTests,
 } from "../services/audit-signing.service.js";
 import { _setActivityRecorderForTests } from "../services/activity.singleton.js";
@@ -52,7 +68,95 @@ function makeRow(over: Partial<FakeRow>, id: number): FakeRow {
 
 const KEY = Buffer.from("warp-456-test-key-bytes-must-be-long", "utf8");
 
-function makeApp(rows: FakeRow[]) {
+/**
+ * WARP-3153: stand-in for device-identity-svc, with the real key type:
+ * ECDSA P-256, DER signatures (what the sidecar's `Sign` returns). Node
+ * cannot build X.509 certs, so openssl self-signs one, as the sidecar does.
+ */
+const DEVICE = (() => {
+  const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const privatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const dir = mkdtempSync(path.join(tmpdir(), "device-"));
+  writeFileSync(path.join(dir, "key.pem"), privatePem);
+  const certPem = execFileSync(
+    "openssl",
+    ["req", "-x509", "-new", "-key", path.join(dir, "key.pem"), "-subj", "/CN=droplet-test-device", "-days", "30"],
+    { encoding: "utf8" },
+  );
+  return { privatePem, certPem };
+})();
+const FP = `sha256:${createHash("sha256").update(DEVICE.certPem, "utf8").digest("hex")}`;
+const SEAL_PREFIX = "droplet-activity-bundle:v3:";
+
+function deviceSign(payload: Uint8Array) {
+  return { signature: cryptoSign("sha256", payload, DEVICE.privatePem), algorithm: "ECDSA-P256-SHA256" };
+}
+
+const sealer: ActivityBundleSealer = {
+  async getDeviceCert() {
+    return DEVICE.certPem;
+  },
+  async signWithDeviceKey(payload) {
+    return deviceSign(payload);
+  },
+};
+
+/** Replace the bundle's seal line with `edit(seal)`. */
+function editSeal(bundle: string, edit: (seal: any) => void): string {
+  const lines = bundle.trimEnd().split("\n");
+  const seal = JSON.parse(lines.at(-1)!);
+  edit(seal);
+  lines[lines.length - 1] = JSON.stringify(seal);
+  return lines.join("\n") + "\n";
+}
+
+/** Edit one field of the SIGNED statement, keeping the old signature. */
+function editStatement(bundle: string, edit: (stmt: any) => void): string {
+  return editSeal(bundle, (seal) => {
+    const stmt = JSON.parse(seal.statement);
+    edit(stmt);
+    seal.statement = JSON.stringify(stmt);
+  });
+}
+
+const VERIFIER = path.resolve(
+  __dirname,
+  "../../../../scripts/verify-activity-bundle.mjs",
+);
+
+/** Run the shipped offline verifier on a bundle; returns exit code + output. */
+function runVerifier(bundle: string, ...args: string[]) {
+  const file = path.join(mkdtempSync(path.join(tmpdir(), "bundle-")), "b.jsonl");
+  writeFileSync(file, bundle);
+  try {
+    const out = execFileSync(process.execPath, [VERIFIER, file, ...args], {
+      encoding: "utf8",
+    });
+    return { code: 0, out };
+  } catch (e) {
+    const err = e as { status: number; stdout: string };
+    return { code: err.status, out: err.stdout };
+  }
+}
+
+/** Rows genuinely HMAC-chained with KEY, as the recorder writes them. */
+function signedChain(n: number): FakeRow[] {
+  const signer = createHmacSigner(KEY);
+  const rows: FakeRow[] = [];
+  let prev = "";
+  for (let i = 1; i <= n; i++) {
+    const r = makeRow({ prevSignatureHash: prev, what: `event ${i}` }, i);
+    r.signature = signer.sign(
+      { ...r, severity: r.severity, kind: r.kind as "system" },
+      prev,
+    );
+    rows.push(r);
+    prev = hashSignature(r.signature);
+  }
+  return rows;
+}
+
+function makeApp(rows: FakeRow[], bundleSealer: ActivityBundleSealer | null = sealer) {
   const prisma = {
     activityRow: {
       async findMany({ where, orderBy, take }: any) {
@@ -111,7 +215,7 @@ function makeApp(rows: FakeRow[]) {
     (req as any).user = { id: "alice", role: "owner", username: "alice" };
     next();
   });
-  app.use("/api", createActivityRouter(prisma as never));
+  app.use("/api", createActivityRouter(prisma as never, bundleSealer));
   return app;
 }
 
@@ -295,17 +399,16 @@ describe("POST /api/activity/export", () => {
     expect(res.status).toBe(200);
     expect(res.headers["content-type"]).toContain("application/x-ndjson");
     const lines = res.text.trim().split("\n").map((l) => JSON.parse(l));
-    expect(lines).toHaveLength(4); // manifest + 3 rows
-    // WARP-181: rows are now version-tagged (schemaVersion) and carry
-    // actor fields, so the bundle format identifier is bumped — a
-    // v1-only verifier must fail fast at the manifest instead of
-    // reporting false tampering on v2 rows.
-    expect(lines[0].type).toBe("droplet.activity-bundle.v2");
-    expect(lines[0].algorithm).toBe("HMAC-SHA256");
-    expect(lines[0].publicKey).not.toBeNull();
+    expect(lines).toHaveLength(5); // manifest + 3 rows + seal
+    // WARP-3153: v3 = no signing key inside, device-key seal last.
+    expect(lines[0].type).toBe("droplet.activity-bundle.v3");
+    expect(lines[0].rowAlgorithm).toBe("HMAC-SHA256");
+    expect(lines[0].deviceCertPem).toBe(DEVICE.certPem);
     expect(lines[1].id).toBe("1");
     expect(lines[2].id).toBe("2");
     expect(lines[3].id).toBe("3");
+    expect(lines[4].type).toBe("droplet.activity-bundle.v3.seal");
+    expect(JSON.parse(lines[4].statement).rowCount).toBe(3);
   });
 
   it("respects the filter shape in the request body", async () => {
@@ -319,7 +422,7 @@ describe("POST /api/activity/export", () => {
       .send({ kind: "auth" });
     expect(res.status).toBe(200);
     const lines = res.text.trim().split("\n").map((l) => JSON.parse(l));
-    expect(lines).toHaveLength(2); // manifest + 1 row
+    expect(lines).toHaveLength(3); // manifest + 1 row + seal
     expect(lines[1].kind).toBe("auth");
   });
 
@@ -379,7 +482,7 @@ describe("POST /api/activity/export", () => {
       .send({ actorId: "uuid-alice" });
     expect(res.status).toBe(200);
     const lines = res.text.trim().split("\n").map((l) => JSON.parse(l));
-    expect(lines).toHaveLength(2); // manifest + ONLY the v2 row
+    expect(lines).toHaveLength(3); // manifest + ONLY the v2 row + seal
     expect(lines[1].id).toBe("2");
     expect(lines[1].schemaVersion).toBe(2);
   });
@@ -395,23 +498,181 @@ describe("POST /api/activity/export", () => {
       .send({ actorType: "ai" });
     expect(res.status).toBe(200);
     const lines = res.text.trim().split("\n").map((l) => JSON.parse(l));
-    expect(lines).toHaveLength(2); // manifest + 1 row
+    expect(lines).toHaveLength(3); // manifest + 1 row + seal
     expect(lines[1].actorType).toBe("ai");
   });
 
-  it("ships the signer's public bytes so an offline verifier can replay", async () => {
-    const signer = createHmacSigner(KEY);
-    _setActivityRecorderForTests(null, signer);
-    const app = makeApp([makeRow({}, 1)]);
-    const res = await request(app).post("/api/activity/export").send({});
-    const manifest = JSON.parse(res.text.trim().split("\n")[0]!);
-    const publicKey = Buffer.from(manifest.publicKey, "base64");
-    // The HMAC implementation returns the raw key bytes.
-    expect(publicKey.toString("utf8")).toBe(
-      "warp-456-test-key-bytes-must-be-long",
+  // ── WARP-3153: the signing key never leaves the box ──
+
+  it("carries no private key material: no PEM private-key marker, no HMAC key, no device key", async () => {
+    const res = await request(signedApp()).post("/api/activity/export").send({});
+    expect(res.status).toBe(200);
+    const text = res.text;
+    expect(text).not.toMatch(/PRIVATE KEY/);
+    // The HMAC key in every encoding it could plausibly be shipped in.
+    for (const enc of ["utf8", "base64", "base64url", "hex"] as const) {
+      expect(text).not.toContain(KEY.toString(enc));
+    }
+    // The device private key: its PEM body, and the raw P-256 scalar `d`.
+    const derB64 = DEVICE.privatePem.replace(/-----[^-]+-----|\s/g, "");
+    expect(text).not.toContain(derB64);
+    const d = Buffer.from(
+      (createPrivateKey(DEVICE.privatePem).export({ format: "jwk" }) as { d: string }).d,
+      "base64url",
     );
+    for (const enc of ["base64", "base64url", "hex"] as const) {
+      expect(text).not.toContain(d.toString(enc));
+    }
+    expect(JSON.parse(text.split("\n")[0]!)).not.toHaveProperty("publicKey");
+  });
+
+  it("verifies offline with the shipped verifier, with no secret", async () => {
+    const res = await request(signedApp()).post("/api/activity/export").send({});
+    const r = runVerifier(res.text, "--fingerprint", FP);
+    expect(r.out).toContain("OK: 3 row(s)");
+    expect(r.code).toBe(0);
+  });
+
+  it("the seal is an ECDSA P-256 DER signature over the domain prefix + the statement", async () => {
+    const res = await request(signedApp()).post("/api/activity/export").send({});
+    const seal = JSON.parse(res.text.trimEnd().split("\n").at(-1)!);
+    const sig = Buffer.from(seal.signature, "base64");
+    expect(sig[0]).toBe(0x30); // DER SEQUENCE, not raw r||s
+    const key = new X509Certificate(DEVICE.certPem).publicKey;
+    expect(key.asymmetricKeyDetails?.namedCurve).toBe("prime256v1");
+    expect(cryptoVerify("sha256", Buffer.from(SEAL_PREFIX + seal.statement), key, sig)).toBe(true);
+    // Without the prefix the same bytes do not verify: no cross-domain replay.
+    expect(cryptoVerify("sha256", Buffer.from(seal.statement), key, sig)).toBe(false);
+  });
+
+  it("the verifier rejects an edited row, deleted head rows and a wrong device", async () => {
+    const res = await request(signedApp()).post("/api/activity/export").send({});
+
+    const edited = res.text.replace("event 2", "event X");
+    expect(runVerifier(edited, "--fingerprint", FP).out).toContain("digest mismatch");
+
+    // Drop the first row (line 2): the digest no longer matches.
+    const lines = res.text.split("\n");
+    const headless = [lines[0], ...lines.slice(2)].join("\n");
+    const r = runVerifier(headless, "--fingerprint", FP);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("digest mismatch");
+
+    // A forger with their own key can make a self-consistent bundle, but it
+    // does not match the box's fingerprint.
+    expect(runVerifier(res.text, "--fingerprint", "sha256:" + "0".repeat(64)).code).toBe(1);
+  });
+
+  it("every seal field is covered by the signature: tampering any of them fails", async () => {
+    // Start from a bundle whose box-side HMAC check FAILED on one row.
+    const rows = signedChain(3);
+    rows[1]!.what = "rewritten in the database";
+    const res = await request(makeApp(rows)).post("/api/activity/export").send({});
+    const stmt = JSON.parse(JSON.parse(res.text.trimEnd().split("\n").at(-1)!).statement);
+    expect(stmt.rowHmac).toEqual({ checked: 3, failed: 1, failedRowIds: ["2"] });
+    expect(runVerifier(res.text, "--fingerprint", FP).out).toContain("failing its HMAC check");
+
+    const tamperings: Array<(s: any) => void> = [
+      (s) => { s.rowHmac.failed = 0; s.rowHmac.failedRowIds = []; },
+      (s) => { s.rowHmac.checked = 99; },
+      (s) => { s.rowCount = 2; },
+      (s) => { s.digest = "A".repeat(43); },
+      (s) => { s.type = "something.else"; },
+    ];
+    for (const t of tamperings) {
+      const out = runVerifier(editStatement(res.text, t), "--fingerprint", FP);
+      expect(out.code).toBe(1);
+      expect(out.out).toContain("seal signature does not verify");
+    }
+    // Stripping or emptying the signature, or swapping algorithm, never helps.
+    expect(runVerifier(editSeal(res.text, (s) => { s.signature = ""; }), "--fingerprint", FP).code).toBe(1);
+    expect(runVerifier(editSeal(res.text, (s) => { delete s.signature; }), "--fingerprint", FP).code).toBe(1);
+  });
+
+  it("the verifier requires rowHmac.checked to equal the rows in the file", async () => {
+    // A seal the device key really signed, but whose HMAC check doesn't
+    // cover every row in the file.
+    const res = await request(signedApp()).post("/api/activity/export").send({});
+    const lines = res.text.trimEnd().split("\n");
+    const seal = JSON.parse(lines.at(-1)!);
+    const stmt = JSON.parse(seal.statement);
+    stmt.rowHmac.checked = 2;
+    seal.statement = JSON.stringify(stmt);
+    seal.signature = deviceSign(Buffer.from(SEAL_PREFIX + seal.statement)).signature.toString("base64");
+    lines[lines.length - 1] = JSON.stringify(seal);
+    const out = runVerifier(lines.join("\n") + "\n", "--fingerprint", FP);
+    expect(out.code).toBe(1);
+    expect(out.out).toContain("box HMAC check covered 2 row(s)");
+  });
+
+  it("requires --fingerprint unless --no-fingerprint is passed, which warns loudly", async () => {
+    const res = await request(signedApp()).post("/api/activity/export").send({});
+    const bare = runVerifier(res.text);
+    expect(bare.code).toBe(1);
+    expect(bare.out).toContain("no --fingerprint given");
+    const unpinned = runVerifier(res.text, "--no-fingerprint");
+    expect(unpinned.code).toBe(0);
+    expect(unpinned.out).toContain("ORIGIN IS NOT");
+  });
+
+  it("refuses with 503 when the bundle cannot be sealed", async () => {
+    const res = await request(makeApp(signedChain(1), null))
+      .post("/api/activity/export")
+      .send({});
+    expect(res.status).toBe(503);
+  });
+
+  it("refuses with 503 when the device key signs with an empty signature (TPM placeholder)", async () => {
+    const empty: ActivityBundleSealer = {
+      getDeviceCert: sealer.getDeviceCert,
+      async signWithDeviceKey() {
+        return { signature: new Uint8Array(0), algorithm: "ECDSA-P256-SHA256" };
+      },
+    };
+    const res = await request(makeApp(signedChain(1), empty))
+      .post("/api/activity/export")
+      .send({});
+    expect(res.status).toBe(503);
+  });
+
+  it("writes an unsigned seal (which fails verification) if signing breaks mid-export", async () => {
+    for (const late of ["throw", "empty"] as const) {
+      let calls = 0;
+      const recorded: Array<Record<string, unknown>> = [];
+      _setActivityRecorderForTests(
+        {
+          async record(params: Record<string, unknown>) {
+            recorded.push(params);
+            return null;
+          },
+        } as never,
+        createHmacSigner(KEY),
+      );
+      const flaky: ActivityBundleSealer = {
+        getDeviceCert: sealer.getDeviceCert,
+        async signWithDeviceKey(payload) {
+          calls += 1;
+          if (calls === 1) return deviceSign(payload); // the up-front probe
+          if (late === "throw") throw new Error("tpm wedged");
+          return { signature: new Uint8Array(0), algorithm: "ECDSA-P256-SHA256" };
+        },
+      };
+      const res = await request(makeApp(signedChain(2), flaky))
+        .post("/api/activity/export")
+        .send({});
+      await new Promise((r) => setImmediate(r));
+      const seal = JSON.parse(res.text.trimEnd().split("\n").at(-1)!);
+      expect(seal.signature).toBeUndefined();
+      expect(seal.error).toBeDefined();
+      expect(runVerifier(res.text, "--fingerprint", FP).code).toBe(1);
+      expect((recorded[0] as { refs: { sealed: boolean } }).refs.sealed).toBe(false);
+    }
   });
 });
+
+function signedApp() {
+  return makeApp(signedChain(3));
+}
 
 describe("POST /api/activity/export — the export is itself audited", () => {
   /**
@@ -486,6 +747,6 @@ describe("POST /api/activity/export — the export is itself audited", () => {
     const res = await request(app).post("/api/activity/export").send({});
 
     expect(res.status).toBe(200);
-    expect(res.text.trim().split("\n")).toHaveLength(2);
+    expect(res.text.trim().split("\n")).toHaveLength(3);
   });
 });

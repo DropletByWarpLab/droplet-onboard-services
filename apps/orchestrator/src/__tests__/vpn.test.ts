@@ -85,6 +85,9 @@ function createPrismaMock() {
       findUnique: vi.fn(async ({ where }: any) => {
         return rows.find((r) => r.id === where.id) ?? null;
       }),
+      count: vi.fn(async ({ where }: any = {}) =>
+        rows.filter((r) => Object.entries(where ?? {}).every(([k, v]) => r[k] === v)).length,
+      ),
       create: vi.fn(async ({ data }: any) => {
         // publicKey is unique across ALL rows (active + revoked); tag the
         // P2002 with meta.target so isActiveIpViolation() routes it to the
@@ -797,12 +800,10 @@ describe("DELETE /api/vpn/peers/:id", () => {
     expect(res.status).toBe(404);
   });
 
-  it("403s a family-tier caller (WARP-171 — VPN write is owner+admin only)", async () => {
-    // Pre-WARP-171 this test exercised the per-resource ownership
-    // guard ("you can delete YOUR peer but not bob's"). After WARP-171
-    // the route-level guard rejects every family-tier caller at the
-    // door — they don't even reach the ownership check. The 403 still
-    // happens, just from `requireRole("owner", "admin")` instead.
+  it("403s a family-tier caller on a static peer (WARP-171; WARP-3121 only opens OWN overlay devices)", async () => {
+    // Members may revoke their own OVERLAY device (WARP-3121, covered in
+    // vpn-overlay-qr-enroll.test.ts). A static peer — and anyone else's
+    // device — stays owner/admin only.
     const prisma = createPrismaMock();
     prisma.rows.push({
       id: "p1", userId: "bob", deviceLabel: "phone", publicKey: "A=", assignedIp: "10.13.13.5", status: "active", createdAt: new Date(),
@@ -991,6 +992,60 @@ describe("GET /api/vpn/status — interfaceLive / livePeerCount (WARP-2689)", ()
     const res = await request(buildApp(createPrismaMock())).get("/api/vpn/status");
     expect(res.body.interfaceLive).toBeNull();
     expect(res.body.livePeerCount).toBeNull();
+  });
+});
+
+// WARP-3156 — the status read is reconnaissance for an outsider: the LAN
+// address and how many staff devices tunnel in. External guests are refused;
+// members see only their own device count and no box-wide live count.
+describe("GET /api/vpn/status — role scoping (WARP-3156)", () => {
+  function configured() {
+    (openwrt.vpnStatus as any).mockResolvedValue({
+      interface: "wg0",
+      public_key: "PUBKEY=",
+      listen_port: 51820,
+      addresses: ["10.13.13.1/24"],
+      peer_count: 7,
+      interface_live: true,
+      live_peer_count: 5,
+    });
+  }
+
+  it("403s an external guest and says nothing about the network", async () => {
+    configured();
+    const res = await request(
+      buildApp(createPrismaMock(), { username: "gina", role: "guest" }),
+    ).get("/api/vpn/status");
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.body)).not.toMatch(/peerCount|homeEndpointHost|10\.13/);
+    expect(openwrt.vpnStatus).not.toHaveBeenCalled();
+  });
+
+  it("gives a member their OWN active device count, never the box-wide counts", async () => {
+    configured();
+    const prisma = createPrismaMock();
+    prisma.rows.push(
+      { id: "a1", userId: "alice", status: "active" },
+      { id: "a2", userId: "alice", status: "revoked" },
+      { id: "b1", userId: "bob", status: "active" },
+    );
+    const res = await request(
+      buildApp(prisma, { username: "alice", role: "family" }),
+    ).get("/api/vpn/status");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      configured: true,
+      peerCount: 1,
+      livePeerCount: null,
+      endpointHost: null,
+      interfaceLive: true,
+    });
+  });
+
+  it("keeps the box-wide counts for an owner", async () => {
+    configured();
+    const res = await request(buildApp(createPrismaMock())).get("/api/vpn/status");
+    expect(res.body).toMatchObject({ peerCount: 7, livePeerCount: 5 });
   });
 });
 
