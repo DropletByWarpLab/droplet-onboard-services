@@ -652,10 +652,13 @@ person's approval. Source of truth: `apps/orchestrator/src/routes/agent-runs.ts`
 `AgentRunModels.kt`) and iOS (droplet-ios #63, WARP-2914).
 
 **Who.** Every route requires role `owner` or `admin`; any other role gets
-`403 {"error":"Forbidden: role not permitted to use background runs"}`. A person sees
-only their own runs: another person's run id is a `404 {"error":"Run not found"}`, never
-a 403. A native client always acts as itself and never sends `onBehalfOf` (that field is
-for the `_service:mcp` principal acting for a chat user).
+`403 {"error":"Forbidden: role not permitted"}` (or `"Forbidden: no role on session"`)
+from the role gate, before the handler runs. Key on the status: the `error` is a sentence,
+not a slug. A person sees only their own runs: another person's run id is a
+`404 {"error":"Run not found"}`, never a 403. A native client always acts as itself and
+never sends `onBehalfOf` (that field is for the `_service:mcp` principal acting for a chat
+user), so it never sees the two `403`s that only that principal can reach
+(`"Forbidden: role not permitted to use background runs"`, `"Forbidden: no principal to act for"`).
 
 | Method | Path | Body / query | Returns |
 |---|---|---|---|
@@ -711,13 +714,13 @@ terminal. 404 / 403 as above.
 | Status | `error` | Meaning |
 |---|---|---|
 | 404 | `not_found` | no such run (the ownership check's 404 says `"Run not found"` instead; treat both the same) |
-| 403 | `not_owner` | the run belongs to someone else |
+| 403 | `not_owner` | the run belongs to someone else. In practice a client gets the `"Run not found"` 404 instead, because the ownership check already runs first; `not_owner` only fires on a race, so do not build UI for it |
 | 403 | `forbidden_tool_for_role` | the deciding person's role may not approve this tool |
 | 409 | `not_parked` | run is not waiting (already decided, cancelled, or finished): re-read it |
 | 409 | `attribution_failed` | the box could not resolve who is deciding; nothing changed and the run is still parked |
 | 400 | `Invalid decision` (+ `details`) | `decision` is not `approved` or `denied` |
 
-The role gate's 403 is a sentence, not a slug (see above); key on the status.
+The role gate's 403 is a sentence, not a slug (see **Who**, above); key on the status.
 After a successful decision the run is `queued` again and the worker resumes it. There
 is no undo. Do not auto-retry a confirm: re-read the run first.
 
