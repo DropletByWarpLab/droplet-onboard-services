@@ -468,6 +468,7 @@ describe("the source header", () => {
       "incidents",
       "alerts",
       "links",
+      "summaries",
       "patterns",
       "retention",
     ];

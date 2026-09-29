@@ -57,7 +57,6 @@ export const ROUTING_COPY = {
   loadErrorBody: "This doesn't mean nobody is told. Try again in a moment.",
   retry: "Retry",
   loading: "Loading who is told about alerts",
-  roles: { owner: "Owner", admin: "Admin", family: "Family", guest: "Guest" },
 } as const;
 
 /** The page around the panel (a page file may not export its copy). */
