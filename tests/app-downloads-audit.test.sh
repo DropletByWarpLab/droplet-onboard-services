@@ -319,6 +319,27 @@ else
   fail "the label guard accepts anything — it cannot fail"
 fi
 
+# -----------------------------------------------------------------------------
+echo ""
+echo "  -- WARP-3120: clients.lock.json (what the OTA release carries) --"
+# -----------------------------------------------------------------------------
+LOCK="$REPO_ROOT_REAL/data/app-downloads/clients.lock.json"
+if python3 "$REPO_ROOT_REAL/scripts/release/fetch-client-apps.py" --lock "$LOCK" --check >/dev/null 2>&1; then
+  pass "clients.lock.json is a valid lock (fetch-client-apps.py --check)"
+else
+  fail "clients.lock.json is malformed: $(python3 "$REPO_ROOT_REAL/scripts/release/fetch-client-apps.py" --lock "$LOCK" --check 2>&1 | tail -1)"
+fi
+# Flipping macos to `installer` asserts every release carries the DMG, and
+# only the lock makes a release carry it. So the flip can never land ahead of
+# a lock entry (the flip's other precondition, build-iso staging from the
+# lock, is WARP-3174; see EXPECTED).
+lock_pins_macos="$(python3 -c 'import json,sys; print(any(c.get("platform")=="macos" for c in json.load(open(sys.argv[1]))["clients"]))' "$LOCK" 2>/dev/null)"
+if grep -Eq '^macos[[:space:]]+installer' "$REAL_EXPECTED" && [ "$lock_pins_macos" != "True" ]; then
+  fail "EXPECTED says macos installer but clients.lock.json pins no macos build"
+else
+  pass "EXPECTED's macos policy does not run ahead of clients.lock.json"
+fi
+
 echo ""
 echo "  ------------------------------------------------"
 if [ "$FAILURES" -eq 0 ]; then

@@ -12,15 +12,10 @@
   gap: 14px;
 }
 
-/* The detected platform leads. A soft brand wash + ring is enough to
-   draw the eye without shouting — the Badge already names it. */
+/* The detected platform leads. A brand ring is enough to draw the eye
+   without shouting — the Badge already names it. */
 .dl-card-rec {
   border-color: var(--brand);
-  background: linear-gradient(
-    180deg,
-    var(--brand-subtle) 0%,
-    var(--card-bg) 46%
-  );
 }
 
 .dl-rec {

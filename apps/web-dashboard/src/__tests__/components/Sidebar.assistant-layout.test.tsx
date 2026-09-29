@@ -71,7 +71,11 @@ describe("<Sidebar> under the assistant layout (WARP-3062)", () => {
     const overview = within(rail).getByRole("link", { name: /overview/i });
     expect(overview).toHaveAttribute("href", "/overview");
     expect(overview).toHaveAttribute("aria-current", "page");
-    expect(within(rail).queryAllByRole("link").some((a) => a.getAttribute("href") === "/")).toBe(false);
+    // The brand mark (stage #2415) still leads home to `/`; no nav entry does.
+    const navLinks = within(rail)
+      .queryAllByRole("link")
+      .filter((a) => !/^Droplet\b.*home$/.test(a.getAttribute("aria-label") ?? ""));
+    expect(navLinks.some((a) => a.getAttribute("href") === "/")).toBe(false);
   });
 
   it("keeps Overview's slot in the phone tab bar, at /overview", () => {

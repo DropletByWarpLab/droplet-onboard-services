@@ -135,9 +135,66 @@ class TestWarmUp:
         # cleanly (never touch them) so a dev box does no pointless work.
         tts = MockTTS()
         stt = MockSTT()
-        main._warm_up_upstreams(stt, tts)
+        pipeline = _RecordingPipeline()
+        main._warm_up_upstreams(stt, tts, pipeline)
         assert tts.texts_received == []
         assert stt.sessions_opened == 0
+        assert pipeline.primed == 0  # no cue synthesis on a __mock__ box
+
+
+# ── spoken-cue cache (WARP-3124) ─────────────────────────────────────
+
+class _RecordingPipeline:
+    """Duck-type of WakePipeline.prime_cues."""
+
+    def __init__(self, raises: bool = False):
+        self._raises = raises
+        self.primed = 0
+
+    def prime_cues(self) -> int:
+        self.primed += 1
+        if self._raises:
+            raise RuntimeError("cue synth blew up")
+        return 2
+
+
+class TestWarmUpPrimesCues:
+    def test_primes_the_cue_cache_once_after_the_tts_warm_up(self):
+        tts = _RecordingTTS()
+        pipeline = _RecordingPipeline()
+        main._warm_up_upstreams(_RecordingSTT(), tts, pipeline)
+        assert pipeline.primed == 1
+        assert len(tts.synth_calls) == 1  # the voice warm-up itself
+
+    def test_cues_prime_after_the_stt_warm_up(self):
+        # Every first utterance needs STT warm; only a tool or cold-model
+        # turn needs a cue, so the cue synths must not delay the STT warm-up.
+        stt = _RecordingSTT()
+        stt_finished_at_prime: list[int] = []
+
+        class _OrderPipeline(_RecordingPipeline):
+            def prime_cues(self) -> int:
+                stt_finished_at_prime.append(stt.finished)
+                return super().prime_cues()
+
+        main._warm_up_upstreams(stt, _RecordingTTS(), _OrderPipeline())
+        assert stt_finished_at_prime == [1]
+
+    def test_cue_priming_failure_is_non_fatal(self):
+        stt = _RecordingSTT()
+        main._warm_up_upstreams(stt, _RecordingTTS(), _RecordingPipeline(raises=True))
+        # A cue failure must not stop STT from warming.
+        assert stt.sessions == 1
+
+    def test_no_pipeline_is_fine(self):
+        main._warm_up_upstreams(_RecordingSTT(), _RecordingTTS(), None)
+
+    def test_skips_cues_when_tts_unreachable(self):
+        pipeline = _RecordingPipeline()
+        main._warm_up_upstreams(
+            _RecordingSTT(), _RecordingTTS(available=False), pipeline,
+        )
+        assert pipeline.primed == 0
 
 
 # ── shutdown closes the pooled clients (WARP-1433) ──────────────────

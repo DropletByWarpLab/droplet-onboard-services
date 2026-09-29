@@ -33,10 +33,6 @@ export function InterviewIntroCard({
       data-testid="interview-intro-card"
       className="relative max-w-[640px] mx-auto text-center px-4 py-8"
     >
-      <div
-        aria-hidden="true"
-        className="aurora-bg absolute inset-0 opacity-55 pointer-events-none rounded-2xl"
-      />
       <div className="relative space-y-4">
         <div className="mx-auto w-10 h-10 text-accent" aria-hidden="true">
           <Sparkles size={40} />

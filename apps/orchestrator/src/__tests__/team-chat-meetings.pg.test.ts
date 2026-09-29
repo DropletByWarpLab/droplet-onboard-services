@@ -17,7 +17,8 @@
  *                  NotificationLog row; a stale meeting gets the explicit
  *                  not_needed terminal with no message;
  *   acting user  — the `_service:mcp` principal + X-Droplet-User resolves
- *                  against the REAL directory: messages attribute to the
+ *                  against the REAL directory, named by username (stdio)
+ *                  or by User.id (HTTP, WARP-3187): messages attribute to the
  *                  forwarded human's User.id; a human session's header is
  *                  IGNORED; a deactivated forwarded identity 401s; a
  *                  forwarded non-participant gets the same 404 a human
@@ -434,5 +435,49 @@ describe.skipIf(!RUN)("team chat meetings — real Postgres (WARP-1685)", () => 
       .send({ kind: "text", body: "trying to be alice" });
     expect(spoof.status).toBe(201);
     expect(spoof.body.message.senderId).toBe(bob.id);
+  });
+
+  // WARP-3187 — over the mcp-server's HTTP transport both headers carry the
+  // User.id (`claims.sub`), not the username. The real directory resolves it,
+  // and the calendar mirror still lands on the organizer's USERNAME, never on
+  // the UUID the header carried.
+  it("service path named by User.id (HTTP transport) attributes to the same human; the calendar mirror keys on their username", async () => {
+    const alice = await mkUser("alice", "family");
+    const bob = await mkUser("bob", "family");
+    const ghost = await mkUser("ghost", "family", "DEACTIVATED");
+    const threadId = await mkDirectThread(alice, bob);
+    expect(alice.id).not.toBe(alice.username);
+
+    const mcpApp = buildApp(MCP);
+
+    const sent = await request(mcpApp)
+      .post(`/api/team-chat/threads/${threadId}/messages`)
+      .set("X-Nextcloud-User", alice.id)
+      .set("X-Droplet-User", alice.id)
+      .send({ kind: "text", body: "assistant over HTTP, on Alice's behalf" });
+    expect(sent.status).toBe(201);
+    expect(sent.body.message.senderId).toBe(alice.id);
+
+    const meeting = await request(mcpApp)
+      .post(`/api/team-chat/threads/${threadId}/meetings`)
+      .set("X-Nextcloud-User", bob.id)
+      .set("X-Droplet-User", bob.id)
+      .send({
+        title: `${PREFIX}via-http`,
+        startsAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+      });
+    expect(meeting.status).toBe(201);
+    expect(meeting.body.meeting.createdById).toBe(bob.id);
+    const event = await prisma.calendarEvent.findUnique({
+      where: { id: meeting.body.meeting.calendarEventId },
+    });
+    expect(event).toMatchObject({ userId: bob.username });
+
+    const dead = await request(mcpApp)
+      .post(`/api/team-chat/threads/${threadId}/messages`)
+      .set("X-Nextcloud-User", ghost.id)
+      .set("X-Droplet-User", ghost.id)
+      .send({ kind: "text", body: "from beyond, over HTTP" });
+    expect(dead.status).toBe(401);
   });
 });

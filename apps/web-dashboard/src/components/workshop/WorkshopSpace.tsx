@@ -270,6 +270,22 @@ export function WorkshopSpace() {
     composerRef.current?.focus();
   };
 
+  // The owner deleted a custom tool from its pane: nothing may keep pointing
+  // at it — the rail, the pane (and its drawer), the composer, the URL. Its
+  // runs stay; the FK is ON DELETE SET NULL, so they are re-read to drop the
+  // workspace they no longer name, and so is the open run when it was one.
+  const removeWorkspace = (w: { id: string; name: string }) => {
+    setWorkspaces((cur) => cur?.filter((x) => x.id !== w.id) ?? cur);
+    setSelectedWorkspaceId((cur) => (cur === w.id ? null : cur));
+    setComposeWorkspaceId((cur) => (cur === w.id ? "" : cur));
+    setContextOpen(false);
+    setComposerStatus({ text: `Deleted "${w.name}".` });
+    void loadWorkspaces();
+    void loadRuns();
+    if (selectedRef.current && detail?.workspaceId === w.id) void loadDetail(selectedRef.current);
+    composerRef.current?.focus();
+  };
+
   const removeSchedule = async (id: string) => {
     setScheduleBusy(true);
     try {
@@ -334,6 +350,7 @@ export function WorkshopSpace() {
           selectRun(id);
           setContextOpen(false);
         }}
+        onDeleted={removeWorkspace}
       />
     ) : null;
 

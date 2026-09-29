@@ -293,6 +293,118 @@ else
   fail "the copy-honesty grep does not match the claim it exists to catch"
 fi
 
+# --- WARP-3174: stage-lock.sh (the image build's lock staging) ---------------
+# A fake `gh` plays `gh release download` (copies $FAKE_ASSET to <dir>/<pattern>)
+# and `gh auth token` (prints $FAKE_GH_AUTH), so the real fetch-client-apps.py
+# and stage.mjs both run. Every call is logged, to prove an empty lock makes none.
+STAGE_LOCK="$REPO_ROOT_REAL/scripts/app-downloads/stage-lock.sh"
+if command -v python3 >/dev/null 2>&1 && [ -f "$STAGE_LOCK" ]; then
+  LK="$WORK/lock"; mkdir -p "$LK/bin"
+  cat > "$LK/bin/gh" <<'GH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_GH_LOG"
+if [ "$1" = auth ]; then printf '%s' "$FAKE_GH_AUTH"; exit 0; fi
+while [ $# -gt 0 ]; do
+  case "$1" in -p) pat="$2"; shift 2 ;; -D) dir="$2"; shift 2 ;; *) shift ;; esac
+done
+cp "$FAKE_ASSET" "$dir/$pat"
+GH
+  chmod +x "$LK/bin/gh"
+  printf 'a notarized dmg, honestly' > "$LK/asset"
+  sha="$(node -e "process.stdout.write(require('crypto').createHash('sha256').update(require('fs').readFileSync(process.argv[1])).digest('hex'))" "$LK/asset")"
+  size="$(wc -c < "$LK/asset" | tr -d ' ')"
+  write_lock() { # <file> <clients json>
+    printf '{"schemaVersion":1,"clients":%s}\n' "$2" > "$1"
+  }
+  mac_entry() { # <sha256>
+    printf '[{"platform":"macos","version":"0.2.0","source":{"repo":"DropletByWarpLab/DropletAgent","tag":"mac-v0.2.0"},"file":"Droplet-0.2.0.dmg","size":%s,"sha256":"%s"}]' "$size" "$1"
+  }
+  run_lock() { # <lock> <root> [GH_TOKEN] [auth token]
+    rm -f "$LK/gh.log"
+    PATH="$LK/bin:$PATH" GH_TOKEN="${3-}" DROPLET_CLIENT_APPS_TOKEN="" FAKE_GH_AUTH="${4-}" \
+      FAKE_ASSET="$LK/asset" FAKE_GH_LOG="$LK/gh.log" \
+      bash "$STAGE_LOCK" --lock "$1" --dir "$2" >"$WORK/out.txt" 2>"$WORK/err.txt"
+  }
+
+  write_lock "$LK/empty.json" '[]'
+  R="$WORK/lock-empty"; mkdir -p "$R"
+  if run_lock "$LK/empty.json" "$R" && [ ! -e "$R/catalog.json" ] && [ ! -e "$LK/gh.log" ]; then
+    pass "stage-lock: an empty lock stages nothing and calls no gh (no token needed)"
+  else
+    fail "stage-lock: an empty lock did something"; cat "$WORK/err.txt"
+  fi
+
+  write_lock "$LK/mac.json" "$(mac_entry "$sha")"
+  R="$WORK/lock-mac"; mkdir -p "$R"
+  if run_lock "$LK/mac.json" "$R" "t0ken" \
+     && [ -f "$R/macos/Droplet-0.2.0.dmg" ] \
+     && [ "$(node -e "const c=require(process.argv[1]);const m=c.platforms.find(p=>p.platform==='macos');process.stdout.write(m.version+' '+m.primary+' '+m.assets[0].sha256)" "$R/catalog.json")" = "0.2.0 Droplet-0.2.0.dmg $sha" ]; then
+    pass "stage-lock: a pinned macos entry is fetched, verified and staged into the catalog"
+  else
+    fail "stage-lock: a pinned macos entry was not staged"; cat "$WORK/err.txt"
+  fi
+
+  R="$WORK/lock-auth"; mkdir -p "$R"
+  if run_lock "$LK/mac.json" "$R" "" "builder-token" && [ -f "$R/macos/Droplet-0.2.0.dmg" ] \
+     && grep -q '^auth token' "$LK/gh.log"; then
+    pass "stage-lock: with no GH_TOKEN it falls back to the builder's gh auth token"
+  else
+    fail "stage-lock: no fallback to gh auth token"; cat "$WORK/err.txt"
+  fi
+
+  R="$WORK/lock-notoken"; mkdir -p "$R"
+  if ! run_lock "$LK/mac.json" "$R" "" "" && [ ! -e "$R/catalog.json" ] \
+     && grep -q 'DROPLET_CLIENT_APPS_TOKEN' "$WORK/err.txt"; then
+    pass "stage-lock: a pinned entry with no token fails closed, with the reason"
+  else
+    fail "stage-lock: a pinned entry with no token did not fail closed"; cat "$WORK/err.txt"
+  fi
+
+  write_lock "$LK/bad.json" "$(mac_entry "$(printf '0%.0s' $(seq 64))")"
+  R="$WORK/lock-bad"; mkdir -p "$R"
+  if ! run_lock "$LK/bad.json" "$R" "t0ken" && [ ! -e "$R/catalog.json" ] && [ ! -e "$R/macos" ] \
+     && grep -q 'sha256' "$WORK/err.txt"; then
+    pass "stage-lock: a sha256 mismatch fails and stages nothing"
+  else
+    fail "stage-lock: a sha256 mismatch was staged"; cat "$WORK/err.txt"
+  fi
+
+  write_lock "$LK/broken.json" '"nope"'
+  if ! run_lock "$LK/broken.json" "$WORK/lock-broken" "t0ken" && [ ! -e "$LK/gh.log" ]; then
+    pass "stage-lock: a malformed lock fails before any download"
+  else
+    fail "stage-lock: a malformed lock was accepted"
+  fi
+else
+  fail "stage-lock: python3 and scripts/app-downloads/stage-lock.sh are required"
+fi
+
+# The wiring: build-iso must stage the lock, audit the root the image carries
+# (not the checkout, which never reaches a box), and put that root in the ISO;
+# the autoinstall must copy it into the clone. Text checks: build-iso itself
+# only runs on a Linux host with docker and a 3 GB download.
+BUILD_ISO="$REPO_ROOT_REAL/scripts/image/build-iso.sh"
+USER_DATA="$REPO_ROOT_REAL/scripts/image/autoinstall/user-data"
+lock_line="$(grep -n 'stage-lock.sh' "$BUILD_ISO" | head -1 | cut -d: -f1)"
+audit_line="$(grep -n 'bash "\$AUDIT_SH" --dir' "$BUILD_ISO" | head -1 | cut -d: -f1)"
+if [ -n "$lock_line" ] && [ -n "$audit_line" ] && [ "$lock_line" -lt "$audit_line" ]; then
+  pass "build-iso stages the lock before its pre-flight audit"
+else
+  fail "build-iso does not stage clients.lock.json before the audit"
+fi
+if grep -q 'bash "\$AUDIT_SH" --dir "\$APP_DOWNLOADS_ROOT"' "$BUILD_ISO" \
+   && grep -q -- '-map /app-downloads /server/app-downloads' "$BUILD_ISO" \
+   && grep -q '"\${APP_DOWNLOADS_ROOT}:/app-downloads:ro"' "$BUILD_ISO"; then
+  pass "build-iso audits the staging root it maps into the ISO"
+else
+  fail "build-iso audits one root and ships another (or ships none)"
+fi
+if grep -q 'cp -rn /cdrom/server/app-downloads/. /target/home/droplet/edge-platform/data/app-downloads/' "$USER_DATA"; then
+  pass "the autoinstall copies the ISO's staging root into the clone"
+else
+  fail "the autoinstall never copies the ISO's installers into the clone"
+fi
+
 echo ""
 echo "  ------------------------------------------------"
 if [ "$FAILURES" -eq 0 ]; then
