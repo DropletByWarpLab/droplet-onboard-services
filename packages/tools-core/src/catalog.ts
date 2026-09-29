@@ -85,7 +85,13 @@ export type ToolDomain =
   // WARP-2896 (ADR-056 §6.2) — the workshop's workspace tools. Its own
   // domain: they are reachable inside a workshop run only, and the run
   // worker admits them structurally (agent-run-worker WORKSPACE_TOOLS).
-  | "workspace";
+  | "workspace"
+  // WARP-2979 (ADR-059 P4 §6.12) — the Security command center's READ-ONLY
+  // tools. Slug matches the `security` ModuleId, which claims it, so the
+  // module toggle and the per-person Security level gate the domain. It never
+  // holds a write or confirming tool (the registry pin), and it is withheld
+  // from every cloud turn (the orchestrator's OFF_LAN_WITHHELD_DOMAINS).
+  | "security";
 
 export interface ToolCatalogEntry {
   name: string;
@@ -290,6 +296,8 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "workspace_run",
     "workspace_propose",
   ],
+  // WARP-2979 — four reads, and only reads.
+  security: ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status"],
   system: [
     "get_system_health",
     "get_gpu_status",
@@ -530,6 +538,11 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   workspace_commit: "Save a version of the extension being built",
   workspace_run: "Run the extension's tests, build or checks",
   workspace_propose: "Hand the finished extension to you for review",
+  // WARP-2979 (ADR-059 P4 §6.12.3) — Security, read-only.
+  security_list_incidents: "See what Security flagged, like someone inside after hours",
+  security_get_incident: "Open one Security incident and see why it was flagged",
+  security_search_events: "Look back through camera activity",
+  security_zone_status: "Check which areas are covered and which cameras are reporting",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns

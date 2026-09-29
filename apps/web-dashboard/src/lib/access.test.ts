@@ -175,6 +175,14 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
     expect(cal.domains).toEqual(["calendar", "reminders", "notifications"]);
   });
 
+  it("WARP-2979: Security is its own on-box row, gated by the Security feature", () => {
+    // Effective access counts only GRANTED domains (effective-access.service.ts),
+    // so without this row no custom role could ever be given the Security tools.
+    // MUTATION: drop the row, or its feature -> red.
+    const security = TOOL_DOMAIN_GROUPS.find((g) => g.id === "security")!;
+    expect(security).toMatchObject({ label: "Security", domains: ["security"], feature: "security" });
+  });
+
   it("business is its own on-box row, and System no longer carries it (WARP-2583)", () => {
     // ADR-045 collapsed every PM and CRM tool into the `business` domain. The
     // Projects row used to write the `pm` grant — empty since — while

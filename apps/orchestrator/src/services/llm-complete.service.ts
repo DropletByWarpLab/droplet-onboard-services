@@ -61,6 +61,14 @@ export interface CompleteOnceArgs {
    * the request body stays byte-for-byte what it was.
    */
   reasoningEffort?: "low" | "medium" | "high";
+  /**
+   * WARP-2979 — an explicit gateway provider (`"local"` = the on-box runtime).
+   * Sent as the request's `provider`, so the gateway routes by it and never by
+   * the model name's prefix: a locally served model called gpt-* or claude-*
+   * would otherwise resolve to a cloud provider. Unset → the key is never sent
+   * and the request body stays byte-for-byte what it was.
+   */
+  provider?: string;
 }
 
 export interface CompleteOnceResult {
@@ -107,6 +115,7 @@ export async function completeOnce(
         temperature: args.temperature ?? DEFAULT_TEMPERATURE,
         max_tokens: args.maxTokens ?? DEFAULT_MAX_TOKENS,
         ...(args.reasoningEffort ? { reasoning_effort: args.reasoningEffort } : {}),
+        ...(args.provider ? { provider: args.provider } : {}),
         // NO `tools` / `tool_choice` — this call path is non-agentic by
         // contract; nothing here may ever advertise a tool to the model.
       },
