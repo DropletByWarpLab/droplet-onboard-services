@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import { archivedZoneIdOf, translateError, type ErrorDomain } from "@/lib/friendly-errors";
-import type { SecurityErrorCode } from "@/lib/types";
+import type { DoorsErrorCode, SecurityErrorCode } from "@/lib/types";
 
 /**
  * WARP-294 — Tests for the typed-error → friendly-copy translator.
@@ -50,6 +50,8 @@ const DOMAINS: ErrorDomain[] = [
   "search-semantic",
   // WARP-2977 P2b — the Security pages' writes (mode, opening hours, areas).
   "security",
+  // ADR-055 P4b — the /doors page.
+  "doors",
   "generic",
 ];
 
@@ -946,5 +948,64 @@ describe("translateError — security incidents and alert routing (WARP-2978)", 
       expect(copy(code, 503), code).toMatch(/can't|couldn't/i);
       expect(copy(code, 503), code).not.toMatch(/nothing (happened|to show)|quiet/i);
     }
+  });
+});
+
+// ADR-055 P4b — the /doors page's reads and owner-only writes. Every typed code
+// the doors routes answer with has its own copy; a role refusal and a module
+// refusal carry no typed code (a flat body), so they are keyed on the status.
+describe("translateError — doors domain (ADR-055 P4b)", () => {
+  const CODES = [
+    "INVALID_NAME",
+    "DOOR_NOT_FOUND",
+    "DOOR_RETIRED",
+    "VALIDATION_ERROR",
+    "DOORS_UNAVAILABLE",
+  ] as const satisfies readonly DoorsErrorCode[];
+  // Exhaustive at compile time (the dashboard tsc lane type-checks tests): a
+  // code added to DoorsErrorCode without copy here fails the build.
+  type Uncovered = Exclude<DoorsErrorCode, (typeof CODES)[number]>;
+  const everyCodeListed: [Uncovered] extends [never] ? true : Uncovered = true;
+  void everyCodeListed;
+  const fallback = translateError({ code: "TOTALLY_UNKNOWN_CODE" }, "doors");
+
+  it("every typed code the doors routes answer with has its own copy, and never the server's message", () => {
+    for (const code of CODES) {
+      const copy = translateError({ code, status: 409, message: SECRET }, "doors");
+      expect(copy, code).not.toBe(fallback);
+      expect(copy, code).not.toContain(SECRET);
+    }
+  });
+
+  it("a 403 (a role refusal, flat body, no code) names who can change doors", () => {
+    const copy = translateError({ status: 403, message: SECRET }, "doors");
+    expect(copy).toBe("Only the owner can add, change or retire doors.");
+    expect(copy).not.toBe(fallback);
+  });
+
+  it("a 404 (a module refusal, flat body, no code) is not a retry", () => {
+    const copy = translateError({ status: 404, message: SECRET }, "doors");
+    expect(copy).not.toBe(fallback);
+    expect(copy).not.toMatch(/try again/i);
+    expect(translateError({ code: "module_disabled" }, "doors")).toBe(copy);
+  });
+
+  it("a retired door says it can't be changed, and an unavailable read says it is not the same as no doors", () => {
+    expect(translateError({ code: "DOOR_RETIRED" }, "doors")).toMatch(/retired/);
+    expect(translateError({ code: "DOORS_UNAVAILABLE" }, "doors")).toMatch(/not the same as there being none/);
+  });
+
+  it("the copy promises nothing: no alarm, no watching, no locked doors, no safety", () => {
+    const banned = /monitor|armed|\barm\b|alarm|\bsecure\b|protected|guard|\ball\s+locked\b|\b(?:un)?locked\b|\bsafe(?:ty|ly)?\b|\balert/i;
+    for (const code of [...CODES, "401", "403", "404", "409", "429", "module_disabled", "NETWORK", "NETWORK_ERROR", "TIMEOUT", "TOTALLY_UNKNOWN_CODE"]) {
+      expect(translateError({ code }, "doors"), code).not.toMatch(banned);
+    }
+    expect(fallback).not.toMatch(banned);
+  });
+
+  it("a 401 that survives the token refresh says nothing changed, and never that the session ended", () => {
+    const copy = translateError({ status: 401 }, "doors");
+    expect(copy).toMatch(/nothing was changed/);
+    expect(copy).not.toMatch(/session (has )?ended|signed out|logged out/i);
   });
 });

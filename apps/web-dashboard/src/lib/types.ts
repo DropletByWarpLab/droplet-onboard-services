@@ -1497,7 +1497,9 @@ export type AccessModuleId =
   /** WARP-2581 — invoices and bills landed from a cloud ledger. */
   | "money"
   /** WARP-2977 — the Security command center (ADR-059). */
-  | "security";
+  | "security"
+  /** ADR-055 — the doors this box knows about. Ships dark (DOORS_ENABLED). */
+  | "doors";
 
 export interface AccessRoleFeatureGrant {
   moduleId: AccessModuleId;
@@ -4391,3 +4393,96 @@ export interface NotificationAckAllResult {
   acked: number;
   unread: number;
 }
+
+// ── ADR-055 P4b: the doors page (routes /api/doors/*, ADR-055 P4a) ──
+
+/** Where a door's open/closed report comes from (AccessPoint.doorPositionSource). */
+export type DoorPositionSource = "lock" | "dp1" | "none";
+
+/**
+ * What the newest position report says. `unknown` is "no report yet" or "the
+ * door's device stopped reporting" — never closed. `not_monitored` is a door
+ * with no position source. The server never ages a report into `unknown`
+ * itself: that waits for link supervision, so a position is always the LAST
+ * report, and `positionSince` is how old it is.
+ */
+export type DoorPosition = "open" | "closed" | "unknown" | "not_monitored";
+
+/** Which forced-door claim a door can make; null when it can make none (§9.7). */
+export type DoorForcedClaim = "latch_witnessed" | "unwitnessed_open";
+
+export interface DoorView {
+  id: string;
+  name: string;
+  doorPositionSource: DoorPositionSource;
+  heldOpenSeconds: number;
+  status: "active" | "retired";
+  retiredAt: string | null;
+  position: DoorPosition;
+  /** When the newest position report happened. Null when none has, and for a `none` door. */
+  positionSince: string | null;
+  claims: { forcedDoor: DoorForcedClaim | null; heldOpen: boolean };
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** GET /api/doors[?include=retired]. */
+export interface DoorsResponse {
+  doors: DoorView[];
+}
+
+/** The fourteen AccessEvent kinds (brief §11.3). */
+export type DoorEventKind =
+  | "door_open"
+  | "door_closed"
+  | "latch_retracted"
+  | "latch_extended"
+  | "bolt_thrown"
+  | "bolt_withdrawn"
+  | "rex"
+  | "key_override"
+  | "unlock_granted"
+  | "unlock_denied"
+  | "forced_door"
+  | "held_open"
+  | "tamper"
+  | "trouble";
+
+export interface DoorEventView {
+  id: string;
+  doorId: string;
+  doorName: string;
+  kind: DoorEventKind;
+  /** When the DEVICE says it happened. */
+  occurredAt: string;
+  forcedClaim: DoorForcedClaim | null;
+  troubleCode: "position_unknown" | null;
+  derivedFromId: string | null;
+  correlationKey: string | null;
+}
+
+/** GET /api/doors/events. `nextCursor` is null on the last page. */
+export interface DoorEventsPage {
+  events: DoorEventView[];
+  nextCursor: string | null;
+}
+
+/** POST /api/doors (owner only). */
+export interface DoorCreateBody {
+  name: string;
+  doorPositionSource: DoorPositionSource;
+}
+
+/** PATCH /api/doors/:id (owner only) — at least one field. */
+export interface DoorPatchBody {
+  name?: string;
+  doorPositionSource?: DoorPositionSource;
+}
+
+/** The `error.code`s the doors routes answer with. */
+export type DoorsErrorCode =
+  | "INVALID_NAME"
+  | "DOOR_NOT_FOUND"
+  | "DOOR_RETIRED"
+  | "VALIDATION_ERROR"
+  | "DOORS_UNAVAILABLE";

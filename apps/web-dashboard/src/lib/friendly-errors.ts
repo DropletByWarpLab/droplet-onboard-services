@@ -82,6 +82,11 @@ export type ErrorDomain =
   // `error.code`s for routes 3–15, so the copy can say exactly what happened
   // (someone else changed it, the change could not be recorded, …).
   | "security"
+  // ADR-055 P4b — the /doors page's writes (add, change, retire a door) and its
+  // reads. Every code is one of the orchestrator's typed `error.code`s for the
+  // doors routes, plus the statuses of a role or module refusal, which carry no
+  // typed code (a flat `{error: "..."}` body).
+  | "doors"
   | "generic";
 
 /** Domain-fallback copy. NEVER `err.message`. */
@@ -158,6 +163,10 @@ const FALLBACK: Record<ErrorDomain, string> = {
   // it (the typed codes below); an unknown failure might have landed.
   security:
     "We couldn't make that change right now. Refresh the page to see where things stand, then try again.",
+  // ADR-055 P4b. Says nothing was changed only where the server guarantees it
+  // (the typed codes below); an unknown failure might have landed.
+  doors:
+    "We couldn't make that change to your doors. Refresh the page to see where things stand, then try again.",
   generic:
     "We couldn't reach this Droplet right now. Try again in a moment.",
 };
@@ -798,6 +807,32 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     // so the copy doesn't hang on inferCodeFromMessage matching the browser's
     // wording ("Failed to fetch" in Chrome, "NetworkError …" in Firefox,
     // "Load failed" in Safari — which matches nothing).
+    NETWORK_ERROR:
+      "We can't reach this Droplet right now. Check the connection and try again.",
+    TIMEOUT: "That took too long. Refresh the page to see whether it went through.",
+  },
+  // ADR-055 P4b — the doors routes (P4a). Writes are the owner's alone, so a
+  // 403 names who can, without saying whether the person is the owner: the
+  // same page is read by admins too. None of this promises a door is watched.
+  doors: {
+    INVALID_NAME:
+      "A door's name needs 1 to 80 characters, with no line breaks or hidden characters. Nothing was changed.",
+    VALIDATION_ERROR: "Some of that isn't quite right. Check what you entered and try again.",
+    DOOR_NOT_FOUND: "That door isn't there any more. Refresh the page.",
+    DOOR_RETIRED: "That door is retired, so it can't be changed.",
+    DOORS_UNAVAILABLE:
+      "Droplet couldn't read its doors just now. This is not the same as there being none. Try again in a moment.",
+    // A role refusal (requireRole) answers a flat 403 with no typed code.
+    "403": "Only the owner can add, change or retire doors.",
+    // A route-level module gate answers 404 module_disabled (also a flat body):
+    // Doors was switched off, or this person's access changed, under the page.
+    module_disabled: "You can't do that any more. Refresh the page.",
+    "404": "You can't do that any more. Refresh the page.",
+    "401": "Droplet couldn't confirm you're signed in, so nothing was changed. Try again, and sign in again if this keeps happening.",
+    "409": "Someone else changed this just now. Refresh the page and try again.",
+    "429": "That's a lot of changes at once. Wait a moment and try again.",
+    NETWORK:
+      "We can't reach this Droplet right now. Check the connection and try again.",
     NETWORK_ERROR:
       "We can't reach this Droplet right now. Check the connection and try again.",
     TIMEOUT: "That took too long. Refresh the page to see whether it went through.",
