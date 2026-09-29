@@ -909,11 +909,29 @@ else
 fi
 
 EXT_GATE_LINE="$(printf '%s\n' "$CODE_NUM" | grep -E '^[0-9]+:if ! secw_verify_extension_key_rotated "\$DROPLET_TPM_DIR"; then$' | head -n 1 | cut -d: -f1 || true)"
-if [ -n "$EXT_GATE_LINE" ] \
-   && sed -n "${EXT_GATE_LINE},$((EXT_GATE_LINE + 12))p" "$RESET" | grep -qE '^[[:space:]]*exit 1$'; then
+# The gate's whole `if ... fi` (up to the first column-0 `fi`), comments stripped.
+EXT_GATE_BLOCK=""
+if [ -n "$EXT_GATE_LINE" ]; then
+  EXT_GATE_BLOCK="$(awk -v s="$EXT_GATE_LINE" 'NR >= s { print; if (NR > s && /^fi$/) exit }' "$RESET" \
+    | grep -vE '^[[:space:]]*#' || true)"
+fi
+if [ "$(awk '/SURVIVED/ { s = 1 } s && /^[[:space:]]*exit 1$/ { ok = 1 } END { print ok ? "yes" : "no" }' <<<"$EXT_GATE_BLOCK")" = "yes" ]; then
   pass "a surviving extension key ABORTS the reset (exit 1)"
 else
   fail "the reset does not gate on the rotation — a surviving key still reports a clean reset"
+fi
+# WARP-3207: a key dir the reset cannot look into is its own verdict. Nothing
+# is known to have SURVIVED, so it must abort as "cannot be verified", in a
+# branch of its own that exits before the survivor message.
+if [ "$(awk '
+      /"\$SECW_EXTENSION_KEY_BLOCKED" = "1"/ { inb = 1; next }
+      inb && /SURVIVED/ { bad = 1 }
+      inb && /CANNOT be verified/ { msg = 1 }
+      inb && /^[[:space:]]*exit 1$/ { if (msg) ok = 1; inb = 0 }
+      END { print (ok && !bad) ? "yes" : "no" }' <<<"$EXT_GATE_BLOCK")" = "yes" ]; then
+  pass "a key dir the reset cannot look into ABORTS it as 'cannot be verified', not 'survived'"
+else
+  fail "the rotation gate has no BLOCKED branch — an unobservable key dir reads as a rotated key"
 fi
 if [ -n "$EXT_GATE_LINE" ] && [ -n "$BRIDGE_LINE" ] && [ -n "$ROTATE_LINE" ] \
    && [ "$EXT_GATE_LINE" -gt "$BRIDGE_LINE" ] && [ "$EXT_GATE_LINE" -gt "$ROTATE_LINE" ]; then
@@ -1129,6 +1147,127 @@ identity_digest() {
     && grep -qxF "$TPM/extension-signing.sealed" <<<"$SECW_EXTENSION_KEY_LEFTOVER"
 ) && pass "a key that cannot be removed fails the rotation AND the gate, naming the path" \
   || fail "a surviving extension key passes the gate"
+
+# --- a key dir this user cannot search (WARP-3207) ---------------------------
+# The TPM dir belongs to the sidecar's uid. It is 0755 on every box today, but
+# 0700 (or an unsearchable parent) is a natural hardening, and the dashboard's
+# Danger Zone reset runs under the device-bridge unit's NoNewPrivileges, where
+# sudo cannot escalate. A directory we cannot search reads as EMPTY, and
+# `sudo test -e` exits non-zero both for "absent" and for "sudo failed". So the
+# gate must report BLOCKED ("cannot verify"), never a rotated key.
+#
+# chmod 000 does not lock root out, so these cases need an unprivileged runner
+# (CI's runner user, a developer shell). As root they are reported as skipped.
+#
+# ext_key_locked_run <sudo: none|broken|passthrough|working> <lock: dir|parent>
+# Locks the key dir (or its parent), runs the rotation and then the gate, and
+# unlocks again. Leaves rc, gate, LOCKED and `before` for the caller. Returns 3
+# when the lock does not hold (running as root).
+ext_key_locked_run() {
+  local _sudo="$1" _lock="$2"
+  make_tpm_fixture
+  if [ "$_lock" = parent ]; then
+    mkdir "$TMP/var"
+    mv "$TPM" "$TMP/var/tpm"
+    TPM="$TMP/var/tpm"
+    LOCKED="$TMP/var"
+  else
+    LOCKED="$TPM"
+  fi
+  before="$(identity_digest "$TPM")"
+  case "$_sudo" in
+    none) SECW_SUDO="" ;;
+    broken)
+      # NoNewPrivileges, no tty, or no sudo at all: every command fails.
+      printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/bin/sudo-broken"
+      chmod +x "$TMP/bin/sudo-broken"
+      SECW_SUDO="$TMP/bin/sudo-broken" ;;
+    passthrough)
+      # Runs every command, but as us: it "works", and still sees no more than
+      # we do. The gate's control must ask for search, not just a zero exit.
+      printf '#!/usr/bin/env bash\nexec "$@"\n' > "$TMP/bin/sudo-passthrough"
+      chmod +x "$TMP/bin/sudo-passthrough"
+      SECW_SUDO="$TMP/bin/sudo-passthrough" ;;
+    working)
+      # Stands in for a privileged view: search is granted for the one command
+      # and taken back afterwards.
+      printf '#!/usr/bin/env bash\nchmod 700 %q\n"$@"\nrc=$?\nchmod 000 %q\nexit "$rc"\n' \
+        "$LOCKED" "$LOCKED" > "$TMP/bin/sudo-working"
+      chmod +x "$TMP/bin/sudo-working"
+      SECW_SUDO="$TMP/bin/sudo-working" ;;
+  esac
+  chmod 000 "$LOCKED"
+  if [ -x "$LOCKED" ]; then
+    chmod 755 "$LOCKED"
+    return 3
+  fi
+  rc=0
+  secw_rotate_extension_key "$TPM" >/dev/null 2>&1 || rc=$?
+  gate=0
+  secw_verify_extension_key_rotated "$TPM" >/dev/null 2>&1 || gate=$?
+  chmod 755 "$LOCKED"
+}
+# locked_verdict <subshell-rc> <pass-message> <fail-message>
+locked_verdict() {
+  case "$1" in
+    0) pass "$2" ;;
+    3) printf '  - skipped (running as root; chmod 000 does not lock root out): %s\n' "$2" ;;
+    *) fail "$3" ;;
+  esac
+}
+# BLOCKED, nothing claimed as a survivor, nothing touched, and the reason names
+# the directory that could not be searched.
+locked_is_blocked() {
+  [ "$rc" != "0" ] && [ "$gate" != "0" ] \
+    && [ "${SECW_EXTENSION_KEY_BLOCKED:-}" = "1" ] \
+    && grep -qF "$LOCKED" <<<"${SECW_EXTENSION_KEY_BLOCKED_REASON:-}" \
+    && [ -z "$SECW_EXTENSION_KEY_LEFTOVER" ] \
+    && [ -e "$TPM/extension-signing.sealed" ] \
+    && [ "$(identity_digest "$TPM")" = "$before" ]
+}
+
+_r=0
+( ext_key_locked_run broken dir || exit $?
+  locked_is_blocked
+) || _r=$?
+locked_verdict "$_r" \
+  "an unsearchable key dir with a failing sudo is BLOCKED, not a rotated key" \
+  "an unsearchable key dir with a failing sudo passes the gate — 'cannot see' reads as 'gone'"
+
+_r=0
+( ext_key_locked_run none dir || exit $?
+  locked_is_blocked
+) || _r=$?
+locked_verdict "$_r" \
+  "an unsearchable key dir with no privilege command is BLOCKED" \
+  "an unsearchable key dir with SECW_SUDO empty passes the gate"
+
+_r=0
+( ext_key_locked_run passthrough dir || exit $?
+  locked_is_blocked
+) || _r=$?
+locked_verdict "$_r" \
+  "a privilege command that runs but cannot search the key dir is BLOCKED" \
+  "a sudo that runs without seeing more passes the gate's control — 'cannot see' reads as 'gone'"
+
+_r=0
+( ext_key_locked_run broken parent || exit $?
+  locked_is_blocked
+) || _r=$?
+locked_verdict "$_r" \
+  "an unsearchable PARENT of the key dir is BLOCKED, not 'no TPM dir'" \
+  "an unsearchable parent hides the key dir, and the gate reads that as a box with no TPM dir"
+
+_r=0
+( ext_key_locked_run working dir || exit $?
+  [ "$rc" = "0" ] && [ "$gate" = "0" ] && [ "${SECW_EXTENSION_KEY_BLOCKED:-0}" = "0" ] \
+    && [ ! -e "$TPM/extension-signing.sealed" ] && [ ! -e "$TPM/extension-signing.sealed.tmp" ] \
+    && [ "$(identity_digest "$TPM")" = "$before" ] \
+    && [ "$(find "$TPM" -mindepth 1 | wc -l | tr -d ' ')" = "6" ]
+) || _r=$?
+locked_verdict "$_r" \
+  "an unsearchable key dir with a working sudo: the key is rotated under sudo, identity intact" \
+  "a working sudo does not rotate the key in a dir only it can search"
 
 ROTATE_OUT="$(
   make_tpm_fixture >/dev/null 2>&1
