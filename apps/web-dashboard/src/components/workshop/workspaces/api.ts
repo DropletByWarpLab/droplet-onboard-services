@@ -19,31 +19,61 @@ export const WORKSPACE_STATUS_LABELS: Record<WorkspaceStatus, string> = {
 };
 
 /**
- * WARP-2974 — what the box's templates are called to a person (the Workshop
- * design brief §3.5). Keyed by the directory name under
- * `extensions/templates/`; an unknown template shows its raw id.
+ * What one of the box's templates is, to a person choosing where a custom
+ * tool starts. A `language` template is a tool extension in that language —
+ * the main choice, shown side by side with the file the code lives in and
+ * the command that tests it (the template's own README). Anything else is a
+ * different kind of start and is listed under it.
  */
-export const TEMPLATE_LABELS: Record<string, { label: string; blurb: string }> = {
-  "typescript-tool": {
-    label: "TypeScript MCP server (Node 20)",
-    blurb: "Composes tools this box already has and shapes their data.",
-  },
+export interface TemplateInfo {
+  label: string;
+  /** The runtime the sandbox bakes in for it (`extensions/templates/README.md`). */
+  runtime?: string;
+  kind: "language" | "other";
+  /** One line on what it is and when to pick it — `other` templates. */
+  blurb?: string;
+  /** Where the tool's `run(input)` lives, and how its test runs — `language` templates. */
+  entry?: string;
+  test?: string;
+}
+
+/**
+ * WARP-2974 — the box's templates as a person meets them. Keyed by the
+ * directory name under `extensions/templates/`; an unknown template shows
+ * its raw id under the `other` group. The two tool templates are not MCP
+ * servers themselves (the sandbox's host shim serves them), so they are
+ * named by the language a person would code in.
+ */
+export const TEMPLATE_INFO: Record<string, TemplateInfo> = {
   "python-tool": {
-    label: "Python MCP server (3.12)",
-    blurb: "Composes tools this box already has and shapes their data.",
+    label: "Python",
+    runtime: "3.12",
+    kind: "language",
+    entry: "tool.py",
+    test: "pytest",
+  },
+  "typescript-tool": {
+    label: "TypeScript",
+    runtime: "Node 20",
+    kind: "language",
+    entry: "src/index.ts",
+    test: "npm test",
   },
   // WARP-2899 (ADR-056 slice L) — a connector draft is not an extension: it
   // renders an ADR-046 REST profile, its guide, its egress entry and its
   // ADR-042 rows into the store, and an owner exports it for a Warp Lab PR.
   "rest-profile": {
-    label: "Connector draft (REST profile)",
-    blurb: "Drafts a vendor profile, its guide and its egress entry for Warp Lab to review. Nothing on this box dials the vendor.",
+    label: "Connector draft",
+    kind: "other",
+    blurb: "For a service with a REST API. Drafts a profile for Warp Lab to review and ship — nothing on this box contacts the service.",
   },
 };
 
 export function templateLabel(id: string | null | undefined): string {
-  if (!id) return "an empty workspace";
-  return TEMPLATE_LABELS[id]?.label ?? id;
+  if (!id) return "Blank (no starter files)";
+  const info = TEMPLATE_INFO[id];
+  if (!info) return id;
+  return info.runtime ? `${info.label} (${info.runtime})` : info.label;
 }
 
 export interface WorkspaceRunRef {
