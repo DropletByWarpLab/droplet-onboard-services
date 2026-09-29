@@ -687,11 +687,10 @@ incident uuid, `:userId` a user uuid; a value that is not a uuid is a `400`.
   is not the nested envelope below and not `INCIDENT_NOT_FOUND`.
 - **Role, on each route** (`routes/security-incidents.ts`): 16–21 owner, admin or
   family (`family` is "Staff" in the UI); 22 and 35 owner or admin only. A role
-  outside the list gets the flat `403 { "error": "Forbidden: role not permitted" }`.
-  In practice that is a service token: a guest with an account cannot hold a
-  Security grant (`view` is floored at `family`, `services/access-catalog.ts`), so the
-  gate above answers it with the `404` first. No route takes a service principal,
-  so Droplet's AI can never acknowledge, resolve or change routing.
+  outside the list, a guest or a service token, gets the flat `403 { "error":
+  "Forbidden: role not permitted" }` (a guest whose access role holds no Security
+  grant is turned away earlier, by the `404` above). No route takes a service
+  principal, so Droplet's AI can never acknowledge, resolve or change routing.
 - **Rate limit on the writes** (19, 20, 22, 35): 60 a minute per IP, then `429 {
   "error": "Too many requests, slow down" }` (`middleware/rate-limit.ts`).
 - **Do not probe.** Ask `GET /api/modules` whether to draw Security at all:
@@ -968,8 +967,9 @@ whether there is nothing to judge or the view is partial.
 **Freshness and empty states.**
 
 - The engine that makes incidents ticks every 10 s (`SECURITY_INCIDENT_INTERVAL_MS`,
-  `services/security-incidents.service.ts`), so an event joins an incident within
-  about 10 s of being stored. An incident stays `collecting` until 5 minutes of
+  `services/security-incidents.service.ts`), so new events are sorted into incidents
+  on that tick, and a `camera_offline` reason waits until the camera has been down 60 s
+  (`OFFLINE_MIN_MS`). An incident stays `collecting` until 5 minutes of
   quiet plus a 90 s settle (`QUIET_MS`, `SETTLE_MS`), and never spans more than an
   hour. Frigate reports a detection when it ends, so a person still in view is
   counted about 30 s in (`SECURITY_ONGOING_AFTER_MS`, an `_ongoing` label) and
