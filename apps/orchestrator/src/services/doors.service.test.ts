@@ -33,6 +33,8 @@ import {
 } from "./doors.service.js";
 
 const NOW = new Date("2026-09-29T03:55:00.000Z");
+/** `NOW` minus `seconds`. */
+const ago = (seconds: number) => new Date(NOW.getTime() - seconds * 1000);
 const REQ = { user: { id: "owner-1", role: "owner", username: "owner" } } as never;
 
 function doorRow(over: Record<string, unknown> = {}) {
@@ -107,9 +109,9 @@ describe("event cursor", () => {
 describe("listDoors", () => {
   it("lists active doors by default and includes retired ones only when asked", async () => {
     const p = makePrisma();
-    await listDoors(asPrisma(p), { includeRetired: false });
+    await listDoors(asPrisma(p), { includeRetired: false, now: NOW });
     expect(p.accessPoint.findMany.mock.calls[0]![0]).toMatchObject({ where: { status: "active" } });
-    await listDoors(asPrisma(p), { includeRetired: true });
+    await listDoors(asPrisma(p), { includeRetired: true, now: NOW });
     expect((p.accessPoint.findMany.mock.calls[1]![0] as { where?: unknown }).where).toBeUndefined();
   });
 
@@ -121,23 +123,65 @@ describe("listDoors", () => {
       doorRow({ id: "c", name: "C", doorPositionSource: "dp1" }),
     ]);
     p.$queryRaw.mockResolvedValue([
-      { accessPointId: "a", kind: "door_open", troubleCode: null, occurredAt: new Date("2026-09-29T01:00:00Z") },
-      { accessPointId: "c", kind: "trouble", troubleCode: "position_unknown", occurredAt: new Date("2026-09-29T02:00:00Z") },
+      { accessPointId: "a", kind: "door_open", troubleCode: null, occurredAt: ago(10) },
+      { accessPointId: "c", kind: "trouble", troubleCode: "position_unknown", occurredAt: ago(5) },
     ]);
-    const doors = await listDoors(asPrisma(p), { includeRetired: false });
+    const doors = await listDoors(asPrisma(p), { includeRetired: false, now: NOW });
     expect(doors.map((d) => [d.id, d.position])).toEqual([
       ["a", "open"],
       ["b", "unknown"],
       ["c", "unknown"],
     ]);
-    expect(doors[0]!.positionSince).toEqual(new Date("2026-09-29T01:00:00Z"));
+    expect(doors[0]!.positionSince).toEqual(ago(10));
     expect(doors[1]!.positionSince).toBeNull();
+  });
+
+  // §9.7: "on the third missed heartbeat its position is UNKNOWN — never left at
+  // 'closed'". P4a has no heartbeat record, so the newest position report's own
+  // time is the freshness input; positionUnknownDue owns the cutoff (~90 s for a
+  // lock, ~180 s for a DP-1).
+  describe("a position that has gone stale reads unknown, with its since", () => {
+    const listOne = async (source: string, kind: string, secondsOld: number) => {
+      const p = makePrisma();
+      p.accessPoint.findMany.mockResolvedValue([doorRow({ doorPositionSource: source })]);
+      p.$queryRaw.mockResolvedValue([{ accessPointId: "door-1", kind, troubleCode: null, occurredAt: ago(secondsOld) }]);
+      return (await listDoors(asPrisma(p), { includeRetired: false, now: NOW }))[0]!;
+    };
+
+    it("a lock: closed 89 s ago is closed; at the third missed heartbeat (90 s) it is unknown — and says since when", async () => {
+      expect(await listOne("lock", "door_closed", 89)).toMatchObject({ position: "closed", positionSince: ago(89) });
+      expect(await listOne("lock", "door_closed", 90)).toMatchObject({ position: "unknown", positionSince: ago(90) });
+    });
+
+    it("a DP-1 is on the slower clock: 179 s is closed, 180 s is unknown", async () => {
+      expect(await listOne("dp1", "door_closed", 179)).toMatchObject({ position: "closed" });
+      expect(await listOne("dp1", "door_closed", 180)).toMatchObject({ position: "unknown", positionSince: ago(180) });
+    });
+
+    it("an old `open` is unknown too: a stale reading is not evidence in either direction", async () => {
+      expect(await listOne("lock", "door_open", 3600)).toMatchObject({ position: "unknown", positionSince: ago(3600) });
+    });
+
+    it("the read that follows a write applies the same cutoff (create / update / retire return a view)", async () => {
+      const p = makePrisma();
+      p.accessPoint.findUnique.mockResolvedValue(doorRow());
+      p.$queryRaw.mockResolvedValue([{ accessPointId: "door-1", kind: "door_closed", troubleCode: null, occurredAt: ago(3600) }]);
+      const retired = await retireDoor(asPrisma(p), "door-1", { req: REQ, now: NOW });
+      expect(retired).toMatchObject({ position: "unknown", positionSince: ago(3600) });
+    });
+
+    it("a `none` door is still not_monitored, never unknown", async () => {
+      const p = makePrisma();
+      p.accessPoint.findMany.mockResolvedValue([doorRow({ doorPositionSource: "none" })]);
+      const [door] = await listDoors(asPrisma(p), { includeRetired: false, now: NOW });
+      expect(door).toMatchObject({ position: "not_monitored", positionSince: null });
+    });
   });
 
   it("a door with no position source is not_monitored and claims neither alarm — without asking the event log", async () => {
     const p = makePrisma();
     p.accessPoint.findMany.mockResolvedValue([doorRow({ id: "n", doorPositionSource: "none" })]);
-    const [door] = await listDoors(asPrisma(p), { includeRetired: false });
+    const [door] = await listDoors(asPrisma(p), { includeRetired: false, now: NOW });
     expect(door).toMatchObject({
       position: "not_monitored",
       positionSince: null,
@@ -153,7 +197,7 @@ describe("listDoors", () => {
       doorRow({ id: "l", doorPositionSource: "lock" }),
       doorRow({ id: "s", doorPositionSource: "dp1" }),
     ]);
-    const doors = await listDoors(asPrisma(p), { includeRetired: false });
+    const doors = await listDoors(asPrisma(p), { includeRetired: false, now: NOW });
     expect(doors.map((d) => d.claims.forcedDoor)).toEqual(["latch_witnessed", "unwitnessed_open"]);
   });
 });

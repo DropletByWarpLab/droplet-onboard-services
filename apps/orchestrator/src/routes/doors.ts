@@ -118,7 +118,7 @@ export function createDoorsRouter(prisma: PrismaClient, deps: DoorsRouteDeps = {
       return;
     }
     try {
-      res.json({ doors: await listDoors(prisma, { includeRetired: q.data.include === "retired" }) });
+      res.json({ doors: await listDoors(prisma, { includeRetired: q.data.include === "retired", now: deps.now?.() ?? new Date() }) });
     } catch (err) {
       answerError(res, err, "list doors");
     }

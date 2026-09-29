@@ -355,7 +355,10 @@ describe.skipIf(!RUN)("doors — real Postgres (ADR-055 P4a)", () => {
       const lateArrival = await door({ name: `${TAG} late`, source: "dp1" });
       const gone = await door({ name: `${TAG} gone`, source: "lock" });
       const none = await door({ name: `${TAG} none`, source: "none" });
+      const stale = await door({ name: `${TAG} stale`, source: "lock" });
 
+      // Closed, and then silent for a day: §9.7 says that is unknown, never closed.
+      await event(stale.id, "door_closed", { occurredAt: daysAgo(1) });
       await event(closedThenOpen.id, "door_closed", { occurredAt: daysAgo(1) });
       await event(closedThenOpen.id, "door_open", { occurredAt: new Date(NOW.getTime() - 1000) });
       await event(closedThenOpen.id, "latch_extended", { occurredAt: NOW }); // newest, but not a position event
@@ -367,9 +370,10 @@ describe.skipIf(!RUN)("doors — real Postgres (ADR-055 P4a)", () => {
       await event(gone.id, "trouble", { occurredAt: new Date(NOW.getTime() - 500), troubleCode: "position_unknown" });
       await event(none.id, "door_open");
 
-      const doors = await listDoors(prisma, { includeRetired: false });
+      const doors = await listDoors(prisma, { includeRetired: false, now: NOW });
       const byName = new Map(doors.map((x) => [x.name, x]));
       expect(byName.get(`${TAG} fresh`)).toMatchObject({ position: "unknown", positionSince: null });
+      expect(byName.get(`${TAG} stale`)).toMatchObject({ position: "unknown", positionSince: daysAgo(1) });
       expect(byName.get(`${TAG} cto`)!.position).toBe("open");
       expect(byName.get(`${TAG} late`)!.position).toBe("open");
       expect(byName.get(`${TAG} gone`)!.position).toBe("unknown");
@@ -419,8 +423,8 @@ describe.skipIf(!RUN)("doors — real Postgres (ADR-055 P4a)", () => {
       expect((await retireDoor(prisma, created.id, { req: REQ, now: NOW })).status).toBe("retired");
       await expect(updateDoor(prisma, created.id, { name: `${TAG} x` }, { req: REQ, now: NOW })).rejects.toBeInstanceOf(DoorWriteError);
 
-      expect((await listDoors(prisma, { includeRetired: false })).map((x) => x.id)).not.toContain(created.id);
-      expect((await listDoors(prisma, { includeRetired: true })).map((x) => x.id)).toContain(created.id);
+      expect((await listDoors(prisma, { includeRetired: false, now: NOW })).map((x) => x.id)).not.toContain(created.id);
+      expect((await listDoors(prisma, { includeRetired: true, now: NOW })).map((x) => x.id)).toContain(created.id);
     });
 
     it("the `doors` ModuleId exists in the database (its own migration ran before the tables)", async () => {
