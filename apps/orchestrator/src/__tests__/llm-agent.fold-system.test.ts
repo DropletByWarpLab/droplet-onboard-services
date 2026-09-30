@@ -146,6 +146,7 @@ describe("foldSystemMessages (WARP-3338)", () => {
       const out = foldSystemMessages(routeLayout({ base, attachments: 100, pins: 100, chat: 100 }));
       expect(text(out.messages[0])).toHaveLength(FOLDED_SYSTEM_MAX_CHARS);
       expect(out.trimmed).toEqual({});
+      expect(out.overCapChars).toBe(0);
     });
 
     it("one char over: cuts the attachments, marks the cut, and lands at or under the cap", () => {
@@ -154,6 +155,7 @@ describe("foldSystemMessages (WARP-3338)", () => {
       const folded = text(out.messages[0]);
       expect(folded.length).toBeLessThanOrEqual(FOLDED_SYSTEM_MAX_CHARS);
       expect(out.trimmed).toEqual({ attachments: 1 + FOLD_TRUNCATED_MARKER.length });
+      expect(out.overCapChars).toBe(0);
       expect(folded).toContain(HEADERS.attachments + "A".repeat(100 - 1 - FOLD_TRUNCATED_MARKER.length) + FOLD_TRUNCATED_MARKER + "\n\n");
       expect(folded.startsWith("B".repeat(base) + "\n\n")).toBe(true);
       expect(folded).toContain(HEADERS.pins + "P".repeat(100));
@@ -182,6 +184,9 @@ describe("foldSystemMessages (WARP-3338)", () => {
       const folded = text(out.messages[0]);
       expect(folded.startsWith("B".repeat(FOLDED_SYSTEM_MAX_CHARS) + "\n\n")).toBe(true);
       expect(folded).toContain(HEADERS.pins + "P".repeat(200));
+      // Still over: reported so the caller can say the gateway will refuse it.
+      expect(out.overCapChars).toBe(folded.length - FOLDED_SYSTEM_MAX_CHARS);
+      expect(out.overCapChars).toBeGreaterThan(0);
     });
 
     it("never splits a surrogate pair", () => {
@@ -264,10 +269,79 @@ describe("runAgent sends the folded shape on both transports (WARP-3338)", () =>
     expect(JSON.stringify(lines[0]!.obj)).not.toMatch(/AAAA|BBBB/);
   });
 
+  it("logs agent_system_fold_over_cap once when the uncuttable blocks alone overflow", async () => {
+    const { deps } = blockingDeps();
+    await runAgent(deps, {
+      model: "m",
+      messages: routeLayout({ base: FOLDED_SYSTEM_MAX_CHARS + 500, attachments: 10, pins: 10, chat: 10 }),
+    });
+    const lines = logged.filter((l) => l.msg === "agent_system_fold_over_cap");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.obj.over_chars).toBeGreaterThan(500);
+    expect(lines[0]!.obj.max_chars).toBe(FOLDED_SYSTEM_MAX_CHARS);
+    expect(JSON.stringify(lines[0]!.obj)).not.toMatch(/BBBB|PPPP/);
+  });
+
+  it("checkpoints the unfolded array, and logs a cut that first happens after iteration 0, once", async () => {
+    // One tool round, then an answer. At the top of iteration 1 the test adds
+    // a large unmarked system message to the loop's own array (what stage's
+    // system-role finalize nudge does), so only that pass needs a cut.
+    let n = 0;
+    const chat = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message:
+              n++ === 0
+                ? {
+                    role: "assistant",
+                    content: "",
+                    tool_calls: [
+                      { id: "c1", type: "function", function: { name: "calculate", arguments: '{"expression":"1+1"}' } },
+                    ],
+                  }
+                : { role: "assistant", content: "done" },
+          },
+        ],
+      }),
+    }));
+    const checkpointed: ChatMessage[][] = [];
+    const deps: AgentDeps = {
+      mcp: {
+        listTools: vi.fn().mockResolvedValue([{ name: "calculate", description: "d", inputSchema: {} }]),
+        callTool: vi.fn().mockResolvedValue({ isError: false, content: [{ type: "text", text: '{"result":2}' }] }),
+      } as never,
+      aiGateway: { chat } as never,
+    };
+    await runAgent(deps, {
+      model: "m",
+      messages: [sys("BASE"), sys("A".repeat(5_000), "attachments"), sys("PINS", "pins"), { role: "user", content: "q" }],
+      checkpoint: {
+        onIteration: async (iteration, messages) => {
+          checkpointed.push([...messages]);
+          if (iteration === 1) (messages as ChatMessage[]).push(sys("N".repeat(FOLDED_SYSTEM_MAX_CHARS)));
+        },
+        beforeToolCall: async () => undefined,
+        afterToolCall: async () => {},
+      },
+    });
+
+    // The checkpoint sees the loop's own array: three system messages, unfolded.
+    expect(systemCount(checkpointed[0]!)).toBe(3);
+    // The wire sees one.
+    expect(systemCount((chat.mock.calls[0] as unknown as [{ messages: ChatMessage[] }])[0].messages)).toBe(1);
+    const lines = logged.filter((l) => l.msg === "agent_system_fold_trimmed");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.obj.iter).toBe(1);
+    expect(lines[0]!.obj.trimmed_chars).toEqual({ attachments: expect.any(Number) });
+  });
+
   it("logs nothing when nothing was cut", async () => {
     const { deps } = blockingDeps();
     await runAgent(deps, { model: "m", messages: routeLayout() });
     expect(logged.some((l) => l.msg === "agent_system_fold_trimmed")).toBe(false);
+    expect(logged.some((l) => l.msg === "agent_system_fold_over_cap")).toBe(false);
   });
 
   it("an agent run's request (system prompt + goal) goes out unchanged", async () => {
