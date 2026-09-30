@@ -259,6 +259,10 @@ const MATRIX: GuardedRoute[] = [
   { method: "get", path: "/api/voice/status", allowed: ["owner", "admin"] },
   { method: "get", path: "/api/voice/devices", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/voice/say", allowed: ["owner", "admin"] },
+  // Speaker output volume — same posture as /say: it drives the room
+  // speaker, and a mute silences the household's assistant.
+  { method: "get", path: "/api/voice/volume", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/voice/volume", allowed: ["owner", "admin"] },
 
   // WARP-1056: voiceprint enrollment — owner+admin only, same posture as
   // the sibling voice-assistant proxy above. Enrollment captures and
