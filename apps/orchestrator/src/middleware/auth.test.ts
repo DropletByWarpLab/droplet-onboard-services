@@ -203,3 +203,23 @@ describe("requireRole — policy-violation audit emit (WARP-237)", () => {
     expect(recorded).toHaveLength(0);
   });
 });
+
+describe("authMiddleware — health routes (WARP-3154)", () => {
+  function anonReq(path: string): Request {
+    return { headers: {}, cookies: {}, path } as unknown as Request;
+  }
+
+  it("lets an anonymous caller reach the public health route", () => {
+    const next = vi.fn() as unknown as NextFunction;
+    authMiddleware(anonReq("/api/orchestrator/health"), mockRes(), next);
+    expect(next).toHaveBeenCalled();
+  });
+
+  it("401s an anonymous caller on /orchestrator/health/details (it carries each component's error)", () => {
+    const res = mockRes();
+    const next = vi.fn() as unknown as NextFunction;
+    authMiddleware(anonReq("/api/orchestrator/health/details"), res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(401);
+  });
+});

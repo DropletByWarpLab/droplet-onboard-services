@@ -9,6 +9,10 @@
  * WARP-2500 — the lifecycle verbs are provider-scoped:
  *
  *   POST /api/integrations/:provider/disconnect     Purge credentials+cursors.
+ *                                                   WARP-3375: body `{ records:
+ *                                                   "keep" | "delete" }` (default
+ *                                                   keep) says what becomes of the
+ *                                                   records the connector landed.
  *   POST /api/integrations/:provider/write-enable   Per-practice write opt-in.
  *   POST /api/integrations/:provider/write-disable  Kill-switch (default off).
  *
@@ -131,6 +135,16 @@ const connectSchema = z.object({
   /** PEM of the CA to trust for this box's certificate. */
   apiCaCert: z.string().min(1).optional(),
 });
+
+/**
+ * WARP-3375 — the owner's answer to "what happens to the records this
+ * connector imported?". Optional so a client that predates the question (and
+ * sends no body) gets the safe answer: `keep` deletes nothing. `.strict()` so a
+ * misspelt field is a 400 rather than a silent fall-back to the default.
+ */
+const disconnectSchema = z
+  .object({ records: z.enum(["keep", "delete"]).default("keep") })
+  .strict();
 
 export function createIntegrationsRouter(
   prisma: PrismaClient,
@@ -403,8 +417,15 @@ export function createIntegrationsRouter(
     (provider: (req: Request) => string) =>
     async (req: Request, res: Response, next: (e?: unknown) => void) => {
       try {
+        const parsed = disconnectSchema.safeParse(req.body ?? {});
+        if (!parsed.success) {
+          res
+            .status(400)
+            .json({ error: "Invalid request", details: parsed.error.flatten() });
+          return;
+        }
         const actor = (req as AuthedRequest).user?.id ?? "unknown";
-        res.json(await svc.disconnect({ actor }, provider(req)));
+        res.json(await svc.disconnect({ actor }, provider(req), parsed.data));
       } catch (err) {
         if (!handleErpError(res, err)) next(err);
       }

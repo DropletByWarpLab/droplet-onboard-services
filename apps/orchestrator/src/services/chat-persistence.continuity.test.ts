@@ -192,3 +192,52 @@ describe("WARP-2484 — the toolCalls filter carries the real DbNull sentinel", 
     expect(Prisma.JsonNull).not.toBe(Prisma.AnyNull);
   });
 });
+
+describe("WARP-3348 — getPreviousTurnRanToolNames (the action-claim check's credit)", () => {
+  function prismaWith(rows: Array<Row & { id: string }>) {
+    const findMany = vi.fn(
+      async (args: {
+        where: { sessionId: string; session?: { userId: string }; role?: string; id?: { not?: string } };
+        take?: number;
+      }) => {
+        let out = rows.filter(
+          (r) =>
+            r.sessionId === args.where.sessionId &&
+            r.userId === args.where.session?.userId &&
+            r.role === args.where.role,
+        );
+        if (args.where.id?.not !== undefined) out = out.filter((r) => r.id !== args.where.id!.not);
+        out = out.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+        if (typeof args.take === "number") out = out.slice(0, args.take);
+        return out.map((r) => ({ toolCalls: r.toolCalls }));
+      },
+    );
+    return { chatMessage: { findMany } };
+  }
+
+  it("returns only what the previous turn RAN: ok, not pending, never this turn's row or an older one", async () => {
+    const svc = new ChatPersistenceService(
+      prismaWith([
+        { id: "a1", sessionId: "s1", userId: "u1", role: "assistant", createdAt: at(1), toolCalls: [{ ...call("delete_file"), ok: true }] },
+        {
+          id: "a2",
+          sessionId: "s1",
+          userId: "u1",
+          role: "assistant",
+          createdAt: at(2),
+          toolCalls: [
+            { ...call("email_send"), ok: true },
+            { ...call("business_create"), ok: true, status: "confirmation_required" },
+            { ...call("team_chat_send_message"), ok: false },
+          ],
+        },
+        // this turn's own row, created before the lookup
+        { id: "a3", sessionId: "s1", userId: "u1", role: "assistant", createdAt: at(3), toolCalls: null },
+      ]) as never,
+    );
+    expect(await svc.getPreviousTurnRanToolNames("s1", "u1", "a3")).toEqual(["email_send"]);
+    // The latest turn ran nothing: no credit, even though an older one did.
+    expect(await svc.getPreviousTurnRanToolNames("s1", "u1", null)).toEqual([]);
+    expect(await svc.getPreviousTurnRanToolNames("s1", "someone-else", "a3")).toEqual([]);
+  });
+});

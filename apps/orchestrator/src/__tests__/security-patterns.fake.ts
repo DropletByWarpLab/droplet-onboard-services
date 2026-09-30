@@ -38,7 +38,15 @@ export interface PatternsWorld {
   /** userId → granted camera names. */
   grants: Record<string, string[]>;
   zones: Array<{ id: string; name: string; kind: string; state: "active" | "archived"; version: number }>;
-  links: Array<{ id: string; zoneId: string; sourceKind: "camera" | "camera_zone"; sourceRef: string; state: "active" | "removed" }>;
+  links: Array<{
+    id: string;
+    zoneId: string;
+    sourceKind: "camera" | "camera_zone";
+    sourceRef: string;
+    state: "active" | "removed";
+    /** WARP-2979 — who set the link; a person unless a case says otherwise. */
+    stateSetBy?: "person" | "droplet";
+  }>;
   sources: Array<{
     sourceKey: string;
     camera: string;
@@ -142,7 +150,14 @@ export function patternsPrisma(w: PatternsWorld) {
           .sort((x, y) => (x.zoneId < y.zoneId ? -1 : x.zoneId > y.zoneId ? 1 : x.sourceRef < y.sourceRef ? -1 : 1))
           .map((l) => {
             const z = w.zones.find((zz) => zz.id === l.zoneId)!;
-            return { id: l.id, zoneId: l.zoneId, sourceKind: l.sourceKind, sourceRef: l.sourceRef, zone: { name: z.name, kind: z.kind } };
+            return {
+              id: l.id,
+              zoneId: l.zoneId,
+              sourceKind: l.sourceKind,
+              sourceRef: l.sourceRef,
+              stateSetBy: l.stateSetBy ?? "person",
+              zone: { name: z.name, kind: z.kind },
+            };
           });
       }),
     },

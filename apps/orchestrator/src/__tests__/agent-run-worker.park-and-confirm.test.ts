@@ -92,6 +92,7 @@ const deleteThenReport = (req: { messages: Array<{ role: string; content: unknow
     return { role: "assistant", content: null, tool_calls: [toolCall("c1", "delete_file", { path: "/old.txt" })] };
   }
   const last = String(replies[replies.length - 1]!.content);
+  if (last.includes("TOOL_OUTPUT_MALFORMED")) return { role: "assistant", content: "The reply was unreadable; it may have run." };
   if (last.includes("CONFIRMATION_DENIED")) return { role: "assistant", content: "Left it alone, as you asked." };
   if (last.includes("tool_dispatch_failed") || last.includes("CONFIRMATION_REJECTED")) {
     return { role: "assistant", content: "The delete did not go through; nothing changed." };
@@ -112,7 +113,7 @@ function interceptingMcp(
   tools: string[],
   tier2: Set<string>,
   denied: Set<string> = new Set(),
-  opts: { refuseRedeem?: boolean; throwOnRedeem?: boolean; challengeAsError?: boolean; result?: unknown } = {},
+  opts: { refuseRedeem?: boolean; throwOnRedeem?: boolean; challengeAsError?: boolean; truncateRedeem?: boolean; result?: unknown } = {},
 ) {
   let minted = 0;
   const live = new Set<string>();
@@ -168,6 +169,7 @@ function interceptingMcp(
         }
       }
       executed.push({ name, args, token: ctx?.confirmationToken });
+      if (opts.truncateRedeem) return { isError: false, content: [{ type: "text", text: '{"ok": true, "to' }] };
       return wire(opts.result ?? { ok: true, tool: name });
     },
   );
@@ -616,6 +618,27 @@ describe("agent runs — the handshake is crash-safe and error-safe (WARP-2179 r
         what: "delete_file approved but did not run",
         refs: expect.objectContaining({ agentRunId: id, confirmation: "confirmed_failed" }),
       }),
+    );
+  });
+
+  it("WARP-3284 — an approved call whose reply is unreadable is a failed result for the model, audited as run", async () => {
+    const clock = new Date("2026-09-04T03:00:00Z");
+    const mcp = interceptingMcp(["delete_file"], new Set(["delete_file"]), new Set(), { truncateRedeem: true });
+    const { db, id } = await approvedRun(mcp, () => clock);
+    recordActivityMock.mockClear();
+    const b = makeWorker(db, mcp, { workerId: "B", now: () => clock });
+    await b.worker.tickOnce();
+    await settle(b.worker);
+    const done = db.row(id);
+    expect(mcp.executed).toHaveLength(1);
+    // The model was handed the envelope, not the fragment.
+    expect(done.result).toBe("The reply was unreadable; it may have run.");
+    const entry = (done.trace as AgentRunTraceEntry[]).find((e) => e.confirmation === "confirmed");
+    // The trace keeps the wire text, and records the call failed.
+    expect(entry).toMatchObject({ isError: true, text: '{"ok": true, "to' });
+    // The tool DID run (it answered); "approved but did not run" would be false.
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({ what: "delete_file approved and run" }),
     );
   });
 
@@ -1195,5 +1218,86 @@ describe("agent runs — an approved park runs the STORED call; the model never 
       expect(mcp.executed).toHaveLength(0);
       expectPendingCleared(done);
     });
+  });
+});
+
+describe("chat-started runs (WARP-3300)", () => {
+  it("run from the fixed brief, and the park notification names the chat", async () => {
+    const clock = new Date("2026-09-28T12:00:00Z");
+    const db = createAgentRunPrismaMock({ users: [OWNER], now: () => clock });
+    const { id } = await enqueueAgentRun(db.prisma, {
+      userId: OWNER.id,
+      goal: "tidy up old files",
+      model: "m",
+      sessionId: "conv-9",
+      origin: "chat",
+      title: "Tidy up",
+      deliverable: "A list of what was removed",
+    });
+    const mcp = interceptingMcp(["delete_file", "list_files"], new Set(["delete_file"]));
+    const { worker, chat } = makeWorker(db, mcp, { now: () => clock });
+    await worker.tickOnce();
+    await settle(worker);
+
+    const firstUser = (chat.mock.calls[0]![0] as { messages: Array<{ role: string; content: string }> }).messages.find(
+      (m) => m.role === "user",
+    )!;
+    expect(firstUser.content).toContain("Background task: Tidy up");
+    expect(firstUser.content).toContain("A list of what was removed");
+    expect(firstUser.content).toContain("at most 300 words");
+
+    const note = sendNotificationMock.mock.calls[0]![1] as { data: Record<string, unknown> };
+    expect(note.data).toEqual({ agentRunId: id, pendingTool: "delete_file", needsDecision: true, sessionId: "conv-9" });
+  });
+});
+
+describe("agent runs — the report's claims are checked against the whole run (WARP-3348)", () => {
+  // The decided call runs in the worker, outside the loop; the check must
+  // still see it. The model claims the delete whatever the tool said.
+  const deleteThenClaim = (req: { messages: Array<{ role: string; content: unknown }> }) =>
+    req.messages.some((m) => m.role === "tool")
+      ? { role: "assistant", content: "I've deleted /old.txt." }
+      : { role: "assistant", content: null, tool_calls: [toolCall("c1", "delete_file", { path: "/old.txt" })] };
+
+  async function decidedRun(decision: "approved" | "denied") {
+    const db = createAgentRunPrismaMock({ users: [OWNER] });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "tidy up", model: "m" });
+    const mcp = interceptingMcp(["delete_file"], new Set(["delete_file"]));
+    const chat = scripted(deleteThenClaim);
+    const a = makeWorker(db, mcp, { chat });
+    await a.worker.tickOnce();
+    await settle(a.worker);
+    expect(db.row(id).status).toBe("awaiting_confirmation");
+    await decideAgentRun(db.prisma, {
+      id,
+      decision,
+      decidedBy: { id: OWNER.id, role: "owner" },
+      resolveAccess: ownerAccess as never,
+    });
+    const b = makeWorker(db, mcp, { workerId: "B", chat });
+    await b.worker.tickOnce();
+    await settle(b.worker);
+    return { row: db.row(id), chat, mcp };
+  }
+
+  it("approve → resume: 'I've deleted it' after the approved delete goes out untouched, with no check call", async () => {
+    const { row, chat, mcp } = await decidedRun("approved");
+    expect(mcp.executed).toHaveLength(1);
+    expect(row.status).toBe("succeeded");
+    expect(row.result).toBe("I've deleted /old.txt.");
+    expect(chat).toHaveBeenCalledTimes(2); // the park, the report: no correction call
+  });
+
+  it("deny → resume: the same claim after a declined delete is not trusted, and asks nothing", async () => {
+    const { row, chat, mcp } = await decidedRun("denied");
+    expect(mcp.executed).toHaveLength(0);
+    expect(chat).toHaveBeenCalledTimes(3); // the park, the report, one check call
+    const checkReq = chat.mock.calls[2]![0] as { messages: Array<{ role: string; content: unknown }> };
+    const prompt = String(checkReq.messages[checkReq.messages.length - 1]!.content);
+    expect(prompt).toContain("- delete_file: NOT done: the person declined it.");
+    expect(prompt).toContain("do not ask any questions");
+    expect(row.result).toBe(
+      "I've deleted /old.txt.\n\nNot done: you declined to delete a file, or a folder and everything in it, from your Droplet.",
+    );
   });
 });

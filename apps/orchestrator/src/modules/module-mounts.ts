@@ -225,8 +225,15 @@ export function mountModuleGates(
  * tools write, so the gate asks for `use` on the roster GET as well. The
  * `team_chat` module is not feature-gated for humans, so the gate asks question
  * 1 only, and browser sessions are untouched.
+ *
+ * WARP-2979 (ADR-059 P4 §6.12.2) — `security`: its four read-only tools hop
+ * only to /api/security/assistant/*, all under the `security` module's one
+ * prefix, so the gate sees every one. It repeats the person's tool scope and
+ * Security feature at the data boundary, which the mcp-server's HTTP
+ * transport (write-tier RBAC only) would otherwise skip; the assistant
+ * router then resolves the same person and applies DS-005.
  */
-export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business", "email", "team_chat"];
+export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business", "email", "team_chat", "security"];
 
 /** Mount after `mountModuleGates` (and therefore after `authMiddleware`). */
 export function mountMcpActingUserGates(

@@ -4,7 +4,8 @@
  * WARP-1683 — "New message": pick one colleague for a DM, several for a
  * group (a name field appears once it's a group). The roster is
  * GET /api/team-chat/contacts — every ACTIVE member, all roles — minus
- * the caller. The server dedupes direct pairs, so re-picking an existing
+ * the caller. An external guest never opens this dialog (WARP-3263: a
+ * guest can't start a conversation). The server dedupes direct pairs, so re-picking an existing
  * DM lands in the existing conversation instead of a duplicate.
  */
 
@@ -39,7 +40,7 @@ export function NewThreadDialog({
     return others.filter(
       (c) =>
         c.displayName.toLowerCase().includes(q) ||
-        c.username.toLowerCase().includes(q),
+        (c.username ?? "").toLowerCase().includes(q),
     );
   }, [contacts, meId, query]);
 
@@ -129,9 +130,11 @@ export function NewThreadDialog({
                   <span className="mx-row-name block truncate">
                     {c.displayName}
                   </span>
-                  <span className="mx-row-preview block truncate">
-                    {c.username}
-                  </span>
+                  {c.username && (
+                    <span className="mx-row-preview block truncate">
+                      {c.username}
+                    </span>
+                  )}
                 </span>
                 {active && (
                   <Check

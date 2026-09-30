@@ -16,11 +16,9 @@ import { DropletMark } from "./DropletMark";
 import { ThemeToggle } from "./ThemeToggle";
 import { Dialog } from "./Dialog";
 import { useAuth } from "@/lib/auth";
-import { useCapabilities } from "@/lib/hooks/useCapabilities";
-import { useIntegrations } from "@/lib/hooks/useIntegrations";
-import { isMedicalConnector } from "@/components/integrations/provider-descriptors";
-import { useModuleGate } from "@/lib/hooks/useModuleGate";
+import { useNavGates } from "@/components/Departments/useNavGates";
 import { useTeamChatUnread } from "@/lib/hooks/useTeamChat";
+import { useAgentRunsActive } from "@/lib/hooks/useAgentRunsActive";
 import { VERSION_LABEL } from "@/lib/brand";
 // WARP-2956 — collapse (64px icon rail) + drag-resize (200–360px) state for
 // the desktop aside. The hook owns persistence and the `--sidebar-w` CSS
@@ -80,23 +78,27 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const { user, logout } = useAuth();
-  const adminCapabilities = useCapabilities();
-  const isModuleOn = useModuleGate();
-  // WARP-2880: /practice is advertised only while a medical integration is
-  // connected. Fetched for owner/admin only — the route 403s everyone else,
-  // and Practice is role-hidden from them anyway.
-  const role = user?.role as AuthRole | undefined;
-  const { connected } = useIntegrations(role === "owner" || role === "admin");
-  const capabilities = {
-    ...adminCapabilities,
-    medicalConnector: connected.some((e) => isMedicalConnector(e.meta.id)),
-  };
+  // Role, capabilities (incl. WARP-2880's medical connector) and module
+  // switches — shared with the chat's page list (WARP-3116).
+  const { role, capabilities, isModuleOn } = useNavGates();
   // WARP-1683: resolves nav-config's `badgeKey` names to live counts. The
   // Sidebar owns the polling hook (nav-config stays pure data); the badge
   // reads 0 — and renders nothing — while the module is off or unresolved.
   const teamChatUnread = useTeamChatUnread();
+  // WARP-3303 — owner/admin only, like the Workshop entry and the route.
+  const agentRuns = useAgentRunsActive(role === "owner" || role === "admin");
   const badgeCounts: Record<NonNullable<NavItem["badgeKey"]>, number> = {
     teamChatUnread,
+    agentRunsActive: agentRuns.count,
+  };
+  // Amber = a badge asking for a decision, not just counting.
+  const badgeWarn: Partial<Record<NonNullable<NavItem["badgeKey"]>, boolean>> = {
+    agentRunsActive: agentRuns.needsYou,
+  };
+  const badgeLabel: Record<NonNullable<NavItem["badgeKey"]>, (n: number) => string> = {
+    teamChatUnread: (n) => `${n} unread`,
+    agentRunsActive: (n) =>
+      `${n} background task${n === 1 ? "" : "s"} going${agentRuns.needsYou ? ", one needs your OK" : ""}`,
   };
 
   // WARP-2956: desktop collapse / resize.
@@ -496,6 +498,8 @@ export function Sidebar() {
                     onActivate={item.href === "/settings" ? () => setMainTreeAt(null) : undefined}
                     pathname={pathname}
                     badge={item.badgeKey ? badgeCounts[item.badgeKey] : 0}
+                    badgeWarn={item.badgeKey ? badgeWarn[item.badgeKey] : false}
+                    badgeLabel={item.badgeKey ? badgeLabel[item.badgeKey] : undefined}
                     collapsed={collapsed}
                   />
                 ))}
@@ -825,6 +829,8 @@ export function Sidebar() {
                               ? badgeCounts[entry.item.badgeKey]
                               : 0
                           }
+                          badgeWarn={entry.item.badgeKey ? badgeWarn[entry.item.badgeKey] : false}
+                          badgeLabel={entry.item.badgeKey ? badgeLabel[entry.item.badgeKey] : undefined}
                         />
                         {entry.children.map((child) => (
                           <DrawerLink
@@ -903,6 +909,8 @@ function DrawerLink({
   onNavigate,
   nested,
   badge = 0,
+  badgeWarn,
+  badgeLabel,
 }: {
   item: NavItem;
   active: boolean;
@@ -912,6 +920,10 @@ function DrawerLink({
   nested?: boolean;
   /** WARP-1683 — live count for `item.badgeKey`; hidden at 0. */
   badge?: number;
+  /** WARP-3303 — amber: the badge asks for a decision. */
+  badgeWarn?: boolean;
+  /** WARP-3303 — what the count means, for screen readers. */
+  badgeLabel?: (n: number) => string;
 }) {
   const Icon = item.icon;
   return (
@@ -934,7 +946,7 @@ function DrawerLink({
     >
       <Icon size={18} strokeWidth={active ? 2 : 1.5} />
       {item.label}
-      <NavBadge count={badge} />
+      <NavBadge count={badge} warn={badgeWarn} label={badgeLabel} />
     </Link>
   );
 }
@@ -948,21 +960,30 @@ function DrawerLink({
  * ignored by SRs); the adjacent sr-only text carries the meaning.
  * Exported for the a11y-markup pin (Sidebar.nav-badge.test.tsx).
  */
-export function NavBadge({ count }: { count: number }) {
+export function NavBadge({
+  count,
+  warn = false,
+  label = (n: number) => `${n} unread`,
+}: {
+  count: number;
+  warn?: boolean;
+  label?: (n: number) => string;
+}) {
   if (count <= 0) return null;
   return (
     <>
       <span
         aria-hidden="true"
-        className="
+        className={`
           ml-auto min-w-[20px] px-1.5 py-0.5 rounded-full text-center
           type-caption-2 font-semibold tabular-nums
-          bg-accent-subtle text-accent
-        "
+          ${warn ? "bg-system-orange/15 text-system-orange" : "bg-accent-subtle text-accent"}
+        `}
+        data-warn={warn || undefined}
       >
         {count > 99 ? "99+" : count}
       </span>
-      <span className="sr-only">{`${count} unread`}</span>
+      <span className="sr-only">{label(count)}</span>
     </>
   );
 }
@@ -977,6 +998,8 @@ function NavLink({
   onActivate,
   pathname,
   badge = 0,
+  badgeWarn,
+  badgeLabel,
   collapsed = false,
 }: {
   item: NavItem;
@@ -990,6 +1013,10 @@ function NavLink({
   pathname: string;
   /** WARP-1683 — live count for `item.badgeKey`; hidden at 0. */
   badge?: number;
+  /** WARP-3303 — amber: the badge asks for a decision. */
+  badgeWarn?: boolean;
+  /** WARP-3303 — what the count means, for screen readers. */
+  badgeLabel?: (n: number) => string;
   /** WARP-2956 — icon-rail mode: glyph only, label as title + aria-label so
    *  the accessible name survives; the badge pill waits for expand (the
    *  sr-only badge text would otherwise be lost under the aria-label anyway).
@@ -1025,7 +1052,7 @@ function NavLink({
           {!collapsed && (
             <span className="truncate sidebar-fade-in">{item.label}</span>
           )}
-          {!collapsed && <NavBadge count={badge} />}
+          {!collapsed && <NavBadge count={badge} warn={badgeWarn} label={badgeLabel} />}
         </Link>
         {/* A sibling of the link, not inside it: a button nested in an <a>
             is invalid and would navigate on every toggle. */}

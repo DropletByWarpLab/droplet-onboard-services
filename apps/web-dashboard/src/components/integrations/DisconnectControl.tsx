@@ -32,6 +32,16 @@
  * copy of its own; a second sentence about the credential is a second sentence
  * to keep true.
  *
+ * ## WARP-3375 — the records the connector copied are the owner's call
+ *
+ * The confirm used to say "Your X data is untouched" while the box deleted the
+ * Customers records the connector had landed. It now asks. A connector that
+ * copied something offers **Keep the records** (the default: they become
+ * ordinary records and nothing is deleted) or **Delete the records**, and
+ * Delete needs a SECOND, red confirmation. A connector that copied nothing says
+ * so and offers no choice. Every sentence is derived per connector in
+ * `disconnect-copy.ts` from the same dataset lists the box copies with.
+ *
  * ## The role gate is here, not in each parent
  *
  * `POST /api/integrations/:provider/disconnect` is `requireRole("owner",
@@ -42,9 +52,11 @@
 
 import { useState } from "react";
 import { Unplug } from "lucide-react";
+import { landedRecords, providerDescriptor } from "@droplet/shared-types";
 import { useAuth } from "@/lib/auth";
-import { disconnectProvider } from "@/lib/api.erp";
+import { disconnectProvider, type LandedRecordsChoice } from "@/lib/api.erp";
 import { lifecycleErrorMessage } from "@/lib/lifecycle-errors";
+import { disconnectCopy } from "./disconnect-copy";
 
 /**
  * Discriminated union, per `DnsServersForm.tsx:46-51`. Not four booleans:
@@ -55,7 +67,9 @@ import { lifecycleErrorMessage } from "@/lib/lifecycle-errors";
 type Phase =
   | { kind: "idle" }
   | { kind: "confirming" }
-  | { kind: "busy" }
+  // WARP-3375 — the second, red confirmation. Only Delete reaches it.
+  | { kind: "confirmingDelete" }
+  | { kind: "busy"; records: LandedRecordsChoice }
   | { kind: "error"; message: string };
 
 export function DisconnectControl({
@@ -74,14 +88,19 @@ export function DisconnectControl({
 }) {
   const { user } = useAuth();
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
+  // WARP-3375 — reset to Keep every time the confirm opens, so a Delete picked
+  // in an earlier, abandoned attempt can never be the one-click default.
+  const [choice, setChoice] = useState<LandedRecordsChoice>("keep");
 
   const isAdmin = user?.role === "owner" || user?.role === "admin";
   if (!isAdmin) return null;
 
-  async function run() {
-    setPhase({ kind: "busy" });
+  const copy = disconnectCopy(displayName, landedRecords(providerDescriptor(provider)));
+
+  async function run(records: LandedRecordsChoice) {
+    setPhase({ kind: "busy", records });
     try {
-      await disconnectProvider(provider);
+      await disconnectProvider(provider, records);
       setPhase({ kind: "idle" });
       onDisconnected?.();
     } catch (err) {
@@ -93,6 +112,47 @@ export function DisconnectControl({
     }
   }
 
+  const deleteStep =
+    phase.kind === "confirmingDelete" || (phase.kind === "busy" && phase.records === "delete");
+
+  // WARP-3375 — the second, red confirmation for Delete.
+  if (deleteStep) {
+    const busy = phase.kind === "busy";
+    return (
+      <div
+        className="rounded-[var(--radius-input)] bg-[rgba(239,68,68,0.1)] border border-[#ef4444] p-3"
+        data-testid="disconnect-confirm-delete"
+      >
+        <p className="type-subheadline" style={{ color: "var(--text)" }}>
+          {copy.confirmDeleteTitle}
+        </p>
+        <p className="type-footnote mt-1" style={{ color: "var(--text)" }}>
+          {copy.confirmDeleteBody}
+        </p>
+        <div className="mt-3 flex items-center gap-2">
+          <button
+            type="button"
+            className="type-footnote px-2 min-h-[44px]"
+            style={{ color: "var(--text-muted)" }}
+            disabled={busy}
+            onClick={() => setPhase({ kind: "confirming" })}
+          >
+            Go back
+          </button>
+          <button
+            type="button"
+            className="type-subheadline px-4 rounded-[var(--radius-input)] bg-[#ef4444] text-white hover:bg-[#dc2626] disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-1.5 min-h-[44px]"
+            disabled={busy}
+            aria-busy={busy || undefined}
+            onClick={() => run("delete")}
+          >
+            {busy ? "Deleting…" : "Delete records and disconnect"}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   // Tokens follow `settings/DestructiveConfirm.tsx`, not the sheet this block
   // came out of: `ManageSheet` is grandfathered in
   // `scripts/dashboard-token-allowlist.txt` and this file is new, so the
@@ -102,18 +162,67 @@ export function DisconnectControl({
   // failure lives.
   if (phase.kind === "confirming" || phase.kind === "busy") {
     const busy = phase.kind === "busy";
+    // A connector that copied nothing has no choice to make: the answer is
+    // fixed at Keep, which deletes nothing.
+    const effective: LandedRecordsChoice = copy.copiesNothing ? "keep" : choice;
     return (
       <div
         className="rounded-[var(--radius-input)] bg-[rgba(239,68,68,0.1)] p-3"
         data-testid="disconnect-confirm"
       >
         {/* The purge is stated BEFORE it happens, which is the half ADR-041 §2
-            calls a capability statement. The old sheet's wording promised only
-            that Droplet would stop reading. */}
+            calls a capability statement. WARP-3375: and so is what happens to
+            the records, per connector — never "your data is untouched". */}
         <p className="type-footnote" style={{ color: "var(--text)" }}>
-          Disconnect {displayName}? Droplet stops reading it and removes the stored
-          credential. Your {displayName} data is untouched.
+          {copy.intro}
         </p>
+        {!copy.copiesNothing && (
+          <fieldset className="mt-3" disabled={busy}>
+            <legend className="sr-only">
+              What happens to the {displayName} records Droplet copied
+            </legend>
+            <label className="flex items-start gap-2 min-h-[44px] py-1">
+              <input
+                type="radio"
+                name={`records-${provider}`}
+                className="mt-1"
+                checked={choice === "keep"}
+                onChange={() => setChoice("keep")}
+              />
+              <span>
+                <span className="type-subheadline" style={{ color: "var(--text)" }}>
+                  Keep the records (recommended)
+                </span>
+                <span
+                  className="type-footnote block"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  {copy.keep}
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 min-h-[44px] py-1">
+              <input
+                type="radio"
+                name={`records-${provider}`}
+                className="mt-1"
+                checked={choice === "delete"}
+                onChange={() => setChoice("delete")}
+              />
+              <span>
+                <span className="type-subheadline" style={{ color: "var(--text)" }}>
+                  Delete the records
+                </span>
+                <span
+                  className="type-footnote block"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  {copy.remove}
+                </span>
+              </span>
+            </label>
+          </fieldset>
+        )}
         <div className="mt-3 flex items-center gap-2">
           <button
             type="button"
@@ -129,9 +238,11 @@ export function DisconnectControl({
             className="type-subheadline px-4 rounded-[var(--radius-input)] bg-[#ef4444] text-white hover:bg-[#dc2626] disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-1.5 min-h-[44px]"
             disabled={busy}
             aria-busy={busy || undefined}
-            onClick={run}
+            onClick={() =>
+              effective === "delete" ? setPhase({ kind: "confirmingDelete" }) : run("keep")
+            }
           >
-            {busy ? "Disconnecting…" : "Disconnect"}
+            {busy ? "Disconnecting…" : effective === "delete" ? "Continue" : "Disconnect"}
           </button>
         </div>
       </div>
@@ -143,7 +254,10 @@ export function DisconnectControl({
       <button
         type="button"
         className="flex items-center gap-2 type-footnote text-system-red"
-        onClick={() => setPhase({ kind: "confirming" })}
+        onClick={() => {
+          setChoice("keep");
+          setPhase({ kind: "confirming" });
+        }}
       >
         <Unplug size={14} aria-hidden /> Disconnect {displayName}
       </button>

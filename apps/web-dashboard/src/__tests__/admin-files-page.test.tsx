@@ -27,6 +27,8 @@ vi.mock("@/lib/api", () => ({
   fetchSystemHealth: vi.fn().mockResolvedValue({ status: "ok" }),
   fetchDevices: vi.fn().mockResolvedValue([]),
   fetchHealth: vi.fn().mockResolvedValue({}),
+  // WARP-3168: the page mounts CompanyPublicLinks, which lists on mount.
+  fetchCompanyPublicLinks: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("next/navigation", () => ({

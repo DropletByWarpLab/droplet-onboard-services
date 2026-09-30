@@ -153,7 +153,10 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
   };
 
   return (
-    <div ref={rootRef} className="relative">
+    // Below lg the popover anchors to the header (.chat-head is positioned),
+    // not this button — see MemoryPanel: right-aligned to a mid-header button
+    // it started off the left edge of a phone screen.
+    <div ref={rootRef} className="lg:relative">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -174,7 +177,7 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
         <div
           role="dialog"
           aria-label="Pinned context"
-          className="absolute right-0 mt-1 w-80 max-w-[85vw] z-20 rounded-2xl p-3 backdrop-blur-xl backdrop-saturate-150"
+          className="absolute right-0 max-lg:right-3 mt-1 w-80 max-w-[85vw] z-20 rounded-2xl p-3 backdrop-blur-xl backdrop-saturate-150"
           style={{
             background: "var(--glass)",
             // Shadow only — `--lift` carries a 1px brand ring (WARP-3043).
@@ -229,7 +232,7 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
           )}
 
           <div
-            className="flex items-center gap-1.5 pt-2"
+            className="chat-field-row flex items-center gap-1.5 pt-2"
           >
             <MenuSelect
               id="pin-kind"
@@ -250,7 +253,7 @@ export function ContextPinsPopover({ sessionId }: { sessionId: string }) {
                 if (e.key === "Enter") void handleAdd();
               }}
               placeholder="/share/projects/…"
-              className="type-footnote h-8 flex-1 min-w-0 rounded-[var(--radius-input)] outline-none bg-[var(--surface-2)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:ring-2 focus:ring-[var(--brand)]"
+              className="chat-field flex-1 min-w-0"
             />
             <button
               type="button"

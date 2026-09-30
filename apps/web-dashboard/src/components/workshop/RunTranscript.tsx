@@ -81,7 +81,7 @@ function StepIcon({ kind }: { kind: StepKind }) {
   return <X size={size} aria-hidden />;
 }
 
-function Step({ entry }: { entry: TraceEntry }) {
+export function Step({ entry }: { entry: TraceEntry }) {
   const { kind, marker } = stepOf(entry);
   return (
     <li className={`ws-step is-${kind}`}>
