@@ -477,15 +477,18 @@ describe("the anchors", () => {
 
 // WARP-2977 P2b-2 x WARP-2979 P4 PR-1: door locks are not Droplet's to link. PR-1 scores the camera arm only; the
 // lock arm is P4 PR-4's to design. A person's lock link sits in the area like any other row and nothing more.
-describe("door-lock links are not Droplet's (P4 scores cameras only)", () => {
+// #2350 pinned these while P4 scored cameras only. From P4 PR-4 a person's lock link anchors — through its LIVE
+// changes alone (the lock arm's own tests are in "P4 PR-4 — …" below and in security-cooccurrence.test.ts) — so what
+// stays true of a lock link with no such change is pinned here.
+describe("door-lock links with no live change (P4 PR-4: a lock anchors only through its live changes)", () => {
   const LOCK = "matter:4660/1";
   const lockLink = (over: Partial<Link> = {}) => link("z-stock", LOCK, { sourceKind: "lock", sourceLabel: "Back door lock", ...over });
 
-  it("a person's lock link is never an anchor: an area made only of a lock scores nothing and reads no events", async () => {
+  it("an area made only of a lock whose window holds no live change scores nothing and changes nothing", async () => {
     const w = world({ links: [lockLink()] });
     const before = structuredClone(w.links);
-    const { prisma } = await runOn(w);
-    expect(prisma.securityEvent.findMany).not.toHaveBeenCalled();
+    const { prisma, summary } = await runOn(w);
+    expect(summary.scored).toBe(0);
     expect(prisma.securityZoneLink.createMany).not.toHaveBeenCalled();
     expect(w.links).toEqual(before);
     expect(w.log.filter((l) => l.startsWith("create:") || l.startsWith("update:"))).toEqual([]);
