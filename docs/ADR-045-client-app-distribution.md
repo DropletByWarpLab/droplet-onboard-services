@@ -138,9 +138,10 @@ this ADR carried as a passenger no longer has a consumer. The decision of
 1. **Windows updates are box-served.** The client checks the box it is paired
    with, never the internet, and never a cloud endpoint. There is no telemetry.
 2. **Integrity is SHA-256 over the pinned channel.** The client takes the
-   installer's size and SHA-256 from the box's `catalog.json` (served over the
-   pinned TLS channel, see ADR-062) and refuses an installer that does not
-   match.
+   installer's size and SHA-256 from the box's catalog, `GET /api/app-downloads`
+   (which reports each asset's `size` and `sha256` from `catalog.json`; the
+   box does not serve `catalog.json` itself), over the pinned TLS channel (see
+   ADR-062), and refuses an installer that does not match.
 3. **Authenticity is WinVerifyTrust with a publisher-subject pin.** The client
    verifies the Authenticode signature and pins the publisher *subject*, not a
    thumbprint. The expected subject is baked in at build time.
@@ -156,5 +157,6 @@ this ADR carried as a passenger no longer has a consumer. The decision of
 7. **The Windows `EXPECTED` row stays `blocked`.** It flips only when the
    v1.0.0 MSI is staged in the same change (roadmap gate G9); flipping it
    earlier turns the image build and ship-check red. Only its ticket is
-   re-pointed, to WARP-3246 (the audit accepts only a WARP key on a blocked
-   row), and moves again to the v1.0.0 release ticket once that is filed.
+   re-pointed, to WARP-3246 (`tests/app-downloads-audit.test.sh` accepts only
+   a WARP key on a blocked row; `audit.sh` itself takes any ticket token), and
+   moves again to the v1.0.0 release ticket once that is filed.

@@ -62,7 +62,7 @@ export type AppPlatform = (typeof APP_PLATFORMS)[number];
  *   download" link, never as the primary action.
  * - `manifest`   — updater metadata (`latest.json`, legacy Tauri). Served
  *   verbatim; not surfaced as a human download. The native Windows
- *   client reads `catalog.json` instead.
+ *   client reads the catalog (`GET /api/app-downloads`) instead.
  */
 export const ASSET_KINDS = ["installer", "signature", "manifest"] as const;
 export type AssetKind = (typeof ASSET_KINDS)[number];
