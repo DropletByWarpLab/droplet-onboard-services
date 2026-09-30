@@ -277,5 +277,15 @@ export interface Tool {
    * reading the field, so the default lives in exactly one place.
    */
   confirmationOwner?: ConfirmationOwner;
+  /**
+   * WARP-3349 — refuse a call that can never succeed BEFORE the person is
+   * asked to approve it. The interceptor challenges before the handler runs,
+   * so a handler alone can only refuse after the approval. The mcp-server
+   * runs this first on a call that carries no confirmation token: a
+   * `ToolResult` is returned instead of the challenge, `null` lets the
+   * interceptor ask. It must only read. A throw is ignored, and the
+   * handler validates again after the approval.
+   */
+  precheck?: (args: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult | null>;
   handler: ToolHandler;
 }

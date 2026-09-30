@@ -138,6 +138,70 @@ export function previewRecipients(
   };
 }
 
+/**
+ * WARP-3349 — the recipients to look up as a member's work email address:
+ * those that match no roster username and contain "@". Usernames never
+ * contain "@" (invite, SSO and SCIM keep [A-Za-z0-9._-]), and a roster
+ * username still wins, so a typed username never takes this path.
+ */
+export function addressesToLookUp(
+  roster: { contacts: RosterContact[] },
+  recipients: string[],
+): string[] {
+  const usernames = new Set(roster.contacts.flatMap((c) => (c.username ? [c.username] : [])));
+  return recipients.filter((r) => !usernames.has(r) && r.includes("@"));
+}
+
+export type AddressLookup =
+  | { ok: true; usernames: string[] }
+  | { ok: false; result: ToolResult };
+
+/**
+ * WARP-3349 — map POST /api/team-chat/contacts/lookup (one row or `null`
+ * per address, in order) back onto `recipients`: each address becomes its
+ * member's username, deduplicated, so "dave" and "dave@company.com" are one
+ * person. An address that is no ACTIVE owner's, admin's or member's is
+ * refused, and the model is told to offer email instead (Romain,
+ * 2026-09-29: team chat by default, email only when the person asks).
+ */
+export async function readLookupResponse(
+  res: TeamChatHttpResponse,
+  recipients: string[],
+  addresses: string[],
+): Promise<AddressLookup> {
+  if (res.status === 404) {
+    return { ok: false, result: err("TEAM_CHAT_UNAVAILABLE", UNAVAILABLE_MESSAGE) };
+  }
+  if (res.status === 401) {
+    return { ok: false, result: err("AUTH_REQUIRED", "auth_required") };
+  }
+  const body = res.ok
+    ? ((await res.json().catch(() => null)) as { contacts?: (RosterContact | null)[] } | null)
+    : null;
+  const rows = body?.contacts;
+  if (!Array.isArray(rows) || rows.length !== addresses.length) {
+    return {
+      ok: false,
+      result: err("TEAM_CHAT_SEND_FAILED", `orchestrator returned ${res.status}`),
+    };
+  }
+  const byAddress = new Map(addresses.map((a, i) => [a, rows[i]?.username ?? null]));
+  const outside = addresses.filter((a) => byAddress.get(a) === null);
+  if (outside.length > 0) {
+    return {
+      ok: false,
+      result: err(
+        "RECIPIENT_NOT_A_MEMBER",
+        `${outside.join(", ")} ${outside.length === 1 ? "isn't a member" : "aren't members"} of this Workspace; team chat only reaches members — ask the user whether to email them instead.`,
+      ),
+    };
+  }
+  return {
+    ok: true,
+    usernames: [...new Set(recipients.map((r) => byAddress.get(r) ?? r))],
+  };
+}
+
 export type RecipientResolution =
   | { ok: true; others: RosterContact[] }
   | { ok: false; result: ToolResult };

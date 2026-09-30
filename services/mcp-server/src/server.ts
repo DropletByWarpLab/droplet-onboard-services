@@ -274,6 +274,15 @@ export function createServer(
       meta && typeof meta.confirmationToken === "string" && meta.confirmationToken.length > 0
         ? meta.confirmationToken
         : undefined;
+    // WARP-3349 — a call that can never succeed is refused here, before the
+    // person is asked to approve it (team_chat_send_message: a recipient who
+    // is not a member). Only a call without a token, the one about to be
+    // challenged, runs it. A precheck reads and never writes; if it throws,
+    // the gate below still asks and the handler validates after approval.
+    if (tool.precheck && !confirmationToken) {
+      const early = await tool.precheck(args, ctx).catch(() => null);
+      if (early) return toolResultToContent(early);
+    }
     const outcome = interceptor.intercept(tool, args, { confirmationToken });
     const refusal = interceptOutcomeToToolResult(tool, outcome);
     if (refusal) {

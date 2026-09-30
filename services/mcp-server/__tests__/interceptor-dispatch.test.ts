@@ -310,3 +310,73 @@ describe("registry tools on the MCP path are gated too (WARP-2312)", () => {
     await close();
   });
 });
+
+/**
+ * WARP-3349 — `Tool.precheck` runs BEFORE the interceptor challenges, so a
+ * call that can never succeed (team_chat_send_message to someone who is not a
+ * member) is refused instead of asking the person to approve it. It is only
+ * a gate in front of the gate: no token is minted for a refused call, a call
+ * that already carries a token skips it, and a precheck that throws never
+ * stands between the person and the approval.
+ */
+describe("MCP dispatch path — a precheck refuses before the challenge (WARP-3349)", () => {
+  function prechecked(precheck: NonNullable<Tool["precheck"]>) {
+    const { tool, invoked } = syntheticRemoteTool();
+    return { tool: { ...tool, precheck } as Tool, invoked };
+  }
+
+  it("a refusal is returned instead of a challenge: no token minted, no write", async () => {
+    const error = { code: "RECIPIENT_NOT_A_MEMBER", message: "x@other.org isn't a member" };
+    const { tool, invoked } = prechecked(async () => ({ ok: false, status: "error", error }));
+    const { client, close } = await connect({ additionalTools: new Map([[tool.name, tool]]) });
+    const pending = defaultToolCallInterceptor.tokens.size();
+
+    const res = await client.callTool({ name: tool.name, arguments: { contactId: "c-1" } });
+
+    expect(parse(res)).toEqual({ status: "error", error });
+    expect((res as { isError?: boolean }).isError).toBe(true);
+    expect(defaultToolCallInterceptor.tokens.size()).toBe(pending);
+    expect(invoked).toEqual([]);
+    await close();
+  });
+
+  it("a passing precheck (null) leaves the challenge exactly as it was", async () => {
+    const precheck = vi.fn(async () => null);
+    const { tool, invoked } = prechecked(precheck);
+    const { client, close } = await connect({ additionalTools: new Map([[tool.name, tool]]) });
+
+    const payload = parse(await client.callTool({ name: tool.name, arguments: { contactId: "c-1" } }));
+
+    expect(payload.status).toBe("confirmation_required");
+    expect(precheck).toHaveBeenCalledWith({ contactId: "c-1" }, expect.anything());
+    expect(invoked).toEqual([]);
+    await close();
+  });
+
+  it("the approved call (it carries the token) skips the precheck and runs", async () => {
+    const precheck = vi.fn(async () => null);
+    const { tool, invoked } = prechecked(precheck);
+    const { client, close } = await connect({ additionalTools: new Map([[tool.name, tool]]) });
+    const args = { contactId: "c-1" };
+
+    const token = tokenFrom(parse(await client.callTool({ name: tool.name, arguments: args })));
+    await client.callTool({ name: tool.name, arguments: args, _meta: { confirmationToken: token } });
+
+    expect(precheck).toHaveBeenCalledTimes(1);
+    expect(invoked).toEqual([args]);
+    await close();
+  });
+
+  it("a precheck that throws does not stand between the person and the approval", async () => {
+    const { tool, invoked } = prechecked(async () => {
+      throw new Error("roster unreachable");
+    });
+    const { client, close } = await connect({ additionalTools: new Map([[tool.name, tool]]) });
+
+    const payload = parse(await client.callTool({ name: tool.name, arguments: { contactId: "c-1" } }));
+
+    expect(payload.status).toBe("confirmation_required");
+    expect(invoked).toEqual([]);
+    await close();
+  });
+});

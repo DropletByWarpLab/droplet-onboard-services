@@ -14,7 +14,7 @@ import type { Mock } from "vitest";
 import sendMessage from "../../../src/handlers/team-chat/send-message.js";
 import emailSend from "../../../src/handlers/email/send.js";
 import emailDraftReply from "../../../src/handlers/email/draft-reply.js";
-import type { ToolContext } from "../../../src/types.js";
+import type { ToolContext, ToolResult } from "../../../src/types.js";
 
 interface FakeResponse {
   ok: boolean;
@@ -438,21 +438,215 @@ describe("team_chat_send_message — a roster that does not say who is asking", 
  * assertion goes red.
  */
 describe("WARP-3340 — team chat is the default channel, email only when asked", () => {
-  it("team_chat_send_message says it is the default and takes usernames, not addresses", () => {
+  it("team_chat_send_message says it is the default and takes usernames or work addresses (WARP-3349)", () => {
     expect(sendMessage.description).toContain(
       "The default way to message, tell or send something to a colleague, even one named by email address; use email only when the user asks for email.",
     );
     expect(sendMessage.description).toContain(
-      "member USERNAMES, not email addresses; never guess one from a job title, ask who is meant",
+      "recipients = member usernames or their work email addresses; never guess one from a job title, ask who is meant",
     );
     const recipients = (sendMessage.inputSchema as { properties: { recipients: { description: string } } })
       .properties.recipients;
-    expect(recipients.description).toContain("never an email address");
+    expect(recipients.description).toContain("Member usernames or their work email addresses.");
   });
 
   it.each([emailSend, emailDraftReply])("$name is only for when the user asks for email", (tool) => {
     expect(tool.description).toContain(
       "Only when the user asks for email (an address alone is not a request for email); to message a colleague otherwise, team chat is the default.",
     );
+  });
+});
+
+/**
+ * WARP-3349 — "message dave@company.com" reaches Dave over team chat. The
+ * roster carries no email (User.email is encrypted at rest), so an address
+ * is looked up by the orchestrator and replaced by the member's username;
+ * an address that is no member's is refused BEFORE the person is asked to
+ * approve (`precheck`, which the mcp-server runs ahead of the interceptor's
+ * challenge), with the email suggestion. The fake answers the lookup the way
+ * the route does: trim + lowercase, members only, one row or null per
+ * address, in order.
+ */
+describe("WARP-3349 — a recipient given by work email address", () => {
+  const DAVE = { id: "uuid-dave", displayName: "Dave Ortiz", username: "dave" };
+  const ROSTER = { ...CONTACTS, contacts: [...CONTACTS.contacts, { ...DAVE, role: "family" }] };
+  const DIRECTORY: Record<string, typeof DAVE> = { "dave@example.com": DAVE };
+
+  function errorOf(r: ToolResult | null) {
+    if (!r || r.ok) throw new Error(`expected a refusal, got ${JSON.stringify(r)}`);
+    return r.error;
+  }
+
+  function world(roster: unknown = ROSTER, lookup?: (emails: string[]) => FakeResponse) {
+    const lookups: string[][] = [];
+    const writes: Array<{ path: string; body: unknown }> = [];
+    const get = vi.fn(async () => res(200, roster));
+    const post = vi.fn(async (path: string, body: { emails?: string[] }) => {
+      if (path === "/api/team-chat/contacts/lookup") {
+        const emails = body.emails ?? [];
+        lookups.push(emails);
+        return lookup
+          ? lookup(emails)
+          : res(200, { contacts: emails.map((e) => DIRECTORY[e.trim().toLowerCase()] ?? null) });
+      }
+      writes.push({ path, body });
+      return path === "/api/team-chat/threads"
+        ? res(201, { thread: { id: "thread-d" } })
+        : res(201, { message: { id: "msg-d", threadId: "thread-d" } });
+    });
+    const { ctx } = ctxWith({ get, post });
+    return { ctx, post, lookups, writes };
+  }
+
+  it("an address resolves to its member: a direct thread with them, sent as the acting user", async () => {
+    const w = world();
+    const r = await sendMessage.handler(
+      { recipients: ["dave@example.com"], body: "Server maintenance tonight at 10pm", confirmed: true },
+      w.ctx,
+    );
+    if (!r.ok) throw new Error(`expected a successful ToolResult, got ${JSON.stringify(r)}`);
+    expect(w.post).toHaveBeenCalledWith(
+      "/api/team-chat/contacts/lookup",
+      { emails: ["dave@example.com"] },
+      expect.objectContaining({ headers: expect.objectContaining({ "X-Droplet-User": "alice" }) }),
+    );
+    expect(w.writes[0]).toEqual({
+      path: "/api/team-chat/threads",
+      body: { kind: "direct", participantIds: ["uuid-dave"] },
+    });
+    expect(r.data).toMatchObject({ recipients: ["dave"] });
+  });
+
+  it("the approval preview names the member, and nothing is written", async () => {
+    const w = world();
+    const r = await sendMessage.handler({ recipients: ["dave@example.com"], body: "hi" }, w.ctx);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
+    expect(r.status).toBe("confirmation_required");
+    expect(r.error?.message).toContain("Dave Ortiz");
+    expect(r.error?.details).toMatchObject({ recipients: ["dave"] });
+    expect(w.writes).toEqual([]);
+  });
+
+  it("an address that is no member's is refused before approval, with the email suggestion", async () => {
+    const w = world();
+    const early = await sendMessage.precheck!({ recipients: ["stranger@example.com"], body: "hi" }, w.ctx);
+    expect(early).toEqual({
+      ok: false,
+      status: "error",
+      error: {
+        code: "RECIPIENT_NOT_A_MEMBER",
+        message:
+          "stranger@example.com isn't a member of this Workspace; team chat only reaches members — ask the user whether to email them instead.",
+      },
+    });
+    expect(w.writes).toEqual([]);
+  });
+
+  it("phase 2 refuses the same address, with no write", async () => {
+    const w = world();
+    const r = await sendMessage.handler(
+      { recipients: ["stranger@example.com"], body: "hi", confirmed: true },
+      w.ctx,
+    );
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
+    expect(r.error?.code).toBe("RECIPIENT_NOT_A_MEMBER");
+    expect(w.writes).toEqual([]);
+  });
+
+  it("an unknown username is refused before approval too", async () => {
+    const w = world();
+    const early = await sendMessage.precheck!({ recipients: ["nobody"], body: "hi" }, w.ctx);
+    expect(errorOf(early).code).toBe("UNKNOWN_RECIPIENT");
+    expect(w.lookups).toEqual([]);
+  });
+
+  it("usernames are unchanged: no lookup", async () => {
+    const w = world();
+    const r = await sendMessage.handler({ recipients: ["bob"], body: "hi", confirmed: true }, w.ctx);
+    expect(r.ok).toBe(true);
+    expect(w.lookups).toEqual([]);
+    expect(w.writes[0]?.body).toEqual({ kind: "direct", participantIds: ["uuid-bob"] });
+  });
+
+  it("a roster username wins over the address reading, even one containing @", async () => {
+    const w = world({
+      ...ROSTER,
+      contacts: [...ROSTER.contacts, { id: "uuid-legacy", displayName: "Old Account", username: "ops@legacy" }],
+    });
+    const r = await sendMessage.handler({ recipients: ["ops@legacy"], body: "hi", confirmed: true }, w.ctx);
+    expect(r.ok).toBe(true);
+    expect(w.lookups).toEqual([]);
+    expect(w.writes[0]?.body).toEqual({ kind: "direct", participantIds: ["uuid-legacy"] });
+  });
+
+  it("a mixed list: usernames stay, only the addresses are looked up, one group", async () => {
+    const w = world();
+    const r = await sendMessage.handler(
+      { recipients: ["bob", "dave@example.com"], body: "standup?", confirmed: true },
+      w.ctx,
+    );
+    expect(r.ok).toBe(true);
+    expect(w.lookups).toEqual([["dave@example.com"]]);
+    expect(w.writes[0]?.body).toEqual({ kind: "group", participantIds: ["uuid-bob", "uuid-dave"] });
+  });
+
+  it("one person named by username and by address (any case) is messaged once, directly", async () => {
+    const w = world();
+    const r = await sendMessage.handler(
+      { recipients: ["dave", "Dave@Example.COM"], body: "hi", confirmed: true },
+      w.ctx,
+    );
+    if (!r.ok) throw new Error(`expected a successful ToolResult, got ${JSON.stringify(r)}`);
+    expect(w.lookups).toEqual([["Dave@Example.COM"]]);
+    expect(w.writes[0]?.body).toEqual({ kind: "direct", participantIds: ["uuid-dave"] });
+    expect(r.data).toMatchObject({ recipients: ["dave"] });
+  });
+
+  it("a mixed list with one outsider is refused whole, naming only the outsider", async () => {
+    const w = world();
+    const early = await sendMessage.precheck!(
+      { recipients: ["bob", "dave@example.com", "x@other.org"], body: "hi" },
+      w.ctx,
+    );
+    expect(errorOf(early).code).toBe("RECIPIENT_NOT_A_MEMBER");
+    expect(errorOf(early).message).toMatch(/^x@other\.org isn't a member/);
+    expect(errorOf(early).message).not.toContain("dave@example.com");
+  });
+
+  it("an external guest is never looked up for: they get the rule instead (WARP-3263)", async () => {
+    const w = world({
+      contacts: [{ id: "uuid-bob", displayName: "Bob B" }],
+      me: { id: "uuid-carol" },
+      canStartConversation: false,
+    });
+    const early = await sendMessage.precheck!({ recipients: ["bob@example.com"], body: "hi" }, w.ctx);
+    expect(errorOf(early).code).toBe("GUEST_CANNOT_START_CONVERSATION");
+    expect(w.post).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["the module is off", () => res(404, {}), "TEAM_CHAT_UNAVAILABLE"],
+    ["a server error", () => res(500, {}), "TEAM_CHAT_SEND_FAILED"],
+    ["a row count that does not match", () => res(200, { contacts: [] }), "TEAM_CHAT_SEND_FAILED"],
+  ])("a lookup that fails (%s) is refused before approval", async (_label, answer, code) => {
+    const w = world(ROSTER, answer);
+    const early = await sendMessage.precheck!({ recipients: ["dave@example.com"], body: "hi" }, w.ctx);
+    expect(errorOf(early).code).toBe(code);
+  });
+
+  it("precheck never writes, even when the model already set confirmed: true", async () => {
+    const w = world();
+    const early = await sendMessage.precheck!(
+      { recipients: ["dave@example.com"], body: "hi", confirmed: true },
+      w.ctx,
+    );
+    expect(early).toBeNull();
+    expect(w.writes).toEqual([]);
+  });
+
+  it("precheck lets a thread_id send through to the approval, with no HTTP", async () => {
+    const w = world();
+    expect(await sendMessage.precheck!({ thread_id: "t-1", body: "hi" }, w.ctx)).toBeNull();
+    expect(w.post).not.toHaveBeenCalled();
   });
 });
