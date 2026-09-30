@@ -438,13 +438,15 @@ describe("team_chat_send_message — a roster that does not say who is asking", 
  * these green. MUTATION: drop any one clause and its assertion goes red.
  */
 describe("WARP-3340 — team chat is the default channel, email only when asked", () => {
-  it("team_chat_send_message is the default and takes usernames or work addresses (WARP-3349)", () => {
+  it("team_chat_send_message is the default and takes usernames or addresses of people in the Workspace (WARP-3349)", () => {
     expect(sendMessage.description).toContain("use email only when the user asks for email");
-    expect(sendMessage.description).toContain("member usernames or their work email addresses");
+    expect(sendMessage.description).toContain("usernames or email addresses of people in this Workspace");
     expect(sendMessage.description).toContain("never guess one from a job title");
     const recipients = (sendMessage.inputSchema as { properties: { recipients: { description: string } } })
       .properties.recipients;
-    expect(recipients.description).toContain("usernames or their work email addresses");
+    expect(recipients.description).toContain(
+      "Usernames or email addresses of people in this Workspace (members or external guests)",
+    );
   });
 
   it.each([emailSend, emailDraftReply])("$name is for a request for email, which a thread reply is", (tool) => {
@@ -457,18 +459,22 @@ describe("WARP-3340 — team chat is the default channel, email only when asked"
 /**
  * WARP-3349 — "message dave@company.com" reaches Dave over team chat. The
  * roster carries no email (User.email is encrypted at rest), so an address
- * is looked up by the orchestrator and replaced by the member's username;
- * an address that is no member's is refused BEFORE the person is asked to
- * approve (`precheck`, which the mcp-server runs ahead of the interceptor's
+ * is looked up by the orchestrator and replaced by that person's username,
+ * a member's or an external guest's (Romain, 2026-09-30); an address that is
+ * nobody's in the Workspace is refused BEFORE the person is asked to approve
+ * (`precheck`, which the mcp-server runs ahead of the interceptor's
  * challenge), with the email suggestion. The fake answers the lookup the way
- * the route does: trim + lowercase, members only, one row or null per
+ * the route does: trim + lowercase, ACTIVE people only, one row or null per
  * address, in order.
  */
-describe("WARP-3349 — a recipient given by work email address", () => {
+describe("WARP-3349 — a recipient given by email address", () => {
   const DAVE = { id: "uuid-dave", displayName: "Dave Ortiz", username: "dave" };
+  const CAROL = { id: "uuid-carol", displayName: "Carol C", username: "carol" };
   const ROSTER = { ...CONTACTS, contacts: [...CONTACTS.contacts, { ...DAVE, role: "family" }] };
-  const DIRECTORY: Record<string, typeof DAVE> = { "dave@example.com": DAVE };
-  const GUEST_ADDRESS = "carol@partner.example";
+  const DIRECTORY: Record<string, typeof DAVE> = {
+    "dave@example.com": DAVE,
+    "carol@partner.example": CAROL,
+  };
 
   function errorOf(r: ToolResult | null) {
     if (!r || r.ok) throw new Error(`expected a refusal, got ${JSON.stringify(r)}`);
@@ -485,12 +491,7 @@ describe("WARP-3349 — a recipient given by work email address", () => {
         lookups.push(emails);
         return lookup
           ? lookup(emails)
-          : res(200, {
-              contacts: emails.map((e) => {
-                const key = e.trim().toLowerCase();
-                return DIRECTORY[key] ?? (key === GUEST_ADDRESS ? { guest: true } : null);
-              }),
-            });
+          : res(200, { contacts: emails.map((e) => DIRECTORY[e.trim().toLowerCase()] ?? null) });
       }
       writes.push({ path, body });
       return path === "/api/team-chat/threads"
@@ -530,7 +531,7 @@ describe("WARP-3349 — a recipient given by work email address", () => {
     expect(w.writes).toEqual([]);
   });
 
-  it("an address that is no member's is refused before approval, with the email suggestion", async () => {
+  it("an address that is nobody's in the Workspace is refused before approval, with the email suggestion", async () => {
     const w = world();
     const early = await sendMessage.precheck!({ recipients: ["stranger@example.com"], body: "hi" }, w.ctx);
     expect(early).toEqual({
@@ -539,21 +540,21 @@ describe("WARP-3349 — a recipient given by work email address", () => {
       error: {
         code: "RECIPIENT_NOT_A_MEMBER",
         message:
-          "stranger@example.com isn't a member of this Workspace; team chat only reaches members — ask the user whether to email them instead.",
+          "stranger@example.com isn't in this Workspace; team chat only reaches people in it — ask the user whether to email them instead.",
       },
     });
     expect(w.writes).toEqual([]);
   });
 
-  it("a guest's address is refused truthfully: guests are reached by username only", async () => {
+  it("an external guest's address resolves to the guest and sends (Romain, 2026-09-30)", async () => {
     const w = world();
-    const early = await sendMessage.precheck!({ recipients: [GUEST_ADDRESS], body: "hi" }, w.ctx);
-    expect(errorOf(early)).toEqual({
-      code: "RECIPIENT_IS_GUEST",
-      message:
-        "carol@partner.example is an external guest in this Workspace; team chat reaches guests by username only — ask the user for the username, or whether to email them instead.",
-    });
-    expect(w.writes).toEqual([]);
+    const r = await sendMessage.handler(
+      { recipients: ["Carol@Partner.example"], body: "hi", confirmed: true },
+      w.ctx,
+    );
+    if (!r.ok) throw new Error(`expected a successful ToolResult, got ${JSON.stringify(r)}`);
+    expect(w.writes[0]?.body).toEqual({ kind: "direct", participantIds: ["uuid-carol"] });
+    expect(r.data).toMatchObject({ recipients: ["carol"] });
   });
 
   it.each([
@@ -647,7 +648,7 @@ describe("WARP-3349 — a recipient given by work email address", () => {
       w.ctx,
     );
     expect(errorOf(early).code).toBe("RECIPIENT_NOT_A_MEMBER");
-    expect(errorOf(early).message).toMatch(/^x@other\.org isn't a member/);
+    expect(errorOf(early).message).toMatch(/^x@other\.org isn't in this Workspace/);
     expect(errorOf(early).message).not.toContain("dave@example.com");
   });
 

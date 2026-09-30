@@ -44,7 +44,7 @@ const inputSchema = {
       type: "array",
       items: { type: "string" },
       description:
-        "Member usernames or their work email addresses. One recipient = a direct message (existing 1:1 threads are reused); several = a new group. Provide exactly one of recipients / thread_id.",
+        "Usernames or email addresses of people in this Workspace (members or external guests). One recipient = a direct message (existing 1:1 threads are reused); several = a new group. Provide exactly one of recipients / thread_id.",
     },
     thread_id: {
       type: "string",
@@ -69,8 +69,9 @@ const inputSchema = {
  * Recipients → the roster rows the thread is with (sender dropped, unknown
  * names refused). WARP-3349: the roster has no email column (User.email is
  * encrypted at rest, WARP-233), so a recipient that is not a username but
- * contains "@" is looked up by the orchestrator (`findUserByEmail`, the
- * blind index) and replaced by that member's username. The addresses go in
+ * is shaped like an address is looked up by the orchestrator
+ * (`findUserByEmail`, the blind index) and replaced by that person's
+ * username, a member's or an external guest's. The addresses go in
  * a POST body, never a URL, so they stay out of the request log. A guest
  * caller is never looked up for; resolveRecipients answers with the rule.
  */
@@ -260,7 +261,7 @@ async function handler(
 const tool: Tool = {
   name: "team_chat_send_message",
   description:
-    "Send a Messages (team chat) text to other members on the user's behalf. The default way to message, tell or send something to a colleague, even one named by email address; use email only when the user asks for email. recipients = member usernames or their work email addresses; never guess one from a job title, ask who is meant (one = direct message, several = a new group), or pass thread_id to continue an existing conversation. Two-step: the first call returns confirmation_required previewing the recipients and text — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Send a Messages (team chat) text to other members on the user's behalf. The default way to message, tell or send something to a colleague, even one named by email address; use email only when the user asks for email. recipients = usernames or email addresses of people in this Workspace; never guess one from a job title, ask who is meant (one = direct message, several = a new group), or pass thread_id to continue an existing conversation. Two-step: the first call returns confirmation_required previewing the recipients and text — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

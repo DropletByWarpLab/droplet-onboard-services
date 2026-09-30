@@ -142,7 +142,7 @@ export function previewRecipients(
 const ADDRESS_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
- * WARP-3349 — the recipients to look up as a member's work email address:
+ * WARP-3349 — the recipients to look up as someone's email address:
  * those that match no roster username and are shaped like an address.
  * Usernames never contain "@" (invite, SSO and SCIM keep [A-Za-z0-9._-]),
  * and a roster username still wins, so a typed username never takes this
@@ -163,18 +163,14 @@ export type AddressLookup =
   | { ok: true; usernames: string[] }
   | { ok: false; result: ToolResult };
 
-/** A lookup row: a member, `{ guest: true }` for an external guest's address, or null. */
-type LookupRow = { username?: string; guest?: boolean } | null;
-
 /**
- * WARP-3349 — map POST /api/team-chat/contacts/lookup (one row per address,
- * in order) back onto `recipients`: each address becomes its member's
- * username, deduplicated, so "dave" and "dave@company.com" are one person.
- * An address that is no ACTIVE owner's, admin's or member's is refused, and
- * the model is told to offer email instead (Romain, 2026-09-29: team chat by
- * default, email only when the person asks). A guest's address is refused
- * too (only members are reached by address), but truthfully: a guest can
- * still be messaged by username.
+ * WARP-3349 — map POST /api/team-chat/contacts/lookup (one row or `null`
+ * per address, in order) back onto `recipients`: each address becomes its
+ * person's username, deduplicated, so "dave" and "dave@company.com" are one
+ * person. The route answers for everyone ACTIVE in the Workspace, external
+ * guests included (Romain, 2026-09-30). An address that is nobody's there
+ * is refused, and the model is told to offer email instead (Romain,
+ * 2026-09-29: team chat by default, email only when the person asks).
  */
 export async function readLookupResponse(
   res: TeamChatHttpResponse,
@@ -188,7 +184,7 @@ export async function readLookupResponse(
     return { ok: false, result: err("AUTH_REQUIRED", "auth_required") };
   }
   const body = res.ok
-    ? ((await res.json().catch(() => null)) as { contacts?: LookupRow[] } | null)
+    ? ((await res.json().catch(() => null)) as { contacts?: (RosterContact | null)[] } | null)
     : null;
   const rows = body?.contacts;
   if (!Array.isArray(rows) || rows.length !== addresses.length) {
@@ -197,30 +193,20 @@ export async function readLookupResponse(
       result: err("TEAM_CHAT_SEND_FAILED", `orchestrator returned ${res.status}`),
     };
   }
-  const byAddress = new Map(addresses.map((a, i) => [a, rows[i] ?? null]));
-  const outside = addresses.filter((a) => !byAddress.get(a)?.username && !byAddress.get(a)?.guest);
+  const byAddress = new Map(addresses.map((a, i) => [a, rows[i]?.username ?? null]));
+  const outside = addresses.filter((a) => byAddress.get(a) === null);
   if (outside.length > 0) {
     return {
       ok: false,
       result: err(
         "RECIPIENT_NOT_A_MEMBER",
-        `${outside.join(", ")} ${outside.length === 1 ? "isn't a member" : "aren't members"} of this Workspace; team chat only reaches members — ask the user whether to email them instead.`,
-      ),
-    };
-  }
-  const guests = addresses.filter((a) => byAddress.get(a)?.guest);
-  if (guests.length > 0) {
-    return {
-      ok: false,
-      result: err(
-        "RECIPIENT_IS_GUEST",
-        `${guests.join(", ")} ${guests.length === 1 ? "is an external guest" : "are external guests"} in this Workspace; team chat reaches guests by username only — ask the user for the username, or whether to email them instead.`,
+        `${outside.join(", ")} ${outside.length === 1 ? "isn't" : "aren't"} in this Workspace; team chat only reaches people in it — ask the user whether to email them instead.`,
       ),
     };
   }
   return {
     ok: true,
-    usernames: [...new Set(recipients.map((r) => byAddress.get(r)?.username ?? r))],
+    usernames: [...new Set(recipients.map((r) => byAddress.get(r) ?? r))],
   };
 }
 

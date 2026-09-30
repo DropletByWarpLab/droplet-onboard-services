@@ -364,12 +364,13 @@ describe("the real team-chat tools against the real router drop the sender by id
  * WARP-3349 — "message bob@acme.test" reaches Bob over team chat. The roster
  * has no email column (User.email is encrypted at rest, WARP-233), so
  * POST /team-chat/contacts/lookup resolves each address with findUserByEmail
- * (the emailLookupHash blind index) to an ACTIVE owner, admin or member, and
- * the tool refuses anyone else before the person is asked to approve. The
- * rows here are written the way every writer writes them (emailWriteData), so
- * the route reads the real blind index, under a test key.
+ * (the emailLookupHash blind index) to an ACTIVE owner, admin, member or
+ * external guest (Romain, 2026-09-30), and the tool refuses anyone else
+ * before the person is asked to approve. The rows here are written the way
+ * every writer writes them (emailWriteData), so the route reads the real
+ * blind index, under a test key.
  */
-describe("WARP-3349 — a colleague given by work email address", () => {
+describe("WARP-3349 — a colleague given by email address", () => {
   beforeAll(() => __setColumnCryptoKeyForTest(Buffer.alloc(32, 7).toString("base64")));
   afterAll(() => __setColumnCryptoKeyForTest(null));
 
@@ -382,26 +383,43 @@ describe("WARP-3349 — a colleague given by work email address", () => {
     directoryStatus: "DEACTIVATED",
     email: "dan@acme.test",
   };
+  const ERIN: Person = {
+    id: "5b0d6c1e-0000-4000-8000-0000000000e5",
+    username: "erin",
+    nextcloudUsername: null,
+    displayName: "Erin",
+    role: "guest",
+    directoryStatus: "DEACTIVATED",
+    email: "erin@partner.test",
+  };
   const WITH_EMAIL: Person[] = [
     { ...ALICE, email: "alice@acme.test" },
     { ...BOB, email: "bob@acme.test" },
     { ...CAROL, email: "carol@partner.test" },
     DAN,
+    ERIN,
   ];
   const lookup = (user: AuthUser, prisma: PrismaDouble, emails: unknown) =>
     request(appAs(user, prisma)).post("/api/team-chat/contacts/lookup").send({ emails });
 
-  it("answers a member's address in any case or spacing, only `guest` for a guest's, null otherwise, in order", async () => {
+  it("answers a member's or a guest's address in any case or spacing, null for nobody or the deactivated, in order", async () => {
     const prisma = prismaDouble(WITH_EMAIL);
     const res = await lookup(asSession(ALICE), prisma, [
       " Bob@ACME.test ",
       "nobody@acme.test",
-      "carol@partner.test",
+      "CAROL@partner.test",
       "dan@acme.test",
+      "erin@partner.test",
     ]);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
-      contacts: [{ id: BOB.id, displayName: "Bob", username: "bob" }, null, { guest: true }, null],
+      contacts: [
+        { id: BOB.id, displayName: "Bob", username: "bob" },
+        null,
+        { id: CAROL.id, displayName: "Carol", username: "carol" },
+        null,
+        null,
+      ],
     });
     // One blind-index probe per address; the table is never read whole.
     expect(prisma.user.findMany).not.toHaveBeenCalled();
@@ -449,14 +467,25 @@ describe("WARP-3349 — a colleague given by work email address", () => {
     expect(r.data).toMatchObject({ recipients: ["bob"] });
   });
 
+  it("the real tool reaches an external guest given by address (Romain, 2026-09-30)", async () => {
+    const prisma = prismaDouble(WITH_EMAIL);
+    const r = await sendMessage.handler(
+      { recipients: ["carol@partner.test"], body: "Your badge is at reception", confirmed: true },
+      toolCtx(prisma, ALICE),
+    );
+    if (!r.ok) throw new Error(`expected a successful ToolResult, got ${JSON.stringify(r)}`);
+    expect(prisma.threads).toEqual([{ id: "th-1", kind: "direct", participantIds: [ALICE.id, CAROL.id] }]);
+    expect(r.data).toMatchObject({ recipients: ["carol"] });
+  });
+
   it.each([
-    ["nobody's", "nobody@acme.test", "RECIPIENT_NOT_A_MEMBER"],
-    ["an external guest's", "carol@partner.test", "RECIPIENT_IS_GUEST"],
-    ["a deactivated person's", "dan@acme.test", "RECIPIENT_NOT_A_MEMBER"],
-  ])("the real precheck refuses %s address before approval, with no thread", async (_label, address, code) => {
+    ["nobody's", "nobody@acme.test"],
+    ["a deactivated member's", "dan@acme.test"],
+    ["a deactivated guest's", "erin@partner.test"],
+  ])("the real precheck refuses %s address before approval, with no thread", async (_label, address) => {
     const prisma = prismaDouble(WITH_EMAIL);
     const early = await sendMessage.precheck!({ recipients: [address], body: "hi" }, toolCtx(prisma, ALICE));
-    expect(early).toMatchObject({ ok: false, status: "error", error: { code } });
+    expect(early).toMatchObject({ ok: false, status: "error", error: { code: "RECIPIENT_NOT_A_MEMBER" } });
     expect(prisma.teamChatThread.create).not.toHaveBeenCalled();
   });
 
