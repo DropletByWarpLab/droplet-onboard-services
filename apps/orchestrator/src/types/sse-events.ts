@@ -113,8 +113,9 @@ export type SSEEvent =
    * BEFORE it is sent; this frame fires only when the correction failed and
    * the false sentence went out with a status line appended after it.
    *
-   * `unsupported`  the turn attempted no write at all.
-   * `contradicted` it attempted writes, and they did not run.
+   * `unsupported`  none of the claimed actions was attempted.
+   * `contradicted` a claimed action was attempted and did not run (waiting
+   *                for approval, declined, refused or failed).
    *
    * The loop guards the INPUT side of tool use thoroughly (WARP-1529 RBAC,
    * WARP-642 hallucinated names, WARP-1480 error logging) and had nothing on
@@ -133,7 +134,7 @@ export type SSEEvent =
       status: "unsupported" | "contradicted";
       /** The model's own sentences that triggered it. Capped at 160 chars. */
       claims: string[];
-      /** The writes the turn attempted (empty for `unsupported`). */
+      /** The claimed writes that were attempted and did not run (empty for `unsupported`). */
       tools: string[];
     }
   | {

@@ -1314,7 +1314,7 @@ types on the same stream — render or ignore as needed:
 | `tool_result` | `{ id, ok, data?, status?, message? }` | That tool's result |
 | `reasoning_step` | `{ text }` | One deep-reasoning step (only when `captureReasoning:true`; emitted BEFORE `content_delta` on the turn) |
 | `model_loading` | `{ model, sizeGb }` | WARP-903 — the selected model needs a cold load (30-60 s to first token). Emitted first, at most once; render a loading state until the next frame, or ignore. `sizeGb` is decimal GB or null |
-| `tool_use_validation` | `{ status, claims, tools }` | WARP-2544 / WARP-3348 — the delivered answer still claims a completed action the tool trace does not support (its correction pass failed, so a status line was appended). At most once per turn, immediately BEFORE `done`. `status` is `"unsupported"` (the turn attempted no write) or `"contradicted"` (it attempted writes that did not run). See the note below |
+| `tool_use_validation` | `{ status, claims, tools }` | WARP-2544 / WARP-3348 — the delivered answer still claims a completed action the tool trace does not support (its correction pass failed, so a status line was appended). At most once per turn, immediately BEFORE `done`. `status` is `"unsupported"` (none of the claimed actions was attempted) or `"contradicted"` (a claimed action was attempted and did not run: waiting for approval, declined, refused or failed); `tools` lists those writes. See the note below |
 | `done` | `{ iterations, stop_reason, error? }` | Terminal frame |
 
 **`tool_use_validation` is ADVISORY, not a retraction.** Since WARP-3348 the
@@ -1331,7 +1331,7 @@ It exists because the tools on this product are physical (cameras, locks,
 network rules, power), so a model sentence claiming an action that never
 succeeded is a safety and trust problem rather than a cosmetic one. `claims`
 carries the model's own sentences that triggered it (capped at 160 chars each)
-and `tools` names the writes the turn attempted.
+and `tools` names the claimed writes that were attempted and did not run.
 
 Native clients should detect end-of-stream on `event: done` /
 `stop_reason` (the v1 clients keyed on `finishReason`, which never arrives,

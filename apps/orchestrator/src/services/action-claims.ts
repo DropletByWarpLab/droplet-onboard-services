@@ -22,23 +22,34 @@
  * an inference call, so every rule errs toward "not a claim":
  *   - past or perfect tense only, first person ("I've sent", "I deleted") or a
  *     perfect passive ("has been created"); never future, modal or conditional;
- *   - quoted text, `>` quote lines, code blocks and reported speech ("she
- *     wrote …") are not the assistant's claims and are removed first;
- *   - a clause with a negation, an offer, a condition or approval wording is
- *     skipped; a sentence with a question mark, a time reference or a
+ *   - quoted text, `>` quote lines and code blocks are not the assistant's
+ *     claims; neither is what follows a third party's reporting verb ("Bob
+ *     wrote …", "the ticket says …"), while "you said" / "you mentioned" is
+ *     the person, and the claim around it still counts;
+ *   - a clause with a negation, an offer or a condition is skipped; a sentence
+ *     with a question mark, pending-approval wording ("waiting for your
+ *     approval"), a time expression ("earlier", "since March") or a
  *     "below/above" pointer is skipped whole;
  *   - "sent", "deleted" and real-world state changes ("disabled", "locked",
- *     "scheduled") are STRICT: flagged when nothing of that family ran. The
- *     other change verbs ("created", "updated", "added", "drafted") also
- *     describe edits to the model's own text ("I've updated the draft:"), so
- *     they, and every passive, are flagged only when this turn attempted a
- *     write of that family and it did not run;
- *   - a claim is backed when a write of its family ran; a "change" claim by
- *     any write that ran, since "I moved it to the trash" describes a delete.
+ *     "scheduled", "approved") are STRICT: flagged when nothing of that
+ *     family ran. The other change verbs ("created", "updated", "added",
+ *     "drafted") also describe edits to the model's own text ("I've updated
+ *     the draft:"), so they, and every passive, are flagged only when this
+ *     turn attempted a write of that family and it did not run;
+ *   - every family a sentence claims is checked ("I've emailed Dave and I've
+ *     cancelled the meeting" is two claims).
  *
  * Families come from write metadata, not a per-tool list: the caller says
  * which tools write (the loop's catalog + runtime classification), and a
  * write's family is the verb in its name (send / delete, else "change").
+ * "Sent" and "deleted" need their own family to have run; a state change a
+ * change or a delete ("I've cancelled the meeting" via `delete_event`); an
+ * edit claim any write ("I moved it to the trash" describes a delete).
+ *
+ * KNOWN GAPS, accepted: claims without a first-person subject ("✅ Sent the
+ * report", a bullet "- Deleted 3 files", "Email sent to Dave"); a second verb
+ * sharing one subject ("I've emailed Dave and cancelled …" checks the first);
+ * plain past passives ("was sent"); answers not in English.
  */
 import type { AgentTraceEntry } from "../types/agent-trace.js";
 
@@ -57,7 +68,7 @@ export type WriteOutcome =
   | "executed"
   | "pending" // waiting for the person's thumbs-up
   | "declined" // the person said no (a durable run's CONFIRMATION_DENIED)
-  | "forbidden" // refused for lack of permission (role, handler, deny tier)
+  | "forbidden" // refused for lack of permission (role, handler, deny tier, remote policy)
   | "failed"
   | "unclear"; // may or may not have run: a timeout, a thrown dispatch
 
@@ -76,6 +87,7 @@ const DELETE_VERBS = "deleted|erased|trashed|purged|wiped";
 const STATE_VERBS = [
   "scheduled", "rescheduled", "booked", "cancell?ed", "canceled", "blocked", "unblocked",
   "enabled", "disabled", "locked", "unlocked", "restarted", "rebooted", "armed", "disarmed",
+  "approved",
   // "turned the camera off" — only with on/off somewhere after it.
   String.raw`(?:turned|switched)(?=.*\b(?:on|off)\b)`,
 ].join("|");
@@ -91,7 +103,7 @@ const EDIT_VERBS = [
 
 const ADVERBS = String.raw`(?:(?:just|already|now|also|successfully|finally|gone ahead and)\s+)*`;
 const firstPerson = (verbs: string) =>
-  new RegExp(String.raw`(?:\bi(?:'ve| have| had)?\s+${ADVERBS}|^\s*successfully\s+)(?:${verbs})\b`);
+  new RegExp(String.raw`(?:\bi(?:'ve| have| had)?\s+${ADVERBS}|^\s*(?:and\s+)?successfully\s+)(?:${verbs})\b`);
 const perfectPassive = (verbs: string) =>
   new RegExp(String.raw`\b(?:has|have)\s+${ADVERBS}been\s+${ADVERBS}(?:${verbs})\b|\b(?:was|were)\s+successfully\s+(?:${verbs})\b`);
 
@@ -109,28 +121,35 @@ const PATTERNS = (
   passive: perfectPassive(verbs),
 }));
 
-/** Skips the CLAUSE: negated, hedged, conditional, or an offer. */
+/** Skips the CLAUSE: negated, hedged, conditional, an offer, or addressed to the person. */
 const CLAUSE_NOT_A_CLAIM = new RegExp(
   [
     String.raw`n't\b|\b(?:not|no|never|nothing|none|neither|nor|without|unable|cannot|failed|failure)\b`,
     // offers, modals, conditionals — "it would have been sent", "once you approve"
     String.raw`\b(?:will|would|could|should|might|may|must|shall|going to|about to|ready to|once|if|unless|until|when you|after you)\b`,
     String.raw`\b(?:let me know|would you like|do you want|want me to)\b`,
+    // "I've shared the steps with you" is the answer itself, not a send
+    String.raw`\bshared\b.*\bwith you\b`,
   ].join("|"),
 );
 /**
- * Skips the SENTENCE: the approval step (it qualifies the whole sentence:
- * "I've saved the fact, pending your approval" is honest), another time, a
- * pointer at the answer, reported speech.
+ * Skips the SENTENCE: pending approval (it qualifies the whole sentence: "I've
+ * saved the fact, pending your approval" is honest), a time expression, a
+ * pointer at the answer itself.
  */
 const SENTENCE_NOT_A_CLAIM = new RegExp(
   [
-    String.raw`\b(?:pending|waiting|awaiting|await|approv\w*|confirm\w*)\b`,
-    String.raw`\b(?:earlier|previously|before|yesterday|ago|since|last (?:time|week|month|year|night)|in the past|originally)\b`,
+    String.raw`\b(?:pending|awaiting|waiting (?:for|on)|(?:needs?|requires?) (?:your )?(?:approval|confirmation|sign-off|thumbs-up)|approval (?:request|prompt)|(?:for|until|after) your (?:approval|confirmation)|please (?:approve|confirm))\b`,
+    String.raw`\b(?:earlier|previously|yesterday|ago|last (?:time|week|month|year|night)|in the past|originally)\b`,
+    String.raw`\b(?:since|before) (?:then|today|yesterday|last|this|the (?:start|beginning|end)|\d|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b|(?:mon|tues|wednes|thurs|fri|satur|sun)day)`,
     String.raw`\b(?:below|above|in this (?:answer|reply|message|response))\b`,
-    String.raw`\b(?:says|said|wrote|writes|replied|replies|states|stated|mentions|mentioned|according to)\b`,
   ].join("|"),
 );
+/**
+ * A third party's reporting verb: what follows it is reported, not claimed.
+ * "You said / you mentioned" is the person talking to us, so it does not cut.
+ */
+const REPORTED = /(?<!\byou\s)\b(?:says|said|wrote|writes|replied|replies|states|stated|mentions|mentioned|reads|according to)\b/;
 /** Extra skips for the passive voice, which also describes records read back. */
 const PASSIVE_NOT_A_CLAIM =
   /\bby\b|\b(?:19|20)\d\d\b|\b(?:that|which|who)\s+(?:has|have)\s+been\b|\bon (?:mon|tue|wed|thu|fri|sat|sun)/;
@@ -152,41 +171,39 @@ function withoutQuotedText(answer: string): string {
   return answer
     .replace(/```[\s\S]*?(?:```|$)/g, " ")
     .replace(/^[ \t]*>.*$/gm, " ")
-    .replace(/“[^”]*”|"[^"\n]*"|‘[^’\n]*’/g, " ")
+    .replace(/“[^”\n]*”|"[^"\n]*"|‘[^’\n]*’/g, " ")
     // straight single quotes only as a pair around words, never an apostrophe
     .replace(/(^|[\s(:])'[^'\n]*'(?=[\s.,;:!?)]|$)/g, "$1 ");
 }
 
 /**
- * Completed-action claims in `answer`, one per sentence (the first family that
- * matches). Sentence scope keeps an honest "I couldn't send it." from
- * suppressing a false claim two sentences later; clause scope keeps "…; let
- * me know if you need anything else" from hiding the claim before it.
+ * Completed-action claims in `answer`: one per distinct family (and
+ * strictness) per sentence. Sentence scope keeps an honest "I couldn't send
+ * it." from suppressing a false claim two sentences later; clause scope keeps
+ * "…, let me know if you need anything else" from hiding the claim before it.
  */
 export function detectActionClaims(answer: string): ActionClaim[] {
   const claims: ActionClaim[] = [];
   for (const sentence of withoutQuotedText(answer).split(/(?<=[.!?:;])\s+|\n+/)) {
-    const s = normalize(sentence).trim();
+    let s = normalize(sentence).trim();
     if (!s || s.endsWith("?")) continue;
     if (PERMISSION_CHECK.test(s) && !HARD_NEGATION.test(s)) {
       claims.push({ sentence: sentence.trim(), family: "permission_check", strict: true });
       continue;
     }
     if (SENTENCE_NOT_A_CLAIM.test(s)) continue;
+    const reported = REPORTED.exec(s);
+    if (reported) s = s.slice(0, reported.index);
     const passiveAllowed = !PASSIVE_NOT_A_CLAIM.test(s);
-    const claim = s
-      .split(/,|\s[—–-]\s|\s+but\s+/)
-      .filter((clause) => !CLAUSE_NOT_A_CLAIM.test(clause))
-      .flatMap((clause) =>
-        PATTERNS.flatMap((p) =>
-          p.firstPerson.test(clause)
-            ? [{ family: p.family, strict: p.strict }]
-            : passiveAllowed && p.passive.test(clause)
-              ? [{ family: p.family, strict: false }]
-              : [],
-        ),
-      )[0];
-    if (claim) claims.push({ sentence: sentence.trim(), ...claim });
+    const found = new Map<string, Omit<ActionClaim, "sentence">>();
+    for (const clause of s.split(/,|\s[—–-]\s|\s+but\s+/)) {
+      if (CLAUSE_NOT_A_CLAIM.test(clause)) continue;
+      for (const p of PATTERNS) {
+        const strict = p.firstPerson.test(clause) ? p.strict : passiveAllowed && p.passive.test(clause) ? false : null;
+        if (strict !== null) found.set(`${p.family}:${strict}`, { family: p.family, strict });
+      }
+    }
+    for (const c of found.values()) claims.push({ sentence: sentence.trim(), ...c });
   }
   return claims;
 }
@@ -195,45 +212,56 @@ export function detectActionClaims(answer: string): ActionClaim[] {
 
 /** The loop's own control envelopes: the call never reached a tool. */
 const GUARD_CODES = new Set(["UNKNOWN_TOOL", "TOOL_NOW_AVAILABLE", "REPEATED_CALL"]);
+/** Blocked by the box's policy (deny tier, a remote server's policy) rather than the person's role. */
+const POLICY_CODES = new Set([
+  "TOOL_DENIED",
+  "REMOTE_WRITE_NOT_PERMITTED",
+  "REMOTE_TOOL_DENIED",
+  "REMOTE_TOOL_NOT_CLASSIFIED",
+  "REMOTE_TOOL_EXCLUDED_FROM_V1",
+]);
 /**
  * Refused for lack of permission. The loop's role gate (tool-access.service),
- * a handler's 403, the interceptor's deny tier, and a remote server's policy.
+ * a handler's 403, and the policy codes above.
  */
 const FORBIDDEN_CODES = new Set([
   "FORBIDDEN",
   "FORBIDDEN_TOOL_FOR_ROLE",
   "LOCK_OPERATION_NOT_PERMITTED",
-  "TOOL_DENIED",
-  "REMOTE_WRITE_NOT_PERMITTED",
-  "REMOTE_TOOL_DENIED",
+  ...POLICY_CODES,
 ]);
-/** Blocked by the box's policy rather than by the person's role. */
-const POLICY_CODES = new Set(["TOOL_DENIED", "REMOTE_WRITE_NOT_PERMITTED", "REMOTE_TOOL_DENIED"]);
 /** The write may have landed anyway (WARP-3284's malformed body says so too). */
-const UNCLEAR_CODES = new Set(["TIMEOUT", "TOOL_OUTPUT_MALFORMED"]);
+const UNCLEAR_CODES = new Set(["TIMEOUT", "TOOL_OUTPUT_MALFORMED", "tool_dispatch_failed"]);
 
 const SEND_TOOL = /(?:^|_)(?:send|message|notif\w*|share|forward|invite|post)(?:_|$)/;
 const DELETE_TOOL = /(?:^|_)(?:delete|remove|forget|purge|trash|erase|wipe)(?:_|$)/;
 
-/** A write tool's claim family: the verb in its name. */
+/** A write tool's claim family: the verb in its name (snake_case or camelCase). */
 export function writeFamilyOf(tool: string): ClaimFamily {
-  return SEND_TOOL.test(tool) ? "send" : DELETE_TOOL.test(tool) ? "delete" : "change";
+  const words = tool.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+  return SEND_TOOL.test(words) ? "send" : DELETE_TOOL.test(words) ? "delete" : "change";
 }
 
-function outcomeOf(result: unknown): WriteOutcome | "guard" {
-  if (result === null || typeof result !== "object") return "executed";
-  const r = result as { status?: unknown; error?: unknown };
-  // ORCH-05: a thrown dispatch carries a string `error` — the call may have run.
-  if (typeof r.error === "string") return "unclear";
+/** The error code on a result: `{error:{code}}`, or the multiplexer's `{error:"CODE"}`. */
+function codeOf(result: unknown): string | undefined {
+  const e = (result as { error?: unknown } | null)?.error;
+  const code = typeof e === "string" ? e : (e as { code?: unknown } | undefined)?.code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function outcomeOf(result: unknown, isError: boolean): WriteOutcome | "guard" {
+  const r = result !== null && typeof result === "object" ? (result as { status?: unknown; error?: unknown }) : {};
+  const code = codeOf(result);
   if (r.status === "confirmation_required") return "pending";
-  if (r.status !== "error") return "executed";
-  const code = (r.error as { code?: unknown } | undefined)?.code;
-  if (typeof code !== "string") return "failed";
-  if (GUARD_CODES.has(code)) return "guard";
-  if (code === "CONFIRMATION_DENIED") return "declined";
-  if (FORBIDDEN_CODES.has(code)) return "forbidden";
-  if (UNCLEAR_CODES.has(code)) return "unclear";
-  return "failed";
+  if (code !== undefined && (typeof r.error === "string" || r.status === "error")) {
+    if (GUARD_CODES.has(code)) return "guard";
+    if (code === "CONFIRMATION_DENIED") return "declined";
+    if (FORBIDDEN_CODES.has(code)) return "forbidden";
+    if (UNCLEAR_CODES.has(code)) return "unclear";
+    return "failed";
+  }
+  // A remote tool's plain-text failure arrives as {raw}: only isError says so.
+  return r.status === "error" || isError ? "failed" : "executed";
 }
 
 /** Every write attempted, in order; reads and the loop's guard hits dropped. */
@@ -243,15 +271,10 @@ export function writeAttempts(
 ): WriteAttempt[] {
   const out: WriteAttempt[] = [];
   for (const t of trace) {
-    const outcome = outcomeOf(t.result);
+    const outcome = outcomeOf(t.result, t.isError === true);
     if (!isWrite(t.tool) || outcome === "guard") continue;
-    const code = (t.result as { error?: { code?: unknown } } | null)?.error?.code;
-    out.push({
-      tool: t.tool,
-      family: writeFamilyOf(t.tool),
-      outcome,
-      ...(typeof code === "string" ? { code } : {}),
-    });
+    const code = codeOf(t.result);
+    out.push({ tool: t.tool, family: writeFamilyOf(t.tool), outcome, ...(code ? { code } : {}) });
   }
   return out;
 }
@@ -270,11 +293,19 @@ export interface ClaimCheckOptions {
   /** Which tools write: the loop's catalog + runtime classification. */
   isWrite: (tool: string) => boolean;
   /**
-   * Tools an earlier turn of this conversation actually ran (ok, not a pending
-   * approval). A strict claim of a family this turn did not attempt gets the
-   * benefit of the doubt for those: "Yes, I've sent it" in the next turn.
+   * Tools the PREVIOUS turn of this conversation actually ran (ok, not a
+   * pending approval). A send or delete claim of a family this turn did not
+   * attempt stands on those ("Yes, I've sent it"); state changes never do.
    */
   priorRanTools?: readonly string[];
+}
+
+/** Which families a claim may stand on. */
+function backs(c: ActionClaim, a: WriteAttempt): boolean {
+  if (c.family !== "change") return a.family === c.family;
+  // A state change is a change or a delete ("cancelled" the meeting via
+  // delete_event), never a send; an edit claim, any write.
+  return c.strict ? a.family !== "send" : true;
 }
 
 // Says so plainly: "you don't have permission", "not allowed", "your role" …
@@ -287,7 +318,6 @@ export function checkActionClaims(
   opts: ClaimCheckOptions,
 ): ClaimCheck {
   const attempts = writeAttempts(trace, opts.isWrite);
-  const covers = (claim: ClaimFamily, a: WriteAttempt) => claim === "change" || a.family === claim;
   const earlier = new Set((opts.priorRanTools ?? []).filter(opts.isWrite).map(writeFamilyOf));
   const unbacked: ActionClaim[] = [];
   const unconfirmed: ActionClaim[] = [];
@@ -297,8 +327,8 @@ export function checkActionClaims(
       continue;
     }
     const family = c.family;
-    if (attempts.some((a) => a.outcome === "executed" && covers(family, a))) continue;
-    if (attempts.some((a) => a.outcome === "unclear" && covers(family, a))) {
+    if (attempts.some((a) => a.outcome === "executed" && backs(c, a))) continue;
+    if (attempts.some((a) => a.outcome === "unclear" && backs(c, a))) {
       unconfirmed.push(c);
       continue;
     }
@@ -306,13 +336,24 @@ export function checkActionClaims(
       unbacked.push(c); // tried this turn, and it did not run
       continue;
     }
-    const ranEarlier = earlier.has(family) || (family === "change" && earlier.size > 0);
-    if (c.strict && !ranEarlier) unbacked.push(c);
+    if (c.strict && !(family !== "change" && earlier.has(family))) unbacked.push(c);
   }
   const denials = attempts.filter((a) => a.outcome === "forbidden");
   const unstatedDenials =
     denials.length > 0 && !MENTIONS_PERMISSION.test(normalize(answer)) ? denials : [];
   return { unbacked, unconfirmed, unstatedDenials, attempts };
+}
+
+/**
+ * The writes behind the unbacked claims that did not run (pending, declined,
+ * refused, failed): what the advisory SSE frame names. Empty when none of the
+ * claimed families was attempted at all.
+ */
+export function notRunWrites(check: ClaimCheck): WriteAttempt[] {
+  const families = new Set(check.unbacked.map((c) => c.family));
+  return check.attempts.filter(
+    (a) => a.outcome !== "executed" && a.outcome !== "unclear" && families.has(a.family),
+  );
 }
 
 // ── what the person and the model are told ──────────────────────────
@@ -357,10 +398,10 @@ export function claimCorrectionPrompt(
     check.attempts.length > 0
       ? check.attempts.map((a) => `- ${a.tool}: ${reasonForModel(a)}.`)
       : ["- No action ran in this turn: nothing was sent, created, changed or deleted."];
-  const wrong = check.unbacked.map((c) =>
-    c.family === "permission_check"
-      ? `- "${c.sentence}" — no permission check ran; Droplet has no tool that checks permissions.`
-      : `- "${c.sentence}" — this did not happen.`,
+  const wrong = [...new Set(check.unbacked.map((c) => c.sentence))].map((sentence) =>
+    check.unbacked.some((c) => c.sentence === sentence && c.family === "permission_check")
+      ? `- "${sentence}" — no permission check ran; Droplet has no tool that checks permissions.`
+      : `- "${sentence}" — this did not happen.`,
   );
   return [
     "Before your reply goes out, check it against what actually happened in this turn.",
@@ -434,10 +475,6 @@ function statusFor(a: WriteAttempt, label: ToolLabel): string {
       return what ? `Not done: you declined to ${act(what)}.` : "Not done: you declined it.";
     case "forbidden":
       return deniedLine(a, label);
-    case "unclear":
-      return what
-        ? `Droplet couldn't confirm this went through: ${what}.`
-        : "Droplet couldn't confirm that went through.";
     default:
       return what ? `Not done: Droplet couldn't ${act(what)}.` : "Not done: that step failed.";
   }

@@ -14,6 +14,7 @@ import {
   claimStatusLine,
   deniedLine,
   detectActionClaims,
+  notRunWrites,
   unconfirmedLine,
   writeAttempts,
   writeFamilyOf,
@@ -68,6 +69,16 @@ describe("detectActionClaims — claims", () => {
     ["Successfully updated the schedule.", "change", false],
     ["I've saved the new schedule.", "change", false],
     ["I've set up a reminder for 3 pm.", "change", false],
+    // review 2: "you said / mentioned" is the person, not reported speech;
+    // "since" without a time is a reason; "confirmation" is not an approval
+    // prompt; "approved" is a state change
+    ["I've deleted the file you mentioned.", "delete", true],
+    ["As you said, I've turned off the porch camera.", "change", true],
+    ["I've disabled the guest network since nobody's using it.", "change", true],
+    ["I've sent Alice the booking confirmation.", "send", true],
+    ["I've approved the expense and notified finance.", "change", true],
+    // the text before a third party's reporting verb is still ours
+    ["I've sent the report as Bob mentioned.", "send", true],
   ])("%s → %s (strict %s)", (answer, family, strict) => {
     expect(detectActionClaims(answer)).toEqual([
       expect.objectContaining({ family, strict, sentence: expect.any(String) }),
@@ -79,6 +90,24 @@ describe("detectActionClaims — claims", () => {
       expect.objectContaining({ family: "permission_check" }),
     ]);
     expect(detectActionClaims("I haven't verified that you can delete it.")).toEqual([]);
+  });
+
+  it("checks every family a sentence claims, not just the first (review 2)", () => {
+    const answer = "I've emailed Dave the notice, and I've cancelled Friday's meeting.";
+    expect(detectActionClaims(answer).map((c) => `${c.family}:${c.strict}`)).toEqual([
+      "send:true",
+      "change:true",
+    ]);
+    // Only the send ran: the cancel is not backed by it.
+    const c = check(answer, [entry("email_send", OK)]);
+    expect(c.unbacked.map((u) => u.family)).toEqual(["change"]);
+    // A cancel IS backed by a delete (a meeting is cancelled via delete_event).
+    expect(check("I've cancelled Friday's meeting.", [entry("delete_event", OK)]).unbacked).toEqual([]);
+  });
+
+  it("a curly quote never swallows text across lines (review nit)", () => {
+    const answer = "“Draft title\n\nI’ve sent the email to Dave. The “final” version is attached.";
+    expect(detectActionClaims(answer)).toEqual([expect.objectContaining({ family: "send" })]);
   });
 
   it("scores sentences independently", () => {
@@ -158,6 +187,8 @@ describe("detectActionClaims — not claims", () => {
     "Alice replied that she has sent the contract.",
     "> I've cancelled the meeting on Friday.",
     "Here is the draft:\n```\nHi Alice, I've scheduled our review for Friday.\n```",
+    // review nit: the answer itself, addressed to the person, is not a send
+    "I've shared the steps with you:",
     "",
   ])("%j", (answer) => {
     expect(detectActionClaims(answer)).toEqual([]);
@@ -203,6 +234,10 @@ describe("writeFamilyOf — the verb in a write's name", () => {
     expect(writeFamilyOf("email_draft_reply")).toBe("change");
     expect(writeFamilyOf("atlassian__createJiraIssue")).toBe("change");
     expect(writeFamilyOf("slack__post_message")).toBe("send");
+    // camelCase remote names (review nit)
+    expect(writeFamilyOf("x__sendEmail")).toBe("send");
+    expect(writeFamilyOf("x__postMessage")).toBe("send");
+    expect(writeFamilyOf("x__deleteRecord")).toBe("delete");
   });
 });
 
@@ -234,6 +269,35 @@ describe("writeAttempts — trace outcomes", () => {
       "create_event:unclear",
       "write_file:unclear",
     ]);
+  });
+
+  it("reads the multiplexer's refusal envelope as a permission refusal (review 1)", () => {
+    // Literal shape of mcp-multiplexer.service.ts `errorOutcome(...)`.
+    const refused = {
+      error: "REMOTE_WRITE_NOT_PERMITTED",
+      tool: "ext-x__create_issue",
+      message: "ext-x's create_issue writes, and remote writes are not permitted.",
+    };
+    const trace = [entry("ext-x__create_issue", refused)];
+    expect(writeAttempts(trace, isWrite)).toEqual([
+      { tool: "ext-x__create_issue", family: "change", outcome: "forbidden", code: "REMOTE_WRITE_NOT_PERMITTED" },
+    ]);
+    const c = check("I've created the issue.", trace);
+    expect(c.unconfirmed).toEqual([]);
+    expect(c.unbacked).toHaveLength(1);
+    expect(c.unstatedDenials).toHaveLength(1);
+    expect(deniedLine(c.unstatedDenials[0]!, () => 'Use the ext-x tool "create issue"')).toBe(
+      'Not done: this Droplet doesn\'t allow you to use the ext-x tool "create issue".',
+    );
+    // The same shape for a call refused before the wire is a failure, not "unclear".
+    expect(writeAttempts([entry("ext-x__create_issue", { error: "REMOTE_TOOL_NOT_REGISTERED" })], isWrite)[0]!.outcome)
+      .toBe("failed");
+  });
+
+  it("a plain-text failure from a remote tool is not 'executed' (isError, review nit)", () => {
+    const t: AgentTraceEntry = { ...entry("x__createIssue", { raw: "Error: quota exceeded" }), isError: true };
+    expect(writeAttempts([t], isWrite)[0]!.outcome).toBe("failed");
+    expect(writeAttempts([entry("x__createIssue", { raw: "Issue X-1 created" })], isWrite)[0]!.outcome).toBe("executed");
   });
 
   it("uses the caller's write predicate (remote classification), not the name", () => {
@@ -297,11 +361,24 @@ describe("checkActionClaims", () => {
     expect(check("SUP-101 has been closed.", [entry("business_update", PENDING)]).unbacked).toHaveLength(1);
   });
 
-  it("an earlier turn's send stands only if it RAN (prior_ran_tool_names)", () => {
+  it("the previous turn's send stands only if it RAN (prior_ran_tool_names)", () => {
     expect(check("Yes, I've sent it.", [], ["email_send"]).unbacked).toEqual([]);
     expect(check("Yes, I've sent it.", [], []).unbacked).toHaveLength(1);
     // Retried this turn and not done: the claim is about this turn's attempt.
     expect(check("Yes, I've sent it.", [entry("email_send", PENDING)], ["email_send"]).unbacked).toHaveLength(1);
+  });
+
+  it("earlier credit needs the same family, and never covers a state change (review 4)", () => {
+    expect(check("I've deleted it.", [], ["email_send"]).unbacked).toHaveLength(1);
+    expect(check("I've deleted it.", [], ["delete_file"]).unbacked).toEqual([]);
+    expect(check("I've unlocked the front door.", [], ["control_device"]).unbacked).toHaveLength(1);
+    expect(check("I've unlocked the front door.", [], ["email_send"]).unbacked).toHaveLength(1);
+  });
+
+  it("names only the claimed writes that did not run (the advisory frame, review 5)", () => {
+    const c = check("I've emailed Dave.", [entry("email_draft_reply", { draftId: "d1" }), entry("email_send", PENDING)]);
+    expect(notRunWrites(c).map((a) => a.tool)).toEqual(["email_send"]);
+    expect(notRunWrites(check("I've emailed Dave.", [entry("email_draft_reply", { draftId: "d1" })]))).toEqual([]);
   });
 
   it("decision B: a permission refusal the answer never mentions", () => {

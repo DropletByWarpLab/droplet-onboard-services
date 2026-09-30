@@ -1832,6 +1832,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
                       tool: e.tool,
                       args: e.args,
                       result: toolResultPayloadValue(parseToolResultPayload(e.text!, e.tool)),
+                      ...(e.isError ? { isError: true as const } : {}),
                     })),
                 },
               )

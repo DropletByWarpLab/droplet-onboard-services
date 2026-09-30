@@ -81,6 +81,7 @@ import {
   claimCorrectionPrompt,
   claimStatusLine,
   deniedLine,
+  notRunWrites,
   unconfirmedLine,
   type ClaimCheckOptions,
 } from "./action-claims.js";
@@ -519,10 +520,10 @@ export interface AgentRequest {
    */
   prior_tool_names?: string[];
   /**
-   * WARP-3348 — the subset of earlier turns' tools that actually RAN (ok, not
-   * a pending approval). The action-claim check lets "Yes, I've sent it" in a
-   * later turn stand only for those; a send that was merely proposed or
-   * refused earlier backs nothing.
+   * WARP-3348 — the tools the PREVIOUS turn of this conversation actually ran
+   * (ok, not a pending approval). The action-claim check lets a send or
+   * delete claim this turn did not retry ("Yes, I've sent it") stand on
+   * those; a state change ("I've unlocked the door") never gets that credit.
    */
   prior_ran_tool_names?: string[];
   /**
@@ -1908,7 +1909,13 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       const malformedText = malformedToolOutputText(payload);
       if (malformedText !== null) text = malformedText;
       const ran = !isError && malformedText === null && !isConfirmationEnvelope(text);
-      trace.push({ tool_call_id: callId, tool: grant.tool, args: grant.args, result: parsed });
+      trace.push({
+        tool_call_id: callId,
+        tool: grant.tool,
+        args: grant.args,
+        result: parsed,
+        ...(isError || malformedText !== null ? { isError: true as const } : {}),
+      });
       emit({ type: "tool_result", id: callId, ok: ran, data: parsed });
       logger.info(
         { tool: grant.tool, challengeId: grant.challengeId, turn_id: turnId, ok: ran },
@@ -2844,7 +2851,14 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           isError: Boolean(result.isError),
         });
       }
-      trace.push({ tool_call_id: call.id, tool: call.function.name, args, result: parsed });
+      trace.push({
+        tool_call_id: call.id,
+        tool: call.function.name,
+        args,
+        result: parsed,
+        // WARP-3348 — a remote tool's plain-text failure parses as {raw}.
+        ...(result.isError ? { isError: true as const } : {}),
+      });
 
       // WARP-3283 — feed the no-progress guard (see its declaration).
       if (
@@ -3398,12 +3412,16 @@ async function settleActionClaims(p: {
       answer = `${p.answer}\n\n${claimStatusLine(first, claimLabel)}`;
       correction = "status_line";
       // The false claim is still in the text that goes out; say so on the
-      // wire too (the WARP-2544 frame, for clients that render it).
+      // wire too (the WARP-2544 frame, for clients that render it): which
+      // claimed writes were attempted and did not run, if any were.
+      const notRun = notRunWrites(first);
       deps.onEvent?.({
         type: "tool_use_validation",
-        status: first.attempts.length > 0 ? "contradicted" : "unsupported",
-        claims: first.unbacked.map((c) => (c.sentence.length > 160 ? `${c.sentence.slice(0, 157)}…` : c.sentence)),
-        tools: [...new Set(first.attempts.map((a) => a.tool))],
+        status: notRun.length > 0 ? "contradicted" : "unsupported",
+        claims: [...new Set(first.unbacked.map((c) => c.sentence))].map((s) =>
+          s.length > 160 ? `${s.slice(0, 157)}…` : s,
+        ),
+        tools: [...new Set(notRun.map((a) => a.tool))],
       });
     }
   }
