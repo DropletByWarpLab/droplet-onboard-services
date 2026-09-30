@@ -1,7 +1,7 @@
 # ADR-061: Native Linux client — Rust, GTK 4 and libadwaita, no web view
 
 - **Status:** Proposed (2026-09-25)
-- **Sibling of:** ADR-062 (native per-platform desktop clients: the native WinUI 3 Windows client and the macOS row; open PR #2444, WARP-3211). Not ADR-060, which is the Windows Hello relying party. The clients deliberately share no code (ADR-008 §1). The Windows client is tracked as WARP-3197 and described in `droplet-windows` (`DESIGN.md`, `docs/ARCHITECTURE.md` on `feat/native-windows-client`).
+- **Sibling of:** ADR-062 (native per-platform desktop clients: the native WinUI 3 Windows client and the macOS row; open PR #2444, WARP-3211). Not ADR-060, which is the Windows Hello relying party. The clients deliberately share no code (ADR-008 §1). The Windows client is tracked as WARP-3197 and described in `droplet-windows` (`docs/DESIGN.md`, `docs/ARCHITECTURE.md` on `main`).
 - **Ticket:** WARP-3203.
 - **Supersedes for desktop Linux:** ADR-009's client row "reuse the dashboard in a shell". ADR-009 never listed Linux; this ADR adds the row.
 - **Builds on:** ADR-008 (native clients implement the contract themselves), ADR-023 and ADR-058 (trust: public certificate, else the pairing's pinned key, never TOFU), ADR-037 (tunnel key custody), ADR-045 (the operator stages installers; the box never fetches).
@@ -27,6 +27,7 @@ Stefan asked for a fully native Linux app, explicitly not a web view, on 2026-09
 ## Consequences
 
 - Linux ships Home, Ask AI, Files, Cameras, Network, Devices, Notifications, Remote Access and Settings natively in 0.1. The rest opens in the browser until built (`droplet-linux/docs/PARITY.md`).
+- Remote Access follows the enrolling user's session. A connection bound to `user:<name>` (Decision 7) is usable only while that user has a session, so the tunnel does not come up before login. That matches the D1 rule: the app brings it up when the LAN probe fails, so no app session means no tunnel.
 - Passkey sign-in (libfido2, the `webauthn` routes, RP = the box's name, never an IP) and native SSO (loopback PKCE on `/api/sso/oidc/native/*`) follow the sign-in extensions proposed in ADR-063 (WARP-3226, open PR #2446). Those routes are not on `stage` yet, and this ADR does not assume they exist. The same routes are meant to serve every desktop.
 - ADR-056's "desktop as an MCP host" and ADR-014's desktop tool-host consent tiers apply to this client too. Neither is in 0.1. Both need WARP-1955-style signing and update custody decided for Linux before anything runs tools on a customer's PC.
 - **Open, not decided here:** the app id. Linux uses `ai.warplab.Droplet`, matching Android's `ai.warplab.droplet` namespace. ADR-045 already flags the iOS/Android bundle-id split, and this adds a data point, not a decision.
