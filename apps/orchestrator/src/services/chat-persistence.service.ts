@@ -226,6 +226,11 @@ export class ChatPersistenceService {
   async getConversationToolNames(
     conversationId: string,
     userId: string,
+    /**
+     * WARP-3348 — only calls that actually RAN: ok, and not a pending
+     * approval (which is persisted with ok:true so its chip renders).
+     */
+    opts: { ranOnly?: boolean } = {},
   ): Promise<string[]> {
     const rows = await this.prisma.chatMessage.findMany({
       where: {
@@ -246,7 +251,9 @@ export class ChatPersistenceService {
       const calls = row.toolCalls as unknown as PersistedToolCall[] | null;
       if (!Array.isArray(calls)) continue;
       for (const c of calls) {
-        if (c && typeof c.name === "string" && c.name.length > 0) names.add(c.name);
+        if (!(c && typeof c.name === "string" && c.name.length > 0)) continue;
+        if (opts.ranOnly && !(c.ok === true && c.status !== "confirmation_required")) continue;
+        names.add(c.name);
       }
     }
     return [...names];

@@ -1618,6 +1618,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // fail. Continuity must never cost the user their answer; try/catch is
       // what enforces that rather than merely asserting it.
       let priorToolNames: string[] = [];
+      // WARP-3348 — the subset that actually ran, for the action-claim check
+      // ("Yes, I've sent it" stands only if an earlier send ran). Read with
+      // continuity; under `off`/`explicit` the check simply gets no benefit.
+      let priorRanToolNames: string[] = [];
       if (
         toolSelectionMode !== "off" &&
         toolSelectionMode !== "explicit" &&
@@ -1628,6 +1632,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           priorToolNames = await persistence.getConversationToolNames(
             conversationId,
             userId,
+          );
+          priorRanToolNames = await persistence.getConversationToolNames(
+            conversationId,
+            userId,
+            { ranOnly: true },
           );
         } catch (err: unknown) {
           // eslint-disable-next-line no-console
@@ -2556,6 +2565,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             tool_selection_mode: toolSelectionMode,
             // WARP-1921 — cross-turn continuity for §3 selection.
             prior_tool_names: priorToolNames,
+            prior_ran_tool_names: priorRanToolNames,
             allowed_tools: allowedForUser,
             // WARP-1529 — the same §3 scope, re-checked fail-closed before
             // every tool dispatch inside the loop.
@@ -2658,6 +2668,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           tool_selection_mode: toolSelectionMode,
           // WARP-1921 — cross-turn continuity for §3 selection.
           prior_tool_names: priorToolNames,
+          prior_ran_tool_names: priorRanToolNames,
           allowed_tools: allowedForUser,
           // WARP-1529 — the same §3 scope, re-checked fail-closed before
           // every tool dispatch inside the loop.

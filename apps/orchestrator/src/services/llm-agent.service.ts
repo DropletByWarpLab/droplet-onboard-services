@@ -74,20 +74,18 @@ import {
 } from "./tool-selection.service.js";
 import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
 import { currentRuntimeToolLookup } from "./tool-layers.service.js";
-// WARP-2544 — output-side guard on tool use: does the finished answer match
-// what the tools actually did? Deterministic, no inference call.
-import {
-  validateAnswerAgainstTrace,
-  describeToolUseVerdict,
-} from "./tool-use-validation.js";
-// WARP-3348 — the acting half: claims that did not happen get a check call.
+// WARP-3348 — output-side guard on tool use: does the finished answer say
+// something happened that did not? Replaces WARP-2544's advisory detector.
 import {
   checkActionClaims,
   claimCorrectionPrompt,
   claimStatusLine,
   deniedLine,
+  unconfirmedLine,
+  type ClaimCheckOptions,
 } from "./action-claims.js";
-// WARP-3193 ARCH-10 — in types/ so tool-use-validation.ts needs nothing from here.
+import { parseNamespacedToolName } from "./mcp-multiplexer.service.js";
+// WARP-3193 ARCH-10 — in types/ so action-claims.ts needs nothing from here.
 import type { AgentTraceEntry } from "../types/agent-trace.js";
 import {
   assertToolAdvertisementFitsBudget,
@@ -521,6 +519,22 @@ export interface AgentRequest {
    */
   prior_tool_names?: string[];
   /**
+   * WARP-3348 — the subset of earlier turns' tools that actually RAN (ok, not
+   * a pending approval). The action-claim check lets "Yes, I've sent it" in a
+   * later turn stand only for those; a send that was merely proposed or
+   * refused earlier backs nothing.
+   */
+  prior_ran_tool_names?: string[];
+  /**
+   * WARP-3348 — calls of the SAME piece of work that settled outside this
+   * loop call: a durable run's earlier segments and the call a person just
+   * approved or declined, which the run worker executes itself before
+   * resuming the loop (WARP-3044). The action-claim check reads them with
+   * this call's own trace, so "I've sent the report" after an approved send
+   * stands, and after a declined one does not. In-process only.
+   */
+  priorAttempts?: AgentTraceEntry[];
+  /**
    * WARP-1529 / ADR-032 §3 (RBAC v2 T5) — the caller's resolved per-role tool
    * reach. Applied TWICE, on purpose:
    *
@@ -703,11 +717,13 @@ export interface AgentResult {
    * `correction`: "corrected" = the model's answer claimed an action that did
    * not happen and the one no-tools check call fixed it; "status_line" = the
    * check call did not, so the answer went out with a fixed status line;
-   * absent = no false claim, only a permission line was added.
+   * absent = no false claim, only a fixed line was added (an unclear outcome
+   * or a permission refusal). Neither of those costs a model call.
    */
   actionClaimCheck?: {
     correction?: "corrected" | "status_line";
     unbackedClaims: number;
+    unconfirmedClaims: number;
     deniedWrites: number;
   };
   /**
@@ -2179,6 +2195,18 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         for (const step of reasoning.reasoningSteps) {
           emit({ type: "reasoning_step", text: step });
         }
+      } else if (req.captureReasoning && !streamContentReleased) {
+        // WARP-3348 — a HELD streamed turn never went through the emitter's
+        // flush, which is what emits inline `<reasoning>` steps (qwen3 /
+        // deepseek). Emit them here, still before the content. The provider
+        // channel's step was already emitted by the stream consumer, so only
+        // the inline ones are parsed.
+        const inline = parseReasoningTrace({
+          content: typeof asst.content === "string" ? asst.content : null,
+        });
+        for (const step of inline.reasoningSteps) {
+          emit({ type: "reasoning_step", text: step });
+        }
       }
       // WARP-1331 — finalisation guard: strip citation cruft; demote a
       // bare tool-args JSON "answer" to empty. An empty completion with NO
@@ -2251,6 +2279,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // WARP-3348 — before the answer goes out, check what it says happened
       // against what the trace says ran. Only an answer still held back can
       // be corrected; on a tool turn that is every answer (deferContent).
+      // This replaced WARP-2544's advisory check at this point, which only
+      // logged the same question after the answer had already gone out.
       let actionClaimCheck: AgentResult["actionClaimCheck"];
       if (answer && !onWire && tools.length > 0) {
         ({ answer, check: actionClaimCheck } = await settleActionClaims({
@@ -2261,70 +2291,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           isFallback,
           trace,
           turnId,
+          // The same write predicate as the WARP-3285 fallback.
+          isWrite: (tool) => catalogEntry(tool)?.write ?? runtimeLookup(tool)?.requiresWrite === true,
         }));
       }
       if (answer.length > onWire.length) {
         emit({ type: "content_delta", text: answer.slice(onWire.length) });
-      }
-      // WARP-2544 — the ONE point where the finished answer and the tool trace
-      // are both in hand, on BOTH transports. Everything above this line
-      // guards the INPUT side of tool use (WARP-1529 RBAC, WARP-642
-      // hallucinated names, WARP-1480 error logging); nothing had ever
-      // compared the ANSWER against what the tools actually did, so a model
-      // could say "I've turned the camera off" on a turn that dispatched
-      // nothing, or over a dispatch that returned status:"error", and the
-      // sentence reached the user unchallenged. These tools are physical, so
-      // that is a safety failure rather than a cosmetic one.
-      //
-      // Deterministic and local: no inference call, no network, no tokens —
-      // it adds no latency to the happy path, which matters on a box whose
-      // whole problem was latency (WARP-2543).
-      //
-      // ⚠ ADVISORY. The answer has already gone out above. WARP-3348 is the
-      // acting check (it holds the answer and corrects it before emission);
-      // this stays as the operator signal, over the text that actually went out.
-      const toolUse = validateAnswerAgainstTrace({
-        answer,
-        trace,
-        // ⚠ A WEAK gate, and deliberately no longer load-bearing. The comment
-        // that used to sit here claimed a conversational turn runs with
-        // `tool_choice:"none"` and therefore advertises nothing. That is false
-        // for the surface that matters: the dashboard never sends
-        // `tool_choice`, so it defaults to "auto" and tools ARE advertised on
-        // every chat turn. `"none"` is produced only by voice-io's greeting
-        // path and email-analysis. Relying on this to suppress false positives
-        // meant ordinary sentences ("I've listed the options below") were
-        // claim-checked. The real protection is the narrowed, state-change-only
-        // verb list in tool-use-validation.ts; this only skips the genuinely
-        // tool-less turns.
-        toolsAdvertised: advertisedNames.size > 0,
-      });
-      if (toolUse.status !== "ok") {
-        logger.warn(
-          {
-            turnId,
-            iterations: iter + 1,
-            status: toolUse.status,
-            tools: toolUse.tools,
-            counts: toolUse.counts,
-            // 🔴 claimCount, not the claim TEXT. The excerpts are the model's
-            // own prose about whatever the user asked and whatever the tools
-            // returned — file contents, message bodies, device names. The
-            // logger is bare pino to stdout with no redact paths and its
-            // output is collected into the diagnostics bundle, so logging the
-            // sentences ships user content off the box. The client that is
-            // entitled to them still gets them on the SSE frame below.
-            claimCount: toolUse.claims.length,
-            threadId: req.citationContext?.threadId,
-          },
-          `agent_tool_use_unverified: ${describeToolUseVerdict(toolUse)}`,
-        );
-        emit({
-          type: "tool_use_validation",
-          status: toolUse.status,
-          claims: toolUse.claims,
-          tools: toolUse.tools,
-        });
       }
       emit({
         type: "done",
@@ -3335,7 +3307,9 @@ function blankAnswerFallback(
  *      and asks for a corrected answer. The correction is checked again; if it
  *      still claims what did not happen, or comes back blank, or the call
  *      fails, the model is not trusted twice: the original answer goes out
- *      with a status line built from the trace alone.
+ *      with a status line built from the trace alone. A claim resting on an
+ *      unclear outcome (a timeout) gets a fixed line and no call: the model
+ *      cannot know either.
  *   B. "if permission is denied the user should know": a write refused for
  *      permission that the final text never mentions gets a plain line.
  *
@@ -3353,10 +3327,13 @@ async function settleActionClaims(p: {
   isFallback: boolean;
   trace: AgentTraceEntry[];
   turnId: string;
+  isWrite: (tool: string) => boolean;
 }): Promise<{ answer: string; check?: AgentResult["actionClaimCheck"] }> {
-  const { deps, req, trace } = p;
-  const label = (tool: string) => catalogEntry(tool)?.label;
-  const first = p.isFallback ? undefined : checkActionClaims(p.answer, trace, req.prior_tool_names);
+  const { deps, req } = p;
+  // A durable run's earlier segments and its decided call are the same work.
+  const trace = [...(req.priorAttempts ?? []), ...p.trace];
+  const opts: ClaimCheckOptions = { isWrite: p.isWrite, priorRanTools: req.prior_ran_tool_names };
+  const first = p.isFallback ? undefined : checkActionClaims(p.answer, trace, opts);
   let answer = p.answer;
   let correction: "corrected" | "status_line" | undefined;
   if (first && first.unbacked.length > 0) {
@@ -3387,28 +3364,49 @@ async function settleActionClaims(p: {
             .cleanedContent,
         );
       }
-    } catch {
-      // Any failure (abort, gateway, preemption) falls to the status line:
-      // the one thing this path must not do is emit the unchecked claim bare.
+    } catch (err) {
+      // WARP-3306 — chat took the slot back: a run requeues and redoes this
+      // iteration from its checkpoint, so let it.
+      if (isGatewayPreempted(err)) {
+        logger.warn({ turn_id: p.turnId }, "agent_action_claims_check_preempted");
+        throw err;
+      }
+      // Anything else falls to the status line: the one thing this path must
+      // not do is emit the unchecked claim bare.
+      logger.warn(
+        { turn_id: p.turnId, error: err instanceof Error ? err.name : "unknown" },
+        "agent_action_claims_check_failed",
+      );
     }
-    if (corrected && checkActionClaims(corrected, trace, req.prior_tool_names).unbacked.length === 0) {
+    if (corrected && checkActionClaims(corrected, trace, opts).unbacked.length === 0) {
       answer = corrected;
       correction = "corrected";
     } else {
-      answer = `${p.answer}\n\n${claimStatusLine(first, label)}`;
+      answer = `${p.answer}\n\n${claimStatusLine(first, claimLabel)}`;
       correction = "status_line";
+      // The false claim is still in the text that goes out; say so on the
+      // wire too (the WARP-2544 frame, for clients that render it).
+      deps.onEvent?.({
+        type: "tool_use_validation",
+        status: first.attempts.length > 0 ? "contradicted" : "unsupported",
+        claims: first.unbacked.map((c) => (c.sentence.length > 160 ? `${c.sentence.slice(0, 157)}…` : c.sentence)),
+        tools: [...new Set(first.attempts.map((a) => a.tool))],
+      });
     }
   }
-  // B, over the text that will actually go out.
-  const denied = checkActionClaims(answer, trace).unstatedDenials;
-  if (denied.length > 0) {
-    answer += `\n\n${[...new Set(denied.map((d) => deniedLine(d, label)))].join(" ")}`;
-  }
-  if (!correction && denied.length === 0) return { answer };
+  // Fixed lines, no model call, over the text that will actually go out.
+  const last = checkActionClaims(answer, trace, opts);
+  const extra = [
+    p.isFallback ? "" : unconfirmedLine(last, claimLabel),
+    [...new Set(last.unstatedDenials.map((d) => deniedLine(d, claimLabel)))].join(" "),
+  ].filter(Boolean);
+  if (extra.length > 0) answer += `\n\n${extra.join(" ")}`;
+  if (!correction && extra.length === 0) return { answer };
   const check = {
     ...(correction ? { correction } : {}),
     unbackedClaims: first?.unbacked.length ?? 0,
-    deniedWrites: denied.length,
+    unconfirmedClaims: p.isFallback ? 0 : last.unconfirmed.length,
+    deniedWrites: last.unstatedDenials.length,
   };
   // Counts and families only — the claim sentences are the model's prose.
   logger.warn(
@@ -3416,12 +3414,26 @@ async function settleActionClaims(p: {
       turn_id: p.turnId,
       ...check,
       claim_families: [...new Set(first?.unbacked.map((c) => c.family) ?? [])],
-      writes: first?.attempts.map((a) => `${a.tool}:${a.outcome}`),
+      writes: last.attempts.map((a) => `${a.tool}:${a.outcome}`),
       ...(req.toolCallContext?.agentRunId ? { agent_run_id: req.toolCallContext.agentRunId } : {}),
     },
     "agent_action_claims_checked",
   );
   return { answer, check };
+}
+
+/**
+ * WARP-3348 — a tool's words for a status line: its catalog label (WARP-3285),
+ * or for a registered remote tool its server and name. Tool names in the trace
+ * that are neither were refused before dispatch and never reach here.
+ */
+function claimLabel(tool: string): string | undefined {
+  const label = catalogEntry(tool)?.label;
+  if (label) return label;
+  const remote = parseNamespacedToolName(tool);
+  if (!remote) return undefined;
+  const name = remote.wireName.replace(/[_-]+/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+  return `Use the ${remote.serverId} tool "${name}"`;
 }
 
 /**
