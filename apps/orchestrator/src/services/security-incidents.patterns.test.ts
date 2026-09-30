@@ -46,6 +46,7 @@ import { _resetIncidentHealthForTests, tickSecurityIncidents, trimSecurityIncide
 import { setIncidentVerdict } from "./security-incident-actions.js";
 import { PatternTally, _resetPatternRulesForTests, flagPatterns, loadPatternContext, patternRuleHealth } from "./security-pattern-rules.js";
 import { loadActiveLinks } from "./security-zones.service.js";
+import { SECURITY_RULESET_VERSION } from "../lib/security-rules.js";
 import {
   areaRows,
   baselineRows,
@@ -146,7 +147,7 @@ describe("a rare person in the Stock room (interior) after closing", () => {
         effect: "trial",
         severity: "alert",
         keyCameras: ["back"],
-        rulesetVersion: 3,
+        rulesetVersion: SECURITY_RULESET_VERSION,
         zoneKey: `area:${STOCK}`,
       }),
     ]);
@@ -169,6 +170,28 @@ describe("a rare person in the Stock room (interior) after closing", () => {
     expect(f.world.securityPatternFlag.map((x) => [x.evidenceEventId, x.severity])).toEqual([
       [10n, "alert"],
       [11n, "alert"],
+    ]);
+  });
+});
+
+// ADR-059 §6.7.1 — Droplet's links add context, never severity. The engine passes the incident's
+// `personLinked` (from the event's matched area) to the pattern severity at BOTH grouping sites.
+describe("a restricted area open hours: only a link a person made or kept adds the area's raise (§6.7.1)", () => {
+  it.each([
+    ["a person made the link", "alert", { origin: "person", stateSetBy: "person" }],
+    ["Droplet made it and a person kept it", "alert", { origin: "droplet", stateSetBy: "person" }],
+    ["only Droplet made it", "notice", { origin: "droplet", stateSetBy: "droplet" }],
+  ] as const)("%s → the opening flag and the joining flag are both %s", async (_what, severity, link) => {
+    const f = world({ kind: "restricted", mode: "open", at: NOON });
+    for (const l of f.world.securityZoneLink) Object.assign(l, link);
+    f.world.securityEvent.push(eventRow({ id: 10n, startedAt: NOON }));
+    await tick(f, plus(NOON, 30_000));
+    f.world.securityEvent.push(eventRow({ id: 11n, startedAt: plus(NOON, 40_000), createdAt: plus(NOON, 61_000) }));
+    await tick(f, plus(NOON, 70_000));
+    expect(f.world.securityIncident).toHaveLength(1);
+    expect(f.world.securityPatternFlag.map((x) => [x.evidenceEventId, x.severity])).toEqual([
+      [10n, severity],
+      [11n, severity],
     ]);
   });
 });
@@ -297,7 +320,7 @@ describe("the evidence cap (D4, spec test 20)", () => {
       const written = await flagPatterns(
         db(f),
         e as never,
-        { incidentId, key: { scope: "area", zoneId: STOCK, scopeCamera: null }, zoneKind: "interior", mode: "closed" },
+        { incidentId, key: { scope: "area", zoneId: STOCK, scopeCamera: null }, zoneKind: "interior", mode: "closed", personLinked: true },
         ctx,
         links,
         plus(T0, 200_000),

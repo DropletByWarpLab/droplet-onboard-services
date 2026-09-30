@@ -85,7 +85,13 @@ export type ToolDomain =
   // WARP-2896 (ADR-056 §6.2) — the workshop's workspace tools. Its own
   // domain: they are reachable inside a workshop run only, and the run
   // worker admits them structurally (agent-run-worker WORKSPACE_TOOLS).
-  | "workspace";
+  | "workspace"
+  // WARP-2979 (ADR-059 P4 §6.12) — the Security command center's READ-ONLY
+  // tools. Slug matches the `security` ModuleId, which claims it, so the
+  // module toggle and the per-person Security level gate the domain. It never
+  // holds a write or confirming tool (the registry pin), and it is withheld
+  // from every cloud turn (the orchestrator's OFF_LAN_WITHHELD_DOMAINS).
+  | "security";
 
 export interface ToolCatalogEntry {
   name: string;
@@ -278,7 +284,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   // WARP-1685 — Messages sends on the acting human's behalf.
   team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
   // WARP-2180 — durable background runs.
-  agent_runs: ["start_agent_run", "list_agent_runs"],
+  agent_runs: ["start_agent_run", "list_agent_runs", "cancel_agent_run"],
   routines: ["routine_draft", "routine_list", "routine_run"],
   workspace: [
     "workspace_read",
@@ -290,6 +296,8 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "workspace_run",
     "workspace_propose",
   ],
+  // WARP-2979 — reads, and only reads (WARP-2980 P5 PR-E added the fifth).
+  security: ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status", "security_explain_pattern"],
   system: [
     "get_system_health",
     "get_gpu_status",
@@ -317,6 +325,11 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "get_weather",
     "currency_convert",
     "classify_items",
+    // WARP-3116 — `data` rather than a new domain: every role template
+    // already grants it, and a new domain would need a grant in each one
+    // before anyone below owner could ask to be taken to a page.
+    "find_dashboard_page",
+    "open_dashboard_page",
   ],
 };
 
@@ -519,9 +532,13 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   currency_convert: "Convert money between currencies using daily rates",
   // Data (bulk labelling — WARP-3074)
   classify_items: "Sort a batch of items into categories, with how sure it is about each",
+  // Data (dashboard navigation — WARP-3116)
+  find_dashboard_page: "Find where a screen or setting lives and link to it",
+  open_dashboard_page: "Take you to a page of the dashboard",
   // Background runs (WARP-2180)
   start_agent_run: "Hand Droplet a longer task to work on in the background",
   list_agent_runs: "See your background tasks and how they went",
+  cancel_agent_run: "Stop a background task you started",
   routine_draft: "Write down a routine for you to review and turn on",
   routine_list: "See the routines on this box and whether they are on",
   routine_run: "Run one of your routines right now",
@@ -533,6 +550,13 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   workspace_commit: "Save a version of the extension being built",
   workspace_run: "Run the extension's tests, build or checks",
   workspace_propose: "Hand the finished extension to you for review",
+  // WARP-2979 (ADR-059 P4 §6.12.3) — Security, read-only.
+  security_list_incidents: "See what Security flagged, like someone inside after hours",
+  security_get_incident: "Open one Security incident and see why it was flagged",
+  security_search_events: "Look back through camera activity",
+  security_zone_status: "Check which areas are covered and which cameras are reporting",
+  // WARP-2980 (ADR-059 P5 §6.18).
+  security_explain_pattern: "See what's usual for an area at a given time",
 };
 
 /** Humanized fallback for a tool with no home description yet — turns

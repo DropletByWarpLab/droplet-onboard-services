@@ -97,6 +97,9 @@ class FramebufferBackend:
         # garbage in the per-row pad) doesn't show through a letterboxed frame.
         self._mm[:] = b"\x00" * (stride * height)
         self._jitter = 0
+        # WARP-2128: geometry mismatches are reported ONCE per distinct
+        # (frame, panel) pair, not once per frame — see _blit().
+        self._reported_mismatches: set[Tuple[int, int, int, int]] = set()
 
     # ----- construction -------------------------------------------------
 
@@ -230,10 +233,37 @@ class FramebufferBackend:
         # rescaling hides a misconfigured LCD_WIDTH/LCD_HEIGHT.
         ox = oy = 0
         if image.size != (self.width, self.height):
-            logger.warning("frame %dx%d != panel %dx%d — centring. Check "
-                           "LCD_WIDTH/LCD_HEIGHT.", image.width, image.height,
-                           self.width, self.height)
-            if image.width > self.width or image.height > self.height:
+            oversized = image.width > self.width or image.height > self.height
+            # WARP-2128: say this ONCE per distinct mismatch. It used to log
+            # every frame, which at the cycle rate buries the one line that
+            # explains the panel in scrollback — so the operator reads a
+            # cropped screen as broken hardware rather than a wrong setting.
+            key = (image.width, image.height, self.width, self.height)
+            if key not in self._reported_mismatches:
+                self._reported_mismatches.add(key)
+                if oversized:
+                    # Loud: this one CROPS. The operator is looking at the
+                    # top-left corner of a render built for a screen that is
+                    # not attached, which is never what anyone wanted.
+                    logger.error(
+                        "CONFIG ERROR: rendering %dx%d into a %dx%d panel — "
+                        "the frame is LARGER than the screen and will be "
+                        "CROPPED to its top-left corner. This is a wrong "
+                        "setting, not broken hardware: set LCD_WIDTH=%d and "
+                        "LCD_HEIGHT=%d in .env and recreate the container "
+                        "(docker restart does NOT re-read env_file). Re-running "
+                        "scripts/setup.sh re-detects this automatically.",
+                        image.width, image.height, self.width, self.height,
+                        self.width, self.height)
+                else:
+                    logger.warning(
+                        "frame %dx%d < panel %dx%d — centring with margins. "
+                        "Check LCD_WIDTH/LCD_HEIGHT.",
+                        image.width, image.height, self.width, self.height)
+            else:
+                logger.debug("frame %dx%d != panel %dx%d (already reported)",
+                             image.width, image.height, self.width, self.height)
+            if oversized:
                 image = image.crop((0, 0, min(image.width, self.width),
                                     min(image.height, self.height)))
             ox = (self.width - image.width) // 2

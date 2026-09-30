@@ -112,6 +112,41 @@ RBAC: write tools (anything with `requiresWrite: true` in
 Unprivileged callers get the read-only subset of `tools/list` and any
 spoofed `tool_calls` for write tools in replayed history return 403.
 
+### Dashboard navigation (WARP-3116)
+
+The web dashboard sends one more optional field on every turn:
+
+```json
+"dashboardPages": [
+  { "href": "/voice", "label": "Voice", "section": "Systems › Network",
+    "keywords": ["microphone", "wake word"] }
+]
+```
+
+It is the list of pages the signed-in viewer can open, derived from
+`apps/web-dashboard/src/components/nav-config.ts` by `assistantPages()`
+with the sidebar's own gates. It is validated by `dashboardPagesSchema`
+(`@droplet/shared-types`, at most 120 same-origin paths) and forwarded to the tool
+dispatch as `_meta.dashboardPages` (stdio-trusted, like `userRole`). Two
+`data`-domain tools resolve against it:
+
+- `find_dashboard_page(query)` returns matching pages, so the answer can link
+  them as `[Voice](/voice)`. The chat renders in-app links through
+  `next/link`.
+- `open_dashboard_page(page)` resolves a label, a path or the person's words
+  to one page and returns `{ action: "navigate", href, label }`. The dashboard
+  routes there when the LIVE turn ends. A reload, a stopped turn, or a page
+  the turn did not send never moves it.
+
+An agent-loop turn without `dashboardPages` (voice, phones, background runs)
+has both tools withheld from its pool, from the route's budget estimate and
+from the tool-guidance line (`navigationToolsWithheld`).
+
+External MCP clients on the HTTP transport are outside the agent loop: they
+still see both tools in `tools/list`, and every call refuses with
+`NAVIGATION_UNAVAILABLE`, because that transport ignores `_meta.dashboardPages`
+(a network caller could otherwise hand the tools a page list of its own).
+
 ## Tool registry
 
 The canonical registry lives in

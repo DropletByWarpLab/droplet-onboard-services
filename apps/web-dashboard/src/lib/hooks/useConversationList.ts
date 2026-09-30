@@ -42,7 +42,8 @@ export function useConversationList(): {
   mergeRows: (items: ConversationSummary[]) => void;
   applyTurnCompleted: (id: string) => Promise<void>;
   rename: (id: string, title: string) => Promise<void>;
-  remove: (id: string) => Promise<boolean>;
+  /** WARP-3303 — `cancelRuns` answers the live-background-runs question (see deleteConversation). */
+  remove: (id: string, cancelRuns?: boolean) => Promise<boolean>;
   /** WARP-845 — move a chat into (or out of, with null) a project.
    *  Optimistic; reverts on server failure. */
   moveToProject: (id: string, projectId: string | null) => Promise<void>;
@@ -244,8 +245,8 @@ export function useConversationList(): {
     }
   }, []);
 
-  const remove = useCallback(async (id: string) => {
-    const ok = await deleteConversation(id);
+  const remove = useCallback(async (id: string, cancelRuns?: boolean) => {
+    const ok = await (cancelRuns === undefined ? deleteConversation(id) : deleteConversation(id, cancelRuns));
     if (!isMountedRef.current) return ok;
     if (ok) setFlat((prev) => prev.filter((c) => c.id !== id));
     return ok;

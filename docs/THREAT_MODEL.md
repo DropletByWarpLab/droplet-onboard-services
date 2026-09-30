@@ -138,8 +138,8 @@ is what keeps Nextcloud's login/settings/admin UI off the dashboard's
 origin. Nextcloud's WOPI callback endpoint is likewise unrouted: the
 engine→Nextcloud callback is server-to-server over the compose network
 (`wopi_callback_url=http://nextcloud/`) and never a browser request, so
-it needs no gateway leg at all. Nextcloud remains reachable in full
-under the existing `/nextcloud/` leg, which is unchanged.
+it needs no gateway leg at all. Nextcloud remains reachable under the
+existing `/nextcloud/` leg, except for its OCS sharing API (last paragraph).
 
 Enforcement: `tests/nginx-nextcloud-assets.test.sh` fails the build if a
 blanket `/index.php` leg appears in ANY form — prefix with or without a
@@ -147,6 +147,17 @@ trailing slash, or a regex leg mentioning php — or if one of the named
 `/index.php/…` paths gets its own leg. It deliberately makes no claim
 about `/apps/files`: `^~ /apps/` routes it, and an assertion that said
 otherwise would be a guard that lies.
+
+**The `/nextcloud/` leg refuses Nextcloud's OCS sharing API (WARP-3053).**
+Every user's Nextcloud password equals their Droplet password and app
+passwords (device pairing, per-user WebDAV drive logins) are full-scope, so
+without this any member or guest could call `ocs/v1.php|v2.php/apps/files_sharing/`
+directly and mint a public link to Workspace files, bypassing the
+owner/admin-only rule the orchestrator enforces. Two `^~` locations answer 403
+for any suffix and any method; the web app is unaffected because the
+orchestrator reaches Nextcloud over the compose network (`NEXTCLOUD_URL`), not
+through the gateway. Enforcement: Phase 7 of
+`tests/nginx-nextcloud-assets.test.sh`.
 
 ## 4. TB2 — LAN clients ↔ box services
 

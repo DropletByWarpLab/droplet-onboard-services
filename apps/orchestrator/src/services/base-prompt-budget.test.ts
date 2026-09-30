@@ -4,7 +4,7 @@
  * `BASE_PROMPT_MAX_CHARS = 12200` bounds the worst-case sum of EVERY fixed
  * system-prompt block: identity (4000) + persona (1200) + business (1500)
  * + tool guidance (2200) + memory facts (2000) + interview conductor (900)
- * = 11800, leaving 400 chars of slack. (2026-07-23: tool guidance became a
+ * + date line (150, WARP-3281) = 11950, leaving 250 chars of slack. (2026-07-23: tool guidance became a
  * counted, capped block — previously ~600 uncounted chars riding inside
  * the identity fold.) This canary fails in CI if a future budget edit
  * pushes the sum over the ceiling.
@@ -32,6 +32,7 @@ import {
   INTERVIEW_PROMPT_MAX_CHARS,
   TOOL_GUIDANCE_MAX_CHARS,
   BASE_PROMPT_MAX_CHARS,
+  DATE_LINE_MAX_CHARS,
   OUTPUT_RESERVE,
 } from "./prompt-budget.consts.js";
 import {
@@ -165,8 +166,8 @@ function chatToolSizes(): { name: string; chars: number }[] {
  * WARP-1891 — per-tool ceiling on a single serialized `tools[]` entry.
  *
  * Derivation: the effective window is DEFAULT_CONTEXT_WINDOW - OUTPUT_RESERVE
- * = 15360 tokens = 61440 chars, of which the fixed blocks take 11800, leaving
- * ~49.6K chars for the whole ~70-tool chat advertisement. 2000 chars is ~4% of
+ * = 15360 tokens = 61440 chars, of which the fixed blocks take 11950, leaving
+ * ~49.5K chars for the whole ~70-tool chat advertisement. 2000 chars is ~4% of
  * that budget in ONE tool — past that a tool is pathological, not merely rich.
  *
  * This exists because the aggregate assertion below is FILE-scoped: when the
@@ -261,11 +262,13 @@ describe("worst-case fixed system-block budget", () => {
       BUSINESS_CONTEXT_MAX_CHARS +
       TOOL_GUIDANCE_MAX_CHARS +
       MEMORY_FACTS_CHAR_BUDGET +
-      INTERVIEW_PROMPT_MAX_CHARS;
-    // 4000 + 1200 + 1500 + 2200 + 2000 + 900 = 11800. (2026-07-23: tool
+      INTERVIEW_PROMPT_MAX_CHARS +
+      DATE_LINE_MAX_CHARS;
+    // 4000 + 1200 + 1500 + 2200 + 2000 + 900 + 150 = 11950 (WARP-3281 added
+    // the date line). (2026-07-23: tool
     // guidance became a counted, capped block — it was previously ~600
     // uncounted chars riding inside the identity fold.)
-    expect(fixedBlockChars).toBe(11800);
+    expect(fixedBlockChars).toBe(11950);
     expect(fixedBlockChars).toBeLessThanOrEqual(BASE_PROMPT_MAX_CHARS);
   });
 
@@ -393,6 +396,55 @@ describe("worst-case fixed system-block budget", () => {
     // 110K leaves room for roughly one more domain of this size before the
     // next author has to make the same call consciously.
     //
+    // WARP-2979 (ADR-059 P4 §6.12.7) — that call, made and written down. Step 0
+    // measured 109,403 chars over 152 tools before the Security domain: 597 of
+    // headroom, less than one tool. Its four read-only tools serialize to
+    // 3,525 (list 1,308, search 1,159, get 546, status 512 — mean 881, under
+    // both the 2,000 per-tool and the 1,000 pool-mean lines), so the registry
+    // is 112,932 over 156. No description trim can close a 2,932-char gap,
+    // and shaving other domains' prose to fit is what the note above rules
+    // out. Raised to 115,000: the reasons above still hold (this is the
+    // MCP-facing surface, and every per-turn assertion in this file is green
+    // with Security in it — the domain is selected, never core), and the new
+    // line again leaves about two ordinary tools before the next crossing is
+    // somebody's conscious decision. The decision is Stefan's to reverse.
+    //
+    // WARP-2980 (ADR-059 P5 PR-E) — `security_explain_pattern`, the fifth
+    // Security read, measured under this line without moving it: 112,950 over
+    // 156 before, 970 for the tool (under both the 2,000 per-tool and the
+    // 1,000 pool-mean lines), 113,921 over 157 after — 1,079 of headroom,
+    // about one ordinary tool. The line did not move.
+    //
+    // WARP-3116 does not move it either, and it had to fit. The two navigation
+    // tools as first written, find_dashboard_page (711) + open_dashboard_page
+    // (754), took the registry to 115,388 over 159 tools: 388 chars over, with
+    // no written decision to raise the line. So the prose was cut, not the
+    // ceiling raised: both descriptions and their parameter docs now say only
+    // what routes the model (find = where is it, link it; open = take me
+    // there; never a path the tool did not return), 515 + 545 = 1,060, and the
+    // closing "Tier-1 read; safe to call without operator confirmation." was
+    // dropped from nine read tools that already state it as
+    // `requiresWrite: false` / `requiresConfirmation: false`
+    // (get_bandwidth_usage, list_vpn_peers, list_threat_events,
+    // get_drive_health, get_audit_log, get_update_status, network_summary,
+    // memory_recall, business_profile_get). That took it to 114,641 at stage
+    // 7363c4ba5. WARP-3194 then lengthened two Security descriptions (+206),
+    // so it stands at 114,676 over 159 with the last three of those dropped
+    // (−171): 324 chars under 115,000 — under half an ordinary tool, so the
+    // next crossing is a decision, not an accident. What bounds a real chat
+    // turn is untouched: the per-domain assertion above stays green with both
+    // in the `data` pool, and the agent loop withholds both from every turn
+    // that carries no dashboard page list (voice, phones, background runs), so
+    // on those turns they cost nothing at all.
+    //
+    // WARP-3299 did not move it either. The chat-background-runs stack
+    // (WARP-3299/3300/3302: `cancel_agent_run` plus richer `start_agent_run`
+    // / `list_agent_runs` schemas) took the registry to 115,230 over 160 once
+    // merged with stage. Only that stack's own new prose was cut, keeping
+    // every directive (result posts to chat, approve on a card, never poll):
+    // 114,996 over 160, which leaves 4 chars. The next tool crosses this line,
+    // so its author makes the written call.
+    //
     // ⚠ The CHAT-pool assertion above used to be the fragile one, sitting at
     // 59,941 of a flat 60,000 — 59 chars of headroom, so the next tool added
     // to chat scope tripped it. WARP-2547 resolved that: it is now a function
@@ -427,7 +479,12 @@ describe("worst-case fixed system-block budget", () => {
     // the reasoning in point 1 above still holds (MCP-facing surface, no
     // window), the per-domain worst case above stays green, and ~1.7K
     // leaves roughly two average tools before the next author decides again.
-    expect(fullRegistryJson.length).toBeLessThan(112000);
+    //
+    // Carried onto stage's 115,000 line at the merge (2026-09-29): stage had
+    // since raised the line for the Security domain and sat 4 chars under it,
+    // so the same tool crosses it again by the same margin. This applies that
+    // same written decision to the new base (+2K), not a new re-baseline.
+    expect(fullRegistryJson.length).toBeLessThan(117000);
   });
 
   /**

@@ -176,13 +176,21 @@ export type NavItem = {
    */
   settingsBlurb?: string;
   /**
+   * WARP-3116 — other words people use for this destination ("wifi" for
+   * Network, "people" for Users). Rendered nowhere; the assistant's page
+   * lookup (find_dashboard_page / open_dashboard_page, fed by
+   * `assistantPages`) matches them alongside the label. Only the words the
+   * label and its path do not already carry.
+   */
+  keywords?: string[];
+  /**
    * WARP-1683 — named live-count badge rendered on the item (desktop
    * sidebar + mobile More drawer). The KEY lives here so nav-config stays
    * the one source of truth for what the nav shows; the VALUE is resolved
    * by the Sidebar (which owns the polling hooks) — pure data, no hook in
    * this module. Rendered only when the resolved count is > 0.
    */
-  badgeKey?: "teamChatUnread";
+  badgeKey?: "teamChatUnread" | "agentRunsActive";
   /**
    * Nested sub-navigation. When present, the desktop sidebar reveals these
    * children indented under the parent whenever the user is anywhere inside
@@ -237,13 +245,14 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: "Work",
     items: [
-      { href: "/", label: "Overview", icon: LayoutDashboard },
-      { href: "/chat", label: "Ask AI", icon: MessageSquare },
+      { href: "/", label: "Overview", icon: LayoutDashboard, keywords: ["home", "dashboard"] },
+      { href: "/chat", label: "Ask AI", icon: MessageSquare, keywords: ["assistant", "conversations"] },
       {
         href: "/files",
         label: "Files",
         icon: FolderOpen,
         requiresModule: "files",
+        keywords: ["documents", "folders", "drive"],
         // Files sub-nav. WARP-2966 cut it from six rows to three, because six
         // was not one idea: an "All files" row whose href WAS the parent's,
         // four places inside the tree, and a device-pairing screen.
@@ -265,7 +274,7 @@ export const NAV_GROUPS: NavGroup[] = [
         children: [
           { href: "/files/recents", label: "Recent", icon: Clock },
           { href: "/files/shared", label: "Shared", icon: Share2 },
-          { href: "/files/trash", label: "Trash", icon: Trash2 },
+          { href: "/files/trash", label: "Trash", icon: Trash2, keywords: ["deleted", "bin"] },
         ],
       },
       // WARP-1683: member-to-member team chat. Sits next to Ask AI and Files
@@ -283,8 +292,14 @@ export const NAV_GROUPS: NavGroup[] = [
       // owner/admin/family and RBAC-scopes accounts per user; the send tier is
       // gated to owner/admin in the UI + server. No unread-count badge (the
       // NavItem type has no count field; out of scope).
-      { href: "/email", label: "Email", icon: Mail, requiresModule: "email" },
-      { href: "/calendar", label: "Calendar", icon: CalendarIcon, requiresModule: "calendar" },
+      { href: "/email", label: "Email", icon: Mail, requiresModule: "email", keywords: ["mail", "inbox"] },
+      {
+        href: "/calendar",
+        label: "Calendar",
+        icon: CalendarIcon,
+        requiresModule: "calendar",
+        keywords: ["appointments", "meetings", "schedule"],
+      },
       // WARP-2925 → WARP-2974 → WARP-3063 — Workshop, where the owner gives the
       // box a goal and has it build custom tools. WARP-2967 tucked it behind
       // Settings → Automation with Routines, and that removed it from the
@@ -303,6 +318,8 @@ export const NAV_GROUPS: NavGroup[] = [
         label: "Workshop",
         icon: Hammer,
         roles: ["owner", "admin"],
+        // WARP-3303 — background runs still going; amber when one needs an OK.
+        badgeKey: "agentRunsActive",
       },
 
       /* ── tucked out of Work (WARP-1807 / WARP-2966 / WARP-2967) ────────
@@ -541,11 +558,17 @@ export const NAV_GROUPS: NavGroup[] = [
         label: "Cameras",
         icon: Video,
         requiresModule: "cameras",
+        keywords: ["cctv", "video", "live view"],
         children: [
           // Events replaces the old "Clips" entry — same icon, expanded UX.
           // The /clips route still resolves (kept as a redirect) so external
           // links and the LLM tool list_clips don't 404.
-          { href: "/events", label: "Events", icon: Film },
+          {
+            href: "/events",
+            label: "Events",
+            icon: Film,
+            keywords: ["clips", "recordings", "footage", "detections"],
+          },
         ],
       },
       {
@@ -553,6 +576,7 @@ export const NAV_GROUPS: NavGroup[] = [
         label: "Network",
         icon: Network,
         requiresModule: "network",
+        keywords: ["wifi", "wi-fi", "internet", "router", "firewall"],
         children: [
           // WARP-1055 / WARP-2967 — mic health + guided calibration. It was a
           // peer surface ("calibration is living, health-bearing state", design
@@ -561,7 +585,13 @@ export const NAV_GROUPS: NavGroup[] = [
           //
           // As with Money above, nesting does not add the `network` module
           // gate: with networking off, Voice is promoted into Network's slot.
-          { href: "/voice", label: "Voice", icon: Mic, requiresModule: "voice" },
+          {
+            href: "/voice",
+            label: "Voice",
+            icon: Mic,
+            requiresModule: "voice",
+            keywords: ["microphone", "mic", "wake word", "calibration"],
+          },
           // Already carried `requiresModule: "network"` — the same gate as its
           // new parent, so nesting changes nothing for it.
           {
@@ -569,6 +599,7 @@ export const NAV_GROUPS: NavGroup[] = [
             label: "Remote access",
             icon: Globe,
             requiresModule: "network",
+            keywords: ["vpn", "away from home"],
           },
         ],
       },
@@ -576,7 +607,13 @@ export const NAV_GROUPS: NavGroup[] = [
       // the Overview tab's LayoutDashboard glyph at thumb distance. Stays
       // top-level: it owns a mobile bottom tab (MOBILE_PRIMARY_HREFS), which
       // is resolved against top-level items only.
-      { href: "/devices", label: "Devices", icon: Cpu, requiresModule: "smart_home" },
+      {
+        href: "/devices",
+        label: "Devices",
+        icon: Cpu,
+        requiresModule: "smart_home",
+        keywords: ["smart home", "lights", "matter"],
+      },
 
       /* ── tucked out of Systems (WARP-2967) ──────────────────────────── */
 
@@ -629,7 +666,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: "Admin",
     items: [
-      { href: "/settings", label: "Settings", icon: Settings },
+      { href: "/settings", label: "Settings", icon: Settings, keywords: ["preferences"] },
 
       /* ── tucked behind Settings (WARP-2967) ─────────────────────────── */
 
@@ -672,6 +709,7 @@ export const NAV_GROUPS: NavGroup[] = [
         href: "/users",
         label: "Users",
         icon: Users,
+        keywords: ["people", "members", "accounts", "invite"],
         hidden: true,
         settingsSection: "Account",
         settingsBlurb: "People who can sign in, and what each of them may do",
@@ -716,6 +754,7 @@ export const NAV_GROUPS: NavGroup[] = [
         href: "/health",
         label: "Health",
         icon: HeartPulse,
+        keywords: ["status", "diagnostics"],
         hidden: true,
         settingsSection: "System",
         settingsBlurb: "Live status of every service on the box",
@@ -756,6 +795,7 @@ export const NAV_GROUPS: NavGroup[] = [
         href: "/admin/audit",
         label: "Audit log",
         icon: ScrollText,
+        keywords: ["activity", "history"],
         roles: ["owner", "admin"],
         hidden: true,
         settingsSection: "Advanced",
@@ -795,6 +835,28 @@ export const NAV_GROUPS: NavGroup[] = [
 // "More" trigger that opens the drawer (see below). Everything else
 // from NAV_GROUPS routes through the drawer.
 export const MOBILE_PRIMARY_HREFS = ["/", "/chat", "/files", "/devices"] as const;
+
+/**
+ * WARP-3062 — where Overview lives in the assistant nav layout. That layout
+ * opens on Ask AI, so `/` belongs to the Ask side and the same Home board is
+ * served from here instead. Only the href moves: the entry keeps its label,
+ * glyph and (absent) gates, so the business side's nav is today's nav.
+ */
+export const ASSISTANT_OVERVIEW_HREF = "/overview";
+
+/** Re-point every `/` entry (Overview, in any department arrangement) at
+ *  `href`. Returns the input untouched when there is nothing to move, so a
+ *  caller can compare by identity. Pure — runs before gating, like
+ *  `departmentNavGroups`. */
+export function withOverviewAt(groups: NavGroup[], href: string): NavGroup[] {
+  if (href === "/") return groups;
+  return groups.map((g) => ({
+    ...g,
+    items: g.items.map((item) =>
+      item.href === "/" ? { ...item, href } : item,
+    ),
+  }));
+}
 
 /** Filter a group's items by role + capabilities. Returns the same
  *  shape with items shaped to render order; empty groups are caller's
@@ -983,7 +1045,9 @@ export function isSettingsContext(pathname: string): boolean {
  * `requiresModule` today; the explicit list below makes that a guarantee
  * instead of an accident.
  */
-const ALWAYS_ON_PATHS = ["/", "/chat", "/settings"] as const;
+// WARP-3062: `/overview` is Home under the assistant layout, so it is always
+// on for the same reason `/` is.
+const ALWAYS_ON_PATHS = ["/", ASSISTANT_OVERVIEW_HREF, "/chat", "/settings"] as const;
 
 // Exported (WARP-2971) so the Workspace layout derives the active space with
 // the SAME segment-aware rule `moduleForPath` uses, not a second prefix test.

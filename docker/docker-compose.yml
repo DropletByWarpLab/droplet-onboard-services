@@ -2693,6 +2693,10 @@ services:
       #   the cap is generous (covers reasoning + a short spoken answer);
       #   too low → empty completion. Gateway hard-caps at 4096.
       - VOICE_MAX_TOKENS=${VOICE_MAX_TOKENS:-}
+      #   VOICE_MAX_ITER — agent-loop step budget per voice turn
+      #   (default 4, clamped 1..10; WARP-3316). Empty → the in-code
+      #   default. A budget of 2 died on the second tool call.
+      - VOICE_MAX_ITER=${VOICE_MAX_ITER:-}
       #   VOICE_ALLOWED_TOOLS — comma-separated tool names the voice
       #   assistant may use on tool-enabled turns. Empty → the curated
       #   in-code default (box health, cameras, network, files, smart
