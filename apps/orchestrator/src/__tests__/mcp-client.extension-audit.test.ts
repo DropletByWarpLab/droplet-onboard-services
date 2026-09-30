@@ -16,15 +16,17 @@ const spies = vi.hoisted(() => ({
 }));
 
 vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
-  Client: vi.fn().mockImplementation(() => ({
-    callTool: spies.callTool,
-    listTools: vi.fn().mockResolvedValue({ tools: [] }),
-    connect: vi.fn().mockResolvedValue(undefined),
-    close: vi.fn().mockResolvedValue(undefined),
-  })),
+  Client: vi.fn().mockImplementation(function () {
+    return {
+      callTool: spies.callTool,
+      listTools: vi.fn().mockResolvedValue({ tools: [] }),
+      connect: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+  }),
 }));
 vi.mock("@modelcontextprotocol/sdk/client/stdio.js", () => ({
-  StdioClientTransport: vi.fn().mockImplementation(() => ({})),
+  StdioClientTransport: vi.fn().mockImplementation(function () { return {}; }),
 }));
 vi.mock("../services/activity.singleton.js", () => ({ recordActivity: spies.record }));
 

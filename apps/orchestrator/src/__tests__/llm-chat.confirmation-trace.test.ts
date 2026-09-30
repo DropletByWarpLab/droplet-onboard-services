@@ -87,19 +87,21 @@ const { mockFinalize } = vi.hoisted(() => ({
   mockFinalize: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("../services/chat-persistence.service.js", () => ({
-  ChatPersistenceService: vi.fn().mockImplementation(() => ({
-    ensureConversation: vi.fn().mockResolvedValue({ id: "conv-1" }),
-    createTurnRows: vi.fn().mockResolvedValue({
-      userMessageId: "um-1",
-      assistantMessageId: "am-1",
-      assistantAlreadyFinal: false,
-    }),
-    finalizeAssistantMessage: mockFinalize,
-    updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
-    listConversationsForUser: vi.fn().mockResolvedValue([]),
-    getConversationForUser: vi.fn().mockResolvedValue(null),
-    deleteConversationForUser: vi.fn().mockResolvedValue(false),
-  })),
+  ChatPersistenceService: vi.fn().mockImplementation(function () {
+    return {
+      ensureConversation: vi.fn().mockResolvedValue({ id: "conv-1" }),
+      createTurnRows: vi.fn().mockResolvedValue({
+        userMessageId: "um-1",
+        assistantMessageId: "am-1",
+        assistantAlreadyFinal: false,
+      }),
+      finalizeAssistantMessage: mockFinalize,
+      updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
+      listConversationsForUser: vi.fn().mockResolvedValue([]),
+      getConversationForUser: vi.fn().mockResolvedValue(null),
+      deleteConversationForUser: vi.fn().mockResolvedValue(false),
+    };
+  }),
 }));
 
 const mockRunAgent = vi.fn();

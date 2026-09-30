@@ -86,15 +86,17 @@ vi.mock("../services/file-citation.service.js", () => ({
 const mockEnsureConversation = vi.fn().mockResolvedValue(null);
 const mockCreateTurnRows = vi.fn().mockResolvedValue(null);
 vi.mock("../services/chat-persistence.service.js", () => ({
-  ChatPersistenceService: vi.fn().mockImplementation(() => ({
-    ensureConversation: (...a: unknown[]) => mockEnsureConversation(...a),
-    createTurnRows: (...a: unknown[]) => mockCreateTurnRows(...a),
-    finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
-    updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
-    listConversationsForUser: vi.fn().mockResolvedValue([]),
-    getConversationForUser: vi.fn().mockResolvedValue(null),
-    deleteConversationForUser: vi.fn().mockResolvedValue(false),
-  })),
+  ChatPersistenceService: vi.fn().mockImplementation(function () {
+    return {
+      ensureConversation: (...a: unknown[]) => mockEnsureConversation(...a),
+      createTurnRows: (...a: unknown[]) => mockCreateTurnRows(...a),
+      finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
+      updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
+      listConversationsForUser: vi.fn().mockResolvedValue([]),
+      getConversationForUser: vi.fn().mockResolvedValue(null),
+      deleteConversationForUser: vi.fn().mockResolvedValue(false),
+    };
+  }),
 }));
 
 const mockRunAgent = vi.fn();

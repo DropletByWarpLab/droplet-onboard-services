@@ -96,20 +96,22 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
 }));
 
 vi.mock("../services/chat-persistence.service.js", () => ({
-  ChatPersistenceService: vi.fn().mockImplementation(() => ({
-    ensureConversation: vi.fn().mockResolvedValue({ id: "conv-1", created: true }),
-    createTurnRows: vi.fn().mockResolvedValue({
-      conversationId: "conv-1",
-      userMessageId: "user-1",
-      assistantMessageId: "asst-1",
-      created: true,
-    }),
-    finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
-    renameConversationForUser: vi.fn(),
-    listConversationsForUser: vi.fn().mockResolvedValue([]),
-    getConversationForUser: vi.fn().mockResolvedValue(null),
-    deleteConversationForUser: vi.fn().mockResolvedValue(false),
-  })),
+  ChatPersistenceService: vi.fn().mockImplementation(function () {
+    return {
+      ensureConversation: vi.fn().mockResolvedValue({ id: "conv-1", created: true }),
+      createTurnRows: vi.fn().mockResolvedValue({
+        conversationId: "conv-1",
+        userMessageId: "user-1",
+        assistantMessageId: "asst-1",
+        created: true,
+      }),
+      finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
+      renameConversationForUser: vi.fn(),
+      listConversationsForUser: vi.fn().mockResolvedValue([]),
+      getConversationForUser: vi.fn().mockResolvedValue(null),
+      deleteConversationForUser: vi.fn().mockResolvedValue(false),
+    };
+  }),
 }));
 
 vi.mock("../services/mqtt.service.js", () => ({
