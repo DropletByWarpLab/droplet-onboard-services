@@ -38,7 +38,7 @@
  *      from the trace, not run and not parked; the stored call must still
  *      match its binding and the principal's reach at the claim.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
 
 vi.mock("../config.js", () => ({
   config: {
@@ -1133,7 +1133,7 @@ describe("agent runs — an approved park runs the STORED call; the model never 
     type Update = { where: Record<string, unknown>; data: Record<string, unknown> };
     /** Answer `count: 0` — the lease was taken — to the one write `lost` picks. */
     function loseLeaseOn(db: ReturnType<typeof createAgentRunPrismaMock>, lost: (u: Update) => boolean) {
-      const updateMany = db.prisma.agentRun.updateMany as unknown as ReturnType<typeof vi.fn>;
+      const updateMany = db.prisma.agentRun.updateMany as unknown as Mock<(args: Update) => Promise<{ count: number }>>;
       const real = updateMany.getMockImplementation()!;
       updateMany.mockImplementation(async (args: Update) => (lost(args) ? { count: 0 } : real(args)));
     }

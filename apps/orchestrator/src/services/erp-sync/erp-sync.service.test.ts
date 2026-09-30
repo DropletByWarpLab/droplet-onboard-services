@@ -133,7 +133,7 @@ function harness(opts: {
     introspect: vi.fn(),
     runRead,
     applyWrite: vi.fn(),
-  } as unknown as Connector & { runRead: ReturnType<typeof vi.fn> };
+  } as unknown as Harness["connector"];
 
   const prisma = {
     __cursors: cursors,
