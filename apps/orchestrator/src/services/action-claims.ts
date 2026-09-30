@@ -172,7 +172,11 @@ const PASSIVE_NOT_A_CLAIM =
  */
 const ELLIPTICAL_SEND =
   /^[\s(\[\u2022\u2705-]*(?:team chat\s+|chat\s+)?(?:message|email|e-mail|text|reminder|invite|invitation|notification)s?\s+(?:successfully\s+)?sent\b/;
-const OLDER = /\b(?:last|latest|most recent|previous|this (?:week|month|year)|today)\b/;
+// A record read back: "Last email sent to Bob …", "Messages sent this week: 3".
+// Anchored to the sending, so a time inside the message itself ("… that
+// payroll is late this month") does not hide the claim.
+const OLDER =
+  /^[^a-z]*(?:the\s+)?(?:last|latest|most recent|previous)\b|\bsent\s+(?:this|last)\s+(?:week|month|year)\b|\bsent\s+today\b/;
 /**
  * A clause that opens on a send or delete verb with no subject: "(Also
  * notified Alice that ...)", "Sent a message to Alice ...". Not a mailbox folder.

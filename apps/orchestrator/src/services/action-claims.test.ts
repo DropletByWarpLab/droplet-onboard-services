@@ -87,6 +87,8 @@ describe("detectActionClaims — claims", () => {
     ["(Also notified Alice that payroll is late this month.)", "send", true],
     ["(Team chat: Sent a message to Alice saying “payroll is late this month.”)", "send", true],
     ["- Deleted 3 files from /Records.", "delete", true],
+    // a time inside the message itself is not a record read back
+    ["Message sent to Alice that payroll is late this month.", "send", true],
   ])("%s → %s (strict %s)", (answer, family, strict) => {
     expect(detectActionClaims(answer)).toEqual([
       expect.objectContaining({ family, strict, sentence: expect.any(String) }),
