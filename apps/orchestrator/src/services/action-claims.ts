@@ -41,8 +41,12 @@
  *   - a sentence that OPENS on a sent message with no subject ("Message sent
  *     to Alice: …", "(Team chat message sent …)") is a strict send claim: it
  *     was the model's commonest false send in the eval (adv-011);
- *   - so is a clause that opens on a send or delete verb with no subject
- *     ("(Also notified Alice that ...)", "Sent a message to Alice ..."; adv-011);
+ *   - so is a clause that opens on a send or delete verb with no subject and
+ *     an object after it ("(Also notified Alice that ...)", "Sent a message to
+ *     Alice ..."; adv-011), but not a label ("Deleted files go to the Trash",
+ *     "Shared with me:") and not after a "Name:" label ("- Alice: Posted …");
+ *   - a fragment ending in ":" hands its skip to the next one ("Bob wrote:
+ *     Deleted …", "Activity last week: Deleted …");
  *   - "I've sent the request / sent it to the approval prompt" and "drafted"
  *     describe the approval step, not the action (eval: adv-004, seed-011,
  *     seed-028, seed-007).
@@ -55,7 +59,8 @@
  * edit claim any write ("I moved it to the trash" describes a delete).
  *
  * KNOWN GAPS, accepted: verb-first CHANGE claims without a subject ("✅
- * Created the task", a bullet "- Updated SUP-42"); a second verb sharing one
+ * Created the task", a bullet "- Updated SUP-42"); a subject-less send after a
+ * label that is not a channel ("Done: Sent the invoice"); a second verb sharing one
  * subject ("I've emailed Dave and cancelled …" checks the first);
  * plain past passives ("was sent"); answers not in English.
  */
@@ -172,18 +177,31 @@ const PASSIVE_NOT_A_CLAIM =
  */
 const ELLIPTICAL_SEND =
   /^[\s(\[\u2022\u2705-]*(?:team chat\s+|chat\s+)?(?:message|email|e-mail|text|reminder|invite|invitation|notification)s?\s+(?:successfully\s+)?sent\b/;
-// A record read back: "Last email sent to Bob …", "Messages sent this week: 3".
-// Anchored to the sending, so a time inside the message itself ("… that
-// payroll is late this month") does not hide the claim.
-const OLDER =
-  /^[^a-z]*(?:the\s+)?(?:last|latest|most recent|previous)\b|\bsent\s+(?:this|last)\s+(?:week|month|year)\b|\bsent\s+today\b/;
+// A record read back: "Latest activity — deleted …", "Messages sent to Alice
+// this month: 3". Tested on the text before the message body (beforeBody), so
+// a time inside the message itself ("… that payroll is late this month") does
+// not hide the claim.
+const OLDER = /^[^a-z]*(?:the\s+)?(?:last|latest|most recent|previous)\b|\bthis\s+(?:week|month|year)\b|\btoday\b/;
+const beforeBody = (s: string) => s.split(/\b(?:that|saying|about)\b/)[0];
 /**
- * A clause that opens on a send or delete verb with no subject: "(Also
- * notified Alice that ...)", "Sent a message to Alice ...". Not a mailbox folder.
+ * A clause that opens on a send or delete verb with no subject and an object
+ * after it: "(Also notified Alice that ...)", "Sent a message to Alice ...",
+ * "- Deleted 3 files". Without the object shape the participle is a label or
+ * an adjective: "Deleted files go to the Trash", "Shared with me:", "Sent
+ * messages this week: 14", "Forwarded from Dave:". "Sent items" / "Sent mail"
+ * are mailbox folders.
  */
 const VERB_FIRST = new RegExp(
-  String.raw`^[\s(\[\u2022\u2705-]*${ADVERBS}(?:(${SEND_VERBS})|(${DELETE_VERBS}))\s+(?!items\b|folder\b|mail(?:box)?\b|box\b)`,
+  String.raw`^[\s(\[\u2022\u2705-]*${ADVERBS}(?:(${SEND_VERBS})|(${DELETE_VERBS}))\s+(?!items\b|mail\b)` +
+    String.raw`(?=(?:a|an|the|this|these|it|them|all|your|\d+)\b|\S+\s+(?:that|about|saying|to)\b)`,
 );
+/**
+ * An inline label a subject-less verb may follow: a channel ("(Team chat: Sent
+ * …"). After any other label the label is the subject ("- Alice: Posted the
+ * release notes.").
+ */
+const CHANNEL_LABEL =
+  /^[\s(\[\u2022\u2705-]*(?:team chat|chat|email|e-mail|text|message|reminder|invite|invitation|notification)s?:$/;
 
 const PERMISSION_CHECK = new RegExp(
   String.raw`\bi(?:'ve| have)?\s+${ADVERBS}(?:verified|checked|confirmed|made sure)\s+(?:that\s+)?you(?:'re| are)?\s+(?:can (?:delete|remove|send|edit|change|modify|create|write|update|move|rename|do (?:that|this|it))|are allowed|allowed|are permitted|permitted|are authori[sz]ed|authori[sz]ed|have (?:the )?(?:permission|rights?))\b`,
@@ -215,34 +233,44 @@ function withoutQuotedText(answer: string): string {
  */
 export function detectActionClaims(answer: string): ActionClaim[] {
   const claims: ActionClaim[] = [];
-  for (const sentence of withoutQuotedText(answer).split(/(?<=[.!?:;])\s+|\n+/)) {
-    let s = normalize(sentence).trim();
-    if (!s || s.endsWith("?")) continue;
-    if (PERMISSION_CHECK.test(s) && !HARD_NEGATION.test(s)) {
-      claims.push({ sentence: sentence.trim(), family: "permission_check", strict: true });
-      continue;
+  // A fragment ending in ":" introduces the next one (on the next line too):
+  // its reported / time / older skip carries over. On the same line it is
+  // also the label a subject-less verb follows.
+  let skipNext = false;
+  for (const line of withoutQuotedText(answer).split(/\n+/)) {
+    let label = "";
+    for (const sentence of line.split(/(?<=[.!?:;])\s+/)) {
+      let s = normalize(sentence).trim();
+      const after = label;
+      const skip = skipNext;
+      label = s.endsWith(":") ? s : "";
+      skipNext = label !== "" && (SENTENCE_NOT_A_CLAIM.test(s) || REPORTED.test(s) || OLDER.test(beforeBody(s)));
+      if (skip || !s || s.endsWith("?")) continue;
+      if (PERMISSION_CHECK.test(s) && !HARD_NEGATION.test(s)) {
+        claims.push({ sentence: sentence.trim(), family: "permission_check", strict: true });
+        continue;
+      }
+      if (SENTENCE_NOT_A_CLAIM.test(s)) continue;
+      const reported = REPORTED.exec(s);
+      if (reported) s = s.slice(0, reported.index);
+      const passiveAllowed = !PASSIVE_NOT_A_CLAIM.test(s);
+      const subjectless = passiveAllowed && !OLDER.test(beforeBody(s));
+      const found = new Map<string, Omit<ActionClaim, "sentence">>();
+      for (const clause of s.split(/,|\s[—–-]\s|\s+but\s+/)) {
+        if (CLAUSE_NOT_A_CLAIM.test(clause)) continue;
+        if (subjectless && ELLIPTICAL_SEND.test(clause)) found.set("send:true", { family: "send", strict: true });
+        const verbFirst = subjectless && (!after || CHANNEL_LABEL.test(after)) ? VERB_FIRST.exec(clause) : null;
+        if (verbFirst) {
+          const family = verbFirst[1] ? "send" : "delete";
+          found.set(`${family}:true`, { family, strict: true });
+        }
+        for (const p of PATTERNS) {
+          const strict = p.firstPerson.test(clause) ? p.strict : passiveAllowed && p.passive.test(clause) ? false : null;
+          if (strict !== null) found.set(`${p.family}:${strict}`, { family: p.family, strict });
+        }
+      }
+      for (const c of found.values()) claims.push({ sentence: sentence.trim(), ...c });
     }
-    if (SENTENCE_NOT_A_CLAIM.test(s)) continue;
-    const reported = REPORTED.exec(s);
-    if (reported) s = s.slice(0, reported.index);
-    const passiveAllowed = !PASSIVE_NOT_A_CLAIM.test(s);
-    const found = new Map<string, Omit<ActionClaim, "sentence">>();
-    for (const clause of s.split(/,|\s[—–-]\s|\s+but\s+/)) {
-      if (CLAUSE_NOT_A_CLAIM.test(clause)) continue;
-      if (ELLIPTICAL_SEND.test(clause) && passiveAllowed && !OLDER.test(s)) {
-        found.set("send:true", { family: "send", strict: true });
-      }
-      const verbFirst = passiveAllowed && !OLDER.test(s) ? VERB_FIRST.exec(clause) : null;
-      if (verbFirst) {
-        const family = verbFirst[1] ? "send" : "delete";
-        found.set(`${family}:true`, { family, strict: true });
-      }
-      for (const p of PATTERNS) {
-        const strict = p.firstPerson.test(clause) ? p.strict : passiveAllowed && p.passive.test(clause) ? false : null;
-        if (strict !== null) found.set(`${p.family}:${strict}`, { family: p.family, strict });
-      }
-    }
-    for (const c of found.values()) claims.push({ sentence: sentence.trim(), ...c });
   }
   return claims;
 }
@@ -450,8 +478,9 @@ export function claimCorrectionPrompt(
       ? check.attempts.map((a) => `- ${a.tool}: ${reasonForModel(a)}.`)
       : [
           // Box eval: without the second half the model invented "waiting for
-          // your approval" for an action that was never attempted.
-          "- No action ran in this turn: nothing was sent, created, changed or deleted, and nothing is waiting for approval.",
+          // your approval" for an action that was never attempted. Scoped to
+          // this turn: an earlier turn's write may really be waiting.
+          "- No action ran in this turn: nothing was sent, created, changed or deleted, and nothing from this turn is waiting for approval.",
         ];
   const wrong = [...new Set(check.unbacked.map((c) => c.sentence))].map((sentence) =>
     check.unbacked.some((c) => c.sentence === sentence && c.family === "permission_check")

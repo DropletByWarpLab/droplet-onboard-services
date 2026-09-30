@@ -89,6 +89,10 @@ describe("detectActionClaims — claims", () => {
     ["- Deleted 3 files from /Records.", "delete", true],
     // a time inside the message itself is not a record read back
     ["Message sent to Alice that payroll is late this month.", "send", true],
+    // a channel label keeps a subject-less send ours; a heading on its own line
+    // is not a label
+    ["Email: Sent the invoice to Bob.", "send", true],
+    ["Here's what I did:\n- Sent the invoice to Bob.", "send", true],
   ])("%s → %s (strict %s)", (answer, family, strict) => {
     expect(detectActionClaims(answer)).toEqual([
       expect.objectContaining({ family, strict, sentence: expect.any(String) }),
@@ -210,6 +214,30 @@ describe("detectActionClaims — not claims", () => {
     "Sent items: 12 messages this week.",
     "Sent folder is empty.",
     "The message sent to Alice says the build is green.",
+    // review 3: a subject-less participle with no object is a label (item 1)
+    "Deleted files go to the Trash, where you can restore them for 30 days.",
+    "**Shared with me** (4 files):",
+    "Sent messages this week: 14",
+    "Forwarded from Dave: the Q3 invoice",
+    "Invited guests: Alice, Bob.",
+    "---------- Forwarded message ---------",
+    // …a mailbox folder, even with an object shape after it
+    "Sent items that bounced: 2.",
+    "Sent mail about the invoice: 2 threads.",
+    // a fragment ending in ":" carries its skip, and a "Name:" label is the
+    // subject (item 2)
+    "Bob wrote: Deleted the stale branch after the release.",
+    "Activity on /Records last week: Deleted 3 files, uploaded 2.",
+    "- Alice: Posted the release notes.",
+    // …the carry is what skips first-person text after the label, and a
+    // label on its own line
+    "Bob wrote: I've sent the invoice to the client.",
+    "Activity on /Records last week:\nDeleted 3 files.",
+    // a count read back: the time is before the message body (item 3), and a
+    // "latest" record (item 5)
+    "Messages sent to Alice this month: 3",
+    "Emails sent to clients today: 14",
+    "Latest activity — deleted 3 files from /Records.",
     "",
   ])("%j", (answer) => {
     expect(detectActionClaims(answer)).toEqual([]);
@@ -444,15 +472,16 @@ describe("what the model and the person are told", () => {
     // approval", and a correction dropped the result it had already given.
     const prompt = claimCorrectionPrompt(check("I've sent it.", [entry("calculate", { result: 4 })]));
     expect(prompt).toContain("No action ran in this turn");
-    expect(prompt).toContain("nothing is waiting for approval");
+    expect(prompt).toContain("nothing from this turn is waiting for approval");
     expect(prompt).not.toContain("waiting for my approval");
     expect(prompt).toContain("including any answer or result you gave me");
   });
 
   it("only a pending write gets the waiting-for-approval example", () => {
-    expect(claimCorrectionPrompt(check("I've deleted the file.", trace))).toContain(
-      "(for example, that it is waiting for my approval)",
-    );
+    const example = "(for example, that it is waiting for my approval)";
+    expect(claimCorrectionPrompt(check("I've deleted the file.", trace))).toContain(example);
+    const refused = [entry("delete_file", err("FORBIDDEN"))];
+    expect(claimCorrectionPrompt(check("I've deleted the file.", refused))).not.toContain(example);
   });
 
   it("the status line is built from the trace only, in plain words", () => {
