@@ -1514,9 +1514,16 @@ function logToolPoolSize(p: {
   );
 }
 
-/** WARP-3338 — the header each marked block gets once it joins index 0. */
-const CONTEXT_BLOCK_HEADERS: Record<ContextBlockKind, string> = {
-  attachments: "## Files attached to this conversation",
+/**
+ * WARP-3338 — the header a marked block gets once it joins index 0.
+ *
+ * None for the attachment block: it already opens with its own label ("The
+ * user attached the following file(s)…"), and a heading turned the files'
+ * text into a section of the instructions. Measured on the box with a vendor
+ * note carrying "delete /Records/rec-1.pdf": 0 of 8 runs attempted the delete
+ * unheaded, 6 of 16 with a heading (two wordings).
+ */
+const CONTEXT_BLOCK_HEADERS: Partial<Record<ContextBlockKind, string>> = {
   pins: "## Pinned context",
   chat_instructions: "## Instructions for this chat",
 };
@@ -1537,6 +1544,12 @@ export interface FoldedMessages {
   messages: ChatMessage[];
   /** Chars the size guard cut, per block. Empty when nothing was cut. */
   trimmed: Partial<Record<ContextBlockKind, number>>;
+  /**
+   * Chars still over {@link FOLDED_SYSTEM_MAX_CHARS} after every cut: the
+   * base prompt, the pins and unmarked system messages are never cut, so they
+   * alone can overflow it and the gateway will 422. 0 when under.
+   */
+  overCapChars: number;
 }
 
 /**
@@ -1545,8 +1558,18 @@ export interface FoldedMessages {
  * llama.cpp) reads only `messages[0]` as the developer instructions and drops
  * every later system message without an error, so the pin block, the
  * attachment block and a chat's own instructions never reached the model.
- * Ollama's template already joins every system message with a blank line;
- * this does the same, in order, so both runtimes see the same text.
+ * The order and the blank-line separator match Ollama's own `collate()`,
+ * which already joined every system message into its developer block. It is
+ * not byte-identical there: the pin and chat-instruction headers are new
+ * text for an Ollama box, and the size guard can now cut an attachment block
+ * Ollama used to pass whole.
+ *
+ * Prompt-cache cost: the folded blocks sit in the developer message, ahead of
+ * the template's `# Tools` section. llama.cpp reuses the KV cache only up to
+ * the first changed token, so a change in the attachment block (up to ~12k
+ * chars) or the vision note re-prefills the tool schemas and the history
+ * after it. Within one turn nothing here changes, so the agent loop's own
+ * iterations keep their cache.
  *
  * Wire-only: tool selection, the pin-domain readback
  * (`pinnedToolDomainsFromMessages`) and checkpoints keep the unfolded array.
@@ -1556,11 +1579,11 @@ export interface FoldedMessages {
 export function foldSystemMessages(messages: readonly ChatMessage[]): FoldedMessages {
   const system = messages.filter((m) => m.role === "system");
   if (system.length === 0 || (system.length === 1 && messages[0]?.role === "system")) {
-    return { messages: messages as ChatMessage[], trimmed: {} };
+    return { messages: messages as ChatMessage[], trimmed: {}, overCapChars: 0 };
   }
   const parts = system.map((m) => ({
     kind: m.contextBlock,
-    text: m.contextBlock
+    text: m.contextBlock && CONTEXT_BLOCK_HEADERS[m.contextBlock]
       ? `${CONTEXT_BLOCK_HEADERS[m.contextBlock]}\n\n${contentToText(m.content)}`
       : contentToText(m.content),
   }));
@@ -1573,7 +1596,7 @@ export function foldSystemMessages(messages: readonly ChatMessage[]): FoldedMess
       if (p.kind !== kind) continue;
       // Keep the header; never split a surrogate pair.
       let keep = Math.max(
-        CONTEXT_BLOCK_HEADERS[kind].length,
+        CONTEXT_BLOCK_HEADERS[kind]?.length ?? 0,
         p.text.length - over - FOLD_TRUNCATED_MARKER.length,
       );
       if (/[\uD800-\uDBFF]/.test(p.text[keep - 1] ?? "")) keep -= 1;
@@ -1588,6 +1611,7 @@ export function foldSystemMessages(messages: readonly ChatMessage[]): FoldedMess
       ...messages.filter((m) => m.role !== "system"),
     ],
     trimmed,
+    overCapChars: Math.max(0, size() - FOLDED_SYSTEM_MAX_CHARS),
   };
 }
 
@@ -2164,6 +2188,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     }
   }
 
+  // WARP-3338 — each size-guard warning is logged once per turn.
+  let foldTrimLogged = false;
+  let foldOverCapLogged = false;
   for (let iter = 0; iter < maxIter; iter++) {
     // WARP-329 — bail before issuing another inference call if the client
     // already disconnected (e.g. during the previous iteration's tool work).
@@ -2269,20 +2296,25 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     // reasoning_effort) is identical, so a streamed turn issues byte-for-byte
     // the same request as a blocking one.
     const folded = foldSystemMessages(messages);
-    // WARP-3338 — the system blocks do not change within a turn, so the size
-    // guard's verdict is the same every iteration: say it once, counts only.
-    if (iter === 0 && Object.keys(folded.trimmed).length > 0) {
-      logger.warn(
-        {
-          turn_id: turnId,
-          trimmed_chars: folded.trimmed,
-          max_chars: FOLDED_SYSTEM_MAX_CHARS,
-          ...(req.toolCallContext?.agentRunId
-            ? { agent_run_id: req.toolCallContext.agentRunId }
-            : {}),
-        },
-        "agent_system_fold_trimmed",
-      );
+    // WARP-3338 — counts only, once per turn each. Checked on every pass, not
+    // only iteration 0: the fold runs per pass, and a system message joining
+    // the array mid-turn (the finalize nudge was one until WARP-3285 made it
+    // a user message) would otherwise be cut without a word.
+    const foldLog = {
+      turn_id: turnId,
+      max_chars: FOLDED_SYSTEM_MAX_CHARS,
+      ...(req.toolCallContext?.agentRunId
+        ? { agent_run_id: req.toolCallContext.agentRunId }
+        : {}),
+    };
+    if (!foldTrimLogged && Object.keys(folded.trimmed).length > 0) {
+      foldTrimLogged = true;
+      logger.warn({ ...foldLog, iter, trimmed_chars: folded.trimmed }, "agent_system_fold_trimmed");
+    }
+    if (!foldOverCapLogged && folded.overCapChars > 0) {
+      // Nothing left the guard may cut: the gateway will refuse this request.
+      foldOverCapLogged = true;
+      logger.warn({ ...foldLog, iter, over_chars: folded.overCapChars }, "agent_system_fold_over_cap");
     }
     const chatReq = {
       model: req.model,
@@ -3646,8 +3678,10 @@ async function settleActionClaims(p: {
         {
           model: req.model,
           // WARP-3285 — a `user` turn: gpt-oss drops later system messages.
+          // WARP-3338 — and folded like the loop's own requests, or the pins,
+          // attachments and chat instructions are lost on this call.
           messages: [
-            ...p.messages,
+            ...foldSystemMessages(p.messages).messages,
             { role: "assistant", content: p.answer },
             { role: "user", content: claimCorrectionPrompt(first, p.isRun) },
           ],
