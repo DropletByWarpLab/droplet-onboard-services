@@ -125,6 +125,11 @@ describe("runAgent — no-progress early-stop (WARP-3283)", () => {
         (m) => m.role === "user" && String(m.content).includes("found nothing"),
       ),
     ).toBe(true);
+    // WARP-3347 — Romain: no success searching → ask for the missing detail.
+    // It must still say nothing was found: grounding cases score on that.
+    const nudge = String(finalReq.messages[finalReq.messages.length - 1]!.content);
+    expect(nudge).toContain("that you couldn't find it");
+    expect(nudge).toContain("ask me for the specific detail");
     expect(result.stop_reason).toBe("no_progress");
     expect(result.iterations).toBe(4);
     expect(result.message.content).toBe("I couldn't find a data-deletion policy.");
@@ -332,5 +337,74 @@ describe("runAgent — no-progress early-stop (WARP-3283)", () => {
     expect(callTool).toHaveBeenCalledTimes(4);
     expect((chat.mock.calls[4]![0] as Req).tools).toEqual([]);
     expect(result.stop_reason).toBe("no_progress");
+  });
+
+  it("a blank answer after the stop still asks for detail, even when some searches returned hits", async () => {
+    // WARP-3347 — #2538's fallback reads any non-empty hit as "some
+    // information". The guard already judged these hits unusable.
+    const empty = await EMPTY_CONTENT;
+    const hit = '{"query":"q","results":[{"path":"/a.md","text":"x"}]}';
+    const blank = { role: "assistant", content: "", reasoning_content: "Maybe search email." };
+    let i = 0;
+    const { deps, chat } = makeDeps(
+      [search("a"), search("b"), search("c"), search("d"), blank],
+      () => (++i === 2 ? hit : empty),
+    );
+    const result = await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "find it" }],
+      max_iter: 10,
+    });
+    expect(chat).toHaveBeenCalledTimes(6); // 4 searches + finalize + ONE retry
+    expect(result.stop_reason).toBe("no_progress");
+    expect(result.message.content).toBe(
+      "I looked but didn't find anything matching. Could you tell me a bit more about what you're looking for?",
+    );
+  });
+
+  // WARP-3347 — a durable run: nobody is watching, so no question.
+  const RUN = { userId: "u1", userRole: "owner", agentRunId: "run-1" } as const;
+
+  it("on a durable run the stop reports what was searched and asks nothing", async () => {
+    const empty = await EMPTY_CONTENT;
+    const { deps, chat } = makeDeps(
+      [search("a"), search("b"), search("c"), { role: "assistant", content: "Report." }],
+      () => empty,
+    );
+    const result = await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "find it" }],
+      max_iter: 10,
+      toolCallContext: RUN,
+    });
+    expect(result.stop_reason).toBe("no_progress");
+    const finalReq = chat.mock.calls[3]![0] as Req;
+    const nudge = String(finalReq.messages[finalReq.messages.length - 1]!.content);
+    expect(nudge).toContain("report exactly what you looked for and what blocked you");
+    expect(nudge).not.toContain("ask me");
+  });
+
+  it("on a durable run a blank answer after the stop says it couldn't finish, and asks nothing", async () => {
+    // The hits were judged unusable, so not "I found some information"; and a
+    // run takes #2538's no-question wording for that branch.
+    const empty = await EMPTY_CONTENT;
+    const hit = '{"query":"q","results":[{"path":"/a.md","text":"x"}]}';
+    const blank = { role: "assistant", content: "", reasoning_content: "Maybe search email." };
+    let i = 0;
+    const { deps } = makeDeps(
+      [search("a"), search("b"), search("c"), search("d"), blank],
+      () => (++i === 2 ? hit : empty),
+    );
+    const result = await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "find it" }],
+      max_iter: 10,
+      toolCallContext: RUN,
+    });
+    expect(result.stop_reason).toBe("no_progress");
+    expect(result.message.content).toBe(
+      "I looked but didn't find anything matching, so I couldn't finish the task.",
+    );
+    expect(result.message.content).not.toContain("?");
   });
 });

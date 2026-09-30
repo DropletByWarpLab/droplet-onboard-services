@@ -1300,11 +1300,15 @@ data: {"iterations": 1, "stop_reason": "model_done"}
 ```
 
 `stop_reason` ∈ `model_done | iteration_limit | error | context_budget |
-repetition | no_progress` (an `error` frame also carries an `error`
-string). The last three mean the loop stopped calling tools early — the
-context filled up, the model repeated an identical call, or its searches
-kept finding nothing — and the final text is still a normal answer; treat
-any value you do not recognise like `model_done`. The agent loop also emits these event
+repetition | no_progress | needs_details` (an `error` frame also carries an
+`error` string). The last four mean the loop stopped calling tools early: the
+context filled up, the model repeated an identical call, its searches kept
+finding nothing, or half the turn's steps went on searches that found
+nothing usable (`needs_details`, WARP-3347). The final text is still a normal
+answer. `needs_details` says the guard fired, not what the answer is: it
+usually asks the person for the missing detail, but it can be a plain answer
+when the results were already enough. Treat any value you do not recognise
+like `model_done`. The agent loop also emits these event
 types on the same stream — render or ignore as needed:
 
 | `event:` | `data` payload | Meaning |

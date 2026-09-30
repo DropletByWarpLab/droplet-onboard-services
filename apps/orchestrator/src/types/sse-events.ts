@@ -146,7 +146,8 @@ export type SSEEvent =
         | "error"
         | "context_budget"
         | "repetition"
-        | "no_progress";
+        | "no_progress"
+        | "needs_details";
       error?: string;
     };
 
