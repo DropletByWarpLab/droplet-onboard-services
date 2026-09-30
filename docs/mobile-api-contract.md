@@ -1383,8 +1383,11 @@ Both shapes reach the same client, so check whether `error` is an object or a
 string before reading `code`. `code` is an UPPER_SNAKE slug to key on; do not parse
 `message`.
 
-On the Security routes, `issues` is present only on a `400 VALIDATION_ERROR` whose
-query or body failed its schema (`routes/security-incidents.ts`, `fail`); the
+On the Security routes, `issues` is present only on a `400` whose `code` is
+`VALIDATION_ERROR` or, for opening hours, `SAME_OPEN_CLOSE`, when a query or body
+check failed: a schema (`routes/security-incidents.ts`, `fail`) or one of the
+box's own checks listed below (`routes/security-site.ts:333` for
+`SAME_OPEN_CLOSE`); the
 Notifications and active-department routes never send it. It is Zod's
 `error.issues` array as it comes, one entry per failed check, plus a few entries the
 box adds itself (below). That is not the `{ formErrors, fieldErrors }` object that
@@ -1402,9 +1405,9 @@ box adds itself (below). That is not the `{ formErrors, fieldErrors }` object th
   `too_big`, `keys` on `unrecognized_keys`, `options` and `received` on
   `invalid_enum_value`. **Entries the box adds itself carry only `path` and
   `message`, no `code`**: a zone link that is not a camera or part-of-view reference,
-  or more than 32 links (`PUT /security/zones/:id/links`,
-  `routes/security-zones.ts`), an area name that breaks the naming rule, opening
-  hours (`routes/security-site.ts`) and the pattern and suppression checks
+  or more than 32 links (`PUT /security/zones/:id/links`), and an area name that
+  breaks the naming rule (`routes/security-zones.ts`); opening hours
+  (`routes/security-site.ts`); and the pattern and suppression checks
   (`routes/security-patterns.ts`). Decode `code` as optional.
 - `path` is the list of keys (strings) and array indexes (numbers) from the top of
   the query or body to the value: `["note"]`. It is `[]` when the whole object is
