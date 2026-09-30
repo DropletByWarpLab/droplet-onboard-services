@@ -93,6 +93,25 @@ describe("detectActionClaims — claims", () => {
     // is not a label
     ["Email: Sent the invoice to Bob.", "send", true],
     ["Here's what I did:\n- Sent the invoice to Bob.", "send", true],
+    // recall that d91772345 lost (post-merge review): an object that is a
+    // name, a word + article/preposition, or a file name / path…
+    ["Sent Alice the payroll reminder.", "send", true],
+    ["Notified Alice.", "send", true],
+    ["Notified Alice and Bob.", "send", true],
+    ["Emailed Bob the invoice.", "send", true],
+    ["- Deleted rec-1.pdf from /Records.", "delete", true],
+    ["Deleted /Records/rec-1.pdf.", "delete", true],
+    ["Shared /Finance with Bob.", "send", true],
+    // …a first-person claim under a "today" / "this week" / "below" label…
+    ["Here's what I did today:\n- I've sent the invoice to Bob.", "send", true],
+    ["This week:\nI've emailed Bob the notice.", "send", true],
+    ["Details below:\nI've sent the invoice to Bob.", "send", true],
+    // …and a time that is not a count label
+    ["Email sent to Bob today.", "send", true],
+    ["Sent the invoice to Bob today.", "send", true],
+    // a heading governs one plain line, or its bullet list, and no further
+    ["Bob wrote:\nDeleted the stale branch.\nSent the invoice to Carol.", "send", true],
+    ["Activity on /Records last week:\n- Deleted 3 files.\nI've also sent the invoice to Bob.", "send", true],
   ])("%s → %s (strict %s)", (answer, family, strict) => {
     expect(detectActionClaims(answer)).toEqual([
       expect.objectContaining({ family, strict, sentence: expect.any(String) }),
@@ -218,6 +237,8 @@ describe("detectActionClaims — not claims", () => {
     "Deleted files go to the Trash, where you can restore them for 30 days.",
     "**Shared with me** (4 files):",
     "Sent messages this week: 14",
+    "Sent messages are kept for 30 days.",
+    "**Deleted Files**",
     "Forwarded from Dave: the Q3 invoice",
     "Invited guests: Alice, Bob.",
     "---------- Forwarded message ---------",
@@ -227,12 +248,19 @@ describe("detectActionClaims — not claims", () => {
     // a fragment ending in ":" carries its skip, and a "Name:" label is the
     // subject (item 2)
     "Bob wrote: Deleted the stale branch after the release.",
+    "Bob wrote:\nDeleted the stale branch.", // the carry alone
+    "Bob: Deleted the stale branch after the release.", // the label gate alone
     "Activity on /Records last week: Deleted 3 files, uploaded 2.",
     "- Alice: Posted the release notes.",
     // …the carry is what skips first-person text after the label, and a
     // label on its own line
     "Bob wrote: I've sent the invoice to the client.",
     "Activity on /Records last week:\nDeleted 3 files.",
+    // a past-time label governs its whole bullet list; a past time skips
+    // first-person text too, "today" only the subject-less shapes
+    "Activity on /Records last week:\n- Deleted 3 files.\n- Deleted 2 folders.",
+    "Yesterday:\n- I deleted 3 files from /Records.",
+    "Today's activity:\n- Sent 3 invoices to clients.",
     // a count read back: the time is before the message body (item 3), and a
     // "latest" record (item 5)
     "Messages sent to Alice this month: 3",
