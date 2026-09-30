@@ -79,8 +79,81 @@ import type { RuntimeToolDescriptor } from "./runtime-tool-registry.service.js";
 // WARP-2582 — the pin block's domains. `context-pin-prompt` imports nothing
 // but a tools-core type, so this direction cannot cycle.
 import { pinnedToolDomainsFromMessages } from "./context-pin-prompt.js";
+// WARP-3116 — the tools the navigation rules exist to reach. A leaf module
+// (shared-types only), so this direction cannot cycle either.
+import { DASHBOARD_NAVIGATION_TOOLS } from "./dashboard-navigation.js";
 
-export type ToolSelectionMode = "off" | "domains";
+/**
+ * How a turn's advertised tools are derived from its pool.
+ *
+ *   • `domains` — keyword/continuity selection (the shipping default).
+ *   • `off` — the whole pool, no budget assert. The operator's diagnostic and
+ *     rollback lever (`TOOL_SELECTION_MODE=off`).
+ *   • `explicit` — WARP-3125. The whole pool, because the CALLER already named
+ *     it: the voice principal's own `allowed_tools`, after RBAC. Never set by
+ *     an operator (config admits only `off`/`domains`); the chat route picks
+ *     it per turn through `resolveTurnToolSelectionMode`. Unlike `off`, the
+ *     tool budget is still asserted (`selectionAssertsToolBudget`).
+ */
+export type ToolSelectionMode = "off" | "domains" | "explicit";
+
+/**
+ * WARP-3125 — the selection mode for ONE chat turn.
+ *
+ * The voice principal, when it sends its own `allowed_tools`, has already
+ * chosen its tools. Running keyword selection on top of that list changed the
+ * advertised `tools[]` with every sentence. llama-server reuses the KV cache
+ * only for the prompt prefix that is byte-identical to the previous request,
+ * and the tool block sits near the front, so the change cost a re-prefill of
+ * everything after it on every voice turn. It also dropped tools the sentence
+ * needed ("is everything working?" matched no rule, so `get_system_health`
+ * was not advertised), and each miss cost a self-heal iteration out of
+ * voice's two.
+ *
+ * Scoped to the VOICE principal WITH a list, and to nothing else:
+ *   • Dashboard callers keep `domains`. Their `allowed_tools` is a request
+ *     filtered by role, and the setup wizard's `[]` is zero tools either way.
+ *   • The other service tokens (`_service:mcp`, `_service:email`, ...) keep
+ *     `domains` too. `/api/llm/chat` admits every one of them, but none has
+ *     opted in, and none is sized to a fixed list. Widen this deliberately,
+ *     per caller, not by sharing the `service` role.
+ *   • The voice principal with no list gets the whole chat scope, which does
+ *     not fit the window unselected (WARP-1893), so it keeps `domains`.
+ *   • Agent and durable runs never reach this. `agent-run-worker.service.ts`
+ *     calls `runAgent` directly with `runToolPool()` and the configured mode,
+ *     and relies on selection to fit the budget.
+ *   • `off` stays `off`, so the rollback lever keeps meaning "whole pool, no
+ *     assert" for every caller.
+ */
+export function resolveTurnToolSelectionMode(opts: {
+  configured: ToolSelectionMode;
+  callerSuppliedAllowedTools: boolean;
+  voicePrincipal: boolean;
+}): ToolSelectionMode {
+  if (
+    opts.configured === "domains" &&
+    opts.callerSuppliedAllowedTools &&
+    opts.voicePrincipal
+  ) {
+    return "explicit";
+  }
+  return opts.configured;
+}
+
+/**
+ * Whether the agent loop asserts the assembled advertisement against the
+ * tool budget (`assertToolAdvertisementFitsBudget`) for this mode.
+ *
+ * `off` deliberately does not: it is the lever that advertises the whole chat
+ * pool, which has not fitted the window since WARP-1893. `explicit` does,
+ * because a caller-named set is expected to fit. If it ever stops fitting,
+ * that must fail loudly rather than go on the wire unmeasured.
+ */
+export function selectionAssertsToolBudget(
+  mode: ToolSelectionMode | undefined,
+): boolean {
+  return mode === "domains" || mode === "explicit";
+}
 
 /** Reverse index over the CI-complete catalog: tool name → its domain. */
 const DOMAIN_BY_NAME: ReadonlyMap<string, ToolDomain> = new Map(
@@ -234,6 +307,20 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // camera by display name alone, so without the verb the turn would never
   // advertise rename_camera.
   { pattern: /\b(cameras?|clips?|recordings?|footage|motion|doorbell|snapshots?|surveillance|nvr|frigate|live view|people|person|someone|somebody|anybody|anyone|intruders?|visitors?|packages?|parcels?|deliver(y|ies)|driveway|porch|doorstep|front door|back door|garage|yard|gate|who (was|were|came|is|has been)|renam(e[sd]?|ing)|re-?label(s|l?ed|l?ing)?)\b/i, domains: ["cameras"] },
+  // WARP-2979 (ADR-059 P4 §6.12.6) — Security questions. The camera words
+  // (person, someone, back door, who was…) already pull `cameras`; this rule is
+  // what brings in incidents, areas and the site mode for "anything odd last
+  // night?". A word in two rules brings in both domains, and a false-positive
+  // domain is cheap (see the rule comment above). Never core: four schemas on
+  // every turn would pay for a question most turns never ask.
+  // Review #2420: `alerts?`, `offline` and "(anyone|anybody|someone) in/at the …" — the tools' own examples
+  // ("any alerts this week?", "is any camera offline?", "was anyone in the stock room after 9?"), pinned by a
+  // test that reads every quoted example out of the security descriptions.
+  // WARP-2980 (ADR-059 P5 PR-E) — "is it normal…?" / "what's usual…?": the
+  // question security_explain_pattern answers. The spec's own box-proof
+  // sentence, "is it normal for someone to be in the stock room at 2 AM?",
+  // matched none of the words above.
+  { pattern: /\b(security|incidents?|flagged|after[- ]hours|overnight|last night|while (we|i) (were|was) (out|away|closed)|break[- ]?ins?|intruders?|suspicious|unusual|anything (odd|strange|weird|unusual)|out of place|tamper(ed|ing)?|went (dark|offline)|areas?|cover(ed|age)|acknowledg(e|ed|ement)|closed up|site mode|opening hours|alerts?|offline|(anyone|anybody|someone) (in|at) the|(is|was) (it|that|this) (normal|usual)|what(['’]?s| is) (normal|usual))\b/i, domains: ["security"] },
   { pattern: /\b(calendar|meetings?|appointments?|events?|schedule|agenda|busy|free time|what'?s on)\b/i, domains: ["calendar"] },
   // WARP-2454 — AVAILABILITY, BOUNDED TO A TEMPORAL CUE.
   //
@@ -334,7 +421,30 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // `replie`, and missed `reply` and `replies` entirely — so "did the
   // accountant ever reply" advertised no email tool at all. Every other
   // alternative is unchanged.
-  { pattern: /\b(e-?mails?|inbox|newsletters?|unread|spam|repl(y|ies|ied|ying)|sent)\b/i, domains: ["email"] },
+  //
+  // WARP-3280 — CONTACTS. `search_contacts` lives in this domain, yet
+  // "look up the contact alice@example.com" matched nothing: no rule named
+  // the address book, so the model searched memory and files and told the
+  // user "no contact record found", a false negative stated as fact. Added:
+  //   • `contacts?` and `address book`. The VERB sense ("contact me later",
+  //     "who should I contact about the boiler") is knowingly admitted:
+  //     reaching a person is what this domain's tools do, and it is six
+  //     schemas. `contact lens(es)` and `contact-lens` are excluded, and
+  //     `contactless` never matches the word boundary. The cloud rule still
+  //     does NOT claim `contact` (see WARP-2497 below), so this is the
+  //     word's only owner.
+  //   • a bare email ADDRESS. Someone who types an address is asking about
+  //     that person. It needs a dotted domain, so a handle ("@dropletbox")
+  //     or "meet me @ 5" stays out. Negatives pin both. Any `user@host.tld`
+  //     token counts, so `git@github.com:org/repo` and `ssh root@droplet.local`
+  //     admit this domain too: the cheap direction (six schemas), pinned by
+  //     tests so it reads as a choice, not an accident.
+  //     LINEAR BY CONSTRUCTION: the lookbehind lets a match start only at the
+  //     head of a run, and the RFC bounds (local part 64, label 63) cap each
+  //     attempt. The earlier unbounded `[\w.+-]+@…` restarted at every
+  //     position and backtracked O(n²): 40k chars took ~3 s on the event loop.
+  //     The linear-time test in tool-selection.service.test.ts guards every rule.
+  { pattern: /\b(e-?mails?|inbox|newsletters?|unread|spam|repl(y|ies|ied|ying)|sent|contacts?(?![\s-]+lens(es)?\b)|address book)\b|(?<![\w.+-])[\w.+-]{1,64}@(?:[\w-]{1,63}\.)+[a-z]{2,}\b/i, domains: ["email"] },
   // WARP-2454 — team_chat had NO rule at all, so its tools were reachable
   // only by continuity: a conversation that had not already used the domain
   // could never start using it. Same defect class WARP-2058 fixed for `pm`,
@@ -358,6 +468,29 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // `slack`, `standup`, `huddle` and `dm` carry no such ambiguity and are
   // taken bare. The negatives in tool-selection.service.test.ts pin this.
   { pattern: /\b(slack|stand-?ups?|huddles?|dms?|direct messages?|group chats?|team chats?|(slack|team|work|group|company) channels?|(slack|stand-?up|chat|message|comment) threads?)\b/i, domains: ["team_chat"] },
+  // WARP-3340 — "message someone". Team chat is the default way to reach a
+  // colleague (Romain, 2026-09-29: email only when the person asks for it),
+  // yet the rule above never named the verb. "Before messaging
+  // dave@example.com, …" (agent-loop eval seed-028) matched only the email
+  // rule, through the address, so the model could pick nothing but email.
+  //
+  // Held to the narrowness above: the bare noun is NOT admitted. "the message
+  // in the file", "voice message", "message queue", "Kafka messages",
+  // "read Dana's message" are not asking anyone to send anything, and each
+  // would buy this domain's schemas for nothing. Only the PERSON frame is:
+  //   • message/messaging, tell, ping or text + a person: him/her/them,
+  //     everyone, the team, an address, or a name followed by that / about /
+  //     saying / ":" ("message Priya that…"). A leading determiner or noun
+  //     ("the message them…", "voice message Bob left") makes it a noun.
+  //   • send (someone) a/an (…) message ("send Bob a quick message", "send the
+  //     team a message", "send a status message to ops"). "send the error
+  //     message to the log" has no article and stays out.
+  //   • let <someone> know, except me/us/you/it.
+  // "tell Priya the backup finished" (a bare name, no that/about) is not
+  // matched: a name is indistinguishable from an object here. The base
+  // prompt's guidance line names team_chat_send_message, so a call still
+  // self-heals. Every lookbehind is bounded, so the rule stays linear.
+  { pattern: /(?<!\b(?:the|a|an|this|that|these|those|my|your|his|her|their|our|its|any|each|every|last|latest|new|first|voice|error|warning|status|commit|log|exit|e-?mail|text|out-of-office)\s{1,3})\b(?:messag(?:e|ing)|tell|ping|text(?:ing)?)\s+(?:(?:him|her|them|everyone|everybody|(?:the|my|our)\s+(?:whole\s+)?team)\b|[\w.+-]{1,64}@[\w-]|(?!(?:me|us|you|it|what|which|who|whom|whether|if|how|when|why|where|the|a|an|this|that|these|those|about|to|for|in|on|of|from|with|and|or)\b)[a-z][\w'-]{0,30}(?:\s*:|\s+(?:that|about|saying|to say)\b))|\bsend\s+(?:(?:the\s+)?[\w.@+-]{1,64}\s+)?an?\s+(?:[\w-]{1,20}\s+)?messages?\b|\blet\s+(?!(?:me|us|it|you)\b)(?:the\s+(?:whole\s+)?)?[a-z][\w'-]{0,30}\s+know\b/i, domains: ["team_chat"] },
   { pattern: /\b(remember|memory|forget|know about me)\b/i, domains: ["memory"] },
   // ADR-045 slice C — ONE business rule, replacing WARP-2552's pair.
   //
@@ -402,7 +535,31 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
     pattern: /\b(business|company|opening hours|customers?|crm|deals?|pipelines?|leads?|opportunit(y|ies)|prospects?|clients?|follow-?ups?)\b/i,
     domains: ["business", "crm"],
   },
-  { pattern: /\b(time|date|today|tomorrow|yesterday|weather|calculate|convert|translate|timestamp)\b/i, domains: ["data"] },
+  // WARP-3280 — THE CALCULATOR. The rule had the literal `calculate` and
+  // nothing else, so "what is 187 * 43?" and even "use the calculator to
+  // work out 2+2" advertised no `calculate`; the model did the arithmetic in
+  // its head. Added `calculat\w*` (calculator, calculation), `math(s)`,
+  // `arithmetic`, `N% of`, and an arithmetic EXPRESSION. The expression is
+  // split on purpose: `+ * × ÷ ^` between digits count with or without
+  // spaces, but `-`, `/` and `x` count only with a space on each side,
+  // because tight they are dates (2026-10-03, 9/11), phone numbers
+  // (555-0142) and resolutions (1920x1080). Bare `sum` is not claimed:
+  // "sum up the thread" is a summary. Negatives pin those shapes. A time
+  // range such as "3 - 4 pm" still admits this domain; that is the cheap
+  // direction, and the date tools live here anyway.
+  { pattern: /\b(time|date|today|tomorrow|yesterday|weather|calculat\w*|maths?|mathematics|arithmetic|convert|translate|timestamp)\b|\d\s*[+*×÷^]\s*\d|\d\s+[-/x]\s+\d|\d\s*%\s*of\b/i, domains: ["data"] },
+  // (WARP-3116's navigation rule is NOT in this list — see NAVIGATION_RULES
+  // below the array, which is evaluated only for a pool that can use it.)
+  // WARP-3074 — bulk labelling (`classify_items`) lives in `data`. The
+  // verbs are qualified by a batch object, never taken bare: `data` is one
+  // of the larger domains, and a bare `label` fires on "print a shipping
+  // label", a bare `sort` on "sort the files by newest", a bare `classif…`
+  // on "the security classification of this file". Whole-sentence
+  // positives and negatives in tool-selection.service.test.ts.
+  {
+    pattern: /\b((classif(y|ying)|categori[sz](e|ing)|triage|sort|label|tag|group|bucket) (these|them|those|each|all|every)|(classif(y|ying)|categori[sz](e|ing)|triage) (this|the|my) (batch|pile|list|inbox|queue)|which (team|department|category) (each|every))\b/i,
+    domains: ["data"],
+  },
   // WARP-2497 — the cloud SaaS datasets (Stripe / HubSpot / Mailchimp).
   //
   // The defect this closes is the one WARP-2058 closed for `pm` and WARP-2454
@@ -514,6 +671,10 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // WARP-2180 — durable background runs. Word boundaries on purpose; the
   // vocabulary is how a person hands work off, not the work's subject.
   { pattern: /\b(background (run|task|job)s?|agent runs?|in the background|while (i'?m|i am) (away|out|asleep|gone)|keep working on (this|it)|work on (this|it) (later|overnight)|long[- ]running (task|job))\b/i, domains: ["agent_runs"] },
+  // WARP-3302 — stopping a run by its plain name. "How is it going?" needs no
+  // rule: a chat that started a run carries start_agent_run in its prior tool
+  // names, so continuity already advertises the domain on the follow-up.
+  { pattern: /\b(stop|cancel|abort|kill) (the|that|this|my) (task|run|job)\b/i, domains: ["agent_runs"] },
   // WARP-2894 (ADR-056 §5.1) — routines. The vocabulary is how a person asks
   // for something RECURRING or AUTOMATED, not the word "routine" alone:
   // "every morning", "each Friday", "automate this", "set this up to run",
@@ -523,6 +684,62 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // it — "schedule this" is an automation ask, "my schedule" is not.
   { pattern: /\b(routines?|automat(e|ed|ion|ically)|(every|each)\s+(day|morning|evening|night|week|weekday|weekend|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday|hour|\d+\s*(minutes?|hours?|days?|weeks?))|daily|weekly|nightly|monthly|schedule\s+(this|it|that)|set\s+(this|it|that)\s+up\s+to\s+run|on\s+a\s+schedule|recurring)\b/i, domains: ["routines"] },
 ];
+
+/**
+ * WARP-3116 — getting AROUND the dashboard: find_dashboard_page and
+ * open_dashboard_page live in `data`. The words are how a person asks to be
+ * moved or pointed somewhere ("take me to it", "where do I change…"), not what
+ * the page is about — "take me to it" names no page at all, and it is the
+ * sentence this rule exists for.
+ *
+ * THE GATE. A separate list, evaluated only for a pool that carries one of the
+ * two tools (`rulesForPool`), because a match admits the WHOLE `data` domain
+ * and buys nothing unless the turn can use the two this rule is for. Measured
+ * with `measureToolSpecs` on the owner's chat pool: 9 tools, ~8.8K chars, ~2.2K
+ * tokens (17 tools and ~3.9K counting the eight utilities the chat scope
+ * leaves out). Both are withheld from every turn with no dashboard page list —
+ * voice, phones, background runs — at both places the pool is built
+ * (`routes/llm.ts` for the estimate, `llm-agent.service.ts` for the wire), so a
+ * pool that holds one came from a turn with a page list, and no caller has to
+ * pass a flag that could drift between the two. As one of `DOMAIN_RULES` this
+ * ran on every turn, and off the dashboard it could only ever admit the OTHER
+ * seven tools (~1.8K tokens).
+ *
+ * EXPLICIT ONLY. Every alternative is a request to be moved or pointed. The
+ * bare forms were dropped after they admitted the domain on ordinary
+ * sentences — "I am going to need a summary of my inbox" and "before I go to
+ * sleep" (`go(ing) to`), "send the link to Bob" (`link to`), "what is on the
+ * front page of the report" (`the <word> page`) — and `head to` and
+ * `page/screen/tab/section for/with` went with them, being the same shape:
+ * a motion verb or a UI noun with no destination. A phrasing lost this way
+ * still gets there: the guidance line names find_dashboard_page on a dashboard
+ * turn, and a call to a filtered-but-allowed tool expands its domain next
+ * iteration — one lost iteration, not a failed turn.
+ *
+ * What stays bare is deliberate. `where is / are / do I …` is the ticket's own
+ * question, and in the dashboard chat the place a person asks after is usually
+ * a page ("where are my deleted files?" → Trash). `settings` is NOT claimed
+ * bare: "change the wifi settings to WPA3" is an action for the network tools,
+ * not a trip, so it counts only after "open" / "show me".
+ */
+const NAVIGATION_RULES: typeof DOMAIN_RULES = [
+  {
+    pattern: /\b(take me|bring me|navigate|jump to|link me|where (is|are|can i|do i|would i|should i)|how do i get to|(open|show me) (the |my )?(\w+ ){0,2}(settings|page|screen|tab))\b/i,
+    domains: ["data"],
+  },
+];
+
+const ALL_RULES: typeof DOMAIN_RULES = [...DOMAIN_RULES, ...NAVIGATION_RULES];
+
+/**
+ * The rules worth evaluating for this pool: every ordinary rule, plus the
+ * navigation rules only when the pool holds a tool they exist to reach.
+ */
+function rulesForPool(pool: readonly string[]): typeof DOMAIN_RULES {
+  return pool.some((name) => DASHBOARD_NAVIGATION_TOOLS.has(name))
+    ? ALL_RULES
+    : DOMAIN_RULES;
+}
 
 /**
  * A tool name's domain. `runtimeTools` extends the lookup to the dynamic half
@@ -537,7 +754,7 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
  * overlap fails CI instead of shipping (WARP-2448).
  */
 export const RULED_DOMAINS: ReadonlySet<ToolDomain> = new Set(
-  DOMAIN_RULES.flatMap((r) => r.domains),
+  ALL_RULES.flatMap((r) => r.domains),
 );
 
 export function domainOfTool(
@@ -576,6 +793,10 @@ export function toolNamesForDomain(
  * exactly as it did before WARP-2443 — the local-only path is unchanged, so
  * any shift in agent behaviour is attributable to the new universe rather
  * than to a refactor.
+ *
+ * WARP-3116 — the navigation rules join the ordinary ones only when `pool`
+ * carries a navigation tool; see `NAVIGATION_RULES` for why the pool is the
+ * gate.
  */
 export function selectAdvertisedTools(opts: {
   mode: ToolSelectionMode;
@@ -597,12 +818,14 @@ export function selectAdvertisedTools(opts: {
    */
   extraDomains?: readonly ToolDomain[];
 }): { advertised: string[]; matchedDomains: ToolDomain[] } {
-  if (opts.mode === "off") {
+  // WARP-3125 — `explicit` advertises the caller's named set as-is, like
+  // `off`. The two differ only in whether the loop asserts the budget.
+  if (opts.mode === "off" || opts.mode === "explicit") {
     return { advertised: opts.pool, matchedDomains: [] };
   }
   const runtimeDomains = indexRuntimeDomains(opts.runtimeTools);
   const domains = new Set<ToolDomain>(opts.extraDomains ?? []);
-  for (const rule of DOMAIN_RULES) {
+  for (const rule of rulesForPool(opts.pool)) {
     if (rule.pattern.test(opts.userMessage)) {
       for (const d of rule.domains) domains.add(d);
     }
@@ -661,6 +884,22 @@ export function lastUserMessageText(messages: readonly SelectionMessage[]): stri
   return typeof lastUser?.content === "string" ? lastUser.content : "";
 }
 
+// WARP-3302 (box finding, 2026-09-28) — "Yes, go ahead" after a turn that
+// matched a domain but called nothing (the model asked first) matched no
+// rule, so the tool it meant to call was not advertised and it claimed a run
+// it never started. A short affirmation carries the previous user message's
+// words forward; anything longer is judged on its own.
+const AFFIRMATION = /^\s*(yes|yeah|yep|sure|ok(ay)?|please|go ahead|do it|start it|sounds good)\b[\s\w,.!']{0,40}$/i;
+
+/** The text selection rules read: the last user message, plus the one before it when the last is a bare "yes, go ahead". */
+export function selectionUserText(messages: readonly SelectionMessage[]): string {
+  const last = lastUserMessageText(messages);
+  if (!AFFIRMATION.test(last) || last.trim().split(/\s+/).length > 6) return last;
+  const users = messages.filter((m) => m.role === "user");
+  const prev = users.at(-2)?.content;
+  return typeof prev === "string" ? `${prev}\n${last}` : last;
+}
+
 /**
  * Continuity: every tool name this conversation has already called.
  *
@@ -689,8 +928,9 @@ export function conversationToolNamesFor(
 /**
  * The names this turn will actually advertise, derived once.
  *
- * Under `off` the whole pool genuinely IS the wire payload, so it is returned
- * unnarrowed — a budget estimate for that mode must charge for all of it.
+ * Under `off` and `explicit` the whole pool genuinely IS the wire payload, so
+ * it is returned unnarrowed — a budget estimate for those modes must charge
+ * for all of it.
  */
 export function effectiveAdvertisedToolNames(opts: {
   mode: ToolSelectionMode;
@@ -728,7 +968,7 @@ export function effectiveAdvertisedToolNames(opts: {
   // question itself.
   const { advertised } = selectAdvertisedTools({
     mode: opts.mode,
-    userMessage: lastUserMessageText(opts.messages),
+    userMessage: selectionUserText(opts.messages),
     pool: [...opts.pool],
     conversationToolNames: conversationToolNamesFor(opts.priorToolNames, opts.messages),
     runtimeTools: opts.runtimeTools,

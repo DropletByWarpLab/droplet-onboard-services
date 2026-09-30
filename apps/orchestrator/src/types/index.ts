@@ -37,9 +37,19 @@ export function contentToText(
     .join("\n");
 }
 
+/**
+ * WARP-3338 — which block a system message that routes/llm.ts adds after its
+ * base prompt carries. The agent loop folds every system message into index 0
+ * and heads each marked block so the model can tell them apart
+ * (`foldSystemMessages`, llm-agent.service.ts).
+ */
+export type ContextBlockKind = "attachments" | "pins" | "chat_instructions";
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | ContentBlock[];
+  /** WARP-3338 — set by routes/llm.ts on the system messages it adds. */
+  contextBlock?: ContextBlockKind;
   // Only populated on assistant messages that request tool execution.
   tool_calls?: ToolCall[];
   // Set on tool-role messages to correlate the result with the request.
@@ -302,7 +312,9 @@ export interface StorageStats {
 export interface HealthResponse {
   status: "ok" | "degraded";
   uptime: number;
-  version: string;
+  // WARP-3154 — the real committed OTA release tag; the key is absent (not
+  // `null`) on a box that has never taken an update — see AggregateHealth.
+  version?: string;
   /**
    * WARP-1926 — the local inference runtime this box serves from: `dmr`
    * (Docker Model Runner, the shipped default since WARP-1870) or `ollama`.

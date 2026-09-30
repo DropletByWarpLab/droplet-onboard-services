@@ -372,3 +372,94 @@ async def test_release_frees_slot_and_dispatches_next():
         assert scheduler.queue_depth == 0
     finally:
         await scheduler.stop()
+
+
+# --- WARP-3306 — preempt a background request for chat ----------------------
+
+
+@pytest.mark.asyncio
+async def test_user_request_preempts_preemptible_background_holder():
+    """A USER request that finds the slot held by an opted-in background
+    request sets that holder's preempt event, and dispatches once it releases."""
+    scheduler = InferenceScheduler(max_concurrent=1)
+    await scheduler.start()
+    try:
+        preempt = asyncio.Event()
+        f_bg = await scheduler.enqueue(Priority.BACKGROUND, "run", preempt)
+        await asyncio.wait_for(f_bg, timeout=1.0)
+
+        f_user = await scheduler.enqueue(Priority.USER, "chat")
+        assert preempt.is_set()
+        await asyncio.sleep(0.05)
+        assert not f_user.done(), "chat must wait for the background holder to release"
+
+        await scheduler.release(preempt)
+        assert await asyncio.wait_for(f_user, timeout=1.0) == "chat"
+        assert scheduler.metrics()["total_preempted"] == 1
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_background_holder_without_opt_in_is_never_preempted():
+    scheduler = InferenceScheduler(max_concurrent=1)
+    await scheduler.start()
+    try:
+        f_bg = await scheduler.enqueue(Priority.BACKGROUND, "brain-pass")
+        await asyncio.wait_for(f_bg, timeout=1.0)
+        f_user = await scheduler.enqueue(Priority.USER, "chat")
+        await asyncio.sleep(0.05)
+        assert not f_user.done()
+        assert scheduler.metrics()["total_preempted"] == 0
+        await scheduler.release()
+        assert await asyncio.wait_for(f_user, timeout=1.0) == "chat"
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_holder_is_asked_once_and_not_after_release():
+    """Two chats in a row ask the holder once; a released holder is never asked."""
+    scheduler = InferenceScheduler(max_concurrent=2)
+    await scheduler.start()
+    try:
+        preempt = asyncio.Event()
+        f_bg = await scheduler.enqueue(Priority.BACKGROUND, "run", preempt)
+        await asyncio.wait_for(f_bg, timeout=1.0)
+        # A free slot: chat dispatches without preempting anyone.
+        f1 = await scheduler.enqueue(Priority.USER, "chat-1")
+        await asyncio.wait_for(f1, timeout=1.0)
+        assert not preempt.is_set()
+        # Slots full now: the next chat asks the holder, the one after does not ask again.
+        await scheduler.enqueue(Priority.USER, "chat-2")
+        await scheduler.enqueue(Priority.USER, "chat-3")
+        assert preempt.is_set()
+        assert scheduler.metrics()["total_preempted"] == 1
+    finally:
+        await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_unless_preempted_cancels_the_stream_and_raises():
+    """main._unless_preempted: the model stream is torn down when chat preempts it."""
+    import main
+
+    closed = asyncio.Event()
+
+    async def upstream():
+        try:
+            yield "data: chunk-1\n\n"
+            await asyncio.sleep(30)  # a long model call
+            yield "data: chunk-2\n\n"
+        finally:
+            closed.set()
+
+    preempt = asyncio.Event()
+    it = upstream().__aiter__()
+    assert await main._unless_preempted(it.__anext__(), preempt) == "data: chunk-1\n\n"
+    asyncio.get_running_loop().call_later(0.05, preempt.set)
+    with pytest.raises(main._Preempted):
+        await main._unless_preempted(it.__anext__(), preempt)
+    assert closed.is_set(), "the upstream model stream must be closed"
+    # Without an event the helper is a plain await.
+    assert await main._unless_preempted(asyncio.sleep(0, result=7), None) == 7

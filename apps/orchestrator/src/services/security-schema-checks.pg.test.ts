@@ -181,8 +181,8 @@ describe.skipIf(!RUN)("P2b schema CHECKs live in the database (WARP-2977)", () =
 
   const link = (kind: string, ref: string): string[] => [
     zone(`${TAG}links`, q(`${TAG}links`), `${TAG}zone-links`),
-    `INSERT INTO "SecurityZoneLink" ("id","zoneId","sourceKind","sourceRef","sourceLabel","state")
-     VALUES ('${TAG}link','${TAG}zone-links','${kind}',${q(ref)},'Front door','active')`,
+    `INSERT INTO "SecurityZoneLink" ("id","zoneId","sourceKind","sourceRef","sourceLabel","state","origin","stateSetBy")
+     VALUES ('${TAG}link','${TAG}zone-links','${kind}',${q(ref)},'Front door','active','person','person')`,
   ];
 
   describe("SecurityZoneLink_ref", () => {

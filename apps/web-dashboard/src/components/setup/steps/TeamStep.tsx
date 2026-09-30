@@ -78,7 +78,7 @@ import { Dialog } from "@/components/Dialog";
 const ROLE_OPTIONS: ReadonlyArray<{ value: TeamInviteRole; label: string }> = [
   { value: "admin", label: "Admin" },
   { value: "family", label: "Member" },
-  { value: "guest", label: "Guest" },
+  { value: "guest", label: "External guest" },
   { value: "owner", label: "Owner" },
 ];
 
@@ -581,8 +581,9 @@ export function TeamStep({
           person&rsquo;s behalf — an <span className="font-semibold">Admin</span>{" "}
           can manage people and the network, a{" "}
           <span className="font-semibold">Member</span> works with cameras,
-          files, and chat, and a <span className="font-semibold">Guest</span> is
-          scoped to their own sessions.
+          files, and chat, and an{" "}
+          <span className="font-semibold">External guest</span> is scoped to
+          their own sessions.
         </p>
         {/* WARP-1305 — honesty in the learn-more too: only describe SSO as an
             instruction when a directory is actually connected. Otherwise the

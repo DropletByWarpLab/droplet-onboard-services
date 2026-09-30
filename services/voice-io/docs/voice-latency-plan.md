@@ -39,7 +39,7 @@ for a tool question. The dominant costs, ranked:
 | 6 | **No warm-up** — first utterance after boot pays cold CTranslate2 init; first *spoken* reply can race a 70 MB Piper voice download inside a 15 s timeout. | `main.py:298-302`, `tts.py:62` | **D** |
 | 7 | **1.0 s silence tail on every turn** + `STT_MAX_RECORD_S` drift (code/README say 3.0, box runs 5.0) + `--cpu-threads 4` inside `cpus: 2.0`. | `pipeline.py:290`, `docker-compose.yml:1750`, `:1823` | **E** |
 
-**Not the problem** (don't touch): `max_iter:2` is already tuned down;
+**Not the problem** (don't touch): the agent-loop budget (`max_iter`, now 4 via `VOICE_MAX_ITER` — WARP-3316) is already tuned down;
 `--beam-size 1` is already greedy-optimal; STT is already 16 kHz-native with no
 disk I/O. Model residency is short on purpose: `OLLAMA_KEEP_ALIVE` defaults to
 `5m` (WARP-1826, the `ollama` service in `docker/docker-compose.yml`), not 24 h.

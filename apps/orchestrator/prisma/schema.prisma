@@ -944,6 +944,12 @@ model ChatMessage {
   /// WARP-844 — user rating on an assistant turn (explicit column per the
   /// no-guessing rule). NULL = unrated. Feeds the admin RAG-eval loop.
   feedback    ChatMessageFeedback?
+  /// WARP-3300 — what this row is. `message` is every ordinary turn;
+  /// `agent_run_result` is a background run reporting back into the chat
+  /// that started it (`meta` then holds {runId, status, title, summary,
+  /// artifacts}). An explicit column, never inferred from `meta`.
+  kind        ChatMessageKind      @default(message)
+  meta        Json?
   createdAt   DateTime             @default(now())
 
   @@index([sessionId, createdAt])
@@ -958,6 +964,12 @@ enum CloudHistoryConsent {
   not_asked
   granted
   declined
+}
+
+/// WARP-3300 — see ChatMessage.kind.
+enum ChatMessageKind {
+  message
+  agent_run_result
 }
 
 /// WARP-844 — thumbs rating on an assistant message.
@@ -1060,6 +1072,11 @@ model UserInvite {
   // separate ticket.
   role         Role      @default(family)
   createdBy    String // username of issuing admin
+  // WARP-3263: the issuing admin's User.id, copied to User.invitedById at
+  // accept. No FK: an audit pointer that must not block invite creation;
+  // accept checks the row still exists before copying it. Null on invites
+  // issued before this column existed.
+  createdById  String?
   expiresAt    DateTime
   // WARP-3193 QUAL-3: the lifecycle is this column, not the absence of the
   // timestamps below (CLAUDE.md no-guessing rule; WARP-218
@@ -2129,6 +2146,13 @@ model CalendarEvent {
   sourceId     String? // FK to CalendarSource.id (when source="external")
   externalUid  String? // iCalendar UID — used as idempotency key on re-sync
   externalEtag String? // CalDAV ETag for change detection
+  /// WARP-3266 — explicit, never derived from externalUid's shape:
+  /// "none" — a one-off event (every local row);
+  /// "occurrence" — one instance of a subscribed recurring series, expanded
+  ///   at sync time (externalUid = "<UID>::<original start ISO>");
+  /// "unexpanded" — a recurring series whose RRULE is outside the supported
+  ///   subset, stored as its first instance only. Clients can say "repeats".
+  recurrence   String   @default("none")
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -2976,6 +3000,16 @@ model User {
   // silently strip or downgrade a person's assignment.
   accessRoleId     String?
   accessRole       AccessRole?           @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
+  // WARP-3263: the person who brought this account onto the box: the invite's
+  // issuer (stamped at invite accept) or the admin who created it directly
+  // (POST /auth/users). An explicit id, never inferred from usernames or
+  // timestamps. Null when nobody did (setup owner, SSO/SCIM) or when that
+  // person was later deleted (SetNull), so a new hire reusing the old
+  // username is never mistaken for the inviter. An external guest's Messages
+  // roster shows this person.
+  invitedById      String?
+  invitedBy        User?                 @relation("UserInvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
+  invitees         User[]                @relation("UserInvitedBy")
   // ADR-032 / WARP-1525: per-person feature-axis exceptions (design D-A, v1).
   accessExceptions UserAccessException[]
   // WARP-2748 (ADR-051): findings assigned to this person. SetNull on the
@@ -3931,9 +3965,62 @@ model EmailMessage {
   extractedAt      DateTime?
   extractReason    ExtractReason?
 
+  /// WARP-3267 — the files this message carried.
+  attachments EmailAttachment[]
+
   @@unique([accountId, messageId])
   @@index([threadId, receivedAt(sort: Desc)])
   @@index([extractStatus, receivedAt])
+}
+
+/// WARP-3267 — one MIME part of an inbound message that is not its body.
+///
+/// Ruling: the bytes live in box storage (this table), not in the mailbox
+/// owner's Nextcloud home. A mailbox an admin connects for the company has no
+/// owner (`EmailAccount.userId` is null) and so no home to write to; anything
+/// in a Nextcloud home is picked up by the preview generator and the file
+/// indexer, which would render and parse a stranger's file the moment it
+/// arrived; and here the bytes go with the message, so disconnecting a mailbox
+/// (which cascades) leaves nothing behind. Saving an attachment into Files is
+/// the person's own act, from a client.
+///
+/// Never rendered by the box. Served only as a download
+/// (`GET /api/email/:accountId/messages/:messageId/attachments/:attachmentId`).
+/// `status` says whether the bytes were kept: a part over the size limits is
+/// listed, so the reader knows it existed, but not stored.
+model EmailAttachment {
+  id             String                @id @default(uuid())
+  emailMessageId String
+  emailMessage   EmailMessage          @relation(fields: [emailMessageId], references: [id], onDelete: Cascade)
+  /// Copied from the message so a forward can check, in one query, that the
+  /// attachment belongs to the mailbox the draft is sent from.
+  accountId      String
+  /// Position among the message's attachments (0-based). Unique per message.
+  partIndex      Int
+  /// As the sender named it, decoded. Sanitised when served, never trusted.
+  filename       String
+  /// As the sender declared it. Recorded, never used to decide how to open it.
+  contentType    String
+  size           Int
+  sha256         String
+  /// `Content-ID` of an inline part (a `cid:` image), without the brackets.
+  contentId      String?
+  status         EmailAttachmentStatus
+  /// Null unless `status` is `stored`.
+  data           Bytes?
+  createdAt      DateTime              @default(now())
+
+  @@unique([emailMessageId, partIndex])
+  @@index([accountId])
+}
+
+/// WARP-3267 — whether an attachment's bytes were kept.
+/// `too_large`: the part, or the message's running total, was over the limit.
+/// `over_limit`: the message carried more attachments than the box keeps.
+enum EmailAttachmentStatus {
+  stored
+  too_large
+  over_limit
 }
 
 /// WARP-465 — operator- or Droplet-authored draft. `draftedByDroplet`
@@ -3965,6 +4052,9 @@ model EmailDraft {
   /// every draft that has never been claimed.
   claimedAt        DateTime?
   error            String?
+  /// WARP-3267 — stored `EmailAttachment` ids a forward carries. Checked on
+  /// write to belong to this draft's mailbox; the indexer attaches them at send.
+  attachmentIds    String[]         @default([])
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 
@@ -4214,8 +4304,38 @@ model AgentRun {
   /// EVERY claim (the WARP-1580 ticker rule), never cached at creation, so a
   /// run cannot outlive a role change with stale reach.
   userId             String
-  /// The chat conversation that started the run, when one did.
+  /// The chat conversation that started the run, when one did. WARP-3299:
+  /// set by the server from the chat turn (never from model arguments),
+  /// together with the two ids below, when `origin = chat`.
   sessionId          String?
+  /// WARP-3299 — who started the run. Explicit, never inferred from which
+  /// ids are NULL (a schedule run also has no session).
+  origin             AgentRunOrigin
+  /// WARP-3299 — the assistant message whose tool call started the run, and
+  /// that call's id. Lets the chat card find its run.
+  originMessageId    String?
+  originToolCallId   String?
+  /// WARP-3299 — the short label the card shows, and what "done" means.
+  /// Backfilled from the goal's first line for runs that predate them.
+  title              String                   @default("")
+  deliverable        String                   @default("")
+  /// WARP-3299 — the bounded result written back to the chat (the full final
+  /// text stays in `result`). Written by the result-message work, WARP-3300.
+  summary            String?                  @db.VarChar(2000)
+  /// WARP-3299 — `[{kind, ref, title}]`: what the run created.
+  artifacts          Json                     @default("[]")
+  /// WARP-3299 — whether the result message reached the conversation.
+  /// `not_applicable` for runs no chat started.
+  resultDelivery     AgentRunResultDelivery   @default(not_applicable)
+  /// WARP-3300 — posts of the result message tried so far. The worker stops
+  /// retrying a `failed` delivery at 5 (RESULT_DELIVERY_MAX_ATTEMPTS).
+  resultDeliveryAttempts Int                  @default(0)
+  /// WARP-3301 — why a `queued` run is not being worked on: `queue` (behind
+  /// other runs, or not due yet) or `chat` (it yielded the one inference slot
+  /// to interactive chat on a gateway 429). Written at every transition back
+  /// to `queued`; meaningless in any other status, where the API reports
+  /// `waitingFor: "none"`.
+  queueWait          AgentRunQueueWait        @default(queue)
   goal               String
   model              String
   status             AgentRunStatus           @default(queued)
@@ -4441,6 +4561,31 @@ enum ExtensionSigner {
   release
 }
 
+/// WARP-3299 — who started a run.
+enum AgentRunOrigin {
+  workshop
+  schedule
+  chat
+}
+
+/// WARP-3299 — whether a chat-started run's result message reached its
+/// conversation. `not_applicable` for every run no chat started.
+enum AgentRunResultDelivery {
+  not_applicable
+  pending
+  delivered
+  failed
+  /// WARP-3300 — the conversation was deleted before the result could be
+  /// posted. Terminal, like `delivered`: there is nowhere left to post it.
+  conversation_gone
+}
+
+/// WARP-3301 — why a queued run waits. See `AgentRun.queueWait`.
+enum AgentRunQueueWait {
+  queue
+  chat
+}
+
 /// WARP-2997 — where a run's model runs, and whether its owner may use it.
 /// `unchecked` (never claimed yet), `local` (on the box; nothing withheld),
 /// `cloud_allowed` (cloud model, person permitted; stored-content tools
@@ -4625,6 +4770,10 @@ enum OffLanChannelKey {
   /// (Google / Apple / Mozilla) a PushSubscription row names. Read by
   /// `webPushGate` in dispatchToUser, the one dial site, on every call.
   web_push
+  /// WARP-3264 — "Look up places online": the calendar place field's
+  /// OpenStreetMap (Nominatim) lookup. Owner-only switch, default off;
+  /// read fail-closed by `placeLookupGate` in GET /api/calendar/places.
+  place_lookup
 }
 
 /// WARP-473 — Phase G1. File ↔ ChatMessage citations.
@@ -4696,6 +4845,39 @@ model FileTag {
   @@unique([ncFileId, label])
   @@index([ncFileId])
   @@index([addedByUserId])
+}
+
+/// Finder-tag-style palette for a folder's colour in the Files UI. "No colour"
+/// is not a member: clearing a colour deletes the `FileFolderColor` row (the
+/// row's existence IS the "this folder is coloured" fact, and `color` is its
+/// only state — there is no second column to disagree with it).
+enum FolderColor {
+  red
+  orange
+  yellow
+  green
+  blue
+  purple
+  gray
+}
+
+/// Per-user folder colour. Personal organisation, NOT shared metadata: user A
+/// colouring a folder is invisible to user B, so it is keyed on
+/// `(userId, ncFileId)`. `ncFileId` (oc:fileid) survives rename/move — the
+/// same identity FileTag / FileComment use — so no path bookkeeping happens on
+/// rename. `userId` is the LOCAL `User.id` UUID (`req.user.id`), never the
+/// Nextcloud username. Like FileTag, no FK to User: a file-metadata table
+/// keyed on Nextcloud identities, mirroring the shipped precedent.
+model FileFolderColor {
+  id        String      @id @default(uuid())
+  userId    String
+  ncFileId  Int
+  color     FolderColor
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  @@unique([userId, ncFileId])
+  @@index([userId])
 }
 
 /// WARP-468 — Phase E2. 60 s egress byte counter per off-LAN channel.
@@ -4783,6 +4965,15 @@ model Workspace {
   /// WARP-218 / ClaimCodeState precedent). False until the org step persists;
   /// the org step is NOT skippable.
   orgConfigured     Boolean       @default(false)
+  /// Owner setting, OFF by default: may owner/admin/family map their own
+  /// drive in Finder / File Explorer (POST /api/storage/network-drive/personal
+  /// mints a per-user Nextcloud app password)? EXPLICIT boolean, never derived
+  /// from the presence of DeviceClient rows or a role (CLAUDE.md no-guessing
+  /// rule; same discipline as `orgConfigured` above). Written only by the
+  /// owner-only PUT /api/settings/workspace/personal-drive; readable by any
+  /// signed-in user through GET /api/settings/workspace so the dialog can say
+  /// why the drive is unavailable. WARP-3318; see docs/network-drive.md.
+  personalDriveEnabled Boolean       @default(false)
   /// Whoever last flipped the type (Nextcloud username from the auth
   /// middleware). Nullable: setup wizard runs before any user exists.
   setBy             String?
@@ -8900,12 +9091,13 @@ model SecurityIngestState {
 // ── WARP-2977 P2b (ADR-059 §3.4, §3.6): areas, opening hours, the site mode ──
 //
 // Areas resolve against SecurityEvent at READ time — SecurityEvent gets no zoneId.
-// Values land with their first writer: link states proposed/rejected, origin,
-// evidence and confidence arrive with P4; the `lock` source kind with the Matter
-// adapter (P2b-2); departmentId when something reads it.
+// Values land with their first writer: the `lock` source kind with the Matter
+// adapter (P2b-2); departmentId when something reads it. WARP-2979 (P4) added
+// the link states proposed/rejected, origin/stateSetBy, evidence and confidence.
 //
 // Every shape rule below that Prisma cannot express is a hand-written CHECK in
-// 20260924000100_warp_2977_security_zones_hours_mode — explicit enums, never
+// 20260924000100_warp_2977_security_zones_hours_mode (and, for WARP-2979's
+// columns, 20260926000100_warp_2979_security_ai) — explicit enums, never
 // IS NULL as state.
 
 enum SecurityZoneKind {
@@ -8927,10 +9119,21 @@ enum SecurityZoneSourceKind {
   camera_zone
 }
 
-/// `removed` = a person unlinked it. Kept (never deleted) so P4 never re-proposes it.
+/// `removed` = a person unlinked it. `rejected` = a person turned down or undid Droplet's link.
+/// Both are final for Droplet: kept (never deleted), never re-proposed, never touched (WARP-2979).
 enum SecurityZoneLinkState {
   active
   removed
+  /// WARP-2979 — Droplet suggests it; nothing uses it until a person accepts it.
+  proposed
+  /// WARP-2979 — a person said no to Droplet's suggestion, or undid Droplet's link.
+  rejected
+}
+
+/// WARP-2979 — who created a link row (`origin`, immutable) and who set its current state (`stateSetBy`).
+enum SecurityLinkActor {
+  person
+  droplet
 }
 
 model SecurityZone {
@@ -8970,10 +9173,56 @@ model SecurityZoneLink {
   createdAt      DateTime               @default(now())
   decidedById    String?
   stateChangedAt DateTime               @default(now())
+  /// WARP-2979 — who created the row. Immutable. Every P2b row was made by a person (route 12): backfilled
+  /// `person`. No default: every writer names it.
+  origin         SecurityLinkActor
+  /// WARP-2979 — who set the CURRENT state. `droplet` only for proposed/active on a droplet-origin row (CHECK).
+  /// No default: every writer names it.
+  stateSetBy     SecurityLinkActor
+  /// WARP-2979 — LinkEvidenceV1 (lib/security-link-evidence.ts), validated in code. Set iff origin = droplet (CHECK).
+  evidence       Json?
+  /// WARP-2979 — Wilson 95 % lower bound of hits / anchors, 0..1. Set iff origin = droplet (CHECK).
+  confidence     Float?
+  /// WARP-2979 — LINK_RULES_VERSION that produced `evidence`. Set iff origin = droplet (CHECK).
+  rulesVersion   Int?                   @db.SmallInt
+  /// WARP-2979 — when `evidence` was computed. Proposed rows refresh it; active rows keep their activation evidence.
+  evidenceAt     DateTime?
 
   @@unique([zoneId, sourceKind, sourceRef])
   @@index([sourceKind, sourceRef, state])
   @@index([zoneId, state])
+  @@index([state, origin])
+}
+
+// ── WARP-2979 (ADR-059 P4, DS-006/DS-007): what Droplet's AI may do in Security ──
+
+/// What Droplet may do with links on its own.
+enum SecurityAiLinking {
+  /// Above the auto bar a link becomes active on its own, with a "Linked by Droplet" chip and Undo; the rest are suggested.
+  link_and_suggest
+  /// Everything is suggested; nothing becomes active without a person.
+  suggest_only
+  /// Droplet looks for no links.
+  off
+}
+
+/// Whether Droplet writes incident summaries (always on this box, never in the cloud).
+enum SecurityAiSummaries {
+  on
+  off
+}
+
+/// One row, created lazily (createMany skipDuplicates, then read; never upsert({update:{}})).
+/// Written only by the manage-level settings route, by compare-and-set on `version` (CHECK: id = 'singleton').
+model SecurityAiSettings {
+  id          String              @id @default("singleton")
+  linking     SecurityAiLinking   @default(link_and_suggest)
+  summaries   SecurityAiSummaries @default(on)
+  /// Lost-update guard for the settings form.
+  version     Int                 @default(0)
+  /// User.id of the last person who changed it (no FK: users are deletable; the audit chain is the record).
+  updatedById String?
+  updatedAt   DateTime            @updatedAt
 }
 
 enum SecurityHoursState {
@@ -9238,12 +9487,13 @@ model SecurityBaselineJobState {
 // Membership is SecurityEventTriage (one row per SecurityEvent, the exactly-once marker);
 // SecurityEvent stays append-only (a BEFORE UPDATE trigger refuses any update).
 // Values land with their first writer: out_of_place / unusual_volume / long_dwell and the verdict
-// columns landed with P5 PR-B (WARP-2980); camera_offline_during_activity lands with P4, the door
-// codes with ADR-055.
+// columns landed with P5 PR-B (WARP-2980); camera_offline_during_activity, the reasons' related
+// sources and the incident's "Summary by Droplet" columns with P4 (WARP-2979); the door codes with
+// ADR-055.
 //
 // Every shape rule Prisma cannot express is a hand-written CHECK in
-// 20260925030000_warp_2978_security_incidents (P5 PR-B's: 20260925060100_warp_2980_security_patterns_verdicts)
-// — explicit enums, never IS NULL as state.
+// 20260925030000_warp_2978_security_incidents (P5 PR-B's: 20260925060100_warp_2980_security_patterns_verdicts;
+// P4's: 20260926000100_warp_2979_security_ai) — explicit enums, never IS NULL as state.
 
 enum SecurityIncidentScope {
   /// One area. zoneId + zoneName + zoneKind are set (CHECK).
@@ -9299,6 +9549,9 @@ enum SecurityReasonCode {
   out_of_place
   unusual_volume
   long_dwell
+  /// WARP-2979 — a camera a person linked to the area stopped reporting soon after someone was seen there,
+  /// while the site was closed or away. Always an alert (CHECK SecurityIncidentReason_code_severity).
+  camera_offline_during_activity
 }
 
 /// WARP-2980 P5 PR-B — a person's judgement of an incident (brief §4.4). Explicit — never inferred from verdictAt.
@@ -9306,6 +9559,19 @@ enum SecurityIncidentVerdict {
   unreviewed
   expected
   not_expected
+}
+
+/// WARP-2979 (ADR-059 §4.5) — the incident's "Summary by Droplet". Explicit — never inferred from narrative IS NULL.
+enum SecurityNarrativeState {
+  /// None asked for: plain activity (severity info, CHECK), or a notice/alert incident still collecting.
+  none
+  /// Waiting for the narrator: set when a notice/alert incident seals, or by Regenerate.
+  pending
+  written
+  /// The narrator gave up after its maximum attempts; the page shows codes only.
+  failed
+  /// Still pending 7 days after the incident's last activity; never narrated.
+  expired
 }
 
 enum SecurityTriageOutcome {
@@ -9402,7 +9668,8 @@ model SecurityIncident {
   stateChangedById String?
   resolvedAt       DateTime?
   resolvedById     String?
-  /// CAS for the engine and for people. Bumped by every write.
+  /// CAS for the engine and for people. Bumped by every write — except the summary's (WARP-2979): a
+  /// summary never bumps it, so it can never make an acknowledgement 409.
   version          Int                      @default(0)
   updatedAt        DateTime                 @updatedAt
 
@@ -9420,6 +9687,24 @@ model SecurityIncident {
   /// Empty iff unreviewed (CHECK).
   verdictCodes     SecurityReasonCode[]     @default([])
 
+  /// WARP-2979 (DS-007) — "Summary by Droplet", written on this box only. Every incident before P4 stays
+  /// `none` (never narrated retroactively). Shape CHECKed (SecurityIncident_narrative_shape).
+  narrativeState         SecurityNarrativeState @default(none)
+  /// Plain text, ≤ 700 chars, checked before it is stored.
+  narrative              String?                @db.VarChar(700)
+  /// The model that wrote it (the response's `model`, else the requested local id).
+  narrativeModel         String?                @db.VarChar(120)
+  narrativePromptVersion Int?                   @db.SmallInt
+  narratedAt             DateTime?
+  /// {cameras: string[], threats: boolean, locks: boolean} — everything the text names. DS-005: shown only
+  /// to a viewer who can see all of it. Shape validated in code.
+  narrativeAudience      Json?
+  narrativeAttempts      Int                    @default(0) @db.SmallInt
+  /// Claim lease and last attempt (not state).
+  narrativeAttemptAt     DateTime?
+  /// Last failure: MODEL_ERROR | TIMEOUT | LENGTH | EMPTY | CHECK_FAILED:<rule>.
+  narrativeError         String?                @db.VarChar(64)
+
   reasons      SecurityIncidentReason[]
   members      SecurityEventTriage[]
   acks         SecurityIncidentAck[]
@@ -9432,6 +9717,7 @@ model SecurityIncident {
   @@index([zoneId, lastActivityAt])
   @@index([notifyState])
   @@index([verdict])
+  @@index([narrativeState, severity, lastActivityAt])
 }
 
 model SecurityIncidentReason {
@@ -9454,9 +9740,16 @@ model SecurityIncidentReason {
   evidenceAt      DateTime
   evidenceSummary String              @db.VarChar(500)
   /// The rule's numbers, per code (validated in code): after_hours_presence {mode, modeSource,
-  /// nonOpenAt, zoneKind}; camera_offline {offlineForSec|null, backAt|null}; threat_signal {activityId, kind}.
+  /// nonOpenAt, zoneKind}; camera_offline {offlineForSec|null, backAt|null}; threat_signal {activityId, kind};
+  /// camera_offline_during_activity {offlineForSec|null, backAt|null, mode, modeSource, activity}.
   detail          Json
   createdAt       DateTime            @default(now())
+  /// WARP-2979 — a SECOND camera the evidence names (camera_offline_during_activity: where the person was
+  /// seen). DS-005: the reason is visible only when this camera is visible too. Only on that code (CHECK).
+  relatedCamera   String?             @db.VarChar(64)
+  /// WARP-2979 (PR-4) — the evidence names a lock reading; visible only with mayReadLocks (DS-019).
+  /// Only on camera_offline_during_activity (CHECK).
+  relatedLock     Boolean             @default(false)
 
   @@unique([incidentId, code, evidenceEventId])
   @@index([incidentId])

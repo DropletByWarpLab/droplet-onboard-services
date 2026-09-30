@@ -159,6 +159,29 @@ describe("NotificationToaster deep link (WARP-2909)", () => {
     expect(routerPush).toHaveBeenCalledWith("/workshop?run=r1");
   });
 
+  // WARP-3303 — a run started from chat reports back to that chat.
+  it("a run notification carrying sessionId opens the chat, not the Workshop", async () => {
+    const action = await toastFor({
+      kind: "ai",
+      title: "Background run finished: supplier check",
+      url: "/workshop?run=r1",
+      data: { agentRunId: "r1", status: "succeeded", sessionId: "conv-42" },
+    });
+    action!.onClick();
+    expect(routerPush).toHaveBeenCalledWith("/chat?c=conv-42");
+  });
+
+  it("an agent-run progress frame is not toasted", async () => {
+    render(<NotificationToaster />);
+    await act(async () => {
+      await Promise.resolve();
+      FakeWebSocket.instances.at(-1)!.onmessage?.({
+        data: JSON.stringify({ topic: "droplet/agent-runs/romain", payload: { runId: "r1", status: "running" } }),
+      });
+    });
+    expect(toastSpy).not.toHaveBeenCalled();
+  });
+
   it("a toast without a url has no action", async () => {
     expect(await toastFor({ kind: "ai", title: "Done" })).toBeUndefined();
   });

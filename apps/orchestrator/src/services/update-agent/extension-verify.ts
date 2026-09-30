@@ -217,7 +217,7 @@ export async function verifyExtensionStatement(
         return refuse(
           "extension_key_changed",
           now === null
-            ? "the box holds no extension key; it was signed by one (re-promote after a disk rebuild)"
+            ? "the box holds no extension key; it was signed by one (re-promote after a disk rebuild or a factory reset)"
             : `box extension key is ${now}, the statement was signed by ${opts.recorded.keyFingerprint}; re-promote`,
         );
       }

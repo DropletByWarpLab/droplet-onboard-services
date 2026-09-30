@@ -149,7 +149,7 @@ async function handler(
 const tool: Tool = {
   name: "memory_recall",
   description:
-    "Recall durable memory facts about the user or workspace. Returns facts whose text contains the query substring (case-insensitive). Optional category filter (Tone, Workflow, Scope, Schedule, Other, Business). Tier-1 read; safe to call without operator confirmation. Use BEFORE answering questions about user preferences, recurring workflows, scope assumptions, schedule, or business knowledge.",
+    "Recall durable memory facts about the user or workspace. Returns facts whose text contains the query substring (case-insensitive). Optional category filter (Tone, Workflow, Scope, Schedule, Other, Business). Use BEFORE answering questions about user preferences, recurring workflows, scope assumptions, schedule, or business knowledge.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

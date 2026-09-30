@@ -250,7 +250,7 @@ async function handler(
 const tool: Tool = {
   name: "get_audit_log",
   description:
-    'The workspace audit trail — what the AI and team members did (tool calls, network changes, auth events, system actions) from the tamper-evident activity log. Owner/admin only — other roles get FORBIDDEN. Filter by kind, actor (user/ai/system), or a free-text query. Use for "what did the AI do today?", "who changed the Wi-Fi?", or "show recent activity" questions. Defaults to the last 24 hours (max 720 = 30 days). Tier-1 read; safe to call without operator confirmation.',
+    'The workspace audit trail — what the AI and team members did (tool calls, network changes, auth events, system actions) from the tamper-evident activity log. Owner/admin only — other roles get FORBIDDEN. Filter by kind, actor (user/ai/system), or a free-text query. Use for "what did the AI do today?", "who changed the Wi-Fi?", or "show recent activity" questions. Defaults to the last 24 hours (max 720 = 30 days).',
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

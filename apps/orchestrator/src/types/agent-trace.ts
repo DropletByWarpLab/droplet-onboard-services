@@ -4,4 +4,9 @@ export interface AgentTraceEntry {
   tool: string;
   args: Record<string, unknown>;
   result: unknown;
+  /**
+   * WARP-3348 — the dispatch reported failure. Set only when true. The parsed
+   * `result` alone cannot say so for a remote tool's plain text (`{raw}`).
+   */
+  isError?: true;
 }

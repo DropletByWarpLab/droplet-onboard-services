@@ -72,6 +72,9 @@ export interface PersistedMessageInput {
    * submits when the user retries a transient network failure.
    */
   turnId?: string | null;
+  /** WARP-3300 — defaults to `message`; `agent_run_result` carries `meta`. */
+  kind?: "message" | "agent_run_result";
+  meta?: Prisma.InputJsonValue | null;
 }
 
 export interface PersistedConversationSummary {
@@ -119,6 +122,10 @@ export interface PersistedConversationDetail extends PersistedConversationSummar
      */
     model: string | null;
     provider: string | null;
+    /** WARP-3300 — `agent_run_result` rows are a background run reporting
+     *  back; `meta` is then {runId, status, title, summary, artifacts}. */
+    kind: "message" | "agent_run_result";
+    meta: unknown;
   }>;
 }
 
@@ -181,6 +188,8 @@ export class ChatPersistenceService {
         // WARP-904 — per-message audit trail (see PersistedConversationDetail).
         model: m.model ?? null,
         provider: m.provider ?? null,
+        kind: m.kind as "message" | "agent_run_result",
+        meta: m.meta ?? null,
       })),
     };
   }
@@ -241,6 +250,40 @@ export class ChatPersistenceService {
       }
     }
     return [...names];
+  }
+
+  /**
+   * WARP-3348 — the tools the PREVIOUS assistant turn of this conversation
+   * actually ran: ok, and not a pending approval (persisted with ok:true so
+   * its chip renders). The action-claim check lets a send or delete claim in
+   * this turn ("Yes, I've sent it") stand on those; nothing older counts.
+   * `currentAssistantMessageId` is this turn's own row, already created.
+   */
+  async getPreviousTurnRanToolNames(
+    conversationId: string,
+    userId: string,
+    currentAssistantMessageId: string | null,
+  ): Promise<string[]> {
+    const [row] = await this.prisma.chatMessage.findMany({
+      where: {
+        sessionId: conversationId,
+        session: { userId },
+        role: "assistant",
+        ...(currentAssistantMessageId ? { id: { not: currentAssistantMessageId } } : {}),
+      },
+      select: { toolCalls: true },
+      orderBy: { createdAt: "desc" },
+      take: 1,
+    });
+    const calls = row?.toolCalls as unknown as PersistedToolCall[] | null | undefined;
+    if (!Array.isArray(calls)) return [];
+    return [
+      ...new Set(
+        calls
+          .filter((c) => c && typeof c.name === "string" && c.ok === true && c.status !== "confirmation_required")
+          .map((c) => c.name),
+      ),
+    ];
   }
 
   /**
@@ -816,6 +859,8 @@ export class ChatPersistenceService {
                 : Prisma.JsonNull,
             toolCallId: m.toolCallId ?? null,
             turnId: m.turnId ?? null,
+            kind: m.kind ?? "message",
+            meta: m.meta ?? Prisma.JsonNull,
           },
         });
       }
