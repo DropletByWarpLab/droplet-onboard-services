@@ -1767,6 +1767,20 @@ export function useChat(options: UseChatOptions = {}) {
             ? { citations: restoredCitations }
             : {}),
           ...(failureKind ? { failureKind } : {}),
+          // WARP-3303 — the result a background run posted into this chat.
+          // `content` stays the plain text, so the replayed history the model
+          // reads is unchanged; only the rendering becomes a card.
+          ...(m.kind === "agent_run_result" && m.meta?.runId && m.meta.status
+            ? {
+                runResult: {
+                  runId: m.meta.runId,
+                  status: m.meta.status,
+                  title: m.meta.title ?? "Background task",
+                  summary: m.meta.summary ?? "",
+                  artifacts: m.meta.artifacts ?? [],
+                },
+              }
+            : {}),
         });
       }
       // Tail-orphan: a user message at the END of the persisted list with no

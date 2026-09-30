@@ -186,6 +186,16 @@ export interface ToolContext {
    */
   workspaceId?: string;
   /**
+   * WARP-3299 — the chat turn this dispatch belongs to: the conversation
+   * (`ChatSession.id`), the assistant message being written and the model's
+   * tool call id. Forwarded by the orchestrator via `_meta`, stdio-trusted
+   * only, never from tool arguments. `start_agent_run` sends them so the run
+   * links back to the chat that started it.
+   */
+  conversationId?: string;
+  messageId?: string;
+  toolCallId?: string;
+  /**
    * WARP-3116 — the pages the calling dashboard can open, derived per viewer
    * from its nav config and forwarded by the orchestrator via
    * `_meta.dashboardPages` (stdio-trusted only). Typed `unknown` on purpose:

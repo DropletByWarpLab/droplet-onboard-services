@@ -284,7 +284,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   // WARP-1685 — Messages sends on the acting human's behalf.
   team_chat: ["team_chat_send_message", "team_chat_send_meeting_invite"],
   // WARP-2180 — durable background runs.
-  agent_runs: ["start_agent_run", "list_agent_runs"],
+  agent_runs: ["start_agent_run", "list_agent_runs", "cancel_agent_run"],
   routines: ["routine_draft", "routine_list", "routine_run"],
   workspace: [
     "workspace_read",
@@ -535,6 +535,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Background runs (WARP-2180)
   start_agent_run: "Hand Droplet a longer task to work on in the background",
   list_agent_runs: "See your background tasks and how they went",
+  cancel_agent_run: "Stop a background task you started",
   routine_draft: "Write down a routine for you to review and turn on",
   routine_list: "See the routines on this box and whether they are on",
   routine_run: "Run one of your routines right now",

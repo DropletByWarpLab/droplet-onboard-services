@@ -638,6 +638,10 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // WARP-2180 — durable background runs. Word boundaries on purpose; the
   // vocabulary is how a person hands work off, not the work's subject.
   { pattern: /\b(background (run|task|job)s?|agent runs?|in the background|while (i'?m|i am) (away|out|asleep|gone)|keep working on (this|it)|work on (this|it) (later|overnight)|long[- ]running (task|job))\b/i, domains: ["agent_runs"] },
+  // WARP-3302 — stopping a run by its plain name. "How is it going?" needs no
+  // rule: a chat that started a run carries start_agent_run in its prior tool
+  // names, so continuity already advertises the domain on the follow-up.
+  { pattern: /\b(stop|cancel|abort|kill) (the|that|this|my) (task|run|job)\b/i, domains: ["agent_runs"] },
   // WARP-2894 (ADR-056 §5.1) — routines. The vocabulary is how a person asks
   // for something RECURRING or AUTOMATED, not the word "routine" alone:
   // "every morning", "each Friday", "automate this", "set this up to run",
@@ -847,6 +851,22 @@ export function lastUserMessageText(messages: readonly SelectionMessage[]): stri
   return typeof lastUser?.content === "string" ? lastUser.content : "";
 }
 
+// WARP-3302 (box finding, 2026-09-28) — "Yes, go ahead" after a turn that
+// matched a domain but called nothing (the model asked first) matched no
+// rule, so the tool it meant to call was not advertised and it claimed a run
+// it never started. A short affirmation carries the previous user message's
+// words forward; anything longer is judged on its own.
+const AFFIRMATION = /^\s*(yes|yeah|yep|sure|ok(ay)?|please|go ahead|do it|start it|sounds good)\b[\s\w,.!']{0,40}$/i;
+
+/** The text selection rules read: the last user message, plus the one before it when the last is a bare "yes, go ahead". */
+export function selectionUserText(messages: readonly SelectionMessage[]): string {
+  const last = lastUserMessageText(messages);
+  if (!AFFIRMATION.test(last) || last.trim().split(/\s+/).length > 6) return last;
+  const users = messages.filter((m) => m.role === "user");
+  const prev = users.at(-2)?.content;
+  return typeof prev === "string" ? `${prev}\n${last}` : last;
+}
+
 /**
  * Continuity: every tool name this conversation has already called.
  *
@@ -915,7 +935,7 @@ export function effectiveAdvertisedToolNames(opts: {
   // question itself.
   const { advertised } = selectAdvertisedTools({
     mode: opts.mode,
-    userMessage: lastUserMessageText(opts.messages),
+    userMessage: selectionUserText(opts.messages),
     pool: [...opts.pool],
     conversationToolNames: conversationToolNamesFor(opts.priorToolNames, opts.messages),
     runtimeTools: opts.runtimeTools,

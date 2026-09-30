@@ -37,6 +37,7 @@ import { redactConfirmationTokensForModel } from "@droplet/tools-core";
 
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
+import { isGatewayPreempted } from "../lib/gateway-preempted.js";
 import type {
   McpCallContext,
   ToolCallResult as McpToolCallResult,
@@ -1284,6 +1285,10 @@ async function consumeChatStream(
     if (signal?.aborted || isAbortError(err)) {
       throw new AgentStreamAborted(settleTeardown());
     }
+    // WARP-3306 — the gateway took the slot back for chat. Not a transport
+    // death: no partial answer, no fallback; the caller (the agent-run
+    // worker) requeues and redoes this iteration from its checkpoint.
+    if (isGatewayPreempted(err)) throw err;
     // Nothing emitted yet → let the loop fall back to blocking chat(). Already
     // emitted → a fallback would double the answer, so make it an error turn.
     //
@@ -2037,6 +2042,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           // good partial in it.
           return abortedResult(iter, teardownPartialOf(err));
         }
+        // WARP-3306 — see consumeChatStream: propagate, never fall back.
+        if (isGatewayPreempted(err)) throw err;
         if (err instanceof AgentStreamPartialError) {
           // The stream died AFTER partial content was emitted — falling back to
           // blocking would double the answer. Surface an honest error turn (the
@@ -2612,12 +2619,17 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // schema rejects unknown properties). Failures fall through to the
       // baseline tool call so a flaky classifier / embedder can never
       // block retrieval.
-      let toolContext = req.toolCallContext;
+      // WARP-3299 — the model's call id rides `_meta` so a tool can record
+      // which call produced what it starts. Only on a chat turn (a
+      // conversation is present); a run's own calls carry `agentRunId`.
+      let toolContext = req.toolCallContext?.conversationId
+        ? { ...req.toolCallContext, toolCallId: call.id }
+        : req.toolCallContext;
       if (call.function.name === "search_content" && deps.enhancement) {
         toolContext = await resolveSearchEnhancement(
           deps.enhancement,
           args,
-          req.toolCallContext,
+          toolContext,
         );
       }
 
