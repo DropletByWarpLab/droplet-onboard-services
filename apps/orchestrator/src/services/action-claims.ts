@@ -46,11 +46,13 @@
  *     Alice ...", "Notified Alice."; adv-011), but not a label ("Deleted files
  *     go to the Trash", "Shared with me:") and not after a "Name:" label
  *     ("- Alice: Posted …");
- *   - a label ("…:") hands a skip to what it introduces: a reporting verb or a
- *     past time that HEADS it ("Bob wrote:", "Yesterday:") skips everything
- *     but the assistant's own "I've …"; "today", "this week", "below", a
- *     count label, or a time inside it ("…the files you uploaded yesterday:")
- *     only switch off the subject-less checks;
+ *   - a label ("…:") hands a skip to what it introduces: "Bob wrote:" / "The
+ *     ticket says:" skips it all (someone else's words); a past time or an
+ *     "as / per / according to" frame that HEADS it ("Yesterday:", "As Bob
+ *     mentioned:") skips everything but the assistant's own "I've …";
+ *     "today", "this week", "below", a count label, or a time inside it
+ *     ("…the files you uploaded yesterday:") only switch off the subject-less
+ *     checks;
  *   - "I've sent the request / sent it to the approval prompt" and "drafted"
  *     describe the approval step, not the action (eval: adv-004, seed-011,
  *     seed-028, seed-007).
@@ -255,10 +257,19 @@ function withoutQuotedText(answer: string): string {
     .replace(/(^|[\s(:])'[^'\n]*'(?=[\s.,;:!?)]|$)/g, "$1 ");
 }
 
-type Carry = "" | "soft" | "full";
-/** What a label ("…:") hands to what it introduces. */
+/**
+ * What a label ("…:") hands to what it introduces, weakest first: "soft" turns
+ * off the subject-less checks; "full" also skips everything but the
+ * assistant's own "I've …"; "quote" skips it all, because after "Bob wrote:" /
+ * "The ticket says:" the words are someone else's, quoted or not.
+ */
+type Carry = "" | "soft" | "full" | "quote";
+const CARRY_ORDER: Carry[] = ["", "soft", "full", "quote"];
+/** "As Bob mentioned:", "According to the ticket:": the assistant keeps speaking in its own voice. */
+const ATTRIBUTION = /^[^a-z]*(?:as|per|like|according to)\b/;
 function carryOf(label: string): Carry {
-  if (PAST_HEAD.test(label) || headedReport(label)) return "full";
+  if (headedReport(label)) return ATTRIBUTION.test(label) ? "full" : "quote";
+  if (PAST_HEAD.test(label)) return "full";
   return SENTENCE_NOT_A_CLAIM.test(label) || REPORTED.test(label) || OLDER.test(label) || NOW_TIME.test(label)
     ? "soft"
     : "";
@@ -270,7 +281,7 @@ function headedReport(label: string): boolean {
   const before = label.slice(0, m.index).split(/\s+/).filter(Boolean);
   return before.length <= 3 && !before.some((w) => /^(?:you|that|which|who|i|we)$/.test(w));
 }
-const strongest = (a: Carry, b: Carry): Carry => (a === "full" || b === "full" ? "full" : a || b);
+const strongest = (a: Carry, b: Carry): Carry => (CARRY_ORDER.indexOf(a) >= CARRY_ORDER.indexOf(b) ? a : b);
 const BULLET = /^\s*(?:[-*•]|\d+[.)])\s/;
 
 /**
@@ -303,8 +314,8 @@ export function detectActionClaims(answer: string): ActionClaim[] {
       const mode = strongest(lineCarry, carry);
       label = s.endsWith(":") ? s : "";
       carry = label ? carryOf(label) : "";
-      if (!s || s.endsWith("?")) continue;
-      // Under a reported or past label only "I've …" is still the assistant's own claim.
+      if (mode === "quote" || !s || s.endsWith("?")) continue;
+      // Under a past or attribution label only "I've …" is still the assistant's own claim.
       const full = mode === "full";
       if (full && !PRESENT_PERFECT.test(s)) continue;
       if (PERMISSION_CHECK.test(s) && !HARD_NEGATION.test(s)) {

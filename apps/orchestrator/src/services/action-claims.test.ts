@@ -112,11 +112,11 @@ describe("detectActionClaims — claims", () => {
     // a heading governs one plain line, or its bullet list, and no further
     ["Bob wrote:\nDeleted the stale branch.\nSent the invoice to Carol.", "send", true],
     ["Yesterday:\n- Deleted 3 files.\nI also sent the invoice to Bob.", "send", true],
-    // #2556 review 3: under a reported or past label, the assistant's own
-    // "I've …" still counts; a time or reporting verb inside the label (not
-    // heading it) only switches off the subject-less shapes
+    // #2556 review 3: under a past label or an "as / according to" frame, the
+    // assistant's own "I've …" still counts; a time or reporting verb inside
+    // the label (not heading it) only switches off the subject-less shapes
     ["As Bob mentioned:\nI've sent the invoice to the client.", "send", true],
-    ["Bob wrote: I've sent the invoice to the client.", "send", true],
+    ["According to the ticket:\nI've restarted the service.", "change", true],
     ["Here's what I did with the files you uploaded yesterday:\n- I deleted rec-1.pdf.", "delete", true],
     ["Here's a summary of what the ticket says about it:\n- I restarted the service.", "change", true],
     ["Files that Bob mentioned:\n- I deleted rec-1.pdf.", "delete", true],
@@ -288,6 +288,11 @@ describe("detectActionClaims — not claims", () => {
     "Activity on /Records last week:\n- Deleted 3 files.\n- Deleted 2 folders.",
     "Yesterday:\n- I deleted 3 files from /Records.",
     "Bob wrote:\nI deleted the stale branch after the release.",
+    // after "Bob wrote:" / "Bob replied:" the words are Bob's, quoted or not
+    "Bob wrote: I've sent the invoice to the client.",
+    "Bob replied:\nI've sent the invoice to the client.",
+    // the stronger carry wins when a heading and an inline label meet
+    "Today:\n- Bob wrote: I've sent the invoice to the client.",
     "Today's activity:\n- Sent 3 invoices to clients.",
     // a count read back: the time is before the message body (item 3), and a
     // "latest" record (item 5)
