@@ -629,6 +629,14 @@ const envSchema = z.object({
   // since compose does not set this for the orchestrator. Read it from
   // `config`, never `process.env` directly.
   AI_GATEWAY_GRPC_URL: z.string().default("ai-gateway:50051"),
+  // WARP-3071 — Kev triage SHADOW MODE on brain finding delivery: log Kev's
+  // answer next to the rule-based verdict, change nothing the user sees.
+  // Off by default; explicit string->bool (the BRAIN_ENABLED idiom, never
+  // z.coerce.boolean, which reads "false" as true).
+  DECISION_MODEL_TRIAGE_SHADOW: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
 
   // --- OpenWrt Routing ---
   // Default uses `host.docker.internal` so the bridged orchestrator can
