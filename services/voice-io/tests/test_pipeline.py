@@ -5090,6 +5090,17 @@ class TestVolumeFastPath:
         pipe._default_on_transcript("volume 5")
         assert pipe._volume.state().level == 50
 
+    def test_quieter_at_the_floor_stays_audible(self, monkeypatch, tmp_path):
+        # "Quieter" one time too many must not silence the box: the
+        # acknowledgement still plays, at the floor level.
+        play_calls = _patch_play(monkeypatch)
+        tts = _loud_tts()
+        pipe = self._pipe(tmp_path, level=10, tts=tts)
+        pipe._default_on_transcript("a lot quieter")
+        assert pipe._volume.state() == VolumeState(level=10, muted=False)
+        assert tts.texts_received == ["Volume 10."]
+        assert len(play_calls) == 1 and _peak(play_calls[0]) > 0
+
     def test_mute_is_silent_and_keeps_the_level(self, monkeypatch, tmp_path):
         play_calls = _patch_play(monkeypatch)
         llm = _RecordingLLM(scripted_replies=["never asked"])

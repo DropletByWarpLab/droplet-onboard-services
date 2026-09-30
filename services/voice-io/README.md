@@ -124,7 +124,7 @@ reach it via the Docker network).
 | `/voice/status` | GET | Pipeline snapshot: `state` ∈ `idle\|loading\|listening\|wake_detected\|transcribing\|transcript_ready\|speaking\|error\|no_mic`, plus `wake_model`, `threshold`, `last_wake_at`, `last_wake_score`, `stt_loaded`, `last_transcript`, `last_transcript_at`, `tts_loaded`, `last_response`, `last_response_at`, `input_rms_dbfs` (rolling mic level over ~2 s, measured inside the pipeline's frame handler — safe to drive a live level meter), `last_audio_at`, `input_flatlined`, and the speaker volume: `output_level` (0-100), `output_muted`, `output_fault` (a storage fault on the volume file, or null). Read-only; safe to poll. |
 | `/voice/say` | POST | `{"text":"hello world","voice":"en_US-ryan-medium"}` — synthesize + play through the picked speaker. Test endpoint until commit 7 wires the LLM-reply path. Returns `{ok, duration_s, sample_rate}`. Plays at the speaker volume; muted means nothing is played. |
 | `/voice/volume` | GET | Speaker volume: `{level, muted, fault}`. Works with voice switched off or no mic. See [Speaker volume](#speaker-volume). |
-| `/voice/volume` | POST | Exactly one of `{"level": 0-100}`, `{"change": -100..100}` or `{"muted": true\|false}` (strict: no strings, floats or extra keys; anything else is 422). Persists and applies from the next thing the box says; a level change also unmutes. Returns `{level, muted, fault, previous_level, previous_muted}`. |
+| `/voice/volume` | POST | Exactly one of `{"level": 0-100}`, `{"change": -100..100}` or `{"muted": true\|false}` (strict: no strings, floats or extra keys; anything else is 422). Persists and applies from the next thing the box says; a level change also unmutes, and a negative `change` never lowers it below 10. Returns `{level, muted, fault, previous_level, previous_muted}`. |
 
 ## Speaker volume
 
@@ -141,7 +141,9 @@ above and spoken commands. `voice/volume.py` owns it.
 - **Mute** plays nothing at all (replies and cues), while the pipeline's
   state changes and post-speak cooldown run as usual. Mute never changes
   the level; unmute restores it. The only ways to silence the box are
-  `muted: true` and an explicitly requested level 0.
+  `muted: true` and an explicitly requested level 0: a relative decrease
+  ("quieter", `{"change": -N}`) stops at 10, or holds a level that was
+  explicitly set below 10.
 - **Persistence**: `/data/voice-volume.json` (`{"level": 70, "muted":
   false}`) on the `voice-calibration` volume, atomic write, override with
   `VOICE_VOLUME_PATH`. No file means level 100, unmuted (boxes upgrading

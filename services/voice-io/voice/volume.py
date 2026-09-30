@@ -55,6 +55,11 @@ LEVEL_MIN = 0
 LEVEL_MAX = 100
 # 100 == unity == the output every box had before volume existed.
 DEFAULT_LEVEL = LEVEL_MAX
+# The floor a relative decrease stops at (-40 dB, quiet but audible), so
+# "quieter" said once too often never silences the box — inaudible stays
+# a choice: mute, or an explicit level 0. A level already below it (set
+# explicitly) is held, not raised. Also what "minimum volume" asks for.
+MIN_STEPPED_LEVEL = 10
 
 
 def clamp_level(level: int) -> int:
@@ -221,9 +226,13 @@ class VolumeController:
         return self._apply(lambda s: VolumeState(clamp_level(level), False))
 
     def change(self, delta: int) -> VolumeChange:
-        return self._apply(
-            lambda s: VolumeState(clamp_level(s.level + int(delta)), False),
-        )
+        def step(s: VolumeState) -> VolumeState:
+            level = clamp_level(s.level + int(delta))
+            if delta < 0:
+                level = max(level, min(s.level, MIN_STEPPED_LEVEL))
+            return VolumeState(level, False)
+
+        return self._apply(step)
 
     def set_muted(self, muted: bool) -> VolumeChange:
         return self._apply(lambda s: VolumeState(s.level, bool(muted)))

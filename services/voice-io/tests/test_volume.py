@@ -32,6 +32,7 @@ from voice.volume import (
     DEFAULT_LEVEL,
     LEVEL_MAX,
     LEVEL_MIN,
+    MIN_STEPPED_LEVEL,
     VolumeController,
     VolumeState,
     VolumeStore,
@@ -266,10 +267,30 @@ class TestVolumeController:
 
     @pytest.mark.parametrize(
         ("start", "delta", "got"),
-        [(50, 10, 60), (50, -10, 40), (95, 10, 100), (5, -10, 0), (50, -25, 25)],
+        [(50, 10, 60), (50, -10, 40), (95, 10, 100), (50, -25, 25), (5, 10, 15)],
     )
     def test_change_is_relative_and_clamped(self, start, delta, got):
         assert _controller(level=start).change(delta).current.level == got
+
+    @pytest.mark.parametrize(
+        ("start", "delta", "got"),
+        [
+            (15, -10, MIN_STEPPED_LEVEL),
+            (MIN_STEPPED_LEVEL, -10, MIN_STEPPED_LEVEL),
+            (20, -25, MIN_STEPPED_LEVEL),
+            (100, -100, MIN_STEPPED_LEVEL),
+            # Below the floor only by an explicit set: a decrease holds it
+            # there rather than raising it, and 0 stays the explicit 0.
+            (5, -10, 5),
+            (0, -10, 0),
+        ],
+    )
+    def test_a_relative_decrease_never_reaches_silence(self, start, delta, got):
+        # Inaudible is only ever chosen: muted=true or an explicit level 0.
+        # "Quieter" said once too often must not silence the box.
+        change = _controller(level=start).change(delta)
+        assert change.current.level == got
+        assert (change.current.level > 0) == (start > 0)
 
     def test_mute_keeps_the_level(self, volume_path):
         ctl = _controller(level=60)

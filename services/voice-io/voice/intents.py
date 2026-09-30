@@ -34,12 +34,15 @@ import re
 from dataclasses import dataclass
 from typing import Literal, Optional
 
+from voice.volume import MIN_STEPPED_LEVEL
+
 VolumeIntentKind = Literal["set", "change", "mute", "unmute", "query"]
 
 STEP = 10             # "turn it up", "louder"
 BIG_STEP = 25         # "a lot louder", "turn it way up"
 MAX_LEVEL = 100
-MIN_SPOKEN_LEVEL = 10  # "minimum volume": quiet but audible, never 0
+# "minimum volume": the same audible floor a relative decrease stops at.
+MIN_SPOKEN_LEVEL = MIN_STEPPED_LEVEL
 
 
 @dataclass(frozen=True)

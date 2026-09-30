@@ -94,6 +94,9 @@ class TestPostVolume:
         controller.set_level(95)
         assert client.post("/voice/volume", json={"change": 10}).json()["level"] == 100
         assert client.post("/voice/volume", json={"change": -30}).json()["level"] == 70
+        # A relative step stops at the audible floor; only an explicit
+        # level 0 (or a mute) silences the speaker.
+        assert client.post("/voice/volume", json={"change": -100}).json()["level"] == 10
 
     def test_mute_and_unmute_keep_the_level(self, client, controller):
         controller.set_level(60)
