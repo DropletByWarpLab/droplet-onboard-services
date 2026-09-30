@@ -333,6 +333,24 @@ describe("POST /api/llm/chat — voice's system message reaches the model (WARP-
     ]);
   });
 
+  it("a dashboard caller's tool_choice='none' turn leaves its message unmarked at index 0", async () => {
+    // WARP-3338: marked only on turns that get the base prompt. With no base
+    // prompt the caller's message is already index 0, so nothing is folded
+    // and the request reaches the model exactly as the caller sent it.
+    const res = await postChat(OWNER, {
+      messages: [
+        { role: "system", content: "caller context" },
+        { role: "user", content: "hello" },
+      ],
+      tool_choice: "none",
+    });
+    expect(res.status).toBe(200);
+    expect(agentRequest().messages).toEqual([
+      { role: "system", content: "caller context" },
+      { role: "user", content: "hello" },
+    ]);
+  });
+
   it("a dashboard caller's message keeps its position, marked as its chat instructions", async () => {
     // Scoped to the voice principal: a person's own system message keeps its
     // position. WARP-3338: it is marked, and the agent loop folds it into
