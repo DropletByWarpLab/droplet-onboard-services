@@ -814,11 +814,13 @@ or admin at `manage` level chooses who is told (`routes/security-incidents.ts`).
 | 20 | POST | `/security/incidents/:id/resolve` | `act` | `{ note? }`, at most 280 UTF-16 code units (below) | `{ incident: IncidentDetail, changed }` |
 | 21 | GET | `/security/alert-routing` | `view` | — | `AlertRouting` |
 | 22 | PUT | `/security/alert-routing/:userId` | `manage`, owner/admin | `{ state: "receiving" \| "not_receiving", expectedVersion: <int> \| null }` | `{ person: RoutingPerson }` |
+| 28 | POST | `/security/incidents/:id/narrative` | `act`, then a person who sees every camera and may read threats (owner/admin) | `{}` or no body (below) | **`202`**, not 200: `{ narrative: NarrativeView }` |
 | 35 | POST | `/security/incidents/:id/verdict` | `act`, owner/admin | `{ verdict: "expected" \| "not_expected" }` | `{ incident: IncidentDetail, changed }` |
 
-Route 35 is P5's, not one of §8's 16–22. It is in the same router and route 18
-reports it (`verdict`, `viewer.canGiveVerdict`), so it is listed. `:id` is an
-incident uuid, `:userId` a user uuid; a value that is not a uuid is a `400`.
+Routes 28 and 35 are not among §8's 16–22: 28 is P4's (WARP-2979), 35 is P5's. They
+are in the same router and route 18 reports them (`narrative`, `verdict`,
+`viewer.canGiveVerdict`), so they are listed. `:id` is an incident uuid, `:userId` a
+user uuid; a value that is not a uuid is a `400`.
 
 **Who may call.**
 
@@ -829,28 +831,34 @@ incident uuid, `:userId` a user uuid; a value that is not a uuid is a `400`.
   on), and `manage` is floored at the admin tier (`services/access-catalog.ts`).
   A closed gate answers the **flat** `404 { "error": "module_disabled", "module":
   "security" }`: the toggle is off, the person holds no Security grant, or the route
-  needs a level the person lacks (19, 20 and 35 need `act`, 22 needs `manage`). It
+  needs a level the person lacks (19, 20, 28 and 35 need `act`, 22 needs `manage`). It
   is not the nested envelope below and not `INCIDENT_NOT_FOUND`.
 - **Role, on each route** (`routes/security-incidents.ts`): 16–21 owner, admin or
-  family (`family` is "Staff" in the UI); 22 and 35 owner or admin only. A role
-  outside the list, a guest or a service token, gets the flat `403 { "error":
-  "Forbidden: role not permitted" }` (a guest whose access role holds no Security
-  grant is turned away earlier, by the `404` above). No route takes a service
-  principal, so Droplet's AI can never acknowledge, resolve or change routing.
-- **Rate limit on the writes** (19, 20, 22, 35): 60 a minute per IP
+  family (`family` is "Staff" in the UI); 22 and 35 owner or admin only; 28 owner,
+  admin or family at the role gate, then the viewer rule under Route 28 below (in
+  practice owner or admin). A role outside the list, a guest or a service token,
+  gets the flat `403 { "error": "Forbidden: role not permitted" }` (a guest whose
+  access role holds no Security grant is turned away earlier, by the `404` above).
+  No route takes a service principal, so Droplet's AI can never acknowledge,
+  resolve or change routing.
+- **Rate limit on the writes** (19, 20, 22, 28, 35): 60 a minute per IP
   (`sensitiveRateLimit`, `middleware/rate-limit.ts`), then a `429` whose body is
   exactly `{ "error": "Too many requests, slow down" }`. It is **flat**: `error` is
   a string, and there is no `code`, no `message` and no `retryAfterSeconds`. The
   wait is only in the `Retry-After` response header, in whole seconds. It is not
-  the nested envelope below.
+  the nested envelope below. **The limiter is shared:** `sensitiveRateLimit` is one
+  counter (`identifier: "droplet-sensitive"`, `rate-limit.ts`) used by 13 route
+  files, so any other route that uses it (auth, files, VPN, cameras, and more)
+  spends the same 60 a minute per IP.
 - **Do not probe.** Ask `GET /api/modules` whether to draw Security at all:
   `effectiveForUser: [{ moduleId, level }]` lists what the person holds (no
   `security` entry: no Security screens and no Security calls; the field is
   omitted when the box cannot resolve it, and then `modules[].effective` decides)
-  (`routes/modules.routes.ts`). The role `403` and the per-person `404` are each
-  written to the audit log as an `auth` warn "Access denied" row, which Security
-  copies into its own feed as a threat for owners and admins (`recordAccessDenied`,
-  `middleware/auth.ts`; `mirrorThreatRows`, `services/security-events.service.ts`).
+  (`routes/modules.routes.ts`). The role `403` (route 28's viewer-rule `403` too)
+  and the per-person `404` are each written to the audit log as an `auth` warn
+  "Access denied" row, which Security copies into its own feed as a threat for
+  owners and admins (`recordAccessDenied`, `middleware/auth.ts`; `mirrorThreatRows`,
+  `services/security-events.service.ts`).
   Once a screen is open, route 18's `viewer.level` and route 21's `level` say
   which controls to draw.
 
@@ -861,7 +869,7 @@ sees the cameras they were granted.
 
 - An incident none of whose cameras the person can see does not exist for them:
   absent from 16, from 17's counts and `latest`, and `404 INCIDENT_NOT_FOUND`, the
-  same body as a missing id, from 18–20 and 35. `site_threat` incidents (network
+  same body as a missing id, from 18–20, 28 and 35. `site_threat` incidents (network
   and sign-in warnings) are owner/admin only; `site_camera_system` incidents
   (Frigate as a whole) are visible to every Security viewer.
 - A visible incident is **projected** onto the visible cameras: `state`,
@@ -889,7 +897,7 @@ sees the cameras they were granted.
   (`apps/orchestrator/prisma/schema.prisma`) carry none, and
   `services/security-access.ts` has no lock scope.
 
-**Errors on 16–22 and 35 are nested**, as on the Notifications routes:
+**Errors on 16–22, 28 and 35 are nested**, as on the Notifications routes:
 `{ "error": { "code": "…", "message": "…", "issues"? } }`. Key on `code`; `message`
 is calm copy for the person. `issues` is present only when the query or body
 failed its schema: a non-uuid id, a `cursor` of 60 characters or fewer that the box
@@ -899,17 +907,20 @@ The two gate answers above and the `429` are flat.
 
 | HTTP | `error.code` | Routes | When |
 |---|---|---|---|
-| 400 | `VALIDATION_ERROR` | 16, 18–20, 22, 35 | Unknown key, value out of range, a non-uuid id, a `cursor` the box did not mint (or over 60 characters), a `note` with characters that cannot be stored |
-| 404 | `INCIDENT_NOT_FOUND` | 18–20, 35 | Missing **or hidden**, byte for byte the same |
+| 400 | `VALIDATION_ERROR` | 16, 18–20, 22, 28, 35 | Unknown key, value out of range, a non-uuid id, a `cursor` the box did not mint (or over 60 characters), a `note` with characters that cannot be stored |
+| 404 | `INCIDENT_NOT_FOUND` | 18–20, 28, 35 | Missing **or hidden**, byte for byte the same |
 | 404 | `USER_NOT_FOUND` | 22 | No such person |
-| 409 | `NOT_ACTIONABLE` | 19, 20 | Plain activity, or a partial view |
+| 409 | `NOT_ACTIONABLE` | 19, 20, 28 | Plain activity, or a partial view (28: also any view the summary rules refuse, one body) |
+| 409 | `SUMMARIES_OFF` | 28 | Summaries are switched off in Security settings |
+| 409 | `NARRATIVE_TOO_OLD` | 28 | The incident's last activity is over 7 days ago |
+| 409 | `NARRATIVE_COOLDOWN` | 28 | Under 10 minutes since the last attempt or the last written text |
 | 409 | `NOT_JUDGEABLE` | 35 | Nothing this person can judge, or a partial view |
-| 409 | `INCIDENT_CONFLICT` | 19, 20, 35 | Someone changed the incident at the same moment, twice in a row; re-read (route 18) and try again if still wanted |
+| 409 | `INCIDENT_CONFLICT` | 19, 20, 28, 35 | Someone changed the incident at the same moment, twice in a row; re-read (route 18) and try again if still wanted |
 | 409 | `VERSION_CONFLICT` | 22 | `expectedVersion` is not the row's current `version` |
 | 409 | `NO_RECIPIENT` | 22 | The change would leave nobody eligible to be told |
 | 422 | `NOT_ELIGIBLE` | 22 | `receiving` for a person who cannot open Security at `act` |
 | 500 | `INTERNAL_ERROR` | 19, 20, 22, 35 | A bug on the box |
-| 503 | `INCIDENTS_UNAVAILABLE` | 16–20, 35 | The read or write could not be answered: **never an empty 200** |
+| 503 | `INCIDENTS_UNAVAILABLE` | 16–20, 28, 35 | The read or write could not be answered: **never an empty 200** |
 | 503 | `ROUTING_UNAVAILABLE` | 21, 22 | Same, for routing |
 | 503 | `AUDIT_UNAVAILABLE` | 19, 20, 22, 35 | The audit row is written in the same transaction, and it could not be: nothing changed, safe to retry |
 
@@ -984,6 +995,7 @@ in `services/security-incident-view.ts`). Times are UTC ISO-8601.
     "evidence": { "eventId": "<id>", "camera": "…", "label": "…", "at": "ISO-8601", "summary": "…" },
     "detail": { … }, "suppression": { "id": "<uuid>", "reason": "…", "state": "active" | "removed" | "expired" } | null
   }],
+  "narrative": NarrativeView | null,
   "viewer": { "level": "view" | "act" | "manage", "acknowledged": false, "canGiveVerdict": false }
 }
 ```
@@ -1029,6 +1041,11 @@ in `services/security-incident-view.ts`). Times are UTC ISO-8601.
 - **`verdict`** is `null` unless the person sees every camera and may read threats;
   **`patternFlags`** is empty for everyone but owners and admins. A flag is a trial:
   it never counts towards `state`, `severity` or a notification.
+- **`narrative`** is Droplet's "Summary by Droplet" for this person (`NarrativeView`,
+  under Route 28), or `null`: for anyone who may not read summaries (no state and no
+  hint that one exists), with summaries off, for plain activity, and when there is
+  nothing to say (`none` once the incident has closed, `expired` with no text)
+  (`narrativeView`, `services/security-narrative-view.ts`).
 
 **Route 16 (list).** Newest first by the person's own last activity, then id
 descending. `nextCursor` is opaque (`<ms>.<uuid>`): pass it back as `cursor` for
@@ -1125,6 +1142,50 @@ only: it never changes `state`, `severity`, codes or notifications. The `state` 
 `verdict` can change between the two, never back to `unreviewed`. Send it only when
 route 18 says `viewer.canGiveVerdict`. The `409 NOT_JUDGEABLE` body is the same
 whether there is nothing to judge or the view is partial.
+
+**Route 28 (summarise now, regenerate).** Asks the box to write, or rewrite, the
+incident's "Summary by Droplet" (`requestIncidentNarrative`,
+`services/security-incident-actions.ts`). The box writes the text afterwards, so the
+answer is **`202`**, not `200`, and `narrative.state` is always `pending`. There is
+nothing to send: the body is strict (`narrativeBodySchema`,
+`routes/security-incidents.ts`), so `{}` or no body is fine and any key is
+`400 VALIDATION_ERROR` with `issues`. It writes no audit row and leaves the
+incident's `version` alone.
+
+```json
+{ "narrative": NarrativeView }
+
+// NarrativeView (services/security-narrative-view.ts), also route 18's `narrative`
+{ "state": "none" | "pending" | "written" | "failed" | "expired",
+  "text": "…" | null, "writtenAt": "ISO-8601" | null, "model": "…" | null, "promptVersion": <int> | null }
+```
+
+- `text` is plain text. While `pending` it is the **previous** summary when there is
+  one (else `null`), kept until the new one is written; `writtenAt`, `model` and
+  `promptVersion` describe that text and are `null` with it. Re-read route 18 until
+  `state` leaves `pending`: the dashboard does so every 5 s for at most 2 minutes
+  (`NarrativeSection.tsx`, `NARRATIVE_POLL_MS`, `NARRATIVE_POLL_FOR_MS`).
+- **The viewer rule runs first, before any incident is read.** A person who does not
+  both see every camera and may read threats (`mayReadSummaries`,
+  `services/security-narrative-view.ts`) gets the flat `403 { "error": "Forbidden:
+  role not permitted" }`: the role gate's own body, the same for every id, so it says
+  nothing about any summary. Only owner and admin qualify (`roleMayReadThreats`,
+  `services/security-access.ts`; `UNRESTRICTED_ROLES`,
+  `services/camera-access.service.ts`), so a `family` (Staff) person at `act` gets it,
+  and an audit row (`recordAccessDenied`, reason `summary-audience`).
+- **Then the first of these that applies wins**, in this order: `404
+  INCIDENT_NOT_FOUND`; `409 NOT_ACTIONABLE`; `409 SUMMARIES_OFF`; `409
+  NARRATIVE_TOO_OLD` (`lastActivityAt` over 7 days ago, `NARRATIVE_EXPIRE_MS`: a
+  request then would only expire); `409 NARRATIVE_COOLDOWN` (under 10 minutes since
+  the last attempt or the last text, `NARRATIVE_COOLDOWN_MS`); `409
+  INCIDENT_CONFLICT`. Any read or write that fails is `503 INCIDENTS_UNAVAILABLE`:
+  this route has no `500` and no `AUDIT_UNAVAILABLE`.
+- **When to send it.** Read route 18 first. Offer it only at `viewer.level` `act` or
+  above, within 7 days of `lastActivityAt`, and for a `narrative` in state `written`
+  or `failed` (Regenerate) or `none` while `grouping` is `collecting` (Summarise
+  now); never for `pending`, `expired` or a `null` `narrative`. This is the
+  dashboard's rule (`narrativeAskable` and the button choice in
+  `NarrativeSection.tsx`).
 
 **Freshness and empty states.**
 
@@ -1243,7 +1304,9 @@ this contract.
 > of `src/routes/*` found ~621 flat `error` responses and **zero** nested ones. A few
 > route families have emitted it since (the first, WARP-2977, on 2026-09-23); they are
 > listed under [Nested envelope](#nested-envelope-on-some-routes) below, and every
-> other route is still flat. The fictional codes the old table listed
+> other client-facing route is still flat (`routes/panel-security.ts` and
+> `routes/security-assistant.ts` also nest their errors, but only a service principal
+> may call them). The fictional codes the old table listed
 > (`PAIR_CODE_EXPIRED`, `PAIR_CODE_INVALID`, `RATE_LIMITED`, `INTERNAL`) do not
 > exist in any handler.
 
@@ -1310,7 +1373,7 @@ These routes answer `{ "error": { "code": "…", "message": "…", "issues"? } }
 - `/notifications` N1–N4 (`routes/notifications.ts`; `POST /notifications/send`
   keeps the flat shape).
 - `/me/active-department` (`routes/me-department.ts`).
-- The Security routes of `routes/security-incidents.ts` (16–22, 35),
+- The Security routes of `routes/security-incidents.ts` (16–22, 28, 35),
   `routes/security-site.ts`, `routes/security-zones.ts` and
   `routes/security-patterns.ts`. Routes 1 and 2 (`routes/security.ts`) are flat,
   and so are the gate, role and rate-limit answers in front of all of them (see
@@ -1323,8 +1386,9 @@ string before reading `code`. `code` is an UPPER_SNAKE slug to key on; do not pa
 On the Security routes, `issues` is present only on a `400 VALIDATION_ERROR` whose
 query or body failed its schema (`routes/security-incidents.ts`, `fail`); the
 Notifications and active-department routes never send it. It is Zod's
-`error.issues` array as it comes, one entry per failed check. That is not the
-`{ formErrors, fieldErrors }` object that `details` carries in the flat shape.
+`error.issues` array as it comes, one entry per failed check, plus a few entries the
+box adds itself (below). That is not the `{ formErrors, fieldErrors }` object that
+`details` carries in the flat shape.
 
 ```json
 { "error": { "code": "VALIDATION_ERROR", "message": "That request isn't in a shape Droplet understands.",
@@ -1332,15 +1396,21 @@ Notifications and active-department routes never send it. It is Zod's
                  "message": "String must contain at most 280 character(s)", "path": ["note"] }] } }
 ```
 
-- Every entry has `code` (Zod's issue code, for example `invalid_type`, `too_big`,
-  `invalid_enum_value`, `invalid_string`, `unrecognized_keys`), `path` and
-  `message`. Other keys depend on `code`: `maximum` on `too_big`, `keys` on
-  `unrecognized_keys`, `options` and `received` on `invalid_enum_value`.
+- Every entry has `path` and `message`. Entries Zod produces also have `code` (Zod's
+  issue code, for example `invalid_type`, `too_big`, `invalid_enum_value`,
+  `invalid_string`, `unrecognized_keys`), and other keys depend on it: `maximum` on
+  `too_big`, `keys` on `unrecognized_keys`, `options` and `received` on
+  `invalid_enum_value`. **Entries the box adds itself carry only `path` and
+  `message`, no `code`**: a zone link that is not a camera or part-of-view reference,
+  or more than 32 links (`PUT /security/zones/:id/links`,
+  `routes/security-zones.ts`), an area name that breaks the naming rule, opening
+  hours (`routes/security-site.ts`) and the pattern and suppression checks
+  (`routes/security-patterns.ts`). Decode `code` as optional.
 - `path` is the list of keys (strings) and array indexes (numbers) from the top of
   the query or body to the value: `["note"]`. It is `[]` when the whole object is
   at fault, as for an unknown key (`code: "unrecognized_keys"`, `keys: ["…"]`).
-- `issues[].message` is Zod's own English text. Do not show it; key on `code` and
-  `path`.
+- `issues[].message` is Zod's own English text, or the box's own on an entry it adds.
+  Do not show it; key on `path`, and on `code` when it is present.
 
 ## SSE / streaming reads
 
