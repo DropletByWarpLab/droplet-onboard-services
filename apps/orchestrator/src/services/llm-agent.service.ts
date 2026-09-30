@@ -1849,9 +1849,13 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // The WARP-3044 worker's predicate: a refused token comes back as a
       // `confirmation_required` envelope with `isError: false` (mcp-server
       // sets it only for `status: "error"`), and the tool did not run.
-      const ran = !isError && !isConfirmationEnvelope(text);
-      const payload = parseToolResultPayload(text);
+      const payload = parseToolResultPayload(text, grant.tool);
       const parsed: unknown = toolResultPayloadValue(payload);
+      // WARP-3284 — unparseable local-tool output is a failure here too, and
+      // the model gets the error envelope rather than the fragment.
+      const malformedText = malformedToolOutputText(payload);
+      if (malformedText !== null) text = malformedText;
+      const ran = !isError && malformedText === null && !isConfirmationEnvelope(text);
       trace.push({ tool_call_id: callId, tool: grant.tool, args: grant.args, result: parsed });
       emit({ type: "tool_result", id: callId, ok: ran, data: parsed });
       logger.info(
