@@ -80,7 +80,7 @@ export function Sidebar() {
   const { user, logout } = useAuth();
   // Role, capabilities (incl. WARP-2880's medical connector) and module
   // switches — shared with the chat's page list (WARP-3116).
-  const { capabilities, isModuleOn } = useNavGates();
+  const { role, capabilities, isModuleOn } = useNavGates();
   // WARP-1683: resolves nav-config's `badgeKey` names to live counts. The
   // Sidebar owns the polling hook (nav-config stays pure data); the badge
   // reads 0 — and renders nothing — while the module is off or unresolved.

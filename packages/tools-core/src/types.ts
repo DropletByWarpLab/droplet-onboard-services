@@ -195,6 +195,7 @@ export interface ToolContext {
   conversationId?: string;
   messageId?: string;
   toolCallId?: string;
+  /**
    * WARP-3116 — the pages the calling dashboard can open, derived per viewer
    * from its nav config and forwarded by the orchestrator via
    * `_meta.dashboardPages` (stdio-trusted only). Typed `unknown` on purpose:
