@@ -711,6 +711,7 @@ export function createToolsRouter(
         res.json(projectSpec(spec, actor));
         return;
       }
+      const from = spec.visibility;
       const updated = (await prisma.toolSpec.update({
         where: { id: spec.id },
         data: { visibility: to },
@@ -723,7 +724,7 @@ export function createToolsRouter(
         what: to === "WORKSPACE" ? "Routine shared with the Workspace" : "Routine made private",
         actor: { type: "user", id: actor.id },
         sub: spec.name,
-        refs: { specId: spec.id, slug: spec.slug, from: spec.visibility, to },
+        refs: { specId: spec.id, slug: spec.slug, from, to },
       });
       res.json(projectSpec(updated, actor));
     } catch (err) {
