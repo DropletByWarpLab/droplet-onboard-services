@@ -3,7 +3,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 
-import { purgeLandedRecords } from "./landed-purge.js";
+import { detachLandedRecords, purgeLandedDocuments, purgeLandedRecords } from "./landed-purge.js";
 
 const NOW = new Date("2026-09-01T04:00:00.000Z");
 
@@ -130,5 +130,71 @@ describe("purgeLandedRecords", () => {
   it("reports zero on a connection that landed nothing", async () => {
     const client = db();
     expect(await purge(client)).toEqual({ deleted: 0, archived: 0, pipelineRemoved: false });
+  });
+});
+
+describe("detachLandedRecords (WARP-3375 keep)", () => {
+  const table = (count: number) => ({ updateMany: vi.fn(async () => ({ count })) });
+
+  it("clears the whole provenance triple AND flips origin, in ONE update per table", async () => {
+    // Mutation: drop `origin: "LOCAL"` → the CHECK arm "all three set AND
+    // EXTERNAL" no longer applies, but the row stays uneditable EXTERNAL.
+    // Mutation: drop any one link column → the `*_provenance_complete` CHECK
+    // rejects the row at runtime.
+    const client = {
+      crmDeal: table(2),
+      contact: table(3),
+      crmCompany: table(4),
+      crmPipeline: table(1),
+    };
+
+    const detached = await detachLandedRecords(client as never, "conn-1");
+
+    const data = { connectionId: null, externalSystem: null, externalId: null, origin: "LOCAL" };
+    for (const t of [client.crmDeal, client.contact, client.crmCompany]) {
+      expect(t.updateMany).toHaveBeenCalledTimes(1);
+      expect(t.updateMany).toHaveBeenCalledWith({ where: { connectionId: "conn-1" }, data });
+    }
+    expect(client.crmPipeline.updateMany).toHaveBeenCalledWith({
+      where: { connectionId: "conn-1" },
+      data: { connectionId: null },
+    });
+    // Pipelines are not "records" in the audit count.
+    expect(detached).toBe(9);
+  });
+
+  it("never writes isArchived — that is owner state", async () => {
+    const client = {
+      crmDeal: table(0),
+      contact: table(0),
+      crmCompany: table(0),
+      crmPipeline: table(0),
+    };
+
+    await detachLandedRecords(client as never, "conn-1");
+
+    for (const t of [client.crmDeal, client.contact, client.crmCompany]) {
+      const arg = (t.updateMany.mock.calls[0] as unknown as [{ data: object }])[0];
+      expect(arg.data).not.toHaveProperty("isArchived");
+    }
+  });
+});
+
+describe("purgeLandedDocuments (WARP-3375 delete)", () => {
+  it("removes the money history, then only this connection's LANDED documents", async () => {
+    const client = {
+      $executeRaw: vi.fn(async () => 5),
+      erpDocument: { deleteMany: vi.fn(async () => ({ count: 7 })) },
+    };
+
+    const deleted = await purgeLandedDocuments(client as never, "conn-1");
+
+    expect(deleted).toBe(7);
+    expect(client.erpDocument.deleteMany).toHaveBeenCalledWith({
+      where: { connectionId: "conn-1", origin: "LANDED" },
+    });
+    expect(client.$executeRaw.mock.invocationCallOrder[0]!).toBeLessThan(
+      client.erpDocument.deleteMany.mock.invocationCallOrder[0]!,
+    );
   });
 });

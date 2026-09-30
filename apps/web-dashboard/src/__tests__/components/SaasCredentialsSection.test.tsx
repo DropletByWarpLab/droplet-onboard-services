@@ -1072,7 +1072,9 @@ describe("disconnecting a configured provider", () => {
     expect(disconnectProviderMock).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
-    await waitFor(() => expect(disconnectProviderMock).toHaveBeenCalledWith("fixture-billing"));
+    await waitFor(() =>
+      expect(disconnectProviderMock).toHaveBeenCalledWith("fixture-billing", "keep"),
+    );
   });
 
   /**

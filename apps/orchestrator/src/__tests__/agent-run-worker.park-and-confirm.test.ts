@@ -1250,3 +1250,54 @@ describe("chat-started runs (WARP-3300)", () => {
     expect(note.data).toEqual({ agentRunId: id, pendingTool: "delete_file", needsDecision: true, sessionId: "conv-9" });
   });
 });
+
+describe("agent runs — the report's claims are checked against the whole run (WARP-3348)", () => {
+  // The decided call runs in the worker, outside the loop; the check must
+  // still see it. The model claims the delete whatever the tool said.
+  const deleteThenClaim = (req: { messages: Array<{ role: string; content: unknown }> }) =>
+    req.messages.some((m) => m.role === "tool")
+      ? { role: "assistant", content: "I've deleted /old.txt." }
+      : { role: "assistant", content: null, tool_calls: [toolCall("c1", "delete_file", { path: "/old.txt" })] };
+
+  async function decidedRun(decision: "approved" | "denied") {
+    const db = createAgentRunPrismaMock({ users: [OWNER] });
+    const { id } = await enqueueAgentRun(db.prisma, { userId: OWNER.id, goal: "tidy up", model: "m" });
+    const mcp = interceptingMcp(["delete_file"], new Set(["delete_file"]));
+    const chat = scripted(deleteThenClaim);
+    const a = makeWorker(db, mcp, { chat });
+    await a.worker.tickOnce();
+    await settle(a.worker);
+    expect(db.row(id).status).toBe("awaiting_confirmation");
+    await decideAgentRun(db.prisma, {
+      id,
+      decision,
+      decidedBy: { id: OWNER.id, role: "owner" },
+      resolveAccess: ownerAccess as never,
+    });
+    const b = makeWorker(db, mcp, { workerId: "B", chat });
+    await b.worker.tickOnce();
+    await settle(b.worker);
+    return { row: db.row(id), chat, mcp };
+  }
+
+  it("approve → resume: 'I've deleted it' after the approved delete goes out untouched, with no check call", async () => {
+    const { row, chat, mcp } = await decidedRun("approved");
+    expect(mcp.executed).toHaveLength(1);
+    expect(row.status).toBe("succeeded");
+    expect(row.result).toBe("I've deleted /old.txt.");
+    expect(chat).toHaveBeenCalledTimes(2); // the park, the report: no correction call
+  });
+
+  it("deny → resume: the same claim after a declined delete is not trusted, and asks nothing", async () => {
+    const { row, chat, mcp } = await decidedRun("denied");
+    expect(mcp.executed).toHaveLength(0);
+    expect(chat).toHaveBeenCalledTimes(3); // the park, the report, one check call
+    const checkReq = chat.mock.calls[2]![0] as { messages: Array<{ role: string; content: unknown }> };
+    const prompt = String(checkReq.messages[checkReq.messages.length - 1]!.content);
+    expect(prompt).toContain("- delete_file: NOT done: the person declined it.");
+    expect(prompt).toContain("do not ask any questions");
+    expect(row.result).toBe(
+      "I've deleted /old.txt.\n\nNot done: you declined to delete a file, or a folder and everything in it, from your Droplet.",
+    );
+  });
+});

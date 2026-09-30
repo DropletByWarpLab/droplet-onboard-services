@@ -17,7 +17,7 @@
  * page test.
  */
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import React from "react";
 
 vi.mock("@/components/shell/ShellPage", () => ({
@@ -59,6 +59,16 @@ describe("/trust Trust Center placeholder (WARP-246)", () => {
     expect(screen.getAllByText(/in progress/i).length).toBeGreaterThanOrEqual(1);
     // …and the page says out loud that this is a roadmap.
     expect(screen.getByText(/roadmap/i)).toBeInTheDocument();
+  });
+
+  it("does not list device identity as shipped while the box defaults to a mock TPM (WARP-3392)", () => {
+    render(<TrustPage />);
+    const row = screen.getByText(/hardware-sealed device identity is rolling out/i)
+      .closest(".lrow") as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(within(row).getByText("In progress")).toBeInTheDocument();
+    expect(within(row).queryByText("Shipped")).toBeNull();
+    expect(screen.queryByText(/sealed inside its tpm/i)).toBeNull();
   });
 
   it("renders artifact links as disabled placeholders", () => {
