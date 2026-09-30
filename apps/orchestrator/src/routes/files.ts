@@ -92,6 +92,7 @@ import { requireRole, requireRoleOrMcpService, recordAccessDenied } from "../mid
 import { sensitiveRateLimit, standardRateLimit } from "../middleware/rate-limit.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { UnsafePathError } from "../lib/unsafe-path-error.js";
+import { storedUploadName } from "../lib/upload-file-name.js";
 import { isPathUnderUser } from "../services/brain-memory.service.js";
 import {
   classifyFileContentId,
@@ -1985,6 +1986,12 @@ export function createFilesRouter(
   // every staged part first, so a 413 / 400 / client abort leaves nothing
   // behind — the batch lands whole or not at all. The JSON transport
   // (write_file / create_document) is not multipart and skips all of this.
+  class BadUploadNameError extends Error {
+    constructor() {
+      super("File name must not contain '/', a control character or a '..' segment");
+    }
+  }
+
   async function handleUpload(req: Request, res: Response, next: NextFunction) {
     if (!req.is("multipart/form-data")) {
       next();
@@ -2003,14 +2010,40 @@ export function createFilesRouter(
       handleFileError(err, res, next);
       return;
     }
+    // WARP-3057: busboy decoded a plain `filename=` as latin1 (so macOS's
+    // U+202F in "9.41.12 AM" landed as "â¯AM") and cut the name at the last
+    // `\` or `/`. `defParamCharset` reads it as UTF-8 (`filename*=` still
+    // wins when sent), and `preservePath` hands us the name whole so
+    // `storedUploadName` can keep a `\` and refuse traversal — checked in
+    // the fileFilter, before a byte of that part is staged.
     const scopedUpload = multer({
       storage,
+      defParamCharset: "utf8",
+      preservePath: true,
+      fileFilter: (_req, file, cb) => {
+        if (storedUploadName(file.originalname) === null) {
+          cb(new BadUploadNameError());
+          return;
+        }
+        cb(null, true);
+      },
       limits: {
         fileSize: limitMb * 1024 * 1024,
         files: MAX_FILES_PER_UPLOAD,
       },
     });
     scopedUpload.array("files", MAX_FILES_PER_UPLOAD)(req, res, (err) => {
+      if (err instanceof BadUploadNameError) {
+        res.status(400).json({ error: err.message, code: "UPLOAD_BAD_NAME" });
+        return;
+      }
+      // busboy refuses a part header carrying a raw control character (and
+      // any other malformed header) before the fileFilter sees it: that is
+      // the client's bad request, not a 500.
+      if (err instanceof Error && err.message === "Malformed part header") {
+        res.status(400).json({ error: "Malformed upload", code: "UPLOAD_MALFORMED" });
+        return;
+      }
       if (err instanceof MulterError) {
         if (err.code === "LIMIT_FILE_SIZE") {
           // WARP-1912 — the dashboard's translator never echoes `error`
@@ -2468,7 +2501,7 @@ export function createFilesRouter(
         (req.files as (Express.Multer.File & StagedUploadInfo)[] | undefined) ?? [];
       let rawTargetPath: string;
       type PendingUpload =
-        | { name: string; size: number; sha256: string; uploadId: string }
+        | { name: string; requestedName: string; size: number; sha256: string; uploadId: string }
         | { name: string; size: number; sha256: string; buffer: Buffer };
       let uploads: PendingUpload[];
       let jsonCreateOnly = false;
@@ -2476,7 +2509,9 @@ export function createFilesRouter(
       if (files.length > 0) {
         rawTargetPath = (req.query.path as string) || "/";
         uploads = files.map((f) => ({
-          name: f.originalname,
+          // Non-null: the fileFilter refused every name this rejects.
+          name: storedUploadName(f.originalname)!,
+          requestedName: f.originalname,
           size: f.size,
           sha256: f.sha256,
           uploadId: f.uploadId,
@@ -2586,7 +2621,9 @@ export function createFilesRouter(
               targetPath,
               file.name,
               file.uploadId,
-              overwrite,
+              // WARP-3057: a name we changed (`\` → `_`) is not the name the
+              // caller asked to replace, so it always keeps both.
+              overwrite && file.name === file.requestedName,
             ));
             uncommitted.delete(file.uploadId);
           } else {
@@ -2612,14 +2649,20 @@ export function createFilesRouter(
             }
           }
           const uploadedPath = joinDir(targetPath, finalName);
+          // WARP-3057: a `\` stored as `_` is a rename the caller is told about.
+          const requestedName = "requestedName" in file ? file.requestedName : file.name;
           const status: UploadEntryStatus =
-            outcome === "replaced" ? "replaced" : finalName !== file.name ? "renamed" : "uploaded";
+            outcome === "replaced"
+              ? "replaced"
+              : finalName !== requestedName
+                ? "renamed"
+                : "uploaded";
           const entry: UploadedFileEntry = {
             name: finalName,
             path: uploadedPath,
             size: file.size,
             status,
-            ...(status === "renamed" ? { requestedName: file.name } : {}),
+            ...(status === "renamed" ? { requestedName } : {}),
           };
           results.push(entry);
 
