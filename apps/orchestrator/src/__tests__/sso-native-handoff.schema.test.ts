@@ -61,6 +61,9 @@ describe("Prisma schema — SsoLoginState native handoff", () => {
     // Only the sha256 of the handoff code is stored; unique so redemption is a
     // point lookup and two rows can never share a code.
     expect(body).toMatch(/handoffCodeHash\s+String\?\s+@unique/);
+    // The consent value the page carries (ADR-063 S5): hashed, unique, set by the
+    // callback and cleared when Continue claims it. No code exists before that.
+    expect(body).toMatch(/nativeConsentHash\s+String\?\s+@unique/);
     expect(body).toMatch(/handoffUserId\s+String\?/);
     expect(body).toMatch(/handoffExpiresAt\s+DateTime\?/);
     expect(body).toMatch(/handoffConsumedAt\s+DateTime\?/);
@@ -90,6 +93,7 @@ describe("Prisma migration — sso_native_handoff (additive, idempotent)", () =>
     for (const [col, type] of [
       ["nativeRedirectUri", "TEXT"],
       ["nativeCodeChallenge", "TEXT"],
+      ["nativeConsentHash", "TEXT"],
       ["handoffCodeHash", "TEXT"],
       ["handoffUserId", "TEXT"],
       ["handoffExpiresAt", "TIMESTAMP\\(3\\)"],
@@ -99,6 +103,9 @@ describe("Prisma migration — sso_native_handoff (additive, idempotent)", () =>
     }
     expect(sql).toMatch(
       /CREATE UNIQUE INDEX IF NOT EXISTS "SsoLoginState_handoffCodeHash_key"\s+ON "SsoLoginState"\("handoffCodeHash"\)/,
+    );
+    expect(sql).toMatch(
+      /CREATE UNIQUE INDEX IF NOT EXISTS "SsoLoginState_nativeConsentHash_key"\s+ON "SsoLoginState"\("nativeConsentHash"\)/,
     );
     // No UPDATE / DELETE against existing login-state rows.
     expect(sql).not.toMatch(/^\s*(UPDATE|DELETE)\b/im);

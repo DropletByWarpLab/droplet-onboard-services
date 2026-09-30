@@ -19,7 +19,11 @@
  *        { provider, redirectUri, codeChallenge, codeChallengeMethod:"S256" }
  *        → 200 { authorizeUrl }  (no cookie, no 302)
  *   GET  /api/sso/oidc/callback   NATIVE row → no cookie check, no session
- *        cookies; 302 to redirectUri?code=<one-time handoff>&state=<state>
+ *        cookies, NO handoff code: a consent page (RFC 8252 section 8.6,
+ *        ADR-063 S5) carrying a single-use consent value bound to the state row
+ *   POST /api/sso/oidc/native/consent { consent }   (Continue on that page)
+ *        → mints the one-time handoff code (60 s from now), audits the
+ *        approval, 303 to redirectUri?code=<handoff>&state=<state>
  *   POST /api/sso/oidc/native/token { code, codeVerifier }
  *        → the /auth/login?return=body JSON body
  *
@@ -34,13 +38,15 @@
  *     delegated to openid-client inside exchangeCodeAndValidate.
  *   - Native leg: the explicit `flowKind` column on the state row decides the
  *     branch, so a browser flow can never be turned into a handoff. State
- *     stays single-use and server-side; the handoff code is 32 random bytes,
- *     stored as sha256 only, lives 60 s, is redeemable once, and is useless
- *     without the app's PKCE verifier.
+ *     stays single-use and server-side; the callback mints no code (only a
+ *     single-use consent value, sha256 only, that lives as long as the state
+ *     row); the handoff code is minted by Continue, is 32 random bytes, stored
+ *     as sha256 only, lives 60 s from Continue, is redeemable once, and is
+ *     useless without the app's PKCE verifier.
  *   - We NEVER log the code, tokens, secrets, or claims.
  */
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { Router, type Request } from "express";
+import { Router, urlencoded, type Request } from "express";
 import { z } from "zod";
 
 import {
@@ -57,7 +63,8 @@ import {
   createLoginState,
   consumeLoginState,
   peekLoginState,
-  setHandoff,
+  parkConsent,
+  claimConsent,
   consumeHandoff,
   SSO_LOGIN_STATE_TTL_SECONDS,
   SSO_NATIVE_HANDOFF_TTL_SECONDS,
@@ -182,37 +189,51 @@ function escapeHtml(value: string): string {
 }
 
 /**
- * RFC 8252 §8.6 consent page for a NATIVE flow. The IdP leg has just finished
- * in the system browser; before the browser hands a sign-in code to whatever is
- * registered for the app's redirect (a loopback listener, or the `droplet://`
- * scheme any local app can claim), the person confirms it. Continue is the
- * handoff redirect, Cancel is the same redirect with `error=access_denied`. No
- * script and no form: both are plain links. The code stays useless without the
- * app's PKCE verifier and lives 60 s, so an abandoned page grants nothing.
+ * CSP `form-action` sources for the consent form: this box, plus wherever the
+ * 303 after Continue lands (Chromium enforces `form-action` on the redirect
+ * too): the loopback origin, or the private-use scheme.
+ */
+function consentFormActionSources(redirectUri: string): string {
+  if (redirectUri === APP_SCHEME_REDIRECT) return "'self' droplet:";
+  return `'self' ${new URL(redirectUri).origin}`;
+}
+
+/**
+ * RFC 8252 section 8.6 consent page for a NATIVE flow (ADR-063 S5). The IdP
+ * leg has just finished in the system browser; before the box hands a sign-in
+ * code to whatever is registered for the app's redirect (a loopback listener,
+ * or the `droplet://` scheme any local app can claim), the person confirms it.
+ * The page carries NO code: Continue is a POST of the single-use `consent`
+ * value bound to the state row, and only that mints the code (with its own
+ * 60 s clock) and redirects. Cancel is a plain link to the same redirect with
+ * `error=access_denied`. No script; the page lives as long as the state row.
  */
 function renderNativeConsentPage(input: {
   provider: string;
   displayName: string;
   redirectUri: string;
-  continueUrl: string;
+  consentValue: string;
   cancelUrl: string;
 }): string {
   const target =
     input.redirectUri === APP_SCHEME_REDIRECT
       ? "the Droplet app on this computer"
       : "an app running on this computer";
+  const minutes = Math.round(SSO_LOGIN_STATE_TTL_SECONDS / 60);
   const e = escapeHtml;
+  // `action` is relative to /api/sso/oidc/callback, so it resolves to
+  // /api/sso/oidc/native/consent wherever the API is mounted.
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer"><title>Sign in to Droplet</title>
 <style>body{font:16px/1.5 system-ui,sans-serif;max-width:28rem;margin:12vh auto;padding:0 1rem;color:#1a1a1a}
-h1{font-size:1.25rem}a.btn{display:inline-block;padding:.6rem 1.1rem;border-radius:.4rem;text-decoration:none;margin-right:.6rem;border:1px solid #444;color:#1a1a1a}
-a.primary{background:#1a1a1a;color:#fff}small{color:#555}</style></head>
+h1{font-size:1.25rem}.btn{display:inline-block;padding:.6rem 1.1rem;border-radius:.4rem;text-decoration:none;margin-right:.6rem;border:1px solid #444;color:#1a1a1a;background:#fff;font:inherit;cursor:pointer}
+.primary{background:#1a1a1a;color:#fff}small{color:#555}form{display:inline}</style></head>
 <body><h1>Sign in to Droplet?</h1>
 <p>You signed in with ${e(input.provider)} as <strong>${e(input.displayName)}</strong>.
 Continue to give ${e(target)} access to this Droplet account.</p>
-<p><a class="btn primary" href="${e(input.continueUrl)}">Continue</a><a class="btn" href="${e(input.cancelUrl)}">Cancel</a></p>
-<p><small>Only continue if you started this sign-in from the Droplet app just now. This page expires in one minute.</small></p>
+<div><form method="post" action="native/consent"><input type="hidden" name="consent" value="${e(input.consentValue)}"><button class="btn primary" type="submit">Continue</button></form><a class="btn" href="${e(input.cancelUrl)}">Cancel</a></div>
+<p><small>Only continue if you started this sign-in from the Droplet app just now. This page expires in ${minutes} minutes.</small></p>
 </body></html>`;
 }
 
@@ -807,21 +828,21 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
 
       if (loginState.flowKind === "NATIVE") {
         // RFC 8252 handoff: NO session and NO cookies here (this is the
-        // system browser, not the app). Park a one-time code on the row —
-        // sha256 only, 60 s — and ask the person to confirm (RFC 8252 §8.6)
-        // before the browser hands it to the app's redirect. The app redeems
-        // it at POST /sso/oidc/native/token with its verifier, and THAT is
-        // where the sign-in is audited (a parked code is not a sign-in).
+        // system browser, not the app), and NO handoff code either (ADR-063
+        // S5): park only the hash of a single-use consent value and the
+        // person the IdP resolved, and ask them to confirm (RFC 8252 section
+        // 8.6). Only Continue (POST /sso/oidc/native/consent) mints the code
+        // and redirects; the app then redeems it at POST /sso/oidc/native/token
+        // with its verifier, and THAT is where the sign-in is audited.
         const redirectUri = loginState.nativeRedirectUri;
         if (!redirectUri) {
           // The migration CHECK makes a NATIVE row without it unwritable.
           throw new Error("SSO native callback: NATIVE login state has no redirect URI");
         }
-        const handoffCode = randomBytes(32).toString("base64url");
-        await setHandoff(prisma, loginState.id, {
-          codeHash: sha256Hex(handoffCode),
+        const consentValue = randomBytes(32).toString("base64url");
+        await parkConsent(prisma, loginState.id, {
+          consentHash: sha256Hex(consentValue),
           userId: user.id,
-          expiresAt: new Date(Date.now() + SSO_NATIVE_HANDOFF_TTL_SECONDS * 1000),
         });
 
         res.setHeader("Cache-Control", "no-store");
@@ -829,9 +850,8 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
         res.setHeader("X-Frame-Options", "DENY");
         res.setHeader(
           "Content-Security-Policy",
-          "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+          `default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action ${consentFormActionSources(redirectUri)}; frame-ancestors 'none'`,
         );
-        // nativeRedirectUri was validated at begin to carry no query.
         res
           .status(200)
           .type("html")
@@ -840,7 +860,7 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
               provider,
               displayName: user.displayName,
               redirectUri,
-              continueUrl: `${redirectUri}?code=${handoffCode}&state=${encodeURIComponent(loginState.state)}`,
+              consentValue,
               cancelUrl: nativeErrorRedirectUrl(redirectUri, loginState.state, "access_denied"),
             }),
           );
@@ -873,6 +893,63 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
     }
   });
 
+  // ── Continue on the native consent page (ADR-063 S5) ──
+  // The page's single-use `consent` value (bound to the state row, hashed at
+  // rest) is traded atomically for the handoff code, whose 60 s clock starts
+  // now, not when the page was shown. The approval is audited (S8). The value
+  // is unguessable and only ever in the page, so a cross-site POST cannot
+  // forge it; a replay or a double click finds it already spent.
+  router.post(
+    "/sso/oidc/native/consent",
+    authRateLimit,
+    urlencoded({ extended: false, limit: "2kb" }),
+    async (req, res, next) => {
+      try {
+        res.setHeader("Cache-Control", "no-store");
+        res.setHeader("Referrer-Policy", "no-referrer");
+        if (!prisma) {
+          res.status(500).json({ error: "SSO is not available", code: "SSO_NO_PRISMA" });
+          return;
+        }
+        const consent: unknown = req.body?.consent;
+        if (typeof consent !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(consent)) {
+          res.status(400).json({ error: "Invalid request", code: "INVALID_REQUEST" });
+          return;
+        }
+        const handoffCode = randomBytes(32).toString("base64url");
+        const row = await claimConsent(prisma, sha256Hex(consent), sha256Hex(handoffCode));
+        if (!row || !row.nativeRedirectUri || !row.handoffUserId) {
+          res.status(400).json({
+            error: "This sign-in page expired or was already used. Start again from the Droplet app.",
+            code: "SSO_CONSENT_INVALID",
+          });
+          return;
+        }
+        await recordActivity({
+          kind: "auth",
+          severity: "ok",
+          sourceIcon: "shield",
+          what: `Native SSO sign-in approved via ${row.provider}`,
+          sub: `${row.provider} • consent_approved`,
+          refs: {
+            outcome: "consent_approved",
+            method: "sso-native",
+            provider: row.provider,
+            userId: row.handoffUserId,
+          },
+          actor: { type: "user", id: row.handoffUserId },
+        });
+        // nativeRedirectUri was validated at begin to carry no query.
+        res.redirect(
+          303,
+          `${row.nativeRedirectUri}?code=${handoffCode}&state=${encodeURIComponent(row.state)}`,
+        );
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   // ── Redeem a native handoff for a Bearer session ──
   // Answers EXACTLY the /auth/login?return=body body. Bearer-only: no
   // cookies, not cacheable. The code is claimed atomically BEFORE the PKCE
@@ -886,27 +963,10 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
         res.status(400).json({ error: "Invalid request", code: "INVALID_REQUEST" });
         return;
       }
-      // WARP-582 posture: tokens in a response body are for native clients
-      // only (lib/browser-context.ts). Refused before the claim, so a
-      // browser-context call does not burn the code.
-      const marker = browserMarkerHeader(req.headers);
-      if (marker !== null) {
-        logger.warn({ marker }, "SSO native token: refused for a browser context (WARP-582)");
-        res.status(403).json({
-          error: "This endpoint is for native clients only",
-          code: "NATIVE_CLIENT_REQUIRED",
-        });
-        return;
-      }
-      if (!prisma) {
-        res.status(500).json({ error: "SSO is not available", code: "SSO_NO_PRISMA" });
-        return;
-      }
-
-      const { code, codeVerifier } = parsed.data;
       // Every redemption outcome is audited (the box's activity log, not just
-      // logger.warn): a redeemed code IS the sign-in, and a failed one is the
-      // signal of a stolen or guessed code. Never the code, verifier or tokens.
+      // logger.warn; ADR-063 S8): a redeemed code IS the sign-in, and a failed
+      // attempt, a browser context included, is the signal of a stolen or
+      // guessed code. Never the code, verifier or tokens.
       const auditNativeFailure = (
         reason: string,
         row?: { provider: string; handoffUserId: string | null },
@@ -926,6 +986,26 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
           },
           actor: { type: "anonymous" },
         });
+      // WARP-582 posture: tokens in a response body are for native clients
+      // only (lib/browser-context.ts). Refused before the claim, so a
+      // browser-context call does not burn the code, but it is audited: a page
+      // in a browser holding a handoff code is exactly what to notice.
+      const marker = browserMarkerHeader(req.headers);
+      if (marker !== null) {
+        logger.warn({ marker }, "SSO native token: refused for a browser context (WARP-582)");
+        await auditNativeFailure("browser_context");
+        res.status(403).json({
+          error: "This endpoint is for native clients only",
+          code: "NATIVE_CLIENT_REQUIRED",
+        });
+        return;
+      }
+      if (!prisma) {
+        res.status(500).json({ error: "SSO is not available", code: "SSO_NO_PRISMA" });
+        return;
+      }
+
+      const { code, codeVerifier } = parsed.data;
       // Single-use claim: unknown, replayed and expired codes all miss.
       const row = await consumeHandoff(prisma, sha256Hex(code));
       if (

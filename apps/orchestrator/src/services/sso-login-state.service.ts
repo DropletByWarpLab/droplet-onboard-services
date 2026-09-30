@@ -14,10 +14,11 @@
  * and `UserInvite.acceptedAt` (invite-accept).
  *
  * Native handoff (RFC 8252): a NATIVE row (explicit `flowKind`) also carries
- * the native app's redirect and PKCE challenge. The callback parks a one-time
- * handoff code on it (`setHandoff`, sha256 only) and
- * `POST /sso/oidc/native/token` redeems it once (`consumeHandoff`), with the
- * same conditional-claim idiom.
+ * the native app's redirect and PKCE challenge. The callback parks only a
+ * single-use CONSENT value on it (`parkConsent`, sha256 only); Continue on the
+ * consent page trades it for a one-time handoff code with a 60 s clock
+ * (`claimConsent`), and `POST /sso/oidc/native/token` redeems that code once
+ * (`consumeHandoff`), all with the same conditional-claim idiom.
  */
 import type { PrismaClient, SsoLoginState } from "@prisma/client";
 
@@ -119,38 +120,72 @@ export async function peekLoginState(
   return prisma.ssoLoginState.findUnique({ where: { state } });
 }
 
-/** One-time handoff code lifetime: the app redeems it right after the redirect. */
+/**
+ * One-time handoff code lifetime. The clock starts when the person presses
+ * Continue on the consent page (ADR-063 S5), not when the page is shown: the
+ * page itself lives as long as the state row (`SSO_LOGIN_STATE_TTL_SECONDS`).
+ */
 export const SSO_NATIVE_HANDOFF_TTL_SECONDS = 60;
 
-export interface SetHandoffInput {
-  /** sha256 (hex) of the handoff code — the plaintext is never stored. */
-  codeHash: string;
+export interface ParkConsentInput {
+  /** sha256 (hex) of the single-use consent value embedded in the page. */
+  consentHash: string;
   /** Local User.id the callback resolved. */
   userId: string;
-  expiresAt: Date;
 }
 
 /**
- * Park the handoff on a NATIVE row. The write is conditional on
- * `flowKind = NATIVE`, so a browser row can never be turned into a handoff;
- * a miss throws (the callback then fails closed with a 500, minting nothing).
+ * Bind a pending consent to a NATIVE row: the callback stores the hash of the
+ * page's single-use value and the person it resolved, and NO handoff code
+ * exists yet. The write is conditional on `flowKind = NATIVE` and on no code
+ * having been minted, so a browser row can never be turned into a handoff; a
+ * miss throws (the callback then fails closed with a 500, minting nothing).
  */
-export async function setHandoff(
+export async function parkConsent(
   prisma: PrismaClient,
   stateId: string,
-  input: SetHandoffInput,
+  input: ParkConsentInput,
 ): Promise<void> {
   const { count } = await prisma.ssoLoginState.updateMany({
-    where: { id: stateId, flowKind: "NATIVE" },
-    data: {
-      handoffCodeHash: input.codeHash,
-      handoffUserId: input.userId,
-      handoffExpiresAt: input.expiresAt,
-    },
+    where: { id: stateId, flowKind: "NATIVE", handoffCodeHash: null },
+    data: { nativeConsentHash: input.consentHash, handoffUserId: input.userId },
   });
   if (count !== 1) {
-    throw new Error("SSO handoff: no NATIVE login-state row to attach the code to");
+    throw new Error("SSO consent: no NATIVE login-state row to attach the consent to");
   }
+}
+
+/**
+ * The person pressed Continue: atomically trade the page's single-use consent
+ * value for a handoff code (`codeHash`, sha256 only) with a fresh 60 s clock.
+ * Returns the row (redirect, state, provider, the person) on success, or null
+ * if the value is unknown, already used (replay, a double click) or the state
+ * row has expired (the page's own lifetime). Same race-safe conditional claim
+ * as `consumeLoginState`: exactly one caller sees count===1, and the consent
+ * value is cleared by the claim so it can never mint a second code.
+ */
+export async function claimConsent(
+  prisma: PrismaClient,
+  consentHash: string,
+  codeHash: string,
+): Promise<SsoLoginState | null> {
+  const row = await prisma.ssoLoginState.findUnique({
+    where: { nativeConsentHash: consentHash },
+  });
+  if (!row) return null;
+  const handoffExpiresAt = new Date(Date.now() + SSO_NATIVE_HANDOFF_TTL_SECONDS * 1000);
+  const { count } = await prisma.ssoLoginState.updateMany({
+    where: {
+      id: row.id,
+      nativeConsentHash: consentHash,
+      flowKind: "NATIVE",
+      handoffCodeHash: null,
+      expiresAt: { gt: new Date() },
+    },
+    data: { nativeConsentHash: null, handoffCodeHash: codeHash, handoffExpiresAt },
+  });
+  if (count !== 1) return null;
+  return { ...row, nativeConsentHash: null, handoffCodeHash: codeHash, handoffExpiresAt };
 }
 
 /**
@@ -256,10 +291,12 @@ export async function pruneExpiredLoginStates(
   // since expired) is never swept inside the grace window.
   //
   // A consumed NATIVE row may still carry a redeemable handoff: the callback
-  // claims the state BEFORE the IdP code exchange, so the handoff can be
-  // minted well after `consumedAt`. Such a row is spared until its handoff is
-  // past the same grace window (which also covers `consumeHandoff`'s
-  // claim-then-read). A NATIVE row with no handoff (the callback failed) goes
+  // claims the state BEFORE the IdP code exchange, and Continue mints the
+  // handoff up to the state's own 10 minutes later, so it can land well after
+  // `consumedAt`. Such a row is spared until its handoff is past the same
+  // grace window (which also covers `consumeHandoff`'s claim-then-read), and,
+  // while a consent value is still pending (the page is live), until the state
+  // itself has expired. A NATIVE row with neither (the callback failed) goes
   // like a browser row.
   const where = {
     OR: [
@@ -269,8 +306,17 @@ export async function pruneExpiredLoginStates(
           {
             OR: [
               { flowKind: "BROWSER" as const },
-              { handoffExpiresAt: null },
-              { handoffExpiresAt: { lt: consumedCutoff } },
+              {
+                AND: [
+                  {
+                    OR: [
+                      { handoffExpiresAt: null },
+                      { handoffExpiresAt: { lt: consumedCutoff } },
+                    ],
+                  },
+                  { OR: [{ nativeConsentHash: null }, { expiresAt: { lt: now } }] },
+                ],
+              },
             ],
           },
         ],

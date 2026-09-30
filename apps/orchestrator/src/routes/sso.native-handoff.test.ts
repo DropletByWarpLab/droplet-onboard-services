@@ -5,11 +5,14 @@
  *
  *   POST /api/sso/oidc/native/begin   → 200 { authorizeUrl } (no cookie, no 302)
  *   GET  /api/sso/oidc/callback       → NATIVE row: no cookie check, no session
- *                                        cookies; a consent page (RFC 8252 §8.6)
- *                                        whose Continue link is the app's redirect
- *                                        with a one-time handoff code; any failure
+ *                                        cookies, NO handoff code: a consent page
+ *                                        (RFC 8252 §8.6, ADR-063 S5) carrying a
+ *                                        single-use consent value; any failure
  *                                        (an IdP error or cancel included) is
  *                                        relayed to the app's redirect as error=
+ *   POST /api/sso/oidc/native/consent → Continue: trades the consent value for a
+ *                                        60 s handoff code (audited as approved)
+ *                                        and 303s to the app's redirect
  *   POST /api/sso/oidc/native/token   → { user, accessToken, refreshToken,
  *                                        accessTokenExpiresAt, refreshTokenExpiresAt }
  *
@@ -155,6 +158,7 @@ function createPrismaMock(users: UserRow[] = [{ ...stefan }]) {
         flowKind: "BROWSER",
         nativeRedirectUri: null,
         nativeCodeChallenge: null,
+        nativeConsentHash: null,
         handoffCodeHash: null,
         handoffUserId: null,
         handoffExpiresAt: null,
@@ -165,9 +169,11 @@ function createPrismaMock(users: UserRow[] = [{ ...stefan }]) {
       return { ...row };
     }),
     findUnique: vi.fn(async ({ where }: { where: Row }) => {
-      const hit = states.find((r) =>
-        where.state !== undefined ? r.state === where.state : r.handoffCodeHash === where.handoffCodeHash,
-      );
+      const hit = states.find((r) => {
+        if (where.state !== undefined) return r.state === where.state;
+        if (where.nativeConsentHash !== undefined) return r.nativeConsentHash === where.nativeConsentHash;
+        return r.handoffCodeHash === where.handoffCodeHash;
+      });
       return hit ? { ...hit } : null;
     }),
     updateMany: vi.fn(async ({ where, data }: { where: Row; data: Row }) => {
@@ -244,10 +250,17 @@ function hrefs(html: string): string[] {
   return [...html.matchAll(/href="([^"]*)"/g)].map((m) => m[1]!.replace(/&amp;/g, "&"));
 }
 
+function consentValue(html: string): string {
+  return /<input type="hidden" name="consent" value="([^"]*)">/.exec(html)?.[1] ?? "";
+}
+
+const CONSENT_PATH = "/api/sso/oidc/native/consent";
+
 /**
- * begin → IdP (mocked) → callback. The callback answers the consent page;
- * `location` is its Continue link, i.e. where the browser goes once the person
- * confirms, and `code` is the handoff code the app receives there.
+ * begin → IdP (mocked) → callback → the person presses Continue. The callback
+ * answers the consent page (`res`, with the single-use `consent` value and the
+ * Cancel link); Continue POSTs that value and the box answers a 303 (`consentRes`)
+ * whose `location` is the app's redirect carrying the handoff `code`.
  */
 async function completeNativeCallback(
   app: express.Express,
@@ -257,16 +270,30 @@ async function completeNativeCallback(
   verifier: string;
   location: string;
   cancel: string;
+  consent: string;
   res: request.Response;
+  consentRes: request.Response;
 }> {
+  const page = await startNativeConsent(app, redirectUri);
+  const consentRes = await request(app).post(CONSENT_PATH).type("form").send({ consent: page.consent });
+  expect(consentRes.status).toBe(303);
+  const location = (consentRes.headers.location as string) ?? "";
+  const code = new URL(location).searchParams.get("code") ?? "";
+  return { ...page, code, location, consentRes };
+}
+
+/** begin → IdP (mocked) → callback: stops at the consent page, before Continue. */
+async function startNativeConsent(
+  app: express.Express,
+  redirectUri = LOOPBACK,
+): Promise<{ verifier: string; cancel: string; consent: string; res: request.Response }> {
   const { verifier, challenge } = pkcePair();
   const b = await begin(app, { redirectUri, codeChallenge: challenge });
   expect(b.status).toBe(200);
   const res = await request(app).get("/api/sso/oidc/callback?code=idp-code&state=st-nat");
   expect(res.status).toBe(200);
-  const [location = "", cancel = ""] = hrefs(res.text);
-  const code = new URL(location).searchParams.get("code") ?? "";
-  return { code, verifier, location, cancel, res };
+  const [cancel = ""] = hrefs(res.text);
+  return { verifier, cancel, consent: consentValue(res.text), res };
 }
 
 /** begin → a failure at the callback (IdP error, cancel, ...): the redirect the app gets. */
@@ -444,16 +471,37 @@ describe("POST /api/sso/oidc/native/begin", () => {
 // ── callback ────────────────────────────────────────────────────────────────
 
 describe("GET /api/sso/oidc/callback — native leg", () => {
-  it("needs no state cookie, sets no session cookie, and asks for consent before the one-time code goes to the app", async () => {
+  it("needs no state cookie, sets no session cookie, and parks NO handoff code: the page carries only a single-use consent value", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
-    const { code, location, res } = await completeNativeCallback(app);
+    const { consent, res } = await startNativeConsent(app);
 
-    // A consent page, not a redirect: the code has not left the box's page yet.
+    // A consent page, not a redirect: nothing has left the box's page yet.
     expect(res.headers.location).toBeUndefined();
     expect(res.headers["content-type"]).toMatch(/text\/html/);
     expect(res.text).toContain("Sign in to Droplet?");
     expect(res.text).toContain("Stefan Cruceru");
+    expectNoSessionCookies(res);
+    expect(createSession).not.toHaveBeenCalled();
+
+    // ADR-063 S5: the callback stores no code. The page has no code in it and
+    // the row has no code hash; only the sha256 of the consent value is parked.
+    expect(res.text).not.toContain("code=");
+    expect(consent).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const row = prisma._states[0];
+    expect(row.consumedAt).toBeInstanceOf(Date);
+    expect(row.handoffCodeHash).toBeNull();
+    expect(row.handoffExpiresAt).toBeNull();
+    expect(row.nativeConsentHash).toBe(createHash("sha256").update(consent).digest("hex"));
+    expect(JSON.stringify(row)).not.toContain(consent);
+    expect(row.handoffUserId).toBe(stefan.id);
+  });
+
+  it("Continue is a POST that mints the code (sha256 only, 60 s) and 303s to the app's redirect with the app's state", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const before = Date.now();
+    const { code, location, consent, consentRes } = await completeNativeCallback(app);
 
     const url = new URL(location);
     expect(`${url.origin}${url.pathname}`).toBe(LOOPBACK);
@@ -461,24 +509,125 @@ describe("GET /api/sso/oidc/callback — native leg", () => {
     expect([...url.searchParams.keys()]).toEqual(["code", "state"]);
     // 32 random bytes, base64url.
     expect(code).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    expectNoSessionCookies(res);
+    expect(consentRes.headers["cache-control"]).toBe("no-store");
+    expect(consentRes.headers["referrer-policy"]).toBe("no-referrer");
+    expectNoSessionCookies(consentRes);
     expect(createSession).not.toHaveBeenCalled();
 
-    // Only the sha256 of the code is stored, with a 60 s lifetime.
     const row = prisma._states[0];
-    expect(row.consumedAt).toBeInstanceOf(Date);
     expect(row.handoffCodeHash).toBe(createHash("sha256").update(code).digest("hex"));
     expect(JSON.stringify(row)).not.toContain(code);
-    expect(row.handoffUserId).toBe(stefan.id);
-    const ttlMs = row.handoffExpiresAt.getTime() - Date.now();
+    // The consent value is spent by the same claim.
+    expect(row.nativeConsentHash).toBeNull();
+    expect(JSON.stringify(row)).not.toContain(consent);
+    const ttlMs = row.handoffExpiresAt.getTime() - before;
     expect(ttlMs).toBeGreaterThan(55_000);
-    expect(ttlMs).toBeLessThanOrEqual(60_000);
+    expect(ttlMs).toBeLessThanOrEqual(61_000);
     expect(row.handoffConsumedAt).toBeNull();
   });
 
-  it("consent page (RFC 8252 §8.6): Cancel is error=access_denied with the app's state; the page cannot be framed, cached or leak the code", async () => {
+  it("the 60 s clock starts at Continue, not when the page was shown: a person who took minutes (an IdP MFA prompt) still gets a redeemable code", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const app = buildApp(createPrismaMock());
+      const page = await startNativeConsent(app);
+      // Five minutes on the page, inside the state row's 10 minutes.
+      vi.setSystemTime(new Date(Date.now() + 5 * 60_000));
+      const cont = await request(app).post(CONSENT_PATH).type("form").send({ consent: page.consent });
+      expect(cont.status).toBe(303);
+      const code = new URL(cont.headers.location as string).searchParams.get("code");
+
+      const res = await request(app)
+        .post("/api/sso/oidc/native/token")
+        .send({ code, codeVerifier: page.verifier });
+      expect(res.status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the page lives no longer than the state row: after its 10 minutes Continue is refused and no code is minted", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma);
+      const page = await startNativeConsent(app);
+      vi.setSystemTime(new Date(Date.now() + 10 * 60_000 + 1000));
+
+      const cont = await request(app).post(CONSENT_PATH).type("form").send({ consent: page.consent });
+
+      expect(cont.status).toBe(400);
+      expect(cont.body.code).toBe("SSO_CONSENT_INVALID");
+      expect(cont.headers.location).toBeUndefined();
+      expect(prisma._states[0].handoffCodeHash).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the consent value is single-use: a second Continue (replay, double click) mints nothing and is not audited again", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const { consent, code } = await completeNativeCallback(app);
+    const codeHash = prisma._states[0].handoffCodeHash;
+
+    const again = await request(app).post(CONSENT_PATH).type("form").send({ consent });
+
+    expect(again.status).toBe(400);
+    expect(again.body.code).toBe("SSO_CONSENT_INVALID");
+    expect(again.headers.location).toBeUndefined();
+    expect(prisma._states[0].handoffCodeHash).toBe(codeHash);
+    expect(code).not.toBe("");
+    expect(recordActivity).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["no body", {}],
+    ["an empty value", { consent: "" }],
+    ["a malformed value", { consent: "not a consent value" }],
+    ["an unknown value", { consent: "A".repeat(43) }],
+  ])("refuses Continue with %s (400) and mints no code", async (_label, body) => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    await startNativeConsent(app);
+
+    const res = await request(app).post(CONSENT_PATH).type("form").send(body);
+
+    expect(res.status).toBe(400);
+    expect(res.headers.location).toBeUndefined();
+    expect(prisma._states[0].handoffCodeHash).toBeNull();
+    expect(recordActivity).not.toHaveBeenCalled();
+  });
+
+  it("a wrong consent value leaves the real page usable", async () => {
     const app = buildApp(createPrismaMock());
-    const { cancel, res } = await completeNativeCallback(app);
+    const first = await startNativeConsent(app);
+    const bogus = await request(app).post(CONSENT_PATH).type("form").send({ consent: "B".repeat(43) });
+    expect(bogus.status).toBe(400);
+    const cont = await request(app).post(CONSENT_PATH).type("form").send({ consent: first.consent });
+    expect(cont.status).toBe(303);
+  });
+
+  it("audits the approval: one activity row when the person presses Continue, naming the person and provider, never the code or the consent value", async () => {
+    const app = buildApp(createPrismaMock());
+    const { code, consent, verifier } = await completeNativeCallback(app);
+
+    expect(recordActivity).toHaveBeenCalledTimes(1);
+    const row = recordActivity.mock.calls[0]![0];
+    expect(row).toMatchObject({
+      kind: "auth",
+      severity: "ok",
+      actor: { type: "user", id: stefan.id },
+      refs: { outcome: "consent_approved", method: "sso-native", provider: "google", userId: stefan.id },
+    });
+    expect(row.what).toContain("approved");
+    const logged = JSON.stringify(recordActivity.mock.calls);
+    for (const secret of [code, consent, verifier]) expect(logged).not.toContain(secret);
+  });
+
+  it("consent page (RFC 8252 §8.6): Continue is a same-origin POST form, Cancel is error=access_denied with the app's state; the page cannot be framed, cached or scripted", async () => {
+    const app = buildApp(createPrismaMock());
+    const { cancel, res } = await startNativeConsent(app);
 
     const url = new URL(cancel);
     expect(`${url.origin}${url.pathname}`).toBe(LOOPBACK);
@@ -486,24 +635,32 @@ describe("GET /api/sso/oidc/callback — native leg", () => {
     expect(url.searchParams.get("state")).toBe("st-nat");
     expect(url.searchParams.has("code")).toBe(false);
 
+    expect(res.text).toMatch(/<form method="post" action="native\/consent">/);
+    expect(res.text.match(/<form/g)).toHaveLength(1);
+    expect(hrefs(res.text)).toEqual([cancel]);
+
     expect(res.headers["cache-control"]).toBe("no-store");
     expect(res.headers["referrer-policy"]).toBe("no-referrer");
     expect(res.headers["x-frame-options"]).toBe("DENY");
-    expect(res.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
-    // Plain links only: no script, no form.
-    expect(res.text).not.toMatch(/<script|<form/i);
+    const csp = res.headers["content-security-policy"] as string;
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("default-src 'none'");
+    // The form may post to this box and be redirected to the app, nowhere else.
+    expect(csp).toContain("form-action 'self' http://127.0.0.1:49152");
+    expect(res.text).not.toMatch(/<script/i);
   });
 
-  it("names the Droplet app for the private-use scheme and any local app for a loopback redirect", async () => {
-    const scheme = await completeNativeCallback(buildApp(createPrismaMock()), "droplet://sso/callback");
+  it("lets the form redirect to the private-use scheme, and names the Droplet app for it and any local app for a loopback redirect", async () => {
+    const scheme = await startNativeConsent(buildApp(createPrismaMock()), "droplet://sso/callback");
     expect(scheme.res.text).toContain("the Droplet app on this computer");
-    const loop = await completeNativeCallback(buildApp(createPrismaMock()));
+    expect(scheme.res.headers["content-security-policy"]).toContain("form-action 'self' droplet:");
+    const loop = await startNativeConsent(buildApp(createPrismaMock()));
     expect(loop.res.text).toContain("an app running on this computer");
   });
 
-  it("does not audit a sign-in at the callback (a parked code is not a sign-in)", async () => {
+  it("does not audit a sign-in at the callback (the approval is audited at Continue, the sign-in at redemption)", async () => {
     const app = buildApp(createPrismaMock());
-    await completeNativeCallback(app);
+    await startNativeConsent(app);
     expect(recordActivity).not.toHaveBeenCalled();
   });
 
@@ -595,6 +752,7 @@ describe("GET /api/sso/oidc/callback — native leg", () => {
     const { url, res } = await nativeCallbackRedirect(buildApp(prisma), "code=idp-code&");
     expect(url.searchParams.get("error")).toBe("sso_failed");
     expect(prisma._states[0].handoffCodeHash).toBeNull();
+    expect(prisma._states[0].nativeConsentHash).toBeNull();
     expectNoSessionCookies(res);
     expect(recordActivity.mock.calls[0]![0].refs).toMatchObject({ outcome: "no_usable_account" });
   });
@@ -786,7 +944,10 @@ describe("POST /api/sso/oidc/native/token", () => {
   it("audits a successful redemption in the activity log — the sign-in, not the parked code", async () => {
     const app = buildApp(createPrismaMock());
     const { code, verifier } = await completeNativeCallback(app);
-    expect(recordActivity).not.toHaveBeenCalled();
+    // Only the approval (Continue) is in the log so far, not a sign-in.
+    expect(recordActivity).toHaveBeenCalledTimes(1);
+    expect(recordActivity.mock.calls[0]![0].refs).toMatchObject({ outcome: "consent_approved" });
+    recordActivity.mockClear();
 
     const res = await request(app).post("/api/sso/oidc/native/token").send({ code, codeVerifier: verifier });
     expect(res.status).toBe(200);
@@ -809,6 +970,7 @@ describe("POST /api/sso/oidc/native/token", () => {
   it("audits a wrong verifier as pkce_mismatch with the provider and the user the code was for", async () => {
     const app = buildApp(createPrismaMock());
     const { code } = await completeNativeCallback(app);
+    recordActivity.mockClear(); // the approval is covered above
     const res = await request(app)
       .post("/api/sso/oidc/native/token")
       .send({ code, codeVerifier: pkcePair().verifier });
@@ -841,6 +1003,7 @@ describe("POST /api/sso/oidc/native/token", () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
     const { code, verifier } = await completeNativeCallback(app);
+    recordActivity.mockClear(); // the approval is covered above
     prisma._users[0].directoryStatus = "DEACTIVATED";
     await request(app).post("/api/sso/oidc/native/token").send({ code, codeVerifier: verifier });
     expect(recordActivity).toHaveBeenCalledTimes(1);
@@ -851,21 +1014,40 @@ describe("POST /api/sso/oidc/native/token", () => {
     });
   });
 
-  it("does not audit a malformed request or a browser-context refusal (no code was attempted)", async () => {
+  it("does not audit a malformed request (no code was attempted)", async () => {
     const app = buildApp(createPrismaMock());
     await request(app).post("/api/sso/oidc/native/token").send({});
-    await request(app)
+    expect(recordActivity).not.toHaveBeenCalled();
+  });
+
+  it("audits a refused browser context as browser_context (ADR-063 S8), at warn with an anonymous actor and no secrets", async () => {
+    const app = buildApp(createPrismaMock());
+    const code = "a".repeat(43);
+    const codeVerifier = "b".repeat(43);
+    const res = await request(app)
       .post("/api/sso/oidc/native/token")
       .set("Origin", "https://droplet-ai.local")
       .set("Sec-Fetch-Mode", "cors")
-      .send({ code: "a".repeat(43), codeVerifier: "a".repeat(43) });
-    expect(recordActivity).not.toHaveBeenCalled();
+      .send({ code, codeVerifier });
+
+    expect(res.status).toBe(403);
+    expect(recordActivity).toHaveBeenCalledTimes(1);
+    expect(recordActivity.mock.calls[0]![0]).toMatchObject({
+      kind: "auth",
+      severity: "warn",
+      actor: { type: "anonymous" },
+      refs: { outcome: "browser_context", method: "sso-native" },
+    });
+    const logged = JSON.stringify(recordActivity.mock.calls);
+    expect(logged).not.toContain(code);
+    expect(logged).not.toContain(codeVerifier);
   });
 
   it("re-checks the TOTP gate at redemption: a factor enrolled after the callback refuses the session", async () => {
     const prisma = createPrismaMock([{ ...stefan, passwordHash: "$argon2id$mock" }]);
     const app = buildApp(prisma);
     const { code, verifier } = await completeNativeCallback(app);
+    recordActivity.mockClear(); // the approval is covered above
     checkLoginSecondFactor.mockResolvedValue("failed");
 
     const res = await request(app).post("/api/sso/oidc/native/token").send({ code, codeVerifier: verifier });

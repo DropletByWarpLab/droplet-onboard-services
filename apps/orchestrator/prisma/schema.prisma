@@ -3075,11 +3075,17 @@ model SsoLoginState {
   // The app's PKCE S256 challenge for the handoff (43-char base64url). Not
   // the IdP-side verifier above, which never leaves the box.
   nativeCodeChallenge String?
+  // sha256 (hex) of the single-use consent value the callback embedded in the
+  // consent page (ADR-063 S5). Set by the callback, cleared when Continue
+  // claims it; the page lives as long as `expiresAt` (10 minutes). Plaintext
+  // is never stored.
+  nativeConsentHash   String?     @unique
   // sha256 (hex) of the one-time handoff code; the plaintext is never stored.
   handoffCodeHash     String?     @unique
-  // Local User.id the callback resolved; re-read at redemption.
+  // Local User.id the callback resolved (parked with the consent value, before
+  // any code exists); re-read at redemption.
   handoffUserId       String?
-  // 60 s after the callback minted the code.
+  // 60 s after Continue minted the code (ADR-063 S5), not after the callback.
   handoffExpiresAt    DateTime?
   // Single-use stamp for the redemption (same idiom as `consumedAt`).
   handoffConsumedAt   DateTime?

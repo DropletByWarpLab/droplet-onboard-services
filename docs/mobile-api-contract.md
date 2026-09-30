@@ -137,9 +137,12 @@ Design and rationale: ADR-063 (Proposed).
 3. The app opens `authorizeUrl` in the **system browser** (never an embedded
    WebView). The person signs in at the provider, which redirects to the box.
 4. The box validates the sign-in and shows a **consent page** in the browser
-   ("Sign in to Droplet?", RFC 8252 §8.6). It sets no cookies. **Continue**
-   sends the browser to `<redirectUri>?code=<handoff code>&state=<state>`.
-   **Cancel** sends it to `<redirectUri>?error=access_denied&state=<state>`.
+   ("Sign in to Droplet?", RFC 8252 §8.6). It sets no cookies and mints no
+   code yet. **Continue** is a form `POST` to `/api/sso/oidc/native/consent`
+   that mints the handoff code and answers `303` to
+   `<redirectUri>?code=<handoff code>&state=<state>`. **Cancel** sends the
+   browser to `<redirectUri>?error=access_denied&state=<state>`. The page is
+   good for as long as the state (10 minutes).
 5. `POST /api/sso/oidc/native/token` with the handoff code and the verifier →
    the `/auth/login?return=body` body.
 
@@ -153,7 +156,8 @@ lifetime, because a closed browser tab sends nothing.
 | Method | Path | Auth | Body | Returns |
 |---|---|---|---|---|
 | POST | `/sso/oidc/native/begin` | none | `{ provider, redirectUri, codeChallenge, codeChallengeMethod: "S256" }` | `200 { authorizeUrl }` (no cookie, no redirect) |
-| GET | `/sso/oidc/callback?code&state` | none (reached from the provider) | — | `200` consent page whose Continue link is `<redirectUri>?code=<43-char handoff code>&state=<state>`; or `302 <redirectUri>?error=<error>&state=<state>` |
+| GET | `/sso/oidc/callback?code&state` | none (reached from the provider) | — | `200` consent page (no code in it; Continue posts a single-use consent value); or `302 <redirectUri>?error=<error>&state=<state>` |
+| POST | `/sso/oidc/native/consent` | none (the consent page's own form) | `consent=<single-use value>` (form-encoded) | `303 <redirectUri>?code=<43-char handoff code>&state=<state>`; `400 SSO_CONSENT_INVALID` if the page expired or was already used |
 | POST | `/sso/oidc/native/token` | none | `{ code, codeVerifier }` | `200 { user: { id, username, displayName, role, mustChangePassword }, accessToken, refreshToken, accessTokenExpiresAt, refreshTokenExpiresAt }` |
 
 ```json
@@ -189,14 +193,15 @@ random port and path: another local app can claim `droplet://`, although it
 could only redeem a code for a flow it started with its own verifier.
 
 **Handoff code.** 32 random bytes, base64url (43 chars). The box keeps only its
-SHA-256. It is minted when the consent page is shown, is valid for **60
-seconds** and for **one** redemption, and is useless without the app's
-verifier. A redemption attempt consumes it **whatever the outcome**, so a wrong
-verifier burns the code and the app must start over at `begin`. If the person
-takes longer than 60 seconds on the consent page, redemption answers
-`SSO_HANDOFF_INVALID` and the app starts over. The `state` in the redirect is
-the one the box minted; the app should check it against the `authorizeUrl` it
-opened.
+SHA-256. It is minted when the person presses **Continue**, not when the
+consent page is shown, is valid for **60 seconds** from then and for **one**
+redemption, and is useless without the app's verifier. A redemption attempt
+consumes it **whatever the outcome**, so a wrong verifier burns the code and
+the app must start over at `begin`. A person who takes minutes on the consent
+page (an identity-provider MFA prompt, say) still gets a fresh 60 seconds; only
+an expired state (10 minutes) sends them back to the app to start again. The
+`state` in the redirect is the one the box minted; the app should check it
+against the `authorizeUrl` it opened.
 
 **Errors relayed to the app.** `<redirectUri>?error=<error>&state=<state>`,
 with no `code`. The IdP's own error text is never forwarded.
