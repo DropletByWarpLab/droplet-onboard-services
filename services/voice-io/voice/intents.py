@@ -44,11 +44,11 @@ MIN_SPOKEN_LEVEL = 10  # "minimum volume": quiet but audible, never 0
 
 @dataclass(frozen=True)
 class VolumeIntent:
-    """`value` is the level for "set", the signed step for "change", and
-    None for mute / unmute / query."""
+    """`value` is the level for "set" and the signed step for "change";
+    mute / unmute / query carry no value and leave it at 0."""
 
     kind: VolumeIntentKind
-    value: Optional[int] = None
+    value: int = 0
 
 
 # ── number words, 0-100 ─────────────────────────────────────────────
