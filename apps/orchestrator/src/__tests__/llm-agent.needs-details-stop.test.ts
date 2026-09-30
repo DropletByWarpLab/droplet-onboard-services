@@ -195,7 +195,7 @@ describe("runAgent — ask for details after half the turn's steps found nothing
     const result = await ask(deps, 6);
     expect(callTool).toHaveBeenCalledTimes(6);
     expect(result.stop_reason).toBe("iteration_limit");
-    expect(result.message.content).toContain("search_content tool kept failing");
+    expect(result.message.content).toContain("kept failing");
   });
 
   it("never cuts before step 2: one search is no evidence that searching is failing", async () => {

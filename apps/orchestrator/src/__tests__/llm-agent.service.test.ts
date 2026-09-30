@@ -1095,7 +1095,9 @@ describe("runAgent", () => {
       // the non-streaming result both carry it).
       expect(typeof result.message.content).toBe("string");
       expect((result.message.content as string).length).toBeGreaterThan(0);
-      expect(result.message.content).toContain("search_files");
+      // WARP-3285 — named by its catalog label, never the raw id.
+      expect(result.message.content).toContain("Find files by name");
+      expect(result.message.content).not.toContain("search_files");
       const deltaIdx = events.findIndex((e) => e.type === "content_delta");
       const doneIdx = events.findIndex((e) => e.type === "done");
       expect(deltaIdx).toBeGreaterThanOrEqual(0);
