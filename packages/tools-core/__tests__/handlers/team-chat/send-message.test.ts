@@ -442,7 +442,9 @@ describe("WARP-3340 — team chat is the default channel, email only when asked"
     expect(sendMessage.description).toContain(
       "The default way to message, tell or send something to a colleague, even one named by email address; use email only when the user asks for email.",
     );
-    expect(sendMessage.description).toContain("member USERNAMES, not email addresses");
+    expect(sendMessage.description).toContain(
+      "member USERNAMES, not email addresses; never guess one from a job title, ask who is meant",
+    );
     const recipients = (sendMessage.inputSchema as { properties: { recipients: { description: string } } })
       .properties.recipients;
     expect(recipients.description).toContain("never an email address");
