@@ -15,7 +15,7 @@
  * HANDLER source file, so every dispatch lives in the handler itself and
  * this module only validates inputs and maps responses.
  */
-import type { ToolContext, ToolResult } from "../../types.js";
+import type { Tool, ToolContext, ToolHandler, ToolResult } from "../../types.js";
 
 export function err(code: string, message: string): ToolResult {
   return { ok: false, status: "error", error: { code, message } };
@@ -107,34 +107,44 @@ export async function readRosterResponse(
 
 const SELF_ONLY_MESSAGE = "recipients must include someone other than yourself";
 
-export type RecipientPreview =
-  | { ok: true; usernames: string[]; names: string[] }
-  | { ok: false; result: ToolResult };
+/**
+ * Recipients → the roster rows the thread is with (sender dropped, unknown
+ * names refused), shared by both send tools in both phases. WARP-3349: the
+ * roster has no email column (User.email is encrypted at rest, WARP-233),
+ * so a recipient that is not a username but is shaped like an address is
+ * looked up by the orchestrator (`findUserByEmail`, the blind index) and
+ * replaced by that person's username, a member's or an external guest's.
+ * `lookup` is the handler's own POST /api/team-chat/contacts/lookup (the
+ * route path has to stay in the handler file for the WARP-1455 drift gate);
+ * the addresses go in its body, never a URL, so they stay out of the
+ * request log. A guest caller is never looked up for; resolveRecipients
+ * answers with the rule.
+ */
+export async function resolveTargets(
+  roster: { contacts: RosterContact[]; meId: string; canStartConversation: boolean },
+  recipients: string[],
+  lookup: (emails: string[]) => Promise<TeamChatHttpResponse>,
+): Promise<RecipientResolution> {
+  const addresses = addressesToLookUp(roster, recipients);
+  if (addresses.length > 0 && roster.canStartConversation) {
+    const looked = await readLookupResponse(await lookup(addresses), recipients, addresses);
+    if (!looked.ok) return looked;
+    recipients = looked.usernames;
+  }
+  return resolveRecipients(roster, recipients);
+}
 
 /**
- * Phase 1 (the approval copy): drop the sender by id and show DISPLAY
- * NAMES where the roster knows them. An unknown username stays as typed —
- * phase 2 refuses it loudly. Naming only the sender is refused here, so
- * the user is never asked to approve a send that cannot happen.
+ * WARP-3349 / WARP-3403 — a send tool's `precheck`: its own unconfirmed
+ * phase, run before the interceptor asks, so a refusal reaches the model
+ * instead of an approval card for a send that cannot happen. `confirmed`
+ * is forced false, so this can never reach the confirmed phase's writes,
+ * whatever the model passed.
  */
-export function previewRecipients(
-  roster: { contacts: RosterContact[]; meId: string },
-  usernames: string[],
-): RecipientPreview {
-  const byUsername = new Map(
-    roster.contacts.flatMap((c) => (c.username ? [[c.username, c] as const] : [])),
-  );
-  const others = usernames.filter((u) => byUsername.get(u)?.id !== roster.meId);
-  if (others.length === 0) {
-    return { ok: false, result: err("INVALID_ARGS", SELF_ONLY_MESSAGE) };
-  }
-  return {
-    ok: true,
-    usernames: others,
-    names: others.map((u) => {
-      const display = byUsername.get(u)?.displayName;
-      return display && display.length > 0 ? display : u;
-    }),
+export function unconfirmedPhaseAsPrecheck(handler: ToolHandler): NonNullable<Tool["precheck"]> {
+  return async (args, ctx) => {
+    const r = await handler({ ...args, confirmed: false }, ctx);
+    return !r.ok && r.status === "error" ? { ok: false, status: "error", error: r.error } : null;
   };
 }
 
@@ -239,7 +249,7 @@ export function resolveRecipients(
       ok: false,
       result: err(
         "UNKNOWN_RECIPIENT",
-        `No member named: ${missing.join(", ")}. Recipients must be existing member usernames.`,
+        `Nobody in this Workspace has the username: ${missing.join(", ")}. Recipients must be usernames or email addresses of people in this Workspace.`,
       ),
     };
   }

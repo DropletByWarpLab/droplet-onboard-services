@@ -489,20 +489,56 @@ describe("WARP-3349 — a colleague given by email address", () => {
     expect(prisma.teamChatThread.create).not.toHaveBeenCalled();
   });
 
-  it("the model reads the address in the refusal; the default tool-error log line never carries it", async () => {
-    const args = { recipients: ["nobody@acme.test"], body: "hi" };
-    const early = await sendMessage.precheck!(args, toolCtx(prismaDouble(WITH_EMAIL), ALICE));
+  // WARP-3403 — the meeting invite resolves and refuses exactly the same way.
+  it.each([
+    ["a member", "Bob@Acme.test", BOB],
+    ["an external guest", "carol@partner.test", CAROL],
+  ])("the real meeting invite reaches %s given by address: a direct thread and the meeting, organized by Alice", async (_l, address, person) => {
+    const prisma = prismaDouble(WITH_EMAIL);
+    const r = await sendMeetingInvite.handler(
+      { recipients: [address], title: "Planning", starts_at: IN_AN_HOUR(), confirmed: true },
+      toolCtx(prisma, ALICE),
+    );
+    if (!r.ok) throw new Error(`expected a successful ToolResult, got ${JSON.stringify(r)}`);
+    expect(prisma.threads).toEqual([{ id: "th-1", kind: "direct", participantIds: [ALICE.id, person.id] }]);
+    expect(prisma.teamChatMeeting.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ threadId: "th-1", createdById: ALICE.id, title: "Planning" }),
+    });
+    expect(r.data).toMatchObject({ recipients: [person.username] });
+  });
+
+  it.each([
+    ["nobody's", "nobody@acme.test"],
+    ["a deactivated member's", "dan@acme.test"],
+    ["a deactivated guest's", "erin@partner.test"],
+  ])("the real meeting-invite precheck refuses %s address before approval, with no thread or meeting", async (_label, address) => {
+    const prisma = prismaDouble(WITH_EMAIL);
+    const early = await sendMeetingInvite.precheck!(
+      { recipients: [address], title: "Planning", starts_at: IN_AN_HOUR() },
+      toolCtx(prisma, ALICE),
+    );
+    expect(early).toMatchObject({ ok: false, status: "error", error: { code: "RECIPIENT_NOT_A_MEMBER" } });
+    expect(prisma.teamChatThread.create).not.toHaveBeenCalled();
+    expect(prisma.teamChatMeeting.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["team_chat_send_message", sendMessage, { body: "hi" }],
+    ["team_chat_send_meeting_invite", sendMeetingInvite, { title: "Planning", starts_at: "2099-01-01T10:00:00Z" }],
+  ])("%s: the model reads the address in the refusal; the default tool-error log line never carries it", async (name, tool, rest) => {
+    const args = { recipients: ["nobody@acme.test"], ...rest };
+    const early = await tool.precheck!(args, toolCtx(prismaDouble(WITH_EMAIL), ALICE));
     if (!early || early.ok) throw new Error(`expected a refusal, got ${JSON.stringify(early)}`);
     expect(early.error.message).toContain("nobody@acme.test");
     // mcp-server's wire text for a failure, then llm-agent's agent_tool_error line.
     const wire = JSON.stringify({ status: early.status, error: early.error });
     const line = describeToolError({
-      tool: "team_chat_send_message",
+      tool: name,
       toolCallId: "call-1",
       turnId: "turn-1",
       iter: 0,
       args,
-      payload: parseToolResultPayload(wire, "team_chat_send_message"),
+      payload: parseToolResultPayload(wire, name),
       includeExcerpt: false,
     });
     expect(line.error_code).toBe("RECIPIENT_NOT_A_MEMBER");

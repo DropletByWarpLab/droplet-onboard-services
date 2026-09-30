@@ -486,6 +486,8 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
     client: "orchestrator",
     hops: [
       admit("get", "/api/team-chat/contacts"),
+      // WARP-3403 — a recipient given by email address.
+      admit("post", "/api/team-chat/contacts/lookup"),
       admit("post", "/api/team-chat/threads"),
       admit("post", "/api/team-chat/threads/:id/meetings"),
     ],
