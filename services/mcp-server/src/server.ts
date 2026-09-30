@@ -167,8 +167,8 @@ export function createServer(
     // withhold is refused before any role check or handler, on both transports.
     // ABSENT, so it reads like "this part of Droplet is off", not like a role
     // refusal. Over HTTP the JWT names the person and `_meta` cannot; over
-    // stdio `_meta.userId` does, and an unattributed call (a scheduled run) is
-    // the box.
+    // stdio `_meta.userId` does, and a call that sends none is the box (a
+    // scheduled run used to; it now carries its owner's username).
     const callMeta = (req.params as { _meta?: Record<string, unknown> })._meta;
     const asserted = trustedPrincipal
       ? typeof callMeta?.userId === "string" && callMeta.userId.length > 0

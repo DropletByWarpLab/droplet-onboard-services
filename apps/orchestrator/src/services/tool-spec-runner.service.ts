@@ -204,7 +204,9 @@ interface RunArgs {
   scope?: ToolAccessScope | null;
   /**
    * The identity the run's tool calls execute as (username, role, Nextcloud
-   * token). Omitted for a scheduled fire, which has no session to speak of.
+   * token). A scheduled fire has no session, so it carries the owner's
+   * username alone (WARP-2972: the mcp-server's module gate reads the person
+   * from it); never a role or a token.
    */
   callContext?: McpCallContext;
 }

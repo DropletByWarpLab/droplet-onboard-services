@@ -69,6 +69,22 @@
  * `nextFireAt` still advances so a re-grant resumes the cadence cleanly
  * (the same skip-and-advance posture as the writes/!reversible gate).
  *
+ * ── WHO THE CALLS ARE FOR (WARP-2972) ─────────────────────────────
+ *
+ * Resolving the owner's reach here is not the whole of "runs as its creator":
+ * the mcp-server applies its own gates per call, and it learns the person only
+ * from `_meta.userId`. A fire that sent none was the BOX to it — the module
+ * gate's person axis (`module_disabled`) did not apply, so an owner who had
+ * lost a module, or a deny exception on it, still ran that module's tools
+ * every morning. The owner's `User.username` (what chat sends) now rides every
+ * call of the fire, through the dispatcher, so the call is refused exactly as
+ * it would be in that person's chat turn.
+ *
+ * Only `userId`, deliberately: it is what the gate reads, and forwarding the
+ * role or a token would widen what per-user handlers may reach beyond this
+ * change. An owner whose handle cannot be read does not run (same closed
+ * reasons, same skip-and-advance) — dispatching with none is the gap.
+ *
  * ── WHICH GATE (WARP-1621) ─────────────────────────────────────────
  *
  * A resolved creator still has TWO independent gates to clear, and a scope
@@ -91,6 +107,7 @@ import {
   firstToolDeniedForPrincipal,
   hasWriteTool,
   resolveAttributedToolAccess,
+  type AttributionFailure,
 } from "./tool-access.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import { nextFireFromRrule } from "../utils/rrule.js";
@@ -282,12 +299,36 @@ export async function tickToolSchedules(
       continue;
     }
 
+    // WARP-2972 — see "WHO THE CALLS ARE FOR". Read only now, after the access
+    // gate, so every reason above keeps its own audit; nothing personal is
+    // logged for this one (the reason is a closed vocabulary, like the gate's).
+    const runAs = await ownerHandle(prisma, spec.ownerId);
+    if (!runAs.ok) {
+      await recordActivity({
+        kind: "tool_run",
+        severity: "warn",
+        sourceIcon: "shield",
+        what: "Scheduled run skipped (access)",
+        actor: { type: "system" },
+        sub: `${spec.name} (no resolvable owner)`,
+        refs: { specId: spec.id, scheduleId: schedule.id, reason: runAs.reason },
+      });
+      logger.warn(
+        { specId: spec.id, scheduleId: schedule.id, reason: runAs.reason },
+        "scheduled_run_owner_unresolved",
+      );
+      await advanceOrDisable(prisma, schedule, now);
+      skipped += 1;
+      continue;
+    }
+
     try {
       await runToolSpec(prisma, dispatcher, {
         specId: spec.id,
         specName: spec.name,
         steps: spec.steps,
         triggeredBy: "scheduler",
+        callContext: { userId: runAs.handle },
         // The runner re-checks per step: `${prev}` substitution means the §3
         // lock rule can only see a step's real args at dispatch.
         scope: attributed.scope,
@@ -308,6 +349,31 @@ export async function tickToolSchedules(
   }
 
   return { inspected: due.length, fired, skipped, disabled };
+}
+
+/**
+ * WARP-2972 — the handle a scheduled fire's tool calls carry as `_meta.userId`:
+ * the owner's `User.username`, the same value chat sends over stdio (the
+ * mcp-server's `resolveAssertedUser` reads it, and per-user handlers key on
+ * it). Never throws: a missing owner and a failed read are both a refusal, and
+ * neither reason names the person.
+ */
+async function ownerHandle(
+  prisma: PrismaClient,
+  ownerId: string | null,
+): Promise<{ ok: true; handle: string } | { ok: false; reason: AttributionFailure }> {
+  if (!ownerId) return { ok: false, reason: "no_principal" };
+  try {
+    const row = await prisma.user.findUnique({
+      where: { id: ownerId },
+      select: { username: true },
+    });
+    return row?.username
+      ? { ok: true, handle: row.username }
+      : { ok: false, reason: "user_missing" };
+  } catch {
+    return { ok: false, reason: "read_failed" };
+  }
 }
 
 async function advanceOrDisable(
