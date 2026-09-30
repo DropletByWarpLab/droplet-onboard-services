@@ -40,7 +40,8 @@ export function contentToText(
 /**
  * WARP-3338 — which block a system message that routes/llm.ts adds after its
  * base prompt carries. The agent loop folds every system message into index 0
- * and heads each marked block so the model can tell them apart
+ * and heads the blocks that do not label themselves, so the model can tell
+ * them apart
  * (`foldSystemMessages`, llm-agent.service.ts).
  */
 export type ContextBlockKind = "attachments" | "pins" | "chat_instructions";
