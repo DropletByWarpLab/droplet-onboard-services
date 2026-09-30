@@ -1407,8 +1407,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // instructions (the dashboard sends the chat's or its project's prompt
       // here). Marked, the agent loop folds it into index 0 under its own
       // header instead of leaving it where gpt-oss drops it. Voice keeps
-      // WARP-3125's fold above, byte for byte.
-      if (!isVoice) {
+      // WARP-3125's fold above, byte for byte. Same condition as the base
+      // prompt: a `tool_choice: "none"` turn gets none, so the caller's
+      // message is already index 0 there.
+      if (!isVoice && chatReq.tool_choice !== "none") {
         agentMessages = agentMessages.map((m): ChatMessage =>
           m.role === "system" ? { ...m, contextBlock: "chat_instructions" } : m,
         );

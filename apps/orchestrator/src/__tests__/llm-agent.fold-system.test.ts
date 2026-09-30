@@ -208,7 +208,7 @@ function blockingDeps(content = "done") {
 }
 
 function streamingDeps() {
-  const chatStream = vi.fn(() => ({
+  const chatStream = vi.fn((_req: { messages: ChatMessage[] }, _signal?: AbortSignal) => ({
     async *[Symbol.asyncIterator]() {
       const chunk: ChatStreamChunk = {
         choices: [{ delta: { content: "done" }, finish_reason: "stop" }],
