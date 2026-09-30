@@ -2241,6 +2241,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           trace,
           advertisedNames,
           (tool) => catalogEntry(tool)?.write ?? runtimeLookup(tool)?.requiresWrite === true,
+          // WARP-3347 — the loop already judged these hits unusable.
+          finalizeReason === "needs_details",
         );
         emit({ type: "content_delta", text: answer });
       }
@@ -3288,6 +3290,9 @@ function blankAnswerFallback(
   trace: AgentTraceEntry[],
   advertised: ReadonlySet<string>,
   isWrite: (tool: string) => boolean,
+  // WARP-3347 — set when the half-budget guard ended the search: its hits
+  // are not "some information", so the reply asks for the missing detail.
+  hitsUnusable: boolean,
 ): string {
   const done = new Set<string>();
   const pending = new Set<string>();
@@ -3321,7 +3326,7 @@ function blankAnswerFallback(
     );
   }
   if (parts.length > 0) return parts.join(" ");
-  return foundSomething
+  return foundSomething && !hitsUnusable
     ? "I found some information but couldn't put together an answer from it. Please ask again, or ask for one part at a time."
     : "I looked but didn't find anything matching. Could you tell me a bit more about what you're looking for?";
 }

@@ -47,7 +47,11 @@ const TOOLS = Object.keys(HITS);
  * `script` is what the model does on every pass that advertises tools; the
  * last entry repeats. A pass with NO tools (the finalize) answers ANSWER.
  */
-function scripted(script: unknown[], fail: (name: string) => boolean = () => false) {
+function scripted(
+  script: unknown[],
+  fail: (name: string) => boolean = () => false,
+  answer: unknown = { role: "assistant", content: ANSWER },
+) {
   const requests: Req[] = [];
   const events: SSEEvent[] = [];
   let step = 0;
@@ -55,7 +59,7 @@ function scripted(script: unknown[], fail: (name: string) => boolean = () => fal
     requests.push({ ...req, messages: [...req.messages] });
     const message =
       req.tools.length === 0
-        ? { role: "assistant", content: ANSWER }
+        ? answer
         : script[Math.min(step++, script.length - 1)];
     return { ok: true, json: async () => ({ choices: [{ message, finish_reason: "stop" }] }) };
   });
@@ -123,6 +127,20 @@ describe("runAgent — ask for details after half the turn's steps found nothing
     expect(result.iterations).toBe(11);
     expect(result.message.content).toBe(ANSWER);
     expect(events.at(-1)).toMatchObject({ type: "done", stop_reason: "needs_details" });
+  });
+
+  it("a blank answer to the ask gets #2538's retry, then a fallback that still asks", async () => {
+    // Eval (adv-007): the finalize pass and its retry both ended in the
+    // reasoning channel. The search hits were judged unusable, so the
+    // fallback must not say "I found some information".
+    const blank = { role: "assistant", content: "", reasoning_content: "Maybe search contacts." };
+    const { deps, chat } = scripted(LOOKING, () => false, blank);
+    const result = await ask(deps, 20);
+    expect(chat).toHaveBeenCalledTimes(12); // 10 searches + finalize + ONE retry
+    expect(result.stop_reason).toBe("needs_details");
+    expect(result.message.content).toBe(
+      "I looked but didn't find anything matching. Could you tell me a bit more about what you're looking for?",
+    );
   });
 
   it("uses the turn's own max_iter, rounding half up", async () => {
