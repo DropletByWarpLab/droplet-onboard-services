@@ -92,9 +92,14 @@ report into the PR or ticket it supports; `runs/` is not committed.
 
 Runs are sequential (one GPU, one model) and 66 x 3 takes hours. Don't start
 one while another eval owns the GPU. Back-to-back runs are fine: the box's
-ai-gateway allows 60 requests/min per client (`RATE_LIMIT_RPM`), and on a 429
-run.mts waits 60 s and reruns the case (up to 5 times), so a run paces itself
-instead of failing every remaining case.
+ai-gateway allows 60 requests/min per client (`RATE_LIMIT_RPM`), and on a
+gateway 429 or 5xx (a rate-limited stream falls back to the blocking call,
+which surfaces as a 502) run.mts waits 60 s and reruns the case, up to 5 times,
+so a run paces itself instead of failing every remaining case. bench-box.sh
+also waits 60 s after a run, so a suite chained right after it
+(`bench-box.sh a && bench-box.sh b`) does not start inside the same rate
+window; the rate storm that motivated this began when a second suite started
+within a minute of the first.
 
 ## Regression set and dev set
 

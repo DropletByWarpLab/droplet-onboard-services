@@ -13,7 +13,8 @@
 # checkout is bootstrapped (npm ci + npm run bootstrap) on first use.
 # Writes runs/<UTC date>-<label>.{jsonl,log,report.txt}; the report ends with
 # the pass^k summary. Sequential by design: one GPU, one model. Back-to-back
-# runs pace themselves: run.mts waits out the gateway's 60 req/min 429s.
+# runs pace themselves: run.mts waits out the gateway's 429/5xx, and this
+# script rests 60 s after a run so the next suite starts in a fresh rate window.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
@@ -43,3 +44,4 @@ docker run --rm --user "$(stat -c %u:%g "$REPO")" --network "$NET" -v "$REPO:/re
     python3 evaluate.py runs/$N.jsonl > runs/$N.report.txt || true   # exit 1 = a hard gate tripped
     tail -n 25 runs/$N.report.txt
   ' _ "$NAME" "$MODEL" "$@"
+sleep 60

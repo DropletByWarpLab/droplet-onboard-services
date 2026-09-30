@@ -273,15 +273,17 @@ console.error(`model=${opt.model} window=${window} selection=${opt.selection} ca
 for (let r = 1; r <= Number(opt.repeat); r++) {
   for (const c of selected) {
     let rec;
-    // The box's ai-gateway allows 60 requests/min per client; a 429 is the
-    // bench's pacing, not the agent's result, so wait it out and rerun the case.
+    // The box's ai-gateway allows 60 requests/min per client and the model
+    // runner sheds load with 5xx (a rate-limited stream falls back to the
+    // blocking call, which surfaces as a 502). Either is the bench's pacing, not
+    // the agent's result, so wait it out and rerun the case.
     for (let attempt = 0; ; attempt++) {
       try {
         rec = await runCase(c, r, window);
         break;
       } catch (e) {
-        if (/\b429\b/.test(String(e)) && attempt < 5) {
-          console.error(`[r${r}] ${c.id} gateway 429, waiting 60s (attempt ${attempt + 1})`);
+        if (/AI Gateway (streaming )?error (429|50[0234])\b/.test(String(e)) && attempt < 5) {
+          console.error(`[r${r}] ${c.id} gateway busy, waiting 60s (attempt ${attempt + 1})`);
           await new Promise((res) => setTimeout(res, 60_000));
           continue;
         }
