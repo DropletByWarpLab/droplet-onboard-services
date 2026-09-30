@@ -114,6 +114,8 @@ describe("POST /api/storage/network-drive/personal", () => {
         platform: "macos",
         ncAppPassword: "enc:app-pw-123",
         status: "active",
+        // Explicit discriminator: "personal drives off" revokes by this column.
+        kind: "personal_drive",
       }),
     });
     expect(recordActivityMock).toHaveBeenCalledTimes(1);

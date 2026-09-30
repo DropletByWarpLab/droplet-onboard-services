@@ -100,16 +100,23 @@ user can read it as `personalDriveEnabled` in `GET /api/settings/workspace`,
 which is how the dialog knows to show "Personal drives aren't turned on for
 this Droplet" instead of the create button. Every change is an Activity row.
 While it is off, the POST below answers `403 {"error":"personal_drive_disabled"}`
-and mints nothing. Turning it off stops *new* logins only: app passwords
-already created keep working until their owner removes them from the devices
-list. The setting's copy tells the owner that drive access skips the download
-audit and the per-file upload limit.
+and mints nothing. Turning it off also **signs every personal drive out**: the
+PUT revokes each active `DeviceClient` with `kind = personal_drive` (the
+Nextcloud app password is revoked best-effort, the row is marked revoked
+either way), leaves native-app pairings (`kind = app_pairing`) alone, and
+answers `{ "personalDriveEnabled": false, "revokedDriveLogins": <n> }` with the
+same count in the Activity row. Logins created **before** the `kind` column
+existed (migration `20260930100000_device_client_kind`) cannot be told apart
+from pairings and are not bulk-revoked; each person can remove theirs from
+their own devices list. The setting's copy tells the owner that drive access
+skips the download audit and the per-file upload limit.
 
 **Flow.** Files page -> Connect as a network drive -> "Your drive" -> pick Mac
 or Windows -> "Create my drive login". The orchestrator mints a per-device
 Nextcloud **app password** for the caller (same mechanism as device pairing),
-stores it encrypted in `DeviceClient` (`deviceType: desktop`, name
-"Finder on My Mac" / "File Explorer on My PC"), and returns it once. The user
+stores it encrypted in `DeviceClient` (`deviceType: desktop`,
+`kind: personal_drive`, name "Finder on My Mac" / "File Explorer on My PC"),
+and returns it once. The user
 pastes the address and login into Finder (Go -> Connect to Server, tick
 "Remember this password in my keychain") or Explorer (This PC -> Map network
 drive, tick "Reconnect at sign-in" and "Connect using different credentials").
@@ -171,6 +178,12 @@ the compose network (`NEXTCLOUD_URL`), not through the gateway. Contributor and
 manager are the same Nextcloud group (`dept-<slug>`), so the department
 manager check and the WARP-3053 share rule are orchestrator policy; with
 sharing closed here, a mounted drive can no longer sidestep either.
+
+Because the gateway blocks Nextcloud's sharing API, Nextcloud's own web UI share
+dialog and the Nextcloud desktop and mobile clients cannot create shares through
+the box's gateway; the Droplet dashboard is the sharing surface. The same
+denial covers the other OCS routes that mint a credential-free link (editor
+direct-editing links, direct-download links; audit in `docs/SECURITY.md`).
 
 **Known limits.**
 

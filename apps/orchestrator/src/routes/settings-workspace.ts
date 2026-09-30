@@ -25,12 +25,17 @@
  *
  *   PUT /api/settings/workspace/personal-drive
  *     Body: { enabled: boolean }
- *     → { personalDriveEnabled }
+ *     → { personalDriveEnabled } (on)
+ *     → { personalDriveEnabled: false, revokedDriveLogins } (off)
  *     Owner-only (same rule as POST above; admin is refused). Turns the
  *     personal WebDAV drive on or off for the whole box (default OFF); the
  *     flag is `Workspace.personalDriveEnabled`, read back by GET above as
  *     `personalDriveEnabled` and enforced by POST
  *     /api/storage/network-drive/personal. Every change is an Activity row.
+ *     Every `enabled: false` write (not just a true→false transition, so a
+ *     retry after a partial failure finishes the job) also revokes every
+ *     active `DeviceClient.kind = personal_drive` login — native-app pairings
+ *     are never touched — and reports how many in `revokedDriveLogins`.
  *
  * The setup wizard's org step calls POST once at first-run to pin the
  * singleton to BUSINESS. This route is the orchestrator half; the
@@ -46,6 +51,7 @@ import { z } from "zod";
 import { createLogger } from "../lib/logger.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
+import { revokeActivePersonalDriveLogins } from "../services/device-client-revoke.service.js";
 
 const logger = createLogger("settings-workspace-route");
 
@@ -239,17 +245,24 @@ export function createSettingsWorkspaceRouter(prisma: PrismaClient): Router {
         create: { id: 1, personalDriveEnabled: enabled },
       });
 
-      logger.info({ user: getUsername(req), enabled }, "personal_drive_setting_set");
+      // The flag is written first so no new login can be minted while the
+      // existing ones are being revoked. Off signs out every personal drive.
+      const revoked = enabled ? {} : { revokedDriveLogins: await revokeActivePersonalDriveLogins(prisma) };
+
+      logger.info({ user: getUsername(req), enabled, ...revoked }, "personal_drive_setting_set");
       await recordActivity({
         kind: "system",
         severity: "info",
         sourceIcon: "hard-drive",
         what: enabled ? "Personal drives turned on" : "Personal drives turned off",
+        sub: enabled
+          ? null
+          : `${revoked.revokedDriveLogins} personal drive login${revoked.revokedDriveLogins === 1 ? "" : "s"} signed out`,
         actor: actorFromRequest(req),
-        refs: { setting: "personalDriveEnabled", enabled },
+        refs: { setting: "personalDriveEnabled", enabled, ...revoked },
       });
 
-      res.json({ personalDriveEnabled: row.personalDriveEnabled });
+      res.json({ personalDriveEnabled: row.personalDriveEnabled, ...revoked });
     } catch (e) {
       next(e);
     }

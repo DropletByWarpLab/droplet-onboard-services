@@ -24,14 +24,36 @@ vi.mock("@prisma/client", () => ({
   Prisma: { PrismaClientKnownRequestError: class extends Error {} },
 }));
 
+// "Personal drives off" revokes DeviceClient rows through the shared revoke
+// helper; Nextcloud, crypto, MQTT and the activity log are stubbed like
+// device-clients.personal-drive.test.ts.
+vi.mock("../services/nextcloud.client.js", () => ({
+  ncDeleteAppPassword: vi.fn(),
+}));
+vi.mock("../services/encryption.service.js", () => ({
+  decryptSecret: vi.fn((s: string) => s.replace(/^enc:/, "")),
+}));
+vi.mock("../services/mqtt.service.js", () => ({ publish: vi.fn() }));
+const { recordActivityMock } = vi.hoisted(() => ({
+  recordActivityMock: vi.fn().mockResolvedValue(null),
+}));
+vi.mock("../services/activity.singleton.js", () => ({
+  recordActivity: recordActivityMock,
+}));
+
 import { createSettingsWorkspaceRouter } from "../routes/settings-workspace.js";
+import { ncDeleteAppPassword } from "../services/nextcloud.client.js";
+import { publish } from "../services/mqtt.service.js";
 
 const UUID = "6f0f5a3e-2f4b-4a4e-9d7e-0a1b2c3d4e5f";
 
 const findUniqueMock = vi.fn();
 const upsertMock = vi.fn();
+const deviceClientFindMany = vi.fn();
+const deviceClientUpdate = vi.fn();
 const prisma = {
   workspace: { findUnique: findUniqueMock, upsert: upsertMock },
+  deviceClient: { findMany: deviceClientFindMany, update: deviceClientUpdate },
 } as unknown as PrismaClient;
 
 let app: import("express").Express;
@@ -56,6 +78,11 @@ beforeAll(async () => {
 beforeEach(() => {
   findUniqueMock.mockReset();
   upsertMock.mockReset();
+  deviceClientFindMany.mockReset().mockResolvedValue([]);
+  deviceClientUpdate.mockReset().mockResolvedValue({});
+  recordActivityMock.mockClear();
+  vi.mocked(ncDeleteAppPassword).mockReset().mockResolvedValue(undefined as never);
+  vi.mocked(publish).mockClear();
   identity = { id: UUID, username: "romain", role: "owner" };
 });
 
@@ -161,12 +188,120 @@ describe("PUT /api/settings/workspace/personal-drive", () => {
     });
   });
 
-  it("lets the owner turn them off again", async () => {
+  it("lets the owner turn them off again (nothing to revoke: revokedDriveLogins 0)", async () => {
     upsertMock.mockResolvedValueOnce({ personalDriveEnabled: false });
     const res = await request(app).put(URL_PATH).send({ enabled: false });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ personalDriveEnabled: false });
+    expect(res.body).toEqual({ personalDriveEnabled: false, revokedDriveLogins: 0 });
     expect(upsertMock.mock.calls[0][0].update).toEqual({ personalDriveEnabled: false });
+  });
+
+  describe("turning off signs out the personal drives", () => {
+    type Row = {
+      id: string;
+      userId: string;
+      ncAppPassword: string;
+      status: string;
+      kind: "app_pairing" | "personal_drive";
+    };
+    let rows: Row[];
+
+    beforeEach(() => {
+      // A tiny DeviceClient table that honours findMany's `where`, so the test
+      // shows which rows the route actually reaches rather than asserting a mock.
+      rows = [
+        { id: "drive-a", userId: "alice", ncAppPassword: "enc:pw-a", status: "active", kind: "personal_drive" },
+        { id: "drive-b", userId: "bob", ncAppPassword: "enc:pw-b", status: "active", kind: "personal_drive" },
+        { id: "drive-old", userId: "carol", ncAppPassword: "enc:pw-old", status: "revoked", kind: "personal_drive" },
+        { id: "app-mac", userId: "alice", ncAppPassword: "enc:pw-app", status: "active", kind: "app_pairing" },
+      ];
+      deviceClientFindMany.mockImplementation(
+        async ({ where }: { where: { kind: string; status: string } }) =>
+          rows.filter((r) => r.kind === where.kind && r.status === where.status),
+      );
+      deviceClientUpdate.mockImplementation(
+        async ({ where, data }: { where: { id: string }; data: Partial<Row> }) =>
+          Object.assign(rows.find((r) => r.id === where.id)!, data),
+      );
+      upsertMock.mockResolvedValue({ personalDriveEnabled: false });
+    });
+
+    it("revokes every ACTIVE personal_drive login, leaves app pairings alone, and reports the count", async () => {
+      const res = await request(app).put(URL_PATH).send({ enabled: false });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ personalDriveEnabled: false, revokedDriveLogins: 2 });
+
+      expect(deviceClientFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { kind: "personal_drive", status: "active" } }),
+      );
+      const byId = Object.fromEntries(rows.map((r) => [r.id, r.status]));
+      expect(byId).toEqual({
+        "drive-a": "revoked",
+        "drive-b": "revoked",
+        "drive-old": "revoked",
+        "app-mac": "active",
+      });
+      // The Nextcloud app passwords of the two live drive logins were revoked upstream;
+      // the pairing's and the already-revoked row's were not touched.
+      expect(vi.mocked(ncDeleteAppPassword).mock.calls.map((c) => c[0]).sort()).toEqual(["pw-a", "pw-b"]);
+      expect(vi.mocked(publish)).toHaveBeenCalledWith("droplet/devices/alice/revoked", { deviceId: "drive-a" });
+      expect(vi.mocked(publish)).toHaveBeenCalledWith("droplet/devices/bob/revoked", { deviceId: "drive-b" });
+    });
+
+    it("writes the flag first, then revokes", async () => {
+      await request(app).put(URL_PATH).send({ enabled: false });
+      expect(upsertMock.mock.invocationCallOrder[0]).toBeLessThan(
+        deviceClientFindMany.mock.invocationCallOrder[0],
+      );
+    });
+
+    it("records the count in the Activity row", async () => {
+      await request(app).put(URL_PATH).send({ enabled: false });
+      expect(recordActivityMock).toHaveBeenCalledTimes(1);
+      expect(recordActivityMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          what: "Personal drives turned off",
+          sub: "2 personal drive logins signed out",
+          refs: { setting: "personalDriveEnabled", enabled: false, revokedDriveLogins: 2 },
+        }),
+      );
+    });
+
+    it("still marks a row revoked (and counts it) when Nextcloud refuses the upstream revoke", async () => {
+      vi.mocked(ncDeleteAppPassword).mockRejectedValueOnce(new Error("nextcloud down"));
+      const res = await request(app).put(URL_PATH).send({ enabled: false });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ personalDriveEnabled: false, revokedDriveLogins: 2 });
+      expect(rows.filter((r) => r.kind === "personal_drive").map((r) => r.status)).toEqual([
+        "revoked",
+        "revoked",
+        "revoked",
+      ]);
+    });
+
+    it("is a no-op on a repeat: already-revoked rows are not selected again", async () => {
+      await request(app).put(URL_PATH).send({ enabled: false });
+      vi.mocked(ncDeleteAppPassword).mockClear();
+      const res = await request(app).put(URL_PATH).send({ enabled: false });
+      expect(res.body).toEqual({ personalDriveEnabled: false, revokedDriveLogins: 0 });
+      expect(ncDeleteAppPassword).not.toHaveBeenCalled();
+    });
+
+    it("turning personal drives ON revokes nothing and keeps the response shape", async () => {
+      upsertMock.mockResolvedValue({ personalDriveEnabled: true });
+      const res = await request(app).put(URL_PATH).send({ enabled: true });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ personalDriveEnabled: true });
+      expect(deviceClientFindMany).not.toHaveBeenCalled();
+      expect(deviceClientUpdate).not.toHaveBeenCalled();
+      expect(ncDeleteAppPassword).not.toHaveBeenCalled();
+      expect(recordActivityMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          what: "Personal drives turned on",
+          refs: { setting: "personalDriveEnabled", enabled: true },
+        }),
+      );
+    });
   });
 
   it.each(["admin", "family", "guest"])(
@@ -177,6 +312,7 @@ describe("PUT /api/settings/workspace/personal-drive", () => {
       expect(res.status).toBe(403);
       expect(res.body.error).toBe("owner_required");
       expect(upsertMock).not.toHaveBeenCalled();
+      expect(deviceClientFindMany).not.toHaveBeenCalled();
     },
   );
 

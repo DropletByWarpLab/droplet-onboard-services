@@ -11,7 +11,10 @@ import {
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { encryptSecret, decryptSecret } from "../services/encryption.service.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
-import { publish } from "../services/mqtt.service.js";
+import {
+  revokeDeviceClient,
+  safePublish,
+} from "../services/device-client-revoke.service.js";
 import {
   dispatchToUser,
   getPublicVapidKey,
@@ -70,14 +73,6 @@ const platformSchema = z.enum([
   "other",
 ]);
 const deviceTypeSchema = z.enum(["desktop", "mobile"]);
-
-function safePublish(topic: string, payload: Record<string, unknown>): void {
-  try {
-    publish(topic, payload);
-  } catch (err) {
-    logger.warn({ err, topic }, "MQTT publish failed (non-fatal)");
-  }
-}
 
 
 function getUser(req: Request): string {
@@ -172,36 +167,6 @@ async function mintDeviceCredential(
   const appPassword = await ncGenerateAppPassword(ncToken);
   if (!appPassword) return { ok: false, reason: "nc_failed" };
   return { ok: true, appPassword, encrypted: encryptSecret(appPassword) };
-}
-
-/**
- * Shared revoke cleanup for BOTH auth paths — the operator session-cookie
- * delete and the WARP-349 device Basic-auth self-revoke: best-effort revoke
- * the Nextcloud app password upstream, mark the row revoked, publish the
- * MQTT event. Idempotent — an already-revoked row is a no-op.
- */
-async function revokeDeviceClient(
-  prisma: PrismaClient,
-  row: { id: string; userId: string; ncAppPassword: string; status: string },
-): Promise<void> {
-  if (row.status === "revoked") return;
-
-  try {
-    const plaintext = decryptSecret(row.ncAppPassword);
-    await ncDeleteAppPassword(plaintext);
-  } catch (err) {
-    // Best-effort: still mark the row revoked even if Nextcloud can't
-    // kill the token (e.g. already expired). Operators can clean up
-    // stale tokens via the Nextcloud admin UI if needed.
-    logger.warn({ err, deviceId: row.id }, "Failed to revoke Nextcloud app password");
-  }
-
-  await prisma.deviceClient.update({
-    where: { id: row.id },
-    data: { status: "revoked" },
-  });
-
-  safePublish(`droplet/devices/${row.userId}/revoked`, { deviceId: row.id });
 }
 
 export function createDeviceClientsRouter(prisma: PrismaClient): Router {
@@ -469,6 +434,7 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
               appVersion: parsed.data.appVersion ?? null,
               ncAppPassword: encrypted,
               status: "active",
+              kind: "app_pairing",
             },
           });
 
@@ -614,6 +580,9 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
               platform,
               ncAppPassword: encrypted,
               status: "active",
+              // Explicit discriminator: turning personal drives off revokes
+              // exactly these rows (PUT /settings/workspace/personal-drive).
+              kind: "personal_drive",
             },
           });
         } catch (err) {

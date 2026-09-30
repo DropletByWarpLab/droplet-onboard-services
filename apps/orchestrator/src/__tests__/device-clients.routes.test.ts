@@ -188,6 +188,11 @@ describe("POST /api/devices/pair/claim — atomic single-use (WARP-564)", () => 
     // Consume + create happen inside one transaction.
     expect(mockPrisma.$transaction).toHaveBeenCalledOnce();
     expect(mockPrisma.deviceClient.create).toHaveBeenCalledOnce();
+    // Native-app pairings are explicitly app_pairing, so "personal drives off"
+    // never revokes them.
+    expect(mockPrisma.deviceClient.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ kind: "app_pairing" }),
+    });
     // Winner keeps the credential — no compensation.
     expect(mockNcDelete).not.toHaveBeenCalled();
     // WARP-237: pairing (app-password issuance) emits a mandatory row.

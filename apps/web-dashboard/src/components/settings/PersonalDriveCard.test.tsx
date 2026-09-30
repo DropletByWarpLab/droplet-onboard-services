@@ -5,7 +5,8 @@
  *   - it loads `personalDriveEnabled` from GET /api/settings/workspace and
  *     shows the switch OFF unless the server says true;
  *   - the copy discloses that Finder / File Explorer access is not recorded as
- *     downloads and skips the per-file upload limit;
+ *     downloads and skips the per-file upload limit, and that turning it off
+ *     signs everyone out of their personal drive;
  *   - a toggle is optimistic, PUTs /api/settings/workspace/personal-drive and
  *     toasts; a failed PUT puts the switch back and shows the error line;
  *   - every role but owner renders nothing and never fetches.
@@ -83,7 +84,12 @@ describe("PersonalDriveCard", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.getByText(/Guests can't\./)).toBeInTheDocument();
-    expect(screen.getByText(/logins people already made keep working/)).toBeInTheDocument();
+    // Off now signs everyone out; only pre-update logins need removing by hand.
+    expect(
+      screen.getByText(/Turning this off signs everyone out of their personal drive and stops new logins\./),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Drive logins made before this update are not signed out automatically/)).toBeInTheDocument();
+    expect(screen.queryByText(/keep working/)).not.toBeInTheDocument();
   });
 
   // The `family` tier is displayed as "Staff" everywhere (lib/access.ts
