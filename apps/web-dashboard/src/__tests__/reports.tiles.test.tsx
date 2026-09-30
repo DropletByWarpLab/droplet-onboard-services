@@ -782,8 +782,10 @@ describe("IntegrationsBody for a member (WARP-3374)", () => {
   it("a failed read is an error with a retry, not an empty tile", async () => {
     fetchIntegrationsSummaryMock.mockRejectedValueOnce(new Error("boom"));
     render(<IntegrationsBody now={NOW} isAdminTier={false} />);
-    fireEvent.click(await screen.findByRole("button", { name: /retry|try again/i }));
+    const retry = await screen.findByRole("button", { name: /retry|try again/i });
+    // the retry's own read answers, so the answer is in place before the click
     fetchIntegrationsSummaryMock.mockResolvedValue({ connected: 2, needsAttention: 0, lastSyncedAt: null });
+    fireEvent.click(retry);
     expect(await screen.findByText("2 systems connected")).toBeTruthy();
   });
 

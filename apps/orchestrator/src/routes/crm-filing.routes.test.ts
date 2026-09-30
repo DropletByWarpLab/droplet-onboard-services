@@ -48,27 +48,19 @@ const resolveNcTokenMock = vi.hoisted(() => vi.fn());
 // WARP-3365 review: the writes name a §9 level (`requireFeatureAccess`), whose
 // default resolver is the boot-bound singleton. Hand it a controllable one; an
 // unset answer (`undefined`) and `null` both mean "no local row, nothing to
-// narrow", which is what every pre-existing case below relies on.
+// narrow", which is what every pre-existing case below relies on. The REAL gate
+// runs (and keeps its readable level marker): only its resolver is injected.
+// (Injected here rather than by mocking effective-access.service, which would
+// put this file, with its own $transaction stub, inside WARP-1570's seam gate.)
 const effectiveAccessMock = vi.hoisted(() => ({ resolve: vi.fn() }));
-vi.mock("../services/effective-access.service.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../services/effective-access.service.js")>()),
-  resolveEffectiveAccess: (userId: string) => effectiveAccessMock.resolve(userId),
-}));
-/** The canary route fetches the verdict for itself; this is the peer it asks. */
-const internalFetchMock = vi.fn();
-vi.mock("../lib/internal-tls.js", () => ({
-  internalFetch: (...a: unknown[]) => internalFetchMock(...a),
-  internalBaseUrl: (u: string) => u,
-}));
-
-const recordActivityMock = vi.fn(async (_p: Record<string, unknown>) => null);
-vi.mock("../services/activity.singleton.js", () => ({
-  recordActivity: (p: Record<string, unknown>) => recordActivityMock(p),
-}));
-
-vi.mock("../services/nextcloud-session.service.js", () => ({
-  resolveNcToken: resolveNcTokenMock,
-}));
+vi.mock("../middleware/feature-gate.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../middleware/feature-gate.js")>();
+  return {
+    ...actual,
+    requireFeatureAccess: (moduleId: Parameters<typeof actual.requireFeatureAccess>[0], level?: Parameters<typeof actual.requireFeatureAccess>[1]) =>
+      actual.requireFeatureAccess(moduleId, level, (userId: string) => effectiveAccessMock.resolve(userId)),
+  };
+});
 
 import { createCrmFilingRouter } from "./crm-filing.js";
 import type { Role } from "../services/jwt.service.js";

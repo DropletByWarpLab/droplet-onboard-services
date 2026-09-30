@@ -367,7 +367,7 @@ describe("mcp acting-user gate — the acting person's LEVEL (WARP-3365)", () =>
   it("the owner's full catalog (manage) is unchanged", async () => {
     resolveMock.mockResolvedValue(ok(null));
     heldLevel = "manage";
-    expect((await request(appAs(MCP)).post("/api/crm/deals").set("X-Nextcloud-User", "sam")).status).toBe(200);
+    expect((await request(appAs(MCP)).post("/api/crm/companies").set("X-Nextcloud-User", "sam")).status).toBe(200);
   });
 });
 
