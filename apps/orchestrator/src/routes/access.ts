@@ -101,6 +101,7 @@ import {
   GATEABLE_MODULE_IDS,
   GRANTABLE_TOOL_DOMAINS,
   isGrantableDomain,
+  isGateableModuleId,
   clampConnectorLevel,
   clampLevel,
   type ConnectorLevel,
@@ -327,7 +328,16 @@ function serializeAccessRole(row: RoleWithMeta, layers: ToolLayers) {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     peopleCount: row._count.users,
-    featureGrants: row.featureGrants.map((g) => ({ moduleId: g.moduleId, level: g.level })),
+    // The same clamp `normalizeGrants` applies at write time, and the resolver at
+    // read time (effective-access.service): a row saved before a floor existed
+    // (a Guest-based role's security:view) is inert, so the list must not show it
+    // as reach. Nothing is rewritten; `null` = the tier may hold no grant.
+    featureGrants: row.featureGrants.flatMap<{ moduleId: ModuleId; level: FeatureLevel }>((g) => {
+      // `chat` is always-on and never a grant row; a stray one is listed as stored.
+      if (!isGateableModuleId(g.moduleId)) return [{ moduleId: g.moduleId, level: g.level }];
+      const level = clampLevel(row.startingPoint, g.moduleId, g.level);
+      return level === null ? [] : [{ moduleId: g.moduleId, level }];
+    }),
     toolGrants: toolGrantStates(row.toolGrants, layers),
     connectorGrants: row.connectorGrants.map((g) => ({ provider: g.provider, level: g.level })),
   };
