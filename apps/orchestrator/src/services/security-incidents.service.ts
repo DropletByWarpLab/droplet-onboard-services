@@ -580,7 +580,10 @@ export async function triageOne(
         });
         if (kept.length > 0) await tx.securityIncidentReason.createMany({ data: reasonRows(created.id, kept), skipDuplicates: true });
         await ledger("grouped", created.id);
-        return { result: "opened", grouped: { incidentId: created.id, key: decision.key, zoneKind: area?.zoneKind ?? null, mode } };
+        return {
+          result: "opened",
+          grouped: { incidentId: created.id, key: decision.key, zoneKind: area?.zoneKind ?? null, mode, personLinked: area?.personLinked ?? false },
+        };
       }
 
       const i = plan.incident;
@@ -605,7 +608,10 @@ export async function triageOne(
       if (kept.length > 0) await tx.securityIncidentReason.createMany({ data: reasonRows(i.id, kept), skipDuplicates: true });
       await ledger("grouped", i.id);
       // decision.key is the incident's (the candidate query); its mode is the event's (fitsIncident).
-      return { result: "joined", grouped: { incidentId: i.id, key: decision.key, zoneKind: i.zoneKind, mode: i.openedInMode } };
+      return {
+        result: "joined",
+        grouped: { incidentId: i.id, key: decision.key, zoneKind: i.zoneKind, mode: i.openedInMode, personLinked: decision.area?.personLinked ?? false },
+      };
     }
     throw new IncidentConflictError(
       decision.outcome === "group" ? `${decision.key.scope}:${decision.key.zoneId ?? decision.key.scopeCamera ?? "site"}` : "?",

@@ -65,14 +65,38 @@ export class AuditKeyRotationError extends Error {
 /** Runs the host helper's `rotate-audit-key`. Null when this box has none. */
 export type RotateOnHost = (() => Promise<void>) | null;
 
-export async function rotateAuditKey(opts: {
+type RotateOpts = {
   runOnHost: RotateOnHost;
   actor: ActivityActor;
   actorUsername: string | null;
   /** Test seams; production reads the real paths. */
   retiredDir?: string;
   loadKey?: () => Buffer;
-}): Promise<{ previousKeyId: string; newKeyId: string }> {
+};
+
+// WARP-3180 — single flight. Two concurrent owner POSTs would both rotate on
+// disk and the second would 500 after the key had already changed; the
+// second is refused up front instead. Per process: the orchestrator is the
+// only caller.
+let rotationInFlight = false;
+
+export async function rotateAuditKey(opts: RotateOpts): Promise<{ previousKeyId: string; newKeyId: string }> {
+  if (rotationInFlight) {
+    throw new AuditKeyRotationError(
+      409,
+      "ROTATION_IN_PROGRESS",
+      "A key rotation is already running. Wait for it to finish.",
+    );
+  }
+  rotationInFlight = true;
+  try {
+    return await rotateAuditKeyOnce(opts);
+  } finally {
+    rotationInFlight = false;
+  }
+}
+
+async function rotateAuditKeyOnce(opts: RotateOpts): Promise<{ previousKeyId: string; newKeyId: string }> {
   const retiredDir = opts.retiredDir ?? AUDIT_RETIRED_DIR;
   const previousKeyId = getCurrentAuditKeyId();
   if (!previousKeyId) {

@@ -143,7 +143,7 @@ async function seed(db: ReturnType<typeof createAgentRunPrismaMock>, id = "ws-a"
 
 async function seedRun(db: ReturnType<typeof createAgentRunPrismaMock>, workspaceId: string | null, userId = "u-owner", status = "running") {
   const row = await db.prisma.agentRun.create({
-    data: { userId, goal: "g", model: "m", maxIter: 5, workspaceId },
+    data: { userId, goal: "g", model: "m", maxIter: 5, workspaceId, origin: "workshop" },
     select: { id: true },
   });
   await db.prisma.agentRun.updateMany({ where: { id: row.id }, data: { status } });

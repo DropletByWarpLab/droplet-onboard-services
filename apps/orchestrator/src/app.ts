@@ -44,6 +44,7 @@ import { createStorageRouter } from "./routes/storage.js";
 import { createAppDownloadsRouter } from "./routes/app-downloads.js";
 import { createSystemResetRouter } from "./routes/system-reset.routes.js";
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth.js";
+import { createStepUpRouter } from "./routes/auth-step-up.js";
 import { createSsoRouter } from "./routes/sso.js";
 import {
   createPublicWebAuthnRouter,
@@ -136,7 +137,7 @@ import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
 import { resolveActiveModel } from "./services/active-model.service.js";
 import { createToolsRouter } from "./routes/tools.js";
 import { detachRemoteMcp, mcpClient, remoteCallPolicy } from "./services/mcp-client.singleton.js";
-import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
+import { stepResultValue, type StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createHardwareRouter } from "./routes/hardware.js";
 import { createHomeRouter } from "./routes/home.js";
@@ -367,6 +368,8 @@ export function createApp(
 
   // Protected routes — auth middleware has populated req.user
   app.use("/api", createProtectedAuthRouter(prisma));
+  // WARP-3180 — re-prove the current session (fresh lastMfaAt, same sid).
+  app.use("/api", createStepUpRouter(prisma));
 
   // Module gates — both layers, data-driven from the registry:
   //   layer 1  requireModuleEnabled  — the WORKSPACE capability gate: 404 a
@@ -824,20 +827,7 @@ export function createApp(
   // on the first failure; per-step trace returned to the caller.
   const toolStepDispatcher: StepDispatcher = {
     async call(tool, args, context) {
-      const result = await mcpClient.callTool(tool, args, context);
-      if (result.isError) {
-        const detail = result.content?.[0]?.text ?? "tool reported error";
-        throw new Error(typeof detail === "string" ? detail : String(detail));
-      }
-      const text = result.content?.[0]?.text;
-      if (typeof text === "string" && text.length > 0) {
-        try {
-          return JSON.parse(text);
-        } catch {
-          return { raw: text };
-        }
-      }
-      return null;
+      return stepResultValue(tool, await mcpClient.callTool(tool, args, context));
     },
   };
   app.use("/api", createToolsRouter(prisma, toolStepDispatcher));

@@ -29,6 +29,41 @@ import { composeToolGuidance } from "./tool-guidance.service.js";
 // composed there. One source, imported — not a fourth copy of a literal that
 // already exists three times in this repo.
 import { MEMORY_FACTS_CHAR_BUDGET } from "./tool-budget.service.js";
+import { localDayInZone } from "./scene-schedule-tz-backfill.service.js";
+
+/**
+ * WARP-3281 — today's date for the chat prompt, e.g.
+ * `Today is Monday 2026-09-28 (America/Los_Angeles); use that timezone for any clock or calendar tool.`
+ *
+ * Without it gpt-oss assumed a date near its training cutoff and refused
+ * "the weather in Boston on 2026-10-03" (six days out) as beyond the
+ * forecast horizon, never calling get_current_datetime to check.
+ *
+ * DAY granularity only, never a time: WARP-3125 showed a minute timestamp
+ * busts llama.cpp's prefix cache on every request, and a date busts it once
+ * a day. The time of day stays with get_current_datetime.
+ *
+ * Zone: the caller's `timeZone` (the route passes `Workspace.tz`, set at
+ * setup), then the box zone, then UTC (`localDayInZone`, shared with
+ * briefingToday). The zone hint exists because get_current_datetime defaults
+ * to the container zone (UTC): without it the prompt's "today" and the tool's
+ * "now" can name different days near midnight. The hint names no tool, so it
+ * is safe whatever the person's tool allowlist (WARP-642).
+ *
+ * `withZone: false` renders the day only. The route passes it on an off-LAN
+ * (cloud) turn: the zone is workspace configuration, the class of stored
+ * content the WARP-2746 gate keeps on the box.
+ */
+export function todayLine(
+  now: Date = new Date(),
+  timeZone?: string | null,
+  opts: { withZone?: boolean } = {},
+): string {
+  const { date, weekday, zone } = localDayInZone(now, timeZone);
+  const day = weekday ? `${weekday} ${date}` : date;
+  if (opts.withZone === false) return `Today is ${day}.`;
+  return `Today is ${day} (${zone}); use that timezone for any clock or calendar tool.`;
+}
 
 // ── Base system prompt (RAG + durable-memory steering) ──
 //
@@ -75,6 +110,13 @@ export function buildBaseSystemPrompt(
    */
   businessBlock?: string,
   /**
+   * WARP-3281 — the date line (see `todayLine`). Defaults to today in the
+   * box zone, so a caller that passes nothing still gets a date; the chat
+   * route passes one built from `Workspace.tz`. "" omits it: the voice
+   * principal's own prompt already carries a clock.
+   */
+  dateLine: string = todayLine(),
+  /**
    * WARP-3116 — tools the turn's pool withholds regardless of `allowed`
    * (see composeToolGuidance). Omitted = nothing beyond `allowed`.
    */
@@ -101,6 +143,10 @@ export function buildBaseSystemPrompt(
   const guidanceBlock = composeToolGuidance(allowed, withheldTools);
   if (guidanceBlock.length > 0) {
     lines.push("", guidanceBlock);
+  }
+  // Last, so everything above it stays a stable cache prefix all day.
+  if (dateLine.length > 0) {
+    lines.push("", dateLine);
   }
   return lines.join("\n");
 }

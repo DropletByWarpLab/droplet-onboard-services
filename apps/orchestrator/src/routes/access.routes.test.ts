@@ -114,7 +114,7 @@ interface RoleSeed {
   name: string;
   slug: string;
   description?: string | null;
-  startingPoint: "admin" | "family" | "guest";
+  startingPoint: "owner" | "admin" | "family" | "guest";
   state?: string;
   storageQuotaBytes?: bigint | null;
   maxUploadSizeMb?: number | null;
@@ -700,6 +700,48 @@ describe("GET /api/access/roles[/:id]", () => {
     expect(role.featureGrants).toEqual([{ moduleId: "files", level: "act" }]);
     expect(role.createdAt).toBeTruthy();
     expect(role.updatedAt).toBeTruthy();
+  });
+
+  // ADR-059 follow-up to the create-time floor: a Guest-based role saved before
+  // it may still store security:view. The resolver ignores that row, so the
+  // list must not show it either. Read-time only: nothing is rewritten.
+  describe("serializes stored feature grants through the same clamp as create (ADR-059)", () => {
+    const stored = { moduleId: "security", level: "view" };
+    const files = { moduleId: "files", level: "view" };
+
+    it("omits security:view on a Guest-based role, in the list and on GET /:id", async () => {
+      const prisma = createPrismaMock({
+        roles: [{ id: "g", name: "Old guest", slug: "old-guest", startingPoint: "guest", featureGrants: [stored, files] }],
+      });
+      const list = await request(buildApp(prisma)).get("/api/access/roles");
+      expect(list.status).toBe(200);
+      expect(list.body.roles[0].featureGrants).toEqual([files]);
+      const one = await request(buildApp(prisma)).get("/api/access/roles/g");
+      expect(one.body.role.featureGrants).toEqual([files]);
+      // Not a cleanup: the stored row is left exactly as it was.
+      expect(prisma._roles().get("g").featureGrants).toEqual([stored, files]);
+    });
+
+    it.each([
+      ["family", { moduleId: "security", level: "view" }],
+      ["family", { moduleId: "security", level: "act" }],
+      ["admin", { moduleId: "security", level: "manage" }],
+      ["owner", { moduleId: "security", level: "manage" }],
+    ] as const)("leaves a legal security grant on a %s-based role unchanged (%j)", async (startingPoint, grant) => {
+      const prisma = createPrismaMock({
+        roles: [{ id: "r", name: "R", slug: "r", startingPoint, featureGrants: [grant, files] }],
+      });
+      const res = await request(buildApp(prisma)).get("/api/access/roles");
+      expect(res.body.roles[0].featureGrants).toEqual([grant, files]);
+    });
+
+    it("lists a stored level above the tier ceiling at the ceiling the resolver enforces", async () => {
+      const prisma = createPrismaMock({
+        roles: [{ id: "f", name: "F", slug: "f", startingPoint: "family", featureGrants: [{ moduleId: "security", level: "manage" }] }],
+      });
+      const res = await request(buildApp(prisma)).get("/api/access/roles");
+      expect(res.body.roles[0].featureGrants).toEqual([{ moduleId: "security", level: "act" }]);
+    });
   });
 
   it("GET /:id returns { role }; unknown id 404s", async () => {
