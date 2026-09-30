@@ -194,6 +194,9 @@ export interface StubPrisma {
   crmPipeline: Record<string, ReturnType<typeof vi.fn>>;
   crmPipelineStage: Record<string, ReturnType<typeof vi.fn>>;
   crmActivity: Record<string, ReturnType<typeof vi.fn>>;
+  /** WARP-3375 — landed invoices/bills, and the raw MoneySnapshot delete. */
+  erpDocument: Record<string, ReturnType<typeof vi.fn>>;
+  $executeRaw: ReturnType<typeof vi.fn>;
   $transaction: TransactionSeam["$transaction"];
   /** The live connection rows, so a test can read back what was written. */
   rows: Array<Record<string, unknown>>;
@@ -204,6 +207,8 @@ export interface StubPrisma {
     companies: Array<Record<string, unknown>>;
     contacts: Array<Record<string, unknown>>;
     deals: Array<Record<string, unknown>>;
+    /** WARP-3375 — landed ledger documents (`ErpDocument`). */
+    documents: Array<Record<string, unknown>>;
     /** Ids that carry a note a human typed — the archive-not-delete trigger. */
     withLocalActivity: Set<string>;
   };
@@ -237,6 +242,7 @@ function stubPrisma(
   const landedCompanies: Array<Record<string, unknown>> = [];
   const landedContacts: Array<Record<string, unknown>> = [];
   const landedDeals: Array<Record<string, unknown>> = [];
+  const landedDocuments: Array<Record<string, unknown>> = [];
   const localActivity = new Set<string>();
 
   const landedTable = (store: Array<Record<string, unknown>>) => ({
@@ -255,6 +261,14 @@ function stubPrisma(
       if (row) Object.assign(row, args.data);
       return row ?? {};
     }),
+    // WARP-3375 — `keep` detaches with one `updateMany` per table.
+    updateMany: vi.fn(
+      async (args: { where: { connectionId?: string }; data: Record<string, unknown> }) => {
+        const hit = store.filter((r) => r.connectionId === args.where.connectionId);
+        for (const r of hit) Object.assign(r, args.data);
+        return { count: hit.length };
+      },
+    ),
   });
 
   const self = {
@@ -378,6 +392,7 @@ function stubPrisma(
     crmPipeline: {
       findFirst: vi.fn(async () => null),
       delete: vi.fn(async () => ({})),
+      updateMany: vi.fn(async () => ({ count: 0 })),
     },
     crmPipelineStage: { deleteMany: vi.fn(async () => ({ count: 0 })) },
     crmActivity: {
@@ -388,6 +403,26 @@ function stubPrisma(
         return localActivity.has(id) ? { id: "act-1" } : null;
       }),
     },
+    // WARP-3375 — the landed ledger. `deleteMany` honors `where`, so "deleted
+    // THIS connection's LANDED documents and nobody else's" is assertable.
+    erpDocument: {
+      deleteMany: vi.fn(
+        async (args: { where: { connectionId?: string; origin?: string } }) => {
+          const keep = landedDocuments.filter(
+            (d) =>
+              !(
+                d.connectionId === args.where.connectionId &&
+                d.origin === args.where.origin
+              ),
+          );
+          const count = landedDocuments.length - keep.length;
+          landedDocuments.splice(0, landedDocuments.length, ...keep);
+          return { count };
+        },
+      ),
+    },
+    // The MoneySnapshot delete is a tagged-template raw statement.
+    $executeRaw: vi.fn(async () => 0),
   } as unknown as StubPrisma;
 
   const seam = createTransactionSeam({
@@ -398,6 +433,7 @@ function stubPrisma(
       landedCompanies,
       landedContacts,
       landedDeals,
+      landedDocuments,
     },
   });
   self.$transaction = seam.$transaction;
@@ -407,6 +443,7 @@ function stubPrisma(
     companies: landedCompanies,
     contacts: landedContacts,
     deals: landedDeals,
+    documents: landedDocuments,
     withLocalActivity: localActivity,
   };
   self.seam = seam;
@@ -1527,7 +1564,7 @@ describe("a known but unconfigured provider answers about ITSELF", () => {
   });
 });
 
-describe("WARP-2549 — disconnecting also removes what the connection landed", () => {
+describe("WARP-2549 — disconnecting with records: \"delete\" removes what the connection landed", () => {
   /** Seed the rows a sync would have landed under this connection. */
   function withLanded(
     prisma: ReturnType<typeof stubPrisma>,
@@ -1551,7 +1588,7 @@ describe("WARP-2549 — disconnecting also removes what the connection landed", 
   it("deletes a landed record nobody wrote against", async () => {
     const prisma = withLanded(stubPrisma(connectedRow()), { companies: ["co-1"] });
 
-    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft", { records: "delete" });
 
     expect(prisma.landed.companies).toHaveLength(0);
   });
@@ -1565,7 +1602,7 @@ describe("WARP-2549 — disconnecting also removes what the connection landed", 
       withNotes: ["co-1"],
     });
 
-    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft", { records: "delete" });
 
     expect(prisma.landed.companies).toHaveLength(1);
     expect(prisma.landed.companies[0]).toMatchObject({ isArchived: true });
@@ -1578,7 +1615,7 @@ describe("WARP-2549 — disconnecting also removes what the connection landed", 
     prisma.erpSyncCursor.updateMany.mockRejectedValueOnce(new Error("reset failed"));
 
     await expect(
-      serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft"),
+      serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft", { records: "delete" }),
     ).rejects.toThrow("reset failed");
 
     expect(prisma.landed.companies).toHaveLength(1);
@@ -1591,13 +1628,250 @@ describe("WARP-2549 — disconnecting also removes what the connection landed", 
       withNotes: ["co-2"],
     });
 
-    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft");
+    await serviceFor(prisma).disconnect({ actor: "romain" }, "eaglesoft", { records: "delete" });
 
     const call = prisma.erpAuditLog.create.mock.calls[0] as unknown as [
       { data: { scope: Record<string, unknown> } },
     ];
     expect(call[0].data.scope).toMatchObject({ landedDeleted: 1, landedArchived: 1 });
     expect(JSON.stringify(call[0].data.scope)).not.toContain("co-1");
+  });
+});
+
+describe("WARP-3375 — the owner chooses what becomes of the records a connector landed", () => {
+  const linked = (id: string, over: Record<string, unknown> = {}) => ({
+    id,
+    connectionId: "conn_1",
+    origin: "EXTERNAL",
+    externalSystem: "hubspot",
+    externalId: `x-${id}`,
+    isArchived: false,
+    ...over,
+  });
+
+  /** A HubSpot-shaped box: one company, one contact, one deal, and a ledger doc. */
+  function seeded() {
+    const prisma = stubPrisma(connectedRow({ provider: "hubspot" }));
+    prisma.landed.companies.push(linked("co-1"));
+    prisma.landed.contacts.push(linked("ct-1"));
+    prisma.landed.deals.push(linked("d-1"));
+    prisma.landed.documents.push({ id: "doc-1", connectionId: "conn_1", origin: "LANDED" });
+    return prisma;
+  }
+
+  const audit = (prisma: ReturnType<typeof stubPrisma>) =>
+    (
+      prisma.erpAuditLog.create.mock.calls[0] as unknown as [
+        { data: { actor: string; scope: Record<string, unknown> } },
+      ]
+    )[0].data;
+
+  describe("keep", () => {
+    it("deletes and archives NOTHING, and clears every source link", async () => {
+      // Mutation: run `purgeLandedRecords` on this branch → the rows vanish → red.
+      const prisma = seeded();
+
+      await serviceFor(prisma).disconnect({ actor: "romain" }, "hubspot", { records: "keep" });
+
+      for (const table of [prisma.landed.companies, prisma.landed.contacts, prisma.landed.deals]) {
+        expect(table).toHaveLength(1);
+        // The whole provenance triple goes, AND origin flips to LOCAL: the
+        // `*_provenance_complete` CHECK forbids EXTERNAL without a connection,
+        // and an EXTERNAL row is one the box refuses to edit.
+        expect(table[0]).toMatchObject({
+          connectionId: null,
+          externalSystem: null,
+          externalId: null,
+          origin: "LOCAL",
+          isArchived: false,
+        });
+      }
+      expect(prisma.crmCompany.delete).not.toHaveBeenCalled();
+      expect(prisma.contact.delete).not.toHaveBeenCalled();
+      expect(prisma.crmDeal.delete).not.toHaveBeenCalled();
+      expect(prisma.crmPipeline.delete).not.toHaveBeenCalled();
+      expect(prisma.erpDocument.deleteMany).not.toHaveBeenCalled();
+      expect(prisma.$executeRaw).not.toHaveBeenCalled();
+    });
+
+    it("leaves the landed ledger in place — a LANDED document must keep its connection", async () => {
+      const prisma = seeded();
+
+      await serviceFor(prisma).disconnect({ actor: "romain" }, "hubspot", { records: "keep" });
+
+      expect(prisma.landed.documents).toEqual([
+        { id: "doc-1", connectionId: "conn_1", origin: "LANDED" },
+      ]);
+    });
+
+    it("detaches the synced pipeline too, scoped to the CONNECTION", async () => {
+      const prisma = seeded();
+
+      await serviceFor(prisma).disconnect({ actor: "romain" }, "hubspot", { records: "keep" });
+
+      expect(prisma.crmPipeline.updateMany).toHaveBeenCalledWith({
+        where: { connectionId: "conn_1" },
+        data: { connectionId: null },
+      });
+    });
+
+    it("never touches a SIBLING connection's rows", async () => {
+      // Two HubSpot portals: detaching by provider would take the other's links.
+      const prisma = seeded();
+      prisma.landed.companies.push(linked("co-2", { connectionId: "conn_2" }));
+
+      await serviceFor(prisma).disconnect({ actor: "romain" }, "hubspot", { records: "keep" });
+
+      expect(prisma.landed.companies.find((c) => c.id === "co-2")).toMatchObject({
+        connectionId: "conn_2",
+        origin: "EXTERNAL",
+      });
+    });
+
+    it("still purges the credential and resets the cursors", async () => {
+      const prisma = seeded();
+
+      const detail = await serviceFor(prisma).disconnect({ actor: "romain" }, "hubspot", {
+        records: "keep",
+      });
+
+      expect(detail.status).toBe("DISABLED");
+      expect(prisma.rows[0].apiCredentialsEnc).toBeNull();
+      expect(prisma.rows[0].providerTokensEnc).toBeNull();
+      expect(prisma.erpSyncCursor.updateMany).toHaveBeenCalled();
+    });
+
+    it("writes an audit row with actor, provider, disposition and counts", async () => {
+      const prisma = seeded();
+
+      await serviceFor(prisma).disconnect({ actor: "romain" }, "hubspot", { records: "keep" });
+
+      const { actor, scope } = audit(prisma);
+      expect(actor).toBe("romain");
+      expect(scope).toMatchObject({
+        provider: "hubspot",
+        records: "keep",
+        landedDetached: 3,
+        landedDeleted: 0,
+        landedArchived: 0,
+        documentsDeleted: 0,
+      });
+      // Counts, never names or ids.
+      expect(JSON.stringify(scope)).not.toContain("x-co-1");
+    });
+  });
+
+  describe("the default", () => {
+    it("is keep when no options are passed", async () => {
+      // Mutation: default `records` to "delete" in `disconnect()` → red.
+      const prisma = seeded();
+
+      await serviceFor(prisma).disconnect({ actor: "romain" }, "hubspot");
+
+      expect(prisma.landed.companies).toHaveLength(1);
+      expect(prisma.landed.contacts).toHaveLength(1);
+      expect(prisma.landed.deals).toHaveLength(1);
+      expect(prisma.landed.documents).toHaveLength(1);
+      expect(audit(prisma).scope).toMatchObject({ records: "keep", landedDetached: 3 });
+    });
+
+    it("is keep when options are passed without a disposition", async () => {
+      const prisma = seeded();
+
+      await serviceFor(prisma).disconnect({ actor: "romain" }, "hubspot", {});
+
+      expect(prisma.landed.companies).toHaveLength(1);
+      expect(audit(prisma).scope).toMatchObject({ records: "keep" });
+    });
+  });
+
+  describe("delete", () => {
+    it("purges the CRM rows and the landed ledger, and detaches nothing", async () => {
+      const prisma = seeded();
+
+      await serviceFor(prisma).disconnect({ actor: "romain" }, "hubspot", { records: "delete" });
+
+      expect(prisma.landed.companies).toHaveLength(0);
+      expect(prisma.landed.contacts).toHaveLength(0);
+      expect(prisma.landed.deals).toHaveLength(0);
+      expect(prisma.landed.documents).toHaveLength(0);
+      expect(prisma.crmCompany.updateMany).not.toHaveBeenCalled();
+      expect(prisma.crmPipeline.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("deletes only THIS connection's LANDED documents", async () => {
+      const prisma = seeded();
+      prisma.landed.documents.push({ id: "doc-2", connectionId: "conn_2", origin: "LANDED" });
+      prisma.landed.documents.push({ id: "doc-3", connectionId: null, origin: "LOCAL" });
+
+      await serviceFor(prisma).disconnect({ actor: "romain" }, "hubspot", { records: "delete" });
+
+      expect(prisma.erpDocument.deleteMany).toHaveBeenCalledWith({
+        where: { connectionId: "conn_1", origin: "LANDED" },
+      });
+      expect(prisma.landed.documents.map((d) => d.id)).toEqual(["doc-2", "doc-3"]);
+    });
+
+    it("removes the money history BEFORE the documents it is selected through", async () => {
+      // Mutation: swap the two statements → the subquery finds nothing → red.
+      const prisma = seeded();
+
+      await serviceFor(prisma).disconnect({ actor: "romain" }, "hubspot", { records: "delete" });
+
+      expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
+      const raw = prisma.$executeRaw.mock.calls[0] as unknown as [
+        TemplateStringsArray,
+        ...unknown[],
+      ];
+      expect(raw[0].join("?")).toMatch(/DELETE FROM "MoneySnapshot"/);
+      expect(raw.slice(1)).toEqual(["erp_document", "conn_1"]);
+      expect(prisma.$executeRaw.mock.invocationCallOrder[0]!).toBeLessThan(
+        prisma.erpDocument.deleteMany.mock.invocationCallOrder[0]!,
+      );
+    });
+
+    it("writes an audit row with actor, provider, disposition and counts", async () => {
+      const prisma = seeded();
+      prisma.landed.withLocalActivity.add("co-1");
+
+      await serviceFor(prisma).disconnect({ actor: "romain" }, "hubspot", { records: "delete" });
+
+      const { actor, scope } = audit(prisma);
+      expect(actor).toBe("romain");
+      expect(scope).toMatchObject({
+        provider: "hubspot",
+        records: "delete",
+        // The contact and the deal go; the company carries a note, so it stays.
+        landedDeleted: 2,
+        landedArchived: 1,
+        landedDetached: 0,
+        documentsDeleted: 1,
+      });
+      expect(JSON.stringify(scope)).not.toContain("x-co-1");
+    });
+
+    it("still ARCHIVES a record carrying a note a human typed", async () => {
+      const prisma = seeded();
+      prisma.landed.withLocalActivity.add("co-1");
+
+      await serviceFor(prisma).disconnect({ actor: "romain" }, "hubspot", { records: "delete" });
+
+      expect(prisma.landed.companies).toHaveLength(1);
+      expect(prisma.landed.companies[0]).toMatchObject({ isArchived: true });
+    });
+
+    it("rolls the ledger delete back with the credential purge", async () => {
+      const prisma = seeded();
+      prisma.erpAuditLog.create.mockRejectedValueOnce(new Error("audit failed"));
+
+      await expect(
+        serviceFor(prisma).disconnect({ actor: "romain" }, "hubspot", { records: "delete" }),
+      ).rejects.toThrow("audit failed");
+
+      expect(prisma.landed.documents).toHaveLength(1);
+      expect(prisma.landed.companies).toHaveLength(1);
+      expect(prisma.rows[0].apiCredentialsEnc).not.toBeNull();
+    });
   });
 });
 
