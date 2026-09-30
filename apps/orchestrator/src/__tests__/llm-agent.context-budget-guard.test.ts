@@ -2,7 +2,7 @@
  * Spec §2 — token-aware iteration guard. When the estimated transcript
  * leaves < ITERATION_MIN_HEADROOM under (context_window − OUTPUT_RESERVE),
  * the loop stops dispatching tools and runs ONE finalization pass (zero
- * tools, tool_choice "none", a system nudge) ending stop_reason
+ * tools, tool_choice "none", a user-role nudge) ending stop_reason
  * "context_budget" — never a silent history trim.
  */
 import { describe, it, expect, vi } from "vitest";
@@ -76,8 +76,8 @@ describe("runAgent — context-budget iteration guard (spec §2)", () => {
     expect(
       finalReq.messages.some(
         (m) =>
-          m.role === "system" &&
-          String(m.content).includes("Context budget reached"),
+          m.role === "user" &&
+          String(m.content).includes("room there is for more lookups"),
       ),
     ).toBe(true);
     expect(result.stop_reason).toBe("context_budget");
@@ -98,7 +98,7 @@ describe("runAgent — context-budget iteration guard (spec §2)", () => {
     expect(secondReq.tools.length).toBeGreaterThan(0);
   });
 
-  it("a finalize pass that still emits tool_calls terminates (no third call)", async () => {
+  it("a finalize pass that still emits tool_calls gets one retry, then a fallback (no fourth call)", async () => {
     const toolCallMsg = {
       role: "assistant",
       content: null,
@@ -119,9 +119,13 @@ describe("runAgent — context-budget iteration guard (spec §2)", () => {
       messages: [{ role: "user", content: "hi" }],
       context_window: 4096,
     });
-    expect(chat).toHaveBeenCalledTimes(2);
+    // WARP-3285 — the stripped call leaves a blank after tool work: one
+    // no-tools retry, then the fallback reply, never an empty bubble.
+    expect(chat).toHaveBeenCalledTimes(3);
     expect(result.stop_reason).toBe("context_budget");
-    expect(result.message.content).toBe(""); // WARP-854 path owns blank turns
+    expect(result.message.content).toBe(
+      "I found some information but couldn't put together an answer from it. Please ask again, or ask for one part at a time.",
+    );
   });
 
   it("large tool schemas do not trip the guard (schemas are excluded from the estimate)", async () => {

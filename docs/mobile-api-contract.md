@@ -1300,11 +1300,15 @@ data: {"iterations": 1, "stop_reason": "model_done"}
 ```
 
 `stop_reason` ∈ `model_done | iteration_limit | error | context_budget |
-repetition | no_progress` (an `error` frame also carries an `error`
-string). The last three mean the loop stopped calling tools early — the
-context filled up, the model repeated an identical call, or its searches
-kept finding nothing — and the final text is still a normal answer; treat
-any value you do not recognise like `model_done`. The agent loop also emits these event
+repetition | no_progress | needs_details` (an `error` frame also carries an
+`error` string). The last four mean the loop stopped calling tools early: the
+context filled up, the model repeated an identical call, its searches kept
+finding nothing, or half the turn's steps went on searches that found
+nothing usable (`needs_details`, WARP-3347). The final text is still a normal
+answer. `needs_details` says the guard fired, not what the answer is: it
+usually asks the person for the missing detail, but it can be a plain answer
+when the results were already enough. Treat any value you do not recognise
+like `model_done`. The agent loop also emits these event
 types on the same stream — render or ignore as needed:
 
 | `event:` | `data` payload | Meaning |
@@ -1314,21 +1318,24 @@ types on the same stream — render or ignore as needed:
 | `tool_result` | `{ id, ok, data?, status?, message? }` | That tool's result |
 | `reasoning_step` | `{ text }` | One deep-reasoning step (only when `captureReasoning:true`; emitted BEFORE `content_delta` on the turn) |
 | `model_loading` | `{ model, sizeGb }` | WARP-903 — the selected model needs a cold load (30-60 s to first token). Emitted first, at most once; render a loading state until the next frame, or ignore. `sizeGb` is decimal GB or null |
-| `tool_use_validation` | `{ status, claims, tools }` | WARP-2544 — the answer claims a completed action the tool trace does not support. At most once per turn, immediately BEFORE `done`, and only when the check does not pass. `status` is `"unsupported"` (the turn dispatched nothing) or `"contradicted"` (every call to some tool failed). See the note below |
+| `tool_use_validation` | `{ status, claims, tools }` | WARP-2544 / WARP-3348 — the delivered answer still claims a completed action the tool trace does not support (its correction pass failed, so a status line was appended). At most once per turn, immediately BEFORE `done`. `status` is `"unsupported"` (none of the claimed actions was attempted) or `"contradicted"` (a claimed action was attempted and did not run: waiting for approval, declined, refused or failed); `tools` lists those writes. See the note below |
 | `done` | `{ iterations, stop_reason, error? }` | Terminal frame |
 
-**`tool_use_validation` is ADVISORY, not a retraction.** By the time it is
-emitted the answer has already reached the client as `content_delta` frames, so
-it cannot un-send anything. Render it *beside* the answer — "this may not have
-actually happened" — never as a correction of what was already shown, and never
-by mutating or hiding the delivered text. Ignoring the frame is valid and
-matches pre-WARP-2544 behaviour; it is additive and breaks no existing client.
+**`tool_use_validation` is ADVISORY, not a retraction.** Since WARP-3348 the
+answer of a tool turn is checked BEFORE it is sent: a claimed action that did
+not happen gets one correction pass, and if that fails the answer goes out with
+a plain status line appended ("Nothing was sent."). This frame is emitted only
+in that last case, when the delivered text still contains the false sentence
+above the status line. Render it *beside* the answer — "this may not have
+actually happened" — never by mutating or hiding the delivered text. Ignoring
+the frame is valid and matches pre-WARP-2544 behaviour; it is additive and
+breaks no existing client.
 
 It exists because the tools on this product are physical (cameras, locks,
 network rules, power), so a model sentence claiming an action that never
 succeeded is a safety and trust problem rather than a cosmetic one. `claims`
 carries the model's own sentences that triggered it (capped at 160 chars each)
-and `tools` names the tools whose calls all failed.
+and `tools` names the claimed writes that were attempted and did not run.
 
 Native clients should detect end-of-stream on `event: done` /
 `stop_reason` (the v1 clients keyed on `finishReason`, which never arrives,
