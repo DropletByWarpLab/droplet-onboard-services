@@ -119,8 +119,10 @@ describe("composeToolGuidance", () => {
     const line = "- Message people with team_chat_send_message unless asked for email.";
     expect(composeToolGuidance(["team_chat_send_message"])).toContain(line);
     expect(composeToolGuidance(undefined)).toContain(line);
-    // Messages turned off, or a role without it: no line, and email is the
-    // only channel left.
+    // A caller whose tool pool lacks team chat (a role without it): no line,
+    // and email is the only channel left. Switching Messages off does not
+    // reach this pool for an owner or admin; the tool is still offered and
+    // refuses before the approval with TEAM_CHAT_UNAVAILABLE (WARP-3349).
     const noChat = composeToolGuidance(["email_search", "email_draft_reply", "email_send"]);
     expect(noChat).not.toContain("team_chat_send_message");
     expect(noChat).not.toContain("Message people");

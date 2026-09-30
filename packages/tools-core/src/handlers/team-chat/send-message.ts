@@ -7,10 +7,13 @@
  * orchestrator; a multi-recipient send creates a group) or into an
  * existing thread by id.
  *
- * Two-phase contract (the share_file posture): the first call returns
- * `confirmation_required` (ZERO HTTP) previewing who gets what; only a
- * re-issue with `confirmed: true` — after the user explicitly approves —
- * dispatches. Identity: every orchestrator call carries X-Droplet-User =
+ * Two-phase contract (the share_file posture): an unconfirmed call validates
+ * and resolves the recipients (reads only, ZERO writes) and returns
+ * `confirmation_required`; only a call with `confirmed: true` dispatches. In
+ * chat the dispatch interceptor challenges before this handler runs, so the
+ * person approves the interceptor's card (argument shapes only, WARP-2469),
+ * never this handler's text; the unconfirmed phase runs as `precheck`
+ * (WARP-3349) to refuse a send that cannot happen before that card. Identity: every orchestrator call carries X-Droplet-User =
  * ctx.userId (username on stdio, User.id over HTTP), so the message is
  * attributed to the acting human and flows through the exact
  * participant/module checks a
@@ -21,11 +24,11 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import {
   actingHeaders,
   err,
-  previewRecipients,
   readRosterResponse,
   readThreadResponse,
-  resolveRecipients,
+  resolveTargets,
   truncateForPreview,
+  unconfirmedPhaseAsPrecheck,
 } from "./_roster.js";
 
 const MAX_BODY_CHARS = 4000;
@@ -38,7 +41,7 @@ const inputSchema = {
       type: "array",
       items: { type: "string" },
       description:
-        "Member USERNAMES to message, never an email address. One recipient = a direct message (existing 1:1 threads are reused); several = a new group. Provide exactly one of recipients / thread_id.",
+        "Usernames or email addresses of people in this Workspace (members or external guests). One recipient = a direct message (existing 1:1 threads are reused); several = a new group. Provide exactly one of recipients / thread_id.",
     },
     thread_id: {
       type: "string",
@@ -58,6 +61,16 @@ const inputSchema = {
   required: ["body"],
   additionalProperties: false,
 } as const;
+
+/** WARP-3349 — the address lookup `resolveTargets` calls (in this file for the WARP-1455 drift gate). */
+function lookupAddresses(ctx: ToolContext) {
+  return (emails: string[]) =>
+    ctx.http.orchestrator.post(
+      "/api/team-chat/contacts/lookup",
+      { emails },
+      { headers: actingHeaders(ctx) },
+    );
+}
 
 async function handler(
   args: Record<string, unknown>,
@@ -97,7 +110,7 @@ async function handler(
     ) {
       return err(
         "INVALID_ARGS",
-        `recipients must be 1-${MAX_RECIPIENTS} member usernames`,
+        `recipients must be 1-${MAX_RECIPIENTS} usernames or email addresses of people in this Workspace`,
       );
     }
     // The sender is dropped against the roster's `me` (WARP-3196), never
@@ -113,12 +126,15 @@ async function handler(
     return err("INVALID_ARGS", "thread_id must be a non-empty conversation id");
   }
 
-  // Confirmation gate — AFTER validation (a malformed call should fail
+  // Unconfirmed phase — AFTER validation (a malformed call should fail
   // loudly, not ask the user to approve it) and BEFORE any WRITE. The
-  // roster is read best-effort so the approval copy shows DISPLAY NAMES
-  // ("Bob B", not "bob" — UX review) without the sender, and a list that
-  // names only the sender is refused here; any roster hiccup falls back to
-  // the typed usernames, and phase 2 still validates them loudly.
+  // recipients are resolved exactly as phase 2 does, so a recipient phase 2
+  // would refuse (unknown, not a member, only the sender) is refused here.
+  // WARP-3349: `precheck` below runs this before the interceptor asks, so
+  // those refusals come before the approval card. The confirmation_required
+  // text is only what a direct caller gets; nobody approves it. Messages
+  // switched off (the roster's 404) is refused too; any other roster hiccup
+  // falls back to the typed recipients, and phase 2 validates them again.
   if (args.confirmed !== true) {
     let names = recipients;
     if (hasRecipients) {
@@ -128,14 +144,15 @@ async function handler(
           { headers: actingHeaders(ctx) },
         );
         const roster = await readRosterResponse(rosterRes);
+        if (!roster.ok && rosterRes.status === 404) return roster.result;
         if (roster.ok) {
-          const shown = previewRecipients(roster, recipients);
-          if (!shown.ok) return shown.result;
-          recipients = shown.usernames;
-          names = shown.names;
+          const resolved = await resolveTargets(roster, recipients, lookupAddresses(ctx));
+          if (!resolved.ok) return resolved.result;
+          recipients = resolved.others.flatMap((c) => (c.username ? [c.username] : []));
+          names = resolved.others.map((c) => c.displayName || c.username || c.id);
         }
       } catch {
-        // Preview-only read — usernames are an honest fallback.
+        // Unreachable roster — phase 2 reads it again and fails loudly.
       }
     }
     const target = hasRecipients ? names.join(", ") : "the existing conversation";
@@ -161,7 +178,7 @@ async function handler(
     });
     const roster = await readRosterResponse(rosterRes);
     if (!roster.ok) return roster.result;
-    const resolved = resolveRecipients(roster, recipients);
+    const resolved = await resolveTargets(roster, recipients, lookupAddresses(ctx));
     if (!resolved.ok) return resolved.result;
     // resolveRecipients only matches rows that carry a username.
     recipients = resolved.others.flatMap((c) => (c.username ? [c.username] : []));
@@ -222,10 +239,12 @@ async function handler(
 const tool: Tool = {
   name: "team_chat_send_message",
   description:
-    "Send a Messages (team chat) text to other members on the user's behalf. The default way to message, tell or send something to a colleague, even one named by email address; use email only when the user asks for email. recipients = member USERNAMES, not email addresses; never guess one from a job title, ask who is meant (one = direct message, several = a new group), or pass thread_id to continue an existing conversation. Two-step: the first call returns confirmation_required previewing the recipients and text — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Send a Messages (team chat) text to other members on the user's behalf. The default way to message, tell or send something to a colleague, even one named by email address; use email only when the user asks for email. recipients = usernames or email addresses of people in this Workspace; never guess one from a job title, ask who is meant (one = direct message, several = a new group), or pass thread_id to continue an existing conversation. Two-step: the first call returns confirmation_required previewing the recipients and text — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,
+  // WARP-3349 — the unconfirmed phase above, run before the interceptor asks.
+  precheck: unconfirmedPhaseAsPrecheck(handler),
   handler,
 };
 
