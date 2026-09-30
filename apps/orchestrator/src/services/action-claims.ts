@@ -344,7 +344,11 @@ function reasonForModel(a: WriteAttempt): string {
  * drops every system message after the first). Tool names, not labels: this
  * is for the model, which knows its tools by name.
  */
-export function claimCorrectionPrompt(check: ClaimCheck): string {
+export function claimCorrectionPrompt(
+  check: ClaimCheck,
+  /** A durable run: nobody is watching, so the corrected answer asks nothing. */
+  inRun = false,
+): string {
   const facts =
     check.attempts.length > 0
       ? check.attempts.map((a) => `- ${a.tool}: ${reasonForModel(a)}.`)
@@ -362,7 +366,9 @@ export function claimCorrectionPrompt(check: ClaimCheck): string {
     ...wrong,
     "Rewrite your reply so it only says what actually happened. Say plainly what was not done and why " +
       "(for example, that it is waiting for my approval). Keep everything else that was right. " +
-      "Do not call any tools. Reply with the corrected answer only.",
+      "Do not call any tools. " +
+      (inRun ? "Nobody is watching this run, so do not ask any questions. " : "") +
+      "Reply with the corrected answer only.",
   ].join("\n");
 }
 

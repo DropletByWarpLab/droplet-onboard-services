@@ -2295,6 +2295,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           messages,
           answer,
           isFallback,
+          isRun,
           trace,
           turnId,
           // The same write predicate as the WARP-3285 fallback.
@@ -3336,6 +3337,7 @@ async function settleActionClaims(p: {
   messages: ChatMessage[];
   answer: string;
   isFallback: boolean;
+  isRun: boolean;
   trace: AgentTraceEntry[];
   turnId: string;
   isWrite: (tool: string) => boolean;
@@ -3357,7 +3359,7 @@ async function settleActionClaims(p: {
           messages: [
             ...p.messages,
             { role: "assistant", content: p.answer },
-            { role: "user", content: claimCorrectionPrompt(first) },
+            { role: "user", content: claimCorrectionPrompt(first, p.isRun) },
           ],
           stream: false,
           temperature: req.temperature,
