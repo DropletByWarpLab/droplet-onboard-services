@@ -73,9 +73,36 @@ import {
   type ToolAccessScope,
 } from "./tool-access.service.js";
 import { createLogger } from "../lib/logger.js";
+import { redactCredentials, redactCredentialValues } from "../lib/log-redaction.js";
 import type { McpCallContext } from "./mcp-client.service.js";
+import type { McpToolCallOutcome } from "./mcp-client.port.js";
+import {
+  malformedToolOutputText,
+  parseToolResultPayload,
+  toolResultPayloadValue,
+} from "./tool-result-payload.js";
 
 const logger = createLogger("tool-spec-runner");
+
+/**
+ * A step's tool reply as the walker's value, shared by the run-now
+ * dispatcher (`app.ts`) and the schedule ticker's (`index.ts`). Throws on
+ * failure — the walker halts on the first one.
+ *
+ * WARP-3284 — parsed through the agent loop's `parseToolResultPayload`, so an
+ * unreadable local-tool reply fails the step with TOOL_OUTPUT_MALFORMED
+ * instead of reaching the next step as a successful `{ raw }` fragment. A
+ * remote/extension tool's plain text is still `{ raw }`.
+ */
+export function stepResultValue(tool: string, result: McpToolCallOutcome): unknown {
+  const text = result.content?.[0]?.text;
+  if (result.isError) throw new Error(text ?? "tool reported error");
+  if (typeof text !== "string" || text.length === 0) return null;
+  const payload = parseToolResultPayload(text, tool);
+  const failure = malformedToolOutputText(payload);
+  if (failure !== null) throw new Error(failure);
+  return toolResultPayloadValue(payload);
+}
 
 export interface StepDispatcher {
   /**
@@ -541,7 +568,22 @@ export async function runToolSpec(
       try {
         // The facts are the trace SO FAR — a copy, so the summarizer cannot
         // mutate the run's own record of what happened.
-        const prose = await args.summarizer.summarize(summarizeStep.prompt, [...trace]);
+        //
+        // WARP-3282 — scrubbed of credentials: the summary model (which may
+        // be a configured cloud default) reads these results exactly as the
+        // chat loop's model reads a tool result, so it gets the same scrub.
+        // `named`/`prev` keep the real values — data flowing from one step
+        // into the next is not a model path, and a copy step must copy.
+        const facts = redactCredentialValues(trace);
+        if (facts.count > 0) {
+          logger.info(
+            { specId: args.specId, redacted: facts.count },
+            "tool_spec_step_credentials_redacted",
+          );
+        }
+        const prose = await args.summarizer.summarize(summarizeStep.prompt, [
+          ...(facts.value as RunStepTrace[]),
+        ]);
         const outName = stepOutputName(step);
         trace.push({
           idx: step.idx,
@@ -738,6 +780,21 @@ export async function runToolSpec(
   // tool names in refs.
   const failedSteps =
     outcome.status === "ok" ? trace.filter((t) => !t.ok).map((t) => t.tool) : [];
+
+  // WARP-3282 — the run record (ToolRun.trace/error, the HTTP response, the
+  // run history shared across owner/admin/family) holds results and resolved
+  // args, so it gets the same credential scrub as a chat trace. Count only.
+  const stored = redactCredentialValues(outcome.trace);
+  const storedError = outcome.error ? redactCredentials(outcome.error) : null;
+  const redacted = stored.count + (storedError?.count ?? 0);
+  if (redacted > 0) {
+    logger.info({ specId: args.specId, redacted }, "tool_spec_run_credentials_redacted");
+    outcome = {
+      ...outcome,
+      trace: stored.value as RunStepTrace[],
+      error: storedError ? storedError.text : outcome.error,
+    };
+  }
 
   const endedAt = new Date();
   const run = (await prisma.toolRun.create({

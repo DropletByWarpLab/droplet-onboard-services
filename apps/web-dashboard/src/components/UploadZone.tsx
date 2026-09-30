@@ -2,6 +2,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import { Upload } from "lucide-react";
+import { isInternalDrag } from "./FileManager/internal-drag";
 import {
   readDroppedUploads,
   selectionFromFileList,
@@ -46,7 +47,8 @@ export function UploadZone({
 
   const handleDragEnter = useCallback(
     (e: React.DragEvent) => {
-      if (disabled) return;
+      // A drag-to-move between rows/breadcrumbs is not an upload: no overlay.
+      if (disabled || isInternalDrag(e.dataTransfer)) return;
       e.preventDefault();
       dragCounter.current++;
       setIsDragging(true);
@@ -62,7 +64,7 @@ export function UploadZone({
       // again — a page-sized dashed rectangle stuck over the whole surface
       // (WARP-1876 review). The clamp covers the other way in: a drag that
       // began outside the zone can leave it without ever entering it.
-      if (disabled) return;
+      if (disabled || isInternalDrag(e.dataTransfer)) return;
       e.preventDefault();
       dragCounter.current = Math.max(0, dragCounter.current - 1);
       if (dragCounter.current === 0) setIsDragging(false);
@@ -72,6 +74,11 @@ export function UploadZone({
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
+      // An internal drag that lands on empty space (not a folder/breadcrumb)
+      // is simply cancelled — never read as an empty upload. Only reached
+      // when no drop target claimed it, and dragover withholds
+      // preventDefault for internal drags so this seldom fires at all.
+      if (isInternalDrag(e.dataTransfer)) return;
       e.preventDefault();
       dragCounter.current = 0;
       setIsDragging(false);
@@ -89,7 +96,11 @@ export function UploadZone({
     [onUpload, disabled]
   );
 
-  const handleDragOver = (e: React.DragEvent) => e.preventDefault();
+  // Internal drags are left un-prevented so anything that isn't a folder or
+  // breadcrumb shows the "not allowed" cursor and never fires a drop.
+  const handleDragOver = (e: React.DragEvent) => {
+    if (!isInternalDrag(e.dataTransfer)) e.preventDefault();
+  };
 
   return (
     <div

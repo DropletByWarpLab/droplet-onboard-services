@@ -18,6 +18,7 @@ vi.mock("@/lib/hooks/useCapabilities", () => ({
 }));
 vi.mock("@/lib/hooks/useModuleGate", () => ({ useModuleGate: () => () => true }));
 vi.mock("@/lib/hooks/useTeamChat", () => ({ useTeamChatUnread: () => 0 }));
+vi.mock("@/lib/hooks/useAgentRunsActive", () => ({ useAgentRunsActive: () => ({ count: 0, needsYou: false }) }));
 
 import { NavBadge } from "@/components/Sidebar";
 
@@ -36,5 +37,21 @@ describe("NavBadge — a11y markup pin (WARP-1683)", () => {
     render(<NavBadge count={120} />);
     expect(screen.getByText("99+").getAttribute("aria-hidden")).toBe("true");
     expect(screen.getByText("120 unread").className).toContain("sr-only");
+  });
+});
+
+describe("NavBadge — background runs (WARP-3303)", () => {
+  it("turns amber and says what it counts when a run needs an OK", () => {
+    render(<NavBadge count={2} warn label={(n) => `${n} background tasks going, one needs your OK`} />);
+    const numeral = screen.getByText("2");
+    expect(numeral.getAttribute("data-warn")).toBe("true");
+    expect(numeral.className).toContain("text-system-orange");
+    expect(screen.getByText("2 background tasks going, one needs your OK").className).toContain("sr-only");
+  });
+
+  it("keeps the accent tone when nothing needs a decision", () => {
+    render(<NavBadge count={1} />);
+    expect(screen.getByText("1").getAttribute("data-warn")).toBeNull();
+    expect(screen.getByText("1").className).toContain("text-accent");
   });
 });

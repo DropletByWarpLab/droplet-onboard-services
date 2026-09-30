@@ -17,7 +17,8 @@
  * so legacy consumers don't break.
  *
  * Iteration cap: config.agentMaxIter (env AGENT_MAX_ITER_DEFAULT / CAP,
- * ships 10 / 10 — config.ts, raised from 5 by the 2026-07-21 tuning sweep)
+ * ships 20 / 20 — config.ts, raised from 5 by the 2026-07-21 tuning sweep,
+ * then to 20 by WARP-3297)
  * — a confused or prompt-injected model can't burn unbounded tokens.
  *
  * WARP-1602 — channel discipline. The model's ANALYSIS (chain-of-thought)
@@ -36,12 +37,14 @@ import { redactConfirmationTokensForModel } from "@droplet/tools-core";
 
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
+import { isGatewayPreempted } from "../lib/gateway-preempted.js";
 import type {
   McpCallContext,
   ToolCallResult as McpToolCallResult,
 } from "./mcp-client.service.js";
 import type { McpClientPort } from "./mcp-client.port.js";
 import {
+  malformedToolOutputText,
   parseToolResultPayload,
   toolResultPayloadValue,
   type ToolResultPayload,
@@ -56,6 +59,7 @@ import {
   boundToolResultForModel,
 } from "./tool-result-bounding.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
+import { navigationToolsWithheld } from "./dashboard-navigation.js";
 import {
   narrowToolsToScope,
   toolDispatchDenial,
@@ -64,7 +68,9 @@ import {
 import {
   effectiveAdvertisedToolNames,
   domainOfTool,
+  selectionAssertsToolBudget,
   toolNamesForDomain,
+  type ToolSelectionMode,
 } from "./tool-selection.service.js";
 import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
 import { currentRuntimeToolLookup } from "./tool-layers.service.js";
@@ -93,6 +99,7 @@ import {
 import type { ChatMessage, ChatResponse, ChatStreamChunk, ToolCall } from "../types/index.js";
 import type { SSEEvent } from "../types/sse-events.js";
 import type { QueryClass } from "../types/query-enhancement.js";
+import { redactToolResult } from "../lib/log-redaction.js";
 
 const logger = createLogger("llm-agent");
 
@@ -141,7 +148,62 @@ export interface CitationDeps {
  * `services/chat-approval.service.ts` is the production instance; the
  * route half (`POST /api/llm/confirm/:challengeId`) uses the same one.
  */
-export type ChatApprovalPort = Pick<ChatApprovalStore, "register" | "claimGrant">;
+export type ChatApprovalPort = Pick<ChatApprovalStore, "register" | "claimGrant"> &
+  // WARP-3279 — optional: only the chat store replays approved calls. The
+  // durable-run worker supplies its own two-method port and replays its
+  // parked call itself (WARP-3044).
+  Partial<Pick<ChatApprovalStore, "takeNextApproved">>;
+
+/**
+ * WARP-3279 — what the model reads in place of the interceptor's challenge
+ * text when chat owns the approval. The generic text tells the model to
+ * "re-issue the SAME call ... presenting this confirmationToken", which in
+ * chat has no token to present (WARP-2486 scrubs it) and led the assistant
+ * to ask the user to paste one. In chat the person approves on the prompt
+ * and the server runs the approved call itself, so the model has nothing to
+ * re-issue.
+ */
+function chatChallengeTextForModel(tool: string): string {
+  return JSON.stringify({
+    ok: false,
+    status: "confirmation_required",
+    error: {
+      code: "CONFIRMATION_REQUIRED",
+      message:
+        `'${tool}' writes, so it needs a thumbs-up. The user is being shown an approval ` +
+        "prompt for this exact call. Tell them it is waiting for their approval and stop. " +
+        "Do not retry the call and do not ask the user for any code: once they approve, " +
+        "the approved call runs by itself and its result appears in the conversation.",
+    },
+  });
+}
+
+/** Any `status: "confirmation_required"` envelope — a challenge or a refused token. */
+export function isConfirmationEnvelope(text: string): boolean {
+  try {
+    return (JSON.parse(text) as { status?: unknown })?.status === "confirmation_required";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * WARP-3279 — the answer to a model call of a tool whose approved call was
+ * already replayed this turn. The loop's own vocabulary for a repeat
+ * (`REPEATED_CALL`), as the run worker's `alreadyRunText` (WARP-3044).
+ */
+function approvedAlreadyRanEnvelope(tool: string) {
+  return {
+    status: "error" as const,
+    error: {
+      code: "REPEATED_CALL",
+      message:
+        `You already called '${tool}': the user approved it and it has already run with the ` +
+        "approved arguments; its result is in the conversation above. Do not call it again — " +
+        "report that result to the user.",
+    },
+  };
+}
 
 export interface AgentDeps {
   /**
@@ -413,8 +475,14 @@ export interface AgentRequest {
    * WARP-642 guard. Unset/"off" → full-pool advertisement, byte-for-byte
    * today's behavior. Only ever SUBSETS the pool this loop already resolved
    * (allowed_tools / chat scope) — RBAC is decided before this field.
+   *
+   * WARP-3125 — "explicit" advertises the resolved pool whole, like "off",
+   * but still asserts the tool budget. Only the chat route sets it, for the
+   * voice principal when it names its own `allowed_tools`
+   * (`resolveTurnToolSelectionMode`), so the advertised set is identical
+   * turn to turn.
    */
-  tool_selection_mode?: "off" | "domains";
+  tool_selection_mode?: ToolSelectionMode;
   /**
    * WARP-2896 — tool domains the CALLER's binding admits on every turn under
    * "domains" selection, whatever the sentence says. Set by the agent-run
@@ -607,7 +675,8 @@ export interface AgentResult {
     | "iteration_limit"
     | "error"
     | "context_budget"
-    | "repetition";
+    | "repetition"
+    | "no_progress";
   error?: string;
   /** WARP-1479 — set only when the terminal turn produced no visible answer. */
   blankDiagnostics?: BlankAnswerDiagnostics;
@@ -1217,6 +1286,10 @@ async function consumeChatStream(
     if (signal?.aborted || isAbortError(err)) {
       throw new AgentStreamAborted(settleTeardown());
     }
+    // WARP-3306 — the gateway took the slot back for chat. Not a transport
+    // death: no partial answer, no fallback; the caller (the agent-run
+    // worker) requeues and redoes this iteration from its checkpoint.
+    if (isGatewayPreempted(err)) throw err;
     // Nothing emitted yet → let the loop fall back to blocking chat(). Already
     // emitted → a fallback would double the answer, so make it an error turn.
     //
@@ -1406,10 +1479,17 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // read the same registry/classification state.
   const scoped = req.toolAccessScope;
   const runtimeLookup = currentRuntimeToolLookup();
+  // WARP-3116 — no dashboard page list, no navigation tools: dropped from
+  // BOTH branches, so every runAgent caller (voice, phones, background runs)
+  // is covered, and routes/llm.ts's estimate drops the same set.
+  const navigationWithheld = navigationToolsWithheld(
+    Boolean(req.toolCallContext?.dashboardPages?.length),
+  );
   const filtered = narrowToolsToScope(
-    req.allowed_tools
+    (req.allowed_tools
       ? allTools.filter((t) => req.allowed_tools!.includes(t.name))
-      : allTools.filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name)),
+      : allTools.filter((t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name))
+    ).filter((t) => !navigationWithheld.has(t.name)),
     scoped,
     runtimeLookup,
   );
@@ -1479,7 +1559,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // conversation touching many domains grows `conversationToolNames` and so
   // the matched-domain set. That is precisely the case worth a loud failure
   // rather than a quiet one.
-  if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
+  //
+  // WARP-3125 — `explicit` (a service principal's own set, unselected) is
+  // policed too. No selection shrinks that set, so this assert is the only
+  // check that it still fits the window.
+  if (selectionAssertsToolBudget(req.tool_selection_mode) && toolChoice !== "none") {
     const poolSize = assertToolAdvertisementFitsBudget({
       specs: tools,
       contextWindow: poolContextWindow,
@@ -1522,7 +1606,28 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // than a break because the user still deserves an answer synthesized from
   // the gathered results, which needs one more inference call.
   const contextWindow = req.context_window ?? DEFAULT_CONTEXT_WINDOW;
-  let finalizeReason: "context_budget" | "repetition" | null = null;
+  let finalizeReason: "context_budget" | "repetition" | "no_progress" | null = null;
+  // WARP-3283 — no-progress early-stop. A model that keeps REPHRASING a
+  // search that finds nothing makes distinct calls, so the repetition guard
+  // above never fires and the turn used to run to maxIter and end on the
+  // canned step-limit text (live: 8 search_content rephrasings, 102 s).
+  // Counts zero-hit results PER SEARCH TOOL across the whole turn. Not
+  // "consecutive": in the eval trace that motivated this (adv-010) the
+  // rephrasings interleave low-relevance partial hits, exactly as a top-k
+  // index does, so a streak never reached 3 and the turn still hit the cap.
+  // Per tool, not pooled: adv-010 was 8x search_content, while three empties
+  // from three DIFFERENT tools is a legitimate "look everywhere" fan-out
+  // ("check files, email and the CRM; if there's none, add a task") that
+  // must keep its tools for the conditional write.
+  // Failed searches and every other tool don't count.
+  // Not persisted: a durable run resumed mid-turn (WARP-2177) restarts these
+  // counts at 0, so it can spend up to 2 more empties per tool; maxIter still
+  // bounds the turn.
+  // ponytail: three empty lookups of DIFFERENT entities with the same tool
+  // (three business_find customer searches) still finalize after the third;
+  // key on (tool, entity) if that shows up.
+  const MAX_EMPTY_SEARCHES = 3;
+  const emptySearches = new Map<string, number>();
   // WARP-1479 — the provider's verdict for the most recent BLOCKING
   // response, folded into the blank-answer diagnostics when the terminal
   // turn produces no visible output. Set fresh on every blocking response
@@ -1580,7 +1685,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // §3-refused one). Carry WHY so the terminal error names the real problem;
   // an operator reading "unknown tool" for a tool that exists and is simply
   // not granted would chase the wrong bug.
-  let lastBadToolReason: "unknown tool" | "forbidden tool" = "unknown tool";
+  let lastBadToolReason: "unknown tool" | "forbidden tool" | "already-run tool" = "unknown tool";
 
   // WARP-329 — the result returned when the client disconnects mid-turn.
   // We don't emit a `done` event (the SSE consumer is gone) and the route
@@ -1676,6 +1781,144 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     };
   };
 
+  // WARP-3279 — replay the calls a person approved since the last turn,
+  // BEFORE the model is asked anything. The chat twin of WARP-3044.
+  //
+  // The model used to be responsible for re-issuing an approved call with
+  // byte-identical arguments so `claimGrant` could attach the token. It can't:
+  // no earlier tool call re-enters its context (routes/llm.ts, WARP-2849), so
+  // it rebuilds the call from its own prose and free-text fields come back
+  // reworded — re-challenged forever (4/4 eval cases). Here the stored call,
+  // exactly as the person was shown it, runs once with its human-issued token
+  // through the same RBAC gate and dispatch port as any call, and the model
+  // meets it as an ordinary tool_call + result.
+  //
+  // Fail-closed: `takeNextApproved` returns only grants a human moved to
+  // `approved` through the role-gated confirm route, for THIS user in THIS
+  // conversation, unexpired, and spends each one before it is dispatched.
+  // One at a time, so an abort between replays leaves the rest approved.
+  // The interceptor still re-checks the token's binding on redemption.
+  //
+  // `replayedTools` holds only tools whose approved call actually RAN. It is
+  // keyed by tool NAME for the whole turn: a re-issue comes back with
+  // reworded free-text args, so matching on args would miss it and run the
+  // write twice. The price is that a genuinely different second call of the
+  // same tool in this turn is also refused; the model can ask for it next
+  // turn, where it is challenged normally. A replay that did NOT run is not
+  // recorded, so the model's re-issue falls through to normal dispatch and is
+  // challenged afresh: the user gets a new prompt instead of being told an
+  // unexecuted write happened.
+  const replayedTools = new Set<string>();
+  const replayUserId = req.toolCallContext?.userId;
+  const takeNext = deps.approvals?.takeNextApproved;
+  if (takeNext && replayUserId && toolChoice !== "none") {
+    for (;;) {
+      if (req.signal?.aborted) return abortedResult(0);
+      const grant = takeNext({ userId: replayUserId, threadId: req.citationContext?.threadId });
+      if (!grant) break;
+      const callId = `approved-${grant.challengeId}`;
+      const denial = fullPoolNames.has(grant.tool)
+        ? toolDispatchDenial(grant.tool, grant.args, scoped, runtimeLookup)
+        : {
+            code: "TOOL_UNAVAILABLE",
+            message: `'${grant.tool}' is not available on this turn, so the approved call did not run.`,
+          };
+      let text: string;
+      let isError: boolean;
+      if (denial) {
+        text = JSON.stringify({ status: "error", error: denial });
+        isError = true;
+      } else {
+        emit({ type: "tool_call", id: callId, name: grant.tool, args: grant.args });
+        try {
+          const result = await deps.mcp.callTool(grant.tool, grant.args, {
+            ...(req.toolCallContext ?? {}),
+            confirmationToken: grant.token,
+          });
+          text = result.content[0]?.text ?? "{}";
+          isError = Boolean(result.isError);
+        } catch (err) {
+          text = JSON.stringify({
+            error: "tool_dispatch_failed",
+            tool: grant.tool,
+            message: (err instanceof Error ? err.message : String(err)).slice(0, 500),
+          });
+          isError = true;
+        }
+      }
+      // The WARP-3044 worker's predicate: a refused token comes back as a
+      // `confirmation_required` envelope with `isError: false` (mcp-server
+      // sets it only for `status: "error"`), and the tool did not run.
+      const payload = parseToolResultPayload(text, grant.tool);
+      const parsed: unknown = toolResultPayloadValue(payload);
+      // WARP-3284 — unparseable local-tool output is a failure here too, and
+      // the model gets the error envelope rather than the fragment.
+      const malformedText = malformedToolOutputText(payload);
+      if (malformedText !== null) text = malformedText;
+      const ran = !isError && malformedText === null && !isConfirmationEnvelope(text);
+      trace.push({ tool_call_id: callId, tool: grant.tool, args: grant.args, result: parsed });
+      emit({ type: "tool_result", id: callId, ok: ran, data: parsed });
+      logger.info(
+        { tool: grant.tool, challengeId: grant.challengeId, turn_id: turnId, ok: ran },
+        "chat_approved_call_replayed",
+      );
+      if (!ran) {
+        // WARP-1480 — the same failure line as the loop's dispatch point.
+        logger.warn(
+          describeToolError({
+            tool: grant.tool,
+            toolCallId: callId,
+            turnId,
+            iter: 0,
+            args: grant.args,
+            payload,
+            includeExcerpt: config.AGENT_BLANK_TURN_DEBUG,
+            threadId: req.citationContext?.threadId,
+          }),
+          "agent_tool_error",
+        );
+      } else {
+        replayedTools.add(grant.tool);
+      }
+      messages.push(
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: callId,
+              type: "function",
+              function: { name: grant.tool, arguments: JSON.stringify(grant.args) },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          tool_call_id: callId,
+          content: boundToolResultForModel(
+            redactConfirmationTokensForModel(text),
+            grant.tool,
+            (refusal) => {
+              logger.warn(
+                {
+                  tool: grant.tool,
+                  tool_call_id: callId,
+                  turn_id: turnId,
+                  iter: 0,
+                  input_chars: refusal.inputChars,
+                  reason: refusal.reason,
+                  ...(refusal.detail ? { detail: refusal.detail } : {}),
+                },
+                "agent_tool_result_refused",
+              );
+            },
+            config.AGENT_TOOL_RESULT_CAP_CHARS,
+          ),
+        },
+      );
+    }
+  }
+
   for (let iter = 0; iter < maxIter; iter++) {
     // WARP-329 — bail before issuing another inference call if the client
     // already disconnected (e.g. during the previous iteration's tool work).
@@ -1732,7 +1975,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         content:
           finalizeReason === "repetition"
             ? "You are repeating tool calls — answer the user now from the information already gathered. Do not call any more tools."
-            : "Context budget reached — answer the user now from the information already gathered. Do not call any more tools.",
+            : finalizeReason === "no_progress"
+              ? "Your last searches found nothing — stop searching. Answer the user now: say what you looked for and that nothing matching was found, plus anything useful already gathered. Do not call any more tools."
+              : "Context budget reached — answer the user now from the information already gathered. Do not call any more tools.",
       });
     }
     const iterTools = finalizeReason !== null ? [] : tools;
@@ -1802,6 +2047,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           // good partial in it.
           return abortedResult(iter, teardownPartialOf(err));
         }
+        // WARP-3306 — see consumeChatStream: propagate, never fall back.
+        if (isGatewayPreempted(err)) throw err;
         if (err instanceof AgentStreamPartialError) {
           // The stream died AFTER partial content was emitted — falling back to
           // blocking would double the answer. Surface an honest error turn (the
@@ -2181,7 +2428,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
             .filter((t) => keep.has(t.name))
             .map(toSpec);
           let healed = true;
-          if (req.tool_selection_mode === "domains" && toolChoice !== "none") {
+          // Same gate as the initial assert. Under `explicit` the whole pool
+          // is already advertised, so this branch is unreachable there.
+          if (selectionAssertsToolBudget(req.tool_selection_mode) && toolChoice !== "none") {
             try {
               const healedSize = assertToolAdvertisementFitsBudget({
                 specs: candidate,
@@ -2307,6 +2556,25 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         continue;
       }
 
+      // WARP-3279 — the approved call for this tool already ran this turn
+      // (replayed above). A model re-issue — reworded or not — is answered
+      // from that result: never a second execution, never a second prompt.
+      if (replayedTools.has(call.function.name)) {
+        const already = approvedAlreadyRanEnvelope(call.function.name);
+        trace.push({ tool_call_id: call.id, tool: call.function.name, args, result: already });
+        emit({ type: "tool_result", id: call.id, ok: false, data: already });
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: boundControlEnvelopeForModel(JSON.stringify(already)),
+        });
+        // A model that keeps re-issuing it must still trip the breaker.
+        lastBadToolName = call.function.name;
+        lastBadToolReason = "already-run tool";
+        iterGuardHits++;
+        continue;
+      }
+
       // Spec §4 — occurrence 1 dispatches; 2 nudges; 3 finalizes. A nudged
       // call is neither a guard hit nor a real dispatch, so the WARP-642
       // circuit breaker is unaffected.
@@ -2356,12 +2624,17 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // schema rejects unknown properties). Failures fall through to the
       // baseline tool call so a flaky classifier / embedder can never
       // block retrieval.
-      let toolContext = req.toolCallContext;
+      // WARP-3299 — the model's call id rides `_meta` so a tool can record
+      // which call produced what it starts. Only on a chat turn (a
+      // conversation is present); a run's own calls carry `agentRunId`.
+      let toolContext = req.toolCallContext?.conversationId
+        ? { ...req.toolCallContext, toolCallId: call.id }
+        : req.toolCallContext;
       if (call.function.name === "search_content" && deps.enhancement) {
         toolContext = await resolveSearchEnhancement(
           deps.enhancement,
           args,
-          req.toolCallContext,
+          toolContext,
         );
       }
 
@@ -2437,10 +2710,56 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           ],
         };
       }
-      const text = result.content[0]?.text ?? "{}";
+      // WARP-3282 — scrub credential shapes (AWS keys, provider tokens, PEM
+      // blocks, `password=` …) out of the tool result BEFORE anything else
+      // reads it. The model can't leak what it never saw: adv-019 showed it
+      // repeating an AWS secret from a search_content snippet verbatim.
+      //
+      // Deliberately redacted for EVERY consumer below, not only the model:
+      // the durable run checkpoint, the returned trace (persisted with the
+      // chat message) and the SSE `tool_result.data` all hold the scrubbed
+      // text. A chat is persisted, exported, shared, and read by members and
+      // guests the underlying file may not be shared with; the person who
+      // may see the credential still opens the document itself through
+      // Files, which this does not touch. Confirmation tokens are hex under
+      // camelCase keys and match no rule, so the approval path is unaffected.
+      // Redacted per decoded JSON string leaf, not over the escaped wire text
+      // (where `KEY="v"` arrives as `KEY=\"v\"` and slips past the rules).
+      // Count only in the log — never the value.
+      const { text, count: credentialsRedacted } = redactToolResult(
+        result.content[0]?.text ?? "{}",
+      );
+      if (credentialsRedacted > 0) {
+        logger.info(
+          {
+            tool: call.function.name,
+            tool_call_id: call.id,
+            turn_id: turnId,
+            iter,
+            redacted: credentialsRedacted,
+          },
+          "agent_tool_result_credentials_redacted",
+        );
+      }
+      // WARP-1604 — single parse point for the tool-result wire payload.
+      // `payload` carries the mcp-server contract in its type (see
+      // services/tool-result-payload.ts); `parsed` is the same value widened
+      // for the existing untyped consumers (SSE event, trace).
+      const payload = parseToolResultPayload(text, call.function.name);
+      const parsed: unknown = toolResultPayloadValue(payload);
+      // WARP-3284 — a local tool's output that doesn't parse is a FAILED
+      // call, whatever `isError` said: the SSE chip goes red, the failure is
+      // logged below, the checkpoint records it failed, and the model gets
+      // the error envelope (without the fragment) instead of a truncated body
+      // it would read as "no data". See parseToolResultPayload for why a
+      // remote/extension tool's plain text is still a success.
+      const malformedText = malformedToolOutputText(payload);
+      if (malformedText !== null) result = { ...result, isError: true };
+      const modelText = malformedText ?? text;
       // WARP-2177 — complete the trace entry with the wire result, so a
       // resume after THIS point replays instead of re-dispatching. Skipped
-      // for a replay: the entry is already complete.
+      // for a replay: the entry is already complete. The wire text is stored,
+      // not the envelope: a replay re-parses it to the same verdict.
       if (req.checkpoint && !replay) {
         await req.checkpoint.afterToolCall({
           tool_call_id: call.id,
@@ -2450,13 +2769,23 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           isError: Boolean(result.isError),
         });
       }
-      // WARP-1604 — single parse point for the tool-result wire payload.
-      // `payload` carries the mcp-server contract in its type (see
-      // services/tool-result-payload.ts); `parsed` is the same value widened
-      // for the existing untyped consumers (SSE event, trace).
-      const payload = parseToolResultPayload(text);
-      const parsed: unknown = toolResultPayloadValue(payload);
       trace.push({ tool_call_id: call.id, tool: call.function.name, args, result: parsed });
+
+      // WARP-3283 — feed the no-progress guard (see its declaration).
+      if (
+        !result.isError &&
+        isZeroHitSearchResult(call.function.name, args, parsed)
+      ) {
+        const empties = (emptySearches.get(call.function.name) ?? 0) + 1;
+        emptySearches.set(call.function.name, empties);
+        if (empties >= MAX_EMPTY_SEARCHES && finalizeReason === null) {
+          finalizeReason = "no_progress";
+          logger.info(
+            { turn_id: turnId, iter, tool: call.function.name, empty_searches: empties },
+            "agent_no_progress_finalize",
+          );
+        }
+      }
 
       // WARP-1480 — the ONE point that sees every tool failure, on BOTH the
       // streaming and non-streaming paths. Until now nothing in this repo had
@@ -2485,6 +2814,10 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // confirmation_required is NOT a hard error — surface ok=true so
       // the dashboard renders it as a "needs approval" chip rather than
       // a red failure. The status/message fields drive the UX label.
+      // WARP-3279 — set when this challenge went to the chat approval store,
+      // which replays the approved call itself; the model then reads
+      // `chatChallengeTextForModel` instead of the interceptor's text.
+      let chatOwnsApproval = false;
       const isConfirmation =
         parsed !== null &&
         typeof parsed === "object" &&
@@ -2542,6 +2875,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
 
         if (isInterceptorChallenge) {
           if (deps.approvals && approvalUserId) {
+            chatOwnsApproval = Boolean(deps.approvals.takeNextApproved);
             const challenge = deps.approvals.register({
               tool: call.function.name,
               args,
@@ -2551,6 +2885,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
                   ? interceptorBlock!.expiresAt
                   : Date.now(),
               userId: approvalUserId,
+              // WARP-3279 — replayed only into a turn of this conversation.
+              threadId: req.citationContext?.threadId,
             });
             evt.confirmation = {
               kind: "tool_confirmation",
@@ -2617,9 +2953,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // this step takes TEXT and returns TEXT and touches nothing else.
       // WARP-2178 — the cap is now config.AGENT_TOOL_RESULT_CAP_CHARS (default
       // the historical 8000), so it can be set from a measured distribution.
+      // WARP-2002 — the model never sees a confirmation token; see the helper.
+      const boundInput = isConfirmation ? redactConfirmationTokensForModel(modelText) : modelText;
       const bounded = boundToolResultForModel(
-        // WARP-2002 — the model never sees a confirmation token; see the helper.
-        isConfirmation ? redactConfirmationTokensForModel(text) : text,
+        chatOwnsApproval
+          ? chatChallengeTextForModel(call.function.name)
+          : boundInput,
         call.function.name,
         (refusal) => {
           // The refusal branch DESYNCS the model from the operator trace:
@@ -2656,7 +2995,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           iter,
           result_chars: text.length,
           bounded_chars: bounded.length,
-          reduced: bounded !== text,
+          // What the BOUND step cut, not the WARP-3284 envelope swap or the
+          // token redaction before it: this line tunes the cap.
+          reduced: bounded !== boundInput,
           ...(req.toolCallContext?.agentRunId
             ? { agent_run_id: req.toolCallContext.agentRunId }
             : {}),
@@ -3025,6 +3366,53 @@ const RETRIEVAL_CLASS_TOOLS = new Set([
 
 function isRetrievalClassTool(name: string): boolean {
   return RETRIEVAL_CLASS_TOOLS.has(name);
+}
+
+/**
+ * WARP-3283 — query-driven lookups whose result can be "zero hits", each
+ * mapped to the root key its handler (packages/tools-core) puts the hits
+ * under. Not `RETRIEVAL_CLASS_TOOLS`: `read_file` never returns zero hits
+ * and `list_files` of an empty folder is an answer, not a failed search.
+ * `memory_recall` is left out on purpose — on a miss it falls back to the
+ * recent facts, so its result is never empty. `business_find` is handled
+ * separately in `isZeroHitSearchResult`: its list key varies by entity.
+ */
+const SEARCH_TOOLS = new Map([
+  ["search_content", "results"], // { query, results }
+  ["search_files", "items"], // /api/files/search { items }
+  ["email_search", "threads"], // { type, filter, threadCount, threads }
+  // No mailbox connected is `{ contacts: [], count: 0, note }` and counts on
+  // purpose: rephrasing cannot find mail that is not indexed.
+  ["search_contacts", "contacts"],
+  ["search_calendar_events", "events"], // { type, count, query, events }
+  ["search_camera_events", "events"], // { type, query, events, count }
+  ["workspace_search", "hits"], // { pattern, hits, count, truncated }
+]);
+
+/**
+ * A successful search that found nothing. Tool-aware, not shape-driven: a
+ * record read carries root arrays too (business_find customer by id is
+ * `{ entity, customer, contacts: [], open_deals: [], projects: [], … }`),
+ * and an empty link list on a FOUND record is not a miss.
+ */
+function isZeroHitSearchResult(
+  tool: string,
+  args: Record<string, unknown>,
+  parsed: unknown,
+): boolean {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const p = parsed as Record<string, unknown>;
+  if (tool === "business_find") {
+    // With `id` it is a record read (the handler's own test: a non-blank
+    // string). `pipeline` without id is a roll-up, never carries `total`.
+    if (typeof args.id === "string" && args.id.trim() !== "") return false;
+    // Every list branch carries `total` except work_item's search.
+    if (typeof p.total === "number") return p.total === 0;
+    return Array.isArray(p.work_items) && p.work_items.length === 0;
+  }
+  const key = SEARCH_TOOLS.get(tool);
+  const hits = key === undefined ? undefined : p[key];
+  return Array.isArray(hits) && hits.length === 0;
 }
 
 /**

@@ -23,6 +23,7 @@ import { useBoxAddress } from "@/lib/hooks/useBoxAddress";
 import { resolveHealthCopy } from "@/app/health-copy";
 import { AmbientLayer } from "@/components/home/AmbientLayer";
 import { Phead } from "./primitives";
+import { InboxBell } from "@/components/notifications/InboxBell";
 
 import "./indigo-tokens.css";
 import "./droplet-shell.css";
@@ -100,6 +101,7 @@ export function ShellPage({
           <span className="pt-t">{label}</span>
         </span>
         <span className="pt-spring" />
+        <InboxBell />
         <ShellStatusChip />
       </header>
       <div className="page-body">

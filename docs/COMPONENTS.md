@@ -221,6 +221,8 @@ network. Host-published ports and host-network services are called out.
 - **Build/deploy:** Next.js **standalone** output (monorepo-aware
   `outputFileTracingRoot`); multi-stage Docker (`node:20`), served on 3001.
   Requires `@droplet/shared-types` at build — **cannot build standalone**.
+  Fonts are vendored under `src/app/fonts/` (`next/font/local`) so `next build`
+  needs no network — don't import `next/font/google` (test-guarded, WARP-3317).
 - **Tests:** Vitest + React Testing Library (`src/__tests__/`, ~119 files).
 - **Gotchas:** admin-page gating is **client-side only** (`useAuth().user.role`) —
   the backend is the real enforcement point. Dev rewrites don't exist in prod;
@@ -646,7 +648,11 @@ network. Host-published ports and host-network services are called out.
   smbd on `:445`; account `droplet` (uid 33 = www-data) with the per-device
   `SMB_PASSWORD`. The same volume mounts into Nextcloud as the `/Droplet`
   files_external mount (`nextcloud-init.sh`) so web + desktop see one tree.
-  Connect info: `GET /api/storage/network-drive` (owner/admin). Guide:
+  Connect info: `GET /api/storage/network-drive` (owner/admin). A user's own
+  drive (WebDAV via Nextcloud): `POST /api/storage/network-drive/personal`
+  (owner/admin/family, gated by the owner setting
+  `Workspace.personalDriveEnabled`, off by default) — see
+  [`network-drive.md`](network-drive.md#per-user-drive-webdav). Guide:
   [`network-drive.md`](network-drive.md).
 
 ## scripts/

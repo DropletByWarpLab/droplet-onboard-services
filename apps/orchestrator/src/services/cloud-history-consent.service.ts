@@ -17,6 +17,20 @@
  * `user_only`. The dashboard dialog is the way to say yes; it is never the
  * enforcement.
  *
+ * NEVER SENT, WHATEVER THE CONSENT (WARP-2979, ADR-059 P4 §6.13, D27). A
+ * conversation holding an on-box answer that used a Security tool replays the
+ * user's own messages only — granted or not, covered or not. Security results
+ * are presence and location data about identifiable people (DS-007): the
+ * local model's "someone was at the back door at 2:14" must not reach a cloud
+ * provider one turn later just because the owner said yes to the rest. The
+ * summary names it (`neverSent`), so the consent dialog can say so.
+ *
+ * NOR AN ANSWER THAT NEVER FINALIZED (#2420 review 8). That rule reads each
+ * answer's `toolCalls`, written when the turn finalizes — and a failed
+ * finalize is only logged, leaving the row `pending`/`streaming` with no
+ * tools recorded. Such an on-box answer may have used Security, so it is
+ * treated like one: the conversation replays the user's own messages.
+ *
  * WHAT COUNTS AS ON-BOX. An assistant row whose persisted provider is local,
  * or NULL (rows from before WARP-904 stamped a provider, or an API caller that
  * sent none) — unknown provenance is treated as on-box. A conversation that
@@ -34,6 +48,14 @@ const DREW_ON_LABEL: Partial<Record<ToolDomain, string>> = {
   files: "documents",
   memory: "memory",
   business: "business records",
+};
+
+/**
+ * WARP-2979 — domains whose on-box answers are NEVER replayed to a cloud
+ * model, whatever the consent: the plain word the dialog says.
+ */
+const NEVER_SENT_LABEL: Partial<Record<ToolDomain, string>> = {
+  security: "Security",
 };
 
 const DOMAIN_BY_NAME = new Map(TOOL_CATALOG.map((t) => [t.name, t.domain]));
@@ -55,7 +77,21 @@ export interface CloudHistorySummary {
   userMessages: number;
   /** Plain-word stored-content sources those uncovered answers used. */
   drewOn: string[];
+  /**
+   * WARP-2979 — plain-word sources whose answers are never sent to a cloud
+   * model, whatever the consent (any on-box answer, covered or not). Non-empty
+   * ⇒ a cloud turn on this conversation carries the user's messages only.
+   */
+  neverSent: string[];
+  /**
+   * #2420 review 8 — on-box answers still `pending`/`streaming`: their tools
+   * are not recorded yet (or never will be, if finalizing failed). > 0 ⇒ a
+   * cloud turn carries the user's messages only, like `neverSent`.
+   */
+  unfinishedOnBoxAnswers: number;
 }
+
+const UNFINISHED: ReadonlySet<string> = new Set(["pending", "streaming"]);
 
 function isOnBox(provider: string | null): boolean {
   return provider === null || isLocalProvider(provider);
@@ -88,7 +124,7 @@ export async function summarizeCloudHistory(
       role: { in: ["user", "assistant"] },
       ...(args.excludeMessageId ? { id: { not: args.excludeMessageId } } : {}),
     },
-    select: { role: true, provider: true, createdAt: true, toolCalls: true },
+    select: { role: true, provider: true, createdAt: true, toolCalls: true, status: true },
   });
 
   const coveredUntil =
@@ -106,6 +142,18 @@ export async function summarizeCloudHistory(
       isOnBox(r.provider) &&
       (decidedAt === null || r.createdAt > decidedAt),
   ).length;
+  const neverSent = new Set<string>();
+  for (const r of rows) {
+    if (r.role !== "assistant" || !isOnBox(r.provider)) continue;
+    for (const name of toolNames(r.toolCalls)) {
+      const domain = DOMAIN_BY_NAME.get(name);
+      const label = domain ? NEVER_SENT_LABEL[domain] : undefined;
+      if (label) neverSent.add(label);
+    }
+  }
+  const unfinished = rows.filter(
+    (r) => r.role === "assistant" && isOnBox(r.provider) && UNFINISHED.has(r.status),
+  ).length;
   const drewOn = new Set<string>();
   for (const r of uncovered) {
     for (const name of toolNames(r.toolCalls)) {
@@ -122,6 +170,8 @@ export async function summarizeCloudHistory(
     unaskedOnBoxAnswers: unasked,
     userMessages: rows.filter((r) => r.role === "user").length,
     drewOn: [...drewOn].sort(),
+    neverSent: [...neverSent].sort(),
+    unfinishedOnBoxAnswers: unfinished,
   };
 }
 
@@ -140,7 +190,14 @@ export async function decideHistoryReplay(
       userId: args.userId,
       excludeMessageId: args.excludeMessageId,
     });
-    return summary && summary.uncoveredOnBoxAnswers === 0 ? "full" : "user_only";
+    // WARP-2979: a Security answer is never replayed, whatever the consent says —
+    // nor an on-box answer whose tools were never recorded (#2420 review 8).
+    return summary &&
+      summary.uncoveredOnBoxAnswers === 0 &&
+      summary.neverSent.length === 0 &&
+      summary.unfinishedOnBoxAnswers === 0
+      ? "full"
+      : "user_only";
   } catch {
     return "user_only";
   }

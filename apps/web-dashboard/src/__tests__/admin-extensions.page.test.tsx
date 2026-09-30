@@ -340,8 +340,32 @@ describe("/admin/extensions — installed", () => {
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Uninstall wc" }));
     expect(api.uninstallExtension).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Confirm uninstall" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm uninstall wc" }));
     await waitFor(() => expect(api.uninstallExtension).toHaveBeenCalledWith("wc"));
+  });
+
+  it("moves focus to Confirm on Uninstall, and names Confirm and Keep by extension", async () => {
+    api.fetchExtensions.mockResolvedValue({ extensions: [INSTALLED] });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Uninstall wc" }));
+    const confirm = screen.getByRole("button", { name: "Confirm uninstall wc" });
+    expect(document.activeElement).toBe(confirm);
+    expect(screen.getByRole("button", { name: "Keep wc" })).toBeTruthy();
+  });
+
+  it("🔴 a Review click while a promotion is being confirmed is refused, not lost", async () => {
+    let finish: (v: unknown) => void = () => undefined;
+    api.confirmExtensionPromotion.mockReturnValue(new Promise((r) => (finish = r)));
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Review wc 0.1.0" }));
+    await screen.findByRole("list", { name: "What this extension gets" });
+    fireEvent.change(await screen.findByLabelText("Area"), { target: { value: "network" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign and install" }));
+    await waitFor(() => expect(api.confirmExtensionPromotion).toHaveBeenCalledTimes(1));
+    expect((screen.getByRole("button", { name: "Review wc 0.1.0" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Review wc 0.1.0" }));
+    expect(api.prepareExtensionPromotion).toHaveBeenCalledTimes(1);
+    finish({ version: "0.1.0", installed: true, installError: null });
   });
 
   it("says when the sandbox is switched off instead of failing silently", async () => {

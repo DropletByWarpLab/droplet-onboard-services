@@ -13,6 +13,11 @@
  * manual Open up alive, and `resolveMode` already ends it on read; the throw
  * reaches `safeRun`'s failure canary instead.
  *
+ * Droplet's own link changes (WARP-2979, DS-018) are the exception to that
+ * exception: they are audited IN their transaction (`auditSecuritySystemInTx`),
+ * under the same route contract below, because a link without its record is
+ * worse than no link. A broken chain rolls the job's change back.
+ *
  * Row shape, fixed: kind `system`, severity `info`, sourceIcon `shield`,
  * refs `{surface: 'security', action, …}`. NEVER kind `network`/`auth` and
  * never severity `warn`/`err`: the P2a threat mirror copies exactly those
@@ -83,8 +88,25 @@ export type SecurityAuditAction =
   | "zone.update"
   | "zone.archive"
   | "zone.unarchive"
-  /** refs `{zoneId, added: string[], removed: string[], reactivated: string[]}`. */
+  /**
+   * refs `{zoneId, added: string[], removed: string[], reactivated: string[], accepted: string[]}` —
+   * `accepted` (WARP-2979): Droplet's suggestions a person ticked and saved.
+   */
   | "zone.links"
+  /**
+   * WARP-2979 (ADR-059 P4 §6.14). System actor, IN the proposal job's
+   * transaction, last (`auditSecuritySystemInTx`): Droplet suggested a link.
+   * refs `{zoneId, linkId, sourceKind, sourceRef, kind, gate, confidenceBp, rulesVersion}`.
+   */
+  | "link.proposed"
+  /** System actor, in the job's tx, last: Droplet linked a source on its own. refs as `link.proposed` plus `from: 'none' | 'proposed'`. */
+  | "link.activated"
+  /** A person added Droplet's suggestion or kept Droplet's link (in-tx, last). refs `{zoneId, linkId, sourceRef, from: 'proposed' | 'active'}`. */
+  | "link.accepted"
+  /** A person turned down Droplet's suggestion or undid Droplet's link (in-tx, last). refs `{zoneId, linkId, sourceRef, from, undo}`. */
+  | "link.rejected"
+  /** A person changed what Droplet's AI may do (in-tx, last). refs `{linking, summaries, from: {linking, summaries}}`. */
+  | "ai_settings.set"
   /**
    * WARP-2978 (ADR-059 P3 §6.9). A person acknowledged / resolved an incident
    * (in-tx, last). refs `{incidentId, ackId, severity, codes, visibleCodes,
@@ -393,6 +415,30 @@ export async function auditSecurityInTx(
   entry: SecurityAuditEntry,
 ): Promise<RecordedActivityRow> {
   const params = securityAuditParams(entry, actorFromRequest(req));
+  try {
+    return await recordActivityInTx(tx, params);
+  } catch (err) {
+    if (err instanceof ActivityChainPreconditionError) throw err;
+    throw new SecurityAuditUnavailableError(err);
+  }
+}
+
+/**
+ * WARP-2979 (ADR-059 P4 §6.14, DS-018). Audit a SYSTEM change in the caller's
+ * transaction — Droplet's own link changes (`link.proposed`,
+ * `link.activated`), written by the hourly proposal job. Exactly
+ * `auditSecurityInTx`'s contract with the system actor (`{type: 'system', id:
+ * null}` — never `ai`, which stays reserved for agent-loop actions): READ
+ * COMMITTED, the `tx` Prisma handed the callback, every CAS first and the
+ * audits LAST, nothing after them. Input problems throw as they are; an
+ * append failure becomes SecurityAuditUnavailableError and rolls the change
+ * back (the job's `safeRun` canary sees it).
+ */
+export async function auditSecuritySystemInTx(
+  tx: ActivityAppendTx,
+  entry: SecurityAuditEntry,
+): Promise<RecordedActivityRow> {
+  const params = securityAuditParams(entry, { type: "system", id: null });
   try {
     return await recordActivityInTx(tx, params);
   } catch (err) {

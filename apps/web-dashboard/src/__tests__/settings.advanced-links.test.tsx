@@ -44,6 +44,9 @@ const fetchUsersMock = vi.fn();
 const capsRef = { current: { claudeActivity: false, ragEval: false } };
 
 vi.mock("@/lib/api", () => ({
+  // WARP-3264 — Settings mounts PlaceLookupSwitch.
+  fetchPlaceLookupChannel: vi.fn().mockResolvedValue(null),
+  setPlaceLookupChannel: vi.fn(),
   fetchUsers: (...a: any[]) => fetchUsersMock(...a),
   createUser: vi.fn(),
   deleteUser: vi.fn(),

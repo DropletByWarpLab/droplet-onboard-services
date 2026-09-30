@@ -36,6 +36,7 @@ import type { PrismaClient } from "@prisma/client";
 import {
   buildBaseSystemPrompt,
   buildMemoryFactsBlock,
+  todayLine,
 } from "./system-prompt.service.js";
 import { loadIdentityPrompt, IDENTITY_MAX_CHARS } from "./identity-prompt.js";
 import { composeToolGuidance } from "./tool-guidance.service.js";
@@ -58,6 +59,7 @@ import {
   BUSINESS_CONTEXT_MAX_CHARS,
   TOOL_GUIDANCE_MAX_CHARS,
   INTERVIEW_PROMPT_MAX_CHARS,
+  DATE_LINE_MAX_CHARS,
 } from "./prompt-budget.consts.js";
 import {
   resolveAttributedToolAccess,
@@ -236,6 +238,9 @@ export async function inspectPromptForPerson(
     false,
     async () => composePersonaBlock(await getPersona(prisma)),
   );
+  // WARP-3281 — the business's zone for the date line, read off the same row
+  // the route reads it from.
+  let workspaceTz: string | null = null;
   const business = await compose(
     "business",
     "About this business",
@@ -245,6 +250,7 @@ export async function inspectPromptForPerson(
       // The route's own gate, in the route's own order: a HOME box composes
       // nothing, and a missing singleton reads as BUSINESS (WARP-1341).
       const workspace = await prisma.workspace.findUnique({ where: { id: 1 } });
+      workspaceTz = workspace?.tz ?? null;
       const workspaceType = (workspace?.type ?? "BUSINESS") as WorkspaceTypeName;
       if (workspaceType !== "BUSINESS") return "";
       return composeBusinessBlock(role, await getBusinessProfile(prisma), workspaceType);
@@ -256,6 +262,16 @@ export async function inspectPromptForPerson(
     TOOL_GUIDANCE_MAX_CHARS,
     true,
     () => composeToolGuidance(input.allowedToolNames),
+  );
+  // WARP-3281 — the date line, as its own block so the admin view accounts
+  // for it. After `business`, which reads the zone off the Workspace row. The
+  // route's off-LAN rule: a cloud turn carries the day without the zone.
+  const date = await compose(
+    "date",
+    "Today's date",
+    DATE_LINE_MAX_CHARS,
+    true,
+    () => todayLine(new Date(), workspaceTz, { withZone: !offLan }),
   );
   const memory = await compose(
     "memory",
@@ -323,6 +339,7 @@ export async function inspectPromptForPerson(
     persona,
     business,
     toolGuidance,
+    date,
     memory,
     brain,
     interviewBlock,
@@ -339,6 +356,7 @@ export async function inspectPromptForPerson(
       input.allowedToolNames,
       persona.text ?? "",
       business.text ?? "",
+      date.text ?? "",
     ) +
     (memory.text ?? "") +
     (brain.text ?? "") +

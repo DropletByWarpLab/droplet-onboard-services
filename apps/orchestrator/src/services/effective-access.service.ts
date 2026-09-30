@@ -287,7 +287,10 @@ export function computeEffectiveAccess(inputs: EffectiveAccessInputs): Effective
     for (const f of ALWAYS_ON_FEATURES) levelByModule.set(f.moduleId, f.level);
     for (const grant of user.accessRole.featureGrants) {
       if (!isGateableModuleId(grant.moduleId)) continue; // chat rows never exist; defensive
-      levelByModule.set(grant.moduleId, clampLevel(tier, grant.moduleId, grant.level));
+      // `null`: the tier may hold nothing on this module (doors below admin), so a
+      // grant stored before that floor existed is inert rather than honoured.
+      const level = clampLevel(tier, grant.moduleId, grant.level);
+      if (level !== null) levelByModule.set(grant.moduleId, level);
     }
   }
   for (const exception of inputs.exceptions) {
@@ -295,10 +298,8 @@ export function computeEffectiveAccess(inputs: EffectiveAccessInputs): Effective
     if (exception.effect === "deny") {
       levelByModule.delete(exception.moduleId);
     } else {
-      levelByModule.set(
-        exception.moduleId,
-        clampLevel(tier, exception.moduleId, exception.level ?? "view"),
-      );
+      const level = clampLevel(tier, exception.moduleId, exception.level ?? "view");
+      if (level !== null) levelByModule.set(exception.moduleId, level);
     }
   }
   // WARP-1528 (T4 / QA): the intersection applies to the GATEABLE modules

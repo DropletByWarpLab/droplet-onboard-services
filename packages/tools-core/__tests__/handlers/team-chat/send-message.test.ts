@@ -212,6 +212,38 @@ describe("team_chat_send_message", () => {
     expect(post).not.toHaveBeenCalled();
   });
 
+  it("phase 2: an external guest's names-only roster returns the real rule, not UNKNOWN_RECIPIENT (WARP-3263)", async () => {
+    const get = vi.fn(async () =>
+      res(200, {
+        contacts: [{ id: "uuid-bob", displayName: "Bob B" }],
+        me: { id: "uuid-carol" },
+        canStartConversation: false,
+      }),
+    );
+    const post = vi.fn();
+    const { ctx } = ctxWith({ get, post, userId: "carol" });
+    const r = await sendMessage.handler(
+      { recipients: ["bob"], body: "hi", confirmed: true },
+      ctx,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
+    expect(r.error?.code).toBe("GUEST_CANNOT_START_CONVERSATION");
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("phase 2: the thread route's guest 403 maps to the typed error, not TEAM_CHAT_SEND_FAILED", async () => {
+    const post = vi.fn(async () => res(403, { error: "guest_cannot_start_conversation" }));
+    const { ctx } = ctxWith({ post });
+    const r = await sendMessage.handler(
+      { recipients: ["bob"], body: "hi", confirmed: true },
+      ctx,
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
+    expect(r.error?.code).toBe("GUEST_CANNOT_START_CONVERSATION");
+  });
+
   it("phase 2 (thread_id): posts straight to the thread — no roster read", async () => {
     const post = vi
       .fn()
