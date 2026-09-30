@@ -77,7 +77,7 @@ describe("runAgent — context-budget iteration guard (spec §2)", () => {
       finalReq.messages.some(
         (m) =>
           m.role === "user" &&
-          String(m.content).includes("Context budget reached"),
+          String(m.content).includes("room there is for more lookups"),
       ),
     ).toBe(true);
     expect(result.stop_reason).toBe("context_budget");
@@ -123,7 +123,9 @@ describe("runAgent — context-budget iteration guard (spec §2)", () => {
     // no-tools retry, then the fallback reply, never an empty bubble.
     expect(chat).toHaveBeenCalledTimes(3);
     expect(result.stop_reason).toBe("context_budget");
-    expect(result.message.content).toMatch(/couldn't put together an answer/);
+    expect(result.message.content).toBe(
+      "I found some information but couldn't put together an answer from it. Please ask again, or ask for one part at a time.",
+    );
   });
 
   it("large tool schemas do not trip the guard (schemas are excluded from the estimate)", async () => {

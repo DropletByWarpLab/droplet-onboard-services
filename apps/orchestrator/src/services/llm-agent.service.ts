@@ -33,7 +33,7 @@
  */
 
 import type { PrivateEnhancement, ToolDomain } from "@droplet/tools-core";
-import { redactConfirmationTokensForModel } from "@droplet/tools-core";
+import { redactConfirmationTokensForModel, TOOL_CATALOG } from "@droplet/tools-core";
 
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
@@ -1936,7 +1936,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     // `messages` is a valid conversation here (see AgentCheckpointPort).
     // Awaited: a checkpoint that failed to persist must fail the run, not
     // let it continue un-resumable.
-    if (req.checkpoint) await req.checkpoint.onIteration(iter, messages);
+    //
+    // WARP-3285 — not on the blank-retry pass: `messages` would then carry the
+    // finalize nudge, and a requeued run would resume with that nudge read as
+    // the person's request (tool selection keys on the last user message).
+    // Resuming from the previous checkpoint just redoes the finalize pass.
+    if (req.checkpoint && !blankRetry) await req.checkpoint.onIteration(iter, messages);
 
     // Spec §2 — token-aware iteration guard. chars/4 rounded up, matching
     // context-budget.service.ts; JSON.stringify over-counts (keys, escapes,
@@ -1984,15 +1989,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         // WARP-3285 — "user", not "system": gpt-oss's chat template turns only
         // messages[0] into the developer block and silently DROPS every later
         // system message, so this nudge never reached the model and 11 of 12
-        // finalize passes in the eval came back blank.
+        // finalize passes in the eval came back blank. Worded as the
+        // person's own request, since that is how the model reads it.
         role: "user",
         content: blankRetry
-          ? "You haven't replied yet. Answer my request now in plain text, using what the tools above returned. If you didn't find what I asked for, say what you checked and ask me what I meant. Do not call any more tools."
+          ? "You haven't replied yet. Please answer my request now in plain text, using what the tools above returned. If you didn't find what I asked for, say what you checked and ask me what I meant. Don't call any more tools."
           : finalizeReason === "repetition"
-            ? "You are repeating tool calls — answer the user now from the information already gathered. Do not call any more tools."
+            ? "You're repeating the same tool calls. Please answer my question now with what you already have. Don't call any more tools."
             : finalizeReason === "no_progress"
-              ? "Your last searches found nothing — stop searching. Answer the user now: say what you looked for and that nothing matching was found, plus anything useful already gathered. Do not call any more tools."
-              : "Context budget reached — answer the user now from the information already gathered. Do not call any more tools.",
+              ? "Your last searches found nothing, so stop searching. Please answer me now: say what you looked for and that nothing matching was found, plus anything useful you already have. Don't call any more tools."
+              : "That's all the room there is for more lookups. Please answer my question now with what you already have. Don't call any more tools.",
       });
     }
     const iterTools = finalizing ? [] : tools;
@@ -2171,10 +2177,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // an error bubble. In the eval every one was the model ending in its
       // reasoning channel (cause "reasoning_only"), mostly on a finalize pass.
       // Retry once with no tools and an explicit ask; if that is blank too, or
-      // no iteration is left, say what was checked. A blank with NO tool work
-      // stays WARP-854's (a context overflow, which a retry would repeat).
+      // no iteration is left, say what the tools did. A blank with NO tool
+      // work, or one the provider ended with finish_reason "length" (the
+      // mid-turn overflow signature), stays on WARP-854's error path: that
+      // is a context overflow, which a retry would only repeat.
       let answer = visible;
-      if (blankDiagnostics && trace.length > 0) {
+      if (blankDiagnostics && trace.length > 0 && blankDiagnostics.finishReason !== "length") {
         if (!blankRetry && iter + 1 < maxIter) {
           blankRetry = true;
           // Already on the wire as reasoning_step; keep it in the trace too.
@@ -2192,7 +2200,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           );
           continue;
         }
-        answer = blankAnswerFallback(trace, advertisedNames);
+        answer = blankAnswerFallback(
+          trace,
+          advertisedNames,
+          (tool) => catalogEntry(tool)?.write ?? runtimeLookup(tool)?.requiresWrite === true,
+        );
         emit({ type: "content_delta", text: answer });
       }
       // WARP-1602 — the inverse guard to WARP-1479's. A turn that answers
@@ -3088,57 +3100,20 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // plain language. stop_reason stays "iteration_limit" so operators and
   // the trace keep the real signal; only the visible content changes.
   const failedTools = [
-    ...new Set(
-      trace
-        .filter((t) => {
-          const r = t.result as
-            | { status?: unknown; ok?: unknown; error?: unknown }
-            | null
-            | undefined;
-          if (r === null || typeof r !== "object") return false;
-          // Spec §4 — a REPEATED_CALL nudge means the call was never
-          // re-dispatched this turn (its prior result already succeeded);
-          // it must not read as "the tool kept failing".
-          if (
-            typeof r.error === "object" &&
-            r.error !== null &&
-            (r.error as { code?: unknown }).code === "REPEATED_CALL"
-          ) {
-            return false;
-          }
-          // Spec §3 — a TOOL_NOW_AVAILABLE heal means selection filtered the
-          // tool out; it was never actually dispatched, so it must not read
-          // as "the tool kept failing" either.
-          if (
-            typeof r.error === "object" &&
-            r.error !== null &&
-            (r.error as { code?: unknown }).code === "TOOL_NOW_AVAILABLE"
-          ) {
-            return false;
-          }
-          // Handler envelopes report status:"error" / ok:false; the
-          // dispatch-throw path (ORCH-05) reports a string `error`.
-          // confirmation_required is a UX pause, not a failure.
-          return (
-            r.status === "error" ||
-            r.ok === false ||
-            typeof r.error === "string"
-          );
-        })
-        .map((t) => t.tool),
-    ),
+    ...new Set(trace.filter((t) => isFailedToolResult(t.result)).map((t) => t.tool)),
   ];
   // WARP-1331 — trace tool names are model-controlled: the model invents
   // garbled names ("memory_repay??", "search_content?") that the guard
   // records as failures, and interpolating them verbatim put nonsense tools
   // in customer-facing copy. Only registry-advertised names may be named;
-  // failures on invented tools get the generic phrasing.
-  const knownFailedTools = failedTools.filter((n) => advertisedNames.has(n));
+  // failures on invented tools get the generic phrasing. WARP-3285 — and by
+  // their catalog label, never the raw id (voice reads this copy aloud).
+  const failedLabels = toolLabels(failedTools, advertisedNames);
   const fallbackText =
-    knownFailedTools.length > 0
-      ? `I ran into a problem while working on that — the ${knownFailedTools.join(
-          ", ",
-        )} tool${knownFailedTools.length > 1 ? "s" : ""} kept failing, so I couldn't finish your request. Please try again in a moment.`
+    failedLabels.length > 0
+      ? `I ran into a problem while working on that, so I couldn't finish your request. ${
+          failedLabels.length > 1 ? "These steps" : "This step"
+        } kept failing: ${failedLabels.join("; ")}. Please try again in a moment.`
       : failedTools.length > 0
         ? "I ran into a problem while working on that — one of my tools kept failing, so I couldn't finish your request. Please try again in a moment."
         : "I couldn't finish working through that request within my step limit. Please try again, or ask for a smaller piece of it.";
@@ -3202,20 +3177,110 @@ function isBareJson(s: string): boolean {
 }
 
 /**
- * WARP-3285 — the reply for a turn whose answer stayed blank after real tool
- * work, even after the one retry. Says what was checked and asks the person to
- * narrow it down: in the eval these turns were searches that found nothing or
- * ambiguous requests ("Send them the update."), and a clarifying question is
- * the right answer to both. Trace tool names are model-controlled, so only
- * advertised ones are named (WARP-1331).
+ * WARP-1012 — did this trace entry's call fail? Shared by the iteration-limit
+ * and the WARP-3285 blank-answer fallbacks so they agree on "failed".
  */
-function blankAnswerFallback(trace: AgentTraceEntry[], advertised: Set<string>): string {
-  const used = [...new Set(trace.map((t) => t.tool))].filter((n) => advertised.has(n));
-  return (
-    `I looked into this${used.length > 0 ? ` (${used.join(", ")})` : ""} but couldn't ` +
-    "put together an answer from what I found. Could you tell me a bit more about " +
-    "what you need, or rephrase the request?"
+function isFailedToolResult(result: unknown): boolean {
+  if (result === null || typeof result !== "object") return false;
+  const r = result as { status?: unknown; ok?: unknown; error?: unknown };
+  const code =
+    typeof r.error === "object" && r.error !== null
+      ? (r.error as { code?: unknown }).code
+      : undefined;
+  // Spec §4 — a REPEATED_CALL nudge means the call was never re-dispatched
+  // this turn (its prior result already succeeded). Spec §3 — a
+  // TOOL_NOW_AVAILABLE heal means selection filtered the tool out, so it was
+  // never dispatched either. Neither may read as "the tool kept failing".
+  if (code === "REPEATED_CALL" || code === "TOOL_NOW_AVAILABLE") return false;
+  // Handler envelopes report status:"error" / ok:false; the dispatch-throw
+  // path (ORCH-05) reports a string `error`. confirmation_required is a UX
+  // pause, not a failure.
+  return r.status === "error" || r.ok === false || typeof r.error === "string";
+}
+
+const isPendingApproval = (result: unknown): boolean =>
+  (result as { status?: unknown } | null)?.status === "confirmation_required";
+
+let catalogByName: Map<string, { label: string; write: boolean }> | undefined;
+/** WARP-3285 — a compiled tool's catalog facts; undefined for runtime tools
+ *  and invented names. Built on first use, not at import. */
+function catalogEntry(name: string): { label: string; write: boolean } | undefined {
+  catalogByName ??= new Map(
+    TOOL_CATALOG.map((t) => [
+      t.name,
+      {
+        // The home copy up to its first clause: "Add an event to your calendar".
+        label: t.homeDescription.split(/\. | — | \(/)[0]!.trim().replace(/\.$/, ""),
+        write: t.requiresWrite,
+      },
+    ]),
   );
+  return catalogByName.get(name);
+}
+
+/**
+ * WARP-3285 — plain-language names for tools in customer-facing copy (voice
+ * reads it aloud, so never a raw id). Only advertised, catalogued tools are
+ * named (WARP-1331); runtime and invented names are left out.
+ */
+function toolLabels(names: Iterable<string>, advertised: ReadonlySet<string>): string[] {
+  const labels = [...names]
+    .filter((n) => advertised.has(n))
+    .map((n) => catalogEntry(n)?.label)
+    .filter((l): l is string => Boolean(l));
+  return [...new Set(labels)];
+}
+
+/**
+ * WARP-3285 — the reply for a turn whose answer stayed blank after real tool
+ * work, even after the one retry. Deterministic, and it states the OUTCOME,
+ * because the person acts on it: a write that ran is reported as done (asking
+ * them to rephrase would invite a duplicate send), a pending approval as
+ * pending, a failure as a failure (rephrasing won't fix an outage). Only when
+ * the reads found nothing does it ask for more detail — in the eval those
+ * were searches that came up empty or ambiguous asks ("Send them the
+ * update."), where a clarifying question is the right answer.
+ */
+function blankAnswerFallback(
+  trace: AgentTraceEntry[],
+  advertised: ReadonlySet<string>,
+  isWrite: (tool: string) => boolean,
+): string {
+  const done = new Set<string>();
+  const pending = new Set<string>();
+  const failed = new Set<string>();
+  let foundSomething = false;
+  for (const t of trace) {
+    if (isFailedToolResult(t.result)) failed.add(t.tool);
+    else if (isPendingApproval(t.result)) pending.add(t.tool);
+    else if (isWrite(t.tool)) done.add(t.tool);
+    else if (!isZeroHitSearchResult(t.tool, t.args, t.result)) foundSomething = true;
+  }
+  const parts: string[] = [];
+  if (done.size > 0) {
+    const labels = toolLabels(done, advertised);
+    parts.push(labels.length > 0 ? `Done: ${labels.join("; ")}.` : "Done, that went through.");
+  }
+  if (pending.size > 0) {
+    const labels = toolLabels(pending, advertised);
+    parts.push(
+      labels.length > 0
+        ? `Waiting for your approval: ${labels.join("; ")}.`
+        : "That needs your approval before I go ahead.",
+    );
+  }
+  if (failed.size > 0) {
+    const labels = toolLabels(failed, advertised);
+    parts.push(
+      labels.length > 0
+        ? `${labels.length > 1 ? "These steps" : "This step"} didn't work: ${labels.join("; ")}. Please try again in a moment.`
+        : "One of the steps didn't work. Please try again in a moment.",
+    );
+  }
+  if (parts.length > 0) return parts.join(" ");
+  return foundSomething
+    ? "I found some information but couldn't put together an answer from it. Please ask again, or ask for one part at a time."
+    : "I looked but didn't find anything matching. Could you tell me a bit more about what you're looking for?";
 }
 
 /**

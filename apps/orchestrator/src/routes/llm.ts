@@ -224,8 +224,11 @@ function publishTurnCompleted(
 /**
  * WARP-1479 — record WHY a turn produced no visible answer.
  *
- * The customer already gets an honest failed turn (the empty-completion
- * rewrite below); this is the operator's half. Blank turns are the eval
+ * A blank with no tool work, or a context overflow, reaches the customer as
+ * an honest failed turn (the empty-completion rewrite below). After tool work
+ * the agent loop retries once and then substitutes a fallback reply
+ * (WARP-3285), so there this line is the only sign the words aren't the
+ * model's. Either way, this is the operator's half. Blank turns are the eval
  * suite's largest failure class and nothing in the logs currently says
  * whether the model returned nothing, thought without answering, or our own
  * sanitizer demoted the completion — so every fix attempt would be a guess.
@@ -2425,6 +2428,12 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // successful tool calls, 49 s, zero visible output.) A turn with
           // no visible answer is a failed turn whatever its trace says, so
           // all three terminal reasons now rewrite on blank content alone.
+          //
+          // WARP-3285 — after tool work the agent loop no longer ends blank
+          // (one retry, then a fallback reply) except on a finish_reason
+          // "length" overflow. What still arrives here is a blank with no
+          // tool work or an overflow; the gate stays keyed on blank content
+          // alone as the safety net.
           if (
             e.type === "done" &&
             liveAssistantContent.trim().length === 0 &&
@@ -2441,7 +2450,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
                 "empty_completion: the model produced no visible answer for " +
                 "this turn. Common causes: the request (system prompt + " +
                 "tools + history) overflowed the context window, or the " +
-                "model returned nothing after its tool calls. Server logs " +
+                "model returned nothing without calling any tool. Server logs " +
                 "carry a `blank_final_answer` line attributing this turn.",
             };
           }
@@ -2692,7 +2701,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         //
         // WARP-1479 — a non-empty trace does NOT make a blank answer
         // honest (see the streaming site above for the live repro). All
-        // three terminal reasons rewrite on blank content alone.
+        // three terminal reasons rewrite on blank content alone. WARP-3285
+        // — after tool work only an overflow still arrives blank; see the
+        // streaming site.
         if (
           contentToText(result.message.content).trim().length === 0 &&
           (result.stop_reason === "model_done" ||

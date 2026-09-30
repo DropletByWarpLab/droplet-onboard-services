@@ -135,6 +135,11 @@ const THRESHOLD_TOKENS = DEFAULT_CONTEXT_WINDOW - OUTPUT_RESERVE;
 const OVERSIZED_MESSAGE_CHARS = 70_000;
 const OVERSIZED_MESSAGE_TOKENS = OVERSIZED_MESSAGE_CHARS / 4;
 
+/** WARP-3285 — the agent loop's reply when a blank after tool work stays
+ *  blank on its retry and the reads returned something. */
+const FOUND_SOMETHING =
+  "I found some information but couldn't put together an answer from it. Please ask again, or ask for one part at a time.";
+
 type SseFrame = { event: string; data: Record<string, unknown> };
 
 // Parse an SSE response body into a sequence of {event, data} frames.
@@ -408,9 +413,7 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.stop_reason).toBe("context_budget");
-    expect(res.body.message.content).toMatch(
-      /^I looked into this \(list_network_devices\) but couldn't put together an answer/,
-    );
+    expect(res.body.message.content).toBe(FOUND_SOMETHING);
 
     // ── WARP-2655: the degradation this turn causes, pinned ──────────────
     //
@@ -649,7 +652,7 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
       .filter((f) => f.event === "content_delta")
       .map((f) => String(f.data.text))
       .join("");
-    expect(text).toMatch(/^I looked into this \(list_network_devices\) but couldn't/);
+    expect(text).toBe(FOUND_SOMETHING);
   });
 
   it("streaming emits tool_call + tool_result events when the model dispatches a tool", async () => {
