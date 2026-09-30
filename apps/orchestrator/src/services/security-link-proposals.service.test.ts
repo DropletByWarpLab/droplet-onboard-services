@@ -475,8 +475,6 @@ describe("the anchors", () => {
   });
 });
 
-// WARP-2977 P2b-2 x WARP-2979 P4 PR-1: door locks are not Droplet's to link. PR-1 scores the camera arm only; the
-// lock arm is P4 PR-4's to design. A person's lock link sits in the area like any other row and nothing more.
 // #2350 pinned these while P4 scored cameras only. From P4 PR-4 a person's lock link anchors — through its LIVE
 // changes alone (the lock arm's own tests are in "P4 PR-4 — …" below and in security-cooccurrence.test.ts) — so what
 // stays true of a lock link with no such change is pinned here.

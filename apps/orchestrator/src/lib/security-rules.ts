@@ -23,7 +23,9 @@
  * Rules (D18–D21): severity comes from the codes only. after_hours_presence
  * alerts; camera_offline and threat_signal are notices and never alert in P3
  * (a CHECK pins the pairs). Codes are monotonic: a reason is never deleted or
- * downgraded. Lock rows feed no rule (D21).
+ * downgraded. Lock rows form no incident of their own (D21); from version 5
+ * (P4 PR-4, D12, below) a live lock change is camera_offline_during_activity's
+ * activity, never its trigger.
  *
  * Changing any number in RULESET needs a SECURITY_RULESET_VERSION bump
  * (lib/ruleset-fingerprint.test.ts fails otherwise).

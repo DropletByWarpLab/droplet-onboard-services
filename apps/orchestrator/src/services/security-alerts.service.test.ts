@@ -847,7 +847,7 @@ describe("the alerts health row (§6.11)", () => {
     expect((await computeAlertsHealthRow(client(onlyEntry), resolve, NOW)).state).toBe("not_configured");
   });
 
-  // WARP-2977 P2b-2 × WARP-2978 — lock rows feed no rule (D21): a door lock on an area is no camera.
+  // WARP-2977 P2b-2 × WARP-2978 — no rule fires on a lock alone (D21; PR-4's lock activity needs a camera to drop).
   it("not configured: an Inside / Staff only area whose only link is a door lock can never raise an alert", async () => {
     const lockLink = { id: "stock-lock", zoneId: STOCK, sourceKind: "lock", sourceRef: "matter:7/1", sourceLabel: "Stock room lock", state: "active" };
     const onlyLock = world({ securityZoneLink: [lockLink] });

@@ -159,7 +159,7 @@ export async function eligibilityOf(user: EligibilityUser, resolve: EffectiveAcc
   try {
     const access = await resolve(user.id);
     level = access?.features.find((f) => f.moduleId === "security")?.level ?? null;
-    // An owner is never narrowed (the resolver's §3 bypass) — as `securityScopeForPerson` reads it.
+    // An owner is never narrowed: the resolver's §3 bypass gives the owner every module, Devices included.
     mayReadLocks = user.role === "owner" || locksReadableWith(access, user.role);
   } catch (err) {
     logger.warn({ err, userId: user.id }, "alert eligibility: the access resolver failed — not told this time");
@@ -622,7 +622,8 @@ async function uncoveredAlertCameras(prisma: PrismaClient, receivers: readonly R
   const cameras = new Set<string>();
   for (const l of links) {
     const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
-    // A door lock (WARP-2977 P2b-2) is no camera: lock rows feed no rule (D21).
+    // A door lock (WARP-2977 P2b-2) is no camera: no rule fires on a lock alone (D21), and PR-4's lock activity
+    // (D12) still needs a person-linked camera to drop.
     if (parsed && !isLockLinkRef(parsed)) cameras.add(parsed.camera);
   }
   if (cameras.size === 0) return [];
