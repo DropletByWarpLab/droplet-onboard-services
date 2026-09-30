@@ -52,6 +52,8 @@ import type {
   MatterGrouped,
   Room,
   FileEntryInfo,
+  FolderColor,
+  FolderColorEntry,
   FileSpaceId,
   FileSpacesResponse,
   FileVersionInfo,
@@ -123,6 +125,7 @@ import type {
   UsagePolicy,
   UsageWithMeta,
   AdminFilesUsageResponse,
+  CompanyPublicLink,
   Department,
   DepartmentDetail,
   DepartmentRight,
@@ -169,6 +172,11 @@ import type {
   SecurityZonePatchBody,
   SecurityZonesResponse,
   SecurityZoneWriteResult,
+  SecurityAiSettingsBody,
+  SecurityAiSettingsView,
+  SecurityAiSettingsWriteResult,
+  SecurityLinkDecisionResult,
+  SecurityLinkProposalsView,
   NotificationAckAllResult,
   NotificationAckResult,
   NotificationsPage,
@@ -177,6 +185,8 @@ import type {
   AlertRoutingView,
   IncidentActionResult,
   IncidentDetail,
+  IncidentNarrativeView,
+  IncidentVerdict,
   IncidentsPage,
   IncidentsSummary,
 } from "./types";
@@ -1388,17 +1398,33 @@ export interface SystemHealth {
   status: SystemHealthStatus;
   components: SystemComponent[];
   uptime: number;
-  version: string;
+  // WARP-3154 — the real committed OTA release tag; absent on a box that has
+  // never taken an update (still on its factory image). No longer the
+  // hardcoded "0.1.0" literal.
+  version?: string;
 }
 
 export async function fetchSystemHealth(): Promise<SystemHealth> {
   // Public endpoint (no auth) — used by Docker healthcheck + dashboard pill.
+  // WARP-3154 — never carries a down component's `error` (internal-topology
+  // leak on an unauthenticated route); use fetchSystemHealthDetails() for that.
   const res = await fetch(`${BASE}/api/orchestrator/health`, {
     credentials: "include",
   });
   // 503 is a valid "down" response; we still want to read the body.
   if (!res.ok && res.status !== 503) {
     throw new Error(`Failed to fetch system health: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** WARP-3154 — the owner/admin counterpart of fetchSystemHealth(): same
+ *  shape, but each component's `error` reason is present. 403s for anyone
+ *  else; callers gate on isAdminRole(user?.role) before calling this. */
+export async function fetchSystemHealthDetails(): Promise<SystemHealth> {
+  const res = await authFetch(`${BASE}/api/orchestrator/health/details`);
+  if (!res.ok && res.status !== 503) {
+    throw new Error(`Failed to fetch system health details: ${res.status}`);
   }
   return res.json();
 }
@@ -3093,6 +3119,35 @@ export async function setWebPushChannel(enabled: boolean): Promise<void> {
   }
 }
 
+/**
+ * WARP-3264 — the `place_lookup` off-LAN channel: the calendar place field's
+ * OpenStreetMap lookup. Default off. `null` = unreadable; don't guess.
+ */
+export async function fetchPlaceLookupChannel(): Promise<{ enabled: boolean } | null> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan`);
+  if (!res.ok) return null;
+  const body = (await res.json()) as { channels?: Array<{ key: string; enabled: boolean }> };
+  const row = body.channels?.find((c) => c.key === "place_lookup");
+  return row ? { enabled: row.enabled === true } : null;
+}
+
+/** WARP-3264 — flip `place_lookup`. Owner only (the route 403s everyone else). */
+export async function setPlaceLookupChannel(enabled: boolean): Promise<void> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan/place_lookup`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      enabled,
+      reason: enabled ? "Turned on from Settings → Locations" : "Turned off from Settings → Locations",
+    }),
+  });
+  if (!res.ok) {
+    throw Object.assign(new Error(`Failed to change place lookup: ${res.status}`), {
+      status: res.status,
+    });
+  }
+}
+
 /** `refused` is set when the `web_push` off-LAN channel is off (WARP-2904). */
 export async function sendTestPush(): Promise<{
   sent: number;
@@ -3396,6 +3451,31 @@ export function getCameraLiveUrl(name: string): string {
  *  doesn't have birdseye configured. */
 export function getBirdseyeLiveUrl(): string {
   return `${BASE}/api/cameras/birdseye/live`;
+}
+
+/**
+ * Whether the birdseye composite would play for this viewer: the HTTP status
+ * of a GET, read off its headers, and the request aborted at once — the body
+ * is an endless MJPEG stream and is never read. Never HEAD: Express runs the
+ * GET handler for a HEAD and Node sends a HEAD's headers only when the
+ * response ends, which a continuous stream never does. Through `authFetch`,
+ * so an expired access cookie is refreshed before the `<img>` needs it.
+ * Rejects on a timeout (20 s), a network failure, or `signal` aborting.
+ */
+export async function getBirdseyeStatus(signal?: AbortSignal): Promise<number> {
+  const ctrl = new AbortController();
+  const stop = () => ctrl.abort();
+  if (signal?.aborted) stop();
+  signal?.addEventListener("abort", stop, { once: true });
+  const timer = setTimeout(stop, DEFAULT_API_FETCH_TIMEOUT_MS);
+  try {
+    const res = await authFetch(getBirdseyeLiveUrl(), { signal: ctrl.signal });
+    return res.status;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", stop);
+    ctrl.abort();
+  }
 }
 
 // --- Camera groups ---
@@ -5192,6 +5272,50 @@ export async function fetchFiles(
   return res.json();
 }
 
+// Per-user folder colours. Keyed server-side on the folder's Nextcloud fileId
+// (survives rename/move); `path` here is space-relative, like every other
+// space-threaded write helper.
+export async function fetchFolderColors(): Promise<FolderColorEntry[]> {
+  const res = await authFetch(`${BASE}/api/files/folder-colors`);
+  if (!res.ok) throw new Error(`Failed to fetch folder colors: ${res.status}`);
+  const data = await res.json();
+  return data.colors;
+}
+
+export async function setFolderColor(
+  path: string,
+  color: FolderColor,
+  space: FileSpaceId = "personal"
+): Promise<void> {
+  const res = await authFetch(`${BASE}/api/files/folder-colors`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(
+      space === "personal" ? { path, color } : { path, color, space }
+    ),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to set folder color: ${res.status}`);
+  }
+}
+
+export async function clearFolderColor(
+  path: string,
+  space: FileSpaceId = "personal"
+): Promise<void> {
+  const qs = new URLSearchParams({ path });
+  if (space !== "personal") qs.set("space", space);
+  const res = await authFetch(
+    `${BASE}/api/files/folder-colors?${qs.toString()}`,
+    { method: "DELETE" }
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to clear folder color: ${res.status}`);
+  }
+}
+
 // WARP-883 (ADR-027 WS-5) — which Files spaces exist for this user. Drives the
 // My Files / Shared switcher; the switcher hides itself when shared is absent.
 export async function fetchSpaces(): Promise<FileSpacesResponse> {
@@ -6448,6 +6572,14 @@ export async function fetchPromptInspect(
 }
 
 /** Admin usage roster — per-user + per-department storage (WARP-1271). */
+/** WARP-3168: owner/admin only. Throws on 503 (Nextcloud unreadable) — never an empty list. */
+export async function fetchCompanyPublicLinks(): Promise<CompanyPublicLink[]> {
+  const res = await authFetch(`${BASE}/api/admin/files/company-public-links`);
+  if (!res.ok) throw new Error(`Couldn't read the company's links (${res.status})`);
+  const body: { links: CompanyPublicLink[] } = await res.json();
+  return body.links;
+}
+
 export async function fetchAdminFilesUsage(): Promise<AdminFilesUsageResponse> {
   const res = await authFetch(`${BASE}/api/admin/files/usage`);
   if (!res.ok) {
@@ -8410,8 +8542,9 @@ async function teamChatFail(
 export interface TeamChatContact {
   id: string;
   displayName: string;
-  username: string;
-  role: string;
+  /** WARP-3263 — absent for an external guest's directory (names only). */
+  username?: string;
+  role?: string;
 }
 
 export type TeamChatMessageKind =
@@ -9194,6 +9327,8 @@ export interface CloudHistorySummary {
   unaskedOnBoxAnswers: number;
   userMessages: number;
   drewOn: string[];
+  /** WARP-2979 — sources whose answers are never sent to a cloud model, whatever is chosen (e.g. "Security"). */
+  neverSent?: string[];
 }
 
 export async function fetchCloudHistory(conversationId: string): Promise<CloudHistorySummary> {
@@ -9382,6 +9517,43 @@ export function putSecurityZoneLinks(id: string, body: SecurityZoneLinksBody): P
   );
 }
 
+// ── WARP-2979 (ADR-059 P4 §7 routes 23–27): Droplet's links and its AI settings ──
+
+export const SECURITY_LINK_PROPOSALS_PATH = "/api/security/link-proposals";
+export const SECURITY_LINKS_PATH = "/api/security/links";
+export const SECURITY_AI_SETTINGS_PATH = "/api/security/ai-settings";
+
+/** 23 (view; the list is filled only at manage) — Droplet's open suggestions. */
+export function getSecurityLinkProposals(): Promise<SecurityLinkProposalsView> {
+  return securityFetch<SecurityLinkProposalsView>(`${BASE}${SECURITY_LINK_PROPOSALS_PATH}`);
+}
+
+/** 24 (manage) — add Droplet's suggestion, or Keep a link Droplet made. */
+export function acceptSecurityLink(linkId: string): Promise<SecurityLinkDecisionResult> {
+  return securityFetch<SecurityLinkDecisionResult>(
+    `${BASE}${SECURITY_LINKS_PATH}/${encodeURIComponent(linkId)}/accept`,
+    jsonBody("POST", {}),
+  );
+}
+
+/** 25 (manage) — Not this (a suggestion), or Undo (a link Droplet made). Final: Droplet never suggests it again. */
+export function rejectSecurityLink(linkId: string): Promise<SecurityLinkDecisionResult> {
+  return securityFetch<SecurityLinkDecisionResult>(
+    `${BASE}${SECURITY_LINKS_PATH}/${encodeURIComponent(linkId)}/reject`,
+    jsonBody("POST", {}),
+  );
+}
+
+/** 26 (view) — what Droplet's AI may do in Security. */
+export function getSecurityAiSettings(): Promise<SecurityAiSettingsView> {
+  return securityFetch<SecurityAiSettingsView>(`${BASE}${SECURITY_AI_SETTINGS_PATH}`);
+}
+
+/** 27 (manage) — change it; `expectedVersion` from the last read (409 VERSION_CONFLICT otherwise). */
+export function putSecurityAiSettings(body: SecurityAiSettingsBody): Promise<SecurityAiSettingsWriteResult> {
+  return securityFetch<SecurityAiSettingsWriteResult>(`${BASE}${SECURITY_AI_SETTINGS_PATH}`, jsonBody("PUT", body));
+}
+
 /** 13 (manage) — set or clear the weekly hours. */
 export function putSecurityHours(body: SecurityHoursBody): Promise<SecurityHoursWriteResult> {
   return securityFetch<SecurityHoursWriteResult>(`${BASE}${SECURITY_HOURS_PATH}`, jsonBody("PUT", body));
@@ -9511,12 +9683,37 @@ export function acknowledgeSecurityIncident(
   );
 }
 
+/**
+ * 28 (act) — WARP-2979 P4 PR-2: "Summarise now" / "Regenerate". 202 {narrative}
+ * in state `pending`; 409 NARRATIVE_COOLDOWN, NARRATIVE_TOO_OLD, SUMMARIES_OFF or NOT_ACTIONABLE;
+ * 404 INCIDENT_NOT_FOUND. The body is strict and empty.
+ */
+export function requestSecurityIncidentNarrative(id: string): Promise<{ narrative: IncidentNarrativeView }> {
+  return securityFetch<{ narrative: IncidentNarrativeView }>(
+    `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/narrative`,
+    jsonBody("POST", {}),
+  );
+}
+
 /** 20 (act) — done, with an optional note of at most 280 characters. The body is strict: no empty note is sent. */
 export function resolveSecurityIncident(id: string, opts: { note?: string } = {}): Promise<IncidentActionResult> {
   const note = (opts.note ?? "").trim();
   return securityFetch<IncidentActionResult>(
     `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/resolve`,
     jsonBody("POST", note ? { note } : {}),
+  );
+}
+
+/**
+ * 35 (act, owner/admin — WARP-2980 P5) — Expected / Not expected. The body is
+ * exactly `{verdict}` (strict on the box). It never acknowledges, resolves or
+ * changes who is told; 409 NOT_JUDGEABLE when there is nothing this viewer
+ * can mark (or their view is partial), 409 INCIDENT_CONFLICT on a lost race.
+ */
+export function setSecurityIncidentVerdict(id: string, verdict: IncidentVerdict): Promise<IncidentActionResult> {
+  return securityFetch<IncidentActionResult>(
+    `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/verdict`,
+    jsonBody("POST", { verdict }),
   );
 }
 

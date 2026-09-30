@@ -288,8 +288,10 @@ export const MODULES: readonly ModuleDef[] = [
     // WARP-2977 (ADR-059 DS-004) — the command center. Not folded into
     // `cameras`: network and sign-in threats are in it too, and ADR-055's
     // doors will be. Camera grants still filter every camera row (DS-005).
-    // The `security` tool domain arrives with its read-only tools (P4) and is
-    // claimed here in the same change — never left unclaimed (WARP-2742).
+    // WARP-2979 (P4 §6.12): the `security` tool domain — four read-only tools
+    // — is claimed here in the same change that ships them, never left
+    // unclaimed (WARP-2742). The toggle and the per-person Security level
+    // therefore decide the chat tools as they decide the page.
     //
     // The event STORE ingests whether or not this toggle is on: patterns need
     // 14 days of history (§4.3), and switching Security on must not start
@@ -297,7 +299,7 @@ export const MODULES: readonly ModuleDef[] = [
     id: "security", label: "Security",
     description: "One feed for camera detections, camera health, and network and sign-in warnings.",
     category: "operations", routePrefixes: ["/api/security"], navHrefs: ["/security"],
-    toolDomains: [], core: false, defaultEnabled: false,
+    toolDomains: ["security"], core: false, defaultEnabled: false,
     available: () => true, // native to the orchestrator; threats need no camera
   },
   {

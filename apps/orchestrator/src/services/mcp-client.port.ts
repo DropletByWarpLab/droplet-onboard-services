@@ -29,6 +29,7 @@
  * how it talks to one without holding it.
  */
 import type { PrivateEnhancement } from "@droplet/tools-core";
+import type { DashboardPage } from "@droplet/shared-types";
 
 /**
  * Per-call session context plumbed through MCP `_meta`. Add fields here
@@ -101,6 +102,12 @@ export interface McpCallContext {
   conversationId?: string;
   messageId?: string;
   toolCallId?: string;
+   * WARP-3116 — the pages the calling dashboard can open, validated by the
+   * chat route. Read by `find_dashboard_page` / `open_dashboard_page`;
+   * stdio-trusted, and never a grant — the dashboard's own route guards and
+   * the orchestrator's `requireRole` still decide what a page shows.
+   */
+  dashboardPages?: DashboardPage[];
   /**
    * WARP-2900 — the promoted extension that made this call, when an
    * extension called back into the box as its installing owner

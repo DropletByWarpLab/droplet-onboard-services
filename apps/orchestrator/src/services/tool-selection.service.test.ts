@@ -12,6 +12,7 @@ import {
   toolNamesForDomain,
 } from "./tool-selection.service.js";
 import type { RuntimeToolDescriptor } from "./runtime-tool-registry.service.js";
+import { TOOL_CATALOG } from "@droplet/tools-core";
 
 const POOL = [
   "search_content",
@@ -972,6 +973,168 @@ describe("WARP-2894 — routines are reachable from a fresh turn", () => {
   });
 });
 
+describe("WARP-3116 — dashboard navigation is reachable from a fresh turn", () => {
+  const NAV_TOOLS = ["find_dashboard_page", "open_dashboard_page"];
+  // Stand-ins for the OTHER `data` tools (seven in the owner's chat pool). The
+  // domain is admitted WHOLE (~2.2K tokens with the two below), so a
+  // navigation rule that fires wrongly buys all of them along with the two it
+  // exists for. A test that looked only at the navigation tools could not tell
+  // "the rule did not fire" from "the rule fired and the pool held nothing
+  // else".
+  const DATA_TOOLS = ["get_weather", "calculate"];
+  // A dashboard turn: the page list arrived, so both navigation tools survived
+  // the withholding in dashboard-navigation.ts and sit in the pool.
+  const NAV_POOL = [...POOL, ...DATA_TOOLS, ...NAV_TOOLS];
+  // Every other turn (voice, phones, background runs): both are withheld.
+  const PAGELESS_POOL = [...POOL, ...DATA_TOOLS];
+
+  const select = (pool: string[], userMessage: string) =>
+    selectAdvertisedTools({
+      mode: "domains",
+      userMessage,
+      pool,
+      conversationToolNames: [],
+    });
+  const advertisedFor = (userMessage: string) =>
+    select(NAV_POOL, userMessage).advertised;
+
+  // Whole sentences, EMPTY continuity. "take me to it" is the incident: the
+  // follow-up names no page, so only the phrasing can admit the tool.
+  //
+  // One sentence per surviving alternative, so an edit that breaks one of
+  // them is named by the case that goes red.
+  //
+  // Not here on purpose: "give me a link to the voice settings" and "go to
+  // settings". They rode on the bare `link to` / `go to`, which also matched
+  // the ordinary sentences in the negatives below, so they now reach the tool
+  // the other way: the guidance line names find_dashboard_page on a dashboard
+  // turn, and a call to a filtered-but-allowed tool expands its domain on the
+  // next iteration. One lost iteration, not a failed turn.
+  //
+  // MUTATION: delete NAVIGATION_RULES from tool-selection.service.ts and
+  // every positive below goes red.
+  describe("positives — how a person asks to be moved or pointed somewhere", () => {
+    it.each([
+      "take me to it",
+      "can you bring me to the calendar",
+      "navigate to people",
+      "jump to the camera recordings",
+      "link me to the voice settings",
+      "where do I change the wifi password?",
+      "where is the guest wifi setting",
+      "where are my deleted files?",
+      "how do I get to the camera recordings",
+      "open the security page",
+      "open voice settings",
+      "show me the network settings",
+    ])("%s advertises the navigation tools", (message) => {
+      const advertised = advertisedFor(message);
+      expect(advertised).toContain("open_dashboard_page");
+      expect(advertised).toContain("find_dashboard_page");
+    });
+  });
+
+  // The review of PR #2443 (head 39e6658): four ordinary sentences matched the
+  // rule and admitted the WHOLE `data` domain on turns that wanted none of it.
+  // Each rode on one bare alternative, named beside it. The last two are the
+  // same class, not named in the review, and fail the same assertion.
+  //
+  // MUTATION: put any of those alternatives back into NAVIGATION_RULES and the
+  // case that rode on it goes red.
+  describe("negatives — ordinary sentences the bare alternatives used to match", () => {
+    it.each([
+      // was `go(ing)? (back )?to`
+      "I am going to need a summary of my inbox",
+      "before I go to sleep remind me",
+      // was `links? (to|for)`
+      "send the link to Bob",
+      // was `the \w+ (page|screen|tab)`
+      "what is on the front page of the report",
+      // was `head (over )?to`
+      "let's head over to Bob's",
+      // was `(page|screen|tab|section) (for|with)`
+      "the screen with the error message",
+    ])("%s admits no data tool", (message) => {
+      const r = select(NAV_POOL, message);
+      expect(r.matchedDomains).not.toContain("data");
+      for (const name of [...NAV_TOOLS, ...DATA_TOOLS]) {
+        expect(r.advertised, name).not.toContain(name);
+      }
+    });
+  });
+
+  describe("negatives — questions that are not about getting somewhere", () => {
+    it.each([
+      "turn off the kitchen lights",
+      "summarise the lease agreement",
+      // (no time words: those admit `data` through the utilities rule)
+      "who came to the front door",
+      "is the internet down?",
+      // A setting named in an ACTION is the network tools' job, not a trip:
+      // `settings` is claimed only after "open" / "show me".
+      "change the wifi settings to WPA3",
+    ])("%s does not advertise the navigation tools", (message) => {
+      expect(advertisedFor(message)).not.toContain("open_dashboard_page");
+    });
+  });
+
+  // The gate. Both navigation tools are withheld from any turn with no page
+  // list (dashboard-navigation.ts), and a phrasing rule whose tools are not in
+  // the pool can only buy the rest of the `data` schemas. So it does not run:
+  // the pool is the gate, and it is the same pool the route's estimate and the
+  // agent loop's wire payload both hand in.
+  //
+  // MUTATION: evaluate NAVIGATION_RULES whatever the pool holds and every case
+  // below goes red — the review's finding, on the turns it named.
+  describe("a turn with no page list never pays for the rule", () => {
+    it.each([
+      "take me to voice settings",
+      "where do I change the wifi password?",
+      "open the security page",
+    ])("%s admits no data tool when the pool holds no navigation tool", (message) => {
+      const r = select(PAGELESS_POOL, message);
+      expect(r.matchedDomains).not.toContain("data");
+      for (const name of DATA_TOOLS) expect(r.advertised, name).not.toContain(name);
+    });
+
+    it("the same sentence on a dashboard turn admits the whole domain", () => {
+      // The control: without it the cases above pass for a rule that never fires.
+      const r = select(NAV_POOL, "take me to voice settings");
+      expect(r.matchedDomains).toContain("data");
+      expect(r.advertised).toEqual(expect.arrayContaining([...NAV_TOOLS, ...DATA_TOOLS]));
+    });
+
+    it("a real data sentence still admits the domain with no page list", () => {
+      // Only the navigation rule is gated; the utilities rule is not.
+      expect(select(PAGELESS_POOL, "what is the weather like").advertised).toContain(
+        "get_weather",
+      );
+    });
+
+    it("holds through effectiveAdvertisedToolNames, the derivation both call sites share", () => {
+      const messages = [{ role: "user", content: "take me to voice settings" }];
+      const dashboard = effectiveAdvertisedToolNames({ mode: "domains", messages, pool: NAV_POOL });
+      const pageless = effectiveAdvertisedToolNames({
+        mode: "domains",
+        messages,
+        pool: PAGELESS_POOL,
+      });
+      expect(dashboard.has("open_dashboard_page")).toBe(true);
+      for (const name of DATA_TOOLS) expect(pageless.has(name), name).toBe(false);
+    });
+  });
+
+  it("reaches the tools by continuity once one has been used", () => {
+    const advertised = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "yes that one",
+      pool: NAV_POOL,
+      conversationToolNames: ["find_dashboard_page"],
+    }).advertised;
+    expect(advertised).toContain("open_dashboard_page");
+  });
+});
+
 describe("WARP-2896 — a workshop run's binding admits the workspace domain; nothing else does", () => {
   const WORKSPACE = [
     "workspace_read",
@@ -1054,5 +1217,210 @@ describe("WARP-2896 — a workshop run's binding admits the workspace domain; no
     expect(advertised.has("control_device")).toBe(true);
     expect(advertised.has("workspace_write")).toBe(true);
     expect(advertised.has("list_network_devices")).toBe(false);
+  });
+});
+
+describe("WARP-2979 — Security questions reach the security domain (ADR-059 P4 §6.12.6)", () => {
+  const SECURITY = ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status", "security_explain_pattern"];
+  const SECURITY_POOL = [...POOL, ...SECURITY];
+  const select = (sentence: string) =>
+    selectAdvertisedTools({ mode: "domains", userMessage: sentence, pool: SECURITY_POOL, conversationToolNames: [] });
+
+  it.each([
+    "anything odd at the back door last night?",
+    "did anything happen while we were away",
+    "any security incidents this week?",
+    "is the stock room covered?",
+    "which areas had people after hours?",
+    // WARP-2980 (P5 PR-E) — what is usual for a place: the box-proof sentence, and the same question asked two ways.
+    "is it normal for someone to be in the stock room at 2 AM?",
+    "was that normal for a Sunday morning?",
+    "what's usual for the loading bay at night?",
+  ])("routes to security: %s", (sentence) => {
+    const r = select(sentence);
+    expect(r.matchedDomains, `"${sentence}" advertised only [${r.advertised.join(", ")}]`).toContain("security");
+    for (const name of SECURITY) expect(r.advertised, name).toContain(name);
+  });
+
+  it.each(["add a dentist appointment tomorrow", "block my son's tablet"])("does not route to security: %s", (sentence) => {
+    const r = select(sentence);
+    expect(r.matchedDomains).not.toContain("security");
+    for (const name of SECURITY) expect(r.advertised, name).not.toContain(name);
+  });
+
+  it("is never in the core pool: pulled in by the turn, or not at all", () => {
+    for (const name of SECURITY) expect(CORE_TOOL_NAMES.has(name), name).toBe(false);
+    for (const name of SECURITY) expect(domainOfTool(name), name).toBe("security");
+  });
+
+  it("a follow-up keeps the domain by continuity", () => {
+    const r = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "and the one before that?",
+      pool: SECURITY_POOL,
+      conversationToolNames: ["security_get_incident"],
+    });
+    expect(r.advertised).toContain("security_list_incidents");
+  });
+
+  // Review #2420 (item 4): the tools' OWN examples — the questions each description tells the model it answers —
+  // must reach them. Read from the catalog, so an example added to a description is checked the day it lands.
+  const EXAMPLE = /(?:^|[\s(])'([^']+\?)'/g;
+  const examples = TOOL_CATALOG.filter((t) => t.domain === "security").flatMap((t) =>
+    [...t.description.matchAll(EXAMPLE)].map((m) => [t.name, m[1]!] as const),
+  );
+
+  it("the descriptions carry examples to check (not vacuous)", () => {
+    expect(examples.length).toBeGreaterThanOrEqual(5);
+    expect(examples.map(([, q]) => q)).toEqual(
+      expect.arrayContaining([
+        "any alerts this week?",
+        "is any camera offline?",
+        "was anyone in the stock room after 9?",
+        // WARP-2980 (PR-E): security_explain_pattern's own.
+        "is it normal for someone to be in the stock room at 2 AM?",
+        "why was this flagged?",
+      ]),
+    );
+  });
+
+  it.each(examples)("%s's own example routes to security: %s", (_tool, question) => {
+    const r = select(question);
+    expect(r.matchedDomains, `"${question}" advertised only [${r.advertised.join(", ")}]`).toContain("security");
+  });
+});
+
+describe("WARP-3280 — contacts and the calculator are reachable from a fresh turn", () => {
+  const CONTACTS_POOL = [...POOL, "search_contacts", "email_search"];
+  const DATA_POOL = [...POOL, "calculate", "get_weather"];
+
+  const advertisedFor = (userMessage: string, pool: string[]) =>
+    selectAdvertisedTools({
+      mode: "domains",
+      userMessage,
+      pool,
+      conversationToolNames: [],
+    }).advertised;
+
+  // The ticket's own four sentences matched NO domain (or, for the second,
+  // not `email`), so the model answered "no contact found" without ever
+  // having search_contacts. MUTATION: drop `contacts?`/`address book`/the
+  // bare-address alternative from the email rule and these go red.
+  describe("contacts — positives", () => {
+    it.each([
+      "Look up the contact alice@example.com.",
+      "Look up charlie@example.com and open the work item from their contact note.",
+      "what's the plumber's number in my contacts?",
+      "is Dana Whitfield in the address book?",
+      "who is bob.smith+work@acme-corp.co.uk?",
+      "find Maria Lopez's contact info",
+    ])("%s advertises search_contacts", (message) => {
+      expect(advertisedFor(message, CONTACTS_POOL)).toContain("search_contacts");
+    });
+  });
+
+  // `contact` as a VERB ("contact me later", "who should I contact about the
+  // boiler") is knowingly admitted: reaching a person is what the email
+  // domain's tools do, and the whole domain is six schemas. What is NOT
+  // admitted is the eyewear and card-payment senses, which want nothing
+  // from an inbox.
+  describe("contacts — negatives", () => {
+    it.each([
+      "I need to reorder my contact lenses",
+      "does the shop take contactless payments?",
+      // An `@` that is not an address: a handle and a time.
+      "follow us @dropletbox",
+      "meet me @ 5",
+      "reorder my contact-lens prescription",
+    ])("%s does not advertise search_contacts", (message) => {
+      expect(advertisedFor(message, CONTACTS_POOL)).not.toContain("search_contacts");
+    });
+  });
+
+  // Knowingly admitted: any `user@host.tld` token is read as an address, so a
+  // git remote or an ssh target advertises the email domain too. Six schemas
+  // is the cheap direction; pinned so a future narrowing is a decision.
+  describe("contacts — address-shaped tokens that are not mail (accepted)", () => {
+    it.each([
+      "clone git@github.com:org/repo for me",
+      "ssh root@droplet.local is refusing my key",
+    ])("%s advertises search_contacts", (message) => {
+      expect(advertisedFor(message, CONTACTS_POOL)).toContain("search_contacts");
+    });
+  });
+
+  // MUTATION: narrow `calculat\w*` back to `calculate`, or drop the
+  // arithmetic-expression alternative, and the matching positive goes red.
+  describe("calculator — positives", () => {
+    it.each([
+      "What is 187 * 43?",
+      "Use the calculator to work out 2+2.",
+      "can you do the math on 1250 × 12 for the annual rent?",
+      "what's 84 / 7",
+      "quick calculation: 15% of 240",
+      "what's 3 x 4.5",
+      "how much is 2^10",
+      "check my arithmetic, 17 - 9 is 8 right?",
+    ])("%s advertises calculate", (message) => {
+      expect(advertisedFor(message, DATA_POOL)).toContain("calculate");
+    });
+  });
+
+  // `-`, `/` and `x` are expressions only with spaces around them; tight,
+  // they are dates, phone numbers, resolutions and part numbers. Bare `sum`
+  // is not claimed ("sum up the thread" is a summary). These sentences carry
+  // no other data word, so they must stay off the domain.
+  describe("calculator — negatives", () => {
+    it.each([
+      "call the landlord on 555-0142",
+      "the 9/11 memorial photo",
+      "is the monitor 1920x1080?",
+      "sum up the thread with Karen",
+      "C++ developer resume",
+    ])("%s does not advertise calculate", (message) => {
+      expect(advertisedFor(message, DATA_POOL)).not.toContain("calculate");
+    });
+  });
+});
+
+// WARP-3280 review — the first bare-address alternative (`[\w.+-]+@…`,
+// unanchored and unbounded) backtracked O(n²): 40k chars took ~3 s, blocking
+// the event loop on every turn and timing out llm-chat.integration.test.ts.
+// `selectAdvertisedTools` tests EVERY `DOMAIN_RULES` pattern (no short
+// circuit), so timing it times every rule. Each input is a worst case for at
+// least one rule shape: a long word run, a run of `.`/`@` separators, a
+// dotted domain with no TLD, whitespace after a digit (the arithmetic `\s*`
+// alternatives), and a repeated `contact` lookahead. The auth-policy userid
+// test is the precedent. MUTATION: restore `[\w.+-]+@[\w-]+(\.[\w-]+)*` and
+// the first case takes seconds.
+//
+// WARP-3116 — `NAVIGATION_RULES` run only for a pool that holds a navigation
+// tool, so a pool without one never times them. Each input therefore runs
+// against BOTH pools, and the last four are worst cases for the navigation
+// shapes (`open|show me` + the bounded `(\w+ ){0,2}`, `where …`).
+describe("WARP-3280 — every domain rule runs in linear time on hostile input", () => {
+  const N = 100_000;
+  const NAV_POOL = [...POOL, "find_dashboard_page", "open_dashboard_page"];
+  it.each([
+    ["word run", "x".repeat(N)],
+    ["dotted run", "a.".repeat(N / 2)],
+    ["at run", "a@".repeat(N / 2)],
+    ["local part, no @", "a".repeat(N) + "@"],
+    ["domain, no TLD", "a@" + "a.".repeat(N / 2) + "1"],
+    ["plus/dash run", "+-".repeat(N / 2) + "@x"],
+    ["digit then spaces", "1" + " ".repeat(N) + "a"],
+    ["digit-space run", "1 ".repeat(N / 2)],
+    ["percent run", "1 % ".repeat(N / 4)],
+    ["contact run", "contact ".repeat(N / 8)],
+    ["open run", "open ".repeat(N / 5)],
+    ["show me run", "show me ".repeat(N / 8)],
+    ["open then words", "open " + "a ".repeat(N / 2)],
+    ["where run", "where ".repeat(N / 6)],
+  ])("%s (%#) decides in under 50 ms", (_label, hostile) => {
+    for (const pool of [POOL, NAV_POOL]) {
+      const started = performance.now();
+      selectAdvertisedTools({ mode: "domains", userMessage: hostile, pool, conversationToolNames: [] });
+      expect(performance.now() - started).toBeLessThan(50);
+    }
   });
 });

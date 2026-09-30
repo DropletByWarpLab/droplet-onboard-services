@@ -178,8 +178,18 @@ the device-id key, and the device-id key never signs an extension.
   manifest are none of them secret, so a kept key would let a promotion the
   previous owner made verify `ok` on the next owner's box. The next owner's
   first promote mints a new key. The reset re-scans the directory and refuses
-  to report a clean reset while the key file survives. Nothing else in the
-  directory is touched (Phase 10 of `tests/factory-reset-secrets-wipe.test.sh`).
+  to report a clean reset while the key file survives, or while it cannot
+  look into the directory at all (unsearchable, and no working sudo).
+  Nothing else in the directory is touched (Phase 10 of
+  `tests/factory-reset-secrets-wipe.test.sh`).
+  A `--backup` reset does not change this: the backup carries the workspace
+  and the database rows but never the TPM directory, so restoring it after a
+  reset leaves every box-signed extension `failed` (`extension_key_changed`)
+  until the owner re-promotes it.
+  The dashboard's Danger Zone reset runs inside the device-bridge unit
+  (`NoNewPrivileges`, `ProtectSystem=strict`), where the key cannot be removed;
+  the gate refuses there rather than reporting a clean reset. Running that
+  route through a root-owned unit is a follow-up.
 
 The verifier is `apps/orchestrator/src/services/update-agent/extension-verify.ts`.
 Keys are chosen by the statement's own `kind`: `extension` accepts the box

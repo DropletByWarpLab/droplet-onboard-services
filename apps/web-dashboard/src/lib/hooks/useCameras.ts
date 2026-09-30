@@ -21,14 +21,19 @@ const CAMERAS_KEY = "/api/cameras";
 const DISCOVERED_KEY = "/api/cameras/discovered";
 const EVENTS_KEY = "/api/cameras/events/recent";
 
-export function useCameras() {
+/**
+ * `enabled: false` pauses every camera poll (null SWR keys). Every camera
+ * route refuses role `guest` and each 403 writes an audited "Access denied"
+ * row, so a caller that can't view cameras must not poll them (WARP-3157).
+ */
+export function useCameras({ enabled = true }: { enabled?: boolean } = {}) {
   const {
     data: cameras,
     error,
     isLoading,
     isValidating,
     mutate,
-  } = useSWR<CameraInfo[]>(CAMERAS_KEY, fetchCameras, {
+  } = useSWR<CameraInfo[]>(enabled ? CAMERAS_KEY : null, fetchCameras, {
     refreshInterval: 10_000,
   });
 
@@ -36,13 +41,13 @@ export function useCameras() {
   // is what lets the page distinguish "nothing on your network" from
   // "nothing is scanning".
   const { data: discovery, mutate: mutateDiscovered } = useSWR<CameraCandidateList>(
-    DISCOVERED_KEY,
+    enabled ? DISCOVERED_KEY : null,
     fetchCameraCandidates,
     { refreshInterval: 30_000 },
   );
 
   const { data: recentEvents } = useSWR<DetectionEvent[]>(
-    EVENTS_KEY,
+    enabled ? EVENTS_KEY : null,
     () => fetchCameraEvents(10),
     { refreshInterval: 10_000 }
   );

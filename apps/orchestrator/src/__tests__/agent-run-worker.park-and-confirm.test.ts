@@ -112,7 +112,7 @@ function interceptingMcp(
   tools: string[],
   tier2: Set<string>,
   denied: Set<string> = new Set(),
-  opts: { refuseRedeem?: boolean; throwOnRedeem?: boolean; challengeAsError?: boolean } = {},
+  opts: { refuseRedeem?: boolean; throwOnRedeem?: boolean; challengeAsError?: boolean; result?: unknown } = {},
 ) {
   let minted = 0;
   const live = new Set<string>();
@@ -168,7 +168,7 @@ function interceptingMcp(
         }
       }
       executed.push({ name, args, token: ctx?.confirmationToken });
-      return wire({ ok: true, tool: name });
+      return wire(opts.result ?? { ok: true, tool: name });
     },
   );
   return {
@@ -1061,6 +1061,33 @@ describe("agent runs — an approved park runs the STORED call; the model never 
     expect(done.result).toBe("The fact was not saved.");
     expect(JSON.stringify(model.seen)).not.toMatch(/tok-\d/);
     expect(rowText(done)).not.toMatch(/tok-\d/);
+  });
+
+  it("WARP-3282 — an approved call's result is scrubbed of credentials before the model, the messages and the trace see it", async () => {
+    // Every imported remote MCP tool defaults to requiresConfirmation, so a
+    // READ can park; its result then enters the conversation HERE, not in
+    // the loop. Same scrub, same placeholder.
+    const SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const model = rewordingModel();
+    const { db, id, mcp } = await parked(model, {
+      mcp: { result: { ok: true, page: `deploy notes\nexport AWS_SECRET_ACCESS_KEY="${SECRET}"\n` } },
+    });
+    expect(await decide(db, id, "approved")).toMatchObject({ ok: true });
+
+    await resume(db, mcp, model);
+
+    const done = db.row(id);
+    expect(done.status).toBe("succeeded");
+    expect(mcp.executed).toHaveLength(1);
+    const reply = model.seen[1]!.find((m) => m.role === "tool" && m.tool_call_id === "c1")!;
+    expect(String(reply.content)).not.toContain(SECRET);
+    expect(JSON.parse(String(reply.content))).toMatchObject({
+      ok: true,
+      page: 'deploy notes\nexport AWS_SECRET_ACCESS_KEY="[credential redacted]"\n',
+    });
+    // Neither persisted column holds it.
+    expect(JSON.stringify(done.messages)).not.toContain(SECRET);
+    expect(JSON.stringify(done.trace)).not.toContain(SECRET);
   });
 
   it("a run whose wall clock ran out while it waited in the queue does not run the approved call", async () => {

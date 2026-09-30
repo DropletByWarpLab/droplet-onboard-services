@@ -1,4 +1,5 @@
 import { memo, useRef, useState } from "react";
+import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -23,6 +24,7 @@ import {
 } from "lucide-react";
 import type { ChatMessage as ChatMessageType, ChatToolCall } from "@/lib/types";
 import { CodeBlock } from "@/components/CodeBlock";
+import { safeNext } from "@/lib/safe-next";
 import { CitationCard } from "@/components/citations/CitationCard";
 import { AttachmentChip } from "@/components/AttachmentChip";
 import { mimeFromPath } from "@/lib/mime-icons";
@@ -32,6 +34,23 @@ import { RunCard, RunResultCard, runIdOf } from "@/components/chat/RunCard";
 import { SAFE_MARKDOWN_COMPONENTS } from "@/components/chat/safe-markdown";
 import { splitReasoningSteps } from "@/components/chat/reasoning-trace";
 import "@/components/chat/thinking.css";
+
+const SafeLink = SAFE_MARKDOWN_COMPONENTS.a;
+
+/**
+ * WARP-3116 — whether a model-written link is a dashboard page, to be routed
+ * client-side. Same-origin by `safeNext`, the hardened check (`/\evil`,
+ * `//evil`, `/..//evil`): only a path it returns unchanged counts. `/api/…` is
+ * a resource the orchestrator serves, not a page, so it is never one.
+ */
+function isDashboardPath(href: string | undefined): href is string {
+  return (
+    typeof href === "string" &&
+    href.startsWith("/") &&
+    !/^\/api(?:[/?#]|$)/.test(href) &&
+    safeNext(href) === href
+  );
+}
 
 // ReasoningDisclosure ("Thought process") moved to
 // @/components/chat/ReasoningDisclosure (WARP-934) so the in-app chat and the
@@ -297,7 +316,7 @@ export const ChatMessage = memo(function ChatMessage({
       {/* Bubble + meta. group/message lets the action toolbar surface on
           hover OR keyboard focus (focus-within) without prop-drilling
           state up. */}
-      <div className={`msg-col group/message ${isUser ? "items-end" : "items-start"}`}>
+      <div className={`msg-col group/message ${isUser ? "items-end" : "is-assistant items-start"}`}>
       <div
         className={`msg-bubble ${isUser ? "is-user" : "is-assistant"}`}
         // role="status" + aria-live="polite" on the streaming assistant
@@ -455,6 +474,18 @@ export const ChatMessage = memo(function ChatMessage({
                   ),
                   // Per-block hover copy button (Claude-chat parity).
                   pre: ({ node, ...props }) => <CodeBlock {...props} />,
+                  // WARP-3116 — a dashboard page ("[Voice](/voice)", as the
+                  // dashboard-page tools hand back) routes client-side instead
+                  // of reloading the whole app. Every other link, including a
+                  // same-origin `/api/` resource such as a camera snapshot,
+                  // stays on SEC-INJ-1's SafeLink (new tab, no Referer, no
+                  // window.opener) — this key replaces the spread's `a`.
+                  a: ({ node, ...props }) =>
+                    isDashboardPath(props.href) ? (
+                      <Link {...props} href={props.href} />
+                    ) : (
+                      <SafeLink {...props} />
+                    ),
                 }}
               >
                 {message.content}
@@ -726,7 +757,7 @@ function FailureChip({
     missing: {
       Icon: Ghost,
       copy: "No reply was saved for this turn.",
-      tone: "bg-surface-tertiary/40 text-label-tertiary border border-dashed border-separator",
+      tone: "msg-missing-chip bg-surface-tertiary/40 text-label-tertiary border border-dashed border-separator",
       role: "status" as const,
     },
   } satisfies Record<NonNullable<ChatMessageType["failureKind"]>, {
@@ -811,7 +842,7 @@ function ToolCallChip({ call }: { call: ChatToolCall }) {
 
   return (
     <span
-      className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full type-caption-1 ${tone}`}
+      className={`msg-tool-chip${pending ? " is-pending" : ""} inline-flex items-center gap-1.5 px-2 py-1 rounded-full type-caption-1 ${tone}`}
       data-tool-call-id={call.id}
       data-tool-name={call.name}
       data-tool-status={call.status ?? (pending ? "pending" : ok ? "ok" : "error")}

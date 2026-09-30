@@ -156,6 +156,8 @@ const MAX_FILE_BYTES = 50 * 1024 * 1024;
 
 const upload = multer({
   storage: multer.memoryStorage(),
+  // WARP-3057: a plain `filename=` is UTF-8, not latin1.
+  defParamCharset: "utf8",
   limits: { fileSize: MAX_FILE_BYTES },
 });
 

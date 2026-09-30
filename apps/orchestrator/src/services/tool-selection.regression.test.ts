@@ -303,6 +303,29 @@ const TURNS: Turn[] = [
     message: "what did we bill last week",
     requires: "cloud_query_dataset",
   },
+  {
+    // WARP-2980 (ADR-059 P5 PR-E) — the box-proof sentence from the spec, word
+    // for word. It names no Security vocabulary at all ("someone" only pulls
+    // `cameras`), which is exactly how the tool would ship advertised on zero
+    // of the turns it exists for.
+    label: "security / what is usual for a place at an hour",
+    message: "is it normal for someone to be in the stock room at 2 AM?",
+    requires: "security_explain_pattern",
+  },
+  // WARP-3280 — two sentences from the agent-loop eval that matched NO
+  // domain, so the model never had the tool: it answered "no contact found"
+  // without searching, and did the multiplication in its head. Run through
+  // the real shipping pool, so an exclusion upstream would also show here.
+  {
+    label: "email / a contact looked up by address alone",
+    message: "Look up the contact alice@example.com.",
+    requires: "search_contacts",
+  },
+  {
+    label: "data / bare arithmetic",
+    message: "What is 187 * 43?",
+    requires: "calculate",
+  },
 ];
 
 const select = (t: Turn) =>

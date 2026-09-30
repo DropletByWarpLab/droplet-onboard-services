@@ -72,7 +72,15 @@ function mkApp(findMany: ReturnType<typeof vi.fn>) {
     };
     next();
   });
-  const prisma = { workspaceLocation: { findMany } };
+  // WARP-3264 — these cases exercise the online leg, so the owner has
+  // turned `place_lookup` on. The default-off path is pinned in
+  // calendar.places-offline.test.ts.
+  const prisma = {
+    workspaceLocation: { findMany },
+    offLanAllowlistChannel: {
+      findUnique: vi.fn().mockResolvedValue({ key: "place_lookup", enabled: true }),
+    },
+  };
   app.use("/api", createCalendarRouter(prisma as never));
   return app;
 }

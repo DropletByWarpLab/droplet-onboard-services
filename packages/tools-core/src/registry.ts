@@ -236,6 +236,10 @@ import translateText from "./handlers/data/translate-text.js";
 // /api/web routes — ambient_data off-LAN channel, fail-closed.
 import getWeather from "./handlers/data/get-weather.js";
 import currencyConvert from "./handlers/data/currency-convert.js";
+// data (WARP-3116): dashboard navigation — resolve a page from the list the
+// dashboard sent with the turn; the dashboard does the moving.
+import findDashboardPage from "./handlers/dashboard/find-dashboard-page.js";
+import openDashboardPage from "./handlers/dashboard/open-dashboard-page.js";
 // WARP-2180: durable background runs (epic WARP-2176)
 import startAgentRun from "./handlers/agent-runs/start-agent-run.js";
 import listAgentRuns from "./handlers/agent-runs/list-agent-runs.js";
@@ -252,6 +256,15 @@ import workspaceWrite from "./handlers/workspace/workspace-write.js";
 import workspaceCommit from "./handlers/workspace/workspace-commit.js";
 import workspaceRun from "./handlers/workspace/workspace-run.js";
 import workspacePropose from "./handlers/workspace/workspace-propose.js";
+// WARP-2979 (ADR-059 P4 §6.12): Security — four READ-ONLY tools over the
+// orchestrator's assistant routes (routes/security-assistant.ts), which admit
+// only the MCP principal and scope every answer to the person it acts for.
+import securityListIncidents from "./handlers/security/security-list-incidents.js";
+import securityGetIncident from "./handlers/security/security-get-incident.js";
+import securitySearchEvents from "./handlers/security/security-search-events.js";
+import securityZoneStatus from "./handlers/security/security-zone-status.js";
+// WARP-2980 (ADR-059 P5 PR-E): what normal looks like for one place — A5 on the same router.
+import securityExplainPattern from "./handlers/security/security-explain-pattern.js";
 
 const allTools: Tool[] = [
   // network
@@ -438,6 +451,10 @@ const allTools: Tool[] = [
   // WARP-1436: ambient web data (Tier-1; screened egress via /api/web)
   getWeather,
   currencyConvert,
+  // WARP-3116: dashboard navigation (Tier-1; pure lookup over the page list
+  // the dashboard sent — the handler moves nothing, the dashboard routes)
+  findDashboardPage,
+  openDashboardPage,
   // WARP-2180: background agent runs — start is Tier-2 (unattended compute),
   // list is Tier-1. The worker keeps start_agent_run OUT of a run's pool.
   startAgentRun,
@@ -466,6 +483,15 @@ const allTools: Tool[] = [
   workspaceCommit,
   workspaceRun,
   workspacePropose,
+  // WARP-2979 (ADR-059 P4 §6.12.4): Security. Every one Tier-1 read — no
+  // write, no confirmation, and none ever may be (ADR-055 §11.5; the domain
+  // pin in __tests__/registry.test.ts). Security never goes to a cloud model
+  // (the orchestrator's OFF_LAN_WITHHELD_DOMAINS and the history rule).
+  securityListIncidents,
+  securityGetIncident,
+  securitySearchEvents,
+  securityZoneStatus,
+  securityExplainPattern,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));

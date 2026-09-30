@@ -45,7 +45,7 @@ async function handler(
       status: "error",
       error: {
         code: "FORBIDDEN",
-        message: "email analysis is available to owner, admin, and family roles only",
+        message: "email analysis is available to owner, admin, and member roles only",
       },
     };
   }

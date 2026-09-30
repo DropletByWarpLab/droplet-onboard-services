@@ -227,7 +227,8 @@ async function handler(
   if (!roster.ok) return roster.result;
   const resolved = resolveRecipients(roster, recipients);
   if (!resolved.ok) return resolved.result;
-  recipients = resolved.others.map((c) => c.username);
+  // resolveRecipients only matches rows that carry a username.
+  recipients = resolved.others.flatMap((c) => (c.username ? [c.username] : []));
   const threadRes = await ctx.http.orchestrator.post(
     "/api/team-chat/threads",
     {

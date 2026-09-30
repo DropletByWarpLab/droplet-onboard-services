@@ -121,10 +121,12 @@ import {
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 import { isGatewayPreempted } from "../lib/gateway-preempted.js";
+import { redactToolResult } from "../lib/log-redaction.js";
 import type { ChatMessage } from "../types/index.js";
 import { contentToText } from "../types/index.js";
 import { chatRunBrief, deliverRunResults } from "./agent-run-result.service.js";
 import {
+  isConfirmationEnvelope,
   runAgent,
   type AgentCheckpointPort,
   type AgentDeps,
@@ -759,15 +761,6 @@ function interceptorTokenOf(text: string): string | null {
   }
 }
 
-/** Any `status: "confirmation_required"` envelope — a challenge or a refused token. */
-function isConfirmationEnvelope(text: string): boolean {
-  try {
-    return (JSON.parse(text) as { status?: unknown })?.status === "confirmation_required";
-  } catch {
-    return false;
-  }
-}
-
 /**
  * WARP-2179 — a challenge payload carries the interceptor's minted token
  * (twice: nested and, for the WARP-640 chip, flat). Nothing persisted about
@@ -1342,6 +1335,15 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     // Wrapped the way the loop wraps a live dispatch (ORCH-05): a thrown
     // dispatch is a bounded tool error the model can recover from, never the
     // death of a run whose whole point is surviving transient failures.
+    //
+    // WARP-3282 — and scrubbed of credentials the way the loop scrubs one,
+    // because an approved call's result enters the conversation HERE, not in
+    // the loop: the trace entry, the persisted messages and the model all
+    // read this text. A read can park (every imported remote MCP tool
+    // defaults to requiresConfirmation), so this is a document-reading path.
+    // The interceptor's camelCase `confirmationToken` matches no rule and a
+    // result with nothing to redact is byte-identical, so the handshake's
+    // token read is unaffected. Count only in the log — never the value.
     const dispatch = async (
       tool: string,
       args: Record<string, unknown>,
@@ -1349,7 +1351,11 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     ): Promise<{ text: string; isError: boolean }> => {
       try {
         const r = await deps.agent.mcp.callTool(tool, args, ctx);
-        return { text: r.content[0]?.text ?? "{}", isError: Boolean(r.isError) };
+        const { text, count } = redactToolResult(r.content[0]?.text ?? "{}");
+        if (count > 0) {
+          logger.info({ runId, tool, redacted: count }, "agent_tool_result_credentials_redacted");
+        }
+        return { text, isError: Boolean(r.isError) };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return {
@@ -2031,7 +2037,8 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     switch (result.stop_reason) {
       case "model_done":
       case "context_budget":
-      case "repetition": {
+      case "repetition":
+      case "no_progress": {
         const text = contentToText(result.message.content);
         await finish(runId, {
           status: "succeeded",

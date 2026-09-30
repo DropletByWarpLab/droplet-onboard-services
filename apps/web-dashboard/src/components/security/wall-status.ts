@@ -24,7 +24,7 @@ export const WALL_COPY = {
   // Plain words: "wall" is our name for it, not the person's.
   link: "TV view",
   // D6: the tier is tierLabel("family"), pinned in wall-status.test.
-  linkTitle: "A full-screen view for a TV signed in with a Staff account. It shows that account's cameras.",
+  linkTitle: "A full-screen view for a TV signed in with a Member account. It shows that account's cameras.",
   heading: "Security TV view",
   leave: "Back to Security",
   fullScreen: "Full screen",
@@ -40,7 +40,7 @@ export const WALL_COPY = {
   // One tile per camera; {camera} is the name the household gave it.
   tileAlt: "{camera}, latest picture",
   tileConnecting: "Connecting…",
-  // Short: it sits on the picture, which can be 72 px high, and the tile keeps asking without saying so.
+  // Short: it sits on the picture, which can be 72 px high or less on a TV, and the tile keeps asking without saying so.
   tileLost: "No picture yet",
   tileStale: "Picture from {time}",
   tileNotSending: "Not sending pictures",
@@ -65,7 +65,6 @@ export const WALL_COPY = {
   quietMany: "{n} quiet",
   notSetUpOne: "1 not set up",
   notSetUpMany: "{n} not set up",
-  otherSource: "Another source",
 
   updatedLabel: "Updated",
   unknownValue: "—",
@@ -77,15 +76,15 @@ export const WALL_COPY = {
   offlineBody: "What you see is from {time}.",
   signOutSoon: "This screen will be signed out by {time} at the latest. Someone will need to sign in again to keep it on.",
 
-  // D6 (Stefan: "Member wall, own cameras") — the wall runs on a Staff account only. {tier} is tierLabel("family").
+  // D6 (Stefan: "Member wall, own cameras") — the wall runs on a Member account only. {tier} is tierLabel("family").
   // The device is named "this screen", as on the wall's banners: the refusal is as often a laptop's as a TV's.
   refusedTitle: "This TV view doesn't run on an owner or admin account",
   refusedWhy: "An owner or admin account can reach nearly everything in Droplet, and a TV stays signed in, in a room, for hours.",
-  refusedGuestTitle: "This TV view doesn't run on a guest account",
-  refusedGuestWhy: "A guest account can't see Security or its cameras, so there is nothing to show here.",
+  refusedGuestTitle: "This TV view doesn't run on an external guest account",
+  refusedGuestWhy: "An external guest account can't see Security or its cameras, so there is nothing to show here.",
   refusedWhat: "Sign in here with a {tier} account instead. This screen then shows only the cameras that account has been given.",
-  // Non-blocking 1 (rjouffret, round 3): a Staff account holds Security at Respond by default (the mode, acknowledging);
-  // a role based on Staff with Security at View has the server refuse those. Words as the role builder shows them.
+  // Non-blocking 1 (rjouffret, round 3): a Member account holds Security at Respond by default (the mode, acknowledging);
+  // a role based on Member with Security at View has the server refuse those. Words as the role builder shows them.
   refusedManage:
     "It's best to make an account just for this screen. On the Users page, add it and choose its cameras. Then in Roles & access, give it a role based on {tier} with Cameras on and Security set to View, so it can't change the site mode or acknowledge alerts.",
   refusedManageLink: "Open Users",
@@ -100,7 +99,7 @@ export const WALL_COPY = {
 } as const;
 
 /**
- * D6 — the one role a wall runs for: Staff (`family`). An owner or admin
+ * D6 — the one role a wall runs for: Member (`family`). An owner or admin
  * session is refused (Stefan: "Member wall, own cameras"): a TV stays signed
  * in, unattended, in a room, one click from everything that account can do.
  * A guest is refused too: every read the wall makes (route 17's counts,
@@ -126,23 +125,54 @@ export const WALL_TILE_STALE_AFTER_MS = 15_000;
 /** The render clock: "Updated", staleness and the sign-out warning are re-judged this often. */
 export const WALL_TICK_MS = 5_000;
 
+/** A picture is kept at least this high while any grid can give it that (wall.css has no floor of its own on a TV). */
+export const WALL_TILE_MIN_PICTURE_PX = 72;
+/** wall.css `.sec-wall-tiles`: the gap between tiles. */
+const TILE_GAP_PX = 8;
+/**
+ * What a tile spends besides its picture: its caption (one line at the smallest type, 14 px × 1.5 plus 16 px of
+ * padding) and its two 1 px borders. An estimate that only ranks grids against each other: wall.css does the fitting.
+ */
+const TILE_CHROME_PX = 39;
+
 /**
  * The camera tiles' grid on a TV: the nearest square that holds them, wider
  * than tall (1 → 1×1, 2 → 2×1, 3–4 → 2×2, 5–6 → 3×2, 7–9 → 3×3, 10–12 → 4×3),
- * so the tiles share the space the strip leaves (wall.css keeps each picture
- * at least 72 px high, and scrolls the page a little when that doesn't fit).
+ * so the tiles share the space the strip leaves.
+ *
+ * `area` is the tiles' own box (their content, inside the padding). When the
+ * near-square grid would leave a picture under WALL_TILE_MIN_PICTURE_PX high
+ * (a 1080p TV browser at 960×540 with 12 cameras, a banner and two sources
+ * down: the strip and the banners come first, the tiles get what is left),
+ * it is replaced by the grid whose pictures are largest (12 cameras in a
+ * 928 × 208 px box → 6×2, not 4×3); a tie keeps the earlier grid, the
+ * near-square one first. Without `area`, or before it is measured, it is the
+ * near-square grid.
  */
-export function tileGrid(n: number): { cols: number; rows: number } {
-  const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
-  return { cols, rows: Math.max(1, Math.ceil(n / cols)) };
+export function tileGrid(n: number, area?: { width: number; height: number }): { cols: number; rows: number } {
+  const grid = (cols: number) => ({ cols, rows: Math.max(1, Math.ceil(n / cols)) });
+  const near = grid(Math.max(1, Math.ceil(Math.sqrt(n))));
+  if (!area || !(area.width > 0) || !(area.height > 0)) return near;
+  const frameH = (g: { rows: number }) => (area.height - (g.rows - 1) * TILE_GAP_PX) / g.rows - TILE_CHROME_PX;
+  if (frameH(near) >= WALL_TILE_MIN_PICTURE_PX) return near;
+  // The tallest 16:9 picture the frame holds: as high as the frame, or as wide as the cell allows.
+  const pictureH = (g: { cols: number; rows: number }) =>
+    Math.min(frameH(g), (((area.width - (g.cols - 1) * TILE_GAP_PX) / g.cols) * 9) / 16);
+  let best = near;
+  for (let cols = 1; cols <= n; cols++) {
+    const g = grid(cols);
+    if (pictureH(g) > pictureH(best)) best = g;
+  }
+  return best;
 }
 
 /**
  * What each /security health row is to the wall. Only event SOURCES count in
  * the sources cell (ADR §3.2): `patterns` reads quiet for its 14 learning
- * days, `retention` and `alerts` feed nothing on screen, `site_mode` is the
- * mode cell's and `incidents` the needs-attention cell's. A `Record`, so a new
- * row id (locks, summaries) cannot land without being classified here.
+ * days, `links` is off whenever linking is, `retention` and `alerts` feed
+ * nothing on screen, `site_mode` is the mode cell's and `incidents` the
+ * needs-attention cell's. A `Record`, so a new row id (locks, summaries)
+ * cannot land in the type without being classified here.
  */
 export type WallRowRole = "source" | "engine" | "mode" | "other";
 export const WALL_ROW_ROLE: Record<SecurityHealthRow["id"], WallRowRole> = {
@@ -152,13 +182,20 @@ export const WALL_ROW_ROLE: Record<SecurityHealthRow["id"], WallRowRole> = {
   site_mode: "mode",
   incidents: "engine",
   alerts: "other",
+  links: "other",
+  summaries: "other",
   patterns: "other",
   retention: "other",
 };
 
-/** The source rows, in the server's order. An id this build does not know counts as a source: never hide what we can't classify. */
+/**
+ * The source rows, in the server's order. An id this build does not know is
+ * never a source (#2423 review 13): the cell claims only what it can name —
+ * an unclassified job row (`links` with linking off, before it was listed
+ * here) read "1 not set up" on every staff wall.
+ */
 export function sourceRows(rows: readonly SecurityHealthRow[]): SecurityHealthRow[] {
-  return rows.filter((r) => (WALL_ROW_ROLE[r.id] ?? "source") === "source");
+  return rows.filter((r) => WALL_ROW_ROLE[r.id] === "source");
 }
 
 /** "{n} things", or its singular. */

@@ -19,6 +19,7 @@ import {
   incidentVisibilityWhere,
   projectIncident,
   projectedLastActivity,
+  reasonVisibleTo,
   visibleReasonWhere,
   type IncidentRowForView,
   type IncidentViewer,
@@ -68,6 +69,8 @@ function reason(code: ReasonRowForView["code"], camera: string | null, severity:
     evidenceAt: T,
     evidenceSummary: "x",
     detail: {},
+    relatedCamera: null,
+    relatedLock: false,
   };
 }
 
@@ -268,7 +271,14 @@ describe("the list's SQL mirrors the projection (DS-005 in the query, visibility
 
   it("a visible reason is one on a visible camera (or a site-wide one on a visible incident)", () => {
     expect(visibleReasonWhere(owner)).toEqual({});
-    expect(visibleReasonWhere(frontOnly)).toEqual({ OR: [{ evidenceCamera: { in: ["front"] } }, { evidenceCamera: null }] });
+    // WARP-2979 — plus the reason's related camera (where a person was seen) and, until PR-4's mayReadLocks, no related lock.
+    expect(visibleReasonWhere(frontOnly)).toEqual({
+      AND: [
+        { OR: [{ evidenceCamera: { in: ["front"] } }, { evidenceCamera: null }] },
+        { OR: [{ relatedCamera: null }, { relatedCamera: { in: ["front"] } }] },
+        { relatedLock: false },
+      ],
+    });
   });
 
   it("the visibility clause is AND[0], and `severity=alert` counts only VISIBLE alert codes", () => {
@@ -386,5 +396,49 @@ describe("judgeableCodes (D16, review item 3) — visible counted codes plus the
   it("family on a trial-only incident → nothing (flags are owner/admin's in PR-B)", () => {
     const p = projectIncident(incident({ severity: "info", state: "no_action", reasonCodes: [] }), [], frontOnly, NOW)!;
     expect(judgeableCodes(p, [f("out_of_place")], frontOnly)).toEqual([]);
+  });
+});
+
+// ── WARP-2979 (p4-spec §6.7.2): the related camera ─────────────────────────
+
+describe("reasonVisibleTo — the one rule, with the camera where a person was seen", () => {
+  const dropped = (evidenceCamera: string, relatedCamera: string | null): ReasonRowForView => ({
+    ...reason("camera_offline_during_activity", evidenceCamera, "alert"),
+    evidenceKind: "camera_offline",
+    relatedCamera,
+  });
+
+  it("a hidden related camera hides the reason — even when the camera that dropped is visible", () => {
+    expect(reasonVisibleTo(dropped("front", "back"), frontOnly, false)).toBe(false);
+    expect(reasonVisibleTo(dropped("front", "front"), frontOnly, false)).toBe(true);
+    expect(reasonVisibleTo(dropped("front", null), frontOnly, false)).toBe(true);
+    expect(reasonVisibleTo(dropped("back", "front"), frontOnly, false)).toBe(false);
+    expect(reasonVisibleTo(dropped("front", "back"), owner, false)).toBe(true);
+  });
+
+  it("a related lock is shown only to a viewer who sees every camera (PR-4 makes it mayReadLocks)", () => {
+    const lock = { ...dropped("front", null), relatedLock: true };
+    expect(reasonVisibleTo(lock, frontOnly, false)).toBe(false);
+    expect(reasonVisibleTo(lock, owner, false)).toBe(true);
+  });
+
+  it("projectIncident uses it: the reason drops out, and the visible severity with it — a PARTIAL view, never actionable", () => {
+    const p = projectIncident(
+      incident({ reasonCodes: ["camera_offline", "camera_offline_during_activity"] }),
+      [dropped("front", "back"), reason("camera_offline", "front", "notice")],
+      frontOnly,
+      NOW,
+    )!;
+    expect(p.codes).toEqual(["camera_offline"]);
+    expect(p.severity).toBe("notice");
+    expect(p.partial).toBe(true);
+    expect(p.actionable).toBe(false);
+    const owners = projectIncident(incident(), [dropped("front", "back")], owner, NOW)!;
+    expect(owners).toMatchObject({ codes: ["camera_offline_during_activity"], severity: "alert", partial: false });
+  });
+
+  it("the list's filter shape carries the related-camera clause (route 16's SQL twin)", () => {
+    const w = incidentListWhere(frontOnly, { state: "all", severity: "alert" }) as { AND: unknown[] };
+    expect(JSON.stringify(w)).toContain('"relatedCamera":{"in":["front"]}');
   });
 });

@@ -261,10 +261,13 @@ function normalizeGrants(args: {
   connectorGrants: Array<{ provider: string; level: ConnectorLevel }>;
   mayOperateLocks: boolean;
 }): NormalizedGrants {
-  const featureGrants = args.featureGrants.map((g) => ({
-    moduleId: g.moduleId as ModuleId,
-    level: clampLevel(args.startingPoint, g.moduleId, g.level),
-  }));
+  // `null` from the clamp = this starting point may hold NO grant on the module
+  // (doors below admin, ADR-055): the row is not written, exactly as an
+  // unheldable connector grant is not (below).
+  const featureGrants = args.featureGrants.flatMap((g) => {
+    const level = clampLevel(args.startingPoint, g.moduleId, g.level);
+    return level === null ? [] : [{ moduleId: g.moduleId as ModuleId, level }];
+  });
   // O-2's connector floors, both of them, from the one authoritative helper:
   // read_write only on Admin-based roles, and (WARP-1578) NO grant at all on
   // Guest-based roles — a guest sits below O-2's family-and-up read floor, so

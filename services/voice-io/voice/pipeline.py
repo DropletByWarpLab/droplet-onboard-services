@@ -53,7 +53,9 @@ Status:
   last_wake_at / last_wake_score / last_wake_model
   last_transcript / last_transcript_at
   stt_loaded — true iff the STT server was reachable at startup
-  error_message (only set in 'error' state)
+  error_message — the latched fault in 'error'; otherwise why the last
+    voice turn failed (TTS / playback / LLM stream — the pipeline keeps
+    listening, WARP-3199), cleared by the next wake
 
 `wake_detected` and `transcript_ready` are transient UI hints that
 auto-decay to `listening` after `WAKE_VISUAL_DECAY_S` seconds (2 s by
@@ -95,6 +97,11 @@ from voice.wake import (
 )
 
 logger = logging.getLogger("voice.pipeline")
+
+# What a TTS server fault looks like from WyomingTTS.synthesize — it reuses
+# stt.py's wire helpers, so a mid-event drop is STTUnavailable. Any other
+# exception out of synthesize is a bug and is logged with its traceback.
+_TTS_WIRE_FAULTS = (TTSUnavailable, STTUnavailable)
 
 
 class _DeviceError(Exception):
@@ -306,6 +313,15 @@ DEFAULT_CALIBRATION_MODE_TTL_S = 90.0
 # room reverb, short enough that a deliberate second "hey jarvis" still
 # wakes promptly.
 DEFAULT_POST_SPEAK_COOLDOWN_S = 2.0
+
+# Warm on wake (WARP-3127). A fired wake asks the orchestrator to start
+# loading the chat model (LLMClient.warm → POST /api/llm/warm), so a reload
+# after WARP-1826's 5 min residency overlaps the person speaking + STT
+# instead of starting once the transcript lands. At most one warm per this
+# window: a conversation's back-to-back wakes find the model resident
+# anyway, and the orchestrator side is probe-first and in-flight-guarded.
+# Monotonic, so a wall-clock step can't suppress or double the warm.
+DEFAULT_LLM_WARM_DEBOUNCE_S = 60.0
 
 # End-of-speech (VAD) for the STT capture window. Once the user has
 # actually started talking, the capture ends after a short run of
@@ -766,6 +782,11 @@ class WakePipeline:
         # LLM — commit 7. None disables the closed-loop behaviour;
         # transcript still lands in /voice/status but isn't spoken.
         self._llm = llm
+        # Warm on wake (WARP-3127) — monotonic stamp of the last warm handed
+        # off, and the daemon thread carrying it. Written only from the
+        # 'wake-pipeline' thread (_run_wake_detect → _maybe_warm_llm).
+        self._llm_warm_at: Optional[float] = None
+        self._llm_warm_thread: Optional[threading.Thread] = None
         # How often the background probe thread re-checks STT/TTS/LLM
         # reachability. Without this, an upstream that came up AFTER
         # voice-io (common at boot when whisper / piper / ai-
@@ -1135,6 +1156,61 @@ class WakePipeline:
         except Exception:  # pragma: no cover — defensive
             logger.exception("activity reporter raised (event dropped)")
 
+    # ──────────────────────────────────────────────────────────────
+    # Warm on wake (WARP-3127)
+    # ──────────────────────────────────────────────────────────────
+
+    def _maybe_warm_llm(self) -> None:
+        """Ask the LLM backend to start loading its model — off-thread.
+
+        Called from the wake-fire site on the 'wake-pipeline' capture thread,
+        so it must never block and never raise: the warm itself runs on a
+        short-lived daemon thread ('llm-warm') and this returns as soon as
+        that thread is started. Skipped when:
+
+          - there is no LLM (nothing to warm);
+          - STT is absent or unreachable: the interaction ends at the
+            detection (wake_heard), no turn follows, so a load would only
+            take the GPU;
+          - a warm was handed off less than DEFAULT_LLM_WARM_DEBOUNCE_S ago
+            (monotonic), or the previous one is still running.
+
+        Every failure is swallowed at DEBUG: a missed warm only loses the
+        head start — the turn itself still loads the model.
+        """
+        try:
+            llm = self._llm
+            if llm is None:
+                return
+            if self._stt is None or not self._stt_available:
+                return
+            now = time.monotonic()
+            if (
+                self._llm_warm_at is not None
+                and now - self._llm_warm_at < DEFAULT_LLM_WARM_DEBOUNCE_S
+            ):
+                return
+            previous = self._llm_warm_thread
+            if previous is not None and previous.is_alive():
+                return
+            self._llm_warm_at = now
+            thread = threading.Thread(
+                target=self._warm_llm_worker, args=(llm,),
+                name="llm-warm", daemon=True,
+            )
+            self._llm_warm_thread = thread
+            thread.start()
+        except Exception:
+            logger.debug("llm warm hand-off failed (ignored)", exc_info=True)
+
+    @staticmethod
+    def _warm_llm_worker(llm: LLMClient) -> None:
+        """Body of the 'llm-warm' thread. Never lets an exception escape."""
+        try:
+            llm.warm()
+        except Exception:
+            logger.debug("llm warm raised (ignored)", exc_info=True)
+
     def _check_flatline_transition(self) -> None:
         """Emit dsp_wedge / dsp_recovered on `input_flatlined` edges.
 
@@ -1314,14 +1390,27 @@ class WakePipeline:
             # for that state).
             with self._lock:
                 prev_state = self._state
-                self._state = "speaking"
+                # A latched fault already drops every frame, so anti-feedback
+                # holds without 'speaking' — and entering it would let the
+                # restore / _fail_turn below report a deaf pipeline as
+                # 'listening' with /health 200 (WARP-3199).
+                if prev_state not in ("error", "no_mic"):
+                    self._state = "speaking"
                 self._last_response = text
                 self._last_response_at = time.time()
 
             try:
                 audio = self._tts.synthesize(text, voice=voice)
-            except TTSUnavailable as exc:
-                self._set_error(f"TTS synthesize failed: {exc}")
+            except Exception as exc:  # noqa: BLE001 — any synth failure ends the turn
+                # Not just TTSUnavailable: WyomingTTS reuses stt.py's wire
+                # helpers, so Piper dropping mid-event raises STTUnavailable.
+                # Escaping here stranded the pipeline in 'speaking' (WARP-3199).
+                # Anything else is a bug — keep its traceback.
+                logger.warning(
+                    "TTS synthesize failed: %r", exc,
+                    exc_info=not isinstance(exc, _TTS_WIRE_FAULTS),
+                )
+                self._fail_turn(f"TTS synthesize failed: {exc}")
                 return {"ok": False, "error": str(exc), "duration_s": 0.0}
 
             # Play. Skip if the synthesized audio is empty (e.g. empty text).
@@ -1332,16 +1421,13 @@ class WakePipeline:
             try:
                 self._play_pcm(audio)
             except Exception as exc:
-                self._set_error(f"playback failed: {exc}")
                 # Mid-playback failure still drove the speaker for some of
                 # the reply, so the same anti-feedback window applies: the
                 # partial Piper output can bleed into the mic and score
                 # above threshold. Arm the post-speak cooldown here too —
                 # _restore_state_after_speak (which normally sets it) does
-                # NOT run on this path because _set_error moved us out of
-                # 'speaking' into 'error'.
-                with self._lock:
-                    self._speak_ended_at = time.time()
+                # NOT run on this path.
+                self._fail_turn(f"playback failed: {exc}", drove_speaker=True)
                 return {"ok": False, "error": str(exc), "duration_s": audio.duration_s}
 
             self._restore_state_after_speak(prev_state)
@@ -1477,7 +1563,7 @@ class WakePipeline:
             # The generator never ran on another thread, so closing it
             # here is safe — and still aborts the orchestrator turn.
             _close_quietly(chunk_iter)
-            self._set_error(f"voice reply failed (tts): synth thread: {exc}")
+            self._fail_turn(f"voice reply failed (tts): synth thread: {exc}")
             return {
                 "ok": False, "error": str(exc), "error_kind": "tts",
                 "duration_s": 0.0, "spoke_any": False, "sentences": 0,
@@ -1534,7 +1620,9 @@ class WakePipeline:
                 answer_started = True
                 try:
                     audio = self._tts.synthesize(text, voice=voice)  # type: ignore[union-attr]
-                except TTSUnavailable as exc:
+                except _TTS_WIRE_FAULTS as exc:
+                    # WyomingTTS raises STTUnavailable when Piper drops the
+                    # socket mid-event (WARP-3199) — a wire fault, not a bug.
                     failure = _SpeakFailure("tts", exc)
                     break
                 except Exception as exc:  # noqa: BLE001 — see below
@@ -1628,10 +1716,10 @@ class WakePipeline:
         # Error path: surface it, and arm the cooldown if we drove the
         # speaker at all — even a partial reply can bleed into the shared
         # mic (same contract as speak()'s mid-playback failure).
-        self._set_error(f"voice reply failed ({error_kind}): {first_error}")
-        if drove_speaker:
-            with self._lock:
-                self._speak_ended_at = time.time()
+        self._fail_turn(
+            f"voice reply failed ({error_kind}): {first_error}",
+            drove_speaker=drove_speaker,
+        )
         return {
             "ok": False,
             "error": str(first_error),
@@ -2568,6 +2656,10 @@ class WakePipeline:
             self._last_wake_model = event.model_name
             if not calibrating:
                 self._state = "wake_detected"
+                # A new turn starts clean: drop the last failed turn's
+                # note (WARP-3199). A latched 'error' never reaches here —
+                # _on_frame drops its frames.
+                self._error_message = None
                 # WARP-3124 — a handled wake starts the turn's timing.
                 self._turn_timing = _TurnTiming(wake_at=time.monotonic())
 
@@ -2580,6 +2672,11 @@ class WakePipeline:
             # recognizer's half-decoded utterance into the next try.
             self._reset_detector()
             return
+
+        # WARP-3127: start loading the chat model now, while the person is
+        # still speaking. At the fire site (not in _default_on_wake) so an
+        # injected on_wake can't bypass it; hands off and returns at once.
+        self._maybe_warm_llm()
 
         try:
             self._on_wake(event)
@@ -2754,6 +2851,27 @@ class WakePipeline:
             self._state = "error"
             self._error_message = msg
 
+    def _fail_turn(self, msg: str, *, drove_speaker: bool = False) -> None:
+        """One voice turn failed — TTS, playback, or the LLM reply stream
+        (WARP-3199). Report why on /voice/status, then keep listening: the
+        next wake is a fresh try against a dependency that has usually come
+        back (a TTS timeout, a dropped SSE). Latching 'error' here left the
+        assistant deaf and /audio/measure refusing until voice-io restarted.
+        Stuck faults (the detector, the capture loop) still use _set_error,
+        and one that landed mid-turn keeps its state and message.
+
+        `drove_speaker` arms the post-speak cooldown in the same lock hold
+        as the flip to 'listening', so no frame reaches the detector in
+        between (a partial reply can bleed into the mic)."""
+        with self._lock:
+            if drove_speaker:
+                self._speak_ended_at = time.time()
+            if self._state == "error":
+                return
+            if self._state in ("speaking", "transcript_ready"):
+                self._state = "listening"
+            self._error_message = msg
+
     @staticmethod
     def _default_on_wake(event: WakeEvent) -> None:
         logger.info(
@@ -2852,8 +2970,8 @@ class WakePipeline:
         # Intent gate: short-circuit speculative tool calls on greetings,
         # time-of-day, and who-are-you utterances. The orchestrator's
         # agent loop honors tool_choice="none" by advertising zero
-        # tools — the model can only answer from the system prompt
-        # context, which already carries the live time + location.
+        # tools — the model can only answer from its prompt, whose user
+        # turn opens with the live time + location (llm.build_turn_context).
         tool_choice = classify_tool_choice(transcript)
         if tool_choice == "none":
             logger.info(
@@ -2877,7 +2995,7 @@ class WakePipeline:
         # WARP-1058 — the §3.4 outcome row. "Answered" means the user
         # actually HEARD a reply; a failed / empty / rejected reply is
         # honestly just "Heard the wake word" (the fault itself surfaces via
-        # error_message / health, not the feed).
+        # error_message, not the feed).
         self._emit_activity(
             "wake_answered" if spoke else "wake_heard",
             score=wake_score, threshold=self._threshold, model=wake_model,
