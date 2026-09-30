@@ -331,9 +331,28 @@ describe("POST /api/llm/chat — voice's system message reaches the model (WARP-
     ]);
   });
 
-  it("a dashboard caller's message layout is unchanged", async () => {
+  it("a dashboard caller's tool_choice='none' turn leaves its message unmarked at index 0", async () => {
+    // WARP-3338: marked only on turns that get the base prompt. With no base
+    // prompt the caller's message is already index 0, so nothing is folded
+    // and the request reaches the model exactly as the caller sent it.
+    const res = await postChat(OWNER, {
+      messages: [
+        { role: "system", content: "caller context" },
+        { role: "user", content: "hello" },
+      ],
+      tool_choice: "none",
+    });
+    expect(res.status).toBe(200);
+    expect(agentRequest().messages).toEqual([
+      { role: "system", content: "caller context" },
+      { role: "user", content: "hello" },
+    ]);
+  });
+
+  it("a dashboard caller's message keeps its position, marked as its chat instructions", async () => {
     // Scoped to the voice principal: a person's own system message keeps its
-    // position. (Pins and attachments at index >= 1 are a separate ticket.)
+    // position. WARP-3338: it is marked, and the agent loop folds it into
+    // index 0 on the wire under "Instructions for this chat".
     const res = await postChat(OWNER, {
       messages: [
         { role: "system", content: "caller context" },
@@ -344,7 +363,11 @@ describe("POST /api/llm/chat — voice's system message reaches the model (WARP-
     const { messages } = agentRequest();
     expect(systemMessages(messages)).toHaveLength(2);
     expect(text(messages[0])).toContain("You are Droplet");
-    expect(messages[1]).toEqual({ role: "system", content: "caller context" });
+    expect(messages[1]).toEqual({
+      role: "system",
+      content: "caller context",
+      contextBlock: "chat_instructions",
+    });
   });
 });
 
@@ -361,6 +384,11 @@ describe("POST /api/llm/chat — voice's system message reaches the model (WARP-
  *    WARP-3125 the gpt-oss template dropped that text on a tool turn. Folding
  *    it for every service token would let each one append to the box's own
  *    system instructions.
+ *
+ * WARP-3338: the agent loop now folds every system message into index 0 on
+ * the wire. A non-voice caller's text still stays out of the route's base
+ * prompt: it reaches the model under its own "Instructions for this chat"
+ * header, after the box's instructions.
  */
 describe("POST /api/llm/chat — a non-voice service principal is unchanged (WARP-3125)", () => {
   const MCP: TestUser = { id: "_service:mcp", username: "_service:mcp", role: "service" };
@@ -396,7 +424,7 @@ describe("POST /api/llm/chat — a non-voice service principal is unchanged (WAR
   it.each([
     ["_service:mcp", MCP],
     ["_service:email", EMAIL],
-  ])("%s does not get its system text folded into the index-0 instructions", async (_label, user) => {
+  ])("%s keeps its system text out of the route's base prompt", async (_label, user) => {
     const res = await postChat(user, turn(VOICE_TOOLS));
     expect(res.status).toBe(200);
     const { messages } = agentRequest();
@@ -404,7 +432,13 @@ describe("POST /api/llm/chat — a non-voice service principal is unchanged (WAR
     // prompt at index 0, the caller's own message left where it was.
     expect(text(messages[0])).toContain("You are Droplet");
     expect(text(messages[0])).not.toContain(CALLER_SYSTEM);
-    expect(messages[1]).toEqual({ role: "system", content: CALLER_SYSTEM });
+    // WARP-3338: marked as its chat instructions; the agent loop folds it on
+    // the wire under its own header, after the box's base prompt.
+    expect(messages[1]).toEqual({
+      role: "system",
+      content: CALLER_SYSTEM,
+      contextBlock: "chat_instructions",
+    });
     expect(systemMessages(messages)).toHaveLength(2);
   });
 

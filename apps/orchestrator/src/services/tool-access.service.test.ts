@@ -14,6 +14,7 @@ import {
   firstForbiddenToolName,
   firstToolDeniedForPrincipal,
   hasWriteTool,
+  isCatalogRead,
   isLockLikeInvocation,
   lockOperationDenied,
   narrowToolNamesForPrincipal,
@@ -70,6 +71,21 @@ describe("WARP-2665 — writeToolsIn / hasWriteTool, the one write classificatio
     for (const { name } of TOOL_CATALOG) {
       expect(hasWriteTool([name])).toBe(WRITE_TOOLS.has(name));
     }
+  });
+});
+
+describe("WARP-3287 — isCatalogRead, the one 'may this call run twice' test", () => {
+  it("is a read only for a catalog tool that neither writes nor asks for a thumbs-up", () => {
+    for (const t of TOOL_CATALOG) {
+      expect(isCatalogRead(t.name)).toBe(!t.requiresWrite && !t.requiresConfirmation);
+    }
+    expect(isCatalogRead("search_content")).toBe(true);
+    expect(isCatalogRead("create_event")).toBe(false); // an ungated write
+  });
+
+  it("does not treat a name the catalog does not know (remote, extension) as a read", () => {
+    expect(isCatalogRead("acme__search")).toBe(false);
+    expect(isCatalogRead("ext-notes__list")).toBe(false);
   });
 });
 

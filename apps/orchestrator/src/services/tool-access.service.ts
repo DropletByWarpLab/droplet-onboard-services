@@ -276,6 +276,19 @@ export function hasWriteTool(names: ReadonlyArray<string>): boolean {
 }
 
 /**
+ * WARP-3287 — a catalog READ (`!requiresWrite && !requiresConfirmation`): a
+ * second dispatch has no second effect. The one test for "may this call be
+ * repeated when its outcome is unknown", shared by the run worker's lost-call
+ * re-dispatch (WARP-2877 `redispatchSafe`) and the agent loop's retry of a
+ * failed call. A name the catalog does not know — a remote or extension tool,
+ * a hallucination — is not a read.
+ */
+export function isCatalogRead(name: string): boolean {
+  const entry = CATALOG_BY_NAME.get(name);
+  return entry !== undefined && !entry.requiresWrite && !entry.requiresConfirmation;
+}
+
+/**
  * WARP-2894 — the names in `names` that no compiled tool answers to.
  *
  * A routine the model drafts is only as good as the tools it names, and the

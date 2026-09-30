@@ -21,6 +21,7 @@ const NAMEABLE_TOOLS = [
   "email_summarize_thread",
   "email_draft_reply",
   "email_send",
+  "team_chat_send_message",
   "search_calendar_events",
   "list_events",
   "list_reminders",
@@ -112,6 +113,24 @@ describe("composeToolGuidance", () => {
     const noSend = composeToolGuidance(["email_search", "email_draft_reply"]);
     expect(noSend).toContain("email_draft_reply");
     expect(noSend).not.toContain("email_send");
+  });
+
+  it("makes team chat the default way to message someone, email only when asked (WARP-3340)", () => {
+    const line = "- Message people with team_chat_send_message unless asked for email.";
+    expect(composeToolGuidance(["team_chat_send_message"])).toContain(line);
+    expect(composeToolGuidance(undefined)).toContain(line);
+    // A caller whose tool pool lacks team chat (a role without it): no line,
+    // and email is the only channel left. Switching Messages off does not
+    // reach this pool for an owner or admin; the tool is still offered and
+    // refuses before the approval with TEAM_CHAT_UNAVAILABLE (WARP-3349).
+    const noChat = composeToolGuidance(["email_search", "email_draft_reply", "email_send"]);
+    expect(noChat).not.toContain("team_chat_send_message");
+    expect(noChat).not.toContain("Message people");
+    // The trims that paid for the line kept the business line's pointer for
+    // customer questions (review of #2541).
+    expect(composeToolGuidance(["business_profile_get"])).toContain(
+      "- For questions about the business or its customers, use the business context above",
+    );
   });
 
   it("scopes the calculate mandate and gates its converter fragments", () => {

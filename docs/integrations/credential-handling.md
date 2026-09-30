@@ -39,7 +39,9 @@ The same rule covers failure. If Droplet **refuses** the credential you pasted �
 
 **Disconnect** on the integration's manage menu is not a flag flip. The stored credential is removed from the box, and the connection goes back to "not connected".
 
-Two things that deliberately survive: the data Droplet has already read and indexed stays where it is until you delete it, and the connection's identity stays so the dashboard can still tell you that this is a Stripe connection that is now disconnected — rather than pretending Stripe was never set up.
+For a connector that copied records onto the box (customers, contacts, deals, invoices or bills), Disconnect asks what to do with them. **Keep the records** is the default and deletes nothing: customers, contacts and deals become ordinary records your team owns and can edit, and copied invoices and bills stay as read-only copies. **Delete the records** removes them (any customer record that carries a note your team wrote is archived instead) and needs a second confirmation. Either choice is written to the audit log with the counts. A connector that copied nothing says so and asks nothing.
+
+Two things that deliberately survive: the records you chose to keep, and the connection's identity, which stays so the dashboard can still tell you that this is a Stripe connection that is now disconnected — rather than pretending Stripe was never set up.
 
 If you want the credential gone at the vendor's end too — and you usually should — you have to delete it there as well. See the "Revocation" section of your vendor's guide. Disconnecting on the box stops Droplet using it; it does not stop it existing.
 
