@@ -468,6 +468,29 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // `slack`, `standup`, `huddle` and `dm` carry no such ambiguity and are
   // taken bare. The negatives in tool-selection.service.test.ts pin this.
   { pattern: /\b(slack|stand-?ups?|huddles?|dms?|direct messages?|group chats?|team chats?|(slack|team|work|group|company) channels?|(slack|stand-?up|chat|message|comment) threads?)\b/i, domains: ["team_chat"] },
+  // WARP-3340 — "message someone". Team chat is the default way to reach a
+  // colleague (Romain, 2026-09-29: email only when the person asks for it),
+  // yet the rule above never named the verb. "Before messaging
+  // dave@example.com, …" (agent-loop eval seed-028) matched only the email
+  // rule, through the address, so the model could pick nothing but email.
+  //
+  // Held to the narrowness above: the bare noun is NOT admitted. "the message
+  // in the file", "voice message", "message queue", "Kafka messages",
+  // "read Dana's message" are not asking anyone to send anything, and each
+  // would buy this domain's schemas for nothing. Only the PERSON frame is:
+  //   • message/messaging, tell, ping or text + a person: him/her/them,
+  //     everyone, the team, an address, or a name followed by that / about /
+  //     saying / ":" ("message Priya that…"). A leading determiner or noun
+  //     ("the message them…", "voice message Bob left") makes it a noun.
+  //   • send (someone) a/an (…) message ("send Bob a quick message", "send the
+  //     team a message", "send a status message to ops"). "send the error
+  //     message to the log" has no article and stays out.
+  //   • let <someone> know, except me/us/you/it.
+  // "tell Priya the backup finished" (a bare name, no that/about) is not
+  // matched: a name is indistinguishable from an object here. The base
+  // prompt's guidance line names team_chat_send_message, so a call still
+  // self-heals. Every lookbehind is bounded, so the rule stays linear.
+  { pattern: /(?<!\b(?:the|a|an|this|that|these|those|my|your|his|her|their|our|its|any|each|every|last|latest|new|first|voice|error|warning|status|commit|log|exit|e-?mail|text|out-of-office)\s{1,3})\b(?:messag(?:e|ing)|tell|ping|text(?:ing)?)\s+(?:(?:him|her|them|everyone|everybody|(?:the|my|our)\s+(?:whole\s+)?team)\b|[\w.+-]{1,64}@[\w-]|(?!(?:me|us|you|it|what|which|who|whom|whether|if|how|when|why|where|the|a|an|this|that|these|those|about|to|for|in|on|of|from|with|and|or)\b)[a-z][\w'-]{0,30}(?:\s*:|\s+(?:that|about|saying|to say)\b))|\bsend\s+(?:(?:the\s+)?[\w.@+-]{1,64}\s+)?an?\s+(?:[\w-]{1,20}\s+)?messages?\b|\blet\s+(?!(?:me|us|it|you)\b)(?:the\s+(?:whole\s+)?)?[a-z][\w'-]{0,30}\s+know\b/i, domains: ["team_chat"] },
   { pattern: /\b(remember|memory|forget|know about me)\b/i, domains: ["memory"] },
   // ADR-045 slice C — ONE business rule, replacing WARP-2552's pair.
   //

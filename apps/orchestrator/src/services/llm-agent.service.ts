@@ -46,12 +46,14 @@ import type { McpClientPort } from "./mcp-client.port.js";
 import {
   malformedToolOutputText,
   parseToolResultPayload,
+  TOOL_OUTPUT_MALFORMED,
   toolResultPayloadValue,
   type ToolResultPayload,
 } from "./tool-result-payload.js";
 import {
   describeToolError,
   newAgentTurnId,
+  type ToolErrorDiagnostics,
 } from "./tool-error-diagnostics.js";
 import type { ChatApprovalStore } from "./chat-approval.service.js";
 import {
@@ -61,6 +63,7 @@ import {
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import { navigationToolsWithheld } from "./dashboard-navigation.js";
 import {
+  isCatalogRead,
   narrowToolsToScope,
   toolDispatchDenial,
   type ToolAccessScope,
@@ -102,7 +105,14 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   estimateTokensFromChars,
 } from "./context-budget.service.js";
-import type { ChatMessage, ChatResponse, ChatStreamChunk, ToolCall } from "../types/index.js";
+import type {
+  ChatMessage,
+  ChatResponse,
+  ChatStreamChunk,
+  ContextBlockKind,
+  ToolCall,
+} from "../types/index.js";
+import { contentToText } from "../types/index.js";
 import type { SSEEvent } from "../types/sse-events.js";
 import type { QueryClass } from "../types/query-enhancement.js";
 import { redactToolResult } from "../lib/log-redaction.js";
@@ -209,6 +219,58 @@ function approvedAlreadyRanEnvelope(tool: string) {
         "report that result to the user.",
     },
   };
+}
+
+/**
+ * WARP-3287 — failures of the TOOL rather than of the call: it timed out, its
+ * upstream was unreachable, or its output could not be read. The same call can
+ * succeed a moment later, so the repetition guard lets a READ run again (see
+ * `toolFailures` in runAgent) — and the outcome is unknown, so a write never.
+ * Codes as `describeToolError` reports them — the loop's own thrown-dispatch
+ * envelope is TOOL_DISPATCH_FAILED there, transient whatever its message. The
+ * codes in NETWORK_CAUSE_CODES count when their message names a network or
+ * upstream-down cause: a HANDLER_THREW cause chain, `read_file`'s `nextcloud
+ * returned 503`. Only those: a substring hit elsewhere is noise (PARSE_FAILED's
+ * "unterminated quoted field" contains "terminated").
+ */
+const TRANSIENT_TOOL_ERROR_CODES = new Set([
+  "TIMEOUT",
+  "UPSTREAM_UNAVAILABLE",
+  "TOOL_DISPATCH_FAILED",
+  TOOL_OUTPUT_MALFORMED,
+]);
+const TRANSIENT_MESSAGE_CLASSES = new Set([
+  "headers_timeout",
+  "body_timeout",
+  "connect_timeout",
+  "socket_error",
+  "econnreset",
+  "econnrefused",
+  "etimedout",
+  "eai_again",
+  "ehostunreach",
+  "enetunreach",
+  "epipe",
+  "socket_hang_up",
+  "other_side_closed",
+  "tls_socket_disconnected",
+  "fetch_failed",
+  "terminated",
+  "nextcloud_502",
+  "nextcloud_503",
+  "nextcloud_504",
+  "bad_gateway",
+  "service_unavailable",
+  "gateway_timeout",
+]);
+const NETWORK_CAUSE_CODES = new Set(["HANDLER_THREW", "READ_FAILED", "UNSTRUCTURED_ERROR"]);
+
+function isTransientToolFailure(d: ToolErrorDiagnostics): boolean {
+  return (
+    TRANSIENT_TOOL_ERROR_CODES.has(d.error_code) ||
+    (NETWORK_CAUSE_CODES.has(d.error_code) &&
+      TRANSIENT_MESSAGE_CLASSES.has(d.message_class))
+  );
 }
 
 export interface AgentDeps {
@@ -1452,6 +1514,83 @@ function logToolPoolSize(p: {
   );
 }
 
+/** WARP-3338 — the header each marked block gets once it joins index 0. */
+const CONTEXT_BLOCK_HEADERS: Record<ContextBlockKind, string> = {
+  attachments: "## Files attached to this conversation",
+  pins: "## Pinned context",
+  chat_instructions: "## Instructions for this chat",
+};
+
+/**
+ * WARP-3338 — the ai-gateway refuses any message over 32,000 chars
+ * (services/ai-gateway/schemas.py `_PER_MESSAGE_TEXT_CHARS`), and the fold
+ * sums blocks that were each under it. `.length` counts UTF-16 units, never
+ * fewer than Python's code points, so staying under this here stays under
+ * the gateway's cap there.
+ */
+export const FOLDED_SYSTEM_MAX_CHARS = 31_000;
+export const FOLD_TRUNCATED_MARKER = "\n…[truncated]";
+/** Cut first to last. The base prompt and the pins are never cut. */
+const FOLD_TRIM_ORDER: readonly ContextBlockKind[] = ["attachments", "chat_instructions"];
+
+export interface FoldedMessages {
+  messages: ChatMessage[];
+  /** Chars the size guard cut, per block. Empty when nothing was cut. */
+  trimmed: Partial<Record<ContextBlockKind, number>>;
+}
+
+/**
+ * WARP-3338 — the wire shape every local chat template renders the same way:
+ * ONE system message, first. gpt-oss's GGUF template (Docker Model Runner /
+ * llama.cpp) reads only `messages[0]` as the developer instructions and drops
+ * every later system message without an error, so the pin block, the
+ * attachment block and a chat's own instructions never reached the model.
+ * Ollama's template already joins every system message with a blank line;
+ * this does the same, in order, so both runtimes see the same text.
+ *
+ * Wire-only: tool selection, the pin-domain readback
+ * (`pinnedToolDomainsFromMessages`) and checkpoints keep the unfolded array.
+ * A request whose only system message is already first (agent runs, email
+ * analysis, every single-prompt caller) goes out untouched.
+ */
+export function foldSystemMessages(messages: readonly ChatMessage[]): FoldedMessages {
+  const system = messages.filter((m) => m.role === "system");
+  if (system.length === 0 || (system.length === 1 && messages[0]?.role === "system")) {
+    return { messages: messages as ChatMessage[], trimmed: {} };
+  }
+  const parts = system.map((m) => ({
+    kind: m.contextBlock,
+    text: m.contextBlock
+      ? `${CONTEXT_BLOCK_HEADERS[m.contextBlock]}\n\n${contentToText(m.content)}`
+      : contentToText(m.content),
+  }));
+  const size = () => parts.reduce((n, p) => n + p.text.length + 2, -2);
+  const trimmed: FoldedMessages["trimmed"] = {};
+  for (const kind of FOLD_TRIM_ORDER) {
+    for (const p of parts) {
+      const over = size() - FOLDED_SYSTEM_MAX_CHARS;
+      if (over <= 0) break;
+      if (p.kind !== kind) continue;
+      // Keep the header; never split a surrogate pair.
+      let keep = Math.max(
+        CONTEXT_BLOCK_HEADERS[kind].length,
+        p.text.length - over - FOLD_TRUNCATED_MARKER.length,
+      );
+      if (/[\uD800-\uDBFF]/.test(p.text[keep - 1] ?? "")) keep -= 1;
+      if (p.text.length - keep <= FOLD_TRUNCATED_MARKER.length) continue;
+      trimmed[kind] = (trimmed[kind] ?? 0) + p.text.length - keep;
+      p.text = p.text.slice(0, keep) + FOLD_TRUNCATED_MARKER;
+    }
+  }
+  return {
+    messages: [
+      { role: "system", content: parts.map((p) => p.text).join("\n\n") },
+      ...messages.filter((m) => m.role !== "system"),
+    ],
+    trimmed,
+  };
+}
+
 export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<AgentResult> {
   // Spec §1 — both enforcement points (this clamp + the /api/llm/chat zod
   // bound) read config.agentMaxIter, so they cannot drift. WARP-2749: a
@@ -1718,6 +1857,29 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // intended, while nested payload differences (which a flat replacer
   // array would erase) keep genuinely different calls distinct.
   const executedCallCounts = new Map<string, number>();
+  // WARP-3287 — only a call that SUCCEEDED has a result to point at.
+  // `callOutcomes`: how each call key's last dispatch ended (a key refused
+  // while its tool was down was never dispatched and has none).
+  // `toolFailures`: per tool, transient failures (isTransientToolFailure)
+  // since the last successful call of ANY tool. A catalog read that failed
+  // transiently is re-dispatched instead of nudged until its tool reaches
+  // MAX_TOOL_FAILURES — the failed call plus one retry, identical or reworded;
+  // a write is never repeated, its outcome is unknown (WARP-2877's rule,
+  // `isCatalogRead`). The tool is then down: its next call, whatever the
+  // arguments, is refused, and the one after finalizes, as in §4. A repeat of
+  // a call that succeeded stays on the §4 path.
+  // ponytail: any success clears every count, so a key that has had its retry
+  // can earn another; each needs a new successful call in between, and
+  // maxIter bounds it. Track retries per key if that shows up.
+  const MAX_TOOL_FAILURES = 2;
+  const callOutcomes = new Map<
+    string,
+    { ok: true } | { ok: false; code: string; transient: boolean }
+  >();
+  const toolFailures = new Map<
+    string,
+    { count: number; code: string; refused: boolean }
+  >();
   const canonicalJson = (v: unknown): string => {
     if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
     if (v !== null && typeof v === "object") {
@@ -2106,9 +2268,25 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     // path; every other field (incl. WARP-849 max_tokens + WARP-1442a
     // reasoning_effort) is identical, so a streamed turn issues byte-for-byte
     // the same request as a blocking one.
+    const folded = foldSystemMessages(messages);
+    // WARP-3338 — the system blocks do not change within a turn, so the size
+    // guard's verdict is the same every iteration: say it once, counts only.
+    if (iter === 0 && Object.keys(folded.trimmed).length > 0) {
+      logger.warn(
+        {
+          turn_id: turnId,
+          trimmed_chars: folded.trimmed,
+          max_chars: FOLDED_SYSTEM_MAX_CHARS,
+          ...(req.toolCallContext?.agentRunId
+            ? { agent_run_id: req.toolCallContext.agentRunId }
+            : {}),
+        },
+        "agent_system_fold_trimmed",
+      );
+    }
     const chatReq = {
       model: req.model,
-      messages,
+      messages: folded.messages,
       temperature: req.temperature,
       max_tokens: req.max_tokens,
       reasoning_effort: req.reasoning_effort,
@@ -2708,18 +2886,45 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // Spec §4 — occurrence 1 dispatches; 2 nudges; 3 finalizes. A nudged
       // call is neither a guard hit nor a real dispatch, so the WARP-642
       // circuit breaker is unaffected.
+      // WARP-3287 — a read's retry after a transient failure is dispatched and
+      // is not an occurrence; a down tool is refused whatever the arguments,
+      // without counting one (the key may never have run). See `toolFailures`.
       const callKey = canonicalCallKey(call.function.name, args, call.id);
       const priorCalls = executedCallCounts.get(callKey) ?? 0;
-      executedCallCounts.set(callKey, priorCalls + 1);
-      if (priorCalls >= 1) {
+      const outcome = callOutcomes.get(callKey);
+      const failed = outcome?.ok === false ? outcome : undefined;
+      const read = isCatalogRead(call.function.name);
+      const down = toolFailures.get(call.function.name);
+      const toolDown =
+        down !== undefined && down.count >= MAX_TOOL_FAILURES && outcome?.ok !== true;
+      const retry = failed?.transient === true && read && !toolDown;
+      if (!retry && !toolDown) executedCallCounts.set(callKey, priorCalls + 1);
+      if (toolDown || (priorCalls >= 1 && !retry)) {
         const nudge = {
           status: "error" as const,
           error: {
             code: "REPEATED_CALL",
-            message:
-              `You already called '${call.function.name}' with these exact ` +
-              `arguments; its result is in the conversation above. Use that ` +
-              `result or answer the user — do not repeat the call.`,
+            message: toolDown
+              ? `You already called '${call.function.name}' ${down.count} times in a ` +
+                `row and it failed each time (last error: ${down.code}); there is no ` +
+                `result to use. Do not call it again with any arguments — tell the ` +
+                `user it failed` +
+                (read
+                  ? "."
+                  : ", and that it may already have happened, so they should check before retrying.")
+              : failed?.transient
+                ? `You already called '${call.function.name}' with these exact ` +
+                  `arguments and it failed (${failed.code}), but it may already have ` +
+                  `happened. Do not call it again — tell the user it may already have ` +
+                  `happened and to check before retrying.`
+                : failed
+                  ? `You already called '${call.function.name}' with these exact ` +
+                    `arguments and it failed (${failed.code}); there is no result to ` +
+                    `use. Do not repeat the call — change the arguments or tell the ` +
+                    `user it failed.`
+                  : `You already called '${call.function.name}' with these exact ` +
+                    `arguments; its result is in the conversation above. Use that ` +
+                    `result or answer the user — do not repeat the call.`,
           },
         };
         trace.push({
@@ -2734,9 +2939,10 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           tool_call_id: call.id,
           content: boundControlEnvelopeForModel(JSON.stringify(nudge)),
         });
-        if (priorCalls >= 2) {
+        if (toolDown ? down.refused : priorCalls >= 2) {
           finalizeReason = finalizeReason ?? "repetition";
         }
+        if (toolDown) down.refused = true;
         continue;
       }
 
@@ -2938,19 +3144,31 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // unattributed. `confirmation_required` is excluded for free: mcp-server
       // sets `isError` only for `status === "error"`.
       if (result.isError) {
-        logger.warn(
-          describeToolError({
-            tool: call.function.name,
-            toolCallId: call.id,
-            turnId,
-            iter,
-            args,
-            payload,
-            includeExcerpt: config.AGENT_BLANK_TURN_DEBUG,
-            threadId: req.citationContext?.threadId,
-          }),
-          "agent_tool_error",
-        );
+        const diagnostics = describeToolError({
+          tool: call.function.name,
+          toolCallId: call.id,
+          turnId,
+          iter,
+          args,
+          payload,
+          includeExcerpt: config.AGENT_BLANK_TURN_DEBUG,
+          threadId: req.citationContext?.threadId,
+        });
+        logger.warn(diagnostics, "agent_tool_error");
+        // WARP-3287 — feed the repetition guard. The shape-guarded code, never
+        // raw tool text, is what its refusal quotes back to the model.
+        const transient = isTransientToolFailure(diagnostics);
+        callOutcomes.set(callKey, { ok: false, code: diagnostics.error_code, transient });
+        if (transient) {
+          toolFailures.set(call.function.name, {
+            count: (toolFailures.get(call.function.name)?.count ?? 0) + 1,
+            code: diagnostics.error_code,
+            refused: false,
+          });
+        }
+      } else {
+        callOutcomes.set(callKey, { ok: true });
+        toolFailures.clear();
       }
 
       // Translate the MCP envelope into an SSE tool_result event.
@@ -3276,7 +3494,7 @@ function isFailedToolResult(result: unknown): boolean {
       ? (r.error as { code?: unknown }).code
       : undefined;
   // Spec §4 — a REPEATED_CALL nudge means the call was never re-dispatched
-  // this turn (its prior result already succeeded). Spec §3 — a
+  // this turn (a failed dispatch before it is its own trace entry). Spec §3 — a
   // TOOL_NOW_AVAILABLE heal means selection filtered the tool out, so it was
   // never dispatched either. Neither may read as "the tool kept failing".
   if (code === "REPEATED_CALL" || code === "TOOL_NOW_AVAILABLE") return false;
