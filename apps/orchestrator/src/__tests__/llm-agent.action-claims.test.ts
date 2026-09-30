@@ -162,6 +162,29 @@ describe("runAgent — action claims are checked before the answer goes out (WAR
     expect(onWire(events)).not.toContain("payroll");
   });
 
+  it("the check call is folded like the loop's own: one system message, first, carrying the pin (WARP-3338)", async () => {
+    const { deps: d, requests } = deps((_req, i) => {
+      if (i === 1) return call("calculate", { expression: "2+2" });
+      if (i === 2) return says("I’ve sent the message to Alice. The result of 2 + 2 is **4**.");
+      return says("The result of 2 + 2 is **4**. I didn't send any message.");
+    });
+    await runAgent(d, {
+      ...REQ,
+      messages: [
+        { role: "system", content: "sys" },
+        { role: "system", content: "- file: /Docs/pinned.md", contextBlock: "pins" },
+        { role: "user", content: "Use the calculator to work out 2+2." },
+      ],
+    });
+
+    const check = requests[2]!;
+    expect(check.tools).toEqual([]);
+    const system = check.messages.filter((m) => m.role === "system");
+    expect(system).toHaveLength(1);
+    expect(check.messages[0]!.role).toBe("system");
+    expect(String(check.messages[0]!.content)).toContain("/Docs/pinned.md");
+  });
+
   it("a correction that still claims the action is not trusted: original + a status line from the trace", async () => {
     const { deps: d, chat, events } = deps((_req, i) =>
       i === 1 ? call("calculate", { expression: "2+2" }) : says("I've sent the message to Alice. The result is 4."),
