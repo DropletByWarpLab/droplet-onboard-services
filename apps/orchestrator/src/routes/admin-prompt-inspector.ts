@@ -51,6 +51,7 @@ import { actorFromRequest } from "../services/activity.service.js";
 import { createLogger } from "../lib/logger.js";
 import { inspectToolsForPerson, type ToolInspectDeps } from "../services/tool-inspect.service.js";
 import { inspectPromptForPerson } from "../services/prompt-inspect.service.js";
+import { navigationToolsWithheld } from "../services/dashboard-navigation.js";
 
 const logger = createLogger("admin-prompt-inspector");
 
@@ -167,6 +168,11 @@ export function createAdminPromptInspectorRouter(
         const result = await inspectPromptForPerson(prisma, {
           targetUserId: req.params.userId,
           allowedToolNames,
+          // WARP-3116 — the real turn withholds the navigation tools when it
+          // carries no dashboard page list. The dashboard sends one; voice
+          // never does, so a modelled voice turn withholds them and every
+          // other modelled turn is the dashboard's.
+          withheldToolNames: navigationToolsWithheld(!flag(req, "voice")),
           offLan,
           interview,
         });

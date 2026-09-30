@@ -38,11 +38,11 @@ const COPY = {
   header: "Who Droplet recognizes",
   addVoice: "Add a voice",
   empty:
-    "No voices enrolled. Droplet answers everyone as a guest until it knows who's who.",
+    "No voices enrolled. Droplet answers everyone as an external guest until it knows who's who.",
   privacy:
     "Voiceprints are stored and matched on this box. They never leave your network and are deleted instantly when removed.",
   guestLine:
-    "Unrecognized voices are treated as guests — read-only answers, no personal data.",
+    "Unrecognized voices are treated as external guests — read-only answers, no personal data.",
   chip: "On this box only",
 } as const;
 

@@ -70,6 +70,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from backoff import BackoffState
 from creds import decrypt
+from errors import IngestTooLarge
 from parser import parse_message
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,7 @@ class AccountConfig:
 
 
 class IngestFn(Protocol):
-    async def __call__(self, account_id: str, payload: dict) -> bool: ...
+    async def __call__(self, account_id: str, payload: dict) -> bool | str: ...
 
 
 class MqttPublishFn(Protocol):
@@ -158,8 +159,14 @@ class SyncState:
     """
 
     last_uid: Optional[int] = None
+    #: WARP-3267 — UID → cycles it has held the watermark after a 413.
+    too_large_holds: dict[int, int] = field(default_factory=dict)
     #: Bookkeeping for tests and the log line.
     cycles: int = field(default=0)
+
+
+#: Cycles a 413-refused UID holds the watermark before it is skipped (WARP-3267).
+MAX_TOO_LARGE_HOLDS = 3
 
 
 # Track scheduled per-account jobs so we can cancel + reschedule on
@@ -172,9 +179,11 @@ async def _fetch_and_ingest(
     account: AccountConfig,
     deps: IdleDeps,
     uids: list[str],
+    too_large: Optional[list[int]] = None,
 ) -> int:
     """Fetch each UID, parse, POST. Returns the count of successful
-    ingests so the caller can log a summary."""
+    ingests so the caller can log a summary. A UID the orchestrator refused
+    with 413 is appended to `too_large` so the caller can hold the watermark."""
     success = 0
     for uid in uids:
         # One poison message (malformed MIME/headers, a parser edge case, a
@@ -198,9 +207,23 @@ async def _fetch_and_ingest(
             if parsed is None:
                 logger.debug("uid %s parse returned None — skipping", uid)
                 continue
-            ok = await deps.ingest(account.id, dict(parsed))
+            try:
+                ok = await deps.ingest(account.id, dict(parsed))
+            except IngestTooLarge:
+                logger.warning(
+                    "uid %s refused as too large (413); holding the watermark", uid,
+                )
+                if too_large is not None:
+                    too_large.append(int(uid))
+                continue
+            if not ok:
+                logger.warning("uid %s not ingested; skipped", uid)
             if ok:
                 success += 1
+                # A re-delivered duplicate (restart backfill, a held UID's
+                # neighbours) is not new mail: no refresh signal for it.
+                if ok == "duplicate":
+                    continue
                 # The orchestrator's ingest response carries threadId but
                 # we don't decode it here — MQTT consumers re-query for
                 # the row they care about. Pass the messageId so the
@@ -299,7 +322,21 @@ async def _sync_new_mail(
 
     if not uids:
         return 0
-    success = await _fetch_and_ingest(imap, account, deps, [str(u) for u in uids])
+    held: list[int] = []
+    success = await _fetch_and_ingest(
+        imap, account, deps, [str(u) for u in uids], too_large=held,
+    )
+    # A held UID is fetched again next cycle, up to MAX_TOO_LARGE_HOLDS
+    # cycles; then it is skipped like any other refusal (IDX-07).
+    holds = {u: state.too_large_holds.get(u, 0) + 1 for u in held}
+    for uid, n in holds.items():
+        if n > MAX_TOO_LARGE_HOLDS:
+            logger.warning(
+                "uid %d refused as too large %d times; skipped", uid, MAX_TOO_LARGE_HOLDS,
+            )
+    state.too_large_holds = {u: n for u, n in holds.items() if n <= MAX_TOO_LARGE_HOLDS}
+    if state.too_large_holds:
+        state.last_uid = min(state.too_large_holds) - 1
     logger.info("account %s: ingested %d/%d UIDs", account.address, success, len(uids))
     return success
 

@@ -101,6 +101,7 @@ import type { AuthUser } from "../middleware/auth.js";
 // phase and by the orchestrator Dockerfile.
 import {
   createServer,
+  NO_MODULE_GATING,
   type ServerOptions,
   type ContextDeps,
 } from "@droplet/mcp-server";
@@ -190,7 +191,13 @@ async function connectMcp(baseUrl: string) {
         : ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() } as unknown as HttpClient),
   } as ContextDeps;
   // The PRODUCTION interceptor instance, not a test double.
-  const options: ServerOptions = { interceptor: defaultToolCallInterceptor };
+  // WARP-2972 — no orchestrator to ask a module verdict of, and this file is
+  // about the confirmation interceptor: opt out of module gating explicitly
+  // (a server built with no source fails closed).
+  const options: ServerOptions = {
+    interceptor: defaultToolCallInterceptor,
+    moduleVerdict: NO_MODULE_GATING,
+  };
   const server = createServer(deps, { kind: "local-trusted" }, options);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "warp-2305-probe", version: "0.0.1" }, { capabilities: {} });
@@ -485,6 +492,7 @@ describe("WARP-2472 — control: a pass-through interceptor gives the same singl
     } as ContextDeps;
     const server = createServer(deps, { kind: "local-trusted" }, {
       interceptor: passThroughInterceptor,
+      moduleVerdict: NO_MODULE_GATING,
     });
     const [ct, st] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "warp-2305-before", version: "0.0.1" }, { capabilities: {} });

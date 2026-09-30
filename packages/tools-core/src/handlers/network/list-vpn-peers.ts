@@ -81,7 +81,7 @@ async function handler(
 const tool: Tool = {
   name: "list_vpn_peers",
   description:
-    "List the WireGuard remote-access (VPN) peers: device label, owner, assigned IP, active/revoked status, home/away mode, and creation time. Never returns key material. Creating or revoking peers from chat is not available yet (WARP-1444) — direct the user to the dashboard's Remote Access page for that. Tier-1 read; safe to call without operator confirmation.",
+    "List the WireGuard remote-access (VPN) peers: device label, owner, assigned IP, active/revoked status, home/away mode, and creation time. Never returns key material. Creating or revoking peers from chat is not available yet (WARP-1444) — direct the user to the dashboard's Remote Access page for that.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

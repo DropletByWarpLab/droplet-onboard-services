@@ -17,7 +17,7 @@ import {
 import { buildContext, type ContextDeps, type Claims } from "./context.js";
 import { canCallTool, isWithheldOffBox, filterToolsForRole } from "./rbac.js";
 import { describeThrown } from "./thrown-cause.js";
-import type { ModuleVerdictSource } from "./module-verdict.js";
+import { FAIL_CLOSED_MODULE_SOURCE, type ModuleVerdictSource } from "./module-verdict.js";
 
 const SERVER_INFO = { name: "droplet-mcp-server", version: "0.1.0" };
 
@@ -75,9 +75,13 @@ export interface ServerOptions {
    * verdict baked into it would outlive the toggle. The orchestrator applies
    * the same predicate to its pool at list time, on top of the cache.
    *
-   * Absent → nothing is withheld. The two production construction sites
-   * (index.ts) both pass one, pinned by server-module-gate.test.ts; a source
-   * that cannot get an answer returns the FAIL-CLOSED verdict, not an absence.
+   * Absent → FAIL CLOSED (`FAIL_CLOSED_MODULE_SOURCE`): module-owned tools are
+   * withheld and unclaimed domains kept. A server built without a source used
+   * to withhold nothing, so a construction site that forgot the option was a
+   * silent fail-open; now forgetting is safe and withholding nothing is an
+   * explicit opt-out (module-verdict.ts, for tests and embedders). Both
+   * production construction sites (index.ts) pass a real one, pinned by
+   * server-module-gate.test.ts.
    */
   moduleVerdict?: ModuleVerdictSource;
 }
@@ -89,7 +93,7 @@ export function createServer(
 ) {
   const additionalTools = options.additionalTools;
   const interceptor = options.interceptor ?? defaultToolCallInterceptor;
-  const moduleVerdict = options.moduleVerdict;
+  const moduleVerdict: ModuleVerdictSource = options.moduleVerdict ?? FAIL_CLOSED_MODULE_SOURCE;
   const resolveTool = (name: string): Tool | undefined =>
     TOOLS.get(name) ?? additionalTools?.get(name);
   // Trust is derived solely from the declared posture, not from the presence
@@ -116,10 +120,9 @@ export function createServer(
     const permitted = filterToolsForRole(advertised, claims?.role, { trustedPrincipal });
     // WARP-2972 — an external client's list drops what a module toggle or its
     // person's grants withhold. Not the stdio child's (see ServerOptions).
-    const visible =
-      moduleVerdict && !trustedPrincipal
-        ? withholdModuleTools(permitted, await moduleVerdict(claims?.sub))
-        : permitted;
+    const visible = trustedPrincipal
+      ? permitted
+      : withholdModuleTools(permitted, await moduleVerdict(claims?.sub));
     const tools = visible.map((t) => ({
       name: t.name,
       description: t.description,
@@ -166,31 +169,29 @@ export function createServer(
     // refusal. Over HTTP the JWT names the person and `_meta` cannot; over
     // stdio `_meta.userId` does, and an unattributed call (a scheduled run) is
     // the box.
-    if (moduleVerdict) {
-      const callMeta = (req.params as { _meta?: Record<string, unknown> })._meta;
-      const asserted = trustedPrincipal
-        ? typeof callMeta?.userId === "string" && callMeta.userId.length > 0
-          ? callMeta.userId
-          : undefined
-        : claims?.sub;
-      if (isToolWithheldByModule(tool.name, await moduleVerdict(asserted))) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                status: "error",
-                error: {
-                  code: "module_disabled",
-                  message:
-                    "This part of Droplet is switched off, or is not available to this person.",
-                },
-              }),
-            },
-          ],
-          isError: true,
-        };
-      }
+    const callMeta = (req.params as { _meta?: Record<string, unknown> })._meta;
+    const asserted = trustedPrincipal
+      ? typeof callMeta?.userId === "string" && callMeta.userId.length > 0
+        ? callMeta.userId
+        : undefined
+      : claims?.sub;
+    if (isToolWithheldByModule(tool.name, await moduleVerdict(asserted))) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              status: "error",
+              error: {
+                code: "module_disabled",
+                message:
+                  "This part of Droplet is switched off, or is not available to this person.",
+              },
+            }),
+          },
+        ],
+        isError: true,
+      };
     }
 
     // Re-check on dispatch — tools/list cache could be stale, or a client
@@ -279,6 +280,14 @@ export function createServer(
       !Array.isArray(meta._enhancement)
         ? (meta._enhancement as PrivateEnhancement)
         : undefined;
+    // WARP-3116 — the pages the calling dashboard can open. Same trusted-
+    // stdio posture: over HTTP a client could hand the navigation tools a
+    // list of its own choosing. Passed through as-is; the handlers parse it
+    // with the shared schema before it becomes a navigation target.
+    const metaDashboardPages =
+      trustedPrincipal && meta && Array.isArray(meta.dashboardPages)
+        ? (meta.dashboardPages as unknown[])
+        : undefined;
     const ctx = buildContext(
       deps,
       claims,
@@ -289,6 +298,7 @@ export function createServer(
       metaUserRole,
       metaAgentRunId,
       metaWorkspaceId,
+      metaDashboardPages,
     );
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
 

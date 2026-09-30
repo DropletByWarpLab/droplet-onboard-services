@@ -6,6 +6,7 @@ import type http from "node:http";
 import { startHttp } from "../src/transports/http.js";
 import { createServer } from "../src/server.js";
 import type { ContextDeps } from "../src/context.js";
+import { NO_MODULE_GATING } from "../src/module-verdict.js";
 
 /**
  * End-to-end: real MCP `Client` over `StreamableHTTPClientTransport`
@@ -53,7 +54,7 @@ describe("http roundtrip", () => {
       port: 0,
       host: "127.0.0.1",
       jwtSecret: SECRET,
-      buildServer: (claims) => createServer(deps, { kind: "authenticated", claims }),
+      buildServer: (claims) => createServer(deps, { kind: "authenticated", claims }, { moduleVerdict: NO_MODULE_GATING }),
     });
     await new Promise<void>((resolve) => server.once("listening", resolve));
     const addr = server.address();

@@ -385,11 +385,18 @@ export async function fetchReviewCamera(reviewId: string): Promise<string | null
   return typeof body.camera === "string" && body.camera ? body.camera : null;
 }
 
+/**
+ * A Frigate 404 (event pruned, or never given a thumbnail) is surfaced as the
+ * `thumbnail_not_found` sentinel — same style as deleteEvent's
+ * `event_not_found` — so the route can answer 404 instead of a generic 500.
+ * Every other non-2xx keeps its plain Error.
+ */
 export async function fetchEventThumbnail(eventId: string): Promise<Response> {
   const resp = await fetch(
     `${FRIGATE_URL}/api/events/${encodeURIComponent(eventId)}/thumbnail.jpg`,
     { signal: timeout(SNAPSHOT_TIMEOUT) }
   );
+  if (resp.status === 404) throw new Error("thumbnail_not_found");
   if (!resp.ok) throw new Error(`Frigate thumbnail: ${resp.status}`);
   return resp;
 }

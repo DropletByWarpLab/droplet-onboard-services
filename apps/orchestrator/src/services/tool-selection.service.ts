@@ -79,6 +79,9 @@ import type { RuntimeToolDescriptor } from "./runtime-tool-registry.service.js";
 // WARP-2582 — the pin block's domains. `context-pin-prompt` imports nothing
 // but a tools-core type, so this direction cannot cycle.
 import { pinnedToolDomainsFromMessages } from "./context-pin-prompt.js";
+// WARP-3116 — the tools the navigation rules exist to reach. A leaf module
+// (shared-types only), so this direction cannot cycle either.
+import { DASHBOARD_NAVIGATION_TOOLS } from "./dashboard-navigation.js";
 
 /**
  * How a turn's advertised tools are derived from its pool.
@@ -522,6 +525,8 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // range such as "3 - 4 pm" still admits this domain; that is the cheap
   // direction, and the date tools live here anyway.
   { pattern: /\b(time|date|today|tomorrow|yesterday|weather|calculat\w*|maths?|mathematics|arithmetic|convert|translate|timestamp)\b|\d\s*[+*×÷^]\s*\d|\d\s+[-/x]\s+\d|\d\s*%\s*of\b/i, domains: ["data"] },
+  // (WARP-3116's navigation rule is NOT in this list — see NAVIGATION_RULES
+  // below the array, which is evaluated only for a pool that can use it.)
   // WARP-2497 — the cloud SaaS datasets (Stripe / HubSpot / Mailchimp).
   //
   // The defect this closes is the one WARP-2058 closed for `pm` and WARP-2454
@@ -644,6 +649,62 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
 ];
 
 /**
+ * WARP-3116 — getting AROUND the dashboard: find_dashboard_page and
+ * open_dashboard_page live in `data`. The words are how a person asks to be
+ * moved or pointed somewhere ("take me to it", "where do I change…"), not what
+ * the page is about — "take me to it" names no page at all, and it is the
+ * sentence this rule exists for.
+ *
+ * THE GATE. A separate list, evaluated only for a pool that carries one of the
+ * two tools (`rulesForPool`), because a match admits the WHOLE `data` domain
+ * and buys nothing unless the turn can use the two this rule is for. Measured
+ * with `measureToolSpecs` on the owner's chat pool: 9 tools, ~8.8K chars, ~2.2K
+ * tokens (17 tools and ~3.9K counting the eight utilities the chat scope
+ * leaves out). Both are withheld from every turn with no dashboard page list —
+ * voice, phones, background runs — at both places the pool is built
+ * (`routes/llm.ts` for the estimate, `llm-agent.service.ts` for the wire), so a
+ * pool that holds one came from a turn with a page list, and no caller has to
+ * pass a flag that could drift between the two. As one of `DOMAIN_RULES` this
+ * ran on every turn, and off the dashboard it could only ever admit the OTHER
+ * seven tools (~1.8K tokens).
+ *
+ * EXPLICIT ONLY. Every alternative is a request to be moved or pointed. The
+ * bare forms were dropped after they admitted the domain on ordinary
+ * sentences — "I am going to need a summary of my inbox" and "before I go to
+ * sleep" (`go(ing) to`), "send the link to Bob" (`link to`), "what is on the
+ * front page of the report" (`the <word> page`) — and `head to` and
+ * `page/screen/tab/section for/with` went with them, being the same shape:
+ * a motion verb or a UI noun with no destination. A phrasing lost this way
+ * still gets there: the guidance line names find_dashboard_page on a dashboard
+ * turn, and a call to a filtered-but-allowed tool expands its domain next
+ * iteration — one lost iteration, not a failed turn.
+ *
+ * What stays bare is deliberate. `where is / are / do I …` is the ticket's own
+ * question, and in the dashboard chat the place a person asks after is usually
+ * a page ("where are my deleted files?" → Trash). `settings` is NOT claimed
+ * bare: "change the wifi settings to WPA3" is an action for the network tools,
+ * not a trip, so it counts only after "open" / "show me".
+ */
+const NAVIGATION_RULES: typeof DOMAIN_RULES = [
+  {
+    pattern: /\b(take me|bring me|navigate|jump to|link me|where (is|are|can i|do i|would i|should i)|how do i get to|(open|show me) (the |my )?(\w+ ){0,2}(settings|page|screen|tab))\b/i,
+    domains: ["data"],
+  },
+];
+
+const ALL_RULES: typeof DOMAIN_RULES = [...DOMAIN_RULES, ...NAVIGATION_RULES];
+
+/**
+ * The rules worth evaluating for this pool: every ordinary rule, plus the
+ * navigation rules only when the pool holds a tool they exist to reach.
+ */
+function rulesForPool(pool: readonly string[]): typeof DOMAIN_RULES {
+  return pool.some((name) => DASHBOARD_NAVIGATION_TOOLS.has(name))
+    ? ALL_RULES
+    : DOMAIN_RULES;
+}
+
+/**
  * A tool name's domain. `runtimeTools` extends the lookup to the dynamic half
  * of the universe; omit it for a local-only question (the pre-WARP-2443
  * signature, kept working for every existing caller).
@@ -656,7 +717,7 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
  * overlap fails CI instead of shipping (WARP-2448).
  */
 export const RULED_DOMAINS: ReadonlySet<ToolDomain> = new Set(
-  DOMAIN_RULES.flatMap((r) => r.domains),
+  ALL_RULES.flatMap((r) => r.domains),
 );
 
 export function domainOfTool(
@@ -695,6 +756,10 @@ export function toolNamesForDomain(
  * exactly as it did before WARP-2443 — the local-only path is unchanged, so
  * any shift in agent behaviour is attributable to the new universe rather
  * than to a refactor.
+ *
+ * WARP-3116 — the navigation rules join the ordinary ones only when `pool`
+ * carries a navigation tool; see `NAVIGATION_RULES` for why the pool is the
+ * gate.
  */
 export function selectAdvertisedTools(opts: {
   mode: ToolSelectionMode;
@@ -723,7 +788,7 @@ export function selectAdvertisedTools(opts: {
   }
   const runtimeDomains = indexRuntimeDomains(opts.runtimeTools);
   const domains = new Set<ToolDomain>(opts.extraDomains ?? []);
-  for (const rule of DOMAIN_RULES) {
+  for (const rule of rulesForPool(opts.pool)) {
     if (rule.pattern.test(opts.userMessage)) {
       for (const d of rule.domains) domains.add(d);
     }

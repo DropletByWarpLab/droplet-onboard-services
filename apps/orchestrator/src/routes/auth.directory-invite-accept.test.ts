@@ -602,6 +602,39 @@ describe("WARP-1051 — invite-accept session role matches the canonical invite 
   });
 });
 
+describe("invite-accept records who invited the person (WARP-3263)", () => {
+  async function acceptGuestInvite(prisma: any) {
+    const token = await issueInvite(buildApp(prisma), {
+      displayName: "Ext",
+      email: "ext@warp.test",
+      role: "guest",
+    });
+    const accept = await request(buildApp(prisma, null))
+      .post(`/api/auth/invites/accept/${token}`)
+      .send({ password: INVITE_PASSWORD });
+    expect(accept.status).toBe(200);
+    return prisma.user.upsert.mock.calls.at(-1)[0].create;
+  }
+
+  it("stamps the issuer's id on the invite and copies it to User.invitedById", async () => {
+    const prisma = createPrismaMock();
+    await prisma.user.upsert({
+      where: { id: "admin" },
+      create: { id: "admin", username: "admin-issuer" },
+      update: {},
+    });
+    const created = await acceptGuestInvite(prisma);
+    expect(prisma.userInvite.create.mock.calls[0][0].data.createdById).toBe("admin");
+    expect(created.invitedById).toBe("admin");
+  });
+
+  it("leaves invitedById null when the issuer was deleted before the accept", async () => {
+    const prisma = createPrismaMock(); // no "admin" row: deleted
+    const created = await acceptGuestInvite(prisma);
+    expect(created.invitedById).toBeNull();
+  });
+});
+
 describe("invite-accept auto-login provisions the Nextcloud session token", () => {
   // The accept handler auto-logs the invitee in ("same shape as
   // /api/auth/login") and it holds the plaintext password it just gave

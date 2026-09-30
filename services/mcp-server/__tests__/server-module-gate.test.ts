@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -7,7 +7,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { FAIL_CLOSED_MODULE_VERDICT, TOOL_CATALOG, type ModuleVerdict } from "@droplet/tools-core";
 import { createServer, type TrustContext } from "../src/server.js";
 import type { ContextDeps } from "../src/context.js";
-import type { ModuleVerdictSource } from "../src/module-verdict.js";
+import { NO_MODULE_GATING, type ModuleVerdictSource } from "../src/module-verdict.js";
 
 /**
  * WARP-2972 — module gating at the MCP protocol layer, both transports.
@@ -197,12 +197,52 @@ describe("stdio transport (the orchestrator's own child)", () => {
   });
 });
 
-describe("no verdict source configured (unit tests, embedders)", () => {
-  it("withholds nothing", async () => {
+describe("no verdict source configured: fail CLOSED by construction (WARP-2972 review)", () => {
+  // A server built without a source used to withhold nothing, so a transport
+  // that forgot the option was a silent fail-open. Omitting it is now the
+  // fail-closed verdict; withholding nothing is an explicit act
+  // (NO_MODULE_GATING) that is greppable and never wired in src/.
+  it("HTTP: tools/list drops module-owned tools and keeps unclaimed ones", async () => {
     const { client } = await connect(http(), undefined);
+    const names = await namesOf(client);
+    expect(names).not.toContain(CAMERA_TOOL);
+    expect(names).not.toContain(NETWORK_TOOL);
+    expect(names).toContain(UNCLAIMED_TOOL);
+  });
+
+  it("HTTP and stdio: tools/call refuses a module-owned tool and serves an unclaimed one", async () => {
+    for (const trust of [http(), stdio]) {
+      const { client, hop } = await connect(trust, undefined);
+      const refused = await client.callTool({ name: NETWORK_TOOL, arguments: {} });
+      expect(errorCode(refused)).toBe("module_disabled");
+      expect(hop).not.toHaveBeenCalled();
+      // (`get_gpu_status` refuses a role-less stdio call in its own handler.)
+      await client.callTool({ name: UNCLAIMED_TOOL, arguments: {}, _meta: { userRole: "owner" } });
+      expect(hop, trust.kind).toHaveBeenCalled();
+    }
+  });
+
+  it("an explicit NO_MODULE_GATING withholds nothing", async () => {
+    const { client } = await connect(http(), NO_MODULE_GATING);
     const names = await namesOf(client);
     expect(names).toContain(CAMERA_TOOL);
     expect(names).toContain(NETWORK_TOOL);
+  });
+
+  it("NO_MODULE_GATING is referenced nowhere in src/ but its definition and the library barrel", () => {
+    const srcDir = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
+    const hits: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, e.name);
+        if (e.isDirectory()) walk(full);
+        else if (e.name.endsWith(".ts") && readFileSync(full, "utf8").includes("NO_MODULE_GATING")) {
+          hits.push(full.slice(srcDir.length + 1));
+        }
+      }
+    };
+    walk(srcDir);
+    expect(hits.sort()).toEqual(["lib.ts", "module-verdict.ts"]);
   });
 });
 

@@ -1,3 +1,5 @@
+import type { DashboardPage } from "@droplet/shared-types";
+
 import type { ScoreKind } from "./relevance";
 
 /**
@@ -226,6 +228,10 @@ export interface ChatRequest {
    * entirely to get the role-default registry. The server distinguishes
    * `[]` from absent, so only send `[]` when zero tools is meant. */
   allowed_tools?: string[];
+  /** WARP-3116 — the pages this viewer can open (`assistantPages`), for the
+   *  assistant's find_dashboard_page / open_dashboard_page. Omitted = the
+   *  server withholds both tools. */
+  dashboardPages?: DashboardPage[];
 }
 
 export interface ModelInfo {
@@ -1462,6 +1468,19 @@ export interface AdminFilesUsageResponse {
   departments: AdminUsageDepartmentRow[];
 }
 
+/** WARP-3168: a link on company data, made by someone who is not owner/admin. */
+export interface CompanyPublicLink {
+  shareId: number;
+  /** OCS share type: 3 public link, 4 email link, 0/1 with the re-share bit, … */
+  shareType: number;
+  permissions: number;
+  library: string;
+  path: string;
+  createdBy: { userId: string | null; name: string; role: AccessTier | null };
+  createdAt: string;
+  expiresAt: string | null;
+}
+
 export interface InviteCreateResponse {
   token: string;
   url: string;
@@ -1475,7 +1494,7 @@ export interface InviteCreateResponse {
 // inferred. The backend routes (T3+) build in parallel — these shapes are
 // the fixed contract both sides code against.
 
-/** The full Role pgEnum (display label for `family` is "Staff", §0.1). */
+/** The full Role pgEnum (display label for `family` is "Member", `guest` is "External guest"). */
 export type AccessTier = "owner" | "admin" | "family" | "guest" | "service";
 
 /** Custom-role starting point — never owner/service (ADR-032 §2 CHECK). */
@@ -1585,7 +1604,7 @@ export interface AccessToolDomainsResponse {
     sources: string[];
     tools: number;
     populated: boolean;
-    /** Holds a tool classified read — reachable for Staff/Guest-based roles. */
+    /** Holds a tool classified read — reachable for Member/external-guest-based roles. */
     readable: boolean;
   }>;
 }
@@ -1755,7 +1774,7 @@ export interface InviteListItem {
    *  pgEnum, so this was NEVER the legacy `InviteRole` ("user" | "admin").
    *  The mistyping was load-bearing: the pending-invites row rendered
    *  `role === "admin" ? "admin" : "user"`, which is only exhaustive under
-   *  the wrong type, and it silently collapsed Staff, Guest and every
+   *  the wrong type, and it silently collapsed Member, External guest and every
    *  custom-role invite into the single word "user". Typed as the full
    *  tier enum, that ternary no longer type-checks as a complete mapping
    *  and the label has to be resolved properly. */
@@ -4479,6 +4498,31 @@ export interface IncidentDetail extends IncidentSummary {
    * Absent on a box before PR-2.
    */
   narrative?: IncidentNarrativeView | null;
+  /**
+   * WARP-3195 (P4 §6.7.1, §8) — the links only Droplet made that back this
+   * incident. An event matched through Droplet's links alone never alerts, so
+   * the page says "Droplet linked this camera. Keep the link to get alerts
+   * from it." with Keep (route 24, manage). Null unless this viewer is at
+   * manage, owner/admin, and sees every camera and may read threats — a rule
+   * that never reads the incident (DS-005, the R1 pin) — else the list, `[]`
+   * when there is none. Absent on a box before WARP-3195.
+   */
+  dropletLinks?: IncidentDropletLinkView[] | null;
+}
+
+/** WARP-3195 — one link only Droplet set, into the incident's area (route 18's `dropletLinks`). */
+export interface IncidentDropletLinkView {
+  /** Route 24's `:linkId`. */
+  linkId: string;
+  /** The area as it is now. */
+  zone: { id: string; name: string; kind: SecurityZoneKind };
+  sourceKind: SecurityZoneSourceKind;
+  /** camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`. */
+  sourceRef: string;
+  /** The Frigate camera the link points at. */
+  camera: string;
+  /** The camera's display name (live, else the link's snapshot) — never the part. */
+  label: string;
 }
 
 /** WARP-2979 P4 PR-2 — route 18's `narrative`, and route 28's 202 body. Written on the box only (DS-007). */

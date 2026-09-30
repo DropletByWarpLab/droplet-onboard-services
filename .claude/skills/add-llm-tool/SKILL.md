@@ -69,7 +69,7 @@ relocates the cliff instead of removing it:
 |---|---|---|
 | `PER_TOOL_MAX_CHARS` — one serialized tool | 2 000 chars | `set_detection_zones` is already 2 576 and is out of chat scope for it |
 | full chat pool | mean ≤ 1 000 chars per advertised tool (`PER_TOOL_MAX_CHARS / 2`, WARP-2547) — it scales with the pool, so ordinary growth widens it | — |
-| full registry serialization | < 115 000 chars | 113 921 at WARP-2980 (157 tools) — about one average tool left. A growth tripwire on the MCP-facing surface, crossed only as a decision written beside the line: 100 000 → 110 000 at WARP-2546, → 115 000 at WARP-2979 |
+| full registry serialization | < 115 000 chars | 114 676 at WARP-3116 (159 tools) — under half an average tool left. A growth tripwire on the MCP-facing surface, crossed only as a decision written beside the line: 100 000 → 110 000 at WARP-2546, → 115 000 at WARP-2979 |
 
 If your schema is too big, **cut prose or cut properties**. Do **not** add
 `maxLength` / `pattern` / `enum` to shrink it: that is what blew llama.cpp's
@@ -182,6 +182,7 @@ must never touch (runtime tools live outside `TOOLS`, ADR-043).
 - The MCP server picks the tool up from `TOOLS` with no registration of its own.
 - RBAC write-intent tracking follows `requiresWrite` (see the read-only table).
 - Confirmation follows `requiresConfirmation` through the generic interceptor.
+- Module gating follows the tool's DOMAIN (WARP-2972): a tool in a module-claimed domain leaves the chat pool, `/api/llm/tools` and MCP when its module is off. `apps/orchestrator/src/__tests__/setup.ts` installs a PERMISSIVE verdict, so a pool or route test only sees gating if it calls `_setToolModuleVerdictForTests` (`services/tool-module-verdict.service.ts`); a NEW domain a module claims must also join `MODULE_OWNED_TOOL_DOMAINS` in `packages/tools-core/src/module-gate.ts` or `tool-module-verdict.service.test.ts` fails.
 
 ## Running the gates
 

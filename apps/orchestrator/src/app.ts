@@ -132,7 +132,7 @@ import { createTlsCertificateRouter } from "./routes/tls-certificate.js";
 import { createBackupStatusRouter } from "./routes/backup-status.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createUpdatesRouter } from "./routes/updates.js";
-import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
+import { createEmailRouter, EMAIL_INGEST_PATH, wireEmailAnalysis } from "./routes/email.js";
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
 import { resolveActiveModel } from "./services/active-model.service.js";
 import { createToolsRouter } from "./routes/tools.js";
@@ -234,7 +234,13 @@ export function createApp(
   // an explicit limit; body-parser skips an already-parsed body, so the
   // global parser below leaves it alone and keeps its default elsewhere.
   app.use("/api/files/upload", express.json({ limit: "16mb" }));
-  app.use(express.json({ type: ["application/json", "application/scim+json"] }));
+  // WARP-3267: the email ingest route carries attachments and parses its own
+  // body with a larger limit, after its service-principal check — so the
+  // global parser leaves that one path alone (see EMAIL_INGEST_PATH).
+  const jsonParser = express.json({ type: ["application/json", "application/scim+json"] });
+  app.use((req, res, next) =>
+    EMAIL_INGEST_PATH.test(req.path) ? next() : jsonParser(req, res, next),
+  );
 
   // Public auth routes (setup + login + invite-accept) — no authentication required.
   // Prisma is required for the WARP-217 invite-accept endpoints (token lookup).

@@ -686,6 +686,11 @@ export function useSecurityIncidentSummary(enabled = true) {
  * in the cache and refreshes the summary; it throws the typed error for the
  * caller to render with `translateError(err, "security")` — then `refresh()`,
  * since a 409 means the incident moved.
+ *
+ * WARP-3195 — `keepLink` (manage): Keep a link only Droplet made (route 24),
+ * then re-read the incident (its `dropletLinks` line goes) and every area
+ * list (the link's "Linked by Droplet" chip goes). It throws the typed error
+ * like the others; the caller re-reads with `refresh()`.
  */
 export function useSecurityIncident(id: string | null) {
   const { mutate: globalMutate } = useSWRConfig();
@@ -732,6 +737,14 @@ export function useSecurityIncident(id: string | null) {
     await mutate();
     return r;
   }, [id, mutate]);
+  const keepLink = useCallback(
+    async (linkId: string): Promise<SecurityLinkDecisionResult> => {
+      const r = await acceptSecurityLink(linkId);
+      await Promise.all([mutate(), globalMutate(isZonesKey)]);
+      return r;
+    },
+    [mutate, globalMutate],
+  );
   // WARP-2980 (P5 PR-C) — route 35: Expected / Not expected. The box returns the incident, like acknowledge.
   const giveVerdict = useCallback(
     async (verdict: IncidentVerdict) => apply(await setSecurityIncidentVerdict(id!, verdict)),
@@ -746,6 +759,7 @@ export function useSecurityIncident(id: string | null) {
     acknowledge,
     resolve,
     summarise,
+    keepLink,
     giveVerdict,
   };
 }

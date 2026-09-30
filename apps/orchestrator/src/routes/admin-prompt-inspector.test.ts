@@ -49,6 +49,7 @@ vi.mock("../services/prompt-inspect.service.js", () => ({
 }));
 
 import { createAdminPromptInspectorRouter } from "./admin-prompt-inspector.js";
+import { DASHBOARD_NAVIGATION_TOOLS } from "../services/dashboard-navigation.js";
 
 const prisma = {} as never;
 
@@ -184,6 +185,22 @@ describe("🔴 the path parameter is the target, and the query models the turn",
     expect(mocks.inspectPrompt).toHaveBeenCalledWith(
       prisma,
       expect.objectContaining({ allowedToolNames: undefined }),
+    );
+  });
+
+  it("🔴 models the navigation tools the way the real turn withholds them (WARP-3116)", async () => {
+    // A dashboard turn carries a page list, so nothing is withheld; a voice
+    // turn has none, so the navigation tools are — and the guidance must not
+    // name what the modelled turn does not carry.
+    await request(appAs("owner")).get("/api/admin/prompt-inspect/u1");
+    expect(mocks.inspectPrompt).toHaveBeenLastCalledWith(
+      prisma,
+      expect.objectContaining({ withheldToolNames: new Set() }),
+    );
+    await request(appAs("owner")).get("/api/admin/prompt-inspect/u1?voice=1");
+    expect(mocks.inspectPrompt).toHaveBeenLastCalledWith(
+      prisma,
+      expect.objectContaining({ withheldToolNames: DASHBOARD_NAVIGATION_TOOLS }),
     );
   });
 

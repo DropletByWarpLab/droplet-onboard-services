@@ -22,6 +22,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { defaultToolCallInterceptor, type Tool } from "@droplet/tools-core";
 import { createServer, type ServerOptions } from "../src/server.js";
 import type { ContextDeps } from "../src/context.js";
+import { NO_MODULE_GATING } from "../src/module-verdict.js";
 
 function buildDeps(): ContextDeps {
   return {
@@ -58,7 +59,7 @@ function syntheticRemoteTool() {
 }
 
 async function connect(options: ServerOptions) {
-  const server = createServer(buildDeps(), { kind: "local-trusted" }, options);
+  const server = createServer(buildDeps(), { kind: "local-trusted" }, { moduleVerdict: NO_MODULE_GATING, ...options });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "interceptor-test", version: "0.0.1" }, { capabilities: {} });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

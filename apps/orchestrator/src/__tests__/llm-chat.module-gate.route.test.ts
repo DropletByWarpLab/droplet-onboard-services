@@ -97,8 +97,10 @@ import {
   guardComposerFailOpen,
   promptBlockPrismaDelegates,
 } from "./helpers/prompt-block-fixtures.js";
+import { readPackageFile } from "./helpers/test-paths.js";
 
 const REGISTRY = [
+  { name: "find_dashboard_page" },
   { name: "list_files" },
   { name: "list_cameras" },
   { name: "search_camera_events" },
@@ -153,10 +155,10 @@ const systemPromptText = (): string => {
   return typeof sys.content === "string" ? sys.content : "";
 };
 
-const chat = (app: express.Express) =>
+const chat = (app: express.Express, extra: Record<string, unknown> = {}) =>
   request(app)
     .post("/api/llm/chat")
-    .send({ model: "m1", messages: [{ role: "user", content: "hi" }] });
+    .send({ model: "m1", messages: [{ role: "user", content: "hi" }], ...extra });
 
 guardComposerFailOpen();
 
@@ -243,5 +245,47 @@ describe("/api/llm/chat — tool guidance never names a tool the pool no longer 
     _setToolModuleVerdictForTests(async () => withheld("cameras"));
     await chat(buildApp(createPrismaMock(null), FAMILY));
     expect(systemPromptText()).not.toContain("For camera questions");
+  });
+});
+
+describe("/api/llm/chat — module gating and stage's navigation withholding both reach guidance (WARP-3116)", () => {
+  // The two axes are independent: `navigationWithheld` (no dashboard page list)
+  // and the module verdict. Guidance must honour BOTH at BOTH call sites.
+  const PAGES = [{ href: "/network", label: "Network" }];
+
+  it("a turn with no page list names neither the withheld module's tools nor the navigation tool", async () => {
+    _setToolModuleVerdictForTests(async () => withheld("cameras"));
+    await chat(buildApp(createPrismaMock(null), OWNER));
+    const sys = systemPromptText();
+    expect(sys).not.toContain("For camera questions");
+    expect(sys).not.toContain("find_dashboard_page");
+  });
+
+  it("a dashboard turn names the navigation tool and still not the withheld module's", async () => {
+    _setToolModuleVerdictForTests(async () => withheld("cameras"));
+    await chat(buildApp(createPrismaMock(null), OWNER), { dashboardPages: PAGES });
+    const sys = systemPromptText();
+    expect(sys).toContain("find_dashboard_page");
+    expect(sys).not.toContain("For camera questions");
+  });
+
+  it("with every module on, a dashboard turn names both (the control)", async () => {
+    await chat(buildApp(createPrismaMock(null), OWNER), { dashboardPages: PAGES });
+    const sys = systemPromptText();
+    expect(sys).toContain("find_dashboard_page");
+    expect(sys).toContain("For camera questions");
+  });
+
+  it("the budget estimate's guidance carries both too: an oversized pool never shows in the sized prompt", async () => {
+    // The estimate composes guidance with `(names, "", undefined, navigationWithheld)`;
+    // a source pin, in the style of tool-selection.parity.test.ts, because the
+    // estimate's inputs are not observable through the mocked agent loop.
+    const src = readPackageFile("src", "routes/llm.ts");
+    expect(src).toMatch(
+      /buildBaseSystemPrompt\(\s*namesForGuidance\(allowedForUser, moduleVerdict\),\s*"",\s*undefined,\s*navigationWithheld,?\s*\)/,
+    );
+    expect(src).toMatch(
+      /buildBaseSystemPrompt\(\s*namesForGuidance\(allowedForUser, moduleVerdict\),\s*degraded\.personaBlock,\s*degraded\.businessBlock,\s*navigationWithheld,?\s*\)/,
+    );
   });
 });

@@ -26,7 +26,11 @@ const REGISTRY = [
   { name: "get_system_health", description: "health", inputSchema: { type: "object" } },
   { name: "email_search", description: "email", inputSchema: { type: "object" } },
   { name: "control_device", description: "control", inputSchema: { type: "object" } },
+  { name: "find_dashboard_page", description: "find a page", inputSchema: { type: "object" } },
+  { name: "open_dashboard_page", description: "open a page", inputSchema: { type: "object" } },
 ];
+
+const NAVIGATION = ["find_dashboard_page", "open_dashboard_page"];
 
 const withheld = (...domains: string[]): ModuleVerdict => ({ withheldDomains: new Set(domains) });
 
@@ -90,7 +94,11 @@ describe("runAgent — module verdict on the pool", () => {
   it("a verdict that withholds nothing changes nothing", async () => {
     const { deps, chat } = makeDeps();
     await runAgent(deps, base({ moduleVerdict: withheld() }));
-    expect(advertised(chat)).toEqual(REGISTRY.map((t) => t.name));
+    // No dashboard page list on this turn, so stage's navigation withholding
+    // (WARP-3116) still applies on its own axis.
+    expect(advertised(chat)).toEqual(
+      REGISTRY.map((t) => t.name).filter((n) => !NAVIGATION.includes(n)),
+    );
   });
 
   it("the turn RUNS with a shorter list: absent is not an error and not an empty pool", async () => {
@@ -147,6 +155,41 @@ describe("runAgent — module verdict on the pool", () => {
     await runAgent(deps, base({ tool_choice: "none" }));
     expect(advertised(chat)).toEqual([]);
     expect(resolver).not.toHaveBeenCalled();
+  });
+});
+
+describe("runAgent — module gating and navigation withholding are independent axes (WARP-3116)", () => {
+  it("with no page list, BOTH a withheld module's tools and the navigation tools are absent", async () => {
+    const { deps, chat } = makeDeps();
+    await runAgent(deps, base({ moduleVerdict: withheld("cameras") }));
+    const names = advertised(chat);
+    expect(names).not.toContain("list_cameras");
+    for (const n of NAVIGATION) expect(names, n).not.toContain(n);
+    expect(names).toContain("list_network_devices");
+  });
+
+  it("with a page list, the navigation tools are advertised and the withheld module's still are not", async () => {
+    const { deps, chat } = makeDeps();
+    await runAgent(
+      deps,
+      base({
+        moduleVerdict: withheld("cameras"),
+        toolCallContext: { dashboardPages: [{ href: "/network", label: "Network" }] },
+      }),
+    );
+    const names = advertised(chat);
+    for (const n of NAVIGATION) expect(names, n).toContain(n);
+    expect(names).not.toContain("list_cameras");
+  });
+
+  it("navigation tools live in an unclaimed domain, so even the fail-closed verdict keeps them", async () => {
+    _setToolModuleVerdictForTests(null);
+    const { deps, chat } = makeDeps();
+    await runAgent(
+      deps,
+      base({ toolCallContext: { dashboardPages: [{ href: "/network", label: "Network" }] } }),
+    );
+    for (const n of NAVIGATION) expect(advertised(chat), n).toContain(n);
   });
 });
 

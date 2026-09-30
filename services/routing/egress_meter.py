@@ -89,6 +89,8 @@ CHANNEL_KEYS = (
     # chain classifies either yet, so both read 0 until one does.
     "ambient_data",
     "web_push",
+    # WARP-3264 — calendar place suggestions (OpenStreetMap Nominatim).
+    "place_lookup",
 )
 CHAIN_PREFIX = "droplet_offlan_"
 

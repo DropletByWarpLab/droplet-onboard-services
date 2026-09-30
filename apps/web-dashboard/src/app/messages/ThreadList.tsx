@@ -70,21 +70,25 @@ export function ThreadList({
   meId: string;
   selectedThreadId: string | null;
   onSelect: (id: string) => void;
-  onCompose: () => void;
+  /** WARP-3263 — omitted for an external guest, who can't start a
+   *  conversation; both "New message" affordances disappear. */
+  onCompose?: () => void;
 }) {
   return (
     <>
       <div className="mx-head justify-between">
         <span className="mx-head-title">Conversations</span>
-        <button
-          type="button"
-          onClick={onCompose}
-          className="mx-iconbtn"
-          title="New message"
-          aria-label="New message"
-        >
-          <SquarePen size={16} />
-        </button>
+        {onCompose && (
+          <button
+            type="button"
+            onClick={onCompose}
+            className="mx-iconbtn"
+            title="New message"
+            aria-label="New message"
+          >
+            <SquarePen size={16} />
+          </button>
+        )}
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto py-1">
@@ -108,15 +112,19 @@ export function ThreadList({
             />
             <p className="mx-empty-title">No conversations yet</p>
             <p className="mx-empty-sub">
-              Message a colleague directly, or start a small group.
+              {onCompose
+                ? "Message a colleague directly, or start a small group."
+                : "When someone at the company messages you, the conversation appears here."}
             </p>
-            <button
-              type="button"
-              onClick={onCompose}
-              className="btn primary mt-4"
-            >
-              New message
-            </button>
+            {onCompose && (
+              <button
+                type="button"
+                onClick={onCompose}
+                className="btn primary mt-4"
+              >
+                New message
+              </button>
+            )}
           </div>
         )}
 
