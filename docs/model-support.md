@@ -15,17 +15,18 @@ changes all of them at once.
 
 ## What the box adapts per model family
 
-Model-specific switches live in ONE table in the ai-gateway
-(`services/ai-gateway/providers/ollama_local.py`, next to
-`model_supports_reasoning_effort`), so a caller asks for *what it wants*
-("low thinking") and the gateway sends each family its own control. Add a
-family there. Don't special-case a model in a caller.
+Model-specific switches live in ONE table in the ai-gateway,
+`_THINKING_CONTROLS` in `services/ai-gateway/providers/ollama_local.py`
+(WARP-3409, #2558). A caller asks for *what it wants* ("low thinking") and
+the gateway sends each family its own control; `/ai/models` reports each
+model's `thinking_control`. Add a family there. Don't special-case a model
+in a caller. Every Daily report or tool-spec write-up asks for low thinking.
 
 | Family | Thinking control | Verified |
 |---|---|---|
 | gpt-oss | `reasoning_effort` (top level, plus `chat_template_kwargs` on DMR, WARP-3123) | on the lab box |
-| GLM-4.x | `chat_template_kwargs.enable_thinking=false` for low or no thinking | on the lab box, 2026-09-30; lands with the Daily report fix |
-| Qwen3 | expected to be the same kwarg as GLM; add it only after rendering its template (below) | not yet |
+| GLM-4.x | `chat_template_kwargs.enable_thinking=false` for low (DMR only) | on the lab box, 2026-09-30: the rendered prompt ends `<\|assistant\|><think>` by default and `<\|assistant\|></think>` with the flag |
+| Qwen3 | the upstream template takes the same kwarg (renders an empty `<think></think>` block); a TODO in the table, not code | not on a served template |
 | anything else | nothing sent | — |
 
 ## Known traps with local chat templates
@@ -53,10 +54,12 @@ about 1,850 prompt tokens), 3 runs each, on the lab box (RTX 5060 Ti):
 | GLM-4.7-flash, thinking on, 2,100 budget | 0/3 (cut off; 2 empty, 1 truncated) | 2,100 | 21–26 s |
 | GLM-4.7-flash, thinking on, 4,096 budget | 3/3 | 2,038–3,488 | 20–54 s |
 | **GLM-4.7-flash, `enable_thinking=false`** | **3/3** | **187–267** | **~2 s** |
-| gpt-oss:20B, default effort, 2,100 budget | 3/3 | 844–1,480 | 13–29 s |
+| gpt-oss:20B, default effort, 2,100 budget | 5/6 over two replays (1 cut off) | 796–2,100 | 8–29 s |
+| **gpt-oss:20B, low effort, 2,100 budget** | **3/3** | **319–341** | **3.3–3.9 s** |
 
-A thinking model left on its default can use most of a 4k budget on a
-five-paragraph summary. Give thinking-light tasks (summaries, titles,
+Even gpt-oss at its default effort occasionally uses the whole budget on a
+five-paragraph summary. Low effort produced write-ups of the same length in a
+tenth of the tokens. Give thinking-light tasks (summaries, titles,
 classification) low thinking through the table, and don't raise budgets.
 
 ## Debugging a model problem on a box
@@ -73,6 +76,9 @@ is read-only.
 2. **What the logs already tell you.** In `droplet-orchestrator-1`:
    - `tool-spec-summarizer` "summarizer returned empty content…", with the
      model, `finishReason` and `reasoningChars`;
+   - `tool_spec_summary_fallback`: the write-up failed and the report went out
+     as a plain readout (the step's trace has `fallback: true` and
+     `fallbackReason`);
    - `tool-spec-runner` "tool spec run failed", with the step error;
    - `agent_blank_answer_retry` and `blankDiagnostics` for chat blanks;
    - `agent_system_fold_trimmed` and `agent_system_fold_over_cap` for the
@@ -86,9 +92,13 @@ is read-only.
      "select trace from \"ToolRun\" where id='<run id>'"
    ```
 4. **Replay the write-up on any model**, using the summarizer's real
-   rendering and prompt: `scripts/model-support/replay-summary.mjs` (added
-   with the Daily report fix; usage in its header). Compare models, budgets
-   and thinking settings on the exact failed input before changing code.
+   rendering, prompt and gateway client (WARP-3409; usage in its header):
+   ```bash
+   docker exec -i droplet-orchestrator-1 node - --run <run id> --thinking low \
+     < scripts/model-support/replay-summary.mjs
+   ```
+   Compare models, budgets and thinking settings on the exact failed input
+   before changing code.
 5. **See the exact prompt the model receives:**
    ```bash
    sudo scripts/model-support/render-template.sh <model-tag> --props      # build + template hash
@@ -97,7 +107,9 @@ is read-only.
    ```
    `request.json` is `{"messages": [...], "tools": [...], "chat_template_kwargs": {...}}`.
    Anything the template drops is simply absent from the output. The model
-   must be loaded (make it active, or send it one chat).
+   must be loaded (make it active, or send it one chat). This talks to the
+   llama-server socket inside `droplet-dmr`; the model runner's own HTTP API
+   has no `/apply-template`.
 6. **Whole-agent behaviour:** run the agent-loop eval on the box against the
    model (`tests/agent-loop-eval/bench-box.sh` with `MODEL=<tag>`; the suite
    lands with PR #2537), and compare with a gpt-oss run on the same box.
@@ -115,7 +127,9 @@ is read-only.
 
 ## Open items
 
-- Qwen3 thinking control: unverified (no Qwen3 template on the lab box).
+- Qwen3 thinking control: unverified on a served template (no Qwen3 on the lab box).
+- Scheduled routines with a write-up step fail on every fire: the schedule
+  ticker runs specs without a summarizer (WARP-3410).
 - Attachment text can carry instructions the model repeats (WARP-3405).
 - The Mac and iOS apps kept a previously auto-picked chat model after the box's
   default changed, until relaunch. The fix is in DropletKit (auto-picked
