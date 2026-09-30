@@ -384,7 +384,9 @@ describe("runAgent — no-progress early-stop (WARP-3283)", () => {
     expect(nudge).not.toContain("ask me");
   });
 
-  it("on a durable run a blank answer after the stop keeps #2538's fallback, which asks nothing", async () => {
+  it("on a durable run a blank answer after the stop says it couldn't finish, and asks nothing", async () => {
+    // The hits were judged unusable, so not "I found some information"; and a
+    // run takes #2538's no-question wording for that branch.
     const empty = await EMPTY_CONTENT;
     const hit = '{"query":"q","results":[{"path":"/a.md","text":"x"}]}';
     const blank = { role: "assistant", content: "", reasoning_content: "Maybe search email." };
@@ -401,7 +403,8 @@ describe("runAgent — no-progress early-stop (WARP-3283)", () => {
     });
     expect(result.stop_reason).toBe("no_progress");
     expect(result.message.content).toBe(
-      "I found some information but couldn't put together an answer from it. Please ask again, or ask for one part at a time.",
+      "I looked but didn't find anything matching, so I couldn't finish the task.",
     );
+    expect(result.message.content).not.toContain("?");
   });
 });

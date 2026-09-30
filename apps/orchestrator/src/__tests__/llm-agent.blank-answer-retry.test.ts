@@ -271,6 +271,37 @@ describe("runAgent — the blank-answer fallback states the outcome (WARP-3285)"
   });
 });
 
+describe("runAgent — durable runs never end on a question (WARP-3285)", () => {
+  // AGENT_RUN_SYSTEM_PROMPT: "Nobody is watching this run and you cannot ask
+  // questions." Chat asks; a run reports what blocked it.
+  const RUN_CTX = { userId: "u1", agentRunId: "run-1" } as never;
+
+  it("the retry nudge asks a chat turn to clarify, and a run to report what blocked it", async () => {
+    for (const [ctx, expected, absent] of [
+      [undefined, "ask me what I meant", "what blocked you"],
+      [RUN_CTX, "say exactly what you looked for and what blocked you", "ask me"],
+    ] as const) {
+      const { deps, requests } = blockingDeps(oneCallThenBlank("search_contacts"));
+      await runAgent(deps, { ...LOOKUP, ...(ctx ? { toolCallContext: ctx } : {}) });
+      const nudge = String(lastMessage(requests[2]!).content);
+      expect(nudge).toContain(expected);
+      expect(nudge).not.toContain(absent);
+    }
+  });
+
+  it("reads that found nothing: chat asks for detail, a run says it couldn't finish", async () => {
+    const chat = blockingDeps(oneCallThenBlank("search_content", { query: "deletion policy" }));
+    expect((await runAgent(chat.deps, LOOKUP)).message.content).toBe(FOUND_NOTHING);
+
+    const run = blockingDeps(oneCallThenBlank("search_content", { query: "deletion policy" }));
+    const result = await runAgent(run.deps, { ...LOOKUP, toolCallContext: RUN_CTX });
+    expect(result.message.content).toBe(
+      "I looked but didn't find anything matching, so I couldn't finish the task.",
+    );
+    expect(result.message.content).not.toContain("?");
+  });
+});
+
 describe("runAgent — blank retry and durable-run checkpoints (WARP-3285)", () => {
   it("the retry pass is not checkpointed, so a resumed run never reads the nudge as the request", async () => {
     let finalizePasses = 0;

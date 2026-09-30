@@ -1643,6 +1643,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // key on (tool, entity) if that shows up.
   const MAX_EMPTY_SEARCHES = 3;
   const emptySearches = new Map<string, number>();
+  // A durable run (WARP-2177) cannot ask: nobody is watching it
+  // (AGENT_RUN_SYSTEM_PROMPT), so its wording must never end on a question.
+  const isRun = Boolean(req.toolCallContext?.agentRunId);
   // WARP-3347 — the guard's second trigger. Searches that return IRRELEVANT
   // hits never count as empty above, so an ambiguous request ("Send a message
   // to the manager saying hello.") used to rephrase for 16 steps. Decision
@@ -1655,10 +1658,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // looking calls that RAN: a search tool that keeps failing is an outage, and
   // WARP-1012's "kept failing" reply is the honest answer to it.
   //
-  // Chat only. A durable run (WARP-2177) cannot ask: nobody is watching it
-  // (AGENT_RUN_SYSTEM_PROMPT), and its resume restarts these counters on
-  // every yield, approval and crash while its decided write never counts.
-  const isRun = Boolean(req.toolCallContext?.agentRunId);
+  // Chat only: a run is never cut (`isRun`), and its resume restarts these
+  // counters on every yield, approval and crash while its decided write
+  // never counts.
   let madeProgress = false;
   let searchesRun = 0;
   // WARP-1479 — the provider's verdict for the most recent BLOCKING
@@ -2036,7 +2038,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         // person's own request, since that is how the model reads it.
         role: "user",
         content: blankRetry
-          ? "You haven't replied yet. Please answer my request now in plain text, using what the tools above returned. If you didn't find what I asked for, say what you checked and ask me what I meant. Don't call any more tools."
+          ? isRun
+            ? "Please give your answer now with what you already have; if you couldn't complete the task, say exactly what you looked for and what blocked you. Don't call any more tools."
+            : "You haven't replied yet. Please answer my request now in plain text, using what the tools above returned. If you didn't find what I asked for, say what you checked and ask me what I meant. Don't call any more tools."
           : finalizeReason === "repetition"
             ? "You're repeating the same tool calls. Please answer my question now with what you already have. Don't call any more tools."
             : finalizeReason === "no_progress"
@@ -2251,9 +2255,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           trace,
           advertisedNames,
           (tool) => catalogEntry(tool)?.write ?? runtimeLookup(tool)?.requiresWrite === true,
-          // WARP-3347 — a search guard already judged these hits unusable. Not
-          // on a run: its fallback must not ask a question nobody can answer.
-          !isRun && (finalizeReason === "needs_details" || finalizeReason === "no_progress"),
+          isRun,
+          // WARP-3347 — a search guard already judged these hits unusable.
+          finalizeReason === "needs_details" || finalizeReason === "no_progress",
         );
         emit({ type: "content_delta", text: answer });
       }
@@ -3293,7 +3297,8 @@ function toolLabels(names: Iterable<string>, advertised: ReadonlySet<string>): s
  * because the person acts on it: a write that ran is reported as done (asking
  * them to rephrase would invite a duplicate send), a pending approval as
  * pending, a failure as a failure (rephrasing won't fix an outage). Only when
- * the reads found nothing does it ask for more detail — in the eval those
+ * the reads found nothing does it ask for more detail (in chat; a durable run
+ * says it couldn't finish, since nobody can answer) — in the eval those
  * were searches that came up empty or ambiguous asks ("Send them the
  * update."), where a clarifying question is the right answer.
  */
@@ -3301,9 +3306,11 @@ function blankAnswerFallback(
   trace: AgentTraceEntry[],
   advertised: ReadonlySet<string>,
   isWrite: (tool: string) => boolean,
+  /** A durable run: nobody can answer a question, so none is asked. */
+  inRun: boolean,
   // WARP-3347 — set when a search guard (WARP-3283 empties, the half-budget
   // cut) ended the search: its hits are not "some information", so the reply
-  // asks for the missing detail.
+  // takes the found-nothing branch (a question in chat, none on a run).
   hitsUnusable: boolean,
 ): string {
   const done = new Set<string>();
@@ -3340,7 +3347,9 @@ function blankAnswerFallback(
   if (parts.length > 0) return parts.join(" ");
   return foundSomething && !hitsUnusable
     ? "I found some information but couldn't put together an answer from it. Please ask again, or ask for one part at a time."
-    : "I looked but didn't find anything matching. Could you tell me a bit more about what you're looking for?";
+    : inRun
+      ? "I looked but didn't find anything matching, so I couldn't finish the task."
+      : "I looked but didn't find anything matching. Could you tell me a bit more about what you're looking for?";
 }
 
 /**
