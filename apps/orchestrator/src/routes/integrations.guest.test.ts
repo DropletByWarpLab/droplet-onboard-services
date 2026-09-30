@@ -18,9 +18,9 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: vi.fn().mockResolvedValue(null),
 }));
 
-const { list } = vi.hoisted(() => ({ list: vi.fn() }));
+const { list, getEaglesoft } = vi.hoisted(() => ({ list: vi.fn(), getEaglesoft: vi.fn() }));
 vi.mock("../services/integrations.service.js", () => ({
-  createIntegrationsService: () => ({ list }),
+  createIntegrationsService: () => ({ list, getEaglesoft }),
 }));
 
 import { createIntegrationsRouter } from "./integrations.js";
@@ -104,5 +104,34 @@ describe("GET /api/integrations/summary — what a member may know (WARP-3374)",
     const res = await request(appAs(role)).get("/api/integrations/summary");
     expect(res.status).toBe(403);
     expect(list).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /api/integrations/eaglesoft — the connection detail (WARP-3374)", () => {
+  const DETAIL = {
+    provider: "eaglesoft",
+    status: "CONNECTED",
+    host: "10.0.4.12",
+    databaseName: "practice",
+    account: "droplet_ro",
+    schemaHash: "abc123",
+    credentialExpiry: { status: "expiring", daysRemaining: 6 },
+  };
+
+  beforeEach(() => {
+    getEaglesoft.mockReset().mockResolvedValue(DETAIL);
+  });
+
+  it.each(["owner", "admin"])("an %s gets the detail", async (role) => {
+    const res = await request(appAs(role)).get("/api/integrations/eaglesoft");
+    expect(res.status).toBe(200);
+    expect(res.body.connection).toEqual(DETAIL);
+  });
+
+  it.each(["family", "guest", "service", null])("a %s is refused, and no host, account or expiry leaves", async (role) => {
+    const res = await request(appAs(role)).get("/api/integrations/eaglesoft");
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.body)).not.toMatch(/10\.0\.4\.12|droplet_ro|abc123|daysRemaining/);
+    expect(getEaglesoft).not.toHaveBeenCalled();
   });
 });

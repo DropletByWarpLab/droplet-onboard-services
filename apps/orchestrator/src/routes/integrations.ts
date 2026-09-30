@@ -234,7 +234,12 @@ export function createIntegrationsRouter(
 
   router.get(
     "/integrations/eaglesoft",
-    requireRole("owner", "admin", "family"),
+    // WARP-3374 (Romain, 2026-09-30: integrations detail is owner/admin only).
+    // The connection detail carries the host, database, account, schema hash and
+    // credential expiry: the same topology the list withholds from a member.
+    // The Practice page (owner/admin) is its only reader; the member-facing
+    // signal is the provider-free `/integrations/summary`.
+    requireRole("owner", "admin"),
     async (_req, res, next) => {
       try {
         // The dashboard's EaglesoftDetail nests the connection plus the

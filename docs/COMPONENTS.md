@@ -207,8 +207,9 @@ network. Host-published ports and host-network services are called out.
   state) and nothing else in Projects; `modules/guest-shares.ts` names the five
   requests and `middleware/guest-share.ts` checks the assignment per record. A
   guest cannot own a deal or customer or lead a project. Single company-wide
-  routes floor with `requireRole`: `GET /api/integrations` is owner/admin (a
-  member reads the provider-free `/api/integrations/summary`), `GET /api/devices`
+  routes floor with `requireRole`: `GET /api/integrations` and
+  `GET /api/integrations/eaglesoft` are owner/admin (a member reads the
+  provider-free `/api/integrations/summary`), `GET /api/devices`
   drops `ip` and `networkMode` for a member and is refused to a guest, and the
   `/api/tools` routines refuse a guest. `GET /api/app-downloads` stays open to
   every role but sends the store's raw `detail` to owner/admin only;
