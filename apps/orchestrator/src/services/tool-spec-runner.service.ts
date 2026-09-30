@@ -139,6 +139,13 @@ export interface Summarizer {
    * as a failed step like any other.
    */
   summarize(prompt: string, facts: RunStepTrace[]): Promise<string>;
+  /**
+   * WARP-3409 — the write-up to use when `summarize` threw, built from the
+   * same facts without a model. Present → the step succeeds with it (marked
+   * `fallback` in the trace) and the run goes on; absent → the step fails as
+   * before. A report must not fail because only its prose did.
+   */
+  fallback?(facts: RunStepTrace[], err: unknown): string;
 }
 
 /** The trace's `tool` slot for a step that calls no tool. Reserved rather
@@ -190,6 +197,10 @@ export interface RunStepTrace {
   /** WARP-2895 — set on a `when` step whose condition was false: how many
    *  later steps the walk did NOT run. The run's status stays `ok`. */
   skippedRemaining?: number;
+  /** WARP-3409 — set on a `summarize` step whose `result` is the model-free
+   *  fallback write-up; `fallbackReason` is why the model's was missing. */
+  fallback?: true;
+  fallbackReason?: string;
 }
 
 export interface RunOutcome {
@@ -530,7 +541,7 @@ export async function runToolSpec(
     const idx =
       args.steps.find((step) => parseCallStep(step)?.tool === forbiddenTool)?.idx ?? 0;
     const msg =
-      `step ${idx} (${forbiddenTool}): not permitted by this run's access role`;
+      `step ${idx + 1} (${forbiddenTool}): not permitted by this run's access role`;
     trace.push({ idx, tool: forbiddenTool, args: {}, ok: false, error: msg });
     outcome = {
       status: "failed",
@@ -554,7 +565,7 @@ export async function runToolSpec(
       if (!args.summarizer) {
         // Fail rather than skip. A report that quietly dropped its narrative
         // would render as a report with nothing to say.
-        const msg = `step ${step.idx}: summarize step but no summarizer configured`;
+        const msg = `step ${step.idx + 1}: summarize step but no summarizer configured`;
         trace.push({
           idx: step.idx,
           tool: SUMMARIZE_PSEUDO_TOOL,
@@ -565,22 +576,22 @@ export async function runToolSpec(
         outcome = { status: "failed", trace, error: msg };
         break;
       }
+      // The facts are the trace SO FAR — a copy, so the summarizer cannot
+      // mutate the run's own record of what happened.
+      //
+      // WARP-3282 — scrubbed of credentials: the summary model (which may
+      // be a configured cloud default) reads these results exactly as the
+      // chat loop's model reads a tool result, so it gets the same scrub.
+      // `named`/`prev` keep the real values — data flowing from one step
+      // into the next is not a model path, and a copy step must copy.
+      const facts = redactCredentialValues(trace);
+      if (facts.count > 0) {
+        logger.info(
+          { specId: args.specId, redacted: facts.count },
+          "tool_spec_step_credentials_redacted",
+        );
+      }
       try {
-        // The facts are the trace SO FAR — a copy, so the summarizer cannot
-        // mutate the run's own record of what happened.
-        //
-        // WARP-3282 — scrubbed of credentials: the summary model (which may
-        // be a configured cloud default) reads these results exactly as the
-        // chat loop's model reads a tool result, so it gets the same scrub.
-        // `named`/`prev` keep the real values — data flowing from one step
-        // into the next is not a model path, and a copy step must copy.
-        const facts = redactCredentialValues(trace);
-        if (facts.count > 0) {
-          logger.info(
-            { specId: args.specId, redacted: facts.count },
-            "tool_spec_step_credentials_redacted",
-          );
-        }
         const prose = await args.summarizer.summarize(summarizeStep.prompt, [
           ...(facts.value as RunStepTrace[]),
         ]);
@@ -597,6 +608,27 @@ export async function runToolSpec(
         prev = prose;
       } catch (err) {
         const msg = (err as Error).message ?? String(err);
+        // WARP-3409 — the facts were gathered; only the prose is missing. A
+        // summarizer that can write a fallback turns this into a finished
+        // step, marked so the log and any client can tell it apart.
+        const fallback = args.summarizer.fallback?.([...(facts.value as RunStepTrace[])], err);
+        if (fallback) {
+          logger.warn({ specId: args.specId, reason: msg }, "tool_spec_summary_fallback");
+          const outName = stepOutputName(step);
+          trace.push({
+            idx: step.idx,
+            tool: SUMMARIZE_PSEUDO_TOOL,
+            args: { prompt: summarizeStep.prompt },
+            ok: true,
+            result: fallback,
+            fallback: true,
+            fallbackReason: msg,
+            ...(outName ? { as: outName } : {}),
+          });
+          if (outName) named.set(outName, fallback);
+          prev = fallback;
+          continue;
+        }
         trace.push({
           idx: step.idx,
           tool: SUMMARIZE_PSEUDO_TOOL,
@@ -604,7 +636,7 @@ export async function runToolSpec(
           ok: false,
           error: msg,
         });
-        outcome = { status: "failed", trace, error: `step ${step.idx} (summarize): ${msg}` };
+        outcome = { status: "failed", trace, error: `step ${step.idx + 1} (summarize): ${msg}` };
         break;
       }
       continue;
@@ -619,7 +651,7 @@ export async function runToolSpec(
     if (sandboxStep) {
       const pseudo = sandboxStep.kind === "when" ? WHEN_PSEUDO_TOOL : TRANSFORM_PSEUDO_TOOL;
       if (!args.transformer) {
-        const msg = `step ${step.idx}: ${sandboxStep.kind} step but no sandbox configured`;
+        const msg = `step ${step.idx + 1}: ${sandboxStep.kind} step but no sandbox configured`;
         trace.push({ idx: step.idx, tool: pseudo, args: {}, ok: false, error: msg });
         outcome = { status: "failed", trace, error: msg };
         break;
@@ -630,7 +662,7 @@ export async function runToolSpec(
       } catch (err) {
         if (!(err instanceof StepReferenceError)) throw err;
         trace.push({ idx: step.idx, tool: pseudo, args: {}, ok: false, error: err.message });
-        outcome = { status: "failed", trace, error: `step ${step.idx} (${sandboxStep.kind}): ${err.message}` };
+        outcome = { status: "failed", trace, error: `step ${step.idx + 1} (${sandboxStep.kind}): ${err.message}` };
         break;
       }
       try {
@@ -666,7 +698,7 @@ export async function runToolSpec(
       } catch (err) {
         const msg = (err as Error).message ?? String(err);
         trace.push({ idx: step.idx, tool: pseudo, args: { inputs: resolvedInputs }, ok: false, error: msg });
-        outcome = { status: "failed", trace, error: `step ${step.idx} (${sandboxStep.kind}): ${msg}` };
+        outcome = { status: "failed", trace, error: `step ${step.idx + 1} (${sandboxStep.kind}): ${msg}` };
         break;
       }
       continue;
@@ -674,7 +706,7 @@ export async function runToolSpec(
 
     const parsed = parseCallStep(step);
     if (!parsed) {
-      const msg = `step ${step.idx}: malformed (kind=${step.kind})`;
+      const msg = `step ${step.idx + 1}: malformed (kind=${step.kind})`;
       trace.push({
         idx: step.idx,
         tool: "(unknown)",
@@ -698,7 +730,7 @@ export async function runToolSpec(
       >;
     } catch (err) {
       if (!(err instanceof StepReferenceError)) throw err;
-      const msg = `step ${step.idx} (${parsed.tool}): ${err.message}`;
+      const msg = `step ${step.idx + 1} (${parsed.tool}): ${err.message}`;
       trace.push({
         idx: step.idx,
         tool: parsed.tool,
@@ -725,7 +757,7 @@ export async function runToolSpec(
       outcome = {
         status: "failed",
         trace,
-        error: `step ${step.idx} (${parsed.tool}): ${denial.message}`,
+        error: `step ${step.idx + 1} (${parsed.tool}): ${denial.message}`,
         denialCode: denial.code,
       };
       break;
@@ -767,7 +799,7 @@ export async function runToolSpec(
       outcome = {
         status: "failed",
         trace,
-        error: `step ${step.idx} (${parsed.tool}): ${msg}`,
+        error: `step ${step.idx + 1} (${parsed.tool}): ${msg}`,
       };
       // Halt — no further steps attempted per the C1 contract.
       break;
@@ -777,9 +809,10 @@ export async function runToolSpec(
   // Optional steps that failed. The run is still `ok`, but a report written
   // around a source that could not be read must leave a signal something
   // other than the model's wording can act on: `warn` in the feed and the
-  // tool names in refs.
+  // tool names in refs. WARP-3409: a summary written by the fallback is a gap
+  // too — the run finished, the model's prose did not.
   const failedSteps =
-    outcome.status === "ok" ? trace.filter((t) => !t.ok).map((t) => t.tool) : [];
+    outcome.status === "ok" ? trace.filter((t) => !t.ok || t.fallback).map((t) => t.tool) : [];
 
   // WARP-3282 — the run record (ToolRun.trace/error, the HTTP response, the
   // run history shared across owner/admin/family) holds results and resolved

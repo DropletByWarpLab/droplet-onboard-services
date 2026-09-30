@@ -107,7 +107,9 @@ class ChatRequest(BaseModel):
     # gpt-oss family (a no-op for other models) as a top-level
     # `reasoning_effort` on the OpenAI-compat /v1/chat/completions call, and on
     # the DMR runtime also as `chat_template_kwargs.reasoning_effort`
-    # (WARP-3123). The three values are gpt-oss's harmony reasoning levels; the
+    # (WARP-3123). On DMR, "low" also turns thinking OFF for GLM / Qwen3,
+    # whose templates only have `enable_thinking` (WARP-3409). The three
+    # values are gpt-oss's harmony reasoning levels; the
     # Literal makes anything else a 422 at the edge rather than a malformed
     # field silently reaching the inference runtime.
     reasoning_effort: Literal["low", "medium", "high"] | None = None

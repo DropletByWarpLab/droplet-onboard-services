@@ -85,6 +85,13 @@ export interface ToolDefinition {
   };
 }
 
+/**
+ * WARP-3409 — the ai-gateway's `max_tokens` ceiling (services/ai-gateway
+ * schemas.py `ChatRequest.max_tokens`, `le=4096`). Anything above it is a 422
+ * at the gateway, which is how the daily report's doubled retry failed.
+ */
+export const GATEWAY_MAX_TOKENS = 4096;
+
 export interface ChatRequest {
   model: string;
   messages: ChatMessage[];

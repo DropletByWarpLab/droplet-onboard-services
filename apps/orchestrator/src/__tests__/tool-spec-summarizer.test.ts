@@ -15,9 +15,11 @@ vi.mock("../services/llm-complete.service.js", () => ({
 
 import {
   createToolSpecSummarizer,
+  fallbackSummary,
   renderFacts,
 } from "../services/tool-spec-summarizer.service.js";
 import type { RunStepTrace } from "../services/tool-spec-runner.service.js";
+import { GATEWAY_MAX_TOKENS } from "../types/index.js";
 
 const ok = (tool: string, result: unknown): RunStepTrace => ({
   idx: 0,
@@ -115,6 +117,129 @@ describe("renderFacts", () => {
     const out = renderFacts([ok("weird_tool", circular)]);
     expect(out).toMatch(/could not be serialised/);
   });
+
+  it("puts known raw figures in a person's units — seconds, bytes, bits per second", () => {
+    // WARP-3409 — given `"uptime":16831`, every model opened the report with
+    // "running for 16,831 seconds".
+    const out = renderFacts([
+      ok("get_system_health", { status: "ok", uptime: 16_831 }),
+      ok("get_camera_health", { system: { uptimeSec: 172_735, storage: [{ freeBytes: 712_596_835_533, usedBytes: 0 }] } }),
+      ok("list_recent_files", { items: [{ name: "a.png", size: 328_693 }, { name: "b", size: 512 }] }),
+      ok("network_summary", { kpis: { wanUpBps: 0, wanDownBps: 2_500_000, clientCount: 7, offLanBytesThisMonth: 1_073_741_824 } }),
+    ]);
+    expect(out).toContain('"uptime":"4 h 40 min"');
+    expect(out).toContain('"uptimeSec":"1 d 23 h"');
+    expect(out).toContain('"freeBytes":"663.7 GB"');
+    expect(out).toContain('"usedBytes":"0 B"');
+    expect(out).toContain('"size":"321.0 KB"');
+    expect(out).toContain('"size":"512 B"');
+    expect(out).toContain('"wanUpBps":"0 bps"');
+    expect(out).toContain('"wanDownBps":"2.5 Mbps"');
+    expect(out).toContain('"offLanBytesThisMonth":"1.0 GB"');
+    // Everything else is left exactly as the tool returned it.
+    expect(out).toContain('"clientCount":7');
+    expect(out).toContain('"status":"ok"');
+  });
+
+  it("leaves a known field alone when it is not a non-negative number", () => {
+    const out = renderFacts([ok("t", { size: "large", uptime: -1, totalBytesPerHour: 5_000, constructor: 5 })]);
+    expect(out).toBe('- t: {"size":"large","uptime":-1,"totalBytesPerHour":5000,"constructor":5}');
+  });
+});
+
+/** The dispatcher throws the MCP error envelope verbatim (app.ts). */
+const envelope = (code: string, message: string) => JSON.stringify({ status: "error", error: { code, message } });
+
+/** The facts of run a405c8a7 (2026-09-30), trimmed to the fields the readouts use. */
+const dailyFacts = (): RunStepTrace[] => [
+  ok("get_system_health", {
+    status: "ok",
+    uptime: 16_831,
+    components: ["ai-gateway", "display", "file-indexer", "mqtt", "nextcloud", "postgres", "redis", "routing", "storage"].map(
+      (name) => ({ name, status: "ok" }),
+    ),
+  }),
+  ok("list_recent_files", { items: Array.from({ length: 30 }, (_, i) => ({ name: `f${i}` })) }),
+  ok("network_summary", { kpis: { clientCount: 7, dnsBlockedToday: 0 } }),
+  ok("get_camera_health", { system: { cameraCount: 0, camerasLive: 0 }, cameras: [] }),
+  ok("list_events", { count: 0, events: [] }),
+  failed("erp_get_ar_summary", envelope("ERP_NOT_CONNECTED", "ERP not connected yet")),
+  failed("erp_get_schedule_today", envelope("ERP_NOT_CONNECTED", "ERP not connected yet")),
+];
+
+describe("fallbackSummary (WARP-3409) — the write-up when the model could not write one", () => {
+  it("reads out each source in plain lines, leaves NOT CONNECTED out, and says why there is no prose", () => {
+    expect(fallbackSummary(dailyFacts(), new Error("AI Gateway error 422: …"))).toBe(
+      [
+        "System health: 9 of 9 services ok.",
+        "Recent files: 30 recently changed items.",
+        "Network: 7 devices connected, 0 DNS lookups blocked today.",
+        "Cameras: none set up.",
+        "Calendar: no upcoming events.",
+        "The written summary couldn't be produced because the AI service returned an error.",
+      ].join("\n"),
+    );
+  });
+
+  it("says a failed read plainly, names services that are not ok, and counts live cameras", () => {
+    const out = fallbackSummary(
+      [
+        ok("get_system_health", { components: [{ name: "redis", status: "ok" }, { name: "nextcloud", status: "down" }] }),
+        failed("list_recent_files", envelope("RECENT_FAILED", "nextcloud returned 503")),
+        ok("get_camera_health", { system: { cameraCount: 3, camerasLive: 2 } }),
+        ok("list_events", { count: 1 }),
+      ],
+      new Error("x"),
+    ).split("\n");
+    expect(out.slice(0, 4)).toEqual([
+      "System health: 1 of 2 services ok (not ok: nextcloud).",
+      "Recent files: couldn't be read.",
+      "Cameras: 2 of 3 live.",
+      "Calendar: 1 upcoming event.",
+    ]);
+  });
+
+  it("never guesses: an unrecognised shape or an unknown tool is just 'checked'; pseudo-steps are not sources", () => {
+    const out = fallbackSummary(
+      [
+        ok("network_summary", { kpis: { clientCount: "seven" } }),
+        ok("search_files", { hits: 4 }),
+        ok("toString", {}),
+        { idx: 2, tool: "(transform)", args: {}, ok: true, result: 1 },
+      ],
+      new Error("x"),
+    ).split("\n");
+    expect(out.slice(0, -1)).toEqual(["Network: checked.", "search_files: checked.", "toString: checked."]);
+  });
+
+  it("says so when nothing was gathered", () => {
+    expect(fallbackSummary([failed("erp_get_ar_summary", envelope("ERP_NOT_CONNECTED", "no"))], new Error("x"))).toBe(
+      "Nothing was gathered to report on.\nThe written summary couldn't be produced because the AI service returned an error.",
+    );
+  });
+
+  it("names the cause in plain words: out of room, no text, no model, too slow", async () => {
+    const why = async (): Promise<string> => {
+      const s = createToolSpecSummarizer(activeModel);
+      const err = await s.summarize("Write it up.", [ok("t", 1)]).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      return s.fallback!([], err).split("\n").pop()!;
+    };
+
+    completeOnceMock.mockResolvedValue({ content: "", model: "m", reasoning: "x".repeat(6940), finishReason: "length" });
+    expect(await why()).toBe("The written summary couldn't be produced because the AI model ran out of room before it wrote anything.");
+
+    completeOnceMock.mockResolvedValue({ content: "", model: "m", reasoning: "", finishReason: "stop" });
+    expect(await why()).toBe("The written summary couldn't be produced because the AI model returned no text.");
+
+    completeOnceMock.mockRejectedValue(new Error("AI Gateway timeout after 120000ms during completeOnce"));
+    expect(await why()).toBe("The written summary couldn't be produced because the AI model took too long to answer.");
+
+    activeModel.mockResolvedValue(null);
+    expect(await why()).toBe("The written summary couldn't be produced because no AI model was available to write it.");
+  });
 });
 
 describe("createToolSpecSummarizer", () => {
@@ -144,16 +269,26 @@ describe("createToolSpecSummarizer", () => {
     expect(completeOnceMock).toHaveBeenCalledTimes(1);
   });
 
-  it("RETRIES once on a blank answer with a doubled budget and low effort", async () => {
+  it("asks for LOW thinking on the first call — a write-up of gathered facts needs none", async () => {
+    // WARP-3409 — GLM-4.7 at its default thinking spent all 2,100 tokens
+    // reasoning (3/3 replays); with thinking off it finished in ~2 s.
+    const s = createToolSpecSummarizer(activeModel);
+    await s.summarize("Write it up.", [ok("t", 1)]);
+    expect(completeOnceMock.mock.calls[0][0].reasoningEffort).toBe("low");
+  });
+
+  it("RETRIES once on a blank answer with a doubled budget CAPPED at the gateway's ceiling, still low", async () => {
     // WARP-2964 — a blank answer with finish_reason=length is a budget
     // failure, not a quiet day. Give it room once before giving up.
+    // WARP-3409 — but never past the gateway's le=4096: 2 × 2,100 = 4,200
+    // was a 422 that failed the whole run.
     completeOnceMock
       .mockResolvedValueOnce({ content: "   ", model: "m", reasoning: "…", finishReason: "length" })
       .mockResolvedValueOnce({ content: "Nine files landed.", model: "m", reasoning: "", finishReason: "stop" });
     const s = createToolSpecSummarizer(activeModel);
     await expect(s.summarize("Write it up.", [ok("t", 1)])).resolves.toBe("Nine files landed.");
     expect(completeOnceMock).toHaveBeenCalledTimes(2);
-    expect(completeOnceMock.mock.calls[1][0].maxTokens).toBe(4200);
+    expect(completeOnceMock.mock.calls[1][0].maxTokens).toBe(GATEWAY_MAX_TOKENS);
     expect(completeOnceMock.mock.calls[1][0].reasoningEffort).toBe("low");
   });
 

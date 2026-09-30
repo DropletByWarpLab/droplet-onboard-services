@@ -813,6 +813,24 @@ def model_supports_reasoning_effort(model: str) -> bool:
     return any(marker in m for marker in _REASONING_MODEL_MARKERS)
 
 
+# WARP-3409: thinking families with no effort LEVELS, only an on/off switch in
+# the chat template. GLM-4.5+ ends the generation prompt with `<think>` by
+# default and with `</think>` when `enable_thinking` is false (read from the
+# GGUF template of docker.io/ai/glm-4.7-flash on the box); Qwen3's template
+# emits an empty `<think></think>` for the same flag. llama.cpp takes it as a
+# boolean in `chat_template_kwargs`, so it rides only on DMR; Ollama's
+# OpenAI-compat endpoint has no such field and its body stays unchanged.
+# `reasoning_effort="low"` maps to off; "medium"/"high" keep the template's own
+# default (thinking on), which is the same body as sending nothing.
+_THINKING_SWITCH_MODEL_MARKERS = ("glm", "qwen3")
+
+
+def model_has_thinking_switch(model: str) -> bool:
+    """True when `model`'s template turns thinking off via `enable_thinking`."""
+    m = model.lower()
+    return any(marker in m for marker in _THINKING_SWITCH_MODEL_MARKERS)
+
+
 class OllamaLocalProvider(BaseProvider):
     """Provider for the local Ollama instance.
 
@@ -1042,6 +1060,17 @@ class OllamaLocalProvider(BaseProvider):
                     **(kwargs.get("chat_template_kwargs") or {}),
                     "reasoning_effort": reasoning_effort,
                 }
+        elif (
+            reasoning_effort == "low"
+            and _DMR_TEMPLATE_REASONING_EFFORT
+            and model_has_thinking_switch(model)
+        ):
+            # WARP-3409: see _THINKING_SWITCH_MODEL_MARKERS. No top-level
+            # field: these templates have no effort levels to read it into.
+            body["chat_template_kwargs"] = {
+                **(kwargs.get("chat_template_kwargs") or {}),
+                "enable_thinking": False,
+            }
         if has_tools:
             tools_payload = [
                 t.model_dump() if hasattr(t, "model_dump") else t

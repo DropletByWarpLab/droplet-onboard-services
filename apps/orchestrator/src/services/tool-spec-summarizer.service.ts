@@ -16,6 +16,7 @@ import { completeOnce } from "./llm-complete.service.js";
 import { OFF_LAN_WITHHELD_DOMAINS } from "./stored-content-egress.service.js";
 import type { RunStepTrace, Summarizer } from "./tool-spec-runner.service.js";
 import { createLogger } from "../lib/logger.js";
+import { GATEWAY_MAX_TOKENS } from "../types/index.js";
 
 const logger = createLogger("tool-spec-summarizer");
 
@@ -80,6 +81,62 @@ function parseToolError(error: string | undefined): { code?: string; message: st
   return { message: error };
 }
 
+/**
+ * WARP-3409 — figures a person reads in other units than the tool returns.
+ * Given raw results, every model opened the report with "running for 16,831
+ * seconds". Keyed by field NAME across all results, so a name belongs here
+ * only when it means the same unit in every tools-core result that uses it
+ * (`size` is a file size in bytes wherever it appears; `totalBytesPerHour` is
+ * a rate, which is why this is a list and not a `*Bytes` suffix rule).
+ */
+function humanBytes(n: number): string {
+  // Binary units, like the dashboard's bytes.ts: Nextcloud reports binary sizes.
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  return i === 0 ? `${n} B` : `${n.toFixed(1)} ${units[i]}`;
+}
+
+function humanDuration(sec: number): string {
+  const d = Math.floor(sec / 86_400);
+  const h = Math.floor((sec % 86_400) / 3_600);
+  const m = Math.floor((sec % 3_600) / 60);
+  if (d > 0) return `${d} d ${h} h`;
+  if (h > 0) return `${h} h ${m} min`;
+  return m > 0 ? `${m} min` : `${Math.floor(sec)} s`;
+}
+
+function humanBitRate(bps: number): string {
+  if (bps < 1_000) return `${bps} bps`;
+  if (bps < 1_000_000) return `${(bps / 1_000).toFixed(1)} kbps`;
+  return `${(bps / 1_000_000).toFixed(1)} Mbps`;
+}
+
+// A Map, not an object literal: a result key like "constructor" must not
+// find Object.prototype's.
+const HUMANIZE: ReadonlyMap<string, (n: number) => string> = new Map([
+  ["uptime", humanDuration],
+  ["uptimeSec", humanDuration],
+  ["size", humanBytes],
+  ["sizeBytes", humanBytes],
+  ["freeBytes", humanBytes],
+  ["usedBytes", humanBytes],
+  ["totalBytes", humanBytes],
+  ["offLanBytes", humanBytes],
+  ["offLanBytesThisMonth", humanBytes],
+  ["wanUpBps", humanBitRate],
+  ["wanDownBps", humanBitRate],
+]);
+
+/** `JSON.stringify` replacer: a known field's non-negative number, in its unit. */
+function humanizeFigure(key: string, value: unknown): unknown {
+  const fmt = HUMANIZE.get(key);
+  return fmt && typeof value === "number" && Number.isFinite(value) && value >= 0 ? fmt(value) : value;
+}
+
 function renderFact(t: RunStepTrace): string {
   if (!t.ok) {
     // Failures are facts too, and the ones most worth saying out loud. A
@@ -93,7 +150,7 @@ function renderFact(t: RunStepTrace): string {
   }
   let body: string;
   try {
-    body = JSON.stringify(t.result ?? null);
+    body = JSON.stringify(t.result ?? null, humanizeFigure);
   } catch {
     // Circular or otherwise unserialisable — say so rather than dropping it.
     body = "(result could not be serialised)";
@@ -112,6 +169,122 @@ export function renderFacts(facts: RunStepTrace[]): string {
     return "(no results were gathered)";
   }
   return facts.map(renderFact).join("\n");
+}
+
+/**
+ * WARP-3409 — a failure the summarizer can name for the owner, in plain words
+ * (`plain`, which completes "...couldn't be produced because ___"). `message`
+ * stays the technical reason the trace and the log keep.
+ */
+class SummaryUnavailableError extends Error {
+  constructor(
+    message: string,
+    readonly plain: string,
+  ) {
+    super(message);
+  }
+}
+
+/** Safe read of a nested field of an arbitrary tool result. */
+function at(value: unknown, ...path: string[]): unknown {
+  let cur = value;
+  for (const key of path) {
+    if (typeof cur !== "object" || cur === null) return undefined;
+    cur = (cur as Record<string, unknown>)[key];
+  }
+  return cur;
+}
+
+const count = (v: unknown): number | null =>
+  typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null;
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * WARP-3409 — the fallback write-up's line for each of the daily report's
+ * reads: a label, and a readout of its key figures. A readout answers null
+ * on a shape it does not recognise, which prints as "checked", never as a
+ * guessed figure. Any other tool is named as is.
+ */
+type Readout = { label: string; read: (r: unknown) => string | null };
+const READOUTS: ReadonlyMap<string, Readout> = new Map(
+  Object.entries<Readout>({
+    get_system_health: {
+      label: "System health",
+      read: (r) => {
+        const comps = at(r, "components");
+        if (!Array.isArray(comps)) return null;
+        const down = comps.filter((c) => at(c, "status") !== "ok").map((c) => String(at(c, "name")));
+        const tally = `${comps.length - down.length} of ${comps.length} services ok`;
+        return down.length === 0 ? tally : `${tally} (not ok: ${down.join(", ")})`;
+      },
+    },
+    list_recent_files: {
+      label: "Recent files",
+      read: (r) => {
+        const items = at(r, "items");
+        return Array.isArray(items) ? plural(items.length, "recently changed item") : null;
+      },
+    },
+    network_summary: {
+      label: "Network",
+      read: (r) => {
+        const clients = count(at(r, "kpis", "clientCount"));
+        const blocked = count(at(r, "kpis", "dnsBlockedToday"));
+        if (clients === null) return null;
+        return `${plural(clients, "device")} connected` + (blocked === null ? "" : `, ${plural(blocked, "DNS lookup")} blocked today`);
+      },
+    },
+    get_camera_health: {
+      label: "Cameras",
+      read: (r) => {
+        const total = count(at(r, "system", "cameraCount"));
+        const live = count(at(r, "system", "camerasLive"));
+        if (total === null) return null;
+        if (total === 0) return "none set up";
+        return live === null ? plural(total, "camera") : `${live} of ${total} live`;
+      },
+    },
+    list_events: {
+      label: "Calendar",
+      read: (r) => {
+        const n = count(at(r, "count"));
+        if (n === null) return null;
+        return n === 0 ? "no upcoming events" : plural(n, "upcoming event");
+      },
+    },
+  }),
+);
+
+/** Why the model's write-up is missing, completing "...because ___". */
+function plainReason(err: unknown): string {
+  if (err instanceof SummaryUnavailableError) return err.plain;
+  const message = err instanceof Error ? err.message : String(err);
+  return /timeout/i.test(message) ? "the AI model took too long to answer" : "the AI service returned an error";
+}
+
+/**
+ * WARP-3409 — the write-up used when the model could not produce one, so a
+ * report never fails because its prose did (Romain: "if something returns
+ * empty but the rest isn't then it still shouldn't fail"). Deterministic and
+ * built only from the facts: one line per source in the prompt's vocabulary
+ * (NOT CONNECTED left out, a failed read said plainly), then one sentence on
+ * why there is no written summary.
+ */
+export function fallbackSummary(facts: RunStepTrace[], err: unknown): string {
+  const lines = facts.flatMap((t) => {
+    // Pseudo-steps (`(transform)`, an earlier `(summarize)`) are not sources.
+    if (t.tool.startsWith("(")) return [];
+    const readout = READOUTS.get(t.tool);
+    const label = readout?.label ?? t.tool;
+    if (!t.ok) {
+      const { code } = parseToolError(t.error);
+      return code && NOT_CONNECTED_CODES.has(code) ? [] : [`${label}: couldn't be read.`];
+    }
+    return [`${label}: ${readout?.read(t.result) ?? "checked"}.`];
+  });
+  if (lines.length === 0) lines.push("Nothing was gathered to report on.");
+  lines.push(`The written summary couldn't be produced because ${plainReason(err)}.`);
+  return lines.join("\n");
 }
 
 const SYSTEM = [
@@ -171,22 +344,29 @@ export function createToolSpecSummarizer(
         // A failed step, said plainly — never a hardcoded tag the box does
         // not host (the historic mistral fallback 404'd upstream), and never
         // a cloud model for a withheld domain's results.
-        throw new Error(
+        throw new SummaryUnavailableError(
           local
             ? "no AI model on this Droplet is available to write a summary of these results"
             : "no local model is available to write the summary",
+          "no AI model was available to write it",
         );
       }
 
       const text = `${prompt}\n\nResults:\n${renderFacts(facts)}`;
-      const ask = (maxTokens: number, reasoningEffort?: "low") =>
+      // WARP-3409 — every call asks for low thinking: a write-up of facts
+      // already gathered needs none, and a thinking model given its default
+      // spends the whole budget before a word of prose. The gateway turns
+      // "low" into gpt-oss's low effort, or thinking OFF for GLM/Qwen3 on DMR
+      // (replay of the failed run: GLM went from 3/3 cut off at 2,100 tokens
+      // to 3/3 finished in ~2 s). Cloud providers ignore it.
+      const ask = (maxTokens: number) =>
         completeOnce({
           system: SYSTEM,
           text,
           model,
           temperature: TEMPERATURE,
           maxTokens,
-          ...(reasoningEffort ? { reasoningEffort } : {}),
+          reasoningEffort: "low",
           // A withheld domain's results are written on the box, and the request SAYS so: the gateway routes by a
           // named provider before it looks at the model's name, so a local fine-tune called gpt-* or claude-* still
           // stays local. Any other summary keeps routing by model, as before.
@@ -197,9 +377,8 @@ export function createToolSpecSummarizer(
       let content = result.content.trim();
       if (!content) {
         // WARP-2964 — one retry, because the cause is nearly always the
-        // budget: the model thought until it was cut off. Double the room and
-        // ask for less thinking (the gateway scopes `reasoning_effort` to the
-        // gpt-oss family and DMR may ignore it — harmless either way). A
+        // budget: the model thought until it was cut off. Double the room,
+        // up to the gateway's ceiling (WARP-3409: 2 × 2,100 was a 422). A
         // non-blank first answer never gets here, so the daily cost is still
         // one call.
         logger.warn(
@@ -211,23 +390,27 @@ export function createToolSpecSummarizer(
           },
           "summarizer returned empty content; retrying with a doubled budget",
         );
-        result = await ask(MAX_TOKENS * 2, "low");
+        result = await ask(Math.min(MAX_TOKENS * 2, GATEWAY_MAX_TOKENS));
         content = result.content.trim();
       }
       if (!content) {
         // `completeOnce` treats empty content as a non-error. Here it is one:
         // an empty narrative would render as a report with nothing to say,
-        // which is indistinguishable from a quiet day. Fail so the tile shows
-        // its failure state instead — and say WHY, because this string is the
-        // whole of what the owner and the next debugger get: the runner puts
-        // it verbatim into `trace[n].error` and `ToolRun.error`.
-        throw new Error(
+        // which is indistinguishable from a quiet day. Throw — the runner
+        // then writes `fallbackSummary` instead and marks the step — and say
+        // WHY, because this string is what the trace's `fallbackReason` and
+        // the log keep for the next debugger.
+        throw new SummaryUnavailableError(
           `the model returned an empty summary (model=${model} ` +
             `finish_reason=${result.finishReason ?? "unknown"} ` +
             `reasoning_chars=${result.reasoning.length})`,
+          result.finishReason === "length"
+            ? "the AI model ran out of room before it wrote anything"
+            : "the AI model returned no text",
         );
       }
       return content;
     },
+    fallback: fallbackSummary,
   };
 }

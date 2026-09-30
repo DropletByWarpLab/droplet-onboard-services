@@ -23,6 +23,7 @@ import * as aiGateway from "./ai-gateway.client.js";
 import { isTimeoutError } from "./ai-gateway.client.js";
 import {
   contentToText,
+  GATEWAY_MAX_TOKENS,
   type ChatMessage,
   type ChatResponse,
 } from "../types/index.js";
@@ -57,7 +58,8 @@ export interface CompleteOnceArgs {
   /**
    * WARP-2964 — gpt-oss reasoning-effort control, passed straight through as
    * a top-level `reasoning_effort` (the gateway scopes it to the gpt-oss
-   * family, so it is a no-op elsewhere). Unset → the key is never sent and
+   * family; WARP-3409 adds "low" = thinking off for GLM/Qwen3 on DMR; a
+   * no-op elsewhere). Unset → the key is never sent and
    * the request body stays byte-for-byte what it was.
    */
   reasoningEffort?: "low" | "medium" | "high";
@@ -113,7 +115,9 @@ export async function completeOnce(
         messages,
         stream: false,
         temperature: args.temperature ?? DEFAULT_TEMPERATURE,
-        max_tokens: args.maxTokens ?? DEFAULT_MAX_TOKENS,
+        // WARP-3409 — clamped here, once, for every caller: above the
+        // gateway's ceiling the whole call is a 422, not a shorter answer.
+        max_tokens: Math.min(args.maxTokens ?? DEFAULT_MAX_TOKENS, GATEWAY_MAX_TOKENS),
         ...(args.reasoningEffort ? { reasoning_effort: args.reasoningEffort } : {}),
         ...(args.provider ? { provider: args.provider } : {}),
         // NO `tools` / `tool_choice` — this call path is non-agentic by
