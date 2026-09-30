@@ -2032,7 +2032,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           : finalizeReason === "repetition"
             ? "You're repeating the same tool calls. Please answer my question now with what you already have. Don't call any more tools."
             : finalizeReason === "no_progress"
-              ? "Your last searches found nothing, so stop searching. If the results above already answer my request, please answer it. Otherwise tell me what you looked for and that nothing matching was found, then ask me for the specific detail you need to continue (for example which person, file, record or ticket I mean). Don't call any more tools."
+              ? "Your last searches found nothing, so stop searching. If the results above already answer my request, please answer it. Otherwise tell me what you looked for and that you couldn't find it, then ask me for the specific detail you need to continue (for example which person, file, record or ticket I mean). Don't call any more tools."
               : finalizeReason === "needs_details"
                 ? "You've spent half of this turn's steps searching without finding what my request needs, so stop searching. If the results above already answer my request, please answer it. Otherwise tell me in one sentence what you checked, then ask me for the specific detail you need to continue (for example which person, file, record or ticket I mean). Don't call any more tools."
                 : "That's all the room there is for more lookups. Please answer my question now with what you already have. Don't call any more tools.",

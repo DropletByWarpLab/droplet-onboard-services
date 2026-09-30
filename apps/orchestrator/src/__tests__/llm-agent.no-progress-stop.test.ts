@@ -128,7 +128,7 @@ describe("runAgent — no-progress early-stop (WARP-3283)", () => {
     // WARP-3347 — Romain: no success searching → ask for the missing detail.
     // It must still say nothing was found: grounding cases score on that.
     const nudge = String(finalReq.messages[finalReq.messages.length - 1]!.content);
-    expect(nudge).toContain("that nothing matching was found");
+    expect(nudge).toContain("that you couldn't find it");
     expect(nudge).toContain("ask me for the specific detail");
     expect(result.stop_reason).toBe("no_progress");
     expect(result.iterations).toBe(4);
