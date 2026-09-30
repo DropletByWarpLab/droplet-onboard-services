@@ -598,6 +598,27 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
           throw err;
         }
 
+        // The owner's switch-off can land between the check above and this row
+        // (the mint is a Nextcloud round-trip), after its revoke sweep has
+        // already run — leaving a live login while drives read off. Re-read the
+        // flag now the row exists; if it is off, revoke this login and never
+        // hand back its password. A switch-off after this read is covered by
+        // the sweep, which sees the row.
+        const stillOn = await prisma.workspace.findUnique({
+          where: { id: 1 },
+          select: { personalDriveEnabled: true },
+        });
+        if (!stillOn?.personalDriveEnabled) {
+          await revokeDeviceClient(prisma, {
+            id: client.id,
+            userId: user,
+            ncAppPassword: encrypted,
+            status: "active",
+          });
+          res.status(403).json({ error: "personal_drive_disabled" });
+          return;
+        }
+
         safePublish(`droplet/devices/${user}/paired`, {
           deviceId: client.id,
           deviceName,

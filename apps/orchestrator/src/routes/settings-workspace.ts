@@ -31,11 +31,16 @@
  *     personal WebDAV drive on or off for the whole box (default OFF); the
  *     flag is `Workspace.personalDriveEnabled`, read back by GET above as
  *     `personalDriveEnabled` and enforced by POST
- *     /api/storage/network-drive/personal. Every change is an Activity row.
+ *     /api/storage/network-drive/personal. Every change is an Activity row,
+ *     written right after the flag so it exists even if a later step throws.
  *     Every `enabled: false` write (not just a true→false transition, so a
- *     retry after a partial failure finishes the job) also revokes every
- *     active `DeviceClient.kind = personal_drive` login — native-app pairings
- *     are never touched — and reports how many in `revokedDriveLogins`.
+ *     retry after a partial failure finishes the job) also marks every
+ *     active `DeviceClient.kind = personal_drive` login revoked — native-app
+ *     pairings are never touched — and reports how many in
+ *     `revokedDriveLogins`. The revoke outcome is a SECOND Activity row
+ *     (count on success, "failed after N revoked" on a throw, which stays a
+ *     500). The upstream Nextcloud delete is best-effort, so the count is rows
+ *     marked revoked, not passwords Nextcloud confirmed deleted.
  *
  * The setup wizard's org step calls POST once at first-run to pin the
  * singleton to BUSINESS. This route is the orchestrator half; the
@@ -51,7 +56,10 @@ import { z } from "zod";
 import { createLogger } from "../lib/logger.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
-import { revokeActivePersonalDriveLogins } from "../services/device-client-revoke.service.js";
+import {
+  revokeActivePersonalDriveLogins,
+  type RevokedDriveLogin,
+} from "../services/device-client-revoke.service.js";
 
 const logger = createLogger("settings-workspace-route");
 
@@ -245,24 +253,59 @@ export function createSettingsWorkspaceRouter(prisma: PrismaClient): Router {
         create: { id: 1, personalDriveEnabled: enabled },
       });
 
-      // The flag is written first so no new login can be minted while the
-      // existing ones are being revoked. Off signs out every personal drive.
-      const revoked = enabled ? {} : { revokedDriveLogins: await revokeActivePersonalDriveLogins(prisma) };
-
-      logger.info({ user: getUsername(req), enabled, ...revoked }, "personal_drive_setting_set");
+      // The flag change is audited before anything that can fail: a revoke
+      // that throws below must never leave the switch off with no Activity row.
+      const actor = actorFromRequest(req);
+      logger.info({ user: getUsername(req), enabled }, "personal_drive_setting_set");
       await recordActivity({
         kind: "system",
         severity: "info",
         sourceIcon: "hard-drive",
         what: enabled ? "Personal drives turned on" : "Personal drives turned off",
-        sub: enabled
-          ? null
-          : `${revoked.revokedDriveLogins} personal drive login${revoked.revokedDriveLogins === 1 ? "" : "s"} signed out`,
-        actor: actorFromRequest(req),
-        refs: { setting: "personalDriveEnabled", enabled, ...revoked },
+        sub: null,
+        actor,
+        refs: { setting: "personalDriveEnabled", enabled },
       });
 
-      res.json({ personalDriveEnabled: row.personalDriveEnabled, ...revoked });
+      if (enabled) {
+        res.json({ personalDriveEnabled: row.personalDriveEnabled });
+        return;
+      }
+
+      // Off: revoke the existing logins, then audit the outcome as its own row.
+      // The flag is already off, but a mint that passed its own check just
+      // before the write can still land after this sweep; the mint route
+      // re-reads the flag after creating its row and revokes that login itself.
+      const revoked: RevokedDriveLogin[] = [];
+      try {
+        await revokeActivePersonalDriveLogins(prisma, revoked);
+      } catch (e) {
+        // Progress survives in `revoked`; the failure stays an error (500 via next).
+        const reason = (e instanceof Error ? e.message : String(e)).slice(0, 200);
+        logger.error({ err: e, revokedDriveLogins: revoked.length }, "personal_drive_revoke_failed");
+        await recordActivity({
+          kind: "system",
+          severity: "err",
+          sourceIcon: "hard-drive",
+          what: "Personal drive logins were not all revoked",
+          sub: `failed after ${revoked.length} revoked: ${reason}`,
+          actor,
+          refs: { setting: "personalDriveEnabled", enabled, revokedDriveLogins: revoked.length, revoked, error: reason },
+        });
+        throw e;
+      }
+      logger.info({ user: getUsername(req), revokedDriveLogins: revoked.length }, "personal_drive_logins_revoked");
+      await recordActivity({
+        kind: "system",
+        severity: "info",
+        sourceIcon: "hard-drive",
+        what: "Personal drive logins revoked",
+        sub: `${revoked.length} personal drive login${revoked.length === 1 ? "" : "s"} revoked`,
+        actor,
+        refs: { setting: "personalDriveEnabled", enabled, revokedDriveLogins: revoked.length, revoked },
+      });
+
+      res.json({ personalDriveEnabled: row.personalDriveEnabled, revokedDriveLogins: revoked.length });
     } catch (e) {
       next(e);
     }

@@ -84,11 +84,17 @@ describe("PersonalDriveCard", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.getByText(/Guests can't\./)).toBeInTheDocument();
-    // Off now signs everyone out; only pre-update logins need removing by hand.
+    // Off revokes the drive logins (no claim Nextcloud confirmed each sign-out);
+    // only pre-update logins need removing by hand, and the copy says where to find them.
     expect(
-      screen.getByText(/Turning this off signs everyone out of their personal drive and stops new logins\./),
+      screen.getByText(/Turning this off revokes every personal drive login and stops new ones\./),
     ).toBeInTheDocument();
-    expect(screen.getByText(/Drive logins made before this update are not signed out automatically/)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Drive logins made before this update are not revoked automatically; they show up in each person’s Paired devices as “Finder on …” or “File Explorer on …” and can be removed there\./,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/signs everyone out|signed out/)).not.toBeInTheDocument();
     expect(screen.queryByText(/keep working/)).not.toBeInTheDocument();
   });
 

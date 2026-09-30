@@ -100,15 +100,22 @@ user can read it as `personalDriveEnabled` in `GET /api/settings/workspace`,
 which is how the dialog knows to show "Personal drives aren't turned on for
 this Droplet" instead of the create button. Every change is an Activity row.
 While it is off, the POST below answers `403 {"error":"personal_drive_disabled"}`
-and mints nothing. Turning it off also **signs every personal drive out**: the
-PUT revokes each active `DeviceClient` with `kind = personal_drive` (the
-Nextcloud app password is revoked best-effort, the row is marked revoked
-either way), leaves native-app pairings (`kind = app_pairing`) alone, and
-answers `{ "personalDriveEnabled": false, "revokedDriveLogins": <n> }` with the
-same count in the Activity row. Logins created **before** the `kind` column
-existed (migration `20260930100000_device_client_kind`) cannot be told apart
-from pairings and are not bulk-revoked; each person can remove theirs from
-their own devices list. The setting's copy tells the owner that drive access
+and mints nothing. Turning it off also **revokes every personal drive login**:
+the PUT marks each active `DeviceClient` with `kind = personal_drive` revoked
+(the Nextcloud app password is deleted best-effort; the row is marked revoked
+either way, so `<n>` counts rows marked revoked, not passwords Nextcloud
+confirmed deleted), leaves native-app pairings (`kind = app_pairing`) alone, and
+answers `{ "personalDriveEnabled": false, "revokedDriveLogins": <n> }`. The
+flag change and the revoke outcome are two Activity rows (the outcome row lists
+each revoked login, or records "failed after N revoked" if the sweep throws,
+which is a 500). If the switch-off lands while a login is being minted, the
+POST notices once its row exists, revokes it and answers 403
+`personal_drive_disabled` without returning a password. Logins created
+**before** the `kind` column existed (migration
+`20260930100000_device_client_kind`) cannot be told apart from pairings and are
+not bulk-revoked; each person can find theirs in their own devices list (Paired
+devices) as "Finder on …" / "File Explorer on …" and remove them there. The
+setting's copy tells the owner that drive access
 skips the download audit and the per-file upload limit.
 
 **Flow.** Files page -> Connect as a network drive -> "Your drive" -> pick Mac
@@ -144,7 +151,8 @@ POST /api/storage/network-drive/personal      (session auth; owner|admin|family)
   "windowsPath": "\\\\<host>@SSL\\nextcloud\\remote.php\\dav\\files\\<uid>"
 }
 400 invalid body | 403 role not permitted (guest, service)
-403 personal_drive_disabled (owner setting is off) | 409 nc_credential_unavailable
+403 personal_drive_disabled (owner setting is off, or was switched off mid-request)
+409 nc_credential_unavailable
 429 rate limited | 502 Nextcloud refused to mint
 ```
 

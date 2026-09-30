@@ -49,21 +49,37 @@ export async function revokeDeviceClient(
   safePublish(`droplet/devices/${row.userId}/revoked`, { deviceId: row.id });
 }
 
+export interface RevokedDriveLogin {
+  clientId: string;
+  userId: string;
+}
+
 /**
  * Revoke every ACTIVE personal-drive login (`kind: personal_drive`) — the
- * Finder / File Explorer WebDAV logins — and return how many were revoked.
- * Native-app pairings (`kind: app_pairing`) are never selected. A Nextcloud
- * failure is swallowed per row by `revokeDeviceClient` (the row is still marked
- * revoked); a database failure propagates, and because the selection is
- * "still active" a repeat call picks up whatever is left.
+ * Finder / File Explorer WebDAV logins. Native-app pairings
+ * (`kind: app_pairing`) are never selected. "Revoked" here means the row was
+ * MARKED revoked: the Nextcloud app-password delete is best-effort
+ * (`revokeDeviceClient` swallows a rejection, and `ncDeleteAppPassword` does not
+ * check the HTTP status, so a refusal upstream is not seen here).
+ *
+ * Each login is appended to `revoked` (and returned) as soon as its row is
+ * marked, so a caller whose call throws still holds the progress made before
+ * the failure. A database failure propagates; because the selection is "still
+ * active", a repeat call picks up whatever is left.
  */
-export async function revokeActivePersonalDriveLogins(prisma: PrismaClient): Promise<number> {
+export async function revokeActivePersonalDriveLogins(
+  prisma: PrismaClient,
+  revoked: RevokedDriveLogin[] = [],
+): Promise<RevokedDriveLogin[]> {
   const rows = await prisma.deviceClient.findMany({
     where: { kind: "personal_drive", status: "active" },
     select: { id: true, userId: true, ncAppPassword: true, status: true },
   });
+  // Serial on purpose: one Nextcloud round-trip per row. Fine at box scale
+  // (tens of users, a few logins each); not a bulk API.
   for (const row of rows) {
     await revokeDeviceClient(prisma, row);
+    revoked.push({ clientId: row.id, userId: row.userId });
   }
-  return rows.length;
+  return revoked;
 }

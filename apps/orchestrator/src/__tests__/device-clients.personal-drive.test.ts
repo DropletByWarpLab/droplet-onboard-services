@@ -12,7 +12,7 @@ import express from "express";
 import request from "supertest";
 
 const mockPrisma = {
-  deviceClient: { create: vi.fn() },
+  deviceClient: { create: vi.fn(), update: vi.fn() },
   workspace: { findUnique: vi.fn() },
 };
 
@@ -167,6 +167,29 @@ describe("POST /api/storage/network-drive/personal", () => {
       expect(res.body).toEqual({ error: "personal_drive_disabled" });
       expect(mockNcGenerate).not.toHaveBeenCalled();
       expect(mockPrisma.deviceClient.create).not.toHaveBeenCalled();
+      expect(recordActivityMock).not.toHaveBeenCalled();
+    },
+  );
+
+  // The mint is a Nextcloud round-trip; a switch-off (whose revoke sweep has
+  // already run) can land between the first check and the row insert.
+  it.each([{ personalDriveEnabled: false }, null])(
+    "revokes the login it just created and 403s when the owner switches off mid-mint (re-read: %j)",
+    async (reread) => {
+      mockPrisma.workspace.findUnique
+        .mockResolvedValueOnce({ personalDriveEnabled: true })
+        .mockResolvedValueOnce(reread);
+      const res = await request(makeApp()).post(URL_PATH).send({ platform: "macos" });
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: "personal_drive_disabled" });
+      expect(JSON.stringify(res.body)).not.toContain("app-pw-123");
+      expect(mockPrisma.deviceClient.create).toHaveBeenCalledTimes(1);
+      // Revoked upstream and in the database, never handed out or announced.
+      expect(mockNcDelete).toHaveBeenCalledWith("app-pw-123");
+      expect(mockPrisma.deviceClient.update).toHaveBeenCalledWith({
+        where: { id: "dc-1" },
+        data: { status: "revoked" },
+      });
       expect(recordActivityMock).not.toHaveBeenCalled();
     },
   );

@@ -110,11 +110,12 @@ export function PersonalDriveCard() {
               <span className="sub">
                 Files opened or copied through Finder or File Explorer are not
                 recorded as downloads in the activity log, and the per-file
-                upload size limit does not apply there. Turning this off signs
-                everyone out of their personal drive and stops new logins.
-                Drive logins made before this update are not signed out
-                automatically; each person can remove theirs from Paired
-                devices.
+                upload size limit does not apply there. Turning this off
+                revokes every personal drive login and stops new ones. Drive
+                logins made before this update are not revoked automatically;
+                they show up in each person&rsquo;s Paired devices as
+                &ldquo;Finder on …&rdquo; or &ldquo;File Explorer on …&rdquo;
+                and can be removed there.
               </span>
             </span>
           </div>

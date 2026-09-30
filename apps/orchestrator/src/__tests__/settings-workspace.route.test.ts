@@ -196,7 +196,7 @@ describe("PUT /api/settings/workspace/personal-drive", () => {
     expect(upsertMock.mock.calls[0][0].update).toEqual({ personalDriveEnabled: false });
   });
 
-  describe("turning off signs out the personal drives", () => {
+  describe("turning off revokes the personal drives", () => {
     type Row = {
       id: string;
       userId: string;
@@ -226,7 +226,7 @@ describe("PUT /api/settings/workspace/personal-drive", () => {
       upsertMock.mockResolvedValue({ personalDriveEnabled: false });
     });
 
-    it("revokes every ACTIVE personal_drive login, leaves app pairings alone, and reports the count", async () => {
+    it("marks every ACTIVE personal_drive login revoked, leaves app pairings alone, and reports the count", async () => {
       const res = await request(app).put(URL_PATH).send({ enabled: false });
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ personalDriveEnabled: false, revokedDriveLogins: 2 });
@@ -255,19 +255,77 @@ describe("PUT /api/settings/workspace/personal-drive", () => {
       );
     });
 
-    it("records the count in the Activity row", async () => {
+    it("audits the flag change first, then the revoke outcome as its own row", async () => {
       await request(app).put(URL_PATH).send({ enabled: false });
-      expect(recordActivityMock).toHaveBeenCalledTimes(1);
-      expect(recordActivityMock).toHaveBeenCalledWith(
+      expect(recordActivityMock).toHaveBeenCalledTimes(2);
+      expect(recordActivityMock.mock.calls[0][0]).toEqual(
         expect.objectContaining({
           what: "Personal drives turned off",
-          sub: "2 personal drive logins signed out",
-          refs: { setting: "personalDriveEnabled", enabled: false, revokedDriveLogins: 2 },
+          refs: { setting: "personalDriveEnabled", enabled: false },
+        }),
+      );
+      // "marked revoked", not "signed out": the Nextcloud delete is best-effort.
+      expect(recordActivityMock.mock.calls[1][0]).toEqual(
+        expect.objectContaining({
+          what: "Personal drive logins revoked",
+          sub: "2 personal drive logins revoked",
+          refs: {
+            setting: "personalDriveEnabled",
+            enabled: false,
+            revokedDriveLogins: 2,
+            revoked: [
+              { clientId: "drive-a", userId: "alice" },
+              { clientId: "drive-b", userId: "bob" },
+            ],
+          },
         }),
       );
     });
 
-    it("still marks a row revoked (and counts it) when Nextcloud refuses the upstream revoke", async () => {
+    it("keeps the flag audit and records a failure outcome when the revoke throws midway", async () => {
+      // Second row's DB write rejects (Nextcloud failures are swallowed per row, so a
+      // throw here is a Prisma error or a corrupt ciphertext in decryptSecret).
+      const defaultUpdate = deviceClientUpdate.getMockImplementation()!;
+      deviceClientUpdate
+        .mockImplementationOnce(defaultUpdate)
+        .mockRejectedValueOnce(new Error("db write failed"));
+
+      const res = await request(app).put(URL_PATH).send({ enabled: false });
+
+      expect(res.status).toBeGreaterThanOrEqual(500);
+      // The flag is already off, and that change was audited before the revoke ran.
+      expect(upsertMock).toHaveBeenCalledTimes(1);
+      expect(recordActivityMock).toHaveBeenCalledTimes(2);
+      expect(recordActivityMock.mock.calls[0][0]).toEqual(
+        expect.objectContaining({
+          what: "Personal drives turned off",
+          refs: { setting: "personalDriveEnabled", enabled: false },
+        }),
+      );
+      const failure = recordActivityMock.mock.calls[1][0];
+      expect(failure).toEqual(
+        expect.objectContaining({
+          severity: "err",
+          what: "Personal drive logins were not all revoked",
+          sub: "failed after 1 revoked: db write failed",
+          refs: {
+            setting: "personalDriveEnabled",
+            enabled: false,
+            revokedDriveLogins: 1,
+            revoked: [{ clientId: "drive-a", userId: "alice" }],
+            error: "db write failed",
+          },
+        }),
+      );
+      // No credential material in the audit row.
+      expect(JSON.stringify(failure)).not.toMatch(/pw-/);
+      expect(rows.find((r) => r.id === "drive-a")!.status).toBe("revoked");
+      expect(rows.find((r) => r.id === "drive-b")!.status).toBe("active");
+    });
+
+    it("still marks a row revoked (and counts it) if the Nextcloud call rejects (the helper's defensive catch)", async () => {
+      // The real ncDeleteAppPassword never rejects (WARP-3383); this pins the
+      // helper's own try/catch so a future client that throws cannot strand a row.
       vi.mocked(ncDeleteAppPassword).mockRejectedValueOnce(new Error("nextcloud down"));
       const res = await request(app).put(URL_PATH).send({ enabled: false });
       expect(res.status).toBe(200);
@@ -295,6 +353,7 @@ describe("PUT /api/settings/workspace/personal-drive", () => {
       expect(deviceClientFindMany).not.toHaveBeenCalled();
       expect(deviceClientUpdate).not.toHaveBeenCalled();
       expect(ncDeleteAppPassword).not.toHaveBeenCalled();
+      expect(recordActivityMock).toHaveBeenCalledTimes(1);
       expect(recordActivityMock).toHaveBeenCalledWith(
         expect.objectContaining({
           what: "Personal drives turned on",

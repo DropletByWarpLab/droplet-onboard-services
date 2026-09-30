@@ -278,13 +278,24 @@ rule: [`THREAT_MODEL.md`](THREAT_MODEL.md) §3a.
 Turning the setting off revokes every active personal-drive login: each row
 carries the explicit `DeviceClient.kind` (`personal_drive`, set by the POST
 above; native-app pairings are `app_pairing`), and
-`PUT /api/settings/workspace/personal-drive` with `enabled: false` revokes the
-active `personal_drive` rows, returns the count as `revokedDriveLogins` and
-records it in the Activity row. **Logins minted before the `kind` column
+`PUT /api/settings/workspace/personal-drive` with `enabled: false` marks the
+active `personal_drive` rows revoked and returns the count as
+`revokedDriveLogins`. The flag change is an Activity row written right after
+the flag; the revoke outcome is a second row (the count, or "failed after N
+revoked" plus the error message if the sweep throws, in which case the request
+is a 500 and the flag stays off). Each row's `{ clientId, userId }` is listed
+in that row's `refs`. The count is rows **marked revoked**, not app passwords
+Nextcloud confirmed deleted: the upstream delete is best-effort, and
+`ncDeleteAppPassword` does not check the HTTP status (tracked as WARP-3383).
+A mint that passed its flag check just before the switch-off can insert its
+row after the sweep has run, so the POST re-reads the flag once the row exists
+and, if it is now off, revokes that login and answers 403
+`personal_drive_disabled` without returning the password. **Logins minted before the `kind` column
 existed** (migration `20260930100000_device_client_kind`) default to
 `app_pairing`: nothing explicit tells them apart from pairings (the name is
 free text, and the pairing-code link is purged daily), so they are NOT
-bulk-revoked. Each person can remove theirs from their own devices list
+bulk-revoked. They show in each person's devices list (Paired devices) as
+"Finder on …" / "File Explorer on …", where each person can remove theirs
 (`DELETE /api/devices/clients/:id`).
 
 ### Nextcloud OCS audit: routes that mint a bearer-style URL (WARP-3053, WARP-3318)
@@ -331,10 +342,15 @@ found that are NOT OCS and are NOT closed here, for a follow-up:
   OCS. Not confirmed on the pinned image. Options: deny
   `/nextcloud/remote.php/dav/photos/`, or disable `photos` in
   `nextcloud-init.sh` the way `disable_hub_apps` does.
-- **The root `/index.php/apps/richdocuments/` leg is a prefix**, so it also
-  carries richdocuments' non-OCS routes (the WOPI file endpoints, which need a
-  WOPI token, and token minting for a credentialed caller). The editor needs
-  the leg, so it stays.
+- **richdocuments' non-OCS routes still mint WOPI `access_token` URLs**, and
+  they are reachable through BOTH spellings: the `/nextcloud/` leg
+  (`/nextcloud/index.php/apps/richdocuments/…`) and the root
+  `/index.php/apps/richdocuments/` leg. The root leg is a prefix, so it carries
+  every richdocuments route (the WOPI file endpoints, which need a WOPI token,
+  and token minting for a credentialed caller). The editor needs the root leg,
+  so it stays; the `/nextcloud/` spelling has no consumer and is a candidate to
+  deny by route once the route names are confirmed on a live box. Not closed
+  here; the OCS denials above do not cover it.
 - **The owner switch is not a WebDAV gate.** It controls whether the
   orchestrator mints app passwords and, now, revokes the rows it created. A
   user can still authenticate to `/nextcloud/remote.php/dav` with their own
