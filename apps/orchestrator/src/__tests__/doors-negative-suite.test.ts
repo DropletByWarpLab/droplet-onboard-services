@@ -357,7 +357,7 @@ describe("negative 3 — no in-place AccessEvent UPDATE or DELETE (source; the t
     // Not vacuous: the walk reaches the doors service and this file, and its
     // needle is a real setting name (the migration is what carries it).
     expect(ALL_TS.map(([f]) => f)).toEqual(expect.arrayContaining([PURGE_FILE, "apps/orchestrator/src/__tests__/doors-negative-suite.test.ts"]));
-    const migration = readFileSync(resolve(REPO, "apps/orchestrator/prisma/migrations/20260929100200_adr_055_doors_tables/migration.sql"), "utf8");
+    const migration = readFileSync(resolve(REPO, "apps/orchestrator/prisma/migrations/20260930130200_adr_055_doors_tables/migration.sql"), "utf8");
     expect(migration.includes(needle)).toBe(true);
   });
 

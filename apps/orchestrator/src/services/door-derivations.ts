@@ -27,7 +27,7 @@
  *   none          `doorPositionSource = none` gets no forced-door and no
  *                 held-open claim. An alarm the product cannot derive is not
  *                 one it advertises. (Built: `alarmClaimsFor`; the database
- *                 refuses the rows too, migration 20260929100200.)
+ *                 refuses the rows too, migration 20260930130200.)
  *
  * "Authorised" is a running fact of the event stream, not a time window: a
  * grant, REX or key override stands until the door is next secure (a relock),
