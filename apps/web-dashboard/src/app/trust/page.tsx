@@ -96,9 +96,10 @@ const SECTIONS: TrustSection[] = [
       },
       {
         name: "TPM-sealed device identity",
-        detail:
-          "Each Droplet's identity key is sealed inside its TPM security chip and never leaves it.",
-        status: "shipped",
+        detail: "Hardware-sealed device identity is rolling out.",
+        // WARP-3392: not "shipped" — the box defaults to DROPLET_TPM_BACKEND=mock,
+        // where the identity key is a file on the box, not a TPM key.
+        status: "in-progress",
       },
       {
         name: "FIPS 140-3 cryptography",

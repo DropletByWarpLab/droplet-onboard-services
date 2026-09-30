@@ -134,6 +134,7 @@ import {
   type ChatApprovalPort,
 } from "./llm-agent.service.js";
 import {
+  isCatalogRead,
   narrowToolNamesForPrincipal,
   resolveAttributedToolAccess,
   toolAllowedForPrincipal,
@@ -346,9 +347,9 @@ export function runToolPool(opts: { workspace?: boolean } = {}): string[] {
  *     refusing to repeat an unknown call is the honest default if it is not.
  */
 export function redispatchSafe(tool: string, prior: { confirmation?: string }): boolean {
+  if (isCatalogRead(tool)) return true;
   const entry = TOOL_CATALOG.find((t) => t.name === tool);
   if (!entry) return false;
-  if (!entry.requiresWrite && !entry.requiresConfirmation) return true;
   // WARP-2896 — a workspace write repeats onto the same checkout: `write`
   // is idempotent by contract (same bytes, `changed: false`), `commit` finds
   // nothing to commit, `run` runs the tests again. Re-dispatch, loudly (the
