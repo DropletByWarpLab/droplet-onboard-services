@@ -1637,6 +1637,21 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           );
         }
       }
+      // WARP-3348 — what the previous turn actually ran, for the action-claim
+      // check ("Yes, I've sent it" stands only if that send ran). A failed
+      // read only costs the check that credit, never the turn.
+      let priorRanToolNames: string[] = [];
+      if (conversationId && userId) {
+        try {
+          priorRanToolNames = await persistence.getPreviousTurnRanToolNames(
+            conversationId,
+            userId,
+            assistantMessageId,
+          );
+        } catch {
+          /* no credit */
+        }
+      }
 
       // Track tool calls observed during streaming so we can include
       // them in the persisted assistant message at the end of the turn.
@@ -2556,6 +2571,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             tool_selection_mode: toolSelectionMode,
             // WARP-1921 — cross-turn continuity for §3 selection.
             prior_tool_names: priorToolNames,
+            prior_ran_tool_names: priorRanToolNames,
             allowed_tools: allowedForUser,
             // WARP-1529 — the same §3 scope, re-checked fail-closed before
             // every tool dispatch inside the loop.
@@ -2658,6 +2674,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           tool_selection_mode: toolSelectionMode,
           // WARP-1921 — cross-turn continuity for §3 selection.
           prior_tool_names: priorToolNames,
+          prior_ran_tool_names: priorRanToolNames,
           allowed_tools: allowedForUser,
           // WARP-1529 — the same §3 scope, re-checked fail-closed before
           // every tool dispatch inside the loop.
@@ -2686,11 +2703,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // dashboard can lazy-load the trace later.
         liveReasoning = result.message.reasoning ?? null;
         for (const t of result.trace) {
+          // WARP-3348 — the real outcome, as the streaming path persists it
+          // (a pending approval is ok + status, a failure is not ok): the
+          // next turn's action-claim check reads what actually ran.
+          const r = t.result as { status?: unknown; error?: unknown } | null;
+          const pending = r?.status === "confirmation_required";
           liveToolCalls.push({
             id: t.tool_call_id,
             name: t.tool,
             args: t.args,
-            ok: true,
+            ok: pending || !(t.isError || r?.status === "error" || typeof r?.error === "string"),
+            ...(pending ? { status: "confirmation_required" } : {}),
             data: t.result,
           });
         }

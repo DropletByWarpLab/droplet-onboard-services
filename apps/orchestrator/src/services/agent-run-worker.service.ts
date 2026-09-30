@@ -140,7 +140,11 @@ import {
   toolDispatchDenial,
 } from "./tool-access.service.js";
 import { boundToolResultForModel } from "./tool-result-bounding.js";
-import { malformedToolOutputText, parseToolResultPayload } from "./tool-result-payload.js";
+import {
+  malformedToolOutputText,
+  parseToolResultPayload,
+  toolResultPayloadValue,
+} from "./tool-result-payload.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import { recordActivity } from "./activity.singleton.js";
 import { sendNotification } from "./notifications.service.js";
@@ -1817,6 +1821,19 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
                   ...(run.workspaceId ? { bound_tool_domains: WORKSPACE_TOOL_DOMAINS } : {}),
                   signal: controller.signal,
                   checkpoint,
+                  // WARP-3348 — the run's settled calls so far, including the
+                  // one just decided above, which ran outside the loop: the
+                  // answer's claims are checked against the whole run. Parked
+                  // challenges were decided since, and replays repeat an entry.
+                  priorAttempts: trace
+                    .filter((e) => e.text !== undefined && !e.replayOf && !isConfirmationEnvelope(e.text))
+                    .map((e) => ({
+                      tool_call_id: e.tool_call_id,
+                      tool: e.tool,
+                      args: e.args,
+                      result: toolResultPayloadValue(parseToolResultPayload(e.text!, e.tool)),
+                      ...(e.isError ? { isError: true as const } : {}),
+                    })),
                 },
               )
             : { message: { role: "assistant", content: "" }, trace: [], iterations: 0, stop_reason: "iteration_limit" };
