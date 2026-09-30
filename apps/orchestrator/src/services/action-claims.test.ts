@@ -111,7 +111,15 @@ describe("detectActionClaims — claims", () => {
     ["Sent the invoice to Bob today.", "send", true],
     // a heading governs one plain line, or its bullet list, and no further
     ["Bob wrote:\nDeleted the stale branch.\nSent the invoice to Carol.", "send", true],
-    ["Activity on /Records last week:\n- Deleted 3 files.\nI've also sent the invoice to Bob.", "send", true],
+    ["Yesterday:\n- Deleted 3 files.\nI also sent the invoice to Bob.", "send", true],
+    // #2556 review 3: under a reported or past label, the assistant's own
+    // "I've …" still counts; a time or reporting verb inside the label (not
+    // heading it) only switches off the subject-less shapes
+    ["As Bob mentioned:\nI've sent the invoice to the client.", "send", true],
+    ["Bob wrote: I've sent the invoice to the client.", "send", true],
+    ["Here's what I did with the files you uploaded yesterday:\n- I deleted rec-1.pdf.", "delete", true],
+    ["Here's a summary of what the ticket says about it:\n- I restarted the service.", "change", true],
+    ["Files that Bob mentioned:\n- I deleted rec-1.pdf.", "delete", true],
   ])("%s → %s (strict %s)", (answer, family, strict) => {
     expect(detectActionClaims(answer)).toEqual([
       expect.objectContaining({ family, strict, sentence: expect.any(String) }),
@@ -141,6 +149,12 @@ describe("detectActionClaims — claims", () => {
   it("a curly quote never swallows text across lines (review nit)", () => {
     const answer = "“Draft title\n\nI’ve sent the email to Dave. The “final” version is attached.";
     expect(detectActionClaims(answer)).toEqual([expect.objectContaining({ family: "send" })]);
+  });
+
+  it("a time inside a label does not silence the assistant's own list (#2556 review 3)", () => {
+    const answer =
+      "Here's what I did with the files you uploaded yesterday:\n- I've deleted rec-1.pdf.\n- I've sent the summary to Bob.";
+    expect(detectActionClaims(answer).map((c) => c.family)).toEqual(["delete", "send"]);
   });
 
   it("scores sentences independently", () => {
@@ -239,6 +253,21 @@ describe("detectActionClaims — not claims", () => {
     "Sent messages this week: 14",
     "Sent messages are kept for 30 days.",
     "**Deleted Files**",
+    // #2556 review 1: a preposition first is a label, and on/via/with/from
+    // after a bare plural is not an object
+    "**Shared with the Finance team** (3 files):",
+    "Deleted in the last 30 days:",
+    "Forwarded from the CFO: the Q3 invoice",
+    "Posted in the #general channel:",
+    "Deleted files from OneDrive go to the Recycle Bin.",
+    "Shared links with edit rights expire after 7 days.",
+    // review 2: title-case names joined by "and" must end the clause
+    "**Deleted Files and Folders**",
+    "Shared Calendars and Contacts sync every 15 min.",
+    "Shared Drives and My Drive are indexed.",
+    // review 4: an extension needs a name before it and a letter first
+    "Deleted .tmp files are purged nightly.",
+    "Deleted v1.2 builds are kept 7 days.",
     "Forwarded from Dave: the Q3 invoice",
     "Invited guests: Alice, Bob.",
     "---------- Forwarded message ---------",
@@ -252,14 +281,13 @@ describe("detectActionClaims — not claims", () => {
     "Bob: Deleted the stale branch after the release.", // the label gate alone
     "Activity on /Records last week: Deleted 3 files, uploaded 2.",
     "- Alice: Posted the release notes.",
-    // …the carry is what skips first-person text after the label, and a
-    // label on its own line
-    "Bob wrote: I've sent the invoice to the client.",
+    // …and the carry covers a label on its own line
     "Activity on /Records last week:\nDeleted 3 files.",
-    // a past-time label governs its whole bullet list; a past time skips
-    // first-person text too, "today" only the subject-less shapes
+    // a label governs its whole bullet list; a past time that heads it skips
+    // the simple past too, "today" only the subject-less shapes
     "Activity on /Records last week:\n- Deleted 3 files.\n- Deleted 2 folders.",
     "Yesterday:\n- I deleted 3 files from /Records.",
+    "Bob wrote:\nI deleted the stale branch after the release.",
     "Today's activity:\n- Sent 3 invoices to clients.",
     // a count read back: the time is before the message body (item 3), and a
     // "latest" record (item 5)
