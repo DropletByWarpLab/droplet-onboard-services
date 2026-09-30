@@ -398,10 +398,11 @@ exactly as for an unknown slug. `share` and `unshare` are idempotent and answer 
 `403 forbidden_not_creator` for a member who can see a shared routine they did not create;
 `409 box_routine_stays_shared` for `daily-report`. Box-provided routines (mined suggestions,
 `daily-report`) are `WORKSPACE`. The legacy free-text `share` field is not read by anything.
-`POST /tools` whose `slug` collides with a routine the caller can see is `409 Slug already in
-use`; if it collides with one the caller cannot see, the routine is created under the next free
-suffix (`<slug>-2`, `-3`, ...) and the response carries the slug actually used — read `slug` from
-the answer, do not assume the one you sent.
+`POST /tools` by a member (`family`) stores the routine under the requested `slug` plus a short
+random suffix (`invoice-reminder-7f3a`), every time, so the slug reveals nothing about other
+routines; the name is unchanged and sharing keeps the slug. Read `slug` from the answer, do not
+assume the one you sent. A `slug` held by a routine the caller can see is `409 Slug already in use`.
+Owner and admin keep the plain `slug` (and the plain 409); so do the box's own routines.
 
 `safety` ∈ 1..3; `slug` matches `SLUG_RE` (2..80 chars). Missing spec → `404 Spec not found`.
 

@@ -13,6 +13,7 @@ import { TOOL_CATALOG } from "@droplet/tools-core";
 import {
   createDraftSpecTx,
   DraftSlugTakenError,
+  randomSlugSuffix,
   SLUG_RE,
   suffixedSlug,
   validateDraftSpec,
@@ -150,23 +151,27 @@ describe("createDraftSpecTx", () => {
   });
 });
 
-/** WARP-3354 — the slug a create falls back to when the one asked for is held by a routine the caller cannot see. */
-describe("suffixedSlug", () => {
-  it("appends -<n>", () => {
-    expect(suffixedSlug("q3-export", 2)).toBe("q3-export-2");
-    expect(suffixedSlug("q3-export", 13)).toBe("q3-export-13");
+/** WARP-3354 — a member's new routine is stored as `<slug>-<random>`. */
+describe("suffixedSlug / randomSlugSuffix", () => {
+  it("appends -<suffix>", () => {
+    expect(suffixedSlug("q3-export", "7f3a")).toBe("q3-export-7f3a");
+  });
+
+  it("randomSlugSuffix is 4 lowercase hex chars and varies", () => {
+    const seen = new Set(Array.from({ length: 50 }, () => randomSlugSuffix()));
+    for (const v of seen) expect(v).toMatch(/^[0-9a-f]{4}$/);
+    expect(seen.size).toBeGreaterThan(1);
   });
 
   it("stays inside the 80-char cap and never leaves a double or trailing hyphen", () => {
-    const longest = "a".repeat(80);
-    const out = suffixedSlug(longest, 12);
+    const out = suffixedSlug("a".repeat(80), "7f3a");
     expect(out).toHaveLength(80);
-    expect(out.endsWith("-12")).toBe(true);
-    // The trim lands right after a hyphen: `aaa…a-bc` cut at 78 ends on `-`.
-    const edge = "a".repeat(77) + "-bc";
-    const trimmed = suffixedSlug(edge, 2);
-    expect(trimmed).toBe("a".repeat(77) + "-2");
-    for (const slug of [out, trimmed, suffixedSlug("ab", 2)]) {
+    expect(out.endsWith("-7f3a")).toBe(true);
+    // The trim lands right after a hyphen: `aaa…a-bc` cut at 75 ends on `-`.
+    const edge = "a".repeat(74) + "-bcdef";
+    const trimmed = suffixedSlug(edge, "7f3a");
+    expect(trimmed).toBe("a".repeat(74) + "-7f3a");
+    for (const slug of [out, trimmed, suffixedSlug("ab", "7f3a")]) {
       expect(slug).toMatch(SLUG_RE);
       expect(slug.length).toBeLessThanOrEqual(80);
     }

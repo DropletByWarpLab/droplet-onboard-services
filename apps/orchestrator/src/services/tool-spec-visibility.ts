@@ -38,6 +38,11 @@ export interface VisibilitySpec {
 /** Roles that see and manage every routine, whoever created it. */
 const SEES_EVERY_ROUTINE: ReadonlySet<string> = new Set(["owner", "admin"]);
 
+/** Owner and admin: they see every routine, so nothing is hidden from them. */
+export function seesEveryToolSpec(actor: { role: string }): boolean {
+  return SEES_EVERY_ROUTINE.has(actor.role);
+}
+
 /**
  * May this person share, un-share, edit or run this routine regardless of its
  * visibility: its creator, an owner or an admin. A routine with no creator

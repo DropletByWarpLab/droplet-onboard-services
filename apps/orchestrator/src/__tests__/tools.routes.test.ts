@@ -371,9 +371,12 @@ describe("WARP-462 — Tool spec CRUD", () => {
     expect(bad.status).toBe(400);
   });
 
+  // WARP-3354 — a member's slug gets a random suffix, so two creates never
+  // collide; the plain 409 is what owner and admin (plain slugs) still meet.
+  // The member paths are in tool-spec-visibility.test.ts.
   it("returns 409 on duplicate slug", async () => {
     const prisma = createPrismaMock();
-    const app = buildApp(prisma, noopDispatcher, mkUser("family"));
+    const app = buildApp(prisma, noopDispatcher, mkUser("admin"));
     const body = {
       slug: "dupe",
       name: "x",

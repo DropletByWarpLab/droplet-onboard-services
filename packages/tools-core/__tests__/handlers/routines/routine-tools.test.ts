@@ -67,6 +67,16 @@ describe("routine_draft (WARP-2894)", () => {
     expect(Object.keys(body)).not.toContain("status");
   });
 
+  it("reports the slug the box stored, which may carry a short suffix (WARP-3354)", async () => {
+    const post = vi.fn(async () =>
+      makeResponse(201, { slug: "daily-files-7f3a", status: "draft", writes: false, steps: [{}] }),
+    );
+    const res = await routineDraft.handler({ slug: "daily-files", name: "Daily files", steps }, ctxWith({ post }));
+    const data = (res as { data: { slug: string; message: string } }).data;
+    expect(data.slug).toBe("daily-files-7f3a");
+    expect(data.message).toContain("daily-files-7f3a");
+  });
+
   it("relays the route's unknown-tools 400 with the names, so the model can fix the draft", async () => {
     const post = vi.fn(async () =>
       makeResponse(400, { error: "unknown_tools", detail: "these steps name tools this box does not have", tools: ["list_reciept"] }),

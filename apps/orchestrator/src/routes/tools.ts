@@ -19,10 +19,12 @@
  * Workspace; owner and admin see every routine. The rule is
  * services/tool-spec-visibility.ts and is applied on EVERY route below: a
  * routine the caller may not see answers 404 exactly like a missing one.
- * Creating a routine whose slug collides with one the caller may not see takes
- * the next free suffixed slug (`-2`, `-3`, ...) instead of answering 409, so
- * that answer never names a routine the caller cannot see. A collision with a
- * routine the caller CAN see is still a plain 409.
+ * A member's new routine is always stored under its requested slug plus a
+ * short random suffix (`invoice-reminder-7f3a`), free or not, so the slug they
+ * get back says nothing about other routines; its name is unchanged, sharing
+ * it later keeps the slug, and asking for a slug held by a routine they CAN see
+ * is still a plain 409. Owner and admin see every routine and keep plain
+ * slugs, as do the box's own routines (daily report, mined suggestions).
  *
  * The §7 spec model lives in this orchestrator, NOT in
  * `packages/tools-core` — that registry is the capability source of
@@ -61,9 +63,12 @@ import {
 import {
   createDraftSpecTx,
   DraftSlugTakenError,
-  MAX_SLUG_SUFFIX,
+  MAX_SLUG_TRIES,
+  randomSlugSuffix,
   suffixedSlug,
   createSpecSchema,
+  type CreateSpecInput,
+  type DraftSpecRefusal,
   reconcileWrites,
   stepReferenceError,
   stepSchema,
@@ -77,6 +82,7 @@ import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import {
   canManageToolSpec,
   canSeeToolSpec,
+  seesEveryToolSpec,
   visibleToolSpecWhere,
   type ToolSpecVisibility,
 } from "../services/tool-spec-visibility.js";
@@ -337,6 +343,11 @@ export function createToolsRouter(
    * never calls it.
    */
   transformer: Transformer = createSandboxTransformer(),
+  /**
+   * WARP-3354 — injected so tests can force a suffix collision, the same
+   * reason `summarizer` and `transformer` are parameters.
+   */
+  slugSuffix: () => string = randomSlugSuffix,
 ): Router {
   const router = Router();
 
@@ -381,6 +392,53 @@ export function createToolsRouter(
       ...(role ? { userRole: role } : {}),
       ...(ncToken ? { ncToken } : {}),
     };
+  }
+
+  type DraftResult =
+    | { ok: true; spec: SpecRow & { steps: StepRow[] } }
+    | { ok: false; refusal: DraftSpecRefusal };
+
+  /**
+   * WARP-3354 — create the draft under the slug it will be stored as.
+   *
+   * A slug is unique across the whole box but a member may not see every
+   * routine, so the plain slug is an oracle: a 409 confirms that someone's
+   * private routine has that name. So a member's routine is ALWAYS stored as
+   * `<slug>-<random>`, whether or not the plain slug was free; what they get
+   * back then says nothing about other routines. Only a slug held by a routine
+   * they CAN see (shared, or their own) is refused 409, as before. Owner and
+   * admin see every routine — any collision is one they can see — so they keep
+   * plain slugs and the plain 409. Sharing later keeps the slug.
+   */
+  async function createDraftFor(actor: Actor, input: CreateSpecInput): Promise<DraftResult> {
+    const create = (slug: string) =>
+      createDraftSpecTx<SpecRow & { steps: StepRow[] }>(prisma, { ...input, slug }, actor.id);
+
+    if (seesEveryToolSpec(actor)) {
+      return create(input.slug).catch((err: unknown) => {
+        if (err instanceof DraftSlugTakenError) return { ok: false as const, refusal: err.refusal };
+        throw err;
+      });
+    }
+
+    const held = (await prisma.toolSpec.findUnique({
+      where: { slug: input.slug },
+      select: { ownerId: true, visibility: true },
+    })) as { ownerId: string | null; visibility: string } | null;
+    if (held && canSeeToolSpec(actor, held)) {
+      return { ok: false, refusal: new DraftSlugTakenError(input.slug).refusal };
+    }
+
+    let last: DraftSlugTakenError | undefined;
+    for (let i = 0; i < MAX_SLUG_TRIES; i++) {
+      try {
+        return await create(suffixedSlug(input.slug, slugSuffix()));
+      } catch (err) {
+        if (!(err instanceof DraftSlugTakenError)) throw err;
+        last = err; // the suffixed slug collided; draw again, say nothing
+      }
+    }
+    return { ok: false, refusal: last!.refusal };
   }
 
   router.get(
@@ -511,28 +569,7 @@ export function createToolsRouter(
         // multi-draft caller must unwind); here it is the 409 — unless the
         // routine holding the slug is one this caller may not see, in which
         // case a 409 would confirm that routine exists (WARP-3354).
-        type Created = SpecRow & { steps: StepRow[] };
-        const create = (slug: string) =>
-          createDraftSpecTx<Created>(prisma, { ...parsed.data, slug }, who.id);
-        const created = await create(parsed.data.slug).catch(async (err: unknown) => {
-          if (!(err instanceof DraftSlugTakenError)) throw err;
-          const held = (await prisma.toolSpec.findUnique({
-            where: { slug: parsed.data.slug },
-            select: { ownerId: true, visibility: true },
-          })) as { ownerId: string | null; visibility: string } | null;
-          // Visible to the caller (or gone since): the plain 409 tells them nothing new.
-          if (!held || canSeeToolSpec(who, held)) return { ok: false as const, refusal: err.refusal };
-          // Not theirs to know about: take the next free slug and say nothing.
-          // ponytail: linear probe, MAX_SLUG_SUFFIX tries; past that, the plain 409.
-          for (let n = 2; n < 2 + MAX_SLUG_SUFFIX; n++) {
-            try {
-              return await create(suffixedSlug(parsed.data.slug, n));
-            } catch (retry) {
-              if (!(retry instanceof DraftSlugTakenError)) throw retry;
-            }
-          }
-          return { ok: false as const, refusal: err.refusal };
-        });
+        const created = await createDraftFor(who, parsed.data);
         if (!created.ok) {
           res.status(created.refusal.status).json(created.refusal.body);
           return;

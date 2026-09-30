@@ -212,7 +212,10 @@ network. Host-published ports and host-network services are called out.
     `404`, like an unknown slug. Only the creator, an owner or an admin may share or
     un-share (`POST`/`DELETE /api/tools/:slug/share`); the assistant cannot. The
     box's own routines (mined suggestions, `daily-report`) stay `WORKSPACE`, and a
-    scheduled run fires as the creator and never reads the rule.
+    scheduled run fires as the creator and never reads the rule. Slugs are box-wide
+    unique, so a plain slug would be an oracle for another member's private routine:
+    a member's new routine is always stored as `<slug>-<4 hex>` (owner and admin, who
+    see everything, keep plain slugs).
 
 ## apps/web-dashboard
 

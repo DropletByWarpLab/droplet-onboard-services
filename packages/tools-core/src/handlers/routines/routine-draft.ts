@@ -107,7 +107,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       writes: data.writes ?? false,
       steps: Array.isArray(data.steps) ? data.steps.length : args.steps.length,
       message:
-        "Saved as a draft, private to the person you drafted it for until they share it with the Workspace. It does nothing until the owner reviews it on the Routines page and turns it on — tell them it is there.",
+        `Saved as a draft under the slug "${data.slug}" (use that exact slug to refer to it — the box may add a short suffix to the one you asked for), private to the person you drafted it for until they share it with the Workspace. It does nothing until the owner reviews it on the Routines page and turns it on — tell them it is there.`,
     },
   };
 }
