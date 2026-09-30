@@ -92,6 +92,16 @@ describe("createDraftSpecTx", () => {
     expect(data.writes).toBe(false);
   });
 
+  /**
+   * WARP-3354. MUTATION: write `visibility: "WORKSPACE"` -> red. A routine the
+   * assistant drafts for one person must not appear in front of the company.
+   */
+  it("creates the row PRIVATE — sharing with the Workspace is its own act", async () => {
+    const tx = fakeTx();
+    await createDraftSpecTx(tx as never, input(), "user-uuid-1");
+    expect(tx.toolSpec.create.mock.calls[0]![0].data.visibility).toBe("PRIVATE");
+  });
+
   it("a refused spec creates nothing", async () => {
     const tx = fakeTx();
     const out = await createDraftSpecTx(

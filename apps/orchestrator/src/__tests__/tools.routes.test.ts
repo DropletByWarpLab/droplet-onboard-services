@@ -47,6 +47,7 @@ interface SpecRow {
   status: "live" | "draft" | "suggested";
   ownerId: string | null;
   share: string | null;
+  visibility: "PRIVATE" | "WORKSPACE";
   safety: number;
   writes: boolean;
   reversible: boolean;
@@ -126,6 +127,7 @@ function createPrismaMock(
             category: string | null;
             description: string | null;
             share: string | null;
+            visibility: "PRIVATE" | "WORKSPACE";
             safety: number;
             writes: boolean;
             reversible: boolean;
@@ -159,6 +161,7 @@ function createPrismaMock(
             status: data.status ?? "draft",
             ownerId: data.ownerId,
             share: data.share,
+            visibility: data.visibility,
             safety: data.safety,
             writes: data.writes,
             reversible: data.reversible,
@@ -397,6 +400,7 @@ describe("WARP-462 — Tool spec CRUD", () => {
         status: "draft",
         ownerId: null,
         share: null,
+        visibility: "WORKSPACE",
         safety: 1,
         writes: false,
         reversible: true,
@@ -414,6 +418,7 @@ describe("WARP-462 — Tool spec CRUD", () => {
         status: "live",
         ownerId: null,
         share: null,
+        visibility: "WORKSPACE",
         safety: 1,
         writes: false,
         reversible: true,
@@ -444,6 +449,7 @@ describe("WARP-462 — Tool spec CRUD", () => {
         status: "draft",
         ownerId: null,
         share: null,
+        visibility: "WORKSPACE",
         safety: 1,
         writes: false,
         reversible: true,
@@ -478,6 +484,7 @@ describe("WARP-462 — Tool spec CRUD", () => {
         status: "suggested",
         ownerId: null,
         share: null,
+        visibility: "WORKSPACE",
         safety: 1,
         writes: false,
         reversible: true,
@@ -504,6 +511,7 @@ describe("WARP-462 — Tool spec CRUD", () => {
         status: "draft",
         ownerId: "someone-else",
         share: null,
+        visibility: "WORKSPACE",
         safety: 1,
         writes: false,
         reversible: true,
@@ -530,6 +538,7 @@ describe("WARP-462 — Tool spec CRUD", () => {
         status: "suggested",
         ownerId: null,
         share: null,
+        visibility: "WORKSPACE",
         safety: 1,
         writes: false,
         reversible: true,
@@ -556,6 +565,7 @@ describe("WARP-462 — Tool spec CRUD", () => {
         status: "draft",
         ownerId: null,
         share: null,
+        visibility: "WORKSPACE",
         safety: 1,
         writes: false,
         reversible: true,
@@ -595,6 +605,7 @@ describe("WARP-462 — Tool spec CRUD", () => {
         status: "draft",
         ownerId: null,
         share: null,
+        visibility: "WORKSPACE",
         safety: 1,
         writes: false,
         reversible: true,
@@ -626,6 +637,7 @@ describe("WARP-462 — Tool spec CRUD", () => {
         status: "draft",
         ownerId: null,
         share: null,
+        visibility: "WORKSPACE",
         safety: 1,
         writes: false,
         reversible: true,
@@ -655,6 +667,7 @@ describe("WARP-462 — POST /api/tools/:slug/runs", () => {
       status: "live" as const,
       ownerId: null,
       share: null,
+      visibility: "WORKSPACE",
       safety: 1,
       writes: false,
       reversible: true,
@@ -796,6 +809,7 @@ describe("WARP-462 — GET /api/tools/:slug/runs", () => {
         status: "live",
         ownerId: null,
         share: null,
+        visibility: "WORKSPACE",
         safety: 1,
         writes: false,
         reversible: true,

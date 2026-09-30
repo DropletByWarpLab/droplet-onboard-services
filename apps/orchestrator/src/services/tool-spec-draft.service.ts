@@ -372,6 +372,11 @@ export async function createDraftSpecTx<Row>(
         reversible: input.reversible ?? true,
         // Explicit, never the schema default and never the body's.
         status: "draft",
+        // WARP-3354 — a routine starts private to its creator. Sharing it with
+        // the Workspace is its own act (POST /api/tools/:slug/share), never a
+        // field of the create body, so nothing the assistant drafts can land
+        // in front of the rest of the company by itself.
+        visibility: "PRIVATE",
         ownerId,
         steps: {
           create: input.steps.map((s, idx) => ({

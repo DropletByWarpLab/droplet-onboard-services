@@ -6,12 +6,20 @@
  *   GET    /api/tools/:slug                     — full spec + ordered steps
  *   POST   /api/tools                           — create draft
  *   PATCH  /api/tools/:slug                     — edit + publish draft→live
+ *   POST   /api/tools/:slug/share               — WARP-3354 share with the Workspace
+ *   DELETE /api/tools/:slug/share               — WARP-3354 back to private
  *   POST   /api/tools/:slug/runs                — imperative run-now
  *   GET    /api/tools/:slug/runs                — paginated history
  *   GET    /api/tools/:slug/schedules           — WARP-2665 rrule schedules
  *   POST   /api/tools/:slug/schedules           — WARP-2665 create
  *   PATCH  /api/tools/:slug/schedules/:id       — WARP-2665 edit / enable
  *   DELETE /api/tools/:slug/schedules/:id       — WARP-2665 remove
+ *
+ * WARP-3354 — a routine is PRIVATE to its creator unless shared with the
+ * Workspace; owner and admin see every routine. The rule is
+ * services/tool-spec-visibility.ts and is applied on EVERY route below: a
+ * routine the caller may not see answers 404 exactly like a missing one, so
+ * a private slug is not even confirmed to exist.
  *
  * The §7 spec model lives in this orchestrator, NOT in
  * `packages/tools-core` — that registry is the capability source of
@@ -61,6 +69,13 @@ import {
 } from "../services/tool-spec-draft.service.js";
 import { isSupportedRrule, nextFireFromRrule } from "../utils/rrule.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
+import {
+  canManageToolSpec,
+  canSeeToolSpec,
+  visibleToolSpecWhere,
+  type ToolSpecVisibility,
+} from "../services/tool-spec-visibility.js";
+import { recordActivity } from "../services/activity.singleton.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("tools-route");
@@ -224,6 +239,7 @@ interface SpecRow {
   status: SpecStatus;
   ownerId: string | null;
   share: string | null;
+  visibility: ToolSpecVisibility;
   safety: number;
   writes: boolean;
   reversible: boolean;
@@ -246,9 +262,15 @@ interface RunRow {
  * underlying Prisma row carries the same shape; this projects out
  * internal-only fields (`ownerId` stays, but `id` is the primary
  * identity surface — `slug` is the dashboard / API key).
+ *
+ * WARP-3354 — `visibility` is the stored column; `canShare` is per VIEWER:
+ * true when this caller may share or un-share the routine (its creator, an
+ * owner or an admin), so a client never restates the rule to decide whether
+ * to offer the action.
  */
 function projectSpec(
   spec: SpecRow & { steps: StepRow[] },
+  actor: Actor,
 ): Record<string, unknown> {
   return {
     id: spec.id,
@@ -260,6 +282,8 @@ function projectSpec(
     status: spec.status,
     ownerId: spec.ownerId,
     share: spec.share,
+    visibility: spec.visibility,
+    canShare: canManageToolSpec(actor, spec),
     safety: spec.safety,
     writes: spec.writes,
     reversible: spec.reversible,
@@ -354,7 +378,7 @@ export function createToolsRouter(
         if (!actor) return;
         const status = req.query.status;
         const category = req.query.category;
-        const where: { status?: SpecStatus; category?: string } = {};
+        const where: { status?: SpecStatus; category?: string; OR?: unknown } = {};
         if (typeof status === "string") {
           if (!(SPEC_STATUSES as readonly string[]).includes(status)) {
             res
@@ -367,6 +391,12 @@ export function createToolsRouter(
         if (typeof category === "string" && category.length > 0) {
           where.category = category;
         }
+        // WARP-3354 — a member lists the shared routines and their own, never
+        // another member's private ones. Filtered in the query, not after it,
+        // so a limit or a count can never be computed over rows the caller
+        // may not see. `null` = owner/admin, who see every routine.
+        const visible = visibleToolSpecWhere(actor);
+        if (visible) where.OR = visible.OR;
         // WARP-2894 — schedules ride on the list row (additive). The model's
         // routine_list needs them to answer "when does this run" without a
         // call per slug, and the dashboard's list ignores keys it does not
@@ -395,6 +425,8 @@ export function createToolsRouter(
             status: r.status,
             ownerId: r.ownerId,
             share: r.share,
+            visibility: r.visibility,
+            canShare: canManageToolSpec(actor, r),
             safety: r.safety,
             writes: r.writes,
             reversible: r.reversible,
@@ -416,17 +448,20 @@ export function createToolsRouter(
     requireRole("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
+        const actor = await actorOr403(prisma, req, res, undefined);
+        if (!actor) return;
         const spec = (await findSpec(req.params.slug, (where) =>
           prisma.toolSpec.findUnique({
             where,
             include: { steps: { orderBy: { idx: "asc" } } },
           }),
         )) as unknown as (SpecRow & { steps: StepRow[] }) | null;
-        if (!spec) {
+        // WARP-3354 — another member's private routine is a 404, not a 403.
+        if (!spec || !canSeeToolSpec(actor, spec)) {
           res.status(404).json({ error: "Spec not found" });
           return;
         }
-        res.json(projectSpec(spec));
+        res.json(projectSpec(spec, actor));
       } catch (err) {
         next(err);
       }
@@ -471,7 +506,7 @@ export function createToolsRouter(
           res.status(created.refusal.status).json(created.refusal.body);
           return;
         }
-        res.status(201).json(projectSpec(created.spec));
+        res.status(201).json(projectSpec(created.spec, who));
       } catch (err) {
         next(err);
       }
@@ -490,6 +525,13 @@ export function createToolsRouter(
             .json({ error: "Invalid patch", details: parsed.error.flatten() });
           return;
         }
+        // WARP-3354 — the `owner`/`admin` floor above is also the visibility
+        // rule: those two roles see and manage every routine, so a patch needs
+        // no per-routine check. A member cannot edit a routine at all, their
+        // own included. `visibility` is deliberately NOT patchable here; it
+        // moves only through the share routes below.
+        const editor = await actorOr403(prisma, req, res, undefined);
+        if (!editor) return;
         // WARP-2665 — steps are loaded because the write classification is
         // derived from them. A patch that changes `writes` without touching
         // the steps must be checked against the steps already stored, and a
@@ -604,11 +646,96 @@ export function createToolsRouter(
           });
         })) as unknown as SpecRow & { steps: StepRow[] };
 
-        res.json(projectSpec(updated));
+        res.json(projectSpec(updated, editor));
       } catch (err) {
         next(err);
       }
     },
+  );
+
+  /**
+   * WARP-3354 — share a routine with the Workspace, or take it back to private.
+   *
+   *   POST   /tools/:slug/share   visibility → WORKSPACE
+   *   DELETE /tools/:slug/share   visibility → PRIVATE
+   *
+   * Both are idempotent and answer the routine (the same DTO as GET). Who may
+   * call: the routine's creator, an owner or an admin — `canManageToolSpec`.
+   * A member who can SEE a shared routine they did not create is refused 403
+   * (they know it exists); one who cannot see it gets the 404 every other
+   * route gives. A person's act on the Routines page, never a tool: there is
+   * no `routine_share`, and the mcp principal is not admitted here, so the
+   * assistant cannot publish a routine to the company on anyone's behalf.
+   *
+   * `version` is not bumped: it pins a run to the STEPS it ran against, and
+   * sharing changes none. The change is recorded in the activity feed.
+   */
+  async function setVisibility(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    to: ToolSpecVisibility,
+  ): Promise<void> {
+    try {
+      const actor = await actorOr403(prisma, req, res, undefined);
+      if (!actor) return;
+      const spec = (await findSpec(req.params.slug, (where) =>
+        prisma.toolSpec.findUnique({
+          where,
+          include: { steps: { orderBy: { idx: "asc" } } },
+        }),
+      )) as unknown as (SpecRow & { steps: StepRow[] }) | null;
+      if (!spec || !canSeeToolSpec(actor, spec)) {
+        res.status(404).json({ error: "Spec not found" });
+        return;
+      }
+      if (!canManageToolSpec(actor, spec)) {
+        res.status(403).json({
+          error: "forbidden_not_creator",
+          detail: "only the person who created this routine, an owner or an admin can share or un-share it",
+          slug: spec.slug,
+        });
+        return;
+      }
+      // The Reports tile runs `daily-report` for every member. Making it
+      // private would answer them 404 on a tile that is not theirs to fix.
+      if (to === "PRIVATE" && spec.slug === DAILY_REPORT_SLUG) {
+        res.status(409).json({
+          error: "box_routine_stays_shared",
+          detail: "the daily report is provided by the box and stays shared with the Workspace",
+          slug: spec.slug,
+        });
+        return;
+      }
+      if (spec.visibility === to) {
+        res.json(projectSpec(spec, actor));
+        return;
+      }
+      const updated = (await prisma.toolSpec.update({
+        where: { id: spec.id },
+        data: { visibility: to },
+        include: { steps: { orderBy: { idx: "asc" } } },
+      })) as unknown as SpecRow & { steps: StepRow[] };
+      await recordActivity({
+        kind: "tool_run",
+        severity: "info",
+        sourceIcon: "share",
+        what: to === "WORKSPACE" ? "Routine shared with the Workspace" : "Routine made private",
+        actor: { type: "user", id: actor.id },
+        sub: spec.name,
+        refs: { specId: spec.id, slug: spec.slug, from: spec.visibility, to },
+      });
+      res.json(projectSpec(updated, actor));
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  router.post("/tools/:slug/share", requireRole("owner", "admin", "family"), (req, res, next) =>
+    setVisibility(req, res, next, "WORKSPACE"),
+  );
+  router.delete("/tools/:slug/share", requireRole("owner", "admin", "family"), (req, res, next) =>
+    setVisibility(req, res, next, "PRIVATE"),
   );
 
   router.post(
@@ -628,7 +755,10 @@ export function createToolsRouter(
             include: { steps: { orderBy: { idx: "asc" } } },
           }),
         )) as unknown as (SpecRow & { steps: StepRow[] }) | null;
-        if (!spec) {
+        // WARP-3354 — a private routine runs for its creator, owners and admins
+        // only; for anyone else it does not exist. A shared routine follows the
+        // run rules below unchanged.
+        if (!spec || !canSeeToolSpec(actor, spec)) {
           res.status(404).json({ error: "Spec not found" });
           return;
         }
@@ -763,10 +893,12 @@ export function createToolsRouter(
     requireRole("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
+        const actor = await actorOr403(prisma, req, res, undefined);
+        if (!actor) return;
         const spec = (await findSpec(req.params.slug, (where) =>
           prisma.toolSpec.findUnique({ where }),
         )) as unknown as SpecRow | null;
-        if (!spec) {
+        if (!spec || !canSeeToolSpec(actor, spec)) {
           res.status(404).json({ error: "Spec not found" });
           return;
         }
@@ -834,10 +966,14 @@ export function createToolsRouter(
     req: Request,
     res: Response,
   ): Promise<{ spec: SpecRow; schedule: ScheduleRow | null } | null> {
+    // WARP-3354 — schedules belong to their routine's visibility: the list is
+    // open to members, so it must not reveal a private routine's cadence.
+    const actor = await actorOr403(prisma, req, res, undefined);
+    if (!actor) return null;
     const spec = (await findSpec(req.params.slug, (where) =>
       prisma.toolSpec.findUnique({ where }),
     )) as unknown as SpecRow | null;
-    if (!spec) {
+    if (!spec || !canSeeToolSpec(actor, spec)) {
       res.status(404).json({ error: "Spec not found" });
       return null;
     }
