@@ -944,6 +944,12 @@ model ChatMessage {
   /// WARP-844 — user rating on an assistant turn (explicit column per the
   /// no-guessing rule). NULL = unrated. Feeds the admin RAG-eval loop.
   feedback    ChatMessageFeedback?
+  /// WARP-3300 — what this row is. `message` is every ordinary turn;
+  /// `agent_run_result` is a background run reporting back into the chat
+  /// that started it (`meta` then holds {runId, status, title, summary,
+  /// artifacts}). An explicit column, never inferred from `meta`.
+  kind        ChatMessageKind      @default(message)
+  meta        Json?
   createdAt   DateTime             @default(now())
 
   @@index([sessionId, createdAt])
@@ -958,6 +964,12 @@ enum CloudHistoryConsent {
   not_asked
   granted
   declined
+}
+
+/// WARP-3300 — see ChatMessage.kind.
+enum ChatMessageKind {
+  message
+  agent_run_result
 }
 
 /// WARP-844 — thumbs rating on an assistant message.
@@ -4200,6 +4212,9 @@ model AgentRun {
   /// WARP-3299 — whether the result message reached the conversation.
   /// `not_applicable` for runs no chat started.
   resultDelivery     AgentRunResultDelivery   @default(not_applicable)
+  /// WARP-3300 — posts of the result message tried so far. The worker stops
+  /// retrying a `failed` delivery at 5 (RESULT_DELIVERY_MAX_ATTEMPTS).
+  resultDeliveryAttempts Int                  @default(0)
   /// WARP-3301 — why a `queued` run is not being worked on: `queue` (behind
   /// other runs, or not due yet) or `chat` (it yielded the one inference slot
   /// to interactive chat on a gateway 429). Written at every transition back
@@ -4445,6 +4460,9 @@ enum AgentRunResultDelivery {
   pending
   delivered
   failed
+  /// WARP-3300 — the conversation was deleted before the result could be
+  /// posted. Terminal, like `delivered`: there is nowhere left to post it.
+  conversation_gone
 }
 
 /// WARP-3301 — why a queued run waits. See `AgentRun.queueWait`.

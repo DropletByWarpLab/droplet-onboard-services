@@ -14,7 +14,7 @@ import { Dialog } from "@/components/Dialog";
 import { useToast } from "@/components/Toast";
 import { useConversationList } from "@/lib/hooks/useConversationList";
 import { translateError } from "@/lib/friendly-errors";
-import type { ConversationSummary } from "@/lib/api";
+import type { ConversationHasLiveRunsError, ConversationSummary } from "@/lib/api";
 import { ChatHistoryRow } from "./ChatHistoryRow";
 import { exportConversationMarkdown } from "@/lib/export-conversation";
 import {
@@ -84,6 +84,12 @@ export function ChatHistoryPanel({
   const { toast } = useToast();
   const [pendingDelete, setPendingDelete] =
     useState<ConversationSummary | null>(null);
+  // WARP-3303 — the chat started background tasks that are still going:
+  // the server refused the delete until the person says what happens to them.
+  const [liveRunsDelete, setLiveRunsDelete] = useState<{
+    target: ConversationSummary;
+    count: number;
+  } | null>(null);
   // ── WARP-845 — projects state ──
   const [projects, setProjects] = useState<ChatProject[]>([]);
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
@@ -215,12 +221,15 @@ export function ChatHistoryPanel({
     return () => observer.disconnect();
   }, [hasMore, isLoading, loadMore]);
 
-  const confirmDelete = async () => {
-    if (!pendingDelete) return;
-    const target = pendingDelete;
+  const confirmDelete = async (
+    chosen?: { target: ConversationSummary; cancelRuns: boolean },
+  ) => {
+    const target = chosen?.target ?? pendingDelete;
+    if (!target) return;
     setPendingDelete(null);
+    setLiveRunsDelete(null);
     try {
-      const ok = await remove(target.id);
+      const ok = await remove(target.id, chosen?.cancelRuns);
       if (!ok) toast("Chat already deleted");
       // If the user just deleted the chat they're currently viewing,
       // route back to a fresh /chat so the messages column doesn't keep
@@ -230,6 +239,13 @@ export function ChatHistoryPanel({
         onNewChat();
       }
     } catch (err) {
+      // By name, not instanceof: the class lives in the api module, which
+      // tests replace wholesale.
+      if (err instanceof Error && err.name === "ConversationHasLiveRunsError") {
+        const runs = (err as ConversationHasLiveRunsError).runs ?? [];
+        setLiveRunsDelete({ target, count: Math.max(1, runs.length) });
+        return;
+      }
       toast(translateError(err, "chat"));
     }
   };
@@ -554,6 +570,54 @@ export function ChatHistoryPanel({
                          hover:bg-system-red/90 inline-flex items-center gap-1.5 min-h-[36px]"
             >
               Delete
+            </button>
+          </div>
+        </div>
+      </Dialog>
+
+      {/* WARP-3303 — the chat has background tasks still going. */}
+      <Dialog
+        open={liveRunsDelete !== null}
+        onClose={() => setLiveRunsDelete(null)}
+        labelledBy="chat-history-live-runs-heading"
+        maxWidth="sm"
+      >
+        <div>
+          <h2 id="chat-history-live-runs-heading" className="type-headline mb-2">
+            {liveRunsDelete?.count === 1
+              ? "This chat started a background task"
+              : `This chat started ${liveRunsDelete?.count ?? 0} background tasks`}
+          </h2>
+          <p className="type-subheadline text-label-secondary mb-4">
+            {liveRunsDelete?.count === 1 ? "It is" : "They are"} still going. Stop{" "}
+            {liveRunsDelete?.count === 1 ? "it" : "them"} with the chat, or keep{" "}
+            {liveRunsDelete?.count === 1 ? "it" : "them"} running; the results then stay in the Workshop.
+          </p>
+          <div className="flex flex-wrap justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setLiveRunsDelete(null)}
+              className="type-subheadline text-accent hover:text-accent-hover px-3 py-2 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => liveRunsDelete && void confirmDelete({ target: liveRunsDelete.target, cancelRuns: false })}
+              data-testid="live-runs-keep"
+              className="type-subheadline px-4 py-1.5 rounded-md bg-surface-secondary text-label-primary
+                         hover:bg-surface-tertiary inline-flex items-center gap-1.5 min-h-[36px]"
+            >
+              Keep {liveRunsDelete?.count === 1 ? "it" : "them"} and delete
+            </button>
+            <button
+              type="button"
+              onClick={() => liveRunsDelete && void confirmDelete({ target: liveRunsDelete.target, cancelRuns: true })}
+              data-testid="live-runs-stop"
+              className="type-subheadline px-4 py-1.5 rounded-md bg-system-red text-white
+                         hover:bg-system-red/90 inline-flex items-center gap-1.5 min-h-[36px]"
+            >
+              Stop {liveRunsDelete?.count === 1 ? "it" : "them"} and delete
             </button>
           </div>
         </div>

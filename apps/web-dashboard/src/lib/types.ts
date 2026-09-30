@@ -86,6 +86,19 @@ export interface ChatMessage {
   /** WARP-844 — thumbs rating on an assistant turn (null/absent = unrated). */
   feedback?: "up" | "down" | null;
   /**
+   * WARP-3303 — set on the message a background run posts into the chat that
+   * started it (persisted `kind: "agent_run_result"`, WARP-3300). Rendered as
+   * a result card; `content` still carries the plain-text version, which is
+   * what the model reads when the history is replayed.
+   */
+  runResult?: {
+    runId: string;
+    status: "succeeded" | "failed" | "cancelled";
+    title: string;
+    summary: string;
+    artifacts: { kind: string; ref: string; title: string }[];
+  };
+  /**
    * WARP-904 — the model/provider this specific turn actually ran on.
    * Populated from the persisted row via `loadConversation`; absent on a
    * live-streaming message (the composer already knows its own

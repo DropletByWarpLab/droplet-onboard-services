@@ -123,6 +123,7 @@ import { createLogger } from "../lib/logger.js";
 import { isGatewayPreempted } from "../lib/gateway-preempted.js";
 import type { ChatMessage } from "../types/index.js";
 import { contentToText } from "../types/index.js";
+import { chatRunBrief, deliverRunResults } from "./agent-run-result.service.js";
 import {
   runAgent,
   type AgentCheckpointPort,
@@ -995,6 +996,12 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
 
   async function tickOnce(): Promise<TickCounts> {
     const at = now();
+    // WARP-3300 — post finished chat runs' results into their conversations.
+    // Never lets a delivery problem stop the queue from moving.
+    await deliverRunResults({ prisma, now }).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error("[agent-run-worker] result delivery sweep failed:", err);
+    });
     const { reclaimed, failed } = await reclaimStale(at);
     let claimed = 0;
     const capacity = limits.concurrency - inFlight.size;
@@ -1103,6 +1110,10 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           pendingToolCallId: string | null;
           pendingDecision: "approved" | "denied" | null;
           workspaceId: string | null;
+          origin: "workshop" | "schedule" | "chat";
+          title: string;
+          deliverable: string;
+          sessionId: string | null;
         }
       | null;
     const lease = leases.get(runId);
@@ -1187,7 +1198,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         ...CLEAR_PENDING,
       });
       await audit(runId, run.userId, "failed", "Agent run refused (cloud access)", error,
-        { username: user.username, goal: run.goal },
+        { username: user.username, goal: run.goal, sessionId: run.sessionId },
         { cloudGate, offLanProvider: cloudDecision.body.provider });
       return;
     }
@@ -1229,7 +1240,12 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     const preemptible = preemptions < maxPreemptions;
     const messages = Array.isArray(run.messages)
       ? (run.messages as ChatMessage[])
-      : initialRunMessages(run.goal, offLanProvider !== null);
+      : initialRunMessages(
+          // WARP-3300 — a chat-started run gets the fixed brief; the others
+          // keep their goal verbatim.
+          run.origin === "chat" ? chatRunBrief(run) : run.goal,
+          offLanProvider !== null,
+        );
     // A resumed run re-derives its system prompt from THIS claim's verdict,
     // never from the checkpoint: the notice follows where the model runs now.
     if (messages[0]?.role === "system") {
@@ -1822,7 +1838,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         ["cancelled"],
       );
       await audit(runId, run.userId, "cancelled", "Agent run cancelled", undefined,
-        user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+        user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
       return;
     }
     if (reason === "parked" && park.request) {
@@ -1881,7 +1897,14 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           // by POST /api/agent-runs/:id/confirm from that page. No token, no
           // hash, no args (they can carry customer data) ride on the payload.
           ...agentRunLink(runId),
-          data: { agentRunId: runId, pendingTool: parkRequest.tool, needsDecision: true },
+          // WARP-3300 — `sessionId` lets a client show the approval inline in
+          // the chat that started the run.
+          data: {
+            agentRunId: runId,
+            pendingTool: parkRequest.tool,
+            needsDecision: true,
+            ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+          },
         }).catch((err) => {
           logger.warn({ err, runId }, "agent_run_park_notification_failed");
         });
@@ -1908,7 +1931,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       const proposed = proposalKindOf(text);
       const draft = proposed.kind === "connector-draft";
       await audit(runId, run.userId, "succeeded", draft ? "Agent run proposed a connector draft" : "Agent run proposed an extension", undefined,
-        user ? { username: user.username, goal: run.goal, result: text } : undefined);
+        user ? { username: user.username, goal: run.goal, result: text, sessionId: run.sessionId } : undefined);
       if (user) {
         const goal = run.goal.length > 120 ? `${run.goal.slice(0, 117)}…` : run.goal;
         await sendNotification(prisma, {
@@ -1946,7 +1969,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         ...CLEAR_PENDING,
       });
       await audit(runId, run.userId, "failed", "Agent run halted (outcome unknown)", error,
-        user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+        user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
       return;
     }
     if (reason === "deadline") {
@@ -1960,7 +1983,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         ...CLEAR_PENDING,
       });
       await audit(runId, run.userId, "failed", "Agent run failed", error,
-        user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+        user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
       return;
     }
     if (preempted || gatewayBusy(threw, result)) {
@@ -2000,7 +2023,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       const error = threw instanceof Error ? threw.message : String(threw ?? "no result");
       await finish(runId, { status: "failed", endedAt, error: error.slice(0, 2000), ...CLEAR_PENDING });
       await audit(runId, run.userId, "failed", "Agent run failed", error,
-        user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+        user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
       return;
     }
 
@@ -2020,7 +2043,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           ...CLEAR_PENDING,
         });
         await audit(runId, run.userId, "succeeded", "Agent run completed", undefined,
-          user ? { username: user.username, goal: run.goal, result: text } : undefined, offLanRefs);
+          user ? { username: user.username, goal: run.goal, result: text, sessionId: run.sessionId } : undefined, offLanRefs);
         return;
       }
       case "iteration_limit": {
@@ -2034,7 +2057,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           ...CLEAR_PENDING,
         });
         await audit(runId, run.userId, "failed", "Agent run failed", error,
-          user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+          user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
         return;
       }
       case "error":
@@ -2049,7 +2072,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           ...CLEAR_PENDING,
         });
         await audit(runId, run.userId, "failed", "Agent run failed", error,
-          user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+          user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
         return;
       }
     }
@@ -2063,7 +2086,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     error?: string,
     // WARP-2180 — on a terminal status the owner is told over the same
     // ws-bridge topic the park notification uses, with the result summary.
-    notify?: { username: string; goal: string; result?: string | null },
+    notify?: { username: string; goal: string; result?: string | null; sessionId?: string | null },
     // WARP-2997 — the cloud gate's verdict and what it withheld, on the
     // signed row, as chat records `offLanProvider` on its turn row.
     offLan?: Record<string, unknown>,
@@ -2084,7 +2107,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         // WARP-2909 — same link and tag as the park, so the finish replaces
         // the approval prompt in the tray. No `needsDecision` here.
         ...agentRunLink(runId),
-        data: { agentRunId: runId, status },
+        data: { agentRunId: runId, status, ...(notify.sessionId ? { sessionId: notify.sessionId } : {}) },
       }).catch((err) => {
         logger.warn({ err, runId }, "agent_run_terminal_notification_failed");
       });

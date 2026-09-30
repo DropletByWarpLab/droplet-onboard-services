@@ -603,5 +603,32 @@ conversation (`sessionId`), and the assistant message and tool call that
 started it (`originMessageId`, `originToolCallId`), all set server-side from
 the turn's `_meta` (WARP-3299). A person may have at most 3 active runs;
 schedule fires are exempt. Deleting a chat with a live run answers 409 unless
-the caller says `cancelRuns=true|false`. Results flowing back into the chat,
-live events and the chat UI are the epic's later tickets.
+the caller says `cancelRuns=true|false`; the web chat asks the person which.
+
+**The brief and the result message (WARP-3300).** A chat-started run's first
+user message is a fixed brief (`chatRunBrief`): objective, deliverable, and
+the instruction that its final message is read by a parent with a very small
+context — a summary of at most 300 words plus the files it made. It never sees
+the chat history. When the run ends (any terminal status), the worker tick's
+`deliverRunResults` sweep posts ONE message into the conversation: role
+`assistant`, `ChatMessage.kind = agent_run_result`, `meta = {runId, status,
+title, summary, artifacts}`, and plain-text content (`Background task "…"
+finished: <summary>`), so older clients show it and the next chat turn replays
+it to the model with no polling tool. `summary` is capped at 2,000 characters
+at a word boundary; `artifacts` come only from recorded, successful
+`write_file` / `create_*` / `copy_file` calls. `resultDelivery` is the explicit
+state — `pending` → `delivered`, or `failed` (retried up to 5 posts), or
+`conversation_gone` when the chat was deleted first — and `turnId =
+agent-run:<id>` makes a repeat post a no-op. Each post also publishes the
+chat's `turn-completed` topic so an open dashboard reloads the thread.
+
+**In the web chat (WARP-3303).** A `start_agent_run` call that produced a run
+renders as a run card (`components/chat/RunCard.tsx`) instead of a tool chip.
+The card reads the run (`GET /api/agent-runs/:id`) and then follows the live
+topic, never the persisted tool result; it offers Stop and, when the run parks,
+Approve/Decline against `POST /:id/confirm` with no chat turn sent. The
+`agent_run_result` message renders as a result card. The layout's
+NotificationToaster socket fans the topic out (`lib/agent-run-events.ts`) to
+the cards and the Workshop nav badge (active runs; amber when one needs an OK).
+Terminal and park notifications carry `data.sessionId`, and their toast opens
+`/chat?c=<sessionId>` instead of the Workshop.

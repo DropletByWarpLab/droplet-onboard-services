@@ -221,6 +221,8 @@ Stream URL is short-lived (signed); fetch fresh on every player open.
 | POST | `/llm/chat` | Bearer | `{ model, messages: [{ role, content }], stream?: true, conversationId? }` → SSE stream OR JSON |
 | DELETE | `/llm/conversations/:id` | Bearer | `{ ok }` |
 
+Each message carries `kind` (`message`, or `agent_run_result` for a background run reporting back, WARP-3300) and `meta` (`null`, or `{runId, status, title, summary, artifacts}` on an `agent_run_result`). Its `content` is plain assistant text either way, so a client that ignores `kind` still shows it.
+
 Chat sends go to the single `POST /api/llm/chat` route (there is **no**
 per-conversation `/llm/conversations/:id/chat` endpoint). The conversation
 id is carried in the request **body** as `conversationId` (a UUID), not in

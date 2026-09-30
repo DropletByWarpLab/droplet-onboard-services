@@ -182,7 +182,7 @@ export type NavItem = {
    * by the Sidebar (which owns the polling hooks) — pure data, no hook in
    * this module. Rendered only when the resolved count is > 0.
    */
-  badgeKey?: "teamChatUnread";
+  badgeKey?: "teamChatUnread" | "agentRunsActive";
   /**
    * Nested sub-navigation. When present, the desktop sidebar reveals these
    * children indented under the parent whenever the user is anywhere inside
@@ -303,6 +303,8 @@ export const NAV_GROUPS: NavGroup[] = [
         label: "Workshop",
         icon: Hammer,
         roles: ["owner", "admin"],
+        // WARP-3303 — background runs still going; amber when one needs an OK.
+        badgeKey: "agentRunsActive",
       },
 
       /* ── tucked out of Work (WARP-1807 / WARP-2966 / WARP-2967) ────────

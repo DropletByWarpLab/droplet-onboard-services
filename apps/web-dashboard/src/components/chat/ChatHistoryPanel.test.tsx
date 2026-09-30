@@ -174,6 +174,48 @@ describe("ChatHistoryPanel", () => {
     await waitFor(() => expect(deleteConversationMock).toHaveBeenCalledWith("a"));
   });
 
+  // ── WARP-3303 — a chat with background tasks still going ─────────────────
+
+  it.each([
+    ["Stop them and delete", true],
+    ["Keep them and delete", false],
+  ])("asks about live background tasks, then deletes with %s", async (button, cancelRuns) => {
+    listConversationsMock.mockResolvedValue([row("a")]);
+    const live = Object.assign(new Error("conversation_has_live_runs"), {
+      name: "ConversationHasLiveRunsError",
+      runs: [
+        { id: "r1", title: "Supplier check", status: "running" },
+        { id: "r2", title: "Invoice sweep", status: "queued" },
+      ],
+    });
+    deleteConversationMock.mockRejectedValueOnce(live).mockResolvedValueOnce(true);
+    render(<ChatHistoryPanel activeConversationId={null} onSelect={vi.fn()} onNewChat={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("chat-a")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /more actions/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /delete/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+    expect(await screen.findByText("This chat started 2 background tasks")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: button }));
+    await waitFor(() => expect(deleteConversationMock).toHaveBeenLastCalledWith("a", cancelRuns));
+    await waitFor(() => expect(screen.queryByText("chat-a")).not.toBeInTheDocument());
+  });
+
+  it("Cancel on the live-tasks question deletes nothing", async () => {
+    listConversationsMock.mockResolvedValue([row("a")]);
+    deleteConversationMock.mockRejectedValueOnce(
+      Object.assign(new Error("x"), { name: "ConversationHasLiveRunsError", runs: [{ id: "r1", title: "t", status: "running" }] }),
+    );
+    render(<ChatHistoryPanel activeConversationId={null} onSelect={vi.fn()} onNewChat={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("chat-a")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /more actions/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /delete/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+    expect(await screen.findByText("This chat started a background task")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+    expect(deleteConversationMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("chat-a")).toBeInTheDocument();
+  });
+
   // ── WARP-1917 — pinned chats ─────────────────────────────────────────────
 
   it("renders a Pinned section above the date groups, ordered by pinnedAt desc, without duplicating rows", async () => {
