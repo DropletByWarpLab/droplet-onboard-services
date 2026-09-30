@@ -63,6 +63,16 @@ export interface AgentRunRow {
   cloudGate: string;
   offLanProvider: string | null;
   offLanWithheldTools: string[];
+  /** WARP-3299 — who started it, the chat turn that did, and what it owes. */
+  origin: string;
+  originMessageId: string | null;
+  originToolCallId: string | null;
+  title: string;
+  deliverable: string;
+  summary: string | null;
+  artifacts: unknown;
+  resultDelivery: string;
+  queueWait: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -88,6 +98,10 @@ function matches(row: Record<string, unknown>, where: Record<string, unknown>): 
       const c = cond as Record<string, unknown>;
       if ("in" in c) {
         if (!(c.in as unknown[]).includes(actual)) return false;
+        continue;
+      }
+      if ("not" in c) {
+        if (actual === c.not) return false;
         continue;
       }
       if ("notIn" in c) {
@@ -238,6 +252,15 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
         cloudGate: "unchecked",
         offLanProvider: null,
         offLanWithheldTools: [],
+        origin: args.data.origin as string,
+        originMessageId: (args.data.originMessageId as string | null) ?? null,
+        originToolCallId: (args.data.originToolCallId as string | null) ?? null,
+        title: (args.data.title as string | undefined) ?? "",
+        deliverable: (args.data.deliverable as string | undefined) ?? "",
+        summary: null,
+        artifacts: [],
+        resultDelivery: (args.data.resultDelivery as string | undefined) ?? "not_applicable",
+        queueWait: (args.data.queueWait as string | undefined) ?? "queue",
         createdAt: now(),
         updatedAt: now(),
       };

@@ -46,6 +46,6 @@ export function mcpWireText(result: ToolResult): string {
  * The wire text, parsed exactly the way the agent loop parses it. This is
  * the only supported way for a test to obtain a `ToolResultPayload`.
  */
-export function mcpWirePayload(result: ToolResult): ToolResultPayload {
-  return parseToolResultPayload(mcpWireText(result));
+export function mcpWirePayload(result: ToolResult, toolName = "read_file"): ToolResultPayload {
+  return parseToolResultPayload(mcpWireText(result), toolName);
 }

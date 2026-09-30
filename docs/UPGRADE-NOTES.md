@@ -12,6 +12,26 @@ checklist rather than a story.
 
 ---
 
+## WARP-3057 — upload file names (optional one-shot repair)
+
+**Background.** Before WARP-3057 the box decoded a browser upload's file name
+as latin1, so UTF-8 names were stored garbled (`Café.pdf` as `CafÃ©.pdf`).
+Deploying fixes new uploads only. **No migration ships with this**; names
+already stored stay garbled until an admin runs the repair.
+
+**Order (any time after deploy, as root from the repo root):**
+
+1. `scripts/repair-upload-names.sh` — dry run. Lists every rename, changes
+   nothing. It walks each user's whole `files/` tree (people's folders and
+   the company Workspace, not department folders), so check the list for
+   paths that did not come from a dashboard upload.
+2. `scripts/repair-upload-names.sh --apply` — renames through
+   `occ files:move`, so ids, shares, tags and versions survive. A repaired
+   name that is already taken is skipped, never overwritten. Safe to re-run.
+   The final line must read `renamed N of N`, with N matching the dry run.
+
+---
+
 ## WARP-2196 — embedder swap MiniLM→bge (operator-gated re-embed)
 
 **Background.** `EMBEDDING_MODEL` moves to `bge-small-en-v1.5`. Both models

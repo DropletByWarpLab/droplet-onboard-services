@@ -34,6 +34,7 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import { sendNotification } from "../notifications.service.js";
+import type { ShadowItem } from "./brain-triage-shadow.js";
 
 /** Only a loss this large interrupts somebody. Minor units. */
 export const DEFAULT_MIN_IMPACT_MINOR = 100_000n; // 1,000.00
@@ -81,6 +82,9 @@ export async function notifyFindings(
     now?: Date;
     minImpactMinor?: bigint;
     digestIntervalMs?: number;
+    /** WARP-3071 — told each FINAL verdict, after it is stamped. Shadow-only:
+     *  must return at once and never affect delivery (brain-triage-shadow.ts). */
+    onTriaged?: (items: ShadowItem[]) => void;
   } = {},
 ): Promise<NotifyOutcome> {
   const now = opts.now ?? new Date();
@@ -130,6 +134,7 @@ export async function notifyFindings(
     // after the loop would re-announce everything if the process died midway.
     await prisma.brainFinding.update({ where: { id: f.id }, data: { notifiedAt: now } });
     immediate += 1;
+    shadow(opts.onTriaged, [f], "immediate");
   }
 
   if (rest.length === 0) return { immediate, digested: 0, digestSent: false };
@@ -172,6 +177,23 @@ export async function notifyFindings(
     create: { key: DIGEST_FLAG_KEY, valueJson: { at: now.toISOString() } },
     update: { valueJson: { at: now.toISOString() } },
   });
+  // Only once the digest is SENT: a held finding has no final verdict yet, and
+  // shadowing it every hourly pass would ask Kev about it again and again.
+  shadow(opts.onTriaged, rest, "digest");
 
   return { immediate, digested: rest.length, digestSent: true };
+}
+
+/** A throwing hook must not change what brain-notify does or returns. */
+function shadow(
+  hook: ((items: ShadowItem[]) => void) | undefined,
+  findings: Array<{ id: string; kind: string; title: string; rationale: string }>,
+  tier: ShadowItem["tier"],
+): void {
+  if (!hook) return;
+  try {
+    hook(findings.map((f) => ({ id: f.id, kind: f.kind, title: f.title, rationale: f.rationale, tier })));
+  } catch {
+    // Shadow mode: swallowed by design.
+  }
 }

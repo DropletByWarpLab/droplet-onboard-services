@@ -1,4 +1,6 @@
-# Mobile API Contract
+# Native Client API Contract
+
+> Formerly "Mobile API Contract" (file name kept so existing links keep working). Widened to native desktop clients by WARP-3230 (ADR-062, WARP-3211).
 
 **Status:** Living document (mirror of the orchestrator routes that mobile clients consume)
 **Date:** 2026-05-18 (chat route + SSE wire corrected 2026-06-01 — XR-01/XR-02; error
@@ -6,10 +8,23 @@ envelope, VPN/DDNS shapes, and missing endpoints reconciled against `src/routes/
 2026-06-28 during the `droplet-ios` build — XR-03)
 **Companion to:** ADR-008 (Native Mobile — Design System + API Contract)
 
-This document is the contract that the iOS + Android apps build against. Both apps
-re-derive their model layer from this doc. If you change the orchestrator's
-mobile-relevant routes, update this doc IN THE SAME PR and the mobile teams will
-mirror the change.
+This document is the contract that the native clients build against: the iOS and
+Android apps, and the native Windows client (`droplet-windows`, C# / WinUI 3,
+ADR-062). The native clients re-derive their model layer from this doc. If you
+change the orchestrator's client-relevant routes, update this doc IN THE SAME PR
+and the client teams will mirror the change.
+
+**Native desktop clients.** A desktop client is a native app, not a browser: it
+signs in with `POST /auth/login?return=body` (the JWT pair comes back in the
+body; the native-only gate described under Auth applies), sends
+`Authorization: Bearer` on every route, pins the box's identity as described in
+the pairing / sign-in flow, and receives real-time events over
+`/api/ws/events` (see "Real-time events"). Since WARP-3038 the box sets no
+cookies on a body-token sign-in or refresh; before it, the box also set the
+httpOnly session pair on those responses. A client keeps only the body tokens
+and must not store any cookie the box sets, whichever version it talks to. The
+passkey and native SSO sign-in flows are not part of this contract yet (ADR-063,
+WARP-3226).
 
 > **Source of truth (XR-03).** Where this doc and the shipped orchestrator routes
 > disagree, **`apps/orchestrator/src/routes/*` wins** — a cross-repo audit while
@@ -129,10 +144,20 @@ pre-login recovery is the `recoveryCode` field on `/auth/login` above.
 
 | Method | Path | Auth | Returns |
 |---|---|---|---|
-| GET | `/orchestrator/health` | none | `{ status: "ok"\|"degraded"\|"down", components: [...], uptime, version }` |
+| GET | `/orchestrator/health` | none | `{ status: "ok"\|"degraded"\|"down", components: [{ name, status, latencyMs, lastCheckedAt }], uptime, version? }` |
+| GET | `/orchestrator/health/details` | owner/admin | same shape, plus each component's `error?` reason |
 
 Called on app launch + every 60s while foregrounded. Drives the
 status pill in the chrome.
+
+- `version` is the box's committed OTA release tag (e.g.
+  `ota-stable-412-gabc1234`, or `git-<sha10>` for an untagged build), not
+  semver. The key is **absent** (never `null`) on a box that has never taken
+  an OTA update, so decode it as optional or give it a default.
+- The public route never carries a component's `error`: it is raw probe text
+  that names internal hosts and ports (WARP-3154). Owner/admin clients that
+  want the reason read `/orchestrator/health/details`; anyone else gets 401
+  (anonymous) or 403.
 
 ### Device pairing (`/api/devices/*`)
 
@@ -180,7 +205,8 @@ Sign-in + optional enrollment sequence:
    client that pins it keeps verifying every later connection (API, WebSocket,
    WebView) against the same pin. Absent when the box cannot read its own
    leaf; unknown parameters are ignored by older clients. Reference
-   implementation: droplet-windows `trust.rs` (WARP-2953).
+   implementation: the native Windows client's C# trust code in `droplet-windows`
+   (a port of the retired Rust `trust.rs`, WARP-2953; WARP-3236).
 2. App POSTs `/auth/login?return=body` → stores JWT pair + user. On
    `401 TOTP_REQUIRED`, prompt for `totp` and resubmit.
 3. (Optional) If a pair `code` is present, app POSTs `/devices/pair/claim`
@@ -196,19 +222,30 @@ To GENERATE a code, the dashboard (already authenticated) POSTs
 
 | Method | Path | Auth | Returns / body |
 |---|---|---|---|
-| GET | `/cameras` | Bearer | `{ cameras, discovered, recentEvents, totalCameras }` |
+| GET | `/cameras` | Bearer | `{ cameras }`, the cameras this person may see; `{ cameras: [], _status: "disconnected" }` when the camera service is down (that is not "no cameras") |
 | GET | `/cameras/:name` | Bearer | full `CameraInfo` |
-| GET | `/cameras/:name/thumbnail` | Bearer | image bytes |
-| GET | `/cameras/:name/stream-url?protocol=hls\|webrtc` | Bearer | `{ url, expiresAt }` |
-| GET | `/cameras/clips?camera=&from=&to=` | Bearer | `[{ id, camera, startedAt, durationMs, thumbnailUrl, downloadUrl }]` |
-| GET | `/cameras/clips/:id/download` | Bearer | mp4 bytes |
-| POST | `/cameras/clips/:id/share` | Bearer | `{ ttl? }` → `{ url, expiresAt }` |
+| GET | `/cameras/:name/snapshot` | Bearer | current JPEG frame |
+| GET | `/cameras/:name/live` | Bearer | MJPEG stream (`multipart/x-mixed-replace`, `Cache-Control: no-store`) |
+| GET | `/cameras/:name/events` | Bearer | events for one camera |
+| GET | `/cameras/events?limit=` | Bearer | recent events, newest first |
+| GET | `/cameras/events/:eventId/thumbnail` | Bearer | image bytes (`Cache-Control: private, no-store`) |
+| GET | `/cameras/events/:eventId/snapshot` | Bearer | event JPEG |
+| GET | `/cameras/reviews/:reviewId/thumbnail` | Bearer | review item image bytes |
+| GET | `/cameras/events/sse` | Bearer | SSE stream of camera events (`data: {json}`; `: heartbeat` every 30 s; first frame `{ "type": "connected" }`) |
+| GET | `/cameras/clips?camera=&limit=` | Bearer | `{ clips: [{ id, camera, label, score, start_time, end_time, thumbnail_url, clip_url }] }` (`limit` default 50, max 200; only events that have a clip) |
+| GET | `/cameras/clips/event/:eventId` | Bearer | mp4 bytes |
+| POST | `/cameras/clips/share` | Bearer (custody roles) | share a clip |
 | GET | `/cameras/groups` | Bearer | `[{ id, name, members }]` |
 | GET | `/cameras/pins` | Bearer | `[{ cameraName, sortOrder }]` |
 | POST | `/cameras/pins` | Bearer | `{ cameraName, sortOrder? }` → 201 |
 | DELETE | `/cameras/pins/:cameraName` | Bearer | `{ ok }` |
 
-Stream URL is short-lived (signed); fetch fresh on every player open.
+There is no HLS or WebRTC `stream-url` route and no per-camera `thumbnail`
+route: live view is the MJPEG `/cameras/:name/live` stream (send the Bearer
+header; the stream is per-connection and never cached) and stills come from
+`snapshot`. Camera routes are scoped per person: a client only sees the cameras
+it is granted. A save or download asked by a role that is not owner or admin
+answers `403 { code: "CAMERA_CUSTODY_REQUIRED" }`.
 
 ### LLM (`/api/llm/*`)
 
@@ -220,6 +257,8 @@ Stream URL is short-lived (signed); fetch fresh on every player open.
 | POST | `/llm/conversations` | Bearer | `{ title?, model? }` → `{ id }` |
 | POST | `/llm/chat` | Bearer | `{ model, messages: [{ role, content }], stream?: true, conversationId? }` → SSE stream OR JSON |
 | DELETE | `/llm/conversations/:id` | Bearer | `{ ok }` |
+
+Each message carries `kind` (`message`, or `agent_run_result` for a background run reporting back, WARP-3300) and `meta` (`null`, or `{runId, status, title, summary, artifacts}` on an `agent_run_result`). Its `content` is plain assistant text either way, so a client that ignores `kind` still shows it.
 
 Chat sends go to the single `POST /api/llm/chat` route (there is **no**
 per-conversation `/llm/conversations/:id/chat` endpoint). The conversation
@@ -235,6 +274,14 @@ context today — the schema has never declared the assistant `tool_calls` a too
 result answers, so anything you send is an orphan the ai-gateway rejects
 outright. Send `system` / `user` / `assistant` text only. When the server does
 discard something it says so, on the two headers below.
+
+**`dashboardPages` is web-only for now (WARP-3116).** The web dashboard sends
+the pages its viewer can open, so the assistant can link to them and move the
+viewer between them (`find_dashboard_page` / `open_dashboard_page`; see
+`docs/LLM_AGENT.md` § Dashboard navigation). A native client that omits it
+gets neither tool advertised and no `{ action: "navigate" }` result.
+Adopting it means sending the app's own screens as same-origin-shaped paths
+and routing on that result, which is a contract change of its own.
 
 Streaming uses SSE (`Content-Type: text/event-stream`). Native clients
 should use a streaming HTTP client (URLSession `bytes(for:)` on iOS,
@@ -410,9 +457,10 @@ preview tiles.
 | Method | Path | Auth | Returns / body |
 |---|---|---|---|
 | GET | `/matter/devices` | Bearer | `[{ id, name, type, room?, state, capabilities }]` |
-| POST | `/matter/devices/:id/command` | Bearer | `{ command: "on"\|"off"\|"toggle"\|..., args? }` → `{ ok }` |
-| GET | `/matter/events?since=…` | Bearer | `[{ id, deviceId, type, ts, payload }]` |
-| DELETE | `/matter/devices/:id` | Bearer | `{ ok }` |
+| GET | `/matter/devices/events` | Bearer | SSE stream: `data: {json}` frames of `{ type: "connected" }`, `{ type: "state_changed", … }` and `{ type: "connection_changed", … }`, plus `: heartbeat` every 30 s |
+| POST | `/matter/devices/:nodeId/command` | Bearer (owner/admin/family) | `{ command, data? }` → `200 { …result, nodeId, command, tier }`; a Tier-2 (lock-like) command answers `202 { status: "confirmation_required", nodeId, command, service, tier, reason, confirmationToken, expiresIn: 60 }` |
+| POST | `/matter/devices/:nodeId/confirm` | Bearer (owner/admin/family) | `{ confirmationToken, service }` → `200 { …result, nodeId, confirmed: true }` or `400 { error, code }`; the command comes from the token, never from this body |
+| DELETE | `/matter/devices/:nodeId` | Bearer | `{ ok }` |
 | POST | `/matter/commission` | Bearer | `{ qrPayload }` → `{ deviceId }` (dashboard only in v1) |
 
 Commissioning happens via dashboard QR scanner (WARP-182). Mobile v1
@@ -642,6 +690,106 @@ never grants**: what the person can reach is the same whatever is chosen.
   `{ "error": { "code": "…", "message": "…" } }`. Key on `code`. A `404` with any
   other code, or none, means the box is older than this route: keep the choice
   on the device.
+
+### Agent runs (`/api/agent-runs/*`, WARP-2915)
+
+Background runs the box works on by itself, and the Tier-2 calls they park on for a
+person's approval. Source of truth: `apps/orchestrator/src/routes/agent-runs.ts`
+(`serializeRun`, `listQuerySchema`, `decideSchema`) and `decideAgentRun` in
+`services/agent-run-worker.service.ts`. Shipped clients: Android (droplet-android #46,
+`AgentRunModels.kt`) and iOS (droplet-ios #63, WARP-2914).
+
+**Who.** Every route requires role `owner` or `admin`; any other role gets
+`403 {"error":"Forbidden: role not permitted"}` (or `"Forbidden: no role on session"`)
+from the role gate, before the handler runs. Key on the status: the `error` is a sentence,
+not a slug. A person sees only their own runs: another person's run id is a
+`404 {"error":"Run not found"}`, never a 403. A native client always acts as itself and
+never sends `onBehalfOf` (that field is for the `_service:mcp` principal acting for a chat
+user), so it never sees the two `403`s that only that principal can reach
+(`"Forbidden: role not permitted to use background runs"`, `"Forbidden: no principal to act for"`).
+
+| Method | Path | Body / query | Returns |
+|---|---|---|---|
+| GET | `/agent-runs` | `?limit` (1-100, default 25), `?cursor`, `?status`, `?workspaceId` | `{ items: Run[], nextCursor: string \| null }` |
+| GET | `/agent-runs/:id` | — | `Run` plus `trace` |
+| POST | `/agent-runs/:id/cancel` | — | `200 { id, status: "cancelled" }` |
+| POST | `/agent-runs/:id/confirm` | `{ decision: "approved" \| "denied" }` | `200 { id, tool, decision, status: "queued" }` |
+
+`POST /agent-runs` (start) and `/agent-runs/schedules` (recurring runs) also exist; the
+mobile apps do not use them, so they are not specified here.
+
+**List.** Ordered newest first by `(createdAt desc, id desc)`. It is **not** parked-first:
+a run awaiting confirmation sits where its `createdAt` puts it, so a client that wants a
+"needs your OK" section filters on `status == "awaiting_confirmation"` (or sends
+`?status=awaiting_confirmation`). `status` is one of `queued`, `running`,
+`awaiting_confirmation`, `succeeded`, `failed`, `cancelled`; treat an unknown value as
+"unknown", not as an error. `nextCursor` is opaque (today `<createdAt ISO>|<id>`): pass it
+back verbatim, never build or parse it. It is `null` when the page returned fewer than
+`limit` rows, so a full last page yields one extra empty request. A malformed cursor is
+`400 {"error":"Invalid cursor"}`; a bad query is `400 {"error":"Invalid query","details":…}`.
+List rows carry no `trace`.
+
+**Run.**
+
+| Field | Type |
+|---|---|
+| `id`, `goal`, `model`, `status` | string |
+| `sessionId`, `startedAt`, `endedAt`, `deadlineAt`, `result`, `stopReason`, `error` | string \| null |
+| `iteration`, `maxIter`, `attempts` | int |
+| `runAfter`, `createdAt`, `updatedAt` | ISO-8601 string |
+| `workspaceId`, `cloudGate`, `offLanProvider`, `offLanWithheldTools` | Workshop / off-LAN metadata; clients that do not render it decode past it |
+| `pending` | `null`, or the parked call (below) |
+| `trace` | detail read only: array of steps |
+
+`pending` is non-null **only** while `status == "awaiting_confirmation"`:
+`{ tool, args, summary, parkedAt, decision, decidedAt }`. `summary` is an **object**
+(`{ tool, fields: [{ key, kind, detail, value? }], truncatedFields }`), not a string: it is
+the PHI-free `ConfirmationSummary` shared with chat confirmations, and `detail` is a size or
+shape, never the value. `args` is the raw argument object. It is present because the caller
+is the run's owner, but native clients should not render it and do not declare it.
+
+Trace step: `{ tool_call_id, tool, args, iteration, dispatchedAt, text?, isError?,
+completedAt?, replayOf?, confirmation?: "parked" \| "confirmed" \| "denied",
+unknownOutcome?: true }`. `unknownOutcome` marks a call whose result was lost when the
+worker restarted. A run re-parked on the same tool that has such a step may already have
+happened, so a client must not tell the person that nothing has been done yet.
+
+**Cancel.** `409 {"error":"Run is already finished","status":<current>}` once the run is
+terminal. 404 / 403 as above.
+
+**Confirm.** Errors are `{ "error": <reason>, "id": <run id> }`, where `reason` is a slug:
+
+| Status | `error` | Meaning |
+|---|---|---|
+| 404 | `not_found` | no such run (the ownership check's 404 says `"Run not found"` instead; treat both the same) |
+| 403 | `not_owner` | the run belongs to someone else. In practice a client gets the `"Run not found"` 404 instead, because the ownership check already runs first; `not_owner` only fires on a race, so do not build UI for it |
+| 403 | `forbidden_tool_for_role` | the deciding person's role may not approve this tool |
+| 409 | `not_parked` | run is not waiting (already decided, cancelled, or finished): re-read it |
+| 409 | `attribution_failed` | the box could not resolve who is deciding; nothing changed and the run is still parked |
+| 400 | `Invalid decision` (+ `details`) | `decision` is not `approved` or `denied` |
+
+The role gate's 403 is a sentence, not a slug (see **Who**, above); key on the status.
+After a successful decision the run is `queued` again and the worker resumes it. There
+is no undo. Do not auto-retry a confirm: re-read the run first.
+
+**Deep link.** A run opens in the native apps as **`droplet://run/<id>`**: exactly one
+path segment, no query, and `<id>` matching `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`. Opening
+it only shows the run; it never approves, declines, or cancels. The box does not send this
+scheme. A push for a run carries the dashboard path
+`url: "/workshop?run=<id>"` (`agentRunLink` in `agent-run-worker.service.ts`; `run` is the
+only query key, and `tag: "agent-run:<id>"` collapses every notification about one run).
+On Android `/workshop?run=<id>`, `/admin/audit?run=<id>` (which forwards to `/workshop`)
+and `/agent-runs/<id>` all open the same run page, and the push handler rewrites them to
+`droplet://run/<id>` for its content intent. Anything else, or an id that fails the
+pattern, opens the inbox.
+
+**Client cross-check (Android #46 vs iOS #63).** No wire mismatch: both read
+`pending.summary` as the chat `ConfirmationSummary` object (the bug WARP-2914 fixed on iOS
+was modelling it as a string), both drop `args`, and both accept the same run-id rule.
+Differences that are not contract issues: iOS handles the 404 in both shapes (the
+`"Run not found"` sentence and the `not_found` slug) while Android keys 404 on status,
+and Android's `parkedCallMayHaveRun` (the `unknownOutcome` re-park case) is Android
+copy that the iOS card may not carry.
 
 ### Security incidents and alert routing (`/api/security/*` — WARP-2981)
 
@@ -1152,11 +1300,15 @@ data: {"iterations": 1, "stop_reason": "model_done"}
 ```
 
 `stop_reason` ∈ `model_done | iteration_limit | error | context_budget |
-repetition | no_progress` (an `error` frame also carries an `error`
-string). The last three mean the loop stopped calling tools early — the
-context filled up, the model repeated an identical call, or its searches
-kept finding nothing — and the final text is still a normal answer; treat
-any value you do not recognise like `model_done`. The agent loop also emits these event
+repetition | no_progress | needs_details` (an `error` frame also carries an
+`error` string). The last four mean the loop stopped calling tools early: the
+context filled up, the model repeated an identical call, its searches kept
+finding nothing, or half the turn's steps went on searches that found
+nothing usable (`needs_details`, WARP-3347). The final text is still a normal
+answer. `needs_details` says the guard fired, not what the answer is: it
+usually asks the person for the missing detail, but it can be a plain answer
+when the results were already enough. Treat any value you do not recognise
+like `model_done`. The agent loop also emits these event
 types on the same stream — render or ignore as needed:
 
 | `event:` | `data` payload | Meaning |
@@ -1166,21 +1318,24 @@ types on the same stream — render or ignore as needed:
 | `tool_result` | `{ id, ok, data?, status?, message? }` | That tool's result |
 | `reasoning_step` | `{ text }` | One deep-reasoning step (only when `captureReasoning:true`; emitted BEFORE `content_delta` on the turn) |
 | `model_loading` | `{ model, sizeGb }` | WARP-903 — the selected model needs a cold load (30-60 s to first token). Emitted first, at most once; render a loading state until the next frame, or ignore. `sizeGb` is decimal GB or null |
-| `tool_use_validation` | `{ status, claims, tools }` | WARP-2544 — the answer claims a completed action the tool trace does not support. At most once per turn, immediately BEFORE `done`, and only when the check does not pass. `status` is `"unsupported"` (the turn dispatched nothing) or `"contradicted"` (every call to some tool failed). See the note below |
+| `tool_use_validation` | `{ status, claims, tools }` | WARP-2544 / WARP-3348 — the delivered answer still claims a completed action the tool trace does not support (its correction pass failed, so a status line was appended). At most once per turn, immediately BEFORE `done`. `status` is `"unsupported"` (none of the claimed actions was attempted) or `"contradicted"` (a claimed action was attempted and did not run: waiting for approval, declined, refused or failed); `tools` lists those writes. See the note below |
 | `done` | `{ iterations, stop_reason, error? }` | Terminal frame |
 
-**`tool_use_validation` is ADVISORY, not a retraction.** By the time it is
-emitted the answer has already reached the client as `content_delta` frames, so
-it cannot un-send anything. Render it *beside* the answer — "this may not have
-actually happened" — never as a correction of what was already shown, and never
-by mutating or hiding the delivered text. Ignoring the frame is valid and
-matches pre-WARP-2544 behaviour; it is additive and breaks no existing client.
+**`tool_use_validation` is ADVISORY, not a retraction.** Since WARP-3348 the
+answer of a tool turn is checked BEFORE it is sent: a claimed action that did
+not happen gets one correction pass, and if that fails the answer goes out with
+a plain status line appended ("Nothing was sent."). This frame is emitted only
+in that last case, when the delivered text still contains the false sentence
+above the status line. Render it *beside* the answer — "this may not have
+actually happened" — never by mutating or hiding the delivered text. Ignoring
+the frame is valid and matches pre-WARP-2544 behaviour; it is additive and
+breaks no existing client.
 
 It exists because the tools on this product are physical (cameras, locks,
 network rules, power), so a model sentence claiming an action that never
 succeeded is a safety and trust problem rather than a cosmetic one. `claims`
 carries the model's own sentences that triggered it (capped at 160 chars each)
-and `tools` names the tools whose calls all failed.
+and `tools` names the claimed writes that were attempted and did not run.
 
 Native clients should detect end-of-stream on `event: done` /
 `stop_reason` (the v1 clients keyed on `finishReason`, which never arrives,
@@ -1198,16 +1353,47 @@ fields.
 If a route gets a breaking change, gate it behind a versioned path
 (`/api/v2/...`) and keep the v1 path alive for ≥1 mobile release.
 
+## Real-time events (`/api/ws/events`)
+
+A WebSocket bridge that forwards the box's MQTT events for the signed-in person.
+Source: `apps/orchestrator/src/services/ws-bridge.service.ts`.
+
+- **URL:** `wss://<host>/api/ws/events` (matched by prefix; any other upgrade
+  path is answered `404`).
+- **Auth:** at upgrade time, either the session cookie (browsers) or a Bearer
+  access token passed as the WebSocket subprotocol `bearer.<accessToken>`
+  (native clients use this). The token is validated like an HTTP request: a
+  revoked user or an ended session is refused. Failure is a plain
+  `401 Unauthorized` on the upgrade and no WebSocket is established. The
+  server does not echo a selected subprotocol, so a client must not require one
+  back. The token is checked only at upgrade: refresh it before it expires,
+  and reconnect with the new one.
+- **Topics:** there is no subscribe message. The server subscribes each
+  connection to the person's own topics only: `droplet/files/<username>/#`
+  (and `droplet/files/<userId>/#`), `droplet/devices/<username>/#`,
+  `droplet/index/<username>/#`, `droplet/notifications/<username>` and
+  `droplet/chat/<username>/#`. Other people's topics are never forwarded.
+- **Frames:** server to client JSON text frames
+  `{ "topic": "<mqtt topic>", "payload": <json> }`. Client-sent frames are
+  ignored. The server sends a WebSocket ping every 25 s (the client library
+  answers with a pong automatically).
+- **Reconnect:** on close, reconnect with exponential backoff and jitter, and
+  stop once sign-in has ended. Events are not replayed, so after a reconnect
+  re-fetch state (`GET /notifications`, files, devices).
+
 ## Open items
 
 - [ ] OpenAPI generation: should we write `openapi.yaml` and codegen
-      Swift/Kotlin clients? Reduces drift but adds a build step.
-      Defer — markdown contract is the v1 mechanism.
-- [ ] WebSocket / Server-Sent Events for real-time notifications when
-      app is foregrounded. Today the only real-time channel is APNs/FCM
-      push (background) + polling.
+      Swift/Kotlin/C# clients? Reduces drift but adds a build step. The
+      markdown contract is still the mechanism; a generated client for the
+      desktop subset is a possible follow-up.
+- [x] Real-time channel while the app is foregrounded: shipped as the
+      `/api/ws/events` WebSocket bridge (see "Real-time events") plus the
+      camera and Matter SSE streams. APNs/FCM push remains the background
+      channel on mobile.
 - [ ] WebRTC vs HLS for camera streams. Frigate supports both; HLS is
-      simpler client-side, WebRTC has lower latency. v1 ships HLS.
+      simpler client-side, WebRTC has lower latency. v1 ships MJPEG live
+      (`/cameras/:name/live`); HLS/WebRTC are not served to clients.
 ## Project Management (native PM)
 
 > Backed by the native PM module owned by the orchestrator

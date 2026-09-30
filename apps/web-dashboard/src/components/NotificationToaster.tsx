@@ -37,6 +37,8 @@ import { useToast, type ToastAction } from "./Toast";
 import { useAuth } from "@/lib/auth";
 import { ackNotification } from "@/lib/api";
 import { isSecurityWallPath } from "@/lib/routing";
+import { publishAgentRunFrame } from "@/lib/agent-run-events";
+import { refreshNotificationInbox } from "@/lib/hooks/useNotificationInbox";
 
 interface IncomingNotification {
   kind?: "reminder" | "event" | "system" | "ai";
@@ -70,6 +72,17 @@ export function withNotificationParam(url: string, id: string | null): string {
  *  public/sw.js keeps an identical copy (WARP-3208); sw.notification-ack.test.ts pins both. */
 export function isInAppPath(url: unknown): url is string {
   return typeof url === "string" && url.startsWith("/") && !url.startsWith("//") && !url.includes("\\") && !/[\u0000-\u001f\u007f]/.test(url);
+}
+
+/**
+ * WARP-3303 — a run started from chat reports back to that chat, not to the
+ * Workshop: its notifications carry `data.sessionId`, and "Open" goes there.
+ */
+export function chatLinkFor(payload: { data?: Record<string, unknown> }): string | null {
+  const sessionId = payload.data?.sessionId;
+  return typeof sessionId === "string" && NOTIFICATION_ID_RE.test(sessionId)
+    ? `/chat?c=${encodeURIComponent(sessionId)}`
+    : null;
 }
 
 /** A NotificationLog id (cuid): the shape the ack route accepts. */
@@ -166,7 +179,12 @@ export function NotificationToaster() {
         } catch {
           return;
         }
+        // WARP-3303 — agent-run progress rides this same socket to the run
+        // cards and the sidebar badge (lib/agent-run-events.ts). No toast.
+        publishAgentRunFrame(data.topic, data.payload);
         if (!data.topic || !data.topic.startsWith("droplet/notifications/")) return;
+        // WARP-3307 — the inbox bell and list follow this same topic.
+        refreshNotificationInbox();
         const payload = data.payload ?? {};
         const title = payload.title ?? kindFallbackTitle(payload.kind);
         // The old shape did `${title} — ${body}` even when title was the
@@ -178,7 +196,7 @@ export function NotificationToaster() {
         const message = payload.body
           ? `${title} — ${payload.body}`
           : title;
-        const link = payload.url;
+        const link = chatLinkFor(payload) ?? payload.url;
         const id = typeof payload.id === "string" && payload.id.length > 0 ? payload.id : null;
         const action: ToastAction | undefined = isInAppPath(link)
           ? {

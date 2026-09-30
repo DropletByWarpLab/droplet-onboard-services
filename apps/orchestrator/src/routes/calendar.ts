@@ -46,6 +46,9 @@ import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
 import { fetchNominatim, type PlaceSuggestion } from "../services/places.service.js";
+// WARP-3264 — the Nominatim leg is behind the owner-only `place_lookup`
+// off-LAN channel (default off).
+import { placeLookupGate } from "../services/off-lan-gate.service.js";
 // WARP-1906 — premade workspace locations (building + conference room) rank
 // ahead of the Nominatim results in the location autocomplete.
 import {
@@ -464,6 +467,44 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
   // Result shape is intentionally narrow: just enough for the combobox to
   // render a list and persist a string. Lat/lon are included so a follow-up
   // can store coordinates without changing the wire.
+  // WARP-3264 — the caller's own previously used event places matching `q`,
+  // most recently used first, minus anything already offered as a room.
+  // Scoped to the caller's calendar so one person's meeting places never
+  // surface in a colleague's field. Dedup + LIMIT run in Postgres (Prisma's
+  // `distinct` dedupes in memory, loading every matching row per keystroke).
+  // Values that are meeting links (pre-WARP-1874 rows) are not places.
+  // Never throws: a failed read is just no suggestions.
+  async function usedPlaces(
+    userId: string,
+    q: string,
+    limit: number,
+    rooms: PlaceSuggestion[],
+  ): Promise<PlaceSuggestion[]> {
+    try {
+      const pattern = `%${q.replace(/[\\%_]/g, "\\$&")}%`;
+      const rows = await prisma.$queryRaw<Array<{ location: string }>>`
+        SELECT btrim("location") AS location
+          FROM "CalendarEvent"
+         WHERE "userId" = ${userId}
+           AND "location" ILIKE ${pattern}
+           AND btrim("location") <> ''
+           AND btrim("location") !~* '^https?://'
+         GROUP BY btrim("location")
+         ORDER BY MAX("startsAt") DESC
+         LIMIT ${limit + rooms.length}`;
+      const roomNames = new Set(rooms.map((r) => r.displayName.toLowerCase()));
+      return rows
+        .map((r) => r.location)
+        .filter((l) => !roomNames.has(l.toLowerCase()))
+        .slice(0, limit)
+        .map((l) => ({ name: l, context: "", displayName: l, lat: "", lon: "", type: null }));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[calendar/places] used-places lookup failed:", err);
+      return [];
+    }
+  }
+
   router.get("/calendar/places", async (req, res) => {
     // Declared OUTSIDE the try so the catch can still serve them: on an
     // offline/air-gapped box (the flagship posture) the premade rooms are
@@ -499,6 +540,19 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
       // Nominatim failure (DNS, ECONNREFUSED, the 5s abort — the fetch
       // REJECTS, unlike a non-OK response which resolves to []) degrades to
       // rooms-only instead of discarding the rows already read above.
+      // WARP-3264 — with the `place_lookup` channel off (the default), the
+      // typed text never leaves the box: suggest only the caller's own
+      // previously used event places. Scoped to the caller's calendar so
+      // one person's meeting places never surface in a colleague's field.
+      if (!(await placeLookupGate(prisma))) {
+        // Rooms and used places are capped separately (each ≤ limit), the
+        // same shape as rooms + externals below, so a workspace with many
+        // matching rooms never starves the caller's own places.
+        const used = await usedPlaces(getUser(req), q, limit, rooms);
+        res.json({ places: [...rooms, ...used] });
+        return;
+      }
+
       let external: PlaceSuggestion[] = [];
       try {
         const cacheKey = `places:v2:${limit}:${q.toLowerCase()}`;
@@ -516,6 +570,8 @@ export function createCalendarRouter(prisma: PrismaClient): Router {
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn("[calendar/places] external lookup failed:", err);
+        // Degraded ON is a superset of OFF: still offer the caller's places.
+        external = await usedPlaces(getUser(req), q, limit, rooms);
       }
 
       res.json({ places: [...rooms, ...external] });

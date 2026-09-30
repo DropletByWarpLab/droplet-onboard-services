@@ -44,6 +44,10 @@ import {
   resolveEffectiveUsage,
   type EffectiveUsageSource,
 } from "../services/effective-usage.service.js";
+import {
+  listMemberCompanyLinks,
+  queryNextcloudCompanyShares,
+} from "../services/company-link-audit.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("admin-files-usage-route");
@@ -287,6 +291,33 @@ export function createAdminFilesUsageRouter(prisma: PrismaClient): Router {
       } catch (err) {
         logger.error({ err }, "GET /api/admin/files/usage failed");
         res.status(500).json({ error: "usage_fetch_failed" });
+      }
+    },
+  );
+
+  /**
+   * WARP-3168 — links on company data (Workspace, departments, teams) that
+   * leave the company and were made by someone who is not an owner/admin:
+   * before WARP-3053, or in Nextcloud directly. List only; revoking stays a
+   * person's decision. 503 when Nextcloud's database can't be read, never an
+   * empty list that would read as "none".
+   */
+  router.get(
+    "/files/company-public-links",
+    requireRole("owner", "admin"),
+    async (_req: Request, res: Response) => {
+      try {
+        const adminToken = adminBasicToken();
+        const links = await listMemberCompanyLinks({
+          queryShares: queryNextcloudCompanyShares,
+          listFolders: () => gfListFolders(adminToken),
+          prisma,
+          serviceUser: process.env.NEXTCLOUD_ADMIN_USER || "admin",
+        });
+        res.json({ links });
+      } catch (err) {
+        logger.error({ err }, "GET /api/admin/files/company-public-links failed");
+        res.status(503).json({ error: "company_links_unavailable" });
       }
     },
   );

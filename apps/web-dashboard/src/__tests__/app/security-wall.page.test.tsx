@@ -12,7 +12,7 @@
  *     day when it is not today), the sign-out warning in the sign-in's last
  *     half hour — and a remount over a warm cache keeps the values' own time;
  *   · the cameras are this account's own: a tile for each camera the list
- *     gives (a Staff account with 2 of 4 cameras shows those 2), a picture
+ *     gives (a Member account with 2 of 4 cameras shows those 2), a picture
  *     asked for those alone (D6, Stefan: "Member wall, own cameras");
  *   · the way out is always visible; Full screen only where the browser
  *     offers it; the banners and the strip come before the tiles in the page
@@ -230,7 +230,7 @@ describe("/security/wall — what the strip says (T-D7)", () => {
 describe("/security/wall — this account's own cameras (D6: \"Member wall, own cameras\")", () => {
   const asked = () => (h.authFetch.mock.calls as Array<[string]>).map(([url]) => url.split("?")[0]!);
 
-  it("a Staff account with 2 of the box's 4 cameras: exactly those 2 tiles, by their household names — and pictures for those 2 alone", async () => {
+  it("a Member account with 2 of the box's 4 cameras: exactly those 2 tiles, by their household names — and pictures for those 2 alone", async () => {
     // The box has four cameras; the list route has narrowed them to this account's grants.
     box.cameras = { cameras: [cam("back_door", "Back door"), cam("till", "Till")] };
     render(<SecurityWallPage />, { wrapper: Wrap });

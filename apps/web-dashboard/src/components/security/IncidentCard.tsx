@@ -23,6 +23,7 @@ import { incidentTitle, severityBadge, stateLine, whatLine } from "./incident-co
 /** The glyph for the incident's strongest visible reason, else its scope. */
 export function incidentIcon(i: Pick<IncidentSummary, "scope" | "reasonCodes">): LucideIcon {
   if (i.reasonCodes.includes("after_hours_presence")) return User;
+  if (i.reasonCodes.includes("camera_offline_during_activity")) return VideoOff;
   if (i.reasonCodes.includes("camera_offline") || i.scope === "site_camera_system") return VideoOff;
   if (i.reasonCodes.includes("threat_signal") || i.scope === "site_threat") return ShieldAlert;
   return Shield;

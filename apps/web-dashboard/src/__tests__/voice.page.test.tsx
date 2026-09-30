@@ -225,7 +225,7 @@ describe("VoiceSurface hero states (WARP-1055)", () => {
     // Profiles + activity empty states, §9 verbatim.
     expect(
       screen.getByText(
-        "No voices enrolled. Droplet answers everyone as a guest until it knows who's who.",
+        "No voices enrolled. Droplet answers everyone as an external guest until it knows who's who.",
       ),
     ).toBeInTheDocument();
     expect(
@@ -311,7 +311,7 @@ describe("VoiceSurface sections (WARP-1055)", () => {
     expect(screen.getByText("Who Droplet recognizes")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Unrecognized voices are treated as guests — read-only answers, no personal data.",
+        "Unrecognized voices are treated as external guests — read-only answers, no personal data.",
       ),
     ).toBeInTheDocument();
     expect(

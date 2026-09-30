@@ -303,6 +303,19 @@ The one case that needs a second declaration: if your handler relays a
 `confirmationOwner: "route"` so the user is asked once, by that route.
 §13 has the rule and the gate that enforces it.
 
+Because the interceptor challenges before your handler runs, a handler
+alone can refuse a hopeless call (an unknown recipient, say) only after
+the person approved it. Declare `precheck` (WARP-3349) to refuse it
+first. `services/mcp-server/src/server.ts` runs it only on a call the
+interceptor is about to challenge: no token, `requiresConfirmation`, an
+interceptor-owned confirmation (§13), and no deny rule matching (§8 —
+a denied call runs nothing and answers `TOOL_DENIED`). An error result
+replaces the challenge; `null`, any other result, or a throw (logged by
+tool name only) leaves the interceptor to ask. It must only read, and
+the handler still validates after approval. `team_chat_send_message`
+and `team_chat_send_meeting_invite` run their own unconfirmed phase as
+the precheck (`unconfirmedPhaseAsPrecheck` in `handlers/team-chat/_roster.ts`).
+
 See `packages/tools-core/src/confirmation.ts` and
 `packages/tools-core/src/interceptor.ts`.
 

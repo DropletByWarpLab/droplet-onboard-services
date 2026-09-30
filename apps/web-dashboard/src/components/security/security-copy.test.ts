@@ -64,9 +64,14 @@ import * as HoursEditor from "./HoursEditor";
 import * as LearningList from "./LearningList";
 import * as AckHistory from "./AckHistory";
 import * as AlertRoutingPanel from "./AlertRoutingPanel";
+import * as AiSettingsPanel from "./AiSettingsPanel";
+import * as LinkSuggestions from "./LinkSuggestions";
+import * as LinkWhyPopover from "./LinkWhyPopover";
+import * as linkEvidenceCopy from "./link-evidence-copy";
 import * as IncidentCard from "./IncidentCard";
 import * as IncidentList from "./IncidentList";
 import * as IncidentView from "./IncidentView";
+import * as NarrativeSection from "./NarrativeSection";
 import * as NoticeList from "./NoticeList";
 import * as ReasonList from "./ReasonList";
 import * as ResolveDialog from "./ResolveDialog";
@@ -113,11 +118,18 @@ const MODULES: Record<string, Record<string, unknown>> = {
   "src/components/security/VerdictBar.tsx": VerdictBar,
   "src/components/security/PatternFlagList.tsx": PatternFlagList,
   "src/components/security/NoticeList.tsx": NoticeList,
+  // WARP-2979 (P4 PR-2) — "Summary by Droplet".
+  "src/components/security/NarrativeSection.tsx": NarrativeSection,
   "src/components/security/AckHistory.tsx": AckHistory,
   "src/components/security/ResolveDialog.tsx": ResolveDialog,
   // WARP-3185 B — no copy of its own; listed because every module here is.
   "src/components/security/show-older.ts": ShowOlder,
   "src/components/security/AlertRoutingPanel.tsx": AlertRoutingPanel,
+  "src/components/security/AiSettingsPanel.tsx": AiSettingsPanel,
+  // WARP-2979 (P4) — Droplet's links.
+  "src/components/security/LinkSuggestions.tsx": LinkSuggestions,
+  "src/components/security/LinkWhyPopover.tsx": LinkWhyPopover,
+  "src/components/security/link-evidence-copy.ts": linkEvidenceCopy,
   "src/components/security/ModeCard.tsx": ModeCard,
   "src/components/security/SecurityFeed.tsx": SecurityFeed,
   // WARP-2981 (P6) — the Security wall.

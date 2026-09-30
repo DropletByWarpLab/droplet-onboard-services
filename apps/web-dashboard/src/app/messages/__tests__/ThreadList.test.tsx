@@ -83,4 +83,34 @@ describe("ThreadList — UX review pins (WARP-1683)", () => {
     const srText = screen.getByText("3 unread");
     expect(srText.className).toContain("sr-only");
   });
+
+  it("WARP-3263: without onCompose (external guest) no New message affordance renders", () => {
+    render(
+      <ThreadList
+        threads={[]}
+        isLoading={false}
+        meId="u-carol"
+        selectedThreadId={null}
+        onSelect={noop}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "New message" })).toBeNull();
+    expect(
+      screen.getByText("When someone at the company messages you, the conversation appears here."),
+    ).toBeTruthy();
+  });
+
+  it("with onCompose (staff) both New message affordances render", () => {
+    render(
+      <ThreadList
+        threads={[]}
+        isLoading={false}
+        meId="u-alice"
+        selectedThreadId={null}
+        onSelect={noop}
+        onCompose={noop}
+      />,
+    );
+    expect(screen.getAllByRole("button", { name: "New message" })).toHaveLength(2);
+  });
 });

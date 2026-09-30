@@ -38,6 +38,20 @@ export interface ToolApprovalPromptProps {
   onRerequest?: () => void;
 }
 
+/**
+ * WARP-3303 — the per-tool allowlist the header asks for. Starting a
+ * background run is approved on WHAT the run will do, so its title and
+ * deliverable are shown as written; both are the task the person just asked
+ * for in this chat, not content read from their files. Every other
+ * argument, and every other tool, stays shape-only.
+ */
+const SHOWN_VALUES: Record<string, readonly string[]> = {
+  start_agent_run: ["title", "deliverable"],
+};
+
+/** Background-run bounds (AGENT_RUN_MAX_ITER, AGENT_RUN_MAX_WALL_MS). */
+const RUN_BOUNDS = "Runs in the background for up to 30 steps and 40 minutes. Changes it wants to make still ask you first.";
+
 /** A human sentence for one summarised argument. Never a value. */
 function fieldLine(field: {
   key: string;
@@ -74,7 +88,11 @@ export function ToolApprovalPrompt({
   const settled = isExpired || isDenied || isApproved;
 
   const toolName = confirmation.tool ?? call.name;
-  const fields = confirmation.summary?.fields ?? [];
+  const shownKeys = SHOWN_VALUES[toolName] ?? [];
+  const shown = shownKeys
+    .map((k) => [k, call.args?.[k]] as const)
+    .filter((e): e is readonly [string, string] => typeof e[1] === "string" && e[1].trim() !== "");
+  const fields = (confirmation.summary?.fields ?? []).filter((f) => !shownKeys.includes(f.key));
   const truncated = confirmation.summary?.truncatedFields ?? 0;
 
   const decide = (decision: "approve" | "deny") => {
@@ -112,6 +130,22 @@ export function ToolApprovalPrompt({
                 : `${toolName} needs your approval`}
         </span>
       </p>
+
+      {shown.length > 0 && (
+        <dl className="mt-1.5 space-y-0.5" data-testid="approval-shown-values">
+          {shown.map(([k, v]) => (
+            <div key={k}>
+              <dt className="inline font-medium">{k === "title" ? "Task" : k === "deliverable" ? "Delivers" : k}: </dt>
+              <dd className="inline">{v}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      {toolName === "start_agent_run" && (
+        <p className="mt-1 opacity-90" data-testid="approval-run-bounds">
+          {RUN_BOUNDS}
+        </p>
+      )}
 
       {fields.length > 0 && (
         <ul className="tool-approval-detail mt-1.5 space-y-0.5 opacity-90" data-testid="approval-arg-summary">

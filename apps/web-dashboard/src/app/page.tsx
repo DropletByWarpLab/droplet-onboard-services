@@ -317,10 +317,21 @@ export default function DashboardPage() {
     }
   }, [dir]);
 
-  const items = layouts[dir];
+  // WARP-3157 — every camera route refuses role `guest`; never render or
+  // offer the tile to one. Filtered at render time (not out of the WIDGETS
+  // registry) so an owner/admin/member's saved layout is unaffected.
+  const isGuest = user?.role === "guest";
+  const items = isGuest ? layouts[dir].filter((it) => it.id !== "cameras") : layouts[dir];
   const cfg = DIRECTIONS[dir];
 
-  const persist = (next: LayoutItem[]) => {
+  const persist = (edited: LayoutItem[]) => {
+    // WARP-3157 — the layout key is per browser, not per user: a guest's edit
+    // (which never contains the hidden cameras tile) must not strip it from
+    // the next owner/admin/member's board. Carry it through at the end.
+    const next =
+      isGuest && !edited.some((it) => it.id === "cameras")
+        ? [...edited, ...layouts[dir].filter((it) => it.id === "cameras")]
+        : edited;
     setLayouts((L) => {
       const n = { ...L, [dir]: next };
       try {
@@ -341,7 +352,9 @@ export default function DashboardPage() {
   };
   const onReset = () => persist(defaultsFor(dir));
 
-  const hidden = CATALOG.filter((c) => !items.some((it) => it.id === c.id));
+  const hidden = CATALOG.filter(
+    (c) => !items.some((it) => it.id === c.id) && !(isGuest && c.id === "cameras"),
+  );
 
   const firstName = useMemo(() => {
     const raw = user?.displayName || user?.username || "";

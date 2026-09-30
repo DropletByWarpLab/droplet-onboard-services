@@ -5,6 +5,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   TOOLS,
+  confirmationOwnerOf,
   defaultToolCallInterceptor,
   interceptOutcomeToToolResult,
   type PrivateEnhancement,
@@ -13,7 +14,7 @@ import {
   type ToolResult,
 } from "@droplet/tools-core";
 import { buildContext, type ContextDeps, type Claims } from "./context.js";
-import { canCallTool, filterToolsForRole } from "./rbac.js";
+import { canCallTool, isWithheldOffBox, filterToolsForRole } from "./rbac.js";
 import { describeThrown } from "./thrown-cause.js";
 
 const SERVER_INFO = { name: "droplet-mcp-server", version: "0.1.0" };
@@ -109,6 +110,27 @@ export function createServer(
       };
     }
 
+    // WARP-2979 (§6.13) — a withheld domain is refused off the box before any
+    // role check or handler: a client that calls it by name without listing
+    // it first gets nothing from it.
+    if (!trustedPrincipal && isWithheldOffBox(tool)) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              status: "error",
+              error: {
+                code: "withheld_off_box",
+                message: "This tool is only available to Droplet's own chat on this box.",
+              },
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+
     // Re-check on dispatch — tools/list cache could be stale, or a client
     // could try to call a write tool by name without listing it first.
     if (!canCallTool(tool, claims?.role, { trustedPrincipal })) {
@@ -187,6 +209,18 @@ export function createServer(
       meta.workspaceId.length > 0
         ? meta.workspaceId
         : undefined;
+    // WARP-3299 — the chat turn (conversation, assistant message, tool
+    // call) this dispatch belongs to. Same posture: an HTTP client cannot
+    // attach a run it starts to someone else's conversation.
+    const metaString = (key: string): string | undefined =>
+      trustedPrincipal && meta && typeof meta[key] === "string" && (meta[key] as string).length > 0
+        ? (meta[key] as string)
+        : undefined;
+    const metaTurn = {
+      conversationId: metaString("conversationId"),
+      messageId: metaString("messageId"),
+      toolCallId: metaString("toolCallId"),
+    };
     const metaEnhancement =
       trustedPrincipal &&
       meta &&
@@ -194,6 +228,14 @@ export function createServer(
       meta._enhancement !== null &&
       !Array.isArray(meta._enhancement)
         ? (meta._enhancement as PrivateEnhancement)
+        : undefined;
+    // WARP-3116 — the pages the calling dashboard can open. Same trusted-
+    // stdio posture: over HTTP a client could hand the navigation tools a
+    // list of its own choosing. Passed through as-is; the handlers parse it
+    // with the shared schema before it becomes a navigation target.
+    const metaDashboardPages =
+      trustedPrincipal && meta && Array.isArray(meta.dashboardPages)
+        ? (meta.dashboardPages as unknown[])
         : undefined;
     const ctx = buildContext(
       deps,
@@ -205,6 +247,8 @@ export function createServer(
       metaUserRole,
       metaAgentRunId,
       metaWorkspaceId,
+      metaTurn,
+      metaDashboardPages,
     );
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
 
@@ -220,7 +264,9 @@ export function createServer(
     //
     // It runs BEFORE the handler, so an unconfirmed or denied call never
     // reaches handler code and performs no write — asserted with a
-    // handler spy, not just on the response.
+    // handler spy, not just on the response. The one exception is a tool's
+    // read-only `precheck` (WARP-3349, below): an unconfirmed call the
+    // interceptor is about to challenge may run it; a denied call never does.
     //
     // The token arrives on `_meta`, the transport's channel for protocol
     // metadata that must not become a tool argument (same channel as
@@ -231,6 +277,33 @@ export function createServer(
       meta && typeof meta.confirmationToken === "string" && meta.confirmationToken.length > 0
         ? meta.confirmationToken
         : undefined;
+    // WARP-3349 — a call that can never succeed is refused here, before the
+    // person is asked to approve it (team_chat_send_message: a recipient who
+    // is not a member). Only a call the interceptor is about to CHALLENGE
+    // runs it: no token, a confirming tool whose confirmation the
+    // interceptor owns, and not denied — the deny tier's answer wins, so a
+    // denied call makes no reads and the model sees TOOL_DENIED (§8). Only
+    // an error result replaces the challenge; anything else, or a throw
+    // (logged, tool name only), leaves the gate below to ask, and the
+    // handler validates again after approval.
+    if (
+      tool.precheck &&
+      !confirmationToken &&
+      tool.requiresConfirmation &&
+      confirmationOwnerOf(tool) === "interceptor" &&
+      !interceptor.denyTier.evaluate(tool, args)
+    ) {
+      const precheck = tool.precheck;
+      const early = await Promise.resolve()
+        .then(() => precheck(args, ctx))
+        .catch(() => {
+          console.warn("tool.precheck_threw", { tool: tool.name });
+          return null;
+        });
+      if (early && early.ok === false && early.status === "error") {
+        return toolResultToContent(early);
+      }
+    }
     const outcome = interceptor.intercept(tool, args, { confirmationToken });
     const refusal = interceptOutcomeToToolResult(tool, outcome);
     if (refusal) {

@@ -491,8 +491,12 @@ describe("(c) reconciler drift-overwrite — NC group membership", () => {
     // membership read on this tick is the admin-group one.
     // WARP-2993: plus NC's built-in `admin` group (the instance-admin sweep),
     // likewise box-wide and unrelated to household rights.
+    // WARP-3179: plus the Workspace group and `guest`, read by the role-based
+    // Workspace membership sweep (guests out, everyone else in). That sweep
+    // keys on the person's box ROLE; D-5's per-membership RIGHTS convergence
+    // for the Workspace stays deferred, and no department group is read.
     for (const call of ncListGroupMembersStrictMock.mock.calls) {
-      expect(["droplet-admins", "admin"]).toContain(call[1]);
+      expect(["droplet-admins", "admin", "household", "guest"]).toContain(call[1]);
     }
   });
 });

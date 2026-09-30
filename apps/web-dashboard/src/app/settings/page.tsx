@@ -23,8 +23,10 @@ import { EmailAccountCard } from "@/components/settings/EmailAccountCard";
 import { Microsoft365Card } from "@/components/settings/Microsoft365Card";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
 import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
+import { PersonalDriveCard } from "@/components/settings/PersonalDriveCard";
 import { BusinessProfileCard } from "@/components/settings/BusinessProfileCard";
 import { LocationsCard } from "@/components/settings/LocationsCard";
+import { PlaceLookupSwitch } from "@/components/settings/PlaceLookupSwitch";
 import { LogsSection } from "@/components/settings/LogsSection";
 import { CertificateRows } from "@/components/settings/CertificateRows";
 import { BackupRows } from "@/components/settings/BackupRows";
@@ -286,6 +288,8 @@ export default function SettingsPage() {
               the same `user.role` expression PersonalityCard uses, and
               renders nothing for lesser roles. */}
           <LocationsCard />
+          {/* WARP-3264 — owner-only "Look up places online" (off by default). */}
+          <PlaceLookupSwitch />
 
           {/* WARP-2967 — the derived Workspace rows (Sync devices,
               Integrations, Credentials, Company files) for owner/admin; the
@@ -614,6 +618,11 @@ export default function SettingsPage() {
             </Link>
           </div>
         </div>
+
+        {/* Personal drives — the owner switch for per-user Finder / File
+            Explorer drives (off by default). Self-gates to the owner role and
+            renders nothing for anyone else. */}
+        <PersonalDriveCard />
 
         {/* Diagnostics (WARP-823) — owner/admin downloadable, redacted log bundle. */}
         <LogsSection />

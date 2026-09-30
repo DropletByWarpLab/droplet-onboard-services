@@ -471,7 +471,7 @@ describe("Disconnect on the MCP tile reaches the box's purge (WARP-2659)", () =>
 
     fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
     await waitFor(() => expect(disconnectProviderMock).toHaveBeenCalledTimes(1));
-    expect(disconnectProviderMock).toHaveBeenCalledWith(MCP_ID);
+    expect(disconnectProviderMock).toHaveBeenCalledWith(MCP_ID, "keep");
   });
 
   /**
