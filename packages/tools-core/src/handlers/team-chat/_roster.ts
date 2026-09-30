@@ -15,7 +15,7 @@
  * HANDLER source file, so every dispatch lives in the handler itself and
  * this module only validates inputs and maps responses.
  */
-import type { ToolContext, ToolResult } from "../../types.js";
+import type { Tool, ToolContext, ToolHandler, ToolResult } from "../../types.js";
 
 export function err(code: string, message: string): ToolResult {
   return { ok: false, status: "error", error: { code, message } };
@@ -107,34 +107,116 @@ export async function readRosterResponse(
 
 const SELF_ONLY_MESSAGE = "recipients must include someone other than yourself";
 
-export type RecipientPreview =
-  | { ok: true; usernames: string[]; names: string[] }
+/**
+ * Recipients → the roster rows the thread is with (sender dropped, unknown
+ * names refused), shared by both send tools in both phases. WARP-3349: the
+ * roster has no email column (User.email is encrypted at rest, WARP-233),
+ * so a recipient that is not a username but is shaped like an address is
+ * looked up by the orchestrator (`findUserByEmail`, the blind index) and
+ * replaced by that person's username, a member's or an external guest's.
+ * `lookup` is the handler's own POST /api/team-chat/contacts/lookup (the
+ * route path has to stay in the handler file for the WARP-1455 drift gate);
+ * the addresses go in its body, never a URL, so they stay out of the
+ * request log. A guest caller is never looked up for; resolveRecipients
+ * answers with the rule.
+ */
+export async function resolveTargets(
+  roster: { contacts: RosterContact[]; meId: string; canStartConversation: boolean },
+  recipients: string[],
+  lookup: (emails: string[]) => Promise<TeamChatHttpResponse>,
+): Promise<RecipientResolution> {
+  const addresses = addressesToLookUp(roster, recipients);
+  if (addresses.length > 0 && roster.canStartConversation) {
+    const looked = await readLookupResponse(await lookup(addresses), recipients, addresses);
+    if (!looked.ok) return looked;
+    recipients = looked.usernames;
+  }
+  return resolveRecipients(roster, recipients);
+}
+
+/**
+ * WARP-3349 / WARP-3403 — a send tool's `precheck`: its own unconfirmed
+ * phase, run before the interceptor asks, so a refusal reaches the model
+ * instead of an approval card for a send that cannot happen. `confirmed`
+ * is forced false, so this can never reach the confirmed phase's writes,
+ * whatever the model passed.
+ */
+export function unconfirmedPhaseAsPrecheck(handler: ToolHandler): NonNullable<Tool["precheck"]> {
+  return async (args, ctx) => {
+    const r = await handler({ ...args, confirmed: false }, ctx);
+    return !r.ok && r.status === "error" ? { ok: false, status: "error", error: r.error } : null;
+  };
+}
+
+/** `local@domain.tld`, within the lookup route's 320-character limit. */
+const ADDRESS_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * WARP-3349 — the recipients to look up as someone's email address:
+ * those that match no roster username and are shaped like an address.
+ * Usernames never contain "@" (invite, SSO and SCIM keep [A-Za-z0-9._-]),
+ * and a roster username still wins, so a typed username never takes this
+ * path. Anything else ("@bob", an oversized string) stays a username and
+ * fails as UNKNOWN_RECIPIENT.
+ */
+export function addressesToLookUp(
+  roster: { contacts: RosterContact[] },
+  recipients: string[],
+): string[] {
+  const usernames = new Set(roster.contacts.flatMap((c) => (c.username ? [c.username] : [])));
+  return recipients.filter(
+    (r) => !usernames.has(r) && r.length <= 320 && ADDRESS_SHAPE.test(r),
+  );
+}
+
+export type AddressLookup =
+  | { ok: true; usernames: string[] }
   | { ok: false; result: ToolResult };
 
 /**
- * Phase 1 (the approval copy): drop the sender by id and show DISPLAY
- * NAMES where the roster knows them. An unknown username stays as typed —
- * phase 2 refuses it loudly. Naming only the sender is refused here, so
- * the user is never asked to approve a send that cannot happen.
+ * WARP-3349 — map POST /api/team-chat/contacts/lookup (one row or `null`
+ * per address, in order) back onto `recipients`: each address becomes its
+ * person's username, deduplicated, so "dave" and "dave@company.com" are one
+ * person. The route answers for everyone ACTIVE in the Workspace, external
+ * guests included (Romain, 2026-09-30). An address that is nobody's there
+ * is refused, and the model is told to offer email instead (Romain,
+ * 2026-09-29: team chat by default, email only when the person asks).
  */
-export function previewRecipients(
-  roster: { contacts: RosterContact[]; meId: string },
-  usernames: string[],
-): RecipientPreview {
-  const byUsername = new Map(
-    roster.contacts.flatMap((c) => (c.username ? [[c.username, c] as const] : [])),
-  );
-  const others = usernames.filter((u) => byUsername.get(u)?.id !== roster.meId);
-  if (others.length === 0) {
-    return { ok: false, result: err("INVALID_ARGS", SELF_ONLY_MESSAGE) };
+export async function readLookupResponse(
+  res: TeamChatHttpResponse,
+  recipients: string[],
+  addresses: string[],
+): Promise<AddressLookup> {
+  if (res.status === 404) {
+    return { ok: false, result: err("TEAM_CHAT_UNAVAILABLE", UNAVAILABLE_MESSAGE) };
+  }
+  if (res.status === 401) {
+    return { ok: false, result: err("AUTH_REQUIRED", "auth_required") };
+  }
+  const body = res.ok
+    ? ((await res.json().catch(() => null)) as { contacts?: (RosterContact | null)[] } | null)
+    : null;
+  const rows = body?.contacts;
+  if (!Array.isArray(rows) || rows.length !== addresses.length) {
+    return {
+      ok: false,
+      result: err("TEAM_CHAT_SEND_FAILED", `orchestrator returned ${res.status}`),
+    };
+  }
+  const byAddress = new Map(addresses.map((a, i) => [a, rows[i]?.username ?? null]));
+  const outside = addresses.filter((a) => byAddress.get(a) === null);
+  if (outside.length > 0) {
+    return {
+      ok: false,
+      result: err(
+        "RECIPIENT_NOT_A_MEMBER",
+        `${outside.join(", ")} ${outside.length === 1 ? "isn't" : "aren't"} in this Workspace; team chat only reaches people in it — ask the user whether to email them instead.`,
+      ),
+    };
   }
   return {
     ok: true,
-    usernames: others,
-    names: others.map((u) => {
-      const display = byUsername.get(u)?.displayName;
-      return display && display.length > 0 ? display : u;
-    }),
+    usernames: [...new Set(recipients.map((r) => byAddress.get(r) ?? r))],
   };
 }
 
@@ -167,7 +249,7 @@ export function resolveRecipients(
       ok: false,
       result: err(
         "UNKNOWN_RECIPIENT",
-        `No member named: ${missing.join(", ")}. Recipients must be existing member usernames.`,
+        `Nobody in this Workspace has the username: ${missing.join(", ")}. Recipients must be usernames or email addresses of people in this Workspace.`,
       ),
     };
   }
