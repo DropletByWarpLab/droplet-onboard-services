@@ -4,6 +4,7 @@
  * transcript. LAN-local only; Prisma-backed; no new services.
  *
  *   GET  /team-chat/contacts                      — roster for the picker
+ *   POST /team-chat/contacts/lookup               — email address → contact (WARP-3349)
  *   GET  /team-chat/threads                       — caller's threads + unread
  *   POST /team-chat/threads                       — create (direct deduped)
  *   GET  /team-chat/threads/:id/messages          — cursor page, newest-first
@@ -21,8 +22,8 @@
  * Access model:
  *   - Humans only (owner/admin/family/guest) — no service principals,
  *     with ONE pinned exception (WARP-1685): the routes the two team-chat
- *     LLM tools dispatch through (contacts roster, thread create, message
- *     send, meeting create) ALSO admit the trusted `_service:mcp`
+ *     LLM tools dispatch through (contacts roster and lookup, thread
+ *     create, message send, meeting create) ALSO admit the trusted `_service:mcp`
  *     principal via requireRoleOrMcpService, acting AS the person the
  *     X-Droplet-User header names (username on stdio, User.id over HTTP —
  *     WARP-3187) like routes/email.ts: the header is
@@ -70,6 +71,7 @@ import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { checkSpaceAccess, departmentSpaceToken } from "../middleware/space.js";
 import { resolveFileDepartment } from "../services/file-registry.service.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
+import { findUserByEmail } from "../services/user-directory.service.js";
 import { createLogger } from "../lib/logger.js";
 // WARP-1874 — the single https-only gate for a value that becomes an href.
 import { meetingUrlSchema } from "../lib/meeting-url.js";
@@ -123,6 +125,10 @@ const createThreadSchema = z.object({
   kind: z.enum(["direct", "group"]),
   participantIds: z.array(z.string().min(1)).min(1).max(24),
   title: z.string().trim().min(1).max(80).optional(),
+});
+
+const lookupContactsSchema = z.object({
+  emails: z.array(z.string().trim().min(3).max(320)).min(1).max(24),
 });
 
 const listMessagesQuerySchema = z.object({
@@ -306,7 +312,7 @@ interface TranscriptSnapshot {
 export function createTeamChatRouter(prisma: PrismaClient): Router {
   const router = Router();
   const guard = requireRole(...HUMAN_ROLES);
-  // WARP-1685 — the four routes the team-chat LLM tools dispatch through
+  // WARP-1685 — the routes the team-chat LLM tools dispatch through
   // additionally admit the trusted `_service:mcp` principal (and ONLY that
   // principal — voice/email-indexer's coarse "service" role still 403s).
   const guardOrMcp = requireRoleOrMcpService(...HUMAN_ROLES);
@@ -461,6 +467,48 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
         orderBy: { displayName: "asc" },
       });
       res.json({ contacts, me: { id: me.id }, canStartConversation: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // WARP-3349 — team_chat_send_message takes a colleague's work email
+  // address. The roster has no email column (User.email is encrypted at
+  // rest, WARP-233), so each address is one blind-index probe
+  // (findUserByEmail: trim + lowercase, then the emailLookupHash), never a
+  // decrypt of the table. The roster's people match: ACTIVE owners, admins,
+  // members and external guests (Romain, 2026-09-30: a member may reach a
+  // guest by address). A deactivated person's or nobody's address answers
+  // null, in request order. POST so the addresses stay out of the logged
+  // URL, and nothing here logs them. A guest caller gets no directory
+  // lookup at all (WARP-3263).
+  router.post("/team-chat/contacts/lookup", guardOrMcp, async (req, res, next) => {
+    try {
+      const me = await resolveCaller(req);
+      if (!me) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      if (me.role === "guest") {
+        res.status(403).json({ error: "guest_cannot_start_conversation" });
+        return;
+      }
+      const parsed = lookupContactsSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "invalid_lookup" });
+        return;
+      }
+      const contacts = await Promise.all(
+        parsed.data.emails.map(async (email) => {
+          const user = await findUserByEmail(prisma, email);
+          return user &&
+            user.directoryStatus === "ACTIVE" &&
+            (HUMAN_ROLES as readonly string[]).includes(user.role)
+            ? { id: user.id, displayName: user.displayName, username: user.username }
+            : null;
+        }),
+      );
+      res.json({ contacts });
     } catch (err) {
       next(err);
     }
