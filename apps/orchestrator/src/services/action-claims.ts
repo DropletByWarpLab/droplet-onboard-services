@@ -448,7 +448,11 @@ export function claimCorrectionPrompt(
   const facts =
     check.attempts.length > 0
       ? check.attempts.map((a) => `- ${a.tool}: ${reasonForModel(a)}.`)
-      : ["- No action ran in this turn: nothing was sent, created, changed or deleted."];
+      : [
+          // Box eval: without the second half the model invented "waiting for
+          // your approval" for an action that was never attempted.
+          "- No action ran in this turn: nothing was sent, created, changed or deleted, and nothing is waiting for approval.",
+        ];
   const wrong = [...new Set(check.unbacked.map((c) => c.sentence))].map((sentence) =>
     check.unbacked.some((c) => c.sentence === sentence && c.family === "permission_check")
       ? `- "${sentence}" — no permission check ran; Droplet has no tool that checks permissions.`
@@ -460,8 +464,10 @@ export function claimCorrectionPrompt(
     ...facts,
     "Your reply says things that did not happen:",
     ...wrong,
-    "Rewrite your reply so it only says what actually happened. Say plainly what was not done and why " +
-      "(for example, that it is waiting for my approval). Keep everything else that was right. " +
+    "Rewrite your reply so it only says what actually happened. Say plainly what was not done and why" +
+      (check.attempts.some((a) => a.outcome === "pending") ? " (for example, that it is waiting for my approval)" : "") +
+      ". Keep everything else that was right, " +
+      "including any answer or result you gave me. " +
       "Do not call any tools. " +
       (inRun ? "Nobody is watching this run, so do not ask any questions. " : "") +
       "Reply with the corrected answer only.",

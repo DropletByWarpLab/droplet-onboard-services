@@ -439,9 +439,19 @@ describe("what the model and the person are told", () => {
     expect(prompt).toContain("Do not call any tools.");
   });
 
-  it("with nothing attempted, the prompt says no action ran", () => {
-    expect(claimCorrectionPrompt(check("I've sent it.", [entry("calculate", { result: 4 })]))).toContain(
-      "No action ran in this turn",
+  it("with nothing attempted, the prompt says no action ran and nothing is pending", () => {
+    // Box eval: a bare "no action ran" let the model invent "waiting for your
+    // approval", and a correction dropped the result it had already given.
+    const prompt = claimCorrectionPrompt(check("I've sent it.", [entry("calculate", { result: 4 })]));
+    expect(prompt).toContain("No action ran in this turn");
+    expect(prompt).toContain("nothing is waiting for approval");
+    expect(prompt).not.toContain("waiting for my approval");
+    expect(prompt).toContain("including any answer or result you gave me");
+  });
+
+  it("only a pending write gets the waiting-for-approval example", () => {
+    expect(claimCorrectionPrompt(check("I've deleted the file.", trace))).toContain(
+      "(for example, that it is waiting for my approval)",
     );
   });
 
