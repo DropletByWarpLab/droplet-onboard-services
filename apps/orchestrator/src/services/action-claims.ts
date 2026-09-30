@@ -33,11 +33,17 @@
  *   - "sent", "deleted" and real-world state changes ("disabled", "locked",
  *     "scheduled", "approved") are STRICT: flagged when nothing of that
  *     family ran. The other change verbs ("created", "updated", "added",
- *     "drafted") also describe edits to the model's own text ("I've updated
+ *     "saved") also describe edits to the model's own text ("I've updated
  *     the draft:"), so they, and every passive, are flagged only when this
  *     turn attempted a write of that family and it did not run;
  *   - every family a sentence claims is checked ("I've emailed Dave and I've
- *     cancelled the meeting" is two claims).
+ *     cancelled the meeting" is two claims);
+ *   - a sentence that OPENS on a sent message with no subject ("Message sent
+ *     to Alice: …", "(Team chat message sent …)") is a strict send claim: it
+ *     was the model's commonest false send in the eval (adv-011);
+ *   - "I've sent the request / sent it to the approval prompt" and "drafted"
+ *     describe the approval step, not the action (eval: adv-004, seed-011,
+ *     seed-028, seed-007).
  *
  * Families come from write metadata, not a per-tool list: the caller says
  * which tools write (the loop's catalog + runtime classification), and a
@@ -46,8 +52,8 @@
  * change or a delete ("I've cancelled the meeting" via `delete_event`); an
  * edit claim any write ("I moved it to the trash" describes a delete).
  *
- * KNOWN GAPS, accepted: claims without a first-person subject ("✅ Sent the
- * report", a bullet "- Deleted 3 files", "Email sent to Dave"); a second verb
+ * KNOWN GAPS, accepted: verb-first claims without a subject ("✅ Sent the
+ * report", a bullet "- Deleted 3 files"); a second verb
  * sharing one subject ("I've emailed Dave and cancelled …" checks the first);
  * plain past passives ("was sent"); answers not in English.
  */
@@ -95,7 +101,7 @@ const STATE_VERBS = [
 // Left out entirely, each common in plain prose: set, started, stopped, ran,
 // applied, completed, made, wrote, prepared, checked, listed.
 const EDIT_VERBS = [
-  "created", "added", "drafted", "saved", "stored", "recorded", "updated", "changed",
+  "created", "added", "saved", "stored", "recorded", "updated", "changed",
   "modified", "edited", "renamed", "moved", "closed", "reopened", "marked", "assigned",
   "reassigned", "removed", "installed", "configured", "restored", "archived", "uploaded",
   "copied", "filed", "set up",
@@ -130,6 +136,9 @@ const CLAUSE_NOT_A_CLAIM = new RegExp(
     String.raw`\b(?:let me know|would you like|do you want|want me to)\b`,
     // "I've shared the steps with you" is the answer itself, not a send
     String.raw`\bshared\b.*\bwith you\b`,
+    // the approval step itself: "I've sent the request to create the task",
+    // "I've sent the draft to the confirmation prompt" (eval: adv-004, seed-011, seed-028)
+    String.raw`\bsent\b.*\b(?:request|prompt)\b`,
   ].join("|"),
 );
 /**
@@ -153,6 +162,15 @@ const REPORTED = /(?<!\byou\s)\b(?:says|said|wrote|writes|replied|replies|states
 /** Extra skips for the passive voice, which also describes records read back. */
 const PASSIVE_NOT_A_CLAIM =
   /\bby\b|\b(?:19|20)\d\d\b|\b(?:that|which|who)\s+(?:has|have)\s+been\b|\bon (?:mon|tue|wed|thu|fri|sat|sun)/;
+/**
+ * A sentence that opens on a sent message with no subject: "Message sent to
+ * Alice: …", "(Team chat message sent to Alice …)", "Email sent." Not a record
+ * read back ("Last email sent to Bob …", "messages sent this week"), not "The
+ * message sent to Alice says …" (a record), not "has been sent" (the passive).
+ */
+const ELLIPTICAL_SEND =
+  /^[\s(\[\u2022\u2705-]*(?:team chat\s+|chat\s+)?(?:message|email|e-mail|text|reminder|invite|invitation|notification)s?\s+(?:successfully\s+)?sent\b/;
+const OLDER = /\b(?:last|latest|most recent|previous|this (?:week|month|year)|today)\b/;
 
 const PERMISSION_CHECK = new RegExp(
   String.raw`\bi(?:'ve| have)?\s+${ADVERBS}(?:verified|checked|confirmed|made sure)\s+(?:that\s+)?you(?:'re| are)?\s+(?:can (?:delete|remove|send|edit|change|modify|create|write|update|move|rename|do (?:that|this|it))|are allowed|allowed|are permitted|permitted|are authori[sz]ed|authori[sz]ed|have (?:the )?(?:permission|rights?))\b`,
@@ -198,6 +216,9 @@ export function detectActionClaims(answer: string): ActionClaim[] {
     const found = new Map<string, Omit<ActionClaim, "sentence">>();
     for (const clause of s.split(/,|\s[—–-]\s|\s+but\s+/)) {
       if (CLAUSE_NOT_A_CLAIM.test(clause)) continue;
+      if (ELLIPTICAL_SEND.test(clause) && passiveAllowed && !OLDER.test(s)) {
+        found.set("send:true", { family: "send", strict: true });
+      }
       for (const p of PATTERNS) {
         const strict = p.firstPerson.test(clause) ? p.strict : passiveAllowed && p.passive.test(clause) ? false : null;
         if (strict !== null) found.set(`${p.family}:${strict}`, { family: p.family, strict });

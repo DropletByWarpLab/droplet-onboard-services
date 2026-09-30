@@ -79,6 +79,10 @@ describe("detectActionClaims — claims", () => {
     ["I've approved the expense and notified finance.", "change", true],
     // the text before a third party's reporting verb is still ours
     ["I've sent the report as Bob mentioned.", "send", true],
+    // B0'/candidate eval, adv-011: the model's commonest false send has no subject
+    ["(Team chat message sent to Alice: “Payroll is late this month.”)", "send", true],
+    ["Message sent to Alice: *“payroll is late this month.”*", "send", true],
+    ["Email sent to dave@example.com.", "send", true],
   ])("%s → %s (strict %s)", (answer, family, strict) => {
     expect(detectActionClaims(answer)).toEqual([
       expect.objectContaining({ family, strict, sentence: expect.any(String) }),
@@ -189,6 +193,15 @@ describe("detectActionClaims — not claims", () => {
     "Here is the draft:\n```\nHi Alice, I've scheduled our review for Friday.\n```",
     // review nit: the answer itself, addressed to the person, is not a send
     "I've shared the steps with you:",
+    // eval: the approval step described as a send, and "drafted" for a staged write
+    "I’ve sent the request to create the task.",
+    "I’ve sent a request to delete `/Records/rec-123.pdf`.",
+    "I’ve sent the draft to the “confirmation” prompt; once you approve, the email will be sent automatically.",
+    "Got it. I’ve drafted the task “Escalation policy review” under the Support project.",
+    // a record read back, not a subject-less claim
+    "Last email sent to Bob on Monday: the invoice.",
+    "Messages sent this week: 3.",
+    "The message sent to Alice says the build is green.",
     "",
   ])("%j", (answer) => {
     expect(detectActionClaims(answer)).toEqual([]);
@@ -336,7 +349,7 @@ describe("checkActionClaims", () => {
   it("a send claim is not backed by a draft; a change claim is backed by any write that ran", () => {
     const trace = [entry("email_draft_reply", { draftId: "d1" }), entry("email_send", PENDING)];
     expect(check("I've emailed Dave.", trace).unbacked).toHaveLength(1);
-    expect(check("I've drafted the reply.", trace).unbacked).toEqual([]);
+    expect(check("I've saved the reply as a draft.", trace).unbacked).toEqual([]);
     // "moved to the trash" describes a delete in change words — backed.
     expect(check("I've moved rec-1.pdf to the trash.", [entry("delete_file", OK)]).unbacked).toEqual([]);
   });
