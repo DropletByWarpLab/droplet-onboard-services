@@ -4,9 +4,9 @@
  * later system message, which silently dropped the chat route's attachment
  * block, pin block and a chat's own instructions. The fold keeps their order,
  * heads the pin and chat-instruction blocks (the attachment block labels
- * itself), and keeps the result under the ai-gateway's
- * per-message cap by cutting attachments first, then chat instructions, and
- * never the base prompt or the pins.
+ * itself), and keeps the result under the ai-gateway's per-message cap by
+ * cutting attachments first, then chat instructions, and never the base
+ * prompt or the pins.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
