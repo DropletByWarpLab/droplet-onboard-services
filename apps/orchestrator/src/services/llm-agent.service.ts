@@ -99,7 +99,14 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   estimateTokensFromChars,
 } from "./context-budget.service.js";
-import type { ChatMessage, ChatResponse, ChatStreamChunk, ToolCall } from "../types/index.js";
+import type {
+  ChatMessage,
+  ChatResponse,
+  ChatStreamChunk,
+  ContextBlockKind,
+  ToolCall,
+} from "../types/index.js";
+import { contentToText } from "../types/index.js";
 import type { SSEEvent } from "../types/sse-events.js";
 import type { QueryClass } from "../types/query-enhancement.js";
 import { redactToolResult } from "../lib/log-redaction.js";
@@ -1460,6 +1467,83 @@ function logToolPoolSize(p: {
   );
 }
 
+/** WARP-3338 — the header each marked block gets once it joins index 0. */
+const CONTEXT_BLOCK_HEADERS: Record<ContextBlockKind, string> = {
+  attachments: "## Files attached to this conversation",
+  pins: "## Pinned context",
+  chat_instructions: "## Instructions for this chat",
+};
+
+/**
+ * WARP-3338 — the ai-gateway refuses any message over 32,000 chars
+ * (services/ai-gateway/schemas.py `_PER_MESSAGE_TEXT_CHARS`), and the fold
+ * sums blocks that were each under it. `.length` counts UTF-16 units, never
+ * fewer than Python's code points, so staying under this here stays under
+ * the gateway's cap there.
+ */
+export const FOLDED_SYSTEM_MAX_CHARS = 31_000;
+export const FOLD_TRUNCATED_MARKER = "\n…[truncated]";
+/** Cut first to last. The base prompt and the pins are never cut. */
+const FOLD_TRIM_ORDER: readonly ContextBlockKind[] = ["attachments", "chat_instructions"];
+
+export interface FoldedMessages {
+  messages: ChatMessage[];
+  /** Chars the size guard cut, per block. Empty when nothing was cut. */
+  trimmed: Partial<Record<ContextBlockKind, number>>;
+}
+
+/**
+ * WARP-3338 — the wire shape every local chat template renders the same way:
+ * ONE system message, first. gpt-oss's GGUF template (Docker Model Runner /
+ * llama.cpp) reads only `messages[0]` as the developer instructions and drops
+ * every later system message without an error, so the pin block, the
+ * attachment block and a chat's own instructions never reached the model.
+ * Ollama's template already joins every system message with a blank line;
+ * this does the same, in order, so both runtimes see the same text.
+ *
+ * Wire-only: tool selection, the pin-domain readback
+ * (`pinnedToolDomainsFromMessages`) and checkpoints keep the unfolded array.
+ * A request whose only system message is already first (agent runs, email
+ * analysis, every single-prompt caller) goes out untouched.
+ */
+export function foldSystemMessages(messages: readonly ChatMessage[]): FoldedMessages {
+  const system = messages.filter((m) => m.role === "system");
+  if (system.length === 0 || (system.length === 1 && messages[0]?.role === "system")) {
+    return { messages: messages as ChatMessage[], trimmed: {} };
+  }
+  const parts = system.map((m) => ({
+    kind: m.contextBlock,
+    text: m.contextBlock
+      ? `${CONTEXT_BLOCK_HEADERS[m.contextBlock]}\n\n${contentToText(m.content)}`
+      : contentToText(m.content),
+  }));
+  const size = () => parts.reduce((n, p) => n + p.text.length + 2, -2);
+  const trimmed: FoldedMessages["trimmed"] = {};
+  for (const kind of FOLD_TRIM_ORDER) {
+    for (const p of parts) {
+      const over = size() - FOLDED_SYSTEM_MAX_CHARS;
+      if (over <= 0) break;
+      if (p.kind !== kind) continue;
+      // Keep the header; never split a surrogate pair.
+      let keep = Math.max(
+        CONTEXT_BLOCK_HEADERS[kind].length,
+        p.text.length - over - FOLD_TRUNCATED_MARKER.length,
+      );
+      if (/[\uD800-\uDBFF]/.test(p.text[keep - 1] ?? "")) keep -= 1;
+      if (p.text.length - keep <= FOLD_TRUNCATED_MARKER.length) continue;
+      trimmed[kind] = (trimmed[kind] ?? 0) + p.text.length - keep;
+      p.text = p.text.slice(0, keep) + FOLD_TRUNCATED_MARKER;
+    }
+  }
+  return {
+    messages: [
+      { role: "system", content: parts.map((p) => p.text).join("\n\n") },
+      ...messages.filter((m) => m.role !== "system"),
+    ],
+    trimmed,
+  };
+}
+
 export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<AgentResult> {
   // Spec §1 — both enforcement points (this clamp + the /api/llm/chat zod
   // bound) read config.agentMaxIter, so they cannot drift. WARP-2749: a
@@ -2066,9 +2150,25 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     // path; every other field (incl. WARP-849 max_tokens + WARP-1442a
     // reasoning_effort) is identical, so a streamed turn issues byte-for-byte
     // the same request as a blocking one.
+    const folded = foldSystemMessages(messages);
+    // WARP-3338 — the system blocks do not change within a turn, so the size
+    // guard's verdict is the same every iteration: say it once, counts only.
+    if (iter === 0 && Object.keys(folded.trimmed).length > 0) {
+      logger.warn(
+        {
+          turn_id: turnId,
+          trimmed_chars: folded.trimmed,
+          max_chars: FOLDED_SYSTEM_MAX_CHARS,
+          ...(req.toolCallContext?.agentRunId
+            ? { agent_run_id: req.toolCallContext.agentRunId }
+            : {}),
+        },
+        "agent_system_fold_trimmed",
+      );
+    }
     const chatReq = {
       model: req.model,
-      messages,
+      messages: folded.messages,
       temperature: req.temperature,
       max_tokens: req.max_tokens,
       reasoning_effort: req.reasoning_effort,
