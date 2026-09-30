@@ -207,7 +207,8 @@ the device rather than opening a second stream on it.
    and the /voice page carries the owner/admin switch. Still missing: any
    hardware mute-switch integration, a self-expiring "be quiet for an hour"
    pause, and a `mute_mic` tool the assistant could call on request
-   (WARP-627, unbuilt).
+   (unbuilt). The spoken "mute" that WARP-627 added silences the
+   **speaker** only; the microphone keeps listening (see Speaker volume).
 2. Tool questions are still slow — two model round trips plus the tool call
    (about 8–15 s). The spoken cue fills the silence but doesn't shorten it.
 3. Read-only tools — voice cannot control devices in v1.
