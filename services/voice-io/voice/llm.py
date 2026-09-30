@@ -1110,6 +1110,7 @@ def _extract_assistant_text(payload: dict) -> str:
         "iterations":  N,
         "stop_reason": "model_done" | "iteration_limit" | "error"
                      | "context_budget" | "repetition" | "no_progress"
+                     | "needs_details"
       }
 
     Legacy fallback (ai-gateway / OpenAI-compatible) — kept so the same

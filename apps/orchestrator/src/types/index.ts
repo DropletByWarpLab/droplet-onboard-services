@@ -37,9 +37,19 @@ export function contentToText(
     .join("\n");
 }
 
+/**
+ * WARP-3338 — which block a system message that routes/llm.ts adds after its
+ * base prompt carries. The agent loop folds every system message into index 0
+ * and heads the blocks that do not label themselves, so the model can tell
+ * them apart (`foldSystemMessages`, llm-agent.service.ts).
+ */
+export type ContextBlockKind = "attachments" | "pins" | "chat_instructions";
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | ContentBlock[];
+  /** WARP-3338 — set by routes/llm.ts on the system messages it adds. */
+  contextBlock?: ContextBlockKind;
   // Only populated on assistant messages that request tool execution.
   tool_calls?: ToolCall[];
   // Set on tool-role messages to correlate the result with the request.

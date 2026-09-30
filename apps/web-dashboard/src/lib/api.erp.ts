@@ -183,17 +183,32 @@ export function setProviderWrites(
 }
 
 /**
+ * What becomes of the records a connector copied onto the box (WARP-3375).
+ * `keep` turns them into ordinary records and deletes nothing; `delete`
+ * removes them (the box archives any that carry a note your team wrote).
+ */
+export type LandedRecordsChoice = "keep" | "delete";
+
+/**
  * Disconnect ONE provider — stops Droplet reading and purges the stored
- * credential; the vendor's own data is untouched.
+ * credential. The vendor's own account is not changed, and the key is NOT
+ * revoked there. `records` is the owner's answer about what Droplet already
+ * copied; it is always sent, so the box's audit row records a choice rather
+ * than a default.
  *
  * WARP-2500 — provider-scoped; see {@link setProviderWrites}.
  */
 export function disconnectProvider(
   provider: string,
+  records: LandedRecordsChoice = "keep",
 ): Promise<IntegrationConnection> {
   return apiFetch<IntegrationConnection>(
     `/api/integrations/${encodeURIComponent(provider)}/disconnect`,
-    { method: "POST" },
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ records }),
+    },
   );
 }
 

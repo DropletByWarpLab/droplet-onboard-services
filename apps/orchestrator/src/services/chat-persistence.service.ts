@@ -253,6 +253,40 @@ export class ChatPersistenceService {
   }
 
   /**
+   * WARP-3348 — the tools the PREVIOUS assistant turn of this conversation
+   * actually ran: ok, and not a pending approval (persisted with ok:true so
+   * its chip renders). The action-claim check lets a send or delete claim in
+   * this turn ("Yes, I've sent it") stand on those; nothing older counts.
+   * `currentAssistantMessageId` is this turn's own row, already created.
+   */
+  async getPreviousTurnRanToolNames(
+    conversationId: string,
+    userId: string,
+    currentAssistantMessageId: string | null,
+  ): Promise<string[]> {
+    const [row] = await this.prisma.chatMessage.findMany({
+      where: {
+        sessionId: conversationId,
+        session: { userId },
+        role: "assistant",
+        ...(currentAssistantMessageId ? { id: { not: currentAssistantMessageId } } : {}),
+      },
+      select: { toolCalls: true },
+      orderBy: { createdAt: "desc" },
+      take: 1,
+    });
+    const calls = row?.toolCalls as unknown as PersistedToolCall[] | null | undefined;
+    if (!Array.isArray(calls)) return [];
+    return [
+      ...new Set(
+        calls
+          .filter((c) => c && typeof c.name === "string" && c.ok === true && c.status !== "confirmation_required")
+          .map((c) => c.name),
+      ),
+    ];
+  }
+
+  /**
    * List a user's conversations newest-first. Used by the dashboard sidebar
    * (when reintroduced) and any future "resume" flow.
    */

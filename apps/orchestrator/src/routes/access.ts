@@ -332,6 +332,11 @@ function serializeAccessRole(row: RoleWithMeta, layers: ToolLayers) {
     // read time (effective-access.service): a row saved before a floor existed
     // (a Guest-based role's security:view) is inert, so the list must not show it
     // as reach. Nothing is rewritten; `null` = the tier may hold no grant.
+    // The tier here is the role's `startingPoint`; the resolver clamps by the
+    // PERSON's tier. They agree only because assigning a role writes
+    // `User.role = startingPoint` in the same transaction (assign, below) and an
+    // invite whose tier differs is refused (ROLE_TIER_MISMATCH, invite-access-role.service):
+    // relax either and this list can show reach the resolver does not grant.
     featureGrants: row.featureGrants.flatMap<{ moduleId: ModuleId; level: FeatureLevel }>((g) => {
       // `chat` is always-on and never a grant row; a stray one is listed as stored.
       if (!isGateableModuleId(g.moduleId)) return [{ moduleId: g.moduleId, level: g.level }];

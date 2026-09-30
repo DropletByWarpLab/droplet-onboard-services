@@ -68,7 +68,12 @@ import {
 // WARP-2482 — the sync side owns what a cursor reset MEANS; this service owns
 // WHEN one happens. Exposed as a single call so the credential lifecycle never
 // hand-writes the cursor field set (see `UNSTARTED_ERP_CURSOR`).
-import { purgeLandedRecords } from "./crm/landed-purge.js";
+import {
+  detachLandedRecords,
+  purgeLandedDocuments,
+  purgeLandedRecords,
+  type LandedRecordsDisposition,
+} from "./crm/landed-purge.js";
 import { resetCursorsForConnection } from "./erp-sync/cursor.service.js";
 import { SERIALIZABLE_TX } from "../lib/prisma-tx.js";
 import { credentialsPurgedFor } from "./integration-status.js";
@@ -556,8 +561,18 @@ export interface IntegrationsService {
     provider: string,
     enabled: boolean,
   ): Promise<IntegrationDetail>;
-  /** WARP-2500 — provider-scoped; see {@link IntegrationsService.setWriteEnabled}. */
-  disconnect(ctx: { actor: string }, provider: string): Promise<IntegrationDetail>;
+  /**
+   * WARP-2500 — provider-scoped; see {@link IntegrationsService.setWriteEnabled}.
+   *
+   * WARP-3375 — `opts.records` is the owner's answer to "what happens to the
+   * records this connector imported?". Absent means `"keep"`: a caller that
+   * says nothing must never delete a business's customers.
+   */
+  disconnect(
+    ctx: { actor: string },
+    provider: string,
+    opts?: { records?: LandedRecordsDisposition },
+  ): Promise<IntegrationDetail>;
 }
 
 /**
@@ -1369,13 +1384,25 @@ export function createIntegrationsService(
      * committing in between would otherwise have its fresh credential purged
      * by a disconnect that never saw it.
      *
+     * ## WARP-3375 — the records the connector landed are the owner's call
+     *
+     * `opts.records` is `"keep"` (default) or `"delete"`. Before it, this ran
+     * the purge unconditionally while the dashboard told the owner their data
+     * was untouched. `keep` detaches the landed CRM rows into ordinary LOCAL
+     * records and deletes nothing; `delete` is the purge (CRM rows, with
+     * note-carrying ones archived, plus the landed invoices and bills). The
+     * choice is written to the audit row with counts.
+     *
      * What this does NOT do: revoke at the vendor. We cannot rotate what we did
      * not mint (ADR-042 §6); the customer revokes in their own console and the
      * setup guides say so. And it does not touch `secretRef` — ADR-041 §4
      * forbids becoming the unimplemented secret store's first writer
      * (WARP-2028), and the column is a non-null pending pointer regardless.
      */
-    async disconnect(ctx, provider) {
+    async disconnect(ctx, provider, opts = {}) {
+      // WARP-3375 — the default is the safe direction. Read once, before the
+      // transaction, so the audit row and the branch below cannot disagree.
+      const records: LandedRecordsDisposition = opts.records ?? "keep";
       // WARP-2500 — validated BEFORE the transaction opens. An unknown
       // provider is a 404 and must not cost a SERIALIZABLE transaction, and
       // must never reach the `if (!row) return null` idempotence branch below:
@@ -1439,17 +1466,28 @@ export function createIntegrationsService(
         const cursorsReset = await resetCursorsForConnection(tx, row.id);
         // WARP-2549 — ADR-041 §4's other binding constraint: "deletion is a
         // real operation". The credential purge above stops the box READING
-        // this account; this stops it KEEPING what it already read.
+        // this account; this decides what happens to what it already read.
         //
-        // In the same transaction, for the same reason the purge is one
-        // `update`: two transactions can half-commit, and a box whose
-        // credentials are gone but whose landed customers are not is a box
-        // that tells an owner it disconnected and did half of it.
+        // WARP-3375 — that decision is the owner's, not the box's. `keep`
+        // (the default) detaches the CRM rows into ordinary LOCAL records and
+        // deletes nothing; `delete` is the purge. Either way it is in the same
+        // transaction, for the same reason the purge is one `update`: two
+        // transactions can half-commit, and a box whose credentials are gone
+        // but whose records are in an undecided state is a box that tells an
+        // owner it disconnected and did half of it.
         //
-        // Records carrying a note a human typed are ARCHIVED, not deleted —
-        // every `CrmActivity` subject relation is `onDelete: Cascade`, so
-        // deleting the parent silently destroys the owner's own prose.
-        const landed = await purgeLandedRecords(tx, row.id, new Date());
+        // On `delete`, records carrying a note a human typed are ARCHIVED, not
+        // deleted — every `CrmActivity` subject relation is `onDelete:
+        // Cascade`, so deleting the parent silently destroys the owner's own
+        // prose.
+        const now = new Date();
+        const landed =
+          records === "delete"
+            ? await purgeLandedRecords(tx, row.id, now)
+            : { deleted: 0, archived: 0 };
+        const documentsDeleted =
+          records === "delete" ? await purgeLandedDocuments(tx, row.id) : 0;
+        const detached = records === "keep" ? await detachLandedRecords(tx, row.id) : 0;
         await tx.erpAuditLog.create({
           data: {
             connectionId: row.id,
@@ -1477,8 +1515,16 @@ export function createIntegrationsService(
               purged: true,
               cursorsReset,
               // Counts, never names — the same rule the line above follows.
+              //
+              // WARP-3375 — the owner's answer, verbatim, so an auditor can
+              // tell a disconnect that kept the records from one that deleted
+              // them. Every count is present on both branches (0 where the
+              // branch does not apply) so the row has one shape.
+              records,
               landedDeleted: landed.deleted,
               landedArchived: landed.archived,
+              landedDetached: detached,
+              documentsDeleted,
             },
           },
         });
