@@ -144,10 +144,20 @@ pre-login recovery is the `recoveryCode` field on `/auth/login` above.
 
 | Method | Path | Auth | Returns |
 |---|---|---|---|
-| GET | `/orchestrator/health` | none | `{ status: "ok"\|"degraded"\|"down", components: [...], uptime, version }` |
+| GET | `/orchestrator/health` | none | `{ status: "ok"\|"degraded"\|"down", components: [{ name, status, latencyMs, lastCheckedAt }], uptime, version? }` |
+| GET | `/orchestrator/health/details` | owner/admin | same shape, plus each component's `error?` reason |
 
 Called on app launch + every 60s while foregrounded. Drives the
 status pill in the chrome.
+
+- `version` is the box's committed OTA release tag (e.g.
+  `ota-stable-412-gabc1234`, or `git-<sha10>` for an untagged build), not
+  semver. The key is **absent** (never `null`) on a box that has never taken
+  an OTA update, so decode it as optional or give it a default.
+- The public route never carries a component's `error`: it is raw probe text
+  that names internal hosts and ports (WARP-3154). Owner/admin clients that
+  want the reason read `/orchestrator/health/details`; anyone else gets 401
+  (anonymous) or 403.
 
 ### Device pairing (`/api/devices/*`)
 
