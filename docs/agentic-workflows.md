@@ -89,7 +89,7 @@ bump both sides in lockstep when the contract changes.
 3. **ai-gateway** (`main.py` → `router.py`) inspects the model name. If it starts with `llama*`, `mistral*`, `phi*`, `gpt-oss*`, etc., route to `OLLAMA_URL` — **direct to Ollama** at `http://host.docker.internal:11434`'s OpenAI-compat `/v1/chat/completions`. (Model lifecycle — `/models/*`, `/health`, `/metrics` — goes to `inference-manager` on `:8002`; the chat path does not.) **Routing collision guards (WARP-604):** `gpt-oss` is OpenAI's *open-weights* model served **locally** by Ollama, so it is matched **before** the cloud `gpt` prefix and never sent to the OpenAI cloud provider (which the off-LAN gate blocks with HTTP 451 — this was the live chat-failure root cause). The one configured `LLM_MODEL` also always resolves to local Ollama regardless of name. Genuine cloud models (`gpt-4o`, `o1`, `o3`) still route to OpenAI.
 4. **Ollama on the inference host** (the `ollama` container in `droplet-local-LLM`) generates a response, possibly with `tool_calls`.
 5. **Orchestrator** parses `tool_calls`, dispatches each via `mcp.callTool()` (JSON-RPC over stdio), gets results, appends `role="tool"` messages, re-prompts.
-6. Loop until model produces final text or hits `MAX_ITERATIONS` (~10).
+6. Loop until model produces final text or hits the step limit (`AGENT_MAX_ITER_CAP`, 20 since WARP-3297).
 7. **Response streams back** via SSE through ai-gateway → orchestrator → caller.
 
 The inference host side (`droplet-local-LLM`) is involved only in step 3-4. We see one HTTP call per loop iteration. We do not see tool calls, conversation history, or session state — those live in the orchestrator.
