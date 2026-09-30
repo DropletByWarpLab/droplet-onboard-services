@@ -126,6 +126,11 @@ describe("composeToolGuidance", () => {
     const noChat = composeToolGuidance(["email_search", "email_draft_reply", "email_send"]);
     expect(noChat).not.toContain("team_chat_send_message");
     expect(noChat).not.toContain("Message people");
+    // The trims that paid for the line kept the business line's pointer for
+    // customer questions (review of #2541).
+    expect(composeToolGuidance(["business_profile_get"])).toContain(
+      "- For questions about the business or its customers, use the business context above",
+    );
   });
 
   it("scopes the calculate mandate and gates its converter fragments", () => {

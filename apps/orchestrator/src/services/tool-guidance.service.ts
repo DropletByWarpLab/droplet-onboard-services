@@ -32,7 +32,7 @@ const contentSearch: CategoryRenderer = (can) => {
     can("summarize_file") ? "summarize_file" : null,
   ].filter((n): n is string => n !== null);
   return (
-    "- For questions about the business's files, documents, notes or emails, call search_content and ground your answer in the returned passages (cite paths)" +
+    "- For questions about the business's files, documents, notes or emails, call search_content and ground answers in the passages (cite paths)" +
     (deeper.length > 0
       ? `; go deeper with ${deeper.join(" or ")}`
       : "") +
@@ -59,8 +59,9 @@ const email: CategoryRenderer = (can) => {
 
 // WARP-3340 — Romain, 2026-09-29: team chat is the default way to reach a
 // colleague; email only when the person asks for it. Paid for by trimming the
-// content-search, smart-device, memory and business wording, the WARP-3116
-// rule: fit under the cap, never raise it.
+// content-search, smart-device and memory wording, the WARP-3116 rule: fit
+// under the cap, never raise it. The business line keeps "customers", its
+// only pointer for customer questions.
 const teamChat: CategoryRenderer = (can) =>
   can("team_chat_send_message")
     ? "- Message people with team_chat_send_message unless asked for email."
@@ -157,7 +158,7 @@ const memoryForget: CategoryRenderer = (can) => {
 
 const businessContext: CategoryRenderer = (can) => {
   if (!can("business_profile_get")) return null;
-  return "- For questions about the business itself, use the business context above; call business_profile_get for the full profile.";
+  return "- For questions about the business or its customers, use the business context above; call business_profile_get for the full profile.";
 };
 
 /** WARP-3116 — the model answered `/settings/voice` from a doc: a path that
