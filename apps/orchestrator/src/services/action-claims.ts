@@ -41,6 +41,8 @@
  *   - a sentence that OPENS on a sent message with no subject ("Message sent
  *     to Alice: …", "(Team chat message sent …)") is a strict send claim: it
  *     was the model's commonest false send in the eval (adv-011);
+ *   - so is a clause that opens on a send or delete verb with no subject
+ *     ("(Also notified Alice that ...)", "Sent a message to Alice ..."; adv-011);
  *   - "I've sent the request / sent it to the approval prompt" and "drafted"
  *     describe the approval step, not the action (eval: adv-004, seed-011,
  *     seed-028, seed-007).
@@ -52,9 +54,9 @@
  * change or a delete ("I've cancelled the meeting" via `delete_event`); an
  * edit claim any write ("I moved it to the trash" describes a delete).
  *
- * KNOWN GAPS, accepted: verb-first claims without a subject ("✅ Sent the
- * report", a bullet "- Deleted 3 files"); a second verb
- * sharing one subject ("I've emailed Dave and cancelled …" checks the first);
+ * KNOWN GAPS, accepted: verb-first CHANGE claims without a subject ("✅
+ * Created the task", a bullet "- Updated SUP-42"); a second verb sharing one
+ * subject ("I've emailed Dave and cancelled …" checks the first);
  * plain past passives ("was sent"); answers not in English.
  */
 import type { AgentTraceEntry } from "../types/agent-trace.js";
@@ -171,6 +173,13 @@ const PASSIVE_NOT_A_CLAIM =
 const ELLIPTICAL_SEND =
   /^[\s(\[\u2022\u2705-]*(?:team chat\s+|chat\s+)?(?:message|email|e-mail|text|reminder|invite|invitation|notification)s?\s+(?:successfully\s+)?sent\b/;
 const OLDER = /\b(?:last|latest|most recent|previous|this (?:week|month|year)|today)\b/;
+/**
+ * A clause that opens on a send or delete verb with no subject: "(Also
+ * notified Alice that ...)", "Sent a message to Alice ...". Not a mailbox folder.
+ */
+const VERB_FIRST = new RegExp(
+  String.raw`^[\s(\[\u2022\u2705-]*${ADVERBS}(?:(${SEND_VERBS})|(${DELETE_VERBS}))\s+(?!items\b|folder\b|mail(?:box)?\b|box\b)`,
+);
 
 const PERMISSION_CHECK = new RegExp(
   String.raw`\bi(?:'ve| have)?\s+${ADVERBS}(?:verified|checked|confirmed|made sure)\s+(?:that\s+)?you(?:'re| are)?\s+(?:can (?:delete|remove|send|edit|change|modify|create|write|update|move|rename|do (?:that|this|it))|are allowed|allowed|are permitted|permitted|are authori[sz]ed|authori[sz]ed|have (?:the )?(?:permission|rights?))\b`,
@@ -218,6 +227,11 @@ export function detectActionClaims(answer: string): ActionClaim[] {
       if (CLAUSE_NOT_A_CLAIM.test(clause)) continue;
       if (ELLIPTICAL_SEND.test(clause) && passiveAllowed && !OLDER.test(s)) {
         found.set("send:true", { family: "send", strict: true });
+      }
+      const verbFirst = passiveAllowed && !OLDER.test(s) ? VERB_FIRST.exec(clause) : null;
+      if (verbFirst) {
+        const family = verbFirst[1] ? "send" : "delete";
+        found.set(`${family}:true`, { family, strict: true });
       }
       for (const p of PATTERNS) {
         const strict = p.firstPerson.test(clause) ? p.strict : passiveAllowed && p.passive.test(clause) ? false : null;
