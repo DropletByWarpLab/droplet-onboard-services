@@ -136,7 +136,7 @@ import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
 import { resolveActiveModel } from "./services/active-model.service.js";
 import { createToolsRouter } from "./routes/tools.js";
 import { detachRemoteMcp, mcpClient, remoteCallPolicy } from "./services/mcp-client.singleton.js";
-import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
+import { stepResultValue, type StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createHardwareRouter } from "./routes/hardware.js";
 import { createHomeRouter } from "./routes/home.js";
@@ -824,20 +824,7 @@ export function createApp(
   // on the first failure; per-step trace returned to the caller.
   const toolStepDispatcher: StepDispatcher = {
     async call(tool, args, context) {
-      const result = await mcpClient.callTool(tool, args, context);
-      if (result.isError) {
-        const detail = result.content?.[0]?.text ?? "tool reported error";
-        throw new Error(typeof detail === "string" ? detail : String(detail));
-      }
-      const text = result.content?.[0]?.text;
-      if (typeof text === "string" && text.length > 0) {
-        try {
-          return JSON.parse(text);
-        } catch {
-          return { raw: text };
-        }
-      }
-      return null;
+      return stepResultValue(tool, await mcpClient.callTool(tool, args, context));
     },
   };
   app.use("/api", createToolsRouter(prisma, toolStepDispatcher));

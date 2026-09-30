@@ -43,7 +43,7 @@ function deps(opts: { toolResultChars: number; answers?: unknown[] }) {
         ]),
       callTool: vi.fn().mockResolvedValue({
         isError: false,
-        content: [{ type: "text", text: "x".repeat(opts.toolResultChars) }],
+        content: [{ type: "text", text: JSON.stringify("x".repeat(opts.toolResultChars)) }],
       }),
     } as never,
     aiGateway: { chat } as never,
@@ -166,7 +166,7 @@ describe("runAgent — context-budget iteration guard (spec §2)", () => {
           ]),
         callTool: vi.fn().mockResolvedValue({
           isError: false,
-          content: [{ type: "text", text: "x".repeat(100) }],
+          content: [{ type: "text", text: JSON.stringify("x".repeat(100)) }],
         }),
       } as never,
       aiGateway: { chat } as never,
@@ -207,7 +207,8 @@ describe("runAgent — context-budget iteration guard (spec §2)", () => {
         },
       ],
     };
-    const toolResultText = "y".repeat(50);
+    // Valid JSON: a local tool's non-JSON reply is TOOL_OUTPUT_MALFORMED (WARP-3284).
+    const toolResultText = JSON.stringify("y".repeat(48));
     const toolResultMsg = {
       role: "tool",
       tool_call_id: "c1",
