@@ -468,6 +468,17 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // `slack`, `standup`, `huddle` and `dm` carry no such ambiguity and are
   // taken bare. The negatives in tool-selection.service.test.ts pin this.
   { pattern: /\b(slack|stand-?ups?|huddles?|dms?|direct messages?|group chats?|team chats?|(slack|team|work|group|company) channels?|(slack|stand-?up|chat|message|comment) threads?)\b/i, domains: ["team_chat"] },
+  // WARP-3340 — "message someone". Team chat is the default way to reach a
+  // colleague (Romain, 2026-09-29: email only when the person asks for it),
+  // yet the rule above never named the verb. "Before messaging
+  // dave@example.com, …" (agent-loop eval seed-028) matched only the email
+  // rule, through the address, so the model could pick nothing but email.
+  // `message` is qualified the way `channel` and `thread` are above: the
+  // technical compounds ("error message", "commit message", "exit status
+  // message") and "email message", which is the email rule's, stay out.
+  // "Messages" is also the module's own name. The lookbehind runs after the
+  // word matched, so it costs nothing on text without it (linear-time test).
+  { pattern: /\bmessag(e[sd]?|ing)\b(?<!\b(error|commit|log|status|exit|e-?mail)\s{1,3}messag\w*)/i, domains: ["team_chat"] },
   { pattern: /\b(remember|memory|forget|know about me)\b/i, domains: ["memory"] },
   // ADR-045 slice C — ONE business rule, replacing WARP-2552's pair.
   //

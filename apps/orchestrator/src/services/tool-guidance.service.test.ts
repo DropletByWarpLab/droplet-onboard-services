@@ -21,6 +21,7 @@ const NAMEABLE_TOOLS = [
   "email_summarize_thread",
   "email_draft_reply",
   "email_send",
+  "team_chat_send_message",
   "search_calendar_events",
   "list_events",
   "list_reminders",
@@ -112,6 +113,17 @@ describe("composeToolGuidance", () => {
     const noSend = composeToolGuidance(["email_search", "email_draft_reply"]);
     expect(noSend).toContain("email_draft_reply");
     expect(noSend).not.toContain("email_send");
+  });
+
+  it("makes team chat the default way to message someone, email only when asked (WARP-3340)", () => {
+    const line = "- Message people with team_chat_send_message unless asked for email.";
+    expect(composeToolGuidance(["team_chat_send_message"])).toContain(line);
+    expect(composeToolGuidance(undefined)).toContain(line);
+    // Messages turned off, or a role without it: no line, and email is the
+    // only channel left.
+    const noChat = composeToolGuidance(["email_search", "email_draft_reply", "email_send"]);
+    expect(noChat).not.toContain("team_chat_send_message");
+    expect(noChat).not.toContain("Message people");
   });
 
   it("scopes the calculate mandate and gates its converter fragments", () => {

@@ -12,6 +12,8 @@
 import { describe, it, expect, vi } from "vitest";
 import type { Mock } from "vitest";
 import sendMessage from "../../../src/handlers/team-chat/send-message.js";
+import emailSend from "../../../src/handlers/email/send.js";
+import emailDraftReply from "../../../src/handlers/email/draft-reply.js";
 import type { ToolContext } from "../../../src/types.js";
 
 interface FakeResponse {
@@ -425,5 +427,30 @@ describe("team_chat_send_message — a roster that does not say who is asking", 
     if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("TEAM_CHAT_SEND_FAILED");
     expect(post).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * WARP-3340 — Romain, 2026-09-29: "team chat default unless specified by the
+ * user". The descriptions are what the model reads when both channels are
+ * advertised (agent-loop eval seed-028 drafted and sent an email instead), so
+ * each side of the choice says it. MUTATION: drop any one sentence and its
+ * assertion goes red.
+ */
+describe("WARP-3340 — team chat is the default channel, email only when asked", () => {
+  it("team_chat_send_message says it is the default and takes usernames, not addresses", () => {
+    expect(sendMessage.description).toContain(
+      "The default way to message, tell or send something to a colleague; use email only when the user asks for email.",
+    );
+    expect(sendMessage.description).toContain("member USERNAMES, not email addresses");
+    const recipients = (sendMessage.inputSchema as { properties: { recipients: { description: string } } })
+      .properties.recipients;
+    expect(recipients.description).toContain("never an email address");
+  });
+
+  it.each([emailSend, emailDraftReply])("$name is only for when the user asks for email", (tool) => {
+    expect(tool.description).toContain(
+      "Only when the user asks for email; to message a colleague otherwise, team chat is the default.",
+    );
   });
 });

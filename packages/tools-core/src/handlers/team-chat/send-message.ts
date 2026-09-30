@@ -38,7 +38,7 @@ const inputSchema = {
       type: "array",
       items: { type: "string" },
       description:
-        "Member USERNAMES to message. One recipient = a direct message (existing 1:1 threads are reused); several = a new group. Provide exactly one of recipients / thread_id.",
+        "Member USERNAMES to message, never an email address. One recipient = a direct message (existing 1:1 threads are reused); several = a new group. Provide exactly one of recipients / thread_id.",
     },
     thread_id: {
       type: "string",
@@ -222,7 +222,7 @@ async function handler(
 const tool: Tool = {
   name: "team_chat_send_message",
   description:
-    "Send a Messages (team chat) text to other members on the user's behalf. recipients = member USERNAMES (one = direct message, several = a new group), or pass thread_id to continue an existing conversation. Two-step: the first call returns confirmation_required previewing the recipients and text — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Send a Messages (team chat) text to other members on the user's behalf. The default way to message, tell or send something to a colleague; use email only when the user asks for email. recipients = member USERNAMES, not email addresses (one = direct message, several = a new group), or pass thread_id to continue an existing conversation. Two-step: the first call returns confirmation_required previewing the recipients and text — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

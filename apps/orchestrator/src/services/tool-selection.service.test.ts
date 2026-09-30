@@ -567,6 +567,34 @@ describe("WARP-2454 — keyword rules vs. natural phrasing", () => {
     });
   });
 
+  // ── WARP-3340: "message someone" reaches team chat ────────────────────
+  //
+  // Team chat is the default channel for reaching a colleague (email only
+  // when asked for), so the verb has to advertise it. MUTATION: delete the
+  // WARP-3340 rule and every positive goes red; drop the lookbehind and the
+  // technical compounds do.
+  describe("WARP-3340 — messaging a person advertises team chat", () => {
+    it.each([
+      // agent-loop eval seed-028, verbatim: the address alone used to pull
+      // only the email domain.
+      "Before messaging dave@example.com, look them up to confirm they exist, then send them: 'Server maintenance tonight at 10pm'.",
+      "message Priya that the delivery is late",
+      "can you send Bob a quick message about the 3pm call",
+      "any new messages from the front desk?",
+    ])("%s selects team chat", (message) => {
+      expect(advertisedFor(message, CHAT_POOL)).toContain("team_chat_send_message");
+    });
+
+    it.each([
+      "what does this error message mean?",
+      "fix the commit message on my last change",
+      "find the email message from the accountant",
+      "the e-mail messages from the landlord",
+    ])("%s does not", (message) => {
+      expect(advertisedFor(message, CHAT_POOL)).not.toContain("team_chat_send_message");
+    });
+  });
+
   // ── 3. calendar: the `free time` literal missed "am I free Thursday" ───
   describe("calendar — availability is bounded to a temporal cue", () => {
     it.each([
@@ -1453,6 +1481,10 @@ describe("WARP-3280 — every domain rule runs in linear time on hostile input",
     ["show me run", "show me ".repeat(N / 8)],
     ["open then words", "open " + "a ".repeat(N / 2)],
     ["where run", "where ".repeat(N / 6)],
+    // WARP-3340 — the team-chat `message` rule and its lookbehind.
+    ["message run", "message ".repeat(N / 8)],
+    ["error message run", "error message ".repeat(N / 14)],
+    ["error then spaces then message", "error" + " ".repeat(N) + "message"],
   ])("%s (%#) decides in under 50 ms", (_label, hostile) => {
     for (const pool of [POOL, NAV_POOL]) {
       const started = performance.now();
