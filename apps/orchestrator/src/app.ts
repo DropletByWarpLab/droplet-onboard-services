@@ -44,6 +44,7 @@ import { createStorageRouter } from "./routes/storage.js";
 import { createAppDownloadsRouter } from "./routes/app-downloads.js";
 import { createSystemResetRouter } from "./routes/system-reset.routes.js";
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth.js";
+import { createStepUpRouter } from "./routes/auth-step-up.js";
 import { createSsoRouter } from "./routes/sso.js";
 import {
   createPublicWebAuthnRouter,
@@ -367,6 +368,8 @@ export function createApp(
 
   // Protected routes — auth middleware has populated req.user
   app.use("/api", createProtectedAuthRouter(prisma));
+  // WARP-3180 — re-prove the current session (fresh lastMfaAt, same sid).
+  app.use("/api", createStepUpRouter(prisma));
 
   // Module gates — both layers, data-driven from the registry:
   //   layer 1  requireModuleEnabled  — the WORKSPACE capability gate: 404 a

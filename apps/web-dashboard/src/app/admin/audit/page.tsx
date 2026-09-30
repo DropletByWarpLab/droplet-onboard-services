@@ -46,6 +46,7 @@ import {
   type VerifyState,
 } from "@/components/audit/types";
 import { activityRowsToCsv } from "@/lib/audit-csv";
+import { RotateAuditKey } from "@/components/audit/RotateAuditKey";
 
 const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 300;
@@ -452,6 +453,9 @@ function AuditPageInner() {
       {verify.phase === "broken" && (
         <BrokenChainBanner brokenAtId={verify.brokenAtId} rowsChecked={verify.rowsChecked} />
       )}
+
+      {/* WARP-3180 — renders only for the owner (the route is owner-only). */}
+      <RotateAuditKey onRotated={() => void runVerify()} />
 
       <div className="toolbar">
         <select
