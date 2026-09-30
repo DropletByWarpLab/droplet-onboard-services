@@ -1651,8 +1651,11 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // for the missing detail. `madeProgress` flips on the first call that ran
   // and is not a looking call (see `isLookingCall`): an opened file, a record
   // read by id, any write or confirmation, any other tool. Sticky: a turn that
-  // once got somewhere is never cut by this trigger.
+  // once got somewhere is never cut by this trigger. `searched` needs a
+  // looking call that RAN: a search tool that keeps failing is an outage, and
+  // WARP-1012's "kept failing" reply is the honest answer to it.
   let madeProgress = false;
+  let searched = false;
   // WARP-1479 — the provider's verdict for the most recent BLOCKING
   // response, folded into the blank-answer diagnostics when the terminal
   // turn produces no visible output. Set fresh on every blocking response
@@ -1996,13 +1999,13 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       }
     }
     // WARP-3347 — half the steps gone on searching that found nothing usable
-    // (see `madeProgress`). The turn must actually have searched: one that
-    // only hit failing non-search tools keeps its step-limit reply.
+    // (see `madeProgress`). Never before step 2: half of a 2-step turn is one
+    // search, which says nothing about whether searching is failing.
     if (
       finalizeReason === null &&
+      searched &&
       !madeProgress &&
-      iter >= Math.ceil(maxIter / 2) &&
-      trace.some((t) => isLookingCall(t.tool, t.args))
+      iter >= Math.max(2, Math.ceil(maxIter / 2))
     ) {
       finalizeReason = "needs_details";
       logger.info(
@@ -2865,7 +2868,10 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       }
       // WARP-3347 — a confirmation_required envelope is not `isError`, so a
       // write parked on approval counts as progress too.
-      if (!result.isError && !isLookingCall(call.function.name, args)) madeProgress = true;
+      if (!result.isError) {
+        if (isLookingCall(call.function.name, args)) searched = true;
+        else madeProgress = true;
+      }
 
       // WARP-1480 — the ONE point that sees every tool failure, on BOTH the
       // streaming and non-streaming paths. Until now nothing in this repo had

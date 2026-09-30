@@ -189,13 +189,21 @@ describe("runAgent — ask for details after half the turn's steps found nothing
     expect(result.stop_reason).toBe("model_done");
   });
 
-  it("a turn that never searched keeps its step-limit reply", async () => {
-    // Failing reads are not searching: the WARP-1012 "kept failing" text is
-    // the more accurate answer there.
-    const reads = Array.from({ length: 6 }, (_, i) => call("read_file", { path: `/guess-${i}.md` }));
-    const { callTool, deps } = scripted(reads, () => true);
+  it("a search tool that keeps failing is an outage, not a failed search: WARP-1012's reply stands", async () => {
+    const searches = Array.from({ length: 6 }, (_, i) => search(`q${i}`));
+    const { callTool, deps } = scripted(searches, () => true);
     const result = await ask(deps, 6);
     expect(callTool).toHaveBeenCalledTimes(6);
     expect(result.stop_reason).toBe("iteration_limit");
+    expect(result.message.content).toContain("search_content tool kept failing");
+  });
+
+  it("never cuts before step 2: one search is no evidence that searching is failing", async () => {
+    const two = scripted(LOOKING);
+    expect((await ask(two.deps, 2)).stop_reason).toBe("iteration_limit");
+    expect(two.callTool).toHaveBeenCalledTimes(2);
+    const three = scripted(LOOKING);
+    expect((await ask(three.deps, 3)).stop_reason).toBe("needs_details");
+    expect(three.callTool).toHaveBeenCalledTimes(2);
   });
 });
