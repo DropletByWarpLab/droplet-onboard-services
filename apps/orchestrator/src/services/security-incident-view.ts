@@ -70,6 +70,12 @@
  *     floored at owner/admin — so nobody overwrites a judgement about things
  *     they cannot see (review item 2). Everyone else: `verdict: null`,
  *     `canGiveVerdict: false`. Routes 16–17 are untouched.
+ *
+ * WARP-3195 (P4 §6.7.1, §8) — route 18 gains `dropletLinks`, the links only
+ * Droplet made that back the incident, for Keep. The same viewer-level rule
+ * (manage, owner/admin, sees everything; security-incident-links.ts): anyone
+ * else reads `null` on every incident, so the R1 pin holds. Routes 16–17 are
+ * untouched.
  */
 import type {
   Prisma,
@@ -92,20 +98,20 @@ import { loadActiveLinks, viewerAreas, zoneChipsFor } from "./security-zones.ser
 import { projectedIncidentPage } from "./security-incident-page.js";
 import { presenceHolds, type OngoingSource } from "./security-inflight.js";
 import { stripUnsafeDisplayChars } from "./security-audit.js";
+import { NARRATIVE_SELECT, narrativeView, type NarrativeView } from "./security-narrative-view.js";
+import { loadIncidentDropletLinks, type IncidentDropletLinkView } from "./security-incident-links.js";
+import { readSummariesSetting } from "./security-ai-settings.js";
 import { QUIET_MS, REASON_CODE_ORDER, SETTLE_MS, parseCounts, parseSpans } from "../lib/security-rules.js";
+import { reasonVisibleTo } from "../lib/security-reason-visibility.js";
 import type { PatternCode } from "../lib/security-baseline-math.js";
 import { REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
+import { seesEverything, type IncidentViewer } from "./security-incident-viewer.js";
 
 // ── the viewer and the rows ────────────────────────────────────────────────
 
-export interface IncidentViewer {
-  userId: string;
-  /** `"all"` for owner/admin; otherwise exactly the granted Frigate camera names. */
-  visibleCameras: "all" | ReadonlySet<string>;
-  mayReadThreats: boolean;
-  /** Owner/admin: every notice. Anyone else: their own (D34). */
-  ownerOrAdmin: boolean;
-}
+// The viewer and `seesEverything` live in a leaf (WARP-3193 ARCH-1): the summary's rules use them without
+// importing this module, which imports those rules. Re-exported so every importer of this module is unchanged.
+export { seesEverything, type IncidentViewer } from "./security-incident-viewer.js";
 
 /** The incident columns the projection reads. */
 export const INCIDENT_VIEW_SELECT = {
@@ -142,6 +148,9 @@ export const REASON_VIEW_SELECT = {
   evidenceAt: true,
   evidenceSummary: true,
   detail: true,
+  // WARP-2979 — a second source the evidence names; `reasonVisibleTo` reads both.
+  relatedCamera: true,
+  relatedLock: true,
 } as const satisfies Prisma.SecurityIncidentReasonSelect;
 
 export type ReasonRowForView = Prisma.SecurityIncidentReasonGetPayload<{ select: typeof REASON_VIEW_SELECT }>;
@@ -185,15 +194,21 @@ export function incidentVisible(i: Pick<IncidentRowForView, "scope" | "cameras">
   return i.cameras.some((c) => seesCamera(v, c));
 }
 
+/** The reason columns visibility reads (WARP-2979: plus the second source the evidence names). */
+export type ReasonVisibilityRow = Pick<ReasonRowForView, "evidenceCamera" | "relatedCamera" | "relatedLock">;
+
+// WARP-2979 — THE reason-visibility rule lives in a leaf module (the notifier imports it too, and this module sits on an
+// import cycle with it); it is re-exported here, beside its callers.
+export { reasonVisibleTo } from "../lib/security-reason-visibility.js";
+
 /**
- * Whether this viewer may see one reason: its evidence camera, or the incident's own scope rule for a camera-less one.
+ * Whether this viewer may see one reason: `reasonVisibleTo` with the incident's own scope rule for a camera-less one.
  * A camera-less reason exists only on a site scope (CHECK SecurityIncidentReason_site_evidence; §6.2 routes its evidence
  * nowhere else), where this and the SQL twins (`visibleReasonWhere`, the list's `visReason`) agree. On area/camera this
  * says hidden and they say shown — a row that cannot exist (review 383d647e item 4).
  */
-export function reasonVisible(r: Pick<ReasonRowForView, "evidenceCamera">, i: Pick<IncidentRowForView, "scope">, v: IncidentViewer): boolean {
-  if (r.evidenceCamera === null) return i.scope === "site_threat" ? v.mayReadThreats : SITE_SCOPES.includes(i.scope);
-  return seesCamera(v, r.evidenceCamera);
+export function reasonVisible(r: ReasonVisibilityRow, i: Pick<IncidentRowForView, "scope">, v: IncidentViewer): boolean {
+  return reasonVisibleTo(r, v, i.scope === "site_threat" ? v.mayReadThreats : SITE_SCOPES.includes(i.scope));
 }
 
 export interface IncidentProjection {
@@ -263,6 +278,16 @@ export function projectedLastActivity(i: IncidentSpanRow, v: IncidentViewer): Da
 }
 
 const NOBODY_IN_VIEW: ReadonlySet<string> = new Set();
+
+/**
+ * The viewer's own FIRST activity (review #2420 — the twin of
+ * `projectedLastActivity`): the earliest `first` of the span entries she sees,
+ * else the stored `firstActivityAt`. The chat tools' period meets HER span.
+ */
+export function projectedFirstActivity(i: IncidentSpanRow & Pick<IncidentRowForView, "firstActivityAt">, v: IncidentViewer): Date {
+  const shown = shownSpans(i, v);
+  return shown ? new Date(Math.min(...shown.map((s) => s.first.getTime()))) : i.firstActivityAt;
+}
 
 /** The viewer's own span and grouping (review #4). */
 function viewerSpan(
@@ -388,10 +413,6 @@ export function judgeableCodes(p: Pick<IncidentProjection, "codes">, flags: read
   return REASON_CODE_ORDER.filter((c) => codes.has(c));
 }
 
-/** Review item 2 — who may see (and give) a verdict: a viewer who sees every camera and may read threats (P4's rule). */
-export function seesEverything(v: IncidentViewer): boolean {
-  return v.visibleCameras === "all" && v.mayReadThreats;
-}
 
 // ── the list's SQL (routes 16–17) ──────────────────────────────────────────
 
@@ -410,11 +431,18 @@ export function incidentVisibilityWhere(v: IncidentViewer): Prisma.SecurityIncid
 /**
  * A reason the viewer may see — on an incident the visibility clause already let through. A camera-less reason is
  * shown: it is site-wide evidence (CHECK SecurityIncidentReason_site_evidence) that §6.2 groups only into a site scope,
- * where `reasonVisible` shows it too.
+ * where `reasonVisible` shows it too. WARP-2979: `reasonVisibleTo`'s related-camera and related-lock clauses, in SQL.
  */
 export function visibleReasonWhere(v: IncidentViewer): Prisma.SecurityIncidentReasonWhereInput {
   if (v.visibleCameras === "all") return {};
-  return { OR: [{ evidenceCamera: { in: [...v.visibleCameras] } }, { evidenceCamera: null }] };
+  const cams = [...v.visibleCameras];
+  return {
+    AND: [
+      { OR: [{ evidenceCamera: { in: cams } }, { evidenceCamera: null }] },
+      { OR: [{ relatedCamera: null }, { relatedCamera: { in: cams } }] },
+      { relatedLock: false },
+    ],
+  };
 }
 
 export type IncidentStateFilter = "attention" | "open" | "acknowledged" | "resolved" | "activity" | "all";
@@ -424,6 +452,16 @@ export interface IncidentListFilters {
   severity?: "alert" | "notice";
   zoneId?: string;
   cursor?: { at: Date; id: string };
+  /**
+   * WARP-2979 (P4 §6.12.3) — the chat tools' period: incidents whose span
+   * AS THIS VIEWER SEES IT (`projectedFirstActivity` … `projectedLastActivity`)
+   * meets `[from, to]`. Review #2420: judged in the query itself — the SQL
+   * page for a camera-limited viewer, the stored columns for a viewer who sees
+   * every camera (the same thing for them) — so a hidden camera's activity
+   * never pulls an incident into her page, and never gives the page a cursor
+   * that leads nowhere (DS-005).
+   */
+  activeBetween?: { from: Date; to: Date };
 }
 
 /**
@@ -486,6 +524,9 @@ export function incidentListWhere(v: IncidentViewer, f: IncidentListFilters): Pr
     });
   }
   if (f.zoneId) and.push({ zoneId: f.zoneId });
+  if (f.activeBetween) {
+    and.push({ lastActivityAt: { gte: f.activeBetween.from }, firstActivityAt: { lte: f.activeBetween.to } });
+  }
   if (f.cursor) {
     and.push({ OR: [{ lastActivityAt: { lt: f.cursor.at } }, { lastActivityAt: f.cursor.at, id: { lt: f.cursor.id } }] });
   }
@@ -546,8 +587,17 @@ export interface IncidentReasonView {
     at: string;
     summary: string;
   };
-  /** The rule's numbers (§4): after_hours_presence {mode, modeSource, nonOpenAt, zoneKind}; camera_offline {offlineForSec, backAt}; threat_signal {activityId, kind}. */
+  /**
+   * The rule's numbers (§4): after_hours_presence {mode, modeSource, nonOpenAt, zoneKind}; camera_offline {offlineForSec,
+   * backAt}; threat_signal {activityId, kind}; camera_offline_during_activity {offlineForSec, backAt, mode, modeSource,
+   * activity: {eventId, kind, label, at, zoneId, zoneName}}.
+   */
   detail: Prisma.JsonValue;
+  /**
+   * WARP-2979 — the second camera the evidence names (camera_offline_during_activity: where the person was seen), else
+   * null. Present only on a reason this viewer may see, which needs this camera visible too.
+   */
+  relatedCamera: string | null;
 }
 
 export interface IncidentAckView {
@@ -643,6 +693,22 @@ export interface IncidentDetail extends IncidentSummary {
   verdict: IncidentVerdictView | null;
   /** WARP-2980 PR-B: visible flags only (D16), in evidence order. */
   patternFlags: IncidentPatternFlagView[];
+  /**
+   * WARP-2979 P4 PR-2 — "Summary by Droplet" (§6.11.3): null unless this viewer
+   * can see everything it could name (security-narrative-view.ts) — no state,
+   * no hint otherwise — and null with summaries off, for plain activity, and
+   * when there is nothing to say (`none` once closed, `expired` with no text).
+   */
+  narrative: NarrativeView | null;
+  /**
+   * WARP-3195 (P4 §6.7.1, §8) — the links only Droplet made that back this
+   * incident: "Droplet linked this camera. Keep the link to get alerts from
+   * it." with Keep (route 24). Null unless the viewer is at manage, owner/admin
+   * and sees everything — a rule that never reads the incident, so it cannot
+   * tell a camera-limited viewer's two R1 worlds apart
+   * (security-incident-links.ts); else the list, `[]` when there is none.
+   */
+  dropletLinks: IncidentDropletLinkView[] | null;
   /**
    * `canGiveVerdict` — exactly when route 35 would accept a mark from them:
    * owner/admin (its role floor) who see everything, at act or above, on a
@@ -850,7 +916,7 @@ export async function loadIncidentDetail(
   now: Date,
   presence?: PresenceSource,
 ): Promise<IncidentDetail | null> {
-  const row = await prisma.securityIncident.findUnique({ where: { id }, select: { ...INCIDENT_VIEW_SELECT, ...VERDICT_SELECT } });
+  const row = await prisma.securityIncident.findUnique({ where: { id }, select: { ...INCIDENT_VIEW_SELECT, ...VERDICT_SELECT, ...NARRATIVE_SELECT } });
   if (!row) return null;
   const reasons = await prisma.securityIncidentReason.findMany({
     where: { incidentId: id },
@@ -924,6 +990,11 @@ export async function loadIncidentDetail(
   }
 
   const lastAck = acks.length > 0 ? acks[acks.length - 1]! : null;
+  // WARP-2979: a missing settings row is its default (on); one that cannot be read shows no summary.
+  const summariesOn = await readSummariesSetting(prisma).then(
+    (s) => s === "on",
+    () => false,
+  );
   return {
     ...summaryOf(p, lastAck),
     actionable: p.actionable && level !== "view" && (p.state === "open" || p.state === "acknowledged"),
@@ -940,6 +1011,7 @@ export async function loadIncidentDetail(
         summary: r.evidenceSummary,
       },
       detail: r.detail,
+      relatedCamera: r.relatedCamera,
     })),
     events,
     moreEvents,
@@ -989,6 +1061,8 @@ export async function loadIncidentDetail(
       detail: f.detail,
       suppression: f.suppression ? { id: f.suppression.id, reason: f.suppression.reason, state: f.suppression.state } : null,
     })),
+    narrative: narrativeView(row, reasons, p, v, summariesOn),
+    dropletLinks: await loadIncidentDropletLinks(prisma, row, v, level),
     viewer: {
       level,
       acknowledged: acks.some((a) => a.byUserId === v.userId),

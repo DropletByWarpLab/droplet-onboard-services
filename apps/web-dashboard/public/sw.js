@@ -93,6 +93,23 @@ function withNotificationParam(url, id) {
   return id && INCIDENT_PATH_RE.test(url) ? url + "?n=" + encodeURIComponent(id) : url;
 }
 
+/**
+ * WARP-3208 — the same rule as `isInAppPath` in src/components/NotificationToaster.tsx
+ * (the canonical copy: this classic script cannot import it; sw.notification-ack.test.ts
+ * pins both to the same cases). The box validates `url`, but a click never navigates
+ * to a stored value it has not re-checked: only an in-app path — no scheme or host, no
+ * `//host`, no backslash, no control character.
+ */
+function isInAppPath(url) {
+  return (
+    typeof url === "string" &&
+    url.startsWith("/") &&
+    !url.startsWith("//") &&
+    !url.includes("\\") &&
+    !/[\u0000-\u001f\u007f]/.test(url)
+  );
+}
+
 /** The tapped notification's row id, when it is one. */
 function ackIdOf(data) {
   const id = data && data.notificationId;
@@ -162,7 +179,8 @@ self.addEventListener("message", (event) => {
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const id = ackIdOf(event.notification.data);
-  const url = withNotificationParam((event.notification.data && event.notification.data.url) || "/cameras", id);
+  const stored = event.notification.data && event.notification.data.url;
+  const url = withNotificationParam(isInAppPath(stored) ? stored : "/cameras", id);
   // Started first, awaited last: the focus/navigation below never waits on it.
   const ack = id ? ackOpened(id) : Promise.resolve(true);
 

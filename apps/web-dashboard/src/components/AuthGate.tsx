@@ -5,6 +5,7 @@ import { useEffect, type ReactNode } from "react";
 import { useAuth } from "@/lib/auth";
 import { Sidebar } from "@/components/Sidebar";
 import { WorkspaceShell } from "@/components/workspace/WorkspaceShell";
+import { AssistantShell } from "@/components/assistant/AssistantShell";
 import { useNavLayout } from "@/lib/nav-layout";
 import { ModuleRouteGuard } from "@/components/ModuleRouteGuard";
 import { DropletMark } from "@/components/DropletMark";
@@ -333,7 +334,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // (and mirroring into the guard's key) while the guard's card is up, so the
   // TV comes back by itself once Security is on again.
   //
-  // D6 (Stefan: "Member wall, own cameras") — the wall runs on a Staff
+  // D6 (Stefan: "Member wall, own cameras") — the wall runs on a Member
   // session only. An owner or admin session would sit signed in, unattended,
   // in a room, one click from everything that account can do; a guest's reads
   // would all be refused by the server, each an audited denial. The refusal
@@ -366,12 +367,26 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // owns its own <main id="main"> (the skip link's target) and sits at the
   // same point in this ladder, so every takeover above and the module guard
   // inside apply to both layouts identically.
+  //
+  // WARP-3062: so does the Assistant shell, for the same reasons — its
+  // business side is the Sidebar below, and its Ask side is `/chat`, which
+  // the guard never blocks (always on).
   if (navLayout === "workspace") {
     return (
       <>
         <WorkspaceShell>
           <ModuleRouteGuard>{children}</ModuleRouteGuard>
         </WorkspaceShell>
+        <HelpLauncher />
+      </>
+    );
+  }
+  if (navLayout === "assistant") {
+    return (
+      <>
+        <AssistantShell>
+          <ModuleRouteGuard>{children}</ModuleRouteGuard>
+        </AssistantShell>
         <HelpLauncher />
       </>
     );

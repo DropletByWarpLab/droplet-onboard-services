@@ -92,6 +92,37 @@ export interface AgentRunSummary {
   stopReason: string | null;
   error: string | null;
   pending: PendingCall | null;
+  // WARP-3299/3300/3301 — chat-started runs. Optional: an older box omits them.
+  origin?: "workshop" | "schedule" | "chat";
+  sessionId?: string | null;
+  title?: string | null;
+  deliverable?: string | null;
+  summary?: string | null;
+  artifacts?: AgentRunArtifact[];
+  /** 1 = next to be picked up; set on queued runs only. */
+  queuePosition?: number | null;
+  /** Why a queued run is not moving: behind other runs, or yielding to chat. */
+  waitingFor?: "none" | "queue" | "chat";
+}
+
+export interface AgentRunArtifact {
+  kind: string;
+  ref: string;
+  title: string;
+}
+
+/** WARP-3301 — `droplet/agent-runs/<username>`: one frame per step and per status change. */
+export interface AgentRunEvent {
+  runId: string;
+  sessionId: string | null;
+  status: AgentRunStatus;
+  iteration: number;
+  maxIter: number;
+  lastTool: string | null;
+  queuePosition: number | null;
+  waitingFor: "none" | "queue" | "chat";
+  title: string | null;
+  summary?: string | null;
 }
 
 export interface AgentRunDetail extends AgentRunSummary {
@@ -105,10 +136,12 @@ async function readError(res: Response, fallback: string): Promise<Error> {
 
 export async function listAgentRuns(params: {
   status?: string;
+  sessionId?: string;
   limit?: number;
 }): Promise<{ items: AgentRunSummary[]; nextCursor: string | null }> {
   const qs = new URLSearchParams();
   if (params.status) qs.set("status", params.status);
+  if (params.sessionId) qs.set("sessionId", params.sessionId);
   qs.set("limit", String(params.limit ?? 25));
   const res = await authFetch(`/api/agent-runs?${qs.toString()}`);
   if (!res?.ok) throw await readError(res, "Couldn't load background runs");

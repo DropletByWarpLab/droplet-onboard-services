@@ -28,7 +28,10 @@ import {
 import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
 // WARP-2552 — the SAME selector the agent loop uses, so the budget estimate
 // and the wire payload cannot disagree.
-import { effectiveAdvertisedToolNames } from "../services/tool-selection.service.js";
+import {
+  effectiveAdvertisedToolNames,
+  resolveTurnToolSelectionMode,
+} from "../services/tool-selection.service.js";
 // WARP-2582 — business context pins. The renderer is pure; the resolver is
 // where the module gate and the per-person tool-domain grant compose.
 import {
@@ -62,6 +65,8 @@ import { chatApprovalStore } from "../services/chat-approval.service.js";
 import { createEnhancementDeps } from "../services/query-enhancement.service.js";
 import { createFileCitationService } from "../services/file-citation.service.js";
 import { TOOLS, TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
+import { dashboardPagesSchema } from "@droplet/shared-types";
+import { navigationToolsWithheld } from "../services/dashboard-navigation.js";
 import { mcpClient } from "../services/mcp-client.singleton.js";
 import type { McpCallContext } from "../services/mcp-client.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
@@ -100,6 +105,7 @@ import { actorFromRequest } from "../services/activity.service.js";
 import {
   buildBaseSystemPrompt,
   buildMemoryFactsBlock,
+  todayLine,
 } from "../services/system-prompt.service.js";
 import { getPersona, composePersonaBlock } from "../services/persona.service.js";
 import {
@@ -117,6 +123,10 @@ import {
   resolveTurnContextWindow,
   type RequestSizeParts,
 } from "../services/context-budget.service.js";
+import {
+  ACTIVE_AGENT_RUN_STATUSES,
+  cancelAgentRun,
+} from "../services/agent-run-worker.service.js";
 
 /** WARP-456: severity bucket the dashboard renders for the activity feed. */
 function activitySeverityForTurnStatus(
@@ -402,6 +412,21 @@ const chatRequestSchema = z.object({
   // foreign ids are silently ignored). Existing conversations are never
   // moved by a turn.
   projectId: z.string().uuid().optional(),
+  // WARP-3116 — the pages this viewer can open, derived by the dashboard from
+  // its nav config on every turn. Forwarded to the tool dispatch as
+  // `_meta.dashboardPages` for find_dashboard_page / open_dashboard_page;
+  // absent (voice, phones, external clients) withholds both tools.
+  //
+  // An invalid list is DROPPED, not a 400: it is navigation metadata, and a
+  // bad nav entry must cost the turn its navigation tools, never the turn.
+  dashboardPages: dashboardPagesSchema.optional().catch(({ error }) => {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[llm/chat] dashboardPages rejected — navigation tools withheld this turn:",
+      error.issues[0]?.message,
+    );
+    return undefined;
+  }),
 });
 
 // WARP-1426 — POST /llm/complete. Single-turn, non-agentic completion:
@@ -472,6 +497,45 @@ export { VOICE_WRITE_TOOLS };
 
 export function isVoicePrincipal(user: AuthedRequest["user"]): boolean {
   return user?.id === "_service:voice" && user?.role === "service";
+}
+
+/**
+ * WARP-3125 — take a caller's LEADING system message(s) off the front of the
+ * request so the route can fold them into its own index-0 system message.
+ *
+ * Applied to the VOICE principal only (`isVoicePrincipal`). This route admits
+ * every service token (role `service`), and the fold puts the caller's text
+ * into the box's own developer instructions, after the base prompt and the
+ * off-LAN notices. Widening it to another service token is a decision to make
+ * for that caller, not a side effect of it sharing the role.
+ *
+ * Why: the gpt-oss chat template turns only `messages[0]` (system or
+ * developer) into the developer instructions. Its message loop has branches
+ * for user, assistant and tool only, so a system message at index 1 or later
+ * is dropped without an error. On a tool turn the route splices its base
+ * prompt at index 0, which pushed voice-io's system message (the "one short
+ * spoken sentence, no markdown" persona) to index 1, and the model never saw
+ * it. Nothing downstream merges messages (ai-gateway forwards them
+ * verbatim).
+ *
+ * Only the leading run is taken. A system message later in the list is
+ * mid-conversation context and keeps its position. Contents are joined with a
+ * blank line, the same separator the base prompt uses between blocks.
+ */
+export function splitLeadingSystemMessages(messages: readonly ChatMessage[]): {
+  preamble: string;
+  rest: ChatMessage[];
+} {
+  let i = 0;
+  while (i < messages.length && messages[i]!.role === "system") i += 1;
+  return {
+    preamble: messages
+      .slice(0, i)
+      .map((m) => contentToText(m.content).trim())
+      .filter((t) => t.length > 0)
+      .join("\n\n"),
+    rest: messages.slice(i),
+  };
 }
 
 type ReasoningEffort = "low" | "medium" | "high";
@@ -1151,6 +1215,30 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         toolAccessScope,
       );
 
+      // WARP-3125 — ONE selection mode for this turn, handed to the budget
+      // estimate and to both runAgent calls so the two stay in step
+      // (WARP-2552 parity). The VOICE principal, when it names its own
+      // `allowed_tools`, gets `explicit`: its set, RBAC-narrowed just above,
+      // is advertised as-is and in registry order, so the tool block is
+      // identical turn to turn and llama-server can reuse the cached prefix.
+      // Everyone else keeps the configured mode, including the other service
+      // tokens (`_service:mcp`, `_service:email`, ...) that share this route
+      // and the `service` role. Agent and durable runs call runAgent directly
+      // and never pass through here.
+      //
+      // WARP-3316 — the same intent, and the reason this resolver replaced its
+      // inline `isVoice ? "off" : config.TOOL_SELECTION_MODE`: the relevance
+      // selector's keyword rules are written for typed chat, so a spoken "is
+      // everything working?" names no domain, the tool the model then calls is
+      // un-advertised, and the TOOL_NOW_AVAILABLE self-heal burns one of
+      // voice's few iterations. `explicit` advertises voice's scope as-is
+      // (nothing dropped) and, unlike `off`, keeps the budget asserted.
+      const toolSelectionMode = resolveTurnToolSelectionMode({
+        configured: config.TOOL_SELECTION_MODE,
+        callerSuppliedAllowedTools: chatReq.allowed_tools !== undefined,
+        voicePrincipal: isVoice,
+      });
+
       // WARP-1121 (§9.3) — is this turn part of the live onboarding
       // interview? One indexed read; fail-open to "not an interview" so a
       // profile-read hiccup can never take normal chat down. When active:
@@ -1189,6 +1277,15 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           (await mcpClient.listTools().catch(() => [])).map((t) => t.name);
         allowedForUser = withholdStoredContentTools(materialised);
       }
+
+      // WARP-3116 — the dashboard's page list. Without one there is no screen
+      // to move, and the navigation tools are withheld where the pool is built
+      // (here for the estimate and guidance, in the agent loop for the wire —
+      // see dashboard-navigation.ts for why not by rewriting allowedForUser).
+      const dashboardPages = chatReq.dashboardPages?.length
+        ? chatReq.dashboardPages
+        : undefined;
+      const navigationWithheld = navigationToolsWithheld(Boolean(dashboardPages));
 
       // Resolve the caller's Nextcloud session token so file-tool
       // handlers (`list_files`, `read_file`, `write_file`, etc.) can
@@ -1230,12 +1327,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       const brainOwnerId = (req as AuthedRequest).user?.id;
       // WARP-845: also forward the caller's role so role-scoped handlers
       // (memory_recall) can filter what the model may read.
+      // WARP-3116: and the dashboard's page list, for the navigation tools.
       const toolCallContext: McpCallContext | undefined =
-        ncToken || userId || role
+        ncToken || userId || role || dashboardPages
           ? {
               ...(ncToken ? { ncToken } : {}),
               ...(userId ? { userId } : {}),
               ...(role ? { userRole: role } : {}),
+              ...(dashboardPages ? { dashboardPages } : {}),
             }
           : undefined;
 
@@ -1283,6 +1382,23 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         });
       }
       let agentMessages: ChatMessage[] = replayStrip.messages;
+      // WARP-3125 — the voice principal's own system message on a tool turn is
+      // taken off here and folded into the base system message below, so it
+      // renders as the model's developer instructions instead of being
+      // dropped at index 1 (see `splitLeadingSystemMessages`). Taken BEFORE
+      // any pin/attachment splice so only the caller's own messages can be
+      // folded. The condition matches the base-prompt block below, so
+      // whatever is taken here is always put back there. Every other caller
+      // keeps its layout (dashboard users and the other service tokens
+      // alike: a folded message joins the box's own system instructions, so
+      // it is not extended past voice); `tool_choice: "none"` turns get no
+      // base prompt, so the caller's message is already index 0 there.
+      let callerSystemPreamble = "";
+      if (isVoice && chatReq.tool_choice !== "none") {
+        const split = splitLeadingSystemMessages(agentMessages);
+        callerSystemPreamble = split.preamble;
+        agentMessages = split.rest;
+      }
       let agentModel = chatReq.model;
       // WARP-904: the provider that actually served this turn — tracks
       // `agentModel`. Vision auto-routing (below) can swap the user's selected
@@ -1389,6 +1505,19 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         }
       }
 
+      // WARP-3299 — the persisted turn, so a tool can link what it starts
+      // (a background run) back to this conversation. Server-side only: the
+      // model never supplies these, and a turn that was not persisted
+      // (ephemeral, service caller) simply carries none.
+      const turnToolCallContext: McpCallContext | undefined =
+        toolCallContext && conversationId
+          ? {
+              ...toolCallContext,
+              conversationId,
+              ...(assistantMessageId ? { messageId: assistantMessageId } : {}),
+            }
+          : toolCallContext;
+
       // WARP-437 follow-up — production-wire EnhancementDeps behind a
       // feature flag. `createEnhancementDeps` returns `undefined` unless
       // `QUERY_ENHANCEMENT_ENABLED=1`, in which case the agent loop's
@@ -1470,8 +1599,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // iteration — the gap the spec's §6 outcome named as the prerequisite
       // to shipping TOOL_SELECTION_MODE.
       //
-      // Skipped entirely when selection is off (nothing consumes it) or the
-      // turn is ephemeral/unauthenticated (no conversation to read).
+      // Skipped entirely when selection is off or explicit (nothing consumes
+      // it) or the turn is ephemeral/unauthenticated (no conversation to
+      // read).
       //
       // try/catch, NOT `.catch()`: a `.catch()` only handles a REJECTED
       // promise. If `getConversationToolNames` is missing from the object
@@ -1481,7 +1611,12 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // fail. Continuity must never cost the user their answer; try/catch is
       // what enforces that rather than merely asserting it.
       let priorToolNames: string[] = [];
-      if (config.TOOL_SELECTION_MODE !== "off" && conversationId && userId) {
+      if (
+        toolSelectionMode !== "off" &&
+        toolSelectionMode !== "explicit" &&
+        conversationId &&
+        userId
+      ) {
         try {
           priorToolNames = await persistence.getConversationToolNames(
             conversationId,
@@ -1968,22 +2103,6 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           console.warn("[llm/chat] memory-fact load failed:", err);
         }
 
-        // WARP-2752 (ADR-051) — the brain block. Same fail-open posture as the
-        // memory block above: an unreadable brain degrades the turn, it never
-        // fails it. `buildBrainBlock` resolves the caller's scope itself and
-        // returns "" if it cannot, so a family turn can never inherit
-        // company-scope rows through an error path.
-        let brainBlock = "";
-        try {
-          brainBlock = await buildBrainBlock(prisma, {
-            id: req.user?.id ?? "",
-            role: role ?? "",
-          });
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn("[llm/chat] brain block load failed:", err);
-        }
-
         // WARP-1118 — compose the personality block fresh from Prisma each
         // request (§7.2: single-row read, no cache to invalidate). Fail-open
         // to no persona block on any error, same posture as the memory block.
@@ -2002,10 +2121,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // composeBusinessBlock role-filters and gates on type again
         // (defense-in-depth). Fail-open to no block on any error.
         let businessBlock = "";
+        // WARP-3281 — the business's zone for the date line, off the same row.
+        let workspaceTz: string | null = null;
         try {
           const workspace = await prisma.workspace.findUnique({
             where: { id: 1 },
           });
+          workspaceTz = workspace?.tz ?? null;
           const workspaceType = (workspace?.type ?? "BUSINESS") as WorkspaceTypeName;
           if (workspaceType === "BUSINESS") {
             businessBlock = composeBusinessBlock(
@@ -2031,20 +2153,22 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // gives us the identity+guidance chars without a persona block for the
         // estimate; the guidance is folded into identityBlock here since both
         // are never-dropped fixed blocks.
-        // WARP-2746 — THE off-LAN filter for the system-prompt blocks. Runs
-        // BEFORE the size estimate so the estimate, `degradeToFit` and the
-        // wire all see the same text: a block withheld here can neither be
-        // sent nor charged against the window.
-        const promptGate = withholdPromptBlocksForOffLan(
-          { memory: memoryBlock, brain: brainBlock, business: businessBlock },
-          isOffLanTurn,
+        // WARP-3281 — today's date, computed once so the size estimate and the
+        // wire carry the same line. Voice gets none: voice-io appends its own
+        // "Right now it is …" clock (services/voice-io/voice/llm.py), and two
+        // clocks from two zone sources could disagree near midnight. On an
+        // off-LAN turn the Workspace.tz label stays on the box (WARP-2746's
+        // class: workspace configuration); the day alone goes.
+        const dateLine = isVoice
+          ? ""
+          : todayLine(new Date(), workspaceTz, { withZone: !isOffLanTurn });
+        const identityAndGuidance = buildBaseSystemPrompt(
+          allowedForUser,
+          "",
+          "",
+          dateLine,
+          navigationWithheld,
         );
-        offLanWithheld.push(...promptGate.withheld);
-        memoryBlock = promptGate.blocks.memory;
-        brainBlock = promptGate.blocks.brain;
-        businessBlock = promptGate.blocks.business;
-
-        const identityAndGuidance = buildBaseSystemPrompt(allowedForUser, "");
         // WARP-1121 (§9.3/§10) — the interview conductor block. Appended
         // after the whole base prompt on interview turns only; folded into
         // the NEVER-DROPPED identity part for sizing (it must survive
@@ -2055,13 +2179,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           : "";
         // The POOL: an explicit allowed set verbatim, otherwise the WARP-1424
         // default chat scope (registry minus chat-tool-scope.ts exclusions).
-        const pooledTools = allowedForUser
-          ? Array.from(TOOLS.values()).filter((t) =>
-              allowedForUser!.includes(t.name),
-            )
-          : Array.from(TOOLS.values()).filter(
-              (t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name),
-            );
+        // WARP-3116: both branches then lose the navigation tools on a turn
+        // with no page list — the agent loop withholds them identically.
+        const pooledTools = (
+          allowedForUser
+            ? Array.from(TOOLS.values()).filter((t) =>
+                allowedForUser!.includes(t.name),
+              )
+            : Array.from(TOOLS.values()).filter(
+                (t) => !EXCLUDED_FROM_CHAT_TOOLS.has(t.name),
+              )
+        ).filter((t) => !navigationWithheld.has(t.name));
         // WARP-2556 — the §3 scope, applied BEFORE selection narrows further.
         //
         // `narrowAllowedToolsForRole` returns `undefined` for a privileged role
@@ -2096,8 +2224,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         //
         // Since WARP-1921 the agent loop narrows the pool to a per-turn subset
         // (`llm-agent.service.ts`, gated on `tool_selection_mode === "domains"`,
-        // which the route passes UNCONDITIONALLY — there is no path that ships
-        // the whole pool except an operator setting TOOL_SELECTION_MODE=off).
+        // which every caller gets unless an operator sets TOOL_SELECTION_MODE=
+        // off, or, since WARP-3125, the voice principal names its own
+        // `allowed_tools` and gets `explicit`).
         // The comment that used to sit here still claimed the estimate
         // "reflects what the model actually receives"; it had been false since
         // selection landed. Measured on a 16384 window: the estimator charged
@@ -2112,19 +2241,63 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // being dropped from the system prompt on every turn — to make room
         // for schemas that were never sent.
         //
-        // Under `off` the pool genuinely IS the wire payload, so it is sized
-        // whole. `effectiveAdvertisedToolNames` is the SAME function the loop
+        // Under `off` and `explicit` the pool genuinely IS the wire payload, so
+        // it is sized whole. `effectiveAdvertisedToolNames` is the SAME function the loop
         // uses, so the two cannot drift; `tool-selection.parity.test.ts` pins
         // that. Runtime-registered remote tools are not in this estimate — the
         // route has no registry access — which is unchanged from before; the
         // loop's own `assertToolAdvertisementFitsBudget` is the gate that sees
         // the fully assembled advertisement.
+        //
+        // WARP-3125 — the per-turn mode, the same value both runAgent calls
+        // get, so an `explicit` voice turn is sized as its whole caller set.
         const advertisedNamesForEstimate = effectiveAdvertisedToolNames({
-          mode: config.TOOL_SELECTION_MODE,
+          mode: toolSelectionMode,
           messages: agentMessages,
           priorToolNames,
           pool: effectiveTools.map((t) => t.name),
         });
+
+        // WARP-2752 (ADR-051) — the brain block. Same fail-open posture as the
+        // memory block above: an unreadable brain degrades the turn, it never
+        // fails it. `buildBrainBlock` resolves the caller's scope itself and
+        // returns "" if it cannot, so a family turn can never inherit
+        // company-scope rows through an error path.
+        //
+        // WARP-3125 — built HERE, after the advertised set, because its closing
+        // hint names `business_find` and must only do so when this turn
+        // advertises it. Voice's fixed list has no `business_find`, and the
+        // block was telling it to call one. It is the SAME set the size
+        // estimate below and the loop use, so the prompt cannot name a tool
+        // the request does not carry.
+        let brainBlock = "";
+        try {
+          brainBlock = await buildBrainBlock(
+            prisma,
+            {
+              id: req.user?.id ?? "",
+              role: role ?? "",
+            },
+            { advertisedTools: advertisedNamesForEstimate },
+          );
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn("[llm/chat] brain block load failed:", err);
+        }
+
+        // WARP-2746 — THE off-LAN filter for the system-prompt blocks. Runs
+        // BEFORE the size estimate so the estimate, `degradeToFit` and the
+        // wire all see the same text: a block withheld here can neither be
+        // sent nor charged against the window.
+        const promptGate = withholdPromptBlocksForOffLan(
+          { memory: memoryBlock, brain: brainBlock, business: businessBlock },
+          isOffLanTurn,
+        );
+        offLanWithheld.push(...promptGate.withheld);
+        memoryBlock = promptGate.blocks.memory;
+        brainBlock = promptGate.blocks.brain;
+        businessBlock = promptGate.blocks.business;
+
         const toolSchemasJson = JSON.stringify(
           effectiveTools
             .filter((t) => advertisedNamesForEstimate.has(t.name))
@@ -2142,10 +2315,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         const assembledText = agentMessages
           .map((m) => contentToText(m.content))
           .join("\n");
+        // WARP-3125 — the voice principal's folded system text. It was sized
+        // inside `historyText` while it sat in agentMessages; it is charged to
+        // the never-dropped identity part now, because it goes out verbatim
+        // and nothing may drop it.
+        const callerPreambleBlock = callerSystemPreamble
+          ? "\n\n" + callerSystemPreamble
+          : "";
         const sizeParts: RequestSizeParts = {
           // Interview conductor rides in the never-dropped identity part
           // (WARP-1121 §10 — interview sessions only; never dropped there).
-          identityBlock: identityAndGuidance + interviewBlock,
+          identityBlock: identityAndGuidance + interviewBlock + callerPreambleBlock,
           personaBlock,
           businessBlock, // WARP-1120 — role-filtered, BUSINESS-only, dropped 1st.
           toolGuidance: "", // folded into identityBlock above.
@@ -2182,6 +2362,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
               allowedForUser,
               degraded.personaBlock,
               degraded.businessBlock,
+              dateLine,
+              navigationWithheld,
             ) +
             memoryBlock +
             // WARP-2752 (ADR-051) — the brain block, AFTER degradation so a
@@ -2199,7 +2381,12 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             // tell the user the truth and name the remedy.
             (isOffLanTurn ? "\n\n" + OFF_LAN_WITHHELD_NOTICE : "") +
             // WARP-2991 — say so when the earlier replies were held back.
-            (historyWithheldMessages > 0 ? "\n\n" + OFF_LAN_HISTORY_NOTICE : ""),
+            (historyWithheldMessages > 0 ? "\n\n" + OFF_LAN_HISTORY_NOTICE : "") +
+            // WARP-3125 — the voice principal's own system text (voice-io's
+            // spoken-reply persona), LAST: it is the most specific instruction
+            // for this surface, and it is stable text, so the prefix through
+            // the tool block stays cacheable. "" for every other caller.
+            callerPreambleBlock,
         };
         agentMessages = [baseSystemMessage, ...agentMessages];
       }
@@ -2212,6 +2399,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           Connection: "keep-alive",
           "X-Accel-Buffering": "no",
         });
+        // Set once a terminal `done` reached the wire (see the catch below).
+        let doneSent = false;
         const onEvent = (e: SSEEvent) => {
           // WARP-854 — an "empty completion": the model "finished" without
           // producing any visible output or calling a tool. Seen in the
@@ -2237,7 +2426,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             liveAssistantContent.trim().length === 0 &&
             (e.stop_reason === "model_done" ||
               e.stop_reason === "context_budget" ||
-              e.stop_reason === "repetition")
+              e.stop_reason === "repetition" ||
+              e.stop_reason === "no_progress")
           ) {
             emptyCompletion = true;
             e = {
@@ -2256,6 +2446,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           } catch {
             /* client gone */
           }
+          if (e.type === "done") doneSent = true;
           if (e.type === "content_delta") {
             liveAssistantContent += e.text;
           } else if (e.type === "tool_call") {
@@ -2349,7 +2540,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             reasoning_effort: reasoningEffort,
             max_iter: chatReq.max_iter,
             context_window: turnWindow.window,
-            tool_selection_mode: config.TOOL_SELECTION_MODE,
+            tool_selection_mode: toolSelectionMode,
             // WARP-1921 — cross-turn continuity for §3 selection.
             prior_tool_names: priorToolNames,
             allowed_tools: allowedForUser,
@@ -2357,7 +2548,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             // every tool dispatch inside the loop.
             toolAccessScope,
             tool_choice: chatReq.tool_choice,
-            toolCallContext,
+            toolCallContext: turnToolCallContext,
             captureReasoning: chatReq.captureReasoning,
             citationContext,
             // WARP-329 — cancel inference + halt the loop on disconnect.
@@ -2407,6 +2598,21 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             terminal = "failed";
             // eslint-disable-next-line no-console
             console.error("[llm/chat] agent loop failed:", err);
+            // A thrown loop (e.g. the model runner 500s on the chat template,
+            // or the gateway 502s) used to end a 200 stream with no terminal
+            // event: the client saw an empty turn and no retry chip. Send the
+            // documented error `done`. The message is fixed text on purpose —
+            // the thrown error can carry upstream internals.
+            if (!doneSent) {
+              onEvent({
+                type: "done",
+                iterations: 0,
+                stop_reason: "error",
+                error:
+                  "agent_loop_failed: the model service returned an error for " +
+                  "this turn. Try again; server logs carry the cause.",
+              });
+            }
           }
         } finally {
           res.end();
@@ -2436,7 +2642,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           reasoning_effort: reasoningEffort,
           max_iter: chatReq.max_iter,
           context_window: turnWindow.window,
-          tool_selection_mode: config.TOOL_SELECTION_MODE,
+          tool_selection_mode: toolSelectionMode,
           // WARP-1921 — cross-turn continuity for §3 selection.
           prior_tool_names: priorToolNames,
           allowed_tools: allowedForUser,
@@ -2444,7 +2650,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // every tool dispatch inside the loop.
           toolAccessScope,
           tool_choice: chatReq.tool_choice,
-          toolCallContext,
+          toolCallContext: turnToolCallContext,
           captureReasoning: chatReq.captureReasoning,
           citationContext,
         });
@@ -2487,7 +2693,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           contentToText(result.message.content).trim().length === 0 &&
           (result.stop_reason === "model_done" ||
             result.stop_reason === "context_budget" ||
-            result.stop_reason === "repetition")
+            result.stop_reason === "repetition" ||
+            result.stop_reason === "no_progress")
         ) {
           result = {
             ...result,
@@ -2675,6 +2882,35 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         wasInterviewSession = profile?.interviewChatId === req.params.id;
       } catch {
         /* not an interview delete as far as we can tell */
+      }
+      // WARP-3299 — a background run this chat started is still working.
+      // Deleting the chat must not strand it silently: without an explicit
+      // `cancelRuns`, answer 409 with the live runs so the client can ask;
+      // `cancelRuns=true` stops them first, `cancelRuns=false` keeps them.
+      const ownerId = (req as AuthedRequest).user?.id;
+      const cancelRuns = req.query.cancelRuns;
+      if (ownerId) {
+        // Fail-open, like the interview probe above: a lookup error must
+        // never block deleting a chat.
+        const liveRuns = await prisma.agentRun
+          .findMany({
+            where: {
+              sessionId: req.params.id,
+              userId: ownerId,
+              status: { in: [...ACTIVE_AGENT_RUN_STATUSES] },
+            },
+            select: { id: true, title: true, status: true },
+          })
+          .catch(() => []);
+        if (liveRuns.length > 0) {
+          if (cancelRuns !== "true" && cancelRuns !== "false") {
+            res.status(409).json({ error: "conversation_has_live_runs", runs: liveRuns });
+            return;
+          }
+          if (cancelRuns === "true") {
+            for (const run of liveRuns) await cancelAgentRun(prisma, run.id);
+          }
+        }
       }
       const deleted = await persistence.deleteConversationForUser(
         req.params.id,

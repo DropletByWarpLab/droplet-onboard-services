@@ -154,6 +154,9 @@ const EXPECTED_TOOL_NAMES = [
   // WARP-1436 — ambient web data via screened egress (both Tier-1)
   "get_weather",
   "currency_convert",
+  // WARP-3116 — dashboard navigation (both Tier-1; pure lookups)
+  "find_dashboard_page",
+  "open_dashboard_page",
   // WARP-1440 — camera depth (search/health Tier-1; toggle/zones/delete Tier-2)
   "search_camera_events",
   "get_camera_health",
@@ -203,6 +206,8 @@ const EXPECTED_TOOL_NAMES = [
   // list is Tier-1. Both in the chat pool: a run is startable from chat.
   "start_agent_run",
   "list_agent_runs",
+  // WARP-3302 — stop one run (write, no prompt). Checking one run is list_agent_runs({run_id}).
+  "cancel_agent_run",
   // routines (WARP-2894, ADR-056 §5.1) — draft is Write-tier with NO
   // confirmation (a draft is inert), list is Tier-1, run is Tier-2.
   "routine_draft",
@@ -218,6 +223,15 @@ const EXPECTED_TOOL_NAMES = [
   "workspace_commit",
   "workspace_run",
   "workspace_propose",
+  // WARP-2979 security (ADR-059 P4 §6.12) — four Tier-1 reads, and the domain
+  // may never hold anything else (the read-only pin below).
+  "security_list_incidents",
+  "security_get_incident",
+  "security_search_events",
+  "security_zone_status",
+  // WARP-2980 (ADR-059 P5 PR-E, §6.18) — what normal looks like for one place;
+  // a Tier-1 read like the other four.
+  "security_explain_pattern",
 ];
 
 describe("TOOLS registry", () => {
@@ -249,6 +263,9 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("start_agent_run")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("list_agent_runs")?.requiresWrite).toBe(false);
     expect(TOOLS.get("list_agent_runs")?.requiresConfirmation).toBe(false);
+    // WARP-3302 — stopping a run only stops work: a write with no prompt.
+    expect(TOOLS.get("cancel_agent_run")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("cancel_agent_run")?.requiresConfirmation).toBe(false);
     // WARP-2894 — a draft is inert (POST /api/tools cannot set status), so
     // drafting is a write that needs no confirmation; a person promotes it
     // on /routines. Running a LIVE routine is real tool calls: Tier-2.
@@ -362,6 +379,12 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("get_weather")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("currency_convert")?.requiresWrite).toBe(false);
     expect(TOOLS.get("currency_convert")?.requiresConfirmation).toBe(false);
+    // WARP-3116 — navigation resolves a page; the dashboard moves the view.
+    // No box state changes, so both are Tier-1.
+    expect(TOOLS.get("find_dashboard_page")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("find_dashboard_page")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("open_dashboard_page")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("open_dashboard_page")?.requiresConfirmation).toBe(false);
     // WARP-1440 — camera reads are Tier-1; detection toggle, zone writes,
     // and clip deletion are Tier-2 (write + handler-enforced confirmation).
     expect(TOOLS.get("search_camera_events")?.requiresWrite).toBe(false);
@@ -502,6 +525,26 @@ describe("TOOLS registry", () => {
     // A mutating-verb tool with requiresWrite:false is exactly the WARP-466
     // email_draft_reply regression class — fail loudly.
     expect(offenders).toEqual([]);
+  });
+
+  // WARP-2979 (ADR-059 P4 §6.12.4; ADR-055 §11.5 extended by brief §4.6) —
+  // Droplet's AI never acknowledges, resolves, changes the mode, hours,
+  // routing or links, and never touches doors or grants. A write or
+  // confirming tool in the `security` domain is a design change, not a diff:
+  // this pin fails it, and the assistant router has no route it could call.
+  it("the security domain holds no write or confirming tool", () => {
+    const security = TOOL_CATALOG.filter((e) => e.domain === "security");
+    // Non-vacuous: the five tools are there to be checked (WARP-2980 added the fifth).
+    expect(security.map((e) => e.name).sort()).toEqual(
+      ["security_explain_pattern", "security_get_incident", "security_list_incidents", "security_search_events", "security_zone_status"],
+    );
+    const offenders = security.filter((e) => e.requiresWrite || e.requiresConfirmation).map((e) => e.name);
+    expect(offenders).toEqual([]);
+    for (const e of security) {
+      const t = TOOLS.get(e.name)!;
+      expect(t.requiresWrite, e.name).toBe(false);
+      expect(t.requiresConfirmation, e.name).toBe(false);
+    }
   });
 
   it("TOOL_CATALOG is in 1:1 correspondence with TOOLS (completeness)", () => {

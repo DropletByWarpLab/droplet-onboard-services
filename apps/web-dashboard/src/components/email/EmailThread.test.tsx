@@ -212,3 +212,40 @@ describe("EmailThread", () => {
     expect(screen.getByLabelText(/loading/i)).toBeInTheDocument();
   });
 });
+
+describe("WARP-3267 — attachments", () => {
+  it("lists a stored attachment with a download link and an over-limit one without", () => {
+    const t = thread();
+    t.messages[0].attachments = [
+      {
+        id: "att-1",
+        partIndex: 0,
+        filename: "quote.pdf",
+        contentType: "application/pdf",
+        size: 2048,
+        sha256: "a".repeat(64),
+        contentId: null,
+        status: "stored",
+      },
+      {
+        id: "att-2",
+        partIndex: 1,
+        filename: "video.mov",
+        contentType: "video/quicktime",
+        size: 50 * 1024 * 1024,
+        sha256: "b".repeat(64),
+        contentId: null,
+        status: "too_large",
+      },
+    ];
+    render(
+      <EmailThread thread={t} draft={null} isLoading={false} canSend={false} onSent={() => {}} />,
+    );
+    const link = screen.getByRole("link", { name: /download/i });
+    expect(link.getAttribute("href")).toBe("/api/email/acc-1/messages/m1/attachments/att-1");
+    expect(link.hasAttribute("download")).toBe(true);
+    expect(screen.getByText("video.mov")).toBeTruthy();
+    expect(screen.getByText(/too large to keep/i)).toBeTruthy();
+    expect(screen.getAllByRole("link", { name: /download/i })).toHaveLength(1);
+  });
+});

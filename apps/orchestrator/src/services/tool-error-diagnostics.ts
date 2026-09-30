@@ -69,8 +69,9 @@ import {
  *   `string_error` a BARE STRING `error` with no code — mcp-server's unknown-
  *                  tool reply and the ORCH-05 `tool_dispatch_failed` envelope
  *                  the agent loop synthesizes around a thrown dispatch.
- *   `raw`          `{raw:text}` — `parseToolResultPayload`'s non-JSON fallback
- *                  (a stdio hiccup; mcp-server itself always emits JSON).
+ *   `raw`          `{raw:text}` — `parseToolResultPayload`'s plain-text shape
+ *                  (a remote MCP / extension tool's text; malformed JSON is
+ *                  an `envelope` with TOOL_OUTPUT_MALFORMED since WARP-3284).
  *   `unknown`      anything else. Kept as an explicit bucket so a future wire
  *                  change shows up as a spike in one token rather than as
  *                  silence.

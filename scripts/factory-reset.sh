@@ -176,8 +176,11 @@ Options:
   --purge-images   Also remove built Docker images + dangling images/networks
   --force          Restart Docker if volumes cannot be removed (stuck references)
   --backup         Emit a pre-reset full-device safety backup and KEEP the
-                   backups dir (WARP-570 gate: a failed backup aborts the reset)
-  --no-backup      DEPRECATED no-op — no backup is already the default
+                   backups dir (WARP-570 gate: a failed backup aborts the reset).
+                   The backup does not carry the extension-signing key, which
+                   the reset rotates: after a restore, re-promote the owner's
+                   extensions (they read as failed until then)
+  --no-backup     DEPRECATED no-op — no backup is already the default
   --decommission   Fully DEREGISTER the device at HQ (delete it from the fleet
                    registry). DEFAULT: RELEASE only — the device stays
                    registered/trusted and self-heals (WARP-980).
@@ -1397,6 +1400,15 @@ log_success "Verified: no .env, snapshot or secrets-dir file remains on $(dirnam
 # (paths only), and refuse to report a clean reset. At the end of Phase 4 for
 # the same reason: every other cleanup has run first.
 if ! secw_verify_extension_key_rotated "$DROPLET_TPM_DIR"; then
+  # WARP-3207: BLOCKED means the gate could not look into the key dir at all
+  # (unsearchable as this user, and no working sudo, e.g. under the
+  # device-bridge unit's NoNewPrivileges). Nothing is known to have survived,
+  # so this says "cannot verify", but it still refuses a clean reset.
+  if [ "$SECW_EXTENSION_KEY_BLOCKED" = "1" ]; then
+    log_error "The extension-signing key rotation CANNOT be verified: $SECW_EXTENSION_KEY_BLOCKED_REASON"
+    log_error "Refusing to report a clean reset. Re-run the reset as root."
+    exit 1
+  fi
   log_error "The extension-signing key SURVIVED the reset:"
   printf '%s\n' "$SECW_EXTENSION_KEY_LEFTOVER" | while IFS= read -r _leftover; do
     [ -n "$_leftover" ] && log_error "  - $_leftover"

@@ -64,9 +64,12 @@ function makePrismaStub() {
         if (idx >= 0) events.splice(idx, 1);
       }),
       deleteMany: vi.fn(async ({ where }: any) => {
+        const before = events.length;
         for (let i = events.length - 1; i >= 0; i--) {
+          if (where.id?.in && !where.id.in.includes(events[i].id)) continue;
           if (events[i].sourceId === where.sourceId) events.splice(i, 1);
         }
+        return { count: before - events.length };
       }),
       // WARP-3193 PERF-10 — createMany with skipDuplicates on (sourceId, externalUid).
       createMany: vi.fn(async ({ data, skipDuplicates }: any) => {
@@ -386,6 +389,142 @@ describe("syncSource", () => {
     expect(third).toMatchObject({ added: 0, updated: 1, total: 250 });
     expect(stub.calendarEvent.update).toHaveBeenCalledTimes(1);
     expect(stub._events.find((e: any) => e.externalUid === "u7@x").endsAt).toEqual(moved[7]!.endsAt);
+  });
+
+  it("WARP-3266: stores each occurrence of a recurring event once, re-syncs without duplicating, removes a newly EXDATE'd one, and renames the old first-instance row in place", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-27T12:00:00Z"));
+    try {
+      const prisma = makePrismaStub();
+      const stub = prisma as any;
+      const src = await createSource(prisma, "alice", { name: "Feed", url: "https://x.ics", authMode: "none" });
+      // The row an older build stored for this series: first instance, bare UID.
+      stub._events.push({
+        id: "legacy", userId: "alice", source: "external", sourceId: src.id, externalUid: "w@x",
+        title: "Standup", startsAt: new Date("2026-10-05T16:00:00Z"), endsAt: new Date("2026-10-05T16:30:00Z"),
+        allDay: false, recurrence: "none",
+      });
+      const master = {
+        uid: "w@x",
+        summary: "Standup",
+        startsAt: new Date("2026-10-05T16:00:00Z"),
+        endsAt: new Date("2026-10-05T16:30:00Z"),
+        allDay: false,
+        rrule: "FREQ=WEEKLY;COUNT=4",
+      };
+      syncCalendarSourceMock.mockResolvedValueOnce({ ok: true, events: [master] });
+      const first = await syncSource(prisma, src.id);
+      // The legacy row is adopted as the first occurrence (same id, so CRM /
+      // reminder links survive), not deleted and re-created.
+      expect(first).toMatchObject({ added: 3, updated: 1, total: 4, removed: 0 });
+      expect(stub._events.find((e: any) => e.id === "legacy")).toMatchObject({
+        externalUid: "w@x::2026-10-05T16:00:00.000Z",
+        recurrence: "occurrence",
+      });
+      expect(stub._events.map((e: any) => e.externalUid).sort()).toEqual([
+        "w@x::2026-10-05T16:00:00.000Z",
+        "w@x::2026-10-12T16:00:00.000Z",
+        "w@x::2026-10-19T16:00:00.000Z",
+        "w@x::2026-10-26T16:00:00.000Z",
+      ]);
+      expect(stub._events.every((e: any) => e.recurrence === "occurrence")).toBe(true);
+
+      syncCalendarSourceMock.mockResolvedValueOnce({
+        ok: true,
+        events: [{ ...master, exdates: [new Date("2026-10-12T16:00:00Z")] }],
+      });
+      const second = await syncSource(prisma, src.id);
+      expect(second).toMatchObject({ added: 0, updated: 0, removed: 1, total: 3 });
+      expect(stub._events).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("WARP-3266: a series that turns unexpanded loses its old occurrence rows (no duplicates)", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-27T12:00:00Z"));
+    try {
+      const prisma = makePrismaStub();
+      const stub = prisma as any;
+      const src = await createSource(prisma, "alice", { name: "Feed", url: "https://x.ics", authMode: "none" });
+      const master = {
+        uid: "w@x",
+        summary: "Standup",
+        startsAt: new Date("2026-10-05T16:00:00Z"),
+        endsAt: new Date("2026-10-05T16:30:00Z"),
+        allDay: false,
+        rrule: "FREQ=WEEKLY;COUNT=4",
+      };
+      syncCalendarSourceMock.mockResolvedValueOnce({ ok: true, events: [master] });
+      await syncSource(prisma, src.id);
+      expect(stub._events).toHaveLength(4);
+
+      syncCalendarSourceMock.mockResolvedValueOnce({
+        ok: true,
+        events: [{ ...master, rrule: "FREQ=MONTHLY;BYDAY=MO;BYSETPOS=1" }],
+      });
+      const r = await syncSource(prisma, src.id);
+      expect(r).toMatchObject({ added: 1, removed: 4, total: 1 });
+      expect(stub._events.map((e: any) => [e.externalUid, e.recurrence])).toEqual([["w@x", "unexpanded"]]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  const weekly = {
+    uid: "w@x",
+    summary: "Standup",
+    startsAt: new Date("2026-10-05T16:00:00Z"),
+    endsAt: new Date("2026-10-05T16:30:00Z"),
+    allDay: false,
+    rrule: "FREQ=WEEKLY;COUNT=4",
+  };
+
+  it("WARP-3266: a failed insert deletes nothing and surfaces lastSyncError", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-27T12:00:00Z"));
+    try {
+      const prisma = makePrismaStub();
+      const stub = prisma as any;
+      const src = await createSource(prisma, "alice", { name: "Feed", url: "https://x.ics", authMode: "none" });
+      stub._events.push({
+        id: "legacy", userId: "alice", source: "external", sourceId: src.id, externalUid: "w@x",
+        title: "Standup", startsAt: new Date("2026-10-19T16:00:00Z"), endsAt: new Date("2026-10-19T16:30:00Z"),
+        allDay: false, recurrence: "none",
+      });
+      stub.calendarEvent.createMany.mockRejectedValueOnce(new Error("db down"));
+      syncCalendarSourceMock.mockResolvedValueOnce({ ok: true, events: [weekly] });
+      const r = await syncSource(prisma, src.id);
+      expect(r.error).toMatch(/not saved/);
+      expect(r.removed).toBe(0);
+      expect(stub.calendarEvent.deleteMany).not.toHaveBeenCalled();
+      expect(stub._events.map((e: any) => e.id)).toEqual(["legacy"]);
+      expect(stub._sources.find((s: any) => s.id === src.id).lastSyncError).toMatch(/not saved/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("WARP-3266: a bare row outside the window is kept when its series has no in-window occurrence", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-27T12:00:00Z"));
+    try {
+      const prisma = makePrismaStub();
+      const stub = prisma as any;
+      const src = await createSource(prisma, "alice", { name: "Feed", url: "https://x.ics", authMode: "none" });
+      const kickoff = { ...weekly, uid: "k@x", startsAt: new Date("2028-09-04T16:00:00Z"), endsAt: new Date("2028-09-04T17:00:00Z") };
+      stub._events.push({
+        id: "future", userId: "alice", source: "external", sourceId: src.id, externalUid: "k@x",
+        title: "Kickoff", startsAt: kickoff.startsAt, endsAt: kickoff.endsAt, allDay: false, recurrence: "none",
+      });
+      syncCalendarSourceMock.mockResolvedValueOnce({ ok: true, events: [kickoff] });
+      const r = await syncSource(prisma, src.id);
+      expect(r).toMatchObject({ added: 0, removed: 0, total: 0 });
+      expect(stub._events.map((e: any) => e.id)).toEqual(["future"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("persists lastSyncError on fetch failure", async () => {
