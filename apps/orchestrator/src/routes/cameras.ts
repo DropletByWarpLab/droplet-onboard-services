@@ -1878,7 +1878,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!isValidEventId(req.params.eventId)) {
         return res.status(400).json({ error: "Invalid event ID format" });
       }
-      const frigateResp = await fetchEventThumbnail(req.params.eventId);
+      const frigateResp = await fetchEventThumbnail(req.params.eventId).catch((err: unknown) => {
+        if (err instanceof Error && err.message === "thumbnail_not_found") return null;
+        throw err; // any other upstream failure keeps its current status
+      });
+      if (!frigateResp) return res.status(404).json({ error: "Thumbnail not found" });
       const contentType = frigateResp.headers.get("content-type") || "image/jpeg";
       res.setHeader("Content-Type", contentType);
       res.setHeader("Cache-Control", "private, no-store"); // WARP-3103: footage never lands in a cache
