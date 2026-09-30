@@ -167,9 +167,8 @@ This is a class fix across all three clients, not three separate nits.
 
 ## Amendment 1: the native Windows client (WARP-3245)
 
-- **Status:** Proposed. It becomes **Accepted** when Romain approves the PR
-  that lands it. That PR flips this word before it merges, so the amendment
-  merges only as Accepted.
+- **Status:** Accepted, 2026-09-30, by Stefan Cruceru, who merged it ahead
+  of Romain's sign-off. R15 below stays provisional until Romain confirms it.
 - **Date:** 2026-09-27 · **Ticket:** [WARP-3245](https://warp-lab.atlassian.net/browse/WARP-3245) · epic [WARP-3223](https://warp-lab.atlassian.net/browse/WARP-3223)
 - **Why:** [ADR-062](ADR-062-native-desktop-clients.md)
   ([#2444](https://github.com/DropletByWarpLab/droplet-onboard-services/pull/2444))
