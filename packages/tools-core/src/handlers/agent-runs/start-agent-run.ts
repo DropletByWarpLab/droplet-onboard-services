@@ -25,21 +25,21 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
 const inputSchema = {
   type: "object",
   properties: {
-    title: { type: "string", description: "Short label, under 60 characters." },
-    goal: { type: "string", description: "What to accomplish, in plain language." },
-    deliverable: { type: "string", description: "What the finished result should be." },
-    constraints: { type: "string", description: "Optional limits to respect." },
+    title: { type: "string", description: "Label, <60 chars." },
+    goal: { type: "string", description: "What to do, in plain words." },
+    deliverable: { type: "string", description: "The expected result." },
+    constraints: { type: "string", description: "Limits to respect." },
     refs: {
       type: "array",
       items: { type: "string" },
-      description: "Optional files or ids to start from.",
+      description: "Files or ids to start from.",
     },
     max_iter: {
       type: "integer",
       minimum: 1,
-      description: "Optional step budget for the run.",
+      description: "Step budget.",
     },
-    workspace: { type: "string", description: "Optional Workshop workspace id: build an extension there instead." },
+    workspace: { type: "string", description: "Workshop workspace id: build an extension there." },
   },
   required: ["goal"],
   additionalProperties: false,
@@ -135,7 +135,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const startAgentRun: Tool = {
   name: "start_agent_run",
   description:
-    "Start a background run: Droplet works on a multi-step task unattended (minutes) and posts the result in this chat. Use for jobs too long for one reply: sweeping files, reviewing many items. Call it directly: the person approves it on a card, never ask first in text.",
+    "Run a multi-step task unattended (minutes); the result posts in this chat. For jobs too long for one reply, e.g. sweeping files. Call it directly; the person approves on a card, never in text.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

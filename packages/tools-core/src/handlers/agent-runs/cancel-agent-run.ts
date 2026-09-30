@@ -63,7 +63,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const cancelAgentRun: Tool = {
   name: "cancel_agent_run",
   description:
-    "Stop one of the user's background runs when they ask. Completed steps stay done.",
+    "Stop a background run when the user asks. Finished steps stay done.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

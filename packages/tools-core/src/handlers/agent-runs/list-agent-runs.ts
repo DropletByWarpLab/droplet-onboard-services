@@ -29,9 +29,9 @@ const inputSchema = {
     status: {
       type: "string",
       enum: [...STATUSES],
-      description: "Only runs in this state.",
+      description: "Filter by state.",
     },
-    this_chat: { type: "boolean", description: "Only runs started in this chat." },
+    this_chat: { type: "boolean", description: "Only this chat's runs." },
     limit: { type: "integer", minimum: 1, maximum: 50, description: "Default 10." },
   },
   additionalProperties: false,
@@ -140,7 +140,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const listAgentRuns: Tool = {
   name: "list_agent_runs",
   description:
-    "Your background runs, newest first: state, steps, result, any approval awaited. Use when the user asks; never loop on it, results reach the chat by themselves.",
+    "Background runs, newest first: state, steps, result, approval awaited. Only when asked; results post to the chat by themselves.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,
