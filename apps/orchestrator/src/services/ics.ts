@@ -5,9 +5,10 @@
  * public calendars, Fastmail, etc.) and to serialize the user's own events
  * for the /api/calendar/publish endpoint so phones can subscribe via
  * webcal://. We deliberately do NOT implement RRULE expansion or VALARM
- * semantics. Recurring events coming from a feed are stored as their first
- * instance only, with no marker — `IcsEvent` carries the raw `rrule`, but
- * `calendar.service.ts` has no column to persist it into.
+ * semantics HERE. Recurring events (RRULE, EXDATE, RECURRENCE-ID overrides)
+ * are parsed into `IcsEvent` and expanded by `ics-recurrence.ts` at sync time
+ * (WARP-3266); a rule outside the supported subset is stored as its first
+ * instance with `recurrence = "unexpanded"`, never silently.
  *
  * Nested components (VALARM, and anything else opened with BEGIN: inside a
  * VEVENT) are SKIPPED, not merely unmodelled — see `parseIcs`. That
@@ -39,10 +40,10 @@
  * the documented drop class rather than producing a wrong time.
  *
  * Extending this module:
- *  - Recurring events: add an `rrule` library + expand on read in
- *    calendar.service.ts. NOTE: `utils/rrule.ts`'s `nextFireFromRrule` is a
- *    next-fire advancer, NOT an expander — it ignores COUNT/UNTIL and rejects
- *    the bare `FREQ=WEEKLY;BYDAY=TU` Google emits. Do not reuse it here.
+ *  - Recurring events: see `ics-recurrence.ts`. NOTE: `utils/rrule.ts`'s
+ *    `nextFireFromRrule` is a next-fire advancer, NOT an expander — it
+ *    ignores COUNT/UNTIL and rejects the bare `FREQ=WEEKLY;BYDAY=TU` Google
+ *    emits. Do not reuse it here.
  *  - Windows zone names: vendor the CLDR windowsZones map, or read the
  *    STANDARD/DAYLIGHT offsets out of the VTIMEZONE the feed already ships.
  *  - Attendees / RSVP: parse ATTENDEE lines into a separate table.
@@ -58,8 +59,27 @@ export interface IcsEvent {
   startsAt: Date;
   endsAt: Date;
   allDay: boolean;
-  // Raw RRULE if present — caller may surface as text rather than expand.
+  // Raw RRULE if present — expanded by ics-recurrence.ts (WARP-3266).
   rrule?: string;
+  /** The resolved IANA zone DTSTART was written in; absent for UTC, floating
+   *  and DATE values. Recurrence repeats the WALL CLOCK in this zone, so a
+   *  9:00 meeting stays at 9:00 across a DST change. */
+  tzid?: string;
+  /** EXDATE instants (DATE-TIME form). */
+  exdates?: Date[];
+  /** EXDATE days in DATE form, `YYYY-MM-DD`: excludes whichever occurrence
+   *  falls on that calendar day in the series' own zone. */
+  exdateDays?: string[];
+  /** RECURRENCE-ID: this VEVENT overrides the instance of series `uid` that
+   *  originally started at this instant. */
+  recurrenceId?: Date;
+  /** RECURRENCE-ID's RANGE parameter, uppercased (`THISANDFUTURE`). */
+  recurrenceRange?: string;
+  /** DTSTART's wall clock as written, when it carries a TZID. Recurrence
+   *  repeats this, not the instant read back (which a DST gap shifts). */
+  dtstartWall?: { ymd: string; minuteOfDay: number };
+  /** STATUS, uppercased. A CANCELLED override removes its instance. */
+  status?: string;
 }
 
 /** Unfold continuation lines (RFC 5545 §3.1) — a line beginning with
@@ -170,7 +190,7 @@ function normalizeTzid(tzid: string): string | undefined {
  *  to state which of the two it is passing. RFC 5545 §3.3.5 forbids TZID on a
  *  value that already carries `Z`, so an explicit `Z` wins and the parameter
  *  is ignored rather than double-applied. */
-function parseIcsDateTime(value: string, tzid: string | undefined): Date {
+export function parseIcsDateTime(value: string, tzid: string | undefined): Date {
   const v = value.trim();
   // DATE form: YYYYMMDD. TZID does not apply — a DATE has no time of day.
   if (/^\d{8}$/.test(v)) {
@@ -306,6 +326,13 @@ export function parseIcs(text: string): IcsEvent[] {
           endsAt: current.endsAt,
           allDay: current._allDay === true,
           rrule: current.rrule,
+          tzid: current.tzid,
+          exdates: current.exdates,
+          exdateDays: current.exdateDays,
+          recurrenceId: current.recurrenceId,
+          recurrenceRange: current.recurrenceRange,
+          dtstartWall: current.dtstartWall,
+          status: current.status,
         });
       }
       current = {};
@@ -343,6 +370,17 @@ export function parseIcs(text: string): IcsEvent[] {
         break;
       case "DTSTART":
         current.startsAt = parseIcsDateTime(parsed.value, parsed.params.TZID);
+        current.tzid =
+          parsed.params.TZID !== undefined && !parsed.value.trim().endsWith("Z")
+            ? normalizeTzid(parsed.params.TZID)
+            : undefined;
+        {
+          const w = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/.exec(parsed.value.trim());
+          current.dtstartWall =
+            current.tzid && w
+              ? { ymd: `${w[1]}-${w[2]}-${w[3]}`, minuteOfDay: Number(w[4]) * 60 + Number(w[5]) }
+              : undefined;
+        }
         if (parsed.params.VALUE === "DATE" || /^\d{8}$/.test(parsed.value.trim())) {
           current._allDay = true;
         }
@@ -352,6 +390,28 @@ export function parseIcs(text: string): IcsEvent[] {
         break;
       case "RRULE":
         current.rrule = parsed.value;
+        break;
+      case "EXDATE":
+        // Comma-separated list; the line may repeat. A value that does not
+        // parse is ignored rather than dropping the event.
+        for (const raw of parsed.value.split(",")) {
+          const v = raw.trim();
+          if (/^\d{8}$/.test(v)) {
+            (current.exdateDays ??= []).push(`${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}`);
+          } else {
+            const at = parseIcsDateTime(v, parsed.params.TZID);
+            if (!isNaN(at.getTime())) (current.exdates ??= []).push(at);
+          }
+        }
+        break;
+      case "RECURRENCE-ID": {
+        const at = parseIcsDateTime(parsed.value, parsed.params.TZID);
+        if (!isNaN(at.getTime())) current.recurrenceId = at;
+        current.recurrenceRange = parsed.params.RANGE?.toUpperCase();
+        break;
+      }
+      case "STATUS":
+        current.status = parsed.value.trim().toUpperCase();
         break;
     }
   }
