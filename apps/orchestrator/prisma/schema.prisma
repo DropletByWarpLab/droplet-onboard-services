@@ -1060,6 +1060,11 @@ model UserInvite {
   // separate ticket.
   role         Role      @default(family)
   createdBy    String // username of issuing admin
+  // WARP-3263: the issuing admin's User.id, copied to User.invitedById at
+  // accept. No FK: an audit pointer that must not block invite creation;
+  // accept checks the row still exists before copying it. Null on invites
+  // issued before this column existed.
+  createdById  String?
   expiresAt    DateTime
   // WARP-3193 QUAL-3: the lifecycle is this column, not the absence of the
   // timestamps below (CLAUDE.md no-guessing rule; WARP-218
@@ -2983,6 +2988,16 @@ model User {
   // silently strip or downgrade a person's assignment.
   accessRoleId     String?
   accessRole       AccessRole?           @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
+  // WARP-3263: the person who brought this account onto the box: the invite's
+  // issuer (stamped at invite accept) or the admin who created it directly
+  // (POST /auth/users). An explicit id, never inferred from usernames or
+  // timestamps. Null when nobody did (setup owner, SSO/SCIM) or when that
+  // person was later deleted (SetNull), so a new hire reusing the old
+  // username is never mistaken for the inviter. An external guest's Messages
+  // roster shows this person.
+  invitedById      String?
+  invitedBy        User?                 @relation("UserInvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
+  invitees         User[]                @relation("UserInvitedBy")
   // ADR-032 / WARP-1525: per-person feature-axis exceptions (design D-A, v1).
   accessExceptions UserAccessException[]
   // WARP-2748 (ADR-051): findings assigned to this person. SetNull on the

@@ -43,16 +43,20 @@ export interface TeamChatHttpResponse {
 const UNAVAILABLE_MESSAGE =
   "Messages is unavailable — the Messages module may be turned off in Settings → Modules.";
 
-/** The roster row shape GET /api/team-chat/contacts serves. */
+/** The roster row shape GET /api/team-chat/contacts serves. `username` is
+ *  absent for an external guest caller, who gets names only (WARP-3263). */
 export interface RosterContact {
   id: string;
   displayName: string;
-  username: string;
+  username?: string;
 }
 
 export type RosterRead =
-  | { ok: true; contacts: RosterContact[]; meId: string }
+  | { ok: true; contacts: RosterContact[]; meId: string; canStartConversation: boolean }
   | { ok: false; result: ToolResult };
+
+const GUEST_CANNOT_START_MESSAGE =
+  "External guests can't start a conversation. They can only reply in one a member started (pass its thread_id).";
 
 /**
  * Map the roster response. A 404 is the team_chat module gate.
@@ -82,6 +86,7 @@ export async function readRosterResponse(
   const body = (await res.json().catch(() => null)) as {
     contacts?: RosterContact[];
     me?: { id?: unknown };
+    canStartConversation?: boolean;
   } | null;
   const meId = body?.me?.id;
   if (typeof meId !== "string" || meId.length === 0) {
@@ -90,7 +95,14 @@ export async function readRosterResponse(
       result: err("TEAM_CHAT_SEND_FAILED", "orchestrator did not say who is sending"),
     };
   }
-  return { ok: true, contacts: body?.contacts ?? [], meId };
+  return {
+    ok: true,
+    contacts: body?.contacts ?? [],
+    meId,
+    // WARP-3263 — stated by the orchestrator, never inferred from a
+    // names-only roster. Absent (an older orchestrator) means allowed.
+    canStartConversation: body?.canStartConversation !== false,
+  };
 }
 
 const SELF_ONLY_MESSAGE = "recipients must include someone other than yourself";
@@ -109,7 +121,9 @@ export function previewRecipients(
   roster: { contacts: RosterContact[]; meId: string },
   usernames: string[],
 ): RecipientPreview {
-  const byUsername = new Map(roster.contacts.map((c) => [c.username, c] as const));
+  const byUsername = new Map(
+    roster.contacts.flatMap((c) => (c.username ? [[c.username, c] as const] : [])),
+  );
   const others = usernames.filter((u) => byUsername.get(u)?.id !== roster.meId);
   if (others.length === 0) {
     return { ok: false, result: err("INVALID_ARGS", SELF_ONLY_MESSAGE) };
@@ -135,10 +149,18 @@ export type RecipientResolution =
  * thread is with; their count decides direct vs group.
  */
 export function resolveRecipients(
-  roster: { contacts: RosterContact[]; meId: string },
+  roster: { contacts: RosterContact[]; meId: string; canStartConversation: boolean },
   usernames: string[],
 ): RecipientResolution {
-  const byUsername = new Map(roster.contacts.map((c) => [c.username, c] as const));
+  if (!roster.canStartConversation) {
+    return {
+      ok: false,
+      result: err("GUEST_CANNOT_START_CONVERSATION", GUEST_CANNOT_START_MESSAGE),
+    };
+  }
+  const byUsername = new Map(
+    roster.contacts.flatMap((c) => (c.username ? [[c.username, c] as const] : [])),
+  );
   const missing = usernames.filter((u) => !byUsername.has(u));
   if (missing.length > 0) {
     return {
@@ -183,6 +205,15 @@ export async function readThreadResponse(
       ok: false,
       result: err("INVALID_ARGS", body?.error ?? "invalid thread request"),
     };
+  }
+  if (res.status === 403) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    if (body?.error === "guest_cannot_start_conversation") {
+      return {
+        ok: false,
+        result: err("GUEST_CANNOT_START_CONVERSATION", GUEST_CANNOT_START_MESSAGE),
+      };
+    }
   }
   if (!res.ok) {
     return {

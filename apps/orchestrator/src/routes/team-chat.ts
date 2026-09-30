@@ -370,11 +370,64 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
     });
   }
 
+  /**
+   * WARP-3263 — an external guest's directory. A guest is someone outside
+   * the company: the staff list and org roles are company data, and an
+   * unsolicited guest DM to the owner is a phishing vector. So a guest sees
+   * only the people they already share a conversation with, plus the person
+   * who invited them — names only (no username, no role).
+   *
+   * The inviter is `User.invitedById`, an explicit id stamped at invite
+   * accept (or by the admin who created the account). It is never inferred
+   * from usernames or timestamps, and it is SetNull when that person is
+   * deleted, so a new hire who reuses their username is never listed.
+   * Accounts with no recorded inviter (SSO/SCIM, pre-column rows) see only
+   * their conversations' people, which fails closed.
+   */
+  async function guestContacts(
+    me: Caller,
+  ): Promise<Array<{ id: string; displayName: string }>> {
+    const [self, shared] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: me.id },
+        select: { invitedById: true },
+      }),
+      // TeamChatParticipant.userId has no User relation, so this stays two
+      // participant reads rather than one relation filter.
+      prisma.teamChatParticipant
+        .findMany({ where: { userId: me.id }, select: { threadId: true } })
+        .then((mine) =>
+          mine.length === 0
+            ? []
+            : prisma.teamChatParticipant.findMany({
+                where: {
+                  threadId: { in: mine.map((p) => p.threadId) },
+                  userId: { not: me.id },
+                },
+                select: { userId: true },
+              }),
+        ),
+    ]);
+    const ids = new Set(shared.map((p) => p.userId));
+    if (self?.invitedById) ids.add(self.invitedById);
+    return prisma.user.findMany({
+      where: {
+        directoryStatus: "ACTIVE",
+        role: { in: [...HUMAN_ROLES] },
+        id: { in: [...ids], not: me.id },
+      },
+      select: { id: true, displayName: true },
+      orderBy: { displayName: "asc" },
+    });
+  }
+
   // ── Roster ──────────────────────────────────────────────────────
 
   // Exists because GET /api/auth/users is owner/admin-only; the picker
   // needs names for every human tier. Minimal projection, ACTIVE humans
-  // only — never service principals, never deactivated rows.
+  // only — never service principals, never deactivated rows. Owners,
+  // admins and members get the full roster; a guest gets guestContacts()
+  // (WARP-3263).
   // WARP-1685: guardOrMcp — the send tools resolve recipient usernames to
   // User.ids through this roster, acting as the forwarded human.
   // WARP-3196: `me` is the resolved caller's User.id. The tools drop the
@@ -388,6 +441,17 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
         res.status(401).json({ error: "auth_required" });
         return;
       }
+      // `canStartConversation` states the POST /team-chat/threads rule
+      // explicitly, so a client (the LLM send tools) never has to infer
+      // "guest" from a roster that lacks usernames.
+      if (me.role === "guest") {
+        res.json({
+          contacts: await guestContacts(me),
+          me: { id: me.id },
+          canStartConversation: false,
+        });
+        return;
+      }
       const contacts = await prisma.user.findMany({
         where: {
           directoryStatus: "ACTIVE",
@@ -396,7 +460,7 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
         select: contactSelect,
         orderBy: { displayName: "asc" },
       });
-      res.json({ contacts, me: { id: me.id } });
+      res.json({ contacts, me: { id: me.id }, canStartConversation: true });
     } catch (err) {
       next(err);
     }
@@ -460,7 +524,9 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
           participants: t.participants.map((p) => ({
             userId: p.userId,
             displayName: names.get(p.userId)?.displayName ?? null,
-            username: names.get(p.userId)?.username ?? null,
+            // WARP-3263 — a guest sees names only, never login handles.
+            username:
+              me.role === "guest" ? null : (names.get(p.userId)?.username ?? null),
           })),
           lastMessage: t.messages[0]
             ? toMessageDto(t.messages[0], names.get(t.messages[0].senderId)?.displayName)
@@ -483,6 +549,13 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
       const me = await resolveCaller(req);
       if (!me) {
         res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      // WARP-3263 — an external guest can't start a conversation; staff
+      // (owner/admin/member) add a guest instead. Before validation so the
+      // answer never depends on who the guest named.
+      if (me.role === "guest") {
+        res.status(403).json({ error: "guest_cannot_start_conversation" });
         return;
       }
       const parsed = createThreadSchema.safeParse(req.body);

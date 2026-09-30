@@ -8483,8 +8483,9 @@ async function teamChatFail(
 export interface TeamChatContact {
   id: string;
   displayName: string;
-  username: string;
-  role: string;
+  /** WARP-3263 — absent for an external guest's directory (names only). */
+  username?: string;
+  role?: string;
 }
 
 export type TeamChatMessageKind =
