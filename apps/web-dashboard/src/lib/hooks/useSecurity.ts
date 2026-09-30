@@ -10,7 +10,9 @@
  * that is quiet apart from one that is not being fed.
  *
  * WARP-2977 P2b adds the areas, sources, site-mode and opening-hours hooks
- * (bottom of the file). Each returns its OWN `mutate`, and each write helper
+ * (bottom of the file). WARP-2979 (P4) adds Droplet's suggestions and the
+ * decisions on its links (`useLinkProposals`) and the AI settings
+ * (`useAiSettings`). Each returns its OWN `mutate`, and each write helper
  * throws the apiFetch TypedError for the caller to render with
  * `translateError(err, "security")`. None of them can reach the feed's
  * useSWRInfinite keys — after a write that changes feed rows (a mode change,
@@ -19,7 +21,15 @@
 import { useCallback, useMemo } from "react";
 import useSWR, { useSWRConfig, type Revalidator, type RevalidatorOptions } from "swr";
 import useSWRInfinite from "swr/infinite";
+import { closeIncidentNotifications } from "@/lib/incident-notifications";
 import {
+  SECURITY_AI_SETTINGS_PATH,
+  SECURITY_LINK_PROPOSALS_PATH,
+  acceptSecurityLink,
+  getSecurityAiSettings,
+  getSecurityLinkProposals,
+  putSecurityAiSettings,
+  rejectSecurityLink,
   SECURITY_ALERT_ROUTING_PATH,
   SECURITY_HOURS_PATH,
   SECURITY_INCIDENTS_PATH,
@@ -36,6 +46,7 @@ import {
   getSecurityIncidents,
   putAlertRouting,
   resolveSecurityIncident,
+  requestSecurityIncidentNarrative,
   setSecurityIncidentVerdict,
   type SecurityIncidentsQuery,
   archiveSecurityZone,
@@ -66,6 +77,11 @@ import {
   type SecurityEventsQuery,
 } from "@/lib/api";
 import type {
+  SecurityAiSettingsBody,
+  SecurityAiSettingsView,
+  SecurityAiSettingsWriteResult,
+  SecurityLinkDecisionResult,
+  SecurityLinkProposalsView,
   AlertRoutingPerson,
   AlertRoutingSetBody,
   AlertRoutingView,
@@ -600,14 +616,35 @@ export function useSecurityIncidents(filter: SecurityIncidentsFilter) {
     [filterKey],
   );
 
+  // WARP-3185 C — `revalidateAll`: the 15 s refresh re-reads every page the
+  // person loaded, not only the first (SWR's default for an infinite list),
+  // so an older page never shows an incident as it stood minutes ago. It
+  // costs one request per loaded page per refresh; the list opens on one page
+  // ("Needs attention" is short) and grows only when someone presses Show
+  // older. Refreshing only on mount would be cheaper, but this page is kept
+  // open and polled, and between mounts older pages would still go stale.
   const { data, error, isLoading, isValidating, size, setSize, mutate } = useSWRInfinite<IncidentsPage>(getKey, fetcher, {
     refreshInterval: REFRESH_MS,
     revalidateFirstPage: true,
     revalidateOnFocus: false,
-    revalidateAll: false,
+    revalidateAll: true,
   });
 
-  const incidents: IncidentSummary[] = useMemo(() => (data ?? []).flatMap((p) => p.incidents), [data]);
+  // Keyset pages are read at different moments: an incident whose activity
+  // lifted it onto an earlier page can still sit on a later one. List it once,
+  // where the newest read put it (the earlier page).
+  const incidents: IncidentSummary[] = useMemo(() => {
+    const seen = new Set<string>();
+    const out: IncidentSummary[] = [];
+    for (const p of data ?? []) {
+      for (const i of p.incidents) {
+        if (seen.has(i.id)) continue;
+        seen.add(i.id);
+        out.push(i);
+      }
+    }
+    return out;
+  }, [data]);
   const isLoadingMore = isValidating && size > 0 && Boolean(data && typeof data[size - 1] === "undefined");
   const lastPage = data?.[data.length - 1];
   const hasMore = Boolean(lastPage && lastPage.nextCursor !== null);
@@ -649,6 +686,11 @@ export function useSecurityIncidentSummary(enabled = true) {
  * in the cache and refreshes the summary; it throws the typed error for the
  * caller to render with `translateError(err, "security")` — then `refresh()`,
  * since a 409 means the incident moved.
+ *
+ * WARP-3195 — `keepLink` (manage): Keep a link only Droplet made (route 24),
+ * then re-read the incident (its `dropletLinks` line goes) and every area
+ * list (the link's "Linked by Droplet" chip goes). It throws the typed error
+ * like the others; the caller re-reads with `refresh()`.
  */
 export function useSecurityIncident(id: string | null) {
   const { mutate: globalMutate } = useSWRConfig();
@@ -660,19 +702,48 @@ export function useSecurityIncident(id: string | null) {
 
   const apply = useCallback(
     async (r: IncidentActionResult): Promise<IncidentActionResult> => {
-      await Promise.all([mutate(r.incident, { revalidate: false }), globalMutate(SECURITY_INCIDENT_SUMMARY_PATH)]);
+      // No incident in the answer (this person can't see it any more): re-read,
+      // so the page shows where it stands — caching null would spin forever (WARP-3185).
+      await Promise.all([
+        r.incident ? mutate(r.incident, { revalidate: false }) : mutate(),
+        globalMutate(SECURITY_INCIDENT_SUMMARY_PATH),
+      ]);
       return r;
     },
     [mutate, globalMutate],
   );
 
+  // WARP-3185 F — handled here, so its alert leaves this device's tray
+  // (best-effort, never awaited, never throws).
   const acknowledge = useCallback(
-    async (opts: { notificationId?: string | null } = {}) => apply(await acknowledgeSecurityIncident(id!, opts)),
+    async (opts: { notificationId?: string | null } = {}) => {
+      const r = await apply(await acknowledgeSecurityIncident(id!, opts));
+      void closeIncidentNotifications(id!);
+      return r;
+    },
     [apply, id],
   );
   const resolve = useCallback(
-    async (opts: { note?: string } = {}) => apply(await resolveSecurityIncident(id!, opts)),
+    async (opts: { note?: string } = {}) => {
+      const r = await apply(await resolveSecurityIncident(id!, opts));
+      void closeIncidentNotifications(id!);
+      return r;
+    },
     [apply, id],
+  );
+  // WARP-2979 P4 PR-2 (route 28) — Summarise now / Regenerate, then a re-read (the answer carries only the summary).
+  const summarise = useCallback(async () => {
+    const r = await requestSecurityIncidentNarrative(id!);
+    await mutate();
+    return r;
+  }, [id, mutate]);
+  const keepLink = useCallback(
+    async (linkId: string): Promise<SecurityLinkDecisionResult> => {
+      const r = await acceptSecurityLink(linkId);
+      await Promise.all([mutate(), globalMutate(isZonesKey)]);
+      return r;
+    },
+    [mutate, globalMutate],
   );
   // WARP-2980 (P5 PR-C) — route 35: Expected / Not expected. The box returns the incident, like acknowledge.
   const giveVerdict = useCallback(
@@ -687,6 +758,8 @@ export function useSecurityIncident(id: string | null) {
     refresh: () => mutate(),
     acknowledge,
     resolve,
+    summarise,
+    keepLink,
     giveVerdict,
   };
 }
@@ -697,6 +770,16 @@ export function useSecurityIncident(id: string | null) {
  * re-reads the whole list (the fallback banner and other rows can move) and
  * the health header (its `alerts` row names who is told).
  */
+/** The routing list with one person's row replaced by the box's echo (appended if it wasn't listed). */
+function withPerson(current: AlertRoutingView | undefined, person: AlertRoutingPerson): AlertRoutingView | undefined {
+  if (!current || current.level !== "manage") return current;
+  const listed = current.people.some((p) => p.userId === person.userId);
+  return {
+    ...current,
+    people: listed ? current.people.map((p) => (p.userId === person.userId ? person : p)) : [...current.people, person],
+  };
+}
+
 export function useAlertRouting() {
   const { mutate: globalMutate } = useSWRConfig();
   const { data, error, isLoading, mutate } = useSWR<AlertRoutingView>(SECURITY_ALERT_ROUTING_PATH, () => getAlertRouting(), {
@@ -706,11 +789,101 @@ export function useAlertRouting() {
   const set = useCallback(
     async (userId: string, body: AlertRoutingSetBody): Promise<AlertRoutingPerson> => {
       const r = await putAlertRouting(userId, body);
-      await Promise.all([mutate(), globalMutate(SECURITY_HEALTH_PATH)]);
+      // WARP-3185 E — the box's echoed row is this person's truth: it goes in
+      // the cache first, so a change that landed never looks refused (and the
+      // next change sends the version it echoed) even if the re-read fails.
+      await mutate((current) => withPerson(current, r.person), { revalidate: false });
+      // Then re-read the rest (the fallback banner, other rows) and the health
+      // header, whose `alerts` row names who is told.
+      void mutate();
+      void globalMutate(SECURITY_HEALTH_PATH);
       return r.person;
     },
     [mutate, globalMutate],
   );
 
   return { routing: data ?? null, error: error as Error | undefined, isLoading, refresh: () => mutate(), set };
+}
+
+// ── WARP-2979 (ADR-059 P4 §7 routes 23–27): Droplet's links and its AI settings ──
+
+/**
+ * GET /api/security/link-proposals — Droplet's open suggestions (filled only
+ * at manage; below it the list is empty, never refused) plus the linking
+ * setting. `accept` (route 24: Add it / Keep) and `reject` (route 25: Not
+ * this / Undo) are manage-level intents on the link's CURRENT state; each
+ * refreshes every area list (a decision moves an area's links and version),
+ * the sources' link statuses and this list. Both throw the typed error for
+ * `translateError(err, "security")`.
+ */
+export function useLinkProposals() {
+  const { mutate: globalMutate } = useSWRConfig();
+  const { data, error, isLoading, mutate } = useSWR<SecurityLinkProposalsView>(
+    SECURITY_LINK_PROPOSALS_PATH,
+    () => getSecurityLinkProposals(),
+    { shouldRetryOnError: false },
+  );
+
+  const settle = useCallback(async () => {
+    await Promise.all([mutate(), globalMutate(isZonesKey), globalMutate(SECURITY_SOURCES_PATH)]);
+  }, [mutate, globalMutate]);
+
+  const accept = useCallback(
+    async (linkId: string): Promise<SecurityLinkDecisionResult> => {
+      const r = await acceptSecurityLink(linkId);
+      await settle();
+      return r;
+    },
+    [settle],
+  );
+  const reject = useCallback(
+    async (linkId: string): Promise<SecurityLinkDecisionResult> => {
+      const r = await rejectSecurityLink(linkId);
+      await settle();
+      return r;
+    },
+    [settle],
+  );
+
+  return {
+    proposals: data?.proposals ?? null,
+    linking: data?.linking ?? null,
+    level: data?.level ?? null,
+    error: error as Error | undefined,
+    isLoading,
+    refresh: () => mutate(),
+    accept,
+    reject,
+  };
+}
+
+/**
+ * GET /api/security/ai-settings — what Droplet's AI may do in Security.
+ * `save` PUTs the whole choice with the version it read (manage) and puts the
+ * server's answer in the cache; it refreshes the suggestions (linking may
+ * have turned off or on) and the health header (its `links` row names the
+ * setting). On a 409 the caller re-reads with `refresh()`.
+ */
+export function useAiSettings() {
+  const { mutate: globalMutate } = useSWRConfig();
+  const { data, error, isLoading, mutate } = useSWR<SecurityAiSettingsView>(
+    SECURITY_AI_SETTINGS_PATH,
+    () => getSecurityAiSettings(),
+    { shouldRetryOnError: false },
+  );
+
+  const save = useCallback(
+    async (body: SecurityAiSettingsBody): Promise<SecurityAiSettingsWriteResult> => {
+      const r = await putSecurityAiSettings(body);
+      await Promise.all([
+        mutate({ linking: r.linking, summaries: r.summaries, version: r.version }, { revalidate: false }),
+        globalMutate(SECURITY_LINK_PROPOSALS_PATH),
+        globalMutate(SECURITY_HEALTH_PATH),
+      ]);
+      return r;
+    },
+    [mutate, globalMutate],
+  );
+
+  return { settings: data ?? null, error: error as Error | undefined, isLoading, refresh: () => mutate(), save };
 }

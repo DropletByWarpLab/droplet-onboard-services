@@ -7,6 +7,16 @@
  * credential purge already happens in `integrations.service.ts`; this is the
  * records half.
  *
+ * ## WARP-3375 — the owner chooses, and the default deletes nothing
+ *
+ * This module used to run unconditionally, so "offer" was a promise the box
+ * never kept. `disconnect()` now takes a {@link LandedRecordsDisposition}:
+ *
+ *   • `keep` (the default) → {@link detachLandedRecords}. Nothing is deleted;
+ *     the CRM rows become ordinary LOCAL records the business owns.
+ *   • `delete` → {@link purgeLandedRecords} (the walk below) plus
+ *     {@link purgeLandedDocuments} for the ledger copies.
+ *
  * ## Why it is not one `deleteMany`
  *
  * 🔴 All three of `CrmActivity`'s subject relations are `onDelete: Cascade`,
@@ -32,6 +42,11 @@
  * `connectionId` and none of them names a provider.
  */
 import { Prisma } from "@prisma/client";
+
+import { SUBJECT_ERP_DOCUMENT } from "../erp-sync/money-snapshot.service.js";
+
+/** What the owner asked to happen to the records a connector landed. */
+export type LandedRecordsDisposition = "keep" | "delete";
 
 export type PurgeDb = Pick<
   Prisma.TransactionClient,
@@ -153,4 +168,89 @@ export async function purgeLandedRecords(
     archived: dealResult.archived + contactResult.archived + companyResult.archived,
     pipelineRemoved,
   };
+}
+
+/**
+ * KEEP: hand the connection's landed CRM rows over to the business.
+ *
+ * "Detach" is one `UPDATE` per table that clears the whole provenance triple
+ * AND flips `origin` to LOCAL. Both halves are needed and neither can go
+ * first: the `*_provenance_complete` CHECK allows either "all three link
+ * columns NULL" (any origin) or "all three set AND origin = EXTERNAL", so
+ * nulling the links alone leaves EXTERNAL rows the guards in `crm.service.ts`
+ * still refuse to edit or delete, which is the opposite of "ordinary
+ * customers". A single `UPDATE` is checked once, on the final row.
+ *
+ * The synced pipeline is detached the same way, so the deals still standing in
+ * it keep their board and the owner can rename or reshape it.
+ *
+ * Already-archived rows stay archived (`isArchived` is owner state and is not
+ * written here), and `CrmActivity` and `PartyLink` rows are untouched: the
+ * timeline and the match a person confirmed outlive the connector.
+ *
+ * Scoped to the CONNECTION for the reason in the header. Runs inside the
+ * caller's transaction.
+ *
+ * KNOWN CONSEQUENCE: the link is what the next sync reconciles on, so
+ * reconnecting the same vendor lands fresh EXTERNAL copies beside these
+ * detached ones. That is the price of "no longer synced or owned".
+ */
+export async function detachLandedRecords(
+  db: Pick<Prisma.TransactionClient, "contact" | "crmCompany" | "crmDeal" | "crmPipeline">,
+  connectionId: string,
+): Promise<number> {
+  const scope = { connectionId };
+  const unlink = {
+    connectionId: null,
+    externalSystem: null,
+    externalId: null,
+    origin: "LOCAL" as const,
+  };
+  const deals = await db.crmDeal.updateMany({ where: scope, data: unlink });
+  const contacts = await db.contact.updateMany({ where: scope, data: unlink });
+  const companies = await db.crmCompany.updateMany({ where: scope, data: unlink });
+  // The pipeline has no provenance triple or origin — only the unique link.
+  await db.crmPipeline.updateMany({ where: scope, data: { connectionId: null } });
+  return deals.count + contacts.count + companies.count;
+}
+
+/**
+ * DELETE: remove the invoices and bills this connection landed, and the
+ * per-day money history captured from them.
+ *
+ * `ErpDocument` is not touched by {@link purgeLandedRecords}, so before
+ * WARP-3375 a disconnect left the whole ledger copy on the box. Nothing hangs
+ * off a landed document that a person wrote (a LANDED row is read-only and the
+ * timeline attaches to CRM rows only), so there is no archive branch: it is
+ * `LANDED` for THIS connection or it stays. `origin: "LANDED"` is stated even
+ * though a LOCAL row can never carry a connection (the `ErpDocument_provenance`
+ * CHECK), so a future loosening of that CHECK cannot make this delete a
+ * document a person typed.
+ *
+ * `MoneySnapshot` has no foreign key on purpose (a series must outlive a
+ * vendor deleting an invoice), which is exactly why it has to be removed by
+ * hand here: it carries each document's amount, balance and status. Done in
+ * SQL, before the documents go, because it selects through them and a ledger
+ * can be larger than a bound-parameter list.
+ *
+ * KEEP has no counterpart for this table: a LANDED row must keep its
+ * connection (same CHECK), and turning it LOCAL would invent a lifecycle
+ * status and drop the vendor's own. So on `keep` the ledger copy stays,
+ * read-only, on the disabled connection.
+ */
+export async function purgeLandedDocuments(
+  db: Pick<Prisma.TransactionClient, "erpDocument" | "$executeRaw">,
+  connectionId: string,
+): Promise<number> {
+  await db.$executeRaw`
+    DELETE FROM "MoneySnapshot"
+    WHERE "subjectType" = ${SUBJECT_ERP_DOCUMENT}
+      AND "subjectId" IN (
+        SELECT "id" FROM "ErpDocument"
+        WHERE "connectionId" = ${connectionId} AND "origin" = 'LANDED'
+      )`;
+  const { count } = await db.erpDocument.deleteMany({
+    where: { connectionId, origin: "LANDED" },
+  });
+  return count;
 }

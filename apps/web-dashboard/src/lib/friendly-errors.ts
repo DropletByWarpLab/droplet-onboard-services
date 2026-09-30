@@ -261,6 +261,12 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That expiration date isn't allowed by this Droplet's sharing rules. Pick a different date.",
     PERMISSIONS_REJECTED:
       "That access level isn't available for this item. Pick a different access level and try again.",
+    // WARP-3168 / WARP-3053 — the box's stable refusal codes (share-policy.ts).
+    // Deterministic, so name the rule instead of the generic 403 copy.
+    workspace_share_admin_only:
+      "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside.",
+    public_link_company_data:
+      "Only an owner or admin can create or change a public link to company files, or let others re-share them. You can still share with people in the company.",
     // WARP-1658 — every 403 a share write can draw is a DETERMINISTIC policy
     // rejection: role denial (requireRole), guest read-only, or insufficient
     // rights on a household/department space (requireSpaceAccess). Without this
@@ -339,6 +345,12 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "This Droplet's rules limit when share links expire, and sharing several files at once can't set an expiry date. Share this file on its own to pick one.",
     PERMISSIONS_REJECTED:
       "That access level isn't available for this item. Pick a different access level and try again.",
+    // WARP-3168 / WARP-3053 — the box's stable refusal codes (share-policy.ts).
+    // Deterministic, so name the rule instead of the generic 403 copy.
+    workspace_share_admin_only:
+      "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside.",
+    public_link_company_data:
+      "Only an owner or admin can create or change a public link to company files, or let others re-share them. You can still share with people in the company.",
     "403":
       "You don't have permission to share this item. Sign out and back in if your access changed recently, or ask the Droplet's owner or an admin to share it.",
     NOT_FOUND:
@@ -784,6 +796,19 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     NOT_ELIGIBLE: "This person can't open Security, so they can't be told about alerts.",
     ROUTING_UNAVAILABLE: "Droplet couldn't read who is told about alerts right now. Try again in a moment.",
     USER_NOT_FOUND: "That person isn't on this Droplet any more. Refresh the page.",
+    // WARP-2979 (ADR-059 P4 §7 routes 23–27) — Droplet's links and what its AI
+    // may do. A missing link and one on a camera this person can't see get ONE
+    // answer from the box (DS-005), so the copy never says which.
+    LINK_NOT_FOUND: "That link isn't there any more, or you can't see it. Refresh the page.",
+    LINK_NOT_DECIDABLE: "Someone already decided on that link. Refresh the page to see where it stands.",
+    LINK_CONFLICT: "Someone else changed this area at the same moment. Refresh the page and try again.",
+    LINK_LIMIT: "This area already has 32 cameras and parts linked. Remove one before adding another.",
+    LINKS_UNAVAILABLE: "Droplet couldn't load its suggestions right now. Try again in a moment.",
+    AI_SETTINGS_UNAVAILABLE: "Droplet couldn't load these settings right now. Try again in a moment.",
+    // WARP-2979 P4 PR-2 (route 28) — "Summarise now" / "Regenerate".
+    NARRATIVE_COOLDOWN: "Droplet wrote this in the last 10 minutes. Try again later.",
+    NARRATIVE_TOO_OLD: "Droplet writes summaries only for incidents active in the last 7 days.",
+    SUMMARIES_OFF: "Summaries are turned off in Security settings.",
     // A route-level feature gate answers 404 module_disabled (a flat body, so
     // apiFetch carries no typed code — the status entry catches it): this
     // person's level changed under the page, or Security was switched off.

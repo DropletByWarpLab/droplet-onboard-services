@@ -20,6 +20,7 @@ import { ModelSelector } from "@/components/ModelSelector";
 import { SessionHeader } from "@/components/chat/SessionHeader";
 import { ChatHistoryPanel, type ChatHistoryPanelHandle } from "@/components/chat/ChatHistoryPanel";
 import { ContextPinsPopover } from "@/components/chat/ContextPinsPopover";
+import { CloudModelsPill } from "@/components/chat/CloudModelsPill";
 import { ChatFileRail } from "@/components/chat/ChatFileRail";
 import { MemoryPanel } from "@/components/chat/MemoryPanel";
 import {
@@ -47,6 +48,7 @@ import {
 } from "@/lib/api";
 import { Dialog } from "@/components/Dialog";
 import { useChat } from "@/lib/hooks/useChat";
+import { useAssistantPages } from "@/lib/hooks/useAssistantPages";
 import { useModels } from "@/lib/hooks/useModels";
 import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 import { useToolCatalog } from "@/lib/hooks/useToolCatalog";
@@ -163,6 +165,8 @@ export default function ChatPage() {
   // Send the canonical wrap-up turn once the interview session finishes
   // loading (Resume-banner "Skip the rest" defers it through navigation).
   const pendingWrapUpRef = useRef(false);
+  // WARP-3116 — the pages the assistant may link to or take the viewer to.
+  const dashboardPages = useAssistantPages();
   const {
     messages,
     isStreaming,
@@ -194,6 +198,8 @@ export default function ChatPage() {
       // WARP-844 — restore the persona this conversation is held under.
       setSystemPrompt(persistedPrompt ?? "");
     },
+    dashboardPages,
+    onNavigate: (href) => router.push(href),
   });
 
   // The `?c=<id>` currently in the URL. Read HERE, above the interview
@@ -1323,7 +1329,13 @@ export default function ChatPage() {
           // composer instead of up in the header where a long thread
           // scrolls it out of reach. A cloud model names its provider on the
           // picker itself (WARP-3043); there is no separate tag.
-          modelSelector={<ModelSelector value={selectedModel} onChange={handleModelChange} />}
+          modelSelector={
+            <>
+              <ModelSelector value={selectedModel} onChange={handleModelChange} />
+              {/* WARP-3161 — chat text may leave the Droplet. */}
+              <CloudModelsPill />
+            </>
+          }
           // WARP-3043 — the empty chat's suggestions render inside the
           // composer, under the pill (one scrolling row above it on phones).
           suggestions={

@@ -6,6 +6,11 @@
  *   1. Header: title, span and the mode it opened in, the state, and — at
  *      act — Acknowledge and Resolve….
  *   2. Why Droplet flagged this: the visible codes first, with evidence.
+ *   2b. Summary by Droplet (WARP-2979 P4 PR-2, NarrativeSection): AFTER the
+ *      codes, never before them — the reasons are the record; the summary
+ *      is the box's own model's words, shown only when the box sends it
+ *      for this viewer (DS-005). Regenerate / Summarise now at act, on any
+ *      state (a resolved incident too).
  *   3. What happened: the visible events (the feed's row), each with its
  *      thumbnail, Clip (or Clip expired) and the other areas it was in; once
  *      the events are trimmed, the sentence that says what is kept.
@@ -43,6 +48,15 @@
  *   · Acknowledge sends the notification the page was opened from (`?n=`,
  *     set by the toaster and the service worker); the box keeps it only when
  *     it is this person's own notice for this incident.
+ *   · WARP-3195 (P4 §6.7.1, §8) — under the reasons, each camera only Droplet
+ *     linked to this area (`dropletLinks`): "Droplet linked this camera. Keep
+ *     the link to get alerts from it." with Keep (route 24). Manage only —
+ *     the module level AND the box's `viewer.level`; the box itself sends the
+ *     list only then. The section is there for these lines alone when nothing
+ *     was flagged: that is the case they explain (Droplet's links never
+ *     alert). Keep follows the rules above — aria-disabled and a ref guard in
+ *     flight; `translateError`, then a re-read, on a refusal; focus stays on
+ *     Keep while its line is there, and goes to the state line once it isn't.
  *
  * WARP-2980 (ADR-059 P5 PR-C) — patterns on the incident page:
  *   · the pattern flags (route 18's `patternFlags`: trial, or kept quiet by
@@ -59,16 +73,25 @@
  */
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
-import { ChevronLeft, Loader2, RefreshCw } from "lucide-react";
+import { ChevronLeft, Link2, Loader2, RefreshCw } from "lucide-react";
 import { Phead } from "@/components/shell/primitives";
 import { useToast } from "@/components/Toast";
 import { translateError } from "@/lib/friendly-errors";
 import { useAuth } from "@/lib/auth";
 import { levelAtLeast, useModuleLevel } from "@/lib/hooks/useModuleGate";
-import { useCameraDisplayNames, useSecurityIncident, useSecurityMode } from "@/lib/hooks/useSecurity";
+import { useCameraDisplayNames, useSecurityHealth, useSecurityIncident, useSecurityMode } from "@/lib/hooks/useSecurity";
 import { deviceTimeZone } from "@/lib/security-time";
-import type { IncidentActionResult, IncidentDetail, IncidentMemberView, IncidentVerdict } from "@/lib/types";
+import type {
+  IncidentActionResult,
+  IncidentDetail,
+  IncidentDropletLinkView,
+  IncidentMemberView,
+  IncidentVerdict,
+} from "@/lib/types";
 import { AckHistory } from "./AckHistory";
+import { sourcePhrase } from "./link-evidence-copy";
+import { ALERTING_KINDS } from "./LinkWhyPopover";
+import { NarrativeSection, narrativeAskable } from "./NarrativeSection";
 import { NoticeList } from "./NoticeList";
 import { PatternFlagList } from "./PatternFlagList";
 import { ReasonList } from "./ReasonList";
@@ -92,7 +115,8 @@ export const COPY = {
   back: "Security",
   acknowledge: "Acknowledge",
   // One sentence for every reason the box gives `actionable: false` (DS-005).
-  cantAct: "You can't acknowledge or resolve this incident. An owner or admin can.",
+  // Act-level members can act (the box folds level ≥ act into `actionable`), so not "an owner or admin" (WARP-3185).
+  cantAct: "You can't acknowledge or resolve this incident. Someone who can respond to Security events can.",
   resolve: "Resolve…",
   acknowledgedToast: "Acknowledged",
   resolvedToast: "Resolved",
@@ -133,36 +157,58 @@ export function notificationIdFrom(raw: string | null | undefined): string | nul
   return raw && NOTIFICATION_ID_RE.test(raw) ? raw : null;
 }
 
+/** The /security tab the incident page was opened from (`?from=`), validated: anything else is Incidents. */
+export type BackTab = "incidents" | "everything";
+export function backTabFrom(raw: string | null | undefined): BackTab {
+  return raw === "everything" ? "everything" : "incidents";
+}
+/** Where "‹ Security" goes: back to the tab the person came from. */
+export function backHref(tab: BackTab | undefined): string {
+  return tab === "everything" ? "/security?tab=everything" : "/security";
+}
+
 const isNotFound = (err: unknown): boolean => {
   const e = err as { code?: unknown; status?: unknown } | undefined;
   return e?.code === "INCIDENT_NOT_FOUND" || e?.status === 404;
 };
-const errorCode = (err: unknown): string | undefined => {
-  const c = (err as { code?: unknown } | undefined)?.code;
-  return typeof c === "string" ? c : undefined;
+/** What a refused write said: its typed code and HTTP status, when it had them. */
+interface WriteFailure {
+  code?: string;
+  status?: number;
+}
+const failureOf = (err: unknown): WriteFailure => {
+  const e = err as { code?: unknown; status?: unknown } | undefined;
+  return {
+    code: typeof e?.code === "string" ? e.code : undefined,
+    status: typeof e?.status === "number" ? e.status : undefined,
+  };
 };
+const upperFirst = (s: string): string => (s ? s[0]!.toUpperCase() + s.slice(1) : s);
 
 export interface IncidentViewProps {
   id: string;
   /** The alert notification the page was opened from, already validated (`notificationIdFrom`). */
   notificationId: string | null;
+  /** The /security tab to go back to (`backTabFrom`). Incidents when absent. */
+  backTab?: BackTab;
   now?: Date;
 }
 
-export function IncidentView({ id, notificationId, now: nowProp }: IncidentViewProps) {
+export function IncidentView({ id, notificationId, backTab, now: nowProp }: IncidentViewProps) {
   const valid = UUID_RE.test(id);
   const q = useSecurityIncident(valid ? id : null);
-  if (!valid) return <NotFound />;
-  return <IncidentBody {...q} notificationId={notificationId} now={nowProp} />;
+  const back = backHref(backTab);
+  if (!valid) return <NotFound back={back} />;
+  return <IncidentBody {...q} notificationId={notificationId} back={back} now={nowProp} />;
 }
 
-function NotFound() {
+function NotFound({ back }: { back: string }) {
   return (
     <section className="card" data-testid="incident-not-found">
       <div className="empty">
         <span className="eh">{COPY.notFound}</span>
         <span style={{ maxWidth: "48ch" }}>{COPY.notFoundBody}</span>
-        <Link className="btn" href="/security" style={{ marginTop: 8 }}>
+        <Link className="btn" href={back} style={{ marginTop: 8 }}>
           {COPY.backToSecurity}
         </Link>
       </div>
@@ -178,16 +224,21 @@ function IncidentBody({
   refresh,
   acknowledge,
   resolve,
+  summarise,
+  keepLink,
   giveVerdict,
   notificationId,
+  back,
   now: nowProp,
-}: Query & { notificationId: string | null; now?: Date }) {
+}: Query & { notificationId: string | null; back: string; now?: Date }) {
   const now = nowProp ?? new Date();
   const level = useModuleLevel("security");
   const { user } = useAuth();
   // The trial rule (spec §6.13, D19): owner/admin only. Unknown yet → nobody.
   const ownerOrAdmin = user?.role === "owner" || user?.role === "admin";
   const { mode } = useSecurityMode();
+  // WARP-2979: the `summaries` row says whether the on-box model is Paused (a pending summary then says so).
+  const { sources } = useSecurityHealth();
   const cameraLabel = useCameraDisplayNames();
   const { toast } = useToast();
   const device = deviceTimeZone();
@@ -207,6 +258,12 @@ function IncidentBody({
 
   const ids = { why: useId(), what: useId(), told: useId(), acks: useId() };
 
+  // WARP-3195 — Keep, one link at a time: the same in-flight rules as the header's buttons.
+  const [keeping, setKeeping] = useState<string | null>(null);
+  const keepingRef = useRef(false);
+  const keepRefs = useRef(new Map<string, HTMLButtonElement>());
+  const [keepFocusAfter, setKeepFocusAfter] = useState<string | null>(null);
+
   // After a write lands, the button that was pressed may be gone: put focus
   // where the person can carry on, never on <body>.
   useEffect(() => {
@@ -224,8 +281,16 @@ function IncidentBody({
     setFocusAfter(null);
   }, [focusAfter, incident]);
 
+  // After a Keep and its re-read: its line still there (a refusal) → focus never left Keep; gone (kept, or decided
+  // by someone else first) → the state line.
+  useEffect(() => {
+    if (!keepFocusAfter) return;
+    if (!keepRefs.current.has(keepFocusAfter)) stateRef.current?.focus();
+    setKeepFocusAfter(null);
+  }, [keepFocusAfter, incident]);
+
   const run = useCallback(
-    async (action: Write, write: () => Promise<IncidentActionResult>, done: string): Promise<string | null> => {
+    async (action: Write, write: () => Promise<IncidentActionResult>, done: string): Promise<"BUSY" | WriteFailure | null> => {
       if (busyRef.current) return "BUSY";
       busyRef.current = true;
       setBusy(action);
@@ -236,10 +301,17 @@ function IncidentBody({
         return null;
       } catch (err) {
         // Typed copy only (409 INCIDENT_CONFLICT / NOT_ACTIONABLE / NOT_JUDGEABLE, 503
-        // AUDIT_UNAVAILABLE, …) — never err.message. Then re-read.
+        // AUDIT_UNAVAILABLE, …) — never err.message. Then re-read, and WAIT
+        // for it (WARP-3185 A): a refusal can take the buttons away, and focus
+        // is placed only once the page shows the incident as it now stands —
+        // placed earlier, it lands on a button about to vanish, then <body>.
         toast(translateError(err, "security"), "error");
-        void refresh();
-        return errorCode(err) ?? "UNKNOWN";
+        try {
+          await refresh();
+        } catch {
+          // A failed re-read is the page's own "couldn't refresh" line.
+        }
+        return failureOf(err);
       } finally {
         busyRef.current = false;
         setBusy(null);
@@ -249,7 +321,7 @@ function IncidentBody({
   );
 
   if (error && (isNotFound(error) || !incident)) {
-    if (isNotFound(error)) return <NotFound />;
+    if (isNotFound(error)) return <NotFound back={back} />;
     return (
       <section className="card" role="alert" data-testid="incident-error">
         <div className="empty">
@@ -282,6 +354,14 @@ function IncidentBody({
   // The box's answer alone decides the sentence, never the module level: that
   // reads `view` while it loads, and the sentence would flash for someone who can act.
   const cantAct = live && i.actionable !== true;
+  // WARP-2979 — Summarise now / Regenerate: act (both levels), in any state; the box sends a summary only to a
+  // viewer who can see all of it, so a partial view never gets the section at all.
+  const canSummarise = levelAtLeast(level, "act") && levelAtLeast(i.viewer.level, "act");
+  const summariesPaused = (sources ?? []).some((s) => s.id === "summaries" && s.state === "down" && s.detail.startsWith("Paused"));
+  // WARP-3195 — Keep is route 24, a manage route: both levels, like the header's act controls. The box sends the list
+  // only to a manage-level viewer who sees everything; this is the second fence, and `?? []` a box before WARP-3195.
+  const canKeep = levelAtLeast(level, "manage") && levelAtLeast(i.viewer.level, "manage");
+  const dropletLinks = canKeep ? (i.dropletLinks ?? []) : [];
   const badge = severityBadge(i.severity);
   const chip = stateChip(i.state, i.severity);
   const title = incidentTitle(i, cameraLabel);
@@ -295,14 +375,39 @@ function IncidentBody({
     void run("resolve", () => resolve({ note }), COPY.resolvedToast).then((failed) => {
       if (failed === "BUSY") return;
       // A note the box refused, or an outage: keep the dialog (and the note) to try again.
-      // The incident moved or went away: close it; the re-read shows where it stands.
-      if (failed === null || failed === "INCIDENT_CONFLICT" || failed === "NOT_ACTIONABLE" || failed === "INCIDENT_NOT_FOUND") {
+      // The incident moved (any 409) or isn't this person's to resolve any more
+      // (any 404 — INCIDENT_NOT_FOUND, or a flat one from the feature gate when
+      // Security or their level went away under the page, WARP-3185): close it;
+      // the re-read shows where it stands.
+      if (failed === null || failed.status === 404 || failed.status === 409) {
         setDialogOpen(false);
         setFocusAfter("resolve");
       }
     });
   };
 
+  const onKeep = async (l: IncidentDropletLinkView) => {
+    if (keepingRef.current) return;
+    keepingRef.current = true;
+    setKeeping(l.linkId);
+    try {
+      const r = await keepLink(l.linkId);
+      // `changed:false` (someone kept it already) is silent, like Acknowledge's; the re-read takes the line away.
+      if (r.changed) {
+        const kept = ALERTING_KINDS.includes(l.zone.kind) ? INCIDENT_COPY.keptAlerts : INCIDENT_COPY.keptPlain;
+        toast(fill(kept, { camera: upperFirst(sourcePhrase(l)), area: l.zone.name }), "success");
+      }
+    } catch (err) {
+      // Typed copy only (409 LINK_NOT_DECIDABLE / LINK_CONFLICT / ZONE_ARCHIVED, 404 LINK_NOT_FOUND, 503 …) — never
+      // err.message. Then re-read, before focus is placed: the link may have been decided elsewhere.
+      toast(translateError(err, "security"), "error");
+      await refresh();
+    } finally {
+      keepingRef.current = false;
+      setKeeping(null);
+      setKeepFocusAfter(l.linkId);
+    }
+  };
   const onVerdict = (verdict: IncidentVerdict) => {
     const done = verdict === "expected" ? VERDICT_COPY.savedExpected : VERDICT_COPY.savedNotExpected;
     void run("verdict", () => giveVerdict(verdict), done).then((failed) => {
@@ -349,7 +454,7 @@ function IncidentBody({
   return (
     <>
       <Link
-        href="/security"
+        href={back}
         style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 13, color: "var(--text-muted)", alignSelf: "flex-start" }}
       >
         <ChevronLeft size={14} aria-hidden />
@@ -382,24 +487,31 @@ function IncidentBody({
         </p>
       )}
 
-      {(i.reasons.length > 0 || flags.length > 0) && (
+      {(i.reasons.length > 0 || flags.length > 0 || dropletLinks.length > 0) && (
         <>
-          <SectTitle id={ids.why} title={i.reasons.length > 0 ? COPY.whyTitle : COPY.wouldHaveTitle} />
+          <SectTitle id={ids.why} title={i.reasons.length > 0 || flags.length === 0 ? COPY.whyTitle : COPY.wouldHaveTitle} />
           <section className="card" aria-labelledby={ids.why}>
-            {i.reasons.length > 0 && (
-              <ReasonList reasons={i.reasons} cameraLabel={cameraLabel} timezone={timezone} now={now} labelledBy={ids.why} />
-            )}
-            <PatternFlagList
-              flags={flags}
-              cameraLabel={cameraLabel}
-              timezone={timezone}
-              now={now}
-              labelledBy={ids.why}
-              separated={i.reasons.length > 0}
-            />
+            <div className="rows">
+              {i.reasons.length > 0 && (
+                <ReasonList reasons={i.reasons} cameraLabel={cameraLabel} timezone={timezone} now={now} labelledBy={ids.why} />
+              )}
+              <PatternFlagList flags={flags} cameraLabel={cameraLabel} timezone={timezone} now={now} labelledBy={ids.why} />
+              {dropletLinks.length > 0 && <DropletLinkList links={dropletLinks} keeping={keeping} keepRefs={keepRefs} onKeep={onKeep} />}
+            </div>
           </section>
         </>
       )}
+
+      <NarrativeSection
+        narrative={i.narrative}
+        grouping={i.grouping}
+        canAct={canSummarise && narrativeAskable(i.lastActivityAt, now)}
+        paused={summariesPaused}
+        timezone={timezone}
+        now={now}
+        onSummarise={summarise}
+        refresh={() => void refresh()}
+      />
 
       <VerdictBar
         verdict={i.verdict}
@@ -451,6 +563,60 @@ function IncidentBody({
         />
       )}
     </>
+  );
+}
+
+/**
+ * WARP-3195 — one row per link only Droplet made: which camera (or part of its view), the line, and Keep. The
+ * button's name carries the camera (a page can hold several Keeps) after its visible word.
+ */
+function DropletLinkList({
+  links,
+  keeping,
+  keepRefs,
+  onKeep,
+}: {
+  links: readonly IncidentDropletLinkView[];
+  keeping: string | null;
+  keepRefs: { current: Map<string, HTMLButtonElement> };
+  onKeep: (link: IncidentDropletLinkView) => Promise<void>;
+}) {
+  return (
+    <ul className="rows" data-testid="incident-droplet-links" style={{ listStyle: "none", margin: 0, padding: 0 }}>
+      {links.map((l) => {
+        const camera = sourcePhrase(l);
+        return (
+          <li key={l.linkId} className="lrow" data-droplet-link={l.linkId}>
+            <span className="ri" aria-hidden>
+              <Link2 size={16} />
+            </span>
+            <span className="rt">
+              <span className="nm" style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>
+                {upperFirst(camera)}
+              </span>
+              <span className="sub" style={{ whiteSpace: "normal", overflowWrap: "anywhere" }}>
+                {INCIDENT_COPY.dropletLinked}
+              </span>
+            </span>
+            <button
+              ref={(el) => {
+                if (el) keepRefs.current.set(l.linkId, el);
+                else keepRefs.current.delete(l.linkId);
+              }}
+              type="button"
+              className="btn sm"
+              aria-label={fill(INCIDENT_COPY.keepLinkNamed, { camera })}
+              aria-disabled={keeping !== null || undefined}
+              onClick={() => void onKeep(l)}
+              style={{ flexShrink: 0 }}
+            >
+              {keeping === l.linkId && <Loader2 size={14} className="animate-spin" aria-hidden />}
+              {INCIDENT_COPY.keepLink}
+            </button>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 

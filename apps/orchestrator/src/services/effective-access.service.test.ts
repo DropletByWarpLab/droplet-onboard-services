@@ -176,6 +176,58 @@ describe("effective-access — tier-only floors (null accessRoleId = today's wor
   });
 });
 
+// ── ADR-059 — a tier below the Security floor (family) holds NO security grant ──
+//
+// `view` is the lowest rung, so before the refusal a stored security:view on a
+// guest role clamped to itself and the resolver handed it out. Every
+// /api/security route refuses a guest (requireRole), so nothing was reachable,
+// but the role list and the nav advertised reach that does not exist.
+describe("effective-access — security is refused below family (ADR-059)", () => {
+  const securityView = [{ moduleId: "security" as ModuleId, level: "view" as const }];
+
+  it("a guest-based role holding a stored security:view resolves to no security", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({ user: { id: "u-g", role: "guest", accessRole: role({ featureGrants: [...securityView, { moduleId: "files", level: "view" }] }) } }),
+    );
+    expect(featureLevel(res, "security")).toBeUndefined();
+    expect(featureLevel(res, "files")).toBe("view"); // and nothing else is disturbed
+  });
+
+  it("a per-person `allow` exception cannot hand a guest security either", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: { id: "u-g", role: "guest", accessRole: role({ featureGrants: [] }) },
+        exceptions: [{ moduleId: "security" as ModuleId, effect: "allow", level: "view" }] as EffectiveAccessInputs["exceptions"],
+      }),
+    );
+    expect(featureLevel(res, "security")).toBeUndefined();
+  });
+
+  it("D6: a family-based (Staff) wall role at Security View resolves to view, not to nothing and not to act", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({ user: { id: "u-w", role: "family", accessRole: role({ featureGrants: [...securityView, { moduleId: "cameras", level: "view" }] }) } }),
+    );
+    expect(featureLevel(res, "security")).toBe("view");
+    expect(featureLevel(res, "cameras")).toBe("view");
+  });
+
+  it("an admin-based role holding security:manage resolves to it (the floor is a floor, not a ban)", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({ user: { id: "u-a", role: "admin", accessRole: role({ featureGrants: [{ moduleId: "security", level: "manage" }] }) } }),
+    );
+    expect(featureLevel(res, "security")).toBe("manage");
+  });
+
+  it("a role-less guest resolves to no security; a role-less family to act, admin to manage, the owner to manage (bypass)", () => {
+    const at = (tier: "guest" | "family" | "admin" | "owner") =>
+      featureLevel(computeEffectiveAccess(baseInputs({ user: { id: "u-1", role: tier, accessRole: null } })), "security");
+    expect(at("guest")).toBeUndefined();
+    expect(at("family")).toBe("act");
+    expect(at("admin")).toBe("manage");
+    expect(at("owner")).toBe("manage");
+  });
+});
+
 describe("effective-access — owner bypass", () => {
   it("owner resolves ALL features at manage (chat act), every domain, locks on", () => {
     const res = computeEffectiveAccess(

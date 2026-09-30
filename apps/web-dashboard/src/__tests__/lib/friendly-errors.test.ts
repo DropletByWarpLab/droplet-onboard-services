@@ -372,6 +372,16 @@ describe("translateError — share domain (WARP-1148/1149)", () => {
     expect(result).not.toContain("module_disabled");
   });
 
+  it("names the box's Workspace and company-link refusals instead of the generic 403", () => {
+    for (const domain of ["share", "share-bulk"] as const) {
+      const ws = translateError({ code: "workspace_share_admin_only", status: 403 }, domain);
+      expect(ws).toMatch(/already shared with everyone in the company/);
+      const link = translateError({ code: "public_link_company_data", status: 403 }, domain);
+      expect(link).toMatch(/public link to company files/);
+      expect(link).not.toMatch(/sign out/i);
+    }
+  });
+
   it("maps the Nextcloud password-policy rejection to password copy (not the retry fallback)", () => {
     // Real OCS message shape from Nextcloud's password_policy app, surfaced by
     // the orchestrator as { error: "OCS share create: …" } with status 400.
@@ -810,6 +820,17 @@ describe("translateError — security domain (WARP-2977 P2b)", () => {
     "NOT_ELIGIBLE",
     "ROUTING_UNAVAILABLE",
     "USER_NOT_FOUND",
+    // WARP-2979 (ADR-059 P4 §7 routes 23–27) — Droplet's links and the AI settings.
+    "LINK_NOT_FOUND",
+    "LINK_NOT_DECIDABLE",
+    "LINK_CONFLICT",
+    "LINK_LIMIT",
+    "LINKS_UNAVAILABLE",
+    "AI_SETTINGS_UNAVAILABLE",
+    // WARP-2979 P4 PR-2 — route 28.
+    "NARRATIVE_COOLDOWN",
+    "NARRATIVE_TOO_OLD",
+    "SUMMARIES_OFF",
   ] as const satisfies readonly SecurityErrorCode[];
   // Exhaustive at compile time (the dashboard tsc lane type-checks tests): a
   // code added to SecurityErrorCode without copy here fails the build.

@@ -33,6 +33,8 @@ const OFF_LAN_CHANNEL_KEYS = [
   "ambient_data",
   // WARP-2904 — Web Push (Google / Apple / Mozilla push services).
   "web_push",
+  // WARP-3264 — calendar place suggestions (OpenStreetMap Nominatim).
+  "place_lookup",
 ] as const;
 type ChannelKey = (typeof OFF_LAN_CHANNEL_KEYS)[number];
 const channelKeyEnum = z.enum(OFF_LAN_CHANNEL_KEYS);
@@ -129,6 +131,7 @@ export function createOffLanNetworkRouter(prisma: PrismaClient): Router {
           web_fetch: 0n,
           ambient_data: 0n,
           web_push: 0n,
+          place_lookup: 0n,
         };
         let sampleCount = 0;
         for (const g of groups) {

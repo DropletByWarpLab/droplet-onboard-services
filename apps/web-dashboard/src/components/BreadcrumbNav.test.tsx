@@ -4,7 +4,7 @@
  * even though Nextcloud mounts the team library flat, ADR-029 §D-3).
  */
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { BreadcrumbNav } from "./BreadcrumbNav";
 
 describe("BreadcrumbNav", () => {
@@ -113,5 +113,54 @@ describe("BreadcrumbNav — labelForSegment (WARP-1338)", () => {
       />
     );
     expect(screen.getByText("Photos")).toBeInTheDocument();
+  });
+});
+
+describe("BreadcrumbNav — drop targets (drag-to-move)", () => {
+  const INTERNAL = "application/x-droplet-files";
+  const dt = (paths: string[]) => ({
+    types: [INTERNAL],
+    getData: () => JSON.stringify(paths),
+    setData: () => {},
+    dropEffect: "",
+  });
+
+  it("reports a drop on a parent crumb with that crumb's path", () => {
+    const onDropItems = vi.fn();
+    render(
+      <BreadcrumbNav path="/A/B/C" onNavigate={() => {}} onDropItems={onDropItems} />
+    );
+    fireEvent.drop(screen.getByRole("button", { name: "B" }), { dataTransfer: dt(["/x"]) });
+    expect(onDropItems).toHaveBeenCalledWith("/A/B", ["/x"]);
+    fireEvent.drop(screen.getByRole("button", { name: "My files" }), {
+      dataTransfer: dt(["/y"]),
+    });
+    expect(onDropItems).toHaveBeenCalledWith("/", ["/y"]);
+  });
+
+  it("does not make the current folder a drop target", () => {
+    const onDropItems = vi.fn();
+    render(
+      <BreadcrumbNav path="/A/B" onNavigate={() => {}} onDropItems={onDropItems} />
+    );
+    // "B" is the current folder — a plain label, not a button.
+    expect(screen.queryByRole("button", { name: "B" })).toBeNull();
+  });
+
+  it("highlights a crumb the page allows and skips one it vetoes", () => {
+    render(
+      <BreadcrumbNav
+        path="/A/B/C"
+        onNavigate={() => {}}
+        onDropItems={() => {}}
+        canDropOn={(p) => p !== "/A"}
+      />
+    );
+    const ok = screen.getByRole("button", { name: "B" });
+    fireEvent.dragEnter(ok, { dataTransfer: dt(["/x"]) });
+    expect(ok).toHaveAttribute("data-drop-over", "1");
+    const vetoed = screen.getByRole("button", { name: "A" });
+    fireEvent.dragEnter(vetoed, { dataTransfer: dt(["/x"]) });
+    expect(vetoed).not.toHaveAttribute("data-drop-over");
   });
 });

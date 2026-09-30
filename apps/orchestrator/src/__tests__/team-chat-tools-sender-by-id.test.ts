@@ -23,7 +23,7 @@
  * The tools-core handler lanes cover both namings of the sender (username and
  * User.id). Every User.id here differs from the username, as on a real box.
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, beforeAll, afterAll, vi } from "vitest";
 import request from "supertest";
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import type { PrismaClient } from "@prisma/client";
@@ -34,6 +34,11 @@ vi.mock("../config.js", () => ({
 }));
 
 import { createTeamChatRouter } from "../routes/team-chat.js";
+import { emailWriteData } from "../services/user-directory.service.js";
+import { __setColumnCryptoKeyForTest } from "../services/column-crypto.service.js";
+import { createRequestLogger } from "../middleware/request-logger.js";
+import { describeToolError } from "../services/tool-error-diagnostics.js";
+import { parseToolResultPayload } from "../services/tool-result-payload.js";
 import { MCP_PRINCIPAL_ID } from "../middleware/mcp-acting-user-gate.js";
 import type { AuthUser } from "../middleware/auth.js";
 import { userDirectory, type DirectoryUser } from "./helpers/user-directory.js";
@@ -74,9 +79,18 @@ function rowMatches(row: Record<string, unknown>, where: Where): boolean {
   );
 }
 
-function prismaDouble() {
-  const directory = userDirectory(PEOPLE);
-  const rows = () => PEOPLE.map((p) => ({ directoryStatus: "ACTIVE", ...p }) as Record<string, unknown>);
+function prismaDouble(people: Person[] = PEOPLE) {
+  const directory = userDirectory(people);
+  // WARP-3349 — a row with an address stores it the way every writer does
+  // (emailWriteData: the dcv1 blob plus the emailLookupHash blind index).
+  const rows = () =>
+    people.map(
+      (p) =>
+        ({ directoryStatus: "ACTIVE", ...p, ...(p.email ? emailWriteData(p.email) : {}) }) as Record<
+          string,
+          unknown
+        >,
+    );
   const pick = (row: Record<string, unknown>, select?: Record<string, unknown>) =>
     select ? Object.fromEntries(Object.keys(select).map((k) => [k, row[k]])) : row;
   const now = new Date("2026-09-26T12:00:00.000Z");
@@ -155,6 +169,8 @@ function prismaDouble() {
   return {
     threads,
     user: {
+      // WARP-3349 — findUserByEmail's blind-index probe.
+      findUnique: vi.fn(async ({ where }: { where: Where }) => rows().find((r) => rowMatches(r, where)) ?? null),
       // resolveCaller's acting-user lookup, both shapes it has had: the
       // username `findFirst` and resolveAssertedUser's `findMany({ OR })`.
       findFirst: vi.fn(async ({ where, select }: { where: Where; select?: Record<string, unknown> }) => {
@@ -341,5 +357,191 @@ describe("the real team-chat tools against the real router drop the sender by id
     expect(r.error?.code).toBe("INVALID_ARGS");
     expect(prisma.teamChatThread.create).not.toHaveBeenCalled();
     expect(prisma.teamChatMeeting.create).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * WARP-3349 — "message bob@acme.test" reaches Bob over team chat. The roster
+ * has no email column (User.email is encrypted at rest, WARP-233), so
+ * POST /team-chat/contacts/lookup resolves each address with findUserByEmail
+ * (the emailLookupHash blind index) to an ACTIVE owner, admin, member or
+ * external guest (Romain, 2026-09-30), and the tool refuses anyone else
+ * before the person is asked to approve. The rows here are written the way
+ * every writer writes them (emailWriteData), so the route reads the real
+ * blind index, under a test key.
+ */
+describe("WARP-3349 — a colleague given by email address", () => {
+  beforeAll(() => __setColumnCryptoKeyForTest(Buffer.alloc(32, 7).toString("base64")));
+  afterAll(() => __setColumnCryptoKeyForTest(null));
+
+  const DAN: Person = {
+    id: "5b0d6c1e-0000-4000-8000-0000000000d4",
+    username: "dan",
+    nextcloudUsername: null,
+    displayName: "Dan",
+    role: "family",
+    directoryStatus: "DEACTIVATED",
+    email: "dan@acme.test",
+  };
+  const ERIN: Person = {
+    id: "5b0d6c1e-0000-4000-8000-0000000000e5",
+    username: "erin",
+    nextcloudUsername: null,
+    displayName: "Erin",
+    role: "guest",
+    directoryStatus: "DEACTIVATED",
+    email: "erin@partner.test",
+  };
+  const WITH_EMAIL: Person[] = [
+    { ...ALICE, email: "alice@acme.test" },
+    { ...BOB, email: "bob@acme.test" },
+    { ...CAROL, email: "carol@partner.test" },
+    DAN,
+    ERIN,
+  ];
+  const lookup = (user: AuthUser, prisma: PrismaDouble, emails: unknown) =>
+    request(appAs(user, prisma)).post("/api/team-chat/contacts/lookup").send({ emails });
+
+  it("answers a member's or a guest's address in any case or spacing, null for nobody or the deactivated, in order", async () => {
+    const prisma = prismaDouble(WITH_EMAIL);
+    const res = await lookup(asSession(ALICE), prisma, [
+      " Bob@ACME.test ",
+      "nobody@acme.test",
+      "CAROL@partner.test",
+      "dan@acme.test",
+      "erin@partner.test",
+    ]);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      contacts: [
+        { id: BOB.id, displayName: "Bob", username: "bob" },
+        null,
+        { id: CAROL.id, displayName: "Carol", username: "carol" },
+        null,
+        null,
+      ],
+    });
+    // One blind-index probe per address; the table is never read whole.
+    expect(prisma.user.findMany).not.toHaveBeenCalled();
+  });
+
+  it("a guest caller gets no directory lookup at all (WARP-3263)", async () => {
+    const prisma = prismaDouble(WITH_EMAIL);
+    const res = await lookup(asSession(CAROL), prisma, ["bob@acme.test"]);
+    expect(res.status).toBe(403);
+    expect(prisma.user.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("a malformed body is a 400 that does not echo it", async () => {
+    const res = await lookup(asSession(ALICE), prismaDouble(WITH_EMAIL), []);
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "invalid_lookup" });
+  });
+
+  it("the addresses stay out of the request log", async () => {
+    const lines: string[] = [];
+    const app = express();
+    app.use(createRequestLogger({ dest: { write: (s: string) => lines.push(s) }, level: "info" }));
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as Request & { user: AuthUser }).user = asSession(ALICE);
+      next();
+    });
+    app.use("/api", createTeamChatRouter(prismaDouble(WITH_EMAIL) as unknown as PrismaClient));
+    const res = await request(app)
+      .post("/api/team-chat/contacts/lookup")
+      .send({ emails: ["bob@acme.test"] });
+    expect(res.status).toBe(200);
+    expect(lines.join("")).toContain("/api/team-chat/contacts/lookup");
+    expect(lines.join("")).not.toContain("bob@acme.test");
+  });
+
+  it("the real tool reaches a member given by address: a direct thread, sent by Alice", async () => {
+    const prisma = prismaDouble(WITH_EMAIL);
+    const r = await sendMessage.handler(
+      { recipients: ["Bob@Acme.test"], body: "Server maintenance tonight at 10pm", confirmed: true },
+      toolCtx(prisma, ALICE),
+    );
+    if (!r.ok) throw new Error(`expected a successful ToolResult, got ${JSON.stringify(r)}`);
+    expect(prisma.threads).toEqual([{ id: "th-1", kind: "direct", participantIds: [ALICE.id, BOB.id] }]);
+    expect(r.data).toMatchObject({ recipients: ["bob"] });
+  });
+
+  it("the real tool reaches an external guest given by address (Romain, 2026-09-30)", async () => {
+    const prisma = prismaDouble(WITH_EMAIL);
+    const r = await sendMessage.handler(
+      { recipients: ["carol@partner.test"], body: "Your badge is at reception", confirmed: true },
+      toolCtx(prisma, ALICE),
+    );
+    if (!r.ok) throw new Error(`expected a successful ToolResult, got ${JSON.stringify(r)}`);
+    expect(prisma.threads).toEqual([{ id: "th-1", kind: "direct", participantIds: [ALICE.id, CAROL.id] }]);
+    expect(r.data).toMatchObject({ recipients: ["carol"] });
+  });
+
+  it.each([
+    ["nobody's", "nobody@acme.test"],
+    ["a deactivated member's", "dan@acme.test"],
+    ["a deactivated guest's", "erin@partner.test"],
+  ])("the real precheck refuses %s address before approval, with no thread", async (_label, address) => {
+    const prisma = prismaDouble(WITH_EMAIL);
+    const early = await sendMessage.precheck!({ recipients: [address], body: "hi" }, toolCtx(prisma, ALICE));
+    expect(early).toMatchObject({ ok: false, status: "error", error: { code: "RECIPIENT_NOT_A_MEMBER" } });
+    expect(prisma.teamChatThread.create).not.toHaveBeenCalled();
+  });
+
+  // WARP-3403 — the meeting invite resolves and refuses exactly the same way.
+  it.each([
+    ["a member", "Bob@Acme.test", BOB],
+    ["an external guest", "carol@partner.test", CAROL],
+  ])("the real meeting invite reaches %s given by address: a direct thread and the meeting, organized by Alice", async (_l, address, person) => {
+    const prisma = prismaDouble(WITH_EMAIL);
+    const r = await sendMeetingInvite.handler(
+      { recipients: [address], title: "Planning", starts_at: IN_AN_HOUR(), confirmed: true },
+      toolCtx(prisma, ALICE),
+    );
+    if (!r.ok) throw new Error(`expected a successful ToolResult, got ${JSON.stringify(r)}`);
+    expect(prisma.threads).toEqual([{ id: "th-1", kind: "direct", participantIds: [ALICE.id, person.id] }]);
+    expect(prisma.teamChatMeeting.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ threadId: "th-1", createdById: ALICE.id, title: "Planning" }),
+    });
+    expect(r.data).toMatchObject({ recipients: [person.username] });
+  });
+
+  it.each([
+    ["nobody's", "nobody@acme.test"],
+    ["a deactivated member's", "dan@acme.test"],
+    ["a deactivated guest's", "erin@partner.test"],
+  ])("the real meeting-invite precheck refuses %s address before approval, with no thread or meeting", async (_label, address) => {
+    const prisma = prismaDouble(WITH_EMAIL);
+    const early = await sendMeetingInvite.precheck!(
+      { recipients: [address], title: "Planning", starts_at: IN_AN_HOUR() },
+      toolCtx(prisma, ALICE),
+    );
+    expect(early).toMatchObject({ ok: false, status: "error", error: { code: "RECIPIENT_NOT_A_MEMBER" } });
+    expect(prisma.teamChatThread.create).not.toHaveBeenCalled();
+    expect(prisma.teamChatMeeting.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["team_chat_send_message", sendMessage, { body: "hi" }],
+    ["team_chat_send_meeting_invite", sendMeetingInvite, { title: "Planning", starts_at: "2099-01-01T10:00:00Z" }],
+  ])("%s: the model reads the address in the refusal; the default tool-error log line never carries it", async (name, tool, rest) => {
+    const args = { recipients: ["nobody@acme.test"], ...rest };
+    const early = await tool.precheck!(args, toolCtx(prismaDouble(WITH_EMAIL), ALICE));
+    if (!early || early.ok) throw new Error(`expected a refusal, got ${JSON.stringify(early)}`);
+    expect(early.error.message).toContain("nobody@acme.test");
+    // mcp-server's wire text for a failure, then llm-agent's agent_tool_error line.
+    const wire = JSON.stringify({ status: early.status, error: early.error });
+    const line = describeToolError({
+      tool: name,
+      toolCallId: "call-1",
+      turnId: "turn-1",
+      iter: 0,
+      args,
+      payload: parseToolResultPayload(wire, name),
+      includeExcerpt: false,
+    });
+    expect(line.error_code).toBe("RECIPIENT_NOT_A_MEMBER");
+    expect(JSON.stringify(line)).not.toContain("nobody@acme.test");
   });
 });

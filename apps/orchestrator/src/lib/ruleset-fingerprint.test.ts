@@ -35,8 +35,10 @@ describe("the ruleset fingerprint", () => {
     expect({ version: SECURITY_RULESET_VERSION, fingerprint }).toEqual({
       // v2 — WARP-2978 PR-D: after_hours_presence accepts `detection_ongoing` (a person still in view at 30 s).
       // v3 — WARP-2980 P5 PR-B: the pattern codes (all `trial`), their severity modifiers and the baseline numbers.
-      version: 3,
-      fingerprint: "27aa1153e9dcde0acc7b2d0ed04240b85e2cda8831cd36dd4a69164942462414",
+      // v4 — WARP-2979 P4 PR-1: camera_offline_during_activity, and alerts only through person-set links (rankPick,
+      //      after_hours_presence's personLinked — code, riding the same bump).
+      version: 4,
+      fingerprint: "bc7bca3747b1cdadfa36ea561b030833d67f43e9d4d5c91a96f047efd034fe15",
     });
   });
 

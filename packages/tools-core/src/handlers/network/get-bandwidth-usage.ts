@@ -126,7 +126,7 @@ async function handler(
 const tool: Tool = {
   name: "get_bandwidth_usage",
   description:
-    "WAN bandwidth usage: current down/up throughput, DNS queries blocked today, off-LAN bytes this month, and active client count. Pass `window` (1h, 6h, 24h, 7d) to also get the throughput time series for trend questions. WAN-aggregate only — the box does not track per-device bandwidth, so don't promise a per-device breakdown. Tier-1 read; safe to call without operator confirmation.",
+    "WAN bandwidth usage: current down/up throughput, DNS queries blocked today, off-LAN bytes this month, and active client count. Pass `window` (1h, 6h, 24h, 7d) to also get the throughput time series for trend questions. WAN-aggregate only — the box does not track per-device bandwidth, so don't promise a per-device breakdown.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

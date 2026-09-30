@@ -69,8 +69,8 @@ interface CatalogLevelDef {
    * anyway: the floor is documentation the routes back with `requireRole`.
    * `true` makes the floor a REFUSAL: a tier below `minTier` holds no grant on
    * the module at all (`maxLevelFor` / `clampLevel` answer `null`), so the role
-   * writer stores none and the resolver hands none out. Opt-in per module;
-   * `security`'s family floor on `view` is not opted in and is unchanged.
+   * writer stores none and the resolver hands none out. Opt-in per module:
+   * `security` (family floor, ADR-059) and `doors` (admin floor, ADR-055).
    */
   refuseBelowFloor?: true;
 }
@@ -112,9 +112,12 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
   // links, schedule, suppressions, routing and retention. Presence data about
   // identifiable people, so even `view` is floored at family — no guest tier.
   // `manage` is business policy (a suppression can hide a real intrusion), so
-  // it is floored at admin.
+  // it is floored at admin. `refuseBelowFloor` makes the family floor on `view`
+  // bite: `view` is the lowest rung, so without it a guest role could store
+  // security:view, advertising reach every /api/security route refuses (each
+  // refusal is a denial row that becomes a threat incident).
   security: [
-    { level: "view", minTier: "family" },
+    { level: "view", minTier: "family", refuseBelowFloor: true },
     { level: "act", minTier: "family" },
     { level: "manage", minTier: "admin" },
   ],
@@ -240,7 +243,7 @@ function tierRefused(tier: Role, moduleId: GateableModuleId): boolean {
 /**
  * The highest §9 level `tier` may hold on `moduleId`. Every module offers a
  * `view`, so the result is at least "view" — except where `view` itself is a
- * refusal below its floor (`refuseBelowFloor`, doors): `null` = the tier may
+ * refusal below its floor (`refuseBelowFloor`: security, doors): `null` = the tier may
  * hold nothing on this module.
  */
 export function maxLevelFor(tier: Role, moduleId: GateableModuleId): FeatureLevel | null {

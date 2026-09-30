@@ -215,8 +215,16 @@ const envSchema = z.object({
   // previously-unpassable eval rows converting at 6-10 iterations — while
   // typical turns still finish in ~3.6 iterations, so the raised budget
   // costs nothing on easy turns. Only hard rows use the depth.
-  AGENT_MAX_ITER_DEFAULT: z.coerce.number().int().positive().default(10),
-  AGENT_MAX_ITER_CAP: z.coerce.number().int().positive().default(10),
+  //
+  // WARP-3297 (2026-09-28, Romain's call, "for now"): both raised 10 → 20.
+  // Not a measured winner like the 5 → 10 flip above: the 2026-09-27
+  // agent-loop eval ended 2/66 turns at iteration_limit, and hard turns get
+  // more room while those causes are fixed. Costs: each extra step is one
+  // more model call (~10–40 s on gpt-oss:20b), more 16k context pressure,
+  // and a stuck model can issue more unapproved tier-1 writes. Revisit with
+  // a 10-vs-20 sweep before keeping it.
+  AGENT_MAX_ITER_DEFAULT: z.coerce.number().int().positive().default(20),
+  AGENT_MAX_ITER_CAP: z.coerce.number().int().positive().default(20),
   // WARP-2177 — durable agent runs (epic WARP-2176). The worker in
   // agent-run-worker.service.ts reads the RESOLVED block (config.agentRuns),
   // never these raw values, so the reclaim/heartbeat relation below is
@@ -249,6 +257,12 @@ const envSchema = z.object({
   // loop honours it through `AgentDeps.maxIterCap`, which only in-process
   // callers can set — /api/llm/chat never does, so chat is byte-identical.
   AGENT_RUN_MAX_ITER: z.coerce.number().int().positive().default(30),
+  // WARP-3306 — a run's model call gives the gateway slot up when chat
+  // arrives (measured 2026-09-28: chat otherwise waited 20–38 s behind it).
+  // Starvation guard: after this many consecutive preemptions with no
+  // finished iteration in between, the run's next claim is not preemptible,
+  // so it always progresses. 0 turns preemption off.
+  AGENT_RUN_MAX_PREEMPTIONS: z.coerce.number().int().nonnegative().default(3),
   // WARP-2178 — characters of ONE tool result the model is fed per call
   // (tool-result-bounding.ts). 8000 is the value the loop has always used and
   // the value ITERATION_MIN_HEADROOM and the ai-gateway's 32,000-char message
@@ -621,6 +635,14 @@ const envSchema = z.object({
   // since compose does not set this for the orchestrator. Read it from
   // `config`, never `process.env` directly.
   AI_GATEWAY_GRPC_URL: z.string().default("ai-gateway:50051"),
+  // WARP-3071 — Kev triage SHADOW MODE on brain finding delivery: log Kev's
+  // answer next to the rule-based verdict, change nothing the user sees.
+  // Off by default; explicit string->bool (the BRAIN_ENABLED idiom, never
+  // z.coerce.boolean, which reads "false" as true).
+  DECISION_MODEL_TRIAGE_SHADOW: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
 
   // --- OpenWrt Routing ---
   // Default uses `host.docker.internal` so the bridged orchestrator can
@@ -1697,6 +1719,7 @@ export const config = {
       maxWallMs: parsed.AGENT_RUN_MAX_WALL_MS,
     }),
     maxIter: parsed.AGENT_RUN_MAX_ITER,
+    maxPreemptions: parsed.AGENT_RUN_MAX_PREEMPTIONS,
   },
 };
 export type Config = typeof config;

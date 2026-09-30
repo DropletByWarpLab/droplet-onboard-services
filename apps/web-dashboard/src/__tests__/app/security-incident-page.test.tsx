@@ -12,7 +12,7 @@ import type { ReactNode } from "react";
 const h = vi.hoisted(() => ({
   search: "",
   id: "7f3c2a10-5b1e-4c8e-9a0d-2f6b3c4d5e6f" as unknown,
-  seen: [] as Array<{ id: string; notificationId: string | null }>,
+  seen: [] as Array<{ id: string; notificationId: string | null; backTab?: string }>,
 }));
 
 vi.mock("next/navigation", () => ({
@@ -25,8 +25,8 @@ vi.mock("@/components/shell/ShellPage", () => ({
 }));
 vi.mock("@/components/security/IncidentView", async (orig) => ({
   ...(await orig<typeof import("@/components/security/IncidentView")>()),
-  IncidentView: (p: { id: string; notificationId: string | null }) => {
-    h.seen.push({ id: p.id, notificationId: p.notificationId });
+  IncidentView: (p: { id: string; notificationId: string | null; backTab: string }) => {
+    h.seen.push({ id: p.id, notificationId: p.notificationId, backTab: p.backTab });
     return null;
   },
 }));
@@ -43,7 +43,18 @@ beforeEach(() => {
 describe("/security/incidents/[id]", () => {
   it("passes the route's id, and no notification without ?n=", () => {
     render(<IncidentPage />);
-    expect(h.seen.at(-1)).toEqual({ id: "7f3c2a10-5b1e-4c8e-9a0d-2f6b3c4d5e6f", notificationId: null });
+    expect(h.seen.at(-1)).toEqual({ id: "7f3c2a10-5b1e-4c8e-9a0d-2f6b3c4d5e6f", notificationId: null, backTab: "incidents" });
+  });
+
+  it("?from=everything sends the way back to the Everything tab; anything else is Incidents (WARP-3185 3)", () => {
+    h.search = "from=everything";
+    render(<IncidentPage />);
+    expect(h.seen.at(-1)?.backTab).toBe("everything");
+    for (const bad of ["incidents", "Everything", "everything2", "javascript:x", ""]) {
+      h.search = `from=${encodeURIComponent(bad)}`;
+      render(<IncidentPage />);
+      expect(h.seen.at(-1)?.backTab, bad).toBe("incidents");
+    }
   });
 
   it("?n=<notification id> reaches Acknowledge", () => {

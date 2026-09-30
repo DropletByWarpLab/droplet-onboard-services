@@ -53,7 +53,7 @@ const FULL_ENTRY = {
   default: true,
   display_name: "GPT-OSS 20B",
   maker: "OpenAI",
-  description: "Everyday chat and agent tool use. The box's proven default.",
+  description: "Everyday chat and tasks that use your connected tools. The recommended default.",
   capabilities: ["tools", "thinking"],
   roles: ["chat"],
   disk_gb: 13.8,
