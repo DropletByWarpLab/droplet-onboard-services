@@ -17,8 +17,8 @@ data/app-downloads/            →  mounted read-only at /opt/droplet/app-downlo
   catalog.json                 →  GENERATED — pins every asset's size + sha256
   windows/
     Droplet_0.2.0_x64-setup.exe
-    Droplet_0.2.0_x64-setup.exe.sig   (Tauri minisign envelope, optional)
-    latest.json                        (Tauri updater manifest, optional)
+    Droplet_0.2.0_x64-setup.exe.sig   (legacy Tauri envelope, optional, no longer produced)
+    latest.json                        (legacy Tauri manifest, optional, no longer produced)
   android/ ios/ macos/ linux/          (same shape, all optional)
 ```
 
@@ -226,10 +226,12 @@ Two gates, and it matters which one is load-bearing:
   without a code change — and so the UI never claims "signed" for
   something nobody verified.
 
-The Windows `.sig` is the **Tauri updater's minisign envelope** (key
-`F5E6E366DCF9B85E`). It is declared, digest-checked and served verbatim,
-but the box never verifies it: Ed25519 is forbidden on-box by
+A Windows `.sig` is a **legacy Tauri minisign envelope** (key
+`F5E6E366DCF9B85E`); the native client (ADR-062) does not produce one, and
+its updates are verified by SHA-256 plus WinVerifyTrust with a publisher
+pin (ADR-045 Amendment 1). If one is staged it is declared, digest-checked
+and served verbatim, but the box never verifies it: Ed25519 is forbidden on-box by
 `docs/security/fips-allowed-algorithms.md` without a registered
 exception, and the box has no reason to hold that opinion. That signature
-exists for the *client's own updater* and for a customer who wants to
-verify the download independently before running it.
+exists only for a customer who wants to verify a legacy download
+independently before running it.
