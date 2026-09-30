@@ -273,10 +273,21 @@ console.error(`model=${opt.model} window=${window} selection=${opt.selection} ca
 for (let r = 1; r <= Number(opt.repeat); r++) {
   for (const c of selected) {
     let rec;
-    try {
-      rec = await runCase(c, r, window);
-    } catch (e) {
-      rec = { case_id: c.id, repeat: r, harness_error: String((e as Error)?.stack ?? e), steps: [], dispatches: [], final_answer: "" };
+    // The box's ai-gateway allows 60 requests/min per client; a 429 is the
+    // bench's pacing, not the agent's result, so wait it out and rerun the case.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        rec = await runCase(c, r, window);
+        break;
+      } catch (e) {
+        if (/\b429\b/.test(String(e)) && attempt < 5) {
+          console.error(`[r${r}] ${c.id} gateway 429, waiting 60s (attempt ${attempt + 1})`);
+          await new Promise((res) => setTimeout(res, 60_000));
+          continue;
+        }
+        rec = { case_id: c.id, repeat: r, harness_error: String((e as Error)?.stack ?? e), steps: [], dispatches: [], final_answer: "" };
+        break;
+      }
     }
     appendFileSync(out, JSON.stringify(rec) + "\n");
     const calls = (rec.dispatches ?? []).map((d: Dispatch) => `${d.tool}:${d.outcome}`).join(",") || "-";

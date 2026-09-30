@@ -12,7 +12,8 @@
 # token is passed by name only, never printed or put on a command line. The
 # checkout is bootstrapped (npm ci + npm run bootstrap) on first use.
 # Writes runs/<UTC date>-<label>.{jsonl,log,report.txt}; the report ends with
-# the pass^k summary. Sequential by design: one GPU, one model.
+# the pass^k summary. Sequential by design: one GPU, one model. Back-to-back
+# runs pace themselves: run.mts waits out the gateway's 60 req/min 429s.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
