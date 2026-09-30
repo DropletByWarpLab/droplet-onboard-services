@@ -447,3 +447,69 @@ describe("MCP dispatch path — a precheck refuses before the challenge (WARP-33
     await close();
   });
 });
+
+/**
+ * WARP-3349 / WARP-3403 — the REAL team-chat send tools through the real
+ * dispatch path: a recipient address that is nobody's in the Workspace is
+ * refused by the tool's precheck before any challenge — no token minted, no
+ * write — and the model reads the refusal. Only the orchestrator is a double.
+ */
+describe("the real team-chat tools refuse an address nobody in the Workspace has, before any challenge", () => {
+  function orchestratorDouble() {
+    const writes: string[] = [];
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const orchestrator = {
+      get: vi.fn(async () =>
+        json(200, {
+          me: { id: "uuid-alice" },
+          contacts: [{ id: "uuid-alice", displayName: "Alice", username: "alice" }],
+          canStartConversation: true,
+        }),
+      ),
+      post: vi.fn(async (path: string, body: { emails?: string[] }) => {
+        if (path === "/api/team-chat/contacts/lookup") {
+          return json(200, { contacts: (body.emails ?? []).map(() => null) });
+        }
+        writes.push(path);
+        return json(201, {});
+      }),
+      patch: vi.fn(),
+      delete: vi.fn(),
+    };
+    return { orchestrator, writes };
+  }
+
+  it.each([
+    ["team_chat_send_message", { recipients: ["nobody@example.com"], body: "hi" }],
+    [
+      "team_chat_send_meeting_invite",
+      { recipients: ["nobody@example.com"], title: "Sync", starts_at: "2099-01-01T10:00:00Z" },
+    ],
+  ])("%s", async (name, args) => {
+    const { orchestrator, writes } = orchestratorDouble();
+    const deps: ContextDeps = {
+      prisma: {} as never,
+      matter: {} as never,
+      httpFactory: () => orchestrator as never,
+    };
+    const server = createServer(deps, { kind: "local-trusted" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "precheck-e2e", version: "0.0.1" }, { capabilities: {} });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const pending = defaultToolCallInterceptor.tokens.size();
+
+    const payload = parse(await client.callTool({ name, arguments: args, _meta: { userId: "alice" } }));
+
+    expect(payload).toMatchObject({ status: "error", error: { code: "RECIPIENT_NOT_A_MEMBER" } });
+    expect(defaultToolCallInterceptor.tokens.size()).toBe(pending);
+    expect(orchestrator.post).toHaveBeenCalledWith(
+      "/api/team-chat/contacts/lookup",
+      { emails: ["nobody@example.com"] },
+      expect.anything(),
+    );
+    expect(writes).toEqual([]);
+    await client.close();
+    await server.close();
+  });
+});

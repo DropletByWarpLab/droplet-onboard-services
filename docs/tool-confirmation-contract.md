@@ -313,7 +313,8 @@ a denied call runs nothing and answers `TOOL_DENIED`). An error result
 replaces the challenge; `null`, any other result, or a throw (logged by
 tool name only) leaves the interceptor to ask. It must only read, and
 the handler still validates after approval. `team_chat_send_message`
-runs its own unconfirmed phase as the precheck.
+and `team_chat_send_meeting_invite` run their own unconfirmed phase as
+the precheck (`unconfirmedPhaseAsPrecheck` in `handlers/team-chat/_roster.ts`).
 
 See `packages/tools-core/src/confirmation.ts` and
 `packages/tools-core/src/interceptor.ts`.

@@ -23,15 +23,12 @@ import { confirmationRequired } from "../../confirmation.js";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import {
   actingHeaders,
-  addressesToLookUp,
   err,
-  readLookupResponse,
   readRosterResponse,
   readThreadResponse,
-  resolveRecipients,
+  resolveTargets,
   truncateForPreview,
-  type RecipientResolution,
-  type RosterContact,
+  unconfirmedPhaseAsPrecheck,
 } from "./_roster.js";
 
 const MAX_BODY_CHARS = 4000;
@@ -65,33 +62,14 @@ const inputSchema = {
   additionalProperties: false,
 } as const;
 
-/**
- * Recipients → the roster rows the thread is with (sender dropped, unknown
- * names refused). WARP-3349: the roster has no email column (User.email is
- * encrypted at rest, WARP-233), so a recipient that is not a username but
- * is shaped like an address is looked up by the orchestrator
- * (`findUserByEmail`, the blind index) and replaced by that person's
- * username, a member's or an external guest's. The addresses go in
- * a POST body, never a URL, so they stay out of the request log. A guest
- * caller is never looked up for; resolveRecipients answers with the rule.
- */
-async function resolveTargets(
-  ctx: ToolContext,
-  roster: { contacts: RosterContact[]; meId: string; canStartConversation: boolean },
-  recipients: string[],
-): Promise<RecipientResolution> {
-  const addresses = addressesToLookUp(roster, recipients);
-  if (addresses.length > 0 && roster.canStartConversation) {
-    const lookupRes = await ctx.http.orchestrator.post(
+/** WARP-3349 — the address lookup `resolveTargets` calls (in this file for the WARP-1455 drift gate). */
+function lookupAddresses(ctx: ToolContext) {
+  return (emails: string[]) =>
+    ctx.http.orchestrator.post(
       "/api/team-chat/contacts/lookup",
-      { emails: addresses },
+      { emails },
       { headers: actingHeaders(ctx) },
     );
-    const looked = await readLookupResponse(lookupRes, recipients, addresses);
-    if (!looked.ok) return looked;
-    recipients = looked.usernames;
-  }
-  return resolveRecipients(roster, recipients);
 }
 
 async function handler(
@@ -168,7 +146,7 @@ async function handler(
         const roster = await readRosterResponse(rosterRes);
         if (!roster.ok && rosterRes.status === 404) return roster.result;
         if (roster.ok) {
-          const resolved = await resolveTargets(ctx, roster, recipients);
+          const resolved = await resolveTargets(roster, recipients, lookupAddresses(ctx));
           if (!resolved.ok) return resolved.result;
           recipients = resolved.others.flatMap((c) => (c.username ? [c.username] : []));
           names = resolved.others.map((c) => c.displayName || c.username || c.id);
@@ -200,7 +178,7 @@ async function handler(
     });
     const roster = await readRosterResponse(rosterRes);
     if (!roster.ok) return roster.result;
-    const resolved = await resolveTargets(ctx, roster, recipients);
+    const resolved = await resolveTargets(roster, recipients, lookupAddresses(ctx));
     if (!resolved.ok) return resolved.result;
     // resolveRecipients only matches rows that carry a username.
     recipients = resolved.others.flatMap((c) => (c.username ? [c.username] : []));
@@ -265,14 +243,8 @@ const tool: Tool = {
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,
-  // WARP-3349 — the unconfirmed call (phase 1 above) run before the
-  // interceptor asks: its refusals reach the model instead of an approval
-  // prompt for a send that cannot happen. `confirmed` is forced false so
-  // this can never reach phase 2's writes, whatever the model passed.
-  precheck: async (args, ctx) => {
-    const r = await handler({ ...args, confirmed: false }, ctx);
-    return !r.ok && r.status === "error" ? { ok: false, status: "error", error: r.error } : null;
-  },
+  // WARP-3349 — the unconfirmed phase above, run before the interceptor asks.
+  precheck: unconfirmedPhaseAsPrecheck(handler),
   handler,
 };
 
