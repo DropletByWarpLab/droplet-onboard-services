@@ -1007,7 +1007,6 @@ describe("WARP-3074 — bulk labelling reaches classify_items from a fresh turn"
     "who is on triage duty at the front desk this week?",
   ])("%s does not advertise classify_items", (message) => {
     expect(advertisedFor(message)).not.toContain("classify_items");
-    });
   });
 });
 
