@@ -26,6 +26,7 @@ import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
 import { PersonalDriveCard } from "@/components/settings/PersonalDriveCard";
 import { BusinessProfileCard } from "@/components/settings/BusinessProfileCard";
 import { LocationsCard } from "@/components/settings/LocationsCard";
+import { PlaceLookupSwitch } from "@/components/settings/PlaceLookupSwitch";
 import { LogsSection } from "@/components/settings/LogsSection";
 import { CertificateRows } from "@/components/settings/CertificateRows";
 import { BackupRows } from "@/components/settings/BackupRows";
@@ -287,6 +288,8 @@ export default function SettingsPage() {
               the same `user.role` expression PersonalityCard uses, and
               renders nothing for lesser roles. */}
           <LocationsCard />
+          {/* WARP-3264 — owner-only "Look up places online" (off by default). */}
+          <PlaceLookupSwitch />
 
           {/* WARP-2967 — the derived Workspace rows (Sync devices,
               Integrations, Credentials, Company files) for owner/admin; the

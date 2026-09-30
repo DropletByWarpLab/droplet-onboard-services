@@ -216,7 +216,7 @@ async function handler(
 const tool: Tool = {
   name: "list_threat_events",
   description:
-    'Recent security-relevant events from the tamper-evident activity log: auth failures/denials and network threat rows, including egress anomalies (a service trying to reach an unlisted destination). Owner/admin only — other roles get FORBIDDEN. Use for "any threats?", "did anything phone home?", or "any failed logins?" questions. Defaults to the last 24 hours (max 168 = 7 days). Tier-1 read; safe to call without operator confirmation.',
+    'Recent security-relevant events from the tamper-evident activity log: auth failures/denials and network threat rows, including egress anomalies (a service trying to reach an unlisted destination). Owner/admin only — other roles get FORBIDDEN. Use for "any threats?", "did anything phone home?", or "any failed logins?" questions. Defaults to the last 24 hours (max 168 = 7 days).',
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

@@ -149,6 +149,14 @@ const COMPANY_PUBLIC_LINK_ADMIN_ONLY =
   "Only an owner or admin can create a public link to company files. You can still share with people in the company.";
 
 /**
+ * WARP-3168 (Romain, 2026-09-25): members share nothing from the Workspace,
+ * internal shares included; the box and Nextcloud (Workspace group mask 15)
+ * both refuse it. Shown on the disabled Share button, never silently absent.
+ */
+const WORKSPACE_SHARE_ADMIN_ONLY =
+  "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside.";
+
+/**
  * The share posture of the bulk path, stated rather than inherited.
  *
  * `createShare` defaults to `{ shareType: 3 }` and the server defaults
@@ -1087,12 +1095,13 @@ export default function FilesPage() {
       return isReaderSpace ? READER_TOOLBAR_TOOLTIP : LIBRARY_SHARE_MANAGER_ONLY;
     }
     if (isReaderSpace) return READER_TOOLBAR_TOOLTIP;
+    if (space === "shared" && !isOwnerOrAdmin) return WORKSPACE_SHARE_ADMIN_ONLY;
     if (publicLinkBlockedReason && fm.selectedCount > 1) return publicLinkBlockedReason;
     if (fm.selectedCount > BULK_SHARE_LIMIT) {
       return `You can share up to ${BULK_SHARE_LIMIT} files at once — ${fm.selectedCount} are selected.`;
     }
     return undefined;
-  }, [activeSpace, isReaderSpace, publicLinkBlockedReason, fm.selectedCount]);
+  }, [activeSpace, isReaderSpace, space, isOwnerOrAdmin, publicLinkBlockedReason, fm.selectedCount]);
 
   // ── Preview (opens rich preview modal) ──
   const handlePreview = useCallback((file: FileEntryInfo) => {
@@ -2137,6 +2146,8 @@ export default function FilesPage() {
                   onClick={() => handleShare(selectedFile)}
                   className="btn ghost sm"
                   type="button"
+                  disabled={!!shareBlockedReason}
+                  title={shareBlockedReason}
                 >
                   <LinkIcon size={14} />
                   Share…

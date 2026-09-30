@@ -125,6 +125,7 @@ import type {
   UsagePolicy,
   UsageWithMeta,
   AdminFilesUsageResponse,
+  CompanyPublicLink,
   Department,
   DepartmentDetail,
   DepartmentRight,
@@ -1397,17 +1398,33 @@ export interface SystemHealth {
   status: SystemHealthStatus;
   components: SystemComponent[];
   uptime: number;
-  version: string;
+  // WARP-3154 — the real committed OTA release tag; absent on a box that has
+  // never taken an update (still on its factory image). No longer the
+  // hardcoded "0.1.0" literal.
+  version?: string;
 }
 
 export async function fetchSystemHealth(): Promise<SystemHealth> {
   // Public endpoint (no auth) — used by Docker healthcheck + dashboard pill.
+  // WARP-3154 — never carries a down component's `error` (internal-topology
+  // leak on an unauthenticated route); use fetchSystemHealthDetails() for that.
   const res = await fetch(`${BASE}/api/orchestrator/health`, {
     credentials: "include",
   });
   // 503 is a valid "down" response; we still want to read the body.
   if (!res.ok && res.status !== 503) {
     throw new Error(`Failed to fetch system health: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** WARP-3154 — the owner/admin counterpart of fetchSystemHealth(): same
+ *  shape, but each component's `error` reason is present. 403s for anyone
+ *  else; callers gate on isAdminRole(user?.role) before calling this. */
+export async function fetchSystemHealthDetails(): Promise<SystemHealth> {
+  const res = await authFetch(`${BASE}/api/orchestrator/health/details`);
+  if (!res.ok && res.status !== 503) {
+    throw new Error(`Failed to fetch system health details: ${res.status}`);
   }
   return res.json();
 }
@@ -3097,6 +3114,35 @@ export async function setWebPushChannel(enabled: boolean): Promise<void> {
   });
   if (!res.ok) {
     throw Object.assign(new Error(`Failed to change push delivery: ${res.status}`), {
+      status: res.status,
+    });
+  }
+}
+
+/**
+ * WARP-3264 — the `place_lookup` off-LAN channel: the calendar place field's
+ * OpenStreetMap lookup. Default off. `null` = unreadable; don't guess.
+ */
+export async function fetchPlaceLookupChannel(): Promise<{ enabled: boolean } | null> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan`);
+  if (!res.ok) return null;
+  const body = (await res.json()) as { channels?: Array<{ key: string; enabled: boolean }> };
+  const row = body.channels?.find((c) => c.key === "place_lookup");
+  return row ? { enabled: row.enabled === true } : null;
+}
+
+/** WARP-3264 — flip `place_lookup`. Owner only (the route 403s everyone else). */
+export async function setPlaceLookupChannel(enabled: boolean): Promise<void> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan/place_lookup`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      enabled,
+      reason: enabled ? "Turned on from Settings → Locations" : "Turned off from Settings → Locations",
+    }),
+  });
+  if (!res.ok) {
+    throw Object.assign(new Error(`Failed to change place lookup: ${res.status}`), {
       status: res.status,
     });
   }
@@ -6492,6 +6538,14 @@ export async function fetchPromptInspect(
 }
 
 /** Admin usage roster — per-user + per-department storage (WARP-1271). */
+/** WARP-3168: owner/admin only. Throws on 503 (Nextcloud unreadable) — never an empty list. */
+export async function fetchCompanyPublicLinks(): Promise<CompanyPublicLink[]> {
+  const res = await authFetch(`${BASE}/api/admin/files/company-public-links`);
+  if (!res.ok) throw new Error(`Couldn't read the company's links (${res.status})`);
+  const body: { links: CompanyPublicLink[] } = await res.json();
+  return body.links;
+}
+
 export async function fetchAdminFilesUsage(): Promise<AdminFilesUsageResponse> {
   const res = await authFetch(`${BASE}/api/admin/files/usage`);
   if (!res.ok) {
@@ -8454,8 +8508,9 @@ async function teamChatFail(
 export interface TeamChatContact {
   id: string;
   displayName: string;
-  username: string;
-  role: string;
+  /** WARP-3263 — absent for an external guest's directory (names only). */
+  username?: string;
+  role?: string;
 }
 
 export type TeamChatMessageKind =

@@ -183,3 +183,121 @@ class TestMalformedDateTolerance:
         parsed = parse_message(_make_raw(date="Wed, 27 May 2026 10:00:00 +0000"))
         assert parsed is not None
         assert parsed["receivedAt"].startswith("2026-05-27T10:00:00")
+
+
+# WARP-3267 — attachments are listed and, within the limits, kept.
+
+import base64 as _b64
+from email.message import EmailMessage as _EM
+
+import parser as _parser
+
+
+def _with_attachments(*parts):
+    m = _EM()
+    m["Message-ID"] = "<a@x>"
+    m["From"] = "a@x.com"
+    m["To"] = "b@x.com"
+    m["Subject"] = "files"
+    m["Date"] = "Mon, 1 Jun 2026 10:00:00 +0000"
+    m.set_content("see attached")
+    for name, data in parts:
+        m.add_attachment(data, maintype="application", subtype="pdf", filename=name)
+    return m.as_bytes()
+
+
+def test_attachment_is_stored_with_metadata():
+    out = _parser.parse_message(_with_attachments(("invoice.pdf", b"%PDF")))
+    assert out["bodyText"].strip() == "see attached"
+    [att] = out["attachments"]
+    assert att["filename"] == "invoice.pdf"
+    assert att["contentType"] == "application/pdf"
+    assert att["size"] == 4 and att["status"] == "stored"
+    assert _b64.b64decode(att["data"]) == b"%PDF"
+
+
+def test_attachment_over_the_size_limit_is_listed_without_bytes(monkeypatch):
+    monkeypatch.setattr(_parser, "MAX_ATTACHMENT_BYTES", 3)
+    out = _parser.parse_message(_with_attachments(("big.pdf", b"%PDF")))
+    [att] = out["attachments"]
+    assert att["status"] == "too_large" and "data" not in att and att["size"] == 4
+
+
+def test_attachments_over_the_count_limit_are_listed_as_over_limit(monkeypatch):
+    monkeypatch.setattr(_parser, "MAX_STORED_ATTACHMENTS", 1)
+    out = _parser.parse_message(_with_attachments(("a.pdf", b"1"), ("b.pdf", b"2")))
+    assert [a["status"] for a in out["attachments"]] == ["stored", "over_limit"]
+
+
+def test_attachments_that_would_overflow_the_ingest_body_are_demoted(monkeypatch):
+    # Budget fits the message and one small part, not the second.
+    monkeypatch.setattr(_parser, "MAX_INGEST_PAYLOAD_BYTES", 1)
+    out = _parser.parse_message(_with_attachments(("a.pdf", b"1")))
+    [att] = out["attachments"]
+    assert att["status"] == "too_large" and "data" not in att
+
+
+def test_serialised_payload_never_exceeds_the_budget(monkeypatch):
+    import json
+
+    monkeypatch.setattr(_parser, "MAX_INGEST_PAYLOAD_BYTES", 2000)
+    out = _parser.parse_message(
+        _with_attachments(("a.pdf", b"x" * 600), ("b.pdf", b"y" * 600), ("c.pdf", b"z" * 600))
+    )
+    assert len(json.dumps(out)) <= 2000
+    assert [a["status"] for a in out["attachments"]][0] == "stored"
+    assert "too_large" in [a["status"] for a in out["attachments"]]
+
+
+def test_overlong_content_id_is_dropped_not_fatal():
+    m = _EM()
+    m["Message-ID"] = "<a@x>"
+    m["From"] = "a@x.com"
+    m["To"] = "b@x.com"
+    m["Subject"] = "cid"
+    m["Date"] = "Mon, 1 Jun 2026 10:00:00 +0000"
+    m.set_content("hi")
+    m.add_attachment(b"img", maintype="image", subtype="png", filename="i.png")
+    [part] = list(m.iter_attachments())
+    part["Content-ID"] = "<" + "c" * 2000 + "@x>"
+    [att] = _parser.parse_message(m.as_bytes())["attachments"]
+    assert att["contentId"] is None
+
+
+def _envelope(subject):
+    m = _EM()
+    m["Message-ID"] = "<outer@x>"
+    m["From"] = "a@x.com"
+    m["To"] = "b@x.com"
+    m["Subject"] = subject
+    m["Date"] = "Mon, 1 Jun 2026 10:00:00 +0000"
+    return m
+
+
+def test_forwarded_message_is_one_attachment_and_not_walked_into():
+    inner = _EM()
+    inner["Message-ID"] = "<inner@x>"
+    inner["From"] = "c@x.com"
+    inner["Subject"] = "original"
+    inner.set_content("INNER BODY")
+    inner.add_attachment(b"%PDF", maintype="application", subtype="pdf", filename="inner.pdf")
+    outer = _envelope("fwd")
+    outer.set_content("<p>see below</p>", subtype="html")
+    outer.add_attachment(inner)
+    out = _parser.parse_message(outer.as_bytes())
+    # The inner message's text is not the outer message's body...
+    assert out["bodyText"] is None
+    # ...and its PDF is not listed as the outer's: one .eml, nothing else.
+    [att] = out["attachments"]
+    assert att["contentType"] == "message/rfc822"
+    assert att["filename"] == "forwarded.eml"
+    assert b"INNER BODY" in _b64.b64decode(att["data"])
+
+
+def test_named_inline_html_body_is_the_body_not_a_download():
+    m = _envelope("named body")
+    m.set_content("<p>hello</p>", subtype="html")
+    m.replace_header("Content-Type", 'text/html; charset="utf-8"; name="message.htm"')
+    out = _parser.parse_message(m.as_bytes())
+    assert "hello" in out["bodyHtml"]
+    assert out["attachments"] == []

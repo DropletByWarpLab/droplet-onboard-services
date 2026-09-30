@@ -69,9 +69,11 @@ import { readUserEmail } from "../services/user-directory.service.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import {
   exposesOutside,
+  isWorkspacePath,
   libraryOfHomePath,
   mayCreatePublicLink,
   PUBLIC_LINK_REFUSAL,
+  WORKSPACE_SHARE_REFUSAL,
   type ShareLibrary,
 } from "../services/share-policy.js";
 import {
@@ -92,6 +94,7 @@ import { requireRole, requireRoleOrMcpService, recordAccessDenied } from "../mid
 import { sensitiveRateLimit, standardRateLimit } from "../middleware/rate-limit.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { UnsafePathError } from "../lib/unsafe-path-error.js";
+import { storedUploadName } from "../lib/upload-file-name.js";
 import { isPathUnderUser } from "../services/brain-memory.service.js";
 import {
   classifyFileContentId,
@@ -1985,6 +1988,12 @@ export function createFilesRouter(
   // every staged part first, so a 413 / 400 / client abort leaves nothing
   // behind — the batch lands whole or not at all. The JSON transport
   // (write_file / create_document) is not multipart and skips all of this.
+  class BadUploadNameError extends Error {
+    constructor() {
+      super("File name must not contain '/', a control character or a '..' segment");
+    }
+  }
+
   async function handleUpload(req: Request, res: Response, next: NextFunction) {
     if (!req.is("multipart/form-data")) {
       next();
@@ -2003,14 +2012,40 @@ export function createFilesRouter(
       handleFileError(err, res, next);
       return;
     }
+    // WARP-3057: busboy decoded a plain `filename=` as latin1 (so macOS's
+    // U+202F in "9.41.12 AM" landed as "â¯AM") and cut the name at the last
+    // `\` or `/`. `defParamCharset` reads it as UTF-8 (`filename*=` still
+    // wins when sent), and `preservePath` hands us the name whole so
+    // `storedUploadName` can keep a `\` and refuse traversal — checked in
+    // the fileFilter, before a byte of that part is staged.
     const scopedUpload = multer({
       storage,
+      defParamCharset: "utf8",
+      preservePath: true,
+      fileFilter: (_req, file, cb) => {
+        if (storedUploadName(file.originalname) === null) {
+          cb(new BadUploadNameError());
+          return;
+        }
+        cb(null, true);
+      },
       limits: {
         fileSize: limitMb * 1024 * 1024,
         files: MAX_FILES_PER_UPLOAD,
       },
     });
     scopedUpload.array("files", MAX_FILES_PER_UPLOAD)(req, res, (err) => {
+      if (err instanceof BadUploadNameError) {
+        res.status(400).json({ error: err.message, code: "UPLOAD_BAD_NAME" });
+        return;
+      }
+      // busboy refuses a part header carrying a raw control character (and
+      // any other malformed header) before the fileFilter sees it: that is
+      // the client's bad request, not a 500.
+      if (err instanceof Error && err.message === "Malformed part header") {
+        res.status(400).json({ error: "Malformed upload", code: "UPLOAD_MALFORMED" });
+        return;
+      }
       if (err instanceof MulterError) {
         if (err.code === "LIMIT_FILE_SIZE") {
           // WARP-1912 — the dashboard's translator never echoes `error`
@@ -2468,7 +2503,7 @@ export function createFilesRouter(
         (req.files as (Express.Multer.File & StagedUploadInfo)[] | undefined) ?? [];
       let rawTargetPath: string;
       type PendingUpload =
-        | { name: string; size: number; sha256: string; uploadId: string }
+        | { name: string; requestedName: string; size: number; sha256: string; uploadId: string }
         | { name: string; size: number; sha256: string; buffer: Buffer };
       let uploads: PendingUpload[];
       let jsonCreateOnly = false;
@@ -2476,7 +2511,9 @@ export function createFilesRouter(
       if (files.length > 0) {
         rawTargetPath = (req.query.path as string) || "/";
         uploads = files.map((f) => ({
-          name: f.originalname,
+          // Non-null: the fileFilter refused every name this rejects.
+          name: storedUploadName(f.originalname)!,
+          requestedName: f.originalname,
           size: f.size,
           sha256: f.sha256,
           uploadId: f.uploadId,
@@ -2586,7 +2623,9 @@ export function createFilesRouter(
               targetPath,
               file.name,
               file.uploadId,
-              overwrite,
+              // WARP-3057: a name we changed (`\` → `_`) is not the name the
+              // caller asked to replace, so it always keeps both.
+              overwrite && file.name === file.requestedName,
             ));
             uncommitted.delete(file.uploadId);
           } else {
@@ -2612,14 +2651,20 @@ export function createFilesRouter(
             }
           }
           const uploadedPath = joinDir(targetPath, finalName);
+          // WARP-3057: a `\` stored as `_` is a rename the caller is told about.
+          const requestedName = "requestedName" in file ? file.requestedName : file.name;
           const status: UploadEntryStatus =
-            outcome === "replaced" ? "replaced" : finalName !== file.name ? "renamed" : "uploaded";
+            outcome === "replaced"
+              ? "replaced"
+              : finalName !== requestedName
+                ? "renamed"
+                : "uploaded";
           const entry: UploadedFileEntry = {
             name: finalName,
             path: uploadedPath,
             size: file.size,
             status,
-            ...(status === "renamed" ? { requestedName: file.name } : {}),
+            ...(status === "renamed" ? { requestedName } : {}),
           };
           results.push(entry);
 
@@ -3015,6 +3060,12 @@ export function createFilesRouter(
     res.status(403).json(PUBLIC_LINK_REFUSAL);
   }
 
+  /** WARP-3168: a member sharing a Workspace item, of any kind. */
+  function refuseWorkspaceShare(req: Request, res: Response): void {
+    recordAccessDenied(req, "workspace-share-member");
+    res.status(403).json(WORKSPACE_SHARE_REFUSAL);
+  }
+
   // ── Create a share link ──
   //
   // Accepts the full ShareCreateOptions surface (shareType / permissions /
@@ -3086,16 +3137,23 @@ export function createFilesRouter(
       const departmentId = req.spaceDepartmentId ?? null;
       const shareToken = departmentId ? adminBasicToken() : await getToken(req);
 
-      // WARP-3053: on company data, anything but an internal user/group share
-      // without the re-share bit (see exposesOutside) is owner/admin only,
-      // judged on the RESOLVED library so the home-path shape can't skip it.
-      // Owner/admin short-circuit the library lookup.
-      if (exposesOutside(parsed.data.shareType, parsed.data.permissions)) {
-        const role = await actingRole(req);
-        const allowed =
-          mayCreatePublicLink(role, "company") ||
-          mayCreatePublicLink(role, await shareLibrary(space, targetPath));
-        if (!allowed) {
+      // WARP-3168: a member may not share a Workspace item at all, internal
+      // shares included — the same rule Nextcloud now enforces with the
+      // Workspace group's mask 15 (see isWorkspacePath for why). Judged on
+      // the RESOLVED path, so `space=shared` and the home-path shape agree.
+      // WARP-3053: on department/team libraries, anything but an internal
+      // user/group share without the re-share bit (see exposesOutside) is
+      // owner/admin only. Owner/admin short-circuit both lookups.
+      const role = await actingRole(req);
+      if (!mayCreatePublicLink(role, "company")) {
+        if (isWorkspacePath(targetPath, SHARED_FOLDER_NAME)) {
+          refuseWorkspaceShare(req, res);
+          return;
+        }
+        if (
+          exposesOutside(parsed.data.shareType, parsed.data.permissions) &&
+          !mayCreatePublicLink(role, await shareLibrary(space, targetPath))
+        ) {
           refusePublicLink(req, res);
           return;
         }
@@ -4131,15 +4189,32 @@ export function createFilesRouter(
       // Revoking (DELETE) stays open to them.
       if (!mayCreatePublicLink(req.user?.role, "company")) {
         const existing = auth.deptRow
-          ? { shareType: auth.deptRow.shareType, library: "company" as const }
+          ? {
+              shareType: auth.deptRow.shareType,
+              library: "company" as const,
+              // A recorded `space=shared` share sits on the HOUSEHOLD row.
+              workspace:
+                (
+                  await prisma.department.findUnique({
+                    where: { id: auth.deptRow.departmentId },
+                    select: { kind: true },
+                  })
+                )?.kind === "HOUSEHOLD",
+            }
           : await ncGetShare(token, shareId).then(async (s) =>
               s
                 ? {
                     shareType: s.shareType,
                     library: libraryOfHomePath(s.path, await companyLibraryRoots()),
+                    workspace: isWorkspacePath(s.path, SHARED_FOLDER_NAME),
                   }
                 : null,
             );
+        // WARP-3168: no member edits of any Workspace share (revoke stays open).
+        if (existing?.workspace) {
+          refuseWorkspaceShare(req, res);
+          return;
+        }
         if (
           existing &&
           exposesOutside(existing.shareType, parsed.data.permissions ?? 0) &&

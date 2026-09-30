@@ -39,11 +39,14 @@ vi.mock("../services/security-incident-page.js", async () => ({
   projectedIncidentPage: (await import("./security-incidents.fake.js")).referenceProjectedIncidentPage,
 }));
 
-import { createSecurityAssistantRouter, type CameraStatusSource } from "../routes/security-assistant.js";
+import { AREA_READ_BATCH, createSecurityAssistantRouter, type CameraStatusSource } from "../routes/security-assistant.js";
 import { securityScopeForPerson } from "../services/security-access.js";
+import { assistantBodyBudget } from "../services/security-assistant-view.js";
 import type { EffectiveAccessResult } from "../services/effective-access.service.js";
 import { explainSecurityPattern } from "../services/security-patterns-read.js";
 import { loadIncidentDetail } from "../services/security-incident-view.js";
+import { SECURITY_ZONE_ACTIVE_LIMIT } from "../services/security-zones.service.js";
+import { getTool, type ToolContext } from "@droplet/tools-core";
 import {
   areaRows as fakeAreaRows,
   baselineRows,
@@ -264,6 +267,25 @@ const ROUTES = [
 ];
 
 const MODULE_DISABLED = { error: "module_disabled", module: "security" };
+
+/** Droplet's own summary of INC_FRONT (PR-2's check already refused any name in it). */
+const SUMMARY = "A person was seen on the Shop floor at 10:14 PM while the site was closed. It was acknowledged at 10:19 PM.";
+const WRITTEN = new Date(T.getTime() + 600_000); // 10:24 PM London
+
+/** Give an incident a "Summary by Droplet" as the narrator writes it (the CHECK's shape), then `over`. */
+function withSummary(w: FakeSecurityPrisma, id: string, over: Record<string, unknown> = {}): void {
+  const row = w.world.securityIncident.find((r) => r.id === id);
+  if (!row) throw new Error(`no incident ${id}`);
+  Object.assign(row, {
+    narrativeState: "written",
+    narrative: SUMMARY,
+    narrativeModel: "llama3.2:3b",
+    narrativePromptVersion: 1,
+    narratedAt: WRITTEN,
+    narrativeAudience: { cameras: [...(row.cameras as string[])], threats: row.scope === "site_threat", locks: false },
+    ...over,
+  });
+}
 
 let f: FakeSecurityPrisma;
 beforeEach(() => {
@@ -508,6 +530,30 @@ describe("no person's name in any output (§6.12.5, D26)", () => {
     expect(text).not.toContain("jordan");
   });
 
+  // Part A (WARP-2979, spec §6.12.5): the one stored text A2 passes through is Droplet's own summary. PR-2's
+  // check keeps names out of it; this proves A2 adds none around it — "Maria" is seeded everywhere else
+  // the incident stores a name or free text, and none of it reaches the tool.
+  it("A2 with Droplet's summary: the summary reaches the tool; Maria, stored elsewhere in the incident, never does", async () => {
+    withSummary(f, INC_FRONT, { narrativeModel: "maria-local:3b", narrativeError: "Maria's earlier try was refused" });
+    Object.assign(f.world.securityIncident.find((r) => r.id === INC_FRONT)!, {
+      verdict: "expected",
+      verdictById: MARIA,
+      verdictByName: "Maria",
+      verdictAt: WRITTEN,
+      verdictFirstAt: WRITTEN,
+      verdictCodes: ["after_hours_presence"],
+    });
+    const { server } = app(f);
+    for (const who of ["stefan", "jordan"]) {
+      const res = await get(server, `/api/security/assistant/incidents/${INC_FRONT}`, who);
+      expect(res.status, who).toBe(200);
+      expect(res.body.incident.summaryByDroplet, who).toEqual({ text: SUMMARY, writtenAt: { at: WRITTEN.toISOString(), local: "10:24 PM" } });
+      // Seeded: the acknowledger (name, client, note), the verdict-giver, the evidence's stored summary and
+      // detail, the mode-setter, the model's id and the last error.
+      expect(JSON.stringify(res.body).toLowerCase(), who).not.toContain("maria");
+    }
+  });
+
   it("the acknowledgement is its time only; the mode says why, not who", async () => {
     const { server } = app(f);
     const a2 = await get(server, `/api/security/assistant/incidents/${INC_FRONT}`, "stefan");
@@ -567,9 +613,9 @@ describe("the shapes", () => {
         areas: ["Shop floor"],
       },
     ]);
-    expect(res.body.incident).toMatchObject({ moreEvents: false, eventsRemoved: false, resolved: null });
+    expect(res.body.incident).toMatchObject({ moreEvents: false, eventsRemoved: false, resolved: null, summaryByDroplet: null });
     expect(Object.keys(res.body.incident).sort()).toEqual(
-      ["acknowledged", "codes", "events", "eventsRemoved", "first", "id", "last", "moreEvents", "resolved", "severity", "state", "stillHappening", "title", "url"].sort(),
+      ["acknowledged", "codes", "events", "eventsRemoved", "first", "id", "last", "moreEvents", "resolved", "severity", "state", "stillHappening", "summaryByDroplet", "title", "url"].sort(),
     );
   });
 
@@ -603,6 +649,216 @@ describe("the shapes", () => {
     expect(owner.body.suggestionsWaiting).toBe(0);
     const maria = await get(server, "/api/security/assistant/areas", "maria");
     expect(maria.body.suggestionsWaiting).toBeNull();
+  });
+});
+
+// Part A (WARP-2979, spec §6.12.3 A2): `summaryByDroplet` follows `narrativeVisibleTo` — as built by PR-2, a
+// viewer-level rule: only a viewer who sees every camera AND may read threats — and is only ever a WRITTEN text.
+describe("A2 summaryByDroplet", () => {
+  const a2 = async (w: FakeSecurityPrisma, who: string, id = INC_FRONT) => {
+    const res = await get(app(w).server, `/api/security/assistant/incidents/${id}`, who);
+    expect(res.status, who).toBe(200);
+    return res.body;
+  };
+
+  it("the owner and an admin get the written text and when, as a local time", async () => {
+    withSummary(f, INC_FRONT);
+    withSummary(f, INC_THREAT, { narrative: "A sign-in failed twice at 10:12 PM." });
+    for (const who of ["stefan", "jordan"]) {
+      expect((await a2(f, who)).incident.summaryByDroplet, who).toEqual({ text: SUMMARY, writtenAt: { at: WRITTEN.toISOString(), local: "10:24 PM" } });
+      expect((await a2(f, who, INC_THREAT)).incident.summaryByDroplet.text, who).toBe("A sign-in failed twice at 10:12 PM.");
+    }
+  });
+
+  it("🔴 a camera-limited viewer gets null — even for an incident wholly on her own camera — and her answer is the same byte for byte as with no summary", async () => {
+    const without = await a2(world(), "maria");
+    withSummary(f, INC_FRONT);
+    const withIt = await a2(f, "maria");
+    expect(withIt.incident.summaryByDroplet).toBeNull();
+    expect(withIt).toEqual(without);
+    // The SSO family member granted `front` too: same rule, same null.
+    expect((await a2(f, "sam@example.com")).incident.summaryByDroplet).toBeNull();
+  });
+
+  it.each([
+    ["pending — a Regenerate in flight keeps the old text", { narrativeState: "pending" }],
+    ["pending, never written", { narrativeState: "pending", narrative: null, narrativeModel: null, narrativePromptVersion: null, narratedAt: null, narrativeAudience: null }],
+    ["failed, with an earlier text", { narrativeState: "failed", narrativeError: "CHECK_FAILED:TIMES" }],
+    ["expired, with an earlier text", { narrativeState: "expired" }],
+    ["none", { narrativeState: "none", narrative: null, narrativeModel: null, narrativePromptVersion: null, narratedAt: null, narrativeAudience: null }],
+  ])("null unless written: %s", async (_label, over) => {
+    withSummary(f, INC_FRONT, over);
+    expect((await a2(f, "stefan")).incident.summaryByDroplet).toBeNull();
+  });
+
+  it("null while summaries are switched off, and back when they are on", async () => {
+    withSummary(f, INC_FRONT);
+    f.world.securityAiSettings.push({ id: "singleton", linking: "link_and_suggest", summaries: "off", version: 1, updatedById: null, updatedAt: T });
+    expect((await a2(f, "stefan")).incident.summaryByDroplet).toBeNull();
+    f.world.securityAiSettings[0]!.summaries = "on";
+    expect((await a2(f, "stefan")).incident.summaryByDroplet).not.toBeNull();
+  });
+
+  it("an unreadable summaries setting shows none, never a 503", async () => {
+    withSummary(f, INC_FRONT);
+    f.failOn("securityAiSettings", "findUnique", undefined, { always: true });
+    expect((await a2(f, "stefan")).incident.summaryByDroplet).toBeNull();
+  });
+});
+
+// WARP-3194 items 1 and 2: A4 could not resume past the areas it trimmed, and it queried every visible area
+// (two queries each, all at once) before trimming.
+describe("A4 pages through the areas, reading only what a page holds (WARP-3194)", () => {
+  const LABEL = "A camera with a very long display name that goes on".padEnd(60, "x");
+  const name = (i: number) => `Area ${String(i).padStart(3, "0")}`;
+  const cap = 8_000 - '{"type":"security_areas",}'.length;
+
+  /** `visible` areas on `front` (Maria's camera) and `hidden` ones on `back` alone, their names interleaved. */
+  function areaWorld(visible: number, hidden: number): FakeSecurityPrisma {
+    const rows = [
+      ...Array.from({ length: visible }, (_, i) => areaRows(`0c0c0c0c-0000-4000-8000-${String(i).padStart(12, "0")}`, name(2 * i), "interior", ["front"])),
+      ...Array.from({ length: hidden }, (_, i) => areaRows(`0d0d0d0d-0000-4000-8000-${String(i).padStart(12, "0")}`, name(2 * i + 1), "interior", ["back"])),
+    ];
+    return world({
+      camera: [{ id: "cam-front", name: "front", displayName: LABEL }, { id: "cam-back", name: "back", displayName: "Back camera" }],
+      securityZone: rows.map((r) => r.zone),
+      securityZoneLink: rows.flatMap((r) => r.links),
+    });
+  }
+
+  /** Every page from offset 0, following nextOffset. */
+  async function pages(w: FakeSecurityPrisma, who: string) {
+    const { server } = app(w, { level: "manage" });
+    const out: Array<Record<string, unknown> & { areas: Array<{ name: string }>; moreAreas: number; nextOffset: number | null }> = [];
+    let offset: number | null = 0;
+    for (let i = 0; offset !== null && i < 20; i++) {
+      const res = await get(server, `/api/security/assistant/areas?offset=${offset}`, who);
+      expect(res.status).toBe(200);
+      out.push(res.body);
+      offset = res.body.nextOffset;
+    }
+    expect(offset).toBeNull();
+    return out;
+  }
+
+  it("nextOffset resumes right after the last area shown: every area once, in order, each page under the cap", async () => {
+    const all = await pages(areaWorld(40, 0), "stefan");
+    expect(all.length).toBeGreaterThan(1);
+    expect(all.flatMap((b) => b.areas.map((a) => a.name))).toEqual(Array.from({ length: 40 }, (_, i) => name(2 * i)));
+    let seen = 0;
+    for (const b of all) {
+      seen += b.areas.length;
+      expect(b.moreAreas).toBe(40 - seen);
+      expect(b.nextOffset).toBe(seen < 40 ? seen : null);
+      expect(JSON.stringify(b).length).toBeLessThan(cap);
+    }
+  });
+
+  it("an offset past the end is an empty page with nothing more; outside 0–64 it is 400", async () => {
+    const { server } = app(areaWorld(40, 0));
+    for (const offset of [40, 64]) {
+      const res = await get(server, `/api/security/assistant/areas?offset=${offset}`, "stefan");
+      expect(res.status, String(offset)).toBe(200);
+      expect(res.body, String(offset)).toMatchObject({ areas: [], moreAreas: 0, nextOffset: null });
+    }
+    for (const offset of ["65", "-1", "1.5", "x"]) {
+      const res = await get(server, `/api/security/assistant/areas?offset=${offset}`, "stefan");
+      expect(res.status, offset).toBe(400);
+      expect(res.body.error.code, offset).toBe("BAD_REQUEST");
+    }
+  });
+
+  // tools-core cannot import the orchestrator's limit, so the tool's `offset` ceiling (OFFSET_MAX) is a literal
+  // there. This runs the real tool and ties the two: it refuses an offset exactly where the route would.
+  it("security_zone_status's offset ceiling is A4's (SECURITY_ZONE_ACTIVE_LIMIT)", async () => {
+    const tool = getTool("security_zone_status")!;
+    const body = { site: { mode: "closed" }, areas: [], moreAreas: 0, nextOffset: null, suggestionsWaiting: null };
+    const orchestratorGet = vi.fn().mockImplementation(async () => new globalThis.Response(JSON.stringify(body), { status: 200 }));
+    const ctx = { http: { orchestrator: { get: orchestratorGet } }, signal: new AbortController().signal } as unknown as ToolContext;
+    expect((await tool.handler({ offset: SECURITY_ZONE_ACTIVE_LIMIT }, ctx)).ok).toBe(true);
+    expect(orchestratorGet).toHaveBeenCalledTimes(1);
+    const past = await tool.handler({ offset: SECURITY_ZONE_ACTIVE_LIMIT + 1 }, ctx);
+    expect(past.ok).toBe(false);
+    expect(orchestratorGet).toHaveBeenCalledTimes(1);
+  });
+
+  it("?area= and offset together: the one area, then nothing", async () => {
+    const { server } = app(areaWorld(40, 0));
+    const first = await get(server, `/api/security/assistant/areas?area=${encodeURIComponent(name(6))}&offset=0`, "stefan");
+    expect(first.body).toMatchObject({ areas: [{ name: name(6) }], moreAreas: 0, nextOffset: null });
+    const past = await get(server, `/api/security/assistant/areas?area=${encodeURIComponent(name(6))}&offset=1`, "stefan");
+    expect(past.body).toMatchObject({ areas: [], moreAreas: 0, nextOffset: null });
+  });
+
+  it("🔴 DS-005: hidden areas move no count, no offset and no page — Maria's pages are byte for byte a site's without them", async () => {
+    const withHidden = await pages(areaWorld(40, 20), "maria");
+    const without = await pages(areaWorld(40, 0), "maria");
+    expect(withHidden.length).toBeGreaterThan(1);
+    expect(withHidden).toEqual(without);
+    expect(JSON.stringify(withHidden)).not.toContain("Back camera");
+    // A forged offset reads her areas only: past them it is the same empty page as on a site without hidden ones.
+    const a = app(areaWorld(40, 20)).server;
+    const b = app(areaWorld(40, 0)).server;
+    for (const offset of [20, 39, 40, 45, 59, 60, 64]) {
+      const x = await get(a, `/api/security/assistant/areas?offset=${offset}`, "maria");
+      const y = await get(b, `/api/security/assistant/areas?offset=${offset}`, "maria");
+      expect(x.body, String(offset)).toEqual(y.body);
+    }
+    // The owner, who sees them, pages through all sixty.
+    const owner = await pages(areaWorld(40, 20), "stefan");
+    const everyName = [...Array.from({ length: 40 }, (_, i) => name(2 * i)), ...Array.from({ length: 20 }, (_, i) => name(2 * i + 1))].sort();
+    expect(owner.flatMap((p) => p.areas.map((x) => x.name))).toEqual(everyName);
+  });
+
+  /** Count the per-area reads A4 makes, and how many run at once. */
+  function probeReads(w: FakeSecurityPrisma) {
+    const probe = { counts: 0, events: 0, inFlight: 0, peak: 0 };
+    const wrap = (table: "securityIncident" | "securityEvent", method: "count" | "findMany", tally: "counts" | "events") => {
+      const delegate = w.client[table] as Record<string, (args: unknown) => Promise<unknown>>;
+      const real = delegate[method]!.bind(delegate);
+      delegate[method] = async (args: unknown) => {
+        probe[tally]++;
+        probe.inFlight++;
+        probe.peak = Math.max(probe.peak, probe.inFlight);
+        try {
+          await new Promise((r) => setImmediate(r));
+          return await real(args);
+        } finally {
+          probe.inFlight--;
+        }
+      };
+    };
+    wrap("securityIncident", "count", "counts");
+    wrap("securityEvent", "findMany", "events");
+    return probe;
+  }
+
+  it("reads only the areas the page can hold, a few at a time — not every visible area at once", async () => {
+    const w = areaWorld(40, 0);
+    const probe = probeReads(w);
+    const res = await get(app(w).server, "/api/security/assistant/areas", "stefan");
+    const n = res.body.areas.length;
+    expect(n).toBeGreaterThan(5);
+    expect(n).toBeLessThan(40);
+    // One count and one latest-event read per area read; at most one batch past the last area that fits.
+    expect(probe.counts).toBeLessThanOrEqual(n + AREA_READ_BATCH);
+    expect(probe.events).toBe(probe.counts);
+    // Two reads per area in flight, a batch at a time.
+    expect(probe.peak).toBeLessThanOrEqual(2 * AREA_READ_BATCH);
+    expect(probe.peak).toBeGreaterThan(1);
+  });
+
+  it("…and the page is exactly what fitting every area would give: each area's own answer, as many as fit", async () => {
+    const w = areaWorld(40, 0);
+    const { server } = app(w);
+    const res = await get(server, "/api/security/assistant/areas", "stefan");
+    const n = res.body.areas.length;
+    const own = async (i: number) => (await get(server, `/api/security/assistant/areas?area=${encodeURIComponent(name(2 * i))}`, "stefan")).body.areas[0];
+    for (let i = 0; i < n; i++) expect(res.body.areas[i], name(2 * i)).toEqual(await own(i));
+    expect(JSON.stringify(res.body).length).toBeLessThanOrEqual(assistantBodyBudget());
+    // One more area would not have fitted.
+    const more = { ...res.body, areas: [...res.body.areas, await own(n)], moreAreas: res.body.moreAreas - 1, nextOffset: n + 1 < 40 ? n + 1 : null };
+    expect(JSON.stringify(more).length).toBeGreaterThan(assistantBodyBudget());
   });
 });
 
@@ -660,6 +916,66 @@ describe("periods", () => {
     const res = await get(server, "/api/security/assistant/incidents?period=today", "stefan");
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe("NO_SITE_TIMEZONE");
+  });
+
+  // WARP-3194 item 3: hours that cannot be evaluated used to cost the tools their zone altogether.
+  describe("opening hours that can't be read (WARP-3194)", () => {
+    const office = officeHours("Europe/London");
+    /** An unknown site zone, or one weekday row gone: either way `loadSiteHours` answers ok:false. */
+    const unreadable = (how: "unknown zone" | "a weekday missing", siteZone: string, workspaceTz: string | null) =>
+      world({
+        securitySiteHours: [{ ...office.header, timezone: how === "unknown zone" ? "Mars/Olympus" : siteZone }],
+        securitySchedule: how === "a weekday missing" ? office.days.slice(1) : office.days,
+        workspace: workspaceTz ? [{ id: 1, tz: workspaceTz }] : [],
+      });
+
+    it("an unknown site zone falls back to the workspace's: today answers, in that zone, on A1 and A3", async () => {
+      f = unreadable("unknown zone", "", "Europe/London");
+      const { server } = app(f);
+      for (const path of ["/api/security/assistant/incidents?period=today", "/api/security/assistant/events?period=today"]) {
+        const res = await get(server, path, "stefan");
+        expect(res.status, path).toBe(200);
+        expect(res.body.timezone, path).toBe("Europe/London");
+        expect(res.body.period.from, path).toEqual({ at: "2026-09-22T23:00:00.000Z", local: "12:00 AM" });
+      }
+    });
+
+    it("a site zone the runtime knows is kept when only the rows are broken — the workspace's never replaces it", async () => {
+      f = unreadable("a weekday missing", "America/New_York", "Europe/London");
+      const res = await get(app(f).server, "/api/security/assistant/incidents?period=today", "stefan");
+      expect(res.status).toBe(200);
+      expect(res.body.timezone).toBe("America/New_York");
+      expect(res.body.period.from.at).toBe("2026-09-23T04:00:00.000Z");
+    });
+
+    it("last_night reads as if no hours were set: 6 PM yesterday to 8 AM today, in the fallback zone", async () => {
+      f = unreadable("unknown zone", "", "Europe/London");
+      const res = await get(app(f).server, "/api/security/assistant/incidents?period=last_night", "stefan");
+      expect(res.status).toBe(200);
+      expect(res.body.period.from.at).toBe("2026-09-22T17:00:00.000Z");
+      expect(res.body.period.to.at).toBe("2026-09-23T07:00:00.000Z");
+    });
+
+    it("no zone known at all: today is still 400 NO_SITE_TIMEZONE, never a guessed zone", async () => {
+      f = unreadable("unknown zone", "", null);
+      const res = await get(app(f).server, "/api/security/assistant/incidents?period=today", "stefan");
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe("NO_SITE_TIMEZONE");
+    });
+
+    it("A4 answers instead of 503: the mode is unknown and says why, the areas are what they were, times in the fallback zone", async () => {
+      const readable = await get(app(world()).server, "/api/security/assistant/areas", "stefan");
+      f = unreadable("unknown zone", "", "Europe/London");
+      const res = await get(app(f).server, "/api/security/assistant/areas", "stefan");
+      expect(res.status).toBe(200);
+      expect(res.body.site).toEqual({ mode: "unknown", why: "opening hours can't be read", until: null, hoursSet: true, timezone: "Europe/London" });
+      expect(res.body.areas).toEqual(readable.body.areas);
+      // And with no zone known either: still an answer, its times without a zone.
+      f = unreadable("unknown zone", "", null);
+      const bare = await get(app(f).server, "/api/security/assistant/areas", "stefan");
+      expect(bare.status).toBe(200);
+      expect(bare.body.site).toMatchObject({ mode: "unknown", timezone: null });
+    });
   });
 
   it("a period keeps only incidents whose VISIBLE span meets it", async () => {
@@ -823,6 +1139,24 @@ describe("failure and size", () => {
     const a3next = await get(server, `/api/security/assistant/events?limit=40&cursor=${a3.body.nextCursor}`, "stefan");
     const seen = a3.body.events.length;
     expect(a3next.body.events[0].at.at).toBe(new Date(T.getTime() - seen * 60_000).toISOString());
+  });
+
+  // Part A: the summary counts toward the same budget, and it is the EVENTS that give way — never the summary.
+  it("A2 with a summary at its longest (700 chars): under the cap, the summary whole, fewer events and moreEvents", async () => {
+    const { incidents } = bigWorld();
+    const { server } = app(f);
+    const cap = 8_000 - '{"type":"security_incident",}'.length;
+    const path = `/api/security/assistant/incidents/${incidents[0]!.id}`;
+    const before = await get(server, path, "stefan");
+    const longest = "A person was seen at the front door while the site was closed, and stayed for a while. ".repeat(9).slice(0, 700).trim();
+    withSummary(f, incidents[0]!.id, { narrative: longest });
+    const after = await get(server, path, "stefan");
+    expect(after.status).toBe(200);
+    expect(JSON.stringify(after.body).length).toBeLessThan(cap);
+    expect(after.body.incident.summaryByDroplet.text).toBe(longest);
+    expect(after.body.incident.moreEvents).toBe(true);
+    expect(after.body.incident.events.length).toBeGreaterThan(0);
+    expect(after.body.incident.events.length).toBeLessThan(before.body.incident.events.length);
   });
 
   // #2420 review 12: the camera-limited viewer takes a different path (her own SQL page, the partial view),

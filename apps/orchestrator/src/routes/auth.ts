@@ -689,6 +689,20 @@ const SSO_MANAGED_ACCOUNT_BODY = {
   code: "SSO_MANAGED_ACCOUNT",
 } as const;
 
+/**
+ * WARP-3263 — `id` if it still names a User row, else null. Guards the
+ * User.invitedById FK: the inviter may have been deleted between issuing
+ * the invite and its accept, or the caller may not be a directory row.
+ */
+async function liveUserId(
+  prisma: import("@prisma/client").PrismaClient,
+  id: string | null | undefined,
+): Promise<string | null> {
+  if (!id) return null;
+  const row = await prisma.user.findUnique({ where: { id }, select: { id: true } });
+  return row?.id ?? null;
+}
+
 async function findDirectoryUserByHandle(
   prisma: import("@prisma/client").PrismaClient,
   handle: string,
@@ -2062,6 +2076,9 @@ export function createPublicAuthRouter(
       const accessRoleAssignment = acceptedAccessRole
         ? { role: acceptedAccessRole.startingPoint, accessRoleId: acceptedAccessRole.id }
         : null;
+      // WARP-3263 — who brought this person onto the box, as an explicit id
+      // (a guest's Messages roster shows them). Null on a pre-column invite.
+      const invitedById = await liveUserId(prisma, invite.createdById);
       const userRow = await prisma.user.upsert({
         where: { nextcloudUsername: invite.username },
         update: {
@@ -2086,6 +2103,7 @@ export function createPublicAuthRouter(
           // Canonical Role enum: the applied role's startingPoint, else the
           // invite's tier (pre-T9 behavior, bit-for-bit).
           role: invite.role,
+          invitedById,
           // `isLocal` defaults to true in the schema; mirror-from-NC
           // would only flip false for setup-time admins.
           ...(accessRoleAssignment ?? {}),
@@ -3069,6 +3087,8 @@ export function createProtectedAuthRouter(
           // WARP-824: explicit forced-change-on-first-login flag (default
           // true). The post-auth gate reads this fresh on every request.
           mustChangePassword,
+          // WARP-3263 — the creating admin, same role as an invite's issuer.
+          invitedById: await liveUserId(prisma, req.user?.id),
         },
       });
 
@@ -4092,6 +4112,8 @@ export function createProtectedAuthRouter(
           email: parsed.data.email,
           role: parsed.data.role,
           createdBy: req.user?.username ?? "unknown",
+          // WARP-3263 — copied to User.invitedById at accept.
+          createdById: req.user?.id ?? null,
           expiresAt,
           // WARP-1533: validated custom access role (null = plain tier).
           accessRoleId: inviteAccessRole?.id ?? null,

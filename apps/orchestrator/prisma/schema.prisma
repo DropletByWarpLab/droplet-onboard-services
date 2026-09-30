@@ -1060,6 +1060,11 @@ model UserInvite {
   // separate ticket.
   role         Role      @default(family)
   createdBy    String // username of issuing admin
+  // WARP-3263: the issuing admin's User.id, copied to User.invitedById at
+  // accept. No FK: an audit pointer that must not block invite creation;
+  // accept checks the row still exists before copying it. Null on invites
+  // issued before this column existed.
+  createdById  String?
   expiresAt    DateTime
   // WARP-3193 QUAL-3: the lifecycle is this column, not the absence of the
   // timestamps below (CLAUDE.md no-guessing rule; WARP-218
@@ -2129,6 +2134,13 @@ model CalendarEvent {
   sourceId     String? // FK to CalendarSource.id (when source="external")
   externalUid  String? // iCalendar UID — used as idempotency key on re-sync
   externalEtag String? // CalDAV ETag for change detection
+  /// WARP-3266 — explicit, never derived from externalUid's shape:
+  /// "none" — a one-off event (every local row);
+  /// "occurrence" — one instance of a subscribed recurring series, expanded
+  ///   at sync time (externalUid = "<UID>::<original start ISO>");
+  /// "unexpanded" — a recurring series whose RRULE is outside the supported
+  ///   subset, stored as its first instance only. Clients can say "repeats".
+  recurrence   String   @default("none")
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -2976,6 +2988,16 @@ model User {
   // silently strip or downgrade a person's assignment.
   accessRoleId     String?
   accessRole       AccessRole?           @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
+  // WARP-3263: the person who brought this account onto the box: the invite's
+  // issuer (stamped at invite accept) or the admin who created it directly
+  // (POST /auth/users). An explicit id, never inferred from usernames or
+  // timestamps. Null when nobody did (setup owner, SSO/SCIM) or when that
+  // person was later deleted (SetNull), so a new hire reusing the old
+  // username is never mistaken for the inviter. An external guest's Messages
+  // roster shows this person.
+  invitedById      String?
+  invitedBy        User?                 @relation("UserInvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
+  invitees         User[]                @relation("UserInvitedBy")
   // ADR-032 / WARP-1525: per-person feature-axis exceptions (design D-A, v1).
   accessExceptions UserAccessException[]
   // WARP-2748 (ADR-051): findings assigned to this person. SetNull on the
@@ -3894,9 +3916,62 @@ model EmailMessage {
   extractedAt      DateTime?
   extractReason    ExtractReason?
 
+  /// WARP-3267 — the files this message carried.
+  attachments EmailAttachment[]
+
   @@unique([accountId, messageId])
   @@index([threadId, receivedAt(sort: Desc)])
   @@index([extractStatus, receivedAt])
+}
+
+/// WARP-3267 — one MIME part of an inbound message that is not its body.
+///
+/// Ruling: the bytes live in box storage (this table), not in the mailbox
+/// owner's Nextcloud home. A mailbox an admin connects for the company has no
+/// owner (`EmailAccount.userId` is null) and so no home to write to; anything
+/// in a Nextcloud home is picked up by the preview generator and the file
+/// indexer, which would render and parse a stranger's file the moment it
+/// arrived; and here the bytes go with the message, so disconnecting a mailbox
+/// (which cascades) leaves nothing behind. Saving an attachment into Files is
+/// the person's own act, from a client.
+///
+/// Never rendered by the box. Served only as a download
+/// (`GET /api/email/:accountId/messages/:messageId/attachments/:attachmentId`).
+/// `status` says whether the bytes were kept: a part over the size limits is
+/// listed, so the reader knows it existed, but not stored.
+model EmailAttachment {
+  id             String                @id @default(uuid())
+  emailMessageId String
+  emailMessage   EmailMessage          @relation(fields: [emailMessageId], references: [id], onDelete: Cascade)
+  /// Copied from the message so a forward can check, in one query, that the
+  /// attachment belongs to the mailbox the draft is sent from.
+  accountId      String
+  /// Position among the message's attachments (0-based). Unique per message.
+  partIndex      Int
+  /// As the sender named it, decoded. Sanitised when served, never trusted.
+  filename       String
+  /// As the sender declared it. Recorded, never used to decide how to open it.
+  contentType    String
+  size           Int
+  sha256         String
+  /// `Content-ID` of an inline part (a `cid:` image), without the brackets.
+  contentId      String?
+  status         EmailAttachmentStatus
+  /// Null unless `status` is `stored`.
+  data           Bytes?
+  createdAt      DateTime              @default(now())
+
+  @@unique([emailMessageId, partIndex])
+  @@index([accountId])
+}
+
+/// WARP-3267 — whether an attachment's bytes were kept.
+/// `too_large`: the part, or the message's running total, was over the limit.
+/// `over_limit`: the message carried more attachments than the box keeps.
+enum EmailAttachmentStatus {
+  stored
+  too_large
+  over_limit
 }
 
 /// WARP-465 — operator- or Droplet-authored draft. `draftedByDroplet`
@@ -3928,6 +4003,9 @@ model EmailDraft {
   /// every draft that has never been claimed.
   claimedAt        DateTime?
   error            String?
+  /// WARP-3267 — stored `EmailAttachment` ids a forward carries. Checked on
+  /// write to belong to this draft's mailbox; the indexer attaches them at send.
+  attachmentIds    String[]         @default([])
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 
@@ -4588,6 +4666,10 @@ enum OffLanChannelKey {
   /// (Google / Apple / Mozilla) a PushSubscription row names. Read by
   /// `webPushGate` in dispatchToUser, the one dial site, on every call.
   web_push
+  /// WARP-3264 — "Look up places online": the calendar place field's
+  /// OpenStreetMap (Nominatim) lookup. Owner-only switch, default off;
+  /// read fail-closed by `placeLookupGate` in GET /api/calendar/places.
+  place_lookup
 }
 
 /// WARP-473 — Phase G1. File ↔ ChatMessage citations.

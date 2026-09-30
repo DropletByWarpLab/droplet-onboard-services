@@ -154,6 +154,9 @@ const EXPECTED_TOOL_NAMES = [
   // WARP-1436 — ambient web data via screened egress (both Tier-1)
   "get_weather",
   "currency_convert",
+  // WARP-3116 — dashboard navigation (both Tier-1; pure lookups)
+  "find_dashboard_page",
+  "open_dashboard_page",
   // WARP-1440 — camera depth (search/health Tier-1; toggle/zones/delete Tier-2)
   "search_camera_events",
   "get_camera_health",
@@ -371,6 +374,12 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("get_weather")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("currency_convert")?.requiresWrite).toBe(false);
     expect(TOOLS.get("currency_convert")?.requiresConfirmation).toBe(false);
+    // WARP-3116 — navigation resolves a page; the dashboard moves the view.
+    // No box state changes, so both are Tier-1.
+    expect(TOOLS.get("find_dashboard_page")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("find_dashboard_page")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("open_dashboard_page")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("open_dashboard_page")?.requiresConfirmation).toBe(false);
     // WARP-1440 — camera reads are Tier-1; detection toggle, zone writes,
     // and clip deletion are Tier-2 (write + handler-enforced confirmation).
     expect(TOOLS.get("search_camera_events")?.requiresWrite).toBe(false);

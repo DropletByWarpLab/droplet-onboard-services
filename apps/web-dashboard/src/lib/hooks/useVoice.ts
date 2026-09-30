@@ -152,14 +152,16 @@ export function useVoiceSurfaceData(): VoiceSurfaceData {
  * Coarse voice health for the Home system-status tile — one row, low
  * poll cadence, same derivation as the page so the two never disagree.
  * `state: null` while loading or when the dashboard can't reach the
- * orchestrator at all (the tile renders an em-dash).
+ * orchestrator at all (the tile renders an em-dash). `enabled: false`
+ * skips the poll entirely: GET /api/voice/status is owner/admin only and
+ * every 403 writes an audited "Access denied" row (WARP-3157).
  */
-export function useVoiceHealthSummary(): {
+export function useVoiceHealthSummary({ enabled = true }: { enabled?: boolean } = {}): {
   state: VoiceSurfaceState | null;
   unavailable: boolean;
 } {
   const { data: status, error } = useSWR<VoiceStatusInfo>(
-    VOICE_STATUS_KEY,
+    enabled ? VOICE_STATUS_KEY : null,
     () => fetchVoiceStatus(),
     { refreshInterval: HOME_POLL_MS, shouldRetryOnError: false },
   );

@@ -302,7 +302,9 @@ export interface StorageStats {
 export interface HealthResponse {
   status: "ok" | "degraded";
   uptime: number;
-  version: string;
+  // WARP-3154 — the real committed OTA release tag; the key is absent (not
+  // `null`) on a box that has never taken an update — see AggregateHealth.
+  version?: string;
   /**
    * WARP-1926 — the local inference runtime this box serves from: `dmr`
    * (Docker Model Runner, the shipped default since WARP-1870) or `ollama`.
