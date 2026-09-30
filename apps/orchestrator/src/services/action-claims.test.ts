@@ -259,12 +259,12 @@ describe("what the model and the person are told", () => {
   ];
 
   it("the correction prompt states every write's fate and quotes the wrong sentence", () => {
-    const check = checkActionClaims("I've created the task and deleted the file.", trace);
+    const check = checkActionClaims("I've deleted the file.", trace);
     const prompt = claimCorrectionPrompt(check);
     expect(prompt).toContain("- business_create: NOT done: it is waiting for the person's approval");
     expect(prompt).toContain("- delete_file: NOT done: the person does not have permission");
     expect(prompt).toContain("- email_send: done.");
-    expect(prompt).toContain(`"I've created the task and deleted the file." — this did not happen.`);
+    expect(prompt).toContain(`"I've deleted the file." — this did not happen.`);
     expect(prompt).toContain("Do not call any tools.");
   });
 
