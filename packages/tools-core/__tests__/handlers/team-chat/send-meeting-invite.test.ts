@@ -469,7 +469,7 @@ describe("WARP-3403 — a meeting invitee given by email address", () => {
         : res(201, { meeting: { id: "mtg-d", threadId: "thread-d" } });
     });
     const { ctx } = ctxWith({ get, post });
-    return { ctx, post, lookups, writes };
+    return { ctx, get, post, lookups, writes };
   }
 
   it("says it takes usernames or email addresses of people in the Workspace", () => {
@@ -571,6 +571,7 @@ describe("WARP-3403 — a meeting invitee given by email address", () => {
       w.ctx,
     );
     expect(errorOf(early).code).toBe("INVALID_ARGS");
+    expect(w.get).not.toHaveBeenCalled();
     expect(w.post).not.toHaveBeenCalled();
   });
 

@@ -249,7 +249,7 @@ export function resolveRecipients(
       ok: false,
       result: err(
         "UNKNOWN_RECIPIENT",
-        `No member named: ${missing.join(", ")}. Recipients must be existing member usernames.`,
+        `Nobody in this Workspace has the username: ${missing.join(", ")}. Recipients must be usernames or email addresses of people in this Workspace.`,
       ),
     };
   }

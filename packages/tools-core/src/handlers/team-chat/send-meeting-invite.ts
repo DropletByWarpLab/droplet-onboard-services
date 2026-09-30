@@ -120,7 +120,7 @@ async function handler(
   ) {
     return err(
       "INVALID_ARGS",
-      `recipients must be 1-${MAX_RECIPIENTS} member usernames`,
+      `recipients must be 1-${MAX_RECIPIENTS} usernames or email addresses of people in this Workspace`,
     );
   }
   // The organizer is dropped against the roster's `me` (WARP-3196), never
