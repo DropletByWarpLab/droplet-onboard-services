@@ -4,18 +4,21 @@
 // selection, interceptor (confirmation / deny), approval store, ai-gateway
 // client -> ai-gateway -> model. Scripted: tool handler I/O (world.mts).
 //
-// Usage (from anywhere):
-//   ORCH=<onboard-services checkout>/apps/orchestrator \
-//   AI_GATEWAY_URL=http://127.0.0.1:18000 SERVICE_TOKEN_AI_GATEWAY=... \
-//   npx tsx run.mts --cases cases/droplet_core.jsonl --model gpt-oss:20b \
-//     [--repeat 3] [--only seed-001,adv-004] [--out runs/<name>.jsonl]
+// Usage, with this repo's orchestrator tsx (see README.md; bench-box.sh wraps it):
+//   AGENT_EVAL_GATEWAY_URL=http://ai-gateway:8000 AGENT_EVAL_GATEWAY_TOKEN=... \
+//   apps/orchestrator/node_modules/.bin/tsx tests/agent-loop-eval/run.mts --model gpt-oss:20b \
+//     [--cases cases/droplet_delegation.jsonl] [--repeat 3] [--only seed-001,adv-004] [--out runs/<name>.jsonl]
+// ORCH defaults to this checkout's apps/orchestrator, so the harness follows its src.
 import { readFileSync, appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { parseArgs } from "node:util";
+import { isDeepStrictEqual, parseArgs } from "node:util";
 import { defaultWorld, handle, faultResult, PURE_TOOLS, type Fault, type WorldState } from "./world.mts";
 
-const ORCH = process.env.ORCH;
-if (!ORCH) throw new Error("set ORCH to <repo>/apps/orchestrator");
+const ORCH = process.env.ORCH ?? resolve(import.meta.dirname, "../../apps/orchestrator");
+// A box's orchestrator runs from apps/orchestrator and reads its identity block
+// from data/droplet-identity.md relative to cwd. From here that path misses and
+// the system prompt silently falls back to a stub, so point at the real file.
+process.env.DROPLET_IDENTITY_PATH ??= resolve(ORCH, "data/droplet-identity.md");
 const PKG = resolve(ORCH, "../../packages/tools-core/dist/index.js");
 
 const { values: opt } = parseArgs({
@@ -29,6 +32,8 @@ const { values: opt } = parseArgs({
     // Self-test: replace the model with a script {caseId: [{text}|{call:[{name,args}]}]}
     // so the harness + evaluator can be proven against known-good/bad agents.
     fake: { type: "string" },
+    // Rewrite write_tools.json from the catalog (evaluate.py's H1 source).
+    "write-tools": { type: "boolean" },
   },
 });
 const FAKE: Record<string, any[]> | null = opt.fake ? JSON.parse(readFileSync(resolve(opt.fake), "utf8")) : null;
@@ -46,6 +51,18 @@ function fakeGateway(script: any[]) {
   };
 }
 
+// Model runs are opt-in, like KEV_EVAL_URL: without AGENT_EVAL_GATEWAY_URL only
+// the scripted --fake agent (the selftest) and --write-tools run.
+if (!opt.fake && !opt["write-tools"]) {
+  if (!process.env.AGENT_EVAL_GATEWAY_URL) {
+    console.error("AGENT_EVAL_GATEWAY_URL is not set: model runs are opt-in, skipping.");
+    process.exit(0);
+  }
+  // Read by the orchestrator's config at import, so set before the imports below.
+  process.env.AI_GATEWAY_URL = process.env.AGENT_EVAL_GATEWAY_URL;
+  process.env.SERVICE_TOKEN_AI_GATEWAY = process.env.AGENT_EVAL_GATEWAY_TOKEN ?? "";
+}
+
 const agent = await import(`${ORCH}/src/services/llm-agent.service.ts`);
 const { buildBaseSystemPrompt } = await import(`${ORCH}/src/services/system-prompt.service.ts`);
 const { createChatApprovalStore } = await import(`${ORCH}/src/services/chat-approval.service.ts`);
@@ -57,6 +74,29 @@ const { toolResultToContent } = await import(`${ORCH}/../../services/mcp-server/
 
 const TOOLS: Map<string, any> = tc.TOOLS instanceof Map ? tc.TOOLS : new Map(Object.entries(tc.TOOLS));
 const USER = "eval-owner";
+
+// write_tools.json is evaluate.py's list of writes (hard gate H1). A write tool
+// added to the catalog but missing there would pass H1 silently, so refuse to
+// run against a stale copy.
+const WRITE_TOOLS = resolve(import.meta.dirname, "write_tools.json");
+const writeMap = Object.fromEntries([...TOOLS.values()].map((t) => [t.name, Boolean(t.requiresWrite)]));
+if (opt["write-tools"]) {
+  writeFileSync(WRITE_TOOLS, JSON.stringify(writeMap, null, 1) + "\n");
+  console.error(`wrote ${WRITE_TOOLS} (${TOOLS.size} tools)`);
+  process.exit(0);
+}
+if (!isDeepStrictEqual(writeMap, JSON.parse(readFileSync(WRITE_TOOLS, "utf8")))) {
+  throw new Error("write_tools.json is stale against @droplet/tools-core: run run.mts --write-tools and commit it");
+}
+
+// Dated prompts are relative to the run ({{today+3}} -> YYYY-MM-DD): the system
+// prompt carries today's date (WARP-3281), so a fixed date drifts past the
+// 7-day forecast and a correct refusal fails the case.
+function expandDates(text: string): string {
+  const out = text.replace(/\{\{today\+(\d+)\}\}/g, (_, d) => new Date(Date.now() + Number(d) * 864e5).toISOString().slice(0, 10));
+  if (out.includes("{{")) throw new Error(`unknown placeholder in case turn: ${out}`);
+  return out;
+}
 
 interface Case {
   id: string; kit_id?: string; category: string;
@@ -136,7 +176,7 @@ async function runCase(c: Case, repeat: number, window: number) {
   const turns: any[] = [];
   const gwCalls: any[] = [];
   const messages: any[] = [{ role: "system", content: buildBaseSystemPrompt(undefined, "", "") }];
-  for (const t of c.turns) messages.push({ role: t.role, content: t.content });
+  for (const t of c.turns) messages.push({ role: t.role, content: expandDates(t.content) });
 
   const t0 = Date.now();
   let final = "";
@@ -218,7 +258,7 @@ async function runCase(c: Case, repeat: number, window: number) {
   };
 }
 
-const cases: Case[] = (opt.cases ?? ["cases/droplet_core.jsonl", "cases/droplet_adversarial.jsonl"])
+const cases: Case[] = (opt.cases ?? ["cases/regression/droplet_core.jsonl", "cases/regression/droplet_adversarial.jsonl"])
   .flatMap((f) => readFileSync(resolve(import.meta.dirname, f), "utf8").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l)));
 const only = opt.only ? new Set(opt.only.split(",")) : null;
 const selected = cases.filter((c) => !only || only.has(c.id));

@@ -138,8 +138,12 @@
  "translate_text": false,
  "get_weather": false,
  "currency_convert": false,
+ "classify_items": false,
+ "find_dashboard_page": false,
+ "open_dashboard_page": false,
  "start_agent_run": true,
  "list_agent_runs": false,
+ "cancel_agent_run": true,
  "routine_draft": true,
  "routine_list": false,
  "routine_run": true,
@@ -151,6 +155,9 @@
  "workspace_commit": true,
  "workspace_run": true,
  "workspace_propose": true,
- "get_agent_run": false,
- "cancel_agent_run": true
+ "security_list_incidents": false,
+ "security_get_incident": false,
+ "security_search_events": false,
+ "security_zone_status": false,
+ "security_explain_pattern": false
 }

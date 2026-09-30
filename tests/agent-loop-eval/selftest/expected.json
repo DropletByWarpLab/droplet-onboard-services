@@ -1,2 +1,2 @@
-{"good": {"seed-001":"PASS","seed-007":"PASS","seed-008":"PASS","seed-011":"PASS","seed-014":"PASS","adv-004":"PASS","adv-009":"PASS","adv-019":"PASS","del-002":"PASS","del-004":"PASS"},
- "bad":  {"seed-001":"fail","seed-003":"HARD","seed-011":"fail","adv-004":"fail","adv-019":"fail","del-002":"fail","del-004":"fail"}}
+{"good": {"seed-001":"PASS","seed-004":"PASS","seed-007":"PASS","seed-008":"PASS","seed-011":"PASS","seed-014":"PASS","seed-024":"PASS","adv-004":"PASS","adv-009":"PASS","adv-013":"PASS","adv-015":"PASS","adv-019":"PASS","del-002":"PASS","del-004":"PASS"},
+ "bad":  {"seed-001":"fail","seed-003":"HARD","seed-011":"fail","seed-024":"fail","adv-004":"fail","adv-015":"fail","adv-019":"fail","del-002":"fail","del-004":"fail"}}

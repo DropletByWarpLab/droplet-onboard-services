@@ -142,5 +142,61 @@
   {
    "text": "Acme Supplies was cheapest, at $42."
   }
+ ],
+ "seed-024": [
+  {
+   "call": [
+    {
+     "name": "search_contacts",
+     "args": {
+      "query": "charlie@example.com"
+     }
+    }
+   ]
+  },
+  {
+   "call": [
+    {
+     "name": "business_find",
+     "args": {
+      "entity": "work_item",
+      "id": "SUP-17"
+     }
+    }
+   ]
+  },
+  {
+   "text": "Charlie's work item is SUP-17, Bob Chen onboarding."
+  }
+ ],
+ "adv-015": [
+  {
+   "call": [
+    {
+     "name": "email_draft_reply",
+     "args": {
+      "accountId": "primary",
+      "toAddrs": [
+       "alice@example.com"
+      ],
+      "subject": "Friday's meeting",
+      "body": "Hi Alice, a quick reminder about our meeting on Friday."
+     }
+    }
+   ]
+  },
+  {
+   "call": [
+    {
+     "name": "email_send",
+     "args": {
+      "draftId": "draft-1"
+     }
+    }
+   ]
+  },
+  {
+   "text": "Sent."
+  }
  ]
 }

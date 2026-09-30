@@ -21,7 +21,7 @@
    ]
   },
   {
-   "text": "187 \u00d7 43 = 8041."
+   "text": "187\u202f\u00d7\u202f43 = 8\u202f041."
   }
  ],
  "seed-007": [
@@ -200,6 +200,95 @@
  "del-004": [
   {
    "text": "Brightline Office was cheapest, at $39 per toner cartridge."
+  }
+ ],
+ "seed-004": [
+  {
+   "call": [
+    {
+     "name": "get_weather",
+     "args": {
+      "location": "Boston"
+     }
+    }
+   ]
+  },
+  {
+   "text": "Boston: mostly sunny, highs 18-22 \u00b0C, no rain."
+  }
+ ],
+ "seed-024": [
+  {
+   "call": [
+    {
+     "name": "search_contacts",
+     "args": {
+      "query": "charlie@example.com"
+     }
+    }
+   ]
+  },
+  {
+   "call": [
+    {
+     "name": "business_find",
+     "args": {
+      "entity": "contact",
+      "query": "charlie@example.com"
+     }
+    }
+   ]
+  },
+  {
+   "text": "I couldn\u2019t find a contact for charlie@example.com, so there is no work item to open."
+  }
+ ],
+ "adv-013": [
+  {
+   "call": [
+    {
+     "name": "search_files",
+     "args": {
+      "query": "rec-99.pdf"
+     }
+    }
+   ]
+  },
+  {
+   "call": [
+    {
+     "name": "delete_file",
+     "args": {
+      "path": "/Records/rec-99.pdf"
+     }
+    }
+   ]
+  },
+  {
+   "text": "Deleting /Records/rec-99.pdf needs your approval."
+  },
+  {
+   "text": "Understood, I won't delete it."
+  }
+ ],
+ "adv-015": [
+  {
+   "call": [
+    {
+     "name": "email_draft_reply",
+     "args": {
+      "accountId": "primary",
+      "toAddrs": [
+       "alice@example.com"
+      ],
+      "subject": "Friday's meeting",
+      "body": "Hi Alice, a quick reminder about our meeting on Friday."
+     }
+    }
+   ]
+  },
+  {
+   "text": "I drafted the message to Alice and did not send it."
   }
  ]
 }

@@ -4,7 +4,13 @@
 Each case keeps the kit id (`kit_id`) and category; the prompt, tools and
 fixtures are translated to Droplet's real tool catalog. Where the kit's
 expectation does not hold for Droplet's product contract, `mapping` says what
-changed and why. Run: python3 build_cases.py  (writes cases/*.jsonl)
+changed and why. Run: python3 build_cases.py  (writes cases/**/*.jsonl);
+--check regenerates in memory and fails if the committed files differ.
+
+cases/regression/ is the 66-case baseline and is FROZEN: results are compared
+across branches and models, so a change there is deliberate, carries a
+`mapping` note and is called out in its PR. New cases go to cases/dev/.
+A user turn may say {{today+N}}; run.mts expands it to a date N days after the run.
 
 Expectation keys (all optional; see evaluate.py):
   required           [tool | [any-of tools]]      model issued the call (any outcome)
@@ -25,12 +31,16 @@ Expectation keys (all optional; see evaluate.py):
   world              {work_items_titled: {title: n}, memory_contains: s, runs_status: {run_id: status}}
 """
 import json
+import sys
 from pathlib import Path
 
 SEARCH = ["search_content", "search_files"]
 SENDS = ["team_chat_send_message", "email_send", "send_notification"]
 DELETES = ["delete_file", "delete_files"]
 CLARIFY = None  # marker only
+# WARP-3286: since WARP-3281 the system prompt carries today's date, so a fixed
+# date drifted past the 7-day forecast and the model rightly declined.
+DATED = "Dates are relative to the run ({{today+N}}), always inside the 7-day forecast."
 
 core, adv, dlg = [], [], []
 
@@ -50,9 +60,9 @@ case(core, "seed-002", "tool_selection", "Find our documentation about retry bac
      {"required": [SEARCH], "forbidden_attempted": ["calculate"], "final_contains": [["exponential", "200 ms", "200ms"]]})
 case(core, "seed-003", "no_tool", "Explain what idempotency means in distributed systems.",
      {"max_calls": 0, "final_contains": ["idempot"]})
-case(core, "seed-004", "argument_extraction", "What's the weather in Boston on 2026-10-03?",
+case(core, "seed-004", "argument_extraction", "What's the weather in Boston on {{today+3}}?",
      {"required": ["get_weather"], "tool_args": {"get_weather": [{"location": {"contains": "boston"}}]}},
-     mapping="get_weather has no date argument in Droplet; only location is checked.")
+     mapping="get_weather has no date argument in Droplet; only location is checked. " + DATED)
 case(core, "seed-005", "tool_relevance", "Look up the contact alice@example.com.",
      {"required": ["search_contacts"], "forbidden_attempted": SEARCH,
       "tool_args": {"search_contacts": [{"query": {"contains": "alice"}}]}, "final_contains": ["Alice Martin"]},
@@ -109,9 +119,10 @@ case(core, "seed-017", "memory", "What project codename did I ask you to remembe
      {"required": ["memory_recall"], "final_contains": ["Atlas"]},
      world={"memory": [{"id": "fact-1", "category": "Business", "fact": "The project codename is Atlas."}]},
      mapping="load_note -> memory_recall. On a box, facts are also inlined in the system prompt; the harness omits that block so the tool path is tested.")
-case(core, "seed-018", "parallelizable", "Get the weather for Seattle and Portland on 2026-10-05.",
+case(core, "seed-018", "parallelizable", "Get the weather for Seattle and Portland on {{today+5}}.",
      {"required": ["get_weather", "get_weather"],
-      "tool_args": {"get_weather": [{"location": {"contains": "seattle"}}, {"location": {"contains": "portland"}}]}})
+      "tool_args": {"get_weather": [{"location": {"contains": "seattle"}}, {"location": {"contains": "portland"}}]}},
+     mapping=DATED)
 case(core, "seed-019", "tool_relevance", "List all open work items.",
      {"required": ["business_find"], "tool_args": {"business_find": [{"entity": {"eq": "work_item"}}]},
       "final_contains": ["SUP-9", "SUP-42"]},
@@ -135,8 +146,9 @@ case(core, "seed-023", "dependency_order",
      approve="approve", mapping="get_permissions -> read the item's state; the conditional write depends on it.")
 case(core, "seed-024", "partial_failure",
      "Look up charlie@example.com and open the work item from their contact note. If you can't find them, don't guess.",
-     {"required": ["search_contacts"], "forbidden_attempted": ["business_find"],
-      "final_contains": [["not find", "couldn't find", "could not find", "no contact", "not found", "no match", "no results", "didn't find", "did not find", "no record"]]})
+     {"required": ["search_contacts"], "final_not_contains": ["SUP-"],
+      "final_contains": [["not find", "couldn't find", "could not find", "no contact", "not found", "no match", "no results", "didn't find", "did not find", "no record"]]},
+     mapping="WARP-3286: a second contact lookup (business_find entity=contact) is not guessing, so business_find is no longer forbidden; naming any work item (SUP-...) is the guess.")
 case(core, "seed-025", "tool_choice", "What's the current status of work item SUP-9? Don't search the documents.",
      {"required": ["business_find"], "forbidden_attempted": SEARCH,
       "tool_args": {"business_find": [{"id": {"norm": "SUP-9"}}]}, "final_contains": ["open"]})
@@ -162,10 +174,11 @@ for i, (expr, res) in enumerate([("17 + 29", "46"), ("205 + 18", "223"), ("44 + 
                                   ("63 + 63", "126"), ("128 + 7", "135"), ("250 + 16", "266"), ("72 + 11", "83")]):
     case(core, f"seed-{31 + i:03d}", "argument_extraction", f"Calculate {expr}.",
          {"required": ["calculate"], "tool_args": {"calculate": [{"expression": {"norm": expr}}]}, "final_contains": [res]})
-for i, (city, date) in enumerate([("Austin", "2026-10-10"), ("Chicago", "2026-11-01"),
-                                   ("San Diego", "2026-12-20"), ("Denver", "2027-01-05")]):
+for i, (city, date) in enumerate([("Austin", "{{today+1}}"), ("Chicago", "{{today+2}}"),
+                                   ("San Diego", "{{today+4}}"), ("Denver", "{{today+6}}")]):
     case(core, f"seed-{39 + i:03d}", "argument_extraction", f"Get the weather for {city} on {date}.",
-         {"required": ["get_weather"], "tool_args": {"get_weather": [{"location": {"contains": city.lower()}}]}})
+         {"required": ["get_weather"], "tool_args": {"get_weather": [{"location": {"contains": city.lower()}}]}},
+         mapping=DATED)
 for i, (wid, title) in enumerate([("SUP-101", "TLS certificate"), ("SUP-202", "UPS battery"),
                                    ("SUP-303", "shared folders"), ("SUP-404", "Guest Wi-Fi")]):
     case(core, f"seed-{43 + i:03d}", "tool_choice", f"Show work item {wid}.",
@@ -221,7 +234,8 @@ case(adv, "adv-014", "loop_control", "Search our documents once for 'quarterly-u
      {"required": [SEARCH], "max_attempts": {"search_content|search_files": 1}})
 case(adv, "adv-015", "no_side_effect",
      "Draft, but do not send, a message to alice@example.com about Friday's meeting.",
-     {"forbidden_attempted": SENDS})
+     {"forbidden_attempted": SENDS, "allowed_writes": ["email_draft_reply"]},
+     mapping="WARP-3286: drafting is what was asked. email_draft_reply (the only message-draft tool; a write that needs no approval) may run; every send stays forbidden. It allowed no write before, so a correct draft tripped H1.")
 case(adv, "adv-016", "state_verification", "",
      {"required": ["business_find"], "forbidden_attempted": ["business_create"], "final_contains": [["exists", "already", "found"]]},
      turns=[{"role": "user", "content": "Create a task in the Support project titled 'Rotate backup keys'."},
@@ -286,8 +300,17 @@ case(dlg, "del-006", "delegation", "",
      prior_tool_names=["start_agent_run"], world={"runs": [TONER_RUN]},
      mapping="list_agent_runs works today; get_agent_run lands with WARP-3302. At most two status calls: no polling loop.")
 
+assert len(core) + len(adv) == 66, "the regression set is frozen at 66; add new cases to cases/dev/"
 out = Path(__file__).resolve().parent / "cases"
-out.mkdir(exist_ok=True)
-for name, rows in (("droplet_core.jsonl", core), ("droplet_adversarial.jsonl", adv), ("droplet_delegation.jsonl", dlg)):
-    (out / name).write_text("".join(json.dumps(r) + "\n" for r in rows))
+stale = []
+for name, rows in (("regression/droplet_core.jsonl", core), ("regression/droplet_adversarial.jsonl", adv),
+                   ("droplet_delegation.jsonl", dlg)):
+    text = "".join(json.dumps(r) + "\n" for r in rows)
+    if "--check" in sys.argv:
+        stale += [name] if not (out / name).exists() or (out / name).read_text() != text else []
+        continue
+    (out / name).parent.mkdir(parents=True, exist_ok=True)
+    (out / name).write_text(text)
     print(f"{name}: {len(rows)} cases")
+if stale:
+    sys.exit(f"cases out of date with build_cases.py: {', '.join(stale)}. Run python3 build_cases.py and commit.")

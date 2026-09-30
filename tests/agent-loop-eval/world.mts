@@ -110,9 +110,13 @@ export function handle(w: WorldState, tool: string, a: Record<string, any>): Too
   switch (tool) {
     case "search_content":
     case "search_files": {
-      const q = words(String(a.query ?? ""));
-      const hits = w.docs
-        .map((d) => ({ d, score: q.filter((t) => d.text.toLowerCase().includes(t) || d.path.toLowerCase().includes(t)).length / Math.max(q.length, 1) }))
+      const raw = String(a.query ?? "").toLowerCase();
+      const q = words(raw);
+      // search_files also finds the records in `files` by name; a query that
+      // is part of a path ("rec-99.pdf") ranks first (adv-013).
+      const pool = tool === "search_files" ? [...w.docs, ...Object.entries(w.files).map(([path, text]) => ({ path, text }))] : w.docs;
+      const hits = pool
+        .map((d) => ({ d, score: raw && tool === "search_files" && d.path.toLowerCase().includes(raw) ? 2 : q.filter((t) => d.text.toLowerCase().includes(t) || d.path.toLowerCase().includes(t)).length / Math.max(q.length, 1) }))
         .filter((h) => h.score >= 0.5)
         .sort((x, y) => y.score - x.score)
         .slice(0, Number(a.limit ?? 5));
