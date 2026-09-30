@@ -232,8 +232,11 @@ function publishTurnCompleted(
 /**
  * WARP-1479 — record WHY a turn produced no visible answer.
  *
- * The customer already gets an honest failed turn (the empty-completion
- * rewrite below); this is the operator's half. Blank turns are the eval
+ * A blank with no tool work, or a context overflow, reaches the customer as
+ * an honest failed turn (the empty-completion rewrite below). After tool work
+ * the agent loop retries once and then substitutes a fallback reply
+ * (WARP-3285), so there this line is the only sign the words aren't the
+ * model's. Either way, this is the operator's half. Blank turns are the eval
  * suite's largest failure class and nothing in the logs currently says
  * whether the model returned nothing, thought without answering, or our own
  * sanitizer demoted the completion — so every fix attempt would be a guess.
@@ -1315,10 +1318,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // the MCP stdio child via `McpCallContext` → `_meta.ncToken` on
       // every `tools/call`. `resolveNcToken` returns null when the
       // request has no Nextcloud session (e.g. a direct API caller
-      // without the cookie); file tools will then surface
-      // AUTH_REQUIRED, which is the same behavior as before WARP-104.
+      // without the cookie), and always for a service principal such as
+      // voice, whose bearer is a shared secret and not a Nextcloud
+      // credential; file tools will then surface AUTH_REQUIRED, which is
+      // the same behavior as before WARP-104.
       const ncToken = (await resolveNcToken(req).catch(() => null)) ?? undefined;
-      if (!ncToken && (req as AuthedRequest).user) {
+      // A service principal never has a credential, so the warning below
+      // (a person's unprovisioned session) would only be noise on its turns.
+      if (!ncToken && (req as AuthedRequest).user && role !== "service") {
         // An authenticated dashboard user with no NC credential is the
         // signature of an unprovisioned session (passkey/SSO login, cache
         // restart, or logout on another device) — every ncToken-gated file
@@ -1420,6 +1427,18 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         const split = splitLeadingSystemMessages(agentMessages);
         callerSystemPreamble = split.preamble;
         agentMessages = split.rest;
+      }
+      // WARP-3338 — every other caller's own system message is its chat
+      // instructions (the dashboard sends the chat's or its project's prompt
+      // here). Marked, the agent loop folds it into index 0 under its own
+      // header instead of leaving it where gpt-oss drops it. Voice keeps
+      // WARP-3125's fold above, byte for byte. Same condition as the base
+      // prompt: a `tool_choice: "none"` turn gets none, so the caller's
+      // message is already index 0 there.
+      if (!isVoice && chatReq.tool_choice !== "none") {
+        agentMessages = agentMessages.map((m): ChatMessage =>
+          m.role === "system" ? { ...m, contextBlock: "chat_instructions" } : m,
+        );
       }
       let agentModel = chatReq.model;
       // WARP-904: the provider that actually served this turn — tracks
@@ -1652,6 +1671,21 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           );
         }
       }
+      // WARP-3348 — what the previous turn actually ran, for the action-claim
+      // check ("Yes, I've sent it" stands only if that send ran). A failed
+      // read only costs the check that credit, never the turn.
+      let priorRanToolNames: string[] = [];
+      if (conversationId && userId) {
+        try {
+          priorRanToolNames = await persistence.getPreviousTurnRanToolNames(
+            conversationId,
+            userId,
+            assistantMessageId,
+          );
+        } catch {
+          /* no credit */
+        }
+      }
 
       // Track tool calls observed during streaming so we can include
       // them in the persisted assistant message at the end of the turn.
@@ -1852,7 +1886,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             // or a business pin the resolver could not reach). A header with
             // no lines under it is prompt the model reads for nothing.
             if (block) {
-              const pinSystemMessage: ChatMessage = { role: "system", content: block };
+              const pinSystemMessage: ChatMessage = {
+                role: "system",
+                content: block,
+                contextBlock: "pins",
+              };
               agentMessages = [pinSystemMessage, ...agentMessages];
             }
           }
@@ -1971,6 +2009,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             const attachmentSystemMessage: ChatMessage = {
               role: "system",
               content: systemParts.join("\n\n"),
+              contextBlock: "attachments",
             };
             agentMessages = [attachmentSystemMessage, ...agentMessages];
           }
@@ -2453,13 +2492,19 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // successful tool calls, 49 s, zero visible output.) A turn with
           // no visible answer is a failed turn whatever its trace says, so
           // all three terminal reasons now rewrite on blank content alone.
+          //
+          // WARP-3285 — after tool work the agent loop no longer ends blank
+          // (one retry, then a fallback reply) except on a finish_reason
+          // "length" overflow. What still arrives here is a blank with no
+          // tool work or an overflow; the gate stays keyed on blank content
+          // alone as the safety net.
           if (
             e.type === "done" &&
             liveAssistantContent.trim().length === 0 &&
-            (e.stop_reason === "model_done" ||
-              e.stop_reason === "context_budget" ||
-              e.stop_reason === "repetition" ||
-              e.stop_reason === "no_progress")
+            // WARP-3347 — by exclusion, so a stop reason added later is
+            // covered without another edit here.
+            e.stop_reason !== "error" &&
+            e.stop_reason !== "iteration_limit"
           ) {
             emptyCompletion = true;
             e = {
@@ -2469,7 +2514,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
                 "empty_completion: the model produced no visible answer for " +
                 "this turn. Common causes: the request (system prompt + " +
                 "tools + history) overflowed the context window, or the " +
-                "model returned nothing after its tool calls. Server logs " +
+                "model returned nothing without calling any tool. Server logs " +
                 "carry a `blank_final_answer` line attributing this turn.",
             };
           }
@@ -2575,6 +2620,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             tool_selection_mode: toolSelectionMode,
             // WARP-1921 — cross-turn continuity for §3 selection.
             prior_tool_names: priorToolNames,
+            prior_ran_tool_names: priorRanToolNames,
             allowed_tools: allowedForUser,
             // WARP-1529 — the same §3 scope, re-checked fail-closed before
             // every tool dispatch inside the loop.
@@ -2679,6 +2725,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           tool_selection_mode: toolSelectionMode,
           // WARP-1921 — cross-turn continuity for §3 selection.
           prior_tool_names: priorToolNames,
+          prior_ran_tool_names: priorRanToolNames,
           allowed_tools: allowedForUser,
           // WARP-1529 — the same §3 scope, re-checked fail-closed before
           // every tool dispatch inside the loop.
@@ -2709,11 +2756,17 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // dashboard can lazy-load the trace later.
         liveReasoning = result.message.reasoning ?? null;
         for (const t of result.trace) {
+          // WARP-3348 — the real outcome, as the streaming path persists it
+          // (a pending approval is ok + status, a failure is not ok): the
+          // next turn's action-claim check reads what actually ran.
+          const r = t.result as { status?: unknown; error?: unknown } | null;
+          const pending = r?.status === "confirmation_required";
           liveToolCalls.push({
             id: t.tool_call_id,
             name: t.tool,
             args: t.args,
-            ok: true,
+            ok: pending || !(t.isError || r?.status === "error" || typeof r?.error === "string"),
+            ...(pending ? { status: "confirmation_required" } : {}),
             data: t.result,
           });
         }
@@ -2724,13 +2777,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         //
         // WARP-1479 — a non-empty trace does NOT make a blank answer
         // honest (see the streaming site above for the live repro). All
-        // three terminal reasons rewrite on blank content alone.
+        // three terminal reasons rewrite on blank content alone. WARP-3285
+        // — after tool work only an overflow still arrives blank; see the
+        // streaming site.
         if (
           contentToText(result.message.content).trim().length === 0 &&
-          (result.stop_reason === "model_done" ||
-            result.stop_reason === "context_budget" ||
-            result.stop_reason === "repetition" ||
-            result.stop_reason === "no_progress")
+          // WARP-3347 — by exclusion, as on the streaming path.
+          result.stop_reason !== "error" &&
+          result.stop_reason !== "iteration_limit"
         ) {
           result = {
             ...result,

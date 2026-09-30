@@ -311,3 +311,206 @@ describe("registry tools on the MCP path are gated too (WARP-2312)", () => {
     await close();
   });
 });
+
+/**
+ * WARP-3349 — `Tool.precheck` runs BEFORE the interceptor challenges, so a
+ * call that can never succeed (team_chat_send_message to someone who is not a
+ * member) is refused instead of asking the person to approve it. It is only
+ * a gate in front of the gate: no token is minted for a refused call, a call
+ * that already carries a token skips it, and a precheck that throws never
+ * stands between the person and the approval.
+ */
+describe("MCP dispatch path — a precheck refuses before the challenge (WARP-3349)", () => {
+  function prechecked(precheck: NonNullable<Tool["precheck"]>) {
+    const { tool, invoked } = syntheticRemoteTool();
+    return { tool: { ...tool, precheck } as Tool, invoked };
+  }
+
+  it("a refusal is returned instead of a challenge: no token minted, no write", async () => {
+    const error = { code: "RECIPIENT_NOT_A_MEMBER", message: "x@other.org isn't a member" };
+    const { tool, invoked } = prechecked(async () => ({ ok: false, status: "error", error }));
+    const { client, close } = await connect({ additionalTools: new Map([[tool.name, tool]]) });
+    const pending = defaultToolCallInterceptor.tokens.size();
+
+    const res = await client.callTool({ name: tool.name, arguments: { contactId: "c-1" } });
+
+    expect(parse(res)).toEqual({ status: "error", error });
+    expect((res as { isError?: boolean }).isError).toBe(true);
+    expect(defaultToolCallInterceptor.tokens.size()).toBe(pending);
+    expect(invoked).toEqual([]);
+    await close();
+  });
+
+  it("a passing precheck (null) leaves the challenge exactly as it was", async () => {
+    const precheck = vi.fn(async () => null);
+    const { tool, invoked } = prechecked(precheck);
+    const { client, close } = await connect({ additionalTools: new Map([[tool.name, tool]]) });
+
+    const payload = parse(await client.callTool({ name: tool.name, arguments: { contactId: "c-1" } }));
+
+    expect(payload.status).toBe("confirmation_required");
+    expect(precheck).toHaveBeenCalledWith({ contactId: "c-1" }, expect.anything());
+    expect(invoked).toEqual([]);
+    await close();
+  });
+
+  it("the approved call (it carries the token) skips the precheck and runs", async () => {
+    const precheck = vi.fn(async () => null);
+    const { tool, invoked } = prechecked(precheck);
+    const { client, close } = await connect({ additionalTools: new Map([[tool.name, tool]]) });
+    const args = { contactId: "c-1" };
+
+    const token = tokenFrom(parse(await client.callTool({ name: tool.name, arguments: args })));
+    await client.callTool({ name: tool.name, arguments: args, _meta: { confirmationToken: token } });
+
+    expect(precheck).toHaveBeenCalledTimes(1);
+    expect(invoked).toEqual([args]);
+    await close();
+  });
+
+  it.each([
+    [
+      "rejects",
+      (async () => {
+        throw new Error("roster unreachable");
+      }) as NonNullable<Tool["precheck"]>,
+    ],
+    [
+      "throws synchronously",
+      (() => {
+        throw new Error("roster unreachable");
+      }) as unknown as NonNullable<Tool["precheck"]>,
+    ],
+  ])("a precheck that %s does not stand between the person and the approval, and is logged by name only", async (_label, precheck) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { tool, invoked } = prechecked(precheck);
+    const { client, close } = await connect({ additionalTools: new Map([[tool.name, tool]]) });
+
+    const payload = parse(await client.callTool({ name: tool.name, arguments: { contactId: "c-secret" } }));
+
+    expect(payload.status).toBe("confirmation_required");
+    expect(invoked).toEqual([]);
+    expect(warn).toHaveBeenCalledWith("tool.precheck_threw", { tool: tool.name });
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("c-secret");
+    warn.mockRestore();
+    await close();
+  });
+
+  it.each([
+    ["a success", { ok: true, data: { sent: true } }],
+    ["a confirmation_required", { ok: false, status: "confirmation_required", error: { code: "X", message: "x" } }],
+  ])("anything but an error (%s) is ignored: the normal challenge", async (_label, answer) => {
+    const { tool, invoked } = prechecked((async () => answer) as unknown as NonNullable<Tool["precheck"]>);
+    const { client, close } = await connect({ additionalTools: new Map([[tool.name, tool]]) });
+
+    const payload = parse(await client.callTool({ name: tool.name, arguments: { contactId: "c-1" } }));
+
+    expect(payload.status).toBe("confirmation_required");
+    expect((payload.error as { code: string }).code).toBe("CONFIRMATION_REQUIRED");
+    expect(invoked).toEqual([]);
+    await close();
+  });
+
+  it("a DENIED call never runs the precheck: TOOL_DENIED, not the precheck's refusal (contract §8)", async () => {
+    const precheck = vi.fn(async () => ({
+      ok: false as const,
+      status: "error" as const,
+      error: { code: "RECIPIENT_NOT_A_MEMBER", message: "ask whether to email them" },
+    }));
+    const { tool, invoked } = prechecked(precheck);
+    defaultToolCallInterceptor.denyTier.add("test:deny-before-precheck", ({ tool: t }) =>
+      t.name === tool.name ? { code: "REMOTE_WRITES_DISABLED", message: "remote writes are off" } : null,
+    );
+    const { client, close } = await connect({ additionalTools: new Map([[tool.name, tool]]) });
+
+    const payload = parse(await client.callTool({ name: tool.name, arguments: { contactId: "c-1" } }));
+
+    expect((payload.error as { code: string }).code).toBe("TOOL_DENIED");
+    expect(precheck).not.toHaveBeenCalled();
+    expect(invoked).toEqual([]);
+    defaultToolCallInterceptor.denyTier.remove("test:deny-before-precheck");
+    await close();
+  });
+
+  it.each([
+    ["a tool that does not require confirmation", { requiresConfirmation: false }],
+    ["a route-owned confirmation (§13)", { confirmationOwner: "route" as const }],
+  ])("the interceptor would not challenge %s, so its precheck never runs", async (_label, override) => {
+    const precheck = vi.fn(async () => null);
+    const { tool } = prechecked(precheck);
+    const { client, close } = await connect({
+      additionalTools: new Map([[tool.name, { ...tool, ...override } as Tool]]),
+    });
+
+    await client.callTool({ name: tool.name, arguments: { contactId: "c-1" } });
+
+    expect(precheck).not.toHaveBeenCalled();
+    await close();
+  });
+});
+
+/**
+ * WARP-3349 / WARP-3403 — the REAL team-chat send tools through the real
+ * dispatch path: a recipient address that is nobody's in the Workspace is
+ * refused by the tool's precheck before any challenge — no token minted, no
+ * write — and the model reads the refusal. Only the orchestrator is a double.
+ */
+describe("the real team-chat tools refuse an address nobody in the Workspace has, before any challenge", () => {
+  function orchestratorDouble() {
+    const writes: string[] = [];
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const orchestrator = {
+      get: vi.fn(async () =>
+        json(200, {
+          me: { id: "uuid-alice" },
+          contacts: [{ id: "uuid-alice", displayName: "Alice", username: "alice" }],
+          canStartConversation: true,
+        }),
+      ),
+      post: vi.fn(async (path: string, body: { emails?: string[] }) => {
+        if (path === "/api/team-chat/contacts/lookup") {
+          return json(200, { contacts: (body.emails ?? []).map(() => null) });
+        }
+        writes.push(path);
+        return json(201, {});
+      }),
+      patch: vi.fn(),
+      delete: vi.fn(),
+    };
+    return { orchestrator, writes };
+  }
+
+  it.each([
+    ["team_chat_send_message", { recipients: ["nobody@example.com"], body: "hi" }],
+    [
+      "team_chat_send_meeting_invite",
+      { recipients: ["nobody@example.com"], title: "Sync", starts_at: "2099-01-01T10:00:00Z" },
+    ],
+  ])("%s", async (name, args) => {
+    const { orchestrator, writes } = orchestratorDouble();
+    const deps: ContextDeps = {
+      prisma: {} as never,
+      matter: {} as never,
+      httpFactory: () => orchestrator as never,
+    };
+    const server = createServer(deps, { kind: "local-trusted" }, { moduleVerdict: NO_MODULE_GATING });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "precheck-e2e", version: "0.0.1" }, { capabilities: {} });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const pending = defaultToolCallInterceptor.tokens.size();
+
+    const payload = parse(await client.callTool({ name, arguments: args, _meta: { userId: "alice" } }));
+
+    expect(payload).toMatchObject({ status: "error", error: { code: "RECIPIENT_NOT_A_MEMBER" } });
+    expect(defaultToolCallInterceptor.tokens.size()).toBe(pending);
+    expect(orchestrator.post).toHaveBeenCalledWith(
+      "/api/team-chat/contacts/lookup",
+      { emails: ["nobody@example.com"] },
+      expect.anything(),
+    );
+    expect(writes).toEqual([]);
+    await client.close();
+    await server.close();
+  });
+});

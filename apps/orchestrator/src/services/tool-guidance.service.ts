@@ -32,7 +32,7 @@ const contentSearch: CategoryRenderer = (can) => {
     can("summarize_file") ? "summarize_file" : null,
   ].filter((n): n is string => n !== null);
   return (
-    "- For questions about the business's files, documents, notes or emails, call search_content and ground your answer in the returned passages (cite their paths)" +
+    "- For questions about the business's files, documents, notes or emails, call search_content and ground answers in the passages (cite paths)" +
     (deeper.length > 0
       ? `; go deeper with ${deeper.join(" or ")}`
       : "") +
@@ -56,6 +56,16 @@ const email: CategoryRenderer = (can) => {
   }
   return line + ".";
 };
+
+// WARP-3340 — Romain, 2026-09-29: team chat is the default way to reach a
+// colleague; email only when the person asks for it. Paid for by trimming the
+// content-search, smart-device and memory wording, the WARP-3116 rule: fit
+// under the cap, never raise it. The business line keeps "customers", its
+// only pointer for customer questions.
+const teamChat: CategoryRenderer = (can) =>
+  can("team_chat_send_message")
+    ? "- Message people with team_chat_send_message unless asked for email."
+    : null;
 
 const calendar: CategoryRenderer = (can) => {
   const check = [
@@ -96,7 +106,7 @@ const smartDevices: CategoryRenderer = (can) => {
     "- For smart devices, check list_smart_home_devices first" +
     (can("control_device") ? "; act with control_device" : "") +
     (can("run_scene") ? "; run scenes with run_scene" : "") +
-    " — confirm which device is meant when a reference is ambiguous."
+    " — confirm which device is meant when ambiguous."
   );
 };
 
@@ -131,7 +141,7 @@ const networkSystem: CategoryRenderer = (can) => {
  *  zero-tool caller — only the memory_recall fragment is gated. */
 const memoryPointer: CategoryRenderer = (can) => {
   return (
-    "- Before answering questions about the business's preferences or how the team likes things done, check the durable memory below" +
+    "- Before answering questions about the business's preferences or how the team works, check the durable memory below" +
     (can("memory_recall") ? "; call memory_recall for anything not listed." : ".")
   );
 };
@@ -148,7 +158,7 @@ const memoryForget: CategoryRenderer = (can) => {
 
 const businessContext: CategoryRenderer = (can) => {
   if (!can("business_profile_get")) return null;
-  return "- For questions about the business itself (what it does, customers, goals), use the business context above; call business_profile_get for the full profile.";
+  return "- For questions about the business or its customers, use the business context above; call business_profile_get for the full profile.";
 };
 
 /** WARP-3116 — the model answered `/settings/voice` from a doc: a path that
@@ -164,6 +174,7 @@ const dashboardNavigation: CategoryRenderer = (can) => {
 const CATEGORY_RENDERERS: CategoryRenderer[] = [
   contentSearch,
   email,
+  teamChat,
   calendar,
   computation,
   smartDevices,

@@ -2,6 +2,7 @@ export * from "./anchor";
 export * from "./box-name";
 export * from "./dashboard-pages";
 export * from "./integration-status";
+export * from "./landed-records";
 export * from "./meeting-link";
 export * from "./money";
 export * from "./upload";
