@@ -62,6 +62,22 @@ vi.mock("../middleware/feature-gate.js", async (importOriginal) => {
   };
 });
 
+/** The canary route fetches the verdict for itself; this is the peer it asks. */
+const internalFetchMock = vi.fn();
+vi.mock("../lib/internal-tls.js", () => ({
+  internalFetch: (...a: unknown[]) => internalFetchMock(...a),
+  internalBaseUrl: (u: string) => u,
+}));
+
+const recordActivityMock = vi.fn(async (_p: Record<string, unknown>) => null);
+vi.mock("../services/activity.singleton.js", () => ({
+  recordActivity: (p: Record<string, unknown>) => recordActivityMock(p),
+}));
+
+vi.mock("../services/nextcloud-session.service.js", () => ({
+  resolveNcToken: resolveNcTokenMock,
+}));
+
 import { createCrmFilingRouter } from "./crm-filing.js";
 import type { Role } from "../services/jwt.service.js";
 import { FILING_ERRORS } from "../services/filing/apply.service.js";
