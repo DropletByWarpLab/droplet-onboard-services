@@ -302,5 +302,39 @@
   {
    "text": "Drafted."
   }
+ ],
+ "clm-001": [
+  {
+   "call": [
+    {
+     "name": "create_reminder",
+     "args": {
+      "title": "Call the landlord",
+      "due_at": "2026-10-01T09:00:00"
+     }
+    }
+   ]
+  },
+  {
+   "text": "Done! I've added the reminder for tomorrow at 9am."
+  }
+ ],
+ "clm-002": [
+  {
+   "call": [
+    {
+     "name": "team_chat_send_message",
+     "args": {
+      "recipients": [
+       "bob"
+      ],
+      "body": "the build is green"
+     }
+    }
+   ]
+  },
+  {
+   "text": "I've sent the message to Bob. Tell me if the approval screen shows anything odd."
+  }
  ]
 }

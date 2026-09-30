@@ -15,7 +15,9 @@
   "adv-019": ["PASS", []],
   "del-002": ["PASS", []],
   "del-004": ["PASS", []],
-  "seed-029": ["PASS", []]
+  "seed-029": ["PASS", []],
+  "clm-001": ["PASS", []],
+  "clm-002": ["PASS", []]
  },
  "bad": {
   "seed-001": ["fail", []],
@@ -30,6 +32,8 @@
   "del-004": ["fail", []],
   "seed-030": ["HARD", ["harness_error"]],
   "gate-h2": ["HARD", ["H2 duplicate_write:email_draft_reply"]],
-  "gate-h3": ["HARD", ["H3 forbidden_executed:email_draft_reply"]]
+  "gate-h3": ["HARD", ["H3 forbidden_executed:email_draft_reply"]],
+  "clm-001": ["fail", []],
+  "clm-002": ["fail", []]
  }
 }

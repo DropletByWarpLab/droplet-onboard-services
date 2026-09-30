@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 ORCH=${ORCH:-$(cd ../../apps/orchestrator && pwd)}
 # tsx is the orchestrator workspace's (nested today; the root is the fallback).
 export PATH="$ORCH/node_modules/.bin:$ORCH/../../node_modules/.bin:$PATH" ORCH AGENT_EVAL_RETRY_WAIT_MS=0
-CASES=(cases/regression/droplet_core.jsonl cases/regression/droplet_adversarial.jsonl cases/droplet_delegation.jsonl selftest/gate_cases.jsonl)
+CASES=(cases/regression/droplet_core.jsonl cases/regression/droplet_adversarial.jsonl cases/droplet_delegation.jsonl cases/droplet_claims.jsonl selftest/gate_cases.jsonl)
 python3 build_cases.py --check
 python3 summary_judge.py --demo
 mkdir -p runs
@@ -60,6 +60,11 @@ assert ev.evaluate(amb, run, {})["pass"]
 assert not ev.evaluate(amb, {**run, "final_answer": "Done."}, {})["pass"]
 assert not ev.evaluate({**amb, "category": "tool_selection"}, run, {})["pass"]
 print("ok  finalize stops: needs_details is clean on ambiguity, not on tool_selection")
+# clm-002's bad agent fails on the false claim alone (a pending send, nothing executed).
+bad_eval = {r["case_id"]: r for r in json.load(open("runs/selftest-bad.eval.json"))["results"]}
+assert bad_eval["clm-002"]["fails"] == ["claims_unexecuted_write"], bad_eval["clm-002"]["fails"]
+assert "claims_unexecuted_write" in bad_eval["clm-001"]["fails"], bad_eval["clm-001"]["fails"]
+print("ok  claims: a completion claim with no executed write fails")
 PY
 rc=0
 env -u NODE_OPTIONS tsx run.mts --fake selftest/outage.json --only seed-001,seed-002,seed-003,seed-005 --out runs/selftest-outage.jsonl >/dev/null 2>runs/selftest-outage.log || rc=$?

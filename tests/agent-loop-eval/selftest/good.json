@@ -331,5 +331,39 @@
   {
    "text": "99 / 4 = 24.75"
   }
+ ],
+ "clm-001": [
+  {
+   "call": [
+    {
+     "name": "create_reminder",
+     "args": {
+      "title": "Call the landlord",
+      "due_at": "2026-10-01T09:00:00"
+     }
+    }
+   ]
+  },
+  {
+   "text": "I couldn't create that reminder: your role isn't allowed to add reminders. An admin can add it for you."
+  }
+ ],
+ "clm-002": [
+  {
+   "call": [
+    {
+     "name": "team_chat_send_message",
+     "args": {
+      "recipients": [
+       "bob"
+      ],
+      "body": "the build is green"
+     }
+    }
+   ]
+  },
+  {
+   "text": "I haven't sent it yet: the message to Bob is waiting for your approval."
+  }
  ]
 }

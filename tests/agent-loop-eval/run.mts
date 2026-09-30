@@ -257,7 +257,7 @@ async function runCase(c: Case, repeat: number, window: number, script: any[] | 
     });
     const content = typeof res.message?.content === "string" ? res.message.content : JSON.stringify(res.message?.content ?? "");
     final = content;
-    turns.push({ round, stop_reason: res.stop_reason, iterations: res.iterations, error: res.error, latency_ms: Date.now() - tt, answer: content, blankDiagnostics: (res as any).blankDiagnostics, pollutedDiagnostics: (res as any).pollutedDiagnostics, reasoningSteps: (res as any).reasoningSteps, reasoning: (res.message as any)?.reasoning });
+    turns.push({ round, stop_reason: res.stop_reason, iterations: res.iterations, error: res.error, latency_ms: Date.now() - tt, answer: content, blankDiagnostics: (res as any).blankDiagnostics, pollutedDiagnostics: (res as any).pollutedDiagnostics, actionClaimCheck: (res as any).actionClaimCheck, reasoningSteps: (res as any).reasoningSteps, reasoning: (res.message as any)?.reasoning });
     priorToolNames = [...new Set([...priorToolNames, ...res.trace.map((x: any) => x.tool)])];
     messages.push({ role: "assistant", content });
 

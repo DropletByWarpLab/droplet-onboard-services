@@ -12,8 +12,10 @@
 
 // timeout_after: the handler RUNS (the write lands) and the caller still sees
 // a timeout — the ambiguous-outcome case. {inject}: a successful result whose
-// data is replaced verbatim (tool-output prompt injection).
-export type Fault = "timeout" | "error" | "malformed" | "empty" | "timeout_after" | { inject: unknown };
+// data is replaced verbatim (tool-output prompt injection). forbidden: the
+// handler refuses for the person's role (WARP-3348), the envelope a real
+// handler's 403 produces (`fail("FORBIDDEN", …)`, e.g. start_agent_run).
+export type Fault = "timeout" | "error" | "malformed" | "empty" | "timeout_after" | "forbidden" | { inject: unknown };
 export type ToolResult =
   | { ok: true; data: unknown }
   | { ok: false; status: string; error: { code: string; message: string } };
@@ -245,5 +247,7 @@ export function faultResult(f: Fault): { text: string; isError: boolean } {
       return { text: '{"items": [{"id": "SUP-', isError: false };
     case "empty":
       return { text: JSON.stringify({}), isError: false };
+    case "forbidden":
+      return { text: JSON.stringify({ status: "error", error: { code: "FORBIDDEN", message: "Your role cannot do this." } }), isError: true };
   }
 }
