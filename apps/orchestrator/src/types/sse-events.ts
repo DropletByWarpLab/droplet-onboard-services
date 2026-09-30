@@ -108,12 +108,14 @@ export type SSEEvent =
   | { type: "model_loading"; model: string; sizeGb: number | null }
   /**
    * WARP-2544 — the answer claims a completed action that the tool trace does
-   * not support. Emitted at most once per turn, immediately before `done`,
-   * and ONLY when the check does not pass.
+   * not support. Emitted at most once per turn, immediately before `done`.
+   * Since WARP-3348 (action-claims.ts) the answer is checked and corrected
+   * BEFORE it is sent; this frame fires only when the correction failed and
+   * the false sentence went out with a status line appended after it.
    *
-   * `unsupported`  the answer claims an action on a turn that dispatched
-   *                nothing at all.
-   * `contradicted` it dispatched, and every dispatch failed.
+   * `unsupported`  none of the claimed actions was attempted.
+   * `contradicted` a claimed action was attempted and did not run (waiting
+   *                for approval, declined, refused or failed).
    *
    * The loop guards the INPUT side of tool use thoroughly (WARP-1529 RBAC,
    * WARP-642 hallucinated names, WARP-1480 error logging) and had nothing on
@@ -122,18 +124,17 @@ export type SSEEvent =
    * false "done" about a door or a firewall rule is a safety failure rather
    * than a cosmetic one.
    *
-   * ⚠ ADVISORY, NOT A RETRACTION. On the streaming path the answer has
-   * already reached the client as `content_delta` frames before terminal
-   * content exists, so this cannot un-send it. A client should surface it
-   * beside the answer ("this may not have actually happened"), never treat
-   * it as a correction of what was already rendered.
+   * ⚠ ADVISORY, NOT A RETRACTION. The answer has already reached the client
+   * as `content_delta` frames. A client should surface it beside the answer
+   * ("this may not have actually happened"), never treat it as a correction
+   * of what was already rendered.
    */
   | {
       type: "tool_use_validation";
       status: "unsupported" | "contradicted";
-      /** The model's own sentences that triggered it. Capped, log-safe. */
+      /** The model's own sentences that triggered it. Capped at 160 chars. */
       claims: string[];
-      /** Tool names dispatched this turn (may be empty for `unsupported`). */
+      /** The claimed writes that were attempted and did not run (empty for `unsupported`). */
       tools: string[];
     }
   | {
@@ -145,7 +146,8 @@ export type SSEEvent =
         | "error"
         | "context_budget"
         | "repetition"
-        | "no_progress";
+        | "no_progress"
+        | "needs_details";
       error?: string;
     };
 

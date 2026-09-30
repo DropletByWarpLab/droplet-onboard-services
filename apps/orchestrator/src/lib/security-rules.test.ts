@@ -540,6 +540,15 @@ describe("patternSeverity — every row of spec §4.6 (D9, D10)", () => {
     expect(patternSeverity("unusual_volume", "person", "open", null)).toBe("notice");
     expect(patternSeverity("unusual_volume", "person", "closed", "entry")).toBe("notice");
   });
+
+  // §6.7.1: a link Droplet made (raiseArea false) adds no area RAISE, and nothing else changes.
+  it("raiseArea false drops only the area raise: restricted stays at the camera-key severity, the open-entry info downgrade and the mode raise still apply", () => {
+    expect(patternSeverity("out_of_place", "person", "open", "restricted", false)).toBe("notice");
+    expect(patternSeverity("out_of_place", "person", "open", "restricted", true)).toBe("alert");
+    expect(patternSeverity("out_of_place", "person", "open", "restricted", false)).toBe(patternSeverity("out_of_place", "person", "open", null));
+    expect(patternSeverity("unusual_volume", "person", "open", "entry", false)).toBe("info");
+    expect(patternSeverity("out_of_place", "person", "closed", "restricted", false)).toBe("alert");
+  });
 });
 
 describe("expected activity — one match rule for the engine and route 31 (D11–D13, review item 10)", () => {

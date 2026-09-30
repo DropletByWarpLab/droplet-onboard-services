@@ -1032,12 +1032,23 @@ const minSeverity = (a: SecuritySeverity, b: SecuritySeverity): SecuritySeverity
  * no area modifier). Base notice; closed/away +1; restricted +1;
  * busier-than-usual at an open entry is info; then the cap — only a person
  * reaches alert, and unusual_volume never does.
+ *
+ * `raiseArea` (§6.7.1) is false when the incident's area was matched only through
+ * a link Droplet made: that link adds context, never severity, so the area's
+ * raise (restricted +1) is skipped. It gates the raise ONLY — the kind still
+ * decides the open-entry info downgrade, so a Droplet link never outranks a person's.
  */
-export function patternSeverity(code: PatternCode, label: string, mode: SecurityMode, zoneKind: SecurityZoneKind | null): SecuritySeverity {
+export function patternSeverity(
+  code: PatternCode,
+  label: string,
+  mode: SecurityMode,
+  zoneKind: SecurityZoneKind | null,
+  raiseArea = true,
+): SecuritySeverity {
   const rule = PATTERN_RULES.codes[code].severity;
   let s: SecuritySeverity = rule.base;
   if ((PATTERN_RULES.raiseModes as readonly string[]).includes(mode)) s = raise(s);
-  if (zoneKind !== null && (PATTERN_RULES.raiseZoneKinds as readonly string[]).includes(zoneKind)) s = raise(s);
+  if (raiseArea && zoneKind !== null && (PATTERN_RULES.raiseZoneKinds as readonly string[]).includes(zoneKind)) s = raise(s);
   if ("infoWhen" in rule && mode === rule.infoWhen.mode && zoneKind === rule.infoWhen.zoneKind) s = "info";
   return minSeverity(s, label === "person" ? rule.maxPerson : rule.maxOther);
 }
