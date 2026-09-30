@@ -368,6 +368,23 @@ describe("<ToolsPage /> — Extensions (WARP-2900)", () => {
     expect(within(section).getByText("Blocked until reviewed")).toBeInTheDocument();
   });
 
+  it("gives the chip a focus stop and a described-by explanation, and shows a pre-release only as one", () => {
+    ready(SAMPLE);
+    const tool = runtimeTool("word_count", "allow", null);
+    useRuntimeToolsMock.mockReturnValue({
+      tools: [{ ...tool, extension: { id: "wc", version: "1.0.0-trust-me-im-reviewed" } }],
+      isLoading: false,
+      error: undefined,
+    });
+    render(<ToolsPage />);
+    const chip = screen.getByText("Reviewed read");
+    expect(chip.getAttribute("tabindex")).toBe("0");
+    const note = document.getElementById(chip.getAttribute("aria-describedby") ?? "");
+    expect(note?.textContent).toContain("An owner reviewed it as read-only");
+    expect(document.body.textContent).toContain("version 1.0.0 (pre-release)");
+    expect(document.body.textContent).not.toContain("trust-me");
+  });
+
   it("🔴 is a catalog, not a console: no button, and clicking a card seeds nothing", () => {
     ready(SAMPLE);
     useRuntimeToolsMock.mockReturnValue({

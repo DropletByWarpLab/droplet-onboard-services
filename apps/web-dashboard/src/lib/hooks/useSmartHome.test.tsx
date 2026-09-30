@@ -8,7 +8,7 @@
  * can detect the confirmation path and surface a confirm affordance.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderHook, act } from "@testing-library/react";
+import { renderHook, act, waitFor } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import type { ReactNode } from "react";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
@@ -29,7 +29,7 @@ vi.mock("@/lib/api", () => ({
   sendMatterCommand: vi.fn(),
 }));
 
-import { sendMatterCommand } from "@/lib/api";
+import { sendMatterCommand, fetchMatterDevices } from "@/lib/api";
 
 const wrapper = ({ children }: { children: ReactNode }) => (
   <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
@@ -119,5 +119,30 @@ describe("useSmartHome.command (KAN-5)", () => {
     expect(sendMatterCommand).toHaveBeenCalledWith("31000", "set_temperature", {
       temperature: 31,
     });
+  });
+});
+
+describe("useSmartHome.disconnected (WARP-3276)", () => {
+  it("is false for a normal answer", async () => {
+    const { result } = renderHook(() => useSmartHome(), { wrapper });
+    await waitFor(() => expect(result.current.grouped).not.toBeNull());
+    expect(result.current.disconnected).toBe(false);
+  });
+
+  it("is true when the orchestrator answers _status: disconnected (controller down)", async () => {
+    vi.mocked(fetchMatterDevices).mockResolvedValueOnce({
+      lights: [],
+      switches: [],
+      sensors: [],
+      climate: [],
+      media: [],
+      covers: [],
+      locks: [],
+      other: [],
+      _status: "disconnected",
+    });
+    const { result } = renderHook(() => useSmartHome(), { wrapper });
+    await waitFor(() => expect(result.current.disconnected).toBe(true));
+    expect(result.current.totalDevices).toBe(0);
   });
 });

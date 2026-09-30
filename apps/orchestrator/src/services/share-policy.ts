@@ -77,6 +77,28 @@ export function libraryOfHomePath(homePath: string, companyRoots: readonly strin
   return roots.some((r) => p === r || p.startsWith(r + "/")) ? "company" : "personal";
 }
 
+/**
+ * WARP-3168 — true when a home-relative path is in the company Workspace
+ * (same NFC, case-insensitive, fail-closed matching as `libraryOfHomePath`).
+ *
+ * Ruling (Romain, 2026-09-25): members may not share Workspace items AT ALL,
+ * internal shares included. Every member already sees the whole Workspace, so
+ * an internal share adds nothing, and Nextcloud can only express "no share of
+ * any kind" on a groupfolder (group mask 15, as for department libraries), so
+ * the box refuses exactly what Nextcloud refuses. Department/team libraries
+ * keep the WARP-3053 rule: internal shares open, anything leaving the company
+ * owner/admin only.
+ */
+export function isWorkspacePath(homePath: string, workspaceRoot: string): boolean {
+  return libraryOfHomePath(homePath, [workspaceRoot]) === "company";
+}
+
+export const WORKSPACE_SHARE_REFUSAL = {
+  error: "workspace_share_admin_only",
+  message:
+    "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside.",
+} as const;
+
 export const PUBLIC_LINK_REFUSAL = {
   error: "public_link_company_data",
   message:

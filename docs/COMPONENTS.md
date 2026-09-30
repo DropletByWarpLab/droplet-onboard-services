@@ -221,6 +221,8 @@ network. Host-published ports and host-network services are called out.
 - **Build/deploy:** Next.js **standalone** output (monorepo-aware
   `outputFileTracingRoot`); multi-stage Docker (`node:20`), served on 3001.
   Requires `@droplet/shared-types` at build — **cannot build standalone**.
+  Fonts are vendored under `src/app/fonts/` (`next/font/local`) so `next build`
+  needs no network — don't import `next/font/google` (test-guarded, WARP-3317).
 - **Tests:** Vitest + React Testing Library (`src/__tests__/`, ~119 files).
 - **Gotchas:** admin-page gating is **client-side only** (`useAuth().user.role`) —
   the backend is the real enforcement point. Dev rewrites don't exist in prod;
@@ -338,12 +340,18 @@ network. Host-published ports and host-network services are called out.
   section.
 - **gRPC consumers:** file-indexer (`EmbedText`), orchestrator/mcp-server
   (`Rerank`, `ClassifyQuery` for adaptive RAG routing).
-- **Planned — Kev decision model (ADR-006 in `droplet-local-LLM`, epic WARP-3067):**
-  a `Decide` RPC (WARP-3070) proxying to `droplet-local-LLM`'s `decision-model`
-  sidecar (`:8009`, profile `decision`, off by default): calibrated yes/no /
-  choice / score answers, no generated text. It is the **only** way in: nothing
-  else calls `:8009`. Consumers fail soft to today's behaviour and never sit on the
-  write-approval path. Not built until the bench-box go/no-go (WARP-3069) passes.
+- **Kev decision model (ADR-006 in `droplet-local-LLM`, epic WARP-3067):** the
+  `Decide` RPC (WARP-3070) exists and proxies to `droplet-local-LLM`'s
+  `decision-model` sidecar (`:8009`, profile `decision`, off by default):
+  calibrated yes/no / choice / score answers, no generated text. **Off until
+  `DECISION_MODEL_URL` is set** (plus `DECISION_MODEL_API_KEY`, the sidecar's
+  key); unset, it answers `DECIDE_STATUS_UNAVAILABLE` with no network call.
+  Every failure (timeout, 5xx, 401) is a status in the response, never a gRPC
+  error; a 422 is `DECIDE_STATUS_INVALID`. Orchestrator client:
+  `apps/orchestrator/src/services/decision-model.client.ts`. It is the **only**
+  way in: nothing else calls `:8009`. **No consumers yet** (triage, `ClassifyQuery`,
+  tool-domain selection, `classify_items`: WARP-3071–3074); they must fail soft
+  to today's behaviour and never sit on the write-approval path.
   Full picture: `docs/agentic-workflows.md` § "Decision model (Kev)".
 - **Gotchas:** does **not** dispatch tools (forwards `tools[]` as-is, returns raw
   `tool_calls` to the orchestrator). Embed/rerank models lazy-load from HF on first
@@ -640,7 +648,11 @@ network. Host-published ports and host-network services are called out.
   smbd on `:445`; account `droplet` (uid 33 = www-data) with the per-device
   `SMB_PASSWORD`. The same volume mounts into Nextcloud as the `/Droplet`
   files_external mount (`nextcloud-init.sh`) so web + desktop see one tree.
-  Connect info: `GET /api/storage/network-drive` (owner/admin). Guide:
+  Connect info: `GET /api/storage/network-drive` (owner/admin). A user's own
+  drive (WebDAV via Nextcloud): `POST /api/storage/network-drive/personal`
+  (owner/admin/family, gated by the owner setting
+  `Workspace.personalDriveEnabled`, off by default) — see
+  [`network-drive.md`](network-drive.md#per-user-drive-webdav). Guide:
   [`network-drive.md`](network-drive.md).
 
 ## scripts/
@@ -671,7 +683,7 @@ network. Host-published ports and host-network services are called out.
 ## proto/ & schemas/
 
 - `proto/inference.proto` — ai-gateway gRPC: `Chat`/`StreamChat`/`ListModels`/
-  `EmbedText`/`Rerank`/`ClassifyQuery`. `proto/device_identity.proto` — TPM sidecar:
+  `EmbedText`/`Rerank`/`ClassifyQuery`/`Decide`. `proto/device_identity.proto` — TPM sidecar:
   `Sign`/`GetCert`/`GetStatus`/`Reseal`. Codegen via `scripts/generate-grpc.sh`.
 - `schemas/anchor.schema.json` — JSON Schema 2020-12 for the `Anchor` union; the
   source of truth for `packages/shared-types/src/anchor.ts` (regenerate, don't

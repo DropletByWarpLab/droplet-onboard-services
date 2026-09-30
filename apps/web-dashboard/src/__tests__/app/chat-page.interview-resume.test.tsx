@@ -120,7 +120,7 @@ describe("chat /chat — interview resume banner is never a dead end (WARP-1668)
 
     // The ordinary empty-chat hint proves the profile fetch resolved and the
     // page settled, so a missing banner is a real absence, not a slow render.
-    await screen.findByText("Ask Droplet anything");
+    await screen.findByTestId("chat-empty");
     expect(screen.queryByTestId("interview-resume-banner")).toBeNull();
   });
 
@@ -136,7 +136,7 @@ describe("chat /chat — interview resume banner is never a dead end (WARP-1668)
 
     render(<ChatPage />);
 
-    await screen.findByText("Ask Droplet anything");
+    await screen.findByTestId("chat-empty");
     expect(screen.queryByTestId("interview-resume-banner")).toBeNull();
   });
 
@@ -173,7 +173,7 @@ describe("chat /chat — interview resume banner is never a dead end (WARP-1668)
 
     render(<ChatPage />);
 
-    await screen.findByText("Ask Droplet anything");
+    await screen.findByTestId("chat-empty");
     expect(screen.queryByTestId("interview-resume-banner")).toBeNull();
   });
 });

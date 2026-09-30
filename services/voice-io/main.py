@@ -1012,8 +1012,9 @@ def health(response: Response) -> HealthResponse:
         dsp_last_restart_at = s.dsp_last_restart_at
     # Both 'error' and 'no_mic' are stuck-and-deaf: _on_frame drops every
     # frame for state in ('error', 'no_mic') (voice/pipeline.py), so the
-    # assistant can't hear a wake word in either. 'error' latches on a
-    # transient STT/TTS/LLM failure; 'no_mic' parks when no input device
+    # assistant can't hear a wake word in either. 'error' latches on a stuck
+    # fault — the detector, the capture loop, an STT session (a failed reply
+    # turn does NOT latch it: WARP-3199); 'no_mic' parks when no input device
     # resolves (there is no supported mic-less / output-only mode — no-mic is
     # a fault the supervisor keeps retrying, not a configuration). Report
     # degraded (ok=False + 503) for both so the Dockerfile healthcheck

@@ -304,3 +304,70 @@ describe("authMiddleware — WARP-2804 req.sessionChecked", () => {
     expect(req.sessionChecked).toBe(false);
   });
 });
+
+// WARP-3038 (ADR-008 §3) — when a request carries BOTH a Bearer and a session
+// cookie, the Bearer is the identity the client meant to use. A native client
+// on a shared cookie jar (or a browser tab beside a native app) must not have
+// another user's stale cookie override its Bearer.
+describe("authMiddleware — WARP-3038 Bearer beats cookie", () => {
+  const aliceBearer = { ...payloadWithSid, sub: "u-alice", username: "alice", sid: "sid-alice" };
+  const bobCookie = { ...payloadWithSid, sub: "u-bob", username: "bob", sid: "sid-bob" };
+
+  beforeEach(() => {
+    verifyAccessToken.mockImplementation((t: string) =>
+      t === "alice-jwt" ? aliceBearer : t === "bob-jwt" ? bobCookie : null,
+    );
+    checkSession.mockResolvedValue({
+      kind: "ok",
+      record: { userId: "x", role: "family", createdAt: 0, lastSeenAt: 0 },
+    });
+  });
+
+  it("authenticates as the Bearer's user when a different user's cookie rides along", async () => {
+    const req = {
+      headers: { authorization: "Bearer alice-jwt" },
+      cookies: { droplet_session: "bob-jwt" },
+      path: "/api/llm/models",
+    } as unknown as Request;
+    const next = vi.fn() as unknown as NextFunction;
+
+    authMiddleware(req, mockRes(), next);
+    await flush();
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(req.user).toMatchObject({ id: "u-alice", sid: "sid-alice" });
+    expect(checkSession).toHaveBeenCalledWith("sid-alice");
+  });
+
+  it("a Bearer that does not verify is NOT rescued by a valid cookie", async () => {
+    const req = {
+      headers: { authorization: "Bearer garbage" },
+      cookies: { droplet_session: "bob-jwt" },
+      path: "/api/llm/models",
+    } as unknown as Request;
+    const res = mockRes();
+    const next = vi.fn() as unknown as NextFunction;
+
+    authMiddleware(req, res, next);
+    await flush();
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(req.user).toBeUndefined();
+  });
+
+  it("a cookie-only request (the browser path) still authenticates", async () => {
+    const req = {
+      headers: {},
+      cookies: { droplet_session: "bob-jwt" },
+      path: "/api/llm/models",
+    } as unknown as Request;
+    const next = vi.fn() as unknown as NextFunction;
+
+    authMiddleware(req, mockRes(), next);
+    await flush();
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(req.user).toMatchObject({ id: "u-bob" });
+  });
+});

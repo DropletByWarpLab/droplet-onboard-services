@@ -153,10 +153,12 @@ describe("describeToolError — message_excerpt is envelope-only and scrubbed", 
     expect(JSON.stringify(d)).not.toContain("hunter2hunter2");
   });
 
-  it("drops an excerpt that still looks like key material after redaction", () => {
+  it("never ships key material from a PEM whose END falls outside the redaction bound", () => {
     // A PEM whose END delimiter falls outside the pre-redaction bound
     // (MAX_REDACT_INPUT = 64k) cannot be matched by the block rule — the
-    // excerpt must be dropped rather than shipped half-scrubbed.
+    // excerpt must never ship half-scrubbed. Since WARP-3282 the unterminated-
+    // block rule collapses it to the placeholder; the `-----BEGIN` drop in
+    // tool-error-diagnostics.ts stays as the backstop.
     //
     // The body is laid out as real PEM is — 64-column base64 lines — not as
     // one 200k-character run. `redactSecrets`' sensitive-key rule starts with
@@ -176,7 +178,7 @@ describe("describeToolError — message_excerpt is envelope-only and scrubbed", 
       { includeExcerpt: true },
     );
 
-    expect(d.message_excerpt).toBeUndefined();
+    expect(d.message_excerpt ?? "").not.toMatch(/BEGIN|AAAA/);
   });
 });
 

@@ -73,6 +73,7 @@ import {
   type ToolAccessScope,
 } from "./tool-access.service.js";
 import { createLogger } from "../lib/logger.js";
+import { redactCredentials, redactCredentialValues } from "../lib/log-redaction.js";
 import type { McpCallContext } from "./mcp-client.service.js";
 import type { McpToolCallOutcome } from "./mcp-client.port.js";
 import {
@@ -567,7 +568,22 @@ export async function runToolSpec(
       try {
         // The facts are the trace SO FAR — a copy, so the summarizer cannot
         // mutate the run's own record of what happened.
-        const prose = await args.summarizer.summarize(summarizeStep.prompt, [...trace]);
+        //
+        // WARP-3282 — scrubbed of credentials: the summary model (which may
+        // be a configured cloud default) reads these results exactly as the
+        // chat loop's model reads a tool result, so it gets the same scrub.
+        // `named`/`prev` keep the real values — data flowing from one step
+        // into the next is not a model path, and a copy step must copy.
+        const facts = redactCredentialValues(trace);
+        if (facts.count > 0) {
+          logger.info(
+            { specId: args.specId, redacted: facts.count },
+            "tool_spec_step_credentials_redacted",
+          );
+        }
+        const prose = await args.summarizer.summarize(summarizeStep.prompt, [
+          ...(facts.value as RunStepTrace[]),
+        ]);
         const outName = stepOutputName(step);
         trace.push({
           idx: step.idx,
@@ -764,6 +780,21 @@ export async function runToolSpec(
   // tool names in refs.
   const failedSteps =
     outcome.status === "ok" ? trace.filter((t) => !t.ok).map((t) => t.tool) : [];
+
+  // WARP-3282 — the run record (ToolRun.trace/error, the HTTP response, the
+  // run history shared across owner/admin/family) holds results and resolved
+  // args, so it gets the same credential scrub as a chat trace. Count only.
+  const stored = redactCredentialValues(outcome.trace);
+  const storedError = outcome.error ? redactCredentials(outcome.error) : null;
+  const redacted = stored.count + (storedError?.count ?? 0);
+  if (redacted > 0) {
+    logger.info({ specId: args.specId, redacted }, "tool_spec_run_credentials_redacted");
+    outcome = {
+      ...outcome,
+      trace: stored.value as RunStepTrace[],
+      error: storedError ? storedError.text : outcome.error,
+    };
+  }
 
   const endedAt = new Date();
   const run = (await prisma.toolRun.create({

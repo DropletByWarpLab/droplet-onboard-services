@@ -113,7 +113,7 @@ function interceptingMcp(
   tools: string[],
   tier2: Set<string>,
   denied: Set<string> = new Set(),
-  opts: { refuseRedeem?: boolean; throwOnRedeem?: boolean; challengeAsError?: boolean; truncateRedeem?: boolean } = {},
+  opts: { refuseRedeem?: boolean; throwOnRedeem?: boolean; challengeAsError?: boolean; truncateRedeem?: boolean; result?: unknown } = {},
 ) {
   let minted = 0;
   const live = new Set<string>();
@@ -170,7 +170,7 @@ function interceptingMcp(
       }
       executed.push({ name, args, token: ctx?.confirmationToken });
       if (opts.truncateRedeem) return { isError: false, content: [{ type: "text", text: '{"ok": true, "to' }] };
-      return wire({ ok: true, tool: name });
+      return wire(opts.result ?? { ok: true, tool: name });
     },
   );
   return {
@@ -1086,6 +1086,33 @@ describe("agent runs — an approved park runs the STORED call; the model never 
     expect(rowText(done)).not.toMatch(/tok-\d/);
   });
 
+  it("WARP-3282 — an approved call's result is scrubbed of credentials before the model, the messages and the trace see it", async () => {
+    // Every imported remote MCP tool defaults to requiresConfirmation, so a
+    // READ can park; its result then enters the conversation HERE, not in
+    // the loop. Same scrub, same placeholder.
+    const SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const model = rewordingModel();
+    const { db, id, mcp } = await parked(model, {
+      mcp: { result: { ok: true, page: `deploy notes\nexport AWS_SECRET_ACCESS_KEY="${SECRET}"\n` } },
+    });
+    expect(await decide(db, id, "approved")).toMatchObject({ ok: true });
+
+    await resume(db, mcp, model);
+
+    const done = db.row(id);
+    expect(done.status).toBe("succeeded");
+    expect(mcp.executed).toHaveLength(1);
+    const reply = model.seen[1]!.find((m) => m.role === "tool" && m.tool_call_id === "c1")!;
+    expect(String(reply.content)).not.toContain(SECRET);
+    expect(JSON.parse(String(reply.content))).toMatchObject({
+      ok: true,
+      page: 'deploy notes\nexport AWS_SECRET_ACCESS_KEY="[credential redacted]"\n',
+    });
+    // Neither persisted column holds it.
+    expect(JSON.stringify(done.messages)).not.toContain(SECRET);
+    expect(JSON.stringify(done.trace)).not.toContain(SECRET);
+  });
+
   it("a run whose wall clock ran out while it waited in the queue does not run the approved call", async () => {
     const model = rewordingModel();
     const { db, id, mcp } = await parked(model);
@@ -1191,5 +1218,35 @@ describe("agent runs — an approved park runs the STORED call; the model never 
       expect(mcp.executed).toHaveLength(0);
       expectPendingCleared(done);
     });
+  });
+});
+
+describe("chat-started runs (WARP-3300)", () => {
+  it("run from the fixed brief, and the park notification names the chat", async () => {
+    const clock = new Date("2026-09-28T12:00:00Z");
+    const db = createAgentRunPrismaMock({ users: [OWNER], now: () => clock });
+    const { id } = await enqueueAgentRun(db.prisma, {
+      userId: OWNER.id,
+      goal: "tidy up old files",
+      model: "m",
+      sessionId: "conv-9",
+      origin: "chat",
+      title: "Tidy up",
+      deliverable: "A list of what was removed",
+    });
+    const mcp = interceptingMcp(["delete_file", "list_files"], new Set(["delete_file"]));
+    const { worker, chat } = makeWorker(db, mcp, { now: () => clock });
+    await worker.tickOnce();
+    await settle(worker);
+
+    const firstUser = (chat.mock.calls[0]![0] as { messages: Array<{ role: string; content: string }> }).messages.find(
+      (m) => m.role === "user",
+    )!;
+    expect(firstUser.content).toContain("Background task: Tidy up");
+    expect(firstUser.content).toContain("A list of what was removed");
+    expect(firstUser.content).toContain("at most 300 words");
+
+    const note = sendNotificationMock.mock.calls[0]![1] as { data: Record<string, unknown> };
+    expect(note.data).toEqual({ agentRunId: id, pendingTool: "delete_file", needsDecision: true, sessionId: "conv-9" });
   });
 });

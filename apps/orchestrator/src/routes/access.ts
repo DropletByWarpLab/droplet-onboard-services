@@ -101,6 +101,7 @@ import {
   GATEABLE_MODULE_IDS,
   GRANTABLE_TOOL_DOMAINS,
   isGrantableDomain,
+  isGateableModuleId,
   clampConnectorLevel,
   clampLevel,
   type ConnectorLevel,
@@ -261,10 +262,13 @@ function normalizeGrants(args: {
   connectorGrants: Array<{ provider: string; level: ConnectorLevel }>;
   mayOperateLocks: boolean;
 }): NormalizedGrants {
-  const featureGrants = args.featureGrants.map((g) => ({
-    moduleId: g.moduleId as ModuleId,
-    level: clampLevel(args.startingPoint, g.moduleId, g.level),
-  }));
+  // `null` from the clamp = this starting point may hold NO grant on the module
+  // (doors below admin, ADR-055): the row is not written, exactly as an
+  // unheldable connector grant is not (below).
+  const featureGrants = args.featureGrants.flatMap((g) => {
+    const level = clampLevel(args.startingPoint, g.moduleId, g.level);
+    return level === null ? [] : [{ moduleId: g.moduleId as ModuleId, level }];
+  });
   // O-2's connector floors, both of them, from the one authoritative helper:
   // read_write only on Admin-based roles, and (WARP-1578) NO grant at all on
   // Guest-based roles — a guest sits below O-2's family-and-up read floor, so
@@ -324,7 +328,16 @@ function serializeAccessRole(row: RoleWithMeta, layers: ToolLayers) {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     peopleCount: row._count.users,
-    featureGrants: row.featureGrants.map((g) => ({ moduleId: g.moduleId, level: g.level })),
+    // The same clamp `normalizeGrants` applies at write time, and the resolver at
+    // read time (effective-access.service): a row saved before a floor existed
+    // (a Guest-based role's security:view) is inert, so the list must not show it
+    // as reach. Nothing is rewritten; `null` = the tier may hold no grant.
+    featureGrants: row.featureGrants.flatMap<{ moduleId: ModuleId; level: FeatureLevel }>((g) => {
+      // `chat` is always-on and never a grant row; a stray one is listed as stored.
+      if (!isGateableModuleId(g.moduleId)) return [{ moduleId: g.moduleId, level: g.level }];
+      const level = clampLevel(row.startingPoint, g.moduleId, g.level);
+      return level === null ? [] : [{ moduleId: g.moduleId, level }];
+    }),
     toolGrants: toolGrantStates(row.toolGrants, layers),
     connectorGrants: row.connectorGrants.map((g) => ({ provider: g.provider, level: g.level })),
   };

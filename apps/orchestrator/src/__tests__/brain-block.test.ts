@@ -169,6 +169,62 @@ describe("buildBrainBlock (WARP-2752)", () => {
     expect(out).toContain("business_find");
   });
 
+  /**
+   * WARP-3125 — THE HINT FOLLOWS THE ADVERTISED SET. The closing sentence
+   * points the model at `business_find`. A caller whose turn does not
+   * advertise that tool (voice sends a fixed list without it) must not be
+   * told to call it: the model either invents the call or burns an iteration
+   * on a self-heal. The rows are present in every case here — an empty brain
+   * returns "" and would pass an absence assertion against any implementation.
+   */
+  describe("tool-usage hint (WARP-3125)", () => {
+    const HINT = "Use business_find";
+
+    it("drops the business_find hint when the turn does not advertise it", async () => {
+      const out = await buildBrainBlock(db([finding], [digest]), owner, {
+        advertisedTools: new Set(["list_cameras", "control_device"]),
+      });
+      // The summary itself is untouched...
+      expect(out).toContain("net 30");
+      expect(out).toContain("Acme is 90 days past due");
+      // ...and so is the honesty note: still a standing, partial summary.
+      expect(out).toContain("not a live read");
+      expect(out).toContain("partial");
+      // ...but the tool is not named.
+      expect(out).not.toContain("business_find");
+    });
+
+    it("keeps the hint when the turn advertises business_find", async () => {
+      const out = await buildBrainBlock(db([finding], [digest]), owner, {
+        advertisedTools: new Set(["list_cameras", "business_find"]),
+      });
+      expect(out).toContain(`${HINT} (entity: finding or digest) for the current list.`);
+    });
+
+    it("an empty advertised set names no tool", async () => {
+      // The setup wizard's `allowed_tools: []`.
+      const out = await buildBrainBlock(db([finding], [digest]), owner, {
+        advertisedTools: new Set(),
+      });
+      expect(out).toContain("Acme is 90 days past due");
+      expect(out).not.toContain("business_find");
+    });
+
+    it("keeps the hint when the caller states no tool set", async () => {
+      // `undefined` = no tool notion at this call site (the prompt inspector),
+      // the same contract as `composeToolGuidance(undefined)`.
+      expect(await buildBrainBlock(db([finding], [digest]), owner)).toContain(HINT);
+      expect(await buildBrainBlock(db([finding], [digest]), owner, {})).toContain(HINT);
+    });
+
+    it("ends on the honesty note, with no dangling space, once the hint is gone", async () => {
+      const out = await buildBrainBlock(db([], [digest]), owner, {
+        advertisedTools: new Set(["list_cameras"]),
+      });
+      expect(out.endsWith("and it is partial.")).toBe(true);
+    });
+  });
+
   it("stays within the char budget, clipped at a line boundary", async () => {
     const many = Array.from({ length: 8 }, (_, i) => ({
       title: `Digest ${i} ${"x".repeat(200)}`,

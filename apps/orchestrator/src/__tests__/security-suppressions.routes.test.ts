@@ -101,7 +101,16 @@ function access(level: Level | null, tier: EffectiveAccessResult["tier"] = "fami
 }
 
 const zone = (id: string, name: string, state = "active") => ({ id, name, nameKey: name.toLowerCase(), kind: "interior", state, version: 0 });
-const link = (zoneId: string, camera: string, n: number) => ({ id: `${zoneId.slice(0, 6)}-l${n}`, zoneId, sourceKind: "camera", sourceRef: camera, sourceLabel: camera, state: "active" });
+const link = (zoneId: string, camera: string, n: number) => ({
+  id: `${zoneId.slice(0, 6)}-l${n}`,
+  zoneId,
+  sourceKind: "camera",
+  sourceRef: camera,
+  sourceLabel: camera,
+  state: "active",
+  origin: "person",
+  stateSetBy: "person",
+});
 const sup = (id: string, target: { zoneId: string } | { camera: string }, over: Record<string, unknown> = {}) => ({
   id,
   targetKind: "zoneId" in target ? "area" : "camera",

@@ -27,6 +27,9 @@ interface RoomSectionsProps {
   /** Turn every reachable light/switch in the room on/off (Tier-1). */
   onBulkLights: (room: Room, devices: MatterDevice[], on: boolean) => void;
   actions: RoomActions;
+  /** WARP-3276: external guest — list only; no device, bulk or room controls
+   *  (the command and room routes admit owner/admin/member only). */
+  readOnly?: boolean;
 }
 
 function DeviceGrid({
@@ -35,8 +38,8 @@ function DeviceGrid({
   onDeviceClick,
 }: {
   devices: MatterDevice[];
-  onCommand: RoomSectionsProps["onCommand"];
   onDeviceClick: RoomSectionsProps["onDeviceClick"];
+  onCommand?: RoomSectionsProps["onCommand"];
 }) {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -58,8 +61,10 @@ function RoomHeader({
   onRename,
   onChooseIcon,
   onDelete,
+  readOnly,
 }: {
   bucket: RoomBucket;
+  readOnly?: boolean;
   onBulkLights: RoomSectionsProps["onBulkLights"];
   onRename: () => void;
   onChooseIcon: () => void;
@@ -85,13 +90,14 @@ function RoomHeader({
         &middot; {devices.length} {devices.length === 1 ? "device" : "devices"}
       </span>
       <span className="flex-1" />
-      {lights.length > 0 && (
+      {!readOnly && lights.length > 0 && (
         <ToggleSwitch
           on={anyLightOn(devices)}
           ariaLabel={`All ${room.name} lights`}
           onToggle={() => onBulkLights(room, devices, !anyLightOn(devices))}
         />
       )}
+      {!readOnly && (
       <div className="relative">
         <button
           ref={triggerRef}
@@ -157,6 +163,7 @@ function RoomHeader({
           </>
         )}
       </div>
+      )}
     </div>
   );
 }
@@ -168,6 +175,7 @@ export function RoomSections({
   onDeviceClick,
   onBulkLights,
   actions,
+  readOnly = false,
 }: RoomSectionsProps) {
   // null = closed; otherwise the room being edited (null = create) + which
   // face of the dialog to open — rename shows the name field, icon jumps
@@ -180,7 +188,7 @@ export function RoomSections({
 
   return (
     <div className="flex flex-col gap-8">
-      {showNudge && !nudgeDismissed && (
+      {!readOnly && showNudge && !nudgeDismissed && (
         <div
           className="card flex items-start gap-3 p-4"
           style={{ background: "var(--brand-subtle)" }}
@@ -216,7 +224,7 @@ export function RoomSections({
       )}
 
       {/* Add-room affordance when rooms already exist. */}
-      {!showNudge && (
+      {!readOnly && !showNudge && (
         <div className="flex justify-end -mb-4">
           <button
             type="button"
@@ -238,6 +246,7 @@ export function RoomSections({
             onRename={() => setModal({ room: bucket.room, mode: "rename" })}
             onChooseIcon={() => setModal({ room: bucket.room, mode: "icon" })}
             onDelete={() => setDeleting(bucket.room)}
+            readOnly={readOnly}
           />
           {bucket.devices.length === 0 ? (
             <div
@@ -249,7 +258,7 @@ export function RoomSections({
           ) : (
             <DeviceGrid
               devices={bucket.devices}
-              onCommand={onCommand}
+              onCommand={readOnly ? undefined : onCommand}
               onDeviceClick={onDeviceClick}
             />
           )}
@@ -266,7 +275,7 @@ export function RoomSections({
           </div>
           <DeviceGrid
             devices={layout.unassigned}
-            onCommand={onCommand}
+            onCommand={readOnly ? undefined : onCommand}
             onDeviceClick={onDeviceClick}
           />
         </section>

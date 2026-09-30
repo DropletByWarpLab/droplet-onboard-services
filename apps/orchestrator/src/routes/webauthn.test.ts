@@ -27,7 +27,7 @@
  * Security posture mirrors auth.directory-login.test.ts: same JWT decode of the
  * session cookie, same in-memory Prisma mock shape.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import request from "supertest";
 import express from "express";
 import cookieParser from "cookie-parser";
@@ -189,10 +189,11 @@ const stefan: UserRow = {
 };
 
 /** supertest sends `Host: 127.0.0.1:<port>` — an IP, which the routes refuse
- *  as an RP ID (WARP-1157). Stand in the box's LAN name unless a test sets
- *  x-forwarded-host itself to exercise that refusal. */
+ *  as an RP ID (WARP-1157). Stand in the box's LAN name for that default, and
+ *  leave a Host a test set itself (to exercise the IP refusal) untouched. The
+ *  RP is derived from Host only; X-Forwarded-Host is ignored (WARP-3229). */
 const lanHost: express.RequestHandler = (req, _res, next) => {
-  req.headers.host = "droplet-ai.local";
+  if (req.headers.host?.startsWith("127.0.0.1:")) req.headers.host = "droplet-ai.local";
   next();
 };
 
@@ -479,6 +480,8 @@ describe("WebAuthn authentication (public, passwordless) — POST /auth/webauthn
     expect(res.status).toBe(200);
     expect(res.body.accessToken).toEqual(expect.any(String));
     expect(res.body.refreshToken).toEqual(expect.any(String));
+    // WARP-3038 — a body-token passkey sign-in sets no session cookies.
+    expect(res.headers["set-cookie"]).toBeUndefined();
   });
 
   it("verify: ?return=body from a BROWSER context (Origin present) issues the cookie session but NO body tokens (WARP-582)", async () => {
@@ -663,7 +666,7 @@ describe("WARP-1157 — honest refusals and coded errors", () => {
     const { prisma } = createPrismaMock({ users: [stefan] });
     const res = await request(buildProtectedApp(prisma, stefan))
       .post("/api/auth/webauthn/register/options")
-      .set("X-Forwarded-Host", "192.168.9.195");
+      .set("Host", "192.168.9.195");
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("origin_unsupported");
     expect(createChallenge).not.toHaveBeenCalled();
@@ -673,7 +676,7 @@ describe("WARP-1157 — honest refusals and coded errors", () => {
     const { prisma } = createPrismaMock();
     const res = await request(buildPublicApp(prisma))
       .post("/api/auth/webauthn/authenticate/options")
-      .set("X-Forwarded-Host", "[fe80::1]:443");
+      .set("Host", "[fe80::1]:443");
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("origin_unsupported");
     expect(createChallenge).not.toHaveBeenCalled();
@@ -954,5 +957,86 @@ describe("WARP-3193 — passkeys require user verification and an enrolled TOTP"
       .send({ response: ceremonyResponse("cred-id-b64url") });
     expect(res.status).toBe(200);
     expect(sessionFromCookie(res).lastMfaAt).toBeUndefined();
+  });
+});
+
+// WARP-3229 — the RP comes from the Host header. nginx forwards the client's
+// Host header and never sets X-Forwarded-Host, so on a box that header can
+// only come from the client and must not steer the RP: neither to force the IP
+// refusal nor to dodge it or pick the rpID/origin the server will expect. A
+// developer stack is the one exception: the `next dev` rewrite proxy sets Host
+// to the orchestrator's own address and puts the browser's address in
+// X-Forwarded-Host.
+describe("WARP-3229 — the RP comes from Host; X-Forwarded-Host only on a developer stack", () => {
+  const credential: CredentialRow = {
+    id: "cred-1",
+    userId: "u-uuid-stefan-7777",
+    credentialId: "cred-id-b64url",
+    publicKey: Buffer.from([1, 2, 3, 4]),
+    counter: 5,
+    transports: "internal",
+    createdAt: new Date(),
+    lastUsedAt: null,
+  };
+
+  // A shipped box's posture: nothing sets NODE_ENV there, and setup.sh writes
+  // DROPLET_ENV=production. Pinned so the shell running the suite can't
+  // change the result.
+  beforeEach(() => {
+    vi.stubEnv("NODE_ENV", undefined);
+    vi.stubEnv("DROPLET_ENV", "production");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("ignores a client-supplied X-Forwarded-Host when deriving the RP", async () => {
+    const { prisma } = createPrismaMock();
+    generateAuthenticationOptions.mockResolvedValue({ challenge: CHALLENGE, rpId: "droplet-ai.local" });
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/options")
+      .set("X-Forwarded-Host", "192.168.9.195");
+    expect(res.status).toBe(200);
+    expect(generateAuthenticationOptions).toHaveBeenCalledWith(
+      expect.objectContaining({ rpID: "droplet-ai.local" }),
+    );
+  });
+
+  it("a client-supplied X-Forwarded-Host cannot dodge the IP refusal", async () => {
+    const { prisma } = createPrismaMock();
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/options")
+      .set("Host", "192.168.9.195")
+      .set("X-Forwarded-Host", "droplet-ai.local");
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("origin_unsupported");
+    expect(createChallenge).not.toHaveBeenCalled();
+  });
+
+  it("developer stack (NODE_ENV=development, not a shipped box): verifies against the browser's address from X-Forwarded-Host", async () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("DROPLET_ENV", undefined);
+    const { prisma } = createPrismaMock({ users: [stefan], credentials: [{ ...credential }] });
+    consumeChallenge.mockResolvedValue({
+      id: "c-1",
+      challenge: CHALLENGE,
+      type: "AUTHENTICATION",
+      userId: null,
+      expiresAt: new Date(Date.now() + 60000),
+      createdAt: new Date(),
+    });
+    verifyAuthenticationResponse.mockResolvedValue({ verified: true, authenticationInfo: { newCounter: 6 } });
+
+    // What the dashboard's next dev rewrite sends in docker/docker-compose.dev.yml.
+    const res = await request(buildPublicApp(prisma))
+      .post("/api/auth/webauthn/authenticate/verify")
+      .set("Host", "orchestrator:3000")
+      .set("X-Forwarded-Host", "localhost:3001")
+      .send({ response: ceremonyResponse("cred-id-b64url") });
+
+    expect(res.status).toBe(200);
+    expect(verifyAuthenticationResponse).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedOrigin: "http://localhost:3001", expectedRPID: "localhost" }),
+    );
   });
 });
