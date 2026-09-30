@@ -18,8 +18,11 @@
  * WARP-3354 — a routine is PRIVATE to its creator unless shared with the
  * Workspace; owner and admin see every routine. The rule is
  * services/tool-spec-visibility.ts and is applied on EVERY route below: a
- * routine the caller may not see answers 404 exactly like a missing one, so
- * a private slug is not even confirmed to exist.
+ * routine the caller may not see answers 404 exactly like a missing one.
+ * Creating a routine whose slug collides with one the caller may not see takes
+ * the next free suffixed slug (`-2`, `-3`, ...) instead of answering 409, so
+ * that answer never names a routine the caller cannot see. A collision with a
+ * routine the caller CAN see is still a plain 409.
  *
  * The §7 spec model lives in this orchestrator, NOT in
  * `packages/tools-core` — that registry is the capability source of
@@ -58,6 +61,8 @@ import {
 import {
   createDraftSpecTx,
   DraftSlugTakenError,
+  MAX_SLUG_SUFFIX,
+  suffixedSlug,
   createSpecSchema,
   reconcileWrites,
   stepReferenceError,
@@ -258,6 +263,16 @@ interface RunRow {
 }
 
 /**
+ * May this viewer be offered share / un-share on this routine? Its creator, an
+ * owner or an admin (`canManageToolSpec`) — except `daily-report`: the box's
+ * own routine is always shared with the Workspace, so un-sharing it answers
+ * 409 (see `setVisibility`) and there is nothing to offer.
+ */
+function canShareSpec(actor: Actor, spec: SpecRow): boolean {
+  return spec.slug !== DAILY_REPORT_SLUG && canManageToolSpec(actor, spec);
+}
+
+/**
  * Materialize a clean DTO for a spec + its ordered steps. The
  * underlying Prisma row carries the same shape; this projects out
  * internal-only fields (`ownerId` stays, but `id` is the primary
@@ -265,8 +280,8 @@ interface RunRow {
  *
  * WARP-3354 — `visibility` is the stored column; `canShare` is per VIEWER:
  * true when this caller may share or un-share the routine (its creator, an
- * owner or an admin), so a client never restates the rule to decide whether
- * to offer the action.
+ * owner or an admin; never `daily-report`), so a client never restates the
+ * rule to decide whether to offer the action.
  */
 function projectSpec(
   spec: SpecRow & { steps: StepRow[] },
@@ -283,7 +298,7 @@ function projectSpec(
     ownerId: spec.ownerId,
     share: spec.share,
     visibility: spec.visibility,
-    canShare: canManageToolSpec(actor, spec),
+    canShare: canShareSpec(actor, spec),
     safety: spec.safety,
     writes: spec.writes,
     reversible: spec.reversible,
@@ -426,7 +441,7 @@ export function createToolsRouter(
             ownerId: r.ownerId,
             share: r.share,
             visibility: r.visibility,
-            canShare: canManageToolSpec(actor, r),
+            canShare: canShareSpec(actor, r),
             safety: r.safety,
             writes: r.writes,
             reversible: r.reversible,
@@ -493,14 +508,30 @@ export function createToolsRouter(
         // same checks. WARP-485: ownerId is the User.id, never the username.
         // No runtime tool sets: the walker dispatches compiled tools only.
         // A slug collision is thrown typed (it aborts a transaction, so a
-        // multi-draft caller must unwind); here it is just the 409.
-        const created = await createDraftSpecTx<SpecRow & { steps: StepRow[] }>(
-          prisma,
-          parsed.data,
-          who.id,
-        ).catch((err: unknown) => {
-          if (err instanceof DraftSlugTakenError) return { ok: false as const, refusal: err.refusal };
-          throw err;
+        // multi-draft caller must unwind); here it is the 409 — unless the
+        // routine holding the slug is one this caller may not see, in which
+        // case a 409 would confirm that routine exists (WARP-3354).
+        type Created = SpecRow & { steps: StepRow[] };
+        const create = (slug: string) =>
+          createDraftSpecTx<Created>(prisma, { ...parsed.data, slug }, who.id);
+        const created = await create(parsed.data.slug).catch(async (err: unknown) => {
+          if (!(err instanceof DraftSlugTakenError)) throw err;
+          const held = (await prisma.toolSpec.findUnique({
+            where: { slug: parsed.data.slug },
+            select: { ownerId: true, visibility: true },
+          })) as { ownerId: string | null; visibility: string } | null;
+          // Visible to the caller (or gone since): the plain 409 tells them nothing new.
+          if (!held || canSeeToolSpec(who, held)) return { ok: false as const, refusal: err.refusal };
+          // Not theirs to know about: take the next free slug and say nothing.
+          // ponytail: linear probe, MAX_SLUG_SUFFIX tries; past that, the plain 409.
+          for (let n = 2; n < 2 + MAX_SLUG_SUFFIX; n++) {
+            try {
+              return await create(suffixedSlug(parsed.data.slug, n));
+            } catch (retry) {
+              if (!(retry instanceof DraftSlugTakenError)) throw retry;
+            }
+          }
+          return { ok: false as const, refusal: err.refusal };
         });
         if (!created.ok) {
           res.status(created.refusal.status).json(created.refusal.body);

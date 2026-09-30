@@ -391,13 +391,17 @@ Saved multi-step "tools"/macros the LLM agent can run (slug-addressed).
 WARP-3354 — **a routine is private to its creator unless shared with the Workspace.**
 `visibility` is `"PRIVATE"` (its creator, owners and admins) or `"WORKSPACE"` (every
 member). `canShare` is per viewer: true when the caller may share or un-share it (its
-creator, an owner or an admin) — show the action on that, do not re-derive it from
-`ownerId`. Owner and admin see every routine. Every `/tools/:slug*` route (detail, runs,
+creator, an owner or an admin; always false for `daily-report`) — show the action on that,
+do not re-derive it from `ownerId`. Owner and admin see every routine. Every `/tools/:slug*` route (detail, runs,
 run history, schedules) answers `404 Spec not found` for a routine the caller may not see,
 exactly as for an unknown slug. `share` and `unshare` are idempotent and answer the spec;
 `403 forbidden_not_creator` for a member who can see a shared routine they did not create;
 `409 box_routine_stays_shared` for `daily-report`. Box-provided routines (mined suggestions,
 `daily-report`) are `WORKSPACE`. The legacy free-text `share` field is not read by anything.
+`POST /tools` whose `slug` collides with a routine the caller can see is `409 Slug already in
+use`; if it collides with one the caller cannot see, the routine is created under the next free
+suffix (`<slug>-2`, `-3`, ...) and the response carries the slug actually used — read `slug` from
+the answer, do not assume the one you sent.
 
 `safety` ∈ 1..3; `slug` matches `SLUG_RE` (2..80 chars). Missing spec → `404 Spec not found`.
 

@@ -14,6 +14,11 @@
  *     cannot be run, read back or scheduled-peeked by someone who cannot see it;
  *   - share / un-share: its creator, an owner or an admin — nobody else, and
  *     never the assistant;
+ *   - creating a routine whose slug a private routine of someone else already
+ *     holds takes a suffixed slug and never answers 409, so the answer cannot
+ *     confirm that routine exists; a collision with a routine the caller can
+ *     see is still 409;
+ *   - an external guest is refused on get, run and schedules;
  *   - the assistant (`_service:mcp` acting for a person) is held to the
  *     visibility of THAT person, not of a robot;
  *   - the migration's backfill: live routines and suggestions stay shared,
@@ -38,6 +43,7 @@ vi.mock("../services/activity.singleton.js", () => ({
 import { createToolsRouter } from "../routes/tools.js";
 import type { StepDispatcher } from "../services/tool-spec-runner.service.js";
 import { DAILY_REPORT_SLUG } from "../services/daily-report-spec.service.js";
+import { MAX_SLUG_SUFFIX, suffixedSlug } from "../services/tool-spec-draft.service.js";
 import type { AuthUser } from "../middleware/auth.js";
 import { userDirectory, type DirectoryUser } from "./helpers/user-directory.js";
 import { PRISMA_DIR } from "./helpers/test-paths.js";
@@ -164,6 +170,9 @@ function createPrismaMock(seed: SpecRow[] = fixtures()) {
       }),
       create: vi.fn(
         async ({ data }: { data: Record<string, unknown> & { steps: { create: Array<Omit<StepRow, "id" | "specId">> } } }) => {
+          if (specs.has(data.slug as string)) {
+            throw Object.assign(new Error("unique"), { code: "P2002" });
+          }
           const id = `spec-new-${n++}`;
           const row: SpecRow = {
             id,
@@ -279,7 +288,18 @@ describe("GET /api/tools — a member lists the Workspace's routines and their o
     expect(row("mined")).toMatchObject({ visibility: "WORKSPACE", canShare: false });
 
     const asOwner = await request(buildApp(createPrismaMock(), owner)).get("/api/tools");
-    expect(asOwner.body.specs.every((s: { canShare: boolean }) => s.canShare)).toBe(true);
+    const others = asOwner.body.specs.filter((s: { slug: string }) => s.slug !== DAILY_REPORT_SLUG);
+    expect(others.length).toBeGreaterThan(0);
+    expect(others.every((s: { canShare: boolean }) => s.canShare)).toBe(true);
+  });
+
+  it("canShare is false for the box's daily report even for owner and admin — its un-share is always a 409", async () => {
+    for (const who of [owner, admin]) {
+      const list = await request(buildApp(createPrismaMock(), who)).get("/api/tools");
+      expect(list.body.specs.find((s: { slug: string }) => s.slug === DAILY_REPORT_SLUG).canShare, who.role).toBe(false);
+      const one = await request(buildApp(createPrismaMock(), who)).get(`/api/tools/${DAILY_REPORT_SLUG}`);
+      expect(one.body.canShare, who.role).toBe(false);
+    }
   });
 
   it("an external guest lists nothing — 403 before the query", async () => {
@@ -379,6 +399,100 @@ describe("run, run history and schedules follow the routine's visibility", () =>
 
   it("a shared routine's schedules are readable by every member", async () => {
     expect((await request(buildApp(createPrismaMock(), alice)).get("/api/tools/shared/schedules")).status).toBe(200);
+  });
+});
+
+// ── external guest ───────────────────────────────────────────────
+describe("an external guest is refused on get, run and schedules — before any lookup", () => {
+  it.each([
+    ["GET", "/api/tools/shared"],
+    ["POST", "/api/tools/shared/runs"],
+    ["GET", "/api/tools/shared/schedules"],
+  ])("%s %s is 403", async (method, path) => {
+    const prisma = createPrismaMock();
+    const dispatcher = makeDispatcher();
+    const app = buildApp(prisma, guest, dispatcher);
+    const res = method === "GET" ? await request(app).get(path) : await request(app).post(path).send({});
+    expect(res.status).toBe(403);
+    expect(prisma.toolSpec.findUnique).not.toHaveBeenCalled();
+    expect(dispatcher.call).not.toHaveBeenCalled();
+    expect(prisma.toolRun.create).not.toHaveBeenCalled();
+  });
+
+  it("the assistant acting for a guest cannot run a routine either", async () => {
+    const prisma = createPrismaMock();
+    const dispatcher = makeDispatcher();
+    const res = await request(buildApp(prisma, mcp, dispatcher))
+      .post("/api/tools/shared/runs")
+      .set("X-Nextcloud-User", "visitor")
+      .send({});
+    expect(res.status).toBe(403);
+    expect(prisma.toolSpec.findUnique).not.toHaveBeenCalled();
+    expect(dispatcher.call).not.toHaveBeenCalled();
+  });
+});
+
+// ── slug collisions ──────────────────────────────────────────────
+describe("a colliding slug never names a routine the caller cannot see", () => {
+  const draft = (slug: string) => ({ slug, name: "Mine", steps: [{ tool: "list_files", args: {} }] });
+
+  it("a slug held by another member's PRIVATE routine is taken silently under the next free suffix", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma, alice)).post("/api/tools").send(draft("bob-live"));
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ slug: "bob-live-2", ownerId: "u-alice", visibility: "PRIVATE" });
+    expect(JSON.stringify(res.body)).not.toMatch(/already in use|u-bob/);
+    // bob's routine is untouched.
+    expect(prisma.specs.get("bob-live")).toMatchObject({ ownerId: "u-bob", visibility: "PRIVATE" });
+  });
+
+  it("keeps probing past suffixes that are taken too, whoever holds them", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma, alice);
+    expect((await request(app).post("/api/tools").send(draft("bob-live"))).body.slug).toBe("bob-live-2");
+    // `bob-live-2` is now alice's own, visible to her: the probe must still move on, silently.
+    const again = await request(app).post("/api/tools").send(draft("bob-live"));
+    expect(again.status).toBe(201);
+    expect(again.body.slug).toBe("bob-live-3");
+  });
+
+  it("the assistant's routine_draft for alice takes the same path", async () => {
+    const res = await request(buildApp(createPrismaMock(), mcp))
+      .post("/api/tools")
+      .set("X-Nextcloud-User", "alice")
+      .send(draft("bob-live"));
+    expect(res.status).toBe(201);
+    expect(res.body.slug).toBe("bob-live-2");
+  });
+
+  it("an orphan private routine (no creator) is just as invisible to a member", async () => {
+    const res = await request(buildApp(createPrismaMock(), alice)).post("/api/tools").send(draft("orphan-draft"));
+    expect(res.status).toBe(201);
+    expect(res.body.slug).toBe("orphan-draft-2");
+  });
+
+  it("a slug held by a routine the caller CAN see is still a plain 409", async () => {
+    const cases: Array<[AuthUser, string]> = [
+      [alice, "shared"], // shared with the Workspace
+      [alice, "alice-live"], // her own
+      [owner, "bob-live"], // owner sees every routine
+      [admin, "bob-live"],
+    ];
+    for (const [who, slug] of cases) {
+      const res = await request(buildApp(createPrismaMock(), who)).post("/api/tools").send(draft(slug));
+      expect(res.status, `${who.role} ${slug}`).toBe(409);
+      expect(res.body).toEqual({ error: "Slug already in use", slug });
+    }
+  });
+
+  it("gives up with the plain 409 only when every probed suffix is held too (degenerate)", async () => {
+    const prisma = createPrismaMock();
+    for (let n = 2; n < 2 + MAX_SLUG_SUFFIX; n++) {
+      const slug = suffixedSlug("bob-live", n);
+      prisma.specs.set(slug, spec(slug, { status: "draft", ownerId: bob.id, visibility: "PRIVATE" }));
+    }
+    const res = await request(buildApp(prisma, alice)).post("/api/tools").send(draft("bob-live"));
+    expect(res.status).toBe(409);
   });
 });
 

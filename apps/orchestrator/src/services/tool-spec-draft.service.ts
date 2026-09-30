@@ -31,6 +31,20 @@ import { unknownToolsIn, writeToolsIn } from "./tool-access.service.js";
 export const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 /**
+ * WARP-3354 — the slug to try when the one asked for is held by a routine the
+ * caller may not see: `<slug>-<n>`, the base trimmed so the result still fits
+ * the 80-char cap and never ends a segment on a hyphen. Always satisfies
+ * {@link SLUG_RE} for a slug that does.
+ */
+export function suffixedSlug(slug: string, n: number): string {
+  const tail = `-${n}`;
+  return slug.slice(0, 80 - tail.length).replace(/-+$/, "") + tail;
+}
+
+/** How many suffixed slugs a colliding create tries before giving up. */
+export const MAX_SLUG_SUFFIX = 20;
+
+/**
  * WARP-2670 — the name a step may publish its result under, for later steps
  * to read as `${steps.<name>}`. Lowercase snake so the reference syntax needs
  * no quoting or escaping, and so two names cannot differ only by case.

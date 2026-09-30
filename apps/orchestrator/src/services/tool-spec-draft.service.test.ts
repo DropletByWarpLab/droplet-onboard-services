@@ -13,6 +13,8 @@ import { TOOL_CATALOG } from "@droplet/tools-core";
 import {
   createDraftSpecTx,
   DraftSlugTakenError,
+  SLUG_RE,
+  suffixedSlug,
   validateDraftSpec,
   type CreateSpecInput,
 } from "./tool-spec-draft.service.js";
@@ -145,5 +147,28 @@ describe("createDraftSpecTx", () => {
       }),
     );
     await expect(createDraftSpecTx(tx as never, input(), "u1")).rejects.toThrow("db down");
+  });
+});
+
+/** WARP-3354 — the slug a create falls back to when the one asked for is held by a routine the caller cannot see. */
+describe("suffixedSlug", () => {
+  it("appends -<n>", () => {
+    expect(suffixedSlug("q3-export", 2)).toBe("q3-export-2");
+    expect(suffixedSlug("q3-export", 13)).toBe("q3-export-13");
+  });
+
+  it("stays inside the 80-char cap and never leaves a double or trailing hyphen", () => {
+    const longest = "a".repeat(80);
+    const out = suffixedSlug(longest, 12);
+    expect(out).toHaveLength(80);
+    expect(out.endsWith("-12")).toBe(true);
+    // The trim lands right after a hyphen: `aaa…a-bc` cut at 78 ends on `-`.
+    const edge = "a".repeat(77) + "-bc";
+    const trimmed = suffixedSlug(edge, 2);
+    expect(trimmed).toBe("a".repeat(77) + "-2");
+    for (const slug of [out, trimmed, suffixedSlug("ab", 2)]) {
+      expect(slug).toMatch(SLUG_RE);
+      expect(slug.length).toBeLessThanOrEqual(80);
+    }
   });
 });
