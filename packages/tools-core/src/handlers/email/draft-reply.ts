@@ -138,7 +138,7 @@ async function handler(
 const tool: Tool = {
   name: "email_draft_reply",
   description:
-    "Draft a reply to an email thread. Only when the user asks for email; to message a colleague otherwise, team chat is the default. Writes to EmailDraft with draftedByDroplet=true so the operator sees it in the Droplet drafts tab. Does NOT send — `email_send` (write + confirm) is required to dispatch.",
+    "Draft a reply to an email thread. Only when the user asks for email (an address alone is not a request for email); to message a colleague otherwise, team chat is the default. Writes to EmailDraft with draftedByDroplet=true so the operator sees it in the Droplet drafts tab. Does NOT send — `email_send` (write + confirm) is required to dispatch.",
   inputSchema,
   // Persists an EmailDraft row → WRITE. Without requiresWrite:true the
   // orchestrator's WRITE_TOOLS set in routes/llm.ts excludes this tool

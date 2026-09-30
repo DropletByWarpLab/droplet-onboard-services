@@ -440,7 +440,7 @@ describe("team_chat_send_message — a roster that does not say who is asking", 
 describe("WARP-3340 — team chat is the default channel, email only when asked", () => {
   it("team_chat_send_message says it is the default and takes usernames, not addresses", () => {
     expect(sendMessage.description).toContain(
-      "The default way to message, tell or send something to a colleague; use email only when the user asks for email.",
+      "The default way to message, tell or send something to a colleague, even one named by email address; use email only when the user asks for email.",
     );
     expect(sendMessage.description).toContain("member USERNAMES, not email addresses");
     const recipients = (sendMessage.inputSchema as { properties: { recipients: { description: string } } })
@@ -450,7 +450,7 @@ describe("WARP-3340 — team chat is the default channel, email only when asked"
 
   it.each([emailSend, emailDraftReply])("$name is only for when the user asks for email", (tool) => {
     expect(tool.description).toContain(
-      "Only when the user asks for email; to message a colleague otherwise, team chat is the default.",
+      "Only when the user asks for email (an address alone is not a request for email); to message a colleague otherwise, team chat is the default.",
     );
   });
 });
