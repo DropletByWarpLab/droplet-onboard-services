@@ -2044,7 +2044,8 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       case "model_done":
       case "context_budget":
       case "repetition":
-      case "no_progress": {
+      case "no_progress":
+      case "needs_details": {
         const text = contentToText(result.message.content);
         await finish(runId, {
           status: "succeeded",

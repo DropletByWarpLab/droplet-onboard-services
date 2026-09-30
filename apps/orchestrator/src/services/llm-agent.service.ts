@@ -677,7 +677,8 @@ export interface AgentResult {
     | "error"
     | "context_budget"
     | "repetition"
-    | "no_progress";
+    | "no_progress"
+    | "needs_details";
   error?: string;
   /**
    * WARP-1479 — set only when the model's terminal answer was blank. After
@@ -1611,7 +1612,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // than a break because the user still deserves an answer synthesized from
   // the gathered results, which needs one more inference call.
   const contextWindow = req.context_window ?? DEFAULT_CONTEXT_WINDOW;
-  let finalizeReason: "context_budget" | "repetition" | "no_progress" | null = null;
+  let finalizeReason:
+    | "context_budget"
+    | "repetition"
+    | "no_progress"
+    | "needs_details"
+    | null = null;
   // WARP-3285 — a blank answer after real tool work gets ONE more pass of the
   // same kind (no tools, a nudge) before the loop falls back to saying what it
   // checked. Separate from `finalizeReason` so the turn keeps its stop_reason.
@@ -1637,6 +1643,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // key on (tool, entity) if that shows up.
   const MAX_EMPTY_SEARCHES = 3;
   const emptySearches = new Map<string, number>();
+  // WARP-3347 — the guard's second trigger. Searches that return IRRELEVANT
+  // hits never count as empty above, so an ambiguous request ("Send a message
+  // to the manager saying hello.") used to rephrase for 16 steps. Decision
+  // (Romain, 2026-09-29): once half the turn's steps are spent and its
+  // searching has found nothing it went on to use, stop and ask the person
+  // for the missing detail. `madeProgress` flips on the first call that ran
+  // and is not a looking call (see `isLookingCall`): an opened file, a record
+  // read by id, any write or confirmation, any other tool. Sticky: a turn that
+  // once got somewhere is never cut by this trigger.
+  let madeProgress = false;
   // WARP-1479 — the provider's verdict for the most recent BLOCKING
   // response, folded into the blank-answer diagnostics when the terminal
   // turn produces no visible output. Set fresh on every blocking response
@@ -1888,6 +1904,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         );
       } else {
         replayedTools.add(grant.tool);
+        madeProgress = true;
       }
       messages.push(
         {
@@ -1978,6 +1995,21 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         );
       }
     }
+    // WARP-3347 — half the steps gone on searching that found nothing usable
+    // (see `madeProgress`). The turn must actually have searched: one that
+    // only hit failing non-search tools keeps its step-limit reply.
+    if (
+      finalizeReason === null &&
+      !madeProgress &&
+      iter >= Math.ceil(maxIter / 2) &&
+      trace.some((t) => isLookingCall(t.tool, t.args))
+    ) {
+      finalizeReason = "needs_details";
+      logger.info(
+        { turn_id: turnId, iter, max_iter: maxIter, tool_calls: trace.length },
+        "agent_needs_details_finalize",
+      );
+    }
     const finalizing = finalizeReason !== null || blankRetry;
     if (finalizing) {
       messages.push({
@@ -1992,7 +2024,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
             ? "You are repeating tool calls — answer the user now from the information already gathered. Do not call any more tools."
             : finalizeReason === "no_progress"
               ? "Your last searches found nothing — stop searching. Answer the user now: say what you looked for and that nothing matching was found, plus anything useful already gathered. Do not call any more tools."
-              : "Context budget reached — answer the user now from the information already gathered. Do not call any more tools.",
+              : finalizeReason === "needs_details"
+                ? "You've spent half of this turn's steps searching without finding what my request needs — stop searching. If the results above already answer my request, answer it. Otherwise tell me in one sentence what you checked, then ask me for the specific detail you need to continue (for example which person, file, record or ticket I mean). Do not call any more tools."
+                : "Context budget reached — answer the user now from the information already gathered. Do not call any more tools.",
       });
     }
     const iterTools = finalizing ? [] : tools;
@@ -2829,6 +2863,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           );
         }
       }
+      // WARP-3347 — a confirmation_required envelope is not `isError`, so a
+      // write parked on approval counts as progress too.
+      if (!result.isError && !isLookingCall(call.function.name, args)) madeProgress = true;
 
       // WARP-1480 — the ONE point that sees every tool failure, on BOTH the
       // streaming and non-streaming paths. Until now nothing in this repo had
@@ -3465,7 +3502,7 @@ function isZeroHitSearchResult(
   if (tool === "business_find") {
     // With `id` it is a record read (the handler's own test: a non-blank
     // string). `pipeline` without id is a roll-up, never carries `total`.
-    if (typeof args.id === "string" && args.id.trim() !== "") return false;
+    if (isNonBlank(args.id)) return false;
     // Every list branch carries `total` except work_item's search.
     if (typeof p.total === "number") return p.total === 0;
     return Array.isArray(p.work_items) && p.work_items.length === 0;
@@ -3473,6 +3510,30 @@ function isZeroHitSearchResult(
   const key = SEARCH_TOOLS.get(tool);
   const hits = key === undefined ? undefined : p[key];
   return Array.isArray(hits) && hits.length === 0;
+}
+
+function isNonBlank(v: unknown): boolean {
+  return typeof v === "string" && v.trim() !== "";
+}
+
+/**
+ * WARP-3347 — a call that only LOOKS for something: its hits are candidates,
+ * not yet an answer. The WARP-3283 searches, the listings, the memory recall,
+ * and business_find by query or as a bare list. business_find by `id` or
+ * `parent_id` reads a known record, usually one an earlier result named.
+ *
+ * By name, not from the catalog: the catalog tells reads from writes, not
+ * searches from reads. A tool missing here counts as progress, so an
+ * omission makes the half-budget trigger fire less often, never more.
+ */
+function isLookingCall(tool: string, args: Record<string, unknown>): boolean {
+  if (tool === "business_find") return !isNonBlank(args.id) && !isNonBlank(args.parent_id);
+  return (
+    SEARCH_TOOLS.has(tool) ||
+    tool === "list_files" ||
+    tool === "list_recent_files" ||
+    tool === "memory_recall"
+  );
 }
 
 /**

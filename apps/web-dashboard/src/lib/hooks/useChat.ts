@@ -292,7 +292,8 @@ interface DoneEvent extends SSEEventBase {
     | "error"
     | "context_budget"
     | "repetition"
-    | "no_progress";
+    | "no_progress"
+    | "needs_details";
   error?: string;
 }
 
@@ -2255,7 +2256,8 @@ function applyEvent(
             evt.stop_reason === "iteration_limit" ||
             evt.stop_reason === "context_budget" ||
             evt.stop_reason === "repetition" ||
-            evt.stop_reason === "no_progress")
+            evt.stop_reason === "no_progress" ||
+            evt.stop_reason === "needs_details")
         ) {
           const updated = [...base];
           updated[idx] = {

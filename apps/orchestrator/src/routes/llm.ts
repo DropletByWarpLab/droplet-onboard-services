@@ -2431,7 +2431,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             (e.stop_reason === "model_done" ||
               e.stop_reason === "context_budget" ||
               e.stop_reason === "repetition" ||
-              e.stop_reason === "no_progress")
+              e.stop_reason === "no_progress" ||
+              e.stop_reason === "needs_details")
           ) {
             emptyCompletion = true;
             e = {
@@ -2698,7 +2699,8 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           (result.stop_reason === "model_done" ||
             result.stop_reason === "context_budget" ||
             result.stop_reason === "repetition" ||
-            result.stop_reason === "no_progress")
+            result.stop_reason === "no_progress" ||
+            result.stop_reason === "needs_details")
         ) {
           result = {
             ...result,
