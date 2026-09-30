@@ -87,6 +87,11 @@ export interface GroupedInto {
   zoneKind: SecurityZoneKind | null;
   /** The incident's `openedInMode` — the mode at the event's start (nothing joins across a mode change). */
   mode: SecurityMode;
+  /**
+   * The event's primary area was matched through a link a PERSON made or kept (ADR-059 §6.7.1). False = only
+   * Droplet's own link reached it, which adds context and grouping, never severity: the area modifier is dropped.
+   */
+  personLinked: boolean;
 }
 
 /** An active expected activity, as the engine reads it (`suppressionFor`'s rows). */
@@ -438,7 +443,8 @@ export async function flagPatterns(
         code: h.code,
         // Every pattern code is `trial` in v3 (the tripwire in security-rules.test.ts): PR-D adds `counted`.
         effect: quiet ? ("suppressed" as const) : ("trial" as const),
-        severity: patternSeverity(h.code, label, grouped.mode, grouped.zoneKind),
+        // §6.7.1: a link Droplet made adds no area modifier — the same severity as a camera key (zoneKind null).
+        severity: patternSeverity(h.code, label, grouped.mode, grouped.personLinked ? grouped.zoneKind : null),
         suppressionId: quiet?.id ?? null,
         rulesetVersion: SECURITY_RULESET_VERSION,
         zoneKey,
