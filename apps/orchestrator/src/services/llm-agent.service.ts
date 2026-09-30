@@ -46,12 +46,14 @@ import type { McpClientPort } from "./mcp-client.port.js";
 import {
   malformedToolOutputText,
   parseToolResultPayload,
+  TOOL_OUTPUT_MALFORMED,
   toolResultPayloadValue,
   type ToolResultPayload,
 } from "./tool-result-payload.js";
 import {
   describeToolError,
   newAgentTurnId,
+  type ToolErrorDiagnostics,
 } from "./tool-error-diagnostics.js";
 import type { ChatApprovalStore } from "./chat-approval.service.js";
 import {
@@ -203,6 +205,53 @@ function approvedAlreadyRanEnvelope(tool: string) {
         "report that result to the user.",
     },
   };
+}
+
+/**
+ * WARP-3287 — failures of the TOOL rather than of the call: it timed out, its
+ * upstream was unreachable, or its output could not be read. The same call can
+ * succeed a moment later, so the repetition guard lets it run again (see
+ * `toolFailures` in runAgent). Codes as `describeToolError` reports them — the
+ * loop's own thrown-dispatch envelope is TOOL_DISPATCH_FAILED there. Any other
+ * code counts when its message names a network or upstream-down cause: a
+ * HANDLER_THREW cause chain, `read_file`'s `nextcloud returned 503`.
+ */
+const TRANSIENT_TOOL_ERROR_CODES = new Set([
+  "TIMEOUT",
+  "UPSTREAM_UNAVAILABLE",
+  "TOOL_DISPATCH_FAILED",
+  TOOL_OUTPUT_MALFORMED,
+]);
+const TRANSIENT_MESSAGE_CLASSES = new Set([
+  "headers_timeout",
+  "body_timeout",
+  "connect_timeout",
+  "socket_error",
+  "econnreset",
+  "econnrefused",
+  "etimedout",
+  "eai_again",
+  "ehostunreach",
+  "enetunreach",
+  "epipe",
+  "socket_hang_up",
+  "other_side_closed",
+  "tls_socket_disconnected",
+  "fetch_failed",
+  "terminated",
+  "nextcloud_502",
+  "nextcloud_503",
+  "nextcloud_504",
+  "bad_gateway",
+  "service_unavailable",
+  "gateway_timeout",
+]);
+
+function isTransientToolFailure(d: ToolErrorDiagnostics): boolean {
+  return (
+    TRANSIENT_TOOL_ERROR_CODES.has(d.error_code) ||
+    TRANSIENT_MESSAGE_CLASSES.has(d.message_class)
+  );
 }
 
 export interface AgentDeps {
@@ -1642,6 +1691,23 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // intended, while nested payload differences (which a flat replacer
   // array would erase) keep genuinely different calls distinct.
   const executedCallCounts = new Map<string, number>();
+  // WARP-3287 — only a call that SUCCEEDED has a result to point at.
+  // `failedCalls`: the error of each call key whose last dispatch failed
+  // (cleared on success). `toolFailures`: per tool, dispatches in a row that
+  // failed transiently (isTransientToolFailure). Such a call is re-dispatched
+  // instead of nudged, until its tool reaches MAX_TOOL_FAILURES — the failed
+  // call plus one retry, identical or reworded. The tool is then down for the
+  // turn: its next call, whatever the arguments, is refused, and the one after
+  // finalizes, as in §4.
+  // ponytail: a success of the same tool clears its count, so a key that has
+  // had its retry can earn another; each needs a new successful call in
+  // between, and maxIter bounds it. Track retries per key if that shows up.
+  const MAX_TOOL_FAILURES = 2;
+  const failedCalls = new Map<string, { code: string; transient: boolean }>();
+  const toolFailures = new Map<
+    string,
+    { count: number; code: string; refused: boolean }
+  >();
   const canonicalJson = (v: unknown): string => {
     if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
     if (v !== null && typeof v === "object") {
@@ -2578,18 +2644,34 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // Spec §4 — occurrence 1 dispatches; 2 nudges; 3 finalizes. A nudged
       // call is neither a guard hit nor a real dispatch, so the WARP-642
       // circuit breaker is unaffected.
+      // WARP-3287 — a retry of a transient failure is dispatched and is not an
+      // occurrence; a down tool is refused whatever the arguments (see
+      // `toolFailures`).
       const callKey = canonicalCallKey(call.function.name, args, call.id);
       const priorCalls = executedCallCounts.get(callKey) ?? 0;
-      executedCallCounts.set(callKey, priorCalls + 1);
-      if (priorCalls >= 1) {
+      const failed = failedCalls.get(callKey);
+      const down = toolFailures.get(call.function.name);
+      const toolDown = down !== undefined && down.count >= MAX_TOOL_FAILURES;
+      const retry = failed?.transient === true && !toolDown;
+      if (!retry) executedCallCounts.set(callKey, priorCalls + 1);
+      if (toolDown || (priorCalls >= 1 && !retry)) {
         const nudge = {
           status: "error" as const,
           error: {
             code: "REPEATED_CALL",
-            message:
-              `You already called '${call.function.name}' with these exact ` +
-              `arguments; its result is in the conversation above. Use that ` +
-              `result or answer the user — do not repeat the call.`,
+            message: toolDown
+              ? `You already called '${call.function.name}' ${down.count} times in a ` +
+                `row and it failed each time (last error: ${down.code}); there is no ` +
+                `result to use. Do not call it again with any arguments — tell the ` +
+                `user it failed.`
+              : failed
+                ? `You already called '${call.function.name}' with these exact ` +
+                  `arguments and it failed (${failed.code}); there is no result to ` +
+                  `use. Do not repeat the call — change the arguments or tell the ` +
+                  `user it failed.`
+                : `You already called '${call.function.name}' with these exact ` +
+                  `arguments; its result is in the conversation above. Use that ` +
+                  `result or answer the user — do not repeat the call.`,
           },
         };
         trace.push({
@@ -2604,9 +2686,10 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           tool_call_id: call.id,
           content: boundControlEnvelopeForModel(JSON.stringify(nudge)),
         });
-        if (priorCalls >= 2) {
+        if (toolDown ? down.refused : priorCalls >= 2) {
           finalizeReason = finalizeReason ?? "repetition";
         }
+        if (toolDown) down.refused = true;
         continue;
       }
 
@@ -2795,19 +2878,31 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // unattributed. `confirmation_required` is excluded for free: mcp-server
       // sets `isError` only for `status === "error"`.
       if (result.isError) {
-        logger.warn(
-          describeToolError({
-            tool: call.function.name,
-            toolCallId: call.id,
-            turnId,
-            iter,
-            args,
-            payload,
-            includeExcerpt: config.AGENT_BLANK_TURN_DEBUG,
-            threadId: req.citationContext?.threadId,
-          }),
-          "agent_tool_error",
-        );
+        const diagnostics = describeToolError({
+          tool: call.function.name,
+          toolCallId: call.id,
+          turnId,
+          iter,
+          args,
+          payload,
+          includeExcerpt: config.AGENT_BLANK_TURN_DEBUG,
+          threadId: req.citationContext?.threadId,
+        });
+        logger.warn(diagnostics, "agent_tool_error");
+        // WARP-3287 — feed the repetition guard. The shape-guarded code, never
+        // raw tool text, is what its refusal quotes back to the model.
+        const transient = isTransientToolFailure(diagnostics);
+        failedCalls.set(callKey, { code: diagnostics.error_code, transient });
+        if (transient) {
+          toolFailures.set(call.function.name, {
+            count: (toolFailures.get(call.function.name)?.count ?? 0) + 1,
+            code: diagnostics.error_code,
+            refused: false,
+          });
+        }
+      } else {
+        failedCalls.delete(callKey);
+        toolFailures.delete(call.function.name);
       }
 
       // Translate the MCP envelope into an SSE tool_result event.
@@ -3054,8 +3149,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
             | undefined;
           if (r === null || typeof r !== "object") return false;
           // Spec §4 — a REPEATED_CALL nudge means the call was never
-          // re-dispatched this turn (its prior result already succeeded);
-          // it must not read as "the tool kept failing".
+          // re-dispatched this turn; it must not read as "the tool kept
+          // failing" (a failed dispatch before it is its own trace entry).
           if (
             typeof r.error === "object" &&
             r.error !== null &&

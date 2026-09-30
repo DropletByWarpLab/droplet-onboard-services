@@ -192,3 +192,159 @@ describe("runAgent — repetition early-stop (spec §4)", () => {
     expect(result.stop_reason).toBe("model_done");
   });
 });
+
+/**
+ * WARP-3287 — only a call that SUCCEEDED has a result to point at. A call that
+ * failed transiently is re-dispatched; a tool that failed twice in a row is
+ * refused (honestly), then finalized. Eval seed-014 / adv-009.
+ */
+describe("runAgent — repetition guard after a failed call (WARP-3287)", () => {
+  const searchCall = (id: string, query: string) => ({
+    role: "assistant",
+    content: null,
+    tool_calls: [
+      {
+        id,
+        type: "function",
+        function: { name: "search_content", arguments: JSON.stringify({ query }) },
+      },
+    ],
+  });
+  const failure = (code: string, message = "x") => ({
+    isError: true,
+    content: [
+      { type: "text", text: JSON.stringify({ status: "error", error: { code, message } }) },
+    ],
+  });
+  const TIMEOUT = failure("TIMEOUT", "The tool did not respond within 30 s.");
+  const refusals = (chat: ReturnType<typeof makeDeps>["chat"]) => {
+    const last = chat.mock.calls[chat.mock.calls.length - 1]![0] as {
+      messages: { role: string; content: unknown }[];
+    };
+    return last.messages
+      .filter((m) => m.role === "tool" && String(m.content).includes("REPEATED_CALL"))
+      .map((m) => String(m.content));
+  };
+  const run = (deps: AgentDeps) =>
+    runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "search, retry once if it times out" }],
+      max_iter: 10,
+    });
+
+  it("seed-014: an identical retry of a timed-out call is dispatched", async () => {
+    const { deps, chat, callTool } = makeDeps([
+      sameCall, // TIMEOUT
+      sameCall, // the retry the user asked for
+      { role: "assistant", content: "600 requests per minute" },
+    ]);
+    callTool.mockResolvedValueOnce(TIMEOUT);
+    const result = await run(deps);
+    expect(callTool).toHaveBeenCalledTimes(2);
+    expect(refusals(chat)).toEqual([]);
+    expect(result.stop_reason).toBe("model_done");
+  });
+
+  it.each([
+    ["UPSTREAM_UNAVAILABLE", failure("UPSTREAM_UNAVAILABLE")],
+    ["HANDLER_THREW with a network cause", failure("HANDLER_THREW", "fetch failed; cause: read ECONNRESET")],
+    ["an upstream 503", failure("READ_FAILED", "nextcloud returned 503")],
+    ["unreadable output (WARP-3284)", { isError: false, content: [{ type: "text", text: '{"hits": [{"id": "SUP-' }] }],
+  ])("retries after %s", async (_label, first) => {
+    const { deps, callTool } = makeDeps([
+      sameCall,
+      sameCall,
+      { role: "assistant", content: "done" },
+    ]);
+    callTool.mockResolvedValueOnce(first);
+    await run(deps);
+    expect(callTool).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries after a thrown dispatch (tool_dispatch_failed)", async () => {
+    const { deps, callTool } = makeDeps([
+      sameCall,
+      sameCall,
+      { role: "assistant", content: "done" },
+    ]);
+    callTool.mockRejectedValueOnce(new Error("MCP child exited"));
+    await run(deps);
+    expect(callTool).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["INVALID_ARGS", failure("INVALID_ARGS", "query is required")],
+    ["HANDLER_THREW without a network cause", failure("HANDLER_THREW", "TypeError: x is not a function")],
+  ])("does not retry %s, and says the call failed", async (_label, first) => {
+    const { deps, chat, callTool } = makeDeps([
+      sameCall,
+      sameCall,
+      { role: "assistant", content: "it failed" },
+    ]);
+    callTool.mockResolvedValueOnce(first);
+    await run(deps);
+    expect(callTool).toHaveBeenCalledTimes(1);
+    const [nudge] = refusals(chat);
+    expect(nudge).toContain("it failed (");
+    expect(nudge).not.toContain("its result is in the conversation above");
+  });
+
+  it("stops a call that keeps timing out after its one retry", async () => {
+    const { deps, chat, callTool } = makeDeps([
+      sameCall, // TIMEOUT
+      sameCall, // retry: TIMEOUT
+      sameCall, // refused
+      sameCall, // refused + finalize
+      { role: "assistant", content: "the search is failing" },
+    ]);
+    callTool.mockResolvedValue(TIMEOUT);
+    const result = await run(deps);
+    expect(callTool).toHaveBeenCalledTimes(2);
+    const nudges = refusals(chat);
+    expect(nudges).toHaveLength(2);
+    expect(nudges[0]).toContain("2 times in a row and it failed each time (last error: TIMEOUT)");
+    expect(nudges[0]).not.toContain("its result is in the conversation above");
+    const finalReq = chat.mock.calls[4]![0] as { tools: unknown[] };
+    expect(finalReq.tools).toEqual([]);
+    expect(result.stop_reason).toBe("repetition");
+  });
+
+  it("adv-009: a reworded call to a tool that failed twice is refused, not dispatched", async () => {
+    const malformed = { isError: false, content: [{ type: "text", text: '{"items": [{"id": "SUP-' }] };
+    const { deps, chat, callTool } = makeDeps([
+      searchCall("c1", "open work items"),
+      searchCall("c2", "open work items limit 10"),
+      searchCall("c3", "open"), // tool is down: refused, whatever the arguments
+      { role: "assistant", content: "the lookup is failing" },
+    ]);
+    callTool.mockResolvedValue(malformed);
+    const result = await run(deps);
+    expect(callTool).toHaveBeenCalledTimes(2);
+    const nudges = refusals(chat);
+    expect(nudges).toHaveLength(1);
+    expect(nudges[0]).toContain("already called 'search_content' 2 times in a row");
+    expect(nudges[0]).toContain("TOOL_OUTPUT_MALFORMED");
+    // One refusal nudges; it does not finalize on its own.
+    expect(result.stop_reason).toBe("model_done");
+  });
+
+  it("a success clears the failure: the next repeat gets the ordinary nudge, the tool's count restarts", async () => {
+    const { deps, chat, callTool } = makeDeps([
+      sameCall, // TIMEOUT
+      sameCall, // retry: ok
+      sameCall, // ordinary §4 nudge — its result now exists
+      searchCall("c2", "marc"), // TIMEOUT: the tool's first failure since the success
+      searchCall("c3", "anna"), // dispatched: the tool is not down
+      { role: "assistant", content: "done" },
+    ]);
+    callTool
+      .mockResolvedValueOnce(TIMEOUT)
+      .mockResolvedValueOnce({ isError: false, content: [{ type: "text", text: '{"hits":[]}' }] })
+      .mockResolvedValueOnce(TIMEOUT);
+    await run(deps);
+    expect(callTool).toHaveBeenCalledTimes(4);
+    const nudges = refusals(chat);
+    expect(nudges).toHaveLength(1);
+    expect(nudges[0]).toContain("its result is in the conversation above");
+  });
+});
