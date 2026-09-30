@@ -107,9 +107,9 @@ class ChatRequest(BaseModel):
     # gpt-oss family (a no-op for other models) as a top-level
     # `reasoning_effort` on the OpenAI-compat /v1/chat/completions call, and on
     # the DMR runtime also as `chat_template_kwargs.reasoning_effort`
-    # (WARP-3123). On DMR, "low" also turns thinking OFF for GLM / Qwen3,
-    # whose templates only have `enable_thinking` (WARP-3409). The three
-    # values are gpt-oss's harmony reasoning levels; the
+    # (WARP-3123). WARP-3409: for a family that only switches thinking on/off
+    # (GLM on DMR), "low" turns it off; `ModelInfo.thinking_control` says which
+    # a model takes. The three values are gpt-oss's harmony reasoning levels; the
     # Literal makes anything else a 422 at the edge rather than a malformed
     # field silently reaching the inference runtime.
     reasoning_effort: Literal["low", "medium", "high"] | None = None
@@ -267,6 +267,11 @@ class ModelInfo(BaseModel):
     # Additive (defaults None for back-compat): which modalities the model
     # supports. Drives the orchestrator's vision routing + the dashboard badge.
     capabilities: ModelCapabilities | None = None
+    # WARP-3409 (additive, defaults None): what `ChatRequest.reasoning_effort`
+    # does for this model on this runtime — "reasoning_effort" (levels, e.g.
+    # gpt-oss), "enable_thinking" ("low" = thinking off, e.g. GLM on DMR), or
+    # None (not sent). providers/ollama_local.py `_THINKING_CONTROLS`.
+    thinking_control: Literal["reasoning_effort", "enable_thinking"] | None = None
 
 
 class ModelsResponse(BaseModel):

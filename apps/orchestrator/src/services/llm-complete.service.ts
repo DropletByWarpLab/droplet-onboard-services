@@ -58,8 +58,7 @@ export interface CompleteOnceArgs {
   /**
    * WARP-2964 — gpt-oss reasoning-effort control, passed straight through as
    * a top-level `reasoning_effort` (the gateway scopes it to the gpt-oss
-   * family; WARP-3409 adds "low" = thinking off for GLM/Qwen3 on DMR; a
-   * no-op elsewhere). Unset → the key is never sent and
+   * family, so it is a no-op elsewhere). Unset → the key is never sent and
    * the request body stays byte-for-byte what it was.
    */
   reasoningEffort?: "low" | "medium" | "high";

@@ -269,9 +269,10 @@ describe("createToolSpecSummarizer", () => {
     expect(completeOnceMock).toHaveBeenCalledTimes(1);
   });
 
-  it("asks for LOW thinking on the first call — a write-up of gathered facts needs none", async () => {
-    // WARP-3409 — GLM-4.7 at its default thinking spent all 2,100 tokens
-    // reasoning (3/3 replays); with thinking off it finished in ~2 s.
+  it("asks for LOW thinking on the first call — the gateway's family table decides what that means", async () => {
+    // WARP-3409 — replaying the failed run: gpt-oss:20B at default effort
+    // took 8–22 s and was cut off once in three; at low, 3–4 s, 3/3 done.
+    // GLM at its default spent all 2,100 tokens thinking; "low" = thinking off.
     const s = createToolSpecSummarizer(activeModel);
     await s.summarize("Write it up.", [ok("t", 1)]);
     expect(completeOnceMock.mock.calls[0][0].reasoningEffort).toBe("low");

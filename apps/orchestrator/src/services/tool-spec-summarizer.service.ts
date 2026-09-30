@@ -287,7 +287,9 @@ export function fallbackSummary(facts: RunStepTrace[], err: unknown): string {
   return lines.join("\n");
 }
 
-const SYSTEM = [
+/** The summary model's system prompt. Exported for scripts/model-support/replay-summary.mjs (WARP-3409),
+ *  so a replay renders exactly what production sends. */
+export const SUMMARY_SYSTEM = [
   "You are writing a short briefing for the owner of a Droplet appliance,",
   "from tool results gathered on their own hardware.",
   "",
@@ -354,14 +356,16 @@ export function createToolSpecSummarizer(
 
       const text = `${prompt}\n\nResults:\n${renderFacts(facts)}`;
       // WARP-3409 — every call asks for low thinking: a write-up of facts
-      // already gathered needs none, and a thinking model given its default
-      // spends the whole budget before a word of prose. The gateway turns
-      // "low" into gpt-oss's low effort, or thinking OFF for GLM/Qwen3 on DMR
-      // (replay of the failed run: GLM went from 3/3 cut off at 2,100 tokens
-      // to 3/3 finished in ~2 s). Cloud providers ignore it.
+      // already gathered needs little, and a thinking model at its default can
+      // spend the whole budget before a word of prose. The gateway's per-family
+      // table decides what "low" means for the active model (gpt-oss: low
+      // effort; GLM on DMR: thinking off; unknown: nothing sent). Replaying
+      // the failed run on gpt-oss:20B: default effort 796–2,100 completion
+      // tokens, 8–22 s, one of three cut off; low 319–341 tokens, 3–4 s, 3/3
+      // finished, prose of the same length.
       const ask = (maxTokens: number) =>
         completeOnce({
-          system: SYSTEM,
+          system: SUMMARY_SYSTEM,
           text,
           model,
           temperature: TEMPERATURE,

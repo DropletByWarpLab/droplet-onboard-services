@@ -209,6 +209,9 @@ export interface ModelInfo {
   // Additive (optional for back-compat): modalities the model supports.
   // Populated by the ai-gateway; drives vision routing + the dashboard badge.
   capabilities?: ModelCapabilities;
+  // WARP-3409 (additive, optional): what `reasoning_effort` does for this
+  // model — levels (gpt-oss), "low" = thinking off (GLM on DMR), or nothing.
+  thinking_control?: "reasoning_effort" | "enable_thinking" | null;
 }
 
 export interface ModelsResponse {

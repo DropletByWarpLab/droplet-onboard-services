@@ -1482,27 +1482,38 @@ class TestReasoningEffort:
         assert body["reasoning_effort"] == "low"
         assert body["chat_template_kwargs"] == {"reasoning_effort": "low"}
 
-    # -- WARP-3409 — "low" = thinking OFF for GLM / Qwen3 on DMR -------------
+    # -- WARP-3409 — one field, adapted per model family (_THINKING_CONTROLS) --
     #
-    # Their templates have no effort levels, only `enable_thinking`: GLM-4.7's
-    # GGUF template ends the prompt `<|assistant|></think>` instead of
-    # `<think>` when it is false, Qwen3's adds an empty think block. Replaying
-    # the failed daily report on the box, GLM at its default thought through
-    # all 2,100 tokens (3/3); with the flag it finished in ~2 s (3/3).
+    # GLM's template has no effort levels, only `enable_thinking`: its GGUF
+    # template (docker.io/ai/glm-4.7-flash on the box) ends the prompt
+    # `<|assistant|></think>` instead of `<think>` when it is false. Replaying
+    # a daily report that failed, GLM at its default thought through all
+    # 2,100 tokens (3/3); with the flag it finished in ~2 s (3/3).
+
+    GLM = "docker.io/ai/glm-4.7-flash:reap-q4_K_M"
 
     @pytest.mark.parametrize(
-        "model",
+        ("model", "dmr", "expected"),
         [
-            # The id the box runs as its active model.
-            "docker.io/ai/glm-4.7-flash:reap-q4_K_M",
-            "docker.io/ai/qwen3:8B-Q4_K_M",
-            "GLM-4.5-Air",
+            ("gpt-oss:20b", False, "reasoning_effort"),
+            ("docker.io/ai/gpt-oss:20B-F16", True, "reasoning_effort"),
+            ("docker.io/ai/glm-4.7-flash:reap-q4_K_M", True, "enable_thinking"),
+            ("GLM-4.5-Air", True, "enable_thinking"),
+            # Ollama has no template kwargs: the switch does not exist there.
+            ("glm-4.7-flash", False, None),
+            # Not verified on a served template yet (the TODO in the table).
+            ("docker.io/ai/qwen3:8B-Q4_K_M", True, None),
+            ("llama3.2:3b", True, None),
+            ("mistral:7b-instruct", False, None),
         ],
     )
+    def test_thinking_control_family_table(self, monkeypatch, model, dmr, expected):
+        self._set_dmr(monkeypatch, dmr)
+        assert ollama_local.thinking_control(model) == expected
+        assert ollama_local.model_supports_reasoning_effort(model) is (expected == "reasoning_effort")
+
     @respx.mock
-    async def test_dmr_thinking_switch_family_low_turns_thinking_off(
-        self, provider, monkeypatch, model
-    ):
+    async def test_dmr_glm_low_turns_thinking_off(self, provider, monkeypatch):
         self._set_dmr(monkeypatch, True)
         self._stub_limits(provider)
         handler, captured = self._capture_post()
@@ -1510,19 +1521,17 @@ class TestReasoningEffort:
 
         await provider.chat(
             messages=[ChatMessage(role="user", content="hi")],
-            model=model,
+            model=self.GLM,
             reasoning_effort="low",
         )
         body = captured["body"]
         assert body["chat_template_kwargs"] == {"enable_thinking": False}
-        # No effort levels in these templates — nothing to send top-level.
+        # No effort levels in this template — nothing to send top-level.
         assert "reasoning_effort" not in body
 
     @pytest.mark.parametrize("effort", ["medium", "high", None])
     @respx.mock
-    async def test_dmr_thinking_switch_family_keeps_default_unless_low(
-        self, provider, monkeypatch, effort
-    ):
+    async def test_dmr_glm_keeps_its_default_unless_low(self, provider, monkeypatch, effort):
         # Only "low" asks for less thinking; anything else is the template's
         # own default (thinking on), i.e. the unchanged body.
         self._set_dmr(monkeypatch, True)
@@ -1532,38 +1541,36 @@ class TestReasoningEffort:
 
         await provider.chat(
             messages=[ChatMessage(role="user", content="hi")],
-            model="docker.io/ai/glm-4.7-flash:reap-q4_K_M",
+            model=self.GLM,
             **({"reasoning_effort": effort} if effort else {}),
         )
         assert "chat_template_kwargs" not in captured["body"]
         assert "reasoning_effort" not in captured["body"]
 
+    @pytest.mark.parametrize(
+        ("model", "dmr"),
+        [("glm-4.7-flash", False), ("docker.io/ai/qwen3:8B-Q4_K_M", True), ("llama3.2:3b", True)],
+    )
     @respx.mock
-    async def test_ollama_runtime_thinking_switch_family_body_is_unchanged(
-        self, provider, monkeypatch
-    ):
-        # Ollama's OpenAI-compat endpoint has no template kwargs; its body for
-        # these models stays exactly what it was.
-        self._set_dmr(monkeypatch, False)
+    async def test_no_thinking_control_body_is_unchanged(self, provider, monkeypatch, model, dmr):
+        self._set_dmr(monkeypatch, dmr)
         self._stub_limits(provider)
         handler, captured = self._capture_post()
         respx.post(TEST_CHAT_URL).mock(side_effect=handler)
 
         await provider.chat(
             messages=[ChatMessage(role="user", content="hi")],
-            model="qwen3:8b",
+            model=model,
             reasoning_effort="low",
         )
         assert captured["body"] == {
-            "model": "qwen3:8b",
+            "model": model,
             "messages": [{"role": "user", "content": "hi"}],
             "stream": False,
         }
 
     @respx.mock
-    async def test_dmr_thinking_off_merges_caller_template_kwargs(
-        self, provider, monkeypatch
-    ):
+    async def test_dmr_glm_thinking_off_merges_caller_template_kwargs(self, provider, monkeypatch):
         self._set_dmr(monkeypatch, True)
         self._stub_limits(provider)
         handler, captured = self._capture_post()
@@ -1572,29 +1579,27 @@ class TestReasoningEffort:
 
         await provider.chat(
             messages=[ChatMessage(role="user", content="hi")],
-            model="docker.io/ai/glm-4.7-flash:reap-q4_K_M",
+            model=self.GLM,
             reasoning_effort="low",
             chat_template_kwargs=caller_kwargs,
         )
-        assert captured["body"]["chat_template_kwargs"] == {
-            "foo": 1,
-            "enable_thinking": False,
-        }
+        assert captured["body"]["chat_template_kwargs"] == {"foo": 1, "enable_thinking": False}
         assert caller_kwargs == {"foo": 1, "enable_thinking": True}
 
-    @pytest.mark.parametrize(
-        ("model", "expected"),
-        [
-            ("docker.io/ai/glm-4.7-flash:reap-q4_K_M", True),
-            ("qwen3:8b", True),
-            ("docker.io/ai/Qwen3-30B-A3B", True),
-            ("docker.io/ai/gpt-oss:20B-F16", False),
-            ("qwen2.5:7b", False),
-            ("llama3.2:3b", False),
-        ],
-    )
-    def test_thinking_switch_family_table(self, model, expected):
-        assert ollama_local.model_has_thinking_switch(model) is expected
+    @respx.mock
+    async def test_list_models_says_which_thinking_control_each_model_takes(self, provider, monkeypatch):
+        # So callers (and later the Models page) can see what "low" will do.
+        self._set_dmr(monkeypatch, True)
+        tags = [{"name": "docker.io/ai/gpt-oss:20B-F16"}, {"name": self.GLM}, {"name": "llama3.2:3b"}]
+        respx.get(f"{TEST_BASE_URL}/api/tags").mock(return_value=httpx.Response(200, json={"models": tags}))
+        respx.post(f"{TEST_BASE_URL}/api/show").mock(return_value=httpx.Response(200, json={}))
+
+        models = await provider.list_models()
+        assert [(m.id, m.thinking_control) for m in models] == [
+            ("docker.io/ai/gpt-oss:20B-F16", "reasoning_effort"),
+            (self.GLM, "enable_thinking"),
+            ("llama3.2:3b", None),
+        ]
 
 
 # ---------------------------------------------------------------------------

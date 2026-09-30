@@ -527,8 +527,7 @@ describe("WARP-3409 — the report never fails because only its write-up did", (
         "The written summary couldn't be produced because the AI service returned an error.",
       ].join("\n"),
     );
-    // Both calls asked for low thinking on the box's model, and the retry
-    // for no more than the gateway takes.
+    // Both calls asked for low thinking; the retry for no more than the gateway takes.
     expect(completeOnceMock.mock.calls.map(([a]) => [a.model, a.provider, a.reasoningEffort, a.maxTokens])).toEqual([
       ["docker.io/ai/glm-4.7-flash:reap-q4_K_M", "local", "low", 2100],
       ["docker.io/ai/glm-4.7-flash:reap-q4_K_M", "local", "low", 4096],
