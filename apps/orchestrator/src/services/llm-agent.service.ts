@@ -33,7 +33,7 @@
  */
 
 import type { PrivateEnhancement, ToolDomain } from "@droplet/tools-core";
-import { redactConfirmationTokensForModel } from "@droplet/tools-core";
+import { redactConfirmationTokensForModel, TOOL_CATALOG } from "@droplet/tools-core";
 
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
@@ -77,13 +77,19 @@ import {
 } from "./tool-selection.service.js";
 import { runtimeToolRegistry } from "./runtime-tool-registry.service.js";
 import { currentRuntimeToolLookup } from "./tool-layers.service.js";
-// WARP-2544 — output-side guard on tool use: does the finished answer match
-// what the tools actually did? Deterministic, no inference call.
+// WARP-3348 — output-side guard on tool use: does the finished answer say
+// something happened that did not? Replaces WARP-2544's advisory detector.
 import {
-  validateAnswerAgainstTrace,
-  describeToolUseVerdict,
-} from "./tool-use-validation.js";
-// WARP-3193 ARCH-10 — in types/ so tool-use-validation.ts needs nothing from here.
+  checkActionClaims,
+  claimCorrectionPrompt,
+  claimStatusLine,
+  deniedLine,
+  notRunWrites,
+  unconfirmedLine,
+  type ClaimCheckOptions,
+} from "./action-claims.js";
+import { parseNamespacedToolName } from "./mcp-multiplexer.service.js";
+// WARP-3193 ARCH-10 — in types/ so action-claims.ts needs nothing from here.
 import type { AgentTraceEntry } from "../types/agent-trace.js";
 import {
   assertToolAdvertisementFitsBudget,
@@ -576,6 +582,22 @@ export interface AgentRequest {
    */
   prior_tool_names?: string[];
   /**
+   * WARP-3348 — the tools the PREVIOUS turn of this conversation actually ran
+   * (ok, not a pending approval). The action-claim check lets a send or
+   * delete claim this turn did not retry ("Yes, I've sent it") stand on
+   * those; a state change ("I've unlocked the door") never gets that credit.
+   */
+  prior_ran_tool_names?: string[];
+  /**
+   * WARP-3348 — calls of the SAME piece of work that settled outside this
+   * loop call: a durable run's earlier segments and the call a person just
+   * approved or declined, which the run worker executes itself before
+   * resuming the loop (WARP-3044). The action-claim check reads them with
+   * this call's own trace, so "I've sent the report" after an approved send
+   * stands, and after a declined one does not. In-process only.
+   */
+  priorAttempts?: AgentTraceEntry[];
+  /**
    * WARP-1529 / ADR-032 §3 (RBAC v2 T5) — the caller's resolved per-role tool
    * reach. Applied TWICE, on purpose:
    *
@@ -651,9 +673,10 @@ export interface AgentCheckpointPort {
 /**
  * WARP-1479 — why a terminal turn produced no visible answer.
  *
- * Present ONLY when the turn ended with empty visible content. The blank
- * itself is surfaced to the customer by the route's empty-completion
- * rewrite; this attributes it to a LAYER so the fix work is aimed at
+ * Present ONLY when the model's terminal answer was blank. With no tool work
+ * the blank is surfaced by the route's empty-completion rewrite; after tool
+ * work the loop retries once, then substitutes a fallback reply (WARP-3285).
+ * This attributes the blank to a LAYER so the fix work is aimed at
  * evidence: the model returned nothing, it spent the turn in the reasoning
  * channel, or our own `sanitizeFinalContent` demoted what it did return.
  *
@@ -738,9 +761,14 @@ export interface AgentResult {
     | "error"
     | "context_budget"
     | "repetition"
-    | "no_progress";
+    | "no_progress"
+    | "needs_details";
   error?: string;
-  /** WARP-1479 — set only when the terminal turn produced no visible answer. */
+  /**
+   * WARP-1479 — set only when the model's terminal answer was blank. After
+   * real tool work `message.content` then carries the WARP-3285 fallback
+   * reply, so this is the only sign those words are not the model's.
+   */
   blankDiagnostics?: BlankAnswerDiagnostics;
   /**
    * WARP-1602 — set only when the visible answer trips an analysis-leak
@@ -748,6 +776,20 @@ export interface AgentResult {
    * operator/eval attribution channel.
    */
   pollutedDiagnostics?: PollutedAnswerDiagnostics;
+  /**
+   * WARP-3348 — set only when the action-claim check changed the answer.
+   * `correction`: "corrected" = the model's answer claimed an action that did
+   * not happen and the one no-tools check call fixed it; "status_line" = the
+   * check call did not, so the answer went out with a fixed status line;
+   * absent = no false claim, only a fixed line was added (an unclear outcome
+   * or a permission refusal). Neither of those costs a model call.
+   */
+  actionClaimCheck?: {
+    correction?: "corrected" | "status_line";
+    unbackedClaims: number;
+    unconfirmedClaims: number;
+    deniedWrites: number;
+  };
   /**
    * WARP-1602 — the turn's reasoning trace with its PER-STEP boundaries
    * intact, in arrival order: one entry per agent iteration that produced
@@ -1386,8 +1428,13 @@ async function consumeChatStream(
   // buffer, and the WARP-1442 sum invariant is what catches that.
   // `streamComplete: true` — the for-await drained to its end, so the whole
   // buffer is stable and `flush` may release it entire.
+  //
+  // WARP-3348 — a deferred TERMINAL turn is held here too: the loop checks
+  // the answer's action claims against the trace first and emits the checked
+  // text itself (`contentReleased: false` is what tells it to). Nothing is
+  // lost on the wire: a deferred turn put nothing there before this point.
   const { raw: rawContent, contentReleased } = content.settle(
-    isToolCallTurn,
+    isToolCallTurn || (opts.deferContent ?? false),
     true,
   );
 
@@ -1769,7 +1816,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // than a break because the user still deserves an answer synthesized from
   // the gathered results, which needs one more inference call.
   const contextWindow = req.context_window ?? DEFAULT_CONTEXT_WINDOW;
-  let finalizeReason: "context_budget" | "repetition" | "no_progress" | null = null;
+  let finalizeReason:
+    | "context_budget"
+    | "repetition"
+    | "no_progress"
+    | "needs_details"
+    | null = null;
+  // WARP-3285 — a blank answer after real tool work gets ONE more pass of the
+  // same kind (no tools, a nudge) before the loop falls back to saying what it
+  // checked. Separate from `finalizeReason` so the turn keeps its stop_reason.
+  let blankRetry = false;
   // WARP-3283 — no-progress early-stop. A model that keeps REPHRASING a
   // search that finds nothing makes distinct calls, so the repetition guard
   // above never fires and the turn used to run to maxIter and end on the
@@ -1791,6 +1847,26 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // key on (tool, entity) if that shows up.
   const MAX_EMPTY_SEARCHES = 3;
   const emptySearches = new Map<string, number>();
+  // A durable run (WARP-2177) cannot ask: nobody is watching it
+  // (AGENT_RUN_SYSTEM_PROMPT), so its wording must never end on a question.
+  const isRun = Boolean(req.toolCallContext?.agentRunId);
+  // WARP-3347 — the guard's second trigger. Searches that return IRRELEVANT
+  // hits never count as empty above, so an ambiguous request ("Send a message
+  // to the manager saying hello.") used to rephrase for 16 steps. Decision
+  // (Romain, 2026-09-29): once half the turn's steps are spent and its
+  // searching has found nothing it went on to use, stop and ask the person
+  // for the missing detail. `madeProgress` flips on the first call that ran
+  // and is not a looking call (see `isLookingCall`): an opened file, a record
+  // read by id, any write or confirmation, any other tool. Sticky: a turn that
+  // once got somewhere is never cut by this trigger. `searchesRun` counts
+  // looking calls that RAN: a search tool that keeps failing is an outage, and
+  // WARP-1012's "kept failing" reply is the honest answer to it.
+  //
+  // Chat only: a run is never cut (`isRun`), and its resume restarts these
+  // counters on every yield, approval and crash while its decided write
+  // never counts.
+  let madeProgress = false;
+  let searchesRun = 0;
   // WARP-1479 — the provider's verdict for the most recent BLOCKING
   // response, folded into the blank-answer diagnostics when the terminal
   // turn produces no visible output. Set fresh on every blocking response
@@ -2042,7 +2118,13 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       const malformedText = malformedToolOutputText(payload);
       if (malformedText !== null) text = malformedText;
       const ran = !isError && malformedText === null && !isConfirmationEnvelope(text);
-      trace.push({ tool_call_id: callId, tool: grant.tool, args: grant.args, result: parsed });
+      trace.push({
+        tool_call_id: callId,
+        tool: grant.tool,
+        args: grant.args,
+        result: parsed,
+        ...(isError || malformedText !== null ? { isError: true as const } : {}),
+      });
       emit({ type: "tool_result", id: callId, ok: ran, data: parsed });
       logger.info(
         { tool: grant.tool, challengeId: grant.challengeId, turn_id: turnId, ok: ran },
@@ -2065,6 +2147,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         );
       } else {
         replayedTools.add(grant.tool);
+        madeProgress = true;
       }
       messages.push(
         {
@@ -2116,7 +2199,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     // `messages` is a valid conversation here (see AgentCheckpointPort).
     // Awaited: a checkpoint that failed to persist must fail the run, not
     // let it continue un-resumable.
-    if (req.checkpoint) await req.checkpoint.onIteration(iter, messages);
+    //
+    // WARP-3285 — not on the blank-retry pass: `messages` would then carry the
+    // finalize nudge, and a requeued run would resume with that nudge read as
+    // the person's request (tool selection keys on the last user message).
+    // Resuming from the previous checkpoint just redoes the finalize pass.
+    if (req.checkpoint && !blankRetry) await req.checkpoint.onIteration(iter, messages);
 
     // Spec §2 — token-aware iteration guard. chars/4 rounded up, matching
     // context-budget.service.ts; JSON.stringify over-counts (keys, escapes,
@@ -2158,20 +2246,50 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         );
       }
     }
-    if (finalizeReason !== null) {
+    // WARP-3347 — half the steps gone on searching that found nothing usable
+    // (see `madeProgress`). Never before step 4, and only after as many
+    // searches that ran as the empties guard needs: a 4-step voice turn
+    // (search_contacts, search_files, then email_send) must keep its action
+    // step, and steps burnt on hallucinated tool names are not searching.
+    if (
+      !isRun &&
+      finalizeReason === null &&
+      searchesRun >= MAX_EMPTY_SEARCHES &&
+      !madeProgress &&
+      iter >= Math.max(4, Math.ceil(maxIter / 2))
+    ) {
+      finalizeReason = "needs_details";
+      logger.info(
+        { turn_id: turnId, iter, max_iter: maxIter, tool_calls: trace.length },
+        "agent_needs_details_finalize",
+      );
+    }
+    const finalizing = finalizeReason !== null || blankRetry;
+    if (finalizing) {
       messages.push({
-        role: "system",
-        content:
-          finalizeReason === "repetition"
-            ? "You are repeating tool calls — answer the user now from the information already gathered. Do not call any more tools."
+        // WARP-3285 — "user", not "system": gpt-oss's chat template turns only
+        // messages[0] into the developer block and silently DROPS every later
+        // system message, so this nudge never reached the model and 11 of 12
+        // finalize passes in the eval came back blank. Worded as the
+        // person's own request, since that is how the model reads it.
+        role: "user",
+        content: blankRetry
+          ? isRun
+            ? "Please give your answer now with what you already have; if you couldn't complete the task, say exactly what you looked for and what blocked you. Don't call any more tools."
+            : "You haven't replied yet. Please answer my request now in plain text, using what the tools above returned. If you didn't find what I asked for, say what you checked and ask me what I meant. Don't call any more tools."
+          : finalizeReason === "repetition"
+            ? "You're repeating the same tool calls. Please answer my question now with what you already have. Don't call any more tools."
             : finalizeReason === "no_progress"
-              ? "Your last searches found nothing — stop searching. Answer the user now: say what you looked for and that nothing matching was found, plus anything useful already gathered. Do not call any more tools."
-              : "Context budget reached — answer the user now from the information already gathered. Do not call any more tools.",
+              ? isRun
+                ? "Your last searches found nothing. Stop searching and report exactly what you looked for and what blocked you. Don't call any more tools."
+                : "Your last searches found nothing, so stop searching. If the results above already answer my request, please answer it. Otherwise tell me what you looked for and that you couldn't find it, then ask me for the specific detail you need to continue (for example which person, file, record or ticket I mean). Don't call any more tools."
+              : finalizeReason === "needs_details"
+                ? "You've spent half of this turn's steps searching without finding what my request needs, so stop searching. If the results above already answer my request, please answer it. Otherwise tell me in one sentence what you checked, then ask me for the specific detail you need to continue (for example which person, file, record or ticket I mean). Don't call any more tools."
+                : "That's all the room there is for more lookups. Please answer my question now with what you already have. Don't call any more tools.",
       });
     }
-    const iterTools = finalizeReason !== null ? [] : tools;
-    const iterToolChoice: "auto" | "none" =
-      finalizeReason !== null ? "none" : toolChoice;
+    const iterTools = finalizing ? [] : tools;
+    const iterToolChoice: "auto" | "none" = finalizing ? "none" : toolChoice;
 
     // The outbound request shared by both transports. `stream` is set per
     // path; every other field (incl. WARP-849 max_tokens + WARP-1442a
@@ -2232,11 +2350,13 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
             captureReasoning: req.captureReasoning ?? false,
             signal: req.signal,
             // WARP-1602 — this iteration advertised tools, so it may still
-            // resolve to `tool_calls`; hold its content until we know. An
-            // iteration with ZERO tools (the finalize pass, tool_choice
-            // "none", or a caller with an empty pool) cannot, so it keeps
-            // streaming token-by-token exactly as WARP-1442 shipped it.
-            deferContent: iterTools.length > 0,
+            // resolve to `tool_calls`; hold its content until we know. A turn
+            // with ZERO tools (tool_choice "none", or a caller with an empty
+            // pool) cannot, so it keeps streaming token-by-token exactly as
+            // WARP-1442 shipped it. WARP-3348 — a tool turn's finalize pass is
+            // held too: its answer is checked against the trace before it
+            // goes out, like any other answer of a tool turn.
+            deferContent: tools.length > 0,
           },
         );
         asst = streamed.asst;
@@ -2314,8 +2434,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
 
     // Spec §2 — the finalize pass advertised zero tools; a model that still
     // emits tool_calls gets no second chance. Strip them so this turn takes
-    // the terminal path (empty content lands in WARP-854's FAILED-turn path).
-    if (finalizeReason !== null && asst.tool_calls?.length) {
+    // the terminal path (empty content lands in the WARP-3285 blank guard).
+    if (finalizing && asst.tool_calls?.length) {
       delete asst.tool_calls;
     }
 
@@ -2342,11 +2462,24 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         for (const step of reasoning.reasoningSteps) {
           emit({ type: "reasoning_step", text: step });
         }
+      } else if (req.captureReasoning && !streamContentReleased) {
+        // WARP-3348 — a HELD streamed turn never went through the emitter's
+        // flush, which is what emits inline `<reasoning>` steps (qwen3 /
+        // deepseek). Emit them here, still before the content. The provider
+        // channel's step was already emitted by the stream consumer, so only
+        // the inline ones are parsed.
+        const inline = parseReasoningTrace({
+          content: typeof asst.content === "string" ? asst.content : null,
+        });
+        for (const step of inline.reasoningSteps) {
+          emit({ type: "reasoning_step", text: step });
+        }
       }
       // WARP-1331 — finalisation guard: strip citation cruft; demote a
-      // bare tool-args JSON "answer" to empty. Empty completions get NO
-      // content_delta — WARP-854's error path (done error frame / FAILED
-      // turn) is the owner of that case.
+      // bare tool-args JSON "answer" to empty. An empty completion with NO
+      // tool work gets no content_delta — WARP-854's error path (done error
+      // frame / FAILED turn) owns that case; after tool work, see WARP-3285
+      // below.
       const visible = sanitizeFinalContent(reasoning.cleanedContent);
       // WARP-1479 — a blank answer is a failed turn (the route rewrites it as
       // one); attribute WHY here, while the raw completion is still in hand.
@@ -2361,6 +2494,44 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
             finishReason: lastFinishReason,
             usage: lastUsage,
           });
+      // WARP-3285 — a blank after real tool work must never reach the user as
+      // an error bubble. In the eval every one was the model ending in its
+      // reasoning channel (cause "reasoning_only"), mostly on a finalize pass.
+      // Retry once with no tools and an explicit ask; if that is blank too, or
+      // no iteration is left, say what the tools did. A blank with NO tool
+      // work, or one the provider ended with finish_reason "length" (the
+      // mid-turn overflow signature), stays on WARP-854's error path: that
+      // is a context overflow, which a retry would only repeat.
+      let answer = visible;
+      let isFallback = false;
+      if (blankDiagnostics && trace.length > 0 && blankDiagnostics.finishReason !== "length") {
+        if (!blankRetry && iter + 1 < maxIter) {
+          blankRetry = true;
+          // Already on the wire as reasoning_step; keep it in the trace too.
+          if (reasoning.fullReasoning != null) reasoningSteps.push(reasoning.fullReasoning);
+          logger.warn(
+            {
+              turn_id: turnId,
+              iter,
+              cause: blankDiagnostics.cause,
+              provider_reasoning_chars: blankDiagnostics.providerReasoningChars,
+              tool_calls: trace.length,
+              ...(finalizeReason ? { finalize_reason: finalizeReason } : {}),
+            },
+            "agent_blank_answer_retry",
+          );
+          continue;
+        }
+        answer = blankAnswerFallback(
+          trace,
+          advertisedNames,
+          (tool) => catalogEntry(tool)?.write ?? runtimeLookup(tool)?.requiresWrite === true,
+          isRun,
+          // WARP-3347 — a search guard already judged these hits unusable.
+          finalizeReason === "needs_details" || finalizeReason === "no_progress",
+        );
+        isFallback = true;
+      }
       // WARP-1602 — the inverse guard to WARP-1479's. A turn that answers
       // WITH its chain-of-thought must be attributable in eval runs instead of
       // scoring as healthy just because the bubble wasn't empty.
@@ -2374,71 +2545,29 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // WARP-1602 — `streamContentReleased`, not `streamedTurn`: a streamed
       // turn whose content was QUARANTINED never reached the wire, so the
       // answer would silently vanish if the flag were merely "was streamed".
-      if (visible && !(streamedTurn && streamContentReleased)) {
-        emit({ type: "content_delta", text: visible });
+      const onWire = streamedTurn && streamContentReleased ? visible : "";
+      // WARP-3348 — before the answer goes out, check what it says happened
+      // against what the trace says ran. Only an answer still held back can
+      // be corrected; on a tool turn that is every answer (deferContent).
+      // This replaced WARP-2544's advisory check at this point, which only
+      // logged the same question after the answer had already gone out.
+      let actionClaimCheck: AgentResult["actionClaimCheck"];
+      if (answer && !onWire && tools.length > 0) {
+        ({ answer, check: actionClaimCheck } = await settleActionClaims({
+          deps,
+          req,
+          messages,
+          answer,
+          isFallback,
+          isRun,
+          trace,
+          turnId,
+          // The same write predicate as the WARP-3285 fallback.
+          isWrite: (tool) => catalogEntry(tool)?.write ?? runtimeLookup(tool)?.requiresWrite === true,
+        }));
       }
-      // WARP-2544 — the ONE point where the finished answer and the tool trace
-      // are both in hand, on BOTH transports. Everything above this line
-      // guards the INPUT side of tool use (WARP-1529 RBAC, WARP-642
-      // hallucinated names, WARP-1480 error logging); nothing had ever
-      // compared the ANSWER against what the tools actually did, so a model
-      // could say "I've turned the camera off" on a turn that dispatched
-      // nothing, or over a dispatch that returned status:"error", and the
-      // sentence reached the user unchallenged. These tools are physical, so
-      // that is a safety failure rather than a cosmetic one.
-      //
-      // Deterministic and local: no inference call, no network, no tokens —
-      // it adds no latency to the happy path, which matters on a box whose
-      // whole problem was latency (WARP-2543).
-      //
-      // ⚠ ADVISORY BY CONSTRUCTION. On the streaming path `visible` already
-      // left as content_delta frames — above, or incrementally during the
-      // stream — so there is nothing here to retract. A corrective re-prompt
-      // needs a hold-back buffer that would defeat streaming; that trade is a
-      // separate decision, and pretending otherwise would mean emitting a
-      // second answer contradicting one the user has already read.
-      const toolUse = validateAnswerAgainstTrace({
-        answer: visible,
-        trace,
-        // ⚠ A WEAK gate, and deliberately no longer load-bearing. The comment
-        // that used to sit here claimed a conversational turn runs with
-        // `tool_choice:"none"` and therefore advertises nothing. That is false
-        // for the surface that matters: the dashboard never sends
-        // `tool_choice`, so it defaults to "auto" and tools ARE advertised on
-        // every chat turn. `"none"` is produced only by voice-io's greeting
-        // path and email-analysis. Relying on this to suppress false positives
-        // meant ordinary sentences ("I've listed the options below") were
-        // claim-checked. The real protection is the narrowed, state-change-only
-        // verb list in tool-use-validation.ts; this only skips the genuinely
-        // tool-less turns.
-        toolsAdvertised: advertisedNames.size > 0,
-      });
-      if (toolUse.status !== "ok") {
-        logger.warn(
-          {
-            turnId,
-            iterations: iter + 1,
-            status: toolUse.status,
-            tools: toolUse.tools,
-            counts: toolUse.counts,
-            // 🔴 claimCount, not the claim TEXT. The excerpts are the model's
-            // own prose about whatever the user asked and whatever the tools
-            // returned — file contents, message bodies, device names. The
-            // logger is bare pino to stdout with no redact paths and its
-            // output is collected into the diagnostics bundle, so logging the
-            // sentences ships user content off the box. The client that is
-            // entitled to them still gets them on the SSE frame below.
-            claimCount: toolUse.claims.length,
-            threadId: req.citationContext?.threadId,
-          },
-          `agent_tool_use_unverified: ${describeToolUseVerdict(toolUse)}`,
-        );
-        emit({
-          type: "tool_use_validation",
-          status: toolUse.status,
-          claims: toolUse.claims,
-          tools: toolUse.tools,
-        });
+      if (answer.length > onWire.length) {
+        emit({ type: "content_delta", text: answer.slice(onWire.length) });
       }
       emit({
         type: "done",
@@ -2471,7 +2600,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           : null;
       const finalMessage: ChatMessage = {
         ...asstClean,
-        content: visible,
+        content: answer,
         ...(fullReasoning != null ? { reasoning: fullReasoning } : {}),
       };
       return {
@@ -2484,6 +2613,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           : {}),
         ...(blankDiagnostics ? { blankDiagnostics } : {}),
         ...(pollutedDiagnostics ? { pollutedDiagnostics } : {}),
+        ...(actionClaimCheck ? { actionClaimCheck } : {}),
       };
     }
 
@@ -3006,7 +3136,14 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           isError: Boolean(result.isError),
         });
       }
-      trace.push({ tool_call_id: call.id, tool: call.function.name, args, result: parsed });
+      trace.push({
+        tool_call_id: call.id,
+        tool: call.function.name,
+        args,
+        result: parsed,
+        // WARP-3348 — a remote tool's plain-text failure parses as {raw}.
+        ...(result.isError ? { isError: true as const } : {}),
+      });
 
       // WARP-3283 — feed the no-progress guard (see its declaration).
       if (
@@ -3022,6 +3159,12 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
             "agent_no_progress_finalize",
           );
         }
+      }
+      // WARP-3347 — a confirmation_required envelope is not `isError`, so a
+      // write parked on approval counts as progress too.
+      if (!result.isError) {
+        if (isLookingCall(call.function.name, args)) searchesRun++;
+        else madeProgress = true;
       }
 
       // WARP-1480 — the ONE point that sees every tool failure, on BOTH the
@@ -3294,57 +3437,20 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // plain language. stop_reason stays "iteration_limit" so operators and
   // the trace keep the real signal; only the visible content changes.
   const failedTools = [
-    ...new Set(
-      trace
-        .filter((t) => {
-          const r = t.result as
-            | { status?: unknown; ok?: unknown; error?: unknown }
-            | null
-            | undefined;
-          if (r === null || typeof r !== "object") return false;
-          // Spec §4 — a REPEATED_CALL nudge means the call was never
-          // re-dispatched this turn; it must not read as "the tool kept
-          // failing" (a failed dispatch before it is its own trace entry).
-          if (
-            typeof r.error === "object" &&
-            r.error !== null &&
-            (r.error as { code?: unknown }).code === "REPEATED_CALL"
-          ) {
-            return false;
-          }
-          // Spec §3 — a TOOL_NOW_AVAILABLE heal means selection filtered the
-          // tool out; it was never actually dispatched, so it must not read
-          // as "the tool kept failing" either.
-          if (
-            typeof r.error === "object" &&
-            r.error !== null &&
-            (r.error as { code?: unknown }).code === "TOOL_NOW_AVAILABLE"
-          ) {
-            return false;
-          }
-          // Handler envelopes report status:"error" / ok:false; the
-          // dispatch-throw path (ORCH-05) reports a string `error`.
-          // confirmation_required is a UX pause, not a failure.
-          return (
-            r.status === "error" ||
-            r.ok === false ||
-            typeof r.error === "string"
-          );
-        })
-        .map((t) => t.tool),
-    ),
+    ...new Set(trace.filter((t) => isFailedToolResult(t.result)).map((t) => t.tool)),
   ];
   // WARP-1331 — trace tool names are model-controlled: the model invents
   // garbled names ("memory_repay??", "search_content?") that the guard
   // records as failures, and interpolating them verbatim put nonsense tools
   // in customer-facing copy. Only registry-advertised names may be named;
-  // failures on invented tools get the generic phrasing.
-  const knownFailedTools = failedTools.filter((n) => advertisedNames.has(n));
+  // failures on invented tools get the generic phrasing. WARP-3285 — and by
+  // their catalog label, never the raw id (voice reads this copy aloud).
+  const failedLabels = toolLabels(failedTools, advertisedNames);
   const fallbackText =
-    knownFailedTools.length > 0
-      ? `I ran into a problem while working on that — the ${knownFailedTools.join(
-          ", ",
-        )} tool${knownFailedTools.length > 1 ? "s" : ""} kept failing, so I couldn't finish your request. Please try again in a moment.`
+    failedLabels.length > 0
+      ? `I ran into a problem while working on that, so I couldn't finish your request. ${
+          failedLabels.length > 1 ? "These steps" : "This step"
+        } kept failing: ${failedLabels.join("; ")}. Please try again in a moment.`
       : failedTools.length > 0
         ? "I ran into a problem while working on that — one of my tools kept failing, so I couldn't finish your request. Please try again in a moment."
         : "I couldn't finish working through that request within my step limit. Please try again, or ask for a smaller piece of it.";
@@ -3405,6 +3511,267 @@ function isBareJson(s: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * WARP-1012 — did this trace entry's call fail? Shared by the iteration-limit
+ * and the WARP-3285 blank-answer fallbacks so they agree on "failed".
+ */
+function isFailedToolResult(result: unknown): boolean {
+  if (result === null || typeof result !== "object") return false;
+  const r = result as { status?: unknown; ok?: unknown; error?: unknown };
+  const code =
+    typeof r.error === "object" && r.error !== null
+      ? (r.error as { code?: unknown }).code
+      : undefined;
+  // Spec §4 — a REPEATED_CALL nudge means the call was never re-dispatched
+  // this turn (a failed dispatch before it is its own trace entry). Spec §3 — a
+  // TOOL_NOW_AVAILABLE heal means selection filtered the tool out, so it was
+  // never dispatched either. Neither may read as "the tool kept failing".
+  if (code === "REPEATED_CALL" || code === "TOOL_NOW_AVAILABLE") return false;
+  // Handler envelopes report status:"error" / ok:false; the dispatch-throw
+  // path (ORCH-05) reports a string `error`. confirmation_required is a UX
+  // pause, not a failure.
+  return r.status === "error" || r.ok === false || typeof r.error === "string";
+}
+
+const isPendingApproval = (result: unknown): boolean =>
+  (result as { status?: unknown } | null)?.status === "confirmation_required";
+
+let catalogByName: Map<string, { label: string; write: boolean }> | undefined;
+/** WARP-3285 — a compiled tool's catalog facts; undefined for runtime tools
+ *  and invented names. Built on first use, not at import. */
+function catalogEntry(name: string): { label: string; write: boolean } | undefined {
+  catalogByName ??= new Map(
+    TOOL_CATALOG.map((t) => [
+      t.name,
+      {
+        // The home copy up to its first clause: "Add an event to your calendar".
+        label: t.homeDescription.split(/\. | — | \(/)[0]!.trim().replace(/\.$/, ""),
+        write: t.requiresWrite,
+      },
+    ]),
+  );
+  return catalogByName.get(name);
+}
+
+/**
+ * WARP-3285 — plain-language names for tools in customer-facing copy (voice
+ * reads it aloud, so never a raw id). Only advertised, catalogued tools are
+ * named (WARP-1331); runtime and invented names are left out.
+ */
+function toolLabels(names: Iterable<string>, advertised: ReadonlySet<string>): string[] {
+  const labels = [...names]
+    .filter((n) => advertised.has(n))
+    .map((n) => catalogEntry(n)?.label)
+    .filter((l): l is string => Boolean(l));
+  return [...new Set(labels)];
+}
+
+/**
+ * WARP-3285 — the reply for a turn whose answer stayed blank after real tool
+ * work, even after the one retry. Deterministic, and it states the OUTCOME,
+ * because the person acts on it: a write that ran is reported as done (asking
+ * them to rephrase would invite a duplicate send), a pending approval as
+ * pending, a failure as a failure (rephrasing won't fix an outage). Only when
+ * the reads found nothing does it ask for more detail (in chat; a durable run
+ * says it couldn't finish, since nobody can answer) — in the eval those
+ * were searches that came up empty or ambiguous asks ("Send them the
+ * update."), where a clarifying question is the right answer.
+ */
+function blankAnswerFallback(
+  trace: AgentTraceEntry[],
+  advertised: ReadonlySet<string>,
+  isWrite: (tool: string) => boolean,
+  /** A durable run: nobody can answer a question, so none is asked. */
+  inRun: boolean,
+  // WARP-3347 — set when a search guard (WARP-3283 empties, the half-budget
+  // cut) ended the search: its hits are not "some information", so the reply
+  // takes the found-nothing branch (a question in chat, none on a run).
+  hitsUnusable: boolean,
+): string {
+  const done = new Set<string>();
+  const pending = new Set<string>();
+  const failed = new Set<string>();
+  let foundSomething = false;
+  for (const t of trace) {
+    if (isFailedToolResult(t.result)) failed.add(t.tool);
+    else if (isPendingApproval(t.result)) pending.add(t.tool);
+    else if (isWrite(t.tool)) done.add(t.tool);
+    else if (!isZeroHitSearchResult(t.tool, t.args, t.result)) foundSomething = true;
+  }
+  const parts: string[] = [];
+  if (done.size > 0) {
+    const labels = toolLabels(done, advertised);
+    parts.push(labels.length > 0 ? `Done: ${labels.join("; ")}.` : "Done, that went through.");
+  }
+  if (pending.size > 0) {
+    const labels = toolLabels(pending, advertised);
+    parts.push(
+      labels.length > 0
+        ? `Waiting for your approval: ${labels.join("; ")}.`
+        : "That needs your approval before I go ahead.",
+    );
+  }
+  if (failed.size > 0) {
+    const labels = toolLabels(failed, advertised);
+    parts.push(
+      labels.length > 0
+        ? `${labels.length > 1 ? "These steps" : "This step"} didn't work: ${labels.join("; ")}. Please try again in a moment.`
+        : "One of the steps didn't work. Please try again in a moment.",
+    );
+  }
+  if (parts.length > 0) return parts.join(" ");
+  return foundSomething && !hitsUnusable
+    ? "I found some information but couldn't put together an answer from it. Please ask again, or ask for one part at a time."
+    : inRun
+      ? "I looked but didn't find anything matching, so I couldn't finish the task."
+      : "I looked but didn't find anything matching. Could you tell me a bit more about what you're looking for?";
+}
+
+/**
+ * WARP-3348 — Romain's decisions of 2026-09-29, on the one path every
+ * terminal answer of a tool turn takes (chat streaming and blocking, runs,
+ * ToolSpecs):
+ *
+ *   A. "send a check to validate": an answer that says an action happened
+ *      which the trace says did not (never attempted, waiting for approval,
+ *      declined, refused, failed) gets ONE no-tools call that states the facts
+ *      and asks for a corrected answer. The correction is checked again; if it
+ *      still claims what did not happen, or comes back blank, or the call
+ *      fails, the model is not trusted twice: the original answer goes out
+ *      with a status line built from the trace alone. A claim resting on an
+ *      unclear outcome (a timeout) gets a fixed line and no call: the model
+ *      cannot know either.
+ *   B. "if permission is denied the user should know": a write refused for
+ *      permission that the final text never mentions gets a plain line.
+ *
+ * A truthful answer costs nothing: the check is string work, and the call
+ * happens only on a detected mismatch. WARP-3285's fallback reply is built
+ * from the trace, so it is not claim-checked; it still gets the line for B.
+ * Deterministic on purpose, and never the Kev decision model: this sits on
+ * the write path's reporting, and Kev stays off it.
+ */
+async function settleActionClaims(p: {
+  deps: AgentDeps;
+  req: AgentRequest;
+  messages: ChatMessage[];
+  answer: string;
+  isFallback: boolean;
+  isRun: boolean;
+  trace: AgentTraceEntry[];
+  turnId: string;
+  isWrite: (tool: string) => boolean;
+}): Promise<{ answer: string; check?: AgentResult["actionClaimCheck"] }> {
+  const { deps, req } = p;
+  // A durable run's earlier segments and its decided call are the same work.
+  const trace = [...(req.priorAttempts ?? []), ...p.trace];
+  const opts: ClaimCheckOptions = { isWrite: p.isWrite, priorRanTools: req.prior_ran_tool_names };
+  const first = p.isFallback ? undefined : checkActionClaims(p.answer, trace, opts);
+  let answer = p.answer;
+  let correction: "corrected" | "status_line" | undefined;
+  if (first && first.unbacked.length > 0) {
+    let corrected = "";
+    try {
+      const gw = await deps.aiGateway.chat(
+        {
+          model: req.model,
+          // WARP-3285 — a `user` turn: gpt-oss drops later system messages.
+          messages: [
+            ...p.messages,
+            { role: "assistant", content: p.answer },
+            { role: "user", content: claimCorrectionPrompt(first, p.isRun) },
+          ],
+          stream: false,
+          temperature: req.temperature,
+          max_tokens: req.max_tokens,
+          reasoning_effort: req.reasoning_effort,
+          tools: [],
+          tool_choice: "none",
+        },
+        req.signal,
+      );
+      if (gw.ok) {
+        const msg = (await gw.json()).choices?.[0]?.message;
+        corrected = sanitizeFinalContent(
+          parseReasoningTrace({ content: typeof msg?.content === "string" ? msg.content : null })
+            .cleanedContent,
+        );
+      }
+    } catch (err) {
+      // WARP-3306 — chat took the slot back: a run requeues and redoes this
+      // iteration from its checkpoint, so let it.
+      if (isGatewayPreempted(err)) {
+        logger.warn({ turn_id: p.turnId }, "agent_action_claims_check_preempted");
+        throw err;
+      }
+      // Anything else falls to the status line: the one thing this path must
+      // not do is emit the unchecked claim bare.
+      logger.warn(
+        { turn_id: p.turnId, error: err instanceof Error ? err.name : "unknown" },
+        "agent_action_claims_check_failed",
+      );
+    }
+    if (corrected && checkActionClaims(corrected, trace, opts).unbacked.length === 0) {
+      answer = corrected;
+      correction = "corrected";
+    } else {
+      answer = `${p.answer}\n\n${claimStatusLine(first, claimLabel)}`;
+      correction = "status_line";
+      // The false claim is still in the text that goes out; say so on the
+      // wire too (the WARP-2544 frame, for clients that render it): which
+      // claimed writes were attempted and did not run, if any were.
+      const notRun = notRunWrites(first);
+      deps.onEvent?.({
+        type: "tool_use_validation",
+        status: notRun.length > 0 ? "contradicted" : "unsupported",
+        claims: [...new Set(first.unbacked.map((c) => c.sentence))].map((s) =>
+          s.length > 160 ? `${s.slice(0, 157)}…` : s,
+        ),
+        tools: [...new Set(notRun.map((a) => a.tool))],
+      });
+    }
+  }
+  // Fixed lines, no model call, over the text that will actually go out.
+  const last = checkActionClaims(answer, trace, opts);
+  const extra = [
+    p.isFallback ? "" : unconfirmedLine(last, claimLabel),
+    [...new Set(last.unstatedDenials.map((d) => deniedLine(d, claimLabel)))].join(" "),
+  ].filter(Boolean);
+  if (extra.length > 0) answer += `\n\n${extra.join(" ")}`;
+  if (!correction && extra.length === 0) return { answer };
+  const check = {
+    ...(correction ? { correction } : {}),
+    unbackedClaims: first?.unbacked.length ?? 0,
+    unconfirmedClaims: p.isFallback ? 0 : last.unconfirmed.length,
+    deniedWrites: last.unstatedDenials.length,
+  };
+  // Counts and families only — the claim sentences are the model's prose.
+  logger.warn(
+    {
+      turn_id: p.turnId,
+      ...check,
+      claim_families: [...new Set(first?.unbacked.map((c) => c.family) ?? [])],
+      writes: last.attempts.map((a) => `${a.tool}:${a.outcome}`),
+      ...(req.toolCallContext?.agentRunId ? { agent_run_id: req.toolCallContext.agentRunId } : {}),
+    },
+    "agent_action_claims_checked",
+  );
+  return { answer, check };
+}
+
+/**
+ * WARP-3348 — a tool's words for a status line: its catalog label (WARP-3285),
+ * or for a registered remote tool its server and name. Tool names in the trace
+ * that are neither were refused before dispatch and never reach here.
+ */
+function claimLabel(tool: string): string | undefined {
+  const label = catalogEntry(tool)?.label;
+  if (label) return label;
+  const remote = parseNamespacedToolName(tool);
+  if (!remote) return undefined;
+  const name = remote.wireName.replace(/[_-]+/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+  return `Use the ${remote.serverId} tool "${name}"`;
 }
 
 /**
@@ -3654,7 +4021,7 @@ function isZeroHitSearchResult(
   if (tool === "business_find") {
     // With `id` it is a record read (the handler's own test: a non-blank
     // string). `pipeline` without id is a roll-up, never carries `total`.
-    if (typeof args.id === "string" && args.id.trim() !== "") return false;
+    if (isNonBlank(args.id)) return false;
     // Every list branch carries `total` except work_item's search.
     if (typeof p.total === "number") return p.total === 0;
     return Array.isArray(p.work_items) && p.work_items.length === 0;
@@ -3662,6 +4029,30 @@ function isZeroHitSearchResult(
   const key = SEARCH_TOOLS.get(tool);
   const hits = key === undefined ? undefined : p[key];
   return Array.isArray(hits) && hits.length === 0;
+}
+
+function isNonBlank(v: unknown): boolean {
+  return typeof v === "string" && v.trim() !== "";
+}
+
+/**
+ * WARP-3347 — a call that only LOOKS for something: its hits are candidates,
+ * not yet an answer. The WARP-3283 searches, the listings, the memory recall,
+ * and business_find by query or as a bare list. business_find by `id` or
+ * `parent_id` reads a known record, usually one an earlier result named.
+ *
+ * By name, not from the catalog: the catalog tells reads from writes, not
+ * searches from reads. A tool missing here counts as progress, so an
+ * omission makes the half-budget trigger fire less often, never more.
+ */
+function isLookingCall(tool: string, args: Record<string, unknown>): boolean {
+  if (tool === "business_find") return !isNonBlank(args.id) && !isNonBlank(args.parent_id);
+  return (
+    SEARCH_TOOLS.has(tool) ||
+    tool === "list_files" ||
+    tool === "list_recent_files" ||
+    tool === "memory_recall"
+  );
 }
 
 /**

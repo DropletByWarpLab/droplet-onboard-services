@@ -84,12 +84,19 @@ const REQ = {
   messages: [{ role: "user" as const, content: "how much did I spend?" }],
 };
 
+/** WARP-3285 — the reply once a blank after tool work is still blank on the
+ *  retry. The search found a file, so it is the "found something" wording. */
+const FALLBACK =
+  "I found some information but couldn't put together an answer from it. Please ask again, or ask for one part at a time.";
+
 describe("runAgent — blank-answer diagnostics (WARP-1479)", () => {
   it("attributes an empty completion after successful tool work", async () => {
     const result = await runAgent(depsAnsweringWith(""), REQ);
 
     expect(result.stop_reason).toBe("model_done");
-    expect(result.message.content).toBe("");
+    // WARP-3285 — after tool work the blank (retried once, blank again) is
+    // replaced by the fallback reply; the diagnostics still attribute it.
+    expect(result.message.content).toBe(FALLBACK);
     expect(result.blankDiagnostics).toMatchObject({
       cause: "model_returned_nothing",
       rawContentChars: 0,
@@ -123,7 +130,7 @@ describe("runAgent — blank-answer diagnostics (WARP-1479)", () => {
       REQ,
     );
 
-    expect(result.message.content).toBe("");
+    expect(result.message.content).toBe(FALLBACK);
     expect(result.blankDiagnostics).toMatchObject({
       cause: "sanitizer_demoted_json",
     });
@@ -133,7 +140,7 @@ describe("runAgent — blank-answer diagnostics (WARP-1479)", () => {
   it("attributes a citation-token-only answer to the sanitizer's strip pass", async () => {
     const result = await runAgent(depsAnsweringWith("【3†source=a.csv】"), REQ);
 
-    expect(result.message.content).toBe("");
+    expect(result.message.content).toBe(FALLBACK);
     expect(result.blankDiagnostics).toMatchObject({
       cause: "sanitizer_stripped_all",
     });

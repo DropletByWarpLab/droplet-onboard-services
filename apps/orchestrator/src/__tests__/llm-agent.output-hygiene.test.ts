@@ -129,12 +129,14 @@ describe("runAgent — failure-copy tool names (WARP-1331)", () => {
     expect(asText(result.message.content)).toMatch(/tool/i);
   });
 
-  it("still names a real registry tool that kept failing", async () => {
+  it("still names a real registry tool that kept failing — by its plain label (WARP-3285)", async () => {
     const chat = vi.fn().mockResolvedValue(toolCall("search_content"));
     const callTool = vi.fn().mockRejectedValue(new Error("boom"));
     const { deps } = makeDeps(chat, callTool);
     const result = await runAgent(deps, { ...REQ, max_iter: 2 });
     expect(result.stop_reason).toBe("iteration_limit");
-    expect(asText(result.message.content)).toContain("search_content");
+    // Voice reads this aloud: the catalog label, never the raw id.
+    expect(asText(result.message.content)).toContain("Search inside your files for what you need");
+    expect(asText(result.message.content)).not.toContain("search_content");
   });
 });
