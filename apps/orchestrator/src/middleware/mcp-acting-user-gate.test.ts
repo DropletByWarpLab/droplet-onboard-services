@@ -280,6 +280,61 @@ describe("mcp acting-user gate — the feature check mirrors the browser's", () 
   });
 });
 
+// WARP-3365 / WARP-3369 (Romain, 2026-09-30) — an external guest gets nothing
+// of the company's customers or work, and asking the assistant is not a way
+// round it. A role-less guest has a null tool scope (question 1 passes) and
+// `projects` is not feature-gated (question 2 is not asked), so the acting
+// person's TIER is the check that refuses them, off the same catalog fact as
+// the browser's `requireModuleTierFloor`.
+describe("mcp acting-user gate — the tier floor (WARP-3365, WARP-3369)", () => {
+  const acting = (tier: string, s: ToolAccessScope | null = null): ActingUserAccess => ({
+    scope: s,
+    tier,
+    unresolved: null,
+    userId: "u-sam",
+  });
+
+  it("an external guest with no custom role is 404 module_disabled on CRM and on PM, whatever the resolver says they hold", async () => {
+    resolveMock.mockResolvedValue(acting("guest"));
+    heldFeatures = ["crm", "projects"];
+    const app = appAs(MCP);
+    for (const [path, module] of [
+      ["/api/crm/companies", "crm"],
+      ["/api/pm/work-items", "projects"],
+      ["/api/mobile/pm/projects", "projects"],
+    ] as const) {
+      const read = await request(app).get(path).set("X-Nextcloud-User", "sam");
+      expect(read.status, `GET ${path}`).toBe(404);
+      expect(read.body, `GET ${path}`).toEqual({ error: "module_disabled", module });
+      const write = await request(app).post(path).set("X-Nextcloud-User", "sam");
+      expect(write.status, `POST ${path}`).toBe(404);
+    }
+  });
+
+  it("a guest whose role grants the business tool domain is refused all the same", async () => {
+    resolveMock.mockResolvedValue(acting("guest", scope(["business"], [])));
+    heldFeatures = ["crm", "projects"];
+    expect((await request(appAs(MCP)).get("/api/pm/work-items").set("X-Nextcloud-User", "sam")).status).toBe(404);
+  });
+
+  it("a member, an admin and an owner are not refused by the floor", async () => {
+    heldFeatures = ["crm", "projects"];
+    for (const tier of ["family", "admin", "owner"]) {
+      resolveMock.mockResolvedValue(acting(tier, scope(["business"], ["business"])));
+      const app = appAs(MCP);
+      expect((await request(app).get("/api/crm/companies").set("X-Nextcloud-User", "sam")).status, tier).toBe(200);
+      expect((await request(app).get("/api/pm/work-items").set("X-Nextcloud-User", "sam")).status, tier).toBe(200);
+    }
+  });
+
+  it("the floor is scoped to the modules the catalog refuses: a guest on Messages and Files is not refused by it", async () => {
+    resolveMock.mockResolvedValue(acting("guest"));
+    const app = appAs(MCP);
+    expect((await request(app).get("/api/team-chat/contacts").set("X-Nextcloud-User", "sam")).status).toBe(200);
+    expect((await request(app).get("/api/files/x").set("X-Nextcloud-User", "sam")).status).toBe(200);
+  });
+});
+
 describe("actingUserAccessResolver — fail closed on identity", () => {
   // A Prisma double that HONOURS `where`, with the account shape that broke:
   // SSO / SCIM users have no `nextcloudUsername`.

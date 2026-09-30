@@ -25,6 +25,11 @@
  * match wins": a value that is one person's username and another's id is
  * AMBIGUOUS, and picking either scopes the call with a stranger's reach.
  *
+ * Before both questions, the TIER FLOOR (WARP-3365 / WARP-3369): a module the
+ * access catalog refuses the acting person's tier (`refuseBelowFloor`: an
+ * external guest and CRM or Projects) is 404 `module_disabled`, as it is for
+ * that person's browser (`requireModuleTierFloor`).
+ *
  * Two questions, both about the acting person:
  *   1. the tool scope — is `domain` in their §3 reach (a write needs `use`)?
  *      The method stands in for "a write": a GET is a read tool's hop. Where
@@ -71,6 +76,8 @@ import {
   type AttributionFailure,
 } from "../services/tool-access.service.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
+import { isGateableModuleId, maxLevelFor } from "../services/access-catalog.js";
+import type { Role } from "../services/jwt.service.js";
 import {
   resolveAssertedUser,
   type AssertedUserFailure,
@@ -179,6 +186,22 @@ export function requireMcpActingUserToolDomain(
     }
     if (access.unresolved) {
       deny(req, res, access.unresolved);
+      return;
+    }
+    // WARP-3365 / WARP-3369 — the tier floor, asked of the ACTING person: a
+    // module the catalog refuses their tier (an external guest and CRM or
+    // Projects) is refused to the assistant acting for them too, whatever
+    // their tool scope says. A role-less guest has a null scope (question 1
+    // passes), and `projects` is not feature-gated (question 2 is not asked),
+    // so without this a guest could read the company's customers and work
+    // items by asking the assistant. Same catalog fact as
+    // `requireModuleTierFloor` on the browser path.
+    if (
+      access.tier !== null &&
+      isGateableModuleId(moduleId) &&
+      maxLevelFor(access.tier as Role, moduleId) === null
+    ) {
+      deny(req, res, "tier_below_module_floor");
       return;
     }
     const scope = access.scope;

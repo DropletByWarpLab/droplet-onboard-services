@@ -17,6 +17,11 @@
  * cannot read. Writes are `owner|admin|family`, matching `WRITE` in
  * `routes/crm.ts`.
  *
+ * WARP-3365 — the read floor is the CRM's own: `mountModuleGates` refuses an
+ * external guest on the whole `/api/crm` prefix (`requireModuleTierFloor`), so
+ * a guest cannot ask which business records a file shared with them is linked
+ * to.
+ *
  * DELIBERATELY NOT `requireRoleOrMcpService`. Every other CRM write admits the
  * MCP service principal so WARP-2546's tools can dispatch. This one does not,
  * for a concrete reason rather than caution: creating a link resolves a PATH

@@ -107,6 +107,73 @@ describe("GET /api/voice/status (WARP-1036)", () => {
   });
 });
 
+// WARP-3396 — voice-io's status carries what was last SAID in the room and
+// what the assistant answered. Nothing on the dashboard reads them, but the
+// Voice page polls the status every second, so they sat in every open tab,
+// HAR export and proxy log. The default answer drops the four fields; the
+// setup wizard's voice step asks for them ("what it heard") with
+// `?include=transcript`, on the same owner/admin-only route.
+describe("GET /api/voice/status — the transcript stays out of the default answer (WARP-3396)", () => {
+  const FULL = {
+    enabled: true,
+    state: "listening",
+    wake_loaded: true,
+    last_wake_at: 100.5,
+    input_flatlined: false,
+    last_transcript: "call the landlord about the lease",
+    last_transcript_at: 101.2,
+    last_response: "Calling the landlord now.",
+    last_response_at: 103.4,
+  };
+  const STRIPPED = {
+    enabled: true,
+    state: "listening",
+    wake_loaded: true,
+    last_wake_at: 100.5,
+    input_flatlined: false,
+  };
+
+  it.each(["owner", "admin"] as const)("a %s gets the status without the last transcript or reply", async (role) => {
+    fetchSpy.mockResolvedValue(upstreamJson(200, FULL));
+    const res = await request(buildApp(mkUser(role))).get("/api/voice/status");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(STRIPPED);
+    expect(JSON.stringify(res.body)).not.toMatch(/landlord|last_transcript|last_response/);
+  });
+
+  it("the wizard's `?include=transcript` gets all four fields, and the upstream call carries no query", async () => {
+    fetchSpy.mockResolvedValue(upstreamJson(200, FULL));
+    const res = await request(buildApp(mkUser("owner"))).get("/api/voice/status?include=transcript");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(FULL);
+    expect(fetchSpy).toHaveBeenCalledWith("http://voice-io:8086/voice/status", expect.anything());
+  });
+
+  it("any other include value is the default answer", async () => {
+    fetchSpy.mockResolvedValue(upstreamJson(200, FULL));
+    const res = await request(buildApp(mkUser("owner"))).get("/api/voice/status?include=everything");
+    expect(res.body).toEqual(STRIPPED);
+  });
+
+  it("the transcript is not a way round the role floor: a member and a guest are 403 with or without it", async () => {
+    for (const role of ["family", "guest"] as const) {
+      for (const qs of ["", "?include=transcript"]) {
+        fetchSpy.mockClear();
+        const res = await request(buildApp(mkUser(role))).get(`/api/voice/status${qs}`);
+        expect(res.status, `${role} ${qs}`).toBe(403);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      }
+    }
+  });
+
+  it("an upstream fault body is relayed as before (the strip touches only the four fields)", async () => {
+    fetchSpy.mockResolvedValue(upstreamJson(500, { detail: "boom" }));
+    const res = await request(buildApp(mkUser("owner"))).get("/api/voice/status");
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ detail: "boom" });
+  });
+});
+
 describe("GET /api/voice/devices (WARP-1036)", () => {
   it("proxies to voice-io /audio/devices", async () => {
     fetchSpy.mockResolvedValue(upstreamJson(200, { input: null, devices: [] }));

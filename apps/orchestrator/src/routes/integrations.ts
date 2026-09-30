@@ -143,7 +143,12 @@ export function createIntegrationsRouter(
 
   router.get(
     "/integrations",
-    requireRole("owner", "admin", "family", "guest", "service"),
+    // WARP-3374 (Romain, 2026-09-30: an external guest gets nothing of the
+    // company's data unless it is shared with them). Which business systems are
+    // connected, when they last synced and when a credential expires is the
+    // company's own topology, so `guest` is not admitted. Members keep the read
+    // for the Reports tiles.
+    requireRole("owner", "admin", "family", "service"),
     async (_req, res, next) => {
       try {
         // Bare array — the dashboard hub maps it by provider (api.erp.ts).

@@ -3,8 +3,12 @@
  * project-management surface. Backs the dashboard Projects surface and (via the
  * orchestrator) the 9 `pm_*` MCP tools.
  *
- * Auth: mounted AFTER authMiddleware. PM is household-shared — reads are open
- * to any authenticated role; writes are gated with `requireRole`. Project,
+ * Auth: mounted AFTER authMiddleware. PM is company-shared — reads are open
+ * to any authenticated member-or-above role; writes are gated with
+ * `requireRole`. An external guest reads nothing (WARP-3369, Romain
+ * 2026-09-30): the `projects` module's tier floor (`refuseBelowFloor` in
+ * access-catalog.ts, mounted by `mountModuleGates` off the `/api/pm` prefix)
+ * answers 404 `module_disabled` before any route here runs. Project,
  * work-item + comment writes additionally admit the MCP service principal
  * (`requireRoleOrMcpService`) so the LLM's confirmed write tools can dispatch
  * through here. The human-facing confirmation gate is NOT in this file and NOT

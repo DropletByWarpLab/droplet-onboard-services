@@ -426,7 +426,11 @@ describe("native PM routes — RBAC", () => {
     expect(res.status).toBe(403);
   });
 
-  it("guest CAN read projects (200)", async () => {
+  // WARP-3369: this router alone does not floor reads, and this pins that it
+  // does not — the external-guest refusal is the `projects` module's tier floor
+  // mounted by `mountModuleGates` (proved through the real mount in
+  // __tests__/guest-company-data.test.ts), so a guest never reaches here.
+  it("a read that reaches the router unguarded is served (the guest floor is the module gate's, not this router's)", async () => {
     const res = await request(makeApp(prisma, GUEST)).get("/api/pm/projects");
     expect(res.status).toBe(200);
     expect(res.body.projects).toEqual([]);

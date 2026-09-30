@@ -50,7 +50,13 @@ import {
   resolveEffectiveAccess,
   type EffectiveAccessResult,
 } from "../services/effective-access.service.js";
-import { FEATURE_LEVEL_RANK, type FeatureLevel } from "../services/access-catalog.js";
+import {
+  FEATURE_LEVEL_RANK,
+  isGateableModuleId,
+  maxLevelFor,
+  type FeatureLevel,
+} from "../services/access-catalog.js";
+import type { Role } from "../services/jwt.service.js";
 import { recordAccessDenied } from "./auth.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -126,6 +132,44 @@ export function readFeatureGateMeta(fn: unknown): FeatureGateMeta | null {
   if (typeof fn !== "function") return null;
   const meta = (fn as unknown as Record<symbol, unknown>)[FEATURE_GATE_META];
   return meta && typeof meta === "object" ? (meta as FeatureGateMeta) : null;
+}
+
+/**
+ * WARP-3365 / WARP-3369 — the tier floor of a module, as a role check.
+ *
+ * Romain, 2026-09-30: an external guest gets NOTHING from company-wide business
+ * data unless it is explicitly shared with them, and the box enforces it on
+ * every route. The catalog says which modules a tier may hold nothing on
+ * (`refuseBelowFloor`: security, crm, projects), and this is the one handler
+ * that turns that fact into a refusal at the prefix — by ROLE, straight off the
+ * session, so it holds without a database read and where the per-person gate
+ * "has nothing to narrow" (a session with no local User row). Same 404
+ * `module_disabled` body as the two gates beside it: a module a tier may not
+ * open reads as absent, not forbidden.
+ *
+ * Passes `service` principals (the tool paths, the egress collector, voice-io):
+ * they are not a human tier. The assistant acting FOR a guest is refused by the
+ * same catalog fact in `requireMcpActingUserToolDomain`.
+ *
+ * Mounted by `mountModuleGates` for `tierRefusingModuleIds()`, off the registry
+ * prefixes, so a module that gains `refuseBelowFloor` is floored the day it
+ * does with no route edited.
+ */
+export function requireModuleTierFloor(moduleId: ModuleId): RequestHandler {
+  return function moduleTierFloor(req: Request, res: Response, next: NextFunction): void {
+    const user = req.user;
+    // No principal → authMiddleware owns the 401; service → not a human tier.
+    if (!user || user.role === "service") {
+      next();
+      return;
+    }
+    if (isGateableModuleId(moduleId) && maxLevelFor(user.role as Role, moduleId) === null) {
+      recordAccessDenied(req, "module-tier-floor-denied");
+      res.status(404).json({ error: "module_disabled", module: moduleId });
+      return;
+    }
+    next();
+  };
 }
 
 /**

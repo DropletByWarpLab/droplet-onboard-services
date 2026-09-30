@@ -1401,6 +1401,12 @@ workspace-slug-centric, with a single seeded `home` workspace. iOS/Android/
 Windows clients call the `/api/mobile/pm/*` endpoints below behind the normal
 dashboard session/JWT.
 
+**Roles (WARP-3369).** Owner, admin and member (`family`) only. An external
+guest (`guest`) reads nothing of the company's work: every `/api/pm/*` and
+`/api/mobile/pm/*` route answers `404 { "error": "module_disabled", "module":
+"projects" }` for that role (and every `/api/crm/*` route the same with
+`"module": "crm"`, WARP-3365). Clients hide the entry rather than show the error.
+
 ### `GET /api/mobile/pm/workspaces`
 
 List workspaces visible to the caller. Used for `workspace_slug`
