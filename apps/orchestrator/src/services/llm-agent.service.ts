@@ -63,6 +63,7 @@ import {
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import { navigationToolsWithheld } from "./dashboard-navigation.js";
 import {
+  isCatalogRead,
   narrowToolsToScope,
   toolDispatchDenial,
   type ToolAccessScope,
@@ -210,11 +211,14 @@ function approvedAlreadyRanEnvelope(tool: string) {
 /**
  * WARP-3287 — failures of the TOOL rather than of the call: it timed out, its
  * upstream was unreachable, or its output could not be read. The same call can
- * succeed a moment later, so the repetition guard lets it run again (see
- * `toolFailures` in runAgent). Codes as `describeToolError` reports them — the
- * loop's own thrown-dispatch envelope is TOOL_DISPATCH_FAILED there. Any other
- * code counts when its message names a network or upstream-down cause: a
- * HANDLER_THREW cause chain, `read_file`'s `nextcloud returned 503`.
+ * succeed a moment later, so the repetition guard lets a READ run again (see
+ * `toolFailures` in runAgent) — and the outcome is unknown, so a write never.
+ * Codes as `describeToolError` reports them — the loop's own thrown-dispatch
+ * envelope is TOOL_DISPATCH_FAILED there, transient whatever its message. The
+ * codes in NETWORK_CAUSE_CODES count when their message names a network or
+ * upstream-down cause: a HANDLER_THREW cause chain, `read_file`'s `nextcloud
+ * returned 503`. Only those: a substring hit elsewhere is noise (PARSE_FAILED's
+ * "unterminated quoted field" contains "terminated").
  */
 const TRANSIENT_TOOL_ERROR_CODES = new Set([
   "TIMEOUT",
@@ -246,11 +250,13 @@ const TRANSIENT_MESSAGE_CLASSES = new Set([
   "service_unavailable",
   "gateway_timeout",
 ]);
+const NETWORK_CAUSE_CODES = new Set(["HANDLER_THREW", "READ_FAILED", "UNSTRUCTURED_ERROR"]);
 
 function isTransientToolFailure(d: ToolErrorDiagnostics): boolean {
   return (
     TRANSIENT_TOOL_ERROR_CODES.has(d.error_code) ||
-    TRANSIENT_MESSAGE_CLASSES.has(d.message_class)
+    (NETWORK_CAUSE_CODES.has(d.error_code) &&
+      TRANSIENT_MESSAGE_CLASSES.has(d.message_class))
   );
 }
 
@@ -1692,18 +1698,24 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // array would erase) keep genuinely different calls distinct.
   const executedCallCounts = new Map<string, number>();
   // WARP-3287 — only a call that SUCCEEDED has a result to point at.
-  // `failedCalls`: the error of each call key whose last dispatch failed
-  // (cleared on success). `toolFailures`: per tool, dispatches in a row that
-  // failed transiently (isTransientToolFailure). Such a call is re-dispatched
-  // instead of nudged, until its tool reaches MAX_TOOL_FAILURES — the failed
-  // call plus one retry, identical or reworded. The tool is then down for the
-  // turn: its next call, whatever the arguments, is refused, and the one after
-  // finalizes, as in §4.
-  // ponytail: a success of the same tool clears its count, so a key that has
-  // had its retry can earn another; each needs a new successful call in
-  // between, and maxIter bounds it. Track retries per key if that shows up.
+  // `callOutcomes`: how each call key's last dispatch ended (a key refused
+  // while its tool was down was never dispatched and has none).
+  // `toolFailures`: per tool, transient failures (isTransientToolFailure)
+  // since the last successful call of ANY tool. A catalog read that failed
+  // transiently is re-dispatched instead of nudged until its tool reaches
+  // MAX_TOOL_FAILURES — the failed call plus one retry, identical or reworded;
+  // a write is never repeated, its outcome is unknown (WARP-2877's rule,
+  // `isCatalogRead`). The tool is then down: its next call, whatever the
+  // arguments, is refused, and the one after finalizes, as in §4. A repeat of
+  // a call that succeeded stays on the §4 path.
+  // ponytail: any success clears every count, so a key that has had its retry
+  // can earn another; each needs a new successful call in between, and
+  // maxIter bounds it. Track retries per key if that shows up.
   const MAX_TOOL_FAILURES = 2;
-  const failedCalls = new Map<string, { code: string; transient: boolean }>();
+  const callOutcomes = new Map<
+    string,
+    { ok: true } | { ok: false; code: string; transient: boolean }
+  >();
   const toolFailures = new Map<
     string,
     { count: number; code: string; refused: boolean }
@@ -2644,16 +2656,19 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // Spec §4 — occurrence 1 dispatches; 2 nudges; 3 finalizes. A nudged
       // call is neither a guard hit nor a real dispatch, so the WARP-642
       // circuit breaker is unaffected.
-      // WARP-3287 — a retry of a transient failure is dispatched and is not an
-      // occurrence; a down tool is refused whatever the arguments (see
-      // `toolFailures`).
+      // WARP-3287 — a read's retry after a transient failure is dispatched and
+      // is not an occurrence; a down tool is refused whatever the arguments,
+      // without counting one (the key may never have run). See `toolFailures`.
       const callKey = canonicalCallKey(call.function.name, args, call.id);
       const priorCalls = executedCallCounts.get(callKey) ?? 0;
-      const failed = failedCalls.get(callKey);
+      const outcome = callOutcomes.get(callKey);
+      const failed = outcome?.ok === false ? outcome : undefined;
+      const read = isCatalogRead(call.function.name);
       const down = toolFailures.get(call.function.name);
-      const toolDown = down !== undefined && down.count >= MAX_TOOL_FAILURES;
-      const retry = failed?.transient === true && !toolDown;
-      if (!retry) executedCallCounts.set(callKey, priorCalls + 1);
+      const toolDown =
+        down !== undefined && down.count >= MAX_TOOL_FAILURES && outcome?.ok !== true;
+      const retry = failed?.transient === true && read && !toolDown;
+      if (!retry && !toolDown) executedCallCounts.set(callKey, priorCalls + 1);
       if (toolDown || (priorCalls >= 1 && !retry)) {
         const nudge = {
           status: "error" as const,
@@ -2663,15 +2678,23 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
               ? `You already called '${call.function.name}' ${down.count} times in a ` +
                 `row and it failed each time (last error: ${down.code}); there is no ` +
                 `result to use. Do not call it again with any arguments — tell the ` +
-                `user it failed.`
-              : failed
+                `user it failed` +
+                (read
+                  ? "."
+                  : ", and that it may already have happened, so they should check before retrying.")
+              : failed?.transient
                 ? `You already called '${call.function.name}' with these exact ` +
-                  `arguments and it failed (${failed.code}); there is no result to ` +
-                  `use. Do not repeat the call — change the arguments or tell the ` +
-                  `user it failed.`
-                : `You already called '${call.function.name}' with these exact ` +
-                  `arguments; its result is in the conversation above. Use that ` +
-                  `result or answer the user — do not repeat the call.`,
+                  `arguments and it failed (${failed.code}), but it may already have ` +
+                  `happened. Do not call it again — tell the user it may already have ` +
+                  `happened and to check before retrying.`
+                : failed
+                  ? `You already called '${call.function.name}' with these exact ` +
+                    `arguments and it failed (${failed.code}); there is no result to ` +
+                    `use. Do not repeat the call — change the arguments or tell the ` +
+                    `user it failed.`
+                  : `You already called '${call.function.name}' with these exact ` +
+                    `arguments; its result is in the conversation above. Use that ` +
+                    `result or answer the user — do not repeat the call.`,
           },
         };
         trace.push({
@@ -2892,7 +2915,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         // WARP-3287 — feed the repetition guard. The shape-guarded code, never
         // raw tool text, is what its refusal quotes back to the model.
         const transient = isTransientToolFailure(diagnostics);
-        failedCalls.set(callKey, { code: diagnostics.error_code, transient });
+        callOutcomes.set(callKey, { ok: false, code: diagnostics.error_code, transient });
         if (transient) {
           toolFailures.set(call.function.name, {
             count: (toolFailures.get(call.function.name)?.count ?? 0) + 1,
@@ -2901,8 +2924,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           });
         }
       } else {
-        failedCalls.delete(callKey);
-        toolFailures.delete(call.function.name);
+        callOutcomes.set(callKey, { ok: true });
+        toolFailures.clear();
       }
 
       // Translate the MCP envelope into an SSE tool_result event.

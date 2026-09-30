@@ -194,22 +194,18 @@ describe("runAgent — repetition early-stop (spec §4)", () => {
 });
 
 /**
- * WARP-3287 — only a call that SUCCEEDED has a result to point at. A call that
- * failed transiently is re-dispatched; a tool that failed twice in a row is
- * refused (honestly), then finalized. Eval seed-014 / adv-009.
+ * WARP-3287 — only a call that SUCCEEDED has a result to point at. A READ that
+ * failed transiently is re-dispatched, a write never is; a tool that failed
+ * twice in a row is refused (honestly), then finalized. Eval seed-014 / adv-009.
  */
 describe("runAgent — repetition guard after a failed call (WARP-3287)", () => {
-  const searchCall = (id: string, query: string) => ({
+  const callOf = (id: string, name: string, args: Record<string, unknown>) => ({
     role: "assistant",
     content: null,
-    tool_calls: [
-      {
-        id,
-        type: "function",
-        function: { name: "search_content", arguments: JSON.stringify({ query }) },
-      },
-    ],
+    tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(args) } }],
   });
+  const searchCall = (id: string, query: string) => callOf(id, "search_content", { query });
+  const OK = { isError: false, content: [{ type: "text", text: '{"hits":[]}' }] };
   const failure = (code: string, message = "x") => ({
     isError: true,
     content: [
@@ -225,11 +221,12 @@ describe("runAgent — repetition guard after a failed call (WARP-3287)", () => 
       .filter((m) => m.role === "tool" && String(m.content).includes("REPEATED_CALL"))
       .map((m) => String(m.content));
   };
-  const run = (deps: AgentDeps) =>
+  const run = (deps: AgentDeps, allowed_tools?: string[]) =>
     runAgent(deps, {
       model: "m",
       messages: [{ role: "user", content: "search, retry once if it times out" }],
       max_iter: 10,
+      ...(allowed_tools ? { allowed_tools } : {}),
     });
 
   it("seed-014: an identical retry of a timed-out call is dispatched", async () => {
@@ -249,6 +246,7 @@ describe("runAgent — repetition guard after a failed call (WARP-3287)", () => 
     ["UPSTREAM_UNAVAILABLE", failure("UPSTREAM_UNAVAILABLE")],
     ["HANDLER_THREW with a network cause", failure("HANDLER_THREW", "fetch failed; cause: read ECONNRESET")],
     ["an upstream 503", failure("READ_FAILED", "nextcloud returned 503")],
+    ["a bare string error with a network cause", { isError: true, content: [{ type: "text", text: '{"error":"socket hang up"}' }] }],
     ["unreadable output (WARP-3284)", { isError: false, content: [{ type: "text", text: '{"hits": [{"id": "SUP-' }] }],
   ])("retries after %s", async (_label, first) => {
     const { deps, callTool } = makeDeps([
@@ -275,6 +273,8 @@ describe("runAgent — repetition guard after a failed call (WARP-3287)", () => 
   it.each([
     ["INVALID_ARGS", failure("INVALID_ARGS", "query is required")],
     ["HANDLER_THREW without a network cause", failure("HANDLER_THREW", "TypeError: x is not a function")],
+    // "unterminated" contains "terminated": a network class counts only on the codes that carry a cause.
+    ["PARSE_FAILED whose message matches a network class", failure("PARSE_FAILED", "unterminated quoted field")],
   ])("does not retry %s, and says the call failed", async (_label, first) => {
     const { deps, chat, callTool } = makeDeps([
       sameCall,
@@ -339,12 +339,73 @@ describe("runAgent — repetition guard after a failed call (WARP-3287)", () => 
     ]);
     callTool
       .mockResolvedValueOnce(TIMEOUT)
-      .mockResolvedValueOnce({ isError: false, content: [{ type: "text", text: '{"hits":[]}' }] })
+      .mockResolvedValueOnce(OK)
       .mockResolvedValueOnce(TIMEOUT);
     await run(deps);
     expect(callTool).toHaveBeenCalledTimes(4);
     const nudges = refusals(chat);
     expect(nudges).toHaveLength(1);
     expect(nudges[0]).toContain("its result is in the conversation above");
+  });
+
+  it("never repeats a write whose outcome is unknown: create_event timed out", async () => {
+    const event = callOf("c1", "create_event", { title: "Board meeting", start: "2026-10-01T09:00" });
+    const { deps, chat, callTool } = makeDeps(
+      [event, event, { role: "assistant", content: "it may already be on the calendar" }],
+      ["create_event"],
+    );
+    callTool.mockResolvedValueOnce(TIMEOUT);
+    await run(deps, ["create_event"]);
+    // The POST may have landed; a second dispatch would be a second event.
+    expect(callTool).toHaveBeenCalledTimes(1);
+    const [nudge] = refusals(chat);
+    expect(nudge).toContain("failed (TIMEOUT), but it may already have happened");
+    expect(nudge).toContain("check before retrying");
+    expect(nudge).not.toContain("its result is in the conversation above");
+  });
+
+  it("a success of ANY tool clears the failure counts, so a tool is not locked out for the rest of a long run", async () => {
+    const { deps, chat, callTool } = makeDeps(
+      [
+        searchCall("c1", "a"), // TIMEOUT
+        searchCall("c2", "b"), // TIMEOUT: search_content is down
+        searchCall("c3", "c"), // refused
+        callOf("c4", "calculate", { expression: "1+1" }), // ok: clears the counts
+        searchCall("c5", "c"), // dispatched again — neither down nor counted by its refusal
+        { role: "assistant", content: "done" },
+      ],
+      ["search_content", "calculate"],
+    );
+    callTool.mockResolvedValueOnce(TIMEOUT).mockResolvedValueOnce(TIMEOUT);
+    const result = await run(deps, ["search_content", "calculate"]);
+    expect(callTool.mock.calls.map((c) => c[0])).toEqual([
+      "search_content",
+      "search_content",
+      "calculate",
+      "search_content",
+    ]);
+    expect(refusals(chat)).toHaveLength(1);
+    expect(result.stop_reason).toBe("model_done");
+  });
+
+  it("a repeat of a call that SUCCEEDED keeps the §4 message and steps while its tool is down", async () => {
+    const { deps, chat, callTool } = makeDeps([
+      sameCall, // ok
+      searchCall("c2", "b"), // TIMEOUT
+      searchCall("c3", "c"), // TIMEOUT: search_content is down
+      sameCall, // §4 nudge: its result does exist
+      sameCall, // §4 nudge + finalize
+      { role: "assistant", content: "here is what I found" },
+    ]);
+    callTool
+      .mockResolvedValueOnce(OK)
+      .mockResolvedValueOnce(TIMEOUT)
+      .mockResolvedValueOnce(TIMEOUT);
+    const result = await run(deps);
+    expect(callTool).toHaveBeenCalledTimes(3);
+    const nudges = refusals(chat);
+    expect(nudges).toHaveLength(2);
+    for (const n of nudges) expect(n).toContain("its result is in the conversation above");
+    expect(result.stop_reason).toBe("repetition");
   });
 });
