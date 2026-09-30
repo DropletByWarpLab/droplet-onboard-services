@@ -284,3 +284,50 @@ describe("UploadZone — the overlay always clears (WARP-1876 review)", () => {
     expect(screen.queryByText("Drop files or folders to upload")).not.toBeInTheDocument();
   });
 });
+
+// Drag-to-move inside the Files page rides the same DOM events as an external
+// file drop; the custom dataTransfer type is the only thing telling them apart.
+describe("UploadZone — internal drag-to-move is not an upload", () => {
+  const internalDrag = () =>
+    ({
+      dataTransfer: { types: ["application/x-droplet-files"], files: [] },
+    }) as unknown as Partial<DragEvent>;
+
+  it("shows no upload overlay for an internal drag", () => {
+    const { container } = render(
+      <UploadZone onUpload={vi.fn()}>
+        <p>list</p>
+      </UploadZone>
+    );
+    fireEvent.dragEnter(container.firstChild as Element, internalDrag());
+    expect(container.querySelector("[data-dropzone-overlay]")).toBeNull();
+  });
+
+  it("does not claim the dragover (so empty space stays a not-allowed cursor)", () => {
+    const { container } = render(
+      <UploadZone onUpload={vi.fn()}>
+        <p>list</p>
+      </UploadZone>
+    );
+    // fireEvent returns false when the event was preventDefault()ed.
+    expect(fireEvent.dragOver(container.firstChild as Element, internalDrag())).toBe(true);
+    // ...while an external file drag is still claimed.
+    expect(
+      fireEvent.dragOver(container.firstChild as Element, {
+        dataTransfer: { types: ["Files"], files: [] },
+      } as unknown as Partial<DragEvent>)
+    ).toBe(false);
+  });
+
+  it("never reports an internal drop as an upload", async () => {
+    const onUpload = vi.fn();
+    const { container } = render(
+      <UploadZone onUpload={onUpload}>
+        <p>list</p>
+      </UploadZone>
+    );
+    fireEvent.drop(container.firstChild as Element, internalDrag());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(onUpload).not.toHaveBeenCalled();
+  });
+});

@@ -68,7 +68,9 @@ export function attachWsBridge(server: HttpServer): WebSocketServer {
           ? protocolHeader.slice("bearer.".length)
           : null;
 
-      const token = cookieToken ?? bearerFromProtocol;
+      // WARP-3038 — an explicit Bearer beats a cookie that rides the same
+      // upgrade, as in authMiddleware.
+      const token = bearerFromProtocol ?? cookieToken;
       const user = await validateTokenForWs(token);
       if (!user) {
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
@@ -117,6 +119,9 @@ export function attachWsBridge(server: HttpServer): WebSocketServer {
       // can fire a browser notification (or, in the future, a mobile
       // push when a push-dispatcher subscribes to the same topic).
       `droplet/chat/${user.username}/#`,
+      // WARP-3301: live background-run events (status, step, queue
+      // position) from agent-run-events.service.ts, for this user's runs only.
+      `droplet/agent-runs/${user.username}`,
     ];
 
     const unsubscribes = topics.map((t) =>

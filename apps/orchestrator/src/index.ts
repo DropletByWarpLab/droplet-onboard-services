@@ -75,6 +75,8 @@ import {
   type BrainPassTrigger,
 } from "./services/brain/brain-pass-runner.js";
 import { notifyFindings } from "./services/brain/brain-notify.service.js";
+import { createTriageShadow } from "./services/brain/brain-triage-shadow.js";
+import { DecisionModelClient } from "./services/decision-model.client.js";
 import {
   brainPassesSchedulable,
   isBrainEnabled,
@@ -151,7 +153,7 @@ import type { MatterDispatcher } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
 import { createExtensionAttacher } from "./services/extension-attach.service.js";
-import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
+import { stepResultValue, type StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
 import { runActivityNotifySweep } from "./services/activity-notify.service.js";
@@ -199,6 +201,8 @@ import { registerDoorsJobs } from "./services/doors.service.js";
 import { assertDoorsWired } from "./services/doors-wiring.js";
 import { registerSecurityModeJobs } from "./services/security-mode.service.js";
 import { registerSecurityIncidentJobs } from "./services/security-incidents.service.js";
+import { registerSecurityLinkJobs } from "./services/security-link-proposals.service.js";
+import { registerSecurityNarratorJobs } from "./services/security-narrator.service.js";
 import { getEffectiveModuleIds } from "./services/modules.service.js";
 import { resolveEffectiveAccess } from "./services/effective-access.service.js";
 import { registerSecurityBaselineJobs } from "./services/security-baselines.service.js";
@@ -657,20 +661,7 @@ async function main() {
   // schedule-ticker` so only one replica fires each due schedule.
   const toolSchedulerDispatcher: StepDispatcher = {
     async call(tool, args) {
-      const result = await mcpClient.callTool(tool, args);
-      if (result.isError) {
-        const detail = result.content?.[0]?.text ?? "tool reported error";
-        throw new Error(typeof detail === "string" ? detail : String(detail));
-      }
-      const text = result.content?.[0]?.text;
-      if (typeof text === "string" && text.length > 0) {
-        try {
-          return JSON.parse(text);
-        } catch {
-          return { raw: text };
-        }
-      }
-      return null;
+      return stepResultValue(tool, await mcpClient.callTool(tool, args));
     },
   };
   cronRuntime.scheduleInterval(
@@ -770,6 +761,13 @@ async function main() {
     // and the operator's "check now" are three callers of the same function
     // with the same lease, rather than three code paths with three ideas about
     // exclusion — which is the shape of defect this epic has already hit twice.
+    // WARP-3071 — shadow-only; undefined (today's code path) unless the flag is on.
+    let kev: DecisionModelClient | undefined;
+    const onTriaged = createTriageShadow({
+      enabled: config.DECISION_MODEL_TRIAGE_SHADOW,
+      decide: (args) => (kev ??= new DecisionModelClient({ url: config.AI_GATEWAY_GRPC_URL })).decide(args),
+    });
+
     const passRunners = {
       // Deterministic pass: no model call, so it never contends for the box's
       // single inference slot.
@@ -792,7 +790,7 @@ async function main() {
         // — so a run whose claim was lost meanwhile leaves delivery to the
         // worker that holds it now.
         if (signal.aborted) return;
-        const notified = await notifyFindings(prisma);
+        const notified = await notifyFindings(prisma, { onTriaged });
         if (notified.immediate > 0 || notified.digestSent) {
           logger.info({ notified }, "brain.findings.notified");
         }
@@ -1154,6 +1152,20 @@ async function main() {
     // in-flight map): a person in view for 30 s alerts before their `end`.
     ongoing: securityOngoingSource(),
   });
+  // WARP-2979 (ADR-059 P4 §6.3) — Droplet's link proposals: every hour, on its
+  // own advisory lock, it compares when things happen at a source a person
+  // placed in an area with every other camera, and suggests (or, above a
+  // higher bar, makes) links — never an alert by itself. Unconditional, like
+  // the jobs above; `SecurityAiSettings.linking = off` is honoured inside the
+  // tick. Registration is the `links` health row's boot assertion.
+  registerSecurityLinkJobs(cronRuntime, prisma);
+  // WARP-2979 (ADR-059 P4 §6.9) — Droplet's incident summaries: every minute,
+  // with NO advisory lock (a model call outlives the lock's transaction), it
+  // writes a short summary for each sealed notice or alert incident, on THIS
+  // box's own model only (DS-007), standing aside whenever someone is
+  // chatting. Unconditional; `SecurityAiSettings.summaries = off` is honoured
+  // inside the tick. Registration is the `summaries` health row's boot assertion.
+  registerSecurityNarratorJobs(cronRuntime, prisma);
   // WARP-2980 (ADR-059 P5) — the baseline job: every 60 s it records which
   // cameras Droplet can prove it is listening to (coverage cannot be rebuilt
   // later), keeps the learning state, and rebuilds what normal looks like

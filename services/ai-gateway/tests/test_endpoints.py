@@ -346,3 +346,83 @@ class TestModelsRefreshEndpoint:
             "/ai/models/refresh", headers={"Authorization": "Bearer the-token"}
         )
         assert ok.status_code == 200
+
+
+class TestChatPreemptedForChat:
+    """WARP-3306 — a background run's call (X-Preemptible: 1) gives the slot up
+    when chat arrives: 409 before the stream starts, a final error frame after,
+    and in both cases the slot is released so the chat request dispatches."""
+
+    @staticmethod
+    async def _wire(monkeypatch, provider_chat):
+        import main
+        from scheduler import InferenceScheduler
+
+        scheduler = InferenceScheduler(max_concurrent=1)
+        await scheduler.start()
+        router = MagicMock()
+        router.chat = provider_chat
+        monkeypatch.setattr(main, "inference_scheduler", scheduler)
+        monkeypatch.setattr(main, "provider_router", router)
+        http_request = MagicMock()
+        http_request.state.principal = None
+        http_request.headers = {}
+        return main, scheduler, http_request
+
+    async def test_blocking_call_answers_409_and_frees_the_slot(self, monkeypatch):
+        async def slow_chat(*_a, **_k):
+            await asyncio.sleep(30)
+
+        main, scheduler, http_request = await self._wire(monkeypatch, slow_chat)
+        try:
+            req = ChatRequest(model="m", messages=[{"role": "user", "content": "x"}], stream=False)
+            run = asyncio.create_task(main.chat(req, http_request, x_request_priority=10, x_preemptible="1"))
+            for _ in range(50):
+                if scheduler.active_requests == 1:
+                    break
+                await asyncio.sleep(0.01)
+            f_user = await scheduler.enqueue(0, "chat")
+            resp = await asyncio.wait_for(run, timeout=2)
+            assert resp.status_code == 409
+            assert b"preempted_for_chat" in resp.body
+            assert await asyncio.wait_for(f_user, timeout=1) == "chat"
+        finally:
+            await scheduler.stop()
+
+    async def test_stream_ends_with_a_preempted_frame(self, monkeypatch):
+        async def stream():
+            yield "data: {\"n\": 1}\n\n"
+            await asyncio.sleep(30)
+            yield "data: {\"n\": 2}\n\n"
+
+        async def chat(*_a, **_k):
+            return stream()
+
+        main, scheduler, http_request = await self._wire(monkeypatch, chat)
+        try:
+            req = ChatRequest(model="m", messages=[{"role": "user", "content": "x"}], stream=True)
+            resp = await main.chat(req, http_request, x_request_priority=10, x_preemptible="1")
+            body = resp.body_iterator
+            first = await body.__anext__()
+            assert '"n": 1' in first
+            f_user = await scheduler.enqueue(0, "chat")
+            rest = [c async for c in body]
+            assert rest == [main.PREEMPTED_FRAME]
+            assert await asyncio.wait_for(f_user, timeout=1) == "chat"
+        finally:
+            await scheduler.stop()
+
+    async def test_user_priority_ignores_the_opt_in(self, monkeypatch):
+        """Only background requests can be preempted; the header alone is not enough."""
+        async def chat(*_a, **_k):
+            return {"ok": True}
+
+        main, scheduler, http_request = await self._wire(monkeypatch, chat)
+        try:
+            enqueue = AsyncMock(wraps=scheduler.enqueue)
+            monkeypatch.setattr(scheduler, "enqueue", enqueue)
+            req = ChatRequest(model="m", messages=[{"role": "user", "content": "x"}], stream=False)
+            await main.chat(req, http_request, x_request_priority=0, x_preemptible="1")
+            assert enqueue.await_args.args[2] is None
+        finally:
+            await scheduler.stop()

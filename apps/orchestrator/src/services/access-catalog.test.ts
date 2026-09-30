@@ -136,6 +136,56 @@ describe("access-catalog — tier default catalog (null accessRoleId world)", ()
   });
 });
 
+// ADR-059 §6 — Security's `view` is floored at family ("no guest tier": presence
+// data about identifiable people), and every /api/security read is
+// requireRole(owner, admin, family). `view` is the lowest rung, so a tier below
+// its floor used to clamp DOWN to it and hold it anyway: a guest role could
+// store security:view and the roles list advertised reach the routes refuse
+// (each refusal is a denial row that becomes a threat incident). The floor is
+// now a refusal (`refuseBelowFloor`), the contract `clampConnectorLevel` has.
+describe("access-catalog — security's family floor on `view` is a refusal (ADR-059)", () => {
+  it("a guest (and a service principal) holds NO security grant at all — not even view", () => {
+    for (const tier of ["guest", "service"] as const) {
+      expect(maxLevelFor(tier, "security"), tier).toBeNull();
+      for (const level of ["view", "act", "manage"] as const) {
+        expect(clampLevel(tier, "security", level), `${tier} ${level}`).toBeNull();
+      }
+    }
+  });
+
+  it("family, admin and owner are unchanged: family tops out at act, admin and owner at manage", () => {
+    expect(maxLevelFor("family", "security")).toBe("act");
+    expect(maxLevelFor("admin", "security")).toBe("manage");
+    expect(maxLevelFor("owner", "security")).toBe("manage");
+    // D6's wall account: a Staff-based role set to Security View keeps view (it is not clamped to nothing)
+    expect(clampLevel("family", "security", "view")).toBe("view");
+    expect(clampLevel("family", "security", "act")).toBe("act");
+    expect(clampLevel("family", "security", "manage")).toBe("act"); // manage is admin-only: a clamp, not a refusal
+    expect(clampLevel("admin", "security", "view")).toBe("view");
+    expect(clampLevel("admin", "security", "manage")).toBe("manage");
+    expect(clampLevel("owner", "security", "manage")).toBe("manage");
+  });
+
+  it("the refusal is opt-in per module: security (below family) and doors (below admin) are the only ones that refuse a guest or a family tier", () => {
+    const refusing = (tier: "guest" | "family") =>
+      GATEABLE_MODULE_IDS.filter((m) => maxLevelFor(tier, m) === null || clampLevel(tier, m, "manage") === null);
+    expect(refusing("guest")).toEqual(["security", "doors"]);
+    expect(refusing("family")).toEqual(["doors"]);
+  });
+
+  it("a role-less guest's catalog has no security row; a role-less family, admin and owner keep theirs", () => {
+    const level = (tier: "guest" | "family" | "admin" | "owner") =>
+      fullCatalogFeatures(tier).find((f) => f.moduleId === "security")?.level;
+    expect(level("guest")).toBeUndefined();
+    expect(level("family")).toBe("act");
+    expect(level("admin")).toBe("manage");
+    expect(level("owner")).toBe("manage");
+    // and nothing else about the guest's catalog moved: every other module is still there, chat included.
+    // A guest is refused security (below family) and doors (below admin), so chat + every gateable module but those two.
+    expect(fullCatalogFeatures("guest")).toHaveLength(GATEABLE_MODULE_IDS.length - 1);
+  });
+});
+
 describe("access-catalog — tool-domain mapping (tools-core vocabulary)", () => {
   it("maps features to tools-core domains; declared-ungated domains always pass", () => {
     const domains = domainsForFeatures(new Set(["calendar", "knowledge", "projects", "smart_home"]));
@@ -433,16 +483,20 @@ describe("access-catalog — doors (ADR-055)", () => {
     }
   });
 
-  it("no other module refuses a tier: every non-doors module still clamps to at least `view`", () => {
-    // The refusal is opt-in per module. security's own family floor on `view`
-    // is unchanged by this (it is not opted in), so this pins the set exactly.
+  it("only security and doors refuse a tier: every other module still clamps to at least `view`", () => {
+    // The refusal is opt-in per module, and two have opted in: security refuses
+    // below its floor (guest), doors below admin (family and guest). This pins
+    // the set exactly, in both directions.
     for (const moduleId of GATEABLE_MODULE_IDS) {
-      if (moduleId === "doors") continue;
+      if (moduleId === "security" || moduleId === "doors") continue;
       for (const tier of ["family", "guest"] as const) {
         expect(maxLevelFor(tier, moduleId), `${tier} ${moduleId}`).not.toBeNull();
         expect(clampLevel(tier, moduleId, "manage"), `${tier} ${moduleId}`).not.toBeNull();
       }
     }
+    expect(maxLevelFor("guest", "security")).toBeNull();
+    expect(maxLevelFor("family", "security")).not.toBeNull();
+    expect(maxLevelFor("family", "doors")).toBeNull();
   });
 
   it("a role-less family or guest person's catalog has no doors row; admin's has it at view", () => {

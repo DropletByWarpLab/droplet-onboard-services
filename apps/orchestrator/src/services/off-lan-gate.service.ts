@@ -97,3 +97,23 @@ export async function webPushGate(prisma: OffLanGatePrisma): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * WARP-3264 — true only when the `place_lookup` off-LAN channel ("Look up
+ * places online (sends the place you type to OpenStreetMap)") is explicitly
+ * enabled. Gates the Nominatim leg of GET /api/calendar/places. Never
+ * throws: a missing row or a DB error keeps the lookup on the box.
+ */
+export async function placeLookupGate(
+  prisma: OffLanGatePrisma,
+): Promise<boolean> {
+  try {
+    const row = await prisma.offLanAllowlistChannel.findUnique({
+      where: { key: OffLanChannelKey.place_lookup },
+    });
+    return row?.enabled === true;
+  } catch (err) {
+    logger.warn({ err }, "place_lookup off-LAN gate read failed — failing closed (no egress)");
+    return false;
+  }
+}

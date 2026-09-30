@@ -21,6 +21,7 @@ const NAMEABLE_TOOLS = [
   "email_summarize_thread",
   "email_draft_reply",
   "email_send",
+  "team_chat_send_message",
   "search_calendar_events",
   "list_events",
   "list_reminders",
@@ -45,6 +46,7 @@ const NAMEABLE_TOOLS = [
   "memory_extract_fact",
   "memory_forget",
   "business_profile_get",
+  "find_dashboard_page",
 ];
 
 describe("composeToolGuidance", () => {
@@ -113,6 +115,24 @@ describe("composeToolGuidance", () => {
     expect(noSend).not.toContain("email_send");
   });
 
+  it("makes team chat the default way to message someone, email only when asked (WARP-3340)", () => {
+    const line = "- Message people with team_chat_send_message unless asked for email.";
+    expect(composeToolGuidance(["team_chat_send_message"])).toContain(line);
+    expect(composeToolGuidance(undefined)).toContain(line);
+    // A caller whose tool pool lacks team chat (a role without it): no line,
+    // and email is the only channel left. Switching Messages off does not
+    // reach this pool for an owner or admin; the tool is still offered and
+    // refuses before the approval with TEAM_CHAT_UNAVAILABLE (WARP-3349).
+    const noChat = composeToolGuidance(["email_search", "email_draft_reply", "email_send"]);
+    expect(noChat).not.toContain("team_chat_send_message");
+    expect(noChat).not.toContain("Message people");
+    // The trims that paid for the line kept the business line's pointer for
+    // customer questions (review of #2541).
+    expect(composeToolGuidance(["business_profile_get"])).toContain(
+      "- For questions about the business or its customers, use the business context above",
+    );
+  });
+
   it("scopes the calculate mandate and gates its converter fragments", () => {
     const block = composeToolGuidance(["calculate"]);
     expect(block).toContain("Never do arithmetic in your head");
@@ -121,5 +141,27 @@ describe("composeToolGuidance", () => {
     );
     expect(block).not.toContain("unit_convert");
     expect(block).not.toContain("currency_convert");
+  });
+
+  it("renders the dashboard-path line only when a navigation tool survives (WARP-3116)", () => {
+    // Off the dashboard both tools are withheld, and the line must go with
+    // them — it names them.
+    expect(composeToolGuidance(["search_content"])).not.toContain("dashboard paths");
+    expect(composeToolGuidance(["open_dashboard_page"])).not.toContain("dashboard paths");
+    expect(composeToolGuidance(["find_dashboard_page"])).toContain(
+      "Never guess dashboard paths: use find_dashboard_page.",
+    );
+  });
+
+  it("honours `withheld` even for the privileged `undefined` (WARP-3116)", () => {
+    // The owner's `undefined` cannot say "not this turn"; the withheld set
+    // does, and a line naming a withheld tool is the WARP-642 failure.
+    const block = composeToolGuidance(
+      undefined,
+      new Set(["find_dashboard_page", "open_dashboard_page"]),
+    );
+    expect(block).not.toContain("find_dashboard_page");
+    expect(block).not.toContain("open_dashboard_page");
+    expect(block).toContain("search_content");
   });
 });

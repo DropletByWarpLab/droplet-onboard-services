@@ -32,9 +32,9 @@ const contentSearch: CategoryRenderer = (can) => {
     can("summarize_file") ? "summarize_file" : null,
   ].filter((n): n is string => n !== null);
   return (
-    "- For questions about the business's files, documents, notes or emails, call search_content and ground your answer in the returned passages (cite their paths)" +
+    "- For questions about the business's files, documents, notes or emails, call search_content and ground answers in the passages (cite paths)" +
     (deeper.length > 0
-      ? `; go deeper on a specific file with ${deeper.join(" or ")}`
+      ? `; go deeper with ${deeper.join(" or ")}`
       : "") +
     "."
   );
@@ -43,8 +43,8 @@ const contentSearch: CategoryRenderer = (can) => {
 const email: CategoryRenderer = (can) => {
   if (!can("email_search")) return null;
   let line =
-    "- For email questions, search the mailbox with email_search" +
-    (can("email_read") ? " and read messages with email_read" : "") +
+    "- For email questions, search with email_search" +
+    (can("email_read") ? " and read with email_read" : "") +
     (can("email_summarize_thread")
       ? "; summarize long threads with email_summarize_thread"
       : "") +
@@ -56,6 +56,16 @@ const email: CategoryRenderer = (can) => {
   }
   return line + ".";
 };
+
+// WARP-3340 — Romain, 2026-09-29: team chat is the default way to reach a
+// colleague; email only when the person asks for it. Paid for by trimming the
+// content-search, smart-device and memory wording, the WARP-3116 rule: fit
+// under the cap, never raise it. The business line keeps "customers", its
+// only pointer for customer questions.
+const teamChat: CategoryRenderer = (can) =>
+  can("team_chat_send_message")
+    ? "- Message people with team_chat_send_message unless asked for email."
+    : null;
 
 const calendar: CategoryRenderer = (can) => {
   const check = [
@@ -79,7 +89,7 @@ const computation: CategoryRenderer = (can) => {
   if (can("currency_convert")) extras.push("currency_convert for money");
   if (can("date_math")) extras.push("date_math for date arithmetic");
   if (can("get_current_datetime"))
-    extras.push("get_current_datetime for the current date and time");
+    extras.push("get_current_datetime for the date and time");
   // Strong-but-scoped mandate (locked in the 2026-07-23 spec): "never
   // mentally" steering without routing counting or algebra into a tool
   // that rejects unknown identifiers at parse time.
@@ -96,7 +106,7 @@ const smartDevices: CategoryRenderer = (can) => {
     "- For smart devices, check list_smart_home_devices first" +
     (can("control_device") ? "; act with control_device" : "") +
     (can("run_scene") ? "; run scenes with run_scene" : "") +
-    " — confirm which device is meant when a reference is ambiguous."
+    " — confirm which device is meant when ambiguous."
   );
 };
 
@@ -131,7 +141,7 @@ const networkSystem: CategoryRenderer = (can) => {
  *  zero-tool caller — only the memory_recall fragment is gated. */
 const memoryPointer: CategoryRenderer = (can) => {
   return (
-    "- Before answering questions about the business's preferences or how the team likes things done, check the durable memory below" +
+    "- Before answering questions about the business's preferences or how the team works, check the durable memory below" +
     (can("memory_recall") ? "; call memory_recall for anything not listed." : ".")
   );
 };
@@ -148,12 +158,23 @@ const memoryForget: CategoryRenderer = (can) => {
 
 const businessContext: CategoryRenderer = (can) => {
   if (!can("business_profile_get")) return null;
-  return "- For questions about the business itself (what it does, customers, goals), use the business context above; call business_profile_get for the full profile.";
+  return "- For questions about the business or its customers, use the business context above; call business_profile_get for the full profile.";
+};
+
+/** WARP-3116 — the model answered `/settings/voice` from a doc: a path that
+ *  never existed. Withheld off the dashboard with its tool, so this renders
+ *  only where there is a screen to move. Names find_dashboard_page alone:
+ *  the budget below had 57 chars left, and that tool's description is what
+ *  points at open_dashboard_page. */
+const dashboardNavigation: CategoryRenderer = (can) => {
+  if (!can("find_dashboard_page")) return null;
+  return "- Never guess dashboard paths: use find_dashboard_page.";
 };
 
 const CATEGORY_RENDERERS: CategoryRenderer[] = [
   contentSearch,
   email,
+  teamChat,
   calendar,
   computation,
   smartDevices,
@@ -163,6 +184,7 @@ const CATEGORY_RENDERERS: CategoryRenderer[] = [
   memoryWrite,
   memoryForget,
   businessContext,
+  dashboardNavigation,
 ];
 
 const NEVER_INVENT_LINE =
@@ -173,18 +195,29 @@ const NEVER_INVENT_LINE =
 // page), not only search. The loop scrubs the shapes it recognises
 // (lib/log-redaction.ts); this covers the shapes it can't. It rides on the
 // never-invent line when that renders (no extra "- " line), which keeps the
-// full render ~10 chars under TOOL_GUIDANCE_MAX_CHARS without raising the
-// cap — the cap feeds the ADR-056 tools[] ceiling (12,410 tokens) that the
-// add-llm-tool skill and its test cite.
+// full render under TOOL_GUIDANCE_MAX_CHARS without raising the cap — the
+// cap feeds the ADR-056 tools[] ceiling (12,410 tokens) that the
+// add-llm-tool skill and its test cite. WARP-3116's dashboard-path line
+// joined it by trimming the content-search, email and datetime wording
+// above, for the same reason: fit under the cap, never raise it.
 const CREDENTIAL_RULE = "Never repeat a password, key or token from a result.";
 
 /**
  * Compose the tool-guidance block from the caller's EFFECTIVE tool set.
  * `allowed` undefined = privileged caller = every tool passes (the same
  * `can()` contract buildBaseSystemPrompt has always used).
+ *
+ * `withheld` — WARP-3116: tools this turn's pool drops whatever `allowed`
+ * says (today the navigation tools on a turn with no dashboard page list).
+ * `allowed` cannot carry that for the owner, whose `undefined` means "the
+ * default scope", so it arrives separately.
  */
-export function composeToolGuidance(allowed: string[] | undefined): string {
-  const can: Can = (name) => !allowed || allowed.includes(name);
+export function composeToolGuidance(
+  allowed: string[] | undefined,
+  withheld?: ReadonlySet<string>,
+): string {
+  const can: Can = (name) =>
+    (!allowed || allowed.includes(name)) && !withheld?.has(name);
   const rendered = CATEGORY_RENDERERS.map((render) => render(can)).filter(
     (line): line is string => line !== null,
   );
