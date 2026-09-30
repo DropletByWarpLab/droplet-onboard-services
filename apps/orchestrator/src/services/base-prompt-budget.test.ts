@@ -434,6 +434,14 @@ describe("worst-case fixed system-block budget", () => {
     // that carries no dashboard page list (voice, phones, background runs), so
     // on those turns they cost nothing at all.
     //
+    // WARP-3299 did not move it either. The chat-background-runs stack
+    // (WARP-3299/3300/3302: `cancel_agent_run` plus richer `start_agent_run`
+    // / `list_agent_runs` schemas) took the registry to 115,230 over 160 once
+    // merged with stage. Only that stack's own new prose was cut, keeping
+    // every directive (result posts to chat, approve on a card, never poll):
+    // 114,996 over 160, which leaves 4 chars. The next tool crosses this line,
+    // so its author makes the written call.
+    //
     // ⚠ The CHAT-pool assertion above used to be the fragile one, sitting at
     // 59,941 of a flat 60,000 — 59 chars of headroom, so the next tool added
     // to chat scope tripped it. WARP-2547 resolved that: it is now a function

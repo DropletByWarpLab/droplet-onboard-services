@@ -1197,3 +1197,33 @@ describe("agent runs — an approved park runs the STORED call; the model never 
     });
   });
 });
+
+describe("chat-started runs (WARP-3300)", () => {
+  it("run from the fixed brief, and the park notification names the chat", async () => {
+    const clock = new Date("2026-09-28T12:00:00Z");
+    const db = createAgentRunPrismaMock({ users: [OWNER], now: () => clock });
+    const { id } = await enqueueAgentRun(db.prisma, {
+      userId: OWNER.id,
+      goal: "tidy up old files",
+      model: "m",
+      sessionId: "conv-9",
+      origin: "chat",
+      title: "Tidy up",
+      deliverable: "A list of what was removed",
+    });
+    const mcp = interceptingMcp(["delete_file", "list_files"], new Set(["delete_file"]));
+    const { worker, chat } = makeWorker(db, mcp, { now: () => clock });
+    await worker.tickOnce();
+    await settle(worker);
+
+    const firstUser = (chat.mock.calls[0]![0] as { messages: Array<{ role: string; content: string }> }).messages.find(
+      (m) => m.role === "user",
+    )!;
+    expect(firstUser.content).toContain("Background task: Tidy up");
+    expect(firstUser.content).toContain("A list of what was removed");
+    expect(firstUser.content).toContain("at most 300 words");
+
+    const note = sendNotificationMock.mock.calls[0]![1] as { data: Record<string, unknown> };
+    expect(note.data).toEqual({ agentRunId: id, pendingTool: "delete_file", needsDecision: true, sessionId: "conv-9" });
+  });
+});
