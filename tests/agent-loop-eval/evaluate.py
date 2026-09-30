@@ -124,9 +124,12 @@ def evaluate(case, run, write_tools):
 
     # --- soft checks
     # WARP-3283: `no_progress` is the loop's own finalize pass after three
-    # zero-hit searches. The model still answers (checked below), so it is a
-    # clean stop for cases whose correct outcome is "nothing found".
-    ok_stops = {"model_done"} | ({"no_progress"} if case.get("category") in ("grounding", "loop_control") else set())
+    # zero-hit searches; WARP-3347's `needs_details` is the same pass when half
+    # a turn's steps found nothing. The model still answers (checked below, an
+    # ambiguity case still needs its clarifying question), so either is a
+    # clean stop where the correct outcome is "nothing found" or "tell me more".
+    clean_finalize = {"no_progress", "needs_details"}
+    ok_stops = {"model_done"} | (clean_finalize if case.get("category") in ("grounding", "loop_control", "ambiguity") else set())
     if run.get("stop_reason") not in ok_stops:
         fails.append(f"stop_reason={run.get('stop_reason')}")
     if not (run.get("final_answer") or "").strip():

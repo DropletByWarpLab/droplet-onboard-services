@@ -51,6 +51,15 @@ iso = next(s["result"]["iso"] for s in r["steps"] if s.get("type") == "tool_resu
 plus3 = (datetime.date.fromisoformat(r["today"]) + datetime.timedelta(days=3)).isoformat()
 assert iso[:10] == r["today"] and plus3 in r["turns_asked"][0], (iso, r["today"], r["turns_asked"])
 print("ok  retry: 429 retried once, 502 recorded; clock: tool, prompt and {{today+3}} agree")
+# The loop's finalize stops are clean only where "nothing found" / "tell me
+# more" is the right outcome, and the answer is still checked.
+import evaluate as ev
+amb = {"category": "ambiguity", "expected": {"requires_clarification": True}}
+run = {"stop_reason": "needs_details", "final_answer": "Which record do you mean?", "steps": [], "dispatches": []}
+assert ev.evaluate(amb, run, {})["pass"]
+assert not ev.evaluate(amb, {**run, "final_answer": "Done."}, {})["pass"]
+assert not ev.evaluate({**amb, "category": "tool_selection"}, run, {})["pass"]
+print("ok  finalize stops: needs_details is clean on ambiguity, not on tool_selection")
 PY
 rc=0
 env -u NODE_OPTIONS tsx run.mts --fake selftest/outage.json --only seed-001,seed-002,seed-003,seed-005 --out runs/selftest-outage.jsonl >/dev/null 2>runs/selftest-outage.log || rc=$?
