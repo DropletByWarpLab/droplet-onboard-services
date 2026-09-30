@@ -367,16 +367,83 @@ describe("MCP dispatch path — a precheck refuses before the challenge (WARP-33
     await close();
   });
 
-  it("a precheck that throws does not stand between the person and the approval", async () => {
-    const { tool, invoked } = prechecked(async () => {
-      throw new Error("roster unreachable");
-    });
+  it.each([
+    [
+      "rejects",
+      (async () => {
+        throw new Error("roster unreachable");
+      }) as NonNullable<Tool["precheck"]>,
+    ],
+    [
+      "throws synchronously",
+      (() => {
+        throw new Error("roster unreachable");
+      }) as unknown as NonNullable<Tool["precheck"]>,
+    ],
+  ])("a precheck that %s does not stand between the person and the approval, and is logged by name only", async (_label, precheck) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { tool, invoked } = prechecked(precheck);
+    const { client, close } = await connect({ additionalTools: new Map([[tool.name, tool]]) });
+
+    const payload = parse(await client.callTool({ name: tool.name, arguments: { contactId: "c-secret" } }));
+
+    expect(payload.status).toBe("confirmation_required");
+    expect(invoked).toEqual([]);
+    expect(warn).toHaveBeenCalledWith("tool.precheck_threw", { tool: tool.name });
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("c-secret");
+    warn.mockRestore();
+    await close();
+  });
+
+  it.each([
+    ["a success", { ok: true, data: { sent: true } }],
+    ["a confirmation_required", { ok: false, status: "confirmation_required", error: { code: "X", message: "x" } }],
+  ])("anything but an error (%s) is ignored: the normal challenge", async (_label, answer) => {
+    const { tool, invoked } = prechecked((async () => answer) as unknown as NonNullable<Tool["precheck"]>);
     const { client, close } = await connect({ additionalTools: new Map([[tool.name, tool]]) });
 
     const payload = parse(await client.callTool({ name: tool.name, arguments: { contactId: "c-1" } }));
 
     expect(payload.status).toBe("confirmation_required");
+    expect((payload.error as { code: string }).code).toBe("CONFIRMATION_REQUIRED");
     expect(invoked).toEqual([]);
+    await close();
+  });
+
+  it("a DENIED call never runs the precheck: TOOL_DENIED, not the precheck's refusal (contract §8)", async () => {
+    const precheck = vi.fn(async () => ({
+      ok: false as const,
+      status: "error" as const,
+      error: { code: "RECIPIENT_NOT_A_MEMBER", message: "ask whether to email them" },
+    }));
+    const { tool, invoked } = prechecked(precheck);
+    defaultToolCallInterceptor.denyTier.add("test:deny-before-precheck", ({ tool: t }) =>
+      t.name === tool.name ? { code: "REMOTE_WRITES_DISABLED", message: "remote writes are off" } : null,
+    );
+    const { client, close } = await connect({ additionalTools: new Map([[tool.name, tool]]) });
+
+    const payload = parse(await client.callTool({ name: tool.name, arguments: { contactId: "c-1" } }));
+
+    expect((payload.error as { code: string }).code).toBe("TOOL_DENIED");
+    expect(precheck).not.toHaveBeenCalled();
+    expect(invoked).toEqual([]);
+    defaultToolCallInterceptor.denyTier.remove("test:deny-before-precheck");
+    await close();
+  });
+
+  it.each([
+    ["a tool that does not require confirmation", { requiresConfirmation: false }],
+    ["a route-owned confirmation (§13)", { confirmationOwner: "route" as const }],
+  ])("the interceptor would not challenge %s, so its precheck never runs", async (_label, override) => {
+    const precheck = vi.fn(async () => null);
+    const { tool } = prechecked(precheck);
+    const { client, close } = await connect({
+      additionalTools: new Map([[tool.name, { ...tool, ...override } as Tool]]),
+    });
+
+    await client.callTool({ name: tool.name, arguments: { contactId: "c-1" } });
+
+    expect(precheck).not.toHaveBeenCalled();
     await close();
   });
 });

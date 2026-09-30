@@ -471,6 +471,7 @@ describe("WARP-3349 — a recipient given by work email address", () => {
   const DAVE = { id: "uuid-dave", displayName: "Dave Ortiz", username: "dave" };
   const ROSTER = { ...CONTACTS, contacts: [...CONTACTS.contacts, { ...DAVE, role: "family" }] };
   const DIRECTORY: Record<string, typeof DAVE> = { "dave@example.com": DAVE };
+  const GUEST_ADDRESS = "carol@partner.example";
 
   function errorOf(r: ToolResult | null) {
     if (!r || r.ok) throw new Error(`expected a refusal, got ${JSON.stringify(r)}`);
@@ -487,7 +488,12 @@ describe("WARP-3349 — a recipient given by work email address", () => {
         lookups.push(emails);
         return lookup
           ? lookup(emails)
-          : res(200, { contacts: emails.map((e) => DIRECTORY[e.trim().toLowerCase()] ?? null) });
+          : res(200, {
+              contacts: emails.map((e) => {
+                const key = e.trim().toLowerCase();
+                return DIRECTORY[key] ?? (key === GUEST_ADDRESS ? { guest: true } : null);
+              }),
+            });
       }
       writes.push({ path, body });
       return path === "/api/team-chat/threads"
@@ -517,13 +523,13 @@ describe("WARP-3349 — a recipient given by work email address", () => {
     expect(r.data).toMatchObject({ recipients: ["dave"] });
   });
 
-  it("the approval preview names the member, and nothing is written", async () => {
+  // The person approves the interceptor's card (argument shapes only), not
+  // this handler's text, so what matters before approval is only whether
+  // precheck lets the call through.
+  it("precheck resolves a member's address and lets the call through to the approval, writing nothing", async () => {
     const w = world();
-    const r = await sendMessage.handler({ recipients: ["dave@example.com"], body: "hi" }, w.ctx);
-    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
-    expect(r.status).toBe("confirmation_required");
-    expect(r.error?.message).toContain("Dave Ortiz");
-    expect(r.error?.details).toMatchObject({ recipients: ["dave"] });
+    expect(await sendMessage.precheck!({ recipients: ["dave@example.com"], body: "hi" }, w.ctx)).toBeNull();
+    expect(w.lookups).toEqual([["dave@example.com"]]);
     expect(w.writes).toEqual([]);
   });
 
@@ -540,6 +546,41 @@ describe("WARP-3349 — a recipient given by work email address", () => {
       },
     });
     expect(w.writes).toEqual([]);
+  });
+
+  it("a guest's address is refused truthfully: guests are reached by username only", async () => {
+    const w = world();
+    const early = await sendMessage.precheck!({ recipients: [GUEST_ADDRESS], body: "hi" }, w.ctx);
+    expect(errorOf(early)).toEqual({
+      code: "RECIPIENT_IS_GUEST",
+      message:
+        "carol@partner.example is an external guest in this Workspace; team chat reaches guests by username only — ask the user for the username, or whether to email them instead.",
+    });
+    expect(w.writes).toEqual([]);
+  });
+
+  it.each([
+    ["no local part", "@bob"],
+    ["no domain dot", "bob@localhost"],
+    ["over the 320-character limit", `${"a".repeat(310)}@example.com`],
+  ])("a value not shaped like an address (%s) is not looked up: UNKNOWN_RECIPIENT", async (_label, value) => {
+    const w = world();
+    const early = await sendMessage.precheck!({ recipients: [value], body: "hi" }, w.ctx);
+    expect(errorOf(early).code).toBe("UNKNOWN_RECIPIENT");
+    expect(w.lookups).toEqual([]);
+  });
+
+  it("Messages switched off (the roster's 404) is refused before approval, with no lookup", async () => {
+    const post = vi.fn();
+    const { ctx } = ctxWith({ get: vi.fn(async () => res(404, {})), post });
+    const early = await sendMessage.precheck!({ recipients: ["dave@example.com"], body: "hi" }, ctx);
+    expect(errorOf(early).code).toBe("TEAM_CHAT_UNAVAILABLE");
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("any other roster failure still lets the call through to the approval (phase 2 reads again)", async () => {
+    const { ctx } = ctxWith({ get: vi.fn(async () => res(500, {})) });
+    expect(await sendMessage.precheck!({ recipients: ["bob"], body: "hi" }, ctx)).toBeNull();
   });
 
   it("phase 2 refuses the same address, with no write", async () => {

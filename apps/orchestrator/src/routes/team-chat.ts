@@ -479,11 +479,14 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
   // address. The roster has no email column (User.email is encrypted at
   // rest, WARP-233), so each address is one blind-index probe
   // (findUserByEmail: trim + lowercase, then the emailLookupHash), never a
-  // decrypt of the table. Only ACTIVE owners, admins and members match; an
-  // external guest's, a deactivated person's or nobody's address answers
-  // null, in request order. POST so the addresses stay out of the logged
-  // URL, and nothing here logs them. A guest caller gets no directory
-  // lookup at all (WARP-3263).
+  // decrypt of the table. Only ACTIVE owners, admins and members match; a
+  // deactivated person's or nobody's address answers null, in request
+  // order. An ACTIVE external guest's answers `{ guest: true }` and nothing
+  // else, so the tool can say truthfully that a guest is reached by
+  // username only; the roster already lists guests to this caller. Whether
+  // guests should be reachable by address is Romain's call (WARP-3349).
+  // POST so the addresses stay out of the logged URL, and nothing here
+  // logs them. A guest caller gets no directory lookup at all (WARP-3263).
   router.post("/team-chat/contacts/lookup", guardOrMcp, async (req, res, next) => {
     try {
       const me = await resolveCaller(req);
@@ -503,9 +506,9 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
       const contacts = await Promise.all(
         parsed.data.emails.map(async (email) => {
           const user = await findUserByEmail(prisma, email);
-          return user &&
-            user.directoryStatus === "ACTIVE" &&
-            (MEMBER_ROLES as readonly string[]).includes(user.role)
+          if (!user || user.directoryStatus !== "ACTIVE") return null;
+          if (user.role === "guest") return { guest: true };
+          return (MEMBER_ROLES as readonly string[]).includes(user.role)
             ? { id: user.id, displayName: user.displayName, username: user.username }
             : null;
         }),

@@ -138,31 +138,43 @@ export function previewRecipients(
   };
 }
 
+/** `local@domain.tld`, within the lookup route's 320-character limit. */
+const ADDRESS_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 /**
  * WARP-3349 — the recipients to look up as a member's work email address:
- * those that match no roster username and contain "@". Usernames never
- * contain "@" (invite, SSO and SCIM keep [A-Za-z0-9._-]), and a roster
- * username still wins, so a typed username never takes this path.
+ * those that match no roster username and are shaped like an address.
+ * Usernames never contain "@" (invite, SSO and SCIM keep [A-Za-z0-9._-]),
+ * and a roster username still wins, so a typed username never takes this
+ * path. Anything else ("@bob", an oversized string) stays a username and
+ * fails as UNKNOWN_RECIPIENT.
  */
 export function addressesToLookUp(
   roster: { contacts: RosterContact[] },
   recipients: string[],
 ): string[] {
   const usernames = new Set(roster.contacts.flatMap((c) => (c.username ? [c.username] : [])));
-  return recipients.filter((r) => !usernames.has(r) && r.includes("@"));
+  return recipients.filter(
+    (r) => !usernames.has(r) && r.length <= 320 && ADDRESS_SHAPE.test(r),
+  );
 }
 
 export type AddressLookup =
   | { ok: true; usernames: string[] }
   | { ok: false; result: ToolResult };
 
+/** A lookup row: a member, `{ guest: true }` for an external guest's address, or null. */
+type LookupRow = { username?: string; guest?: boolean } | null;
+
 /**
- * WARP-3349 — map POST /api/team-chat/contacts/lookup (one row or `null`
- * per address, in order) back onto `recipients`: each address becomes its
- * member's username, deduplicated, so "dave" and "dave@company.com" are one
- * person. An address that is no ACTIVE owner's, admin's or member's is
- * refused, and the model is told to offer email instead (Romain,
- * 2026-09-29: team chat by default, email only when the person asks).
+ * WARP-3349 — map POST /api/team-chat/contacts/lookup (one row per address,
+ * in order) back onto `recipients`: each address becomes its member's
+ * username, deduplicated, so "dave" and "dave@company.com" are one person.
+ * An address that is no ACTIVE owner's, admin's or member's is refused, and
+ * the model is told to offer email instead (Romain, 2026-09-29: team chat by
+ * default, email only when the person asks). A guest's address is refused
+ * too (only members are reached by address), but truthfully: a guest can
+ * still be messaged by username.
  */
 export async function readLookupResponse(
   res: TeamChatHttpResponse,
@@ -176,7 +188,7 @@ export async function readLookupResponse(
     return { ok: false, result: err("AUTH_REQUIRED", "auth_required") };
   }
   const body = res.ok
-    ? ((await res.json().catch(() => null)) as { contacts?: (RosterContact | null)[] } | null)
+    ? ((await res.json().catch(() => null)) as { contacts?: LookupRow[] } | null)
     : null;
   const rows = body?.contacts;
   if (!Array.isArray(rows) || rows.length !== addresses.length) {
@@ -185,8 +197,8 @@ export async function readLookupResponse(
       result: err("TEAM_CHAT_SEND_FAILED", `orchestrator returned ${res.status}`),
     };
   }
-  const byAddress = new Map(addresses.map((a, i) => [a, rows[i]?.username ?? null]));
-  const outside = addresses.filter((a) => byAddress.get(a) === null);
+  const byAddress = new Map(addresses.map((a, i) => [a, rows[i] ?? null]));
+  const outside = addresses.filter((a) => !byAddress.get(a)?.username && !byAddress.get(a)?.guest);
   if (outside.length > 0) {
     return {
       ok: false,
@@ -196,9 +208,19 @@ export async function readLookupResponse(
       ),
     };
   }
+  const guests = addresses.filter((a) => byAddress.get(a)?.guest);
+  if (guests.length > 0) {
+    return {
+      ok: false,
+      result: err(
+        "RECIPIENT_IS_GUEST",
+        `${guests.join(", ")} ${guests.length === 1 ? "is an external guest" : "are external guests"} in this Workspace; team chat reaches guests by username only — ask the user for the username, or whether to email them instead.`,
+      ),
+    };
+  }
   return {
     ok: true,
-    usernames: [...new Set(recipients.map((r) => byAddress.get(r) ?? r))],
+    usernames: [...new Set(recipients.map((r) => byAddress.get(r)?.username ?? r))],
   };
 }
 

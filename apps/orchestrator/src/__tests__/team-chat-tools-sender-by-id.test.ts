@@ -391,7 +391,7 @@ describe("WARP-3349 — a colleague given by work email address", () => {
   const lookup = (user: AuthUser, prisma: PrismaDouble, emails: unknown) =>
     request(appAs(user, prisma)).post("/api/team-chat/contacts/lookup").send({ emails });
 
-  it("answers a member's address in any case or spacing, and null for anyone else, in order", async () => {
+  it("answers a member's address in any case or spacing, only `guest` for a guest's, null otherwise, in order", async () => {
     const prisma = prismaDouble(WITH_EMAIL);
     const res = await lookup(asSession(ALICE), prisma, [
       " Bob@ACME.test ",
@@ -401,7 +401,7 @@ describe("WARP-3349 — a colleague given by work email address", () => {
     ]);
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
-      contacts: [{ id: BOB.id, displayName: "Bob", username: "bob" }, null, null, null],
+      contacts: [{ id: BOB.id, displayName: "Bob", username: "bob" }, null, { guest: true }, null],
     });
     // One blind-index probe per address; the table is never read whole.
     expect(prisma.user.findMany).not.toHaveBeenCalled();
@@ -450,13 +450,13 @@ describe("WARP-3349 — a colleague given by work email address", () => {
   });
 
   it.each([
-    ["nobody's", "nobody@acme.test"],
-    ["an external guest's", "carol@partner.test"],
-    ["a deactivated person's", "dan@acme.test"],
-  ])("the real precheck refuses %s address before approval, with no thread", async (_label, address) => {
+    ["nobody's", "nobody@acme.test", "RECIPIENT_NOT_A_MEMBER"],
+    ["an external guest's", "carol@partner.test", "RECIPIENT_IS_GUEST"],
+    ["a deactivated person's", "dan@acme.test", "RECIPIENT_NOT_A_MEMBER"],
+  ])("the real precheck refuses %s address before approval, with no thread", async (_label, address, code) => {
     const prisma = prismaDouble(WITH_EMAIL);
     const early = await sendMessage.precheck!({ recipients: [address], body: "hi" }, toolCtx(prisma, ALICE));
-    expect(early).toMatchObject({ ok: false, status: "error", error: { code: "RECIPIENT_NOT_A_MEMBER" } });
+    expect(early).toMatchObject({ ok: false, status: "error", error: { code } });
     expect(prisma.teamChatThread.create).not.toHaveBeenCalled();
   });
 

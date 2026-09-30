@@ -7,10 +7,13 @@
  * orchestrator; a multi-recipient send creates a group) or into an
  * existing thread by id.
  *
- * Two-phase contract (the share_file posture): the first call returns
- * `confirmation_required` (reads only, ZERO writes) previewing who gets what; only a
- * re-issue with `confirmed: true` — after the user explicitly approves —
- * dispatches. Identity: every orchestrator call carries X-Droplet-User =
+ * Two-phase contract (the share_file posture): an unconfirmed call validates
+ * and resolves the recipients (reads only, ZERO writes) and returns
+ * `confirmation_required`; only a call with `confirmed: true` dispatches. In
+ * chat the dispatch interceptor challenges before this handler runs, so the
+ * person approves the interceptor's card (argument shapes only, WARP-2469),
+ * never this handler's text; the unconfirmed phase runs as `precheck`
+ * (WARP-3349) to refuse a send that cannot happen before that card. Identity: every orchestrator call carries X-Droplet-User =
  * ctx.userId (username on stdio, User.id over HTTP), so the message is
  * attributed to the acting human and flows through the exact
  * participant/module checks a
@@ -144,14 +147,15 @@ async function handler(
     return err("INVALID_ARGS", "thread_id must be a non-empty conversation id");
   }
 
-  // Confirmation gate — AFTER validation (a malformed call should fail
+  // Unconfirmed phase — AFTER validation (a malformed call should fail
   // loudly, not ask the user to approve it) and BEFORE any WRITE. The
-  // recipients are resolved exactly as phase 2 does, so the approval copy
-  // shows DISPLAY NAMES ("Bob B", not "bob" — UX review) without the
-  // sender, and a recipient phase 2 would refuse (unknown, not a member,
-  // only the sender) is refused here (WARP-3349: `precheck` below runs this
-  // before the interceptor asks). A roster hiccup falls back to the typed
-  // recipients, and phase 2 still validates them loudly.
+  // recipients are resolved exactly as phase 2 does, so a recipient phase 2
+  // would refuse (unknown, not a member, only the sender) is refused here.
+  // WARP-3349: `precheck` below runs this before the interceptor asks, so
+  // those refusals come before the approval card. The confirmation_required
+  // text is only what a direct caller gets; nobody approves it. Messages
+  // switched off (the roster's 404) is refused too; any other roster hiccup
+  // falls back to the typed recipients, and phase 2 validates them again.
   if (args.confirmed !== true) {
     let names = recipients;
     if (hasRecipients) {
@@ -161,6 +165,7 @@ async function handler(
           { headers: actingHeaders(ctx) },
         );
         const roster = await readRosterResponse(rosterRes);
+        if (!roster.ok && rosterRes.status === 404) return roster.result;
         if (roster.ok) {
           const resolved = await resolveTargets(ctx, roster, recipients);
           if (!resolved.ok) return resolved.result;
@@ -168,7 +173,7 @@ async function handler(
           names = resolved.others.map((c) => c.displayName || c.username || c.id);
         }
       } catch {
-        // Preview-only reads — the typed recipients are an honest fallback.
+        // Unreachable roster — phase 2 reads it again and fails loudly.
       }
     }
     const target = hasRecipients ? names.join(", ") : "the existing conversation";
@@ -265,7 +270,7 @@ const tool: Tool = {
   // this can never reach phase 2's writes, whatever the model passed.
   precheck: async (args, ctx) => {
     const r = await handler({ ...args, confirmed: false }, ctx);
-    return !r.ok && r.status === "error" ? r : null;
+    return !r.ok && r.status === "error" ? { ok: false, status: "error", error: r.error } : null;
   },
   handler,
 };

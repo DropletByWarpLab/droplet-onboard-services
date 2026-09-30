@@ -306,11 +306,14 @@ The one case that needs a second declaration: if your handler relays a
 Because the interceptor challenges before your handler runs, a handler
 alone can refuse a hopeless call (an unknown recipient, say) only after
 the person approved it. Declare `precheck` (WARP-3349) to refuse it
-first: `services/mcp-server/src/server.ts` runs it on a call without a
-token, returns its `ToolResult` instead of the challenge, and lets a
-`null` through to the interceptor. It must only read; a throw is
-ignored, and the handler still validates after approval.
-`team_chat_send_message` runs its own unconfirmed phase as the precheck.
+first. `services/mcp-server/src/server.ts` runs it only on a call the
+interceptor is about to challenge: no token, `requiresConfirmation`, an
+interceptor-owned confirmation (§13), and no deny rule matching (§8 —
+a denied call runs nothing and answers `TOOL_DENIED`). An error result
+replaces the challenge; `null`, any other result, or a throw (logged by
+tool name only) leaves the interceptor to ask. It must only read, and
+the handler still validates after approval. `team_chat_send_message`
+runs its own unconfirmed phase as the precheck.
 
 See `packages/tools-core/src/confirmation.ts` and
 `packages/tools-core/src/interceptor.ts`.
