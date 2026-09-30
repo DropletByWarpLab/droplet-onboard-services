@@ -116,6 +116,11 @@ export function buildBaseSystemPrompt(
    * principal's own prompt already carries a clock.
    */
   dateLine: string = todayLine(),
+  /**
+   * WARP-3116 — tools the turn's pool withholds regardless of `allowed`
+   * (see composeToolGuidance). Omitted = nothing beyond `allowed`.
+   */
+  withheldTools?: ReadonlySet<string>,
 ): string {
   // Identity leads: the full "who you are / what this box does" block
   // from data/droplet-identity.md (fail-open to the legacy one-liner),
@@ -135,7 +140,7 @@ export function buildBaseSystemPrompt(
   // Tool guidance is composed per-category from the caller's EFFECTIVE
   // set (tool-guidance.service.ts) — the WARP-642 never-name-a-stripped-
   // tool invariant lives there, with its own unit tests.
-  const guidanceBlock = composeToolGuidance(allowed);
+  const guidanceBlock = composeToolGuidance(allowed, withheldTools);
   if (guidanceBlock.length > 0) {
     lines.push("", guidanceBlock);
   }

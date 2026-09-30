@@ -75,7 +75,7 @@ async function handler(
 const tool: Tool = {
   name: "network_summary",
   description:
-    "Get a one-shot snapshot of network health: WAN throughput, active client count, DNS queries blocked today, off-LAN bytes this month. Returns a network_check card the dashboard renders as a KPI grid + summary. Tier-1 read; safe to call without operator confirmation. Use when the user asks status-shape questions like 'how's the network?' or 'anything weird?'",
+    "Get a one-shot snapshot of network health: WAN throughput, active client count, DNS queries blocked today, off-LAN bytes this month. Returns a network_check card the dashboard renders as a KPI grid + summary. Use when the user asks status-shape questions like 'how's the network?' or 'anything weird?'",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

@@ -1,6 +1,7 @@
 import { config } from "../config.js";
 import { getRequestId } from "../lib/request-context.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
+import { GatewayPreemptedError, PREEMPTED_FOR_CHAT } from "../lib/gateway-preempted.js";
 import { markModelListChanged, modelListGeneration } from "./model-list-generation.js";
 import type {
   ChatRequest,
@@ -251,7 +252,14 @@ export async function getModelContextWindow(
  */
 export interface ChatCallOptions {
   priority?: number;
+  /**
+   * WARP-3306 — `X-Preemptible: 1`: the gateway may cut this (background)
+   * call short when a chat request arrives. It then throws
+   * {@link GatewayPreemptedError}. Only the agent-run worker opts in.
+   */
+  preemptible?: boolean;
 }
+
 
 export async function chat(
   request: ChatRequest,
@@ -273,12 +281,14 @@ export async function chat(
       "Content-Type": "application/json",
       ...authHeaders(userId),
       ...(opts?.priority !== undefined ? { "X-Request-Priority": String(opts.priority) } : {}),
+      ...(opts?.preemptible ? { "X-Preemptible": "1" } : {}),
     },
     body: JSON.stringify(request),
     signal,
   });
   if (!res.ok && !request.stream) {
     const body = await res.text();
+    if (res.status === 409 && body.includes(PREEMPTED_FOR_CHAT)) throw new GatewayPreemptedError();
     throw new Error(`AI Gateway error ${res.status}: ${body}`);
   }
   return res;
@@ -310,6 +320,7 @@ export async function* chatStream(
   const res = await chat({ ...request, stream: true }, signal, userId, opts);
   if (!res.ok) {
     const body = await res.text().catch(() => "");
+    if (res.status === 409 && body.includes(PREEMPTED_FOR_CHAT)) throw new GatewayPreemptedError();
     throw new Error(`AI Gateway streaming error ${res.status}: ${body}`);
   }
   if (!res.body) {
@@ -324,11 +335,18 @@ export async function* chatStream(
     if (!line.startsWith("data:")) return;
     const payload = line.slice(5).trim();
     if (!payload || payload === "[DONE]") return;
+    let chunk: ChatStreamChunk;
     try {
-      yield JSON.parse(payload) as ChatStreamChunk;
+      chunk = JSON.parse(payload) as ChatStreamChunk;
     } catch {
       // Skip a malformed frame rather than tearing down the whole turn.
+      return;
     }
+    // WARP-3306 — the gateway ends a preempted stream with this frame.
+    if ((chunk as { error?: { code?: unknown } }).error?.code === PREEMPTED_FOR_CHAT) {
+      throw new GatewayPreemptedError();
+    }
+    yield chunk;
   };
 
   try {

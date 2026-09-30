@@ -33,6 +33,7 @@ import {
 } from "./security-pattern-rules.js";
 import { loadActiveLinks } from "./security-zones.service.js";
 import { slotOf } from "../lib/security-baseline-slots.js";
+import { SECURITY_RULESET_VERSION } from "../lib/security-rules.js";
 import {
   areaRows,
   baselineRows,
@@ -86,6 +87,7 @@ const areaGrouped = (over: Partial<GroupedInto> = {}): GroupedInto => ({
   key: { scope: "area", zoneId: STOCK, scopeCamera: null },
   zoneKind: "interior",
   mode: "closed",
+  personLinked: true,
   ...over,
 });
 
@@ -113,7 +115,7 @@ describe("a judged event (every gate passes)", () => {
       effect: "trial",
       severity: "alert",
       suppressionId: null,
-      rulesetVersion: 3,
+      rulesetVersion: SECURITY_RULESET_VERSION,
       zoneKey: `area:${STOCK}`,
       keyCameras: ["back"],
       evidenceEventId: 500n,
@@ -127,7 +129,7 @@ describe("a judged event (every gate passes)", () => {
         windowTo: "2026-09-22",
         mode: "closed",
         zoneKind: "interior",
-        rulesetVersion: 3,
+        rulesetVersion: SECURITY_RULESET_VERSION,
         daysObserved: 20,
         daysWithEvent: 0,
         smoothedDaysObserved: "30",
@@ -145,6 +147,28 @@ describe("a judged event (every gate passes)", () => {
     const { n, tally } = await judge(usual);
     expect(n).toBe(0);
     expect(tally).toEqual([{ date: "2026-09-23", outcome: "judged", n: 1 }]);
+  });
+});
+
+// ADR-059 §6.7.1 / P4 PR-1's PR-D checklist — an area matched only through a link Droplet made must not
+// add its `restricted` raise to a pattern flag's severity. Trial today, so nothing alerts; PR-D flips it.
+describe("pattern severity ignores an area matched only through a Droplet link (§6.7.1)", () => {
+  const severityOf = async (over: Partial<GroupedInto>) => (await judge(world(), undefined, areaGrouped(over))).flags[0]!.severity;
+
+  it("open hours, a restricted area: the raise applies when a person linked it, and not when only Droplet did", async () => {
+    expect(await severityOf({ zoneKind: "restricted", mode: "open", personLinked: true })).toBe("alert");
+    expect(await severityOf({ zoneKind: "restricted", mode: "open", personLinked: false })).toBe("notice");
+  });
+
+  it("a Droplet-linked restricted area gets the severity a camera key gets (no area modifier)", async () => {
+    const cameraKey = await severityOf({ zoneKind: null, mode: "open", personLinked: false });
+    expect(await severityOf({ zoneKind: "restricted", mode: "open", personLinked: false })).toBe(cameraKey);
+  });
+
+  it("only the area modifier is dropped: the mode raise still applies, and the snapshot in `detail` still names the kind", async () => {
+    expect(await severityOf({ zoneKind: "restricted", mode: "closed", personLinked: false })).toBe("alert");
+    const { flags } = await judge(world(), undefined, areaGrouped({ zoneKind: "restricted", mode: "open", personLinked: false }));
+    expect(flags[0]).toMatchObject({ severity: "notice", detail: { zoneKind: "restricted" } });
   });
 });
 

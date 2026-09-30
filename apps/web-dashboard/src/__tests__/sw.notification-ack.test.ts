@@ -20,6 +20,7 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { readPackageFile } from "./helpers/test-paths";
+import { isInAppPath } from "../components/NotificationToaster";
 
 const SOURCE = readPackageFile("public/sw.js");
 
@@ -327,5 +328,54 @@ describe("sw.js — Security alerts (WARP-2978, D36, D37)", () => {
     expect(sw.clients.openWindow).toHaveBeenLastCalledWith(INCIDENT);
     await click(sw, { url: `${INCIDENT}?n=someone-elses`, notificationId: "clx9" }).done;
     expect(sw.clients.openWindow).toHaveBeenLastCalledWith(`${INCIDENT}?n=someone-elses`);
+  });
+});
+
+describe("sw.js notificationclick → re-checks the stored url (WARP-3208)", () => {
+  const CTRL = String.fromCharCode(10);
+  const NUL = String.fromCharCode(0);
+  const BAD = [
+    "https://evil.example/x",
+    "javascript:alert(1)",
+    "//evil.example/x",
+    "/" + String.fromCharCode(92) + "evil.example",
+    "calendar",
+    "/a" + CTRL + "b",
+    "/a" + NUL + "b",
+    "/a" + String.fromCharCode(127),
+    "",
+    null,
+    42,
+  ];
+  const GOOD = ["/calendar", "/cameras/front", "/security/incidents/abc-1", "/x?y=1#z"];
+
+  it.each(BAD)("an unsafe stored url (%j) falls back to /cameras", async (url) => {
+    const opened = fakeClient();
+    const sw = loadSw({ opened });
+    await click(sw, { url }).done;
+    expect(sw.clients.openWindow).toHaveBeenCalledWith("/cameras");
+  });
+
+  it.each(GOOD)("an in-app path (%s) is opened as sent", async (url) => {
+    const sw = loadSw({ opened: fakeClient() });
+    await click(sw, { url }).done;
+    expect(sw.clients.openWindow).toHaveBeenCalledWith(url);
+  });
+
+  it("an unsafe url also falls back when a dashboard tab is focused, and still acks", async () => {
+    const win = { ...fakeClient(), focus: vi.fn(async () => undefined), navigate: vi.fn(async () => null) };
+    const sw = loadSw({ windows: [win] });
+    await click(sw, { url: "https://evil.example/x", notificationId: "clx1" }).done;
+    expect(win.navigate).toHaveBeenCalledWith("/cameras");
+    expect(sw.fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("sw.js's predicate agrees with the toaster's canonical isInAppPath on every case", () => {
+    const m = /function isInAppPath\(url\) \{[\s\S]*?\n\}\n/.exec(SOURCE);
+    expect(m).not.toBeNull();
+    const swPredicate = new Function(m![0] + "return isInAppPath;")() as (u: unknown) => boolean;
+    for (const c of [...BAD, ...GOOD, "/", "/\\", "//", "/" + String.fromCharCode(31)]) {
+      expect(swPredicate(c), JSON.stringify(c)).toBe(isInAppPath(c));
+    }
   });
 });

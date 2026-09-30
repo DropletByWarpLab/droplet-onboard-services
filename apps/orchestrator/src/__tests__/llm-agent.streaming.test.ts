@@ -399,6 +399,29 @@ describe("runAgent — server-side token streaming (WARP-1442)", () => {
     expect(deltas).toHaveLength(1);
   });
 
+  // WARP-3306 — a gateway preemption is not a transport death: it neither
+  // falls back to blocking chat() (a second call chat would have to wait out)
+  // nor becomes a `stream_interrupted` turn with a partial answer. It
+  // propagates, so the agent-run worker can requeue and redo the iteration.
+  it.each([
+    ["before any content", false],
+    ["after partial content", true],
+  ])("a preempted_for_chat stream (%s) rejects runAgent — no fallback, no partial turn", async (_label, partial) => {
+    const chat = vi.fn();
+    const preempted = Object.assign(new Error("AI Gateway preempted_for_chat"), { code: "preempted_for_chat" });
+    async function* cutStream(): AsyncGenerator<ChatStreamChunk> {
+      if (partial) yield { choices: [{ delta: { content: "Partial" } }] };
+      throw preempted;
+    }
+    const deps: AgentDeps = {
+      mcp: { listTools: vi.fn().mockResolvedValue([]), callTool: vi.fn() } as never,
+      aiGateway: { chat, chatStream: () => cutStream() } as never,
+      onEvent: () => {},
+    };
+    await expect(runAgent(deps, REQ)).rejects.toBe(preempted);
+    expect(chat).not.toHaveBeenCalled();
+  });
+
   it("does NOT fall back (no double-emit) when the stream dies AFTER partial content", async () => {
     // Blocking chat would answer in full — falling back after partial content
     // was already streamed would replay + double the answer. Instead the turn

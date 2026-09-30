@@ -209,7 +209,7 @@ describe("WARP-473 — extractCitedFilePaths", () => {
   });
 
   it("survives non-JSON wire text (the `{ raw }` degrade path)", () => {
-    expect(extractCitedFilePaths(parseToolResultPayload("not json at all"))).toEqual([]);
+    expect(extractCitedFilePaths(parseToolResultPayload("not json at all", "read_file"))).toEqual([]);
   });
 
   // THE regression. Before WARP-1604 the extractor walked `data.*`, which is
@@ -220,6 +220,7 @@ describe("WARP-473 — extractCitedFilePaths", () => {
   it("does NOT read the legacy `{ ok, data }` envelope (WARP-1604 regression)", () => {
     const legacyEnvelopeOnTheWire = parseToolResultPayload(
       JSON.stringify({ ok: true, data: { path: "/Documents/foo.pdf" } }),
+      "read_file",
     );
     expect(extractCitedFilePaths(legacyEnvelopeOnTheWire)).toEqual([]);
   });

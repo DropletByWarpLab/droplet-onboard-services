@@ -23,9 +23,14 @@
  */
 
 import { useState } from "react";
-import { Lock, Send, Sparkles } from "lucide-react";
+import { Download, Lock, Paperclip, Send, Sparkles } from "lucide-react";
 import { sendDraft } from "@/lib/api";
-import type { DraftRow, EmailMessage, ThreadDetail } from "@/lib/types-email";
+import type {
+  DraftRow,
+  EmailAttachment,
+  EmailMessage,
+  ThreadDetail,
+} from "@/lib/types-email";
 
 interface EmailThreadProps {
   thread?: ThreadDetail;
@@ -142,7 +147,7 @@ export function EmailThread({
       {/* Messages */}
       <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-4">
         {thread.messages.map((m) => (
-          <MessageBlock key={m.id} message={m} />
+          <MessageBlock key={m.id} message={m} accountId={thread.accountId} />
         ))}
 
         {draft && (
@@ -157,7 +162,56 @@ export function EmailThread({
   );
 }
 
-function MessageBlock({ message }: { message: EmailMessage }) {
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * WARP-3267 — a message's attachments. A plain download link, never a
+ * preview: the box serves the bytes as `attachment` + nosniff, and nothing on
+ * this page renders them.
+ */
+function AttachmentList({
+  accountId,
+  messageId,
+  attachments,
+}: {
+  accountId: string;
+  messageId: string;
+  attachments: EmailAttachment[];
+}) {
+  return (
+    <ul className="mt-3 pt-3 space-y-1.5" style={{ borderTop: "1px solid var(--border)" }} aria-label="Attachments">
+      {attachments.map((a) => (
+        <li key={a.id} className="flex items-center gap-2 type-caption-1" style={{ color: "var(--text)" }}>
+          <Paperclip size={12} aria-hidden style={{ color: "var(--text-muted)" }} />
+          <span className="truncate">{a.filename}</span>
+          <span style={{ color: "var(--text-muted)" }}>{formatSize(a.size)}</span>
+          {a.status === "stored" ? (
+            <a
+              className="btn sm ml-auto gap-1"
+              href={`/api/email/${encodeURIComponent(accountId)}/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(a.id)}`}
+              download
+            >
+              <Download size={12} aria-hidden />
+              Download
+            </a>
+          ) : (
+            <span className="ml-auto" style={{ color: "var(--text-muted)" }}>
+              {a.status === "too_large"
+                ? "Too large to keep on the Droplet"
+                : "Past the attachment limit, not kept"}
+            </span>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function MessageBlock({ message, accountId }: { message: EmailMessage; accountId: string }) {
   const name = message.fromName ?? message.fromAddr;
   return (
     <article className="card" style={{ padding: "16px" }}>
@@ -189,6 +243,13 @@ function MessageBlock({ message }: { message: EmailMessage }) {
       >
         {message.bodyText ?? ""}
       </div>
+      {message.attachments && message.attachments.length > 0 && (
+        <AttachmentList
+          accountId={accountId}
+          messageId={message.id}
+          attachments={message.attachments}
+        />
+      )}
     </article>
   );
 }

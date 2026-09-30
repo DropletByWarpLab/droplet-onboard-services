@@ -13,7 +13,7 @@ import {
   type ToolResult,
 } from "@droplet/tools-core";
 import { buildContext, type ContextDeps, type Claims } from "./context.js";
-import { canCallTool, filterToolsForRole } from "./rbac.js";
+import { canCallTool, isWithheldOffBox, filterToolsForRole } from "./rbac.js";
 import { describeThrown } from "./thrown-cause.js";
 
 const SERVER_INFO = { name: "droplet-mcp-server", version: "0.1.0" };
@@ -109,6 +109,27 @@ export function createServer(
       };
     }
 
+    // WARP-2979 (§6.13) — a withheld domain is refused off the box before any
+    // role check or handler: a client that calls it by name without listing
+    // it first gets nothing from it.
+    if (!trustedPrincipal && isWithheldOffBox(tool)) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              status: "error",
+              error: {
+                code: "withheld_off_box",
+                message: "This tool is only available to Droplet's own chat on this box.",
+              },
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+
     // Re-check on dispatch — tools/list cache could be stale, or a client
     // could try to call a write tool by name without listing it first.
     if (!canCallTool(tool, claims?.role, { trustedPrincipal })) {
@@ -187,6 +208,18 @@ export function createServer(
       meta.workspaceId.length > 0
         ? meta.workspaceId
         : undefined;
+    // WARP-3299 — the chat turn (conversation, assistant message, tool
+    // call) this dispatch belongs to. Same posture: an HTTP client cannot
+    // attach a run it starts to someone else's conversation.
+    const metaString = (key: string): string | undefined =>
+      trustedPrincipal && meta && typeof meta[key] === "string" && (meta[key] as string).length > 0
+        ? (meta[key] as string)
+        : undefined;
+    const metaTurn = {
+      conversationId: metaString("conversationId"),
+      messageId: metaString("messageId"),
+      toolCallId: metaString("toolCallId"),
+    };
     const metaEnhancement =
       trustedPrincipal &&
       meta &&
@@ -194,6 +227,14 @@ export function createServer(
       meta._enhancement !== null &&
       !Array.isArray(meta._enhancement)
         ? (meta._enhancement as PrivateEnhancement)
+        : undefined;
+    // WARP-3116 — the pages the calling dashboard can open. Same trusted-
+    // stdio posture: over HTTP a client could hand the navigation tools a
+    // list of its own choosing. Passed through as-is; the handlers parse it
+    // with the shared schema before it becomes a navigation target.
+    const metaDashboardPages =
+      trustedPrincipal && meta && Array.isArray(meta.dashboardPages)
+        ? (meta.dashboardPages as unknown[])
         : undefined;
     const ctx = buildContext(
       deps,
@@ -205,6 +246,8 @@ export function createServer(
       metaUserRole,
       metaAgentRunId,
       metaWorkspaceId,
+      metaTurn,
+      metaDashboardPages,
     );
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
 

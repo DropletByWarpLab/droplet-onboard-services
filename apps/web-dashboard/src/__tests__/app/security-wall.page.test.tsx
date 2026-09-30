@@ -12,17 +12,17 @@
  *     day when it is not today), the sign-out warning in the sign-in's last
  *     half hour — and a remount over a warm cache keeps the values' own time;
  *   · the cameras are this account's own: a tile for each camera the list
- *     gives (a Staff account with 2 of 4 cameras shows those 2), a picture
+ *     gives (a Member account with 2 of 4 cameras shows those 2), a picture
  *     asked for those alone (D6, Stefan: "Member wall, own cameras");
  *   · the way out is always visible; Full screen only where the browser
  *     offers it; the banners and the strip come before the tiles in the page
  *     (a TV alone draws the tiles first);
  *   · every request is a GET to one of the reads it is allowed (§4) — and no
  *     dashboard source can even name the rack panel's route (T-D13);
- *   · wall.css: tokens only, the strip at the bottom of a TV's screen, every
- *     picture at least 72 px high (the page scrolls rather than squeeze one),
- *     a tile's state on its picture and its name alone in the caption,
- *     readable muted badges, and nothing 375 px wide scrolls sideways.
+ *   · wall.css: tokens only, the page exactly a TV's height with the banners,
+ *     the strip and its way out always on screen (the tiles give up the
+ *     space), a tile's state on its picture and its name alone in the
+ *     caption, readable muted badges, and nothing 375 px wide scrolls sideways.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -37,7 +37,7 @@ vi.mock("@/lib/auth", () => ({ authFetch: h.authFetch, useAuth: () => ({ user: {
 
 import SecurityWallPage from "@/app/security/wall/page";
 import { SecurityWall } from "@/components/security/SecurityWall";
-import { WALL_COPY } from "@/components/security/wall-status";
+import { WALL_COPY, WALL_TILE_MIN_PICTURE_PX } from "@/components/security/wall-status";
 import { COPY as MODE_COPY } from "@/components/security/ModeCard";
 import { COPY as FEED_COPY } from "@/components/security/SecurityFeed";
 import type { CameraInfo, SecurityHealthRow, SecurityModeView } from "@/lib/types";
@@ -230,7 +230,7 @@ describe("/security/wall — what the strip says (T-D7)", () => {
 describe("/security/wall — this account's own cameras (D6: \"Member wall, own cameras\")", () => {
   const asked = () => (h.authFetch.mock.calls as Array<[string]>).map(([url]) => url.split("?")[0]!);
 
-  it("a Staff account with 2 of the box's 4 cameras: exactly those 2 tiles, by their household names — and pictures for those 2 alone", async () => {
+  it("a Member account with 2 of the box's 4 cameras: exactly those 2 tiles, by their household names — and pictures for those 2 alone", async () => {
     // The box has four cameras; the list route has narrowed them to this account's grants.
     box.cameras = { cameras: [cam("back_door", "Back door"), cam("till", "Till")] };
     render(<SecurityWallPage />, { wrapper: Wrap });
@@ -474,15 +474,22 @@ describe("DS-005 source pin (T-D13)", () => {
 describe("wall.css — tokens only, and a phone never scrolls sideways", () => {
   const css = readFileSync(packagePath("src/components/security/wall.css"), "utf8");
   const code = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  /** What sits inside the phone query's exact complement (not ≤ 640 px wide, and not ≤ 480 px tall): a TV or a desktop. */
+  const tvRules = () =>
+    /@media not all and \(max-width: 640px\) \{\s*@media not all and \(max-height: 480px\) \{([\s\S]*?)\}\s*\}\s*(?=@media)/.exec(code)?.[1] ?? "";
 
-  it("the page is at least the viewport's height, the tiles take what the strip leaves, and it grows (never squeezes) below that", () => {
+  it("the page is at least the viewport's height, and the tiles take what the strip leaves", () => {
     expect(code).toMatch(/\.droplet-shell\.sec-wall \{[^}]*min-height: 100dvh;[^}]*grid-template-rows: minmax\(0, 1fr\) auto auto;/);
-    // Round 3 (UX): a fixed height squeezed 12 pictures to 0–23 px on a 960×540 TV browser. Now the page scrolls a little instead.
-    expect(code).not.toMatch(/\.droplet-shell\.sec-wall \{[^}]*(?<![-\w])height:/);
+    // Only the TV rule (below) gives it a height; a phone's page grows with its tiles and scrolls.
+    const base = /\.droplet-shell\.sec-wall \{[^}]*\}/.exec(code)?.[0] ?? "";
+    expect(base).not.toMatch(/(?<![-\w])height:/);
+    const phone = /@media \(max-width: 640px\), \(max-height: 480px\) \{[^@]*/.exec(code)?.[0] ?? "";
+    expect(phone).not.toMatch(/(?<![-\w])height:/);
   });
 
-  it("a picture is never less than 72 px high, and nothing in it spills onto the caption", () => {
+  it("a frame is 72 px high at least (tileGrid's floor), and nothing in it spills onto the caption", () => {
     expect(code).toMatch(/\.droplet-shell \.sec-wall-tile-frame \{\s*position: relative; min-height: 72px; overflow: hidden;/);
+    expect(WALL_TILE_MIN_PICTURE_PX).toBe(72);
   });
 
   it("a tile's state sits on its picture, above the <img>, and wraps rather than lose its time; the caption is the name alone, on one line", () => {
@@ -531,11 +538,20 @@ describe("wall.css — tokens only, and a phone never scrolls sideways", () => {
 
   it("above 640 px wide and 480 px tall the tiles are drawn first, above the banners and the strip, and nowhere else", () => {
     // The phone query's exact complement, so no size has neither layout (a zoomed 640.5 px window included).
-    expect(code).toMatch(
-      /@media not all and \(max-width: 640px\) \{\s*@media not all and \(max-height: 480px\) \{\s*\.droplet-shell \.sec-wall-cameras \{ order: -1; \}\s*\}\s*\}/,
-    );
+    expect(tvRules()).toMatch(/\.droplet-shell \.sec-wall-cameras \{ order: -1; \}/);
     // Nothing else is moved.
     expect(code.match(/\border:/g)).toHaveLength(1);
+  });
+
+  it("above 640 px wide and 480 px tall the page is exactly the screen's height: the banners, the strip and its way out never leave it (F14)", () => {
+    // Review round 4 (rjouffret) NB1: with `min-height` alone the tiles' row grew to its content, and on a 960×540 TV browser
+    // (12 cameras, a stale banner, two sources down) the page ran 86 px past the screen, 141 px with both banners and "Back
+    // to Security" gone. A TV is not scrolled: the tiles give up the space, the strip does not.
+    expect(tvRules()).toMatch(/\.droplet-shell\.sec-wall \{ height: 100dvh; \}/);
+    // A frame's own 72 px would push its caption out of a tile that has given up its height: tileGrid keeps the floor where a grid can.
+    expect(tvRules()).toMatch(/\.droplet-shell \.sec-wall-tile-frame \{ min-height: 0; \}/);
+    // Those three rules and nothing else, so the layout above 640 × 480 has one place to read.
+    expect(tvRules().match(/\{/g)).toHaveLength(3);
   });
 
   it("the strip's buttons grow with the screen like its badges, and keep the shell's 44 px touch target at 720 px and below", () => {

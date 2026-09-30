@@ -21,6 +21,7 @@ import {
   type MemoryFact,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { MenuSelect, type MenuSelectOption } from "@/components/ui/MenuSelect";
 
 const CATEGORIES: MemoryFact["category"][] = [
   "Tone",
@@ -59,6 +60,23 @@ const AUDIENCE_RANK: Record<MemoryFact["audience"], number> = {
 function audienceOptionsForRole(role: string | undefined) {
   const rank = ROLE_RANK[role ?? ""] ?? 1;
   return AUDIENCES.filter((a) => AUDIENCE_RANK[a.value] <= rank);
+}
+
+const CATEGORY_OPTIONS: MenuSelectOption<MemoryFact["category"]>[] = CATEGORIES.map((c) => ({
+  value: c,
+  label: c,
+}));
+
+/** A fact whose audience outranks the caller (an admin viewing an
+ *  owner-only fact) keeps that audience visible as a disabled option, so
+ *  the control never names a value its menu lacks. */
+function factAudienceOptions(
+  current: MemoryFact["audience"],
+  allowed: MenuSelectOption<MemoryFact["audience"]>[],
+): MenuSelectOption<MemoryFact["audience"]>[] {
+  if (allowed.some((a) => a.value === current)) return allowed;
+  const label = AUDIENCES.find((a) => a.value === current)?.label ?? current;
+  return [{ value: current, label, disabled: true }, ...allowed];
 }
 
 function friendlyMemoryError(err: unknown): string {
@@ -169,7 +187,10 @@ export function MemoryPanel() {
   };
 
   return (
-    <div ref={rootRef} className="relative">
+    // Below lg the panel anchors to the header (.chat-head is positioned),
+    // not this button: the button sits mid-header on a phone, and a panel
+    // right-aligned to it started off the left edge of the screen.
+    <div ref={rootRef} className="lg:relative">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -190,11 +211,11 @@ export function MemoryPanel() {
         <div
           role="dialog"
           aria-label="Assistant memory"
-          className="absolute right-0 mt-1 w-96 max-w-[90vw] z-20 rounded-2xl p-3 backdrop-blur-xl backdrop-saturate-150"
+          className="absolute right-0 max-lg:right-3 mt-1 w-96 max-w-[90vw] z-20 rounded-2xl p-3 backdrop-blur-xl backdrop-saturate-150"
           style={{
             background: "var(--glass)",
-            border: "1px solid var(--card-bd)",
-            boxShadow: "var(--lift)",
+            // Shadow only — `--lift` carries a 1px brand ring (WARP-3043).
+            boxShadow: "0 16px 40px -12px rgba(0, 0, 0, 0.35), 0 2px 10px rgba(0, 0, 0, 0.08)",
           }}
         >
           <div className="type-caption-1 mb-2" style={{ color: "var(--text-muted)" }}>
@@ -232,37 +253,15 @@ export function MemoryPanel() {
                   >
                     {fact.fact}
                   </span>
-                  <label className="sr-only" htmlFor={`audience-${fact.id}`}>
-                    Audience
-                  </label>
-                  <select
+                  <MenuSelect
                     id={`audience-${fact.id}`}
+                    label="Audience"
                     value={fact.audience}
-                    onChange={(e) =>
-                      void handleAudience(
-                        fact,
-                        e.target.value as MemoryFact["audience"],
-                      )
-                    }
+                    options={factAudienceOptions(fact.audience, audienceOptions)}
+                    onChange={(a) => void handleAudience(fact, a)}
                     title="Who receives this fact"
-                    className="type-caption-2 h-6 w-24 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
-                  >
-                    {/* If the fact's current audience outranks the caller
-                        (e.g. an admin viewing an owner-only fact), keep it
-                        visible as a disabled option so the select doesn't
-                        render blank. */}
-                    {!audienceOptions.some((a) => a.value === fact.audience) && (
-                      <option value={fact.audience} disabled>
-                        {AUDIENCES.find((a) => a.value === fact.audience)
-                          ?.label ?? fact.audience}
-                      </option>
-                    )}
-                    {audienceOptions.map((a) => (
-                      <option key={a.value} value={a.value}>
-                        {a.label}
-                      </option>
-                    ))}
-                  </select>
+                    className="type-caption-2 h-6 w-24"
+                  />
                   <button
                     type="button"
                     role="switch"
@@ -292,66 +291,54 @@ export function MemoryPanel() {
             </ul>
           )}
 
+          {/* Two rows: on one, the two selects took 224 of the popover's
+              360px and left the fact itself a 54px box. The fact and its
+              Add go first; what it is and who gets it go under it. */}
           <div
-            className="flex items-center gap-1.5 pt-2"
-            style={{ borderTop: "1px solid var(--card-bd)" }}
+            className="flex flex-col gap-1.5 pt-2"
           >
-            <label className="sr-only" htmlFor="memory-category">
-              Category
-            </label>
-            <select
-              id="memory-category"
-              value={category}
-              onChange={(e) =>
-                setCategory(e.target.value as MemoryFact["category"])
-              }
-              className="type-footnote h-8 w-28 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
-            >
-              {CATEGORIES.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
-            <label className="sr-only" htmlFor="memory-audience">
-              Audience
-            </label>
-            <select
-              id="memory-audience"
-              value={audience}
-              onChange={(e) =>
-                setAudience(e.target.value as MemoryFact["audience"])
-              }
-              title="Who receives this fact"
-              className="type-footnote h-8 w-28 flex-none rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] focus:border-[var(--brand)]"
-            >
-              {audienceOptions.map((a) => (
-                <option key={a.value} value={a.value}>
-                  {a.label}
-                </option>
-              ))}
-            </select>
-            <label className="sr-only" htmlFor="memory-draft">
-              New fact
-            </label>
-            <input
-              id="memory-draft"
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void handleAdd();
-              }}
-              placeholder="e.g. Prefers answers in French"
-              className="type-footnote h-8 flex-1 min-w-0 rounded-[var(--radius-input)] outline-none bg-[var(--surface)] border border-[var(--border)] text-[var(--text)] placeholder:text-[var(--text-muted)] focus:border-[var(--brand)]"
-            />
-            <button
-              type="button"
-              onClick={() => void handleAdd()}
-              disabled={busy || draft.trim().length === 0}
-              className="flex-none inline-flex items-center gap-1 h-8 px-2.5 rounded-md type-footnote transition-colors text-[var(--brand)] hover:bg-[var(--brand-subtle)] disabled:text-[var(--text-faint)] disabled:cursor-not-allowed"
-            >
-              <Plus size={14} aria-hidden="true" /> Add
-            </button>
+            <div className="chat-field-row flex items-center gap-1.5">
+              <label className="sr-only" htmlFor="memory-draft">
+                New fact
+              </label>
+              <input
+                id="memory-draft"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleAdd();
+                }}
+                placeholder="e.g. Prefers answers in French"
+                className="chat-field flex-1 min-w-0"
+              />
+              <button
+                type="button"
+                onClick={() => void handleAdd()}
+                disabled={busy || draft.trim().length === 0}
+                className="flex-none inline-flex items-center gap-1 h-8 px-2.5 rounded-md type-footnote transition-colors text-[var(--brand)] hover:bg-[var(--brand-subtle)] disabled:text-[var(--text-faint)] disabled:cursor-not-allowed"
+              >
+                <Plus size={14} aria-hidden="true" /> Add
+              </button>
+            </div>
+            <div className="chat-field-row flex items-center gap-1.5">
+              <MenuSelect
+                id="memory-category"
+                label="Category"
+                value={category}
+                options={CATEGORY_OPTIONS}
+                onChange={setCategory}
+                className="type-footnote h-8 w-28"
+              />
+              <MenuSelect
+                id="memory-audience"
+                label="Audience"
+                value={audience}
+                options={audienceOptions}
+                onChange={setAudience}
+                title="Who receives this fact"
+                className="type-footnote h-8 w-28"
+              />
+            </div>
           </div>
 
           {error && (

@@ -119,8 +119,8 @@ describe("/security — the Security wall link (WARP-2981)", () => {
     const link = within(await screen.findByTestId("phead-actions")).getByRole("link", { name: WALL_COPY.link });
     expect(link).toHaveAttribute("href", "/security/wall");
     expect(link).toHaveAttribute("title", WALL_COPY.linkTitle);
-    // D6: a TV runs on a Staff account and shows that account's cameras.
-    expect(WALL_COPY.linkTitle).toMatch(/signed in with a Staff account\. It shows that account's cameras\./);
+    // D6: a TV runs on a Member account and shows that account's cameras.
+    expect(WALL_COPY.linkTitle).toMatch(/signed in with a Member account\. It shows that account's cameras\./);
     // Plain words on the button itself: a tooltip never reaches a phone, and "wall" is our name for it.
     expect(link).toHaveTextContent("TV view");
     expect(link.textContent).not.toMatch(/wall/i);
@@ -239,6 +239,18 @@ describe("/security — Incidents (WARP-2978)", () => {
     expect(h.replace).toHaveBeenLastCalledWith("/security?tab=everything", { scroll: false });
     fireEvent.click(screen.getByRole("tab", { name: /Incidents/ }));
     expect(h.replace).toHaveBeenLastCalledWith("/security", { scroll: false });
+  });
+
+  it("the tab follows the URL: a same-route navigation to /security brings Incidents back (WARP-3185 2)", async () => {
+    h.search = "tab=everything";
+    const { rerender } = render(<SecurityPage />, { wrapper: Wrap });
+    expect(await screen.findByRole("tab", { name: "Everything" })).toHaveAttribute("aria-selected", "true");
+    h.search = "";
+    rerender(<SecurityPage />);
+    await waitFor(() => expect(screen.getByRole("tab", { name: /Incidents/ })).toHaveAttribute("aria-selected", "true"));
+    h.search = "tab=everything";
+    rerender(<SecurityPage />);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Everything" })).toHaveAttribute("aria-selected", "true"));
   });
 
   it("the tabs follow the arrow keys (the tabs pattern), and only the selected tab is in the tab order", async () => {

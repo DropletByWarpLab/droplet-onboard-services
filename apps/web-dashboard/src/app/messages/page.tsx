@@ -44,6 +44,7 @@ export default function MessagesPage() {
   const { mutate } = useSWRConfig();
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [composeOpen, setComposeOpen] = useState(false);
+  const isGuest = user?.role === "guest";
 
   const selectedThread =
     threads?.find((t) => t.id === selectedThreadId) ?? null;
@@ -97,7 +98,9 @@ export default function MessagesPage() {
             meId={user?.id ?? ""}
             selectedThreadId={selectedThreadId}
             onSelect={setSelectedThreadId}
-            onCompose={() => setComposeOpen(true)}
+            // WARP-3263 — an external guest can't start a conversation (the
+            // box answers 403); staff add them instead.
+            onCompose={isGuest ? undefined : () => setComposeOpen(true)}
           />
         </div>
 
@@ -116,12 +119,16 @@ export default function MessagesPage() {
         </div>
       </div>
 
-      <NewThreadDialog
-        open={composeOpen}
-        onClose={() => setComposeOpen(false)}
-        meId={user?.id ?? ""}
-        onCreated={handleCreated}
-      />
+      {/* WARP-3263 — a guest can't start a conversation, so don't mount the
+          dialog (it reads GET /team-chat/contacts on mount). */}
+      {!isGuest && (
+        <NewThreadDialog
+          open={composeOpen}
+          onClose={() => setComposeOpen(false)}
+          meId={user?.id ?? ""}
+          onCreated={handleCreated}
+        />
+      )}
     </ShellPage>
   );
 }

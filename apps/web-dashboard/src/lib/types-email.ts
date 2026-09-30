@@ -78,6 +78,25 @@ export interface EmailMessage {
   bodyHtml: string | null;
   /** ISO timestamp. */
   receivedAt: string;
+  /** WARP-3267 — the files the message carried (metadata only). */
+  attachments?: EmailAttachment[];
+}
+
+/**
+ * WARP-3267 — one attachment of a received message. `stored` ones download
+ * from `emailAttachmentUrl`; the others were over the box's limits and are
+ * listed so the reader knows they existed.
+ */
+export interface EmailAttachment {
+  id: string;
+  partIndex: number;
+  filename: string;
+  /** The sender's claim. Shown, never used to open the file. */
+  contentType: string;
+  size: number;
+  sha256: string;
+  contentId: string | null;
+  status: "stored" | "too_large" | "over_limit";
 }
 
 /** A full thread with its messages in ascending receivedAt order. */
@@ -99,6 +118,8 @@ export interface DraftRow {
   subject: string;
   body: string;
   draftedByDroplet: boolean;
+  /** WARP-3267 — stored attachment ids a forward carries. */
+  attachmentIds?: string[];
   status: DraftStatus;
   /** ISO timestamp once sent, else null. */
   sentAt: string | null;

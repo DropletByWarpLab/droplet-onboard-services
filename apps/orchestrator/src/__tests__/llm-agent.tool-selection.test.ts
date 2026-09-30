@@ -309,3 +309,47 @@ describe("runAgent — bound_tool_domains (WARP-2896)", () => {
     for (const name of WORKSPACE) expect(names, name).not.toContain(name);
   });
 });
+
+describe("WARP-2979 — a Security tool on a cloud turn (ADR-059 P4 §6.13)", () => {
+  it("is not in the pool, and a forced call stays UNKNOWN_TOOL — never dispatched, never self-healed", async () => {
+    const { withholdStoredContentTools } = await import("../services/stored-content-egress.service.js");
+    const pool = [
+      { name: "search_content", description: "d", inputSchema: {} },
+      { name: "list_network_devices", description: "d", inputSchema: {} },
+      { name: "security_list_incidents", description: "d", inputSchema: {} },
+      { name: "security_search_events", description: "d", inputSchema: {} },
+    ];
+    const forced = {
+      role: "assistant",
+      content: null,
+      tool_calls: [{ id: "s1", type: "function", function: { name: "security_list_incidents", arguments: '{"period":"last_night"}' } }],
+    };
+    const turns = [forced, { role: "assistant", content: "done" }];
+    const chat = vi.fn().mockImplementation(async () => ({
+      ok: true,
+      json: async () => ({ choices: [{ message: turns[Math.min(chat.mock.calls.length - 1, turns.length - 1)] }] }),
+    }));
+    const callTool = vi.fn();
+    const deps: AgentDeps = { mcp: { listTools: vi.fn().mockResolvedValue(pool), callTool } as never, aiGateway: { chat } as never };
+
+    // The route's off-LAN step: the materialised pool minus the withheld domains (files and security here).
+    const allowed = withholdStoredContentTools(pool.map((t) => t.name));
+    expect(allowed).toEqual(["list_network_devices"]);
+
+    await runAgent(deps, {
+      model: "m",
+      // A Security question: the selection rule would bring the domain in, if it were allowed at all.
+      messages: [{ role: "user", content: "anything odd at the back door last night?" }],
+      tool_selection_mode: "domains",
+      allowed_tools: allowed,
+    });
+
+    expect(callTool).not.toHaveBeenCalled();
+    const reply = messages_(chat.mock.calls[1]![0]).find((m) => m.role === "tool" && m.tool_call_id === "s1") as { content: string } | undefined;
+    expect(JSON.parse(reply!.content).error.code).toBe("UNKNOWN_TOOL");
+    for (const call of chat.mock.calls) {
+      expect(toolNames(call[0])).not.toContain("security_list_incidents");
+      expect(toolNames(call[0])).not.toContain("security_search_events");
+    }
+  });
+});

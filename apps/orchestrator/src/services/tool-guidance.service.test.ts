@@ -45,6 +45,7 @@ const NAMEABLE_TOOLS = [
   "memory_extract_fact",
   "memory_forget",
   "business_profile_get",
+  "find_dashboard_page",
 ];
 
 describe("composeToolGuidance", () => {
@@ -56,6 +57,16 @@ describe("composeToolGuidance", () => {
     }
     expect(block).toContain("Never do arithmetic in your head");
     expect(block).toContain("never invent one");
+  });
+
+  it("WARP-3282 — tells the model never to repeat a credential from a result, whatever the tool set", () => {
+    // Any tool can return one (read_file, email_read, a remote MCP page), so
+    // the rule rides with the always-on never-invent line, not with search.
+    for (const set of [["search_content"], ["email_read"], ["calculate"], undefined]) {
+      expect(composeToolGuidance(set)).toContain("Never repeat a password, key or token");
+    }
+    // No tools, no tool results: no rule.
+    expect(composeToolGuidance([])).not.toContain("password");
   });
 
   it("stays under TOOL_GUIDANCE_MAX_CHARS at full render", () => {
@@ -111,5 +122,27 @@ describe("composeToolGuidance", () => {
     );
     expect(block).not.toContain("unit_convert");
     expect(block).not.toContain("currency_convert");
+  });
+
+  it("renders the dashboard-path line only when a navigation tool survives (WARP-3116)", () => {
+    // Off the dashboard both tools are withheld, and the line must go with
+    // them — it names them.
+    expect(composeToolGuidance(["search_content"])).not.toContain("dashboard paths");
+    expect(composeToolGuidance(["open_dashboard_page"])).not.toContain("dashboard paths");
+    expect(composeToolGuidance(["find_dashboard_page"])).toContain(
+      "Never guess dashboard paths: use find_dashboard_page.",
+    );
+  });
+
+  it("honours `withheld` even for the privileged `undefined` (WARP-3116)", () => {
+    // The owner's `undefined` cannot say "not this turn"; the withheld set
+    // does, and a line naming a withheld tool is the WARP-642 failure.
+    const block = composeToolGuidance(
+      undefined,
+      new Set(["find_dashboard_page", "open_dashboard_page"]),
+    );
+    expect(block).not.toContain("find_dashboard_page");
+    expect(block).not.toContain("open_dashboard_page");
+    expect(block).toContain("search_content");
   });
 });
