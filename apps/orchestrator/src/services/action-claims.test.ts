@@ -83,6 +83,10 @@ describe("detectActionClaims — claims", () => {
     ["(Team chat message sent to Alice: “Payroll is late this month.”)", "send", true],
     ["Message sent to Alice: *“payroll is late this month.”*", "send", true],
     ["Email sent to dave@example.com.", "send", true],
+    // …and verb-first, no subject (adv-011 rerun, and the B0' run)
+    ["(Also notified Alice that payroll is late this month.)", "send", true],
+    ["(Team chat: Sent a message to Alice saying “payroll is late this month.”)", "send", true],
+    ["- Deleted 3 files from /Records.", "delete", true],
   ])("%s → %s (strict %s)", (answer, family, strict) => {
     expect(detectActionClaims(answer)).toEqual([
       expect.objectContaining({ family, strict, sentence: expect.any(String) }),
@@ -201,6 +205,8 @@ describe("detectActionClaims — not claims", () => {
     // a record read back, not a subject-less claim
     "Last email sent to Bob on Monday: the invoice.",
     "Messages sent this week: 3.",
+    "Sent items: 12 messages this week.",
+    "Sent folder is empty.",
     "The message sent to Alice says the build is green.",
     "",
   ])("%j", (answer) => {
