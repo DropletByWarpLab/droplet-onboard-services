@@ -269,7 +269,10 @@ describe("requestFactoryReset — double-fire guard", () => {
     });
 
     // Second confirmed reset with a job already dispatched → refused.
+    // Vitest 4's spyOn hands back the SAME spy for an already-spied fetch, so
+    // its history still holds the first dispatch; clear it to count only this.
     const fetchSpy2 = mockFetchOnce(200, { ok: true });
+    fetchSpy2.mockClear();
     await expect(
       requestFactoryReset(prisma as never, {
         userId: "owner-1",

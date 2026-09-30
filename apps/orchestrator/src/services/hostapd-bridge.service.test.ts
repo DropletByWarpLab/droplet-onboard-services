@@ -196,8 +196,11 @@ describe("applyWifi — per-user staging (review #2: no shared global slot)", ()
 
     // Second apply for the SAME user with nothing newly staged: must NOT reuse
     // "StaleNet" — it has to ask the bridge for the current SSID.
+    // Vitest 4's spyOn hands back the SAME spy for an already-spied fetch, so
+    // clear the failed first apply out of its history before reading calls.
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
+      .mockClear()
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ ssid: "LiveNet" }), { status: 200 }),
       )

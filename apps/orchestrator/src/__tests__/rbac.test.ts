@@ -941,7 +941,11 @@ function flattenTests(task: CensusTask): CensusTask[] {
   return [task];
 }
 
-afterAll((suite) => {
+// Vitest 4.1 passes suite-hook fixtures as the FIRST argument and the suite
+// as the second; the first must be an object pattern (vitest parses it to
+// decide which fixtures to set up), so it stays an empty one.
+// eslint-disable-next-line no-empty-pattern
+afterAll(({}, suite) => {
   const tests = flattenTests(suite as unknown as CensusTask);
 
   expect(
