@@ -2076,6 +2076,10 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       }
       case "error":
       default: {
+        // WARP-3347 — only "error" may reach here: a stop_reason added to
+        // AgentResult without a case above would fail every run that ends on
+        // it, so leaving one out is a compile error.
+        result.stop_reason satisfies "error";
         const error = result.error ?? "agent loop error";
         await finish(runId, {
           status: "failed",

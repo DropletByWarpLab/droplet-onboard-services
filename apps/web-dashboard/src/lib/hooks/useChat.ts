@@ -2249,15 +2249,12 @@ function applyEvent(
         // answer at all (chips, then nothing). The server rewrites those
         // turns to `stop_reason: "error"` now, so this guard is the
         // defense-in-depth twin for any turn that reaches us un-rewritten.
+        //
+        // WARP-3347 — no stop_reason filter: "error" returned above and every
+        // other reason belongs here, including one added later.
         if (
           last.content.trim().length === 0 &&
-          (!last.reasoning || !last.reasoning.trim()) &&
-          (evt.stop_reason === "model_done" ||
-            evt.stop_reason === "iteration_limit" ||
-            evt.stop_reason === "context_budget" ||
-            evt.stop_reason === "repetition" ||
-            evt.stop_reason === "no_progress" ||
-            evt.stop_reason === "needs_details")
+          (!last.reasoning || !last.reasoning.trim())
         ) {
           const updated = [...base];
           updated[idx] = {

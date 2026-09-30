@@ -659,9 +659,7 @@ describe("runAgent", () => {
     };
     const result = await runAgent(deps, {
       model: "ollama/gpt-oss:20b",
-      // 10, not 8: the answer is step 5, exactly where the WARP-3347
-      // half-budget guard cuts an 8-step turn that has only searched.
-      max_iter: 10,
+      max_iter: 8,
       messages: [{ role: "user", content: "search the knowledge base for vacation policy" }],
     });
 

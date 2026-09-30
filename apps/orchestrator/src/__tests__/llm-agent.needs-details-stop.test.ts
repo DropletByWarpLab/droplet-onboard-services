@@ -40,6 +40,8 @@ const HITS: Record<string, string> = {
   read_file: JSON.stringify({ path: "/Docs/Support/escalation-policy.md", content: "Escalation policy" }),
   delete_file: JSON.stringify({ status: "confirmation_required", error: { message: "Approve?" } }),
   business_update: JSON.stringify({ id: "SUP-9", status: "done" }),
+  search_files: JSON.stringify({ items: [{ path: "/Finance/Q3-report.pdf" }] }),
+  email_send: JSON.stringify({ status: "sent" }),
 };
 const TOOLS = Object.keys(HITS);
 
@@ -145,9 +147,49 @@ describe("runAgent — ask for details after half the turn's steps found nothing
 
   it("uses the turn's own max_iter, rounding half up", async () => {
     const { callTool, deps } = scripted(LOOKING);
-    const result = await ask(deps, 7);
-    expect(callTool).toHaveBeenCalledTimes(4);
+    const result = await ask(deps, 11);
+    expect(callTool).toHaveBeenCalledTimes(6);
     expect(result.stop_reason).toBe("needs_details");
+  });
+
+  it("a durable run is never cut: nobody can answer its question", async () => {
+    const searches = Array.from({ length: 14 }, (_, i) => search(`q${i}`));
+    const { callTool, requests, deps } = scripted([...searches, { role: "assistant", content: "Report." }]);
+    const result = await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "Find the manager's email and say hello." }],
+      max_iter: 20,
+      toolCallContext: { userId: "u1", userRole: "owner", agentRunId: "run-1" },
+    });
+    expect(callTool).toHaveBeenCalledTimes(14);
+    expect(requests.every((r) => r.tools.length > 0)).toBe(true);
+    expect(result.stop_reason).toBe("model_done");
+  });
+
+  it("a 4-step voice turn keeps its action step after two lookups", async () => {
+    // voice-io's DEFAULT_LLM_MAX_ITER is 4. "Email the Q3 report to the
+    // accountant": find the person, find the file, then send.
+    const { callTool, deps } = scripted([
+      call("search_contacts", { query: "accountant" }),
+      call("search_files", { query: "Q3 report" }),
+      call("email_send", { to: "bob@example.com", subject: "Q3 report" }),
+      { role: "assistant", content: "Sent." },
+    ]);
+    const result = await ask(deps, 4);
+    expect(callTool.mock.calls.map((c) => c[0])).toEqual(["search_contacts", "search_files", "email_send"]);
+    expect(result.stop_reason).toBe("model_done");
+  });
+
+  it("steps that were not searches do not make half the turn 'searching'", async () => {
+    // Two searches that ran, then failing reads: not progress, not searching.
+    const reads = Array.from({ length: 10 }, (_, i) => call("read_file", { path: `/guess-${i}.md` }));
+    const { callTool, deps } = scripted(
+      [search("a"), search("b"), ...reads, { role: "assistant", content: "Done." }],
+      (name) => name === "read_file",
+    );
+    const result = await ask(deps, 20);
+    expect(callTool).toHaveBeenCalledTimes(12);
+    expect(result.stop_reason).toBe("model_done");
   });
 
   it("the chat default budget (20) cuts at step 10", async () => {
@@ -216,12 +258,12 @@ describe("runAgent — ask for details after half the turn's steps found nothing
     expect(result.message.content).toContain("kept failing");
   });
 
-  it("never cuts before step 2: one search is no evidence that searching is failing", async () => {
-    const two = scripted(LOOKING);
-    expect((await ask(two.deps, 2)).stop_reason).toBe("iteration_limit");
-    expect(two.callTool).toHaveBeenCalledTimes(2);
-    const three = scripted(LOOKING);
-    expect((await ask(three.deps, 3)).stop_reason).toBe("needs_details");
-    expect(three.callTool).toHaveBeenCalledTimes(2);
+  it("never cuts before step 4: a budget of 4 or fewer steps is left alone", async () => {
+    const four = scripted(LOOKING);
+    expect((await ask(four.deps, 4)).stop_reason).toBe("iteration_limit");
+    expect(four.callTool).toHaveBeenCalledTimes(4);
+    const five = scripted(LOOKING);
+    expect((await ask(five.deps, 5)).stop_reason).toBe("needs_details");
+    expect(five.callTool).toHaveBeenCalledTimes(4);
   });
 });

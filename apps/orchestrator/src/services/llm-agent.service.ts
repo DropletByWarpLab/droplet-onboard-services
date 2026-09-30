@@ -1651,11 +1651,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // for the missing detail. `madeProgress` flips on the first call that ran
   // and is not a looking call (see `isLookingCall`): an opened file, a record
   // read by id, any write or confirmation, any other tool. Sticky: a turn that
-  // once got somewhere is never cut by this trigger. `searched` needs a
-  // looking call that RAN: a search tool that keeps failing is an outage, and
+  // once got somewhere is never cut by this trigger. `searchesRun` counts
+  // looking calls that RAN: a search tool that keeps failing is an outage, and
   // WARP-1012's "kept failing" reply is the honest answer to it.
+  //
+  // Chat only. A durable run (WARP-2177) cannot ask: nobody is watching it
+  // (AGENT_RUN_SYSTEM_PROMPT), and its resume restarts these counters on
+  // every yield, approval and crash while its decided write never counts.
+  const isRun = Boolean(req.toolCallContext?.agentRunId);
   let madeProgress = false;
-  let searched = false;
+  let searchesRun = 0;
   // WARP-1479 — the provider's verdict for the most recent BLOCKING
   // response, folded into the blank-answer diagnostics when the terminal
   // turn produces no visible output. Set fresh on every blocking response
@@ -2004,13 +2009,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       }
     }
     // WARP-3347 — half the steps gone on searching that found nothing usable
-    // (see `madeProgress`). Never before step 2: half of a 2-step turn is one
-    // search, which says nothing about whether searching is failing.
+    // (see `madeProgress`). Never before step 4, and only after as many
+    // searches that ran as the empties guard needs: a 4-step voice turn
+    // (search_contacts, search_files, then email_send) must keep its action
+    // step, and steps burnt on hallucinated tool names are not searching.
     if (
+      !isRun &&
       finalizeReason === null &&
-      searched &&
+      searchesRun >= MAX_EMPTY_SEARCHES &&
       !madeProgress &&
-      iter >= Math.max(2, Math.ceil(maxIter / 2))
+      iter >= Math.max(4, Math.ceil(maxIter / 2))
     ) {
       finalizeReason = "needs_details";
       logger.info(
@@ -2032,7 +2040,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           : finalizeReason === "repetition"
             ? "You're repeating the same tool calls. Please answer my question now with what you already have. Don't call any more tools."
             : finalizeReason === "no_progress"
-              ? "Your last searches found nothing, so stop searching. If the results above already answer my request, please answer it. Otherwise tell me what you looked for and that you couldn't find it, then ask me for the specific detail you need to continue (for example which person, file, record or ticket I mean). Don't call any more tools."
+              ? isRun
+                ? "Your last searches found nothing. Stop searching and report exactly what you looked for and what blocked you. Don't call any more tools."
+                : "Your last searches found nothing, so stop searching. If the results above already answer my request, please answer it. Otherwise tell me what you looked for and that you couldn't find it, then ask me for the specific detail you need to continue (for example which person, file, record or ticket I mean). Don't call any more tools."
               : finalizeReason === "needs_details"
                 ? "You've spent half of this turn's steps searching without finding what my request needs, so stop searching. If the results above already answer my request, please answer it. Otherwise tell me in one sentence what you checked, then ask me for the specific detail you need to continue (for example which person, file, record or ticket I mean). Don't call any more tools."
                 : "That's all the room there is for more lookups. Please answer my question now with what you already have. Don't call any more tools.",
@@ -2241,8 +2251,9 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           trace,
           advertisedNames,
           (tool) => catalogEntry(tool)?.write ?? runtimeLookup(tool)?.requiresWrite === true,
-          // WARP-3347 — a search guard already judged these hits unusable.
-          finalizeReason === "needs_details" || finalizeReason === "no_progress",
+          // WARP-3347 — a search guard already judged these hits unusable. Not
+          // on a run: its fallback must not ask a question nobody can answer.
+          !isRun && (finalizeReason === "needs_details" || finalizeReason === "no_progress"),
         );
         emit({ type: "content_delta", text: answer });
       }
@@ -2883,7 +2894,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
       // WARP-3347 — a confirmation_required envelope is not `isError`, so a
       // write parked on approval counts as progress too.
       if (!result.isError) {
-        if (isLookingCall(call.function.name, args)) searched = true;
+        if (isLookingCall(call.function.name, args)) searchesRun++;
         else madeProgress = true;
       }
 

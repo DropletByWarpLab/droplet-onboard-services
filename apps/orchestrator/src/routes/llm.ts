@@ -2437,11 +2437,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           if (
             e.type === "done" &&
             liveAssistantContent.trim().length === 0 &&
-            (e.stop_reason === "model_done" ||
-              e.stop_reason === "context_budget" ||
-              e.stop_reason === "repetition" ||
-              e.stop_reason === "no_progress" ||
-              e.stop_reason === "needs_details")
+            // WARP-3347 — by exclusion, so a stop reason added later is
+            // covered without another edit here.
+            e.stop_reason !== "error" &&
+            e.stop_reason !== "iteration_limit"
           ) {
             emptyCompletion = true;
             e = {
@@ -2707,11 +2706,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // streaming site.
         if (
           contentToText(result.message.content).trim().length === 0 &&
-          (result.stop_reason === "model_done" ||
-            result.stop_reason === "context_budget" ||
-            result.stop_reason === "repetition" ||
-            result.stop_reason === "no_progress" ||
-            result.stop_reason === "needs_details")
+          // WARP-3347 — by exclusion, as on the streaming path.
+          result.stop_reason !== "error" &&
+          result.stop_reason !== "iteration_limit"
         ) {
           result = {
             ...result,

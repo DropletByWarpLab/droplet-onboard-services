@@ -361,4 +361,47 @@ describe("runAgent — no-progress early-stop (WARP-3283)", () => {
       "I looked but didn't find anything matching. Could you tell me a bit more about what you're looking for?",
     );
   });
+
+  // WARP-3347 — a durable run: nobody is watching, so no question.
+  const RUN = { userId: "u1", userRole: "owner", agentRunId: "run-1" } as const;
+
+  it("on a durable run the stop reports what was searched and asks nothing", async () => {
+    const empty = await EMPTY_CONTENT;
+    const { deps, chat } = makeDeps(
+      [search("a"), search("b"), search("c"), { role: "assistant", content: "Report." }],
+      () => empty,
+    );
+    const result = await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "find it" }],
+      max_iter: 10,
+      toolCallContext: RUN,
+    });
+    expect(result.stop_reason).toBe("no_progress");
+    const finalReq = chat.mock.calls[3]![0] as Req;
+    const nudge = String(finalReq.messages[finalReq.messages.length - 1]!.content);
+    expect(nudge).toContain("report exactly what you looked for and what blocked you");
+    expect(nudge).not.toContain("ask me");
+  });
+
+  it("on a durable run a blank answer after the stop keeps #2538's fallback, which asks nothing", async () => {
+    const empty = await EMPTY_CONTENT;
+    const hit = '{"query":"q","results":[{"path":"/a.md","text":"x"}]}';
+    const blank = { role: "assistant", content: "", reasoning_content: "Maybe search email." };
+    let i = 0;
+    const { deps } = makeDeps(
+      [search("a"), search("b"), search("c"), search("d"), blank],
+      () => (++i === 2 ? hit : empty),
+    );
+    const result = await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: "find it" }],
+      max_iter: 10,
+      toolCallContext: RUN,
+    });
+    expect(result.stop_reason).toBe("no_progress");
+    expect(result.message.content).toBe(
+      "I found some information but couldn't put together an answer from it. Please ask again, or ask for one part at a time.",
+    );
+  });
 });
