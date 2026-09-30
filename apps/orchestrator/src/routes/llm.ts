@@ -1403,6 +1403,16 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         callerSystemPreamble = split.preamble;
         agentMessages = split.rest;
       }
+      // WARP-3338 — every other caller's own system message is its chat
+      // instructions (the dashboard sends the chat's or its project's prompt
+      // here). Marked, the agent loop folds it into index 0 under its own
+      // header instead of leaving it where gpt-oss drops it. Voice keeps
+      // WARP-3125's fold above, byte for byte.
+      if (!isVoice) {
+        agentMessages = agentMessages.map((m): ChatMessage =>
+          m.role === "system" ? { ...m, contextBlock: "chat_instructions" } : m,
+        );
+      }
       let agentModel = chatReq.model;
       // WARP-904: the provider that actually served this turn — tracks
       // `agentModel`. Vision auto-routing (below) can swap the user's selected
@@ -1834,7 +1844,11 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             // or a business pin the resolver could not reach). A header with
             // no lines under it is prompt the model reads for nothing.
             if (block) {
-              const pinSystemMessage: ChatMessage = { role: "system", content: block };
+              const pinSystemMessage: ChatMessage = {
+                role: "system",
+                content: block,
+                contextBlock: "pins",
+              };
               agentMessages = [pinSystemMessage, ...agentMessages];
             }
           }
@@ -1953,6 +1967,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             const attachmentSystemMessage: ChatMessage = {
               role: "system",
               content: systemParts.join("\n\n"),
+              contextBlock: "attachments",
             };
             agentMessages = [attachmentSystemMessage, ...agentMessages];
           }
