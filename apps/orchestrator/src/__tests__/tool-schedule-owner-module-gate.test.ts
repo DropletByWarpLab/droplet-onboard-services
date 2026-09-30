@@ -24,8 +24,10 @@
  *   - the dispatcher stops forwarding `context`     -> the person axis vanishes,
  *     "an owner without the module" RUNS and the verdict is never asked for them
  *   - the ticker stops passing `callContext`        -> same
- *   - the ticker dispatches when the owner handle can't be read -> the "handle
- *     unreadable" cases fire an unattributed run
+ *   - the ticker dispatches when the resolved owner has no handle -> the "no
+ *     handle" case fires an unattributed run
+ *   - the ticker reads the owner's row a second time for the handle (or ignores
+ *     the one the access gate returned) -> the "read ONCE" case fails
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ModuleId } from "@prisma/client";
@@ -108,8 +110,8 @@ interface Scenario {
   box?: ReadonlySet<ModuleId>;
   /** Modules the owner holds. */
   held?: ReadonlySet<ModuleId>;
-  /** How the ticker's read of the owner's username goes wrong. */
-  handleRead?: "missing" | "blank" | "throws";
+  /** The owner's row carries a blank `username`. */
+  blankHandle?: boolean;
 }
 
 async function fire(s: Scenario) {
@@ -187,6 +189,7 @@ async function fire(s: Scenario) {
     reversible: true,
     steps: [{ id: "st-0", idx: 0, kind: "call", args: { tool: NETWORK_TOOL, args: {} } }],
   };
+  let userReads = 0;
   const prisma = {
     toolSchedule: {
       findMany: vi.fn(async () => [schedule]),
@@ -202,23 +205,36 @@ async function fire(s: Scenario) {
       }),
     },
     user: {
-      findUnique: vi.fn(async ({ where, select }: { where: { id: string }; select?: { username?: boolean } }) => {
+      findUnique: vi.fn(async ({ where }: { where: { id: string } }) => {
+        userReads += 1;
         const row = directory.find((r) => r.id === where.id);
         if (!row) return null;
-        if (select?.username === true) {
-          if (s.handleRead === "throws") throw new Error(`db down for ${row.username}`);
-          if (s.handleRead === "missing") return null;
-          if (s.handleRead === "blank") return { username: "" };
-          return { username: row.username };
-        }
-        return { role: row.role, directoryStatus: row.directoryStatus, accessRoleId: null, accessRole: null };
+        // Only the FIRST read is the row the ticker decided on. Any later read
+        // answers a different person and a deactivated row, so a ticker that
+        // reads twice (or takes its handle from a second read) is visible in
+        // what it sends and in `userReads`.
+        return userReads === 1
+          ? {
+              username: s.blankHandle ? "" : row.username,
+              role: row.role,
+              directoryStatus: row.directoryStatus,
+              accessRoleId: null,
+              accessRole: null,
+            }
+          : {
+              username: "someone-else",
+              role: row.role,
+              directoryStatus: "DEACTIVATED",
+              accessRoleId: null,
+              accessRole: null,
+            };
       }),
     },
   };
 
   const result = await tickToolSchedules(prisma as never, dispatcher, now);
   await Promise.all([sdkClient.close(), server.close()]);
-  return { result, runs, hop, asked, schedule, now };
+  return { result, runs, hop, asked, schedule, now, userReads: () => userReads };
 }
 
 const skipReason = (): unknown =>
@@ -324,35 +340,42 @@ describe("a scheduled run is refused for the module gate's person axis", () => {
   });
 });
 
-describe("an owner whose handle cannot be read does not run (never an unattributed call)", () => {
-  it.each([
-    ["missing", "user_missing"],
-    ["blank", "user_missing"],
-    ["throws", "read_failed"],
-  ] as const)("username read %s -> skipped as %s, nothing dispatched", async (handleRead, reason) => {
-    const { result, hop, asked, schedule, now } = await fire({ owner: ALICE, handleRead });
+describe("the owner's handle comes from the access gate's own row", () => {
+  it("reads the owner's row ONCE per fire, and sends the handle from that read", async () => {
+    // Tier, deactivation and the handle are one snapshot. A second read is a
+    // gap in which an owner deactivated after the access decision is still
+    // dispatched for (and, being unclaimed-domain tools, not stopped by the
+    // server's fail-closed verdict either).
+    const { result, asked, userReads } = await fire({ owner: ALICE });
+
+    expect(userReads()).toBe(1);
+    expect(result.fired).toBe(1);
+    expect(asked).toEqual(["alice"]);
+  });
+
+  it("a resolved owner with NO handle does not run: never an unattributed call", async () => {
+    const { result, hop, asked, schedule, now } = await fire({ owner: ALICE, blankHandle: true });
 
     expect(result).toEqual({ inspected: 1, fired: 0, skipped: 1, disabled: 0 });
     expect(hop).not.toHaveBeenCalled();
     // Not even asked: an unattributed call would have got the BOX verdict and run.
     expect(asked).toEqual([]);
-    expect(skipReason()).toBe(reason);
+    expect(skipReason()).toBe("user_missing");
     expect(schedule.nextFireAt.getTime()).toBeGreaterThan(now.getTime());
     expect(schedule.enabled).toBe(true);
   });
 
-  it("logs only a closed vocabulary: no person, no id, no error text", async () => {
-    await fire({ owner: ALICE, handleRead: "throws" });
+  it("logs only a closed vocabulary: no person, no id", async () => {
+    await fire({ owner: ALICE, blankHandle: true });
 
     const line = logged.find((l) => l.msg === "scheduled_run_owner_unresolved");
     expect(line).toBeDefined();
     expect(line!.level).toBe("warn");
-    expect(line!.obj).toEqual({ specId: "spec-1", scheduleId: "sched-1", reason: "read_failed" });
-    // The thrown error text carried the username; it must not have travelled.
-    expect(JSON.stringify(logged)).not.toMatch(/alice|u-alice|db down/);
+    expect(line!.obj).toEqual({ specId: "spec-1", scheduleId: "sched-1", reason: "user_missing" });
+    expect(JSON.stringify(logged)).not.toMatch(/alice|u-alice/);
     const audited = recordActivityMock.mock.calls
       .map(([a]) => a)
       .find((a) => a.what === "Scheduled run skipped (access)");
-    expect(JSON.stringify(audited)).not.toMatch(/alice|u-alice|db down/);
+    expect(JSON.stringify(audited)).not.toMatch(/alice|u-alice/);
   });
 });

@@ -82,8 +82,11 @@
  *
  * Only `userId`, deliberately: it is what the gate reads, and forwarding the
  * role or a token would widen what per-user handlers may reach beyond this
- * change. An owner whose handle cannot be read does not run (same closed
- * reasons, same skip-and-advance) — dispatching with none is the gap.
+ * change. The handle comes back from `resolveAttributedToolAccess`, off the
+ * SAME row read that decided tier, scope and deactivation — never a second
+ * query, in whose gap an owner deactivated after the access decision would
+ * still have been dispatched for. A resolved owner with no handle does not run
+ * (same skip-and-advance) — dispatching with none is the gap.
  *
  * ── WHICH GATE (WARP-1621) ─────────────────────────────────────────
  *
@@ -107,7 +110,6 @@ import {
   firstToolDeniedForPrincipal,
   hasWriteTool,
   resolveAttributedToolAccess,
-  type AttributionFailure,
 } from "./tool-access.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import { nextFireFromRrule } from "../utils/rrule.js";
@@ -299,11 +301,12 @@ export async function tickToolSchedules(
       continue;
     }
 
-    // WARP-2972 — see "WHO THE CALLS ARE FOR". Read only now, after the access
-    // gate, so every reason above keeps its own audit; nothing personal is
-    // logged for this one (the reason is a closed vocabulary, like the gate's).
-    const runAs = await ownerHandle(prisma, spec.ownerId);
-    if (!runAs.ok) {
+    // WARP-2972 — see "WHO THE CALLS ARE FOR". The handle is the access gate's
+    // own row, so there is nothing left to read. A resolved owner without one
+    // is refused, and nothing personal is logged (the reason is a closed
+    // vocabulary, like the gate's).
+    if (attributed.username === null) {
+      const reason = "user_missing";
       await recordActivity({
         kind: "tool_run",
         severity: "warn",
@@ -311,10 +314,10 @@ export async function tickToolSchedules(
         what: "Scheduled run skipped (access)",
         actor: { type: "system" },
         sub: `${spec.name} (no resolvable owner)`,
-        refs: { specId: spec.id, scheduleId: schedule.id, reason: runAs.reason },
+        refs: { specId: spec.id, scheduleId: schedule.id, reason },
       });
       logger.warn(
-        { specId: spec.id, scheduleId: schedule.id, reason: runAs.reason },
+        { specId: spec.id, scheduleId: schedule.id, reason },
         "scheduled_run_owner_unresolved",
       );
       await advanceOrDisable(prisma, schedule, now);
@@ -328,7 +331,7 @@ export async function tickToolSchedules(
         specName: spec.name,
         steps: spec.steps,
         triggeredBy: "scheduler",
-        callContext: { userId: runAs.handle },
+        callContext: { userId: attributed.username },
         // The runner re-checks per step: `${prev}` substitution means the §3
         // lock rule can only see a step's real args at dispatch.
         scope: attributed.scope,
@@ -349,31 +352,6 @@ export async function tickToolSchedules(
   }
 
   return { inspected: due.length, fired, skipped, disabled };
-}
-
-/**
- * WARP-2972 — the handle a scheduled fire's tool calls carry as `_meta.userId`:
- * the owner's `User.username`, the same value chat sends over stdio (the
- * mcp-server's `resolveAssertedUser` reads it, and per-user handlers key on
- * it). Never throws: a missing owner and a failed read are both a refusal, and
- * neither reason names the person.
- */
-async function ownerHandle(
-  prisma: PrismaClient,
-  ownerId: string | null,
-): Promise<{ ok: true; handle: string } | { ok: false; reason: AttributionFailure }> {
-  if (!ownerId) return { ok: false, reason: "no_principal" };
-  try {
-    const row = await prisma.user.findUnique({
-      where: { id: ownerId },
-      select: { username: true },
-    });
-    return row?.username
-      ? { ok: true, handle: row.username }
-      : { ok: false, reason: "user_missing" };
-  } catch {
-    return { ok: false, reason: "read_failed" };
-  }
 }
 
 async function advanceOrDisable(

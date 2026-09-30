@@ -764,6 +764,16 @@ export interface AttributedToolAccess {
   tier: string | null;
   /** Non-null ⇔ `scope` is DENY_ALL because the identity could not be trusted. */
   unresolved: AttributionFailure | null;
+  /**
+   * WARP-2972 — the row's `User.username`, read in the SAME query as `tier`
+   * and `scope`, so what a caller sends downstream as `_meta.userId` and what
+   * it just decided on come from one snapshot of the row. The scheduled-run
+   * ticker used to read it in a second query: an owner deactivated between the
+   * two was refused by neither. `null` when `unresolved` is set (an identity we
+   * could not establish has no handle); a caller that needs one and finds
+   * none refuses, it never dispatches without.
+   */
+  username: string | null;
 }
 
 /**
@@ -801,23 +811,25 @@ export async function resolveAttributedToolAccess(
     scope: DENY_ALL_TOOL_SCOPE,
     tier: null,
     unresolved,
+    username: null,
   });
 
   if (!userId) return deny("no_principal");
 
   let row:
-    | (AccessRoleIdRow & { role: string; directoryStatus: string })
+    | (AccessRoleIdRow & { role: string; directoryStatus: string; username: string })
     | null;
   try {
     row = (await prisma.user.findUnique({
       where: { id: userId },
       select: {
+        username: true,
         role: true,
         directoryStatus: true,
         accessRoleId: true,
         accessRole: { select: { toolGrants: { select: { domain: true, level: true } } } },
       },
-    })) as (AccessRoleIdRow & { role: string; directoryStatus: string }) | null;
+    })) as (AccessRoleIdRow & { role: string; directoryStatus: string; username: string }) | null;
   } catch (err) {
     logger.error({ err, userId }, "attributed_tool_access_read_failed");
     return deny("read_failed");
@@ -831,11 +843,13 @@ export async function resolveAttributedToolAccess(
     return deny("user_deactivated");
   }
   // §3 owner bypass, read off the row. Service rows never reach here.
-  if (row.role === "owner") return { scope: null, tier: "owner", unresolved: null };
+  const username = row.username || null;
+  if (row.role === "owner") return { scope: null, tier: "owner", unresolved: null, username };
 
   return {
     scope: await composeScopeForRow(userId, row),
     tier: row.role,
     unresolved: null,
+    username,
   };
 }
