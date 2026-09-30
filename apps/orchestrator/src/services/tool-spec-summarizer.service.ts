@@ -12,7 +12,7 @@
  */
 
 import { TOOL_CATALOG, type ToolDomain } from "@droplet/tools-core";
-import { completeOnce } from "./llm-complete.service.js";
+import { completeOnce, type CompleteOnceResult } from "./llm-complete.service.js";
 import { OFF_LAN_WITHHELD_DOMAINS } from "./stored-content-egress.service.js";
 import type { RunStepTrace, Summarizer, SummaryOutput } from "./tool-spec-runner.service.js";
 import { createLogger } from "../lib/logger.js";
@@ -112,7 +112,8 @@ function humanDuration(sec: number): string {
 function humanBitRate(bps: number): string {
   if (bps < 1_000) return `${bps} bps`;
   if (bps < 1_000_000) return `${(bps / 1_000).toFixed(1)} kbps`;
-  return `${(bps / 1_000_000).toFixed(1)} Mbps`;
+  if (bps < 1_000_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`;
+  return `${(bps / 1_000_000_000).toFixed(1)} Gbps`;
 }
 
 // A Map, not an object literal: a result key like "constructor" must not
@@ -209,6 +210,9 @@ const count = (v: unknown): number | null =>
   typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null;
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
+/** list_recent_files' page size (its `/recents?limit=30`). */
+const RECENT_FILES_PAGE = 30;
+
 /**
  * WARP-3409 — the fallback write-up's line for each of the daily report's
  * reads: a label, and a readout of its key figures. A readout answers null
@@ -232,7 +236,12 @@ const READOUTS: ReadonlyMap<string, Readout> = new Map(
       label: "Recent files",
       read: (r) => {
         const items = at(r, "items");
-        return Array.isArray(items) ? plural(items.length, "recently changed item") : null;
+        if (!Array.isArray(items)) return null;
+        // The tool asks for one page (`/recents?limit=30`, tools-core list-recent-files.ts), so a
+        // full page is "the most recent 30", never a count of everything that changed.
+        return items.length >= RECENT_FILES_PAGE
+          ? `the ${RECENT_FILES_PAGE} most recently changed items`
+          : plural(items.length, "recently changed item");
       },
     },
     network_summary: {
@@ -275,6 +284,9 @@ export function toLastSentence(text: string): string {
   for (const m of text.matchAll(/[.!?]["'\u201d\u2019)\]]*(?=\s)/g)) end = m.index + m[0].length;
   return end < 0 ? "" : text.slice(0, end);
 }
+
+/** WARP-3409 — appended to a write-up ended early, so it never reads as finished. */
+export const TRUNCATED_NOTE = "This summary was cut short; some details may be missing.";
 
 /** Why the model's write-up is missing, completing "...because ___". */
 function plainReason(err: unknown): string {
@@ -415,8 +427,16 @@ export function createToolSpecSummarizer(
           "summarizer returned empty or cut-off content; retrying with a doubled budget",
         );
         cutOff = content;
-        result = await ask(Math.min(MAX_TOKENS * 2, GATEWAY_MAX_TOKENS));
-        content = result.content.trim();
+        let retry: CompleteOnceResult | null = null;
+        try {
+          retry = await ask(Math.min(MAX_TOKENS * 2, GATEWAY_MAX_TOKENS));
+        } catch (err) {
+          // A failed retry must not throw away prose the first call wrote.
+          if (!cutOff) throw err;
+          logger.warn({ model, err: (err as Error).message }, "summary retry failed; keeping the cut-off first answer");
+        }
+        content = retry ? retry.content.trim() : "";
+        if (retry) result = retry;
         if (content && result.finishReason === "length") {
           if (content.length > cutOff.length) cutOff = content;
           content = "";
@@ -424,11 +444,13 @@ export function createToolSpecSummarizer(
       }
       if (!content && cutOff) {
         // Cut off twice: keep what was written, ended at its last complete
-        // sentence so no fragment reaches the owner, and say so in the step.
+        // sentence so no fragment reaches the owner, and say so — in the step
+        // (`truncated`) and in the prose itself, because no client reads the
+        // flag and a trimmed summary would otherwise look finished.
         const whole = toLastSentence(cutOff);
         if (whole) {
-          logger.warn({ model, keptChars: whole.length, cutChars: cutOff.length }, "summary cut off twice; kept up to its last complete sentence");
-          return { text: whole, truncated: true };
+          logger.warn({ model, keptChars: whole.length, cutChars: cutOff.length }, "summary cut off; kept up to its last complete sentence");
+          return { text: `${whole}\n\n${TRUNCATED_NOTE}`, truncated: true };
         }
       }
       if (!content) {

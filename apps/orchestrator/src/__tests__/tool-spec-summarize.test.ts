@@ -574,6 +574,89 @@ describe("WARP-3409 — the report never fails because only its write-up did", (
   });
 });
 
+describe("WARP-3409 — every runner message counts steps from 1 (the failing step is idx 2 → \"step 3\")", () => {
+  const ok = (idx: number) => ({ id: `s${idx}`, idx, kind: "call", args: { tool: "list_files", args: {} } });
+  const lockScope = { domains: new Set(["files", "smart-home"]), writeDomains: new Set(["smart-home"]), locks: false };
+  const filesOnlyScope = { domains: new Set(["files"]), writeDomains: new Set(["files"]), locks: false };
+
+  it.each([
+    [
+      "the whole-spec access pre-flight",
+      { id: "s2", idx: 2, kind: "call", args: { tool: "control_device", args: { node_id: "n1" } } },
+      { scope: filesOnlyScope },
+      /^step 3 \(control_device\): not permitted by this run's access role$/,
+    ],
+    [
+      "a summarize step with no summarizer",
+      { id: "s2", idx: 2, kind: "summarize", args: {} },
+      {},
+      /^step 3: summarize step but no summarizer configured$/,
+    ],
+    [
+      "a bad reference in a transform's inputs",
+      { id: "s2", idx: 2, kind: "transform", args: { code: "output = 1", inputs: { a: "${steps.nope}" } } },
+      { transformer: { transform: vi.fn() } },
+      /^step 3 \(transform\): no earlier step is named "nope"/,
+    ],
+    [
+      "a malformed step",
+      { id: "s2", idx: 2, kind: "teleport", args: {} },
+      {},
+      /^step 3: malformed \(kind=teleport\)$/,
+    ],
+    [
+      "a bad reference in a call step's args",
+      { id: "s2", idx: 2, kind: "call", args: { tool: "list_files", args: { path: "${steps.nope}" } } },
+      {},
+      /^step 3 \(list_files\): no earlier step is named "nope"/,
+    ],
+    [
+      "a dispatch-time denial (a lock the role may not operate)",
+      { id: "s2", idx: 2, kind: "call", args: { tool: "control_device", args: { node_id: "n1", command: "unlock" } } },
+      { scope: lockScope },
+      /^step 3 \(control_device\): This person's access role does not permit operating locks/,
+    ],
+  ])("%s", async (_name, failing, extra, expected) => {
+    const p = fakePrisma();
+    const { outcome } = await runToolSpec(p.client, dispatcherReturning({ ok: true }), {
+      specId: "s",
+      specName: "n",
+      steps: [ok(0), ok(1), failing],
+      triggeredBy: null,
+      ...(extra as Record<string, unknown>),
+    });
+    expect(outcome.status).toBe("failed");
+    expect(outcome.error).toMatch(expected);
+  });
+});
+
+describe("WARP-3409 — a fallback readout that throws still leaves a recorded run", () => {
+  it("fails the step with both reasons instead of escaping as a 500", async () => {
+    const summarizer: Summarizer = {
+      summarize: vi.fn(async () => {
+        throw new Error("AI Gateway error 503");
+      }),
+      fallback: vi.fn(() => {
+        throw new Error("readout bug");
+      }),
+    };
+    const p = fakePrisma();
+    const { outcome } = await runToolSpec(p.client, dispatcherReturning({}), {
+      specId: "s",
+      specName: "n",
+      steps: [summarizeStep(0)],
+      triggeredBy: null,
+      summarizer,
+    });
+    expect(outcome.status).toBe("failed");
+    expect(outcome.error).toBe(
+      "step 1 (summarize): AI Gateway error 503 (the fallback write-up failed too: readout bug)",
+    );
+    expect(p.created).toHaveLength(1);
+    expect(p.created[0]).toMatchObject({ status: "failed" });
+  });
+});
+
 describe("WARP-3282 — a step's result is scrubbed of credentials before the summary model and the run record see it", () => {
   const SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 

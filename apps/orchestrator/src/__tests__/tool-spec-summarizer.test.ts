@@ -18,6 +18,7 @@ import {
   fallbackSummary,
   renderFacts,
   toLastSentence,
+  TRUNCATED_NOTE,
 } from "../services/tool-spec-summarizer.service.js";
 import type { RunStepTrace } from "../services/tool-spec-runner.service.js";
 import { GATEWAY_MAX_TOKENS } from "../types/index.js";
@@ -134,6 +135,7 @@ describe("renderFacts", () => {
       ok("get_camera_health", { system: { uptimeSec: 172_735, storage: [{ freeBytes: 712_596_835_533, usedBytes: 0 }] } }),
       ok("list_recent_files", { items: [{ name: "a.png", size: 328_693 }, { name: "b", size: 512 }] }),
       ok("network_summary", { kpis: { wanUpBps: 0, wanDownBps: 2_500_000, clientCount: 7, offLanBytesThisMonth: 1_073_741_824 } }),
+      ok("lan_summary", { kpis: { wanUpBps: 2_500_000_000 } }),
     ]);
     expect(out).toContain('"uptime":"4 h 40 min"');
     expect(out).toContain('"uptimeSec":"1 d 23 h"');
@@ -143,6 +145,7 @@ describe("renderFacts", () => {
     expect(out).toContain('"size":"512 B"');
     expect(out).toContain('"wanUpBps":"0 bps"');
     expect(out).toContain('"wanDownBps":"2.5 Mbps"');
+    expect(out).toContain('"wanUpBps":"2.5 Gbps"');
     expect(out).toContain('"offLanBytesThisMonth":"1.0 GB"');
     // Everything else is left exactly as the tool returned it.
     expect(out).toContain('"clientCount":7');
@@ -180,7 +183,7 @@ describe("fallbackSummary (WARP-3409) — the write-up when the model could not 
     expect(fallbackSummary(dailyFacts(), new Error("AI Gateway error 422: …"))).toBe(
       [
         "System health: 9 of 9 services ok.",
-        "Recent files: 30 recently changed items.",
+        "Recent files: the 30 most recently changed items.",
         "Network: 7 devices connected, 0 DNS lookups blocked today.",
         "Cameras: none set up.",
         "Calendar: no upcoming events.",
@@ -205,6 +208,18 @@ describe("fallbackSummary (WARP-3409) — the write-up when the model could not 
       "Cameras: 2 of 3 live.",
       "Calendar: 1 upcoming event.",
     ]);
+  });
+
+  it("a full page of recent files is 'the 30 most recent', never a count of everything that changed", () => {
+    // list_recent_files asks /recents?limit=30 with no time window: 30 back
+    // means "at least 30", so printing 30 as a total would be a guessed figure.
+    const line = (n: number) =>
+      fallbackSummary([ok("list_recent_files", { items: Array.from({ length: n }, (_, i) => ({ name: `f${i}` })) })], new Error("x")).split(
+        "\n",
+      )[0];
+    expect(line(30)).toBe("Recent files: the 30 most recently changed items.");
+    expect(line(29)).toBe("Recent files: 29 recently changed items.");
+    expect(line(1)).toBe("Recent files: 1 recently changed item.");
   });
 
   it("never guesses: an unrecognised shape or an unknown tool is just 'checked'; pseudo-steps are not sources", () => {
@@ -350,7 +365,7 @@ describe("createToolSpecSummarizer", () => {
     // The first is longer, so it is kept; its dangling "Stor" goes, and the
     // "8.8" inside it is not mistaken for a sentence end.
     await expect(s.summarize("Write it up.", [ok("t", 1)])).resolves.toEqual({
-      text: "Your system is healthy. Uptime is 4 h 40 min. CPU is at 8.8 %.",
+      text: `Your system is healthy. Uptime is 4 h 40 min. CPU is at 8.8 %.\n\n${TRUNCATED_NOTE}`,
       truncated: true,
     });
   });
@@ -358,7 +373,10 @@ describe("createToolSpecSummarizer", () => {
   it("cut off, then a blank retry: the cut-off text is kept, ended cleanly", async () => {
     completeOnceMock.mockResolvedValueOnce(cut("Nine files landed. Two more are")).mockResolvedValueOnce(done(""));
     const s = createToolSpecSummarizer(activeModel);
-    await expect(s.summarize("Write it up.", [ok("t", 1)])).resolves.toEqual({ text: "Nine files landed.", truncated: true });
+    await expect(s.summarize("Write it up.", [ok("t", 1)])).resolves.toEqual({
+      text: `Nine files landed.\n\n${TRUNCATED_NOTE}`,
+      truncated: true,
+    });
   });
 
   it("cut off with no complete sentence at all: throws, and the fallback says why in plain words", async () => {
@@ -372,6 +390,27 @@ describe("createToolSpecSummarizer", () => {
     expect(s.fallback!([], err).split("\n").pop()).toBe(
       "The written summary couldn't be produced because the AI model ran out of room before it finished a sentence.",
     );
+  });
+
+  it("a retry that ERRORS does not throw away the first answer's prose", async () => {
+    completeOnceMock
+      .mockResolvedValueOnce(cut("Your system is healthy. Nine files landed. Two"))
+      .mockRejectedValueOnce(new Error("AI Gateway timeout after 120000ms during completeOnce"));
+    const s = createToolSpecSummarizer(activeModel);
+    await expect(s.summarize("Write it up.", [ok("t", 1)])).resolves.toEqual({
+      text: `Your system is healthy. Nine files landed.\n\n${TRUNCATED_NOTE}`,
+      truncated: true,
+    });
+  });
+
+  it("a retry that errors after a BLANK first answer still throws (nothing to keep)", async () => {
+    completeOnceMock.mockResolvedValueOnce(cut("")).mockRejectedValueOnce(new Error("AI Gateway error 503"));
+    const s = createToolSpecSummarizer(activeModel);
+    await expect(s.summarize("Write it up.", [ok("t", 1)])).rejects.toThrow(/AI Gateway error 503/);
+  });
+
+  it("a trimmed summary says so in the prose itself — no client reads `truncated`", () => {
+    expect(TRUNCATED_NOTE).toBe("This summary was cut short; some details may be missing.");
   });
 
   it("toLastSentence: a terminator counts only with whitespace after it", () => {

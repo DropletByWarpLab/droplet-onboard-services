@@ -620,7 +620,15 @@ export async function runToolSpec(
         // WARP-3409 — the facts were gathered; only the prose is missing. A
         // summarizer that can write a fallback turns this into a finished
         // step, marked so the log and any client can tell it apart.
-        const fallback = args.summarizer.fallback?.([...(facts.value as RunStepTrace[])], err);
+        let fallback: string | undefined;
+        let error = msg;
+        try {
+          fallback = args.summarizer.fallback?.([...(facts.value as RunStepTrace[])], err);
+        } catch (fallbackErr) {
+          // A readout that throws must still leave a recorded run (a failed
+          // step), never escape as a 500 with no ToolRun row.
+          error = `${msg} (the fallback write-up failed too: ${(fallbackErr as Error).message ?? String(fallbackErr)})`;
+        }
         if (fallback) {
           logger.warn({ specId: args.specId, reason: msg }, "tool_spec_summary_fallback");
           const outName = stepOutputName(step);
@@ -643,9 +651,9 @@ export async function runToolSpec(
           tool: SUMMARIZE_PSEUDO_TOOL,
           args: { prompt: summarizeStep.prompt },
           ok: false,
-          error: msg,
+          error,
         });
-        outcome = { status: "failed", trace, error: `step ${step.idx + 1} (summarize): ${msg}` };
+        outcome = { status: "failed", trace, error: `step ${step.idx + 1} (summarize): ${error}` };
         break;
       }
       continue;

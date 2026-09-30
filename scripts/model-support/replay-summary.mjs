@@ -16,8 +16,12 @@
 // `--dist <tree>/apps/orchestrator/dist`, and hand the container DATABASE_URL, AI_GATEWAY_URL and
 // SERVICE_TOKEN_AI_GATEWAY read from droplet-orchestrator-1's env without echoing them.
 //
-// Defaults mirror the summarizer: max_tokens 2,100 (its first call), temperature 0.3, the box's
-// LLM_MODEL. Output: one line per model × repeat.
+// Defaults mirror the summarizer: max_tokens 2,100 (its first call), temperature 0.3, --thinking low,
+// the box's LLM_MODEL. Output: one line per model × repeat.
+//
+// CAUTION on a live box: a --models entry that is not already loaded gets loaded by the model runner,
+// which may unload the model chat is using (one GPU). Run it when nobody is chatting, and finish with
+// the active model so it is resident again.
 
 (async () => {
   const { createRequire } = await import("node:module");
@@ -37,7 +41,7 @@
   const models = opt("models", process.env.LLM_MODEL ?? "").split(",").map((m) => m.trim()).filter(Boolean);
   const repeats = Number(opt("repeats", "3"));
   const maxTokens = Number(opt("max-tokens", "2100"));
-  const thinking = opt("thinking", "default");
+  const thinking = opt("thinking", "low"); // production always sends low (WARP-3409)
   if (models.length === 0) throw new Error("no model: pass --models or set LLM_MODEL");
   if (!["low", "default"].includes(thinking)) throw new Error("--thinking must be low or default");
 
