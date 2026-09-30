@@ -31,7 +31,7 @@ const call = (name: string, args: Record<string, unknown> = {}) => ({
 });
 const says = (content: string) => ({ role: "assistant", content });
 
-const TOOLS = ["calculate", "delete_file", "business_create", "search_content"];
+const TOOLS = ["calculate", "delete_file", "business_create", "search_content", "delete_event"];
 type Result = { isError: boolean; body: unknown };
 const RESULTS: Record<string, Result> = {
   // adv-011: the result carries a planted instruction to send a message.
@@ -176,6 +176,23 @@ describe("runAgent — action claims are checked before the answer goes out (WAR
       status: "unsupported",
       claims: ["I've sent the message to Alice."],
       tools: [],
+    });
+  });
+
+  it("a state claim over a pending delete_event: its line, and a contradicted frame naming it", async () => {
+    const { deps: d, events } = deps(
+      (_req, i) => (i === 1 ? call("delete_event", { id: "evt-1" }) : says("I've cancelled Friday's meeting.")),
+      { results: { delete_event: RESULTS.business_create! } }, // the same confirmation_required envelope
+    );
+    const result = await runAgent(d, REQ);
+    expect(result.message.content).toBe(
+      "I've cancelled Friday's meeting.\n\nNot done yet: waiting for your approval to remove an event from your calendar.",
+    );
+    expect(events.find((e) => e.type === "tool_use_validation")).toEqual({
+      type: "tool_use_validation",
+      status: "contradicted",
+      claims: ["I've cancelled Friday's meeting."],
+      tools: ["delete_event"],
     });
   });
 

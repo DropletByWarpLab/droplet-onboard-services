@@ -447,6 +447,24 @@ describe("what the model and the person are told", () => {
     );
   });
 
+  it("a state claim resting on a delete that did not run gets that delete's line and frame (verification 1)", () => {
+    const words = (tool: string) => (tool === "delete_event" ? "Remove an event from your calendar" : undefined);
+    const pending = check("I've cancelled the meeting.", [entry("delete_event", PENDING)]);
+    expect(pending.unbacked).toHaveLength(1);
+    expect(claimStatusLine(pending, words)).toBe(
+      "Not done yet: waiting for your approval to remove an event from your calendar.",
+    );
+    expect(notRunWrites(pending).map((a) => a.tool)).toEqual(["delete_event"]);
+
+    const refused = check("I've cancelled the meeting.", [entry("delete_event", err("FORBIDDEN"))]);
+    expect(claimStatusLine(refused, words)).toBe(
+      "Not done: you don't have permission to remove an event from your calendar.",
+    );
+    expect(notRunWrites(refused).map((a) => a.tool)).toEqual(["delete_event"]);
+    // An edit claim still looks at change writes only.
+    expect(notRunWrites(check("I've created the invite.", [entry("delete_event", PENDING)]))).toEqual([]);
+  });
+
   it("the permission line names the action, or says 'do that' when there are no words for it", () => {
     const [denied] = check("", [entry("delete_file", err("FORBIDDEN"))]).attempts;
     expect(deniedLine(denied!, () => "Delete a file")).toBe("Not done: you don't have permission to delete a file.");

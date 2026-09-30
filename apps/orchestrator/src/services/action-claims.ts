@@ -308,6 +308,16 @@ function backs(c: ActionClaim, a: WriteAttempt): boolean {
   return c.strict ? a.family !== "send" : true;
 }
 
+/**
+ * Which attempts that did NOT run speak to a claim: the same as `backs`,
+ * except that an edit claim (and every passive) looks at change writes only,
+ * so a status read-out is never tied to, say, a pending send.
+ */
+function relevant(c: ActionClaim, a: WriteAttempt): boolean {
+  if (c.family === "permission_check") return false;
+  return c.family === "change" && !c.strict ? a.family === "change" : backs(c, a);
+}
+
 // Says so plainly: "you don't have permission", "not allowed", "your role" …
 const MENTIONS_PERMISSION =
   /\b(?:permissions?|not allowed|isn't allowed|aren't allowed|not permitted|not authori[sz]ed|unauthori[sz]ed|(?:don't|do not|doesn't|does not) have (?:the )?(?:access|rights?)|no access|access (?:is |was )?denied|access role|your role|doesn't allow|does not allow)\b/;
@@ -332,7 +342,7 @@ export function checkActionClaims(
       unconfirmed.push(c);
       continue;
     }
-    if (attempts.some((a) => a.family === family)) {
+    if (attempts.some((a) => relevant(c, a))) {
       unbacked.push(c); // tried this turn, and it did not run
       continue;
     }
@@ -350,9 +360,11 @@ export function checkActionClaims(
  * claimed families was attempted at all.
  */
 export function notRunWrites(check: ClaimCheck): WriteAttempt[] {
-  const families = new Set(check.unbacked.map((c) => c.family));
   return check.attempts.filter(
-    (a) => a.outcome !== "executed" && a.outcome !== "unclear" && families.has(a.family),
+    (a) =>
+      a.outcome !== "executed" &&
+      a.outcome !== "unclear" &&
+      check.unbacked.some((c) => relevant(c, a)),
   );
 }
 
@@ -438,7 +450,7 @@ export function claimStatusLine(check: ClaimCheck, label: ToolLabel): string {
       continue;
     }
     const family = c.family;
-    const tried = check.attempts.filter((a) => a.family === family && a.outcome !== "executed");
+    const tried = check.attempts.filter((a) => relevant(c, a) && a.outcome !== "executed");
     if (tried.length === 0) lines.add(NOTHING_DONE[family]);
     for (const a of tried) lines.add(statusFor(a, label));
   }
