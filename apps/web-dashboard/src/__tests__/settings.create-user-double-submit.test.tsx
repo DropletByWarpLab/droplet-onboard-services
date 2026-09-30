@@ -14,6 +14,9 @@ const createUserMock = vi.fn();
 const deleteUserMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
+  // WARP-3264 — Settings mounts PlaceLookupSwitch.
+  fetchPlaceLookupChannel: vi.fn().mockResolvedValue(null),
+  setPlaceLookupChannel: vi.fn(),
   fetchUsers: (...a: any[]) => fetchUsersMock(...a),
   createUser: (...a: any[]) => createUserMock(...a),
   deleteUser: (...a: any[]) => deleteUserMock(...a),

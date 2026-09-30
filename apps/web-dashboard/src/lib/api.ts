@@ -3102,6 +3102,35 @@ export async function setWebPushChannel(enabled: boolean): Promise<void> {
   }
 }
 
+/**
+ * WARP-3264 — the `place_lookup` off-LAN channel: the calendar place field's
+ * OpenStreetMap lookup. Default off. `null` = unreadable; don't guess.
+ */
+export async function fetchPlaceLookupChannel(): Promise<{ enabled: boolean } | null> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan`);
+  if (!res.ok) return null;
+  const body = (await res.json()) as { channels?: Array<{ key: string; enabled: boolean }> };
+  const row = body.channels?.find((c) => c.key === "place_lookup");
+  return row ? { enabled: row.enabled === true } : null;
+}
+
+/** WARP-3264 — flip `place_lookup`. Owner only (the route 403s everyone else). */
+export async function setPlaceLookupChannel(enabled: boolean): Promise<void> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan/place_lookup`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      enabled,
+      reason: enabled ? "Turned on from Settings → Locations" : "Turned off from Settings → Locations",
+    }),
+  });
+  if (!res.ok) {
+    throw Object.assign(new Error(`Failed to change place lookup: ${res.status}`), {
+      status: res.status,
+    });
+  }
+}
+
 /** `refused` is set when the `web_push` off-LAN channel is off (WARP-2904). */
 export async function sendTestPush(): Promise<{
   sent: number;
