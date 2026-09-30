@@ -105,6 +105,7 @@ import { actorFromRequest } from "../services/activity.service.js";
 import {
   buildBaseSystemPrompt,
   buildMemoryFactsBlock,
+  todayLine,
 } from "../services/system-prompt.service.js";
 import { getPersona, composePersonaBlock } from "../services/persona.service.js";
 import {
@@ -2120,10 +2121,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // composeBusinessBlock role-filters and gates on type again
         // (defense-in-depth). Fail-open to no block on any error.
         let businessBlock = "";
+        // WARP-3281 — the business's zone for the date line, off the same row.
+        let workspaceTz: string | null = null;
         try {
           const workspace = await prisma.workspace.findUnique({
             where: { id: 1 },
           });
+          workspaceTz = workspace?.tz ?? null;
           const workspaceType = (workspace?.type ?? "BUSINESS") as WorkspaceTypeName;
           if (workspaceType === "BUSINESS") {
             businessBlock = composeBusinessBlock(
@@ -2149,10 +2153,20 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // gives us the identity+guidance chars without a persona block for the
         // estimate; the guidance is folded into identityBlock here since both
         // are never-dropped fixed blocks.
+        // WARP-3281 — today's date, computed once so the size estimate and the
+        // wire carry the same line. Voice gets none: voice-io appends its own
+        // "Right now it is …" clock (services/voice-io/voice/llm.py), and two
+        // clocks from two zone sources could disagree near midnight. On an
+        // off-LAN turn the Workspace.tz label stays on the box (WARP-2746's
+        // class: workspace configuration); the day alone goes.
+        const dateLine = isVoice
+          ? ""
+          : todayLine(new Date(), workspaceTz, { withZone: !isOffLanTurn });
         const identityAndGuidance = buildBaseSystemPrompt(
           allowedForUser,
           "",
-          undefined,
+          "",
+          dateLine,
           navigationWithheld,
         );
         // WARP-1121 (§9.3/§10) — the interview conductor block. Appended
@@ -2348,6 +2362,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
               allowedForUser,
               degraded.personaBlock,
               degraded.businessBlock,
+              dateLine,
               navigationWithheld,
             ) +
             memoryBlock +
