@@ -2032,7 +2032,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           : finalizeReason === "repetition"
             ? "You're repeating the same tool calls. Please answer my question now with what you already have. Don't call any more tools."
             : finalizeReason === "no_progress"
-              ? "Your last searches found nothing, so stop searching. Please answer me now: say what you looked for and that nothing matching was found, plus anything useful you already have. Don't call any more tools."
+              ? "Your last searches found nothing, so stop searching. If the results above already answer my request, please answer it. Otherwise tell me what you looked for and that nothing matching was found, then ask me for the specific detail you need to continue (for example which person, file, record or ticket I mean). Don't call any more tools."
               : finalizeReason === "needs_details"
                 ? "You've spent half of this turn's steps searching without finding what my request needs, so stop searching. If the results above already answer my request, please answer it. Otherwise tell me in one sentence what you checked, then ask me for the specific detail you need to continue (for example which person, file, record or ticket I mean). Don't call any more tools."
                 : "That's all the room there is for more lookups. Please answer my question now with what you already have. Don't call any more tools.",
@@ -2241,8 +2241,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           trace,
           advertisedNames,
           (tool) => catalogEntry(tool)?.write ?? runtimeLookup(tool)?.requiresWrite === true,
-          // WARP-3347 — the loop already judged these hits unusable.
-          finalizeReason === "needs_details",
+          // WARP-3347 — a search guard already judged these hits unusable.
+          finalizeReason === "needs_details" || finalizeReason === "no_progress",
         );
         emit({ type: "content_delta", text: answer });
       }
@@ -3290,8 +3290,9 @@ function blankAnswerFallback(
   trace: AgentTraceEntry[],
   advertised: ReadonlySet<string>,
   isWrite: (tool: string) => boolean,
-  // WARP-3347 — set when the half-budget guard ended the search: its hits
-  // are not "some information", so the reply asks for the missing detail.
+  // WARP-3347 — set when a search guard (WARP-3283 empties, the half-budget
+  // cut) ended the search: its hits are not "some information", so the reply
+  // asks for the missing detail.
   hitsUnusable: boolean,
 ): string {
   const done = new Set<string>();
