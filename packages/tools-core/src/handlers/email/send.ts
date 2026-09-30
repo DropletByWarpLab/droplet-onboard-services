@@ -133,7 +133,7 @@ async function handler(
 const tool: Tool = {
   name: "email_send",
   description:
-    "Send a drafted email. Only when the user asks for email (an address alone is not a request for email); to message a colleague otherwise, team chat is the default. Write tier — requires user confirmation in the dashboard. Refuses with off_lan_blocked when Settings → Off-LAN allowlist has `outbound_email` disabled.",
+    "Send a drafted email. Only when the user asks for email (replying to an email thread counts as asking for email; an address alone does not); to message a colleague otherwise, team chat is the default. Write tier — requires user confirmation in the dashboard. Refuses with off_lan_blocked when Settings → Off-LAN allowlist has `outbound_email` disabled.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

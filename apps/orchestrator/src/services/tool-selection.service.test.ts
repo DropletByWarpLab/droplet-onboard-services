@@ -570,17 +570,27 @@ describe("WARP-2454 — keyword rules vs. natural phrasing", () => {
   // ── WARP-3340: "message someone" reaches team chat ────────────────────
   //
   // Team chat is the default channel for reaching a colleague (email only
-  // when asked for), so the verb has to advertise it. MUTATION: delete the
-  // WARP-3340 rule and every positive goes red; drop the lookbehind and the
-  // technical compounds do.
+  // when asked for), so asking to message a PERSON has to advertise it. The
+  // bare noun must not: this is the most expensive domain (see the team_chat
+  // rule's comment), and "the message in the file" asks nobody to send
+  // anything. MUTATION: delete the WARP-3340 rule and every positive goes
+  // red; admit the bare noun (e.g. `\bmessag(e|es|ing)\b`) and the
+  // negatives do.
   describe("WARP-3340 — messaging a person advertises team chat", () => {
     it.each([
       // agent-loop eval seed-028, verbatim: the address alone used to pull
       // only the email domain.
       "Before messaging dave@example.com, look them up to confirm they exist, then send them: 'Server maintenance tonight at 10pm'.",
       "message Priya that the delivery is late",
+      "can you message the team about the outage?",
       "can you send Bob a quick message about the 3pm call",
-      "any new messages from the front desk?",
+      "send the team a message about the fire drill",
+      "Send a message to the manager saying hello.",
+      "send a status message to the ops channel",
+      "let the team know the office is closed tomorrow",
+      "ping him about the invoice",
+      "text Sam that I'm running late",
+      "tell everyone the printer is fixed",
     ])("%s selects team chat", (message) => {
       expect(advertisedFor(message, CHAT_POOL)).toContain("team_chat_send_message");
     });
@@ -590,8 +600,50 @@ describe("WARP-2454 — keyword rules vs. natural phrasing", () => {
       "fix the commit message on my last change",
       "find the email message from the accountant",
       "the e-mail messages from the landlord",
+      // Review of #2541: the bare noun, each a turn that sends nothing.
+      "what does the message in the file say?",
+      "play the voice message from the supplier",
+      "the message queue is backed up again",
+      "are the MQTT messages still arriving?",
+      "Kafka messages are piling up on the broker",
+      "what does this warning message mean?",
+      "set up my out-of-office message for next week",
+      "read Dana's message",
+      "the message Dana sent about the invoice",
+      // A determiner makes the verb a noun: the lookbehind.
+      "what was the message everyone got about the outage?",
+      "read the text her manager forwarded",
+      // A read question; the domain has no tool that reads messages.
+      "any new messages from the front desk?",
+      // The verbs, outside a person frame.
+      "let me know when the backup finishes",
+      "can you tell what that error means?",
+      "ping the router",
+      "send the error message to the log",
     ])("%s does not", (message) => {
       expect(advertisedFor(message, CHAT_POOL)).not.toContain("team_chat_send_message");
+    });
+
+    // With the email tools in the pool as well, which is the real choice the
+    // model faces: seed-028's wording offers BOTH channels (the address still
+    // matches the email rule), and an email reply offers email alone.
+    const BOTH_POOL = [...CHAT_POOL, "email_search", "email_draft_reply", "email_send"];
+    it("offers team chat AND email for seed-028's wording", () => {
+      const advertised = advertisedFor(
+        "Before messaging dave@example.com, look them up to confirm they exist, then send them: 'Server maintenance tonight at 10pm'.",
+        BOTH_POOL,
+      );
+      expect(advertised).toContain("team_chat_send_message");
+      expect(advertised).toContain("email_send");
+    });
+
+    it.each([
+      "reply to the accountant's email thread",
+      "Reply to the message from the accountant",
+    ])("%s offers email and not team chat", (message) => {
+      const advertised = advertisedFor(message, BOTH_POOL);
+      expect(advertised).toContain("email_draft_reply");
+      expect(advertised).not.toContain("team_chat_send_message");
     });
   });
 
@@ -1481,10 +1533,15 @@ describe("WARP-3280 — every domain rule runs in linear time on hostile input",
     ["show me run", "show me ".repeat(N / 8)],
     ["open then words", "open " + "a ".repeat(N / 2)],
     ["where run", "where ".repeat(N / 6)],
-    // WARP-3340 — the team-chat `message` rule and its lookbehind.
+    // WARP-3340 — the team-chat person-frame rule and its lookbehinds.
     ["message run", "message ".repeat(N / 8)],
     ["error message run", "error message ".repeat(N / 14)],
     ["error then spaces then message", "error" + " ".repeat(N) + "message"],
+    ["message then spaces", "message" + " ".repeat(N) + "x"],
+    ["send a run", "send a ".repeat(N / 7)],
+    ["send then spaces", "send" + " ".repeat(N) + "a message"],
+    ["let run", "let ".repeat(N / 4)],
+    ["tell a word run", "tell " + "a".repeat(N)],
   ])("%s (%#) decides in under 50 ms", (_label, hostile) => {
     for (const pool of [POOL, NAV_POOL]) {
       const started = performance.now();

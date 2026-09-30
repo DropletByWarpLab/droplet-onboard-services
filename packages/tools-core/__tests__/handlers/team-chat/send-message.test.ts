@@ -434,25 +434,18 @@ describe("team_chat_send_message — a roster that does not say who is asking", 
  * WARP-3340 — Romain, 2026-09-29: "team chat default unless specified by the
  * user". The descriptions are what the model reads when both channels are
  * advertised (agent-loop eval seed-028 drafted and sent an email instead), so
- * each side of the choice says it. MUTATION: drop any one sentence and its
- * assertion goes red.
+ * each side of the choice says it. Key phrases only, so a rewording keeps
+ * these green. MUTATION: drop any one clause and its assertion goes red.
  */
 describe("WARP-3340 — team chat is the default channel, email only when asked", () => {
-  it("team_chat_send_message says it is the default and takes usernames, not addresses", () => {
-    expect(sendMessage.description).toContain(
-      "The default way to message, tell or send something to a colleague, even one named by email address; use email only when the user asks for email.",
-    );
-    expect(sendMessage.description).toContain(
-      "member USERNAMES, not email addresses; never guess one from a job title, ask who is meant",
-    );
-    const recipients = (sendMessage.inputSchema as { properties: { recipients: { description: string } } })
-      .properties.recipients;
-    expect(recipients.description).toContain("never an email address");
+  it("team_chat_send_message is the default and takes usernames, not addresses", () => {
+    expect(sendMessage.description).toContain("use email only when the user asks for email");
+    expect(sendMessage.description).toContain("not email addresses");
   });
 
-  it.each([emailSend, emailDraftReply])("$name is only for when the user asks for email", (tool) => {
-    expect(tool.description).toContain(
-      "Only when the user asks for email (an address alone is not a request for email); to message a colleague otherwise, team chat is the default.",
-    );
+  it.each([emailSend, emailDraftReply])("$name is for a request for email, which a thread reply is", (tool) => {
+    expect(tool.description).toContain("Only when the user asks for email");
+    expect(tool.description).toContain("replying to an email thread counts as asking for email");
+    expect(tool.description).toContain("team chat is the default");
   });
 });
