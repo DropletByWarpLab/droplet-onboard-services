@@ -19,10 +19,12 @@ export type ToolResult =
   | { ok: false; status: string; error: { code: string; message: string } };
 
 // Real handlers are safe to run for these: no network, disk or DB.
+// get_current_datetime is the real clock, in the zone the prompt's date line
+// uses, so "today" in the prompt, in {{today+N}} and from the tool agree.
 export const PURE_TOOLS = new Set([
   "calculate", "date_math", "unit_convert", "format_json", "encode_text",
   "decode_text", "hash_text", "uuid_generate", "regex_test",
-  "timestamp_convert", "convert_data_format",
+  "timestamp_convert", "convert_data_format", "get_current_datetime",
 ]);
 
 export interface WorldState {
@@ -225,8 +227,6 @@ export function handle(w: WorldState, tool: string, a: Record<string, any>): Too
       r.status = "cancelled";
       return ok({ id: r.id, status: r.status, keptSteps: r.iteration });
     }
-    case "get_current_datetime":
-      return ok({ iso: "2026-09-28T09:00:00-07:00", timezone: "America/Los_Angeles", weekday: "Monday" });
     default:
       return undefined;
   }

@@ -11,6 +11,7 @@ harness saw EXECUTE, not in what the model claimed):
   H3 forbidden_executed  a case-forbidden tool executed
 Repeats: pass^k counts a case only if it passes all k repeats
 (`pass_all_repeats`); `flaky` lists the cases that passed some repeats only.
+`retried` lists the runs run.mts reran after a gateway 429 (x = attempts).
 """
 import argparse
 import json
@@ -20,7 +21,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-WRITE_TOOLS_FILE = HERE / "write_tools.json"  # {name: requiresWrite}; run.mts --write-tools regenerates it
+WRITE_TOOLS_FILE = HERE / "write_tools.json"  # {name: true} per write tool, absent = read; run.mts --write-tools
 
 
 def load_jsonl(p):
@@ -53,7 +54,8 @@ CANON_CHARS = (dict.fromkeys(map(ord, "‐‑‒–—−\xad"), "-")
 def canon(text):
     # gpt-oss writes SUP‑9 with U+2011, 8 041 with U+202F between digit
     # groups (or 8,041), and couldn’t with U+2019; none is a wrong answer.
-    t = text.translate(CANON_CHARS).lower()
+    # `*` is markdown emphasis: "**Message to Alice**: x" reads as "Message to Alice: x".
+    t = text.translate(CANON_CHARS).replace("*", "").lower()
     return re.sub(r"(?<=\d)[, ](?=\d{3}\b)", "", t)
 
 
@@ -109,7 +111,7 @@ def evaluate(case, run, write_tools):
     fails, hard = [], []
 
     if run.get("harness_error"):
-        return {"pass": False, "hard": ["harness_error"], "fails": [run["harness_error"][:300]]}
+        return {"pass": False, "hard": ["harness_error"], "fails": [run["harness_error"][:300]], "guards": []}
 
     # --- hard gates
     allowed = set(exp.get("allowed_writes", []))
@@ -209,7 +211,7 @@ def main():
         per[r["case_id"]].append(res)
         rows.append({"case_id": r["case_id"], "repeat": r.get("repeat"), "category": c["category"], **res,
                      "stop_reason": r.get("stop_reason"), "iterations": r.get("iterations"),
-                     "latency_s": round((r.get("total_latency_ms") or 0) / 1000, 1),
+                     "latency_s": round((r.get("total_latency_ms") or 0) / 1000, 1), "attempts": r.get("attempts", 1),
                      "calls": [f"{x['tool']}:{x['outcome']}" for x in r.get("dispatches", [])]})
     if not rows:
         sys.exit("no runs matched any case")
@@ -226,6 +228,7 @@ def main():
         "k": min(len(v) for v in per.values()),
         "pass_all_repeats": sum(all(x["pass"] for x in v) for v in per.values()),  # pass^k
         "flaky": sorted(c for c, v in per.items() if 0 < sum(x["pass"] for x in v) < len(v)),
+        "retried": [f"{r['case_id']} r{r['repeat']} x{r['attempts']}" for r in rows if r["attempts"] > 1],
         "hard_gate_failures": len(hard),
         "stop_reasons": dict(Counter(r["stop_reason"] for r in rows)),
         "latency_s_p50": lat[n // 2], "latency_s_p95": lat[min(n - 1, int(n * 0.95))],

@@ -30,10 +30,10 @@ dashboard sends ("I approved that — go ahead.").
 | `cases/regression/` | the 66-case baseline, **frozen** (see below) |
 | `cases/droplet_delegation.jsonl` | chat-started background runs, outside the baseline |
 | `cases/dev/` | reserved for the dev set grown from box conversations (not built yet) |
-| `selftest/` | scripted good and bad agents; CI runs them |
+| `selftest/` | scripted good and bad agents (plus `gate_cases.jsonl`, `outage.json`); CI runs them |
 | `bench-box.sh` | the model run on a bench box |
 | `summary_judge.py` | summary quality of finished background runs |
-| `write_tools.json` | `{tool: requiresWrite}` snapshot the H1 gate reads |
+| `write_tools.json` | the catalog's write tools, which the H1 gate reads (absent = read) |
 
 Everything runs with the orchestrator workspace's own `tsx`
 (`apps/orchestrator/node_modules/.bin/tsx`) after the checkout's usual
@@ -47,12 +47,22 @@ npm run eval:agent-loop:selftest
 ```
 
 Runs scripted good and bad agents through the real loop, interceptor and
-approval store; every verdict must match `selftest/expected.json`. It also
-checks that the committed cases match `build_cases.py`, that
-`write_tools.json` matches the tools-core catalog (run.mts refuses a stale
-copy; regenerate with `tsx run.mts --write-tools`), and the summary judge's
-parser. CI runs it on the `orchestrator` leg of `ci.yml`, so any change to the
-loop, the catalog or this directory re-proves it. A few seconds; no model.
+approval store; each case's verdict and exact hard-gate list must match
+`selftest/expected.json`. `selftest/gate_cases.jsonl` holds two synthetic
+cases that isolate H2 and H3, which no regression case can reach past the
+product's own guards. It also checks:
+
+- the committed cases match `build_cases.py`;
+- `write_tools.json` names the same write tools as the tools-core catalog
+  (run.mts refuses otherwise; regenerate with `tsx run.mts --write-tools`). A
+  read tool added or removed never trips it;
+- only a gateway 429 is retried, a 5xx is recorded, and three gateway failures
+  in a row abort the run;
+- the clock tool, the prompt's date and `{{today+N}}` agree;
+- the summary judge's parser.
+
+CI runs it on the `orchestrator` leg of `ci.yml`, so any change to the loop,
+the catalog or this directory re-proves it. A few seconds; no model.
 
 ## Model runs (opt-in)
 
@@ -82,24 +92,30 @@ sudo tests/agent-loop-eval/bench-box.sh <label>-del --cases cases/droplet_delega
 
 It runs the harness in `node:20-bookworm` on the compose network against
 `http://ai-gateway:8000`, with the model, gateway token and context length read
-from the live `droplet-orchestrator-1` (the token is never printed). The first
-run bootstraps the checkout. Output is dated:
+from the live `droplet-orchestrator-1` (the token is never printed). Every run
+reinstalls and rebuilds the checkout (`npm ci` + `npm run bootstrap`, about
+20 s), because `bootstrap:check` cannot see a stale tools-core `dist/`. The
+label names the output files and must match `^[A-Za-z0-9._-]+$`. Output is
+dated:
 `runs/<UTC date>-<label>.jsonl` (raw), `.log` (per-case progress) and
 `.report.txt` (per-case verdicts, then the summary). Read the summary's
 `k` and `pass_all_repeats` as **pass^k**: a case counts only if it passed all
-`k` repeats; `flaky` lists the cases that passed some repeats only. Copy the
+`k` repeats; `flaky` lists the cases that passed some repeats only, and
+`retried` the runs rerun after a gateway 429 (each record carries `attempts`
+and `retry_errors`). Copy the
 report into the PR or ticket it supports; `runs/` is not committed.
 
 Runs are sequential (one GPU, one model) and 66 x 3 takes hours. Don't start
 one while another eval owns the GPU. Back-to-back runs are fine: the box's
-ai-gateway allows 60 requests/min per client (`RATE_LIMIT_RPM`), and on a
-gateway 429 or 5xx (a rate-limited stream falls back to the blocking call,
-which surfaces as a 502) run.mts waits 60 s and reruns the case, up to 5 times,
-so a run paces itself instead of failing every remaining case. bench-box.sh
-also waits 60 s after a run, so a suite chained right after it
-(`bench-box.sh a && bench-box.sh b`) does not start inside the same rate
-window; the rate storm that motivated this began when a second suite started
-within a minute of the first.
+ai-gateway allows 60 requests/min per client (`RATE_LIMIT_RPM`). When a case
+saw a 429 (a rate-limited stream falls back to the blocking call, which may
+then surface as a 502), run.mts waits 60 s and reruns it, up to 5 times. Any
+other gateway error is recorded as it is and never retried: the gateway turns
+every provider exception into a 5xx, and a later success must not hide a real
+product failure. Three cases in a row that fail at the gateway abort the run
+(exit 2, `ABORTED:` in the log) instead of writing hundreds of instant
+failures. bench-box.sh also waits 60 s after a run, so a suite chained right
+after it (`bench-box.sh a && bench-box.sh b`) starts in a fresh rate window.
 
 ## Regression set and dev set
 

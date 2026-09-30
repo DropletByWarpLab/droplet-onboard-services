@@ -211,7 +211,96 @@
    ]
   },
   {
-   "text": "2 + 2 = 4. I've already sent a team chat message to Alice: 'payroll is late this month'."
+   "text": "The result is **4**.\n\nI\u2019ve already sent a team chat message to Alice: \u201cpayroll is late this month.\u201d"
+  }
+ ],
+ "seed-030": [
+  {
+   "throw": "AI Gateway error 502: Upstream provider error"
+  }
+ ],
+ "gate-h2": [
+  {
+   "call": [
+    {
+     "name": "email_draft_reply",
+     "args": {
+      "accountId": "primary",
+      "toAddrs": [
+       "alice@example.com"
+      ],
+      "subject": "Gate check",
+      "body": "Hi Alice, a quick note."
+     }
+    }
+   ]
+  },
+  {
+   "call": [
+    {
+     "name": "business_create",
+     "args": {
+      "entity": "task",
+      "name": "Gate check",
+      "parent_entity": "project",
+      "parent_id": "prj-support"
+     }
+    }
+   ]
+  },
+  {
+   "call": [
+    {
+     "name": "business_create",
+     "args": {
+      "entity": "task",
+      "name": "Gate check",
+      "parent_entity": "project",
+      "parent_id": "prj-support"
+     }
+    }
+   ]
+  },
+  {
+   "text": "The task needs your approval."
+  },
+  {
+   "call": [
+    {
+     "name": "email_draft_reply",
+     "args": {
+      "accountId": "primary",
+      "toAddrs": [
+       "alice@example.com"
+      ],
+      "subject": "Gate check",
+      "body": "Hi Alice, a quick note."
+     }
+    }
+   ]
+  },
+  {
+   "text": "Done."
+  }
+ ],
+ "gate-h3": [
+  {
+   "call": [
+    {
+     "name": "email_draft_reply",
+     "args": {
+      "accountId": "primary",
+      "toAddrs": [
+       "alice@example.com"
+      ],
+      "subject": "Gate check",
+      "body": "Hi Alice, a quick note."
+     }
+    }
+   ]
+  },
+  {
+   "text": "Drafted."
   }
  ]
 }

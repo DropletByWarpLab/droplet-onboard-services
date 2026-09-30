@@ -11,7 +11,7 @@
 // ORCH defaults to this checkout's apps/orchestrator, so the harness follows its src.
 import { readFileSync, appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { isDeepStrictEqual, parseArgs } from "node:util";
+import { parseArgs } from "node:util";
 import { defaultWorld, handle, faultResult, PURE_TOOLS, type Fault, type WorldState } from "./world.mts";
 
 const ORCH = process.env.ORCH ?? resolve(import.meta.dirname, "../../apps/orchestrator");
@@ -29,8 +29,9 @@ const { values: opt } = parseArgs({
     only: { type: "string" },
     out: { type: "string" },
     selection: { type: "string", default: process.env.TOOL_SELECTION_MODE ?? "domains" },
-    // Self-test: replace the model with a script {caseId: [{text}|{call:[{name,args}]}]}
+    // Self-test: replace the model with a script {caseId: [{text}|{call:[{name,args}]}|{throw}]}
     // so the harness + evaluator can be proven against known-good/bad agents.
+    // {throw} raises that gateway error text (the retry and abort rules' test).
     fake: { type: "string" },
     // Rewrite write_tools.json from the catalog (evaluate.py's H1 source).
     "write-tools": { type: "boolean" },
@@ -38,11 +39,25 @@ const { values: opt } = parseArgs({
 });
 const FAKE: Record<string, any[]> | null = opt.fake ? JSON.parse(readFileSync(resolve(opt.fake), "utf8")) : null;
 
+// A gateway 429 seen during the current attempt, at stream open or on the
+// blocking call. Only a 429 is the bench's pacing (60 requests/min per client);
+// the gateway turns every provider exception into a 5xx, so a 5xx is a real
+// product failure and is never retried.
+let saw429 = false;
+function noteGatewayError(e: unknown): never {
+  if (/AI Gateway (streaming )?error 429\b/.test(String(e))) saw429 = true;
+  throw e;
+}
+const RETRY_WAIT_MS = Number(process.env.AGENT_EVAL_RETRY_WAIT_MS ?? 60_000);
+
+// `script` is consumed across a case's attempts, so a retried case resumes it.
 function fakeGateway(script: any[]) {
   let n = 0;
   return {
     chat: async () => {
-      const step = script[n++] ?? { text: "Done." };
+      const step = script.shift() ?? { text: "Done." };
+      n++;
+      if (step.throw) noteGatewayError(new Error(step.throw));
       const message = step.call
         ? { role: "assistant", content: "", tool_calls: step.call.map((c: any, i: number) => ({ id: `fake-${n}-${i}`, type: "function", function: { name: c.name, arguments: JSON.stringify(c.args) } })) }
         : { role: "assistant", content: step.text };
@@ -64,10 +79,11 @@ if (!opt.fake && !opt["write-tools"]) {
 }
 
 const agent = await import(`${ORCH}/src/services/llm-agent.service.ts`);
-const { buildBaseSystemPrompt } = await import(`${ORCH}/src/services/system-prompt.service.ts`);
+const { buildBaseSystemPrompt, todayLine } = await import(`${ORCH}/src/services/system-prompt.service.ts`);
 const { createChatApprovalStore } = await import(`${ORCH}/src/services/chat-approval.service.ts`);
 const gw = await import(`${ORCH}/src/services/ai-gateway.client.ts`);
 const { resolveTurnContextWindow } = await import(`${ORCH}/src/services/context-budget.service.ts`);
+const { localDayInZone } = await import(`${ORCH}/src/services/scene-schedule-tz-backfill.service.ts`);
 const { config } = await import(`${ORCH}/src/config.ts`);
 const tc = await import(PKG);
 const { toolResultToContent } = await import(`${ORCH}/../../services/mcp-server/src/server.ts`);
@@ -75,25 +91,28 @@ const { toolResultToContent } = await import(`${ORCH}/../../services/mcp-server/
 const TOOLS: Map<string, any> = tc.TOOLS instanceof Map ? tc.TOOLS : new Map(Object.entries(tc.TOOLS));
 const USER = "eval-owner";
 
-// write_tools.json is evaluate.py's list of writes (hard gate H1). A write tool
-// added to the catalog but missing there would pass H1 silently, so refuse to
-// run against a stale copy.
+// write_tools.json lists the catalog's writes for evaluate.py (hard gate H1);
+// a tool absent from it is a read. A write tool missing there would pass H1
+// silently, so refuse to run when the write names differ. Read tools come and
+// go without touching it.
 const WRITE_TOOLS = resolve(import.meta.dirname, "write_tools.json");
-const writeMap = Object.fromEntries([...TOOLS.values()].map((t) => [t.name, Boolean(t.requiresWrite)]));
+const writeNames = [...TOOLS.values()].filter((t) => t.requiresWrite).map((t) => t.name).sort();
 if (opt["write-tools"]) {
-  writeFileSync(WRITE_TOOLS, JSON.stringify(writeMap, null, 1) + "\n");
-  console.error(`wrote ${WRITE_TOOLS} (${TOOLS.size} tools)`);
+  writeFileSync(WRITE_TOOLS, JSON.stringify(Object.fromEntries(writeNames.map((n) => [n, true])), null, 1) + "\n");
+  console.error(`wrote ${WRITE_TOOLS} (${writeNames.length} write tools)`);
   process.exit(0);
 }
-if (!isDeepStrictEqual(writeMap, JSON.parse(readFileSync(WRITE_TOOLS, "utf8")))) {
-  throw new Error("write_tools.json is stale against @droplet/tools-core: run run.mts --write-tools and commit it");
+const listed = Object.entries(JSON.parse(readFileSync(WRITE_TOOLS, "utf8"))).filter(([, w]) => w).map(([n]) => n).sort();
+if (listed.join() !== writeNames.join()) {
+  throw new Error("write_tools.json is stale against @droplet/tools-core's write tools: run run.mts --write-tools and commit it");
 }
 
 // Dated prompts are relative to the run ({{today+3}} -> YYYY-MM-DD): the system
 // prompt carries today's date (WARP-3281), so a fixed date drifts past the
-// 7-day forecast and a correct refusal fails the case.
-function expandDates(text: string): string {
-  const out = text.replace(/\{\{today\+(\d+)\}\}/g, (_, d) => new Date(Date.now() + Number(d) * 864e5).toISOString().slice(0, 10));
+// 7-day forecast and a correct refusal fails the case. `today` is the same
+// local day the prompt's date line shows (localDayInZone, the box zone).
+function expandDates(text: string, today: string): string {
+  const out = text.replace(/\{\{today\+(\d+)\}\}/g, (_, d) => new Date(Date.parse(`${today}T00:00:00Z`) + Number(d) * 864e5).toISOString().slice(0, 10));
   if (out.includes("{{")) throw new Error(`unknown placeholder in case turn: ${out}`);
   return out;
 }
@@ -166,7 +185,7 @@ function makePort(world: WorldState, faults: Record<string, Fault[]>, log: Dispa
   };
 }
 
-async function runCase(c: Case, repeat: number, window: number) {
+async function runCase(c: Case, repeat: number, window: number, script: any[] | null) {
   const world: WorldState = { ...defaultWorld(), ...(structuredClone(c.world ?? {}) as object) } as WorldState;
   const dispatches: Dispatch[] = [];
   const mcp = makePort(world, c.faults ?? {}, dispatches);
@@ -175,13 +194,15 @@ async function runCase(c: Case, repeat: number, window: number) {
   const confirmations: any[] = [];
   const turns: any[] = [];
   const gwCalls: any[] = [];
-  const messages: any[] = [{ role: "system", content: buildBaseSystemPrompt(undefined, "", "") }];
-  for (const t of c.turns) messages.push({ role: t.role, content: expandDates(t.content) });
+  const now = new Date();
+  const today = localDayInZone(now).date;
+  const messages: any[] = [{ role: "system", content: buildBaseSystemPrompt(undefined, "", "", todayLine(now)) }];
+  for (const t of c.turns) messages.push({ role: t.role, content: expandDates(t.content, today) });
 
   const t0 = Date.now();
   let final = "";
   let priorToolNames: string[] = c.prior_tool_names ?? [];
-  const fake = FAKE ? fakeGateway(FAKE[c.id] ?? []) : null;
+  const fake = script ? fakeGateway(script) : null;
   // At most one approval round-trip, the way the dashboard does it.
   for (let round = 0; round < 2; round++) {
     let pendingChallenge: string | undefined;
@@ -201,19 +222,23 @@ async function runCase(c: Case, repeat: number, window: number) {
     const deps = {
       mcp, approvals,
       aiGateway: fake ?? {
-        chat: (r: any, s?: AbortSignal) => gw.chat(r, s, USER),
+        chat: (r: any, s?: AbortSignal) => gw.chat(r, s, USER).catch(noteGatewayError),
         chatStream: (r: any, s?: AbortSignal) => (async function* () {
           // WARP-3285 local tap: per-iteration provider verdict (not in product diagnostics on the stream path).
           const g: any = { round, tools: (r.tools ?? []).length, tool_choice: r.tool_choice, msgs: r.messages?.length, content: "", reasoning: "", toolCalls: 0, finish: null, usage: null };
           gwCalls.push(g);
-          for await (const ch of gw.chatStream(r, s, USER) as AsyncIterable<any>) {
-            const c = ch.choices?.[0]; const d = c?.delta ?? {};
-            if (typeof d.content === "string") g.content += d.content;
-            const rr = d.reasoning ?? d.reasoning_content ?? d.thinking; if (typeof rr === "string") g.reasoning += rr;
-            if (Array.isArray(d.tool_calls)) g.toolCalls += d.tool_calls.filter((t: any) => t.function?.name).length;
-            if (c?.finish_reason) g.finish = c.finish_reason;
-            if (ch.usage) g.usage = ch.usage;
-            yield ch;
+          try {
+            for await (const ch of gw.chatStream(r, s, USER) as AsyncIterable<any>) {
+              const c = ch.choices?.[0]; const d = c?.delta ?? {};
+              if (typeof d.content === "string") g.content += d.content;
+              const rr = d.reasoning ?? d.reasoning_content ?? d.thinking; if (typeof rr === "string") g.reasoning += rr;
+              if (Array.isArray(d.tool_calls)) g.toolCalls += d.tool_calls.filter((t: any) => t.function?.name).length;
+              if (c?.finish_reason) g.finish = c.finish_reason;
+              if (ch.usage) g.usage = ch.usage;
+              yield ch;
+            }
+          } catch (e) {
+            noteGatewayError(e);  // the loop then falls back to the blocking call
           }
           g.contentChars = g.content.length; g.reasoningChars = g.reasoning.length;
           g.content = g.content.slice(0, 600); g.reasoning = g.reasoning.slice(-1500);
@@ -249,6 +274,7 @@ async function runCase(c: Case, repeat: number, window: number) {
 
   return {
     case_id: c.id, kit_id: c.kit_id, repeat, model: opt.model, selection: opt.selection,
+    today, turns_asked: messages.slice(1, 1 + c.turns.length).map((m) => m.content),
     steps, dispatches, confirmations, turns, gwCalls,
     final_answer: final,
     stop_reason: turns.at(-1)?.stop_reason,
@@ -270,30 +296,42 @@ const advertised = FAKE ? undefined : await gw.getModelContextWindow(opt.model!)
 const window = resolveTurnContextWindow({ advertised, localWindow: config.OLLAMA_CONTEXT_LENGTH }).window;
 console.error(`model=${opt.model} window=${window} selection=${opt.selection} cases=${selected.length} repeat=${opt.repeat} -> ${out}`);
 
+let gatewayDown = 0;
 for (let r = 1; r <= Number(opt.repeat); r++) {
   for (const c of selected) {
-    let rec;
-    // The box's ai-gateway allows 60 requests/min per client and the model
-    // runner sheds load with 5xx (a rate-limited stream falls back to the
-    // blocking call, which surfaces as a 502). Either is the bench's pacing, not
-    // the agent's result, so wait it out and rerun the case.
-    for (let attempt = 0; ; attempt++) {
+    let rec: any;
+    const script = FAKE ? [...(FAKE[c.id] ?? [])] : null;
+    const retryErrors: string[] = [];
+    // Only a 429 is retried: wait out the gateway's 60 requests/min and rerun
+    // the case, up to 5 times. Anything else is recorded as it is, so a later
+    // success can never hide a real product failure.
+    for (;;) {
+      saw429 = false;
       try {
-        rec = await runCase(c, r, window);
+        rec = await runCase(c, r, window, script);
         break;
       } catch (e) {
-        if (/AI Gateway (streaming )?error (429|50[0234])\b/.test(String(e)) && attempt < 5) {
-          console.error(`[r${r}] ${c.id} gateway busy, waiting 60s (attempt ${attempt + 1})`);
-          await new Promise((res) => setTimeout(res, 60_000));
+        if (saw429 && retryErrors.length < 5) {
+          retryErrors.push(String(e).slice(0, 300));
+          console.error(`[r${r}] ${c.id} gateway 429, waiting ${RETRY_WAIT_MS / 1000}s (retry ${retryErrors.length})`);
+          await new Promise((res) => setTimeout(res, RETRY_WAIT_MS));
           continue;
         }
         rec = { case_id: c.id, repeat: r, harness_error: String((e as Error)?.stack ?? e), steps: [], dispatches: [], final_answer: "" };
         break;
       }
     }
+    rec.attempts = retryErrors.length + 1;
+    if (retryErrors.length) rec.retry_errors = retryErrors;
     appendFileSync(out, JSON.stringify(rec) + "\n");
     const calls = (rec.dispatches ?? []).map((d: Dispatch) => `${d.tool}:${d.outcome}`).join(",") || "-";
-    console.error(`[r${r}] ${c.id.padEnd(8)} stop=${(rec as any).stop_reason ?? "HARNESS_ERR"} it=${(rec as any).iterations ?? "-"} ${((rec as any).total_latency_ms / 1000 || 0).toFixed(1)}s ${calls}`);
+    console.error(`[r${r}] ${c.id.padEnd(8)} stop=${rec.stop_reason ?? "HARNESS_ERR"} it=${rec.iterations ?? "-"} ${(rec.total_latency_ms / 1000 || 0).toFixed(1)}s ${calls}`);
+    // An outage fails every case in seconds; stop instead of writing hundreds of them.
+    gatewayDown = /AI Gateway (streaming )?error/.test(rec.harness_error ?? "") ? gatewayDown + 1 : 0;
+    if (gatewayDown >= 3) {
+      console.error(`ABORTED: 3 consecutive cases failed at the ai-gateway (last: ${rec.harness_error.split("\n")[0].slice(0, 200)}). Check the gateway and the model runtime, then rerun. ${out} holds the records so far.`);
+      process.exit(2);
+    }
   }
 }
 console.error(`wrote ${out}`);

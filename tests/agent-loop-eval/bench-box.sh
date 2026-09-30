@@ -9,16 +9,19 @@
 # The harness runs in node:20-bookworm on the compose network and reaches
 # http://ai-gateway:8000 the way the orchestrator does. The gateway token,
 # model and context length come from the live orchestrator container; the
-# token is passed by name only, never printed or put on a command line. The
-# checkout is bootstrapped (npm ci + npm run bootstrap) on first use.
+# token is passed by name only, never printed or put on a command line. Every
+# run reinstalls and rebuilds the checkout (npm ci + npm run bootstrap, ~20 s):
+# bootstrap:check cannot see a stale tools-core dist, and hours of model time
+# must not score an old catalog.
 # Writes runs/<UTC date>-<label>.{jsonl,log,report.txt}; the report ends with
 # the pass^k summary. Sequential by design: one GPU, one model. Back-to-back
-# runs pace themselves: run.mts waits out the gateway's 429/5xx, and this
-# script rests 60 s after a run so the next suite starts in a fresh rate window.
+# runs pace themselves: run.mts waits out the gateway's 429s, and this script
+# rests 60 s after a run so the next suite starts in a fresh rate window.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 LABEL=${1:?usage: bench-box.sh <label> [run.mts args...]}; shift
+[[ $LABEL =~ ^[A-Za-z0-9._-]+$ ]] || { echo "label must match ^[A-Za-z0-9._-]+\$ (it names the output files)" >&2; exit 2; }
 # Compose names on a box installed by setup.sh.
 ORCH_CT=${ORCH_CT:-droplet-orchestrator-1}
 NET=${NET:-droplet_default}
@@ -36,12 +39,12 @@ docker run --rm --user "$(stat -c %u:%g "$REPO")" --network "$NET" -v "$REPO:/re
   -e OLLAMA_CONTEXT_LENGTH="${CTX:-16384}" -e AGENT_BLANK_TURN_DEBUG=1 -e LOG_LEVEL=warn \
   node:20-bookworm bash -c '
     set -eo pipefail
-    npm run -s bootstrap:check >/dev/null 2>&1 || { npm ci --no-audit --no-fund --loglevel=error && npm run bootstrap; }
+    npm ci --no-audit --no-fund --loglevel=error && npm run -s bootstrap >/dev/null
     cd tests/agent-loop-eval
     N=$1 M=$2; shift 2
     PATH=/repo/apps/orchestrator/node_modules/.bin:/repo/node_modules/.bin:$PATH
-    tsx run.mts --model "$M" --repeat 3 --out runs/$N.jsonl "$@" 2> runs/$N.log || { tail -n 20 runs/$N.log; exit 1; }
-    python3 evaluate.py runs/$N.jsonl > runs/$N.report.txt || true   # exit 1 = a hard gate tripped
-    tail -n 25 runs/$N.report.txt
+    tsx run.mts --model "$M" --repeat 3 --out "runs/$N.jsonl" "$@" 2> "runs/$N.log" || { tail -n 20 "runs/$N.log"; exit 1; }
+    python3 evaluate.py "runs/$N.jsonl" > "runs/$N.report.txt" || true   # exit 1 = a hard gate tripped
+    tail -n 25 "runs/$N.report.txt"
   ' _ "$NAME" "$MODEL" "$@"
 sleep 60
