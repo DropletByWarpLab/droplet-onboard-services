@@ -370,6 +370,16 @@ describe("translateError — share domain (WARP-1148/1149)", () => {
     expect(result).not.toContain("module_disabled");
   });
 
+  it("names the box's Workspace and company-link refusals instead of the generic 403", () => {
+    for (const domain of ["share", "share-bulk"] as const) {
+      const ws = translateError({ code: "workspace_share_admin_only", status: 403 }, domain);
+      expect(ws).toMatch(/already shared with everyone in the company/);
+      const link = translateError({ code: "public_link_company_data", status: 403 }, domain);
+      expect(link).toMatch(/public link to company files/);
+      expect(link).not.toMatch(/sign out/i);
+    }
+  });
+
   it("maps the Nextcloud password-policy rejection to password copy (not the retry fallback)", () => {
     // Real OCS message shape from Nextcloud's password_policy app, surfaced by
     // the orchestrator as { error: "OCS share create: …" } with status 400.
@@ -802,6 +812,8 @@ describe("translateError — security domain (WARP-2977 P2b)", () => {
     "INCIDENT_CONFLICT",
     "NOT_ACTIONABLE",
     "INCIDENTS_UNAVAILABLE",
+    // WARP-2980 (P5 PR-C) — route 35, Expected / Not expected.
+    "NOT_JUDGEABLE",
     "NO_RECIPIENT",
     "NOT_ELIGIBLE",
     "ROUTING_UNAVAILABLE",

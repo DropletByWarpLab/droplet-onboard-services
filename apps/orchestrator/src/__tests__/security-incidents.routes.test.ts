@@ -1306,6 +1306,101 @@ describe("route 18 — `narrative`, shown only to a viewer who can see all of it
   });
 });
 
+// ── WARP-3195 (P4 §6.7.1, §8) — route 18's `dropletLinks`: "Droplet linked this camera. Keep the link…" ──
+
+describe("route 18 — `dropletLinks`, only for a manage-level viewer who sees everything (WARP-3195)", () => {
+  /** SHARED's area (the incident's `zoneId`): Stock room, on back and front. */
+  const STOCK = "3f1c2a9e-0b7d-4c55-9a51-1c2d3e4f5a61";
+  const BACK_LINK = { linkId: "l-back", zone: { id: STOCK, name: "Stock room", kind: "interior" }, sourceKind: "camera", sourceRef: "back", camera: "back", label: "Back camera" };
+
+  /** Stock room: front linked by a person; back by Droplet alone (`back` overrides the back row). */
+  function withStockRoom(f: FakeSecurityPrisma, back: Record<string, unknown> = {}, zone: Record<string, unknown> = {}): void {
+    f.world.securityZone.push({ id: STOCK, name: "Stock room", nameKey: "stock room", kind: "interior", state: "active", version: 3, ...zone });
+    f.world.securityZoneLink.push(
+      { id: "l-front", zoneId: STOCK, sourceKind: "camera", sourceRef: "front", sourceLabel: "Front door", state: "active", origin: "person", stateSetBy: "person" },
+      { id: "l-back", zoneId: STOCK, sourceKind: "camera", sourceRef: "back", sourceLabel: "Back camera", state: "active", origin: "droplet", stateSetBy: "droplet", ...back },
+    );
+  }
+  const read = (f: FakeSecurityPrisma, role: Role, level: Level) => {
+    const { server, resolve } = app(f, role, level);
+    return request(server).get(`/api/security/incidents/${SHARED}`).then((res) => ({ res, resolve }));
+  };
+
+  it.each([
+    ["owner", "manage"],
+    ["admin", "manage"],
+  ] as const)("🔴 %s at %s (sees everything): back's link, with its area and camera — the line and Keep", async (role, level) => {
+    const f = world();
+    withStockRoom(f);
+    const { res, resolve } = await read(f, role, level);
+    expect(res.status).toBe(200);
+    expect(resolve).toHaveBeenCalledWith(USERS[role]!.id);
+    expect(res.body.dropletLinks).toEqual([BACK_LINK]);
+  });
+
+  it.each([
+    ["admin", "act"],
+    ["admin", "view"],
+    ["family", "act"],
+    ["family", "view"],
+    // A resolver that says manage for family: route 24's role floor still refuses her, and she does not see every camera.
+    ["family", "manage"],
+  ] as const)("🔴 %s at %s: `dropletLinks: null` — never the list, never an empty one", async (role, level) => {
+    const f = world();
+    withStockRoom(f);
+    const { res, resolve } = await read(f, role, level);
+    expect(res.status).toBe(200);
+    expect(resolve).toHaveBeenCalledWith(USERS[role]!.id);
+    expect(res.body).toHaveProperty("dropletLinks", null);
+  });
+
+  it("🔴 R1 — a camera-limited viewer's whole answer is the same whether or not back is linked only by Droplet (owner's is not)", async () => {
+    const droplet = world();
+    withStockRoom(droplet);
+    const person = world();
+    withStockRoom(person, { origin: "person", stateSetBy: "person" });
+    const maria = await Promise.all([read(droplet, "family", "act"), read(person, "family", "act")]);
+    expect(maria[0].res.status).toBe(200);
+    expect(maria[0].res.body).toEqual(maria[1].res.body);
+    const owner = await Promise.all([read(droplet, "owner", "manage"), read(person, "owner", "manage")]);
+    expect(owner[0].res.body.dropletLinks).toEqual([BACK_LINK]);
+    expect(owner[1].res.body.dropletLinks).toEqual([]);
+  });
+
+  it("a link a person kept counts for alerts already: nothing to keep", async () => {
+    const f = world();
+    withStockRoom(f, { stateSetBy: "person" });
+    expect((await read(f, "owner", "manage")).res.body.dropletLinks).toEqual([]);
+  });
+
+  it("a Droplet SUGGESTION (proposed) is not a link yet: nothing to keep here (the Areas page decides suggestions)", async () => {
+    const f = world();
+    withStockRoom(f, { state: "proposed" });
+    expect((await read(f, "owner", "manage")).res.body.dropletLinks).toEqual([]);
+  });
+
+  it("an undone link (rejected) is gone: nothing to keep", async () => {
+    const f = world();
+    withStockRoom(f, { state: "rejected", stateSetBy: "person" });
+    expect((await read(f, "owner", "manage")).res.body.dropletLinks).toEqual([]);
+  });
+
+  it("an area that was removed (archived): nothing to keep — route 24 would refuse it", async () => {
+    const f = world();
+    withStockRoom(f, {}, { state: "archived" });
+    expect((await read(f, "owner", "manage")).res.body.dropletLinks).toEqual([]);
+  });
+
+  it("a camera incident has no area: an empty list", async () => {
+    const f = world();
+    withStockRoom(f);
+    const { server } = app(f, "owner", "manage");
+    const res = await request(server).get(`/api/security/incidents/${BACK_ONLY}`);
+    expect(res.status).toBe(200);
+    expect(res.body.dropletLinks).toEqual([]);
+  });
+});
+
 describe("route 20 — a resolve that seals asks for the summary (WARP-2979 §6.9.1)", () => {
   it("resolving a collecting alert incident → sealed and `pending`, its lease cleared — in the resolve's own CAS'd update", async () => {
     const f = world();

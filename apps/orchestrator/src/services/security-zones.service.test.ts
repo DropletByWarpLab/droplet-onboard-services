@@ -45,6 +45,9 @@ const frontAndLocks = { ...onlyFront, mayReadLocks: true };
 /** An owner/admin narrowed off Devices: every camera, no locks. */
 const camerasOnly = { visibleCameras: "all" as const, mayReadLocks: false };
 
+/** What a P2b link row carries since WARP-2979: a person made it and set its state; no evidence. */
+const PERSON_LINK = { origin: "person", stateSetBy: "person", evidence: null } as const;
+
 const LOCK_A = "matter:4660/1";
 const LOCK_B = "matter:99/2";
 
@@ -498,8 +501,8 @@ describe("the areas list (route 3)", () => {
     const z: ZoneRecord = {
       ...zone("z", []),
       links: [
-        { id: "l1", sourceKind: "lock", sourceRef: LOCK_A, sourceLabel: "Smart Lock", state: "active", stateChangedAt: at, origin: "person", stateSetBy: "person", evidence: null },
-        { id: "l2", sourceKind: "lock", sourceRef: LOCK_B, sourceLabel: "Old gate lock", state: "active", stateChangedAt: at, origin: "person", stateSetBy: "person", evidence: null },
+        { id: "l1", sourceKind: "lock", sourceRef: LOCK_A, sourceLabel: "Smart Lock", state: "active", stateChangedAt: at, ...PERSON_LINK },
+        { id: "l2", sourceKind: "lock", sourceRef: LOCK_B, sourceLabel: "Old gate lock", state: "active", stateChangedAt: at, ...PERSON_LINK },
       ],
     };
     const view = toZoneView(z, z.links, new Map(), new Map([[LOCK_A, "Back door lock"]]));
@@ -509,7 +512,7 @@ describe("the areas list (route 3)", () => {
   it("WARP-2977 P2b-2: an area made only of locks is hidden from a viewer without Devices view", () => {
     const lockOnly: ZoneRecord = {
       ...zone("door", []),
-      links: [{ id: "l1", sourceKind: "lock", sourceRef: LOCK_A, sourceLabel: "Back door lock", state: "active", stateChangedAt: at, origin: "person", stateSetBy: "person", evidence: null }],
+      links: [{ id: "l1", sourceKind: "lock", sourceRef: LOCK_A, sourceLabel: "Back door lock", state: "active", stateChangedAt: at, ...PERSON_LINK }],
     };
     expect(visibleZoneViews([lockOnly], camerasOnly, new Map()).map((v) => v.id)).toEqual([]);
     expect(visibleZoneViews([lockOnly], everyone, new Map()).map((v) => v.id)).toEqual(["door"]);

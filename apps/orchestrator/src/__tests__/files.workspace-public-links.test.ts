@@ -49,7 +49,12 @@ vi.mock("../config.js", () => ({
 
 import { createFilesRouter } from "../routes/files.js";
 import * as nc from "../services/nextcloud.client.js";
-import { exposesOutside, libraryOfHomePath, mayCreatePublicLink } from "../services/share-policy.js";
+import {
+  exposesOutside,
+  isWorkspacePath,
+  libraryOfHomePath,
+  mayCreatePublicLink,
+} from "../services/share-policy.js";
 
 const ncMock = nc as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
@@ -94,14 +99,14 @@ function makePrisma() {
   };
 }
 
-function app(asUser: { id: string; username: string; role: string }) {
+function app(asUser: { id: string; username: string; role: string }, db = makePrisma()) {
   const a = express();
   a.use(express.json());
   a.use((req, _res, next) => {
     (req as unknown as { user: typeof asUser }).user = asUser;
     next();
   });
-  a.use("/api", createFilesRouter(makePrisma() as never));
+  a.use("/api", createFilesRouter(db as never));
   return a;
 }
 
@@ -118,7 +123,7 @@ describe("WARP-3053 — POST /files/share public links on company data", () => {
   it("member, web shape (home path, no space) on the Workspace: 403, no OCS call", async () => {
     const res = await request(app(MEMBER)).post("/api/files/share").send({ path: "/Household/Plan.pdf" });
     expect(res.status).toBe(403);
-    expect(res.body.error).toBe("public_link_company_data");
+    expect(res.body.error).toBe("workspace_share_admin_only");
     expect(ncMock.ncCreateShareV2).not.toHaveBeenCalled();
   });
 
@@ -157,11 +162,28 @@ describe("WARP-3053 — POST /files/share public links on company data", () => {
     expect(ncMock.ncCreateShareV2).not.toHaveBeenCalled();
   });
 
-  it("member, internal GROUP share (1) of a Workspace item without re-share: allowed", async () => {
+  // WARP-3168 ruling: members share nothing from the Workspace, internal
+  // shares included — Nextcloud refuses the same (Workspace group mask 15).
+  it("member, internal GROUP share (1) of a Workspace item: 403 (WARP-3168)", async () => {
     const res = await request(app(MEMBER))
       .post("/api/files/share")
       .send({ path: "/Household/Plan.pdf", shareType: 1, shareWith: "staff", permissions: 1 });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("workspace_share_admin_only");
+    expect(ncMock.ncCreateShareV2).not.toHaveBeenCalled();
+  });
+
+  it("member, internal share of a department item: still allowed (departments keep WARP-3053)", async () => {
+    const res = await request(app(MEMBER))
+      .post("/api/files/share")
+      .send({ path: "/Alpha/Reports/q3.pdf", shareType: 0, shareWith: "ada", permissions: 1 });
     expect(res.status).toBe(200);
+  });
+
+  it("member, public link on a department item: still the WARP-3053 refusal", async () => {
+    const res = await request(app(MEMBER)).post("/api/files/share").send({ path: "/Alpha/Reports/q3.pdf" });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("public_link_company_data");
   });
 
   it("admin, email share (4) of a Workspace item: allowed", async () => {
@@ -233,16 +255,19 @@ describe("WARP-3053 — POST /files/share public links on company data", () => {
     );
   });
 
-  it("member, internal share of a Workspace item with a colleague: allowed", async () => {
+  it("member, internal share of a Workspace item with a colleague: 403 (WARP-3168)", async () => {
     const res = await request(app(MEMBER))
       .post("/api/files/share")
       .send({ path: "/Household/Plan.pdf", shareType: 0, shareWith: "ada", permissions: 3 });
+    expect(res.status).toBe(403);
+    expect(ncMock.ncCreateShareV2).not.toHaveBeenCalled();
+  });
+
+  it("admin, internal share of a Workspace item: allowed", async () => {
+    const res = await request(app(ADMIN))
+      .post("/api/files/share")
+      .send({ path: "/Household/Plan.pdf", shareType: 0, shareWith: "mia", permissions: 1 });
     expect(res.status).toBe(200);
-    expect(ncMock.ncCreateShareV2).toHaveBeenCalledWith(
-      "session-token",
-      "/Household/Plan.pdf",
-      expect.objectContaining({ shareType: 0, shareWith: "ada" }),
-    );
   });
 
   it("share_file tool (MCP service) acting for a member on the Workspace: 403", async () => {
@@ -294,8 +319,29 @@ describe("WARP-3053 — PUT/DELETE /files/share/:id on company data", () => {
     expect(ncMock.ncUpdateShare).not.toHaveBeenCalled();
   });
 
-  it("member editing an internal Workspace share without re-share: allowed", async () => {
+  it("member editing an internal Workspace share: 403 (WARP-3168)", async () => {
     ncMock.ncGetShare.mockResolvedValue({ ...created, shareType: 0, path: "/Household/Plan.pdf" });
+    const res = await request(app(MEMBER)).put("/api/files/share/7").send({ permissions: 3 });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("workspace_share_admin_only");
+    expect(ncMock.ncUpdateShare).not.toHaveBeenCalled();
+  });
+
+  it("member (creator) editing a recorded space=shared share: 403 (WARP-3168)", async () => {
+    const db = makePrisma();
+    db.departmentShare.findUnique.mockResolvedValue({
+      departmentId: HOUSEHOLD.id,
+      createdById: MEMBER.id,
+      shareType: 0,
+    } as never);
+    const res = await request(app(MEMBER, db)).put("/api/files/share/7").send({ permissions: 1 });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("workspace_share_admin_only");
+    expect(ncMock.ncUpdateShare).not.toHaveBeenCalled();
+  });
+
+  it("member editing an internal department share without re-share: allowed", async () => {
+    ncMock.ncGetShare.mockResolvedValue({ ...created, shareType: 0, path: "/Alpha/a.pdf" });
     const res = await request(app(MEMBER)).put("/api/files/share/7").send({ permissions: 3 });
     expect(res.status).toBe(200);
   });
@@ -342,6 +388,15 @@ describe("WARP-3053 — share-policy", () => {
     expect(libraryOfHomePath("/Cafe\u0301/x", ["Cafe\u0301"])).toBe("company");
     expect(libraryOfHomePath("\\Household\\x", roots)).toBe("company");
     expect(libraryOfHomePath("/", roots)).toBe("personal");
+  });
+
+  it("isWorkspacePath: whole-prefix, NFC, case-insensitive, fail closed", () => {
+    expect(isWorkspacePath("/Household/x", "Household")).toBe(true);
+    expect(isWorkspacePath("/household", "Household")).toBe(true);
+    expect(isWorkspacePath("/./Household/x", "Household")).toBe(true);
+    expect(isWorkspacePath("/Householder/x", "Household")).toBe(false);
+    expect(isWorkspacePath("/Alpha/x", "Household")).toBe(false);
+    expect(isWorkspacePath("\\Household\\x", "Household")).toBe(true);
   });
 
   it("exposesOutside is an allowlist: only user/group without re-share is internal", () => {

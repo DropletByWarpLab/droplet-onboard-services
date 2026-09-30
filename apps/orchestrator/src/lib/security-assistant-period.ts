@@ -75,7 +75,11 @@ export function assistantInstant(at: Date, tz: string | null, now: Date): { at: 
 
 const bad = (message: string): AssistantPeriodResult => ({ ok: false, code: "BAD_REQUEST", message });
 
-function parseInstant(raw: string): Date | null {
+/**
+ * One instant WITH its offset, or null. Exported for A5's `at` (WARP-2980
+ * PR-E): the same rule as from/to, so an offset-less time is refused there too.
+ */
+export function parseAssistantInstant(raw: string): Date | null {
   if (!ISO_WITH_OFFSET.test(raw)) return null;
   const at = new Date(raw);
   return Number.isNaN(at.getTime()) ? null : at;
@@ -133,8 +137,8 @@ export function resolveAssistantPeriod(
 
   if (!hasRange) return { ok: true, period: null };
   if (input.from === undefined) return bad("to needs a from.");
-  const from = parseInstant(input.from);
-  const to = input.to === undefined ? now : parseInstant(input.to);
+  const from = parseAssistantInstant(input.from);
+  const to = input.to === undefined ? now : parseAssistantInstant(input.to);
   if (!from || !to) return bad("from and to must be ISO-8601 times with an offset, like 2026-09-22T21:00:00+01:00.");
   const end = new Date(Math.min(to.getTime(), now.getTime()));
   if (from.getTime() >= end.getTime()) return bad("from must be before to, and in the past.");

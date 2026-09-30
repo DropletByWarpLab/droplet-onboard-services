@@ -8,10 +8,11 @@ import { startHttp } from "../src/transports/http.js";
 import { createServer } from "../src/server.js";
 import { isWithheldOffBox, OFF_BOX_WITHHELD_DOMAINS } from "../src/rbac.js";
 import type { ContextDeps } from "../src/context.js";
+import { TOOL_CATALOG } from "@droplet/tools-core";
 
 /**
  * WARP-2979 (#2420 review 2a; ADR-059 P4 §6.13 "security never leaves the
- * box") — the four `security_*` tools are withheld on every transport that is
+ * box") — every `security_*` tool (P4's four, P5's `security_explain_pattern`) is withheld on every transport that is
  * not the orchestrator's own stdio child.
  *
  * Why the HTTP transport: an owner who publishes :9090 and points Claude
@@ -25,7 +26,8 @@ import type { ContextDeps } from "../src/context.js";
  * server"). So `local-trusted` is the only on-box path, and it keeps all four.
  */
 const SECRET = "test-secret-security-withheld";
-const SECURITY_TOOLS = ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status"];
+/** From the catalog, so a Security tool added later is checked the day it lands. */
+const SECURITY_TOOLS = TOOL_CATALOG.filter((t) => t.domain === "security").map((t) => t.name);
 
 function buildDeps() {
   const get = vi.fn().mockResolvedValue(new Response(JSON.stringify({ incidents: [], nextCursor: null }), { status: 200 }));
@@ -48,6 +50,8 @@ const errorCode = (res: Awaited<ReturnType<Client["callTool"]>>): string | undef
 
 describe("the security domain off the box (§6.13)", () => {
   it("the withheld set is exactly `security`; a security tool is withheld, a camera tool is not", () => {
+    expect(SECURITY_TOOLS).toEqual(expect.arrayContaining(["security_list_incidents", "security_explain_pattern"]));
+    expect(SECURITY_TOOLS).toHaveLength(5);
     expect([...OFF_BOX_WITHHELD_DOMAINS]).toEqual(["security"]);
     expect(isWithheldOffBox({ name: "security_list_incidents" })).toBe(true);
     expect(isWithheldOffBox({ name: "list_cameras" })).toBe(false);

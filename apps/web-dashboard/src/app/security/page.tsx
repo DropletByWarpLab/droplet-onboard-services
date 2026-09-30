@@ -58,7 +58,6 @@ const TAB_LABEL = { incidents: LIST_COPY.tabIncidents, everything: LIST_COPY.tab
 type Tab = keyof typeof TAB_LABEL;
 const TABS: readonly Tab[] = ["incidents", "everything"];
 
-/** WARP-2977 P2b-2: links counted per kind, so a camera view of an area only a lock covers reads "not covered". */
 type Area = SecurityZoneRef & { linkCount: number; cameraLinkCount: number; lockLinkCount: number };
 
 interface TabProps {
@@ -86,7 +85,13 @@ function SecurityCenter() {
   const router = useRouter();
   const params = useSearchParams();
   const canSeeThreats = user?.role === "owner" || user?.role === "admin";
-  const [tab, setTab] = useState<Tab>(params.get("tab") === "everything" ? "everything" : "incidents");
+  // The URL owns the tab (WARP-3185): a same-route navigation — the sidebar's
+  // Security link, an incident's way back — moves it, not only the first load.
+  const urlTab: Tab = params.get("tab") === "everything" ? "everything" : "incidents";
+  const [tab, setTab] = useState<Tab>(urlTab);
+  useEffect(() => {
+    setTab(urlTab);
+  }, [urlTab]);
   const [zone, setZone] = useState<string | null>(null);
   const tabRefs = useRef<Record<Tab, HTMLButtonElement | null>>({ incidents: null, everything: null });
   const refreshTab = useRef<() => void>(() => {});
@@ -250,9 +255,9 @@ function IncidentsTab(props: TabProps & { onShowEverything: () => void }) {
 
 function EverythingTab(props: TabProps) {
   const [pickedView, setView] = useState<SecurityView>("all");
-  // WARP-2977 P2b-2: a picked Doors view falls back to Everything once the header offers none.
-  const view = viewFor(pickedView, props.health.sources);
   const [includeLow, setIncludeLow] = useState(false);
+  // A picked Doors view falls back to Everything once the header stops offering it.
+  const view = viewFor(pickedView, props.health.sources);
   const canManageAreas = levelAtLeast(useModuleLevel("security"), "manage");
   // An area removed (or no longer visible) since it was picked stops
   // filtering: the feed falls back to all areas instead of a silent empty

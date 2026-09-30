@@ -1156,6 +1156,201 @@ describe("PUT /api/security/zones/:id/links", () => {
   });
 });
 
+// ── WARP-2977 P2b-2: door locks as area links (DS-019) ────────────────────
+
+describe("door locks on areas — Security view AND Devices view (DS-019)", () => {
+  const DOOR = "5c6d7e8f-9a0b-4c1d-8e2f-3a4b5c6d7e8f";
+  const lockLink = (id: string, zoneId: string, sourceRef: string, state: LinkRow["state"] = "active"): LinkRow => ({
+    id,
+    zoneId,
+    sourceKind: "lock",
+    sourceRef,
+    sourceLabel: "Smart Lock (as linked)",
+    state,
+    origin: "person",
+    stateSetBy: "person",
+    createdById: "u-owner",
+    decidedById: null,
+    stateChangedAt: T0,
+  });
+
+  beforeEach(() => {
+    // An area made only of a lock, and a lock on the shop floor beside its cameras.
+    db.zones.push({ id: DOOR, name: "Back door", nameKey: "back door", kind: "entry", state: "active", version: 2, createdById: "u-owner" });
+    db.links.push(lockLink("l-door-a", DOOR, LOCK_A), lockLink("l-shop-gone", SHOP, "matter:1/1"));
+    // The family member with Devices view holds the same camera grant as u-fam.
+    db.grants.set("u-fam-dev", ["front"]);
+  });
+
+  const zonesFor = async (user: keyof typeof USERS) =>
+    (await request(app(user)).get("/api/security/zones")).body.zones.map(
+      (z: { id: string; links: Array<{ sourceRef: string; label: string }> }) => [z.id, z.links.map((l) => `${l.sourceRef}=${l.label}`)],
+    );
+
+  it("GET /zones: without Devices view an area made only of locks is hidden, and no lock link is shown anywhere", async () => {
+    expect(await zonesFor("u-fam")).toEqual([[SHOP, ["front=Front camera"]]]);
+    expect(await zonesFor("u-admin-nodev")).toEqual([
+      [SHOP, ["cam9=was cam9", "front=Front camera", "back/porch=Back camera"]],
+      [YARD, ["back=Back camera"]],
+    ]);
+    expect(resolve).toHaveBeenCalledWith("u-admin-nodev");
+  });
+
+  it("GET /zones: with Devices view the lock area shows, each lock labelled by its current name, else the snapshot", async () => {
+    expect(await zonesFor("u-fam-dev")).toEqual([
+      [DOOR, [`${LOCK_A}=Back door lock`]],
+      [SHOP, ["front=Front camera", "matter:1/1=Smart Lock (as linked)"]],
+    ]);
+    // The labels come from the last sweep's locks — no smart-home call on a page load.
+    expect(lockReader.listLocks).not.toHaveBeenCalled();
+  });
+
+  it("GET /sources with Devices view: every paired lock endpoint (sorted by label), and each lock link's status", async () => {
+    const res = await request(app("u-owner")).get("/api/security/sources");
+    expect(res.status).toBe(200);
+    expect(lockReader.listLocks).toHaveBeenCalledTimes(1);
+    expect(res.body.locks).toEqual({
+      state: "ok",
+      items: [
+        { ref: LOCK_B, nodeId: "99", endpointId: 2, label: "Annex lock", room: null, connected: false },
+        { ref: LOCK_A, nodeId: "4660", endpointId: 1, label: "Back door lock", room: "Hall", connected: true },
+      ],
+    });
+    expect(res.body.linkStatus).toContainEqual({ linkId: "l-door-a", status: "present" });
+    expect(res.body.linkStatus).toContainEqual({ linkId: "l-shop-gone", status: "missing" });
+  });
+
+  it("GET /sources without Devices view: locks hidden, the smart-home service not asked, no lock link listed", async () => {
+    const res = await request(app("u-admin-nodev")).get("/api/security/sources");
+    expect(res.body.locks).toEqual({ state: "hidden", items: [] });
+    expect(lockReader.listLocks).not.toHaveBeenCalled();
+    const ids = res.body.linkStatus.map((s: { linkId: string }) => s.linkId);
+    expect(ids).not.toContain("l-door-a");
+    expect(ids).not.toContain("l-shop-gone");
+  });
+
+  it.each([
+    ["the smart-home service cannot answer", () => lockReader.listLocks.mockRejectedValue(new Error("sidecar 503"))],
+    ["no lock adapter is running", () => (locksRunning = false)],
+  ])("GET /sources when %s: locks unavailable (never an empty 'no locks'), lock links unknown, cameras untouched — 200", async (_n, arrange) => {
+    arrange();
+    const res = await request(app("u-owner")).get("/api/security/sources");
+    expect(res.status).toBe(200);
+    expect(res.body.locks).toEqual({ state: "unavailable", items: [] });
+    expect(res.body.linkStatus).toContainEqual({ linkId: "l-door-a", status: "unknown" });
+    expect(res.body.frigate).toBe("ok");
+  });
+
+  describe("PUT /zones/:id/links with a lock", () => {
+    const put = (user: keyof typeof USERS, links: Array<[string, string]>, expectedVersion = 1, id = YARD) =>
+      request(app(user))
+        .put(`/api/security/zones/${id}/links`)
+        .send({ links: links.map(([sourceKind, sourceRef]) => ({ sourceKind, sourceRef })), expectedVersion });
+
+    it("links a paired lock: checked against a FRESH list, its name snapshotted, audited — Frigate never asked", async () => {
+      const res = await put("u-owner", [
+        ["camera", "back"],
+        ["lock", LOCK_A],
+      ]);
+      expect(res.status).toBe(200);
+      expect(lockReader.listLocks).toHaveBeenCalledTimes(1);
+      expect(frigate).not.toHaveBeenCalled();
+      expect(db.links.find((l) => l.zoneId === YARD && l.sourceRef === LOCK_A)).toMatchObject({
+        sourceKind: "lock",
+        state: "active",
+        sourceLabel: "Back door lock",
+        createdById: "u-owner",
+      });
+      expect(res.body.zone.links).toContainEqual(
+        expect.objectContaining({ sourceKind: "lock", sourceRef: LOCK_A, label: "Back door lock" }),
+      );
+      expect(audits()).toHaveLength(1);
+      expect(audits()[0]!.refs).toMatchObject({ action: "zone.links", zoneId: YARD, added: [LOCK_A], removed: [], reactivated: [] });
+    });
+
+    it("a lock the smart-home service does not list → 422 SOURCE_NOT_FOUND, nothing written", async () => {
+      const before = state();
+      const res = await put("u-owner", [
+        ["camera", "back"],
+        ["lock", "matter:7/1"],
+      ]);
+      expect([res.status, res.body.error.code]).toEqual([422, "SOURCE_NOT_FOUND"]);
+      expect(state()).toEqual(before);
+      expect(h.recordActivityInTx).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["the list fails", () => lockReader.listLocks.mockRejectedValue(new Error("sidecar 503"))],
+      ["no adapter is running", () => (locksRunning = false)],
+    ])("a NEW lock when %s → 503 SOURCE_CHECK_UNAVAILABLE, nothing written", async (_n, arrange) => {
+      arrange();
+      const before = state();
+      const res = await put("u-owner", [
+        ["camera", "back"],
+        ["lock", LOCK_A],
+      ]);
+      expect([res.status, res.body.error.code]).toEqual([503, "SOURCE_CHECK_UNAVAILABLE"]);
+      expect(state()).toEqual(before);
+    });
+
+    it("an admin narrowed off Devices cannot link a lock — the same 422 as a lock that does not exist", async () => {
+      const before = state();
+      const res = await put("u-admin-nodev", [
+        ["camera", "back"],
+        ["lock", LOCK_A],
+      ]);
+      expect([res.status, res.body.error.code]).toEqual([422, "SOURCE_NOT_FOUND"]);
+      expect(resolve).toHaveBeenCalledWith("u-admin-nodev");
+      expect(lockReader.listLocks).not.toHaveBeenCalled();
+      expect(state()).toEqual(before);
+    });
+
+    it("…and a save by them leaves the area's lock links exactly as they are (hidden links are not in the diff)", async () => {
+      const res = await put(
+        "u-admin-nodev",
+        [
+          ["camera", "front"],
+          ["camera_zone", "back/porch"],
+          ["camera", "cam9"],
+          ["camera", "side"],
+        ],
+        3,
+        SHOP,
+      );
+      expect(res.status).toBe(200);
+      expect(db.links.find((l) => l.id === "l-shop-gone")).toMatchObject({ state: "active" });
+      expect(audits()[0]!.refs).toMatchObject({ added: ["side"], removed: [] });
+      // Their answer does not name the lock either.
+      expect(res.body.zone.links.map((l: { sourceKind: string }) => l.sourceKind)).not.toContain("lock");
+    });
+
+    it("an EXISTING lock link is kept without a check, even while the lock list is down", async () => {
+      lockReader.listLocks.mockRejectedValue(new Error("sidecar 503"));
+      const res = await put(
+        "u-owner",
+        [
+          ["camera", "front"],
+          ["camera_zone", "back/porch"],
+          ["camera", "cam9"],
+          ["lock", "matter:1/1"],
+          ["camera", "side"],
+        ],
+        3,
+        SHOP,
+      );
+      expect(res.status).toBe(200);
+      expect(lockReader.listLocks).not.toHaveBeenCalled();
+      expect(db.links.find((l) => l.id === "l-shop-gone")).toMatchObject({ state: "active" });
+    });
+
+    it.each([["matter:04660/1"], ["matter:4660/0"], ["matter:4660"], ["front"]])("400 on a malformed lock ref %j", async (ref) => {
+      const res = await put("u-owner", [["lock", ref]]);
+      expect(res.status).toBe(400);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+  });
+});
+
 // ── WARP-2979 (P4 §7): Droplet's links ───────────────────────────────────
 
 describe("GET /api/security/zones — who made each link, and Droplet's evidence only for who can see all of it (route 3)", () => {
@@ -1454,200 +1649,5 @@ describe("PUT /api/security/zones/:id/links — route 12's P4 cells (§6.5)", ()
     expect(res.status).toBe(200);
     expect(row(AUTO)).toMatchObject({ state: "removed", stateSetBy: "person", decidedById: "u-owner" });
     expect(audits()[0]).toMatchObject({ refs: { removed: ["front"] } });
-  });
-});
-
-// ── WARP-2977 P2b-2: door locks as area links (DS-019) ────────────────────
-
-describe("door locks on areas — Security view AND Devices view (DS-019)", () => {
-  const DOOR = "5c6d7e8f-9a0b-4c1d-8e2f-3a4b5c6d7e8f";
-  const lockLink = (id: string, zoneId: string, sourceRef: string, state: LinkRow["state"] = "active"): LinkRow => ({
-    id,
-    zoneId,
-    sourceKind: "lock",
-    sourceRef,
-    sourceLabel: "Smart Lock (as linked)",
-    state,
-    createdById: "u-owner",
-    decidedById: null,
-    stateChangedAt: T0,
-    origin: "person",
-    stateSetBy: "person",
-  });
-
-  beforeEach(() => {
-    // An area made only of a lock, and a lock on the shop floor beside its cameras.
-    db.zones.push({ id: DOOR, name: "Back door", nameKey: "back door", kind: "entry", state: "active", version: 2, createdById: "u-owner" });
-    db.links.push(lockLink("l-door-a", DOOR, LOCK_A), lockLink("l-shop-gone", SHOP, "matter:1/1"));
-    // The family member with Devices view holds the same camera grant as u-fam.
-    db.grants.set("u-fam-dev", ["front"]);
-  });
-
-  const zonesFor = async (user: keyof typeof USERS) =>
-    (await request(app(user)).get("/api/security/zones")).body.zones.map(
-      (z: { id: string; links: Array<{ sourceRef: string; label: string }> }) => [z.id, z.links.map((l) => `${l.sourceRef}=${l.label}`)],
-    );
-
-  it("GET /zones: without Devices view an area made only of locks is hidden, and no lock link is shown anywhere", async () => {
-    expect(await zonesFor("u-fam")).toEqual([[SHOP, ["front=Front camera"]]]);
-    expect(await zonesFor("u-admin-nodev")).toEqual([
-      [SHOP, ["cam9=was cam9", "front=Front camera", "back/porch=Back camera"]],
-      [YARD, ["back=Back camera"]],
-    ]);
-    expect(resolve).toHaveBeenCalledWith("u-admin-nodev");
-  });
-
-  it("GET /zones: with Devices view the lock area shows, each lock labelled by its current name, else the snapshot", async () => {
-    expect(await zonesFor("u-fam-dev")).toEqual([
-      [DOOR, [`${LOCK_A}=Back door lock`]],
-      [SHOP, ["front=Front camera", "matter:1/1=Smart Lock (as linked)"]],
-    ]);
-    // The labels come from the last sweep's locks — no smart-home call on a page load.
-    expect(lockReader.listLocks).not.toHaveBeenCalled();
-  });
-
-  it("GET /sources with Devices view: every paired lock endpoint (sorted by label), and each lock link's status", async () => {
-    const res = await request(app("u-owner")).get("/api/security/sources");
-    expect(res.status).toBe(200);
-    expect(lockReader.listLocks).toHaveBeenCalledTimes(1);
-    expect(res.body.locks).toEqual({
-      state: "ok",
-      items: [
-        { ref: LOCK_B, nodeId: "99", endpointId: 2, label: "Annex lock", room: null, connected: false },
-        { ref: LOCK_A, nodeId: "4660", endpointId: 1, label: "Back door lock", room: "Hall", connected: true },
-      ],
-    });
-    expect(res.body.linkStatus).toContainEqual({ linkId: "l-door-a", status: "present" });
-    expect(res.body.linkStatus).toContainEqual({ linkId: "l-shop-gone", status: "missing" });
-  });
-
-  it("GET /sources without Devices view: locks hidden, the smart-home service not asked, no lock link listed", async () => {
-    const res = await request(app("u-admin-nodev")).get("/api/security/sources");
-    expect(res.body.locks).toEqual({ state: "hidden", items: [] });
-    expect(lockReader.listLocks).not.toHaveBeenCalled();
-    const ids = res.body.linkStatus.map((s: { linkId: string }) => s.linkId);
-    expect(ids).not.toContain("l-door-a");
-    expect(ids).not.toContain("l-shop-gone");
-  });
-
-  it.each([
-    ["the smart-home service cannot answer", () => lockReader.listLocks.mockRejectedValue(new Error("sidecar 503"))],
-    ["no lock adapter is running", () => (locksRunning = false)],
-  ])("GET /sources when %s: locks unavailable (never an empty 'no locks'), lock links unknown, cameras untouched — 200", async (_n, arrange) => {
-    arrange();
-    const res = await request(app("u-owner")).get("/api/security/sources");
-    expect(res.status).toBe(200);
-    expect(res.body.locks).toEqual({ state: "unavailable", items: [] });
-    expect(res.body.linkStatus).toContainEqual({ linkId: "l-door-a", status: "unknown" });
-    expect(res.body.frigate).toBe("ok");
-  });
-
-  describe("PUT /zones/:id/links with a lock", () => {
-    const put = (user: keyof typeof USERS, links: Array<[string, string]>, expectedVersion = 1, id = YARD) =>
-      request(app(user))
-        .put(`/api/security/zones/${id}/links`)
-        .send({ links: links.map(([sourceKind, sourceRef]) => ({ sourceKind, sourceRef })), expectedVersion });
-
-    it("links a paired lock: checked against a FRESH list, its name snapshotted, audited — Frigate never asked", async () => {
-      const res = await put("u-owner", [
-        ["camera", "back"],
-        ["lock", LOCK_A],
-      ]);
-      expect(res.status).toBe(200);
-      expect(lockReader.listLocks).toHaveBeenCalledTimes(1);
-      expect(frigate).not.toHaveBeenCalled();
-      expect(db.links.find((l) => l.zoneId === YARD && l.sourceRef === LOCK_A)).toMatchObject({
-        sourceKind: "lock",
-        state: "active",
-        sourceLabel: "Back door lock",
-        createdById: "u-owner",
-      });
-      expect(res.body.zone.links).toContainEqual(
-        expect.objectContaining({ sourceKind: "lock", sourceRef: LOCK_A, label: "Back door lock" }),
-      );
-      expect(audits()).toHaveLength(1);
-      expect(audits()[0]!.refs).toMatchObject({ action: "zone.links", zoneId: YARD, added: [LOCK_A], removed: [], reactivated: [] });
-    });
-
-    it("a lock the smart-home service does not list → 422 SOURCE_NOT_FOUND, nothing written", async () => {
-      const before = state();
-      const res = await put("u-owner", [
-        ["camera", "back"],
-        ["lock", "matter:7/1"],
-      ]);
-      expect([res.status, res.body.error.code]).toEqual([422, "SOURCE_NOT_FOUND"]);
-      expect(state()).toEqual(before);
-      expect(h.recordActivityInTx).not.toHaveBeenCalled();
-    });
-
-    it.each([
-      ["the list fails", () => lockReader.listLocks.mockRejectedValue(new Error("sidecar 503"))],
-      ["no adapter is running", () => (locksRunning = false)],
-    ])("a NEW lock when %s → 503 SOURCE_CHECK_UNAVAILABLE, nothing written", async (_n, arrange) => {
-      arrange();
-      const before = state();
-      const res = await put("u-owner", [
-        ["camera", "back"],
-        ["lock", LOCK_A],
-      ]);
-      expect([res.status, res.body.error.code]).toEqual([503, "SOURCE_CHECK_UNAVAILABLE"]);
-      expect(state()).toEqual(before);
-    });
-
-    it("an admin narrowed off Devices cannot link a lock — the same 422 as a lock that does not exist", async () => {
-      const before = state();
-      const res = await put("u-admin-nodev", [
-        ["camera", "back"],
-        ["lock", LOCK_A],
-      ]);
-      expect([res.status, res.body.error.code]).toEqual([422, "SOURCE_NOT_FOUND"]);
-      expect(resolve).toHaveBeenCalledWith("u-admin-nodev");
-      expect(lockReader.listLocks).not.toHaveBeenCalled();
-      expect(state()).toEqual(before);
-    });
-
-    it("…and a save by them leaves the area's lock links exactly as they are (hidden links are not in the diff)", async () => {
-      const res = await put(
-        "u-admin-nodev",
-        [
-          ["camera", "front"],
-          ["camera_zone", "back/porch"],
-          ["camera", "cam9"],
-          ["camera", "side"],
-        ],
-        3,
-        SHOP,
-      );
-      expect(res.status).toBe(200);
-      expect(db.links.find((l) => l.id === "l-shop-gone")).toMatchObject({ state: "active" });
-      expect(audits()[0]!.refs).toMatchObject({ added: ["side"], removed: [] });
-      // Their answer does not name the lock either.
-      expect(res.body.zone.links.map((l: { sourceKind: string }) => l.sourceKind)).not.toContain("lock");
-    });
-
-    it("an EXISTING lock link is kept without a check, even while the lock list is down", async () => {
-      lockReader.listLocks.mockRejectedValue(new Error("sidecar 503"));
-      const res = await put(
-        "u-owner",
-        [
-          ["camera", "front"],
-          ["camera_zone", "back/porch"],
-          ["camera", "cam9"],
-          ["lock", "matter:1/1"],
-          ["camera", "side"],
-        ],
-        3,
-        SHOP,
-      );
-      expect(res.status).toBe(200);
-      expect(lockReader.listLocks).not.toHaveBeenCalled();
-      expect(db.links.find((l) => l.id === "l-shop-gone")).toMatchObject({ state: "active" });
-    });
-
-    it.each([["matter:04660/1"], ["matter:4660/0"], ["matter:4660"], ["front"]])("400 on a malformed lock ref %j", async (ref) => {
-      const res = await put("u-owner", [["lock", ref]]);
-      expect(res.status).toBe(400);
-      expect(prisma.$transaction).not.toHaveBeenCalled();
-    });
   });
 });

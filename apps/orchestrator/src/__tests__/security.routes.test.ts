@@ -715,8 +715,7 @@ describe("door locks on the feed and the header — Security view AND Devices vi
     it("a family member with Devices view gets it (and still no threat row)", async () => {
       resolve.mockResolvedValue(catalog("view", true));
       const res = await request(app("family")).get("/api/security/health");
-      // WARP-2978: `incidents` is every viewer's; `alerts` (it names who is told) is owner/admin only.
-      // WARP-2979: `links` (Droplet's link job) is every viewer's too, right after alerts.
+      // WARP-2978: `incidents` is every viewer's; `alerts` (it names who is told) is owner/admin only. WARP-2979: `links` names no area, camera or incident, so it is every viewer's.
       expect(ids(res)).toEqual(["camera_ingest", "camera_system", "locks", "site_mode", "incidents", "links", "patterns", "retention"]);
     });
 

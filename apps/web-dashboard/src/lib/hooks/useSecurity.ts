@@ -21,6 +21,7 @@
 import { useCallback, useMemo } from "react";
 import useSWR, { useSWRConfig, type Revalidator, type RevalidatorOptions } from "swr";
 import useSWRInfinite from "swr/infinite";
+import { closeIncidentNotifications } from "@/lib/incident-notifications";
 import {
   SECURITY_AI_SETTINGS_PATH,
   SECURITY_LINK_PROPOSALS_PATH,
@@ -46,6 +47,7 @@ import {
   putAlertRouting,
   resolveSecurityIncident,
   requestSecurityIncidentNarrative,
+  setSecurityIncidentVerdict,
   type SecurityIncidentsQuery,
   archiveSecurityZone,
   createSecurityZone,
@@ -86,6 +88,7 @@ import type {
   CameraInfo,
   IncidentActionResult,
   IncidentDetail,
+  IncidentVerdict,
   IncidentSummary,
   IncidentsPage,
   IncidentsSummary,
@@ -613,14 +616,35 @@ export function useSecurityIncidents(filter: SecurityIncidentsFilter) {
     [filterKey],
   );
 
+  // WARP-3185 C — `revalidateAll`: the 15 s refresh re-reads every page the
+  // person loaded, not only the first (SWR's default for an infinite list),
+  // so an older page never shows an incident as it stood minutes ago. It
+  // costs one request per loaded page per refresh; the list opens on one page
+  // ("Needs attention" is short) and grows only when someone presses Show
+  // older. Refreshing only on mount would be cheaper, but this page is kept
+  // open and polled, and between mounts older pages would still go stale.
   const { data, error, isLoading, isValidating, size, setSize, mutate } = useSWRInfinite<IncidentsPage>(getKey, fetcher, {
     refreshInterval: REFRESH_MS,
     revalidateFirstPage: true,
     revalidateOnFocus: false,
-    revalidateAll: false,
+    revalidateAll: true,
   });
 
-  const incidents: IncidentSummary[] = useMemo(() => (data ?? []).flatMap((p) => p.incidents), [data]);
+  // Keyset pages are read at different moments: an incident whose activity
+  // lifted it onto an earlier page can still sit on a later one. List it once,
+  // where the newest read put it (the earlier page).
+  const incidents: IncidentSummary[] = useMemo(() => {
+    const seen = new Set<string>();
+    const out: IncidentSummary[] = [];
+    for (const p of data ?? []) {
+      for (const i of p.incidents) {
+        if (seen.has(i.id)) continue;
+        seen.add(i.id);
+        out.push(i);
+      }
+    }
+    return out;
+  }, [data]);
   const isLoadingMore = isValidating && size > 0 && Boolean(data && typeof data[size - 1] === "undefined");
   const lastPage = data?.[data.length - 1];
   const hasMore = Boolean(lastPage && lastPage.nextCursor !== null);
@@ -662,6 +686,11 @@ export function useSecurityIncidentSummary(enabled = true) {
  * in the cache and refreshes the summary; it throws the typed error for the
  * caller to render with `translateError(err, "security")` — then `refresh()`,
  * since a 409 means the incident moved.
+ *
+ * WARP-3195 — `keepLink` (manage): Keep a link only Droplet made (route 24),
+ * then re-read the incident (its `dropletLinks` line goes) and every area
+ * list (the link's "Linked by Droplet" chip goes). It throws the typed error
+ * like the others; the caller re-reads with `refresh()`.
  */
 export function useSecurityIncident(id: string | null) {
   const { mutate: globalMutate } = useSWRConfig();
@@ -673,18 +702,33 @@ export function useSecurityIncident(id: string | null) {
 
   const apply = useCallback(
     async (r: IncidentActionResult): Promise<IncidentActionResult> => {
-      await Promise.all([mutate(r.incident, { revalidate: false }), globalMutate(SECURITY_INCIDENT_SUMMARY_PATH)]);
+      // No incident in the answer (this person can't see it any more): re-read,
+      // so the page shows where it stands — caching null would spin forever (WARP-3185).
+      await Promise.all([
+        r.incident ? mutate(r.incident, { revalidate: false }) : mutate(),
+        globalMutate(SECURITY_INCIDENT_SUMMARY_PATH),
+      ]);
       return r;
     },
     [mutate, globalMutate],
   );
 
+  // WARP-3185 F — handled here, so its alert leaves this device's tray
+  // (best-effort, never awaited, never throws).
   const acknowledge = useCallback(
-    async (opts: { notificationId?: string | null } = {}) => apply(await acknowledgeSecurityIncident(id!, opts)),
+    async (opts: { notificationId?: string | null } = {}) => {
+      const r = await apply(await acknowledgeSecurityIncident(id!, opts));
+      void closeIncidentNotifications(id!);
+      return r;
+    },
     [apply, id],
   );
   const resolve = useCallback(
-    async (opts: { note?: string } = {}) => apply(await resolveSecurityIncident(id!, opts)),
+    async (opts: { note?: string } = {}) => {
+      const r = await apply(await resolveSecurityIncident(id!, opts));
+      void closeIncidentNotifications(id!);
+      return r;
+    },
     [apply, id],
   );
   // WARP-2979 P4 PR-2 (route 28) — Summarise now / Regenerate, then a re-read (the answer carries only the summary).
@@ -693,6 +737,19 @@ export function useSecurityIncident(id: string | null) {
     await mutate();
     return r;
   }, [id, mutate]);
+  const keepLink = useCallback(
+    async (linkId: string): Promise<SecurityLinkDecisionResult> => {
+      const r = await acceptSecurityLink(linkId);
+      await Promise.all([mutate(), globalMutate(isZonesKey)]);
+      return r;
+    },
+    [mutate, globalMutate],
+  );
+  // WARP-2980 (P5 PR-C) — route 35: Expected / Not expected. The box returns the incident, like acknowledge.
+  const giveVerdict = useCallback(
+    async (verdict: IncidentVerdict) => apply(await setSecurityIncidentVerdict(id!, verdict)),
+    [apply, id],
+  );
 
   return {
     incident: data ?? null,
@@ -702,6 +759,8 @@ export function useSecurityIncident(id: string | null) {
     acknowledge,
     resolve,
     summarise,
+    keepLink,
+    giveVerdict,
   };
 }
 
@@ -711,6 +770,16 @@ export function useSecurityIncident(id: string | null) {
  * re-reads the whole list (the fallback banner and other rows can move) and
  * the health header (its `alerts` row names who is told).
  */
+/** The routing list with one person's row replaced by the box's echo (appended if it wasn't listed). */
+function withPerson(current: AlertRoutingView | undefined, person: AlertRoutingPerson): AlertRoutingView | undefined {
+  if (!current || current.level !== "manage") return current;
+  const listed = current.people.some((p) => p.userId === person.userId);
+  return {
+    ...current,
+    people: listed ? current.people.map((p) => (p.userId === person.userId ? person : p)) : [...current.people, person],
+  };
+}
+
 export function useAlertRouting() {
   const { mutate: globalMutate } = useSWRConfig();
   const { data, error, isLoading, mutate } = useSWR<AlertRoutingView>(SECURITY_ALERT_ROUTING_PATH, () => getAlertRouting(), {
@@ -720,7 +789,14 @@ export function useAlertRouting() {
   const set = useCallback(
     async (userId: string, body: AlertRoutingSetBody): Promise<AlertRoutingPerson> => {
       const r = await putAlertRouting(userId, body);
-      await Promise.all([mutate(), globalMutate(SECURITY_HEALTH_PATH)]);
+      // WARP-3185 E — the box's echoed row is this person's truth: it goes in
+      // the cache first, so a change that landed never looks refused (and the
+      // next change sends the version it echoed) even if the re-read fails.
+      await mutate((current) => withPerson(current, r.person), { revalidate: false });
+      // Then re-read the rest (the fallback banner, other rows) and the health
+      // header, whose `alerts` row names who is told.
+      void mutate();
+      void globalMutate(SECURITY_HEALTH_PATH);
       return r.person;
     },
     [mutate, globalMutate],

@@ -110,12 +110,6 @@ export function isLockLinkRef(parsed: ParsedLinkRef): parsed is LockLinkRef {
   return "nodeId" in parsed;
 }
 
-/** A camera or camera_zone link's target; null for a lock link or a malformed ref. */
-export function parseCameraLinkRef(kind: SecurityZoneSourceKind, ref: string): CameraLinkRef | null {
-  const parsed = parseLinkRef(kind, ref);
-  return parsed !== null && !isLockLinkRef(parsed) ? parsed : null;
-}
-
 /** The scope a link filter reads: the camera grant and the lock gate (DS-005, DS-019). */
 export type LinkScope = Pick<SecurityViewerScope, "visibleCameras" | "mayReadLocks">;
 
@@ -1451,9 +1445,10 @@ const notDecidable = (): ZoneWriteError =>
 
 /** How the audit line names a link's view: `Back camera`, or `the "till" part of Back camera`. */
 function linkPhrase(l: { sourceKind: SecurityZoneSourceKind; sourceRef: string; sourceLabel: string }, labels: ReadonlyMap<string, string>): string {
-  const parsed = parseCameraLinkRef(l.sourceKind, l.sourceRef);
-  const label = stripUnsafeDisplayChars((parsed ? labels.get(parsed.camera) : undefined) ?? l.sourceLabel);
-  return parsed?.frigateZone ? `the "${parsed.frigateZone}" part of ${label}` : label;
+  const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
+  const cameraRef = parsed && !isLockLinkRef(parsed) ? parsed : null;
+  const label = stripUnsafeDisplayChars((cameraRef ? labels.get(cameraRef.camera) : undefined) ?? l.sourceLabel);
+  return cameraRef?.frigateZone ? `the "${cameraRef.frigateZone}" part of ${label}` : label;
 }
 
 /**
@@ -1626,8 +1621,10 @@ export async function listLinkProposals(
     },
   });
   const out = visibleLinks(rows, scope).map((r) => {
-    const camera = parseCameraLinkRef(r.sourceKind, r.sourceRef)?.camera;
-    const live = r.sourceKind === "lock" ? lockLabels.get(r.sourceRef) : camera !== undefined ? cameraLabels.get(camera) : undefined;
+    const parsed = parseLinkRef(r.sourceKind, r.sourceRef);
+    const camera = parsed && !isLockLinkRef(parsed) ? parsed.camera : undefined;
+    // A lock suggestion by the lock's current name (P4 PR-4); a camera by its display name; else the snapshot.
+    const live = parsed && isLockLinkRef(parsed) ? lockLabels.get(r.sourceRef) : camera !== undefined ? cameraLabels.get(camera) : undefined;
     const evidence = evidenceFor(r, scope);
     return {
       match: evidence?.names.match ?? false,

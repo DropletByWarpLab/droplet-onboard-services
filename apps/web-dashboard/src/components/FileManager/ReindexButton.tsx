@@ -12,8 +12,9 @@
  *     can't trample each other (409 `index_in_progress`).
  *
  * The button surfaces each path inline:
- *   - mfa_required → bounce to /settings/mfa?returnTo=... so the user
- *     can re-auth without losing their place;
+ *   - mfa_required / mfa_stale → the <StepUpDialog> (password + code for
+ *     this session, WARP-3180), then the re-index runs again (WARP-3252;
+ *     it used to bounce to a /settings/mfa page that never existed);
  *   - index_in_progress / 5xx → show the message next to the button;
  *   - 200 → show "Re-indexed N chunks" so the admin has confirmation
  *     the rewrite landed.
@@ -22,6 +23,9 @@
 import { useState, type JSX } from "react";
 import { RefreshCw } from "lucide-react";
 import { authFetch } from "@/lib/auth";
+import { StepUpDialog } from "@/components/auth/StepUpDialog";
+
+const MFA_PROMPT = "Confirm it's you to re-index.";
 
 export interface ReindexButtonProps {
   /**
@@ -39,6 +43,7 @@ type Status = "idle" | "running" | "mfa" | "done" | "error";
 export function ReindexButton({ fileId }: ReindexButtonProps): JSX.Element {
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState<string>("");
+  const [stepUpOpen, setStepUpOpen] = useState(false);
 
   async function onClick() {
     setStatus("running");
@@ -50,12 +55,11 @@ export function ReindexButton({ fileId }: ReindexButtonProps): JSX.Element {
       );
       if (resp.status === 401) {
         const body = await resp.json().catch(() => ({} as Record<string, unknown>));
-        if ((body as { error?: string }).error === "mfa_required") {
+        const code = (body as { error?: string }).error;
+        if (code === "mfa_required" || code === "mfa_stale") {
           setStatus("mfa");
-          setMessage("Recent MFA required — redirecting…");
-          window.location.href = `/settings/mfa?returnTo=${encodeURIComponent(
-            window.location.pathname,
-          )}`;
+          setMessage(MFA_PROMPT);
+          setStepUpOpen(true);
           return;
         }
       }
@@ -104,6 +108,22 @@ export function ReindexButton({ fileId }: ReindexButtonProps): JSX.Element {
           {message}
         </span>
       )}
+      <StepUpDialog
+        open={stepUpOpen}
+        onClose={() => {
+          setStepUpOpen(false);
+          // Dismissed without confirming: drop the "Confirm it's you" line.
+          // (After a successful step-up onClick runs next and takes over.)
+          setStatus((s) => (s === "mfa" ? "idle" : s));
+          setMessage((m) => (m === MFA_PROMPT ? "" : m));
+        }}
+        onVerified={onClick}
+        onError={(m) => {
+          setStatus("error");
+          setMessage(m);
+        }}
+        actionLabel="Re-index"
+      />
     </div>
   );
 }

@@ -301,7 +301,8 @@ describe("the withheld set is DERIVED from the tool catalog", () => {
 
   it("WARP-2979: withholds every Security tool, and the notice says Security stays on the Droplet", () => {
     expect(OFF_LAN_WITHHELD_DOMAINS.has("security")).toBe(true);
-    for (const name of ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status"]) {
+    // WARP-2980 — the fifth, security_explain_pattern, is withheld by its domain like the four.
+    for (const name of ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status", "security_explain_pattern"]) {
       expect(OFF_LAN_WITHHELD_TOOLS.has(name), name).toBe(true);
     }
     expect(withholdStoredContentTools(["security_search_events", "get_network_status"])).toEqual(["get_network_status"]);
@@ -599,6 +600,28 @@ describe("POST /api/llm/chat — stored content in the PROMPT (WARP-2746)", () =
     expect([...(refs.offLanWithheld as string[])].sort()).toEqual(
       ["brain", "business", "context_pins", "memory"],
     );
+  });
+  // WARP-3281 — the date line's Workspace.tz label is workspace configuration:
+  // it stays on the box. The cloud model still gets the day.
+  it.each([
+    [false, true],
+    [true, false],
+  ])("cloud=%s: the date line carries the Workspace.tz zone=%s", async (cloud, zoneSent) => {
+    mockGetModelProvider.mockResolvedValue(cloud ? "anthropic" : "local");
+    const prisma = createPrismaMock();
+    prisma.workspace.findUnique = vi.fn(async () => ({ id: 1, type: "BUSINESS", tz: "Pacific/Auckland" }));
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as unknown as { user?: unknown }).user = { id: OWNER_ID, username: "stefan", role: "owner" };
+      next();
+    });
+    app.use("/api", createLlmRouter(prisma as never));
+
+    expect((await send(app, cloud)).status).toBe(200);
+    const sent = outboundText();
+    expect(sent).toMatch(/Today is \w+ \d{4}-\d{2}-\d{2}/);
+    expect(sent.includes("Pacific/Auckland")).toBe(zoneSent);
   });
 });
 

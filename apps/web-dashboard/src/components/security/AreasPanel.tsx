@@ -88,6 +88,10 @@ export const COPY = {
   retry: "Retry",
   // A lost race on an area: the panel has already re-read it, so the form or card shows their version.
   conflict: "Someone else changed this area while you were editing. What's shown now is their version, so make your change again.",
+  // WARP-2977 P2b-2 — door locks (only people with Devices view see lock links).
+  missingLock: "{lock} isn't paired any more",
+  unknownLocks: "Couldn't check the door locks",
+  lockReuseHint: "A door lock that's paired again shows up as a new lock, so it needs linking to this area again.",
   // WARP-2979 — Droplet's links.
   linkedByDroplet: "Linked by Droplet",
   // WCAG 2.5.3: the chip's name starts with its visible text ("Linked by Droplet").
@@ -97,10 +101,6 @@ export const COPY = {
   kept: "Kept. {camera} now counts for alerts in {area}.",
   keptPlain: "Kept. {camera} now counts for {area}.",
   undone: "Undone. Droplet won't suggest {camera} for {area} again.",
-  // WARP-2977 P2b-2 — door locks (only people with Devices view see lock links).
-  missingLock: "{lock} isn't paired any more",
-  unknownLocks: "Couldn't check the door locks",
-  lockReuseHint: "A door lock that's paired again shows up as a new lock, so it needs linking to this area again.",
 } as const;
 
 /** "Linked by Droplet": a link Droplet made AND still set on its own (Keep turns it into a person's). */

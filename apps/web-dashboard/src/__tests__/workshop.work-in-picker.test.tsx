@@ -76,7 +76,7 @@ describe("Workshop — the Work in menu", () => {
     expect(chip()).toHaveAttribute("aria-expanded", "true");
     const menu = screen.getByRole("menu", { name: "Work in" });
     const rows = within(menu).getAllByRole("menuitemradio");
-    expect(rows.map((r) => r.querySelector(".ws-workin-item-name")?.textContent)).toEqual(["No workspace", "Word counter", "Booking reminders"]);
+    expect(rows.map((r) => r.querySelector(".pick-item-name")?.textContent)).toEqual(["No workspace", "Word counter", "Booking reminders"]);
     expect(rows.filter((r) => r.getAttribute("aria-checked") === "true").map((r) => r.textContent)).toEqual([
       expect.stringContaining("Booking reminders"),
     ]);

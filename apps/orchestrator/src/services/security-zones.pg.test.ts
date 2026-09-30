@@ -296,9 +296,9 @@ describe.skipIf(!RUN)("Areas against real Postgres (WARP-2977 P2b)", () => {
           const n = Math.floor(r() * 5); // 0–4 links; 0 exercises "none"
           for (let k = 0; k < n; k++) {
             const roll = r();
-            const base = { linkId: `${zoneId}-${k}`, zoneId, zoneName: zoneId, zoneKind: "interior" as const, setBy: "person" as const };
+            const base = { linkId: `${zoneId}-${k}`, zoneId, zoneName: zoneId, zoneKind: "interior" as const };
             if (roll < 0.2) {
-              links.push({ ...base, sourceKind: "lock", sourceRef: pick(r, LOCKS) });
+              links.push({ ...base, sourceKind: "lock", sourceRef: pick(r, LOCKS), setBy: "person" });
               continue;
             }
             const camera = pick(r, CAMS);

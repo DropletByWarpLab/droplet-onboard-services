@@ -252,6 +252,12 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That expiration date isn't allowed by this Droplet's sharing rules. Pick a different date.",
     PERMISSIONS_REJECTED:
       "That access level isn't available for this item. Pick a different access level and try again.",
+    // WARP-3168 / WARP-3053 — the box's stable refusal codes (share-policy.ts).
+    // Deterministic, so name the rule instead of the generic 403 copy.
+    workspace_share_admin_only:
+      "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside.",
+    public_link_company_data:
+      "Only an owner or admin can create or change a public link to company files, or let others re-share them. You can still share with people in the company.",
     // WARP-1658 — every 403 a share write can draw is a DETERMINISTIC policy
     // rejection: role denial (requireRole), guest read-only, or insufficient
     // rights on a household/department space (requireSpaceAccess). Without this
@@ -330,6 +336,12 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "This Droplet's rules limit when share links expire, and sharing several files at once can't set an expiry date. Share this file on its own to pick one.",
     PERMISSIONS_REJECTED:
       "That access level isn't available for this item. Pick a different access level and try again.",
+    // WARP-3168 / WARP-3053 — the box's stable refusal codes (share-policy.ts).
+    // Deterministic, so name the rule instead of the generic 403 copy.
+    workspace_share_admin_only:
+      "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside.",
+    public_link_company_data:
+      "Only an owner or admin can create or change a public link to company files, or let others re-share them. You can still share with people in the company.",
     "403":
       "You don't have permission to share this item. Sign out and back in if your access changed recently, or ask the Droplet's owner or an admin to share it.",
     NOT_FOUND:
@@ -767,6 +779,10 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     // can't see) answers: the same words as the incident page's, never why.
     NOT_ACTIONABLE: "You can't acknowledge or resolve this incident. Refresh the page to see where it stands.",
     INCIDENTS_UNAVAILABLE: "Droplet can't read the incidents right now. Try again in a moment.",
+    // WARP-2980 (P5 PR-C) — route 35. Nothing this person can mark, or a view
+    // that went partial (a camera they can't see): one body, so the words
+    // never say which.
+    NOT_JUDGEABLE: "There's nothing here you can mark as expected or not. Refresh the page to see where it stands.",
     NO_RECIPIENT:
       "Someone who can open Security has to be told about alerts. Turn someone else on first, then try again.",
     NOT_ELIGIBLE: "This person can't open Security, so they can't be told about alerts.",

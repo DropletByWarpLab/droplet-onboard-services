@@ -337,10 +337,22 @@ describe("agent-runs routes — ownership, list, detail, cancel (WARP-2180)", ()
     expect(page1.body.items[0]).not.toHaveProperty("trace");
   });
 
+  it("filters by the chat that started the run (WARP-3302)", async () => {
+    const db = createAgentRunPrismaMock({ users: [owner] });
+    await enqueueAgentRun(db.prisma, { userId: "u-owner", goal: "from chat", model: "m", sessionId: "conv-1" });
+    await enqueueAgentRun(db.prisma, { userId: "u-owner", goal: "elsewhere", model: "m", sessionId: "conv-2" });
+    await enqueueAgentRun(db.prisma, { userId: "u-owner", goal: "workshop", model: "m" });
+    const { app } = buildApp(owner, db);
+    const res = await request(app).get("/api/agent-runs").query({ sessionId: "conv-1" });
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((r: { goal: string }) => r.goal)).toEqual(["from chat"]);
+  });
+
   it("pages by (createdAt, id): rows created in the same millisecond straddling a page boundary are not skipped", async () => {
     const same = new Date("2026-09-04T10:00:00Z");
     const db = createAgentRunPrismaMock({ users: [owner], now: () => same });
-    for (let i = 0; i < 4; i++) await enqueueAgentRun(db.prisma, { userId: "u-owner", goal: `g${i}`, model: "m" });
+    // Schedule fires are exempt from the WARP-3299 per-person cap, so four can be live.
+    for (let i = 0; i < 4; i++) await enqueueAgentRun(db.prisma, { userId: "u-owner", goal: `g${i}`, model: "m", origin: "schedule" });
     const { app } = buildApp(owner, db);
     const seen: string[] = [];
     let cursor: string | null = null;
@@ -540,5 +552,88 @@ describe("agent-runs routes — runs follow the box's ACTIVE model (WARP-3047)",
     const { app, db } = buildApp(owner);
     expect((await request(app).post("/api/agent-runs").send({ goal: "g" })).status).toBe(400);
     expect(db.rows).toHaveLength(0);
+  });
+});
+
+// WARP-3299 — a chat-started run links back to the turn that started it.
+describe("agent-runs routes — chat origin, per-person cap, queue position (WARP-3299)", () => {
+  const chatBody = {
+    goal: "check supplier prices",
+    onBehalfOf: "romain",
+    title: "Supplier price check",
+    deliverable: "a table of prices",
+    origin: "chat",
+    sessionId: "conv-1",
+    originMessageId: "msg-1",
+    originToolCallId: "call-1",
+  };
+
+  it("the mcp principal records origin = chat with the conversation, message and tool call", async () => {
+    const { app, db } = buildApp(mcpPrincipal);
+    const res = await request(app).post("/api/agent-runs").send(chatBody);
+    expect(res.status).toBe(201);
+    expect(res.body.queuePosition).toBe(1);
+    const row = db.row(res.body.id);
+    expect(row).toMatchObject({
+      origin: "chat",
+      sessionId: "conv-1",
+      originMessageId: "msg-1",
+      originToolCallId: "call-1",
+      title: "Supplier price check",
+      deliverable: "a table of prices",
+      resultDelivery: "pending",
+    });
+    const detail = await request(app).get(`/api/agent-runs/${res.body.id}`).query({ onBehalfOf: "romain" });
+    expect(detail.body).toMatchObject({ origin: "chat", originMessageId: "msg-1", title: "Supplier price check", artifacts: [] });
+  });
+
+  it("a person's own request cannot claim to come from chat", async () => {
+    const { app, db } = buildApp(owner);
+    const res = await request(app).post("/api/agent-runs").send(chatBody);
+    expect(res.status).toBe(201);
+    expect(db.row(res.body.id)).toMatchObject({
+      origin: "workshop",
+      originMessageId: null,
+      originToolCallId: null,
+      resultDelivery: "not_applicable",
+    });
+  });
+
+  it("the title defaults to the goal's first line", async () => {
+    const { app, db } = buildApp(owner);
+    const res = await request(app).post("/api/agent-runs").send({ goal: "Sweep the invoices\nthen summarise" });
+    expect(db.row(res.body.id).title).toBe("Sweep the invoices");
+  });
+
+  it("a fourth active run for the same person is refused with a readable message", async () => {
+    const { app, db } = buildApp(owner);
+    for (let i = 0; i < 3; i++) expect((await request(app).post("/api/agent-runs").send({ goal: `g${i}` })).status).toBe(201);
+    const res = await request(app).post("/api/agent-runs").send({ goal: "g3" });
+    expect(res.status).toBe(429);
+    expect(res.body).toMatchObject({ code: "agent_run_cap", active: 3 });
+    expect(res.body.error).toMatch(/limit is 3/);
+    expect(db.rows).toHaveLength(3);
+  });
+
+  it("the queue position counts the runs ahead of it", async () => {
+    const { app } = buildApp(owner);
+    await request(app).post("/api/agent-runs").send({ goal: "first" });
+    const second = await request(app).post("/api/agent-runs").send({ goal: "second" });
+    expect(second.body.queuePosition).toBe(2);
+  });
+});
+
+// WARP-3299 — owner and admin only start runs from chat in v1 (Romain,
+// 2026-09-28). A member never sees the tool: it is a write, and chat strips
+// write tools from every non-privileged role. Pinned here so a future
+// "members may run tasks" change is a deliberate one.
+describe("start_agent_run reach by role (WARP-3299)", () => {
+  it("owner and admin see it; a member and a guest do not", async () => {
+    const { toolAllowedForTier } = await import("../services/tool-access.service.js");
+    expect(toolAllowedForTier("start_agent_run", "owner")).toBe(true);
+    expect(toolAllowedForTier("start_agent_run", "admin")).toBe(true);
+    expect(toolAllowedForTier("start_agent_run", "family")).toBe(false);
+    expect(toolAllowedForTier("start_agent_run", "guest")).toBe(false);
+    expect(toolAllowedForTier("start_agent_run", "family", true)).toBe(false);
   });
 });

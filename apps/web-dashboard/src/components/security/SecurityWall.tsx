@@ -6,7 +6,7 @@
  * A tile for each camera the signed-in person may see, above a status strip
  * — the site mode, what needs attention, and which sources are not reporting.
  * Read-only, no navigation (AuthGate renders no shell here), signed in as a
- * Staff account — never an owner or admin (D6, Stefan: "Member wall, own
+ * Member account — never an owner or admin (D6, Stefan: "Member wall, own
  * cameras"; AuthGate refuses those before this renders): every number and
  * every camera is that person's own DS-005 projection, read from the routes
  * /security and /cameras already use (useSecurityWall). Nothing here writes,

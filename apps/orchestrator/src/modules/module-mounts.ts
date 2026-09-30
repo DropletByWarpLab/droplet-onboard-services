@@ -206,13 +206,6 @@ export function mountModuleGates(
  *   - `business_profile_get` reads through `ctx.prisma`, no HTTP hop at all.
  * Both rely on the tool-level gate (the chat / runner dispatch check).
  *
- * WARP-2979 (ADR-059 P4 §6.12.2) — `security`: its four read-only tools hop
- * only to /api/security/assistant/*, all under the `security` module's one
- * prefix, so the gate sees every one. It repeats the person's tool scope and
- * Security feature at the data boundary, which the mcp-server's HTTP
- * transport (write-tier RBAC only) would otherwise skip; the assistant
- * router then resolves the same person and applies DS-005.
- *
  * `email` (WARP-3145): the five email tools reach routes/email.ts as
  * `_service:mcp`, and the route resolves the acting person for mailbox
  * ownership but never asked their tool scope, so over the HTTP transport
@@ -222,8 +215,25 @@ export function mountModuleGates(
  * gate to see; WARP-3102 moves it to `GET /api/email/contacts`, under the
  * prefix. The email module is not feature-gated for humans, so the gate asks
  * question 1 only, and browser sessions are untouched.
+ *
+ * `team_chat` (WARP-3162): `team_chat_send_message` and
+ * `team_chat_send_meeting_invite` reach routes/team-chat.ts as `_service:mcp`,
+ * and the route resolves the acting person for thread membership but never
+ * asked their tool scope, so over the HTTP transport (WARP-2989) a person whose
+ * role leaves Messages out could message and invite members in their own name.
+ * Every `team_chat` hop is under `/api/team-chat` (the same test pins it). Both
+ * tools write, so the gate asks for `use` on the roster GET as well. The
+ * `team_chat` module is not feature-gated for humans, so the gate asks question
+ * 1 only, and browser sessions are untouched.
+ *
+ * WARP-2979 (ADR-059 P4 §6.12.2) — `security`: its four read-only tools hop
+ * only to /api/security/assistant/*, all under the `security` module's one
+ * prefix, so the gate sees every one. It repeats the person's tool scope and
+ * Security feature at the data boundary, which the mcp-server's HTTP
+ * transport (write-tier RBAC only) would otherwise skip; the assistant
+ * router then resolves the same person and applies DS-005.
  */
-export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business", "email", "security"];
+export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business", "email", "team_chat", "security"];
 
 /** Mount after `mountModuleGates` (and therefore after `authMiddleware`). */
 export function mountMcpActingUserGates(

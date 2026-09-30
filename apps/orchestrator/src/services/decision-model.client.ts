@@ -14,6 +14,7 @@
  */
 
 import { credentials, Metadata, type ServiceError } from "@grpc/grpc-js";
+import { z } from "zod";
 import {
   DecideQuestionType,
   DecideStatus,
@@ -55,6 +56,42 @@ export type DecideAnswer =
 export type DecideResult =
   | { status: "ok"; answers: Record<string, DecideAnswer>; latencyMs: number; model: string }
   | { status: "unavailable" | "invalid"; detail: string };
+
+// WARP-3074 — the body of `POST /api/llm/decide` (routes/llm.ts), the
+// `classify_items` MCP tool's way in. Lives here, beside the types it
+// mirrors, so a test can pin the tool's payload against it without
+// mounting the router. Bounds sit at the trust boundary; the tool applies
+// tighter caps of its own. Kev's answer is data, so the route always 200s
+// with the `DecideResult` (`unavailable` included); only a bad body is a 400.
+const decideInstructions = z.string().min(1).max(1000);
+export const decideRequestSchema = z
+  .object({
+    state: z.string().min(1).max(16000),
+    questions: z
+      .record(
+        z.string().regex(/^[A-Za-z0-9_-]{1,32}$/),
+        z.discriminatedUnion("type", [
+          z.object({ type: z.literal("noul"), instructions: decideInstructions }).strict(),
+          z
+            .object({
+              type: z.literal("choice"),
+              instructions: decideInstructions,
+              options: z.array(z.object({ name: z.string().min(1).max(200) }).strict()).min(1).max(255),
+            })
+            .strict(),
+          z
+            .object({
+              type: z.literal("score"),
+              instructions: decideInstructions,
+              levels: z.array(z.string().min(1).max(200)).min(2).max(50),
+            })
+            .strict(),
+        ]),
+      )
+      .refine((q) => Object.keys(q).length >= 1 && Object.keys(q).length <= 8, "1 to 8 questions"),
+    timeoutMs: z.number().int().min(1).max(10000).optional(),
+  })
+  .strict();
 
 /** Narrow stub surface — keeps the mock shape small in tests. */
 export interface DecideStub {

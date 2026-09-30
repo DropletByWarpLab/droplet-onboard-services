@@ -483,7 +483,8 @@ export type SourceState = "ok" | "quiet" | "down" | "not_configured";
  * locks (DS-019); `incidents` and `alerts` (WARP-2978 P3) are the incident
  * engine's and the notifier's; `links` (WARP-2979 P4) is Droplet's
  * link-proposal job's; `patterns` (WARP-2980 P5) is the baseline job's.
- * `summaries` (WARP-2979 P4 PR-2) is Droplet's incident narrator's, right after `links`.
+ * `summaries` (WARP-2979 P4 PR-2) is Droplet's incident narrator's, right
+ * after `links`.
  */
 export type SecurityHealthId =
   | "camera_ingest"

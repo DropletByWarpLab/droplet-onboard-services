@@ -17,6 +17,7 @@ import { createDevicesRouter } from "./routes/devices.js";
 import { createAdminPromptInspectorRouter } from "./routes/admin-prompt-inspector.js";
 import { createLlmRouter } from "./routes/llm.js";
 import { trackInteractiveInference } from "./services/interactive-inference.service.js";
+import { createLlmWarmRouter } from "./routes/llm-warm.js";
 import { createToolsRuntimeRouter } from "./routes/tools-runtime.js";
 import { resolveToolAccessScope } from "./services/tool-access.service.js";
 import { createTeamChatRouter } from "./routes/team-chat.js";
@@ -43,6 +44,7 @@ import { createStorageRouter } from "./routes/storage.js";
 import { createAppDownloadsRouter } from "./routes/app-downloads.js";
 import { createSystemResetRouter } from "./routes/system-reset.routes.js";
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./routes/auth.js";
+import { createStepUpRouter } from "./routes/auth-step-up.js";
 import { createSsoRouter } from "./routes/sso.js";
 import {
   createPublicWebAuthnRouter,
@@ -130,12 +132,12 @@ import { createTlsCertificateRouter } from "./routes/tls-certificate.js";
 import { createBackupStatusRouter } from "./routes/backup-status.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createUpdatesRouter } from "./routes/updates.js";
-import { createEmailRouter, wireEmailAnalysis } from "./routes/email.js";
+import { createEmailRouter, EMAIL_INGEST_PATH, wireEmailAnalysis } from "./routes/email.js";
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
 import { resolveActiveModel } from "./services/active-model.service.js";
 import { createToolsRouter } from "./routes/tools.js";
 import { detachRemoteMcp, mcpClient, remoteCallPolicy } from "./services/mcp-client.singleton.js";
-import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
+import { stepResultValue, type StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createHardwareRouter } from "./routes/hardware.js";
 import { createHomeRouter } from "./routes/home.js";
@@ -232,7 +234,13 @@ export function createApp(
   // an explicit limit; body-parser skips an already-parsed body, so the
   // global parser below leaves it alone and keeps its default elsewhere.
   app.use("/api/files/upload", express.json({ limit: "16mb" }));
-  app.use(express.json({ type: ["application/json", "application/scim+json"] }));
+  // WARP-3267: the email ingest route carries attachments and parses its own
+  // body with a larger limit, after its service-principal check — so the
+  // global parser leaves that one path alone (see EMAIL_INGEST_PATH).
+  const jsonParser = express.json({ type: ["application/json", "application/scim+json"] });
+  app.use((req, res, next) =>
+    EMAIL_INGEST_PATH.test(req.path) ? next() : jsonParser(req, res, next),
+  );
 
   // Public auth routes (setup + login + invite-accept) — no authentication required.
   // Prisma is required for the WARP-217 invite-accept endpoints (token lookup).
@@ -360,6 +368,8 @@ export function createApp(
 
   // Protected routes — auth middleware has populated req.user
   app.use("/api", createProtectedAuthRouter(prisma));
+  // WARP-3180 — re-prove the current session (fresh lastMfaAt, same sid).
+  app.use("/api", createStepUpRouter(prisma));
 
   // Module gates — both layers, data-driven from the registry:
   //   layer 1  requireModuleEnabled  — the WORKSPACE capability gate: 404 a
@@ -436,6 +446,11 @@ export function createApp(
       resolveScope: (user) => resolveToolAccessScope(prisma, user),
     }),
   );
+  // WARP-3127 — POST /api/llm/warm: voice-io starts loading the active model
+  // the moment the wake word fires. Mounted BEFORE createLlmRouter so no
+  // `/llm/:param` route there can ever shadow it; the `chat` module gate
+  // (`/api/llm`) covers it like /api/llm/chat.
+  app.use("/api", createLlmWarmRouter(prisma));
   // WARP-2979 (ADR-059 P4 §6.9.2) — the in-flight counter on the two
   // interactive LLM routes (typed chat, voice, /llm/complete). Background
   // model work (Droplet's incident summaries) waits for it to be idle and
@@ -445,7 +460,9 @@ export function createApp(
   app.use("/api", createLlmRouter(prisma));
   // WARP-1683 — team chat (member-to-member Messages). Humans only; the
   // `team_chat` module gate is mounted by mountModuleGates above off the
-  // registry's /api/team-chat prefix.
+  // registry's /api/team-chat prefix. WARP-3162: the team-chat tools'
+  // `_service:mcp` calls reach this router only past `mountMcpActingUserGates`
+  // above (the acting person needs `team_chat` with `use`).
   app.use("/api", createTeamChatRouter(prisma));
   app.use("/api", createMemoryRouter(prisma));
   // WARP-1118 — personality API (GET role-split read + PATCH owner/admin).
@@ -810,20 +827,7 @@ export function createApp(
   // on the first failure; per-step trace returned to the caller.
   const toolStepDispatcher: StepDispatcher = {
     async call(tool, args, context) {
-      const result = await mcpClient.callTool(tool, args, context);
-      if (result.isError) {
-        const detail = result.content?.[0]?.text ?? "tool reported error";
-        throw new Error(typeof detail === "string" ? detail : String(detail));
-      }
-      const text = result.content?.[0]?.text;
-      if (typeof text === "string" && text.length > 0) {
-        try {
-          return JSON.parse(text);
-        } catch {
-          return { raw: text };
-        }
-      }
-      return null;
+      return stepResultValue(tool, await mcpClient.callTool(tool, args, context));
     },
   };
   app.use("/api", createToolsRouter(prisma, toolStepDispatcher));

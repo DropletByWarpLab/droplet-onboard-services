@@ -944,6 +944,12 @@ model ChatMessage {
   /// WARP-844 — user rating on an assistant turn (explicit column per the
   /// no-guessing rule). NULL = unrated. Feeds the admin RAG-eval loop.
   feedback    ChatMessageFeedback?
+  /// WARP-3300 — what this row is. `message` is every ordinary turn;
+  /// `agent_run_result` is a background run reporting back into the chat
+  /// that started it (`meta` then holds {runId, status, title, summary,
+  /// artifacts}). An explicit column, never inferred from `meta`.
+  kind        ChatMessageKind      @default(message)
+  meta        Json?
   createdAt   DateTime             @default(now())
 
   @@index([sessionId, createdAt])
@@ -958,6 +964,12 @@ enum CloudHistoryConsent {
   not_asked
   granted
   declined
+}
+
+/// WARP-3300 — see ChatMessage.kind.
+enum ChatMessageKind {
+  message
+  agent_run_result
 }
 
 /// WARP-844 — thumbs rating on an assistant message.
@@ -1060,6 +1072,11 @@ model UserInvite {
   // separate ticket.
   role         Role      @default(family)
   createdBy    String // username of issuing admin
+  // WARP-3263: the issuing admin's User.id, copied to User.invitedById at
+  // accept. No FK: an audit pointer that must not block invite creation;
+  // accept checks the row still exists before copying it. Null on invites
+  // issued before this column existed.
+  createdById  String?
   expiresAt    DateTime
   // WARP-3193 QUAL-3: the lifecycle is this column, not the absence of the
   // timestamps below (CLAUDE.md no-guessing rule; WARP-218
@@ -2129,6 +2146,13 @@ model CalendarEvent {
   sourceId     String? // FK to CalendarSource.id (when source="external")
   externalUid  String? // iCalendar UID — used as idempotency key on re-sync
   externalEtag String? // CalDAV ETag for change detection
+  /// WARP-3266 — explicit, never derived from externalUid's shape:
+  /// "none" — a one-off event (every local row);
+  /// "occurrence" — one instance of a subscribed recurring series, expanded
+  ///   at sync time (externalUid = "<UID>::<original start ISO>");
+  /// "unexpanded" — a recurring series whose RRULE is outside the supported
+  ///   subset, stored as its first instance only. Clients can say "repeats".
+  recurrence   String   @default("none")
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -2976,6 +3000,16 @@ model User {
   // silently strip or downgrade a person's assignment.
   accessRoleId     String?
   accessRole       AccessRole?           @relation(fields: [accessRoleId], references: [id], onDelete: Restrict)
+  // WARP-3263: the person who brought this account onto the box: the invite's
+  // issuer (stamped at invite accept) or the admin who created it directly
+  // (POST /auth/users). An explicit id, never inferred from usernames or
+  // timestamps. Null when nobody did (setup owner, SSO/SCIM) or when that
+  // person was later deleted (SetNull), so a new hire reusing the old
+  // username is never mistaken for the inviter. An external guest's Messages
+  // roster shows this person.
+  invitedById      String?
+  invitedBy        User?                 @relation("UserInvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
+  invitees         User[]                @relation("UserInvitedBy")
   // ADR-032 / WARP-1525: per-person feature-axis exceptions (design D-A, v1).
   accessExceptions UserAccessException[]
   // WARP-2748 (ADR-051): findings assigned to this person. SetNull on the
@@ -3894,9 +3928,62 @@ model EmailMessage {
   extractedAt      DateTime?
   extractReason    ExtractReason?
 
+  /// WARP-3267 — the files this message carried.
+  attachments EmailAttachment[]
+
   @@unique([accountId, messageId])
   @@index([threadId, receivedAt(sort: Desc)])
   @@index([extractStatus, receivedAt])
+}
+
+/// WARP-3267 — one MIME part of an inbound message that is not its body.
+///
+/// Ruling: the bytes live in box storage (this table), not in the mailbox
+/// owner's Nextcloud home. A mailbox an admin connects for the company has no
+/// owner (`EmailAccount.userId` is null) and so no home to write to; anything
+/// in a Nextcloud home is picked up by the preview generator and the file
+/// indexer, which would render and parse a stranger's file the moment it
+/// arrived; and here the bytes go with the message, so disconnecting a mailbox
+/// (which cascades) leaves nothing behind. Saving an attachment into Files is
+/// the person's own act, from a client.
+///
+/// Never rendered by the box. Served only as a download
+/// (`GET /api/email/:accountId/messages/:messageId/attachments/:attachmentId`).
+/// `status` says whether the bytes were kept: a part over the size limits is
+/// listed, so the reader knows it existed, but not stored.
+model EmailAttachment {
+  id             String                @id @default(uuid())
+  emailMessageId String
+  emailMessage   EmailMessage          @relation(fields: [emailMessageId], references: [id], onDelete: Cascade)
+  /// Copied from the message so a forward can check, in one query, that the
+  /// attachment belongs to the mailbox the draft is sent from.
+  accountId      String
+  /// Position among the message's attachments (0-based). Unique per message.
+  partIndex      Int
+  /// As the sender named it, decoded. Sanitised when served, never trusted.
+  filename       String
+  /// As the sender declared it. Recorded, never used to decide how to open it.
+  contentType    String
+  size           Int
+  sha256         String
+  /// `Content-ID` of an inline part (a `cid:` image), without the brackets.
+  contentId      String?
+  status         EmailAttachmentStatus
+  /// Null unless `status` is `stored`.
+  data           Bytes?
+  createdAt      DateTime              @default(now())
+
+  @@unique([emailMessageId, partIndex])
+  @@index([accountId])
+}
+
+/// WARP-3267 — whether an attachment's bytes were kept.
+/// `too_large`: the part, or the message's running total, was over the limit.
+/// `over_limit`: the message carried more attachments than the box keeps.
+enum EmailAttachmentStatus {
+  stored
+  too_large
+  over_limit
 }
 
 /// WARP-465 — operator- or Droplet-authored draft. `draftedByDroplet`
@@ -3928,6 +4015,9 @@ model EmailDraft {
   /// every draft that has never been claimed.
   claimedAt        DateTime?
   error            String?
+  /// WARP-3267 — stored `EmailAttachment` ids a forward carries. Checked on
+  /// write to belong to this draft's mailbox; the indexer attaches them at send.
+  attachmentIds    String[]         @default([])
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 
@@ -4177,8 +4267,38 @@ model AgentRun {
   /// EVERY claim (the WARP-1580 ticker rule), never cached at creation, so a
   /// run cannot outlive a role change with stale reach.
   userId             String
-  /// The chat conversation that started the run, when one did.
+  /// The chat conversation that started the run, when one did. WARP-3299:
+  /// set by the server from the chat turn (never from model arguments),
+  /// together with the two ids below, when `origin = chat`.
   sessionId          String?
+  /// WARP-3299 — who started the run. Explicit, never inferred from which
+  /// ids are NULL (a schedule run also has no session).
+  origin             AgentRunOrigin
+  /// WARP-3299 — the assistant message whose tool call started the run, and
+  /// that call's id. Lets the chat card find its run.
+  originMessageId    String?
+  originToolCallId   String?
+  /// WARP-3299 — the short label the card shows, and what "done" means.
+  /// Backfilled from the goal's first line for runs that predate them.
+  title              String                   @default("")
+  deliverable        String                   @default("")
+  /// WARP-3299 — the bounded result written back to the chat (the full final
+  /// text stays in `result`). Written by the result-message work, WARP-3300.
+  summary            String?                  @db.VarChar(2000)
+  /// WARP-3299 — `[{kind, ref, title}]`: what the run created.
+  artifacts          Json                     @default("[]")
+  /// WARP-3299 — whether the result message reached the conversation.
+  /// `not_applicable` for runs no chat started.
+  resultDelivery     AgentRunResultDelivery   @default(not_applicable)
+  /// WARP-3300 — posts of the result message tried so far. The worker stops
+  /// retrying a `failed` delivery at 5 (RESULT_DELIVERY_MAX_ATTEMPTS).
+  resultDeliveryAttempts Int                  @default(0)
+  /// WARP-3301 — why a `queued` run is not being worked on: `queue` (behind
+  /// other runs, or not due yet) or `chat` (it yielded the one inference slot
+  /// to interactive chat on a gateway 429). Written at every transition back
+  /// to `queued`; meaningless in any other status, where the API reports
+  /// `waitingFor: "none"`.
+  queueWait          AgentRunQueueWait        @default(queue)
   goal               String
   model              String
   status             AgentRunStatus           @default(queued)
@@ -4404,6 +4524,31 @@ enum ExtensionSigner {
   release
 }
 
+/// WARP-3299 — who started a run.
+enum AgentRunOrigin {
+  workshop
+  schedule
+  chat
+}
+
+/// WARP-3299 — whether a chat-started run's result message reached its
+/// conversation. `not_applicable` for every run no chat started.
+enum AgentRunResultDelivery {
+  not_applicable
+  pending
+  delivered
+  failed
+  /// WARP-3300 — the conversation was deleted before the result could be
+  /// posted. Terminal, like `delivered`: there is nowhere left to post it.
+  conversation_gone
+}
+
+/// WARP-3301 — why a queued run waits. See `AgentRun.queueWait`.
+enum AgentRunQueueWait {
+  queue
+  chat
+}
+
 /// WARP-2997 — where a run's model runs, and whether its owner may use it.
 /// `unchecked` (never claimed yet), `local` (on the box; nothing withheld),
 /// `cloud_allowed` (cloud model, person permitted; stored-content tools
@@ -4588,6 +4733,10 @@ enum OffLanChannelKey {
   /// (Google / Apple / Mozilla) a PushSubscription row names. Read by
   /// `webPushGate` in dispatchToUser, the one dial site, on every call.
   web_push
+  /// WARP-3264 — "Look up places online": the calendar place field's
+  /// OpenStreetMap (Nominatim) lookup. Owner-only switch, default off;
+  /// read fail-closed by `placeLookupGate` in GET /api/calendar/places.
+  place_lookup
 }
 
 /// WARP-473 — Phase G1. File ↔ ChatMessage citations.
@@ -4659,6 +4808,39 @@ model FileTag {
   @@unique([ncFileId, label])
   @@index([ncFileId])
   @@index([addedByUserId])
+}
+
+/// Finder-tag-style palette for a folder's colour in the Files UI. "No colour"
+/// is not a member: clearing a colour deletes the `FileFolderColor` row (the
+/// row's existence IS the "this folder is coloured" fact, and `color` is its
+/// only state — there is no second column to disagree with it).
+enum FolderColor {
+  red
+  orange
+  yellow
+  green
+  blue
+  purple
+  gray
+}
+
+/// Per-user folder colour. Personal organisation, NOT shared metadata: user A
+/// colouring a folder is invisible to user B, so it is keyed on
+/// `(userId, ncFileId)`. `ncFileId` (oc:fileid) survives rename/move — the
+/// same identity FileTag / FileComment use — so no path bookkeeping happens on
+/// rename. `userId` is the LOCAL `User.id` UUID (`req.user.id`), never the
+/// Nextcloud username. Like FileTag, no FK to User: a file-metadata table
+/// keyed on Nextcloud identities, mirroring the shipped precedent.
+model FileFolderColor {
+  id        String      @id @default(uuid())
+  userId    String
+  ncFileId  Int
+  color     FolderColor
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  @@unique([userId, ncFileId])
+  @@index([userId])
 }
 
 /// WARP-468 — Phase E2. 60 s egress byte counter per off-LAN channel.
@@ -4746,6 +4928,15 @@ model Workspace {
   /// WARP-218 / ClaimCodeState precedent). False until the org step persists;
   /// the org step is NOT skippable.
   orgConfigured     Boolean       @default(false)
+  /// Owner setting, OFF by default: may owner/admin/family map their own
+  /// drive in Finder / File Explorer (POST /api/storage/network-drive/personal
+  /// mints a per-user Nextcloud app password)? EXPLICIT boolean, never derived
+  /// from the presence of DeviceClient rows or a role (CLAUDE.md no-guessing
+  /// rule; same discipline as `orgConfigured` above). Written only by the
+  /// owner-only PUT /api/settings/workspace/personal-drive; readable by any
+  /// signed-in user through GET /api/settings/workspace so the dialog can say
+  /// why the drive is unavailable. WARP-3318; see docs/network-drive.md.
+  personalDriveEnabled Boolean       @default(false)
   /// Whoever last flipped the type (Nextcloud username from the auth
   /// middleware). Nullable: setup wizard runs before any user exists.
   setBy             String?
@@ -8882,9 +9073,9 @@ model SecurityIngestState {
 // ── WARP-2977 P2b (ADR-059 §3.4, §3.6): areas, opening hours, the site mode ──
 //
 // Areas resolve against SecurityEvent at READ time — SecurityEvent gets no zoneId.
-// Values land with their first writer: departmentId when something reads it.
-// The `lock` source kind landed with the Matter lock adapter (P2b-2). WARP-2979
-// (P4) added the link states proposed/rejected, origin/stateSetBy, evidence and confidence.
+// Values land with their first writer: the `lock` source kind with the Matter
+// adapter (P2b-2); departmentId when something reads it. WARP-2979 (P4) added
+// the link states proposed/rejected, origin/stateSetBy, evidence and confidence.
 //
 // Every shape rule below that Prisma cannot express is a hand-written CHECK in
 // 20260924000100_warp_2977_security_zones_hours_mode (and, for WARP-2979's

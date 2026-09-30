@@ -122,8 +122,8 @@ export const EXPECTED_LENGTHS: ReadonlyArray<{ days: number; label: string }> = 
 /** The card owner/admin see: counts from the first mark, a percentage from day 30. */
 export const PRECISION_COPY = {
   title: "How often Droplet was right",
-  // No verdict control ships yet (the incident page, F1): the hint never points at one. F1 restores the "marks … Not expected" wording.
-  hint: "Once people can mark flagged incidents as expected or not, this shows how often each kind of flag was right, as a percentage after 30 days of marks.",
+  // WARP-2980 PR-C (F1): the incident page now asks "Was this expected?", so the hint points at it.
+  hint: "When someone marks a flagged incident Not expected, the flag was right. This shows how often each kind of flag was right, as a percentage after 30 days of marks.",
   none: "Nothing has been marked yet.",
   soFarOne: "1 mark so far",
   soFarMany: "{n} marks so far",

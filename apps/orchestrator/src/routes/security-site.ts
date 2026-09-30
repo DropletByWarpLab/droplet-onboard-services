@@ -37,7 +37,7 @@
  *     for (not reporting, never heard, or unknown). It never says "all
  *     locked" — a lock last heard locked is simply not named;
  *   · `locksChecked: false` and no names, when the adapter is not running,
- *     has not checked yet, or can't reach the smart-home service: every
+ *     has not checked yet, or can't reach the device-control service: every
  *     reading may be stale (review F4).
  * Read from the adapter's memory AFTER the commit, so it can never turn a
  * committed change into an error.
@@ -298,7 +298,7 @@ export function createSecuritySiteRouter(prisma: PrismaClient, deps: SecurityRou
    *
    * Review F4: the names are only as good as the adapter's word. With no
    * adapter, or readings that are not current (not running, nothing checked
-   * yet, the smart-home service unreachable), every reading may be stale:
+   * yet, the device-control service unreachable), every reading may be stale:
    * naming a lock "still unlocked" could be false, and an empty list would
    * read as "none open". The answer is then `locksChecked: false` with no
    * names — "nothing is reporting" never looks like "nothing is open".

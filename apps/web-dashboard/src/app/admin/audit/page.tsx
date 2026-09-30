@@ -46,6 +46,7 @@ import {
   type VerifyState,
 } from "@/components/audit/types";
 import { activityRowsToCsv } from "@/lib/audit-csv";
+import { RotateAuditKey } from "@/components/audit/RotateAuditKey";
 
 const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 300;
@@ -162,8 +163,17 @@ function AuditPageInner() {
     fetchUsers()
       .then(({ users }) => {
         if (!alive) return;
+        // WARP-3155 — `id` is the Nextcloud/login handle; `actorId` on an
+        // activity row is the canonical local user id (`actorFromRequest`,
+        // `services/activity.service.ts`), which is `userId` here. Keying
+        // on `id` meant the lookup always missed and every row rendered "by
+        // user 1a2b3c4d…" instead of the person's name.
         setUserNames(
-          new Map(users.map((u) => [u.id, u.displayName || u.username])),
+          new Map(
+            users
+              .filter((u): u is typeof u & { userId: string } => u.userId != null)
+              .map((u) => [u.userId, u.displayName || u.username]),
+          ),
         );
       })
       .catch(() => {
@@ -443,6 +453,9 @@ function AuditPageInner() {
       {verify.phase === "broken" && (
         <BrokenChainBanner brokenAtId={verify.brokenAtId} rowsChecked={verify.rowsChecked} />
       )}
+
+      {/* WARP-3180 — renders only for the owner (the route is owner-only). */}
+      <RotateAuditKey onRotated={() => void runVerify()} />
 
       <div className="toolbar">
         <select

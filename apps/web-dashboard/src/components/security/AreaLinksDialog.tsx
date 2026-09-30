@@ -273,14 +273,14 @@ export function AreaLinksDialog({
       <label htmlFor={id} style={{ fontSize: 13.5, color: "var(--text)", overflowWrap: "anywhere" }}>
         {label}
       </label>
-      {suggestedKeys.has(key) && (
-        <span className="badge muted" data-suggested={key}>
-          {COPY.suggested}
-        </span>
-      )}
       {hint && (
         <span id={`${id}-hint`} style={{ fontSize: 12.5, color: "var(--text-muted)", overflowWrap: "anywhere" }}>
           {hint}
+        </span>
+      )}
+      {suggestedKeys.has(key) && (
+        <span className="badge muted" data-suggested={key}>
+          {COPY.suggested}
         </span>
       )}
     </div>

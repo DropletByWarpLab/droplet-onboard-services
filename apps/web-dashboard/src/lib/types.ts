@@ -1,3 +1,5 @@
+import type { DashboardPage } from "@droplet/shared-types";
+
 import type { ScoreKind } from "./relevance";
 
 /**
@@ -85,6 +87,19 @@ export interface ChatMessage {
   reasoning?: string;
   /** WARP-844 — thumbs rating on an assistant turn (null/absent = unrated). */
   feedback?: "up" | "down" | null;
+  /**
+   * WARP-3303 — set on the message a background run posts into the chat that
+   * started it (persisted `kind: "agent_run_result"`, WARP-3300). Rendered as
+   * a result card; `content` still carries the plain-text version, which is
+   * what the model reads when the history is replayed.
+   */
+  runResult?: {
+    runId: string;
+    status: "succeeded" | "failed" | "cancelled";
+    title: string;
+    summary: string;
+    artifacts: { kind: string; ref: string; title: string }[];
+  };
   /**
    * WARP-904 — the model/provider this specific turn actually ran on.
    * Populated from the persisted row via `loadConversation`; absent on a
@@ -226,6 +241,10 @@ export interface ChatRequest {
    * entirely to get the role-default registry. The server distinguishes
    * `[]` from absent, so only send `[]` when zero tools is meant. */
   allowed_tools?: string[];
+  /** WARP-3116 — the pages this viewer can open (`assistantPages`), for the
+   *  assistant's find_dashboard_page / open_dashboard_page. Omitted = the
+   *  server withholds both tools. */
+  dashboardPages?: DashboardPage[];
 }
 
 export interface ModelInfo {
@@ -813,6 +832,26 @@ export interface BulkOperationResult {
 
 /** View mode for the file manager — list or grid */
 export type FileViewMode = "list" | "grid";
+
+/**
+ * Finder-tag-style folder colours. Mirrors the orchestrator's `FolderColor`
+ * enum; "no colour" is the absence of a row (clearing deletes it), so it is
+ * deliberately not a member here.
+ */
+export type FolderColor =
+  | "red"
+  | "orange"
+  | "yellow"
+  | "green"
+  | "blue"
+  | "purple"
+  | "gray";
+
+/** One coloured folder, keyed on the Nextcloud fileId a listing entry carries. */
+export interface FolderColorEntry {
+  ncFileId: number;
+  color: FolderColor;
+}
 
 // --- Phase 3: device clients + pairing ---
 
@@ -1442,6 +1481,19 @@ export interface AdminFilesUsageResponse {
   departments: AdminUsageDepartmentRow[];
 }
 
+/** WARP-3168: a link on company data, made by someone who is not owner/admin. */
+export interface CompanyPublicLink {
+  shareId: number;
+  /** OCS share type: 3 public link, 4 email link, 0/1 with the re-share bit, … */
+  shareType: number;
+  permissions: number;
+  library: string;
+  path: string;
+  createdBy: { userId: string | null; name: string; role: AccessTier | null };
+  createdAt: string;
+  expiresAt: string | null;
+}
+
 export interface InviteCreateResponse {
   token: string;
   url: string;
@@ -1455,7 +1507,7 @@ export interface InviteCreateResponse {
 // inferred. The backend routes (T3+) build in parallel — these shapes are
 // the fixed contract both sides code against.
 
-/** The full Role pgEnum (display label for `family` is "Staff", §0.1). */
+/** The full Role pgEnum (display label for `family` is "Member", `guest` is "External guest"). */
 export type AccessTier = "owner" | "admin" | "family" | "guest" | "service";
 
 /** Custom-role starting point — never owner/service (ADR-032 §2 CHECK). */
@@ -1565,7 +1617,7 @@ export interface AccessToolDomainsResponse {
     sources: string[];
     tools: number;
     populated: boolean;
-    /** Holds a tool classified read — reachable for Staff/Guest-based roles. */
+    /** Holds a tool classified read — reachable for Member/external-guest-based roles. */
     readable: boolean;
   }>;
 }
@@ -1735,7 +1787,7 @@ export interface InviteListItem {
    *  pgEnum, so this was NEVER the legacy `InviteRole` ("user" | "admin").
    *  The mistyping was load-bearing: the pending-invites row rendered
    *  `role === "admin" ? "admin" : "user"`, which is only exhaustive under
-   *  the wrong type, and it silently collapsed Staff, Guest and every
+   *  the wrong type, and it silently collapsed Member, External guest and every
    *  custom-role invite into the single word "user". Typed as the full
    *  tier enum, that ternary no longer type-checks as a complete mapping
    *  and the label has to be resolved properly. */
@@ -3200,6 +3252,14 @@ export const PENDING_COMPOSER_KEY = "droplet.pendingComposer";
 export const PENDING_PROMPT_KEY = "droplet.pendingPrompt";
 
 /**
+ * WARP-3062 — `sessionStorage[CHAT_DRAFT_KEY]` holds the /chat composer's
+ * unsent text, so it survives the composer unmounting (the assistant
+ * layout's switch to Overview and back). Cleared by sending, and on sign-out
+ * with the hand-offs above: it is the signed-in person's words.
+ */
+export const CHAT_DRAFT_KEY = "droplet.chatDraft";
+
+/**
  * WARP-460 + WARP-2582 — every kind of context that can be pinned to a chat
  * thread. Mirrors the orchestrator's `ContextPinKind` enum; the two are one
  * contract and change together.
@@ -3609,17 +3669,17 @@ export interface SecurityEvent {
    */
   zones: SecurityZoneRef[];
   /**
-   * WARP-2978 (ADR-059 P3 route 1) — the incident the engine grouped this row
-   * into, or null. A row the viewer can see implies its incident is visible
-   * to them. Absent from a box older than P3.
-   */
-  incident?: { id: string } | null;
-  /**
    * WARP-2977 P2b-2 — `live`: startedAt is when it happened. `polled`: when
    * Droplet's 60 s check found it (a door lock changed while the live stream
    * was down), so the time is not when it happened.
    */
   observed: "live" | "polled";
+  /**
+   * WARP-2978 (ADR-059 P3 route 1) — the incident the engine grouped this row
+   * into, or null. A row the viewer can see implies its incident is visible
+   * to them. Absent from a box older than P3.
+   */
+  incident?: { id: string } | null;
 }
 
 export interface SecurityEventsPage {
@@ -3633,9 +3693,10 @@ export interface SecurityEventsPage {
  * threat_mirror, site_mode, incidents, alerts, links, patterns, retention.
  * `locks` (WARP-2977 P2b-2) comes only to people with Devices view;
  * `threat_mirror` and `alerts` (WARP-2978) only to owners and admins.
- * `incidents` (WARP-2978) is the incident engine's row, `links` (WARP-2979)
- * Droplet's link-finding job's, `patterns` (WARP-2980) the baseline job's.
- * Mirrors the orchestrator's `SecurityHealthId`.
+ * `incidents` (WARP-2978) is the incident engine's row, every viewer's.
+ * `links` (WARP-2979) is Droplet's link-finding job's row, after `alerts`.
+ * `patterns` (WARP-2980) is the baseline job's row. Mirrors the
+ * orchestrator's `SecurityHealthId`.
  */
 export interface SecurityHealthRow {
   id:
@@ -4079,7 +4140,9 @@ export type SecurityErrorCode =
   // WARP-2979 P4 PR-2 (route 28): Summarise now / Regenerate.
   | "NARRATIVE_COOLDOWN"
   | "NARRATIVE_TOO_OLD"
-  | "SUMMARIES_OFF";
+  | "SUMMARIES_OFF"
+  // WARP-2980 (P5 PR-C) — route 35: nothing this viewer can mark, or a partial view (one body).
+  | "NOT_JUDGEABLE";
 
 /** The error envelope; `archivedZoneId` rides on ZONE_NAME_TAKEN when the name's holder is archived. */
 export interface SecurityApiErrorBody {
@@ -4399,15 +4462,55 @@ export interface IncidentNoticeView {
  */
 export type IncidentMemberView = Omit<SecurityEvent, "incident"> & { alsoIn: SecurityZoneRef[] };
 
+/** WARP-2980 (P5 PR-B route 18, PR-C) — Expected / Not expected, as the box keeps it. */
+export type IncidentVerdictState = "unreviewed" | "expected" | "not_expected";
+/** Route 35's body: an answer can change, never go back to unreviewed. */
+export type IncidentVerdict = Exclude<IncidentVerdictState, "unreviewed">;
+
+/**
+ * Route 18's verdict — sent only to a viewer who sees every camera and may
+ * read threats (null to anyone else: an answer about things they can't see).
+ */
+export interface IncidentVerdictView {
+  state: IncidentVerdictState;
+  /** Display-safe; null iff unreviewed. */
+  byName: string | null;
+  at: string | null;
+  /** The codes judged when it was marked. */
+  codes: SecurityReasonCode[];
+}
+
+/**
+ * One pattern flag on route 18 (WARP-2980 P5 PR-B): what Droplet would have
+ * flagged (`trial` — every pattern code is trial until P5 PR-D) or what
+ * expected activity kept quiet (`suppressed`). Neither counts: neither sets
+ * the incident's severity or state, and neither told anyone. The box sends
+ * flags only to owner/admin who see the flag's cameras.
+ */
+export interface IncidentPatternFlagView {
+  code: SecurityPatternCode;
+  effect: "trial" | "suppressed";
+  /** What it would carry if it counted. Never shown as the incident's severity. */
+  severity: SecuritySeverity;
+  key: { kind: "area" | "camera"; zoneId: string | null; camera: string | null };
+  evidence: { eventId: string; camera: string; label: string; at: string; summary: string };
+  /**
+   * The numbers behind it (safe integers and exact strings): every flag
+   * `{dayType, hour, windowFrom, windowTo, mode, zoneKind, rulesetVersion}`;
+   * out_of_place `{daysObserved, daysWithEvent, …}`; unusual_volume `{k,
+   * lambda, typicalPerHour, …}`; long_dwell `{durationSec, p99Sec, …}`.
+   */
+  detail: Record<string, string | number | null> | null;
+  /** effect = suppressed: the expected activity that kept it quiet, as it is NOW; else null. */
+  suppression: { id: string; reason: string; state: "active" | "removed" | "expired" } | null;
+}
+
 /**
  * GET /api/security/incidents/:id — 404 INCIDENT_NOT_FOUND for missing AND hidden alike.
  *
- * Deliberately NOT mirrored here: what P5 PR-B (WARP-2980) added to route 18
- * — `verdict`, `patternFlags` and `viewer.canGiveVerdict` — and route 35
- * (POST …/verdict, whose 409 is NOT_JUDGEABLE). The box sends them; this
- * page ignores them. P5 PR-C mirrors and renders them (the verdict bar, the
- * Trial chip, a flag quietened by expected activity), each with its own
- * viewer rule, so none of it is shown before that rule is.
+ * WARP-2980 (P5 PR-C) mirrors what P5 PR-B added — `verdict`, `patternFlags`
+ * and `viewer.canGiveVerdict` — and route 35 (POST …/verdict, 409
+ * NOT_JUDGEABLE), each rendered under its own viewer rule.
  */
 export interface IncidentDetail extends IncidentSummary {
   reasons: IncidentReasonView[];
@@ -4432,11 +4535,19 @@ export interface IncidentDetail extends IncidentSummary {
    * the cause.
    */
   actionable: boolean;
+  /** WARP-2980: null unless this viewer sees every camera and may read threats. */
+  verdict: IncidentVerdictView | null;
+  /** WARP-2980: the flags this viewer may see, in evidence order (owner/admin only, on the box). */
+  patternFlags: IncidentPatternFlagView[];
   /**
    * The viewer's Security level on the box, and whether they have acknowledged
    * or resolved this incident — kept in a partial view too (their own act).
+   * `canGiveVerdict` (WARP-2980): exactly when route 35 would accept an answer
+   * from them — owner/admin who see everything, at act or above, on a view
+   * that isn't partial, with something to judge. Independent of `actionable`:
+   * a trial-only incident has nothing to acknowledge and can still be judged.
    */
-  viewer: { level: "view" | "act" | "manage"; acknowledged: boolean };
+  viewer: { level: "view" | "act" | "manage"; acknowledged: boolean; canGiveVerdict: boolean };
   /**
    * WARP-2979 P4 PR-2 — "Summary by Droplet" (§6.11.3, DS-005): null unless this
    * viewer sees every camera and may read threats (owner/admin) AND can see
@@ -4446,6 +4557,31 @@ export interface IncidentDetail extends IncidentSummary {
    * Absent on a box before PR-2.
    */
   narrative?: IncidentNarrativeView | null;
+  /**
+   * WARP-3195 (P4 §6.7.1, §8) — the links only Droplet made that back this
+   * incident. An event matched through Droplet's links alone never alerts, so
+   * the page says "Droplet linked this camera. Keep the link to get alerts
+   * from it." with Keep (route 24, manage). Null unless this viewer is at
+   * manage, owner/admin, and sees every camera and may read threats — a rule
+   * that never reads the incident (DS-005, the R1 pin) — else the list, `[]`
+   * when there is none. Absent on a box before WARP-3195.
+   */
+  dropletLinks?: IncidentDropletLinkView[] | null;
+}
+
+/** WARP-3195 — one link only Droplet set, into the incident's area (route 18's `dropletLinks`). */
+export interface IncidentDropletLinkView {
+  /** Route 24's `:linkId`. */
+  linkId: string;
+  /** The area as it is now. */
+  zone: { id: string; name: string; kind: SecurityZoneKind };
+  sourceKind: SecurityZoneSourceKind;
+  /** camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`. */
+  sourceRef: string;
+  /** The Frigate camera the link points at. */
+  camera: string;
+  /** The camera's display name (live, else the link's snapshot) — never the part. */
+  label: string;
 }
 
 /** WARP-2979 P4 PR-2 — route 18's `narrative`, and route 28's 202 body. Written on the box only (DS-007). */
@@ -4460,7 +4596,8 @@ export interface IncidentNarrativeView {
 
 /** POST …/acknowledge and …/resolve → 200. `changed:false` = nothing new (already done). */
 export interface IncidentActionResult {
-  incident: IncidentDetail;
+  /** null when, after the write, this person can no longer see the incident (route 18 would answer 404). */
+  incident: IncidentDetail | null;
   changed: boolean;
 }
 

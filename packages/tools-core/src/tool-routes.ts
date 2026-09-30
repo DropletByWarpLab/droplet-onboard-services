@@ -505,10 +505,17 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "translate_text", client: "orchestrator", hops: [admit("post", "/api/llm/complete")] },
   { tool: "get_weather", client: "orchestrator", hops: [admit("get", "/api/web/weather")] },
   { tool: "currency_convert", client: "orchestrator", hops: [admit("get", "/api/web/rates")] },
+  // WARP-3074 — one hop per item; the route admits service principals only.
+  { tool: "classify_items", client: "orchestrator", hops: [admit("post", "/api/llm/decide")] },
+  // WARP-3116 — pure lookups over the page list carried on the call's _meta.
+  none("find_dashboard_page"),
+  none("open_dashboard_page"),
   // WARP-2180 — background runs. The route admits the mcp principal on
   // behalf of the named chat user (requireRoleOrMcpService).
   { tool: "start_agent_run", client: "orchestrator", hops: [admit("post", "/api/agent-runs")] },
-  { tool: "list_agent_runs", client: "orchestrator", hops: [admit("get", "/api/agent-runs")] },
+  // WARP-3302 — `run_id` reads one run; cancel stops one. Owner-scoped by the route guard.
+  { tool: "list_agent_runs", client: "orchestrator", hops: [admit("get", "/api/agent-runs"), admit("get", "/api/agent-runs/:id")] },
+  { tool: "cancel_agent_run", client: "orchestrator", hops: [admit("post", "/api/agent-runs/:id/cancel")] },
   // WARP-2894 — the ToolSpec router admits the mcp principal on exactly these
   // three routes and resolves the acting human from X-Nextcloud-User /
   // onBehalfOf (routes/tools.ts resolveActor); the other seven stay browser-only.
@@ -535,4 +542,6 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "security_get_incident", client: "orchestrator", hops: [admit("get", "/api/security/assistant/incidents/:id")] },
   { tool: "security_search_events", client: "orchestrator", hops: [admit("get", "/api/security/assistant/events")] },
   { tool: "security_zone_status", client: "orchestrator", hops: [admit("get", "/api/security/assistant/areas")] },
+  // WARP-2980 (ADR-059 P5 PR-E) — A5, the same router and the same two guards.
+  { tool: "security_explain_pattern", client: "orchestrator", hops: [admit("get", "/api/security/assistant/patterns")] },
 ];

@@ -39,8 +39,8 @@ export function householdGroupName(sharedFolderName: string): string {
  * Build the `groups[]` list passed to `ncCreateUser` for a given role.
  *
  * Role→group mapping: owner/admin → `droplet-admins` (WARP-2993 dropped NC's
- * built-in "admin"), guest → "guest", family → no role group; plus the
- * household group so the
+ * built-in "admin"), guest → "guest", family → no role group; plus, for
+ * every role but guest (WARP-3179), the household group so the
  * shared folder mounts for every household member. The household group is
  * appended without duplication.
  *
@@ -88,6 +88,10 @@ export function buildNcGroups(role: Role, householdGroup: string): string[] {
       : role === "guest"
         ? ["guest"]
         : [];
+  // WARP-3179: an external guest never joins the Workspace group — its write
+  // mask would union over the read-only one `guest` holds on the Workspace
+  // (department-reconciler workspaceMasks), matching the box's reader grant.
+  if (role === "guest") return roleGroups;
   return roleGroups.includes(householdGroup)
     ? roleGroups
     : [...roleGroups, householdGroup];

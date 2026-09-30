@@ -7,10 +7,10 @@ import { describe, it, expect, vi } from "vitest";
 import { config, resolveAgentIterLimits } from "../config.js";
 
 describe("shipped agent iteration defaults", () => {
-  it("resolve to 10/10 — the 2026-07-21 staging step-sweep outcome (findings-2026-07-21-tuning.md)", () => {
-    // Env-unset boot (this test env) must yield the measured winner, not the
-    // pre-tuning 5. A regression to 5 silently reverts the phase-2 result.
-    expect(config.agentMaxIter).toEqual({ defaultIter: 10, capIter: 10 });
+  it("resolve to 20/20 — WARP-3297 (raised from the 2026-07-21 sweep's 10/10)", () => {
+    // Env-unset boot (this test env) must yield the shipped defaults. A silent
+    // revert to 10 (or the pre-tuning 5) would undo a deliberate decision.
+    expect(config.agentMaxIter).toEqual({ defaultIter: 20, capIter: 20 });
   });
 });
 

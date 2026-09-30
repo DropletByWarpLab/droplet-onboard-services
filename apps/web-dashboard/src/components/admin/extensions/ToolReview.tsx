@@ -39,6 +39,7 @@ import { Badge, Card, Row, Sect } from "@/components/shell/primitives";
 import { useExtensionToolReview } from "@/lib/hooks/useExtensionToolReview";
 import { classificationLabel } from "@/lib/runtime-tools";
 import type { ExtensionListItem, ExtensionToolClassification, ExtensionToolDecision } from "@/lib/types";
+import { displayVersion } from "./copy";
 import { readArguments } from "./tool-arguments";
 import {
   ARGUMENT_NAME_WITHHELD,
@@ -179,7 +180,7 @@ export function ToolReview({ extension, canReview }: { extension: ExtensionListI
   };
 
   // `<id>@<version>`, the source format the inspector and /tools use.
-  const title = extension.version ? `${extension.id}@${extension.version.version}` : extension.id;
+  const title = extension.version ? `${extension.id}@${displayVersion(extension.version.version)}` : extension.id;
 
   return (
     <Card icon={<Puzzle size={15} />} title={<span style={MONO}>{title}</span>}>

@@ -208,6 +208,18 @@ export function createServer(
       meta.workspaceId.length > 0
         ? meta.workspaceId
         : undefined;
+    // WARP-3299 — the chat turn (conversation, assistant message, tool
+    // call) this dispatch belongs to. Same posture: an HTTP client cannot
+    // attach a run it starts to someone else's conversation.
+    const metaString = (key: string): string | undefined =>
+      trustedPrincipal && meta && typeof meta[key] === "string" && (meta[key] as string).length > 0
+        ? (meta[key] as string)
+        : undefined;
+    const metaTurn = {
+      conversationId: metaString("conversationId"),
+      messageId: metaString("messageId"),
+      toolCallId: metaString("toolCallId"),
+    };
     const metaEnhancement =
       trustedPrincipal &&
       meta &&
@@ -215,6 +227,14 @@ export function createServer(
       meta._enhancement !== null &&
       !Array.isArray(meta._enhancement)
         ? (meta._enhancement as PrivateEnhancement)
+        : undefined;
+    // WARP-3116 — the pages the calling dashboard can open. Same trusted-
+    // stdio posture: over HTTP a client could hand the navigation tools a
+    // list of its own choosing. Passed through as-is; the handlers parse it
+    // with the shared schema before it becomes a navigation target.
+    const metaDashboardPages =
+      trustedPrincipal && meta && Array.isArray(meta.dashboardPages)
+        ? (meta.dashboardPages as unknown[])
         : undefined;
     const ctx = buildContext(
       deps,
@@ -226,6 +246,8 @@ export function createServer(
       metaUserRole,
       metaAgentRunId,
       metaWorkspaceId,
+      metaTurn,
+      metaDashboardPages,
     );
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
 

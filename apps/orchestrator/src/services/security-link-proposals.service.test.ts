@@ -475,6 +475,54 @@ describe("the anchors", () => {
   });
 });
 
+// WARP-2977 P2b-2 x WARP-2979 P4 PR-1: door locks are not Droplet's to link. PR-1 scores the camera arm only; the
+// lock arm is P4 PR-4's to design. A person's lock link sits in the area like any other row and nothing more.
+describe("door-lock links are not Droplet's (P4 scores cameras only)", () => {
+  const LOCK = "matter:4660/1";
+  const lockLink = (over: Partial<Link> = {}) => link("z-stock", LOCK, { sourceKind: "lock", sourceLabel: "Back door lock", ...over });
+
+  it("a person's lock link is never an anchor: an area made only of a lock scores nothing and reads no events", async () => {
+    const w = world({ links: [lockLink()] });
+    const before = structuredClone(w.links);
+    const { prisma } = await runOn(w);
+    expect(prisma.securityEvent.findMany).not.toHaveBeenCalled();
+    expect(prisma.securityZoneLink.createMany).not.toHaveBeenCalled();
+    expect(w.links).toEqual(before);
+    expect(w.log.filter((l) => l.startsWith("create:") || l.startsWith("update:"))).toEqual([]);
+  });
+
+  it("beside a camera anchor, the lock link is left exactly as it is and only cameras are ever created", async () => {
+    const w = world();
+    w.links.push(lockLink());
+    const lockBefore = structuredClone(rowOf(w, LOCK));
+    await runOn(w);
+    expect(rowOf(w, "cam_b")).toMatchObject({ state: "active", origin: "droplet", sourceKind: "camera" });
+    expect(rowOf(w, LOCK)).toEqual(lockBefore);
+    expect(w.links.filter((l) => l.origin === "droplet").map((l) => l.sourceKind)).toEqual(["camera"]);
+    expect(w.log.some((l) => l.includes(LOCK))).toBe(false);
+  });
+
+  it("a lock link still counts toward the area's 32 active links (the cap is per area, whatever the kind)", async () => {
+    const w = world();
+    w.links.push(lockLink());
+    for (let i = 0; i < 30; i += 1) w.links.push(link("z-stock", `filler_${i}`)); // cam_a + lock + 30 = 32 active
+    await runOn(w);
+    expect(rowOf(w, "cam_b")).toMatchObject({ state: "proposed" });
+  });
+
+  it("a lock row on the feed (camera NULL) is not a sighting: it feeds no co-occurrence", async () => {
+    const w = world();
+    w.links.push(lockLink());
+    w.events.push({ kind: "lock_state", camera: null, labels: [], cameraZones: [], startedAt: new Date(FROM + 2 * H), endedAt: null });
+    const { summary } = await runOn(w);
+    const clean = world();
+    clean.links.push(lockLink());
+    const { summary: baseline } = await runOn(clean);
+    expect(summary.scored).toBe(baseline.scored);
+    expect(w.links.map((l) => `${l.sourceRef}:${l.state}`)).toEqual(clean.links.map((l) => `${l.sourceRef}:${l.state}`));
+  });
+});
+
 describe("the caps", () => {
   /** Area z-stock anchored on cam_a; cameras c01…cNN each see someone after most of cam_a's visits. */
   function many(n: number): World {

@@ -81,9 +81,10 @@ import type { SecurityHealthRow } from "./security-events.service.js";
 import type { EffectiveAccessResolver } from "../middleware/feature-gate.js";
 import {
   buildZoneIndex,
+  isLockLinkRef,
   loadActiveLinks,
   matchAreasForEvent,
-  parseCameraLinkRef,
+  parseLinkRef,
   zonesForEvent,
   type ActiveZoneLink,
   type ZoneIndex,
@@ -581,7 +582,10 @@ export async function triageOne(
         });
         if (kept.length > 0) await tx.securityIncidentReason.createMany({ data: reasonRows(created.id, kept), skipDuplicates: true });
         await ledger("grouped", created.id);
-        return { result: "opened", grouped: { incidentId: created.id, key: decision.key, zoneKind: area?.zoneKind ?? null, mode } };
+        return {
+          result: "opened",
+          grouped: { incidentId: created.id, key: decision.key, zoneKind: area?.zoneKind ?? null, mode, personLinked: area?.personLinked ?? false },
+        };
       }
 
       const i = plan.incident;
@@ -606,7 +610,10 @@ export async function triageOne(
       if (kept.length > 0) await tx.securityIncidentReason.createMany({ data: reasonRows(i.id, kept), skipDuplicates: true });
       await ledger("grouped", i.id);
       // decision.key is the incident's (the candidate query); its mode is the event's (fitsIncident).
-      return { result: "joined", grouped: { incidentId: i.id, key: decision.key, zoneKind: i.zoneKind, mode: i.openedInMode } };
+      return {
+        result: "joined",
+        grouped: { incidentId: i.id, key: decision.key, zoneKind: i.zoneKind, mode: i.openedInMode, personLinked: decision.area?.personLinked ?? false },
+      };
     }
     throw new IncidentConflictError(
       decision.outcome === "group" ? `${decision.key.scope}:${decision.key.zoneId ?? decision.key.scopeCamera ?? "site"}` : "?",
@@ -717,16 +724,21 @@ async function activityReason(
   if (event.kind !== "camera_offline" || event.camera === null) return null;
   // Review #2418: offline long enough and closed/away at the drop, BEFORE any sighting is read.
   if (!dropCountsForActivity(event, onlines, now, ctx.timeline)) return null;
+  // A door-lock link has no camera: it puts no one "in" an area for this rule (D21).
+  const cameraOfLink = (l: Pick<ActiveZoneLink, "sourceKind" | "sourceRef">): string | undefined => {
+    const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
+    return parsed && !isLockLinkRef(parsed) ? parsed.camera : undefined;
+  };
   const personAreas = new Map<string, string>();
   for (const l of ctx.links) {
-    if (l.setBy === "person" && parseCameraLinkRef(l.sourceKind, l.sourceRef)?.camera === event.camera) personAreas.set(l.zoneId, l.zoneName);
+    if (l.setBy === "person" && cameraOfLink(l) === event.camera) personAreas.set(l.zoneId, l.zoneName);
   }
   if (personAreas.size === 0) return null;
   const cameras = [
     ...new Set(
       ctx.links
         .filter((l) => l.setBy === "person" && personAreas.has(l.zoneId))
-        .map((l) => parseCameraLinkRef(l.sourceKind, l.sourceRef)?.camera)
+        .map(cameraOfLink)
         .filter((c): c is string => c !== undefined),
     ),
   ].sort();

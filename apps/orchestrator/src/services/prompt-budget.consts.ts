@@ -44,13 +44,19 @@ export const INTERVIEW_PROMPT_MAX_CHARS = 900;
  *  the real render stays under this. */
 export const TOOL_GUIDANCE_MAX_CHARS = 2200;
 
+/** WARP-3281 — ceiling for the chat prompt's date line (`todayLine`) plus
+ *  its "\n\n" separator. Never dropped (it rides in the identity fold).
+ *  The longest real render (Wednesday, a 32-char IANA zone) is ~120 chars;
+ *  150 also covers a 64-char `Workspace.tz`, the column's own cap. */
+export const DATE_LINE_MAX_CHARS = 150;
+
 /**
  * CI-tested ceiling on the worst-case sum of every FIXED system-prompt
  * block (identity + persona + business + tool guidance + memory facts +
- * interview). Not a runtime gate — the estimator is — but a canary so a
+ * interview + date line). Not a runtime gate — the estimator is — but a canary so a
  * future block-copy or budget edit that would blow the sum fails in CI.
- * The nominal worst case is 4000 + 1200 + 1500 + 2200 + 2000 + 900 =
- * 11800, leaving 400 chars of slack. (2026-07-23: tool guidance became a
+ * The nominal worst case is 4000 + 1200 + 1500 + 2200 + 2000 + 900 + 150 =
+ * 11950, leaving 250 chars of slack. (2026-07-23: tool guidance became a
  * counted, capped block; the window headroom it consumed was reclaimed by
  * scoping four config-heavy tools out of default chat — see
  * chat-tool-scope.ts.)
