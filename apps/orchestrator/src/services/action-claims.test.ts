@@ -124,6 +124,8 @@ describe("detectActionClaims — not claims", () => {
     "I’m ready to delete `/Records/rec-123.pdf`, but I need your approval first.",
     "Deleting **/Records/rec-123.pdf** requires your confirmation.",
     "Please approve the creation in the UI.",
+    // B0 seed-016: the approval qualifies the whole sentence
+    "I’ve saved the fact that our project codename is Atlas, pending your approval.",
     // questions
     "Have I sent it already?",
     "Should I delete the file?",

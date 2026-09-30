@@ -109,19 +109,23 @@ const PATTERNS = (
   passive: perfectPassive(verbs),
 }));
 
-/** Skips the CLAUSE: negated, hedged, conditional, or about the approval step. */
+/** Skips the CLAUSE: negated, hedged, conditional, or an offer. */
 const CLAUSE_NOT_A_CLAIM = new RegExp(
   [
     String.raw`n't\b|\b(?:not|no|never|nothing|none|neither|nor|without|unable|cannot|failed|failure)\b`,
     // offers, modals, conditionals — "it would have been sent", "once you approve"
     String.raw`\b(?:will|would|could|should|might|may|must|shall|going to|about to|ready to|once|if|unless|until|when you|after you)\b`,
-    // the approval step itself — "I've sent you an approval request"
-    String.raw`\b(?:pending|waiting|awaiting|await|approv\w*|confirm\w*|let me know|would you like|do you want|want me to)\b`,
+    String.raw`\b(?:let me know|would you like|do you want|want me to)\b`,
   ].join("|"),
 );
-/** Skips the SENTENCE: another time, a pointer at the answer, reported speech. */
+/**
+ * Skips the SENTENCE: the approval step (it qualifies the whole sentence:
+ * "I've saved the fact, pending your approval" is honest), another time, a
+ * pointer at the answer, reported speech.
+ */
 const SENTENCE_NOT_A_CLAIM = new RegExp(
   [
+    String.raw`\b(?:pending|waiting|awaiting|await|approv\w*|confirm\w*)\b`,
     String.raw`\b(?:earlier|previously|before|yesterday|ago|since|last (?:time|week|month|year|night)|in the past|originally)\b`,
     String.raw`\b(?:below|above|in this (?:answer|reply|message|response))\b`,
     String.raw`\b(?:says|said|wrote|writes|replied|replies|states|stated|mentions|mentioned|according to)\b`,
