@@ -16,16 +16,9 @@ describe("createMcpStepDispatcher", () => {
     expect(callTool).toHaveBeenCalledWith("t", {}, undefined);
   });
 
-  it("parses a JSON result, keeps non-JSON as raw, and returns null for an empty one", async () => {
-    const callTool = vi
-      .fn()
-      .mockResolvedValueOnce(ok('{"n":1}'))
-      .mockResolvedValueOnce(ok("plain"))
-      .mockResolvedValueOnce(ok());
-    const d = createMcpStepDispatcher({ callTool });
-    expect(await d.call("t", {})).toEqual({ n: 1 });
-    expect(await d.call("t", {})).toEqual({ raw: "plain" });
-    expect(await d.call("t", {})).toBeNull();
+  it("returns the parsed result (stepResultValue owns the parsing rules, pinned in llm-agent.malformed-tool-output.test.ts)", async () => {
+    const callTool = vi.fn().mockResolvedValue(ok('{"n":1}'));
+    expect(await createMcpStepDispatcher({ callTool }).call("t", {})).toEqual({ n: 1 });
   });
 
   it("throws the tool's own message when the tool, or a gate in front of it, reports an error", async () => {

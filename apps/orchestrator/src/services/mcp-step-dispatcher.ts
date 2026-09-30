@@ -12,25 +12,12 @@
  * reach it, instead of inline in the boot file.
  */
 import type { McpClientPort } from "./mcp-client.port.js";
-import type { StepDispatcher } from "./tool-spec-runner.service.js";
+import { stepResultValue, type StepDispatcher } from "./tool-spec-runner.service.js";
 
 export function createMcpStepDispatcher(mcp: Pick<McpClientPort, "callTool">): StepDispatcher {
   return {
     async call(tool, args, context) {
-      const result = await mcp.callTool(tool, args, context);
-      if (result.isError) {
-        const detail = result.content?.[0]?.text ?? "tool reported error";
-        throw new Error(typeof detail === "string" ? detail : String(detail));
-      }
-      const text = result.content?.[0]?.text;
-      if (typeof text === "string" && text.length > 0) {
-        try {
-          return JSON.parse(text);
-        } catch {
-          return { raw: text };
-        }
-      }
-      return null;
+      return stepResultValue(tool, await mcp.callTool(tool, args, context));
     },
   };
 }

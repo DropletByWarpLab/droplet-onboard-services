@@ -18,7 +18,7 @@ import type { MorningBriefing, PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
 import { cacheDel, cacheGet, cacheSet } from "../services/cache.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
-import { resolveBoxTimezone } from "../services/scene-schedule-tz-backfill.service.js";
+import { localDayInZone } from "../services/scene-schedule-tz-backfill.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("briefings");
@@ -39,7 +39,7 @@ export async function invalidateBriefingCache(userId: string, forDate: string): 
 
 /**
  * The box-local calendar day as `YYYY-MM-DD`: `Workspace.tz` → the box's
- * resolved zone → UTC. Stand-in until WARP-2252 exports its helper.
+ * resolved zone → UTC, via the shared `localDayInZone` (WARP-3281).
  */
 export async function briefingToday(prisma: PrismaClient, now = new Date()): Promise<string> {
   let tz: string | null = null;
@@ -49,21 +49,7 @@ export async function briefingToday(prisma: PrismaClient, now = new Date()): Pro
   } catch {
     // fall through to the box zone
   }
-  for (const zone of [tz, resolveBoxTimezone(), "UTC"]) {
-    if (!zone) continue;
-    try {
-      // en-CA formats as YYYY-MM-DD.
-      return new Intl.DateTimeFormat("en-CA", {
-        timeZone: zone,
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      }).format(now);
-    } catch {
-      // unknown zone string in Workspace.tz — try the next one
-    }
-  }
-  return now.toISOString().slice(0, 10);
+  return localDayInZone(now, tz).date;
 }
 
 /** `@db.Date` round-trips as UTC midnight. */

@@ -277,15 +277,16 @@ describe("/api/llm/chat — module gating and stage's navigation withholding bot
   });
 
   it("the budget estimate's guidance carries both too: an oversized pool never shows in the sized prompt", async () => {
-    // The estimate composes guidance with `(names, "", undefined, navigationWithheld)`;
+    // The estimate composes guidance with `(names, "", "", dateLine, navigationWithheld)`
+    // (WARP-3281 added `dateLine` ahead of the navigation set);
     // a source pin, in the style of tool-selection.parity.test.ts, because the
     // estimate's inputs are not observable through the mocked agent loop.
     const src = readPackageFile("src", "routes/llm.ts");
     expect(src).toMatch(
-      /buildBaseSystemPrompt\(\s*namesForGuidance\(allowedForUser, moduleVerdict\),\s*"",\s*undefined,\s*navigationWithheld,?\s*\)/,
+      /buildBaseSystemPrompt\(\s*namesForGuidance\(allowedForUser, moduleVerdict\),\s*"",\s*"",\s*dateLine,\s*navigationWithheld,?\s*\)/,
     );
     expect(src).toMatch(
-      /buildBaseSystemPrompt\(\s*namesForGuidance\(allowedForUser, moduleVerdict\),\s*degraded\.personaBlock,\s*degraded\.businessBlock,\s*navigationWithheld,?\s*\)/,
+      /buildBaseSystemPrompt\(\s*namesForGuidance\(allowedForUser, moduleVerdict\),\s*degraded\.personaBlock,\s*degraded\.businessBlock,\s*dateLine,\s*navigationWithheld,?\s*\)/,
     );
   });
 });

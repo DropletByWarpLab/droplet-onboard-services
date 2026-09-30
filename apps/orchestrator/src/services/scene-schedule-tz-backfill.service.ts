@@ -94,6 +94,35 @@ export function resolveBoxTimezone(): string | null {
 }
 
 /**
+ * WARP-3281 — the local calendar day at `now`: `tz` (the caller passes
+ * `Workspace.tz`) → the box zone → UTC. An unknown zone string falls through
+ * instead of throwing. `zone` is the zone that actually rendered the day.
+ * Shared by the chat prompt's date line and `briefingToday`.
+ */
+export function localDayInZone(
+  now: Date,
+  tz?: string | null,
+): { date: string; weekday: string; zone: string } {
+  for (const zone of [tz, resolveBoxTimezone(), "UTC"]) {
+    if (!zone) continue;
+    try {
+      // en-CA formats as YYYY-MM-DD.
+      const date = new Intl.DateTimeFormat("en-CA", {
+        timeZone: zone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(now);
+      const weekday = new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "long" }).format(now);
+      return { date, weekday, zone };
+    } catch {
+      // An unknown zone string: try the next one.
+    }
+  }
+  return { date: now.toISOString().slice(0, 10), weekday: "", zone: "UTC" };
+}
+
+/**
  * Rewrite the BYHOUR / BYMINUTE params of an RRULE body to `hour` / `minute`,
  * leaving FREQ / BYDAY / INTERVAL / BYSECOND and ordering otherwise intact.
  * Params present are replaced in place; BYHOUR/BYMINUTE absent are appended

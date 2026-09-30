@@ -25,21 +25,21 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
 const inputSchema = {
   type: "object",
   properties: {
-    goal: {
-      type: "string",
-      description:
-        "What to accomplish, in plain language. The run works on it unattended, with the same tools you have, and reports back when done.",
+    title: { type: "string", description: "Label, <60 chars." },
+    goal: { type: "string", description: "What to do, in plain words." },
+    deliverable: { type: "string", description: "The expected result." },
+    constraints: { type: "string", description: "Limits to respect." },
+    refs: {
+      type: "array",
+      items: { type: "string" },
+      description: "Files or ids to start from.",
     },
     max_iter: {
       type: "integer",
       minimum: 1,
-      description: "Optional step budget for the run.",
+      description: "Step budget.",
     },
-    workspace: {
-      type: "string",
-      description:
-        "Optional. The id of a Workshop workspace to work in. The run then builds an extension there — reading, editing, testing and finally proposing it for review — instead of doing ordinary work.",
-    },
+    workspace: { type: "string", description: "Workshop workspace id: build an extension there." },
   },
   required: ["goal"],
   additionalProperties: false,
@@ -61,7 +61,30 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   if (!ctx.userId) {
     return fail("NO_PRINCIPAL", "This tool needs to know who it acts for, and does not.");
   }
-  const body: Record<string, unknown> = { goal, onBehalfOf: ctx.userId };
+  // WARP-3299 — constraints and references ride in the goal text: the run
+  // reads its goal as its brief, and they bound what it works on.
+  const constraints = typeof args.constraints === "string" ? args.constraints.trim() : "";
+  const refs = Array.isArray(args.refs)
+    ? args.refs.filter((r): r is string => typeof r === "string" && r.trim().length > 0).map((r) => r.trim())
+    : [];
+  const brief = [
+    goal,
+    ...(constraints ? [`Constraints: ${constraints}`] : []),
+    ...(refs.length ? [`Start from: ${refs.join(", ")}`] : []),
+  ].join("\n\n").slice(0, 4000);
+  const body: Record<string, unknown> = { goal: brief, onBehalfOf: ctx.userId };
+  const title = typeof args.title === "string" ? args.title.trim().slice(0, 120) : "";
+  if (title) body.title = title;
+  const deliverable = typeof args.deliverable === "string" ? args.deliverable.trim().slice(0, 1000) : "";
+  if (deliverable) body.deliverable = deliverable;
+  // WARP-3299 — link the run to the chat turn that started it. From the
+  // server-set context only (`_meta`, stdio-trusted), never from arguments.
+  if (ctx.conversationId) {
+    body.origin = "chat";
+    body.sessionId = ctx.conversationId;
+    if (ctx.messageId) body.originMessageId = ctx.messageId;
+    if (ctx.toolCallId) body.originToolCallId = ctx.toolCallId;
+  }
   if (typeof args.max_iter === "number" && Number.isInteger(args.max_iter) && args.max_iter > 0) {
     body.maxIter = args.max_iter;
   }
@@ -79,18 +102,28 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     headers: { Accept: "application/json" },
   });
   if (res.status === 403) return fail("FORBIDDEN", "Your role cannot start background runs.");
+  if (res.status === 429) {
+    const err = (await res.json().catch(() => null)) as { error?: string } | null;
+    return fail("AGENT_RUN_CAP", err?.error ?? "You have too many background runs going. Wait for one to finish.");
+  }
   if (res.status === 404 && workspace) return fail("NOT_FOUND", `No workspace "${workspace}" on this box.`);
   if (res.status === 409 && workspace) {
     const err = (await res.json().catch(() => null)) as { error?: string } | null;
     return fail("WORKSPACE_BUSY", err?.error ?? `Workspace "${workspace}" cannot take a run right now.`);
   }
   if (!res.ok) return fail("AGENT_RUN_START_FAILED", `orchestrator returned ${res.status}`);
-  const data = (await res.json()) as { id: string; status: string; workspaceId?: string | null };
+  const data = (await res.json()) as {
+    id: string;
+    status: string;
+    workspaceId?: string | null;
+    queuePosition?: number;
+  };
   return {
     ok: true,
     data: {
       runId: data.id,
       status: data.status,
+      ...(typeof data.queuePosition === "number" ? { queuePosition: data.queuePosition } : {}),
       ...(data.workspaceId ? { workspace: data.workspaceId } : {}),
       message: data.workspaceId
         ? "Started in the Workshop. You will be notified when it proposes its extension, or if it needs your approval for an action."
@@ -102,7 +135,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const startAgentRun: Tool = {
   name: "start_agent_run",
   description:
-    "Start a background run: Droplet works on a multi-step task unattended (minutes, not seconds) and notifies you when it finishes or needs your approval for an action. Use for jobs too long for one reply — sweeping files, reviewing many items. Needs your confirmation to start.",
+    "Run a multi-step task unattended (minutes); the result posts in this chat. For jobs too long for one reply, e.g. sweeping files. Call it directly; the person approves on a card, never in text.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,
