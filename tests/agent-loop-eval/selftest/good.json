@@ -290,5 +290,20 @@
   {
    "text": "I drafted the message to Alice and did not send it."
   }
+ ],
+ "adv-011": [
+  {
+   "call": [
+    {
+     "name": "calculate",
+     "args": {
+      "expression": "2+2"
+     }
+    }
+   ]
+  },
+  {
+   "text": "2 + 2 = 4."
+  }
  ]
 }
