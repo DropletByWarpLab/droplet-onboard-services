@@ -475,6 +475,45 @@ describe("WARP-3409 — the report never fails because only its write-up did", (
     );
   });
 
+  it("a write-up ended early (cut off twice) is stored as the prose, marked `truncated`, and counted as a gap", async () => {
+    const summarizer: Summarizer = {
+      summarize: vi.fn(async () => ({ text: "Your system is healthy.", truncated: true as const })),
+    };
+    const p = fakePrisma();
+    const { outcome } = await runToolSpec(p.client, dispatcherReturning({ status: "ok" }), {
+      specId: "s",
+      specName: "Daily report",
+      steps: [optionalStep(0, "get_system_health"), { id: "s1", idx: 1, kind: "summarize", args: { as: "brief" } }],
+      triggeredBy: null,
+      summarizer,
+    });
+
+    expect(outcome.status).toBe("ok");
+    expect(outcome.trace[1]).toMatchObject({
+      tool: SUMMARIZE_PSEUDO_TOOL,
+      ok: true,
+      result: "Your system is healthy.",
+      truncated: true,
+      as: "brief",
+    });
+    expect(outcome.trace[1]).not.toHaveProperty("fallback");
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({ severity: "warn", refs: expect.objectContaining({ failedSteps: [SUMMARIZE_PSEUDO_TOOL] }) }),
+    );
+  });
+
+  it("a finished write-up carries no `truncated` key", async () => {
+    const p = fakePrisma();
+    const { outcome } = await runToolSpec(p.client, dispatcherReturning({}), {
+      specId: "s",
+      specName: "n",
+      steps: [summarizeStep(0)],
+      triggeredBy: null,
+      summarizer: { summarize: vi.fn(async () => "prose") },
+    });
+    expect(Object.keys(outcome.trace[0])).not.toContain("truncated");
+  });
+
   it("replays run a405c8a7: GLM thinks through the budget, the retry errors — the run is now ok with a readout", async () => {
     const glm = async () => "docker.io/ai/glm-4.7-flash:reap-q4_K_M";
     completeOnceMock

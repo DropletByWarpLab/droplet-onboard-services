@@ -14,7 +14,7 @@
 import { TOOL_CATALOG, type ToolDomain } from "@droplet/tools-core";
 import { completeOnce } from "./llm-complete.service.js";
 import { OFF_LAN_WITHHELD_DOMAINS } from "./stored-content-egress.service.js";
-import type { RunStepTrace, Summarizer } from "./tool-spec-runner.service.js";
+import type { RunStepTrace, Summarizer, SummaryOutput } from "./tool-spec-runner.service.js";
 import { createLogger } from "../lib/logger.js";
 import { GATEWAY_MAX_TOKENS } from "../types/index.js";
 
@@ -137,16 +137,20 @@ function humanizeFigure(key: string, value: unknown): unknown {
   return fmt && typeof value === "number" && Number.isFinite(value) && value >= 0 ? fmt(value) : value;
 }
 
+/** A source the owner never set up — not news, so no fact at all. */
+function isNotConnected(t: RunStepTrace): boolean {
+  if (t.ok) return false;
+  const { code } = parseToolError(t.error);
+  return code !== undefined && NOT_CONNECTED_CODES.has(code);
+}
+
 function renderFact(t: RunStepTrace): string {
   if (!t.ok) {
     // Failures are facts too, and the ones most worth saying out loud. A
     // narrative that silently omits the step that failed is exactly the
-    // dishonesty this surface is built against. The two markers are the
-    // prompt's vocabulary: NOT CONNECTED is left out, COULD NOT BE READ is
-    // said plainly.
-    const { code, message } = parseToolError(t.error);
-    if (code && NOT_CONNECTED_CODES.has(code)) return `- ${t.tool}: NOT CONNECTED`;
-    return `- ${t.tool}: COULD NOT BE READ (${message})`;
+    // dishonesty this surface is built against. COULD NOT BE READ is the
+    // prompt's vocabulary for it.
+    return `- ${t.tool}: COULD NOT BE READ (${parseToolError(t.error).message})`;
   }
   let body: string;
   try {
@@ -161,14 +165,20 @@ function renderFact(t: RunStepTrace): string {
   return `- ${t.tool}: ${body}`;
 }
 
-/** The facts block handed to the model, one line per step, in run order. */
+/**
+ * The facts block handed to the model, one line per step, in run order.
+ * WARP-3409 — a NOT CONNECTED source is dropped here, in code: marked and
+ * left to the prompt, a model with thinking off wrote it up as "could not be
+ * read" anyway.
+ */
 export function renderFacts(facts: RunStepTrace[]): string {
-  if (facts.length === 0) {
+  const shown = facts.filter((t) => !isNotConnected(t));
+  if (shown.length === 0) {
     // An honest empty rather than a blank prompt: without this the model is
     // free to invent a day from nothing.
     return "(no results were gathered)";
   }
-  return facts.map(renderFact).join("\n");
+  return shown.map(renderFact).join("\n");
 }
 
 /**
@@ -255,6 +265,17 @@ const READOUTS: ReadonlyMap<string, Readout> = new Map(
   }),
 );
 
+/**
+ * WARP-3409 — `text` up to its last complete sentence, or "" when it has none.
+ * A terminator counts only when whitespace follows it: the text was cut off,
+ * so a final "8." may be the start of "8.8" rather than the end of a sentence.
+ */
+export function toLastSentence(text: string): string {
+  let end = -1;
+  for (const m of text.matchAll(/[.!?]["'\u201d\u2019)\]]*(?=\s)/g)) end = m.index + m[0].length;
+  return end < 0 ? "" : text.slice(0, end);
+}
+
 /** Why the model's write-up is missing, completing "...because ___". */
 function plainReason(err: unknown): string {
   if (err instanceof SummaryUnavailableError) return err.plain;
@@ -276,10 +297,7 @@ export function fallbackSummary(facts: RunStepTrace[], err: unknown): string {
     if (t.tool.startsWith("(")) return [];
     const readout = READOUTS.get(t.tool);
     const label = readout?.label ?? t.tool;
-    if (!t.ok) {
-      const { code } = parseToolError(t.error);
-      return code && NOT_CONNECTED_CODES.has(code) ? [] : [`${label}: couldn't be read.`];
-    }
+    if (!t.ok) return isNotConnected(t) ? [] : [`${label}: couldn't be read.`];
     return [`${label}: ${readout?.read(t.result) ?? "checked"}.`];
   });
   if (lines.length === 0) lines.push("Nothing was gathered to report on.");
@@ -298,8 +316,6 @@ export const SUMMARY_SYSTEM = [
   "  carry a number over from general knowledge.",
   "- If a source is marked COULD NOT BE READ, say so plainly in one clause.",
   "  Do not omit it and do not guess what it would have said.",
-  "- If a source is marked NOT CONNECTED, leave it out entirely. Something",
-  "  the owner never connected is not news.",
   "- Write prose. No bullet points, no headings, no markdown.",
   "- Second person, plain language, no exclamation marks.",
   "- If there is nothing of note, say that briefly rather than padding.",
@@ -339,7 +355,7 @@ export function createToolSpecSummarizer(
   resolveLocalModel: () => Promise<string | null> = async () => null,
 ): Summarizer {
   return {
-    async summarize(prompt: string, facts: RunStepTrace[]): Promise<string> {
+    async summarize(prompt: string, facts: RunStepTrace[]): Promise<SummaryOutput> {
       const local = factsNeedLocalModel(facts);
       const model = local ? await resolveLocalModel() : await resolveModel();
       if (!model) {
@@ -379,23 +395,41 @@ export function createToolSpecSummarizer(
 
       let result = await ask(MAX_TOKENS);
       let content = result.content.trim();
-      if (!content) {
+      // WARP-3409 — the longest write-up that ran out of room mid-sentence. A
+      // cut-off answer is not a finished one: it is retried like a blank.
+      let cutOff = "";
+      if (!content || result.finishReason === "length") {
         // WARP-2964 — one retry, because the cause is nearly always the
         // budget: the model thought until it was cut off. Double the room,
         // up to the gateway's ceiling (WARP-3409: 2 × 2,100 was a 422). A
-        // non-blank first answer never gets here, so the daily cost is still
+        // finished first answer never gets here, so the daily cost is still
         // one call.
         logger.warn(
           {
             model,
             factCount: facts.length,
             finishReason: result.finishReason,
+            contentChars: content.length,
             reasoningChars: result.reasoning.length,
           },
-          "summarizer returned empty content; retrying with a doubled budget",
+          "summarizer returned empty or cut-off content; retrying with a doubled budget",
         );
+        cutOff = content;
         result = await ask(Math.min(MAX_TOKENS * 2, GATEWAY_MAX_TOKENS));
         content = result.content.trim();
+        if (content && result.finishReason === "length") {
+          if (content.length > cutOff.length) cutOff = content;
+          content = "";
+        }
+      }
+      if (!content && cutOff) {
+        // Cut off twice: keep what was written, ended at its last complete
+        // sentence so no fragment reaches the owner, and say so in the step.
+        const whole = toLastSentence(cutOff);
+        if (whole) {
+          logger.warn({ model, keptChars: whole.length, cutChars: cutOff.length }, "summary cut off twice; kept up to its last complete sentence");
+          return { text: whole, truncated: true };
+        }
       }
       if (!content) {
         // `completeOnce` treats empty content as a non-error. Here it is one:
@@ -405,12 +439,14 @@ export function createToolSpecSummarizer(
         // WHY, because this string is what the trace's `fallbackReason` and
         // the log keep for the next debugger.
         throw new SummaryUnavailableError(
-          `the model returned an empty summary (model=${model} ` +
+          `the model returned ${cutOff ? "no complete sentence" : "an empty summary"} (model=${model} ` +
             `finish_reason=${result.finishReason ?? "unknown"} ` +
             `reasoning_chars=${result.reasoning.length})`,
-          result.finishReason === "length"
-            ? "the AI model ran out of room before it wrote anything"
-            : "the AI model returned no text",
+          cutOff
+            ? "the AI model ran out of room before it finished a sentence"
+            : result.finishReason === "length"
+              ? "the AI model ran out of room before it wrote anything"
+              : "the AI model returned no text",
         );
       }
       return content;

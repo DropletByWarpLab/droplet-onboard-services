@@ -17,6 +17,7 @@ import {
   createToolSpecSummarizer,
   fallbackSummary,
   renderFacts,
+  toLastSentence,
 } from "../services/tool-spec-summarizer.service.js";
 import type { RunStepTrace } from "../services/tool-spec-runner.service.js";
 import { GATEWAY_MAX_TOKENS } from "../types/index.js";
@@ -70,16 +71,23 @@ describe("renderFacts", () => {
   const toolError = (code: string, message: string) =>
     JSON.stringify({ status: "error", error: { code, message } });
 
-  it("maps a not-connected error CODE to NOT CONNECTED mechanically — never left to the model", () => {
+  it("DROPS a not-connected source from the facts, in code — never left to the model", () => {
     // ERP_NOT_CONNECTED means the owner never set the source up: not news.
     // AUTH_REQUIRED is a per-user source with nobody to read it for (a
-    // scheduled run). Both leave the report; the prompt says so in the
-    // same words.
-    expect(renderFacts([failed("erp_get_ar_summary", toolError("ERP_NOT_CONNECTED", "ERP not connected yet"))])).toBe(
-      "- erp_get_ar_summary: NOT CONNECTED",
-    );
-    expect(renderFacts([failed("list_events", toolError("AUTH_REQUIRED", "auth_required"))])).toBe(
-      "- list_events: NOT CONNECTED",
+    // scheduled run). WARP-3409: marked and left to the prompt, a model with
+    // thinking off wrote the ERP up as "could not be read" anyway.
+    const out = renderFacts([
+      ok("get_system_health", { status: "ok" }),
+      failed("erp_get_ar_summary", toolError("ERP_NOT_CONNECTED", "ERP not connected yet")),
+      failed("list_events", toolError("AUTH_REQUIRED", "auth_required")),
+    ]);
+    expect(out).toBe('- get_system_health: {"status":"ok"}');
+    expect(out).not.toMatch(/erp_get_ar_summary|list_events|NOT CONNECTED/);
+  });
+
+  it("says nothing was gathered when every source was not connected", () => {
+    expect(renderFacts([failed("erp_get_ar_summary", toolError("ERP_NOT_CONNECTED", "no"))])).toBe(
+      "(no results were gathered)",
     );
   });
 
@@ -316,6 +324,61 @@ describe("createToolSpecSummarizer", () => {
       /empty summary \(model=.* finish_reason=length reasoning_chars=2518\)/,
     );
     expect(completeOnceMock).toHaveBeenCalledTimes(2);
+  });
+
+  // WARP-3409 — a write-up cut off mid-sentence (finish_reason=length with
+  // text) is not finished; replaying the failed run, gpt-oss at default effort
+  // returned 658 chars ending "…display " once in three.
+  const cut = (content: string) => ({ content, model: "m", reasoning: "", finishReason: "length" });
+  const done = (content: string) => ({ content, model: "m", reasoning: "", finishReason: "stop" });
+
+  it("RETRIES a cut-off answer like a blank one, and takes the retry when it finishes", async () => {
+    completeOnceMock.mockResolvedValueOnce(cut("All is well. The latency for each component is low: display ")).mockResolvedValueOnce(done("All is well."));
+    const s = createToolSpecSummarizer(activeModel);
+    await expect(s.summarize("Write it up.", [ok("t", 1)])).resolves.toBe("All is well.");
+    expect(completeOnceMock.mock.calls.map(([a]) => [a.maxTokens, a.reasoningEffort])).toEqual([
+      [2100, "low"],
+      [GATEWAY_MAX_TOKENS, "low"],
+    ]);
+  });
+
+  it("cut off twice: keeps the LONGER text up to its last complete sentence and marks it truncated", async () => {
+    completeOnceMock
+      .mockResolvedValueOnce(cut("Your system is healthy. Uptime is 4 h 40 min. CPU is at 8.8 %. Stor"))
+      .mockResolvedValueOnce(cut("Your system is healthy. Uptime is 4 h 40 min. CPU is at 8."));
+    const s = createToolSpecSummarizer(activeModel);
+    // The first is longer, so it is kept; its dangling "Stor" goes, and the
+    // "8.8" inside it is not mistaken for a sentence end.
+    await expect(s.summarize("Write it up.", [ok("t", 1)])).resolves.toEqual({
+      text: "Your system is healthy. Uptime is 4 h 40 min. CPU is at 8.8 %.",
+      truncated: true,
+    });
+  });
+
+  it("cut off, then a blank retry: the cut-off text is kept, ended cleanly", async () => {
+    completeOnceMock.mockResolvedValueOnce(cut("Nine files landed. Two more are")).mockResolvedValueOnce(done(""));
+    const s = createToolSpecSummarizer(activeModel);
+    await expect(s.summarize("Write it up.", [ok("t", 1)])).resolves.toEqual({ text: "Nine files landed.", truncated: true });
+  });
+
+  it("cut off with no complete sentence at all: throws, and the fallback says why in plain words", async () => {
+    completeOnceMock.mockResolvedValueOnce(cut("Your system has been running for")).mockResolvedValueOnce(cut("Your system"));
+    const s = createToolSpecSummarizer(activeModel);
+    const err = await s.summarize("Write it up.", [ok("t", 1)]).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(String(err)).toMatch(/no complete sentence \(model=m finish_reason=length/);
+    expect(s.fallback!([], err).split("\n").pop()).toBe(
+      "The written summary couldn't be produced because the AI model ran out of room before it finished a sentence.",
+    );
+  });
+
+  it("toLastSentence: a terminator counts only with whitespace after it", () => {
+    expect(toLastSentence("One. Two! Three? Fou")).toBe("One. Two! Three?");
+    expect(toLastSentence("He said “fine.” Then")).toBe("He said “fine.”");
+    expect(toLastSentence("Storage is 663.7 GB and CPU 8.")).toBe("");
+    expect(toLastSentence("No sentence ends here")).toBe("");
   });
 
   it("sends the facts and the spec's prompt to the model", async () => {
