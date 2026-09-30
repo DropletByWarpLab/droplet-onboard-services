@@ -4,7 +4,7 @@
  * `BASE_PROMPT_MAX_CHARS = 12200` bounds the worst-case sum of EVERY fixed
  * system-prompt block: identity (4000) + persona (1200) + business (1500)
  * + tool guidance (2200) + memory facts (2000) + interview conductor (900)
- * = 11800, leaving 400 chars of slack. (2026-07-23: tool guidance became a
+ * + date line (150, WARP-3281) = 11950, leaving 250 chars of slack. (2026-07-23: tool guidance became a
  * counted, capped block — previously ~600 uncounted chars riding inside
  * the identity fold.) This canary fails in CI if a future budget edit
  * pushes the sum over the ceiling.
@@ -32,6 +32,7 @@ import {
   INTERVIEW_PROMPT_MAX_CHARS,
   TOOL_GUIDANCE_MAX_CHARS,
   BASE_PROMPT_MAX_CHARS,
+  DATE_LINE_MAX_CHARS,
   OUTPUT_RESERVE,
 } from "./prompt-budget.consts.js";
 import {
@@ -165,8 +166,8 @@ function chatToolSizes(): { name: string; chars: number }[] {
  * WARP-1891 — per-tool ceiling on a single serialized `tools[]` entry.
  *
  * Derivation: the effective window is DEFAULT_CONTEXT_WINDOW - OUTPUT_RESERVE
- * = 15360 tokens = 61440 chars, of which the fixed blocks take 11800, leaving
- * ~49.6K chars for the whole ~70-tool chat advertisement. 2000 chars is ~4% of
+ * = 15360 tokens = 61440 chars, of which the fixed blocks take 11950, leaving
+ * ~49.5K chars for the whole ~70-tool chat advertisement. 2000 chars is ~4% of
  * that budget in ONE tool — past that a tool is pathological, not merely rich.
  *
  * This exists because the aggregate assertion below is FILE-scoped: when the
@@ -261,11 +262,13 @@ describe("worst-case fixed system-block budget", () => {
       BUSINESS_CONTEXT_MAX_CHARS +
       TOOL_GUIDANCE_MAX_CHARS +
       MEMORY_FACTS_CHAR_BUDGET +
-      INTERVIEW_PROMPT_MAX_CHARS;
-    // 4000 + 1200 + 1500 + 2200 + 2000 + 900 = 11800. (2026-07-23: tool
+      INTERVIEW_PROMPT_MAX_CHARS +
+      DATE_LINE_MAX_CHARS;
+    // 4000 + 1200 + 1500 + 2200 + 2000 + 900 + 150 = 11950 (WARP-3281 added
+    // the date line). (2026-07-23: tool
     // guidance became a counted, capped block — it was previously ~600
     // uncounted chars riding inside the identity fold.)
-    expect(fixedBlockChars).toBe(11800);
+    expect(fixedBlockChars).toBe(11950);
     expect(fixedBlockChars).toBeLessThanOrEqual(BASE_PROMPT_MAX_CHARS);
   });
 
@@ -434,6 +437,14 @@ describe("worst-case fixed system-block budget", () => {
     // that carries no dashboard page list (voice, phones, background runs), so
     // on those turns they cost nothing at all.
     //
+    // WARP-3299 did not move it either. The chat-background-runs stack
+    // (WARP-3299/3300/3302: `cancel_agent_run` plus richer `start_agent_run`
+    // / `list_agent_runs` schemas) took the registry to 115,230 over 160 once
+    // merged with stage. Only that stack's own new prose was cut, keeping
+    // every directive (result posts to chat, approve on a card, never poll):
+    // 114,996 over 160, which leaves 4 chars. The next tool crosses this line,
+    // so its author makes the written call.
+    //
     // ⚠ The CHAT-pool assertion above used to be the fragile one, sitting at
     // 59,941 of a flat 60,000 — 59 chars of headroom, so the next tool added
     // to chat scope tripped it. WARP-2547 resolved that: it is now a function
@@ -461,7 +472,19 @@ describe("worst-case fixed system-block budget", () => {
         },
       })),
     );
-    expect(fullRegistryJson.length).toBeLessThan(115000);
+    //
+    // WARP-3074 crossed it (109,421 → 110,309 with `classify_items`, 888
+    // chars after trimming its prose; the tool needs a two-part schema, so
+    // it cannot fit in the 579 that were left). Raised by 2K, not re-based:
+    // the reasoning in point 1 above still holds (MCP-facing surface, no
+    // window), the per-domain worst case above stays green, and ~1.7K
+    // leaves roughly two average tools before the next author decides again.
+    //
+    // Carried onto stage's 115,000 line at the merge (2026-09-29): stage had
+    // since raised the line for the Security domain and sat 4 chars under it,
+    // so the same tool crosses it again by the same margin. This applies that
+    // same written decision to the new base (+2K), not a new re-baseline.
+    expect(fullRegistryJson.length).toBeLessThan(117000);
   });
 
   /**

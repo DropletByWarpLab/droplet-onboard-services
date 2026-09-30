@@ -95,6 +95,7 @@ import {
   resolveTurnSideModel,
 } from "../services/active-model.service.js";
 import { recordAccessDenied, requireRole } from "../middleware/auth.js";
+import { DecisionModelClient, decideRequestSchema } from "../services/decision-model.client.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
 import {
   decideCloudTurn,
@@ -113,6 +114,7 @@ import { actorFromRequest } from "../services/activity.service.js";
 import {
   buildBaseSystemPrompt,
   buildMemoryFactsBlock,
+  todayLine,
 } from "../services/system-prompt.service.js";
 import { getPersona, composePersonaBlock } from "../services/persona.service.js";
 import {
@@ -130,6 +132,10 @@ import {
   resolveTurnContextWindow,
   type RequestSizeParts,
 } from "../services/context-budget.service.js";
+import {
+  ACTIVE_AGENT_RUN_STATUSES,
+  cancelAgentRun,
+} from "../services/agent-run-worker.service.js";
 
 /** WARP-456: severity bucket the dashboard renders for the activity feed. */
 function activitySeverityForTurnStatus(
@@ -448,6 +454,9 @@ const completeRequestSchema = z
     max_tokens: z.number().int().min(1).max(4096).optional(),
   })
   .strict();
+
+/** WARP-3074 — built on first `POST /llm/decide`, like the other gRPC clients. */
+let decisionModel: DecisionModelClient | null = null;
 
 const CONVERSATION_ID_HEADER = "X-Conversation-Id";
 /** WARP-329: assistant row id, set alongside X-Conversation-Id on the same
@@ -1518,6 +1527,19 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         }
       }
 
+      // WARP-3299 — the persisted turn, so a tool can link what it starts
+      // (a background run) back to this conversation. Server-side only: the
+      // model never supplies these, and a turn that was not persisted
+      // (ephemeral, service caller) simply carries none.
+      const turnToolCallContext: McpCallContext | undefined =
+        toolCallContext && conversationId
+          ? {
+              ...toolCallContext,
+              conversationId,
+              ...(assistantMessageId ? { messageId: assistantMessageId } : {}),
+            }
+          : toolCallContext;
+
       // WARP-437 follow-up — production-wire EnhancementDeps behind a
       // feature flag. `createEnhancementDeps` returns `undefined` unless
       // `QUERY_ENHANCEMENT_ENABLED=1`, in which case the agent loop's
@@ -2121,10 +2143,13 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // composeBusinessBlock role-filters and gates on type again
         // (defense-in-depth). Fail-open to no block on any error.
         let businessBlock = "";
+        // WARP-3281 — the business's zone for the date line, off the same row.
+        let workspaceTz: string | null = null;
         try {
           const workspace = await prisma.workspace.findUnique({
             where: { id: 1 },
           });
+          workspaceTz = workspace?.tz ?? null;
           const workspaceType = (workspace?.type ?? "BUSINESS") as WorkspaceTypeName;
           if (workspaceType === "BUSINESS") {
             businessBlock = composeBusinessBlock(
@@ -2152,10 +2177,21 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         // are never-dropped fixed blocks.
         // WARP-2972 — guidance must not name a tool the pool no longer holds;
         // `undefined` ("every tool") stops being true once a module is off.
+        //
+        // WARP-3281 — today's date, computed once so the size estimate and the
+        // wire carry the same line. Voice gets none: voice-io appends its own
+        // "Right now it is …" clock (services/voice-io/voice/llm.py), and two
+        // clocks from two zone sources could disagree near midnight. On an
+        // off-LAN turn the Workspace.tz label stays on the box (WARP-2746's
+        // class: workspace configuration); the day alone goes.
+        const dateLine = isVoice
+          ? ""
+          : todayLine(new Date(), workspaceTz, { withZone: !isOffLanTurn });
         const identityAndGuidance = buildBaseSystemPrompt(
           namesForGuidance(allowedForUser, moduleVerdict),
           "",
-          undefined,
+          "",
+          dateLine,
           navigationWithheld,
         );
         // WARP-1121 (§9.3/§10) — the interview conductor block. Appended
@@ -2358,6 +2394,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
               namesForGuidance(allowedForUser, moduleVerdict),
               degraded.personaBlock,
               degraded.businessBlock,
+              dateLine,
               navigationWithheld,
             ) +
             memoryBlock +
@@ -2545,7 +2582,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             // WARP-2972 — the module axis, applied to the pool alongside the scope.
             moduleVerdict,
             tool_choice: chatReq.tool_choice,
-            toolCallContext,
+            toolCallContext: turnToolCallContext,
             captureReasoning: chatReq.captureReasoning,
             citationContext,
             // WARP-329 — cancel inference + halt the loop on disconnect.
@@ -2649,7 +2686,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           // WARP-2972 — the module axis, applied to the pool alongside the scope.
           moduleVerdict,
           tool_choice: chatReq.tool_choice,
-          toolCallContext,
+          toolCallContext: turnToolCallContext,
           captureReasoning: chatReq.captureReasoning,
           citationContext,
         });
@@ -2796,6 +2833,22 @@ export function createLlmRouter(prisma: PrismaClient): Router {
     },
   );
 
+  // WARP-3074 — the `classify_items` tool's only way to Kev: orchestrator →
+  // DecisionModelClient → ai-gateway `Decide`. Nothing calls the sidecar's
+  // port directly. Service principals only (the mcp-server is the caller):
+  // no dashboard surface needs it, and per-person access is the MCP tool
+  // RBAC's job.
+  router.post("/llm/decide", requireRole("service"), async (req, res) => {
+    const parsed = decideRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+    decisionModel ??= new DecisionModelClient({ url: config.AI_GATEWAY_GRPC_URL });
+    // `decide` never throws: an absent sidecar is `{status:"unavailable"}`.
+    res.json(await decisionModel.decide(parsed.data));
+  });
+
   // ── WARP-304: per-user conversation history ──
   // The dashboard reads `/api/llm/conversations/:id` on mount when a
   // `?c=<id>` URL hash is present, to rehydrate the thread. Listing is
@@ -2881,6 +2934,35 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         wasInterviewSession = profile?.interviewChatId === req.params.id;
       } catch {
         /* not an interview delete as far as we can tell */
+      }
+      // WARP-3299 — a background run this chat started is still working.
+      // Deleting the chat must not strand it silently: without an explicit
+      // `cancelRuns`, answer 409 with the live runs so the client can ask;
+      // `cancelRuns=true` stops them first, `cancelRuns=false` keeps them.
+      const ownerId = (req as AuthedRequest).user?.id;
+      const cancelRuns = req.query.cancelRuns;
+      if (ownerId) {
+        // Fail-open, like the interview probe above: a lookup error must
+        // never block deleting a chat.
+        const liveRuns = await prisma.agentRun
+          .findMany({
+            where: {
+              sessionId: req.params.id,
+              userId: ownerId,
+              status: { in: [...ACTIVE_AGENT_RUN_STATUSES] },
+            },
+            select: { id: true, title: true, status: true },
+          })
+          .catch(() => []);
+        if (liveRuns.length > 0) {
+          if (cancelRuns !== "true" && cancelRuns !== "false") {
+            res.status(409).json({ error: "conversation_has_live_runs", runs: liveRuns });
+            return;
+          }
+          if (cancelRuns === "true") {
+            for (const run of liveRuns) await cancelAgentRun(prisma, run.id);
+          }
+        }
       }
       const deleted = await persistence.deleteConversationForUser(
         req.params.id,

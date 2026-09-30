@@ -272,6 +272,18 @@ export function createServer(
       meta.workspaceId.length > 0
         ? meta.workspaceId
         : undefined;
+    // WARP-3299 — the chat turn (conversation, assistant message, tool
+    // call) this dispatch belongs to. Same posture: an HTTP client cannot
+    // attach a run it starts to someone else's conversation.
+    const metaString = (key: string): string | undefined =>
+      trustedPrincipal && meta && typeof meta[key] === "string" && (meta[key] as string).length > 0
+        ? (meta[key] as string)
+        : undefined;
+    const metaTurn = {
+      conversationId: metaString("conversationId"),
+      messageId: metaString("messageId"),
+      toolCallId: metaString("toolCallId"),
+    };
     const metaEnhancement =
       trustedPrincipal &&
       meta &&
@@ -298,6 +310,7 @@ export function createServer(
       metaUserRole,
       metaAgentRunId,
       metaWorkspaceId,
+      metaTurn,
       metaDashboardPages,
     );
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;

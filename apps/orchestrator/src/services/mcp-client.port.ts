@@ -92,6 +92,17 @@ export interface McpCallContext {
    */
   workspaceId?: string;
   /**
+   * WARP-3299 — the chat turn this dispatch belongs to: the conversation
+   * (`ChatSession.id`), the assistant message being written, and the
+   * model's tool call id. Set by the SERVER (routes/llm.ts and the agent
+   * loop), never from tool arguments, so `start_agent_run` can link the run
+   * it starts back to the chat that started it. Stdio-trusted, like
+   * `agentRunId`; the mcp-server drops them on HTTP.
+   */
+  conversationId?: string;
+  messageId?: string;
+  toolCallId?: string;
+  /**
    * WARP-3116 — the pages the calling dashboard can open, validated by the
    * chat route. Read by `find_dashboard_page` / `open_dashboard_page`;
    * stdio-trusted, and never a grant — the dashboard's own route guards and

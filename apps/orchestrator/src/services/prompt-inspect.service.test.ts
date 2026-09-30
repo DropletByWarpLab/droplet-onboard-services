@@ -262,6 +262,21 @@ describe("🔴 the assembled prompt is the real string, in the real order", () =
     expect(r.assembled).toContain("PERSONA");
   });
 
+  it("WARP-3281: shows the date line as its own block, zone withheld off-LAN like the turn", async () => {
+    const ws = (prisma as unknown as { workspace: { findUnique: ReturnType<typeof vi.fn> } }).workspace;
+    const aucklandRow = { id: 1, type: "BUSINESS", tz: "Pacific/Auckland" };
+    ws.findUnique.mockResolvedValueOnce(aucklandRow).mockResolvedValueOnce(aucklandRow);
+    const onLan = await inspectPromptForPerson(prisma, { targetUserId: "u1" });
+    expect(blockOf(onLan, "date").status).toBe("present");
+    expect(blockOf(onLan, "date").neverDropped).toBe(true);
+    expect(blockOf(onLan, "date").text).toMatch(/^Today is \w+ \d{4}-\d{2}-\d{2} \(Pacific\/Auckland\)/);
+    expect(onLan.assembled).toContain(blockOf(onLan, "date").text!);
+
+    const offLan = await inspectPromptForPerson(prisma, { targetUserId: "u1", offLan: true });
+    expect(blockOf(offLan, "date").text).toMatch(/^Today is \w+ \d{4}-\d{2}-\d{2}\.$/);
+    expect(offLan.assembled).not.toContain("Pacific/Auckland");
+  });
+
   it("passes the caller's allowed tool names to the guidance composer, verbatim", async () => {
     // WARP-642: guidance must never name a tool the person cannot call.
     // `undefined` is the builder's own encoding for "privileged, every tool"

@@ -154,6 +154,8 @@ const EXPECTED_TOOL_NAMES = [
   // WARP-1436 — ambient web data via screened egress (both Tier-1)
   "get_weather",
   "currency_convert",
+  // WARP-3074 — bulk labelling via the Kev decision model (Tier-1)
+  "classify_items",
   // WARP-3116 — dashboard navigation (both Tier-1; pure lookups)
   "find_dashboard_page",
   "open_dashboard_page",
@@ -206,6 +208,8 @@ const EXPECTED_TOOL_NAMES = [
   // list is Tier-1. Both in the chat pool: a run is startable from chat.
   "start_agent_run",
   "list_agent_runs",
+  // WARP-3302 — stop one run (write, no prompt). Checking one run is list_agent_runs({run_id}).
+  "cancel_agent_run",
   // routines (WARP-2894, ADR-056 §5.1) — draft is Write-tier with NO
   // confirmation (a draft is inert), list is Tier-1, run is Tier-2.
   "routine_draft",
@@ -261,6 +265,9 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("start_agent_run")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("list_agent_runs")?.requiresWrite).toBe(false);
     expect(TOOLS.get("list_agent_runs")?.requiresConfirmation).toBe(false);
+    // WARP-3302 — stopping a run only stops work: a write with no prompt.
+    expect(TOOLS.get("cancel_agent_run")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("cancel_agent_run")?.requiresConfirmation).toBe(false);
     // WARP-2894 — a draft is inert (POST /api/tools cannot set status), so
     // drafting is a write that needs no confirmation; a person promotes it
     // on /routines. Running a LIVE routine is real tool calls: Tier-2.
@@ -368,6 +375,10 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("translate_text")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("summarize_file")?.requiresWrite).toBe(false);
     expect(TOOLS.get("summarize_file")?.requiresConfirmation).toBe(false);
+    // WARP-3074 — classify_items only labels; acting on a label is a
+    // separate tool call on the normal write-confirmation path.
+    expect(TOOLS.get("classify_items")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("classify_items")?.requiresConfirmation).toBe(false);
     // WARP-1436 — ambient web-data tools are Tier-1 (read-only; egress is
     // gated + audited server-side, not a state write).
     expect(TOOLS.get("get_weather")?.requiresWrite).toBe(false);

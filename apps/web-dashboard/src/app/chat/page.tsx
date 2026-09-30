@@ -20,6 +20,7 @@ import { ModelSelector } from "@/components/ModelSelector";
 import { SessionHeader } from "@/components/chat/SessionHeader";
 import { ChatHistoryPanel, type ChatHistoryPanelHandle } from "@/components/chat/ChatHistoryPanel";
 import { ContextPinsPopover } from "@/components/chat/ContextPinsPopover";
+import { CloudModelsPill } from "@/components/chat/CloudModelsPill";
 import { ChatFileRail } from "@/components/chat/ChatFileRail";
 import { MemoryPanel } from "@/components/chat/MemoryPanel";
 import {
@@ -1328,7 +1329,13 @@ export default function ChatPage() {
           // composer instead of up in the header where a long thread
           // scrolls it out of reach. A cloud model names its provider on the
           // picker itself (WARP-3043); there is no separate tag.
-          modelSelector={<ModelSelector value={selectedModel} onChange={handleModelChange} />}
+          modelSelector={
+            <>
+              <ModelSelector value={selectedModel} onChange={handleModelChange} />
+              {/* WARP-3161 — chat text may leave the Droplet. */}
+              <CloudModelsPill />
+            </>
+          }
           // WARP-3043 — the empty chat's suggestions render inside the
           // composer, under the pill (one scrolling row above it on phones).
           suggestions={
