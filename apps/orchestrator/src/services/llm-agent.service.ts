@@ -3646,8 +3646,10 @@ async function settleActionClaims(p: {
         {
           model: req.model,
           // WARP-3285 — a `user` turn: gpt-oss drops later system messages.
+          // WARP-3338 — and folded like the loop's own requests, or the pins,
+          // attachments and chat instructions are lost on this call.
           messages: [
-            ...p.messages,
+            ...foldSystemMessages(p.messages).messages,
             { role: "assistant", content: p.answer },
             { role: "user", content: claimCorrectionPrompt(first, p.isRun) },
           ],
