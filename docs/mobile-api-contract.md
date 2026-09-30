@@ -22,9 +22,10 @@ the pairing / sign-in flow, and receives real-time events over
 `/api/ws/events` (see "Real-time events"). Since WARP-3038 the box sets no
 cookies on a body-token sign-in or refresh; before it, the box also set the
 httpOnly session pair on those responses. A client keeps only the body tokens
-and must not store any cookie the box sets, whichever version it talks to. The
-passkey and native SSO sign-in flows are not part of this contract yet (ADR-063,
-WARP-3226).
+and must not store any cookie the box sets, whichever version it talks to. Native
+SSO sign-in is described under "SSO for native clients" (ADR-063, WARP-3226;
+WARP-3212). The passkey sign-in flow is not part of this contract yet (ADR-063,
+WARP-3226; it arrives with WARP-238).
 
 > **Source of truth (XR-03).** Where this doc and the shipped orchestrator routes
 > disagree, **`apps/orchestrator/src/routes/*` wins** — a cross-repo audit while
@@ -142,7 +143,7 @@ The box stays the OIDC client: the identity provider still redirects to the
 box's own `/api/sso/oidc/callback`, and the redirect URI registered at the
 provider does not change (ADR-016). List the providers first with
 `GET /api/sso/oidc/providers` → `{ providers: ["google" | "entra" | "okta", …] }`.
-Design and rationale: ADR-063 (Proposed).
+Design and rationale: ADR-063.
 
 1. The app makes a PKCE pair: `codeVerifier` (43–128 chars of
    `A-Z a-z 0-9 - . _ ~`) and `codeChallenge = BASE64URL(SHA256(codeVerifier))`
