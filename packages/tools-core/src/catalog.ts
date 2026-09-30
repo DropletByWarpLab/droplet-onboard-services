@@ -324,6 +324,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "translate_text",
     "get_weather",
     "currency_convert",
+    "classify_items",
     // WARP-3116 — `data` rather than a new domain: every role template
     // already grants it, and a new domain would need a grant in each one
     // before anyone below owner could ask to be taken to a page.
@@ -529,6 +530,8 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Data (ambient web data — WARP-1436)
   get_weather: "Check the weather and forecast for any place",
   currency_convert: "Convert money between currencies using daily rates",
+  // Data (bulk labelling — WARP-3074)
+  classify_items: "Sort a batch of items into categories, with how sure it is about each",
   // Data (dashboard navigation — WARP-3116)
   find_dashboard_page: "Find where a screen or setting lives and link to it",
   open_dashboard_page: "Take you to a page of the dashboard",

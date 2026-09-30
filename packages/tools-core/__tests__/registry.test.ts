@@ -154,6 +154,8 @@ const EXPECTED_TOOL_NAMES = [
   // WARP-1436 — ambient web data via screened egress (both Tier-1)
   "get_weather",
   "currency_convert",
+  // WARP-3074 — bulk labelling via the Kev decision model (Tier-1)
+  "classify_items",
   // WARP-3116 — dashboard navigation (both Tier-1; pure lookups)
   "find_dashboard_page",
   "open_dashboard_page",
@@ -373,6 +375,10 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("translate_text")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("summarize_file")?.requiresWrite).toBe(false);
     expect(TOOLS.get("summarize_file")?.requiresConfirmation).toBe(false);
+    // WARP-3074 — classify_items only labels; acting on a label is a
+    // separate tool call on the normal write-confirmation path.
+    expect(TOOLS.get("classify_items")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("classify_items")?.requiresConfirmation).toBe(false);
     // WARP-1436 — ambient web-data tools are Tier-1 (read-only; egress is
     // gated + audited server-side, not a state write).
     expect(TOOLS.get("get_weather")?.requiresWrite).toBe(false);

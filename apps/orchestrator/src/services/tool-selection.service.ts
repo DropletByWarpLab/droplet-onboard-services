@@ -527,6 +527,16 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   { pattern: /\b(time|date|today|tomorrow|yesterday|weather|calculat\w*|maths?|mathematics|arithmetic|convert|translate|timestamp)\b|\d\s*[+*×÷^]\s*\d|\d\s+[-/x]\s+\d|\d\s*%\s*of\b/i, domains: ["data"] },
   // (WARP-3116's navigation rule is NOT in this list — see NAVIGATION_RULES
   // below the array, which is evaluated only for a pool that can use it.)
+  // WARP-3074 — bulk labelling (`classify_items`) lives in `data`. The
+  // verbs are qualified by a batch object, never taken bare: `data` is one
+  // of the larger domains, and a bare `label` fires on "print a shipping
+  // label", a bare `sort` on "sort the files by newest", a bare `classif…`
+  // on "the security classification of this file". Whole-sentence
+  // positives and negatives in tool-selection.service.test.ts.
+  {
+    pattern: /\b((classif(y|ying)|categori[sz](e|ing)|triage|sort|label|tag|group|bucket) (these|them|those|each|all|every)|(classif(y|ying)|categori[sz](e|ing)|triage) (this|the|my) (batch|pile|list|inbox|queue)|which (team|department|category) (each|every))\b/i,
+    domains: ["data"],
+  },
   // WARP-2497 — the cloud SaaS datasets (Stripe / HubSpot / Mailchimp).
   //
   // The defect this closes is the one WARP-2058 closed for `pm` and WARP-2454

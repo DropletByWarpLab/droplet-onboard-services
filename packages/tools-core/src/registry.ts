@@ -236,6 +236,7 @@ import translateText from "./handlers/data/translate-text.js";
 // /api/web routes — ambient_data off-LAN channel, fail-closed.
 import getWeather from "./handlers/data/get-weather.js";
 import currencyConvert from "./handlers/data/currency-convert.js";
+import classifyItems from "./handlers/data/classify-items.js";
 // data (WARP-3116): dashboard navigation — resolve a page from the list the
 // dashboard sent with the turn; the dashboard does the moving.
 import findDashboardPage from "./handlers/dashboard/find-dashboard-page.js";
@@ -451,6 +452,8 @@ const allTools: Tool[] = [
   // WARP-1436: ambient web data (Tier-1; screened egress via /api/web)
   getWeather,
   currencyConvert,
+  // WARP-3074: bulk labelling via the Kev decision model (Tier-1)
+  classifyItems,
   // WARP-3116: dashboard navigation (Tier-1; pure lookup over the page list
   // the dashboard sent — the handler moves nothing, the dashboard routes)
   findDashboardPage,

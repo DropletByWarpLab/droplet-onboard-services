@@ -973,6 +973,43 @@ describe("WARP-2894 — routines are reachable from a fresh turn", () => {
   });
 });
 
+describe("WARP-3074 — bulk labelling reaches classify_items from a fresh turn", () => {
+  const advertisedFor = (userMessage: string) =>
+    selectAdvertisedTools({
+      mode: "domains",
+      userMessage,
+      pool: [...POOL, "classify_items"],
+      conversationToolNames: [],
+    }).advertised;
+
+  // Whole sentences a person types when they hand over a pile. MUTATION:
+  // delete the WARP-3074 rule and every positive goes red — none of them
+  // carries a word the older `data` rule owns.
+  it.each([
+    "can you go through these 40 support emails and categorise them by department?",
+    "sort these customer reviews into happy, neutral and angry",
+    "label each of these tickets as urgent or not urgent",
+    "please triage this batch of leads for me: hot, warm or cold",
+    "group these expense lines by cost centre",
+    "work out which team each request belongs to",
+  ])("%s advertises classify_items", (message) => {
+    expect(advertisedFor(message)).toContain("classify_items");
+  });
+
+  // The ambiguous verbs, used the way they are used when nobody wants a
+  // classifier. A widening that takes the bare word turns these red.
+  it.each([
+    "print a shipping label for the parcel to Lyon",
+    "sort the files by newest first",
+    "who is in the group chat for the front desk",
+    "what's the name tag on the garage camera?",
+    "what is the security classification of this file?",
+    "who is on triage duty at the front desk this week?",
+  ])("%s does not advertise classify_items", (message) => {
+    expect(advertisedFor(message)).not.toContain("classify_items");
+  });
+});
+
 describe("WARP-3116 — dashboard navigation is reachable from a fresh turn", () => {
   const NAV_TOOLS = ["find_dashboard_page", "open_dashboard_page"];
   // Stand-ins for the OTHER `data` tools (seven in the owner's chat pool). The

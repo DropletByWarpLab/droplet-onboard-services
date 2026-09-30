@@ -5,8 +5,9 @@
 
 import { status as GrpcStatus } from "@grpc/grpc-js";
 import { describe, it, expect, vi } from "vitest";
-import { DecisionModelClient, DECIDE_DEFAULT_TIMEOUT_MS } from "../services/decision-model.client.js";
+import { DecisionModelClient, DECIDE_DEFAULT_TIMEOUT_MS, decideRequestSchema } from "../services/decision-model.client.js";
 import { DecideQuestionType, DecideStatus } from "../grpc-generated/inference.js";
+import { TOOLS } from "@droplet/tools-core";
 
 function clientWith(impl: (req: any, md: any, opts: any, cb: any) => void) {
   const stub = { decide: vi.fn(impl) };
@@ -107,5 +108,30 @@ describe("DecisionModelClient", () => {
       // The deadline must leave the gateway's own timeout room to fire first.
       expect((opts.deadline as Date).getTime()).toBeGreaterThanOrEqual(before + DECIDE_DEFAULT_TIMEOUT_MS);
     }
+  });
+});
+
+// WARP-3074 — the classify_items tool builds this body in another package;
+// a shape the route's `.strict()` schema rejects would make the tool a
+// silent 400 → "invalid" on every item. Pin the real payload against it.
+describe("decideRequestSchema accepts what classify_items sends", () => {
+  it("parses the tool's request body for all three question types", async () => {
+    const classifyItems = TOOLS.get("classify_items")!;
+    const post = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: "unavailable", detail: "x" })));
+    const http = { get: vi.fn(), post, patch: vi.fn(), delete: vi.fn() };
+    await classifyItems.handler(
+      {
+        items: [{ id: "a", text: "Invoice 42 is overdue" }],
+        questions: {
+          dept: { type: "choice", instructions: "Which department?", options: ["billing", "support"] },
+          urgent: { type: "noul", instructions: "Urgent?" },
+          tone: { type: "score", instructions: "How upset?", options: ["calm", "angry"] },
+        },
+      },
+      { http: { orchestrator: http }, signal: new AbortController().signal } as never,
+    );
+    expect(post).toHaveBeenCalledWith("/api/llm/decide", expect.anything(), expect.anything());
+    const parsed = decideRequestSchema.safeParse(post.mock.calls[0][1]);
+    expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true);
   });
 });

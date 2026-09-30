@@ -505,6 +505,8 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "translate_text", client: "orchestrator", hops: [admit("post", "/api/llm/complete")] },
   { tool: "get_weather", client: "orchestrator", hops: [admit("get", "/api/web/weather")] },
   { tool: "currency_convert", client: "orchestrator", hops: [admit("get", "/api/web/rates")] },
+  // WARP-3074 — one hop per item; the route admits service principals only.
+  { tool: "classify_items", client: "orchestrator", hops: [admit("post", "/api/llm/decide")] },
   // WARP-3116 — pure lookups over the page list carried on the call's _meta.
   none("find_dashboard_page"),
   none("open_dashboard_page"),

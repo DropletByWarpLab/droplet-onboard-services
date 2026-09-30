@@ -472,7 +472,19 @@ describe("worst-case fixed system-block budget", () => {
         },
       })),
     );
-    expect(fullRegistryJson.length).toBeLessThan(115000);
+    //
+    // WARP-3074 crossed it (109,421 → 110,309 with `classify_items`, 888
+    // chars after trimming its prose; the tool needs a two-part schema, so
+    // it cannot fit in the 579 that were left). Raised by 2K, not re-based:
+    // the reasoning in point 1 above still holds (MCP-facing surface, no
+    // window), the per-domain worst case above stays green, and ~1.7K
+    // leaves roughly two average tools before the next author decides again.
+    //
+    // Carried onto stage's 115,000 line at the merge (2026-09-29): stage had
+    // since raised the line for the Security domain and sat 4 chars under it,
+    // so the same tool crosses it again by the same margin. This applies that
+    // same written decision to the new base (+2K), not a new re-baseline.
+    expect(fullRegistryJson.length).toBeLessThan(117000);
   });
 
   /**

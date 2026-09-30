@@ -87,6 +87,7 @@ import {
   resolveTurnSideModel,
 } from "../services/active-model.service.js";
 import { recordAccessDenied, requireRole } from "../middleware/auth.js";
+import { DecisionModelClient, decideRequestSchema } from "../services/decision-model.client.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
 import {
   decideCloudTurn,
@@ -445,6 +446,9 @@ const completeRequestSchema = z
     max_tokens: z.number().int().min(1).max(4096).optional(),
   })
   .strict();
+
+/** WARP-3074 — built on first `POST /llm/decide`, like the other gRPC clients. */
+let decisionModel: DecisionModelClient | null = null;
 
 const CONVERSATION_ID_HEADER = "X-Conversation-Id";
 /** WARP-329: assistant row id, set alongside X-Conversation-Id on the same
@@ -2796,6 +2800,22 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       }
     },
   );
+
+  // WARP-3074 — the `classify_items` tool's only way to Kev: orchestrator →
+  // DecisionModelClient → ai-gateway `Decide`. Nothing calls the sidecar's
+  // port directly. Service principals only (the mcp-server is the caller):
+  // no dashboard surface needs it, and per-person access is the MCP tool
+  // RBAC's job.
+  router.post("/llm/decide", requireRole("service"), async (req, res) => {
+    const parsed = decideRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+    decisionModel ??= new DecisionModelClient({ url: config.AI_GATEWAY_GRPC_URL });
+    // `decide` never throws: an absent sidecar is `{status:"unavailable"}`.
+    res.json(await decisionModel.decide(parsed.data));
+  });
 
   // ── WARP-304: per-user conversation history ──
   // The dashboard reads `/api/llm/conversations/:id` on mount when a

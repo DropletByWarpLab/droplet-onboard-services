@@ -184,6 +184,12 @@ const TURNS: Turn[] = [
     requires: "get_weather",
   },
   {
+    // WARP-3074 — the bulk ask classify_items exists for.
+    label: "data / bulk labelling",
+    message: "go through these support emails and categorise them by department",
+    requires: "classify_items",
+  },
+  {
     label: "business / the shop's own details",
     message: "remind me what our opening hours are on a Sunday",
     requires: "business_profile_get",
