@@ -667,7 +667,7 @@ describe("WARP-462 — POST /api/tools/:slug/runs", () => {
       status: "live" as const,
       ownerId: null,
       share: null,
-      visibility: "WORKSPACE",
+      visibility: "WORKSPACE" as const,
       safety: 1,
       writes: false,
       reversible: true,
