@@ -589,9 +589,10 @@ export interface AgentCheckpointPort {
 /**
  * WARP-1479 — why a terminal turn produced no visible answer.
  *
- * Present ONLY when the turn ended with empty visible content. The blank
- * itself is surfaced to the customer by the route's empty-completion
- * rewrite; this attributes it to a LAYER so the fix work is aimed at
+ * Present ONLY when the model's terminal answer was blank. With no tool work
+ * the blank is surfaced by the route's empty-completion rewrite; after tool
+ * work the loop retries once, then substitutes a fallback reply (WARP-3285).
+ * This attributes the blank to a LAYER so the fix work is aimed at
  * evidence: the model returned nothing, it spent the turn in the reasoning
  * channel, or our own `sanitizeFinalContent` demoted what it did return.
  *
@@ -678,7 +679,11 @@ export interface AgentResult {
     | "repetition"
     | "no_progress";
   error?: string;
-  /** WARP-1479 — set only when the terminal turn produced no visible answer. */
+  /**
+   * WARP-1479 — set only when the model's terminal answer was blank. After
+   * real tool work `message.content` then carries the WARP-3285 fallback
+   * reply, so this is the only sign those words are not the model's.
+   */
   blankDiagnostics?: BlankAnswerDiagnostics;
   /**
    * WARP-1602 — set only when the visible answer trips an analysis-leak
@@ -1607,6 +1612,10 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // the gathered results, which needs one more inference call.
   const contextWindow = req.context_window ?? DEFAULT_CONTEXT_WINDOW;
   let finalizeReason: "context_budget" | "repetition" | "no_progress" | null = null;
+  // WARP-3285 — a blank answer after real tool work gets ONE more pass of the
+  // same kind (no tools, a nudge) before the loop falls back to saying what it
+  // checked. Separate from `finalizeReason` so the turn keeps its stop_reason.
+  let blankRetry = false;
   // WARP-3283 — no-progress early-stop. A model that keeps REPHRASING a
   // search that finds nothing makes distinct calls, so the repetition guard
   // above never fires and the turn used to run to maxIter and end on the
@@ -1969,20 +1978,25 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         );
       }
     }
-    if (finalizeReason !== null) {
+    const finalizing = finalizeReason !== null || blankRetry;
+    if (finalizing) {
       messages.push({
-        role: "system",
-        content:
-          finalizeReason === "repetition"
+        // WARP-3285 — "user", not "system": gpt-oss's chat template turns only
+        // messages[0] into the developer block and silently DROPS every later
+        // system message, so this nudge never reached the model and 11 of 12
+        // finalize passes in the eval came back blank.
+        role: "user",
+        content: blankRetry
+          ? "You haven't replied yet. Answer my request now in plain text, using what the tools above returned. If you didn't find what I asked for, say what you checked and ask me what I meant. Do not call any more tools."
+          : finalizeReason === "repetition"
             ? "You are repeating tool calls — answer the user now from the information already gathered. Do not call any more tools."
             : finalizeReason === "no_progress"
               ? "Your last searches found nothing — stop searching. Answer the user now: say what you looked for and that nothing matching was found, plus anything useful already gathered. Do not call any more tools."
               : "Context budget reached — answer the user now from the information already gathered. Do not call any more tools.",
       });
     }
-    const iterTools = finalizeReason !== null ? [] : tools;
-    const iterToolChoice: "auto" | "none" =
-      finalizeReason !== null ? "none" : toolChoice;
+    const iterTools = finalizing ? [] : tools;
+    const iterToolChoice: "auto" | "none" = finalizing ? "none" : toolChoice;
 
     // The outbound request shared by both transports. `stream` is set per
     // path; every other field (incl. WARP-849 max_tokens + WARP-1442a
@@ -2105,8 +2119,8 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
 
     // Spec §2 — the finalize pass advertised zero tools; a model that still
     // emits tool_calls gets no second chance. Strip them so this turn takes
-    // the terminal path (empty content lands in WARP-854's FAILED-turn path).
-    if (finalizeReason !== null && asst.tool_calls?.length) {
+    // the terminal path (empty content lands in the WARP-3285 blank guard).
+    if (finalizing && asst.tool_calls?.length) {
       delete asst.tool_calls;
     }
 
@@ -2135,9 +2149,10 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
         }
       }
       // WARP-1331 — finalisation guard: strip citation cruft; demote a
-      // bare tool-args JSON "answer" to empty. Empty completions get NO
-      // content_delta — WARP-854's error path (done error frame / FAILED
-      // turn) is the owner of that case.
+      // bare tool-args JSON "answer" to empty. An empty completion with NO
+      // tool work gets no content_delta — WARP-854's error path (done error
+      // frame / FAILED turn) owns that case; after tool work, see WARP-3285
+      // below.
       const visible = sanitizeFinalContent(reasoning.cleanedContent);
       // WARP-1479 — a blank answer is a failed turn (the route rewrites it as
       // one); attribute WHY here, while the raw completion is still in hand.
@@ -2152,6 +2167,34 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
             finishReason: lastFinishReason,
             usage: lastUsage,
           });
+      // WARP-3285 — a blank after real tool work must never reach the user as
+      // an error bubble. In the eval every one was the model ending in its
+      // reasoning channel (cause "reasoning_only"), mostly on a finalize pass.
+      // Retry once with no tools and an explicit ask; if that is blank too, or
+      // no iteration is left, say what was checked. A blank with NO tool work
+      // stays WARP-854's (a context overflow, which a retry would repeat).
+      let answer = visible;
+      if (blankDiagnostics && trace.length > 0) {
+        if (!blankRetry && iter + 1 < maxIter) {
+          blankRetry = true;
+          // Already on the wire as reasoning_step; keep it in the trace too.
+          if (reasoning.fullReasoning != null) reasoningSteps.push(reasoning.fullReasoning);
+          logger.warn(
+            {
+              turn_id: turnId,
+              iter,
+              cause: blankDiagnostics.cause,
+              provider_reasoning_chars: blankDiagnostics.providerReasoningChars,
+              tool_calls: trace.length,
+              ...(finalizeReason ? { finalize_reason: finalizeReason } : {}),
+            },
+            "agent_blank_answer_retry",
+          );
+          continue;
+        }
+        answer = blankAnswerFallback(trace, advertisedNames);
+        emit({ type: "content_delta", text: answer });
+      }
       // WARP-1602 — the inverse guard to WARP-1479's. A turn that answers
       // WITH its chain-of-thought must be attributable in eval runs instead of
       // scoring as healthy just because the bubble wasn't empty.
@@ -2262,7 +2305,7 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
           : null;
       const finalMessage: ChatMessage = {
         ...asstClean,
-        content: visible,
+        content: answer,
         ...(fullReasoning != null ? { reasoning: fullReasoning } : {}),
       };
       return {
@@ -3156,6 +3199,23 @@ function isBareJson(s: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * WARP-3285 — the reply for a turn whose answer stayed blank after real tool
+ * work, even after the one retry. Says what was checked and asks the person to
+ * narrow it down: in the eval these turns were searches that found nothing or
+ * ambiguous requests ("Send them the update."), and a clarifying question is
+ * the right answer to both. Trace tool names are model-controlled, so only
+ * advertised ones are named (WARP-1331).
+ */
+function blankAnswerFallback(trace: AgentTraceEntry[], advertised: Set<string>): string {
+  const used = [...new Set(trace.map((t) => t.tool))].filter((n) => advertised.has(n));
+  return (
+    `I looked into this${used.length > 0 ? ` (${used.join(", ")})` : ""} but couldn't ` +
+    "put together an answer from what I found. Could you tell me a bit more about " +
+    "what you need, or rephrase the request?"
+  );
 }
 
 /**

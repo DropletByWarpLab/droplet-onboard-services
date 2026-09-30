@@ -122,7 +122,7 @@ describe("runAgent — no-progress early-stop (WARP-3283)", () => {
     expect(finalReq.tool_choice).toBe("none");
     expect(
       finalReq.messages.some(
-        (m) => m.role === "system" && String(m.content).includes("found nothing"),
+        (m) => m.role === "user" && String(m.content).includes("found nothing"),
       ),
     ).toBe(true);
     expect(result.stop_reason).toBe("no_progress");

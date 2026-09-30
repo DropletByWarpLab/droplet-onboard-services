@@ -335,13 +335,13 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
     expect(res.body.error).toContain("empty_completion");
   });
 
-  it("non-streaming rewrites a blank context_budget finalize even with prior tool activity (agent-budgets)", async () => {
+  it("a blank context_budget finalize after tool activity ends on the fallback reply, never a blank (WARP-3285)", async () => {
     // The §2 guard can finalize BLANK after real tool activity earlier in
     // the turn: a huge transcript trips the guard on iteration 1, the
-    // finalize pass (zero tools) then answers with nothing. The pre-fix
-    // WARP-854 gate required an EMPTY trace to rewrite, so this exact case
-    // — a non-empty trace, blank final content, stop_reason context_budget
-    // — used to persist as a silent "completed" empty bubble.
+    // finalize pass (zero tools) then answers with nothing. That used to
+    // persist as a silent "completed" empty bubble, then (WARP-1479) as an
+    // empty_completion error after all the work. WARP-3285: one no-tools
+    // retry, and when that is blank too, a reply saying what was checked.
     // WARP-2655 — capture the system message actually put on the wire, so the
     // drop below is asserted on the prompt the model would have received and
     // not only on the warn that announced it.
@@ -385,6 +385,13 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
         json: async () => ({
           choices: [{ message: { role: "assistant", content: "" } }],
         }),
+      })
+      .mockResolvedValueOnce({
+        // iter 2 — the WARP-3285 retry, blank again.
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: "" } }],
+        }),
       });
 
     const res = await request(app)
@@ -400,8 +407,10 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
       });
 
     expect(res.status).toBe(200);
-    expect(res.body.stop_reason).toBe("error");
-    expect(res.body.error).toContain("empty_completion");
+    expect(res.body.stop_reason).toBe("context_budget");
+    expect(res.body.message.content).toMatch(
+      /^I looked into this \(list_network_devices\) but couldn't put together an answer/,
+    );
 
     // ── WARP-2655: the degradation this turn causes, pinned ──────────────
     //
@@ -533,11 +542,11 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
     expect(systemPrompt).toContain(loadIdentityPrompt());
   });
 
-  it("non-streaming rewrites a blank model_done even with prior tool activity (WARP-1479)", async () => {
+  it("non-streaming: a blank model_done after tool activity is retried, then answered with the fallback (WARP-3285)", async () => {
     // The live repro: the model dispatches a real tool, the tool SUCCEEDS,
-    // and the terminal turn then answers with nothing. The pre-fix gate
-    // required an EMPTY trace to rewrite `model_done`, so this persisted as
-    // a silent "completed" empty bubble — tool chips, no answer, no retry.
+    // and the terminal turn then answers with nothing. Once a silent empty
+    // bubble, then (WARP-1479) an empty_completion error after all the work;
+    // now one no-tools retry, and the fallback reply when that is blank too.
     mockChat
       .mockResolvedValueOnce({
         ok: true,
@@ -564,6 +573,13 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
         json: async () => ({
           choices: [{ message: { role: "assistant", content: "" } }],
         }),
+      })
+      .mockResolvedValueOnce({
+        // The WARP-3285 retry (no tools) answers.
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: "You spent €1,416 last month." } }],
+        }),
       });
 
     const res = await request(app)
@@ -574,11 +590,11 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
       });
 
     expect(res.status).toBe(200);
-    expect(res.body.stop_reason).toBe("error");
-    expect(res.body.error).toContain("empty_completion");
+    expect(res.body.stop_reason).toBe("model_done");
+    expect(res.body.message.content).toBe("You spent €1,416 last month.");
   });
 
-  it("streaming rewrites a blank model_done even with prior tool activity (WARP-1479)", async () => {
+  it("streaming: a blank model_done after tool activity, blank again on retry, streams the fallback (WARP-3285)", async () => {
     mockChat
       .mockResolvedValueOnce({
         ok: true,
@@ -605,6 +621,13 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
         json: async () => ({
           choices: [{ message: { role: "assistant", content: "" } }],
         }),
+      })
+      .mockResolvedValueOnce({
+        // The WARP-3285 retry, blank again.
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: "" } }],
+        }),
       });
 
     const res = await request(app)
@@ -621,10 +644,12 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
     expect(res.status).toBe(200);
     const frames = parseSse(sseText(res));
     const done = frames.find((f) => f.event === "done");
-    expect(done?.data).toMatchObject({ stop_reason: "error" });
-    expect(String((done?.data as { error?: string }).error)).toContain(
-      "empty_completion",
-    );
+    expect(done?.data).toMatchObject({ stop_reason: "model_done" });
+    const text = frames
+      .filter((f) => f.event === "content_delta")
+      .map((f) => String(f.data.text))
+      .join("");
+    expect(text).toMatch(/^I looked into this \(list_network_devices\) but couldn't/);
   });
 
   it("streaming emits tool_call + tool_result events when the model dispatches a tool", async () => {
