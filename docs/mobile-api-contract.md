@@ -251,7 +251,8 @@ with no Frigate event, so there is nothing to ask for. Its errors
 | 403 | `{ "error": "Forbidden: role not permitted" }` | A role outside owner, admin and family (a guest, a service token) |
 | 404 | `{ "error": "module_disabled", "module": "cameras" }` | Cameras is off on the box, or the person's access does not include it |
 | 404 | `{ "error": "Not found" }` | A person with per-camera grants asks for an event on a camera they do not hold, or one Frigate does not know: the same body for both. Owner and admin skip this check |
-| 500 | `{ "error": "Internal server error", "message": "Something went wrong" }` | Frigate has no thumbnail for the event (pruned, or never made) or cannot be reached. The route does not pass Frigate's status through, unlike `/cameras/events/:eventId/snapshot` and `/cameras/reviews/:reviewId/thumbnail`, which answer `{ "error": "frigate <status>" }`: a gone thumbnail is a `500` here, not a `404` |
+| 404 | `{ "error": "Thumbnail not found" }` | Frigate answers 404: it has no thumbnail for the event (pruned, or never made) or no such event (#2528). Key on the status, not the body: this route has three 404 bodies |
+| 500 | `{ "error": "Internal server error", "message": "Something went wrong" }` | Frigate answers any other non-2xx, times out, or cannot be reached |
 | 503 | `{ "error": "access_check_unavailable" }` | The grant check could not run (the database, or Frigate's event lookup, failed): retry |
 
 ### LLM (`/api/llm/*`)
