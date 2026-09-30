@@ -14,8 +14,8 @@
  *   - zod validation of grant/exception module ids.
  *
  * Floor model (ADR-004 via brief §9): `view` is not floored on ordinary
- * features, and is REFUSED below family on `security`, `crm` and `projects`
- * (`refuseBelowFloor`); `act`/
+ * features, and is REFUSED below family on `security`, `crm`, `projects` and
+ * `money` (`refuseBelowFloor`); `act`/
  * `manage` floor at the FAMILY tier on ordinary features; network and
  * managed-switch writes floor at ADMIN; voice `act` is deliberately
  * un-floored (guests may talk to the assistant). The always-on trio of the
@@ -176,8 +176,13 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
   // record — so there is no `act` level to offer: there is no action. `manage`
   // is floored at `admin` because the only management verb in reach is
   // connecting or disconnecting the ledger itself, which is credential work.
+  // WARP-3365 review (Romain, 2026-09-30: external guests get nothing of the
+  // company's data): what the business is owed and owes is the company's own,
+  // so `view` is a REFUSAL below the family floor too (`refuseBelowFloor`).
+  // The routes already refused a guest by role; the catalog, the tier floor on
+  // the prefix and the assistant's data hop now say the same thing.
   money: [
-    { level: "view", minTier: "family" },
+    { level: "view", minTier: "family", refuseBelowFloor: true },
     { level: "manage", minTier: "admin" },
   ],
   // WARP-2018/2032. `manage` is where connecting an address-book SOURCE will
@@ -260,7 +265,7 @@ export function maxLevelFor(tier: Role, moduleId: GateableModuleId): FeatureLeve
 /**
  * The modules some human tier may hold NOTHING on (`refuseBelowFloor`), derived
  * from the catalog so the route gate, the assistant gate and the role writer
- * all read the same fact. Today: `security`, `crm`, `projects`. A `service`
+ * all read the same fact. Today: `security`, `crm`, `projects`, `money`. A `service`
  * principal is not a human tier and is excluded from the probe.
  */
 export function tierRefusingModuleIds(): GateableModuleId[] {

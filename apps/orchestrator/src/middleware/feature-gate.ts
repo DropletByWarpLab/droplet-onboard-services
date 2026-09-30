@@ -57,6 +57,7 @@ import {
   type FeatureLevel,
 } from "../services/access-catalog.js";
 import type { Role } from "../services/jwt.service.js";
+import { isGuestShared } from "../modules/guest-shares.js";
 import { recordAccessDenied } from "./auth.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -147,6 +148,10 @@ export function readFeatureGateMeta(fn: unknown): FeatureGateMeta | null {
  * `module_disabled` body as the two gates beside it: a module a tier may not
  * open reads as absent, not forbidden.
  *
+ * The one exception is a record explicitly SHARED with a guest (WARP-3369:
+ * a work item assigned to them): `modules/guest-shares.ts` names the requests,
+ * and the route's own guard checks the record.
+ *
  * Passes `service` principals (the tool paths, the egress collector, voice-io):
  * they are not a human tier. The assistant acting FOR a guest is refused by the
  * same catalog fact in `requireMcpActingUserToolDomain`.
@@ -164,6 +169,14 @@ export function requireModuleTierFloor(moduleId: ModuleId): RequestHandler {
       return;
     }
     if (isGateableModuleId(moduleId) && maxLevelFor(user.role as Role, moduleId) === null) {
+      // WARP-3369 (Romain, 2026-09-30): assigning a work item to a guest SHARES
+      // that one item. The few requests declared in modules/guest-shares.ts get
+      // past the floor; the route's own guard (middleware/guest-share.ts) is
+      // the authorization and answers 404 unless the item is assigned to them.
+      if (user.role === "guest" && isGuestShared(moduleId, req.method, `${req.baseUrl}${req.path}`)) {
+        next();
+        return;
+      }
       recordAccessDenied(req, "module-tier-floor-denied");
       res.status(404).json({ error: "module_disabled", module: moduleId });
       return;

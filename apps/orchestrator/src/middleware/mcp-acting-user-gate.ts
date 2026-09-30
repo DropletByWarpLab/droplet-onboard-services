@@ -40,8 +40,10 @@
  *   2. the feature — ONLY where the browser asks it: when the module serving
  *      this prefix is in FEATURE_GATED_MODULES (module-mounts.ts), the acting
  *      person must hold it, the same check `requireFeatureAccess` makes of a
- *      human on that URL. Today that is `crm` (/api/crm); `projects` is not
- *      feature-gated, so /api/pm asks question 1 only. The rule is browser
+ *      human on that URL, and at the LEVEL the method needs: `view` for a read,
+ *      `act` for a write (WARP-3365). Today that is `crm` (/api/crm) and
+ *      `money` (/api/money); `projects` is not feature-gated, so /api/pm asks
+ *      question 1 only. The rule is browser
  *      parity: the assistant never reaches more than the person could in the
  *      browser, and never LESS either — a CRM-only person's `business_find`
  *      on a customer reads that customer's projects, as their browser can.
@@ -76,7 +78,12 @@ import {
   type AttributionFailure,
 } from "../services/tool-access.service.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
-import { isGateableModuleId, maxLevelFor } from "../services/access-catalog.js";
+import {
+  FEATURE_LEVEL_RANK,
+  isGateableModuleId,
+  maxLevelFor,
+  type FeatureLevel,
+} from "../services/access-catalog.js";
 import type { Role } from "../services/jwt.service.js";
 import {
   resolveAssertedUser,
@@ -221,9 +228,21 @@ export function requireMcpActingUserToolDomain(
     }
     try {
       const effective = access.userId ? await features(access.userId) : null;
-      if (effective && !effective.features.some((f) => f.moduleId === moduleId)) {
-        deny(req, res, "feature_not_held");
-        return;
+      if (effective) {
+        const held = effective.features.find((f) => f.moduleId === moduleId);
+        if (!held) {
+          deny(req, res, "feature_not_held");
+          return;
+        }
+        // WARP-3365 review — the LEVEL, not just the module. A write through a
+        // tool needs `act`, as it does for the same person in the browser
+        // (routes/crm.ts names the level on every write); a role that holds
+        // `crm: view` reads through the assistant and cannot write through it.
+        const needed: FeatureLevel = READ_METHODS.has(req.method) ? "view" : "act";
+        if (FEATURE_LEVEL_RANK[held.level] < FEATURE_LEVEL_RANK[needed]) {
+          deny(req, res, "feature_level_too_low");
+          return;
+        }
       }
     } catch (err) {
       logger.error({ err }, "mcp_acting_user_feature_read_failed");

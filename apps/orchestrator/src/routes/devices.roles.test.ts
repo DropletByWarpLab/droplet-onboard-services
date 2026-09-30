@@ -1,10 +1,10 @@
 /**
- * WARP-3378 (Romain, 2026-09-30: an external guest gets nothing of the
- * company's data unless it is shared with them) — `GET /api/devices` answers
- * the box's own Device row: hostname, hardware revision, network mode and IP.
- * It had no role guard, so any signed-in principal read it. A guest is refused;
- * owner, admin and member keep the read (the dashboard's header chip and the
- * Settings card use it).
+ * WARP-3378 (Romain, 2026-09-30) — `GET /api/devices` answers the box's own
+ * Device row: hostname, hardware revision, network mode and IP. It had no role
+ * guard, so any signed-in principal read it. Network mode and the IP are for
+ * owner and admin only; a member gets the hostname and hardware revision (the
+ * dashboard's header chip and the Settings card), and an external guest gets
+ * nothing.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import express from "express";
@@ -61,9 +61,28 @@ describe("GET /api/devices — the box's own device row (WARP-3378)", () => {
     expect(listDevices).not.toHaveBeenCalled();
   });
 
-  it.each(["owner", "admin", "family"])("a %s gets the device row", async (role) => {
+  it.each(["owner", "admin"])("an %s gets the whole device row", async (role) => {
     const res = await request(appAs(role)).get("/api/devices");
     expect(res.status).toBe(200);
     expect(res.body).toEqual([ROW]);
+  });
+
+  it("a member gets who the box is, but neither its IP address nor its network mode", async () => {
+    const res = await request(appAs("family")).get("/api/devices");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([
+      { id: "d1", deviceId: "droplet-001", hostname: "droplet", hardwareRev: "rev-b", lastSeen: "2026-09-30T00:00:00.000Z" },
+    ]);
+    expect(Object.keys(res.body[0])).not.toContain("ip");
+    expect(Object.keys(res.body[0])).not.toContain("networkMode");
+    expect(JSON.stringify(res.body)).not.toMatch(/192\.168|dhcp/);
+  });
+
+  it("a column added to the row later is withheld from a member until someone decides otherwise", async () => {
+    listDevices.mockResolvedValue([{ ...ROW, wanIp: "203.0.113.9", serial: "SN-1" }]);
+    const res = await request(appAs("family")).get("/api/devices");
+    expect(Object.keys(res.body[0]).sort()).toEqual(["deviceId", "hardwareRev", "hostname", "id", "lastSeen"]);
+    const operator = await request(appAs("admin")).get("/api/devices");
+    expect(operator.body[0].wanIp).toBe("203.0.113.9");
   });
 });

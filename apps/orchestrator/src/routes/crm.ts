@@ -115,6 +115,8 @@ function mapServiceError(err: unknown, res: Response): boolean {
       return true;
     case crm.CRM_ERRORS.INVALID_STAGE:
     case crm.CRM_ERRORS.AMOUNT_NEEDS_CURRENCY:
+    // WARP-3365 — an external guest cannot own a customer or a deal.
+    case crm.CRM_ERRORS.OWNER_IS_GUEST:
     case "activity_needs_a_subject":
       // The referenced row exists but is wrong for this request — 422, so a
       // cross-pipeline stage id does not read as a typo.

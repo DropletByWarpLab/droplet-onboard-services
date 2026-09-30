@@ -516,13 +516,19 @@ export default function SettingsPage() {
                 modal tells the owner to read, so it must render the same
                 canonical name the server compares against — never a leaked
                 container-id hostname from a stale Device row. */}
-            {/* WARP-3378 — the box's own device row (hostname, hardware, network
-                mode, IP) is not served to an external guest (403), so its rows
-                are left out rather than rendered as "—" / "Not assigned". */}
+            {/* WARP-3378 — the box's own device row: hostname and hardware are
+                for members and up, network mode and the IP address for owner
+                and admin only, and an external guest is served none of it (403).
+                Rows the box does not send are left out rather than rendered as
+                "—" / "Not assigned". */}
             {currentUser?.role !== "guest" && (
               <>
                 <InfoRow label="Hostname" value={boxDisplayHost(device?.hostname)} />
                 <InfoRow label="Hardware" value={device?.hardwareRev ?? "—"} />
+              </>
+            )}
+            {(currentUser?.role === "owner" || currentUser?.role === "admin") && (
+              <>
                 <InfoRow label="Network mode" value={device?.networkMode ?? "—"} />
                 <InfoRow label="IP address" value={device?.ip ?? "Not assigned"} />
               </>

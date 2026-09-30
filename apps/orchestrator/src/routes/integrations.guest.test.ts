@@ -1,10 +1,11 @@
 /**
- * WARP-3374 (Romain, 2026-09-30: an external guest gets nothing of the
- * company's data unless it is shared with them) — `GET /api/integrations`
- * lists which business systems are connected, when each last synced and when a
- * credential expires. That is the company's own topology; a guest is refused.
- * Owner, admin and member keep the read (the Reports tiles use it), as does the
- * `service` role the route already admitted.
+ * WARP-3374 (Romain, 2026-09-30) — `GET /api/integrations` lists which business
+ * systems are connected, which provider is which, when each last synced and
+ * when a credential expires. That is the company's own topology: owner and admin
+ * only (and the `service` role the route already admitted). A member and an
+ * external guest are refused. What a member needs from it — "is the data fresh,
+ * is anything broken" — is `GET /api/integrations/summary`: counts and the newest
+ * sync time, with no provider, no per-provider status and no credential expiry.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import express from "express";
@@ -52,8 +53,8 @@ describe("GET /api/integrations — the company's connected systems (WARP-3374)"
     list.mockReset().mockResolvedValue(HUB);
   });
 
-  it("an external guest is refused, and nothing about a connection or its credential leaves", async () => {
-    const res = await request(appAs("guest")).get("/api/integrations");
+  it.each(["guest", "family"])("a %s is refused, and nothing about a connection or its credential leaves", async (role) => {
+    const res = await request(appAs(role)).get("/api/integrations");
     expect(res.status).toBe(403);
     expect(JSON.stringify(res.body)).not.toMatch(/eaglesoft|credentialExpiry|daysRemaining/);
     expect(list).not.toHaveBeenCalled();
@@ -64,9 +65,44 @@ describe("GET /api/integrations — the company's connected systems (WARP-3374)"
     expect(list).not.toHaveBeenCalled();
   });
 
-  it.each(["owner", "admin", "family", "service"])("a %s gets the list, unchanged", async (role) => {
+  it.each(["owner", "admin", "service"])("a %s gets the list, unchanged", async (role) => {
     const res = await request(appAs(role)).get("/api/integrations");
     expect(res.status).toBe(200);
     expect(res.body).toEqual(HUB);
+  });
+});
+
+describe("GET /api/integrations/summary — what a member may know (WARP-3374)", () => {
+  const MANY = [
+    { provider: "eaglesoft", status: "CONNECTED", configured: true, writeEnabled: false, lastSyncedAt: "2026-09-30T00:00:00.000Z", credentialExpiry: { status: "expiring", daysRemaining: 6 } },
+    { provider: "quickbooks", status: "NEEDS_RECONNECT", configured: true, writeEnabled: false, lastSyncedAt: "2026-09-29T00:00:00.000Z", credentialExpiry: null },
+    { provider: "stripe", status: "DEGRADED", configured: true, writeEnabled: false, lastSyncedAt: null, credentialExpiry: null },
+    { provider: "hubspot", status: "NOT_CONFIGURED", configured: false, writeEnabled: false, lastSyncedAt: null, credentialExpiry: null },
+    { provider: "mailchimp", status: "DISABLED", configured: true, writeEnabled: false, lastSyncedAt: "2026-09-01T00:00:00.000Z", credentialExpiry: null },
+  ];
+
+  beforeEach(() => {
+    list.mockReset().mockResolvedValue(MANY);
+  });
+
+  it.each(["owner", "admin", "family"])("a %s gets counts and the newest sync, and nothing else", async (role) => {
+    const res = await request(appAs(role)).get("/api/integrations/summary");
+    expect(res.status).toBe(200);
+    // connected = in use (connected, degraded, needs-reconnect...); not "not configured" or "turned off"
+    expect(res.body).toEqual({ connected: 3, needsAttention: 2, lastSyncedAt: "2026-09-30T00:00:00.000Z" });
+    const text = JSON.stringify(res.body);
+    expect(text).not.toMatch(/eaglesoft|quickbooks|stripe|hubspot|mailchimp|provider|credential|expir|daysRemaining/i);
+  });
+
+  it("with nothing connected it says zero and no sync time — never a guess", async () => {
+    list.mockResolvedValue([MANY[3]]);
+    const res = await request(appAs("family")).get("/api/integrations/summary");
+    expect(res.body).toEqual({ connected: 0, needsAttention: 0, lastSyncedAt: null });
+  });
+
+  it.each(["guest", "service", null])("a %s is refused", async (role) => {
+    const res = await request(appAs(role)).get("/api/integrations/summary");
+    expect(res.status).toBe(403);
+    expect(list).not.toHaveBeenCalled();
   });
 });

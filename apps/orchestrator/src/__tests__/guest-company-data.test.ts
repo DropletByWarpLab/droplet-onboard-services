@@ -9,7 +9,7 @@
  * What is pinned here, all through the REAL mount (`mountModuleGates`) and the
  * REAL catalog rather than a hand-rolled replica:
  *
- *   1. Every route the CRM and Projects routers register (found by scanning the
+ *   1. Every route the CRM, Projects and Money routers register (found by scanning the
  *      router SOURCE, so a route added tomorrow is covered the day it lands) is
  *      404 `module_disabled` for a guest, reachable for a member, an admin and
  *      an owner, and reachable for the `service` principal (the tool paths).
@@ -52,12 +52,14 @@ vi.mock("../services/effective-access.service.js", async (importOriginal) => {
 import { mountModuleGates } from "../modules/module-mounts.js";
 import { createModuleGate } from "../middleware/module-gate.js";
 import { MODULES, type AvailabilityConfig } from "../modules/module-registry.js";
+import { GUEST_SHARES } from "../modules/guest-shares.js";
 import {
   fullCatalogFeatures,
   tierRefusingModuleIds,
   type FeatureLevel,
 } from "../services/access-catalog.js";
 import { createCrmRouter } from "../routes/crm.js";
+import { createCrmEntityLinksRouter } from "../routes/crm-entity-links.js";
 import { readFeatureGateMeta } from "../middleware/feature-gate.js";
 import { isRoleGuard, type AuthUser } from "../middleware/auth.js";
 import type { EffectiveAccessResult } from "../services/effective-access.service.js";
@@ -180,6 +182,13 @@ const SURFACES: ReadonlyArray<{ module: ModuleId; label: string; files: string[]
     ],
     atLeast: 30,
   },
+  // WARP-3365 review: what the business is owed and owes is the company's own.
+  {
+    module: "money",
+    label: "Money",
+    files: [["routes", "money.ts"]],
+    atLeast: 2,
+  },
 ];
 
 /** The real mount, with a stub standing where each real route answers. */
@@ -215,11 +224,22 @@ describe.each(SURFACES)("$label: every route, through the real module mount", (s
     expect(routes.length).toBeGreaterThanOrEqual(surface.atLeast);
   });
 
-  it("an external guest is refused on EVERY route: 404 module_disabled, and the handler never runs", async () => {
+  it("an external guest is refused on EVERY route: 404 module_disabled, and the handler never runs — bar the requests declared as shared", async () => {
     const app = mountedWithStubs("guest", routes);
     const rows = await probeAll(app, routes);
-    expect(rows.filter((row) => !row.endsWith("-> 404 module_disabled"))).toEqual([]);
-    const sample = await request(app).get(concrete(routes[0].path));
+    // WARP-3369: a work item assigned to a guest is shared with them. The five
+    // requests in modules/guest-shares.ts get past the prefix floor to the
+    // route's own per-record guard (proved in guest-work-item-share.test.ts);
+    // nothing else does, for Projects or for any other module.
+    const shares = GUEST_SHARES[surface.module] ?? [];
+    const isShared = (r: RouteRow): boolean =>
+      shares.some((s) => s.method === r.method.toUpperCase() && s.path.test(concrete(r.path).toLowerCase()));
+    const unexpected = routes.flatMap((r, i) =>
+      rows[i].endsWith(isShared(r) ? "-> 200" : "-> 404 module_disabled") ? [] : [rows[i]],
+    );
+    expect(unexpected).toEqual([]);
+    expect(routes.filter(isShared)).toHaveLength(shares.length);
+    const sample = await request(app).get(concrete(routes.find((r) => !isShared(r))!.path));
     expect(sample.body).toEqual({ error: "module_disabled", module: surface.module });
   });
 
@@ -234,8 +254,8 @@ describe.each(SURFACES)("$label: every route, through the real module mount", (s
 });
 
 describe("the floor is exactly the catalog's refusal", () => {
-  it("is security, crm and projects — the modules a guest holds nothing on", () => {
-    expect([...tierRefusingModuleIds()].sort()).toEqual(["crm", "projects", "security"]);
+  it("is security, crm, projects and money — the modules a guest holds nothing on", () => {
+    expect([...tierRefusingModuleIds()].sort()).toEqual(["crm", "money", "projects", "security"]);
   });
 
   it("a guest still reaches every OTHER module's prefix (their shared files, Messages, own chats, the rest)", async () => {
@@ -480,5 +500,61 @@ describe("CRM writes: what a member's role actually holds decides (WARP-3365)", 
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: "module_disabled", module: "crm" });
     expect(h.resolve).not.toHaveBeenCalled();
+  });
+});
+
+// ── 3. the entity-link writes name their level too (WARP-3365 review) ───────
+
+describe("CRM entity-link writes name their §9 level (WARP-3365 review)", () => {
+  const LINK_LEVELS: ReadonlyArray<readonly [string, FeatureLevel, "post" | "patch" | "delete", string]> = [
+    ["POST /crm/entity-links", "act", "post", "/api/crm/entity-links"],
+    ["PATCH /crm/entity-links/:id", "act", "patch", "/api/crm/entity-links/x"],
+    ["DELETE /crm/entity-links/:id", "manage", "delete", "/api/crm/entity-links/x"],
+  ];
+
+  const stack = (createCrmEntityLinksRouter({} as never) as unknown as { stack: Layer[] }).stack;
+  const routes = stack.flatMap((layer) =>
+    layer.route
+      ? Object.keys(layer.route.methods)
+          .filter((m) => layer.route!.methods[m])
+          .map((m) => ({ key: `${m.toUpperCase()} ${layer.route!.path}`, method: m.toUpperCase(), handles: layer.route!.stack.map((x) => x.handle) }))
+      : [],
+  );
+
+  it("the writes are exactly the table, each with one crm gate at its level after the role guard; the reads carry none", () => {
+    expect(routes.filter((r) => r.method !== "GET").map((r) => r.key).sort()).toEqual(
+      LINK_LEVELS.map(([key]) => key).sort(),
+    );
+    for (const [key, level] of LINK_LEVELS) {
+      const route = routes.find((r) => r.key === key)!;
+      expect(route.handles.map(readFeatureGateMeta).filter((m) => m !== null), key).toEqual([{ moduleId: "crm", level }]);
+      expect(route.handles.findIndex((h) => readFeatureGateMeta(h) !== null), key).toBeGreaterThan(
+        route.handles.findIndex(isRoleGuard),
+      );
+    }
+    for (const r of routes.filter((x) => x.method === "GET")) {
+      expect(r.handles.map(readFeatureGateMeta).filter((m) => m !== null), r.key).toEqual([]);
+    }
+  });
+
+  it("crm: view cannot link, relink or unlink a file; act cannot delete a link; manage can", async () => {
+    const app = withPrincipal("family");
+    app.use("/api", createCrmEntityLinksRouter({} as never));
+    app.use((_err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+      res.status(500).json({ error: "handler_error" });
+    });
+    const refused = (res: { status: number; body: { error?: string; module?: string } }) =>
+      res.status === 404 && res.body.error === "module_disabled" && res.body.module === "crm";
+    for (const [held, expected] of [
+      ["view", { act: true, manage: true }],
+      ["act", { act: false, manage: true }],
+      ["manage", { act: false, manage: false }],
+    ] as const) {
+      h.resolve.mockReset().mockResolvedValue(access("family", [["crm", held]]));
+      for (const [key, level, method, url] of LINK_LEVELS) {
+        const res = await request(app)[method](url).send({});
+        expect(refused(res), `${held} ${key} -> ${res.status}`).toBe(expected[level as "act" | "manage"]);
+      }
+    }
   });
 });

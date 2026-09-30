@@ -124,7 +124,7 @@ export const FEATURE_GATED_MODULES: ReadonlySet<ModuleId> = new Set<ModuleId>([
 
 /**
  * WARP-3365 / WARP-3369 — the modules a human tier may hold NOTHING on, read
- * off the access catalog (`refuseBelowFloor`): security, crm and projects.
+ * off the access catalog (`refuseBelowFloor`): security, crm, projects and money.
  * Derived, not listed, so the role floor cannot drift from the grant floor.
  * `projects` is deliberately NOT in FEATURE_GATED_MODULES (a CRM-only person
  * still reads /api/pm through the browser and the assistant, see
@@ -250,8 +250,16 @@ export function mountModuleGates(
  * Security feature at the data boundary, which the mcp-server's HTTP
  * transport (write-tier RBAC only) would otherwise skip; the assistant
  * router then resolves the same person and applies DS-005.
+ *
+ * WARP-3365 review — `money`: `money_list_open_documents` reaches
+ * `/api/money/documents` as `_service:mcp`, and the route admitted the
+ * principal on its own account without asking who it acts for, so an external
+ * guest (a null tool scope, and Money's `view` was not refused below family)
+ * could read the company's receivables and payables by asking the assistant.
+ * Its one hop is under `/api/money` (the same test pins it). Money is
+ * feature-gated for humans, so the gate asks question 2 as well.
  */
-export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business", "email", "team_chat", "security"];
+export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business", "email", "team_chat", "security", "money"];
 
 /** Mount after `mountModuleGates` (and therefore after `authMiddleware`). */
 export function mountMcpActingUserGates(

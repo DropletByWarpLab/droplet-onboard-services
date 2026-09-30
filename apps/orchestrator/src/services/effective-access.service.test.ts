@@ -280,6 +280,37 @@ describe("effective-access — crm and projects are refused below family (WARP-3
   });
 });
 
+// WARP-3365 review — Money is refused below family too (what the business is
+// owed and owes is the company's own), so no role, exception or tier default
+// hands a guest a Money row either.
+describe("effective-access — money is refused below family (WARP-3365 review)", () => {
+  it("a role-less guest resolves to no money; a role-less family to view, admin and owner to manage", () => {
+    const at = (tier: "guest" | "family" | "admin" | "owner") =>
+      featureLevel(computeEffectiveAccess(baseInputs({ user: { id: "u-1", role: tier, accessRole: null } })), "money");
+    expect(at("guest")).toBeUndefined();
+    expect(at("family")).toBe("view");
+    expect(at("admin")).toBe("manage");
+    expect(at("owner")).toBe("manage");
+  });
+
+  it("a guest-based role holding a stored money:view, and a per-person `allow` exception, resolve to none", () => {
+    const stored = computeEffectiveAccess(
+      baseInputs({
+        user: { id: "u-g", role: "guest", accessRole: role({ featureGrants: [{ moduleId: "money" as ModuleId, level: "view" }, { moduleId: "files", level: "view" }] }) },
+      }),
+    );
+    expect(featureLevel(stored, "money")).toBeUndefined();
+    expect(featureLevel(stored, "files")).toBe("view");
+    const allowed = computeEffectiveAccess(
+      baseInputs({
+        user: { id: "u-g", role: "guest", accessRole: role({ featureGrants: [] }) },
+        exceptions: [{ moduleId: "money" as ModuleId, effect: "allow", level: "view" }] as EffectiveAccessInputs["exceptions"],
+      }),
+    );
+    expect(featureLevel(allowed, "money")).toBeUndefined();
+  });
+});
+
 describe("effective-access — owner bypass", () => {
   it("owner resolves ALL features at manage (chat act), every domain, locks on", () => {
     const res = computeEffectiveAccess(

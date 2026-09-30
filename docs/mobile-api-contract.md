@@ -1402,10 +1402,15 @@ Windows clients call the `/api/mobile/pm/*` endpoints below behind the normal
 dashboard session/JWT.
 
 **Roles (WARP-3369).** Owner, admin and member (`family`) only. An external
-guest (`guest`) reads nothing of the company's work: every `/api/pm/*` and
-`/api/mobile/pm/*` route answers `404 { "error": "module_disabled", "module":
-"projects" }` for that role (and every `/api/crm/*` route the same with
-`"module": "crm"`, WARP-3365). Clients hide the entry rather than show the error.
+guest (`guest`) reads nothing of the company's work: every `/api/mobile/pm/*`
+route answers `404 { "error": "module_disabled", "module": "projects" }` for
+that role, as does `/api/pm/*` (and every `/api/crm/*` and `/api/money/*` route
+the same with `"module": "crm"` / `"money"`, WARP-3365). The one exception
+(Romain, 2026-09-30): a work item ASSIGNED to a guest is shared with them, so on
+`/api/pm` a guest may `GET /work-items/:id`, `GET` and `POST /work-items/:id/comments`,
+`POST /work-items/:id/transition` and `GET /projects/:id/states` for an item
+assigned to them (the same 404 for any other item, existing or not). Clients hide
+the entry rather than show the error.
 
 ### `GET /api/mobile/pm/workspaces`
 

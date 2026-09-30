@@ -516,8 +516,10 @@ export interface DeviceInfo {
   deviceId: string;
   hostname: string;
   hardwareRev: string;
-  networkMode: string;
-  ip: string | null;
+  /** Owner and admin only (WARP-3378): absent from a member's answer. */
+  networkMode?: string;
+  /** Owner and admin only (WARP-3378): absent from a member's answer. */
+  ip?: string | null;
   lastSeen: string;
 }
 
