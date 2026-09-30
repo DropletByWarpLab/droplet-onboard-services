@@ -1300,10 +1300,14 @@ export function createLlmRouter(prisma: PrismaClient): Router {
       // the MCP stdio child via `McpCallContext` → `_meta.ncToken` on
       // every `tools/call`. `resolveNcToken` returns null when the
       // request has no Nextcloud session (e.g. a direct API caller
-      // without the cookie); file tools will then surface
-      // AUTH_REQUIRED, which is the same behavior as before WARP-104.
+      // without the cookie), and always for a service principal such as
+      // voice, whose bearer is a shared secret and not a Nextcloud
+      // credential; file tools will then surface AUTH_REQUIRED, which is
+      // the same behavior as before WARP-104.
       const ncToken = (await resolveNcToken(req).catch(() => null)) ?? undefined;
-      if (!ncToken && (req as AuthedRequest).user) {
+      // A service principal never has a credential, so the warning below
+      // (a person's unprovisioned session) would only be noise on its turns.
+      if (!ncToken && (req as AuthedRequest).user && role !== "service") {
         // An authenticated dashboard user with no NC credential is the
         // signature of an unprovisioned session (passkey/SSO login, cache
         // restart, or logout on another device) — every ncToken-gated file

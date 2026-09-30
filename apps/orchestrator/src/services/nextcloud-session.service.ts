@@ -94,10 +94,25 @@ function extractSessionToken(req: Request): string | null {
 }
 
 /**
+ * A non-human principal: every SERVICE_PRINCIPALS entry in middleware/auth.ts
+ * and an extension's `_service:ext:<slug>` call-back principal. Either signal
+ * is enough, the same test activity.service.ts `actorFromRequest` applies.
+ */
+function isServicePrincipal(user: Request["user"]): boolean {
+  return user?.role === "service" || (user?.id?.startsWith("_service:") ?? false);
+}
+
+/**
  * Resolve the Nextcloud credential that should be used for an outbound OCS
  * or WebDAV call on behalf of the request's authenticated user.
  *
  * Resolution order:
+ *   0. A service principal (`_service:*`, role `service`) gets none. Its
+ *      Bearer is a shared secret (SERVICE_TOKEN_VOICE, ...), not a Nextcloud
+ *      credential, and step 2 would otherwise forward that secret to
+ *      Nextcloud and into MCP `_meta.ncToken`. The MCP principal's
+ *      per-person token rides X-Nextcloud-Token and is read by its own
+ *      routes, never here.
  *   1. If the session token is a JWT (post-PR#12 browsers), look up the
  *      per-user Nextcloud app-password from Redis by `req.user.id`.
  *   2. Otherwise, treat the session token as a legacy Nextcloud token and
@@ -111,6 +126,8 @@ function extractSessionToken(req: Request): string | null {
  * surface 401 so the dashboard prompts a fresh login, which re-seeds Redis.
  */
 export async function resolveNcToken(req: Request): Promise<string | null> {
+  if (isServicePrincipal(req.user)) return null;
+
   const sessionToken = extractSessionToken(req);
 
   if (sessionToken) {
