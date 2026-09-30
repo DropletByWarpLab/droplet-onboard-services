@@ -284,8 +284,9 @@ describe("runAgent sends the folded shape on both transports (WARP-3338)", () =>
 
   it("checkpoints the unfolded array, and logs a cut that first happens after iteration 0, once", async () => {
     // One tool round, then an answer. At the top of iteration 1 the test adds
-    // a large unmarked system message to the loop's own array (what stage's
-    // system-role finalize nudge does), so only that pass needs a cut.
+    // a large unmarked system message to the loop's own array (what the
+    // finalize nudge did while it was a system message), so only that pass
+    // needs a cut.
     let n = 0;
     const chat = vi.fn(async () => ({
       ok: true,

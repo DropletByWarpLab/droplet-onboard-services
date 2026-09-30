@@ -2296,9 +2296,10 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
     // reasoning_effort) is identical, so a streamed turn issues byte-for-byte
     // the same request as a blocking one.
     const folded = foldSystemMessages(messages);
-    // WARP-3338 — counts only, once per turn each. Not only at iteration 0:
-    // a system message added mid-turn (a finalize nudge) can push the fold
-    // over for the first time on a later pass.
+    // WARP-3338 — counts only, once per turn each. Checked on every pass, not
+    // only iteration 0: the fold runs per pass, and a system message joining
+    // the array mid-turn (the finalize nudge was one until WARP-3285 made it
+    // a user message) would otherwise be cut without a word.
     const foldLog = {
       turn_id: turnId,
       max_chars: FOLDED_SYSTEM_MAX_CHARS,
