@@ -14,11 +14,13 @@
  * never inferred from `externalSystem != null` — see `toCompany`.
  *
  * Money: `amountMinor` is a decimal STRING of minor units at every hop, from
- * the Postgres BigInt to the model. It is never parsed into a number here.
- * `JSON.parse` would happily turn "9007199254740993" into 9007199254740992 —
- * off by one, silently, in a figure somebody is about to quote to a customer —
- * so nothing on this path treats it as arithmetic.
+ * the Postgres BigInt to the LAST one, and it is never parsed into a number
+ * (`JSON.parse` would turn "9007199254740993" into …992 — off by one, silently,
+ * in a figure somebody is about to quote to a customer). At that last hop the
+ * model gets MAJOR units instead (WARP-3400): given the cents string it read
+ * "1000000" as dollars and quoted a $10,000.00 deal as "USD 1,000,000".
  */
+import { majorFromMinor } from "../../major-units.js";
 
 // ── Wire shapes the tools return ─────────────────────────────────────────────
 // Deliberately a SUBSET of the orchestrator's Api* shapes: a tool result is
@@ -44,8 +46,10 @@ export interface CrmDealOut {
   stage: string;
   /** OPEN | WON | LOST — the outcome, which is never the stage NAME. */
   outcome: string;
-  /** Decimal string of minor units. Never a number — see the header. */
-  amount_minor: string | null;
+  /** MAJOR units as a decimal string, e.g. "10000.00". Never a number. */
+  amount: string | null;
+  /** Ready to quote, e.g. "$10,000.00". */
+  amount_display: string | null;
   currency: string | null;
   expected_close: string | null;
   closed_at: string | null;
@@ -111,13 +115,15 @@ export function toCompany(row: ApiCompany): CrmCompanyOut {
 }
 
 export function toDeal(row: ApiDeal): CrmDealOut {
+  const money = majorFromMinor(row.amountMinor, row.currency);
   return {
     id: row.id,
     title: row.title,
     company: row.companyName,
     stage: row.stage.name,
     outcome: row.stage.kind,
-    amount_minor: row.amountMinor,
+    amount: money?.amount ?? null,
+    amount_display: money?.display ?? null,
     currency: row.currency,
     expected_close: row.expectedCloseOn,
     closed_at: row.closedAt,

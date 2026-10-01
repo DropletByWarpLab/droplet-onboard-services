@@ -18,6 +18,7 @@
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import { callOrch } from "../pm/pm-orch.js";
+import { displayMajor } from "../../major-units.js";
 import { moneyError } from "./money-orch.js";
 
 const inputSchema = {
@@ -43,10 +44,13 @@ interface DocumentOut {
   direction: "owed_to_us" | "owed_by_us";
   counterparty: string | null;
   due: string | null;
-  /** The invoiced total, as a decimal string. */
+  /** The invoiced total, as a decimal string in MAJOR units. */
   amount: string | null;
-  /** What remains UNPAID — not the same number as `amount`. */
+  /** What remains UNPAID — not the same number as `amount`. Major units. */
   balance: string | null;
+  /** WARP-3400 — ready to quote ("$4,210.55"); null while the currency is unknown. */
+  amount_display: string | null;
+  balance_display: string | null;
   /** Null means "this ledger's own currency", which the box does not know. */
   currency: string | null;
   /** The document's state: the box's own lifecycle, or the vendor's word. */
@@ -125,6 +129,11 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       due: doc.dueAt,
       amount: doc.amount,
       balance: doc.balance,
+      // 🔴 NO symbol without a currency: a ledger that sent none is in its own
+      // home currency, which the box does not know, and a "$" invented here is
+      // exactly the denomination bug WARP-3400 fixed on the deal side.
+      amount_display: doc.amount !== null && doc.currency ? displayMajor(doc.amount, doc.currency) : null,
+      balance_display: doc.balance !== null && doc.currency ? displayMajor(doc.balance, doc.currency) : null,
       currency: doc.currency,
       // One field, because a person asking "what state is this in" does not
       // care which of two columns holds the answer. The box's own lifecycle
@@ -168,7 +177,8 @@ const tool: Tool = {
     "List the invoices and bills this box has read from connected accounting systems " +
     "(Xero, QuickBooks, Stripe): who owes what, what is due and what is overdue. " +
     "Read-only — the accounting system stays the system of record. Balances are " +
-    "unpaid amounts, and figures from different ledgers must never be added.",
+    "unpaid amounts, and figures from different ledgers must never be added. " +
+    "Amounts are in major units (e.g. dollars).",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,
