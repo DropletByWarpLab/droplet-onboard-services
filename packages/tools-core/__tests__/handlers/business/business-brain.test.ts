@@ -10,9 +10,10 @@
  * What is worth pinning here is the projection, because it is the ONLY
  * narrowing between the database and the model:
  *
- *   money       stays a minor-unit STRING, like every other amount this tool
- *               returns — a JSON number here would be the one place amounts
- *               change type, against the tool's own promise
+ *   money       is a MAJOR-unit STRING (`impact`, `impact_display`), like every
+ *               other amount this tool returns — a JSON number here would be
+ *               the one place amounts change type, and the cents the wire
+ *               carries are what a model reads as dollars (WARP-3400)
  *   evidence    is summarised, not passed through. A tool result is capped at
  *               8,000 chars; whole evidence arrays would fill it with three
  *               findings and the model would believe that was all of them
@@ -94,13 +95,30 @@ describe("business_find entity:finding (WARP-2752)", () => {
     expect(get.mock.calls[0]![0]).toContain("limit=50");
   });
 
-  it("keeps money a minor-unit string", async () => {
+  it("hands the model major units, never the cents string", async () => {
+    // 4000000 minor USD is $40,000.00. The model used to be given the cents
+    // and read them as dollars: 100x too high (WARP-3400).
     get.mockResolvedValueOnce(res(true, 200, { findings: [apiFinding], total: 1 }));
     const out = expectOk(await businessFind.handler({ entity: "finding" }, ctx));
     const f = (out.data as { findings: Array<Record<string, unknown>> }).findings[0]!;
-    expect(f.impact_minor).toBe("4000000");
-    expect(typeof f.impact_minor).toBe("string");
+    expect(f.impact).toBe("40000.00");
+    expect(f.impact_display).toBe("$40,000.00");
+    expect(typeof f.impact).toBe("string");
     expect(f.currency).toBe("USD");
+    expect(f).not.toHaveProperty("impact_minor");
+  });
+
+  it.each([
+    ["JPY", "1000000", "1000000", "¥1,000,000"],
+    ["KWD", "1000000", "1000.000", "KWD 1,000.000"],
+  ])("honours the %s exponent on an impact of %s minor units", async (currency, minor, impact, display) => {
+    get.mockResolvedValueOnce(
+      res(true, 200, { findings: [{ ...apiFinding, impactMinor: minor, currency }], total: 1 }),
+    );
+    const out = expectOk(await businessFind.handler({ entity: "finding" }, ctx));
+    const f = (out.data as { findings: Array<Record<string, unknown>> }).findings[0]!;
+    expect(f.impact).toBe(impact);
+    expect(f.impact_display).toBe(display);
   });
 
   it("summarises evidence instead of passing the whole array", async () => {
@@ -123,7 +141,8 @@ describe("business_find entity:finding (WARP-2752)", () => {
     );
     const out = expectOk(await businessFind.handler({ entity: "finding" }, ctx));
     const f = (out.data as { findings: Array<Record<string, unknown>> }).findings[0]!;
-    expect(f.impact_minor).toBeNull();
+    expect(f.impact).toBeNull();
+    expect(f.impact_display).toBeNull();
   });
 });
 
