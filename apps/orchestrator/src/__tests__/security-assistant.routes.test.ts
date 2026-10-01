@@ -46,6 +46,7 @@ import type { EffectiveAccessResult } from "../services/effective-access.service
 import { explainSecurityPattern } from "../services/security-patterns-read.js";
 import { loadIncidentDetail } from "../services/security-incident-view.js";
 import { SECURITY_ZONE_ACTIVE_LIMIT } from "../services/security-zones.service.js";
+import type { LockReadingsState } from "../services/security-lock-adapter.js";
 import { getTool, type ToolContext } from "@droplet/tools-core";
 import {
   areaRows as fakeAreaRows,
@@ -239,7 +240,7 @@ interface AppOpts {
   resolve?: (userId: string) => Promise<EffectiveAccessResult | null>;
   cameraStatus?: CameraStatusSource;
   /** WARP-2979 PR-4 — the lock adapter as the routes read it (default: none running). */
-  locks?: () => { knownLocks(): Array<{ ref: string; name: string; connected: boolean }> } | null;
+  locks?: () => { knownLocks(): Array<{ ref: string; name: string; connected: boolean }>; readingsState(): LockReadingsState } | null;
 }
 
 function app(f: FakeSecurityPrisma, opts: AppOpts = {}) {
@@ -717,7 +718,10 @@ describe("P4 PR-4 — door locks in security_search_events (A3) and security_zon
    */
   const ownerBypass = async (userId: string) => (userId === STEFAN ? withDevices(userId) : access("view"));
   const lockApp = (opts: AppOpts = {}) => app(f, { resolve: ownerBypass, ...opts });
-  const known = (connected = true) => () => ({ knownLocks: () => [{ ref: LOCK, name: "Back door lock", connected }] });
+  const known = (connected = true, readings: LockReadingsState = "current") => () => ({
+    knownLocks: () => [{ ref: LOCK, name: "Back door lock", connected }],
+    readingsState: () => readings,
+  });
 
   beforeEach(() => {
     f.world.securityEvent.push(lockRow(10n, new Date(T.getTime() + 120_000), "unlocked", "live"), lockRow(11n, new Date(T.getTime() + 180_000), "locked", "polled"));
@@ -810,7 +814,9 @@ describe("P4 PR-4 — door locks in security_search_events (A3) and security_zon
       { source: "Back door lock", part: null, reporting: "yes", linkedBy: "a person" },
     ]);
     expect((await shop({ locks: known(false) }))[1]!.reporting).toBe("offline");
-    expect((await shop({ locks: () => ({ knownLocks: () => [] }) }))[1]).toMatchObject({ source: "Smart Lock (as linked)", reporting: "not set up" });
+    expect((await shop({ locks: () => ({ knownLocks: () => [], readingsState: () => "current" as const }) }))[1]).toMatchObject({ source: "Smart Lock (as linked)", reporting: "not set up" });
+    // A last list the adapter can no longer confirm is not "yes": the /security header says it can't reach the locks.
+    expect((await shop({ locks: known(true, "unreachable") }))[1]!.reporting).toBe("unknown");
     expect((await shop({}))[1]!.reporting).toBe("unknown");
     expect((await shop({ locks: known() }, "maria")).map((c) => c.source)).toEqual(["Front door"]);
   });

@@ -662,8 +662,9 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
       // "detection off": Frigate says the camera is there but not detecting — neither reporting nor offline.
       type Reporting = "yes" | "offline" | "detection off" | "not set up" | "unknown";
       // A door lock: the adapter's last list — connected is reporting; not listed is not set up; no adapter, unknown.
+      // A last list the adapter can't currently confirm (bridge down, sweep failing) is unknown too, as on Close up.
       const lockReporting = (ref: string): Reporting => {
-        if (!reader) return "unknown";
+        if (!reader || reader.readingsState() !== "current") return "unknown";
         const lock = reader.knownLocks().find((l) => l.ref === ref);
         return !lock ? "not set up" : lock.connected ? "yes" : "offline";
       };
