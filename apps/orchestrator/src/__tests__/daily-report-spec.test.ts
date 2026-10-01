@@ -102,6 +102,25 @@ describe("seedDailyReportSpec", () => {
     for (const tool of called) expect(known.has(tool)).toBe(true);
   });
 
+  it("is worded for any business — no step's readback label talks about patients or a practice", async () => {
+    // WARP-3355: the routine readback is built from the catalog's home copy.
+    // The ERP reads used to say "what patients still owe" / "your practice
+    // software" on boxes with no practice connector. Read the labels the
+    // shipped steps will actually produce, so a vertical-worded step added
+    // here later fails this instead of reaching every business.
+    const p = fakePrisma(null);
+    await seedDailyReportSpec(p.client);
+    const labels = new Map(
+      TOOL_CATALOG.map((t: { name: string; homeDescription: string }) => [t.name, t.homeDescription]),
+    );
+    const called = createArg(p.create).data.steps.create
+      .filter((s) => s.kind === "call")
+      .map((s) => s.args.tool as string);
+    for (const tool of called) {
+      expect(labels.get(tool), tool).not.toMatch(/patient|practice/i);
+    }
+  });
+
   it("marks every read OPTIONAL — one source a box lacks must not kill the narrative", async () => {
     // The runner halts on the first failed step unless the step opts out.
     // A box with no cameras or no ERP is the common case, not the edge.

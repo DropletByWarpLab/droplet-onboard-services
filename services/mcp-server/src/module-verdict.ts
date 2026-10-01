@@ -1,5 +1,6 @@
 import {
   FAIL_CLOSED_MODULE_VERDICT,
+  MODULE_OWNED_TOOL_DOMAINS,
   parseModuleVerdict,
   type HttpClient,
   type ModuleVerdict,
@@ -22,7 +23,10 @@ import {
  * `FAIL_CLOSED_MODULE_VERDICT`: every module-owned domain withheld, every
  * unclaimed domain (system, data, routines, …) still available. The caller
  * gets a shorter tool list, never an error, and a failure is not remembered:
- * the next call asks again, so recovery is immediate.
+ * the next call asks again, so recovery is immediate. That includes the
+ * orchestrator's OWN fail-closed answer (an unresolvable person, a resolver
+ * error), which arrives as a well-formed 200: a verdict that withholds every
+ * module-owned domain is never cached either.
  *
  * A failure is SAID, once a minute: an operator whose tool list has quietly
  * shrunk needs one line naming why. The reason is a closed vocabulary
@@ -82,6 +86,12 @@ const DEFAULT_TTL_MS = 5_000;
 const DEFAULT_TIMEOUT_MS = 3_000;
 const MAX_CACHED = 512;
 
+/** True for the fail-closed set, whether it was built here or parsed from the orchestrator's answer. */
+function withholdsEveryModuleDomain(verdict: ModuleVerdict): boolean {
+  for (const d of MODULE_OWNED_TOOL_DOMAINS) if (!verdict.withheldDomains.has(d)) return false;
+  return true;
+}
+
 export function createModuleVerdictSource(opts: ModuleVerdictSourceOptions): ModuleVerdictSource {
   const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -132,8 +142,9 @@ export function createModuleVerdictSource(opts: ModuleVerdictSourceOptions): Mod
     let pending = inflight.get(key);
     if (!pending) {
       pending = fetchVerdict(asserted).then((verdict) => {
-        // Only a real answer is remembered; the fail-closed sentinel is not.
-        if (verdict !== FAIL_CLOSED_MODULE_VERDICT) {
+        // Only a real answer is remembered. Neither this side's fail-closed
+        // sentinel nor a 200 that carries the orchestrator's fail-closed set is.
+        if (!withholdsEveryModuleDomain(verdict)) {
           if (cache.size >= MAX_CACHED) cache.clear();
           cache.set(key, { at: now(), verdict });
         }

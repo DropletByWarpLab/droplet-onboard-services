@@ -101,10 +101,17 @@ async function defaultPersonModuleIds(userId: string): Promise<ReadonlySet<Modul
   return access ? new Set(access.features.map((f) => f.moduleId)) : null;
 }
 
-/** What is cached about one asserted value: who they are and what they hold. */
+/**
+ * What is cached about one asserted value: who they are and what they hold,
+ * or that they did not resolve. An unresolved name (unknown, ambiguous,
+ * deactivated) is cached for the TTL like any answer, so a caller repeating it
+ * costs one lookup and one warning per TTL, not one per tool call. A THROWN
+ * lookup is never cached.
+ */
 type PersonEntry =
   | { at: number; kind: "owner" }
-  | { at: number; kind: "person"; held: ReadonlySet<ModuleId> };
+  | { at: number; kind: "person"; held: ReadonlySet<ModuleId> }
+  | { at: number; kind: "unresolved" };
 
 export function createModuleVerdictResolver(deps: ModuleVerdictDeps): ModuleVerdictResolver {
   const ttlMs = deps.ttlMs ?? MODULE_VERDICT_TTL_MS;
@@ -112,17 +119,16 @@ export function createModuleVerdictResolver(deps: ModuleVerdictDeps): ModuleVerd
   const personModuleIds = deps.personModuleIds ?? defaultPersonModuleIds;
   const people = new Map<string, PersonEntry>();
 
-  /** `null` = could not be established (the caller fails closed). */
+  /** `null` or `unresolved` = could not be established (the caller fails closed). */
   async function person(asserted: string): Promise<PersonEntry | null> {
     const cached = people.get(asserted);
     if (cached && now() - cached.at < ttlMs) return cached;
     const resolved = await resolveAssertedUser(deps.prisma as PrismaClient, asserted);
+    let entry: PersonEntry;
     if (!resolved.ok) {
       logger.warn({ reason: resolved.reason }, "module_verdict_person_unresolved");
-      return null;
-    }
-    let entry: PersonEntry;
-    if (resolved.user.role === "owner") {
+      entry = { at: now(), kind: "unresolved" };
+    } else if (resolved.user.role === "owner") {
       entry = { at: now(), kind: "owner" };
     } else {
       const held = await personModuleIds(resolved.user.id);
@@ -145,7 +151,7 @@ export function createModuleVerdictResolver(deps: ModuleVerdictDeps): ModuleVerd
         return { withheldDomains: withheldDomainsFor(box) };
       }
       const entry = await person(who);
-      if (entry === null) return FAIL_CLOSED_MODULE_VERDICT;
+      if (entry === null || entry.kind === "unresolved") return FAIL_CLOSED_MODULE_VERDICT;
       const held =
         entry.kind === "owner" ? box : new Set([...entry.held].filter((m) => box.has(m)));
       return { withheldDomains: withheldDomainsFor(held) };

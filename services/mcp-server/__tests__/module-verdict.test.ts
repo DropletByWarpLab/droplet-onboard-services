@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { FAIL_CLOSED_MODULE_VERDICT } from "@droplet/tools-core";
+import { FAIL_CLOSED_MODULE_VERDICT, MODULE_OWNED_TOOL_DOMAINS } from "@droplet/tools-core";
 import type { HttpClient } from "@droplet/tools-core";
 import {
   FAIL_CLOSED_MODULE_SOURCE,
@@ -85,6 +85,17 @@ describe("createModuleVerdictSource", () => {
       t = 5_001;
       await source("carol");
       expect(get).toHaveBeenCalledTimes(3);
+    });
+
+    it("does NOT cache the orchestrator's own fail-closed answer (a 200 withholding every module domain)", async () => {
+      const get = vi
+        .fn()
+        .mockResolvedValueOnce(ok([...MODULE_OWNED_TOOL_DOMAINS]))
+        .mockResolvedValueOnce(ok(["cameras"]));
+      const source = createModuleVerdictSource({ http: client(get) });
+      expect((await source("carol")).withheldDomains).toEqual(new Set(MODULE_OWNED_TOOL_DOMAINS));
+      expect([...(await source("carol")).withheldDomains]).toEqual(["cameras"]);
+      expect(get).toHaveBeenCalledTimes(2);
     });
 
     it("shares one in-flight request between concurrent callers", async () => {

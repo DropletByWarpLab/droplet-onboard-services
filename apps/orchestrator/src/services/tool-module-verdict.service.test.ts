@@ -286,6 +286,20 @@ describe("caching", () => {
     expect(boxModuleIds).toHaveBeenCalledTimes(2);
   });
 
+  it("caches an UNRESOLVED person for the TTL: one lookup per TTL, still fail-closed, re-resolved after it", async () => {
+    let t = 1_000;
+    const rows: Row[] = [CAROL];
+    const prisma = prismaWith(rows);
+    const r = resolver({ prisma, ttlMs: 5_000, now: () => t });
+    expect(await r("nobody")).toBe(FAIL_CLOSED_MODULE_VERDICT);
+    expect(await r("nobody")).toBe(FAIL_CLOSED_MODULE_VERDICT);
+    expect(prisma.user.findMany).toHaveBeenCalledTimes(1);
+    rows.push({ id: "u-nobody", username: "nobody", role: "admin" });
+    t += 5_001;
+    expect((await r("nobody")).withheldDomains.size).toBe(0);
+    expect(prisma.user.findMany).toHaveBeenCalledTimes(2);
+  });
+
   it("does not cache a failure", async () => {
     let fail = true;
     const personModuleIds = vi.fn(async () => {
