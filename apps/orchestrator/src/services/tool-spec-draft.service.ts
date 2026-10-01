@@ -148,7 +148,7 @@ export function stepReferenceError(steps: ParsedStep[]): Record<string, unknown>
     for (const ref of referencedStepNames(scanned)) {
       if (!published.has(ref)) {
         return {
-          error: `Step ${i} refers to \${steps.${ref}}, which no earlier step publishes`,
+          error: `Step ${i + 1} refers to \${steps.${ref}}, which no earlier step publishes`,
           detail:
             "give the producing step an `as` name, and make sure it comes first",
           step: i,

@@ -15,9 +15,13 @@ vi.mock("../services/llm-complete.service.js", () => ({
 
 import {
   createToolSpecSummarizer,
+  fallbackSummary,
   renderFacts,
+  toLastSentence,
+  TRUNCATED_NOTE,
 } from "../services/tool-spec-summarizer.service.js";
 import type { RunStepTrace } from "../services/tool-spec-runner.service.js";
+import { GATEWAY_MAX_TOKENS } from "../types/index.js";
 
 const ok = (tool: string, result: unknown): RunStepTrace => ({
   idx: 0,
@@ -68,16 +72,23 @@ describe("renderFacts", () => {
   const toolError = (code: string, message: string) =>
     JSON.stringify({ status: "error", error: { code, message } });
 
-  it("maps a not-connected error CODE to NOT CONNECTED mechanically — never left to the model", () => {
+  it("DROPS a not-connected source from the facts, in code — never left to the model", () => {
     // ERP_NOT_CONNECTED means the owner never set the source up: not news.
     // AUTH_REQUIRED is a per-user source with nobody to read it for (a
-    // scheduled run). Both leave the report; the prompt says so in the
-    // same words.
-    expect(renderFacts([failed("erp_get_ar_summary", toolError("ERP_NOT_CONNECTED", "ERP not connected yet"))])).toBe(
-      "- erp_get_ar_summary: NOT CONNECTED",
-    );
-    expect(renderFacts([failed("list_events", toolError("AUTH_REQUIRED", "auth_required"))])).toBe(
-      "- list_events: NOT CONNECTED",
+    // scheduled run). WARP-3409: marked and left to the prompt, a model with
+    // thinking off wrote the ERP up as "could not be read" anyway.
+    const out = renderFacts([
+      ok("get_system_health", { status: "ok" }),
+      failed("erp_get_ar_summary", toolError("ERP_NOT_CONNECTED", "ERP not connected yet")),
+      failed("list_events", toolError("AUTH_REQUIRED", "auth_required")),
+    ]);
+    expect(out).toBe('- get_system_health: {"status":"ok"}');
+    expect(out).not.toMatch(/erp_get_ar_summary|list_events|NOT CONNECTED/);
+  });
+
+  it("says nothing was gathered when every source was not connected", () => {
+    expect(renderFacts([failed("erp_get_ar_summary", toolError("ERP_NOT_CONNECTED", "no"))])).toBe(
+      "(no results were gathered)",
     );
   });
 
@@ -115,6 +126,143 @@ describe("renderFacts", () => {
     const out = renderFacts([ok("weird_tool", circular)]);
     expect(out).toMatch(/could not be serialised/);
   });
+
+  it("puts known raw figures in a person's units — seconds, bytes, bits per second", () => {
+    // WARP-3409 — given `"uptime":16831`, every model opened the report with
+    // "running for 16,831 seconds".
+    const out = renderFacts([
+      ok("get_system_health", { status: "ok", uptime: 16_831 }),
+      ok("get_camera_health", { system: { uptimeSec: 172_735, storage: [{ freeBytes: 712_596_835_533, usedBytes: 0 }] } }),
+      ok("list_recent_files", { items: [{ name: "a.png", size: 328_693 }, { name: "b", size: 512 }] }),
+      ok("network_summary", { kpis: { wanUpBps: 0, wanDownBps: 2_500_000, clientCount: 7, offLanBytesThisMonth: 1_073_741_824 } }),
+      ok("lan_summary", { kpis: { wanUpBps: 2_500_000_000 } }),
+    ]);
+    expect(out).toContain('"uptime":"4 h 40 min"');
+    expect(out).toContain('"uptimeSec":"1 d 23 h"');
+    expect(out).toContain('"freeBytes":"663.7 GB"');
+    expect(out).toContain('"usedBytes":"0 B"');
+    expect(out).toContain('"size":"321.0 KB"');
+    expect(out).toContain('"size":"512 B"');
+    expect(out).toContain('"wanUpBps":"0 bps"');
+    expect(out).toContain('"wanDownBps":"2.5 Mbps"');
+    expect(out).toContain('"wanUpBps":"2.5 Gbps"');
+    expect(out).toContain('"offLanBytesThisMonth":"1.0 GB"');
+    // Everything else is left exactly as the tool returned it.
+    expect(out).toContain('"clientCount":7');
+    expect(out).toContain('"status":"ok"');
+  });
+
+  it("leaves a known field alone when it is not a non-negative number", () => {
+    const out = renderFacts([ok("t", { size: "large", uptime: -1, totalBytesPerHour: 5_000, constructor: 5 })]);
+    expect(out).toBe('- t: {"size":"large","uptime":-1,"totalBytesPerHour":5000,"constructor":5}');
+  });
+});
+
+/** The dispatcher throws the MCP error envelope verbatim (app.ts). */
+const envelope = (code: string, message: string) => JSON.stringify({ status: "error", error: { code, message } });
+
+/** The facts of run a405c8a7 (2026-09-30), trimmed to the fields the readouts use. */
+const dailyFacts = (): RunStepTrace[] => [
+  ok("get_system_health", {
+    status: "ok",
+    uptime: 16_831,
+    components: ["ai-gateway", "display", "file-indexer", "mqtt", "nextcloud", "postgres", "redis", "routing", "storage"].map(
+      (name) => ({ name, status: "ok" }),
+    ),
+  }),
+  ok("list_recent_files", { items: Array.from({ length: 30 }, (_, i) => ({ name: `f${i}` })) }),
+  ok("network_summary", { kpis: { clientCount: 7, dnsBlockedToday: 0 } }),
+  ok("get_camera_health", { system: { cameraCount: 0, camerasLive: 0 }, cameras: [] }),
+  ok("list_events", { count: 0, events: [] }),
+  failed("erp_get_ar_summary", envelope("ERP_NOT_CONNECTED", "ERP not connected yet")),
+  failed("erp_get_schedule_today", envelope("ERP_NOT_CONNECTED", "ERP not connected yet")),
+];
+
+describe("fallbackSummary (WARP-3409) — the write-up when the model could not write one", () => {
+  it("reads out each source in plain lines, leaves NOT CONNECTED out, and says why there is no prose", () => {
+    expect(fallbackSummary(dailyFacts(), new Error("AI Gateway error 422: …"))).toBe(
+      [
+        "System health: 9 of 9 services ok.",
+        "Recent files: the 30 most recently changed items.",
+        "Network: 7 devices connected, 0 DNS lookups blocked today.",
+        "Cameras: none set up.",
+        "Calendar: no upcoming events.",
+        "The written summary couldn't be produced because the AI service returned an error.",
+      ].join("\n"),
+    );
+  });
+
+  it("says a failed read plainly, names services that are not ok, and counts live cameras", () => {
+    const out = fallbackSummary(
+      [
+        ok("get_system_health", { components: [{ name: "redis", status: "ok" }, { name: "nextcloud", status: "down" }] }),
+        failed("list_recent_files", envelope("RECENT_FAILED", "nextcloud returned 503")),
+        ok("get_camera_health", { system: { cameraCount: 3, camerasLive: 2 } }),
+        ok("list_events", { count: 1 }),
+      ],
+      new Error("x"),
+    ).split("\n");
+    expect(out.slice(0, 4)).toEqual([
+      "System health: 1 of 2 services ok (not ok: nextcloud).",
+      "Recent files: couldn't be read.",
+      "Cameras: 2 of 3 live.",
+      "Calendar: 1 upcoming event.",
+    ]);
+  });
+
+  it("a full page of recent files is 'the 30 most recent', never a count of everything that changed", () => {
+    // list_recent_files asks /recents?limit=30 with no time window: 30 back
+    // means "at least 30", so printing 30 as a total would be a guessed figure.
+    const line = (n: number) =>
+      fallbackSummary([ok("list_recent_files", { items: Array.from({ length: n }, (_, i) => ({ name: `f${i}` })) })], new Error("x")).split(
+        "\n",
+      )[0];
+    expect(line(30)).toBe("Recent files: the 30 most recently changed items.");
+    expect(line(29)).toBe("Recent files: 29 recently changed items.");
+    expect(line(1)).toBe("Recent files: 1 recently changed item.");
+  });
+
+  it("never guesses: an unrecognised shape or an unknown tool is just 'checked'; pseudo-steps are not sources", () => {
+    const out = fallbackSummary(
+      [
+        ok("network_summary", { kpis: { clientCount: "seven" } }),
+        ok("search_files", { hits: 4 }),
+        ok("toString", {}),
+        { idx: 2, tool: "(transform)", args: {}, ok: true, result: 1 },
+      ],
+      new Error("x"),
+    ).split("\n");
+    expect(out.slice(0, -1)).toEqual(["Network: checked.", "search_files: checked.", "toString: checked."]);
+  });
+
+  it("says so when nothing was gathered", () => {
+    expect(fallbackSummary([failed("erp_get_ar_summary", envelope("ERP_NOT_CONNECTED", "no"))], new Error("x"))).toBe(
+      "Nothing was gathered to report on.\nThe written summary couldn't be produced because the AI service returned an error.",
+    );
+  });
+
+  it("names the cause in plain words: out of room, no text, no model, too slow", async () => {
+    const why = async (): Promise<string> => {
+      const s = createToolSpecSummarizer(activeModel);
+      const err = await s.summarize("Write it up.", [ok("t", 1)]).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      return s.fallback!([], err).split("\n").pop()!;
+    };
+
+    completeOnceMock.mockResolvedValue({ content: "", model: "m", reasoning: "x".repeat(6940), finishReason: "length" });
+    expect(await why()).toBe("The written summary couldn't be produced because the AI model ran out of room before it wrote anything.");
+
+    completeOnceMock.mockResolvedValue({ content: "", model: "m", reasoning: "", finishReason: "stop" });
+    expect(await why()).toBe("The written summary couldn't be produced because the AI model returned no text.");
+
+    completeOnceMock.mockRejectedValue(new Error("AI Gateway timeout after 120000ms during completeOnce"));
+    expect(await why()).toBe("The written summary couldn't be produced because the AI model took too long to answer.");
+
+    activeModel.mockResolvedValue(null);
+    expect(await why()).toBe("The written summary couldn't be produced because no AI model was available to write it.");
+  });
 });
 
 describe("createToolSpecSummarizer", () => {
@@ -144,16 +292,27 @@ describe("createToolSpecSummarizer", () => {
     expect(completeOnceMock).toHaveBeenCalledTimes(1);
   });
 
-  it("RETRIES once on a blank answer with a doubled budget and low effort", async () => {
+  it("asks for LOW thinking on the first call — the gateway's family table decides what that means", async () => {
+    // WARP-3409 — replaying the failed run: gpt-oss:20B at default effort
+    // took 8–22 s and was cut off once in three; at low, 3–4 s, 3/3 done.
+    // GLM at its default spent all 2,100 tokens thinking; "low" = thinking off.
+    const s = createToolSpecSummarizer(activeModel);
+    await s.summarize("Write it up.", [ok("t", 1)]);
+    expect(completeOnceMock.mock.calls[0][0].reasoningEffort).toBe("low");
+  });
+
+  it("RETRIES once on a blank answer with a doubled budget CAPPED at the gateway's ceiling, still low", async () => {
     // WARP-2964 — a blank answer with finish_reason=length is a budget
     // failure, not a quiet day. Give it room once before giving up.
+    // WARP-3409 — but never past the gateway's le=4096: 2 × 2,100 = 4,200
+    // was a 422 that failed the whole run.
     completeOnceMock
       .mockResolvedValueOnce({ content: "   ", model: "m", reasoning: "…", finishReason: "length" })
       .mockResolvedValueOnce({ content: "Nine files landed.", model: "m", reasoning: "", finishReason: "stop" });
     const s = createToolSpecSummarizer(activeModel);
     await expect(s.summarize("Write it up.", [ok("t", 1)])).resolves.toBe("Nine files landed.");
     expect(completeOnceMock).toHaveBeenCalledTimes(2);
-    expect(completeOnceMock.mock.calls[1][0].maxTokens).toBe(4200);
+    expect(completeOnceMock.mock.calls[1][0].maxTokens).toBe(GATEWAY_MAX_TOKENS);
     expect(completeOnceMock.mock.calls[1][0].reasoningEffort).toBe("low");
   });
 
@@ -180,6 +339,85 @@ describe("createToolSpecSummarizer", () => {
       /empty summary \(model=.* finish_reason=length reasoning_chars=2518\)/,
     );
     expect(completeOnceMock).toHaveBeenCalledTimes(2);
+  });
+
+  // WARP-3409 — a write-up cut off mid-sentence (finish_reason=length with
+  // text) is not finished; replaying the failed run, gpt-oss at default effort
+  // returned 658 chars ending "…display " once in three.
+  const cut = (content: string) => ({ content, model: "m", reasoning: "", finishReason: "length" });
+  const done = (content: string) => ({ content, model: "m", reasoning: "", finishReason: "stop" });
+
+  it("RETRIES a cut-off answer like a blank one, and takes the retry when it finishes", async () => {
+    completeOnceMock.mockResolvedValueOnce(cut("All is well. The latency for each component is low: display ")).mockResolvedValueOnce(done("All is well."));
+    const s = createToolSpecSummarizer(activeModel);
+    await expect(s.summarize("Write it up.", [ok("t", 1)])).resolves.toBe("All is well.");
+    expect(completeOnceMock.mock.calls.map(([a]) => [a.maxTokens, a.reasoningEffort])).toEqual([
+      [2100, "low"],
+      [GATEWAY_MAX_TOKENS, "low"],
+    ]);
+  });
+
+  it("cut off twice: keeps the LONGER text up to its last complete sentence and marks it truncated", async () => {
+    completeOnceMock
+      .mockResolvedValueOnce(cut("Your system is healthy. Uptime is 4 h 40 min. CPU is at 8.8 %. Stor"))
+      .mockResolvedValueOnce(cut("Your system is healthy. Uptime is 4 h 40 min. CPU is at 8."));
+    const s = createToolSpecSummarizer(activeModel);
+    // The first is longer, so it is kept; its dangling "Stor" goes, and the
+    // "8.8" inside it is not mistaken for a sentence end.
+    await expect(s.summarize("Write it up.", [ok("t", 1)])).resolves.toEqual({
+      text: `Your system is healthy. Uptime is 4 h 40 min. CPU is at 8.8 %.\n\n${TRUNCATED_NOTE}`,
+      truncated: true,
+    });
+  });
+
+  it("cut off, then a blank retry: the cut-off text is kept, ended cleanly", async () => {
+    completeOnceMock.mockResolvedValueOnce(cut("Nine files landed. Two more are")).mockResolvedValueOnce(done(""));
+    const s = createToolSpecSummarizer(activeModel);
+    await expect(s.summarize("Write it up.", [ok("t", 1)])).resolves.toEqual({
+      text: `Nine files landed.\n\n${TRUNCATED_NOTE}`,
+      truncated: true,
+    });
+  });
+
+  it("cut off with no complete sentence at all: throws, and the fallback says why in plain words", async () => {
+    completeOnceMock.mockResolvedValueOnce(cut("Your system has been running for")).mockResolvedValueOnce(cut("Your system"));
+    const s = createToolSpecSummarizer(activeModel);
+    const err = await s.summarize("Write it up.", [ok("t", 1)]).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(String(err)).toMatch(/no complete sentence \(model=m finish_reason=length/);
+    expect(s.fallback!([], err).split("\n").pop()).toBe(
+      "The written summary couldn't be produced because the AI model ran out of room before it finished a sentence.",
+    );
+  });
+
+  it("a retry that ERRORS does not throw away the first answer's prose", async () => {
+    completeOnceMock
+      .mockResolvedValueOnce(cut("Your system is healthy. Nine files landed. Two"))
+      .mockRejectedValueOnce(new Error("AI Gateway timeout after 120000ms during completeOnce"));
+    const s = createToolSpecSummarizer(activeModel);
+    await expect(s.summarize("Write it up.", [ok("t", 1)])).resolves.toEqual({
+      text: `Your system is healthy. Nine files landed.\n\n${TRUNCATED_NOTE}`,
+      truncated: true,
+    });
+  });
+
+  it("a retry that errors after a BLANK first answer still throws (nothing to keep)", async () => {
+    completeOnceMock.mockResolvedValueOnce(cut("")).mockRejectedValueOnce(new Error("AI Gateway error 503"));
+    const s = createToolSpecSummarizer(activeModel);
+    await expect(s.summarize("Write it up.", [ok("t", 1)])).rejects.toThrow(/AI Gateway error 503/);
+  });
+
+  it("a trimmed summary says so in the prose itself — no client reads `truncated`", () => {
+    expect(TRUNCATED_NOTE).toBe("This summary was cut short; some details may be missing.");
+  });
+
+  it("toLastSentence: a terminator counts only with whitespace after it", () => {
+    expect(toLastSentence("One. Two! Three? Fou")).toBe("One. Two! Three?");
+    expect(toLastSentence("He said “fine.” Then")).toBe("He said “fine.”");
+    expect(toLastSentence("Storage is 663.7 GB and CPU 8.")).toBe("");
+    expect(toLastSentence("No sentence ends here")).toBe("");
   });
 
   it("sends the facts and the spec's prompt to the model", async () => {
