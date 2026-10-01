@@ -19,7 +19,9 @@
 import type { Request } from "express";
 import type { AccessEventKind, AccessForcedClaim, AccessTroubleCode, DoorPositionSource, Prisma, PrismaClient } from "@prisma/client";
 import { actorFromRequest } from "./activity.service.js";
-import { recordActivity } from "./activity.singleton.js";
+import { recordActivityInTx } from "./activity.singleton.js";
+import type { ActivityAppendTx } from "./activity.service.js";
+import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
 import { chainSafeText, hasUnsafeDisplayChars } from "./security-audit.js";
 import type { CronRuntime } from "./cron-runtime.service.js";
 import {
@@ -54,9 +56,13 @@ export interface DoorView {
   heldOpenSeconds: number;
   status: "active" | "retired";
   retiredAt: Date | null;
-  /** From the newest position event. Unknown — never closed — until one exists; not_monitored for a `none` door. */
+  /**
+   * From the newest position event. Unknown — never closed — until one exists,
+   * and again after every change of `doorPositionSource` until one arrives
+   * under the new source; not_monitored for a `none` door.
+   */
   position: DoorPosition;
-  /** When the newest position event happened. `null` if none has, and for a `none` door. */
+  /** When the position event behind `position` happened. `null` when there is none (see above), and for a `none` door. */
   positionSince: Date | null;
   /** What this door is able to alarm on (§9.7). The UI says so. */
   claims: { forcedDoor: AccessForcedClaim | null; heldOpen: boolean };
@@ -81,6 +87,7 @@ interface AccessPointRow {
   name: string;
   doorPositionSource: DoorPositionSource;
   heldOpenSeconds: number;
+  doorPositionSourceSince: Date;
   status: "active" | "retired";
   retiredAt: Date | null;
   createdAt: Date;
@@ -92,6 +99,8 @@ interface PositionRow {
   kind: AccessEventKind;
   troubleCode: AccessTroubleCode | null;
   occurredAt: Date;
+  /** When the box received it — the box's clock, not the device's. */
+  createdAt: Date;
 }
 
 /**
@@ -99,9 +108,18 @@ interface PositionRow {
  * only comes on change says nothing about how current it is. It turns `unknown`
  * when link supervision lapses (§9.7), which ships with the supervision writer
  * (P1 link), not by the age of the last event.
+ *
+ * A report from before the last change of `doorPositionSource` was made under
+ * the old wiring and says nothing about the door now, so it does not count: the
+ * position is unknown until a report arrives under the new source. "Before" on
+ * either clock — received by the box, or occurred by the device's word — so a
+ * replayed old report cannot pass for a new one.
  */
-function toDoorView(row: AccessPointRow, latest: PositionRow | undefined): DoorView {
+function toDoorView(row: AccessPointRow, newest: PositionRow | undefined): DoorView {
   const source = row.doorPositionSource;
+  const since = row.doorPositionSourceSince.getTime();
+  const latest =
+    newest && newest.createdAt.getTime() >= since && newest.occurredAt.getTime() >= since ? newest : undefined;
   return {
     id: row.id,
     name: row.name,
@@ -138,7 +156,7 @@ export async function listDoors(
     // DISTINCT ON walks the (accessPointId, occurredAt) index per door; Prisma's
     // own `distinct` would read every matching row and pick in memory.
     const latest = await prisma.$queryRaw<PositionRow[]>`
-      SELECT DISTINCT ON ("accessPointId") "accessPointId", "kind", "troubleCode", "occurredAt"
+      SELECT DISTINCT ON ("accessPointId") "accessPointId", "kind", "troubleCode", "occurredAt", "createdAt"
       FROM "AccessEvent"
       WHERE "accessPointId" = ANY(${monitored}::text[])
         AND ("kind" IN ('door_open', 'door_closed') OR ("kind" = 'trouble' AND "troubleCode" = 'position_unknown'))
@@ -238,15 +256,23 @@ function invalidName(): DoorWriteError {
   return new DoorWriteError(400, "INVALID_NAME", `A door's name is 1–${DOOR_NAME_MAX} characters, with nothing that hides or reorders text`);
 }
 
-/** Door configuration is security-relevant (`none` switches alarms off), so every change is audited. Best effort: the recorder never throws. */
+/**
+ * Door configuration is security-relevant (`none` switches alarms off), so
+ * every change is audited IN the transaction that makes it: the change and its
+ * audit row commit or roll back together, and a change the chain cannot record
+ * does not happen (the route answers 503). Call it LAST in the callback, after
+ * the write — nothing may run after it (activity.singleton.ts,
+ * `recordActivityInTx`).
+ */
 async function audit(
+  tx: ActivityAppendTx,
   ctx: DoorWriteContext,
   what: string,
   sub: string,
   action: "door.create" | "door.update" | "door.retire",
   refs: Record<string, unknown>,
 ): Promise<void> {
-  await recordActivity({
+  await recordActivityInTx(tx, {
     // system / info, never network / auth or warn / err: the Security threat
     // mirror copies exactly those, and an owner naming a door is not a threat.
     kind: "system",
@@ -259,25 +285,31 @@ async function audit(
   });
 }
 
+type DoorsPrisma = Pick<PrismaClient, "accessPoint" | "$queryRaw" | "$transaction">;
+
 export async function createDoor(
-  prisma: Pick<PrismaClient, "accessPoint" | "$queryRaw">,
+  prisma: DoorsPrisma,
   input: { name: string; doorPositionSource: DoorPositionSource; heldOpenSeconds?: number },
   ctx: DoorWriteContext,
 ): Promise<DoorView> {
   const name = normaliseDoorName(input.name);
   if (name === null) throw invalidName();
-  const row = (await prisma.accessPoint.create({
-    data: {
-      name,
-      doorPositionSource: input.doorPositionSource,
-      heldOpenSeconds: input.heldOpenSeconds ?? HELD_OPEN_DEFAULT_SECONDS,
-    },
-  })) as AccessPointRow;
-  await audit(ctx, "Door added", row.name, "door.create", {
-    doorId: row.id,
-    doorPositionSource: row.doorPositionSource,
-    heldOpenSeconds: row.heldOpenSeconds,
-  });
+  const row = await prisma.$transaction(async (tx) => {
+    const created = (await tx.accessPoint.create({
+      data: {
+        name,
+        doorPositionSource: input.doorPositionSource,
+        doorPositionSourceSince: ctx.now,
+        heldOpenSeconds: input.heldOpenSeconds ?? HELD_OPEN_DEFAULT_SECONDS,
+      },
+    })) as AccessPointRow;
+    await audit(tx, ctx, "Door added", created.name, "door.create", {
+      doorId: created.id,
+      doorPositionSource: created.doorPositionSource,
+      heldOpenSeconds: created.heldOpenSeconds,
+    });
+    return created;
+  }, READ_COMMITTED_TX);
   return toDoorView(row, undefined);
 }
 
@@ -290,7 +322,7 @@ async function loadDoor(prisma: Pick<PrismaClient, "accessPoint">, id: string): 
 async function viewOf(prisma: Pick<PrismaClient, "accessPoint" | "$queryRaw">, id: string): Promise<DoorView> {
   const row = await loadDoor(prisma, id);
   const latest = row.doorPositionSource === "none" ? [] : await prisma.$queryRaw<PositionRow[]>`
-    SELECT DISTINCT ON ("accessPointId") "accessPointId", "kind", "troubleCode", "occurredAt"
+    SELECT DISTINCT ON ("accessPointId") "accessPointId", "kind", "troubleCode", "occurredAt", "createdAt"
     FROM "AccessEvent"
     WHERE "accessPointId" = ${id}
       AND ("kind" IN ('door_open', 'door_closed') OR ("kind" = 'trouble' AND "troubleCode" = 'position_unknown'))
@@ -299,7 +331,7 @@ async function viewOf(prisma: Pick<PrismaClient, "accessPoint" | "$queryRaw">, i
 }
 
 export async function updateDoor(
-  prisma: Pick<PrismaClient, "accessPoint" | "$queryRaw">,
+  prisma: DoorsPrisma,
   id: string,
   patch: { name?: string; doorPositionSource?: DoorPositionSource; heldOpenSeconds?: number },
   ctx: DoorWriteContext,
@@ -322,34 +354,44 @@ export async function updateDoor(
   const changed = Object.keys(data);
   if (changed.length === 0) return viewOf(prisma, id);
 
-  // The status guard rides on the write itself: a door retired between the read
-  // above and this line must not be quietly edited.
-  const { count } = await prisma.accessPoint.updateMany({ where: { id, status: "active" }, data });
-  if (count === 0) throw new DoorWriteError(409, "DOOR_RETIRED", "This door is retired and can't be changed");
+  await prisma.$transaction(async (tx) => {
+    // The status guard rides on the write itself: a door retired between the
+    // read above and this line must not be quietly edited. A new source also
+    // restarts the position (toDoorView): reports from the old wiring no
+    // longer describe the door.
+    const { count } = await tx.accessPoint.updateMany({
+      where: { id, status: "active" },
+      data: data.doorPositionSource ? { ...data, doorPositionSourceSince: ctx.now } : data,
+    });
+    if (count === 0) throw new DoorWriteError(409, "DOOR_RETIRED", "This door is retired and can't be changed");
 
-  await audit(ctx, "Door changed", data.name ?? current.name, "door.update", {
-    doorId: id,
-    changed,
-    // The one change with teeth: `none` switches forced-door and held-open off.
-    ...(data.doorPositionSource ? { doorPositionSource: { from: current.doorPositionSource, to: data.doorPositionSource } } : {}),
-    ...(data.heldOpenSeconds !== undefined ? { heldOpenSeconds: { from: current.heldOpenSeconds, to: data.heldOpenSeconds } } : {}),
-  });
+    await audit(tx, ctx, "Door changed", data.name ?? current.name, "door.update", {
+      doorId: id,
+      changed,
+      // The one change with teeth: `none` switches forced-door and held-open off.
+      ...(data.doorPositionSource ? { doorPositionSource: { from: current.doorPositionSource, to: data.doorPositionSource } } : {}),
+      ...(data.heldOpenSeconds !== undefined ? { heldOpenSeconds: { from: current.heldOpenSeconds, to: data.heldOpenSeconds } } : {}),
+    });
+  }, READ_COMMITTED_TX);
   return viewOf(prisma, id);
 }
 
 /** A door is retired, never deleted: its events are evidence and reference it. Retiring twice is a no-op, not an error. */
 export async function retireDoor(
-  prisma: Pick<PrismaClient, "accessPoint" | "$queryRaw">,
+  prisma: DoorsPrisma,
   id: string,
   ctx: DoorWriteContext,
 ): Promise<DoorView> {
   const current = await loadDoor(prisma, id);
   if (current.status === "retired") return viewOf(prisma, id);
-  const { count } = await prisma.accessPoint.updateMany({
-    where: { id, status: "active" },
-    data: { status: "retired", retiredAt: ctx.now },
-  });
-  if (count === 1) await audit(ctx, "Door retired", current.name, "door.retire", { doorId: id });
+  await prisma.$transaction(async (tx) => {
+    const { count } = await tx.accessPoint.updateMany({
+      where: { id, status: "active" },
+      data: { status: "retired", retiredAt: ctx.now },
+    });
+    // count 0: retired concurrently — that retirement was audited by its own writer.
+    if (count === 1) await audit(tx, ctx, "Door retired", current.name, "door.retire", { doorId: id });
+  }, READ_COMMITTED_TX);
   return viewOf(prisma, id);
 }
 

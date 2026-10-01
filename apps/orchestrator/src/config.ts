@@ -1101,10 +1101,11 @@ const envSchema = z.object({
   //   — the module ships dark. Only "1"/"true" enable it; anything else,
   //   including an empty string from compose's `${DOORS_ENABLED:-}`, is OFF.
   //   OFF means ABSENT, not empty: the module registry's `available` reads
-  //   this (as `cameras` reads FRIGATE_URL), so /api/doors 404s and the
-  //   `doors` tool domain is unreachable. The retention job still runs with
-  //   it off: rows already written identify people, and their clock does not
-  //   stop because the surface was switched off.
+  //   this (as `cameras` reads FRIGATE_URL), so /api/doors 404s. There is no
+  //   `doors` tool domain yet (the read-only chat tools are P4b's, and claim
+  //   it then); when it lands, this same flag gates it. The retention job
+  //   still runs with it off: rows already written identify people, and their
+  //   clock does not stop because the surface was switched off.
   DOORS_ENABLED: z
     .string()
     .default("0")
