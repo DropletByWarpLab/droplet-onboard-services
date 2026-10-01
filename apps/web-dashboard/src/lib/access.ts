@@ -421,7 +421,17 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
     label: "Projects",
     description: "Boards, tasks and milestones",
     levels: [
-      { value: "view", label: "View", grants: "See boards and tasks" },
+      // WARP-3369 — value-identical to the orchestrator catalog: `view` is a
+      // REFUSAL below the member floor (`refuseBelowFloor`), an external guest
+      // holds nothing of the company's projects (Romain, 2026-09-30).
+      {
+        value: "view",
+        label: "View",
+        grants: "See boards and tasks",
+        minTier: FAMILY,
+        dropNoun: "See projects",
+        dropVerb: "see projects",
+      },
       {
         value: "act",
         label: "Work",
@@ -452,7 +462,16 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
     label: "CRM",
     description: "Customers, deals and the sales pipeline",
     levels: [
-      { value: "view", label: "View", grants: "See customers and the pipeline" },
+      // WARP-3365 — as Projects above: `view` is refused below the member
+      // floor, so an external guest holds nothing of the company's customers.
+      {
+        value: "view",
+        label: "View",
+        grants: "See customers and the pipeline",
+        minTier: FAMILY,
+        dropNoun: "See customers",
+        dropVerb: "see customers",
+      },
       {
         value: "act",
         label: "Work",

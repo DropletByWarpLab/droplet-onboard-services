@@ -215,6 +215,20 @@ describe("floor clamping (§5.2 — blocked levels shown, never hidden)", () => 
     expect(isLevelBlocked("admin", "network", "manage")).toBe(false);
   });
 
+  // WARP-3365 / WARP-3369 — the box refuses an external guest ANY crm or
+  // projects grant (`refuseBelowFloor`), so every level is blocked for the
+  // guest starting point, `view` included; a member-based role is unaffected.
+  it("blocks every level of Customers (crm) and Projects for a guest starting point, view included", () => {
+    for (const featureId of ["crm", "projects"]) {
+      for (const level of ["view", "act", "manage"] as const) {
+        expect(isLevelBlocked("guest", featureId, level), `guest ${featureId} ${level}`).toBe(true);
+        expect(isLevelBlocked("family", featureId, level), `family ${featureId} ${level}`).toBe(false);
+      }
+    }
+    expect(floorBlockedReason("crm", "view")).toBe("See customers is for members.");
+    expect(floorBlockedReason("projects", "view")).toBe("See projects is for members.");
+  });
+
   it("blocks write levels (act/manage) on a guest starting point for family-floored features", () => {
     expect(isLevelBlocked("guest", "files", "act")).toBe(true);
     expect(isLevelBlocked("guest", "cameras", "manage")).toBe(true);
@@ -782,16 +796,13 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
       featureGrants: [
         { moduleId: "files", level: "view" },
         { moduleId: "docs", level: "view" },
-        { moduleId: "crm", level: "view" },
         { moduleId: "calendar", level: "view" },
         { moduleId: "contacts", level: "view" },
         { moduleId: "knowledge", level: "view" },
-        { moduleId: "projects", level: "view" },
         { moduleId: "team_chat", level: "view" },
       ],
       toolGrants: [
         { domain: "files", level: "view" },
-        { domain: "business", level: "view" },
         { domain: "calendar", level: "view" },
         { domain: "reminders", level: "view" },
         { domain: "notifications", level: "view" },

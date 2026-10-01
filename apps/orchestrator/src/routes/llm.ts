@@ -1855,6 +1855,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             // nearly every turn — so this is affordable inline.
             const targets = await resolveBusinessPinTargets(prisma, pins, {
               scope: toolAccessScope,
+              // WARP-3365 / WARP-3369: a role-less guest has a null scope, so
+              // the tier is what stops a pinned record naming itself to them.
+              tier: role,
             });
             // WARP-2746 — pinned paths and customer names are stored content;
             // a cloud turn gets none of them (stored-content-egress.service).
@@ -3704,7 +3707,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             (req as AuthedRequest).user,
             "session-claim",
           );
-          targets = await resolveBusinessPinTargets(prisma, pins, { scope });
+          targets = await resolveBusinessPinTargets(prisma, pins, {
+            scope,
+            tier: (req as AuthedRequest).user?.role,
+          });
         } catch (err) {
           // eslint-disable-next-line no-console
           console.error("[llm/pins] failed to resolve business pin targets:", err);
@@ -3764,7 +3770,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             prisma,
             parsed.data.kind as BusinessPinKind,
             parsed.data.ref,
-            { scope },
+            { scope, tier: (req as AuthedRequest).user?.role },
           );
           if (!check.ok) {
             if (check.reason === "module_disabled") {

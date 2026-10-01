@@ -136,6 +136,44 @@ const connectSchema = z.object({
   apiCaCert: z.string().min(1).optional(),
 });
 
+/** Statuses that mean "a connection exists and is in use" (the dashboard hub's LIVE set). */
+const CONNECTED_STATUSES: ReadonlySet<string> = new Set([
+  "CONNECTED",
+  "CAPABILITY_LIMITED",
+  "DEGRADED",
+  "DRIFT_LOCKED",
+  "NEEDS_RECONNECT",
+]);
+/** Statuses a person should look at: something is broken or waiting on someone. */
+const ATTENTION_STATUSES: ReadonlySet<string> = new Set([
+  "DEGRADED",
+  "DRIFT_LOCKED",
+  "NEEDS_RECONNECT",
+  "ERROR",
+]);
+
+export interface IntegrationsSummary {
+  connected: number;
+  needsAttention: number;
+  /** ISO of the newest successful sync across every connection, or null. */
+  lastSyncedAt: string | null;
+}
+
+/** Reduce the hub list to the provider-free summary a member may read. */
+export function summarizeIntegrations(
+  rows: ReadonlyArray<{ status: string; lastSyncedAt: string | null }>,
+): IntegrationsSummary {
+  let newest: string | null = null;
+  for (const r of rows) {
+    if (r.lastSyncedAt && (newest === null || r.lastSyncedAt > newest)) newest = r.lastSyncedAt;
+  }
+  return {
+    connected: rows.filter((r) => CONNECTED_STATUSES.has(r.status)).length,
+    needsAttention: rows.filter((r) => ATTENTION_STATUSES.has(r.status)).length,
+    lastSyncedAt: newest,
+  };
+}
+
 /**
  * WARP-3375 — the owner's answer to "what happens to the records this
  * connector imported?". Optional so a client that predates the question (and
@@ -157,7 +195,13 @@ export function createIntegrationsRouter(
 
   router.get(
     "/integrations",
-    requireRole("owner", "admin", "family", "guest", "service"),
+    // WARP-3374 (Romain, 2026-09-30). Which business systems are connected, when
+    // they last synced, whether a credential is expiring or being refused, and
+    // which provider is which, is the company's own topology: owner and admin
+    // only. An external guest gets nothing of it, and a member gets the
+    // provider-free `/integrations/summary` below. `service` keeps the read it
+    // already had.
+    requireRole("owner", "admin", "service"),
     async (_req, res, next) => {
       try {
         // Bare array — the dashboard hub maps it by provider (api.erp.ts).
@@ -168,9 +212,34 @@ export function createIntegrationsRouter(
     },
   );
 
+  /**
+   * WARP-3374 — what a MEMBER may know about the integrations: how many systems
+   * are connected, how many need attention, and when the newest sync landed.
+   * No provider key, no status per provider, no credential expiry, no purge
+   * flag: the Reports tile needs "is the data fresh and is anything broken",
+   * not which vendor it is or when a key lapses. Owner and admin read the full
+   * list above; an external guest reads neither.
+   */
+  router.get(
+    "/integrations/summary",
+    requireRole("owner", "admin", "family"),
+    async (_req, res, next) => {
+      try {
+        res.json(summarizeIntegrations(await svc.list()));
+      } catch (err) {
+        if (!handleErpError(res, err)) next(err);
+      }
+    },
+  );
+
   router.get(
     "/integrations/eaglesoft",
-    requireRole("owner", "admin", "family"),
+    // WARP-3374 (Romain, 2026-09-30: integrations detail is owner/admin only).
+    // The connection detail carries the host, database, account, schema hash and
+    // credential expiry: the same topology the list withholds from a member.
+    // The Practice page (owner/admin) is its only reader; the member-facing
+    // signal is the provider-free `/integrations/summary`.
+    requireRole("owner", "admin"),
     async (_req, res, next) => {
       try {
         // The dashboard's EaglesoftDetail nests the connection plus the
