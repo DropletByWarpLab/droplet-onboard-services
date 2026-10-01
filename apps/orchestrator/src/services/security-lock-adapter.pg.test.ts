@@ -84,7 +84,7 @@ describe.skipIf(!RUN)("Matter lock adapter store — real Postgres (WARP-2977 P2
     prisma.securityEvent.findMany({
       where: { source: "matter_lock", sourceRef: r },
       orderBy: [{ startedAt: "asc" }, { id: "asc" }],
-      select: { id: true, labels: true, dedupeKey: true, observed: true, camera: true, kind: true, summary: true, severity: true },
+      select: { id: true, labels: true, dedupeKey: true, observed: true, baseline: true, camera: true, kind: true, summary: true, severity: true },
     });
 
   beforeAll(async () => {
@@ -118,8 +118,10 @@ describe.skipIf(!RUN)("Matter lock adapter store — real Postgres (WARP-2977 P2
       severity: "info",
       dedupeKey: `matter_lock:${node(1)}/1:after:none:locked`,
       summary: `${TAG} Back door: locked`,
+      baseline: true,
     });
     expect(rows[1]!.dedupeKey).toBe(`matter_lock:${node(1)}/1:after:${rows[0]!.id}:unlocked`);
+    expect(rows[1]!.baseline).toBe(false);
   });
 
   it("a restart (a fresh tracker) reads the history back: no repeat of the stored reading, and the next change chains after it", async () => {
