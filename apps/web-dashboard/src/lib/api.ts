@@ -146,6 +146,7 @@ import type {
   AppDownloadCatalog,
   Routine,
   RoutineStatus,
+  RoutineVisibility,
   RoutineRun,
   RoutineSchedule,
   ContextPinKind,
@@ -9138,6 +9139,21 @@ export async function setRoutineStatus(
     body: JSON.stringify({ status }),
   });
   return routineJson<Routine>(res, "Failed to update routine");
+}
+
+/**
+ * WARP-3354 — share a routine with the Workspace (`WORKSPACE`, POST) or make it
+ * private again (`PRIVATE`, DELETE). The box decides who may: the creator, an
+ * owner or an admin. Answers the routine.
+ */
+export async function setRoutineVisibility(
+  slug: string,
+  visibility: RoutineVisibility,
+): Promise<Routine> {
+  const res = await authFetch(`${BASE}/api/tools/${encodeURIComponent(slug)}/share`, {
+    method: visibility === "WORKSPACE" ? "POST" : "DELETE",
+  });
+  return routineJson<Routine>(res, "Failed to change who can see the routine");
 }
 
 /**

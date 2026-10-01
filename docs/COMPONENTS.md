@@ -202,6 +202,20 @@ network. Host-published ports and host-network services are called out.
     Only `MATTER_STORAGE_PATH` is allow-listed. (See `src/config.ts` comment.)
   - **All scheduling goes through `cron-runtime.service.ts`** with Postgres
     advisory locks (multi-instance-safe). No `while True`/`setInterval` schedulers.
+  - **A routine (`ToolSpec`) is private to its creator unless shared with the
+    Workspace (WARP-3354).** `ToolSpec.visibility` is an explicit enum
+    (`PRIVATE | WORKSPACE`, no column default). The rule lives once, in
+    `src/services/tool-spec-visibility.ts`, and every `/api/tools*` route goes
+    through it, as do the assistant's `routine_*` tools (they reach the same routes
+    as the person they act for). A member lists and gets the Workspace's routines
+    plus their own; owner and admin see all; a routine you may not see answers
+    `404`, like an unknown slug. Only the creator, an owner or an admin may share or
+    un-share (`POST`/`DELETE /api/tools/:slug/share`); the assistant cannot. The
+    box's own routines (mined suggestions, `daily-report`) stay `WORKSPACE`, and a
+    scheduled run fires as the creator and never reads the rule. Slugs are box-wide
+    unique, so a plain slug would be an oracle for another member's private routine:
+    a member's new routine is always stored as `<slug>-<4 hex>` (owner and admin, who
+    see everything, keep plain slugs).
 
 ## apps/web-dashboard
 

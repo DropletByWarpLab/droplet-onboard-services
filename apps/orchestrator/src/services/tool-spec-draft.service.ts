@@ -20,6 +20,7 @@
  * A draft is ALWAYS born `status: "draft"`, written explicitly rather than
  * left to the schema default, so no caller's body can make one live.
  */
+import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import type { Prisma } from "@prisma/client";
 import { plannedToolNames, referencedStepNames } from "./tool-spec-runner.service.js";
@@ -29,6 +30,29 @@ import { unknownToolsIn, writeToolsIn } from "./tool-access.service.js";
 // be URL-safe in `/api/tools/:slug` without escaping; loose enough for
 // operator-typed names.
 export const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * WARP-3354 — a member's new routine is stored under `<slug>-<suffix>`, the
+ * base trimmed so the result still fits the 80-char cap and never ends a
+ * segment on a hyphen. Always satisfies {@link SLUG_RE} for a slug and a
+ * suffix that do.
+ */
+export function suffixedSlug(slug: string, suffix: string): string {
+  const tail = `-${suffix}`;
+  return slug.slice(0, 80 - tail.length).replace(/-+$/, "") + tail;
+}
+
+/**
+ * WARP-3354 — the short random suffix, 4 hex chars. Independent of whether
+ * the requested slug was free, so the slug a member gets back reveals nothing
+ * about other routines. A (rare) collision just draws again.
+ */
+export function randomSlugSuffix(): string {
+  return randomBytes(2).toString("hex");
+}
+
+/** Draws before a member's create gives up (each is a 1-in-65536 collision per base). */
+export const MAX_SLUG_TRIES = 5;
 
 /**
  * WARP-2670 — the name a step may publish its result under, for later steps
@@ -372,6 +396,11 @@ export async function createDraftSpecTx<Row>(
         reversible: input.reversible ?? true,
         // Explicit, never the schema default and never the body's.
         status: "draft",
+        // WARP-3354 — a routine starts private to its creator. Sharing it with
+        // the Workspace is its own act (POST /api/tools/:slug/share), never a
+        // field of the create body, so nothing the assistant drafts can land
+        // in front of the rest of the company by itself.
+        visibility: "PRIVATE",
         ownerId,
         steps: {
           create: input.steps.map((s, idx) => ({
