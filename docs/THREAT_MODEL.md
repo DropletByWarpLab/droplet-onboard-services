@@ -139,7 +139,7 @@ origin. Nextcloud's WOPI callback endpoint is likewise unrouted: the
 engine→Nextcloud callback is server-to-server over the compose network
 (`wopi_callback_url=http://nextcloud/`) and never a browser request, so
 it needs no gateway leg at all. Nextcloud remains reachable under the
-existing `/nextcloud/` leg, except for its OCS sharing API (last paragraph).
+existing `/nextcloud/` leg, except for its OCS sharing API and the OCS routes that mint a bearer-style URL (last two paragraphs).
 
 Enforcement: `tests/nginx-nextcloud-assets.test.sh` fails the build if a
 blanket `/index.php` leg appears in ANY form — prefix with or without a
@@ -158,6 +158,13 @@ for any suffix and any method; the web app is unaffected because the
 orchestrator reaches Nextcloud over the compose network (`NEXTCLOUD_URL`), not
 through the gateway. Enforcement: Phase 7 of
 `tests/nginx-nextcloud-assets.test.sh`.
+
+**The same leg refuses the other OCS routes that mint a credential-free URL
+(WARP-3318 audit).** `apps/richdocuments`, `apps/files/api/v1/directEditing`
+and `apps/dav/api/v1/direct` answer 403 under `/nextcloud/` (same four
+spellings); the editor's own direct-editing mint is an orchestrator-to-Nextcloud
+call over `NEXTCLOUD_URL`, so it is unaffected. Audit table and what was left
+open: [`SECURITY.md`](SECURITY.md) "Nextcloud OCS audit".
 
 ## 4. TB2 — LAN clients ↔ box services
 

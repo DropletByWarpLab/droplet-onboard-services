@@ -276,12 +276,20 @@ def resample_int16(
     rate conversion (22050→48000 = 480/220.5, but poly_resample handles
     arbitrary up/down factors via L/M reduction). Quality is sufficient
     for spoken TTS — we're not chasing audiophile fidelity here.
+
+    Float input (test_tone's sine) is taken as already in [-1, 1] and
+    comes back as int16 too. Scaling it by 1/32768 like int16 PCM turned
+    a 0.3-amplitude tone into all zeros, which silenced /audio/test-tone
+    on every sink that rejects 16 kHz.
     """
     if src_rate == dst_rate:
         return audio
     from scipy.signal import resample_poly
     # scipy works in float; convert + scale to avoid clipping.
-    as_float = audio.astype(np.float32) / 32768.0
+    if np.issubdtype(audio.dtype, np.floating):
+        as_float = audio.astype(np.float32)
+    else:
+        as_float = audio.astype(np.float32) / 32768.0
     resampled = resample_poly(as_float, dst_rate, src_rate, axis=0)
     # Clamp to int16 range and convert back.
     np.clip(resampled, -1.0, 1.0, out=resampled)

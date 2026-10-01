@@ -2523,7 +2523,9 @@ services:
     # comes back listening. Intended — reset returns the appliance to
     # out-of-the-box behaviour, and out of the box it listens — but it is
     # the one item on this volume whose loss ADDS a capability rather
-    # than removing one, so it belongs in any reset-facing copy.
+    # than removing one, so it belongs in any reset-facing copy. The
+    # speaker volume is the fourth (/data/voice-volume.json,
+    # voice/volume.py): a reset returns it to 100, unmuted.
     volumes:
       - /dev/snd:/dev/snd
       - voice-calibration:/data

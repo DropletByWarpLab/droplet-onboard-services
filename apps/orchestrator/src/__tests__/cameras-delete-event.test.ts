@@ -9,7 +9,8 @@
  * Pinned behavior:
  *   - happy path: frigate client's deleteEvent is called with the id,
  *     route answers { status: "deleted", event: id },
- *   - Frigate "event_not_found" sentinel → 404,
+ *   - FrigateNotFoundError("event_not_found") → 404 (matched by type, not by
+ *     message — a bare Error carrying the same text stays a 502),
  *   - any other Frigate failure → 502 passthrough,
  *   - role guard: the MCP service principal (`_service:mcp`) is admitted
  *     (the delete_clip LLM tool dispatches through it); a guest is 403 and
@@ -75,6 +76,7 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
 import { createCamerasRouter } from "../routes/cameras.js";
 import { userDirectory } from "./helpers/user-directory.js";
 import { deleteEvent } from "../services/frigate.client.js";
+import { FrigateNotFoundError } from "../types/frigate-error.js";
 import type { AuthUser } from "../middleware/auth.js";
 
 const mockDeleteEvent = vi.mocked(deleteEvent);
@@ -121,11 +123,27 @@ describe("DELETE /api/cameras/events/:eventId", () => {
   });
 
   it("404 when Frigate reports the event does not exist", async () => {
-    mockDeleteEvent.mockRejectedValue(new Error("event_not_found"));
+    mockDeleteEvent.mockRejectedValue(new FrigateNotFoundError("event_not_found"));
     const res = await request(buildApp(owner)).delete("/api/cameras/events/nope-1");
 
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: "Event not found" });
+  });
+
+  it("does not match on the message: a bare Error saying event_not_found is a 502", async () => {
+    mockDeleteEvent.mockRejectedValue(new Error("event_not_found"));
+    const res = await request(buildApp(owner)).delete("/api/cameras/events/ev-1");
+
+    expect(res.status).toBe(502);
+    expect(res.body).toEqual({ error: "event_not_found" });
+  });
+
+  it("does not treat another not-found code as a missing event", async () => {
+    mockDeleteEvent.mockRejectedValue(new FrigateNotFoundError("thumbnail_not_found"));
+    const res = await request(buildApp(owner)).delete("/api/cameras/events/ev-1");
+
+    expect(res.status).toBe(502);
+    expect(res.body).toEqual({ error: "thumbnail_not_found" });
   });
 
   it("502 passthrough on any other Frigate failure", async () => {

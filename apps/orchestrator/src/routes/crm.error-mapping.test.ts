@@ -90,6 +90,12 @@ describe("WARP-2577 — CRM error mapping", () => {
     }
   });
 
+  it("answers a guest owner with 422, not a 500 (WARP-3365)", () => {
+    // The row exists and the request is well-formed; the CHOICE is not
+    // processable, which is the INVALID_STAGE shape.
+    expect(labelsForStatus(422)).toContain("OWNER_IS_GUEST");
+  });
+
   it("keeps the wrong-row-for-this-request codes on 422", () => {
     // The 404/422 split is meaningful and easy to erode: INVALID_STAGE means
     // the stage EXISTS and belongs to another pipeline. Sweeping it into 404
