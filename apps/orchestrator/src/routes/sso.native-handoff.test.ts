@@ -658,6 +658,13 @@ describe("GET /api/sso/oidc/callback — native leg", () => {
     expect(loop.res.text).toContain("an app running on this computer");
   });
 
+  it("an IPv6 loopback redirect gets a valid form-action source (CSP host-source has no IPv6 literal)", async () => {
+    const v6 = await startNativeConsent(buildApp(createPrismaMock()), "http://[::1]:49152/callback");
+    const csp = v6.res.headers["content-security-policy"] as string;
+    expect(csp).toContain("form-action 'self' http:;");
+    expect(csp).not.toContain("[::1]");
+  });
+
   it("does not audit a sign-in at the callback (the approval is audited at Continue, the sign-in at redemption)", async () => {
     const app = buildApp(createPrismaMock());
     await startNativeConsent(app);

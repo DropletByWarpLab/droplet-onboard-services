@@ -194,7 +194,13 @@ function escapeHtml(value: string): string {
  */
 function consentFormActionSources(redirectUri: string): string {
   if (redirectUri === APP_SCHEME_REDIRECT) return "'self' droplet:";
-  return `'self' ${new URL(redirectUri).origin}`;
+  const url = new URL(redirectUri);
+  // CSP's host-source grammar has no IPv6 literal: `http://[::1]:<port>` is an
+  // invalid source a browser drops, leaving `'self'`, which would block the 303
+  // to the app. The scheme source is the narrowest valid one; the page has no
+  // script, so the only form it can post is the box's own Continue.
+  if (url.hostname.startsWith("[")) return "'self' http:";
+  return `'self' ${url.origin}`;
 }
 
 /**
