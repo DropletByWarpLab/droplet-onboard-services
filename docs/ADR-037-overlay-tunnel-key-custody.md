@@ -97,6 +97,7 @@ own Windows client both do it:
   implementation (`boringtun`) and the TUN adapter (`wintun`). Owns the tunnel,
   the private key, and the route table writes. Installed by the MSI with a
   one-time admin prompt; after that, connect and disconnect are silent.
+  *Amended (Amendment 1, row 5): asked at install and at each update.*
 - **The Tauri shell** — user-mode UI. Talks to the service over a named pipe,
   loopback-only, token-authenticated. It can ask for `connect`, `disconnect`,
   `status`; it receives the public key to submit during enrollment. It cannot
