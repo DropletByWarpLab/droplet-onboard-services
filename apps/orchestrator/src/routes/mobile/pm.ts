@@ -78,8 +78,10 @@ export function createPmMobileRouter(prisma: PrismaClient): Router {
 
   // PM data is private workspace content — human roles explicit, `service`
   // excluded so the mcp-server / voice-io can't enumerate it over the mobile
-  // surface (ADR-004 §3).
-  const HUMAN_GET = requireRole("owner", "admin", "family", "guest");
+  // surface (ADR-004 §3). WARP-3369: no `guest` either (an external guest
+  // reads nothing of the company's work; the module's tier floor refuses them
+  // at the prefix already, this keeps the router honest on its own).
+  const HUMAN_GET = requireRole("owner", "admin", "family");
 
   router.get(
     "/api/mobile/pm/workspaces",

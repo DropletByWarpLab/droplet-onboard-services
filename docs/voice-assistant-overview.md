@@ -27,16 +27,47 @@ voice-activity detector that ends capture after 0.6 s of trailing silence
 filter (drops fragments like "uh" from residual false wakes) and an intent
 gate (a regex classifier — greetings, "what time is it", "who are you",
 "can you hear me" get `tool_choice: "none"` so the LLM answers instantly
-from its persona prompt without speculatively calling tools).
+from its persona prompt without speculatively calling tools). Between the
+two, spoken speaker-volume commands ("turn it up", "volume 40 percent",
+"mute", "what's the volume") are recognised by a second regex classifier
+and handled entirely on the box, with no LLM call — see Speaker volume below.
 
 The transcript then posts to the orchestrator's `/api/llm/chat` under a
 dedicated service-principal bearer token — the same ReAct agent loop and
 ~50-tool MCP surface the dashboard chat uses, capped at 2 iterations for
 snappiness and RBAC-restricted to read-only tools (voice can check cameras,
-network and devices but cannot change anything in v1). The reply text goes
+network and devices but cannot change anything in v1 through the agent loop;
+its own speaker volume is changed locally, see below). The reply text goes
 to a local Piper TTS container (voice `en_US-ryan-medium`) and plays out the
-ReSpeaker's speaker output. A 2 s post-speak cooldown suppresses wake
-detection so the box doesn't hear itself.
+ReSpeaker's speaker output at the persisted speaker volume. A 2 s post-speak
+cooldown suppresses wake detection so the box doesn't hear itself.
+
+## Speaker volume
+
+One level (0-100) plus a mute flag, persisted on the box
+(`/data/voice-volume.json`) and applied as software gain to everything the
+assistant says, including the spoken cues. 100 is the loudness every box had
+before volume existed; there is no boost above it. Mute plays nothing and
+keeps the level for unmute. An unreadable volume file falls back to 100,
+unmuted, and reports the fault on `/voice/status` (`output_fault`) — a
+storage fault never silences the box on its own.
+
+Two ways to change it:
+
+- **By voice**, locally: "volume 40 percent", "volume 5" (0-10 scale),
+  "turn it up/down", "louder", "quieter", "max volume", "minimum volume"
+  (10), "mute", "unmute", "what's the volume". Answered in a few words at the
+  new level ("Volume 40."), mute is silent. Works with the LLM down. Only
+  whole, object-less utterances match: "turn up the thermostat" still goes to
+  the agent loop, and "stop" / "quiet" / "shut up" are never mute.
+- **Over the API**: `GET/POST /api/voice/volume` (owner/admin), audited as a
+  `voice` activity row. There is no dashboard control on top of it yet.
+
+The assistant has no `set_volume` tool, so a phrasing the classifier doesn't
+recognise goes to the LLM, which cannot change the volume. Adding that tool
+widens voice's write set beyond `control_device` and needs an ADR-004
+amendment first. `/voice/status` carries `output_level` and `output_muted`
+for a future indicator.
 
 ## User-visible states (from `/voice/status`)
 
@@ -176,7 +207,8 @@ the device rather than opening a second stream on it.
    and the /voice page carries the owner/admin switch. Still missing: any
    hardware mute-switch integration, a self-expiring "be quiet for an hour"
    pause, and a `mute_mic` tool the assistant could call on request
-   (WARP-627, unbuilt).
+   (unbuilt). The spoken "mute" that WARP-627 added silences the
+   **speaker** only; the microphone keeps listening (see Speaker volume).
 2. Tool questions are still slow — two model round trips plus the tool call
    (about 8–15 s). The spoken cue fills the silence but doesn't shorten it.
 3. Read-only tools — voice cannot control devices in v1.

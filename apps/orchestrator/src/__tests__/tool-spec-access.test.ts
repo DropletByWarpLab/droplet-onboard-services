@@ -83,6 +83,7 @@ interface SpecRow {
   name: string;
   status: "live" | "draft" | "suggested";
   ownerId: string | null;
+  visibility: "PRIVATE" | "WORKSPACE";
   writes: boolean;
   reversible: boolean;
   steps: StepRow[];
@@ -113,6 +114,7 @@ function spec(over: Partial<SpecRow> = {}): SpecRow {
     name: "Nightly recap",
     status: "live",
     ownerId: "user-narrowed",
+    visibility: "WORKSPACE",
     writes: false,
     reversible: true,
     steps: [step(0, FORBIDDEN_TOOL, { node_id: "n1", command: "turn_on" })],

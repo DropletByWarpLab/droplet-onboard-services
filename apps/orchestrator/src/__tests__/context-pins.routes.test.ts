@@ -354,3 +354,52 @@ describe("WARP-2582 — business pins through the real route handler", () => {
     expect(byId.get("pin-customer")).toEqual({ state: "unavailable", label: null, sublabel: null });
   });
 });
+
+// ── WARP-3365 / WARP-3369: the tier reaches the resolver from the route ─────
+// A role-less guest's tool scope is `null`, which narrows nothing, so the
+// session tier is the only thing that can refuse a business pin to them. The
+// floor itself is pinned in services/context-pin-targets.service.test.ts; this
+// pins that both pin routes hand the resolver the REAL session role.
+describe("WARP-3365 / WARP-3369 — the pin routes pass the caller's tier", () => {
+  const CUSTOMER = "11111111-2222-4333-8444-555555555555";
+
+  it.each(["guest", "family", "owner"])("POST checks a business pin with tier=%s", async (role) => {
+    const prisma = createPrismaMock();
+    await request(buildApp(prisma, { id: OWNER_ID, username: OWNER_USERNAME, role }))
+      .post(`/api/llm/${OWNED_SESSION}/pins`)
+      .send({ kind: "customer", ref: CUSTOMER });
+    expect(pinTargets.checkBusinessPinTarget).toHaveBeenCalledWith(
+      expect.anything(),
+      "customer",
+      CUSTOMER,
+      expect.objectContaining({ tier: role }),
+    );
+  });
+
+  it("a guest whose pin check is refused gets the module_disabled answer and no pin row", async () => {
+    pinTargets.checkBusinessPinTarget.mockResolvedValue({
+      ok: false,
+      reason: "module_disabled",
+      module: "crm",
+    });
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma, { id: OWNER_ID, username: OWNER_USERNAME, role: "guest" }))
+      .post(`/api/llm/${OWNED_SESSION}/pins`)
+      .send({ kind: "customer", ref: CUSTOMER });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "module_disabled", module: "crm" });
+    expect(prisma.contextPin.create).not.toHaveBeenCalled();
+  });
+
+  it.each(["guest", "family"])("GET resolves the listing with tier=%s", async (role) => {
+    const prisma = createPrismaMock();
+    await request(buildApp(prisma, { id: OWNER_ID, username: OWNER_USERNAME, role })).get(
+      `/api/llm/${OWNED_SESSION}/pins`,
+    );
+    expect(pinTargets.resolveBusinessPinTargets).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ tier: role }),
+    );
+  });
+});

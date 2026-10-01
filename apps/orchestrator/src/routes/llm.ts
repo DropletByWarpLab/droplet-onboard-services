@@ -80,7 +80,7 @@ import type { McpCallContext } from "../services/mcp-client.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { encodeSSE, type SSEEvent } from "../types/sse-events.js";
 import type { ChatMessage, ModelsResponse } from "../types/index.js";
-import { contentToText } from "../types/index.js";
+import { contentToText, GATEWAY_MAX_TOKENS } from "../types/index.js";
 import {
   ChatPersistenceService,
   type PersistedToolCall,
@@ -365,7 +365,7 @@ const chatRequestSchema = z.object({
   // le=4096). Now that the value is actually forwarded (WARP-849), an
   // out-of-range number must 400 here instead of 422ing at the gateway
   // and surfacing as a 500.
-  max_tokens: z.number().int().min(1).max(4096).optional(),
+  max_tokens: z.number().int().min(1).max(GATEWAY_MAX_TOKENS).optional(),
   // WARP-1442 — optional gpt-oss reasoning-effort control. Mirrors the
   // ai-gateway's pydantic Literal (low|medium|high); an out-of-range value
   // 400s here rather than 422ing at the gateway. Unset by an explicit caller
@@ -454,7 +454,7 @@ const completeRequestSchema = z
     text: z.string().min(1).max(24000),
     model: z.string().max(200).optional(),
     temperature: z.number().min(0).max(1).optional(),
-    max_tokens: z.number().int().min(1).max(4096).optional(),
+    max_tokens: z.number().int().min(1).max(GATEWAY_MAX_TOKENS).optional(),
   })
   .strict();
 
@@ -1873,6 +1873,9 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             // nearly every turn — so this is affordable inline.
             const targets = await resolveBusinessPinTargets(prisma, pins, {
               scope: toolAccessScope,
+              // WARP-3365 / WARP-3369: a role-less guest has a null scope, so
+              // the tier is what stops a pinned record naming itself to them.
+              tier: role,
             });
             // WARP-2746 — pinned paths and customer names are stored content;
             // a cloud turn gets none of them (stored-content-egress.service).
@@ -3749,7 +3752,10 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             (req as AuthedRequest).user,
             "session-claim",
           );
-          targets = await resolveBusinessPinTargets(prisma, pins, { scope });
+          targets = await resolveBusinessPinTargets(prisma, pins, {
+            scope,
+            tier: (req as AuthedRequest).user?.role,
+          });
         } catch (err) {
           // eslint-disable-next-line no-console
           console.error("[llm/pins] failed to resolve business pin targets:", err);
@@ -3809,7 +3815,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             prisma,
             parsed.data.kind as BusinessPinKind,
             parsed.data.ref,
-            { scope },
+            { scope, tier: (req as AuthedRequest).user?.role },
           );
           if (!check.ok) {
             if (check.reason === "module_disabled") {
