@@ -118,7 +118,9 @@ describe("defaultIdentityPath", () => {
   });
 
   it("treats an empty DROPLET_IDENTITY_PATH as unset (the compose ${VAR:-} trap)", () => {
+    delete process.env.DROPLET_IDENTITY_PATH;
+    const bundled = defaultIdentityPath();
     process.env.DROPLET_IDENTITY_PATH = "";
-    expect(defaultIdentityPath()).toBe(path.resolve(process.cwd(), "data/droplet-identity.md"));
+    expect(defaultIdentityPath()).toBe(bundled);
   });
 });
