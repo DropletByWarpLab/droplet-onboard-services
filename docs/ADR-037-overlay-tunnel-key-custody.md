@@ -152,6 +152,7 @@ This is a class fix across all three clients, not three separate nits.
   the wire change was never built, and neither Windows nor iOS needs it.*
 - Windows gains a service to install, sign, upgrade and uninstall — real surface
   area, and the MSI now needs an admin prompt it did not need before.
+  *Amended (Amendment 1, row 5): asked at install and at each update.*
 - Existing iOS enrollments that already burned slots need a one-time prune.
   There are no customer boxes in this state; the lab box may need it.
 
@@ -189,7 +190,7 @@ This is a class fix across all three clients, not three separate nits.
   not merge before this amendment is Accepted. They and spike S9 land before
   the release pipeline builds the first signed MSI. No signed MSI ships
   vpnd 0.2.2's gate.
-- **References:** lines in this file are from before this amendment's edits.
+- **References:** line references (`:89`-`:145`) are to this file as of `stage` at `129016f27`, before this amendment and any later note.
   Orchestrator references are to `stage` at `129016f27`. `droplet-windows`
   references are to `main` at `e1428db39` (vpnd 0.2.2); files under
   `droplet-vpnd/src/` are cited by file name. "The roadmap" is the plan of
@@ -247,7 +248,10 @@ user-writable (`keystore.rs:159-160`; `winsec.rs:133-134`). That is the
 planted-file shape this ADR bans. From VPND-3 on, the service mints a fresh
 token at every start and only writes it. It checks the path's owner and that
 the path is not a link, deletes any existing file, and creates the file new
-with a protected descriptor: SYSTEM and Administrators get full control,
+(`CREATE_NEW`, not following reparse points, so a file planted between the
+delete and the create fails the create rather than being written to, and a
+failed create stops the service from starting) with a
+protected descriptor: SYSTEM and Administrators get full control,
 interactive users get read. Under policy A that is every interactive user on the
 machine, not only the installing user. It never reads the file. A client therefore reads
 the file for each connection and does not cache it. The token stays a cheap
