@@ -44,6 +44,7 @@ interface SpecRow {
   status: "live" | "draft" | "suggested";
   ownerId: string | null;
   share: string | null;
+  visibility: "PRIVATE" | "WORKSPACE";
   safety: number;
   writes: boolean;
   reversible: boolean;
@@ -75,6 +76,7 @@ function createPrismaMock(seed: SpecRow[] = []) {
           status: "draft",
           ownerId: (data.ownerId as string | null) ?? null,
           share: null,
+          visibility: data.visibility as SpecRow["visibility"],
           safety: 1,
           writes: data.writes as boolean,
           reversible: true,
@@ -173,6 +175,7 @@ describe("POST /api/tools/:slug/runs with a transform step", () => {
       status: "live",
       ownerId: "u-owner",
       share: null,
+      visibility: "WORKSPACE",
       safety: 1,
       writes: false,
       reversible: true,

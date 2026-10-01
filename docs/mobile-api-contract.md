@@ -397,12 +397,30 @@ Saved multi-step "tools"/macros the LLM agent can run (slug-addressed).
 
 | Method | Path | Auth | Body | Returns |
 |---|---|---|---|---|
-| GET | `/tools?status=&category=` | owner/admin/family | — | `{ specs: [{ id, slug, name, category, description, version, status, ownerId, share, safety, writes, reversible, …, stepCount, runCount }] }` |
-| GET | `/tools/:slug` | owner/admin/family | — | full spec (incl. `steps`) |
-| POST | `/tools` | owner/admin/family | `{ slug, name, category?, description?, share?, safety?, writes?, reversible?, steps: [{ tool, args? }] }` | 201 spec |
-| PATCH | `/tools/:slug` | owner/admin | partial spec (+ `status?`) | spec |
+| GET | `/tools?status=&category=` | owner/admin/family | — | `{ specs: [{ id, slug, name, category, description, version, status, ownerId, share, visibility, canShare, safety, writes, reversible, …, stepCount, runCount }] }` — only the routines the caller may see |
+| GET | `/tools/:slug` | owner/admin/family | — | full spec (incl. `steps`); `404` when the caller may not see it |
+| POST | `/tools` | owner/admin/family | `{ slug, name, category?, description?, share?, safety?, writes?, reversible?, steps: [{ tool, args? }] }` | 201 spec, born `visibility: "PRIVATE"` |
+| PATCH | `/tools/:slug` | owner/admin | partial spec (+ `status?`) | spec (`visibility` is not patchable) |
+| POST | `/tools/:slug/share` | owner/admin/family | — | spec with `visibility: "WORKSPACE"` — WARP-3354 |
+| DELETE | `/tools/:slug/share` | owner/admin/family | — | spec with `visibility: "PRIVATE"` — WARP-3354 |
 | POST | `/tools/:slug/runs` | owner/admin/family | run args | run result (confirmation-gated for write/Tier-2 tools) |
 | GET | `/tools/:slug/runs` | owner/admin/family | — | run history |
+
+WARP-3354 — **a routine is private to its creator unless shared with the Workspace.**
+`visibility` is `"PRIVATE"` (its creator, owners and admins) or `"WORKSPACE"` (every
+member). `canShare` is per viewer: true when the caller may share or un-share it (its
+creator, an owner or an admin; always false for `daily-report`) — show the action on that,
+do not re-derive it from `ownerId`. Owner and admin see every routine. Every `/tools/:slug*` route (detail, runs,
+run history, schedules) answers `404 Spec not found` for a routine the caller may not see,
+exactly as for an unknown slug. `share` and `unshare` are idempotent and answer the spec;
+`403 forbidden_not_creator` for a member who can see a shared routine they did not create;
+`409 box_routine_stays_shared` for `daily-report`. Box-provided routines (mined suggestions,
+`daily-report`) are `WORKSPACE`. The legacy free-text `share` field is not read by anything.
+`POST /tools` by a member (`family`) stores the routine under the requested `slug` plus a short
+random suffix (`invoice-reminder-7f3a`), every time, so the slug reveals nothing about other
+routines; the name is unchanged and sharing keeps the slug. Read `slug` from the answer, do not
+assume the one you sent. A `slug` held by a routine the caller can see is `409 Slug already in use`.
+Owner and admin keep the plain `slug` (and the plain 409); so do the box's own routines.
 
 `safety` ∈ 1..3; `slug` matches `SLUG_RE` (2..80 chars). Missing spec → `404 Spec not found`.
 
