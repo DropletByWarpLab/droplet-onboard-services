@@ -733,7 +733,8 @@ export interface LockActivity {
   /** `labels[0]`. */
   reading: string | undefined;
   observed: string;
-  dedupeKey: string;
+  /** `SecurityEvent.baseline`: the lock's first stored reading, not a turn. */
+  baseline: boolean;
   startedAt: Date;
   /** The active areas a person linked this lock to. */
   personZoneIds: readonly string[];

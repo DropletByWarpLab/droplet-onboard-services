@@ -50,8 +50,7 @@ import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js
 import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
 import { LINK_RULES_VERSION, type PairCandidateResult } from "../lib/security-cooccurrence.js";
 import { parseLinkEvidence } from "../lib/security-link-evidence.js";
-import { LOCK_BASELINE_KEY_MARK } from "../lib/security-lock-changes.js";
-import { lockDedupeKey, type LockReading } from "./security-lock-adapter.js";
+import { lockRowDraft, type LockReading } from "./security-lock-adapter.js";
 
 const S = 1000;
 const MIN = 60 * S;
@@ -99,7 +98,7 @@ interface LockEv {
   sourceRef: string;
   labels: string[];
   observed: "live" | "polled";
-  dedupeKey: string;
+  baseline: boolean;
   startedAt: Date;
 }
 interface World {
@@ -258,7 +257,7 @@ function fake(w: World) {
         if (where.kind === "lock_state") {
           return (w.locks ?? [])
             .filter((l) => where.source === "matter_lock" && inRange(l.startedAt, where.startedAt))
-            .map((l) => ({ sourceRef: l.sourceRef, labels: l.labels, observed: l.observed, dedupeKey: l.dedupeKey, startedAt: l.startedAt }));
+            .map((l) => ({ sourceRef: l.sourceRef, labels: l.labels, observed: l.observed, baseline: l.baseline, startedAt: l.startedAt }));
         }
         if (where.kind === "detection") {
           return w.events
@@ -763,14 +762,16 @@ describe("the `links` health row (§6.15)", () => {
 // ── P4 PR-4: lock anchors (§6.2.1–§6.2.3, D31) ───────────────────────────────
 
 const LOCK = "matter:4660/1";
-const LOCK_KEY = (prev: string | null, reading: string) => lockDedupeKey({ nodeId: "4660", endpointId: 1, reading: reading as LockReading }, prev);
+/** What P2b PR-2's own writer marks as `baseline` for a row after `prevId` (null: no earlier stored reading). */
+const BASELINE = (prevId: string | null, reading: string) =>
+  lockRowDraft({ obs: { nodeId: "4660", endpointId: 1, ref: LOCK, reading: reading as LockReading }, prevId, name: "Back door lock", via: "live", at: new Date(FROM) }).baseline;
 
 /** A live lock change (after an earlier row) at `at`, unless said otherwise. */
 const turn = (at: number, over: Partial<LockEv> = {}): LockEv => ({
   sourceRef: LOCK,
   labels: [over.labels?.[0] ?? "unlocked"],
   observed: "live",
-  dedupeKey: LOCK_KEY(`${at}`, over.labels?.[0] ?? "unlocked"),
+  baseline: false,
   startedAt: new Date(at),
   ...over,
 });
@@ -781,7 +782,7 @@ function lockTraffic(linked: string[], n = 20, over: Partial<LockEv> = {}): { lo
   const events: Ev[] = [];
   for (let i = 0; i < n; i += 1) {
     const t = FROM + 2 * H + i * (3 * H + 7 * MIN);
-    locks.push(turn(t, { labels: [i % 2 === 0 ? "unlocked" : "locked"], dedupeKey: LOCK_KEY(`p${i}`, i % 2 === 0 ? "unlocked" : "locked"), ...over }));
+    locks.push(turn(t, { labels: [i % 2 === 0 ? "unlocked" : "locked"], ...over }));
     for (const cam of linked) events.push(person(cam, t + 2 * S));
   }
   return { locks, events };
@@ -833,11 +834,11 @@ describe("P4 PR-4 — a person-linked lock's changes anchor (lock ↔ camera)", 
     expect(summary.scored).toBe(0);
   });
 
-  it("the BASELINE row is never an anchor — the mark is P2b PR-2's own builder's (`lockDedupeKey(obs, null)`)", async () => {
-    expect(LOCK_KEY(null, "locked")).toContain(LOCK_BASELINE_KEY_MARK);
-    expect(LOCK_KEY("42", "locked")).not.toContain(LOCK_BASELINE_KEY_MARK);
+  it("the BASELINE row is never an anchor — the explicit `baseline` column, as P2b PR-2's own writer sets it (`lockRowDraft`, no earlier row)", async () => {
+    expect(BASELINE(null, "locked")).toBe(true);
+    expect(BASELINE("42", "locked")).toBe(false);
     const w = lockWorld();
-    for (const l of w.locks!) l.dedupeKey = LOCK_KEY(null, l.labels[0]!);
+    for (const l of w.locks!) l.baseline = BASELINE(null, l.labels[0]!);
     await runOn(w, { knownLocks: () => KNOWN });
     expect(rowOf(w, "cam_b", "z-back")).toBeUndefined();
   });
@@ -860,7 +861,7 @@ describe("P4 PR-4 — a person-linked lock's changes anchor (lock ↔ camera)", 
         kind: "lock_state",
         startedAt: { gte: new Date(FROM - 30 * MIN), lte: new Date(NOW.getTime() - 15 * MIN) },
       },
-      select: { sourceRef: true, labels: true, observed: true, dedupeKey: true, startedAt: true },
+      select: { sourceRef: true, labels: true, observed: true, baseline: true, startedAt: true },
     });
   });
 

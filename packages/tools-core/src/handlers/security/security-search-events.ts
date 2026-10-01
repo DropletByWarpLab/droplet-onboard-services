@@ -3,7 +3,7 @@
  * events the person may see, newest first — detections, cameras going
  * offline or back, network and sign-in warnings (owner/admin only, by the
  * route), changes of the site mode and (P4 PR-4) door lock changes (Devices
- * view only, by the route). Each event says how it was `found`: a lock change
+ * view only, by the route). Each lock event says how it was `found`: a change
  * found by Droplet's 60 s check carries that check's time, not the change's.
  *
  * Read-only (§6.12.4): GET A3 only. A camera or area the person cannot see

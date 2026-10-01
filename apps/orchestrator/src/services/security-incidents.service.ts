@@ -770,7 +770,7 @@ async function activityReason(
           },
           orderBy: [{ startedAt: "desc" }, { id: "desc" }],
           take: ACTIVITY_ROWS,
-          select: { id: true, source: true, kind: true, sourceRef: true, labels: true, observed: true, dedupeKey: true, startedAt: true },
+          select: { id: true, source: true, kind: true, sourceRef: true, labels: true, observed: true, baseline: true, startedAt: true },
         });
   return cameraOfflineDuringActivity({
     offline: event,
@@ -783,7 +783,7 @@ async function activityReason(
       sourceRef: r.sourceRef,
       reading: r.labels[0],
       observed: r.observed,
-      dedupeKey: r.dedupeKey,
+      baseline: r.baseline,
       startedAt: r.startedAt,
       personZoneIds: zonesForEvent({ source: r.source, kind: r.kind, camera: null, cameraZones: [], sourceRef: r.sourceRef }, ctx.personIndex),
     })),

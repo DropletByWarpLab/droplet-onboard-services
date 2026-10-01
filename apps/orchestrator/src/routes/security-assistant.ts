@@ -44,7 +44,7 @@
  * lock-only area and no lock row — the safe side of the dashboard's rule,
  * never wider. Widening it is a decision for the tools, not a side effect of
  * the person's grants, and P4 PR-4 (§6.12.3) makes it for exactly two: A3
- * (`security_search_events`, `kind: lock_state`, each event's `found`) and
+ * (`security_search_events`, `kind: lock_state`, each lock event's `found`) and
  * A4 (`security_zone_status`, a person-linked lock covering its area, its
  * `reporting` from the lock adapter) read `securityScopeForPerson` itself, so
  * a person with Devices view gets lock rows and lock links there and anyone
@@ -614,7 +614,8 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
       const lockLabels = lockLabelsFor(scope, lockReader());
       const items = page.events.map((e) => ({
         ...eventItem(e, areas, labels, site.timezone, now, { sourceRef: page.sourceRefs.get(e.id), lockLabels }),
-        found: foundWord(e.observed),
+        // Only a lock row can be polled (the lock sweep is the one polled writer), so only it says how it was found.
+        ...(e.kind === "lock_state" ? { found: foundWord(e.observed) } : {}),
       }));
       const n = fitList(items, (kept) => ({ ...head, events: kept, nextCursor: "0000000000000.9223372036854775807" }));
       const tail = page.events[n - 1];

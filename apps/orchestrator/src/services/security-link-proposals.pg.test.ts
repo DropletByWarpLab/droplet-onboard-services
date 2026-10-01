@@ -295,7 +295,7 @@ describe.skipIf(!RUN)("Droplet's link proposals against real Postgres (WARP-2979
     // A lock change 1 s after each of A's 40 visits: the first 20 heard live, the other 20 found by the 60 s
     // check (polled) — plus the baseline row the lock wrote when Droplet first saw it. Rows as P2b-2 writes them.
     const at = (i: number) => new Date(FROM + 2 * H + i * (3 * H + 7 * MIN) + 1 * S);
-    const lockRow = (dedupe: string, startedAt: Date, reading: string, observed: "live" | "polled") => ({
+    const lockRow = (dedupe: string, startedAt: Date, reading: string, observed: "live" | "polled", baseline = false) => ({
       source: "matter_lock" as const,
       kind: "lock_state" as const,
       severity: "info" as const,
@@ -309,10 +309,11 @@ describe.skipIf(!RUN)("Droplet's link proposals against real Postgres (WARP-2979
       endedAt: null,
       summary: `Back door lock: ${reading}`,
       observed,
+      baseline,
     });
     await prisma.securityEvent.createMany({
       data: [
-        lockRow("matter_lock:29790001/1:after:none:locked", new Date(FROM + H), "locked", "live"),
+        lockRow("matter_lock:29790001/1:after:none:locked", new Date(FROM + H), "locked", "live", true),
         ...Array.from({ length: 40 }, (_, i) =>
           lockRow(`matter_lock:29790001/1:after:${i}:${i % 2 === 0 ? "unlocked" : "locked"}`, at(i), i % 2 === 0 ? "unlocked" : "locked", i < 20 ? "live" : "polled"),
         ),

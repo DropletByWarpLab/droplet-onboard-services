@@ -434,7 +434,7 @@ export async function runSecurityLinkProposals(prisma: PrismaClient, now: Date =
     // baseline) is ONE pure rule — `isLockChange`, applied by `buildLockSeries` — not a second copy here.
     prisma.securityEvent.findMany({
       where: { source: "matter_lock", kind: "lock_state", startedAt: { gte: loadFrom, lte: loadTo } },
-      select: { sourceRef: true, labels: true, observed: true, dedupeKey: true, startedAt: true },
+      select: { sourceRef: true, labels: true, observed: true, baseline: true, startedAt: true },
     }),
   ]);
   const labels = new Map(cameras.map((c) => [c.name, c.displayName]));
@@ -458,7 +458,7 @@ export async function runSecurityLinkProposals(prisma: PrismaClient, now: Date =
     sourceRef: r.sourceRef,
     reading: r.labels[0],
     observed: r.observed,
-    dedupeKey: r.dedupeKey,
+    baseline: r.baseline,
     startedAt: r.startedAt.getTime(),
   }));
   const locks = buildLockSeries(lockStates, window);

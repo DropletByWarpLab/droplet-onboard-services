@@ -862,7 +862,7 @@ describe("camera_offline_during_activity (alert, §6.7.2)", () => {
       sourceRef: LOCK,
       reading: "unlocked",
       observed: "live",
-      dedupeKey: `matter_lock:4660/1:after:${id - 1n}:unlocked`,
+      baseline: false,
       startedAt: plus(DROP, offsetMs),
       personZoneIds: [STOCK],
       ...over,
@@ -892,7 +892,7 @@ describe("camera_offline_during_activity (alert, §6.7.2)", () => {
 
   it("🔴 PR-4: a POLLED lock row never counts — its time is when the 60 s check found it; nor the baseline, nor a jammed or unknown reading", () => {
     expect(judge({ activity: [], lockActivity: [turned(-30_000, { observed: "polled" })] })).toBeNull();
-    expect(judge({ activity: [], lockActivity: [turned(-30_000, { dedupeKey: "matter_lock:4660/1:after:none:unlocked" })] })).toBeNull();
+    expect(judge({ activity: [], lockActivity: [turned(-30_000, { baseline: true })] })).toBeNull();
     expect(judge({ activity: [], lockActivity: [turned(-30_000, { reading: "not_fully_locked" })] })).toBeNull();
     expect(judge({ activity: [], lockActivity: [turned(-30_000, { reading: "unknown" })] })).toBeNull();
     for (const reading of ["locked", "unlocked", "unlatched"]) {

@@ -677,7 +677,8 @@ export interface LockStateRow {
   /** `labels[0]`: the reading. */
   reading: string | undefined;
   observed: "live" | "polled";
-  dedupeKey: string;
+  /** `SecurityEvent.baseline`: the lock's first stored reading, not a turn. */
+  baseline: boolean;
   startedAt: number;
 }
 

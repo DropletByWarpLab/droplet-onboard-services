@@ -796,6 +796,13 @@ describe("camera_offline_during_activity at the tick (§6.7.2)", () => {
     expect(f.world.securityIncidentReason.map((r) => r.code)).toEqual(["camera_offline"]);
   });
 
+  it("PR-4: the lock's BASELINE row (`baseline`, its first stored reading) never counts, read from the column → P3's notice only", async () => {
+    const f = world({ securityEvent: [lockTurn(1n, plus(T0, -30_000), { baseline: true }), offline(2n, T0)] });
+    withLock(f);
+    await tick(f, plus(T0, 61_000));
+    expect(f.world.securityIncidentReason.map((r) => r.code)).toEqual(["camera_offline"]);
+  });
+
   it("PR-4: a lock linked to the area by Droplet alone never counts → P3's notice only", async () => {
     const f = world({ securityEvent: [lockTurn(1n, plus(T0, -30_000)), offline(2n, T0)] });
     withLock(f, "droplet");

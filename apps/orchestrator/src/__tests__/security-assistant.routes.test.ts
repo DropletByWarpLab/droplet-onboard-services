@@ -790,11 +790,11 @@ describe("P4 PR-4 — door locks in security_search_events (A3) and security_zon
     expect(lockKinds((await get(devices.server, "/api/security/assistant/events", "maria")).body)).toBe(2);
   });
 
-  it("every A3 event says how it was found: camera rows live", async () => {
+  it("only a lock event says how it was found: a camera row carries no `found`", async () => {
     const { server } = lockApp({ locks: known() });
     const res = await get(server, "/api/security/assistant/events?kind=detection", "stefan");
     expect(res.body.events.length).toBeGreaterThan(0);
-    for (const e of res.body.events) expect(e.found).toBe("live");
+    for (const e of res.body.events) expect(e).not.toHaveProperty("found");
   });
 
   it("with no lock adapter the lock's name is a plain 'Door lock', never the stored summary", async () => {

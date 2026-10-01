@@ -45,7 +45,7 @@ import {
   type LockStateRow,
   type PersonSighting,
 } from "./security-cooccurrence.js";
-import { LOCK_BASELINE_KEY_MARK, LOCK_CHANGE_READINGS, isLockChange } from "./security-lock-changes.js";
+import { LOCK_CHANGE_READINGS, isLockChange } from "./security-lock-changes.js";
 import { poissonUpperTail } from "./security-stats.js";
 import { parseLinkEvidence } from "./security-link-evidence.js";
 
@@ -597,13 +597,12 @@ describe("cameraPairEvidence — what the link stores (LinkEvidenceV1, integers 
 
 const LOCK = "matter:4660/1";
 const LOCK_B = "matter:99/2";
-const lockKey = (ref: string, prev: string | null, reading: string) => `matter_lock:${ref.slice(7)}:after:${prev ?? "none"}:${reading}`;
 /** A `lock_state` row as the job loads it; a live change after an earlier row unless said otherwise. */
 const change = (at: number, over: Partial<LockStateRow> = {}): LockStateRow => ({
   sourceRef: LOCK,
   reading: "unlocked",
   observed: "live",
-  dedupeKey: lockKey(over.sourceRef ?? LOCK, `p${at}`, over.reading ?? "unlocked"),
+  baseline: false,
   startedAt: at,
   ...over,
 });
@@ -618,15 +617,14 @@ describe("isLockChange — which lock rows are a lock turning (§6.2.1)", () => 
     expect(isLockChange(change(0, { observed: "polled" }))).toBe(false);
   });
 
-  it("never the baseline (the first row a lock wrote: when Droplet first saw it, not a turn)", () => {
-    expect(LOCK_BASELINE_KEY_MARK).toBe(":after:none:");
-    expect(isLockChange(change(0, { dedupeKey: lockKey(LOCK, null, "locked"), reading: "locked" }))).toBe(false);
+  it("never the baseline (the first row a lock wrote: when Droplet first saw it, not a turn) — read from the explicit column", () => {
+    expect(isLockChange(change(0, { baseline: true, reading: "locked" }))).toBe(false);
   });
 
   it("never not_fully_locked or unknown (a jammed bolt, a lock that stopped answering), or a row with no reading", () => {
     expect(isLockChange(change(0, { reading: "not_fully_locked" }))).toBe(false);
     expect(isLockChange(change(0, { reading: "unknown" }))).toBe(false);
-    expect(isLockChange({ reading: undefined, observed: "live", dedupeKey: lockKey(LOCK, "p1", "locked") })).toBe(false);
+    expect(isLockChange({ reading: undefined, observed: "live", baseline: false })).toBe(false);
   });
 });
 
@@ -640,7 +638,7 @@ describe("buildLockSeries — every lock with at least one live change in W (§6
         change(W.from - MIN), // before W
         change(W.observedEnd + MIN), // after E
         change(t + 3 * H, { observed: "polled" }),
-        change(t + 4 * H, { dedupeKey: lockKey(LOCK, null, "unlocked") }),
+        change(t + 4 * H, { baseline: true }),
         change(t + 5 * H, { reading: "not_fully_locked" }),
         change(t, { sourceRef: LOCK_B, observed: "polled" }),
       ],
@@ -696,7 +694,7 @@ function lockWorld(opts: { changes?: number } = {}) {
   }
   if (days > 0) {
     // Never anchors: the baseline (first row the lock wrote), a change found by the 60 s check, a jammed bolt.
-    rows.push(change(W.from + 6 * H, { reading: "locked", dedupeKey: lockKey(LOCK, null, "locked") }));
+    rows.push(change(W.from + 6 * H, { reading: "locked", baseline: true }));
     rows.push(change(kept[6]! + 7 * S, { observed: "polled" })); // on a person, 7 s after a kept change — it would move k if it counted
     rows.push(change(kept[7]! + 6 * H, { reading: "not_fully_locked" }));
   }
@@ -836,7 +834,7 @@ describe("scoreLockPairs — the pairs (§6.2.3)", () => {
   });
 
   it("the baseline row is never an anchor, even on a person", () => {
-    const only = { rows: world.kept.map((t) => change(t, { dedupeKey: lockKey(LOCK, null, "unlocked") })), sightings: world.sightings };
+    const only = { rows: world.kept.map((t) => change(t, { baseline: true })), sightings: world.sightings };
     expect(runLocks(only)).toEqual({ results: [], hypotheses: 0 });
   });
 

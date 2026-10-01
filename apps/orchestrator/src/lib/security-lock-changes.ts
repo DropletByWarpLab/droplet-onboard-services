@@ -12,25 +12,24 @@
  *   · the reading is `locked`, `unlocked` or `unlatched`. `not_fully_locked`
  *     is a bolt that jammed, `unknown` a lock that stopped answering: neither
  *     is someone at the door;
- *   · it is not the lock's BASELINE: the first row a lock wrote (or the first
- *     after retention emptied its history) has no earlier row to be "after",
- *     so its dedupe key reads `…:after:none:…` (P2b-2 §6.8's
- *     `lockDedupeKey(obs, null)` — the service test pins the mark against
- *     that builder). Its time is when Droplet first saw the lock.
+ *   · it is not the lock's BASELINE (`SecurityEvent.baseline`, set by the
+ *     lock adapter's `lockRowDraft` when the store held no earlier reading
+ *     to compare against: the lock's first row, or the first after retention
+ *     emptied its history). Its time is when Droplet first saw the lock, not
+ *     when it turned. Read from the explicit column, never inferred from the
+ *     dedupe key.
  */
 
 /** The readings that are a lock turning. */
 export const LOCK_CHANGE_READINGS = ["locked", "unlocked", "unlatched"] as const;
 export type LockChangeReading = (typeof LOCK_CHANGE_READINGS)[number];
 
-/** In a baseline row's dedupe key (`matter_lock:<node>/<ep>:after:none:<reading>`), and in no other. */
-export const LOCK_BASELINE_KEY_MARK = ":after:none:";
-
 /** The columns the rule reads: `reading` is the row's `labels[0]`. */
 export interface LockChangeFields {
   reading: string | undefined;
   observed: string;
-  dedupeKey: string;
+  /** `SecurityEvent.baseline`. */
+  baseline: boolean;
 }
 
 export function isLockChange(r: LockChangeFields): boolean {
@@ -38,6 +37,6 @@ export function isLockChange(r: LockChangeFields): boolean {
     r.observed === "live" &&
     r.reading !== undefined &&
     (LOCK_CHANGE_READINGS as readonly string[]).includes(r.reading) &&
-    !r.dedupeKey.includes(LOCK_BASELINE_KEY_MARK)
+    !r.baseline
   );
 }
