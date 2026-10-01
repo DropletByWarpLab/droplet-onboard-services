@@ -347,8 +347,6 @@ iOS realigned in `droplet-ios` PR #1; Android + Windows to follow.
 ADR predated them) — native clients MUST handle the `TOTP_REQUIRED`
 login challenge. WebAuthn is not part of the app login path.
 
-> **Amended by [ADR-063](ADR-063-native-desktop-sign-in.md) (2026-09-26), for the native desktop clients:** they may sign in with a passkey through the platform authenticator, against the dashboard's `/auth/webauthn/*` routes, with user verification required and a relying party derived from `Host` only. They may also finish an SSO sign-in through the box-local handoff (`/sso/oidc/native/*`, RFC 8252 with PKCE S256), which leaves the IdP redirect URI unchanged. The iOS and Android apps are unchanged.
-
 > **Amended by [ADR-060](ADR-060-native-windows-hello-relying-party.md) (2026-09-25, conditional on its spike S2; until S2 passes, the sentence above stands as written):** the Windows app is the one exception. Its shell runs a native WebAuthn (Windows Hello) ceremony against a per-box native relying party over its pinned channel, and the WebView redeems a single-use code for the ordinary cookie session. The shell still never holds a password or a session token.
 
 > **Adopted for Windows by [ADR-062](ADR-062-native-desktop-clients.md) (2026-09-26):**
@@ -358,3 +356,5 @@ login challenge. WebAuthn is not part of the app login path.
 > app login path" changes only through ADR-063 (WARP-3226). The ADR-060
 > exception above was for the Tauri shell, which ADR-062 retires; see
 > ADR-062's reconciliation with ADR-060.
+
+> **Amended by [ADR-063](ADR-063-native-desktop-sign-in.md) (2026-09-26), for the native desktop clients:** they may sign in with a passkey through the platform authenticator, against the dashboard's `/auth/webauthn/*` routes, with user verification required and a relying party derived from `Host` only. They may also finish an SSO sign-in through the box-local handoff (`/sso/oidc/native/*`, RFC 8252 with PKCE S256), which leaves the IdP redirect URI unchanged. The iOS and Android apps are unchanged.
