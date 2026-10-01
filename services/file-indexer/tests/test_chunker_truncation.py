@@ -64,9 +64,14 @@ def captured(monkeypatch):
 
     class _FakeTokenizerClass:
         @staticmethod
-        def from_pretrained(repo):
-            seen["repo"] = repo
+        def from_file(path):
+            seen["path"] = path
             return fake_tokenizer
+
+    # WARP-3426: the tokenizer file is resolved from the baked Hub cache.
+    def _fake_hf_hub_download(repo, filename, revision=None):
+        seen["download"] = (repo, filename, revision)
+        return "/baked/tokenizer.json"
 
     class _FakeSplitter:
         @staticmethod
@@ -84,6 +89,9 @@ def captured(monkeypatch):
     toks.Tokenizer = _FakeTokenizerClass
     monkeypatch.setitem(sys.modules, "semantic_text_splitter", sts)
     monkeypatch.setitem(sys.modules, "tokenizers", toks)
+    hub = types.ModuleType("huggingface_hub")
+    hub.hf_hub_download = _fake_hf_hub_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
 
     # The splitter is memoised at module level; clear it so _build_splitter runs.
     # WARP-2191 moved the measuring tokenizer into its own module-level cache
@@ -107,6 +115,18 @@ def test_truncation_is_disabled_on_the_measuring_tokenizer(captured):
         "truncation left active — the splitter would measure every chunk as "
         "<= max_length and never split"
     )
+
+
+def test_tokenizer_is_the_baked_file_at_the_pinned_commit(captured):
+    """WARP-3426: resolved from the image's baked cache at the registry's pinned
+    commit and parsed from that file — never fetched by repo id."""
+    seen, _tokenizer = captured
+
+    chunker._build_splitter(_BODY_CAPACITY, _OVERLAP)
+
+    spec = chunker.spec_for(chunker.EMBEDDING_MODEL)
+    assert seen["download"] == (spec.hf_repo, "tokenizer.json", spec.hf_revision)
+    assert seen["path"] == "/baked/tokenizer.json"
 
 
 def test_padding_is_disabled_on_the_measuring_tokenizer(captured):
