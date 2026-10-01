@@ -9,6 +9,7 @@ import { parseDocument, isMap, isScalar } from "yaml";
 
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
+import { FrigateNotFoundError } from "../types/frigate-error.js";
 import {
   buildRecordBlock,
   buildSnapshotsBlock,
@@ -385,11 +386,18 @@ export async function fetchReviewCamera(reviewId: string): Promise<string | null
   return typeof body.camera === "string" && body.camera ? body.camera : null;
 }
 
+/**
+ * A Frigate 404 (event pruned, or never given a thumbnail) is surfaced as a
+ * `FrigateNotFoundError("thumbnail_not_found")` — same as deleteEvent's
+ * `event_not_found` — so the route can answer 404 instead of a generic 500.
+ * Every other non-2xx keeps its plain Error.
+ */
 export async function fetchEventThumbnail(eventId: string): Promise<Response> {
   const resp = await fetch(
     `${FRIGATE_URL}/api/events/${encodeURIComponent(eventId)}/thumbnail.jpg`,
     { signal: timeout(SNAPSHOT_TIMEOUT) }
   );
+  if (resp.status === 404) throw new FrigateNotFoundError("thumbnail_not_found");
   if (!resp.ok) throw new Error(`Frigate thumbnail: ${resp.status}`);
   return resp;
 }
@@ -428,8 +436,7 @@ export async function setEventRetain(
  * driven by the retention keys in its config.
  *
  * NOT idempotent: a second delete of the same id is a Frigate 404,
- * surfaced as the `event_not_found` sentinel (same sentinel-message
- * style as regenerateEventDescription's "genai_disabled") so the route
+ * surfaced as `FrigateNotFoundError("event_not_found")` so the route
  * layer can answer a clean 404 instead of a generic upstream error.
  */
 export async function deleteEvent(eventId: string): Promise<void> {
@@ -438,7 +445,7 @@ export async function deleteEvent(eventId: string): Promise<void> {
     { method: "DELETE", signal: timeout() },
   );
   if (!resp.ok) {
-    if (resp.status === 404) throw new Error("event_not_found");
+    if (resp.status === 404) throw new FrigateNotFoundError("event_not_found");
     throw new Error(`Frigate event delete: ${resp.status}`);
   }
 }

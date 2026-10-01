@@ -250,7 +250,9 @@ describe.skipIf(!RUN)("the detection_ongoing row in Postgres (WARP-2978 PR-D)", 
       });
       const zone = await prisma.securityZone.create({ data: { name: `${TAG} Stock room`, nameKey: `${TAG} stock room`, kind: "interior" } });
       zoneId = zone.id;
-      await prisma.securityZoneLink.create({ data: { zoneId, sourceKind: "camera", sourceRef: CAM, sourceLabel: "Back", state: "active" } });
+      await prisma.securityZoneLink.create({
+        data: { zoneId, sourceKind: "camera", sourceRef: CAM, sourceLabel: "Back", state: "active", origin: "person", stateSetBy: "person" },
+      });
     });
 
     afterAll(async () => {

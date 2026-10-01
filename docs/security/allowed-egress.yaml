@@ -173,14 +173,18 @@ entries:
     purpose: >-
       Geocoding for the event-form location combobox (WARP-307): sends only
       the location query string the user is actively typing; rate-limited
-      1 req/s; identifying User-Agent per OSM ToS.
+      1 req/s; identifying User-Agent per OSM ToS. WARP-3264: OFF by default
+      behind the owner-only `place_lookup` off-LAN channel ("Look up places
+      online"), read fail-closed on every request; with it off the route
+      suggests only rooms and the caller's own previously used places, and
+      nothing leaves the box.
     ticket: WARP-307
     added: 2026-07-04
     review_by: 2027-07-04
     # WARP-2452: was calendar.ts alone, where the host appears only in a
     # comment. The literal lives in places.service.ts; calendar.ts is the
     # route that proxies to it.
-    code_refs: [apps/orchestrator/src/services/places.service.ts, apps/orchestrator/src/routes/calendar.ts]
+    code_refs: [apps/orchestrator/src/services/places.service.ts, apps/orchestrator/src/routes/calendar.ts, apps/orchestrator/src/services/off-lan-gate.service.ts]
 
   - id: voice-geolocation
     kind: egress

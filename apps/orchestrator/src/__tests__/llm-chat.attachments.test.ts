@@ -265,6 +265,8 @@ describe("POST /api/llm/chat — attachment context injection", () => {
     const sys = attachmentSystemMessage();
     expect(sys).toBeDefined();
     expect(sys!.content).toContain("report.pdf");
+    // WARP-3338: marked, so the agent loop folds it into index 0 under its header.
+    expect(sys!.contextBlock).toBe("attachments");
     expect(sys!.content).toContain("Quarterly revenue rose 12%.");
     expect(sys!.content).toContain("Churn fell to 2.1%.");
     // The user turn must survive, after the injected context.
@@ -379,6 +381,44 @@ describe("POST /api/llm/chat — attachment context injection", () => {
     expect(sys!.content.length).toBeLessThan(6_000);
     expect(sys!.content).toMatch(/truncated/i);
     expect(sys!.content).toContain("search_content");
+  });
+
+  it("WARP-3338: marks the attachment, pin and chat-instruction blocks, in the order the loop folds them", async () => {
+    mockEnsureConversation.mockResolvedValue({ id: "conv-88" });
+    mockCreateTurnRows.mockResolvedValue({
+      userMessageId: "um-1",
+      assistantMessageId: "am-1",
+      assistantAlreadyFinal: false,
+    });
+    const prisma = createPrismaMock(
+      [{ id: "bmi-1", userId: USER_ID, filename: "report.pdf", mimeType: "application/pdf", status: "ready" }],
+      [{ brainItemId: "bmi-1", chunkIdx: 0, text: "hello" }],
+    );
+    prisma.contextPin.findMany.mockResolvedValue([
+      { id: "p1", sessionId: "conv-88", kind: "file", ref: "/Docs/IT/rate-limits.md", meta: null, addedAt: new Date(0) },
+    ] as never);
+    const res = await request(buildApp(prisma))
+      .post("/api/llm/chat")
+      .send({
+        model: "m1",
+        messages: [
+          { role: "system", content: "Answer in French." },
+          { role: "user", content: "summarize" },
+        ],
+        attachments: [{ itemId: "bmi-1" }],
+      });
+
+    expect(res.status).toBe(200);
+    const system = agentMessages().filter((m) => m.role === "system");
+    // The base prompt stays unmarked: it is never headed and never cut.
+    expect(system.map((m) => m.contextBlock)).toEqual([
+      undefined,
+      "attachments",
+      "pins",
+      "chat_instructions",
+    ]);
+    expect(system[2]!.content).toContain("/Docs/IT/rate-limits.md");
+    expect(system[3]!.content).toBe("Answer in French.");
   });
 
   it("does not inject anything when the request has no attachments", async () => {

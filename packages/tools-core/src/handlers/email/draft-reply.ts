@@ -72,7 +72,7 @@ async function handler(
       status: "error",
       error: {
         code: "FORBIDDEN",
-        message: "email drafting is available to owner, admin, and family roles only",
+        message: "email drafting is available to owner, admin, and member roles only",
       },
     };
   }
@@ -138,7 +138,7 @@ async function handler(
 const tool: Tool = {
   name: "email_draft_reply",
   description:
-    "Draft a reply to an email thread. Writes to EmailDraft with draftedByDroplet=true so the operator sees it in the Droplet drafts tab. Does NOT send — `email_send` (write + confirm) is required to dispatch.",
+    "Draft a reply to an email thread. Only when the user asks for email (replying to an email thread counts as asking for email; an address alone does not); to message a colleague otherwise, team chat is the default. Writes to EmailDraft with draftedByDroplet=true so the operator sees it in the Droplet drafts tab. Does NOT send — `email_send` (write + confirm) is required to dispatch.",
   inputSchema,
   // Persists an EmailDraft row → WRITE. Without requiresWrite:true the
   // orchestrator's WRITE_TOOLS set in routes/llm.ts excludes this tool

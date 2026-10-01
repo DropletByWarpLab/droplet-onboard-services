@@ -76,6 +76,49 @@ describe("ToolApprovalPrompt — the rendered prompt is PHI-free", () => {
   });
 });
 
+describe("ToolApprovalPrompt — starting a background run (WARP-3303)", () => {
+  const startCall = challengedCall({
+    name: "start_agent_run",
+    args: { goal: `Compare ${SEEDED_NAME}'s suppliers`, title: "Supplier price check", deliverable: "A short table of prices" },
+    confirmation: {
+      kind: "tool_confirmation",
+      challengeId: "chal-run",
+      tool: "start_agent_run",
+      status: "pending",
+      expiresAt: NOW + 60_000,
+      summary: {
+        tool: "start_agent_run",
+        fields: [
+          { key: "goal", kind: "string", detail: "40 characters" },
+          { key: "title", kind: "string", detail: "20 characters" },
+          { key: "deliverable", kind: "string", detail: "23 characters" },
+        ],
+        truncatedFields: 0,
+      },
+    },
+  });
+
+  it("shows the task and deliverable as written, plus the bounds", () => {
+    render(<ToolApprovalPrompt call={startCall} now={NOW} />);
+    const shown = screen.getByTestId("approval-shown-values");
+    expect(shown.textContent).toContain("Supplier price check");
+    expect(shown.textContent).toContain("A short table of prices");
+    expect(screen.getByTestId("approval-run-bounds").textContent).toContain("30 steps and 40 minutes");
+  });
+
+  it("keeps every other argument shape-only", () => {
+    const { container } = render(<ToolApprovalPrompt call={startCall} now={NOW} />);
+    expect(container.textContent).not.toContain(SEEDED_NAME);
+    expect(screen.getByTestId("approval-arg-summary").textContent).toContain("goal: 40 characters");
+  });
+
+  it("shows no values for any other tool", () => {
+    render(<ToolApprovalPrompt call={challengedCall()} now={NOW} />);
+    expect(screen.queryByTestId("approval-shown-values")).toBeNull();
+    expect(screen.queryByTestId("approval-run-bounds")).toBeNull();
+  });
+});
+
 describe("ToolApprovalPrompt — decisions", () => {
   it("reports approve with the challenge id, never a token", () => {
     const onDecision = vi.fn();

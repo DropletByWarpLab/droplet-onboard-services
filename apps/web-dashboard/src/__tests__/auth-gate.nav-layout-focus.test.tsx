@@ -26,6 +26,12 @@ vi.mock("@/components/workspace/WorkspaceShell", () => ({
     <div data-testid="workspace-shell">{children}</div>
   ),
 }));
+// WARP-3062 — the third layout's shell, stubbed like the Workspace one.
+vi.mock("@/components/assistant/AssistantShell", () => ({
+  AssistantShell: ({ children }: { children: React.ReactNode }) => (
+    <div data-testid="assistant-shell">{children}</div>
+  ),
+}));
 vi.mock("@/components/help/HelpLauncher", () => ({
   HelpLauncher: () => <div data-testid="help-launcher" />,
 }));

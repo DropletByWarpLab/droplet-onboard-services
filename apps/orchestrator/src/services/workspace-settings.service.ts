@@ -159,7 +159,8 @@ export interface OffLanChannelDefault {
     | "telemetry"
     | "web_fetch"
     | "ambient_data"
-    | "web_push";
+    | "web_push"
+    | "place_lookup";
   enabled: boolean;
   requiresAdmin: boolean;
 }
@@ -181,6 +182,10 @@ export const OFF_LAN_CHANNEL_DEFAULTS: readonly OffLanChannelDefault[] = [
   // owner opts in. Insert-or-skip below: an operator's choice is never
   // clobbered.
   { key: "web_push", enabled: false, requiresAdmin: true },
+  // WARP-3264 — calendar place suggestions from OpenStreetMap (Nominatim).
+  // OFF by default: the text someone types in an event's place field is
+  // company data. Owner-only to turn on (settings.ts OWNER_ONLY_CHANNELS).
+  { key: "place_lookup", enabled: false, requiresAdmin: true },
 ];
 
 /**

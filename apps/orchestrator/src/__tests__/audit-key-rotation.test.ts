@@ -256,6 +256,27 @@ describe("rotateAuditKey", () => {
     expect(getCurrentAuditKeyId()).toBe(auditKeyId(OLD));
     expect(vi.mocked(recordActivity)).not.toHaveBeenCalled();
   });
+
+  it("a second rotation while one is running is refused with 409, and the key is untouched by it", async () => {
+    _initActivityRecorderWithKeysForTests(fakePrisma(chain), [OLD]);
+    let release!: () => void;
+    const hostStep = new Promise<void>((r) => (release = r));
+    const first = rotateAuditKey({
+      runOnHost: () => hostStep.then(() => {
+        throw new Error("stop here");
+      }),
+      loadKey: () => OLD,
+      retiredDir: tmp,
+      actor: ACTOR,
+      actorUsername: "olivia",
+    });
+    await expect(
+      rotateAuditKey({ runOnHost: async () => {}, loadKey: () => OLD, retiredDir: tmp, actor: ACTOR, actorUsername: "olivia" }),
+    ).rejects.toMatchObject({ status: 409, code: "ROTATION_IN_PROGRESS" });
+    release();
+    await expect(first).rejects.toMatchObject({ status: 502 });
+    expect(getCurrentAuditKeyId()).toBe(auditKeyId(OLD));
+  });
 });
 
 describe("recordRotationFoundAtBoot (rotation by the box script)", () => {

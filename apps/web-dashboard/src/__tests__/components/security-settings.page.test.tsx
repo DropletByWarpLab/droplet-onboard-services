@@ -46,6 +46,8 @@ vi.mock("@/components/Toast", () => ({ useToast: () => ({ toast: h.toast }) }));
 vi.mock("@/lib/hooks/useSecurity", () => ({
   // WARP-2978 — the routing panel's own read; its behaviour is AlertRoutingPanel.test.tsx's.
   useAlertRouting: () => ({ routing: null, error: undefined, isLoading: true, refresh: vi.fn(), set: vi.fn() }),
+  // WARP-2979 — the AI panel's own read; its behaviour is AiSettingsPanel.test.tsx's.
+  useAiSettings: () => ({ settings: null, error: undefined, isLoading: true, refresh: vi.fn(), save: vi.fn() }),
   useSecurityHours: () => ({
     hours: h.hours,
     error: h.error,

@@ -19,6 +19,7 @@ import {
   clampConnectorLevel,
   clampLevel,
   fullCatalogFeatures,
+  tierRefusingModuleIds,
   domainsForFeatures,
   isGrantableDomain,
   tierReachableDomains,
@@ -123,6 +124,92 @@ describe("access-catalog — tier default catalog (null accessRoleId world)", ()
     expect(byId.get("files")).toBe("view");
     expect(byId.get("voice")).toBe("act");
     expect(byId.get("chat")).toBe("act");
+  });
+});
+
+// ADR-059 §6 — Security's `view` is floored at family ("no guest tier": presence
+// data about identifiable people), and every /api/security read is
+// requireRole(owner, admin, family). `view` is the lowest rung, so a tier below
+// its floor used to clamp DOWN to it and hold it anyway: a guest role could
+// store security:view and the roles list advertised reach the routes refuse
+// (each refusal is a denial row that becomes a threat incident). The floor is
+// now a refusal (`refuseBelowFloor`), the contract `clampConnectorLevel` has.
+describe("access-catalog — security's family floor on `view` is a refusal (ADR-059)", () => {
+  it("a guest (and a service principal) holds NO security grant at all — not even view", () => {
+    for (const tier of ["guest", "service"] as const) {
+      expect(maxLevelFor(tier, "security"), tier).toBeNull();
+      for (const level of ["view", "act", "manage"] as const) {
+        expect(clampLevel(tier, "security", level), `${tier} ${level}`).toBeNull();
+      }
+    }
+  });
+
+  it("family, admin and owner are unchanged: family tops out at act, admin and owner at manage", () => {
+    expect(maxLevelFor("family", "security")).toBe("act");
+    expect(maxLevelFor("admin", "security")).toBe("manage");
+    expect(maxLevelFor("owner", "security")).toBe("manage");
+    // D6's wall account: a Staff-based role set to Security View keeps view (it is not clamped to nothing)
+    expect(clampLevel("family", "security", "view")).toBe("view");
+    expect(clampLevel("family", "security", "act")).toBe("act");
+    expect(clampLevel("family", "security", "manage")).toBe("act"); // manage is admin-only: a clamp, not a refusal
+    expect(clampLevel("admin", "security", "view")).toBe("view");
+    expect(clampLevel("admin", "security", "manage")).toBe("manage");
+    expect(clampLevel("owner", "security", "manage")).toBe("manage");
+  });
+
+  // WARP-3365 / WARP-3369 (Romain, 2026-09-30) — external guests get NOTHING from
+  // company-wide business data unless it is explicitly shared with them. Nothing
+  // in the CRM or Projects is shared per record, so both take the security
+  // pattern: `view` is a refusal below the family floor.
+  it("the refusal is opt-in per module: security, crm, projects and money are the only ones that refuse a guest or a family tier", () => {
+    const refusing = (tier: "guest" | "family") =>
+      GATEABLE_MODULE_IDS.filter((m) => maxLevelFor(tier, m) === null || clampLevel(tier, m, "manage") === null);
+    expect([...refusing("guest")].sort()).toEqual(["crm", "money", "projects", "security"]);
+    expect(refusing("family")).toEqual([]);
+    // the route gate and the assistant gate mount off THIS list
+    expect([...tierRefusingModuleIds()].sort()).toEqual(["crm", "money", "projects", "security"]);
+  });
+
+  it("a role-less guest's catalog has no security, crm, projects or money row; a role-less family, admin and owner keep theirs", () => {
+    const level = (tier: "guest" | "family" | "admin" | "owner", moduleId: ModuleId) =>
+      fullCatalogFeatures(tier).find((f) => f.moduleId === moduleId)?.level;
+    expect(level("guest", "security")).toBeUndefined();
+    expect(level("guest", "crm")).toBeUndefined();
+    expect(level("guest", "projects")).toBeUndefined();
+    expect(level("guest", "money")).toBeUndefined();
+    expect(level("family", "money")).toBe("view"); // Money is read-only for a member: no act level
+    expect(level("admin", "money")).toBe("manage");
+    expect(level("owner", "money")).toBe("manage");
+    expect(level("family", "security")).toBe("act");
+    expect(level("admin", "security")).toBe("manage");
+    expect(level("owner", "security")).toBe("manage");
+    for (const moduleId of ["crm", "projects"] as const) {
+      expect(level("family", moduleId), `family ${moduleId}`).toBe("manage");
+      expect(level("admin", moduleId), `admin ${moduleId}`).toBe("manage");
+      expect(level("owner", moduleId), `owner ${moduleId}`).toBe("manage");
+    }
+    // and nothing else about the guest's catalog moved: every other module is still there, chat included
+    expect(fullCatalogFeatures("guest")).toHaveLength(GATEABLE_MODULE_IDS.length + 1 - 4);
+    for (const moduleId of ["files", "team_chat", "voice", "calendar", "chat"] as const) {
+      expect(level("guest", moduleId), `guest ${moduleId}`).toBeDefined();
+    }
+  });
+
+  it("a guest-based role cannot store a crm, projects or money grant, at any level; a family-based one clamps as before", () => {
+    for (const moduleId of ["crm", "projects", "money"] as const) {
+      for (const level of ["view", "act", "manage"] as const) {
+        expect(clampLevel("guest", moduleId, level), `guest ${moduleId} ${level}`).toBeNull();
+      }
+    }
+    expect(clampLevel("family", "money", "manage")).toBe("view"); // manage is admin-only: a clamp, not a refusal
+    expect(clampLevel("admin", "money", "manage")).toBe("manage");
+    for (const moduleId of ["crm", "projects"] as const) {
+      for (const level of ["view", "act", "manage"] as const) {
+        expect(clampLevel("guest", moduleId, level), `guest ${moduleId} ${level}`).toBeNull();
+      }
+      expect(clampLevel("family", moduleId, "manage")).toBe("manage");
+      expect(clampLevel("family", moduleId, "view")).toBe("view");
+    }
   });
 });
 

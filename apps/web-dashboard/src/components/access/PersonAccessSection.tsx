@@ -7,7 +7,7 @@
  * person editor in place"), between Identity and Usage:
  *
  *   Role       — a select of assignable roles (custom + built-in Admin /
- *                Staff / Guest — never Owner or Service; options above the
+ *                Member / External guest — never Owner or Service; options above the
  *                actor's tier disabled per WARP-623). The §8 rails render
  *                as disabled-with-honest-copy, never hidden.
  *   What they  — a collapsed-by-default READ-ONLY drawer resolving tier →

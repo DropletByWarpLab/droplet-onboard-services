@@ -23,8 +23,10 @@ import { EmailAccountCard } from "@/components/settings/EmailAccountCard";
 import { Microsoft365Card } from "@/components/settings/Microsoft365Card";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
 import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
+import { PersonalDriveCard } from "@/components/settings/PersonalDriveCard";
 import { BusinessProfileCard } from "@/components/settings/BusinessProfileCard";
 import { LocationsCard } from "@/components/settings/LocationsCard";
+import { PlaceLookupSwitch } from "@/components/settings/PlaceLookupSwitch";
 import { LogsSection } from "@/components/settings/LogsSection";
 import { CertificateRows } from "@/components/settings/CertificateRows";
 import { BackupRows } from "@/components/settings/BackupRows";
@@ -203,12 +205,13 @@ export default function SettingsPage() {
             </div>
             {/* WARP-2971 — which navigation shell this person sees. A display
                 preference like Theme (same storage, same radiogroup), never a
-                permission: both layouts resolve the same nav-config gates. */}
+                permission: every layout resolves the same nav-config gates.
+                WARP-3062 added the third, Assistant. */}
             <div className="lrow" style={{ padding: "12px 16px" }}>
               <span className="rt">
                 <span className="nm">Navigation</span>
                 <span className="sub">
-                  Sidebar, or the Workspace tabs across the top
+                  Sidebar, Workspace tabs, or Assistant, which opens on Ask AI
                 </span>
               </span>
               <NavLayoutToggle />
@@ -285,6 +288,8 @@ export default function SettingsPage() {
               the same `user.role` expression PersonalityCard uses, and
               renders nothing for lesser roles. */}
           <LocationsCard />
+          {/* WARP-3264 — owner-only "Look up places online" (off by default). */}
+          <PlaceLookupSwitch />
 
           {/* WARP-2967 — the derived Workspace rows (Sync devices,
               Integrations, Credentials, Company files) for owner/admin; the
@@ -511,10 +516,23 @@ export default function SettingsPage() {
                 modal tells the owner to read, so it must render the same
                 canonical name the server compares against — never a leaked
                 container-id hostname from a stale Device row. */}
-            <InfoRow label="Hostname" value={boxDisplayHost(device?.hostname)} />
-            <InfoRow label="Hardware" value={device?.hardwareRev ?? "—"} />
-            <InfoRow label="Network mode" value={device?.networkMode ?? "—"} />
-            <InfoRow label="IP address" value={device?.ip ?? "Not assigned"} />
+            {/* WARP-3378 — the box's own device row: hostname and hardware are
+                for members and up, network mode and the IP address for owner
+                and admin only, and an external guest is served none of it (403).
+                Rows the box does not send are left out rather than rendered as
+                "—" / "Not assigned". */}
+            {currentUser?.role !== "guest" && (
+              <>
+                <InfoRow label="Hostname" value={boxDisplayHost(device?.hostname)} />
+                <InfoRow label="Hardware" value={device?.hardwareRev ?? "—"} />
+              </>
+            )}
+            {(currentUser?.role === "owner" || currentUser?.role === "admin") && (
+              <>
+                <InfoRow label="Network mode" value={device?.networkMode ?? "—"} />
+                <InfoRow label="IP address" value={device?.ip ?? "Not assigned"} />
+              </>
+            )}
             <InfoRow
               label="Services"
               value={
@@ -613,6 +631,11 @@ export default function SettingsPage() {
             </Link>
           </div>
         </div>
+
+        {/* Personal drives — the owner switch for per-user Finder / File
+            Explorer drives (off by default). Self-gates to the owner role and
+            renders nothing for anyone else. */}
+        <PersonalDriveCard />
 
         {/* Diagnostics (WARP-823) — owner/admin downloadable, redacted log bundle. */}
         <LogsSection />

@@ -66,6 +66,7 @@ import {
   NoRecordingsInRangeError,
   type PtzAction,
 } from "../services/frigate.client.js";
+import { FrigateNotFoundError } from "../types/frigate-error.js";
 
 /**
  * WARP-1961 — who may LOOK at a camera.
@@ -1547,10 +1548,10 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         try {
           await deleteEvent(req.params.eventId);
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          if (msg === "event_not_found") {
+          if (err instanceof FrigateNotFoundError && err.code === "event_not_found") {
             return res.status(404).json({ error: "Event not found" });
           }
+          const msg = err instanceof Error ? err.message : String(err);
           // Any other Frigate failure (non-2xx, timeout, unreachable) is
           // an upstream error — surface it as 502 with the message so the
           // caller can tell "Frigate said no" from "we blew up".
@@ -1878,7 +1879,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!isValidEventId(req.params.eventId)) {
         return res.status(400).json({ error: "Invalid event ID format" });
       }
-      const frigateResp = await fetchEventThumbnail(req.params.eventId);
+      const frigateResp = await fetchEventThumbnail(req.params.eventId).catch((err: unknown) => {
+        if (err instanceof FrigateNotFoundError && err.code === "thumbnail_not_found") return null;
+        throw err; // any other upstream failure keeps its current status
+      });
+      if (!frigateResp) return res.status(404).json({ error: "Thumbnail not found" });
       const contentType = frigateResp.headers.get("content-type") || "image/jpeg";
       res.setHeader("Content-Type", contentType);
       res.setHeader("Cache-Control", "private, no-store"); // WARP-3103: footage never lands in a cache

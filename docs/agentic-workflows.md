@@ -89,7 +89,7 @@ bump both sides in lockstep when the contract changes.
 3. **ai-gateway** (`main.py` → `router.py`) inspects the model name. If it starts with `llama*`, `mistral*`, `phi*`, `gpt-oss*`, etc., route to `OLLAMA_URL` — **direct to Ollama** at `http://host.docker.internal:11434`'s OpenAI-compat `/v1/chat/completions`. (Model lifecycle — `/models/*`, `/health`, `/metrics` — goes to `inference-manager` on `:8002`; the chat path does not.) **Routing collision guards (WARP-604):** `gpt-oss` is OpenAI's *open-weights* model served **locally** by Ollama, so it is matched **before** the cloud `gpt` prefix and never sent to the OpenAI cloud provider (which the off-LAN gate blocks with HTTP 451 — this was the live chat-failure root cause). The one configured `LLM_MODEL` also always resolves to local Ollama regardless of name. Genuine cloud models (`gpt-4o`, `o1`, `o3`) still route to OpenAI.
 4. **Ollama on the inference host** (the `ollama` container in `droplet-local-LLM`) generates a response, possibly with `tool_calls`.
 5. **Orchestrator** parses `tool_calls`, dispatches each via `mcp.callTool()` (JSON-RPC over stdio), gets results, appends `role="tool"` messages, re-prompts.
-6. Loop until model produces final text or hits `MAX_ITERATIONS` (~10).
+6. Loop until model produces final text or hits the step limit (`AGENT_MAX_ITER_CAP`, 20 since WARP-3297).
 7. **Response streams back** via SSE through ai-gateway → orchestrator → caller.
 
 The inference host side (`droplet-local-LLM`) is involved only in step 3-4. We see one HTTP call per loop iteration. We do not see tool calls, conversation history, or session state — those live in the orchestrator.
@@ -123,7 +123,7 @@ The box has a second, **non-generative** model beside the chat LLM: [Kev](https:
 | Serving (`decision-model`, port 8009, profile `decision`, off by default) | `droplet-local-LLM/services/decision-model/`, compose service in `droplet-local-LLM/docker/docker-compose.yml` |
 | Decision record | `droplet-local-LLM/docs/ADR-006-decision-model-kev.md` |
 | The go/no-go instrument (latency on the bench box) | `droplet-local-LLM/scripts/bench-decision-model.py` (WARP-3069) |
-| The `Decide` gRPC RPC (the only way in) | `droplet-onboard-services/proto/inference.proto` + `services/ai-gateway/` (WARP-3070, not built yet) |
+| The `Decide` gRPC RPC (the only way in) | `droplet-onboard-services/proto/inference.proto` + `services/ai-gateway/` (WARP-3070; on `stage` since 2026-09-28, off unless the gateway's `DECISION_MODEL_URL` is set) |
 | Consumers | `droplet-onboard-services` orchestrator. Planned: triage (WARP-3071), `ClassifyQuery` (WARP-3072), tool-domain selection (WARP-3073), `classify_items` tool (WARP-3074) |
 
 **How it plugs into the agent loop**
@@ -138,7 +138,10 @@ The box has a second, **non-generative** model beside the chat LLM: [Kev](https:
 - **Fail soft.** Sidecar absent, slow or erroring means today's behaviour, with "unavailable" as an explicit state. Kev is never a hard dependency of chat.
 - **Never on the write-approval path.** "Reads run automatically, writes ask for a thumbs-up, destructive actions are blocked" is a product contract. A probability may annotate a confirmation, never approve one.
 - **Never phones home.** Weights are baked into the image and the Hub is forced offline. Fine-tuning happens at Warp Lab on staging/synthetic data, never on customer data (WARP-3075).
-- **Nothing is built on top of it until the bench-box go/no-go passes** (WARP-3069): latency beside gpt-oss:20b, and fewer missed tool domains than the keyword rules.
+- **The go/no-go has a result** (WARP-3069, ADR-006 § "Accuracy half" and § "Latency half"):
+  - **Accuracy:** a GO for exactly one shape, a single `choice` over the domains unioned with the keyword rules.
+  - **Latency on the box's CPU:** a NO-GO for the chat critical path. Tool selection (WARP-3073) and query classification (WARP-3072) wait on a GPU measurement.
+  - **Off the critical path CPU is fine.** Background triage (WARP-3071) and the bulk `classify_items` tool (WARP-3074) do not care. Run CPU in bf16.
 
 ## What is NOT in this repo
 

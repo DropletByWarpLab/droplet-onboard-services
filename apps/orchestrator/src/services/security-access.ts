@@ -7,6 +7,13 @@
  * the health header and (P4) the chat tools. A second copy of any of these
  * rules is how a hidden camera leaks through the one surface that forgot.
  *
+ * WARP-2979 (P4 §6.12.2): ONE function computes the scope for a PERSON
+ * (`securityScopeForPerson`). The human routes reach it through
+ * `securityViewerScope`, which only builds the person from `req`; P4's chat
+ * tools reach it with the acting person their own router resolved (by
+ * username, then id) — so a tool answer and a dashboard page can never
+ * disagree about what one person may see.
+ *
  *   · `visibleCameras` — CameraAccessGrant, via camera-access.service. A
  *     camera outside the grant is ABSENT (no row, no count, no area that is
  *     only made of it), never redacted.
@@ -23,7 +30,7 @@
  */
 import type { Request } from "express";
 import type { PrismaClient } from "@prisma/client";
-import { principalFromRequest, visibleCameraNames } from "./camera-access.service.js";
+import { visibleCameraNames } from "./camera-access.service.js";
 import {
   resolveEffectiveAccessForRequest,
   type EffectiveAccessResolver,
@@ -59,23 +66,63 @@ export interface SecurityRouteDeps {
   ongoing?: Pick<OngoingSource, "inView">;
 }
 
+/** Mirrored threats are owner/admin-only rows (role-based, never a grant). */
+function roleMayReadThreats(role: string | undefined): boolean {
+  return role === "owner" || role === "admin";
+}
+
 /** Moved from routes/security.ts (P2a) with the same semantics: role-based. */
 export function mayReadThreats(req: Pick<Request, "user">): boolean {
-  return req.user?.role === "owner" || req.user?.role === "admin";
+  return roleMayReadThreats(req.user?.role);
 }
 
 /**
- * The viewer's scope for one request. `resolve` is unused until PR-2's
- * `mayReadLocks`; pass `deps.resolve` now so that change touches no caller.
+ * WARP-2979 — the person a Security scope is computed for: a User's `id` and
+ * `role`. For a human request that is `req.user`; for P4's chat tools it is
+ * the acting person the assistant router resolved. Never a service principal
+ * — `_service:mcp` here scopes to nothing (camera-access fails it closed with
+ * no asserted user), so a caller that forgets to resolve the person gets an
+ * empty scope, not the service's.
  */
-export async function securityViewerScope(
+export interface SecurityPerson {
+  id?: string;
+  role?: string;
+}
+
+/**
+ * WARP-2979 (P4 §6.12.2) — THE scope computation, for one person:
+ *
+ *   · `visibleCameras` — `visibleCameraNames` with a plain principal: owner/
+ *     admin → `"all"`, anyone else → their CameraAccessGrant rows, read by
+ *     `userId`; no role → nothing;
+ *   · `mayReadThreats` — owner/admin.
+ *
+ * `resolve` is unused until P2b PR-2's `mayReadLocks`; pass it now so that
+ * change touches no caller. A grant lookup failure REJECTS (the caller
+ * answers 503, never an unfiltered page).
+ */
+export async function securityScopeForPerson(
   prisma: PrismaClient,
-  req: Request,
+  person: SecurityPerson,
   resolve?: EffectiveAccessResolver,
 ): Promise<SecurityViewerScope> {
   void resolve;
-  const visibleCameras = await visibleCameraNames(prisma, principalFromRequest(req));
-  return { visibleCameras, mayReadThreats: mayReadThreats(req) };
+  const visibleCameras = await visibleCameraNames(prisma, { id: person.id, role: person.role });
+  return { visibleCameras, mayReadThreats: roleMayReadThreats(person.role) };
+}
+
+/**
+ * The viewer's scope for one request: `securityScopeForPerson` for
+ * `req.user`. The human routes refuse `_service:mcp` (never
+ * `requireRoleOrMcpService`), so no asserted-user header is ever consulted
+ * here.
+ */
+export async function securityViewerScope(
+  prisma: PrismaClient,
+  req: Pick<Request, "user">,
+  resolve?: EffectiveAccessResolver,
+): Promise<SecurityViewerScope> {
+  return securityScopeForPerson(prisma, { id: req.user?.id, role: req.user?.role }, resolve);
 }
 
 /**

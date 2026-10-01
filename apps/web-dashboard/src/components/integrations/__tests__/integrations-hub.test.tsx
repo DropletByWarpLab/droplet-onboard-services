@@ -1153,7 +1153,7 @@ describe("a connected tile can be disconnected from the hub", () => {
     fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
 
     await waitFor(() => expect(disconnectProviderMock).toHaveBeenCalledTimes(1));
-    expect(disconnectProviderMock).toHaveBeenCalledWith("quickbooks-online");
+    expect(disconnectProviderMock).toHaveBeenCalledWith("quickbooks-online", "keep");
   });
 
   /**

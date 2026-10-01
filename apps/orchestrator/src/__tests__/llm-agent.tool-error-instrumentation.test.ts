@@ -166,7 +166,7 @@ describe("agent_tool_error — it fires, and carries the envelope", () => {
     });
   });
 
-  it("logs a non-JSON stdio hiccup as raw", async () => {
+  it("logs a LOCAL tool's non-JSON reply as TOOL_OUTPUT_MALFORMED (WARP-3284)", async () => {
     await runAgent(
       buildDeps(
         [{ id: "call_1", name: "read_file", args: "{}" }],
@@ -176,8 +176,8 @@ describe("agent_tool_error — it fires, and carries the envelope", () => {
     );
 
     expect(errorLines()[0].obj).toMatchObject({
-      error_shape: "raw",
-      error_code: "NON_JSON_RESULT",
+      error_shape: "envelope",
+      error_code: "TOOL_OUTPUT_MALFORMED",
     });
   });
 

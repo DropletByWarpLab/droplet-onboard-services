@@ -139,6 +139,21 @@ still stands, so a run that keeps yielding ends on its wall clock with that
 reason. A run's iteration cap is `AGENT_RUN_MAX_ITER` (30), its own, carried
 into the loop as `AgentDeps.maxIterCap`; the chat cap is untouched.
 
+**Preempted for chat (WARP-3306).** Priority alone only orders the queue: a
+run's model call already holding the single slot kept it until it finished,
+and chat's first token waited 20–38 s behind it (bench box, 2026-09-28; ~0.5 s
+idle). So a run's calls also carry `X-Preemptible: 1`. A chat request that
+finds the slot held by one makes the gateway cut that call — 409
+`preempted_for_chat` before the stream starts, a final `preempted_for_chat`
+error frame after — and the worker re-queues the run at the same checkpoint
+with `queueWait=chat`, `runAfter` 5 s out, no attempt charged. Preemption only
+ever lands on a model call (the gateway holds the slot for inference, never
+for a tool), so the checkpoint at the top of the iteration replays exactly the
+cut call. Starvation guard: after `AGENT_RUN_MAX_PREEMPTIONS` (3) preemptions
+in a row with no finished iteration between them, the next claim is sent
+without the header and runs to its next stop. Only the run worker opts in;
+brain passes and any other background caller are never cut.
+
 **Heartbeat and reclaim.** The heartbeat is timer-driven (`AGENT_RUN_HEARTBEAT_MS`,
 15 s) and independent of iteration length, so a run parked in a slow model
 call still holds its lease. That is what lets the reclaim threshold be derived
@@ -182,8 +197,8 @@ the loop's unknown-tool guard; the worker turns that into a failed run naming
 the tool and WARP-2179 rather than letting the model spend iterations around
 the refusal.
 
-**Bounds.** `maxIter` (clamped to `config.agentMaxIter.capIter`, 10, because
-the loop itself clamps there — longer runs are §6's problem, as the epic says)
+**Bounds.** `maxIter` (clamped to `config.agentRuns.maxIter`, 30 — the run's
+own cap since WARP-2749, separate from the chat cap; corrected by WARP-3299)
 **and** `deadlineAt`. Cancellation flips `status = cancelled`; the executor
 observes it at the next heartbeat or checkpoint and maps it onto the loop's
 own `AbortController`, so the existing `req.signal?.aborted` checks stop it
@@ -213,6 +228,7 @@ resume needs both.
 | `AGENT_RUN_HEARTBEAT_MS` | 15000 | lease heartbeat |
 | `AGENT_RUN_RECLAIM_AFTER_MS` | 60000 | stale-lease threshold (≥ 2 × heartbeat, clamped) |
 | `AGENT_RUN_MAX_ITER` | 30 | a run's iteration cap, separate from the chat cap |
+| `AGENT_RUN_MAX_PREEMPTIONS` | 3 | WARP-3306: consecutive chat preemptions without a finished iteration before a claim runs unpreemptible; 0 = never preempt |
 | `AGENT_RUN_MAX_ATTEMPTS` | 3 | reclaims before a run is failed |
 | `AGENT_RUN_MAX_WALL_MS` | 2400000 | wall-clock ceiling (40 min) |
 
@@ -430,6 +446,22 @@ the model on the Models page reaches it; an explicit `model` stays pinned
 `droplet/notifications/<username>` topic the park uses, with the result
 summary (or the error).
 
+**Live events (WARP-3301)** — every status change and every checkpoint (at
+most one per step, never per token) publishes on MQTT topic
+`droplet/agent-runs/<username>`, which ws-bridge forwards on `/api/ws/events`
+to that user's sockets only. Payload: `{runId, sessionId, status, iteration,
+maxIter, lastTool, queuePosition, waitingFor, title}` plus `summary` on a
+terminal status. `lastTool` is the tool NAME only, never its arguments.
+Best-effort (QoS 0): a client that missed one re-reads `GET
+/api/agent-runs/:id`, which carries the same `queuePosition` and `waitingFor`.
+`queuePosition` is set for queued runs only, in the worker's claim order
+(`runAfter`, then `createdAt`), with running runs counted ahead: 1 = next.
+`waitingFor` is `none` for any run not queued; a queued run's reason is the
+explicit `queueWait` column — `queue`, or `chat` when it yielded the slot on a
+gateway 429 or was preempted for chat (WARP-3306). A run whose model call is
+still queued inside the gateway behind a chat call reads `running`/`none`: the
+worker cannot observe that short wait. Module: `agent-run-events.service.ts`.
+
 **Dashboard** — `AgentRunsPanel` on **`/workshop`** (WARP-2925, ADR-056; since
 WARP-2974 the run is a transcript in the Workshop space). It is the last
 visible row of the sidebar's Work group, after Calendar, for owner/admin only,
@@ -564,3 +596,39 @@ extension work); `workspace-checkouts` joins `EXCLUDED_VOLUMES`
 
 Parallel tool dispatch within an iteration; sub-agents / delegation; the
 ADR-014 client-target axis; the trigger→action automation engine (WARP-1448).
+
+**Follow-up: chat-started runs (WARP-3298).** Delegation from chat is now its
+own epic. A run started from a chat turn records `origin = chat`, the
+conversation (`sessionId`), and the assistant message and tool call that
+started it (`originMessageId`, `originToolCallId`), all set server-side from
+the turn's `_meta` (WARP-3299). A person may have at most 3 active runs;
+schedule fires are exempt. Deleting a chat with a live run answers 409 unless
+the caller says `cancelRuns=true|false`; the web chat asks the person which.
+
+**The brief and the result message (WARP-3300).** A chat-started run's first
+user message is a fixed brief (`chatRunBrief`): objective, deliverable, and
+the instruction that its final message is read by a parent with a very small
+context — a summary of at most 300 words plus the files it made. It never sees
+the chat history. When the run ends (any terminal status), the worker tick's
+`deliverRunResults` sweep posts ONE message into the conversation: role
+`assistant`, `ChatMessage.kind = agent_run_result`, `meta = {runId, status,
+title, summary, artifacts}`, and plain-text content (`Background task "…"
+finished: <summary>`), so older clients show it and the next chat turn replays
+it to the model with no polling tool. `summary` is capped at 2,000 characters
+at a word boundary; `artifacts` come only from recorded, successful
+`write_file` / `create_*` / `copy_file` calls. `resultDelivery` is the explicit
+state — `pending` → `delivered`, or `failed` (retried up to 5 posts), or
+`conversation_gone` when the chat was deleted first — and `turnId =
+agent-run:<id>` makes a repeat post a no-op. Each post also publishes the
+chat's `turn-completed` topic so an open dashboard reloads the thread.
+
+**In the web chat (WARP-3303).** A `start_agent_run` call that produced a run
+renders as a run card (`components/chat/RunCard.tsx`) instead of a tool chip.
+The card reads the run (`GET /api/agent-runs/:id`) and then follows the live
+topic, never the persisted tool result; it offers Stop and, when the run parks,
+Approve/Decline against `POST /:id/confirm` with no chat turn sent. The
+`agent_run_result` message renders as a result card. The layout's
+NotificationToaster socket fans the topic out (`lib/agent-run-events.ts`) to
+the cards and the Workshop nav badge (active runs; amber when one needs an OK).
+Terminal and park notifications carry `data.sessionId`, and their toast opens
+`/chat?c=<sessionId>` instead of the Workshop.

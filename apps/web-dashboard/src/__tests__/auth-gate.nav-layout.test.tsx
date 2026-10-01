@@ -23,6 +23,11 @@ vi.mock("@/components/workspace/WorkspaceShell", () => ({
     <div data-testid="workspace-shell">{children}</div>
   ),
 }));
+vi.mock("@/components/assistant/AssistantShell", () => ({
+  AssistantShell: ({ children }: { children: React.ReactNode }) => (
+    <div data-testid="assistant-shell">{children}</div>
+  ),
+}));
 vi.mock("@/components/help/HelpLauncher", () => ({
   HelpLauncher: () => <div data-testid="help-launcher" />,
 }));
@@ -33,7 +38,7 @@ vi.mock("@/components/ModuleRouteGuard", () => ({
   ModuleRouteGuard: ({ children }: { children: React.ReactNode }) => <div data-testid="module-guard">{children}</div>,
 }));
 
-const layoutRef = { current: "sidebar" as "sidebar" | "workspace" };
+const layoutRef = { current: "sidebar" as "sidebar" | "workspace" | "assistant" };
 vi.mock("@/lib/nav-layout", () => ({
   useNavLayout: () => ({ layout: layoutRef.current, setLayout: vi.fn() }),
 }));
@@ -89,6 +94,26 @@ describe("AuthGate — nav layout switch (WARP-2971)", () => {
     expect(screen.queryByTestId("workspace-shell")).toBeNull();
     expect(screen.queryByTestId("sidebar-shell")).toBeNull();
   });
+
+  // WARP-3062
+  it("renders the Assistant shell — which owns the sidebar and <main> — when chosen", () => {
+    layoutRef.current = "assistant";
+    pathnameValue = "/calendar";
+    render(<AuthGate>page</AuthGate>);
+    expect(screen.getByTestId("assistant-shell")).toHaveTextContent("page");
+    expect(screen.queryByTestId("workspace-shell")).toBeNull();
+    // The shell decides per side whether the sidebar renders; the gate must
+    // not add one of its own, nor a second <main>.
+    expect(screen.queryByTestId("sidebar-shell")).toBeNull();
+    expect(document.querySelector("main#main")).toBeNull();
+  });
+
+  it("the takeovers win over the assistant layout too", () => {
+    layoutRef.current = "assistant";
+    pathnameValue = "/change-password";
+    render(<AuthGate>page</AuthGate>);
+    expect(screen.queryByTestId("assistant-shell")).toBeNull();
+  });
 });
 
 describe("AuthGate — the Security wall has no chrome, but keeps the module guard (WARP-2981)", () => {
@@ -122,7 +147,7 @@ describe("AuthGate — the Security wall has no chrome, but keeps the module gua
   });
 });
 
-describe("AuthGate — D6: the wall runs on a Staff session only (WARP-2981)", () => {
+describe("AuthGate — D6: the wall runs on a Member session only (WARP-2981)", () => {
   it.each([
     ["owner", "/security/wall", WALL_COPY.refusedTitle],
     ["admin", "/security/wall", WALL_COPY.refusedTitle],
@@ -145,7 +170,7 @@ describe("AuthGate — D6: the wall runs on a Staff session only (WARP-2981)", (
     expect(screen.queryByTestId("help-launcher")).toBeNull();
   });
 
-  it("a family (Staff) session runs the wall", () => {
+  it("a family (Member) session runs the wall", () => {
     userRef.current = { ...userRef.current, role: "family" };
     pathnameValue = "/security/wall";
     render(<AuthGate>wall page</AuthGate>);

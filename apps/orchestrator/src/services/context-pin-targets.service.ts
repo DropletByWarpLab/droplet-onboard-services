@@ -53,6 +53,8 @@ import type { ModuleId, PrismaClient } from "@prisma/client";
 
 import { config } from "../config.js";
 import { getEffectiveModuleIds } from "./modules.service.js";
+import { isGateableModuleId, maxLevelFor } from "./access-catalog.js";
+import type { Role } from "./jwt.service.js";
 import type { ToolAccessScope } from "./tool-access.service.js";
 import {
   BUSINESS_PIN_KINDS,
@@ -90,6 +92,14 @@ export interface PinResolveContext {
   /** The caller's s3 tool reach for this turn. `null` = nothing narrows
    *  (owner, service principal, or no AccessRole). */
   scope: ToolAccessScope | null;
+  /**
+   * The caller's ADR-004 tier (`req.user.role`). REQUIRED, and `undefined`
+   * (no session role) reads as "unknown", which refuses every business kind:
+   * a `null` scope narrows nothing, and that is exactly what every role-less
+   * external guest has, so the tier is the only thing that can tell them apart.
+   * WARP-3365 / WARP-3369 (Romain, 2026-09-30).
+   */
+  tier: string | undefined;
 }
 
 /** The prisma surface this module needs. Narrowed so unit tests can hand in a
@@ -99,12 +109,26 @@ export type PinTargetReadClient = Pick<
   "crmCompany" | "crmDeal" | "pmProject" | "pmWorkItem"
 >;
 
+/**
+ * WARP-3365 / WARP-3369 - the tier floor, the same catalog fact the routes
+ * (`requireModuleTierFloor`) and the assistant's data hops
+ * (`requireMcpActingUserToolDomain`) read. An external guest holds nothing on
+ * `crm` or `projects`, so a guest who knows a record's uuid must not be able to
+ * pin it and read its NAME back in the pin list or in every prompt.
+ */
+function tierMayHold(tier: string | undefined, moduleId: ModuleId): boolean {
+  if (typeof tier !== "string") return false;
+  return !isGateableModuleId(moduleId) || maxLevelFor(tier as Role, moduleId) !== null;
+}
+
 function kindPermitted(
   kind: BusinessPinKind,
   modules: ReadonlySet<ModuleId>,
   scope: ToolAccessScope | null,
+  tier: string | undefined,
 ): boolean {
   if (!modules.has(PIN_KIND_MODULE[kind])) return false;
+  if (!tierMayHold(tier, PIN_KIND_MODULE[kind])) return false;
   if (scope === null) return true;
   return scope.domains.has(PIN_KIND_TOOL_DOMAIN[kind]);
 }
@@ -119,6 +143,7 @@ function kindPermitted(
 async function permittedKinds(
   prisma: unknown,
   scope: ToolAccessScope | null,
+  tier: string | undefined,
 ): Promise<ReadonlySet<BusinessPinKind>> {
   let modules: ReadonlySet<ModuleId>;
   try {
@@ -129,7 +154,7 @@ async function permittedKinds(
   } catch {
     return new Set();
   }
-  return new Set(BUSINESS_PIN_KINDS.filter((k) => kindPermitted(k, modules, scope)));
+  return new Set(BUSINESS_PIN_KINDS.filter((k) => kindPermitted(k, modules, scope, tier)));
 }
 
 /**
@@ -155,7 +180,7 @@ export async function resolveBusinessPinTargets(
   // safe to do this work inline on the chat request rather than out of band.
   if (byKind.size === 0) return out;
 
-  const allowed = await permittedKinds(prisma, ctx.scope);
+  const allowed = await permittedKinds(prisma, ctx.scope, ctx.tier);
 
   const denied: RenderablePin[] = [];
   for (const [kind, list] of byKind) {
@@ -270,7 +295,10 @@ export async function checkBusinessPinTarget(
   ref: string,
   ctx: PinResolveContext,
 ): Promise<PinTargetCheck> {
-  const allowed = await permittedKinds(prisma, ctx.scope);
+  // The refusal comes BEFORE any row is read, and it is the same answer for a
+  // tier the floor refuses whether or not the record exists: a guest probing
+  // uuids learns nothing from 404-versus-422 (WARP-3365 / WARP-3369).
+  const allowed = await permittedKinds(prisma, ctx.scope, ctx.tier);
   if (!allowed.has(kind)) {
     return { ok: false, reason: "module_disabled", module: PIN_KIND_MODULE[kind] };
   }

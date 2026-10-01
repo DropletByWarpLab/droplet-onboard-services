@@ -60,7 +60,12 @@ export interface AggregateHealth {
   status: AggregateStatus;
   components: ComponentHealth[];
   uptime: number; // seconds
-  version: string;
+  // WARP-3154 — the committed OTA release tag. OMITTED (key absent, never
+  // `null`) on a box that has never taken an OTA update (still on its factory
+  // image): droplet-android decodes `version` as a non-null `String` with a
+  // default, which only applies when the key is absent — an explicit `null`
+  // throws and leaves its Home on "Checking system status" forever.
+  version?: string;
 }
 
 type Probe = () => Promise<boolean>;
@@ -74,6 +79,14 @@ const PROBE_TIMEOUT_MS = 5_000; // keep probes snappy so the 15s cadence isn't s
 const startTime = Date.now();
 const cache: Map<ComponentName, ComponentHealth> = new Map();
 let started = false;
+// WARP-3154 — resolved once at boot and re-checked every poll cycle by
+// `refreshCurrentVersion` (called from `startHealthMonitor`, NOT from
+// `runAllProbes` — the latter is exercised directly by tests with minimal
+// Prisma stubs that don't carry a `deviceUpdate` model). Read synchronously
+// by `getAggregateHealth()` so the route stays sync. Kept on a DB read
+// failure rather than reset, so a flaky poll never flips a known-good
+// version back to unknown.
+let currentVersion: string | null = null;
 
 /**
  * WARP-618: per-poll snapshot observers. Every completed probe cycle hands
@@ -257,8 +270,30 @@ export function getAggregateHealth(): AggregateHealth {
     status: classifyAggregate(components),
     components,
     uptime: Math.floor((Date.now() - startTime) / 1000),
-    version: "0.1.0",
+    ...(currentVersion ? { version: currentVersion } : {}),
   };
+}
+
+/**
+ * WARP-3154 — the box's actual running release: the newest COMMITTED
+ * `DeviceUpdate` row (mirrors routes/updates.ts's "currently running" read).
+ * Null when the box has never taken an OTA update (still on its factory
+ * image) — honest, rather than a hardcoded literal divorced from what
+ * actually shipped. A DB read failure logs and leaves `currentVersion`
+ * whatever it already was; never throws (called from the boot seed + every
+ * poll tick, both fire-and-forget). Exported for tests.
+ */
+export async function refreshCurrentVersion(prisma: PrismaClient): Promise<void> {
+  try {
+    const row = await prisma.deviceUpdate.findFirst({
+      where: { status: "committed" },
+      orderBy: { updatedAt: "desc" },
+      select: { releaseTag: true, gitSha: true },
+    });
+    currentVersion = row ? row.releaseTag ?? `git-${row.gitSha.slice(0, 10)}` : null;
+  } catch (err) {
+    logger.warn({ err }, "resolving current release version failed — keeping last known value");
+  }
 }
 
 /**
@@ -282,6 +317,8 @@ export function startHealthMonitor(
       await runAllProbes(prisma).catch((err) => {
         logger.warn({ err }, "health probe cycle failed");
       });
+      // WARP-3154: re-check the running release every tick (never throws).
+      await refreshCurrentVersion(prisma);
     },
     { immediate: true },
   );
@@ -291,4 +328,5 @@ export function startHealthMonitor(
 export function stopHealthMonitor(): void {
   started = false;
   cache.clear();
+  currentVersion = null;
 }

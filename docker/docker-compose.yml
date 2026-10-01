@@ -1363,6 +1363,16 @@ services:
       # DROPLET_FIPS_REQUIRED=true.
       - OPENSSL_CONF=${OPENSSL_CONF:-/etc/ssl/openssl.cnf}
       - DROPLET_FIPS_REQUIRED=${DROPLET_FIPS_REQUIRED:-false}
+      # WARP-3070: the `Decide` RPC's target, the Kev decision-model sidecar
+      # (droplet-local-LLM docs/ADR-006-decision-model-kev.md; profile
+      # `decision`, off by default), e.g. http://host.docker.internal:8009.
+      # Unset/empty = Decide answers UNAVAILABLE with no network call. The key
+      # must equal that repo's DECISION_MODEL_API_KEY. BARE NAMES on purpose:
+      # `${VAR:-}` here would inject an empty string that OVERRIDES a value set
+      # in the ../.env env_file above; bare, compose passes each through only
+      # when set in the shell, and otherwise leaves the env_file value alone.
+      - DECISION_MODEL_URL
+      - DECISION_MODEL_API_KEY
     volumes:
       - aikeys:/data/keys
       # WARP-234/236: internal-TLS bundle — the rediss:// URL above points
@@ -2513,7 +2523,9 @@ services:
     # comes back listening. Intended — reset returns the appliance to
     # out-of-the-box behaviour, and out of the box it listens — but it is
     # the one item on this volume whose loss ADDS a capability rather
-    # than removing one, so it belongs in any reset-facing copy.
+    # than removing one, so it belongs in any reset-facing copy. The
+    # speaker volume is the fourth (/data/voice-volume.json,
+    # voice/volume.py): a reset returns it to 100, unmuted.
     volumes:
       - /dev/snd:/dev/snd
       - voice-calibration:/data
@@ -2683,6 +2695,10 @@ services:
       #   the cap is generous (covers reasoning + a short spoken answer);
       #   too low → empty completion. Gateway hard-caps at 4096.
       - VOICE_MAX_TOKENS=${VOICE_MAX_TOKENS:-}
+      #   VOICE_MAX_ITER — agent-loop step budget per voice turn
+      #   (default 4, clamped 1..10; WARP-3316). Empty → the in-code
+      #   default. A budget of 2 died on the second tool call.
+      - VOICE_MAX_ITER=${VOICE_MAX_ITER:-}
       #   VOICE_ALLOWED_TOOLS — comma-separated tool names the voice
       #   assistant may use on tool-enabled turns. Empty → the curated
       #   in-code default (box health, cameras, network, files, smart

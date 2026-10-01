@@ -52,6 +52,8 @@ import type {
   MatterGrouped,
   Room,
   FileEntryInfo,
+  FolderColor,
+  FolderColorEntry,
   FileSpaceId,
   FileSpacesResponse,
   FileVersionInfo,
@@ -123,6 +125,7 @@ import type {
   UsagePolicy,
   UsageWithMeta,
   AdminFilesUsageResponse,
+  CompanyPublicLink,
   Department,
   DepartmentDetail,
   DepartmentRight,
@@ -143,6 +146,7 @@ import type {
   AppDownloadCatalog,
   Routine,
   RoutineStatus,
+  RoutineVisibility,
   RoutineRun,
   RoutineSchedule,
   ContextPinKind,
@@ -169,6 +173,11 @@ import type {
   SecurityZonePatchBody,
   SecurityZonesResponse,
   SecurityZoneWriteResult,
+  SecurityAiSettingsBody,
+  SecurityAiSettingsView,
+  SecurityAiSettingsWriteResult,
+  SecurityLinkDecisionResult,
+  SecurityLinkProposalsView,
   NotificationAckAllResult,
   NotificationAckResult,
   NotificationsPage,
@@ -177,6 +186,8 @@ import type {
   AlertRoutingView,
   IncidentActionResult,
   IncidentDetail,
+  IncidentNarrativeView,
+  IncidentVerdict,
   IncidentsPage,
   IncidentsSummary,
 } from "./types";
@@ -1367,6 +1378,10 @@ export async function fetchHealth(): Promise<HealthResponse> {
 
 export async function fetchDevices(): Promise<DeviceInfo[]> {
   const res = await authFetch(`${BASE}/api/devices`);
+  // WARP-3378: the box's own device row is not served to an external guest
+  // (403). That is "no device to show", not a fault: the header chip falls back
+  // to the LAN name, and `useDevice` stops polling on an empty answer.
+  if (res.status === 403) return [];
   if (!res.ok) throw new Error(`Failed to fetch devices: ${res.status}`);
   return res.json();
 }
@@ -1388,17 +1403,33 @@ export interface SystemHealth {
   status: SystemHealthStatus;
   components: SystemComponent[];
   uptime: number;
-  version: string;
+  // WARP-3154 — the real committed OTA release tag; absent on a box that has
+  // never taken an update (still on its factory image). No longer the
+  // hardcoded "0.1.0" literal.
+  version?: string;
 }
 
 export async function fetchSystemHealth(): Promise<SystemHealth> {
   // Public endpoint (no auth) — used by Docker healthcheck + dashboard pill.
+  // WARP-3154 — never carries a down component's `error` (internal-topology
+  // leak on an unauthenticated route); use fetchSystemHealthDetails() for that.
   const res = await fetch(`${BASE}/api/orchestrator/health`, {
     credentials: "include",
   });
   // 503 is a valid "down" response; we still want to read the body.
   if (!res.ok && res.status !== 503) {
     throw new Error(`Failed to fetch system health: ${res.status}`);
+  }
+  return res.json();
+}
+
+/** WARP-3154 — the owner/admin counterpart of fetchSystemHealth(): same
+ *  shape, but each component's `error` reason is present. 403s for anyone
+ *  else; callers gate on isAdminRole(user?.role) before calling this. */
+export async function fetchSystemHealthDetails(): Promise<SystemHealth> {
+  const res = await authFetch(`${BASE}/api/orchestrator/health/details`);
+  if (!res.ok && res.status !== 503) {
+    throw new Error(`Failed to fetch system health details: ${res.status}`);
   }
   return res.json();
 }
@@ -3093,6 +3124,35 @@ export async function setWebPushChannel(enabled: boolean): Promise<void> {
   }
 }
 
+/**
+ * WARP-3264 — the `place_lookup` off-LAN channel: the calendar place field's
+ * OpenStreetMap lookup. Default off. `null` = unreadable; don't guess.
+ */
+export async function fetchPlaceLookupChannel(): Promise<{ enabled: boolean } | null> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan`);
+  if (!res.ok) return null;
+  const body = (await res.json()) as { channels?: Array<{ key: string; enabled: boolean }> };
+  const row = body.channels?.find((c) => c.key === "place_lookup");
+  return row ? { enabled: row.enabled === true } : null;
+}
+
+/** WARP-3264 — flip `place_lookup`. Owner only (the route 403s everyone else). */
+export async function setPlaceLookupChannel(enabled: boolean): Promise<void> {
+  const res = await authFetch(`${BASE}/api/settings/off-lan/place_lookup`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      enabled,
+      reason: enabled ? "Turned on from Settings → Locations" : "Turned off from Settings → Locations",
+    }),
+  });
+  if (!res.ok) {
+    throw Object.assign(new Error(`Failed to change place lookup: ${res.status}`), {
+      status: res.status,
+    });
+  }
+}
+
 /** `refused` is set when the `web_push` off-LAN channel is off (WARP-2904). */
 export async function sendTestPush(): Promise<{
   sent: number;
@@ -3396,6 +3456,31 @@ export function getCameraLiveUrl(name: string): string {
  *  doesn't have birdseye configured. */
 export function getBirdseyeLiveUrl(): string {
   return `${BASE}/api/cameras/birdseye/live`;
+}
+
+/**
+ * Whether the birdseye composite would play for this viewer: the HTTP status
+ * of a GET, read off its headers, and the request aborted at once — the body
+ * is an endless MJPEG stream and is never read. Never HEAD: Express runs the
+ * GET handler for a HEAD and Node sends a HEAD's headers only when the
+ * response ends, which a continuous stream never does. Through `authFetch`,
+ * so an expired access cookie is refreshed before the `<img>` needs it.
+ * Rejects on a timeout (20 s), a network failure, or `signal` aborting.
+ */
+export async function getBirdseyeStatus(signal?: AbortSignal): Promise<number> {
+  const ctrl = new AbortController();
+  const stop = () => ctrl.abort();
+  if (signal?.aborted) stop();
+  signal?.addEventListener("abort", stop, { once: true });
+  const timer = setTimeout(stop, DEFAULT_API_FETCH_TIMEOUT_MS);
+  try {
+    const res = await authFetch(getBirdseyeLiveUrl(), { signal: ctrl.signal });
+    return res.status;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", stop);
+    ctrl.abort();
+  }
 }
 
 // --- Camera groups ---
@@ -4296,6 +4381,19 @@ export interface PersistedConversation {
      * `completed` defensively.
      */
     status?: "pending" | "streaming" | "completed" | "failed" | "aborted";
+    /**
+     * WARP-3300 — `agent_run_result` on the message a background run posts
+     * into the chat that started it; `meta` then carries the run. Absent on
+     * an older box (read as `message`).
+     */
+    kind?: "message" | "agent_run_result";
+    meta?: {
+      runId?: string;
+      status?: "succeeded" | "failed" | "cancelled";
+      title?: string;
+      summary?: string;
+      artifacts?: { kind: string; ref: string; title: string }[];
+    } | null;
     createdAt: string;
   }>;
 }
@@ -4381,13 +4479,34 @@ export async function renameConversation(
   return res.json() as Promise<{ id: string; title: string }>;
 }
 
-/** WARP-331 — delete a conversation. Returns true on 200, false on 404. */
-export async function deleteConversation(conversationId: string): Promise<boolean> {
+/**
+ * WARP-3299 — the chat started background runs that are still going. The
+ * server refuses the delete until the person says what happens to them.
+ */
+export class ConversationHasLiveRunsError extends Error {
+  constructor(public readonly runs: { id: string; title: string; status: string }[]) {
+    super("conversation_has_live_runs");
+    this.name = "ConversationHasLiveRunsError";
+  }
+}
+
+/**
+ * WARP-331 — delete a conversation. Returns true on 200, false on 404.
+ * WARP-3303 — throws `ConversationHasLiveRunsError` when the chat has live
+ * background runs and `cancelRuns` was not given; pass `true` to stop them
+ * first or `false` to keep them running.
+ */
+export async function deleteConversation(conversationId: string, cancelRuns?: boolean): Promise<boolean> {
+  const qs = cancelRuns === undefined ? "" : `?cancelRuns=${cancelRuns}`;
   const res = await authFetch(
-    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}`,
+    `${BASE}/api/llm/conversations/${encodeURIComponent(conversationId)}${qs}`,
     { method: "DELETE" },
   );
   if (res.status === 404) return false;
+  if (res.status === 409) {
+    const body = (await res.json().catch(() => null)) as { error?: string; runs?: { id: string; title: string; status: string }[] } | null;
+    if (body?.error === "conversation_has_live_runs") throw new ConversationHasLiveRunsError(body.runs ?? []);
+  }
   if (!res.ok) throw new Error(`Failed to delete conversation: ${res.status}`);
   return true;
 }
@@ -5156,6 +5275,50 @@ export async function fetchFiles(
   if (!res.ok) throw new Error(`Failed to fetch files: ${res.status}`);
   throwIfFilesDegraded(res);
   return res.json();
+}
+
+// Per-user folder colours. Keyed server-side on the folder's Nextcloud fileId
+// (survives rename/move); `path` here is space-relative, like every other
+// space-threaded write helper.
+export async function fetchFolderColors(): Promise<FolderColorEntry[]> {
+  const res = await authFetch(`${BASE}/api/files/folder-colors`);
+  if (!res.ok) throw new Error(`Failed to fetch folder colors: ${res.status}`);
+  const data = await res.json();
+  return data.colors;
+}
+
+export async function setFolderColor(
+  path: string,
+  color: FolderColor,
+  space: FileSpaceId = "personal"
+): Promise<void> {
+  const res = await authFetch(`${BASE}/api/files/folder-colors`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(
+      space === "personal" ? { path, color } : { path, color, space }
+    ),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to set folder color: ${res.status}`);
+  }
+}
+
+export async function clearFolderColor(
+  path: string,
+  space: FileSpaceId = "personal"
+): Promise<void> {
+  const qs = new URLSearchParams({ path });
+  if (space !== "personal") qs.set("space", space);
+  const res = await authFetch(
+    `${BASE}/api/files/folder-colors?${qs.toString()}`,
+    { method: "DELETE" }
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to clear folder color: ${res.status}`);
+  }
 }
 
 // WARP-883 (ADR-027 WS-5) — which Files spaces exist for this user. Drives the
@@ -6414,6 +6577,14 @@ export async function fetchPromptInspect(
 }
 
 /** Admin usage roster — per-user + per-department storage (WARP-1271). */
+/** WARP-3168: owner/admin only. Throws on 503 (Nextcloud unreadable) — never an empty list. */
+export async function fetchCompanyPublicLinks(): Promise<CompanyPublicLink[]> {
+  const res = await authFetch(`${BASE}/api/admin/files/company-public-links`);
+  if (!res.ok) throw new Error(`Couldn't read the company's links (${res.status})`);
+  const body: { links: CompanyPublicLink[] } = await res.json();
+  return body.links;
+}
+
 export async function fetchAdminFilesUsage(): Promise<AdminFilesUsageResponse> {
   const res = await authFetch(`${BASE}/api/admin/files/usage`);
   if (!res.ok) {
@@ -6931,8 +7102,18 @@ async function throwVoiceError(res: Response, fallback: string): Promise<never> 
   throw e;
 }
 
-export async function fetchVoiceStatus(): Promise<VoiceStatusInfo> {
-  const res = await authFetch(`${BASE}/api/voice/status`);
+/**
+ * `transcript: true` also asks for the last utterance and reply
+ * (`last_transcript`, `last_response` and their times). WARP-3396: the box
+ * leaves them out of the default answer, so only the setup wizard's voice step
+ * (its "what it heard" try-it) asks; the Voice page's 1 s poll does not.
+ */
+export async function fetchVoiceStatus(
+  opts: { transcript?: boolean } = {},
+): Promise<VoiceStatusInfo> {
+  const res = await authFetch(
+    `${BASE}/api/voice/status${opts.transcript ? "?include=transcript" : ""}`,
+  );
   if (!res.ok) await throwVoiceError(res, "Failed to fetch voice status");
   return res.json();
 }
@@ -8376,8 +8557,9 @@ async function teamChatFail(
 export interface TeamChatContact {
   id: string;
   displayName: string;
-  username: string;
-  role: string;
+  /** WARP-3263 — absent for an external guest's directory (names only). */
+  username?: string;
+  role?: string;
 }
 
 export type TeamChatMessageKind =
@@ -8970,6 +9152,21 @@ export async function setRoutineStatus(
 }
 
 /**
+ * WARP-3354 — share a routine with the Workspace (`WORKSPACE`, POST) or make it
+ * private again (`PRIVATE`, DELETE). The box decides who may: the creator, an
+ * owner or an admin. Answers the routine.
+ */
+export async function setRoutineVisibility(
+  slug: string,
+  visibility: RoutineVisibility,
+): Promise<Routine> {
+  const res = await authFetch(`${BASE}/api/tools/${encodeURIComponent(slug)}/share`, {
+    method: visibility === "WORKSPACE" ? "POST" : "DELETE",
+  });
+  return routineJson<Routine>(res, "Failed to change who can see the routine");
+}
+
+/**
  * Run now. A `writes && !reversible` spec answers 409 with a
  * `confirmation_required` body; the caller re-invokes with `confirm` set
  * rather than this helper deciding on the user's behalf.
@@ -9160,6 +9357,8 @@ export interface CloudHistorySummary {
   unaskedOnBoxAnswers: number;
   userMessages: number;
   drewOn: string[];
+  /** WARP-2979 — sources whose answers are never sent to a cloud model, whatever is chosen (e.g. "Security"). */
+  neverSent?: string[];
 }
 
 export async function fetchCloudHistory(conversationId: string): Promise<CloudHistorySummary> {
@@ -9348,6 +9547,43 @@ export function putSecurityZoneLinks(id: string, body: SecurityZoneLinksBody): P
   );
 }
 
+// ── WARP-2979 (ADR-059 P4 §7 routes 23–27): Droplet's links and its AI settings ──
+
+export const SECURITY_LINK_PROPOSALS_PATH = "/api/security/link-proposals";
+export const SECURITY_LINKS_PATH = "/api/security/links";
+export const SECURITY_AI_SETTINGS_PATH = "/api/security/ai-settings";
+
+/** 23 (view; the list is filled only at manage) — Droplet's open suggestions. */
+export function getSecurityLinkProposals(): Promise<SecurityLinkProposalsView> {
+  return securityFetch<SecurityLinkProposalsView>(`${BASE}${SECURITY_LINK_PROPOSALS_PATH}`);
+}
+
+/** 24 (manage) — add Droplet's suggestion, or Keep a link Droplet made. */
+export function acceptSecurityLink(linkId: string): Promise<SecurityLinkDecisionResult> {
+  return securityFetch<SecurityLinkDecisionResult>(
+    `${BASE}${SECURITY_LINKS_PATH}/${encodeURIComponent(linkId)}/accept`,
+    jsonBody("POST", {}),
+  );
+}
+
+/** 25 (manage) — Not this (a suggestion), or Undo (a link Droplet made). Final: Droplet never suggests it again. */
+export function rejectSecurityLink(linkId: string): Promise<SecurityLinkDecisionResult> {
+  return securityFetch<SecurityLinkDecisionResult>(
+    `${BASE}${SECURITY_LINKS_PATH}/${encodeURIComponent(linkId)}/reject`,
+    jsonBody("POST", {}),
+  );
+}
+
+/** 26 (view) — what Droplet's AI may do in Security. */
+export function getSecurityAiSettings(): Promise<SecurityAiSettingsView> {
+  return securityFetch<SecurityAiSettingsView>(`${BASE}${SECURITY_AI_SETTINGS_PATH}`);
+}
+
+/** 27 (manage) — change it; `expectedVersion` from the last read (409 VERSION_CONFLICT otherwise). */
+export function putSecurityAiSettings(body: SecurityAiSettingsBody): Promise<SecurityAiSettingsWriteResult> {
+  return securityFetch<SecurityAiSettingsWriteResult>(`${BASE}${SECURITY_AI_SETTINGS_PATH}`, jsonBody("PUT", body));
+}
+
 /** 13 (manage) — set or clear the weekly hours. */
 export function putSecurityHours(body: SecurityHoursBody): Promise<SecurityHoursWriteResult> {
   return securityFetch<SecurityHoursWriteResult>(`${BASE}${SECURITY_HOURS_PATH}`, jsonBody("PUT", body));
@@ -9477,12 +9713,37 @@ export function acknowledgeSecurityIncident(
   );
 }
 
+/**
+ * 28 (act) — WARP-2979 P4 PR-2: "Summarise now" / "Regenerate". 202 {narrative}
+ * in state `pending`; 409 NARRATIVE_COOLDOWN, NARRATIVE_TOO_OLD, SUMMARIES_OFF or NOT_ACTIONABLE;
+ * 404 INCIDENT_NOT_FOUND. The body is strict and empty.
+ */
+export function requestSecurityIncidentNarrative(id: string): Promise<{ narrative: IncidentNarrativeView }> {
+  return securityFetch<{ narrative: IncidentNarrativeView }>(
+    `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/narrative`,
+    jsonBody("POST", {}),
+  );
+}
+
 /** 20 (act) — done, with an optional note of at most 280 characters. The body is strict: no empty note is sent. */
 export function resolveSecurityIncident(id: string, opts: { note?: string } = {}): Promise<IncidentActionResult> {
   const note = (opts.note ?? "").trim();
   return securityFetch<IncidentActionResult>(
     `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/resolve`,
     jsonBody("POST", note ? { note } : {}),
+  );
+}
+
+/**
+ * 35 (act, owner/admin — WARP-2980 P5) — Expected / Not expected. The body is
+ * exactly `{verdict}` (strict on the box). It never acknowledges, resolves or
+ * changes who is told; 409 NOT_JUDGEABLE when there is nothing this viewer
+ * can mark (or their view is partial), 409 INCIDENT_CONFLICT on a lost race.
+ */
+export function setSecurityIncidentVerdict(id: string, verdict: IncidentVerdict): Promise<IncidentActionResult> {
+  return securityFetch<IncidentActionResult>(
+    `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/verdict`,
+    jsonBody("POST", { verdict }),
   );
 }
 

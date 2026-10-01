@@ -821,13 +821,18 @@ export function RolesAccessPanel({
    *  reach resolves from the workspace settings, and a static chip would
    *  claim something this panel cannot know. */
   function renderBuiltinAxisSummary(tier: AccessTier) {
-    const chips = ACCESS_FEATURES.map((def) => {
-      let ceiling = def.levels[0]!;
+    const chips = ACCESS_FEATURES.flatMap((def) => {
+      // A module whose lowest level is floored above this tier is not held at
+      // all (Security, Customers and Projects for an external guest, which the
+      // box refuses outright) — no chip, rather than one claiming "view".
+      const lowest = def.levels[0]!;
+      if (lowest.minTier && TIER_RANK[tier] < TIER_RANK[lowest.minTier]) return [];
+      let ceiling = lowest;
       for (const level of def.levels) {
         if (!level.minTier || TIER_RANK[tier] >= TIER_RANK[level.minTier]) ceiling = level;
       }
       const suffix = def.levels.length > 1 ? ` · ${ceiling.label.toLowerCase()}` : "";
-      return { key: def.moduleId, label: `${def.label}${suffix}` };
+      return [{ key: def.moduleId, label: `${def.label}${suffix}` }];
     });
     return (
       <>

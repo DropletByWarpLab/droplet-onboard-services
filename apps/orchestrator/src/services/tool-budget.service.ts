@@ -38,6 +38,7 @@ import {
   BUSINESS_CONTEXT_MAX_CHARS,
   INTERVIEW_PROMPT_MAX_CHARS,
   TOOL_GUIDANCE_MAX_CHARS,
+  DATE_LINE_MAX_CHARS,
   OUTPUT_RESERVE,
 } from "./prompt-budget.consts.js";
 import { IDENTITY_MAX_CHARS } from "./identity-prompt.js";
@@ -63,8 +64,9 @@ export const MEMORY_FACTS_CHAR_BUDGET = 2000;
  * Worst-case sum of every FIXED system-prompt block, in chars.
  *
  * Composed from the shipping constants rather than restated as a literal:
- * identity + persona + business + tool guidance + memory facts + interview.
- * `base-prompt-budget.test.ts` asserts this equals 11800 and stays under
+ * identity + persona + business + tool guidance + memory facts + interview
+ * + the WARP-3281 date line.
+ * `base-prompt-budget.test.ts` asserts this equals 11950 and stays under
  * `BASE_PROMPT_MAX_CHARS`, so the two files cannot drift apart.
  */
 export const FIXED_SYSTEM_BLOCK_CHARS =
@@ -73,7 +75,8 @@ export const FIXED_SYSTEM_BLOCK_CHARS =
   BUSINESS_CONTEXT_MAX_CHARS +
   TOOL_GUIDANCE_MAX_CHARS +
   MEMORY_FACTS_CHAR_BUDGET +
-  INTERVIEW_PROMPT_MAX_CHARS;
+  INTERVIEW_PROMPT_MAX_CHARS +
+  DATE_LINE_MAX_CHARS;
 
 /** The wire shape a tool takes in an OpenAI-style `tools[]` array. */
 export interface AdvertisedToolSpec {
