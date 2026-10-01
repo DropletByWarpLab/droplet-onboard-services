@@ -61,6 +61,23 @@ describe("module registry — catalog integrity", () => {
   });
 });
 
+describe("module + preset descriptions — plain business language (WARP-3401)", () => {
+  // Customer copy names what a thing DOES for the business, never the vendor,
+  // protocol or acronym behind it. `OnlyOffice` had already gone stale here
+  // (ADR-034 moved to Collabora) — the class of drift this list exists to stop.
+  const VENDOR_OR_PROTOCOL =
+    /\b(onlyoffice|collabora|nextcloud|frigate|eaglesoft|openwrt|ollama|wireguard|hubspot|stripe|mailchimp|quickbooks|bacnet|modbus|snmp|knx|mqtt|rtsp|onvif|vlans?|poe|vpn|rag|operator(?:'s)?)\b|\bMatter\b/i;
+  const ACRONYM = /\b[A-Z]{2,}\b/;
+
+  it.each([...MODULES, ...BUSINESS_TYPES].map((d) => [d.id, d.description] as const))(
+    "%s: %s",
+    (_id, description) => {
+      expect(description).not.toMatch(VENDOR_OR_PROTOCOL);
+      expect(description).not.toMatch(ACRONYM);
+    },
+  );
+});
+
 describe("route prefixes — must match a real router mount", () => {
   it("every non-core module's prefixes are under /api/", () => {
     // All orchestrator routers mount at "/api"; a prefix that doesn't start

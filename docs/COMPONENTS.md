@@ -195,6 +195,26 @@ network. Host-published ports and host-network services are called out.
   `WRITE_TOOLS` in `src/routes/llm.ts` is **derived from `requiresWrite`** in
   tools-core — don't maintain it by hand. Device pairing is QR-code-driven; the
   dashboard uses an HTTP-only `droplet_session` cookie.
+- **External guests get nothing of the company's data unless it is shared with
+  them (Romain, 2026-09-30).** The box enforces it on every route; clients only
+  mirror it. Modules the catalog refuses the guest tier (`refuseBelowFloor` in
+  `services/access-catalog.ts`: `security`, `crm`, `projects`, `money`) are
+  floored at the prefix by `requireModuleTierFloor` (mounted by
+  `mountModuleGates`, 404 `module_disabled`), for the assistant acting for a
+  guest by `requireMcpActingUserToolDomain`, and for context pins by the tier in
+  `context-pin-targets.service.ts`. The one share: a work item ASSIGNED to a
+  guest is shared with them (read it, read and write its comments, move its
+  state) and nothing else in Projects; `modules/guest-shares.ts` names the five
+  requests and `middleware/guest-share.ts` checks the assignment per record. A
+  guest cannot own a deal or customer or lead a project. Single company-wide
+  routes floor with `requireRole`: `GET /api/integrations` and
+  `GET /api/integrations/eaglesoft` are owner/admin (a member reads the
+  provider-free `/api/integrations/summary`), `GET /api/devices`
+  drops `ip` and `networkMode` for a member and is refused to a guest, and the
+  `/api/tools` routines refuse a guest. `GET /api/app-downloads` stays open to
+  every role but sends the store's raw `detail` to owner/admin only;
+  `GET /api/voice/status` leaves the last transcript and reply out unless
+  `?include=transcript` (owner/admin).
 - **Tests:** **125** Vitest `*.test.ts` files under `src/` (+ Supertest for HTTP).
 - **Gotchas:**
   - **`MATTER_*` env vars are forbidden.** matter.js auto-imports every `MATTER_*`

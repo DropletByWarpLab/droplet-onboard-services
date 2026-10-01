@@ -74,6 +74,13 @@ const { ncGetFileId } = vi.hoisted(() => ({
   ncGetFileId: vi.fn<(a: string, b: string, c: string) => Promise<number | null>>(),
 }));
 vi.mock("../services/nextcloud.client.js", () => ({ ncGetFileId }));
+// WARP-3365 review: the writes now name a §9 level (`requireFeatureAccess`). The
+// level ladder is pinned in guest-company-data.test.ts; this suite measures the
+// EntityLink invariants, on a router mounted alone with no effective-access
+// resolver bound and the CRM module off in this DB, so the gate is a pass-through.
+vi.mock("../middleware/feature-gate.js", () => ({
+  requireFeatureAccess: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+}));
 
 import { createCrmEntityLinksRouter } from "../routes/crm-entity-links.js";
 import { checkSpaceAccess, readableDepartmentIdsFor } from "../middleware/space.js";

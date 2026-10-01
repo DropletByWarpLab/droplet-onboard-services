@@ -4,12 +4,18 @@
  *
  * Auth: mounted AFTER authMiddleware, and gated by the `crm` ModuleId through
  * the registry-driven module gates in `module-mounts.ts` — this file adds no
- * gate of its own, so there is one vocabulary and not a parallel list.
+ * READ gate of its own, so there is one vocabulary and not a parallel list.
  *
  * Like PM, the CRM is business-shared: reads are open to any authenticated
- * role, writes are gated with `requireRole`. Write routes admit the MCP service
- * principal (`requireRoleOrMcpService`) so WARP-2546's confirmation-gated tools
- * can dispatch here; the tool layer owns the human-facing confirmation.
+ * member-or-above role, writes are gated with `requireRole` plus the §9 level
+ * (see ACT / MANAGE below). An external guest reads nothing (WARP-3365,
+ * Romain 2026-09-30): the `crm` module's tier floor (`refuseBelowFloor` in
+ * access-catalog.ts, mounted by `mountModuleGates`) answers 404
+ * `module_disabled` on this whole prefix before any route below runs.
+ *
+ * Write routes admit the MCP service principal (`requireRoleOrMcpService`) so
+ * WARP-2546's confirmation-gated tools can dispatch here; the tool layer owns
+ * the human-facing confirmation.
  *
  * Errors: the service throws Error(code); codes map to HTTP status here,
  * mirroring routes/pm/native.ts.
@@ -20,6 +26,7 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
+import { requireFeatureAccess } from "../middleware/feature-gate.js";
 import * as crm from "../services/crm/crm.service.js";
 import * as partyLinks from "../services/crm/party-link.service.js";
 import * as customerRecord from "../services/crm/customer-record.service.js";
@@ -108,6 +115,8 @@ function mapServiceError(err: unknown, res: Response): boolean {
       return true;
     case crm.CRM_ERRORS.INVALID_STAGE:
     case crm.CRM_ERRORS.AMOUNT_NEEDS_CURRENCY:
+    // WARP-3365 — an external guest cannot own a customer or a deal.
+    case crm.CRM_ERRORS.OWNER_IS_GUEST:
     case "activity_needs_a_subject":
       // The referenced row exists but is wrong for this request — 422, so a
       // cross-pipeline stage id does not read as a typo.
@@ -141,6 +150,23 @@ function mapServiceError(err: unknown, res: Response): boolean {
 }
 
 const WRITE = ["owner", "admin", "family"] as const;
+
+/**
+ * WARP-3365 — the §9 ladder on WRITES. The module gate mounted off the registry
+ * prefix (`mountModuleGates`) asks `view`; the ladder promises more: `act` is
+ * logging a call and moving a deal, `manage` is editing the pipeline itself and
+ * deleting records. Until now a member whose custom role held `crm: view` could
+ * still create, edit, archive and delete customers and move deals. Each write
+ * below names the level it needs; a `service` principal (the `crm_*` tool
+ * paths) passes, as it does the view gate, and the assistant acting for a
+ * person is held to the module by `requireMcpActingUserToolDomain`.
+ *
+ * `manage`: the pipeline and its stages, and deleting a customer or a deal.
+ * `act`: everything else that writes, links and unlinks included (an
+ * association is not a record).
+ */
+const ACT = requireFeatureAccess("crm", "act");
+const MANAGE = requireFeatureAccess("crm", "manage");
 
 function badRequest(res: Response, error: z.ZodError): void {
   res.status(400).json({ error: "invalid_request", details: error.flatten() });
@@ -327,7 +353,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/crm/pipelines", requireRole(...WRITE), async (req, res, next) => {
+  router.post("/crm/pipelines", requireRole(...WRITE), MANAGE, async (req, res, next) => {
     const parsed = pipelineCreateSchema.safeParse(req.body);
     if (!parsed.success) return badRequest(res, parsed.error);
     try {
@@ -342,7 +368,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.patch("/crm/pipelines/:id", requireRole(...WRITE), async (req, res, next) => {
+  router.patch("/crm/pipelines/:id", requireRole(...WRITE), MANAGE, async (req, res, next) => {
     const parsed = pipelinePatchSchema.safeParse(req.body);
     if (!parsed.success) return badRequest(res, parsed.error);
     try {
@@ -353,7 +379,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/crm/pipelines/:id", requireRole(...WRITE), async (req, res, next) => {
+  router.delete("/crm/pipelines/:id", requireRole(...WRITE), MANAGE, async (req, res, next) => {
     try {
       await crm.deletePipeline(prisma, req.params.id);
       res.status(204).end();
@@ -363,7 +389,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/crm/pipelines/:id/stages", requireRole(...WRITE), async (req, res, next) => {
+  router.post("/crm/pipelines/:id/stages", requireRole(...WRITE), MANAGE, async (req, res, next) => {
     const parsed = stageCreateSchema.safeParse(req.body);
     if (!parsed.success) return badRequest(res, parsed.error);
     try {
@@ -374,7 +400,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.patch("/crm/stages/:id", requireRole(...WRITE), async (req, res, next) => {
+  router.patch("/crm/stages/:id", requireRole(...WRITE), MANAGE, async (req, res, next) => {
     const parsed = stagePatchSchema.safeParse(req.body);
     if (!parsed.success) return badRequest(res, parsed.error);
     try {
@@ -385,7 +411,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/crm/stages/:id", requireRole(...WRITE), async (req, res, next) => {
+  router.delete("/crm/stages/:id", requireRole(...WRITE), MANAGE, async (req, res, next) => {
     try {
       await crm.deleteStage(prisma, req.params.id);
       res.status(204).end();
@@ -437,7 +463,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/crm/companies", requireRoleOrMcpService(...WRITE), async (req, res, next) => {
+  router.post("/crm/companies", requireRoleOrMcpService(...WRITE), ACT, async (req, res, next) => {
     const parsed = companyCreateSchema.safeParse(req.body);
     if (!parsed.success) return badRequest(res, parsed.error);
     try {
@@ -449,7 +475,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.patch("/crm/companies/:id", requireRoleOrMcpService(...WRITE), async (req, res, next) => {
+  router.patch("/crm/companies/:id", requireRoleOrMcpService(...WRITE), ACT, async (req, res, next) => {
     const parsed = companyPatchSchema.safeParse(req.body);
     if (!parsed.success) return badRequest(res, parsed.error);
     try {
@@ -460,7 +486,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/crm/companies/:id", requireRole(...WRITE), async (req, res, next) => {
+  router.delete("/crm/companies/:id", requireRole(...WRITE), MANAGE, async (req, res, next) => {
     try {
       await crm.deleteCompany(prisma, req.params.id);
       res.status(204).end();
@@ -470,7 +496,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/crm/companies/:id/contacts", requireRole(...WRITE), async (req, res, next) => {
+  router.post("/crm/companies/:id/contacts", requireRole(...WRITE), ACT, async (req, res, next) => {
     const parsed = linkContactSchema.safeParse(req.body);
     if (!parsed.success) return badRequest(res, parsed.error);
     try {
@@ -488,6 +514,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
   router.delete(
     "/crm/companies/:id/contacts/:contactId",
     requireRole(...WRITE),
+    ACT,
     async (req, res, next) => {
       try {
         await crm.unlinkContactFromCompany(prisma, req.params.id, req.params.contactId);
@@ -582,7 +609,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/crm/deals", requireRoleOrMcpService(...WRITE), async (req, res, next) => {
+  router.post("/crm/deals", requireRoleOrMcpService(...WRITE), ACT, async (req, res, next) => {
     const parsed = dealCreateSchema.safeParse(req.body);
     if (!parsed.success) return badRequest(res, parsed.error);
     try {
@@ -594,7 +621,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.patch("/crm/deals/:id", requireRoleOrMcpService(...WRITE), async (req, res, next) => {
+  router.patch("/crm/deals/:id", requireRoleOrMcpService(...WRITE), ACT, async (req, res, next) => {
     const parsed = dealPatchSchema.safeParse(req.body);
     if (!parsed.success) return badRequest(res, parsed.error);
     try {
@@ -608,7 +635,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
   // The board's write. Separate from PATCH because it is the one that moves the
   // forecast, and because it writes a timeline entry — a caller should have to
   // name what they are doing.
-  router.post("/crm/deals/:id/stage", requireRoleOrMcpService(...WRITE), async (req, res, next) => {
+  router.post("/crm/deals/:id/stage", requireRoleOrMcpService(...WRITE), ACT, async (req, res, next) => {
     const parsed = moveStageSchema.safeParse(req.body);
     if (!parsed.success) return badRequest(res, parsed.error);
     try {
@@ -620,7 +647,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/crm/deals/:id", requireRole(...WRITE), async (req, res, next) => {
+  router.delete("/crm/deals/:id", requireRole(...WRITE), MANAGE, async (req, res, next) => {
     try {
       await crm.deleteDeal(prisma, req.params.id);
       res.status(204).end();
@@ -630,7 +657,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/crm/deals/:id/contacts", requireRole(...WRITE), async (req, res, next) => {
+  router.post("/crm/deals/:id/contacts", requireRole(...WRITE), ACT, async (req, res, next) => {
     const parsed = linkContactSchema.safeParse(req.body);
     if (!parsed.success) return badRequest(res, parsed.error);
     try {
@@ -645,6 +672,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
   router.delete(
     "/crm/deals/:id/contacts/:contactId",
     requireRole(...WRITE),
+    ACT,
     async (req, res, next) => {
       try {
         await crm.unlinkContactFromDeal(prisma, req.params.id, req.params.contactId);
@@ -682,7 +710,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/crm/activities", requireRoleOrMcpService(...WRITE), async (req, res, next) => {
+  router.post("/crm/activities", requireRoleOrMcpService(...WRITE), ACT, async (req, res, next) => {
     const parsed = activityCreateSchema.safeParse(req.body);
     if (!parsed.success) return badRequest(res, parsed.error);
     try {
@@ -742,7 +770,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/crm/party-links", requireRole(...WRITE), async (req, res, next) => {
+  router.post("/crm/party-links", requireRole(...WRITE), ACT, async (req, res, next) => {
     const owner = ownerId(req);
     if (!owner) return res.status(403).json({ error: "user_required" });
     const parsed = partyLinkCreateSchema.safeParse(req.body);
@@ -756,7 +784,7 @@ export function createCrmRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.patch("/crm/party-links/:id/archive", requireRole(...WRITE), async (req, res, next) => {
+  router.patch("/crm/party-links/:id/archive", requireRole(...WRITE), ACT, async (req, res, next) => {
     const owner = ownerId(req);
     if (!owner) return res.status(403).json({ error: "user_required" });
     const parsed = partyLinkArchiveSchema.safeParse(req.body ?? {});

@@ -516,8 +516,10 @@ export interface DeviceInfo {
   deviceId: string;
   hostname: string;
   hardwareRev: string;
-  networkMode: string;
-  ip: string | null;
+  /** Owner and admin only (WARP-3378): absent from a member's answer. */
+  networkMode?: string;
+  /** Owner and admin only (WARP-3378): absent from a member's answer. */
+  ip?: string | null;
   lastSeen: string;
 }
 
@@ -1038,7 +1040,9 @@ export interface OverlayApproveResult {
  *  voice-io FastAPI response model). The wizard's voice step polls this
  *  while the customer tries "hey droplet": a `last_wake_at` change is the
  *  wake confirmation; `last_transcript` / `last_response` land afterwards
- *  as STT and the reply complete. `state === "no_mic"` drives the
+ *  as STT and the reply complete — but only when asked for with
+ *  `fetchVoiceStatus({ transcript: true })` (WARP-3396: the box strips the
+ *  four transcript fields from the default answer). `state === "no_mic"` drives the
  *  plug-in-a-mic panel (hot-plug recovery needs no restart). */
 export interface VoiceStatusInfo {
   /** WARP-1599 — the admin kill switch, relayed verbatim. `false` means
