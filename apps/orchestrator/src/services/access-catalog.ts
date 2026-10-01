@@ -13,7 +13,9 @@
  *     states and is never trusted),
  *   - zod validation of grant/exception module ids.
  *
- * Floor model (ADR-004 via brief §9): `view` is never floored; `act`/
+ * Floor model (ADR-004 via brief §9): `view` is not floored on ordinary
+ * features, and is REFUSED below family on `security`, `crm`, `projects` and
+ * `money` (`refuseBelowFloor`); `act`/
  * `manage` floor at the FAMILY tier on ordinary features; network and
  * managed-switch writes floor at ADMIN; voice `act` is deliberately
  * un-floored (guests may talk to the assistant). The always-on trio of the
@@ -70,7 +72,11 @@ interface CatalogLevelDef {
    * `true` makes the floor a REFUSAL: a tier below `minTier` holds no grant on
    * the module at all (`maxLevelFor` / `clampLevel` answer `null`), so the role
    * writer stores none and the resolver hands none out. Opt-in per module:
-   * `security` (family floor, ADR-059) and `doors` (admin floor, ADR-055).
+   * `security` (family floor, ADR-059), `crm` and `projects` (family floor,
+   * WARP-3365 / WARP-3369: external guests get nothing from company-wide
+   * business data), and `doors` (admin floor, ADR-055). The same fact drives the role floor on the routes
+   * (`requireModuleTierFloor`) and on the assistant's data hops
+   * (`requireMcpActingUserToolDomain`), so the three cannot disagree.
    */
   refuseBelowFloor?: true;
 }
@@ -159,17 +165,28 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
     { level: "act", minTier: "family" },
     { level: "manage", minTier: "family" },
   ],
+  // WARP-3369 (Romain, 2026-09-30: external guests get NOTHING from company-wide
+  // business data unless it is explicitly shared with them). Work items,
+  // comments and the activity feed are the company's own, and nothing in
+  // Projects is shared with a guest per item, so `view` is a REFUSAL below the
+  // family floor (ADR-055 `refuseBelowFloor`, the `security` pattern): a guest
+  // holds no Projects grant, the role writer stores none, and
+  // `requireModuleTierFloor` (middleware/feature-gate.ts) answers 404 on every
+  // /api/pm and /api/mobile/pm route for the tier.
   projects: [
-    { level: "view" },
+    { level: "view", minTier: "family", refuseBelowFloor: true },
     { level: "act", minTier: "family" },
     { level: "manage", minTier: "family" },
   ],
   // WARP-2117. Same ladder as `projects`, which it lives inside: `act` is
   // logging a call and moving a deal, `manage` is editing the pipeline itself.
-  // Both floored at `family` — a pipeline is business-sensitive, so the guest
-  // tier gets read-only or nothing.
+  // Both floored at `family` — a pipeline is business-sensitive.
+  // WARP-3365: `view` is refused below `family` too. Customer phone numbers,
+  // addresses, contact e-mail and deal amounts are the company's own data,
+  // and an external guest is someone outside the company (same ruling and
+  // mechanism as `projects` above).
   crm: [
-    { level: "view" },
+    { level: "view", minTier: "family", refuseBelowFloor: true },
     { level: "act", minTier: "family" },
     { level: "manage", minTier: "family" },
   ],
@@ -177,8 +194,13 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
   // record — so there is no `act` level to offer: there is no action. `manage`
   // is floored at `admin` because the only management verb in reach is
   // connecting or disconnecting the ledger itself, which is credential work.
+  // WARP-3365 review (Romain, 2026-09-30: external guests get nothing of the
+  // company's data): what the business is owed and owes is the company's own,
+  // so `view` is a REFUSAL below the family floor too (`refuseBelowFloor`).
+  // The routes already refused a guest by role; the catalog, the tier floor on
+  // the prefix and the assistant's data hop now say the same thing.
   money: [
-    { level: "view", minTier: "family" },
+    { level: "view", minTier: "family", refuseBelowFloor: true },
     { level: "manage", minTier: "admin" },
   ],
   // WARP-2018/2032. `manage` is where connecting an address-book SOURCE will
@@ -256,6 +278,16 @@ export function maxLevelFor(tier: Role, moduleId: GateableModuleId): FeatureLeve
     }
   }
   return best;
+}
+
+/**
+ * The modules some human tier may hold NOTHING on (`refuseBelowFloor`), derived
+ * from the catalog so the route gate, the assistant gate and the role writer
+ * all read the same fact. Today: `security`, `crm`, `projects`, `money`. A `service`
+ * principal is not a human tier and is excluded from the probe.
+ */
+export function tierRefusingModuleIds(): GateableModuleId[] {
+  return GATEABLE_MODULE_IDS.filter((id) => tierRefused("guest", id) || tierRefused("family", id));
 }
 
 /**

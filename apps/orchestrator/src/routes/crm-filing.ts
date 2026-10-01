@@ -32,6 +32,7 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 
 import { requireRole } from "../middleware/auth.js";
+import { requireFeatureAccess } from "../middleware/feature-gate.js";
 import { assertSafeNcPath } from "../services/clips.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { ncGetFileId } from "../services/nextcloud.client.js";
@@ -71,6 +72,17 @@ import {
 import { AUDIT_PHRASES, recordFilingAuditBestEffort } from "../services/filing/audit.js";
 
 const REVIEWER = ["owner", "admin"] as const;
+
+/**
+ * WARP-3365 review — the §9 ladder on the WRITES here, as on `routes/crm.ts`.
+ * `owner` and `admin` only is the tier floor; an admin-based custom role can
+ * still be narrowed to `crm: view`, and that role read the queue fine but
+ * applied, rejected, undid and wrote rules all the same. `act` decides a
+ * proposal (apply, reject, not-same, undo); `manage` is policy (the rules, the
+ * filing settings, arming the canary).
+ */
+const ACT = requireFeatureAccess("crm", "act");
+const MANAGE = requireFeatureAccess("crm", "manage");
 
 /** How many cards one page carries. The needs-a-look list is meant to be
  *  finished, not scrolled. */
@@ -381,7 +393,7 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.patch("/crm/filing/settings", requireRole(...REVIEWER), async (req, res, next) => {
+  router.patch("/crm/filing/settings", requireRole(...REVIEWER), MANAGE, async (req, res, next) => {
     const actorId = actorOf(req);
     if (!actorId) {
       res.status(403).json({ error: "human_reviewer_required" });
@@ -479,7 +491,7 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
    * who is told "the canary has not passed" can act; one who is told
    * "something went wrong" switches the feature off.
    */
-  router.post("/crm/filing/canary", requireRole(...REVIEWER), async (req, res, next) => {
+  router.post("/crm/filing/canary", requireRole(...REVIEWER), MANAGE, async (req, res, next) => {
     const actorId = actorOf(req);
     if (!actorId) {
       // A service principal must not be able to arm unattended CRM writes.
@@ -644,6 +656,7 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
   router.post(
     "/crm/filing/proposals/:id/apply",
     requireRole(...REVIEWER),
+    ACT,
     async (req, res, next) => {
       const actorId = actorOf(req);
       if (!actorId) {
@@ -701,6 +714,7 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
   router.post(
     "/crm/filing/proposals/:id/reject",
     requireRole(...REVIEWER),
+    ACT,
     async (req, res, next) => {
       const actorId = actorOf(req);
       if (!actorId) {
@@ -720,6 +734,7 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
   router.post(
     "/crm/filing/proposals/:id/not-same",
     requireRole(...REVIEWER),
+    ACT,
     async (req, res, next) => {
       const actorId = actorOf(req);
       if (!actorId) {
@@ -752,6 +767,7 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
   router.post(
     "/crm/filing/proposals/:id/undo",
     requireRole(...REVIEWER),
+    ACT,
     async (req, res, next) => {
       const actorId = actorOf(req);
       if (!actorId) {
@@ -787,7 +803,7 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/crm/filing/rules/:id", requireRole(...REVIEWER), async (req, res, next) => {
+  router.delete("/crm/filing/rules/:id", requireRole(...REVIEWER), MANAGE, async (req, res, next) => {
     const actorId = actorOf(req);
     if (!actorId) {
       res.status(403).json({ error: "human_reviewer_required" });
@@ -813,7 +829,7 @@ export function createCrmFilingRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/crm/filing/rules", requireRole(...REVIEWER), async (req, res, next) => {
+  router.post("/crm/filing/rules", requireRole(...REVIEWER), MANAGE, async (req, res, next) => {
     const actorId = actorOf(req);
     if (!actorId) {
       res.status(403).json({ error: "human_reviewer_required" });

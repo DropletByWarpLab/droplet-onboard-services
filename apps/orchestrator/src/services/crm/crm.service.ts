@@ -60,7 +60,28 @@ export const CRM_ERRORS = {
   EMAIL_MESSAGE_NOT_FOUND: "email_message_not_found",
   CALENDAR_EVENT_NOT_FOUND: "calendar_event_not_found",
   WORK_ITEM_NOT_FOUND: "work_item_not_found",
+  /// WARP-3365 (Romain, 2026-09-30) — an external guest is someone outside the
+  /// company and cannot own a customer or a deal: the owner is who the deal's
+  /// won/lost notification goes to, and who the record is accountable to. The
+  /// row is well-formed and the choice is not processable, so the route answers
+  /// 422 like INVALID_STAGE.
+  OWNER_IS_GUEST: "owner_is_guest",
 } as const;
+
+/**
+ * Refuse a guest as the owner of a customer or a deal. `undefined` and `null`
+ * (leave alone / clear) need no read; only a real id does, and an id that names
+ * no user is left to the caller exactly as before (the column is a free string,
+ * not a foreign key).
+ */
+async function assertOwnerIsNotGuest(
+  prisma: PrismaClient,
+  ownerId: string | null | undefined,
+): Promise<void> {
+  if (!ownerId) return;
+  const owner = await prisma.user.findUnique({ where: { id: ownerId }, select: { role: true } });
+  if (owner?.role === "guest") throw new Error(CRM_ERRORS.OWNER_IS_GUEST);
+}
 
 // ── Default pipeline ─────────────────────────────────────────────────────────
 
@@ -675,6 +696,7 @@ export async function createCompany(
   actorId: string | null,
   filing?: FilingProvenance,
 ): Promise<ApiCrmCompany> {
+  await assertOwnerIsNotGuest(prisma, input.ownerId);
   const row = await prisma.crmCompany.create({
     data: {
       name: input.name,
@@ -730,6 +752,7 @@ export async function updateCompany(
 ): Promise<ApiCrmCompany> {
   const existing = await prisma.crmCompany.findUnique({ where: { id } });
   if (!existing) throw new Error(CRM_ERRORS.COMPANY_NOT_FOUND);
+  await assertOwnerIsNotGuest(prisma, input.ownerId);
   await prisma.crmCompany.update({
     where: { id },
     data: {
@@ -1172,6 +1195,7 @@ export async function createDeal(
   input: DealInput & { title: string },
   actorId: string | null,
 ): Promise<ApiCrmDeal> {
+  await assertOwnerIsNotGuest(prisma, input.ownerId);
   const pipeline = input.pipelineId
     ? await getPipeline(prisma, input.pipelineId)
     : await ensureDefaultPipeline(prisma);
@@ -1268,6 +1292,8 @@ export async function updateDeal(
   if (!existing) throw new Error(CRM_ERRORS.DEAL_NOT_FOUND);
 
   // ── Everything that can throw, before anything writes ──────────────────
+
+  await assertOwnerIsNotGuest(prisma, input.ownerId);
 
   const { amountMinor, currency } = resolveAmount(input.amountMinor, input.currency, {
     amountMinor: existing.amountMinor,

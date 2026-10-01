@@ -463,19 +463,28 @@ export const NAV_GROUPS: NavGroup[] = [
       // The CRM's own door. Before ADR-044 it had `navHrefs: []` and rendered
       // as sub-tabs on /projects, which made CRM-without-PM unrepresentable —
       // and that is the shape of most dental boxes.
+      //
+      // WARP-3365: role-gated too. An external guest gets nothing of the
+      // company's customers, so the box refuses `/api/crm` for that tier
+      // (`refuseBelowFloor`) and the entry is not shown to it either.
       {
         href: "/customers",
         label: "Customers",
         icon: Building2,
+        roles: ["owner", "admin", "family"],
         requiresModule: "crm",
       },
       // ADR-026: native PM surface, rendered off /api/pm/* under the dashboard
       // session — no embedded stack, no second login. WARP-1154/1155: hidden
       // when the orchestrator says the Projects module is off.
+      // WARP-3369: role-gated like Customers — the box refuses `/api/pm` and
+      // `/api/mobile/pm` for an external guest (`refuseBelowFloor`), which also
+      // keeps the Money child below from being promoted into its slot for them.
       {
         href: "/projects",
         label: "Projects",
         icon: FolderKanban,
+        roles: ["owner", "admin", "family"],
         requiresModule: "projects",
         children: [
           // WARP-2581 / WARP-2967 — what the business is owed and what it owes,
