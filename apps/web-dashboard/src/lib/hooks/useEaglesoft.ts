@@ -18,8 +18,14 @@ const DEFAULT_CONNECTION: IntegrationConnection = {
  * "Connect Eaglesoft" first-run state cleanly.
  */
 export function useEaglesoft() {
+  const { user } = useAuth();
+  // WARP-3374: the connection detail (host, account, credential expiry) is
+  // owner/admin only on the box, and the two surfaces that show it are
+  // owner/admin-only too (Practice, and the Insights practice tile behind
+  // `canViewPhi`). Nobody else asks, so nobody else gets a 403 every 30 s.
+  const operator = user?.role === "owner" || user?.role === "admin";
   const { data, isLoading, mutate } = useSWR<EaglesoftDetail>(
-    "/api/integrations/eaglesoft",
+    operator ? "/api/integrations/eaglesoft" : null,
     fetchEaglesoft,
     { refreshInterval: 30_000, shouldRetryOnError: false },
   );

@@ -4129,6 +4129,12 @@ enum EmailChannelSecurity {
 /// action in the spec can be undone (e.g. flip a switch back); false
 /// otherwise. Together (writes && !reversible) gates a confirm_action
 /// card before run-now (handled in route layer + C2 scheduler).
+///
+/// WARP-3354 — `visibility` is an explicit enum, never derived from `ownerId`
+/// or `share`: `PRIVATE` routines are seen and run only by their creator
+/// (`ownerId`) and by an owner or admin; `WORKSPACE` routines are seen by
+/// every member. No column default on purpose — every creator must say which
+/// it is. `share` (free text, never read) is superseded by this column.
 model ToolSpec {
   id          String         @id @default(uuid())
   slug        String         @unique
@@ -4139,6 +4145,7 @@ model ToolSpec {
   status      ToolSpecStatus @default(draft)
   ownerId     String?
   share       String?
+  visibility  ToolSpecVisibility
   safety      Int            @default(1)
   writes      Boolean        @default(false)
   reversible  Boolean        @default(true)
@@ -4226,6 +4233,13 @@ enum ToolSpecStatus {
   live
   draft
   suggested
+}
+
+/// WARP-3354 — who may see and run a routine. `PRIVATE`: its creator, owners
+/// and admins. `WORKSPACE`: every member (external guests never see routines).
+enum ToolSpecVisibility {
+  PRIVATE
+  WORKSPACE
 }
 
 /// WARP-462 — ToolRun outcome. Non-terminal: `pending` (pre-created

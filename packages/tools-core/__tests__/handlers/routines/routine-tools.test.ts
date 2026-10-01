@@ -67,6 +67,16 @@ describe("routine_draft (WARP-2894)", () => {
     expect(Object.keys(body)).not.toContain("status");
   });
 
+  it("reports the slug the box stored, which may carry a short suffix (WARP-3354)", async () => {
+    const post = vi.fn(async () =>
+      makeResponse(201, { slug: "daily-files-7f3a", status: "draft", writes: false, steps: [{}] }),
+    );
+    const res = await routineDraft.handler({ slug: "daily-files", name: "Daily files", steps }, ctxWith({ post }));
+    const data = (res as { data: { slug: string; message: string } }).data;
+    expect(data.slug).toBe("daily-files-7f3a");
+    expect(data.message).toContain("daily-files-7f3a");
+  });
+
   it("relays the route's unknown-tools 400 with the names, so the model can fix the draft", async () => {
     const post = vi.fn(async () =>
       makeResponse(400, { error: "unknown_tools", detail: "these steps name tools this box does not have", tools: ["list_reciept"] }),
@@ -165,6 +175,22 @@ describe("routine_list (WARP-2894)", () => {
     expect(path).toMatch(/^\/api\/tools\?/);
     expect(path).toContain("onBehalfOf=romain");
     expect(path).toContain("status=live");
+  });
+
+  it("passes the route's visibility through, so the model can say a routine is private to the person (WARP-3354)", async () => {
+    const get = vi.fn(async () =>
+      makeResponse(200, {
+        specs: [
+          { id: "s1", slug: "mine", name: "Mine", status: "draft", visibility: "PRIVATE", writes: false, reversible: true, updatedAt: "2026-09-30T10:00:00.000Z" },
+          { id: "s2", slug: "ours", name: "Ours", status: "live", visibility: "WORKSPACE", writes: false, reversible: true, updatedAt: "2026-09-30T10:00:00.000Z" },
+        ],
+      }),
+    );
+    const res = await routineList.handler({}, ctxWith({ get }));
+    expect((res as { data: { routines: Array<{ slug: string; visibility?: string }> } }).data.routines).toMatchObject([
+      { slug: "mine", visibility: "PRIVATE" },
+      { slug: "ours", visibility: "WORKSPACE" },
+    ]);
   });
 
   it("drops an unknown status filter rather than forwarding it (the route would 400)", async () => {

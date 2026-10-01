@@ -44,6 +44,24 @@ const ncGetFileIdMock = vi.hoisted(() => vi.fn());
 vi.mock("../services/nextcloud.client.js", () => ({ ncGetFileId: ncGetFileIdMock }));
 
 const resolveNcTokenMock = vi.hoisted(() => vi.fn());
+
+// WARP-3365 review: the writes name a §9 level (`requireFeatureAccess`), whose
+// default resolver is the boot-bound singleton. Hand it a controllable one; an
+// unset answer (`undefined`) and `null` both mean "no local row, nothing to
+// narrow", which is what every pre-existing case below relies on. The REAL gate
+// runs (and keeps its readable level marker): only its resolver is injected.
+// (Injected here rather than by mocking effective-access.service, which would
+// put this file, with its own $transaction stub, inside WARP-1570's seam gate.)
+const effectiveAccessMock = vi.hoisted(() => ({ resolve: vi.fn() }));
+vi.mock("../middleware/feature-gate.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../middleware/feature-gate.js")>();
+  return {
+    ...actual,
+    requireFeatureAccess: (moduleId: Parameters<typeof actual.requireFeatureAccess>[0], level?: Parameters<typeof actual.requireFeatureAccess>[1]) =>
+      actual.requireFeatureAccess(moduleId, level, (userId: string) => effectiveAccessMock.resolve(userId)),
+  };
+});
+
 /** The canary route fetches the verdict for itself; this is the peer it asks. */
 const internalFetchMock = vi.fn();
 vi.mock("../lib/internal-tls.js", () => ({
@@ -63,6 +81,8 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
 import { createCrmFilingRouter } from "./crm-filing.js";
 import type { Role } from "../services/jwt.service.js";
 import { FILING_ERRORS } from "../services/filing/apply.service.js";
+import { readFeatureGateMeta } from "../middleware/feature-gate.js";
+import { isRoleGuard } from "../middleware/auth.js";
 
 type Principal = { id: string; username: string; displayName: string; role: Role } | null;
 
@@ -141,6 +161,7 @@ const PROPOSAL_ID = "11111111-1111-4111-8111-111111111111";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  effectiveAccessMock.resolve.mockReset().mockResolvedValue(null);
   resolveNcTokenMock.mockResolvedValue("nc-token");
   ncGetFileIdMock.mockResolvedValue(8891);
   applyProposalMock.mockResolvedValue({ proposalId: PROPOSAL_ID });
@@ -598,5 +619,100 @@ describe("arming the auto-mode canary", () => {
     expect(params.what).toBe("Auto-filing canary armed");
     expect(params.actor).toBeTruthy();
     expect(params.refs).toMatchObject({ runId: RUN, model: "gpt-oss:20b" });
+  });
+});
+
+// ── WARP-3365 review: the writes name their §9 level ────────────────────────
+// `owner` and `admin` only is the tier floor. An admin-based custom role can be
+// narrowed to `crm: view`, and that role used to apply, reject, undo and write
+// rules all the same. `act` decides a proposal; `manage` is policy.
+describe("🔴 the filing writes name their §9 level (WARP-3365)", () => {
+  const ADMIN = { id: "u-admin", username: "admin", displayName: "Admin", role: "admin" as Role };
+
+  /** method, path (as registered), a concrete URL, the level the write needs. */
+  const WRITES = [
+    ["POST", "/crm/filing/proposals/:id/apply", `/api/crm/filing/proposals/${PROPOSAL_ID}/apply`, "act"],
+    ["POST", "/crm/filing/proposals/:id/reject", `/api/crm/filing/proposals/${PROPOSAL_ID}/reject`, "act"],
+    ["POST", "/crm/filing/proposals/:id/not-same", `/api/crm/filing/proposals/${PROPOSAL_ID}/not-same`, "act"],
+    ["POST", "/crm/filing/proposals/:id/undo", `/api/crm/filing/proposals/${PROPOSAL_ID}/undo`, "act"],
+    ["POST", "/crm/filing/rules", "/api/crm/filing/rules", "manage"],
+    ["DELETE", "/crm/filing/rules/:id", `/api/crm/filing/rules/${PROPOSAL_ID}`, "manage"],
+    ["PATCH", "/crm/filing/settings", "/api/crm/filing/settings", "manage"],
+    ["POST", "/crm/filing/canary", "/api/crm/filing/canary", "manage"],
+  ] as const;
+
+  type Handle = (req: unknown, res: unknown, next: () => void) => unknown;
+  const stack = (createCrmFilingRouter(prisma) as unknown as {
+    stack: Array<{ route?: { path: string; methods: Record<string, boolean>; stack: Array<{ handle: Handle }> } }>;
+  }).stack;
+  const routes = stack.flatMap((l) =>
+    l.route
+      ? Object.keys(l.route.methods)
+          .filter((m) => l.route!.methods[m])
+          .map((m) => ({ key: `${m.toUpperCase()} ${l.route!.path}`, method: m.toUpperCase(), handles: l.route!.stack.map((x) => x.handle) }))
+      : [],
+  );
+
+  it("the write routes are exactly the table, each with one crm gate at its level, after the role guard", () => {
+    const writes = routes.filter((r) => r.method !== "GET");
+    expect(writes.map((r) => r.key).sort()).toEqual(WRITES.map(([m, p]) => `${m} ${p}`).sort());
+    for (const [method, path, , level] of WRITES) {
+      const route = routes.find((r) => r.key === `${method} ${path}`)!;
+      const metas = route.handles.map(readFeatureGateMeta).filter((m) => m !== null);
+      expect(metas, route.key).toEqual([{ moduleId: "crm", level }]);
+      expect(route.handles.findIndex((h) => readFeatureGateMeta(h) !== null), route.key).toBeGreaterThan(
+        route.handles.findIndex(isRoleGuard),
+      );
+    }
+    for (const r of routes.filter((x) => x.method === "GET")) {
+      expect(r.handles.map(readFeatureGateMeta).filter((m) => m !== null), r.key).toEqual([]);
+    }
+  });
+
+  const heldAs = (level: "view" | "act" | "manage") =>
+    effectiveAccessMock.resolve.mockResolvedValue({ features: [{ moduleId: "crm", level }] });
+  const refused = (res: { status: number; body: { error?: string; module?: string } }) =>
+    res.status === 404 && res.body.error === "module_disabled" && res.body.module === "crm";
+
+  it("an admin-based role holding crm: view cannot decide a proposal or write a rule — and the handler never runs", async () => {
+    heldAs("view");
+    const app = appAs(ADMIN);
+    for (const [method, , url] of WRITES) {
+      const res = await request(app)[method.toLowerCase() as "post" | "patch" | "delete"](url).send({});
+      expect(refused(res), `${method} ${url} -> ${res.status}`).toBe(true);
+    }
+    expect(applyProposalMock).not.toHaveBeenCalled();
+    expect(rejectProposalMock).not.toHaveBeenCalled();
+    expect(markNotSameMock).not.toHaveBeenCalled();
+    expect(upsertCalls()).toBe(0);
+  });
+
+  it("crm: act decides proposals but cannot write rules, settings or the canary", async () => {
+    heldAs("act");
+    const app = appAs(ADMIN);
+    for (const [method, , url, level] of WRITES) {
+      const res = await request(app)[method.toLowerCase() as "post" | "patch" | "delete"](url).send({});
+      expect(refused(res), `${method} ${url} -> ${res.status}`).toBe(level === "manage");
+    }
+    expect(applyProposalMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("crm: manage and a person with no custom role pass every gate", async () => {
+    for (const resolved of ["manage", null] as const) {
+      effectiveAccessMock.resolve.mockResolvedValue(
+        resolved === null ? null : { features: [{ moduleId: "crm", level: resolved }] },
+      );
+      const app = appAs(OWNER);
+      for (const [method, , url] of WRITES) {
+        const res = await request(app)[method.toLowerCase() as "post" | "patch" | "delete"](url).send({});
+        expect(refused(res), `${resolved} ${method} ${url} -> ${res.status}`).toBe(false);
+      }
+    }
+  });
+
+  it("the role floor still answers first: a member is 403 whatever the resolver says", async () => {
+    heldAs("manage");
+    const res = await request(appAs(FAMILY)).post(`/api/crm/filing/proposals/${PROPOSAL_ID}/apply`).send({});
+    expect(res.status).toBe(403);
   });
 });

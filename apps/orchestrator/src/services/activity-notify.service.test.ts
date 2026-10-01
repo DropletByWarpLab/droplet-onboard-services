@@ -96,7 +96,7 @@ interface CrmRow {
 function makeStub(seed: {
   pm?: PmRow[];
   assignees?: Array<{ workItemId: string; userId: string }>;
-  users?: Array<{ id: string; username: string }>;
+  users?: Array<{ id: string; username: string; role?: string }>;
   crm?: CrmRow[];
   stages?: Array<{ id: string; name: string; kind: "OPEN" | "WON" | "LOST" }>;
 }) {
@@ -480,5 +480,83 @@ describe("WARP-2911 — a recipient whose username is User.id-shaped", () => {
     const errors = logged.filter((l) => l.level === "error");
     expect(errors).toHaveLength(1);
     expect(errors[0]!.obj).toMatchObject({ userId: LEGACY.id, username: LEGACY.username, code: "NOTIFICATION_RECIPIENT_IS_ID" });
+  });
+});
+
+// WARP-3365 (Romain, 2026-09-30) — assigning a work item to an external guest
+// SHARES that one item with them, so the notification stays; a guest cannot own
+// a deal, and is not told about one; a department watcher hears about every
+// item in the department, which a guest is not admitted to.
+describe("WARP-3365 — external guests and notifications", () => {
+  const GUEST = { id: "u-gina", username: "gina", role: "guest" };
+
+  it("an ASSIGNED guest is notified: they can open the item", async () => {
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "assigned", actorId: "u-dave" })],
+      assignees: [{ workItemId: "w1", userId: GUEST.id }],
+      users: [GUEST],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock.mock.calls.map((c: any) => [c[1].username, c[1].title])).toEqual([["gina", "Assigned to you"]]);
+    expect(prisma.pm[0].notifyStatus).toBe("sent");
+  });
+
+  it("a guest who is only a department WATCHER is not notified; a member watcher still is", async () => {
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "commented", actorId: "u-dave" })],
+      assignees: [{ workItemId: "w1", userId: "u-bob" }],
+      users: [{ id: "u-bob", username: "bob" }, GUEST, { id: "u-carol", username: "carol", role: "family" }],
+    });
+    await runActivityNotifySweep(prisma, {
+      ...opts,
+      departmentWatchers: async () => new Map([["w1", [GUEST.id, "u-carol"]]]),
+    });
+    expect(recordMock.mock.calls.map((c: any) => c[1].username).sort()).toEqual(["bob", "carol"]);
+  });
+
+  it("a guest who is an assignee AND a watcher is notified once, as an assignee", async () => {
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "commented", actorId: "u-dave" })],
+      assignees: [{ workItemId: "w1", userId: GUEST.id }],
+      users: [GUEST],
+    });
+    await runActivityNotifySweep(prisma, { ...opts, departmentWatchers: async () => new Map([["w1", [GUEST.id]]]) });
+    expect(recordMock.mock.calls.map((c: any) => c[1].username)).toEqual(["gina"]);
+  });
+
+  it("the CRM sweep does not tell a guest about a deal closing: the row is terminal, not pending, and a member owner is still told", async () => {
+    const prisma = makeStub({
+      crm: [
+        {
+          id: "c1",
+          kind: "STAGE_CHANGE",
+          toStageId: "st-won",
+          actorId: "u-bob",
+          createdAt: OLD,
+          notifyStatus: "pending",
+          notifiedAt: null,
+          deal: { id: "d1", title: "Acme renewal", ownerId: GUEST.id },
+        },
+        {
+          id: "c2",
+          kind: "STAGE_CHANGE",
+          toStageId: "st-won",
+          actorId: "u-bob",
+          createdAt: OLD,
+          notifyStatus: "pending",
+          notifiedAt: null,
+          deal: { id: "d2", title: "Globex", ownerId: "u-carol" },
+        },
+      ],
+      stages: [{ id: "st-won", name: "Won", kind: "WON" }],
+      users: [GUEST, { id: "u-carol", username: "carol", role: "family" }, { id: "u-bob", username: "bob" }],
+    });
+    const res = await runActivityNotifySweep(prisma, opts);
+    expect(recordMock.mock.calls.map((c: any) => c[1].username)).toEqual(["carol"]);
+    expect(prisma.crm.map((r) => [r.id, r.notifyStatus])).toEqual([
+      ["c1", "not_needed"],
+      ["c2", "sent"],
+    ]);
+    expect(res).toMatchObject({ crmNotified: 1, crmSkipped: 1 });
   });
 });
