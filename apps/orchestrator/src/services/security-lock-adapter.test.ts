@@ -304,6 +304,7 @@ describe("lockRowDraft", () => {
       endedAt: null,
       summary: "Back door lock: unlocked",
       observed: "live",
+      baseline: false,
     });
   });
 
@@ -323,6 +324,12 @@ describe("lockRowDraft", () => {
   it("dedupeKey is deterministic: node, endpoint, the previous row, the reading", () => {
     expect(lockDedupeKey(obs("locked"), null)).toBe(`matter_lock:${NODE}/1:after:none:locked`);
     expect(lockDedupeKey(obs("locked", NODE, 2), "9")).toBe(`matter_lock:${NODE}/2:after:9:locked`);
+  });
+
+  it("baseline is explicit: true only when there is no previous row to be after", () => {
+    expect(lockRowDraft({ obs: obs("locked"), prevId: null, name: "Back door lock", via: "live", at }).baseline).toBe(true);
+    expect(lockRowDraft({ obs: obs("unlocked"), prevId: "9", name: "Back door lock", via: "live", at }).baseline).toBe(false);
+    expect(lockRowDraft({ obs: obs("unlocked"), prevId: "9", name: "Back door lock", via: "polled", at }).baseline).toBe(false);
   });
 
   it("name: the alias, else the device-list name, else 'Lock …<last4>'", () => {
@@ -363,6 +370,7 @@ describe("createLockTracker — transitions only, memory moves only with the sto
       dedupeKey: `matter_lock:${NODE}/1:after:none:locked`,
       labels: ["locked"],
       observed: "live",
+      baseline: true,
       startedAt: new Date(T0),
       summary: "Back door lock: locked",
     });
@@ -381,6 +389,7 @@ describe("createLockTracker — transitions only, memory moves only with the sto
       `matter_lock:${NODE}/1:after:none:locked`,
       `matter_lock:${NODE}/1:after:7:unlocked`,
     ]);
+    expect(store.rows[1]!.draft.baseline).toBe(false);
   });
 
   it("writes transitions only, each after the row before it; reads history once", async () => {

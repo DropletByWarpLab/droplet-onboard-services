@@ -30,7 +30,8 @@
  *     3 unlatched, null unknown.
  *   · Transitions only, one promise chain per `matter:<nodeId>/<endpointId>`.
  *     The first observation of a key reads the previous `{id, reading}` back
- *     from the store; with no stored row it writes a baseline.
+ *     from the store; with no stored row it writes a baseline, marked in
+ *     the explicit `baseline` column (never inferred from the dedupe key).
  *   · `dedupeKey = matter_lock:<node>/<ep>:after:<prevId|none>:<reading>` is
  *     deterministic, so two bridges (or a retry of a write that did land)
  *     collapse to one row.
@@ -146,6 +147,8 @@ export interface LockRowDraft extends SecurityEventDraft {
   endedAt: null;
   summary: string;
   observed: LockObservedVia;
+  /** No earlier stored reading to compare against (`prevId === null`): not a turn. The `baseline` column. */
+  baseline: boolean;
 }
 
 /** The latest stored row for a key. `id` is `SecurityEvent.id` as a decimal string. */
@@ -306,6 +309,7 @@ export function lockRowDraft(input: {
     endedAt: null,
     summary: `${input.name}: ${READING_TEXT[obs.reading]}${via === "polled" ? " (found when Droplet checked)" : ""}`,
     observed: via,
+    baseline: input.prevId === null,
   };
 }
 

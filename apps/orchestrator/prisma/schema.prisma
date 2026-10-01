@@ -9073,6 +9073,11 @@ model SecurityEvent {
   summary     String
   /// WARP-2977 P2b-2. Every P2a/P2b writer is live; the lock sweep writes polled.
   observed    SecurityObservation @default(live)
+  /// WARP-2977 P2b-2. A lock row written with no earlier stored reading to
+  /// compare against (first ever, or after retention emptied its history):
+  /// its time is when Droplet first saw the lock, not a turn. Only
+  /// matter_lock rows are ever true. Readers key on this, never on the dedupeKey.
+  baseline    Boolean             @default(false)
   createdAt   DateTime            @default(now())
   /// WARP-2978 — the engine's exactly-once marker and the incident membership.
   triage      SecurityEventTriage?

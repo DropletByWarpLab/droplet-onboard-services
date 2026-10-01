@@ -95,5 +95,9 @@ describe("migration folder names (WARP-2896)", () => {
     expect(folders).not.toContain("20260925000000_warp_2977_security_lock_values");
     expect(folders).not.toContain("20260925000100_warp_2977_security_lock_rows");
     expect(folders).toContain("20260925010000_warp_2980_security_baselines");
+    // The explicit `baseline` column (#2513 review) is its own folder, after
+    // stage's newest when written, not an edit to the rows migration that dev
+    // boxes may already have applied.
+    expect(folders).toContain("20261001100000_warp_2977_security_lock_baseline");
   });
 });

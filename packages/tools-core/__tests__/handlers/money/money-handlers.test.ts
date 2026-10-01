@@ -77,6 +77,47 @@ describe("shape", () => {
   });
 });
 
+// WARP-3400 — the ledger already ships MAJOR units (NUMERIC, not cents), so the
+// fix here is the ready-to-quote string and the sentence that says so. A symbol
+// is only ever drawn from a currency the ledger actually sent.
+describe("major units (WARP-3400)", () => {
+  it.each([
+    ["USD", "10000", "$10,000.00"],
+    ["JPY", "1000000", "¥1,000,000"],
+    ["KWD", "1000", "KWD 1,000.000"],
+  ])("renders a %s amount of %s as %s", async (currency, amount, display) => {
+    get.mockResolvedValue(res(true, 200, { documents: [wireDoc({ amount, balance: amount, currency })] }));
+    const out = await moneyListOpenDocuments.handler({}, ctx);
+    const doc = (out as { data: { documents: Array<Record<string, unknown>> } }).data.documents[0]!;
+    expect(doc.amount).toBe(amount);
+    expect(doc.amount_display).toBe(display);
+    expect(doc.balance_display).toBe(display);
+  });
+
+  it("pads a short fraction to the currency exponent", async () => {
+    get.mockResolvedValue(
+      res(true, 200, { documents: [wireDoc({ amount: "4210.5", balance: "1200", currency: "USD" })] }),
+    );
+    const out = await moneyListOpenDocuments.handler({}, ctx);
+    const doc = (out as { data: { documents: Array<Record<string, unknown>> } }).data.documents[0]!;
+    expect(doc.amount_display).toBe("$4,210.50");
+    expect(doc.balance_display).toBe("$1,200.00");
+  });
+
+  it("draws no symbol when the ledger sent no currency", async () => {
+    get.mockResolvedValue(res(true, 200, { documents: [wireDoc({ currency: null })] }));
+    const out = await moneyListOpenDocuments.handler({}, ctx);
+    const doc = (out as { data: { documents: Array<Record<string, unknown>> } }).data.documents[0]!;
+    expect(doc.amount).toBe("4210.55");
+    expect(doc.amount_display).toBeNull();
+    expect(doc.balance_display).toBeNull();
+  });
+
+  it("states in the description that amounts are in major units", () => {
+    expect(moneyListOpenDocuments.description).toContain("major units");
+  });
+});
+
 describe("last_read", () => {
   it("🔴 reports the NEWEST read, not whichever document happened to sort first", async () => {
     // `/api/money/documents` orders by `dueAt asc, externalId asc`, so
