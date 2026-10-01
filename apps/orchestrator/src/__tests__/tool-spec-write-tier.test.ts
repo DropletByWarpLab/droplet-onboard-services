@@ -436,7 +436,11 @@ describe("WARP-1621 — the ticker applies the same write-tier gate", () => {
     const result = await tickToolSchedules(prisma as never, dispatcher, now);
 
     expect(result.fired).toBe(1);
-    expect(dispatcher.call).toHaveBeenCalledWith(FILES_READ, { path: "/" });
+    expect(dispatcher.call).toHaveBeenCalledWith(
+      FILES_READ,
+      { path: "/" },
+      { userId: "user-family-handle" },
+    );
     // Recorded as the scheduler's run, authorised against the CREATOR's scope.
     expect(prisma.runs[0]).toMatchObject({ triggeredBy: "scheduler" });
     expect(
