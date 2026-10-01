@@ -26,9 +26,10 @@
  * already carry the two decisions worth keeping: provenance is read off the
  * explicit `origin` column rather than inferred from `externalSystem != null`
  * (an IS-NULL derivation is what CLAUDE.md forbids), and `amountMinor` stays a
- * decimal STRING at every hop — `JSON.parse` turns "9007199254740993" into
- * …992, off by one, silently, in a figure somebody is about to quote to a
- * customer. Copying either would be a second place to get them wrong.
+ * decimal STRING until the last hop, where it becomes major units for the
+ * model (WARP-3400) — `JSON.parse` turns "9007199254740993" into …992, off by
+ * one, silently, in a figure somebody is about to quote to a customer. Copying
+ * either would be a second place to get them wrong.
  *
  * NOTE FOR SLICE D: when the last `crm_*` tool leaves the registry, the
  * mappers move HERE — `crm-orch.ts` must not simply be deleted, or these two
@@ -52,6 +53,7 @@
 import type { ToolResult } from "../../types.js";
 import { callOrch, OrchPmError, toPlaneProject, toPlaneWorkItem } from "../pm/pm-orch.js";
 import { toActivity, toCompany, toDeal } from "../crm/crm-orch.js";
+import { majorFromMinor } from "../../major-units.js";
 
 export { callOrch, toPlaneProject };
 
@@ -262,11 +264,11 @@ export const toGraphCompany = toCompany;
  * count keeps a page of findings inside one result, and the model can open any
  * one of them by id if it needs the rest.
  *
- * `impact_minor` IS A STRING. Minor units, the `CrmDeal.amountMinor` wire shape
- * this tool already uses everywhere else — a JSON number here would be the one
- * place amounts change type, and the tool's own description promises they do
- * not. `null` when the detector could not compute one: a fabricated number is
- * worse than none.
+ * `impact` / `impact_display` ARE MAJOR UNITS, STRINGS (WARP-3400). The wire
+ * carries `impactMinor` (cents) and a model handed that read it as dollars —
+ * 100x too high — so it is converted here, by string surgery and never a
+ * number. `null` when the detector could not compute one: a fabricated number
+ * is worse than none.
  */
 export function toBrainFinding(row: Record<string, unknown>) {
   const evidence = (row.evidence ?? {}) as {
@@ -274,14 +276,17 @@ export function toBrainFinding(row: Record<string, unknown>) {
   };
   const sources = Array.isArray(evidence.sources) ? evidence.sources : [];
   const first = sources[0];
+  const impact = majorFromMinor(
+    row.impactMinor === null || row.impactMinor === undefined ? null : String(row.impactMinor),
+    row.currency as string | null,
+  );
   return {
     id: String(row.id ?? ""),
     kind: String(row.kind ?? ""),
     title: String(row.title ?? ""),
     why: String(row.rationale ?? "").slice(0, 400),
-    impact_minor: row.impactMinor === null || row.impactMinor === undefined
-      ? null
-      : String(row.impactMinor),
+    impact: impact?.amount ?? null,
+    impact_display: impact?.display ?? null,
     currency: (row.currency as string | null) ?? null,
     status: String(row.status ?? ""),
     confidence: (row.confidence as number | null) ?? null,
@@ -403,12 +408,13 @@ interface ApiStageSummary {
  * essentially every new box, for the one question this shape exists to answer.
  */
 export function toStageRollup(s: ApiStageSummary) {
+  const total = s.valuation === "priced" ? majorFromMinor(s.amountMinor, s.currency) : null;
   return {
     stage: s.stageName,
     outcome: s.kind,
     deals: s.dealCount,
     ...(s.valuation === "priced"
-      ? { amount_minor: s.amountMinor, currency: s.currency }
+      ? { amount: total?.amount ?? null, amount_display: total?.display ?? null, currency: s.currency }
       : s.valuation === "mixed_currencies"
         ? { total: null, total_note: "mixed currencies — not summed" }
         : { total: null, total_note: "no amounts entered yet" }),
