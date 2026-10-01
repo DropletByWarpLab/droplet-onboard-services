@@ -312,3 +312,45 @@ describe("POST /api/llm/chat (non-streaming) — interceptor challenge trace", (
     ).toContain("scene-token");
   });
 });
+
+describe("POST /api/llm/chat (non-streaming) — each call's real outcome is persisted (WARP-3348)", () => {
+  it("persists ok/status per call, and the next turn's claim check credits only what ran", async () => {
+    mockRunAgent.mockReset().mockResolvedValue({
+      message: { role: "assistant", content: "Sent; the delete needs your approval; the task failed." },
+      trace: [
+        { tool_call_id: "e1", tool: "email_send", args: { draftId: "d1" }, result: { sent: true } },
+        { tool_call_id: "p1", tool: "delete_file", args: { path: "/Shared/x" }, result: INTERCEPTOR_CHALLENGE },
+        {
+          tool_call_id: "f1",
+          tool: "business_create",
+          args: { entity: "task" },
+          result: { status: "error", error: { code: "PARENT_REQUIRED", message: "A task needs a project." } },
+          isError: true,
+        },
+      ],
+      iterations: 2,
+      stop_reason: "model_done",
+    });
+    await postChat();
+
+    const toolCalls = mockFinalize.mock.calls.at(-1)![0].toolCalls as Array<{
+      name: string;
+      ok?: boolean;
+      status?: string;
+    }>;
+    // Until WARP-3348 every call was persisted ok:true, pending and failed alike.
+    expect(toolCalls.map((c) => [c.name, c.ok, c.status])).toEqual([
+      ["email_send", true, undefined],
+      ["delete_file", true, "confirmation_required"],
+      ["business_create", false, undefined],
+    ]);
+
+    // …and that row, read back as the previous turn, credits only the send.
+    const { ChatPersistenceService: Real } = await vi.importActual<
+      typeof import("../services/chat-persistence.service.js")
+    >("../services/chat-persistence.service.js");
+    const findMany = vi.fn(async () => [{ toolCalls }]);
+    const svc = new Real({ chatMessage: { findMany } } as never);
+    expect(await svc.getPreviousTurnRanToolNames("conv-1", "owner-uuid", "am-2")).toEqual(["email_send"]);
+  });
+});

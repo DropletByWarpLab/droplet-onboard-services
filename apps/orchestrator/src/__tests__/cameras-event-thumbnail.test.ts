@@ -136,6 +136,17 @@ describe("GET /api/cameras/events/:eventId/thumbnail", () => {
     expect(res.status).toBe(500);
   });
 
+  it("does not match on the message: an Error saying thumbnail_not_found is still a 500", async () => {
+    fetchSpy.mockRejectedValue(new Error("thumbnail_not_found"));
+    const res = await request(buildApp()).get(PATH);
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({
+      error: "Internal server error",
+      message: "Something went wrong",
+    });
+  });
+
   it("400 on a malformed event id, without touching Frigate", async () => {
     const res = await request(buildApp()).get(
       `/api/cameras/events/${encodeURIComponent("not ok/../id")}/thumbnail`,

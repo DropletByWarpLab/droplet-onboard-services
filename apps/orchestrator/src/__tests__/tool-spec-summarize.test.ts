@@ -28,6 +28,13 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: recordActivityMock,
 }));
 
+// WARP-3409 — the incident replay drives the real summarizer; only the
+// gateway round-trip is scripted.
+const completeOnceMock = vi.hoisted(() => vi.fn());
+vi.mock("../services/llm-complete.service.js", () => ({
+  completeOnce: completeOnceMock,
+}));
+
 import {
   DEFAULT_SUMMARY_PROMPT,
   SUMMARIZE_PSEUDO_TOOL,
@@ -37,6 +44,7 @@ import {
   type StepDispatcher,
   type Summarizer,
 } from "../services/tool-spec-runner.service.js";
+import { createToolSpecSummarizer } from "../services/tool-spec-summarizer.service.js";
 
 /** Minimal prisma double — the runner only creates a ToolRun row. */
 function fakePrisma() {
@@ -234,7 +242,10 @@ describe("summarize step (WARP-1996)", () => {
     });
 
     expect(outcome.trace[0].error).toBe(attributed);
-    expect(p.created[0].error).toBe(`step 7 (summarize): ${attributed}`);
+    // WARP-3409 — the message counts steps from 1, as every client lists them:
+    // idx 7 is the eighth step ("Write a summary" in the Mac app).
+    expect(p.created[0].error).toBe(`step 8 (summarize): ${attributed}`);
+    expect(outcome.trace[0].idx).toBe(7);
   });
 
   it("contributes NO tool name to the pre-flight — there is nothing to authorize", () => {
@@ -382,6 +393,8 @@ describe("optional steps — one unreadable source does not kill the narrative",
     });
     expect(outcome.status).toBe("failed");
     expect(summarizer.summarize).not.toHaveBeenCalled();
+    // WARP-3409 — counted from 1, like every other runner message.
+    expect(outcome.error).toBe("step 1 (get_system_health): boom");
   });
 
   it("forwards the caller's identity to every tool call when given one", async () => {
@@ -397,6 +410,250 @@ describe("optional steps — one unreadable source does not kill the narrative",
       callContext: { userId: "romain", userRole: "owner" },
     });
     expect(dispatcher.call).toHaveBeenCalledWith("list_events", {}, { userId: "romain", userRole: "owner" });
+  });
+});
+
+describe("WARP-3409 — the report never fails because only its write-up did", () => {
+  const optionalStep = (idx: number, tool: string) => ({
+    id: `s${idx}`,
+    idx,
+    kind: "call",
+    args: { tool, args: {}, optional: true },
+  });
+
+  it("a summarizer with a fallback: the step finishes with it, marked, and the run goes on", async () => {
+    const seen: RunStepTrace[][] = [];
+    const summarizer: Summarizer = {
+      summarize: vi.fn(async () => {
+        throw new Error("AI Gateway error 422: max_tokens");
+      }),
+      fallback: vi.fn((facts: RunStepTrace[]) => {
+        seen.push(facts);
+        return "System health: 9 of 9 services ok.";
+      }),
+    };
+    const dispatcher: StepDispatcher = { call: vi.fn(async () => ({ status: "ok" })) };
+    const p = fakePrisma();
+    const { outcome } = await runToolSpec(p.client, dispatcher, {
+      specId: "s",
+      specName: "Daily report",
+      steps: [
+        optionalStep(0, "get_system_health"),
+        { id: "s1", idx: 1, kind: "summarize", args: { as: "brief" } },
+        { id: "s2", idx: 2, kind: "call", args: { tool: "send_notification", args: { body: "${steps.brief}" } } },
+      ],
+      triggeredBy: "u1",
+      summarizer,
+    });
+
+    expect(outcome.status).toBe("ok");
+    expect(outcome.error).toBeNull();
+    expect(outcome.trace[1]).toEqual({
+      idx: 1,
+      tool: SUMMARIZE_PSEUDO_TOOL,
+      args: { prompt: DEFAULT_SUMMARY_PROMPT },
+      ok: true,
+      result: "System health: 9 of 9 services ok.",
+      fallback: true,
+      fallbackReason: "AI Gateway error 422: max_tokens",
+      as: "brief",
+    });
+    // The fallback sees the same facts the model would have.
+    expect(seen[0].map((t) => t.tool)).toEqual(["get_system_health"]);
+    // A later step reads the fallback exactly as it would have read the prose.
+    expect(dispatcher.call).toHaveBeenLastCalledWith("send_notification", {
+      body: "System health: 9 of 9 services ok.",
+    });
+    expect(p.created[0]).toMatchObject({ status: "ok", error: null });
+    // The feed still says something was missing.
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        severity: "warn",
+        what: "Spec run completed with gaps",
+        refs: expect.objectContaining({ status: "ok", failedSteps: [SUMMARIZE_PSEUDO_TOOL] }),
+      }),
+    );
+  });
+
+  it("a write-up ended early (cut off twice) is stored as the prose, marked `truncated`, and counted as a gap", async () => {
+    const summarizer: Summarizer = {
+      summarize: vi.fn(async () => ({ text: "Your system is healthy.", truncated: true as const })),
+    };
+    const p = fakePrisma();
+    const { outcome } = await runToolSpec(p.client, dispatcherReturning({ status: "ok" }), {
+      specId: "s",
+      specName: "Daily report",
+      steps: [optionalStep(0, "get_system_health"), { id: "s1", idx: 1, kind: "summarize", args: { as: "brief" } }],
+      triggeredBy: null,
+      summarizer,
+    });
+
+    expect(outcome.status).toBe("ok");
+    expect(outcome.trace[1]).toMatchObject({
+      tool: SUMMARIZE_PSEUDO_TOOL,
+      ok: true,
+      result: "Your system is healthy.",
+      truncated: true,
+      as: "brief",
+    });
+    expect(outcome.trace[1]).not.toHaveProperty("fallback");
+    expect(recordActivityMock).toHaveBeenCalledWith(
+      expect.objectContaining({ severity: "warn", refs: expect.objectContaining({ failedSteps: [SUMMARIZE_PSEUDO_TOOL] }) }),
+    );
+  });
+
+  it("a finished write-up carries no `truncated` key", async () => {
+    const p = fakePrisma();
+    const { outcome } = await runToolSpec(p.client, dispatcherReturning({}), {
+      specId: "s",
+      specName: "n",
+      steps: [summarizeStep(0)],
+      triggeredBy: null,
+      summarizer: { summarize: vi.fn(async () => "prose") },
+    });
+    expect(Object.keys(outcome.trace[0])).not.toContain("truncated");
+  });
+
+  it("replays run a405c8a7: GLM thinks through the budget, the retry errors — the run is now ok with a readout", async () => {
+    const glm = async () => "docker.io/ai/glm-4.7-flash:reap-q4_K_M";
+    completeOnceMock
+      .mockResolvedValueOnce({ content: "", model: "glm", reasoning: "x".repeat(6_940), finishReason: "length" })
+      .mockRejectedValueOnce(
+        new Error('AI Gateway error 422: {"detail":[{"loc":["body","max_tokens"],"msg":"Input should be less than or equal to 4096"}]}'),
+      );
+    const results: Record<string, unknown> = {
+      get_system_health: { status: "ok", uptime: 16_831, components: [{ name: "redis", status: "ok" }] },
+      list_recent_files: { items: [{ name: "a" }, { name: "b" }] },
+      network_summary: { kpis: { clientCount: 7, dnsBlockedToday: 0 } },
+      get_camera_health: { system: { cameraCount: 0, camerasLive: 0 } },
+      list_events: { count: 0, events: [] },
+    };
+    const dispatcher: StepDispatcher = {
+      call: vi.fn(async (tool: string) => {
+        if (tool.startsWith("erp_")) {
+          throw new Error(JSON.stringify({ status: "error", error: { code: "ERP_NOT_CONNECTED", message: "no" } }));
+        }
+        return results[tool];
+      }),
+    };
+    const p = fakePrisma();
+    const { outcome } = await runToolSpec(p.client, dispatcher, {
+      specId: "s",
+      specName: "Daily report",
+      steps: [
+        ...Object.keys(results).map((tool, i) => optionalStep(i, tool)),
+        optionalStep(5, "erp_get_ar_summary"),
+        optionalStep(6, "erp_get_schedule_today"),
+        summarizeStep(7),
+      ],
+      triggeredBy: "romain",
+      // Active and local resolvers both name GLM, as on the box (the file
+      // listing makes this a local-only summary, WARP-2979).
+      summarizer: createToolSpecSummarizer(glm, glm),
+    });
+
+    expect(outcome.status).toBe("ok");
+    const last = outcome.trace[7];
+    expect(last).toMatchObject({ tool: SUMMARIZE_PSEUDO_TOOL, ok: true, fallback: true });
+    expect(last.fallbackReason).toMatch(/^AI Gateway error 422/);
+    expect(last.result).toBe(
+      [
+        "System health: 1 of 1 services ok.",
+        "Recent files: 2 recently changed items.",
+        "Network: 7 devices connected, 0 DNS lookups blocked today.",
+        "Cameras: none set up.",
+        "Calendar: no upcoming events.",
+        "The written summary couldn't be produced because the AI service returned an error.",
+      ].join("\n"),
+    );
+    // Both calls asked for low thinking; the retry for no more than the gateway takes.
+    expect(completeOnceMock.mock.calls.map(([a]) => [a.model, a.provider, a.reasoningEffort, a.maxTokens])).toEqual([
+      ["docker.io/ai/glm-4.7-flash:reap-q4_K_M", "local", "low", 2100],
+      ["docker.io/ai/glm-4.7-flash:reap-q4_K_M", "local", "low", 4096],
+    ]);
+  });
+});
+
+describe("WARP-3409 — every runner message counts steps from 1 (the failing step is idx 2 → \"step 3\")", () => {
+  const ok = (idx: number) => ({ id: `s${idx}`, idx, kind: "call", args: { tool: "list_files", args: {} } });
+  const lockScope = { domains: new Set(["files", "smart-home"]), writeDomains: new Set(["smart-home"]), locks: false };
+  const filesOnlyScope = { domains: new Set(["files"]), writeDomains: new Set(["files"]), locks: false };
+
+  it.each([
+    [
+      "the whole-spec access pre-flight",
+      { id: "s2", idx: 2, kind: "call", args: { tool: "control_device", args: { node_id: "n1" } } },
+      { scope: filesOnlyScope },
+      /^step 3 \(control_device\): not permitted by this run's access role$/,
+    ],
+    [
+      "a summarize step with no summarizer",
+      { id: "s2", idx: 2, kind: "summarize", args: {} },
+      {},
+      /^step 3: summarize step but no summarizer configured$/,
+    ],
+    [
+      "a bad reference in a transform's inputs",
+      { id: "s2", idx: 2, kind: "transform", args: { code: "output = 1", inputs: { a: "${steps.nope}" } } },
+      { transformer: { transform: vi.fn() } },
+      /^step 3 \(transform\): no earlier step is named "nope"/,
+    ],
+    [
+      "a malformed step",
+      { id: "s2", idx: 2, kind: "teleport", args: {} },
+      {},
+      /^step 3: malformed \(kind=teleport\)$/,
+    ],
+    [
+      "a bad reference in a call step's args",
+      { id: "s2", idx: 2, kind: "call", args: { tool: "list_files", args: { path: "${steps.nope}" } } },
+      {},
+      /^step 3 \(list_files\): no earlier step is named "nope"/,
+    ],
+    [
+      "a dispatch-time denial (a lock the role may not operate)",
+      { id: "s2", idx: 2, kind: "call", args: { tool: "control_device", args: { node_id: "n1", command: "unlock" } } },
+      { scope: lockScope },
+      /^step 3 \(control_device\): This person's access role does not permit operating locks/,
+    ],
+  ])("%s", async (_name, failing, extra, expected) => {
+    const p = fakePrisma();
+    const { outcome } = await runToolSpec(p.client, dispatcherReturning({ ok: true }), {
+      specId: "s",
+      specName: "n",
+      steps: [ok(0), ok(1), failing],
+      triggeredBy: null,
+      ...(extra as Record<string, unknown>),
+    });
+    expect(outcome.status).toBe("failed");
+    expect(outcome.error).toMatch(expected);
+  });
+});
+
+describe("WARP-3409 — a fallback readout that throws still leaves a recorded run", () => {
+  it("fails the step with both reasons instead of escaping as a 500", async () => {
+    const summarizer: Summarizer = {
+      summarize: vi.fn(async () => {
+        throw new Error("AI Gateway error 503");
+      }),
+      fallback: vi.fn(() => {
+        throw new Error("readout bug");
+      }),
+    };
+    const p = fakePrisma();
+    const { outcome } = await runToolSpec(p.client, dispatcherReturning({}), {
+      specId: "s",
+      specName: "n",
+      steps: [summarizeStep(0)],
+      triggeredBy: null,
+      summarizer,
+    });
+    expect(outcome.status).toBe("failed");
+    expect(outcome.error).toBe(
+      "step 1 (summarize): AI Gateway error 503 (the fallback write-up failed too: readout bug)",
+    );
+    expect(p.created).toHaveLength(1);
+    expect(p.created[0]).toMatchObject({ status: "failed" });
   });
 });
 

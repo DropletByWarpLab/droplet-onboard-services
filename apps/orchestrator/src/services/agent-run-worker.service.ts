@@ -134,13 +134,18 @@ import {
   type ChatApprovalPort,
 } from "./llm-agent.service.js";
 import {
+  isCatalogRead,
   narrowToolNamesForPrincipal,
   resolveAttributedToolAccess,
   toolAllowedForPrincipal,
   toolDispatchDenial,
 } from "./tool-access.service.js";
 import { boundToolResultForModel } from "./tool-result-bounding.js";
-import { malformedToolOutputText, parseToolResultPayload } from "./tool-result-payload.js";
+import {
+  malformedToolOutputText,
+  parseToolResultPayload,
+  toolResultPayloadValue,
+} from "./tool-result-payload.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import { recordActivity } from "./activity.singleton.js";
 import { sendNotification } from "./notifications.service.js";
@@ -346,9 +351,9 @@ export function runToolPool(opts: { workspace?: boolean } = {}): string[] {
  *     refusing to repeat an unknown call is the honest default if it is not.
  */
 export function redispatchSafe(tool: string, prior: { confirmation?: string }): boolean {
+  if (isCatalogRead(tool)) return true;
   const entry = TOOL_CATALOG.find((t) => t.name === tool);
   if (!entry) return false;
-  if (!entry.requiresWrite && !entry.requiresConfirmation) return true;
   // WARP-2896 — a workspace write repeats onto the same checkout: `write`
   // is idempotent by contract (same bytes, `changed: false`), `commit` finds
   // nothing to commit, `run` runs the tests again. Re-dispatch, loudly (the
@@ -1817,6 +1822,19 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
                   ...(run.workspaceId ? { bound_tool_domains: WORKSPACE_TOOL_DOMAINS } : {}),
                   signal: controller.signal,
                   checkpoint,
+                  // WARP-3348 — the run's settled calls so far, including the
+                  // one just decided above, which ran outside the loop: the
+                  // answer's claims are checked against the whole run. Parked
+                  // challenges were decided since, and replays repeat an entry.
+                  priorAttempts: trace
+                    .filter((e) => e.text !== undefined && !e.replayOf && !isConfirmationEnvelope(e.text))
+                    .map((e) => ({
+                      tool_call_id: e.tool_call_id,
+                      tool: e.tool,
+                      args: e.args,
+                      result: toolResultPayloadValue(parseToolResultPayload(e.text!, e.tool)),
+                      ...(e.isError ? { isError: true as const } : {}),
+                    })),
                 },
               )
             : { message: { role: "assistant", content: "" }, trace: [], iterations: 0, stop_reason: "iteration_limit" };
@@ -2044,7 +2062,8 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       case "model_done":
       case "context_budget":
       case "repetition":
-      case "no_progress": {
+      case "no_progress":
+      case "needs_details": {
         const text = contentToText(result.message.content);
         await finish(runId, {
           status: "succeeded",
@@ -2075,6 +2094,10 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       }
       case "error":
       default: {
+        // WARP-3347 — only "error" may reach here: a stop_reason added to
+        // AgentResult without a case above would fail every run that ends on
+        // it, so leaving one out is a compile error.
+        result.stop_reason satisfies "error";
         const error = result.error ?? "agent loop error";
         await finish(runId, {
           status: "failed",

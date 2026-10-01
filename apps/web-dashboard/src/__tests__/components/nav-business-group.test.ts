@@ -314,3 +314,26 @@ describe("the mobile tab cap is not reopened (WARP-290)", () => {
     expect(MOBILE_PRIMARY_HREFS as readonly string[]).not.toContain("/money");
   });
 });
+
+// WARP-3365 / WARP-3369 (Romain, 2026-09-30) — an external guest gets nothing of
+// the company's customers or work unless it is shared with them. The box
+// refuses /api/crm and /api/pm for that tier, so the nav must not offer a door
+// that answers an error. Money is nested under Projects: the parent's role
+// gate holds for it too (`passesParentGate`), so it is not promoted into the
+// slot either.
+describe("external guests are offered no Customers, Projects or Money (WARP-3365, WARP-3369)", () => {
+  it("hides all three from a guest, even with every module on", () => {
+    const visible = flatHrefs("guest");
+    for (const href of ["/customers", "/projects", "/money"]) {
+      expect(visible, href).not.toContain(href);
+    }
+  });
+
+  it("does not promote Money into Projects' slot for a guest on a Projects-off, Money-on box", () => {
+    expect(flatHrefs("guest", openCapabilities, only("money"))).not.toContain("/money");
+  });
+
+  it.each(["family", "admin", "owner"] as const)("still offers all three to a %s", (role) => {
+    expect(flatHrefs(role)).toEqual(expect.arrayContaining(["/customers", "/projects", "/money"]));
+  });
+});

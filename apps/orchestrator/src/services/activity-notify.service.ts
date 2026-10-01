@@ -433,6 +433,20 @@ async function sweepPm(
     }),
   ]);
 
+  // WARP-3365 (Romain, 2026-09-30) — assigning a work item to an external guest
+  // SHARES that one item with them, so an ASSIGNEE is told about it: they can
+  // open it. A department WATCHER is not: a watcher hears about every item in
+  // the department, and a guest is admitted to no item they are not assigned to.
+  const watcherIds = [...new Set([...watchers.values()].flat())];
+  const guestWatchers = new Set<string>();
+  if (watcherIds.length > 0) {
+    const roles = await prisma.user.findMany({
+      where: { id: { in: watcherIds } },
+      select: { id: true, role: true },
+    });
+    for (const u of roles) if (u.role === "guest") guestWatchers.add(u.id);
+  }
+
   const byItem = new Map<string, Set<string>>();
   for (const a of assignees) {
     const set = byItem.get(a.workItemId) ?? new Set<string>();
@@ -441,7 +455,7 @@ async function sweepPm(
   }
   for (const [itemId, userIds] of watchers) {
     const set = byItem.get(itemId) ?? new Set<string>();
-    for (const u of userIds) set.add(u);
+    for (const u of userIds) if (!guestWatchers.has(u)) set.add(u);
     byItem.set(itemId, set);
   }
 
@@ -605,13 +619,18 @@ async function sweepCrm(
       ? []
       : await prisma.user.findMany({
           where: { id: { in: [...perUser.keys()] } },
-          select: { id: true, username: true },
+          select: { id: true, username: true, role: true },
         });
   const usernames = new Map(users.map((u) => [u.id, u.username] as const));
+  // WARP-3365 — an external guest is not told about a company deal closing,
+  // even one recorded against them before the rule (a guest cannot own a deal
+  // any more). Their rows fall to the `not_needed` terminal below.
+  const guestIds = new Set(users.filter((u) => u.role === "guest").map((u) => u.id));
 
   const outgoing: Outgoing[] = [];
   const sendIds: string[] = [];
   for (const [userId, list] of perUser) {
+    if (guestIds.has(userId)) continue;
     const username = deliverableUsername("crmActivity", userId, usernames);
     if (!username) continue;
     for (const item of list) sendIds.push(item.id);

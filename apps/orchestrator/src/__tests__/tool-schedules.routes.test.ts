@@ -53,6 +53,7 @@ interface SpecRow {
   status: "live" | "draft" | "suggested";
   ownerId: string | null;
   share: string | null;
+  visibility: "PRIVATE" | "WORKSPACE";
   safety: number;
   writes: boolean;
   reversible: boolean;
@@ -114,6 +115,7 @@ function createPrismaMock(seed: SpecRow[] = []) {
             status: "draft",
             ownerId: (data.ownerId as string | null) ?? null,
             share: (data.share as string | null) ?? null,
+            visibility: data.visibility as SpecRow["visibility"],
             safety: (data.safety as number) ?? 1,
             writes: data.writes as boolean,
             reversible: data.reversible as boolean,
@@ -208,6 +210,7 @@ function mkSpec(over: Partial<SpecRow> = {}): SpecRow {
     status: "live",
     ownerId: "user-owner",
     share: null,
+    visibility: "WORKSPACE",
     safety: 1,
     writes: false,
     reversible: true,

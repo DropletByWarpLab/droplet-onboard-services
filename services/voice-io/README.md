@@ -121,8 +121,57 @@ reach it via the Docker network).
 | `/audio/devices` | GET | List of all detected ALSA devices with their score + the current pick |
 | `/audio/test-tone` | POST | Play a 440 Hz sine wave through the picked output device for 1 s. For "is my speaker wired right" debug. |
 | `/audio/test-record` | POST | Capture 2 s from the picked input, return RMS + peak level. For "is my mic working" debug. |
-| `/voice/status` | GET | Pipeline snapshot: `state` ∈ `idle\|loading\|listening\|wake_detected\|transcribing\|transcript_ready\|speaking\|error\|no_mic`, plus `wake_model`, `threshold`, `last_wake_at`, `last_wake_score`, `stt_loaded`, `last_transcript`, `last_transcript_at`, `tts_loaded`, `last_response`, `last_response_at`, `input_rms_dbfs` (rolling mic level over ~2 s, measured inside the pipeline's frame handler — safe to drive a live level meter), `last_audio_at`, `input_flatlined`. Read-only; safe to poll. |
-| `/voice/say` | POST | `{"text":"hello world","voice":"en_US-ryan-medium"}` — synthesize + play through the picked speaker. Test endpoint until commit 7 wires the LLM-reply path. Returns `{ok, duration_s, sample_rate}`. |
+| `/voice/status` | GET | Pipeline snapshot: `state` ∈ `idle\|loading\|listening\|wake_detected\|transcribing\|transcript_ready\|speaking\|error\|no_mic`, plus `wake_model`, `threshold`, `last_wake_at`, `last_wake_score`, `stt_loaded`, `last_transcript`, `last_transcript_at`, `tts_loaded`, `last_response`, `last_response_at`, `input_rms_dbfs` (rolling mic level over ~2 s, measured inside the pipeline's frame handler — safe to drive a live level meter), `last_audio_at`, `input_flatlined`, and the speaker volume: `output_level` (0-100), `output_muted`, `output_fault` (a storage fault on the volume file, or null). Read-only; safe to poll. |
+| `/voice/say` | POST | `{"text":"hello world","voice":"en_US-ryan-medium"}` — synthesize + play through the picked speaker. Test endpoint until commit 7 wires the LLM-reply path. Returns `{ok, duration_s, sample_rate}`. Plays at the speaker volume; muted means nothing is played. |
+| `/voice/volume` | GET | Speaker volume: `{level, muted, fault}`. Works with voice switched off or no mic. See [Speaker volume](#speaker-volume). |
+| `/voice/volume` | POST | Exactly one of `{"level": 0-100}`, `{"change": -100..100}` or `{"muted": true\|false}` (strict: no strings, floats or extra keys; anything else is 422). Persists and applies from the next thing the box says; a level change also unmutes, and a negative `change` never lowers it below 10. Returns `{level, muted, fault, previous_level, previous_muted}`. |
+
+## Speaker volume
+
+One output level (0-100) and a mute flag, shared by the HTTP endpoints
+above and spoken commands. `voice/volume.py` owns it.
+
+- **Mechanism: software gain.** The int16 PCM is scaled in
+  `WakePipeline._play_pcm` — the single playback choke point for replies,
+  `/voice/say` and the spoken cues — right before `audio_io.play`. Gain is
+  `(level/100)^2`: 100 is exactly today's pre-volume output, 50 is -12 dB,
+  10 is -40 dB. It only attenuates, so it cannot clip, and there is no
+  "louder than 100". No ALSA mixer is touched, so it behaves the same on
+  every output device and survives a DSP reboot.
+- **Mute** plays nothing at all (replies and cues), while the pipeline's
+  state changes and post-speak cooldown run as usual. Mute never changes
+  the level; unmute restores it. The only ways to silence the box are
+  `muted: true` and an explicitly requested level 0: a relative decrease
+  ("quieter", `{"change": -N}`) stops at 10, or holds a level that was
+  explicitly set below 10.
+- **Persistence**: `/data/voice-volume.json` (`{"level": 70, "muted":
+  false}`) on the `voice-calibration` volume, atomic write, override with
+  `VOICE_VOLUME_PATH`. No file means level 100, unmuted (boxes upgrading
+  into this keep today's loudness). An unreadable file also means level
+  100, unmuted, plus a `fault` on `/voice/volume` and `output_fault` on
+  `/voice/status` — a storage fault never silently mutes the box. A factory
+  reset sweeps the file, so volume returns to 100.
+- **Timing**: the level is read per sentence, so a change during a long
+  reply takes effect on the next sentence, not mid-word.
+- **By voice** (`voice/intents.py`): whole-utterance commands are handled on
+  the box before the LLM — no model round trip, and they work with the LLM
+  down. "volume 40 percent" / "set volume to 40" (a bare 0-10 without
+  "percent" is the 0-10 scale: "volume 5" is 50), "turn it up/down",
+  "louder", "quieter", "softer", "volume up/down" (±10), "a lot louder"
+  (±25), "max volume" (100), "minimum volume" (10), "mute", "unmute",
+  "what's the volume". The box answers "Volume 40." at the new level, mutes
+  silently, and says "Unmuted." at the restored level. Anything naming
+  another object ("turn up the thermostat", "turn the TV down") goes to the
+  normal turn, and "stop", "quiet", "shut up", "cancel" never mean mute.
+- **Not an LLM tool.** There is no `set_volume` tool in the registry, so
+  the assistant cannot change volume from a free-form request the
+  classifier doesn't match. Adding one widens the voice principal's write
+  set (`VOICE_WRITE_TOOLS`, today `{control_device}`) and needs an ADR-004
+  amendment first.
+- The dashboard reaches it through the orchestrator's owner/admin
+  `GET/POST /api/voice/volume` (audited as a `voice` activity row); there
+  is no dashboard control yet. `/audio/test-tone` and `/audio/echo-check`
+  are hardware diagnostics and stay at their fixed levels.
 
 ## Running on the POC box
 
@@ -166,7 +215,8 @@ into stacked commits per `docs/voice-assistant-plan.md`:
 5. **Agent glue** — pipeline.py wires capture → wake → STT → LLM →
    TTS → playback. Adds the four voice-control LLM tools
    (`set_volume`, `mute_mic`, `change_voice`, `mic_status`) called
-   out by WARP-154.
+   out by WARP-154. (None of the four is built. Speaker volume shipped
+   without a tool — see [Speaker volume](#speaker-volume).)
 6. **Dashboard UI** — voice settings page in `apps/web-dashboard`.
    Mic-test button, wake-word selector, volume, voice picker.
 

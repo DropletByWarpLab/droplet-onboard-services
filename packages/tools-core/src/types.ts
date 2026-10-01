@@ -225,6 +225,9 @@ export type ToolResult =
   | { ok: true; data: unknown }
   | { ok: false; error: ToolError; status: "error" | "confirmation_required" };
 
+/** WARP-3349 — the only answer a `Tool.precheck` may give besides `null`. */
+export type PrecheckRefusal = { ok: false; status: "error"; error: ToolError };
+
 export type ToolHandler = (
   args: Record<string, unknown>,
   ctx: ToolContext,
@@ -277,5 +280,16 @@ export interface Tool {
    * reading the field, so the default lives in exactly one place.
    */
   confirmationOwner?: ConfirmationOwner;
+  /**
+   * WARP-3349 — refuse a call that can never succeed BEFORE the person is
+   * asked to approve it. The interceptor challenges before the handler runs,
+   * so a handler alone can only refuse after the approval. The mcp-server
+   * runs this only on a call the interceptor is about to challenge (no
+   * token, not denied, interceptor-owned confirmation): a refusal is
+   * returned instead of the challenge, `null` lets the interceptor ask.
+   * It must only read. A throw is logged and ignored, and the handler
+   * validates again after the approval.
+   */
+  precheck?: (args: Record<string, unknown>, ctx: ToolContext) => Promise<PrecheckRefusal | null>;
   handler: ToolHandler;
 }

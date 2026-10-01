@@ -33,13 +33,15 @@
  * connection, never across connections.** One ledger is one currency by
  * construction; two ledgers are not.
  */
+import { LANDED_LEDGER_DATASETS } from "@droplet/shared-types";
+
 import { isCloudErpProvider } from "../erp-provider.js";
 
 import type { LandOutcome, LandingConnection, LandingDb } from "./land.js";
 import { isUniqueViolation } from "../../lib/prisma-errors.js";
 
-/** Datasets that become `ErpDocument` rows. */
-export const MONEY_ENTITIES = ["invoice", "bill"] as const;
+/** Datasets that become `ErpDocument` rows (declared in shared-types — WARP-3375). */
+export const MONEY_ENTITIES = LANDED_LEDGER_DATASETS;
 
 export function landsMoney(entity: string): boolean {
   return (MONEY_ENTITIES as readonly string[]).includes(entity);
