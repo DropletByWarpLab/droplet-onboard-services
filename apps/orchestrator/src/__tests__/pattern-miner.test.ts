@@ -45,6 +45,7 @@ function createPrismaMock(args: {
     name: string;
     description: string | null;
     status: string;
+    visibility: string;
     writes: boolean;
     reversible: boolean;
     stepCount: number;
@@ -91,6 +92,7 @@ function createPrismaMock(args: {
             name: string;
             description: string | null;
             status: string;
+            visibility: string;
             writes: boolean;
             reversible: boolean;
             steps: {
@@ -103,6 +105,7 @@ function createPrismaMock(args: {
             name: data.name,
             description: data.description,
             status: data.status,
+            visibility: data.visibility,
             writes: data.writes,
             reversible: data.reversible,
             stepCount: data.steps.create.length,
@@ -190,6 +193,8 @@ describe("WARP-464 — mineToolCallPatterns", () => {
     );
     expect(result.inserted).toBeGreaterThan(0);
     expect(prisma.createdSpecs[0].status).toBe("suggested");
+    // WARP-3354 — a suggestion has no creator and keeps today's visibility.
+    expect(prisma.createdSpecs[0].visibility).toBe("WORKSPACE");
     expect(prisma.createdSpecs[0].name).toContain("list_recent_files");
     expect(prisma.createdSpecs[0].description).toContain("repeatedly");
     expect(prisma.createdSpecs[0].stepCount).toBe(2);

@@ -46,6 +46,7 @@ import {
   fetchChainVerify,
   fetchDailyReportRuns,
   fetchIntegrations,
+  fetchIntegrationsSummary,
   fetchTodayBriefing,
   reportFromRun,
   requestBriefingRewrite,
@@ -55,6 +56,7 @@ import {
   type DailyReport,
   type HomeTile,
   type IntegrationSummary,
+  type IntegrationsSummary,
   type VerifySummary,
 } from "./api";
 import {
@@ -1046,7 +1048,69 @@ const PILL_ICON = {
   key: KeyRound,
 } as const;
 
-export function IntegrationsBody({ now }: { now: Date | null }) {
+/**
+ * The connectors tile. Owner and admin read the full list; a member reads a
+ * summary with no provider, no per-provider status and no credential expiry
+ * (WARP-3374: `GET /api/integrations` is owner/admin only). `isAdminTier`
+ * defaults to true because it only chooses WHICH read to make: the box decides
+ * who may read what, and answers 403 to the wrong one.
+ */
+export function IntegrationsBody({ now, isAdminTier = true }: { now: Date | null; isAdminTier?: boolean }) {
+  return isAdminTier ? <IntegrationsList now={now} /> : <IntegrationsSummaryBody now={now} />;
+}
+
+/** A member's view of the connectors: how many are connected, whether any needs attention, and how fresh. */
+function IntegrationsSummaryBody({ now }: { now: Date | null }) {
+  const [summary, setSummary] = useState<IntegrationsSummary | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [nonce, setNonce] = useState(0);
+
+  useEffect(() => {
+    let live = true;
+    setFailed(false);
+    fetchIntegrationsSummary()
+      .then((s) => live && setSummary(s))
+      .catch(() => live && setFailed(true));
+    return () => {
+      live = false;
+    };
+  }, [nonce]);
+
+  if (failed) {
+    return <ErrorBody what="Couldn't read connectors" onRetry={() => setNonce((n) => n + 1)} />;
+  }
+  if (summary === null) return <SkeletonRows n={2} />;
+  if (summary.connected === 0) {
+    return <EmptyBody icon={<Blocks size={28} aria-hidden="true" />} text="Nothing connected yet" />;
+  }
+
+  const attention = summary.needsAttention > 0;
+  const PillIcon = attention ? AlertTriangle : CheckCircle2;
+  const rel = now ? relativeSince(summary.lastSyncedAt, now) : null;
+  return (
+    <div className="rp-rows rp-conns">
+      <div className="rp-conn">
+        <span className="rp-conn-mark">
+          <Plug size={14} aria-hidden="true" />
+        </span>
+        <div className="rp-conn-tx">
+          <div className="rp-conn-name">
+            {summary.connected} {summary.connected === 1 ? "system" : "systems"} connected
+          </div>
+          <div className="rp-conn-sub">
+            {summary.lastSyncedAt === null ? "Nothing synced yet" : rel ? `Last synced ${rel}` : " "}
+          </div>
+        </div>
+        <span className={`rp-pill is-${attention ? "warn" : "ok"}`}>
+          <PillIcon size={11} aria-hidden="true" />
+          {attention ? `${summary.needsAttention} need attention` : "All healthy"}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function IntegrationsList({ now }: { now: Date | null }) {
   const [rows, setRows] = useState<IntegrationSummary[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [nonce, setNonce] = useState(0);

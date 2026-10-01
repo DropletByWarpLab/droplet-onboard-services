@@ -146,6 +146,7 @@ import type {
   AppDownloadCatalog,
   Routine,
   RoutineStatus,
+  RoutineVisibility,
   RoutineRun,
   RoutineSchedule,
   ContextPinKind,
@@ -1377,6 +1378,10 @@ export async function fetchHealth(): Promise<HealthResponse> {
 
 export async function fetchDevices(): Promise<DeviceInfo[]> {
   const res = await authFetch(`${BASE}/api/devices`);
+  // WARP-3378: the box's own device row is not served to an external guest
+  // (403). That is "no device to show", not a fault: the header chip falls back
+  // to the LAN name, and `useDevice` stops polling on an empty answer.
+  if (res.status === 403) return [];
   if (!res.ok) throw new Error(`Failed to fetch devices: ${res.status}`);
   return res.json();
 }
@@ -7097,8 +7102,18 @@ async function throwVoiceError(res: Response, fallback: string): Promise<never> 
   throw e;
 }
 
-export async function fetchVoiceStatus(): Promise<VoiceStatusInfo> {
-  const res = await authFetch(`${BASE}/api/voice/status`);
+/**
+ * `transcript: true` also asks for the last utterance and reply
+ * (`last_transcript`, `last_response` and their times). WARP-3396: the box
+ * leaves them out of the default answer, so only the setup wizard's voice step
+ * (its "what it heard" try-it) asks; the Voice page's 1 s poll does not.
+ */
+export async function fetchVoiceStatus(
+  opts: { transcript?: boolean } = {},
+): Promise<VoiceStatusInfo> {
+  const res = await authFetch(
+    `${BASE}/api/voice/status${opts.transcript ? "?include=transcript" : ""}`,
+  );
   if (!res.ok) await throwVoiceError(res, "Failed to fetch voice status");
   return res.json();
 }
@@ -9134,6 +9149,21 @@ export async function setRoutineStatus(
     body: JSON.stringify({ status }),
   });
   return routineJson<Routine>(res, "Failed to update routine");
+}
+
+/**
+ * WARP-3354 — share a routine with the Workspace (`WORKSPACE`, POST) or make it
+ * private again (`PRIVATE`, DELETE). The box decides who may: the creator, an
+ * owner or an admin. Answers the routine.
+ */
+export async function setRoutineVisibility(
+  slug: string,
+  visibility: RoutineVisibility,
+): Promise<Routine> {
+  const res = await authFetch(`${BASE}/api/tools/${encodeURIComponent(slug)}/share`, {
+    method: visibility === "WORKSPACE" ? "POST" : "DELETE",
+  });
+  return routineJson<Routine>(res, "Failed to change who can see the routine");
 }
 
 /**
