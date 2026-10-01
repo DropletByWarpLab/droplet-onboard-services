@@ -17,6 +17,13 @@
  * cannot read. Writes are `owner|admin|family`, matching `WRITE` in
  * `routes/crm.ts`.
  *
+ * WARP-3365 — the read floor is the CRM's own: `mountModuleGates` refuses an
+ * external guest on the whole `/api/crm` prefix (`requireModuleTierFloor`), so
+ * a guest cannot ask which business records a file shared with them is linked
+ * to. The writes name their §9 level like `routes/crm.ts` (WARP-3365 review):
+ * `act` to link a file or edit a link, `manage` to delete one — a role holding
+ * only `crm: view` reads the links and changes none.
+ *
  * DELIBERATELY NOT `requireRoleOrMcpService`. Every other CRM write admits the
  * MCP service principal so WARP-2546's tools can dispatch. This one does not,
  * for a concrete reason rather than caution: creating a link resolves a PATH
@@ -47,6 +54,7 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 
 import { requireRole } from "../middleware/auth.js";
+import { requireFeatureAccess } from "../middleware/feature-gate.js";
 import {
   checkSpaceAccess,
   departmentSpaceToken,
@@ -177,7 +185,7 @@ export function createCrmEntityLinksRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.post("/crm/entity-links", requireRole(...WRITE), async (req, res, next) => {
+  router.post("/crm/entity-links", requireRole(...WRITE), requireFeatureAccess("crm", "act"), async (req, res, next) => {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) return badRequest(res, parsed.error);
     const body = parsed.data;
@@ -255,7 +263,7 @@ export function createCrmEntityLinksRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.patch("/crm/entity-links/:id", requireRole(...WRITE), async (req, res, next) => {
+  router.patch("/crm/entity-links/:id", requireRole(...WRITE), requireFeatureAccess("crm", "act"), async (req, res, next) => {
     const parsed = patchSchema.safeParse(req.body);
     if (!parsed.success) return badRequest(res, parsed.error);
     try {
@@ -266,7 +274,7 @@ export function createCrmEntityLinksRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.delete("/crm/entity-links/:id", requireRole(...WRITE), async (req, res, next) => {
+  router.delete("/crm/entity-links/:id", requireRole(...WRITE), requireFeatureAccess("crm", "manage"), async (req, res, next) => {
     try {
       await links.deleteLink(prisma, viewerOf(req), req.params.id);
       res.status(204).end();

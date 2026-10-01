@@ -45,11 +45,6 @@
   --card-bg: #ffffff;
   --card-bd: rgba(20, 22, 45, 0.08);
   --card-inner: rgba(20, 22, 45, 0.035);
-  --hero-aurora-opacity: 0.4;
-  --blob-a: 0.05;
-  --blob-b: 0.045;
-  --blob-c: 0.035;
-  --blob-d: 0.03;
 
   color-scheme: light;
   color: var(--text);
@@ -78,11 +73,6 @@
   --card-bg: #14161d;
   --card-bd: rgba(255, 255, 255, 0.055);
   --card-inner: rgba(255, 255, 255, 0.035);
-  --hero-aurora-opacity: 0.5;
-  --blob-a: 0.1;
-  --blob-b: 0.085;
-  --blob-c: 0.065;
-  --blob-d: 0.05;
 
   color-scheme: dark;
 }
@@ -466,7 +456,7 @@ body:has(.droplet-home) {
    implies `contain: layout`, which makes the tile a containing block for
    `position: fixed` descendants — and since `.bento` also clips, a fixed
    surface rendered INSIDE a widget is sized to the tile and then cut off by
-   it. Home's own fixed chrome (.dh-modal-overlay, .dh-ambient, .dh-drop) all
+   it. Home's own fixed chrome (.dh-modal-overlay, .dh-drop) all
    renders at page level, outside `.bento`, so it is unaffected; anything
    full-screen opened FROM a widget must portal to document.body the way
    <Dialog> and <EmailCitation> do. `ask-ai-reflow.test.tsx` guards that. */
@@ -918,102 +908,6 @@ body:has(.droplet-home) {
   height: 14px;
 }
 
-/* ============================================================
-   Ambient decorative layer (scoped, fixed, pointer-events none)
-   ============================================================ */
-.dh-ambient {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  overflow: hidden;
-  pointer-events: none;
-}
-/* Keep the ambient glow inside the content column so it never bleeds behind
-   the (separately rendered) sidebar and tint its translucent surface. */
-@media (min-width: 1024px) {
-  .dh-ambient {
-    left: var(--sidebar-w, 260px);
-  }
-}
-.dh-ambient .blob {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(95px);
-  will-change: transform;
-}
-.dh-ambient .b1 {
-  width: 540px;
-  height: 540px;
-  background: #4f46e5;
-  left: -140px;
-  top: -120px;
-  opacity: var(--blob-a);
-  animation: dh-blob1 28s ease-in-out infinite;
-}
-.dh-ambient .b2 {
-  width: 480px;
-  height: 480px;
-  background: #6366f1;
-  right: -120px;
-  top: 28%;
-  opacity: var(--blob-b);
-  animation: dh-blob2 34s ease-in-out infinite;
-}
-.dh-ambient .b3 {
-  width: 600px;
-  height: 600px;
-  background: #818cf8;
-  left: 32%;
-  bottom: -220px;
-  opacity: var(--blob-c);
-  animation: dh-blob3 31s ease-in-out infinite;
-}
-.dh-ambient .b4 {
-  width: 520px;
-  height: 520px;
-  background: #d9a35c;
-  right: 8%;
-  bottom: -200px;
-  opacity: var(--blob-d);
-  animation: dh-blob4 38s ease-in-out infinite;
-}
-@keyframes dh-blob1 {
-  0%,
-  100% {
-    transform: translate(0, 0) scale(1);
-  }
-  50% {
-    transform: translate(70px, 50px) scale(1.08);
-  }
-}
-@keyframes dh-blob2 {
-  0%,
-  100% {
-    transform: translate(0, 0) scale(1);
-  }
-  50% {
-    transform: translate(-60px, 40px) scale(1.05);
-  }
-}
-@keyframes dh-blob3 {
-  0%,
-  100% {
-    transform: translate(0, 0) scale(1);
-  }
-  50% {
-    transform: translate(50px, -60px) scale(1.1);
-  }
-}
-@keyframes dh-blob4 {
-  0%,
-  100% {
-    transform: translate(0, 0) scale(1);
-  }
-  50% {
-    transform: translate(-70px, -40px) scale(1.12);
-  }
-}
-
 /* bottom-right droplet — a LOAD indicator that fades once mounted */
 .dh-drop {
   position: fixed;
@@ -1082,7 +976,6 @@ body:has(.droplet-home) {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .dh-ambient .blob,
   .dh-drop,
   .dh-drop .ripple {
     animation: none;

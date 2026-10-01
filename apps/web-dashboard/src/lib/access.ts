@@ -61,8 +61,9 @@ export function isAdminRole(role?: string | null): boolean {
   return role === "owner" || role === "admin";
 }
 
-/** Display label — the ONE place the `family` → "Staff" relabel lives
- *  (§0.1 / O-1). The enum value never changes. */
+/** Display label — the ONE place the `family` → "Member" / `guest` →
+ *  "External guest" relabel lives (Romain, 2026-09-25; supersedes the
+ *  §0.1 / O-1 "Staff" label). The enum value never changes. */
 export function tierLabel(tier: AccessTier): string {
   switch (tier) {
     case "owner":
@@ -70,16 +71,15 @@ export function tierLabel(tier: AccessTier): string {
     case "admin":
       return "Admin";
     case "family":
-      return "Staff";
+      return "Member";
     case "guest":
-      return "Guest";
+      return "External guest";
     case "service":
       return "Service";
   }
 }
 
-/** Lower-case plural for sentence positions ("…are for admins."). "Staff"
- *  is its own plural — never "staffs". */
+/** Lower-case plural for sentence positions ("…are for admins."). */
 export function tierPlural(tier: AccessTier): string {
   switch (tier) {
     case "owner":
@@ -87,9 +87,9 @@ export function tierPlural(tier: AccessTier): string {
     case "admin":
       return "admins";
     case "family":
-      return "staff";
+      return "members";
     case "guest":
-      return "guests";
+      return "external guests";
     case "service":
       return "service identities";
   }
@@ -308,7 +308,9 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
       {
         value: "manage",
         label: "Manage",
-        grants: "Areas, opening hours and what counts as expected",
+        // WARP-2978 — choosing who is told about alerts is manage (P3 route 22).
+        // WARP-2979 — so is deciding on Droplet's links and what its AI may do.
+        grants: "Areas, opening hours, who's told about alerts, Droplet's links and what counts as expected",
         minTier: ADMIN,
         dropNoun: "Manage security",
         dropVerb: "manage security",
@@ -419,7 +421,17 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
     label: "Projects",
     description: "Boards, tasks and milestones",
     levels: [
-      { value: "view", label: "View", grants: "See boards and tasks" },
+      // WARP-3369 — value-identical to the orchestrator catalog: `view` is a
+      // REFUSAL below the member floor (`refuseBelowFloor`), an external guest
+      // holds nothing of the company's projects (Romain, 2026-09-30).
+      {
+        value: "view",
+        label: "View",
+        grants: "See boards and tasks",
+        minTier: FAMILY,
+        dropNoun: "See projects",
+        dropVerb: "see projects",
+      },
       {
         value: "act",
         label: "Work",
@@ -450,7 +462,16 @@ export const ACCESS_FEATURES: AccessFeatureDef[] = [
     label: "CRM",
     description: "Customers, deals and the sales pipeline",
     levels: [
-      { value: "view", label: "View", grants: "See customers and the pipeline" },
+      // WARP-3365 — as Projects above: `view` is refused below the member
+      // floor, so an external guest holds nothing of the company's customers.
+      {
+        value: "view",
+        label: "View",
+        grants: "See customers and the pipeline",
+        minTier: FAMILY,
+        dropNoun: "See customers",
+        dropVerb: "see customers",
+      },
       {
         value: "act",
         label: "Work",
@@ -598,6 +619,11 @@ export const TOOL_DOMAIN_GROUPS: ToolDomainGroup[] = [
   { id: "files", label: "Files", domains: ["files"], feature: "files" },
   { id: "smart-home", label: "Device control", domains: ["smart-home"], feature: "smart_home", locks: true },
   { id: "cameras", label: "Cameras", domains: ["cameras"], feature: "cameras" },
+  // WARP-2979 (ADR-059 P4 §6.12.7) — the read-only Security tools, so a custom
+  // role can be granted them (effective access counts only granted domains).
+  // Gated by the Security feature: switching Security off for a role takes
+  // the tools with it.
+  { id: "security", label: "Security", domains: ["security"], feature: "security" },
   { id: "switch", label: "Switch", domains: ["switch"], feature: "managed_switch" },
   {
     id: "calendar",

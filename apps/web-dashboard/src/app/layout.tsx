@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Inter, Instrument_Serif, Space_Grotesk, JetBrains_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import { ThemeProvider } from "@/lib/theme";
 import { NavLayoutProvider } from "@/lib/nav-layout";
 import { AuthProvider } from "@/lib/auth";
@@ -11,38 +11,65 @@ import { NotificationToaster } from "@/components/NotificationToaster";
 import { THEME_COLOR } from "@/lib/brand";
 import "./globals.css";
 
-const inter = Inter({
-  subsets: ["latin"],
+// WARP-3317 — the four families are vendored in ./fonts (the `latin` subset,
+// byte-for-byte what next/font/google downloaded) and loaded with
+// next/font/local, so `next build` makes no network call. The google loader
+// fetched them from fonts.googleapis.com on every build: it failed the
+// docker-build leg of the stage → main promote (PR #2378) on code that had
+// built green earlier that day, and the image could not be built offline.
+// Licenses (SIL OFL 1.1), provenance and the latin-only coverage note are in
+// ./fonts/README.md. Don't go back to next/font/google:
+// src/__tests__/fonts-self-hosted.test.ts fails on it.
+//
+// Each call pins `font-family` to the name the google loader registered. Left
+// alone, next/font/local names the face after the JS variable ("jetbrainsMono"),
+// and stylesheets that name a family literally — projects.css lists
+// "JetBrains Mono" — would stop matching the webfont.
+const inter = localFont({
+  src: "./fonts/inter-latin-wght-normal.woff2",
+  weight: "100 900",
+  style: "normal",
   display: "swap",
   variable: "--font-inter",
+  declarations: [{ prop: "font-family", value: "Inter" }],
 });
 
-const instrumentSerif = Instrument_Serif({
-  subsets: ["latin"],
-  weight: "400",
-  style: ["normal", "italic"],
+const instrumentSerif = localFont({
+  src: [
+    { path: "./fonts/instrument-serif-latin-400-normal.woff2", weight: "400", style: "normal" },
+    { path: "./fonts/instrument-serif-latin-400-italic.woff2", weight: "400", style: "italic" },
+  ],
   display: "swap",
   variable: "--font-display",
+  declarations: [{ prop: "font-family", value: "Instrument Serif" }],
+  // The google loader sized the fallback against Times New Roman for a serif.
+  adjustFontFallback: "Times New Roman",
 });
 
 // Space Grotesk — the flat, geometric "tech" sans used for the Home chat hero
 // headline (the bento home's signature display line). Scoped to that one line
-// via `var(--font-space-grotesk)` in the home stylesheet.
-const spaceGrotesk = Space_Grotesk({
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
+// via `var(--font-space-grotesk)` in the home stylesheet. One variable file;
+// 400–600 is the weight range the google call requested.
+const spaceGrotesk = localFont({
+  src: "./fonts/space-grotesk-latin-wght-normal.woff2",
+  weight: "400 600",
+  style: "normal",
   display: "swap",
   variable: "--font-space-grotesk",
+  declarations: [{ prop: "font-family", value: "Space Grotesk" }],
 });
 
 // JetBrains Mono — the design-system mono family (canon: IPs, hostnames,
 // schedules, metrics, code, all-caps eyebrows). The dashboard references
 // var(--font-mono) + `font-mono` widely, but the variable was never defined at
 // the root, so mono text fell back to the browser default. (handoff 6, D-A.)
-const jetbrainsMono = JetBrains_Mono({
-  subsets: ["latin"],
+const jetbrainsMono = localFont({
+  src: "./fonts/jetbrains-mono-latin-wght-normal.woff2",
+  weight: "100 800",
+  style: "normal",
   display: "swap",
   variable: "--font-mono",
+  declarations: [{ prop: "font-family", value: "JetBrains Mono" }],
 });
 
 export const metadata: Metadata = {

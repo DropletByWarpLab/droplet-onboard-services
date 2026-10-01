@@ -120,9 +120,13 @@ import {
 } from "@droplet/tools-core";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
+import { isGatewayPreempted } from "../lib/gateway-preempted.js";
+import { redactToolResult } from "../lib/log-redaction.js";
 import type { ChatMessage } from "../types/index.js";
 import { contentToText } from "../types/index.js";
+import { chatRunBrief, deliverRunResults } from "./agent-run-result.service.js";
 import {
+  isConfirmationEnvelope,
   runAgent,
   type AgentCheckpointPort,
   type AgentDeps,
@@ -130,15 +134,22 @@ import {
   type ChatApprovalPort,
 } from "./llm-agent.service.js";
 import {
+  isCatalogRead,
   narrowToolNamesForPrincipal,
   resolveAttributedToolAccess,
   toolAllowedForPrincipal,
   toolDispatchDenial,
 } from "./tool-access.service.js";
 import { boundToolResultForModel } from "./tool-result-bounding.js";
+import {
+  malformedToolOutputText,
+  parseToolResultPayload,
+  toolResultPayloadValue,
+} from "./tool-result-payload.js";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import { recordActivity } from "./activity.singleton.js";
 import { sendNotification } from "./notifications.service.js";
+import { noteAgentRunTool, publishAgentRunEvent } from "./agent-run-events.service.js";
 import { summarizeToolArguments } from "./confirmation-summary.js";
 import { decideCloudTurn, resolveOffLanProvider } from "./cloud-access.service.js";
 import {
@@ -175,8 +186,10 @@ export const RUN_READMITTED_TOOLS: ReadonlySet<string> = new Set(["send_notifica
  * WARP-2180 — tools a run may never see. `start_agent_run` is how a chat
  * turn hands work off; inside a run it is how one prompt spawns a fleet that
  * saturates the model. Structural refusal here; the handler refuses too.
+ * WARP-3302 — `cancel_agent_run` likewise: stopping runs is the person's
+ * call from chat, never one unattended run's call about another.
  */
-export const RUN_EXCLUDED_TOOLS: ReadonlySet<string> = new Set(["start_agent_run"]);
+export const RUN_EXCLUDED_TOOLS: ReadonlySet<string> = new Set(["start_agent_run", "cancel_agent_run"]);
 
 /**
  * WARP-2896 (ADR-056 slice G) — the workshop's tools, derived from the
@@ -220,10 +233,20 @@ export const WORKSPACE_TOOL_DOMAINS: readonly ToolDomain[] = [
  */
 const RUN_INFERENCE_PRIORITY = 10;
 const RUN_YIELD_MS = 60_000;
+/**
+ * WARP-3306 — a preempted run comes back sooner than a 429 yield: the chat
+ * that took the slot is one turn, and the run already did the work up to the
+ * call that was cut. Measured 2026-09-28 on the bench box: chat waited
+ * 20–38 s behind a run's model call before preemption existed.
+ */
+const RUN_PREEMPT_YIELD_MS = 5_000;
 
-/** The run's gateway: the caller's functions, each request stamped background priority. */
-function runGateway(gw: AgentDeps["aiGateway"]): AgentDeps["aiGateway"] {
-  const opts = { priority: RUN_INFERENCE_PRIORITY };
+/**
+ * The run's gateway: the caller's functions, each request stamped background
+ * priority and — WARP-3306 — preemptible when the run may still give way.
+ */
+function runGateway(gw: AgentDeps["aiGateway"], preemptible: boolean): AgentDeps["aiGateway"] {
+  const opts = { priority: RUN_INFERENCE_PRIORITY, ...(preemptible ? { preemptible } : {}) };
   return {
     chat: (r, s) => gw.chat(r, s, undefined, opts),
     ...(gw.chatStream ? { chatStream: (r, s) => gw.chatStream!(r, s, undefined, opts) } : {}),
@@ -328,9 +351,9 @@ export function runToolPool(opts: { workspace?: boolean } = {}): string[] {
  *     refusing to repeat an unknown call is the honest default if it is not.
  */
 export function redispatchSafe(tool: string, prior: { confirmation?: string }): boolean {
+  if (isCatalogRead(tool)) return true;
   const entry = TOOL_CATALOG.find((t) => t.name === tool);
   if (!entry) return false;
-  if (!entry.requiresWrite && !entry.requiresConfirmation) return true;
   // WARP-2896 — a workspace write repeats onto the same checkout: `write`
   // is idempotent by contract (same bytes, `changed: false`), `commit` finds
   // nothing to commit, `run` runs the tests again. Re-dispatch, loudly (the
@@ -437,6 +460,40 @@ export interface EnqueueAgentRunInput {
   /** WARP-2896 — the workshop workspace this run works in. Absent for every
    *  ordinary run; the route checked it exists and belongs to the person. */
   workspaceId?: string | null;
+  /** WARP-3299 — who started the run. The Workshop is the default creator;
+   *  the schedule ticker and the chat path say so explicitly. */
+  origin?: "workshop" | "schedule" | "chat";
+  /** WARP-3299 — the assistant message and tool call that started a chat
+   *  run. Server-side values only (the route admits them from the mcp
+   *  service principal alone). */
+  originMessageId?: string | null;
+  originToolCallId?: string | null;
+  /** WARP-3299 — the card's label and what "done" means. The title defaults
+   *  to the goal's first line. */
+  title?: string;
+  deliverable?: string;
+}
+
+/** WARP-3299 — at most this many active runs per person (Romain,
+ *  2026-09-28). Schedules are exempt: their own overlap guard already allows
+ *  one active fire per schedule, and a refused fire would be a lost one. */
+export const MAX_ACTIVE_RUNS_PER_PERSON = 3;
+
+/** WARP-3299 — the per-person cap refused this start. */
+export class AgentRunCapError extends Error {
+  constructor(readonly active: number) {
+    super(
+      `You already have ${active} background runs going; the limit is ${MAX_ACTIVE_RUNS_PER_PERSON}. ` +
+        "Wait for one to finish or stop one, then try again.",
+    );
+    this.name = "AgentRunCapError";
+  }
+}
+
+/** WARP-3299 — a run's default title: the goal's first line, bounded. */
+export function titleFromGoal(goal: string): string {
+  const line = goal.split("\n", 1)[0]!.trim();
+  return line.length > 120 ? `${line.slice(0, 119)}…` : line;
 }
 
 /** Create a `queued` run. The worker's next tick claims it. */
@@ -449,6 +506,15 @@ export async function enqueueAgentRun(
 ): Promise<{ id: string }> {
   const cap = config.agentRuns.maxIter;
   const maxIter = Math.max(1, Math.min(input.maxIter ?? cap, cap));
+  const origin = input.origin ?? "workshop";
+  if (origin !== "schedule") {
+    // ponytail: count-then-create is not atomic; two starts in the same
+    // instant can both pass. The cap is a courtesy bound, not a safety one.
+    const active = await prisma.agentRun.count({
+      where: { userId: input.userId, status: { in: [...ACTIVE_AGENT_RUN_STATUSES] } },
+    });
+    if (active >= MAX_ACTIVE_RUNS_PER_PERSON) throw new AgentRunCapError(active);
+  }
   const row = await prisma.agentRun.create({
     data: {
       userId: input.userId,
@@ -458,10 +524,21 @@ export async function enqueueAgentRun(
       maxIter,
       scheduleId: input.scheduleId ?? null,
       workspaceId: input.workspaceId ?? null,
+      origin,
+      originMessageId: input.originMessageId ?? null,
+      originToolCallId: input.originToolCallId ?? null,
+      title: input.title?.trim() || titleFromGoal(input.goal),
+      deliverable: input.deliverable?.trim() ?? "",
+      // A chat run owes its conversation a result message (WARP-3300).
+      resultDelivery: origin === "chat" ? "pending" : "not_applicable",
       ...(input.runAfter ? { runAfter: input.runAfter } : {}),
     },
     select: { id: true },
   });
+  // WARP-3301 — the new run's first live event (queued, with its position).
+  // Not from inside a transaction (the schedule ticker): the row is not
+  // committed yet and the client closes with it. Its claim event follows.
+  if ("$transaction" in prisma) void publishAgentRunEvent(prisma, row.id);
   return row;
 }
 
@@ -482,6 +559,7 @@ export async function cancelAgentRun(
     // call too, like every other terminal write.
     data: { status: "cancelled", endedAt: now, ...CLEAR_PENDING },
   });
+  if (res.count === 1) void publishAgentRunEvent(prisma, id);
   return res.count === 1;
 }
 
@@ -553,6 +631,7 @@ export async function decideAgentRun(
     where: { id: input.id, status: "awaiting_confirmation" },
     data: {
       status: "queued",
+      queueWait: "queue",
       runAfter: now,
       pendingDecision: input.decision,
       pendingDecidedAt: now,
@@ -561,6 +640,7 @@ export async function decideAgentRun(
     },
   });
   if (res.count !== 1) return { ok: false, reason: "not_parked" };
+  void publishAgentRunEvent(prisma, input.id);
   await recordActivity({
     kind: "tool_call",
     severity: input.decision === "approved" ? "info" : "warn",
@@ -631,6 +711,8 @@ export interface AgentRunWorkerDeps {
   /** Test seams. Production leaves every one of these unset. */
   limits?: typeof config.agentRuns;
   maxIterCap?: number;
+  /** WARP-3306 — see AGENT_RUN_MAX_PREEMPTIONS. */
+  maxPreemptions?: number;
   contextWindow?: number;
   toolSelectionMode?: "off" | "domains";
   workerId?: string;
@@ -682,15 +764,6 @@ function interceptorTokenOf(text: string): string | null {
       : null;
   } catch {
     return null;
-  }
-}
-
-/** Any `status: "confirmation_required"` envelope — a challenge or a refused token. */
-function isConfirmationEnvelope(text: string): boolean {
-  try {
-    return (JSON.parse(text) as { status?: unknown })?.status === "confirmation_required";
-  } catch {
-    return false;
   }
 }
 
@@ -781,6 +854,13 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
 
   /** runId → the execution promise. */
   const inFlight = new Map<string, Promise<void>>();
+  // WARP-3306 — the starvation guard: consecutive preemptions of a run with
+  // no finished iteration in between. At AGENT_RUN_MAX_PREEMPTIONS the next
+  // claim runs unpreemptible, so a run always progresses however busy chat is.
+  // ponytail: in-memory, a restart resets it (only allows more preemption);
+  // persist it on AgentRun if the worker ever runs in more than one process.
+  const preemptionsWithoutProgress = new Map<string, number>();
+  const maxPreemptions = deps.maxPreemptions ?? config.agentRuns.maxPreemptions ?? 0;
   /** runId → the abort controller mapped onto the loop's `signal`. */
   const controllers = new Map<string, AbortController>();
   /** runId → why it was told to stop, so the terminal write names it. */
@@ -854,6 +934,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         where: fence,
         data: {
           status: "queued",
+          queueWait: "queue",
           attempts: { increment: 1 },
           claimedBy: null,
           claimedAt: null,
@@ -863,6 +944,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       });
       if (res.count === 1) {
         reclaimed += 1;
+        void publishAgentRunEvent(prisma, row.id);
         logger.warn(
           { runId: row.id, attempts: row.attempts + 1, lastWorker: row.claimedBy },
           "agent_run_reclaimed",
@@ -890,7 +972,10 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       });
       return true;
     });
-    if (won) leases.set(runId, at);
+    if (won) {
+      leases.set(runId, at);
+      void publishAgentRunEvent(prisma, runId);
+    }
     return won;
   }
 
@@ -910,6 +995,12 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
 
   async function tickOnce(): Promise<TickCounts> {
     const at = now();
+    // WARP-3300 — post finished chat runs' results into their conversations.
+    // Never lets a delivery problem stop the queue from moving.
+    await deliverRunResults({ prisma, now }).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error("[agent-run-worker] result delivery sweep failed:", err);
+    });
     const { reclaimed, failed } = await reclaimStale(at);
     let claimed = 0;
     const capacity = limits.concurrency - inFlight.size;
@@ -988,6 +1079,11 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       where: { id: runId, claimedBy: workerId, status: { in: [...fenceStatuses] }, ...leaseFence(runId) },
       data,
     });
+    // WARP-3301 — one live event per status change and per checkpoint (the
+    // checkpoint writes `iteration` once per step), never per token.
+    if (res.count === 1 && (data.status !== undefined || data.iteration !== undefined)) {
+      void publishAgentRunEvent(prisma, runId);
+    }
     return res.count === 1;
   }
 
@@ -1013,6 +1109,10 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           pendingToolCallId: string | null;
           pendingDecision: "approved" | "denied" | null;
           workspaceId: string | null;
+          origin: "workshop" | "schedule" | "chat";
+          title: string;
+          deliverable: string;
+          sessionId: string | null;
         }
       | null;
     const lease = leases.get(runId);
@@ -1079,7 +1179,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     // Here, at EVERY claim, not at enqueue: a start, a resume after a park,
     // a reclaim and every schedule fire all come through this line, so a
     // revoked cloud grant stops the next fire and no enqueue caller (the
-    // schedule ticker, the morning briefing) can skip it. The same two
+    // schedule ticker, the Workshop, a chat turn) can skip it. The same two
     // questions chat asks, asked the same way (routes/llm.ts): "may this
     // person use cloud?" and, separately, "is this request leaving the box?".
     const principal = { id: run.userId, role: user.role };
@@ -1097,7 +1197,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         ...CLEAR_PENDING,
       });
       await audit(runId, run.userId, "failed", "Agent run refused (cloud access)", error,
-        { username: user.username, goal: run.goal },
+        { username: user.username, goal: run.goal, sessionId: run.sessionId },
         { cloudGate, offLanProvider: cloudDecision.body.provider });
       return;
     }
@@ -1133,9 +1233,18 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     // `let`: consuming a decided park completes the parked iteration and
     // advances the checkpoint past it (WARP-3044, `resumeDecidedCall`).
     let base = run.iteration;
+    // WARP-3306 — did this claim finish an iteration? (the starvation guard)
+    let progressed = false;
+    const preemptions = preemptionsWithoutProgress.get(runId) ?? 0;
+    const preemptible = preemptions < maxPreemptions;
     const messages = Array.isArray(run.messages)
       ? (run.messages as ChatMessage[])
-      : initialRunMessages(run.goal, offLanProvider !== null);
+      : initialRunMessages(
+          // WARP-3300 — a chat-started run gets the fixed brief; the others
+          // keep their goal verbatim.
+          run.origin === "chat" ? chatRunBrief(run) : run.goal,
+          offLanProvider !== null,
+        );
     // A resumed run re-derives its system prompt from THIS claim's verdict,
     // never from the checkpoint: the notice follows where the model runs now.
     if (messages[0]?.role === "system") {
@@ -1232,6 +1341,15 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     // Wrapped the way the loop wraps a live dispatch (ORCH-05): a thrown
     // dispatch is a bounded tool error the model can recover from, never the
     // death of a run whose whole point is surviving transient failures.
+    //
+    // WARP-3282 — and scrubbed of credentials the way the loop scrubs one,
+    // because an approved call's result enters the conversation HERE, not in
+    // the loop: the trace entry, the persisted messages and the model all
+    // read this text. A read can park (every imported remote MCP tool
+    // defaults to requiresConfirmation), so this is a document-reading path.
+    // The interceptor's camelCase `confirmationToken` matches no rule and a
+    // result with nothing to redact is byte-identical, so the handshake's
+    // token read is unaffected. Count only in the log — never the value.
     const dispatch = async (
       tool: string,
       args: Record<string, unknown>,
@@ -1239,7 +1357,11 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     ): Promise<{ text: string; isError: boolean }> => {
       try {
         const r = await deps.agent.mcp.callTool(tool, args, ctx);
-        return { text: r.content[0]?.text ?? "{}", isError: Boolean(r.isError) };
+        const { text, count } = redactToolResult(r.content[0]?.text ?? "{}");
+        if (count > 0) {
+          logger.info({ runId, tool, redacted: count }, "agent_tool_result_credentials_redacted");
+        }
+        return { text, isError: Boolean(r.isError) };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return {
@@ -1406,8 +1528,13 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         }
       }
 
+      // WARP-3284 — the loop's verdict on unreadable output, applied to the
+      // stored call: the model gets the error envelope, the trace records a
+      // failure. The audit below keeps the dispatch verdict: the tool ran and
+      // answered, so "approved but did not run" would be false.
+      const malformedText = malformedToolOutputText(parseToolResultPayload(outcome.text, tool));
       entry.text = scrubInterceptorToken(outcome.text);
-      entry.isError = outcome.isError;
+      entry.isError = outcome.isError || malformedText !== null;
       entry.completedAt = now().toISOString();
       messages.push(
         {
@@ -1417,7 +1544,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
             { id: toolCallId, type: "function", function: { name: tool, arguments: JSON.stringify(entry.args) } },
           ],
         },
-        { role: "tool", tool_call_id: toolCallId, content: modelFacing(tool, outcome.text) },
+        { role: "tool", tool_call_id: toolCallId, content: modelFacing(tool, malformedText ?? outcome.text) },
       );
       base += 1;
       const completed = await finish(runId, {
@@ -1438,12 +1565,13 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       // WARP-2896 — an approved `workspace_propose` that ran ENDS the run
       // here, before the model is asked anything: it throws the `proposed`
       // stop, which the caller's `try` hands to the terminal write.
-      endOnProposal(tool, outcome.text, outcome.isError);
+      endOnProposal(tool, outcome.text, entry.isError);
       return true;
     };
 
     const checkpoint: AgentCheckpointPort = {
       async onIteration(iter, msgs) {
+        if (iter >= 1) progressed = true;
         const observed = await observe(runId, now());
         if (observed) throw new AgentRunStopped(observed, `run stopped: ${observed}`);
         const ok = await finish(runId, {
@@ -1669,7 +1797,17 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         result =
           left > 0
             ? await runAgent(
-                { mcp: deps.agent.mcp, aiGateway: runGateway(deps.agent.aiGateway), approvals, maxIterCap },
+                {
+                  mcp: deps.agent.mcp,
+                  aiGateway: runGateway(deps.agent.aiGateway, preemptible),
+                  approvals,
+                  maxIterCap,
+                  // WARP-3301 — the run's first `onEvent`: it only notes the
+                  // tool NAME for the live event (never args, rule 19).
+                  onEvent: (e) => {
+                    if (e.type === "tool_call") noteAgentRunTool(runId, e.name);
+                  },
+                },
                 {
                   model: run.model,
                   messages,
@@ -1684,6 +1822,19 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
                   ...(run.workspaceId ? { bound_tool_domains: WORKSPACE_TOOL_DOMAINS } : {}),
                   signal: controller.signal,
                   checkpoint,
+                  // WARP-3348 — the run's settled calls so far, including the
+                  // one just decided above, which ran outside the loop: the
+                  // answer's claims are checked against the whole run. Parked
+                  // challenges were decided since, and replays repeat an entry.
+                  priorAttempts: trace
+                    .filter((e) => e.text !== undefined && !e.replayOf && !isConfirmationEnvelope(e.text))
+                    .map((e) => ({
+                      tool_call_id: e.tool_call_id,
+                      tool: e.tool,
+                      args: e.args,
+                      result: toolResultPayloadValue(parseToolResultPayload(e.text!, e.tool)),
+                      ...(e.isError ? { isError: true as const } : {}),
+                    })),
                 },
               )
             : { message: { role: "assistant", content: "" }, trace: [], iterations: 0, stop_reason: "iteration_limit" };
@@ -1699,6 +1850,9 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     // reason is "fenced" — but the row says why, and that is what the
     // terminal write must name.
     const reason = stopReasons.get(runId) ?? stopped?.reason ?? null;
+    // WARP-3306 — chat took the slot mid-call (see the yield below).
+    const preempted = reason === null && isGatewayPreempted(threw);
+    if (!preempted) preemptionsWithoutProgress.delete(runId);
 
     if (reason === "fenced") {
       // Someone else owns the row now. Nothing to write; the successor does.
@@ -1714,7 +1868,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         ["cancelled"],
       );
       await audit(runId, run.userId, "cancelled", "Agent run cancelled", undefined,
-        user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+        user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
       return;
     }
     if (reason === "parked" && park.request) {
@@ -1773,7 +1927,14 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           // by POST /api/agent-runs/:id/confirm from that page. No token, no
           // hash, no args (they can carry customer data) ride on the payload.
           ...agentRunLink(runId),
-          data: { agentRunId: runId, pendingTool: parkRequest.tool, needsDecision: true },
+          // WARP-3300 — `sessionId` lets a client show the approval inline in
+          // the chat that started the run.
+          data: {
+            agentRunId: runId,
+            pendingTool: parkRequest.tool,
+            needsDecision: true,
+            ...(run.sessionId ? { sessionId: run.sessionId } : {}),
+          },
         }).catch((err) => {
           logger.warn({ err, runId }, "agent_run_park_notification_failed");
         });
@@ -1800,7 +1961,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       const proposed = proposalKindOf(text);
       const draft = proposed.kind === "connector-draft";
       await audit(runId, run.userId, "succeeded", draft ? "Agent run proposed a connector draft" : "Agent run proposed an extension", undefined,
-        user ? { username: user.username, goal: run.goal, result: text } : undefined);
+        user ? { username: user.username, goal: run.goal, result: text, sessionId: run.sessionId } : undefined);
       if (user) {
         const goal = run.goal.length > 120 ? `${run.goal.slice(0, 117)}…` : run.goal;
         await sendNotification(prisma, {
@@ -1838,7 +1999,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         ...CLEAR_PENDING,
       });
       await audit(runId, run.userId, "failed", "Agent run halted (outcome unknown)", error,
-        user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+        user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
       return;
     }
     if (reason === "deadline") {
@@ -1852,10 +2013,10 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         ...CLEAR_PENDING,
       });
       await audit(runId, run.userId, "failed", "Agent run failed", error,
-        user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+        user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
       return;
     }
-    if (gatewayBusy(threw, result)) {
+    if (preempted || gatewayBusy(threw, result)) {
       // Interactive chat has the box (see RUN_INFERENCE_PRIORITY). Hand the
       // row back to the queue at the same checkpoint — `iteration` and
       // `messages` were written at the top of the iteration that could not
@@ -1863,14 +2024,26 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       // lease loss: `attempts` is untouched. `deadlineAt` still stands.
       const ok = await finish(runId, {
         status: "queued",
+        queueWait: "chat",
         claimedBy: null,
         claimedAt: null,
         heartbeatAt: null,
-        runAfter: new Date(endedAt.getTime() + RUN_YIELD_MS),
+        runAfter: new Date(endedAt.getTime() + (preempted ? RUN_PREEMPT_YIELD_MS : RUN_YIELD_MS)),
       });
+      if (preempted) {
+        // WARP-3306 — the cut call was a model call (preemption never lands
+        // mid-tool: the gateway only holds the slot for inference), so the
+        // checkpoint at the top of this iteration replays it exactly.
+        preemptionsWithoutProgress.set(runId, progressed ? 1 : preemptions + 1);
+      }
       if (ok) {
         logger.info(
-          { runId, iteration: base + (result?.iterations ?? 0), yieldMs: RUN_YIELD_MS },
+          {
+            runId,
+            iteration: base + (result?.iterations ?? 0),
+            yieldMs: preempted ? RUN_PREEMPT_YIELD_MS : RUN_YIELD_MS,
+            ...(preempted ? { preempted: true, preemptionsWithoutProgress: preemptionsWithoutProgress.get(runId) } : {}),
+          },
           "agent_run_yielded_to_chat",
         );
       }
@@ -1880,7 +2053,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       const error = threw instanceof Error ? threw.message : String(threw ?? "no result");
       await finish(runId, { status: "failed", endedAt, error: error.slice(0, 2000), ...CLEAR_PENDING });
       await audit(runId, run.userId, "failed", "Agent run failed", error,
-        user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+        user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
       return;
     }
 
@@ -1888,7 +2061,9 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     switch (result.stop_reason) {
       case "model_done":
       case "context_budget":
-      case "repetition": {
+      case "repetition":
+      case "no_progress":
+      case "needs_details": {
         const text = contentToText(result.message.content);
         await finish(runId, {
           status: "succeeded",
@@ -1900,7 +2075,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           ...CLEAR_PENDING,
         });
         await audit(runId, run.userId, "succeeded", "Agent run completed", undefined,
-          user ? { username: user.username, goal: run.goal, result: text } : undefined, offLanRefs);
+          user ? { username: user.username, goal: run.goal, result: text, sessionId: run.sessionId } : undefined, offLanRefs);
         return;
       }
       case "iteration_limit": {
@@ -1914,11 +2089,15 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           ...CLEAR_PENDING,
         });
         await audit(runId, run.userId, "failed", "Agent run failed", error,
-          user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+          user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
         return;
       }
       case "error":
       default: {
+        // WARP-3347 — only "error" may reach here: a stop_reason added to
+        // AgentResult without a case above would fail every run that ends on
+        // it, so leaving one out is a compile error.
+        result.stop_reason satisfies "error";
         const error = result.error ?? "agent loop error";
         await finish(runId, {
           status: "failed",
@@ -1929,7 +2108,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
           ...CLEAR_PENDING,
         });
         await audit(runId, run.userId, "failed", "Agent run failed", error,
-          user ? { username: user.username, goal: run.goal } : undefined, offLanRefs);
+          user ? { username: user.username, goal: run.goal, sessionId: run.sessionId } : undefined, offLanRefs);
         return;
       }
     }
@@ -1943,7 +2122,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
     error?: string,
     // WARP-2180 — on a terminal status the owner is told over the same
     // ws-bridge topic the park notification uses, with the result summary.
-    notify?: { username: string; goal: string; result?: string | null },
+    notify?: { username: string; goal: string; result?: string | null; sessionId?: string | null },
     // WARP-2997 — the cloud gate's verdict and what it withheld, on the
     // signed row, as chat records `offLanProvider` on its turn row.
     offLan?: Record<string, unknown>,
@@ -1964,7 +2143,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
         // WARP-2909 — same link and tag as the park, so the finish replaces
         // the approval prompt in the tray. No `needsDecision` here.
         ...agentRunLink(runId),
-        data: { agentRunId: runId, status },
+        data: { agentRunId: runId, status, ...(notify.sessionId ? { sessionId: notify.sessionId } : {}) },
       }).catch((err) => {
         logger.warn({ err, runId }, "agent_run_terminal_notification_failed");
       });
@@ -1994,7 +2173,7 @@ export function createAgentRunWorker(deps: AgentRunWorkerDeps): AgentRunWorker {
       const lease = held.get(id);
       await prisma.agentRun.updateMany({
         where: { id, claimedBy: workerId, status: "running", ...(lease ? { claimedAt: lease } : {}) },
-        data: { status: "queued", claimedBy: null, claimedAt: null, heartbeatAt: null, runAfter: at },
+        data: { status: "queued", queueWait: "queue", claimedBy: null, claimedAt: null, heartbeatAt: null, runAfter: at },
       });
     }
   }

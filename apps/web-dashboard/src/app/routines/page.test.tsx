@@ -9,7 +9,7 @@
  * itself is unit-tested in lib/routine-readback.test.ts.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type { Routine, RoutineSchedule, ToolCatalogEntry } from "@/lib/types";
 
 const useRoutinesMock = vi.fn();
@@ -33,6 +33,7 @@ const runRoutineMock = vi.fn();
 const createScheduleMock = vi.fn();
 const updateScheduleMock = vi.fn();
 const deleteScheduleMock = vi.fn();
+const setVisibilityMock = vi.fn();
 // PARTIAL mock — `@/lib/api` is a large shared module and ShellPage's status
 // chip imports from it too. Replacing the whole module leaves those exports
 // undefined and every test fails on the chrome rather than the page.
@@ -43,6 +44,7 @@ vi.mock("@/lib/api", async (importOriginal) => ({
   createRoutineSchedule: (...a: unknown[]) => createScheduleMock(...a),
   updateRoutineSchedule: (...a: unknown[]) => updateScheduleMock(...a),
   deleteRoutineSchedule: (...a: unknown[]) => deleteScheduleMock(...a),
+  setRoutineVisibility: (...a: unknown[]) => setVisibilityMock(...a),
 }));
 
 import RoutinesPage from "./page";
@@ -58,6 +60,8 @@ function routine(over: Partial<Routine> = {}): Routine {
     status: "live",
     ownerId: "u1",
     share: null,
+    visibility: "WORKSPACE",
+    canShare: false,
     safety: 1,
     writes: false,
     reversible: true,
@@ -381,5 +385,89 @@ describe("/routines — schedules", () => {
     // The zone is sent explicitly — never left to the server's UTC default,
     // which is what WARP-2665's column exists to avoid.
     expect(body.timezone).toBeTruthy();
+  });
+});
+
+// WARP-3354 — the box decides who sees a routine; the page says so and offers
+// sharing only to the people the box says may (`canShare`).
+describe("/routines — who can see a routine (WARP-3354)", () => {
+  it("badges every routine Private or Workspace", () => {
+    setRoutines([
+      routine({ slug: "mine", name: "Mine", visibility: "PRIVATE" }),
+      routine({ slug: "ours", name: "Ours", visibility: "WORKSPACE" }),
+    ]);
+    render(<RoutinesPage />);
+    expect(screen.getByText("Private")).toBeInTheDocument();
+    expect(screen.getByText("Workspace")).toBeInTheDocument();
+  });
+
+  it("offers Share with Workspace only when the box says the viewer may share it", async () => {
+    setRoutines([routine({ visibility: "PRIVATE", canShare: false })]);
+    const { unmount } = render(<RoutinesPage />);
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    await screen.findByRole("button", { name: /Run now/ });
+    expect(screen.queryByRole("button", { name: /Share with Workspace/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Make private/ })).not.toBeInTheDocument();
+    unmount();
+
+    setRoutines([routine({ visibility: "PRIVATE", canShare: true })]);
+    render(<RoutinesPage />);
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    expect(await screen.findByRole("button", { name: /Share with Workspace/ })).toBeInTheDocument();
+  });
+
+  it("never offers sharing on a suggestion — it is the box's, not a person's", async () => {
+    setRoutines([routine({ status: "suggested", visibility: "WORKSPACE", canShare: true })]);
+    render(<RoutinesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /Suggested/ }));
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    await screen.findByRole("button", { name: /Turn on/ });
+    expect(screen.queryByRole("button", { name: /Make private/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Share with Workspace/ })).not.toBeInTheDocument();
+  });
+
+  it("sharing asks with a plain confirm, then shares", async () => {
+    setRoutines([routine({ visibility: "PRIVATE", canShare: true })]);
+    setVisibilityMock.mockResolvedValue(routine({ visibility: "WORKSPACE" }));
+    render(<RoutinesPage />);
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    fireEvent.click(await screen.findByRole("button", { name: /Share with Workspace/ }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Every member will be able to see");
+    const confirm = within(dialog).getByRole("button", { name: "Share" });
+    expect(confirm.className).not.toContain("danger");
+    expect(setVisibilityMock).not.toHaveBeenCalled();
+
+    fireEvent.click(confirm);
+    await waitFor(() => expect(setVisibilityMock).toHaveBeenCalledWith("daily-report", "WORKSPACE"));
+  });
+
+  it("making a shared routine private asks with a RED confirm, then does it", async () => {
+    setRoutines([routine({ visibility: "WORKSPACE", canShare: true })]);
+    setVisibilityMock.mockResolvedValue(routine({ visibility: "PRIVATE" }));
+    render(<RoutinesPage />);
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    fireEvent.click(await screen.findByRole("button", { name: /Make private/ }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("will lose access");
+    const confirm = within(dialog).getByRole("button", { name: "Make private" });
+    expect(confirm.className).toContain("danger");
+    expect(setVisibilityMock).not.toHaveBeenCalled();
+
+    fireEvent.click(confirm);
+    await waitFor(() => expect(setVisibilityMock).toHaveBeenCalledWith("daily-report", "PRIVATE"));
+  });
+
+  it("says so when the box refuses the change", async () => {
+    setRoutines([routine({ visibility: "PRIVATE", canShare: true })]);
+    setVisibilityMock.mockRejectedValue(new Error("only the person who created this routine can share it"));
+    render(<RoutinesPage />);
+    fireEvent.click(screen.getByRole("button", { expanded: false }));
+    fireEvent.click(await screen.findByRole("button", { name: /Share with Workspace/ }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Share" }));
+    expect(await screen.findByText(/only the person who created this routine/)).toBeInTheDocument();
   });
 });

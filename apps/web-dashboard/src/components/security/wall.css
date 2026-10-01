@@ -8,14 +8,16 @@
  *
  * Layout. In the page the banners and the strip come before the tiles, so a
  * screen reader reaches them, and "Back to Security", first. Above 640 px wide
- * and 480 px tall the tiles are drawn above them instead (`order: -1`), the
- * page is at least the viewport's height, and the camera tiles take what the
- * banners and the strip leave (grid rows `minmax(0, 1fr) auto auto`), so the
- * strip is at the bottom of the screen. The tiles are a `--cols` × `--rows`
- * grid of equal cells (tileGrid), each a picture over its name. A picture is
- * never less than 72 px high: when the screen is too short for that (a 1080p
- * TV browser at 960×540 with 12 cameras and a banner), the page grows and
- * scrolls a little instead of squeezing the pictures away. At 640 px wide or
+ * and 480 px tall (a TV) the tiles are drawn above them instead (`order: -1`),
+ * the page is exactly the viewport's height (nobody scrolls a TV), and the
+ * camera tiles take what the banners and the strip leave (grid rows
+ * `minmax(0, 1fr) auto auto`), so the banners, the strip and "Back to Security"
+ * are always on screen, at the bottom of it. The tiles are a `--cols` × `--rows`
+ * grid of equal cells (tileGrid, chosen from the tile area's size), each a
+ * picture over its name. The tiles give up the space, not the strip: a 1080p TV
+ * browser at 960×540 with 12 cameras, both banners and two sources down leaves
+ * the tiles 224 px, so tileGrid picks the grid that keeps the pictures largest
+ * (6 × 2), and a frame has no floor of its own there. At 640 px wide or
  * 480 px tall and below (a phone, either way up) the page scrolls, in the
  * page's own order: the banners, the strip, then the tiles, one per row, each
  * picture 16:9, the rows from the top, and the strip's cells wrap two by two, so
@@ -123,13 +125,19 @@
 .droplet-shell .sec-wall-strip.is-stale .sec-wall-sources { color: var(--text-muted); }
 .droplet-shell .sec-wall-strip.is-stale .badge { filter: grayscale(1); }
 
-/* ── A TV or a desktop: the tiles drawn first ──────────────── */
+/* ── A TV or a desktop: the tiles drawn first, the page one screen tall ── */
 /* The page has the banners and the strip first (a screen reader reads them, and "Back to Security", before a dozen
    camera names; nothing in a tile takes focus). Only here are the tiles drawn above them. This is the phone query's
-   exact complement (not ≤ 640 px wide, and not ≤ 480 px tall), so a phone keeps the page's order with nothing to undo. */
+   exact complement (not ≤ 640 px wide, and not ≤ 480 px tall), so a phone keeps the page's order with nothing to undo.
+   Here the page is exactly the screen's height, so the tiles' row (`minmax(0, 1fr)`) is what is left after the banners and
+   the strip, never more: with `min-height` alone the row grew to its content and pushed the strip off the bottom of a
+   960×540 screen (21–141 px, WARP-2981 F14). A frame has no floor of its own (`min-height: 0`, else it would push its
+   caption out of the tile): tileGrid keeps it at 72 px where a grid can. */
 @media not all and (max-width: 640px) {
   @media not all and (max-height: 480px) {
+    .droplet-shell.sec-wall { height: 100dvh; }
     .droplet-shell .sec-wall-cameras { order: -1; }
+    .droplet-shell .sec-wall-tile-frame { min-height: 0; }
   }
 }
 

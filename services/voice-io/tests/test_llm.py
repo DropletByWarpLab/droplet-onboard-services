@@ -34,18 +34,22 @@ import pytest
 
 import voice.llm
 from voice.llm import (
+    DEFAULT_LLM_MAX_ITER,
     DEFAULT_LLM_SYSTEM_PROMPT,
     DEFAULT_LLM_URL,
+    DEFAULT_LLM_WARM_PATH,
     DEFAULT_VOICE_ALLOWED_TOOLS,
     DEFAULT_VOICE_MAX_TOKENS,
     LLMUnavailable,
     MockLLM,
     OrchestratorLLM,
+    SpokenCue,
     _extract_assistant_text,
     _extract_error_detail,
     build_llm_from_env,
-    build_system_prompt,
+    build_turn_context,
     parse_allowed_tools,
+    parse_max_iter,
     parse_max_tokens,
 )
 
@@ -104,6 +108,85 @@ class TestOrchestratorAvailable:
 
 
 # ────────────────────────────────────────────────────────────────────
+# OrchestratorLLM — warm() (WARP-3127 warm on wake)
+# ────────────────────────────────────────────────────────────────────
+
+class TestOrchestratorWarm:
+    def test_warm_path_default(self):
+        assert DEFAULT_LLM_WARM_PATH == "/api/llm/warm"
+
+    def test_warm_posts_to_the_warm_path_with_the_service_bearer(self, monkeypatch):
+        captured = _install_mock_transport(
+            monkeypatch, lambda req: httpx.Response(202, json={"state": "warming"}),
+        )
+        OrchestratorLLM(base_url="http://test", bearer_token="voice-secret").warm()
+        assert len(captured) == 1
+        req = captured[0]
+        assert req.method == "POST"
+        assert req.url.path == "/api/llm/warm"
+        assert req.headers["Authorization"] == "Bearer voice-secret"
+
+    def test_warm_names_no_model(self, monkeypatch):
+        # The orchestrator warms the box's ACTIVE model (resolveActiveModel).
+        # A client-chosen model would let a caller load a second model onto
+        # the GPU (WARP-1826 / one-model rule).
+        captured = _install_mock_transport(
+            monkeypatch, lambda req: httpx.Response(202, json={"state": "unknown"}),
+        )
+        OrchestratorLLM(base_url="http://test", model="qwen3:8b").warm()
+        body = json.loads(captured[0].content or b"{}")
+        assert "model" not in body
+
+    def test_warm_uses_a_short_timeout(self, monkeypatch):
+        captured = _install_mock_transport(
+            monkeypatch, lambda req: httpx.Response(202, json={"state": "warm"}),
+        )
+        OrchestratorLLM(base_url="http://test", timeout_s=120.0).warm()
+        timeout = captured[0].extensions["timeout"]
+        # Never the 120 s agent-loop timeout: this is a nudge, not a turn.
+        assert all(v is not None and v <= 2.0 for v in timeout.values())
+
+    @pytest.mark.parametrize("status", [401, 403, 404, 500, 503])
+    def test_warm_swallows_http_errors(self, monkeypatch, status):
+        _install_mock_transport(monkeypatch, lambda req: httpx.Response(status, text="nope"))
+        OrchestratorLLM(base_url="http://test").warm()  # must not raise
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            httpx.ConnectError("connection refused"),
+            httpx.ReadTimeout("slow"),
+            httpx.RemoteProtocolError("reset"),
+            OSError("no route to host"),
+        ],
+    )
+    def test_warm_swallows_transport_errors(self, monkeypatch, exc):
+        def handler(req):
+            raise exc
+        _install_mock_transport(monkeypatch, handler)
+        OrchestratorLLM(base_url="http://test").warm()  # must not raise
+
+    def test_warm_failure_logs_at_debug_only(self, monkeypatch, caplog):
+        def handler(req):
+            raise httpx.ConnectError("connection refused")
+        _install_mock_transport(monkeypatch, handler)
+        with caplog.at_level("DEBUG", logger="voice.llm"):
+            OrchestratorLLM(base_url="http://test").warm()
+        records = [r for r in caplog.records if r.name == "voice.llm"]
+        assert records, "a failed warm leaves a debug breadcrumb"
+        assert all(r.levelno == 10 for r in records)
+
+    def test_warm_after_close_does_not_raise(self, monkeypatch):
+        # The warm runs on a background thread, so it can land after main.py's
+        # shutdown hook closed the pool. httpx raises RuntimeError (not an
+        # HTTPError) on a closed client; that must be swallowed too.
+        _install_mock_transport(monkeypatch, lambda req: httpx.Response(202, json={}))
+        client = OrchestratorLLM(base_url="http://test")
+        client.close()
+        client.warm()  # must not raise
+
+
+# ────────────────────────────────────────────────────────────────────
 # OrchestratorLLM — reply()
 # ────────────────────────────────────────────────────────────────────
 
@@ -118,7 +201,11 @@ class TestOrchestratorReply:
             assert body["max_iter"] >= 1  # cap the agent loop
             assert body["messages"][0]["role"] == "system"
             assert body["messages"][1]["role"] == "user"
-            assert body["messages"][1]["content"] == "what time is it"
+            # WARP-3125 — the context line opens the turn; the transcript
+            # closes it.
+            assert body["messages"][1]["content"].startswith("[Context:")
+            assert body["messages"][1]["content"].endswith("\nwhat time is it")
+            assert len(body["messages"]) == 2
             # AgentResult shape per shared_brain LLM_AGENT.md.
             return httpx.Response(
                 200,
@@ -192,12 +279,17 @@ class TestOrchestratorReply:
             })
         _install_mock_transport(monkeypatch, handler)
         OrchestratorLLM(base_url="http://test").reply("  hello there  \n")
-        assert seen == ["hello there"]
+        # WARP-3125 — the turn opens with the bracketed context line; the
+        # stripped transcript follows it on its own line.
+        assert len(seen) == 1
+        context, _, spoken = seen[0].partition("\n")
+        assert context.startswith("[Context:")
+        assert spoken == "hello there"
 
     def test_system_prompt_propagates(self, monkeypatch):
-        # The base system prompt is the persona text. The time + location
-        # footer is appended at reply() time (see TestBuildSystemPrompt).
-        # We just check the base is the prefix here.
+        # WARP-3125 — the system message IS the persona text, verbatim. Time
+        # and location ride in the user turn (see TestBuildTurnContext), so
+        # nothing is appended here.
         seen_system: list[str] = []
         def handler(req):
             body = json.loads(req.content)
@@ -210,8 +302,7 @@ class TestOrchestratorReply:
         OrchestratorLLM(
             base_url="http://test", system_prompt="you are a tiny robot",
         ).reply("hi")
-        assert len(seen_system) == 1
-        assert seen_system[0].startswith("you are a tiny robot")
+        assert seen_system == ["you are a tiny robot"]
 
 
 class TestOrchestratorReplyErrors:
@@ -320,6 +411,13 @@ class TestMockLLM:
     def test_available_false_when_explicitly_set(self):
         assert MockLLM(available=False).available is False
 
+    def test_warm_is_an_inherited_no_op(self):
+        # WARP-3127: warm() lives on the LLMClient interface so the pipeline
+        # can call it on whatever build_llm_from_env returned.
+        m = MockLLM(scripted_replies=["one"])
+        assert m.warm() is None
+        assert m.requests == []
+
 
 # ────────────────────────────────────────────────────────────────────
 # build_llm_from_env
@@ -400,94 +498,122 @@ class TestBuildLLMFromEnv:
 
 
 # ────────────────────────────────────────────────────────────────────
-# Time + location context — system prompt builder
+# Time + location context — the per-turn context line (WARP-3125)
 # ────────────────────────────────────────────────────────────────────
 
-class TestBuildSystemPrompt:
-    """The system prompt has to embed live time + location so the model
-    can answer "what time is it?" / "what's the date?" / "what's the
-    weather in our area?" without making up the answer. These tests
-    pin that the placeholder + the values land where expected."""
+class TestBuildTurnContext:
+    """Voice has to hand the model live time + location so it can answer
+    "what time is it?" / "what's the date?" / "what's the weather in our
+    area?" without making up the answer.
+
+    WARP-3125 moved them out of the system message and into ONE bracketed
+    line that opens the user turn. The system message sits at the front of
+    the prompt, so a minute clock there changed the prefix every minute;
+    and on tool turns the orchestrator's own system message takes index 0,
+    where the gpt-oss template drops anything after it. The user turn is
+    rendered on every path and sits after the cacheable prefix."""
 
     def test_includes_current_time_for_injected_now(self):
         now = datetime(2026, 5, 14, 21, 17, tzinfo=ZoneInfo("UTC"))
-        prompt = build_system_prompt(
-            "BASE", location=None, timezone="UTC", now=now,
-        )
-        assert "Right now it is" in prompt
-        assert "May 14, 2026" in prompt
-        assert "9:17 PM" in prompt  # 21:17 → 9:17 PM
-        assert "Thursday" in prompt  # 2026-05-14 was a Thursday
+        line = build_turn_context(location=None, timezone="UTC", now=now)
+        assert "May 14, 2026" in line
+        assert "9:17 PM" in line  # 21:17 → 9:17 PM
+        assert "Thursday" in line  # 2026-05-14 was a Thursday
+        assert "UTC" in line
 
-    def test_omits_location_line_when_none(self):
+    def test_is_one_bracketed_line(self):
+        now = datetime(2026, 5, 14, 21, 17, tzinfo=ZoneInfo("UTC"))
+        line = build_turn_context(
+            location="Greenwich, CT", timezone="UTC", now=now,
+        )
+        assert line.startswith("[Context: ")
+        assert line.endswith("]")
+        assert "\n" not in line
+
+    def test_minute_resolution_only(self):
+        # Seconds never reach the line: two calls inside the same minute
+        # produce the same text.
+        a = build_turn_context(
+            location=None, timezone="UTC",
+            now=datetime(2026, 5, 14, 21, 17, 3, tzinfo=ZoneInfo("UTC")),
+        )
+        b = build_turn_context(
+            location=None, timezone="UTC",
+            now=datetime(2026, 5, 14, 21, 17, 58, tzinfo=ZoneInfo("UTC")),
+        )
+        assert a == b
+
+    def test_omits_location_when_none(self):
         now = datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC"))
-        prompt = build_system_prompt(
-            "BASE", location=None, timezone="UTC", now=now,
-        )
-        assert "located in" not in prompt
+        line = build_turn_context(location=None, timezone="UTC", now=now)
+        assert "located in" not in line
+        # And it does not promise location answers it cannot back.
+        assert "location" not in line
 
-    def test_omits_location_line_when_empty_string(self):
+    def test_omits_location_when_empty_string(self):
         # Defensive: "" should be treated like None, not rendered as
         # "located in ." which is uglier than silent.
         now = datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC"))
-        prompt = build_system_prompt(
-            "BASE", location="  ", timezone="UTC", now=now,
-        )
-        assert "located in" not in prompt
+        line = build_turn_context(location="  ", timezone="UTC", now=now)
+        assert "located in" not in line
 
     def test_includes_location_when_set(self):
         now = datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC"))
-        prompt = build_system_prompt(
-            "BASE", location="Greenwich, CT", timezone="UTC", now=now,
+        line = build_turn_context(
+            location="Greenwich, CT", timezone="UTC", now=now,
         )
-        assert "located in Greenwich, CT" in prompt
+        assert "located in Greenwich, CT" in line
+        assert "location" in line.split("located in Greenwich, CT", 1)[1]
+
+    def test_location_whitespace_is_collapsed(self):
+        # A location with a stray newline must not split the context line.
+        now = datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC"))
+        line = build_turn_context(
+            location=" Greenwich,\n  CT ", timezone="UTC", now=now,
+        )
+        assert "located in Greenwich, CT" in line
+        assert "\n" not in line
 
     def test_converts_naive_now_to_target_timezone(self):
         # Naive datetime — should be treated as local-in-target-tz.
         naive = datetime(2026, 5, 14, 12, 0)
-        prompt = build_system_prompt(
-            "BASE", location=None, timezone="America/New_York", now=naive,
+        line = build_turn_context(
+            location=None, timezone="America/New_York", now=naive,
         )
         # Friendly format uses %Z which renders the TZ abbrev.
-        assert "EDT" in prompt or "EST" in prompt
+        assert "EDT" in line or "EST" in line
 
     def test_converts_aware_now_to_target_timezone(self):
         # UTC noon → 7 or 8 AM in New York depending on DST.
         utc_noon = datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC"))
-        prompt = build_system_prompt(
-            "BASE", location=None, timezone="America/New_York", now=utc_noon,
+        line = build_turn_context(
+            location=None, timezone="America/New_York", now=utc_noon,
         )
         # May → EDT → UTC-4, so 12:00 UTC → 08:00 EDT.
-        assert "8:00 AM" in prompt
-        assert "Thursday" in prompt  # date doesn't shift either way
+        assert "8:00 AM" in line
+        assert "Thursday" in line  # date doesn't shift either way
 
     def test_unknown_timezone_falls_back_to_utc(self):
         now = datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC"))
         # "Mars/Olympus" isn't an IANA zone — should fall back to UTC
         # silently rather than crash the LLM call.
-        prompt = build_system_prompt(
-            "BASE", location=None, timezone="Mars/Olympus", now=now,
+        line = build_turn_context(
+            location=None, timezone="Mars/Olympus", now=now,
         )
-        assert "UTC" in prompt
-        assert "Right now it is" in prompt
+        assert "UTC" in line
+        assert "12:00 PM" in line
 
     def test_explicit_instruction_to_use_the_time(self):
         # Without an explicit instruction, smaller models often respond
         # with "I don't have access to the current time" even when the
-        # time IS in their system prompt. Make the steer overt.
-        prompt = build_system_prompt(
-            "BASE", location="X", timezone="UTC",
+        # time IS in their prompt. Make the steer overt.
+        line = build_turn_context(
+            location="X", timezone="UTC",
             now=datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC")),
         )
-        assert "do not say you don't have access" in prompt.lower()
-
-    def test_base_prompt_is_preserved_intact_at_top(self):
-        prompt = build_system_prompt(
-            "You are X.",
-            location="Y", timezone="UTC",
-            now=datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC")),
-        )
-        assert prompt.startswith("You are X.\n\n")
+        assert "time" in line.lower()
+        assert "date" in line.lower()
+        assert "do not say you don't have access" in line.lower()
 
 
 class TestDefaultPersona:
@@ -529,20 +655,15 @@ class TestDefaultPersona:
         assert "dashboard" in DEFAULT_LLM_SYSTEM_PROMPT
 
 
-class TestSystemPromptWiringIntoReply:
-    """End-to-end: when reply() sends a request to the LLM endpoint,
-    the system message has the time + location baked in."""
+class TestTurnContextWiringIntoReply:
+    """End-to-end (WARP-3125): reply() sends a system message that is
+    byte-identical turn to turn, and a user turn that opens with the live
+    time + location. Both on the tool path and on the intent-gated
+    tool_choice="none" path."""
 
-    def test_reply_sends_enriched_system_prompt(self, monkeypatch):
-        captured_system: list[str] = []
-        def handler(req):
-            body = json.loads(req.content)
-            captured_system.append(body["messages"][0]["content"])
-            return httpx.Response(200, json={
-                "message": {"role": "assistant", "content": "ok"},
-                "trace": [], "iterations": 1, "stop_reason": "model_done",
-            })
-        _install_mock_transport(monkeypatch, handler)
+    @pytest.mark.parametrize("tool_choice", [None, "none"])
+    def test_time_and_location_ride_in_the_user_turn(self, monkeypatch, tool_choice):
+        bodies = _capture_chat_body(monkeypatch)
         fixed_now = datetime(2026, 5, 14, 21, 17, tzinfo=ZoneInfo("UTC"))
         llm = OrchestratorLLM(
             base_url="http://test",
@@ -550,26 +671,50 @@ class TestSystemPromptWiringIntoReply:
             timezone="America/New_York",
             now_provider=lambda: fixed_now,
         )
-        llm.reply("hi")
-        assert len(captured_system) == 1
-        prompt = captured_system[0]
-        # Time present + location present + tz-converted (UTC 21:17 → EDT 17:17)
-        assert "5:17 PM" in prompt
-        assert "Greenwich, CT" in prompt
-        assert "EDT" in prompt
+        llm.reply("what time is it", tool_choice=tool_choice)
+        assert len(bodies) == 1
+        system, user = bodies[0]["messages"]
+        # Time present + location present + tz-converted
+        # (UTC 21:17 → EDT 17:17), all in the user turn.
+        assert user["role"] == "user"
+        assert "5:17 PM" in user["content"]
+        assert "EDT" in user["content"]
+        assert "Greenwich, CT" in user["content"]
+        assert user["content"].endswith("\nwhat time is it")
+        # None of it in the system message.
+        assert system["content"] == DEFAULT_LLM_SYSTEM_PROMPT
+        assert "5:17" not in system["content"]
+        assert "Greenwich" not in system["content"]
+
+    @pytest.mark.parametrize("tool_choice", [None, "none"])
+    def test_system_message_is_byte_identical_a_minute_apart(
+        self, monkeypatch, tool_choice,
+    ):
+        # The cache property. The system message leads the prompt, so any
+        # byte that changes there costs a re-prefill of everything after it.
+        bodies = _capture_chat_body(monkeypatch)
+        times = iter([
+            datetime(2026, 5, 14, 21, 17, tzinfo=ZoneInfo("UTC")),
+            datetime(2026, 5, 14, 21, 18, tzinfo=ZoneInfo("UTC")),
+        ])
+        llm = OrchestratorLLM(
+            base_url="http://test",
+            location="Greenwich, CT",
+            timezone="UTC",
+            now_provider=lambda: next(times),
+        )
+        llm.reply("is everything working?", tool_choice=tool_choice)
+        llm.reply("is the front camera online?", tool_choice=tool_choice)
+        first, second = (b["messages"] for b in bodies)
+        assert first[0]["content"] == second[0]["content"]
+        # The clock still moved, in the user turn.
+        assert "9:17 PM" in first[1]["content"]
+        assert "9:18 PM" in second[1]["content"]
 
     def test_each_reply_gets_fresh_time(self, monkeypatch):
-        # No tickless caching of the system prompt — every call resamples
+        # No tickless caching of the context line — every call resamples
         # the clock so a long-lived service stays accurate.
-        captured: list[str] = []
-        def handler(req):
-            body = json.loads(req.content)
-            captured.append(body["messages"][0]["content"])
-            return httpx.Response(200, json={
-                "message": {"role": "assistant", "content": "ok"},
-                "trace": [], "iterations": 1, "stop_reason": "model_done",
-            })
-        _install_mock_transport(monkeypatch, handler)
+        bodies = _capture_chat_body(monkeypatch)
         times = iter([
             datetime(2026, 5, 14, 12, 0, tzinfo=ZoneInfo("UTC")),
             datetime(2026, 5, 14, 13, 0, tzinfo=ZoneInfo("UTC")),
@@ -581,8 +726,38 @@ class TestSystemPromptWiringIntoReply:
         )
         llm.reply("a")
         llm.reply("b")
+        captured = [b["messages"][1]["content"] for b in bodies]
         assert "12:00 PM" in captured[0]
         assert "1:00 PM" in captured[1]
+
+    def test_stream_path_sends_the_same_shape(self, monkeypatch):
+        # reply_stream() is voice's production path. It builds its body
+        # through the same helper as reply(); pin that the context line and
+        # the bare system message ride on it too.
+        bodies: list[dict] = []
+
+        def handler(req):
+            bodies.append(json.loads(req.content))
+            return _sse_response(
+                ("content_delta", {"text": "ok now."}),
+                ("done", {"iterations": 1, "stop_reason": "model_done"}),
+            )
+
+        _install_mock_stream(monkeypatch, handler)
+        fixed_now = datetime(2026, 5, 14, 21, 17, tzinfo=ZoneInfo("UTC"))
+        list(OrchestratorLLM(
+            base_url="http://test",
+            location="Greenwich, CT",
+            timezone="UTC",
+            now_provider=lambda: fixed_now,
+        ).reply_stream("is everything working?"))
+        system, user = bodies[0]["messages"]
+        assert system["content"] == DEFAULT_LLM_SYSTEM_PROMPT
+        assert user["content"].startswith(
+            "[Context: it is Thursday, May 14, 2026 at 9:17 PM UTC"
+        )
+        assert "located in Greenwich, CT" in user["content"]
+        assert user["content"].endswith("\nis everything working?")
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -663,6 +838,54 @@ class TestMaxTokensCap:
             "good morning", tool_choice="none",
         )
         assert bodies[0]["max_tokens"] == DEFAULT_VOICE_MAX_TOKENS
+
+
+class TestMaxIterBudget:
+    """WARP-3316 — the voice agent-loop budget. Iteration 0 is the tool
+    call and iteration 1 the answer, so a budget of 2 dies on the SECOND
+    tool call with the orchestrator's iteration_limit fallback ("couldn't
+    finish within my step limit"). Default is 4; VOICE_MAX_ITER tunes it."""
+
+    def test_default_is_four(self):
+        assert DEFAULT_LLM_MAX_ITER == 4
+
+    def test_reply_sends_default_max_iter(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test").reply("what time is it")
+        assert bodies[0]["max_iter"] == 4
+
+    def test_configured_max_iter_is_honored(self, monkeypatch):
+        bodies = _capture_chat_body(monkeypatch)
+        OrchestratorLLM(base_url="http://test", max_iter=6).reply("hi")
+        assert bodies[0]["max_iter"] == 6
+
+
+class TestParseMaxIter:
+    """VOICE_MAX_ITER parsing: unset/garbage fall back to the default;
+    out-of-range numbers clamp to the orchestrator's 1..10 window."""
+
+    def test_unset_and_blank_use_default(self):
+        assert parse_max_iter(None) == DEFAULT_LLM_MAX_ITER
+        assert parse_max_iter("") == DEFAULT_LLM_MAX_ITER
+        assert parse_max_iter("   ") == DEFAULT_LLM_MAX_ITER
+
+    def test_valid_value_is_used(self):
+        assert parse_max_iter("6") == 6
+        assert parse_max_iter("  3 ") == 3
+
+    def test_window_edges_are_accepted(self):
+        assert parse_max_iter("1") == 1
+        assert parse_max_iter("10") == 10
+
+    def test_non_numeric_falls_back(self):
+        assert parse_max_iter("abc") == DEFAULT_LLM_MAX_ITER
+        assert parse_max_iter("2.5") == DEFAULT_LLM_MAX_ITER
+
+    def test_out_of_range_clamps(self):
+        assert parse_max_iter("0") == 1
+        assert parse_max_iter("-5") == 1
+        assert parse_max_iter("11") == 10
+        assert parse_max_iter("999") == 10
 
 
 class TestAllowedToolsScope:
@@ -873,6 +1096,24 @@ class TestBuildLLMFromEnvTurnShaping:
         llm = build_llm_from_env()
         assert llm._max_tokens == DEFAULT_VOICE_MAX_TOKENS
 
+    def test_default_build_uses_default_max_iter(self, monkeypatch, stub_geo):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.delenv("VOICE_MAX_ITER", raising=False)
+        llm = build_llm_from_env()
+        assert llm._max_iter == DEFAULT_LLM_MAX_ITER == 4
+
+    def test_voice_max_iter_env_propagates(self, monkeypatch, stub_geo):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.setenv("VOICE_MAX_ITER", "7")
+        llm = build_llm_from_env()
+        assert llm._max_iter == 7
+
+    def test_voice_max_iter_env_invalid_falls_back(self, monkeypatch, stub_geo):
+        monkeypatch.delenv("LLM_URL", raising=False)
+        monkeypatch.setenv("VOICE_MAX_ITER", "lots")
+        llm = build_llm_from_env()
+        assert llm._max_iter == DEFAULT_LLM_MAX_ITER
+
     def test_voice_allowed_tools_env_propagates(self, monkeypatch, stub_geo):
         monkeypatch.delenv("LLM_URL", raising=False)
         monkeypatch.setenv(
@@ -954,6 +1195,60 @@ class _BreakingByteStream(httpx.SyncByteStream):
 
     def close(self) -> None:
         pass
+
+
+class _ClosableSSEStream(httpx.SyncByteStream):
+    """A complete SSE body that records whether the response was closed,
+    i.e. whether the orchestrator would see the client disconnect."""
+
+    def __init__(self, body: bytes):
+        self._body = body
+        self.closed = False
+
+    def __iter__(self):
+        yield self._body
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestStreamTeardown:
+    """WARP-329: a caller that stops reading early closes the SSE at once,
+    so the orchestrator aborts its agent loop instead of finishing a reply
+    nobody hears. Both public generators share `_stream_reply`; the spy
+    keeps a live reference to it so the test cannot pass through GC."""
+
+    @pytest.mark.parametrize("method", ["reply_stream", "reply_events"])
+    def test_early_close_tears_the_sse_down_now(self, monkeypatch, method):
+        body = _sse(
+            ("content_delta", {"text": "The camera is online. "}),
+            ("content_delta", {"text": "It is recording."}),
+            ("done", {"iterations": 1, "stop_reason": "model_done"}),
+        )
+        streams: list[_ClosableSSEStream] = []
+
+        def handler(req):
+            s = _ClosableSSEStream(body)
+            streams.append(s)
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=s,
+            )
+
+        _install_mock_stream(monkeypatch, handler)
+        inners: list = []
+        real = OrchestratorLLM._stream_reply
+
+        def spy(self, *args, **kwargs):
+            gen = real(self, *args, **kwargs)
+            inners.append(gen)  # a live reference: teardown cannot lean on GC
+            return gen
+
+        monkeypatch.setattr(OrchestratorLLM, "_stream_reply", spy)
+        llm = OrchestratorLLM(base_url="http://test")
+        gen = getattr(llm, method)("is the camera up")
+        assert next(gen) == "The camera is online. "
+        gen.close()
+        assert streams and streams[0].closed is True
 
 
 class TestReplyStreamSSE:
@@ -1184,4 +1479,108 @@ class TestMockReplyStreamFallbackDefault:
     def test_mock_reply_stream_threads_tool_choice(self):
         m = MockLLM(scripted_replies=["ok"])
         list(m.reply_stream("good morning", tool_choice="none"))
+        assert m.last_tool_choice == "none"
+
+
+# ────────────────────────────────────────────────────────────────────
+# WARP-3124 — spoken cues: `reply_events` surfaces tool_call and
+# model_loading as typed SpokenCue items (opt-in; reply_stream stays str)
+# ────────────────────────────────────────────────────────────────────
+
+
+class TestReplyEventsCues:
+    """`reply_events` is the cue-aware sibling of `reply_stream`: the same
+    SSE consume, but the first tool_call frame and the model_loading frame
+    come through as `SpokenCue` markers IN ORDER with the text deltas, so the
+    pipeline can fill the 8-15 s tool-dispatch silence. `reply_stream`'s
+    plain-str contract is untouched (see test_tool_frames_ignored_for_audio)."""
+
+    def test_first_tool_call_yields_one_cue_in_order(self, monkeypatch):
+        def handler(req):
+            return _sse_response(
+                ("tool_call", {"id": "t1", "name": "list_cameras", "args": {}}),
+                ("tool_result", {"id": "t1", "ok": True, "data": []}),
+                ("tool_call", {"id": "t2", "name": "get_camera", "args": {}}),
+                ("tool_result", {"id": "t2", "ok": True, "data": {}}),
+                ("content_delta", {"text": "All cameras are online."}),
+                ("done", {"iterations": 2, "stop_reason": "model_done"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        # ONE cue for the first tool_call only; tool_result never surfaces.
+        assert list(llm.reply_events("check cameras")) == [
+            SpokenCue("tool_call"),
+            "All cameras are online.",
+        ]
+
+    def test_model_loading_yields_a_cue(self, monkeypatch):
+        # On DMR sizeGb is always null — the cue carries no size at all.
+        def handler(req):
+            return _sse_response(
+                ("model_loading", {"model": "gpt-oss:20b", "sizeGb": None}),
+                ("content_delta", {"text": "Good morning."}),
+                ("done", {"iterations": 1, "stop_reason": "model_done"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_events("good morning")) == [
+            SpokenCue("model_loading"),
+            "Good morning.",
+        ]
+
+    def test_reply_stream_still_yields_str_only(self, monkeypatch):
+        # Opt-in: the plain reply_stream never carries a cue object.
+        def handler(req):
+            return _sse_response(
+                ("model_loading", {"model": "m", "sizeGb": 12.5}),
+                ("tool_call", {"id": "t1", "name": "list_cameras", "args": {}}),
+                ("content_delta", {"text": "Done."}),
+                ("done", {"iterations": 2, "stop_reason": "model_done"}),
+            )
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_stream("check")) == ["Done."]
+
+    def test_blocking_fallback_yields_no_cues(self, monkeypatch):
+        # The stream POST fails → blocking reply() → one str, never a cue.
+        def handler(req):
+            if "text/event-stream" in req.headers.get("accept", ""):
+                raise httpx.ConnectError("stream connect refused")
+            return httpx.Response(200, json={
+                "message": {"role": "assistant", "content": "blocking reply won"},
+            })
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_events("hi")) == ["blocking reply won"]
+
+    def test_cue_then_transport_break_still_falls_back(self, monkeypatch):
+        # A cue is not content: a break after only a cue re-runs the blocking
+        # reply() (no audio would be doubled), exactly as before cues existed.
+        calls = {"n": 0}
+
+        def handler(req):
+            calls["n"] += 1
+            if "text/event-stream" in req.headers.get("accept", ""):
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    stream=_BreakingByteStream(_sse(
+                        ("tool_call", {"id": "t1", "name": "x", "args": {}}),
+                    )),
+                )
+            return httpx.Response(200, json={
+                "message": {"role": "assistant", "content": "fallback answer"},
+            })
+        _install_mock_stream(monkeypatch, handler)
+        llm = OrchestratorLLM(base_url="http://test")
+        assert list(llm.reply_events("check")) == [
+            SpokenCue("tool_call"),
+            "fallback answer",
+        ]
+        assert calls["n"] == 2
+
+    def test_base_client_reply_events_delegates_to_reply_stream(self):
+        # MockLLM and every reply_stream-only client get str-only events.
+        m = MockLLM(scripted_replies=["the whole reply"])
+        assert list(m.reply_events("hi", tool_choice="none")) == ["the whole reply"]
         assert m.last_tool_choice == "none"

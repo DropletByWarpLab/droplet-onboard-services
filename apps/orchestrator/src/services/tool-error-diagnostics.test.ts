@@ -30,7 +30,7 @@ function describeWire(
   return describeToolError({
     ...BASE,
     ...over,
-    payload: parseToolResultPayload(text),
+    payload: parseToolResultPayload(text, over.tool ?? BASE.tool),
   });
 }
 
@@ -86,12 +86,19 @@ describe("describeToolError — the four wire shapes", () => {
     expect(d.error_code).toBe("UNSTRUCTURED_ERROR");
   });
 
-  it("classifies non-JSON stdio output as raw / NON_JSON_RESULT", () => {
-    const d = describeWire("MCP child died: Segmentation fault");
+  it("classifies a remote tool's non-JSON output as raw / NON_JSON_RESULT", () => {
+    const d = describeWire("MCP child died: Segmentation fault", { tool: "atlassian__jira_get_issue" });
 
     expect(d.error_shape).toBe("raw");
     expect(d.error_code).toBe("NON_JSON_RESULT");
     expect(d.message_len).toBeGreaterThan(0);
+  });
+
+  it("files a LOCAL tool's non-JSON output under TOOL_OUTPUT_MALFORMED, never excerpting the fragment", () => {
+    const d = describeWire('{"secret": "hunter2hunter2', { includeExcerpt: true });
+
+    expect(d.error_code).toBe("TOOL_OUTPUT_MALFORMED");
+    expect(JSON.stringify(d)).not.toContain("hunter2hunter2");
   });
 
   it("classifies anything else as UNCLASSIFIED", () => {
@@ -137,6 +144,7 @@ describe("describeToolError — message_excerpt is envelope-only and scrubbed", 
 
   it("NEVER emits an excerpt for raw, even with the flag on", () => {
     const d = describeWire("upstream body: X-Api-Key: hunter2hunter2", {
+      tool: "atlassian__jira_get_issue",
       includeExcerpt: true,
     });
 
@@ -145,10 +153,12 @@ describe("describeToolError — message_excerpt is envelope-only and scrubbed", 
     expect(JSON.stringify(d)).not.toContain("hunter2hunter2");
   });
 
-  it("drops an excerpt that still looks like key material after redaction", () => {
+  it("never ships key material from a PEM whose END falls outside the redaction bound", () => {
     // A PEM whose END delimiter falls outside the pre-redaction bound
     // (MAX_REDACT_INPUT = 64k) cannot be matched by the block rule — the
-    // excerpt must be dropped rather than shipped half-scrubbed.
+    // excerpt must never ship half-scrubbed. Since WARP-3282 the unterminated-
+    // block rule collapses it to the placeholder; the `-----BEGIN` drop in
+    // tool-error-diagnostics.ts stays as the backstop.
     //
     // The body is laid out as real PEM is — 64-column base64 lines — not as
     // one 200k-character run. `redactSecrets`' sensitive-key rule starts with
@@ -168,7 +178,7 @@ describe("describeToolError — message_excerpt is envelope-only and scrubbed", 
       { includeExcerpt: true },
     );
 
-    expect(d.message_excerpt).toBeUndefined();
+    expect(d.message_excerpt ?? "").not.toMatch(/BEGIN|AAAA/);
   });
 });
 
@@ -383,7 +393,7 @@ describe("describeToolError — args_fingerprint is salted per process", () => {
     const second = fresh.describeToolError({
       ...BASE,
       args: { path: "/a.txt" },
-      payload: freshParse.parseToolResultPayload('{"error":"x"}'),
+      payload: freshParse.parseToolResultPayload('{"error":"x"}', BASE.tool),
     });
     vi.resetModules();
 

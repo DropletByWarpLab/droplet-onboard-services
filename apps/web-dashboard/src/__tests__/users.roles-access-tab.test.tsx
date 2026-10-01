@@ -6,7 +6,7 @@
  *   - Tab gating: owner/admin sees the third tab; switching mounts the panel.
  *   - Member view (fetchUsers 403): People read-only, NO Roles tab, controls
  *     hidden (not disabled), the §12 caption verbatim.
- *   - Roster extensions: role chip (custom-role name resolved, Staff label
+ *   - Roster extensions: role chip (custom-role name resolved, Member label
  *     for the family tier) + the All / By role filter.
  *   - Person editor: role select seeded, §12 session-revocation sync line on
  *     save, PATCH /api/people/:id/access payload shape.
@@ -190,15 +190,15 @@ describe("tab gating by role", () => {
 });
 
 describe("roster extensions", () => {
-  it("shows the assigned-role chip (custom name resolved; Staff label for bare family tier)", async () => {
+  it("shows the assigned-role chip (custom name resolved; Member label for bare family tier)", async () => {
     render(<UsersPage />);
     await waitFor(() => expect(screen.getByText("Priya Nair")).toBeInTheDocument());
-    // Priya carries her custom role's name; Sam carries the Guest tier label.
+    // Priya carries her custom role's name; Sam carries the External guest tier label.
     // The roles list loads on its own chain (listAccessRoles → setAccessRoles),
     // independent of the roster fetch awaited above, so the custom name is
     // awaited rather than assumed to have committed alongside the roster.
     expect(await screen.findByText("Finance")).toBeInTheDocument();
-    expect(screen.getByText("Guest")).toBeInTheDocument();
+    expect(screen.getByText("External guest")).toBeInTheDocument();
     expect(screen.getByText("Owner")).toBeInTheDocument();
     expect(screen.queryByText("Family")).not.toBeInTheDocument();
   });
@@ -214,7 +214,7 @@ describe("roster extensions", () => {
     // filter click flushes.
     const financeGroup = await screen.findByTestId("roster-group-Finance");
     expect(within(financeGroup).getByText("Priya Nair")).toBeInTheDocument();
-    const guestGroup = screen.getByTestId("roster-group-Guest");
+    const guestGroup = screen.getByTestId("roster-group-External guest");
     expect(within(guestGroup).getByText("Sam Ortega")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "All" }));
     expect(screen.queryByTestId("roster-group-Finance")).not.toBeInTheDocument();

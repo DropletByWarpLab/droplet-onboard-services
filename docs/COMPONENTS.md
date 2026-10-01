@@ -195,6 +195,26 @@ network. Host-published ports and host-network services are called out.
   `WRITE_TOOLS` in `src/routes/llm.ts` is **derived from `requiresWrite`** in
   tools-core — don't maintain it by hand. Device pairing is QR-code-driven; the
   dashboard uses an HTTP-only `droplet_session` cookie.
+- **External guests get nothing of the company's data unless it is shared with
+  them (Romain, 2026-09-30).** The box enforces it on every route; clients only
+  mirror it. Modules the catalog refuses the guest tier (`refuseBelowFloor` in
+  `services/access-catalog.ts`: `security`, `crm`, `projects`, `money`) are
+  floored at the prefix by `requireModuleTierFloor` (mounted by
+  `mountModuleGates`, 404 `module_disabled`), for the assistant acting for a
+  guest by `requireMcpActingUserToolDomain`, and for context pins by the tier in
+  `context-pin-targets.service.ts`. The one share: a work item ASSIGNED to a
+  guest is shared with them (read it, read and write its comments, move its
+  state) and nothing else in Projects; `modules/guest-shares.ts` names the five
+  requests and `middleware/guest-share.ts` checks the assignment per record. A
+  guest cannot own a deal or customer or lead a project. Single company-wide
+  routes floor with `requireRole`: `GET /api/integrations` and
+  `GET /api/integrations/eaglesoft` are owner/admin (a member reads the
+  provider-free `/api/integrations/summary`), `GET /api/devices`
+  drops `ip` and `networkMode` for a member and is refused to a guest, and the
+  `/api/tools` routines refuse a guest. `GET /api/app-downloads` stays open to
+  every role but sends the store's raw `detail` to owner/admin only;
+  `GET /api/voice/status` leaves the last transcript and reply out unless
+  `?include=transcript` (owner/admin).
 - **Tests:** **125** Vitest `*.test.ts` files under `src/` (+ Supertest for HTTP).
 - **Gotchas:**
   - **`MATTER_*` env vars are forbidden.** matter.js auto-imports every `MATTER_*`
@@ -202,6 +222,20 @@ network. Host-published ports and host-network services are called out.
     Only `MATTER_STORAGE_PATH` is allow-listed. (See `src/config.ts` comment.)
   - **All scheduling goes through `cron-runtime.service.ts`** with Postgres
     advisory locks (multi-instance-safe). No `while True`/`setInterval` schedulers.
+  - **A routine (`ToolSpec`) is private to its creator unless shared with the
+    Workspace (WARP-3354).** `ToolSpec.visibility` is an explicit enum
+    (`PRIVATE | WORKSPACE`, no column default). The rule lives once, in
+    `src/services/tool-spec-visibility.ts`, and every `/api/tools*` route goes
+    through it, as do the assistant's `routine_*` tools (they reach the same routes
+    as the person they act for). A member lists and gets the Workspace's routines
+    plus their own; owner and admin see all; a routine you may not see answers
+    `404`, like an unknown slug. Only the creator, an owner or an admin may share or
+    un-share (`POST`/`DELETE /api/tools/:slug/share`); the assistant cannot. The
+    box's own routines (mined suggestions, `daily-report`) stay `WORKSPACE`, and a
+    scheduled run fires as the creator and never reads the rule. Slugs are box-wide
+    unique, so a plain slug would be an oracle for another member's private routine:
+    a member's new routine is always stored as `<slug>-<4 hex>` (owner and admin, who
+    see everything, keep plain slugs).
 
 ## apps/web-dashboard
 
@@ -221,6 +255,8 @@ network. Host-published ports and host-network services are called out.
 - **Build/deploy:** Next.js **standalone** output (monorepo-aware
   `outputFileTracingRoot`); multi-stage Docker (`node:20`), served on 3001.
   Requires `@droplet/shared-types` at build — **cannot build standalone**.
+  Fonts are vendored under `src/app/fonts/` (`next/font/local`) so `next build`
+  needs no network — don't import `next/font/google` (test-guarded, WARP-3317).
 - **Tests:** Vitest + React Testing Library (`src/__tests__/`, ~119 files).
 - **Gotchas:** admin-page gating is **client-side only** (`useAuth().user.role`) —
   the backend is the real enforcement point. Dev rewrites don't exist in prod;
@@ -338,12 +374,18 @@ network. Host-published ports and host-network services are called out.
   section.
 - **gRPC consumers:** file-indexer (`EmbedText`), orchestrator/mcp-server
   (`Rerank`, `ClassifyQuery` for adaptive RAG routing).
-- **Planned — Kev decision model (ADR-006 in `droplet-local-LLM`, epic WARP-3067):**
-  a `Decide` RPC (WARP-3070) proxying to `droplet-local-LLM`'s `decision-model`
-  sidecar (`:8009`, profile `decision`, off by default): calibrated yes/no /
-  choice / score answers, no generated text. It is the **only** way in: nothing
-  else calls `:8009`. Consumers fail soft to today's behaviour and never sit on the
-  write-approval path. Not built until the bench-box go/no-go (WARP-3069) passes.
+- **Kev decision model (ADR-006 in `droplet-local-LLM`, epic WARP-3067):** the
+  `Decide` RPC (WARP-3070) exists and proxies to `droplet-local-LLM`'s
+  `decision-model` sidecar (`:8009`, profile `decision`, off by default):
+  calibrated yes/no / choice / score answers, no generated text. **Off until
+  `DECISION_MODEL_URL` is set** (plus `DECISION_MODEL_API_KEY`, the sidecar's
+  key); unset, it answers `DECIDE_STATUS_UNAVAILABLE` with no network call.
+  Every failure (timeout, 5xx, 401) is a status in the response, never a gRPC
+  error; a 422 is `DECIDE_STATUS_INVALID`. Orchestrator client:
+  `apps/orchestrator/src/services/decision-model.client.ts`. It is the **only**
+  way in: nothing else calls `:8009`. **No consumers yet** (triage, `ClassifyQuery`,
+  tool-domain selection, `classify_items`: WARP-3071–3074); they must fail soft
+  to today's behaviour and never sit on the write-approval path.
   Full picture: `docs/agentic-workflows.md` § "Decision model (Kev)".
 - **Gotchas:** does **not** dispatch tools (forwards `tools[]` as-is, returns raw
   `tool_calls` to the orchestrator). Embed/rerank models lazy-load from HF on first
@@ -640,7 +682,11 @@ network. Host-published ports and host-network services are called out.
   smbd on `:445`; account `droplet` (uid 33 = www-data) with the per-device
   `SMB_PASSWORD`. The same volume mounts into Nextcloud as the `/Droplet`
   files_external mount (`nextcloud-init.sh`) so web + desktop see one tree.
-  Connect info: `GET /api/storage/network-drive` (owner/admin). Guide:
+  Connect info: `GET /api/storage/network-drive` (owner/admin). A user's own
+  drive (WebDAV via Nextcloud): `POST /api/storage/network-drive/personal`
+  (owner/admin/family, gated by the owner setting
+  `Workspace.personalDriveEnabled`, off by default) — see
+  [`network-drive.md`](network-drive.md#per-user-drive-webdav). Guide:
   [`network-drive.md`](network-drive.md).
 
 ## scripts/
@@ -671,7 +717,7 @@ network. Host-published ports and host-network services are called out.
 ## proto/ & schemas/
 
 - `proto/inference.proto` — ai-gateway gRPC: `Chat`/`StreamChat`/`ListModels`/
-  `EmbedText`/`Rerank`/`ClassifyQuery`. `proto/device_identity.proto` — TPM sidecar:
+  `EmbedText`/`Rerank`/`ClassifyQuery`/`Decide`. `proto/device_identity.proto` — TPM sidecar:
   `Sign`/`GetCert`/`GetStatus`/`Reseal`. Codegen via `scripts/generate-grpc.sh`.
 - `schemas/anchor.schema.json` — JSON Schema 2020-12 for the `Anchor` union; the
   source of truth for `packages/shared-types/src/anchor.ts` (regenerate, don't

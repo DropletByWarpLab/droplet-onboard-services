@@ -33,7 +33,11 @@ transcript event (typically <1 s for small.en on CPU); during that
 window the mic stream isn't being drained and may overflow into a
 log line, which is harmless and brief. We don't bridge to asyncio
 because the wake loop is already a blocking thread and the gain
-isn't worth the threading-model complication.
+isn't worth the threading-model complication. The one exception is a
+spoken reply: while it plays on this thread, a short-lived per-turn
+'voice-synth' producer reads the reply stream and synthesizes the next
+sentence (WARP-3124 synth-ahead, see `_run_speak_chunks`); it touches no
+pipeline state and ends with the utterance.
 
 Debounce: a single utterance produces many 80 ms frames above
 threshold (the wake-word audio is ~600 ms). Without a debounce window
@@ -49,7 +53,9 @@ Status:
   last_wake_at / last_wake_score / last_wake_model
   last_transcript / last_transcript_at
   stt_loaded — true iff the STT server was reachable at startup
-  error_message (only set in 'error' state)
+  error_message — the latched fault in 'error'; otherwise why the last
+    voice turn failed (TTS / playback / LLM stream — the pipeline keeps
+    listening, WARP-3199), cleared by the next wake
 
 `wake_detected` and `transcript_ready` are transient UI hints that
 auto-decay to `listening` after `WAKE_VISUAL_DECAY_S` seconds (2 s by
@@ -58,6 +64,7 @@ time to play.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
@@ -65,7 +72,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import asdict, dataclass
-from typing import Any, Callable, Iterable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional, Union
 
 import numpy as np
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -78,10 +85,12 @@ from voice.audio_io import (
     make_int16_resampler,
     negotiate_capture_rate,
 )
-from voice.llm import LLMClient, LLMUnavailable, ToolChoice
+from voice.intents import VolumeIntent, classify_volume_intent
+from voice.llm import LLMClient, LLMUnavailable, SpokenCue, ToolChoice
 from voice.stt import STTUnavailable, StreamingSTT
 from voice.text_chunk import SentenceChunker
 from voice.tts import SynthesizedAudio, TextToSpeech, TTSUnavailable
+from voice.volume import VolumeController, apply_gain
 from voice.wake import (
     WAKE_FRAME_SAMPLES,
     WAKE_SAMPLE_RATE,
@@ -90,6 +99,11 @@ from voice.wake import (
 )
 
 logger = logging.getLogger("voice.pipeline")
+
+# What a TTS server fault looks like from WyomingTTS.synthesize — it reuses
+# stt.py's wire helpers, so a mid-event drop is STTUnavailable. Any other
+# exception out of synthesize is a bug and is logged with its traceback.
+_TTS_WIRE_FAULTS = (TTSUnavailable, STTUnavailable)
 
 
 class _DeviceError(Exception):
@@ -302,6 +316,15 @@ DEFAULT_CALIBRATION_MODE_TTL_S = 90.0
 # wakes promptly.
 DEFAULT_POST_SPEAK_COOLDOWN_S = 2.0
 
+# Warm on wake (WARP-3127). A fired wake asks the orchestrator to start
+# loading the chat model (LLMClient.warm → POST /api/llm/warm), so a reload
+# after WARP-1826's 5 min residency overlaps the person speaking + STT
+# instead of starting once the transcript lands. At most one warm per this
+# window: a conversation's back-to-back wakes find the model resident
+# anyway, and the orchestrator side is probe-first and in-flight-guarded.
+# Monotonic, so a wall-clock step can't suppress or double the warm.
+DEFAULT_LLM_WARM_DEBOUNCE_S = 60.0
+
 # End-of-speech (VAD) for the STT capture window. Once the user has
 # actually started talking, the capture ends after a short run of
 # trailing silence — so the box stops listening the moment they finish
@@ -321,6 +344,35 @@ DEFAULT_VAD_SPEECH_RMS = 700.0    # int16 frame RMS above which a frame = "speec
 DEFAULT_VAD_MIN_SPEECH_S = 0.4    # min CUMULATIVE speech before end-of-speech
                                   # may fire — keeps the wake-word tail + a
                                   # pause before the command from ending early
+
+# Spoken cues (WARP-3124). A tool question is two serial generations plus a
+# dispatch — 8-15 s of silence on the box — and a cold model load can be
+# longer. When the orchestrator reports a `tool_call` or `model_loading`, the
+# box says one short, plain phrase so the user knows it heard them. At most
+# one cue per turn, never once the answer has started. main.py's warm-up
+# pre-synthesizes both (WakePipeline.prime_cues) so a cue costs no Piper
+# round trip. Never states a model name or a size — the box doesn't always
+# know them (DMR reports no size).
+TOOL_CALL_CUE_TEXT = "Let me check."
+MODEL_LOADING_CUE_TEXT = "One moment."
+CUE_PHRASES: dict[str, str] = {
+    "tool_call": TOOL_CALL_CUE_TEXT,
+    "model_loading": MODEL_LOADING_CUE_TEXT,
+}
+
+# Synth-ahead (WARP-3124). While sentence N plays on the turn thread, a
+# per-turn producer thread keeps reading the reply stream and synthesizing
+# N+1. The hand-off holds at most this many finished sentences, so the
+# producer is never more than one sentence ahead of the speaker plus the one
+# it is synthesizing — a failed playback discards little work.
+SYNTH_AHEAD_DEPTH = 1
+# How long the turn thread waits for the producer to wind down after the
+# utterance ends or bails. The producer owns closing the reply stream (a
+# generator can only be closed by the thread running it), so normally this
+# join is instant; if the producer is mid-synthesis or parked on a slow SSE
+# read, the turn moves on and the producer closes the stream the moment
+# that step returns.
+SYNTH_PRODUCER_JOIN_TIMEOUT_S = 2.0
 
 # Multichannel capture → mono for the detector + STT. Both the policy
 # constant (DEFAULT_INPUT_DOWNMIX) and the downmix_to_mono() helper live
@@ -506,9 +558,166 @@ class PipelineStatus:
     # fail-safe expiry the wizard renews; None when the mode is off.
     calibration_mode: bool = False
     calibration_mode_expires_at: Optional[float] = None
+    # Per-turn latency (WARP-3124): the same fields as the last
+    # `voice_turn_timing` log line (see _TurnTiming.summary). None until the
+    # first turn completes.
+    last_turn_timing: Optional[dict[str, Any]] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _close_quietly(iterator: Any) -> None:
+    """Close a generator-like iterator (tearing down the reply SSE behind
+    it, WARP-329). Teardown path: never raises."""
+    close = getattr(iterator, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:  # pragma: no cover — defensive teardown
+            logger.debug("chunk generator close raised", exc_info=True)
+
+
+def _ms(start: Optional[float], end: Optional[float]) -> Optional[int]:
+    """Whole milliseconds between two time.monotonic() stamps; None when
+    either stage did not happen this turn."""
+    if start is None or end is None:
+        return None
+    return round((end - start) * 1000)
+
+
+@dataclass
+class _TurnTiming:
+    """time.monotonic() stamps for ONE voice turn (WARP-3124).
+
+    Created at the wake (or at capture-open when a test drives STT
+    directly), filled in on the capture thread as the turn moves on, and
+    summarised once — as the `voice_turn_timing` log line and
+    /voice/status `last_turn_timing` — when _default_on_transcript ends
+    the turn. The speak-side stamps come back in the speak result dict.
+    """
+
+    wake_at: Optional[float] = None
+    capture_open_at: Optional[float] = None
+    capture_end_at: Optional[float] = None
+    speech_s: Optional[float] = None
+    vad_end: Optional[str] = None  # "silence" | "cap"
+    transcript_at: Optional[float] = None
+
+    def summary(
+        self, *, outcome: str, speak: Optional[dict[str, Any]], ended_at: float,
+    ) -> dict[str, Any]:
+        speak = speak or {}
+        return {
+            "outcome": outcome,
+            "wake_to_capture_ms": _ms(self.wake_at, self.capture_open_at),
+            "speech_ms": (
+                None if self.speech_s is None else round(self.speech_s * 1000)
+            ),
+            "capture_ms": _ms(self.capture_open_at, self.capture_end_at),
+            "vad_end": self.vad_end,
+            "stt_ms": _ms(self.capture_end_at, self.transcript_at),
+            "first_delta_ms": _ms(self.transcript_at, speak.get("first_delta_at")),
+            "first_audio_ms": _ms(self.transcript_at, speak.get("first_audio_at")),
+            "first_answer_audio_ms": _ms(
+                self.transcript_at, speak.get("first_answer_audio_at"),
+            ),
+            "total_ms": _ms(self.wake_at, ended_at),
+            "cue": speak.get("cue"),
+            "sentences": speak.get("sentences", 0),
+            "error_kind": speak.get("error_kind"),
+        }
+
+
+@dataclass(frozen=True)
+class _SpeechItem:
+    """One synthesized piece of an utterance, handed from the synth-ahead
+    producer to the turn thread (WARP-3124). Exactly one of `text` (an
+    answer sentence) or `cue` (a cue kind) is set."""
+
+    audio: SynthesizedAudio
+    text: Optional[str] = None
+    cue: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _SpeakFailure:
+    """The producer's terminal error, delivered in order after everything
+    it already queued. `kind` is "tts" or "llm"."""
+
+    kind: str
+    error: BaseException
+
+
+class _SynthAheadChannel:
+    """Bounded, closable hand-off between the synth-ahead producer and the
+    turn thread that plays (WARP-3124).
+
+    Not a queue.Queue: that can't be closed on Python 3.12 (Queue.shutdown
+    is 3.13+), and a producer parked in put() on a full queue must wake the
+    moment the turn thread bails out — or the producer never reaches the
+    point where it closes the reply stream. A deque under a Condition does
+    both, with no polling.
+    """
+
+    def __init__(self, depth: int):
+        self._depth = max(1, int(depth))
+        self._items: deque[Any] = deque()
+        self._cond = threading.Condition()
+        self._closed = False    # turn thread is done: refuse + drop items
+        self._finished = False  # producer is done: nothing after the queue
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def put(self, item: _SpeechItem) -> bool:
+        """Queue one item, waiting while the channel is full. False once
+        the turn thread has closed the channel — the producer's cue to
+        stop."""
+        with self._cond:
+            while len(self._items) >= self._depth and not self._closed:
+                self._cond.wait()
+            if self._closed:
+                return False
+            self._items.append(item)
+            self._cond.notify_all()
+            return True
+
+    def finish(self, failure: Optional[_SpeakFailure] = None) -> None:
+        """The producer is done. `failure`, if any, is delivered after the
+        items already queued. Never blocks, so the producer always exits."""
+        with self._cond:
+            if failure is not None and not self._closed:
+                self._items.append(failure)
+            self._finished = True
+            self._cond.notify_all()
+
+    def close(self) -> None:
+        """The turn thread is done: drop queued audio and wake a producer
+        parked in put()."""
+        with self._cond:
+            self._closed = True
+            self._items.clear()
+            self._cond.notify_all()
+
+    def __iter__(self) -> Iterator[Any]:
+        """Items in order, until the producer has finished and the queue is
+        empty (or the channel was closed)."""
+        item = self._take()
+        while item is not None:
+            yield item
+            item = self._take()
+
+    def _take(self) -> Optional[Any]:
+        with self._cond:
+            while not self._items and not self._finished and not self._closed:
+                self._cond.wait()
+            if not self._items:
+                return None
+            item = self._items.popleft()
+            self._cond.notify_all()  # room for a producer parked in put()
+            return item
 
 
 class WakePipeline:
@@ -558,6 +767,7 @@ class WakePipeline:
         dsp_restart: Optional[Callable[[], Any]] = None,
         dsp_recovery_max_attempts: int = DEFAULT_DSP_RECOVERY_MAX_ATTEMPTS,
         dsp_recovery_cooldown_s: float = DEFAULT_DSP_RECOVERY_COOLDOWN_S,
+        volume: Optional[VolumeController] = None,
     ):
         self._detector = detector
         self._input_device_index = input_device_index
@@ -572,9 +782,19 @@ class WakePipeline:
         # LLM-reply path; speak() is also still reachable via POST /voice/say.
         self._tts = tts
         self._output_device_index = output_device_index
+        # Speaker output volume — the SAME controller main.py hands the
+        # /voice/volume endpoints, so a dashboard change and a spoken "turn
+        # it up" act on one state. None = unity gain and no spoken volume
+        # commands (every pre-volume constructor call is unchanged).
+        self._volume = volume
         # LLM — commit 7. None disables the closed-loop behaviour;
         # transcript still lands in /voice/status but isn't spoken.
         self._llm = llm
+        # Warm on wake (WARP-3127) — monotonic stamp of the last warm handed
+        # off, and the daemon thread carrying it. Written only from the
+        # 'wake-pipeline' thread (_run_wake_detect → _maybe_warm_llm).
+        self._llm_warm_at: Optional[float] = None
+        self._llm_warm_thread: Optional[threading.Thread] = None
         # How often the background probe thread re-checks STT/TTS/LLM
         # reachability. Without this, an upstream that came up AFTER
         # voice-io (common at boot when whisper / piper / ai-
@@ -709,6 +929,16 @@ class WakePipeline:
         # happen under _lock so the field is coherent across threads.
         self._stt_session = None  # type: ignore[var-annotated]
         self._transcribe_started_at: float = 0.0
+
+        # WARP-3124 — per-turn latency. `_turn_timing` is the turn in
+        # flight (capture thread only); `_last_turn_timing` is the finished
+        # summary /voice/status serves (guarded by _lock).
+        self._turn_timing: Optional[_TurnTiming] = None
+        self._last_turn_timing: Optional[dict[str, Any]] = None
+        # WARP-3124 — pre-synthesized cue PCM by cue kind (guarded by _lock:
+        # filled by prime_cues on the warm-up thread, read by the synth
+        # producer).
+        self._cue_cache: dict[str, SynthesizedAudio] = {}
 
         # Whether the STT server is reachable. Probed lazily on first
         # use (start()), cached for the process lifetime. Surfaced via
@@ -934,6 +1164,61 @@ class WakePipeline:
         except Exception:  # pragma: no cover — defensive
             logger.exception("activity reporter raised (event dropped)")
 
+    # ──────────────────────────────────────────────────────────────
+    # Warm on wake (WARP-3127)
+    # ──────────────────────────────────────────────────────────────
+
+    def _maybe_warm_llm(self) -> None:
+        """Ask the LLM backend to start loading its model — off-thread.
+
+        Called from the wake-fire site on the 'wake-pipeline' capture thread,
+        so it must never block and never raise: the warm itself runs on a
+        short-lived daemon thread ('llm-warm') and this returns as soon as
+        that thread is started. Skipped when:
+
+          - there is no LLM (nothing to warm);
+          - STT is absent or unreachable: the interaction ends at the
+            detection (wake_heard), no turn follows, so a load would only
+            take the GPU;
+          - a warm was handed off less than DEFAULT_LLM_WARM_DEBOUNCE_S ago
+            (monotonic), or the previous one is still running.
+
+        Every failure is swallowed at DEBUG: a missed warm only loses the
+        head start — the turn itself still loads the model.
+        """
+        try:
+            llm = self._llm
+            if llm is None:
+                return
+            if self._stt is None or not self._stt_available:
+                return
+            now = time.monotonic()
+            if (
+                self._llm_warm_at is not None
+                and now - self._llm_warm_at < DEFAULT_LLM_WARM_DEBOUNCE_S
+            ):
+                return
+            previous = self._llm_warm_thread
+            if previous is not None and previous.is_alive():
+                return
+            self._llm_warm_at = now
+            thread = threading.Thread(
+                target=self._warm_llm_worker, args=(llm,),
+                name="llm-warm", daemon=True,
+            )
+            self._llm_warm_thread = thread
+            thread.start()
+        except Exception:
+            logger.debug("llm warm hand-off failed (ignored)", exc_info=True)
+
+    @staticmethod
+    def _warm_llm_worker(llm: LLMClient) -> None:
+        """Body of the 'llm-warm' thread. Never lets an exception escape."""
+        try:
+            llm.warm()
+        except Exception:
+            logger.debug("llm warm raised (ignored)", exc_info=True)
+
     def _check_flatline_transition(self) -> None:
         """Emit dsp_wedge / dsp_recovered on `input_flatlined` edges.
 
@@ -1113,14 +1398,27 @@ class WakePipeline:
             # for that state).
             with self._lock:
                 prev_state = self._state
-                self._state = "speaking"
+                # A latched fault already drops every frame, so anti-feedback
+                # holds without 'speaking' — and entering it would let the
+                # restore / _fail_turn below report a deaf pipeline as
+                # 'listening' with /health 200 (WARP-3199).
+                if prev_state not in ("error", "no_mic"):
+                    self._state = "speaking"
                 self._last_response = text
                 self._last_response_at = time.time()
 
             try:
                 audio = self._tts.synthesize(text, voice=voice)
-            except TTSUnavailable as exc:
-                self._set_error(f"TTS synthesize failed: {exc}")
+            except Exception as exc:  # noqa: BLE001 — any synth failure ends the turn
+                # Not just TTSUnavailable: WyomingTTS reuses stt.py's wire
+                # helpers, so Piper dropping mid-event raises STTUnavailable.
+                # Escaping here stranded the pipeline in 'speaking' (WARP-3199).
+                # Anything else is a bug — keep its traceback.
+                logger.warning(
+                    "TTS synthesize failed: %r", exc,
+                    exc_info=not isinstance(exc, _TTS_WIRE_FAULTS),
+                )
+                self._fail_turn(f"TTS synthesize failed: {exc}")
                 return {"ok": False, "error": str(exc), "duration_s": 0.0}
 
             # Play. Skip if the synthesized audio is empty (e.g. empty text).
@@ -1131,16 +1429,13 @@ class WakePipeline:
             try:
                 self._play_pcm(audio)
             except Exception as exc:
-                self._set_error(f"playback failed: {exc}")
                 # Mid-playback failure still drove the speaker for some of
                 # the reply, so the same anti-feedback window applies: the
                 # partial Piper output can bleed into the mic and score
                 # above threshold. Arm the post-speak cooldown here too —
                 # _restore_state_after_speak (which normally sets it) does
-                # NOT run on this path because _set_error moved us out of
-                # 'speaking' into 'error'.
-                with self._lock:
-                    self._speak_ended_at = time.time()
+                # NOT run on this path.
+                self._fail_turn(f"playback failed: {exc}", drove_speaker=True)
                 return {"ok": False, "error": str(exc), "duration_s": audio.duration_s}
 
             self._restore_state_after_speak(prev_state)
@@ -1153,7 +1448,17 @@ class WakePipeline:
             self._speak_lock.release()
 
     def _play_pcm(self, audio: SynthesizedAudio) -> None:
-        """Hand the PCM to sounddevice. Blocking."""
+        """Hand the PCM to sounddevice at the current output volume.
+        Blocking.
+
+        The one playback choke point — speak(), every streamed sentence and
+        every spoken cue land here — so this is where the volume gain goes:
+        on the int16 array, before audio_io.play (whose signature is
+        unchanged). The gain is read per call, so a change lands on the
+        next sentence. When the output is silent (muted, or an explicit
+        level 0) nothing is played at all; the callers' state transitions
+        and post-speak cooldown run exactly as for an audible reply.
+        """
         # sounddevice wants a numpy array. We get int16 mono from Piper —
         # the playback driver in audio_io.play handles dtype + rate.
         import numpy as _np
@@ -1161,7 +1466,16 @@ class WakePipeline:
         pcm = _np.frombuffer(audio.pcm, dtype=_np.int16)
         if audio.channels > 1:
             pcm = pcm.reshape(-1, audio.channels)
+        if self._volume is not None:
+            gain = self._volume.gain()
+            if gain <= 0.0:
+                return
+            pcm = apply_gain(pcm, gain)
         _play(pcm, samplerate=audio.sample_rate, device=self._output_device_index)
+
+    def _output_audible(self) -> bool:
+        """Whether speech played now would be heard (not muted, level > 0)."""
+        return self._volume is None or self._volume.gain() > 0.0
 
     def _restore_state_after_speak(self, prev_state: PipelineState) -> None:
         """Return to whatever state we were in before speak() was called.
@@ -1191,7 +1505,9 @@ class WakePipeline:
     # ──────────────────────────────────────────────────────────────
 
     def _speak_chunks(
-        self, chunks: Iterable[str], voice: Optional[str] = None,
+        self,
+        chunks: Iterable[Union[str, SpokenCue]],
+        voice: Optional[str] = None,
     ) -> dict[str, Any]:
         """Synthesize + play a STREAM of sentence chunks as ONE utterance.
 
@@ -1202,34 +1518,38 @@ class WakePipeline:
           * ONE non-blocking `_speak_lock` acquire — a concurrent
             POST /voice/say (or a second wake→speak) sees `already_speaking`,
             not a per-sentence race.
-          * State goes to 'speaking' on the first real sentence and stays
-            there until the last; the pipeline thread is busy here so wake
-            detection can't run, and status() reports 'speaking' throughout.
+          * State goes to 'speaking' at the first audio (a cue or a
+            sentence) and stays there until the last; the pipeline thread is
+            busy here so wake detection can't run, and status() reports
+            'speaking' throughout.
           * `_speak_ended_at` is stamped ONCE at the true end, so the 2 s
             post-speak cooldown fires once after the LAST sentence.
 
-        Playback is SEQUENTIAL per sentence (synth 1 → play 1 → synth 2 →
-        play 2 …): first-audio starts right after sentence 1 — the WARP-626
-        win — at the cost of a minor inter-sentence synth gap. A
-        producer/consumer overlap (synthesize N+1 while N plays) is a
-        localized future swap of the play loop below; the load-bearing
-        lock/state/cooldown guards live here, not per-sentence, so that
-        swap stays safe.
+        Synth-ahead (WARP-3124): a per-turn producer thread reads `chunks`
+        and synthesizes while this thread plays, so sentence N+1 is
+        synthesized (and the reply stream keeps being read) while sentence
+        N plays — see `_run_speak_chunks`. `SpokenCue` items in `chunks`
+        become a short cue phrase (at most one per utterance, never once
+        the answer has started).
 
         `chunks` is consumed lazily and MAY raise LLMUnavailable mid-stream
         (the SSE broke) — that's surfaced like a synth failure. Returns a
-        result dict: ok / duration_s / spoke_any / error / error_kind.
+        result dict: ok / duration_s / spoke_any (an ANSWER sentence played)
+        / error / error_kind (tts | playback | llm, or busy when another
+        utterance holds the speaker), plus the turn-timing fields
+        first_audio_at / first_answer_audio_at (time.monotonic) / cue /
+        sentences.
         """
         if self._tts is None or not self._tts_available:
             return {
-                "ok": False, "error": "TTS unavailable",
+                "ok": False, "error": "TTS unavailable", "error_kind": "tts",
                 "duration_s": 0.0, "spoke_any": False,
             }
         # ONE lock for the WHOLE utterance. Non-blocking so a second speaker
         # never queues audio to play out of order (same contract as speak()).
         if not self._speak_lock.acquire(blocking=False):
             return {
-                "ok": False, "error": "already_speaking",
+                "ok": False, "error": "already_speaking", "error_kind": "busy",
                 "duration_s": 0.0, "spoke_any": False,
             }
         try:
@@ -1238,90 +1558,244 @@ class WakePipeline:
             self._speak_lock.release()
 
     def _run_speak_chunks(
-        self, chunks: Iterable[str], voice: Optional[str],
+        self, chunks: Iterable[Union[str, SpokenCue]], voice: Optional[str],
     ) -> dict[str, Any]:
-        """Drive the sequential synth→play loop under the already-held
-        `_speak_lock`. Caller (`_speak_chunks`) owns the lock lifecycle."""
-        prev_state: Optional[PipelineState] = None  # None until first chunk
-        spoke_any = False
-        drove_speaker = False
+        """Run one utterance as producer + consumer (WARP-3124 synth-ahead)
+        under the already-held `_speak_lock`. Caller (`_speak_chunks`) owns
+        the lock lifecycle.
+
+        The producer ('voice-synth' thread, `_produce_speech`) pulls
+        `chunks`, synthesizes, and hands `_SpeechItem`s over a bounded
+        `_SynthAheadChannel`; this (turn) thread plays them in order
+        (`_play_utterance`). The producer is the ONLY thread that advances
+        the chunk generator, so it is also the one that closes it —
+        Python refuses to close a generator another thread is running.
+        Closing it propagates GeneratorExit into the reply stream, which
+        tears down the in-flight SSE, so the orchestrator sees the client
+        disconnect and ABORTS its agent loop (WARP-329) instead of finishing
+        a reply nobody will hear. On any exit this thread closes the
+        channel (waking a producer parked in put()) and joins the producer,
+        bounded by SYNTH_PRODUCER_JOIN_TIMEOUT_S."""
+        chunk_iter = iter(chunks)
+        channel = _SynthAheadChannel(SYNTH_AHEAD_DEPTH)
+        producer = threading.Thread(
+            target=self._produce_speech,
+            args=(chunk_iter, voice, channel),
+            name="voice-synth",
+            daemon=True,
+        )
+        try:
+            producer.start()
+        except RuntimeError as exc:  # thread exhaustion
+            # The generator never ran on another thread, so closing it
+            # here is safe — and still aborts the orchestrator turn.
+            _close_quietly(chunk_iter)
+            self._fail_turn(f"voice reply failed (tts): synth thread: {exc}")
+            return {
+                "ok": False, "error": str(exc), "error_kind": "tts",
+                "duration_s": 0.0, "spoke_any": False, "sentences": 0,
+            }
+        try:
+            return self._play_utterance(channel)
+        finally:
+            channel.close()
+            producer.join(SYNTH_PRODUCER_JOIN_TIMEOUT_S)
+            if producer.is_alive():
+                logger.warning(
+                    "voice synth producer still busy %.1fs after the utterance "
+                    "ended — it closes the reply stream as soon as its current "
+                    "step returns",
+                    SYNTH_PRODUCER_JOIN_TIMEOUT_S,
+                )
+
+    def _produce_speech(
+        self,
+        chunk_iter: Iterator[Union[str, SpokenCue]],
+        voice: Optional[str],
+        channel: _SynthAheadChannel,
+    ) -> None:
+        """Synth-ahead producer — runs on the per-turn 'voice-synth' thread.
+
+        Bounded: one pass over `chunk_iter`, ending when the reply stream
+        ends, the turn thread closes the channel, or shutdown is signalled.
+        Touches no pipeline state (the turn thread owns state, lock and
+        cooldown); its only outputs are channel items and the terminal
+        `_SpeakFailure`. Cue rules live here because this is where the
+        answer is first seen: a cue is queued at most once per utterance,
+        and never after an answer sentence has been taken from the stream.
+        """
+        failure: Optional[_SpeakFailure] = None
+        cue_taken = False
+        answer_started = False
+        try:
+            for item in chunk_iter:  # may raise LLMUnavailable (SSE broke)
+                if channel.closed or self._shutdown.is_set():
+                    break
+                if isinstance(item, SpokenCue):
+                    if cue_taken or answer_started:
+                        continue
+                    cue_taken = True
+                    audio = self._cue_audio(item.kind)
+                    if audio is not None and not channel.put(
+                        _SpeechItem(audio=audio, cue=item.kind),
+                    ):
+                        break
+                    continue
+                text = item.strip() if item else ""
+                if not text:
+                    continue
+                answer_started = True
+                try:
+                    audio = self._tts.synthesize(text, voice=voice)  # type: ignore[union-attr]
+                except _TTS_WIRE_FAULTS as exc:
+                    # WyomingTTS raises STTUnavailable when Piper drops the
+                    # socket mid-event (WARP-3199) — a wire fault, not a bug.
+                    failure = _SpeakFailure("tts", exc)
+                    break
+                except Exception as exc:  # noqa: BLE001 — see below
+                    # The turn thread is waiting on this channel: an escaped
+                    # exception would strand it. Surface it as a TTS fault.
+                    logger.exception("voice synthesis raised unexpectedly")
+                    failure = _SpeakFailure("tts", exc)
+                    break
+                if not channel.put(_SpeechItem(audio=audio, text=text)):
+                    break
+        except LLMUnavailable as exc:
+            failure = _SpeakFailure("llm", exc)
+        except Exception as exc:  # noqa: BLE001 — same reason as above
+            logger.exception("voice reply stream raised unexpectedly")
+            failure = _SpeakFailure("llm", exc)
+        finally:
+            # Close BEFORE finishing the channel, so by the time the turn
+            # thread sees the end (or the failure) the SSE is already torn
+            # down. A no-op when the stream ran to completion.
+            _close_quietly(chunk_iter)
+            channel.finish(failure)
+
+    def _play_utterance(self, channel: _SynthAheadChannel) -> dict[str, Any]:
+        """The consumer half: play every item the producer hands over, in
+        order, on the turn thread. Owns 'speaking', `_last_response`, the
+        error surface and the single cooldown."""
+        prev_state: Optional[PipelineState] = None  # None until first item
+        spoke_any = False       # an ANSWER sentence reached the speaker
+        drove_speaker = False   # any audio (cue or answer) reached it
         total_duration = 0.0
         spoken: list[str] = []
         first_error: Optional[BaseException] = None
         error_kind: Optional[str] = None
-        # Iterate through a handle we can explicitly close: if we bail out
-        # mid-utterance (TTS/playback failure), closing the chunk generator
-        # propagates GeneratorExit into reply_stream, which tears down the
-        # in-flight SSE — the orchestrator then sees the client disconnect
-        # and ABORTS its agent loop (WARP-329) instead of finishing a reply
-        # nobody will hear. On normal completion the generator is already
-        # exhausted, so close() is a no-op.
-        chunk_iter = iter(chunks)
-        try:
-            try:
-                for chunk in chunk_iter:  # may raise LLMUnavailable (SSE broke)
-                    text = chunk.strip() if chunk else ""
-                    if not text:
-                        continue
-                    if self._shutdown.is_set():
-                        break
-                    # Enter 'speaking' on the FIRST real sentence; hold it for
-                    # the rest of the utterance (don't restore between them).
-                    if prev_state is None:
-                        with self._lock:
-                            prev_state = self._state
-                            self._state = "speaking"
-                    try:
-                        audio = self._tts.synthesize(text, voice=voice)
-                    except TTSUnavailable as exc:
-                        first_error, error_kind = exc, "tts"
-                        break
-                    spoken.append(text)
-                    with self._lock:
-                        self._last_response = " ".join(spoken)
-                        self._last_response_at = time.time()
-                    if not audio.pcm:
-                        continue
-                    drove_speaker = True
-                    try:
-                        self._play_pcm(audio)
-                    except Exception as exc:  # noqa: BLE001 — surfaced below
-                        first_error, error_kind = exc, "playback"
-                        break
-                    spoke_any = True
-                    total_duration += audio.duration_s
-            except LLMUnavailable as exc:
-                first_error, error_kind = exc, "llm"
-
-            if first_error is None:
-                # Success (possibly empty — nothing streamed). Restore state +
-                # arm the single post-speak cooldown, only if we actually spoke.
-                self._finish_utterance(prev_state, spoke=spoke_any)
-                return {
-                    "ok": True, "duration_s": total_duration, "spoke_any": spoke_any,
-                }
-
-            # Error path: surface it, and arm the cooldown if we drove the
-            # speaker at all — even a partial reply can bleed into the shared
-            # mic (same contract as speak()'s mid-playback failure).
-            self._set_error(f"voice reply failed ({error_kind}): {first_error}")
-            if drove_speaker:
+        first_audio_at: Optional[float] = None
+        first_answer_audio_at: Optional[float] = None
+        cue: Optional[str] = None
+        sentences = 0
+        for item in channel:
+            if isinstance(item, _SpeakFailure):
+                first_error, error_kind = item.error, item.kind
+                break
+            if self._shutdown.is_set():
+                break
+            # Enter 'speaking' at the FIRST audio item — a cue or a sentence —
+            # and hold it for the rest of the utterance.
+            if prev_state is None:
                 with self._lock:
-                    self._speak_ended_at = time.time()
+                    prev_state = self._state
+                    self._state = "speaking"
+            if item.text is not None:
+                spoken.append(item.text)
+                with self._lock:
+                    self._last_response = " ".join(spoken)
+                    self._last_response_at = time.time()
+            if not item.audio.pcm:
+                continue
+            drove_speaker = True
+            started = time.monotonic()
+            if first_audio_at is None:
+                first_audio_at = started
+            if item.cue is not None:
+                cue = item.cue
+            elif first_answer_audio_at is None:
+                first_answer_audio_at = started
+            try:
+                self._play_pcm(item.audio)
+            except Exception as exc:  # noqa: BLE001 — surfaced below
+                first_error, error_kind = exc, "playback"
+                break
+            total_duration += item.audio.duration_s
+            if item.cue is None:
+                spoke_any = True
+                sentences += 1
+
+        timing = {
+            "first_audio_at": first_audio_at,
+            "first_answer_audio_at": first_answer_audio_at,
+            "cue": cue,
+            "sentences": sentences,
+        }
+        if first_error is None:
+            # Success (possibly empty — nothing streamed). Restore state +
+            # arm the single post-speak cooldown if anything reached the
+            # speaker — a cue alone can bleed into the mic too.
+            self._finish_utterance(prev_state, spoke=drove_speaker)
             return {
-                "ok": False,
-                "error": str(first_error),
-                "error_kind": error_kind,
-                "duration_s": total_duration,
-                "spoke_any": spoke_any,
+                "ok": True, "duration_s": total_duration, "spoke_any": spoke_any,
+                **timing,
             }
-        finally:
-            close = getattr(chunk_iter, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:  # pragma: no cover — defensive teardown
-                    logger.debug("chunk generator close raised", exc_info=True)
+
+        # Error path: surface it, and arm the cooldown if we drove the
+        # speaker at all — even a partial reply can bleed into the shared
+        # mic (same contract as speak()'s mid-playback failure).
+        self._fail_turn(
+            f"voice reply failed ({error_kind}): {first_error}",
+            drove_speaker=drove_speaker,
+        )
+        return {
+            "ok": False,
+            "error": str(first_error),
+            "error_kind": error_kind,
+            "duration_s": total_duration,
+            "spoke_any": spoke_any,
+            **timing,
+        }
+
+    # ──────────────────────────────────────────────────────────────
+    # Spoken cues (WARP-3124)
+    # ──────────────────────────────────────────────────────────────
+
+    def prime_cues(self) -> int:
+        """Pre-synthesize and cache every cue phrase, so a cue plays with no
+        Piper round trip. main.py calls this once from its warm-up thread,
+        after the Piper voice is loaded. Best-effort and never raises;
+        skipped while TTS is unreachable (a cue then synthesizes on first
+        use). Returns how many cues are cached."""
+        if self._tts is None or not self._tts_available:
+            return 0
+        for kind in CUE_PHRASES:
+            self._synthesize_cue(kind)
+        with self._lock:
+            return len(self._cue_cache)
+
+    def _cue_audio(self, kind: str) -> Optional[SynthesizedAudio]:
+        """The cue's PCM — cached, else synthesized now. None when it can't
+        be had: a cue is optional and never fails a turn."""
+        with self._lock:
+            cached = self._cue_cache.get(kind)
+        if cached is not None:
+            return cached
+        return self._synthesize_cue(kind)
+
+    def _synthesize_cue(self, kind: str) -> Optional[SynthesizedAudio]:
+        text = CUE_PHRASES.get(kind)
+        if not text or self._tts is None:
+            return None
+        try:
+            audio = self._tts.synthesize(text)
+        except Exception as exc:  # noqa: BLE001 — a cue is optional
+            logger.info("voice cue %r not synthesized: %s", kind, exc)
+            return None
+        if not audio.pcm:
+            return None
+        with self._lock:
+            self._cue_cache[kind] = audio
+        return audio
 
     def _finish_utterance(
         self, prev_state: Optional[PipelineState], *, spoke: bool,
@@ -1350,13 +1824,27 @@ class WakePipeline:
         synthesized + played while later sentences are still arriving. When
         the LLM delivers the whole reply in one delta (today's reality),
         the chunker still splits it into sentences so playback of sentence 1
-        starts before the rest is synthesized."""
-        def _chunks() -> Iterator[str]:
+        starts before the rest is synthesized.
+
+        WARP-3124: reads `reply_events`, so `SpokenCue` markers pass through
+        in order — straight to the speak path, never into the chunker — and
+        the result carries `first_delta_at` (time.monotonic of the first
+        content delta) for the turn timing. The generator runs on the
+        synth-ahead producer thread; `first_delta` is written there once and
+        read here only after the utterance is over."""
+        first_delta: list[float] = []
+
+        def _chunks() -> Iterator[Union[str, SpokenCue]]:
             chunker = SentenceChunker()
-            stream = self._llm.reply_stream(transcript, tool_choice=tool_choice)
+            stream = self._llm.reply_events(transcript, tool_choice=tool_choice)  # type: ignore[union-attr]
             try:
-                for delta in stream:
-                    for sentence in chunker.push(delta):
+                for item in stream:
+                    if isinstance(item, SpokenCue):
+                        yield item
+                        continue
+                    if item and not first_delta:
+                        first_delta.append(time.monotonic())
+                    for sentence in chunker.push(item):
                         yield sentence
                 for sentence in chunker.flush():
                     yield sentence
@@ -1364,11 +1852,11 @@ class WakePipeline:
                 # Close the SSE explicitly (not via GC) so an early bail-out
                 # tears the orchestrator stream down deterministically — see
                 # the WARP-329 note in _run_speak_chunks.
-                close = getattr(stream, "close", None)
-                if callable(close):
-                    close()
+                _close_quietly(stream)
 
-        return self._speak_chunks(_chunks())
+        result = self._speak_chunks(_chunks())
+        result["first_delta_at"] = first_delta[0] if first_delta else None
+        return result
 
     # ──────────────────────────────────────────────────────────────
     # Calibration live-apply (WARP-1055)
@@ -1633,6 +2121,12 @@ class WakePipeline:
                 calibration_mode_expires_at=(
                     self._calibration_mode_until
                     if self._calibration_mode_active(now)
+                    else None
+                ),
+                # A copy: the snapshot must not alias pipeline state.
+                last_turn_timing=(
+                    dict(self._last_turn_timing)
+                    if self._last_turn_timing is not None
                     else None
                 ),
             )
@@ -2189,6 +2683,12 @@ class WakePipeline:
             self._last_wake_model = event.model_name
             if not calibrating:
                 self._state = "wake_detected"
+                # A new turn starts clean: drop the last failed turn's
+                # note (WARP-3199). A latched 'error' never reaches here —
+                # _on_frame drops its frames.
+                self._error_message = None
+                # WARP-3124 — a handled wake starts the turn's timing.
+                self._turn_timing = _TurnTiming(wake_at=time.monotonic())
 
         if calibrating:
             logger.info(
@@ -2199,6 +2699,11 @@ class WakePipeline:
             # recognizer's half-decoded utterance into the next try.
             self._reset_detector()
             return
+
+        # WARP-3127: start loading the chat model now, while the person is
+        # still speaking. At the fire site (not in _default_on_wake) so an
+        # injected on_wake can't bypass it; hands off and returns at once.
+        self._maybe_warm_llm()
 
         try:
             self._on_wake(event)
@@ -2239,6 +2744,11 @@ class WakePipeline:
             return
         self._stt_session = session
         self._transcribe_started_at = time.time()
+        # WARP-3124 — capture-open stamp (a turn with no wake stamp, e.g. a
+        # test driving STT directly, still gets a timing record).
+        if self._turn_timing is None:
+            self._turn_timing = _TurnTiming()
+        self._turn_timing.capture_open_at = time.monotonic()
         # Reset end-of-speech (VAD) state for this turn.
         self._stt_speech_started = False
         self._stt_silence_s = 0.0
@@ -2289,6 +2799,7 @@ class WakePipeline:
                 "transcribing: end-of-speech (%.1fs speech, %.1fs trailing silence)",
                 self._stt_speech_s, self._stt_silence_s,
             )
+            self._mark_capture_end("silence")
             self._finish_transcription()
             return
 
@@ -2296,7 +2807,17 @@ class WakePipeline:
         # runaway never holds the mic open forever.
         if elapsed >= self._stt_max_record_s:
             logger.info("transcribing: max-record cap reached (%.1fs)", elapsed)
+            self._mark_capture_end("cap")
             self._finish_transcription()
+
+    def _mark_capture_end(self, vad_end: str) -> None:
+        """WARP-3124 — stamp why and when the capture window closed."""
+        timing = self._turn_timing
+        if timing is None:
+            return
+        timing.capture_end_at = time.monotonic()
+        timing.speech_s = self._stt_speech_s
+        timing.vad_end = vad_end
 
     def _finish_transcription(self) -> None:
         """Send audio-stop, block for transcript, transition state."""
@@ -2311,6 +2832,8 @@ class WakePipeline:
             self._abort_transcription(f"finish: {exc}")
             return
         session.close()
+        if self._turn_timing is not None:
+            self._turn_timing.transcript_at = time.monotonic()  # WARP-3124
 
         now = time.time()
         with self._lock:
@@ -2355,6 +2878,27 @@ class WakePipeline:
             self._state = "error"
             self._error_message = msg
 
+    def _fail_turn(self, msg: str, *, drove_speaker: bool = False) -> None:
+        """One voice turn failed — TTS, playback, or the LLM reply stream
+        (WARP-3199). Report why on /voice/status, then keep listening: the
+        next wake is a fresh try against a dependency that has usually come
+        back (a TTS timeout, a dropped SSE). Latching 'error' here left the
+        assistant deaf and /audio/measure refusing until voice-io restarted.
+        Stuck faults (the detector, the capture loop) still use _set_error,
+        and one that landed mid-turn keeps its state and message.
+
+        `drove_speaker` arms the post-speak cooldown in the same lock hold
+        as the flip to 'listening', so no frame reaches the detector in
+        between (a partial reply can bleed into the mic)."""
+        with self._lock:
+            if drove_speaker:
+                self._speak_ended_at = time.time()
+            if self._state == "error":
+                return
+            if self._state in ("speaking", "transcript_ready"):
+                self._state = "listening"
+            self._error_message = msg
+
     @staticmethod
     def _default_on_wake(event: WakeEvent) -> None:
         logger.info(
@@ -2372,7 +2916,47 @@ class WakePipeline:
         Any operator-supplied `on_transcript` callback REPLACES this
         default. Set it via the constructor if you want different
         behaviour (e.g. dashboard-driven dispatch in commit 8).
+
+        WARP-3124: every turn that reaches here — answered, fragment,
+        empty, no LLM, or failed — ends with exactly ONE `voice_turn_timing`
+        INFO line (and /voice/status `last_turn_timing`).
         """
+        timing = self._turn_timing or _TurnTiming()
+        self._turn_timing = None
+        if timing.transcript_at is None:
+            timing.transcript_at = time.monotonic()
+        outcome: str = "error"
+        speak: Optional[dict[str, Any]] = None
+        try:
+            outcome, speak = self._answer_transcript(transcript)
+        finally:
+            self._record_turn_timing(timing, outcome, speak)
+
+    def _record_turn_timing(
+        self,
+        timing: _TurnTiming,
+        outcome: str,
+        speak: Optional[dict[str, Any]],
+    ) -> None:
+        """Log the turn's ONE `voice_turn_timing` INFO line (JSON, ms
+        fields, null where a stage didn't happen) and keep it for
+        /voice/status (WARP-3124)."""
+        summary = timing.summary(
+            outcome=outcome, speak=speak, ended_at=time.monotonic(),
+        )
+        summary["ended_at"] = round(time.time(), 3)
+        with self._lock:
+            self._last_turn_timing = summary
+        logger.info("voice_turn_timing %s", json.dumps(summary))
+
+    def _answer_transcript(
+        self, transcript: str,
+    ) -> tuple[str, Optional[dict[str, Any]]]:
+        """The default turn: gate the transcript, stream the LLM reply,
+        speak it. Returns (outcome, speak result) for the turn timing:
+        answered | no_reply | error (speak ran) or empty | fragment |
+        no_llm (it didn't), or volume (a spoken volume command handled
+        locally, see _answer_volume_intent)."""
         # WARP-1058 — the turn's wake context for the outcome row. Read
         # without the lock (GIL-atomic; same discipline as the other
         # single-field reads on this thread).
@@ -2384,7 +2968,7 @@ class WakePipeline:
                 "wake_heard",
                 score=wake_score, threshold=self._threshold, model=wake_model,
             )
-            return
+            return "empty", None
         if not transcript_is_actionable(transcript):
             # Residual false wakes (a phonetic near-collision on the TV —
             # "hey, drop it") capture room fragments like "it." or "uh".
@@ -2400,7 +2984,17 @@ class WakePipeline:
                 "wake_ignored",
                 score=wake_score, threshold=self._threshold, model=wake_model,
             )
-            return
+            return "fragment", None
+        # Spoken volume commands are handled HERE, before the LLM check and
+        # the intent gate: local device control on the shared controller,
+        # so "turn it up" works with the model (or the orchestrator) down.
+        if self._volume is not None:
+            volume_intent = classify_volume_intent(transcript)
+            if volume_intent is not None:
+                return self._answer_volume_intent(
+                    self._volume, volume_intent,
+                    wake_score=wake_score, wake_model=wake_model,
+                )
         if self._llm is None or not self._llm_available:
             logger.info(
                 "transcript ready (LLM unavailable, not speaking): len=%d",
@@ -2410,12 +3004,12 @@ class WakePipeline:
                 "wake_heard",
                 score=wake_score, threshold=self._threshold, model=wake_model,
             )
-            return
+            return "no_llm", None
         # Intent gate: short-circuit speculative tool calls on greetings,
         # time-of-day, and who-are-you utterances. The orchestrator's
         # agent loop honors tool_choice="none" by advertising zero
-        # tools — the model can only answer from the system prompt
-        # context, which already carries the live time + location.
+        # tools — the model can only answer from its prompt, whose user
+        # turn opens with the live time + location (llm.build_turn_context).
         tool_choice = classify_tool_choice(transcript)
         if tool_choice == "none":
             logger.info(
@@ -2439,8 +3033,63 @@ class WakePipeline:
         # WARP-1058 — the §3.4 outcome row. "Answered" means the user
         # actually HEARD a reply; a failed / empty / rejected reply is
         # honestly just "Heard the wake word" (the fault itself surfaces via
-        # error_message / health, not the feed).
+        # error_message, not the feed). So is a reply played into a muted
+        # speaker.
         self._emit_activity(
-            "wake_answered" if spoke else "wake_heard",
+            "wake_answered" if spoke and self._output_audible() else "wake_heard",
             score=wake_score, threshold=self._threshold, model=wake_model,
         )
+        if spoke:
+            return "answered", result
+        return ("error" if result.get("error") else "no_reply"), result
+
+    def _answer_volume_intent(
+        self,
+        volume: VolumeController,
+        intent: VolumeIntent,
+        *,
+        wake_score: Optional[float],
+        wake_model: Optional[str],
+    ) -> tuple[str, Optional[dict[str, Any]]]:
+        """Execute a spoken volume command locally and acknowledge it.
+
+        No LLM, no orchestrator. The acknowledgement goes through speak(),
+        so it plays at the NEW level ("Volume 40."); a mute is applied
+        silently; an unmute says "Unmuted." at the restored level. The
+        change applies even when TTS is down. Turn outcome: "volume".
+        """
+        ack: Optional[str]
+        if intent.kind == "set":
+            ack = f"Volume {volume.set_level(intent.value).current.level}."
+        elif intent.kind == "change":
+            ack = f"Volume {volume.change(intent.value).current.level}."
+        elif intent.kind == "mute":
+            volume.set_muted(True)
+            ack = None
+        elif intent.kind == "unmute":
+            volume.set_muted(False)
+            ack = "Unmuted."
+        else:  # query
+            ack = f"Volume is {volume.state().level}."
+        state = volume.state()
+        # Length-free: the kind and the resulting state say everything, and
+        # the transcript text never reaches INFO (WARP-3193 SEC-DATA-9).
+        logger.info(
+            "spoken volume command handled locally: %s → level=%d muted=%s",
+            intent.kind, state.level, state.muted,
+        )
+        speak = self.speak(ack) if ack is not None else None
+        if speak is not None and not speak.get("ok"):
+            logger.info("volume acknowledgement not spoken: %s", speak.get("error"))
+        heard = bool(
+            speak is not None
+            and speak.get("ok")
+            and speak.get("duration_s")
+            and self._output_audible()
+        )
+        # No volume-specific activity type exists; reuse the honest pair.
+        self._emit_activity(
+            "wake_answered" if heard else "wake_heard",
+            score=wake_score, threshold=self._threshold, model=wake_model,
+        )
+        return "volume", speak

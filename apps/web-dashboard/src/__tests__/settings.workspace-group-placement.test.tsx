@@ -31,6 +31,9 @@ const fetchPersonaMock = vi.fn();
 const fetchWorkspaceLocationsMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
+  // WARP-3264 — Settings mounts PlaceLookupSwitch.
+  fetchPlaceLookupChannel: vi.fn().mockResolvedValue(null),
+  setPlaceLookupChannel: vi.fn(),
   fetchWorkspaceLocations: (...a: any[]) => fetchWorkspaceLocationsMock(...a),
   createWorkspaceLocation: vi.fn(),
   updateWorkspaceLocation: vi.fn(),

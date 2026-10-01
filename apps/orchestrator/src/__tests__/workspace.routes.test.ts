@@ -10,7 +10,10 @@
  *   - a person on the dashboard reads log/diff/output, creates and deletes;
  *     the write ops are a run's alone (403 for a person without a run);
  *   - create rolls the sandbox back when the row cannot be written, and
- *     delete refuses while a run is active;
+ *     delete refuses while a run is active, or while the workspace backs an
+ *     extension that can still be installed from it (WARP-3200) — decided
+ *     behind the row lock, in the transaction that deletes the row, and the
+ *     repository removed only after the row is gone;
  *   - propose flips the row to `proposed` with the tag;
  *   - git: the mcp principal is 403, family and guest fetch (push flag off),
  *     owner pushes (push flag on), an unknown repo 404;
@@ -25,6 +28,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express, { type Request, type Response, type NextFunction } from "express";
+import http from "node:http";
+import { Readable } from "node:stream";
 import { createHash } from "node:crypto";
 
 vi.mock("../config.js", () => ({
@@ -64,6 +69,16 @@ const ACME: ConnectorDraftFacts = {
 };
 const ACME_READBACK = "drafts a connector for Acme; nothing on this box will dial api.acme.example until Warp Lab ships it";
 
+/** What the sandbox client hands the route: a stream plus the length and sha256 the sandbox stated. */
+function bundleOf(bytes: Buffer, over: { sha256?: string; size?: number } = {}) {
+  return {
+    stream: Readable.from([bytes.subarray(0, 5), bytes.subarray(5)]),
+    head: HEAD,
+    size: over.size ?? bytes.length,
+    sha256: over.sha256 ?? createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
 function fakeSandbox(draft: ConnectorDraftFacts | null = null) {
   const calls: Array<{ op: string; args: unknown[] }> = [];
   const rec = (op: string) => (...args: unknown[]) => {
@@ -95,7 +110,7 @@ function fakeSandbox(draft: ConnectorDraftFacts | null = null) {
     }),
     bundle: vi.fn(async (id: string) => {
       rec("bundle")(id);
-      return { body: BUNDLE, head: HEAD };
+      return bundleOf(BUNDLE);
     }),
     connectorDraft: vi.fn(async (id: string, ref: string) => {
       rec("connectorDraft")(id, ref);
@@ -128,7 +143,7 @@ async function seed(db: ReturnType<typeof createAgentRunPrismaMock>, id = "ws-a"
 
 async function seedRun(db: ReturnType<typeof createAgentRunPrismaMock>, workspaceId: string | null, userId = "u-owner", status = "running") {
   const row = await db.prisma.agentRun.create({
-    data: { userId, goal: "g", model: "m", maxIter: 5, workspaceId },
+    data: { userId, goal: "g", model: "m", maxIter: 5, workspaceId, origin: "workshop" },
     select: { id: true },
   });
   await db.prisma.agentRun.updateMany({ where: { id: row.id }, data: { status } });
@@ -381,6 +396,113 @@ describe("create / detail / delete", () => {
     expect((await request(asAdmin.app).delete("/api/workspace/ws-b")).status).toBe(403);
   });
 
+  // WARP-3200 — the sandbox re-exports an extension's code from its workspace
+  // on every install (a promote, an enable, the reconciler after a reboot),
+  // so the workspace must outlive every extension that can still be installed.
+  it.each(["signed", "installed", "live", "disabled", "failed"])(
+    "delete refuses while the workspace backs a %s extension, and touches nothing",
+    async (status) => {
+      const { app, db, sandbox } = buildApp(owner);
+      await seed(db);
+      db.extensions.push({ id: "ws-a", workspaceId: "ws-a", name: "Word counter", status });
+      const res = await request(app).delete("/api/workspace/ws-a");
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('This workspace is the source of the extension "Word counter"; uninstall the extension first');
+      expect(sandbox.calls.some((c) => c.op === "remove")).toBe(false);
+      expect(db.workspaces).toHaveLength(1);
+      expect(recordActivityMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("delete goes ahead once the workspace's extension is uninstalled", async () => {
+    const { app, db, sandbox } = buildApp(owner);
+    await seed(db);
+    db.extensions.push({ id: "ws-a", workspaceId: "ws-a", name: "Word counter", status: "uninstalled" });
+    const res = await request(app).delete("/api/workspace/ws-a");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ id: "ws-a", deleted: true });
+    expect(sandbox.calls.filter((c) => c.op === "remove").map((c) => c.args)).toEqual([["ws-a"]]);
+    expect(db.workspaces).toHaveLength(0);
+  });
+
+  it("decides behind the row lock: lock, extension read and row delete in one READ COMMITTED transaction, the repository after", async () => {
+    const { app, db, sandbox } = buildApp(owner);
+    await seed(db);
+    expect((await request(app).delete("/api/workspace/ws-a")).status).toBe(200);
+    expect(db.workspaceLocks).toEqual([{ id: "ws-a", mode: "FOR UPDATE" }]);
+    expect(db.prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(db.prisma.$transaction.mock.calls[0][1]).toEqual({ isolationLevel: "ReadCommitted" });
+    const order = [
+      db.prisma.$queryRaw.mock.invocationCallOrder[0],
+      db.prisma.extension.findUnique.mock.invocationCallOrder[0],
+      db.prisma.workshopWorkspace.delete.mock.invocationCallOrder[0],
+      (sandbox.client.remove as unknown as { mock: { invocationCallOrder: number[] } }).mock.invocationCallOrder[0],
+    ];
+    expect(order.every((n) => typeof n === "number")).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+
+  it("a promote that committed while the delete waited for the row is seen, and the delete refuses", async () => {
+    // MUTATION: read the extension before taking the lock (the old
+    // findUnique → check → act) and this is a 200 that leaves a signed
+    // extension whose workspace, and repository, are gone.
+    const { app, db, sandbox } = buildApp(owner);
+    await seed(db);
+    db.setOnWorkspaceLock(({ id }) => {
+      db.extensions.push({ id, workspaceId: id, name: "Word counter", status: "signed" });
+    });
+    const res = await request(app).delete("/api/workspace/ws-a");
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('This workspace is the source of the extension "Word counter"; uninstall the extension first');
+    expect(sandbox.calls.some((c) => c.op === "remove")).toBe(false);
+    expect(db.workspaces).toHaveLength(1);
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("a workspace another delete removed while this one waited for the row is 404, and nothing is removed twice", async () => {
+    const { app, db, sandbox } = buildApp(owner);
+    await seed(db);
+    db.setOnWorkspaceLock(({ id }) => {
+      db.workspaces.splice(db.workspaces.findIndex((w) => w.id === id), 1);
+    });
+    const res = await request(app).delete("/api/workspace/ws-a");
+    expect(res.status).toBe(404);
+    expect(sandbox.calls.some((c) => c.op === "remove")).toBe(false);
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("a row delete that fails leaves the row AND its repository: never a row with nothing behind it", async () => {
+    // MUTATION: remove the repository before the transaction (the old order)
+    // and the row survives with its repository gone.
+    const { app, db, sandbox } = buildApp(owner);
+    await seed(db);
+    db.prisma.workshopWorkspace.delete.mockRejectedValueOnce(new Error("db down"));
+    const res = await request(app).delete("/api/workspace/ws-a");
+    expect(res.status).toBe(500);
+    expect(db.workspaces).toHaveLength(1);
+    expect(sandbox.calls.some((c) => c.op === "remove")).toBe(false);
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("a repository the sandbox cannot remove after the row is gone: the delete stands, and the audit row says what was left", async () => {
+    const { app, db, sandbox } = buildApp(owner);
+    await seed(db);
+    (sandbox.client.remove as unknown as { mockRejectedValueOnce: (e: Error) => void }).mockRejectedValueOnce(
+      new WorkspaceSandboxError("the sandbox is unreachable", 503, "UNREACHABLE"),
+    );
+    const res = await request(app).delete("/api/workspace/ws-a");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ id: "ws-a", deleted: true });
+    expect(db.workspaces).toHaveLength(0);
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock.mock.calls[0][0]).toMatchObject({
+      severity: "warn",
+      what: "Workspace deleted, but its repository could not be removed",
+      sub: "ws-a",
+      refs: { workspaceId: "ws-a", repositoryError: "the sandbox is unreachable" },
+    });
+  });
+
   it("lists templates and workspaces with the last run", async () => {
     const { app, db } = buildApp(admin);
     await seed(db);
@@ -565,6 +687,7 @@ describe("GET /api/workspace/:id/export (WARP-2899)", () => {
       expect(res.headers["x-content-type-options"]).toBe("nosniff");
       expect(res.headers["cache-control"]).toBe("no-store");
       expect(Buffer.compare(res.body as Buffer, BUNDLE)).toBe(0);
+      expect(res.headers["content-length"]).toBe(String(BUNDLE.length));
       // MUTATION: drop the recordActivity call → red.
       const rows = recordActivityMock.mock.calls.filter((c) => (c[0] as { what?: string }).what === "Workspace exported");
       expect(rows).toHaveLength(1);
@@ -602,6 +725,93 @@ describe("GET /api/workspace/:id/export (WARP-2899)", () => {
     expect(sandbox.calls).toEqual([]);
     // (the denial itself is recorded — recordAccessDenied — but no export row)
     expect(recordActivityMock).not.toHaveBeenCalledWith(expect.objectContaining({ what: "Workspace exported" }));
+  });
+
+  it("streams through, and a stream that does not match x-bundle-sha256 is refused: no export row", async () => {
+    // MUTATION: drop the flush check in the verify transform → 200 + a row.
+    const { app, db, sandbox } = buildApp(owner, undefined, ACME);
+    await seed(db);
+    (sandbox.client.bundle as unknown as { mockResolvedValueOnce: (v: unknown) => void }).mockResolvedValueOnce(
+      bundleOf(BUNDLE, { sha256: "0".repeat(64) }),
+    );
+    const outcome = await request(app)
+      .get("/api/workspace/ws-a/export")
+      .buffer(true)
+      .parse(binary)
+      .then(
+        (r) => ({ ok: true as const, r }),
+        (e: unknown) => ({ ok: false as const, e }),
+      );
+    // The length was right, so the client may hold every byte; what it also
+    // holds is the sha256 the export was checked against, and the audit log
+    // holds no row claiming the export happened.
+    if (outcome.ok) expect(outcome.r.headers["x-bundle-sha256"]).toBe("0".repeat(64));
+    expect(recordActivityMock).not.toHaveBeenCalledWith(expect.objectContaining({ what: "Workspace exported" }));
+  });
+
+  it("an export that starts is audited even when the stream fails: a started row and a failed row, no completed row", async () => {
+    // MUTATION: drop the started/failed rows (audit only after success) → red.
+    const { app, db, sandbox } = buildApp(owner, undefined, ACME);
+    await seed(db);
+    (sandbox.client.bundle as unknown as { mockResolvedValueOnce: (v: unknown) => void }).mockResolvedValueOnce(
+      bundleOf(BUNDLE, { sha256: "0".repeat(64) }),
+    );
+    await request(app).get("/api/workspace/ws-a/export").buffer(true).parse(binary).catch(() => undefined);
+    const whats = recordActivityMock.mock.calls.map((c) => (c[0] as { what?: string }).what);
+    expect(whats).toContain("Workspace export started");
+    expect(whats).toContain("Workspace export failed");
+    expect(whats).not.toContain("Workspace exported");
+    const failed = recordActivityMock.mock.calls.find((c) => (c[0] as { what?: string }).what === "Workspace export failed")![0];
+    expect(failed).toMatchObject({ severity: "warn", refs: expect.objectContaining({ workspaceId: "ws-a", bytes: BUNDLE.length }) });
+  });
+
+  it("a client that aborts mid-download still leaves a started row and a failed row", async () => {
+    const { app, db, sandbox } = buildApp(owner, undefined, ACME);
+    await seed(db);
+    const big = Buffer.alloc(4 * 1024 * 1024, 1);
+    (sandbox.client.bundle as unknown as { mockResolvedValueOnce: (v: unknown) => void }).mockResolvedValueOnce({
+      stream: Readable.from((async function* () {
+        for (let i = 0; i < 64; i++) {
+          yield big.subarray(0, 65536);
+          await new Promise((r) => setTimeout(r, 5));
+        }
+      })()),
+      head: HEAD,
+      size: 64 * 65536,
+      sha256: "f".repeat(64),
+    });
+    await new Promise<void>((resolve) => {
+      const server = app.listen(0, () => {
+        const port = (server.address() as { port: number }).port;
+        const req = http.get({ port, path: "/api/workspace/ws-a/export" }, (res) => {
+          res.once("data", () => {
+            req.destroy();
+            setTimeout(() => server.close(() => resolve()), 300);
+          });
+        });
+        req.on("error", () => undefined);
+      });
+    });
+    const whats = recordActivityMock.mock.calls.map((c) => (c[0] as { what?: string }).what);
+    expect(whats).toContain("Workspace export started");
+    expect(whats).toContain("Workspace export failed");
+    expect(whats).not.toContain("Workspace exported");
+  });
+
+  it("an audit failure after a completed download is logged, not relayed: the client still gets the whole bundle", async () => {
+    const { app, db } = buildApp(owner, undefined, ACME);
+    await seed(db);
+    recordActivityMock.mockImplementation(async (row: { what?: string }) => {
+      if (row.what === "Workspace exported") throw new Error("audit store down");
+    });
+    try {
+      const res = await request(app).get("/api/workspace/ws-a/export").buffer(true).parse(binary);
+      expect(res.status).toBe(200);
+      expect(Buffer.compare(res.body as Buffer, BUNDLE)).toBe(0);
+    } finally {
+      recordActivityMock.mockReset();
+      recordActivityMock.mockResolvedValue(null);
+    }
   });
 
   it("an owner's request carrying a run header is 403 — a run does not export", async () => {

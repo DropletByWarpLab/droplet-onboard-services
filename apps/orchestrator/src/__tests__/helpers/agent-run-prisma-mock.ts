@@ -18,6 +18,12 @@ import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 import { userDirectory, type DirectoryUser } from "./user-directory.js";
 
+/** WARP-3200 — one row lock taken through the guard's raw query. */
+export interface WorkspaceLock {
+  id: string;
+  mode: "FOR UPDATE" | "FOR KEY SHARE";
+}
+
 export interface AgentRunRow {
   id: string;
   userId: string;
@@ -57,6 +63,16 @@ export interface AgentRunRow {
   cloudGate: string;
   offLanProvider: string | null;
   offLanWithheldTools: string[];
+  /** WARP-3299 — who started it, the chat turn that did, and what it owes. */
+  origin: string;
+  originMessageId: string | null;
+  originToolCallId: string | null;
+  title: string;
+  deliverable: string;
+  summary: string | null;
+  artifacts: unknown;
+  resultDelivery: string;
+  queueWait: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -82,6 +98,10 @@ function matches(row: Record<string, unknown>, where: Record<string, unknown>): 
       const c = cond as Record<string, unknown>;
       if ("in" in c) {
         if (!(c.in as unknown[]).includes(actual)) return false;
+        continue;
+      }
+      if ("not" in c) {
+        if (actual === c.not) return false;
         continue;
       }
       if ("notIn" in c) {
@@ -232,6 +252,15 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
         cloudGate: "unchecked",
         offLanProvider: null,
         offLanWithheldTools: [],
+        origin: args.data.origin as string,
+        originMessageId: (args.data.originMessageId as string | null) ?? null,
+        originToolCallId: (args.data.originToolCallId as string | null) ?? null,
+        title: (args.data.title as string | undefined) ?? "",
+        deliverable: (args.data.deliverable as string | undefined) ?? "",
+        summary: null,
+        artifacts: [],
+        resultDelivery: (args.data.resultDelivery as string | undefined) ?? "not_applicable",
+        queueWait: (args.data.queueWait as string | undefined) ?? "queue",
         createdAt: now(),
         updatedAt: now(),
       };
@@ -345,6 +374,33 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
     }),
   };
 
+  /** WARP-2900 — promoted extensions, read by the workspace delete guard. */
+  const extensions: Array<Record<string, unknown>> = [];
+  const extension = {
+    findUnique: vi.fn(async (args: { where: { workspaceId: string }; select?: Record<string, boolean> }) => {
+      const row = extensions.find((r) => r.workspaceId === args.where.workspaceId);
+      return row ? pick(row, args.select) : null;
+    }),
+  };
+
+  /**
+   * WARP-3200 — the workspace row lock (workspace-source-guard.service.ts),
+   * the only raw SQL this mock answers. `onWorkspaceLock` runs as the lock
+   * is granted: the seam where a suite lands what a concurrent writer
+   * committed while this one waited for it.
+   */
+  const workspaceLocks: WorkspaceLock[] = [];
+  let onWorkspaceLock: ((lock: WorkspaceLock) => void) | null = null;
+  const $queryRaw = vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const sql = strings.join("?").replace(/\s+/g, " ").trim();
+    const m = /^SELECT "id" FROM "WorkshopWorkspace" WHERE "id" = \? (FOR UPDATE|FOR KEY SHARE)$/.exec(sql);
+    if (!m) throw new Error(`agent-run-prisma-mock: unsupported raw query: ${sql}`);
+    const lock: WorkspaceLock = { id: String(values[0]), mode: m[1] as WorkspaceLock["mode"] };
+    workspaceLocks.push(lock);
+    onWorkspaceLock?.(lock);
+    return workspaces.some((r) => r.id === lock.id) ? [{ id: lock.id }] : [];
+  });
+
   /** WARP-2180 — recurring runs. */
   const schedules: Array<Record<string, unknown>> = [];
   let scheduleSeq = 0;
@@ -388,17 +444,22 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
     agentRun,
     agentRunSchedule,
     workshopWorkspace,
+    extension,
     user,
+    $queryRaw,
     // Rolls back on a throw, like the real thing: the ticker's enqueue+advance
-    // atomicity test depends on a failed advance leaving no run behind.
-    $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => {
+    // atomicity test depends on a failed advance leaving no run behind, and
+    // the workspace delete's on a failed row delete leaving the row.
+    $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>, _options?: unknown) => {
       const rowsBefore = structuredClone(rows);
       const schedulesBefore = structuredClone(schedules);
+      const workspacesBefore = structuredClone(workspaces);
       try {
         return await fn(prisma);
       } catch (err) {
         rows.splice(0, rows.length, ...rowsBefore);
         schedules.splice(0, schedules.length, ...schedulesBefore);
+        workspaces.splice(0, workspaces.length, ...workspacesBefore);
         throw err;
       }
     }),
@@ -409,7 +470,12 @@ export function createAgentRunPrismaMock(opts: AgentRunPrismaMockOptions = {}) {
     prisma: prisma as unknown as PrismaClient & typeof prisma,
     rows,
     workspaces,
+    extensions,
     schedules,
+    workspaceLocks,
+    setOnWorkspaceLock(fn: typeof onWorkspaceLock) {
+      onWorkspaceLock = fn;
+    },
     row: (id: string) => {
       const r = rows.find((x) => x.id === id);
       if (!r) throw new Error(`no row ${id}`);

@@ -23,6 +23,25 @@
  *     trail. Idempotent — re-posting "business" is a no-op 200,
  *     not a 400.
  *
+ *   PUT /api/settings/workspace/personal-drive
+ *     Body: { enabled: boolean }
+ *     → { personalDriveEnabled } (on)
+ *     → { personalDriveEnabled: false, revokedDriveLogins } (off)
+ *     Owner-only (same rule as POST above; admin is refused). Turns the
+ *     personal WebDAV drive on or off for the whole box (default OFF); the
+ *     flag is `Workspace.personalDriveEnabled`, read back by GET above as
+ *     `personalDriveEnabled` and enforced by POST
+ *     /api/storage/network-drive/personal. Every change is an Activity row,
+ *     written right after the flag so it exists even if a later step throws.
+ *     Every `enabled: false` write (not just a true→false transition, so a
+ *     retry after a partial failure finishes the job) also marks every
+ *     active `DeviceClient.kind = personal_drive` login revoked — native-app
+ *     pairings are never touched — and reports how many in
+ *     `revokedDriveLogins`. The revoke outcome is a SECOND Activity row
+ *     (count on success, "failed after N revoked" on a throw, which stays a
+ *     500). The upstream Nextcloud delete is best-effort, so the count is rows
+ *     marked revoked, not passwords Nextcloud confirmed deleted.
+ *
  * The setup wizard's org step calls POST once at first-run to pin the
  * singleton to BUSINESS. This route is the orchestrator half; the
  * dashboard half in `apps/web-dashboard/src/lib/workspace.tsx` is now a
@@ -35,6 +54,12 @@ import { Router, type Request } from "express";
 import { WorkspaceType, type PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { createLogger } from "../lib/logger.js";
+import { recordActivity } from "../services/activity.singleton.js";
+import { actorFromRequest } from "../services/activity.service.js";
+import {
+  revokeActivePersonalDriveLogins,
+  type RevokedDriveLogin,
+} from "../services/device-client-revoke.service.js";
 
 const logger = createLogger("settings-workspace-route");
 
@@ -82,6 +107,8 @@ const postBodySchema = z.object({
   displayName: z.string().min(1).max(120).optional(),
 });
 
+const personalDriveBodySchema = z.object({ enabled: z.boolean() });
+
 export function createSettingsWorkspaceRouter(prisma: PrismaClient): Router {
   const router = Router();
 
@@ -103,6 +130,7 @@ export function createSettingsWorkspaceRouter(prisma: PrismaClient): Router {
           displayName: null,
           setBy: null,
           setAt: null,
+          personalDriveEnabled: false,
         });
         return;
       }
@@ -111,6 +139,7 @@ export function createSettingsWorkspaceRouter(prisma: PrismaClient): Router {
         displayName: row.displayName,
         setBy: row.setBy,
         setAt: row.setAt.toISOString(),
+        personalDriveEnabled: row.personalDriveEnabled,
       });
     } catch (e) {
       next(e);
@@ -182,6 +211,101 @@ export function createSettingsWorkspaceRouter(prisma: PrismaClient): Router {
         setBy: row.setBy,
         setAt: row.setAt.toISOString(),
       });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // ── PUT /api/settings/workspace/personal-drive ─────────────────
+  // Owner-only, like POST above: whether members may hold a full-scope
+  // Nextcloud app password is a box-wide security decision, not routine
+  // admin tuning. Deliberately its own endpoint — POST /settings/workspace
+  // overwrites displayName when the body omits it, so folding a flag into
+  // that body would let an unrelated save silently flip it.
+  router.put("/settings/workspace/personal-drive", async (req, res, next) => {
+    try {
+      const user = getUser(req);
+      if (!user || !getUsername(req)) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      if (user.role !== "owner") {
+        res.status(403).json({
+          error: "owner_required",
+          message: "Only the owner can turn personal drives on or off.",
+        });
+        return;
+      }
+
+      const parsed = personalDriveBodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          error: "invalid_body",
+          message: parsed.error.issues.map((i) => i.message).join("; "),
+        });
+        return;
+      }
+      const { enabled } = parsed.data;
+
+      const row = await prisma.workspace.upsert({
+        where: { id: 1 },
+        update: { personalDriveEnabled: enabled },
+        create: { id: 1, personalDriveEnabled: enabled },
+      });
+
+      // The flag change is audited before anything that can fail: a revoke
+      // that throws below must never leave the switch off with no Activity row.
+      const actor = actorFromRequest(req);
+      logger.info({ user: getUsername(req), enabled }, "personal_drive_setting_set");
+      await recordActivity({
+        kind: "system",
+        severity: "info",
+        sourceIcon: "hard-drive",
+        what: enabled ? "Personal drives turned on" : "Personal drives turned off",
+        sub: null,
+        actor,
+        refs: { setting: "personalDriveEnabled", enabled },
+      });
+
+      if (enabled) {
+        res.json({ personalDriveEnabled: row.personalDriveEnabled });
+        return;
+      }
+
+      // Off: revoke the existing logins, then audit the outcome as its own row.
+      // The flag is already off, but a mint that passed its own check just
+      // before the write can still land after this sweep; the mint route
+      // re-reads the flag after creating its row and revokes that login itself.
+      const revoked: RevokedDriveLogin[] = [];
+      try {
+        await revokeActivePersonalDriveLogins(prisma, revoked);
+      } catch (e) {
+        // Progress survives in `revoked`; the failure stays an error (500 via next).
+        const reason = (e instanceof Error ? e.message : String(e)).slice(0, 200);
+        logger.error({ err: e, revokedDriveLogins: revoked.length }, "personal_drive_revoke_failed");
+        await recordActivity({
+          kind: "system",
+          severity: "err",
+          sourceIcon: "hard-drive",
+          what: "Personal drive logins were not all revoked",
+          sub: `failed after ${revoked.length} revoked: ${reason}`,
+          actor,
+          refs: { setting: "personalDriveEnabled", enabled, revokedDriveLogins: revoked.length, revoked, error: reason },
+        });
+        throw e;
+      }
+      logger.info({ user: getUsername(req), revokedDriveLogins: revoked.length }, "personal_drive_logins_revoked");
+      await recordActivity({
+        kind: "system",
+        severity: "info",
+        sourceIcon: "hard-drive",
+        what: "Personal drive logins revoked",
+        sub: `${revoked.length} personal drive login${revoked.length === 1 ? "" : "s"} revoked`,
+        actor,
+        refs: { setting: "personalDriveEnabled", enabled, revokedDriveLogins: revoked.length, revoked },
+      });
+
+      res.json({ personalDriveEnabled: row.personalDriveEnabled, revokedDriveLogins: revoked.length });
     } catch (e) {
       next(e);
     }

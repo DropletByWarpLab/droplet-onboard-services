@@ -148,6 +148,28 @@ export async function fetchIntegrations(): Promise<IntegrationSummary[]> {
   return res.json();
 }
 
+/**
+ * WARP-3374 — what a MEMBER may know about the connectors: counts and the newest
+ * sync time, with no provider, no per-provider status and no credential expiry.
+ * `GET /api/integrations` (the full list above) is owner/admin only.
+ */
+export interface IntegrationsSummary {
+  connected: number;
+  needsAttention: number;
+  /** ISO, or null when nothing has ever synced. */
+  lastSyncedAt: string | null;
+}
+
+export async function fetchIntegrationsSummary(): Promise<IntegrationsSummary> {
+  const res = await authFetch("/api/integrations/summary");
+  if (res.status === ACTIVITY_FORBIDDEN) throw new ForbiddenError();
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Failed to fetch the integrations summary: ${res.status}`);
+  }
+  return res.json();
+}
+
 // ── The daily report — /api/tools/daily-report/runs ──────────────────────
 //
 // There is no /api/reports/* route and none is needed. The report is a

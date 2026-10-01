@@ -82,6 +82,26 @@ describe.each(PROVIDERS)("disconnectProvider(%s)", (provider) => {
   });
 });
 
+// WARP-3375 — the request body is the owner's answer about the records the
+// connector copied. Always sent, so the box audits a choice, not a default.
+describe("disconnectProvider — records disposition", () => {
+  const body = () => JSON.parse(String(calledInit().body));
+
+  it("sends keep when the caller does not choose", async () => {
+    // Mutation: default the parameter to "delete" → red.
+    await disconnectProvider("hubspot");
+
+    expect(body()).toEqual({ records: "keep" });
+    expect(calledInit().headers).toEqual({ "content-type": "application/json" });
+  });
+
+  it("sends delete only when asked to", async () => {
+    await disconnectProvider("hubspot", "delete");
+
+    expect(body()).toEqual({ records: "delete" });
+  });
+});
+
 /**
  * There is deliberately NO assertion that the client has stopped using the
  * deprecated `eaglesoft` literal aliases.

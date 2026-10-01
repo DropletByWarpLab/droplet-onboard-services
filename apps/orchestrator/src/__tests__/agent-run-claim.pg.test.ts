@@ -114,7 +114,7 @@ describe.skipIf(!RUN)("AgentRun claim is exclusive on Postgres (WARP-2177)", () 
 
   it("the conditional update itself: a second UPDATE on a running row changes nothing", async () => {
     const row = await prisma.agentRun.create({
-      data: { userId: "u", goal: "g", model: "m", maxIter: 3 },
+      data: { userId: "u", goal: "g", model: "m", maxIter: 3, origin: "workshop" },
     });
     created.push(row.id);
     const first = await prisma.agentRun.updateMany({
@@ -140,7 +140,7 @@ describe.skipIf(!RUN)("AgentRun claim is exclusive on Postgres (WARP-2177)", () 
     const ws = await prisma.workshopWorkspace.create({ data: { id: `ws-pg-${Date.now()}`, userId: "u", name: "race" } });
     try {
       const mk = (workspaceId: string | null) =>
-        prisma.agentRun.create({ data: { userId: "u", goal: "g", model: "m", maxIter: 3, workspaceId } });
+        prisma.agentRun.create({ data: { userId: "u", goal: "g", model: "m", maxIter: 3, workspaceId, origin: "workshop" } });
       const first = await mk(ws.id);
       created.push(first.id);
 

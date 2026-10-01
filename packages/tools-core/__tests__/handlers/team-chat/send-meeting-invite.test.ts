@@ -3,14 +3,15 @@
  *
  * Same two-phase contract as team_chat_send_message (share_file posture):
  * phase 1 validates fully (incl. the future-startsAt check, so the user
- * never approves a meeting the orchestrator would refuse) with ZERO HTTP;
+ * never approves a meeting the orchestrator would refuse) with reads only
+ * (roster, address lookup) and ZERO writes;
  * phase 2 resolves recipients, creates/dedupes the thread, then creates
  * the meeting — everything as the forwarded acting user.
  */
 import { describe, it, expect, vi } from "vitest";
 import type { Mock } from "vitest";
 import sendMeetingInvite from "../../../src/handlers/team-chat/send-meeting-invite.js";
-import type { ToolContext } from "../../../src/types.js";
+import type { ToolContext, ToolResult } from "../../../src/types.js";
 
 interface FakeResponse {
   ok: boolean;
@@ -22,10 +23,13 @@ function res(status: number, body: unknown): FakeResponse {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
+// `me` is the person the orchestrator resolved from X-Droplet-User (WARP-3196).
 const CONTACTS = {
+  me: { id: "uuid-alice" },
   contacts: [
     { id: "uuid-alice", displayName: "Alice A", username: "alice", role: "family" },
     { id: "uuid-bob", displayName: "Bob B", username: "bob", role: "family" },
+    { id: "uuid-carol", displayName: "Carol C", username: "carol", role: "guest" },
   ],
 };
 
@@ -302,5 +306,279 @@ describe("team_chat_send_meeting_invite", () => {
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("TEAM_CHAT_SEND_FAILED");
+  });
+});
+
+// WARP-3196 — the organizer is dropped from `recipients` by the User.id the
+// roster names as `me`, on both MCP transports. ctx.userId is User.username
+// on stdio and User.id over HTTP (services/mcp-server/src/context.ts
+// `claims.sub`), so a recipient username compared with it only ever matched
+// on stdio. The fixture's User.id differs from the username, as on a real box.
+const ORGANIZER_NAMINGS = [
+  { transport: "stdio", userId: "alice" },
+  { transport: "HTTP", userId: "uuid-alice" },
+] as const;
+
+describe.each(ORGANIZER_NAMINGS)(
+  "team_chat_send_meeting_invite — the organizer named $userId ($transport)",
+  ({ userId }) => {
+    const created = (threadId: string) =>
+      vi
+        .fn()
+        .mockResolvedValueOnce(res(201, { thread: { id: threadId } }))
+        .mockResolvedValueOnce(
+          res(201, { meeting: { id: "meeting-s", threadId, title: "Sync" }, message: { id: "msg-s" } }),
+        );
+
+    it("[bob, me] invites Bob in a DIRECT thread", async () => {
+      const post = created("thread-dm");
+      const { ctx } = ctxWith({ post, userId });
+      const r = await sendMeetingInvite.handler(
+        { recipients: ["bob", "alice"], title: "Sync", starts_at: futureIso(), confirmed: true },
+        ctx,
+      );
+      if (!r.ok) throw new Error(`expected a successful ToolResult, got ${JSON.stringify(r)}`);
+      expect(post).toHaveBeenNthCalledWith(
+        1,
+        "/api/team-chat/threads",
+        { kind: "direct", participantIds: ["uuid-bob"] },
+        expect.anything(),
+      );
+      expect(r.data).toMatchObject({ recipients: ["bob"] });
+    });
+
+    it("[bob, carol, me] invites Bob and Carol in a group", async () => {
+      const post = created("thread-g");
+      const { ctx } = ctxWith({ post, userId });
+      const r = await sendMeetingInvite.handler(
+        { recipients: ["alice", "bob", "carol"], title: "Sync", starts_at: futureIso(), confirmed: true },
+        ctx,
+      );
+      expect(r.ok).toBe(true);
+      expect(post).toHaveBeenNthCalledWith(
+        1,
+        "/api/team-chat/threads",
+        { kind: "group", participantIds: ["uuid-bob", "uuid-carol"] },
+        expect.anything(),
+      );
+    });
+
+    it("[me] alone is refused with no write — phase 2", async () => {
+      const post = vi.fn();
+      const { ctx } = ctxWith({ post, userId });
+      const r = await sendMeetingInvite.handler(
+        { recipients: ["alice"], title: "Focus time", starts_at: futureIso(), confirmed: true },
+        ctx,
+      );
+      if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
+      expect(r.error?.code).toBe("INVALID_ARGS");
+      expect(r.error?.message).toContain("someone other than yourself");
+      expect(post).not.toHaveBeenCalled();
+    });
+
+    it("[me] alone is refused before the user is asked to approve — phase 1", async () => {
+      const post = vi.fn();
+      const { ctx } = ctxWith({ post, userId });
+      const r = await sendMeetingInvite.handler(
+        { recipients: ["alice"], title: "Focus time", starts_at: futureIso() },
+        ctx,
+      );
+      if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
+      expect(r.status).not.toBe("confirmation_required");
+      expect(r.error?.code).toBe("INVALID_ARGS");
+      expect(post).not.toHaveBeenCalled();
+    });
+
+    it("the approval preview does not name the organizer", async () => {
+      const { ctx, post } = ctxWith({ userId });
+      const r = await sendMeetingInvite.handler(
+        { recipients: ["bob", "alice"], title: "Sync", starts_at: futureIso() },
+        ctx,
+      );
+      if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
+      expect(r.status).toBe("confirmation_required");
+      expect(r.error?.message).toContain("Bob B");
+      expect(r.error?.message).not.toContain("Alice A");
+      expect(r.error?.details).toMatchObject({ recipients: ["bob"] });
+      expect(post).not.toHaveBeenCalled();
+    });
+  },
+);
+
+describe("team_chat_send_meeting_invite — a roster that does not say who is asking", () => {
+  it.each([
+    ["no me", { contacts: CONTACTS.contacts }],
+    ["me without an id", { me: {}, contacts: CONTACTS.contacts }],
+    ["an empty id", { me: { id: "" }, contacts: CONTACTS.contacts }],
+  ])("%s: phase 2 fails closed with no write", async (_label, roster) => {
+    const post = vi.fn();
+    const { ctx } = ctxWith({ get: vi.fn(async () => res(200, roster)), post });
+    const r = await sendMeetingInvite.handler(
+      { recipients: ["bob"], title: "Sync", starts_at: futureIso(), confirmed: true },
+      ctx,
+    );
+    if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
+    expect(r.error?.code).toBe("TEAM_CHAT_SEND_FAILED");
+    expect(post).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * WARP-3403 — "set up a meeting with dave@company.com" reaches Dave, the way
+ * WARP-3349 made team_chat_send_message do: an address is looked up by the
+ * orchestrator (shared `resolveTargets` in _roster.ts) and replaced by that
+ * person's username, a member's or an external guest's (Romain,
+ * 2026-09-30); an address that is nobody's in the Workspace is refused by
+ * `precheck`, before the interceptor asks for approval. The fake answers the
+ * lookup the way the route does: trim + lowercase, ACTIVE people only, one
+ * row or null per address, in order.
+ */
+describe("WARP-3403 — a meeting invitee given by email address", () => {
+  const DAVE = { id: "uuid-dave", displayName: "Dave Ortiz", username: "dave" };
+  const CAROL = { id: "uuid-carol", displayName: "Carol C", username: "carol" };
+  const ROSTER = { ...CONTACTS, contacts: [...CONTACTS.contacts, { ...DAVE, role: "family" }] };
+  const DIRECTORY: Record<string, typeof DAVE> = {
+    "dave@example.com": DAVE,
+    "carol@partner.example": CAROL,
+  };
+  const invite = (recipients: string[], extra: Record<string, unknown> = {}) => ({
+    recipients,
+    title: "Planning",
+    starts_at: futureIso(),
+    ...extra,
+  });
+
+  function errorOf(r: ToolResult | null) {
+    if (!r || r.ok) throw new Error(`expected a refusal, got ${JSON.stringify(r)}`);
+    return r.error;
+  }
+
+  function world(roster: unknown = ROSTER) {
+    const lookups: string[][] = [];
+    const writes: Array<{ path: string; body: unknown }> = [];
+    const get = vi.fn(async () => res(200, roster));
+    const post = vi.fn(async (path: string, body: { emails?: string[] }) => {
+      if (path === "/api/team-chat/contacts/lookup") {
+        const emails = body.emails ?? [];
+        lookups.push(emails);
+        return res(200, { contacts: emails.map((e) => DIRECTORY[e.trim().toLowerCase()] ?? null) });
+      }
+      writes.push({ path, body });
+      return path === "/api/team-chat/threads"
+        ? res(201, { thread: { id: "thread-d" } })
+        : res(201, { meeting: { id: "mtg-d", threadId: "thread-d" } });
+    });
+    const { ctx } = ctxWith({ get, post });
+    return { ctx, get, post, lookups, writes };
+  }
+
+  it("says it takes usernames or email addresses of people in the Workspace", () => {
+    expect(sendMeetingInvite.description).toContain("usernames or email addresses of people in this Workspace");
+    const recipients = (sendMeetingInvite.inputSchema as { properties: { recipients: { description: string } } })
+      .properties.recipients;
+    expect(recipients.description).toContain(
+      "Usernames or email addresses of people in this Workspace (members or external guests)",
+    );
+  });
+
+  it.each([
+    ["a member's", "Dave@Example.com", "uuid-dave", "dave"],
+    ["an external guest's", "carol@partner.example", "uuid-carol", "carol"],
+  ])("%s address resolves: the meeting is in a direct thread with them, as the acting user", async (_l, address, id, username) => {
+    const w = world();
+    const r = await sendMeetingInvite.handler(invite([address], { confirmed: true }), w.ctx);
+    if (!r.ok) throw new Error(`expected a successful ToolResult, got ${JSON.stringify(r)}`);
+    expect(w.post).toHaveBeenCalledWith(
+      "/api/team-chat/contacts/lookup",
+      { emails: [address] },
+      expect.objectContaining({ headers: expect.objectContaining({ "X-Droplet-User": "alice" }) }),
+    );
+    expect(w.writes.map((x) => x.path)).toEqual([
+      "/api/team-chat/threads",
+      "/api/team-chat/threads/thread-d/meetings",
+    ]);
+    expect(w.writes[0]?.body).toEqual({ kind: "direct", participantIds: [id] });
+    expect(r.data).toMatchObject({ recipients: [username] });
+  });
+
+  it("an address that is nobody's in the Workspace is refused by precheck, with the email suggestion and no write", async () => {
+    const w = world();
+    const early = await sendMeetingInvite.precheck!(invite(["stranger@example.com"]), w.ctx);
+    expect(errorOf(early)).toEqual({
+      code: "RECIPIENT_NOT_A_MEMBER",
+      message:
+        "stranger@example.com isn't in this Workspace; team chat only reaches people in it — ask the user whether to email them instead.",
+    });
+    expect(w.writes).toEqual([]);
+  });
+
+  it("the confirmed phase refuses the same address, with no write", async () => {
+    const w = world();
+    const r = await sendMeetingInvite.handler(invite(["stranger@example.com"], { confirmed: true }), w.ctx);
+    expect(errorOf(r).code).toBe("RECIPIENT_NOT_A_MEMBER");
+    expect(w.writes).toEqual([]);
+  });
+
+  it("an unknown username is refused before approval, with no lookup", async () => {
+    const w = world();
+    const early = await sendMeetingInvite.precheck!(invite(["nobody"]), w.ctx);
+    expect(errorOf(early).code).toBe("UNKNOWN_RECIPIENT");
+    expect(w.lookups).toEqual([]);
+  });
+
+  it("plain usernames are unchanged: no lookup", async () => {
+    const w = world();
+    const r = await sendMeetingInvite.handler(invite(["bob"], { confirmed: true }), w.ctx);
+    expect(r.ok).toBe(true);
+    expect(w.lookups).toEqual([]);
+    expect(w.writes[0]?.body).toEqual({ kind: "direct", participantIds: ["uuid-bob"] });
+  });
+
+  it("a mixed list looks up only the addresses; one person named twice is invited once", async () => {
+    const w = world();
+    const r = await sendMeetingInvite.handler(
+      invite(["bob", "dave", "DAVE@example.com"], { confirmed: true }),
+      w.ctx,
+    );
+    expect(r.ok).toBe(true);
+    expect(w.lookups).toEqual([["DAVE@example.com"]]);
+    expect(w.writes[0]?.body).toEqual({ kind: "group", participantIds: ["uuid-bob", "uuid-dave"] });
+  });
+
+  it("an external guest caller is never looked up for: they get the rule instead (WARP-3263)", async () => {
+    const w = world({
+      contacts: [{ id: "uuid-bob", displayName: "Bob B" }],
+      me: { id: "uuid-carol" },
+      canStartConversation: false,
+    });
+    const early = await sendMeetingInvite.precheck!(invite(["bob@example.com"]), w.ctx);
+    expect(errorOf(early).code).toBe("GUEST_CANNOT_START_CONVERSATION");
+    expect(w.post).not.toHaveBeenCalled();
+  });
+
+  it("Messages switched off (the roster's 404) is refused before approval, with no lookup", async () => {
+    const post = vi.fn();
+    const { ctx } = ctxWith({ get: vi.fn(async () => res(404, {})), post });
+    const early = await sendMeetingInvite.precheck!(invite(["dave@example.com"]), ctx);
+    expect(errorOf(early).code).toBe("TEAM_CHAT_UNAVAILABLE");
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("a past start is refused by precheck before approval, with no HTTP", async () => {
+    const w = world();
+    const early = await sendMeetingInvite.precheck!(
+      invite(["bob"], { starts_at: new Date(Date.now() - 60_000).toISOString() }),
+      w.ctx,
+    );
+    expect(errorOf(early).code).toBe("INVALID_ARGS");
+    expect(w.get).not.toHaveBeenCalled();
+    expect(w.post).not.toHaveBeenCalled();
+  });
+
+  it("precheck lets a resolvable invite through to the approval and never writes, even with confirmed: true", async () => {
+    const w = world();
+    expect(await sendMeetingInvite.precheck!(invite(["dave@example.com"], { confirmed: true }), w.ctx)).toBeNull();
+    expect(w.lookups).toEqual([["dave@example.com"]]);
+    expect(w.writes).toEqual([]);
   });
 });
