@@ -23,9 +23,11 @@
 # UI at the dashboard's own origin. Only the two dynamic prefixes the editor
 # actually needs are exposed.
 #
-# Phase 7 (WARP-3053) pins the opposite kind of route: the OCS sharing API under
-# /nextcloud/ is DENIED at the gateway, so an app password cannot mint public
-# links to company files.
+# Phase 7 (WARP-3053 / WARP-3318) pins the opposite kind of route: the OCS
+# sharing API, and the other OCS routes that mint a bearer-style URL
+# (richdocuments direct editing, files directEditing, dav direct download),
+# under /nextcloud/ are DENIED at the gateway, so an app password cannot mint
+# public links or credential-free URLs to company files.
 #
 # These checks need no Docker. The authoritative PARSE gate is the nginx image
 # build (docker/nginx/Dockerfile runs `nginx -t` on the real config — asserted
@@ -553,7 +555,7 @@ for f in "$NGINX_DIR"/docs-engine.*.conf; do
 done
 
 echo ""
-echo "--- Phase 7: the OCS sharing API is denied under /nextcloud/ (WARP-3053) ---"
+echo "--- Phase 7: the OCS sharing API and bearer-URL routes are denied under /nextcloud/ (WARP-3053, WARP-3318) ---"
 # Every user's Nextcloud password equals their Droplet password and app
 # passwords (device pairing, the personal Finder / File Explorer drive) are
 # full-scope, so through /nextcloud/ any member or guest could call Nextcloud's
@@ -566,7 +568,22 @@ SHARING_PREFIXES=(
   "/nextcloud/ocsapp/apps/files_sharing"
 )
 
-for prefix in "${SHARING_PREFIXES[@]}"; do
+# The other OCS routes that hand back a URL usable WITHOUT the caller's
+# credentials (audit: docs/SECURITY.md "Nextcloud OCS audit"). Each is reached
+# by the same four spellings as the sharing app. richdocuments is denied as a
+# whole app; files and dav only by route, because their apps also carry routes
+# Nextcloud's own clients use.
+#   richdocuments            direct-editing URL   (…/richdocuments/direct/<token>)
+#   files …/directEditing    direct-editing URL for any registered editor
+#   dav …/v1/direct          direct-download URL  (…/remote.php/direct/<token>)
+BEARER_URL_PREFIXES=()
+for app in "apps/richdocuments" "apps/files/api/v1/directEditing" "apps/dav/api/v1/direct"; do
+  for spelling in "ocs/v1.php" "ocs/v2.php" "index.php/ocsapp" "ocsapp"; do
+    BEARER_URL_PREFIXES+=("/nextcloud/$spelling/$app")
+  done
+done
+
+for prefix in "${SHARING_PREFIXES[@]}" "${BEARER_URL_PREFIXES[@]}"; do
   if grep -qF "location ^~ $prefix {" "$CONF"; then
     pass "location ^~ $prefix exists (prefix-priority match beats the plain /nextcloud/ leg)"
   else
@@ -624,7 +641,9 @@ resolve_uri() {
     esac
   done <<<"$PREFIX_LOCS"
   [ -n "$best" ] || return 0
-  grep -F "$best|" <<<"$PREFIX_LOCS" | head -1
+  # Anchored at the line start: `/` would otherwise match the first line that
+  # merely CONTAINS "/|" (e.g. "/api/ws/||other").
+  awk -v want="$best|" 'index($0, want) == 1 { print; exit }' <<<"$PREFIX_LOCS"
 }
 
 for uri in \
@@ -637,7 +656,23 @@ for uri in \
   /nextcloud/ocs/v1.php/apps/files_sharing/api/v1/shares/42 \
   /nextcloud/ocs/v1.php/apps/files_sharing \
   /nextcloud/index.php/ocsapp/apps/files_sharing/api/v1/shares \
-  /nextcloud/ocsapp/apps/files_sharing/api/v1/shares; do
+  /nextcloud/ocsapp/apps/files_sharing/api/v1/shares \
+  /nextcloud/ocs/v2.php/apps/richdocuments/api/v1/document \
+  /nextcloud/ocs/v2.php/apps/richdocuments/api/v1/templates/new \
+  /nextcloud/ocs/v2.php/apps/richdocuments \
+  /nextcloud/ocs/v1.php/apps/richdocuments/api/v1/document \
+  /nextcloud/index.php/ocsapp/apps/richdocuments/api/v1/document \
+  /nextcloud/ocsapp/apps/richdocuments/api/v1/document \
+  /nextcloud/ocs/v2.php/apps/files/api/v1/directEditing/open \
+  /nextcloud/ocs/v2.php/apps/files/api/v1/directEditing/create \
+  /nextcloud/ocs/v2.php/apps/files/api/v1/directEditing \
+  /nextcloud/ocs/v1.php/apps/files/api/v1/directEditing/open \
+  /nextcloud/index.php/ocsapp/apps/files/api/v1/directEditing/open \
+  /nextcloud/ocsapp/apps/files/api/v1/directEditing/open \
+  /nextcloud/ocs/v2.php/apps/dav/api/v1/direct \
+  /nextcloud/ocs/v1.php/apps/dav/api/v1/direct \
+  /nextcloud/index.php/ocsapp/apps/dav/api/v1/direct \
+  /nextcloud/ocsapp/apps/dav/api/v1/direct; do
   got="$(resolve_uri "$uri")"
   case "$got" in
     *"|^~|deny") pass "$uri is denied by a ^~ location (any method)" ;;
@@ -652,12 +687,53 @@ for uri in \
   /nextcloud/s/AbCdEf123 \
   /nextcloud/ocs/v2.php/cloud/capabilities \
   /nextcloud/ocs/v2.php/apps/notifications/api/v2/notifications \
-  /nextcloud/index.php/apps/files_sharing/publicpreview/AbCdEf123; do
+  /nextcloud/index.php/apps/files_sharing/publicpreview/AbCdEf123 \
+  /nextcloud/index.php/apps/richdocuments/direct/AbCdEf123 \
+  /nextcloud/index.php/apps/richdocuments/index \
+  /nextcloud/remote.php/direct/AbCdEf123 \
+  /nextcloud/ocs/v2.php/apps/files/api/v1/stats \
+  /nextcloud/ocs/v2.php/apps/files/api/v1/templates \
+  /nextcloud/ocs/v2.php/apps/dav/api/v1/outOfOffice/alice \
+  /nextcloud/ocs/v2.php/core/getapppassword; do
   got="$(resolve_uri "$uri")"
   if [ "$got" = "/nextcloud/||other" ]; then
     pass "$uri still resolves to the proxied /nextcloud/ leg"
   else
-    fail "$uri resolves to '${got:-nothing}' — only the OCS files_sharing paths may be denied; everything else stays proxied by /nextcloud/"
+    fail "$uri resolves to '${got:-nothing}' — only the OCS files_sharing and bearer-URL mint paths may be denied; everything else stays proxied by /nextcloud/"
+  fi
+done
+
+# The embedded editor keeps working: the page the orchestrator hands the iframe
+# (/nextcloud/…/direct/<token>, above) and every root-absolute namespace it loads
+# are proxied by their own legs, not denied. Only MINTING a direct URL is closed.
+for probe in \
+  "/index.php/apps/richdocuments/direct/AbCdEf123|/index.php/apps/richdocuments/" \
+  "/index.php/apps/theming/theme/light.css|/index.php/apps/theming/" \
+  "/apps/richdocuments/js/richdocuments-document.js|/apps/" \
+  "/core/js/common.js|/core/" \
+  "/dist/core-common.js|/dist/"; do
+  uri="${probe%%|*}"; want="${probe##*|}"
+  got="$(resolve_uri "$uri")"
+  if [ "$got" = "$want|^~|other" ]; then
+    pass "$uri is proxied by its editor leg ($want), not denied"
+  else
+    fail "$uri resolves to '${got:-nothing}' — expected the proxied editor leg '$want'; the embedded editor needs it"
+  fi
+done
+
+# Root /ocs/ is NOT routed to Nextcloud (it falls to the dashboard catch-all), so
+# the denials above, all under /nextcloud/, cover every OCS address the gateway
+# serves. Routing /ocs/ to Nextcloud would reopen every route denied here.
+for uri in \
+  /ocs/v2.php/apps/richdocuments/api/v1/document \
+  /ocs/v2.php/apps/files/api/v1/directEditing/open \
+  /ocs/v2.php/apps/dav/api/v1/direct \
+  /ocs/v2.php/apps/files_sharing/api/v1/shares; do
+  got="$(resolve_uri "$uri")"
+  if [ "$got" = "/||other" ]; then
+    pass "$uri is not routed to Nextcloud (dashboard catch-all)"
+  else
+    fail "$uri resolves to '${got:-nothing}' — the gateway must not route root /ocs/ to Nextcloud, or the denials above are bypassed"
   fi
 done
 
@@ -675,6 +751,20 @@ if grep -qE 'function ocsUrl\(endpoint: string\): string \{' "$REPO_ROOT_REAL/ap
   pass "the orchestrator builds every OCS URL from config.NEXTCLOUD_URL (ocsUrl in nextcloud.client.ts)"
 else
   fail "nextcloud.client.ts no longer builds OCS URLs from config.NEXTCLOUD_URL — re-check that web sharing does not cross the gateway"
+fi
+# The editor's direct-editing mint is one of the routes denied above. It is an
+# orchestrator→Nextcloud call over NEXTCLOUD_URL, so the denial cannot break it.
+if grep -qF 'ocsUrl("/ocs/v2.php/apps/richdocuments/api/v1/document")' "$REPO_ROOT_REAL/apps/orchestrator/src/services/nextcloud.client.ts"; then
+  pass "the editor's direct-editing mint goes through ocsUrl (compose network), not the gateway"
+else
+  fail "nextcloud.client.ts no longer mints the richdocuments direct URL via ocsUrl(...) — re-check that editing does not cross the gateway"
+fi
+# And the dashboard never requests a /nextcloud/ OCS path itself.
+if grep -rnE 'ocs/v[12]\.php|/ocsapp' "$REPO_ROOT_REAL/apps/web-dashboard/src" --include='*.ts' --include='*.tsx' \
+   | grep -vE '\.test\.tsx?:|__tests__' | grep -q .; then
+  fail "apps/web-dashboard/src requests a Nextcloud OCS path — it would cross the gateway; re-check the Phase 7 denials"
+else
+  pass "the dashboard requests no Nextcloud OCS path through the gateway"
 fi
 
 echo ""

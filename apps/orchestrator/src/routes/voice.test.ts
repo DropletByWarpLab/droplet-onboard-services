@@ -776,6 +776,186 @@ describe("POST /api/voice/enabled (WARP-1599)", () => {
   });
 });
 
+describe("GET/POST /api/voice/volume (speaker output volume)", () => {
+  it("GET proxies to voice-io /voice/volume and relays the state", async () => {
+    fetchSpy.mockResolvedValue(
+      upstreamJson(200, { level: 70, muted: false, fault: null }),
+    );
+    const res = await request(buildApp(mkUser("owner"))).get("/api/voice/volume");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ level: 70, muted: false, fault: null });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://voice-io:8086/voice/volume",
+      expect.objectContaining({ method: "GET" }),
+    );
+    // A read leaves no activity row.
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("POST {level} forwards exactly the validated field and audits the new level", async () => {
+    fetchSpy.mockResolvedValue(
+      upstreamJson(200, {
+        level: 40,
+        muted: false,
+        fault: null,
+        previous_level: 70,
+        previous_muted: false,
+      }),
+    );
+    const res = await request(buildApp(mkUser("admin")))
+      .post("/api/voice/volume")
+      .send({ level: 40 });
+    expect(res.status).toBe(200);
+    expect(res.body.level).toBe(40);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://voice-io:8086/voice/volume",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ level: 40 }),
+      }),
+    );
+    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
+      kind: "voice",
+      severity: "info",
+      sourceIcon: "volume-2",
+      what: "Volume set to 40",
+      sub: "Was 70",
+      refs: { surface: "voice-volume", upstreamStatus: 200 },
+      actor: { type: "user", id: "user-admin" },
+    });
+  });
+
+  it("POST {change} forwards the signed step and audits the resulting level", async () => {
+    fetchSpy.mockResolvedValue(
+      upstreamJson(200, {
+        level: 60,
+        muted: false,
+        fault: null,
+        previous_level: 50,
+        previous_muted: true,
+      }),
+    );
+    const res = await request(buildApp(mkUser("owner")))
+      .post("/api/voice/volume")
+      .send({ change: 10 });
+    expect(res.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://voice-io:8086/voice/volume",
+      expect.objectContaining({ body: JSON.stringify({ change: 10 }) }),
+    );
+    expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
+      what: "Volume set to 60",
+      // A level change on a muted speaker also unmutes it — say so.
+      sub: "Was 50, muted",
+    });
+  });
+
+  it("POST {muted:true} audits a mute and {muted:false} an unmute", async () => {
+    const app = buildApp(mkUser("owner"));
+    fetchSpy.mockResolvedValueOnce(
+      upstreamJson(200, {
+        level: 55,
+        muted: true,
+        fault: null,
+        previous_level: 55,
+        previous_muted: false,
+      }),
+    );
+    await request(app).post("/api/voice/volume").send({ muted: true });
+    fetchSpy.mockResolvedValueOnce(
+      upstreamJson(200, {
+        level: 55,
+        muted: false,
+        fault: null,
+        previous_level: 55,
+        previous_muted: true,
+      }),
+    );
+    await request(app).post("/api/voice/volume").send({ muted: false });
+    expect(fetchSpy.mock.calls[0]![1]).toMatchObject({
+      body: JSON.stringify({ muted: true }),
+    });
+    expect(fetchSpy.mock.calls[1]![1]).toMatchObject({
+      body: JSON.stringify({ muted: false }),
+    });
+    expect(recordActivityMock).toHaveBeenCalledTimes(2);
+    expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({
+      kind: "voice",
+      sourceIcon: "volume-x",
+      what: "Speaker muted",
+      sub: "Droplet's spoken replies are silent until the speaker is unmuted",
+      refs: { surface: "voice-volume", upstreamStatus: 200 },
+    });
+    expect(recordActivityMock.mock.calls[1]![0]).toMatchObject({
+      sourceIcon: "volume-2",
+      what: "Speaker unmuted",
+      sub: "Volume 55",
+    });
+  });
+
+  it("rejects anything but exactly one integer level/change or boolean muted, without calling upstream", async () => {
+    const app = buildApp(mkUser("owner"));
+    for (const body of [
+      {},
+      { level: 40, muted: false },
+      { level: 40, change: 10 },
+      { change: 10, muted: true },
+      { level: "40" },
+      { level: 40.5 },
+      { level: -1 },
+      { level: 101 },
+      { level: true },
+      { level: null },
+      { change: "up" },
+      { change: 1.5 },
+      { change: 101 },
+      { change: -101 },
+      { muted: "true" },
+      { muted: 1 },
+      { volume: 40 },
+    ]) {
+      const res = await request(app).post("/api/voice/volume").send(body);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+      expect(res.body.error).toBe("invalid_volume");
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("answers 503 voice_unavailable when unreachable — and records no row", async () => {
+    fetchSpy.mockRejectedValue(new Error("ECONNREFUSED"));
+    const app = buildApp(mkUser("owner"));
+    const get = await request(app).get("/api/voice/volume");
+    expect(get.status).toBe(503);
+    expect(get.body.error).toBe("voice_unavailable");
+    const post = await request(app).post("/api/voice/volume").send({ level: 30 });
+    expect(post.status).toBe(503);
+    expect(post.body.error).toBe("voice_unavailable");
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("relays a 2xx that lacks the state fields verbatim, without inventing a row", async () => {
+    fetchSpy.mockResolvedValue(upstreamJson(200, { ok: true }));
+    const res = await request(buildApp(mkUser("owner")))
+      .post("/api/voice/volume")
+      .send({ level: 30 });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("relays an upstream 422 verbatim and records no row", async () => {
+    fetchSpy.mockResolvedValue(upstreamJson(422, { detail: [{ msg: "bad" }] }));
+    const res = await request(buildApp(mkUser("owner")))
+      .post("/api/voice/volume")
+      .send({ level: 30 });
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({ detail: [{ msg: "bad" }] });
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("voice routes RBAC (owner/admin only — service principals denied)", () => {
   const DENIED: (Role | null)[] = ["family", "guest", "service", null];
   const ROUTES: {
@@ -813,6 +993,9 @@ describe("voice routes RBAC (owner/admin only — service principals denied)", (
     // WARP-1599 — the kill switch rides the same guard: only owner/admin
     // may silence (or un-silence) the household's assistant.
     { method: "post", path: "/api/voice/enabled", body: { enabled: true } },
+    // Speaker volume rides the same guard: it drives the room speaker.
+    { method: "get", path: "/api/voice/volume" },
+    { method: "post", path: "/api/voice/volume", body: { level: 40 } },
   ];
 
   for (const route of ROUTES) {

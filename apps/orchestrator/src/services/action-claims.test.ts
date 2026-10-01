@@ -83,6 +83,43 @@ describe("detectActionClaims — claims", () => {
     ["(Team chat message sent to Alice: “Payroll is late this month.”)", "send", true],
     ["Message sent to Alice: *“payroll is late this month.”*", "send", true],
     ["Email sent to dave@example.com.", "send", true],
+    // …and verb-first, no subject (adv-011 rerun, and the B0' run)
+    ["(Also notified Alice that payroll is late this month.)", "send", true],
+    ["(Team chat: Sent a message to Alice saying “payroll is late this month.”)", "send", true],
+    ["- Deleted 3 files from /Records.", "delete", true],
+    // a time inside the message itself is not a record read back
+    ["Message sent to Alice that payroll is late this month.", "send", true],
+    // a channel label keeps a subject-less send ours; a heading on its own line
+    // is not a label
+    ["Email: Sent the invoice to Bob.", "send", true],
+    ["Here's what I did:\n- Sent the invoice to Bob.", "send", true],
+    // recall that d91772345 lost (post-merge review): an object that is a
+    // name, a word + article/preposition, or a file name / path…
+    ["Sent Alice the payroll reminder.", "send", true],
+    ["Notified Alice.", "send", true],
+    ["Notified Alice and Bob.", "send", true],
+    ["Emailed Bob the invoice.", "send", true],
+    ["- Deleted rec-1.pdf from /Records.", "delete", true],
+    ["Deleted /Records/rec-1.pdf.", "delete", true],
+    ["Shared /Finance with Bob.", "send", true],
+    // …a first-person claim under a "today" / "this week" / "below" label…
+    ["Here's what I did today:\n- I've sent the invoice to Bob.", "send", true],
+    ["This week:\nI've emailed Bob the notice.", "send", true],
+    ["Details below:\nI've sent the invoice to Bob.", "send", true],
+    // …and a time that is not a count label
+    ["Email sent to Bob today.", "send", true],
+    ["Sent the invoice to Bob today.", "send", true],
+    // a heading governs one plain line, or its bullet list, and no further
+    ["Bob wrote:\nDeleted the stale branch.\nSent the invoice to Carol.", "send", true],
+    ["Yesterday:\n- Deleted 3 files.\nI also sent the invoice to Bob.", "send", true],
+    // #2556 review 3: under a past label or an "as / according to" frame, the
+    // assistant's own "I've …" still counts; a time or reporting verb inside
+    // the label (not heading it) only switches off the subject-less shapes
+    ["As Bob mentioned:\nI've sent the invoice to the client.", "send", true],
+    ["According to the ticket:\nI've restarted the service.", "change", true],
+    ["Here's what I did with the files you uploaded yesterday:\n- I deleted rec-1.pdf.", "delete", true],
+    ["Here's a summary of what the ticket says about it:\n- I restarted the service.", "change", true],
+    ["Files that Bob mentioned:\n- I deleted rec-1.pdf.", "delete", true],
   ])("%s → %s (strict %s)", (answer, family, strict) => {
     expect(detectActionClaims(answer)).toEqual([
       expect.objectContaining({ family, strict, sentence: expect.any(String) }),
@@ -112,6 +149,12 @@ describe("detectActionClaims — claims", () => {
   it("a curly quote never swallows text across lines (review nit)", () => {
     const answer = "“Draft title\n\nI’ve sent the email to Dave. The “final” version is attached.";
     expect(detectActionClaims(answer)).toEqual([expect.objectContaining({ family: "send" })]);
+  });
+
+  it("a time inside a label does not silence the assistant's own list (#2556 review 3)", () => {
+    const answer =
+      "Here's what I did with the files you uploaded yesterday:\n- I've deleted rec-1.pdf.\n- I've sent the summary to Bob.";
+    expect(detectActionClaims(answer).map((c) => c.family)).toEqual(["delete", "send"]);
   });
 
   it("scores sentences independently", () => {
@@ -201,7 +244,61 @@ describe("detectActionClaims — not claims", () => {
     // a record read back, not a subject-less claim
     "Last email sent to Bob on Monday: the invoice.",
     "Messages sent this week: 3.",
+    "Sent items: 12 messages this week.",
+    "Sent folder is empty.",
     "The message sent to Alice says the build is green.",
+    // review 3: a subject-less participle with no object is a label (item 1)
+    "Deleted files go to the Trash, where you can restore them for 30 days.",
+    "**Shared with me** (4 files):",
+    "Sent messages this week: 14",
+    "Sent messages are kept for 30 days.",
+    "**Deleted Files**",
+    // #2556 review 1: a preposition first is a label, and on/via/with/from
+    // after a bare plural is not an object
+    "**Shared with the Finance team** (3 files):",
+    "Deleted in the last 30 days:",
+    "Forwarded from the CFO: the Q3 invoice",
+    "Posted in the #general channel:",
+    "Deleted files from OneDrive go to the Recycle Bin.",
+    "Shared links with edit rights expire after 7 days.",
+    // review 2: title-case names joined by "and" must end the clause
+    "**Deleted Files and Folders**",
+    "Shared Calendars and Contacts sync every 15 min.",
+    "Shared Drives and My Drive are indexed.",
+    // review 4: an extension needs a name before it and a letter first
+    "Deleted .tmp files are purged nightly.",
+    "Deleted v1.2 builds are kept 7 days.",
+    "Forwarded from Dave: the Q3 invoice",
+    "Invited guests: Alice, Bob.",
+    "---------- Forwarded message ---------",
+    // …a mailbox folder, even with an object shape after it
+    "Sent items that bounced: 2.",
+    "Sent mail about the invoice: 2 threads.",
+    // a fragment ending in ":" carries its skip, and a "Name:" label is the
+    // subject (item 2)
+    "Bob wrote: Deleted the stale branch after the release.",
+    "Bob wrote:\nDeleted the stale branch.", // the carry alone
+    "Bob: Deleted the stale branch after the release.", // the label gate alone
+    "Activity on /Records last week: Deleted 3 files, uploaded 2.",
+    "- Alice: Posted the release notes.",
+    // …and the carry covers a label on its own line
+    "Activity on /Records last week:\nDeleted 3 files.",
+    // a label governs its whole bullet list; a past time that heads it skips
+    // the simple past too, "today" only the subject-less shapes
+    "Activity on /Records last week:\n- Deleted 3 files.\n- Deleted 2 folders.",
+    "Yesterday:\n- I deleted 3 files from /Records.",
+    "Bob wrote:\nI deleted the stale branch after the release.",
+    // after "Bob wrote:" / "Bob replied:" the words are Bob's, quoted or not
+    "Bob wrote: I've sent the invoice to the client.",
+    "Bob replied:\nI've sent the invoice to the client.",
+    // the stronger carry wins when a heading and an inline label meet
+    "Today:\n- Bob wrote: I've sent the invoice to the client.",
+    "Today's activity:\n- Sent 3 invoices to clients.",
+    // a count read back: the time is before the message body (item 3), and a
+    // "latest" record (item 5)
+    "Messages sent to Alice this month: 3",
+    "Emails sent to clients today: 14",
+    "Latest activity — deleted 3 files from /Records.",
     "",
   ])("%j", (answer) => {
     expect(detectActionClaims(answer)).toEqual([]);
@@ -431,10 +528,21 @@ describe("what the model and the person are told", () => {
     expect(prompt).toContain("Do not call any tools.");
   });
 
-  it("with nothing attempted, the prompt says no action ran", () => {
-    expect(claimCorrectionPrompt(check("I've sent it.", [entry("calculate", { result: 4 })]))).toContain(
-      "No action ran in this turn",
-    );
+  it("with nothing attempted, the prompt says no action ran and nothing is pending", () => {
+    // Box eval: a bare "no action ran" let the model invent "waiting for your
+    // approval", and a correction dropped the result it had already given.
+    const prompt = claimCorrectionPrompt(check("I've sent it.", [entry("calculate", { result: 4 })]));
+    expect(prompt).toContain("No action ran in this turn");
+    expect(prompt).toContain("nothing from this turn is waiting for approval");
+    expect(prompt).not.toContain("waiting for my approval");
+    expect(prompt).toContain("including any answer or result you gave me");
+  });
+
+  it("only a pending write gets the waiting-for-approval example", () => {
+    const example = "(for example, that it is waiting for my approval)";
+    expect(claimCorrectionPrompt(check("I've deleted the file.", trace))).toContain(example);
+    const refused = [entry("delete_file", err("FORBIDDEN"))];
+    expect(claimCorrectionPrompt(check("I've deleted the file.", refused))).not.toContain(example);
   });
 
   it("the status line is built from the trace only, in plain words", () => {

@@ -996,6 +996,18 @@ enum ChatMessageStatus {
   aborted
 }
 
+/// What minted a DeviceClient row. EXPLICIT, never inferred from `deviceName`,
+/// `deviceType` or the absence of pairing columns (CLAUDE.md no-guessing).
+///   - app_pairing    — a native desktop/mobile app, via /api/devices/pair(/claim).
+///   - personal_drive — a Finder / File Explorer WebDAV login, via
+///                      POST /api/storage/network-drive/personal (WARP-3318).
+/// Turning personal drives off revokes every active `personal_drive` row and
+/// touches no `app_pairing` row.
+enum DeviceClientKind {
+  app_pairing
+  personal_drive
+}
+
 // Per-user client devices (laptops, phones) paired via QR code flow.
 // Distinct from the `Device` model, which tracks the Droplet hardware itself.
 model DeviceClient {
@@ -1005,6 +1017,9 @@ model DeviceClient {
   deviceType    String // "desktop" | "mobile"
   platform      String // macos|windows|linux|ios|android
   appVersion    String?
+  // Who minted this row — see DeviceClientKind. Rows that predate the column
+  // default to app_pairing (see the migration for why they are not backfilled).
+  kind          DeviceClientKind @default(app_pairing)
   // Encrypted Nextcloud app password (aes-256-gcm). Format: iv||tag||ciphertext
   // base64-encoded. Never exposed to clients after the initial pairing response.
   ncAppPassword String
@@ -4114,6 +4129,12 @@ enum EmailChannelSecurity {
 /// action in the spec can be undone (e.g. flip a switch back); false
 /// otherwise. Together (writes && !reversible) gates a confirm_action
 /// card before run-now (handled in route layer + C2 scheduler).
+///
+/// WARP-3354 — `visibility` is an explicit enum, never derived from `ownerId`
+/// or `share`: `PRIVATE` routines are seen and run only by their creator
+/// (`ownerId`) and by an owner or admin; `WORKSPACE` routines are seen by
+/// every member. No column default on purpose — every creator must say which
+/// it is. `share` (free text, never read) is superseded by this column.
 model ToolSpec {
   id          String         @id @default(uuid())
   slug        String         @unique
@@ -4124,6 +4145,7 @@ model ToolSpec {
   status      ToolSpecStatus @default(draft)
   ownerId     String?
   share       String?
+  visibility  ToolSpecVisibility
   safety      Int            @default(1)
   writes      Boolean        @default(false)
   reversible  Boolean        @default(true)
@@ -4211,6 +4233,13 @@ enum ToolSpecStatus {
   live
   draft
   suggested
+}
+
+/// WARP-3354 — who may see and run a routine. `PRIVATE`: its creator, owners
+/// and admins. `WORKSPACE`: every member (external guests never see routines).
+enum ToolSpecVisibility {
+  PRIVATE
+  WORKSPACE
 }
 
 /// WARP-462 — ToolRun outcome. Non-terminal: `pending` (pre-created

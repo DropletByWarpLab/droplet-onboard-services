@@ -4,12 +4,17 @@
  *
  * A routine's steps and their arguments (file paths, recipients, prompts) and a
  * draft another person asked the assistant to write down are the author's data.
- * The `share` column is still unread, so nothing is "shared" with a guest: they
- * see NO routine, list or detail, and cannot run one, read its runs, or touch
- * its schedules. That was already the rule on every `/api/tools*` route
- * (`requireRole("owner","admin","family")`, and the same set for the person the
- * assistant acts for over MCP); this pins it on all ten routes and on the
- * assistant's path so a widening shows up here first. Members are unchanged.
+ * The routine sharing model (`ToolSpec.visibility`, the member half) has one
+ * share, "with the Workspace" (members), and no per-person share, so nothing
+ * is ever "shared" with a guest: they see NO routine, list or detail, and
+ * cannot run, share or un-share one, read its runs, or touch its schedules.
+ * That is the rule on every `/api/tools*` route (`requireRole("owner","admin",
+ * "family")`, and the same set for the person the assistant acts for over
+ * MCP), and it is checked BEFORE the visibility filter, so a guest never
+ * reaches a routine query. This pins it on all twelve routes (the two share
+ * routes included) and on the assistant's path so a widening shows up here
+ * first, and pins that the member rule composes with it: a member lists the
+ * shared routines plus their own, an owner or admin lists every routine.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
@@ -68,6 +73,9 @@ const ROUTINE_ROUTES = [
   ["post", "/api/tools/some-routine/schedules"],
   ["patch", "/api/tools/some-routine/schedules/s1"],
   ["delete", "/api/tools/some-routine/schedules/s1"],
+  // WARP-3354 member half: share and un-share (creator, owner or admin only).
+  ["post", "/api/tools/some-routine/share"],
+  ["delete", "/api/tools/some-routine/share"],
 ] as const;
 
 beforeEach(() => {
@@ -100,5 +108,31 @@ describe("routines: an external guest sees and touches none of them (WARP-3354)"
     const acting = await request(appAs(MCP, "marc")).get("/api/tools");
     expect(acting.status).toBe(200);
     expect(acting.body).toEqual({ specs: [] });
+  });
+
+  it("a member lists the shared routines plus their own; owner and admin list every routine; a guest never reaches the query", async () => {
+    await request(appAs(person("family"))).get("/api/tools");
+    expect(findMany.mock.calls[0][0].where.OR).toEqual([
+      { visibility: "WORKSPACE" },
+      { ownerId: "u-family" },
+    ]);
+
+    findMany.mockClear();
+    await request(appAs(MCP, "marc")).get("/api/tools");
+    expect(findMany.mock.calls[0][0].where.OR).toEqual([
+      { visibility: "WORKSPACE" },
+      { ownerId: "id-member" },
+    ]);
+
+    for (const role of ["owner", "admin"] as const) {
+      findMany.mockClear();
+      await request(appAs(person(role))).get("/api/tools");
+      expect(findMany.mock.calls[0][0].where.OR).toBeUndefined();
+    }
+
+    findMany.mockClear();
+    await request(appAs(person("guest"))).get("/api/tools");
+    await request(appAs(MCP, "gina")).get("/api/tools");
+    expect(findMany).not.toHaveBeenCalled();
   });
 });

@@ -3416,6 +3416,12 @@ export interface AppDownloadCatalog {
 
 export type RoutineStatus = "live" | "draft" | "suggested";
 
+/**
+ * WARP-3354 — who sees a routine. `PRIVATE`: its creator, owners and admins.
+ * `WORKSPACE`: every member. Enforced by the box; the page only displays it.
+ */
+export type RoutineVisibility = "PRIVATE" | "WORKSPACE";
+
 export interface RoutineStep {
   id: string;
   idx: number;
@@ -3436,7 +3442,11 @@ export interface Routine {
   version: number;
   status: RoutineStatus;
   ownerId: string | null;
+  /** Legacy free text the box never reads. Sharing is `visibility`. */
   share: string | null;
+  visibility: RoutineVisibility;
+  /** Per viewer: may THIS person share or un-share it (its creator, an owner or an admin). */
+  canShare: boolean;
   safety: number;
   /** Derived server-side from the steps since WARP-2665 — never self-declared. */
   writes: boolean;

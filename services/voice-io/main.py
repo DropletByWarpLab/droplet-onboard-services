@@ -22,7 +22,14 @@ from typing import Literal, Optional
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Response
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    model_validator,
+)
 
 from voice.audio_io import (
     AudioUnavailable,
@@ -88,6 +95,7 @@ from voice.llm import LLMClient, build_llm_from_env
 from voice.persona import PersonaFetcher, build_persona_fetcher_from_env
 from voice.stt import MockSTT, StreamingSTT, build_stt_from_env
 from voice.tts import MockTTS, TextToSpeech, build_tts_from_env
+from voice.volume import VolumeController, VolumeStore
 from voice.wake import (
     VOSK_DEFAULT_THRESHOLD,
     VoskWakeWordDetector,
@@ -206,6 +214,12 @@ DEFAULT_MEASURE_SECONDS = 5.0
 # Pipeline lives at module scope so /voice/status can read its state
 # from the request thread while the worker thread is mid-prediction.
 _pipeline: Optional[WakePipeline] = None
+
+# Speaker output volume — ONE controller for the process, built here and
+# not in the pipeline so /voice/volume works while voice is switched off
+# or the box has no mic. The pipeline gets the same instance, so the
+# dashboard and a spoken "turn it up" act on one persisted state.
+_volume = VolumeController(VolumeStore())
 
 # WARP-1619 — a pipeline whose stop() outlived its join budget. Its
 # capture worker is finishing the turn it was in (LLM → TTS → playback
@@ -538,6 +552,7 @@ def _build_and_start_pipeline() -> None:
             # as the dashboard button, sharing its lock (see
             # _auto_restart_dsp) so the two never overlap.
             dsp_restart=_auto_restart_dsp,
+            volume=_volume,
         )
         # WARP-1055 — a persisted calibration (named-volume JSON) wins
         # over the env-derived gain/threshold. Applied before start()
@@ -755,7 +770,7 @@ class VoiceTurnTiming(BaseModel):
     with time.monotonic(); null where the stage didn't happen this turn.
     `first_*_ms` count from the transcript; `total_ms` from the wake."""
 
-    # answered | no_reply | error | empty | fragment | no_llm
+    # answered | no_reply | error | empty | fragment | no_llm | volume
     outcome: str
     wake_to_capture_ms: Optional[int] = None
     speech_ms: Optional[int] = None       # voiced audio the VAD counted
@@ -848,6 +863,13 @@ class VoiceStatusResponse(BaseModel):
     # as its `voice_turn_timing` log line (whole ms, null where a stage
     # didn't happen). Null until the first turn completes.
     last_turn_timing: Optional[VoiceTurnTiming] = None
+    # Speaker output volume (GET/POST /voice/volume), reported with or
+    # without a pipeline. `output_fault` is a storage fault on the volume
+    # file — the box then speaks at the audible default — kept apart from
+    # `error_message`, which is about the pipeline.
+    output_level: int
+    output_muted: bool
+    output_fault: Optional[str] = None
 
 
 class SayRequest(BaseModel):
@@ -978,6 +1000,44 @@ class VoiceEnabledResponse(BaseModel):
     mic_released: bool = True
 
 
+# Speaker output volume. Exactly one field per request, strictly typed:
+# StrictInt so 40.0 / "40" / true are refused rather than coerced, and
+# StrictBool for the same reason /voice/enabled uses it — a string
+# "true" must never mute the speaker. Out-of-range values are a 422 at the
+# edge; the controller's own clamp only matters for `change`, whose
+# result can overshoot 0-100.
+
+class VolumeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    level: Optional[StrictInt] = Field(default=None, ge=0, le=100)
+    change: Optional[StrictInt] = Field(default=None, ge=-100, le=100)
+    muted: Optional[StrictBool] = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> "VolumeRequest":
+        given = [
+            name for name in ("level", "change", "muted")
+            if getattr(self, name) is not None
+        ]
+        if len(given) != 1:
+            raise ValueError("send exactly one of level, change or muted")
+        return self
+
+
+class VolumeResponse(BaseModel):
+    level: int
+    muted: bool
+    # A storage fault on the volume file: unreadable at startup (the box
+    # is at the audible default), or the last change could not be saved.
+    fault: Optional[str] = None
+
+
+class VolumeChangeResponse(VolumeResponse):
+    previous_level: int
+    previous_muted: bool
+
+
 # ────────────────────────────────────────────────────────────────────
 # Endpoints
 # ────────────────────────────────────────────────────────────────────
@@ -1075,6 +1135,8 @@ def voice_status() -> VoiceStatusResponse:
     # silent box, sure they never touched the switch, and right.
     switch = VoiceEnabledStore().read()
     enabled = switch.enabled
+    output = _volume.state()
+    output_fault = _volume.fault
     if _pipeline is None:
         # No pipeline, for one of two reasons the dashboard must be able
         # to tell apart: an admin switched voice off (state "off" — a
@@ -1091,6 +1153,9 @@ def voice_status() -> VoiceStatusResponse:
             # None on an admin's deliberate off — a chosen silence is not
             # a fault and must not light one up on the /voice page.
             error_message=switch.fault,
+            output_level=output.level,
+            output_muted=output.muted,
+            output_fault=output_fault,
         )
     s = _pipeline.status()
     return VoiceStatusResponse(
@@ -1133,6 +1198,9 @@ def voice_status() -> VoiceStatusResponse:
             if s.last_turn_timing is not None
             else None
         ),
+        output_level=output.level,
+        output_muted=output.muted,
+        output_fault=output_fault,
     )
 
 
@@ -1631,6 +1699,38 @@ def set_voice_enabled(req: VoiceEnabledRequest) -> VoiceEnabledResponse:
     finally:
         _enabled_lock.release()
     return VoiceEnabledResponse(enabled=req.enabled, mic_released=mic_released)
+
+
+@app.get("/voice/volume", response_model=VolumeResponse)
+def get_voice_volume() -> VolumeResponse:
+    """The speaker output level (0-100) and mute. Works with no pipeline."""
+    state = _volume.state()
+    return VolumeResponse(level=state.level, muted=state.muted, fault=_volume.fault)
+
+
+@app.post("/voice/volume", response_model=VolumeChangeResponse)
+def set_voice_volume(req: VolumeRequest) -> VolumeChangeResponse:
+    """Set the level, step it, or mute/unmute — exactly one per request.
+
+    Persisted, and live on the next thing the box says (the pipeline
+    reads the same controller). Works with no pipeline: the level is
+    simply there when voice comes back. A level change also unmutes.
+    """
+    if req.level is not None:
+        change = _volume.set_level(req.level)
+    elif req.change is not None:
+        change = _volume.change(req.change)
+    elif req.muted is not None:
+        change = _volume.set_muted(req.muted)
+    else:  # VolumeRequest already refuses this; never guess a mute state
+        raise HTTPException(status_code=422, detail="nothing to change")
+    return VolumeChangeResponse(
+        level=change.current.level,
+        muted=change.current.muted,
+        fault=change.fault,
+        previous_level=change.previous.level,
+        previous_muted=change.previous.muted,
+    )
 
 
 # ────────────────────────────────────────────────────────────────────

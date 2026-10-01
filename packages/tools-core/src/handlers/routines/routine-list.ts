@@ -3,10 +3,13 @@
  * as the acting person sees them on /routines.
  *
  * Tier-1, scoped by the route: GET /api/tools is owner/admin/family and
- * answers `{ specs }` — every routine on the box, since a routine is a
- * box-level object (its steps run as the person who triggers it, which is
- * where narrowing happens). `onBehalfOf = ctx.userId` so the route can hold
- * the acting person to the same role floor a browser caller meets.
+ * answers `{ specs }` — the routines THIS person may see (WARP-3354): the ones
+ * they created plus the ones shared with the Workspace, or every routine for an
+ * owner or admin. Another member's private routine is not in the answer, so it
+ * cannot be listed, described or run from chat. `onBehalfOf = ctx.userId` so
+ * the route holds the acting person to the same role floor and the same
+ * visibility a browser caller meets. `visibility` is passed through so the
+ * model can tell a person "that one is private to you".
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
@@ -32,6 +35,7 @@ interface SpecRow {
   description: string | null;
   version: number;
   status: string;
+  visibility?: "PRIVATE" | "WORKSPACE";
   writes: boolean;
   reversible: boolean;
   updatedAt: string;
@@ -62,6 +66,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     slug: r.slug,
     name: r.name,
     status: r.status,
+    ...(r.visibility ? { visibility: r.visibility } : {}),
     ...(r.description ? { description: r.description.slice(0, 300) } : {}),
     ...(r.category ? { category: r.category } : {}),
     writes: r.writes,

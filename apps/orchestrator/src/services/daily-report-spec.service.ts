@@ -74,6 +74,9 @@ export async function seedDailyReportSpec(prisma: PrismaClient): Promise<SeedRes
       // Live so the Reports tile can run it immediately; a draft would need
       // an operator to publish it before the surface worked at all.
       status: "live",
+      // WARP-3354 — box-provided, no creator, and the Reports tile runs it for
+      // every member: it keeps today's visibility.
+      visibility: "WORKSPACE",
       safety: 1,
       writes: false,
       reversible: true,
