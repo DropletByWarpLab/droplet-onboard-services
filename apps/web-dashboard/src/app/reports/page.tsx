@@ -196,7 +196,7 @@ export default function ReportsPage() {
                 range,
                 now: refreshedAt,
               })}
-              trail={t.id === "d1" ? <ChainChip canRead={isAdminTier} /> : trailLink(t.id)}
+              trail={t.id === "d1" ? <ChainChip canRead={isAdminTier} /> : trailLink(t.id, isAdminTier)}
             />
           ))}
         </div>
@@ -280,14 +280,15 @@ function ProvenanceStrip({ at }: { at: Date | null }) {
   );
 }
 
-/** Header link out to the surface that owns each tile's data. */
-function trailLink(id: string): ReactNode {
+/** Header link out to the surface that owns each tile's data. A member has no
+ *  door to /admin/files or /integrations (owner/admin only), so they get none. */
+function trailLink(id: string, isAdminTier: boolean): ReactNode {
   const to: Record<string, [string, string]> = {
     c1: ["/admin/files", "Manage"],
     c2: ["/integrations", "All connectors"],
   };
   const hit = to[id];
-  if (!hit) return null;
+  if (!hit || !isAdminTier) return null;
   return (
     <a href={hit[0]} className="rp-tile-trail">
       {hit[1]} →
@@ -330,7 +331,7 @@ function tileBody(id: string, d: BodyDeps): ReactNode {
   if (id === "a1") return <ReportBody range={d.range} canRead={d.canSeePhi} now={d.now} />;
   if (id === "a2") return <MoneyBody canRead={d.canSeePhi} now={d.now} />;
   if (id === "c1") return <FoldersBody canRead={d.isAdminTier} />;
-  if (id === "c2") return <IntegrationsBody now={d.now} />;
+  if (id === "c2") return <IntegrationsBody now={d.now} isAdminTier={d.isAdminTier} />;
   if (id === "d1") return <ActivityBody range={d.range} canRead={d.isAdminTier} />;
   return null;
 }

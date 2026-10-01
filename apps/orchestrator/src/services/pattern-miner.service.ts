@@ -191,6 +191,10 @@ export async function mineToolCallPatterns(
         category: "suggested",
         description,
         status: "suggested" as any,
+        // WARP-3354 — mined from tool names across the whole box, no creator, no
+        // arguments: a suggestion keeps today's visibility so any member can
+        // see it and an owner or admin can promote it.
+        visibility: "WORKSPACE",
         safety: 1,
         // WARP-2665 — classify from the tools this pattern actually calls,
         // through the same `hasWriteTool` the routes' reconcile and the

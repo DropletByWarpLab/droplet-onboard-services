@@ -108,6 +108,7 @@ interface SpecRow {
   name: string;
   status: "live" | "draft" | "suggested";
   ownerId: string | null;
+  visibility: "PRIVATE" | "WORKSPACE";
   writes: boolean;
   reversible: boolean;
   steps: StepRow[];
@@ -140,6 +141,7 @@ function spec(over: Partial<SpecRow> = {}): SpecRow {
     name: "Goodnight",
     status: "live",
     ownerId: "user-family",
+    visibility: "WORKSPACE",
     writes: false,
     reversible: true,
     steps: [step(0, SMART_HOME_WRITE, { node_id: "n1", command: "turn_on" })],
@@ -399,6 +401,40 @@ describe("WARP-1621 — the ticker applies the same write-tier gate", () => {
 
     expect(result.fired).toBe(1);
     expect(dispatcher.call).toHaveBeenCalledWith(FILES_READ, { path: "/" });
+  });
+
+  /**
+   * WARP-3354 — BY DESIGN. A PRIVATE routine's schedule keeps firing, as its
+   * creator: the ticker authorises a scheduled run by the spec's `ownerId`
+   * principal (WARP-1580), never by who is looking, and it never reads
+   * `visibility`. Making a routine private hides it from other members; it does
+   * not stop or re-attribute the creator's own automation.
+   *
+   * MUTATION: skip a spec whose `visibility !== "WORKSPACE"` in the ticker -> red.
+   */
+  it("a PRIVATE routine's schedule keeps firing, as its creator", async () => {
+    const dispatcher: StepDispatcher = { call: vi.fn().mockResolvedValue({ ok: true }) };
+    const prisma = createPrismaMock({
+      specs: [
+        spec({
+          ownerId: "user-family",
+          visibility: "PRIVATE",
+          steps: [step(0, FILES_READ, { path: "/" })],
+        }),
+      ],
+      schedules: [dueSchedule()],
+      users: [ROLELESS_FAMILY],
+    });
+
+    const result = await tickToolSchedules(prisma as never, dispatcher, now);
+
+    expect(result.fired).toBe(1);
+    expect(dispatcher.call).toHaveBeenCalledWith(FILES_READ, { path: "/" });
+    // Recorded as the scheduler's run, authorised against the CREATOR's scope.
+    expect(prisma.runs[0]).toMatchObject({ triggeredBy: "scheduler" });
+    expect(
+      prisma.user.findUnique.mock.calls.some(([arg]) => arg.where.id === "user-family"),
+    ).toBe(true);
   });
 
   it("still fires an admin-owned write spec — privileged tiers unaffected", async () => {
