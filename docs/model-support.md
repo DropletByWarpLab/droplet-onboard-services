@@ -40,7 +40,7 @@ drop or reject things our code sends.
 | Pins, attachments, per-chat or project instructions ignored; forced "answer now" came back blank | gpt-oss's template keeps **only the first system message**; later ones vanish | fold every system message into `messages[0]` on the wire (WARP-3338, #2545/#2553); forced answers are `user` messages (WARP-3285, #2538) |
 | `developer` role: 422 from the gateway, or dropped | the gateway accepts system/user/assistant/tool only; DMR renders `developer` only at index 0; Ollama drops it | don't send `developer` |
 | Every turn offering a tool fails with a 500 from the model runner | a tool schema `array` without `items` makes the gpt-oss template throw | WARP-3314 guard test `array-schema-items.guard.test.ts` |
-| A write-up or answer comes back empty with `finish_reason: "length"` | a thinking model spent the whole `max_tokens` budget reasoning | per-family thinking control (table above); budgets sized for it; deterministic fallback in the Daily report |
+| A write-up or answer comes back empty, or cut off, with `finish_reason: "length"` | a thinking model spent the whole `max_tokens` budget reasoning | per-family thinking control (table above). In the Daily report: one retry (capped, low thinking); a still-cut-off write-up is trimmed to its last full sentence, marked `truncated: true` and ends "This summary was cut short…"; an empty one becomes a plain per-source readout (`fallback: true`) |
 | 422 `max_tokens … less than or equal to 4096` | the gateway caps `max_tokens` at 4096 (`services/ai-gateway/schemas.py`) | `completeOnce` clamps to the cap (Daily report fix) |
 | Ollama box behaves differently from a DMR box | Ollama uses its own Go template: it merges every system message and drops `developer` | render on the box you're debugging |
 
@@ -78,7 +78,8 @@ is read-only.
      model, `finishReason` and `reasoningChars`;
    - `tool_spec_summary_fallback`: the write-up failed and the report went out
      as a plain readout (the step's trace has `fallback: true` and
-     `fallbackReason`);
+     `fallbackReason`; a trimmed write-up has `truncated: true`). Sources
+     that aren't connected never reach the prompt;
    - `tool-spec-runner` "tool spec run failed", with the step error;
    - `agent_blank_answer_retry` and `blankDiagnostics` for chat blanks;
    - `agent_system_fold_trimmed` and `agent_system_fold_over_cap` for the
