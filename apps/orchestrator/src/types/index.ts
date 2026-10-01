@@ -85,6 +85,13 @@ export interface ToolDefinition {
   };
 }
 
+/**
+ * WARP-3409 — the ai-gateway's `max_tokens` ceiling (services/ai-gateway
+ * schemas.py `ChatRequest.max_tokens`, `le=4096`). Anything above it is a 422
+ * at the gateway, which is how the daily report's doubled retry failed.
+ */
+export const GATEWAY_MAX_TOKENS = 4096;
+
 export interface ChatRequest {
   model: string;
   messages: ChatMessage[];
@@ -202,6 +209,9 @@ export interface ModelInfo {
   // Additive (optional for back-compat): modalities the model supports.
   // Populated by the ai-gateway; drives vision routing + the dashboard badge.
   capabilities?: ModelCapabilities;
+  // WARP-3409 (additive, optional): what `reasoning_effort` does for this
+  // model — levels (gpt-oss), "low" = thinking off (GLM on DMR), or nothing.
+  thinking_control?: "reasoning_effort" | "enable_thinking" | null;
 }
 
 export interface ModelsResponse {

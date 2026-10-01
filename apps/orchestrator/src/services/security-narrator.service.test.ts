@@ -191,6 +191,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   _resetInteractiveInferenceForTests();
 });
 
@@ -341,6 +342,10 @@ describe("the pick and the claim", () => {
 
 describe("yielding to chat", () => {
   it("not idle (a chat in flight, or one that ended under 30 s ago) → no call, nothing claimed, the yield noted", async () => {
+    // The chat tracker stamps "ended" with the real Date.now(); the fixtures live at NOW. Pin the wall clock to NOW so
+    // "ended just now" is on the fixture timeline — against the real date the 7-day expiry swallows the incident.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
     const [i] = seed([incident()]);
     const release = startChat();
     await tickSecurityNarrator(prisma, deps());
@@ -348,11 +353,11 @@ describe("yielding to chat", () => {
     expect(byId(i!.id)).toMatchObject({ narrativeState: "pending", narrativeAttemptAt: null });
     release();
     // Ended just now: still not quiet for 30 s.
-    clock = new Date(Date.now() + 29_000);
+    clock = at(29_000);
     await tickSecurityNarrator(prisma, deps());
     expect(gw.chat).not.toHaveBeenCalled();
     expect(narratorHealthState().lastYieldAt).toEqual(clock);
-    clock = new Date(Date.now() + 31_000);
+    clock = at(31_000);
     await tickSecurityNarrator(prisma, deps());
     expect(gw.chat).toHaveBeenCalledTimes(1);
   });

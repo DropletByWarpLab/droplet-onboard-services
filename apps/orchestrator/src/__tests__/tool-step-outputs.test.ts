@@ -413,6 +413,10 @@ describe("WARP-2670 — the reference graph is checked at authoring time", () =>
     // duplicate-name error instead, which is a different bug.
     expect(r.body.error).toContain("no earlier step publishes");
     expect(r.body.reference).toBe("me");
+    // WARP-3409 — the message counts from 1, as every client lists steps; the
+    // `step` field stays the 0-based index a client can point at.
+    expect(r.body.error).toMatch(/^Step 1 refers to/);
+    expect(r.body.step).toBe(0);
   });
 
   it("refuses an unknown name", async () => {

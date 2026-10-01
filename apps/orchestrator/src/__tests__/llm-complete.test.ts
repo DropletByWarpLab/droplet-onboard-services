@@ -11,6 +11,7 @@ import { PrismaClient } from "@prisma/client";
 import type { Request, Response, NextFunction } from "express";
 import { createApp } from "../app.js";
 import { completeOnce } from "../services/llm-complete.service.js";
+import { GATEWAY_MAX_TOKENS } from "../types/index.js";
 import { initDeviceService } from "../services/device.service.js";
 
 vi.mock("../middleware/auth.js", () => ({
@@ -212,6 +213,17 @@ describe("completeOnce", () => {
     mockChat.mockResolvedValueOnce(okChatResponse("Hello"));
     await completeOnce({ text: "hi", model: "m" });
     expect(Object.keys(mockChat.mock.calls[0][0])).not.toContain("provider");
+  });
+
+  // WARP-3409 — the daily report's retry asked for 4,200 and the gateway (le=4096) answered 422, failing the run.
+  // The clamp lives here so no caller of completeOnce can repeat that.
+  it("clamps max_tokens to the gateway's ceiling, and leaves a value under it alone", async () => {
+    mockChat.mockResolvedValue(okChatResponse("Hello"));
+    await completeOnce({ text: "hi", model: "m", maxTokens: 4200 });
+    await completeOnce({ text: "hi", model: "m", maxTokens: 4096 });
+    await completeOnce({ text: "hi", model: "m", maxTokens: 2100 });
+    expect(mockChat.mock.calls.map((c) => c[0].max_tokens)).toEqual([4096, 4096, 2100]);
+    expect(GATEWAY_MAX_TOKENS).toBe(4096);
   });
 });
 

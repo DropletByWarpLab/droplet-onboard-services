@@ -146,7 +146,7 @@ describe("transform — a pure function over the run's named results", () => {
     const dispatcher: StepDispatcher = { call: vi.fn(async () => "r") };
     const { outcome } = await run([transformStep(0, "output = 1", { a: 1 }, "x"), callStep(1, "list_files")], dispatcher, null);
     expect(outcome.status).toBe("failed");
-    expect(outcome.error).toBe("step 0: transform step but no sandbox configured");
+    expect(outcome.error).toBe("step 1: transform step but no sandbox configured");
     expect(outcome.trace[0]).toMatchObject({ tool: TRANSFORM_PSEUDO_TOOL, ok: false });
     expect(dispatcher.call).not.toHaveBeenCalled();
   });
@@ -157,7 +157,7 @@ describe("transform — a pure function over the run's named results", () => {
       const transformer: Transformer = { transform: vi.fn(async () => { throw new Error(message); }) };
       const { outcome } = await run([transformStep(0, "x"), callStep(1, "list_files")], dispatcher, transformer);
       expect(outcome.status).toBe("failed");
-      expect(outcome.error).toBe(`step 0 (transform): ${message}`);
+      expect(outcome.error).toBe(`step 1 (transform): ${message}`);
     }
     expect(dispatcher.call).not.toHaveBeenCalled();
   });
