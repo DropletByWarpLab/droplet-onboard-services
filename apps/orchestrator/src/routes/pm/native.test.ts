@@ -257,7 +257,20 @@ function makeFake(hooks: Hooks = {}) {
         if (where.projectId !== undefined) rows = rows.filter((i) => i.projectId === where.projectId);
         if (where.stateId !== undefined) rows = rows.filter((i) => i.stateId === where.stateId);
         if (where.parentId !== undefined) rows = rows.filter((i) => i.parentId === where.parentId);
-        return rows.map((i) => resolveItem(i, include));
+        // WARP-3407 — `assignees: { some: { userId } }` (the own-assignments list, and `?assignee=`).
+        const some = (where.assignees as { some?: { userId?: string } } | undefined)?.some;
+        if (some?.userId) {
+          rows = rows.filter((i) => db.assignees.some((a) => a.workItemId === i.id && a.userId === some.userId));
+        }
+        return rows.map((i) => {
+          const out = resolveItem(i, include);
+          // The cross-project readers join the project per row.
+          if (include?.project) {
+            const p = db.projects.find((x) => x.id === i.projectId);
+            out.project = { identifier: p?.identifier, department: null };
+          }
+          return out;
+        });
       },
       create: async ({ data }: { data: Row }) => {
         fire("pmWorkItem.create");
@@ -1110,6 +1123,35 @@ describe("native PM routes — a work item assigned to an external guest is shar
     // a member's detail still carries the relations key as before
     const detail = await request(makeApp(prisma, { id: "user-family", role: "family" })).get(`/api/pm/work-items/${theirs}`);
     expect(Array.isArray(detail.body.relations)).toBe(true);
+  });
+
+  // WARP-3407 — how the guest FINDS what was shared with them: the list of the
+  // items assigned to them, and nothing else.
+  it("the assigned guest lists exactly the items assigned to them", async () => {
+    const res = await request(makeApp(prisma, GUEST_ASSIGNED)).get("/api/pm/assigned-to-me");
+    expect(res.status).toBe(200);
+    expect(res.body.work_items.map((w: { id: string }) => w.id)).toEqual([mine]);
+    expect(res.body.work_items[0].key).toBe("INBOX-1");
+  });
+
+  it("another guest lists nothing, and no query widens anyone's list to someone else's work", async () => {
+    const other = await request(makeApp(prisma, OTHER_GUEST)).get("/api/pm/assigned-to-me");
+    expect(other.status).toBe(200);
+    expect(other.body.work_items).toEqual([]);
+    const widened = await request(makeApp(prisma, GUEST_ASSIGNED)).get(
+      `/api/pm/assigned-to-me?assignee=user-owner&userId=user-owner&project=${pid}`,
+    );
+    expect(widened.body.work_items.map((w: { id: string }) => w.id)).toEqual([mine]);
+  });
+
+  it("a member's own list is theirs too, and a bad page is a 400", async () => {
+    const owner = makeApp(prisma, OWNER);
+    const theirsToo = (
+      await request(owner).post(`/api/pm/projects/${pid}/work-items`).send({ name: "Member's", assignees: ["user-family"] })
+    ).body.work_item.id;
+    const app = makeApp(prisma, { id: "user-family", role: "family" });
+    expect((await request(app).get("/api/pm/assigned-to-me")).body.work_items.map((w: { id: string }) => w.id)).toEqual([theirsToo]);
+    expect((await request(app).get("/api/pm/assigned-to-me?per_page=abc")).status).toBe(400);
   });
 
   it("the MCP service principal is not a guest: the guard lets it through", async () => {
