@@ -156,9 +156,11 @@ Design and rationale: ADR-063.
    ("Sign in to Droplet?", RFC 8252 §8.6). It sets no cookies and mints no
    code yet. **Continue** is a form `POST` to `/api/sso/oidc/native/consent`
    that mints the handoff code and answers `303` to
-   `<redirectUri>?code=<handoff code>&state=<state>`. **Cancel** sends the
-   browser to `<redirectUri>?error=access_denied&state=<state>`. The page is
-   good for as long as the state (10 minutes).
+   `<redirectUri>?code=<handoff code>&state=<state>`. **Cancel** is a form
+   `POST` to the same path that spends the page and answers `303` to
+   `<redirectUri>?error=access_denied&state=<state>`. Either button works
+   once; after one, the other is refused. The page is good for as long as the
+   state (10 minutes).
 5. `POST /api/sso/oidc/native/token` with the handoff code and the verifier →
    the `/auth/login?return=body` body.
 
@@ -173,7 +175,7 @@ lifetime, because a closed browser tab sends nothing.
 |---|---|---|---|---|
 | POST | `/sso/oidc/native/begin` | none | `{ provider, redirectUri, codeChallenge, codeChallengeMethod: "S256" }` | `200 { authorizeUrl }` (no cookie, no redirect) |
 | GET | `/sso/oidc/callback?code&state` | none (reached from the provider) | — | `200` consent page (no code in it; Continue posts a single-use consent value); or `302 <redirectUri>?error=<error>&state=<state>` |
-| POST | `/sso/oidc/native/consent` | none (the consent page's own form) | `consent=<single-use value>` (form-encoded) | `303 <redirectUri>?code=<43-char handoff code>&state=<state>`; `400 SSO_CONSENT_INVALID` if the page expired or was already used |
+| POST | `/sso/oidc/native/consent` | none (the consent page's own forms) | `consent=<single-use value>&decision=approve` or `decision=deny` (form-encoded) | approve: `303 <redirectUri>?code=<43-char handoff code>&state=<state>`; deny: `303 <redirectUri>?error=access_denied&state=<state>`; `400 SSO_CONSENT_INVALID` if the page expired or was already used |
 | POST | `/sso/oidc/native/token` | none | `{ code, codeVerifier }` | `200 { user: { id, username, displayName, role, mustChangePassword }, accessToken, refreshToken, accessTokenExpiresAt, refreshTokenExpiresAt }` |
 
 ```json
@@ -226,7 +228,7 @@ with no `code`. The IdP's own error text is never forwarded.
 |---|---|
 | `access_denied` | the person chose Cancel on the consent page, or cancelled or was refused at the provider |
 | `invalid_request`, `unauthorized_client`, `unsupported_response_type`, `invalid_scope`, `temporarily_unavailable`, `interaction_required`, `login_required`, `account_selection_required`, `consent_required` | the provider sent that standard OAuth/OIDC error, or (`invalid_request`) sent neither `code` nor `error` |
-| `server_error` | the provider sent an error code that is not in the list above |
+| `server_error` | the provider sent an error code that is not in the list above, or the box failed unexpectedly after the provider redirected back |
 | `sso_failed` | the ID token did not validate, the provider gave no usable email, or the account is deactivated |
 | `sso_email_unverified` | the provider did not verify the email address |
 | `sso_domain_not_allowed` | Google account outside `DROPLET_SSO_GOOGLE_ALLOWED_HD` |

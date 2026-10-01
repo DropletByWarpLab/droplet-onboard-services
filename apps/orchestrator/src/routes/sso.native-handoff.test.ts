@@ -258,8 +258,8 @@ const CONSENT_PATH = "/api/sso/oidc/native/consent";
 
 /**
  * begin → IdP (mocked) → callback → the person presses Continue. The callback
- * answers the consent page (`res`, with the single-use `consent` value and the
- * Cancel link); Continue POSTs that value and the box answers a 303 (`consentRes`)
+ * answers the consent page (`res`, with the single-use `consent` value its
+ * Continue and Cancel forms post); Continue POSTs that value and the box answers a 303 (`consentRes`)
  * whose `location` is the app's redirect carrying the handoff `code`.
  */
 async function completeNativeCallback(
@@ -269,13 +269,12 @@ async function completeNativeCallback(
   code: string;
   verifier: string;
   location: string;
-  cancel: string;
   consent: string;
   res: request.Response;
   consentRes: request.Response;
 }> {
   const page = await startNativeConsent(app, redirectUri);
-  const consentRes = await request(app).post(CONSENT_PATH).type("form").send({ consent: page.consent });
+  const consentRes = await request(app).post(CONSENT_PATH).type("form").send({ consent: page.consent, decision: "approve" });
   expect(consentRes.status).toBe(303);
   const location = (consentRes.headers.location as string) ?? "";
   const code = new URL(location).searchParams.get("code") ?? "";
@@ -286,14 +285,13 @@ async function completeNativeCallback(
 async function startNativeConsent(
   app: express.Express,
   redirectUri = LOOPBACK,
-): Promise<{ verifier: string; cancel: string; consent: string; res: request.Response }> {
+): Promise<{ verifier: string; consent: string; res: request.Response }> {
   const { verifier, challenge } = pkcePair();
   const b = await begin(app, { redirectUri, codeChallenge: challenge });
   expect(b.status).toBe(200);
   const res = await request(app).get("/api/sso/oidc/callback?code=idp-code&state=st-nat");
   expect(res.status).toBe(200);
-  const [cancel = ""] = hrefs(res.text);
-  return { verifier, cancel, consent: consentValue(res.text), res };
+  return { verifier, consent: consentValue(res.text), res };
 }
 
 /** begin → a failure at the callback (IdP error, cancel, ...): the redirect the app gets. */
@@ -533,7 +531,7 @@ describe("GET /api/sso/oidc/callback — native leg", () => {
       const page = await startNativeConsent(app);
       // Five minutes on the page, inside the state row's 10 minutes.
       vi.setSystemTime(new Date(Date.now() + 5 * 60_000));
-      const cont = await request(app).post(CONSENT_PATH).type("form").send({ consent: page.consent });
+      const cont = await request(app).post(CONSENT_PATH).type("form").send({ consent: page.consent, decision: "approve" });
       expect(cont.status).toBe(303);
       const code = new URL(cont.headers.location as string).searchParams.get("code");
 
@@ -554,7 +552,7 @@ describe("GET /api/sso/oidc/callback — native leg", () => {
       const page = await startNativeConsent(app);
       vi.setSystemTime(new Date(Date.now() + 10 * 60_000 + 1000));
 
-      const cont = await request(app).post(CONSENT_PATH).type("form").send({ consent: page.consent });
+      const cont = await request(app).post(CONSENT_PATH).type("form").send({ consent: page.consent, decision: "approve" });
 
       expect(cont.status).toBe(400);
       expect(cont.body.code).toBe("SSO_CONSENT_INVALID");
@@ -571,7 +569,7 @@ describe("GET /api/sso/oidc/callback — native leg", () => {
     const { consent, code } = await completeNativeCallback(app);
     const codeHash = prisma._states[0].handoffCodeHash;
 
-    const again = await request(app).post(CONSENT_PATH).type("form").send({ consent });
+    const again = await request(app).post(CONSENT_PATH).type("form").send({ consent, decision: "approve" });
 
     expect(again.status).toBe(400);
     expect(again.body.code).toBe("SSO_CONSENT_INVALID");
@@ -583,9 +581,10 @@ describe("GET /api/sso/oidc/callback — native leg", () => {
 
   it.each([
     ["no body", {}],
-    ["an empty value", { consent: "" }],
-    ["a malformed value", { consent: "not a consent value" }],
-    ["an unknown value", { consent: "A".repeat(43) }],
+    ["an empty value", { consent: "", decision: "approve" }],
+    ["a malformed value", { consent: "not a consent value", decision: "approve" }],
+    ["an unknown value", { consent: "A".repeat(43), decision: "approve" }],
+    ["an unknown value on Cancel", { consent: "A".repeat(43), decision: "deny" }],
   ])("refuses Continue with %s (400) and mints no code", async (_label, body) => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
@@ -602,9 +601,9 @@ describe("GET /api/sso/oidc/callback — native leg", () => {
   it("a wrong consent value leaves the real page usable", async () => {
     const app = buildApp(createPrismaMock());
     const first = await startNativeConsent(app);
-    const bogus = await request(app).post(CONSENT_PATH).type("form").send({ consent: "B".repeat(43) });
+    const bogus = await request(app).post(CONSENT_PATH).type("form").send({ consent: "B".repeat(43), decision: "approve" });
     expect(bogus.status).toBe(400);
-    const cont = await request(app).post(CONSENT_PATH).type("form").send({ consent: first.consent });
+    const cont = await request(app).post(CONSENT_PATH).type("form").send({ consent: first.consent, decision: "approve" });
     expect(cont.status).toBe(303);
   });
 
@@ -625,19 +624,108 @@ describe("GET /api/sso/oidc/callback — native leg", () => {
     for (const secret of [code, consent, verifier]) expect(logged).not.toContain(secret);
   });
 
-  it("consent page (RFC 8252 §8.6): Continue is a same-origin POST form, Cancel is error=access_denied with the app's state; the page cannot be framed, cached or scripted", async () => {
-    const app = buildApp(createPrismaMock());
-    const { cancel, res } = await startNativeConsent(app);
+  it("Cancel burns the consent value, audits consent_denied with the person and IP, and 303s to the app with error=access_denied and its state", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const { consent } = await startNativeConsent(app);
 
-    const url = new URL(cancel);
+    const res = await request(app).post(CONSENT_PATH).type("form").send({ consent, decision: "deny" });
+
+    expect(res.status).toBe(303);
+    expect(res.headers["cache-control"]).toBe("no-store");
+    const url = new URL(res.headers.location as string);
     expect(`${url.origin}${url.pathname}`).toBe(LOOPBACK);
+    expect([...url.searchParams.keys()].sort()).toEqual(["error", "state"]);
     expect(url.searchParams.get("error")).toBe("access_denied");
     expect(url.searchParams.get("state")).toBe("st-nat");
-    expect(url.searchParams.has("code")).toBe(false);
+    expect(prisma._states[0].nativeConsentHash).toBeNull();
+    expect(prisma._states[0].handoffCodeHash).toBeNull();
 
-    expect(res.text).toMatch(/<form method="post" action="native\/consent">/);
-    expect(res.text.match(/<form/g)).toHaveLength(1);
-    expect(hrefs(res.text)).toEqual([cancel]);
+    expect(recordActivity).toHaveBeenCalledTimes(1);
+    const row = recordActivity.mock.calls[0]![0];
+    expect(row).toMatchObject({
+      kind: "auth",
+      severity: "warn",
+      actor: { type: "user", id: stefan.id },
+      refs: { outcome: "consent_denied", method: "sso-native", provider: "google", userId: stefan.id },
+    });
+    expect(row.refs.ip).toEqual(expect.any(String));
+    expect(JSON.stringify(recordActivity.mock.calls)).not.toContain(consent);
+  });
+
+  it("after Cancel, Continue on the same page mints nothing; after Continue, Cancel does nothing", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const page = await startNativeConsent(app);
+    expect(
+      (await request(app).post(CONSENT_PATH).type("form").send({ consent: page.consent, decision: "deny" })).status,
+    ).toBe(303);
+    const cont = await request(app).post(CONSENT_PATH).type("form").send({ consent: page.consent, decision: "approve" });
+    expect(cont.status).toBe(400);
+    expect(cont.body.code).toBe("SSO_CONSENT_INVALID");
+    expect(prisma._states[0].handoffCodeHash).toBeNull();
+    expect(recordActivity).toHaveBeenCalledTimes(1);
+
+    const prisma2 = createPrismaMock();
+    const app2 = buildApp(prisma2);
+    const done = await completeNativeCallback(app2);
+    const codeHash = prisma2._states[0].handoffCodeHash;
+    recordActivity.mockClear();
+    const cancel = await request(app2).post(CONSENT_PATH).type("form").send({ consent: done.consent, decision: "deny" });
+    expect(cancel.status).toBe(400);
+    expect(cancel.headers.location).toBeUndefined();
+    expect(prisma2._states[0].handoffCodeHash).toBe(codeHash);
+    expect(recordActivity).not.toHaveBeenCalled();
+  });
+
+  it("refuses Cancel on an expired page (400) and audits nothing", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const prisma = createPrismaMock();
+      const app = buildApp(prisma);
+      const page = await startNativeConsent(app);
+      vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+      const res = await request(app).post(CONSENT_PATH).type("form").send({ consent: page.consent, decision: "deny" });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("SSO_CONSENT_INVALID");
+      expect(res.headers.location).toBeUndefined();
+      expect(recordActivity).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses a missing or unknown decision (400): Continue and Cancel are never inferred", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const page = await startNativeConsent(app);
+    for (const body of [{ consent: page.consent }, { consent: page.consent, decision: "yes" }]) {
+      const res = await request(app).post(CONSENT_PATH).type("form").send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("INVALID_REQUEST");
+    }
+    expect(prisma._states[0].nativeConsentHash).not.toBeNull();
+    expect(prisma._states[0].handoffCodeHash).toBeNull();
+    expect(recordActivity).not.toHaveBeenCalled();
+  });
+
+  it("consent page (RFC 8252 §8.6): Continue and Cancel are same-origin POST forms carrying the consent value and an explicit decision, no links; the page cannot be framed, cached or scripted", async () => {
+    const app = buildApp(createPrismaMock());
+    const { consent, res } = await startNativeConsent(app);
+
+    const forms = [...res.text.matchAll(/<form method="post" action="native\/consent">(.*?)<\/form>/g)].map(
+      (m) => m[1]!,
+    );
+    expect(forms).toHaveLength(2);
+    expect(res.text.match(/<form/g)).toHaveLength(2);
+    expect(forms[0]).toContain(`name="consent" value="${consent}"`);
+    expect(forms[0]).toContain('name="decision" value="approve"');
+    expect(forms[0]).toContain(">Continue</button>");
+    expect(forms[1]).toContain(`name="consent" value="${consent}"`);
+    expect(forms[1]).toContain('name="decision" value="deny"');
+    expect(forms[1]).toContain(">Cancel</button>");
+    // No GET link to the app's redirect: Cancel must go through the box.
+    expect(hrefs(res.text)).toEqual([]);
 
     expect(res.headers["cache-control"]).toBe("no-store");
     expect(res.headers["referrer-policy"]).toBe("no-referrer");
@@ -1094,5 +1182,101 @@ describe("POST /api/sso/oidc/native/token", () => {
     const res = await request(buildApp(createPrismaMock())).post("/api/sso/oidc/native/token").send(body);
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("INVALID_REQUEST");
+  });
+});
+
+// ── The two review minors: IP on the audit rows, server_error relay ─────────
+
+describe("native SSO audit rows carry the caller's IP", () => {
+  it("on a relayed callback failure, the approval and the redemption", async () => {
+    const app = buildApp(createPrismaMock());
+    await nativeCallbackRedirect(app, "error=access_denied&");
+    expect(recordActivity.mock.calls[0]![0].refs.ip).toEqual(expect.any(String));
+    recordActivity.mockClear();
+
+    const app2 = buildApp(createPrismaMock());
+    const { code, verifier } = await completeNativeCallback(app2);
+    expect(recordActivity.mock.calls[0]![0].refs).toMatchObject({ outcome: "consent_approved" });
+    expect(recordActivity.mock.calls[0]![0].refs.ip).toEqual(expect.any(String));
+    recordActivity.mockClear();
+
+    const res = await request(app2).post("/api/sso/oidc/native/token").send({ code, codeVerifier: verifier });
+    expect(res.status).toBe(200);
+    expect(recordActivity.mock.calls[0]![0].refs).toMatchObject({ outcome: "success" });
+    expect(recordActivity.mock.calls[0]![0].refs.ip).toEqual(expect.any(String));
+  });
+
+  it("on the TOTP gate's row, which is also the native relay's audit", async () => {
+    const app = buildApp(createPrismaMock([{ ...stefan, passwordHash: "$argon2id$mock" }]));
+    checkLoginSecondFactor.mockResolvedValue("failed");
+    await nativeCallbackRedirect(app, "code=idp-code&");
+    expect(recordActivity.mock.calls[0]![0].refs.ip).toEqual(expect.any(String));
+  });
+});
+
+describe("an unexpected failure after the native state is claimed", () => {
+  it("is relayed to the app as error=server_error and audited, minting nothing", async () => {
+    const prisma = createPrismaMock();
+    prisma.ssoIdentity.findUnique.mockRejectedValue(new Error("db down"));
+    const { res, url } = await nativeCallbackRedirect(buildApp(prisma), "code=idp-code&");
+    expect(`${url.origin}${url.pathname}`).toBe(LOOPBACK);
+    expect([...url.searchParams.keys()].sort()).toEqual(["error", "state"]);
+    expect(url.searchParams.get("error")).toBe("server_error");
+    expect(url.searchParams.get("state")).toBe("st-nat");
+    expectNoSessionCookies(res);
+    expect(prisma._states[0].nativeConsentHash).toBeNull();
+    expect(prisma._states[0].handoffCodeHash).toBeNull();
+    expect(recordActivity).toHaveBeenCalledTimes(1);
+    expect(recordActivity.mock.calls[0]![0].refs).toMatchObject({
+      outcome: "unexpected_error",
+      method: "sso-native",
+      error: "server_error",
+    });
+    // The exception text stays in the log, never in the redirect or the audit.
+    expect(res.headers.location).not.toContain("db down");
+    expect(JSON.stringify(recordActivity.mock.calls)).not.toContain("db down");
+  });
+
+  it("is relayed when parking the consent fails", async () => {
+    const prisma = createPrismaMock();
+    const realUpdateMany = prisma.ssoLoginState.updateMany;
+    prisma.ssoLoginState.updateMany = vi.fn(async (args: { where: Row; data: Row }) =>
+      "nativeConsentHash" in args.data && args.data.nativeConsentHash !== null
+        ? { count: 0 }
+        : realUpdateMany(args),
+    );
+    const { url } = await nativeCallbackRedirect(buildApp(prisma), "code=idp-code&");
+    expect(url.searchParams.get("error")).toBe("server_error");
+  });
+
+  it("falls through to the error handler (500) if the relay's own audit write fails", async () => {
+    const prisma = createPrismaMock();
+    prisma.ssoIdentity.findUnique.mockRejectedValue(new Error("db down"));
+    recordActivity.mockRejectedValueOnce(new Error("audit down"));
+    const app = buildApp(prisma);
+    expect((await begin(app)).status).toBe(200);
+    const res = await request(app).get("/api/sso/oidc/callback?code=idp-code&state=st-nat");
+    expect(res.status).toBe(500);
+    expect(res.headers.location).toBeUndefined();
+  });
+
+  it("leaves the browser flow on the error handler (500), as before", async () => {
+    const prisma = createPrismaMock();
+    prisma.ssoIdentity.findUnique.mockRejectedValue(new Error("db down"));
+    const app = buildApp(prisma);
+    buildAuthorizeRequest.mockResolvedValue({
+      authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=st-br",
+      state: "st-br",
+      nonce: "no-br",
+      codeVerifier: "box-verifier-br",
+    });
+    const auth = await request(app).post("/api/sso/oidc/authorize").send({ provider: "google" });
+    expect(auth.status).toBe(302);
+    const res = await request(app)
+      .get("/api/sso/oidc/callback?code=idp-code&state=st-br")
+      .set("Cookie", "droplet_sso_state=st-br");
+    expect(res.status).toBe(500);
+    expect(res.headers.location).toBeUndefined();
+    expect(recordActivity).not.toHaveBeenCalled();
   });
 });

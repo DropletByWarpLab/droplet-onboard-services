@@ -65,6 +65,7 @@ import {
   peekLoginState,
   parkConsent,
   claimConsent,
+  declineConsent,
   consumeHandoff,
   SSO_LOGIN_STATE_TTL_SECONDS,
 } from "../services/sso-login-state.service.js";
@@ -210,15 +211,16 @@ function consentFormActionSources(redirectUri: string): string {
  * or the `droplet://` scheme any local app can claim), the person confirms it.
  * The page carries NO code: Continue is a POST of the single-use `consent`
  * value bound to the state row, and only that mints the code (with its own
- * 60 s clock) and redirects. Cancel is a plain link to the same redirect with
- * `error=access_denied`. No script; the page lives as long as the state row.
+ * 60 s clock) and redirects. Cancel is a POST of the same value with
+ * `decision=deny`: it burns the value, is audited, and 303s to the redirect
+ * with `error=access_denied`. Two plain forms, no script; the page lives as
+ * long as the state row.
  */
 function renderNativeConsentPage(input: {
   provider: string;
   displayName: string;
   redirectUri: string;
   consentValue: string;
-  cancelUrl: string;
 }): string {
   const target =
     input.redirectUri === APP_SCHEME_REDIRECT
@@ -237,7 +239,7 @@ h1{font-size:1.25rem}.btn{display:inline-block;padding:.6rem 1.1rem;border-radiu
 <body><h1>Sign in to Droplet?</h1>
 <p>You signed in with ${e(input.provider)} as <strong>${e(input.displayName)}</strong>.
 Continue to give ${e(target)} access to this Droplet account.</p>
-<div><form method="post" action="native/consent"><input type="hidden" name="consent" value="${e(input.consentValue)}"><button class="btn primary" type="submit">Continue</button></form><a class="btn" href="${e(input.cancelUrl)}">Cancel</a></div>
+<div><form method="post" action="native/consent"><input type="hidden" name="consent" value="${e(input.consentValue)}"><input type="hidden" name="decision" value="approve"><button class="btn primary" type="submit">Continue</button></form><form method="post" action="native/consent"><input type="hidden" name="consent" value="${e(input.consentValue)}"><input type="hidden" name="decision" value="deny"><button class="btn" type="submit">Cancel</button></form></div>
 <p><small>Only continue if you started this sign-in from the Droplet app just now. This page expires in ${minutes} minutes.</small></p>
 </body></html>`;
 }
@@ -651,6 +653,11 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
 
   // ── Finish SSO: validate, link/create the local user, issue session ──
   router.get("/sso/oidc/callback", authRateLimit, async (req, res, next) => {
+    // Set once the state is claimed; the catch below uses it to tell a NATIVE
+    // app about an unexpected failure instead of leaving it waiting.
+    let relayNativeError:
+      | ((error: string, reason: string, alreadyAudited?: boolean) => Promise<boolean>)
+      | null = null;
     try {
       if (!prisma) {
         res.status(500).json({ error: "SSO is not available", code: "SSO_NO_PRISMA" });
@@ -695,7 +702,7 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
       // nowhere useful to render. Relay it to the app's own redirect as
       // `error=` (RFC 6749 section 4.1, so the app can stop waiting) and audit it.
       // Returns false for a BROWSER flow, which keeps answering in place.
-      const relayNativeError = async (
+      relayNativeError = async (
         error: string,
         reason: string,
         alreadyAudited = false,
@@ -708,7 +715,13 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
             sourceIcon: "shield-alert",
             what: "Native SSO sign-in did not complete",
             sub: `${loginState.provider} • ${reason}`,
-            refs: { outcome: reason, method: "sso-native", provider: loginState.provider, error },
+            refs: {
+              outcome: reason,
+              method: "sso-native",
+              provider: loginState.provider,
+              error,
+              ip: req.ip ?? null,
+            },
             actor: { type: "anonymous" },
           });
         }
@@ -736,6 +749,7 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
       const provider = loginState.provider;
       if (!isSsoProvider(provider)) {
         // Defensive — a persisted row should always carry a valid provider.
+        if (await relayNativeError("server_error", "unsupported_provider")) return;
         res.status(400).json({ error: "Unsupported SSO provider" });
         return;
       }
@@ -817,7 +831,14 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
             sourceIcon: "shield-alert",
             what: "Two-factor challenge failed",
             sub: `${user.username} • ${provider}`,
-            refs: { outcome: "totp_required", method: "sso", provider, userId: user.id, username: user.username },
+            refs: {
+              outcome: "totp_required",
+              method: "sso",
+              provider,
+              userId: user.id,
+              username: user.username,
+              ip: req.ip ?? null,
+            },
             actor: { type: "anonymous" },
           });
           // Already audited above; a native app gets `error=totp_required` and
@@ -865,7 +886,6 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
               displayName: user.displayName,
               redirectUri,
               consentValue,
-              cancelUrl: nativeErrorRedirectUrl(redirectUri, loginState.state, "access_denied"),
             }),
           );
         return;
@@ -893,16 +913,35 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
 
       res.redirect(safeReturnTo(loginState.returnTo));
     } catch (err) {
+      // An unexpected failure after the state was claimed (a DB error, a
+      // throw from the user link or the consent park): the state is spent,
+      // so a NATIVE app would wait for a redirect that never comes. Relay
+      // `server_error` (RFC 6749 section 4.1) and audit it; a BROWSER flow, or
+      // a failure before the claim, goes to the error handler as before.
+      if (relayNativeError && !res.headersSent) {
+        logger.error(
+          { err: (err as Error).message },
+          "SSO native callback: unexpected failure after the state was claimed",
+        );
+        try {
+          if (await relayNativeError("server_error", "unexpected_error")) return;
+        } catch {
+          // The relay itself failed (the audit write, most likely): fall
+          // through to the error handler with the original error.
+        }
+      }
       next(err);
     }
   });
 
-  // ── Continue on the native consent page (ADR-063 S5) ──
-  // The page's single-use `consent` value (bound to the state row, hashed at
-  // rest) is traded atomically for the handoff code, whose 60 s clock starts
-  // now, not when the page was shown. The approval is audited (S8). The value
-  // is unguessable and only ever in the page, so a cross-site POST cannot
-  // forge it; a replay or a double click finds it already spent.
+  // ── Continue or Cancel on the native consent page (ADR-063 S5) ──
+  // Both buttons POST the page's single-use `consent` value (bound to the
+  // state row, hashed at rest) with an explicit `decision`. Continue trades it
+  // atomically for the handoff code, whose 60 s clock starts now, not when the
+  // page was shown. Cancel burns it with no code and relays `access_denied`.
+  // Either way the decision is audited (S8). The value is unguessable and only
+  // ever in the page, so a cross-site POST cannot forge it; a replay, a double
+  // click or a Cancel after Continue (or the reverse) finds it already spent.
   router.post(
     "/sso/oidc/native/consent",
     authRateLimit,
@@ -916,8 +955,42 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
           return;
         }
         const consent: unknown = req.body?.consent;
-        if (typeof consent !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(consent)) {
+        const decision: unknown = req.body?.decision;
+        if (
+          typeof consent !== "string" ||
+          !/^[A-Za-z0-9_-]{43}$/.test(consent) ||
+          (decision !== "approve" && decision !== "deny")
+        ) {
           res.status(400).json({ error: "Invalid request", code: "INVALID_REQUEST" });
+          return;
+        }
+        if (decision === "deny") {
+          const declined = await declineConsent(prisma, sha256Hex(consent));
+          if (!declined || !declined.nativeRedirectUri) {
+            res.status(400).json({
+              error: "This sign-in page expired or was already used. Start again from the Droplet app.",
+              code: "SSO_CONSENT_INVALID",
+            });
+            return;
+          }
+          await recordActivity({
+            kind: "auth",
+            severity: "warn",
+            sourceIcon: "shield-alert",
+            what: `Native SSO sign-in cancelled via ${declined.provider}`,
+            sub: `${declined.provider} • consent_denied`,
+            refs: {
+              outcome: "consent_denied",
+              method: "sso-native",
+              provider: declined.provider,
+              ip: req.ip ?? null,
+              ...(declined.handoffUserId ? { userId: declined.handoffUserId } : {}),
+            },
+            actor: declined.handoffUserId
+              ? { type: "user", id: declined.handoffUserId }
+              : { type: "anonymous" },
+          });
+          res.redirect(303, nativeErrorRedirectUrl(declined.nativeRedirectUri, declined.state, "access_denied"));
           return;
         }
         const handoffCode = randomBytes(32).toString("base64url");
@@ -940,6 +1013,7 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
             method: "sso-native",
             provider: row.provider,
             userId: row.handoffUserId,
+            ip: req.ip ?? null,
           },
           actor: { type: "user", id: row.handoffUserId },
         });
@@ -1078,6 +1152,7 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
           username: dbUser.username,
           role,
           provider: row.provider,
+          ip: req.ip ?? null,
         },
         actor: { type: "user", id: dbUser.id },
       });

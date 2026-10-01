@@ -17,8 +17,9 @@
  * the native app's redirect and PKCE challenge. The callback parks only a
  * single-use CONSENT value on it (`parkConsent`, sha256 only); Continue on the
  * consent page trades it for a one-time handoff code with a 60 s clock
- * (`claimConsent`), and `POST /sso/oidc/native/token` redeems that code once
- * (`consumeHandoff`), all with the same conditional-claim idiom.
+ * (`claimConsent`), Cancel burns it with no code (`declineConsent`), and
+ * `POST /sso/oidc/native/token` redeems that code once (`consumeHandoff`),
+ * all with the same conditional-claim idiom.
  */
 import type { PrismaClient, SsoLoginState } from "@prisma/client";
 
@@ -186,6 +187,36 @@ export async function claimConsent(
   });
   if (count !== 1) return null;
   return { ...row, nativeConsentHash: null, handoffCodeHash: codeHash, handoffExpiresAt };
+}
+
+/**
+ * The person pressed Cancel: atomically burn the page's single-use consent
+ * value WITHOUT minting a code. Same conditional claim as `claimConsent`, so a
+ * Cancel and a Continue racing on one page cannot both win, and a spent page
+ * can do neither. Returns the row (redirect, state, provider, the person) so
+ * the route can audit the refusal and relay `access_denied`, or null if the
+ * value is unknown, already used or the state row has expired.
+ */
+export async function declineConsent(
+  prisma: PrismaClient,
+  consentHash: string,
+): Promise<SsoLoginState | null> {
+  const row = await prisma.ssoLoginState.findUnique({
+    where: { nativeConsentHash: consentHash },
+  });
+  if (!row) return null;
+  const { count } = await prisma.ssoLoginState.updateMany({
+    where: {
+      id: row.id,
+      nativeConsentHash: consentHash,
+      flowKind: "NATIVE",
+      handoffCodeHash: null,
+      expiresAt: { gt: new Date() },
+    },
+    data: { nativeConsentHash: null },
+  });
+  if (count !== 1) return null;
+  return { ...row, nativeConsentHash: null };
 }
 
 /**

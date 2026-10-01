@@ -146,6 +146,7 @@ import {
   peekLoginState,
   parkConsent,
   claimConsent,
+  declineConsent,
   consumeHandoff,
   pruneExpiredLoginStates,
   SSO_LOGIN_STATE_PRUNE_GRACE_MS,
@@ -380,6 +381,47 @@ describe("claimConsent", () => {
       claimConsent(prisma, "consent-1", "code-b"),
     ]);
     expect([a, b].filter((r) => r !== null)).toHaveLength(1);
+  });
+});
+
+describe("declineConsent", () => {
+  function pending(over: Partial<StateRow> = {}): StateRow {
+    return nativeRow({
+      consumedAt: new Date(),
+      nativeConsentHash: "consent-1",
+      handoffUserId: "u-1",
+      ...over,
+    });
+  }
+
+  it("burns the consent value without minting a code, exactly once", async () => {
+    const prisma = createPrismaMock([pending()]);
+    const row = await declineConsent(prisma, "consent-1");
+    expect(row?.handoffUserId).toBe("u-1");
+    expect(row?.nativeRedirectUri).not.toBeNull();
+    const stored = prisma._rows()[0] as StateRow;
+    expect(stored.nativeConsentHash).toBeNull();
+    expect(stored.handoffCodeHash).toBeNull();
+    expect(stored.handoffExpiresAt).toBeNull();
+    expect(await declineConsent(prisma, "consent-1")).toBeNull();
+    // A Continue after the Cancel finds nothing to claim.
+    expect(await claimConsent(prisma, "consent-1", "code-hash-1")).toBeNull();
+  });
+
+  it("refuses once the state row has expired, and an unknown value", async () => {
+    const prisma = createPrismaMock([pending({ expiresAt: new Date(Date.now() - 1000) })]);
+    expect(await declineConsent(prisma, "consent-1")).toBeNull();
+    expect((prisma._rows()[0] as StateRow).nativeConsentHash).toBe("consent-1");
+    expect(await declineConsent(createPrismaMock([pending()]), "consent-other")).toBeNull();
+  });
+
+  it("a Cancel and a Continue racing on one page: exactly one wins", async () => {
+    const prisma = createPrismaMock([pending()]);
+    const [denied, approved] = await Promise.all([
+      declineConsent(prisma, "consent-1"),
+      claimConsent(prisma, "consent-1", "code-a"),
+    ]);
+    expect([denied, approved].filter((r) => r !== null)).toHaveLength(1);
   });
 });
 
