@@ -478,9 +478,14 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Project tracker
   // CRM (customers, deals, pipeline) — reads moved to the business graph
   // ERP (Eaglesoft practice-management integration)
-  erp_get_schedule_today: "See the day's appointment schedule from your practice software",
+  // WARP-3355 — the two ERP READS the Daily report routine runs on every box
+  // are worded for any business, not for a practice: the routine readback is
+  // built client-side (web, Mac, iOS) from these labels, and a box with no
+  // practice connector must not be told it checks "what patients owe" in
+  // "your practice software". The patient-specific tools below keep theirs.
+  erp_get_schedule_today: "See today's appointments at a glance",
   erp_find_patient: "Look up a patient in your practice software",
-  erp_get_ar_summary: "See what patients still owe at a glance",
+  erp_get_ar_summary: "See what customers still owe at a glance",
   erp_schedule_appointment: "Book or move an appointment (you approve it before it's saved)",
   // Money (invoices and bills landed from a connected ledger)
   money_list_open_documents: "See what you are owed and what you owe, from your accounting systems",
