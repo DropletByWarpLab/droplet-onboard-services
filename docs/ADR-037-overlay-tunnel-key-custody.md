@@ -62,6 +62,14 @@ Android is listed for completeness: there is no privilege boundary to cross, so
 not "hide the key from the app" for its own sake; it is "never move a private
 key across a privilege boundary."
 
+> **Linux is a recorded exception, not a row in this table**
+> ([ADR-061](ADR-061-native-linux-client.md) Decision 7, Proposed):
+> NetworkManager owns the tunnel, and the app generates the keypair and hands
+> the private half to NetworkManager once, over D-Bus, into a connection bound
+> to the enrolling user. The app does see the private half for that moment, so
+> the headline rule above is not met. ADR-061 records why that is acceptable
+> and under which conditions.
+
 ### Consequences for enrollment
 
 This forces the resolution of [WARP-1591](https://warp-lab.atlassian.net/browse/WARP-1591),
