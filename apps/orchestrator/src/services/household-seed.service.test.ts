@@ -146,4 +146,77 @@ describe("household-seed.service", () => {
       expect(created!.data.name).toBe("Family Drive");
     });
   });
+
+  // WARP-3425 — the file-indexer maps the Workspace's files by
+  // Department.ncGroupfolderId alone and skips an id no row carries. The seed
+  // wrote that id once and nothing re-read it, so a Workspace row left behind
+  // by a Nextcloud reinstall or restore pointed at the wrong folder forever and
+  // no company document was ever indexed. The existing-row branch now
+  // re-discovers it by mount point.
+  describe("seedHouseholdDepartment — Workspace groupfolder id re-discovery", () => {
+    let originalFolderName: string;
+    let update: ReturnType<typeof vi.fn>;
+
+    function folder(id: number, mountPoint: string) {
+      return { id, mountPoint, groups: {}, quota: -3, size: 0, acl: false, manage: [] };
+    }
+
+    function prismaWithWorkspace(ncGroupfolderId: number | null): PrismaClient {
+      update = vi.fn().mockResolvedValue({});
+      return {
+        department: {
+          findFirst: vi.fn().mockResolvedValue({ id: "hh-1", kind: "HOUSEHOLD", ncGroupfolderId }),
+          update,
+        },
+        user: { findMany: vi.fn().mockResolvedValue([]) },
+      } as unknown as PrismaClient;
+    }
+
+    beforeEach(() => {
+      originalFolderName = config.DROPLET_SHARED_FOLDER_NAME;
+      config.DROPLET_SHARED_FOLDER_NAME = "Household";
+    });
+
+    afterEach(() => {
+      config.DROPLET_SHARED_FOLDER_NAME = originalFolderName;
+    });
+
+    it("moves a stale id to the folder Nextcloud mounts as the Workspace", async () => {
+      vi.mocked(gfListFolders).mockResolvedValue([folder(2, "Finance"), folder(4, "Household")]);
+
+      await seedHouseholdDepartment(prismaWithWorkspace(1));
+
+      expect(update).toHaveBeenCalledWith({
+        where: { id: "hh-1" },
+        data: { ncGroupfolderId: 4 },
+      });
+    });
+
+    it("fills a missing id", async () => {
+      vi.mocked(gfListFolders).mockResolvedValue([folder(4, "Household")]);
+
+      await seedHouseholdDepartment(prismaWithWorkspace(null));
+
+      expect(update).toHaveBeenCalledWith({
+        where: { id: "hh-1" },
+        data: { ncGroupfolderId: 4 },
+      });
+    });
+
+    it("writes nothing when the id is already current", async () => {
+      vi.mocked(gfListFolders).mockResolvedValue([folder(4, "Household")]);
+
+      await seedHouseholdDepartment(prismaWithWorkspace(4));
+
+      expect(update).not.toHaveBeenCalled();
+    });
+
+    it("never clears the id on an empty listing (Nextcloud down or folder not created yet)", async () => {
+      vi.mocked(gfListFolders).mockResolvedValue([]);
+
+      await seedHouseholdDepartment(prismaWithWorkspace(1));
+
+      expect(update).not.toHaveBeenCalled();
+    });
+  });
 });

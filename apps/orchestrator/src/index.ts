@@ -1318,6 +1318,11 @@ async function main() {
   cronRuntime.scheduleInterval(
     5 * 60_000,
     async () => {
+      // WARP-3425: the Workspace seed rides every tick, not just boot (it never
+      // throws). Before it runs, the Workspace row carries a current groupfolder
+      // id — the only key the file-indexer maps Workspace files by — and every
+      // active person has a Workspace membership, which search reads.
+      await seedHouseholdDepartment(prisma);
       const result = await reconcileDepartments(prisma);
       if (
         result.departmentsConverged > 0 ||
