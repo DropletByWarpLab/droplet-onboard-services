@@ -16,9 +16,11 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { createTransactionSeam } from "./helpers/prisma-tx-harness.js";
 
 const recordActivity = vi.fn(async (..._args: unknown[]) => null);
+/** Door changes are audited in their own transaction (doors.service.ts `audit`). */
+const recordActivityInTx = vi.fn(async (_tx: unknown, _params: Record<string, unknown>) => ({}) as never);
 vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: (...args: unknown[]) => recordActivity(...args),
-  recordActivityInTx: vi.fn(),
+  recordActivityInTx: (tx: unknown, params: Record<string, unknown>) => recordActivityInTx(tx, params),
   getActivityRecorder: () => null,
 }));
 
@@ -44,6 +46,7 @@ function doorRow(over: Record<string, unknown> = {}) {
     name: "Front door",
     doorPositionSource: "lock",
     heldOpenSeconds: 30,
+    doorPositionSourceSince: new Date("2026-09-01T00:00:00Z"),
     status: "active",
     retiredAt: null,
     createdAt: new Date("2026-09-01T00:00:00Z"),
@@ -79,11 +82,15 @@ function app(principal: Principal = "owner") {
 
 /** Door-change audit rows only: a refused request is itself audited by the role guard (WARP-237), which is not what these assert. */
 function doorAudits(): unknown[] {
-  return recordActivity.mock.calls.filter((c) => (c[0] as { refs?: { surface?: string } })?.refs?.surface === "doors");
+  const isDoors = (params: unknown) => (params as { refs?: { surface?: string } })?.refs?.surface === "doors";
+  // The best-effort recorder must never carry a door change: it would commit unaudited if the append failed.
+  expect(recordActivity.mock.calls.filter((c) => isDoors(c[0]))).toEqual([]);
+  return recordActivityInTx.mock.calls.filter((c) => isDoors(c[1]));
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  recordActivityInTx.mockImplementation(async () => ({}) as never);
   prisma.accessPoint.findMany.mockResolvedValue([doorRow()]);
   prisma.accessPoint.findUnique.mockResolvedValue(doorRow());
   prisma.accessPoint.create.mockImplementation(async (a: { data: Record<string, unknown> }) => doorRow(a.data));
@@ -109,7 +116,7 @@ describe("GET /api/doors", () => {
 
   it("carries positionSince, and an old position is not aged into unknown (that waits for link supervision, P1)", async () => {
     prisma.$queryRaw.mockResolvedValue([
-      { accessPointId: DOOR_ID, kind: "door_closed", troubleCode: null, occurredAt: new Date("2026-09-28T03:00:00Z") },
+      { accessPointId: DOOR_ID, kind: "door_closed", troubleCode: null, occurredAt: new Date("2026-09-28T03:00:00Z"), createdAt: new Date("2026-09-28T03:00:00Z") },
     ]);
     const res = await request(app()).get("/api/doors");
     expect(res.body.doors[0]).toMatchObject({ position: "closed", positionSince: "2026-09-28T03:00:00.000Z" });
@@ -267,6 +274,16 @@ describe("PATCH /api/doors/:id — owner only", () => {
       where: { id: DOOR_ID, status: "active" },
       data: { name: "Main entrance" },
     });
+  });
+
+  it("a change the audit chain cannot record is a 503, not a change made unaudited", async () => {
+    recordActivityInTx.mockRejectedValue(new Error("chain unavailable"));
+    const res = await request(app()).patch(`/api/doors/${DOOR_ID}`).send({ doorPositionSource: "none" });
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe("DOORS_UNAVAILABLE");
+    // The write ran inside the transaction the failed audit rolled back.
+    expect(prisma.accessPoint.updateMany).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "ReadCommitted" });
   });
 
   it.each(["admin", "family", "guest", "mcp", "voice", null] as const)("%s is refused and nothing is written", async (who) => {

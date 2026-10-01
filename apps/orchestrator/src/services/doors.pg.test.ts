@@ -23,6 +23,9 @@
  *                   occurredAt not id.
  *   wiring        — the §11.2 boot assertion's catalog query and its "trigger
  *                   missing" failure, against the real catalog.
+ *   audit         — a door change and its audit row commit together: an append
+ *                   that fails rolls the change back (only a real transaction
+ *                   proves the rollback).
  *
  * Gated on RUN_PG_INTEGRATION=1 + DATABASE_URL, like every *.pg.test.ts.
  * Local: scripts/test-orchestrator-pg.sh.
@@ -57,6 +60,9 @@ import { createModuleGate } from "../middleware/module-gate.js";
 import { createDoorsRouter } from "../routes/doors.js";
 import { assertDoorsWired, DoorsWiringError } from "./doors-wiring.js";
 import type { AvailabilityConfig } from "../modules/module-registry.js";
+import { createActivityRecorder } from "./activity.service.js";
+import { _setActivityRecorderForTests } from "./activity.singleton.js";
+import { createHmacSigner } from "./audit-signing.service.js";
 
 const RUN =
   process.env.RUN_PG_INTEGRATION === "1" &&
@@ -85,6 +91,7 @@ describe.skipIf(!RUN)("doors — real Postgres (ADR-055 P4a)", () => {
     if (!prisma) return;
     await prisma.$executeRaw`SELECT "access_event_purge"(${FAR_FUTURE}::timestamptz)`;
     await prisma.accessPoint.deleteMany({ where: { name: { startsWith: TAG } } });
+    await prisma.activityRow.deleteMany({ where: { sub: { startsWith: TAG } } });
     await prisma.moduleSetting.deleteMany({ where: { moduleId: "doors" } });
   }
 
@@ -94,6 +101,8 @@ describe.skipIf(!RUN)("doors — real Postgres (ADR-055 P4a)", () => {
       data: {
         name: over.name ?? `${TAG} door ${++seq}`,
         doorPositionSource: over.source ?? "lock",
+        // Wired well before any event a test writes (NOW is fixed in the past).
+        doorPositionSourceSince: daysAgo(30),
         status,
         retiredAt: status === "retired" ? NOW : null,
       },
@@ -131,9 +140,13 @@ describe.skipIf(!RUN)("doors — real Postgres (ADR-055 P4a)", () => {
     prisma = new RealPrismaClient();
     await prisma.$connect();
     await cleanup();
+    // Door changes are audited in their own transaction; that needs a recorder.
+    const signer = createHmacSigner(Buffer.alloc(32, 55));
+    _setActivityRecorderForTests(createActivityRecorder({ prisma, signer }), signer);
   });
 
   afterAll(async () => {
+    _setActivityRecorderForTests(null, null);
     if (!prisma) return;
     await cleanup();
     await prisma.$disconnect();
@@ -487,6 +500,39 @@ describe.skipIf(!RUN)("doors — real Postgres (ADR-055 P4a)", () => {
 
       expect((await listDoors(prisma, { includeRetired: false })).map((x) => x.id)).not.toContain(created.id);
       expect((await listDoors(prisma, { includeRetired: true })).map((x) => x.id)).toContain(created.id);
+    });
+
+    it("each change lands with its audit row, and a change the chain cannot record does not land at all", async () => {
+      const created = await createDoor(prisma, { name: `${TAG} audited`, doorPositionSource: "lock" }, { req: REQ, now: NOW });
+      const rows = await prisma.activityRow.findMany({ where: { sub: `${TAG} audited` }, orderBy: { id: "asc" } });
+      expect(rows.map((r) => r.what)).toEqual(["Door added"]);
+
+      // No recorder: the append throws inside the transaction, and lock → none rolls back with it.
+      _setActivityRecorderForTests(null, null);
+      try {
+        await expect(updateDoor(prisma, created.id, { doorPositionSource: "none" }, { req: REQ, now: NOW })).rejects.toThrow(/unaudited/);
+        await expect(retireDoor(prisma, created.id, { req: REQ, now: NOW })).rejects.toThrow(/unaudited/);
+      } finally {
+        const signer = createHmacSigner(Buffer.alloc(32, 55));
+        _setActivityRecorderForTests(createActivityRecorder({ prisma, signer }), signer);
+      }
+      expect(await prisma.accessPoint.findUniqueOrThrow({ where: { id: created.id } })).toMatchObject({ doorPositionSource: "lock", status: "active" });
+      expect(await prisma.activityRow.count({ where: { sub: `${TAG} audited` } })).toBe(1);
+    });
+
+    it("after a change of position source, the old source's last report no longer gives the position", async () => {
+      const created = await createDoor(prisma, { name: `${TAG} rewired`, doorPositionSource: "lock" }, { req: REQ, now: daysAgo(2) });
+      await event(created.id, "door_closed", { occurredAt: daysAgo(1), createdAt: daysAgo(1) });
+      expect((await listDoors(prisma, { includeRetired: false })).find((x) => x.id === created.id)).toMatchObject({ position: "closed" });
+
+      const rewired = await updateDoor(prisma, created.id, { doorPositionSource: "dp1" }, { req: REQ, now: NOW });
+      expect(rewired).toMatchObject({ position: "unknown", positionSince: null });
+      expect((await listDoors(prisma, { includeRetired: false })).find((x) => x.id === created.id)).toMatchObject({ position: "unknown" });
+
+      // A rename leaves the source, and so the position, alone.
+      await event(created.id, "door_open", { occurredAt: new Date(NOW.getTime() + 1000), createdAt: new Date(NOW.getTime() + 1000) });
+      const renamed = await updateDoor(prisma, created.id, { name: `${TAG} rewired 2` }, { req: REQ, now: new Date(NOW.getTime() + 2000) });
+      expect(renamed).toMatchObject({ position: "open" });
     });
 
     it("the `doors` ModuleId exists in the database (its own migration ran before the tables)", async () => {

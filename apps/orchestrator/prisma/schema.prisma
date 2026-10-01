@@ -10039,18 +10039,23 @@ enum AccessTroubleCode {
 
 /// A door.
 model AccessPoint {
-  id                 String             @id @default(uuid())
-  name               String             @db.VarChar(80)
-  doorPositionSource DoorPositionSource
+  id                      String             @id @default(uuid())
+  name                    String             @db.VarChar(80)
+  doorPositionSource      DoorPositionSource
   /// §9.7 "the door's held-open time". The brief gives no number; 30 s is a
   /// default the owner edits, not a spec value.
-  heldOpenSeconds    Int                @default(30)
-  status             AccessPointStatus  @default(active)
+  heldOpenSeconds         Int                @default(30)
+  /// When `doorPositionSource` last took its current value (set on create and
+  /// on every change of source). A position event the box received before this
+  /// was reported under the OLD wiring and says nothing about the door now, so
+  /// the doors service reads the position as unknown until a newer one arrives.
+  doorPositionSourceSince DateTime           @default(now())
+  status                  AccessPointStatus  @default(active)
   /// Set exactly when `status = retired` (CHECK).
-  retiredAt          DateTime?
-  createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @updatedAt
-  events             AccessEvent[]
+  retiredAt               DateTime?
+  createdAt               DateTime           @default(now())
+  updatedAt               DateTime           @updatedAt
+  events                  AccessEvent[]
 
   @@index([status])
 }

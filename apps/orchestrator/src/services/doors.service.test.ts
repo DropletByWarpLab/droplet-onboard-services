@@ -8,10 +8,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { PrismaClient } from "@prisma/client";
 import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
 
+/** The best-effort recorder. Door changes must never use it: their audit commits with the change. */
 const recordActivity = vi.fn(async (..._args: unknown[]) => null);
+const recordActivityInTx = vi.fn(async (_tx: unknown, _params: Record<string, unknown>) => ({}) as never);
 vi.mock("./activity.singleton.js", () => ({
   recordActivity: (...args: unknown[]) => recordActivity(...args),
-  recordActivityInTx: vi.fn(),
+  recordActivityInTx: (tx: unknown, params: Record<string, unknown>) => recordActivityInTx(tx, params),
   getActivityRecorder: () => null,
 }));
 
@@ -43,6 +45,7 @@ function doorRow(over: Record<string, unknown> = {}) {
     name: "Front door",
     doorPositionSource: "lock",
     heldOpenSeconds: 30,
+    doorPositionSourceSince: new Date("2026-09-01T00:00:00Z"),
     status: "active",
     retiredAt: null,
     createdAt: new Date("2026-09-01T00:00:00Z"),
@@ -71,8 +74,13 @@ function makePrisma() {
 }
 const asPrisma = (p: ReturnType<typeof makePrisma>) => p as unknown as PrismaClient;
 
+/** The audit's params (the recorder's second argument). */
+const audited = (i = 0) => recordActivityInTx.mock.calls[i]![1];
+
 beforeEach(() => {
   recordActivity.mockClear();
+  recordActivityInTx.mockReset();
+  recordActivityInTx.mockImplementation(async () => ({}) as never);
 });
 
 describe("normaliseDoorName", () => {
@@ -123,8 +131,8 @@ describe("listDoors", () => {
       doorRow({ id: "c", name: "C", doorPositionSource: "dp1" }),
     ]);
     p.$queryRaw.mockResolvedValue([
-      { accessPointId: "a", kind: "door_open", troubleCode: null, occurredAt: ago(10) },
-      { accessPointId: "c", kind: "trouble", troubleCode: "position_unknown", occurredAt: ago(5) },
+      { accessPointId: "a", kind: "door_open", troubleCode: null, occurredAt: ago(10), createdAt: ago(10) },
+      { accessPointId: "c", kind: "trouble", troubleCode: "position_unknown", occurredAt: ago(5), createdAt: ago(5) },
     ]);
     const doors = await listDoors(asPrisma(p), { includeRetired: false });
     expect(doors.map((d) => [d.id, d.position])).toEqual([
@@ -145,7 +153,7 @@ describe("listDoors", () => {
     const listOne = async (source: string, kind: string, secondsOld: number) => {
       const p = makePrisma();
       p.accessPoint.findMany.mockResolvedValue([doorRow({ doorPositionSource: source })]);
-      p.$queryRaw.mockResolvedValue([{ accessPointId: "door-1", kind, troubleCode: null, occurredAt: ago(secondsOld) }]);
+      p.$queryRaw.mockResolvedValue([{ accessPointId: "door-1", kind, troubleCode: null, occurredAt: ago(secondsOld), createdAt: ago(secondsOld) }]);
       return (await listDoors(asPrisma(p), { includeRetired: false }))[0]!;
     };
 
@@ -157,9 +165,58 @@ describe("listDoors", () => {
     it("the read that follows a write says the same (create / update / retire return a view)", async () => {
       const p = makePrisma();
       p.accessPoint.findUnique.mockResolvedValue(doorRow());
-      p.$queryRaw.mockResolvedValue([{ accessPointId: "door-1", kind: "door_closed", troubleCode: null, occurredAt: ago(3600) }]);
+      p.$queryRaw.mockResolvedValue([{ accessPointId: "door-1", kind: "door_closed", troubleCode: null, occurredAt: ago(3600), createdAt: ago(3600) }]);
       const retired = await retireDoor(asPrisma(p), "door-1", { req: REQ, now: NOW });
       expect(retired).toMatchObject({ position: "closed", positionSince: ago(3600) });
+    });
+  });
+
+  // Review finding: after `doorPositionSource` changes, the newest position
+  // event was reported under the OLD wiring. It no longer describes the door,
+  // so the position is unknown until a report arrives under the new source.
+  describe("a change of position source restarts the position", () => {
+    const CHANGED = ago(600);
+    const viewWith = async (event: { occurredAt: Date; createdAt: Date }) => {
+      const p = makePrisma();
+      p.accessPoint.findMany.mockResolvedValue([doorRow({ doorPositionSource: "dp1", doorPositionSourceSince: CHANGED })]);
+      p.$queryRaw.mockResolvedValue([{ accessPointId: "door-1", kind: "door_closed", troubleCode: null, ...event }]);
+      return (await listDoors(asPrisma(p), { includeRetired: false }))[0]!;
+    };
+
+    it("a report from before the change reads unknown, with no positionSince", async () => {
+      expect(await viewWith({ occurredAt: ago(3600), createdAt: ago(3600) })).toMatchObject({ position: "unknown", positionSince: null });
+    });
+
+    it("a report received after the change but that occurred before it (a replay) still reads unknown", async () => {
+      expect(await viewWith({ occurredAt: ago(3600), createdAt: ago(60) })).toMatchObject({ position: "unknown", positionSince: null });
+    });
+
+    it("a report received before the change reads unknown even if the device's clock dates it after", async () => {
+      expect(await viewWith({ occurredAt: ago(60), createdAt: ago(3600) })).toMatchObject({ position: "unknown", positionSince: null });
+    });
+
+    it("a report from after the change counts", async () => {
+      expect(await viewWith({ occurredAt: ago(60), createdAt: ago(60) })).toMatchObject({ position: "closed", positionSince: ago(60) });
+    });
+
+    it("the view a source-changing update returns says unknown, not the old source's last word", async () => {
+      const p = makePrisma();
+      p.accessPoint.findUnique
+        .mockResolvedValueOnce(doorRow({ doorPositionSource: "lock" }))
+        .mockResolvedValueOnce(doorRow({ doorPositionSource: "dp1", doorPositionSourceSince: NOW }));
+      p.$queryRaw.mockResolvedValue([{ accessPointId: "door-1", kind: "door_open", troubleCode: null, occurredAt: ago(30), createdAt: ago(30) }]);
+      const door = await updateDoor(asPrisma(p), "door-1", { doorPositionSource: "dp1" }, { req: REQ, now: NOW });
+      expect(door).toMatchObject({ doorPositionSource: "dp1", position: "unknown", positionSince: null });
+    });
+
+    it("a change that leaves the source alone (a rename, a held-open time) does not restart it", async () => {
+      const p = makePrisma();
+      p.accessPoint.findUnique.mockResolvedValue(doorRow());
+      await updateDoor(asPrisma(p), "door-1", { name: "Back door", heldOpenSeconds: 45 }, { req: REQ, now: NOW });
+      expect(p.accessPoint.updateMany).toHaveBeenCalledWith({
+        where: { id: "door-1", status: "active" },
+        data: { name: "Back door", heldOpenSeconds: 45 },
+      });
     });
   });
 
@@ -255,11 +312,11 @@ describe("createDoor", () => {
     const p = makePrisma();
     const door = await createDoor(asPrisma(p), { name: " Front  door ", doorPositionSource: "lock" }, { req: REQ, now: NOW });
     expect(p.accessPoint.create).toHaveBeenCalledWith({
-      data: { name: "Front door", doorPositionSource: "lock", heldOpenSeconds: 30 },
+      data: { name: "Front door", doorPositionSource: "lock", doorPositionSourceSince: NOW, heldOpenSeconds: 30 },
     });
     expect(door).toMatchObject({ id: "door-new", name: "Front door", position: "unknown" });
-    expect(recordActivity).toHaveBeenCalledTimes(1);
-    expect(recordActivity.mock.calls[0]![0]).toMatchObject({
+    expect(recordActivityInTx).toHaveBeenCalledTimes(1);
+    expect(audited()).toMatchObject({
       kind: "system",
       severity: "info",
       what: "Door added",
@@ -272,7 +329,7 @@ describe("createDoor", () => {
     const p = makePrisma();
     const door = await createDoor(asPrisma(p), { name: "Back", doorPositionSource: "none", heldOpenSeconds: 60 }, { req: REQ, now: NOW });
     expect(door.position).toBe("not_monitored");
-    expect(recordActivity.mock.calls[0]![0]).toMatchObject({ refs: { doorPositionSource: "none" } });
+    expect(audited()).toMatchObject({ refs: { doorPositionSource: "none" } });
   });
 
   it("refuses a name it cannot store, before touching the database", async () => {
@@ -281,7 +338,7 @@ describe("createDoor", () => {
       createDoor(asPrisma(p), { name: "Front‮door", doorPositionSource: "lock" }, { req: REQ, now: NOW }),
     ).rejects.toMatchObject({ status: 400, code: "INVALID_NAME" });
     expect(p.accessPoint.create).not.toHaveBeenCalled();
-    expect(recordActivity).not.toHaveBeenCalled();
+    expect(recordActivityInTx).not.toHaveBeenCalled();
   });
 });
 
@@ -292,7 +349,7 @@ describe("updateDoor", () => {
     p.accessPoint.findUnique.mockResolvedValue(doorRow({ status: "retired", retiredAt: NOW }));
     await expect(updateDoor(asPrisma(p), "door-1", { name: "X" }, { req: REQ, now: NOW })).rejects.toMatchObject({ status: 409, code: "DOOR_RETIRED" });
     expect(p.accessPoint.updateMany).not.toHaveBeenCalled();
-    expect(recordActivity).not.toHaveBeenCalled();
+    expect(recordActivityInTx).not.toHaveBeenCalled();
   });
 
   it("updates only active doors (the write itself carries the status guard) and audits what changed, with the source before and after", async () => {
@@ -303,9 +360,9 @@ describe("updateDoor", () => {
     await updateDoor(asPrisma(p), "door-1", { doorPositionSource: "none" }, { req: REQ, now: NOW });
     expect(p.accessPoint.updateMany).toHaveBeenCalledWith({
       where: { id: "door-1", status: "active" },
-      data: { doorPositionSource: "none" },
+      data: { doorPositionSource: "none", doorPositionSourceSince: NOW },
     });
-    expect(recordActivity.mock.calls[0]![0]).toMatchObject({
+    expect(audited()).toMatchObject({
       what: "Door changed",
       refs: {
         surface: "doors",
@@ -322,7 +379,7 @@ describe("updateDoor", () => {
     p.accessPoint.findUnique.mockResolvedValue(doorRow());
     await updateDoor(asPrisma(p), "door-1", { name: "Front door", heldOpenSeconds: 30 }, { req: REQ, now: NOW });
     expect(p.accessPoint.updateMany).not.toHaveBeenCalled();
-    expect(recordActivity).not.toHaveBeenCalled();
+    expect(recordActivityInTx).not.toHaveBeenCalled();
   });
 
   it("a door retired between the read and the write is a 409, not a silent overwrite", async () => {
@@ -330,7 +387,7 @@ describe("updateDoor", () => {
     p.accessPoint.findUnique.mockResolvedValue(doorRow());
     p.accessPoint.updateMany.mockResolvedValue({ count: 0 });
     await expect(updateDoor(asPrisma(p), "door-1", { name: "New" }, { req: REQ, now: NOW })).rejects.toMatchObject({ status: 409 });
-    expect(recordActivity).not.toHaveBeenCalled();
+    expect(recordActivityInTx).not.toHaveBeenCalled();
   });
 });
 
@@ -346,7 +403,7 @@ describe("retireDoor", () => {
       data: { status: "retired", retiredAt: NOW },
     });
     expect(door.status).toBe("retired");
-    expect(recordActivity.mock.calls[0]![0]).toMatchObject({ what: "Door retired", refs: { action: "door.retire", doorId: "door-1" } });
+    expect(audited()).toMatchObject({ what: "Door retired", refs: { action: "door.retire", doorId: "door-1" } });
   });
 
   it("is idempotent: retiring a retired door returns it and writes and audits nothing", async () => {
@@ -354,12 +411,78 @@ describe("retireDoor", () => {
     p.accessPoint.findUnique.mockResolvedValue(doorRow({ status: "retired", retiredAt: NOW }));
     await retireDoor(asPrisma(p), "door-1", { req: REQ, now: NOW });
     expect(p.accessPoint.updateMany).not.toHaveBeenCalled();
-    expect(recordActivity).not.toHaveBeenCalled();
+    expect(recordActivityInTx).not.toHaveBeenCalled();
   });
 
   it("404s a door that does not exist", async () => {
     const p = makePrisma();
     await expect(retireDoor(asPrisma(p), "nope", { req: REQ, now: NOW })).rejects.toBeInstanceOf(DoorWriteError);
+  });
+});
+
+// Review finding: the audit used to be a best-effort recordActivity AFTER the
+// write had committed, so a failed append left e.g. `lock → none` (alarms off)
+// committed and unaudited. The write and its audit now share one READ COMMITTED
+// transaction: the write first, the audit last, and a failed audit rolls the
+// write back.
+describe("a door change and its audit commit together", () => {
+  /** A $transaction that hands the callback its own tx handle and logs the order of what ran inside it. */
+  function txSpy(p: ReturnType<typeof makePrisma>) {
+    const log: string[] = [];
+    const tx = { accessPoint: p.accessPoint, txMarker: true };
+    let open = false;
+    const inTx = (what: string) => log.push(open ? `tx:${what}` : what);
+    p.accessPoint.create.mockImplementation(async (args: { data: Record<string, unknown> }) => {
+      inTx("create");
+      return doorRow({ ...args.data, id: "door-new" });
+    });
+    p.accessPoint.updateMany.mockImplementation(async () => {
+      inTx("updateMany");
+      return { count: 1 };
+    });
+    recordActivityInTx.mockImplementation(async (handle: unknown) => {
+      inTx(handle === tx ? "audit(tx)" : "audit(other handle)");
+      return {} as never;
+    });
+    const $transaction = vi.fn(async (fn: (t: unknown) => Promise<unknown>, _opts?: unknown) => {
+      open = true;
+      try {
+        return await fn(tx);
+      } finally {
+        open = false;
+      }
+    });
+    p.$transaction = $transaction;
+    return { log, $transaction };
+  }
+
+  it.each([
+    ["createDoor", async (p: ReturnType<typeof makePrisma>) => createDoor(asPrisma(p), { name: "Front", doorPositionSource: "lock" }, { req: REQ, now: NOW }), "create"],
+    ["updateDoor", async (p: ReturnType<typeof makePrisma>) => updateDoor(asPrisma(p), "door-1", { doorPositionSource: "none" }, { req: REQ, now: NOW }), "updateMany"],
+    ["retireDoor", async (p: ReturnType<typeof makePrisma>) => retireDoor(asPrisma(p), "door-1", { req: REQ, now: NOW }), "updateMany"],
+  ] as const)("%s: the write, then the audit on the same tx, inside one READ COMMITTED transaction — never the best-effort recorder", async (_name, run, write) => {
+    const p = makePrisma();
+    p.accessPoint.findUnique.mockResolvedValue(doorRow());
+    const { log, $transaction } = txSpy(p);
+    await run(p);
+    expect(log).toEqual([`tx:${write}`, "tx:audit(tx)"]);
+    expect($transaction).toHaveBeenCalledTimes(1);
+    expect($transaction.mock.calls[0]![1]).toEqual({ isolationLevel: "ReadCommitted" });
+    expect(recordActivity).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["createDoor", async (p: ReturnType<typeof makePrisma>) => createDoor(asPrisma(p), { name: "Front", doorPositionSource: "none" }, { req: REQ, now: NOW })],
+    ["updateDoor", async (p: ReturnType<typeof makePrisma>) => updateDoor(asPrisma(p), "door-1", { doorPositionSource: "none" }, { req: REQ, now: NOW })],
+    ["retireDoor", async (p: ReturnType<typeof makePrisma>) => retireDoor(asPrisma(p), "door-1", { req: REQ, now: NOW })],
+  ] as const)("%s: an audit that fails fails the change (the transaction rolls back) — it is not swallowed", async (_name, run) => {
+    const p = makePrisma();
+    p.accessPoint.findUnique.mockResolvedValue(doorRow());
+    const { $transaction } = txSpy(p);
+    recordActivityInTx.mockRejectedValue(new Error("chain unavailable"));
+    await expect(run(p)).rejects.toThrow("chain unavailable");
+    // The rejection left the transaction callback, which is what makes Prisma roll the write back.
+    await expect($transaction.mock.results[0]!.value).rejects.toThrow("chain unavailable");
   });
 });
 
