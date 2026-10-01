@@ -88,6 +88,7 @@ const CFG: AvailabilityConfig = {
   DROPLET_MATTER_SERVICE_URL: "http://matter:8083",
   ROUTING_SERVICE_URL: "http://routing:8080",
   SWITCH_SERVICE_URL: "http://switch:8081",
+  DOORS_ENABLED: "1",
 };
 
 /** Every module switched ON box-wide: the workspace toggle is not what is under test. */

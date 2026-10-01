@@ -521,12 +521,13 @@ describe("access-catalog — doors (ADR-055)", () => {
     }
   });
 
-  it("only security and doors refuse a tier: every other module still clamps to at least `view`", () => {
-    // The refusal is opt-in per module, and two have opted in: security refuses
-    // below its floor (guest), doors below admin (family and guest). This pins
-    // the set exactly, in both directions.
+  it("only security, crm, projects, money and doors refuse a tier: every other module still clamps to at least `view`", () => {
+    // The refusal is opt-in per module. Security, crm, projects and money refuse
+    // below family (guest; WARP-3365 / WARP-3369 for the business three), doors
+    // below admin (family and guest). This pins the set exactly, in both directions.
+    const refusing = new Set<string>(["security", "crm", "projects", "money", "doors"]);
     for (const moduleId of GATEABLE_MODULE_IDS) {
-      if (moduleId === "security" || moduleId === "doors") continue;
+      if (refusing.has(moduleId)) continue;
       for (const tier of ["family", "guest"] as const) {
         expect(maxLevelFor(tier, moduleId), `${tier} ${moduleId}`).not.toBeNull();
         expect(clampLevel(tier, moduleId, "manage"), `${tier} ${moduleId}`).not.toBeNull();
