@@ -67,7 +67,6 @@ import {
   claimConsent,
   consumeHandoff,
   SSO_LOGIN_STATE_TTL_SECONDS,
-  SSO_NATIVE_HANDOFF_TTL_SECONDS,
 } from "../services/sso-login-state.service.js";
 import type { Role } from "../services/jwt.service.js";
 import {
@@ -151,9 +150,9 @@ function pkceS256Matches(codeVerifier: string, codeChallenge: string): boolean {
 /**
  * OAuth 2.0 / OIDC authorization-error codes (RFC 6749 section 4.1, OIDC Core
  * authentication error response) the IdP may send back on the callback. Only
- * these are relayed to
- * the native app, verbatim; anything else (and never `error_description`, which
- * is IdP-controlled free text) collapses to `server_error`.
+ * these are relayed to the native app, verbatim; anything else (and never
+ * `error_description`, which is IdP-controlled free text) collapses to
+ * `server_error`.
  */
 const RELAYED_IDP_ERRORS: ReadonlySet<string> = new Set([
   "access_denied",
@@ -170,11 +169,11 @@ const RELAYED_IDP_ERRORS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Besides the relayed IdP codes, the box sends `sso_failed`, `totp_required`,
- * `sso_email_unverified` and `sso_domain_not_allowed` (documented in
- * docs/mobile-api-contract.md).
+ * RFC 6749 section 4.1 (authorization error response) shape: the app's
+ * redirect with `error` and the state it sent. Besides the relayed IdP codes
+ * the box sends `sso_failed`, `totp_required`, `sso_email_unverified` and
+ * `sso_domain_not_allowed` (documented in docs/mobile-api-contract.md).
  */
-/** RFC 6749 section 4.1 (authorization error response) shape: the app's redirect with `error` and the state it sent. */
 function nativeErrorRedirectUrl(redirectUri: string, state: string, error: string): string {
   return `${redirectUri}?error=${encodeURIComponent(error)}&state=${encodeURIComponent(state)}`;
 }
@@ -824,7 +823,6 @@ export function createSsoRouter(prisma?: PrismaClient): Router {
           return;
         }
       }
-
 
       if (loginState.flowKind === "NATIVE") {
         // RFC 8252 handoff: NO session and NO cookies here (this is the
