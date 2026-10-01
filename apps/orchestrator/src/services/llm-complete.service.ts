@@ -23,6 +23,7 @@ import * as aiGateway from "./ai-gateway.client.js";
 import { isTimeoutError } from "./ai-gateway.client.js";
 import {
   contentToText,
+  GATEWAY_MAX_TOKENS,
   type ChatMessage,
   type ChatResponse,
 } from "../types/index.js";
@@ -113,7 +114,9 @@ export async function completeOnce(
         messages,
         stream: false,
         temperature: args.temperature ?? DEFAULT_TEMPERATURE,
-        max_tokens: args.maxTokens ?? DEFAULT_MAX_TOKENS,
+        // WARP-3409 — clamped here, once, for every caller: above the
+        // gateway's ceiling the whole call is a 422, not a shorter answer.
+        max_tokens: Math.min(args.maxTokens ?? DEFAULT_MAX_TOKENS, GATEWAY_MAX_TOKENS),
         ...(args.reasoningEffort ? { reasoning_effort: args.reasoningEffort } : {}),
         ...(args.provider ? { provider: args.provider } : {}),
         // NO `tools` / `tool_choice` — this call path is non-agentic by
