@@ -16,6 +16,7 @@ import {
 interface CreateArg {
   data: {
     status: string;
+    visibility: string;
     writes: boolean;
     steps: { create: Array<{ idx: number; kind: string; args: { tool?: string } }> };
   };
@@ -64,6 +65,13 @@ describe("seedDailyReportSpec", () => {
     const p = fakePrisma(null);
     await seedDailyReportSpec(p.client);
     expect(createArg(p.create).data.status).toBe("live");
+  });
+
+  // WARP-3354 — box-provided, no creator; the Reports tile runs it for every member.
+  it("ships shared with the Workspace — it has no creator to keep it private for", async () => {
+    const p = fakePrisma(null);
+    await seedDailyReportSpec(p.client);
+    expect(createArg(p.create).data.visibility).toBe("WORKSPACE");
   });
 
   it("is read-only — nothing in it writes, so it can run unattended", async () => {
