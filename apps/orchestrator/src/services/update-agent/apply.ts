@@ -648,6 +648,24 @@ function githubAuthHeaders(opts: ApplyUpdateOptions): Record<string, string> {
 }
 
 /**
+ * WARP-3419 — `…/releases/latest` → `…/releases/tags/<tag>`. `latest` skips
+ * prereleases, and every stage release is one, so a stage row could never
+ * find its own assets there. Null when the URL is not a `latest` endpoint
+ * (a test fake, a mirror): the caller keeps the configured URL.
+ */
+export function releaseByTagUrl(releasesLatestUrl: string, tag: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(releasesLatestUrl);
+  } catch {
+    return null;
+  }
+  if (!url.pathname.endsWith("/releases/latest")) return null;
+  url.pathname = `${url.pathname.slice(0, -"/latest".length)}/tags/${encodeURIComponent(tag)}`;
+  return url.toString();
+}
+
+/**
  * Find one asset of the release this row tracks, by exact name. Every
  * failure is transient: the poller supersedes a row whose release moved on.
  */
@@ -658,8 +676,10 @@ async function releaseAssetUrl(
 ): Promise<{ ok: true; url: string } | { ok: false; detail: string }> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const authHeaders = githubAuthHeaders(opts);
+  const releaseUrl =
+    (row.releaseTag && releaseByTagUrl(opts.releasesLatestUrl, row.releaseTag)) || opts.releasesLatestUrl;
   try {
-    const res = await fetchImpl(opts.releasesLatestUrl, {
+    const res = await fetchImpl(releaseUrl, {
       headers: { accept: "application/vnd.github+json", ...authHeaders },
     });
     if (!res.ok) return { ok: false, detail: `releases endpoint HTTP ${res.status}` };
@@ -668,8 +688,9 @@ async function releaseAssetUrl(
       assets?: Array<{ name: string; url: string }>;
     };
     if (row.releaseTag && release.tag_name && release.tag_name !== row.releaseTag) {
-      // The latest release moved on mid-apply; the poller will supersede
-      // this row on its next tick. Retry semantics keep us honest.
+      // Only reachable on the configured-URL fallback: the latest release
+      // moved on mid-apply; the poller will supersede this row on its next
+      // tick. Retry semantics keep us honest.
       return { ok: false, detail: `latest release is ${release.tag_name}, row tracks ${row.releaseTag}` };
     }
     const url = release.assets?.find((a) => a.name === name)?.url;
