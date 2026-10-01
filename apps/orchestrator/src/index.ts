@@ -46,7 +46,13 @@ import { cleanupExpiredStorageTokens } from "./services/storage-safety.service.j
 import { createOuiLookup } from "./services/oui-lookup.service.js";
 import { createDeviceRegistry } from "./services/device-registry.service.js";
 import * as openwrt from "./services/openwrt.client.js";
+import {
+  purgeDueDeletions,
+  releaseStaleHandovers,
+  LEAVER_DELETION_LOCK_KEY,
+} from "./services/leaver-deletion.service.js";
 import { createCronRuntime } from "./services/cron-runtime.service.js";
+import { recordRotationFoundAtBoot } from "./services/audit-key-rotation.service.js";
 import {
   AGENT_RUN_LOCK_KEY,
   createAgentRunWorker,
@@ -69,6 +75,8 @@ import {
   type BrainPassTrigger,
 } from "./services/brain/brain-pass-runner.js";
 import { notifyFindings } from "./services/brain/brain-notify.service.js";
+import { createTriageShadow } from "./services/brain/brain-triage-shadow.js";
+import { DecisionModelClient } from "./services/decision-model.client.js";
 import {
   brainPassesSchedulable,
   isBrainEnabled,
@@ -145,7 +153,7 @@ import type { MatterDispatcher } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
 import { createExtensionAttacher } from "./services/extension-attach.service.js";
-import type { StepDispatcher } from "./services/tool-spec-runner.service.js";
+import { stepResultValue, type StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
 import { runActivityNotifySweep } from "./services/activity-notify.service.js";
@@ -164,6 +172,7 @@ import {
   recordActivity,
   getActivityRecorder,
 } from "./services/activity.singleton.js";
+import { initVpnDeviceRevoke } from "./services/vpn-peer-revoke.service.js";
 import { createErpSyncRunner } from "./services/erp-sync/erp-sync.service.js";
 import {
   discoverResources,
@@ -190,6 +199,8 @@ import { registerErpDriftRetention } from "./services/erp-sync/drift-record.serv
 import { registerSecurityJobs } from "./services/security-events.service.js";
 import { registerSecurityModeJobs } from "./services/security-mode.service.js";
 import { registerSecurityIncidentJobs } from "./services/security-incidents.service.js";
+import { registerSecurityLinkJobs } from "./services/security-link-proposals.service.js";
+import { registerSecurityNarratorJobs } from "./services/security-narrator.service.js";
 import { getEffectiveModuleIds } from "./services/modules.service.js";
 import { resolveEffectiveAccess } from "./services/effective-access.service.js";
 import { registerSecurityBaselineJobs } from "./services/security-baselines.service.js";
@@ -270,6 +281,14 @@ async function main() {
   // WARP-456: initialize the signed activity recorder. Boot-fatal —
   // an orchestrator that can't sign audit rows must NOT start.
   initActivityRecorder(prisma);
+  // WARP-3160: lifecycle post-effects revoke a leaver's VPN devices through it.
+  initVpnDeviceRevoke(prisma);
+  // WARP-3165: a key rotated while the orchestrator was down
+  // (scripts/rotate-audit-key.sh) gets its "Audit key rotated" row as the
+  // first new-key row, before the start-up row below.
+  await recordRotationFoundAtBoot(prisma).catch((err) =>
+    logger.error({ err }, "audit key rotation check at boot failed"),
+  );
   // Genesis-or-restart event so the first row of every container's
   // lifetime is always a `system` start-up. Makes the chain easier to
   // segment in the dashboard's activity feed.
@@ -640,20 +659,7 @@ async function main() {
   // schedule-ticker` so only one replica fires each due schedule.
   const toolSchedulerDispatcher: StepDispatcher = {
     async call(tool, args) {
-      const result = await mcpClient.callTool(tool, args);
-      if (result.isError) {
-        const detail = result.content?.[0]?.text ?? "tool reported error";
-        throw new Error(typeof detail === "string" ? detail : String(detail));
-      }
-      const text = result.content?.[0]?.text;
-      if (typeof text === "string" && text.length > 0) {
-        try {
-          return JSON.parse(text);
-        } catch {
-          return { raw: text };
-        }
-      }
-      return null;
+      return stepResultValue(tool, await mcpClient.callTool(tool, args));
     },
   };
   cronRuntime.scheduleInterval(
@@ -753,6 +759,13 @@ async function main() {
     // and the operator's "check now" are three callers of the same function
     // with the same lease, rather than three code paths with three ideas about
     // exclusion — which is the shape of defect this epic has already hit twice.
+    // WARP-3071 — shadow-only; undefined (today's code path) unless the flag is on.
+    let kev: DecisionModelClient | undefined;
+    const onTriaged = createTriageShadow({
+      enabled: config.DECISION_MODEL_TRIAGE_SHADOW,
+      decide: (args) => (kev ??= new DecisionModelClient({ url: config.AI_GATEWAY_GRPC_URL })).decide(args),
+    });
+
     const passRunners = {
       // Deterministic pass: no model call, so it never contends for the box's
       // single inference slot.
@@ -775,7 +788,7 @@ async function main() {
         // — so a run whose claim was lost meanwhile leaves delivery to the
         // worker that holds it now.
         if (signal.aborted) return;
-        const notified = await notifyFindings(prisma);
+        const notified = await notifyFindings(prisma, { onTriaged });
         if (notified.immediate > 0 || notified.digestSent) {
           logger.info({ notified }, "brain.findings.notified");
         }
@@ -1130,6 +1143,20 @@ async function main() {
     // in-flight map): a person in view for 30 s alerts before their `end`.
     ongoing: securityOngoingSource(),
   });
+  // WARP-2979 (ADR-059 P4 §6.3) — Droplet's link proposals: every hour, on its
+  // own advisory lock, it compares when things happen at a source a person
+  // placed in an area with every other camera, and suggests (or, above a
+  // higher bar, makes) links — never an alert by itself. Unconditional, like
+  // the jobs above; `SecurityAiSettings.linking = off` is honoured inside the
+  // tick. Registration is the `links` health row's boot assertion.
+  registerSecurityLinkJobs(cronRuntime, prisma);
+  // WARP-2979 (ADR-059 P4 §6.9) — Droplet's incident summaries: every minute,
+  // with NO advisory lock (a model call outlives the lock's transaction), it
+  // writes a short summary for each sealed notice or alert incident, on THIS
+  // box's own model only (DS-007), standing aside whenever someone is
+  // chatting. Unconditional; `SecurityAiSettings.summaries = off` is honoured
+  // inside the tick. Registration is the `summaries` health row's boot assertion.
+  registerSecurityNarratorJobs(cronRuntime, prisma);
   // WARP-2980 (ADR-059 P5) — the baseline job: every 60 s it records which
   // cameras Droplet can prove it is listening to (coverage cannot be rebuilt
   // later), keeps the learning state, and rebuilds what normal looks like
@@ -1324,6 +1351,33 @@ async function main() {
     { lockKey: "droplet:department-reconciler" },
   );
 
+  // WARP-3176: a hand-over claim orphaned by a crash or restart is released
+  // at boot (once it is older than any transfer can run) and again below.
+  releaseStaleHandovers(prisma)
+    .then((r) => {
+      if (r.released > 0 || r.failed > 0) logger.warn(r, "stale hand-over claims released at boot");
+    })
+    .catch((err) => logger.error({ err }, "stale hand-over sweep at boot failed"));
+
+  // WARP-3113: complete leaver deletions whose 30-day retention has run out
+  // (the person was revoked when the deletion was scheduled). 03:50 — clear
+  // of the 03:00–03:40 audit and sweep jobs. WARP-3176: stale hand-over
+  // claims first, so a released PENDING row that is due is purged tonight.
+  cronRuntime.scheduleCron(
+    "50 3 * * *",
+    async () => {
+      const stale = await releaseStaleHandovers(prisma);
+      if (stale.released > 0 || stale.failed > 0) {
+        logger.warn(stale, "stale hand-over claims released");
+      }
+      const res = await purgeDueDeletions(prisma);
+      if (res.completed > 0 || res.failed > 0) {
+        logger.info(res, "leaver-deletion job complete");
+      }
+    },
+    { lockKey: LEAVER_DELETION_LOCK_KEY },
+  );
+
   // WARP-237: nightly tamper detection. 03:25 — after the 03:00 purge
   // reshapes the chain origin and before the 03:35 root signing.
   cronRuntime.scheduleCron(
@@ -1415,6 +1469,7 @@ async function main() {
           composeFile: config.DROPLET_OTA_COMPOSE_FILE,
           configRoot: config.DROPLET_OTA_CONFIG_ROOT,
           updatesDir: config.DROPLET_OTA_UPDATES_DIR,
+          appDownloadsDir: config.DROPLET_APP_DOWNLOADS_DIR,
           githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
         })
       )?.runner ?? null)

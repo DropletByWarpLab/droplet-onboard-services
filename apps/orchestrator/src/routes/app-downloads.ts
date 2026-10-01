@@ -28,6 +28,12 @@
  * reason, so the page can say "no apps are staged on this box" instead
  * of rendering a spinner over a 500. Refusals that mean something IS
  * wrong — a tampered artifact, a broken catalog — are 5xx and loud.
+ *
+ * WARP-3390 — the refusals' `detail` text is the store's own: filesystem paths
+ * (`no catalog.json at <catalogPath>`), raw `err.message`s, digest failures.
+ * Only an owner or admin can act on it, so only they are sent it; every other
+ * role gets the stable `reason` code (the page branches on that) and
+ * `detail: null`. The full text is still logged server-side below.
  */
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
@@ -96,6 +102,13 @@ function statusForFailure(reason: StoreFailureReason): number {
   }
 }
 
+/** WARP-3390 — may this caller read the store's raw `detail` text? Owner and
+ *  admin only; a member, an external guest and an unauthenticated caller may not. */
+function mayReadDetail(req: Request): boolean {
+  const role = req.user?.role;
+  return role === "owner" || role === "admin";
+}
+
 export interface AppDownloadsRouterOptions {
   /** Injected in tests. Production builds one from `config`. */
   store?: AppDownloadsStore;
@@ -118,15 +131,16 @@ export function createAppDownloadsRouter(
    * Shape is stable whether or not anything is staged: `available` tells
    * the UI which branch to render, `platforms` is `[]` when nothing is.
    */
-  router.get("/app-downloads", async (_req: Request, res: Response) => {
+  router.get("/app-downloads", async (req: Request, res: Response) => {
     const loaded = await store.loadCatalog();
+    const detail = (text: string): string | null => (mayReadDetail(req) ? text : null);
 
     if (!loaded.ok) {
       if (isBenign(loaded.failureReason)) {
         res.json({
           available: false,
           reason: loaded.failureReason,
-          detail: loaded.detail,
+          detail: detail(loaded.detail),
           attestation: null,
           platforms: [],
         });
@@ -139,7 +153,7 @@ export function createAppDownloadsRouter(
       res.status(503).json({
         available: false,
         reason: loaded.failureReason,
-        detail: loaded.detail,
+        detail: detail(loaded.detail),
         attestation: null,
         platforms: [],
       });
@@ -219,7 +233,11 @@ export function createAppDownloadsRouter(
         );
         res
           .status(status)
-          .json({ error: opened.failureReason, detail: opened.detail });
+          .json(
+            mayReadDetail(req)
+              ? { error: opened.failureReason, detail: opened.detail }
+              : { error: opened.failureReason },
+          );
         return;
       }
 

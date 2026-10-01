@@ -4,6 +4,33 @@ import { getRequestId } from "../lib/request-context.js";
 
 const isTest = process.env.NODE_ENV === "test" || !!process.env.VITEST;
 
+/**
+ * Query parameters that carry a bearer-equivalent secret. They are scrubbed
+ * from `req.query` on every route (the logged URL keeps only its path), so a log bundle
+ * never carries a replayable credential. Add a name here when a route takes
+ * one in the query string.
+ *   - `token` — overlay link token (WARP-1474), calendar feed token.
+ *   - `sig`   — signed recordings-segment URL (WARP-3122); `u`/`exp` alone
+ *               are harmless without it.
+ *   - `t`     — signed clip-share token (clips.service `signShareUrl`).
+ */
+export const SECRET_QUERY_PARAMS: readonly string[] = ["token", "sig", "t"];
+
+const REDACTED = "[Redacted]";
+
+/** pino-http req serializer (receives the std-serialized req). */
+function scrubReq(req: { url?: string; query?: Record<string, unknown> } & Record<string, unknown>) {
+  const out = { ...req };
+  // WARP-3193 SEC-DATA-4: log the path only, never the query string.
+  if (typeof out.url === "string") out.url = out.url.split("?", 1)[0];
+  if (out.query && typeof out.query === "object") {
+    const query = { ...out.query };
+    for (const name of SECRET_QUERY_PARAMS) if (name in query) query[name] = REDACTED;
+    out.query = query;
+  }
+  return out;
+}
+
 // Dedicated pino-http base logger. Its `mixin` emits `requestId` ONLY while a
 // request context is live — covering in-handler `req.log.*` lines. It must NOT
 // emit the `no-request-context` marker: pino serialises a child logger's
@@ -47,6 +74,9 @@ export function createRequestLogger(opts: {
         // is unaffected; the routes take the token in the JSON body, not the
         // query string.)
         "req.query.token",
+        // WARP-3122: the signed-segment signature (see SECRET_QUERY_PARAMS,
+        // which the req serializer also scrubs from `req.query`).
+        "req.query.sig",
         "req.body.sign_public_key_pem",
         'req.headers["x-overlay-pop"]',
         // WARP-3193 SEC-DATA-2: the user's Nextcloud app-password rides on
@@ -67,16 +97,12 @@ export function createRequestLogger(opts: {
     : pino(httpBaseOpts);
   return pinoHttp({
     logger: httpBaseLogger,
+    // WARP-3122 + WARP-3193 SEC-DATA-4: `redact` cannot reach inside the `url`
+    // string, so a custom req serializer logs the path only and scrubs
+    // SECRET_QUERY_PARAMS from `req.query` (pino-http wraps it around the
+    // standard serializer).
+    serializers: { req: scrubReq },
     level: opts.level ?? (isTest ? "silent" : "info"),
-    // WARP-3193 SEC-DATA-4: the pre-auth calendar ICS feed authenticates by
-    // `?token=`, and the default serializer logs `url` verbatim. Log the path
-    // only; the parsed `req.query` stays, with its token paths redacted above.
-    serializers: {
-      req: (req: { url?: string }) => {
-        if (typeof req.url === "string") req.url = req.url.split("?", 1)[0];
-        return req;
-      },
-    },
     customProps: (req) => ({
       requestId:
         (req as typeof req & { requestId?: string }).requestId ??

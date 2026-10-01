@@ -28,6 +28,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Hammer, PanelLeft, PanelRight } from "lucide-react";
 import { Dialog } from "@/components/Dialog";
+import { helpSlot } from "@/components/shell/dom-slots";
 import {
   LIVE_STATUSES,
   cancelAgentRun,
@@ -107,6 +108,8 @@ export function WorkshopSpace() {
   const railTrigger = useRef<HTMLButtonElement>(null);
   const contextTrigger = useRef<HTMLButtonElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  // WARP-3043 — the head offers HelpLauncher a slot (see app/chat/page.tsx).
+  const registerHelpSlot = helpSlot.useRegister();
   const [composerBusy, setComposerBusy] = useState(false);
   const [composerStatus, setComposerStatus] = useState<{ text: string; title?: string } | null>(null);
 
@@ -267,6 +270,22 @@ export function WorkshopSpace() {
     composerRef.current?.focus();
   };
 
+  // The owner deleted a custom tool from its pane: nothing may keep pointing
+  // at it — the rail, the pane (and its drawer), the composer, the URL. Its
+  // runs stay; the FK is ON DELETE SET NULL, so they are re-read to drop the
+  // workspace they no longer name, and so is the open run when it was one.
+  const removeWorkspace = (w: { id: string; name: string }) => {
+    setWorkspaces((cur) => cur?.filter((x) => x.id !== w.id) ?? cur);
+    setSelectedWorkspaceId((cur) => (cur === w.id ? null : cur));
+    setComposeWorkspaceId((cur) => (cur === w.id ? "" : cur));
+    setContextOpen(false);
+    setComposerStatus({ text: `Deleted "${w.name}".` });
+    void loadWorkspaces();
+    void loadRuns();
+    if (selectedRef.current && detail?.workspaceId === w.id) void loadDetail(selectedRef.current);
+    composerRef.current?.focus();
+  };
+
   const removeSchedule = async (id: string) => {
     setScheduleBusy(true);
     try {
@@ -331,18 +350,19 @@ export function WorkshopSpace() {
           selectRun(id);
           setContextOpen(false);
         }}
+        onDeleted={removeWorkspace}
       />
     ) : null;
 
   return (
-    <div className="droplet-shell chat-app workshop-app h-[calc(100dvh_-_56px_-_env(safe-area-inset-bottom))] lg:h-dvh overflow-x-hidden" data-screen-label="Droplet — Workshop">
+    <div className="droplet-shell chat-app h-[calc(100dvh_-_56px_-_env(safe-area-inset-bottom))] lg:h-dvh overflow-x-hidden" data-screen-label="Droplet — Workshop">
       <aside className="conv-rail hidden lg:flex" aria-label="Workshop rail">
         {rail()}
       </aside>
 
       <div className={`chat-main${selectedRunId ? "" : " is-empty"}`}>
         <header className="chat-head">
-          <button ref={railTrigger} type="button" className="chat-iconbtn ws-rail-toggle" aria-label="Open the workshop rail" onClick={() => setRailOpen(true)}>
+          <button ref={railTrigger} type="button" className="chat-iconbtn chat-drawer-toggle" aria-label="Open the workshop rail" onClick={() => setRailOpen(true)}>
             <PanelLeft size={16} aria-hidden />
           </button>
           <div className="chat-head-title" title={detail?.goal ?? "Workshop"}>
@@ -378,6 +398,7 @@ export function WorkshopSpace() {
               <PanelRight size={16} aria-hidden />
             </button>
           )}
+          <span ref={registerHelpSlot} className="help-slot" />
         </header>
 
         <div className="chat-scroll" aria-live="polite">

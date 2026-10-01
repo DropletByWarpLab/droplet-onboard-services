@@ -39,6 +39,9 @@ interface TraceRow {
   tool?: string;
   ok: boolean;
   error?: string;
+  /** WARP-3409 — a summarize step written without the model, or ended early. */
+  fallback?: boolean;
+  truncated?: boolean;
 }
 
 async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
@@ -91,6 +94,9 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   };
   const trace = Array.isArray(data.trace) ? data.trace : [];
   const failed = trace.filter((t) => !t.ok);
+  // WARP-3409 — the same gaps the Activity row counts: a failed optional read,
+  // or a write-up the model did not finish.
+  const gaps = trace.filter((t) => !t.ok || t.fallback || t.truncated).length;
   return {
     ok: true,
     data: {
@@ -104,7 +110,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         : {}),
       message:
         data.status === "ok"
-          ? `Ran "${slug}": ${trace.length} step${trace.length === 1 ? "" : "s"} completed.`
+          ? `Ran "${slug}": ${trace.length} step${trace.length === 1 ? "" : "s"} completed${gaps > 0 ? `, ${gaps} with gaps` : ""}.`
           : `"${slug}" stopped: ${data.error ?? data.status}.`,
     },
   };

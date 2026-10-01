@@ -126,6 +126,30 @@ describe("ReviewCard (§5/§7)", () => {
     expect(screen.getByText(INTERVIEW_COPY.savedLine)).toBeTruthy();
   });
 
+  // WARP-3043 — who can see a fact is a themed menu, not a native select.
+  it("retargets a fact's audience from its menu before applying", async () => {
+    const onApply = vi.fn().mockResolvedValue(undefined);
+    const { container } = render(
+      <ReviewCard
+        proposal={PROPOSAL}
+        onApply={onApply}
+        onNotYet={vi.fn()}
+        onViewSaved={vi.fn()}
+      />,
+    );
+    expect(container.querySelector("select")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Who can see fact 1: Everyone here" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Admins only" }));
+    expect(screen.getByRole("button", { name: "Who can see fact 1: Admins only" })).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("review-apply"));
+    });
+    expect(onApply.mock.calls[0][0].facts).toEqual([
+      { category: "Business", fact: "Open Tue-Sat", audience: "admin" },
+      { category: "Tone", fact: "Short replies", audience: "admin" },
+    ]);
+  });
+
   it("keeps edits and shows the §7.9 error line on a failed apply", async () => {
     const onApply = vi.fn().mockRejectedValue(new Error("500"));
     render(

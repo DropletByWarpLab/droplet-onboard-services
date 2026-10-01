@@ -40,12 +40,15 @@ import express, { Router, type NextFunction, type Request, type Response } from 
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { createHash, randomBytes } from "node:crypto";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import {
   recordAccessDenied,
   requireRole,
   requireRoleOrMcpService,
   type AuthUser,
 } from "../middleware/auth.js";
+import { createLogger } from "../lib/logger.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import {
@@ -59,6 +62,7 @@ import {
   type WorkspaceSandboxClient,
 } from "../services/workspace.service.js";
 import { ACTIVE_AGENT_RUN_STATUSES } from "../services/agent-run-worker.service.js";
+import { deleteWorkspaceRowUnlessSource } from "../services/workspace-source-guard.service.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import {
   connectorDraftReadback,
@@ -66,6 +70,7 @@ import {
   summarizeConnectorDraft,
 } from "../services/connector-draft.js";
 
+const logger = createLogger("workspace-routes");
 const MCP_PRINCIPAL_ID = "_service:mcp";
 const WORKSHOP_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
 // Fetch for every authenticated HUMAN role; push for owner/admin only. This is
@@ -407,16 +412,43 @@ export function createWorkspaceRouter(
         res.status(409).json({ error: "A run is still working in this workspace; cancel it first" });
         return;
       }
-      await sandbox.remove(id.data);
-      await prisma.workshopWorkspace.delete({ where: { id: id.data } });
+      // WARP-3200 — the sandbox re-exports an extension's code from its
+      // workspace on every install (a promote, an enable, the reconciler
+      // after a reboot), so the workspace outlives every extension that can
+      // still be installed from it; only an uninstalled one lets it go. The
+      // guard and the row delete are one transaction behind a lock on the
+      // row, which a promote's store and an enable's claim take too
+      // (workspace-source-guard.service.ts): one of them racing this delete
+      // either lands first and is refused here, or waits and finds no row.
+      const outcome = await deleteWorkspaceRowUnlessSource(prisma, id.data);
+      if (!outcome.deleted) {
+        if (outcome.reason === "not_found") res.status(404).json({ error: "No such workspace" });
+        else res.status(409).json({ error: `This workspace is the source of the extension "${outcome.extensionName}"; uninstall the extension first` });
+        return;
+      }
+      // The repository goes only AFTER the row, create's order reversed.
+      // Removing it first left a row with no repository behind it whenever
+      // the row delete then failed — the one state create refuses to leave —
+      // and removing it inside the transaction would hold the row lock
+      // across a sandbox call (up to 35 s). Once the row is gone no promote
+      // or enable can name this workspace, so a sandbox failure here can
+      // only leave a repository nothing refers to: nothing installs from it,
+      // and the sandbox refuses a new workspace with its id. The owner's
+      // delete stands, and the audit row says what was left behind.
+      let repositoryError: string | null = null;
+      try {
+        await sandbox.remove(id.data);
+      } catch (err) {
+        repositoryError = (err instanceof Error ? err.message : String(err)).slice(0, 300);
+      }
       await recordActivity({
         kind: "tool_run",
         severity: "warn",
         sourceIcon: "trash",
-        what: "Workspace deleted",
+        what: repositoryError ? "Workspace deleted, but its repository could not be removed" : "Workspace deleted",
         sub: row.name,
         actor: actorFromRequest(req),
-        refs: { workspaceId: id.data },
+        refs: { workspaceId: id.data, ...(repositoryError ? { repositoryError } : {}) },
       });
       res.json({ id: id.data, deleted: true });
     } catch (err) {
@@ -453,33 +485,102 @@ export function createWorkspaceRouter(
         res.status(404).json({ error: "No such workspace" });
         return;
       }
-      const { body, head } = await sandbox.bundle(id.data);
-      const sha256 = createHash("sha256").update(body).digest("hex");
-      // Which vendor, for the audit row. Best effort: a draft that cannot be
-      // read never blocks the owner's download of their own workspace.
-      let provider: string | null = null;
+      const bundle = await sandbox.bundle(id.data);
       try {
-        provider = (await sandbox.connectorDraft(id.data, row.proposedTag ?? "work"))?.provider || null;
-      } catch {
-        provider = null;
+        // Which vendor, for the audit row. Best effort: a draft that cannot be
+        // read never blocks the owner's download of their own workspace.
+        let provider: string | null = null;
+        try {
+          provider = (await sandbox.connectorDraft(id.data, row.proposedTag ?? "work"))?.provider || null;
+        } catch {
+          provider = null;
+        }
+        const auditRefs = {
+          workspaceId: id.data,
+          head: bundle.head,
+          sha256: bundle.sha256,
+          bytes: bundle.size,
+          proposedTag: row.proposedTag ?? null,
+          provider,
+        };
+        // Every export that starts is audited, before a byte leaves: a client
+        // that drops mid-download, or a stream that fails its check, has
+        // still had (part of) the workspace.
+        await recordActivity({
+          kind: "tool_run",
+          severity: "info",
+          sourceIcon: "download",
+          what: "Workspace export started",
+          sub: row.name,
+          actor: actorFromRequest(req),
+          refs: auditRefs,
+        });
+        res.status(200);
+        res.setHeader("Content-Type", "application/octet-stream");
+        res.setHeader("Content-Length", String(bundle.size));
+        res.setHeader("X-Bundle-Sha256", bundle.sha256);
+        res.setHeader("Content-Disposition", `attachment; filename="${id.data}-${bundle.head.slice(0, 7)}.bundle"`);
+        // Bundle bytes for git, as an attachment — never rendered, never cached.
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.setHeader("Cache-Control", "no-store");
+        // Stream-through: the bytes are hashed as they pass, and the stream
+        // ends in an error (response destroyed, no export row) unless they
+        // are exactly the length and sha256 the sandbox stated. The sha256
+        // rides the response so the owner can check the file too.
+        const hash = createHash("sha256");
+        let bytes = 0;
+        const verify = new Transform({
+          transform(chunk: Buffer, _enc, cb) {
+            hash.update(chunk);
+            bytes += chunk.length;
+            cb(null, chunk);
+          },
+          flush(cb) {
+            cb(bytes === bundle.size && hash.digest("hex") === bundle.sha256 ? null : new Error("bundle bytes do not match x-bundle-sha256"));
+          },
+        });
+        try {
+          await pipeline(bundle.stream, verify, res);
+        } catch (err) {
+          bundle.stream.destroy();
+          logger.error({ err, workspaceId: id.data }, "workspace_export_stream_failed");
+          // The download failed or was cut short, and the client may hold
+          // part or all of the bytes: leave a visible failed row.
+          try {
+            await recordActivity({
+              kind: "tool_run",
+              severity: "warn",
+              sourceIcon: "download",
+              what: "Workspace export failed",
+              sub: row.name,
+              actor: actorFromRequest(req),
+              refs: { ...auditRefs, bytesSent: bytes },
+            });
+          } catch (auditErr) {
+            logger.error({ err: auditErr, workspaceId: id.data }, "workspace_export_audit_failed");
+          }
+          return; // pipeline already destroyed the response
+        }
+        // The completion row, once the verified bytes have all been handed
+        // over. The download has succeeded and the headers are gone, so an
+        // audit-store failure here is logged, never passed to Express.
+        try {
+          await recordActivity({
+            kind: "tool_run",
+            severity: "info",
+            sourceIcon: "download",
+            what: "Workspace exported",
+            sub: row.name,
+            actor: actorFromRequest(req),
+            refs: auditRefs,
+          });
+        } catch (auditErr) {
+          logger.error({ err: auditErr, workspaceId: id.data }, "workspace_export_audit_failed");
+        }
+      } catch (err) {
+        bundle.stream.destroy();
+        throw err;
       }
-      await recordActivity({
-        kind: "tool_run",
-        severity: "info",
-        sourceIcon: "download",
-        what: "Workspace exported",
-        sub: row.name,
-        actor: actorFromRequest(req),
-        refs: { workspaceId: id.data, head, sha256, bytes: body.length, proposedTag: row.proposedTag ?? null, provider },
-      });
-      res.status(200);
-      res.setHeader("Content-Type", "application/octet-stream");
-      res.setHeader("Content-Disposition", `attachment; filename="${id.data}-${head.slice(0, 7)}.bundle"`);
-      // Bundle bytes for git, as an attachment — never rendered, never cached.
-      res.setHeader("X-Content-Type-Options", "nosniff");
-      res.setHeader("Cache-Control", "no-store");
-      // nosemgrep: javascript.express.security.audit.xss.direct-response-write.direct-response-write
-      res.send(body);
     } catch (err) {
       relaySandboxError(err, res, next);
     }

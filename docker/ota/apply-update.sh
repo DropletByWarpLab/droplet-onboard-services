@@ -88,6 +88,14 @@
 #   stage-configs       --update-id ID --configs-tar PATH
 #       Unpack the (already sha256-verified) configs tarball over the host
 #       config tree; the pre-image lives in the backup dir from `snapshot`.
+#   stage-client-apps   --update-id ID --platform P --version X.Y.Z --file PATH
+#       WARP-3120: stage one client installer the release carries (already
+#       sha256-verified against the signed manifest by the orchestrator) into
+#       the box's app-downloads directory with the box's own
+#       scripts/app-downloads/stage.sh --no-restart (it replaces the platform
+#       directory and regenerates the catalog). PATH must sit directly in
+#       <updatesDir>/<ID>/clients/. The orchestrator treats a failure as a
+#       skip, never as a failed update.
 #   migrate-deploy
 #       `prisma migrate deploy` for this build's migrations.
 #   recreate-services   --update-id ID --services a,b --target release|previous
@@ -138,6 +146,22 @@
 #   rm-self-swap-helper --update-id ID
 #       `docker rm` (deliberately never -f) the self-swap helper container
 #       for ID; the daemon itself refuses a still-running helper.
+#   nc-transfer-ownership --from UID --to UID
+#       WARP-3169 leaver hand-over: `occ files:transfer-ownership` inside the
+#       nextcloud container, as www-data, bounded by `timeout`. Both ids are
+#       checked against a strict subset of the Nextcloud user-id charset
+#       ([A-Za-z0-9_.@-], never a leading `-`, at most 64) and confirmed to
+#       exist (`occ user:info`) first; `--` ends occ's options so an id can
+#       never be read as a flag. The only caller is the orchestrator's
+#       Delete-with-hand-over path, after its own recipient checks.
+#   rotate-audit-key
+#       WARP-3165: retire the audit chain's HMAC key. Archives
+#       <root>/data/secrets/audit.key to data/secrets/audit-retired/
+#       <UTC stamp>-<keyId>.key FIRST, then writes 32 fresh random bytes
+#       over audit.key IN PLACE (same inode: the orchestrator's single-file
+#       read-only bind mount sees the new bytes). Prints one JSON line
+#       {"previousKeyId","newKeyId"} (ids only, never key bytes). Used by
+#       POST /api/activity/rotate-key and scripts/rotate-audit-key.sh.
 #
 # ── TEST / DRY-RUN HOOK ──
 #   DROPLET_OTA_APPLY_DRY_RUN=1  — print each `docker`/`docker compose` command
@@ -282,6 +306,11 @@ IMAGES=()
 IMAGE=""
 PROFILES=""
 PROFILES_SET=
+PLATFORM=""
+CLIENT_VERSION=""
+CLIENT_FILE=""
+NC_FROM=""
+NC_TO=""
 
 # --- Validators -------------------------------------------------------------
 
@@ -321,6 +350,16 @@ validate_image_ref() {
   case "$1" in
     *[!A-Za-z0-9._:@/-]*) die "invalid --image: $1" ;;
   esac
+}
+
+validate_nc_user() {
+  # $1 = flag name (for the error), $2 = value. A strict subset of the
+  # Nextcloud user-id charset: no space or quote (both legal in Nextcloud),
+  # never a leading `-` (it would read as an occ option), at most 64 chars.
+  case "$2" in
+    '' | -* | *[!A-Za-z0-9_.@-]*) die "invalid $1: $2" ;;
+  esac
+  [ "${#2}" -le 64 ] || die "invalid $1: too long"
 }
 
 validate_positive_int() {
@@ -508,6 +547,35 @@ cmd_stage_configs() {
   [ -f "$CONFIGS_TAR" ] || [ -n "$DRY_RUN" ] || die "--configs-tar not found: $CONFIGS_TAR"
   log "stage-configs $UPDATE_ID from $CONFIGS_TAR -> $(config_root)"
   run tar -xzf "$CONFIGS_TAR" -C "$(config_root)"
+}
+
+cmd_stage_client_apps() {
+  validate_update_id "$UPDATE_ID"
+  case "$PLATFORM" in
+    windows | macos | linux | android) : ;;
+    *) die "invalid --platform: $PLATFORM" ;;
+  esac
+  [[ "$CLIENT_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+    || die "invalid --version: $CLIENT_VERSION (expected x.y.z)"
+  # The file must be a plain asset name directly in this update's clients/
+  # dir (the catalog's ASSET_NAME_RE): nothing else on the host is staged.
+  local dir base
+  dir="$(updates_dir)/$UPDATE_ID/clients"
+  base="$(basename -- "$CLIENT_FILE")"
+  [ "$CLIENT_FILE" = "$dir/$base" ] || die "--file must be in $dir: $CLIENT_FILE"
+  [[ "$base" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || die "invalid --file name: $base"
+  [ -f "$CLIENT_FILE" ] || [ -n "$DRY_RUN" ] || die "--file not found: $CLIENT_FILE"
+  local root stage
+  root="$(config_root)"
+  stage="$root/scripts/app-downloads/stage.sh"
+  [ -f "$stage" ] || [ -n "$DRY_RUN" ] || die "no $stage on this box"
+  log "stage-client-apps $UPDATE_ID $PLATFORM $CLIENT_VERSION $base"
+  # --no-restart: the orchestrator is recreated later in this same apply,
+  # and the catalog memo follows the file anyway (app-downloads/store.ts).
+  run bash "$stage" --no-restart --platform "$PLATFORM" --version "$CLIENT_VERSION" "$CLIENT_FILE" >&2
+  # We run as root; keep the staged files owned like the directory, so an
+  # operator's later hand stage (stage.sh as a normal user) can replace them.
+  run chown -R --reference="$root/data/app-downloads" "$root/data/app-downloads"
 }
 
 cmd_migrate_deploy() {
@@ -830,6 +898,74 @@ cmd_rm_self_swap_helper() {
   run docker rm "$name"
 }
 
+# --- WARP-3169: leaver hand-over --------------------------------------------
+
+# Seconds the transfer may run inside the container. The orchestrator's own
+# exec timeout sits a little above this, so the in-container `timeout` is what
+# normally fires.
+NC_TRANSFER_TIMEOUT_SECONDS="${DROPLET_NC_TRANSFER_TIMEOUT_SECONDS:-600}"
+
+occ() {
+  dc exec -T -u www-data nextcloud "$@"
+}
+
+nc_user_exists() {
+  [ -n "$DRY_RUN" ] && return 0
+  occ php occ user:info --output=json -- "$1" >/dev/null 2>&1
+}
+
+cmd_nc_transfer_ownership() {
+  validate_nc_user --from "$NC_FROM"
+  validate_nc_user --to "$NC_TO"
+  validate_positive_int DROPLET_NC_TRANSFER_TIMEOUT_SECONDS "$NC_TRANSFER_TIMEOUT_SECONDS"
+  [ "$NC_FROM" != "$NC_TO" ] || die "--from and --to are the same user"
+  nc_user_exists "$NC_FROM" || die "unknown Nextcloud user: $NC_FROM"
+  nc_user_exists "$NC_TO" || die "unknown Nextcloud user: $NC_TO"
+  log "nc-transfer-ownership $NC_FROM -> $NC_TO"
+  occ timeout "$NC_TRANSFER_TIMEOUT_SECONDS" \
+    php occ files:transfer-ownership -- "$NC_FROM" "$NC_TO"
+}
+
+cmd_rotate_audit_key() {
+  local secrets key retired id new_id stamp archived fresh
+  secrets="$(config_root)/data/secrets"
+  key="$secrets/audit.key"
+  retired="$secrets/audit-retired"
+  fresh="$secrets/audit.key.new"
+  [ -f "$key" ] && [ -s "$key" ] || die "no audit key at $key"
+  id="$(sha256sum "$key" | cut -c1-16)"
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  archived="$retired/$stamp-$id.key"
+  log "rotate-audit-key: retiring $id"
+  if [ -n "$DRY_RUN" ]; then
+    printf 'DRY-RUN: archive %q -> %q, then rewrite it in place\n' "$key" "$archived"
+    return 0
+  fi
+  [ ! -e "$archived" ] || die "$archived already exists"
+  mkdir -p "$retired"
+  chmod 700 "$retired"
+  # 1. Archive, durably, and prove the copy before the original changes: a
+  #    lost old key means every row it signed stops verifying.
+  cp -p "$key" "$archived.tmp"
+  sync
+  mv "$archived.tmp" "$archived"
+  cmp -s "$key" "$archived" || die "archived copy of $id does not match; audit.key left unchanged"
+  # 2. The new key: staged next to it, then copied over IN PLACE (never
+  #    mv: a rename swaps the inode and the container's file bind keeps the
+  #    old one). If this step is interrupted, audit.key.new holds the new
+  #    key and the archive holds the old one.
+  head -c 32 /dev/urandom > "$fresh"
+  chmod 600 "$fresh"
+  [ "$(wc -c < "$fresh" | tr -d ' ')" = "32" ] || die "could not generate a new key; audit.key left unchanged"
+  cat "$fresh" > "$key"
+  sync
+  cmp -s "$fresh" "$key" || die "audit.key was not fully rewritten; the new key is in $fresh, the old one in $archived"
+  rm -f "$fresh"
+  new_id="$(sha256sum "$key" | cut -c1-16)"
+  log "rotate-audit-key: $id -> $new_id"
+  printf '{"previousKeyId":"%s","newKeyId":"%s"}\n' "$id" "$new_id"
+}
+
 # =============================================================================
 # Arg parsing + dispatch
 # =============================================================================
@@ -848,6 +984,11 @@ while [ "$#" -gt 0 ]; do
     --configs-tar) CONFIGS_TAR="$2"; shift 2 ;;
     --image) IMAGE="$2"; shift 2 ;;
     --profiles) PROFILES="$2"; PROFILES_SET=1; shift 2 ;;
+    --platform) PLATFORM="$2"; shift 2 ;;
+    --version) CLIENT_VERSION="$2"; shift 2 ;;
+    --file) CLIENT_FILE="$2"; shift 2 ;;
+    --from) NC_FROM="${2-}"; shift 2 || die "--from needs a value" ;;
+    --to) NC_TO="${2-}"; shift 2 || die "--to needs a value" ;;
     --images) shift; while [ "$#" -gt 0 ] && [ "${1#--}" = "$1" ]; do IMAGES+=("$1"); shift; done ;;
     # A bare positional (restore-configs ID).
     --*) die "unknown flag: $1" ;;
@@ -860,6 +1001,7 @@ case "$SUBCOMMAND" in
   snapshot) cmd_snapshot ;;
   pull-images) cmd_pull_images ;;
   stage-configs) cmd_stage_configs ;;
+  stage-client-apps) cmd_stage_client_apps ;;
   migrate-deploy) cmd_migrate_deploy ;;
   recreate-services) cmd_recreate_services ;;
   enabled-services) cmd_enabled_services ;;
@@ -870,5 +1012,7 @@ case "$SUBCOMMAND" in
   list-self-swap-helpers) cmd_list_self_swap_helpers ;;
   capture-self-swap-logs) cmd_capture_self_swap_logs ;;
   rm-self-swap-helper) cmd_rm_self_swap_helper ;;
+  nc-transfer-ownership) cmd_nc_transfer_ownership ;;
+  rotate-audit-key) cmd_rotate_audit_key ;;
   *) die "unknown subcommand: $SUBCOMMAND" ;;
 esac

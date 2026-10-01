@@ -77,7 +77,7 @@ from schemas import (
     SessionUpdateRequest,
 )
 from sessions.store import SessionStore, create_session_store
-from scheduler import InferenceScheduler, QueueFullError
+from scheduler import InferenceScheduler, Priority, QueueFullError
 
 from request_context import configure_logging
 
@@ -248,6 +248,41 @@ async def _start_stream(stream: AsyncIterator[str]) -> AsyncGenerator[str, None]
             yield chunk
 
     return _replayed()
+
+
+# WARP-3306 — a background agent run's model call gives the slot up when a
+# chat request arrives. The run worker (orchestrator agent-run-worker) is the
+# only caller that opts in (X-Preemptible: 1) and treats this answer as "chat
+# took the box, requeue me", redoing the call from its checkpoint.
+PREEMPTED_CODE = "preempted_for_chat"
+PREEMPTED_FRAME = 'data: {"error": {"code": "%s", "message": "Preempted by an interactive chat request"}}\n\n' % PREEMPTED_CODE
+
+
+class _Preempted(Exception):
+    """The scheduler asked this request to give its slot up for chat."""
+
+
+async def _unless_preempted(awaitable, preempt: asyncio.Event | None):
+    """Await ``awaitable``; if ``preempt`` fires first, cancel it and raise _Preempted."""
+    if preempt is None:
+        return await awaitable
+    work = asyncio.ensure_future(awaitable)
+    waiter = asyncio.ensure_future(preempt.wait())
+    try:
+        await asyncio.wait({work, waiter}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        # Whichever lost (or both, if we were cancelled ourselves) is torn
+        # down; cancelling the work closes the upstream model stream.
+        for t in (work, waiter):
+            if not t.done():
+                t.cancel()
+    if work.done() and not work.cancelled():
+        return work.result()
+    try:
+        await work
+    except BaseException:
+        pass
+    raise _Preempted()
 
 
 # Global instances
@@ -484,6 +519,7 @@ async def chat(
     request: ChatRequest,
     http_request: Request,
     x_request_priority: int = Header(default=0, alias="X-Request-Priority"),
+    x_preemptible: str = Header(default="", alias="X-Preemptible"),
 ):
     """Unified chat endpoint — routes to the selected provider.
 
@@ -491,9 +527,19 @@ async def chat(
     - 0: user-initiated (default)
     - 5: automation
     - 10: background
+
+    WARP-3306: a background request sent with ``X-Preemptible: 1`` gives its
+    slot up when a user request arrives — 409 ``preempted_for_chat`` before
+    the stream starts, or a final ``preempted_for_chat`` error frame mid-stream.
     """
     if not provider_router or not inference_scheduler:
         raise HTTPException(status_code=503, detail="Service not ready")
+
+    preempt: asyncio.Event | None = (
+        asyncio.Event()
+        if x_preemptible == "1" and x_request_priority >= Priority.BACKGROUND
+        else None
+    )
 
     # WARP-561: the requesting user's BYOK keys (not a device-global key).
     principal = _principal(http_request)
@@ -501,7 +547,7 @@ async def chat(
     # Enqueue with priority
     future = None
     try:
-        future = await inference_scheduler.enqueue(x_request_priority, request)
+        future = await inference_scheduler.enqueue(x_request_priority, request, preempt)
         await future
     except QueueFullError as e:
         raise HTTPException(
@@ -516,7 +562,7 @@ async def chat(
         # leaked slot at max_concurrent=1 permanently deadlocks every /ai/chat.
         # Release it iff the grant actually landed, then re-raise the cancel.
         if future is not None and future.done() and not future.cancelled():
-            await inference_scheduler.release()
+            await inference_scheduler.release(preempt)
         raise
 
     # The scheduler slot is now held. It MUST stay held until the work is
@@ -535,15 +581,23 @@ async def chat(
         nonlocal released
         if not released:
             released = True
-            await inference_scheduler.release()
+            await inference_scheduler.release(preempt)
 
     try:
-        result = await provider_router.chat(request, user_id=principal)
+        result = await _unless_preempted(
+            provider_router.chat(request, user_id=principal), preempt
+        )
         if request.stream:
             # WARP-3047: up to the first frame the stream is still "the call"
             # — a model that can't load fails HERE, before any byte is sent,
             # so it gets the 503 below instead of a 200 cut off mid-body.
-            result = await _start_stream(result)
+            result = await _unless_preempted(_start_stream(result), preempt)
+    except _Preempted:
+        await _release_once()
+        return JSONResponse(
+            status_code=409,
+            content={"detail": {"code": PREEMPTED_CODE, "message": "Preempted by an interactive chat request"}},
+        )
     except ValueError as e:
         await _release_once()
         raise HTTPException(status_code=400, detail=str(e))
@@ -571,7 +625,15 @@ async def chat(
     if request.stream:
         async def _slot_held_stream():
             try:
-                async for chunk in result:
+                chunks = result.__aiter__()
+                while True:
+                    try:
+                        chunk = await _unless_preempted(chunks.__anext__(), preempt)
+                    except StopAsyncIteration:
+                        break
+                    except _Preempted:
+                        yield PREEMPTED_FRAME
+                        break
                     yield chunk
             finally:
                 # Fires when the generator is exhausted, or when Starlette

@@ -23,13 +23,36 @@ import {
   type RecordParams,
 } from "./activity.service.js";
 import {
+  auditKeyId,
   createHmacSigner,
   loadAuditKeyFromDisk,
+  loadRetiredAuditKeys,
   type ActivityRowSigner,
+  type AuditKeyEpoch,
 } from "./audit-signing.service.js";
 
 let recorder: ActivityRowRecorder | null = null;
 let signer: ActivityRowSigner | null = null;
+
+// WARP-3165: the current key sits behind `signer`, a stable delegating
+// object, so a rotation swaps what every holder (the recorder, in-tx
+// appends, the verify routes) signs with, in one assignment. Signing runs
+// under the chain-append lock, so rows are signed in chain order and the
+// chain carries exactly one switch point: every row before it signed by the
+// old key, every row after by the new one (the epoch rule verifies that).
+let current: AuditKeyEpoch | null = null;
+let retired: AuditKeyEpoch[] = [];
+
+function delegatingSigner(): ActivityRowSigner {
+  return {
+    sign: (content, prev) => current!.signer.sign(content, prev),
+    verify: (content, prev, sig) => current!.signer.verify(content, prev, sig),
+  };
+}
+
+function epochFor(key: Buffer): AuditKeyEpoch {
+  return { keyId: auditKeyId(key), signer: createHmacSigner(key) };
+}
 
 /**
  * Initialise the singleton at boot. Throws if the signing key can't be
@@ -41,7 +64,9 @@ let signer: ActivityRowSigner | null = null;
  */
 export function initActivityRecorder(prisma: PrismaClient): void {
   if (recorder) return;
-  signer = createHmacSigner(loadAuditKeyFromDisk());
+  current = epochFor(loadAuditKeyFromDisk());
+  retired = loadRetiredAuditKeys().filter((k) => k.keyId !== current!.keyId);
+  signer = delegatingSigner();
   recorder = createActivityRecorder({ prisma, signer });
 }
 
@@ -130,11 +155,59 @@ export function getActivityRecorder(): ActivityRowRecorder | null {
   return recorder;
 }
 
-/** Exposed only for tests. */
+/**
+ * WARP-3165: the whole keyring, OLDEST FIRST, the current key last. What
+ * every verifier walks with (`createEpochVerifier`). Empty before init.
+ */
+export function getAuditKeyring(): AuditKeyEpoch[] {
+  if (current) return [...retired, current];
+  // A test that injected a bare signer: a one-key ring.
+  return signer ? [{ keyId: "unknown", signer }] : [];
+}
+
+/** WARP-3165: the current key's id (never the key). Null before init. */
+export function getCurrentAuditKeyId(): string | null {
+  return current?.keyId ?? null;
+}
+
+/**
+ * WARP-3165: make `newKey` the signing key and keep the old one for
+ * verification only. The caller has already written `newKey` to disk and
+ * archived the old key where `loadRetiredAuditKeys` finds it, so a restart
+ * lands on the same keyring. Refuses a key that is already in the ring.
+ */
+export function adoptAuditKey(newKey: Buffer): { previousKeyId: string; newKeyId: string } {
+  if (!current) throw new Error("activity recorder not initialised");
+  const next = epochFor(newKey);
+  if (next.keyId === current.keyId || retired.some((k) => k.keyId === next.keyId)) {
+    throw new Error("the new audit key is already in the keyring; nothing was rotated");
+  }
+  const previous = current;
+  retired = [...retired, previous];
+  current = next;
+  return { previousKeyId: previous.keyId, newKeyId: next.keyId };
+}
+
+/** Exposed only for tests. `keys` (raw bytes, oldest first, current last)
+ *  wires a real keyring behind the delegating signer. */
 export function _setActivityRecorderForTests(
   newRecorder: ActivityRowRecorder | null,
   newSigner: ActivityRowSigner | null,
 ): void {
   recorder = newRecorder;
   signer = newSigner;
+  current = null;
+  retired = [];
+}
+
+/** Exposed only for tests: init against explicit key bytes instead of disk. */
+export function _initActivityRecorderWithKeysForTests(
+  prisma: PrismaClient,
+  keys: Buffer[],
+): ActivityRowSigner {
+  retired = keys.slice(0, -1).map(epochFor);
+  current = epochFor(keys[keys.length - 1]!);
+  signer = delegatingSigner();
+  recorder = createActivityRecorder({ prisma, signer });
+  return signer;
 }

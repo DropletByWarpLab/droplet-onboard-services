@@ -4,6 +4,7 @@
  * transcript. LAN-local only; Prisma-backed; no new services.
  *
  *   GET  /team-chat/contacts                      — roster for the picker
+ *   POST /team-chat/contacts/lookup               — email address → contact (WARP-3349)
  *   GET  /team-chat/threads                       — caller's threads + unread
  *   POST /team-chat/threads                       — create (direct deduped)
  *   GET  /team-chat/threads/:id/messages          — cursor page, newest-first
@@ -21,10 +22,11 @@
  * Access model:
  *   - Humans only (owner/admin/family/guest) — no service principals,
  *     with ONE pinned exception (WARP-1685): the routes the two team-chat
- *     LLM tools dispatch through (contacts roster, thread create, message
- *     send, meeting create) ALSO admit the trusted `_service:mcp`
- *     principal via requireRoleOrMcpService, acting AS the X-Droplet-User
- *     username exactly like routes/email.ts effectiveUser(): the header is
+ *     LLM tools dispatch through (contacts roster and lookup, thread
+ *     create, message send, meeting create) ALSO admit the trusted `_service:mcp`
+ *     principal via requireRoleOrMcpService, acting AS the person the
+ *     X-Droplet-User header names (username on stdio, User.id over HTTP —
+ *     WARP-3187) like routes/email.ts: the header is
  *     honored ONLY for that principal (a human session's header is
  *     IGNORED — no impersonation path), the forwarded identity must
  *     resolve to an ACTIVE human (fail closed → 401), and the resolved
@@ -68,6 +70,8 @@ import type { PrismaClient, Prisma } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { checkSpaceAccess, departmentSpaceToken } from "../middleware/space.js";
 import { resolveFileDepartment } from "../services/file-registry.service.js";
+import { resolveAssertedUser } from "../services/asserted-user.service.js";
+import { findUserByEmail } from "../services/user-directory.service.js";
 import { createLogger } from "../lib/logger.js";
 // WARP-1874 — the single https-only gate for a value that becomes an href.
 import { meetingUrlSchema } from "../lib/meeting-url.js";
@@ -100,7 +104,11 @@ class MeetingAlreadyCancelledError extends Error {
 interface Caller {
   /** LOCAL User.id UUID — the scoping key for every team-chat column. */
   id: string;
-  /** Login handle — used ONLY for the ChatSession ownership comparison. */
+  /**
+   * Login handle — the key of the two username-keyed columns this router
+   * touches: the ChatSession ownership comparison and the meeting's
+   * CalendarEvent mirror. Always the resolved row's `User.username`.
+   */
   username: string;
   role: string;
 }
@@ -117,6 +125,10 @@ const createThreadSchema = z.object({
   kind: z.enum(["direct", "group"]),
   participantIds: z.array(z.string().min(1)).min(1).max(24),
   title: z.string().trim().min(1).max(80).optional(),
+});
+
+const lookupContactsSchema = z.object({
+  emails: z.array(z.string().trim().min(3).max(320)).min(1).max(24),
 });
 
 const listMessagesQuerySchema = z.object({
@@ -300,7 +312,7 @@ interface TranscriptSnapshot {
 export function createTeamChatRouter(prisma: PrismaClient): Router {
   const router = Router();
   const guard = requireRole(...HUMAN_ROLES);
-  // WARP-1685 — the four routes the team-chat LLM tools dispatch through
+  // WARP-1685 — the routes the team-chat LLM tools dispatch through
   // additionally admit the trusted `_service:mcp` principal (and ONLY that
   // principal — voice/email-indexer's coarse "service" role still 403s).
   const guardOrMcp = requireRoleOrMcpService(...HUMAN_ROLES);
@@ -317,28 +329,27 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
    * folded into one resolver because every team-chat decision needs the
    * full id/username/role triple).
    *
-   * For the trusted mcp service principal ONLY, the identity is the
-   * X-Droplet-User USERNAME the tool handlers forward (`ctx.userId`,
-   * threaded from the chat session via MCP `_meta.userId` — WARP-202
-   * username semantics). It must resolve to an ACTIVE human in the
-   * directory; missing header, unknown user, deactivated user, or a
-   * service row all yield null → 401, never a fallback identity. For
-   * every other caller the header is IGNORED and the session's own
-   * req.user rules — a human session cannot impersonate this way.
+   * For the trusted mcp service principal ONLY, the identity is the person
+   * the tool handlers name in X-Droplet-User (`ctx.userId`). WARP-3187: that
+   * is `User.username` on the stdio transport and `User.id` over HTTP
+   * (`claims.sub`), so it is resolved by `resolveAssertedUser` — username,
+   * nextcloudUsername or id — never by one column. It must then be an
+   * ACTIVE human: missing header, nobody, ambiguous, deactivated (the only
+   * other DirectoryUserStatus), or a non-human role all yield null → 401,
+   * never a fallback identity. The returned username is the resolved row's,
+   * never the header value. For every other caller the header is IGNORED
+   * and the session's own req.user rules — a human session cannot
+   * impersonate this way.
    */
   async function resolveCaller(req: Request): Promise<Caller | null> {
     if (!isMcpService(req)) return callerOf(req);
     const forwarded = (req.header("x-droplet-user") ?? "").trim();
     if (!forwarded) return null;
-    const row = await prisma.user.findFirst({
-      where: {
-        username: forwarded,
-        directoryStatus: "ACTIVE",
-        role: { in: [...HUMAN_ROLES] },
-      },
-      select: { id: true, username: true, role: true },
-    });
-    return row ?? null;
+    const resolved = await resolveAssertedUser(prisma, forwarded);
+    if (!resolved.ok) return null;
+    const { id, username, role } = resolved.user;
+    if (!(HUMAN_ROLES as readonly string[]).includes(role)) return null;
+    return { id, username, role };
   }
 
   /** Contact projection for roster + name resolution. */
@@ -365,18 +376,86 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
     });
   }
 
+  /**
+   * WARP-3263 — an external guest's directory. A guest is someone outside
+   * the company: the staff list and org roles are company data, and an
+   * unsolicited guest DM to the owner is a phishing vector. So a guest sees
+   * only the people they already share a conversation with, plus the person
+   * who invited them — names only (no username, no role).
+   *
+   * The inviter is `User.invitedById`, an explicit id stamped at invite
+   * accept (or by the admin who created the account). It is never inferred
+   * from usernames or timestamps, and it is SetNull when that person is
+   * deleted, so a new hire who reuses their username is never listed.
+   * Accounts with no recorded inviter (SSO/SCIM, pre-column rows) see only
+   * their conversations' people, which fails closed.
+   */
+  async function guestContacts(
+    me: Caller,
+  ): Promise<Array<{ id: string; displayName: string }>> {
+    const [self, shared] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: me.id },
+        select: { invitedById: true },
+      }),
+      // TeamChatParticipant.userId has no User relation, so this stays two
+      // participant reads rather than one relation filter.
+      prisma.teamChatParticipant
+        .findMany({ where: { userId: me.id }, select: { threadId: true } })
+        .then((mine) =>
+          mine.length === 0
+            ? []
+            : prisma.teamChatParticipant.findMany({
+                where: {
+                  threadId: { in: mine.map((p) => p.threadId) },
+                  userId: { not: me.id },
+                },
+                select: { userId: true },
+              }),
+        ),
+    ]);
+    const ids = new Set(shared.map((p) => p.userId));
+    if (self?.invitedById) ids.add(self.invitedById);
+    return prisma.user.findMany({
+      where: {
+        directoryStatus: "ACTIVE",
+        role: { in: [...HUMAN_ROLES] },
+        id: { in: [...ids], not: me.id },
+      },
+      select: { id: true, displayName: true },
+      orderBy: { displayName: "asc" },
+    });
+  }
+
   // ── Roster ──────────────────────────────────────────────────────
 
   // Exists because GET /api/auth/users is owner/admin-only; the picker
   // needs names for every human tier. Minimal projection, ACTIVE humans
-  // only — never service principals, never deactivated rows.
+  // only — never service principals, never deactivated rows. Owners,
+  // admins and members get the full roster; a guest gets guestContacts()
+  // (WARP-3263).
   // WARP-1685: guardOrMcp — the send tools resolve recipient usernames to
   // User.ids through this roster, acting as the forwarded human.
+  // WARP-3196: `me` is the resolved caller's User.id. The tools drop the
+  // sender from their recipients by it: their own ctx.userId is a username
+  // on stdio and a User.id over HTTP, so they cannot tell which roster row
+  // is theirs without it.
   router.get("/team-chat/contacts", guardOrMcp, async (req, res, next) => {
     try {
       const me = await resolveCaller(req);
       if (!me) {
         res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      // `canStartConversation` states the POST /team-chat/threads rule
+      // explicitly, so a client (the LLM send tools) never has to infer
+      // "guest" from a roster that lacks usernames.
+      if (me.role === "guest") {
+        res.json({
+          contacts: await guestContacts(me),
+          me: { id: me.id },
+          canStartConversation: false,
+        });
         return;
       }
       const contacts = await prisma.user.findMany({
@@ -387,6 +466,48 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
         select: contactSelect,
         orderBy: { displayName: "asc" },
       });
+      res.json({ contacts, me: { id: me.id }, canStartConversation: true });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // WARP-3349 — team_chat_send_message takes a colleague's work email
+  // address. The roster has no email column (User.email is encrypted at
+  // rest, WARP-233), so each address is one blind-index probe
+  // (findUserByEmail: trim + lowercase, then the emailLookupHash), never a
+  // decrypt of the table. The roster's people match: ACTIVE owners, admins,
+  // members and external guests (Romain, 2026-09-30: a member may reach a
+  // guest by address). A deactivated person's or nobody's address answers
+  // null, in request order. POST so the addresses stay out of the logged
+  // URL, and nothing here logs them. A guest caller gets no directory
+  // lookup at all (WARP-3263).
+  router.post("/team-chat/contacts/lookup", guardOrMcp, async (req, res, next) => {
+    try {
+      const me = await resolveCaller(req);
+      if (!me) {
+        res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      if (me.role === "guest") {
+        res.status(403).json({ error: "guest_cannot_start_conversation" });
+        return;
+      }
+      const parsed = lookupContactsSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "invalid_lookup" });
+        return;
+      }
+      const contacts = await Promise.all(
+        parsed.data.emails.map(async (email) => {
+          const user = await findUserByEmail(prisma, email);
+          return user &&
+            user.directoryStatus === "ACTIVE" &&
+            (HUMAN_ROLES as readonly string[]).includes(user.role)
+            ? { id: user.id, displayName: user.displayName, username: user.username }
+            : null;
+        }),
+      );
       res.json({ contacts });
     } catch (err) {
       next(err);
@@ -451,7 +572,9 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
           participants: t.participants.map((p) => ({
             userId: p.userId,
             displayName: names.get(p.userId)?.displayName ?? null,
-            username: names.get(p.userId)?.username ?? null,
+            // WARP-3263 — a guest sees names only, never login handles.
+            username:
+              me.role === "guest" ? null : (names.get(p.userId)?.username ?? null),
           })),
           lastMessage: t.messages[0]
             ? toMessageDto(t.messages[0], names.get(t.messages[0].senderId)?.displayName)
@@ -474,6 +597,13 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
       const me = await resolveCaller(req);
       if (!me) {
         res.status(401).json({ error: "auth_required" });
+        return;
+      }
+      // WARP-3263 — an external guest can't start a conversation; staff
+      // (owner/admin/member) add a guest instead. Before validation so the
+      // answer never depends on who the guest named.
+      if (me.role === "guest") {
+        res.status(403).json({ error: "guest_cannot_start_conversation" });
         return;
       }
       const parsed = createThreadSchema.safeParse(req.body);
@@ -878,9 +1008,11 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
         });
 
         // Best-effort local calendar mirror on the ORGANIZER's calendar.
-        // CalendarEvent.userId holds the Nextcloud USERNAME (the
-        // create_event tool's semantics) and endsAt is required — an
-        // unspecified duration mirrors as the calendar's standard hour.
+        // CalendarEvent.userId holds the USERNAME (the create_event tool's
+        // semantics): `me.username`, the resolved row's, never the
+        // X-Droplet-User value, which is a User.id over HTTP (WARP-3187).
+        // endsAt is required — an unspecified duration mirrors as the
+        // calendar's standard hour.
         let finalMeeting = meeting;
         try {
           const endsAt = new Date(

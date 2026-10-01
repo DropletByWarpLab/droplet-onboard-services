@@ -26,7 +26,6 @@ import {
   ncDeleteAppPassword,
   ncGetCurrentUser,
   ncCreateUser,
-  ncDeleteUser,
   ncEnsureGroup,
   ncListUsers,
   ncUpdateUser,
@@ -61,16 +60,13 @@ import {
   assertRoleAssignable,
   assertRoleChangeAllowed,
   assertDirectoryEditAllowed,
-  assertRemovalAllowed,
   assertDisableAllowed,
   assertSessionRevokeAllowed,
   assertAssignableForCreate,
-  assertRemovalInvariantsTx,
   assertDisableInvariantsTx,
   readGuardTargetTx,
   isConcurrencyConflict,
   SERIALIZABLE_TX,
-  runRemovalPostEffects,
   runDisablePostEffects,
   type NcMirror,
 } from "../services/role-mutation-guard.service.js";
@@ -90,6 +86,11 @@ import {
   absoluteLimitSecondsForRole,
   readSessionDeadline,
 } from "../services/session.service.js";
+import {
+  issueSessionTokens,
+  sessionTokenBody,
+  setSessionCookies,
+} from "../services/session-mint.js";
 import {
   storeNcToken,
   getNcToken,
@@ -132,9 +133,13 @@ import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 // WARP-1558: the create paths below must ensure this box-wide group exists
 // before OCS is asked to provision an admin-tier account into it.
 import { DROPLET_ADMINS_GROUP, adminBasicToken } from "../services/department-provisioner.service.js";
-import { purgeUserData } from "../services/brain-memory.service.js";
-import { purgeM365ForUser } from "../services/m365/m365-auth.service.js";
-import { purgeUsernameKeyedData } from "../services/username-data-purge.service.js";
+import {
+  deleteDispositionSchema,
+  handOverAndDeleteUser,
+  HandoverRefusedError,
+  scheduleUserDeletion,
+  UNKNOWN_DISPOSITION_BODY,
+} from "../services/leaver-deletion.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { verifyClaimCodePresence } from "../services/setup-claim.service.js";
@@ -327,6 +332,7 @@ const recoveryConsumeSchema = z.object({
 // Role enum so the DB column (now typed as `Role`) and the request body
 // share a vocabulary. The shared `inviteRoleField` is declared above
 // createUserSchema (WARP-1042 reuses it for direct user creation).
+
 const createInviteSchema = z.object({
   displayName: z.string().min(1).max(128).optional(),
   // ADR-013: the invite email is the invitee's directory login key on
@@ -551,16 +557,14 @@ export async function getRedirectUri(
 }
 
 /**
- * Resolve the session token from cookie (browser) or Authorization header (API client).
+ * Resolve the session token from the Authorization header (API client) or cookie (browser).
  */
 function resolveToken(req: import("express").Request): string | null {
-  const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
-  if (cookieToken) return cookieToken;
-
+  // WARP-3038 — the Bearer wins when both are sent, as in authMiddleware.
   const authHeader = req.headers.authorization;
   if (authHeader?.startsWith("Bearer ")) return authHeader.slice(7);
 
-  return null;
+  return req.cookies?.[SESSION_COOKIE_NAME] ?? null;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -577,7 +581,8 @@ function resolveToken(req: import("express").Request): string | null {
 // token cache key; the OCS auth path was already normalized in round 1
 // inside `src/middleware/auth.ts`):
 //
-//   1. POST /api/auth/login        — line ~275: signAccessToken({ id })
+//   1. POST /api/auth/login        — issueSessionTokens({ id })
+//                                    (services/session-mint.ts)
 //                                  — line ~267: storeNcToken(id, ...)
 //   2. POST /api/auth/refresh      — line ~447: signAccessToken({ id })
 //                                  — line ~452: touchNcToken(id, ...)
@@ -656,6 +661,8 @@ const DIRECTORY_USER_SELECT = {
   role: true,
   directoryStatus: true,
   provisionSource: true,
+  deletionStatus: true,
+  deletionDueAt: true,
 } as const;
 
 /**
@@ -681,6 +688,20 @@ const SSO_MANAGED_ACCOUNT_BODY = {
   error: "This account signs in through your identity provider, so it cannot have a Droplet password",
   code: "SSO_MANAGED_ACCOUNT",
 } as const;
+
+/**
+ * WARP-3263 — `id` if it still names a User row, else null. Guards the
+ * User.invitedById FK: the inviter may have been deleted between issuing
+ * the invite and its accept, or the caller may not be a directory row.
+ */
+async function liveUserId(
+  prisma: import("@prisma/client").PrismaClient,
+  id: string | null | undefined,
+): Promise<string | null> {
+  if (!id) return null;
+  const row = await prisma.user.findUnique({ where: { id }, select: { id: true } });
+  return row?.id ?? null;
+}
 
 async function findDirectoryUserByHandle(
   prisma: import("@prisma/client").PrismaClient,
@@ -1273,51 +1294,66 @@ export function createPublicAuthRouter(
         );
       }
 
-      // WARP-247 — create the server-side session record FIRST so its sid
-      // rides inside both tokens. createSession enforces the concurrent-
-      // session cap (evicting + auditing the oldest) and starts the
-      // idle/absolute clocks for this login.
-      const { sid } = await createSession({ id: userId, role });
+      // WARP-247 — the shared mint creates the server-side session record
+      // FIRST so its sid rides inside both tokens (createSession enforces the
+      // concurrent-session cap and starts the idle/absolute clocks), then
+      // signs the pair and indexes the refresh token (WARP-116) so an admin
+      // "revoke now" reaches every live device session. The access token
+      // carries the MFA stamp (PR #375) when a second factor was just
+      // satisfied.
+      const minted = await issueSessionTokens(
+        {
+          id: userId,
+          username,
+          displayName,
+          role,
+          // WARP-1582 — snapshot the assigned custom role from the row we
+          // just authenticated against. `?? null` is the MEANINGFUL value
+          // ("no custom role"), not a defensive default: it is what lets the
+          // chat path skip a per-turn read for the role-less majority.
+          accessRoleId: localUser.accessRoleId ?? null,
+        },
+        { lastMfaAt: mfaStampIso },
+      );
 
-      // Issue JWT access + refresh tokens. The access token carries the
-      // MFA stamp (PR #375) when a second factor was just satisfied.
-      const accessToken = signAccessToken({
-        id: userId,
-        username,
-        displayName,
-        role,
-        lastMfaAt: mfaStampIso,
-        sid,
-        // WARP-1582 — snapshot the assigned custom role from the row we
-        // just authenticated against. `?? null` is the MEANINGFUL value
-        // ("no custom role"), not a defensive default: it is what lets the
-        // chat path skip a per-turn read for the role-less majority.
-        accessRoleId: localUser.accessRoleId ?? null,
-      });
-      const refreshToken = signRefreshToken({ id: userId, username, displayName, role, sid });
-      // WARP-116: index this refresh token so an admin "revoke now" (role
-      // change / disable) can denylist every live device session for the user.
-      await registerRefreshSession(userId, refreshToken);
+      // ADR-008 §3 + action item #2: native mobile clients can't read
+      // httpOnly Set-Cookie headers reliably (URLSession on iOS hides
+      // them; Android's OkHttp can but it's ugly). When the caller
+      // opts in with `?return=body=1`, return the JWTs in the JSON
+      // body INSTEAD of cookies.
+      //
+      // WARP-582 — the escape hatch is NATIVE-client-only. A browser context
+      // must never receive tokens in the body (an XSS payload could read them
+      // where the httpOnly cookies are script-unreadable), so the opt-in is
+      // refused whenever the request carries a browser-only marker header
+      // (Sec-Fetch-* / Origin / Referer — browsers attach at least one to
+      // every request they originate, and Sec-Fetch-*+Origin are forbidden
+      // header names page script cannot strip; see lib/browser-context.ts).
+      // The login itself still succeeds for a browser — it keeps its normal
+      // cookie-only session. The shipped native callers (droplet-android
+      // OkHttp, droplet-ios URLSession) send none of these headers;
+      // droplet-windows never uses ?return=body at all (its WebView2 runs
+      // the dashboard's ordinary cookie login).
+      //
+      // WARP-3038 — a body-token login sets NO session cookies. A default
+      // URLSession/CookieJar would otherwise persist the session to disk,
+      // breaking the client's tokens-only-in-Keychain guarantee, and a stale
+      // cookie could later authenticate a request the client meant to send
+      // bearer-less. A browser (no opt-in, or refused above) keeps its
+      // cookies exactly as before.
+      const wantBodyParam = req.query.return === "body" || req.query.return === "body=1";
+      const browserMarker = wantBodyParam ? browserMarkerHeader(req.headers) : null;
+      if (wantBodyParam && browserMarker !== null) {
+        logger.warn(
+          { marker: browserMarker, username },
+          "login: ?return=body refused for a browser context — cookie-only session issued (WARP-582)",
+        );
+      }
+      const wantBody = wantBodyParam && browserMarker === null;
 
-      const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
-
-      // Access token in session cookie
-      res.cookie(SESSION_COOKIE_NAME, accessToken, {
-        httpOnly: true,
-        secure: isHttps,
-        sameSite: "lax",
-        path: "/",
-        maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
-      });
-
-      // Refresh token in separate cookie (scoped to /api/auth)
-      res.cookie(REFRESH_COOKIE_NAME, refreshToken, {
-        httpOnly: true,
-        secure: isHttps,
-        sameSite: "lax",
-        path: "/api/auth",
-        maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
-      });
+      // Access token in the session cookie, refresh token in its own cookie
+      // scoped to /api/auth — browsers only (WARP-3038).
+      if (!wantBody) setSessionCookies(req, res, minted);
 
       // WARP-456: successful sign-in audit row.
       await recordActivity({
@@ -1336,51 +1372,13 @@ export function createPublicAuthRouter(
         actor: { type: "user", id: userId },
       });
 
-      // ADR-008 §3 + action item #2: native mobile clients can't read
-      // httpOnly Set-Cookie headers reliably (URLSession on iOS hides
-      // them; Android's OkHttp can but it's ugly). When the caller
-      // opts in with `?return=body=1`, return the JWTs in the JSON
-      // body too. The cookies are STILL set so browsers behave
-      // unchanged. No behavior change for any existing caller — the
-      // body field is only added when the query param is present.
-      //
-      // WARP-582 — the escape hatch is NATIVE-client-only. A browser context
-      // must never receive tokens in the body (an XSS payload could read them
-      // where the httpOnly cookies are script-unreadable), so the opt-in is
-      // refused whenever the request carries a browser-only marker header
-      // (Sec-Fetch-* / Origin / Referer — browsers attach at least one to
-      // every request they originate, and Sec-Fetch-*+Origin are forbidden
-      // header names page script cannot strip; see lib/browser-context.ts).
-      // The login itself still succeeds for a browser — it keeps its normal
-      // cookie-only session. The shipped native callers (droplet-android
-      // OkHttp, droplet-ios URLSession) send none of these headers;
-      // droplet-windows never uses ?return=body at all (its WebView2 runs
-      // the dashboard's ordinary cookie login).
-      const wantBodyParam = req.query.return === "body" || req.query.return === "body=1";
-      const browserMarker = wantBodyParam ? browserMarkerHeader(req.headers) : null;
-      if (wantBodyParam && browserMarker !== null) {
-        logger.warn(
-          { marker: browserMarker, username },
-          "login: ?return=body refused for a browser context — cookie-only session issued (WARP-582)",
-        );
-      }
-      const wantBody = wantBodyParam && browserMarker === null;
       res.json({
         // WARP-824: surface the explicit forced-change flag so the dashboard
         // redirects an admin-created temp-password user to the change-password
         // screen. This is a UX convenience — the post-auth gate enforces it
         // server-side regardless of whether the client honours the redirect.
         user: { id: userId, username, displayName, role, mustChangePassword: localUser.mustChangePassword },
-        ...(wantBody
-          ? {
-              accessToken,
-              refreshToken,
-              accessTokenExpiresAt:
-                Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
-              refreshTokenExpiresAt:
-                Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
-            }
-          : {}),
+        ...(wantBody ? sessionTokenBody(minted) : {}),
       });
 
       // WARP-1954 — the user just signed in; their next stop is usually
@@ -1690,22 +1688,6 @@ export function createPublicAuthRouter(
         // original 7-day window elapses even though their JWT is fresh).
         await touchNcToken(sub, REFRESH_TOKEN_TTL_SECONDS);
 
-        const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
-        res.cookie(SESSION_COOKIE_NAME, newAccessToken, {
-          httpOnly: true,
-          secure: isHttps,
-          sameSite: "lax",
-          path: "/",
-          maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
-        });
-        res.cookie(REFRESH_COOKIE_NAME, newRefreshToken, {
-          httpOnly: true,
-          secure: isHttps,
-          sameSite: "lax",
-          path: "/api/auth",
-          maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
-        });
-
         // Native clients want the new tokens in body since they can't
         // read Set-Cookie. WARP-3193 SEC-AUTH-7: ONLY native clients — the
         // same WARP-582 rule as /auth/login?return=body. A browser rotates
@@ -1721,6 +1703,26 @@ export function createPublicAuthRouter(
           );
         }
         const wantBody = refreshTokenBody !== null && browserMarker === null;
+
+        // WARP-3038 — a native body-token rotation sets NO cookies, matching
+        // /auth/login?return=body; browsers rotate through the cookies.
+        if (!wantBody) {
+          const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
+          res.cookie(SESSION_COOKIE_NAME, newAccessToken, {
+            httpOnly: true,
+            secure: isHttps,
+            sameSite: "lax",
+            path: "/",
+            maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
+          });
+          res.cookie(REFRESH_COOKIE_NAME, newRefreshToken, {
+            httpOnly: true,
+            secure: isHttps,
+            sameSite: "lax",
+            path: "/api/auth",
+            maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
+          });
+        }
         res.json({
           status: "ok",
           expiresIn: ACCESS_TOKEN_TTL_SECONDS,
@@ -2074,6 +2076,9 @@ export function createPublicAuthRouter(
       const accessRoleAssignment = acceptedAccessRole
         ? { role: acceptedAccessRole.startingPoint, accessRoleId: acceptedAccessRole.id }
         : null;
+      // WARP-3263 — who brought this person onto the box, as an explicit id
+      // (a guest's Messages roster shows them). Null on a pre-column invite.
+      const invitedById = await liveUserId(prisma, invite.createdById);
       const userRow = await prisma.user.upsert({
         where: { nextcloudUsername: invite.username },
         update: {
@@ -2098,6 +2103,7 @@ export function createPublicAuthRouter(
           // Canonical Role enum: the applied role's startingPoint, else the
           // invite's tier (pre-T9 behavior, bit-for-bit).
           role: invite.role,
+          invitedById,
           // `isLocal` defaults to true in the schema; mirror-from-NC
           // would only flip false for setup-time admins.
           ...(accessRoleAssignment ?? {}),
@@ -2859,6 +2865,8 @@ export function createProtectedAuthRouter(
         accessRoleId: string | null;
         directoryStatus: string;
         provisionSource: string;
+        deletionStatus: string;
+        deletionDueAt: Date | null;
       };
       const [allUsers, localRows] = await Promise.all([
         ncListUsers(token),
@@ -2874,6 +2882,8 @@ export function createProtectedAuthRouter(
                 accessRoleId: true,
                 directoryStatus: true,
                 provisionSource: true,
+                deletionStatus: true,
+                deletionDueAt: true,
               },
             }) as Promise<LocalRosterRow[]>)
           : ([] as LocalRosterRow[]),
@@ -2900,6 +2910,9 @@ export function createProtectedAuthRouter(
           accessRoleId: local?.accessRoleId ?? null,
           source: local ? sourceOf(local) : ("nextcloud" satisfies RosterSource),
           hasStorage: true,
+          // WARP-3113: explicit enum; a Nextcloud-only account has no row to schedule.
+          deletionStatus: local?.deletionStatus ?? "NONE",
+          deletionDueAt: local?.deletionDueAt ?? null,
         };
       });
       // Local rows Nextcloud does not list: every SSO/SCIM account, plus any
@@ -2921,6 +2934,8 @@ export function createProtectedAuthRouter(
           accessRoleId: row.accessRoleId,
           source: sourceOf(row),
           hasStorage: false,
+          deletionStatus: row.deletionStatus,
+          deletionDueAt: row.deletionDueAt,
         });
       }
       res.json({ users });
@@ -3072,6 +3087,8 @@ export function createProtectedAuthRouter(
           // WARP-824: explicit forced-change-on-first-login flag (default
           // true). The post-auth gate reads this fresh on every request.
           mustChangePassword,
+          // WARP-3263 — the creating admin, same role as an invite's issuer.
+          invitedById: await liveUserId(prisma, req.user?.id),
         },
       });
 
@@ -3535,6 +3552,9 @@ export function createProtectedAuthRouter(
             username: req.params.username,
             actor: actorFromRequest(req),
             ncMirror,
+            // WARP-3160: devices are keyed by the directory username, not the
+            // handle in the URL (which may be the Nextcloud name).
+            devices: { prisma, username: row.username },
           });
           res.json({
             status: "disabled",
@@ -3562,6 +3582,7 @@ export function createProtectedAuthRouter(
           // failure would have thrown), so the mirror is synced by
           // construction.
           ncMirror: "synced",
+          devices: prisma ? { prisma, username: req.params.username } : null,
         });
         res.json({
           status: "disabled",
@@ -3611,10 +3632,15 @@ export function createProtectedAuthRouter(
           ? await findDirectoryUserByHandle(prisma, req.params.username)
           : null;
         if (row && prisma) {
-          await prisma.user.update({
-            where: { id: row.id },
+          // WARP-3113: a person scheduled for deletion is reactivated only
+          // after the deletion is cancelled — two explicit decisions, never
+          // one click that silently keeps a purge date on a live account.
+          // Pinned to NONE so the nightly job's claim can't race this.
+          const reactivated = await prisma.user.updateMany({
+            where: { id: row.id, deletionStatus: "NONE" },
             data: { directoryStatus: "ACTIVE" },
           });
+          if (reactivated.count === 0) throw RoleMutationRefusedError.deletionPending();
         }
         const ncUsername = row ? row.nextcloudUsername : req.params.username;
         let ncMirror: NcMirror = "no_account";
@@ -3622,8 +3648,28 @@ export function createProtectedAuthRouter(
           await ncSetUserEnabled(token, ncUsername, true);
           ncMirror = "synced";
         }
+        // WARP-3113: reactivation restores access to the company's box, so
+        // it is audited with the actor, like disable.
+        await recordActivity({
+          kind: "auth",
+          severity: "ok",
+          sourceIcon: "user-check",
+          what: "User reactivated",
+          sub: req.params.username,
+          refs: {
+            actor: req.user?.username ?? null,
+            username: req.params.username,
+            targetUserId: row?.id ?? null,
+            ncMirror,
+          },
+          actor: actorFromRequest(req),
+        });
         res.json({ status: "enabled", username: req.params.username, ncMirror });
       } catch (err: any) {
+        if (err instanceof RoleMutationRefusedError) {
+          res.status(err.status).json(err.toJSON());
+          return;
+        }
         if (err.message?.includes("403") || err.message?.includes("997")) {
           res.status(403).json({ error: "Admin access required" });
           return;
@@ -3774,214 +3820,78 @@ export function createProtectedAuthRouter(
   );
 
   // ── Delete user (admin only) ──
-  // WARP-205: Cascade brain-memory items + chunks + on-disk bytes the
-  // user owned. We do this AFTER Nextcloud-side delete succeeds so a
-  // failed upstream call doesn't leave the brain tier partially purged
-  // (the dashboard would then list a user that no longer exists in
-  // Nextcloud — strictly worse than the converse). The cascade is
-  // best-effort: if it throws we still return success, but log loud
-  // — orphaned local rows are recoverable later via a janitor job;
-  // returning 500 here would also fail to undo the upstream delete.
+  // WARP-3113: Delete no longer purges on the spot. An employee's work files
+  // belong to the business, so the request must say what happens to them:
+  // `{ disposition: "retention" }` keeps everything for RETENTION_DAYS, then the
+  // nightly leaver-deletion job (leaver-deletion.service.ts) completes the
+  // removal. Until then an admin can cancel. WARP-3169: or
+  // `{ disposition: "handover", recipientId }` moves the files to an active
+  // owner/admin/member first and completes the deletion at once.
+  //
+  // What happens NOW is the revocation: the same guarded, SERIALIZABLE write
+  // Deactivate makes (WARP-1526 rails 1/2/4/5, directoryStatus=DEACTIVATED),
+  // plus the pending-deletion mark in the same transaction, then the
+  // Nextcloud enable-flag mirror and session revocation. A DELETE with no
+  // disposition (iOS and the Mac on main send none) gets "retention", the
+  // non-destructive, cancellable option, and the audit row says it was
+  // defaulted, so the choice is recorded rather than guessed. An unknown
+  // disposition is still a 400.
   // WARP-171: per-route guard. owner + admin only.
   router.delete("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      // WARP-2993 — provisioning_api needs NC instance admin, which only the
-      // box service account holds. The caller's own NC credential is never
-      // used here; Droplet's requireRole + rails above/below are the authority.
-      const token = adminBasicToken();
-
-      // WARP-1526 rails. This surface predated every people-surface
-      // invariant — an admin could delete the owner's account here. Resolve
-      // the local row and run rails 2 + 1 pre-tx (self-delete, owner
-      // untouchable), then rails 4 + 5 inside a SERIALIZABLE transaction
-      // (SERIALIZABLE_TX — explicit; Prisma/Postgres default to READ
-      // COMMITTED) for a consistent count snapshot (the actual NC delete
-      // runs after commit — the same post-commit-mirror posture as every
-      // other NC effect).
-      // WARP-1565 residual 1 — the removal is no longer half-done. The
-      // transaction below still only REVOKES (directoryStatus=DEACTIVATED),
-      // because that is the half that must be atomic with the rails; the
-      // local row is deleted at the end, once Nextcloud has confirmed the
-      // account is gone. See the delete below for why that order.
+      const parsed = deleteDispositionSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json(UNKNOWN_DISPOSITION_BODY);
+        return;
+      }
       // WARP-2858: via the shared resolver so SSO/SCIM rows are removable.
       const row = prisma
         ? await findDirectoryUserByHandle(prisma, req.params.username)
         : null;
-      if (row && prisma) {
-        assertRemovalAllowed({
-          actor: { id: req.user?.id, role: req.user?.role },
-          target: row,
+      if (!row || !prisma) {
+        // A legacy Nextcloud-only account has no row to hold the retention
+        // state; purging it on the spot is exactly what WARP-3113 forbids.
+        res.status(409).json({
+          error: "This account has no directory entry, so its deletion can't be scheduled.",
+          code: "NO_DIRECTORY_ROW",
         });
-        // pr-reviewer #1229 B3: this transaction used to wrap a COUNT with
-        // no write — a read-only transaction pins nothing, so it read as
-        // protection without being any, and because the route never touched
-        // the local row the "removed" admin stayed role=admin/ACTIVE:
-        //   • it kept counting as a live operator for the NEXT removal's
-        //     rail 5, so admins could be emptied one DELETE at a time; and
-        //   • /auth/login verifies the LOCAL passwordHash, so once the
-        //     ACCESS_TOKEN_TTL denylist entry expired (~15 min) they could
-        //     simply sign back in with full admin.
-        // What this transaction owns is the REVOCATION: the same
-        // directoryStatus lever the disable path uses, which /auth/login,
-        // SSO, WebAuthn and the auth middleware all already fail closed on.
-        // Check and change commit together, at SERIALIZABLE, with the write
-        // optimistically pinned to the role the rails were evaluated
-        // against. The row's DELETION (WARP-1565) is deliberately not in
-        // here — see below.
-        await prisma.$transaction(async (tx) => {
-          const fresh = await readGuardTargetTx(tx, row.id);
-          if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
-          await assertRemovalInvariantsTx(tx, { target: fresh });
-          await tx.user.update({
-            where: { id: fresh.id, role: fresh.role },
-            data: { directoryStatus: "DEACTIVATED" },
-          });
-        }, SERIALIZABLE_TX);
+        return;
       }
-
-      // WARP-2858: the Nextcloud account named by the RESOLVED row. An
-      // SSO/SCIM row has none — skip the call (it would fail against a user
-      // Nextcloud never had and strand the row DEACTIVATED-but-present) and
-      // say so in the response. Rowless legacy accounts: the param IS the
-      // Nextcloud user, as before.
-      const ncUsername = row ? row.nextcloudUsername : req.params.username;
-      let ncMirror: NcMirror = "no_account";
-      if (ncUsername !== null) {
-        await ncDeleteUser(token, ncUsername);
-        ncMirror = "synced";
+      if (parsed.data.disposition === "handover") {
+        // WARP-3169: transfer first, then delete at once. A failed transfer
+        // changes nothing (HandoverRefusedError below).
+        const handed = await handOverAndDeleteUser(prisma, row, {
+          guardActor: { id: req.user?.id, role: req.user?.role },
+          actorUsername: req.user?.username ?? null,
+          actor: actorFromRequest(req),
+          recipientId: parsed.data.recipientId,
+        });
+        res.json({
+          status: handed.removed ? "deleted" : "deletion_retrying",
+          username: req.params.username,
+          recipient: handed.recipient,
+          folder: handed.folder,
+        });
+        return;
       }
-
-      if (prisma && row) {
-        try {
-          // WARP-2858: brain memory keys on the local `User.id` (WARP-493).
-          // This used to pass the path param — a username — so the
-          // delete-time purge matched nothing for any account.
-          const purged = await purgeUserData(prisma, row.id);
-          logger.info(
-            {
-              username: req.params.username,
-              items: purged.items,
-              chunks: purged.chunks,
-            },
-            "Cascaded brain-memory purge after user delete",
-          );
-        } catch (err) {
-          // Don't fail the user-delete if the local cascade trips —
-          // the upstream NC delete already succeeded, and undoing it
-          // is awkward. Log loud so on-call can clean up later.
-          logger.error(
-            { err, username: req.params.username },
-            "Brain-memory cascade purge failed (user already deleted in Nextcloud)",
-          );
-        }
-      } else {
-        // No local row (legacy NC-only account) owns no `User.id`-keyed brain
-        // memory; no prisma should never happen in production
-        // (createProtectedAuthRouter is invoked with prisma in app.ts).
-        logger.warn(
-          { username: req.params.username },
-          "purgeUserData skipped — no local directory row (or protected auth router instantiated without prisma)",
-        );
-      }
-
-      // WARP-1565 residual 1 — finish the removal.
-      //
-      // WARP-1526 bounded the exposure of the surviving row (DEACTIVATED,
-      // and every login gate fails closed on it), but a route called DELETE
-      // whose Nextcloud account is genuinely gone left the local row behind.
-      // The consequence an operator actually hits is not the roster entry:
-      // `username`, `email` and `nextcloudUsername` are UNIQUE columns, so
-      // the orphan keeps holding an identity that is supposed to be free —
-      // and re-inviting the same person (the obvious next action after a
-      // mistaken removal, or when someone returns) collides on it.
-      //
-      // ORDER IS THE CONTRACT: after ncDeleteUser, never before. A row
-      // deleted first, followed by a failing NC call, would strand an
-      // account with working WebDAV — Nextcloud is proxied without
-      // orchestrator auth in front — and nothing local to reconcile it
-      // from. This way a failed NC delete leaves a fully-revoked row to
-      // retry against, which is exactly the pre-WARP-1565 state rather than
-      // a new hole.
-      //
-      // `deleteMany` pinned to DEACTIVATED, not `delete` by id: it is
-      // idempotent on a retry, and it refuses to remove a row that someone
-      // re-activated in the window since the transaction above — that row
-      // is live again and deleting it would be a silent second decision.
-      // No rails re-run here: a DEACTIVATED row holds no operator capacity
-      // (rail 5 already excludes it), so removing it cannot strand the box.
-      if (prisma && row) {
-        // WARP-3193 SEC-AUTH-6: the rows keyed by USERNAME (notes, calendar
-        // + CalDAV credentials, reminders, chats, push subscriptions) go in
-        // the SAME transaction as the row, and only when the row really goes
-        // — the username must never be free while data still answers to it,
-        // or the next account deriving it inherits that data.
-        const removed = await prisma.$transaction(async (tx) => {
-          const r = await tx.user.deleteMany({
-            where: { id: row.id, directoryStatus: "DEACTIVATED" },
-          });
-          if (r.count > 0) {
-            const purged = await purgeUsernameKeyedData(tx, row.username);
-            logger.info(
-              { username: req.params.username, userId: row.id, purged },
-              "Purged username-keyed private data with the deleted user row",
-            );
-          }
-          return r;
-        }, SERIALIZABLE_TX);
-        if (removed.count === 0) {
-          logger.warn(
-            { username: req.params.username, userId: row.id },
-            "local row not deleted after Nextcloud removal — re-activated concurrently; left for operator review",
-          );
-        } else {
-          // WARP-2115 — the deleted person may hold a Microsoft 365 link whose
-          // refresh token is still valid. Nothing cascades (userId is not an
-          // FK), and the /api/m365 routes scope to the requester's OWN
-          // connection, so an orphaned row could never be disconnected by
-          // anyone. Purge it here, gated on a CONFIRMED delete so a
-          // concurrently re-activated account keeps its link.
-          try {
-            const purgedM365 = await purgeM365ForUser(prisma, row.id);
-            if (purgedM365 > 0) {
-              logger.info(
-                { username: req.params.username, userId: row.id },
-                "Purged Microsoft 365 connection after user delete",
-              );
-            }
-          } catch (err) {
-            // Same posture as the brain-memory cascade above: the account is
-            // already gone upstream, so do not fail the request — but log loud,
-            // because what is left behind is a live cloud credential.
-            logger.error(
-              { err, username: req.params.username, userId: row.id },
-              "Microsoft 365 purge failed after user delete — a live refresh token may remain",
-            );
-          }
-        }
-      }
-
-      // Rail 6 (consolidated, WARP-490 parity): this surface previously
-      // revoked NOTHING and audited NOTHING on delete — the removed user's
-      // sessions rode out their TTL. Hard-revoke + denylist + the
-      // mandatory-emit "User removed" row now land here exactly as on
-      // DELETE /api/people/:id (legacy NC-only rows keep a null
-      // targetUserId and skip the revocation they never had).
-      await runRemovalPostEffects({
-        targetUserId: row?.id ?? null,
-        targetUsername: row?.username ?? req.params.username,
-        targetRole: row?.role ?? null,
+      const scheduled = await scheduleUserDeletion(prisma, row, {
+        guardActor: { id: req.user?.id, role: req.user?.role },
         actorUsername: req.user?.username ?? null,
         actor: actorFromRequest(req),
-        // WARP-1565: the qualified headline existed only while the removal
-        // was half-done (pr-reviewer #1229 B3 — "User removed" would have
-        // been a false statement in an append-only, signature-chained audit
-        // log). The Nextcloud account is gone AND the local row is deleted,
-        // so the shipped default is true again and this surface reads
-        // identically to DELETE /api/people/:id.
+        disposition: parsed.data.disposition ?? "retention",
+        dispositionDefaulted: parsed.data.disposition === undefined,
       });
-
-      res.json({ status: "deleted", username: req.params.username, ncMirror });
+      res.json({
+        status: "pending_deletion",
+        username: req.params.username,
+        deletionDueAt: scheduled.deletionDueAt,
+        ...(scheduled.ncMirror ? { ncMirror: scheduled.ncMirror } : {}),
+      });
     } catch (err) {
+      if (err instanceof HandoverRefusedError) {
+        res.status(err.status).json(err.toJSON());
+        return;
+      }
       if (err instanceof RoleMutationRefusedError) {
         res.status(err.status).json(err.toJSON());
         return;
@@ -3996,6 +3906,53 @@ export function createProtectedAuthRouter(
       next(err);
     }
   });
+
+  // WARP-3113: cancel a scheduled deletion. The person stays deactivated;
+  // reactivating them is a separate, deliberate step. Matches PENDING only:
+  // once the nightly job has claimed the row (PURGING) the removal is under
+  // way and cannot be half-undone.
+  router.post(
+    "/auth/users/:username/cancel-deletion",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const row = prisma
+          ? await findDirectoryUserByHandle(prisma, req.params.username)
+          : null;
+        if (!row || !prisma) {
+          res.status(404).json({ error: "User not found" });
+          return;
+        }
+        const cancelled = await prisma.user.updateMany({
+          where: { id: row.id, deletionStatus: "PENDING" },
+          data: { deletionStatus: "NONE", deletionDueAt: null, deletionRequestedBy: null },
+        });
+        if (cancelled.count === 0) {
+          res.status(409).json({
+            error: "This person isn't scheduled for deletion, or the deletion is already running.",
+            code: "NO_PENDING_DELETION",
+          });
+          return;
+        }
+        await recordActivity({
+          kind: "auth",
+          severity: "ok",
+          sourceIcon: "user-check",
+          what: "User deletion cancelled",
+          sub: row.username,
+          refs: {
+            actor: req.user?.username ?? null,
+            targetUserId: row.id,
+            targetUsername: row.username,
+          },
+          actor: actorFromRequest(req),
+        });
+        res.json({ status: "disabled", username: req.params.username });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // ────────────────────────────────────────────────────────────
   // WARP-217 — Admin invite management
@@ -4155,6 +4112,8 @@ export function createProtectedAuthRouter(
           email: parsed.data.email,
           role: parsed.data.role,
           createdBy: req.user?.username ?? "unknown",
+          // WARP-3263 — copied to User.invitedById at accept.
+          createdById: req.user?.id ?? null,
           expiresAt,
           // WARP-1533: validated custom access role (null = plain tier).
           accessRoleId: inviteAccessRole?.id ?? null,
@@ -4183,26 +4142,31 @@ export function createProtectedAuthRouter(
 
       // WARP-1533: an access-role invite lands in Activity with the ADR-032
       // §5 wording (kind `auth`, free-text `what`, refs carry the role UUID).
-      // Plain tier invites keep this surface's shipped behavior (log-only) —
-      // the people surface owns the "Teammate invited" entry.
-      if (inviteAccessRole) {
-        await recordActivity({
-          kind: "auth",
-          severity: "ok",
-          sourceIcon: "user-plus",
-          what: "Invite created with access role",
-          sub: `${parsed.data.email} · ${inviteAccessRole.name}`,
-          refs: {
-            actor: req.user?.username ?? null,
-            email: parsed.data.email,
-            role: parsed.data.role,
-            accessRoleId: inviteAccessRole.id,
-            accessRoleName: inviteAccessRole.name,
-            accessRoleStartingPoint: inviteAccessRole.startingPoint,
-          },
-          actor: actorFromRequest(req),
-        });
-      }
+      // WARP-3113: a plain tier invite is audited too, with the people
+      // surface's "Teammate invited" wording — an invite decides who can get
+      // into the company's box, whichever surface created it. Never the token.
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "user-plus",
+        what: inviteAccessRole ? "Invite created with access role" : "Teammate invited",
+        sub: inviteAccessRole
+          ? `${parsed.data.email} · ${inviteAccessRole.name}`
+          : `${parsed.data.email} · ${parsed.data.role}`,
+        refs: {
+          actor: req.user?.username ?? null,
+          email: parsed.data.email,
+          role: parsed.data.role,
+          ...(inviteAccessRole
+            ? {
+                accessRoleId: inviteAccessRole.id,
+                accessRoleName: inviteAccessRole.name,
+                accessRoleStartingPoint: inviteAccessRole.startingPoint,
+              }
+            : {}),
+        },
+        actor: actorFromRequest(req),
+      });
 
       // BUG-11 — deliver the invite email. The row is created above; the email
       // is a separate, fallible step over the operator's SMTP relay.
@@ -4313,10 +4277,27 @@ export function createProtectedAuthRouter(
         // revoked, in one conditional write with its timestamp. An accepted
         // invite stays accepted — that person already holds the account, and
         // the old unconditional stamp made the record claim otherwise.
-        await prisma.userInvite.updateMany({
+        const revoked = await prisma.userInvite.updateMany({
           where: { id: invite.id, status: { in: ["pending", "expired"] } },
           data: { status: "revoked", revokedAt: new Date() },
         });
+        if (revoked.count > 0) {
+          // WARP-3113: audited once, on the transition — never the token.
+          await recordActivity({
+            kind: "auth",
+            severity: "ok",
+            sourceIcon: "user-minus",
+            what: "Invite revoked",
+            sub: invite.email ?? invite.username,
+            refs: {
+              actor: req.user?.username ?? null,
+              inviteId: invite.id,
+              email: invite.email ?? null,
+              role: invite.role,
+            },
+            actor: actorFromRequest(req),
+          });
+        }
         res.json({ revoked: true });
       } catch (err) {
         next(err);

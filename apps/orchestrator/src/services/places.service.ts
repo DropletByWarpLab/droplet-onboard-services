@@ -12,7 +12,9 @@
  *
  * Provider is unchanged (OSM Nominatim). The egress host
  * `nominatim.openstreetmap.org` is already allow-listed
- * (docs/security/allowed-egress.yaml). OSM ToS constraints — an identifying
+ * (docs/security/allowed-egress.yaml). WARP-3264: the only caller
+ * (GET /api/calendar/places) dials it only when the owner-only
+ * `place_lookup` off-LAN channel is on — default off. OSM ToS constraints — an identifying
  * User-Agent and ~1 req/s (enforced by the combobox's 300 ms debounce) — are
  * unchanged; parameter tuning + clean formatting is the scoped fix.
  */

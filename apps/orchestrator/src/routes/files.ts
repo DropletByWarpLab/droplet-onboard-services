@@ -6,7 +6,7 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import multer, { MulterError } from "multer";
 import { z } from "zod";
-import { PrismaClient, type DepartmentRight } from "@prisma/client";
+import { PrismaClient, type DepartmentRight, type FolderColor } from "@prisma/client";
 import pino from "pino";
 import {
   ncListFiles,
@@ -68,6 +68,15 @@ import {
 import { readUserEmail } from "../services/user-directory.service.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import {
+  exposesOutside,
+  isWorkspacePath,
+  libraryOfHomePath,
+  mayCreatePublicLink,
+  PUBLIC_LINK_REFUSAL,
+  WORKSPACE_SHARE_REFUSAL,
+  type ShareLibrary,
+} from "../services/share-policy.js";
+import {
   assertedNextcloudLoginRefusal,
   resolveAssertedNextcloudLogin,
   type AssertedNextcloudLoginFailure,
@@ -85,6 +94,7 @@ import { requireRole, requireRoleOrMcpService, recordAccessDenied } from "../mid
 import { sensitiveRateLimit, standardRateLimit } from "../middleware/rate-limit.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
 import { UnsafePathError } from "../lib/unsafe-path-error.js";
+import { storedUploadName } from "../lib/upload-file-name.js";
 import { isPathUnderUser } from "../services/brain-memory.service.js";
 import {
   classifyFileContentId,
@@ -1821,6 +1831,139 @@ export function createFilesRouter(
     },
   );
 
+  // ── Folder colours (GET/PUT/DELETE /api/files/folder-colors) ──
+  //
+  // Personal organisation: a colour is visible to the user who set it and to
+  // nobody else, so rows are keyed (req.user.id, ncFileId) and EVERY query
+  // filters on the caller's UUID (never the NC username `getUser(req)`).
+  // Any human role — guest included — may colour folders it can see: this is
+  // the caller's own palette, not a write to shared content, so there is no
+  // `requireRole` and only the `reader` space floor (which is also what the
+  // listing itself needs). The mcp service principal has no palette.
+  //
+  // `ncFileId` survives rename/move, so nothing here runs on those routes.
+  // GET returns every colour the caller has set (bounded by how many folders
+  // they coloured) so the listing stays untouched and cacheable; the
+  // dashboard joins on `ncFileId`, which listings already carry.
+  const FOLDER_COLOR_VALUES = [
+    "red",
+    "orange",
+    "yellow",
+    "green",
+    "blue",
+    "purple",
+    "gray",
+  ] as const satisfies readonly FolderColor[];
+
+  /** Local User.id for a real (non-service) caller, else 403 + null. */
+  const folderColorOwner = (req: Request, res: Response): string | null => {
+    const id = req.user?.id;
+    if (!id || req.user?.role === "service") {
+      recordAccessDenied(req, "folder-color-no-user");
+      res.status(403).json({ error: "Forbidden: folder colors are per user" });
+      return null;
+    }
+    return id;
+  };
+
+  /**
+   * (space, path) → the entry's ncFileId, or null after writing the 4xx.
+   * Does not check the entry is a folder: a colour row on a file is inert
+   * (the UI only paints folders), so a folder-only PROPFIND buys nothing.
+   */
+  const resolveColorTargetIdOr404 = async (
+    req: Request,
+    res: Response,
+    rawPath: unknown,
+  ): Promise<number | null> => {
+    if (typeof rawPath !== "string" || !rawPath || rawPath === "/") {
+      res.status(400).json({ error: "path is required" });
+      return null;
+    }
+    const resolved = await rootForSpace(
+      prisma,
+      resolveSpace(spaceQueryOrBody(req)),
+      rawPath,
+    );
+    const fileId = await ncGetFileId(await getToken(req), await getUser(req, prisma), resolved);
+    if (fileId === null) {
+      res.status(404).json({ error: "Folder not found" });
+      return null;
+    }
+    // Same department gate the tag/comment routes run: the space token only
+    // authorizes what the caller DECLARED, the file's own registry row decides.
+    if (!(await gateFileSpaceAccess(req, res, fileId, "reader"))) return null;
+    return fileId;
+  };
+
+  router.get("/files/folder-colors", async (req, res, next) => {
+    try {
+      const userId = folderColorOwner(req, res);
+      if (!userId) return;
+      const rows = await prisma.fileFolderColor.findMany({
+        where: { userId },
+        select: { ncFileId: true, color: true },
+      });
+      res.json({ colors: rows });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  router.put(
+    "/files/folder-colors",
+    requireSpaceAccess(prisma, "reader", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
+      try {
+        const parsed = z
+          .object({
+            path: z.string().min(1),
+            color: z.enum(FOLDER_COLOR_VALUES),
+            space: z.string().optional(),
+          })
+          .safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: `path and color (${FOLDER_COLOR_VALUES.join(", ")}) are required`,
+          });
+          return;
+        }
+        const userId = folderColorOwner(req, res);
+        if (!userId) return;
+        const ncFileId = await resolveColorTargetIdOr404(req, res, parsed.data.path);
+        if (ncFileId === null) return;
+        const row = await prisma.fileFolderColor.upsert({
+          where: { userId_ncFileId: { userId, ncFileId } },
+          create: { userId, ncFileId, color: parsed.data.color },
+          update: { color: parsed.data.color },
+          select: { ncFileId: true, color: true },
+        });
+        res.json({ color: row });
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
+  // Clearing is a DELETE of the row — there is no "none" member to store.
+  // Path travels in the query string (a DELETE body is dropped by proxies).
+  router.delete(
+    "/files/folder-colors",
+    requireSpaceAccess(prisma, "reader", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
+      try {
+        const userId = folderColorOwner(req, res);
+        if (!userId) return;
+        const ncFileId = await resolveColorTargetIdOr404(req, res, req.query.path);
+        if (ncFileId === null) return;
+        await prisma.fileFolderColor.deleteMany({ where: { userId, ncFileId } });
+        res.status(204).end();
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
   // ── Multer error handler ──
   // WARP-1271 (T19a): the per-request file-size limit is resolved from the
   // caller's UserUsagePolicy BEFORE constructing the multer instance —
@@ -1845,6 +1988,12 @@ export function createFilesRouter(
   // every staged part first, so a 413 / 400 / client abort leaves nothing
   // behind — the batch lands whole or not at all. The JSON transport
   // (write_file / create_document) is not multipart and skips all of this.
+  class BadUploadNameError extends Error {
+    constructor() {
+      super("File name must not contain '/', a control character or a '..' segment");
+    }
+  }
+
   async function handleUpload(req: Request, res: Response, next: NextFunction) {
     if (!req.is("multipart/form-data")) {
       next();
@@ -1863,14 +2012,40 @@ export function createFilesRouter(
       handleFileError(err, res, next);
       return;
     }
+    // WARP-3057: busboy decoded a plain `filename=` as latin1 (so macOS's
+    // U+202F in "9.41.12 AM" landed as "â¯AM") and cut the name at the last
+    // `\` or `/`. `defParamCharset` reads it as UTF-8 (`filename*=` still
+    // wins when sent), and `preservePath` hands us the name whole so
+    // `storedUploadName` can keep a `\` and refuse traversal — checked in
+    // the fileFilter, before a byte of that part is staged.
     const scopedUpload = multer({
       storage,
+      defParamCharset: "utf8",
+      preservePath: true,
+      fileFilter: (_req, file, cb) => {
+        if (storedUploadName(file.originalname) === null) {
+          cb(new BadUploadNameError());
+          return;
+        }
+        cb(null, true);
+      },
       limits: {
         fileSize: limitMb * 1024 * 1024,
         files: MAX_FILES_PER_UPLOAD,
       },
     });
     scopedUpload.array("files", MAX_FILES_PER_UPLOAD)(req, res, (err) => {
+      if (err instanceof BadUploadNameError) {
+        res.status(400).json({ error: err.message, code: "UPLOAD_BAD_NAME" });
+        return;
+      }
+      // busboy refuses a part header carrying a raw control character (and
+      // any other malformed header) before the fileFilter sees it: that is
+      // the client's bad request, not a 500.
+      if (err instanceof Error && err.message === "Malformed part header") {
+        res.status(400).json({ error: "Malformed upload", code: "UPLOAD_MALFORMED" });
+        return;
+      }
       if (err instanceof MulterError) {
         if (err.code === "LIMIT_FILE_SIZE") {
           // WARP-1912 — the dashboard's translator never echoes `error`
@@ -2328,7 +2503,7 @@ export function createFilesRouter(
         (req.files as (Express.Multer.File & StagedUploadInfo)[] | undefined) ?? [];
       let rawTargetPath: string;
       type PendingUpload =
-        | { name: string; size: number; sha256: string; uploadId: string }
+        | { name: string; requestedName: string; size: number; sha256: string; uploadId: string }
         | { name: string; size: number; sha256: string; buffer: Buffer };
       let uploads: PendingUpload[];
       let jsonCreateOnly = false;
@@ -2336,7 +2511,9 @@ export function createFilesRouter(
       if (files.length > 0) {
         rawTargetPath = (req.query.path as string) || "/";
         uploads = files.map((f) => ({
-          name: f.originalname,
+          // Non-null: the fileFilter refused every name this rejects.
+          name: storedUploadName(f.originalname)!,
+          requestedName: f.originalname,
           size: f.size,
           sha256: f.sha256,
           uploadId: f.uploadId,
@@ -2446,7 +2623,9 @@ export function createFilesRouter(
               targetPath,
               file.name,
               file.uploadId,
-              overwrite,
+              // WARP-3057: a name we changed (`\` → `_`) is not the name the
+              // caller asked to replace, so it always keeps both.
+              overwrite && file.name === file.requestedName,
             ));
             uncommitted.delete(file.uploadId);
           } else {
@@ -2472,14 +2651,20 @@ export function createFilesRouter(
             }
           }
           const uploadedPath = joinDir(targetPath, finalName);
+          // WARP-3057: a `\` stored as `_` is a rename the caller is told about.
+          const requestedName = "requestedName" in file ? file.requestedName : file.name;
           const status: UploadEntryStatus =
-            outcome === "replaced" ? "replaced" : finalName !== file.name ? "renamed" : "uploaded";
+            outcome === "replaced"
+              ? "replaced"
+              : finalName !== requestedName
+                ? "renamed"
+                : "uploaded";
           const entry: UploadedFileEntry = {
             name: finalName,
             path: uploadedPath,
             size: file.size,
             status,
-            ...(status === "renamed" ? { requestedName: file.name } : {}),
+            ...(status === "renamed" ? { requestedName } : {}),
           };
           results.push(entry);
 
@@ -2824,6 +3009,63 @@ export function createFilesRouter(
     }
   });
 
+  /**
+   * WARP-3053 — the role of the PERSON a share request acts for. The MCP
+   * service principal carries role "service"; the person it asserts is the
+   * one the share policy judges. An unresolvable assertion yields undefined,
+   * which the policy treats as "not owner/admin" (fail closed).
+   */
+  async function actingRole(req: Request): Promise<string | undefined> {
+    if (!isMcpService(req)) return req.user?.role;
+    const asserted = (req.header("x-nextcloud-user") ?? "").trim();
+    if (!asserted) return undefined;
+    const resolved = await resolveAssertedUser(prisma, asserted);
+    return resolved.ok ? resolved.user.role : undefined;
+  }
+
+  /**
+   * WARP-3053 — top-level folder names of every company library in a home:
+   * the Workspace plus every department/team mount, named as `rootForSpace`
+   * names them. Every state, not only active: an archived library's mount can
+   * linger in homes, and a stale name can only over-refuse (fail closed).
+   */
+  async function companyLibraryRoots(): Promise<string[]> {
+    const depts = await prisma.department.findMany({
+      where: { kind: { in: ["DEPARTMENT", "TEAM"] } },
+      select: { id: true, name: true, kind: true, parentId: true },
+    });
+    const nameById = new Map(depts.map((d) => [d.id, d.name]));
+    return [
+      SHARED_FOLDER_NAME,
+      ...depts.map((d) => {
+        const parent = d.kind === "TEAM" && d.parentId ? nameById.get(d.parentId) : undefined;
+        return parent ? `${parent} — ${d.name}` : d.name;
+      }),
+    ];
+  }
+
+  /**
+   * WARP-3053 — the library a share target sits in, whatever shape the client
+   * used. An explicit non-personal `space` is company data; a home path with
+   * no `space` (the web's and the Mac's shape) is classified by its first
+   * segment, so `/Household/...` is the Workspace either way.
+   */
+  async function shareLibrary(space: Space, homePath: string): Promise<ShareLibrary> {
+    if (space !== "personal") return "company";
+    return libraryOfHomePath(homePath, await companyLibraryRoots());
+  }
+
+  function refusePublicLink(req: Request, res: Response): void {
+    recordAccessDenied(req, "public-link-company-data");
+    res.status(403).json(PUBLIC_LINK_REFUSAL);
+  }
+
+  /** WARP-3168: a member sharing a Workspace item, of any kind. */
+  function refuseWorkspaceShare(req: Request, res: Response): void {
+    recordAccessDenied(req, "workspace-share-member");
+    res.status(403).json(WORKSPACE_SHARE_REFUSAL);
+  }
+
   // ── Create a share link ──
   //
   // Accepts the full ShareCreateOptions surface (shareType / permissions /
@@ -2882,11 +3124,40 @@ export function createFilesRouter(
         res.status(400).json({ error: "path must not contain '..' segments" });
         return;
       }
+      // WARP-3053: no legitimate share path carries a backslash, and one
+      // could dress a company path up as a personal one for the classifier.
+      if (parsed.data.path.includes("\\")) {
+        res.status(400).json({ error: "path must not contain backslashes" });
+        return;
+      }
 
       const space = resolveSpace(spaceQueryOrBody(req));
       const targetPath = await rootForSpace(prisma, space, parsed.data.path);
+
       const departmentId = req.spaceDepartmentId ?? null;
       const shareToken = departmentId ? adminBasicToken() : await getToken(req);
+
+      // WARP-3168: a member may not share a Workspace item at all, internal
+      // shares included — the same rule Nextcloud now enforces with the
+      // Workspace group's mask 15 (see isWorkspacePath for why). Judged on
+      // the RESOLVED path, so `space=shared` and the home-path shape agree.
+      // WARP-3053: on department/team libraries, anything but an internal
+      // user/group share without the re-share bit (see exposesOutside) is
+      // owner/admin only. Owner/admin short-circuit both lookups.
+      const role = await actingRole(req);
+      if (!mayCreatePublicLink(role, "company")) {
+        if (isWorkspacePath(targetPath, SHARED_FOLDER_NAME)) {
+          refuseWorkspaceShare(req, res);
+          return;
+        }
+        if (
+          exposesOutside(parsed.data.shareType, parsed.data.permissions) &&
+          !mayCreatePublicLink(role, await shareLibrary(space, targetPath))
+        ) {
+          refusePublicLink(req, res);
+          return;
+        }
+      }
 
       const share = await ncCreateShareV2(shareToken, targetPath, {
         shareType: parsed.data.shareType,
@@ -3836,12 +4107,12 @@ export function createFilesRouter(
     res: Response,
     shareId: number
   ): Promise<
-    | { ok: true; token: string; deptRow: { departmentId: string } | null }
+    | { ok: true; token: string; deptRow: { departmentId: string; shareType: number } | null }
     | { ok: false }
   > {
     const deptRow = await prisma.departmentShare.findUnique({
       where: { ncShareId: shareId },
-      select: { departmentId: true, createdById: true },
+      select: { departmentId: true, createdById: true, shareType: true },
     });
     if (!deptRow) {
       return { ok: true, token: await getToken(req), deptRow: null };
@@ -3866,7 +4137,11 @@ export function createFilesRouter(
       return { ok: false };
     }
 
-    return { ok: true, token: adminBasicToken(), deptRow: { departmentId: deptRow.departmentId } };
+    return {
+      ok: true,
+      token: adminBasicToken(),
+      deptRow: { departmentId: deptRow.departmentId, shareType: deptRow.shareType },
+    };
   }
 
   // ── Update existing share (PUT /api/files/share/:id) ──
@@ -3908,6 +4183,47 @@ export function createFilesRouter(
       const auth = await resolveShareMutationAuth(req, res, shareId);
       if (!auth.ok) return;
       const { token } = auth;
+
+      // WARP-3053: members may not edit any non-internal share (link, email,
+      // federated, ...) on company data, nor grant the re-share bit on it.
+      // Revoking (DELETE) stays open to them.
+      if (!mayCreatePublicLink(req.user?.role, "company")) {
+        const existing = auth.deptRow
+          ? {
+              shareType: auth.deptRow.shareType,
+              library: "company" as const,
+              // A recorded `space=shared` share sits on the HOUSEHOLD row.
+              workspace:
+                (
+                  await prisma.department.findUnique({
+                    where: { id: auth.deptRow.departmentId },
+                    select: { kind: true },
+                  })
+                )?.kind === "HOUSEHOLD",
+            }
+          : await ncGetShare(token, shareId).then(async (s) =>
+              s
+                ? {
+                    shareType: s.shareType,
+                    library: libraryOfHomePath(s.path, await companyLibraryRoots()),
+                    workspace: isWorkspacePath(s.path, SHARED_FOLDER_NAME),
+                  }
+                : null,
+            );
+        // WARP-3168: no member edits of any Workspace share (revoke stays open).
+        if (existing?.workspace) {
+          refuseWorkspaceShare(req, res);
+          return;
+        }
+        if (
+          existing &&
+          exposesOutside(existing.shareType, parsed.data.permissions ?? 0) &&
+          !mayCreatePublicLink(req.user?.role, existing.library)
+        ) {
+          refusePublicLink(req, res);
+          return;
+        }
+      }
 
       // OCS accepts one field per PUT — apply them sequentially.
       if (parsed.data.permissions !== undefined) {

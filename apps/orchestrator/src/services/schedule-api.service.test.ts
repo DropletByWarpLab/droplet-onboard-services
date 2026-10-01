@@ -269,6 +269,10 @@ function makeMockPrisma() {
   };
 
   const networkDevice = {
+    findUnique: vi.fn(async ({ where }: any) => {
+      const row = devices.get(where.mac);
+      return row ? { manualBlock: row.manualBlock } : null;
+    }),
     update: vi.fn(async ({ where, data, select }: any) => {
       const row = devices.get(where.mac);
       if (!row) {
@@ -613,7 +617,11 @@ describe("createScheduleApiService (WARP-94)", () => {
         manualBlock: false,
       });
       const res = await svc.setManualBlock("AA:BB:CC:DD:EE:01", true);
-      expect(res).toEqual({ mac: "AA:BB:CC:DD:EE:01", manualBlock: true });
+      expect(res).toEqual({
+        mac: "AA:BB:CC:DD:EE:01",
+        manualBlock: true,
+        previousManualBlock: false,
+      });
       expect(mock.prisma.networkDevice.update).toHaveBeenCalledWith({
         where: { mac: "AA:BB:CC:DD:EE:01" },
         data: { manualBlock: true },

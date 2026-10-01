@@ -11,6 +11,7 @@ import httpx
 import pytest
 import respx
 
+import providers.ollama_local as ollama_local
 from providers.ollama_local import (
     _DEFAULT_RUNTIME_URL,
     _LEGACY_MANAGER_URL_ENV,
@@ -1301,6 +1302,304 @@ class TestReasoningEffort:
             reasoning_effort="low",
         )
         assert "reasoning_effort" not in captured["body"]
+
+    # -- WARP-3123 — the same effort, delivered to DMR's chat template ------
+    #
+    # DMR's llama-server (docker/model-runner:v1.2.6) very likely predates
+    # upstream llama.cpp 7e4c0a968 ("chat : pass reasoning_effort to template",
+    # 2026-08-15), so a top-level `reasoning_effort` never reaches gpt-oss's
+    # jinja template and the model reasons at the template default ("medium").
+    # llama-server has long accepted a `chat_template_kwargs` object, and the
+    # gpt-oss template reads `reasoning_effort` from it — so on DMR the value
+    # rides there as well. The gate is the module flag the runtime word sets,
+    # toggled here the same way the grammar-safe-tools tests toggle theirs.
+
+    @staticmethod
+    def _set_dmr(monkeypatch: pytest.MonkeyPatch, on: bool) -> None:
+        monkeypatch.setattr(ollama_local, "_DMR_TEMPLATE_REASONING_EFFORT", on)
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "gpt-oss:20b",
+            # The id DMR actually serves on the box (.env.example LLM_MODEL).
+            "docker.io/ai/gpt-oss:20B-F16",
+        ],
+    )
+    @pytest.mark.parametrize("effort", ["low", "high"])
+    @respx.mock
+    async def test_dmr_gpt_oss_sends_effort_top_level_and_to_template(
+        self, provider, monkeypatch, model, effort
+    ):
+        self._set_dmr(monkeypatch, True)
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model=model,
+            reasoning_effort=effort,
+        )
+        body = captured["body"]
+        # Top-level stays for forward compat (a llama.cpp that has 7e4c0a968
+        # reads it); the template kwarg is what today's DMR actually honors.
+        assert body["reasoning_effort"] == effort
+        assert body["chat_template_kwargs"] == {"reasoning_effort": effort}
+
+    @respx.mock
+    async def test_dmr_gpt_oss_streaming_body_carries_template_effort(
+        self, provider, monkeypatch
+    ):
+        # chat() builds ONE body and hands it to _stream_chat, so the streaming
+        # (dashboard) path must carry the template kwarg too.
+        self._set_dmr(monkeypatch, True)
+        self._stub_limits(provider)
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, text=TestStreamingProviderContent.SSE_BODY)
+
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+        gen = await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="docker.io/ai/gpt-oss:20B-F16",
+            stream=True,
+            reasoning_effort="low",
+        )
+        _ = [frame async for frame in gen]
+        body = captured["body"]
+        assert body["stream"] is True
+        assert body["reasoning_effort"] == "low"
+        assert body["chat_template_kwargs"] == {"reasoning_effort": "low"}
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {},
+            # Even a caller-supplied template kwarg stays off the Ollama body:
+            # the provider has never forwarded that kwarg there.
+            {"chat_template_kwargs": {"foo": 1}},
+        ],
+        ids=["plain", "caller-template-kwargs"],
+    )
+    @respx.mock
+    async def test_ollama_runtime_body_is_unchanged(self, provider, monkeypatch, extra):
+        # Ollama maps the top-level field itself; its body must stay exactly
+        # the pre-WARP-3123 shape — no template kwarg.
+        self._set_dmr(monkeypatch, False)
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="gpt-oss:20b",
+            reasoning_effort="low",
+            **extra,
+        )
+        assert captured["body"] == {
+            "model": "gpt-oss:20b",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+            "reasoning_effort": "low",
+        }
+
+    @respx.mock
+    async def test_dmr_non_gpt_oss_model_gets_neither_field(self, provider, monkeypatch):
+        self._set_dmr(monkeypatch, True)
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="llama3.2:3b",
+            reasoning_effort="low",
+        )
+        assert "reasoning_effort" not in captured["body"]
+        assert "chat_template_kwargs" not in captured["body"]
+
+    @respx.mock
+    async def test_dmr_gpt_oss_without_effort_gets_neither_field(
+        self, provider, monkeypatch
+    ):
+        # Unset effort is the dashboard/default path: the body must not grow a
+        # template kwarg that would pin gpt-oss to any particular level.
+        self._set_dmr(monkeypatch, True)
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="docker.io/ai/gpt-oss:20B-F16",
+        )
+        assert "reasoning_effort" not in captured["body"]
+        assert "chat_template_kwargs" not in captured["body"]
+
+    @respx.mock
+    async def test_dmr_merges_caller_template_kwargs(self, provider, monkeypatch):
+        # Merge, don't clobber: a caller-supplied template kwarg survives next
+        # to the effort, and the caller's dict is not mutated in place.
+        self._set_dmr(monkeypatch, True)
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+        caller_kwargs = {"foo": 1}
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="gpt-oss:20b",
+            reasoning_effort="low",
+            chat_template_kwargs=caller_kwargs,
+        )
+        assert captured["body"]["chat_template_kwargs"] == {
+            "foo": 1,
+            "reasoning_effort": "low",
+        }
+        assert caller_kwargs == {"foo": 1}
+
+    @respx.mock
+    async def test_dmr_template_effort_always_matches_top_level(
+        self, provider, monkeypatch
+    ):
+        # The two fields must never disagree: whichever one a given llama.cpp
+        # build reads, gpt-oss runs at the effort the caller asked for.
+        self._set_dmr(monkeypatch, True)
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model="gpt-oss:20b",
+            reasoning_effort="low",
+            chat_template_kwargs={"reasoning_effort": "high"},
+        )
+        body = captured["body"]
+        assert body["reasoning_effort"] == "low"
+        assert body["chat_template_kwargs"] == {"reasoning_effort": "low"}
+
+    # -- WARP-3409 — one field, adapted per model family (_THINKING_CONTROLS) --
+    #
+    # GLM's template has no effort levels, only `enable_thinking`: its GGUF
+    # template (docker.io/ai/glm-4.7-flash on the box) ends the prompt
+    # `<|assistant|></think>` instead of `<think>` when it is false. Replaying
+    # a daily report that failed, GLM at its default thought through all
+    # 2,100 tokens (3/3); with the flag it finished in ~2 s (3/3).
+
+    GLM = "docker.io/ai/glm-4.7-flash:reap-q4_K_M"
+
+    @pytest.mark.parametrize(
+        ("model", "dmr", "expected"),
+        [
+            ("gpt-oss:20b", False, "reasoning_effort"),
+            ("docker.io/ai/gpt-oss:20B-F16", True, "reasoning_effort"),
+            ("docker.io/ai/glm-4.7-flash:reap-q4_K_M", True, "enable_thinking"),
+            ("GLM-4.5-Air", True, "enable_thinking"),
+            # Ollama has no template kwargs: the switch does not exist there.
+            ("glm-4.7-flash", False, None),
+            # Not verified on a served template yet (the TODO in the table).
+            ("docker.io/ai/qwen3:8B-Q4_K_M", True, None),
+            ("llama3.2:3b", True, None),
+            ("mistral:7b-instruct", False, None),
+        ],
+    )
+    def test_thinking_control_family_table(self, monkeypatch, model, dmr, expected):
+        self._set_dmr(monkeypatch, dmr)
+        assert ollama_local.thinking_control(model) == expected
+        assert ollama_local.model_supports_reasoning_effort(model) is (expected == "reasoning_effort")
+
+    @respx.mock
+    async def test_dmr_glm_low_turns_thinking_off(self, provider, monkeypatch):
+        self._set_dmr(monkeypatch, True)
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model=self.GLM,
+            reasoning_effort="low",
+        )
+        body = captured["body"]
+        assert body["chat_template_kwargs"] == {"enable_thinking": False}
+        # No effort levels in this template — nothing to send top-level.
+        assert "reasoning_effort" not in body
+
+    @pytest.mark.parametrize("effort", ["medium", "high", None])
+    @respx.mock
+    async def test_dmr_glm_keeps_its_default_unless_low(self, provider, monkeypatch, effort):
+        # Only "low" asks for less thinking; anything else is the template's
+        # own default (thinking on), i.e. the unchanged body.
+        self._set_dmr(monkeypatch, True)
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model=self.GLM,
+            **({"reasoning_effort": effort} if effort else {}),
+        )
+        assert "chat_template_kwargs" not in captured["body"]
+        assert "reasoning_effort" not in captured["body"]
+
+    @pytest.mark.parametrize(
+        ("model", "dmr"),
+        [("glm-4.7-flash", False), ("docker.io/ai/qwen3:8B-Q4_K_M", True), ("llama3.2:3b", True)],
+    )
+    @respx.mock
+    async def test_no_thinking_control_body_is_unchanged(self, provider, monkeypatch, model, dmr):
+        self._set_dmr(monkeypatch, dmr)
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model=model,
+            reasoning_effort="low",
+        )
+        assert captured["body"] == {
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+        }
+
+    @respx.mock
+    async def test_dmr_glm_thinking_off_merges_caller_template_kwargs(self, provider, monkeypatch):
+        self._set_dmr(monkeypatch, True)
+        self._stub_limits(provider)
+        handler, captured = self._capture_post()
+        respx.post(TEST_CHAT_URL).mock(side_effect=handler)
+        caller_kwargs = {"foo": 1, "enable_thinking": True}
+
+        await provider.chat(
+            messages=[ChatMessage(role="user", content="hi")],
+            model=self.GLM,
+            reasoning_effort="low",
+            chat_template_kwargs=caller_kwargs,
+        )
+        assert captured["body"]["chat_template_kwargs"] == {"foo": 1, "enable_thinking": False}
+        assert caller_kwargs == {"foo": 1, "enable_thinking": True}
+
+    @respx.mock
+    async def test_list_models_says_which_thinking_control_each_model_takes(self, provider, monkeypatch):
+        # So callers (and later the Models page) can see what "low" will do.
+        self._set_dmr(monkeypatch, True)
+        tags = [{"name": "docker.io/ai/gpt-oss:20B-F16"}, {"name": self.GLM}, {"name": "llama3.2:3b"}]
+        respx.get(f"{TEST_BASE_URL}/api/tags").mock(return_value=httpx.Response(200, json={"models": tags}))
+        respx.post(f"{TEST_BASE_URL}/api/show").mock(return_value=httpx.Response(200, json={}))
+
+        models = await provider.list_models()
+        assert [(m.id, m.thinking_control) for m in models] == [
+            ("docker.io/ai/gpt-oss:20B-F16", "reasoning_effort"),
+            (self.GLM, "enable_thinking"),
+            ("llama3.2:3b", None),
+        ]
 
 
 # ---------------------------------------------------------------------------

@@ -217,3 +217,36 @@ describe("requestLogger overlay QR link-token redaction (WARP-1474)", () => {
     expect(line.req.query.token).toBe("[Redacted]");
   });
 });
+
+describe("requestLogger secret query params (WARP-3122)", () => {
+  const SIG = "SECRET-SEGMENT-SIGNATURE-zz9";
+  const url = `/api/cameras/front/playback.segment?after=1&before=2&seg=0.ts&u=u1&exp=9&sig=${SIG}`;
+
+  it("never logs the segment signature, neither in req.url nor in req.query", () => {
+    const lines: string[] = [];
+    const logger = createRequestLogger({
+      dest: { write: (s: string) => lines.push(s) },
+      level: "info",
+    });
+    const req = Object.assign(mockReq("SIG-ID"), {
+      url,
+      originalUrl: url,
+      query: { seg: "0.ts", sig: SIG, token: "SECRET-TOKEN-q" },
+    }) as unknown as ReturnType<typeof mockReq> & {
+      log: { info: (obj: unknown, msg: string) => void };
+    };
+    const res = mockRes();
+    runWithRequestId("SIG-ID", () => {
+      logger(req as never, res as never);
+      req.log.info({ req }, "explicit req serialize");
+    });
+    res.emit("finish");
+    const output = lines.join("");
+    expect(output).not.toContain(SIG);
+    expect(output).not.toContain("SECRET-TOKEN-q");
+    const completion = JSON.parse(lines[lines.length - 1]);
+    expect(completion.req.url).toBe("/api/cameras/front/playback.segment");
+    expect(completion.req.query.sig).toBe("[Redacted]");
+  });
+
+});

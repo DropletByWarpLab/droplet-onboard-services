@@ -188,8 +188,9 @@ describe("WARP-2921 — agent_tool_pool_size", () => {
       selection_mode: "domains",
       runtime_count: 0,
     });
-    // The ADR-056 §12 ceiling the go/no-go rule is stated against.
-    expect(line.obj.ceiling_tokens).toBe(12_410);
+    // The ADR-056 §12 ceiling the go/no-go rule is stated against. 12,410
+    // until WARP-3281 counted the 150-char date line as a fixed block.
+    expect(line.obj.ceiling_tokens).toBe(12_372);
     expect(size.count).toBeGreaterThan(0);
     expect(typeof line.obj.turn_id).toBe("string");
     expect((line.obj.turn_id as string).length).toBeGreaterThan(0);
@@ -256,8 +257,9 @@ describe("WARP-2921 — agent_tool_pool_size", () => {
       messages: [{ role: "user", content: "hello there" }],
       tool_selection_mode: "domains",
       // Same fixture as llm-agent.tool-selection.test.ts: the core-only
-      // advertisement fits, admitting smart-home does not.
-      context_window: 4070,
+      // advertisement fits, admitting smart-home does not (4108 since
+      // WARP-3281 added the date line to the fixed blocks).
+      context_window: 4108,
     });
     expect(byPhase("initial")).toHaveLength(1);
     expect(byPhase("self_heal")).toHaveLength(0);
@@ -356,7 +358,7 @@ describe("WARP-2921 — agent_tool_pool_size", () => {
       model: "m",
       messages: [{ role: "user", content: "hello there" }],
       tool_selection_mode: "domains",
-      context_window: 4070,
+      context_window: 4108,
       toolCallContext: { agentRunId: "run_9" },
     });
     const initial = byPhase("initial")[0]!;

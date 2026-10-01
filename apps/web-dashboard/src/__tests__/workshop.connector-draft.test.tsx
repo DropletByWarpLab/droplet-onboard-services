@@ -46,7 +46,7 @@ import {
   bundleFilename,
   EXPORT_URL_LIFETIME_MS,
   exportWorkspace,
-  TEMPLATE_LABELS,
+  TEMPLATE_INFO,
   templateLabel,
   WORKSPACE_ID,
   WorkspaceApiError,
@@ -121,12 +121,13 @@ async function pane() {
 }
 
 describe("the rest-profile template (WARP-2899)", () => {
-  it("has a person's label and blurb", () => {
-    expect(TEMPLATE_LABELS["rest-profile"]).toEqual({
-      label: "Connector draft (REST profile)",
-      blurb: "Drafts a vendor profile, its guide and its egress entry for Warp Lab to review. Nothing on this box dials the vendor.",
+  it("has a person's label and blurb, and is not offered as a language", () => {
+    expect(TEMPLATE_INFO["rest-profile"]).toEqual({
+      label: "Connector draft",
+      kind: "other",
+      blurb: "For a service with a REST API. Drafts a profile for Warp Lab to review and ship — nothing on this box contacts the service.",
     });
-    expect(templateLabel("rest-profile")).toBe("Connector draft (REST profile)");
+    expect(templateLabel("rest-profile")).toBe("Connector draft");
   });
 });
 

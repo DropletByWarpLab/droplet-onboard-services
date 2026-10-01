@@ -176,8 +176,11 @@ Options:
   --purge-images   Also remove built Docker images + dangling images/networks
   --force          Restart Docker if volumes cannot be removed (stuck references)
   --backup         Emit a pre-reset full-device safety backup and KEEP the
-                   backups dir (WARP-570 gate: a failed backup aborts the reset)
-  --no-backup      DEPRECATED no-op — no backup is already the default
+                   backups dir (WARP-570 gate: a failed backup aborts the reset).
+                   The backup does not carry the extension-signing key, which
+                   the reset rotates: after a restore, re-promote the owner's
+                   extensions (they read as failed until then)
+  --no-backup     DEPRECATED no-op — no backup is already the default
   --decommission   Fully DEREGISTER the device at HQ (delete it from the fleet
                    registry). DEFAULT: RELEASE only — the device stays
                    registered/trusted and self-heals (WARP-980).
@@ -209,8 +212,13 @@ What gets deleted:
   - Droplet-managed bulk storage: every md pool is stopped and its members'
     superblocks + filesystems wiped, and every drive adopted under
     /mnt/droplet is wiped (unless --keep-storage is passed)
+  - The box extension-signing key (/var/lib/droplet/tpm/extension-signing.sealed)
+    is ROTATED: removed, so an extension the previous owner promoted no longer
+    verifies. The next owner's first promote mints a new one
 
 What is preserved:
+  - The device identity key and cert beside it in /var/lib/droplet/tpm, so the
+    box stays registered and self-heals (WARP-980)
   - Source code and git history
   - Docker images (unless --purge-images)
   - Docker engine and system packages
@@ -1100,6 +1108,22 @@ elif [ -d "$_restic_repo" ]; then
   fi
 fi
 
+# The box extension-signing key (WARP-2900, review #2312). The device-identity
+# sidecar keeps it beside the device-id key, but unlike that key (kept on
+# purpose, WARP-980) it must not outlive the owner: it signs "the owner of this
+# box promoted this extension", and a leased box goes to a new customer. A
+# statement, its signature and its manifest are none of them secret, so a kept
+# key would let a previous owner's promotion verify on the next owner's box.
+# Removed here, with the stack already down (Phase 1; the sidecar caches the
+# key in memory). The sidecar mints a new one on the next owner's first
+# promote. The gate at the end of this phase refuses a clean reset while it
+# survives. scripts/lib/secrets-wipe.sh has the details.
+DROPLET_TPM_DIR="/var/lib/droplet/tpm"
+secw_rotate_extension_key "$DROPLET_TPM_DIR" || true
+if [ "$SECW_EXTENSION_KEY_REMOVED" -gt 0 ]; then
+  log_success "Rotated the extension-signing key in $DROPLET_TPM_DIR (removed $SECW_EXTENSION_KEY_REMOVED file(s); the device identity beside it is kept, WARP-980)"
+fi
+
 # TLS certificates
 # ADR-023 PR-3: explicitly wipe the bootstrap self-signed pair PR-2 stashes as
 # droplet.{crt,key}.bootstrap BEFORE the directory rm. A reset must never leak
@@ -1370,6 +1394,29 @@ if ! secw_verify_wipe "$_env_reset_target" "$_secrets_reset_target" "$REPO_ROOT"
   exit 1
 fi
 log_success "Verified: no .env, snapshot or secrets-dir file remains on $(dirname "$_env_reset_target"), $_secrets_reset_target or $REPO_ROOT"
+
+# --- Authoritative gate: the extension-signing key was rotated (WARP-2900) ----
+# Same shape and placement as the gate above: re-scan the disk, name survivors
+# (paths only), and refuse to report a clean reset. At the end of Phase 4 for
+# the same reason: every other cleanup has run first.
+if ! secw_verify_extension_key_rotated "$DROPLET_TPM_DIR"; then
+  # WARP-3207: BLOCKED means the gate could not look into the key dir at all
+  # (unsearchable as this user, and no working sudo, e.g. under the
+  # device-bridge unit's NoNewPrivileges). Nothing is known to have survived,
+  # so this says "cannot verify", but it still refuses a clean reset.
+  if [ "$SECW_EXTENSION_KEY_BLOCKED" = "1" ]; then
+    log_error "The extension-signing key rotation CANNOT be verified: $SECW_EXTENSION_KEY_BLOCKED_REASON"
+    log_error "Refusing to report a clean reset. Re-run the reset as root."
+    exit 1
+  fi
+  log_error "The extension-signing key SURVIVED the reset:"
+  printf '%s\n' "$SECW_EXTENSION_KEY_LEFTOVER" | while IFS= read -r _leftover; do
+    [ -n "$_leftover" ] && log_error "  - $_leftover"
+  done
+  log_error "Refusing to report a clean reset: an extension the previous owner promoted"
+  log_error "would still verify on this box. Remove those files as root and re-run."
+  exit 1
+fi
 
 log_divider
 

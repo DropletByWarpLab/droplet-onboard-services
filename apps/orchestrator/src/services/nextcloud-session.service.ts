@@ -86,13 +86,20 @@ export async function touchNcToken(userId: string, ttlSeconds: number): Promise<
   }
 }
 
-/** Extract the raw session token from cookie or Authorization header. */
+/** Extract the raw session token from the Authorization header or cookie (Bearer wins — WARP-3038). */
 function extractSessionToken(req: Request): string | null {
-  const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
-  if (cookieToken) return cookieToken;
   const header = req.headers.authorization;
   if (header?.startsWith("Bearer ")) return header.slice(7);
-  return null;
+  return req.cookies?.[SESSION_COOKIE_NAME] ?? null;
+}
+
+/**
+ * A non-human principal: every SERVICE_PRINCIPALS entry in middleware/auth.ts
+ * and an extension's `_service:ext:<slug>` call-back principal. Either signal
+ * is enough, the same test activity.service.ts `actorFromRequest` applies.
+ */
+function isServicePrincipal(user: Request["user"]): boolean {
+  return user?.role === "service" || (user?.id?.startsWith("_service:") ?? false);
 }
 
 /**
@@ -100,6 +107,12 @@ function extractSessionToken(req: Request): string | null {
  * or WebDAV call on behalf of the request's authenticated user.
  *
  * Resolution order:
+ *   0. A service principal (`_service:*`, role `service`) gets none. Its
+ *      Bearer is a shared secret (SERVICE_TOKEN_VOICE, ...), not a Nextcloud
+ *      credential, and step 2 would otherwise forward that secret to
+ *      Nextcloud and into MCP `_meta.ncToken`. The MCP principal's
+ *      per-person token rides X-Nextcloud-Token and is read by its own
+ *      routes, never here.
  *   1. If the session token is a JWT (post-PR#12 browsers), look up the
  *      per-user Nextcloud app-password from Redis by `req.user.id`.
  *   2. Otherwise, treat the session token as a legacy Nextcloud token and
@@ -113,6 +126,8 @@ function extractSessionToken(req: Request): string | null {
  * surface 401 so the dashboard prompts a fresh login, which re-seeds Redis.
  */
 export async function resolveNcToken(req: Request): Promise<string | null> {
+  if (isServicePrincipal(req.user)) return null;
+
   const sessionToken = extractSessionToken(req);
 
   if (sessionToken) {

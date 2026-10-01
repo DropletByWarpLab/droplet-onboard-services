@@ -589,7 +589,8 @@ export function createStorageRouter(prisma: PrismaClient): Router {
         try {
           const token = await resolveNcToken(req);
           // No resolvable credential is the orphan-session case (a session that
-          // pre-dates the NC-session store), not an error.
+          // pre-dates the NC-session store) or a service principal such as the
+          // rack panel (`_service:display`), not an error.
           const quota = token ? await ncGetUserQuota(token) : null;
           if (quota) {
             const total = quota.total ?? 0;

@@ -23,12 +23,12 @@ import { useBoxAddress } from "@/lib/hooks/useBoxAddress";
 import { resolveHealthCopy } from "@/app/health-copy";
 import { AmbientLayer } from "@/components/home/AmbientLayer";
 import { Phead } from "./primitives";
+import { InboxBell } from "@/components/notifications/InboxBell";
 
 import "./indigo-tokens.css";
 import "./droplet-shell.css";
-// AmbientLayer's `.dh-ambient` / `.dh-drop` rules live in the home stylesheet;
-// import it so the decorative layer is styled on shell pages too. The `--blob-*`
-// opacities it reads are defined in the `.droplet-shell` token scope above.
+// AmbientLayer's `.dh-drop` rules live in the home stylesheet; import it so
+// the load indicator is styled on shell pages too.
 import "@/components/home/home-bento.css";
 
 function ShellStatusChip() {
@@ -101,6 +101,7 @@ export function ShellPage({
           <span className="pt-t">{label}</span>
         </span>
         <span className="pt-spring" />
+        <InboxBell />
         <ShellStatusChip />
       </header>
       <div className="page-body">

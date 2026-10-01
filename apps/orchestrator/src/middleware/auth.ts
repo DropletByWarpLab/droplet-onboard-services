@@ -79,7 +79,7 @@ export const REFRESH_COOKIE_NAME = "droplet_refresh";
 /**
  * Auth middleware — validates JWT access tokens and service-principal bearers.
  *
- * Token resolution order:
+ * Token resolution order (WARP-3038 — the Bearer wins when both are sent):
  *   1. `Authorization: Bearer <jwt>`        (API clients — JWT preferred)
  *   2. `droplet_session` HTTP-only cookie   (browser sessions — JWT)
  *
@@ -211,7 +211,10 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     return;
   }
 
-  // Resolve token: cookie first, then Authorization header
+  // Resolve token: Authorization header first, then cookie. WARP-3038 —
+  // a client that presents a Bearer means THAT identity: a stale or
+  // different user's cookie riding the same request (a shared cookie jar)
+  // must not override it (ADR-008 §3).
   const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
   const authHeader = req.headers.authorization;
   // WARP-2896 — the git smart-HTTP transport (`/api/git/<repo>.git/*`) is
@@ -225,13 +228,25 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
       ? gitBasicSessionToken(authHeader.slice(6))
       : null;
   const headerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : gitBasicToken;
-  const token = cookieToken || headerToken;
+  const token = headerToken || cookieToken;
 
   // WARP-2900 — an extension's bearer is a header credential and nothing
   // else. In a cookie it is refused outright, before any other token path
   // sees it.
   if (cookieToken?.startsWith(EXTENSION_TOKEN_PREFIX)) {
     res.status(401).json({ error: "Missing or invalid authentication" });
+    return;
+  }
+
+  // WARP-3122 — a recordings segment URL signed for a still-active person
+  // (services/segment-url-signing.service.ts, the only writer of this
+  // field). It wins over any header/cookie so a native player whose bearer
+  // went stale mid-recording keeps playing; every gate after this one
+  // (password change, module + feature access, role, per-camera grant)
+  // still runs against the signer.
+  if (req.signedSegmentUser) {
+    req.user = req.signedSegmentUser;
+    next();
     return;
   }
 

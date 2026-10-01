@@ -158,6 +158,7 @@ export async function tickAgentRunSchedules(
           maxIter: schedule.maxIter,
           runAfter: fireAt,
           scheduleId: schedule.id,
+          origin: "schedule",
         });
         return { kind: "fired", runId: created.id };
       });

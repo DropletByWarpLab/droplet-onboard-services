@@ -12,9 +12,11 @@
  * not do its books here has no such surface at all rather than an empty one.
  * `requireRole("owner", "admin", "family")` on top, matching the §9 ladder's
  * `view` floor: the front desk chasing an unpaid invoice is the ordinary use of
- * this surface. `guest` is refused — a household guest has no business reading
+ * this surface. `guest` is refused — an external guest has no business reading
  * the practice's receivables — and the per-person feature gate narrows from
- * there.
+ * there. WARP-3365 review: the same refusal is the catalog's (`money` `view` is
+ * `refuseBelowFloor`), applied at the prefix by `requireModuleTierFloor`, so a
+ * guest is 404 `module_disabled` before this router runs.
  *
  * `/money/documents` uses `requireRoleOrMcpService` with that SAME role tuple,
  * not a wider one: `money_list_open_documents` dispatches through it as the
@@ -23,6 +25,12 @@
  * `tools-mcp-admission.test.ts` exist to make impossible. Human RBAC is
  * unchanged: the guard defers to `requireRole("owner", "admin", "family")` for
  * everyone who is not that one service id at the `service` role.
+ *
+ * WHO THE SERVICE PRINCIPAL ACTS FOR is asked one layer up: `money` is in
+ * MCP_ACTING_USER_GATED_DOMAINS (module-mounts.ts), so `requireMcpActingUserToolDomain`
+ * mounted on `/api/money` resolves the person named by `X-Nextcloud-User` and
+ * checks their tier, their `money` tool scope and their Money feature before
+ * this route runs (WARP-3365 review).
  */
 import { Router, type Request, type Response } from "express";
 import type { PrismaClient } from "@prisma/client";

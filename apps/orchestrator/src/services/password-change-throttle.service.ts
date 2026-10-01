@@ -55,13 +55,14 @@ export async function checkPasswordChangeLock(
   }
 }
 
-export async function recordPasswordChangeFailure(userId: string): Promise<void> {
+/** Counts one failure. Resolves true when this failure started a lockout. */
+export async function recordPasswordChangeFailure(userId: string): Promise<boolean> {
   try {
     // cacheIncr is atomic (Redis INCR) — avoids the read-modify-write race
     // where two concurrent wrong-password requests both read N and both write
     // N+1, keeping the counter artificially low.
     const next = await cacheIncr(pwChangeFailsKey(userId), PW_CHANGE_FAILS_TTL_SEC);
-    if (next === null) return; // Redis error — fail open
+    if (next === null) return false; // Redis error — fail open
     const lockedSeconds = passwordChangeBackoffSeconds(next);
     if (lockedSeconds > 0) {
       await cacheSet(
@@ -69,9 +70,12 @@ export async function recordPasswordChangeFailure(userId: string): Promise<void>
         Date.now() + lockedSeconds * 1000,
         lockedSeconds,
       );
+      return true;
     }
+    return false;
   } catch {
     // fail open — see the model comment above.
+    return false;
   }
 }
 

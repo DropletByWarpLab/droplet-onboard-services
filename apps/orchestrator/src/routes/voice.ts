@@ -4,10 +4,11 @@
  *
  * voice-io has NO auth of its own — it binds on the internal Docker
  * network only — so this route is the auth wall, exactly like the
- * admin-rag-eval proxy. Owner/admin only: voice status exposes the last
- * transcript + reply (household-private speech), and `/say` drives the
- * room speaker. Service principals are denied by the same guard
- * (`requireRole` never lists the `service` role here) — the one
+ * admin-rag-eval proxy. Owner/admin only: `/say` drives the room speaker,
+ * and voice-io's status carries the last transcript + reply (private speech
+ * in the room), which this proxy STRIPS from `GET /voice/status` unless the
+ * caller asks for them (WARP-3396, below). Service principals are denied by
+ * the same guard (`requireRole` never lists the `service` role here) — the one
  * exception is POST /voice/events (WARP-1058), which is the inverse:
  * ONLY the `_service:voice` principal may push pipeline events into
  * the activity chain, and every human role is denied.
@@ -91,6 +92,28 @@ const MEASURE_SECONDS_MAX = 30;
 /** WARP-1059 — mirrors voice-io's CalibrationModeRequest ttl_s bounds. */
 const CALIBRATION_MODE_TTL_MIN_S = 5;
 const CALIBRATION_MODE_TTL_MAX_S = 300;
+
+/**
+ * Speaker output volume — mirrors voice-io's VolumeRequest: EXACTLY one
+ * of an integer `level` (0-100), an integer `change` (-100..100) or a
+ * boolean `muted`. Strict, no coercion, unknown keys rejected — same
+ * reasoning as `/voice/enabled`: the proxy and the box must read a body
+ * the same way, so a string "true" can never mute the speaker here and
+ * mean something else there.
+ */
+const volumeRequestSchema = z.union([
+  z.object({ level: z.number().int().min(0).max(100) }).strict(),
+  z.object({ change: z.number().int().min(-100).max(100) }).strict(),
+  z.object({ muted: z.boolean() }).strict(),
+]);
+
+/** The fields of voice-io's POST /voice/volume answer the audit row reads. */
+const volumeChangeSchema = z.object({
+  level: z.number(),
+  muted: z.boolean(),
+  previous_level: z.number(),
+  previous_muted: z.boolean(),
+});
 
 /**
  * WARP-1058 — voice-io → activity-chain event bridge.
@@ -201,7 +224,26 @@ async function proxy(
   path: string,
   body?: unknown,
   timeoutMs: number = READ_TIMEOUT_MS,
+  /** Reshapes the relayed JSON (WARP-3396: drop the transcript fields). */
+  transform?: (payload: unknown) => unknown,
 ): Promise<number> {
+  return (await proxyWithPayload(res, method, path, body, timeoutMs, transform)).status;
+}
+
+/**
+ * `proxy()`, also handing back the payload it relayed — for a write whose
+ * audit row quotes the box's answer (the volume it actually landed on)
+ * rather than the request. Same fetch, same 503 contract.
+ */
+async function proxyWithPayload(
+  res: Response,
+  method: "GET" | "POST" | "DELETE",
+  path: string,
+  body?: unknown,
+  timeoutMs: number = READ_TIMEOUT_MS,
+  /** Reshapes the relayed JSON (WARP-3396: drop the transcript fields). */
+  transform?: (payload: unknown) => unknown,
+): Promise<{ status: number; payload: unknown }> {
   const target = `${voiceIoBaseUrl()}${path}`;
   try {
     const init: RequestInit = {
@@ -229,17 +271,40 @@ async function proxy(
         payload = { raw: text };
       }
     }
-    res.status(upstream.status).json(payload);
-    return upstream.status;
+    const relayed = transform ? transform(payload) : payload;
+    res.status(upstream.status).json(relayed);
+    return { status: upstream.status, payload: relayed };
   } catch (err) {
     // Connection refused / DNS failure (profile inactive) or timeout.
     logger.warn(
       { err: (err as Error)?.message, target, method },
       "voice-io proxy fetch failed — treating as unavailable",
     );
-    res.status(503).json({ error: "voice_unavailable" });
-    return 503;
+    const payload = { error: "voice_unavailable" };
+    res.status(503).json(payload);
+    return { status: 503, payload };
   }
+}
+
+/**
+ * WARP-3396 — what was last SAID in the room and what the assistant answered.
+ * voice-io keeps them until the next wake; nothing on the dashboard's Voice
+ * page or the Home row reads them, yet the page polls the status every second,
+ * so they sat in every open tab's memory, HAR export and proxy log. The
+ * default status answer leaves them out.
+ */
+const TRANSCRIPT_FIELDS = [
+  "last_transcript",
+  "last_transcript_at",
+  "last_response",
+  "last_response_at",
+] as const;
+
+function withoutTranscript(payload: unknown): unknown {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return payload;
+  const out: Record<string, unknown> = { ...(payload as Record<string, unknown>) };
+  for (const field of TRANSCRIPT_FIELDS) delete out[field];
+  return out;
 }
 
 export function createVoiceRouter(): Router {
@@ -249,8 +314,18 @@ export function createVoiceRouter(): Router {
   // never includes `service`, so service principals are denied too.
   const guard = requireRole("owner", "admin");
 
-  router.get("/voice/status", guard, async (_req, res) => {
-    await proxy(res, "GET", "/voice/status");
+  // `?include=transcript` is the setup wizard's voice step asking for "what it
+  // heard" during its one try-it; owner/admin only like the rest of the route.
+  router.get("/voice/status", guard, async (req, res) => {
+    const withTranscript = req.query.include === "transcript";
+    await proxy(
+      res,
+      "GET",
+      "/voice/status",
+      undefined,
+      READ_TIMEOUT_MS,
+      withTranscript ? undefined : withoutTranscript,
+    );
   });
 
   router.get("/voice/devices", guard, async (_req, res) => {
@@ -463,6 +538,71 @@ export function createVoiceRouter(): Router {
         actor: actorFromRequest(req),
       });
     }
+  });
+
+  // ── Speaker output volume ──
+  //
+  // voice-io owns the level: one persisted {level, muted} on the box,
+  // shared with the spoken "turn it up / mute" commands it handles
+  // locally. This is the dashboard's way in — owner/admin only, like
+  // /say, because it drives the room speaker and a mute silences the
+  // household's assistant.
+
+  router.get("/voice/volume", guard, async (_req, res) => {
+    await proxy(res, "GET", "/voice/volume");
+  });
+
+  router.post("/voice/volume", guard, async (req: Request, res) => {
+    const parsed = volumeRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_volume" });
+      return;
+    }
+    // Only the validated field is forwarded (the schemas are .strict()).
+    const { status, payload } = await proxyWithPayload(
+      res,
+      "POST",
+      "/voice/volume",
+      parsed.data,
+    );
+    // Audited like the sibling voice settings writes (/enabled,
+    // /calibration). Only on success — a rejected or unreachable write
+    // changed nothing on the box. The row quotes the level the box
+    // actually landed on (clamped), not the request. Fire-and-forget
+    // after the response is committed; recordActivity swallows failures.
+    if (status < 200 || status >= 300) return;
+    const landed = volumeChangeSchema.safeParse(payload);
+    if (!landed.success) {
+      // voice-io and this route ship together; a 2xx without the state
+      // fields is a contract break worth seeing, not a quiet skip.
+      logger.warn(
+        { upstreamStatus: status },
+        "voice-io volume change answered without its state — no activity row",
+      );
+      return;
+    }
+    const { level, muted, previous_level, previous_muted } = landed.data;
+    const requested = parsed.data;
+    let what: string;
+    let sub: string;
+    if ("muted" in requested) {
+      what = muted ? "Speaker muted" : "Speaker unmuted";
+      sub = muted
+        ? "Droplet's spoken replies are silent until the speaker is unmuted"
+        : `Volume ${level}`;
+    } else {
+      what = `Volume set to ${level}`;
+      sub = `Was ${previous_level}${previous_muted ? ", muted" : ""}`;
+    }
+    void recordActivity({
+      kind: "voice",
+      severity: "info",
+      sourceIcon: muted ? "volume-x" : "volume-2",
+      what,
+      sub,
+      refs: { surface: "voice-volume", upstreamStatus: status },
+      actor: actorFromRequest(req),
+    });
   });
 
   // ── WARP-1058: voice-io → activity-chain event bridge ──

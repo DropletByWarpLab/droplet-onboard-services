@@ -17,9 +17,11 @@
  *   - message list: meeting_invite rows carry the live meeting payload
  *     (incl. RSVPs) so the card renders in one fetch;
  *   - acting-user resolution (WARP-1685 service path): the `_service:mcp`
- *     principal acts as the X-Droplet-User USERNAME — resolved against the
- *     directory (ACTIVE humans only; unknown/service/missing → 401, fail
- *     closed), then flows through the IDENTICAL participant checks as a
+ *     principal acts as the person X-Droplet-User names — resolved against
+ *     the directory (ACTIVE humans only; unknown/service/missing → 401, fail
+ *     closed; both transports' namings are in
+ *     team-chat-acting-user-transport.test.ts, WARP-3187), then flows
+ *     through the IDENTICAL participant checks as a
  *     human call. A HUMAN session sending X-Droplet-User is IGNORED — the
  *     header can never impersonate; other service principals stay 403.
  *
@@ -72,6 +74,7 @@ vi.mock("../services/file-registry.service.js", () => ({
 }));
 
 import { createTeamChatRouter } from "../routes/team-chat.js";
+import { userDirectory } from "./helpers/user-directory.js";
 
 // ── In-memory prisma stub (meetings-focused) ────────────────────────
 
@@ -171,6 +174,8 @@ function createStub(seed: {
   const meetings = [...(seed.meetings ?? [])];
   const rsvps = [...(seed.rsvps ?? [])];
   const calendarEvents: CalendarEventRow[] = [];
+  // None of these fixtures has a Nextcloud login.
+  const directory = userDirectory(() => users.map((u) => ({ nextcloudUsername: null, ...u })));
 
   const withRsvps = (m: MeetingRow) => ({
     ...m,
@@ -189,12 +194,17 @@ function createStub(seed: {
       findMany: vi.fn(
         async (args: {
           where: {
+            OR?: unknown;
             id?: { in: string[] };
             directoryStatus?: string;
             role?: { in: string[] };
           };
           select?: Record<string, true>;
+          take?: number;
         }) => {
+          // WARP-3187 — the acting-user lookup (resolveAssertedUser's
+          // `findMany({ OR })`) runs with Prisma's semantics.
+          if (args.where.OR) return directory.findMany(args as never);
           const rows = users.filter((u) => {
             const w = args.where;
             if (w.id?.in !== undefined && !w.id.in.includes(u.id)) return false;
@@ -210,26 +220,6 @@ function createStub(seed: {
           const keys = Object.keys(args.select);
           return rows.map((r) =>
             Object.fromEntries(keys.map((k) => [k, r[k as keyof UserRow]])),
-          );
-        },
-      ),
-      findFirst: vi.fn(
-        async (args: {
-          where: {
-            username?: string;
-            directoryStatus?: string;
-            role?: { in: string[] };
-          };
-        }) => {
-          const w = args.where;
-          return (
-            users.find(
-              (u) =>
-                (w.username === undefined || u.username === w.username) &&
-                (w.directoryStatus === undefined ||
-                  u.directoryStatus === w.directoryStatus) &&
-                (w.role?.in === undefined || w.role.in.includes(u.role)),
-            ) ?? null
           );
         },
       ),

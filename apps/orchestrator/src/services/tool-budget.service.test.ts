@@ -277,6 +277,6 @@ describe("FIXED_SYSTEM_BLOCK_CHARS", () => {
   it("is composed from the shipping constants, so it cannot drift from them", () => {
     // Mutation: change any block cap in prompt-budget.consts.ts and this
     // number moves with it; base-prompt-budget.test.ts pins the total.
-    expect(FIXED_SYSTEM_BLOCK_CHARS).toBe(11800);
+    expect(FIXED_SYSTEM_BLOCK_CHARS).toBe(11950);
   });
 });

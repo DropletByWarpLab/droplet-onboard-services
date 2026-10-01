@@ -22,7 +22,14 @@ from typing import Literal, Optional
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Response
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    model_validator,
+)
 
 from voice.audio_io import (
     AudioUnavailable,
@@ -88,6 +95,7 @@ from voice.llm import LLMClient, build_llm_from_env
 from voice.persona import PersonaFetcher, build_persona_fetcher_from_env
 from voice.stt import MockSTT, StreamingSTT, build_stt_from_env
 from voice.tts import MockTTS, TextToSpeech, build_tts_from_env
+from voice.volume import VolumeController, VolumeStore
 from voice.wake import (
     VOSK_DEFAULT_THRESHOLD,
     VoskWakeWordDetector,
@@ -206,6 +214,12 @@ DEFAULT_MEASURE_SECONDS = 5.0
 # Pipeline lives at module scope so /voice/status can read its state
 # from the request thread while the worker thread is mid-prediction.
 _pipeline: Optional[WakePipeline] = None
+
+# Speaker output volume — ONE controller for the process, built here and
+# not in the pipeline so /voice/volume works while voice is switched off
+# or the box has no mic. The pipeline gets the same instance, so the
+# dashboard and a spoken "turn it up" act on one persisted state.
+_volume = VolumeController(VolumeStore())
 
 # WARP-1619 — a pipeline whose stop() outlived its join budget. Its
 # capture worker is finishing the turn it was in (LLM → TTS → playback
@@ -349,7 +363,9 @@ _WARMUP_STT_PCM = b"\x00\x00" * 160
 
 
 def _warm_up_upstreams(
-    stt: Optional[StreamingSTT], tts: Optional[TextToSpeech],
+    stt: Optional[StreamingSTT],
+    tts: Optional[TextToSpeech],
+    pipeline: Optional[WakePipeline] = None,
 ) -> None:
     """Prime STT + TTS off the critical path (WARP-1433).
 
@@ -358,23 +374,46 @@ def _warm_up_upstreams(
     clients and for any upstream that isn't reachable right now. main.py runs
     this on a background daemon thread after pipeline.start(), so it never
     blocks startup or /health.
+
+    WARP-3124: once the Piper voice and STT are warm, it also
+    pre-synthesizes the pipeline's spoken cues ("Let me check." / "One
+    moment."), so a cue plays from memory the moment a tool dispatch or cold
+    model load begins. The cues go LAST: every first utterance needs STT
+    warm, only a tool or cold-model turn needs a cue.
     """
-    _warm_up_tts(tts)
+    tts_warm = _warm_up_tts(tts)
     _warm_up_stt(stt)
+    if tts_warm:
+        _warm_up_cues(pipeline)
 
 
-def _warm_up_tts(tts: Optional[TextToSpeech]) -> None:
+def _warm_up_tts(tts: Optional[TextToSpeech]) -> bool:
+    """Returns True when Piper answered the warm-up synth."""
     # MockTTS has no real Piper to warm — skip so a dev box does no work.
     if tts is None or isinstance(tts, MockTTS):
-        return
+        return False
     try:
         if not tts.available:
             logger.info("voice TTS warm-up skipped — Piper not reachable yet")
-            return
+            return False
         tts.synthesize(_WARMUP_TTS_TEXT)
         logger.info("voice TTS warm-up done — Piper voice loaded")
+        return True
     except Exception as exc:  # noqa: BLE001 — warm-up is strictly best-effort
         logger.info("voice TTS warm-up skipped: %s", exc)
+        return False
+
+
+def _warm_up_cues(pipeline: Optional[WakePipeline]) -> None:
+    # WARP-3124 — a cue that isn't cached synthesizes on first use instead,
+    # so a failure here only costs that one cue a Piper round trip.
+    if pipeline is None:
+        return
+    try:
+        cached = pipeline.prime_cues()
+        logger.info("voice cue warm-up done — %d cue(s) cached", cached)
+    except Exception as exc:  # noqa: BLE001 — warm-up is strictly best-effort
+        logger.info("voice cue warm-up skipped: %s", exc)
 
 
 def _warm_up_stt(stt: Optional[StreamingSTT]) -> None:
@@ -459,9 +498,10 @@ def _build_and_start_pipeline() -> None:
         _activity_reporter = build_reporter_from_env()
         # WARP-1119 — build the persona fetcher FIRST so the same instance
         # is shared by the LLM's greeting path and /health's observability
-        # fields. Prime it once off the event loop: the result is cached
-        # for the short TTL and, more importantly, /health shows a real
-        # fetch_ok immediately instead of null until the first greeting.
+        # fields. Prime it once: get_block() starts the first fetch in the
+        # background (WARP-3124 — it never blocks), so the block is normally
+        # cached before the first greeting and /health shows a real
+        # fetch_ok within seconds instead of null until the first greeting.
         # A failed prime is fine — greeting turns fall back and retry.
         _persona_fetcher = build_persona_fetcher_from_env()
         if _persona_fetcher is not None:
@@ -512,6 +552,7 @@ def _build_and_start_pipeline() -> None:
             # as the dashboard button, sharing its lock (see
             # _auto_restart_dsp) so the two never overlap.
             dsp_restart=_auto_restart_dsp,
+            volume=_volume,
         )
         # WARP-1055 — a persisted calibration (named-volume JSON) wins
         # over the env-derived gain/threshold. Applied before start()
@@ -532,8 +573,9 @@ def _build_and_start_pipeline() -> None:
         _teardown_voice_runtime()
         return
     # WARP-1433 — prime STT + TTS off the critical path so the first real
-    # utterance isn't cold. Fire-and-forget on a daemon thread:
-    # best-effort, runs once, never blocks startup or /health.
+    # utterance isn't cold (WARP-3124: and cache the spoken cues).
+    # Fire-and-forget on a daemon thread: best-effort, runs once, never
+    # blocks startup or /health.
     #
     # WARP-1599 — spawned BELOW the try, with its own guard. Inside it,
     # a `Thread.start()` that raised (thread/memory exhaustion) would
@@ -545,7 +587,7 @@ def _build_and_start_pipeline() -> None:
     try:
         threading.Thread(
             target=_warm_up_upstreams,
-            args=(stt, tts),
+            args=(stt, tts, _pipeline),
             name="voice-warmup",
             daemon=True,
         ).start()
@@ -607,8 +649,11 @@ def _teardown_voice_runtime() -> bool:
     pooled httpx client or a parked reporter thread per toggle.
 
     Ordering matters. The pipeline worker holds the same LLM client and
-    persona fetcher, so those are only closed once `stop()` has joined
-    it and no reply()/persona fetch can still be in flight.
+    persona fetcher, so those are only closed once `stop()` has joined it.
+    Two background requests can still be in flight then (WARP-3124): a
+    synth-ahead producer that outlived its bounded join (its utterance is
+    already over, so nothing it still reads is spoken) and a persona
+    refresh, which the fetcher's close() waits for, bounded.
     """
     global _pipeline, _activity_reporter, _llm, _persona_fetcher
     global _draining_pipeline
@@ -648,8 +693,8 @@ def _teardown_voice_runtime() -> bool:
             logger.warning("activity reporter stop raised", exc_info=True)
         _activity_reporter = None
     # WARP-1433 — close the pooled httpx clients now that the pipeline worker
-    # has joined (no reply()/persona fetch is in flight). Both are
-    # best-effort: teardown must never raise.
+    # has joined (see the docstring for the background requests that may
+    # still be in flight). Both are best-effort: teardown must never raise.
     if _llm is not None:
         try:
             _llm.close()
@@ -717,6 +762,29 @@ class HealthResponse(BaseModel):
     # silently for months.
     personaFetchOk: Optional[bool] = None
     personaLastFetchAt: Optional[float] = None
+
+
+class VoiceTurnTiming(BaseModel):
+    """WARP-3124 — one voice turn's latency breakdown (see
+    voice/pipeline.py `_TurnTiming.summary`). Whole milliseconds measured
+    with time.monotonic(); null where the stage didn't happen this turn.
+    `first_*_ms` count from the transcript; `total_ms` from the wake."""
+
+    # answered | no_reply | error | empty | fragment | no_llm | volume
+    outcome: str
+    wake_to_capture_ms: Optional[int] = None
+    speech_ms: Optional[int] = None       # voiced audio the VAD counted
+    capture_ms: Optional[int] = None      # capture-open → end of speech
+    vad_end: Optional[str] = None         # silence | cap
+    stt_ms: Optional[int] = None          # end of speech → transcript
+    first_delta_ms: Optional[int] = None  # → first content delta
+    first_audio_ms: Optional[int] = None  # → first audio (cue or answer)
+    first_answer_audio_ms: Optional[int] = None
+    total_ms: Optional[int] = None
+    cue: Optional[str] = None             # tool_call | model_loading
+    sentences: int = 0                    # answer sentences played
+    error_kind: Optional[str] = None      # tts | playback | llm | busy
+    ended_at: Optional[float] = None      # wall time the turn ended
 
 
 class VoiceStatusResponse(BaseModel):
@@ -791,6 +859,17 @@ class VoiceStatusResponse(BaseModel):
     # expiry the wizard renews; None when the mode is off.
     calibration_mode: bool = False
     calibration_mode_expires_at: Optional[float] = None
+    # WARP-3124 — the last voice turn's latency breakdown: the same fields
+    # as its `voice_turn_timing` log line (whole ms, null where a stage
+    # didn't happen). Null until the first turn completes.
+    last_turn_timing: Optional[VoiceTurnTiming] = None
+    # Speaker output volume (GET/POST /voice/volume), reported with or
+    # without a pipeline. `output_fault` is a storage fault on the volume
+    # file — the box then speaks at the audible default — kept apart from
+    # `error_message`, which is about the pipeline.
+    output_level: int
+    output_muted: bool
+    output_fault: Optional[str] = None
 
 
 class SayRequest(BaseModel):
@@ -921,6 +1000,44 @@ class VoiceEnabledResponse(BaseModel):
     mic_released: bool = True
 
 
+# Speaker output volume. Exactly one field per request, strictly typed:
+# StrictInt so 40.0 / "40" / true are refused rather than coerced, and
+# StrictBool for the same reason /voice/enabled uses it — a string
+# "true" must never mute the speaker. Out-of-range values are a 422 at the
+# edge; the controller's own clamp only matters for `change`, whose
+# result can overshoot 0-100.
+
+class VolumeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    level: Optional[StrictInt] = Field(default=None, ge=0, le=100)
+    change: Optional[StrictInt] = Field(default=None, ge=-100, le=100)
+    muted: Optional[StrictBool] = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> "VolumeRequest":
+        given = [
+            name for name in ("level", "change", "muted")
+            if getattr(self, name) is not None
+        ]
+        if len(given) != 1:
+            raise ValueError("send exactly one of level, change or muted")
+        return self
+
+
+class VolumeResponse(BaseModel):
+    level: int
+    muted: bool
+    # A storage fault on the volume file: unreadable at startup (the box
+    # is at the audible default), or the last change could not be saved.
+    fault: Optional[str] = None
+
+
+class VolumeChangeResponse(VolumeResponse):
+    previous_level: int
+    previous_muted: bool
+
+
 # ────────────────────────────────────────────────────────────────────
 # Endpoints
 # ────────────────────────────────────────────────────────────────────
@@ -955,8 +1072,9 @@ def health(response: Response) -> HealthResponse:
         dsp_last_restart_at = s.dsp_last_restart_at
     # Both 'error' and 'no_mic' are stuck-and-deaf: _on_frame drops every
     # frame for state in ('error', 'no_mic') (voice/pipeline.py), so the
-    # assistant can't hear a wake word in either. 'error' latches on a
-    # transient STT/TTS/LLM failure; 'no_mic' parks when no input device
+    # assistant can't hear a wake word in either. 'error' latches on a stuck
+    # fault — the detector, the capture loop, an STT session (a failed reply
+    # turn does NOT latch it: WARP-3199); 'no_mic' parks when no input device
     # resolves (there is no supported mic-less / output-only mode — no-mic is
     # a fault the supervisor keeps retrying, not a configuration). Report
     # degraded (ok=False + 503) for both so the Dockerfile healthcheck
@@ -1017,6 +1135,8 @@ def voice_status() -> VoiceStatusResponse:
     # silent box, sure they never touched the switch, and right.
     switch = VoiceEnabledStore().read()
     enabled = switch.enabled
+    output = _volume.state()
+    output_fault = _volume.fault
     if _pipeline is None:
         # No pipeline, for one of two reasons the dashboard must be able
         # to tell apart: an admin switched voice off (state "off" — a
@@ -1033,6 +1153,9 @@ def voice_status() -> VoiceStatusResponse:
             # None on an admin's deliberate off — a chosen silence is not
             # a fault and must not light one up on the /voice page.
             error_message=switch.fault,
+            output_level=output.level,
+            output_muted=output.muted,
+            output_fault=output_fault,
         )
     s = _pipeline.status()
     return VoiceStatusResponse(
@@ -1070,6 +1193,14 @@ def voice_status() -> VoiceStatusResponse:
         dsp_last_restart_at=s.dsp_last_restart_at,
         calibration_mode=s.calibration_mode,
         calibration_mode_expires_at=s.calibration_mode_expires_at,
+        last_turn_timing=(
+            VoiceTurnTiming(**s.last_turn_timing)
+            if s.last_turn_timing is not None
+            else None
+        ),
+        output_level=output.level,
+        output_muted=output.muted,
+        output_fault=output_fault,
     )
 
 
@@ -1568,6 +1699,38 @@ def set_voice_enabled(req: VoiceEnabledRequest) -> VoiceEnabledResponse:
     finally:
         _enabled_lock.release()
     return VoiceEnabledResponse(enabled=req.enabled, mic_released=mic_released)
+
+
+@app.get("/voice/volume", response_model=VolumeResponse)
+def get_voice_volume() -> VolumeResponse:
+    """The speaker output level (0-100) and mute. Works with no pipeline."""
+    state = _volume.state()
+    return VolumeResponse(level=state.level, muted=state.muted, fault=_volume.fault)
+
+
+@app.post("/voice/volume", response_model=VolumeChangeResponse)
+def set_voice_volume(req: VolumeRequest) -> VolumeChangeResponse:
+    """Set the level, step it, or mute/unmute — exactly one per request.
+
+    Persisted, and live on the next thing the box says (the pipeline
+    reads the same controller). Works with no pipeline: the level is
+    simply there when voice comes back. A level change also unmutes.
+    """
+    if req.level is not None:
+        change = _volume.set_level(req.level)
+    elif req.change is not None:
+        change = _volume.change(req.change)
+    elif req.muted is not None:
+        change = _volume.set_muted(req.muted)
+    else:  # VolumeRequest already refuses this; never guess a mute state
+        raise HTTPException(status_code=422, detail="nothing to change")
+    return VolumeChangeResponse(
+        level=change.current.level,
+        muted=change.current.muted,
+        fault=change.fault,
+        previous_level=change.previous.level,
+        previous_muted=change.previous.muted,
+    )
 
 
 # ────────────────────────────────────────────────────────────────────

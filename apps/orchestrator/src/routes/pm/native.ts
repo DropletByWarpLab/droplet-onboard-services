@@ -3,8 +3,12 @@
  * project-management surface. Backs the dashboard Projects surface and (via the
  * orchestrator) the 9 `pm_*` MCP tools.
  *
- * Auth: mounted AFTER authMiddleware. PM is household-shared — reads are open
- * to any authenticated role; writes are gated with `requireRole`. Project,
+ * Auth: mounted AFTER authMiddleware. PM is company-shared — reads are open
+ * to any authenticated member-or-above role; writes are gated with
+ * `requireRole`. An external guest reads nothing (WARP-3369, Romain
+ * 2026-09-30): the `projects` module's tier floor (`refuseBelowFloor` in
+ * access-catalog.ts, mounted by `mountModuleGates` off the `/api/pm` prefix)
+ * answers 404 `module_disabled` before any route here runs. Project,
  * work-item + comment writes additionally admit the MCP service principal
  * (`requireRoleOrMcpService`) so the LLM's confirmed write tools can dispatch
  * through here. The human-facing confirmation gate is NOT in this file and NOT
@@ -22,6 +26,7 @@ import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../../middleware/auth.js";
+import { guestAssignedInProject, guestAssignedWorkItem } from "../../middleware/guest-share.js";
 import * as pm from "../../services/pm/pm.service.js";
 import { actorOf } from "./actor.js";
 import { listRelationsFor } from "../../services/pm/pm-relations.service.js";
@@ -50,6 +55,8 @@ function mapServiceError(err: unknown, res: Response): boolean {
     // request is well-formed; it is the CHOICE that is not processable, which
     // is the same shape as invalid_state above.
     case "department_not_assignable":
+    // WARP-3365 — an external guest cannot lead a project.
+    case "lead_is_guest":
       res.status(422).json({ error: msg });
       return true;
     case "identifier_taken":
@@ -197,12 +204,25 @@ const paginationQuerySchema = z.object({
 
 const WRITE = ["owner", "admin", "family"] as const;
 
+/**
+ * WARP-3369 (Romain, 2026-09-30) — assigning a work item to an external guest
+ * SHARES that one item with them: they may read it, comment on it and move its
+ * state. These two routes are the ones that admit `guest` on top of WRITE; each
+ * is followed by `guestAssignedWorkItem`, which answers 404 unless the item is
+ * assigned to the calling guest. Everything else in Projects stays closed to a
+ * guest (`requireModuleTierFloor`, with `modules/guest-shares.ts` naming the
+ * five requests that get past it).
+ */
+const WRITE_OR_ASSIGNED_GUEST = [...WRITE, "guest"] as const;
+
 function badRequest(res: Response, parsed: { error: z.ZodError }): void {
   res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
 }
 
 export function createPmNativeRouter(prisma: PrismaClient): Router {
   const router = Router();
+  const sharedItem = guestAssignedWorkItem(prisma);
+  const sharedProject = guestAssignedInProject(prisma);
 
   // ── Workspaces ──
   router.get("/pm/workspaces", async (_req, res, next) => {
@@ -332,7 +352,7 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
   });
 
   // ── States ──
-  router.get("/pm/projects/:id/states", async (req, res, next) => {
+  router.get("/pm/projects/:id/states", sharedProject, async (req, res, next) => {
     try {
       res.json({ states: await pm.listStates(prisma, req.params.id) });
     } catch (err) {
@@ -524,13 +544,20 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
   // Only the DETAIL read. `listWorkItems` stays relation-free on purpose — a
   // 200-card board must not become 200 relation queries, and the board does not
   // render edges.
-  router.get("/pm/work-items/:id", async (req, res, next) => {
+  router.get("/pm/work-items/:id", sharedItem, async (req, res, next) => {
     try {
       // Independent reads, and getWorkItem already 404s a missing item, so the
       // relations read skips its own existence check rather than asking twice.
+      //
+      // WARP-3369: a guest is shown THE item and nothing around it. A relation
+      // names the OTHER item (its title, its project), so a guest's detail
+      // carries none, and the read is not even made.
+      const isGuest = req.user?.role === "guest";
       const [work_item, relations] = await Promise.all([
         pm.getWorkItem(prisma, req.params.id),
-        listRelationsFor(prisma, req.params.id, { itemChecked: true }),
+        isGuest
+          ? Promise.resolve([])
+          : listRelationsFor(prisma, req.params.id, { itemChecked: true }),
       ]);
       res.json({ work_item, relations });
     } catch (err) {
@@ -570,7 +597,8 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
 
   router.post(
     "/pm/work-items/:id/transition",
-    requireRoleOrMcpService(...WRITE),
+    requireRoleOrMcpService(...WRITE_OR_ASSIGNED_GUEST),
+    sharedItem,
     async (req, res, next) => {
       try {
         const parsed = transitionSchema.safeParse(req.body);
@@ -600,7 +628,7 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
   });
 
   // ── Comments ──
-  router.get("/pm/work-items/:id/comments", async (req, res, next) => {
+  router.get("/pm/work-items/:id/comments", sharedItem, async (req, res, next) => {
     try {
       res.json({ comments: await pm.listComments(prisma, req.params.id) });
     } catch (err) {
@@ -621,7 +649,8 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
 
   router.post(
     "/pm/work-items/:id/comments",
-    requireRoleOrMcpService(...WRITE),
+    requireRoleOrMcpService(...WRITE_OR_ASSIGNED_GUEST),
+    sharedItem,
     async (req, res, next) => {
       try {
         const parsed = commentCreateSchema.safeParse(req.body);

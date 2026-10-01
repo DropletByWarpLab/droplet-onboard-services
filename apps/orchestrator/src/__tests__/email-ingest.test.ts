@@ -158,6 +158,18 @@ function createPrismaMock(opts: {
       ),
     },
     emailMessage: {
+      findUnique: vi.fn(
+        async ({
+          where,
+        }: {
+          where: { accountId_messageId: { accountId: string; messageId: string } };
+        }) =>
+          messages.find(
+            (m) =>
+              m.accountId === where.accountId_messageId.accountId &&
+              m.messageId === where.accountId_messageId.messageId,
+          ) ?? null,
+      ),
       create: vi.fn(
         async ({
           data,
@@ -266,6 +278,9 @@ describe("WARP-465 follow-up — POST /api/email/:accountId/messages-ingest", ()
     expect(second.status).toBe(200);
     expect(second.body.duplicate).toBe(true);
     expect(prisma.messages).toHaveLength(1);
+    // Answered before the thread upsert: a re-delivery can't rewind the
+    // thread's lastMessageAt or snippet (WARP-3267).
+    expect(prisma.emailThread.upsert).toHaveBeenCalledTimes(1);
   });
 
   it("non-service-role POST is 403", async () => {

@@ -74,6 +74,7 @@ import {
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { useChat } from "@/lib/hooks/useChat";
+import { useAssistantPages } from "@/lib/hooks/useAssistantPages";
 import { useStickyScroll } from "@/lib/hooks/useStickyScroll";
 import { useModels } from "@/lib/hooks/useModels";
 import { useRecents } from "@/lib/hooks/useRecents";
@@ -99,6 +100,7 @@ import {
 import { dayKey } from "@/lib/calendar";
 import { FEATURES } from "@/lib/feature-flags";
 import { useAuth } from "@/lib/auth";
+import { isAdminRole } from "@/lib/access";
 import { isLocalProvider } from "@/lib/provider";
 import {
   createVpnPeer,
@@ -122,6 +124,7 @@ import type {
   VpnStatusInfo,
 } from "@/lib/types";
 import { PENDING_PROMPT_KEY } from "@/lib/types";
+import { greetingNow } from "@/lib/greeting";
 // WARP-1803 — the hero's inline conversation reuses the chat surface's
 // message rendering (ChatMessage + the indigo chat skin). Both sheets are
 // fully `.droplet-shell`-scoped, so importing them here styles only the
@@ -149,15 +152,6 @@ export interface WidgetMeta {
 }
 
 /* ─────────────────────────── helpers ─────────────────────────── */
-
-function greetingNow(): string {
-  const hr = new Date().getHours();
-  if (hr < 5) return "Still up";
-  if (hr < 12) return "Good morning";
-  if (hr < 18) return "Good afternoon";
-  if (hr < 22) return "Good evening";
-  return "Working late";
-}
 
 function relTime(iso: string): string {
   const then = new Date(iso).getTime();
@@ -208,7 +202,7 @@ function WEmpty({ children }: { children: React.ReactNode }) {
 
 /**
  * WARP-1803 — the model the hero (and its inline conversation) answers with.
- * Same preference order as the chat page (WARP-1112): the household's chosen
+ * Same preference order as the chat page (WARP-1112): the Workspace's chosen
  * default → first local (on-box) → first available. Null while the list is
  * loading or when no model is configured.
  */
@@ -254,6 +248,8 @@ function InlineChat({
   const router = useRouter();
   const { user } = useAuth();
   const [chatId] = useState(() => `chat-${Date.now()}`);
+  // WARP-3116 — "take me to …" from the Home composer moves the viewer too.
+  const dashboardPages = useAssistantPages();
   const {
     messages,
     isStreaming,
@@ -262,7 +258,12 @@ function InlineChat({
     retryMessage,
     approveScene,
     conversationId,
-  } = useChat({ chatId, authReady: Boolean(user) });
+  } = useChat({
+    chatId,
+    authReady: Boolean(user),
+    dashboardPages,
+    onNavigate: (href) => router.push(href),
+  });
   const { scrollRef, onScroll, scrollToBottom, stickyScrollToBottom } =
     useStickyScroll();
   const [val, setVal] = useState("");
@@ -314,7 +315,6 @@ function InlineChat({
 
   return (
     <div className="w-chat w-chat--conv">
-      <div className="w-chat-aurora" aria-hidden />
       <div className="w-chat-conv-head">
         <span className="w-chat-conv-title">
           <Sparkles size={14} />
@@ -463,7 +463,6 @@ function ChatWidget({ w, h }: WidgetProps) {
 
   return (
     <div className="w-chat">
-      <div className="w-chat-aurora" aria-hidden />
       <div className="w-chat-display" style={{ fontSize: fs }}>
         {greeting}. What can I <em>help you</em> with today?
       </div>
@@ -698,14 +697,24 @@ type StatRow = {
 };
 function StatusWidget({ w, h }: WidgetProps) {
   const router = useRouter();
+  const { user } = useAuth();
+  const isAdmin = isAdminRole(user?.role);
+  const isGuest = user?.role === "guest";
   const { items: recents } = useRecents(50);
   const { models } = useModels();
-  const { totalCameras } = useCameras();
+  // WARP-3157 — no camera polls for a guest: every camera route 403s them
+  // and each 403 writes an audited "Access denied" row.
+  const { totalCameras } = useCameras({ enabled: !isGuest });
   const { totalDevices } = useSmartHome();
   // WARP-1055 — the Home surface's Voice status line lives inside this
   // existing system-health tile (design brief §2), not a new tile.
+  // WARP-3157 — GET /api/voice/status is owner/admin only; a member or
+  // guest polling it forever gets a 403 and the row read "— · checking…"
+  // with no way to resolve. The hook still runs (rules of hooks) but with
+  // its poll disabled — each 403 would write an audited "Access denied"
+  // row — and the row below is dropped from `stats` for non-admins.
   const { state: voiceState, unavailable: voiceUnavailable } =
-    useVoiceHealthSummary();
+    useVoiceHealthSummary({ enabled: isAdmin });
 
   const local = models.filter((m) => isLocalProvider(m.provider)).length;
   const cloud = models.length - local;
@@ -734,11 +743,17 @@ function StatusWidget({ w, h }: WidgetProps) {
                 : voice("—", "not calibrated yet", "var(--color-label-quaternary)");
 
   const stats: StatRow[] = [
-    { icon: Folder, label: "Files", value: recents.length ? String(recents.length) : "—", sub: "recently indexed", dot: "var(--success)", href: "/files" },
-    { icon: Video, label: "Cameras", value: totalCameras ? String(totalCameras) : "—", sub: totalCameras ? "live feeds" : "none yet", dot: "var(--brand)", href: "/cameras" },
+    { icon: Folder, label: "Files", value: recents.length ? String(recents.length) : "—", sub: "recent files", dot: "var(--success)", href: "/files" },
+    // WARP-3157 — every camera route refuses role `guest`; showing this stat
+    // to a guest would report "none yet" as if the box had no cameras.
+    ...(isGuest
+      ? []
+      : [{ icon: Video, label: "Cameras", value: totalCameras ? String(totalCameras) : "—", sub: totalCameras ? "live feeds" : "none yet", dot: "var(--brand)", href: "/cameras" } satisfies StatRow]),
     { icon: Network, label: "Devices", value: totalDevices ? String(totalDevices) : "—", sub: "devices online", dot: "var(--success)", href: "/devices" },
     { icon: Cpu, label: "AI models", value: models.length ? String(models.length) : "—", sub: `${local} local · ${cloud} cloud`, dot: "var(--success)", href: "/models" },
-    voiceRow,
+    // WARP-3157 — GET /api/voice/status is owner/admin only; hide the row
+    // for everyone else rather than a permanent "— · checking…".
+    ...(isAdmin ? [voiceRow] : []),
   ];
 
   if (w <= 2 || h <= 2) {
@@ -928,12 +943,7 @@ function ScenesWidget() {
 }
 
 /* ─────────────────────────── Cameras live peek ─────────────────────────── */
-const CAM_TINTS = [
-  "linear-gradient(135deg,#171922,#222633)",
-  "linear-gradient(135deg,#191c26,#262b3a)",
-  "linear-gradient(135deg,#15171f,#1f2937)",
-  "linear-gradient(135deg,#1a1d27,#242a38)",
-];
+const CAM_TINT = "#0f1117";
 // The home peek polls slower than the cameras grid. `/api/cameras/:name/
 // snapshot` answers with `Cache-Control: max-age=5`, so busting the URL any
 // faster than that only spends requests the browser would have served from
@@ -956,19 +966,17 @@ const aspectOf = (img: { naturalWidth?: number; naturalHeight?: number }): numbe
 };
 
 /**
- * One live tile. The gradient tint is the *fallback*, not the content — it
+ * One live tile. The flat tint is the *fallback*, not the content — it
  * shows while the first frame decodes, and again if the feed drops. Frames
  * are preloaded offscreen and only swapped in once decoded, so the tile
  * never blinks through a blank state (same rationale as CameraCard).
  */
 function CamTile({
   camera,
-  tint,
   motion,
   more,
 }: {
   camera: CameraInfo;
-  tint: string;
   motion: boolean;
   more: number;
 }) {
@@ -1030,7 +1038,7 @@ function CamTile({
       type="button"
       // The tile takes the frame's shape so the feed is shown whole and
       // undistorted; the CSS default (16/9) covers the pre-first-frame tint.
-      style={{ background: tint, ...(ratio ? { aspectRatio: String(ratio) } : {}) }}
+      style={{ background: CAM_TINT, ...(ratio ? { aspectRatio: String(ratio) } : {}) }}
       onClick={() => router.push("/cameras")}
       aria-label={`Open ${label} in Cameras`}
     >
@@ -1066,7 +1074,6 @@ export function CamerasWidget({ w, h }: WidgetProps) {
         <CamTile
           key={cam.name}
           camera={cam}
-          tint={CAM_TINTS[i % CAM_TINTS.length]}
           motion={cam.status === "detecting" || Boolean(cam.lastDetection)}
           more={tiny && cameras.length > 1 && i === 0 ? cameras.length - 1 : 0}
         />
@@ -1680,6 +1687,12 @@ const CONF_CLIPBOARD_TTL_MS = 30_000;
  */
 export function RemoteAccessWidget(_: WidgetProps) {
   const { user } = useAuth();
+  // WARP-3157 — POST/DELETE /api/vpn/peers are owner/admin only ("family
+  // users should ask an admin to add their device", routes/vpn.ts); a
+  // member flipping this switch always 403s. GET /vpn/status + /vpn/peers
+  // stay readable by anyone, so the status text below is still honest —
+  // only the switch itself is admin-gated.
+  const isAdmin = isAdminRole(user?.role);
   const [status, setStatus] = useState<VpnStatusInfo | null>(null);
   const [peers, setPeers] = useState<VpnPeerInfo[]>([]);
   // WARP-1763: did the orchestrator actually read the router's peer list? When
@@ -1780,9 +1793,11 @@ export function RemoteAccessWidget(_: WidgetProps) {
     }
   };
 
-  // The switch is inert while loading/blocked/minting, and while on with no
-  // devices of your own to revoke (others manage theirs in Remote Access).
-  const inert = !loaded || blocked || submitting || (on && mine.length === 0);
+  // The switch is inert while loading/blocked/minting, while on with no
+  // devices of your own to revoke (others manage theirs in Remote Access),
+  // and always for a non-admin (WARP-3157 — mint/revoke are owner/admin
+  // only; a member's tap always 403s).
+  const inert = !isAdmin || !loaded || blocked || submitting || (on && mine.length === 0);
 
   const flip = () => {
     if (inert) return;
@@ -1814,7 +1829,9 @@ export function RemoteAccessWidget(_: WidgetProps) {
                   ? ` · ${connectedNow} connected now`
                   : ""
               }`
-            : "Off · tap to connect this device";
+            : isAdmin
+              ? "Off · tap to connect this device"
+              : "Off · ask an admin to turn this on";
 
   const copyConf = () => {
     if (!created) return;
@@ -1843,33 +1860,48 @@ export function RemoteAccessWidget(_: WidgetProps) {
 
   return (
     <div className="w-remote">
-      <div
-        className={"w-dev" + (on || submitting ? " on" : "")}
-        role="switch"
-        aria-checked={on || submitting}
-        aria-disabled={inert || undefined}
-        aria-label="Remote access"
-        aria-describedby="w-remote-sub"
-        tabIndex={0}
-        onClick={flip}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            flip();
-          }
-        }}
-      >
-        <span className="di">
-          <Globe size={14} />
-        </span>
-        <span className="dn">
-          <div className="nm">Droplet VPN</div>
-          <div className="sb" id="w-remote-sub">{sub}</div>
-        </span>
-        <span className="w-toggle">
-          <span className="ball" />
-        </span>
-      </div>
+      {/* WARP-3157 — mint/revoke are owner/admin only, so a member or guest
+          gets a status line, never an actionable switch (the tap would
+          always 403). */}
+      {isAdmin ? (
+        <div
+          className={"w-dev" + (on || submitting ? " on" : "")}
+          role="switch"
+          aria-checked={on || submitting}
+          aria-disabled={inert || undefined}
+          aria-label="Remote access"
+          aria-describedby="w-remote-sub"
+          tabIndex={0}
+          onClick={flip}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              flip();
+            }
+          }}
+        >
+          <span className="di">
+            <Globe size={14} />
+          </span>
+          <span className="dn">
+            <div className="nm">Droplet VPN</div>
+            <div className="sb" id="w-remote-sub">{sub}</div>
+          </span>
+          <span className="w-toggle">
+            <span className="ball" />
+          </span>
+        </div>
+      ) : (
+        <div className={"w-dev" + (on ? " on" : "")} aria-label="Remote access">
+          <span className="di">
+            <Globe size={14} />
+          </span>
+          <span className="dn">
+            <div className="nm">Droplet VPN</div>
+            <div className="sb" id="w-remote-sub">{sub}</div>
+          </span>
+        </div>
+      )}
 
       <div className="w-remote-addr">
         {fqdn ? (

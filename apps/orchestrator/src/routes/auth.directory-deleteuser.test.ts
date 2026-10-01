@@ -1,4 +1,8 @@
 /**
+ * WARP-3113 — Delete schedules a 30-day retention (the route) and the nightly
+ * job completes the removal (leaver-deletion.service.ts). Both halves are
+ * exercised here against one Prisma stub.
+ *
  * WARP-1526 — DELETE /api/auth/users/:username through the role-mutation
  * guard.
  *
@@ -124,7 +128,33 @@ vi.mock("../services/auth-denylist.service.js", () => ({
   isUserDenied: vi.fn().mockResolvedValue(false),
 }));
 
+// WARP-3160 — lifecycle post-effects revoke the leaver's overlay/VPN devices.
+const { revokeOverlayDevicesMock } = vi.hoisted(() => ({
+  revokeOverlayDevicesMock: vi.fn(async () => ({ revoked: 1, failed: 0, hqPending: 0, pendingDenied: 0 })),
+}));
+vi.mock("../services/vpn-peer-revoke.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/vpn-peer-revoke.service.js")>()),
+  revokeOverlayDevicesForUser: revokeOverlayDevicesMock,
+}));
+
+// WARP-3169 — the hand-over transfer runs through the host helper; the exec
+// boundary is the seam, so the argv ncTransferOwnership builds is asserted.
+const { hostExecMock } = vi.hoisted(() => ({ hostExecMock: vi.fn() }));
+vi.mock("../services/update-agent/host-exec.js", () => ({
+  getOtaHost: () => ({
+    exec: hostExecMock,
+    helperPath: "/opt/droplet/docker/ota/apply-update.sh",
+    composeFile: "/opt/droplet/docker/docker-compose.yml",
+    runner: {},
+  }),
+}));
+
 import { createProtectedAuthRouter } from "./auth.js";
+import {
+  purgeDueDeletions,
+  releaseStaleHandovers,
+  HANDOVER_STALE_MS,
+} from "../services/leaver-deletion.service.js";
 import * as nc from "../services/nextcloud.client.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import type { Role } from "../services/jwt.service.js";
@@ -136,7 +166,7 @@ const SERVICE_NC_TOKEN = adminBasicToken();
 
 /** Prisma stub: findUnique by nextcloudUsername + count + tx passthrough. */
 function createPrismaMock(seed: any[] = []) {
-  const users: any[] = [...seed];
+  const users: any[] = seed.map((u) => ({ deletionStatus: "NONE", deletionDueAt: null, ...u }));
   // Every seeded user is given a Microsoft 365 link, so the delete tests can
   // assert the credential actually goes with them (WARP-2115).
   const m365Rows: any[] = seed.map((u: any) => ({ userId: u.id }));
@@ -163,7 +193,14 @@ function createPrismaMock(seed: any[] = []) {
     }),
     update: vi.fn(async ({ where, data }: any) => {
       const idx = users.findIndex(
-        (u) => u.id === where.id && (where.role === undefined || u.role === where.role),
+        (u) =>
+          u.id === where.id &&
+          (where.role === undefined || u.role === where.role) &&
+          // WARP-3169: the claim / release / revoke pin the deletion state.
+          (where.deletionStatus === undefined || u.deletionStatus === where.deletionStatus) &&
+          // WARP-3176: the release / revoke are pinned to the request's claim.
+          (where.deletionClaimedAt === undefined ||
+            u.deletionClaimedAt?.getTime() === where.deletionClaimedAt?.getTime()),
       );
       if (idx < 0) {
         const err: any = new Error("not found");
@@ -181,10 +218,67 @@ function createPrismaMock(seed: any[] = []) {
         const statusOk =
           where?.directoryStatus === undefined ||
           u.directoryStatus === where.directoryStatus;
-        if (idOk && statusOk) users.splice(i, 1);
+        const delOk =
+          where?.deletionStatus === undefined ||
+          u.deletionStatus === where.deletionStatus;
+        if (idOk && statusOk && delOk) users.splice(i, 1);
       }
       return { count: before - users.length };
     }),
+    updateMany: vi.fn(async ({ where, data }: any) => {
+      let count = 0;
+      for (let i = 0; i < users.length; i += 1) {
+        const u = users[i];
+        if (where.id !== undefined && u.id !== where.id) continue;
+        if (where.directoryStatus !== undefined && u.directoryStatus !== where.directoryStatus) continue;
+        const del = where.deletionStatus;
+        if (del !== undefined) {
+          const allowed = typeof del === "string" ? [del] : del.in;
+          if (!allowed.includes(u.deletionStatus)) continue;
+        }
+        // WARP-3176: the stale-claim release is pinned to the claim time read.
+        if (
+          where.deletionClaimedAt !== undefined &&
+          u.deletionClaimedAt?.getTime() !== where.deletionClaimedAt?.getTime()
+        ) {
+          continue;
+        }
+        // The nightly claim: OR of { status, due <= now } branches.
+        if (
+          where.OR &&
+          !where.OR.some(
+            (c: any) =>
+              u.deletionStatus === c.deletionStatus &&
+              (c.deletionDueAt === undefined || u.deletionDueAt <= c.deletionDueAt.lte) &&
+              (c.deletionClaimedAt === undefined ||
+                (u.deletionClaimedAt != null && u.deletionClaimedAt <= c.deletionClaimedAt.lte)),
+          )
+        ) {
+          continue;
+        }
+        users[i] = { ...u, ...data };
+        count += 1;
+      }
+      return { count };
+    }),
+    findMany: vi.fn(async ({ where }: any) =>
+      users.filter(
+        (u) =>
+          (where.directoryStatus === undefined || u.directoryStatus === where.directoryStatus) &&
+          (where.deletionStatus === undefined || u.deletionStatus === where.deletionStatus) &&
+          // WARP-3176: the stale-claim sweep ages the claim.
+          (where.deletionClaimedAt === undefined ||
+            (u.deletionClaimedAt != null && u.deletionClaimedAt <= where.deletionClaimedAt.lte)) &&
+          (where.OR === undefined ||
+            where.OR.some(
+              (c: any) =>
+                u.deletionStatus === c.deletionStatus &&
+                (c.deletionDueAt === undefined || u.deletionDueAt <= c.deletionDueAt.lte) &&
+                (c.deletionClaimedAt === undefined ||
+                  (u.deletionClaimedAt != null && u.deletionClaimedAt <= c.deletionClaimedAt.lte)),
+            )),
+      ),
+    ),
     count: vi.fn(async ({ where }: any = {}) => {
       let n = 0;
       for (const u of users) {
@@ -280,441 +374,711 @@ function seededAlice() {
     displayName: "Alice",
     role: "family",
     directoryStatus: "ACTIVE",
+    deletionStatus: "NONE",
+    deletionDueAt: null,
   };
 }
+
+const RETAIN = { disposition: "retention" };
+function del(app: any, handle: string) {
+  return request(app).delete(`/api/auth/users/${handle}`).send(RETAIN);
+}
+const OWNER_ROW = {
+  id: "own",
+  username: "o",
+  nextcloudUsername: "o",
+  role: "owner",
+  directoryStatus: "ACTIVE",
+  deletionStatus: "NONE",
+};
+const DAY = 24 * 60 * 60 * 1000;
 
 beforeEach(() => {
   vi.clearAllMocks();
   revokeAllSessionsMock.mockResolvedValue(2);
   (nc.ncDeleteUser as any).mockResolvedValue(undefined);
+  (nc.ncSetUserEnabled as any).mockResolvedValue(undefined);
   purgeUserDataMock.mockResolvedValue({ items: 0, chunks: 0 });
 });
 
-describe("DELETE /api/auth/users/:username — rail 6 post-effects (WARP-490 parity)", () => {
-  it("deletes on Nextcloud, purges brain memory, hard-revokes credentials, and emits 'User removed'", async () => {
-    const prisma = createPrismaMock([seededAlice(), { id: "own", username: "o", nextcloudUsername: "o", role: "owner", directoryStatus: "ACTIVE" }]);
-    const app = buildApp(prisma, "owner");
 
-    const res = await request(app).delete("/api/auth/users/alice");
-
+describe("DELETE /api/auth/users/:username — WARP-3113 schedules, never purges", () => {
+  it("a DELETE with no body (iOS/Mac on main) defaults to retention and the audit says so", async () => {
+    const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
+    const res = await request(buildApp(prisma)).delete("/api/auth/users/alice");
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ status: "deleted", username: "alice" });
-    expect(nc.ncDeleteUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice");
-    // WARP-2858: brain memory keys on User.id (WARP-493) — the purge is
-    // handed the resolved row id, never the path param.
-    expect(purgeUserDataMock).toHaveBeenCalledWith(prisma, "u-alice");
-    // WARP-2115 — the removed person's Microsoft 365 refresh token must go
-    // with them. Nothing cascades (userId is not an FK) and the /api/m365
-    // routes scope to the requester's OWN connection, so a row left behind
-    // holds a live mailbox credential nobody can ever disconnect.
-    expect(prisma.m365Connection.deleteMany).toHaveBeenCalledWith({
-      where: { userId: "u-alice" },
+    expect(res.body.status).toBe("pending_deletion");
+    expect(prisma._users.find((u: any) => u.id === "u-alice")).toMatchObject({
+      directoryStatus: "DEACTIVATED",
+      deletionStatus: "PENDING",
     });
-    expect(prisma.m365DeltaCursor.deleteMany).toHaveBeenCalledWith({
-      where: { userId: "u-alice" },
-    });
-    expect(prisma._m365Rows.some((r: any) => r.userId === "u-alice")).toBe(false);
-    // Rail 6 — previously this surface revoked NOTHING and audited NOTHING.
-    expect(revokeAllSessionsMock).toHaveBeenCalledWith("u-alice");
-    expect(denylistUserMock).toHaveBeenCalledWith("u-alice", expect.any(Number));
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
     expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
       expect.objectContaining({
-        kind: "auth",
-        severity: "warn",
-        sourceIcon: "user-x",
-        // WARP-1565: the local row is now deleted too, so the plain
-        // shipped headline is true again — the qualified wording existed
-        // only while the removal was half-done (pr-reviewer #1229 B3).
-        what: "User removed",
-        sub: "alice",
+        what: "User deletion scheduled",
         refs: expect.objectContaining({
-          targetUserId: "u-alice",
-          targetUsername: "alice",
-          role: "family",
+          disposition: "retention",
+          dispositionDefaulted: true,
+          dispositionNote: "disposition defaulted: retention (client sent none)",
         }),
       }),
     );
   });
 
-  it("legacy NC-only delete (no local row): NC delete + purge still run; audit row lands with targetUserId null; nothing revoked", async () => {
-    const prisma = createPrismaMock([]);
-    const app = buildApp(prisma, "owner");
+  it("an explicit disposition is recorded as chosen, not defaulted; an unknown one is a 400", async () => {
+    const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
+    const app = buildApp(prisma);
+    const bad = await request(app).delete("/api/auth/users/alice").send({ disposition: "purge_now" });
+    expect(bad.status).toBe(400);
+    expect(bad.body.code).toBe("UNKNOWN_DISPOSITION");
+    expect(prisma._users.find((u: any) => u.id === "u-alice").deletionStatus).toBe("NONE");
 
-    const res = await request(app).delete("/api/auth/users/legacy");
+    await del(app, "alice");
+    const row = vi.mocked(recordActivity).mock.calls.at(-1)![0] as any;
+    expect(row.refs).toMatchObject({ disposition: "retention", dispositionDefaulted: false });
+    expect(row.refs.dispositionNote).toBeUndefined();
+  });
+
+  it("revokes now, keeps the files, and marks PENDING 30 days out — audited with the actor", async () => {
+    const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
+    const before = Date.now();
+    const res = await del(buildApp(prisma), "alice");
 
     expect(res.status).toBe(200);
-    expect(nc.ncDeleteUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "legacy");
-    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
-    expect(denylistUserMock).not.toHaveBeenCalled();
+    expect(res.body.status).toBe("pending_deletion");
+    const row = prisma._users.find((u: any) => u.id === "u-alice");
+    expect(row).toMatchObject({
+      directoryStatus: "DEACTIVATED",
+      deletionStatus: "PENDING",
+      deletionRequestedBy: "user-owner",
+    });
+    const due = new Date(row.deletionDueAt).getTime();
+    expect(due - before).toBeGreaterThanOrEqual(30 * DAY - 1000);
+    expect(due - before).toBeLessThanOrEqual(30 * DAY + 5000);
+    // Nothing is purged at request time.
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+    expect(purgeUserDataMock).not.toHaveBeenCalled();
+    // WebDAV cut off through the Nextcloud enable flag; sessions ended.
+    expect(nc.ncSetUserEnabled).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice", false);
+    expect(revokeAllSessionsMock).toHaveBeenCalledWith("u-alice");
     expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
       expect.objectContaining({
-        what: "User removed",
-        sub: "legacy",
-        refs: expect.objectContaining({ targetUserId: null }),
+        what: "User deletion scheduled",
+        refs: expect.objectContaining({ actor: "user-owner", targetUserId: "u-alice", disposition: "retention" }),
+        actor: expect.objectContaining({ type: "user" }),
       }),
     );
   });
-});
 
-// WARP-3193 SEC-AUTH-6 — notes, calendar (incl. CalDAV credentials),
-// reminders, chats and push subscriptions key on the USERNAME with no FK to
-// User. Deleting the row freed the username while the rows stayed, so the
-// next account deriving the same handle inherited all of it.
-describe("DELETE /api/auth/users/:username — username-keyed private data (WARP-3193 SEC-AUTH-6)", () => {
-  function twoUsers() {
-    return [
-      seededAlice(),
-      { id: "own", username: "o", nextcloudUsername: "o", role: "owner", directoryStatus: "ACTIVE" },
-    ];
-  }
+  it("the rails still apply: the owner can't be scheduled (403), nor yourself (409), nor the last operator (409)", async () => {
+    const owner = createPrismaMock([{ ...OWNER_ROW, id: "u-boss", nextcloudUsername: "boss" }]);
+    expect((await del(buildApp(owner, "admin"), "boss")).body.code).toBe("OWNER_IMMUTABLE");
 
-  it("purges every username-keyed private row of the removed person, in the row-delete transaction", async () => {
-    const prisma = createPrismaMock(twoUsers());
-
-    const res = await request(buildApp(prisma, "owner")).delete("/api/auth/users/alice");
-
-    expect(res.status).toBe(200);
-    for (const model of prisma._usernameModels) {
-      expect(prisma._usernameRows(model, "alice"), model).toBe(0);
-      // Nobody else's rows are touched.
-      expect(prisma._usernameRows(model, "o"), model).toBe(1);
-      expect(prisma._usernameRows(model, "bystander"), model).toBe(1);
-    }
-    // Same transaction as the row delete (the rails tx + this one).
-    expect(prisma._users.some((u: any) => u.id === "u-alice")).toBe(false);
-    expect(prisma._seam().calls()).toHaveLength(2);
-  });
-
-  it("purges NOTHING when the Nextcloud delete fails (the revoked row stays to retry from)", async () => {
-    (nc.ncDeleteUser as any).mockRejectedValueOnce(new Error("NC down"));
-    const prisma = createPrismaMock(twoUsers());
-
-    const res = await request(buildApp(prisma, "owner")).delete("/api/auth/users/alice");
-
-    expect(res.status).toBeGreaterThanOrEqual(500);
-    for (const model of prisma._usernameModels) {
-      expect(prisma._usernameRows(model, "alice"), model).toBe(1);
-    }
-  });
-
-  it("purges NOTHING when the row was re-activated concurrently (row not deleted)", async () => {
-    const prisma = createPrismaMock(twoUsers());
-    // Re-activate between the rails transaction and the final delete.
-    (nc.ncDeleteUser as any).mockImplementationOnce(async () => {
-      const alice = prisma._users.find((u: any) => u.id === "u-alice");
-      alice.directoryStatus = "ACTIVE";
-    });
-
-    const res = await request(buildApp(prisma, "owner")).delete("/api/auth/users/alice");
-
-    expect(res.status).toBe(200);
-    for (const model of prisma._usernameModels) {
-      expect(prisma._usernameRows(model, "alice"), model).toBe(1);
-    }
-  });
-});
-
-describe("DELETE /api/auth/users/:username — WARP-1526 rails", () => {
-  it("deleting the OWNER → 403 OWNER_IMMUTABLE; Nextcloud account untouched", async () => {
-    const prisma = createPrismaMock([
-      {
-        id: "u-boss",
-        username: "boss",
-        nextcloudUsername: "boss",
-        displayName: "Boss",
-        role: "owner",
-        directoryStatus: "ACTIVE",
-      },
+    const self = createPrismaMock([
+      { id: "owner-id", username: "user-owner", nextcloudUsername: "selfowner", role: "admin", directoryStatus: "ACTIVE" },
+      { id: "u-other", username: "other", nextcloudUsername: "other", role: "admin", directoryStatus: "ACTIVE" },
     ]);
-    const app = buildApp(prisma, "admin");
+    expect((await del(buildApp(self, "owner"), "selfowner")).body.code).toBe("SELF_ACTION_NOT_ALLOWED");
 
-    const res = await request(app).delete("/api/auth/users/boss");
-
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe("OWNER_IMMUTABLE");
-    expect(res.body.error).toBe(
-      "The owner has full control and can't be changed here.",
-    );
-    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
-    expect(purgeUserDataMock).not.toHaveBeenCalled();
-    expect(vi.mocked(recordActivity)).not.toHaveBeenCalled();
-  });
-
-  it("deleting YOURSELF → 409 SELF_ACTION_NOT_ALLOWED; Nextcloud untouched", async () => {
-    const prisma = createPrismaMock([
-      {
-        id: "owner-id", // buildApp's synthetic req.user.id for callerRole=owner
-        username: "user-owner",
-        nextcloudUsername: "selfowner",
-        displayName: "Self Owner",
-        role: "admin", // non-owner row so the refusal is provably the self rail
-        directoryStatus: "ACTIVE",
-      },
-      {
-        id: "u-other",
-        username: "other",
-        nextcloudUsername: "other",
-        role: "admin",
-        directoryStatus: "ACTIVE",
-      },
+    const last = createPrismaMock([
+      { id: "u-sam", username: "sam", nextcloudUsername: "sam", role: "admin", directoryStatus: "ACTIVE" },
     ]);
-    const app = buildApp(prisma, "owner");
-
-    const res = await request(app).delete("/api/auth/users/selfowner");
-
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe("SELF_ACTION_NOT_ALLOWED");
-    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
-  });
-
-  it("deleting the last ACTIVE operator → 409 LAST_OPERATOR_INVARIANT; Nextcloud untouched", async () => {
-    const prisma = createPrismaMock([
-      {
-        id: "u-sam",
-        username: "sam",
-        nextcloudUsername: "sam",
-        displayName: "Sam",
-        role: "admin",
-        directoryStatus: "ACTIVE",
-      },
-    ]);
-    const app = buildApp(prisma, "admin"); // synthetic admin session, no local row
-
-    const res = await request(app).delete("/api/auth/users/sam");
-
+    const res = await del(buildApp(last, "admin"), "sam");
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("LAST_OPERATOR_INVARIANT");
-    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
-    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+    expect(last._users[0].deletionStatus).toBe("NONE");
     expect(vi.mocked(recordActivity)).not.toHaveBeenCalled();
   });
 
-  it("deleting an admin while another ACTIVE operator remains → 200 (the rail counts, it doesn't blanket-block admins)", async () => {
-    const prisma = createPrismaMock([
-      {
-        id: "u-sam",
-        username: "sam",
-        nextcloudUsername: "sam",
-        displayName: "Sam",
-        role: "admin",
-        directoryStatus: "ACTIVE",
-      },
-      {
-        id: "u-kim",
-        username: "kim",
-        nextcloudUsername: "kim",
-        displayName: "Kim",
-        role: "admin",
-        directoryStatus: "ACTIVE",
-      },
-    ]);
-    const app = buildApp(prisma, "admin");
-
-    const res = await request(app).delete("/api/auth/users/sam");
-
-    expect(res.status).toBe(200);
-    expect(nc.ncDeleteUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "sam");
-    expect(revokeAllSessionsMock).toHaveBeenCalledWith("u-sam");
-  });
-});
-
-/**
- * pr-reviewer (#1229) — the removal rails' operator count must run at
- * SERIALIZABLE, not the READ COMMITTED default Postgres/Prisma actually
- * give you (the code used to claim serializable WAS the default; it is
- * not). Two concurrent deletions of the last two operators would otherwise
- * both read "one other operator remains" and both proceed.
- *
- * Honest scope note, asserted here so it is not mistaken for closed: this
- * route does NOT delete the local User row (pre-existing, called out in the
- * handler), so the transaction is count-only. A read-only SERIALIZABLE
- * transaction cannot conflict with another read-only one, so the isolation
- * level alone does not fully close this particular race — the residual gap
- * is the missing local write, tracked separately.
- */
-describe("DELETE /api/auth/users/:username — serializable isolation", () => {
-  it("passes { isolationLevel: 'Serializable' } to the removal-rails $transaction", async () => {
-    const prisma = createPrismaMock([
-      seededAlice(),
-      { id: "own", username: "o", nextcloudUsername: "o", role: "owner", directoryStatus: "ACTIVE" },
-    ]);
-    const app = buildApp(prisma, "owner");
-
-    const res = await request(app).delete("/api/auth/users/alice");
-
-    expect(res.status).toBe(200);
-    // Two transactions: the removal rails, then — after Nextcloud confirms —
-    // the row delete + username-keyed purge (WARP-3193 SEC-AUTH-6). Both at
-    // SERIALIZABLE, like every transaction on a guarded mutation.
-    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
-    expect(prisma.$transaction.mock.calls[1][1]).toEqual({
-      isolationLevel: "Serializable",
-    });
-    expect(prisma.$transaction.mock.calls[0][1]).toEqual({
-      isolationLevel: "Serializable",
-    });
-  });
-});
-
-/**
- * WARP-1526 — pr-reviewer #1229 B3.
- *
- * The transaction here used to wrap a COUNT with no write: a read-only
- * transaction pins nothing, so it read as protection without being any.
- * Worse, the route never touched the local row, so an NC-deleted admin
- * stayed `role="admin" / directoryStatus=ACTIVE` and kept counting as a
- * live operator for the NEXT removal's rail 5 — sequentially deleting
- * every admin never tripped the invariant — while `/auth/login` verifies
- * the LOCAL passwordHash, so the "removed" admin could sign back in once
- * the ACCESS_TOKEN_TTL denylist entry expired.
- *
- * The fix keeps full local-row deletion out of scope (WARP-1565) but makes
- * check + change atomic: the transaction now writes
- * `directoryStatus="DEACTIVATED"`, which is the same lever the disable
- * path uses and which /auth/login, SSO, WebAuthn and the auth middleware
- * all already fail closed on.
- */
-describe("DELETE /api/auth/users/:username — WARP-1526 B3 atomic local write", () => {
-  it("deactivates the local row INSIDE the guarded transaction (login fails closed; the row stops counting as an operator)", async () => {
-    const prisma = createPrismaMock([
-      seededAlice(),
-      { id: "own", username: "o", nextcloudUsername: "o", role: "owner", directoryStatus: "ACTIVE" },
-    ]);
-    const app = buildApp(prisma, "owner");
-
-    const res = await request(app).delete("/api/auth/users/alice");
-
-    expect(res.status).toBe(200);
-    // WARP-1565 deletes the row at the END of the request, so the final
-    // state can no longer witness this. The property being pinned is
-    // unchanged and still load-bearing: the REVOCATION is a write, made
-    // inside the SERIALIZABLE transaction the rails ran in, pinned to the
-    // role they were evaluated against. (That the row then goes away is the
-    // sibling test; that it SURVIVES revoked when Nextcloud fails is the
-    // one after it.)
-    expect(prisma.user.update).toHaveBeenCalledWith({
-      where: { id: "u-alice", role: "family" },
-      data: { directoryStatus: "DEACTIVATED" },
-    });
-    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
-      isolationLevel: "Serializable",
-    });
+  it("runs the rails at SERIALIZABLE and pins the write to the evaluated role", async () => {
+    const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
+    await del(buildApp(prisma), "alice");
+    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "Serializable" });
+    expect(prisma.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "u-alice", role: "family", deletionStatus: "NONE" } }),
+    );
   });
 
-  /**
-   * WARP-1565 residual 1 — the half-delete finished.
-   *
-   * WARP-1526 bounded the exposure (the row is DEACTIVATED inside the
-   * guarded transaction, and every login gate fails closed on that), but the
-   * row itself survived a route called DELETE whose Nextcloud account is
-   * genuinely gone. Two things follow from an orphan row, and the second is
-   * the one an operator actually hits:
-   *
-   *   • the roster carries a person with no account behind them, and
-   *   • `username` / `email` / `nextcloudUsername` are UNIQUE columns, so
-   *     the freed identity is not free. Re-inviting the same person — the
-   *     obvious next action after removing them by mistake, or after an
-   *     employee returns — collides on the orphan.
-   *
-   * Deleting the row LAST, after the Nextcloud account is confirmed gone, is
-   * what makes the two directories agree in the failure case too: an NC
-   * delete that throws leaves a fully-revoked local row to retry from,
-   * which is strictly today's behaviour rather than a new hole.
-   */
-  it("deletes the local row once the Nextcloud account is gone (the identity is reusable)", async () => {
-    const prisma = createPrismaMock([
-      seededAlice(),
-      { id: "own", username: "o", nextcloudUsername: "o", role: "owner", directoryStatus: "ACTIVE" },
-    ]);
-    const app = buildApp(prisma, "owner");
-
-    expect((await request(app).delete("/api/auth/users/alice")).status).toBe(200);
-
-    expect(prisma._users.find((u: any) => u.id === "u-alice")).toBeUndefined();
-    // Ordering is the contract: NC first, local row after. A row deleted
-    // before a failing ncDeleteUser would strand an NC account with working
-    // WebDAV and nothing left locally to reconcile it from.
-    expect(nc.ncDeleteUser).toHaveBeenCalled();
+  it("a serialization loser (P2034) is a 409 and schedules nothing", async () => {
+    const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
+    const conflict: any = new Error("could not serialize access");
+    conflict.code = "P2034";
+    prisma.user.update.mockRejectedValueOnce(conflict);
+    const res = await del(buildApp(prisma), "alice");
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("CONCURRENT_MUTATION");
+    expect(vi.mocked(recordActivity)).not.toHaveBeenCalled();
   });
 
-  it("keeps the revoked local row when the Nextcloud delete fails (nothing to retry from otherwise)", async () => {
-    (nc.ncDeleteUser as any).mockRejectedValueOnce(new Error("nc down"));
-    const prisma = createPrismaMock([
-      seededAlice(),
-      { id: "own", username: "o", nextcloudUsername: "o", role: "owner", directoryStatus: "ACTIVE" },
-    ]);
-    const app = buildApp(prisma, "owner");
-
-    expect((await request(app).delete("/api/auth/users/alice")).status).toBe(500);
-
-    const row = prisma._users.find((u: any) => u.id === "u-alice");
-    expect(row).toBeDefined();
-    // Access is still revoked — the guarded write committed before the
-    // Nextcloud call, and that half must not be undone by its failure.
-    expect(row.directoryStatus).toBe("DEACTIVATED");
+  it("is idempotent: a second DELETE keeps the first date", async () => {
+    const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
+    const app = buildApp(prisma);
+    const first = await del(app, "alice");
+    const second = await del(app, "alice");
+    expect(second.status).toBe(200);
+    expect(new Date(second.body.deletionDueAt).getTime()).toBe(new Date(first.body.deletionDueAt).getTime());
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
   });
 
-  it("sequential admin removals DO trip the last-operator rail (the deactivated row no longer counts)", async () => {
-    // The pre-fix bug: both admins stayed ACTIVE in the directory, so each
-    // removal counted the other as a surviving operator and the box could
-    // be emptied of operators one DELETE at a time.
+  it("a legacy Nextcloud-only account (no row) can't be scheduled — refused, never purged", async () => {
+    const prisma = createPrismaMock([]);
+    const res = await del(buildApp(prisma), "legacy");
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("NO_DIRECTORY_ROW");
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+  });
+
+  it("sequential admin schedules DO trip the last-operator rail", async () => {
     const prisma = createPrismaMock([
       { id: "u-sam", username: "sam", nextcloudUsername: "sam", role: "admin", directoryStatus: "ACTIVE" },
       { id: "u-kim", username: "kim", nextcloudUsername: "kim", role: "admin", directoryStatus: "ACTIVE" },
     ]);
     const app = buildApp(prisma, "admin");
-
-    const first = await request(app).delete("/api/auth/users/sam");
-    expect(first.status).toBe(200);
-
-    const second = await request(app).delete("/api/auth/users/kim");
+    expect((await del(app, "sam")).status).toBe(200);
+    const second = await del(app, "kim");
     expect(second.status).toBe(409);
     expect(second.body.code).toBe("LAST_OPERATOR_INVARIANT");
-    expect(prisma._users.find((u: any) => u.id === "u-kim").directoryStatus).toBe(
-      "ACTIVE",
+  });
+});
+
+describe("cancel + reactivate while pending — WARP-3113", () => {
+  it("cancel clears the schedule, keeps the person deactivated, and audits the actor", async () => {
+    const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
+    const app = buildApp(prisma);
+    await del(app, "alice");
+    vi.mocked(recordActivity).mockClear();
+
+    const res = await request(app).post("/api/auth/users/alice/cancel-deletion");
+    expect(res.status).toBe(200);
+    expect(prisma._users.find((u: any) => u.id === "u-alice")).toMatchObject({
+      directoryStatus: "DEACTIVATED",
+      deletionStatus: "NONE",
+      deletionDueAt: null,
+    });
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({ what: "User deletion cancelled", refs: expect.objectContaining({ actor: "user-owner" }) }),
     );
   });
 
-  // WARP-1565: this used to assert the OPPOSITE headline, and correctly so —
-  // while the local row survived, "User removed" was a false statement in an
-  // append-only, signature-chained audit log. Now that the row is deleted,
-  // the qualified wording would be the false one, and both removal surfaces
-  // describe the same event in the same words.
-  it("audits 'User removed' — the statement the completed removal makes true", async () => {
-    const prisma = createPrismaMock([
-      seededAlice(),
-      { id: "own", username: "o", nextcloudUsername: "o", role: "owner", directoryStatus: "ACTIVE" },
-    ]);
-    const app = buildApp(prisma, "owner");
-
-    await request(app).delete("/api/auth/users/alice");
-
-    const row = vi.mocked(recordActivity).mock.calls[0][0] as any;
-    expect(row.kind).toBe("auth");
-    expect(row.severity).toBe("warn");
-    expect(row.what).toBe("User removed");
-    // The audit row outlives the row it describes — `targetUserId` is a ref
-    // VALUE, not a foreign key, so the trail survives the delete.
-    expect(row.refs).toEqual(
-      expect.objectContaining({ targetUserId: "u-alice", targetUsername: "alice" }),
-    );
+  it("cancel with nothing pending → 409; members can't cancel (403)", async () => {
+    const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
+    expect((await request(buildApp(prisma)).post("/api/auth/users/alice/cancel-deletion")).status).toBe(409);
+    expect((await request(buildApp(prisma, "family")).post("/api/auth/users/alice/cancel-deletion")).status).toBe(403);
   });
 
-  it("a serialization loser (P2034) is a 409 CONCURRENT_MUTATION and never deletes the Nextcloud account", async () => {
-    const prisma = createPrismaMock([
-      seededAlice(),
-      { id: "own", username: "o", nextcloudUsername: "o", role: "owner", directoryStatus: "ACTIVE" },
-    ]);
-    const app = buildApp(prisma, "owner");
-    const conflict: any = new Error("could not serialize access");
-    conflict.code = "P2034";
-    prisma.user.update.mockRejectedValueOnce(conflict);
+  it("reactivating a person scheduled for deletion is refused until the deletion is cancelled", async () => {
+    const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
+    const app = buildApp(prisma);
+    await del(app, "alice");
+    const refused = await request(app).post("/api/auth/users/alice/enable");
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe("DELETION_PENDING");
 
-    const res = await request(app).delete("/api/auth/users/alice");
+    await request(app).post("/api/auth/users/alice/cancel-deletion");
+    vi.mocked(recordActivity).mockClear();
+    const ok = await request(app).post("/api/auth/users/alice/enable");
+    expect(ok.status).toBe(200);
+    expect(prisma._users.find((u: any) => u.id === "u-alice").directoryStatus).toBe("ACTIVE");
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({ what: "User reactivated", refs: expect.objectContaining({ actor: "user-owner" }) }),
+    );
+  });
+});
 
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe("CONCURRENT_MUTATION");
+describe("purgeDueDeletions — the nightly job (WARP-3113)", () => {
+  const due = () => ({
+    ...seededAlice(),
+    directoryStatus: "DEACTIVATED",
+    deletionStatus: "PENDING",
+    deletionDueAt: new Date(Date.now() - DAY),
+    deletionRequestedBy: "user-owner",
+  });
+
+  it("leaves a deletion that isn't due yet alone", async () => {
+    const prisma = createPrismaMock([{ ...due(), deletionDueAt: new Date(Date.now() + DAY) }]);
+    expect(await purgeDueDeletions(prisma)).toEqual({ completed: 0, failed: 0 });
     expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+  });
+
+  it("completes a due deletion: Nextcloud account, brain memory, M365 link, the row, then 'User removed'", async () => {
+    const prisma = createPrismaMock([due()]);
+    expect(await purgeDueDeletions(prisma)).toEqual({ completed: 1, failed: 0 });
+    expect(nc.ncDeleteUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice");
+    expect(purgeUserDataMock).toHaveBeenCalledWith(prisma, "u-alice");
+    expect(prisma.m365Connection.deleteMany).toHaveBeenCalledWith({ where: { userId: "u-alice" } });
+    expect(prisma._users).toHaveLength(0);
+    expect(revokeAllSessionsMock).toHaveBeenCalledWith("u-alice");
+    expect(denylistUserMock).toHaveBeenCalledWith("u-alice", expect.any(Number));
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "User removed",
+        // The job is the clock; the audit names who asked for it.
+        refs: expect.objectContaining({ actor: "user-owner", targetUserId: "u-alice" }),
+        actor: { type: "system" },
+      }),
+    );
+  });
+
+  it("a failed Nextcloud delete keeps the row claimed (PURGING) and the next run retries it", async () => {
+    (nc.ncDeleteUser as any).mockRejectedValueOnce(new Error("nc down"));
+    const prisma = createPrismaMock([due()]);
+    expect(await purgeDueDeletions(prisma)).toEqual({ completed: 0, failed: 1 });
+    const row = prisma._users.find((u: any) => u.id === "u-alice");
+    expect(row).toMatchObject({ directoryStatus: "DEACTIVATED", deletionStatus: "PURGING" });
+
+    // A claimed row can no longer be cancelled.
+    const cancel = await request(buildApp(prisma)).post("/api/auth/users/alice/cancel-deletion");
+    expect(cancel.status).toBe(409);
+
+    // WARP-3176: not while the claim is fresh (a live removal may hold it)…
+    expect(await purgeDueDeletions(prisma)).toEqual({ completed: 0, failed: 0 });
+    // …but on a later run, once it is stale.
+    const later = new Date(Date.now() + HANDOVER_STALE_MS + 60_000);
+    expect(await purgeDueDeletions(prisma, later)).toEqual({ completed: 1, failed: 0 });
+    expect(prisma._users).toHaveLength(0);
+  });
+
+  it("WARP-3176: never takes over a fresh PURGING claim a hand-over is completing inline", async () => {
+    const prisma = createPrismaMock([
+      { ...due(), deletionStatus: "PURGING", deletionClaimedAt: new Date() },
+    ]);
+    expect(await purgeDueDeletions(prisma)).toEqual({ completed: 0, failed: 0 });
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+  });
+
+  // WARP-3193 SEC-AUTH-6 — notes, calendar (incl. CalDAV credentials),
+  // reminders, chats and push subscriptions key on the USERNAME with no FK
+  // to User; they go with the row, in its transaction, or the next account
+  // deriving the same handle inherits them.
+  it("SEC-AUTH-6: purges exactly the removed person's username-keyed rows, at SERIALIZABLE with the row delete", async () => {
+    const prisma = createPrismaMock([due(), OWNER_ROW]);
+    expect(await purgeDueDeletions(prisma)).toEqual({ completed: 1, failed: 0 });
+    for (const model of prisma._usernameModels) {
+      expect(prisma._usernameRows(model, "alice"), model).toBe(0);
+      expect(prisma._usernameRows(model, OWNER_ROW.username), model).toBe(1);
+      expect(prisma._usernameRows(model, "bystander"), model).toBe(1);
+    }
+    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "Serializable" });
+  });
+
+  it("SEC-AUTH-6: purges nothing when the Nextcloud delete fails (the claimed row stays to retry from)", async () => {
+    (nc.ncDeleteUser as any).mockRejectedValueOnce(new Error("nc down"));
+    const prisma = createPrismaMock([due()]);
+    expect(await purgeDueDeletions(prisma)).toEqual({ completed: 0, failed: 1 });
+    for (const model of prisma._usernameModels) {
+      expect(prisma._usernameRows(model, "alice"), model).toBe(1);
+    }
+  });
+
+  it("SEC-AUTH-6: purges nothing when the row changed state concurrently (row not deleted)", async () => {
+    const prisma = createPrismaMock([due()]);
+    (nc.ncDeleteUser as any).mockImplementationOnce(async () => {
+      prisma._users.find((u: any) => u.id === "u-alice").directoryStatus = "ACTIVE";
+    });
+    await purgeDueDeletions(prisma);
+    expect(prisma._users.some((u: any) => u.id === "u-alice")).toBe(true);
+    for (const model of prisma._usernameModels) {
+      expect(prisma._usernameRows(model, "alice"), model).toBe(1);
+    }
+  });
+
+  it("a person with no Nextcloud account (SSO/SCIM) is removed without a Nextcloud call", async () => {
+    const prisma = createPrismaMock([{ ...due(), nextcloudUsername: null }]);
+    expect(await purgeDueDeletions(prisma)).toEqual({ completed: 1, failed: 0 });
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+    expect(prisma._users).toHaveLength(0);
+  });
+});
+
+describe("WARP-3113 review follow-ups", () => {
+  const due = (over: any = {}) => ({
+    ...seededAlice(),
+    directoryStatus: "DEACTIVATED",
+    deletionStatus: "PENDING",
+    deletionDueAt: new Date(Date.now() - DAY),
+    deletionRequestedBy: "user-owner",
+    ...over,
+  });
+
+  it("uses the person's Nextcloud login, not their username, to disable and to delete", async () => {
+    const row = { ...seededAlice(), username: "alice.m", nextcloudUsername: "amartin" };
+    const prisma = createPrismaMock([row, OWNER_ROW]);
+    expect((await del(buildApp(prisma), "amartin")).status).toBe(200);
+    expect(nc.ncSetUserEnabled).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "amartin", false);
+
+    prisma._users.find((u: any) => u.id === "u-alice").deletionDueAt = new Date(Date.now() - DAY);
+    await purgeDueDeletions(prisma);
+    expect(nc.ncDeleteUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "amartin");
+  });
+
+  it("scheduling denylists access tokens and runs the shared disable step ('User disabled')", async () => {
+    const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
+    await del(buildApp(prisma), "alice");
+    expect(denylistUserMock).toHaveBeenCalledWith("u-alice", expect.any(Number));
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({ what: "User disabled", refs: expect.objectContaining({ targetUserId: "u-alice" }) }),
+    );
+  });
+
+  it("WARP-3160: scheduling revokes the person's overlay devices once, as the admin, reason removal", async () => {
+    const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
+    expect((await del(buildApp(prisma), "alice")).status).toBe(200);
+    // Once: the disable step is told not to sweep them again as `deactivation`.
+    expect(revokeOverlayDevicesMock).toHaveBeenCalledTimes(1);
+    expect(revokeOverlayDevicesMock).toHaveBeenCalledWith("alice", { type: "user", id: "owner-id" }, "removal");
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "User deletion scheduled",
+        refs: expect.objectContaining({ vpnDevicesRevoked: 1, vpnDevicesFailed: 0 }),
+      }),
+    );
+  });
+
+  it("the job skips an ACTIVE row even if it is marked PENDING", async () => {
+    const prisma = createPrismaMock([due({ directoryStatus: "ACTIVE" })]);
+    expect(await purgeDueDeletions(prisma)).toEqual({ completed: 0, failed: 0 });
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+    expect(prisma._users).toHaveLength(1);
+  });
+
+  it("the claim re-checks the due date: a cancel + re-delete after the job's read is not purged early", async () => {
+    const prisma = createPrismaMock([due()]);
+    // The job read a stale snapshot (due yesterday); meanwhile an admin
+    // cancelled and deleted again, so the stored date is 30 days out.
+    const stale = prisma._users.map((u: any) => ({ ...u }));
+    prisma.user.findMany.mockResolvedValueOnce(stale);
+    prisma._users[0].deletionDueAt = new Date(Date.now() + 30 * DAY);
+
+    expect(await purgeDueDeletions(prisma)).toEqual({ completed: 0, failed: 0 });
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+    expect(prisma._users[0].deletionStatus).toBe("PENDING");
+  });
+});
+
+
+describe("DELETE /api/auth/users/:username — WARP-3169 hand-over", () => {
+  const BOB = {
+    id: "u-bob",
+    username: "bob",
+    nextcloudUsername: "bob",
+    role: "family",
+    directoryStatus: "ACTIVE",
+    deletionStatus: "NONE",
+  };
+  const OCC_OUT =
+    "Analysing files of alice ...\nTransferring files to bob/files/transferred from alice on 2026-09-25 22-40-00 ...\nRestoring shares ...\n";
+
+  function handover(app: any, recipientId?: string) {
+    return request(app)
+      .delete("/api/auth/users/alice")
+      .send({ disposition: "handover", ...(recipientId !== undefined ? { recipientId } : {}) });
+  }
+
+  function expectAliceUntouched(prisma: any) {
+    const alice = prisma._users.find((u: any) => u.id === "u-alice");
+    expect(alice).toMatchObject({ directoryStatus: "ACTIVE", deletionStatus: "NONE" });
+    expect(nc.ncSetUserEnabled).not.toHaveBeenCalled();
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+    expect(revokeAllSessionsMock).not.toHaveBeenCalled();
+  }
+
+  beforeEach(() => {
+    hostExecMock.mockReset();
+    hostExecMock.mockResolvedValue({ stdout: OCC_OUT, stderr: "" });
+  });
+
+  it("transfers the files, then deletes at once, and audits who handed what to whom", async () => {
+    const prisma = createPrismaMock([OWNER_ROW, seededAlice(), BOB]);
+    const res = await handover(buildApp(prisma, "owner"), "u-bob");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      status: "deleted",
+      recipient: "bob",
+      folder: "transferred from alice on 2026-09-25 22-40-00",
+    });
+    expect(hostExecMock).toHaveBeenCalledTimes(1);
+    expect(hostExecMock.mock.calls[0][0]).toBe("/opt/droplet/docker/ota/apply-update.sh");
+    expect(hostExecMock.mock.calls[0][1]).toEqual([
+      "nc-transfer-ownership",
+      "--compose-file",
+      "/opt/droplet/docker/docker-compose.yml",
+      "--from",
+      "alice",
+      "--to",
+      "bob",
+    ]);
+    expect(nc.ncDeleteUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice");
+    expect(prisma._users.find((u: any) => u.id === "u-alice")).toBeUndefined();
+    const handed = (recordActivity as any).mock.calls.find(
+      (c: any[]) => c[0].what === "Files handed over",
+    );
+    expect(handed?.[0].refs).toMatchObject({
+      actor: "user-owner",
+      targetUsername: "alice",
+      recipientUsername: "bob",
+      folder: "transferred from alice on 2026-09-25 22-40-00",
+    });
+    // The transfer is recorded before the account is removed.
+    const order = (recordActivity as any).mock.calls.map((c: any[]) => c[0].what);
+    expect(order.indexOf("Files handed over")).toBeLessThan(order.length - 1);
+  });
+
+  it.each([
+    ["an external guest", { ...BOB, role: "guest" }, "u-bob", "RECIPIENT_ROLE"],
+    ["a deactivated person", { ...BOB, directoryStatus: "DEACTIVATED" }, "u-bob", "RECIPIENT_NOT_ACTIVE"],
+    ["a person already pending deletion", { ...BOB, deletionStatus: "PENDING" }, "u-bob", "RECIPIENT_NOT_ACTIVE"],
+    ["the leaver", BOB, "u-alice", "RECIPIENT_IS_LEAVER"],
+    ["someone unknown", BOB, "u-nobody", "RECIPIENT_UNKNOWN"],
+    // By id only: a username or Nextcloud handle is not a recipient id.
+    ["a username instead of an id", BOB, "bob", "RECIPIENT_UNKNOWN"],
+  ])("refuses %s as recipient and changes nothing", async (_label, recipientRow, handle, code) => {
+    const prisma = createPrismaMock([OWNER_ROW, seededAlice(), recipientRow]);
+    const res = await handover(buildApp(prisma, "owner"), handle);
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe(code);
+    expect(hostExecMock).not.toHaveBeenCalled();
+    expectAliceUntouched(prisma);
+  });
+
+  it("refuses a hand-over with no recipient", async () => {
+    const prisma = createPrismaMock([OWNER_ROW, seededAlice(), BOB]);
+    const res = await handover(buildApp(prisma, "owner"));
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("RECIPIENT_REQUIRED");
+    expect(hostExecMock).not.toHaveBeenCalled();
+    expectAliceUntouched(prisma);
+  });
+
+  it("a timeout after occ started says the result may be partial, audits it, and deletes nothing", async () => {
+    const err: any = new Error("OTA host helper nc-transfer-ownership exited 124: ");
+    err.stderr = "[apply-update] nc-transfer-ownership alice -> bob\n";
+    hostExecMock.mockRejectedValue(err);
+    const prisma = createPrismaMock([OWNER_ROW, seededAlice(), BOB]);
+    const res = await handover(buildApp(prisma, "owner"), "u-bob");
+
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe("HANDOVER_INCOMPLETE");
+    expect(res.body.error).toMatch(/may already be in bob's "Transferred from/);
+    expect(res.body.error).toMatch(/Nothing was deleted/);
+    expectAliceUntouched(prisma);
+    const failed = (recordActivity as any).mock.calls.find(
+      (c: any[]) => c[0].what === "File hand-over failed, may be partial",
+    );
+    expect(failed?.[0].refs).toMatchObject({
+      actor: "user-owner",
+      targetUsername: "alice",
+      recipientUsername: "bob",
+      reason: "timed out",
+      mayBePartial: true,
+    });
+  });
+
+  it("a second hand-over of the same leaver while one runs is refused with 409 and never transfers", async () => {
+    let finish: (v: any) => void = () => undefined;
+    hostExecMock.mockImplementation(() => new Promise((r) => (finish = r)));
+    const prisma = createPrismaMock([OWNER_ROW, seededAlice(), BOB]);
+    const app = buildApp(prisma, "owner");
+
+    const first = handover(app, "u-bob").then((r) => r);
+    await vi.waitFor(() => expect(hostExecMock).toHaveBeenCalledTimes(1));
+    expect(prisma._users.find((u: any) => u.id === "u-alice").deletionStatus).toBe("HANDING_OVER");
+
+    // WARP-3176: the claim records when, what it replaced, and to whom.
+    expect(prisma._users.find((u: any) => u.id === "u-alice")).toMatchObject({
+      deletionClaimedAt: expect.any(Date),
+      handoverPriorStatus: "NONE",
+      handoverRecipientId: "u-bob",
+    });
+
+    const second = await handover(app, "u-bob");
+    expect(second.status).toBe(409);
+    // A retention delete can't overwrite the claim either.
+    const retain = await del(app, "alice");
+    expect(retain.status).toBe(409);
+    expect(hostExecMock).toHaveBeenCalledTimes(1);
+
+    finish({ stdout: OCC_OUT, stderr: "" });
+    expect((await first).status).toBe(200);
+  });
+
+  it("a failed transfer releases the claim back to PENDING for a person on retention", async () => {
+    hostExecMock.mockRejectedValue(new Error("exited 1"));
+    const pending = { ...seededAlice(), directoryStatus: "DEACTIVATED", deletionStatus: "PENDING", deletionDueAt: new Date(Date.now() + 5 * DAY) };
+    const prisma = createPrismaMock([OWNER_ROW, pending, BOB]);
+    const res = await handover(buildApp(prisma, "owner"), "u-bob");
+    expect(res.status).toBe(502);
+    expect(prisma._users.find((u: any) => u.id === "u-alice")).toMatchObject({
+      deletionStatus: "PENDING",
+      deletionClaimedAt: null,
+      handoverPriorStatus: null,
+      handoverRecipientId: null,
+    });
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+  });
+
+  it("a failed transfer returns an error and changes nothing — no deactivation, no delete", async () => {
+    const err: any = new Error("OTA host helper nc-transfer-ownership exited 1");
+    err.stderr = "[apply-update] ERROR: unknown Nextcloud user: bob\n";
+    hostExecMock.mockRejectedValue(err);
+    const prisma = createPrismaMock([OWNER_ROW, seededAlice(), BOB]);
+    const res = await handover(buildApp(prisma, "owner"), "u-bob");
+
+    expect(res.status).toBe(502);
+    // The helper refused before occ ran (no start marker), so nothing moved.
+    expect(res.body.code).toBe("HANDOVER_FAILED");
+    expect(res.body.error).toMatch(/nothing was changed/);
+    expectAliceUntouched(prisma);
+    expect(
+      (recordActivity as any).mock.calls.some((c: any[]) => c[0].what === "Files handed over"),
+    ).toBe(false);
+  });
+
+  it("still refuses the owner as the leaver before any transfer", async () => {
+    const prisma = createPrismaMock([
+      { ...OWNER_ROW, id: "own2", username: "o2", nextcloudUsername: "o2" },
+      OWNER_ROW,
+      BOB,
+    ]);
+    const res = await request(buildApp(prisma, "admin"))
+      .delete("/api/auth/users/o2")
+      .send({ disposition: "handover", recipientId: "u-bob" });
+    expect(res.status).toBe(403);
+    expect(hostExecMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("releaseStaleHandovers — WARP-3176 crash recovery", () => {
+  const MIN = 60 * 1000;
+  const BOB = {
+    id: "u-bob",
+    username: "bob",
+    nextcloudUsername: "bob",
+    role: "family",
+    directoryStatus: "ACTIVE",
+    deletionStatus: "NONE",
+  };
+  const claimed = (ageMs: number, prior = "NONE") => ({
+    ...seededAlice(),
+    deletionStatus: "HANDING_OVER",
+    deletionClaimedAt: new Date(Date.now() - ageMs),
+    handoverPriorStatus: prior,
+    handoverRecipientId: "u-bob",
+    ...(prior === "PENDING"
+      ? { directoryStatus: "DEACTIVATED", deletionDueAt: new Date(Date.now() + 5 * DAY) }
+      : {}),
+  });
+  const alice = (prisma: any) => prisma._users.find((u: any) => u.id === "u-alice");
+
+  it("releases a claim older than the transfer timeout plus margin and audits it as interrupted", async () => {
+    const prisma = createPrismaMock([claimed(HANDOVER_STALE_MS + MIN), BOB]);
+    expect(await releaseStaleHandovers(prisma)).toEqual({ released: 1, failed: 0 });
+    expect(alice(prisma)).toMatchObject({
+      deletionStatus: "NONE",
+      deletionClaimedAt: null,
+      handoverPriorStatus: null,
+      handoverRecipientId: null,
+    });
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "File hand-over interrupted, may be partial",
+        sub: expect.stringContaining("alice → bob"),
+        refs: expect.objectContaining({
+          targetUsername: "alice",
+          recipientUsername: "bob",
+          mayBePartial: true,
+        }),
+        actor: { type: "system" },
+      }),
+    );
+    // Nothing is deleted or transferred by the release.
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
+  });
+
+  it("leaves a live claim (inside the window) alone — occ may still be running on the host", async () => {
+    const live = HANDOVER_STALE_MS - MIN;
+    // 660 s is the transfer's own exec timeout; the window must exceed it.
+    expect(HANDOVER_STALE_MS).toBeGreaterThan(660_000);
+    const prisma = createPrismaMock([claimed(live), BOB]);
+    expect(await releaseStaleHandovers(prisma)).toEqual({ released: 0, failed: 0 });
+    expect(alice(prisma).deletionStatus).toBe("HANDING_OVER");
     expect(vi.mocked(recordActivity)).not.toHaveBeenCalled();
+  });
+
+  it("restores PENDING for a person already on retention, so the scheduled delete is not lost", async () => {
+    const prisma = createPrismaMock([claimed(HANDOVER_STALE_MS + MIN, "PENDING"), BOB]);
+    await releaseStaleHandovers(prisma);
+    expect(alice(prisma)).toMatchObject({ deletionStatus: "PENDING", directoryStatus: "DEACTIVATED" });
+  });
+
+  it("never releases a claim re-taken between the read and the release", async () => {
+    const prisma = createPrismaMock([claimed(HANDOVER_STALE_MS + MIN), BOB]);
+    const realFindMany = prisma.user.findMany;
+    prisma.user.findMany = vi.fn(async (args: any) => {
+      const rows = (await realFindMany(args)).map((r: any) => ({ ...r }));
+      // A fresh hand-over claims the row after the sweep read it.
+      alice(prisma).deletionClaimedAt = new Date();
+      return rows;
+    });
+    expect(await releaseStaleHandovers(prisma)).toEqual({ released: 0, failed: 0 });
+    expect(alice(prisma).deletionStatus).toBe("HANDING_OVER");
+  });
+
+  it("a released claim unblocks the next hand-over", async () => {
+    hostExecMock.mockReset();
+    hostExecMock.mockResolvedValue({ stdout: "Transferring files to bob/files/x ...\n", stderr: "" });
+    const prisma = createPrismaMock([OWNER_ROW, claimed(HANDOVER_STALE_MS + MIN), BOB]);
+    const app = buildApp(prisma, "owner");
+    const blocked = await request(app)
+      .delete("/api/auth/users/alice")
+      .send({ disposition: "handover", recipientId: "u-bob" });
+    expect(blocked.status).toBe(409);
+    await releaseStaleHandovers(prisma);
+    const res = await request(app)
+      .delete("/api/auth/users/alice")
+      .send({ disposition: "handover", recipientId: "u-bob" });
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("hand-over claim token — WARP-3176", () => {
+  const BOB = {
+    id: "u-bob",
+    username: "bob",
+    nextcloudUsername: "bob",
+    role: "family",
+    directoryStatus: "ACTIVE",
+    deletionStatus: "NONE",
+  };
+
+  it("a request whose claim was released and re-taken never releases or revokes the newer claim", async () => {
+    let finish: (v: any) => void = () => undefined;
+    hostExecMock.mockReset();
+    hostExecMock.mockImplementationOnce(() => new Promise((r) => (finish = r)));
+    const prisma = createPrismaMock([OWNER_ROW, seededAlice(), BOB]);
+    const app = buildApp(prisma, "owner");
+    const first = request(app)
+      .delete("/api/auth/users/alice")
+      .send({ disposition: "handover", recipientId: "u-bob" })
+      .then((r) => r);
+    await vi.waitFor(() => expect(hostExecMock).toHaveBeenCalledTimes(1));
+
+    // The sweep released the first claim, and a second request re-claimed.
+    const alice = prisma._users.find((u: any) => u.id === "u-alice");
+    const newer = new Date(alice.deletionClaimedAt.getTime() + 1000);
+    Object.assign(alice, { deletionStatus: "HANDING_OVER", deletionClaimedAt: newer });
+
+    // The first request's transfer now finishes: its revoke misses (409-ish
+    // refusal) and its release misses too, so the newer claim stands.
+    finish({ stdout: "Transferring files to bob/files/x ...\n", stderr: "" });
+    const res = await first;
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(prisma._users.find((u: any) => u.id === "u-alice")).toMatchObject({
+      deletionStatus: "HANDING_OVER",
+      deletionClaimedAt: newer,
+      directoryStatus: "ACTIVE",
+    });
+    expect(nc.ncDeleteUser).not.toHaveBeenCalled();
   });
 });

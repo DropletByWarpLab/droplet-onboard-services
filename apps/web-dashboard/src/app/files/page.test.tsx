@@ -293,6 +293,20 @@ describe("<FilesPage /> (WARP-883 smoke)", () => {
     render(<FilesPage />);
     expect(screen.getByText("report.pdf")).toBeInTheDocument();
   });
+
+  // Personal WebDAV drives are open to owner/admin/family only — a guest has
+  // nothing to connect (the route 403s them), so the toolbar hides the button.
+  it.each(["owner", "admin", "family"])("offers Connect drive to %s", (role) => {
+    mockUser = { id: "u1", email: "x@example.com", role };
+    render(<FilesPage />);
+    expect(screen.getByRole("button", { name: "Connect network drive" })).toBeInTheDocument();
+  });
+
+  it("hides Connect drive from a guest", () => {
+    mockUser = { id: "u1", email: "guest@example.com", role: "guest" };
+    render(<FilesPage />);
+    expect(screen.queryByRole("button", { name: "Connect network drive" })).not.toBeInTheDocument();
+  });
 });
 
 // WARP-1338 — a FAILED listing must never masquerade as an empty folder.
@@ -1083,6 +1097,43 @@ describe("<FilesPage /> — Share from the selection toolbar (WARP-1540)", () =>
     mockFiles = [file("a.pdf")];
     mockSelectedPaths = ["/a.pdf"];
     render(<FilesPage />);
+    expect(shareBtn()).not.toBeDisabled();
+  });
+
+  // WARP-3168: a member shares nothing from the Workspace; the button stays
+  // visible, disabled, with the reason. Owner/admin keep it.
+  it("disables Share for a member in the Workspace, with the reason", () => {
+    mockFiles = [file("a.pdf")];
+    mockSelectedPaths = ["/a.pdf"];
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /workspace/i }));
+    expect(shareBtn()).toBeDisabled();
+    expect(shareBtn()).toHaveAttribute(
+      "title",
+      "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside."
+    );
+  });
+
+  // Review of #2416: the detail panel's "Share…" honours the same gate.
+  it("disables the detail panel's Share… for a member in the Workspace", () => {
+    mockFiles = [file("a.pdf")];
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /workspace/i }));
+    fireEvent.click(screen.getAllByText("a.pdf")[0]);
+    const detailShare = screen.getByRole("button", { name: /^share…$/i });
+    expect(detailShare).toBeDisabled();
+    expect(detailShare).toHaveAttribute(
+      "title",
+      "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside.",
+    );
+  });
+
+  it("keeps Share for an admin in the Workspace", () => {
+    mockUser = { id: "admin-1", email: "dana@example.com", role: "admin" };
+    mockFiles = [file("a.pdf")];
+    mockSelectedPaths = ["/a.pdf"];
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /workspace/i }));
     expect(shareBtn()).not.toBeDisabled();
   });
 

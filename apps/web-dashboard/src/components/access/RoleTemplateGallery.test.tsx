@@ -207,10 +207,10 @@ describe("cards", () => {
     expect(names).toEqual(["Front Desk", "Office Manager", "Contractor / Temp"]);
   });
 
-  it("labels the family tier 'Staff' — never the raw enum", async () => {
+  it("labels the family tier 'Member' — never the raw enum", async () => {
     renderGallery();
     await waitFor(() => expect(screen.getByText("Front Desk")).toBeInTheDocument());
-    expect(screen.getByText("Based on Staff")).toBeInTheDocument();
+    expect(screen.getByText("Based on Member")).toBeInTheDocument();
     expect(screen.queryByText(/Based on Family/)).not.toBeInTheDocument();
   });
 
