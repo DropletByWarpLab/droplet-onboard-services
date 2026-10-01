@@ -1,0 +1,98 @@
+#!/bin/sh
+# droplet-fingerprint — WARP-3414. Print this Droplet's certificate KEY
+# fingerprint, in the form the Droplet apps show.
+#
+# WHY. A Droplet app that connects to a box which uses its own certificate
+# (the Mac app, on a manual connect) asks an admin to confirm the key it saw.
+# That is only worth something if the admin has a reference a person on the
+# LAN cannot rewrite. The dashboard shows the same value, but over the very
+# connection under question, so it proves nothing on its own. THIS command is
+# one of the independent channels (the others: the box's own front screen and
+# the setup output): run it on the Droplet itself — at its console, or in the
+# `support` shell — and compare.
+#
+# WHAT. SHA-256 of the DER SubjectPublicKeyInfo of the leaf certificate the
+# gateway serves, as uppercase hex in 4-character groups separated by single
+# spaces (16 groups). Byte-identical to the orchestrator's
+# `formatKeyFingerprint` (lib/served-cert-pin.ts), the rack panel's
+# `format_key_fingerprint` (services/oled-display/device-bridge.py) and the
+# Mac app's confirmation screen, and to
+#   openssl x509 -pubkey -noout | openssl pkey -pubin -outform DER \
+#     | openssl dgst -sha256 -binary | xxd -p -c 64        (then grouped)
+# It is PUBLIC data (any TLS client sees the certificate). No key material is
+# read, printed or needed: the private key is never touched.
+#
+# Usage:
+#   droplet-fingerprint              four lines of four groups
+#   droplet-fingerprint --oneline    the 16 groups on one line (for pasting)
+#   droplet-fingerprint --file PEM   read this certificate file instead of
+#                                    asking the gateway (setup.sh uses this)
+# DROPLET_TLS_CERT=<file> is the same as --file.
+#
+# By default it asks the gateway on THIS machine (127.0.0.1:443) for the
+# certificate it is serving right now: that is what the apps see, and it needs
+# no knowledge of where the checkout lives. A loopback connection cannot be
+# rewritten from the LAN.
+#
+# Repo-tracked (architecture-guard rule 20): installs to
+# /usr/local/bin/droplet-fingerprint via install_single_box_host_integration
+# (scripts/lib/single-box.sh); never hand-placed on a box.
+#
+# Exit: 0 printed; 1 no certificate could be read; 64 bad usage.
+set -eu
+
+oneline=0
+file="${DROPLET_TLS_CERT:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --oneline) oneline=1 ;;
+    --file)
+      [ $# -ge 2 ] || { echo "droplet-fingerprint: --file needs a path" >&2; exit 64; }
+      file="$2"; shift ;;
+    -h|--help) sed -n '2,/^set -eu/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "droplet-fingerprint: unknown argument: $1 (try --help)" >&2; exit 64 ;;
+  esac
+  shift
+done
+
+command -v openssl >/dev/null 2>&1 || { echo "droplet-fingerprint: openssl is not installed" >&2; exit 1; }
+
+# The first certificate of whatever PEM text arrives is the leaf (an LE
+# fullchain writes the leaf first); `openssl x509` reads exactly that one.
+if [ -n "$file" ]; then
+  [ -r "$file" ] || { echo "droplet-fingerprint: cannot read $file" >&2; exit 1; }
+  pem="$(cat -- "$file")"
+else
+  pem="$(openssl s_client -connect 127.0.0.1:443 -servername localhost </dev/null 2>/dev/null || true)"
+fi
+
+# Stage by stage, NOT one pipe: with no certificate, a pipe still ends in a
+# perfectly valid SHA-256 (of nothing, E3B0 C442 …) and would print it as if
+# it were a key.
+pub="$(printf '%s\n' "$pem" | openssl x509 -pubkey -noout 2>/dev/null || true)"
+hex=""
+if [ -n "$pub" ]; then
+  hex="$(printf '%s\n' "$pub" \
+    | openssl pkey -pubin -outform DER 2>/dev/null \
+    | openssl dgst -sha256 -binary 2>/dev/null \
+    | od -An -v -tx1 | tr -d ' \n' | tr 'a-f' 'A-F')"
+fi
+
+case "$hex" in
+  *[!0-9A-F]*|"") hex="" ;;
+esac
+if [ "${#hex}" -ne 64 ]; then
+  if [ -n "$file" ]; then
+    echo "droplet-fingerprint: no certificate in $file" >&2
+  else
+    echo "droplet-fingerprint: the gateway on 127.0.0.1:443 did not answer with a certificate (is the Droplet running?). Try: droplet-fingerprint --file <checkout>/docker/certs/droplet.crt" >&2
+  fi
+  exit 1
+fi
+
+grouped="$(printf '%s' "$hex" | sed 's/\(....\)/\1 /g; s/ $//')"
+if [ "$oneline" -eq 1 ]; then
+  printf '%s\n' "$grouped"
+else
+  printf '%s\n' "$grouped" | awk '{ for (i = 1; i <= NF; i++) printf "%s%s", $i, (i % 4 == 0 || i == NF) ? "\n" : " " }'
+fi

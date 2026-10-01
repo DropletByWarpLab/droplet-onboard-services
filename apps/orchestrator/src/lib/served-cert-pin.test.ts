@@ -14,6 +14,8 @@ import { join } from "node:path";
 import {
   spkiSha256Base64FromPem,
   servedCertPin,
+  formatKeyFingerprint,
+  servedCertFingerprint,
   buildPairUrl,
   _resetServedCertPinCacheForTests,
 } from "./served-cert-pin.js";
@@ -67,6 +69,19 @@ f86/TAq3n+pvbs2X9A==
 -----END CERTIFICATE-----
 `;
 const OTHER_PIN = "1YbIMDdce/GDFyqYHC6oIhEX9Bn4t8qGt7bm6uNkdMc=";
+
+/**
+ * WARP-3414 — the reading form of the two pins above, derived independently
+ * of this code from the certificates themselves:
+ *   openssl x509 -pubkey -noout | openssl pkey -pubin -outform DER \
+ *     | openssl dgst -sha256 -binary | xxd -p -c 64 | tr a-f A-F
+ * then grouped in fours. This is the Droplet Mac app's confirmation-screen
+ * format: uppercase hex, 4-character groups, single spaces, 16 groups.
+ */
+const LEAF_FINGERPRINT =
+  "F017 AFA8 6AD7 8BED 4ABD E646 90F0 5B7B 8DBB E36B 26E9 C8F4 10E5 36A6 1E3D F25C";
+const OTHER_FINGERPRINT =
+  "D586 C830 375C 7BF1 8317 2A98 1C2E A822 1117 F419 F8B7 CA86 B7B6 E6EA E364 74C7";
 
 describe("spkiSha256Base64FromPem", () => {
   it("is the standard SPKI-SHA256 pin of the first certificate", () => {
@@ -122,6 +137,53 @@ describe("servedCertPin", () => {
   it("is null, never a throw, when the leaf is missing", () => {
     expect(servedCertPin(dir)).toBeNull();
     expect(servedCertPin(join(dir, "does-not-exist"))).toBeNull();
+  });
+});
+
+describe("formatKeyFingerprint — the format every client and channel shares", () => {
+  it("is uppercase hex in 16 groups of 4, single-space separated, for the known certificate", () => {
+    expect(formatKeyFingerprint(LEAF_PIN)).toBe(LEAF_FINGERPRINT);
+    expect(formatKeyFingerprint(OTHER_PIN)).toBe(OTHER_FINGERPRINT);
+    const f = formatKeyFingerprint(LEAF_PIN);
+    expect(f).toMatch(/^[0-9A-F]{4}( [0-9A-F]{4}){15}$/);
+    expect(f.split(" ")).toHaveLength(16);
+  });
+
+  it("is the hex of exactly the bytes the pin encodes, so the two never disagree", () => {
+    expect(formatKeyFingerprint(LEAF_PIN).replace(/ /g, "")).toBe(
+      Buffer.from(LEAF_PIN, "base64").toString("hex").toUpperCase(),
+    );
+  });
+
+  it("refuses anything that is not a 32-byte SHA-256 rather than printing a short prefix", () => {
+    expect(() => formatKeyFingerprint("")).toThrow();
+    expect(() => formatKeyFingerprint(Buffer.alloc(8).toString("base64"))).toThrow();
+  });
+});
+
+describe("servedCertFingerprint", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "served-cert-fp-"));
+    _resetServedCertPinCacheForTests();
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("is the reading form of the served leaf's pin, and follows a certificate swap", () => {
+    writeFileSync(join(dir, "droplet.crt"), LEAF_PEM);
+    utimesSync(join(dir, "droplet.crt"), 1_700_000_000, 1_700_000_000);
+    expect(servedCertFingerprint(dir)).toBe(LEAF_FINGERPRINT);
+    // The key changed (a new certificate is installed): the fingerprint
+    // changes with it — never the old one held over.
+    writeFileSync(join(dir, "droplet.crt"), OTHER_PEM);
+    utimesSync(join(dir, "droplet.crt"), 1_800_000_000, 1_800_000_000);
+    expect(servedCertFingerprint(dir)).toBe(OTHER_FINGERPRINT);
+  });
+
+  it("is the LEAF of a fullchain, and null (never a throw) without a readable leaf", () => {
+    writeFileSync(join(dir, "droplet.crt"), LEAF_PEM + OTHER_PEM);
+    expect(servedCertFingerprint(dir)).toBe(LEAF_FINGERPRINT);
+    expect(servedCertFingerprint(join(dir, "does-not-exist"))).toBeNull();
   });
 });
 

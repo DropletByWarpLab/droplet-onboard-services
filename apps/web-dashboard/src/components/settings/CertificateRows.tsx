@@ -19,10 +19,15 @@
  * state; BROWSERS need the public certificate for a padlock. A self-signed
  * box is not "broken" — it is what a box without HQ, or an air-gapped box,
  * looks like by design.
+ *
+ * WARP-3414: below the row, the served key's fingerprint, in the form the
+ * apps show, with copy that says it is only a comparison aid (see
+ * components/KeyFingerprint.tsx).
  */
 import { useEffect, useState } from "react";
 import { fetchTlsCertificate, type TlsCertificate } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { KeyFingerprint } from "@/components/KeyFingerprint";
 
 /** The one action that helps. Kept word-for-word with the notification
  *  (tls-notify.service.ts TLS_RENEW_ACTION) so the card and the toast never
@@ -139,6 +144,7 @@ export function CertificateRows() {
           {copy.note}
         </div>
       )}
+      {cert?.fingerprint && <KeyFingerprint fingerprint={cert.fingerprint} />}
     </>
   );
 }

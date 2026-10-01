@@ -15,8 +15,11 @@ import {
 } from "lucide-react";
 import {
   createPairingCode,
+  fetchTlsCertificate,
   getPairingCodeStatus,
 } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
+import { KeyFingerprint } from "@/components/KeyFingerprint";
 import type { PairingCodeInfo, PairingCodeStatus } from "@/lib/types";
 
 type DeviceType = "mobile" | "desktop";
@@ -51,6 +54,26 @@ const PLATFORM_OPTIONS: Array<{ id: Platform; label: string; type: DeviceType }>
  */
 export default function PairDevicePage() {
   const router = useRouter();
+
+  // WARP-3414: an owner or admin also sees the box's key fingerprint here,
+  // for a Droplet app that asks to confirm it on a manual connect. Read from
+  // the owner/admin-only certificate route, so a member never asks (and is
+  // never refused); a failed load simply shows nothing.
+  const { user } = useAuth();
+  const isAdmin = user?.role === "owner" || user?.role === "admin";
+  const [fingerprint, setFingerprint] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isAdmin) return;
+    let cancelled = false;
+    fetchTlsCertificate()
+      .then((c) => {
+        if (!cancelled) setFingerprint(c.fingerprint);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdmin]);
 
   // Form state
   const [deviceName, setDeviceName] = useState("");
@@ -291,6 +314,12 @@ export default function PairDevicePage() {
               </div>
             </>
           )}
+        </div>
+      )}
+
+      {isAdmin && fingerprint && (
+        <div className="dp-card mt-4 pt-3">
+          <KeyFingerprint fingerprint={fingerprint} />
         </div>
       )}
     </div>
