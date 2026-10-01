@@ -996,6 +996,18 @@ enum ChatMessageStatus {
   aborted
 }
 
+/// What minted a DeviceClient row. EXPLICIT, never inferred from `deviceName`,
+/// `deviceType` or the absence of pairing columns (CLAUDE.md no-guessing).
+///   - app_pairing    — a native desktop/mobile app, via /api/devices/pair(/claim).
+///   - personal_drive — a Finder / File Explorer WebDAV login, via
+///                      POST /api/storage/network-drive/personal (WARP-3318).
+/// Turning personal drives off revokes every active `personal_drive` row and
+/// touches no `app_pairing` row.
+enum DeviceClientKind {
+  app_pairing
+  personal_drive
+}
+
 // Per-user client devices (laptops, phones) paired via QR code flow.
 // Distinct from the `Device` model, which tracks the Droplet hardware itself.
 model DeviceClient {
@@ -1005,6 +1017,9 @@ model DeviceClient {
   deviceType    String // "desktop" | "mobile"
   platform      String // macos|windows|linux|ios|android
   appVersion    String?
+  // Who minted this row — see DeviceClientKind. Rows that predate the column
+  // default to app_pairing (see the migration for why they are not backfilled).
+  kind          DeviceClientKind @default(app_pairing)
   // Encrypted Nextcloud app password (aes-256-gcm). Format: iv||tag||ciphertext
   // base64-encoded. Never exposed to clients after the initial pairing response.
   ncAppPassword String
