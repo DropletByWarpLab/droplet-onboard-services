@@ -221,6 +221,32 @@ describe("routine_run (WARP-2894)", () => {
     expect(path).not.toContain("confirm");
   });
 
+  it("says an ok run had gaps when a read failed or the write-up was a fallback or cut short (WARP-3409)", async () => {
+    const run = (trace: Record<string, unknown>[]) =>
+      routineRun.handler(
+        { slug: "daily-report" },
+        ctxWith({ post: vi.fn(async () => makeResponse(200, { runId: "r", slug: "daily-report", status: "ok", error: null, trace })) }),
+      );
+    const message = async (trace: Record<string, unknown>[]) =>
+      ((await run(trace)) as { data: { message: string } }).data.message;
+
+    expect(await message([{ idx: 0, tool: "get_system_health", ok: true }, { idx: 1, ok: true, result: "prose" }])).toBe(
+      'Ran "daily-report": 2 steps completed.',
+    );
+    expect(
+      await message([
+        { idx: 0, tool: "get_system_health", ok: true },
+        { idx: 1, tool: "(summarize)", ok: true, result: "readout", fallback: true },
+      ]),
+    ).toBe('Ran "daily-report": 2 steps completed, 1 with gaps.');
+    expect(
+      await message([
+        { idx: 0, tool: "list_recent_files", ok: false, error: "nextcloud returned 503" },
+        { idx: 1, tool: "(summarize)", ok: true, result: "prose", truncated: true },
+      ]),
+    ).toBe('Ran "daily-report": 2 steps completed, 2 with gaps.');
+  });
+
   it("reports a failed run (the route's 207) with the failed steps named", async () => {
     const post = vi.fn(async () =>
       makeResponse(207, {
