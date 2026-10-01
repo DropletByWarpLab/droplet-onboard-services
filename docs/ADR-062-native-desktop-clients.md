@@ -5,7 +5,7 @@
 - **Tickets:** [WARP-3211](https://warp-lab.atlassian.net/browse/WARP-3211) (this file) · epic [WARP-3223](https://warp-lab.atlassian.net/browse/WARP-3223) · precedent [WARP-3030](https://warp-lab.atlassian.net/browse/WARP-3030) (DropletAgent, native macOS) · sign-in sibling [WARP-3226](https://warp-lab.atlassian.net/browse/WARP-3226) (ADR-063)
 - **Supersedes in part:** [`ADR-009`](ADR-009-canonical-system-architecture.md) (the Tauri lock and the Mac Catalyst rows) and [`ADR-060`](ADR-060-native-windows-hello-relying-party.md) (the Tauri-shell mechanics; see [Reconciliation with ADR-060](#reconciliation-with-adr-060)).
 - **Amends:** [`ADR-008`](ADR-008-native-mobile-design-system-and-api-contract.md), [`ADR-014`](ADR-014-llm-client-dispatched-actions.md) and [`ADR-056`](ADR-056-agentic-extensibility.md), in this PR. [`ADR-037`](ADR-037-overlay-tunnel-key-custody.md) and [`ADR-045`](ADR-045-client-app-distribution.md) are amended by their own PRs (see [Supersedes and amends](#supersedes-and-amends)).
-- **Siblings:** ADR-061, the native Linux client (GTK 4 / libadwaita, no web view), claimed by [WARP-3203](https://warp-lab.atlassian.net/browse/WARP-3203) and cited by `droplet-linux` #1; it is not yet filed in `docs/`. ADR-063, native desktop sign-in extensions (passkey and native SSO), [WARP-3226](https://warp-lab.atlassian.net/browse/WARP-3226), filed by #2446.
+- **Siblings:** ADR-061, the native Linux client (GTK 4 / libadwaita, no web view), claimed by [WARP-3203](https://warp-lab.atlassian.net/browse/WARP-3203) and cited by `droplet-linux` #1; filed by #2514. ADR-063, native desktop sign-in extensions (passkey and native SSO), [WARP-3226](https://warp-lab.atlassian.net/browse/WARP-3226), filed by #2446.
 - **Number:** claimed here, in `docs/`, on `stage`. Checked 2026-09-26 across all 689 refs on `origin` (`stage` and every open PR head): the only `docs/ADR-*` file above ADR-056 is ADR-060 (#2395). No ref carries an ADR-061, -062 or -063 file. An org-wide code search finds `ADR-061` only in `droplet-linux` and `ADR-062` / `ADR-063` nowhere. The handbook register runs to ADR-059. So 061 is WARP-3203's claim, 062 is the next free number, and 063 is kept for WARP-3226. Re-checked 2026-09-30 before merge: on `stage` the only `docs/ADR-*` file above ADR-056 is still ADR-060; the open PRs add ADR-061 (#2514, WARP-3203) and ADR-063 (#2446) and nothing else in this range.
 
 > **What this file is.** The platform decision for Droplet's desktop clients, and the list of what it changes in other ADRs. It builds nothing. Line references are to `stage` at `3029b383b`. "The roadmap" is *Roadmap: landing and finishing the native WinUI 3 Droplet client* (2026-09-25), the plan of record on WARP-3223. Its outline for this file is §5.1, drafted as "ADR-060" before `stage` took that number.
@@ -102,13 +102,13 @@ Lines are at `stage` `3029b383b`, before this PR's edits.
 | ADR-008 | `:1`, `:34-37`, `:299-300` | Scope widened to the native desktop clients | This PR |
 | ADR-008 | `:165-167` | DPAPI row added | This PR |
 | ADR-008 | `:56-68` | WARP-3023 pointer added | This PR |
-| ADR-008 | `:145-146` | Flagged as the WARP-3038 bug (the code prefers the cookie, `middleware/auth.ts:228`) | This PR |
+| ADR-008 | `:145-146` | No note needed: the WARP-3038 bug (the code preferred the cookie) was fixed on `stage` by #2521, and the Bearer now wins (`middleware/auth.ts:231`) | #2521 |
 | ADR-008 | `:325-327` (WebAuthn rule), `:329` (ADR-060 exception) | For native desktop clients, changes only through ADR-063 | This PR |
 | ADR-014 | `:25`, `:102` | Stack-neutral wording; transport decided later | This PR |
 | ADR-056 | `:18`, `:30`, `:31`, `:34`, `:66-80`, `:102`, `:110` | Wording only | This PR |
 | ADR-060 | §3, §4 steps 1, 2 and 4, §5, §7, Rollout (c)-(e) and the handoff half of (a)-(b), D3, Gate items 4-5 | Superseded for Windows ([above](#reconciliation-with-adr-060)) | This PR (pointer) |
-| ADR-037 | `:84-116`, `:133-137`, `:145` | Names the C# client; pipe identity and gate (row 7); shared-PC policy; write-only token; MSI; rogue-QR binding in C#; optional-key item superseded; `PROTOCOL.md` v1 | Its own amendment PR, before the vpnd hardening lands |
-| ADR-045 | `:32-33`, `:115-119` | The Tauri updater text replaced by row 8 | [WARP-1955](https://warp-lab.atlassian.net/browse/WARP-1955) |
+| ADR-037 | `:84-116`, `:133-137`, `:145` | Names the C# client; pipe identity and gate (row 7); shared-PC policy; write-only token; MSI; rogue-QR binding in C#; optional-key item superseded; `PROTOCOL.md` v1 | Its own amendment PR (#2470), before the vpnd hardening lands |
+| ADR-045 | `:32-33`, `:115-119` | The Tauri updater text replaced by row 8 | ADR-045 Amendment 1 ([WARP-3246](https://warp-lab.atlassian.net/browse/WARP-3246), #2519), on `stage` |
 
 ## Open questions
 

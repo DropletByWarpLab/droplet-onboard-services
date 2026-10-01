@@ -160,12 +160,6 @@ accepts `Authorization: Bearer <jwt>` on every protected route. Bearer
 is checked BEFORE the `droplet_session` cookie. Native clients use
 Bearer; no new orchestrator path is needed.
 
-> **Flagged by [ADR-062](ADR-062-native-desktop-clients.md) (2026-09-26):**
-> the code does the opposite. `middleware/auth.ts:228` reads
-> `const token = cookieToken || headerToken`, so a cookie wins over the
-> Bearer. That is bug WARP-3038. Native clients send no cookie, so they are
-> unaffected.
-
 **One required orchestrator change** before mobile can ship: add
 `?return=body` to `POST /api/auth/login` so the JWT is returned in the
 response body in addition to the existing `Set-Cookie` header. Native
