@@ -25,6 +25,30 @@ name: publish-release
 # every stable box. Any other ref is refused before a single image is
 # built (see the `channel` job).
 #
+# ── PUBLIC PACKAGES, TOKEN-FREE BOXES (WARP-3429, ADR-045) ──
+# A box carries no GitHub token (ADR-045), so it pulls the images and reads
+# the releases anonymously: every first-party GHCR package is PUBLIC. Public
+# is irreversible per package and exposes every layer, and a package that is
+# private by mistake breaks OTA on every box at once. Three additions defend
+# that, none of which touches the channel/prerelease rules above:
+#
+#   1. Pre-push image secret scan — each image is `docker save`d and scanned
+#      with the pinned gitleaks (config + every layer) between `docker build`
+#      and `docker push`; a non-vendor finding outside the reviewed baseline
+#      (scripts/release/image-secret-baseline.txt) fails the publish BEFORE
+#      the image reaches the registry.
+#   2. Public-package gate — after the pushes, every package must answer an
+#      anonymous pull-token request with 200. A new service's package is born
+#      private on GHCR, so a service added to services.json cannot silently
+#      ship unpullable. Runs before anything is signed or released.
+#   3. Signed channel index — once the Release exists, the `index` job signs
+#      channel-<channel>.json (the newest tag + the sha256 of its release.json)
+#      like release.json and uploads it to the rolling `ota-index` release,
+#      whose download URL never changes, so a box finds the newest release
+#      with one anonymous GET instead of listing releases through the API.
+#      `ota-index` is a prerelease, never `latest`, and its tag does not start
+#      with ota-stage-/ota-stable-, so no poller ever mistakes it for a release.
+#
 # ── FAILS UNTIL THE KEY CEREMONY RUNS ──
 # The sign step requires the COSIGN_PRIVATE_KEY + COSIGN_PASSWORD repo
 # secrets, which are provisioned ONLY by the human key ceremony
@@ -263,8 +287,17 @@ jobs:
   publish:
     name: build, push, sign, release
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # WARP-3429: 120 -> 180. The pre-push secret scan adds a `docker save`
+    # plus a per-layer gitleaks pass to every released image; the time that
+    # needs is not measured yet, so the cap moves rather than failing a
+    # publish late, after most of the images are already pushed. A cap, not
+    # spend: runner-minutes are only billed when they are used.
+    timeout-minutes: 180
     needs: [channel, gate-node, gate-python]
+    outputs:
+      # The release tag, for the `index` job — computed once, in the step
+      # that creates the Release, so the pointer can never name another tag.
+      tag: ${{ steps.release.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -273,6 +306,8 @@ jobs:
       # untested generator. WARP-3001: the same suite carries the
       # compose <-> services.json drift gate, so a release also refuses
       # to publish while a compose-built service is missing from the list.
+      # WARP-3429: it also covers the pre-push secret scan and the channel
+      # pointer generator, so neither can ship broken.
       - name: Test release manifest generator
         run: |
           python3 -m pip install --upgrade pip pytest pyyaml
@@ -335,6 +370,18 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
+      # WARP-3429 — the pinned gitleaks the pre-push image scan below runs.
+      # Same release and sha256 as ci.yml's `gitleaks` leg and
+      # ghcr-secret-scan.yml, so one version decides "is this a secret" for
+      # the repo, the registry history and every image about to be pushed.
+      - name: Install gitleaks v8.30.1 (pinned, checksummed — same as ci.yml)
+        run: |
+          set -eu
+          curl -fsSL -o /tmp/gitleaks.tgz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tgz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+
       # Build + push every service in scripts/release/services.json
       # (canonical list — the generator refuses to publish if this loop
       # and the list ever drift). Tag = full commit sha; the manifest
@@ -357,6 +404,24 @@ jobs:
             # compose semantics: dockerfile path is relative to its context
             docker build --pull -t "${image}:${GITHUB_SHA}" \
               -f "${ctx}/${dockerfile}" "${ctx}"
+            # WARP-3429 — secret-scan the image BEFORE it can reach the
+            # registry. The packages are public (ADR-045), and public is
+            # irreversible and exposes every layer, so a credential baked
+            # into any layer (or the config's Env / build args) must stop
+            # the publish here, not be found afterwards in a public package.
+            # Config and each layer are scanned on their own, so a secret
+            # deleted by a later layer is still caught. A non-vendor finding
+            # outside the reviewed baseline exits non-zero and `set -e`
+            # aborts before the push. `</dev/null`: this loop reads its
+            # list from stdin, and nothing the scan spawns may eat it.
+            scan_tar="${RUNNER_TEMP}/image-scan.tar"
+            docker save "${image}:${GITHUB_SHA}" -o "${scan_tar}"
+            python3 scripts/release/scan-ghcr-secrets.py \
+              --package "droplet-${name}" --gitleaks /tmp/gitleaks \
+              --docker-save "${scan_tar}" \
+              --baseline scripts/release/image-secret-baseline.txt \
+              --fail-on-app </dev/null
+            rm -f "${scan_tar}"
             docker push "${image}:${GITHUB_SHA}"
             digest="$(docker inspect \
               --format='{{range .RepoDigests}}{{println .}}{{end}}' \
@@ -376,6 +441,46 @@ jobs:
           json.dump(digests, open("dist/digests.json", "w"), indent=2)
           print(json.dumps(digests, indent=2))
           PY
+
+      # WARP-3429 — drift gate: every first-party package must be pullable
+      # ANONYMOUSLY. A box carries no GitHub token (ADR-045), so a private
+      # package means `docker pull` fails on every box that tries this
+      # release — and GHCR creates every NEW package private, so a service
+      # added to services.json would otherwise ship unpullable with nothing
+      # on the publisher's side noticing. ghcr.io answers an anonymous
+      # pull-token request with 200 only for a public package (403
+      # otherwise), so ask each one exactly as a box's docker would: no
+      # Authorization header. It runs right after the pushes (the package
+      # has to exist to be asked about) and before anything is signed or
+      # released, so a private package fails the job with no Release yet
+      # pointing boxes at images they cannot pull. curl retries only
+      # transient errors (5xx, timeouts, refused connections), never a 403.
+      - name: Gate — every package is public (anonymous pull token)
+        run: |
+          set -euo pipefail
+          owner_lc="${GITHUB_REPOSITORY_OWNER,,}"
+          private=()
+          while read -r name _; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+              --retry 3 --retry-connrefused \
+              "https://ghcr.io/token?scope=repository:${owner_lc}/droplet-${name}:pull&service=ghcr.io" || true)"
+            if [ "${code}" != "200" ]; then
+              private+=("droplet-${name} (HTTP ${code}) https://github.com/orgs/${GITHUB_REPOSITORY_OWNER}/packages/container/droplet-${name}/settings")
+            fi
+          done < dist/digests.txt
+          if [ "${#private[@]}" -gt 0 ]; then
+            echo "::error::${#private[@]} package(s) are not public: boxes pull anonymously (ADR-045), so OTA would fail on every box. Make each one public (Package settings > Danger Zone > Change visibility > Public), then re-run."
+            printf '  %s\n' "${private[@]}"
+            {
+              echo "### Private GHCR packages"
+              echo
+              echo "Boxes pull anonymously (ADR-045). Make each of these public, then re-run:"
+              echo
+              printf -- '- %s\n' "${private[@]}"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "all $(wc -l < dist/digests.txt) packages answer an anonymous pull token"
 
       # WARP-244 — keyless (Sigstore) signature on EVERY pushed image. The
       # signer is this workflow's GitHub Actions OIDC identity: Fulcio
@@ -546,6 +651,7 @@ jobs:
       # HINT, never the trust decision: the device re-checks the channel
       # inside the cosign-verified manifest before accepting anything.
       - name: Create GitHub Release
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
           CHANNEL: ${{ needs.channel.outputs.channel }}
@@ -568,3 +674,120 @@ jobs:
             apps/orchestrator/src/services/update-agent/cosign.pub \
             dist/sbom/*.cdx.json \
             ${client_files[@]+"${client_files[@]}"}
+          # WARP-3429: handed to the `index` job only once the Release and
+          # every asset exist (a failed create exits above, under `set -e`).
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+  # WARP-3429 — signed channel index. A SEPARATE job so a failure here (a
+  # transient `gh` error, say) is fixed with "Re-run failed jobs", which
+  # re-runs only this job: re-running `publish` would redo ~2 hours of
+  # builds and then fail at `gh release create`, because the tag exists.
+  #
+  # It publishes channel-<channel>.json (+ .sig) to the rolling `ota-index`
+  # release. A box fetches
+  #   .../releases/download/ota-index/channel-<channel>.json
+  # (+ .sig), verifies it against the baked-in cosign.pub, and learns the
+  # newest tag for its channel and the sha256 of that release's release.json
+  # with one anonymous GET, no API listing and no token (ADR-045). The
+  # pointer is a hint plus an integrity pin, never the trust decision: the box
+  # still verifies release.json's own signature and re-checks the channel
+  # inside it. The workflow-level concurrency group is held until this job
+  # ends, so two publishes of one channel can never race on the pointer.
+  index:
+    name: channel index (signed pointer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [channel, publish]
+    # Least privilege: this job only reads and writes Releases (the signing
+    # is key-based, so no OIDC token, and it pushes no package).
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CHANNEL: ${{ needs.channel.outputs.channel }}
+      TAG: ${{ needs.publish.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      # The pointer pins the sha256 of release.json, so pin the bytes GitHub
+      # actually serves for the release, not a local copy: if the Release is
+      # missing or incomplete this fails here, and the hash can never
+      # describe a file boxes will not get.
+      - name: Download the published release.json
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "${TAG}" -R "${GITHUB_REPOSITORY}" \
+            --pattern release.json --dir dist
+
+      # Sign exactly as release.json is signed: the same key, the same
+      # --tlog-upload=false (private product metadata stays out of the public
+      # log; the box verifies offline with --insecure-ignore-tlog). The
+      # generator refuses a channel/tag/manifest mismatch, so nothing wrong
+      # ever gets a signature. Verifying with the committed cosign.pub before
+      # upload is the same "never ship a signature our own policy cannot
+      # verify" self-check the image signatures get.
+      - name: Generate and sign the channel pointer
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${COSIGN_PRIVATE_KEY}" ]; then
+            echo "::error::COSIGN_PRIVATE_KEY secret is not set — run the key ceremony in scripts/README.md (\"OTA release signing\") before releases can publish"
+            exit 1
+          fi
+          pointer="dist/channel-${CHANNEL}.json"
+          python3 scripts/release/gen-channel-pointer.py \
+            --manifest dist/release.json --channel "${CHANNEL}" --tag "${TAG}" \
+            --out "${pointer}"
+          cat "${pointer}"
+          cosign sign-blob --yes \
+            --key env://COSIGN_PRIVATE_KEY \
+            --tlog-upload=false \
+            --output-signature "${pointer}.sig" \
+            "${pointer}"
+          cosign verify-blob \
+            --key apps/orchestrator/src/services/update-agent/cosign.pub \
+            --signature "${pointer}.sig" \
+            --insecure-ignore-tlog=true \
+            "${pointer}"
+
+      # The rolling release the pointers live on. Created once, then reused
+      # forever. It must never become `latest` (that is what stable boxes
+      # poll) and its tag must never start with ota-stage-/ota-stable-
+      # (older boxes list releases by that prefix), hence --prerelease
+      # --latest=false and the bare `ota-index` tag. The stage and stable
+      # publishers hold different concurrency groups, so two of them can both
+      # find it missing on the very first run: the loser's create fails
+      # (already exists), which is fine so long as the release is there now.
+      - name: Ensure the ota-index release exists
+        run: |
+          set -euo pipefail
+          ensure_index() {
+            gh release view ota-index -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1 && return 0
+            gh release create ota-index -R "${GITHUB_REPOSITORY}" \
+              --target "${GITHUB_SHA}" \
+              --title "OTA channel index — do not delete" \
+              --notes "Rolling release that holds the signed OTA channel pointers: channel-stage.json and channel-stable.json, each with a .sig. Rewritten in place by publish-release.yml after every successful OTA release (WARP-3429). A pointer names the newest release tag for its channel and the sha256 of that release's release.json; a box verifies the .sig against the cosign.pub baked into its image, then downloads that release. Deleting this release breaks that discovery path for every box. It is a prerelease and is never the latest release, and its tag does not start with ota-stage- or ota-stable-, so it is never mistaken for an OTA release." \
+              --prerelease --latest=false && return 0
+            for _ in 1 2 3 4 5; do
+              sleep 3
+              gh release view ota-index -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1 && return 0
+            done
+            return 1
+          }
+          ensure_index || { echo "::error::could not create or find the ota-index release"; exit 1; }
+
+      # --clobber: the pointer is rewritten in place on every release, under
+      # the same asset name, which is what keeps the box-side URL stable. If
+      # a box fetches between the two uploads it sees a json/.sig pair that
+      # fails verification and simply retries on its next poll.
+      - name: Upload the pointer to ota-index
+        run: |
+          set -euo pipefail
+          gh release upload ota-index -R "${GITHUB_REPOSITORY}" --clobber \
+            "dist/channel-${CHANNEL}.json" "dist/channel-${CHANNEL}.json.sig"

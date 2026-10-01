@@ -456,6 +456,76 @@ cosign verify \
   surface on purpose — it requires the same physical/SSH trust as any
   other host-level intervention.
 
+## Public packages: pre-push secret scan and anonymous-pull gate {#public-packages}
+
+A box pulls images and reads releases with **no GitHub token** (ADR-045: no
+GitHub token may ever sit on a customer appliance), so every first-party
+package `ghcr.io/dropletbywarplab/droplet-*` is **public**. Making a package
+public cannot be undone and exposes every layer it holds, so
+`publish-release.yml` guards both ends of that (WARP-3429):
+
+- **Secret scan before the push.** Each image is built, exported with
+  `docker save`, and scanned with the pinned gitleaks (v8.30.1, same as
+  `ci.yml`) before `docker push`: the image config (Env, history — where
+  build args land) and every layer on its own, so a secret deleted by a later
+  layer is still found (`scripts/release/scan-ghcr-secrets.py --docker-save`).
+  Findings under vendor paths (`node_modules`, `site-packages`, `/usr/lib`, …)
+  are reported but do not block; any other finding that is not in the reviewed
+  baseline `scripts/release/image-secret-baseline.txt` fails the publish
+  before the image reaches the registry. The baseline is `<rule> <path>` per
+  line (no line number, no digest, so it survives a rebuild) and starts empty:
+  a real secret is never baselined — rotate it and fix the image; only a
+  reviewed false positive is. The failing step prints the exact lines to add.
+  `ghcr-secret-scan.yml` (WARP-3423) runs the same scanner over every
+  version already in the registry, on demand.
+- **Public-package gate.** After the pushes, every package must answer an
+  anonymous `https://ghcr.io/token?scope=repository:…:pull&service=ghcr.io`
+  request with 200 (a private package gets 403). Otherwise the job fails,
+  listing each private package with its settings page
+  (`https://github.com/orgs/DropletByWarpLab/packages/container/<package>/settings`)
+  and the instruction to make it public. GHCR creates every *new* package
+  private, so this is what stops a service added to
+  `scripts/release/services.json` from silently shipping an image no box can
+  pull. It runs before anything is signed or the Release is created.
+
+## Signed channel index (`ota-index`) {#channel-index}
+
+After the Release exists, the workflow's `index` job publishes a **signed
+pointer** to the newest release of the channel, so a box can find it with one
+anonymous download instead of listing releases through the GitHub API. The
+pointers live on one rolling release, `ota-index`, at stable URLs:
+
+```
+https://github.com/DropletByWarpLab/droplet-onboard-services/releases/download/ota-index/channel-<stage|stable>.json
+https://github.com/DropletByWarpLab/droplet-onboard-services/releases/download/ota-index/channel-<stage|stable>.json.sig
+```
+
+`channel-<channel>.json` (`scripts/release/gen-channel-pointer.py`; compact
+JSON, fixed key order, UTF-8, trailing newline):
+
+```json
+{"schemaVersion":1,"kind":"droplet-ota-channel-pointer","channel":"stage","tag":"ota-stage-<run>-g<sha7>","gitSha":"<40 hex>","builtAt":"<release.builtAt, verbatim>","manifestSha256":"<sha256 of the uploaded release.json>","publishedAt":"<UTC ISO-8601>"}
+```
+
+- It is signed exactly like `release.json`: the same org cosign key,
+  `--tlog-upload=false`, `.sig` beside it; verify the same way
+  (`cosign verify-blob --key cosign.pub --signature channel-stage.json.sig
+  --insecure-ignore-tlog=true channel-stage.json`). `manifestSha256` is
+  computed over the `release.json` bytes GitHub serves for the release, so it
+  pins exactly the manifest a box will download.
+- **It is a hint and an integrity pin, never the trust decision.** The box
+  still verifies `release.json.sig` and re-checks the channel inside the
+  signed manifest before accepting anything (same rule as the release tag).
+- `ota-index` is a **prerelease, never `latest`**, and its tag does not start
+  with `ota-stage-` / `ota-stable-`, so neither `/releases/latest` (stable
+  boxes) nor the `ota-<channel>-` prefix match (older boxes) can ever select
+  it as a release. Do not delete it: it is created once and rewritten in
+  place (`--clobber`) on every publish.
+- A box that fetches between the `.json` and `.sig` uploads sees a pair that
+  fails verification and retries on its next poll. If the `index` job alone
+  fails, use **Re-run failed jobs**: it re-runs only that job, not the
+  two-hour build.
+
 ## Third-party images
 
 Upstream images in the compose file (nginx, Nextcloud, Frigate, Ollama,

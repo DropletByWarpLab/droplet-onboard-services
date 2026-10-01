@@ -492,6 +492,37 @@ full appliance ISO manifest (OpenSSL ECDSA, ADR-020), while `cosign.pub`
 signs OTA app-update release manifests (WARP-534). Do not reuse one key
 for the other.
 
+### What the publish workflow adds around the signed manifest (WARP-3429)
+
+Boxes carry no GitHub token (ADR-045), so the first-party GHCR packages are
+public and `publish-release.yml` guards that. Full description:
+`docs/SECURITY.md#public-packages` and `#channel-index`.
+
+- **Pre-push image secret scan.** Between `docker build` and `docker push`,
+  `scripts/release/scan-ghcr-secrets.py --docker-save … --fail-on-app` scans
+  the image config and every layer with the pinned gitleaks. A non-vendor
+  finding not listed in `scripts/release/image-secret-baseline.txt`
+  (`<rule> <path>` per line, starts empty) fails the publish before the
+  push; the failing step prints the lines to add if it is a reviewed false
+  positive. A real secret is rotated and removed from the image, never
+  baselined. Run the `ghcr-secret-scan` workflow (WARP-3423) first to see the
+  findings for every published image and curate the baseline.
+- **Public-package gate.** After the pushes every package must answer an
+  anonymous `ghcr.io/token` request with 200; otherwise the job lists each
+  private package with its settings URL. New services start private on GHCR:
+  make the package public (settings → Danger Zone → Change visibility)
+  *before* the first release that includes it.
+- **Signed channel index.** The `index` job writes `channel-<channel>.json`
+  (`scripts/release/gen-channel-pointer.py`), signs it like `release.json`,
+  and uploads it to the rolling `ota-index` release (a prerelease, never
+  latest; never delete it). If only that job fails, "Re-run failed jobs"
+  re-runs it alone.
+
+The unit suites for all of this live next to the scripts
+(`scripts/release/test_*.py`) and run through the same
+`python3 -m pytest scripts/release/` command as the manifest generator, both
+in the PR lane (`release-scripts-tests.yml`) and as the publish gate.
+
 ---
 
 ## File layout
