@@ -148,7 +148,7 @@ class TestLoudFailures:
         assert not out.exists()
 
     def test_channel_must_match_the_manifest(self, tmp_path):
-        self._fails(tmp_path, write_manifest(tmp_path, channel="stable"), "release.channel")
+        self._fails(tmp_path, write_manifest(tmp_path, channel="stable"), "the manifest says")
 
     def test_tag_channel_must_match(self, tmp_path):
         self._fails(tmp_path, write_manifest(tmp_path), "names channel", tag="ota-stable-412-g0123456")
