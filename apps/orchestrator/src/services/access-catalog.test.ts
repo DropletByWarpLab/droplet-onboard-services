@@ -19,6 +19,7 @@ import {
   clampConnectorLevel,
   clampLevel,
   fullCatalogFeatures,
+  tierRefusingModuleIds,
   domainsForFeatures,
   isGrantableDomain,
   tierReachableDomains,
@@ -156,22 +157,59 @@ describe("access-catalog — security's family floor on `view` is a refusal (ADR
     expect(clampLevel("owner", "security", "manage")).toBe("manage");
   });
 
-  it("the refusal is opt-in per module: security is the only one that refuses a guest or a family tier", () => {
+  // WARP-3365 / WARP-3369 (Romain, 2026-09-30) — external guests get NOTHING from
+  // company-wide business data unless it is explicitly shared with them. Nothing
+  // in the CRM or Projects is shared per record, so both take the security
+  // pattern: `view` is a refusal below the family floor.
+  it("the refusal is opt-in per module: security, crm, projects and money are the only ones that refuse a guest or a family tier", () => {
     const refusing = (tier: "guest" | "family") =>
       GATEABLE_MODULE_IDS.filter((m) => maxLevelFor(tier, m) === null || clampLevel(tier, m, "manage") === null);
-    expect(refusing("guest")).toEqual(["security"]);
+    expect([...refusing("guest")].sort()).toEqual(["crm", "money", "projects", "security"]);
     expect(refusing("family")).toEqual([]);
+    // the route gate and the assistant gate mount off THIS list
+    expect([...tierRefusingModuleIds()].sort()).toEqual(["crm", "money", "projects", "security"]);
   });
 
-  it("a role-less guest's catalog has no security row; a role-less family, admin and owner keep theirs", () => {
-    const level = (tier: "guest" | "family" | "admin" | "owner") =>
-      fullCatalogFeatures(tier).find((f) => f.moduleId === "security")?.level;
-    expect(level("guest")).toBeUndefined();
-    expect(level("family")).toBe("act");
-    expect(level("admin")).toBe("manage");
-    expect(level("owner")).toBe("manage");
+  it("a role-less guest's catalog has no security, crm, projects or money row; a role-less family, admin and owner keep theirs", () => {
+    const level = (tier: "guest" | "family" | "admin" | "owner", moduleId: ModuleId) =>
+      fullCatalogFeatures(tier).find((f) => f.moduleId === moduleId)?.level;
+    expect(level("guest", "security")).toBeUndefined();
+    expect(level("guest", "crm")).toBeUndefined();
+    expect(level("guest", "projects")).toBeUndefined();
+    expect(level("guest", "money")).toBeUndefined();
+    expect(level("family", "money")).toBe("view"); // Money is read-only for a member: no act level
+    expect(level("admin", "money")).toBe("manage");
+    expect(level("owner", "money")).toBe("manage");
+    expect(level("family", "security")).toBe("act");
+    expect(level("admin", "security")).toBe("manage");
+    expect(level("owner", "security")).toBe("manage");
+    for (const moduleId of ["crm", "projects"] as const) {
+      expect(level("family", moduleId), `family ${moduleId}`).toBe("manage");
+      expect(level("admin", moduleId), `admin ${moduleId}`).toBe("manage");
+      expect(level("owner", moduleId), `owner ${moduleId}`).toBe("manage");
+    }
     // and nothing else about the guest's catalog moved: every other module is still there, chat included
-    expect(fullCatalogFeatures("guest")).toHaveLength(GATEABLE_MODULE_IDS.length);
+    expect(fullCatalogFeatures("guest")).toHaveLength(GATEABLE_MODULE_IDS.length + 1 - 4);
+    for (const moduleId of ["files", "team_chat", "voice", "calendar", "chat"] as const) {
+      expect(level("guest", moduleId), `guest ${moduleId}`).toBeDefined();
+    }
+  });
+
+  it("a guest-based role cannot store a crm, projects or money grant, at any level; a family-based one clamps as before", () => {
+    for (const moduleId of ["crm", "projects", "money"] as const) {
+      for (const level of ["view", "act", "manage"] as const) {
+        expect(clampLevel("guest", moduleId, level), `guest ${moduleId} ${level}`).toBeNull();
+      }
+    }
+    expect(clampLevel("family", "money", "manage")).toBe("view"); // manage is admin-only: a clamp, not a refusal
+    expect(clampLevel("admin", "money", "manage")).toBe("manage");
+    for (const moduleId of ["crm", "projects"] as const) {
+      for (const level of ["view", "act", "manage"] as const) {
+        expect(clampLevel("guest", moduleId, level), `guest ${moduleId} ${level}`).toBeNull();
+      }
+      expect(clampLevel("family", moduleId, "manage")).toBe("manage");
+      expect(clampLevel("family", moduleId, "view")).toBe("view");
+    }
   });
 });
 
