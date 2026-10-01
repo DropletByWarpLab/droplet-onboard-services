@@ -3534,8 +3534,9 @@ model File {
   ownerUserId  String
   departmentId String? // WARP-1255: department this file belongs to (null = personal/household)
   scope        Scope    @default(team)
-  // Cached path for display. Refreshed from the file-indexer's MQTT
-  // bridge when Nextcloud renames or moves the file.
+  // Cached path for display, as of the upload that wrote the row. Nothing
+  // refreshes it on a rename or move (WARP-2096 Leg 5), so treat it as a hint
+  // and confirm it against Nextcloud before relying on it.
   path         String?
   // WARP-2096: SHA-256 (hex) of the bytes, computed while the upload streams
   // through, and their length. Null for rows written before it or outside
@@ -3544,6 +3545,19 @@ model File {
   // reported to the uploader, never refused by the database.
   sha256       String?
   sizeBytes    BigInt?
+  // WARP-3425: whether Nextcloud still has this file. Rows are written on
+  // upload, and a delete by any path (Files, Nextcloud, a sync client, a trash
+  // purge, a wiped folder) used to leave them claiming the file existed.
+  // `reconcileFileRegistry` (file-registry.service.ts) sets `missing` only
+  // after a SUCCESSFUL read of Nextcloud's file cache did not contain
+  // `ncFileId`, and sets `live` again if the id comes back (a Nextcloud
+  // restore); an upload always writes `live`. A file in the trash bin is still
+  // `live`: it keeps its id and can be restored.
+  //
+  // Kept, never deleted: `departmentId` is what the metadata gates
+  // (`resolveFileDepartment`, `filterVisibleLinks`) fail closed on, and a
+  // missing row would read as personal-space semantics there.
+  status       FileRegistryStatus @default(live)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -3551,6 +3565,13 @@ model File {
   @@index([scope])
   @@index([departmentId])
   @@index([ownerUserId, sha256])
+}
+
+/// WARP-3425 — see `File.status`. Explicit (CLAUDE.md "no guessing"): a row's
+/// existence in Nextcloud is never inferred from a NULL or from the row's absence.
+enum FileRegistryStatus {
+  live
+  missing
 }
 
 // ── WARP-456: signed append-only activity log ──

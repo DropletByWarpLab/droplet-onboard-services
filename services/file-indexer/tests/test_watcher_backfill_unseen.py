@@ -68,6 +68,8 @@ def test_backfill_queues_only_never_seen_files(nc_root, monkeypatch, startup_don
     (home / "new.txt").write_text("never indexed")
     (home / ".hidden").write_text("x")
     (home / "up.part").write_text("x")
+    # `_index` writes no row for an empty file; queuing it would repeat forever.
+    (home / "empty.txt").write_text("")
 
     handler = MagicMock()
     with patch.object(

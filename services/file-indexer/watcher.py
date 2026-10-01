@@ -887,6 +887,13 @@ def backfill_unseen(handler: IndexHandler) -> int:
             continue
         if (target.index_user, target.stored_path) in status_map:
             continue
+        # `_index` returns before writing any status row for an empty file, so
+        # without this every empty file would be re-queued every sweep forever.
+        try:
+            if os.path.getsize(abs_path) == 0:
+                continue
+        except OSError:
+            continue
         handler._enqueue_index(abs_path)
         queued += 1
     if queued:
