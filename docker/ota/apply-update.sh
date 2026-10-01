@@ -73,7 +73,10 @@
 #   DROPLET_OTA_CONFIG_ROOT   repo root (default: two levels above compose).
 #   DROPLET_OTA_HOST_IMAGE    the pinned image the one-shot runs off; reused
 #                             for the detached self-swap and for cosign.
-#   DROPLET_OTA_GITHUB_TOKEN  pull-images only (private GHCR, pre-GA).
+#   DROPLET_OTA_GITHUB_TOKEN  pull-images only. LAB/DEV ONLY (WARP-3430): the
+#                             first-party images are public and ADR-045
+#                             forbids a registry token on an appliance, so
+#                             this is unset on every shipped box.
 #   DROPLET_OTA_SELF_HEALTH_{ATTEMPTS,INTERVAL_SECONDS}  self-swap wait.
 #
 # ── SUBCOMMANDS (the ApplyRunner port contract) ──
@@ -85,6 +88,10 @@
 #       and the per-target overrides + services.txt one level up).
 #   pull-images         --images REF [REF ...]
 #       cosign-verify, then `docker pull`, every pinned image ref (by digest).
+#       Anonymous (WARP-3430). Fails with one of two canonical stderr
+#       prefixes the orchestrator classifies: `image-verify:` (cosign refused
+#       the image — rejected) or `registry-auth:` (the registry refused AUTH,
+#       i.e. the package is private — retried, never rejected).
 #   stage-configs       --update-id ID --configs-tar PATH
 #       Unpack the (already sha256-verified) configs tarball over the host
 #       config tree; the pre-image lives in the backup dir from `snapshot`.
@@ -224,8 +231,9 @@ COSIGN_OIDC_ISSUER='https://token.actions.githubusercontent.com'
 
 # Ephemeral registry auth for BOTH cosign (in-process HTTPS to ghcr.io) and
 # `docker pull` (the CLI forwards credentials from DOCKER_CONFIG to the
-# daemon per pull): GHCR packages are private pre-GA. No token env → no-op
-# (anonymous works if/when the packages go public).
+# daemon per pull). LAB/DEV ONLY since WARP-3430: the first-party packages
+# are public and ADR-045 forbids a token on an appliance, so on a shipped box
+# there is no token env → no-op, and everything below runs anonymously.
 REGISTRY_AUTH_DIR=""
 cleanup_registry_auth() {
   [ -n "$REGISTRY_AUTH_DIR" ] && rm -rf "$REGISTRY_AUTH_DIR"
@@ -261,6 +269,26 @@ cosign_cmd() {
   COSIGN+=("$HOST_IMAGE")
 }
 
+# WARP-3430 — a registry that refuses AUTH is not a bad signature. The GHCR
+# packages are public and a box carries no registry credential (ADR-045), so
+# cosign's signature fetch and `docker pull` run anonymously. While a package
+# is still private the registry answers 401 / UNAUTHORIZED / "authentication
+# required" / DENIED — before any signature exists to judge. Reporting that
+# as `image-verify:` would make apply.ts REJECT a good update for good; it
+# gets its own canonical `registry-auth:` prefix, which apply.ts retries and
+# logs as update.registry_auth_failed. The match is on the registry's own
+# error text, so the worst a spoofed message can do is turn a refusal into a
+# RETRY: verification still dies before the pull, so nothing unverified is
+# ever fetched either way.
+registry_refused_auth() {
+  # $1 = a file holding the failed command's stderr.
+  grep -Eiq 'unauthorized|authentication required|denied:|: denied|(^|[^0-9])401([^0-9]|$)' "$1"
+}
+
+die_registry_auth() {
+  die "registry-auth: the registry refused authentication for $1 — the image package is private, and a box carries no registry credentials (ADR-045); make the package public"
+}
+
 verify_image_signature() {
   local img="$1"
   log "verify $img"
@@ -275,13 +303,49 @@ verify_image_signature() {
       "$img"
     return 0
   fi
-  if ! run "${COSIGN[@]}" verify \
+  # stderr is replayed untouched AND scanned, to tell a registry that refused
+  # auth from a signature that did not verify.
+  local err rc=0
+  err="$(mktemp)"
+  run "${COSIGN[@]}" verify \
       --certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP" \
       --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
       --offline=true \
-      "$img" >/dev/null; then
+      "$img" >/dev/null 2>"$err" || rc=$?
+  cat "$err" >&2
+  if [ "$rc" -ne 0 ]; then
+    if registry_refused_auth "$err"; then
+      rm -f "$err"
+      die_registry_auth "$img"
+    fi
+    rm -f "$err"
     die "image-verify: cosign rejected $img — only images signed by the publish-release workflow may be pulled (WARP-244, docs/SECURITY.md)"
   fi
+  rm -f "$err"
+}
+
+# `docker pull` with the same registry-auth classification as the verify above.
+# A failure that is NOT an auth refusal keeps its old shape: docker's own
+# stderr, then the script exits with docker's status.
+pull_image() {
+  local img="$1"
+  if [ -n "$DRY_RUN" ]; then
+    run docker pull "$img"
+    return 0
+  fi
+  local err rc=0
+  err="$(mktemp)"
+  run docker pull "$img" 2>"$err" || rc=$?
+  cat "$err" >&2
+  if [ "$rc" -ne 0 ]; then
+    if registry_refused_auth "$err"; then
+      rm -f "$err"
+      die_registry_auth "$img"
+    fi
+    rm -f "$err"
+    exit "$rc"
+  fi
+  rm -f "$err"
 }
 
 # The image the host-exec one-shot runs off (host-exec.ts pins it by image
@@ -538,7 +602,7 @@ cmd_pull_images() {
     # are the same content by construction.
     verify_image_signature "$img"
     log "pull $img"
-    run docker pull "$img"
+    pull_image "$img"
   done
 }
 

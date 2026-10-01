@@ -113,6 +113,11 @@ function checkOutcomeCopy(result: CheckNowResult): { ok: boolean; text: string }
       return { ok: true, text: "No release has been published yet." };
     case "already_known":
       return { ok: true, text: "Already tracking the latest release — nothing new." };
+    case "not_newer":
+      return {
+        ok: true,
+        text: "The published release is not newer than the one installed — nothing to update.",
+      };
     case "pending_created":
       return { ok: true, text: "New release found — it is now pending below." };
     case "channel_mismatch":

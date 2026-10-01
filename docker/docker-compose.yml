@@ -397,6 +397,13 @@ services:
       - DROPLET_OTA_COMPOSE_FILE=${DROPLET_OTA_COMPOSE_FILE:-${DROPLET_HOST_ROOT:-/opt/droplet}/docker/docker-compose.yml}
       - DROPLET_OTA_CONFIG_ROOT=${DROPLET_OTA_CONFIG_ROOT:-${DROPLET_HOST_ROOT:-/opt/droplet}}
       - DROPLET_OTA_UPDATES_DIR=/data/updates
+      # WARP-3430 — where the box downloads its release, anonymously and
+      # without the GitHub REST API: the signed channel pointer under
+      # ota-index/ and each release's assets under <tag>/. Empty falls back
+      # to the canonical publisher in config.ts (so this line never crashes
+      # the boot); set it only for a mirror. No GitHub token is provisioned
+      # on a box (ADR-045) — nothing on this path uses one.
+      - DROPLET_OTA_DOWNLOAD_BASE=${DROPLET_OTA_DOWNLOAD_BASE:-}
       # Where the client-app installers are mounted (see the volume below).
       # REQUIRE_SIGNATURE stays off until the OTA key ceremony runs — the
       # cosign anchor is still the WARP-535 placeholder, so switching it on

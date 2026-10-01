@@ -961,9 +961,18 @@ const envSchema = z.object({
   //   polls for cosign-signed OTA release manifests. Default is the
   //   canonical publisher (this repo's publish-release.yml); overridable
   //   for forks/mirrors and for the file-served fake in integration tests.
-  // GITHUB_TOKEN — bearer for the private releases repo. Empty = send no
-  //   Authorization header (public repos / the test fake). Injected via
-  //   .env by setup.sh when fleet provisioning lands; never hardcoded.
+  // DOWNLOAD_BASE — WARP-3430: where a box downloads its release, anonymously
+  //   and without the GitHub REST API (60 unauthenticated requests/hour per IP
+  //   breaks at ~15 boxes behind one NAT, and ADR-045 forbids a token on an
+  //   appliance): the signed channel pointer at
+  //   `<base>/ota-index/channel-<channel>.json(.sig)` and each release's
+  //   assets at `<base>/<tag>/<name>`. Default is the canonical publisher
+  //   (publish-release.yml); set it only for a mirror. RELEASES_URL above is
+  //   now the FALLBACK discovery path, used only while no pointer exists.
+  // GITHUB_TOKEN — bearer for the private releases repo. LAB/DEV ONLY: it is
+  //   NOT provisioned on appliances (ADR-045), and nothing on the anonymous
+  //   path needs it. Empty = send no Authorization header (the default, and
+  //   the test fake). Never hardcoded.
   // POLL_INTERVAL — seconds between checks. 900 (15 min) per the design;
   //   floor of 60 keeps a typo'd "0" from hot-looping the GitHub API.
   DROPLET_OTA_RELEASES_URL: z
@@ -971,6 +980,12 @@ const envSchema = z.object({
     .url()
     .default(
       "https://api.github.com/repos/DropletByWarpLab/droplet-onboard-services/releases/latest",
+    ),
+  DROPLET_OTA_DOWNLOAD_BASE: z
+    .string()
+    .url()
+    .default(
+      "https://github.com/DropletByWarpLab/droplet-onboard-services/releases/download",
     ),
   DROPLET_OTA_GITHUB_TOKEN: z.string().default(""),
   DROPLET_OTA_POLL_INTERVAL: z.coerce.number().int().min(60).finite().default(900),
@@ -1544,16 +1559,23 @@ const envForParse: NodeJS.ProcessEnv = {
     process.env.DEVICE_BRIDGE_URL,
     process.env.BRIDGE_URL,
   ),
-  // WARP-2758 — same rescue, and this key needs it most: it is the schema's
-  // ONLY `.url()`, so a bare `DROPLET_OTA_RELEASES_URL=` is a defined-but-empty
-  // value that `.default()` never replaces and `.url()` rejects, killing the
-  // hard `.parse()` below and the whole boot. The key is documented as an
-  // operator knob for fleet-agent (services/fleet-agent/README.md), whose
-  // config.py:157 treats blank as "use the canonical publisher" — and the
-  // orchestrator inherits the same root `.env` via `env_file:`. Without this,
-  // one blank line in `.env` bricks the orchestrator and not fleet-agent.
+  // WARP-2758 — same rescue, and this key needs it most: it is one of the
+  // schema's `.url()`s, so a bare `DROPLET_OTA_RELEASES_URL=` is a
+  // defined-but-empty value that `.default()` never replaces and `.url()`
+  // rejects, killing the hard `.parse()` below and the whole boot. The key is
+  // documented as an operator knob for fleet-agent (services/fleet-agent/
+  // README.md), whose config.py:157 treats blank as "use the canonical
+  // publisher" — and the orchestrator inherits the same root `.env` via
+  // `env_file:`. Without this, one blank line in `.env` bricks the
+  // orchestrator and not fleet-agent.
   DROPLET_OTA_RELEASES_URL: firstNonEmpty(
     process.env.DROPLET_OTA_RELEASES_URL,
+  ),
+  // WARP-3430 — the same trap, doubly: docker-compose.yml hands the
+  // orchestrator `${DROPLET_OTA_DOWNLOAD_BASE:-}`, which is a defined-but-empty
+  // string on EVERY box that never set it — i.e. the whole fleet.
+  DROPLET_OTA_DOWNLOAD_BASE: firstNonEmpty(
+    process.env.DROPLET_OTA_DOWNLOAD_BASE,
   ),
 };
 

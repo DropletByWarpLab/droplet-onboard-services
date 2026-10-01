@@ -1,7 +1,8 @@
 /**
  * DROPLET_OTA_RELEASES_URL — a bare `KEY=` line must not crash the boot.
  *
- * This is the only `.url()` key in the whole schema. Zod's `.default()` fires
+ * This was the only `.url()` key in the whole schema until WARP-3430 added
+ * DROPLET_OTA_DOWNLOAD_BASE (covered at the bottom). Zod's `.default()` fires
  * on `undefined` only, so an explicit empty string reaches `.url()` and the
  * hard `envSchema.parse()` throws — the orchestrator never boots. Compose
  * hands fleet-agent exactly that shape (`${DROPLET_OTA_RELEASES_URL:-}`,
@@ -62,5 +63,62 @@ describe("DROPLET_OTA_RELEASES_URL — empty value degrades to the default", () 
     expect(config.DROPLET_OTA_RELEASES_URL).toBe(
       "https://example.invalid/repos/x/y/releases/latest",
     );
+  });
+});
+
+/**
+ * WARP-3430 — DROPLET_OTA_DOWNLOAD_BASE is the schema's second `.url()` and has
+ * the same trap, worse: docker-compose.yml hands the orchestrator
+ * `${DROPLET_OTA_DOWNLOAD_BASE:-}`, a defined-but-empty string on EVERY box
+ * that never set it — i.e. the whole fleet. A bare value must resolve to the
+ * canonical publisher, not kill the boot.
+ */
+describe("DROPLET_OTA_DOWNLOAD_BASE — empty value degrades to the default (WARP-3430)", () => {
+  const DL_KEY = "DROPLET_OTA_DOWNLOAD_BASE";
+  const DL_CANONICAL =
+    "https://github.com/DropletByWarpLab/droplet-onboard-services/releases/download";
+  let saved: string | undefined;
+
+  beforeEach(() => {
+    vi.resetModules();
+    saved = process.env[DL_KEY];
+    delete process.env[DL_KEY];
+  });
+
+  afterEach(() => {
+    if (saved === undefined) delete process.env[DL_KEY];
+    else process.env[DL_KEY] = saved;
+  });
+
+  it("unset → the canonical release-download base", async () => {
+    const { config } = await import("./config.js");
+    expect(config.DROPLET_OTA_DOWNLOAD_BASE).toBe(DL_CANONICAL);
+  });
+
+  it("compose's `${KEY:-}` (empty) → default, not a boot crash", async () => {
+    process.env[DL_KEY] = "";
+    vi.resetModules();
+    const { config } = await import("./config.js");
+    expect(config.DROPLET_OTA_DOWNLOAD_BASE).toBe(DL_CANONICAL);
+  });
+
+  it("whitespace-only → default, not a boot crash", async () => {
+    process.env[DL_KEY] = "   ";
+    vi.resetModules();
+    const { config } = await import("./config.js");
+    expect(config.DROPLET_OTA_DOWNLOAD_BASE).toBe(DL_CANONICAL);
+  });
+
+  it("an explicit mirror is honored", async () => {
+    process.env[DL_KEY] = "https://mirror.example.invalid/ota/download";
+    vi.resetModules();
+    const { config } = await import("./config.js");
+    expect(config.DROPLET_OTA_DOWNLOAD_BASE).toBe("https://mirror.example.invalid/ota/download");
+  });
+
+  it("a non-URL value is still refused at boot (validated, not just defaulted)", async () => {
+    process.env[DL_KEY] = "not a url";
+    vi.resetModules();
+    await expect(import("./config.js")).rejects.toThrow();
   });
 });
