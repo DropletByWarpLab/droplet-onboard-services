@@ -5,6 +5,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   TOOLS,
+  confirmationOwnerOf,
   defaultToolCallInterceptor,
   interceptOutcomeToToolResult,
   type PrivateEnhancement,
@@ -263,7 +264,9 @@ export function createServer(
     //
     // It runs BEFORE the handler, so an unconfirmed or denied call never
     // reaches handler code and performs no write — asserted with a
-    // handler spy, not just on the response.
+    // handler spy, not just on the response. The one exception is a tool's
+    // read-only `precheck` (WARP-3349, below): an unconfirmed call the
+    // interceptor is about to challenge may run it; a denied call never does.
     //
     // The token arrives on `_meta`, the transport's channel for protocol
     // metadata that must not become a tool argument (same channel as
@@ -274,6 +277,33 @@ export function createServer(
       meta && typeof meta.confirmationToken === "string" && meta.confirmationToken.length > 0
         ? meta.confirmationToken
         : undefined;
+    // WARP-3349 — a call that can never succeed is refused here, before the
+    // person is asked to approve it (team_chat_send_message: a recipient who
+    // is not a member). Only a call the interceptor is about to CHALLENGE
+    // runs it: no token, a confirming tool whose confirmation the
+    // interceptor owns, and not denied — the deny tier's answer wins, so a
+    // denied call makes no reads and the model sees TOOL_DENIED (§8). Only
+    // an error result replaces the challenge; anything else, or a throw
+    // (logged, tool name only), leaves the gate below to ask, and the
+    // handler validates again after approval.
+    if (
+      tool.precheck &&
+      !confirmationToken &&
+      tool.requiresConfirmation &&
+      confirmationOwnerOf(tool) === "interceptor" &&
+      !interceptor.denyTier.evaluate(tool, args)
+    ) {
+      const precheck = tool.precheck;
+      const early = await Promise.resolve()
+        .then(() => precheck(args, ctx))
+        .catch(() => {
+          console.warn("tool.precheck_threw", { tool: tool.name });
+          return null;
+        });
+      if (early && early.ok === false && early.status === "error") {
+        return toolResultToContent(early);
+      }
+    }
     const outcome = interceptor.intercept(tool, args, { confirmationToken });
     const refusal = interceptOutcomeToToolResult(tool, outcome);
     if (refusal) {

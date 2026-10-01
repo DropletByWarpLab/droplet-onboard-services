@@ -49,7 +49,7 @@
  * the owner's only available action would silently stop working.
  */
 import { Prisma } from "@prisma/client";
-import { providerDescriptor } from "@droplet/shared-types";
+import { LANDED_CRM_DATASETS, providerDescriptor } from "@droplet/shared-types";
 
 import { toMinorUnits } from "@droplet/shared-types";
 import { createLogger } from "../../lib/logger.js";
@@ -105,8 +105,12 @@ export interface LandOutcome {
   readonly reason: LandSkipReason | null;
 }
 
-/** Datasets that land in the CRM. */
-export const LANDED_ENTITIES = ["company", "contact", "deal"] as const;
+/**
+ * Datasets that land in the CRM. WARP-3375 — declared in shared-types, where
+ * the dashboard's Disconnect copy reads the same list, so what the confirm says
+ * is copied cannot drift from what this seam copies.
+ */
+export const LANDED_ENTITIES = LANDED_CRM_DATASETS;
 
 /**
  * Datasets that must never land, listed so the refusal is a decision a reader

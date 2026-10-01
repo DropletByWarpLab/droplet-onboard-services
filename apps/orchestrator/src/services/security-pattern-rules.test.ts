@@ -165,6 +165,23 @@ describe("pattern severity ignores an area matched only through a Droplet link (
     expect(await severityOf({ zoneKind: "restricted", mode: "open", personLinked: false })).toBe(cameraKey);
   });
 
+  // The gate is on the RAISE only: nulling the kind would also drop the open-entry `infoWhen` downgrade, and a
+  // link Droplet made would then outrank a person's (notice against info).
+  it("a Droplet-linked entry area at open hours still lowers unusual_volume to info, exactly as a person-linked one does", async () => {
+    for (const personLinked of [true, false]) {
+      const f = world();
+      for (let i = 0; i < 4; i += 1) f.world.securityEvent.push(eventRow({ id: BigInt(400 + i), startedAt: at(`2026-09-23T21:0${i}:00Z`) }));
+      const { flags } = await judge(f, undefined, areaGrouped({ zoneKind: "entry", mode: "open", personLinked }));
+      expect(
+        flags.map((x) => [x.code, x.severity]),
+        `personLinked ${personLinked}`,
+      ).toEqual([
+        ["out_of_place", "notice"],
+        ["unusual_volume", "info"],
+      ]);
+    }
+  });
+
   it("only the area modifier is dropped: the mode raise still applies, and the snapshot in `detail` still names the kind", async () => {
     expect(await severityOf({ zoneKind: "restricted", mode: "closed", personLinked: false })).toBe("alert");
     const { flags } = await judge(world(), undefined, areaGrouped({ zoneKind: "restricted", mode: "open", personLinked: false }));

@@ -85,10 +85,12 @@ from voice.audio_io import (
     make_int16_resampler,
     negotiate_capture_rate,
 )
+from voice.intents import VolumeIntent, classify_volume_intent
 from voice.llm import LLMClient, LLMUnavailable, SpokenCue, ToolChoice
 from voice.stt import STTUnavailable, StreamingSTT
 from voice.text_chunk import SentenceChunker
 from voice.tts import SynthesizedAudio, TextToSpeech, TTSUnavailable
+from voice.volume import VolumeController, apply_gain
 from voice.wake import (
     WAKE_FRAME_SAMPLES,
     WAKE_SAMPLE_RATE,
@@ -765,6 +767,7 @@ class WakePipeline:
         dsp_restart: Optional[Callable[[], Any]] = None,
         dsp_recovery_max_attempts: int = DEFAULT_DSP_RECOVERY_MAX_ATTEMPTS,
         dsp_recovery_cooldown_s: float = DEFAULT_DSP_RECOVERY_COOLDOWN_S,
+        volume: Optional[VolumeController] = None,
     ):
         self._detector = detector
         self._input_device_index = input_device_index
@@ -779,6 +782,11 @@ class WakePipeline:
         # LLM-reply path; speak() is also still reachable via POST /voice/say.
         self._tts = tts
         self._output_device_index = output_device_index
+        # Speaker output volume — the SAME controller main.py hands the
+        # /voice/volume endpoints, so a dashboard change and a spoken "turn
+        # it up" act on one state. None = unity gain and no spoken volume
+        # commands (every pre-volume constructor call is unchanged).
+        self._volume = volume
         # LLM — commit 7. None disables the closed-loop behaviour;
         # transcript still lands in /voice/status but isn't spoken.
         self._llm = llm
@@ -1440,7 +1448,17 @@ class WakePipeline:
             self._speak_lock.release()
 
     def _play_pcm(self, audio: SynthesizedAudio) -> None:
-        """Hand the PCM to sounddevice. Blocking."""
+        """Hand the PCM to sounddevice at the current output volume.
+        Blocking.
+
+        The one playback choke point — speak(), every streamed sentence and
+        every spoken cue land here — so this is where the volume gain goes:
+        on the int16 array, before audio_io.play (whose signature is
+        unchanged). The gain is read per call, so a change lands on the
+        next sentence. When the output is silent (muted, or an explicit
+        level 0) nothing is played at all; the callers' state transitions
+        and post-speak cooldown run exactly as for an audible reply.
+        """
         # sounddevice wants a numpy array. We get int16 mono from Piper —
         # the playback driver in audio_io.play handles dtype + rate.
         import numpy as _np
@@ -1448,7 +1466,16 @@ class WakePipeline:
         pcm = _np.frombuffer(audio.pcm, dtype=_np.int16)
         if audio.channels > 1:
             pcm = pcm.reshape(-1, audio.channels)
+        if self._volume is not None:
+            gain = self._volume.gain()
+            if gain <= 0.0:
+                return
+            pcm = apply_gain(pcm, gain)
         _play(pcm, samplerate=audio.sample_rate, device=self._output_device_index)
+
+    def _output_audible(self) -> bool:
+        """Whether speech played now would be heard (not muted, level > 0)."""
+        return self._volume is None or self._volume.gain() > 0.0
 
     def _restore_state_after_speak(self, prev_state: PipelineState) -> None:
         """Return to whatever state we were in before speak() was called.
@@ -2928,7 +2955,8 @@ class WakePipeline:
         """The default turn: gate the transcript, stream the LLM reply,
         speak it. Returns (outcome, speak result) for the turn timing:
         answered | no_reply | error (speak ran) or empty | fragment |
-        no_llm (it didn't)."""
+        no_llm (it didn't), or volume (a spoken volume command handled
+        locally, see _answer_volume_intent)."""
         # WARP-1058 — the turn's wake context for the outcome row. Read
         # without the lock (GIL-atomic; same discipline as the other
         # single-field reads on this thread).
@@ -2957,6 +2985,16 @@ class WakePipeline:
                 score=wake_score, threshold=self._threshold, model=wake_model,
             )
             return "fragment", None
+        # Spoken volume commands are handled HERE, before the LLM check and
+        # the intent gate: local device control on the shared controller,
+        # so "turn it up" works with the model (or the orchestrator) down.
+        if self._volume is not None:
+            volume_intent = classify_volume_intent(transcript)
+            if volume_intent is not None:
+                return self._answer_volume_intent(
+                    self._volume, volume_intent,
+                    wake_score=wake_score, wake_model=wake_model,
+                )
         if self._llm is None or not self._llm_available:
             logger.info(
                 "transcript ready (LLM unavailable, not speaking): len=%d",
@@ -2995,11 +3033,63 @@ class WakePipeline:
         # WARP-1058 — the §3.4 outcome row. "Answered" means the user
         # actually HEARD a reply; a failed / empty / rejected reply is
         # honestly just "Heard the wake word" (the fault itself surfaces via
-        # error_message, not the feed).
+        # error_message, not the feed). So is a reply played into a muted
+        # speaker.
         self._emit_activity(
-            "wake_answered" if spoke else "wake_heard",
+            "wake_answered" if spoke and self._output_audible() else "wake_heard",
             score=wake_score, threshold=self._threshold, model=wake_model,
         )
         if spoke:
             return "answered", result
         return ("error" if result.get("error") else "no_reply"), result
+
+    def _answer_volume_intent(
+        self,
+        volume: VolumeController,
+        intent: VolumeIntent,
+        *,
+        wake_score: Optional[float],
+        wake_model: Optional[str],
+    ) -> tuple[str, Optional[dict[str, Any]]]:
+        """Execute a spoken volume command locally and acknowledge it.
+
+        No LLM, no orchestrator. The acknowledgement goes through speak(),
+        so it plays at the NEW level ("Volume 40."); a mute is applied
+        silently; an unmute says "Unmuted." at the restored level. The
+        change applies even when TTS is down. Turn outcome: "volume".
+        """
+        ack: Optional[str]
+        if intent.kind == "set":
+            ack = f"Volume {volume.set_level(intent.value).current.level}."
+        elif intent.kind == "change":
+            ack = f"Volume {volume.change(intent.value).current.level}."
+        elif intent.kind == "mute":
+            volume.set_muted(True)
+            ack = None
+        elif intent.kind == "unmute":
+            volume.set_muted(False)
+            ack = "Unmuted."
+        else:  # query
+            ack = f"Volume is {volume.state().level}."
+        state = volume.state()
+        # Length-free: the kind and the resulting state say everything, and
+        # the transcript text never reaches INFO (WARP-3193 SEC-DATA-9).
+        logger.info(
+            "spoken volume command handled locally: %s → level=%d muted=%s",
+            intent.kind, state.level, state.muted,
+        )
+        speak = self.speak(ack) if ack is not None else None
+        if speak is not None and not speak.get("ok"):
+            logger.info("volume acknowledgement not spoken: %s", speak.get("error"))
+        heard = bool(
+            speak is not None
+            and speak.get("ok")
+            and speak.get("duration_s")
+            and self._output_audible()
+        )
+        # No volume-specific activity type exists; reuse the honest pair.
+        self._emit_activity(
+            "wake_answered" if heard else "wake_heard",
+            score=wake_score, threshold=self._threshold, model=wake_model,
+        )
+        return "volume", speak
