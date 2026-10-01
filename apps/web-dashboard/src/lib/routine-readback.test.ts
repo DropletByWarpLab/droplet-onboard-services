@@ -8,6 +8,7 @@
  * way past the confirmation.
  */
 import { describe, it, expect } from "vitest";
+import { TOOL_CATALOG } from "@droplet/tools-core";
 import {
   describeRoutine,
   describeSchedule,
@@ -249,5 +250,45 @@ describe("describeRoutine — transform / when steps (WARP-2895)", () => {
   it("carries no code for a routine without such steps", () => {
     const r = describeRoutine({ steps: [callStep(0, "list_recent_files")], catalog: CATALOG, writes: false, reversible: true });
     expect(r.code).toEqual([]);
+  });
+});
+
+describe("describeRoutine — the Daily report's ERP reads (WARP-3355)", () => {
+  // The REAL registry copy, not a hand-written stand-in: the defect was in the
+  // shipped labels, so a fake catalog would pass while the box still said
+  // "what patients still owe" to a business with no practice connector.
+  const real = new Map<string, ToolCatalogEntry>(
+    TOOL_CATALOG.map((t) => [
+      t.name,
+      {
+        name: t.name,
+        domain: t.domain,
+        description: t.description,
+        homeDescription: t.homeDescription,
+        requiresWrite: t.requiresWrite,
+        requiresConfirmation: t.requiresConfirmation,
+      },
+    ]),
+  );
+  const sentence = (tools: string[]) =>
+    readbackSentence(
+      describeRoutine({
+        steps: tools.map((t, i) => callStep(i, t)),
+        catalog: real,
+        writes: false,
+        reversible: true,
+      }),
+    );
+
+  it("says nothing about patients or practice software for the reads every box runs", () => {
+    const out = sentence(["erp_get_ar_summary", "erp_get_schedule_today"]);
+    expect(out).toBe(
+      "When you run it — see what customers still owe at a glance, then see today's appointments at a glance.",
+    );
+    expect(out).not.toMatch(/patient|practice/i);
+  });
+
+  it("keeps the patient wording where the routine itself asks for a patient lookup", () => {
+    expect(sentence(["erp_find_patient"])).toMatch(/patient/i);
   });
 });
