@@ -109,3 +109,16 @@ describe("loadIdentityPrompt", () => {
     expect(loadIdentityPrompt(p)).toBe("version two");
   });
 });
+
+describe("defaultIdentityPath", () => {
+  const saved = process.env.DROPLET_IDENTITY_PATH;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.DROPLET_IDENTITY_PATH;
+    else process.env.DROPLET_IDENTITY_PATH = saved;
+  });
+
+  it("treats an empty DROPLET_IDENTITY_PATH as unset (the compose ${VAR:-} trap)", () => {
+    process.env.DROPLET_IDENTITY_PATH = "";
+    expect(defaultIdentityPath()).toBe(path.resolve(process.cwd(), "data/droplet-identity.md"));
+  });
+});

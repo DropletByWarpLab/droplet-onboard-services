@@ -47,7 +47,7 @@ let cached: string | null = null;
 
 export function defaultIdentityPath(): string {
   return (
-    process.env.DROPLET_IDENTITY_PATH ??
+    process.env.DROPLET_IDENTITY_PATH ||
     path.resolve(process.cwd(), "data/droplet-identity.md")
   );
 }

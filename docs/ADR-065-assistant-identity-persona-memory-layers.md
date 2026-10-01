@@ -1,6 +1,6 @@
 # ADR-065: The assistant's identity, personality and memory are separate prompt layers, and only the identity layer carries the rules
 
-- **Status:** Accepted. Everything below describes code on `stage` except the identity file's "What you will and won't do" section and the rule summary in `FALLBACK_IDENTITY`, which land with this ADR.
+- **Status:** Accepted, 2026-10-01, by Stefan Cruceru ([WARP-3420](https://warp-lab.atlassian.net/browse/WARP-3420)). Everything below describes code on `stage` except the identity file's "What you will and won't do" section and the rule summary in `FALLBACK_IDENTITY`, which land with this ADR.
 - **Builds on:** WARP-461 / WARP-845 (memory facts), WARP-1118 (personality, prompt budgets), WARP-1119–1121 (business profile and onboarding interview), [`ADR-051`](ADR-051-company-brain.md) / WARP-2752 (the brain block), WARP-1983 / WARP-2746 (the off-LAN stored-content gate), [`ADR-004`](ADR-004-rbac-per-route-guards.md) and [`ADR-032`](ADR-032-access-roles-custom-rbac.md) (roles), [`llm-safety-tiers.md`](llm-safety-tiers.md), [`tool-confirmation-contract.md`](tool-confirmation-contract.md)
 - **Number:** 061–063 are claimed by open PRs (#2514, #2444, #2446) and 064 by the voice-authority ADR draft (WARP-3328, cited in #2549, not yet on `stage`); this takes 065. A claimed number reserves nothing, so re-check before merge.
 
