@@ -786,3 +786,102 @@
   outline-offset: 2px;
   border-radius: 4px;
 }
+
+/* ── Morning briefing tile (WARP-2250) ──────────────────────
+   Headline, prose and the ranked actions scroll as ONE region inside the
+   tile, so five long actions never grow the grid row; the provenance footer
+   stays pinned below it. Tokens: indigo shell scope only. */
+.rp-brief-scroll {
+  flex: 1;
+  min-height: 0;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+@media (max-width: 767px) {
+  .rp-brief-scroll { max-height: 320px; }
+}
+
+.rp-brief-headline {
+  margin: 0 0 8px;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.rp-brief-label {
+  margin: 14px 0 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.rp-brief-actions {
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+  max-width: 68ch;
+}
+
+.rp-brief-actions li {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  gap: 8px;
+  padding: 10px 0;
+  border-top: 1px solid var(--card-bd);
+}
+
+.rp-brief-rank {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--brand);
+}
+
+.rp-brief-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.rp-brief-detail {
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.rp-brief-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.rp-brief-meta .rp-state-link { margin-right: 6px; }
+
+/* Decorative photo header (WARP-2269) — capped so it never changes the row. */
+.rp-brief-photo {
+  margin: 0 0 12px;
+  pointer-events: none;
+}
+
+.rp-brief-photo img {
+  display: block;
+  width: 100%;
+  height: 120px;
+  object-fit: cover;
+  border: 1px solid var(--card-bd);
+  border-radius: var(--radius-card);
+}
+
+@media (max-width: 767px) {
+  .rp-brief-photo img { height: 72px; }
+}
+
+.rp-brief-credit {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  pointer-events: auto;
+}
+
+.rp-brief-credit a { color: inherit; }

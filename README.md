@@ -437,7 +437,7 @@ npm run dev
 | `NEXTCLOUD_URL` | `http://nextcloud:80` | Nextcloud 29 internal URL |
 | `AUTH_ENABLED` | `true` | Enable token auth middleware |
 | `DEVICE_SECRET` | *(required in prod)* | Fernet key for BYOK encryption (cryptography 42.0) |
-| `MAX_UPLOAD_SIZE_MB` | `100` | Per-file upload limit |
+| `MAX_UPLOAD_SIZE_MB` | `1024` | Per-file upload limit (Nextcloud's 1 GiB request limit; uploads stream) |
 
 ---
 

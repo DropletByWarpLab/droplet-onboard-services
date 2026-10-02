@@ -54,6 +54,10 @@ export const PM_ERRORS = {
   STATE_IS_DEFAULT: "state_is_default",
   /** SERIALIZABLE loser -- nothing was applied, the route answers 409, retry. */
   CONCURRENT_MUTATION: "concurrent_mutation",
+  /** WARP-3365 -- an external guest cannot lead a project (Romain, 2026-09-30).
+   *  A guest is admitted to the ONE work item assigned to them, never to a
+   *  project, so "project lead" names a role they cannot hold. */
+  LEAD_IS_GUEST: "lead_is_guest",
   // ADR-045 §5.3 — the department dimension's codes live beside its rules in
   // pm-department.ts and are folded in here so `mapServiceError` keeps ONE
   // vocabulary to switch on.
@@ -715,6 +719,10 @@ export async function updateProject(
   if (fields.description !== undefined) data.description = fields.description;
   if (fields.icon !== undefined) data.icon = fields.icon;
   if (fields.color !== undefined) data.color = fields.color;
+  if (fields.leadId) {
+    const lead = await prisma.user.findUnique({ where: { id: fields.leadId }, select: { role: true } });
+    if (lead?.role === "guest") throw new Error(PM_ERRORS.LEAD_IS_GUEST);
+  }
   if (fields.leadId !== undefined) data.leadId = fields.leadId;
   // ADR-045 §5.3. Clearing is deliberately unguarded: a department whose
   // archive is what prompted the un-routing must not be the thing that blocks
@@ -1109,6 +1117,33 @@ export async function searchWorkItems(
       },
     },
     orderBy: { updatedAt: "desc" },
+    take: perPage,
+  });
+  return rows.map((r) => mapWorkItem(r, r.project.identifier, r.project.department));
+}
+
+/** WARP-3407 — the work items assigned to ONE person, across projects, newest
+ *  change first. Backs `GET /pm/assigned-to-me`, which passes only the caller's
+ *  own id: for an external guest this is how they find the items shared with
+ *  them by assignment (WARP-3369), and it names nothing that isn't. */
+export async function listAssignedWorkItems(
+  prisma: PrismaClient,
+  userId: string,
+  opts: { perPage?: number; page?: number } = {},
+): Promise<ApiWorkItem[]> {
+  const perPage = Math.max(1, Math.min(200, opts.perPage ?? 100));
+  const page = Math.max(1, opts.page ?? 1);
+  const rows = await prisma.pmWorkItem.findMany({
+    where: { isArchived: false, assignees: { some: { userId } } },
+    // Spans projects, so it joins the project per row (searchWorkItems' rule).
+    include: {
+      ...WORK_ITEM_INCLUDE,
+      project: {
+        select: { identifier: true, department: { select: DEPARTMENT_SELECT } },
+      },
+    },
+    orderBy: { updatedAt: "desc" },
+    skip: (page - 1) * perPage,
     take: perPage,
   });
   return rows.map((r) => mapWorkItem(r, r.project.identifier, r.project.department));

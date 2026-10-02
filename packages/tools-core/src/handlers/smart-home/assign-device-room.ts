@@ -45,7 +45,7 @@ const inputSchema = {
     device: {
       type: "string",
       description:
-        "The device to assign — its household name (e.g. 'kitchen strip'), product name, or Matter node id.",
+        "The device to assign — its given name (e.g. 'lobby strip'), product name, or Matter node id.",
     },
     room: {
       type: "string",
@@ -134,7 +134,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   } catch (e) {
     return err(
       "ASSIGN_FAILED",
-      `Could not list smart-home devices: ${e instanceof Error ? e.message : String(e)}`,
+      `Could not list devices: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
   const { match, candidates } = resolveDevice(flattenDevices(grouped), device);
@@ -150,7 +150,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   if (!match) {
     return err(
       "DEVICE_NOT_FOUND",
-      `No smart-home device matches "${device}" by name or node id. Call list_smart_home_devices to see what exists.`,
+      `No device matches "${device}" by name or node id. Call list_smart_home_devices to see what exists.`,
     );
   }
 
@@ -208,7 +208,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "assign_device_room",
   description:
-    "Put a smart-home device in a room ('move the lamp to the den', 'the heater is in the office') so room-based control and the dashboard's household map work. Accepts the device's household or product name, or its Matter node id, plus a room name — the room is matched case-insensitively and created automatically if it doesn't exist yet. Never changes the device's display name, and is freely reversible by reassigning.",
+    "Put a device in a room ('move the lamp to reception', 'the heater is in the office') so room-based control and the dashboard's room map work. Accepts the device's given or product name, or its Matter node id, plus a room name — the room is matched case-insensitively and created automatically if it doesn't exist yet. Never changes the device's display name, and is freely reversible by reassigning.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

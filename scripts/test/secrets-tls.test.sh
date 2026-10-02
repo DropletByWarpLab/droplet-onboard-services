@@ -79,6 +79,14 @@ _run_generate_tls_cert() {
     # tls-reload.sh.
     reload_gateway_nginx() { return 0; }
     export REPO_ROOT="$sandbox"
+    # WARP-2944: the fixtures below name only 127.0.0.1, and secrets.sh now
+    # regenerates a self-signed cert (around the same key) whenever it stops
+    # naming the box's CURRENT addresses — on a runner with LAN addresses a
+    # restored bootstrap would be "moved" and re-issued, and these byte-
+    # identity assertions would be testing that rule instead of the restore.
+    # Set-but-empty = "no LAN address": loopback only, exactly the fixtures.
+    # The address rule itself is tests/tls-bootstrap-cert-follows-the-box.test.sh.
+    export DROPLET_TLS_SAN_IPS=""
     # shellcheck source=/dev/null
     source "$SECRETS_SH" >/dev/null 2>&1 || { echo "could not source secrets.sh" >&2; exit 91; }
     type _generate_tls_cert >/dev/null 2>&1 || { echo "_generate_tls_cert not defined" >&2; exit 92; }

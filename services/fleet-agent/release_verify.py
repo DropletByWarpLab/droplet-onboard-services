@@ -251,6 +251,29 @@ def _validate_healthcheck(hc: object, prefix: str, issues: list[str]) -> None:
         issues.append(f"{prefix}.path: healthcheck path must start with /")
 
 
+# Fields that only an extension signing statement carries (manifest.ts
+# EXTENSION_SIGNING_FIELDS).
+_EXTENSION_SIGNING_FIELDS = ("usage", "keyUsage")
+
+
+def _non_release_kind_detail(doc: dict) -> str | None:
+    """Port of manifest.ts ``nonReleaseKindDetail`` (same detail strings).
+
+    The kind is rendered as ``JSON.stringify`` renders it there: compact
+    separators (json.dumps' defaults add a space after "," and ":") and
+    non-ASCII left as-is."""
+    if "kind" in doc and doc["kind"] != "release":
+        kind = json.dumps(doc["kind"], ensure_ascii=False, separators=(",", ":"))
+        return (
+            f"kind {kind} is not a release — an extension document never "
+            "parses as a release manifest"
+        )
+    for field in _EXTENSION_SIGNING_FIELDS:
+        if field in doc:
+            return f"{field} is an extension-signing field — a release manifest never carries one"
+    return None
+
+
 def parse_release_manifest(raw: bytes | str) -> VerifyResult:
     """Parse + schema-validate a ``release.json`` body. Pure function over
     the raw bytes; the caller is responsible for having verified the
@@ -271,6 +294,13 @@ def parse_release_manifest(raw: bytes | str) -> VerifyResult:
             failure_reason="malformed_manifest",
             detail="release.json must be a JSON object",
         )
+
+    # WARP-2898: an extension document never parses as a release (mirrors
+    # manifest.ts nonReleaseKindDetail, and runs before the version gates
+    # there too, so both ports reach the same verdict on that class).
+    kind_detail = _non_release_kind_detail(doc)
+    if kind_detail is not None:
+        return VerifyResult(ok=False, failure_reason="schema_invalid", detail=kind_detail)
 
     # Version gates BEFORE full shape validation: a downgraded/newer
     # manifest may legitimately differ in shape, and the version verdict

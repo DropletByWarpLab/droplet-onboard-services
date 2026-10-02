@@ -101,7 +101,10 @@ vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
   return {
     ...actual,
-    uploadFiles: vi.fn().mockResolvedValue(undefined),
+    uploadFiles: vi.fn(
+      async (_p: string, files: FileList | File[]) =>
+        Array.from(files).map((f) => ({ name: f.name, path: "", size: f.size, status: "uploaded" as const })),
+    ),
     deleteFile: vi.fn(),
     createDirectory: vi.fn().mockResolvedValue(undefined),
     getDownloadUrl: (p: string) => `/api/files/download?path=${p}`,

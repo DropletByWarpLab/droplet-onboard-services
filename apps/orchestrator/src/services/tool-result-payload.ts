@@ -33,6 +33,7 @@
  * arbitrary JSON. Widen with `toolResultPayloadValue()` before inspecting.
  */
 import type { ToolError, ToolResult } from "@droplet/tools-core";
+import { parseNamespacedToolName } from "./mcp-multiplexer.service.js";
 
 declare const TOOL_RESULT_PAYLOAD_BRAND: unique symbol;
 
@@ -61,20 +62,81 @@ export interface ToolFailureWirePayload {
   error: ToolError;
 }
 
+/** WARP-3284 — the error code for tool output that could not be parsed. */
+export const TOOL_OUTPUT_MALFORMED = "TOOL_OUTPUT_MALFORMED";
+const MALFORMED_EXCERPT_CHARS = 200;
+
 /**
- * Parse the raw `content[0].text` mcp-server put on the wire.
- *
- * This is the single parse point for a tool result in the agent loop.
- * Non-JSON output (a raw stdio hiccup — mcp-server itself always emits
- * JSON) degrades to the historical `{ raw }` shape so the SSE `tool_result`
- * event and the trace keep rendering something useful.
+ * The payloads {@link parseToolResultPayload} itself built for a parse
+ * failure. Identity, not the `code` string: a well-formed upstream reply that
+ * happens to carry `TOOL_OUTPUT_MALFORMED` is that tool's own answer, not
+ * ours, and must not be reclassified.
  */
-export function parseToolResultPayload(text: string): ToolResultPayload {
+const malformed = new WeakSet<object>();
+
+/**
+ * Parse the raw `content[0].text` a tool call put on the wire.
+ *
+ * Every consumer of a tool result parses through here: the agent loop, the
+ * agent-run worker's approval resume, and the ToolSpec step dispatchers.
+ *
+ * WARP-3284 — what non-JSON text means depends on who produced it, so the
+ * caller passes the tool name:
+ *
+ *   - A LOCAL tool (no `__` in its name) is served by mcp-server, whose
+ *     `toolResultToContent` always `JSON.stringify`s. Any text that does not
+ *     parse — a truncated stream, a crash mid-write, a quote-rooted fragment,
+ *     empty text — is a broken call. It becomes an explicit
+ *     `status: "error"` envelope with code TOOL_OUTPUT_MALFORMED, recognised
+ *     by {@link isMalformedToolOutput}; callers mark the call failed. A
+ *     bounded `raw` excerpt rides along for the trace, never as data.
+ *   - A namespaced tool — a remote MCP server's `<serverId>__<tool>`
+ *     (`mcp-multiplexer`) or an extension's `ext-<slug>__<tool>`
+ *     (`extension-mcp.port`) — passes its upstream's text through verbatim,
+ *     and plain text or markdown is a normal MCP success (`[INFO] 3 matches`,
+ *     `{{name}} updated`). It keeps the historical `{ raw }` success shape.
+ *     That includes an extension body cut at the 32 KiB cap: the port
+ *     appends a `[truncated: …]` line, and the text reaches the model as a
+ *     success like any other (the WARP-2203 cap then applies, with its own
+ *     reduction note).
+ */
+export function parseToolResultPayload(text: string, toolName: string): ToolResultPayload {
   try {
     return JSON.parse(text) as ToolResultPayload;
   } catch {
-    return { raw: text } as unknown as ToolResultPayload;
+    if (parseNamespacedToolName(toolName) !== null) {
+      return { raw: text } as unknown as ToolResultPayload;
+    }
+    const envelope = {
+      status: "error",
+      error: {
+        code: TOOL_OUTPUT_MALFORMED,
+        message:
+          "The tool's response could not be read; the action may still have run. " +
+          "Tell the user which tool failed and do not repeat the call. Do not treat it " +
+          "as an empty result and do not ask the user to supply the data.",
+      },
+      raw: text.slice(0, MALFORMED_EXCERPT_CHARS),
+    };
+    malformed.add(envelope);
+    return envelope as unknown as ToolResultPayload;
   }
+}
+
+/** WARP-3284 — true when {@link parseToolResultPayload} rejected the text. */
+export function isMalformedToolOutput(payload: ToolResultPayload): boolean {
+  const v = payload as unknown;
+  return typeof v === "object" && v !== null && malformed.has(v);
+}
+
+/**
+ * WARP-3284 — what the model is handed for a malformed result: the error
+ * envelope WITHOUT the fragment, or `null` when the payload parsed.
+ */
+export function malformedToolOutputText(payload: ToolResultPayload): string | null {
+  if (!isMalformedToolOutput(payload)) return null;
+  const { status, error } = payload as unknown as { status: string; error: unknown };
+  return JSON.stringify({ status, error });
 }
 
 /**

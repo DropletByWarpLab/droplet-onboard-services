@@ -28,7 +28,107 @@
  * The orchestrator process must never hold a remote MCP socket; the port is
  * how it talks to one without holding it.
  */
-import type { McpCallContext } from "./mcp-client.service.js";
+import type { PrivateEnhancement } from "@droplet/tools-core";
+import type { DashboardPage } from "@droplet/shared-types";
+
+/**
+ * Per-call session context plumbed through MCP `_meta`. Add fields here
+ * as the agent grows new session-bound credentials (e.g. a future
+ * device-side OAuth bearer for camera ops). Keep this narrow — anything
+ * placed here is reachable by every handler in the registry, so don't
+ * pile on unrelated context.
+ */
+export interface McpCallContext {
+  /** Nextcloud session token for the calling user — required by file-tool handlers. */
+  ncToken?: string;
+  /**
+   * Nextcloud username for the calling user. Forwarded as
+   * `_meta.userId` to the stdio child so handlers gated on the per-user
+   * RBAC boundary (e.g. `search_content`'s pgvector lookup, WARP-202)
+   * can scope queries to this user's chunks. The mcp-server's HTTP
+   * transport ignores `_meta.userId` — JWT claims (`claims.sub`) are
+   * the authoritative trust boundary there.
+   */
+  userId?: string;
+  /**
+   * WARP-845 — caller's role, forwarded as `_meta.userRole` so
+   * role-scoped handlers (memory_recall's audience ladder) can filter
+   * what the model may read. Stdio-trusted only; the HTTP transport
+   * ignores it (restrictive guest default applies there).
+   */
+  userRole?: string;
+  /**
+   * WARP-2305 — a confirmation token minted by the dispatch-path
+   * interceptor, forwarded as `_meta.confirmationToken`.
+   *
+   * `_meta` rather than a tool argument for the same reason `ncToken`
+   * lives here: it is protocol metadata, not payload. That also keeps it
+   * clear of every tool's `additionalProperties: false` input schema and
+   * keeps the interceptor's argument-binding hash over untouched
+   * arguments.
+   *
+   * DELIBERATELY NOT SET BY THE AGENT LOOP. The token is returned to the
+   * caller in the challenge and comes back from the human approval
+   * surface (the WARP-640 dashboard confirm chip). If the agent loop
+   * re-attached a token it had just been handed, the model would be
+   * approving its own writes — which is precisely the hole WARP-2305
+   * closes. See `docs/tool-confirmation-contract.md`.
+   */
+  confirmationToken?: string;
+  /**
+   * WARP-2177 — the durable agent run this dispatch belongs to. Lands on the
+   * `tool_call` ActivityRow as `refs.agentRunId` so the Activity surface can
+   * group a run's calls — no new activity kind (`KNOWN_KINDS` is a closed
+   * allow-list that throws, the same reasoning ADR-014 gave for
+   * `refs.targetDeviceId`). Rides `_meta` like every other field here; the
+   * mcp-server ignores it.
+   */
+  agentRunId?: string;
+  /**
+   * WARP-2896 — the workshop workspace the run works in, when it has one.
+   * Read by the `workspace_*` handlers to address their workspace; the
+   * orchestrator route re-derives the binding from `agentRunId`, so this is
+   * an address, never an authorisation. Stdio-trusted, like `agentRunId`.
+   */
+  workspaceId?: string;
+  /**
+   * WARP-3299 — the chat turn this dispatch belongs to: the conversation
+   * (`ChatSession.id`), the assistant message being written, and the
+   * model's tool call id. Set by the SERVER (routes/llm.ts and the agent
+   * loop), never from tool arguments, so `start_agent_run` can link the run
+   * it starts back to the chat that started it. Stdio-trusted, like
+   * `agentRunId`; the mcp-server drops them on HTTP.
+   */
+  conversationId?: string;
+  messageId?: string;
+  toolCallId?: string;
+  /**
+   * WARP-3116 — the pages the calling dashboard can open, validated by the
+   * chat route. Read by `find_dashboard_page` / `open_dashboard_page`;
+   * stdio-trusted, and never a grant — the dashboard's own route guards and
+   * the orchestrator's `requireRole` still decide what a page shows.
+   */
+  dashboardPages?: DashboardPage[];
+  /**
+   * WARP-2900 — the promoted extension that made this call, when an
+   * extension called back into the box as its installing owner
+   * (`POST /api/extensions/self/call`). Lands on the `tool_call` row as
+   * `refs.extensionId` through `extensionAuditRefs`; never an authorisation
+   * (the route resolved the owner and their reach before dispatching).
+   * Rides `_meta` like every field here; the mcp-server ignores it.
+   */
+  extensionId?: string;
+  /**
+   * WARP-437 — adaptive-routing enhancement bundle (HyDE vector,
+   * paraphrase vectors, filename filter, search overrides). Set by the
+   * agent loop right before dispatching `search_content`. Routed via
+   * MCP `_meta._enhancement` so it bypasses the tool's strict input
+   * schema (`additionalProperties: false`); only the trusted-stdio
+   * transport propagates it to handlers. Never set this from a user-
+   * facing route — the trust boundary is the agent loop itself.
+   */
+  _enhancement?: PrivateEnhancement;
+}
 
 /**
  * One tool as the model will see it. Structurally the MCP `tools/list` entry

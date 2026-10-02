@@ -1,0 +1,257 @@
+/**
+ * WARP-2988 — the MCP service path, narrowed by the person the assistant acts for.
+ *
+ * Tools reach the orchestrator as the `_service:mcp` principal, and
+ * `requireFeatureAccess` passes service principals straight through
+ * (feature-gate.ts). Every in-process dispatcher (chat agent loop, ToolSpec
+ * runner, agent-run worker) applies the ADR-032 §3 tool scope BEFORE calling
+ * MCP, but a caller that reaches the MCP server any other way (its HTTP
+ * transport takes any orchestrator access token and runs only the write-tier
+ * RBAC) arrives here unchecked. This gate closes that at the data boundary for
+ * each domain in `MCP_ACTING_USER_GATED_DOMAINS` (module-mounts.ts): it
+ * resolves the ACTING user and asks the same question the dispatch check asks
+ * — is `domain` in their scope, and for a write, may they write it?
+ *
+ * Identity: mcp-server stamps `X-Nextcloud-User` on every orchestrator call
+ * (services/mcp-server/src/context.ts `withActingUser`). It is trusted ONLY
+ * from `_service:mcp`, the same assertion camera-access.service.ts and
+ * middleware/space.ts already rely on; for anyone else this gate is a no-op.
+ * Despite its name the header carries `User.username` on the stdio transport
+ * (routes/llm.ts, agent-run-worker) and `User.id` on the HTTP transport
+ * (`claims.sub`), so it is resolved by `resolveAssertedUser`
+ * (asserted-user.service.ts, WARP-3098), as routes/brain.ts, agent-runs.ts,
+ * tools.ts, workspace.ts and notifications.ts resolve it: all three columns
+ * at once, one active person or nobody. Never "username, then id, first
+ * match wins": a value that is one person's username and another's id is
+ * AMBIGUOUS, and picking either scopes the call with a stranger's reach.
+ *
+ * Before both questions, the TIER FLOOR (WARP-3365 / WARP-3369): a module the
+ * access catalog refuses the acting person's tier (`refuseBelowFloor`: an
+ * external guest and CRM or Projects) is 404 `module_disabled`, as it is for
+ * that person's browser (`requireModuleTierFloor`).
+ *
+ * Two questions, both about the acting person:
+ *   1. the tool scope — is `domain` in their §3 reach (a write needs `use`)?
+ *      The method stands in for "a write": a GET is a read tool's hop. Where
+ *      the domain has NO read tool (`team_chat`: both tools send, and both
+ *      read the roster by GET first), every hop is some write tool's, so
+ *      every method needs `use` (WARP-3162). Otherwise a `view` grant, which
+ *      reaches none of that domain's tools, would still clear its GETs.
+ *   2. the feature — ONLY where the browser asks it: when the module serving
+ *      this prefix is in FEATURE_GATED_MODULES (module-mounts.ts), the acting
+ *      person must hold it, the same check `requireFeatureAccess` makes of a
+ *      human on that URL, and at the LEVEL the method needs: `view` for a read,
+ *      `act` for a write (WARP-3365). Today that is `crm` (/api/crm) and
+ *      `money` (/api/money); `projects` is not feature-gated, so /api/pm asks
+ *      question 1 only. The rule is browser
+ *      parity: the assistant never reaches more than the person could in the
+ *      browser, and never LESS either — a CRM-only person's `business_find`
+ *      on a customer reads that customer's projects, as their browser can.
+ *      The mount passes `features = null` for an ungated module.
+ *
+ *   - owner / no custom role  → null scope passes question 1 (same as chat);
+ *     question 2 still applies where it applies, and resolves to the full
+ *     catalog for owners.
+ *   - unknown / ambiguous / deactivated user, or a read error → DENY (fail
+ *     closed).
+ *     This includes a VOICE turn: the voice service's principal
+ *     (`_service:voice`) is what routes/llm.ts forwards as the acting user,
+ *     and no User row carries it, so voice `business_*` calls get the same
+ *     404 `module_disabled` ("switched off"). Deliberate — no person is
+ *     attributable, like cameras — until voice carries the speaker's identity.
+ *   - NO header → pass. Only orchestrator-internal stdio calls with no user
+ *     context omit it (the ToolSpec schedule ticker), and those already
+ *     cleared `resolveAttributedToolAccess` in the runner's pre-flight. The
+ *     HTTP transport always has `claims.sub`, so it always names someone.
+ *
+ * Denials are 404 `module_disabled`, byte-consistent with the module and
+ * feature gates, so `business_*`'s `businessError` still reads them as "that
+ * part of Droplet is switched off".
+ */
+import type { PrismaClient } from "@prisma/client";
+import type { Request, RequestHandler, Response, NextFunction } from "express";
+import type { ModuleId } from "@prisma/client";
+import {
+  DENY_ALL_TOOL_SCOPE,
+  resolveAttributedToolAccess,
+  type AttributedToolAccess,
+  type AttributionFailure,
+} from "../services/tool-access.service.js";
+import { resolveEffectiveAccess } from "../services/effective-access.service.js";
+import {
+  FEATURE_LEVEL_RANK,
+  isGateableModuleId,
+  maxLevelFor,
+  type FeatureLevel,
+} from "../services/access-catalog.js";
+import type { Role } from "../services/jwt.service.js";
+import {
+  resolveAssertedUser,
+  type AssertedUserFailure,
+  type AssertedUserResolution,
+} from "../services/asserted-user.service.js";
+import type { EffectiveAccessResolver } from "./feature-gate.js";
+import { recordAccessDenied } from "./auth.js";
+import { createLogger } from "../lib/logger.js";
+import { readableDomains, toolLayers } from "../services/tool-layers.service.js";
+
+const logger = createLogger("mcp-acting-user-gate");
+
+export const MCP_PRINCIPAL_ID = "_service:mcp";
+
+/** Why the acting person could not be established; `user_ambiguous` is the header naming two rows. */
+export type ActingUserFailure = AttributionFailure | "user_ambiguous";
+
+/** The acting person's tool reach, plus their `User.id` (null when unresolved). */
+export type ActingUserAccess = Omit<AttributedToolAccess, "unresolved" | "username"> & {
+  unresolved: ActingUserFailure | null;
+  userId: string | null;
+};
+
+/** The asserted header (username on stdio, `User.id` over HTTP) → the acting person. */
+export type ActingUserAccessResolver = (asserted: string) => Promise<ActingUserAccess>;
+
+const ASSERTED_USER_FAILURE: Record<AssertedUserFailure, ActingUserFailure> = {
+  not_found: "user_missing",
+  ambiguous: "user_ambiguous",
+  deactivated: "user_deactivated",
+};
+
+export function actingUserAccessResolver(prisma: PrismaClient): ActingUserAccessResolver {
+  const deny = (unresolved: ActingUserFailure): ActingUserAccess => ({
+    scope: DENY_ALL_TOOL_SCOPE,
+    tier: null,
+    unresolved,
+    userId: null,
+  });
+  return async (asserted) => {
+    let resolved: AssertedUserResolution;
+    try {
+      resolved = await resolveAssertedUser(prisma, asserted);
+    } catch (err) {
+      logger.error({ err }, "mcp_acting_user_lookup_failed");
+      return deny("read_failed");
+    }
+    if (!resolved.ok) return deny(ASSERTED_USER_FAILURE[resolved.reason]);
+    const { id } = resolved.user;
+    // The gate has no use for the row's handle (WARP-2972 added it for the
+    // scheduler); it stays out of what this resolver hands its callers.
+    const { username: _handle, ...access } = await resolveAttributedToolAccess(prisma, id);
+    return { ...access, userId: id };
+  };
+}
+
+const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+export function requireMcpActingUserToolDomain(
+  domain: string,
+  moduleId: ModuleId,
+  resolve: ActingUserAccessResolver,
+  /** Question 2's resolver; `null` when the module is not feature-gated for humans. */
+  features: EffectiveAccessResolver | null = resolveEffectiveAccess,
+): RequestHandler {
+  function deny(req: Request, res: Response, reason: string): void {
+    recordAccessDenied(req, "mcp-acting-user-tool-domain-denied");
+    logger.warn({ domain, reason }, "mcp_acting_user_denied");
+    res.status(404).json({ error: "module_disabled", module: moduleId });
+  }
+  // WARP-3162 — compiled catalog only: a runtime (remote MCP) tool never hops
+  // an orchestrator route, so it cannot make a request this gate sees.
+  const everyToolWrites = !readableDomains(toolLayers()).has(domain);
+
+  return async function mcpActingUserGate(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    if (req.user?.id !== MCP_PRINCIPAL_ID) {
+      next();
+      return;
+    }
+    const asserted = (req.header("x-nextcloud-user") ?? "").trim();
+    // WARP-3145 / WARP-3162 — routes/email.ts and routes/team-chat.ts act for
+    // `X-Droplet-User`, not the header this gate resolves. The mcp-server sets
+    // both from the same `ctx.userId` (`withActingUser`, each tools-core email
+    // handler, and the team-chat handlers' `actingHeaders`), so on a real call
+    // they are equal. When they are not, this gate would clear one person
+    // while the route acts for another: refuse. That includes an
+    // `X-Droplet-User` with no `X-Nextcloud-User`, which would otherwise pass
+    // below as a call that names nobody.
+    const forwarded = (req.header("x-droplet-user") ?? "").trim();
+    if (forwarded && forwarded !== asserted) {
+      deny(req, res, "acting_user_headers_disagree");
+      return;
+    }
+    if (!asserted) {
+      next();
+      return;
+    }
+    let access: ActingUserAccess;
+    try {
+      access = await resolve(asserted);
+    } catch (err) {
+      logger.error({ err }, "mcp_acting_user_resolve_failed");
+      deny(req, res, "resolve_failed");
+      return;
+    }
+    if (access.unresolved) {
+      deny(req, res, access.unresolved);
+      return;
+    }
+    // WARP-3365 / WARP-3369 — the tier floor, asked of the ACTING person: a
+    // module the catalog refuses their tier (an external guest and CRM or
+    // Projects) is refused to the assistant acting for them too, whatever
+    // their tool scope says. A role-less guest has a null scope (question 1
+    // passes), and `projects` is not feature-gated (question 2 is not asked),
+    // so without this a guest could read the company's customers and work
+    // items by asking the assistant. Same catalog fact as
+    // `requireModuleTierFloor` on the browser path.
+    if (
+      access.tier !== null &&
+      isGateableModuleId(moduleId) &&
+      maxLevelFor(access.tier as Role, moduleId) === null
+    ) {
+      deny(req, res, "tier_below_module_floor");
+      return;
+    }
+    const scope = access.scope;
+    if (scope !== null) {
+      const write = everyToolWrites || !READ_METHODS.has(req.method);
+      const allowed = write ? scope.writeDomains.has(domain) : scope.domains.has(domain);
+      if (!allowed) {
+        deny(req, res, write ? "domain_not_writable" : "domain_not_in_scope");
+        return;
+      }
+    }
+    // Question 2 — the module serving this prefix, as `requireFeatureAccess`
+    // asks it of a human (null = no local row, nothing to narrow).
+    if (features === null) {
+      next();
+      return;
+    }
+    try {
+      const effective = access.userId ? await features(access.userId) : null;
+      if (effective) {
+        const held = effective.features.find((f) => f.moduleId === moduleId);
+        if (!held) {
+          deny(req, res, "feature_not_held");
+          return;
+        }
+        // WARP-3365 review — the LEVEL, not just the module. A write through a
+        // tool needs `act`, as it does for the same person in the browser
+        // (routes/crm.ts names the level on every write); a role that holds
+        // `crm: view` reads through the assistant and cannot write through it.
+        const needed: FeatureLevel = READ_METHODS.has(req.method) ? "view" : "act";
+        if (FEATURE_LEVEL_RANK[held.level] < FEATURE_LEVEL_RANK[needed]) {
+          deny(req, res, "feature_level_too_low");
+          return;
+        }
+      }
+    } catch (err) {
+      logger.error({ err }, "mcp_acting_user_feature_read_failed");
+      deny(req, res, "feature_read_failed");
+      return;
+    }
+    next();
+  };
+}

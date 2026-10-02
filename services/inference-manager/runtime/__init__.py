@@ -24,6 +24,7 @@ from .base import (
     RuntimePullError,
     deleted_result,
     pulled_result,
+    unload_result,
 )
 from .dmr import DmrRuntime
 from .factory import (
@@ -58,4 +59,5 @@ __all__ = [
     "pulled_result",
     "resolve_base_url",
     "resolve_runtime_name",
+    "unload_result",
 ]

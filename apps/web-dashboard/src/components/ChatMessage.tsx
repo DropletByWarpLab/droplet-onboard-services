@@ -1,4 +1,5 @@
 import { memo, useRef, useState } from "react";
+import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -23,13 +24,33 @@ import {
 } from "lucide-react";
 import type { ChatMessage as ChatMessageType, ChatToolCall } from "@/lib/types";
 import { CodeBlock } from "@/components/CodeBlock";
+import { safeNext } from "@/lib/safe-next";
 import { CitationCard } from "@/components/citations/CitationCard";
 import { AttachmentChip } from "@/components/AttachmentChip";
 import { mimeFromPath } from "@/lib/mime-icons";
 import { ThinkingMessage } from "@/components/chat/ThinkingMessage";
 import { ToolApprovalPrompt } from "@/components/chat/ToolApprovalPrompt";
+import { RunCard, RunResultCard, runIdOf } from "@/components/chat/RunCard";
+import { SAFE_MARKDOWN_COMPONENTS } from "@/components/chat/safe-markdown";
 import { splitReasoningSteps } from "@/components/chat/reasoning-trace";
 import "@/components/chat/thinking.css";
+
+const SafeLink = SAFE_MARKDOWN_COMPONENTS.a;
+
+/**
+ * WARP-3116 — whether a model-written link is a dashboard page, to be routed
+ * client-side. Same-origin by `safeNext`, the hardened check (`/\evil`,
+ * `//evil`, `/..//evil`): only a path it returns unchanged counts. `/api/…` is
+ * a resource the orchestrator serves, not a page, so it is never one.
+ */
+function isDashboardPath(href: string | undefined): href is string {
+  return (
+    typeof href === "string" &&
+    href.startsWith("/") &&
+    !/^\/api(?:[/?#]|$)/.test(href) &&
+    safeNext(href) === href
+  );
+}
 
 // ReasoningDisclosure ("Thought process") moved to
 // @/components/chat/ReasoningDisclosure (WARP-934) so the in-app chat and the
@@ -213,13 +234,18 @@ export const ChatMessage = memo(function ChatMessage({
   // turn has one (tool calls ARE process, not answer), and in the answer
   // bubble otherwise, which is byte-for-byte the pre-1605 placement for every
   // turn that produced no reasoning.
-  const toolChipRow = hasToolCalls ? (
+  // WARP-3303 — a `start_agent_run` that produced a run is a card (below),
+  // not a chip: the run outlives the turn and the card follows it.
+  const runCalls = hasToolCalls ? toolCalls!.filter((c) => runIdOf(c) !== null) : [];
+  const chipCalls = hasToolCalls ? toolCalls!.filter((c) => runIdOf(c) === null) : [];
+  const toolChipRow = chipCalls.length > 0 ? (
     <div className="flex flex-wrap gap-1.5" data-testid="tool-call-chips">
-      {toolCalls!.map((call) => (
+      {chipCalls.map((call) => (
         <ToolCallChip key={call.id} call={call} />
       ))}
     </div>
   ) : null;
+  const runCards = runCalls.map((call) => <RunCard key={call.id} call={call} />);
 
   // WARP-1605 — the thinking message: a distinct row, with its own avatar and
   // a non-bubble card, carrying the collapsed disclosure + the chips. Sits
@@ -290,7 +316,7 @@ export const ChatMessage = memo(function ChatMessage({
       {/* Bubble + meta. group/message lets the action toolbar surface on
           hover OR keyboard focus (focus-within) without prop-drilling
           state up. */}
-      <div className={`msg-col group/message ${isUser ? "items-end" : "items-start"}`}>
+      <div className={`msg-col group/message ${isUser ? "items-end" : "is-assistant items-start"}`}>
       <div
         className={`msg-bubble ${isUser ? "is-user" : "is-assistant"}`}
         // role="status" + aria-live="polite" on the streaming assistant
@@ -345,6 +371,7 @@ export const ChatMessage = memo(function ChatMessage({
             {!hasThinking && toolChipRow ? (
               <div className="mb-2">{toolChipRow}</div>
             ) : null}
+            {runCards}
             {/* WARP-2469 — a WARP-2305 interceptor challenge gets the real
                 approval prompt: Approve / Don't, a PHI-free argument
                 summary, and an expired state that offers a re-request.
@@ -421,7 +448,12 @@ export const ChatMessage = memo(function ChatMessage({
             {/* WARP-1605: the trace moved to the thinking row above — a
                 collapsed disclosure inside the answer bubble was exactly the
                 "no boundary" this ticket exists to remove. */}
-            {message.content && (
+            {/* WARP-3303 — a background run's result, posted into the chat
+                that started it: a card, not markdown. `content` (the plain
+                text the model reads) is only its fallback. */}
+            {message.runResult ? (
+              <RunResultCard result={message.runResult} />
+            ) : message.content && (
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 // Fenced-block syntax highlighting (hljs classes; colors
@@ -429,6 +461,8 @@ export const ChatMessage = memo(function ChatMessage({
                 // languages render as plain <code> — no detection pass.
                 rehypePlugins={[rehypeHighlight]}
                 components={{
+                  // WARP-3193 SEC-INJ-1: no remote images; hardened links.
+                  ...SAFE_MARKDOWN_COMPONENTS,
                   // WARP-295: wrap GFM tables in a horizontal-scroll
                   // container so a wide table doesn't blow out the
                   // bubble's max-width on narrow viewports. Audit §5.4
@@ -440,6 +474,18 @@ export const ChatMessage = memo(function ChatMessage({
                   ),
                   // Per-block hover copy button (Claude-chat parity).
                   pre: ({ node, ...props }) => <CodeBlock {...props} />,
+                  // WARP-3116 — a dashboard page ("[Voice](/voice)", as the
+                  // dashboard-page tools hand back) routes client-side instead
+                  // of reloading the whole app. Every other link, including a
+                  // same-origin `/api/` resource such as a camera snapshot,
+                  // stays on SEC-INJ-1's SafeLink (new tab, no Referer, no
+                  // window.opener) — this key replaces the spread's `a`.
+                  a: ({ node, ...props }) =>
+                    isDashboardPath(props.href) ? (
+                      <Link {...props} href={props.href} />
+                    ) : (
+                      <SafeLink {...props} />
+                    ),
                 }}
               >
                 {message.content}
@@ -711,7 +757,7 @@ function FailureChip({
     missing: {
       Icon: Ghost,
       copy: "No reply was saved for this turn.",
-      tone: "bg-surface-tertiary/40 text-label-tertiary border border-dashed border-separator",
+      tone: "msg-missing-chip bg-surface-tertiary/40 text-label-tertiary border border-dashed border-separator",
       role: "status" as const,
     },
   } satisfies Record<NonNullable<ChatMessageType["failureKind"]>, {
@@ -796,7 +842,7 @@ function ToolCallChip({ call }: { call: ChatToolCall }) {
 
   return (
     <span
-      className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-full type-caption-1 ${tone}`}
+      className={`msg-tool-chip${pending ? " is-pending" : ""} inline-flex items-center gap-1.5 px-2 py-1 rounded-full type-caption-1 ${tone}`}
       data-tool-call-id={call.id}
       data-tool-name={call.name}
       data-tool-status={call.status ?? (pending ? "pending" : ok ? "ok" : "error")}

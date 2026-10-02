@@ -23,6 +23,33 @@ All routes are under the `/api` mount (the orchestrator registers them as
 - rpID / origin are derived from the request (`webauthn-config.ts`), reusing
   the `getRedirectUri` / `buildInviteUrl` posture — no hardcoded host, no new
   env var. Works on the LAN with the WAN down.
+- `GET /api/auth/webauthn/credentials` · `PATCH|DELETE /credentials/:id`
+  (WARP-1157) — list, rename (`{ name }`, 1–64 chars) and remove the
+  **signed-in user's own** passkeys. Scoped by `userId`: another user's id is
+  a 404. Rename and removal are audited. Never returns public keys or
+  credential ids.
+- Every error body carries a machine-readable `code` next to `error`
+  (`origin_unsupported`, `directory_unavailable`, `challenge_expired`,
+  `verification_failed`, `already_registered`, `storage_failed`,
+  `not_found`); the dashboard's `describePasskeyError` maps them to copy.
+
+### Which address can hold a passkey (WARP-1157)
+
+A passkey is bound to the host it was created on (its RP ID). Following
+ADR-023, the canonical address is the publicly-trusted per-device FQDN; the
+friendly `.local`/`.lan` names 307 to it when the box owns the LAN's DNS
+(`render-canonical-host.sh`). What each address can do:
+
+| Address | Passkeys? |
+|---|---|
+| per-device FQDN (public cert) | yes — the canonical place to enrol |
+| `https://droplet-ai.local` with the bootstrap cert trusted on the device | yes, but only on that name |
+| `https://droplet-ai.local` with a certificate warning clicked through | no — Chrome refuses WebAuthn on certificate errors |
+| plain `http://` (any name) | no — not a secure context |
+| raw IP (`https://192.168.x.x`) | no — an IP is never a valid RP ID; the routes answer `origin_unsupported` |
+
+Each credential stores `rpId`, and Settings shows "Works at <host>" so a
+user can see why a passkey made on one address is not offered on another.
 
 > **Naming note:** the original scaffold sketched the login endpoints as
 > `/assert/options` + `/assert`. The shipped routes use `/authenticate/options`
@@ -45,6 +72,8 @@ model WebAuthnCredential {
   publicKey    Bytes                         // COSE public key
   counter      Int      @default(0)          // monotonic; clone detection
   transports   String?                       // CSV
+  name         String?                       // WARP-1157: owner label
+  rpId         String?                       // WARP-1157: host it works on
   createdAt    DateTime @default(now())
   lastUsedAt   DateTime?
 }

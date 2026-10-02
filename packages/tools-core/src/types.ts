@@ -177,6 +177,33 @@ export interface ToolContext {
    * may not start a run.
    */
   agentRunId?: string;
+  /**
+   * WARP-2896 — the workshop workspace a run works in (forwarded by the
+   * worker via `_meta.workspaceId`, stdio-trusted only). The `workspace_*`
+   * handlers refuse without it; the orchestrator route checks the run named
+   * by `agentRunId` owns this workspace, so a handler cannot be steered to
+   * another one by argument.
+   */
+  workspaceId?: string;
+  /**
+   * WARP-3299 — the chat turn this dispatch belongs to: the conversation
+   * (`ChatSession.id`), the assistant message being written and the model's
+   * tool call id. Forwarded by the orchestrator via `_meta`, stdio-trusted
+   * only, never from tool arguments. `start_agent_run` sends them so the run
+   * links back to the chat that started it.
+   */
+  conversationId?: string;
+  messageId?: string;
+  toolCallId?: string;
+  /**
+   * WARP-3116 — the pages the calling dashboard can open, derived per viewer
+   * from its nav config and forwarded by the orchestrator via
+   * `_meta.dashboardPages` (stdio-trusted only). Typed `unknown` on purpose:
+   * it crossed a process boundary as JSON, so the navigation handlers parse
+   * it with `dashboardPagesSchema` before using it. Absent on every turn
+   * that did not come from the web dashboard.
+   */
+  dashboardPages?: unknown;
   ncToken?: string;
   /**
    * WARP-437 — orchestrator-injected enhancement bundle plumbed through
@@ -197,6 +224,9 @@ export interface ToolError {
 export type ToolResult =
   | { ok: true; data: unknown }
   | { ok: false; error: ToolError; status: "error" | "confirmation_required" };
+
+/** WARP-3349 — the only answer a `Tool.precheck` may give besides `null`. */
+export type PrecheckRefusal = { ok: false; status: "error"; error: ToolError };
 
 export type ToolHandler = (
   args: Record<string, unknown>,
@@ -250,5 +280,16 @@ export interface Tool {
    * reading the field, so the default lives in exactly one place.
    */
   confirmationOwner?: ConfirmationOwner;
+  /**
+   * WARP-3349 — refuse a call that can never succeed BEFORE the person is
+   * asked to approve it. The interceptor challenges before the handler runs,
+   * so a handler alone can only refuse after the approval. The mcp-server
+   * runs this only on a call the interceptor is about to challenge (no
+   * token, not denied, interceptor-owned confirmation): a refusal is
+   * returned instead of the challenge, `null` lets the interceptor ask.
+   * It must only read. A throw is logged and ignored, and the handler
+   * validates again after the approval.
+   */
+  precheck?: (args: Record<string, unknown>, ctx: ToolContext) => Promise<PrecheckRefusal | null>;
   handler: ToolHandler;
 }

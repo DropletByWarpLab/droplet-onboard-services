@@ -18,7 +18,7 @@ vi.mock("framer-motion", async () => {
 });
 
 import { RoleBuilderSheet } from "./RoleBuilderSheet";
-import { blankRoleDraft, roleToDraft } from "@/lib/access";
+import { blankRoleDraft, roleToDraft, toolDomainGroupsWith } from "@/lib/access";
 import { ACCESS_COPY } from "./copy";
 import type { AccessRole } from "@/lib/types";
 
@@ -94,7 +94,7 @@ describe("identity & starting point (axis 1)", () => {
     expect(screen.getByDisplayValue("front-desk")).toBeInTheDocument();
   });
 
-  it("renders the three starting points with §12 captions (Staff label)", () => {
+  it("renders the three starting points with §12 captions (Member label)", () => {
     renderSheet();
     expect(screen.getByText(ACCESS_COPY.startAdmin)).toBeInTheDocument();
     expect(screen.getByText(ACCESS_COPY.startStaff)).toBeInTheDocument();
@@ -117,10 +117,10 @@ describe("identity & starting point (axis 1)", () => {
   it("re-floors on a starting-point drop and names the dropped grant (never silent)", () => {
     const base = roleToDraft(makeRole()); // admin SP with network=manage
     renderSheet({ mode: "edit", base });
-    fireEvent.click(screen.getByRole("button", { name: "Guest" }));
+    fireEvent.click(screen.getByRole("button", { name: "External guest" }));
     expect(
       screen.getByText(
-        "Switching to Guest turns off Configure network — guests can't change the network.",
+        "Switching to External guest turns off Configure network — external guests can't change the network.",
       ),
     ).toBeInTheDocument();
     // The over-floor level fell back to View inside the network row.
@@ -129,6 +129,37 @@ describe("identity & starting point (axis 1)", () => {
       "aria-pressed",
       "true",
     );
+  });
+});
+
+// ADR-059: GET /api/access/roles now lists a stored grant through the same clamp the
+// server writes with (a family role's security:manage lists as act; a guest role's
+// security:view is omitted). `dirty` is a diff against `base`, which is that listed
+// role, so opening one must never read as an edit.
+describe("a role whose stored grants the server lists clamped (ADR-059)", () => {
+  it("a level listed at the ceiling opens with the listed level selected and nothing to save", () => {
+    const role = makeRole({
+      startingPoint: "family",
+      featureGrants: [
+        { moduleId: "security", level: "act" },
+        { moduleId: "cameras", level: "view" },
+      ],
+    });
+    renderSheet({ mode: "edit", base: roleToDraft(role) });
+    expect(screen.getByRole("button", { name: "Save role" })).toBeDisabled();
+    const security = screen.getByTestId("access-feature-security");
+    expect(within(security).getByRole("button", { name: /Respond/ })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("a refused grant the server left out opens with that feature off and nothing to save", () => {
+    const role = makeRole({
+      startingPoint: "guest",
+      featureGrants: [{ moduleId: "files", level: "view" }],
+    });
+    renderSheet({ mode: "edit", base: roleToDraft(role) });
+    expect(screen.getByRole("button", { name: "Save role" })).toBeDisabled();
+    const security = screen.getByTestId("access-feature-security");
+    expect(within(security).getByRole("switch")).toHaveAttribute("aria-checked", "false");
   });
 });
 
@@ -154,7 +185,7 @@ describe("features & what they can do (axis 2)", () => {
     expect(onOpenDepartments).toHaveBeenCalled();
   });
 
-  it("shows floor-blocked levels disabled with the §12 reason on a Staff-based role", () => {
+  it("shows floor-blocked levels disabled with the §12 reason on a Member-based role", () => {
     const base = blankRoleDraft("family");
     base.features.network = { on: true, level: "view" };
     renderSheet({ base });
@@ -357,7 +388,7 @@ describe("AI tools & connectors (axis 4)", () => {
     renderSheet({ mode: "edit", base });
     const select = screen.getByLabelText("Eaglesoft access") as HTMLSelectElement;
     expect(select.value).toBe("read_write");
-    fireEvent.click(screen.getByRole("button", { name: "Staff" }));
+    fireEvent.click(screen.getByRole("button", { name: "Member" }));
     // The select keeps a real value (never silently blank)…
     expect((screen.getByLabelText("Eaglesoft access") as HTMLSelectElement).value).toBe("read");
     // …and the §5.1 notice names the downgrade.
@@ -411,7 +442,7 @@ describe("AI tools & connectors (axis 4)", () => {
     expect(screen.queryByText("Read & write is for admins.")).not.toBeInTheDocument();
   });
 
-  it("blocks the whole connectors axis on Guest-based roles, with the honest reason (WARP-1578)", () => {
+  it("blocks the whole connectors axis on External-guest-based roles, with the honest reason (WARP-1578)", () => {
     // A guest sits below O-2's family-and-up read floor, so any grant saved
     // here is inert. Shown-and-disabled, never hidden and never silently
     // accepted — the two halves of the design-brief doctrine.
@@ -421,21 +452,21 @@ describe("AI tools & connectors (axis 4)", () => {
     const options = Array.from(select.options);
     expect(options.map((o) => o.textContent)).toEqual(["None", "Read", "Read & write"]);
     expect(options.map((o) => o.disabled)).toEqual([false, true, true]);
-    expect(screen.getByText("Connectors are for staff and admins.")).toBeInTheDocument();
+    expect(screen.getByText("Connectors are for members and admins.")).toBeInTheDocument();
   });
 
-  it("switching TO Guest clears connector grants and says so — never a silent drop", () => {
+  it("switching TO External guest clears connector grants and says so — never a silent drop", () => {
     const base = blankRoleDraft("admin");
     base.connectors.eaglesoft = "read_write";
     renderSheet({ mode: "edit", base });
-    fireEvent.click(screen.getByRole("button", { name: "Guest" }));
+    fireEvent.click(screen.getByRole("button", { name: "External guest" }));
     expect((screen.getByLabelText("Eaglesoft access") as HTMLSelectElement).value).toBe("none");
     expect(
-      screen.getByText(/Switching to Guest turns off Eaglesoft — guests can't reach connectors\./),
+      screen.getByText(/Switching to External guest turns off Eaglesoft — external guests can't reach connectors\./),
     ).toBeInTheDocument();
   });
 
-  it("a Guest role that already HOLDS a grant shows it, and discloses that saving removes it", () => {
+  it("an External-guest role that already HOLDS a grant shows it, and discloses that saving removes it", () => {
     // Reachable from rows written before this floor existed. The value stays
     // visible (hiding it would be the same dishonesty in reverse) and the
     // consequence of pressing Save is stated up front.
@@ -448,7 +479,7 @@ describe("AI tools & connectors (axis 4)", () => {
     const { onSave } = renderSheet({ mode: "edit", base });
     expect((screen.getByLabelText("Eaglesoft access") as HTMLSelectElement).value).toBe("read");
     expect(
-      screen.getByText("Connectors are for staff and admins — saving removes this."),
+      screen.getByText("Connectors are for members and admins — saving removes this."),
     ).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Description"), { target: { value: "front desk" } });
@@ -578,5 +609,82 @@ describe("WARP-2738 — initialDirty", () => {
     // Named but untouched: `blankRoleDraft` + a name is still identical to
     // `base`, so only an explicit `initialDirty` may unlock this.
     expect(screen.getByRole("button", { name: "Save role" })).toBeDisabled();
+  });
+});
+
+// ── WARP-2897 — runtime (extension) tool domains ──────────────────────
+
+describe("Extensions rows and dead grants (WARP-2897)", () => {
+  const groups = toolDomainGroupsWith([{ domain: "ext-bookings" }]);
+
+  it("renders no Extensions section when nothing is attached", () => {
+    renderSheet();
+    expect(screen.queryByTestId("access-tools-extensions")).toBeNull();
+  });
+
+  it("renders one Extensions row per runtime domain, starting Off on a new role", () => {
+    renderSheet({ base: blankRoleDraft("family", groups), toolDomainGroups: groups });
+    const row = screen.getByTestId("access-tools-ext:ext-bookings");
+    expect(within(row).getByText("ext-bookings")).toBeTruthy();
+    expect(within(row).getByRole("button", { name: "Off" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("a row the draft has no entry for (domains loaded after the sheet's seed) shows Off", () => {
+    // The panel fetches /api/access/tool-domains asynchronously, so a draft
+    // seeded before it answered has no key for the extension row. Off — never
+    // View — is the only honest display: nothing is granted until chosen.
+    renderSheet({ base: blankRoleDraft("family"), toolDomainGroups: groups });
+    const row = screen.getByTestId("access-tools-ext:ext-bookings");
+    expect(within(row).getByRole("button", { name: "Off" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("choosing View on an Extensions row saves exactly that grant", () => {
+    const { onSave } = renderSheet({ base: blankRoleDraft("family", groups), toolDomainGroups: groups });
+    fireEvent.change(screen.getByLabelText(/role name/i), { target: { value: "Front desk" } });
+    const row = screen.getByTestId("access-tools-ext:ext-bookings");
+    fireEvent.click(within(row).getByRole("button", { name: "View" }));
+    fireEvent.click(screen.getByRole("button", { name: /save role/i }));
+    const payload = onSave.mock.calls[0]![0];
+    expect(payload.toolGrants).toContainEqual({ domain: "ext-bookings", level: "view" });
+  });
+
+  it("badges a grant whose domain nothing provides any more — and still saves it back", () => {
+    const role = makeRole({
+      toolGrants: [{ domain: "ext-bookings", level: "view", state: "dead", deadReason: "not_provided" }],
+    });
+    const { onSave } = renderSheet({
+      mode: "edit",
+      base: roleToDraft(role),
+      deadToolGrants: [{ domain: "ext-bookings", deadReason: "not_provided" }],
+    });
+    const dead = screen.getByTestId("access-tools-dead-ext-bookings");
+    expect(within(dead).getByText("Reaches nothing")).toBeTruthy();
+    expect(within(dead).getByText(ACCESS_COPY.deadToolGrant)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText(/role name/i), { target: { value: "Finance 2" } });
+    fireEvent.click(screen.getByRole("button", { name: /save role/i }));
+    expect(onSave.mock.calls[0]![0].toolGrants).toEqual([{ domain: "ext-bookings", level: "view" }]);
+  });
+
+  /** The dead row's Remove is the only way to revoke it: it has no Off.
+   *  MUTATION: Remove does not record the domain in the draft -> red. */
+  it("Remove on a dead grant drops it from the save; Keep brings it back", () => {
+    const role = makeRole({
+      toolGrants: [{ domain: "ext-bookings", level: "use", state: "dead", deadReason: "not_provided" }],
+    });
+    const { onSave } = renderSheet({
+      mode: "edit",
+      base: roleToDraft(role),
+      deadToolGrants: [{ domain: "ext-bookings", deadReason: "not_provided" }],
+    });
+    fireEvent.change(screen.getByLabelText(/role name/i), { target: { value: "Finance 2" } });
+    const dead = screen.getByTestId("access-tools-dead-ext-bookings");
+    fireEvent.click(within(dead).getByRole("button", { name: "Remove ext-bookings grant" }));
+    expect(within(dead).getByText(ACCESS_COPY.deadToolGrantRemoved)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /save role/i }));
+    expect(onSave.mock.calls[0]![0].toolGrants).toEqual([]);
+
+    fireEvent.click(within(dead).getByRole("button", { name: "Keep ext-bookings grant" }));
+    fireEvent.click(screen.getByRole("button", { name: /save role/i }));
+    expect(onSave.mock.calls[1]![0].toolGrants).toEqual([{ domain: "ext-bookings", level: "use" }]);
   });
 });

@@ -31,8 +31,25 @@ vi.mock("next/link", () => ({
   ),
 }));
 
-import { HealthStatusView } from "@/components/health/HealthStatusView";
+import { HealthStatusView, serviceLabel } from "@/components/health/HealthStatusView";
 import type { SystemHealth } from "@/lib/api";
+
+// Mirrors the health monitor's `ComponentName` union
+// (apps/orchestrator/src/services/health-monitor.service.ts) — kept as a
+// literal list since the two packages don't share types. WARP-3155: every
+// name the monitor can actually send must resolve to a friendly label, never
+// fall through `serviceLabel`'s `?? name` raw-name fallback.
+const COMPONENT_NAMES = [
+  "postgres",
+  "redis",
+  "routing",
+  "ai-gateway",
+  "nextcloud",
+  "display",
+  "file-indexer",
+  "storage",
+  "mqtt",
+] as const;
 
 function makeHealth(overrides: Partial<SystemHealth> = {}): SystemHealth {
   return {
@@ -40,22 +57,29 @@ function makeHealth(overrides: Partial<SystemHealth> = {}): SystemHealth {
     uptime: 3600,
     version: "0.1.0",
     components: [
-      { name: "db", status: "ok", latencyMs: 2, lastCheckedAt: "2026-05-31T00:00:00Z" },
+      { name: "postgres", status: "ok", latencyMs: 2, lastCheckedAt: "2026-05-31T00:00:00Z" },
       { name: "redis", status: "ok", latencyMs: 1, lastCheckedAt: "2026-05-31T00:00:00Z" },
-      { name: "aiGateway", status: "ok", latencyMs: 12, lastCheckedAt: "2026-05-31T00:00:00Z" },
+      { name: "ai-gateway", status: "ok", latencyMs: 12, lastCheckedAt: "2026-05-31T00:00:00Z" },
     ],
     ...overrides,
   };
 }
 
 describe("HealthStatusView (PR #382)", () => {
+  it("has a friendly label for every ComponentName the monitor can send (WARP-3155)", () => {
+    for (const name of COMPONENT_NAMES) {
+      expect(serviceLabel(name)).not.toBe(name);
+    }
+  });
+
+
   it("renders the page heading and every service component with its status", () => {
     render(<HealthStatusView health={makeHealth()} isLoading={false} error={undefined} />);
     expect(
       screen.getByRole("heading", { level: 1, name: /health/i }),
     ).toBeInTheDocument();
 
-    // Rendered with friendly labels (db → Database, aiGateway → AI gateway).
+    // Rendered with friendly labels (postgres → Database, ai-gateway → AI gateway).
     const list = screen.getByRole("list", { name: /service health/i });
     for (const label of [/database/i, /cache/i, /ai gateway/i]) {
       expect(within(list).getByText(label)).toBeInTheDocument();
@@ -75,8 +99,8 @@ describe("HealthStatusView (PR #382)", () => {
     const health = makeHealth({
       status: "degraded",
       components: [
-        { name: "db", status: "ok", latencyMs: 2, lastCheckedAt: "2026-05-31T00:00:00Z" },
-        { name: "frigate", status: "down", latencyMs: 0, lastCheckedAt: "2026-05-31T00:00:00Z", error: "unreachable" },
+        { name: "postgres", status: "ok", latencyMs: 2, lastCheckedAt: "2026-05-31T00:00:00Z" },
+        { name: "routing", status: "down", latencyMs: 0, lastCheckedAt: "2026-05-31T00:00:00Z", error: "unreachable" },
       ],
     });
     render(<HealthStatusView health={health} isLoading={false} error={undefined} />);
@@ -84,9 +108,9 @@ describe("HealthStatusView (PR #382)", () => {
     expect(banner).not.toHaveTextContent(/all systems operational/i);
     // eslint-disable-next-line testing-library/no-node-access
     expect(banner.querySelector(".bg-system-green")).toBeNull();
-    // The failing service is surfaced (frigate → "Cameras (Frigate)").
+    // The failing service is surfaced (routing → "Router").
     const list = screen.getByRole("list", { name: /service health/i });
-    expect(within(list).getByText(/cameras \(frigate\)/i)).toBeInTheDocument();
+    expect(within(list).getByText(/^router$/i)).toBeInTheDocument();
     expect(within(list).getByText(/down/i)).toBeInTheDocument();
   });
 
@@ -96,14 +120,15 @@ describe("HealthStatusView (PR #382)", () => {
     expect(banner).toHaveTextContent(/needs attention/i);
   });
 
-  it("surfaces a flagged storage pool with a link to Drives (WARP-1146)", () => {
+  it("surfaces a flagged storage pool with a link to Storage (WARP-1146)", () => {
     // The monitor's `storage` component goes down when a RAID pool is
     // degraded/failed. The row must render the friendly label AND point the
-    // owner at the Drives page that explains which pool dropped a member.
+    // owner at the Storage page that explains which pool dropped a member
+    // (WARP-2959 moved it from /files/drives to Settings -> Storage).
     const health = makeHealth({
       status: "degraded",
       components: [
-        { name: "db", status: "ok", latencyMs: 2, lastCheckedAt: "2026-05-31T00:00:00Z" },
+        { name: "postgres", status: "ok", latencyMs: 2, lastCheckedAt: "2026-05-31T00:00:00Z" },
         { name: "storage", status: "down", latencyMs: 3, lastCheckedAt: "2026-05-31T00:00:00Z", error: "pool md127 is degraded" },
       ],
     });
@@ -111,7 +136,34 @@ describe("HealthStatusView (PR #382)", () => {
     const list = screen.getByRole("list", { name: /service health/i });
     expect(within(list).getByText(/storage pools/i)).toBeInTheDocument();
     const link = within(list).getByRole("link", { name: /view drives/i });
-    expect(link).toHaveAttribute("href", "/files/drives");
+    expect(link).toHaveAttribute("href", "/settings/storage");
+  });
+
+  it("shows why a service is down — the broker crash loop reads as a reason, not a bare red dot (WARP-2548)", () => {
+    render(
+      <HealthStatusView
+        health={makeHealth({
+          status: "degraded",
+          components: [
+            { name: "postgres", status: "ok", latencyMs: 2, lastCheckedAt: "2026-05-31T00:00:00Z" },
+            {
+              name: "mqtt",
+              status: "down",
+              latencyMs: 0,
+              lastCheckedAt: "2026-05-31T00:00:00Z",
+              error: "MQTT broker connecting: connect ECONNREFUSED 172.18.0.9:8883",
+            },
+          ],
+        })}
+        isLoading={false}
+        error={undefined}
+      />,
+    );
+    const list = screen.getByRole("list", { name: /service health/i });
+    expect(within(list).getByText(/messaging \(mqtt broker\)/i)).toBeInTheDocument();
+    expect(within(list).getByText(/ECONNREFUSED 172\.18\.0\.9:8883/)).toBeInTheDocument();
+    // An up service carries no error line.
+    expect(within(list).queryAllByText(/ECONNREFUSED/)).toHaveLength(1);
   });
 
   it("renders a loading state without crashing when health is undefined", () => {

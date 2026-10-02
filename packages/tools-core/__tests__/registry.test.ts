@@ -94,6 +94,9 @@ const EXPECTED_TOOL_NAMES = [
   "remove_device",
   "create_scene",
   "assign_device_room",
+  // Device gateway (BACnet/IP, Modbus TCP, SNMP, KNX/IP) via /api/building.
+  "get_building_devices",
+  "set_building_point",
   // ADR-045 — the `pm` and `crm` tool families are GONE, and that is the
   // decision this list exists to make somebody sign.
   //
@@ -151,6 +154,11 @@ const EXPECTED_TOOL_NAMES = [
   // WARP-1436 — ambient web data via screened egress (both Tier-1)
   "get_weather",
   "currency_convert",
+  // WARP-3074 — bulk labelling via the Kev decision model (Tier-1)
+  "classify_items",
+  // WARP-3116 — dashboard navigation (both Tier-1; pure lookups)
+  "find_dashboard_page",
+  "open_dashboard_page",
   // WARP-1440 — camera depth (search/health Tier-1; toggle/zones/delete Tier-2)
   "search_camera_events",
   "get_camera_health",
@@ -196,15 +204,41 @@ const EXPECTED_TOOL_NAMES = [
   "cloud_query_dataset",
   // money (WARP-2581) — excluded from the chat pool, MCP/API reachable
   "money_list_open_documents",
+  // doors (ADR-055 P4b, brief §11.5) — the assistant's whole reach into doors:
+  // two READS. No unlock, no grant, no credential, and nothing that confirms.
+  // In the chat pool when the `doors` module is on; withheld with it (WARP-2972).
+  "doors_list",
+  "doors_recent_events",
   // agent_runs (WARP-2180) — start is Tier-2 (it spends compute unattended),
   // list is Tier-1. Both in the chat pool: a run is startable from chat.
   "start_agent_run",
   "list_agent_runs",
+  // WARP-3302 — stop one run (write, no prompt). Checking one run is list_agent_runs({run_id}).
+  "cancel_agent_run",
   // routines (WARP-2894, ADR-056 §5.1) — draft is Write-tier with NO
   // confirmation (a draft is inert), list is Tier-1, run is Tier-2.
   "routine_draft",
   "routine_list",
   "routine_run",
+  // workspace (WARP-2896, ADR-056 §6.2) — four reads, three ungated writes
+  // (one checkout in the sandbox is their whole reach), one Tier-2 propose.
+  "workspace_read",
+  "workspace_search",
+  "workspace_diff",
+  "workspace_log",
+  "workspace_write",
+  "workspace_commit",
+  "workspace_run",
+  "workspace_propose",
+  // WARP-2979 security (ADR-059 P4 §6.12) — four Tier-1 reads, and the domain
+  // may never hold anything else (the read-only pin below).
+  "security_list_incidents",
+  "security_get_incident",
+  "security_search_events",
+  "security_zone_status",
+  // WARP-2980 (ADR-059 P5 PR-E, §6.18) — what normal looks like for one place;
+  // a Tier-1 read like the other four.
+  "security_explain_pattern",
 ];
 
 describe("TOOLS registry", () => {
@@ -236,6 +270,17 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("start_agent_run")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("list_agent_runs")?.requiresWrite).toBe(false);
     expect(TOOLS.get("list_agent_runs")?.requiresConfirmation).toBe(false);
+    // WARP-3302 — stopping a run only stops work: a write with no prompt.
+    expect(TOOLS.get("cancel_agent_run")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("cancel_agent_run")?.requiresConfirmation).toBe(false);
+    // ADR-055 §11.5 — the assistant may never open a door, issue a credential
+    // or change a grant, and no confirmation-token flow makes that acceptable.
+    // Both doors tools are reads, by flag. (This file is the gate for the flags;
+    // doors-read-only.test.ts is the gate for dispatch.)
+    for (const name of ["doors_list", "doors_recent_events"]) {
+      expect(TOOLS.get(name)?.requiresWrite, name).toBe(false);
+      expect(TOOLS.get(name)?.requiresConfirmation, name).toBe(false);
+    }
     // WARP-2894 — a draft is inert (POST /api/tools cannot set status), so
     // drafting is a write that needs no confirmation; a person promotes it
     // on /routines. Running a LIVE routine is real tool calls: Tier-2.
@@ -245,6 +290,19 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("routine_list")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("routine_run")?.requiresWrite).toBe(true);
     expect(TOOLS.get("routine_run")?.requiresConfirmation).toBe(true);
+    // WARP-2896 — the workshop's tiers. The three ungated writes are what
+    // the run worker's WORKSPACE_TOOLS exemption exists for; propose is the
+    // one confirming call, because it is what a person reviews.
+    for (const name of ["workspace_read", "workspace_search", "workspace_diff", "workspace_log"]) {
+      expect(TOOLS.get(name)?.requiresWrite, name).toBe(false);
+      expect(TOOLS.get(name)?.requiresConfirmation, name).toBe(false);
+    }
+    for (const name of ["workspace_write", "workspace_commit", "workspace_run"]) {
+      expect(TOOLS.get(name)?.requiresWrite, name).toBe(true);
+      expect(TOOLS.get(name)?.requiresConfirmation, name).toBe(false);
+    }
+    expect(TOOLS.get("workspace_propose")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("workspace_propose")?.requiresConfirmation).toBe(true);
     // Interceptor-owned, not route-owned: `DELETE /api/files` runs no Tier-2
     // gate of its own, so there is no route challenge to stand down for.
     expect(TOOLS.get("delete_file")?.confirmationOwner).toBeUndefined();
@@ -330,12 +388,22 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("translate_text")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("summarize_file")?.requiresWrite).toBe(false);
     expect(TOOLS.get("summarize_file")?.requiresConfirmation).toBe(false);
+    // WARP-3074 — classify_items only labels; acting on a label is a
+    // separate tool call on the normal write-confirmation path.
+    expect(TOOLS.get("classify_items")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("classify_items")?.requiresConfirmation).toBe(false);
     // WARP-1436 — ambient web-data tools are Tier-1 (read-only; egress is
     // gated + audited server-side, not a state write).
     expect(TOOLS.get("get_weather")?.requiresWrite).toBe(false);
     expect(TOOLS.get("get_weather")?.requiresConfirmation).toBe(false);
     expect(TOOLS.get("currency_convert")?.requiresWrite).toBe(false);
     expect(TOOLS.get("currency_convert")?.requiresConfirmation).toBe(false);
+    // WARP-3116 — navigation resolves a page; the dashboard moves the view.
+    // No box state changes, so both are Tier-1.
+    expect(TOOLS.get("find_dashboard_page")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("find_dashboard_page")?.requiresConfirmation).toBe(false);
+    expect(TOOLS.get("open_dashboard_page")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("open_dashboard_page")?.requiresConfirmation).toBe(false);
     // WARP-1440 — camera reads are Tier-1; detection toggle, zone writes,
     // and clip deletion are Tier-2 (write + handler-enforced confirmation).
     expect(TOOLS.get("search_camera_events")?.requiresWrite).toBe(false);
@@ -377,6 +445,10 @@ describe("TOOLS registry", () => {
     expect(TOOLS.get("create_scene")?.requiresConfirmation).toBe(true);
     expect(TOOLS.get("assign_device_room")?.requiresWrite).toBe(true);
     expect(TOOLS.get("assign_device_room")?.requiresConfirmation).toBe(false);
+    // Building writes move real equipment: interceptor-confirmed, never route-owned.
+    expect(TOOLS.get("get_building_devices")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("set_building_point")?.requiresWrite).toBe(true);
+    expect(TOOLS.get("set_building_point")?.requiresConfirmation).toBe(true);
     // WARP-1450 — appliance ops: reads are Tier-1 (audit/update-status also
     // role-gate the human INSIDE the handler); apply_update is Tier-2.
     expect(TOOLS.get("get_drive_health")?.requiresWrite).toBe(false);
@@ -472,6 +544,26 @@ describe("TOOLS registry", () => {
     // A mutating-verb tool with requiresWrite:false is exactly the WARP-466
     // email_draft_reply regression class — fail loudly.
     expect(offenders).toEqual([]);
+  });
+
+  // WARP-2979 (ADR-059 P4 §6.12.4; ADR-055 §11.5 extended by brief §4.6) —
+  // Droplet's AI never acknowledges, resolves, changes the mode, hours,
+  // routing or links, and never touches doors or grants. A write or
+  // confirming tool in the `security` domain is a design change, not a diff:
+  // this pin fails it, and the assistant router has no route it could call.
+  it("the security domain holds no write or confirming tool", () => {
+    const security = TOOL_CATALOG.filter((e) => e.domain === "security");
+    // Non-vacuous: the five tools are there to be checked (WARP-2980 added the fifth).
+    expect(security.map((e) => e.name).sort()).toEqual(
+      ["security_explain_pattern", "security_get_incident", "security_list_incidents", "security_search_events", "security_zone_status"],
+    );
+    const offenders = security.filter((e) => e.requiresWrite || e.requiresConfirmation).map((e) => e.name);
+    expect(offenders).toEqual([]);
+    for (const e of security) {
+      const t = TOOLS.get(e.name)!;
+      expect(t.requiresWrite, e.name).toBe(false);
+      expect(t.requiresConfirmation, e.name).toBe(false);
+    }
   });
 
   it("TOOL_CATALOG is in 1:1 correspondence with TOOLS (completeness)", () => {

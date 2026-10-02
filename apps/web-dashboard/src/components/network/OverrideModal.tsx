@@ -382,7 +382,7 @@ export function OverrideModal({
                   value={pickerDeviceMac}
                   onChange={(e) => setPickerDeviceMac(e.target.value)}
                   aria-label="Device"
-                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+                  className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-colors"
                   style={{
                     background: "var(--surface)",
                     border: "1px solid var(--border)",
@@ -402,7 +402,7 @@ export function OverrideModal({
                   value={pickerGroupId}
                   onChange={(e) => setPickerGroupId(e.target.value)}
                   aria-label="Group"
-                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+                  className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-colors"
                   style={{
                     background: "var(--surface)",
                     border: "1px solid var(--border)",
@@ -540,7 +540,7 @@ export function OverrideModal({
                   type="datetime-local"
                   value={customEndAt}
                   onChange={(e) => setCustomEndAt(e.target.value)}
-                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+                  className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-colors"
                   style={{
                     background: "var(--surface)",
                     border: "1px solid var(--border)",
@@ -578,7 +578,7 @@ export function OverrideModal({
               value={note}
               onChange={(e) => setNote(e.target.value)}
               placeholder="e.g. Guest access"
-              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
               style={{
                 background: "var(--surface)",
                 border: "1px solid var(--border)",

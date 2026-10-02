@@ -34,7 +34,9 @@ function readPage(sub: string): string {
   return readFileSync(path.join(here, sub, "page.tsx"), "utf-8");
 }
 
-const STATIC_SUBVIEWS = ["drives", "favorites", "recents", "shared", "trash"];
+// WARP-2959: "drives" is no longer one of these — it is a redirect page to
+// /settings/storage, listed in SELF_OWNED so the layout passes it through.
+const STATIC_SUBVIEWS = ["favorites", "recents", "shared", "trash"];
 
 // ── the layout's own dependencies ────────────────────────────────────────
 const mockPathname = vi.fn<() => string>(() => "/files/trash");
@@ -74,11 +76,13 @@ describe("WARP-1548 — sub-pages no longer hand-roll their chrome", () => {
     expect(src).not.toContain(header.sub);
   });
 
-  it("the two dynamic routes still own their chrome, deliberately", () => {
+  it("the self-owned routes still own their chrome, deliberately", () => {
     // Guards the asymmetry documented in files-routes.ts: if someone hoists
     // these without adding the header-override machinery, their computed
     // `actions` / `sub` silently vanish rather than failing loudly.
     expect(readPage("devices")).toMatch(/from "@\/components\/shell\/ShellPage"/);
+    // …and /files/drives brings no chrome because it renders nothing at all.
+    expect(readPage("drives")).toMatch(/redirect\("\/settings\/storage"\)/);
     expect(readFileSync(path.join(here, "page.tsx"), "utf-8")).toMatch(
       /from "@\/components\/shell\/ShellPage"/
     );
@@ -86,7 +90,7 @@ describe("WARP-1548 — sub-pages no longer hand-roll their chrome", () => {
 });
 
 describe("WARP-1548 — the route header map", () => {
-  it("covers exactly the five static sub-routes", () => {
+  it("covers exactly the four static sub-routes", () => {
     expect(LAYOUT_OWNED.sort()).toEqual(
       STATIC_SUBVIEWS.map((s) => `/files/${s}`).sort()
     );

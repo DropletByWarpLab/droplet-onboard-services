@@ -24,6 +24,7 @@ import {
   recordDiscoveredRemoteTools,
   type ClassificationPrisma,
   type RemoteToolClassificationRow,
+  remoteToolReviewHash,
 } from "../services/remote-tool-classification.service.js";
 import type { AuthUser } from "../middleware/auth.js";
 
@@ -48,6 +49,13 @@ function fakePrisma() {
       const next = { ...rows.get(key)!, ...data };
       rows.set(key, next);
       return next;
+    },
+    updateMany: async ({ where, data }: { where: { serverId: string; toolName: string; inputSchemaHash?: string | null }; data: Partial<RemoteToolClassificationRow> }) => {
+      const key = k(where.serverId, where.toolName);
+      const row = rows.get(key);
+      if (!row || ("inputSchemaHash" in where && (row.inputSchemaHash ?? null) !== where.inputSchemaHash)) return { count: 0 };
+      rows.set(key, { ...row, ...data });
+      return { count: 1 };
     },
     findMany: async ({ where }: { where?: { serverId?: string } } = {}) =>
       [...rows.values()].filter((r) => !where?.serverId || r.serverId === where.serverId),
@@ -137,6 +145,29 @@ describe("PATCH /api/admin/remote-tools/classifications/:serverId/:toolName", ()
     expect(res.status).toBe(200);
     expect(cache.lookup("atlassian", "createJiraIssue")?.denied).toBe(true);
     expect(recordActivityMock.mock.calls[0]![0]).toMatchObject({ what: "Remote tool classified: blocked" });
+  });
+
+  it("a review of a schema that has since changed is a 409 and changes nothing", async () => {
+    // MUTATION: map STALE_REVIEW to 200 / drop the hash from the body parse → red.
+    const { prisma, rows } = fakePrisma();
+    const h1 = "a".repeat(64);
+    const h2 = "b".repeat(64);
+    await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count", inputSchemaHash: h1 }]);
+    await recordDiscoveredRemoteTools(prisma, "ext-wc", [{ wireName: "word_count", inputSchemaHash: h2 }]);
+    const cache = new RemoteToolClassificationCache();
+    const app = buildApp(prisma, owner, cache);
+    const asRead = { requiresWrite: false, requiresConfirmation: false, denied: false };
+    // What the owner was shown is the row's hash: the review hash of v1 (no description sent here).
+    const stale = await request(app).patch(`${BASE}/ext-wc/word_count`).send({ ...asRead, inputSchemaHash: remoteToolReviewHash(undefined, h1) });
+    expect(stale.status).toBe(409);
+    expect(stale.body.error).toBe("STALE_REVIEW");
+    expect(rows.get("ext-wc|word_count")).toMatchObject({ requiresWrite: true, reviewedBy: null });
+    expect(cache.lookup("ext-wc", "word_count")).toBeUndefined();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+    expect((await request(app).patch(`${BASE}/ext-wc/word_count`).send({ ...asRead, inputSchemaHash: "not-a-hash" })).status).toBe(400);
+    const fresh = await request(app).patch(`${BASE}/ext-wc/word_count`).send({ ...asRead, inputSchemaHash: remoteToolReviewHash(undefined, h2) });
+    expect(fresh.status).toBe(200);
+    expect(cache.lookup("ext-wc", "word_count")?.requiresWrite).toBe(false);
   });
 
   it("refuses an unseen tool (404), a write without confirmation (400), a malformed body and a malformed id (400)", async () => {

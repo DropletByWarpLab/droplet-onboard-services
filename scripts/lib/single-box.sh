@@ -312,6 +312,17 @@ EOF
   sudo install -m 0755 "$host_src/droplet-relay-dns.sh" \
     /usr/local/sbin/droplet-relay-dns
 
+  # --- bootstrap-certificate refresh (WARP-2944, ADR-058) -------------------
+  # The device-bridge's TlsRefreshWatcher execs this when the uplink address
+  # changes, so the self-signed cert's SAN follows the box around the SAME
+  # key. install-device-bridge.sh installs it on a full provision; landing it
+  # here too is what puts it on an EXISTING box — the WARP-2574 heal
+  # (droplet-host-integration.service → --reapply-host-integration) re-runs
+  # only this function, so a bridge-only install would leave every shipped
+  # box calling a wrapper that is not there, ten minutes at a time, forever.
+  sudo install -m 0755 "$host_src/droplet-tls-bootstrap-refresh.sh" \
+    /usr/local/sbin/droplet-tls-bootstrap-refresh.sh
+
   # --- network self-heal (WARP-1680) --------------------------------------
   # Backstop for a NIC rename / dead uplink leaving the box with no IPv4 and
   # no remote path in. Acts ONLY when nothing holds a usable address, so it is
@@ -1711,12 +1722,23 @@ EOF
   # left behind. Gated on a framebuffer existing AND no PyPortal on USB, so a
   # real PyPortal box still auto-probes exactly as before.
   # Test/dev hooks (so the detection is unit-testable without a real panel):
-  #   DROPLET_FB_DEV   override the framebuffer device probed  (default /dev/fb0)
+  #   DROPLET_FB_DEV   override the framebuffer device probed
+  #                    (default: FB_DEVICE from .env, else /dev/fb0)
   #   DROPLET_FB_SIZE  override the virtual_size sysfs file
+  #   DROPLET_FB_SYSFS override the sysfs class dir (default /sys/class/graphics)
   #   DROPLET_USB_TTY  override the PyPortal USB glob prefix
-  local _fb_dev _fb_sizefile _usb_glob
-  _fb_dev="${DROPLET_FB_DEV:-/dev/fb0}"
-  _fb_sizefile="${DROPLET_FB_SIZE:-/sys/class/graphics/fb0/virtual_size}"
+  #
+  # Probe the operator's FB_DEVICE, not a hard-wired fb0 — WARP-2128. The
+  # runtime (services/oled-display/fb.py `_open_or_raise`) opens FB_DEVICE and
+  # reads its size from /sys/class/graphics/<basename FB_DEVICE>/virtual_size.
+  # Reading fb0 here instead would, on a Vault whose GPU exposes a console fbdev
+  # (fb0 = the 1920x1080 console, the panel on fb1), overwrite LCD_WIDTH /
+  # LCD_HEIGHT with the console's size on every run: the crop, re-created.
+  # An empty FB_DEVICE= counts as unset, as in compose's ${FB_DEVICE:-/dev/fb0}.
+  local _fb_dev _fb_sizefile _usb_glob _current_fb_device
+  _current_fb_device="$( { grep -E '^FB_DEVICE=' "$env_target" 2>/dev/null || true; } | tail -1 | cut -d= -f2-)"
+  _fb_dev="${DROPLET_FB_DEV:-${_current_fb_device:-/dev/fb0}}"
+  _fb_sizefile="${DROPLET_FB_SIZE:-${DROPLET_FB_SYSFS:-/sys/class/graphics}/$(basename "$_fb_dev")/virtual_size}"
   _usb_glob="${DROPLET_USB_TTY:-/dev/tty}"
   local _current_display_backend
   _current_display_backend="$( { grep -E '^DISPLAY_BACKEND=' "$env_target" 2>/dev/null || true; } | tail -1 | cut -d= -f2-)"
@@ -1729,31 +1751,67 @@ EOF
   for _tty in "${_usb_glob}"ACM* "${_usb_glob}"USB*; do
     if [ -e "$_tty" ]; then _usb_present=1; break; fi
   done
+  # Two SEPARATE decisions. Conflating them is WARP-2128 (stale geometry).
+  #
+  # (a) The BACKEND is an operator choice worth preserving across re-runs.
+  local _effective_backend=""
   if [ -n "$_current_display_backend" ] && [ "$_current_display_backend" != "auto" ]; then
     log_info "single-box env: DISPLAY_BACKEND=$_current_display_backend already set — leaving the operator's choice alone"
+    _effective_backend="$_current_display_backend"
   elif [ -e "$_fb_dev" ] && [ "$_usb_present" = 0 ]; then
     upsert_env DISPLAY_BACKEND fb
     upsert_env FB_DEVICE       "$_fb_dev"
+    _effective_backend=fb
+  fi
+  # (b) The GEOMETRY is a property of the panel PHYSICALLY ATTACHED RIGHT NOW,
+  # not a choice, so re-read it on every run — WARP-2128.
+  #
+  # This block used to live inside the auto-detect branch above, which meant
+  # that once DISPLAY_BACKEND=fb was in .env the first branch won and
+  # virtual_size was never read again. Set a box up on a bench HDMI monitor
+  # (1920x1080), swap in the real rack bar (1424x280), re-run setup: the stale
+  # 1920x1080 stuck. display.py then renders 1920x1080 into a 1424x280
+  # framebuffer and fb.py crops to the top-left corner, so the operator sees a
+  # fragment of a screen built for hardware that is no longer attached.
+  if [ "$_effective_backend" = fb ] && [ -e "$_fb_dev" ]; then
     # virtual_size is "<width>,<height>" (e.g. `1424,280`). Never trust it
     # blind: a bad parse here writes a garbage geometry that the panel then
     # renders at, which reads as "the screen is broken" rather than as a
     # config error.
-    local _fb_size _fb_w _fb_h
+    local _fb_size _fb_w _fb_h _prev_w _prev_h
     _fb_size="$(cat "$_fb_sizefile" 2>/dev/null || true)"
     _fb_w="${_fb_size%%,*}"
     _fb_h="${_fb_size##*,}"
     case "${_fb_w}|${_fb_h}" in
       *[!0-9]*\|*|*\|*[!0-9]*|\|*|*\|)
-        log_warn "single-box env: /dev/fb0 present but virtual_size was unreadable ('${_fb_size}') — DISPLAY_BACKEND=fb written WITHOUT dimensions. Set LCD_WIDTH/LCD_HEIGHT by hand or the claim screen may render at the wrong geometry." ;;
+        # Leave whatever is already there: a stale geometry still beats none,
+        # and inventing one here would be the exact failure this block fixes.
+        log_warn "single-box env: ${_fb_dev} present but virtual_size was unreadable ('${_fb_size}') — LCD_WIDTH/LCD_HEIGHT left as-is. Set them by hand or the claim screen may render at the wrong geometry." ;;
       *)
+        _prev_w="$( { grep -E '^LCD_WIDTH='  "$env_target" 2>/dev/null || true; } | tail -1 | cut -d= -f2-)"
+        _prev_h="$( { grep -E '^LCD_HEIGHT=' "$env_target" 2>/dev/null || true; } | tail -1 | cut -d= -f2-)"
         upsert_env LCD_WIDTH  "$_fb_w"
         upsert_env LCD_HEIGHT "$_fb_h"
-        log_info "single-box env: framebuffer rack panel detected — DISPLAY_BACKEND=fb, ${_fb_w}x${_fb_h} (from /sys/class/graphics/fb0/virtual_size)" ;;
+        if [ -n "${_prev_w}${_prev_h}" ] && [ "${_prev_w}x${_prev_h}" != "${_fb_w}x${_fb_h}" ]; then
+          # Loud on purpose: a panel swap is exactly when an operator wants to
+          # see that setup noticed.
+          log_info "single-box env: panel geometry CHANGED ${_prev_w}x${_prev_h} -> ${_fb_w}x${_fb_h} (re-read from ${_fb_sizefile}) — LCD_WIDTH/LCD_HEIGHT updated"
+        else
+          log_info "single-box env: framebuffer rack panel detected — DISPLAY_BACKEND=${_effective_backend}, ${_fb_w}x${_fb_h} (from ${_fb_sizefile})"
+        fi ;;
     esac
   fi
+  # --- end display detection (backend choice + WARP-2128 geometry) ---------
+  # tests/framebuffer-panel-survives-reset.test.sh extracts everything from the
+  # "Test/dev hooks" comment down to this line and runs it against fake
+  # devices. Keep this sentinel if you move the block.
   # WARP-850: matter-controller is the 4th host-net service on the ladder
   # (:8083) — same WARP-806 reasoning as the three above.
   upsert_env DROPLET_MATTER_SERVICE_URL "http://${bridge_gw}:8083"
+  # device-gateway is the 5th host-net service on the ladder (:8084,
+  # network_mode: host for BACnet Who-Is UDP broadcast + KNX multicast) —
+  # same WARP-806 reasoning as the four above.
+  upsert_env DEVICE_GATEWAY_URL "http://${bridge_gw}:8084"
   # WARP-895: hand the Droplet AP's SSID (and an operator-set PSK, if any)
   # to the Matter controller so BLE-first Matter devices can join the LAN.
   # SSID matches the AP written above (~line 201).
@@ -1789,5 +1847,5 @@ EOF
   # reads never depend on docker0 being up.
   upsert_env DEVICE_BRIDGE_URL   "http://${bridge_gw}:9090"
 
-  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, DOCS_ENABLED=${docs_enabled_val} (RAM-gated, ${mem_gb} GiB vs ${docs_min_gib} GiB), CAMERA_SUBNET=auto (edge-router derived, WARP-1805), WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL + RAGAS_OLLAMA_URL (judge → in-network ollama), FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY/DEVICE_BRIDGE URLs → ${bridge_net} gateway ${bridge_gw})"
+  log_success "Wrote single-box knobs to .env (idempotent upsert — COMPOSE_PROFILES=${merged_profiles}, DOCS_ENABLED=${docs_enabled_val} (RAM-gated, ${mem_gb} GiB vs ${docs_min_gib} GiB), CAMERA_SUBNET=auto (edge-router derived, WARP-1805), WIREGUARD_LAN_CIDR=192.168.20.0/24, WIREGUARD_DNS=192.168.20.1, OLLAMA_URL + RAGAS_OLLAMA_URL (judge → in-network ollama), FIPS off, TPM=mock, OpenWrt 127.0.0.1:8181, LLM_MODEL=gpt-oss:20b, DROPLET_AP_MODE=hostapd, SWITCH_AUTOPROVISION=1 flat-lan, ROUTING/SWITCH/DISPLAY/DEVICE_BRIDGE/DEVICE_GATEWAY URLs → ${bridge_net} gateway ${bridge_gw})"
 }

@@ -9,6 +9,7 @@
  * these specs keep the two from drifting on the load-bearing values.
  */
 import { describe, it, expect } from "vitest";
+import type { ModuleId } from "@prisma/client";
 import { TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
 import {
   GATEABLE_MODULE_IDS,
@@ -18,16 +19,23 @@ import {
   clampConnectorLevel,
   clampLevel,
   fullCatalogFeatures,
+  tierRefusingModuleIds,
   domainsForFeatures,
+  isGrantableDomain,
   tierReachableDomains,
+  FEATURE_UNGATED_TOOL_DOMAINS,
+  OWNERS_BY_DOMAIN,
+  unmappedToolDomains,
 } from "./access-catalog.js";
+import { toolLayers } from "./tool-layers.service.js";
+import { MODULES } from "../modules/module-registry.js";
 
 describe("access-catalog — module vocabulary", () => {
   // WARP-2117/2018 added `crm` and `contacts`, taking this from 12 to 14;
-  // WARP-2581 added `money` for 15. The list is pinned so a new ModuleId
-  // cannot arrive without someone writing its §9 ladder — which is exactly
-  // what this test caught each time they did.
-  it("gates the 15 non-core ModuleIds; chat is the always-on module at act", () => {
+  // WARP-2581 added `money` for 15; WARP-2977 added `security` for 16;
+  // ADR-055 added `doors` for 17. The list is pinned so a new ModuleId cannot arrive without someone writing its
+  // §9 ladder — which is exactly what this test caught each time they did.
+  it("gates the 17 non-core ModuleIds; chat is the always-on module at act", () => {
     expect([...GATEABLE_MODULE_IDS].sort()).toEqual(
       [
         "calendar",
@@ -35,6 +43,7 @@ describe("access-catalog — module vocabulary", () => {
         "contacts",
         "crm",
         "docs",
+        "doors",
         "email",
         "files",
         "knowledge",
@@ -42,6 +51,7 @@ describe("access-catalog — module vocabulary", () => {
         "money",
         "network",
         "projects",
+        "security",
         "smart_home",
         "team_chat",
         "voice",
@@ -73,12 +83,19 @@ describe("access-catalog — §9 floor ceilings per tier", () => {
     expect(maxLevelFor("family", "managed_switch")).toBe("view");
   });
 
-  it("admin (and owner) ceiling is each module's own top level (manage everywhere except team_chat)", () => {
+  it("admin (and owner) ceiling is each module's own top level (manage everywhere except team_chat and doors)", () => {
     for (const moduleId of GATEABLE_MODULE_IDS) {
       // WARP-1683: team_chat tops out at `act` BY DESIGN — v1 has no admin
       // surface, and a `manage` level that gates nothing would be a lie in
       // the roles UI. Every other module still ceilings at manage.
-      const top = moduleId === "team_chat" ? "act" : "manage";
+      //
+      // ADR-055: doors tops out at `view` for the SAME reason, and a second
+      // one. Its write routes floor at `owner` (§11.4: "not admin"), and an
+      // owner holds every level through the §3 bypass, so a `manage` rung
+      // would be a grant an admin-based role could be given and could never
+      // use — the inert stored grant clampConnectorLevel's comment refuses.
+      // Pinned exactly (not "anything below manage") in the doors block below.
+      const top = moduleId === "team_chat" ? "act" : moduleId === "doors" ? "view" : "manage";
       expect(maxLevelFor("admin", moduleId), moduleId).toBe(top);
       expect(maxLevelFor("owner", moduleId), moduleId).toBe(top);
     }
@@ -107,8 +124,10 @@ describe("access-catalog — tier default catalog (null accessRoleId world)", ()
     expect(byId.get("files")).toBe("manage");
     expect(byId.get("network")).toBe("view");
     expect(byId.get("managed_switch")).toBe("view");
-    // every gateable module + chat present exactly once
-    expect(features).toHaveLength(GATEABLE_MODULE_IDS.length + 1);
+    // every gateable module the tier may hold + chat present exactly once
+    // (doors is refused below admin, ADR-055 — see the doors block below)
+    expect(features).toHaveLength(GATEABLE_MODULE_IDS.length);
+    expect(byId.has("doors")).toBe(false);
   });
 
   it("guest default: view everywhere (voice act), chat act", () => {
@@ -119,8 +138,95 @@ describe("access-catalog — tier default catalog (null accessRoleId world)", ()
   });
 });
 
+// ADR-059 §6 — Security's `view` is floored at family ("no guest tier": presence
+// data about identifiable people), and every /api/security read is
+// requireRole(owner, admin, family). `view` is the lowest rung, so a tier below
+// its floor used to clamp DOWN to it and hold it anyway: a guest role could
+// store security:view and the roles list advertised reach the routes refuse
+// (each refusal is a denial row that becomes a threat incident). The floor is
+// now a refusal (`refuseBelowFloor`), the contract `clampConnectorLevel` has.
+describe("access-catalog — security's family floor on `view` is a refusal (ADR-059)", () => {
+  it("a guest (and a service principal) holds NO security grant at all — not even view", () => {
+    for (const tier of ["guest", "service"] as const) {
+      expect(maxLevelFor(tier, "security"), tier).toBeNull();
+      for (const level of ["view", "act", "manage"] as const) {
+        expect(clampLevel(tier, "security", level), `${tier} ${level}`).toBeNull();
+      }
+    }
+  });
+
+  it("family, admin and owner are unchanged: family tops out at act, admin and owner at manage", () => {
+    expect(maxLevelFor("family", "security")).toBe("act");
+    expect(maxLevelFor("admin", "security")).toBe("manage");
+    expect(maxLevelFor("owner", "security")).toBe("manage");
+    // D6's wall account: a Staff-based role set to Security View keeps view (it is not clamped to nothing)
+    expect(clampLevel("family", "security", "view")).toBe("view");
+    expect(clampLevel("family", "security", "act")).toBe("act");
+    expect(clampLevel("family", "security", "manage")).toBe("act"); // manage is admin-only: a clamp, not a refusal
+    expect(clampLevel("admin", "security", "view")).toBe("view");
+    expect(clampLevel("admin", "security", "manage")).toBe("manage");
+    expect(clampLevel("owner", "security", "manage")).toBe("manage");
+  });
+
+  // WARP-3365 / WARP-3369 (Romain, 2026-09-30) — external guests get NOTHING from
+  // company-wide business data unless it is explicitly shared with them. Nothing
+  // in the CRM or Projects is shared per record, so both take the security
+  // pattern: `view` is a refusal below the family floor.
+  it("the refusal is opt-in per module: security, crm, projects, money (below family) and doors (below admin) are the only ones that refuse a guest or a family tier", () => {
+    const refusing = (tier: "guest" | "family") =>
+      GATEABLE_MODULE_IDS.filter((m) => maxLevelFor(tier, m) === null || clampLevel(tier, m, "manage") === null);
+    expect([...refusing("guest")].sort()).toEqual(["crm", "doors", "money", "projects", "security"]);
+    expect(refusing("family")).toEqual(["doors"]);
+    // the route gate and the assistant gate mount off THIS list
+    expect([...tierRefusingModuleIds()].sort()).toEqual(["crm", "doors", "money", "projects", "security"]);
+  });
+
+  it("a role-less guest's catalog has no security, crm, projects or money row; a role-less family, admin and owner keep theirs", () => {
+    const level = (tier: "guest" | "family" | "admin" | "owner", moduleId: ModuleId) =>
+      fullCatalogFeatures(tier).find((f) => f.moduleId === moduleId)?.level;
+    expect(level("guest", "security")).toBeUndefined();
+    expect(level("guest", "crm")).toBeUndefined();
+    expect(level("guest", "projects")).toBeUndefined();
+    expect(level("guest", "money")).toBeUndefined();
+    expect(level("family", "money")).toBe("view"); // Money is read-only for a member: no act level
+    expect(level("admin", "money")).toBe("manage");
+    expect(level("owner", "money")).toBe("manage");
+    expect(level("family", "security")).toBe("act");
+    expect(level("admin", "security")).toBe("manage");
+    expect(level("owner", "security")).toBe("manage");
+    for (const moduleId of ["crm", "projects"] as const) {
+      expect(level("family", moduleId), `family ${moduleId}`).toBe("manage");
+      expect(level("admin", moduleId), `admin ${moduleId}`).toBe("manage");
+      expect(level("owner", moduleId), `owner ${moduleId}`).toBe("manage");
+    }
+    // and nothing else about the guest's catalog moved: every other module is still there, chat included.
+    // Doors (below admin) is refused too, so chat + every gateable module but those five.
+    expect(fullCatalogFeatures("guest")).toHaveLength(GATEABLE_MODULE_IDS.length + 1 - 5);
+    for (const moduleId of ["files", "team_chat", "voice", "calendar", "chat"] as const) {
+      expect(level("guest", moduleId), `guest ${moduleId}`).toBeDefined();
+    }
+  });
+
+  it("a guest-based role cannot store a crm, projects or money grant, at any level; a family-based one clamps as before", () => {
+    for (const moduleId of ["crm", "projects", "money"] as const) {
+      for (const level of ["view", "act", "manage"] as const) {
+        expect(clampLevel("guest", moduleId, level), `guest ${moduleId} ${level}`).toBeNull();
+      }
+    }
+    expect(clampLevel("family", "money", "manage")).toBe("view"); // manage is admin-only: a clamp, not a refusal
+    expect(clampLevel("admin", "money", "manage")).toBe("manage");
+    for (const moduleId of ["crm", "projects"] as const) {
+      for (const level of ["view", "act", "manage"] as const) {
+        expect(clampLevel("guest", moduleId, level), `guest ${moduleId} ${level}`).toBeNull();
+      }
+      expect(clampLevel("family", moduleId, "manage")).toBe("manage");
+      expect(clampLevel("family", moduleId, "view")).toBe("view");
+    }
+  });
+});
+
 describe("access-catalog — tool-domain mapping (tools-core vocabulary)", () => {
-  it("maps features to tools-core domains; unclaimed domains always pass", () => {
+  it("maps features to tools-core domains; declared-ungated domains always pass", () => {
     const domains = domainsForFeatures(new Set(["calendar", "knowledge", "projects", "smart_home"]));
     // calendar claims its trio (the WARP-1532 grouping)
     expect(domains.has("calendar")).toBe(true);
@@ -134,19 +240,84 @@ describe("access-catalog — tool-domain mapping (tools-core vocabulary)", () =>
     expect(domains.has("files")).toBe(false);
     expect(domains.has("network")).toBe(false);
     expect(domains.has("switch")).toBe(false);
-    // domains no module claims (system/business/data/erp) are not module-gated
-    expect(domains.has("system")).toBe(true);
-    expect(domains.has("business")).toBe(true);
-    expect(domains.has("data")).toBe(true);
-    expect(domains.has("erp")).toBe(true);
+    expect(domains.has("money")).toBe(false);
+    // the declared-ungated domains pass regardless
+    for (const d of Object.keys(FEATURE_UNGATED_TOOL_DOMAINS)) expect(domains.has(d), d).toBe(true);
   });
 
-  it("feature set ∅ still passes the unclaimed domains only", () => {
-    const domains = domainsForFeatures(new Set());
-    expect(domains.has("files")).toBe(false);
-    expect(domains.has("system")).toBe(true);
+  it("feature set ∅ passes exactly the declared-ungated domains", () => {
+    expect([...domainsForFeatures(new Set())].sort()).toEqual(
+      Object.keys(FEATURE_UNGATED_TOOL_DOMAINS).sort(),
+    );
+  });
+});
+
+// WARP-2742 — the feature intersection is fail-CLOSED and exhaustive. Every
+// assertion here derives the domain list from tools-core's TOOL_DOMAINS and
+// the claims from MODULES; nothing is hand-copied, so a new domain or a new
+// module claim is covered the day it lands.
+describe("access-catalog — every tool domain has a feature decision (WARP-2742)", () => {
+  const claimedBy = new Map<string, string[]>();
+  for (const m of MODULES) {
+    for (const d of m.toolDomains) claimedBy.set(d, [...(claimedBy.get(d) ?? []), m.id]);
+  }
+
+  it.each([...TOOL_DOMAINS])(
+    "%s is claimed by at least one module XOR declared feature-ungated",
+    (domain) => {
+      const owners = claimedBy.get(domain) ?? [];
+      const ungated = Object.prototype.hasOwnProperty.call(FEATURE_UNGATED_TOOL_DOMAINS, domain);
+      expect(
+        owners.length > 0 ? !ungated : ungated,
+        `${domain}: claim it in module-registry.ts toolDomains OR add it to ` +
+          "FEATURE_UNGATED_TOOL_DOMAINS with a reason — not both, not neither",
+      ).toBe(true);
+    },
+  );
+
+  // WARP-2988 — a second claim WIDENS a domain (any owner passes it), so the
+  // shared claims are pinned exactly. A new one is a deliberate edit here.
+  it("only `business` is shared, by exactly crm and projects (OR semantics)", () => {
+    const shared = Object.fromEntries(
+      [...claimedBy].filter(([, owners]) => owners.length > 1).map(([d, o]) => [d, [...o].sort()]),
+    );
+    expect(shared).toEqual({ business: ["crm", "projects"] });
   });
 
+  it("unmappedToolDomains() is empty — the gate denies anything that lands there", () => {
+    expect(unmappedToolDomains()).toEqual([]);
+  });
+
+  it("every declared-ungated domain is a real tools-core domain with a written reason", () => {
+    for (const [d, reason] of Object.entries(FEATURE_UNGATED_TOOL_DOMAINS)) {
+      expect(TOOL_DOMAINS as string[], d).toContain(d);
+      expect((reason ?? "").length, d).toBeGreaterThan(20);
+    }
+  });
+
+  it.each([...TOOL_DOMAINS].filter((d) => claimedBy.has(d)))(
+    "claimed domain %s passes iff at least one owning module is in the feature set",
+    (domain) => {
+      const owners = claimedBy.get(domain)! as ModuleId[];
+      const all = new Set<ModuleId>(MODULES.map((m) => m.id));
+      expect(domainsForFeatures(all).has(domain)).toBe(true);
+      const without = new Set(all);
+      for (const o of owners) without.delete(o);
+      expect(domainsForFeatures(without).has(domain)).toBe(false);
+      for (const o of owners) {
+        expect(domainsForFeatures(new Set([...without, o])).has(domain), `${domain} via ${o}`).toBe(
+          true,
+        );
+      }
+    },
+  );
+
+  it("the Money module claims the money domain (the ticket's plain bug)", () => {
+    expect(claimedBy.get("money")).toEqual(["money"]);
+  });
+});
+
+describe("access-catalog — grantable tool domains", () => {
   it("GRANTABLE_TOOL_DOMAINS is the tools-core union minus erp (connector axis owns erp)", () => {
     expect(GRANTABLE_TOOL_DOMAINS).not.toContain("erp");
     for (const d of GRANTABLE_TOOL_DOMAINS) {
@@ -175,10 +346,45 @@ describe("access-catalog — tool-domain mapping (tools-core vocabulary)", () =>
   });
 });
 
-describe("access-catalog — tier write-filter reachability", () => {
-  it("owner/admin reach every catalog domain", () => {
-    expect([...tierReachableDomains("owner")].sort()).toEqual([...TOOL_DOMAINS].sort());
-    expect([...tierReachableDomains("admin")].sort()).toEqual([...TOOL_DOMAINS].sort());
+describe("access-catalog — tier write-filter reachability (two layers, WARP-2897)", () => {
+  /** A runtime layer holding one tool in `domain`. */
+  const runtimeTool = (domain: string, requiresWrite: boolean, name = `ext__${domain}_tool`) =>
+    toolLayers([{ name, domain, requiresWrite, source: "runtime:ext" }]);
+
+  /**
+   * WARP-2897 REVERSES the WARP-2761 owner/admin answer, deliberately (the
+   * PR's decision #1). Owner/admin used to take `TOOL_DOMAINS` unconditionally,
+   * so a domain holding NO tool — `crm`/`pm` today, and an extension's domain
+   * the moment it is disabled — still read as reachable for every admin
+   * template. They now reach the POPULATED domains of both layers: every
+   * domain some tool actually lives in, write or not.
+   *
+   * MUTATION 1: restore `if (tier === "owner" || tier === "admin") return new
+   * Set<string>(TOOL_DOMAINS);` -> this test goes red (crm/pm and the emptied
+   * extension domain come back).
+   */
+  it("owner/admin reach every POPULATED domain in either layer — and nothing else", () => {
+    const populated = new Set<string>(TOOL_CATALOG.map((t) => t.domain));
+    for (const tier of ["owner", "admin"] as const) {
+      expect([...tierReachableDomains(tier)].sort()).toEqual([...populated].sort());
+      // The declared-empty landing slots drop out (the WARP-2761 pin, rewritten).
+      expect(tierReachableDomains(tier).has("crm")).toBe(false);
+      expect(tierReachableDomains(tier).has("pm")).toBe(false);
+      // A write-only runtime domain IS reachable for admin (admin keeps writes).
+      expect(tierReachableDomains(tier, runtimeTool("ext-bookings", true)).has("ext-bookings")).toBe(true);
+    }
+  });
+
+  it("an extension domain emptied by disable is NOT reachable for admin", () => {
+    // Attached: the extension's one tool populates the domain.
+    expect(tierReachableDomains("admin", runtimeTool("ext-bookings", true)).has("ext-bookings")).toBe(true);
+    // Disabled/detached: the runtime layer no longer carries it.
+    expect(tierReachableDomains("admin", toolLayers([])).has("ext-bookings")).toBe(false);
+  });
+
+  it("a remote catalog landing in a declared-empty domain makes it reachable again", () => {
+    // The reason crm/pm stay declared: a remote Atlassian catalog in `pm`.
+    expect(tierReachableDomains("admin", runtimeTool("pm", true)).has("pm")).toBe(true);
   });
 
   it("family/guest reach only domains with at least one non-write tool", () => {
@@ -192,39 +398,67 @@ describe("access-catalog — tier write-filter reachability", () => {
   });
 
   /**
-   * WARP-2761 — an EMPTY domain is unreachable too, and that is a DECISION,
-   * not a side effect nobody looked at.
+   * MUTATION 2: drop the runtime layer (read `layers.catalog` only in
+   * `readableDomains`/`tierReachableDomains`) -> the read-classified extension
+   * tool is no longer reachable and this goes red.
+   */
+  it("family reaches a runtime domain whose tool the operator classified READ", () => {
+    expect(tierReachableDomains("family", runtimeTool("ext-bookings", false)).has("ext-bookings")).toBe(true);
+    expect(tierReachableDomains("guest", runtimeTool("ext-bookings", false)).has("ext-bookings")).toBe(true);
+  });
+
+  it("family does NOT reach a runtime domain whose every tool is a write", () => {
+    expect(tierReachableDomains("family", runtimeTool("ext-bookings", true)).has("ext-bookings")).toBe(false);
+  });
+
+  /**
+   * WARP-2761 — an EMPTY domain is unreachable for family/guest, and that is
+   * a DECISION, not a side effect nobody looked at. It is unchanged by
+   * WARP-2897; what changed is that owner/admin now agree with it (above).
    *
-   * The function adds a domain only on finding a non-write tool in it, so
-   * "every tool here writes" and "no tool here yet" produce the same answer.
-   * `crm` and `pm` are the second kind: ADR-045 moved their tools into
-   * `business` and catalog.ts keeps them declared as landing slots for a
-   * remote catalog. The alternative — returning a toolless domain as
-   * reachable — was rejected because this set is a live term in the
-   * effective-access intersection, and the first tool a remote catalog
-   * registers into such a domain may be a write that family and guest would
-   * already hold a grant for. The role templates gave up the grants instead.
+   * The alternative — returning a toolless domain as reachable — was rejected
+   * because this set is a live term in the effective-access intersection,
+   * and the first tool a remote catalog registers into such a domain may be a
+   * write that family and guest would already hold a grant for.
    *
-   * This pin is what makes reversing that a deliberate act. MUTATION: add
+   * MUTATION: add
    * `for (const d of TOOL_DOMAINS) if (!TOOL_CATALOG.some((t) => t.domain === d)) out.add(d)`
    * to `tierReachableDomains` -> red.
    */
-  it("a domain with no tools is NOT reachable for family/guest (the decision, pinned)", () => {
+  it("a domain with no tools is NOT reachable for any tier (the decision, pinned)", () => {
     const populated = new Set<string>(TOOL_CATALOG.map((t) => t.domain));
     const empty = TOOL_DOMAINS.filter((d) => !populated.has(d));
     // Guard the premise: if the catalogue ever refills these, this spec is
     // about nothing and should be re-read rather than deleted.
     expect(empty).toContain("crm");
     expect(empty).toContain("pm");
-    const family = tierReachableDomains("family");
-    const guest = tierReachableDomains("guest");
-    for (const d of empty) {
-      expect(family.has(d), `${d} holds no tools`).toBe(false);
-      expect(guest.has(d), `${d} holds no tools`).toBe(false);
-      // …while owner/admin keep it, by taking the union unconditionally —
-      // which is why the emptying showed up on family/guest templates only.
-      expect(tierReachableDomains("admin").has(d)).toBe(true);
+    for (const tier of ["owner", "admin", "family", "guest"] as const) {
+      const reach = tierReachableDomains(tier);
+      for (const d of empty) expect(reach.has(d), `${tier}: ${d} holds no tools`).toBe(false);
     }
+  });
+});
+
+describe("access-catalog — isGrantableDomain (two layers, WARP-2897)", () => {
+  const ext = toolLayers([{ name: "ext__slots", domain: "ext-bookings", requiresWrite: true, source: "runtime:ext" }]);
+
+  it("every compiled grantable domain is grantable, with or without a runtime layer", () => {
+    for (const d of GRANTABLE_TOOL_DOMAINS) {
+      expect(isGrantableDomain(d), d).toBe(true);
+      expect(isGrantableDomain(d, ext), d).toBe(true);
+    }
+  });
+
+  it("erp is never grantable — connector reach is the connectors axis", () => {
+    expect(isGrantableDomain("erp")).toBe(false);
+    const erpRuntime = toolLayers([{ name: "x__erp", domain: "erp", requiresWrite: false, source: "runtime:x" }]);
+    expect(isGrantableDomain("erp", erpRuntime)).toBe(false);
+  });
+
+  it("a runtime-only domain is grantable only while some runtime tool carries it", () => {
+    expect(isGrantableDomain("ext-bookings", ext)).toBe(true);
+    expect(isGrantableDomain("ext-bookings")).toBe(false);
+    expect(isGrantableDomain("ext-nothing", ext)).toBe(false);
   });
 });
 
@@ -257,5 +491,62 @@ describe("access-catalog — connector floors (O-2)", () => {
 
   it("service principals hold none either — they never resolve through layer 2 (§3)", () => {
     expect(clampConnectorLevel("service", "read_write")).toBeNull();
+  });
+});
+
+describe("access-catalog — doors (ADR-055)", () => {
+  it("offers `view` and nothing above it: door writes are owner-only (§11.4), so no grant level can widen them", () => {
+    // Door authority does not get to inherit the rank ladder that lets an
+    // admin escalate on some update paths. The write routes floor at
+    // `owner` (routes/doors.ts) and owners hold every catalog level through
+    // the §3 bypass, so a `manage` rung would only ever advertise a
+    // permission no non-owner can use.
+    for (const tier of ["owner", "admin"] as const) {
+      expect(maxLevelFor(tier, "doors"), tier).toBe("view");
+      expect(clampLevel(tier, "doors", "manage"), tier).toBe("view");
+      expect(clampLevel(tier, "doors", "act"), tier).toBe("view");
+    }
+  });
+
+  it("the `view` floor is a REFUSAL, not a clamp: below admin a tier holds no doors grant at all", () => {
+    // `view` is the lowest rung, so a requested level normally clamps DOWN to
+    // it and every tier keeps it. For doors the floor is real (access logs
+    // identify people entering places at times, and the routes floor at
+    // admin): a family or guest role must not be able to STORE doors:view,
+    // any more than it can store manage on network.
+    for (const tier of ["family", "guest", "service"] as const) {
+      expect(maxLevelFor(tier, "doors"), tier).toBeNull();
+      for (const level of ["view", "act", "manage"] as const) {
+        expect(clampLevel(tier, "doors", level), `${tier} ${level}`).toBeNull();
+      }
+    }
+  });
+
+  it("only security, crm, projects, money and doors refuse a tier: every other module still clamps to at least `view`", () => {
+    // The refusal is opt-in per module. Security, crm, projects and money refuse
+    // below family (guest; WARP-3365 / WARP-3369 for the business three), doors
+    // below admin (family and guest). This pins the set exactly, in both directions.
+    const refusing = new Set<string>(["security", "crm", "projects", "money", "doors"]);
+    for (const moduleId of GATEABLE_MODULE_IDS) {
+      if (refusing.has(moduleId)) continue;
+      for (const tier of ["family", "guest"] as const) {
+        expect(maxLevelFor(tier, moduleId), `${tier} ${moduleId}`).not.toBeNull();
+        expect(clampLevel(tier, moduleId, "manage"), `${tier} ${moduleId}`).not.toBeNull();
+      }
+    }
+    expect(maxLevelFor("guest", "security")).toBeNull();
+    expect(maxLevelFor("family", "security")).not.toBeNull();
+    expect(maxLevelFor("family", "doors")).toBeNull();
+  });
+
+  it("a role-less family or guest person's catalog has no doors row; admin's has it at view", () => {
+    for (const tier of ["family", "guest"] as const) {
+      expect(fullCatalogFeatures(tier).some((f) => f.moduleId === "doors"), tier).toBe(false);
+    }
+    expect(fullCatalogFeatures("admin").find((f) => f.moduleId === "doors")).toEqual({ moduleId: "doors", level: "view" });
+  });
+
+  it("is claimed by exactly one module, and that module is `doors` (P4b: the two read-only assistant tools)", () => {
+    expect(OWNERS_BY_DOMAIN.get("doors")).toEqual(["doors"]);
   });
 });

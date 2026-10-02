@@ -113,7 +113,6 @@ export function createMeContextStatsRouter(prisma: PrismaClient): Router {
       }
       const ncUsername = getNcUsername(req) ?? userId;
       const data = await getSummary(prisma, userId, ncUsername);
-      res.setHeader("Cache-Control", "private, max-age=30");
       res.json(data);
     } catch (e) {
       next(e);
@@ -130,7 +129,6 @@ export function createMeContextStatsRouter(prisma: PrismaClient): Router {
       }
       const ncUsername = getNcUsername(req) ?? userId;
       const data = await getFull(prisma, userId, ncUsername);
-      res.setHeader("Cache-Control", "private, max-age=60");
       res.json(data);
     } catch (e) {
       next(e);
@@ -147,7 +145,6 @@ export function createMeContextStatsRouter(prisma: PrismaClient): Router {
       }
       const ncUsername = getNcUsername(req) ?? userId;
       const data = await getQueued(prisma, userId, ncUsername);
-      res.setHeader("Cache-Control", "private, max-age=300");
       res.json({ items: data });
     } catch (e) {
       next(e);
@@ -164,7 +161,6 @@ export function createMeContextStatsRouter(prisma: PrismaClient): Router {
       }
       const ncUsername = getNcUsername(req) ?? userId;
       const data = await getFailed(prisma, userId, ncUsername);
-      res.setHeader("Cache-Control", "private, max-age=300");
       res.json({ items: data });
     } catch (e) {
       next(e);

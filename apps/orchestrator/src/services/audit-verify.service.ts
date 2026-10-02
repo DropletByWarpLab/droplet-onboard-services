@@ -14,14 +14,16 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import {
+  createEpochVerifier,
   hashSignature,
+  type AuditKeyEpoch,
   type ActivityActorTypeName,
   type ActivityKindName,
   type ActivityRowContent,
   type ActivityRowSigner,
   type ActivitySeverityName,
 } from "./audit-signing.service.js";
-import { getActivitySigner, recordActivity } from "./activity.singleton.js";
+import { getAuditKeyring, recordActivity } from "./activity.singleton.js";
 import { sendNotification } from "./notifications.service.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -33,13 +35,56 @@ export interface ChainVerifyResult {
   brokenAtId: string | null;
 }
 
+/** A bare signer (tests, the pg lane) is a one-key ring. */
+function asKeyring(keys: ActivityRowSigner | AuditKeyEpoch[]): AuditKeyEpoch[] {
+  return Array.isArray(keys) ? keys : [{ keyId: "current", signer: keys }];
+}
+
+/** A stored row's signature-covered content. */
+export function activityRowContent(r: {
+  at: Date;
+  severity: string;
+  sourceIcon: string;
+  what: string;
+  sub: string | null;
+  kind: string;
+  refs: unknown;
+  actorType: string | null;
+  actorId: string | null;
+  schemaVersion: number;
+}): ActivityRowContent {
+  return {
+    at: r.at,
+    severity: r.severity as ActivitySeverityName,
+    sourceIcon: r.sourceIcon,
+    what: r.what,
+    sub: r.sub,
+    kind: r.kind as ActivityKindName,
+    refs: r.refs === null ? null : (r.refs as Record<string, unknown>),
+    actorType: r.actorType as ActivityActorTypeName | null,
+    actorId: r.actorId,
+    schemaVersion: r.schemaVersion,
+  };
+}
+
+/**
+ * Walk the chain and check every link and signature. `from` (optional) walks
+ * only the rows AFTER that row, the first one anchored on `from.signature`
+ * (its prev pointer must be `hashSignature(from.signature)`, which does not
+ * depend on the signer) — a segment walk, for the pg test lane, where files
+ * share one database and each verifies only the rows it appended. Omitted,
+ * it is the whole chain, trusting the first row's prev pointer as the origin.
+ */
 export async function verifyActivityChain(
   prisma: PrismaClient,
-  signer: ActivityRowSigner,
+  keys: ActivityRowSigner | AuditKeyEpoch[],
+  from?: { id: bigint; signature: string } | null,
 ): Promise<ChainVerifyResult> {
   const PAGE = 200;
-  let cursor: bigint | undefined;
-  let prevSignature: string | null = null;
+  // WARP-3165: every row checks against the keyring under the epoch rule.
+  const epoch = createEpochVerifier(asKeyring(keys));
+  let cursor: bigint | undefined = from ? from.id : undefined;
+  let prevSignature: string | null = from ? from.signature : null;
   let rowsChecked = 0;
   let brokenAtId: string | null = null;
 
@@ -57,21 +102,9 @@ export async function verifyActivityChain(
         prevSignature === null
           ? r.prevSignatureHash
           : hashSignature(prevSignature);
-      const content: ActivityRowContent = {
-        at: r.at,
-        severity: r.severity as ActivitySeverityName,
-        sourceIcon: r.sourceIcon,
-        what: r.what,
-        sub: r.sub,
-        kind: r.kind as ActivityKindName,
-        refs: r.refs === null ? null : (r.refs as Record<string, unknown>),
-        actorType: r.actorType as ActivityActorTypeName | null,
-        actorId: r.actorId,
-        schemaVersion: r.schemaVersion,
-      };
       if (
         r.prevSignatureHash !== expectedPrevHash ||
-        !signer.verify(content, expectedPrevHash, r.signature)
+        epoch.verify(activityRowContent(r), expectedPrevHash, r.signature) === null
       ) {
         brokenAtId = r.id.toString();
         break outer;
@@ -111,10 +144,10 @@ let inFlightVerify: Promise<ChainVerifyResult> | null = null;
 
 export function verifyActivityChainCoalesced(
   prisma: PrismaClient,
-  signer: ActivityRowSigner,
+  keys: ActivityRowSigner | AuditKeyEpoch[],
 ): Promise<ChainVerifyResult> {
   if (inFlightVerify) return inFlightVerify;
-  inFlightVerify = verifyActivityChain(prisma, signer).finally(() => {
+  inFlightVerify = verifyActivityChain(prisma, keys).finally(() => {
     inFlightVerify = null;
   });
   return inFlightVerify;
@@ -123,14 +156,14 @@ export function verifyActivityChainCoalesced(
 export async function runNightlyChainVerification(
   prisma: PrismaClient,
 ): Promise<ChainVerifyResult | null> {
-  const signer = getActivitySigner();
-  if (!signer) {
+  const keyring = getAuditKeyring();
+  if (keyring.length === 0) {
     logger.warn("nightly chain verification skipped — signer not initialised");
     return null;
   }
   // WARP-1027: coalesce with any in-flight /activity/verify walk so the cron
   // and a concurrent manual re-verify don't double-walk the whole chain.
-  const result = await verifyActivityChainCoalesced(prisma, signer);
+  const result = await verifyActivityChainCoalesced(prisma, keyring);
   if (result.ok) {
     logger.info(
       { rowsChecked: result.rowsChecked },
@@ -153,25 +186,34 @@ export async function runNightlyChainVerification(
     actor: { type: "system", id: null },
   });
   // The notifications subsystem is keyed by `User.username`, not `User.id` —
-  // `sendNotification` publishes to `droplet/notifications/${userId}` and the
-  // only subscriber is ws-bridge's `droplet/notifications/${user.username}`,
+  // `sendNotification` publishes to `droplet/notifications/${username}` and
+  // the only subscriber is ws-bridge's `droplet/notifications/${user.username}`,
   // while both readers of the persisted NotificationLog (routes/notifications.ts
-  // and the `list_notifications` tool) also filter by username. Selecting `id`
-  // here used to make this the one UUID-keyed caller in the codebase, so the
-  // toast was dropped by the broker AND the stored row was invisible to every
-  // reader — the single alert that must never be missed reached nobody. Select
-  // the username so this caller speaks the same vocabulary as the rest.
+  // and the `list_notifications` tool) also filter by username. This site used
+  // to select `id` (WARP-2783), so the toast was dropped by the broker AND the
+  // stored row was invisible to every reader — the single alert that must never
+  // be missed reached nobody. It was not the only such caller (WARP-2813,
+  // WARP-2910), and no comment can say it is the last: that is what
+  // `__tests__/notification-recipient.guard.test.ts` is for (every call site,
+  // swept), backed by the `NOTIFICATION_RECIPIENT_IS_ID` refusal at runtime.
   const admins = await prisma.user.findMany({
     where: { role: { in: ["owner", "admin"] } },
     select: { username: true },
   });
+  // WARP-2911 — contained PER RECIPIENT: one refused or failed send (e.g. an
+  // account whose username predates the ban on the User.id shape) must never
+  // cost the admins after it the one alert that must not be missed.
   for (const admin of admins) {
-    await sendNotification(prisma, {
-      userId: admin.username,
-      kind: "system",
-      title: "Audit log integrity check failed",
-      body: `Nightly verification found the activity log's hash chain broken at row ${result.brokenAtId}. Open /admin/audit for details.`,
-    });
+    try {
+      await sendNotification(prisma, {
+        username: admin.username,
+        kind: "system",
+        title: "Audit log integrity check failed",
+        body: `Nightly verification found the activity log's hash chain broken at row ${result.brokenAtId}. Open /admin/audit for details.`,
+      });
+    } catch (err) {
+      logger.error({ err, username: admin.username }, "audit-chain alert to one admin failed — continuing with the rest");
+    }
   }
   return result;
 }

@@ -6,7 +6,7 @@
 >
 > **Scope:** Every component in this repo (`droplet-onboard-services`, GitHub
 > `DropletByWarpLab/droplet-onboard-services`) — the **intelligence layer** of the
-> Droplet edge AI appliance. Inference (Ollama + `ollama-manager`) lives in the
+> Droplet edge AI appliance. Inference (Ollama + `inference-manager`) lives in the
 > sibling repo [`droplet-local-LLM`](../../droplet-local-LLM); the physical
 > appliance lives in `pcb-claude-tool`. See [`agentic-workflows.md`](agentic-workflows.md)
 > for the cross-repo picture and [`ADR-009-canonical-system-architecture.md`](ADR-009-canonical-system-architecture.md)
@@ -55,7 +55,8 @@ is deliberately **no separate API gateway service** in front of the orchestrator
                                                    │
           ┌────────────────────────────────────── orchestrator (Node/Express/Prisma)
           │  agent loop ── stdio ──► mcp-server ──► @droplet/tools-core (≈78 tools)
-          │  inference  ── gRPC ───► ai-gateway ──► Ollama (sibling repo) / cloud LLMs
+          │  inference  ── HTTP ───► ai-gateway /ai/chat ──► Ollama/DMR (sibling repo) / cloud LLMs
+          │  embed/rerank ─ gRPC ──► ai-gateway :50051 (EmbedText / Rerank / ClassifyQuery)
           │  files      ── HTTP ───► nextcloud ;  index ◄─ MQTT ─ file-indexer
           │  network    ── HTTP ───► routing ──► OpenWrt router (ubus)
           │  switch     ── HTTP ───► switch service ──► managed switch
@@ -81,6 +82,7 @@ is deliberately **no separate API gateway service** in front of the orchestrator
 | **ai-gateway** | `services/ai-gateway/` | Python + FastAPI | Inference router + gRPC embed/rerank |
 | **routing** | `services/routing/` | Python + FastAPI | OpenWrt control via ubus |
 | **switch** | `services/switch/` | Python + FastAPI | Managed-switch driver |
+| **device-gateway** | `services/device-gateway/` | Python + FastAPI | Device control over BACnet/IP, Modbus TCP, SNMP, KNX/IP |
 | **file-indexer** | `services/file-indexer/` | Python + watchdog | Filesystem indexer + embedder (RAG) |
 | **email-indexer** | `services/email-indexer/` | Python + FastAPI | IMAP IDLE ingest + SMTP send |
 | **camera-discovery** | `services/camera-discovery/` | Python + FastAPI | ONVIF/RTSP discovery → Frigate |
@@ -92,11 +94,18 @@ is deliberately **no separate API gateway service** in front of the orchestrator
 | **device-identity-svc** | `services/device-identity-svc/` | Python + gRPC | TPM 2.0 identity sidecar |
 | **automount** | `services/automount/` | Bash + udev | USB/NVMe auto-mount → Nextcloud |
 | **_shared** | `services/_shared/` | Python | FIPS self-test helper (Python services) |
+| **doc-render** | `services/doc-render/` | Python + FastAPI | Document spec → `.pdf` / `.docx` / `.xlsx` bytes |
+| **egress-audit** | `services/egress-audit/` | Python (host systemd unit) | Runtime egress auditor (conntrack + DNS) |
+| **erp-connector** | `services/erp-connector/` | TypeScript | `@droplet/erp-connector` — ERP/SaaS connector framework (in-process library) |
+| **fleet-agent** | `services/fleet-agent/` | Python | Opt-in fleet telemetry to the analytics portal (profile `telemetry`) |
+| **inference-manager** | `services/inference-manager/` | Python + FastAPI | Model lifecycle + catalog (vendored from `droplet-local-LLM`; profiles `dmr`, `dmr-cuda`) |
+| **matter-controller** | `services/matter-controller/` | TypeScript + matter.js | Native Matter controller sidecar (host network, BLE + mDNS) |
+| **sandbox** | `services/sandbox/` | Python | Hardened execution service (routine steps, workshop runs, extensions) |
+| **web-fetch** | `services/web-fetch/` | Python + FastAPI | The only outbound-HTTP path for ambient-data tools (profile `web`) |
 | **openwrt** | `openwrt/` | Shell + OpenWrt ImageBuilder | Router firmware image + overlay |
 | **docker** | `docker/` | Compose + nginx | Stack definition + reverse proxy |
 | **scripts** | `scripts/` | Shell | Provisioning, reset, security/test gates |
 | **proto / schemas** | `proto/`, `schemas/` | protobuf + JSON Schema | gRPC + anchor contracts |
-| **clients/desktop** | `clients/desktop/` | — | Placeholder (Tauri planned, not started) |
 
 ---
 
@@ -111,11 +120,12 @@ network. Host-published ports and host-network services are called out.
 | orchestrator | 3000 | HTTP + WebSocket | internal (proxied at `/api/`) |
 | web-dashboard | 3001 | HTTP | internal (proxied at `/`) |
 | ai-gateway | 8000 | HTTP (REST/SSE) | internal (proxied at `/ai/`) |
-| ai-gateway | 50051 | gRPC | internal — `EmbedText` / `Rerank` / `Chat` |
+| ai-gateway | 50051 | gRPC | internal — `EmbedText` / `Rerank` / `ClassifyQuery` (chat is HTTP) |
 | mcp-server | 9090 (`MCP_PORT`) | streamable-HTTP | internal (+ stdio child of orchestrator) |
 | mcp-bridge | 9096 (`MCP_BRIDGE_PORT`) | HTTP (internal JSON) | internal only (profile `remote-mcp`) — holds the customer's vendor credential in memory |
 | routing | 8080 | HTTP | **host network mode** (direct router access) |
 | switch | 8081 | HTTP | host (profile `full`) |
+| device-gateway | 8084 | HTTP (+ BACnet UDP 47808, KNX 3671) | host (profiles `full`, `single-box`) |
 | oled-display | 8082 | HTTP | host network (display profile) |
 | camera-discovery | 8085 | HTTP | internal (profile `full`) |
 | erp-sql-bridge | 9095 | HTTP | internal only (profile `erp`) — holds the practice's DB credentials |
@@ -124,6 +134,11 @@ network. Host-published ports and host-network services are called out.
 | file-indexer | 8090 | HTTP (admin reindex) | internal |
 | rag-eval | 8090 | HTTP (trigger) | internal (profile `eval`) |
 | device-identity-svc | `unix:///var/run/droplet/device-identity.sock` | gRPC | unix socket |
+| matter-controller | 8083 | HTTP | host network (BLE commissioning + LAN mDNS) |
+| inference-manager | 8002 | HTTP | internal only, no `ports:` (profiles `dmr`, `dmr-cuda`) |
+| web-fetch | 8010 | HTTP | internal (profile `web`) |
+| doc-render | 8020 | HTTP | internal |
+| sandbox | 8030 | HTTP | internal-only network (`droplet-internal`), no egress |
 | frigate | 5000 | HTTP/RTSP | NVR (profile `linux`/`full`) |
 | db / cache / broker | 5432 / 6379 / 1883 | Postgres / Redis / MQTT | internal |
 
@@ -166,20 +181,42 @@ network. Host-published ports and host-network services are called out.
   (durable background agent runs, WARP-2176: `AgentRun` rows claimed under a
   lease, checkpointed per iteration, parked on Tier-2 confirmations; RRULE
   schedules enqueue runs; design in [`agent-runs-design.md`](agent-runs-design.md);
-  surface `/api/agent-runs`, panel on `/admin/audit`), `openwrt.client.ts`,
+  surface `/api/agent-runs`, panel on `/workshop` — WARP-2925), `openwrt.client.ts`,
   `switch.client.ts`, `camera.service.ts`, `nextcloud.client.ts`, plus
   pollers/tickers (device-reconcile, AP discovery, schedule, reminders,
   tool-schedule, agent-run claim/heartbeat, agent-run-schedule, screen-QR).
-- **Talks to:** ai-gateway (gRPC + REST), mcp-server (stdio child), routing /
+- **Talks to:** ai-gateway (REST for chat, gRPC for embed/rerank), mcp-server (stdio child), routing /
   switch / display / camera-discovery / frigate / nextcloud (HTTP), Redis,
   MQTT, device-identity-svc (gRPC unix socket). PM is served natively from the
   orchestrator's own Postgres (ADR-026) — no external PM service.
-- **Auth:** Bearer JWT (HS256 access + refresh) with Nextcloud OCS fallback;
+- **Auth:** Bearer JWT (HS256 access + refresh) or a service-principal bearer; no Nextcloud-credential fallback (removed, WARP-2994);
   roles `owner | admin | family | guest | service`; per-route RBAC via
   `requireRole` / `requireScope` (see [ADR-004](ADR-004-rbac-per-route-guards.md)).
   `WRITE_TOOLS` in `src/routes/llm.ts` is **derived from `requiresWrite`** in
   tools-core — don't maintain it by hand. Device pairing is QR-code-driven; the
   dashboard uses an HTTP-only `droplet_session` cookie.
+- **External guests get nothing of the company's data unless it is shared with
+  them (Romain, 2026-09-30).** The box enforces it on every route; clients only
+  mirror it. Modules the catalog refuses the guest tier (`refuseBelowFloor` in
+  `services/access-catalog.ts`: `security`, `crm`, `projects`, `money`) are
+  floored at the prefix by `requireModuleTierFloor` (mounted by
+  `mountModuleGates`, 404 `module_disabled`), for the assistant acting for a
+  guest by `requireMcpActingUserToolDomain`, and for context pins by the tier in
+  `context-pin-targets.service.ts`. The one share: a work item ASSIGNED to a
+  guest is shared with them (read it, read and write its comments, move its
+  state) and nothing else in Projects; `modules/guest-shares.ts` names the six
+  requests and `middleware/guest-share.ts` checks the assignment per record (the
+  sixth, `GET /api/pm/assigned-to-me`, lists only the caller's own assigned
+  items, which is how a guest finds them, WARP-3407). A
+  guest cannot own a deal or customer or lead a project. Single company-wide
+  routes floor with `requireRole`: `GET /api/integrations` and
+  `GET /api/integrations/eaglesoft` are owner/admin (a member reads the
+  provider-free `/api/integrations/summary`), `GET /api/devices`
+  drops `ip` and `networkMode` for a member and is refused to a guest, and the
+  `/api/tools` routines refuse a guest. `GET /api/app-downloads` stays open to
+  every role but sends the store's raw `detail` to owner/admin only;
+  `GET /api/voice/status` leaves the last transcript and reply out unless
+  `?include=transcript` (owner/admin).
 - **Tests:** **125** Vitest `*.test.ts` files under `src/` (+ Supertest for HTTP).
 - **Gotchas:**
   - **`MATTER_*` env vars are forbidden.** matter.js auto-imports every `MATTER_*`
@@ -187,6 +224,20 @@ network. Host-published ports and host-network services are called out.
     Only `MATTER_STORAGE_PATH` is allow-listed. (See `src/config.ts` comment.)
   - **All scheduling goes through `cron-runtime.service.ts`** with Postgres
     advisory locks (multi-instance-safe). No `while True`/`setInterval` schedulers.
+  - **A routine (`ToolSpec`) is private to its creator unless shared with the
+    Workspace (WARP-3354).** `ToolSpec.visibility` is an explicit enum
+    (`PRIVATE | WORKSPACE`, no column default). The rule lives once, in
+    `src/services/tool-spec-visibility.ts`, and every `/api/tools*` route goes
+    through it, as do the assistant's `routine_*` tools (they reach the same routes
+    as the person they act for). A member lists and gets the Workspace's routines
+    plus their own; owner and admin see all; a routine you may not see answers
+    `404`, like an unknown slug. Only the creator, an owner or an admin may share or
+    un-share (`POST`/`DELETE /api/tools/:slug/share`); the assistant cannot. The
+    box's own routines (mined suggestions, `daily-report`) stay `WORKSPACE`, and a
+    scheduled run fires as the creator and never reads the rule. Slugs are box-wide
+    unique, so a plain slug would be an oracle for another member's private routine:
+    a member's new routine is always stored as `<slug>-<4 hex>` (owner and admin, who
+    see everything, keep plain slugs).
 
 ## apps/web-dashboard
 
@@ -206,6 +257,8 @@ network. Host-published ports and host-network services are called out.
 - **Build/deploy:** Next.js **standalone** output (monorepo-aware
   `outputFileTracingRoot`); multi-stage Docker (`node:20`), served on 3001.
   Requires `@droplet/shared-types` at build — **cannot build standalone**.
+  Fonts are vendored under `src/app/fonts/` (`next/font/local`) so `next build`
+  needs no network — don't import `next/font/google` (test-guarded, WARP-3317).
 - **Tests:** Vitest + React Testing Library (`src/__tests__/`, ~119 files).
 - **Gotchas:** admin-page gating is **client-side only** (`useAuth().user.role`) —
   the backend is the real enforcement point. Dev rewrites don't exist in prod;
@@ -267,6 +320,21 @@ network. Host-published ports and host-network services are called out.
   read-only (`requiresWrite === false`). RBAC is **re-checked on `tools/call`**
   (not just `tools/list`). Matter tool calls **proxy back** to the orchestrator's
   `/api/matter/*` — the Matter fabric lives in the orchestrator.
+- **Module gating (WARP-2972):** a tool whose domain a module toggle (box) or the
+  acting person's own grants withhold is absent from `tools/list` (HTTP) and refused
+  by `tools/call` (both transports, `module_disabled`). The verdict is asked of the
+  orchestrator (`GET /api/modules/tool-verdict`, admits `_service:mcp` **and the
+  owner** — with `AUTH_ENABLED=false` every request is the synthetic `dev` owner, so
+  `_service:mcp` alone would 403 the mcp-server in a no-auth dev stack) — this
+  container has no module registry or availability config — and **fails closed**
+  when it can't be had: module-owned domains withheld, unclaimed ones kept, one
+  `[mcp-server] module verdict unavailable (<reason>)` warning a minute. A
+  `createServer` built with no verdict source fails closed the same way; tests and
+  embedders opt out with `NO_MODULE_GATING`. The stdio child's `tools/list` stays the
+  raw registry; the orchestrator gates its chat pool and `/api/llm/tools` on top of
+  that cached list. A scheduled ToolSpec run is FOR its spec's owner (`ToolSpec.ownerId`,
+  WARP-1580): the ticker sends the owner's username as `_meta.userId`, so the person axis
+  applies to it as to their chat, and an owner whose username can't be read does not run.
 - **Gotchas:** the `claims === undefined` "trusted" sentinel is **stdio-only** —
   HTTP always requires a valid JWT. gRPC/Redis/Prisma connect lazily so a missing
   dependency at boot doesn't kill the stdio child.
@@ -313,15 +381,29 @@ network. Host-published ports and host-network services are called out.
 
 - **Purpose:** Provider router — **not** a tool dispatcher. FastAPI on 8000 for
   `/ai/chat` (+ models/sessions/health), gRPC on 50051 for `EmbedText` / `Rerank`
-  / `Chat`. Cloud providers (OpenAI, Anthropic) go through **LiteLLM**; local
+  / `ClassifyQuery`. The proto's `Chat` / `StreamChat` RPCs are still served but
+  have no caller in this repo — chat is HTTP. Cloud providers (OpenAI, Anthropic) go through **LiteLLM**; local
   Ollama goes through **direct httpx** to the OpenAI-compat endpoint.
 - **Ollama call path (critical):** chat goes **direct to Ollama `:11434`**, *not*
-  through `ollama-manager`'s `:8002/proxy` (whose 120 s read timeout blows up on
+  through `inference-manager`'s `:8002/proxy` (whose 120 s read timeout blows up on
   CPU inference / cold loads). `OLLAMA_URL` with a trailing `/proxy` is the smoking
   gun for "manager timed out my agent loop." See the CLAUDE.md "Ollama call path"
   section.
 - **gRPC consumers:** file-indexer (`EmbedText`), orchestrator/mcp-server
   (`Rerank`, `ClassifyQuery` for adaptive RAG routing).
+- **Kev decision model (ADR-006 in `droplet-local-LLM`, epic WARP-3067):** the
+  `Decide` RPC (WARP-3070) exists and proxies to `droplet-local-LLM`'s
+  `decision-model` sidecar (`:8009`, profile `decision`, off by default):
+  calibrated yes/no / choice / score answers, no generated text. **Off until
+  `DECISION_MODEL_URL` is set** (plus `DECISION_MODEL_API_KEY`, the sidecar's
+  key); unset, it answers `DECIDE_STATUS_UNAVAILABLE` with no network call.
+  Every failure (timeout, 5xx, 401) is a status in the response, never a gRPC
+  error; a 422 is `DECIDE_STATUS_INVALID`. Orchestrator client:
+  `apps/orchestrator/src/services/decision-model.client.ts`. It is the **only**
+  way in: nothing else calls `:8009`. **No consumers yet** (triage, `ClassifyQuery`,
+  tool-domain selection, `classify_items`: WARP-3071–3074); they must fail soft
+  to today's behaviour and never sit on the write-approval path.
+  Full picture: `docs/agentic-workflows.md` § "Decision model (Kev)".
 - **Gotchas:** does **not** dispatch tools (forwards `tools[]` as-is, returns raw
   `tool_calls` to the orchestrator). Embed/rerank models lazy-load from HF on first
   call (cold start). Sessions are in-memory (lost on restart).
@@ -346,6 +428,22 @@ network. Host-published ports and host-network services are called out.
   (future custom PCB) is a placeholder. `create_driver()` picks by `SWITCH_DRIVER`.
   Endpoints (ports, VLANs, PoE, WAN detect, one-click camera setup) are
   driver-agnostic. Bearer `SERVICE_SECRET`. Profile `full`.
+
+## services/device-gateway
+
+- **Purpose:** Device control for commercial/industrial equipment beside
+  Matter, under the same `smart_home` ("Device control") module. BACnet/IP
+  (BACpypes3), Modbus TCP (pymodbus), SNMP v2c/v3 (pysnmp), KNX/IP (xknx), one
+  `ProtocolDriver` each. The orchestrator fronts it at `/api/building/*`
+  (`routes/building.ts`); the LLM reaches it through `get_building_devices` /
+  `set_building_point`.
+- **Gotchas:** A point exists only if an admin registered it; writable only
+  when marked, with min/max for numbers; BACnet priorities 1-7 are refused.
+  Writes are **plan-only** until `DEVICE_GATEWAY_LIVE_WRITES=1`. The
+  orchestrator's write route audits fail-closed before sending. Registry at
+  `/var/lib/droplet/device-gateway/registry.json` (named volume
+  `device-gateway-state`, backed up and wiped on factory reset). Bearer
+  `SERVICE_TOKEN_DEVICE_GATEWAY`. README has the full contract.
 
 ## services/file-indexer
 
@@ -485,6 +583,75 @@ network. Host-published ports and host-network services are called out.
   `assert_fips_at_boot_or_exit("<service>")` before any crypto. Gated by
   `DROPLET_FIPS_REQUIRED`.
 
+## services/doc-render
+
+- **Purpose:** turns a document spec into `.pdf` / `.docx` / `.xlsx` bytes
+  (WARP-2211) — the model emits a spec, this renders it. `POST /render`, open
+  `GET /health`; everything else needs `DOC_RENDER_SERVICE_TOKEN` (fails closed).
+- **Talks to:** nothing. Stateless, no storage, no egress; the orchestrator's
+  `POST /api/files/render` owns auth, paths and the upload. Port 8020, internal.
+
+## services/egress-audit
+
+- **Purpose:** runtime egress auditor (WARP-268): traces every outbound flow
+  from any container (conntrack + port-53 capture), attributes it to a compose
+  service, and flags flows outside `docs/security/allowed-egress.yaml` into the
+  signed activity log.
+- **Gotchas:** **not a compose service** — it needs the host network namespace and
+  root, so it runs as the `droplet-egress-audit.service` systemd unit installed by
+  `scripts/lib/single-box.sh` (same precedent as `automount`).
+
+## services/erp-connector (`@droplet/erp-connector`)
+
+- **Purpose:** ERP / SaaS connector framework consumed **in-process** by the
+  orchestrator (a workspace library, not a container): Eaglesoft direct-SQL
+  (through `services/erp-sql-bridge`) plus the REST connectors (Stripe, Xero,
+  HubSpot, …). Builds to `dist/` — one of the `npm run bootstrap` leaves.
+- **Reference:** `services/erp-connector/README.md`, `docs/integrations/eaglesoft.md`.
+
+## services/fleet-agent
+
+- **Purpose:** box-side fleet telemetry to the Warp Lab analytics portal
+  (WARP-963). **Off by default:** profile `telemetry`, and it dials nothing
+  unless `DROPLET_TELEMETRY_ENABLED=1` and credentials are provisioned.
+  Fail-open: it observes the box and can never degrade it. Its full egress table
+  is in its README.
+
+## services/inference-manager
+
+- **Purpose:** model lifecycle + catalog (`/models/*`, `/health`) behind
+  `GET /api/models/catalog`. **Vendored** from `droplet-local-LLM` (WARP-2131) —
+  read `services/inference-manager/VENDORED.md` before editing; it is a fork kept
+  in sync by hand.
+- **Surface:** `http://inference-manager:8002`, compose network only (no `ports:`:
+  `POST /models/pull` is an arbitrary-registry-pull primitive). Profiles `dmr`,
+  `dmr-cuda`. Not on the chat path.
+
+## services/matter-controller
+
+- **Purpose:** native Matter controller (matter.js) as a host-network sidecar
+  (ADR-022 / WARP-850): raw HCI for BLE commissioning + LAN mDNS. HTTP on 8083.
+- **Talks to:** fronted by the orchestrator (`matter.service.ts` is its HTTP
+  client); the dashboard keeps calling `/api/matter/*`.
+- **Gotchas:** never add `MATTER_*` env vars (see CLAUDE.md § Environment
+  variables); use `DROPLET_MATTER_*`.
+
+## services/sandbox
+
+- **Purpose:** the one hardened execution service (WARP-2895, ADR-056): routine
+  `transform` / `when` steps, workshop runs (versioned workspaces) and extension
+  processes. A thin HTTP front over `subprocess`, port 8030.
+- **Gotchas:** sits only on the `internal: true` `droplet-internal` network — its
+  registered egress is **none**, which is what makes running customer-written code
+  there acceptable. Holds no credential but its own bearer.
+
+## services/web-fetch
+
+- **Purpose:** the **only** component allowed outbound HTTP for the ambient-data
+  tools (WARP-1436): `GET /weather`, `GET /rates` against fixed keyless
+  destinations registered in `docs/security/allowed-egress.yaml`. Port 8010,
+  profile `web`; `WEB_FETCH_SERVICE_TOKEN` required (fails closed).
+
 ---
 
 # Infrastructure & tooling
@@ -532,7 +699,11 @@ network. Host-published ports and host-network services are called out.
   smbd on `:445`; account `droplet` (uid 33 = www-data) with the per-device
   `SMB_PASSWORD`. The same volume mounts into Nextcloud as the `/Droplet`
   files_external mount (`nextcloud-init.sh`) so web + desktop see one tree.
-  Connect info: `GET /api/storage/network-drive` (owner/admin). Guide:
+  Connect info: `GET /api/storage/network-drive` (owner/admin). A user's own
+  drive (WebDAV via Nextcloud): `POST /api/storage/network-drive/personal`
+  (owner/admin/family, gated by the owner setting
+  `Workspace.personalDriveEnabled`, off by default) — see
+  [`network-drive.md`](network-drive.md#per-user-drive-webdav). Guide:
   [`network-drive.md`](network-drive.md).
 
 ## scripts/
@@ -563,17 +734,11 @@ network. Host-published ports and host-network services are called out.
 ## proto/ & schemas/
 
 - `proto/inference.proto` — ai-gateway gRPC: `Chat`/`StreamChat`/`ListModels`/
-  `EmbedText`/`Rerank`/`ClassifyQuery`. `proto/device_identity.proto` — TPM sidecar:
+  `EmbedText`/`Rerank`/`ClassifyQuery`/`Decide`. `proto/device_identity.proto` — TPM sidecar:
   `Sign`/`GetCert`/`GetStatus`/`Reseal`. Codegen via `scripts/generate-grpc.sh`.
 - `schemas/anchor.schema.json` — JSON Schema 2020-12 for the `Anchor` union; the
   source of truth for `packages/shared-types/src/anchor.ts` (regenerate, don't
   hand-edit the `.ts`).
-
-## clients/desktop
-
-- **Placeholder only** — no code committed. Per ADR-009 the desktop targets are a
-  Tauri Windows `.exe` and macOS via Mac Catalyst on the iOS repo; neither lives
-  here yet.
 
 ---
 

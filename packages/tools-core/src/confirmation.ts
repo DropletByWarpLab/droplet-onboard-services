@@ -103,3 +103,38 @@ export async function passThroughConfirmation(res: Response): Promise<ToolResult
   // context, is redacted.
   return confirmationRequired(message, redactConfirmationSecrets(body));
 }
+
+/**
+ * WARP-2002 — remove every `confirmationToken` from a serialized tool result
+ * before it is handed to the MODEL.
+ *
+ * A challenge carries the interceptor's token in `error.details` twice
+ * (nested under `interceptor`, and flat for the WARP-640 chip), and
+ * route-relayed tools like `run_scene` carry the route's token flat. The
+ * agent loop needs neither in the model's context: the model cannot spend
+ * a token (only `_meta` can, and only the loop sets `_meta`, from a
+ * human-approved grant). What the model CAN do is repeat it in its reply,
+ * which puts a live approval secret into the transcript and the browser,
+ * the #1830 leak class. So the model sees `[withheld]` instead.
+ *
+ * Only the model-bound copy is scrubbed. The SSE event, the trace and the
+ * approval registration read the parsed result before this runs.
+ */
+export function redactConfirmationTokensForModel(text: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return text;
+  }
+  const details = (parsed as { error?: { details?: unknown } } | null)?.error?.details;
+  if (!details || typeof details !== "object") return text;
+  let changed = false;
+  for (const holder of [details, (details as { interceptor?: unknown }).interceptor]) {
+    if (holder && typeof holder === "object" && "confirmationToken" in holder) {
+      (holder as Record<string, unknown>).confirmationToken = "[withheld]";
+      changed = true;
+    }
+  }
+  return changed ? JSON.stringify(parsed) : text;
+}

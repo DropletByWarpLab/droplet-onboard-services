@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { outboundEmailGate } from "../services/off-lan-gate.service.js";
+import { outboundEmailGate, webPushGate } from "../services/off-lan-gate.service.js";
 
 /**
  * Minimal Prisma mock exposing only offLanAllowlistChannel.findUnique
@@ -56,6 +56,38 @@ describe("outboundEmailGate (off-LAN outbound_email gate)", () => {
     await outboundEmailGate(prisma);
     expect(prisma.offLanAllowlistChannel.findUnique).toHaveBeenCalledWith({
       where: { key: "outbound_email" },
+    });
+  });
+});
+
+// WARP-2904 — the `ambientDataGate` posture, not outboundEmailGate's: push is
+// best-effort on every caller, so a gate that cannot be read REFUSES rather
+// than throwing.
+describe("webPushGate (off-LAN web_push gate, never throws)", () => {
+  it("returns true only when the web_push channel is enabled", async () => {
+    await expect(webPushGate(mockPrisma(async () => ({ enabled: true })))).resolves.toBe(true);
+  });
+
+  it("returns false when the channel is disabled", async () => {
+    await expect(webPushGate(mockPrisma(async () => ({ enabled: false })))).resolves.toBe(false);
+  });
+
+  it("fails CLOSED when the row is missing/unprovisioned", async () => {
+    await expect(webPushGate(mockPrisma(async () => null))).resolves.toBe(false);
+  });
+
+  it("fails CLOSED (false, not a throw) on a DB error", async () => {
+    const prisma = mockPrisma(async () => {
+      throw new Error("db unreachable");
+    });
+    await expect(webPushGate(prisma)).resolves.toBe(false);
+  });
+
+  it("reads the channel by the web_push enum key", async () => {
+    const prisma = mockPrisma(async () => ({ enabled: true }));
+    await webPushGate(prisma);
+    expect(prisma.offLanAllowlistChannel.findUnique).toHaveBeenCalledWith({
+      where: { key: "web_push" },
     });
   });
 });

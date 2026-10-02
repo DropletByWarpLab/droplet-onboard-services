@@ -393,11 +393,11 @@ export function TempArc({ mode, kelvin, onPick }: TempArcProps) {
         onPointerMove={(e) => e.buttons === 1 && setFrom(e.clientX)}
         onKeyDown={handleKey}
         className="relative h-5 rounded-full cursor-pointer touch-none
+          shadow-[inset_0_0_0_1px_var(--card-bd)]
           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
         style={{
           background:
             "linear-gradient(90deg, #ffb765, #fff2e0 46%, #e9f1ff 62%, #cfe0ff)",
-          boxShadow: "inset 0 0 0 1px var(--card-bd)",
         }}
       >
         {pos != null && (

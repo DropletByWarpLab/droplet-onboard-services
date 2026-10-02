@@ -13,7 +13,7 @@
  * id appears in this file at all any more, and a test asserts that.
  */
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Blocks, ShieldCheck, ChevronRight, AlertTriangle } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
@@ -22,9 +22,37 @@ import { useIntegrations, type HubEntry } from "@/lib/hooks/useIntegrations";
 import { ConnectorCard } from "@/components/integrations/ConnectorCard";
 import { ConnectWizard } from "@/components/integrations/ConnectWizard";
 import { connectorIcon } from "@/components/integrations/connector-visuals";
-import type { ConnectAction } from "@/components/integrations/provider-descriptors";
+import {
+  REPORTED_CATEGORY,
+  type ConnectAction,
+} from "@/components/integrations/provider-descriptors";
 import { syncedAgo } from "@/lib/erp-format";
 import { writeModeOf } from "@/lib/erp-types";
+
+/**
+ * WARP-2968 — the grid, in one section per category.
+ *
+ * A `Map` rather than a sort: insertion order IS catalog order, so a category
+ * appears where its first provider does and the grid cannot reshuffle under
+ * the owner's cursor when a response arrives. Sorting the categories by name
+ * instead would move every vendor the day one is renamed.
+ *
+ * Nothing is dropped and nothing is collapsed — every entry lands in exactly
+ * one section, which is the property the hub test asserts against the whole
+ * descriptor list rather than against a literal.
+ */
+function byCategory(entries: readonly HubEntry[]): { category: string; entries: HubEntry[] }[] {
+  const sections = new Map<string, HubEntry[]>();
+  for (const e of entries) {
+    // A provider the catalog does not classify has no category of its own;
+    // they share one trailing heading rather than each inventing a vertical.
+    const category = e.meta.category === REPORTED_CATEGORY ? "Other" : e.meta.category;
+    const existing = sections.get(category);
+    if (existing) existing.push(e);
+    else sections.set(category, [e]);
+  }
+  return [...sections].map(([category, grouped]) => ({ category, entries: grouped }));
+}
 
 export default function IntegrationsPage() {
   const router = useRouter();
@@ -146,9 +174,6 @@ export default function IntegrationsPage() {
         </div>
       )}
 
-      {/* Catalog */}
-      <Sect title="Available" />
-
       {/* Why the last click could not do anything. Shown because a click that
           silently returns is worse than one that explains itself. */}
       {blocked && (
@@ -162,21 +187,27 @@ export default function IntegrationsPage() {
         </p>
       )}
 
-      <div className="grid c3 stagger">
-        {entries.map((e) => (
-          <ConnectorCard
-            key={e.meta.id}
-            entry={e}
-            onConnect={() => connectConnector(e)}
-            onOpen={() => openConnector(e)}
-            // WARP-2518 — the same re-read the wizard's `onConnected` triggers.
-            // It is what makes the tile's own `credentialsPurged` line appear:
-            // the hub asserts nothing about the disconnect itself, it just asks
-            // the box again.
-            onDisconnected={() => refresh()}
-          />
-        ))}
-      </div>
+      {/* Catalog — every provider, under the heading for its category. */}
+      {byCategory(entries).map(({ category, entries: grouped }) => (
+        <Fragment key={category}>
+          <Sect title={category} />
+          <div className="grid c3 stagger">
+            {grouped.map((e) => (
+              <ConnectorCard
+                key={e.meta.id}
+                entry={e}
+                onConnect={() => connectConnector(e)}
+                onOpen={() => openConnector(e)}
+                // WARP-2518 — the same re-read the wizard's `onConnected`
+                // triggers. It is what makes the tile's own
+                // `credentialsPurged` line appear: the hub asserts nothing
+                // about the disconnect itself, it just asks the box again.
+                onDisconnected={() => refresh()}
+              />
+            ))}
+          </div>
+        </Fragment>
+      ))}
 
       {/* Safety footer */}
       <p

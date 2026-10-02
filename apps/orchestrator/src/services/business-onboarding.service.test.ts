@@ -264,6 +264,16 @@ describe("interview conductor block (§9.3/§10)", () => {
     expect(INTERVIEW_CONDUCTOR_BLOCK).toContain(WRAP_UP_TURN);
     expect(INTERVIEW_CONDUCTOR_BLOCK).toContain('"facts"');
   });
+
+  // WARP-2965: the exemplar shipped with every value as "", and gpt-oss 20B
+  // echoed it back verbatim — valid JSON, wholly empty, so the dashboard
+  // showed the parse-failure card. Every slot must be a placeholder the
+  // model has to replace, so an echo is never mistaken for an answer.
+  it("shows placeholders, never an empty value the model can echo", () => {
+    expect(INTERVIEW_CONDUCTOR_BLOCK).not.toContain('""');
+    expect(INTERVIEW_CONDUCTOR_BLOCK).toContain('"whatWeDo":"<\u2026>"');
+    expect(INTERVIEW_CONDUCTOR_BLOCK).toContain('"summary":"<\u2026>"');
+  });
 });
 
 describe("getInterviewOverlay (§9.3)", () => {

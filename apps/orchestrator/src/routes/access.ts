@@ -13,6 +13,7 @@
  *   PATCH  /api/access/roles/:id         — update / archive + restore ({ state })
  *   DELETE /api/access/roles/:id         — blocked while in use (reassign first)
  *   POST   /api/access/roles/:id/assign  — { userIds: [] } → { syncState }
+ *   GET    /api/access/tool-domains      — { compiled, runtime } (WARP-2897)
  *
  * Server-authoritative invariants (the dashboard pre-clamps for honest UI
  * but is never trusted):
@@ -99,6 +100,8 @@ import { kickReconcile } from "../services/department-reconciler.service.js";
 import {
   GATEABLE_MODULE_IDS,
   GRANTABLE_TOOL_DOMAINS,
+  isGrantableDomain,
+  isGateableModuleId,
   clampConnectorLevel,
   clampLevel,
   type ConnectorLevel,
@@ -120,6 +123,19 @@ import {
 // effective-access, none of which import a route module.
 import { FEATURE_GATED_MODULES } from "../modules/module-mounts.js";
 import { createLogger } from "../lib/logger.js";
+import {
+  createToolGrantsTx,
+  isUngrantableToolDomainError,
+  replaceToolGrantsTx,
+  toolGrantStates,
+} from "../services/role-grant-writer.service.js";
+import {
+  loadToolLayers,
+  populatedDomains,
+  readableDomains,
+  runtimeOnlyDomains,
+  type ToolLayers,
+} from "../services/tool-layers.service.js";
 
 const logger = createLogger("access-route");
 
@@ -131,10 +147,13 @@ const featureGrantSchema = z.object({
 });
 
 const toolGrantSchema = z.object({
-  // Validated against the tools-core catalog at write time (schema comment
-  // on AccessRoleToolGrant); `erp` is excluded — connector reach is the
-  // connectors axis, never a tool grant.
-  domain: z.enum(GRANTABLE_TOOL_DOMAINS as [string, ...string[]]),
+  // WARP-2897 — a bounded string here, and the grantability check in the ONE
+  // grant writer (role-grant-writer.service.ts `assertGrantableToolDomains`)
+  // at write time, over BOTH tool layers. It used to be a zod enum over the
+  // compiled domains, which refused every runtime domain with an anonymous
+  // "Invalid request"; the writer's 400 names the domain instead. `erp` is
+  // still refused there — connector reach is the connectors axis.
+  domain: z.string().trim().min(1).max(96),
   level: z.enum(["view", "use"]),
 });
 
@@ -169,7 +188,9 @@ const rolePayloadSchema = z.object({
     .refine(uniqueBy((g) => g.moduleId), { message: "Duplicate feature grants" }),
   toolGrants: z
     .array(toolGrantSchema)
-    .max(GRANTABLE_TOOL_DOMAINS.length)
+    // Compiled domains plus whatever runtime domains are attached; the bound
+    // is a size limit, not the vocabulary (the writer checks that).
+    .max(128)
     .refine(uniqueBy((g) => g.domain), { message: "Duplicate tool grants" }),
   connectorGrants: z
     .array(connectorGrantSchema)
@@ -241,10 +262,13 @@ function normalizeGrants(args: {
   connectorGrants: Array<{ provider: string; level: ConnectorLevel }>;
   mayOperateLocks: boolean;
 }): NormalizedGrants {
-  const featureGrants = args.featureGrants.map((g) => ({
-    moduleId: g.moduleId as ModuleId,
-    level: clampLevel(args.startingPoint, g.moduleId, g.level),
-  }));
+  // `null` from the clamp = this starting point may hold NO grant on the module
+  // (security below family, doors below admin): the row is not written, exactly
+  // as an unheldable connector grant is not (below).
+  const featureGrants = args.featureGrants.flatMap((g) => {
+    const level = clampLevel(args.startingPoint, g.moduleId, g.level);
+    return level === null ? [] : [{ moduleId: g.moduleId as ModuleId, level }];
+  });
   // O-2's connector floors, both of them, from the one authoritative helper:
   // read_write only on Admin-based roles, and (WARP-1578) NO grant at all on
   // Guest-based roles — a guest sits below O-2's family-and-up read floor, so
@@ -280,8 +304,14 @@ const ROLE_INCLUDE = {
 } as const;
 
 /** The T8 AccessRole wire shape — BigInt string-encoded, peopleCount from
- *  the relation count, grants flattened to their wire pairs. */
-function serializeAccessRole(row: RoleWithMeta) {
+ *  the relation count, grants flattened to their wire pairs.
+ *
+ *  WARP-2897: each tool grant also carries `state` ('live' | 'dead') and
+ *  `deadReason`, computed against both tool layers — a grant on a domain no
+ *  tool lives in reaches nothing, and the builder says so rather than
+ *  showing it as reach. Additive; the rows themselves are never deleted for
+ *  being dead. */
+function serializeAccessRole(row: RoleWithMeta, layers: ToolLayers) {
   return {
     id: row.id,
     name: row.name,
@@ -298,8 +328,22 @@ function serializeAccessRole(row: RoleWithMeta) {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     peopleCount: row._count.users,
-    featureGrants: row.featureGrants.map((g) => ({ moduleId: g.moduleId, level: g.level })),
-    toolGrants: row.toolGrants.map((g) => ({ domain: g.domain, level: g.level })),
+    // The same clamp `normalizeGrants` applies at write time, and the resolver at
+    // read time (effective-access.service): a row saved before a floor existed
+    // (a Guest-based role's security:view) is inert, so the list must not show it
+    // as reach. Nothing is rewritten; `null` = the tier may hold no grant.
+    // The tier here is the role's `startingPoint`; the resolver clamps by the
+    // PERSON's tier. They agree only because assigning a role writes
+    // `User.role = startingPoint` in the same transaction (assign, below) and an
+    // invite whose tier differs is refused (ROLE_TIER_MISMATCH, invite-access-role.service):
+    // relax either and this list can show reach the resolver does not grant.
+    featureGrants: row.featureGrants.flatMap<{ moduleId: ModuleId; level: FeatureLevel }>((g) => {
+      // `chat` is always-on and never a grant row; a stray one is listed as stored.
+      if (!isGateableModuleId(g.moduleId)) return [{ moduleId: g.moduleId, level: g.level }];
+      const level = clampLevel(row.startingPoint, g.moduleId, g.level);
+      return level === null ? [] : [{ moduleId: g.moduleId, level }];
+    }),
+    toolGrants: toolGrantStates(row.toolGrants, layers),
     connectorGrants: row.connectorGrants.map((g) => ({ provider: g.provider, level: g.level })),
   };
 }
@@ -378,6 +422,11 @@ async function createRoleTx(
     cloudModelsAllowed: boolean;
     grants: NormalizedGrants;
     createdBy: string;
+    /** WARP-2897 — both tool layers, for the writer's grantability check. */
+    layers: ToolLayers;
+    /** Domains the new role may carry even if no longer grantable: a
+     *  duplicate copies its source faithfully (see role-grant-writer). */
+    alreadyHeld?: readonly string[];
   },
 ): Promise<string> {
   const slug = await deriveUniqueSlug(tx, args.name);
@@ -400,11 +449,11 @@ async function createRoleTx(
       data: args.grants.featureGrants.map((g) => ({ roleId: role.id, ...g })),
     });
   }
-  if (args.grants.toolGrants.length > 0) {
-    await tx.accessRoleToolGrant.createMany({
-      data: args.grants.toolGrants.map((g) => ({ roleId: role.id, ...g })),
-    });
-  }
+  // WARP-2897 — through the ONE grant writer (validation included).
+  await createToolGrantsTx(tx, role.id, args.grants.toolGrants, {
+    layers: args.layers,
+    alreadyHeld: args.alreadyHeld,
+  });
   if (args.grants.connectorGrants.length > 0) {
     await tx.accessRoleConnectorGrant.createMany({
       data: args.grants.connectorGrants.map((g) => ({ roleId: role.id, ...g })),
@@ -436,6 +485,13 @@ async function createRoleTx(
  * naming one would be a lie in the audit trail.
  */
 function mapMutationRefusal(res: Response, err: unknown): boolean {
+  // WARP-2897 — a write naming a domain nothing provides (or erp): 400 with
+  // the domains named, raised inside the transaction by the grant writer so
+  // nothing was applied.
+  if (isUngrantableToolDomainError(err)) {
+    res.status(err.status).json(err.toJSON());
+    return true;
+  }
   if (err instanceof RoleMutationRefusedError) {
     res.status(err.status).json(err.toJSON());
     return true;
@@ -458,8 +514,16 @@ const ROLE_IN_USE = {
   code: "ACCESS_ROLE_IN_USE",
 } as const;
 
-export function createAccessRouter(prisma: PrismaClient): Router {
+export function createAccessRouter(
+  prisma: PrismaClient,
+  opts: {
+    /** WARP-2897 — both tool layers. Injected by tests; defaults to the
+     *  process runtime registry plus the classification record. */
+    loadLayers?: () => Promise<ToolLayers>;
+  } = {},
+): Router {
   const router = Router();
+  const loadLayers = opts.loadLayers ?? (() => loadToolLayers(prisma));
 
   const loadRole = (id: string) =>
     prisma.accessRole.findUnique({ where: { id }, include: ROLE_INCLUDE });
@@ -474,7 +538,8 @@ export function createAccessRouter(prisma: PrismaClient): Router {
           include: ROLE_INCLUDE,
           orderBy: { name: "asc" },
         })) as RoleWithMeta[];
-        res.json({ roles: rows.map(serializeAccessRole) });
+        const layers = await loadLayers();
+        res.json({ roles: rows.map((row) => serializeAccessRole(row, layers)) });
       } catch (err) {
         next(err);
       }
@@ -514,6 +579,42 @@ export function createAccessRouter(prisma: PrismaClient): Router {
     },
   );
 
+  // ── GET /api/access/tool-domains ────────────────────────────
+  //
+  // WARP-2897 — the grantable tool-domain vocabulary, both layers. The
+  // dashboard's TOOL_DOMAIN_GROUPS is a static, hand-kept table of COMPILED
+  // domains; a runtime-only domain (an extension's) exists only on the box
+  // that has it attached, so the builder asks here and appends one row per
+  // runtime domain (toolDomainGroupsWith). `compiled` is served too so the
+  // client never restates the grantable list. Per-box state, so no cache
+  // header. Path note: `tool-domains` cannot be shadowed by `/roles/:id`.
+  router.get(
+    "/access/tool-domains",
+    requireRole("owner", "admin"),
+    async (_req: Request, res: Response, next: NextFunction) => {
+      try {
+        const layers = await loadLayers();
+        const populated = populatedDomains(layers);
+        const readable = readableDomains(layers);
+        const runtime = [...runtimeOnlyDomains(layers)]
+          .filter((domain) => isGrantableDomain(domain, layers))
+          .map((domain) => {
+            const tools = layers.runtime.filter((t) => t.domain === domain);
+            return {
+              domain,
+              sources: [...new Set(tools.map((t) => t.source))].sort(),
+              tools: tools.length,
+              populated: populated.has(domain),
+              readable: readable.has(domain),
+            };
+          });
+        res.json({ compiled: [...GRANTABLE_TOOL_DOMAINS], runtime });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
   // ── GET /api/access/roles/:id ───────────────────────────────
   router.get(
     "/access/roles/:id",
@@ -522,7 +623,7 @@ export function createAccessRouter(prisma: PrismaClient): Router {
       try {
         const row = await loadRole(req.params.id);
         if (!row) return res.status(404).json({ error: "Role not found" });
-        res.json({ role: serializeAccessRole(row) });
+        res.json({ role: serializeAccessRole(row, await loadLayers()) });
       } catch (err) {
         next(err);
       }
@@ -568,6 +669,9 @@ export function createAccessRouter(prisma: PrismaClient): Router {
          *  branches. Provenance only: the row is ordinary and editable the
          *  moment it lands, and nothing reads this back. */
         let instantiatedFrom: string | null = null;
+        /** WARP-2897 — a duplicate carries its source's grant rows faithfully,
+         *  dead ones included; only a hand-authored domain must be grantable. */
+        let heldToolDomains: string[] = [];
 
         if (isTemplate) {
           const parsed = templateCreateSchema.safeParse(req.body);
@@ -640,6 +744,7 @@ export function createAccessRouter(prisma: PrismaClient): Router {
           llmDailyMessageCap = source.llmDailyMessageCap;
           cloudModelsAllowed = source.cloudModelsAllowed;
           duplicatedFrom = source.id;
+          heldToolDomains = source.toolGrants.map((g) => g.domain);
           grants = normalizeGrants({
             startingPoint,
             featureGrants: source.featureGrants.map((g) => ({
@@ -694,6 +799,7 @@ export function createAccessRouter(prisma: PrismaClient): Router {
         // creates of the same name both read the same taken-set and race for
         // one slug — the @unique then 500s the loser instead of handing it
         // "-3". Under SERIALIZABLE the loser aborts cleanly (P2034).
+        const layers = await loadLayers();
         const roleId = await prisma.$transaction(
           async (tx) =>
             createRoleTx(tx as PrismaClient, {
@@ -706,6 +812,8 @@ export function createAccessRouter(prisma: PrismaClient): Router {
               cloudModelsAllowed,
               grants,
               createdBy: actorId,
+              layers,
+              alreadyHeld: heldToolDomains,
             }),
           SERIALIZABLE_TX,
         );
@@ -729,7 +837,7 @@ export function createAccessRouter(prisma: PrismaClient): Router {
         });
 
         // No members yet — nothing NC-affecting to converge.
-        res.json({ role: serializeAccessRole(created), syncState: "synced" });
+        res.json({ role: serializeAccessRole(created, layers), syncState: "synced" });
       } catch (err) {
         if (mapMutationRefusal(res, err)) return;
         next(err);
@@ -827,6 +935,7 @@ export function createAccessRouter(prisma: PrismaClient): Router {
         // WARP-1560 — the two state TRANSITIONS, not the requested value: a
         // PATCH restating the state a role is already in is an ordinary
         // update and must not claim otherwise in Activity.
+        const layers = await loadLayers();
         const archivedNow = body.state === "archived" && existing.state !== "archived";
         const restoredNow = body.state === "active" && existing.state !== "active";
 
@@ -865,12 +974,10 @@ export function createAccessRouter(prisma: PrismaClient): Router {
             }
           }
           if (body.toolGrants !== undefined) {
-            await tx.accessRoleToolGrant.deleteMany({ where: { roleId: existing.id } });
-            if (grants.toolGrants.length > 0) {
-              await tx.accessRoleToolGrant.createMany({
-                data: grants.toolGrants.map((g) => ({ roleId: existing.id, ...g })),
-              });
-            }
+            // WARP-2897 — through the ONE grant writer. A domain this role
+            // already holds may stay even if it has gone dead; a NEW domain
+            // must be grantable now (400 naming it, whole PATCH rolled back).
+            await replaceToolGrantsTx(tx, existing.id, grants.toolGrants, { layers });
           }
           if (body.connectorGrants !== undefined || startingPointChanged) {
             await tx.accessRoleConnectorGrant.deleteMany({ where: { roleId: existing.id } });
@@ -1012,7 +1119,7 @@ export function createAccessRouter(prisma: PrismaClient): Router {
         });
 
         res.json({
-          role: serializeAccessRole(updated),
+          role: serializeAccessRole(updated, layers),
           syncState: startingPointChanged || usageConverging ? "pending" : "synced",
           ...(retainedQuotaCount !== undefined ? { retainedQuotaCount } : {}),
         });
@@ -1032,21 +1139,22 @@ export function createAccessRouter(prisma: PrismaClient): Router {
         const existing = await loadRole(req.params.id);
         if (!existing) return res.status(404).json({ error: "Role not found" });
 
+        // Pending = status pending and not yet past expiresAt (the deadline
+        // stays authoritative between daily sweeps, as in the accept route).
+        // The accept path would assign the role (T9), so these are future
+        // members and block exactly like current ones. WARP-3193 QUAL-3:
+        // one predicate, and the release below is its exact NOT.
+        const livePending = {
+          status: "pending" as const,
+          expiresAt: { gt: new Date() },
+        };
         const [members, pendingInvites] = await Promise.all([
           prisma.user.findMany({
             where: { accessRoleId: existing.id },
             select: { id: true, username: true, displayName: true },
           }),
-          // Pending = not accepted, not revoked, not past expiry. The
-          // accept path would assign the role (T9), so these are future
-          // members and block exactly like current ones.
           prisma.userInvite.findMany({
-            where: {
-              accessRoleId: existing.id,
-              acceptedAt: null,
-              revokedAt: null,
-              expiresAt: { gt: new Date() },
-            },
+            where: { accessRoleId: existing.id, ...livePending },
             select: { id: true, username: true, email: true },
           }),
         ]);
@@ -1077,14 +1185,7 @@ export function createAccessRouter(prisma: PrismaClient): Router {
           // pointer, the Restrict FK refuses the delete, and the whole
           // transaction (release included) rolls back → the same 409.
           await tx.userInvite.updateMany({
-            where: {
-              accessRoleId: existing.id,
-              OR: [
-                { acceptedAt: { not: null } },
-                { revokedAt: { not: null } },
-                { expiresAt: { lte: new Date() } },
-              ],
-            },
+            where: { accessRoleId: existing.id, NOT: livePending },
             data: { accessRoleId: null },
           });
           await tx.accessRole.delete({ where: { id: existing.id } });

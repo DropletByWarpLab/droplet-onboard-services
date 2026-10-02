@@ -31,9 +31,17 @@ vi.mock("../services/nextcloud.client.js", async () => {
   );
   return {
     NextcloudOcsError: actual.NextcloudOcsError,
+    NcPreconditionFailedError: actual.NcPreconditionFailedError,
     ncListFiles: vi.fn(),
     ncCreateDirectory: vi.fn(),
     ncUploadFile: vi.fn(),
+    ncStageUpload: vi.fn(async (_t: string, _u: string, _id: string, body: AsyncIterable<Buffer>) => {
+      for await (const _c of body) {
+        /* drain like the real streamed PUT */
+      }
+    }),
+    ncCommitUpload: vi.fn().mockResolvedValue("created"),
+    ncDiscardUpload: vi.fn().mockResolvedValue(undefined),
     ncDownloadFile: vi.fn(),
     ncDeleteFile: vi.fn(),
     ncListShares: vi.fn(),
@@ -66,6 +74,7 @@ vi.mock("../services/nextcloud.client.js", async () => {
 vi.mock("../services/file-registry.service.js", () => ({
   resolveFileDepartment: vi.fn().mockResolvedValue(null),
   upsertFileRegistryEntry: vi.fn().mockResolvedValue(undefined),
+  findSameContentCandidates: vi.fn().mockResolvedValue([]),
 }));
 
 // Session-cookie credential resolution for NON-service callers.
@@ -105,6 +114,7 @@ vi.mock("../config.js", () => ({
 import { createFilesRouter, stripBase64Padding } from "../routes/files.js";
 import * as nc from "../services/nextcloud.client.js";
 import * as registry from "../services/file-registry.service.js";
+import { userDirectory } from "./helpers/user-directory.js";
 
 const ncUploadFile = nc.ncUploadFile as unknown as ReturnType<typeof vi.fn>;
 const ncGetFileId = nc.ncGetFileId as unknown as ReturnType<typeof vi.fn>;
@@ -127,7 +137,14 @@ function buildApp(asUser: { id: string; username: string; role: string }) {
     department: { findFirst: vi.fn().mockResolvedValue(null), findUnique: vi.fn().mockResolvedValue(null) },
     departmentMembership: { findUnique: vi.fn().mockResolvedValue(null) },
     departmentShare: { create: vi.fn() },
-    user: { findUnique: vi.fn().mockResolvedValue(null) },
+    // WARP-2096: the registry owner for an MCP write is the asserted
+    // person's directory row. WARP-3117: the header resolves to that person
+    // and the write goes out as their Nextcloud login; BOB's differs from
+    // his handle (ADR-013).
+    user: userDirectory([
+      { id: "u-alice", username: "alice", nextcloudUsername: "alice", role: "family" },
+      { id: "u-bob", username: "bob", nextcloudUsername: "bob.nc", role: "family" },
+    ]),
     userUsagePolicy: { findUnique: vi.fn().mockResolvedValue(null) },
   };
   app.use("/api", createFilesRouter(prismaStub as never));
@@ -142,7 +159,7 @@ const GUEST = { id: "u-2", username: "visitor", role: "guest" };
 const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
 
 beforeEach(() => {
-  ncUploadFile.mockReset().mockResolvedValue(undefined);
+  ncUploadFile.mockReset().mockResolvedValue("created");
   ncGetFileId.mockReset().mockResolvedValue(42);
   upsertFileRegistryEntry.mockReset().mockResolvedValue(undefined);
   mockResolveNcToken.mockReset().mockResolvedValue("session-token");
@@ -158,7 +175,7 @@ describe("WARP-1460 — POST /files/upload admits the MCP service principal (JSO
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
-      uploaded: [{ name: "note.txt", path: "/Docs/note.txt", size: 11 }],
+      uploaded: [{ name: "note.txt", path: "/Docs/note.txt", size: 11, status: "uploaded" }],
     });
     // Forwarded user + credential, target dir from the body `dir` field,
     // and the exact decoded bytes.
@@ -181,7 +198,9 @@ describe("WARP-1460 — POST /files/upload admits the MCP service principal (JSO
       .send({ filename: "root.txt", contentBase64: b64("x") });
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ uploaded: [{ name: "root.txt", path: "/root.txt", size: 1 }] });
+    expect(res.body).toEqual({
+      uploaded: [{ name: "root.txt", path: "/root.txt", size: 1, status: "uploaded" }],
+    });
     expect(ncUploadFile).toHaveBeenCalledWith(
       "nct-user-cred",
       "alice",
@@ -301,14 +320,66 @@ describe("WARP-1460 — the human MULTIPART path is unchanged", () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
-      uploaded: [{ name: "hello.txt", path: "/hello.txt", size: 5 }],
+      uploaded: [{ name: "hello.txt", path: "/hello.txt", size: 5, status: "uploaded" }],
     });
-    expect(ncUploadFile).toHaveBeenCalledWith(
+    // WARP-2093: multipart is streamed into staging, then committed — the
+    // buffered ncUploadFile is the JSON transport's alone now.
+    expect(nc.ncCommitUpload).toHaveBeenCalledWith(
       "session-token",
       "dev",
-      "/",
-      "hello.txt",
-      expect.any(Buffer),
+      expect.any(String),
+      "/hello.txt",
+      false,
+    );
+    expect(ncUploadFile).not.toHaveBeenCalled();
+  });
+});
+
+describe("WARP-2096 — the JSON tool transport", () => {
+  it("keeps write_file's documented overwrite contract, but REPORTS the replacement", async () => {
+    ncUploadFile.mockResolvedValueOnce("replaced");
+    const res = await request(buildApp(MCP))
+      .post("/api/files/upload")
+      .set("X-Nextcloud-Token", "nct-user-cred")
+      .set("X-Nextcloud-User", "alice")
+      .send({ dir: "/", filename: "notes.md", contentBase64: b64("v2") });
+
+    expect(res.status).toBe(200);
+    expect(res.body.uploaded[0]).toMatchObject({ name: "notes.md", status: "replaced" });
+    // Same single PUT as before — no create-new guard on this transport.
+    expect(ncUploadFile).toHaveBeenCalledWith("nct-user-cred", "alice", "/", "notes.md", expect.any(Buffer));
+  });
+
+  it("the registry row belongs to the ASSERTED person, not _service:mcp, and carries the hash", async () => {
+    await request(buildApp(MCP))
+      .post("/api/files/upload")
+      .set("X-Nextcloud-Token", "nct-user-cred")
+      .set("X-Nextcloud-User", "alice")
+      .send({ dir: "/", filename: "a.txt", contentBase64: b64("abc") });
+
+    expect(upsertFileRegistryEntry).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        ownerUserId: "u-alice",
+        path: "/a.txt",
+        // sha256("abc")
+        sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        sizeBytes: 3,
+      }),
+    );
+  });
+
+  it("WARP-3117: over HTTP (User.id), the write goes out as the person's login and the row is still theirs", async () => {
+    await request(buildApp(MCP))
+      .post("/api/files/upload")
+      .set("X-Nextcloud-Token", "nct-user-cred")
+      .set("X-Nextcloud-User", "u-bob")
+      .send({ dir: "/", filename: "b.txt", contentBase64: b64("abc") });
+
+    expect(ncUploadFile).toHaveBeenCalledWith("nct-user-cred", "bob.nc", "/", "b.txt", expect.any(Buffer));
+    expect(upsertFileRegistryEntry).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ ownerUserId: "u-bob", path: "/b.txt" }),
     );
   });
 });

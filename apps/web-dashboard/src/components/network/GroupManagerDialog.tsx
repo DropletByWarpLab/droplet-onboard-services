@@ -103,7 +103,7 @@ export function GroupManagerDialog({ open, onClose }: Props) {
               }
             }}
             placeholder="New group name"
-            className="flex-1 px-3 py-1.5 type-body outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+            className="flex-1 px-3 py-1.5 type-body outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
             style={{
               background: "var(--surface)",
               border: "1px solid var(--border)",

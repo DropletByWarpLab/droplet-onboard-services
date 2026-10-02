@@ -84,6 +84,13 @@ CHANNEL_KEYS = (
     "outbound_email",
     "telemetry",
     "web_fetch",
+    # WARP-2904 — `ambient_data` (WARP-1436) never joined this tuple; both it
+    # and `web_push` do now so the vocabulary matches the enum. No overlay
+    # chain classifies either yet, so both read 0 until one does.
+    "ambient_data",
+    "web_push",
+    # WARP-3264 — calendar place suggestions (OpenStreetMap Nominatim).
+    "place_lookup",
 )
 CHAIN_PREFIX = "droplet_offlan_"
 

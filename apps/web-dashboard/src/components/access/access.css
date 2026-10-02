@@ -460,6 +460,17 @@
 .acc-tooldomain.off {
   opacity: 0.55;
 }
+/* WARP-2897 — a grant that reaches nothing (its extension is gone). */
+.acc-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(217, 163, 92, 0.4);
+  background: rgba(217, 163, 92, 0.1);
+  color: var(--text);
+}
 
 /* ── off-box caution block (§5.4) ── */
 .acc-caution {

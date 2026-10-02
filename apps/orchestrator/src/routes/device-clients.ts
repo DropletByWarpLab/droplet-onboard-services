@@ -11,14 +11,19 @@ import {
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import { encryptSecret, decryptSecret } from "../services/encryption.service.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
-import { publish } from "../services/mqtt.service.js";
+import {
+  revokeDeviceClient,
+  safePublish,
+} from "../services/device-client-revoke.service.js";
 import {
   dispatchToUser,
   getPublicVapidKey,
 } from "../services/push-dispatch.service.js";
 import { trustedOriginUrl } from "../lib/trusted-origin.js";
-import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
+import { buildPairUrl, servedCertPin } from "../lib/served-cert-pin.js";
+import { SESSION_COOKIE_NAME, requireRole } from "../middleware/auth.js";
 import { createLogger } from "../lib/logger.js";
+import { PushEndpointRejected, vetPushEndpoint } from "../lib/push-endpoint.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 
@@ -51,6 +56,7 @@ const PAIRING_CODE_CREATE_ATTEMPTS = 5;
 const RATE_LIMIT_WINDOW_SEC = 3600;
 const MAX_PAIR_CREATE_PER_USER_PER_HOUR = 5;
 const MAX_PAIR_CLAIM_PER_IP_PER_HOUR = 20;
+const MAX_PERSONAL_DRIVE_PER_USER_PER_HOUR = 10;
 // WARP-1030: brute-force budget for the unauthenticated Basic self-revoke
 // path. A legitimate client revokes once, so both budgets are generous;
 // the per-target bucket also caps a rotating-IP attacker guessing one
@@ -67,14 +73,6 @@ const platformSchema = z.enum([
   "other",
 ]);
 const deviceTypeSchema = z.enum(["desktop", "mobile"]);
-
-function safePublish(topic: string, payload: Record<string, unknown>): void {
-  try {
-    publish(topic, payload);
-  } catch (err) {
-    logger.warn({ err, topic }, "MQTT publish failed (non-fatal)");
-  }
-}
 
 
 function getUser(req: Request): string {
@@ -153,33 +151,22 @@ export async function webdavBaseUrl(req: Request): Promise<string> {
 }
 
 /**
- * Shared revoke cleanup for BOTH auth paths — the operator session-cookie
- * delete and the WARP-349 device Basic-auth self-revoke: best-effort revoke
- * the Nextcloud app password upstream, mark the row revoked, publish the
- * MQTT event. Idempotent — an already-revoked row is a no-op.
+ * Mint a dedicated Nextcloud app password for a new device and encrypt it for
+ * storage. Shared by pairing claim and the per-user drive login so both mint
+ * the same way. `no_session` = the caller's session carries no Nextcloud token
+ * (SSO/passkey logins never receive one); `nc_failed` = Nextcloud refused.
  */
-async function revokeDeviceClient(
-  prisma: PrismaClient,
-  row: { id: string; userId: string; ncAppPassword: string; status: string },
-): Promise<void> {
-  if (row.status === "revoked") return;
-
-  try {
-    const plaintext = decryptSecret(row.ncAppPassword);
-    await ncDeleteAppPassword(plaintext);
-  } catch (err) {
-    // Best-effort: still mark the row revoked even if Nextcloud can't
-    // kill the token (e.g. already expired). Operators can clean up
-    // stale tokens via the Nextcloud admin UI if needed.
-    logger.warn({ err, deviceId: row.id }, "Failed to revoke Nextcloud app password");
-  }
-
-  await prisma.deviceClient.update({
-    where: { id: row.id },
-    data: { status: "revoked" },
-  });
-
-  safePublish(`droplet/devices/${row.userId}/revoked`, { deviceId: row.id });
+async function mintDeviceCredential(
+  req: Request,
+): Promise<
+  | { ok: true; appPassword: string; encrypted: string }
+  | { ok: false; reason: "no_session" | "nc_failed" }
+> {
+  const ncToken = await resolveNcToken(req);
+  if (!ncToken) return { ok: false, reason: "no_session" };
+  const appPassword = await ncGenerateAppPassword(ncToken);
+  if (!appPassword) return { ok: false, reason: "nc_failed" };
+  return { ok: true, appPassword, encrypted: encryptSecret(appPassword) };
 }
 
 export function createDeviceClientsRouter(prisma: PrismaClient): Router {
@@ -248,7 +235,13 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       }
 
       const server = (await webdavBaseUrl(req)).replace(/\/nextcloud$/, "");
-      const pairUrl = `droplet://pair?server=${encodeURIComponent(server)}&code=${code}`;
+      // WARP-2954 / ADR-058: the link carries the served certificate's key
+      // fingerprint (`spki=`), so a native client can pair to THIS box with
+      // no public CA and no HQ — the box's own dashboard, shown to a logged-in
+      // owner, is the channel that makes the pin an anchor (a LAN host cannot
+      // rewrite it). Omitted (same link as before) when the leaf is unreadable.
+      // The unauthenticated /api/tls/status deliberately does not carry it.
+      const pairUrl = buildPairUrl(server, code, servedCertPin());
 
       // Stash pending metadata so /pair/claim knows what device the user
       // intended — the native client only sends the code + its own locally
@@ -391,22 +384,20 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       // hold an interactive Postgres transaction open. The trade-off is that we
       // may mint a password for a claim that then loses the atomic consume race
       // or fails to persist — both compensated below by deleting it.
-      const ncToken = await resolveNcToken(req);
-      if (!ncToken) {
-        res.status(401).json({
-          error: "Nextcloud session unavailable — please log in again",
-        });
+      const minted = await mintDeviceCredential(req);
+      if (!minted.ok) {
+        if (minted.reason === "no_session") {
+          res.status(401).json({
+            error: "Nextcloud session unavailable — please log in again",
+          });
+        } else {
+          res.status(502).json({
+            error: "Failed to generate device credentials from Nextcloud",
+          });
+        }
         return;
       }
-      const appPassword = await ncGenerateAppPassword(ncToken);
-      if (!appPassword) {
-        res.status(502).json({
-          error: "Failed to generate device credentials from Nextcloud",
-        });
-        return;
-      }
-
-      const encrypted = encryptSecret(appPassword);
+      const { appPassword, encrypted } = minted;
 
       let client: { id: string };
       try {
@@ -443,6 +434,7 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
               appVersion: parsed.data.appVersion ?? null,
               ncAppPassword: encrypted,
               status: "active",
+              kind: "app_pairing",
             },
           });
 
@@ -507,6 +499,166 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       next(err);
     }
   });
+
+  // ── POST /api/storage/network-drive/personal ──
+  // Per-user Finder / File Explorer drive: mints a Nextcloud app password for
+  // THIS user and returns the WebDAV address to map. Nextcloud enforces the
+  // user's own My Files / Household / department ACLs, unlike the device-wide
+  // SMB share. Owner/admin/family only — guests and `service` principals get
+  // no drive — and only while the owner has turned personal drives on
+  // (`Workspace.personalDriveEnabled`, default OFF; 403 personal_drive_disabled).
+  // The mount talks to Nextcloud directly, so orchestrator-only controls
+  // (download audit, per-file upload cap) do not apply — WARP-3318 tracks that
+  // unaudited-read trade-off and the credential surface — and the gateway blocks
+  // Nextcloud's OCS sharing API on /nextcloud/ so the app password cannot mint
+  // shares (docker/nginx/nginx.conf, WARP-3053) — see docs/network-drive.md
+  // "Per-user drive (WebDAV)".
+  router.post(
+    "/storage/network-drive/personal",
+    requireRole("owner", "admin", "family"),
+    async (req, res, next) => {
+      try {
+        // Fail closed: no singleton row, or a DB error (-> 500), is "off".
+        const workspace = await prisma.workspace.findUnique({
+          where: { id: 1 },
+          select: { personalDriveEnabled: true },
+        });
+        if (!workspace?.personalDriveEnabled) {
+          res.status(403).json({ error: "personal_drive_disabled" });
+          return;
+        }
+
+        const parsed = z
+          .object({
+            platform: z.enum(["macos", "windows"]),
+            computerName: z.string().trim().min(1).max(60).optional(),
+          })
+          .safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({ error: "Invalid drive request" });
+          return;
+        }
+        const { platform } = parsed.data;
+
+        const user = getUser(req);
+        const rl = await rateLimit(
+          `drive:personal:${user}`,
+          MAX_PERSONAL_DRIVE_PER_USER_PER_HOUR,
+        );
+        if (!rl.allowed) {
+          res.status(429).json({
+            error: "Too many drive logins created. Try again in an hour.",
+          });
+          return;
+        }
+
+        const minted = await mintDeviceCredential(req);
+        if (!minted.ok) {
+          if (minted.reason === "no_session") {
+            // SSO/passkey sessions never held a Nextcloud token; only a
+            // password sign-in can mint one.
+            res.status(409).json({ error: "nc_credential_unavailable" });
+          } else {
+            res.status(502).json({
+              error: "Failed to generate drive credentials from Nextcloud",
+            });
+          }
+          return;
+        }
+        const { appPassword, encrypted } = minted;
+
+        const deviceName = `${platform === "macos" ? "Finder" : "File Explorer"} on ${
+          parsed.data.computerName ?? (platform === "macos" ? "My Mac" : "My PC")
+        }`;
+        let client: { id: string };
+        try {
+          client = await prisma.deviceClient.create({
+            data: {
+              userId: user,
+              deviceName,
+              deviceType: "desktop",
+              platform,
+              ncAppPassword: encrypted,
+              status: "active",
+              // Explicit discriminator: turning personal drives off revokes
+              // exactly these rows (PUT /settings/workspace/personal-drive).
+              kind: "personal_drive",
+            },
+          });
+        } catch (err) {
+          // Compensate: don't leak a live credential nobody can revoke.
+          try {
+            await ncDeleteAppPassword(appPassword);
+          } catch (compErr) {
+            logger.warn(
+              { err: compErr },
+              "Failed to compensate (delete) Nextcloud app password after drive login persist failure",
+            );
+          }
+          throw err;
+        }
+
+        // The owner's switch-off can land between the check above and this row
+        // (the mint is a Nextcloud round-trip), after its revoke sweep has
+        // already run — leaving a live login while drives read off. Re-read the
+        // flag now the row exists; if it is off, revoke this login and never
+        // hand back its password. A switch-off after this read is covered by
+        // the sweep, which sees the row.
+        const stillOn = await prisma.workspace.findUnique({
+          where: { id: 1 },
+          select: { personalDriveEnabled: true },
+        });
+        if (!stillOn?.personalDriveEnabled) {
+          await revokeDeviceClient(prisma, {
+            id: client.id,
+            userId: user,
+            ncAppPassword: encrypted,
+            status: "active",
+          });
+          res.status(403).json({ error: "personal_drive_disabled" });
+          return;
+        }
+
+        safePublish(`droplet/devices/${user}/paired`, {
+          deviceId: client.id,
+          deviceName,
+          platform,
+        });
+        await recordActivity({
+          kind: "auth",
+          severity: "ok",
+          sourceIcon: "hard-drive",
+          what: "Personal drive login created",
+          sub: deviceName,
+          refs: { clientId: client.id },
+          actor: actorFromRequest(req),
+        });
+
+        const base = new URL(await webdavBaseUrl(req));
+        const url = `${base.origin}${base.pathname}/remote.php/dav/files/${encodeURIComponent(user)}/`;
+        // Windows WebClient UNC form: \\host@SSL[@port]\path. The uid stays RAW here
+        // while webdavUrl percent-encodes it: WebClient URL-encodes UNC components
+        // itself, so a pre-encoded `%20` would arrive double-encoded. Safe because
+        // Nextcloud uids are limited to [A-Za-z0-9 _.@'-] — never `\`, `/` or `%`.
+        const winHost =
+          base.port && base.port !== "443"
+            ? `${base.hostname}@SSL@${base.port}`
+            : `${base.hostname}@SSL`;
+        const winPath = `${base.pathname}/remote.php/dav/files/${user}`.replace(/\//g, "\\");
+        res.json({
+          deviceId: client.id,
+          username: user,
+          // Plaintext is returned ONCE; revoke via DELETE /api/devices/clients/:id.
+          appPassword,
+          webdavUrl: url,
+          macosUrl: url,
+          windowsPath: `\\\\${winHost}${winPath}`,
+        });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // ── GET /api/devices/clients ──
   // List the caller's own devices. Never returns the encrypted app password.
@@ -607,7 +759,29 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
           .status(400)
           .json({ error: "Invalid subscription", details: parsed.error.flatten() });
       }
-      const userId = getUser(req);
+      // WARP-2904: the orchestrator will POST to this URL, so it is an SSRF
+      // primitive before it is egress. vetPushEndpoint requires https on the
+      // default port with no userinfo, a plain host that both URL parsers
+      // agree on (web-push dials the LEGACY parser's host), and a real push
+      // service host. dispatchToUser re-runs the check at dial time and adds
+      // a DNS check. The error names the rule, never the endpoint.
+      try {
+        vetPushEndpoint(parsed.data.endpoint);
+      } catch (err) {
+        if (err instanceof PushEndpointRejected) {
+          // `blocked_destination` is the WARP-2022 registration error for a
+          // refused destination; https_required keeps its own self-describing
+          // code. `reason` names which rule refused it.
+          return res.status(400).json({
+            error: err.reason === "https_required" ? "https_required" : "blocked_destination",
+            reason: err.reason,
+          });
+        }
+        throw err;
+      }
+      // WARP-2911 — PushSubscription is keyed by USERNAME, the key
+      // sendNotification dispatches on.
+      const username = getUser(req);
 
       // Upsert by endpoint so re-subscribing doesn't create duplicates.
       // We trust the keys to be fresh on every subscribe (browsers
@@ -615,14 +789,14 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       const row = await prisma.pushSubscription.upsert({
         where: { endpoint: parsed.data.endpoint },
         create: {
-          userId,
+          username,
           endpoint: parsed.data.endpoint,
           p256dhKey: parsed.data.keys.p256dh,
           authKey: parsed.data.keys.auth,
           deviceClientId: parsed.data.deviceClientId,
         },
         update: {
-          userId,
+          username,
           p256dhKey: parsed.data.keys.p256dh,
           authKey: parsed.data.keys.auth,
           deviceClientId: parsed.data.deviceClientId,
@@ -640,11 +814,11 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       if (!endpoint || endpoint.length > 2048) {
         return res.status(400).json({ error: "endpoint required" });
       }
-      const userId = getUser(req);
+      const username = getUser(req);
       // Defensive: only delete the operator's own subscriptions, even
       // if they happened to send someone else's endpoint.
       await prisma.pushSubscription.deleteMany({
-        where: { endpoint, userId },
+        where: { endpoint, username },
       });
       res.status(204).end();
     } catch (err) {
@@ -654,8 +828,8 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
 
   router.post("/devices/push/test", async (req, res, next) => {
     try {
-      const userId = getUser(req);
-      const result = await dispatchToUser(prisma, userId, {
+      const username = getUser(req);
+      const result = await dispatchToUser(prisma, username, {
         title: "Droplet test notification",
         body: "If you can read this, push is working.",
         url: "/",

@@ -89,6 +89,7 @@ import {
   type ApiCrmContactRow,
   type FindEntity,
 } from "./_graph.js";
+import { OrchPmError } from "../pm/pm-orch.js";
 
 const inputSchema = {
   type: "object",
@@ -297,7 +298,12 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
         }
         for (const p of rec.projects ?? []) wanted.add(p.id);
         let projects: ReturnType<typeof toPlaneProject>[] = [];
-        if (wanted.size > 0) {
+        // WARP-2988 review — the project lookup is ENRICHMENT of a CRM record.
+        // When the Projects side refuses it (`module_disabled`: switched off
+        // box-wide, or not reachable for the person the assistant acts for),
+        // the customer is still the answer: return it without projects rather
+        // than failing the whole call as "Projects is switched off".
+        if (wanted.size > 0) try {
           const page = await callOrch<{ projects?: Parameters<typeof toPlaneProject>[0][] }>(
             ctx,
             "get",
@@ -322,6 +328,9 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
             ),
           );
           projects = [...listed, ...direct.map((d) => d.project)].map(toPlaneProject);
+        } catch (err) {
+          if (!(err instanceof OrchPmError && err.message === "module_disabled")) throw err;
+          projects = [];
         }
         const contactRows = (contacts.contacts ?? []).map(toGraphContact);
         // Both lists are pages of `limit`, and each route says how big the
@@ -644,7 +653,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "business_find",
   description:
-    "Look up business records: customers, contacts, deals, projects, work items, the pipeline roll-up, or what the box worked out on its own — `finding` (something that needs attention: overdue money, a slipping deal) and `digest` (standing facts read out of documents). With `id`, that one record plus what links to it, each linked list with its `_total`; without, a search with a `total`. History lives in business_timeline. Amounts are minor-unit strings, never numbers.",
+    "Look up business records: customers, contacts, deals, projects, work items, the pipeline roll-up, or what the box worked out on its own — `finding` (something that needs attention: overdue money, a slipping deal) and `digest` (standing facts read out of documents). With `id`, that one record plus what links to it, each linked list with its `_total`; without, a search with a `total`. History lives in business_timeline. Amounts are in major units (e.g. dollars).",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

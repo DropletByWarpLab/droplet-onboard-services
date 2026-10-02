@@ -153,7 +153,7 @@ describe("/admin/sessions — null is still not [] (WARP-2820)", () => {
       users: [
         { username: "blind", displayName: "Blind Row", role: "admin", sessions: null },
         { username: "gone", displayName: "Gone Row", role: "family", sessions: [] },
-        { username: "here", displayName: "Here Row", role: "owner", sessions: [live()] },
+        { username: "here", displayName: "Here Row", role: "admin", sessions: [live()] },
       ],
     });
 
@@ -171,6 +171,28 @@ describe("/admin/sessions — null is still not [] (WARP-2820)", () => {
     // Exactly one Sign out button: the person the box could actually see.
     expect(screen.getAllByRole("button", { name: /^sign out$/i })).toHaveLength(1);
     expect(screen.queryByText(OUTAGE)).not.toBeInTheDocument();
+  });
+});
+
+// WARP-3111 — the box refuses revoking the owner's sessions and your own, so
+// the page does not offer it on those rows.
+describe("/admin/sessions — no Sign out on the owner's row or your own (WARP-3111)", () => {
+  it("offers Sign out only on the other, non-owner row", async () => {
+    mockRole = "admin";
+    fetchSessionsMock.mockResolvedValue({
+      users: [
+        { username: "boss", displayName: "Boss Row", role: "owner", sessions: [live()] },
+        { username: "alice", displayName: "Alice Row", role: "admin", sessions: [live()] },
+        { username: "bob", displayName: "Bob Row", role: "family", sessions: [live()] },
+      ],
+    });
+
+    render(<AdminSessionsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Bob Row")).toBeInTheDocument();
+    });
+    expect(screen.getAllByRole("button", { name: /^sign out$/i })).toHaveLength(1);
   });
 });
 

@@ -12,18 +12,23 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { recordActivity } from "./activity.singleton.js";
+import { extensionAuditRefs } from "./extension-token.js";
 import {
   confirmationActivityParams,
   confirmedEvent,
   interceptorEventFromContent,
 } from "./confirmation-audit.js";
 
-import type { PrivateEnhancement } from "@droplet/tools-core";
 import type {
+  McpCallContext,
   McpClientPort,
   McpToolCallOutcome,
   McpToolDescriptor,
 } from "./mcp-client.port.js";
+
+// WARP-3193 ARCH-10 — defined on the port (which must not import this file);
+// re-exported so existing importers keep resolving it from here.
+export type { McpCallContext };
 
 export interface McpClientOptions {
   command: string;
@@ -150,6 +155,7 @@ export class McpClientService implements McpClientPort {
           ok: !isError,
           // WARP-2177 — present only for a durable run's dispatches.
           agentRunId: context?.agentRunId,
+          ...extensionAuditRefs(name, context),
         }),
       }).catch(() => {
         // Recorder already swallows internally; defence-in-depth.
@@ -199,67 +205,3 @@ function stripUndefined(
   return out;
 }
 
-/**
- * Per-call session context plumbed through MCP `_meta`. Add fields here
- * as the agent grows new session-bound credentials (e.g. a future
- * device-side OAuth bearer for camera ops). Keep this narrow — anything
- * placed here is reachable by every handler in the registry, so don't
- * pile on unrelated context.
- */
-export interface McpCallContext {
-  /** Nextcloud session token for the calling user — required by file-tool handlers. */
-  ncToken?: string;
-  /**
-   * Nextcloud username for the calling user. Forwarded as
-   * `_meta.userId` to the stdio child so handlers gated on the per-user
-   * RBAC boundary (e.g. `search_content`'s pgvector lookup, WARP-202)
-   * can scope queries to this user's chunks. The mcp-server's HTTP
-   * transport ignores `_meta.userId` — JWT claims (`claims.sub`) are
-   * the authoritative trust boundary there.
-   */
-  userId?: string;
-  /**
-   * WARP-845 — caller's role, forwarded as `_meta.userRole` so
-   * role-scoped handlers (memory_recall's audience ladder) can filter
-   * what the model may read. Stdio-trusted only; the HTTP transport
-   * ignores it (restrictive guest default applies there).
-   */
-  userRole?: string;
-  /**
-   * WARP-2305 — a confirmation token minted by the dispatch-path
-   * interceptor, forwarded as `_meta.confirmationToken`.
-   *
-   * `_meta` rather than a tool argument for the same reason `ncToken`
-   * lives here: it is protocol metadata, not payload. That also keeps it
-   * clear of every tool's `additionalProperties: false` input schema and
-   * keeps the interceptor's argument-binding hash over untouched
-   * arguments.
-   *
-   * DELIBERATELY NOT SET BY THE AGENT LOOP. The token is returned to the
-   * caller in the challenge and comes back from the human approval
-   * surface (the WARP-640 dashboard confirm chip). If the agent loop
-   * re-attached a token it had just been handed, the model would be
-   * approving its own writes — which is precisely the hole WARP-2305
-   * closes. See `docs/tool-confirmation-contract.md`.
-   */
-  confirmationToken?: string;
-  /**
-   * WARP-2177 — the durable agent run this dispatch belongs to. Lands on the
-   * `tool_call` ActivityRow as `refs.agentRunId` so the Activity surface can
-   * group a run's calls — no new activity kind (`KNOWN_KINDS` is a closed
-   * allow-list that throws, the same reasoning ADR-014 gave for
-   * `refs.targetDeviceId`). Rides `_meta` like every other field here; the
-   * mcp-server ignores it.
-   */
-  agentRunId?: string;
-  /**
-   * WARP-437 — adaptive-routing enhancement bundle (HyDE vector,
-   * paraphrase vectors, filename filter, search overrides). Set by the
-   * agent loop right before dispatching `search_content`. Routed via
-   * MCP `_meta._enhancement` so it bypasses the tool's strict input
-   * schema (`additionalProperties: false`); only the trusted-stdio
-   * transport propagates it to handlers. Never set this from a user-
-   * facing route — the trust boundary is the agent loop itself.
-   */
-  _enhancement?: PrivateEnhancement;
-}

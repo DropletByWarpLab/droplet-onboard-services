@@ -69,6 +69,25 @@
  * `nextFireAt` still advances so a re-grant resumes the cadence cleanly
  * (the same skip-and-advance posture as the writes/!reversible gate).
  *
+ * ── WHO THE CALLS ARE FOR (WARP-2972) ─────────────────────────────
+ *
+ * Resolving the owner's reach here is not the whole of "runs as its creator":
+ * the mcp-server applies its own gates per call, and it learns the person only
+ * from `_meta.userId`. A fire that sent none was the BOX to it — the module
+ * gate's person axis (`module_disabled`) did not apply, so an owner who had
+ * lost a module, or a deny exception on it, still ran that module's tools
+ * every morning. The owner's `User.username` (what chat sends) now rides every
+ * call of the fire, through the dispatcher, so the call is refused exactly as
+ * it would be in that person's chat turn.
+ *
+ * Only `userId`, deliberately: it is what the gate reads, and forwarding the
+ * role or a token would widen what per-user handlers may reach beyond this
+ * change. The handle comes back from `resolveAttributedToolAccess`, off the
+ * SAME row read that decided tier, scope and deactivation — never a second
+ * query, in whose gap an owner deactivated after the access decision would
+ * still have been dispatched for. A resolved owner with no handle does not run
+ * (same skip-and-advance) — dispatching with none is the gap.
+ *
  * ── WHICH GATE (WARP-1621) ─────────────────────────────────────────
  *
  * A resolved creator still has TWO independent gates to clear, and a scope
@@ -85,6 +104,7 @@ import {
   plannedToolNames,
   runToolSpec,
   type StepDispatcher,
+  type Transformer,
 } from "./tool-spec-runner.service.js";
 import {
   firstToolDeniedForPrincipal,
@@ -140,6 +160,9 @@ export async function tickToolSchedules(
   prisma: PrismaClient,
   dispatcher: StepDispatcher,
   now: Date = new Date(),
+  /** WARP-2895 — the sandbox seam for scheduled `transform` / `when` steps.
+   *  Injected for the same reason the dispatcher is. */
+  transformer?: Transformer | null,
 ): Promise<TickResult> {
   const due = (await prisma.toolSchedule.findMany({
     where: { enabled: true, nextFireAt: { lte: now } },
@@ -278,15 +301,41 @@ export async function tickToolSchedules(
       continue;
     }
 
+    // WARP-2972 — see "WHO THE CALLS ARE FOR". The handle is the access gate's
+    // own row, so there is nothing left to read. A resolved owner without one
+    // is refused, and nothing personal is logged (the reason is a closed
+    // vocabulary, like the gate's).
+    if (attributed.username === null) {
+      const reason = "user_missing";
+      await recordActivity({
+        kind: "tool_run",
+        severity: "warn",
+        sourceIcon: "shield",
+        what: "Scheduled run skipped (access)",
+        actor: { type: "system" },
+        sub: `${spec.name} (no resolvable owner)`,
+        refs: { specId: spec.id, scheduleId: schedule.id, reason },
+      });
+      logger.warn(
+        { specId: spec.id, scheduleId: schedule.id, reason },
+        "scheduled_run_owner_unresolved",
+      );
+      await advanceOrDisable(prisma, schedule, now);
+      skipped += 1;
+      continue;
+    }
+
     try {
       await runToolSpec(prisma, dispatcher, {
         specId: spec.id,
         specName: spec.name,
         steps: spec.steps,
         triggeredBy: "scheduler",
+        callContext: { userId: attributed.username },
         // The runner re-checks per step: `${prev}` substitution means the §3
         // lock rule can only see a step's real args at dispatch.
         scope: attributed.scope,
+        ...(transformer ? { transformer } : {}),
       });
       fired += 1;
     } catch (err) {

@@ -7,6 +7,22 @@
  *      ActivityRow + ToolSpec collections.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// WARP-3193 PERF-8: count the SHA-256s the detector computes. The real
+// createHash still runs, so fingerprints are unchanged.
+const { createHashCalls } = vi.hoisted(() => ({ createHashCalls: { n: 0 } }));
+vi.mock("node:crypto", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:crypto")>();
+  return {
+    ...actual,
+    createHash: (...args: Parameters<typeof actual.createHash>) => {
+      createHashCalls.n += 1;
+      return actual.createHash(...args);
+    },
+  };
+});
+
+import { createHash } from "node:crypto";
 import {
   detectPatterns,
   mineToolCallPatterns,
@@ -29,6 +45,7 @@ function createPrismaMock(args: {
     name: string;
     description: string | null;
     status: string;
+    visibility: string;
     writes: boolean;
     reversible: boolean;
     stepCount: number;
@@ -75,6 +92,7 @@ function createPrismaMock(args: {
             name: string;
             description: string | null;
             status: string;
+            visibility: string;
             writes: boolean;
             reversible: boolean;
             steps: {
@@ -87,6 +105,7 @@ function createPrismaMock(args: {
             name: data.name,
             description: data.description,
             status: data.status,
+            visibility: data.visibility,
             writes: data.writes,
             reversible: data.reversible,
             stepCount: data.steps.create.length,
@@ -174,6 +193,8 @@ describe("WARP-464 — mineToolCallPatterns", () => {
     );
     expect(result.inserted).toBeGreaterThan(0);
     expect(prisma.createdSpecs[0].status).toBe("suggested");
+    // WARP-3354 — a suggestion has no creator and keeps today's visibility.
+    expect(prisma.createdSpecs[0].visibility).toBe("WORKSPACE");
     expect(prisma.createdSpecs[0].name).toContain("list_recent_files");
     expect(prisma.createdSpecs[0].description).toContain("repeatedly");
     expect(prisma.createdSpecs[0].stepCount).toBe(2);
@@ -271,5 +292,36 @@ describe("WARP-464 — mineToolCallPatterns", () => {
     const second = await mineToolCallPatterns(prisma as any, new Date("2026-05-27T12:00:00Z"));
     expect(prisma.createdSpecs.length).toBe(beforeCount);
     expect(second.inserted).toBe(0);
+  });
+
+  // WARP-3193 PERF-8: the hourly run reads ~70k rows. Selecting id + at +
+  // refs and hashing every window (4 SHA-256 per row) stalled the event loop
+  // inside the cron's advisory-lock transaction.
+  it("selects only refs from ActivityRow", async () => {
+    const prisma = createPrismaMock({ rows: rowsFor(["a", "b"]) });
+    await mineToolCallPatterns(prisma as any, new Date("2026-05-27T12:00:00Z"));
+    expect(prisma.activityRow.findMany.mock.calls[0][0].select).toEqual({ refs: true });
+  });
+});
+
+describe("WARP-3193 PERF-8 — detectPatterns hashes only surviving buckets", () => {
+  beforeEach(() => {
+    createHashCalls.n = 0;
+  });
+
+  it("computes no hash when no window repeats", () => {
+    const seq = Array.from({ length: 2000 }, (_, i) => `tool_${i}`);
+    expect(detectPatterns(seq)).toEqual([]);
+    expect(createHashCalls.n).toBe(0);
+  });
+
+  it("hashes each surviving pattern once, with the unchanged fingerprint", () => {
+    const seq = ["x", "y", "x", "y", "x", "y", ...Array.from({ length: 500 }, (_, i) => `u_${i}`)];
+    const patterns = detectPatterns(seq);
+    expect(createHashCalls.n).toBe(patterns.length);
+    const xy = patterns.find((p) => p.toolNames.join(",") === "x,y")!;
+    expect(xy.fingerprint).toBe(
+      createHash("sha256").update(JSON.stringify(["x", "y"])).digest("base64url"),
+    );
   });
 });

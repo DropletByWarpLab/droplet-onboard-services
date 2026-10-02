@@ -188,3 +188,84 @@ describe("useModelPull (WARP-1827)", () => {
     expect(result.current.error).toBeNull();
   });
 });
+
+// ── WARP-3048 — every refusal reaches state as a STRING ──────────────────
+//
+// The inference-manager's raw disk 409 is `{"detail":{error,needed_gb,
+// free_gb}}`. The hook used to hand that object to CatalogModelCard, and
+// React threw "Objects are not valid as a React child" — the whole /models
+// page went down. The typed C2 bodies get honest copy; anything else is
+// coerced.
+describe("useModelPull — refusal bodies become honest strings (WARP-3048)", () => {
+  async function refusal(status: number, body: unknown): Promise<string> {
+    startModelPullMock.mockResolvedValue(errorResponse(status, body));
+    const { result } = renderHook(() => useModelPull());
+    act(() => {
+      void result.current.startPull("qwen3:14b");
+    });
+    await waitFor(() => expect(result.current.error).not.toBeNull());
+    const message = result.current.error!.message;
+    expect(typeof message).toBe("string");
+    return message;
+  }
+
+  it("reads the inference-manager's nested 409 object instead of rendering it", async () => {
+    const message = await refusal(409, {
+      detail: { error: "insufficient_disk", needed_gb: 23.8, free_gb: 11.2 },
+    });
+    expect(message).toBe(
+      "Not enough space — this model needs 23.8 GB and this Droplet has 11.2 GB free.",
+    );
+  });
+
+  it("words the typed insufficient_disk body with its real numbers", async () => {
+    const message = await refusal(409, {
+      error: "insufficient_disk",
+      detail: "Needs 23.8 GB free; 11.2 GB available.",
+      needed_gb: 23.8,
+      free_gb: 11.2,
+    });
+    expect(message).toBe(
+      "Not enough space — this model needs 23.8 GB and this Droplet has 11.2 GB free.",
+    );
+  });
+
+  it("says why when the box can't confirm what's installed (catalog_unconfirmed)", async () => {
+    const message = await refusal(503, { error: "catalog_unconfirmed" });
+    expect(message).toMatch(/couldn.t confirm which models it already has/i);
+  });
+
+  it("passes the runtime's own reason through on pull_failed", async () => {
+    const message = await refusal(502, {
+      error: "pull_failed",
+      detail: "Failed to pull model: reading model from registry: not found",
+    });
+    expect(message).toBe(
+      "Failed to pull model: reading model from registry: not found",
+    );
+  });
+
+  it("never lets an unrecognised object detail through", async () => {
+    const message = await refusal(409, { detail: { weird: true } });
+    expect(message).toBe(
+      "Couldn’t start the download (409). Try again in a moment.",
+    );
+  });
+
+  it("coerces an object error LINE mid-stream too", async () => {
+    const stream = controlledStream();
+    startModelPullMock.mockResolvedValue(stream.response);
+    const { result } = renderHook(() => useModelPull());
+    act(() => {
+      void result.current.startPull("qwen3:14b");
+    });
+    await waitFor(() => expect(result.current.pulling).toBe("qwen3:14b"));
+    stream.push('{"error":{"code":500}}');
+    stream.close();
+    await waitFor(() =>
+      expect(result.current.error?.message).toBe(
+        "The download stopped partway. Nothing was changed — try again when your connection is steady.",
+      ),
+    );
+  });
+});

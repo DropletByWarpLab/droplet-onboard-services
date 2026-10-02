@@ -53,6 +53,25 @@ def _reset_vram_cache(monkeypatch):
     monkeypatch.setattr(
         vram, "_DGPU_VRAM_GLOB", "/nonexistent-test-path/card*/device/mem_info_vram_total"
     )
+    # WARP-3046: same isolation for the vendor probe and the device-bridge
+    # source — a host NVIDIA card or a developer's exported bridge URL must
+    # never leak into a test that did not ask for one.
+    monkeypatch.setattr(
+        vram, "_DRM_VENDOR_GLOB", "/nonexistent-test-path/card*/device/vendor"
+    )
+    # ...and for the PCI-bus NVIDIA probe and the env the box's setup writes
+    # (GPU_VENDOR) or compose passes in (DMR_MEM_LIMIT) — a Linux CI runner
+    # has a real /sys/bus/pci, and a developer shell may export either name.
+    monkeypatch.setattr(vram, "_PCI_DEVICE_GLOB", "/nonexistent-test-path/pci/*")
+    for name in (
+        "DEVICE_BRIDGE_URL",
+        "BRIDGE_URL",
+        "BRIDGE_AUTH_TOKEN",
+        "SERVICE_TOKEN_DISPLAY",
+        "GPU_VENDOR",
+        "DMR_MEM_LIMIT",
+    ):
+        monkeypatch.delenv(name, raising=False)
     yield
     vram._cached_gb = None
     vram._cached_source = None

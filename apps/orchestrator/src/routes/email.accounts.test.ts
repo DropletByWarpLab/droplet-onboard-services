@@ -241,6 +241,75 @@ describe("🔴 the body is an allow-list", () => {
   });
 });
 
+// ── WARP-2957 — the indexer reports a sync cycle ────────────────────────────
+describe("PATCH /api/email/accounts/:id/status", () => {
+  function prismaWithAccount(exists = true) {
+    const updateMany = vi.fn(async (_a: { where: { id: string }; data: Record<string, unknown> }) => ({
+      count: exists ? 1 : 0,
+    }));
+    return { prisma: { emailAccount: { updateMany } }, updateMany };
+  }
+
+  it("lets the service principal mark a clean cycle: lastIdleAt moves, lastError clears", async () => {
+    const { prisma, updateMany } = prismaWithAccount();
+    const res = await request(app("service", prisma))
+      .patch("/api/email/accounts/acct-1/status")
+      .send({ imapStatus: "idle" });
+    expect(res.status).toBe(200);
+    const data = updateMany.mock.calls[0][0].data;
+    expect(data.imapStatus).toBe("idle");
+    expect(data.lastIdleAt).toBeInstanceOf(Date);
+    expect(data.lastError).toBeNull();
+  });
+
+  it("writes the closed-set sentence for a failed cycle, never the reason token itself", async () => {
+    const { prisma, updateMany } = prismaWithAccount();
+    const res = await request(app("service", prisma))
+      .patch("/api/email/accounts/acct-1/status")
+      .send({ imapStatus: "error", reason: "auth_failed" });
+    expect(res.status).toBe(200);
+    const data = updateMany.mock.calls[0][0].data;
+    expect(data.imapStatus).toBe("error");
+    expect(data.lastErrorAt).toBeInstanceOf(Date);
+    expect(typeof data.lastError).toBe("string");
+    expect(data.lastError).toMatch(/rejected the username or password/);
+  });
+
+  it("🔴 refuses a human session — a person cannot mark a mailbox healthy", async () => {
+    const { prisma, updateMany } = prismaWithAccount();
+    const res = await request(app("owner", prisma))
+      .patch("/api/email/accounts/acct-1/status")
+      .send({ imapStatus: "idle" });
+    expect(res.status).toBe(403);
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it("🔴 refuses a reason outside the closed set, so server text cannot ride in", async () => {
+    const { prisma, updateMany } = prismaWithAccount();
+    const res = await request(app("service", prisma))
+      .patch("/api/email/accounts/acct-1/status")
+      .send({ imapStatus: "error", reason: "535 5.7.8 Username and Password not accepted" });
+    expect(res.status).toBe(400);
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it("refuses `paused` — a schema default is not a cycle outcome", async () => {
+    const { prisma } = prismaWithAccount();
+    const res = await request(app("service", prisma))
+      .patch("/api/email/accounts/acct-1/status")
+      .send({ imapStatus: "paused" });
+    expect(res.status).toBe(400);
+  });
+
+  it("404s an account that is not there", async () => {
+    const { prisma } = prismaWithAccount(false);
+    const res = await request(app("service", prisma))
+      .patch("/api/email/accounts/nope/status")
+      .send({ imapStatus: "idle" });
+    expect(res.status).toBe(404);
+  });
+});
+
 describe("disconnecting", () => {
   it("404s an account that is not there, rather than reporting a delete", async () => {
     disconnectMailboxMock.mockResolvedValue({ removed: false, address: null });

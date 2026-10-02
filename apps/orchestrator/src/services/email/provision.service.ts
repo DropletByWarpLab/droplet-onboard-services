@@ -228,6 +228,111 @@ export interface ConnectedMailbox {
 }
 
 /**
+ * WARP-2957 — ask the indexer to pick the new row up NOW.
+ *
+ * The indexer re-scans `EmailAccount` on a five-minute cron. Without this hop
+ * a freshly connected mailbox sat silent for up to five minutes before its
+ * first sync even started, and the owner had no way to tell "syncing soon"
+ * from "broken". Best-effort by design: the cron is the fallback, so a failed
+ * nudge is logged and never fails the connect that already succeeded.
+ */
+export async function requestIndexerRefresh(): Promise<boolean> {
+  const base = internalBaseUrl(config.EMAIL_INDEXER_URL);
+  try {
+    const resp = await internalFetch(`${base}/accounts/refresh`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${config.SERVICE_TOKEN_EMAIL}` },
+    });
+    if (!resp.ok) {
+      logger.warn({ status: resp.status }, "email-indexer refresh refused — cron will pick the account up");
+      return false;
+    }
+    return true;
+  } catch (err) {
+    logger.warn({ err }, "email-indexer refresh unreachable — cron will pick the account up");
+    return false;
+  }
+}
+
+// ── WARP-2957 — the status hop back ─────────────────────────────────────────
+//
+// `EmailAccount.lastIdleAt`, `lastErrorAt` and `lastError` were in the schema
+// and written by NOTHING. The indexer is read-only on the email tables by
+// design, and it had no way to say how a cycle went, so `imapStatus` stayed
+// `idle` from the moment `connectMailbox` wrote it — whether or not the
+// password still worked. "Connected" was the schema default, not a fact.
+
+/**
+ * Why a sync cycle failed, as a closed set. Mirrors `idle.REASONS` in
+ * `services/email-indexer/idle.py` — add a member there before adding one
+ * here, and the zod enum on the route refuses anything else.
+ *
+ * 🔴 Closed on purpose: an IMAP server's own text routinely echoes the
+ * account name, so the row and the dashboard only ever see one of these.
+ */
+export const MAILBOX_STATUS_REASONS = [
+  "auth_failed",
+  "unreachable",
+  "tls_failed",
+  "timeout",
+  "decrypt_failed",
+  "mailbox_unavailable",
+  "unknown",
+] as const;
+export type MailboxStatusReason = (typeof MAILBOX_STATUS_REASONS)[number];
+
+/** One owner-facing sentence per reason — what `lastError` stores. */
+export const MAILBOX_REASON_MESSAGES: Record<MailboxStatusReason, string> = {
+  auth_failed:
+    "The mail server rejected the username or password. If the password changed, disconnect this mailbox and connect it again.",
+  unreachable: "Couldn't reach the mail server. Check the host name and port.",
+  tls_failed: "Couldn't start a secure connection to the mail server.",
+  timeout: "The mail server didn't answer in time.",
+  decrypt_failed:
+    "This Droplet can no longer read the stored password. Disconnect this mailbox and connect it again.",
+  mailbox_unavailable: "The mail server accepted the sign-in but wouldn't open the inbox.",
+  unknown: "The mail server refused the connection.",
+};
+
+export type MailboxCycleStatus = "idle" | "reconnecting" | "error";
+
+export interface MailboxStatusInput {
+  imapStatus: MailboxCycleStatus;
+  reason?: MailboxStatusReason;
+}
+
+/**
+ * Record how the last sync cycle went. The ONLY writer of the health columns.
+ *
+ *   idle         → `lastIdleAt = now`, `lastError = null` (a recovery clears
+ *                  the message; `lastErrorAt` stays as history).
+ *   error        → `lastErrorAt = now`, `lastError = sentence(reason)`.
+ *   reconnecting → status only.
+ *
+ * `updateMany` rather than `update`, so an unknown id is a `{updated:false}`
+ * the route turns into a 404 instead of a thrown P2025.
+ */
+export async function recordMailboxStatus(
+  prisma: PrismaClient,
+  accountId: string,
+  input: MailboxStatusInput,
+): Promise<{ updated: boolean }> {
+  const now = new Date();
+  const data =
+    input.imapStatus === "idle"
+      ? { imapStatus: "idle" as const, lastIdleAt: now, lastError: null }
+      : input.imapStatus === "error"
+        ? {
+            imapStatus: "error" as const,
+            lastErrorAt: now,
+            lastError: MAILBOX_REASON_MESSAGES[input.reason ?? "unknown"],
+          }
+        : { imapStatus: "reconnecting" as const };
+  const result = await prisma.emailAccount.updateMany({ where: { id: accountId }, data });
+  return { updated: result.count === 1 };
+}
+
+/**
  * Connect one mailbox: guard the hosts, verify the credential, store the row.
  *
  * The order is the point. A row written before the probe would leave the owner
@@ -300,6 +405,9 @@ export async function connectMailbox(
     { accountId: account.id, address: account.address },
     "mailbox connected",
   );
+  // WARP-2957 — the first sync starts within seconds, not on the next cron.
+  // The row is committed; a failed nudge cannot un-connect it.
+  await requestIndexerRefresh();
   return account;
 }
 
@@ -329,5 +437,11 @@ export async function disconnectMailbox(
   if (!existing) return { removed: false, address: null };
 
   const removed = await prisma.emailAccount.deleteMany({ where: { id: accountId } });
+  if (removed.count === 1) {
+    // WARP-2957 — the indexer stops the loop on its next scan; nudge it so
+    // the credential the owner just removed is not used again in the
+    // meantime. Best-effort, same as the connect side.
+    await requestIndexerRefresh();
+  }
   return { removed: removed.count === 1, address: existing.address };
 }

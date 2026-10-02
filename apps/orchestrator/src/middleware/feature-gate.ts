@@ -50,7 +50,14 @@ import {
   resolveEffectiveAccess,
   type EffectiveAccessResult,
 } from "../services/effective-access.service.js";
-import { FEATURE_LEVEL_RANK, type FeatureLevel } from "../services/access-catalog.js";
+import {
+  FEATURE_LEVEL_RANK,
+  isGateableModuleId,
+  maxLevelFor,
+  type FeatureLevel,
+} from "../services/access-catalog.js";
+import type { Role } from "../services/jwt.service.js";
+import { isGuestShared } from "../modules/guest-shares.js";
 import { recordAccessDenied } from "./auth.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -104,6 +111,81 @@ export function resolveEffectiveAccessForRequest(
 }
 
 /**
+ * WARP-2977 P2b — what a feature gate enforces, readable off the handler.
+ *
+ * `requireFeatureAccess` returns an anonymous `featureGate` closure, so a
+ * router-walk invariant ("every Security write route is gated at exactly its
+ * §7 level") had no way to ask a mounted handler what it checks. The marker
+ * is the `ROLE_GUARD_MARKER` / `isRoleGuard` precedent (middleware/auth.ts):
+ * a non-enumerable, non-writable symbol property, so it never shows up in a
+ * spread, a JSON dump or Express's own handling. `Symbol.for` so a second copy
+ * of this module (vitest's module graph) still reads the same key.
+ */
+export const FEATURE_GATE_META = Symbol.for("droplet.featureGate.meta");
+
+export interface FeatureGateMeta {
+  moduleId: ModuleId;
+  level: FeatureLevel;
+}
+
+/** The `{moduleId, level}` a `requireFeatureAccess` handler enforces, or null for anything else. */
+export function readFeatureGateMeta(fn: unknown): FeatureGateMeta | null {
+  if (typeof fn !== "function") return null;
+  const meta = (fn as unknown as Record<symbol, unknown>)[FEATURE_GATE_META];
+  return meta && typeof meta === "object" ? (meta as FeatureGateMeta) : null;
+}
+
+/**
+ * WARP-3365 / WARP-3369 — the tier floor of a module, as a role check.
+ *
+ * Romain, 2026-09-30: an external guest gets NOTHING from company-wide business
+ * data unless it is explicitly shared with them, and the box enforces it on
+ * every route. The catalog says which modules a tier may hold nothing on
+ * (`refuseBelowFloor`: security, crm, projects), and this is the one handler
+ * that turns that fact into a refusal at the prefix — by ROLE, straight off the
+ * session, so it holds without a database read and where the per-person gate
+ * "has nothing to narrow" (a session with no local User row). Same 404
+ * `module_disabled` body as the two gates beside it: a module a tier may not
+ * open reads as absent, not forbidden.
+ *
+ * The one exception is a record explicitly SHARED with a guest (WARP-3369:
+ * a work item assigned to them): `modules/guest-shares.ts` names the requests,
+ * and the route's own guard checks the record.
+ *
+ * Passes `service` principals (the tool paths, the egress collector, voice-io):
+ * they are not a human tier. The assistant acting FOR a guest is refused by the
+ * same catalog fact in `requireMcpActingUserToolDomain`.
+ *
+ * Mounted by `mountModuleGates` for `tierRefusingModuleIds()`, off the registry
+ * prefixes, so a module that gains `refuseBelowFloor` is floored the day it
+ * does with no route edited.
+ */
+export function requireModuleTierFloor(moduleId: ModuleId): RequestHandler {
+  return function moduleTierFloor(req: Request, res: Response, next: NextFunction): void {
+    const user = req.user;
+    // No principal → authMiddleware owns the 401; service → not a human tier.
+    if (!user || user.role === "service") {
+      next();
+      return;
+    }
+    if (isGateableModuleId(moduleId) && maxLevelFor(user.role as Role, moduleId) === null) {
+      // WARP-3369 (Romain, 2026-09-30): assigning a work item to a guest SHARES
+      // that one item. The few requests declared in modules/guest-shares.ts get
+      // past the floor; the route's own guard (middleware/guest-share.ts) is
+      // the authorization and answers 404 unless the item is assigned to them.
+      if (user.role === "guest" && isGuestShared(moduleId, req.method, `${req.baseUrl}${req.path}`)) {
+        next();
+        return;
+      }
+      recordAccessDenied(req, "module-tier-floor-denied");
+      res.status(404).json({ error: "module_disabled", module: moduleId });
+      return;
+    }
+    next();
+  };
+}
+
+/**
  * Gate a route (or a whole module route group) on the caller holding at least
  * `minLevel` on `moduleId` in their resolved §9 catalog.
  *
@@ -116,6 +198,20 @@ export function requireFeatureAccess(
   moduleId: ModuleId,
   minLevel: FeatureLevel = "view",
   resolve: EffectiveAccessResolver = resolveEffectiveAccess,
+): RequestHandler {
+  const gate = featureGateFor(moduleId, minLevel, resolve);
+  Object.defineProperty(gate, FEATURE_GATE_META, {
+    value: Object.freeze({ moduleId, level: minLevel } satisfies FeatureGateMeta),
+    enumerable: false,
+    writable: false,
+  });
+  return gate;
+}
+
+function featureGateFor(
+  moduleId: ModuleId,
+  minLevel: FeatureLevel,
+  resolve: EffectiveAccessResolver,
 ): RequestHandler {
   const needed = FEATURE_LEVEL_RANK[minLevel];
 

@@ -311,7 +311,7 @@ export function MoveCopyDialog({
                 placeholder="Folder name…"
                 aria-label="New folder name"
                 disabled={folderSubmitting}
-                className="flex-1 min-w-0 px-2 py-1 type-footnote outline-none focus:border-[var(--brand)]"
+                className="flex-1 min-w-0 px-2 py-1 type-footnote outline-none focus:ring-2 focus:ring-[var(--brand)]"
                 style={{
                   background: "var(--surface)",
                   border: "1px solid var(--border)",

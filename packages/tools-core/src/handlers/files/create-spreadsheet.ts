@@ -36,7 +36,7 @@ const inputSchema = {
           },
           rows: {
             type: "array",
-            items: { type: "array" },
+            items: { type: "array", items: {} },
             description:
               "Data rows, each an array of cell values aligned to `columns`. Numbers and booleans stay native; a short row is padded, not rejected.",
           },

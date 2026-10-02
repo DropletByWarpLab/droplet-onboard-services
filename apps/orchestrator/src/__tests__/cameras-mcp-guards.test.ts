@@ -75,6 +75,7 @@ vi.mock("../lib/internal-tls.js", () => ({
 }));
 
 import { createCamerasRouter } from "../routes/cameras.js";
+import { userDirectory } from "./helpers/user-directory.js";
 import { enableDetection, disableDetection } from "../services/frigate.client.js";
 import { updateCameraSettings } from "../services/camera-settings.service.js";
 import {
@@ -106,13 +107,7 @@ const prismaShim = {
   // principal, resolved from X-Nextcloud-User. Without a user table the
   // resolution throws and the guard fails CLOSED with a 503 — correct
   // behaviour, wrong test fixture. Model what production has.
-  user: {
-    findUnique: vi.fn(async ({ where }: { where: { nextcloudUsername?: string } }) =>
-      where.nextcloudUsername
-        ? { id: `u-${where.nextcloudUsername}`, role: "owner" }
-        : null,
-    ),
-  },
+  user: userDirectory([{ id: "u-alice", username: "alice", nextcloudUsername: "alice", role: "owner" }]),
   cameraAccessGrant: { findMany: vi.fn(async () => []) },
   camera: {
     updateMany: vi.fn().mockResolvedValue({ count: 1 }),

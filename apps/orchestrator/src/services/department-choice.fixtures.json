@@ -1,0 +1,52 @@
+{
+  "$comment": "WARP-2981 (ADR-059 §6.1) — which departments each viewer may choose. ONE file, read by BOTH apps/orchestrator/src/services/department-choice.test.ts (isChoosableDepartment) and apps/web-dashboard/src/lib/departments/active-department.test.tsx (departmentChoices over GET /api/departments' scoping), so the server's check and the web switcher's offer cannot drift. `choosable` is in switcher order (by name).",
+  "departments": [
+    { "id": "5d1c7a52-0b8e-4c1f-9a3e-1f2b3c4d5e01", "slug": "security", "name": "Security", "kind": "DEPARTMENT", "state": "active" },
+    { "id": "5d1c7a52-0b8e-4c1f-9a3e-1f2b3c4d5e02", "slug": "sales", "name": "Sales", "kind": "DEPARTMENT", "state": "active" },
+    { "id": "5d1c7a52-0b8e-4c1f-9a3e-1f2b3c4d5e03", "slug": "front-desk", "name": "Front desk", "kind": "DEPARTMENT", "state": "pending" },
+    { "id": "5d1c7a52-0b8e-4c1f-9a3e-1f2b3c4d5e04", "slug": "it", "name": "IT", "kind": "DEPARTMENT", "state": "failed" },
+    { "id": "5d1c7a52-0b8e-4c1f-9a3e-1f2b3c4d5e05", "slug": "finance", "name": "Finance", "kind": "DEPARTMENT", "state": "archive_failed" },
+    { "id": "5d1c7a52-0b8e-4c1f-9a3e-1f2b3c4d5e06", "slug": "operations", "name": "Operations", "kind": "DEPARTMENT", "state": "provisioning" },
+    { "id": "5d1c7a52-0b8e-4c1f-9a3e-1f2b3c4d5e07", "slug": "leaving", "name": "Leaving soon", "kind": "DEPARTMENT", "state": "archiving" },
+    { "id": "5d1c7a52-0b8e-4c1f-9a3e-1f2b3c4d5e08", "slug": "old-records", "name": "Old records", "kind": "DEPARTMENT", "state": "archived" },
+    { "id": "5d1c7a52-0b8e-4c1f-9a3e-1f2b3c4d5e09", "slug": "night-shift", "name": "Night shift", "kind": "TEAM", "state": "active", "parentSlug": "security" },
+    { "id": "5d1c7a52-0b8e-4c1f-9a3e-1f2b3c4d5e10", "slug": "household", "name": "Household", "kind": "HOUSEHOLD", "state": "active" }
+  ],
+  "viewers": [
+    {
+      "label": "an owner in no department",
+      "id": "0f3e9a10-6b2c-4d8e-a1f0-2b3c4d5e6f01",
+      "role": "owner",
+      "memberOf": [],
+      "choosable": ["finance", "front-desk", "it", "operations", "sales", "security"]
+    },
+    {
+      "label": "an admin who is only in a team",
+      "id": "0f3e9a10-6b2c-4d8e-a1f0-2b3c4d5e6f02",
+      "role": "admin",
+      "memberOf": ["night-shift"],
+      "choosable": ["finance", "front-desk", "it", "operations", "sales", "security"]
+    },
+    {
+      "label": "a family member in every kind and state of row",
+      "id": "0f3e9a10-6b2c-4d8e-a1f0-2b3c4d5e6f03",
+      "role": "family",
+      "memberOf": ["security", "night-shift", "household", "old-records", "leaving", "it"],
+      "choosable": ["it", "security"]
+    },
+    {
+      "label": "a guest in one department",
+      "id": "0f3e9a10-6b2c-4d8e-a1f0-2b3c4d5e6f04",
+      "role": "guest",
+      "memberOf": ["sales"],
+      "choosable": ["sales"]
+    },
+    {
+      "label": "a family member in no department",
+      "id": "0f3e9a10-6b2c-4d8e-a1f0-2b3c4d5e6f05",
+      "role": "family",
+      "memberOf": [],
+      "choosable": []
+    }
+  ]
+}

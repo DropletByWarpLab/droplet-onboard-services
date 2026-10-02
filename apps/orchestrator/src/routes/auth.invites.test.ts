@@ -74,7 +74,7 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
   getNcToken: vi.fn().mockResolvedValue(null),
   deleteNcToken: vi.fn(),
   touchNcToken: vi.fn(),
-  resolveNcToken: vi.fn().mockResolvedValue("test-nc-token"),
+  resolveNcToken: vi.fn().mockResolvedValue("caller-nc-token"),
 }));
 
 vi.mock("../services/jwt.service.js", async () => {
@@ -89,12 +89,21 @@ vi.mock("../services/jwt.service.js", async () => {
   };
 });
 
+// WARP-3113: invite create/revoke are audited — observed, not persisted.
+vi.mock("../services/activity.singleton.js", () => ({
+  recordActivity: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("../services/brain-memory.service.js", () => ({
   purgeUserData: vi.fn().mockResolvedValue({ items: 0, chunks: 0 }),
 }));
 
 import { createPublicAuthRouter, createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
+// WARP-2993: the /auth/users routes call Nextcloud as the box service
+// account, never with the caller's own NC credential ("caller-nc-token").
+import { adminBasicToken } from "../services/department-provisioner.service.js";
+const SERVICE_NC_TOKEN = adminBasicToken();
 
 // ── In-memory userInvite + user store ──
 function createPrismaMock() {
@@ -177,7 +186,9 @@ function createPrismaMock() {
         let count = 0;
         for (let i = 0; i < userRows.length; i += 1) {
           const u = userRows[i];
+          // WARP-2858: the edit-user route pins its write by the resolved id.
           const match =
+            (where?.id !== undefined && u.id === where.id) ||
             (where?.nextcloudUsername !== undefined && u.nextcloudUsername === where.nextcloudUsername) ||
             (where?.username !== undefined && u.username === where.username);
           if (match) {
@@ -200,6 +211,7 @@ function createPrismaMock() {
           displayName: null,
           email: null,
           role: "user",
+          status: "pending", // the column's DB default (WARP-3193 QUAL-3)
           acceptedAt: null,
           acceptedFrom: null,
           revokedAt: null,
@@ -258,19 +270,21 @@ function createPrismaMock() {
         return rows[idx];
       }),
       // WARP-490: compare-and-swap claim used by the accept handler
-      // (`updateMany({ where: { id, acceptedAt: null }, data: { acceptedAt } })`).
-      // The body is fully synchronous (no internal await), so two racing
-      // claims serialize in the event loop: whichever reaches it first
-      // flips acceptedAt (count 1); the second is filtered by the
-      // `acceptedAt: null` guard and returns count 0 — exactly the DB-
-      // level atomicity the real Prisma updateMany provides.
+      // (`updateMany({ where: { id, status: "pending" }, data: { status:
+      // "accepted", acceptedAt } })` since WARP-3193 QUAL-3), and the
+      // conditional revoke. The body is fully synchronous (no internal
+      // await), so two racing claims serialize in the event loop: whichever
+      // reaches it first flips the status (count 1); the second is filtered
+      // by the status guard and returns count 0 — exactly the DB-level
+      // atomicity the real Prisma updateMany provides.
       updateMany: vi.fn(async ({ where, data }: any) => {
         let count = 0;
         for (let i = 0; i < rows.length; i += 1) {
           const r = rows[i];
           if (where?.id !== undefined && r.id !== where.id) continue;
           if (where?.token !== undefined && r.token !== where.token) continue;
-          if (where?.acceptedAt === null && r.acceptedAt !== null) continue;
+          if (typeof where?.status === "string" && r.status !== where.status) continue;
+          if (where?.status?.in !== undefined && !where.status.in.includes(r.status)) continue;
           rows[i] = { ...r, ...data };
           count += 1;
         }
@@ -487,6 +501,40 @@ describe("DELETE /api/auth/invites/:token — revoke", () => {
     expect(lookup.status).toBe(404);
   });
 
+  // WARP-3193 QUAL-3: the status and its timestamp are written together, and
+  // only a pending/expired invite can move to revoked.
+  it("revoke writes status=revoked with revokedAt, and leaves an accepted invite accepted", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const a = await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
+    const b = await request(app).post("/api/auth/invites").send({ email: "bob@warp.test" });
+    prisma.rows[1].status = "accepted";
+    prisma.rows[1].acceptedAt = new Date();
+
+    expect((await request(app).delete(`/api/auth/invites/${a.body.token}`)).status).toBe(200);
+    expect((await request(app).delete(`/api/auth/invites/${b.body.token}`)).status).toBe(200);
+
+    expect(prisma.rows[0].status).toBe("revoked");
+    expect(prisma.rows[0].revokedAt).toBeInstanceOf(Date);
+    expect(prisma.rows[1].status).toBe("accepted");
+    expect(prisma.rows[1].revokedAt).toBeNull();
+  });
+
+  it("the admin list carries status, reading a pending invite past its deadline as expired", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
+    await request(app).post("/api/auth/invites").send({ email: "bob@warp.test" });
+    prisma.rows[1].expiresAt = new Date(Date.now() - 1000);
+
+    const res = await request(app).get("/api/auth/invites");
+    expect(res.status).toBe(200);
+    const byUser = Object.fromEntries(
+      res.body.invites.map((i: { username: string; status: string }) => [i.username, i.status]),
+    );
+    expect(byUser).toEqual({ alice: "pending", bob: "expired" });
+  });
+
   it("non-admin cannot revoke", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
@@ -496,6 +544,25 @@ describe("DELETE /api/auth/invites/:token — revoke", () => {
     const otherApp = buildApp(prisma, familyUser());
     const res = await request(otherApp).delete(`/api/auth/invites/${token}`);
     expect(res.status).toBe(403);
+  });
+
+  it("WARP-3113: a plain invite and its revoke are each audited once with the actor — never the token", async () => {
+    const { recordActivity } = await import("../services/activity.singleton.js");
+    const audit = vi.mocked(recordActivity);
+    audit.mockClear();
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+    const create = await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
+    const token = create.body.token;
+    await request(app).delete(`/api/auth/invites/${token}`);
+    await request(app).delete(`/api/auth/invites/${token}`); // idempotent: no second row
+
+    const whats = audit.mock.calls.map((c: any) => c[0].what);
+    expect(whats).toEqual(["Teammate invited", "Invite revoked"]);
+    for (const [row] of audit.mock.calls as any[]) {
+      expect(row.refs.actor).toBe("admin-issuer");
+      expect(JSON.stringify(row)).not.toContain(token);
+    }
   });
 
   it("404s on unknown token", async () => {
@@ -560,6 +627,7 @@ describe("GET /api/auth/invites/accept/:token — public lookup", () => {
     const app = buildApp(prisma);
     const create = await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
     const token = create.body.token;
+    prisma.rows[0].status = "accepted";
     prisma.rows[0].acceptedAt = new Date();
 
     const publicApp = buildApp(prisma, null);
@@ -573,6 +641,7 @@ describe("GET /api/auth/invites/accept/:token — public lookup", () => {
     const app = buildApp(prisma);
     const create = await request(app).post("/api/auth/invites").send({ email: "alice@warp.test" });
     const token = create.body.token;
+    prisma.rows[0].status = "revoked";
     prisma.rows[0].revokedAt = new Date();
 
     const publicApp = buildApp(prisma, null);
@@ -622,7 +691,7 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
     expect(Array.isArray(setCookie) ? setCookie.join(";") : String(setCookie)).toMatch(/droplet_session=/);
   });
 
-  it("creates an admin invitee in the admin group", async () => {
+  it("creates an admin invitee in droplet-admins, not NC instance admin (WARP-2993)", async () => {
     const prisma = createPrismaMock();
     const app = buildApp(prisma);
     // ADR-013: email required; username ("carla") is derived server-side.
@@ -639,7 +708,12 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
 
     const callArgs = (nc.ncCreateUser as any).mock.calls[0];
     const groups = callArgs[4] ?? [];
-    expect(groups).toContain("admin");
+    // WARP-2993: admin tier = droplet-admins, never NC instance admin; and
+    // the create runs as the box service account (a `basic:` token, not the
+    // old prefix-less base64 that went out as a Bearer).
+    expect(groups).toContain("droplet-admins");
+    expect(groups).not.toContain("admin");
+    expect(callArgs[0]).toMatch(/^basic:/);
   });
 
   it("rejects a password that doesn't meet the policy", async () => {
@@ -693,6 +767,7 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
       role: "user",
       createdBy: "someone",
       expiresAt: new Date(Date.now() + 60_000),
+      status: "pending",
       acceptedAt: null,
       acceptedFrom: null,
       revokedAt: null,
@@ -701,6 +776,45 @@ describe("POST /api/auth/invites/accept/:token — public accept", () => {
     const app = buildApp(prisma, null);
     const res = await request(app)
       .post(`/api/auth/invites/accept/${"x".repeat(43)}`)
+      .send({ password: "Accept-secret123" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/invalid username/i);
+    expect(nc.ncCreateUser).not.toHaveBeenCalled();
+  });
+
+  // WARP-2911 — a username must never have the shape of a `User.id`:
+  // notifications refuse a UUID-shaped recipient (that is how an id in the
+  // username slot is caught), so such an account would be refused every one.
+  const UUID = "3b7d0195-6c1e-4f2a-9d8b-2a4c6e8f0a1b";
+
+  it("🔴 WARP-2911 an email whose local-part is a UUID derives `<uuid>-2`, never the UUID", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma))
+      .post("/api/auth/invites")
+      .send({ email: `${UUID}@corp.example`, displayName: "Svc", role: "user" });
+    expect(res.status).toBe(200);
+    expect(prisma.rows[0].username).toBe(`${UUID}-2`);
+  });
+
+  it("🔴 WARP-2911 re-validates a UUID-shaped invite username at accept time", async () => {
+    const prisma = createPrismaMock();
+    prisma.rows.push({
+      id: "inv-uuid",
+      token: "u".repeat(43),
+      username: UUID,
+      displayName: null,
+      email: null,
+      role: "user",
+      createdBy: "someone",
+      expiresAt: new Date(Date.now() + 60_000),
+      status: "pending",
+      acceptedAt: null,
+      acceptedFrom: null,
+      revokedAt: null,
+      createdAt: new Date(),
+    });
+    const res = await request(buildApp(prisma, null))
+      .post(`/api/auth/invites/accept/${"u".repeat(43)}`)
       .send({ password: "Accept-secret123" });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/invalid username/i);
@@ -880,7 +994,7 @@ describe("PUT /api/auth/users/:username — email normalization (BLOCKER)", () =
 
     expect(res.status).toBe(200);
     expect(nc.ncUpdateUser).toHaveBeenCalledWith(
-      "test-nc-token",
+      SERVICE_NC_TOKEN,
       "alice",
       "email",
       "alice@example.com",

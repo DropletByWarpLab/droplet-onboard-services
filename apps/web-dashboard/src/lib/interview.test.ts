@@ -81,6 +81,65 @@ describe("parseProposal", () => {
     expect(parseProposal('```json\n{"profile":{},"summary":"","facts":[]}\n```')).toBeNull();
   });
 
+  /**
+   * WARP-2965 — on the lab box the wrap-up model echoed the conductor block's
+   * exemplar verbatim: fence closed, JSON valid, every value "". That must
+   * stay a parse failure (the card offers "Try again"), while a proposal with
+   * the placeholders actually filled in must parse.
+   */
+  it("returns null when the model echoes the all-empty proposal template", () => {
+    const echoed = {
+      profile: {
+        whatWeDo: "",
+        customers: "",
+        teamShape: "",
+        toolsUsed: "",
+        typicalDay: "",
+        goals: "",
+      },
+      summary: "",
+      facts: [{ category: "Business", fact: "", audience: "family" }],
+    };
+    expect(parseProposal("```json\n" + JSON.stringify(echoed) + "\n```")).toBeNull();
+  });
+
+  it("treats a null field exactly like an empty one", () => {
+    const allNull = {
+      profile: { whatWeDo: null, customers: null },
+      summary: null,
+      facts: [{ category: "Business", fact: null, audience: "family" }],
+    };
+    expect(parseProposal("```json\n" + JSON.stringify(allNull) + "\n```")).toBeNull();
+
+    const someReal = {
+      profile: { whatWeDo: "Dental practice", customers: null },
+      summary: null,
+      facts: [],
+    };
+    const p = parseProposal("```json\n" + JSON.stringify(someReal) + "\n```")!;
+    expect(p.profile).toEqual({ whatWeDo: "Dental practice" });
+  });
+
+  it("parses the proposal once the model has replaced the placeholders", () => {
+    const filled = {
+      profile: { whatWeDo: "Dental practice", goals: "Fill the Friday chairs" },
+      summary: "A six-chair dental practice in Boise.",
+      facts: [{ category: "Business", fact: "Open Tue-Sat", audience: "family" }],
+    };
+    const p = parseProposal("```json\n" + JSON.stringify(filled) + "\n```")!;
+    expect(p.profile.goals).toBe("Fill the Friday chairs");
+    expect(p.facts).toHaveLength(1);
+  });
+
+  it("parses an unclosed fence whose object is complete", () => {
+    const p = parseProposal('```json\n{"summary":"A dental practice in Boise.","facts":[]}')!;
+    expect(p.summary).toBe("A dental practice in Boise.");
+  });
+
+  it("returns null on an unclosed fence whose object is truncated", () => {
+    expect(parseProposal('```json\n{"summary":"A dental practi')).toBeNull();
+  });
+
   it("caps facts at the backend's 20-fact bound", () => {
     const many = {
       summary: "s",

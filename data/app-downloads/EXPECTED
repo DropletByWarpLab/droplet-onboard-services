@@ -32,12 +32,13 @@
 # ship-check and the box's own watchdog all go red. Flip it in the same
 # change that makes the artifact real, never ahead of it.
 
-# Windows — droplet-windows builds an NSIS installer via release.yml.
-# Blocked on the first tag: the repo has 0 tags and release.yml has never
-# run, so there is no artifact to stage. Signing secrets ARE present, so
-# this is a release decision, not a capability gap (WARP-1955 covers the
-# updater-distribution + key-custody half that gates the tag).
-windows   blocked   WARP-1955   no v* tag cut yet; release.yml has never run, so no installer exists to stage
+# Windows — the native client (ADR-062) ships an MSI, box-served updates
+# (ADR-045 Amendment 1). Blocked until the v1.0.0 MSI exists: no artifact
+# to stage yet. It flips only in the same change that stages the MSI
+# (roadmap gate G9). WARP-1955 is decided by ADR-062 (Tauri key moot).
+# The ticket is WARP-3246 (this amendment) until the v1.0.0 release ticket is
+# filed; re-point the row then. A blocked row needs a real WARP key.
+windows   blocked   WARP-3246   no v1.0.0 MSI exists to stage
 
 # Android — droplet-android's release workflow needs four signing secrets
 # that do not exist (actions/secrets total_count 0) and its one attempted
@@ -54,6 +55,18 @@ android   blocked   WARP-1415   no signing secrets, no tag, no Play listing; box
 # serve a binary from the box regardless — when it ships, it ships `store`.
 ios       blocked   WARP-1955   no distribution pipeline at all; becomes `store` (never `installer`) once TestFlight exists
 
-# No macOS or Linux client is being built.
-macos     absent    -           no macOS client exists
+# macOS — DropletAgent builds a notarized DMG via scripts/release-dmg.sh
+# (WARP-3030). The OTA release can now carry it (WARP-3120: pinned in
+# clients.lock.json, fetched by publish-release.yml, staged by the box's
+# update), but the lock pins nothing yet. `blocked`, not `installer`, until
+# BOTH hold, in this order, or every image build goes red:
+#   1. clients.lock.json pins a macos build (needs the DROPLET_CLIENT_APPS_TOKEN
+#      secret and a published DropletAgent release);
+#   2. scripts/image/build-iso.sh stages the lock's installers before its
+#      pre-flight audit and carries them in the ISO (WARP-3174, landed).
+# Flip this row in the PR that pins the first macos build in the lock. tests/app-downloads-audit.test.sh
+# refuses `installer` while the lock pins no macos build.
+macos     blocked   WARP-3120   DropletAgent DMG exists (scripts/release-dmg.sh); staged by hand with stage.sh until the OTA release carries it
+
+# No Linux client is being built.
 linux     absent    -           no Linux client exists

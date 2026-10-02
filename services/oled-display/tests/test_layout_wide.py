@@ -1187,3 +1187,158 @@ def test_the_vitals_ssid_default_is_empty_not_a_plausible_name(sim_display):
     """
     assert sim_display._v3["wifi"]["ssid"] == ""
     assert sim_display.household_ssid() == ""
+
+
+# --- WARP-2944: the certificate lifecycle on the screen -------------------
+
+def test_tls_warning_line_speaks_only_when_renewal_is_failing_and_time_is_short():
+    """The rule, branch by branch: failing + under 14 days → the line with the
+    count and the action; failing with weeks to go, healthy, renewing, the
+    bootstrap self-signed cert, an unpolled box, and junk all say nothing."""
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 5}) == (
+        "CERTIFICATE · renewal failing · 5 days left · needs internet")
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 1}) == (
+        "CERTIFICATE · renewal failing · 1 day left · needs internet")
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": -2}) == (
+        "CERTIFICATE EXPIRED · renewal failing · needs internet")
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 13}) != ""
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 14}) == ""
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": 25}) == ""
+    assert lw.tls_warning_line({"state": "LE_ISSUED", "daysLeft": 3}) == ""
+    assert lw.tls_warning_line({"state": "LE_RENEWING", "daysLeft": 3}) == ""
+    assert lw.tls_warning_line({"state": "BOOTSTRAP_SELF_SIGNED", "daysLeft": None}) == ""
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": None}) == ""
+    assert lw.tls_warning_line({"state": "LE_RENEW_FAILED", "daysLeft": "5"}) == ""
+    assert lw.tls_warning_line({}) == ""
+    assert lw.tls_warning_line(None) == ""
+
+
+def _chrome_state(monkeypatch, populated):
+    """The pill draws its label letter by letter (tracked), so the state is
+    read where it is decided: the argument render_status hands _render_chrome."""
+    seen = {}
+    real = lw._render_chrome
+    monkeypatch.setattr(lw, "_render_chrome",
+                        lambda disp, draw, now, state: (seen.__setitem__("state", state),
+                                                        real(disp, draw, now, state))[1])
+    lw.render_status(populated)
+    return seen.get("state")
+
+
+def test_a_failing_certificate_takes_the_footer_and_the_pill_goes_degraded(populated, monkeypatch):
+    populated._mirror_to_v3("tls", {"state": "LE_RENEW_FAILED", "daysLeft": 6,
+                                    "fqdn": "warp-lab.droplet-us.com"})
+    t = _texts(populated)
+    assert "CERTIFICATE · renewal failing · 6 days left · needs internet" in t
+    # It outranks the last event on the footer's right, rather than sharing it.
+    assert "12:04 · Backup completed" not in t
+    # DEGRADED, never ALERT: the box is doing its job; its padlock is not.
+    assert _chrome_state(monkeypatch, populated) == "degraded"
+
+
+def test_a_healthy_certificate_leaves_the_footer_and_the_pill_alone(populated, monkeypatch):
+    populated._mirror_to_v3("tls", {"state": "LE_ISSUED", "daysLeft": 61,
+                                    "fqdn": "warp-lab.droplet-us.com"})
+    t = _texts(populated)
+    assert "12:04 · Backup completed" in t
+    assert not any(s.startswith("CERTIFICATE") for s in t)
+    assert _chrome_state(monkeypatch, populated) == "live"
+
+
+def test_a_later_answer_takes_the_warning_back_down(populated):
+    """update_tls replaces wholesale: renewal succeeded → no stale warning."""
+    populated._mirror_to_v3("tls", {"state": "LE_RENEW_FAILED", "daysLeft": 3})
+    assert any(s.startswith("CERTIFICATE") for s in _texts(populated))
+    populated._mirror_to_v3("tls", {"state": "LE_ISSUED", "daysLeft": 89})
+    assert not any(s.startswith("CERTIFICATE") for s in _texts(populated))
+    assert populated._v3["tls"].get("daysLeft") == 89
+
+
+def test_the_tls_pump_is_gated_on_a_wide_panel():
+    """The footer is layout_wide's; a PyPortal has no place to show the line
+    and must not be polled for it (same gate, same reason as STORAGE)."""
+    import inspect
+    src = inspect.getsource(display_module.TFTDisplay._cycle_loop)
+    pump = src.split("tls = self.fetch_tls_status()")[0]
+    guard = pump.rsplit("if (", 1)[-1]
+    assert "_is_wide_panel()" in guard
+# --- WARP-2954 / ADR-058: the rail's default face is the app-pairing link ---
+
+BRIDGE_PAIR_OK = {
+    "ok": True,
+    "server": "https://192.168.9.195",
+    "spki": "8BevqGrXi+1KveZGkPBbe42742sm6cj0EOU2ph498lw=",
+    # The compact pin-only form (base64url, no padding) — 63 bytes, the only
+    # shape that encodes as a version-4 code on the rail card.
+    "payload": "droplet://pair?spki=8BevqGrXi-1KveZGkPBbe42742sm6cj0EOU2ph498lw",
+}
+
+
+@pytest.fixture
+def with_pair(populated):
+    """A box whose bridge has vouched for its certificate key. Fed through
+    the same mirror the poll loop uses, so the mode→_v3 path is under test."""
+    populated._mirror_to_v3("pair", dict(BRIDGE_PAIR_OK))
+    return populated
+
+
+def test_without_a_pin_the_rail_is_byte_for_byte_the_dashboard_link(populated):
+    """Nothing changes for a box whose bridge has no pin to offer."""
+    assert populated.pair_qr_payload() == ""
+    c = lw._rail_content(populated, populated._v3)
+    assert c["payload"] == "https://warp-lab.droplet-us.com/dashboard"
+    assert c["caption"] == "SCAN TO OPEN" and c["headline"] == "Dashboard"
+
+
+def test_the_bridge_pair_frame_becomes_the_rails_default_face(with_pair):
+    assert with_pair.pair_qr_payload() == BRIDGE_PAIR_OK["payload"]
+    c = lw._rail_content(with_pair, with_pair._v3)
+    assert c["payload"] == BRIDGE_PAIR_OK["payload"]
+    assert c["caption"] == "SCAN TO PAIR" and c["headline"] == "Droplet app"
+    # The typed fallback stays the address — a browser user is no worse off.
+    assert c["fallback"] == "warp-lab.droplet-us.com"
+    assert c["face_index"] == 0 and c["ecc"] == "L"
+    # And it really encodes on the rail card at the scan floor — the whole
+    # reason the link is compact: version 4 at ECC L, never a refused render.
+    qr_img, module_px = lw.render_qr(c["payload"], card=lw.QR_CARD, ecc="L")
+    assert qr_img is not None and module_px >= lw.QR_MIN_MODULE_PX
+    lw.render_status(with_pair)
+
+
+def test_the_pairing_face_yields_to_the_wifi_tap_and_comes_back(with_pair):
+    """The Wi-Fi face keeps its tap + time box; the pairing link is what the
+    rail returns to, not the dashboard link."""
+    with_pair._pyportal_send("qr", dict(BRIDGE_QR_OK))
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "wifi"
+    assert lw._rail_content(with_pair, with_pair._v3)["payload"].startswith("WIFI:")
+    with_pair._rail_wifi_until = 0.0
+    assert lw._rail_content(with_pair, with_pair._v3)["payload"] == BRIDGE_PAIR_OK["payload"]
+
+
+def test_a_bridge_refusal_takes_the_pairing_face_back_down(with_pair):
+    """`ok: False` (no address yet, unreadable certificate) must beat a
+    previously-good link — a merge would leave a link with a stale key on the
+    front of the rack."""
+    assert with_pair.pair_qr_payload()
+    with_pair._mirror_to_v3("pair", {"ok": False, "error": "served certificate not readable"})
+    assert with_pair.pair_qr_payload() == ""
+    assert lw._rail_content(with_pair, with_pair._v3)["headline"] == "Dashboard"
+    # And `ok: False` wins even when a (stale) well-formed link rides along:
+    # the bridge's verdict, not the payload's shape, decides.
+    with_pair._mirror_to_v3("pair", {"ok": False, "error": "certificate changed",
+                                     "payload": BRIDGE_PAIR_OK["payload"]})
+    assert with_pair.pair_qr_payload() == ""
+
+
+def test_only_a_well_shaped_pairing_link_reaches_the_glass(populated):
+    """The panel never composes the link and never trusts an odd one: a bridge
+    answering something unexpected cannot put an arbitrary QR on the rail."""
+    for payload in ("https://evil.example/",
+                    # the full dashboard form does not fit the rail and is not the compact contract
+                    "droplet://pair?server=https%3A%2F%2F192.168.9.195&spki=8BevqGrXi%2B1KveZGkPBbe42742sm6cj0EOU2ph498lw%3D",
+                    "droplet://pair?spki=tooshort", "droplet://pair?spki=" + "a" * 43 + "&x=1",
+                    "droplet://pair?spki=" + "!" * 43, ""):
+        populated._mirror_to_v3("pair", {"ok": True, "payload": payload})
+        assert populated.pair_qr_payload() == "", payload

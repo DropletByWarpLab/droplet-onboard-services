@@ -7,12 +7,19 @@
  *  3. The sync runner that periodically pulls each source, parses ICS/CalDAV,
  *     and upserts events keyed on (sourceId, externalUid).
  *
- * Routes call into this module; nothing here reads `req`. (LLM tooling
- * lives in `@droplet/tools-core` and uses Prisma directly per spec §6.)
+ * Routes call into this module; nothing here reads `req`. The assistant's
+ * calendar tools (`@droplet/tools-core`) reach it through the same routes
+ * (WARP-3101): they used to write CalendarEvent directly, keyed on a value
+ * that is a User.id on one mcp-server transport and a username on the other.
  */
 
 import type { PrismaClient } from "@prisma/client";
 import { syncCalendarSource } from "./caldav.client.js";
+import {
+  expandIcsEvents,
+  OCCURRENCE_KEY_SEPARATOR,
+  recurrenceWindow,
+} from "./ics-recurrence.js";
 import { encryptSecret, decryptSecret } from "./encryption.service.js";
 // WARP-2022 — the registration-time half of the SSRF guard. The fetch-time
 // half lives in caldav.client.ts; both call the same module so there is one
@@ -21,6 +28,9 @@ import { assertOutboundUrlAllowed } from "../lib/outbound-url-guard.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("calendar");
+
+/** WARP-3193 PERF-10 — changed rows per update transaction in a sync. */
+const SYNC_WRITE_CHUNK = 100;
 
 // ── Local events ──
 
@@ -60,10 +70,31 @@ export async function createEvent(
   });
 }
 
+/** WARP-3265 — date-only view of an all-day event from a subscribed feed.
+ *
+ *  An ICS DATE value (`DTSTART;VALUE=DATE:20260915`) has no time of day; the
+ *  parser stores it as UTC midnight. A client that reads that instant in its
+ *  own zone lands a day early west of UTC, so the API also sends the calendar
+ *  dates themselves: `startDate`/`endDate`, `YYYY-MM-DD`, end EXCLUSIVE.
+ *  Additive: `startsAt`/`endsAt` are unchanged.
+ *
+ *  Null for everything else. A LOCAL all-day event carries whatever instants
+ *  the form sent (the creator's local midnight), so its UTC date is not its
+ *  day and deriving one would be a guess. */
+export function allDayDates(ev: {
+  allDay: boolean;
+  source: string;
+  startsAt: Date;
+  endsAt: Date;
+}): { startDate: string | null; endDate: string | null } {
+  if (!ev.allDay || ev.source !== "external") return { startDate: null, endDate: null };
+  return { startDate: ev.startsAt.toISOString().slice(0, 10), endDate: ev.endsAt.toISOString().slice(0, 10) };
+}
+
 export async function listEvents(
   prisma: PrismaClient,
   userId: string,
-  range: { from?: Date; to?: Date; limit?: number },
+  range: { from?: Date; to?: Date; limit?: number; query?: string },
 ) {
   const limit = Math.max(1, Math.min(500, range.limit ?? 200));
   return prisma.calendarEvent.findMany({
@@ -76,6 +107,17 @@ export async function listEvents(
             // events whose start sits before the window.
             ...(range.from ? { endsAt: { gte: range.from } } : {}),
             ...(range.to ? { startsAt: { lte: range.to } } : {}),
+          }
+        : {}),
+      // WARP-3101 — the search_calendar_events tool: the text, in any case,
+      // in the title, the notes or the place.
+      ...(range.query
+        ? {
+            OR: [
+              { title: { contains: range.query, mode: "insensitive" as const } },
+              { description: { contains: range.query, mode: "insensitive" as const } },
+              { location: { contains: range.query, mode: "insensitive" as const } },
+            ],
           }
         : {}),
     },
@@ -96,8 +138,14 @@ export async function updateEvent(
   if (existing.source !== "local") {
     throw new Error("cannot modify externally-synced event");
   }
-  if (patch.startsAt && patch.endsAt && patch.endsAt.getTime() <= patch.startsAt.getTime()) {
-    throw new Error("endsAt must be after startsAt");
+  // WARP-3101 — the range as it will be AFTER the patch. Checking only when
+  // both ends arrived let a one-sided patch (a later start alone) put the end
+  // before the start. The update_event tool checked this before it moved onto
+  // this route, so the route now does it for the dashboard too.
+  if (patch.startsAt !== undefined || patch.endsAt !== undefined) {
+    const startsAt = patch.startsAt ?? existing.startsAt;
+    const endsAt = patch.endsAt ?? existing.endsAt;
+    if (endsAt.getTime() <= startsAt.getTime()) throw new Error("endsAt must be after startsAt");
   }
   return prisma.calendarEvent.update({
     where: { id },
@@ -220,7 +268,7 @@ export async function deleteSource(
 export async function syncSource(
   prisma: PrismaClient,
   sourceId: string,
-): Promise<{ added: number; updated: number; total: number; error?: string }> {
+): Promise<{ added: number; updated: number; removed?: number; total: number; error?: string }> {
   const source = await prisma.calendarSource.findUnique({ where: { id: sourceId } });
   if (!source) throw new Error("source_not_found");
 
@@ -256,54 +304,166 @@ export async function syncSource(
     return { added: 0, updated: 0, total: 0, error: result.error };
   }
 
-  // Upsert each event keyed on (sourceId, externalUid). The unique index
-  // makes this idempotent — re-sync of the same feed never duplicates.
-  let added = 0;
-  let updated = 0;
+  // WARP-3193 PERF-10 — diff before writing. This used to be one upsert per
+  // event, serially, on feeds up to 50 MB: thousands of round trips per sync,
+  // most of them rewriting rows that had not changed. Now: one read of the
+  // source's rows, one batched insert of the new UIDs, and chunked
+  // transactions for only the rows whose fields actually changed. Still
+  // keyed on (sourceId, externalUid), whose unique index keeps a re-sync
+  // from ever duplicating (skipDuplicates covers a racing manual sync).
+  //
+  // WARP-3266 — recurring series are expanded into one row per occurrence
+  // inside a bounded window; each row's key is stable across syncs (see
+  // ics-recurrence.ts). UID-less events are dropped there (RFC 5545 requires
+  // UID); a repeated UID: the last one wins, as before.
+  const now = new Date();
+  const expanded = await expandIcsEvents(result.events, now);
+  const incoming = new Map<string, (typeof expanded)[number]>();
+  for (const ev of expanded) incoming.set(ev.key, ev);
+  const fields = (ev: (typeof expanded)[number]) => ({
+    title: ev.summary,
+    description: ev.description ?? null,
+    location: ev.location ?? null,
+    startsAt: ev.startsAt,
+    endsAt: ev.endsAt,
+    allDay: ev.allDay,
+    recurrence: ev.recurrence,
+  });
+  const existing = await prisma.calendarEvent.findMany({
+    where: { sourceId: source.id },
+    select: {
+      id: true,
+      externalUid: true,
+      title: true,
+      description: true,
+      location: true,
+      startsAt: true,
+      endsAt: true,
+      allDay: true,
+      recurrence: true,
+    },
+  });
+  const byUid = new Map(existing.map((row) => [row.externalUid, row]));
+
+  // WARP-3266 upgrade path: the row an older build stored for a series (bare
+  // UID, first instance) BECOMES that series' first occurrence, renamed in
+  // place, so CrmActivity / Reminder links to it survive.
+  const adopted = new Set<string>();
   for (const ev of result.events) {
-    if (!ev.uid) continue; // RFC 5545 requires UID; skip malformed
-    try {
-      const upserted = await prisma.calendarEvent.upsert({
-        where: {
-          sourceId_externalUid: { sourceId: source.id, externalUid: ev.uid },
-        },
-        create: {
-          userId: source.userId,
-          title: ev.summary,
-          description: ev.description ?? null,
-          location: ev.location ?? null,
-          startsAt: ev.startsAt,
-          endsAt: ev.endsAt,
-          allDay: ev.allDay,
-          source: "external",
-          sourceId: source.id,
-          externalUid: ev.uid,
-        },
-        update: {
-          title: ev.summary,
-          description: ev.description ?? null,
-          location: ev.location ?? null,
-          startsAt: ev.startsAt,
-          endsAt: ev.endsAt,
-          allDay: ev.allDay,
-        },
-      });
-      // Heuristic: if updatedAt is within 100ms of createdAt, it's a fresh
-      // insert. Cheaper than a separate findUnique per event.
-      if (upserted.updatedAt.getTime() - upserted.createdAt.getTime() < 100) added++;
-      else updated++;
-    } catch (err) {
-      // Keep going on individual failures — one bad event shouldn't sink
-      // the whole sync.
-      logger.warn({ err, uid: ev.uid }, "calendar event upsert failed");
+    if (!ev.uid || !ev.rrule || ev.recurrenceId || incoming.has(ev.uid)) continue;
+    const legacy = byUid.get(ev.uid);
+    const firstKey = `${ev.uid}${OCCURRENCE_KEY_SEPARATOR}${ev.startsAt.toISOString()}`;
+    if (legacy && incoming.has(firstKey) && !byUid.has(firstKey)) {
+      byUid.delete(ev.uid);
+      byUid.set(firstKey, legacy);
+      adopted.add(legacy.id);
     }
   }
 
+  const toCreate: Array<ReturnType<typeof fields> & { uid: string }> = [];
+  const toUpdate: Array<{ id: string; uid: string; data: ReturnType<typeof fields> & { externalUid?: string } }> = [];
+  for (const [uid, ev] of incoming) {
+    const data = fields(ev);
+    const row = byUid.get(uid);
+    if (!row) {
+      toCreate.push({ ...data, uid });
+    } else if (row.externalUid !== uid) {
+      toUpdate.push({ id: row.id, uid, data: { ...data, externalUid: uid } });
+    } else if (
+      row.title !== data.title ||
+      row.description !== data.description ||
+      row.location !== data.location ||
+      row.startsAt.getTime() !== data.startsAt.getTime() ||
+      row.endsAt.getTime() !== data.endsAt.getTime() ||
+      row.allDay !== data.allDay ||
+      row.recurrence !== data.recurrence
+    ) {
+      toUpdate.push({ id: row.id, uid, data });
+    }
+  }
+
+  // Keep going on a failed batch — one bad chunk shouldn't sink the whole
+  // sync (the same posture the per-event upsert had).
+  // One createMany: Prisma splits it into statements under Postgres's bind
+  // parameter limit itself.
+  let added = 0;
+  let notSaved = 0;
+  if (toCreate.length > 0) {
+    try {
+      const res = await prisma.calendarEvent.createMany({
+        data: toCreate.map(({ uid, ...data }) => ({
+          ...data,
+          userId: source.userId,
+          source: "external",
+          sourceId: source.id,
+          externalUid: uid,
+        })),
+        skipDuplicates: true,
+      });
+      added = res.count;
+    } catch (err) {
+      notSaved += toCreate.length;
+      logger.warn({ err, sourceId: source.id, count: toCreate.length }, "calendar event insert failed");
+    }
+  }
+  let updated = 0;
+  for (let i = 0; i < toUpdate.length; i += SYNC_WRITE_CHUNK) {
+    const chunk = toUpdate.slice(i, i + SYNC_WRITE_CHUNK);
+    try {
+      await prisma.$transaction(
+        chunk.map((u) => prisma.calendarEvent.update({ where: { id: u.id }, data: u.data })),
+      );
+      updated += chunk.length;
+    } catch (err) {
+      notSaved += chunk.length;
+      logger.warn({ err, sourceId: source.id, count: chunk.length }, "calendar event update batch failed");
+    }
+  }
+
+  // WARP-3266 — rows an expanded series no longer produces: the pre-expansion
+  // single row keyed on the bare UID, and occurrences that an EXDATE or a
+  // cancelled override has since removed. Only rows of series still in the
+  // feed, and only inside the window: history older than the window, a
+  // series whose occurrences all lie outside it, and events that merely left
+  // the feed are kept (the same posture as before for one-off events).
+  // Every UID in the feed, not only the ones expanded this time: a series
+  // that is now stored `unexpanded` must lose the occurrence rows an earlier
+  // sync made, or they show beside its bare row as duplicates.
+  // Skipped entirely when a write failed: deleting the old rows without their
+  // replacements would lose events silently.
+  let removed = 0;
+  if (notSaved === 0) {
+    const feedUids = new Set(result.events.map((e) => e.uid).filter(Boolean));
+    const win = recurrenceWindow(now);
+    const staleIds = existing
+      .filter((row) => {
+        const key = row.externalUid;
+        if (!key || incoming.has(key) || adopted.has(row.id)) return false;
+        if (!(row.endsAt > win.start && row.startsAt < win.end)) return false;
+        if (feedUids.has(key)) return true; // bare row a series no longer produces
+        const sep = key.lastIndexOf(OCCURRENCE_KEY_SEPARATOR);
+        return sep > 0 && feedUids.has(key.slice(0, sep));
+      })
+      .map((row) => row.id);
+    for (let i = 0; i < staleIds.length; i += SYNC_WRITE_CHUNK) {
+      const chunk = staleIds.slice(i, i + SYNC_WRITE_CHUNK);
+      try {
+        const res = await prisma.calendarEvent.deleteMany({
+          where: { id: { in: chunk }, sourceId: source.id },
+        });
+        removed += res.count;
+      } catch (err) {
+        logger.warn({ err, sourceId: source.id, count: chunk.length }, "calendar stale occurrence delete failed");
+      }
+    }
+  }
+
+  const error = notSaved > 0 ? `write: ${notSaved} event(s) not saved; will retry` : undefined;
   await prisma.calendarSource.update({
     where: { id: source.id },
-    data: { lastSyncAt: new Date(), lastSyncError: null },
+    data: { lastSyncAt: new Date(), lastSyncError: error ?? null },
   });
-  return { added, updated, total: result.events.length };
+  return { added, updated, removed, total: incoming.size, ...(error ? { error } : {}) };
 }
 
 /** Find sources whose syncIntervalSec has elapsed since lastSyncAt. Used by

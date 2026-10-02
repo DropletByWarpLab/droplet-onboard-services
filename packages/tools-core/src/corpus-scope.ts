@@ -77,6 +77,15 @@ export interface CorpusCaller {
  * `checkSpaceAccess` takes. Everyone else sees only the ones they are a member
  * of, and only while the department is active.
  *
+ * An external guest (role `guest`) never sees the company Workspace (the
+ * `HOUSEHOLD` department) here, whatever membership row they carry
+ * (WARP-3425). Romain, 2026-09-30: an external guest gets nothing company-wide
+ * unless it is explicitly shared with them, and the Workspace membership a
+ * guest holds is a role-driven `reader` row the seed hands every person, not a
+ * share. A department an owner or admin explicitly added the guest to still
+ * counts. This is narrower than the Files page, which still lets a guest
+ * browse the Workspace read-only (WARP-3179); narrower can only hide.
+ *
  * THROWS on a database failure rather than returning an empty list, because
  * the two callers want different things from that case and neither should have
  * the choice made for it here: the Files route degrades to personal-only with
@@ -100,7 +109,8 @@ export async function visibleDepartmentsFor(
     where: { userId: caller.id, department: { state: "active" } },
     select: { department: { select: { id: true, kind: true, aclVersion: true } } },
   });
-  return memberships.map((m) => m.department);
+  const depts = memberships.map((m) => m.department);
+  return caller.role === "guest" ? depts.filter((d) => d.kind !== "HOUSEHOLD") : depts;
 }
 
 /**

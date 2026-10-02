@@ -4,6 +4,7 @@ import { PrismaClient } from "@prisma/client";
 import { cacheDel } from "./cache.service.js";
 import { publish } from "./mqtt.service.js";
 import { boxDisplayName } from "../lib/box-identity.js";
+import type { CronRuntime } from "./cron-runtime.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("device-registration");
@@ -12,7 +13,6 @@ const REFRESH_INTERVAL_MS = 30_000; // 30 seconds
 const CACHE_KEY = "devices:list";
 
 let prisma: PrismaClient;
-let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
  * Detect the primary non-internal IPv4 address.
@@ -97,10 +97,13 @@ async function refreshDeviceState(): Promise<void> {
 
 /**
  * Start periodic device self-registration.
- * Runs immediately, then every REFRESH_INTERVAL_MS.
+ * Runs immediately (awaited, so boot sees the row), then every
+ * REFRESH_INTERVAL_MS on `cron` (WARP-3193 QUAL-7: index.ts main();
+ * `cron.stop()` tears the schedule down at shutdown).
  */
 export async function initDeviceRegistration(
-  prismaClient: PrismaClient
+  prismaClient: PrismaClient,
+  cron: Pick<CronRuntime, "scheduleInterval">,
 ): Promise<void> {
   prisma = prismaClient;
 
@@ -108,19 +111,9 @@ export async function initDeviceRegistration(
   await refreshDeviceState();
 
   // Then refresh periodically to track network changes
-  refreshTimer = setInterval(refreshDeviceState, REFRESH_INTERVAL_MS);
+  cron.scheduleInterval(REFRESH_INTERVAL_MS, refreshDeviceState);
   logger.info(
     "Device self-registration started (every %ds)",
     REFRESH_INTERVAL_MS / 1000
   );
-}
-
-/**
- * Stop the periodic refresh (for graceful shutdown).
- */
-export function shutdownDeviceRegistration(): void {
-  if (refreshTimer) {
-    clearInterval(refreshTimer);
-    refreshTimer = null;
-  }
 }

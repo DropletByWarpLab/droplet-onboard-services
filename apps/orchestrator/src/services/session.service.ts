@@ -39,7 +39,11 @@
 import { randomUUID } from "node:crypto";
 import { config } from "../config.js";
 import { getRedis } from "./cache.service.js";
-import { revokeUserSessions, type Role } from "./jwt.service.js";
+import {
+  revokeUserSessions,
+  revocationUnavailable,
+  type Role,
+} from "./jwt.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -171,7 +175,9 @@ export async function createSession(user: {
     const redis = getRedis();
     await redis.set(SESSION_KEY_PREFIX + sid, JSON.stringify(record), "EX", gcTtl);
     await redis.zadd(idxKey, now, sid);
-    // GT: only ever extend the index TTL (mirrors cacheSetAdd's posture).
+    // NX stamps the first TTL, GT only ever extends it (mirrors cacheSetAdd;
+    // WARP-3193 PERF-12: GT alone is a no-op on a key with no TTL).
+    await redis.expire(idxKey, gcTtl, "NX");
     await redis.expire(idxKey, gcTtl, "GT");
 
     // Concurrent cap: walk oldest-first, GC index members whose record
@@ -306,6 +312,43 @@ export async function checkSession(
   return { kind: "ok", record };
 }
 
+/**
+ * WARP-2981 (ADR-059 §6.2, D22) — the latest this sign-in can last: the
+ * record's createdAt + the ABSOLUTE limit for the role it was minted with, the
+ * same arithmetic checkSession enforces. It can end sooner (idle expiry, the
+ * concurrent-session cap's eviction, revocation), so a client shows it as a
+ * latest time. The idle deadline is deliberately not offered: every
+ * authenticated request but /auth/refresh slides it, so it would say nothing
+ * useful.
+ *
+ * One Redis GET and nothing else. It never slides lastSeenAt, never destroys
+ * or audits an expired record (enforcement is checkSession's, on the same
+ * request, in authMiddleware), and never throws: a missing record, a record
+ * that does not parse or has no usable createdAt, and a Redis error all
+ * answer null — "cannot tell", which a caller shows as nothing.
+ */
+export async function readSessionDeadline(sid: string): Promise<{ endsAt: Date } | null> {
+  let raw: string | null;
+  try {
+    raw = await getRedis().get(SESSION_KEY_PREFIX + sid);
+  } catch (err) {
+    // authMiddleware's checkSession already logged this outage for the request.
+    logger.debug({ err, sid }, "session deadline read failed — answering null");
+    return null;
+  }
+  if (!raw) return null;
+  let record: Partial<SessionRecord>;
+  try {
+    record = JSON.parse(raw) as Partial<SessionRecord>;
+  } catch {
+    return null;
+  }
+  if (typeof record !== "object" || record === null) return null;
+  const { createdAt, role } = record;
+  if (typeof createdAt !== "number" || !Number.isFinite(createdAt)) return null;
+  return { endsAt: new Date((createdAt + absoluteLimitSecondsForRole(role as Role)) * 1000) };
+}
+
 /** Logout: drop this device's record so the remaining ≤15-min access token
  *  dies at the next middleware check, not just at refresh. */
 export async function deleteSession(userId: string, sid: string): Promise<void> {
@@ -409,6 +452,11 @@ export async function revokeAllSessions(
   opts: { exceptSid?: string } = {},
 ): Promise<number> {
   let revoked = 0;
+  // WARP-3193 QUAL-1: a sweep Redis refused is a FAILED revocation, not a
+  // smaller count — both halves still run (defense in depth), then the
+  // failure is thrown as revocationUnavailable() (503) so no caller reports
+  // sessions revoked that are still alive.
+  let failed = false;
   try {
     const redis = getRedis();
     const idxKey = SESSION_INDEX_PREFIX + userId;
@@ -420,6 +468,7 @@ export async function revokeAllSessions(
       if (removed > 0) revoked += 1;
     }
   } catch (err) {
+    failed = true;
     logger.warn(
       { err, userId },
       "session record sweep failed — refresh denylist below still applies",
@@ -429,8 +478,10 @@ export async function revokeAllSessions(
     try {
       await revokeUserSessions(userId);
     } catch (err) {
-      logger.warn({ err, userId }, "refresh-token denylist sweep failed (non-fatal)");
+      failed = true;
+      logger.warn({ err, userId }, "refresh-token denylist sweep failed");
     }
   }
+  if (failed) throw revocationUnavailable();
   return revoked;
 }

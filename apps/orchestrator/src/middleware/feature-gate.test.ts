@@ -25,9 +25,16 @@ vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: recordActivityMock,
 }));
 
-import { requireFeatureAccess, resolveEffectiveAccessForRequest } from "./feature-gate.js";
+import {
+  FEATURE_GATE_META,
+  readFeatureGateMeta,
+  requireFeatureAccess,
+  resolveEffectiveAccessForRequest,
+} from "./feature-gate.js";
+import { requireRole } from "./auth.js";
 import type { AuthUser } from "./auth.js";
-import type { EffectiveAccessResult } from "../services/effective-access.service.js";
+import { computeEffectiveAccess, type EffectiveAccessResult } from "../services/effective-access.service.js";
+import { GATEABLE_MODULE_IDS } from "../services/access-catalog.js";
 
 type Principal = AuthUser | null;
 
@@ -226,5 +233,114 @@ describe("requireFeatureAccess — failure posture + cost", () => {
     expect(await resolveEffectiveAccessForRequest(req, resolve)).toBeNull();
     expect(await resolveEffectiveAccessForRequest({} as Request, resolve)).toBeNull();
     expect(resolve).not.toHaveBeenCalled();
+  });
+});
+
+// WARP-2977 P2b — the Security level invariant walks router stacks and asks
+// each mounted handler what it enforces. The marker must say exactly what the
+// gate checks, stay invisible to everything else, and change nothing about
+// how the gate behaves.
+describe("requireFeatureAccess — the meta marker (WARP-2977 P2b)", () => {
+  it("carries exactly {moduleId, level} for every level", () => {
+    expect(readFeatureGateMeta(requireFeatureAccess("security", "act"))).toEqual({ moduleId: "security", level: "act" });
+    expect(readFeatureGateMeta(requireFeatureAccess("security", "manage"))).toEqual({
+      moduleId: "security",
+      level: "manage",
+    });
+    expect(readFeatureGateMeta(requireFeatureAccess("cameras", "view"))).toEqual({ moduleId: "cameras", level: "view" });
+  });
+
+  it("defaults to view, the level the gate itself defaults to", () => {
+    expect(readFeatureGateMeta(requireFeatureAccess("security"))).toEqual({ moduleId: "security", level: "view" });
+  });
+
+  it("is null for anything that is not a feature gate", () => {
+    expect(readFeatureGateMeta(requireRole("owner"))).toBeNull();
+    expect(readFeatureGateMeta(() => undefined)).toBeNull();
+    expect(readFeatureGateMeta(undefined)).toBeNull();
+    expect(readFeatureGateMeta({ [FEATURE_GATE_META]: { moduleId: "security", level: "act" } })).toBeNull();
+  });
+
+  it("is non-enumerable, frozen and not writable", () => {
+    const gate = requireFeatureAccess("security", "act");
+    const descriptor = Object.getOwnPropertyDescriptor(gate, FEATURE_GATE_META);
+    expect(descriptor).toMatchObject({ enumerable: false, writable: false, configurable: false });
+    // An object spread copies enumerable symbol keys too — the marker must not travel.
+    expect(Object.getOwnPropertySymbols({ ...gate })).not.toContain(FEATURE_GATE_META);
+    const meta = readFeatureGateMeta(gate)!;
+    expect(Object.isFrozen(meta)).toBe(true);
+    expect(() => {
+      (gate as unknown as Record<symbol, unknown>)[FEATURE_GATE_META] = { moduleId: "security", level: "view" };
+    }).toThrow();
+    expect(readFeatureGateMeta(gate)).toEqual({ moduleId: "security", level: "act" });
+  });
+
+  it("a marked gate still enforces its level (behaviour unchanged)", async () => {
+    const resolve = vi.fn(async () => result([{ moduleId: "cameras", level: "view" }]));
+    const gate = requireFeatureAccess("cameras", "act", resolve);
+    expect(readFeatureGateMeta(gate)?.level).toBe("act");
+    const res = await request(appWith(STAFF, resolve, [gate])).get("/api/cameras");
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "module_disabled", module: "cameras" });
+    expect(resolve).toHaveBeenCalledWith("u-staff");
+  });
+});
+
+// ADR-059 — the Security view gate over a REAL resolved answer (not a stubbed
+// one): `view` is floored at family and is a refusal, so a guest never reaches
+// the routes' own 403, while the D6 wall account (a Staff role at Security View)
+// still gets the reads and is refused the acts.
+describe("requireFeatureAccess — Security's family floor on a resolved answer (ADR-059)", () => {
+  function resolved(role: AuthUser["role"], grants: Array<{ moduleId: "security" | "cameras"; level: "view" | "act" | "manage" }> | null) {
+    const access = computeEffectiveAccess({
+      user: {
+        id: "u-1",
+        role,
+        accessRole:
+          grants === null
+            ? null
+            : {
+                mayOperateLocks: false,
+                cloudModelsAllowed: false,
+                storageQuotaBytes: null,
+                maxUploadSizeMb: null,
+                llmDailyMessageCap: null,
+                featureGrants: grants,
+                toolGrants: [],
+                connectorGrants: [],
+              },
+      },
+      exceptions: [],
+      workspaceModuleIds: new Set(["chat", ...GATEABLE_MODULE_IDS]),
+      cloudEscapeEnabled: false,
+      connections: [],
+      usagePolicy: null,
+      deptRights: [],
+    });
+    return vi.fn(async () => access);
+  }
+  const statusAt = async (role: AuthUser["role"], grants: Parameters<typeof resolved>[1], level: "view" | "act" | "manage") => {
+    const resolve = resolved(role, grants);
+    const res = await request(appWith(principal("u-1", "x", role), resolve, [requireFeatureAccess("security", level, resolve)])).get("/api/cameras");
+    return res.status;
+  };
+
+  it("a guest is refused at the view gate, with or without a stored security:view", async () => {
+    expect(await statusAt("guest", null, "view")).toBe(404);
+    expect(await statusAt("guest", [{ moduleId: "security", level: "view" }], "view")).toBe(404);
+  });
+
+  it("the D6 wall account (Staff role at Security View) passes view and is refused act and manage", async () => {
+    const wall = [{ moduleId: "security" as const, level: "view" as const }, { moduleId: "cameras" as const, level: "view" as const }];
+    expect(await statusAt("family", wall, "view")).toBe(200);
+    expect(await statusAt("family", wall, "act")).toBe(404);
+    expect(await statusAt("family", wall, "manage")).toBe(404);
+  });
+
+  it("family, admin and owner keep what their tier held: family act, admin and owner manage", async () => {
+    expect(await statusAt("family", null, "act")).toBe(200);
+    expect(await statusAt("family", null, "manage")).toBe(404);
+    expect(await statusAt("admin", null, "manage")).toBe(200);
+    expect(await statusAt("owner", null, "manage")).toBe(200);
   });
 });

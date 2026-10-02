@@ -81,6 +81,8 @@ import { sweepUsagePolicies } from "./usage-policy-reconciler.service.js";
 // source in the role-mutation guard (no inlined {owner, admin} copies).
 import { ADMIN_TIER_ROLES } from "./role-mutation-guard.service.js";
 import { createLogger } from "../lib/logger.js";
+import { config } from "../config.js";
+import { householdGroupName } from "../routes/auth-groups.js";
 
 const logger = createLogger("department-reconciler");
 
@@ -209,6 +211,9 @@ export interface ReconcileResult {
   // pr-reviewer #1229 N1: DEACTIVATED rows re-asserted against Nextcloud.
   ncDisableMirrored: number;
   ncDisableMirrorFailed: number;
+  // WARP-2993: humans stripped from Nextcloud's built-in `admin` group.
+  ncInstanceAdminRemoved: number;
+  ncInstanceAdminFailed: number;
 }
 
 /**
@@ -382,11 +387,132 @@ async function removeDriftedGroupMembers(
  * this is a clean no-op, not a failure.
  */
 async function reconcileActiveHousehold(
+  prisma: PrismaClient,
   adminToken: string,
   folderId: number | null,
 ): Promise<void> {
   if (folderId === null) return;
   await ensureAdminsAttached(adminToken, folderId);
+  await ensureWorkspaceMasks(adminToken, folderId);
+  await sweepWorkspaceGroupMembership(prisma, adminToken);
+}
+
+/**
+ * WARP-3179: external guests reach the Workspace through Nextcloud's `guest`
+ * group, read-only, never through the Workspace group. The box grants a guest
+ * the Workspace as `reader` (household-seed roleToRight) and refuses them any
+ * write (middleware/space.ts), so Nextcloud must hold exactly that.
+ */
+export const WORKSPACE_GUEST_GROUP = "guest";
+
+/**
+ * The Workspace groupfolder's group masks, and why each one:
+ *   - Workspace group (members, owners, admins): MASK_RW, share bit withheld
+ *     (WARP-3168 ruling, Romain 2026-09-25). Every member already sees the
+ *     whole Workspace, so a member share adds nothing, and Nextcloud can't
+ *     withhold only link shares on one folder. The box refuses the same
+ *     (share-policy isWorkspacePath). Same mask as a department's rw group.
+ *   - `guest`: MASK_RO (WARP-3179, see WORKSPACE_GUEST_GROUP).
+ *   - `droplet-admins` at MASK_ADMIN: owners/admins keep sharing
+ *     (ensureAdminsAttached).
+ *   - `admin` (the Nextcloud service account only, sweepNcInstanceAdminGroup)
+ *     at MASK_ADMIN: the box mints `space=shared` shares with that credential.
+ */
+export function workspaceMasks(): Record<string, number> {
+  return {
+    [householdGroupName(config.DROPLET_SHARED_FOLDER_NAME)]: MASK_RW,
+    [WORKSPACE_GUEST_GROUP]: MASK_RO,
+    [NC_INSTANCE_ADMIN_GROUP]: MASK_ADMIN,
+  };
+}
+
+/** Read-first, like ensureAdminsAttached: write only what differs. */
+async function ensureWorkspaceMasks(adminToken: string, folderId: number): Promise<void> {
+  const folder = await gfGetFolder(adminToken, folderId);
+  if (!folder) {
+    logger.warn({ folderId }, "workspace masks: could not read the Workspace folder (next tick retries)");
+    return;
+  }
+  for (const [group, mask] of Object.entries(workspaceMasks())) {
+    const current = folder.groups[group];
+    if (current === mask) continue;
+    if (current === undefined) {
+      await ncEnsureGroup(group);
+      await gfAddGroup(adminToken, folderId, group, { confirmOnFailure: true });
+    }
+    await gfSetGroupPermissions(adminToken, folderId, group, mask, { confirmOnFailure: true });
+    await recordActivity({
+      kind: "system",
+      severity: "info",
+      sourceIcon: "shield-alert",
+      what: "Set Workspace folder permissions (WARP-3168/3179)",
+      sub: `${group} · ${current ?? "none"} → ${mask}`,
+      refs: { folderId, group, from: current ?? null, to: mask },
+      actor: { type: "system" },
+    });
+  }
+}
+
+/**
+ * WARP-3179: guests belong to `guest`, never to the Workspace group (whose
+ * write mask would union over their read-only one); every other active person
+ * belongs to the Workspace group and not to `guest`. Converges existing boxes,
+ * where buildNcGroups used to put guests in the Workspace group, and role
+ * changes in either direction. A listing failure skips the tick; one failed
+ * move never stops the rest.
+ */
+async function sweepWorkspaceGroupMembership(prisma: PrismaClient, adminToken: string): Promise<void> {
+  const household = householdGroupName(config.DROPLET_SHARED_FOLDER_NAME);
+  let inHousehold: Set<string>;
+  let inGuest: Set<string>;
+  try {
+    const [h, g] = await Promise.all([
+      ncListGroupMembersStrict(adminToken, household),
+      ncListGroupMembersStrict(adminToken, WORKSPACE_GUEST_GROUP),
+    ]);
+    inHousehold = new Set(h.map((m) => m.id.toLowerCase()));
+    inGuest = new Set(g.map((m) => m.id.toLowerCase()));
+  } catch (err) {
+    logger.error({ err }, "workspace membership sweep: listing failed (next tick retries)");
+    return;
+  }
+
+  const users = await prisma.user.findMany({
+    where: { directoryStatus: "ACTIVE", nextcloudUsername: { not: null } },
+    select: { nextcloudUsername: true, role: true },
+  });
+  for (const u of users) {
+    if (u.role === "service" || !u.nextcloudUsername) continue;
+    const uid = u.nextcloudUsername;
+    const key = uid.toLowerCase();
+    const isGuest = u.role === "guest";
+    const moves: Array<[string, "add" | "remove"]> = [];
+    if (isGuest && inHousehold.has(key)) moves.push([household, "remove"]);
+    if (isGuest && !inGuest.has(key)) moves.push([WORKSPACE_GUEST_GROUP, "add"]);
+    if (!isGuest && !inHousehold.has(key)) moves.push([household, "add"]);
+    if (!isGuest && inGuest.has(key)) moves.push([WORKSPACE_GUEST_GROUP, "remove"]);
+    for (const [group, op] of moves) {
+      try {
+        if (op === "add") {
+          await ncEnsureGroup(group);
+          await ncAddUserToGroup(adminToken, uid, group);
+        } else {
+          await ncRemoveUserFromGroup(adminToken, uid, group);
+        }
+        await recordActivity({
+          kind: "system",
+          severity: op === "remove" ? "warn" : "info",
+          sourceIcon: "shield-alert",
+          what: `${op === "add" ? "Added" : "Removed"} Workspace group member (role is truth)`,
+          sub: `${uid} · ${group}`,
+          refs: { ncUsername: uid, group, role: u.role },
+          actor: { type: "system" },
+        });
+      } catch (err) {
+        logger.error({ err, ncUsername: uid, group, op }, "workspace membership sweep: move failed (next tick retries)");
+      }
+    }
+  }
 }
 
 interface DepartmentSweepRow {
@@ -627,7 +753,7 @@ async function sweepDepartments(
   for (const row of activeRows) {
     try {
       if (row.kind === "HOUSEHOLD") {
-        await reconcileActiveHousehold(adminToken, row.ncGroupfolderId);
+        await reconcileActiveHousehold(prisma, adminToken, row.ncGroupfolderId);
       } else {
         const result = await reconcileActiveDepartment(prisma, row.id);
         if (!result.active) {
@@ -1013,6 +1139,81 @@ async function sweepAdminGroupMembership(
   return { added, removed, failed };
 }
 
+/** Nextcloud's built-in instance-administrator group. */
+export const NC_INSTANCE_ADMIN_GROUP = "admin";
+
+/**
+ * WARP-2993 — only the box service account is a Nextcloud instance admin.
+ *
+ * Romain, 2026-09-22: no human holds NC instance admin, the owner included.
+ * Until then `buildNcGroups` put every owner/admin in NC's built-in `admin`
+ * group, so any Droplet admin could reset the owner's NC password in
+ * Nextcloud and read the owner's NC home, or administer the instance. New
+ * accounts no longer join it; this sweep converges existing boxes and heals
+ * any later out-of-band add from NC's own UI.
+ *
+ * Stateless and idempotent, same shape as sweepAdminGroupMembership: list
+ * (strict — an outage skips the tick instead of reading as "empty"), remove
+ * every member that is not NEXTCLOUD_ADMIN_USER, audit each removal. Once
+ * converged it lists one member and does nothing.
+ *
+ * Never strands the instance: if the service account is NOT among the
+ * listed members, nothing is removed and the tick logs an error. Removing
+ * humans then could leave the group with no working admin credential at
+ * all — an operator has to fix the service account first.
+ */
+async function sweepNcInstanceAdminGroup(
+  adminToken: string,
+): Promise<{ removed: number; failed: number }> {
+  let removed = 0;
+  let failed = 0;
+
+  let members: { id: string }[];
+  try {
+    members = await ncListGroupMembersStrict(adminToken, NC_INSTANCE_ADMIN_GROUP);
+  } catch (err) {
+    logger.error(
+      { err },
+      "nc-instance-admin sweep: listing the NC admin group failed (non-fatal; next tick retries)",
+    );
+    return { removed, failed };
+  }
+
+  const serviceAccount = (process.env.NEXTCLOUD_ADMIN_USER || "admin").toLowerCase();
+  if (!members.some((m) => m.id.toLowerCase() === serviceAccount)) {
+    logger.error(
+      { memberCount: members.length },
+      "nc-instance-admin sweep: the service account is not in the NC admin group — refusing to remove anyone (would strand the instance)",
+    );
+    return { removed, failed };
+  }
+
+  for (const member of members) {
+    if (member.id.toLowerCase() === serviceAccount) continue;
+    try {
+      await ncRemoveUserFromGroup(adminToken, member.id, NC_INSTANCE_ADMIN_GROUP);
+      removed += 1;
+      await recordActivity({
+        kind: "system",
+        severity: "warn",
+        sourceIcon: "shield-alert",
+        what: "Removed a person from Nextcloud instance admin (only the box service account holds it)",
+        sub: `${member.id} · ${NC_INSTANCE_ADMIN_GROUP}`,
+        refs: { ncUsername: member.id, group: NC_INSTANCE_ADMIN_GROUP },
+        actor: { type: "system" },
+      });
+    } catch (err) {
+      failed += 1;
+      logger.error(
+        { err, ncUsername: member.id },
+        "nc-instance-admin sweep: removing a member failed (next tick retries)",
+      );
+    }
+  }
+
+  return { removed, failed };
+}
+
 /**
  * WARP-1526 (pr-reviewer #1229 N1) — directoryStatus → Nextcloud enable
  * mirror.
@@ -1084,6 +1285,7 @@ export async function reconcileDepartments(
   const usageResult = await sweepUsagePolicies(prisma, adminToken);
   const adminGroupResult = await sweepAdminGroupMembership(prisma, adminToken);
   const statusMirrorResult = await sweepDirectoryStatusMirror(prisma, adminToken);
+  const instanceAdminResult = await sweepNcInstanceAdminGroup(adminToken);
 
   const result: ReconcileResult = {
     departmentsSwept: deptResult.swept,
@@ -1106,6 +1308,8 @@ export async function reconcileDepartments(
     adminGroupFailed: adminGroupResult.failed,
     ncDisableMirrored: statusMirrorResult.disabledMirrored,
     ncDisableMirrorFailed: statusMirrorResult.failed,
+    ncInstanceAdminRemoved: instanceAdminResult.removed,
+    ncInstanceAdminFailed: instanceAdminResult.failed,
   };
 
   // WARP-1557: the tick summary used to be debug-only, which is why the .87

@@ -31,6 +31,10 @@ const OFF_LAN_CHANNEL_KEYS = [
   "web_fetch",
   // WARP-1436 — Weather & currency data (Open-Meteo, European Central Bank).
   "ambient_data",
+  // WARP-2904 — Web Push (Google / Apple / Mozilla push services).
+  "web_push",
+  // WARP-3264 — calendar place suggestions (OpenStreetMap Nominatim).
+  "place_lookup",
 ] as const;
 type ChannelKey = (typeof OFF_LAN_CHANNEL_KEYS)[number];
 const channelKeyEnum = z.enum(OFF_LAN_CHANNEL_KEYS);
@@ -104,9 +108,16 @@ export function createOffLanNetworkRouter(prisma: PrismaClient): Router {
           where.channel = q.data.channel;
         }
 
-        const rows = await prisma.offLanEgressSample.findMany({
+        // WARP-3193 PERF-6: roll up on the database. Loading every sample
+        // row (~260k for a month, ~780k for the 90-day retention window)
+        // to sum in Node was the whole cost of this endpoint. The
+        // no-channel range is served by the (ts, channel) primary key;
+        // the ?channel= form by (channel, ts).
+        const groups = await prisma.offLanEgressSample.groupBy({
+          by: ["channel"],
           where: where as any,
-          orderBy: { ts: "asc" },
+          _sum: { bytes: true },
+          _count: { _all: true },
         });
 
         // Roll up bytes per channel. Initialize every channel to 0 so
@@ -119,9 +130,13 @@ export function createOffLanNetworkRouter(prisma: PrismaClient): Router {
           telemetry: 0n,
           web_fetch: 0n,
           ambient_data: 0n,
+          web_push: 0n,
+          place_lookup: 0n,
         };
-        for (const r of rows as Array<{ channel: ChannelKey; bytes: bigint }>) {
-          totals[r.channel] += r.bytes;
+        let sampleCount = 0;
+        for (const g of groups) {
+          totals[g.channel as ChannelKey] += g._sum.bytes ?? 0n;
+          sampleCount += g._count._all;
         }
 
         res.json({
@@ -130,7 +145,7 @@ export function createOffLanNetworkRouter(prisma: PrismaClient): Router {
           totalsByChannel: Object.fromEntries(
             Object.entries(totals).map(([k, v]) => [k, fromBigInt(v)]),
           ),
-          sampleCount: rows.length,
+          sampleCount,
         });
       } catch (err) {
         next(err);

@@ -366,7 +366,7 @@ _WAN_NETWORKS = frozenset(
 #: would be false at exactly the moment the user is relying on it.
 _WAN_REASON = (
     "This is the jack your internet comes in on. Turning it off takes everyone "
-    "in the home offline, and it will stay off until you turn it back on — "
+    "on the network offline, and it will stay off until you turn it back on — "
     "nothing puts it back for you."
 )
 

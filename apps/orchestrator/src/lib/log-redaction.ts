@@ -63,28 +63,76 @@ const SENSITIVE_KEY_WORD = `[A-Za-z0-9_.-]*(?:${SENSITIVE_WORDS})[A-Za-z0-9_.-]*
  */
 const SAFE_KEY_RE = /(?:PUBLIC[_-]?KEY|KEY[_-]?ID|KEYID|_PUBKEY)$/i;
 
+/** WARP-3282 — the marker that replaces a credential in a TOOL RESULT on its
+ *  way into the model context. Worded for a reader (the model relays it), not
+ *  for an operator grepping a log bundle. */
+export const CREDENTIAL_PLACEHOLDER = "[credential redacted]";
+
 /**
- * Ordered list of (pattern → replacement) rules. Each replacement keeps the
- * non-secret prefix it captured (`$1`) and substitutes the placeholder for the
- * secret value. Order matters: the multi-line PEM rule runs first so a key
- * body can't be partially matched by a later single-line rule.
+ * WARP-3282 — the ONE list of credential VALUE SHAPES, shared by the log-bundle
+ * scrub ({@link redactSecrets}, which runs it first, then its own log-only
+ * rules) and the tool-result scrub ({@link redactCredentials}, which runs only
+ * this list).
+ *
+ * Why the tool-result scrub cannot reuse the whole log list: the log rules are
+ * keyed on NAMES (`sensitive-assignment` redacts the value of anything named
+ * `*KEY*`, `*TOKEN*`, `*AUTH*` — `Author: Jane`, `Key: Q3 figures`, a share
+ * link's `token=`), and the bare-bearer rule takes any 8 chars after "Bearer".
+ * That over-redaction is right for a bundle leaving the box and wrong for a
+ * business document the assistant must still be able to read. So every rule
+ * HERE must match a value that is a credential by its own shape, or sits in a
+ * config-shaped assignment (`UPPER_SNAKE_SECRET=`, `password=`), and must leave
+ * prose, file paths, UUIDs and hex hashes alone (pinned by the negatives in
+ * `credential-redaction.test.ts`).
+ *
+ * Each rule takes the placeholder so the two callers keep their own marker.
+ * Values starting with `[` are never matched, so both scrubs are idempotent
+ * over their own (and each other's) placeholder.
  */
-interface RedactionRule {
+interface ShapeRule {
   readonly name: string;
   readonly pattern: RegExp;
-  readonly replace: (substring: string, ...groups: string[]) => string;
+  readonly replace: (placeholder: string, match: string, ...groups: string[]) => string;
 }
 
-const RULES: readonly RedactionRule[] = [
+const whole = (placeholder: string) => placeholder;
+const keepPrefix = (placeholder: string, _m: string, pre: string) => `${pre}${placeholder}`;
+
+/** WARP-3282 — the secret-naming words of a config-shaped name. Shared by the
+ *  text rule ({@link CREDENTIAL_SHAPE_RULES} `env-secret-assignment`) and the
+ *  field-name test ({@link CREDENTIAL_FIELD_RE}) so the two cannot drift. */
+const CONFIG_SECRET_NAME =
+  "(?:[A-Z][A-Z0-9]*_)*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|SECRET_KEY|PRIVATE_KEY)" +
+  "|(?:[a-z][a-z0-9]*_)+(?:secret|token|password|passwd|api_?key|access_key|secret_key|private_key)" +
+  "|(?:api|secret|access|private)_key|client_secret";
+
+/** A quoted value's quotes survive redaction, so a redacted JSON/YAML/shell
+ *  string is still a string. */
+const requote = (placeholder: string, value: string): string => {
+  const q = value[0];
+  return q === '"' || q === "'" || q === "`" ? `${q}${placeholder}${q}` : placeholder;
+};
+
+const CREDENTIAL_SHAPE_RULES: readonly ShapeRule[] = [
   {
     // PEM blocks: -----BEGIN [X] PRIVATE KEY----- ... -----END [X] PRIVATE KEY-----
     // Collapse the whole block (delimiters + body) to a single placeholder so no
-    // base64 key material survives. `[\s\S]` so it spans newlines without the
-    // `s` flag (kept off to stay explicit).
+    // base64 key material survives. Runs first so a key body can't be partially
+    // matched by a later single-line rule.
     name: "pem-private-key",
     pattern:
       /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g,
-    replace: () => `${REDACTION_PLACEHOLDER} (private key)`,
+    replace: (placeholder) => `${placeholder} (private key)`,
+  },
+  {
+    // A PEM block with no END line: search snippets are cut at 280 chars and
+    // read_file pages at 10 000, so a key block is routinely truncated. Fail
+    // closed — everything from the BEGIN line to the end of the string goes.
+    // Tool results are redacted per JSON string leaf ({@link redactToolResult}),
+    // so "the end" is the end of THAT snippet, never a sibling field.
+    name: "pem-private-key-truncated",
+    pattern: /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*$/g,
+    replace: (placeholder) => `${placeholder} (private key)`,
   },
   {
     // Credentials embedded in a URI userinfo: scheme://user:SECRET@host
@@ -93,12 +141,113 @@ const RULES: readonly RedactionRule[] = [
     // (not `+`) so empty-username forms — `redis://:pw@host`, the exact shape
     // secrets.sh generates for REDIS_URL, and `postgresql://:pw@db/...` — are
     // also redacted. The trailing `@` anchor still prevents matching a plain
-    // `host:port` with no userinfo.
+    // `host:port` with no userinfo. The scheme is bounded to 32 chars:
+    // unbounded, every letter of a long alphanumeric run started a scan to
+    // its end (quadratic — ~20 s over a 200k base64 blob). Neither class
+    // crosses `"` or `\`, so in compact JSON
+    // `"see http://host:8080","from":"bob@x.io"` cannot match across the
+    // field boundary and eat `from`.
     name: "uri-userinfo",
-    pattern: /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s:/@]*:)([^\s@/]+)(@)/g,
-    replace: (_m, pre: string, _secret: string, at: string) =>
-      `${pre}${REDACTION_PLACEHOLDER}${at}`,
+    pattern: /([a-zA-Z][a-zA-Z0-9+.-]{0,31}:\/\/[^\s:/@"\\]*:)([^\s@/"\\]+)(@)/g,
+    replace: (placeholder, _m, pre: string, _secret: string, at: string) =>
+      `${pre}${placeholder}${at}`,
   },
+  {
+    // AWS access key id (long-term AKIA, temporary ASIA): fixed 20-char shape.
+    name: "aws-access-key-id",
+    pattern: /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
+    replace: whole,
+  },
+  {
+    // A config-shaped assignment of a secret: `AWS_SECRET_ACCESS_KEY=…`,
+    // `DB_PASSWORD: …` (YAML), `db_password=…`, `"STRIPE_API_KEY": "…"`, the
+    // lowercase keys of ~/.aws/credentials. The name must be UPPER_SNAKE or
+    // snake_case ending in a secret word; camelCase JSON keys
+    // (`confirmationToken`, `shareToken`) and a bare lowercase `token=` (a
+    // share link) never match. `=` takes any 6+ char value; `:` only when
+    // the name has an underscore, so a `TOP SECRET: launch plan` heading is
+    // prose. The value may be "…", '…' or `…` quoted; its class stops at a
+    // quote or `\`, so the closing quote survives and JSON stays JSON.
+    name: "env-secret-assignment",
+    pattern: new RegExp(
+      `\\b(${CONFIG_SECRET_NAME})("?[ \\t]*[:=][ \\t]*["'\`]?)(?!\\[)([^\\s"'\`\\\\,;]{6,})`,
+      "g",
+    ),
+    replace: (placeholder, m, key: string, sep: string) =>
+      sep.includes(":") && !key.includes("_") ? m : `${key}${sep}${placeholder}`,
+  },
+  {
+    // `password=…`, `passwd: …`, `"password": "…"`, `**Password:** …`.
+    // `=` is always a credential. The `:` form is where prose lives
+    // ("Password: required.", "Password: 12 characters minimum"), so an
+    // UNQUOTED `:` value must look like a password: 6+ chars with a digit or
+    // symbol. Markdown emphasis around the label is part of the separator,
+    // never mistaken for the value. A quoted value keeps its quotes.
+    // `passwordProtected` never matches (word boundary after the name).
+    name: "password-assignment",
+    pattern:
+      /\b(pass(?:word|wd|phrase))((?:\*\*|__)?"?[ \t]*[:=][ \t]*(?:\*\*|__)?[ \t]*)(?!\[)("[^"\n]+"|'[^'\n]+'|`[^`\n]+`|[^\s"'`,;]+)/gi,
+    replace: (placeholder, m, key: string, sep: string, value: string) => {
+      const quoted = /^["'`]/.test(value);
+      const bare = value.replace(/[.!?)]+$/, "");
+      if (sep.includes(":") && !quoted && !(bare.length >= 6 && /[^A-Za-z]/.test(bare))) return m;
+      return `${key}${sep}${requote(placeholder, value)}`;
+    },
+  },
+  {
+    // Provider API tokens, recognisable by prefix:
+    //   OpenAI/Anthropic `sk-…` — a digit and a 20+ char alphanumeric run, so
+    //     `sk-learn-notes` and a file named `sk-projects-2026-budget.xlsx`
+    //     survive,
+    //   Stripe `sk_/rk_/pk_` `live_`/`test_`,
+    //   GitHub `ghp_/gho_/ghu_/ghs_/ghr_` and `github_pat_`,
+    //   Slack `xoxb-/xoxp-/xoxa-/xoxs-`,
+    //   HubSpot private-app `pat-<region>-…`,
+    //   Google API key `AIza…` and OAuth access token `ya29.…`.
+    // Never preceded by `/`, `\`, `.` or `-`: a path segment or a longer
+    // hyphenated name is not a token.
+    name: "provider-token",
+    pattern:
+      /(?<![/\\.-])\b(?:sk-(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]*?[A-Za-z0-9]{20}[A-Za-z0-9_-]*|[srp]k_(?:live|test)_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[bpas]-[A-Za-z0-9-]{10,}|pat-[a-z]{2}\d-[A-Za-z0-9-]{20,}|AIza[A-Za-z0-9_-]{30,}|ya29\.[A-Za-z0-9._-]{20,})/g,
+    replace: whole,
+  },
+  {
+    // JWT: header and payload are base64url JSON, so both start `eyJ`.
+    name: "jwt",
+    pattern: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g,
+    replace: whole,
+  },
+  {
+    // `Bearer <opaque token>` in free text: 20+ chars with BOTH a digit and a
+    // letter, so "bearer instruments" survives. (The log list keeps its
+    // broader bearer rule.)
+    name: "bearer-opaque",
+    pattern:
+      /(\bBearer\s+)(?=[A-Za-z0-9._~+/=-]*\d)(?=[A-Za-z0-9._~+/=-]*[A-Za-z])([A-Za-z0-9._~+/=-]{20,})/gi,
+    replace: keepPrefix,
+  },
+];
+
+/**
+ * Ordered list of (pattern → replacement) rules for the LOG BUNDLE. Each
+ * replacement keeps the non-secret prefix it captured (`$1`) and substitutes
+ * the placeholder for the secret value. The shared value-shape rules run first
+ * (PEM before anything single-line), then the name-keyed log-only rules.
+ */
+interface RedactionRule {
+  readonly name: string;
+  readonly pattern: RegExp;
+  readonly replace: (substring: string, ...groups: string[]) => string;
+}
+
+const RULES: readonly RedactionRule[] = [
+  ...CREDENTIAL_SHAPE_RULES.map(
+    (rule): RedactionRule => ({
+      name: rule.name,
+      pattern: rule.pattern,
+      replace: (m, ...groups) => rule.replace(REDACTION_PLACEHOLDER, m, ...groups),
+    }),
+  ),
   {
     // Authorization: Bearer <token>  (and bare "Bearer <token>")
     name: "bearer-token",
@@ -115,7 +264,7 @@ const RULES: readonly RedactionRule[] = [
     // explicitly captures scheme + credential together (fail closed).
     name: "auth-header",
     pattern:
-      /\b(X-Droplet-Auth|Authorization|X-Api-Key|X-Auth-Token|Proxy-Authorization)(\s*[:=]\s*)((?:Basic|Bearer|Token)\s+[^\s",;]+|[^\s",;]{6,})/gi,
+      /\b(X-Droplet-Auth|X-Nextcloud-Token|Authorization|X-Api-Key|X-Auth-Token|Proxy-Authorization)(\s*[:=]\s*)((?:Basic|Bearer|Token)\s+[^\s",;]+|[^\s",;]{6,})/gi,
     replace: (_m, header: string, sep: string) =>
       `${header}${sep}${REDACTION_PLACEHOLDER}`,
   },
@@ -147,10 +296,12 @@ const RULES: readonly RedactionRule[] = [
   {
     // Sensitive KEY=value or KEY: value (env dumps, structured logs). The value
     // may be bare, single- or double-quoted. We keep the key + the operator so
-    // the line stays legible; only the value is replaced.
+    // the line stays legible; only the value is replaced. The optional `"`
+    // before the operator covers a quoted JSON key (`"x-nextcloud-token":"…"`,
+    // the shape every pino line takes) — WARP-3193 SEC-DATA-2.
     name: "sensitive-assignment",
     pattern: new RegExp(
-      `\\b(${SENSITIVE_KEY_WORD})(\\s*[:=]\\s*)("(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*'|[^\\s"',;]+)`,
+      `\\b(${SENSITIVE_KEY_WORD})("?\\s*[:=]\\s*)("(?:[^"\\\\]|\\\\.)*"|'(?:[^'\\\\]|\\\\.)*'|[^\\s"',;]+)`,
       "gi",
     ),
     replace: (whole: string, key: string, sep: string) =>
@@ -179,6 +330,104 @@ export function redactSecrets(text: string): string {
     out = out.replace(rule.pattern, rule.replace as (...args: string[]) => string);
   }
   return out;
+}
+
+/**
+ * WARP-3282 — scrub credential VALUE SHAPES out of a tool result before it
+ * enters the model context. Runs only {@link CREDENTIAL_SHAPE_RULES} (never the
+ * name-keyed log rules — see that list's comment), replacing each hit with
+ * {@link CREDENTIAL_PLACEHOLDER}, and reports how many it replaced so the
+ * caller can log a count without the value.
+ *
+ * This is the RAW-TEXT scrub. Over JSON wire text it is not enough: a quoted
+ * value arrives escaped (`KEY=\\"value\\"`) and slips past the value classes.
+ * A tool result goes through {@link redactToolResult}, which runs this per
+ * decoded string leaf.
+ */
+export function redactCredentials(text: string): { text: string; count: number } {
+  if (!text) return { text, count: 0 };
+  let count = 0;
+  let out = text;
+  for (const rule of CREDENTIAL_SHAPE_RULES) {
+    out = out.replace(rule.pattern, (m: string, ...rest: unknown[]) => {
+      // replace() appends (offset, input) after the capture groups; no rule
+      // uses named groups, so the captures are everything before those two.
+      const groups = rest.slice(0, -2) as string[];
+      const next = rule.replace(CREDENTIAL_PLACEHOLDER, m, ...groups);
+      if (next !== m) count++;
+      return next;
+    });
+  }
+  return { text: out, count };
+}
+
+/**
+ * WARP-3282 — a field whose NAME says its value is a credential (`password`,
+ * `DB_PASSWORD`, `client_secret`, `aws_session_token`). camelCase names
+ * (`confirmationToken`, `passwordProtected`) never match.
+ */
+const CREDENTIAL_FIELD_RE = new RegExp(`^(?:[Pp]ass(?:word|wd|phrase)|${CONFIG_SECRET_NAME})$`);
+
+/**
+ * WARP-3282 — {@link redactCredentials} over a PARSED tool result: every
+ * string leaf is scrubbed as text, and a string under a credential-named field
+ * ({@link CREDENTIAL_FIELD_RE}) is replaced whole. Never mutates its input;
+ * hands back the SAME reference when nothing matched.
+ */
+export function redactCredentialValues(value: unknown): { value: unknown; count: number } {
+  let count = 0;
+  const walk = (v: unknown): unknown => {
+    if (typeof v === "string") {
+      const r = redactCredentials(v);
+      count += r.count;
+      return r.text;
+    }
+    if (Array.isArray(v)) {
+      const out = v.map(walk);
+      return out.every((x, i) => x === v[i]) ? v : out;
+    }
+    if (v === null || typeof v !== "object") return v;
+    let changed = false;
+    // Null prototype: a JSON `"__proto__"` key stays an own property instead
+    // of hitting the setter (which would drop it from the re-serialised text).
+    const out: Record<string, unknown> = Object.create(null);
+    for (const [k, entry] of Object.entries(v as Record<string, unknown>)) {
+      let next: unknown;
+      if (CREDENTIAL_FIELD_RE.test(k) && typeof entry === "string" && entry !== "" && !entry.startsWith("[")) {
+        count++;
+        next = CREDENTIAL_PLACEHOLDER;
+      } else {
+        next = walk(entry);
+      }
+      if (next !== entry) changed = true;
+      out[k] = next;
+    }
+    return changed ? out : v;
+  };
+  const out = walk(value);
+  return { value: out, count };
+}
+
+/**
+ * WARP-3282 — THE scrub for a tool result's wire text on its way to the model.
+ *
+ * JSON (every mcp-server result) is parsed, its decoded string leaves are
+ * scrubbed ({@link redactCredentialValues}) and it is re-serialised — so a
+ * quoted `KEY="value"`, escaped on the wire, is seen as the document had it,
+ * a redaction can never break the JSON, and no rule can run across a field
+ * boundary. A result with nothing to redact comes back byte-identical (the
+ * confirmation envelope's token is read from these exact bytes). Non-JSON
+ * text falls back to the raw scrub.
+ */
+export function redactToolResult(text: string): { text: string; count: number } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return redactCredentials(text);
+  }
+  const { value, count } = redactCredentialValues(parsed);
+  return count === 0 ? { text, count: 0 } : { text: JSON.stringify(value), count };
 }
 
 // ── Structured (object) redaction — WARP-1718 ────────────────────────────────

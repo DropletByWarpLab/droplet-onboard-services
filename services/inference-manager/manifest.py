@@ -27,6 +27,13 @@ def manifest_path() -> str:
     return os.getenv("MODEL_MANIFEST", DEFAULT_MANIFEST_PATH)
 
 
+# WARP-3270 / WARP-3273: fields on ManifestEntry that must never reach a
+# client. main.py's `/models/manifest` pops this set instead of a hardcoded
+# field name, so a future internal-only field can't be added to the model
+# without also being added here.
+INTERNAL_FIELDS = frozenset({"notes"})
+
+
 class ManifestEntry(BaseModel):
     name: str
     pull_tag: str
@@ -43,7 +50,14 @@ class ManifestEntry(BaseModel):
     # LOCAL-LLM-MODEL-SWITCHING-ARCHITECTURE-BRIEF.md §6 in the handbook.
     display_name: str | None = None
     maker: str | None = None
+    # Shown to customers on the Models page: one plain sentence, no ticket
+    # keys or engineering shorthand (WARP-3270 / WARP-3273).
     description: str | None = None
+    # WARP-3270 / WARP-3273: internal engineering notes (quantization math,
+    # bench gates, ticket keys). NEVER returned by the API: /models/eligible
+    # lists its fields explicitly, /models/manifest pops INTERNAL_FIELDS, and
+    # `exclude=True` here strips it from any future `model_dump()` too.
+    notes: str | None = Field(default=None, exclude=True)
     capabilities: list[str] = Field(default_factory=list)
     roles: list[str] = Field(default_factory=list)
     disk_gb: float | None = Field(default=None, ge=0)
@@ -67,6 +81,13 @@ class ManifestEntry(BaseModel):
     # Those are a BUILD-time fact — where weights come from when we package an
     # artifact. This is the RUNTIME identifier the daemon is asked to serve.
     oci: str | None = None
+    # WARP-3046: the manifest digest of the build `oci` pins (the Hub's, which
+    # DMR's /api/tags reports verbatim per tag). `/models/eligible` matches it
+    # so the same build installed under ANOTHER tag — the old catalog pulled
+    # `ai/qwen3-vl:latest`, which is `8B-UD-Q4_K_XL` — reads installed, while a
+    # different build of the same repository never can. Optional, same
+    # never-brick rationale: without it an entry matches tag-exactly.
+    oci_digest: str | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -144,7 +165,12 @@ class Manifest(BaseModel):
                 return m
         return None
 
-    def eligible(self, detected_vram_gb: int) -> list[ManifestEntry]:
+    def eligible(self, detected_vram_gb: int | None) -> list[ManifestEntry]:
+        # WARP-3046: `None` is UNKNOWN VRAM. Nothing is offered — a download
+        # sized against a guess can land weights the card cannot load — but
+        # /models/eligible reports the unknown as such instead of as a 0.
+        if detected_vram_gb is None:
+            return []
         return [m for m in self.models if m.min_vram_gb <= detected_vram_gb]
 
 

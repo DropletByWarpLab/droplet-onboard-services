@@ -123,6 +123,17 @@ export function EmailWorkspace({
 
   const activeAccount = accounts.find((a) => a.id === activeAccountId) ?? null;
   const lastSyncLabel = relativeSync(activeAccount?.lastIdleAt ?? null);
+  // WARP-2957 — an empty list has three different meanings now, and the
+  // account row can tell them apart: never synced yet, last sync failed, or
+  // genuinely nothing in the view.
+  const syncState: "first-sync" | "error" | null = !activeAccount
+    ? null
+    : activeAccount.imapStatus === "error"
+      ? "error"
+      : activeAccount.lastIdleAt === null &&
+          (activeAccount.imapStatus === "idle" || activeAccount.imapStatus === "reconnecting")
+        ? "first-sync"
+        : null;
 
   function selectThread(threadId: string) {
     setActiveThreadId(threadId);
@@ -160,7 +171,7 @@ export function EmailWorkspace({
   return (
     <div
       className="
-        droplet-shell
+        droplet-shell email-app
         grid min-h-0
         h-[calc(100dvh_-_56px_-_env(safe-area-inset-bottom))] lg:h-dvh
         grid-cols-1
@@ -180,6 +191,8 @@ export function EmailWorkspace({
           isLoading={accountsLoading || threadsLoading}
           error={threadsError}
           lastSyncLabel={lastSyncLabel}
+          syncState={syncState}
+          syncError={activeAccount?.lastError ?? null}
           onRetry={() => {
             refreshAccounts();
             refreshThreads();
@@ -453,7 +466,7 @@ function ReplyComposer({
         onChange={(e) => setBody(e.target.value)}
         rows={4}
         placeholder="Write your reply…"
-        className="w-full p-2.5 resize-y type-footnote placeholder:text-[var(--text-muted)] outline-none focus:border-[var(--brand)]"
+        className="w-full p-2.5 resize-y type-footnote placeholder:text-[var(--text-muted)] outline-none focus:ring-2 focus:ring-[var(--brand)]"
         style={{
           background: "var(--surface)",
           border: "1px solid var(--border)",

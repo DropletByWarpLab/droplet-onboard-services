@@ -17,9 +17,19 @@ vi.mock("../config.js", () => ({
     agentRuns: { concurrency: 1, tickMs: 5_000, heartbeatMs: 15_000, reclaimAfterMs: 60_000, maxAttempts: 3, maxWallMs: 2_400_000, maxIter: 10 },
   },
 }));
-const { recordActivityMock } = vi.hoisted(() => ({ recordActivityMock: vi.fn().mockResolvedValue(null) }));
+const { recordActivityMock, resolveActiveModelMock } = vi.hoisted(() => ({
+  recordActivityMock: vi.fn().mockResolvedValue(null),
+  resolveActiveModelMock: vi.fn(),
+}));
 vi.mock("../services/activity.singleton.js", () => ({ recordActivity: recordActivityMock }));
 vi.mock("../services/notifications.service.js", () => ({ sendNotification: vi.fn() }));
+// WARP-3047 — the active-model resolver has its own suite; here it is only
+// observed (what a following schedule fires on, and that a pinned one never
+// asks).
+vi.mock("../services/active-model.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/active-model.service.js")>()),
+  resolveActiveModel: (...args: unknown[]) => resolveActiveModelMock(...args),
+}));
 
 import { tickAgentRunSchedules } from "../services/agent-run-schedule-ticker.service.js";
 import { enqueueAgentRun } from "../services/agent-run-worker.service.js";
@@ -27,7 +37,10 @@ import { createAgentRunPrismaMock } from "./helpers/agent-run-prisma-mock.js";
 
 const OWNER = { id: "u-owner", username: "romain", role: "owner" };
 
-beforeEach(() => recordActivityMock.mockClear());
+beforeEach(() => {
+  recordActivityMock.mockClear();
+  resolveActiveModelMock.mockReset();
+});
 
 describe("agent-run-schedule ticker (WARP-2180)", () => {
   it("fires due schedules as queued runs attributed to the creator, advances nextFireAt, leaves future ones alone", async () => {
@@ -239,5 +252,60 @@ describe("agent-run-schedule ticker — overlap guard (WARP-2877)", () => {
     expect(recordActivityMock).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "system", refs: expect.objectContaining({ rrule: "FREQ=NONSENSE" }) }),
     );
+  });
+});
+
+/**
+ * WARP-3047 — a schedule created without a model FOLLOWS the box's active
+ * model: it is resolved at every fire, not frozen at creation. Frozen, every
+ * such schedule kept asking for the old model after an owner switched — on
+ * DMR a second model on the one GPU at every fire.
+ */
+describe("agent-run-schedule ticker — a schedule that follows the active model (WARP-3047)", () => {
+  const A = "docker.io/ai/gpt-oss:20B-F16";
+  const B = "docker.io/ai/glm-4.7-flash:reap-q4_K_M";
+  const daily = { userId: "u-owner", goal: "morning digest", maxIter: 10, rrule: "FREQ=DAILY;BYHOUR=6;BYMINUTE=0", timezone: "UTC" };
+
+  it("created while A was active, switched to B, fires on B", async () => {
+    let now = new Date("2026-09-04T06:00:30Z");
+    const db = createAgentRunPrismaMock({ users: [OWNER], now: () => now });
+    await db.prisma.agentRunSchedule.create({
+      data: { ...daily, model: A, followsActiveModel: true, nextFireAt: new Date("2026-09-04T06:00:00Z") },
+    });
+    resolveActiveModelMock.mockResolvedValue(A);
+    expect(await tickAgentRunSchedules(db.prisma, now)).toMatchObject({ fired: 1 });
+    expect(db.rows[0]!.model).toBe(A);
+    db.rows[0]!.status = "succeeded";
+
+    // The owner switches the box to B on the Models page.
+    resolveActiveModelMock.mockResolvedValue(B);
+    now = new Date("2026-09-05T06:00:30Z");
+    expect(await tickAgentRunSchedules(db.prisma, now)).toMatchObject({ fired: 1 });
+    expect(db.rows[1]!.model).toBe(B);
+    // An agent run calls tools, so it asks for a tools-capable answer.
+    expect(resolveActiveModelMock).toHaveBeenCalledWith(db.prisma, { requireTools: true });
+  });
+
+  it("a pinned schedule (an explicit model) fires on that model and never asks", async () => {
+    const now = new Date("2026-09-04T06:00:30Z");
+    const db = createAgentRunPrismaMock({ users: [OWNER], now: () => now });
+    await db.prisma.agentRunSchedule.create({
+      data: { ...daily, model: A, followsActiveModel: false, nextFireAt: new Date("2026-09-04T06:00:00Z") },
+    });
+    resolveActiveModelMock.mockResolvedValue(B);
+    await tickAgentRunSchedules(db.prisma, now);
+    expect(db.rows[0]!.model).toBe(A);
+    expect(resolveActiveModelMock).not.toHaveBeenCalled();
+  });
+
+  it("nothing resolvable at fire time → the model stored with the schedule; the slot is not lost", async () => {
+    const now = new Date("2026-09-04T06:00:30Z");
+    const db = createAgentRunPrismaMock({ users: [OWNER], now: () => now });
+    await db.prisma.agentRunSchedule.create({
+      data: { ...daily, model: A, followsActiveModel: true, nextFireAt: new Date("2026-09-04T06:00:00Z") },
+    });
+    resolveActiveModelMock.mockResolvedValue(null);
+    expect(await tickAgentRunSchedules(db.prisma, now)).toMatchObject({ fired: 1, skipped: 0 });
+    expect(db.rows[0]!.model).toBe(A);
   });
 });

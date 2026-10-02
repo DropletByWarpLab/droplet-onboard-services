@@ -2,6 +2,7 @@ import mqtt, { MqttClient } from "mqtt";
 import { config } from "../config.js";
 import { mqttConnectOptions } from "../lib/internal-tls.js";
 import { createLogger } from "../lib/logger.js";
+import { recordMqttState } from "./mqtt-status.js";
 
 const logger = createLogger("mqtt");
 
@@ -21,16 +22,22 @@ export async function connectMqtt(): Promise<void> {
     // WARP-235: on mqtts:// brokers, present this service's client cert
     // (identity = CN "orchestrator"); plain mqtt:// (dev) stays credential-free.
     client = mqtt.connect(config.MQTT_BROKER, mqttConnectOptions(config.MQTT_BROKER));
+    // WARP-2548: every transition feeds the health monitor's `mqtt` component.
+    recordMqttState("connecting");
 
     client.on("connect", () => {
       logger.info("Connected to MQTT broker");
+      recordMqttState("connected");
       resolve();
     });
 
     client.on("error", (err) => {
       logger.error({ err }, "MQTT connection error");
+      if (!client?.connected) recordMqttState("disconnected", err.message);
       reject(err);
     });
+    client.on("close", () => recordMqttState("disconnected"));
+    client.on("reconnect", () => recordMqttState("connecting"));
 
     // Dispatch every incoming message to any matching local handler.
     client.on("message", (t, message) => {

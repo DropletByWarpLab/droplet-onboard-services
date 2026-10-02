@@ -129,6 +129,43 @@ export function createRuntimeDenyTier(): RuntimeDenyTier {
 }
 
 /**
+ * ADR-055 §11.5 — tool namespaces the assistant may only READ.
+ *
+ * "The assistant may never open a door, issue a credential, or change a grant.
+ * There is no confirmation-token flow that makes it acceptable." And the rule
+ * is enforced "at dispatch, not by filtering a catalogue, so an unlock tool
+ * that does not exist cannot be reached by a model that has guessed its name."
+ *
+ * So this is not a rule in the runtime deny tier (which anything can `clear()`
+ * and which ships empty by design — membership there is a human decision): it
+ * is a structural check `intercept` makes on every call, first, for every tool
+ * in the namespace — a compiled tool, an `additionalTools` arrival, anything.
+ * Read-only has to be AFFIRMATIVE: `requiresWrite` and `requiresConfirmation`
+ * both `false`. A tool that declares neither is refused, because "did not say
+ * it writes" is how a remote tool would arrive.
+ *
+ * It refuses a confirming tool too, and a token does not change that. The
+ * point is the opposite of the two-phase flow: no human approval turns a
+ * `doors_*` call from the assistant into an unlock.
+ */
+export const READ_ONLY_TOOL_NAMESPACES = ["doors_"] as const;
+
+/** A reason to refuse, or `null` when the tool is outside every read-only namespace or is a read. */
+export function readOnlyNamespaceBreach(tool: InterceptableTool): DenyReason | null {
+  const name = tool.name.trim().toLowerCase();
+  const namespace = READ_ONLY_TOOL_NAMESPACES.find((p) => name.startsWith(p));
+  if (!namespace) return null;
+  if (tool.requiresWrite === false && tool.requiresConfirmation === false) return null;
+  return {
+    code: "read_only_namespace",
+    message:
+      `'${tool.name}' is in the read-only '${namespace}' namespace, and the assistant never ` +
+      "opens, locks or unlocks a door, issues a credential, or changes who may enter. " +
+      "Nothing about this call was attempted, and no approval changes that.",
+  };
+}
+
+/**
  * The dispatch-time decision. A discriminated union rather than an error
  * string, so callers never pattern-match prose (WARP-2312).
  */
@@ -192,6 +229,11 @@ export function createToolCallInterceptor(opts?: {
     tokens,
     denyTier,
     intercept(tool, args, meta, now = Date.now()) {
+      // 0. ADR-055 §11.5 — the read-only namespaces. Before the deny tier and
+      //    beyond its reach: nothing registered at runtime can remove it.
+      const breach = readOnlyNamespaceBreach(tool);
+      if (breach) return { kind: "denied", reason: breach };
+
       // 1. Deny tier first. A denied tool is refused whether or not it
       //    would also have required confirmation — there is no approval
       //    that makes a blocked action allowed.
@@ -251,38 +293,22 @@ export function createToolCallInterceptor(opts?: {
         };
       }
 
-      // 5. LEGACY PATH — `confirmed: true` against a LIVE CHALLENGE.
+      // 5. NO TOKEN → CHALLENGE, WHATEVER `confirmed` SAYS (WARP-2002).
       //
-      //    Why this exists: in the chat surface nothing can carry a token
-      //    back. `_meta` is set by the orchestrator; the model is what
-      //    re-issues the call, and it only knows the tool's own schema.
-      //    Requiring the secret there would make all 16 hand-rolled
-      //    two-phase tools challenge forever — a production break, and a
-      //    violation of "all 37 still complete their two-phase flow".
+      //    `confirmed: true` is something the MODEL writes. Until WARP-2002
+      //    it was accepted here against a "live challenge" — but the live
+      //    challenge was the one this interceptor had just minted in reply
+      //    to the model's own first call, so the model could re-issue the
+      //    call with the flag set, in the same turn, and write with no
+      //    human involved. That is self-attestation with an extra step.
       //
-      //    It is deliberately WEAKER than the token and deliberately
-      //    STRONGER than what shipped before: `confirmed: true` alone no
-      //    longer authorises anything. The interceptor must have
-      //    challenged THIS tool with THESE arguments, within the TTL, and
-      //    the challenge is spent on use. So it cannot approve a call that
-      //    was never challenged, cannot be moved to a different call, and
-      //    cannot be replayed.
-      //
-      //    Gated on the schema declaring `confirmed`, so it is available
-      //    only to tools that already had a working two-phase contract. A
-      //    tool with no gate at all (the WARP-320 remote class, and the 8
-      //    registry tools that had no check) gets no legacy path and must
-      //    present a real token — fail-closed, which is the correct
-      //    direction for a write that nothing was guarding.
-      if (args.confirmed === true && declaresConfirmedFlag(tool)) {
-        const legacy = tokens.redeemLiveChallenge(tool.name, args, now);
-        if (legacy.ok) {
-          return { kind: "proceed", args, confirmationConsumed: true };
-        }
-        // No live challenge for this exact call — fall through and issue
-        // one. A `confirmed: true` that nothing challenged is not an
-        // approval, and must not read as one.
-      }
+      //    The only thing that admits a confirming call is the token, and
+      //    the token only reaches `_meta` from a human decision: the chat
+      //    grant (`POST /api/llm/confirm/:challengeId`, WARP-2469), the
+      //    parked-run confirm route (`decideAgentRun`), or an MCP client's
+      //    own approval UI. A surface with none of those (voice, ToolSpec)
+      //    fails closed and keeps challenging, which is the intended
+      //    outcome, not a regression.
 
       // 6. Challenge. NO WRITE HAPPENS: the caller returns this outcome
       //    without ever invoking the handler.
@@ -411,7 +437,8 @@ export function interceptOutcomeToToolResult(
       message:
         `'${tool.name}' writes, so it needs a thumbs-up. Relay this to the user, and ` +
         "only after they explicitly approve, re-issue the SAME call with the SAME arguments " +
-        "presenting this confirmationToken. Do NOT approve on the user's behalf.",
+        "presenting this confirmationToken. Do NOT approve on the user's behalf: setting " +
+        "`confirmed: true` yourself approves nothing and only asks again.",
       details: {
         interceptor: {
           outcome: "confirmation_required",

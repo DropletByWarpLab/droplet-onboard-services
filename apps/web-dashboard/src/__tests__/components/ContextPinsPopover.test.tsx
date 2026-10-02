@@ -52,9 +52,9 @@ describe("ContextPinsPopover", () => {
     fireEvent.click(screen.getByRole("button", { name: /context/i }));
     await waitFor(() => screen.getByText("/share/logistics"));
 
-    fireEvent.change(screen.getByLabelText(/kind/i), {
-      target: { value: "file" },
-    });
+    // WARP-3043: a themed menu, not a native select.
+    fireEvent.click(screen.getByRole("button", { name: "Kind: folder" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "file" }));
     fireEvent.change(screen.getByLabelText(/path or reference/i), {
       target: { value: "/docs/spec.pdf" },
     });
@@ -91,6 +91,39 @@ describe("ContextPinsPopover", () => {
 
     await waitFor(() => {
       expect(screen.getByText(/no pinned context/i)).toBeInTheDocument();
+    });
+  });
+
+  describe("phone layout (WARP-3202)", () => {
+    it("anchors to the header below lg: `lg:relative`, never a bare `relative`", async () => {
+      render(<ContextPinsPopover sessionId="conv-1" />);
+      const trigger = screen.getByRole("button", { name: /context/i });
+      fireEvent.click(trigger);
+      const dialog = await screen.findByRole("dialog", { name: /pinned context/i });
+
+      expect(trigger.parentElement).toHaveClass("lg:relative");
+      expect(trigger.parentElement).not.toHaveClass("relative");
+      expect(dialog).toHaveClass("right-0", "max-lg:right-3");
+    });
+
+    it("keeps the kind picker, the path box and Add in one `.chat-field-row`", async () => {
+      render(<ContextPinsPopover sessionId="conv-1" />);
+      fireEvent.click(screen.getByRole("button", { name: /context/i }));
+      const dialog = await screen.findByRole("dialog", { name: /pinned context/i });
+
+      const ref = screen.getByLabelText(/path or reference/i);
+      const kind = screen.getByRole("button", { name: /^Kind:/ });
+      const add = screen.getByRole("button", { name: "Add pin" });
+
+      expect(ref).toHaveClass("chat-field");
+      expect(dialog.querySelector("select")).toBeNull();
+      // `.chat-field-row > button` and `.chat-field-row .pick-select` are what
+      // the phone rule raises to 44px.
+      const row = ref.closest(".chat-field-row");
+      expect(row).not.toBeNull();
+      expect(add.parentElement).toBe(row);
+      expect(kind).toHaveClass("pick-select");
+      expect(row!.contains(kind)).toBe(true);
     });
   });
 });

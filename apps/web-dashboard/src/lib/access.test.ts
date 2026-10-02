@@ -36,24 +36,27 @@ import {
   roleToDraft,
   blankRoleDraft,
   templateToDraft,
+  toolDomainGroupsWith,
+  deadToolGrants,
 } from "./access";
 import type { AccessRole, RoleTemplate } from "./types";
 import { ACCESS_COPY } from "@/components/access/copy";
 
-describe("tier ladder + display labels (§0.1 — family displays as Staff)", () => {
+describe("tier ladder + display labels (family displays as Member, guest as External guest)", () => {
   it("ranks guest < family < admin < owner", () => {
     expect(TIER_RANK.guest).toBeLessThan(TIER_RANK.family);
     expect(TIER_RANK.family).toBeLessThan(TIER_RANK.admin);
     expect(TIER_RANK.admin).toBeLessThan(TIER_RANK.owner);
   });
 
-  it("displays the family tier as Staff (enum value unchanged)", () => {
-    expect(tierLabel("family")).toBe("Staff");
+  it("displays the family tier as Member and guest as External guest (enum values unchanged)", () => {
+    expect(tierLabel("family")).toBe("Member");
     expect(tierLabel("admin")).toBe("Admin");
-    expect(tierLabel("guest")).toBe("Guest");
+    expect(tierLabel("guest")).toBe("External guest");
     expect(tierLabel("owner")).toBe("Owner");
     expect(tierLabel("service")).toBe("Service");
-    expect(tierPlural("family")).toBe("staff");
+    expect(tierPlural("family")).toBe("members");
+    expect(tierPlural("guest")).toBe("external guests");
     expect(tierPlural("admin")).toBe("admins");
   });
 });
@@ -80,6 +83,8 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
         "money",
         "network",
         "projects",
+        // WARP-2977 — the Security command center, on the same terms.
+        "security",
         "smart_home",
         "team_chat",
         "voice",
@@ -171,6 +176,14 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
     expect(cal.domains).toEqual(["calendar", "reminders", "notifications"]);
   });
 
+  it("WARP-2979: Security is its own on-box row, gated by the Security feature", () => {
+    // Effective access counts only GRANTED domains (effective-access.service.ts),
+    // so without this row no custom role could ever be given the Security tools.
+    // MUTATION: drop the row, or its feature -> red.
+    const security = TOOL_DOMAIN_GROUPS.find((g) => g.id === "security")!;
+    expect(security).toMatchObject({ label: "Security", domains: ["security"], feature: "security" });
+  });
+
   it("business is its own on-box row, and System no longer carries it (WARP-2583)", () => {
     // ADR-045 collapsed every PM and CRM tool into the `business` domain. The
     // Projects row used to write the `pm` grant — empty since — while
@@ -195,11 +208,25 @@ describe("feature catalog (one vocabulary — the App-Modules ModuleId enum)", (
 });
 
 describe("floor clamping (§5.2 — blocked levels shown, never hidden)", () => {
-  it("blocks network act/manage on a family (Staff) starting point", () => {
+  it("blocks network act/manage on a family (Member) starting point", () => {
     expect(isLevelBlocked("family", "network", "act")).toBe(true);
     expect(isLevelBlocked("family", "network", "manage")).toBe(true);
     expect(isLevelBlocked("family", "network", "view")).toBe(false);
     expect(isLevelBlocked("admin", "network", "manage")).toBe(false);
+  });
+
+  // WARP-3365 / WARP-3369 — the box refuses an external guest ANY crm or
+  // projects grant (`refuseBelowFloor`), so every level is blocked for the
+  // guest starting point, `view` included; a member-based role is unaffected.
+  it("blocks every level of Customers (crm) and Projects for a guest starting point, view included", () => {
+    for (const featureId of ["crm", "projects"]) {
+      for (const level of ["view", "act", "manage"] as const) {
+        expect(isLevelBlocked("guest", featureId, level), `guest ${featureId} ${level}`).toBe(true);
+        expect(isLevelBlocked("family", featureId, level), `family ${featureId} ${level}`).toBe(false);
+      }
+    }
+    expect(floorBlockedReason("crm", "view")).toBe("See customers is for members.");
+    expect(floorBlockedReason("projects", "view")).toBe("See projects is for members.");
   });
 
   it("blocks write levels (act/manage) on a guest starting point for family-floored features", () => {
@@ -228,16 +255,16 @@ describe("re-flooring a draft (§5.1 — never a silent change)", () => {
     const { features, notice } = refloorFeatures(draft, "guest");
     expect(features.network.level).toBe("view");
     expect(notice).toBe(
-      "Switching to Guest turns off Configure network — guests can't change the network.",
+      "Switching to External guest turns off Configure network — external guests can't change the network.",
     );
   });
 
-  it("uses the Staff display label in notices about the family tier", () => {
+  it("uses the Member display label in notices about the family tier", () => {
     const draft = defaultFeatureDraft("admin");
     draft.network = { on: true, level: "manage" };
     const { notice } = refloorFeatures(draft, "family");
     expect(notice).toBe(
-      "Switching to Staff turns off Configure network — staff can't change the network.",
+      "Switching to Member turns off Configure network — members can't change the network.",
     );
   });
 });
@@ -284,7 +311,7 @@ describe("connector levels (O-2 — Read & write only on Admin-based roles)", ()
     // Every level stays RENDERABLE; `connectorLevelsFor` says which are
     // SELECTABLE, and the builder disables the rest with this reason.
     expect(CONNECTOR_LEVELS).toEqual(["none", "read", "read_write"]);
-    expect(connectorFloorReason("guest")).toBe("Connectors are for staff and admins.");
+    expect(connectorFloorReason("guest")).toBe("Connectors are for members and admins.");
     expect(connectorFloorReason("family")).toBe("Read & write is for admins.");
     expect(connectorFloorReason("admin")).toBeNull();
   });
@@ -769,16 +796,13 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
       featureGrants: [
         { moduleId: "files", level: "view" },
         { moduleId: "docs", level: "view" },
-        { moduleId: "crm", level: "view" },
         { moduleId: "calendar", level: "view" },
         { moduleId: "contacts", level: "view" },
         { moduleId: "knowledge", level: "view" },
-        { moduleId: "projects", level: "view" },
         { moduleId: "team_chat", level: "view" },
       ],
       toolGrants: [
         { domain: "files", level: "view" },
-        { domain: "business", level: "view" },
         { domain: "calendar", level: "view" },
         { domain: "reminders", level: "view" },
         { domain: "notifications", level: "view" },
@@ -1101,5 +1125,196 @@ describe("WARP-2738 — role template → draft → payload round trip", () => {
       "guest",
       "guest",
     ]);
+  });
+});
+
+// ── WARP-2897 — runtime (extension) tool domains in the role builder ──
+//
+// TOOL_DOMAIN_GROUPS stays a static, hand-kept table of COMPILED domains. A
+// runtime-only domain exists only on the box that has it attached, so the
+// builder fetches GET /api/access/tool-domains and appends an "Extensions"
+// row per runtime domain through toolDomainGroupsWith.
+describe("toolDomainGroupsWith — the Extensions section (WARP-2897)", () => {
+  const COMPILED_GROUPED = new Set(TOOL_DOMAIN_GROUPS.flatMap((g) => g.domains));
+
+  it("appends one row per runtime domain, each exactly once, after the static table", () => {
+    const groups = toolDomainGroupsWith([
+      { domain: "ext-bookings" },
+      { domain: "ext-intake" },
+      { domain: "ext-bookings" },
+    ]);
+    expect(groups.slice(0, TOOL_DOMAIN_GROUPS.length)).toEqual(TOOL_DOMAIN_GROUPS);
+    const ext = groups.slice(TOOL_DOMAIN_GROUPS.length);
+    expect(ext.map((g) => g.domains)).toEqual([["ext-bookings"], ["ext-intake"]]);
+    for (const g of ext) {
+      expect(g.section).toBe("extensions");
+      expect(g.feature).toBeNull();
+    }
+    // Every runtime domain exactly once across ALL groups (completeness for
+    // runtime domains, stated explicitly — the compiled pin above covers only
+    // grouped compiled domains).
+    const all = groups.flatMap((g) => g.domains);
+    for (const d of ["ext-bookings", "ext-intake"]) {
+      expect(all.filter((x) => x === d)).toHaveLength(1);
+    }
+  });
+
+  /**
+   * MUTATION: drop the compiled-collision filter -> `files` gets a second row
+   * and this goes red.
+   */
+  it("a runtime domain equal to a compiled domain is REJECTED (never a second row)", () => {
+    // `money` is compiled but in no row, so only the server's `compiled`
+    // list can say it is not a runtime domain.
+    const groups = toolDomainGroupsWith(
+      [{ domain: "files" }, { domain: "pm" }, { domain: "money" }, { domain: "erp" }],
+      ["files", "pm", "money", "team_chat"],
+    );
+    expect(groups).toEqual(TOOL_DOMAIN_GROUPS);
+    const all = groups.flatMap((g) => g.domains);
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  it("with no runtime domains it is exactly TOOL_DOMAIN_GROUPS", () => {
+    expect(toolDomainGroupsWith([])).toEqual(TOOL_DOMAIN_GROUPS);
+  });
+
+  it("extension row ids never collide with a compiled group id", () => {
+    const groups = toolDomainGroupsWith([{ domain: "ext-bookings" }]);
+    const ids = groups.map((g) => g.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(COMPILED_GROUPED.has("ext-bookings")).toBe(false);
+  });
+});
+
+describe("extension rows in the draft ⇄ payload round trip (WARP-2897)", () => {
+  const groups = toolDomainGroupsWith([{ domain: "ext-bookings" }]);
+  const extId = groups[groups.length - 1]!.id;
+
+  it("a blank role grants NO extension domain until the operator picks a level", () => {
+    const draft = blankRoleDraft("family", groups);
+    expect(draft.tools[extId]).toBe("off");
+    const grants = draftToRolePayload(draft, groups).toolGrants;
+    expect(grants.map((g) => g.domain)).not.toContain("ext-bookings");
+    // …and choosing View emits exactly the one row.
+    draft.tools[extId] = "view";
+    expect(draftToRolePayload(draft, groups).toolGrants).toContainEqual({
+      domain: "ext-bookings",
+      level: "view",
+    });
+  });
+
+  it("role → draft → payload keeps an extension grant exactly", () => {
+    const role = {
+      id: "r1",
+      name: "Front desk",
+      slug: "front-desk",
+      description: null,
+      startingPoint: "family",
+      state: "active",
+      storageQuotaBytes: null,
+      maxUploadSizeMb: null,
+      llmDailyMessageCap: null,
+      cloudModelsAllowed: false,
+      mayOperateLocks: false,
+      createdBy: "u0",
+      createdAt: "2026-09-22T00:00:00Z",
+      updatedAt: "2026-09-22T00:00:00Z",
+      peopleCount: 0,
+      featureGrants: [{ moduleId: "files", level: "act" }],
+      toolGrants: [
+        { domain: "files", level: "use", state: "live", deadReason: null },
+        { domain: "ext-bookings", level: "view", state: "live", deadReason: null },
+      ],
+      connectorGrants: [],
+    } as AccessRole;
+    const draft = roleToDraft(role, groups);
+    expect(draft.tools[extId]).toBe("view");
+    // Untouched: the rows pass through verbatim, state never on the wire.
+    expect(draftToRolePayload(draft, groups).toolGrants).toEqual([
+      { domain: "files", level: "use" },
+      { domain: "ext-bookings", level: "view" },
+    ]);
+    // Touched to OFF: the extension row is dropped, nothing else moves.
+    draft.tools[extId] = "off";
+    draft.touchedToolGroups = [extId];
+    expect(draftToRolePayload(draft, groups).toolGrants).toEqual([{ domain: "files", level: "use" }]);
+  });
+
+  it("a DEAD extension grant (its row no longer rendered) still rides through untouched", () => {
+    const role = {
+      id: "r1",
+      name: "Front desk",
+      slug: "front-desk",
+      description: null,
+      startingPoint: "family",
+      state: "active",
+      storageQuotaBytes: null,
+      maxUploadSizeMb: null,
+      llmDailyMessageCap: null,
+      cloudModelsAllowed: false,
+      mayOperateLocks: false,
+      createdBy: "u0",
+      createdAt: "2026-09-22T00:00:00Z",
+      updatedAt: "2026-09-22T00:00:00Z",
+      peopleCount: 0,
+      featureGrants: [],
+      toolGrants: [{ domain: "ext-bookings", level: "view", state: "dead", deadReason: "not_provided" }],
+      connectorGrants: [],
+    } as AccessRole;
+    // Extension disabled: the builder has no row for it.
+    const draft = roleToDraft(role);
+    expect(draftToRolePayload(draft).toolGrants).toEqual([{ domain: "ext-bookings", level: "view" }]);
+    expect(deadToolGrants(role)).toEqual([{ domain: "ext-bookings", deadReason: "not_provided" }]);
+
+    /**
+     * Removing it is the builder's only way to revoke a dead grant — the
+     * domain has no row to set Off, and the server lets a held dead grant be
+     * kept. Without this, the grant revives at its old level if anything
+     * later registers a tool under the same domain.
+     *
+     * MUTATION: ignore `removedToolGrants` in draftToRolePayload -> red.
+     */
+    const removed = { ...draft, removedToolGrants: ["ext-bookings"] };
+    expect(draftToRolePayload(removed).toolGrants).toEqual([]);
+  });
+
+  it("a removed domain drops only its own original rows", () => {
+    const role = {
+      id: "r2",
+      name: "Back office",
+      slug: "back-office",
+      description: null,
+      startingPoint: "admin",
+      state: "active",
+      storageQuotaBytes: null,
+      maxUploadSizeMb: null,
+      llmDailyMessageCap: null,
+      cloudModelsAllowed: false,
+      mayOperateLocks: false,
+      createdBy: "u0",
+      createdAt: "2026-09-22T00:00:00Z",
+      updatedAt: "2026-09-22T00:00:00Z",
+      peopleCount: 0,
+      featureGrants: [],
+      toolGrants: [
+        { domain: "ext-bookings", level: "use", state: "dead", deadReason: "not_provided" },
+        { domain: "erp", level: "view", state: "live", deadReason: null },
+      ],
+      connectorGrants: [],
+    } as AccessRole;
+    const draft = { ...roleToDraft(role), removedToolGrants: ["ext-bookings"] };
+    expect(draftToRolePayload(draft).toolGrants).toEqual([{ domain: "erp", level: "view" }]);
+  });
+
+  it("deadToolGrants lists only not_provided grants — crm/pm landing slots are not badged", () => {
+    const role = {
+      toolGrants: [
+        { domain: "crm", level: "view", state: "dead", deadReason: "empty_domain" },
+        { domain: "files", level: "use", state: "live", deadReason: null },
+        { domain: "files", level: "use" },
+      ],
+    } as unknown as AccessRole;
+    expect(deadToolGrants(role)).toEqual([]);
   });
 });

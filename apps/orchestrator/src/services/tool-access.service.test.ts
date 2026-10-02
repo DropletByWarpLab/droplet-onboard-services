@@ -14,6 +14,7 @@ import {
   firstForbiddenToolName,
   firstToolDeniedForPrincipal,
   hasWriteTool,
+  isCatalogRead,
   isLockLikeInvocation,
   lockOperationDenied,
   narrowToolNamesForPrincipal,
@@ -22,10 +23,13 @@ import {
   resolveAttributedToolAccess,
   resolveToolAccessScope,
   toolAllowedInScope,
+  toolDispatchDenial,
+  unknownToolsIn,
   WRITE_TOOLS,
   writeToolsIn,
   type ToolAccessScope,
 } from "./tool-access.service.js";
+import type { RuntimeToolLookup } from "./tool-layers.service.js";
 
 const scopeOf = (
   domains: string[],
@@ -67,6 +71,21 @@ describe("WARP-2665 — writeToolsIn / hasWriteTool, the one write classificatio
     for (const { name } of TOOL_CATALOG) {
       expect(hasWriteTool([name])).toBe(WRITE_TOOLS.has(name));
     }
+  });
+});
+
+describe("WARP-3287 — isCatalogRead, the one 'may this call run twice' test", () => {
+  it("is a read only for a catalog tool that neither writes nor asks for a thumbs-up", () => {
+    for (const t of TOOL_CATALOG) {
+      expect(isCatalogRead(t.name)).toBe(!t.requiresWrite && !t.requiresConfirmation);
+    }
+    expect(isCatalogRead("search_content")).toBe(true);
+    expect(isCatalogRead("create_event")).toBe(false); // an ungated write
+  });
+
+  it("does not treat a name the catalog does not know (remote, extension) as a read", () => {
+    expect(isCatalogRead("acme__search")).toBe(false);
+    expect(isCatalogRead("ext-notes__list")).toBe(false);
   });
 });
 
@@ -164,6 +183,121 @@ describe("narrowToolsToScope — the single narrowing expression (WARP-2556)", (
   });
 });
 
+// ── WARP-2897 — runtime tools through the SAME predicate ──────────────
+//
+// Until WARP-2897, `toolAllowedInScope` looked a name up in the compiled
+// catalog only, so EVERY runtime tool (remote MCP today, extensions once
+// slice H lands) was denied to any person holding an AccessRole whatever
+// their grants said. The runtime lookup (tool-layers.service.ts
+// `currentRuntimeToolLookup`, shared by both LLM sites) supplies the domain
+// from the descriptor and the write flag from the classification record.
+describe("toolAllowedInScope — runtime tools (WARP-2897)", () => {
+  const runtime: RuntimeToolLookup = (name) =>
+    ({
+      "bookings__list_slots": { domain: "ext-bookings", requiresWrite: false },
+      "bookings__book_slot": { domain: "ext-bookings", requiresWrite: true },
+    })[name];
+
+  /**
+   * MUTATION: make `toolAllowedInScope` catalog-only again (drop the runtime
+   * fallback) -> the first case goes red.
+   */
+  it("admits a READ runtime tool whose domain is in scope", () => {
+    expect(toolAllowedInScope("bookings__list_slots", scopeOf(["ext-bookings"]), runtime)).toBe(true);
+  });
+
+  it("denies it when the domain is not in scope", () => {
+    expect(toolAllowedInScope("bookings__list_slots", scopeOf(["files"], ["files"]), runtime)).toBe(false);
+  });
+
+  it("denies a WRITE-classified runtime tool without the domain in writeDomains", () => {
+    expect(toolAllowedInScope("bookings__book_slot", scopeOf(["ext-bookings"]), runtime)).toBe(false);
+    expect(
+      toolAllowedInScope("bookings__book_slot", scopeOf(["ext-bookings"], ["ext-bookings"]), runtime),
+    ).toBe(true);
+  });
+
+  it("with no lookup passed, every runtime tool stays denied (the fail-closed default)", () => {
+    expect(toolAllowedInScope("bookings__list_slots", scopeOf(["ext-bookings"]))).toBe(false);
+  });
+
+  it("a runtime lookup never rescues a compiled tool the scope drops", () => {
+    // The catalog answers first; a lookup that (wrongly) claimed a compiled
+    // name must not widen it.
+    const liar: RuntimeToolLookup = () => ({ domain: "files", requiresWrite: false });
+    expect(toolAllowedInScope(nameOf("cameras", false), scopeOf(["files"]), liar)).toBe(false);
+  });
+
+  it("both narrowing helpers and the dispatch gate thread the same lookup", () => {
+    const names = ["bookings__list_slots", "bookings__book_slot", "bookings__unknown"];
+    const scope = scopeOf(["ext-bookings"]);
+    expect(narrowToolNamesToScope(names, scope, runtime)).toEqual(["bookings__list_slots"]);
+    expect(
+      narrowToolsToScope(names.map((name) => ({ name })), scope, runtime).map((t) => t.name),
+    ).toEqual(["bookings__list_slots"]);
+    // Dispatch: an out-of-scope REGISTERED runtime tool is refused as forbidden…
+    expect(toolDispatchDenial("bookings__book_slot", {}, scope, runtime)?.code).toBe(
+      "FORBIDDEN_TOOL_FOR_ROLE",
+    );
+    // …an in-scope one passes…
+    expect(toolDispatchDenial("bookings__list_slots", {}, scope, runtime)).toBeNull();
+    // …and an unregistered name still falls through to the WARP-642 guard.
+    expect(toolDispatchDenial("bookings__unknown", {}, scope, runtime)).toBeNull();
+  });
+
+  /**
+   * The PRINCIPAL helpers (both axes) are what chat's catalog build
+   * (`narrowAllowedToolsForRole`) goes through. Without the lookup here, a
+   * scoped family/guest person — or a scoped admin sending `allowed_tools` —
+   * never gets a runtime tool their grant admits, while effective-access
+   * reports the domain as theirs.
+   *
+   * MUTATION: drop the `runtime` argument in `toolAllowedForPrincipal`'s
+   * scope check → red (the principal helpers go back to catalog-only).
+   */
+  it("the principal helpers (tier + scope) thread the same lookup", () => {
+    const names = ["bookings__list_slots", "bookings__book_slot"];
+    const viewScope = scopeOf(["ext-bookings"]);
+    expect(narrowToolNamesForPrincipal(names, "family", viewScope, false, runtime)).toEqual([
+      "bookings__list_slots",
+    ]);
+    expect(narrowToolNamesForPrincipal(names, "admin", viewScope, false, runtime)).toEqual([
+      "bookings__list_slots",
+    ]);
+    expect(
+      narrowToolNamesForPrincipal(
+        names,
+        "admin",
+        scopeOf(["ext-bookings"], ["ext-bookings"]),
+        false,
+        runtime,
+      ),
+    ).toEqual(names);
+    expect(firstToolDeniedForPrincipal(names, "family", viewScope, false, runtime)).toEqual({
+      tool: "bookings__book_slot",
+      axis: "role_grant",
+    });
+    // No lookup passed: the fail-closed default still denies every runtime tool.
+    expect(narrowToolNamesForPrincipal(names, "family", viewScope)).toEqual([]);
+  });
+});
+
+describe("unknownToolsIn / writeToolsIn — optional runtime sets (WARP-2897)", () => {
+  it("a runtime name is known only when passed in extraKnown", () => {
+    expect(unknownToolsIn(["bookings__list_slots"])).toEqual(["bookings__list_slots"]);
+    expect(unknownToolsIn(["bookings__list_slots"], new Set(["bookings__list_slots"]))).toEqual([]);
+    // compiled names stay known either way
+    expect(unknownToolsIn([nameOf("files", false)], new Set())).toEqual([]);
+  });
+
+  it("a runtime name counts as a write only when passed in runtimeWrite", () => {
+    expect(writeToolsIn(["bookings__book_slot"])).toEqual([]);
+    expect(writeToolsIn(["bookings__book_slot"], new Set(["bookings__book_slot"]))).toEqual([
+      "bookings__book_slot",
+    ]);
+  });
+});
+
 describe("lockOperationDenied — mayOperateLocks (§3 locks)", () => {
   const noLocks = scopeOf(["smart-home"], ["smart-home"], false);
   const withLocks = scopeOf(["smart-home"], ["smart-home"], true);
@@ -223,7 +357,7 @@ describe("lockOperationDenied — mayOperateLocks (§3 locks)", () => {
 //
 // WHICH domains each module claims (the calendar/reminders/notifications
 // grouping, knowledge→memory, projects→pm, smart_home→smart-home, and the
-// four unclaimed pass-through domains) is asserted by T3's
+// declared feature-ungated domains, WARP-2742) is asserted by T3's
 // access-catalog.test.ts — that suite owns the grouping and this one does
 // NOT fork it. What is pinned here is the one thing T3 cannot see from the
 // resolved side: that no registry entry names a domain tools-core has never
@@ -542,6 +676,7 @@ describe("firstToolDeniedForPrincipal — the composed A ∧ B pre-flight", () =
 });
 
 interface FakeAttributedRow {
+  username?: string;
   role: string;
   directoryStatus: "ACTIVE" | "DEACTIVATED";
   accessRoleId: string | null;
@@ -572,6 +707,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
       scope: DENY_ALL_TOOL_SCOPE,
       tier: null,
       unresolved: "no_principal",
+      username: null,
     });
   });
 
@@ -582,6 +718,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
       scope: DENY_ALL_TOOL_SCOPE,
       tier: null,
       unresolved: "user_missing",
+      username: null,
     });
   });
 
@@ -600,6 +737,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
       scope: DENY_ALL_TOOL_SCOPE,
       tier: null,
       unresolved: "user_deactivated",
+      username: null,
     });
   });
 
@@ -610,6 +748,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
       scope: DENY_ALL_TOOL_SCOPE,
       tier: null,
       unresolved: "read_failed",
+      username: null,
     });
   });
 
@@ -617,6 +756,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
     await expect(
       resolveAttributedToolAccess(
         fakeAttributedPrisma({
+          username: "olive",
           role: "owner",
           directoryStatus: "ACTIVE",
           accessRoleId: null,
@@ -624,7 +764,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
         }),
         "u1",
       ),
-    ).resolves.toEqual({ scope: null, tier: "owner", unresolved: null });
+    ).resolves.toEqual({ scope: null, tier: "owner", unresolved: null, username: "olive" });
     expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
   });
 
@@ -638,6 +778,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
     await expect(
       resolveAttributedToolAccess(
         fakeAttributedPrisma({
+          username: "fran",
           role: "family",
           directoryStatus: "ACTIVE",
           accessRoleId: null,
@@ -645,7 +786,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
         }),
         "u1",
       ),
-    ).resolves.toEqual({ scope: null, tier: "family", unresolved: null });
+    ).resolves.toEqual({ scope: null, tier: "family", unresolved: null, username: "fran" });
     expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
   });
 
@@ -687,6 +828,64 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
     // `unresolved` stays null — the identity WAS resolved; it is the §3
     // composition that failed, and that already fails closed to DENY_ALL.
     expect(attributed.scope).toEqual(DENY_ALL_TOOL_SCOPE);
+  });
+
+  // WARP-2972 — the scheduler sends the handle as `_meta.userId`; it must be
+  // the SAME row the tier and deactivation were decided on, not a second read.
+  describe("the handle (`username`)", () => {
+    it("comes back for a role holder too, from ONE read that selects it", async () => {
+      resolveEffectiveAccessMock.mockResolvedValue({
+        tier: "admin",
+        toolDomains: ["files"],
+        locks: false,
+      });
+      const prisma = fakeAttributedPrisma({
+        username: "alice",
+        role: "admin",
+        directoryStatus: "ACTIVE",
+        accessRoleId: "r1",
+        accessRole: { toolGrants: [{ domain: "files", level: "use" }] },
+      });
+      const attributed = await resolveAttributedToolAccess(prisma, "u1");
+      expect(attributed.username).toBe("alice");
+      const findUnique = (prisma as unknown as { user: { findUnique: ReturnType<typeof vi.fn> } })
+        .user.findUnique;
+      expect(findUnique).toHaveBeenCalledTimes(1);
+      expect(findUnique.mock.calls[0]![0].select.username).toBe(true);
+    });
+
+    it("is null for every unresolved identity, so a denied person's handle never travels", async () => {
+      for (const row of [
+        null,
+        new Error("db down"),
+        {
+          username: "gone",
+          role: "owner",
+          directoryStatus: "DEACTIVATED",
+          accessRoleId: null,
+          accessRole: null,
+        } as FakeAttributedRow,
+      ]) {
+        const attributed = await resolveAttributedToolAccess(fakeAttributedPrisma(row), "u1");
+        expect(attributed.unresolved).not.toBeNull();
+        expect(attributed.username).toBeNull();
+      }
+    });
+
+    it("is null for a resolved row whose username is blank: the caller refuses, it does not guess", async () => {
+      const attributed = await resolveAttributedToolAccess(
+        fakeAttributedPrisma({
+          username: "",
+          role: "family",
+          directoryStatus: "ACTIVE",
+          accessRoleId: null,
+          accessRole: null,
+        }),
+        "u1",
+      );
+      expect(attributed.unresolved).toBeNull();
+      expect(attributed.username).toBeNull();
+    });
   });
 });
 

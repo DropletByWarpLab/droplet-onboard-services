@@ -195,7 +195,12 @@ droplet_backup_prepare_restic_env() {
 # Recovery guidance for a present-but-unopenable repository. Deliberately
 # advisory: both remedies (restore the old secret / discard the old repo) are
 # destructive in opposite directions, so the operator chooses.
+#
+# Sets DROPLET_BACKUP_KEY_MISMATCH=1 so droplet-backup.sh's exit trap records
+# the EXPLICIT `key_mismatch` state (WARP-1405) rather than a generic failure.
+DROPLET_BACKUP_KEY_MISMATCH=0
 _droplet_backup_log_key_mismatch() {
+  DROPLET_BACKUP_KEY_MISMATCH=1
   log_error "A restic repository EXISTS at $RESTIC_REPOSITORY but the password derived"
   log_error "from this device's DEVICE_SECRET_KEY does not open it."
   log_error "restic: ${1:-wrong password or no key found}"
@@ -206,9 +211,13 @@ _droplet_backup_log_key_mismatch() {
   log_error "keyed to the PREVIOUS secret. Existing snapshots are unreadable until the"
   log_error "old secret is supplied. Refusing to touch the repository."
   log_error ""
-  log_error "Either recover the old snapshots, if the previous DEVICE_SECRET_KEY is"
-  log_error "still available (an .env backup taken before the reset):"
-  log_error "    DEVICE_SECRET_KEY=<old-secret> restic snapshots"
+  log_error "No .env.bak.* / .env.torn.* beside .env holds a key that opens it, so it"
+  log_error "could not be re-keyed automatically (WARP-1405)."
+  log_error ""
+  log_error "Either recover the old snapshots, if a copy of the previous .env exists"
+  log_error "(an .env backup taken before the reset/rotation) — this re-keys the"
+  log_error "repository to the current identity and keeps every snapshot:"
+  log_error "    sudo DROPLET_REPO_ROOT=<checkout> droplet-backup.sh --rekey-from <old .env>"
   log_error "Or, if this device is intentionally starting a fresh identity and the old"
   log_error "snapshots are expendable, move the stale repository aside so the next run"
   log_error "initializes a new one:"
@@ -240,6 +249,11 @@ droplet_backup_ensure_repo() {
   # restic has reworded the surrounding text across versions, but "wrong
   # password" / "no key found" have been constant.
   if _droplet_backup_err_matches "$probe_err" 'wrong password' 'no key found'; then
+    # WARP-1405: the identity rotated but the previous key may still be on
+    # disk — re-key instead of orphaning the snapshot history.
+    if droplet_backup_rekey_from_previous_keys; then
+      return 0
+    fi
     _droplet_backup_log_key_mismatch "$probe_err"
     return 2
   fi
@@ -258,10 +272,192 @@ droplet_backup_ensure_repo() {
   fi
   if [ "$rc" -ne 0 ]; then
     if _droplet_backup_err_matches "$init_out" 'config file already exists' 'already initialized'; then
+      if droplet_backup_rekey_from_previous_keys; then
+        return 0
+      fi
       _droplet_backup_log_key_mismatch "$init_out"
       return 2
     fi
     return "$rc"
   fi
   return 0
+}
+
+# =============================================================================
+# WARP-1405 — KEY LIFECYCLE: a DEVICE_SECRET_KEY rotation re-keys the
+# repository instead of orphaning it.
+#
+# Why re-key rather than a separate, rotation-proof restic secret: the
+# repository password deliberately stays a one-way image of DEVICE_SECRET_KEY.
+# docs/security/crypto-shred.md (row 3) relies on shredding that one key to
+# orphan every snapshot — including off-box targets a factory reset cannot
+# delete — and a second, stable secret would need its own shred step, its own
+# custody and its own TPM sealing (WARP-1033). Re-keying keeps "one device
+# secret, everything derives from it".
+#
+# How a rotation leaves the old key behind: `setup.sh --regenerate-env` and
+# the torn-.env path both copy the previous .env to .env.bak.<epoch> beside the
+# RESOLVED .env (WARP-2624) before writing new secrets. A factory reset shreds
+# those copies on purpose, so a reset still orphans (= crypto-shreds) the
+# repository — exactly as designed. An operator can also hand in an old .env
+# explicitly (droplet-backup.sh --rekey-from FILE → DROPLET_BACKUP_REKEY_FROM).
+#
+# restic keeps ONE master key per repository and wraps it under any number of
+# passwords, so re-keying re-encrypts nothing. The sequence is ordered so that
+# every intermediate state still opens with at least one key:
+#   1. find a candidate old key that opens the repository
+#   2. `restic key add` the current derived password (authenticated by the old)
+#   3. verify the current password opens the repository
+#   4. only then `restic key remove` the OLD key id — a rotation means the old
+#      secret must stop working; a failed remove leaves both keys valid (warn)
+# NEVER deletes, moves or re-initializes a repository.
+# =============================================================================
+
+DROPLET_BACKUP_REKEYED_AT=""
+
+# Candidate files that may hold a previous DEVICE_SECRET_KEY, newest first:
+# the operator-supplied file, then .env.bak.* / .env.torn.* beside both the
+# .env link and its resolved target (mirrors secrets.sh + factory-reset.sh).
+_droplet_backup_previous_env_files() {
+  if [ -n "${DROPLET_BACKUP_REKEY_FROM:-}" ]; then
+    printf '%s\n' "$DROPLET_BACKUP_REKEY_FROM"
+  fi
+  local root env target
+  root="$(droplet_backup_resolve_repo_root 2>/dev/null)" || return 0
+  env="$root/.env"
+  target="$env"
+  if [ -L "$env" ]; then
+    target="$(readlink -f "$env" 2>/dev/null || readlink "$env")"
+  fi
+  # shellcheck disable=SC2012  # names are ours (.env.bak.<epoch>); ls -t is the point.
+  { ls -1t "$env".bak.* "$env".torn.* "$target".bak.* "$target".torn.* 2>/dev/null || true; } \
+    | awk '!seen[$0]++'
+}
+
+# Echo the current key id of the repository as opened by RESTIC_PASSWORD_FILE.
+_droplet_backup_current_key_id() {
+  restic key list --json 2>/dev/null \
+    | tr '}' '\n' | grep '"current":true' | grep -o '"id":"[0-9a-f]*"' | head -n 1 | cut -d'"' -f4
+}
+
+droplet_backup_rekey_from_previous_keys() {
+  local current_pass cand key old_pass old_file old_id tried=" " rc
+  [ -n "${RESTIC_PASSWORD_FILE:-}" ] || return 1
+  current_pass="$(cat "$RESTIC_PASSWORD_FILE" 2>/dev/null)" || return 1
+  old_file="$(dirname "$RESTIC_PASSWORD_FILE")/restic.pass.previous"
+
+  while IFS= read -r cand; do
+    [ -f "$cand" ] || continue
+    key="$( { grep -E '^DEVICE_SECRET_KEY=' "$cand" 2>/dev/null || true; } | head -n 1 | cut -d= -f2-)"
+    [ -n "$key" ] || continue
+    old_pass="$(DEVICE_SECRET_KEY="$key" droplet_backup_derive_password 2>/dev/null)" || continue
+    # Same identity as now, or a key already tried from another copy.
+    [ "$old_pass" = "$current_pass" ] && continue
+    case "$tried" in *" $old_pass "*) continue ;; esac
+    tried="$tried$old_pass "
+
+    ( umask 077 && printf '%s' "$old_pass" > "$old_file" )
+    if ! RESTIC_PASSWORD_FILE="$old_file" restic cat config >/dev/null 2>&1; then
+      continue
+    fi
+
+    log_warn "restic repository $RESTIC_REPOSITORY is keyed to a PREVIOUS DEVICE_SECRET_KEY"
+    log_warn "  (found in $(basename "$cand")) — re-keying it to the current identity (WARP-1405)"
+    old_id="$(RESTIC_PASSWORD_FILE="$old_file" _droplet_backup_current_key_id)"
+
+    rc=0
+    RESTIC_PASSWORD_FILE="$old_file" restic key add --new-password-file "$RESTIC_PASSWORD_FILE" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ] || ! restic cat config >/dev/null 2>&1; then
+      rm -f "$old_file"
+      log_error "re-key FAILED (restic key add rc=$rc) — repository untouched, still keyed to the previous identity"
+      return 1
+    fi
+
+    if [ -n "$old_id" ] && restic key remove "$old_id" >/dev/null 2>&1; then
+      log_success "re-keyed $RESTIC_REPOSITORY to the current identity; previous key ${old_id:0:8} removed"
+    else
+      log_warn "re-keyed $RESTIC_REPOSITORY, but could not remove the previous key ${old_id:0:8}"
+      log_warn "  — the previous DEVICE_SECRET_KEY still opens it. Remove by hand:"
+      log_warn "    restic key list   # then: restic key remove <non-current id>"
+    fi
+    rm -f "$old_file"
+    DROPLET_BACKUP_REKEYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    logger -t droplet-backup -p daemon.warning \
+      "restic repository $RESTIC_REPOSITORY re-keyed to the current DEVICE_SECRET_KEY (WARP-1405)" 2>/dev/null || true
+    return 0
+  done < <(_droplet_backup_previous_env_files)
+
+  rm -f "$old_file"
+  return 1
+}
+
+# =============================================================================
+# WARP-1405 — EXPLICIT backup status for the orchestrator's backup-health job.
+#
+#   $DROPLET_BACKUP_STATUS_DIR/status.json   (default /var/lib/droplet/backup-status)
+#   {
+#     "state": "ok" | "failed" | "key_mismatch" | "pending",   ← explicit enum
+#     "reason":        why the last attempt failed ("" when ok/pending),
+#     "since":         first time this box ever recorded a status (the
+#                      window anchor before any success exists),
+#     "lastAttemptAt", "lastSuccessAt", "lastFailureAt", "lastRekeyAt": ISO|null
+#   }
+#
+# A dedicated directory — NOT the state dir, which holds the staged pg_dumps —
+# because it is bind-mounted read-only into the orchestrator. The file carries
+# no secret: timestamps, the enum, and a reason we author (never raw restic
+# output, which can echo paths and key ids).
+#
+# $1 = state, $2 = reason, $3 = "bump" (default) records an attempt; anything
+# else rewrites the file without claiming a run happened (--check-key).
+# =============================================================================
+_droplet_backup_json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n\t' '  '
+}
+
+# Previous value of a string field in the status file ("" when absent/null).
+droplet_backup_status_field() {
+  local file="${DROPLET_BACKUP_STATUS_DIR:-/var/lib/droplet/backup-status}/status.json"
+  [ -f "$file" ] || return 0
+  { grep -o "\"$1\": *\"[^\"]*\"" "$file" 2>/dev/null || true; } | head -n 1 | sed 's/^[^:]*: *"\(.*\)"$/\1/'
+}
+
+droplet_backup_write_status() {
+  local state="$1" reason="${2:-}" bump="${3:-bump}"
+  local dir="${DROPLET_BACKUP_STATUS_DIR:-/var/lib/droplet/backup-status}"
+  local now since last_attempt last_success last_failure last_rekey tmp
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  since="$(droplet_backup_status_field since)"
+  last_attempt="$(droplet_backup_status_field lastAttemptAt)"
+  last_success="$(droplet_backup_status_field lastSuccessAt)"
+  last_failure="$(droplet_backup_status_field lastFailureAt)"
+  last_rekey="${DROPLET_BACKUP_REKEYED_AT:-$(droplet_backup_status_field lastRekeyAt)}"
+  since="${since:-$now}"
+  if [ "$bump" = "bump" ]; then
+    last_attempt="$now"
+    case "$state" in
+      ok) last_success="$now" ;;
+      failed|key_mismatch) last_failure="$now" ;;
+    esac
+  fi
+  _q() { if [ -n "$1" ]; then printf '"%s"' "$(_droplet_backup_json_escape "$1")"; else printf 'null'; fi; }
+
+  mkdir -p "$dir" || return 0
+  chmod 755 "$dir" 2>/dev/null || true
+  tmp="$dir/status.json.tmp.$$"
+  cat > "$tmp" <<STATUS
+{
+  "schema": 1,
+  "state": "$state",
+  "reason": "$(_droplet_backup_json_escape "$reason")",
+  "since": $(_q "$since"),
+  "lastAttemptAt": $(_q "$last_attempt"),
+  "lastSuccessAt": $(_q "$last_success"),
+  "lastFailureAt": $(_q "$last_failure"),
+  "lastRekeyAt": $(_q "$last_rekey"),
+  "repository": $(_q "${RESTIC_REPOSITORY:-}")
+}
+STATUS
+  chmod 644 "$tmp"
+  mv "$tmp" "$dir/status.json"
 }

@@ -25,7 +25,9 @@ import {
 } from "../column-crypto.service.js";
 import { sealTokenCache } from "./token-cache.js";
 import {
+  beginAuthCodeConnect,
   beginDeviceCodeConnect,
+  completeAuthCodeConnect,
   disconnect,
   getAccessToken,
   type EntraAuthResult,
@@ -36,6 +38,10 @@ const TEST_KEY = Buffer.alloc(32, 2).toString("base64");
 const USER_ID = "55555555-5555-4555-8555-555555555555";
 const SEEDED_CACHE = "SEEDED-MSAL-CACHE-BLOB";
 const SEEDED_TOKEN = "SEEDED-ACCESS-TOKEN";
+const APP = {
+  clientId: "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0",
+  tenantId: "9a8b7c6d-5e4f-4321-8fed-cba987654321",
+};
 
 function authResult(overrides: Partial<EntraAuthResult> = {}): EntraAuthResult {
   return {
@@ -56,8 +62,8 @@ function stubPrisma(row: Record<string, unknown> | null) {
     _row: () => current,
     m365Connection: {
       findUnique: vi.fn(async () => current),
-      upsert: vi.fn(async () => {
-        current = { ...(current ?? {}), state: "PENDING_CONSENT" };
+      upsert: vi.fn(async ({ update }: { update: Record<string, unknown> }) => {
+        current = { ...(current ?? {}), ...update };
         return current;
       }),
       updateMany: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
@@ -68,6 +74,9 @@ function stubPrisma(row: Record<string, unknown> | null) {
         current = { ...(current ?? {}), ...data };
         return current;
       }),
+    },
+    m365DeltaCursor: {
+      deleteMany: vi.fn(async () => ({ count: 0 })),
     },
   };
 }
@@ -93,7 +102,7 @@ describe("connect", () => {
   it("writes exactly one row when the sign-in completes", async () => {
     const prisma = stubPrisma({ userId: USER_ID, state: "DISCONNECTED" });
     const entra: EntraClient = {
-      acquireByDeviceCode: vi.fn(async ({ onCode }) => {
+      acquireByDeviceCode: vi.fn(async (_app, { onCode }) => {
         onCode({
           userCode: "ABC-123",
           verificationUri: "https://microsoft.com/devicelogin",
@@ -103,9 +112,11 @@ describe("connect", () => {
         return authResult();
       }),
       acquireSilent: vi.fn(),
+      getAuthCodeUrl: vi.fn(),
+      acquireByAuthorizationCode: vi.fn(),
     };
 
-    await beginDeviceCodeConnect(prisma as never, entra, USER_ID);
+    await beginDeviceCodeConnect(prisma as never, entra, USER_ID, { app: APP });
     // The completion runs after the promise the caller awaits resolves.
     await new Promise((r) => setTimeout(r, 0));
 
@@ -122,7 +133,7 @@ describe("connect", () => {
     prisma.m365Connection.updateMany.mockResolvedValue({ count: 0 } as never);
 
     const entra: EntraClient = {
-      acquireByDeviceCode: vi.fn(async ({ onCode }) => {
+      acquireByDeviceCode: vi.fn(async (_app, { onCode }) => {
         onCode({
           userCode: "ABC-123",
           verificationUri: "https://microsoft.com/devicelogin",
@@ -132,12 +143,63 @@ describe("connect", () => {
         return authResult();
       }),
       acquireSilent: vi.fn(),
+      getAuthCodeUrl: vi.fn(),
+      acquireByAuthorizationCode: vi.fn(),
     };
 
-    await beginDeviceCodeConnect(prisma as never, entra, USER_ID);
+    await beginDeviceCodeConnect(prisma as never, entra, USER_ID, { app: APP });
     await new Promise((r) => setTimeout(r, 0));
 
     expect(rows("Microsoft 365 connected")).toHaveLength(0);
+  });
+});
+
+describe("connect by authorization code (WARP-2704)", () => {
+  function authCodeEntra(): EntraClient {
+    return {
+      getAuthCodeUrl: vi.fn(async () => "https://login.example/authorize"),
+      acquireByAuthorizationCode: vi.fn(async () => authResult()),
+      acquireByDeviceCode: vi.fn(),
+      acquireSilent: vi.fn(),
+    };
+  }
+
+  it("writes exactly one connected row when the callback completes", async () => {
+    const prisma = stubPrisma({ userId: USER_ID, state: "DISCONNECTED" });
+    const entra = authCodeEntra();
+    const { state } = await beginAuthCodeConnect(prisma as never, entra, USER_ID, {
+      app: APP,
+      redirectUri: "https://droplet-ai.local/api/m365/callback",
+    });
+    await completeAuthCodeConnect(prisma as never, entra, {
+      state,
+      browserState: state,
+      code: "SEEDED-AUTH-CODE",
+    });
+
+    // Mutation: stop persistConnected auditing on this path → red.
+    expect(rows("Microsoft 365 connected")).toHaveLength(1);
+  });
+
+  it("never records the state, the code or the verifier", async () => {
+    const prisma = stubPrisma({ userId: USER_ID, state: "DISCONNECTED" });
+    const entra = authCodeEntra();
+    const { state } = await beginAuthCodeConnect(prisma as never, entra, USER_ID, {
+      app: APP,
+      redirectUri: "https://droplet-ai.local/api/m365/callback",
+    });
+    await completeAuthCodeConnect(prisma as never, entra, {
+      state,
+      browserState: state,
+      code: "SEEDED-AUTH-CODE",
+    });
+
+    const everything = JSON.stringify(allRows());
+    expect(everything).not.toContain(state);
+    expect(everything).not.toContain("SEEDED-AUTH-CODE");
+    const verifier = vi.mocked(entra.acquireByAuthorizationCode).mock.calls[0]![1].codeVerifier;
+    expect(everything).not.toContain(verifier);
+    expect(everything).not.toContain(SEEDED_CACHE);
   });
 });
 
@@ -212,7 +274,7 @@ describe("redaction", () => {
   it("never records a token, a cache blob, or a device code", async () => {
     const prisma = stubPrisma({ userId: USER_ID, state: "DISCONNECTED" });
     const entra: EntraClient = {
-      acquireByDeviceCode: vi.fn(async ({ onCode }) => {
+      acquireByDeviceCode: vi.fn(async (_app, { onCode }) => {
         onCode({
           userCode: "SEEDED-DEVICE-CODE",
           verificationUri: "https://microsoft.com/devicelogin",
@@ -222,9 +284,11 @@ describe("redaction", () => {
         return authResult();
       }),
       acquireSilent: vi.fn(),
+      getAuthCodeUrl: vi.fn(),
+      acquireByAuthorizationCode: vi.fn(),
     };
 
-    await beginDeviceCodeConnect(prisma as never, entra, USER_ID);
+    await beginDeviceCodeConnect(prisma as never, entra, USER_ID, { app: APP });
     await new Promise((r) => setTimeout(r, 0));
     await disconnect(prisma as never, USER_ID);
 

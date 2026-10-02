@@ -12,8 +12,9 @@
  *   - `keyword`  → `searchByLexical`, NEVER touches the gRPC embed. Works
  *                  when the AI gateway is down (the headline win).
  *   - `hybrid`   → embed once, then `searchHybrid` (no rerank pipe).
- *   - `semantic` (or omitted) → the existing inline DISTINCT ON pgvector
- *                  SQL, unchanged (regression lock).
+ *   - `semantic` (or omitted) → embed once, then `searchByVector` + per-file
+ *                  dedupe (WARP-3193 ARCH-2; was an inline DISTINCT ON copy
+ *                  of the vector query that had drifted from the service).
  *   - anything else → 400.
  */
 
@@ -64,17 +65,29 @@ vi.mock("../services/ai-gateway.grpc-client.js", () => ({
 }));
 
 // ─────────────────────────────────────────────────────────────────────────
-// Mock the lexical/hybrid engine (already shipped, WARP-286).
+// Mock the lexical/hybrid engine (already shipped, WARP-286), and the vector
+// arm semantic mode now calls (WARP-3193 ARCH-2).
 // ─────────────────────────────────────────────────────────────────────────
-const { searchByLexicalSpy, searchHybridSpy } = vi.hoisted(() => ({
+const { searchByLexicalSpy, searchHybridSpy, searchByVectorSpy } = vi.hoisted(() => ({
   searchByLexicalSpy: vi.fn(),
   searchHybridSpy: vi.fn(),
+  searchByVectorSpy: vi.fn(),
 }));
 
 vi.mock("../services/file-search.service.js", () => ({
   searchByLexical: (...args: unknown[]) => searchByLexicalSpy(...args),
   searchHybrid: (...args: unknown[]) => searchHybridSpy(...args),
+  searchByVector: (...args: unknown[]) => searchByVectorSpy(...args),
 }));
+
+/** A `SearchHit` as searchByVector returns it (snippet, not full text). */
+const vhit = (path: string, score: number, snippet: string) => ({
+  path,
+  score,
+  snippet,
+  source: "nextcloud",
+  chunkIdx: 0,
+});
 
 // ─────────────────────────────────────────────────────────────────────────
 // WARP-940 — keyword mode unions a Nextcloud NAME match (substring) with the
@@ -192,7 +205,7 @@ vi.mock("@prisma/client", () => {
   }).$transaction;
 
   return {
-    PrismaClient: vi.fn(() => mockPrisma),
+    PrismaClient: vi.fn(function () { return mockPrisma; }),
     Prisma: { PrismaClientKnownRequestError },
   };
 });
@@ -214,6 +227,7 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     isGrpcAvailableSpy.mockReset();
     searchByLexicalSpy.mockReset();
     searchHybridSpy.mockReset();
+    searchByVectorSpy.mockReset();
     queryRawUnsafeMock.mockReset();
     cacheGetSpy.mockReset();
     cacheSetSpy.mockReset();
@@ -296,31 +310,46 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     expect(res.body.results[0]).toEqual({ path: "/Docs/c.txt", score: 0.8, text: "gamma" });
   });
 
-  // ── 4. semantic / omitted runs the inline pgvector SQL (regression lock) ─
-  it("semantic mode runs the inline pgvector $queryRawUnsafe and never the service helpers", async () => {
+  // ── 4. semantic / omitted runs searchByVector (WARP-3193 ARCH-2) ────────
+  // The route used to carry its own copy of the vector query. It ordered by
+  // ("ncFileId", embedding <=> $1) for DISTINCT ON, which the HNSW index
+  // cannot serve (a sequential scan per search), and it skipped the service's
+  // SET LOCAL hnsw.ef_search and decrypt-on-read.
+  it("semantic mode calls searchByVector, dedupes per file, and runs no raw SQL of its own", async () => {
     grpcEmbedSpy.mockResolvedValueOnce([[0.4, 0.5, 0.6]]);
-    queryRawUnsafeMock.mockResolvedValueOnce([
-      { path: "/Docs/d.txt", score: 0.99, text: "delta" },
+    searchByVectorSpy.mockResolvedValueOnce([
+      vhit("/Docs/d.txt", 0.99, "delta"),
+      vhit("/Docs/f.txt", 0.9, "foxtrot"),
+      vhit("/Docs/d.txt", 0.8, "worse delta"),
     ]);
 
-    const res = await request(app).get("/api/files/search/content?q=delta&mode=semantic");
+    const res = await request(app).get("/api/files/search/content?q=delta&mode=semantic&limit=10");
 
     expect(res.status).toBe(200);
-    expect(queryRawUnsafeMock).toHaveBeenCalledTimes(1);
-    expect(queryRawUnsafeMock.mock.calls[0][0]).toContain("DISTINCT ON");
+    expect(queryRawUnsafeMock).not.toHaveBeenCalled();
     expect(searchByLexicalSpy).not.toHaveBeenCalled();
     expect(searchHybridSpy).not.toHaveBeenCalled();
-    expect(res.body.results[0]).toEqual({ path: "/Docs/d.txt", score: 0.99, text: "delta" });
+    expect(searchByVectorSpy).toHaveBeenCalledTimes(1);
+    const params = searchByVectorSpy.mock.calls[0][1];
+    expect(params.vector).toEqual([0.4, 0.5, 0.6]);
+    expect(params.limit).toBe(10 * 5); // over-fetched so dedupe has headroom
+    // The inline query had no similarity floor; keep it that way.
+    expect(params.minSimilarity).toBe(-1);
+    // Response shape unchanged: { path, score, text }, one row per file.
+    expect(res.body.results).toEqual([
+      { path: "/Docs/d.txt", score: 0.99, text: "delta" },
+      { path: "/Docs/f.txt", score: 0.9, text: "foxtrot" },
+    ]);
   });
 
-  it("omitted mode defaults to semantic (inline pgvector SQL)", async () => {
+  it("omitted mode defaults to semantic (searchByVector)", async () => {
     grpcEmbedSpy.mockResolvedValueOnce([[0.7, 0.8, 0.9]]);
-    queryRawUnsafeMock.mockResolvedValueOnce([{ path: "/Docs/e.txt", score: 0.7, text: "epsilon" }]);
+    searchByVectorSpy.mockResolvedValueOnce([vhit("/Docs/e.txt", 0.7, "epsilon")]);
 
     const res = await request(app).get("/api/files/search/content?q=epsilon");
 
     expect(res.status).toBe(200);
-    expect(queryRawUnsafeMock).toHaveBeenCalledTimes(1);
+    expect(searchByVectorSpy).toHaveBeenCalledTimes(1);
     expect(searchByLexicalSpy).not.toHaveBeenCalled();
   });
 
@@ -330,6 +359,7 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     expect(res.status).toBe(400);
     expect(grpcEmbedSpy).not.toHaveBeenCalled();
     expect(searchByLexicalSpy).not.toHaveBeenCalled();
+    expect(searchByVectorSpy).not.toHaveBeenCalled();
     expect(queryRawUnsafeMock).not.toHaveBeenCalled();
   });
 
@@ -361,7 +391,7 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
       { path: "/Docs/k.txt", score: 0.9, snippet: "k", source: "nextcloud", chunkIdx: 0 },
     ]);
     grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
-    queryRawUnsafeMock.mockResolvedValueOnce([{ path: "/Docs/s.txt", score: 0.9, text: "s" }]);
+    searchByVectorSpy.mockResolvedValueOnce([vhit("/Docs/s.txt", 0.9, "s")]);
 
     await request(app).get("/api/files/search/content?q=same&mode=keyword&limit=20");
     await request(app).get("/api/files/search/content?q=same&mode=semantic&limit=20");
@@ -387,14 +417,14 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
       { id: "dept-1", kind: "DEPARTMENT", aclVersion: 1 },
     ]);
     grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
-    queryRawUnsafeMock.mockResolvedValueOnce([]);
+    searchByVectorSpy.mockResolvedValueOnce([]);
     await request(app).get("/api/files/search/content?q=vbump&mode=semantic");
 
     departmentFindManyMock.mockResolvedValueOnce([
       { id: "dept-1", kind: "DEPARTMENT", aclVersion: 2 },
     ]);
     grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
-    queryRawUnsafeMock.mockResolvedValueOnce([]);
+    searchByVectorSpy.mockResolvedValueOnce([]);
     await request(app).get("/api/files/search/content?q=vbump&mode=semantic");
 
     const getKeys = cacheGetSpy.mock.calls
@@ -590,7 +620,7 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
 
   it("semantic mode does NOT run the name arm (keyword-only behaviour)", async () => {
     grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
-    queryRawUnsafeMock.mockResolvedValueOnce([{ path: "/Docs/s.txt", score: 0.9, text: "s" }]);
+    searchByVectorSpy.mockResolvedValueOnce([vhit("/Docs/s.txt", 0.9, "s")]);
     await request(app).get("/api/files/search/content?q=same&mode=semantic");
     expect(ncSearchFilesSpy).not.toHaveBeenCalled();
   });
@@ -603,15 +633,14 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     // ncFileId=0, so DISTINCT ON ("ncFileId") collapsed them into one bogus
     // result. The corpus must match keyword/hybrid (source: nextcloud).
     grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
-    queryRawUnsafeMock.mockResolvedValueOnce([]);
+    searchByVectorSpy.mockResolvedValueOnce([]);
 
     const res = await request(app).get(
       "/api/files/search/content?q=corpus&mode=semantic",
     );
 
     expect(res.status).toBe(200);
-    const sql = queryRawUnsafeMock.mock.calls[0][0] as string;
-    expect(sql).toContain(`"source" = 'nextcloud'`);
+    expect(searchByVectorSpy.mock.calls[0][1].source).toBe("nextcloud");
   });
 
   // WARP-1264: HOUSEHOLD is dual-sentinelled during rollout — both the
@@ -623,8 +652,8 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
       { id: "hh-uuid", kind: "HOUSEHOLD", aclVersion: 3 },
     ]);
     grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
-    queryRawUnsafeMock.mockResolvedValueOnce([
-      { path: "/Household/Trips/burrito.txt", score: 0.9, text: "burrito notes" },
+    searchByVectorSpy.mockResolvedValueOnce([
+      vhit("/Household/Trips/burrito.txt", 0.9, "burrito notes"),
     ]);
 
     const res = await request(app).get(
@@ -633,11 +662,9 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.results[0].path).toBe("/Household/Trips/burrito.txt");
-    // Bind args: $1 vector literal, then the corpus owner list, then limit.
-    const args = queryRawUnsafeMock.mock.calls[0].slice(1);
-    expect(args).toContain("dev");
-    expect(args).toContain("__household__");
-    expect(args).toContain("__dept_hh-uuid__");
+    const params = searchByVectorSpy.mock.calls[0][1];
+    expect(params.userId).toBe("dev");
+    expect(params.additionalUserIds).toEqual(["__household__", "__dept_hh-uuid__"]);
   });
 
   it("includes both household sentinel forms in keyword search when the caller is visible into the HOUSEHOLD department", async () => {
@@ -737,8 +764,8 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
     // …but an on-demand init succeeds (gateway IS reachable).
     initGrpcClientSpy.mockResolvedValue(true);
     grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
-    queryRawUnsafeMock.mockResolvedValueOnce([
-      { path: "/Docs/Dental Hygenists/plan.txt", score: 0.93, text: "dental hygiene plan" },
+    searchByVectorSpy.mockResolvedValueOnce([
+      vhit("/Docs/Dental Hygenists/plan.txt", 0.93, "dental hygiene plan"),
     ]);
 
     const res = await request(app).get(
@@ -810,7 +837,7 @@ describe("GET /api/files/search/content — mode matrix (WARP-880)", () => {
 
   it("answers 503 + code semantic_unavailable when pgvector is missing (WARP-1914)", async () => {
     grpcEmbedSpy.mockResolvedValueOnce([[0.1, 0.2, 0.3]]);
-    queryRawUnsafeMock.mockRejectedValueOnce(
+    searchByVectorSpy.mockRejectedValueOnce(
       new Error('type "vector" does not exist'),
     );
 

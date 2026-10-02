@@ -72,6 +72,9 @@ export interface PersistedMessageInput {
    * submits when the user retries a transient network failure.
    */
   turnId?: string | null;
+  /** WARP-3300 — defaults to `message`; `agent_run_result` carries `meta`. */
+  kind?: "message" | "agent_run_result";
+  meta?: Prisma.InputJsonValue | null;
 }
 
 export interface PersistedConversationSummary {
@@ -119,6 +122,10 @@ export interface PersistedConversationDetail extends PersistedConversationSummar
      */
     model: string | null;
     provider: string | null;
+    /** WARP-3300 — `agent_run_result` rows are a background run reporting
+     *  back; `meta` is then {runId, status, title, summary, artifacts}. */
+    kind: "message" | "agent_run_result";
+    meta: unknown;
   }>;
 }
 
@@ -181,6 +188,8 @@ export class ChatPersistenceService {
         // WARP-904 — per-message audit trail (see PersistedConversationDetail).
         model: m.model ?? null,
         provider: m.provider ?? null,
+        kind: m.kind as "message" | "agent_run_result",
+        meta: m.meta ?? null,
       })),
     };
   }
@@ -241,6 +250,40 @@ export class ChatPersistenceService {
       }
     }
     return [...names];
+  }
+
+  /**
+   * WARP-3348 — the tools the PREVIOUS assistant turn of this conversation
+   * actually ran: ok, and not a pending approval (persisted with ok:true so
+   * its chip renders). The action-claim check lets a send or delete claim in
+   * this turn ("Yes, I've sent it") stand on those; nothing older counts.
+   * `currentAssistantMessageId` is this turn's own row, already created.
+   */
+  async getPreviousTurnRanToolNames(
+    conversationId: string,
+    userId: string,
+    currentAssistantMessageId: string | null,
+  ): Promise<string[]> {
+    const [row] = await this.prisma.chatMessage.findMany({
+      where: {
+        sessionId: conversationId,
+        session: { userId },
+        role: "assistant",
+        ...(currentAssistantMessageId ? { id: { not: currentAssistantMessageId } } : {}),
+      },
+      select: { toolCalls: true },
+      orderBy: { createdAt: "desc" },
+      take: 1,
+    });
+    const calls = row?.toolCalls as unknown as PersistedToolCall[] | null | undefined;
+    if (!Array.isArray(calls)) return [];
+    return [
+      ...new Set(
+        calls
+          .filter((c) => c && typeof c.name === "string" && c.ok === true && c.status !== "confirmation_required")
+          .map((c) => c.name),
+      ),
+    ];
   }
 
   /**
@@ -510,16 +553,33 @@ export class ChatPersistenceService {
     if (args.conversationId) {
       const existing = await this.prisma.chatSession.findFirst({
         where: { id: args.conversationId, userId: args.userId },
-        select: { id: true, systemPrompt: true },
+        select: { id: true, systemPrompt: true, model: true },
       });
       if (existing) {
+        const data: {
+          systemPrompt?: string | null;
+          model?: string;
+          provider?: string | null;
+        } = {};
         if (
           args.systemPrompt !== undefined &&
           existing.systemPrompt !== args.systemPrompt
         ) {
+          data.systemPrompt = args.systemPrompt;
+        }
+        // WARP-3048 — the latest turn's model wins, like the prompt above.
+        // The chat page restores its picker from this column, so stamping
+        // it only at creation reopened every thread on its FIRST turn's
+        // model and silently undid a mid-conversation switch. The provider
+        // moves with it so the pair never goes internally inconsistent.
+        if (args.model && existing.model !== args.model) {
+          data.model = args.model;
+          data.provider = args.provider ?? null;
+        }
+        if (Object.keys(data).length > 0) {
           await this.prisma.chatSession.update({
             where: { id: existing.id },
-            data: { systemPrompt: args.systemPrompt },
+            data,
           });
         }
         return { id: existing.id, created: false };
@@ -566,6 +626,14 @@ export class ChatPersistenceService {
    * case — if the assistant row is already `completed`, it's safe to no-op
    * the entire route.
    *
+   * WARP-3193 PERF-9 — the database now holds that key unique (partial index
+   * `ChatMessage_sessionId_turnId_role_key`). A concurrent submit of the same
+   * turn that passes the check before the other commits hits P2002 on its
+   * insert; that aborts its transaction, so it re-runs once and returns the
+   * turn the winner created. `assistantInFlight` is true whenever the turn
+   * already existed with its assistant row still `streaming` — an agent loop
+   * is running for it, and callers MUST NOT start a second one.
+   *
    * Returns the row IDs so the route can:
    *   - put `X-Assistant-Message-Id` on the response header (lets the
    *     client tie the in-flight stream to a persisted row), and
@@ -590,7 +658,20 @@ export class ChatPersistenceService {
     userMessageId: string;
     assistantMessageId: string;
     assistantAlreadyFinal: boolean;
+    assistantInFlight: boolean;
   }> {
+    try {
+      return await this.createTurnRowsOnce(args);
+    } catch (err) {
+      if (!args.turnId || (err as { code?: unknown } | null)?.code !== "P2002") throw err;
+      // Lost the race: the winner's transaction committed this turn's rows.
+      return this.createTurnRowsOnce(args);
+    }
+  }
+
+  private async createTurnRowsOnce(
+    args: Parameters<ChatPersistenceService["createTurnRows"]>[0],
+  ): ReturnType<ChatPersistenceService["createTurnRows"]> {
     return this.prisma.$transaction(async (tx) => {
       const findRow = async (role: "user" | "assistant") =>
         args.turnId
@@ -649,6 +730,7 @@ export class ChatPersistenceService {
           assistantRow.status === "completed" ||
           assistantRow.status === "failed" ||
           assistantRow.status === "aborted",
+        assistantInFlight: existingAssistant !== null && existingAssistant.status === "streaming",
       };
     });
   }
@@ -777,6 +859,8 @@ export class ChatPersistenceService {
                 : Prisma.JsonNull,
             toolCallId: m.toolCallId ?? null,
             turnId: m.turnId ?? null,
+            kind: m.kind ?? "message",
+            meta: m.meta ?? Prisma.JsonNull,
           },
         });
       }

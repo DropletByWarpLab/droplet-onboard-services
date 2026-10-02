@@ -19,6 +19,11 @@
  *     overall timeout — a pull legitimately runs for minutes, so only the
  *     connect-level defaults (undici) and the caller's AbortSignal bound it.
  *
+ *   - `readPullRefusal()` — WARP-3046: when that pull is refused before any
+ *     progress, translate the sidecar's FastAPI error body into the
+ *     orchestrator's own typed refusal, so a disk 409 or the runtime's own
+ *     reason reaches the dashboard as a string it can show.
+ *
  * ADR-003 note: nothing here touches model CHOICE. Pulls only install; the
  * active-model setting is a separate control-plane preference (WARP-1112).
  */
@@ -70,7 +75,19 @@ export interface CatalogModelEntry {
 }
 
 export interface EligibleCatalog {
+  /** GB the sidecar will size downloads against. `null` = UNKNOWN (WARP-3046:
+   *  nothing could size the box — e.g. an NVIDIA card with the device-bridge
+   *  down), which is not the same as 0. */
   detected_vram_gb: number | null;
+  /** Where `detected_vram_gb` came from: override | device_bridge |
+   *  dgpu_sysfs | unified_memory — `null` when unknown or not reported. */
+  vram_source: string | null;
+  /** The sidecar could not read the runtime's installed list, so every
+   *  `pulled` flag below is unconfirmed (all read false). */
+  tags_unreachable: boolean;
+  /** The sidecar served a last-known-good or empty manifest because the
+   *  shipped one failed to load. */
+  degraded_manifest: boolean;
   models: CatalogModelEntry[];
 }
 
@@ -130,6 +147,13 @@ export async function fetchEligibleCatalog(): Promise<EligibleCatalog> {
   const rawModels = Array.isArray(body?.models) ? body.models : [];
   return {
     detected_vram_gb: readNumber(body?.detected_vram_gb),
+    // WARP-3046: the three flags below were dropped here, so an empty
+    // catalog could never say WHY it was empty (unknown VRAM, an unreadable
+    // inventory, a broken manifest). Strict `=== true`: an older sidecar that
+    // doesn't send one reads as "not flagged", never as a guess.
+    vram_source: readString(body?.vram_source),
+    tags_unreachable: body?.tags_unreachable === true,
+    degraded_manifest: body?.degraded_manifest === true,
     models: rawModels
       .map(parseEntry)
       .filter((m): m is CatalogModelEntry => m !== null),
@@ -161,4 +185,103 @@ export async function openPullStream(
     body: JSON.stringify({ model }),
     signal,
   });
+}
+
+/** Generic copy for a refusal that carried no reason of its own. */
+const PULL_FAILED_FALLBACK =
+  "The download couldn't be started. Try again in a moment.";
+
+/** A runtime reason is shown to an admin verbatim — bound it so a runaway
+ *  upstream body can't flood the page or the audit row. */
+const MAX_REASON_CHARS = 500;
+
+export type PullRefusal =
+  | {
+      status: 409;
+      body: {
+        error: "insufficient_disk";
+        detail: string;
+        needed_gb: number;
+        free_gb: number;
+      };
+    }
+  | { status: 502; body: { error: "pull_failed"; detail: string } };
+
+/** The human-readable reason inside one FastAPI `detail`, or null. A string
+ *  may itself be the runtime's JSON body relayed verbatim — DMR answers a
+ *  pre-stream failure with 500 `{"error":"Failed to pull model: …"}`, which
+ *  the sidecar re-raises as `detail: "<that body>"` — so unwrap its `error`. */
+function refusalReason(detail: unknown): string | null {
+  if (typeof detail === "string") {
+    const text = detail.trim();
+    if (!text) return null;
+    try {
+      const inner = JSON.parse(text) as unknown;
+      if (inner && typeof inner === "object") {
+        const reason = readString((inner as Record<string, unknown>).error);
+        if (reason) return reason;
+      }
+    } catch {
+      /* not JSON — the text is the reason */
+    }
+    return text;
+  }
+  if (detail && typeof detail === "object") {
+    return readString((detail as Record<string, unknown>).error);
+  }
+  return null;
+}
+
+/**
+ * WARP-3046 — turn the sidecar's non-2xx answer to POST /models/pull into the
+ * orchestrator's own typed refusal (cross-lane contract C2). Consumes the body.
+ *
+ * The sidecar is FastAPI, so every refusal is `{"detail": X}`:
+ *  - the disk preflight's 409 carries X as an OBJECT `{error, needed_gb,
+ *    free_gb}` — it used to be relayed verbatim, and the dashboard rendered
+ *    that object as a React child and crashed the page. It becomes
+ *    409 `insufficient_disk` with a STRING `detail` plus the two numbers;
+ *  - anything else carries the runtime's own reason (a bad tag, no egress,
+ *    a registry rate limit), previously flattened into "try again". It
+ *    becomes 502 `pull_failed` with that reason as `detail`.
+ * `detail` is always a non-empty string, whatever the upstream sent.
+ */
+export async function readPullRefusal(upstream: Response): Promise<PullRefusal> {
+  const text = await upstream.text().catch(() => "");
+  let detail: unknown = text;
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    detail =
+      parsed && typeof parsed === "object" && "detail" in parsed
+        ? (parsed as Record<string, unknown>).detail
+        : parsed;
+  } catch {
+    /* not JSON — the raw text is the detail */
+  }
+
+  if (upstream.status === 409 && detail && typeof detail === "object") {
+    const d = detail as Record<string, unknown>;
+    const neededGb = readNumber(d.needed_gb);
+    const freeGb = readNumber(d.free_gb);
+    if (d.error === "insufficient_disk" && neededGb !== null && freeGb !== null) {
+      return {
+        status: 409,
+        body: {
+          error: "insufficient_disk",
+          detail: `Not enough free space for this download: it needs ${neededGb} GB free and ${freeGb} GB is available.`,
+          needed_gb: neededGb,
+          free_gb: freeGb,
+        },
+      };
+    }
+  }
+
+  const reason = refusalReason(detail);
+  return {
+    status: 502,
+    body: {
+      error: "pull_failed",
+      detail: reason ? reason.slice(0, MAX_REASON_CHARS) : PULL_FAILED_FALLBACK,
+    },
+  };
 }

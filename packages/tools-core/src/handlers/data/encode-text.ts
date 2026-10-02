@@ -89,7 +89,7 @@ const tool: Tool = {
   name: "encode_text",
   description:
     `Encode text as 'base64', 'base64url', 'hex', or 'url' (percent-encoding). ` +
-    `Input capped at ${MAX_TEXT_CHARS} chars. Tier-1 read; pure computation, no network egress. ` +
+    `Input capped at ${MAX_TEXT_CHARS} chars. Pure computation, no network egress. ` +
     "Use decode_text to reverse.",
   inputSchema,
   requiresWrite: false,

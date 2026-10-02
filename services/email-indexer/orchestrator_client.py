@@ -1,8 +1,10 @@
 """WARP-465 D1 follow-up — orchestrator HTTP client.
 
-Thin wrapper around httpx for the two write paths this service uses:
+Thin wrapper around httpx for the write paths this service uses:
   - POST /api/email/:accountId/messages-ingest (per inbound message)
   - PATCH /api/email/drafts/:id  (mark queued draft sent/failed)
+  - PATCH /api/email/accounts/:id/status (WARP-2957 — the IDLE loop's
+    cycle outcome; the orchestrator is the only writer of the row)
 
 Service-principal auth via ORCHESTRATOR_SERVICE_TOKEN bearer (same
 shape as routing service's ORCHESTRATOR_SAMPLER_TOKEN per WARP-470/468).
@@ -11,15 +13,17 @@ loop keeps ticking without poisoning the per-account state machine.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import httpx
 
 # WARP-236 — internal mTLS: rewrite the orchestrator base URL to https:// and
 # present email-indexer's client cert when DROPLET_INTERNAL_TLS=1.
 from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kwargs
+from errors import IngestTooLarge
 
 logger = logging.getLogger(__name__)
 
@@ -44,25 +48,73 @@ def _auth_headers() -> Optional[dict[str, str]]:
     return {"Authorization": f"Bearer {SERVICE_TOKEN}"}
 
 
-async def ingest_message(account_id: str, payload: dict[str, Any]) -> bool:
-    """POST a parsed message to the orchestrator. Returns True on
-    201/200 (duplicate counts as success — the indexer's at-least-once
-    delivery is OK). False on any failure."""
+#: WARP-3267 — one ingest in flight box-wide. A max-size message is ~30 MiB
+#: of JSON here and far more while the orchestrator (768m) decodes it;
+#: accounts sync concurrently, so without this they'd stack.
+_INGEST_SLOT = asyncio.Semaphore(1)
+
+
+async def ingest_message(
+    account_id: str, payload: dict[str, Any]
+) -> bool | Literal["duplicate"]:
+    """POST a parsed message to the orchestrator. Returns True on 201,
+    "duplicate" (truthy — the indexer's at-least-once delivery is OK) on the
+    200 re-delivery answer, False on any failure. Raises IngestTooLarge on 413."""
     headers = _auth_headers()
     if headers is None:
         return False
     url = f"{ORCHESTRATOR_URL}/api/email/{account_id}/messages-ingest"
     try:
-        async with httpx.AsyncClient(timeout=10.0, **httpx_client_kwargs()) as client:
+        # 60 s, not 10: a message may carry up to 20 MiB of attachments (WARP-3267).
+        async with _INGEST_SLOT, httpx.AsyncClient(
+            timeout=60.0, **httpx_client_kwargs()
+        ) as client:
             resp = await client.post(url, json=payload, headers=headers)
     except httpx.HTTPError as exc:
         logger.warning("messages-ingest POST failed: %s", exc)
         return False
-    if resp.status_code in (200, 201):
+    if resp.status_code == 201:
         return True
+    if resp.status_code == 200:
+        # The route answers 200 only for `duplicate: true`.
+        return "duplicate"
+    if resp.status_code == 413:
+        raise IngestTooLarge(resp.text[:200])
     logger.warning(
         "messages-ingest non-2xx: status=%d body=%s",
         resp.status_code, resp.text[:200],
+    )
+    return False
+
+
+async def report_account_status(
+    account_id: str, status: str, reason: Optional[str] = None
+) -> bool:
+    """WARP-2957 — tell the orchestrator how the last IDLE cycle went.
+
+    `status` is `idle` (a clean cycle: the row's `lastIdleAt` moves) or
+    `error` (the row's `lastErrorAt` moves and `lastError` is set from
+    `reason`). `reason` is a member of `idle.REASONS` — a closed set, never
+    the server's own words. Returns True on 2xx; a failed report is logged
+    and the next cycle reports again, so nothing here retries.
+    """
+    headers = _auth_headers()
+    if headers is None:
+        return False
+    url = f"{ORCHESTRATOR_URL}/api/email/accounts/{account_id}/status"
+    body: dict[str, Any] = {"imapStatus": status}
+    if reason is not None:
+        body["reason"] = reason
+    try:
+        async with httpx.AsyncClient(timeout=10.0, **httpx_client_kwargs()) as client:
+            resp = await client.patch(url, json=body, headers=headers)
+    except httpx.HTTPError as exc:
+        logger.warning("account status PATCH failed: %s", exc)
+        return False
+    if resp.status_code == 200:
+        return True
+    logger.warning(
+        "account status non-200: status=%d body=%s", resp.status_code, resp.text[:200],
     )
     return False
 

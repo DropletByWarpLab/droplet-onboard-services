@@ -7,13 +7,15 @@
  * supplied become query params — and that a route-level refusal reaches the
  * agent as a typed `ok: false` carrying the route's own code, never a throw.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, type Mock } from "vitest";
 import cloudQueryDataset, {
   CLOUD_QUERY_DATASETS,
 } from "../../../src/handlers/cloud/query-dataset.js";
 import type { ToolContext } from "../../../src/types.js";
 
-function ctxWith(orchestratorGet: ReturnType<typeof vi.fn>): ToolContext {
+type OrchestratorGet = ToolContext["http"]["orchestrator"]["get"];
+
+function ctxWith(orchestratorGet: Mock<OrchestratorGet>): ToolContext {
   return {
     http: {
       routing: {} as ToolContext["http"]["routing"],
@@ -35,9 +37,9 @@ function ctxWith(orchestratorGet: ReturnType<typeof vi.fn>): ToolContext {
 }
 
 /** Fresh Response per call — a Response body can only be read once. */
-function jsonGet(body: unknown, status = 200): ReturnType<typeof vi.fn> {
+function jsonGet(body: unknown, status = 200): Mock<OrchestratorGet> {
   return vi
-    .fn()
+    .fn<OrchestratorGet>()
     .mockImplementation(async () => new Response(JSON.stringify(body), { status }));
 }
 
@@ -162,7 +164,7 @@ describe("cloud_query_dataset (WARP-2497)", () => {
   it("falls back to a status-derived error when the failure body is not route JSON", async () => {
     // A proxy or the auth edge answering ahead of the route — HTML, not JSON.
     const get = vi
-      .fn()
+      .fn<OrchestratorGet>()
       .mockImplementation(async () => new Response("<html>502</html>", { status: 502 }));
     const ctx = ctxWith(get);
 

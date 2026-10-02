@@ -8,7 +8,7 @@
  * only the base-URL mapping injected), and the DeviceUpdate / SystemFlag /
  * ApplianceSetup store is an in-memory stand-in. The compose-over-socket
  * mechanics are behind the ApplyRunner port — the fake here mimics the
- * scripts/lib/apply-update.sh contract exactly (including the detached
+ * docker/ota/apply-update.sh contract exactly (including the detached
  * self-swap helper's health-wait + auto-rollback behaviour), because the
  * real thing recreates Docker containers on the appliance.
  *
@@ -32,10 +32,11 @@
  *   - every status transition is committed BEFORE the action it guards
  *     (resumability contract).
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import http from "node:http";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
 import type { PrismaClient } from "@prisma/client";
@@ -46,10 +47,14 @@ import {
   applyWindowTick,
   httpHealthProbe,
   imageRefMatchesDigest,
+  releaseByTagUrl,
+  SERVICES_START_FAILED_TITLE,
   type ApplyRunner,
+  type EnvReconcileReport,
   type RecreateTarget,
 } from "./apply.js";
-import type { ReleaseManifest, ReleaseService } from "./manifest.js";
+import { createHostComposeRunner } from "./host-compose-runner.js";
+import type { ReleaseClient, ReleaseManifest, ReleaseService } from "./manifest.js";
 import { UPDATE_AGENT_SETTINGS_KEY } from "./settings.js";
 
 const fx = (name: string): Buffer =>
@@ -118,7 +123,20 @@ function buildManifest(overrides: Partial<ReleaseManifest["release"]> = {}): Rel
 let releaseServer: http.Server;
 let releaseBaseUrl = "";
 let servedTag = "ota-9-gapply";
+// WARP-3419 — what `/releases/latest` answers when it is NOT the row's release
+// (a stage row: `latest` skips prereleases). Null = the served release.
+let latestTag: string | null = null;
 let servedConfigs: Buffer = CONFIGS_TAR;
+// WARP-3120 — the client installer a release may carry.
+const DMG = Buffer.from("a Developer ID signed, notarized DMG (fake bytes)");
+let servedDmg: Buffer = DMG;
+const DMG_CLIENT = {
+  platform: "macos" as const,
+  version: "0.2.0",
+  file: "Droplet-0.2.0.dmg",
+  size: DMG.length,
+  sha256: createHash("sha256").update(DMG).digest("hex"),
+};
 
 // ---------------------------------------------------------------------------
 // Fake per-service health endpoints — ONE real HTTP server; the production
@@ -135,18 +153,24 @@ const healthy: Record<string, boolean> = {};
 
 beforeAll(async () => {
   releaseServer = http.createServer((req, res) => {
-    if (req.url === "/releases/latest") {
+    if (req.url === "/releases/latest" || req.url === `/releases/tags/${servedTag}`) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
-          tag_name: servedTag,
+          tag_name: req.url === "/releases/latest" ? (latestTag ?? servedTag) : servedTag,
           assets: [
             { name: "release.json", url: `${releaseBaseUrl}/assets/manifest` },
             { name: "release.json.sig", url: `${releaseBaseUrl}/assets/signature` },
             { name: "configs.tar.gz", url: `${releaseBaseUrl}/assets/configs` },
+            { name: "Droplet-0.2.0.dmg", url: `${releaseBaseUrl}/assets/dmg` },
           ],
         }),
       );
+      return;
+    }
+    if (req.url === "/assets/dmg") {
+      res.writeHead(200, { "content-type": "application/octet-stream" });
+      res.end(servedDmg);
       return;
     }
     if (req.url === "/assets/configs") {
@@ -203,8 +227,33 @@ interface Row {
   manifestSha256: string;
   manifestJson: unknown;
   failureReason: string | null;
+  outcome: string;
+  /** WARP-3193 PERF-3 — the apply claim (mirrors schema.prisma). */
+  applyClaim: string;
+  applyClaimId: string | null;
+  applyClaimedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+type RowWhere = {
+  id?: string;
+  status?: string | { in: string[] };
+  gitSha?: string;
+  applyClaim?: string;
+  applyClaimId?: string;
+};
+
+/** Prisma `where` over the handful of DeviceUpdate fields apply.ts filters on. */
+function rowMatches(r: Row, where: RowWhere | undefined): boolean {
+  const s = where?.status;
+  if (typeof s === "string" && r.status !== s) return false;
+  if (s !== undefined && typeof s !== "string" && !s.in.includes(r.status)) return false;
+  if (where?.id !== undefined && r.id !== where.id) return false;
+  if (where?.gitSha !== undefined && r.gitSha !== where.gitSha) return false;
+  if (where?.applyClaim !== undefined && r.applyClaim !== where.applyClaim) return false;
+  if (where?.applyClaimId !== undefined && r.applyClaimId !== where.applyClaimId) return false;
+  return true;
 }
 
 function createPrismaStub(opts: {
@@ -220,22 +269,8 @@ function createPrismaStub(opts: {
   const deviceUpdate = {
     _rows: () => rows,
     _statusWrites: () => statusWrites,
-    findFirst: async (args: {
-      where?: { id?: string; status?: string | { in: string[] }; gitSha?: string };
-      orderBy?: unknown;
-    }) => {
-      const statusMatch = (r: Row) => {
-        const s = args.where?.status;
-        if (s === undefined) return true;
-        if (typeof s === "string") return r.status === s;
-        return s.in.includes(r.status);
-      };
-      const matches = rows.filter(
-        (r) =>
-          statusMatch(r) &&
-          (args.where?.id === undefined || r.id === args.where.id) &&
-          (args.where?.gitSha === undefined || r.gitSha === args.where.gitSha),
-      );
+    findFirst: async (args: { where?: RowWhere; orderBy?: unknown }) => {
+      const matches = rows.filter((r) => rowMatches(r, args.where));
       matches.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
       return matches[0] ? { ...matches[0] } : null;
     },
@@ -261,14 +296,26 @@ function createPrismaStub(opts: {
     // the same way `update` does, so the transition-ordering assertions
     // keep working.
     updateMany: async (args: {
-      where: { id?: string; status?: string };
-      data: { status?: string; failureReason?: string | null };
+      where: RowWhere;
+      data: {
+        status?: string;
+        failureReason?: string | null;
+        outcome?: string;
+        applyClaim?: string;
+        applyClaimId?: string | null;
+        applyClaimedAt?: Date | null;
+      };
     }) => {
       let count = 0;
       for (const row of rows) {
-        if (args.where.id !== undefined && row.id !== args.where.id) continue;
-        if (args.where.status !== undefined && row.status !== args.where.status) continue;
-        if (args.data.status !== undefined) row.status = args.data.status;
+        if (!rowMatches(row, args.where)) continue;
+        if (args.data.outcome !== undefined) row.outcome = args.data.outcome;
+        if (args.data.applyClaim !== undefined) row.applyClaim = args.data.applyClaim;
+        if ("applyClaimId" in args.data) row.applyClaimId = args.data.applyClaimId ?? null;
+        if ("applyClaimedAt" in args.data) row.applyClaimedAt = args.data.applyClaimedAt ?? null;
+        count += 1;
+        if (args.data.status === undefined) continue; // an outcome- or claim-only write
+        row.status = args.data.status;
         if ("failureReason" in args.data) row.failureReason = args.data.failureReason ?? null;
         row.updatedAt = new Date();
         statusWrites.push({
@@ -276,15 +323,18 @@ function createPrismaStub(opts: {
           status: row.status,
           failureReason: row.failureReason,
         });
-        count += 1;
       }
       return { count };
     },
-    create: async (args: { data: Omit<Row, "id" | "createdAt" | "updatedAt" | "failureReason"> & { failureReason?: string | null } }) => {
+    create: async (args: { data: Omit<Row, "id" | "createdAt" | "updatedAt" | "failureReason" | "outcome" | "applyClaim" | "applyClaimId" | "applyClaimedAt"> & { failureReason?: string | null } }) => {
       seq += 1;
       const row: Row = {
         id: `du-${seq}`,
         failureReason: null,
+        outcome: "not_applied",
+        applyClaim: "unclaimed",
+        applyClaimId: null,
+        applyClaimedAt: null,
         ...args.data,
         createdAt: new Date(Date.now() + seq),
         updatedAt: new Date(),
@@ -347,7 +397,7 @@ function createLoggerSpy() {
 }
 
 // ---------------------------------------------------------------------------
-// Fake ApplyRunner — mimics the scripts/lib/apply-update.sh contract,
+// Fake ApplyRunner — mimics the docker/ota/apply-update.sh contract,
 // including the detached self-swap helper's health-wait + auto-rollback.
 // ---------------------------------------------------------------------------
 
@@ -359,6 +409,34 @@ class FakeRunner implements ApplyRunner {
   selfSwapHealthy = true;
   /** hook fired whenever a recreate lands, so tests can flip health state */
   onRecreate: (services: string[], target: RecreateTarget) => void = () => {};
+  /** WARP-2970 — what `docker compose config --services` reports on this box. */
+  enabled: string[] = Object.keys(PREVIOUS);
+  /** WARP-2970 — make the post-commit start fail. */
+  startFails = false;
+  /** WARP-2970 — services that already have a (stopped) container: grow skips them. */
+  hasStoppedContainer: string[] = [];
+
+  /** WARP-2995 — make the host .env reconcile fail. */
+  reconcileFails = false;
+
+  async reconcileEnv(opts: { updateId: string; image: string }): Promise<EnvReconcileReport> {
+    this.calls.push(`reconcileEnv(${opts.updateId},${opts.image.split("@")[0]})`);
+    if (this.reconcileFails) throw new Error("stub: env-reconcile failed on the host");
+    return { addedKeys: ["SANDBOX_SERVICE_TOKEN"], addedProfiles: [], profiles: "linux", unitUpdated: false };
+  }
+
+  async enabledServices(opts: { updateId: string }): Promise<string[]> {
+    this.calls.push(`enabledServices(${opts.updateId})`);
+    return this.enabled;
+  }
+
+  async startServices(opts: { updateId: string; services: ReleaseService[] }) {
+    this.calls.push(`startServices(${opts.services.map((s) => s.name).join(",")})`);
+    if (this.startFails) throw new Error("stub: start failed");
+    const started = opts.services.filter((s) => !this.hasStoppedContainer.includes(s.name));
+    for (const s of started) this.running[s.name] = s.digest;
+    return { started: started.map((s) => s.name) };
+  }
 
   async currentImageRefs(services: string[]): Promise<Record<string, string | null>> {
     this.calls.push(`currentImageRefs(${services.join(",")})`);
@@ -375,6 +453,24 @@ class FakeRunner implements ApplyRunner {
 
   async stageConfigs(opts: { updateId: string; configsTar: Buffer }) {
     this.calls.push(`stageConfigs(${opts.updateId},${opts.configsTar.length}b)`);
+  }
+
+  /** WARP-3120 — where the fake "helper" finds staged installers; a failure knob. */
+  clientDir = "";
+  staged: Record<string, Buffer> = {};
+  stageClientFails = false;
+
+  async stageClientApp(opts: {
+    updateId: string;
+    client: ReleaseClient;
+    write: (dest: string) => Promise<void>;
+  }) {
+    this.calls.push(`stageClientApp(${opts.updateId},${opts.client.platform},${opts.client.version})`);
+    const dest = path.join(this.clientDir, opts.client.file);
+    await opts.write(dest);
+    if (this.stageClientFails) throw new Error("stub: stage.sh failed on the host");
+    this.staged[opts.client.platform] = readFileSync(dest);
+    return "staged" as const;
   }
 
   async migrateDeploy() {
@@ -433,7 +529,9 @@ function baseOpts(prisma: PrismaStub, runner: FakeRunner, logger = createLoggerS
 
 beforeEach(() => {
   servedTag = "ota-9-gapply";
+  latestTag = null;
   servedConfigs = CONFIGS_TAR;
+  servedDmg = DMG;
   healthy.orchestrator = true;
   healthy["web-dashboard"] = true;
   healthy["device-identity-svc"] = true; // type "none" — never actually probed
@@ -458,6 +556,7 @@ describe("applyPendingUpdate (WARP-539)", () => {
       "snapshot(du-1)",
       "pullImages(orchestrator,web-dashboard,device-identity-svc)",
       `stageConfigs(du-1,${CONFIGS_TAR.length}b)`,
+      "reconcileEnv(du-1,ghcr.io/dropletbywarplab/droplet-orchestrator)",
       "migrateDeploy()",
       "recreateServices(web-dashboard,device-identity-svc,release)",
       "recreateSelfDetached(du-1,release)",
@@ -495,6 +594,7 @@ describe("applyPendingUpdate (WARP-539)", () => {
         "update.snapshot_taken",
         "update.images_pulled",
         "update.configs_staged",
+        "update.env_reconciled",
         "update.migrations_applied",
         "update.apply_started",
         "update.services_recreated",
@@ -541,6 +641,7 @@ describe("applyPendingUpdate (WARP-539)", () => {
     expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
       status: "rolled_back",
       failureReason: "health_gate_failed",
+      outcome: "rolled_back",
     });
     // AC: the box is RUNNING the prior digests.
     expect(runner.running).toEqual(PREVIOUS);
@@ -566,6 +667,47 @@ describe("applyPendingUpdate (WARP-539)", () => {
       expect.objectContaining({ event: "update.rejected" }),
       expect.any(String),
     );
+  });
+
+  // WARP-2898 (ADR-056 slice K1): apply-now is LLM-triggerable (WARP-1450),
+  // so an extension document must die at the manifest gate, before ANY
+  // runner step — the socket path never sees it.
+  it.each([
+    ["kind: extension", { kind: "extension" }],
+    ["usage: extension", { usage: "extension" }],
+    ["keyUsage: extension", { keyUsage: "extension" }],
+  ])(
+    "a pending row whose release-shaped manifest carries %s is rejected before any runner call",
+    async (_label, extra) => {
+      const prisma = createPrismaStub();
+      const runner = new FakeRunner();
+      const logger = createLoggerSpy();
+      await seedPendingRow(prisma, { ...buildManifest(), ...extra });
+
+      const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+      expect(res).toMatchObject({ outcome: "rejected", failureReason: "schema_invalid" });
+      expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
+        status: "rejected",
+        failureReason: "schema_invalid",
+      });
+      // The fake runner's spies are all at zero: no currentImageRefs,
+      // snapshot, pull, stage, migrate or recreate.
+      expect(runner.calls).toEqual([]);
+    },
+  );
+
+  it("an interrupted applying row whose manifest carries kind: extension fails without a runner call", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    const row = await seedPendingRow(prisma, { ...buildManifest(), kind: "extension" });
+    await prisma.deviceUpdate.update({ where: { id: row.id }, data: { status: "applying" } });
+
+    const res = await resumeInterruptedApply(baseOpts(prisma, runner));
+
+    expect(res).toMatchObject({ outcome: "failed" });
+    expect(prisma.deviceUpdate._rows()[0]).toMatchObject({ status: "failed", failureReason: "schema_invalid" });
+    expect(runner.calls).toEqual([]);
   });
 
   it("rejects with image_signature_failed when the pull step refuses a signature", async () => {
@@ -641,6 +783,7 @@ describe("applyPendingUpdate (WARP-539)", () => {
     expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
       status: "rolled_back",
       failureReason: "health_gate_failed",
+      outcome: "rolled_back",
     });
     // Rollback restored configs and recreated the sidecars on the previous
     // refs; the orchestrator itself was NEVER swapped.
@@ -680,6 +823,7 @@ describe("applyPendingUpdate (WARP-539)", () => {
     expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
       status: "failed",
       failureReason: "degraded_health",
+      outcome: "rollback_failed",
     });
     expect(logger.error).toHaveBeenCalledWith(
       expect.objectContaining({ event: "update.failed", failureReason: "degraded_health" }),
@@ -740,12 +884,256 @@ describe("applyPendingUpdate (WARP-539)", () => {
     expect(prisma.deviceUpdate._rows()[0]!.status).toBe("verifying");
   });
 
+  it("WARP-3419: installs a stage release even though /releases/latest names a stable one", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    servedTag = "ota-stage-404-g3c71b82";
+    latestTag = "ota-stable-399-g82be2ca"; // `latest` skips prereleases
+    await seedPendingRow(prisma, buildManifest());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner));
+
+    expect(res.outcome).toBe("self_swap_started");
+  });
+
   it("returns nothing_pending when the table has no applicable row", async () => {
     const prisma = createPrismaStub();
     const runner = new FakeRunner();
     const res = await applyPendingUpdate(baseOpts(prisma, runner));
     expect(res.outcome).toBe("nothing_pending");
     expect(runner.calls).toEqual([]);
+  });
+});
+
+describe("host .env reconcile before any swap (WARP-2995)", () => {
+  it("a failed reconcile refuses the release before anything is swapped, and restores configs", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    runner.reconcileFails = true;
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, buildManifest());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res).toMatchObject({ outcome: "rejected", failureReason: "env_reconcile_failed" });
+    expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
+      status: "rejected",
+      failureReason: "env_reconcile_failed",
+    });
+    // Nothing migrated, recreated or swapped; the staged configs rolled back.
+    expect(runner.calls.slice(-2)).toEqual([
+      "reconcileEnv(du-1,ghcr.io/dropletbywarplab/droplet-orchestrator)",
+      "restoreConfigs(du-1)",
+    ]);
+    expect(runner.calls.some((c) => /^(migrateDeploy|recreate)/.test(c))).toBe(false);
+    expect(runner.running).toEqual(PREVIOUS);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.env_reconcile_failed", deviceUpdateId: "du-1" }),
+      expect.any(String),
+    );
+  });
+
+  it("records what the reconcile added (key names only) in the update audit log", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, buildManifest());
+    await applyPendingUpdate(baseOpts(prisma, runner, logger));
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "update.env_reconciled",
+        addedKeys: ["SANDBOX_SERVICE_TOKEN"],
+        addedProfiles: [],
+        unitUpdated: false,
+      }),
+      expect.any(String),
+    );
+  });
+});
+
+describe("a helper that predates reconcile-env (#2320 review blocker)", () => {
+  // The REAL runner + execFile against a stand-in helper script, so the
+  // detection is exercised on an actual non-zero exit and its stderr.
+  let dir: string;
+  beforeAll(() => {
+    dir = mkdtempSync(path.join(tmpdir(), "warp2995-helper-"));
+  });
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  function withHelper(name: string, stderrLine: string) {
+    const script = path.join(dir, name);
+    writeFileSync(script, `#!/usr/bin/env bash\necho '${stderrLine}' >&2\nexit 1\n`, { mode: 0o755 });
+    const real = createHostComposeRunner({
+      scriptPath: script,
+      composeFile: "/opt/droplet/docker/docker-compose.yml",
+      updatesDir: dir,
+    });
+    const runner = new FakeRunner();
+    runner.reconcileEnv = (opts) => real.reconcileEnv(opts);
+    return runner;
+  }
+
+  it.each([
+    // stage/main's helper: its parser dies on --image before dispatch.
+    ["unknown flag", "[apply-update] ERROR: unknown flag: --image"],
+    ["unknown subcommand", "[apply-update] ERROR: unknown subcommand: reconcile-env"],
+  ])("%s → logged skip, and the release still applies", async (_label, line) => {
+    const prisma = createPrismaStub();
+    const runner = withHelper(`old-${_label.replace(" ", "-")}.sh`, line);
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, buildManifest());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res.outcome).toBe("self_swap_started");
+    expect(runner.calls).toContain("migrateDeploy()");
+    expect(runner.calls).not.toContain("restoreConfigs(du-1)");
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.env_reconcile_skipped", reason: "helper_unsupported" }),
+      expect.any(String),
+    );
+  });
+
+  it("a real reconcile failure from a helper that HAS the subcommand still refuses", async () => {
+    const prisma = createPrismaStub();
+    const runner = withHelper(
+      "new-but-failing.sh",
+      "[apply-update] ERROR: env-reconcile failed on the host for du-1",
+    );
+    await seedPendingRow(prisma, buildManifest());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner));
+
+    expect(res).toMatchObject({ outcome: "rejected", failureReason: "env_reconcile_failed" });
+    expect(runner.calls).toContain("restoreConfigs(du-1)");
+    expect(runner.calls).not.toContain("migrateDeploy()");
+  });
+});
+
+describe("post-commit start of newly enabled services (WARP-2970)", () => {
+  const EMAIL_DIGEST = `sha256:${"5".repeat(64)}`;
+  function manifestWithEmailIndexer(): ReleaseManifest {
+    const m = buildManifest();
+    m.services.push({
+      name: "email-indexer",
+      image: `ghcr.io/dropletbywarplab/droplet-email-indexer@${EMAIL_DIGEST}`,
+      digest: EMAIL_DIGEST,
+      healthcheck: { type: "http", port: 8086, path: "/health" },
+    });
+    return m;
+  }
+
+  beforeEach(() => {
+    healthy["email-indexer"] = true;
+  });
+
+  async function applyAndResume(runner: FakeRunner, logger = createLoggerSpy()) {
+    const prisma = createPrismaStub();
+    await seedPendingRow(prisma, manifestWithEmailIndexer());
+    const notifyOwners = vi.fn(async () => {});
+    const opts = { ...baseOpts(prisma, runner, logger), notifyOwners };
+    await applyPendingUpdate(opts);
+    const resume = await resumeInterruptedApply(opts);
+    return { prisma, resume, logger, notifyOwners };
+  }
+
+  async function runPostCommit(resume: Awaited<ReturnType<typeof resumeInterruptedApply>>) {
+    if (resume.outcome !== "committed") throw new Error(`expected committed, got ${resume.outcome}`);
+    await resume.startNewServices();
+  }
+
+  it("starts a release service the box enables but has never run (OTA-upgraded box)", async () => {
+    const runner = new FakeRunner();
+    runner.enabled = [...Object.keys(PREVIOUS), "email-indexer"];
+    const { resume, prisma, logger, notifyOwners } = await applyAndResume(runner);
+
+    expect(resume.outcome).toBe("committed");
+    expect(prisma.deviceUpdate._rows()[0]!.status).toBe("committed");
+    // WARP-3007 — committed, post-commit start still to run.
+    expect(prisma.deviceUpdate._rows()[0]!.outcome).toBe("starting_services");
+    // The resume hook itself does NOT start anything: index.ts runs it after
+    // listen, unawaited, so the boot path never waits on `compose up`.
+    expect(runner.calls.some((c) => c.startsWith("startServices"))).toBe(false);
+    await runPostCommit(resume);
+    expect(prisma.deviceUpdate._rows()[0]!.outcome).toBe("committed");
+    // Never part of the swap/rollback set — only started after commit.
+    expect(runner.calls.filter((c) => c.startsWith("recreateServices")).join()).not.toContain(
+      "email-indexer",
+    );
+    expect(runner.calls.at(-1)).toBe("startServices(email-indexer)");
+    expect(runner.running["email-indexer"]).toBe(EMAIL_DIGEST);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.services_started", services: ["email-indexer"] }),
+      expect.any(String),
+    );
+    expect(notifyOwners).not.toHaveBeenCalled();
+  });
+
+  it("leaves a service off when this box's compose does not enable it (profile-gated)", async () => {
+    const runner = new FakeRunner(); // enabled = the deployed three only
+    const { resume, prisma } = await applyAndResume(runner);
+    expect(resume.outcome).toBe("committed");
+    // Romain 2026-09-23 (WARP-3001): profile off → image updated, not started.
+    expect(runner.calls).toContain(
+      "pullImages(orchestrator,web-dashboard,device-identity-svc,email-indexer)",
+    );
+    await runPostCommit(resume);
+    expect(runner.calls.some((c) => c.startsWith("startServices"))).toBe(false);
+    expect(runner.running["email-indexer"]).toBeUndefined();
+    // WARP-3007 — nothing to start is a clean commit.
+    expect(prisma.deviceUpdate._rows()[0]!.outcome).toBe("committed");
+  });
+
+  it("leaves a service an operator stopped alone (it has a container)", async () => {
+    const runner = new FakeRunner();
+    runner.enabled = [...Object.keys(PREVIOUS), "email-indexer"];
+    runner.hasStoppedContainer = ["email-indexer"];
+    const { resume, logger, notifyOwners } = await applyAndResume(runner);
+    await runPostCommit(resume);
+    expect(runner.running["email-indexer"]).toBeUndefined();
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.services_started" }),
+      expect.any(String),
+    );
+    expect(notifyOwners).not.toHaveBeenCalled();
+  });
+
+  it("a failed start is logged, reaches the owners, and never un-commits a healthy update", async () => {
+    const runner = new FakeRunner();
+    runner.enabled = [...Object.keys(PREVIOUS), "email-indexer"];
+    runner.startFails = true;
+    const { resume, prisma, logger, notifyOwners } = await applyAndResume(runner);
+    await runPostCommit(resume);
+    expect(prisma.deviceUpdate._rows()[0]!.status).toBe("committed");
+    // WARP-3007 — the verdict is ON the row, not only in a log line.
+    expect(prisma.deviceUpdate._rows()[0]!.outcome).toBe("services_start_failed");
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.services_start_failed", services: ["email-indexer"] }),
+      expect.any(String),
+    );
+    expect(notifyOwners).toHaveBeenCalledWith(
+      SERVICES_START_FAILED_TITLE,
+      expect.stringContaining("email-indexer"),
+    );
+  });
+
+  it("a started service that never goes healthy is a failure, not a success", async () => {
+    const runner = new FakeRunner();
+    runner.enabled = [...Object.keys(PREVIOUS), "email-indexer"];
+    healthy["email-indexer"] = false; // crash-looping
+    const { resume, prisma, logger, notifyOwners } = await applyAndResume(runner);
+    await runPostCommit(resume);
+    expect(prisma.deviceUpdate._rows()[0]!.status).toBe("committed");
+    expect(prisma.deviceUpdate._rows()[0]!.outcome).toBe("services_start_failed");
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.services_started" }),
+      expect.any(String),
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.services_start_failed" }),
+      expect.any(String),
+    );
+    expect(notifyOwners).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -798,6 +1186,7 @@ describe("resumeInterruptedApply (WARP-539 onStart hook)", () => {
     expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
       status: "rolled_back",
       failureReason: "health_gate_failed",
+      outcome: "rolled_back",
     });
   });
 });
@@ -842,6 +1231,144 @@ describe("applyWindowTick (WARP-539 window dispatch)", () => {
   });
 });
 
+describe("WARP-3193 PERF-3 — one apply per row, however many runners race", () => {
+  /** A runner whose snapshot parks until the test lets it go. */
+  class ParkedRunner extends FakeRunner {
+    private release!: () => void;
+    readonly parked = new Promise<void>((r) => (this.release = r));
+    entered = 0;
+    letGo() {
+      this.release();
+    }
+    override async snapshot(opts: { updateId: string; previousRefs: Record<string, string | null> }) {
+      this.entered += 1;
+      await super.snapshot(opts);
+      await this.parked;
+    }
+  }
+
+  it("apply-now and the window tick racing: exactly one snapshots, the other stops before any side effect", async () => {
+    const prisma = createPrismaStub();
+    const runner = new ParkedRunner();
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, buildManifest());
+
+    // Apply-now's detached dispatch starts first and parks inside step 1.
+    const first = applyPendingUpdate(baseOpts(prisma, runner, logger));
+    await vi.waitFor(() => expect(runner.entered).toBe(1));
+    expect(prisma.deviceUpdate._rows()[0]!.status).toBe("verifying");
+
+    // The 03:00 window fires while `verifying` takes its minutes.
+    const second = await applyWindowTick(baseOpts(prisma, runner, logger));
+    expect(second).toEqual({ outcome: "apply_claimed_elsewhere", deviceUpdateId: "du-1" });
+    expect(runner.entered).toBe(1);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.apply_claimed_elsewhere", deviceUpdateId: "du-1" }),
+      expect.any(String),
+    );
+
+    runner.letGo();
+    expect((await first).outcome).toBe("self_swap_started");
+    expect(runner.calls.filter((c) => c.startsWith("snapshot("))).toEqual(["snapshot(du-1)"]);
+    // Exactly one verifying + one applying write: the loser wrote nothing.
+    expect(prisma.deviceUpdate._statusWrites().map((w) => w.status)).toEqual([
+      "verifying",
+      "applying",
+    ]);
+  });
+
+  it("hands the claim back when the run ends, so the next window can retry a verifying row", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    await seedPendingRow(prisma, buildManifest());
+    servedTag = "ota-10-gmoved"; // transient: the latest release moved on
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner));
+    expect(res.outcome).toBe("retry_later");
+    expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
+      status: "verifying",
+      applyClaim: "unclaimed",
+      applyClaimId: null,
+      applyClaimedAt: null,
+    });
+  });
+
+  it("hands the claim back when the run throws", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    runner.pullImages = async () => {
+      throw new Error("registry unreachable");
+    };
+    await seedPendingRow(prisma, buildManifest());
+
+    await expect(applyPendingUpdate(baseOpts(prisma, runner))).rejects.toThrow("registry unreachable");
+    expect(prisma.deviceUpdate._rows()[0]!.applyClaim).toBe("unclaimed");
+  });
+
+  it("runs a row the caller already claimed, and refuses one whose claim it does not hold", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    const row = await seedPendingRow(prisma, buildManifest());
+    await prisma.deviceUpdate.updateMany({
+      where: { id: row.id },
+      data: { applyClaim: "claimed", applyClaimId: "route-claim", applyClaimedAt: new Date() },
+    });
+
+    const wrong = await applyPendingUpdate({
+      ...baseOpts(prisma, runner),
+      claimed: { deviceUpdateId: row.id, claimId: "someone-else" },
+    });
+    expect(wrong).toEqual({ outcome: "apply_claimed_elsewhere", deviceUpdateId: row.id });
+    expect(runner.calls).toEqual([]);
+    // Refusing never releases a claim that is not ours.
+    expect(prisma.deviceUpdate._rows()[0]!.applyClaimId).toBe("route-claim");
+
+    const res = await applyPendingUpdate({
+      ...baseOpts(prisma, runner),
+      claimed: { deviceUpdateId: row.id, claimId: "route-claim" },
+    });
+    expect(res.outcome).toBe("self_swap_started");
+    expect(prisma.deviceUpdate._rows()[0]!.applyClaim).toBe("unclaimed");
+  });
+
+  it("resumeInterruptedApply clears the claim a dead process left behind, then resumes", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    const logger = createLoggerSpy();
+    const row = await seedPendingRow(prisma, buildManifest());
+    // The previous orchestrator claimed, reached verifying, and died.
+    await prisma.deviceUpdate.updateMany({
+      where: { id: row.id },
+      data: {
+        status: "verifying",
+        applyClaim: "claimed",
+        applyClaimId: "dead-process",
+        applyClaimedAt: new Date(),
+      },
+    });
+
+    const resume = await resumeInterruptedApply(baseOpts(prisma, runner, logger));
+
+    expect(resume.outcome).toBe("resumed_apply");
+    expect((resume as { result: { outcome: string } }).result.outcome).toBe("self_swap_started");
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.stale_claims_cleared", count: 1 }),
+      expect.any(String),
+    );
+    expect(prisma.deviceUpdate._rows()[0]!.applyClaim).toBe("unclaimed");
+  });
+});
+
+describe("releaseByTagUrl (WARP-3419)", () => {
+  it("turns the latest endpoint into the by-tag endpoint, and leaves other URLs alone", () => {
+    expect(
+      releaseByTagUrl("https://api.github.com/repos/o/r/releases/latest", "ota-stage-404-g3c71b82"),
+    ).toBe("https://api.github.com/repos/o/r/releases/tags/ota-stage-404-g3c71b82");
+    expect(releaseByTagUrl("https://mirror.example/r/latest.json", "ota-stage-1-gabc")).toBeNull();
+    expect(releaseByTagUrl("not a url", "ota-stage-1-gabc")).toBeNull();
+  });
+});
+
 describe("imageRefMatchesDigest", () => {
   it("matches repo digests, bare digests, and pinned image refs", () => {
     const d = DIGESTS.orchestrator!;
@@ -849,5 +1376,174 @@ describe("imageRefMatchesDigest", () => {
     expect(imageRefMatchesDigest(`ghcr.io/x/y@${d}`, d)).toBe(true);
     expect(imageRefMatchesDigest(PREVIOUS.orchestrator!, d)).toBe(false);
     expect(imageRefMatchesDigest(null, d)).toBe(false);
+  });
+});
+
+describe("WARP-3017 — the resume gates wait for this orchestrator to listen", () => {
+  function listenGate() {
+    let listening = false;
+    let markListening!: () => void;
+    const whenListening = new Promise<void>((r) => {
+      markListening = () => {
+        listening = true;
+        r();
+      };
+    });
+    const probedBeforeListen: string[] = [];
+    const probe = async (svc: ReleaseService) => {
+      if (!listening) probedBeforeListen.push(svc.name);
+      return healthy[svc.name] ?? true;
+    };
+    return { whenListening, markListening, probe, probedBeforeListen };
+  }
+
+  it("never probes before listen, then commits once the server listens", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    await seedPendingRow(prisma, buildManifest());
+    await applyPendingUpdate(baseOpts(prisma, runner));
+    const g = listenGate();
+
+    const resuming = resumeInterruptedApply({
+      ...baseOpts(prisma, runner),
+      probe: g.probe,
+      healthGate: { attempts: 20, intervalMs: 10 }, // 200 ms listen bound
+      whenListening: g.whenListening,
+    });
+    setTimeout(g.markListening, 40);
+    const resume = await resuming;
+
+    expect(g.probedBeforeListen).toEqual([]);
+    expect(resume.outcome).toBe("committed");
+    expect(prisma.deviceUpdate._rows()[0]!.status).toBe("committed");
+  });
+
+  it("an orchestrator that never listens within the bound is rolled back, unprobed", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, buildManifest());
+    await applyPendingUpdate(baseOpts(prisma, runner, logger));
+    const g = listenGate();
+
+    const resume = await resumeInterruptedApply({
+      ...baseOpts(prisma, runner, logger),
+      probe: g.probe,
+      whenListening: g.whenListening, // never resolved
+    });
+
+    expect(g.probedBeforeListen).toEqual([]);
+    expect(resume.outcome).toBe("self_rollback_started");
+    expect(runner.calls).toContain("recreateSelfDetached(du-1,previous)");
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.health_gate_failed", phase: "listen" }),
+      expect.any(String),
+    );
+  });
+
+  it("the OLD orchestrator's verdict gate waits for listen too", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    await seedPendingRow(prisma, buildManifest());
+    await applyPendingUpdate(baseOpts(prisma, runner));
+    healthy["web-dashboard"] = false;
+    await resumeInterruptedApply(baseOpts(prisma, runner)); // starts the full rollback
+    healthy["web-dashboard"] = true;
+    const g = listenGate();
+
+    const verdict = resumeInterruptedApply({
+      ...baseOpts(prisma, runner),
+      probe: g.probe,
+      healthGate: { attempts: 20, intervalMs: 10 },
+      whenListening: g.whenListening,
+    });
+    setTimeout(g.markListening, 40);
+
+    expect((await verdict).outcome).toBe("rolled_back");
+    expect(g.probedBeforeListen).toEqual([]);
+  });
+});
+
+
+describe("client installers the release carries (WARP-3120)", () => {
+  let clientDir: string;
+  beforeEach(() => {
+    clientDir = mkdtempSync(path.join(tmpdir(), "warp3120-clients-"));
+  });
+  afterEach(() => rmSync(clientDir, { recursive: true, force: true }));
+
+  const withDmg = (): ReleaseManifest => ({ ...buildManifest(), clients: [DMG_CLIENT] });
+  const runnerFor = () => {
+    const r = new FakeRunner();
+    r.clientDir = clientDir;
+    return r;
+  };
+
+  it("stages the verified DMG after the .env reconcile and before migrations", async () => {
+    const prisma = createPrismaStub();
+    const runner = runnerFor();
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, withDmg());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res.outcome).toBe("self_swap_started");
+    const i = runner.calls.indexOf("stageClientApp(du-1,macos,0.2.0)");
+    expect(i).toBeGreaterThan(runner.calls.findIndex((c) => c.startsWith("reconcileEnv(")));
+    expect(i).toBeLessThan(runner.calls.indexOf("migrateDeploy()"));
+    expect(runner.staged.macos).toEqual(DMG);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.client_app_staged", platform: "macos", version: "0.2.0", alreadyStaged: false }),
+      expect.any(String),
+    );
+  });
+
+  it.each([
+    ["same size, different bytes", () => Buffer.from(DMG.map((b, i) => (i === 3 ? b ^ 0xff : b)))],
+    ["truncated", () => DMG.subarray(0, DMG.length - 1)],
+    ["too long", () => Buffer.concat([DMG, Buffer.from("!")])],
+  ])("a %s DMG is skipped, deleted, and the box update still goes ahead", async (_l, bytes) => {
+    servedDmg = bytes();
+    const prisma = createPrismaStub();
+    const runner = runnerFor();
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, withDmg());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res.outcome).toBe("self_swap_started");
+    expect(runner.staged.macos).toBeUndefined();
+    expect(existsSync(path.join(clientDir, DMG_CLIENT.file))).toBe(false);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.client_apps_skipped", platform: "macos" }),
+      expect.any(String),
+    );
+  });
+
+  it("a host staging failure is a skip, not a failed update", async () => {
+    const prisma = createPrismaStub();
+    const runner = runnerFor();
+    runner.stageClientFails = true;
+    const logger = createLoggerSpy();
+    await seedPendingRow(prisma, withDmg());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res.outcome).toBe("self_swap_started");
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "update.client_apps_skipped",
+        reason: "stub: stage.sh failed on the host",
+      }),
+      expect.any(String),
+    );
+  });
+
+  it("a manifest without clients stages nothing", async () => {
+    const prisma = createPrismaStub();
+    const runner = runnerFor();
+    await seedPendingRow(prisma, buildManifest());
+    await applyPendingUpdate(baseOpts(prisma, runner));
+    expect(runner.calls.some((c) => c.startsWith("stageClientApp("))).toBe(false);
   });
 });

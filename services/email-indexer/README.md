@@ -8,6 +8,16 @@ orchestrator, and drains the outbound SMTP queue.
 
 - One async IDLE loop per EmailAccount (apscheduler-managed, no
   `while True`). Exponential backoff on disconnect (1s → 60s cap).
+  Each cycle SYNCS FIRST, then IDLEs, then syncs again (WARP-2957):
+  first contact backfills the last 30 days (newest 200), later cycles
+  walk a UID watermark — never `UNSEEN`, which is "unread" and misses
+  everything the owner already read on their phone. A quiet IDLE is a
+  clean cycle, not a failure.
+- Every cycle reports its outcome via
+  `PATCH /api/email/accounts/:id/status` (WARP-2957) — `idle` moves
+  `lastIdleAt`, `error` moves `lastErrorAt` and sets `lastError` from a
+  closed-set reason. The orchestrator is the only writer of those
+  columns; this is how the dashboard's "Connected" became a fact.
 - MIME parser canonicalizes each new message into the shape the
   orchestrator's `POST /api/email/:accountId/messages-ingest`
   expects. RFC 5322 thread keying (References > In-Reply-To >
@@ -18,6 +28,38 @@ orchestrator, and drains the outbound SMTP queue.
   orchestrator.
 - MQTT publish on `email/<accountId>/new` after each successful
   ingest so the dashboard's email tabs refresh without polling.
+
+## Attachments and outbound format (WARP-3267)
+
+- **Ruling — attachments live in box storage, not Nextcloud.** The parser
+  lists every non-body part and sends the bytes (base64) with the ingest;
+  the orchestrator keeps them in `EmailAttachment` beside the message. Why:
+  a company mailbox an admin connects has no owner and so no Nextcloud home;
+  a file in a home is previewed and indexed on arrival, which would render
+  and parse a stranger's file unasked; and the bytes go with the message
+  when a mailbox is disconnected. Saving one into Files is the reader's act.
+- **Limits** (here and in `EMAIL_ATTACHMENT_LIMITS`): 10 MiB per part,
+  20 MiB and 20 parts stored per message. A part over them is listed without
+  bytes (`too_large` / `over_limit`); past 50 parts nothing more is listed.
+- **Payload budget.** The serialised ingest body stays under 30 MiB
+  (`MAX_INGEST_PAYLOAD_BYTES`); a part that would cross it is listed as
+  `too_large`. The orchestrator parses the route with a 48 MB limit.
+- **Ruling — a 413 holds the watermark, for three cycles.** It is the one
+  ingest refusal that does: with the budget, only a limit drift (e.g. a
+  rolling update) can cause it, and a deploy fixes that, so the message
+  should still be fetchable. After `MAX_TOO_LARGE_HOLDS` cycles it is skipped
+  like other refusals (IDX-07) and logged with the UID. Re-delivered
+  duplicates do not fire the new-mail signal, and one ingest is in flight at
+  a time. A malformed attachment entry is a 400, not a 413, so it never holds.
+- A forwarded message (`message/rfc822`) is one `.eml` attachment; the parser
+  does not walk into it, so its body and files are not the outer message's.
+- Downloads: `GET /api/email/:accountId/messages/:messageId/attachments/:id`,
+  gated like the thread read, served as `attachment`, `application/octet-stream`,
+  `nosniff`, sanitised file name, one activity row per download.
+- **Ruling — outbound mail stays plain text.** Replies set `In-Reply-To` and
+  `References` from the thread's Message-IDs, plus `Date` and `Message-ID`.
+  A forward carries stored attachments of its own mailbox, picked by id
+  (`EmailDraft.attachmentIds`), as `multipart/mixed`.
 
 ## What this service does NOT do
 
@@ -55,7 +97,7 @@ orchestrator, and drains the outbound SMTP queue.
 | `MQTT_HOST` / `MQTT_PORT` | `broker` / `8883` | MQTT broker (mTLS listener). |
 | `MQTT_TLS` | `1` | Present the service TLS bundle (identity = cert CN, WARP-235). `0` = plaintext dev broker. |
 | `OUTBOUND_POLL_SECONDS` | `10` | SMTP poller cadence. |
-| `ACCOUNT_REFRESH_SECONDS` | `300` | Account re-discovery cadence. |
+| `ACCOUNT_REFRESH_SECONDS` | `300` | Account re-discovery cadence (also stops loops for disconnected rows). The orchestrator additionally calls `POST /accounts/refresh` right after a connect or disconnect, so a new mailbox starts within seconds (WARP-2957). |
 | `DROPLET_FIPS_REQUIRED` | `true` | WARP-229 boot self-test. |
 
 ## Tests
@@ -87,8 +129,9 @@ deploy checklist:
    hosts against SSRF, asks this service to verify the mailbox and
    encrypt the password (`POST /accounts/provision`), and writes the
    row with `imapStatus = idle` only after the probe succeeds.
-2. Tail `email-indexer` logs — should see `IDLE session` + `ingest`
-   lines within ~10s.
+2. Tail `email-indexer` logs — should see `ingested N/N UIDs` (the
+   30-day backfill) within ~10s, and the Settings card flip from
+   "Checking…" to "Connected · checked just now".
 3. Send a test mail; confirm an EmailMessage row lands in postgres
    and `email/<accountId>/new` MQTT fires.
 4. Author a draft via the dashboard; click Send; confirm draft flips

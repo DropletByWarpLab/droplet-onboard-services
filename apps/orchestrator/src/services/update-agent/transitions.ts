@@ -44,6 +44,15 @@ export type DeviceUpdateStatusName =
   | "failed"
   | "rejected";
 
+/** WARP-3007 — mirrors schema.prisma DeviceUpdateOutcome. */
+export type DeviceUpdateOutcomeName =
+  | "not_applied"
+  | "starting_services"
+  | "committed"
+  | "services_start_failed"
+  | "rolled_back"
+  | "rollback_failed";
+
 /**
  * The advance-only map (mirrors the schema.prisma DeviceUpdateStatus
  * diagram). Terminal statuses map to [] — nothing ever leaves them.
@@ -114,6 +123,8 @@ export async function transitionDeviceUpdate(
     id: string;
     to: Exclude<DeviceUpdateStatusName, "pending">;
     failureReason?: string | null;
+    /** WARP-3007 — written in the same guarded write as the status. */
+    outcome?: DeviceUpdateOutcomeName;
     logger?: pino.Logger;
   },
 ): Promise<void> {
@@ -133,7 +144,11 @@ export async function transitionDeviceUpdate(
   // the audit table gets the guarantee, not the assumption).
   const res = await db.deviceUpdate.updateMany({
     where: { id: opts.id, status: row.status },
-    data: { status: opts.to, failureReason: opts.failureReason ?? null },
+    data: {
+      status: opts.to,
+      failureReason: opts.failureReason ?? null,
+      ...(opts.outcome ? { outcome: opts.outcome } : {}),
+    },
   });
   if (res.count !== 1) {
     throw new DeviceUpdateTransitionError(
@@ -153,6 +168,30 @@ export async function transitionDeviceUpdate(
     },
     "DeviceUpdate status advanced",
   );
+}
+
+/**
+ * WARP-3007 — the post-commit outcome (the status is already final at
+ * `committed`). Conditional on the row still being `committed`, so it can
+ * never relabel another verdict. Returns whether a row was written.
+ */
+export async function recordCommittedOutcome(
+  db: Db,
+  opts: {
+    id: string;
+    outcome: "committed" | "services_start_failed";
+    logger?: pino.Logger;
+  },
+): Promise<boolean> {
+  const res = await db.deviceUpdate.updateMany({
+    where: { id: opts.id, status: "committed" },
+    data: { outcome: opts.outcome },
+  });
+  (opts.logger ?? defaultLog).debug?.(
+    { event: "update.outcome_recorded", deviceUpdateId: opts.id, outcome: opts.outcome },
+    "DeviceUpdate outcome recorded",
+  );
+  return res.count === 1;
 }
 
 /**

@@ -29,32 +29,33 @@ export const CATEGORY_ORDER: SmartHomeCategory[] = [
 export const BULK_CATEGORIES: SmartHomeCategory[] = ["light", "switch"];
 
 /** The 12 room glyphs offered on create (brief §5.4); value must match the
- *  server's ROOM_ICONS allowlist. */
+ *  server's ROOM_ICONS allowlist. Workplace set — the household glyphs stay
+ *  renderable (RoomGlyph) for rooms created before the business-only build. */
 export const ROOM_GLYPHS: Array<{ icon: string; suggests: string }> = [
-  { icon: "sofa", suggests: "Living room" },
-  { icon: "bed", suggests: "Bedroom" },
-  { icon: "chef-hat", suggests: "Kitchen" },
-  { icon: "bath", suggests: "Bathroom" },
   { icon: "monitor", suggests: "Office" },
-  { icon: "car", suggests: "Garage" },
-  { icon: "trees", suggests: "Garden" },
-  { icon: "baby", suggests: "Nursery" },
+  { icon: "presentation", suggests: "Conference room" },
+  { icon: "door-open", suggests: "Reception" },
+  { icon: "coffee", suggests: "Break room" },
+  { icon: "server", suggests: "Server room" },
+  { icon: "printer", suggests: "Print room" },
+  { icon: "package", suggests: "Storage" },
+  { icon: "warehouse", suggests: "Warehouse" },
+  { icon: "factory", suggests: "Shop floor" },
+  { icon: "car", suggests: "Parking" },
   { icon: "dumbbell", suggests: "Gym" },
-  { icon: "washing-machine", suggests: "Laundry" },
-  { icon: "door-open", suggests: "Hallway" },
-  { icon: "home", suggests: "Home" },
+  { icon: "building-2", suggests: "Building" },
 ];
 
 export const SUGGESTED_ROOMS = [
-  "Living room",
-  "Kitchen",
-  "Bedroom",
   "Office",
-  "Bathroom",
-  "Garage",
+  "Conference room",
+  "Reception",
+  "Break room",
+  "Server room",
+  "Warehouse",
 ];
 
-/** The name a household sees: the alias if set, else the product name, else
+/** The name a person sees: the alias if set, else the product name, else
  *  the Matter-reported name. */
 export function displayName(device: MatterDevice): string {
   return device.friendlyName?.trim() || device.productName?.trim() || device.name;

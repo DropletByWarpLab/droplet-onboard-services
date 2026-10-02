@@ -44,6 +44,9 @@ interface UpdateRowView {
   gitSha: string;
   builtAt: string;
   failureReason: string | null;
+  /** WARP-3007 — DeviceUpdateOutcome (not_applied | starting_services |
+   *  committed | services_start_failed | rolled_back | rollback_failed). */
+  outcome?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -160,6 +163,9 @@ async function handler(
             gitSha: current.gitSha,
             builtAt: current.builtAt,
             committedAt: current.updatedAt,
+            // WARP-3007 — e.g. services_start_failed: installed, but a new
+            // part of the release did not start.
+            outcome: current.outcome ?? null,
           }
         : null,
       ...(current
@@ -192,6 +198,7 @@ async function handler(
             status: lastVerdict.status,
             phase: phaseFor(lastVerdict.status),
             failureReason: lastVerdict.failureReason,
+            outcome: lastVerdict.outcome ?? null,
             at: lastVerdict.updatedAt,
           }
         : null,
@@ -213,7 +220,7 @@ async function handler(
 const tool: Tool = {
   name: "get_update_status",
   description:
-    "Software-update status of the Droplet appliance: the currently running version, any pending verified update, apply progress (with a human-readable phase), the last update verdict, and the update settings (channel / auto-apply). The companion to apply_update — use it to check whether an update is available and to follow progress after an apply is dispatched. Owner/admin only — other roles get FORBIDDEN. Tier-1 read; safe to call without operator confirmation.",
+    "Software-update status of the Droplet appliance: the currently running version, any pending verified update, apply progress (with a human-readable phase), the last update verdict, and the update settings (channel / auto-apply). The companion to apply_update — use it to check whether an update is available and to follow progress after an apply is dispatched. Owner/admin only — other roles get FORBIDDEN.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

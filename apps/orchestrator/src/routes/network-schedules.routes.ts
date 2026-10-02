@@ -10,6 +10,7 @@ import type { createScheduleApiService } from "../services/schedule-api.service.
 import { DeviceRegistryError } from "../types/device-registry-error.js";
 import { handleRegistryError } from "./network-error-handler.js";
 import { requireRoleOrMcpService } from "../middleware/auth.js";
+import { requireNetworkMember } from "./network-status.routes.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 
@@ -25,11 +26,13 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
   // is the one enforcing subject/window/range invariants; the only
   // marshalling these handlers do is ISO-string → Date for the override
   // endpoints.
+  //
+  // WARP-3118: the reads (schedules, overrides, schedule events) name staff
+  // devices and when they are cut off, so they take `requireNetworkMember`
+  // like the device roster (WARP-3091): employees yes, external guests no.
 
-  router.get("/network/schedules", async (_req, res, next) => {
+  router.get("/network/schedules", requireNetworkMember, async (_req, res, next) => {
     try {
-      // WARP-111: SWR-friendly caching for the dashboard's polling reads.
-      res.set("Cache-Control", "private, max-age=5, stale-while-revalidate=10");
       const schedules = await scheduleApi.listSchedules();
       res.json({ schedules });
     } catch (err) {
@@ -37,7 +40,7 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
     }
   });
 
-  router.get("/network/schedules/:id", async (req, res, next) => {
+  router.get("/network/schedules/:id", requireNetworkMember, async (req, res, next) => {
     try {
       const schedule = await scheduleApi.getSchedule(req.params.id);
       res.json({ schedule });
@@ -85,7 +88,7 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
     }
   });
 
-  router.get("/network/overrides", async (req, res, next) => {
+  router.get("/network/overrides", requireNetworkMember, async (req, res, next) => {
     try {
       const overrides = await scheduleApi.listOverrides({
         active: req.query.active === "1",
@@ -187,11 +190,8 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
     }
   });
 
-  router.get("/network/schedule-events", async (req, res, next) => {
+  router.get("/network/schedule-events", requireNetworkMember, async (req, res, next) => {
     try {
-      // WARP-111: the event log is append-only and tolerates a slightly
-      // longer plain max-age (no SWR window).
-      res.set("Cache-Control", "private, max-age=15");
       let since: Date | undefined;
       if (typeof req.query.since === "string") {
         const d = new Date(req.query.since);
@@ -222,10 +222,26 @@ export function registerScheduleRoutes(router: Router, deps: ScheduleDeps): void
           .status(400)
           .json({ error: "Body must be { blocked: boolean }" });
       }
-      const result = await scheduleApi.setManualBlock(
+      const { previousManualBlock, ...result } = await scheduleApi.setManualBlock(
         req.params.mac,
         req.body.blocked,
       );
+      // WARP-3092: cutting a device off the network is an admin action on
+      // someone's machine — it lands on the signed activity chain with the
+      // caller as actor, like the override writes above.
+      await recordActivity({
+        kind: "network",
+        severity: "ok",
+        sourceIcon: result.manualBlock ? "shield-off" : "shield",
+        what: result.manualBlock ? "Device blocked" : "Device unblocked",
+        sub: result.mac,
+        refs: {
+          deviceId: result.mac,
+          previousManualBlock,
+          manualBlock: result.manualBlock,
+        },
+        actor: actorFromRequest(req),
+      });
       res.json(result);
     } catch (err) {
       handleRegistryError(err, res, next);

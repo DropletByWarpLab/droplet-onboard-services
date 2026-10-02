@@ -20,7 +20,6 @@
  *  component. Keeping this module free of JSX is what lets it be imported by
  *  a plain `.ts` test. */
 export type FilesRouteIcon =
-  | "drives"
   | "favorites"
   | "recents"
   | "shared"
@@ -37,7 +36,7 @@ export interface FilesRouteHeader {
 }
 
 /**
- * The five sub-routes whose header is fully static, and therefore fully
+ * The four sub-routes whose header is fully static, and therefore fully
  * owned by `app/files/layout.tsx`.
  *
  * `/files` and `/files/devices` are absent on purpose. Both compute part of
@@ -48,22 +47,19 @@ export interface FilesRouteHeader {
  * their own `ShellPage` and the layout passes them straight through.
  */
 export const FILES_ROUTE_HEADERS: Record<string, FilesRouteHeader> = {
-  "/files/drives": {
-    icon: "drives",
-    label: "Drives",
-    title: "Drives",
-    sub: "Storage pools and the physical volumes mounted on this Droplet.",
-  },
   "/files/favorites": {
     icon: "favorites",
     label: "Favorites",
     title: "Favorites",
     sub: "Files and folders you've marked as favorites for quick access.",
   },
+  // WARP-2966 — "Recent", not "Recents". The sidebar row was relabelled with
+  // the section re-cut, and a nav row and the page it opens saying different
+  // words is the drift this map exists to prevent.
   "/files/recents": {
     icon: "recents",
-    label: "Recents",
-    title: "Recents",
+    label: "Recent",
+    title: "Recent",
     sub: "Files you've modified recently, grouped by time.",
   },
   "/files/shared": {
@@ -83,8 +79,14 @@ export const FILES_ROUTE_HEADERS: Record<string, FilesRouteHeader> = {
 /** Routes whose `ShellPage` the layout renders. */
 export const LAYOUT_OWNED = Object.keys(FILES_ROUTE_HEADERS);
 
-/** Routes under `/files` that render their own `ShellPage`, by design. */
-export const SELF_OWNED = ["/files", "/files/devices"] as const;
+/** Routes under `/files` the layout does not wrap. `/files` and
+ *  `/files/devices` render their own `ShellPage`; `/files/drives` renders
+ *  nothing at all — WARP-2959 turned it into a redirect to
+ *  `/settings/storage`, and a header painted around a redirect is a header
+ *  nobody ever sees. Both cases want children passed straight through, and
+ *  both are deliberate, which is what keeps them out of the "unknown"
+ *  bucket the dev warning fires on. */
+export const SELF_OWNED = ["/files", "/files/devices", "/files/drives"] as const;
 
 /** The header for a pathname, or `null` when the page owns its own chrome. */
 export function headerForPath(pathname: string): FilesRouteHeader | null {

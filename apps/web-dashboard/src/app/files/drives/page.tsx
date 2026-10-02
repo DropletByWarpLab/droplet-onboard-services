@@ -1,11 +1,16 @@
-"use client";
+import { redirect } from "next/navigation";
 
-import { DrivesPanel } from "@/components/FileManager/DrivesPanel";
-
-/** Drives surface — the storage breakdown reached from the Files sub-nav.
- *  Mirrors the Droplet Design System handoff's "Drives" tab: a pooled-storage
- *  summary plus a card per mounted volume, driven by the real
- *  /api/storage/drives data. */
-export default function DrivesPage() {
-  return <DrivesPanel />;
+/**
+ * WARP-2959 — /files/drives → /settings/storage permanent redirect.
+ *
+ * The Drives surface moved into Settings → Storage. The route stays alive so
+ * old bookmarks, the sidebar of an older deployed build, and any link written
+ * down while it lived under Files still land on the thing they asked for.
+ *
+ * Server-side redirect: there is no state to preserve, and Next renders it at
+ * request time. `files-routes.ts` lists this path as self-owned so the Files
+ * layout passes it through without painting a header nobody ever sees.
+ */
+export default function DrivesRedirect() {
+  redirect("/settings/storage");
 }

@@ -107,6 +107,54 @@ describe("requestLogger credential redaction (WARP-1015)", () => {
     expect(output).not.toContain(SET_COOKIE);
   });
 
+  // WARP-3193 SEC-DATA-2: every file tool call sends the user's Nextcloud
+  // app-password in X-Nextcloud-Token; x-droplet-auth / x-api-key carry
+  // service credentials. None may reach a log line.
+  it.each([
+    ["x-nextcloud-token", "ncAppPw-SECRET-Q7wE9-rT2yU"],
+    ["x-droplet-auth", "SECRET-DROPLET-AUTH-a1b2c3d4"],
+    ["x-api-key", "SECRET-API-KEY-z9y8x7"],
+  ])("redacts the %s request header", (header, secret) => {
+    const lines: string[] = [];
+    const logger = createRequestLogger({
+      dest: { write: (s: string) => lines.push(s) },
+      level: "info",
+    });
+    const req = mockReq("HDR-ID", { [header]: secret });
+    const res = mockRes();
+    runWithRequestId("HDR-ID", () => {
+      logger(req as never, res as never);
+    });
+    res.emit("finish");
+    expect(lines.join("")).not.toContain(secret);
+    const completion = JSON.parse(lines[lines.length - 1]);
+    expect(completion.req.headers[header]).toBe("[Redacted]");
+  });
+
+  // WARP-3193 SEC-DATA-4: the pre-auth calendar feed authenticates by
+  // `?token=`, and the default req serializer logs `url` verbatim — so every
+  // phone poll wrote a live feed credential into the log. Only the path is
+  // logged; the query string never is.
+  it("strips the query string from the logged req.url", () => {
+    const SECRET = "cm0rowid.SECRET-FEED-TOKEN-base64url";
+    const lines: string[] = [];
+    const logger = createRequestLogger({
+      dest: { write: (s: string) => lines.push(s) },
+      level: "info",
+    });
+    const req = Object.assign(mockReq("URL-ID"), {
+      url: `/api/calendar/publish/alice.ics?token=${SECRET}`,
+    });
+    const res = mockRes();
+    runWithRequestId("URL-ID", () => {
+      logger(req as never, res as never);
+    });
+    res.emit("finish");
+    expect(lines.join("")).not.toContain(SECRET);
+    const completion = JSON.parse(lines[lines.length - 1]);
+    expect(completion.req.url).toBe("/api/calendar/publish/alice.ics");
+  });
+
   it("replaces the redacted headers with the pino placeholder", () => {
     const lines = runLoggedRequest();
     const completion = JSON.parse(lines[lines.length - 1]);
@@ -168,4 +216,37 @@ describe("requestLogger overlay QR link-token redaction (WARP-1474)", () => {
     const line = JSON.parse(lines[lines.length - 1]);
     expect(line.req.query.token).toBe("[Redacted]");
   });
+});
+
+describe("requestLogger secret query params (WARP-3122)", () => {
+  const SIG = "SECRET-SEGMENT-SIGNATURE-zz9";
+  const url = `/api/cameras/front/playback.segment?after=1&before=2&seg=0.ts&u=u1&exp=9&sig=${SIG}`;
+
+  it("never logs the segment signature, neither in req.url nor in req.query", () => {
+    const lines: string[] = [];
+    const logger = createRequestLogger({
+      dest: { write: (s: string) => lines.push(s) },
+      level: "info",
+    });
+    const req = Object.assign(mockReq("SIG-ID"), {
+      url,
+      originalUrl: url,
+      query: { seg: "0.ts", sig: SIG, token: "SECRET-TOKEN-q" },
+    }) as unknown as ReturnType<typeof mockReq> & {
+      log: { info: (obj: unknown, msg: string) => void };
+    };
+    const res = mockRes();
+    runWithRequestId("SIG-ID", () => {
+      logger(req as never, res as never);
+      req.log.info({ req }, "explicit req serialize");
+    });
+    res.emit("finish");
+    const output = lines.join("");
+    expect(output).not.toContain(SIG);
+    expect(output).not.toContain("SECRET-TOKEN-q");
+    const completion = JSON.parse(lines[lines.length - 1]);
+    expect(completion.req.url).toBe("/api/cameras/front/playback.segment");
+    expect(completion.req.query.sig).toBe("[Redacted]");
+  });
+
 });

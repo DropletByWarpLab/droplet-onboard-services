@@ -56,12 +56,15 @@ describe("CORS allowlist config parsing (WARP-562)", () => {
     const SECRET_KEYS = [
       "JWT_SECRET",
       "DEVICE_SECRET_KEY",
+      "DEVICE_SECRET",
       "SERVICE_TOKEN_SWITCH",
+      "SERVICE_TOKEN_DEVICE_GATEWAY",
       "SERVICE_TOKEN_AI_GATEWAY",
       "SERVICE_TOKEN_VOICE",
       "SERVICE_TOKEN_MCP",
       "SERVICE_TOKEN_EMAIL",
       "SERVICE_TOKEN_EGRESS_AUDIT",
+      "NEXTCLOUD_ADMIN_PASSWORD",
     ];
     const prev = Object.fromEntries(SECRET_KEYS.map((k) => [k, process.env[k]]));
     for (const k of SECRET_KEYS) process.env[k] = "x".repeat(64);

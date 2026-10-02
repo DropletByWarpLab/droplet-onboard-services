@@ -100,7 +100,7 @@ async function performRemove() {
             placeholder="Reminder title"
             value={newTitle}
             onChange={(e) => setNewTitle(e.target.value)}
-            className="text-sm outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+            className="text-sm outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
             style={{
               background: "var(--surface)",
               border: "1px solid var(--border)",
@@ -136,7 +136,7 @@ async function performRemove() {
       ) : (
         <ul className="flex flex-col gap-1">
           {reminders.map((r) => {
-            const completed = r.completedAt !== null;
+            const completed = r.status === "completed";
             // aria-label mirrors the visible title; fall back to the
             // stable id when the title is empty so the action is still
             // discoverable to screen readers (WARP-292).

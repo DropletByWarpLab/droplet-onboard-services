@@ -36,18 +36,16 @@ describe("QuickSchedulePopover", () => {
     vi.unstubAllGlobals();
   });
 
-  it("renders with the Bedtime preset copy", () => {
+  it("renders with the After-hours preset copy", () => {
     renderPopover();
-    expect(screen.getByText("Apply Bedtime?")).toBeInTheDocument();
-    expect(
-      screen.getByText(/Sun–Thu 9pm–7am, Fri–Sat 11pm–8am/),
-    ).toBeInTheDocument();
+    expect(screen.getByText("Apply After hours?")).toBeInTheDocument();
+    expect(screen.getByText(/Every day 7pm–7am/)).toBeInTheDocument();
     expect(
       screen.getByRole("dialog", { name: "Apply quick schedule" }),
     ).toBeInTheDocument();
   });
 
-  it("Apply POSTs /api/network/schedules with Bedtime windows and device subject", async () => {
+  it("Apply POSTs /api/network/schedules with After-hours windows and device subject", async () => {
     const subject = {
       type: "device" as const,
       deviceMac: "aa:bb:cc:dd:ee:01",
@@ -66,21 +64,16 @@ describe("QuickSchedulePopover", () => {
       );
       expect(postCalls).toHaveLength(1);
       const body = JSON.parse(postCalls[0][1].body);
-      expect(body.name).toBe("Bedtime");
+      expect(body.name).toBe("After hours");
       expect(body.enabled).toBe(true);
       expect(body.subjectType).toBe("device");
       expect(body.deviceMac).toBe(subject.deviceMac);
-      expect(body.windows).toHaveLength(2);
-      // Sun-Thu mask = 1|2|4|8|16 = 31; Fri-Sat = 32|64 = 96.
+      expect(body.windows).toHaveLength(1);
+      // Every day: Sun..Sat mask = 127.
       expect(body.windows[0]).toEqual({
-        daysOfWeek: 31,
-        startMin: 21 * 60,
+        daysOfWeek: 127,
+        startMin: 19 * 60,
         endMin: 7 * 60,
-      });
-      expect(body.windows[1]).toEqual({
-        daysOfWeek: 96,
-        startMin: 23 * 60,
-        endMin: 8 * 60,
       });
     });
     await waitFor(() => expect(onClose).toHaveBeenCalled());

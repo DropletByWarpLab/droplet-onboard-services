@@ -28,15 +28,24 @@ export function createTlsStatusPublicRouter(prisma: PrismaClient): Router {
       const row = await prisma.tlsCert.findFirst({ orderBy: { updatedAt: "desc" } });
       const fqdn = row?.fqdn || config.DROPLET_PUBLIC_FQDN || null;
       const state = row?.state ?? "BOOTSTRAP_SELF_SIGNED";
+      // WARP-2944: whole days until the current public certificate expires
+      // (null on the bootstrap self-signed cert). The screen's one-line
+      // warning reads this; a public certificate's dates are already public
+      // (Certificate Transparency), so nothing new leaves the box here.
+      const notAfter = row?.notAfter ?? null;
+      const daysLeft = notAfter
+        ? Math.floor((notAfter.getTime() - Date.now()) / 86_400_000)
+        : null;
       res.json({
         state,
         fqdn,
         hqConfigured: Boolean(config.HQ_ISSUANCE_URL),
+        daysLeft,
       });
     } catch {
       // The page treats any non-advance answer as "keep polling" — degrade
       // without leaking error internals onto an unauthenticated surface.
-      res.status(503).json({ state: "UNKNOWN", fqdn: null, hqConfigured: false });
+      res.status(503).json({ state: "UNKNOWN", fqdn: null, hqConfigured: false, daysLeft: null });
     }
   });
 

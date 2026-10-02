@@ -71,7 +71,7 @@ export function CameraSubnetCard({ config, onRefresh }: CameraSubnetCardProps) {
   }
 
   return (
-    <div className="card mb-6">
+    <div className="card">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           {isEnabled ? (

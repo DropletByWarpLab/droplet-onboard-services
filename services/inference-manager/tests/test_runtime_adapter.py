@@ -610,3 +610,39 @@ def test_declared_oci_still_compares_equal_for_membership(dmr_client):
     assert runtime.comparable_id("docker.io/ai/glm-4.7-flash:reap-q4_K_M") == (
         "ai/glm-4.7-flash"
     )
+
+
+# ── WARP-3046: pinned_id — the tag-exact identity of a pinned build ──────
+
+
+@pytest.mark.parametrize(
+    ("supplied", "expected"),
+    [
+        # A declared reference keeps its tag…
+        ("ai/gemma4:26b-a4b-q4_K_M", "ai/gemma4:26b-a4b-q4_K_M"),
+        # …and what DMR REPORTS folds onto the same key (registry host dropped).
+        ("docker.io/ai/gemma4:26b-a4b-q4_K_M", "ai/gemma4:26b-a4b-q4_K_M"),
+        ("docker.io/ai/gpt-oss:20B-F16", "ai/gpt-oss:20B-F16"),
+        # `latest` and no tag pin nothing — the daemon's default build.
+        ("docker.io/ai/gemma4:latest", None),
+        ("ai/gemma4", None),
+        # A bare Ollama id has its tag dropped by `to_runtime_id`, so it pins
+        # nothing on DMR — those entries keep repository-level membership.
+        ("gemma4:26b", None),
+    ],
+)
+def test_dmr_pinned_id(dmr_client, supplied, expected):
+    assert DmrRuntime(dmr_client).pinned_id(supplied) == expected
+
+
+def test_ollama_pinned_id_is_none(ollama_client):
+    """Ollama's `comparable_id` is identity — already tag-exact — so it has
+    nothing to add; `None` keeps its `pulled` comparison byte-identical."""
+    assert OllamaRuntime(ollama_client).pinned_id("gemma4:26b") is None
+
+
+def test_sibling_builds_share_a_comparable_id_but_not_a_pinned_id(dmr_client):
+    runtime = DmrRuntime(dmr_client)
+    a, b = "ai/gemma4:26b-a4b-q4_K_M", "docker.io/ai/gemma4:latest"
+    assert runtime.comparable_id(a) == runtime.comparable_id(b)
+    assert runtime.pinned_id(a) != runtime.pinned_id(b)

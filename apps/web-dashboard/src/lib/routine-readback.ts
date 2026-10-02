@@ -31,6 +31,13 @@ export interface RoutineReadback {
   impactLine: string;
   /** Registry names of the steps that write. Empty for a read-only routine. */
   writeTools: string[];
+  /**
+   * WARP-2895 — the code of every `transform` / `when` step, in run order.
+   * The promote screen shows it: a routine that runs code says so in the
+   * readback ("runs code you wrote"), and the person sees the code itself
+   * before turning it on — the derived readback never trusts a description.
+   */
+  code: Array<{ kind: "transform" | "when"; code: string }>;
 }
 
 const DAY_LABEL: Record<string, string> = {
@@ -138,10 +145,21 @@ export function describeRoutine(args: {
 }): RoutineReadback {
   const actions: string[] = [];
   const writeTools: string[] = [];
+  const code: RoutineReadback["code"] = [];
 
   for (const step of args.steps) {
     if (step.kind === "summarize") {
       actions.push("write you a summary of what it found");
+      continue;
+    }
+    // WARP-2895 — a step that runs code in the sandbox. It dispatches no
+    // tool, so it never touches `writeTools`; it is named honestly and its
+    // code is carried for the promote screen.
+    if (step.kind === "transform" || step.kind === "when") {
+      const stepArgs = step.args as Record<string, unknown> | null;
+      const text = stepArgs && typeof stepArgs.code === "string" ? stepArgs.code : "";
+      code.push({ kind: step.kind, code: text });
+      actions.push(step.kind === "when" ? "run code you wrote to decide whether to continue" : "run code you wrote to shape the results");
       continue;
     }
     const tool = toolNameOf(step);
@@ -177,7 +195,7 @@ export function describeRoutine(args: {
   const enabled = (args.schedules ?? []).filter((s) => s.enabled);
   const cadence = enabled.length > 0 ? describeSchedule(enabled[0]) : null;
 
-  return { cadence, actions, impact, impactLine, writeTools };
+  return { cadence, actions, impact, impactLine, writeTools, code };
 }
 
 /** The readback as one sentence, for the promote confirmation. */

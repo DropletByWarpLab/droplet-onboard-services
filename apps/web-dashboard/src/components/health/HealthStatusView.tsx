@@ -47,21 +47,31 @@ const BANNER_COPY: Record<
   },
 };
 
-/** Friendly service labels — the aggregate keys are terse (db, aiGateway). */
+/**
+ * Friendly service labels, keyed on the names the box's health monitor
+ * ACTUALLY sends (`health-monitor.service.ts` `ComponentName`) — not the
+ * stale set this map used to carry (`db`, `aiGateway`, `matter`, `router`,
+ * `frigate`, `switch`), none of which the monitor emits, so every one of
+ * those component rows fell through to the raw wire name (WARP-3155).
+ * Mirrors the Mac's `HealthPresentation.label` (DropletAgent) — keep both
+ * in sync if a component is added or renamed.
+ */
 const SERVICE_LABELS: Record<string, string> = {
-  db: "Database",
+  postgres: "Database",
   redis: "Cache",
-  aiGateway: "AI gateway",
-  matter: "Smart devices (Matter)",
-  router: "Router",
-  frigate: "Cameras (Frigate)",
-  switch: "Network switch",
+  routing: "Router",
+  "ai-gateway": "AI gateway",
+  nextcloud: "Files (Nextcloud)",
   display: "Front display",
+  "file-indexer": "File search indexing",
   // WARP-1146 — degraded/failed RAID pools surface through the monitor.
   storage: "Storage pools",
+  // WARP-2548 — the MQTT broker the services message over.
+  mqtt: "Messaging (MQTT broker)",
 };
 
-function serviceLabel(name: string): string {
+/** Exported for the WARP-3155 "every ComponentName has a label" test. */
+export function serviceLabel(name: string): string {
   return SERVICE_LABELS[name] ?? name;
 }
 
@@ -172,13 +182,18 @@ function HealthBody({ health }: { health: SystemHealth }) {
                 />
                 <span className="rt">
                   <span className="nm">{serviceLabel(c.name)}</span>
+                  {/* WARP-2548 — say WHY a service is down (the probe's
+                      error summary), so a crash-looping broker reads as
+                      "connect ECONNREFUSED …" rather than a bare red dot. */}
+                  {!up && c.error && <span className="sub mono">{c.error}</span>}
                 </span>
                 {/* WARP-1146 — a flagged storage pool is actionable: point the
-                    owner straight at the Drives page that shows which pool
-                    dropped a member and what to do about it. */}
+                    owner straight at the storage page that shows which pool
+                    dropped a member and what to do about it. (WARP-2959 moved
+                    it to Settings → Storage.) */}
                 {c.name === "storage" && !up && (
                   <Link
-                    href="/files/drives"
+                    href="/settings/storage"
                     className="rmeta text-[var(--brand)]"
                     style={{ textDecoration: "none" }}
                   >
@@ -207,7 +222,14 @@ function HealthBody({ health }: { health: SystemHealth }) {
         }}
       >
         <span>Uptime {formatUptime(health.uptime)}</span>
-        <span style={{ fontFamily: "var(--font-mono)" }}>v{health.version}</span>
+        {/* WARP-3154 — `version` is the real committed OTA release tag now
+            (e.g. "ota-stage-42-gabc1234"), not a hardcoded literal; null on a
+            box that has never taken an update (still on its factory image),
+            so there is nothing honest to print. No "v" prefix — the tag
+            already carries its own shape, unlike a bare semver. */}
+        {health.version && (
+          <span style={{ fontFamily: "var(--font-mono)" }}>{health.version}</span>
+        )}
       </div>
     </>
   );

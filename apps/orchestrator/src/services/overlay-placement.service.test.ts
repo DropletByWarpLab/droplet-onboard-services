@@ -15,6 +15,7 @@ import {
   isPublicIpv4,
   needsRelay,
   observePlacement,
+  parsePortForward,
   splitEndpoint,
   type PlacementResult,
 } from "./overlay-placement.service.js";
@@ -528,6 +529,99 @@ describe("observePlacement", () => {
     expect(s.placement.natClass).toBe("address_dependent");
     expect(s.candidates.map((c) => c.kind)).toEqual(["lan"]);
     expect(s.relayRequired).toBe(true);
+  });
+});
+
+// WARP-3018 — the house shape: box behind an edge router behind an ISP gateway
+// that forwards udp/51820. STUN sees the gateway's public IP but a rewritten
+// port, so without a declared forward the phone is only offered a guess.
+describe("declared port forward (WIREGUARD_PUBLIC_FORWARD)", () => {
+  const doubleNat = {
+    wanAddress: async () => "192.168.9.195",
+    stun: async () => "70.224.64.252:61017",
+    lanAddress: async () => "192.168.1.191",
+  };
+
+  it("parses port-only, ip:port, and blank", () => {
+    expect(parsePortForward("51820")).toEqual({ forward: { host: null, port: 51820 } });
+    expect(parsePortForward(" 70.224.64.252:51820 ")).toEqual({
+      forward: { host: "70.224.64.252", port: 51820 },
+    });
+    expect(parsePortForward("")).toEqual({ forward: null });
+    expect(parsePortForward(undefined)).toEqual({ forward: null });
+  });
+
+  it.each([
+    ["0"],
+    ["70000"],
+    ["192.168.1.254:51820"], // private: unreachable off-LAN
+    ["100.72.1.1:51820"], // CGNAT
+    ["home.droplet-us.com:51820"], // hostname: WARP-1391
+    ["70.224.64.252"], // host without port
+    ["70.224.64.252:0"],
+  ])("refuses %s with a reason, never a candidate", (raw) => {
+    const r = parsePortForward(raw);
+    expect(r.forward).toBeNull();
+    expect(r.error).toBeTruthy();
+  });
+
+  it("port-only forward borrows the STUN public IP and outranks srflx", async () => {
+    const s = await observePlacement(doubleNat, {
+      listenPort: 51820,
+      forward: { host: null, port: 51820 },
+    });
+    expect(s.candidates).toEqual([
+      { kind: "lan", host: "192.168.1.191", port: 51820, priority: 120 },
+      { kind: "mapped", host: "70.224.64.252", port: 51820, priority: 80 },
+      { kind: "srflx", host: "70.224.64.252", port: 61017, priority: 60 },
+    ]);
+  });
+
+  it("without a forward the house shape offers only the STUN guess (the bug)", async () => {
+    const s = await observePlacement(doubleNat, { listenPort: 51820 });
+    expect(s.candidates.map((c) => c.kind)).toEqual(["lan", "srflx"]);
+  });
+
+  it("an explicit host survives a failed STUN probe", async () => {
+    const s = await observePlacement(
+      { ...doubleNat, stun: async () => null },
+      { listenPort: 51820, forward: { host: "70.224.64.252", port: 51820 } },
+    );
+    expect(s.candidates.map((c) => `${c.kind} ${c.host}:${c.port}`)).toEqual([
+      "lan 192.168.1.191:51820",
+      "mapped 70.224.64.252:51820",
+    ]);
+    expect(s.relayRequired).toBe(false);
+  });
+
+  it("a port-only forward with no usable public IP advertises nothing", async () => {
+    for (const stun of [async () => null, async () => "100.72.1.1:4000"]) {
+      const s = await observePlacement(
+        { ...doubleNat, stun },
+        { listenPort: 51820, forward: { host: null, port: 51820 } },
+      );
+      expect(s.candidates.some((c) => c.kind === "mapped")).toBe(false);
+    }
+  });
+
+  it("collapses srflx into mapped when the NATs happened to preserve the port", async () => {
+    const s = await observePlacement(
+      { ...doubleNat, stun: async () => "70.224.64.252:51820" },
+      { listenPort: 51820, forward: { host: null, port: 51820 } },
+    );
+    expect(s.candidates.map((c) => c.kind)).toEqual(["lan", "mapped"]);
+  });
+
+  it("an explicit gateway mapping still wins over a declared forward", async () => {
+    const s = await observePlacement(doubleNat, {
+      listenPort: 51820,
+      mapping: { host: "203.0.113.9", port: 40000 },
+      forward: { host: null, port: 51820 },
+    });
+    expect(s.candidates.find((c) => c.kind === "mapped")).toMatchObject({
+      host: "203.0.113.9",
+      port: 40000,
+    });
   });
 });
 

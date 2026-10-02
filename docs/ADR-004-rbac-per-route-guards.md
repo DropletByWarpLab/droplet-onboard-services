@@ -104,9 +104,10 @@ Apply guards at route registration, not inside the handler. Mirror the existing 
 | `POST/PUT/DELETE /api/cameras/*`, `/api/matter/*`, `/api/smart-home/*` | `owner`, `admin`, `family` |
 | `POST/PUT/DELETE /api/files/*` (write) | `owner`, `admin`, `family` |
 | `POST/PUT/DELETE /api/llm/sessions/*` (own session) | `owner`, `admin`, `family`, `guest` |
+| `POST /api/llm/warm` (WARP-3127, warm on wake) | `owner`, `admin`, and the `_service:voice` principal (pinned by id) |
 | All `GET` endpoints | unchanged (auth middleware still applies; no role gate) |
 
-Service principals (`service` role) are read-only by design — they hit `GET` endpoints and the MCP tool surface only. The matrix above does NOT include `service` on any write row.
+Service principals (`service` role) are read-only by design — they hit `GET` endpoints and the MCP tool surface only. The matrix above does NOT include the `service` role on any write row; the one pinned principal id it names (`_service:voice` on `POST /api/llm/warm`) is the scoped WARP-3127 exception below.
 
 #### Voice smart-home control exception (WARP-1398 amendment)
 
@@ -138,6 +139,27 @@ Service principals (`service` role) are read-only by design — they hit `GET` e
 >
 > Human RBAC is unchanged; this widens exactly one non-human principal by exactly
 > one tool, with the lock carve-out preserved.
+
+#### Voice warm-on-wake exception (WARP-3127 amendment)
+
+> **Status of this note:** added 2026-09-25 by WARP-3127 (voice latency, epic
+> WARP-1430; scope approved by Stefan on 2026-09-25, guard as specified in the
+> ticket). A second scoped exception to the read-only default above.
+>
+> When the wake word fires, voice-io POSTs `/api/llm/warm` so the orchestrator
+> starts loading the box's active chat model while the person is still
+> speaking. The route is guarded by
+> `requireRoleOrService("_service:voice", "owner", "admin")`: the
+> `_service:voice` principal id AND the `service` role must both match, so every
+> other service principal (`_service:mcp`, `_service:email`, ...) is refused, and
+> `family` / `guest` are refused among humans.
+>
+> The grant is deliberately inert: the body names no model (the orchestrator
+> warms `resolveActiveModel`'s answer, so a caller cannot load a second model
+> onto the GPU), the warm is probe-first and in-flight-guarded, it never sets
+> `keep_alive` (WARP-1826's 5-minute residency stands), and the route answers
+> 202 without waiting. Pinned by `routes/llm-warm.test.ts` and the
+> service-principal block of `src/__tests__/rbac.test.ts`.
 
 #### Managed-switch control surface (WARP-559)
 
@@ -330,7 +352,7 @@ export function roleFromGroups(groups: string[]): Role {
 
 Group-name choices match what Nextcloud already provisions out of the box. Documented in the new `docs/RBAC.md` (created in Phase 8 brain-sync, not this ADR).
 
-> **Superseded in part by WARP-1636 — this mapping is a hint, not an authority.** The `admin` group above is Nextcloud's own *instance-administrator* group, which `buildNcGroups` grants to every owner/admin-tier user; reading it back as `owner` let a deliberately-narrowed admin mint the top tier through the Nextcloud OCS auth fallback. The mapping itself is unchanged, but the OCS fallback now mints through `resolveNcSessionRole`, which caps it at the holder's stored `User.role`. Never mint a session from `roleFromGroups` directly. See ADR-032 §7.1.
+> **Superseded in part by WARP-1636 — this mapping is a hint, not an authority.** The `admin` group above is Nextcloud's own *instance-administrator* group, which `buildNcGroups` grants to every owner/admin-tier user; reading it back as `owner` let a deliberately-narrowed admin mint the top tier through the Nextcloud OCS auth fallback. The mapping itself is unchanged, but the OCS fallback now mints through `resolveNcSessionRole`, which caps it at the holder's stored `User.role`. Since WARP-2573 the fallback refused any owner/admin-tier row, and since WARP-2994 the fallback — and `roleFromGroups` / `resolveNcSessionRole` with it — is gone: a Nextcloud credential never yields a Droplet session at all. See ADR-032 §7.1.
 
 ### 5. Tests
 
@@ -352,13 +374,13 @@ Post-fix behavior (both rounds combined):
 - **JWT signing — refresh (`routes/auth.ts:/auth/refresh`):** re-looks up the local `User` by `id = jwtPayload.sub` before rotating. If no row matches (owner removed the user mid-session, OR the refresh token is a pre-WARP-485 legacy token carrying the NC username in `sub`), the old token is denied, cookies are cleared, and the response is **401 `USER_NOT_PROVISIONED`**. Legacy refresh-token holders re-authenticate on next request and receive a properly-shaped pair from `/auth/login` — this is the deliberate JWT-layer cache bump for the round-2 deploy.
 - **JWT signing — invite-accept (`routes/auth.ts:/auth/invites/accept/:token`):** upserts a local `User` row keyed by `nextcloudUsername = invite.username` before signing the JWT, so the freshly-provisioned invitee's first session ships a UUID in `JWT.sub` (not the invite username string). Upsert (not create) so concurrent accept-POSTs that race past the single-use `userInvite.update` don't trip `P2002`-unique on `nextcloudUsername`.
 - **Token verification — JWT path (`middleware/auth.ts:verifyAccessToken`):** `req.user.id = jwtPayload.sub`. Post-round-2, every issued `sub` is a local UUID, so this passthrough is correct.
-- **Token verification — OCS path (`middleware/auth.ts:validateNextcloudTokenDetailed`):** looks up the local `User` row by `nextcloudUsername` (new column added by WARP-485 — see `prisma/migrations/20260526150000_warp_485_user_nextcloud_username/migration.sql`) and sets `req.user.id = localUser.id`. Same fail-closed posture as the JWT signing paths above.
+- **Token verification — OCS path — REMOVED by WARP-2994.** There is no Nextcloud-credential path any more: a token that is neither a JWT nor a service-principal bearer is a 401. Historical: (`middleware/auth.ts:validateNextcloudTokenDetailed`) looked up the local `User` row by `nextcloudUsername` (new column added by WARP-485 — see `prisma/migrations/20260526150000_warp_485_user_nextcloud_username/migration.sql`) and sets `req.user.id = localUser.id`. Same fail-closed posture as the JWT signing paths above.
 - **NC token store (`services/nextcloud-session.service.ts`):** every `storeNcToken` / `getNcToken` / `deleteNcToken` / `touchNcToken` call is keyed by the local User.id UUID. Legacy NC-username-keyed entries from pre-WARP-485 deployments orphan and self-expire on the refresh-token TTL (7 days). Long-running deploys can hard-flush by restarting the Redis cache container (`docker compose restart cache`) — runbook unchanged.
 - **`req.user.username`** keeps the Nextcloud username (or, post-round-2 for fresh JWT sessions, the canonical user handle) for display continuity. Consumers that need the human-readable handle (brain-memory route filters, audit-log rendering) keep using `username`; consumers that need a stable per-user key (`ScopeBinding.userId` FK lookups, self-action comparisons, NC token cache keys) use `id`.
 - **Service principals** (`_service:voice`, `_service:mcp`) are unaffected — they have synthetic ids that never collide with user UUIDs.
 
 The contract is pinned in two test files:
-- `apps/orchestrator/src/__tests__/auth.req-user-id.test.ts` — round-1 coverage: JWT-path passthrough, OCS-with-matching-User, OCS-without-User, prisma-not-initialised fail-closed, and the end-to-end WARP-480 self-guard regression under OCS auth.
+- `apps/orchestrator/src/__tests__/auth.nc-password-reset-escalation.test.ts` — since WARP-2994: JWT-path passthrough (`req.user.id = sub`), and every Nextcloud-credential shape (a `basic:` password, an NC app-password, an NC OAuth token) refused on HTTP and WS without Nextcloud being asked. The round-1 OCS cases (`auth.req-user-id.test.ts`) were deleted with the path they covered.
 - `apps/orchestrator/src/routes/auth.jwt-uuid.test.ts` — round-2 coverage: real `/auth/login` → decode the issued JWT → assert `sub === localUser.id` UUID, plus the corresponding 401 fail-closed branches at login / refresh / invite-accept and the UUID-keyed NC token cache slot at logout.
 
 **Out of scope (deferred to follow-ups):**

@@ -1,7 +1,9 @@
 "use client";
 
+import { useMemo } from "react";
 import useSWR from "swr";
 import { apiFetch } from "./apiFetch";
+import { toLocalAllDay } from "@/lib/calendar";
 
 export interface CalendarEvent {
   id: string;
@@ -14,6 +16,10 @@ export interface CalendarEvent {
   startsAt: string;
   endsAt: string;
   allDay: boolean;
+  /** WARP-3265 — `YYYY-MM-DD`, end exclusive, sent by the box for an all-day
+   *  event from a subscribed feed; null or absent otherwise (older boxes). */
+  startDate?: string | null;
+  endDate?: string | null;
   source: "local" | "external";
   sourceId: string | null;
   externalUid: string | null;
@@ -42,7 +48,10 @@ export function useCalendarEvents(opts: { from?: Date; to?: Date } = {}) {
     url,
     (u: string) => apiFetch<{ events: CalendarEvent[] }>(u, { credentials: "same-origin" }),
   );
-  return { events: data?.events ?? [], error, isLoading, refresh: mutate };
+  // WARP-3265 — every calendar surface reads events through here, so the
+  // all-day date fix lives at this one boundary rather than in each view.
+  const events = useMemo(() => (data?.events ?? []).map(toLocalAllDay), [data]);
+  return { events, error, isLoading, refresh: mutate };
 }
 
 export function useCalendarSources() {
@@ -124,8 +133,33 @@ export async function syncSource(id: string) {
   );
 }
 
-export async function getPublishUrl() {
-  return apiFetch<{ url: string }>("/api/calendar/publish-token", {
+// WARP-2767 — the feed link is a stored credential: the server keeps only a
+// hash, so status never carries a URL. A URL comes back exactly once, from
+// rotate; revoke turns the link off with no replacement.
+export interface PublishLinkStatus {
+  state: "active" | "none";
+  createdAt: string | null;
+  expiresAt: string | null;
+}
+
+export function usePublishLinkStatus() {
+  const { data, mutate } = useSWR<PublishLinkStatus>(
+    "/api/calendar/publish-token",
+    (u: string) => apiFetch<PublishLinkStatus>(u, { credentials: "same-origin" }),
+  );
+  return { status: data, refresh: mutate };
+}
+
+export async function rotatePublishLink() {
+  return apiFetch<{ url: string; expiresAt: string }>("/api/calendar/publish/rotate", {
+    method: "POST",
+    credentials: "same-origin",
+  });
+}
+
+export async function revokePublishLink() {
+  return apiFetch<{ revoked: number }>("/api/calendar/publish/revoke", {
+    method: "POST",
     credentials: "same-origin",
   });
 }

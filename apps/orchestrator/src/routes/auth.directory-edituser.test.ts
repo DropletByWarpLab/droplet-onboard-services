@@ -70,7 +70,7 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
   getNcToken: vi.fn().mockResolvedValue(null),
   deleteNcToken: vi.fn().mockResolvedValue(undefined),
   touchNcToken: vi.fn().mockResolvedValue(undefined),
-  resolveNcToken: vi.fn().mockResolvedValue("test-nc-token"),
+  resolveNcToken: vi.fn().mockResolvedValue("caller-nc-token"),
 }));
 
 vi.mock("../services/jwt.service.js", async () => {
@@ -91,6 +91,15 @@ vi.mock("../services/password.service.js", () => ({
   verifyDummyPassword: vi.fn().mockResolvedValue(false),
 }));
 
+// WARP-3111 — an admin password reset now revokes the target's sessions.
+const revokeAllSessions = vi.fn(async (_userId: string) => 3);
+vi.mock("../services/session.service.js", () => ({
+  createSession: vi.fn(async () => ({ sid: "sid-test", evictedSids: [] })),
+  checkSession: vi.fn(async () => ({ kind: "ok", record: { userId: "x", role: "family", createdAt: 0, lastSeenAt: 0 } })),
+  deleteSession: vi.fn(async () => undefined),
+  revokeAllSessions: (...args: unknown[]) => revokeAllSessions(...(args as [string])),
+}));
+
 vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: vi.fn().mockResolvedValue(undefined),
 }));
@@ -101,7 +110,12 @@ vi.mock("../services/brain-memory.service.js", () => ({
 
 import { createProtectedAuthRouter } from "./auth.js";
 import * as nc from "../services/nextcloud.client.js";
+import { recordActivity } from "../services/activity.singleton.js";
 import type { Role } from "../services/jwt.service.js";
+// WARP-2993: the /auth/users routes call Nextcloud as the box service
+// account, never with the caller's own NC credential ("caller-nc-token").
+import { adminBasicToken } from "../services/department-provisioner.service.js";
+const SERVICE_NC_TOKEN = adminBasicToken();
 
 /**
  * Prisma stub for the edit-user handler. `updateMany` mutates seeded rows
@@ -118,9 +132,13 @@ function createPrismaMock(seed: any[] = []) {
     findUnique: vi.fn(async ({ where }: any) => {
       return (
         users.find(
+          // WARP-2858: the route resolves via the shared handle resolver —
+          // nextcloudUsername first, then username. Each clause is gated on
+          // its own key so a nextcloudUsername probe never matches a null.
           (u) =>
-            where.nextcloudUsername !== undefined &&
-            u.nextcloudUsername === where.nextcloudUsername,
+            (where.nextcloudUsername !== undefined &&
+              u.nextcloudUsername === where.nextcloudUsername) ||
+            (where.username !== undefined && u.username === where.username),
         ) ?? null
       );
     }),
@@ -134,7 +152,8 @@ function createPrismaMock(seed: any[] = []) {
       for (let i = 0; i < users.length; i += 1) {
         const u = users[i];
         const match =
-          ((where.nextcloudUsername !== undefined && u.nextcloudUsername === where.nextcloudUsername) ||
+          ((where.id !== undefined && u.id === where.id) ||
+            (where.nextcloudUsername !== undefined && u.nextcloudUsername === where.nextcloudUsername) ||
             (where.username !== undefined && u.username === where.username)) &&
           (where.role === undefined || u.role === where.role);
         if (match) {
@@ -180,6 +199,7 @@ function seededAlice() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  revokeAllSessions.mockResolvedValue(3);
   (nc.ncUpdateUser as any).mockResolvedValue(undefined);
   hashPassword.mockImplementation(async (_pw: string) => "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$aGFzaGhhc2g");
 });
@@ -213,7 +233,7 @@ describe("PUT /api/auth/users/:username — directory-aware edits", () => {
     expect(row.passwordHash).not.toBe("$argon2id$OLD-HASH"); // actually rotated
     expect(JSON.stringify(row)).not.toContain("New-secret123"); // plaintext never stored
     // Still provisions the WebDAV side with the plaintext.
-    expect(nc.ncUpdateUser).toHaveBeenCalledWith("test-nc-token", "alice", "password", "New-secret123");
+    expect(nc.ncUpdateUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice", "password", "New-secret123");
   });
 
   it("writes a normalized email to the local row and mirrors it to Nextcloud", async () => {
@@ -228,7 +248,7 @@ describe("PUT /api/auth/users/:username — directory-aware edits", () => {
     const row = prisma._users.find((u: any) => u.username === "alice");
     // WARP-233: stored as a dcv1 blob — decrypt for the assertion.
     expect(readUserEmail(row.email)).toBe("newalice@example.com");
-    expect(nc.ncUpdateUser).toHaveBeenCalledWith("test-nc-token", "alice", "email", "newalice@example.com");
+    expect(nc.ncUpdateUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice", "email", "newalice@example.com");
   });
 
   it("updates displayName on the local row and Nextcloud", async () => {
@@ -242,7 +262,7 @@ describe("PUT /api/auth/users/:username — directory-aware edits", () => {
     expect(res.status).toBe(200);
     const row = prisma._users.find((u: any) => u.username === "alice");
     expect(row.displayName).toBe("Alice Cooper");
-    expect(nc.ncUpdateUser).toHaveBeenCalledWith("test-nc-token", "alice", "displayname", "Alice Cooper");
+    expect(nc.ncUpdateUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice", "displayname", "Alice Cooper");
   });
 
   it("404s when changing the email/password of a user with no local directory row", async () => {
@@ -341,7 +361,7 @@ describe("PUT /api/auth/users/:username — WARP-1523 ROLE_RANK cap", () => {
     expect(row.displayName).toBe("Alice B");
     expect(row.role).toBe("family"); // role untouched — schema strips it
     expect(nc.ncUpdateUser).toHaveBeenCalledTimes(1); // displayname only
-    expect(nc.ncUpdateUser).toHaveBeenCalledWith("test-nc-token", "alice", "displayname", "Alice B");
+    expect(nc.ncUpdateUser).toHaveBeenCalledWith(SERVICE_NC_TOKEN, "alice", "displayname", "Alice B");
   });
 
   it("an unrecognized role string is not rank-checked — it falls through to schema validation (400)", async () => {
@@ -531,7 +551,7 @@ describe("PUT /api/auth/users/:username — WARP-1564 owner-credential carve-out
     expect(row.passwordHash).toMatch(/^\$argon2id\$/);
     expect(row.passwordHash).not.toBe("$argon2id$OWNER-HASH"); // actually rotated
     expect(nc.ncUpdateUser).toHaveBeenCalledWith(
-      "test-nc-token",
+      SERVICE_NC_TOKEN,
       "boss",
       "password",
       "Owner-newsecret123",
@@ -550,7 +570,7 @@ describe("PUT /api/auth/users/:username — WARP-1564 owner-credential carve-out
     const row = prisma._users.find((u: any) => u.username === "alice");
     expect(row.passwordHash).not.toBe("$argon2id$OLD-HASH");
     expect(nc.ncUpdateUser).toHaveBeenCalledWith(
-      "test-nc-token",
+      SERVICE_NC_TOKEN,
       "alice",
       "password",
       "Reset-secret123",
@@ -781,7 +801,7 @@ describe("PUT /api/auth/users/:username — WARP-1564 review L2: the write pins 
     // And the write really was attempted with the pin.
     expect(prisma.user.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { nextcloudUsername: "alice", role: "family" },
+        where: { id: "u-alice", role: "family" }, // WARP-2858: pinned by the resolved id
       }),
     );
   });
@@ -848,7 +868,7 @@ describe("PUT /api/auth/users/:username — WARP-1564 review L2: the write pins 
     expect(res.status).toBe(200);
     expect(prisma.user.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { nextcloudUsername: "alice", role: "family" },
+        where: { id: "u-alice", role: "family" }, // WARP-2858: pinned by the resolved id
       }),
     );
   });
@@ -869,5 +889,104 @@ describe("PUT /api/auth/users/:username — WARP-1564 review L2: the write pins 
       expect.objectContaining({ where: { nextcloudUsername: "ghost" } }),
     );
     expect(nc.ncUpdateUser).not.toHaveBeenCalled();
+  });
+});
+
+// WARP-3111 — a password set by someone else is a RESET: temporary (the
+// WARP-824 forced change) and, by default, it ends every live session.
+describe("PUT /api/auth/users/:username — WARP-3111 password reset", () => {
+  it("an admin reset sets mustChangePassword, revokes every session and audits the count", async () => {
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .put("/api/auth/users/alice")
+      .send({ password: "Reset-secret123" });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ mustChangePassword: true, sessionsRevoked: 3 });
+    const row = prisma._users.find((u: any) => u.username === "alice");
+    expect(row.mustChangePassword).toBe(true);
+    expect(revokeAllSessions).toHaveBeenCalledWith("u-alice");
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "auth",
+        what: "Password reset",
+        refs: expect.objectContaining({
+          targetUserId: "u-alice",
+          mustChangePassword: true,
+          sessionsRevoked: 3,
+        }),
+      }),
+    );
+  });
+
+  it("keepSessions: true still forces the change but leaves sessions alive (sessionsRevoked null)", async () => {
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "owner");
+
+    const res = await request(app)
+      .put("/api/auth/users/alice")
+      .send({ password: "Reset-secret123", keepSessions: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ mustChangePassword: true, sessionsRevoked: null });
+    expect(prisma._users.find((u: any) => u.username === "alice").mustChangePassword).toBe(true);
+    expect(revokeAllSessions).not.toHaveBeenCalled();
+    expect(vi.mocked(recordActivity)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        what: "Password reset",
+        refs: expect.objectContaining({ sessionsRevoked: null }),
+      }),
+    );
+  });
+
+  it("changing your OWN password here is maintenance, not a reset: no forced change, no sign-out", async () => {
+    const prisma = createPrismaMock([{ ...seededAlice(), id: "admin-id", role: "admin" }]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .put("/api/auth/users/alice")
+      .send({ password: "Mine-secret123" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.mustChangePassword).toBeUndefined();
+    expect(prisma._users.find((u: any) => u.username === "alice").mustChangePassword).toBeUndefined();
+    expect(revokeAllSessions).not.toHaveBeenCalled();
+  });
+
+  it("a displayName-only edit is not a reset", async () => {
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app).put("/api/auth/users/alice").send({ displayName: "Al" });
+
+    expect(res.status).toBe(200);
+    expect(revokeAllSessions).not.toHaveBeenCalled();
+    expect(prisma._users.find((u: any) => u.username === "alice").mustChangePassword).toBeUndefined();
+  });
+
+  it("a refused reset (admin → owner) revokes nothing", async () => {
+    const prisma = createPrismaMock([
+      { ...seededAlice(), id: "u-boss", username: "boss", nextcloudUsername: "boss", role: "owner" },
+    ]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app)
+      .put("/api/auth/users/boss")
+      .send({ password: "Takeover-123abc" });
+
+    expect(res.status).toBe(403);
+    expect(revokeAllSessions).not.toHaveBeenCalled();
+  });
+
+  it("keepSessions alone is not an edit (400)", async () => {
+    const prisma = createPrismaMock([seededAlice()]);
+    const app = buildApp(prisma, "admin");
+
+    const res = await request(app).put("/api/auth/users/alice").send({ keepSessions: true });
+
+    expect(res.status).toBe(400);
+    expect(revokeAllSessions).not.toHaveBeenCalled();
   });
 });

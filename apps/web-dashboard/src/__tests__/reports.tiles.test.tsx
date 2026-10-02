@@ -13,6 +13,7 @@ const fetchAdminFilesUsageMock = vi.fn();
 const fetchActivityRangeMock = vi.fn();
 const fetchChainVerifyMock = vi.fn();
 const fetchIntegrationsMock = vi.fn();
+const fetchIntegrationsSummaryMock = vi.fn();
 const fetchArSummaryMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
@@ -24,6 +25,7 @@ vi.mock("@/app/reports/api", async (orig) => ({
   fetchActivityRange: (...a: unknown[]) => fetchActivityRangeMock(...a),
   fetchChainVerify: (...a: unknown[]) => fetchChainVerifyMock(...a),
   fetchIntegrations: (...a: unknown[]) => fetchIntegrationsMock(...a),
+  fetchIntegrationsSummary: (...a: unknown[]) => fetchIntegrationsSummaryMock(...a),
   fetchArSummary: (...a: unknown[]) => fetchArSummaryMock(...a),
 }));
 
@@ -728,5 +730,71 @@ describe("ChainChip (WARP-1993)", () => {
     const { container } = render(<ChainChip canRead />);
     await waitFor(() => expect(fetchChainVerifyMock).toHaveBeenCalled());
     expect(container.textContent).toBe("");
+  });
+});
+
+// ── Integrations · a member's summary (WARP-3374) ────────────────────────
+//
+// `GET /api/integrations` is owner/admin only: which provider is which, whether
+// a credential is expiring and the per-provider status are the company's own
+// topology. A member's tile reads the provider-free summary instead.
+describe("IntegrationsBody for a member (WARP-3374)", () => {
+  const NOW = new Date("2026-08-14T09:41:00.000Z");
+
+  beforeEach(() => {
+    fetchIntegrationsMock.mockReset();
+    fetchIntegrationsSummaryMock.mockReset();
+  });
+
+  it("reads the summary, never the provider list, and names no provider", async () => {
+    fetchIntegrationsSummaryMock.mockResolvedValue({
+      connected: 3,
+      needsAttention: 0,
+      lastSyncedAt: "2026-08-14T09:30:00.000Z",
+    });
+    const { container } = render(<IntegrationsBody now={NOW} isAdminTier={false} />);
+    expect(await screen.findByText("3 systems connected")).toBeTruthy();
+    expect(screen.getByText("Last synced 11 min ago")).toBeTruthy();
+    expect(screen.getByText("All healthy")).toBeTruthy();
+    expect(fetchIntegrationsMock).not.toHaveBeenCalled();
+    expect(container.textContent).not.toMatch(/eaglesoft|quickbooks|expir|Paste a new key/i);
+  });
+
+  it("says how many need attention, without saying which", async () => {
+    fetchIntegrationsSummaryMock.mockResolvedValue({
+      connected: 1,
+      needsAttention: 1,
+      lastSyncedAt: null,
+    });
+    render(<IntegrationsBody now={NOW} isAdminTier={false} />);
+    expect(await screen.findByText("1 system connected")).toBeTruthy();
+    expect(screen.getByText("1 need attention")).toBeTruthy();
+    expect(screen.getByText("Nothing synced yet")).toBeTruthy();
+  });
+
+  it("says nothing is connected when the count is zero, with no link to a page a member cannot open", async () => {
+    fetchIntegrationsSummaryMock.mockResolvedValue({ connected: 0, needsAttention: 0, lastSyncedAt: null });
+    const { container } = render(<IntegrationsBody now={NOW} isAdminTier={false} />);
+    expect(await screen.findByText("Nothing connected yet")).toBeTruthy();
+    expect(container.querySelector("a")).toBeNull();
+  });
+
+  it("a failed read is an error with a retry, not an empty tile", async () => {
+    fetchIntegrationsSummaryMock.mockRejectedValueOnce(new Error("boom"));
+    render(<IntegrationsBody now={NOW} isAdminTier={false} />);
+    const retry = await screen.findByRole("button", { name: /retry|try again/i });
+    // the retry's own read answers, so the answer is in place before the click
+    fetchIntegrationsSummaryMock.mockResolvedValue({ connected: 2, needsAttention: 0, lastSyncedAt: null });
+    fireEvent.click(retry);
+    expect(await screen.findByText("2 systems connected")).toBeTruthy();
+  });
+
+  it("an owner or admin still reads the full list, and not the summary", async () => {
+    fetchIntegrationsMock.mockResolvedValue([
+      { provider: "eaglesoft", status: "CONNECTED", configured: true, writeEnabled: false, lastSyncedAt: "2026-08-14T09:30:00.000Z" },
+    ]);
+    render(<IntegrationsBody now={NOW} isAdminTier />);
+    expect(await screen.findByText("Eaglesoft (direct SQL)")).toBeTruthy();
+    expect(fetchIntegrationsSummaryMock).not.toHaveBeenCalled();
   });
 });

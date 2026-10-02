@@ -645,8 +645,16 @@ else
   fail "DISPLAY_SERVICE_URL is '${DISPLAY_URL_EFFECTIVE}' (expected http://${SB_FAKE_GW}:8082)"
 fi
 
-# (AC #2) None of the three may be left as host.docker.internal or docker0.
-if { grep -E '^(ROUTING|SWITCH|DISPLAY)_SERVICE_URL=' "$TMP_ROOT/.env" || true; } \
+# (4) DEVICE_GATEWAY_URL — derived gateway, host port 8084.
+DEVICE_GATEWAY_URL_EFFECTIVE=$( { grep -E '^DEVICE_GATEWAY_URL=' "$TMP_ROOT/.env" || true; } | tail -1 | cut -d= -f2-)
+if [ "$DEVICE_GATEWAY_URL_EFFECTIVE" = "http://${SB_FAKE_GW}:8084" ]; then
+  pass "DEVICE_GATEWAY_URL is the derived droplet_default gateway (http://${SB_FAKE_GW}:8084)"
+else
+  fail "DEVICE_GATEWAY_URL is '${DEVICE_GATEWAY_URL_EFFECTIVE}' (expected http://${SB_FAKE_GW}:8084)"
+fi
+
+# (AC #2) None of the four may be left as host.docker.internal or docker0.
+if { grep -E '^(ROUTING|SWITCH|DISPLAY)_SERVICE_URL=|^DEVICE_GATEWAY_URL=' "$TMP_ROOT/.env" || true; } \
      | grep -qE 'host\.docker\.internal|172\.17\.0\.1'; then
   fail "a host-net SERVICE_URL still points at host.docker.internal/172.17.0.1 (the unreachable docker0)"
 else
@@ -2038,6 +2046,43 @@ if [ "$(_profiles_of "$T9E/c/.env")" = "email" ]; then
   pass "an empty COMPOSE_PROFILES becomes 'email', not ',email'"
 else
   fail "empty COMPOSE_PROFILES became '$(_profiles_of "$T9E/c/.env")'"
+fi
+
+# (4c) WARP-2970 — email-indexer is DEFAULT-ON, not profile-gated.
+#
+# (4b) only reaches boxes that re-run setup.sh. A box that gets its code by
+# OTA never runs migrate_env (and the orchestrator cannot see .env), so while
+# the service sat behind the `email` profile an OTA-upgraded box could never
+# start it. Pinned two ways: statically (no `profiles:` in the service block),
+# and, where Docker is present, by what compose actually resolves with NO
+# profiles, which is the set the OTA post-commit step and the boot unit start.
+_compose_file="$REPO_ROOT_REAL/docker/docker-compose.yml"
+if ! grep -q '^  email-indexer:$' "$_compose_file"; then
+  fail "email-indexer service block not found in $_compose_file"
+elif awk '/^  email-indexer:$/{f=1;next} f&&/^  [a-z0-9-]+:$/{exit} f&&/^    profiles:/{found=1} END{exit !found}' "$_compose_file"; then
+  fail "email-indexer carries a profiles: key again — OTA-upgraded boxes will never start it"
+else
+  pass "email-indexer has no profiles: key (default-on)"
+fi
+if docker compose version >/dev/null 2>&1; then
+  _empty_env="$TMP_ROOT/warp2970-empty.env"; : > "$_empty_env"
+  _default_services="$(env -u COMPOSE_PROFILES docker compose -f "$_compose_file" --env-file "$_empty_env" config --services 2>/dev/null)"
+  if printf '%s\n' "$_default_services" | grep -qx email-indexer; then
+    pass "docker compose config --services with no profiles includes email-indexer"
+  else
+    fail "default compose set lacks email-indexer (got: $(printf '%s' "$_default_services" | tr '\n' ' '))"
+  fi
+  # The profile set a shipped box actually writes (the .195 set, pre-2734).
+  # Captured first: `grep -q` exiting early would SIGPIPE compose under pipefail.
+  _box_services="$(COMPOSE_PROFILES=linux,display,eval,single-box,docs,dmr-cuda \
+    docker compose -f "$_compose_file" --env-file "$_empty_env" config --services 2>/dev/null)"
+  if printf '%s\n' "$_box_services" | grep -qx email-indexer; then
+    pass "a shipped box's profile set (no 'email' token) still resolves email-indexer"
+  else
+    fail "email-indexer missing under a shipped box's COMPOSE_PROFILES"
+  fi
+else
+  pass "docker compose unavailable — resolved-set check skipped (static check above still ran)"
 fi
 
 # (5) Static: generate_env must STAGE the heredoc and rename into place —

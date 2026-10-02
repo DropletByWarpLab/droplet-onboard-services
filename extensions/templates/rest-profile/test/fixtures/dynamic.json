@@ -1,0 +1,59 @@
+{
+  "provider": "globex-crm",
+  "displayName": "Globex CRM",
+  "baseUrl": {
+    "kind": "dynamic",
+    "configField": "companyDomain",
+    "allowedSuffixes": [".globex.example"],
+    "allowedHosts": ["eu.globex-hosted.example"],
+    "hostShape": "the customer's own company subdomain under the vendor's domain, or the vendor's EU host"
+  },
+  "auth": { "headerName": "x-api-token", "valueTemplate": "{{token}}" },
+  "constantHeaders": {},
+  "probePath": "/api/v1/users/me",
+  "minRequestIntervalMs": null,
+  "datasets": [
+    {
+      "dataset": "customer",
+      "path": "/api/v1/persons",
+      "watermark": null,
+      "pagination": { "kind": "limit-offset", "limitParam": "limit", "offsetParam": "start", "pageSize": 100 },
+      "rowsPath": "data",
+      "absentRowsMeansEmpty": true,
+      "fieldMap": { "customer_id": "id", "email": "primary_email", "updated_at": "update_time" }
+    },
+    {
+      "dataset": "charge",
+      "path": "/api/v1/payments",
+      "query": { "status": "all" },
+      "watermark": { "name": "since", "location": "query", "format": "epoch-seconds", "complete": false },
+      "pagination": { "kind": "link-header" },
+      "rowsPath": "",
+      "fieldMap": {
+        "charge_id": "id",
+        "amount": { "path": "amount_minor", "transform": "minor-units", "currencyFrom": "currency" },
+        "currency": "currency",
+        "created_at": { "path": "day", "transform": "date-to-instant" }
+      }
+    }
+  ],
+  "egress": { "dataClass": "user-content-on-request", "purpose": "Globex CRM: persons and payments, read-only, on request." },
+  "credential": {
+    "pastes": "",
+    "acceptedShape": "",
+    "fullPrivilegeAlternative": "",
+    "scopeGranularity": "",
+    "expires": "",
+    "accept": "",
+    "reject": "",
+    "provisionedBy": ""
+  },
+  "guide": {
+    "planPrerequisite": "",
+    "cost": "",
+    "clickPath": [],
+    "scopes": "",
+    "rotation": "",
+    "revocation": ""
+  }
+}

@@ -81,6 +81,7 @@ vi.mock("../services/clips.service.js", () => ({
 }));
 
 import { createCamerasRouter } from "../routes/cameras.js";
+import { userDirectory } from "./helpers/user-directory.js";
 import { exportClip } from "../services/clips.service.js";
 import { resolveNcToken } from "../services/nextcloud-session.service.js";
 import type { AuthUser } from "../middleware/auth.js";
@@ -110,12 +111,7 @@ function buildApp(user: AuthUser): express.Express {
   // principal, resolved from X-Nextcloud-User. Without a user table the
   // resolution throws and the guard fails CLOSED — correct behaviour,
   // wrong fixture. Model what production has.
-  user: {
-    findUnique: async ({ where }: { where: { nextcloudUsername?: string } }) =>
-      where.nextcloudUsername
-        ? { id: `u-${where.nextcloudUsername}`, role: "owner" }
-        : null,
-  },
+  user: userDirectory([{ id: "u-alice", username: "alice", nextcloudUsername: "alice", role: "owner" }]),
   cameraAccessGrant: { findMany: async () => [] },
 } as unknown as PrismaClient));
   return app;

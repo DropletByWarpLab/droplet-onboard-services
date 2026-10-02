@@ -195,3 +195,44 @@ class TestModelRegistrySingleFlight:
 
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1
+
+
+class TestModelRegistryInvalidateMidFlight:
+    """WARP-3046 — `invalidate()` is now called the moment a model download
+    finishes (POST /ai/models/refresh). A fan-out already in flight at that
+    moment listed the PRE-pull inventory: the next caller must not be handed
+    it via single-flight, and it must not be cached as fresh when it lands —
+    either way the just-installed model would vanish for a full TTL."""
+
+    async def test_invalidate_mid_flight_forces_a_fresh_fanout(self):
+        registry = ModelRegistry()
+        mock_router = AsyncMock()
+        before = ModelInfo(id="docker.io/ai/gpt-oss:20B-F16", provider="local", name="gpt-oss")
+        pulled = ModelInfo(id="docker.io/ai/llama3.2:3B-Q4_K_M", provider="local", name="llama3.2")
+        release_stale = asyncio.Event()
+        calls = 0
+
+        async def fanout():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                await release_stale.wait()
+                return _healthy([before])
+            return _healthy([before, pulled])
+
+        mock_router.list_all_models.side_effect = fanout
+
+        stale_waiter = asyncio.create_task(registry.get_models(mock_router))
+        await asyncio.sleep(0)  # the pre-pull fan-out is now in flight
+        registry.invalidate()   # …and the pull finishes
+
+        fresh = await registry.get_models(mock_router)
+        assert [m.id for m in fresh.models] == [before.id, pulled.id]
+
+        release_stale.set()
+        assert [m.id for m in (await stale_waiter).models] == [before.id]
+
+        # The late, stale result did not overwrite the fresh cache.
+        again = await registry.get_models(mock_router)
+        assert [m.id for m in again.models] == [before.id, pulled.id]
+        assert mock_router.list_all_models.call_count == 2

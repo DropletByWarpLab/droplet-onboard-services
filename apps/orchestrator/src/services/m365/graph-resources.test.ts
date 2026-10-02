@@ -21,6 +21,7 @@ import {
   asWorkload,
   deltaTokenParamFor,
   discoveryUrlFor,
+  grantCovers,
   initialUrlFor,
   redactDeltaTokens,
 } from "./graph-resources.js";
@@ -165,6 +166,43 @@ describe("asWorkload / initialUrlFor — an unknown workload is refused, never g
 
   it("admits exactly the five shipped workloads", () => {
     expect([...M365_WORKLOADS]).toEqual(["mail", "calendar", "contacts", "files", "todo"]);
+  });
+});
+
+describe("grantCovers (WARP-3059)", () => {
+  it("covers a need with the same or a broader delegated grant", () => {
+    expect(grantCovers(["Mail.ReadBasic"], "Mail.ReadBasic")).toBe(true);
+    expect(grantCovers(["Mail.ReadWrite"], "Mail.ReadBasic")).toBe(true);
+    expect(grantCovers(["Files.ReadWrite.All"], "Files.Read")).toBe(true);
+    expect(grantCovers(["calendars.read"], "Calendars.Read")).toBe(true);
+  });
+
+  it("reads resource-qualified scopes by their last segment", () => {
+    expect(grantCovers(["https://graph.microsoft.com/Contacts.ReadWrite"], "Contacts.Read")).toBe(true);
+  });
+
+  it("never covers a write need with a read grant, or a need from another resource", () => {
+    expect(grantCovers(["Tasks.Read"], "Tasks.ReadWrite")).toBe(false);
+    expect(grantCovers(["Mail.ReadWrite", "Calendars.ReadWrite"], "Tasks.ReadWrite")).toBe(false);
+    expect(grantCovers(["Mail.Send"], "Mail.ReadBasic")).toBe(false);
+    expect(grantCovers([], "Files.Read")).toBe(false);
+  });
+
+  it("matches what the connector actually requests: every workload but To Do", () => {
+    // The requested set (entra-client M365_SCOPES), as Microsoft returns it.
+    const granted = [
+      "offline_access",
+      "User.Read",
+      "Mail.ReadWrite",
+      "Mail.Send",
+      "Calendars.ReadWrite",
+      "Contacts.ReadWrite",
+      "Files.ReadWrite.All",
+    ];
+    const covered = Object.values(GRAPH_RESOURCES)
+      .filter((spec) => grantCovers(granted, spec.leastPrivilegeScope))
+      .map((spec) => spec.workload);
+    expect(covered).toEqual(["mail", "calendar", "contacts", "files"]);
   });
 });
 

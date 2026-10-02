@@ -58,3 +58,47 @@ export const SERIALIZABLE_TX = { isolationLevel: "Serializable" } as const;
  * including the ones that live in another service.
  */
 export const REPEATABLE_READ_TX = { isolationLevel: "RepeatableRead" } as const;
+
+/**
+ * READ COMMITTED — for COMPARE-AND-SET writes on a version column.
+ *
+ * WARP-2977 P2b (the Security site mode, opening hours and areas). Every
+ * write there is `updateMany({ where: { id, version: expected }, data: {
+ * …, version: { increment: 1 } } })` and reads its `count`: 1 = this writer
+ * won, 0 = somebody else moved the row first (a 409, or a skipped tick).
+ * The CAS row lock is the serialisation point, and under READ COMMITTED
+ * Postgres re-evaluates the `version` predicate against the row a concurrent
+ * writer just committed (EvalPlanQual), so the loser deterministically sees
+ * count 0 — no P2034 to map, no retry loop.
+ *
+ * Deliberately NOT SERIALIZABLE: SSI would also abort the loser, but as a
+ * P2034 thrown from whichever statement tripped it (possibly the audit
+ * append or the feed-row insert AFTER the CAS), turning a clean "someone
+ * else changed it" into a 500-shaped error in the middle of the chain
+ * writer. And NOT REPEATABLE READ: a concurrent update there raises a
+ * serialization failure instead of re-checking the predicate.
+ *
+ * Named explicitly rather than relying on the database default, for the same
+ * reason as the other two: every `$transaction` call site states its level.
+ *
+ * REQUIRED for any transaction that appends to the audit chain in-tx
+ * (`appendActivityRowInTx`, `recordActivityInTx`, `auditSecurityInTx`): the
+ * append reads the chain tail after waiting for the chain lock, and only READ
+ * COMMITTED gives that read a fresh snapshot. The append checks the level and
+ * throws on anything else — so a Security write that audits can NEVER use
+ * SERIALIZABLE_TX or REPEATABLE_READ_TX. Order inside the callback: run every
+ * CAS / row-locking write FIRST, then the audits (`Promise.all` over the
+ * audits only, or one at a time) — never a CAS after any audit in the same
+ * callback, which inverts the lock order (chain lock, then row lock) against
+ * every other audited writer and deadlocks (40P01). Nothing may follow the
+ * audits, least of all a global-client audit (it would self-deadlock on the
+ * chain lock until the transaction times out). Several in-tx appends on one
+ * transaction are serialised in-process and chain linearly — the advisory
+ * lock cannot do that, it is re-entrant within the one connection — but that
+ * covers appends only: a global-client audit must still never be interleaved
+ * with them. Rejections must propagate out of the callback (`Promise.all` or
+ * sequential awaits, never `Promise.allSettled`): a rejection that reached the
+ * database has aborted the whole Postgres transaction, and swallowing it lets
+ * `$transaction` resolve while everything was rolled back.
+ */
+export const READ_COMMITTED_TX = { isolationLevel: "ReadCommitted" } as const;

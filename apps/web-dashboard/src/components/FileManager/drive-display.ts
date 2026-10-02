@@ -5,6 +5,13 @@
  * never consulted `displayName`, so a pool mounted at /mnt/droplet/<fs-uuid>
  * showed the customer its raw GUID).
  *
+ * WARP-2959 — VolumesPanel is gone: the Drives surface (DrivesPanel) moved
+ * whole into Settings → Storage and the Files root no longer carries volume
+ * tiles. The references to it below are history, kept because they say why
+ * these helpers are shared exports rather than private copies. Today's
+ * consumers are DrivesPanel and the Files breadcrumb (`volumeCrumbLabel`),
+ * and `formatBytes` is pinned directly in drive-display.test.ts.
+ *
  * Chain: optimistic override → customer displayName → FS label → humanized
  * mount tail. The tail fallback is GUID-guarded: a machine-generated tail
  * (full fs UUID, vfat-style hex serial, "drive-<hex>"/"pool-<hex>") is never

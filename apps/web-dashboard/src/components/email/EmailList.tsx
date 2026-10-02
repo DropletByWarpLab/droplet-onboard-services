@@ -41,6 +41,14 @@ interface EmailListProps {
   error?: Error;
   /** Pre-formatted "32s ago" / "5m ago" string, or null when never synced. */
   lastSyncLabel?: string | null;
+  /**
+   * WARP-2957 — why the list may be empty for a reason other than "no mail":
+   * `first-sync` while the mailbox has not completed a cycle since it was
+   * connected, `error` when the last cycle failed (`syncError` carries the
+   * closed-set sentence). Null = an ordinary empty view.
+   */
+  syncState?: "first-sync" | "error" | null;
+  syncError?: string | null;
   onRetry?: () => void;
 }
 
@@ -74,6 +82,8 @@ export function EmailList({
   isLoading,
   error,
   lastSyncLabel,
+  syncState = null,
+  syncError = null,
   onRetry,
 }: EmailListProps) {
   const accountCount = accounts.length;
@@ -171,6 +181,46 @@ export function EmailList({
                 Try again
               </button>
             )}
+          </div>
+        ) : threads.length === 0 && syncState === "first-sync" ? (
+          <div className="p-8 text-center" role="status">
+            <Inbox
+              size={28}
+              className="mx-auto mb-2 animate-pulse"
+              style={{ color: "var(--brand)" }}
+              aria-hidden
+            />
+            <p className="type-subheadline" style={{ color: "var(--text)" }}>
+              Fetching your mail
+            </p>
+            <p
+              className="type-footnote mt-1 max-w-[240px] mx-auto"
+              style={{ color: "var(--text-muted)" }}
+            >
+              Droplet is reading this mailbox for the first time. Recent messages show up here
+              in a minute.
+            </p>
+          </div>
+        ) : threads.length === 0 && syncState === "error" ? (
+          <div className="p-8 text-center" role="alert">
+            <Inbox
+              size={28}
+              className="mx-auto mb-2"
+              style={{ color: "var(--text-faint)" }}
+              aria-hidden
+            />
+            <p className="type-subheadline" style={{ color: "var(--text)" }}>
+              Droplet can&rsquo;t reach this mailbox
+            </p>
+            <p
+              className="type-footnote mt-1 max-w-[240px] mx-auto"
+              style={{ color: "var(--text-muted)" }}
+            >
+              {syncError ?? "The last check failed."}
+            </p>
+            <a href="/settings" className="btn sm mt-3">
+              Check the mailbox in Settings
+            </a>
           </div>
         ) : threads.length === 0 ? (
           <div className="p-8 text-center">

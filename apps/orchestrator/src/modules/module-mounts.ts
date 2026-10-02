@@ -57,9 +57,15 @@ import { MODULES, gateScopeFor } from "./module-registry.js";
 import type { ModuleGate } from "../middleware/module-gate.js";
 import {
   requireFeatureAccess,
+  requireModuleTierFloor,
   type EffectiveAccessResolver,
 } from "../middleware/feature-gate.js";
+import { tierRefusingModuleIds } from "../services/access-catalog.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
+import {
+  requireMcpActingUserToolDomain,
+  type ActingUserAccessResolver,
+} from "../middleware/mcp-acting-user-gate.js";
 
 /** The `app.use(path, handler)` surface — structural so tests can pass a bare
  *  Express app or a Router without pulling the whole app type in. */
@@ -111,7 +117,24 @@ export const FEATURE_GATED_MODULES: ReadonlySet<ModuleId> = new Set<ModuleId>([
   // so `gateScopeFor` returns null for both and no sibling surface is caught.
   "crm",
   "money",
+  // WARP-2977 (ADR-059 §6) — gated from the day it exists, so a custom role
+  // narrowed away from Security never reaches `/api/security`.
+  "security",
+  // ADR-055 (P4a) — gated from the day it exists, exactly as `security` was:
+  // a role narrowed away from Doors never reaches `/api/doors`. `/api/doors`
+  // nests inside no other module's prefix, so `gateScopeFor` is null for it.
+  "doors",
 ]);
+
+/**
+ * WARP-3365 / WARP-3369 — the modules a human tier may hold NOTHING on, read
+ * off the access catalog (`refuseBelowFloor`): security, crm, projects and money.
+ * Derived, not listed, so the role floor cannot drift from the grant floor.
+ * `projects` is deliberately NOT in FEATURE_GATED_MODULES (a CRM-only person
+ * still reads /api/pm through the browser and the assistant, see
+ * mcp-acting-user-gate.ts), so this floor is what keeps a guest out of it.
+ */
+const TIER_FLOORED_MODULES: ReadonlySet<ModuleId> = new Set<ModuleId>(tierRefusingModuleIds());
 
 /**
  * Wrap `handler` so it only runs on the paths this module OWNS — every other
@@ -166,13 +189,120 @@ export function mountModuleGates(
     // Droplet) and never per-person gated.
     if (def.core) continue;
     const featureGated = FEATURE_GATED_MODULES.has(def.id);
+    const tierFloored = TIER_FLOORED_MODULES.has(def.id);
     for (const prefix of def.routePrefixes) {
       const applies = gateScopeFor(def, prefix);
       app.use(prefix, scopeToOwnedPaths(moduleGate.requireModuleEnabled(def.id), applies));
+      // WARP-3365 / WARP-3369 — the tier floor (external guests get nothing
+      // from company-wide business data), by role, before the per-person read.
+      if (tierFloored) {
+        app.use(prefix, scopeToOwnedPaths(requireModuleTierFloor(def.id), applies));
+      }
       if (featureGated) {
         app.use(
           prefix,
           scopeToOwnedPaths(requireFeatureAccess(def.id, "view", resolve), applies),
+        );
+      }
+    }
+  }
+}
+
+/**
+ * WARP-2988 — tool domains whose routes narrow the `_service:mcp` principal by
+ * the ACTING user's §3 tool scope (middleware/mcp-acting-user-gate.ts).
+ *
+ * `business` first: it is the domain Romain's "CRM or Projects"
+ * decision is about, and the one whose routes sit under two modules. The gate
+ * mounts on the prefixes of every module that CLAIMS the domain — derived from
+ * the registry, never hand-listed — and `middleware/mcp-acting-user-gate.test.ts`
+ * pins that every tool hop under those prefixes (tools-core TOOL_ROUTES) is a
+ * tool of this domain, so the gate can never refuse another domain's tool.
+ *
+ * `business` hops OUTSIDE those prefixes, which this gate does not see (the
+ * same test pins this list, so a new one fails until it is added here):
+ *   - `business_find` → GET /api/brain/findings, GET /api/brain/digests.
+ *     routes/brain.ts is `requireRoleOrMcpService("owner", "admin")` and
+ *     re-resolves the acting user from the same header for its own scope
+ *     filter.
+ *   - `business_profile_get` reads through `ctx.prisma`, no HTTP hop at all.
+ * Both rely on the tool-level gate (the chat / runner dispatch check).
+ *
+ * `email` (WARP-3145): the five email tools reach routes/email.ts as
+ * `_service:mcp`, and the route resolves the acting person for mailbox
+ * ownership but never asked their tool scope, so over the HTTP transport
+ * (WARP-2989) an admin whose role leaves Email out could read and send the
+ * household's mail. Every `email` hop is under `/api/email` (the same test
+ * pins it). `search_contacts` reads `ctx.prisma`, so it has no hop for this
+ * gate to see; WARP-3102 moves it to `GET /api/email/contacts`, under the
+ * prefix. The email module is not feature-gated for humans, so the gate asks
+ * question 1 only, and browser sessions are untouched.
+ *
+ * `team_chat` (WARP-3162): `team_chat_send_message` and
+ * `team_chat_send_meeting_invite` reach routes/team-chat.ts as `_service:mcp`,
+ * and the route resolves the acting person for thread membership but never
+ * asked their tool scope, so over the HTTP transport (WARP-2989) a person whose
+ * role leaves Messages out could message and invite members in their own name.
+ * Every `team_chat` hop is under `/api/team-chat` (the same test pins it). Both
+ * tools write, so the gate asks for `use` on the roster GET as well. The
+ * `team_chat` module is not feature-gated for humans, so the gate asks question
+ * 1 only, and browser sessions are untouched.
+ *
+ * WARP-2979 (ADR-059 P4 §6.12.2) — `security`: its four read-only tools hop
+ * only to /api/security/assistant/*, all under the `security` module's one
+ * prefix, so the gate sees every one. It repeats the person's tool scope and
+ * Security feature at the data boundary, which the mcp-server's HTTP
+ * transport (write-tier RBAC only) would otherwise skip; the assistant
+ * router then resolves the same person and applies DS-005.
+ *
+ * WARP-3365 review — `money`: `money_list_open_documents` reaches
+ * `/api/money/documents` as `_service:mcp`, and the route admitted the
+ * principal on its own account without asking who it acts for, so an external
+ * guest (a null tool scope, and Money's `view` was not refused below family)
+ * could read the company's receivables and payables by asking the assistant.
+ * Its one hop is under `/api/money` (the same test pins it). Money is
+ * feature-gated for humans, so the gate asks question 2 as well.
+ *
+ * ADR-055 P4b (WARP-3438) — `doors`: `doors_list` and `doors_recent_events` reach
+ * routes/doors.ts as `_service:mcp`, and access logs identify people entering
+ * places at times, so the assistant must never read more than the person it
+ * acts for could. Both tools are reads and every `doors` hop is under
+ * `/api/doors` (the same test pins it). The doors read routes floor at
+ * owner/admin for a human, and `requireRoleOrMcpService` admits `_service:mcp`
+ * before any role check, so the tier floor is asked of the ACTING person here:
+ * the access catalog's `view` for doors is a refusal below admin
+ * (`refuseBelowFloor`), the one fact `requireModuleTierFloor` applies to a
+ * browser and this gate applies to the assistant, so a family or guest person
+ * cannot ask for what their browser refuses (mcp-acting-user-gate.test.ts and
+ * doors-negative-suite.test.ts pin it, and pin that the route's role list is the
+ * same fact). Doors is feature-gated for humans, so question 2 (the person's
+ * `doors` grant) is asked too. There is no write hop to gate: the write routes
+ * admit no service principal at all (§11.5).
+ */
+export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business", "email", "team_chat", "security", "money", "doors"];
+
+/** Mount after `mountModuleGates` (and therefore after `authMiddleware`). */
+export function mountMcpActingUserGates(
+  app: ModuleGateMountTarget,
+  resolve: ActingUserAccessResolver,
+  features: EffectiveAccessResolver = resolveEffectiveAccess,
+): void {
+  for (const domain of MCP_ACTING_USER_GATED_DOMAINS) {
+    for (const def of MODULES) {
+      if (!def.toolDomains.includes(domain)) continue;
+      for (const prefix of def.routePrefixes) {
+        app.use(
+          prefix,
+          scopeToOwnedPaths(
+            // Browser parity: the feature check only where humans get one.
+            requireMcpActingUserToolDomain(
+              domain,
+              def.id,
+              resolve,
+              FEATURE_GATED_MODULES.has(def.id) ? features : null,
+            ),
+            gateScopeFor(def, prefix),
+          ),
         );
       }
     }

@@ -17,6 +17,7 @@ import { safeNext } from "@/lib/safe-next";
 // WARP-629: runtime SSO discovery — the login shows only the IdPs this box has
 // actually configured (local-first, SSO optional).
 import { getEnabledSsoProviders } from "@/lib/api";
+import { useRemaskOnLeave } from "@/lib/hooks/useRemaskOnLeave";
 
 /**
  * PR #375 — the orchestrator's two-factor gate answers a correct password with
@@ -65,6 +66,10 @@ function LoginPageInner() {
   // first paint is password-only; SSO is purely additive once discovered.
   const [ssoProviders, setSsoProviders] = useState<string[]>([]);
 
+  // WARP-3135: a revealed password masks again when the window loses focus or
+  // the page is hidden (Mac parity, WARP-3086). Submit re-masks in handleLogin.
+  useRemaskOnLeave(setShowPassword);
+
   useEffect(() => {
     setPasskeyReady(isPasskeySupported());
   }, []);
@@ -90,6 +95,9 @@ function LoginPageInner() {
     // fires concurrent login() calls (e.g. two POSTs of the same single-use
     // recovery code, the loser flashing a false "didn't match").
     if (isSubmitting) return;
+    // WARP-3135: every attempt re-masks, so a failed one never leaves the
+    // password readable beside the error (Mac parity, WARP-3086).
+    setShowPassword(false);
     setError(null);
 
     // Two-factor challenge in progress: validate the code, not the credentials
@@ -223,9 +231,13 @@ function LoginPageInner() {
       }
     >
       {fromSetup && (
-        <div className="flex items-center gap-2 bg-accent/10 text-accent rounded-lg px-4 py-3 mb-6">
-          <Check size={16} className="flex-shrink-0" aria-hidden="true" />
-          <p className="type-subheadline">
+        /* `bg-accent-subtle` is a real token; `bg-accent/10` was not —
+           the accent is a bare `var()` with no <alpha-value>, so Tailwind
+           dropped the fill entirely and this chip shipped untinted
+           (WARP-2973, same class of bug the accent-alpha guard polices). */
+        <div className="flex items-start gap-2.5 rounded-sm bg-accent-subtle px-3.5 py-3">
+          <Check size={16} className="flex-none mt-px text-accent" aria-hidden="true" />
+          <p className="type-footnote leading-snug text-label-primary">
             Setup already completed. Sign in to access your dashboard.
           </p>
         </div>

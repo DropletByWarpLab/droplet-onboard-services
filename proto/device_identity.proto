@@ -16,6 +16,14 @@ service DeviceIdentityService {
   // Re-bind the sealed identity blob to the current PCR snapshot.
   // Requires a fresh operator-auth nonce issued by the orchestrator.
   rpc Reseal(ResealRequest) returns (ResealResponse);
+  // WARP-2900 (ADR-056 slice H): sign an extension statement with the
+  // box's EXTENSION key: a distinct ECDSA-P256 key, never the device-id
+  // key above. The sidecar parses the statement and refuses anything that
+  // is not {kind:"extension", keyUsage:"extension"}, then signs
+  // EXTENSION_STATEMENT_PREFIX || statement, where the prefix is a
+  // sidecar-owned constant (extension_signing.py). The caller never picks
+  // the key, the prefix or the usage.
+  rpc SignExtensionManifest(SignExtensionManifestRequest) returns (SignExtensionManifestResponse);
 }
 
 message SignRequest {
@@ -47,6 +55,12 @@ message GetStatusResponse {
   bool seal_valid = 7;
   string last_reseal_at = 8;      // ISO 8601 or empty
   map<int32, string> current_pcr_snapshot = 9;  // PCR index → hex digest
+  // WARP-2900: the extension key's PUBLIC half (SubjectPublicKeyInfo,
+  // DER) and "sha256:<hex>" over those DER bytes. Empty until the first
+  // SignExtensionManifest creates the key. Deliberately not a *_key_pem
+  // field: the proto snapshot test forbids that name on every message.
+  bytes extension_spki_der = 10;
+  string extension_key_fingerprint = 11;
 }
 
 message ResealRequest {
@@ -60,4 +74,17 @@ message ResealResponse {
   bool resealed = 1;
   string sealed_at = 2;           // ISO 8601
   repeated int32 new_pcr_snapshot_indices = 3;
+}
+
+message SignExtensionManifestRequest {
+  // Canonical-JSON extension statement bytes, exactly as the orchestrator
+  // stores them. The sidecar signs PREFIX || statement.
+  bytes statement = 1;
+}
+
+message SignExtensionManifestResponse {
+  bytes signature = 1;            // DER-encoded ECDSA signature over PREFIX || statement
+  string algorithm = 2;           // "ECDSA-P256-SHA256"
+  bytes extension_spki_der = 3;   // public half of the key that signed
+  string key_usage = 4;           // always "extension"
 }

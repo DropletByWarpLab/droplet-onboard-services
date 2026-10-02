@@ -36,7 +36,7 @@ export const UPDATE_AGENT_SETTINGS_KEY = "update-agent.settings";
  * WARP-1670 — the release channels a box may subscribe to, one per
  * release branch. Must stay in lockstep with `ALLOWED_CHANNELS` in
  * scripts/release/gen-release-manifest.py and the branch alternation in
- * scripts/lib/apply-update.sh's cosign identity regexp.
+ * docker/ota/apply-update.sh's cosign identity regexp.
  *
  *   stable — refs/heads/main; GitHub's `latest` release
  *   stage  — refs/heads/stage; newest `ota-stage-*` prerelease

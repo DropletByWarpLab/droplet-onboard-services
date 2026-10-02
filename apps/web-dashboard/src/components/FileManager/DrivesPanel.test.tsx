@@ -321,11 +321,17 @@ describe("DrivesPanel — inline rename (WARP-827 AC2)", () => {
 // disks=[sda/sdb pool_member] — and the old panel said "No drives mounted".
 // =====================================================================
 
+// WARP-2960: a disk mdstat CURRENTLY lists as a member is represented by the
+// pool card alone and no longer gets an Available-drives card. The reclaim
+// cases below are therefore written as a DROPPED member — a disk that still
+// carries the RAID superblock (state pool_member, md: "md127") but has fallen
+// out of the array, so mdstat no longer names it. That is the shape that
+// keeps a Reclaim action, and the shape those tests were always about.
 const md127: PoolInfo = {
   device: "md127",
   level: "raid1",
   status: "resyncing",
-  members: ["sda", "sdb"],
+  members: ["sdx", "sdy"],
   displayName: null,
   notes: null,
 };

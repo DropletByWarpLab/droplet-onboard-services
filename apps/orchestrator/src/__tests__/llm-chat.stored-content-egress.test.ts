@@ -50,8 +50,18 @@ vi.mock("../services/cache.service.js", () => ({
   cacheSet: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("../services/mqtt.service.js", () => ({ publish: vi.fn() }));
+const mockRecordActivity = vi.fn();
 vi.mock("../services/activity.singleton.js", () => ({
-  recordActivity: vi.fn().mockResolvedValue(null),
+  recordActivity: (...a: unknown[]) => mockRecordActivity(...a),
+}));
+
+// WARP-2746 — the brain block, stubbed to a known string. Its own consent and
+// scope gates are pinned by its own suite; what THIS file owns is whether the
+// route lets the block reach a cloud provider, which needs it non-empty.
+const BRAIN_TEXT = "Brain: Acme Dental is behind on three insurer claims.";
+vi.mock("../services/brain/brain-block.service.js", () => ({
+  buildBrainBlock: vi.fn(async () => BRAIN_TEXT),
+  BRAIN_BLOCK_CHAR_BUDGET: 2000,
 }));
 vi.mock("../services/nextcloud-session.service.js", () => ({
   resolveNcToken: vi.fn().mockResolvedValue("nc-token"),
@@ -66,6 +76,12 @@ const LIVE_TOOLS = [
   { name: "search_content" },
   { name: "list_files" },
   { name: "memory_recall" },
+  // WARP-2990 — the business profile / CRM / brain-findings door.
+  { name: "business_profile_get" },
+  { name: "business_find" },
+  // WARP-2979 — Security: presence and location data (ADR-059 DS-007).
+  { name: "security_list_incidents" },
+  { name: "security_zone_status" },
   { name: "get_network_status" },
   { name: "list_smart_home_devices" },
 ];
@@ -98,19 +114,21 @@ vi.mock("../services/ai-gateway.client.js", () => ({
 }));
 
 vi.mock("../services/chat-persistence.service.js", () => ({
-  ChatPersistenceService: vi.fn().mockImplementation(() => ({
-    ensureConversation: vi.fn().mockResolvedValue({ id: "conv-1" }),
-    createTurnRows: vi.fn().mockResolvedValue({
-      userMessageId: "um-1",
-      assistantMessageId: "am-1",
-      assistantAlreadyFinal: false,
-    }),
-    finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
-    updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
-    listConversationsForUser: vi.fn().mockResolvedValue([]),
-    getConversationForUser: vi.fn().mockResolvedValue(null),
-    deleteConversationForUser: vi.fn().mockResolvedValue(false),
-  })),
+  ChatPersistenceService: vi.fn().mockImplementation(function () {
+    return {
+      ensureConversation: vi.fn().mockResolvedValue({ id: "conv-1" }),
+      createTurnRows: vi.fn().mockResolvedValue({
+        userMessageId: "um-1",
+        assistantMessageId: "am-1",
+        assistantAlreadyFinal: false,
+      }),
+      finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
+      updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
+      listConversationsForUser: vi.fn().mockResolvedValue([]),
+      getConversationForUser: vi.fn().mockResolvedValue(null),
+      deleteConversationForUser: vi.fn().mockResolvedValue(false),
+    };
+  }),
 }));
 
 const mockRunAgent = vi.fn();
@@ -140,7 +158,11 @@ vi.mock("../services/effective-access.service.js", async (importActual) => {
 
 import { createLlmRouter } from "../routes/llm.js";
 import {
+  OFF_LAN_WITHHELD_DOMAINS,
+  OFF_LAN_WITHHELD_NOTICE,
+  OFF_LAN_WITHHELD_PROMPT_BLOCKS,
   OFF_LAN_WITHHELD_TOOLS,
+  withholdPromptBlocksForOffLan,
   withholdStoredContentTools,
 } from "../services/stored-content-egress.service.js";
 
@@ -159,6 +181,12 @@ guardComposerFailOpen();
 const USER_ID = "person-uuid";
 const OWNER_ID = "owner-uuid";
 
+/** WARP-2746 — a stored memory fact, a pinned path, and the business block's
+ *  own text: each must reach a local model and never a cloud one. */
+const MEMORY_FACT_TEXT = "Front desk alarm code is 4417";
+const PINNED_PATH = "/Patients/J Smith/perio-2026-03.pdf";
+const BUSINESS_TEXT = "A fixture business.";
+
 /** The document body that must never appear in a cloud request. */
 const PHI_TEXT = "Patient J. Smith — perio charting 2026-03-11";
 
@@ -166,7 +194,12 @@ function createPrismaMock() {
   return {
     // WARP-2652 — persona + business + workspace, absent here until now.
     ...promptBlockPrismaDelegates(),
-    memoryFact: { findMany: vi.fn(async () => []) },
+    // WARP-2746 — NON-EMPTY on purpose. This stub was `[]`, which is why the
+    // memory block reached cloud turns unnoticed: nothing to leak, nothing to
+    // catch. Same for the pin below.
+    memoryFact: {
+      findMany: vi.fn(async () => [{ category: "ops", fact: MEMORY_FACT_TEXT }]),
+    },
     brainMemoryItem: {
       findMany: vi.fn(async () => [
         {
@@ -181,7 +214,9 @@ function createPrismaMock() {
     fileContentChunk: {
       findMany: vi.fn(async () => [{ text: PHI_TEXT }]),
     },
-    contextPin: { findMany: vi.fn(async () => []) },
+    contextPin: {
+      findMany: vi.fn(async () => [{ id: "pin-1", kind: "file", ref: PINNED_PATH }]),
+    },
     chatSession: { findFirst: vi.fn(async () => null) },
   };
 }
@@ -233,6 +268,7 @@ function outboundText(): string {
 }
 
 beforeEach(() => {
+  mockRecordActivity.mockReset().mockResolvedValue(null);
   mockRunAgent.mockReset().mockResolvedValue({
     message: { role: "assistant", content: "hi" },
     trace: [],
@@ -263,6 +299,17 @@ describe("the withheld set is DERIVED from the tool catalog", () => {
     ]) {
       expect(OFF_LAN_WITHHELD_TOOLS.has(name)).toBe(true);
     }
+  });
+
+  it("WARP-2979: withholds every Security tool, and the notice says Security stays on the Droplet", () => {
+    expect(OFF_LAN_WITHHELD_DOMAINS.has("security")).toBe(true);
+    // WARP-2980 — the fifth, security_explain_pattern, is withheld by its domain like the four.
+    for (const name of ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status", "security_explain_pattern"]) {
+      expect(OFF_LAN_WITHHELD_TOOLS.has(name), name).toBe(true);
+    }
+    expect(withholdStoredContentTools(["security_search_events", "get_network_status"])).toEqual(["get_network_status"]);
+    expect(OFF_LAN_WITHHELD_NOTICE).toMatch(/Security tools are offered/);
+    expect(OFF_LAN_WITHHELD_NOTICE).toMatch(/Security events/);
   });
 
   it("leaves unrelated domains alone — it subtracts, it does not empty", () => {
@@ -313,6 +360,11 @@ describe("POST /api/llm/chat — a cloud turn carries no stored content", () => 
     expect(allowed).not.toContain("search_content");
     expect(allowed).not.toContain("list_files");
     expect(allowed).not.toContain("memory_recall");
+    expect(allowed).not.toContain("business_profile_get");
+    expect(allowed).not.toContain("business_find");
+    // WARP-2979 — Security never goes to a cloud model.
+    expect(allowed).not.toContain("security_list_incidents");
+    expect(allowed).not.toContain("security_zone_status");
     // The other half of the contract: it subtracted, it didn't nuke.
     expect(allowed).toContain("get_network_status");
   });
@@ -336,6 +388,10 @@ describe("POST /api/llm/chat — a cloud turn carries no stored content", () => 
     expect(allowed).toContain("read_file");
     expect(allowed).toContain("search_content");
     expect(allowed).toContain("memory_recall");
+    expect(allowed).toContain("business_profile_get");
+    expect(allowed).toContain("business_find");
+    expect(allowed).toContain("security_list_incidents");
+    expect(allowed).toContain("security_zone_status");
   });
 
   it("withholds them from the OWNER too — the role most likely to be on a cloud model", async () => {
@@ -481,5 +537,112 @@ describe("POST /api/llm/chat — the model is told why", () => {
         messages: [{ role: "user", content: "hello" }],
       });
     expect(outboundText()).not.toMatch(/privacy boundary/i);
+  });
+});
+
+describe("POST /api/llm/chat — stored content in the PROMPT (WARP-2746)", () => {
+  const send = (app: express.Express, cloud: boolean) =>
+    request(app)
+      .post("/api/llm/chat")
+      .send(
+        cloud
+          ? {
+              model: "claude-opus-4-20250514",
+              provider: "anthropic",
+              messages: [{ role: "user", content: "what do you know about us?" }],
+            }
+          : {
+              model: "llama3:8b",
+              provider: "local",
+              messages: [{ role: "user", content: "what do you know about us?" }],
+            },
+      );
+
+  /** The `refs` of the turn's signed `chat` activity row. */
+  function auditRefs(): Record<string, unknown> {
+    const call = mockRecordActivity.mock.calls.find(
+      (c) => (c[0] as { kind?: string }).kind === "chat",
+    );
+    expect(call).toBeDefined();
+    return (call![0] as { refs: Record<string, unknown> }).refs;
+  }
+
+  it("a LOCAL turn carries memory, business, brain and pins — the fixture floor", async () => {
+    mockGetModelProvider.mockResolvedValue("local");
+    const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
+
+    expect((await send(app, false)).status).toBe(200);
+    const sent = outboundText();
+    expect(sent).toContain(MEMORY_FACT_TEXT);
+    expect(sent).toContain(BUSINESS_TEXT);
+    expect(sent).toContain(BRAIN_TEXT);
+    expect(sent).toContain(PINNED_PATH);
+    expect(auditRefs().offLanWithheld).toBeUndefined();
+  });
+
+  it("a CLOUD turn carries none of them, and the audit row names what was withheld", async () => {
+    mockGetModelProvider.mockResolvedValue("anthropic");
+    const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
+
+    expect((await send(app, true)).status).toBe(200);
+    const sent = outboundText();
+    expect(sent).not.toContain(MEMORY_FACT_TEXT);
+    expect(sent).not.toContain(BUSINESS_TEXT);
+    expect(sent).not.toContain(BUSINESS_BLOCK_DELIMITER_OPEN);
+    expect(sent).not.toContain(BRAIN_TEXT);
+    expect(sent).not.toContain(PINNED_PATH);
+    // Persona is tone, not stored content — it stays. Proves the gate
+    // subtracted rather than dropping the whole system prompt.
+    expect(sent).toContain(PERSONA_BLOCK_PREFIX);
+    // …and the model is told stored content was left out, not just tools.
+    expect(sent).toMatch(/business profile/i);
+
+    const refs = auditRefs();
+    expect(refs.offLanProvider).toBe("anthropic");
+    expect([...(refs.offLanWithheld as string[])].sort()).toEqual(
+      ["brain", "business", "context_pins", "memory"],
+    );
+  });
+  // WARP-3281 — the date line's Workspace.tz label is workspace configuration:
+  // it stays on the box. The cloud model still gets the day.
+  it.each([
+    [false, true],
+    [true, false],
+  ])("cloud=%s: the date line carries the Workspace.tz zone=%s", async (cloud, zoneSent) => {
+    mockGetModelProvider.mockResolvedValue(cloud ? "anthropic" : "local");
+    const prisma = createPrismaMock();
+    prisma.workspace.findUnique = vi.fn(async () => ({ id: 1, type: "BUSINESS", tz: "Pacific/Auckland" }));
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as unknown as { user?: unknown }).user = { id: OWNER_ID, username: "stefan", role: "owner" };
+      next();
+    });
+    app.use("/api", createLlmRouter(prisma as never));
+
+    expect((await send(app, cloud)).status).toBe(200);
+    const sent = outboundText();
+    expect(sent).toMatch(/Today is \w+ \d{4}-\d{2}-\d{2}/);
+    expect(sent.includes("Pacific/Auckland")).toBe(zoneSent);
+  });
+});
+
+describe("withholdPromptBlocksForOffLan — the one definition", () => {
+  it("follows the memory TOOL domain, so the two axes cannot disagree", () => {
+    expect(OFF_LAN_WITHHELD_DOMAINS.has("memory")).toBe(true);
+    expect(OFF_LAN_WITHHELD_PROMPT_BLOCKS.has("memory")).toBe(true);
+    expect(OFF_LAN_WITHHELD_PROMPT_BLOCKS.has("brain")).toBe(true);
+    // WARP-2990 — and the profile block follows the business tool domain.
+    expect(OFF_LAN_WITHHELD_DOMAINS.has("business")).toBe(true);
+    expect(OFF_LAN_WITHHELD_PROMPT_BLOCKS.has("business")).toBe(true);
+  });
+
+  it("is a no-op on a local turn and records only non-empty blocks off-LAN", () => {
+    const blocks = { memory: "m", business: "", brain: "b" };
+    expect(withholdPromptBlocksForOffLan(blocks, false)).toEqual({ blocks, withheld: [] });
+    expect(withholdPromptBlocksForOffLan(blocks, true)).toEqual({
+      blocks: { memory: "", business: "", brain: "" },
+      withheld: ["memory", "brain"],
+    });
   });
 });

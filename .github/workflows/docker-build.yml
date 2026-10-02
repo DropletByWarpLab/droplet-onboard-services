@@ -173,10 +173,10 @@ jobs:
         env:
           BUILDABLE: ${{ steps.compose.outputs.buildable }}
           KNOWN: >-
-            ["ai-gateway","camera-discovery","device-identity-svc",
+            ["ai-gateway","camera-discovery","device-gateway","device-identity-svc",
             "doc-render","email-indexer","file-indexer","gateway",
             "matter-controller","mcp-server","orchestrator","rag-eval",
-            "routing","switch","web-dashboard"]
+            "routing","sandbox","switch","web-dashboard"]
         run: |
           set -eu
           if [ "$(jq -cS . <<<"$BUILDABLE")" != "$(jq -cS . <<<"$KNOWN")" ]; then
@@ -275,6 +275,11 @@ jobs:
             doc-render:
               - *py-shared
               - "services/doc-render/**"
+            sandbox:
+              - *py-shared
+              - "services/sandbox/**"
+              # WARP-2896: the image bakes the extension templates in.
+              - "extensions/templates/**"
             email-indexer:
               - *py-shared
               - "services/email-indexer/**"
@@ -288,6 +293,9 @@ jobs:
             switch:
               - *py-shared
               - "services/switch/**"
+            device-gateway:
+              - *py-shared
+              - "services/device-gateway/**"
             rag-eval:
               - "services/rag-eval/**"
               # ADR-048's canary corpus is COPYd into this image (WARP-2732).

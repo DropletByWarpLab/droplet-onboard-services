@@ -20,13 +20,15 @@
  *
  *   2. COSIGN over catalog.json (opt-in, off by default). Enforced only
  *      when `requireSignature` is set — which `config.ts` derives from
- *      DROPLET_APP_DOWNLOADS_REQUIRE_SIGNATURE. It is off by default on
- *      purpose: the OTA trust anchor is still the WARP-535 placeholder
- *      (`update-agent/verify.ts` refuses everything with
- *      `trust_anchor_placeholder`), so switching this on before the key
- *      ceremony turns every download into a 503. The flag exists so the
- *      ceremony can flip it without a code change — and so the "signed"
- *      claim in the API is never made unless it was actually checked.
+ *      DROPLET_APP_DOWNLOADS_REQUIRE_SIGNATURE. `update-agent/cosign.pub`
+ *      has been a real P-256 key since the 2026-07-30 key ceremony
+ *      (commit 2e8cbff0c) — the trust anchor itself is not the blocker.
+ *      The flag stays off because nothing signs an on-box-generated
+ *      catalog.json today: turning it on would 503 every download, not
+ *      for a missing anchor but for a missing signature. The flag exists
+ *      so signing catalog.json can flip it on without a code change —
+ *      and so the "signed" claim in the API is never made unless it was
+ *      actually checked.
  *
  * The Windows minisign `.sig` and `latest.json` are passengers: declared
  * in the catalog, digest-checked like everything else, served verbatim,
@@ -36,15 +38,13 @@
  * opinion — that signature is for the client's own updater and for a
  * customer verifying the download independently.
  *
- * Caching: the catalog is read once and memoised. The mount is read-only
- * from in here, so nothing this process does can change it — but the HOST
- * side is writable and an operator staging an app does change it under a
- * running container. That is a restart, not a bug: `stage.sh` restarts
- * this service for exactly this reason, and a stage without one leaves
- * the new installer on disk and invisible at /downloads. Do not "fix" it
- * by re-reading per request — the invalidation point is a deliberate
- * operator action, and per-request reads would buy nothing but I/O.
- * Digests are re-checked on EVERY download — the whole point is to
+ * Caching: the parsed catalog is memoised together with the (ino, size,
+ * mtimeMs) of catalog.json, and each request costs one `stat`: when the
+ * file changes under a running container (an operator's `stage.sh`, or an
+ * OTA update staging a client installer, WARP-3120) the next request
+ * re-reads it, with no restart. The mount is read-only from in here; the
+ * HOST side is what changes. Only the catalog is memoised this way; the
+ * installers' digests are re-checked on EVERY download — the whole point is to
  * detect a file that changed after we last looked at it, so caching a
  * verification result would defeat the gate.
  *
@@ -54,7 +54,9 @@
  * device, so it is the right trade against the alternative (memoising on
  * mtime+size, which stops detecting exactly the tampering the gate is
  * for). If a future artifact makes this painful, cache on
- * (ino, size, mtimeMs) — do NOT simply drop the check.
+ * (ino, size, mtimeMs) — do NOT simply drop the check. (That key now guards
+ * the CATALOG memo only: a changed catalog is a re-stage, not tampering,
+ * and the digest gate still runs on every byte served.)
  */
 import { createHash } from "node:crypto";
 import { createReadStream, type ReadStream } from "node:fs";
@@ -169,6 +171,8 @@ export class AppDownloadsStore {
    *  request would be pure overhead. Failures are deliberately not cached;
    *  see `loadCatalog`. Digests are NOT memoised either. */
   private cached: LoadCatalogResult | null = null;
+  /** catalog.json's identity when `cached` was read (WARP-3120). */
+  private cachedKey = "";
 
   constructor(opts: AppDownloadsOptions) {
     this.dir = opts.dir;
@@ -190,7 +194,13 @@ export class AppDownloadsStore {
   }
 
   async loadCatalog(): Promise<LoadCatalogResult> {
-    if (this.cached) return this.cached;
+    // WARP-3120: the memo follows the file. A stat taken before the read can
+    // only make the memo re-read once too often (the file changed between
+    // the two), never serve a stale catalog after the change is visible.
+    const st = await stat(path.join(this.dir, CATALOG_FILENAME)).catch(() => null);
+    const key = st ? `${st.ino}:${st.size}:${st.mtimeMs}` : "";
+    if (this.cached && key === this.cachedKey) return this.cached;
+    this.cached = null;
     const result = await this.loadCatalogUncached();
     // Memoise SUCCESS ONLY. Caching the failure made an operator's stage
     // invisible: the mount is read-only from inside the container but the
@@ -201,7 +211,10 @@ export class AppDownloadsStore {
     // caller, so a restart was the only cure. The cost of not caching is one
     // ENOENT per request on a box with nothing staged; the cost of caching it
     // was a green audit next to an empty page.
-    if (result.ok) this.cached = result;
+    if (result.ok) {
+      this.cached = result;
+      this.cachedKey = key;
+    }
     return result;
   }
 

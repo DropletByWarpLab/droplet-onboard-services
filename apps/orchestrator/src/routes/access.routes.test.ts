@@ -104,6 +104,8 @@ import {
   type RoleTemplateId,
 } from "../services/access-role-templates.js";
 import { FEATURE_GATED_MODULES } from "../modules/module-mounts.js";
+import { toolLayers, type ToolLayers } from "../services/tool-layers.service.js";
+import { GRANTABLE_TOOL_DOMAINS } from "../services/access-catalog.js";
 
 // ── in-memory prisma stub ──────────────────────────────────────────
 
@@ -112,7 +114,7 @@ interface RoleSeed {
   name: string;
   slug: string;
   description?: string | null;
-  startingPoint: "admin" | "family" | "guest";
+  startingPoint: "owner" | "admin" | "family" | "guest";
   state?: string;
   storageQuotaBytes?: bigint | null;
   maxUploadSizeMb?: number | null;
@@ -140,8 +142,8 @@ interface InviteSeed {
   email?: string | null;
   username: string;
   accessRoleId: string | null;
-  acceptedAt?: Date | null;
-  revokedAt?: Date | null;
+  // WARP-3193 QUAL-3: the explicit lifecycle column (defaults to pending).
+  status?: "pending" | "accepted" | "revoked" | "expired";
   expiresAt: Date;
 }
 
@@ -180,7 +182,7 @@ function createPrismaMock(seed: { roles?: RoleSeed[]; users?: UserSeed[]; invite
     });
   }
   for (const i of seed.invites ?? []) {
-    invites.set(i.id, { email: null, acceptedAt: null, revokedAt: null, ...i });
+    invites.set(i.id, { email: null, status: "pending", ...i });
   }
 
   const roleWithMeta = (row: any) => ({
@@ -277,6 +279,9 @@ function createPrismaMock(seed: { roles?: RoleSeed[]; users?: UserSeed[]; invite
       }),
     },
     accessRoleToolGrant: {
+      findMany: vi.fn(async ({ where: { roleId } }: any) =>
+        (roles.get(roleId)?.toolGrants ?? []).map((g: any) => ({ domain: g.domain })),
+      ),
       deleteMany: vi.fn(async ({ where: { roleId } }: any) => {
         const row = roles.get(roleId);
         if (row) row.toolGrants = [];
@@ -327,8 +332,7 @@ function createPrismaMock(seed: { roles?: RoleSeed[]; users?: UserSeed[]; invite
       findMany: vi.fn(async ({ where }: any = {}) => {
         let out = [...invites.values()];
         if (where?.accessRoleId !== undefined) out = out.filter((i) => i.accessRoleId === where.accessRoleId);
-        if (where?.acceptedAt === null) out = out.filter((i) => i.acceptedAt === null);
-        if (where?.revokedAt === null) out = out.filter((i) => i.revokedAt === null);
+        if (where?.status !== undefined) out = out.filter((i) => i.status === where.status);
         if (where?.expiresAt?.gt !== undefined) out = out.filter((i) => i.expiresAt > where.expiresAt.gt);
         return out.map((i) => ({ ...i }));
       }),
@@ -336,14 +340,12 @@ function createPrismaMock(seed: { roles?: RoleSeed[]; users?: UserSeed[]; invite
         let count = 0;
         for (const i of invites.values()) {
           if (where?.accessRoleId !== undefined && i.accessRoleId !== where.accessRoleId) continue;
-          if (where?.OR !== undefined) {
-            const matches = where.OR.some((cond: any) => {
-              if (cond.acceptedAt?.not === null) return i.acceptedAt !== null;
-              if (cond.revokedAt?.not === null) return i.revokedAt !== null;
-              if (cond.expiresAt?.lte !== undefined) return i.expiresAt <= cond.expiresAt.lte;
-              return false;
-            });
-            if (!matches) continue;
+          if (where?.NOT !== undefined) {
+            // The release filter is NOT(the pending pre-check predicate).
+            const live =
+              (where.NOT.status === undefined || i.status === where.NOT.status) &&
+              (where.NOT.expiresAt?.gt === undefined || i.expiresAt > where.NOT.expiresAt.gt);
+            if (live) continue;
           }
           Object.assign(i, data);
           count += 1;
@@ -358,6 +360,7 @@ function createPrismaMock(seed: { roles?: RoleSeed[]; users?: UserSeed[]; invite
 function buildApp(
   prismaMock: any,
   user: { id: string; username: string; role: string } = { id: "actor-1", username: "stefan", role: "owner" },
+  opts: { loadLayers?: () => Promise<ToolLayers> } = {},
 ) {
   const app = express();
   app.use(express.json());
@@ -365,7 +368,7 @@ function buildApp(
     (req as any).user = { ...user, displayName: user.username };
     next();
   });
-  app.use("/api", createAccessRouter(prismaMock));
+  app.use("/api", createAccessRouter(prismaMock, opts));
   return app;
 }
 
@@ -656,6 +659,8 @@ describe("route guards", () => {
     // secret, but it is part of the Access panel: a family caller has no use
     // for it and no business instantiating a role from it.
     expect((await request(app).get("/api/access/role-templates")).status).toBe(403);
+    // WARP-2897 — the tool-domain vocabulary is part of the Access panel too.
+    expect((await request(app).get("/api/access/tool-domains")).status).toBe(403);
     expect(
       (await request(app).post("/api/access/roles").send({ templateId: "front-desk" })).status,
     ).toBe(403);
@@ -695,6 +700,48 @@ describe("GET /api/access/roles[/:id]", () => {
     expect(role.featureGrants).toEqual([{ moduleId: "files", level: "act" }]);
     expect(role.createdAt).toBeTruthy();
     expect(role.updatedAt).toBeTruthy();
+  });
+
+  // ADR-059 follow-up to the create-time floor: a Guest-based role saved before
+  // it may still store security:view. The resolver ignores that row, so the
+  // list must not show it either. Read-time only: nothing is rewritten.
+  describe("serializes stored feature grants through the same clamp as create (ADR-059)", () => {
+    const stored = { moduleId: "security", level: "view" };
+    const files = { moduleId: "files", level: "view" };
+
+    it("omits security:view on a Guest-based role, in the list and on GET /:id", async () => {
+      const prisma = createPrismaMock({
+        roles: [{ id: "g", name: "Old guest", slug: "old-guest", startingPoint: "guest", featureGrants: [stored, files] }],
+      });
+      const list = await request(buildApp(prisma)).get("/api/access/roles");
+      expect(list.status).toBe(200);
+      expect(list.body.roles[0].featureGrants).toEqual([files]);
+      const one = await request(buildApp(prisma)).get("/api/access/roles/g");
+      expect(one.body.role.featureGrants).toEqual([files]);
+      // Not a cleanup: the stored row is left exactly as it was.
+      expect(prisma._roles().get("g").featureGrants).toEqual([stored, files]);
+    });
+
+    it.each([
+      ["family", { moduleId: "security", level: "view" }],
+      ["family", { moduleId: "security", level: "act" }],
+      ["admin", { moduleId: "security", level: "manage" }],
+      ["owner", { moduleId: "security", level: "manage" }],
+    ] as const)("leaves a legal security grant on a %s-based role unchanged (%j)", async (startingPoint, grant) => {
+      const prisma = createPrismaMock({
+        roles: [{ id: "r", name: "R", slug: "r", startingPoint, featureGrants: [grant, files] }],
+      });
+      const res = await request(buildApp(prisma)).get("/api/access/roles");
+      expect(res.body.roles[0].featureGrants).toEqual([grant, files]);
+    });
+
+    it("lists a stored level above the tier ceiling at the ceiling the resolver enforces", async () => {
+      const prisma = createPrismaMock({
+        roles: [{ id: "f", name: "F", slug: "f", startingPoint: "family", featureGrants: [{ moduleId: "security", level: "manage" }] }],
+      });
+      const res = await request(buildApp(prisma)).get("/api/access/roles");
+      expect(res.body.roles[0].featureGrants).toEqual([{ moduleId: "security", level: "act" }]);
+    });
   });
 
   it("GET /:id returns { role }; unknown id 404s", async () => {
@@ -759,6 +806,38 @@ describe("POST /api/access/roles (create)", () => {
     expect(stored.storageQuotaBytes).toBe(9_000_000_000n);
   });
 
+  // ADR-059 — the Security `view` floor (family) is a refusal: a guest holds no
+  // security grant, so the server does not store one (the client is never trusted).
+  it("does not store security:view on a Guest-based role at create (ADR-059)", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma))
+      .post("/api/access/roles")
+      .send(payload({ startingPoint: "guest", featureGrants: [{ moduleId: "security", level: "view" }, { moduleId: "files", level: "view" }] }));
+    expect(res.status).toBe(200);
+    expect(res.body.role.featureGrants).toEqual([{ moduleId: "files", level: "view" }]);
+    expect(prisma._roles().get(res.body.role.id).featureGrants).toEqual([{ moduleId: "files", level: "view" }]);
+  });
+
+  it("keeps security:view on a Family-based role: the D6 wall account is a Staff role at Security View (ADR-059)", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma))
+      .post("/api/access/roles")
+      .send(payload({ startingPoint: "family", featureGrants: [{ moduleId: "security", level: "view" }, { moduleId: "cameras", level: "view" }] }));
+    expect(res.status).toBe(200);
+    expect(res.body.role.featureGrants).toEqual([{ moduleId: "security", level: "view" }, { moduleId: "cameras", level: "view" }]);
+  });
+
+  it("clamps security:manage to act on a Family-based role, and keeps it on an Admin-based one (ADR-059)", async () => {
+    for (const [startingPoint, level] of [["family", "act"], ["admin", "manage"]] as const) {
+      const prisma = createPrismaMock();
+      const res = await request(buildApp(prisma))
+        .post("/api/access/roles")
+        .send(payload({ startingPoint, featureGrants: [{ moduleId: "security", level: "manage" }] }));
+      expect(res.status).toBe(200);
+      expect(res.body.role.featureGrants, startingPoint).toEqual([{ moduleId: "security", level }]);
+    }
+  });
+
   // WARP-1578 — the Guest floor at create time. O-2's read floor is
   // family-and-UP; erp.ts enforces the "and-up" half at the consumption site,
   // so a connector grant on a Guest-based role is inert by construction. The
@@ -791,6 +870,28 @@ describe("POST /api/access/roles (create)", () => {
       .send(payload({ startingPoint: "family" }));
     expect(res.status).toBe(200);
     expect(res.body.role.connectorGrants).toEqual([{ provider: "eaglesoft", level: "read" }]);
+  });
+
+  // ADR-055 — the doors `view` floor is a refusal: below admin a tier holds no
+  // doors grant, so the server does not store one (the client is never trusted).
+  it.each(["family", "guest"] as const)("does not store doors:view on a %s-based role at create (ADR-055)", async (startingPoint) => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma))
+      .post("/api/access/roles")
+      .send(payload({ startingPoint, featureGrants: [{ moduleId: "doors", level: "view" }, { moduleId: "files", level: "view" }] }));
+    expect(res.status).toBe(200);
+    expect(res.body.role.featureGrants).toEqual([{ moduleId: "files", level: "view" }]);
+    expect(prisma._roles().get(res.body.role.id).featureGrants).toEqual([{ moduleId: "files", level: "view" }]);
+  });
+
+  it("keeps doors:view on an Admin-based role — the floor is a floor, not a ban (ADR-055)", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma))
+      .post("/api/access/roles")
+      .send(payload({ startingPoint: "admin", featureGrants: [{ moduleId: "doors", level: "manage" }] }));
+    expect(res.status).toBe(200);
+    // manage is clamped to view (doors offers no more), and admin may hold it.
+    expect(res.body.role.featureGrants).toEqual([{ moduleId: "doors", level: "view" }]);
   });
 
   it("uniquifies a colliding slug with a numeric suffix", async () => {
@@ -847,7 +948,9 @@ describe("POST /api/access/roles (duplicate via sourceRoleId)", () => {
     expect(res.body.role.storageQuotaBytes).toBe("1000");
     expect(res.body.role.cloudModelsAllowed).toBe(true);
     expect(res.body.role.featureGrants).toEqual([{ moduleId: "files", level: "act" }]);
-    expect(res.body.role.toolGrants).toEqual([{ domain: "files", level: "use" }]);
+    expect(res.body.role.toolGrants).toEqual([
+      { domain: "files", level: "use", state: "live", deadReason: null },
+    ]);
     expect(res.body.role.connectorGrants).toEqual([{ provider: "eaglesoft", level: "read" }]);
     expect(res.body.role.peopleCount).toBe(0);
   });
@@ -944,7 +1047,10 @@ describe("POST /api/access/roles (instantiate via templateId — WARP-2738)", ()
     expect(res.body.role.description).toBe(source.description);
     expect(res.body.role.startingPoint).toBe("family");
     expect(res.body.role.featureGrants).toEqual(expected.featureGrants);
-    expect(res.body.role.toolGrants).toEqual(expected.toolGrants);
+    // WARP-2897: every template grant is LIVE — none names an empty domain.
+    expect(res.body.role.toolGrants).toEqual(
+      expected.toolGrants.map((g) => ({ ...g, state: "live", deadReason: null })),
+    );
     expect(res.body.role.connectorGrants).toEqual([]);
     expect(res.body.role.peopleCount).toBe(0);
     expect(res.body.syncState).toBe("synced");
@@ -981,7 +1087,9 @@ describe("POST /api/access/roles (instantiate via templateId — WARP-2738)", ()
       const expected = roleTemplateCreatePayload(t);
       expect(res.body.role.startingPoint).toBe(t.startingPoint);
       expect(res.body.role.featureGrants).toEqual(expected.featureGrants);
-      expect(res.body.role.toolGrants).toEqual(expected.toolGrants);
+      expect(res.body.role.toolGrants).toEqual(
+        expected.toolGrants.map((g) => ({ ...g, state: "live", deadReason: null })),
+      );
       expect(res.body.role.connectorGrants).toEqual([]);
       expect(res.body.role.mayOperateLocks).toBe(t.mayOperateLocks);
       expect(res.body.role.storageQuotaBytes).toBeNull();
@@ -1310,6 +1418,15 @@ describe("PATCH /api/access/roles/:id", () => {
     expect(res.body.role.connectorGrants).toEqual([{ provider: "eaglesoft", level: "read" }]);
   });
 
+  it("…and drops a STORED security:view when the starting point drops to Guest (ADR-059)", async () => {
+    const prisma = createPrismaMock({
+      roles: [{ ...baseRole, startingPoint: "family", featureGrants: [{ moduleId: "security", level: "view" }] }],
+    });
+    const res = await request(buildApp(prisma)).patch("/api/access/roles/r1").send({ startingPoint: "guest" });
+    expect(res.status).toBe(200);
+    expect(res.body.role.featureGrants).toEqual([]);
+  });
+
   // WARP-1578 — the Guest floor. O-2's read floor is family-and-UP, and
   // erp.ts enforces the "and-up" half at the consumption site, so a connector
   // grant saved on a Guest-based role can NEVER take effect. Storing it lets
@@ -1343,6 +1460,15 @@ describe("PATCH /api/access/roles/:id", () => {
       .send({ startingPoint: "guest" });
     expect(res.status).toBe(200);
     expect(res.body.role.connectorGrants).toEqual([]);
+  });
+
+  it("…and drops a STORED doors:view when the starting point drops below admin (ADR-055)", async () => {
+    const prisma = createPrismaMock({
+      roles: [{ ...baseRole, startingPoint: "admin", featureGrants: [{ moduleId: "doors", level: "view" }] }],
+    });
+    const res = await request(buildApp(prisma)).patch("/api/access/roles/r1").send({ startingPoint: "family" });
+    expect(res.status).toBe(200);
+    expect(res.body.role.featureGrants).toEqual([]);
   });
 
   it("keeps read_write on an Admin-based role (the cap is a floor, not a ban)", async () => {
@@ -1474,8 +1600,8 @@ describe("DELETE /api/access/roles/:id", () => {
     const prisma = createPrismaMock({
       roles: [roleSeed],
       invites: [
-        { id: "inv-a", username: "was-accepted", accessRoleId: "r1", acceptedAt: PAST, expiresAt: FUTURE },
-        { id: "inv-r", username: "was-revoked", accessRoleId: "r1", revokedAt: PAST, expiresAt: FUTURE },
+        { id: "inv-a", username: "was-accepted", accessRoleId: "r1", status: "accepted", expiresAt: FUTURE },
+        { id: "inv-r", username: "was-revoked", accessRoleId: "r1", status: "revoked", expiresAt: FUTURE },
         { id: "inv-e", username: "expired", accessRoleId: "r1", expiresAt: PAST },
       ],
     });
@@ -1527,7 +1653,7 @@ describe("DELETE /api/access/roles/:id", () => {
     const prisma = createPrismaMock({
       roles: [roleSeed],
       invites: [
-        { id: "inv-accepted", username: "old", accessRoleId: "r1", acceptedAt: PAST, expiresAt: FUTURE },
+        { id: "inv-accepted", username: "old", accessRoleId: "r1", status: "accepted", expiresAt: FUTURE },
         { id: "inv-raced", username: "raced", accessRoleId: "r1", expiresAt: FUTURE },
       ],
     });
@@ -1623,5 +1749,152 @@ describe("POST /api/access/roles/:id/assign", () => {
     expect(res.body.syncState).toBe("synced");
     expect(revokeAllSessionsMock).not.toHaveBeenCalled();
     expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── WARP-2897 — runtime (extension) tool domains on the grant axis ─────
+
+describe("tool grants over both layers (WARP-2897)", () => {
+  /** A runtime layer with one tool in `ext-bookings` — a remote-MCP fixture
+   *  standing in for an extension until slice H names extension domains. */
+  const attached = async () =>
+    toolLayers([
+      { name: "bookings__list_slots", domain: "ext-bookings", requiresWrite: false, source: "runtime:bookings" },
+    ]);
+  const detached = async () => toolLayers([]);
+  const owner = { id: "actor-1", username: "stefan", role: "owner" };
+
+  it("POST with a runtime domain is 400 NAMING it when nothing provides it, and nothing is written", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma, owner, { loadLayers: detached }))
+      .post("/api/access/roles")
+      .send(payload({ toolGrants: [{ domain: "ext-bookings", level: "view" }] }));
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("TOOL_DOMAIN_NOT_GRANTABLE");
+    expect(res.body.domains).toEqual(["ext-bookings"]);
+    expect(res.body.error).toContain("ext-bookings");
+    // The refusal is raised inside the transaction, before any grant row.
+    expect(prisma.accessRoleToolGrant.createMany).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("POST with the same runtime domain is 200 while a runtime tool carries it", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma, owner, { loadLayers: attached }))
+      .post("/api/access/roles")
+      .send(payload({ toolGrants: [{ domain: "ext-bookings", level: "view" }] }));
+    expect(res.status).toBe(200);
+    expect(res.body.role.toolGrants).toEqual([
+      { domain: "ext-bookings", level: "view", state: "live", deadReason: null },
+    ]);
+  });
+
+  it("erp is refused by the writer with its code, runtime layer or not", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma, owner, { loadLayers: attached }))
+      .post("/api/access/roles")
+      .send(payload({ toolGrants: [{ domain: "erp", level: "use" }] }));
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("TOOL_DOMAIN_NOT_GRANTABLE");
+    expect(res.body.domains).toEqual(["erp"]);
+  });
+
+  it("GET /access/roles marks a grant DEAD once its runtime domain is gone (rows kept)", async () => {
+    const prisma = createPrismaMock({
+      roles: [
+        {
+          id: "r1",
+          name: "Front desk",
+          slug: "front-desk",
+          startingPoint: "family",
+          toolGrants: [
+            { domain: "files", level: "use" },
+            { domain: "ext-bookings", level: "view" },
+            { domain: "crm", level: "view" },
+          ],
+        },
+      ],
+    });
+    const live = await request(buildApp(prisma, owner, { loadLayers: attached })).get("/api/access/roles");
+    expect(live.body.roles[0].toolGrants).toEqual([
+      { domain: "files", level: "use", state: "live", deadReason: null },
+      { domain: "ext-bookings", level: "view", state: "live", deadReason: null },
+      { domain: "crm", level: "view", state: "dead", deadReason: "empty_domain" },
+    ]);
+    const dead = await request(buildApp(prisma, owner, { loadLayers: detached })).get("/api/access/roles");
+    expect(dead.body.roles[0].toolGrants[1]).toEqual({
+      domain: "ext-bookings",
+      level: "view",
+      state: "dead",
+      deadReason: "not_provided",
+    });
+    // Marked, not deleted.
+    expect(prisma.accessRoleToolGrant.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("PATCH may KEEP a dead grant the role holds, but may not INTRODUCE one", async () => {
+    const seed = () =>
+      createPrismaMock({
+        roles: [
+          {
+            id: "r1",
+            name: "Front desk",
+            slug: "front-desk",
+            startingPoint: "family",
+            toolGrants: [{ domain: "ext-bookings", level: "view" }],
+          },
+        ],
+      });
+    // The dashboard re-emits untouched rows verbatim: keeping the dead row
+    // while adding a compiled one must save.
+    const keep = seed();
+    const kept = await request(buildApp(keep, owner, { loadLayers: detached }))
+      .patch("/api/access/roles/r1")
+      .send({
+        toolGrants: [
+          { domain: "ext-bookings", level: "view" },
+          { domain: "files", level: "use" },
+        ],
+      });
+    expect(kept.status).toBe(200);
+    expect(kept.body.role.toolGrants.map((g: { domain: string }) => g.domain)).toEqual([
+      "ext-bookings",
+      "files",
+    ]);
+
+    const introduce = seed();
+    const refused = await request(buildApp(introduce, owner, { loadLayers: detached }))
+      .patch("/api/access/roles/r1")
+      .send({ toolGrants: [{ domain: "ext-other", level: "view" }] });
+    expect(refused.status).toBe(400);
+    expect(refused.body.domains).toEqual(["ext-other"]);
+  });
+
+  it("GET /access/tool-domains serves the compiled list and one entry per runtime-only domain", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(
+      buildApp(prisma, owner, {
+        loadLayers: async () =>
+          toolLayers([
+            { name: "bookings__list_slots", domain: "ext-bookings", requiresWrite: false, source: "runtime:bookings" },
+            { name: "bookings__book_slot", domain: "ext-bookings", requiresWrite: true, source: "runtime:bookings" },
+            // A runtime tool in a COMPILED domain is not an extra row.
+            { name: "atlassian__jira_get_issue", domain: "pm", requiresWrite: true, source: "runtime:atlassian" },
+          ]),
+      }),
+    ).get("/api/access/tool-domains");
+    expect(res.status).toBe(200);
+    expect(res.body.compiled).toEqual([...GRANTABLE_TOOL_DOMAINS]);
+    expect(res.body.runtime).toEqual([
+      { domain: "ext-bookings", sources: ["runtime:bookings"], tools: 2, populated: true, readable: true },
+    ]);
+  });
+
+  it("GET /access/tool-domains is admin-reachable and has no runtime rows on a box with none", async () => {
+    const res = await request(
+      buildApp(createPrismaMock(), { id: "a-1", username: "adm", role: "admin" }),
+    ).get("/api/access/tool-domains");
+    expect(res.status).toBe(200);
+    expect(res.body.runtime).toEqual([]);
   });
 });

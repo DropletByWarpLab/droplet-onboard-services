@@ -54,6 +54,11 @@ class DeviceIdentityServiceStub(object):
                 request_serializer=device__identity__pb2.ResealRequest.SerializeToString,
                 response_deserializer=device__identity__pb2.ResealResponse.FromString,
                 _registered_method=True)
+        self.SignExtensionManifest = channel.unary_unary(
+                '/droplet.device_identity.DeviceIdentityService/SignExtensionManifest',
+                request_serializer=device__identity__pb2.SignExtensionManifestRequest.SerializeToString,
+                response_deserializer=device__identity__pb2.SignExtensionManifestResponse.FromString,
+                _registered_method=True)
 
 
 class DeviceIdentityServiceServicer(object):
@@ -88,6 +93,19 @@ class DeviceIdentityServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SignExtensionManifest(self, request, context):
+        """WARP-2900 (ADR-056 slice H): sign an extension statement with the
+        box's EXTENSION key: a distinct ECDSA-P256 key, never the device-id
+        key above. The sidecar parses the statement and refuses anything that
+        is not {kind:"extension", keyUsage:"extension"}, then signs
+        EXTENSION_STATEMENT_PREFIX || statement, where the prefix is a
+        sidecar-owned constant (extension_signing.py). The caller never picks
+        the key, the prefix or the usage.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_DeviceIdentityServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -110,6 +128,11 @@ def add_DeviceIdentityServiceServicer_to_server(servicer, server):
                     servicer.Reseal,
                     request_deserializer=device__identity__pb2.ResealRequest.FromString,
                     response_serializer=device__identity__pb2.ResealResponse.SerializeToString,
+            ),
+            'SignExtensionManifest': grpc.unary_unary_rpc_method_handler(
+                    servicer.SignExtensionManifest,
+                    request_deserializer=device__identity__pb2.SignExtensionManifestRequest.FromString,
+                    response_serializer=device__identity__pb2.SignExtensionManifestResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -220,6 +243,33 @@ class DeviceIdentityService(object):
             '/droplet.device_identity.DeviceIdentityService/Reseal',
             device__identity__pb2.ResealRequest.SerializeToString,
             device__identity__pb2.ResealResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SignExtensionManifest(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/droplet.device_identity.DeviceIdentityService/SignExtensionManifest',
+            device__identity__pb2.SignExtensionManifestRequest.SerializeToString,
+            device__identity__pb2.SignExtensionManifestResponse.FromString,
             options,
             channel_credentials,
             insecure,

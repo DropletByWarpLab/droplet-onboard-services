@@ -55,6 +55,7 @@ RUN mkdir -p /app/grpc_generated && \
 # COPY so the freshly generated stubs aren't overwritten.
 COPY services/device-identity-svc/backends /app/backends
 COPY services/device-identity-svc/storage.py /app/storage.py
+COPY services/device-identity-svc/extension_signing.py /app/extension_signing.py
 COPY services/device-identity-svc/grpc_server.py /app/grpc_server.py
 COPY services/device-identity-svc/main.py /app/main.py
 

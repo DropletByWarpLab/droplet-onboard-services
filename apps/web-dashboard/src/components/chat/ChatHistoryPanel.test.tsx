@@ -121,6 +121,24 @@ describe("ChatHistoryPanel", () => {
     expect(onNewChat).toHaveBeenCalled();
   });
 
+  // WARP-3043 — the Mac rail: "New chat" is a labelled row above search, not
+  // a bordered `+` square in the header. One button, visible words.
+  it("offers exactly one New chat, as a visible text row above search", async () => {
+    listConversationsMock.mockResolvedValue([]);
+    const { container } = render(
+      <ChatHistoryPanel activeConversationId={null} onSelect={vi.fn()} onNewChat={vi.fn()} />,
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /new chat/i })).toBeInTheDocument());
+    const buttons = screen.getAllByRole("button", { name: /new chat/i });
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0].textContent?.trim()).toBe("New chat");
+    expect(buttons[0].classList.contains("conv-new-row")).toBe(true);
+    const search = container.querySelector(".conv-search")!;
+    expect(
+      buttons[0].compareDocumentPosition(search) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   // ── WARP-1787 ───────────────────────────────────────────────────────────
   // The panel is the body of BOTH the desktop rail and the /chat mobile
   // drawer. Only the drawer has something to close, so the control is opt-in:
@@ -172,6 +190,50 @@ describe("ChatHistoryPanel", () => {
     expect(screen.getByText(/delete this chat/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
     await waitFor(() => expect(deleteConversationMock).toHaveBeenCalledWith("a"));
+  });
+
+  // ── WARP-3303 — a chat with background tasks still going ─────────────────
+
+  it.each([
+    ["Stop them and delete", true],
+    ["Keep them and delete", false],
+  ])("asks about live background tasks, then deletes with %s", async (button, cancelRuns) => {
+    listConversationsMock.mockResolvedValue([row("a")]);
+    const live = Object.assign(new Error("conversation_has_live_runs"), {
+      name: "ConversationHasLiveRunsError",
+      runs: [
+        { id: "r1", title: "Supplier check", status: "running" },
+        { id: "r2", title: "Invoice sweep", status: "queued" },
+      ],
+    });
+    deleteConversationMock.mockRejectedValueOnce(live).mockResolvedValueOnce(true);
+    render(<ChatHistoryPanel activeConversationId={null} onSelect={vi.fn()} onNewChat={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("chat-a")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /more actions/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /delete/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+    expect(await screen.findByText("This chat started 2 background tasks")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: button }));
+    await waitFor(() => expect(deleteConversationMock).toHaveBeenLastCalledWith("a", cancelRuns));
+    await waitFor(() => expect(screen.queryByText("chat-a")).not.toBeInTheDocument());
+  });
+
+  it("Cancel on the live-tasks question deletes nothing", async () => {
+    listConversationsMock.mockResolvedValue([row("a")]);
+    deleteConversationMock.mockRejectedValueOnce(
+      Object.assign(new Error("x"), { name: "ConversationHasLiveRunsError", runs: [{ id: "r1", title: "t", status: "running" }] }),
+    );
+    render(<ChatHistoryPanel activeConversationId={null} onSelect={vi.fn()} onNewChat={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("chat-a")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /more actions/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /delete/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+    expect(await screen.findByText("This chat started a background task")).toBeInTheDocument();
+    // The confirm dialog's exit animation can still hold its own Cancel in the DOM under load.
+    await waitFor(() => expect(screen.queryByText("Delete this chat?")).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+    expect(deleteConversationMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("chat-a")).toBeInTheDocument();
   });
 
   // ── WARP-1917 — pinned chats ─────────────────────────────────────────────

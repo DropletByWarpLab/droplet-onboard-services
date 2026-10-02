@@ -7,10 +7,17 @@
  * lists feed rename / eject / erase / pool pickers, but the side effect was
  * that the disk Nextcloud actually writes uploads to was invisible.
  *
- * So these tests come in pairs. For each surface: the system drive IS rendered,
- * AND it carries none of the affordances a data drive carries. The second half
- * is the one that matters — a system drive that renders as an ordinary drive
- * card would be worse than one that is hidden.
+ * So these tests come in pairs: the system drive IS rendered, AND it carries
+ * none of the affordances a data drive carries. The second half is the one
+ * that matters — a system drive that renders as an ordinary drive card would
+ * be worse than one that is hidden.
+ *
+ * WARP-2959 — there used to be a second surface here, the Files screen's
+ * VolumesPanel tiles. That panel is gone (the Drives surface moved whole into
+ * Settings -> Storage, which is this file's DrivesPanel), and with it the
+ * byte-formatting case it carried: `formatBytes` is exported from
+ * drive-display.ts and its unit clamp is pinned directly in
+ * drive-display.test.ts.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";
@@ -31,7 +38,6 @@ vi.mock("@/lib/hooks/usePools", () => ({ usePools: () => usePoolsMock() }));
 vi.mock("@/lib/auth", () => ({ useAuth: () => ({ user: { role: "owner" } }) }));
 vi.mock("@/components/Toast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 
-import { VolumesPanel } from "./VolumesPanel";
 import { DrivesPanel } from "./DrivesPanel";
 
 // The panels format in BINARY units (1024-based) with decimal-looking labels,
@@ -256,99 +262,5 @@ describe("Storage screen — data-drive headline (WARP-2098)", () => {
     setup({ drives: [], totals: null, systemDisk: makeSystemDisk() });
     render(<DrivesPanel />);
     expect(screen.queryByText(/used across your drives/i)).toBeNull();
-  });
-});
-
-describe("Files screen — System drive tile (WARP-2098)", () => {
-  it("shows the system drive beside the owner's volumes", () => {
-    setup({ drives: [makeDrive()], systemDisk: makeSystemDisk() });
-    render(<VolumesPanel />);
-    const list = screen.getByRole("list", { name: "Storage volumes" });
-    expect(within(list).getByText("System drive")).toBeTruthy();
-    expect(within(list).getByText(/separate from your storage/i)).toBeTruthy();
-  });
-
-  it("is NOT a link — unlike every other tile on this screen", () => {
-    // The other tiles are stretched links into the Nextcloud browser. The
-    // system disk has no files_external registration, so a link would be dead.
-    setup({ drives: [makeDrive()], systemDisk: makeSystemDisk() });
-    render(<VolumesPanel />);
-    const list = screen.getByRole("list", { name: "Storage volumes" });
-    const tiles = within(list).getAllByRole("listitem");
-    const systemTile = tiles.find((t) => t.textContent?.includes("System drive"));
-    expect(systemTile).toBeTruthy();
-    expect(within(systemTile as HTMLElement).queryAllByRole("link")).toHaveLength(0);
-    // …while the data drive next to it still is one.
-    const dataTile = tiles.find((t) => t.textContent?.includes("TOSHIBA EXT"));
-    expect(within(dataTile as HTMLElement).getAllByRole("link").length).toBeGreaterThan(0);
-  });
-
-  it("comes last — the owner's own storage leads", () => {
-    setup({ drives: [makeDrive()], systemDisk: makeSystemDisk() });
-    render(<VolumesPanel />);
-    const tiles = screen.getAllByRole("listitem");
-    expect(tiles[tiles.length - 1].textContent).toContain("System drive");
-  });
-
-  it("still appears on a box with no data drives yet", () => {
-    // This is the box where "where do my files go?" is most urgent, and the
-    // answer is the install disk. The panel used to render nothing here.
-    setup({ drives: [], systemDisk: makeSystemDisk() });
-    render(<VolumesPanel />);
-    expect(screen.getByText("System drive")).toBeTruthy();
-  });
-
-  it("renders nothing when there are neither drives nor a system disk", () => {
-    setup({ drives: [], systemDisk: undefined });
-    const { container } = render(<VolumesPanel />);
-    expect(container.firstChild).toBeNull();
-  });
-
-  it("shows capacity without a meter when usage is unavailable", () => {
-    setup({
-      drives: [makeDrive()],
-      systemDisk: makeSystemDisk({ measurement: "unavailable", used_bytes: null, free_bytes: null, filesystems: [] }),
-    });
-    render(<VolumesPanel />);
-    expect(screen.getByText("Usage unavailable")).toBeTruthy();
-  });
-
-  it("says partly unreadable when only part of the disk measured", () => {
-    setup({
-      drives: [makeDrive()],
-      systemDisk: makeSystemDisk({ measurement: "partial", used_bytes: null, free_bytes: null }),
-    });
-    render(<VolumesPanel />);
-    expect(screen.getByText("Partly unreadable")).toBeTruthy();
-    expect(screen.queryByText("Usage unavailable")).toBeNull();
-    expect(screen.queryByText(/of 512 GB/)).toBeNull();
-  });
-
-  it("branches on the bridge's state, not on the nulls", () => {
-    setup({ drives: [makeDrive()], systemDisk: makeSystemDisk({ measurement: "unavailable" }) });
-    render(<VolumesPanel />);
-    expect(screen.getByText("Usage unavailable")).toBeTruthy();
-    expect(screen.queryByText(/of 512 GB/)).toBeNull();
-  });
-});
-
-describe("byte formatting at pool scale (WARP-2098)", () => {
-  it("renders a real unit at 1 PiB and beyond", () => {
-    // VolumesPanel's formatBytes did not clamp its unit index, so a volume of
-    // 1 PiB or more indexed past the end of the units array and rendered
-    // "1.0 undefined". The sibling formatter in DrivesPanel has always clamped,
-    // so the two disagreed on exactly the sizes a large pool can reach.
-    setup({
-      drives: [
-        makeDrive({
-          size_bytes: 2 ** 50,
-          used_bytes: 2 ** 49,
-          free_bytes: 2 ** 49,
-        }),
-      ],
-    });
-    render(<VolumesPanel />);
-    expect(screen.queryByText(/undefined/)).toBeNull();
-    expect(screen.getAllByText(/TB/).length).toBeGreaterThan(0);
   });
 });

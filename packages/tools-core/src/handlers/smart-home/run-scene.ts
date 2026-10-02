@@ -40,7 +40,7 @@ const inputSchema = {
     scene: {
       type: "string",
       description:
-        "Scene id (uuid) OR human-readable name (e.g. 'Movie night'). Name lookup is case-insensitive; first match wins.",
+        "Scene id (uuid) OR human-readable name (e.g. 'Open up'). Name lookup is case-insensitive; first match wins.",
     },
   },
   required: ["scene"],
@@ -189,7 +189,7 @@ async function handler(
 const tool: Tool = {
   name: "run_scene",
   description:
-    "Run a smart-home scene by id or name. Batch-executes every action in the scene (lights on, thermostat set, locks, etc.) and returns per-action results. Write tier — requires user confirmation in the dashboard. Use when the user asks for a household-routine outcome like 'movie night' or 'goodnight'.",
+    "Run a device-control scene by id or name. Batch-executes every action in the scene (lights on, thermostat set, locks, etc.) and returns per-action results. Write tier — requires user confirmation in the dashboard. Use when the user asks for a routine outcome like 'open up' or 'close for the night'.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

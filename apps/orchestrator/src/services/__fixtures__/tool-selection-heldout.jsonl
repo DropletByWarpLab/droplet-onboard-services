@@ -1,0 +1,150 @@
+{"id": "h001", "text": "wifi is crawling in the back office, whats going on", "domains": ["network"]}
+{"id": "h002", "text": "can you change the guest wifi password, the old one's been passed around way too much", "domains": ["network"]}
+{"id": "h003", "text": "who's hogging all the bandwidth right now", "domains": ["network"]}
+{"id": "h004", "text": "block that weird device called ESP_3F21, nobody knows what it is", "domains": ["network"]}
+{"id": "h005", "text": "the new receptionist's laptop cant get online, did it even get an IP?", "domains": ["network"]}
+{"id": "h006", "text": "is the lease from Hartley signed yet", "domains": ["files"]}
+{"id": "h007", "text": "summarize the new employee handbook for me, just the PTO part", "domains": ["files"]}
+{"id": "h008", "text": "someone overwrote the fee schedule spreadsheet, can you get yesterday's version back", "domains": ["files"]}
+{"id": "h009", "text": "the scans folder is a mess, like 400 duplicates. clean it up", "domains": ["files"]}
+{"id": "h010", "text": "where did we put the signed engagement letter for the Okafor estate", "domains": ["files"]}
+{"id": "h011", "text": "turn the lobby lights off", "domains": ["smart-home"]}
+{"id": "h012", "text": "set the conference room thermostat to 70 before the 2pm", "domains": ["smart-home"]}
+{"id": "h013", "text": "is the back door locked?", "domains": ["smart-home"]}
+{"id": "h014", "text": "make a 'closing up' scene that kills all the lights and locks the front door", "domains": ["smart-home"]}
+{"id": "h015", "text": "did anyone come to the loading dock last night after 9", "domains": ["cameras"]}
+{"id": "h016", "text": "show me the parking lot cam", "domains": ["cameras"]}
+{"id": "h017", "text": "export the clip of the guy who backed into the delivery van this morning", "domains": ["cameras"]}
+{"id": "h018", "text": "hallway cam keeps pinging me bc of the ficus moving, can you ignore that corner", "domains": ["cameras"]}
+{"id": "h019", "text": "which port is the front desk printer plugged into", "domains": ["switch"]}
+{"id": "h020", "text": "power cycle whatever's on port 7", "domains": ["switch"]}
+{"id": "h021", "text": "put port 12 on the guest vlan", "domains": ["switch"]}
+{"id": "h022", "text": "how much PoE budget is left on the switch", "domains": ["switch"]}
+{"id": "h023", "text": "what's on my calendar tomorrow", "domains": ["calendar"]}
+{"id": "h024", "text": "move the staff meeting to thurs 3pm", "domains": ["calendar"]}
+{"id": "h025", "text": "book the conference room fri 10-11 for the Alvarez depo prep", "domains": ["calendar"]}
+{"id": "h026", "text": "remind me to call the insurance adjuster at 2", "domains": ["reminders"]}
+{"id": "h027", "text": "set a timer for 20 min, sealant needs to cure", "domains": ["reminders"]}
+{"id": "h028", "text": "what reminders do i have left today", "domains": ["reminders"]}
+{"id": "h029", "text": "mark the renew business license reminder as done", "domains": ["reminders"]}
+{"id": "h030", "text": "push a notification to all staff: fire drill at 11", "domains": ["notifications"]}
+{"id": "h031", "text": "what notifications did I miss this morning", "domains": ["notifications"]}
+{"id": "h032", "text": "ping Maria's phone that her 3pm is here", "domains": ["notifications"]}
+{"id": "h033", "text": "what were those warnings on the bell icon earlier", "domains": ["notifications"]}
+{"id": "h034", "text": "did the Hartley people ever reply about the lease renewal", "domains": ["email"]}
+{"id": "h035", "text": "summarize the thread with Brightline Staffing", "domains": ["email"]}
+{"id": "h036", "text": "draft a reply to Karen saying we can do the 15th", "domains": ["email"]}
+{"id": "h037", "text": "whats Tom Reyes's email", "domains": ["email"]}
+{"id": "h038", "text": "remember that the Patel account always wants invoices net 45", "domains": ["memory"]}
+{"id": "h039", "text": "what did I tell you about how Linda likes her reports formatted", "domains": ["memory"]}
+{"id": "h040", "text": "forget what i said about the Oakridge discount, that's off now", "domains": ["memory"]}
+{"id": "h041", "text": "from now on i want bullet summaries, not paragraphs. please remember that", "domains": ["memory"]}
+{"id": "h042", "text": "what tasks are overdue on the website redesign", "domains": ["pm"]}
+{"id": "h043", "text": "assign the kitchen remodel punch list to Diego", "domains": ["pm"]}
+{"id": "h044", "text": "create a task for Sam: update the patient intake form, due friday", "domains": ["pm"]}
+{"id": "h045", "text": "how far along are we on the office move project", "domains": ["pm"]}
+{"id": "h046", "text": "which invoices are still unpaid", "domains": ["money"]}
+{"id": "h047", "text": "do we have any open bills from Sysco", "domains": ["money"]}
+{"id": "h048", "text": "any quotes we sent out that nobody accepted yet?", "domains": ["money"]}
+{"id": "h049", "text": "list outstanding invoices older than 60 days", "domains": ["money"]}
+{"id": "h050", "text": "what stage is the Brennan Logistics deal at", "domains": ["crm"]}
+{"id": "h051", "text": "log that I called the Westfield lead, they want a demo next month", "domains": ["crm"]}
+{"id": "h052", "text": "which leads came in from the trade show", "domains": ["crm"]}
+{"id": "h053", "text": "bump the Castillo opportunity to 12k", "domains": ["crm"]}
+{"id": "h054", "text": "who are we seeing today", "domains": ["erp"]}
+{"id": "h055", "text": "pull up Mrs. Kowalski, DOB 3/14/58", "domains": ["erp"]}
+{"id": "h056", "text": "book Jamal Wright a cleaning next tuesday morning", "domains": ["erp"]}
+{"id": "h057", "text": "what's our patient AR look like, how much is past 90", "domains": ["erp"]}
+{"id": "h058", "text": "from the sales dataset, what were our top 5 products last quarter", "domains": ["cloud"]}
+{"id": "h059", "text": "query the POS export for avg ticket size by weekday", "domains": ["cloud"]}
+{"id": "h060", "text": "pull monthly revenue by location from the bigquery data", "domains": ["cloud"]}
+{"id": "h061", "text": "how many orders shipped late in august per the fulfillment data", "domains": ["cloud"]}
+{"id": "h062", "text": "what do we know about Hartley Property Management", "domains": ["business"]}
+{"id": "h063", "text": "add Greenleaf Dental Supply as a new vendor", "domains": ["business"]}
+{"id": "h064", "text": "show me the whole history with Okafor & Sons", "domains": ["business"]}
+{"id": "h065", "text": "Delmar moved, update their address to 400 Pine St", "domains": ["business"]}
+{"id": "h066", "text": "tell the front desk channel Dr. Kim is running 15 min late", "domains": ["team_chat"]}
+{"id": "h067", "text": "send a meeting invite to the ops group for a quick huddle at 4", "domains": ["team_chat"]}
+{"id": "h068", "text": "post in #warehouse that the forklift is down", "domains": ["team_chat"]}
+{"id": "h069", "text": "msg Priya on chat that the proofs are ready", "domains": ["team_chat"]}
+{"id": "h070", "text": "kick off a background job to go through all the 2024 contracts and flag auto-renewals", "domains": ["agent_runs"]}
+{"id": "h071", "text": "hows that research task you started yesterday going", "domains": ["agent_runs"]}
+{"id": "h072", "text": "is the vendor comparison run finished yet", "domains": ["agent_runs"]}
+{"id": "h073", "text": "start a long-running task to compile every client complaint from the last year", "domains": ["agent_runs"]}
+{"id": "h074", "text": "set up a morning briefing every weekday at 7:30 with the schedule and unpaid invoices", "domains": ["routines"]}
+{"id": "h075", "text": "what routines do we have running", "domains": ["routines"]}
+{"id": "h076", "text": "run the end-of-day checklist routine now", "domains": ["routines"]}
+{"id": "h077", "text": "make a weekly thing that sends me the new leads every friday", "domains": ["routines"]}
+{"id": "h078", "text": "what changed in the pricing script since last week", "domains": ["workspace"]}
+{"id": "h079", "text": "propose a fix to the invoice export script so it handles commas in client names", "domains": ["workspace"]}
+{"id": "h080", "text": "where in the workspace do we set the tax rate", "domains": ["workspace"]}
+{"id": "h081", "text": "is the droplet healthy?", "domains": ["system"]}
+{"id": "h082", "text": "how full are the drives", "domains": ["system"]}
+{"id": "h083", "text": "any updates available for the box", "domains": ["system"]}
+{"id": "h084", "text": "who deleted stuff from the shared drive yesterday? check the audit log", "domains": ["system"]}
+{"id": "h085", "text": "convert 42 euros to dollars", "domains": ["data"]}
+{"id": "h086", "text": "translate to spanish for the patient: please arrive 15 minutes early", "domains": ["data"]}
+{"id": "h087", "text": "whats the weather tomorrow, we have the outdoor client event", "domains": ["data"]}
+{"id": "h088", "text": "what date is 90 days from today", "domains": ["data"]}
+{"id": "h089", "text": "find the Hartley lease and email it to their office manager", "domains": ["files", "email"]}
+{"id": "h090", "text": "email the signed Okafor engagement letter to Tom", "domains": ["files", "email"]}
+{"id": "h091", "text": "save the key points from the Brightline email thread as a doc in the HR folder", "domains": ["email", "files"]}
+{"id": "h092", "text": "put the dental conference on the calendar and remind me a week before", "domains": ["calendar", "reminders"]}
+{"id": "h093", "text": "Karen's email has the delivery date, add it to my calendar", "domains": ["email", "calendar"]}
+{"id": "h094", "text": "parking lot camera is offline, is it still getting power from the switch?", "domains": ["cameras", "switch"]}
+{"id": "h095", "text": "new camera plugged into port 9, set up the port and add the camera", "domains": ["switch", "cameras"]}
+{"id": "h096", "text": "export the clip of the break-in attempt and send it to officer Daniels", "domains": ["cameras", "email"]}
+{"id": "h097", "text": "send the unpaid invoice list to our bookkeeper", "domains": ["money", "email"]}
+{"id": "h098", "text": "whats the total of all open invoices in euros", "domains": ["money", "data"]}
+{"id": "h099", "text": "look at the Brennan deal and draft a follow-up to their buyer", "domains": ["crm", "email"]}
+{"id": "h100", "text": "create a project for the Hartley move-in and schedule the kickoff for monday", "domains": ["pm", "calendar"]}
+{"id": "h101", "text": "mark the website launch task done and tell the team in chat", "domains": ["pm", "team_chat"]}
+{"id": "h102", "text": "how many patients are booked today? post it to the front desk channel", "domains": ["erp", "team_chat"]}
+{"id": "h103", "text": "summarize the Q3 sales dataset and save it as a pdf report", "domains": ["cloud", "files"]}
+{"id": "h104", "text": "add Greenleaf as a vendor and remember they only deliver tuesdays", "domains": ["business", "memory"]}
+{"id": "h105", "text": "whats our history with Delmar, and any emails from them this month?", "domains": ["business", "email"]}
+{"id": "h106", "text": "every day at 7pm run the closing-up scene", "domains": ["routines", "smart-home"]}
+{"id": "h107", "text": "drive 3 is making noises, is it failing? if yes alert the office manager", "domains": ["system", "notifications"]}
+{"id": "h108", "text": "install the pending update tonight and give the staff channel a heads up", "domains": ["system", "team_chat"]}
+{"id": "h109", "text": "block the device thats scanning our network and send an alert to all staff", "domains": ["network", "notifications"]}
+{"id": "h110", "text": "who was on the wifi after hours last night, and did the cameras catch anyone", "domains": ["network", "cameras"]}
+{"id": "h111", "text": "open the fee schedule spreadsheet and convert the prices to CAD", "domains": ["files", "data"]}
+{"id": "h112", "text": "translate the patient consent form into spanish and save a copy next to it", "domains": ["files", "data"]}
+{"id": "h113", "text": "weather saturday? if its rain move the company picnic to sunday", "domains": ["data", "calendar"]}
+{"id": "h114", "text": "remind me 3 days before each open invoice is due", "domains": ["money", "reminders"]}
+{"id": "h115", "text": "start a background run to review all vendor contracts and notify me when it's done", "domains": ["agent_runs", "notifications"]}
+{"id": "h116", "text": "what did the last run find? put the results in the shared folder", "domains": ["agent_runs", "files"]}
+{"id": "h117", "text": "find the label script changes in the workspace and msg Priya the diff", "domains": ["workspace", "team_chat"]}
+{"id": "h118", "text": "remember Dr Kim takes lunch 12:30-1:30 and block it on her calendar", "domains": ["memory", "calendar"]}
+{"id": "h119", "text": "find Maria Lopez's contact info and add her as the contact on the Brightline company profile", "domains": ["email", "business"]}
+{"id": "h120", "text": "send the ops team a chat invite for the quarterly review and put it on my calendar", "domains": ["team_chat", "calendar"]}
+{"id": "h121", "text": "take the Westfield lead and create a company record for them", "domains": ["crm", "business"]}
+{"id": "h122", "text": "how much PoE is the lobby cam pulling and is the camera itself healthy", "domains": ["switch", "cameras"]}
+{"id": "h123", "text": "get the patient aging report and remind me to call anyone over 90 days", "domains": ["erp", "reminders"]}
+{"id": "h124", "text": "schedule new hire orientation for Diego and create his onboarding tasks", "domains": ["calendar", "pm"]}
+{"id": "h125", "text": "query last month's revenue from the POS data and convert it to euros", "domains": ["cloud", "data"]}
+{"id": "h126", "text": "book mr. alvarez for a crown prep and email him the pre-op instructions pdf", "domains": ["erp", "email", "files"]}
+{"id": "h127", "text": "find the signed Hartley lease, email it to them, and log it on their company timeline", "domains": ["files", "email", "business"]}
+{"id": "h128", "text": "what's a good way to word a late-payment reminder", "domains": []}
+{"id": "h129", "text": "thanks!", "domains": []}
+{"id": "h130", "text": "good morning", "domains": []}
+{"id": "h131", "text": "how should i explain a deductible to a patient in plain english", "domains": []}
+{"id": "h132", "text": "write me a job ad for a part-time receptionist", "domains": []}
+{"id": "h133", "text": "whats the difference between an LLC and an S-corp", "domains": []}
+{"id": "h134", "text": "can you make this sound less harsh: 'you're late again, this is unacceptable'", "domains": []}
+{"id": "h135", "text": "tips for running a better staff meeting?", "domains": []}
+{"id": "h136", "text": "what does net 30 mean", "domains": []}
+{"id": "h137", "text": "lol ok", "domains": []}
+{"id": "h138", "text": "give me 3 subject lines for our spring promo email", "domains": []}
+{"id": "h139", "text": "how do I tell a client we're raising rates without losing them", "domains": []}
+{"id": "h140", "text": "roughly what does HIPAA say about texting patients", "domains": []}
+{"id": "h141", "text": "proofread: 'Our office will be closed on Monday for the holliday.'", "domains": []}
+{"id": "h142", "text": "who are you", "domains": []}
+{"id": "h143", "text": "any alerts overnight?", "domains": ["notifications"], "note": "could also mean camera events, threat events, or system warnings"}
+{"id": "h144", "text": "is the Hartley thing done?", "domains": ["pm"], "note": "could be the lease file, a project task, or a CRM deal"}
+{"id": "h145", "text": "send the report to Linda", "domains": ["files", "email"], "note": "which report is unclear; could be an agent run result"}
+{"id": "h146", "text": "everything ok with the office?", "domains": ["system", "network"], "note": "vague health check; could extend to cameras/smart-home"}
+{"id": "h147", "text": "what's today looking like", "domains": ["calendar"], "note": "at a practice this could mean the ERP patient schedule"}
+{"id": "h148", "text": "remind the team about friday", "domains": ["team_chat"], "note": "could be reminders or notifications instead of chat"}
+{"id": "h149", "text": "how much do we owe", "domains": ["money"], "note": "open bills; could be misread as ERP receivables"}
+{"id": "h150", "text": "something's wrong with the front door", "domains": ["smart-home"], "note": "smart lock most likely; could be the door camera"}

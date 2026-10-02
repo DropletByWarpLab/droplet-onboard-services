@@ -36,7 +36,7 @@ const inputSchema = {
     device: {
       type: "string",
       description:
-        "The device to remove — its household name (e.g. \"kitchen strip\"), its Matter product name, or its exact node id. Name matching is case-insensitive; use list_smart_home_devices to see names and node ids.",
+        "The device to remove — its given name (e.g. \"lobby strip\"), its Matter product name, or its exact node id. Name matching is case-insensitive; use list_smart_home_devices to see names and node ids.",
     },
     confirmed: {
       type: "boolean",

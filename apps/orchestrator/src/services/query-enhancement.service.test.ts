@@ -1,4 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+// WARP-3047 — the production chat adapter's gateway call, observed.
+const gatewayChat = vi.hoisted(() => vi.fn());
+vi.mock("./ai-gateway.client.js", () => ({ chat: gatewayChat }));
+
 import {
   classifyQuery,
   CLASSIFIER_CACHE_TTL_SEC,
@@ -117,7 +122,7 @@ describe("createEnhancementDeps (WARP-437 production factory)", () => {
     delete process.env.QUERY_ENHANCEMENT_ENABLED;
     const out = createEnhancementDeps({
       aiGatewayGrpcUrl: "ai-gateway:50051",
-      defaultModel: "test-model",
+      resolveModel: async () => "test-model",
     });
     expect(out).toBeUndefined();
   });
@@ -127,7 +132,7 @@ describe("createEnhancementDeps (WARP-437 production factory)", () => {
       process.env.QUERY_ENHANCEMENT_ENABLED = v;
       const out = createEnhancementDeps({
         aiGatewayGrpcUrl: "ai-gateway:50051",
-        defaultModel: "test-model",
+        resolveModel: async () => "test-model",
       });
       expect(out).toBeUndefined();
     }
@@ -137,12 +142,40 @@ describe("createEnhancementDeps (WARP-437 production factory)", () => {
     process.env.QUERY_ENHANCEMENT_ENABLED = "1";
     const out = createEnhancementDeps({
       aiGatewayGrpcUrl: "ai-gateway:50051",
-      defaultModel: "test-model",
+      resolveModel: async () => "test-model",
     });
     expect(out).toBeDefined();
     expect(typeof out?.classify).toBe("function");
     expect(typeof out?.hyde).toBe("function");
     expect(typeof out?.multiQuery).toBe("function");
     expect(typeof out?.embed).toBe("function");
+  });
+
+  it("asks for the rewrite model LAZILY and sends exactly that model (WARP-3047)", async () => {
+    process.env.QUERY_ENHANCEMENT_ENABLED = "1";
+    gatewayChat.mockReset();
+    gatewayChat.mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: "A passage." } }] }),
+    });
+    const resolveModel = vi.fn(async () => "docker.io/ai/qwen3:8B-Q4_K_M");
+    const out = createEnhancementDeps({ aiGatewayGrpcUrl: "ai-gateway:50051", resolveModel });
+    // Building the deps (every /llm/chat turn) costs no resolution at all.
+    expect(resolveModel).not.toHaveBeenCalled();
+
+    await expect(out?.hyde("where is the invoice?")).resolves.toBe("A passage.");
+    expect(resolveModel).toHaveBeenCalledTimes(1);
+    expect(gatewayChat.mock.calls[0][0].model).toBe("docker.io/ai/qwen3:8B-Q4_K_M");
+  });
+
+  it("no resolvable model → no gateway call, the raw query stands (WARP-3047)", async () => {
+    process.env.QUERY_ENHANCEMENT_ENABLED = "1";
+    gatewayChat.mockReset();
+    const out = createEnhancementDeps({
+      aiGatewayGrpcUrl: "ai-gateway:50051",
+      resolveModel: async () => null,
+    });
+    await expect(out?.hyde("where is the invoice?")).resolves.toBe("where is the invoice?");
+    expect(gatewayChat).not.toHaveBeenCalled();
   });
 });

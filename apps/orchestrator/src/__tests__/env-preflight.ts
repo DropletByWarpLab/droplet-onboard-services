@@ -24,6 +24,10 @@ import path from "node:path";
 export const COSIGN_DEPENDENT_SUITES: readonly string[] = [
   "src/services/update-agent/verify.test.ts",
   "src/services/update-agent/poller.test.ts",
+  // WARP-2900: the extension verifier's release-key leg, and the proof the
+  // OTA release paths still refuse box-extension-key signatures.
+  "src/services/update-agent/extension-verify.cosign.test.ts",
+  "src/services/update-agent/release-paths-stay-release-only.test.ts",
 ];
 
 /** apps/orchestrator — this file lives in apps/orchestrator/src/__tests__/. */

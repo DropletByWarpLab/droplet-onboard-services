@@ -206,11 +206,16 @@ describe("EXCLUDED_FROM_CHAT_TOOLS is the POLICY layer, selection is the RELEVAN
       "money",
       "notifications",
       "switch",
+      // WARP-2896 — the workshop's tools live inside a workspace-bound run
+      // and nowhere else (each refuses without one); chat never offers them,
+      // so no selection rule may promise them.
+      "workspace",
     ]);
-    // switch, erp and money are ruleless, which is the coherent state.
+    // switch, erp, money and workspace are ruleless, which is the coherent state.
     expect(RULED_DOMAINS.has("switch")).toBe(false);
     expect(RULED_DOMAINS.has("erp")).toBe(false);
     expect(RULED_DOMAINS.has("money")).toBe(false);
+    expect(RULED_DOMAINS.has("workspace")).toBe(false);
     // ADR-045 — `pm` is the deliberate exception: locally EMPTY and yet ruled,
     // because the rule reaches remote tools and the `business` domain where
     // the writes went. Asserting it here stops a future reader "tidying" the

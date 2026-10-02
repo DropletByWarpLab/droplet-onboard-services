@@ -9,20 +9,25 @@
  * calendar. Recipients RSVP from the card in Messages.
  *
  * Same two-phase contract as team_chat_send_message (share_file posture):
- * phase 1 validates fully — including the future-startsAt check, so the
- * user never approves a meeting the orchestrator would refuse — and
- * returns `confirmation_required` with ZERO HTTP; only `confirmed: true`
- * after an explicit yes dispatches, as X-Droplet-User = ctx.userId.
+ * the unconfirmed phase validates fully — including the future-startsAt
+ * check — and resolves the recipients (reads only, ZERO writes); only
+ * `confirmed: true` dispatches, as X-Droplet-User = ctx.userId. In chat the
+ * dispatch interceptor challenges before this handler runs, so the person
+ * approves the interceptor's card (argument shapes only, WARP-2469), never
+ * this handler's text; the unconfirmed phase runs as `precheck`
+ * (WARP-3403) so a meeting the orchestrator would refuse, or a recipient
+ * who is nobody in the Workspace, is refused before that card.
  */
 import { confirmationRequired } from "../../confirmation.js";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import {
   actingHeaders,
   err,
-  pickParticipantIds,
   readRosterResponse,
   readThreadResponse,
+  resolveTargets,
   truncateForPreview,
+  unconfirmedPhaseAsPrecheck,
 } from "./_roster.js";
 
 const MAX_RECIPIENTS = 24;
@@ -39,7 +44,7 @@ const inputSchema = {
       type: "array",
       items: { type: "string" },
       description:
-        "Member USERNAMES to invite. One recipient reuses the 1:1 thread; several create a group. The organizer is included automatically.",
+        "Usernames or email addresses of people in this Workspace (members or external guests) to invite. One recipient reuses the 1:1 thread; several create a group. The organizer is included automatically.",
     },
     title: {
       type: "string",
@@ -73,6 +78,16 @@ const inputSchema = {
   additionalProperties: false,
 } as const;
 
+/** WARP-3403 — the address lookup `resolveTargets` calls (in this file for the WARP-1455 drift gate). */
+function lookupAddresses(ctx: ToolContext) {
+  return (emails: string[]) =>
+    ctx.http.orchestrator.post(
+      "/api/team-chat/contacts/lookup",
+      { emails },
+      { headers: actingHeaders(ctx) },
+    );
+}
+
 async function handler(
   args: Record<string, unknown>,
   ctx: ToolContext,
@@ -105,15 +120,12 @@ async function handler(
   ) {
     return err(
       "INVALID_ARGS",
-      `recipients must be 1-${MAX_RECIPIENTS} member usernames`,
+      `recipients must be 1-${MAX_RECIPIENTS} usernames or email addresses of people in this Workspace`,
     );
   }
-  const recipients = [...new Set(args.recipients.map((r) => r.trim()))].filter(
-    (r) => r !== ctx.userId,
-  );
-  if (recipients.length === 0) {
-    return err("INVALID_ARGS", "recipients must include someone other than yourself");
-  }
+  // The organizer is dropped against the roster's `me` (WARP-3196), never
+  // by comparing a username with ctx.userId: over HTTP that is a User.id.
+  let recipients = [...new Set(args.recipients.map((r) => r.trim()))];
 
   let durationMinutes: number | undefined;
   if (args.duration_minutes !== undefined) {
@@ -155,10 +167,15 @@ async function handler(
     note = args.note.trim();
   }
 
-  // Confirmation gate — AFTER validation, BEFORE any WRITE (share_file).
-  // The roster is read best-effort so the approval copy shows DISPLAY
-  // NAMES; the timestamp renders in the readable local form (UX review —
-  // raw ISO-UTC is machine copy). The ISO original stays in `details`.
+  // Unconfirmed phase — AFTER validation, BEFORE any WRITE (share_file).
+  // The recipients are resolved exactly as the confirmed phase does, so a
+  // recipient it would refuse (unknown, nobody in the Workspace, only the
+  // organizer) is refused here. WARP-3403: `precheck` below runs this
+  // before the interceptor asks, so those refusals come before the approval
+  // card. The confirmation_required text is only what a direct caller
+  // gets; nobody approves it. Messages switched off (the roster's 404) is
+  // refused too; any other roster hiccup falls back to the typed
+  // recipients, and the confirmed phase validates them again.
   if (args.confirmed !== true) {
     let names = recipients;
     try {
@@ -167,17 +184,15 @@ async function handler(
         { headers: actingHeaders(ctx) },
       );
       const roster = await readRosterResponse(rosterRes);
+      if (!roster.ok && rosterRes.status === 404) return roster.result;
       if (roster.ok) {
-        const byUsername = new Map(
-          roster.contacts.map((c) => [c.username, c] as const),
-        );
-        names = recipients.map((u) => {
-          const display = byUsername.get(u)?.displayName;
-          return display && display.length > 0 ? display : u;
-        });
+        const resolved = await resolveTargets(roster, recipients, lookupAddresses(ctx));
+        if (!resolved.ok) return resolved.result;
+        recipients = resolved.others.flatMap((c) => (c.username ? [c.username] : []));
+        names = resolved.others.map((c) => c.displayName || c.username || c.id);
       }
     } catch {
-      // Preview-only read — usernames are an honest fallback.
+      // Unreachable roster — the confirmed phase reads it again and fails loudly.
     }
     // Explicit zone (review): the readable form renders in the CONTAINER's
     // timezone — naming it ("6:00 PM UTC") keeps the approval honest when
@@ -228,13 +243,15 @@ async function handler(
   });
   const roster = await readRosterResponse(rosterRes);
   if (!roster.ok) return roster.result;
-  const picked = pickParticipantIds(roster.contacts, recipients);
-  if (!picked.ok) return picked.result;
+  const resolved = await resolveTargets(roster, recipients, lookupAddresses(ctx));
+  if (!resolved.ok) return resolved.result;
+  // resolveRecipients only matches rows that carry a username.
+  recipients = resolved.others.flatMap((c) => (c.username ? [c.username] : []));
   const threadRes = await ctx.http.orchestrator.post(
     "/api/team-chat/threads",
     {
-      kind: picked.participantIds.length === 1 ? "direct" : "group",
-      participantIds: picked.participantIds,
+      kind: resolved.others.length === 1 ? "direct" : "group",
+      participantIds: resolved.others.map((c) => c.id),
     },
     { headers: actingHeaders(ctx) },
   );
@@ -293,10 +310,12 @@ async function handler(
 const tool: Tool = {
   name: "team_chat_send_meeting_invite",
   description:
-    "Invite members to a meeting through Messages (team chat) on the user's behalf. recipients = member USERNAMES; the meeting card is posted in the (deduped 1:1 or new group) thread, recipients RSVP from it, and the meeting lands on the organizer's local calendar with a reminder before start. Two-step: the first call returns confirmation_required with the meeting details — relay them to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Invite members to a meeting through Messages (team chat) on the user's behalf. recipients = usernames or email addresses of people in this Workspace; the meeting card is posted in the (deduped 1:1 or new group) thread, recipients RSVP from it, and the meeting lands on the organizer's local calendar with a reminder before start. Two-step: the first call returns confirmation_required with the meeting details — relay them to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,
+  // WARP-3403 — the unconfirmed phase above, run before the interceptor asks.
+  precheck: unconfirmedPhaseAsPrecheck(handler),
   handler,
 };
 

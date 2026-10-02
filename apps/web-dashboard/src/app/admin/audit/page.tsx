@@ -23,14 +23,14 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
-import { Download, FileLock2, ScrollText, Search, ShieldOff } from "lucide-react";
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Download, FileLock2, Hammer, ScrollText, Search, ShieldOff } from "lucide-react";
 import { useAuth, authFetch } from "@/lib/auth";
 import { isAdminRole } from "@/lib/access";
 import { fetchUsers } from "@/lib/api";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { AuditTimeline } from "@/components/audit/AuditTimeline";
-import { AgentRunsPanel } from "@/components/audit/AgentRunsPanel";
 import {
   BrokenChainBanner,
   ChainVerificationBadge,
@@ -46,6 +46,7 @@ import {
   type VerifyState,
 } from "@/components/audit/types";
 import { activityRowsToCsv } from "@/lib/audit-csv";
+import { RotateAuditKey } from "@/components/audit/RotateAuditKey";
 
 const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 300;
@@ -107,6 +108,7 @@ function AuditPageSkeleton() {
 function AuditPageInner() {
   const { user, isLoading: authLoading } = useAuth();
   const searchParams = useSearchParams();
+  const router = useRouter();
 
   const [items, setItems] = useState<ActivityItem[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -125,9 +127,14 @@ function AuditPageInner() {
   const [kind, setKind] = useState(() =>
     parseKindParam(searchParams?.get("kind")),
   );
-  // WARP-2180 — `?run=<id>` opens that background run's detail (a parked
-  // run's approval prompt is deep-linkable from chat or a notification).
-  const initialRunId = searchParams?.get("run") ?? null;
+  // WARP-2180 gave this page `?run=<id>` to open a background run's detail.
+  // WARP-2925 moved the runs panel to /workshop; the deep link keeps working
+  // by forwarding there, so nothing that ever linked here breaks. `replace`,
+  // not `push` — Back should return to wherever the link was, not to here.
+  const forwardRunId = searchParams?.get("run") ?? null;
+  useEffect(() => {
+    if (forwardRunId) router.replace(`/workshop?run=${encodeURIComponent(forwardRunId)}`);
+  }, [forwardRunId, router]);
   const [actorType, setActorType] = useState("");
   const [rangeKey, setRangeKey] = useState<RangeKey>("all");
   const [q, setQ] = useState("");
@@ -156,8 +163,17 @@ function AuditPageInner() {
     fetchUsers()
       .then(({ users }) => {
         if (!alive) return;
+        // WARP-3155 — `id` is the Nextcloud/login handle; `actorId` on an
+        // activity row is the canonical local user id (`actorFromRequest`,
+        // `services/activity.service.ts`), which is `userId` here. Keying
+        // on `id` meant the lookup always missed and every row rendered "by
+        // user 1a2b3c4d…" instead of the person's name.
         setUserNames(
-          new Map(users.map((u) => [u.id, u.displayName || u.username])),
+          new Map(
+            users
+              .filter((u): u is typeof u & { userId: string } => u.userId != null)
+              .map((u) => [u.userId, u.displayName || u.username]),
+          ),
         );
       })
       .catch(() => {
@@ -438,10 +454,13 @@ function AuditPageInner() {
         <BrokenChainBanner brokenAtId={verify.brokenAtId} rowsChecked={verify.rowsChecked} />
       )}
 
+      {/* WARP-3180 — renders only for the owner (the route is owner-only). */}
+      <RotateAuditKey onRotated={() => void runVerify()} />
+
       <div className="toolbar">
         <select
           aria-label="Filter by kind"
-          className="px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+          className="px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-colors"
           style={{
             width: "auto",
             background: "var(--surface)",
@@ -464,7 +483,7 @@ function AuditPageInner() {
             pre-upgrade unattributed rows by design. */}
         <select
           aria-label="Filter by actor"
-          className="px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+          className="px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-colors"
           style={{
             width: "auto",
             background: "var(--surface)",
@@ -507,10 +526,16 @@ function AuditPageInner() {
         </label>
       </div>
 
-      {/* WARP-2180 — background runs live on the Activity surface, not in
-          the nav. Their tool calls are the `tool_call` rows below, grouped
-          by refs.agentRunId; this panel is the run-level view of them. */}
-      <AgentRunsPanel initialRunId={initialRunId} />
+      {/* WARP-2925 — background runs have their own surface now. Their tool
+          calls are still the `tool_call` rows below, grouped by
+          refs.agentRunId; the run-level view of them is /workshop. */}
+      <p className="text-[13px] mb-4 flex items-center gap-2" style={{ color: "var(--text-muted)" }}>
+        <Hammer size={14} aria-hidden />
+        <span>
+          Background runs — starting one, approving what it parks on, its trace — live in{" "}
+          <Link href="/workshop">Workshop</Link>.
+        </span>
+      </p>
       {error && (
         <div className="card" role="alert" style={{ marginBottom: 16 }}>
           <p style={{ fontSize: 13, color: "var(--text)" }} title={error.detail}>

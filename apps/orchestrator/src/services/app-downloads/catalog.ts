@@ -21,19 +21,21 @@
  *
  * A cosign signature over the catalog is supported on top of that
  * (`store.ts`, `requireSignature`), but it is deliberately NOT the load-
- * bearing gate: the OTA trust anchor is still the WARP-535 placeholder
- * (`update-agent/verify.ts` → `trust_anchor_placeholder`), so making
- * signature verification mandatory today would fail-closed on every
- * download and ship a surface that can never serve a byte.
+ * bearing gate: `update-agent/cosign.pub` has been a real P-256 key
+ * since the 2026-07-30 key ceremony, but nothing signs an on-box-
+ * generated catalog.json today, so making signature verification
+ * mandatory would fail-closed on every download and ship a surface that
+ * can never serve a byte.
  *
- * The Windows bundle's own minisign `.sig` + `latest.json` (the Tauri
- * updater envelope, key `F5E6E366DCF9B85E`) ride along as opaque
- * passenger assets — declared here, served verbatim, never verified by
- * the box. Ed25519 is forbidden on-box by
+ * Windows updates are box-served (ADR-045 Amendment 1, ADR-062): the
+ * native client takes size + SHA-256 from this catalog and verifies the
+ * installer with WinVerifyTrust against a pinned publisher subject. There
+ * is no Ed25519 and no Tauri updater envelope for Windows. A `signature`
+ * or `manifest` asset staged for any platform is still an opaque
+ * passenger — declared here, served verbatim, never verified by the box
+ * (Ed25519 is forbidden on-box by
  * `docs/security/fips-allowed-algorithms.md` without a registered
- * exception, and the box has no reason to hold that opinion: the
- * signature exists for the *client's* updater and for a customer who
- * wants to check the download independently.
+ * exception).
  */
 import { z } from "zod";
 
@@ -55,12 +57,12 @@ export type AppPlatform = (typeof APP_PLATFORMS)[number];
  *
  * - `installer` — the thing a human runs. Exactly one per platform is
  *   marked `primary` and becomes the page's main button.
- * - `signature`  — a detached signature over a sibling installer (the
- *   Tauri minisign `.sig`). Offered as a secondary "verify this
+ * - `signature`  — a detached signature over a sibling installer (a
+ *   legacy Tauri minisign `.sig`, not produced for Windows any more). Offered as a secondary "verify this
  *   download" link, never as the primary action.
- * - `manifest`   — updater metadata (`latest.json`). Served so the
- *   installed client can self-update against the box instead of a
- *   cloud endpoint; not surfaced as a human download.
+ * - `manifest`   — updater metadata (`latest.json`, legacy Tauri). Served
+ *   verbatim; not surfaced as a human download. The native Windows
+ *   client reads the catalog (`GET /api/app-downloads`) instead.
  */
 export const ASSET_KINDS = ["installer", "signature", "manifest"] as const;
 export type AssetKind = (typeof ASSET_KINDS)[number];

@@ -15,6 +15,7 @@ import {
   setGuestWifi,
   getGuestWifi,
   removeGuestWifi,
+  stripWirelessSecrets,
 } from "../services/network.service.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
 import {
@@ -30,6 +31,22 @@ import {
   requireRoleOrMcpService,
   requireRoleOrService,
 } from "../middleware/auth.js";
+import { createLogger } from "../lib/logger.js";
+
+const logger = createLogger("network-wifi-routes");
+
+/**
+ * The router's Wi-Fi settings, or null when the router can't be read — the
+ * callers still answer from the AP via getCurrentWifi. WARP-3193 QUAL-15: the
+ * fallback used to be a bare `.catch(() => null)`, so a router fault left no
+ * trace; it is logged before degrading.
+ */
+function wifiSettingsOrNull(route: string) {
+  return getWifiSettings().catch((err: unknown) => {
+    logger.warn({ err, route }, "router Wi-Fi read failed — falling back to the access point");
+    return null;
+  });
+}
 
 export interface WifiDeps {
   prisma: PrismaClient;
@@ -38,10 +55,15 @@ export interface WifiDeps {
 export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
   const { prisma } = deps;
 
-  router.get("/network/wifi", async (_req, res, next) => {
+  // WARP-3091: owner/admin (+ the MCP principal for `get_wifi_settings`), and
+  // secrets stripped even for them — this read is radios, SSIDs and channels;
+  // the PSK lives on `/network/wifi/current`. Members lose it: the web
+  // Wi-Fi channel card falls back to its "couldn't read" notice, and the iOS
+  // Wi-Fi section needs WARP-3095 to stop calling it for non-admins.
+  router.get("/network/wifi", requireRoleOrMcpService("owner", "admin"), async (_req, res, next) => {
     try {
       const wifi = await getWifiSettings();
-      res.json(wifi);
+      res.json(stripWirelessSecrets(wifi));
     } catch (err) {
       next(err);
     }
@@ -61,7 +83,7 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
     try {
       // A router we can't reach must not fail the card — getCurrentWifi still
       // answers from the AP, and reports honestly when nothing can be read.
-      const wifi = await getWifiSettings().catch(() => null);
+      const wifi = await wifiSettingsOrNull("/network/wifi/current");
       res.json(await getCurrentWifi(prisma, wifi));
     } catch (err) {
       next(err);
@@ -91,7 +113,7 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
     requireRoleOrService("_service:display", "owner", "admin"),
     async (_req, res, next) => {
       try {
-        const wifi = await getWifiSettings().catch(() => null);
+        const wifi = await wifiSettingsOrNull("/network/wifi/join-code");
         const current = await getCurrentWifi(prisma, wifi);
         res.json({
           ssid: current.ssid,
@@ -151,7 +173,7 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
       // unaffected.
       const current = await getCurrentWifi(
         prisma,
-        await getWifiSettings().catch(() => null),
+        await wifiSettingsOrNull("/network/wifi/ssid"),
       );
       if (current.source === "ap") {
         return res.status(409).json({

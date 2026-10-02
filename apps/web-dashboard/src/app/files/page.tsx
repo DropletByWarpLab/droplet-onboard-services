@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
 import {
   Folder,
   FolderPlus,
@@ -14,12 +15,15 @@ import {
   Check,
   Copy as CopyIcon,
   AlertTriangle,
+  LayoutGrid,
+  List as ListIcon,
 } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { useToast } from "@/components/Toast";
 import { BreadcrumbNav } from "@/components/BreadcrumbNav";
 import { UploadZone, UploadButton } from "@/components/UploadZone";
 import { FileRow } from "@/components/FileManager/FileRow";
+import { FileTile } from "@/components/FileManager/FileTile";
 import {
   ContextMenu,
   contextMenuIcons,
@@ -45,11 +49,16 @@ import {
 } from "@/components/FileManager/search-target";
 import {
   requiredDirectories,
+  selectionFromFileList,
   type DroppedSelection,
 } from "@/components/FileManager/dropped-entries";
+import {
+  movablePaths,
+  writeDragPaths,
+} from "@/components/FileManager/internal-drag";
+import { FOLDER_COLORS } from "@/components/FileManager/folder-colors";
 import { StarButton } from "@/components/FileManager/StarButton";
 import { Thumbnail } from "@/components/FileManager/Thumbnail";
-import { VolumesPanel } from "@/components/FileManager/VolumesPanel";
 import { volumeCrumbLabel } from "@/components/FileManager/drive-display";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useFiles } from "@/lib/hooks/useFiles";
@@ -59,6 +68,7 @@ import { useFileManager } from "@/lib/hooks/useFileManager";
 import { useFavorites } from "@/lib/hooks/useFavorites";
 import { useFileRealtime } from "@/lib/hooks/useFileRealtime";
 import { useSpaces } from "@/lib/hooks/useSpaces";
+import { useFolderColors } from "@/lib/hooks/useFolderColors";
 import {
   deleteFile,
   createDirectory,
@@ -69,7 +79,14 @@ import {
   bulkCopyFiles,
   fetchShares,
   createShare,
+  setFolderColor,
+  clearFolderColor,
 } from "@/lib/api";
+import {
+  isFilesUnavailableError,
+  FILES_UNAVAILABLE_TITLE,
+  FILES_UNAVAILABLE_HINT,
+} from "@/lib/files-unavailable";
 import { authFetch, useAuth } from "@/lib/auth";
 // WARP-1944 — display-only space naming for the breadcrumb root crumb, the
 // same mapping the SpaceSwitcher's tabs render with (WARP-1808).
@@ -78,12 +95,18 @@ import { translateError } from "@/lib/friendly-errors";
 import {
   folderOnlyOutcomeMessage,
   uploadOutcomeMessage,
+  uploadNoticeMessage,
   uploadProgressLabel,
 } from "@/lib/upload-feedback";
 import { runUpload } from "@/lib/run-upload";
 import { labelForMime } from "@/lib/mime-labels";
 import { Dialog } from "@/components/Dialog";
-import type { FileEntryInfo, FileSpaceId, ShareDetail } from "@/lib/types";
+import type {
+  FileEntryInfo,
+  FileSpaceId,
+  FolderColor,
+  ShareDetail,
+} from "@/lib/types";
 
 // WARP-1267 — verbatim copy (design brief §2).
 const READER_TOOLBAR_TOOLTIP =
@@ -115,6 +138,23 @@ const BULK_SHARE_LIMIT = 20;
  */
 const LIBRARY_SHARE_MANAGER_ONLY =
   "Only a manager can share from this library. Ask one to create the link.";
+
+/**
+ * WARP-3053: a public link to company files (the Workspace or any
+ * department/team library) is owner/admin only, enforced by the box. Members
+ * still share with people. Also the reason a member's multi-select Share is
+ * disabled here, since the bulk path only mints public links.
+ */
+const COMPANY_PUBLIC_LINK_ADMIN_ONLY =
+  "Only an owner or admin can create a public link to company files. You can still share with people in the company.";
+
+/**
+ * WARP-3168 (Romain, 2026-09-25): members share nothing from the Workspace,
+ * internal shares included; the box and Nextcloud (Workspace group mask 15)
+ * both refuse it. Shown on the disabled Share button, never silently absent.
+ */
+const WORKSPACE_SHARE_ADMIN_ONLY =
+  "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside.";
 
 /**
  * The share posture of the bulk path, stated rather than inherited.
@@ -252,6 +292,9 @@ export default function FilesPage() {
   const { spaces, sharedAvailable } = useSpaces();
   const { user } = useAuth();
   const isOwnerOrAdmin = user?.role === "owner" || user?.role === "admin";
+  // Personal WebDAV drives are open to owner/admin/family (never guest), and
+  // only while the owner has turned them on — the dialog explains when off.
+  const canConnectDrive = isOwnerOrAdmin || user?.role === "family";
   // WARP-1267 — the active space's full record (rights, kind, membership,
   // parent name) drives reader posture, the admin foreign-library banner,
   // and the team breadcrumb prefix below.
@@ -261,6 +304,11 @@ export default function FilesPage() {
   );
   const isReaderSpace = activeSpace?.right === "reader";
   const isTeamSpace = activeSpace?.kind === "team";
+  // Guests are read-only everywhere (the write routes 403 them), same posture
+  // as a reader-right library: the direct-manipulation surface — drag to move,
+  // the row Delete, the write half of the context menus — is withheld.
+  const isGuest = user?.role === "guest";
+  const canModify = !isReaderSpace && !isGuest;
 
   // WARP-1910 — "My Files" appeared twice at the root: the switcher's tab and,
   // directly below it, the breadcrumb bar's lone "My files" root crumb. The
@@ -349,9 +397,10 @@ export default function FilesPage() {
   const { toast } = useToast();
   const [error, setError] = useState<string | null>(null);
   const [showNewFolder, setShowNewFolder] = useState(false);
-  // Network drive (SMB): owner/admin-only connect instructions — the
-  // credential behind it is device-wide, so the trigger hides for other
-  // roles (the endpoint 403s them regardless).
+  // Network drive: owner/admin/family can get their own WebDAV drive login
+  // (when the owner has enabled personal drives); the device-wide SMB section
+  // inside the dialog stays owner/admin-only (showSharedDrive — its endpoint
+  // 403s other roles regardless).
   const [showConnectDrive, setShowConnectDrive] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   // Reader posture (WARP-1267): close a still-open new-folder composer if
@@ -413,13 +462,18 @@ export default function FilesPage() {
   // as the false "This folder is empty".
   const { files, isLoading, error: listingError, refresh } = useFiles(currentPath, space);
   const fm = useFileManager(currentPath);
+  const { colors: folderColors, refresh: refreshFolderColors } = useFolderColors();
 
   // WARP-1338 (UX review): the not-connected copy is keyed to its CAUSE —
   // the 404 an unregistered drive actually hits (fetchFiles embeds the HTTP
   // status in the thrown message) — not merely to being below root, so a
   // transient failure deep inside a healthy, registered drive never claims
   // the drive "isn't connected".
+  // WARP-3076 — the box marked the listing degraded: the file service is
+  // down, so neither "empty" nor "drive not connected" is true.
+  const filesUnavailable = isFilesUnavailableError(listingError);
   const driveNotConnected =
+    !filesUnavailable &&
     !!listingError &&
     currentPath !== "/" &&
     /\b404\b/.test(
@@ -430,8 +484,9 @@ export default function FilesPage() {
   // /<mount-tail>; for the live box's legacy pool that tail is the full fs
   // UUID, and the current-folder crumb rendered it raw — a GUID must never
   // be the primary location label (WARP-1337). Feed the breadcrumb the SAME
-  // display chain the tiles use for a first-segment volume match. SWR dedupes
-  // these keys with VolumesPanel's own subscriptions.
+  // display chain the storage cards use for a first-segment volume match.
+  // WARP-2959 moved those tiles off this screen into Settings -> Storage;
+  // the breadcrumb still needs the same chain, so these subscriptions stay.
   const { drives } = useDrives();
   const { pools } = usePools();
   const crumbLabelForSegment = useCallback(
@@ -606,6 +661,8 @@ export default function FilesPage() {
           directoryCount,
           directoriesFailed,
           uploadedPaths,
+          renamed,
+          duplicates,
         } = await runUpload(selection, {
           basePath: currentPath,
           space,
@@ -616,8 +673,12 @@ export default function FilesPage() {
         // swallow that message (nor escape as an unhandled rejection): the
         // listing being stale is the lesser failure.
         if (uploaded > 0 || directoryCount > 0) await refresh().catch(() => undefined);
+        // WARP-2096 — renamed-because-taken / already-on-the-box, appended to
+        // whichever message the run gets.
+        const notice = uploadNoticeMessage(renamed, duplicates);
+        const outcome = uploadOutcomeMessage(uploaded, total, cause, unread, directoriesFailed);
         const message =
-          uploadOutcomeMessage(uploaded, total, cause, unread, directoriesFailed) ??
+          (outcome !== null ? `${outcome}${notice}` : null) ??
           // Everything the drop carried landed and none of it was a file —
           // say what DID happen to the folders.
           (total === 0 ? folderOnlyOutcomeMessage(directoryCount) : null);
@@ -633,7 +694,7 @@ export default function FilesPage() {
           // the v1 contract.
           const undoSpace = space;
           toast(
-            `Uploaded ${uploaded} file${uploaded === 1 ? "" : "s"}.`,
+            `Uploaded ${uploaded} file${uploaded === 1 ? "" : "s"}.${notice}`,
             "success",
             {
               label: "Undo",
@@ -1021,9 +1082,12 @@ export default function FilesPage() {
   // Reader posture is the floor, not the whole rule. In a department/team
   // library the share bit is a `manager` right (ADR-029) and the member group
   // masks withhold it, so a contributor's loop would fail N times just as a
-  // reader's would. Personal / Household carry no `right` at all and are
-  // unrestricted. Whatever the cause, the button stays VISIBLE and disabled
-  // with the reason — never silently absent.
+  // reader's would. Personal / Workspace carry no `right` at all; a member
+  // shares them with people freely, but a PUBLIC link from any company
+  // library is owner/admin only (WARP-3053, box-enforced). Whatever the cause,
+  // the button stays VISIBLE and disabled with the reason — never silently absent.
+  const publicLinkBlockedReason =
+    space !== "personal" && !isOwnerOrAdmin ? COMPANY_PUBLIC_LINK_ADMIN_ONLY : undefined;
   const shareBlockedReason = useMemo(() => {
     const isLibrary =
       activeSpace?.kind === "department" || activeSpace?.kind === "team";
@@ -1031,11 +1095,13 @@ export default function FilesPage() {
       return isReaderSpace ? READER_TOOLBAR_TOOLTIP : LIBRARY_SHARE_MANAGER_ONLY;
     }
     if (isReaderSpace) return READER_TOOLBAR_TOOLTIP;
+    if (space === "shared" && !isOwnerOrAdmin) return WORKSPACE_SHARE_ADMIN_ONLY;
+    if (publicLinkBlockedReason && fm.selectedCount > 1) return publicLinkBlockedReason;
     if (fm.selectedCount > BULK_SHARE_LIMIT) {
       return `You can share up to ${BULK_SHARE_LIMIT} files at once — ${fm.selectedCount} are selected.`;
     }
     return undefined;
-  }, [activeSpace, isReaderSpace, fm.selectedCount]);
+  }, [activeSpace, isReaderSpace, space, isOwnerOrAdmin, publicLinkBlockedReason, fm.selectedCount]);
 
   // ── Preview (opens rich preview modal) ──
   const handlePreview = useCallback((file: FileEntryInfo) => {
@@ -1192,13 +1258,126 @@ export default function FilesPage() {
     }
   }, [fm, handlePreview, space, activeSpaceRoot, navigateTo]);
 
+  // ── Folder colors ──
+  //
+  // Personal (each user's own palette), so unlike every other write here this
+  // is NOT withheld from readers or guests — the server only asks that the
+  // folder be visible. Listing entries carry `ncFileId`, which survives
+  // rename/move, so a coloured folder keeps its colour wherever it goes.
+  const colorFor = useCallback(
+    (file: FileEntryInfo): FolderColor | undefined =>
+      file.isDirectory && file.ncFileId != null
+        ? folderColors.get(file.ncFileId)
+        : undefined,
+    [folderColors]
+  );
+
+  const handleSetFolderColor = useCallback(
+    async (targets: FileEntryInfo[], color: FolderColor | null) => {
+      try {
+        await Promise.all(
+          targets.map((f) =>
+            color
+              ? setFolderColor(toActiveSpaceRelative(f.path), color, space)
+              : clearFolderColor(toActiveSpaceRelative(f.path), space)
+          )
+        );
+      } catch (err) {
+        toast(translateError(err, "files"));
+      } finally {
+        await refreshFolderColors();
+      }
+    },
+    [toActiveSpaceRelative, space, toast, refreshFolderColors]
+  );
+
+  // ── Drag to move ──
+  //
+  // A drag carries the row's whole selection when the row is part of it, else
+  // just the row (which becomes the selection, as in Finder). The dragged paths
+  // are also kept in a ref: dragover cannot read the payload, and the drop
+  // highlight must not light up on the item itself or its own descendants.
+  // Targets are folder rows/tiles and breadcrumb crumbs; the move itself is the
+  // same bulk-move the Cut/Paste path uses.
+  const dragPathsRef = useRef<string[]>([]);
+
+  const handleItemDragStart = useCallback(
+    (file: FileEntryInfo, e: React.DragEvent) => {
+      const inSelection = fm.isSelected(file.path);
+      if (!inSelection) fm.selectOnly(file.path);
+      const paths = inSelection ? fm.selectedPaths : [file.path];
+      dragPathsRef.current = paths;
+      writeDragPaths(e.dataTransfer, paths);
+    },
+    [fm]
+  );
+  const handleItemDragEnd = useCallback(() => {
+    dragPathsRef.current = [];
+  }, []);
+
+  // HOME-relative form of a space-relative path — the shape listing entries
+  // carry, and so the shape `movablePaths` compares in.
+  const toHomeRelative = useCallback(
+    (p: string) => {
+      if (!activeSpaceRoot || activeSpaceRoot === "/") return p;
+      return p === "/" ? activeSpaceRoot : `${activeSpaceRoot}${p}`;
+    },
+    [activeSpaceRoot]
+  );
+
+  const canDropOnFolder = useCallback(
+    (targetHome: string) => movablePaths(targetHome, dragPathsRef.current).length > 0,
+    []
+  );
+
+  const moveIntoFolder = useCallback(
+    async (targetHome: string, dropped: string[]) => {
+      // Only what THIS page started dragging: a payload from another tab or
+      // window names paths in a space we can't vouch for.
+      const started = dragPathsRef.current;
+      dragPathsRef.current = [];
+      const movable = movablePaths(
+        targetHome,
+        dropped.filter((p) => started.includes(p))
+      );
+      if (movable.length === 0) return;
+      try {
+        const results = await bulkMoveFiles(
+          movable.map(toActiveSpaceRelative),
+          toActiveSpaceRelative(targetHome),
+          false,
+          space
+        );
+        const failed = results.filter((r) => !r.ok);
+        if (failed.length > 0) {
+          toast(
+            failed.length === 1 && failed[0].error
+              ? `Couldn't move ${failed[0].path.split("/").pop()}: ${failed[0].error}`
+              : `${failed.length} move(s) failed`
+          );
+        }
+        fm.clearSelection();
+      } catch (err) {
+        toast(translateError(err, "files"));
+      } finally {
+        await refresh();
+      }
+    },
+    [toActiveSpaceRelative, space, fm, refresh, toast]
+  );
+
   // ── Context menu ──
+  const [backgroundMenu, setBackgroundMenu] = useState<{ x: number; y: number } | null>(
+    null
+  );
+
   const handleRowContextMenu = useCallback(
     (file: FileEntryInfo, x: number, y: number) => {
       // If the row isn't already part of selection, make it the only selected item
       if (!fm.isSelected(file.path)) {
         fm.selectOnly(file.path);
       }
+      setBackgroundMenu(null);
       setContextMenu({ x, y, file });
     },
     [fm]
@@ -1210,7 +1389,7 @@ export default function FilesPage() {
     const selectedCount = Math.max(fm.selectedCount, 1);
     const isSingle = selectedCount === 1;
 
-    return [
+    const items: ContextMenuItem[] = [
       {
         label: file.isDirectory ? "Open" : "Preview",
         icon: contextMenuIcons.Open,
@@ -1223,68 +1402,107 @@ export default function FilesPage() {
         disabled: file.isDirectory,
         onClick: () => handleDownload(file.path),
       },
-      { separator: true },
-      {
-        // WARP-1267 — reader posture (design brief §2): rename/move/delete
-        // are visible-but-disabled inside a `reader`-right space, tooltip
-        // copy carried via the item label's title isn't available on this
-        // menu, so the disabled state alone communicates it (ContextMenu
-        // has no per-item tooltip slot; the toolbar/row equivalents do).
-        label: "Rename",
-        icon: contextMenuIcons.Rename,
-        disabled: !isSingle || isReaderSpace,
-        onClick: () => fm.beginRename(file.path),
-      },
-      {
-        label: `Cut${isSingle ? "" : ` (${selectedCount})`}`,
-        icon: contextMenuIcons.Cut,
-        disabled: isReaderSpace,
-        onClick: () => fm.cut(),
-      },
-      {
-        label: `Copy${isSingle ? "" : ` (${selectedCount})`}`,
-        icon: contextMenuIcons.Copy,
-        onClick: () => fm.copy(),
-      },
-      {
-        label: `Move to…`,
-        icon: contextMenuIcons.Cut,
-        disabled: isReaderSpace,
-        onClick: () =>
-          setMoveDialog({
-            mode: "move",
-            paths: fm.selectedCount > 0 ? fm.selectedPaths : [file.path],
-          }),
-      },
-      {
-        label: `Copy to…`,
-        icon: contextMenuIcons.Copy,
-        onClick: () =>
-          setMoveDialog({
-            mode: "copy",
-            paths: fm.selectedCount > 0 ? fm.selectedPaths : [file.path],
-          }),
-      },
-      { separator: true },
-      {
-        // WARP-1540 — no longer single-only: the loop landed, so a multi
-        // selection shares N links from here too (ticket step 4). Still
-        // disabled when the space withholds the share right, or when the
-        // selection exceeds the bulk cap — `shareBlockedReason` is the same
-        // gate the toolbar button uses.
-        //
-        // The multi label names the posture for the same reason the toolbar
-        // label does: this entry point mints public links with no
-        // intervening choice, while the single one opens the dialog.
-        label: isSingle
-          ? "Share link"
-          : `Share ${selectedCount} publicly`,
-        icon: contextMenuIcons.Share,
-        disabled: !!shareBlockedReason,
-        onClick: () =>
-          startShare(fm.selectedCount > 0 ? fm.selectedPaths : [file.path]),
-      },
-      {
+    ];
+
+    // Guests are read-only: the whole write half (rename, cut/copy, move,
+    // share, delete) is hidden rather than shown-and-disabled, like the rest
+    // of the page hides what a role can't do.
+    if (!isGuest) {
+      items.push(
+        { separator: true },
+        {
+          // WARP-1267 — reader posture (design brief §2): rename/move/delete
+          // are visible-but-disabled inside a `reader`-right space, tooltip
+          // copy carried via the item label's title isn't available on this
+          // menu, so the disabled state alone communicates it (ContextMenu
+          // has no per-item tooltip slot; the toolbar/row equivalents do).
+          label: "Rename",
+          icon: contextMenuIcons.Rename,
+          disabled: !isSingle || isReaderSpace,
+          onClick: () => fm.beginRename(file.path),
+        },
+        {
+          label: `Cut${isSingle ? "" : ` (${selectedCount})`}`,
+          icon: contextMenuIcons.Cut,
+          disabled: isReaderSpace,
+          onClick: () => fm.cut(),
+        },
+        {
+          label: `Copy${isSingle ? "" : ` (${selectedCount})`}`,
+          icon: contextMenuIcons.Copy,
+          onClick: () => fm.copy(),
+        },
+        {
+          label: `Move to…`,
+          icon: contextMenuIcons.Cut,
+          disabled: isReaderSpace,
+          onClick: () =>
+            setMoveDialog({
+              mode: "move",
+              paths: fm.selectedCount > 0 ? fm.selectedPaths : [file.path],
+            }),
+        },
+        {
+          label: `Copy to…`,
+          icon: contextMenuIcons.Copy,
+          onClick: () =>
+            setMoveDialog({
+              mode: "copy",
+              paths: fm.selectedCount > 0 ? fm.selectedPaths : [file.path],
+            }),
+        },
+        { separator: true },
+        {
+          // WARP-1540 — no longer single-only: the loop landed, so a multi
+          // selection shares N links from here too (ticket step 4). Still
+          // disabled when the space withholds the share right, or when the
+          // selection exceeds the bulk cap — `shareBlockedReason` is the same
+          // gate the toolbar button uses.
+          //
+          // The multi label names the posture for the same reason the toolbar
+          // label does: this entry point mints public links with no
+          // intervening choice, while the single one opens the dialog.
+          label: isSingle
+            ? "Share link"
+            : `Share ${selectedCount} publicly`,
+          icon: contextMenuIcons.Share,
+          disabled: !!shareBlockedReason,
+          onClick: () =>
+            startShare(fm.selectedCount > 0 ? fm.selectedPaths : [file.path]),
+        }
+      );
+    }
+
+    if (file.isDirectory) {
+      // Every selected folder takes the colour; a lone folder shows its own
+      // current colour as the checked swatch.
+      const selectedDirs = files.filter(
+        (f) => f.isDirectory && fm.isSelected(f.path)
+      );
+      const targets = selectedDirs.length > 0 ? selectedDirs : [file];
+      const current = targets.length === 1 ? colorFor(targets[0]) : undefined;
+      if (isGuest) items.push({ separator: true });
+      items.push({
+        label: "Color",
+        icon: contextMenuIcons.Color,
+        swatches: [
+          {
+            label: "No color",
+            selected: targets.length === 1 && !current,
+            onSelect: () => void handleSetFolderColor(targets, null),
+          },
+          ...FOLDER_COLORS.map((c) => ({
+            label: c.label,
+            css: c.css,
+            selected: current === c.value,
+            onSelect: () => void handleSetFolderColor(targets, c.value),
+          })),
+        ],
+      });
+    }
+
+    if (!isGuest) {
+      items.push({
         label: "Delete",
         icon: contextMenuIcons.Delete,
         destructive: true,
@@ -1296,11 +1514,14 @@ export default function FilesPage() {
             void handleDelete(file.path);
           }
         },
-      },
-    ];
+      });
+    }
+    return items;
   }, [
     contextMenu,
     fm,
+    files,
+    isGuest,
     isReaderSpace,
     handleRowOpen,
     handlePreview,
@@ -1309,7 +1530,92 @@ export default function FilesPage() {
     shareBlockedReason,
     handleDelete,
     handleBulkDelete,
+    colorFor,
+    handleSetFolderColor,
   ]);
+
+  // Right-click on the empty part of the list: New folder / Upload / Paste.
+  // Rows (and tiles) handle their own right-click and preventDefault it, so a
+  // click that reaches here already-handled is skipped. Withheld entirely when
+  // every entry would be a write the viewer can't make.
+  // A throwaway picker (not a mounted <input>): the header's UploadButton owns
+  // the page's file inputs, and this is only reachable from a menu click, which
+  // is the user gesture browsers require for `.click()` on a file input.
+  const openUploadPicker = useCallback(() => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = true;
+    input.onchange = () => {
+      if (input.files && input.files.length > 0) {
+        void handleUpload(selectionFromFileList(input.files));
+      }
+    };
+    input.click();
+  }, [handleUpload]);
+
+  const backgroundMenuItems: ContextMenuItem[] = useMemo(() => {
+    const items: ContextMenuItem[] = [
+      {
+        label: "New folder",
+        icon: contextMenuIcons.NewFolder,
+        onClick: () => setShowNewFolder(true),
+      },
+      {
+        label: "Upload files…",
+        icon: contextMenuIcons.Upload,
+        onClick: openUploadPicker,
+      },
+    ];
+    if (fm.clipboard) {
+      items.push(
+        { separator: true },
+        {
+          label: "Paste",
+          icon: contextMenuIcons.Paste,
+          onClick: () => void handlePasteClipboard(),
+        }
+      );
+    }
+    return items;
+  }, [fm.clipboard, handlePasteClipboard, openUploadPicker]);
+
+  const handleListBackgroundContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      if (e.defaultPrevented || !canModify) return;
+      e.preventDefault();
+      fm.clearSelection();
+      setContextMenu(null);
+      setBackgroundMenu({ x: e.clientX, y: e.clientY });
+    },
+    [canModify, fm]
+  );
+
+  // Props shared by FileRow and FileTile so list and grid stay one contract.
+  const itemInteractionProps = (file: FileEntryInfo) => ({
+    isSelected: fm.isSelected(file.path),
+    isRenaming: fm.renamingPath === file.path,
+    onSelect: (e: React.MouseEvent) => handleRowSelect(file, e),
+    onToggleSelect: () => fm.toggleSelection(file.path, "toggle", files),
+    onOpen: () => handleRowOpen(file),
+    onDelete: () => handleDelete(file.path),
+    onRename: (name: string) => handleRenameCommit(file, name),
+    onCancelRename: fm.endRename,
+    onContextMenu: (x: number, y: number) => handleRowContextMenu(file, x, y),
+    canWrite: canModify,
+    folderColor: colorFor(file),
+    ...(canModify
+      ? {
+          onDragStartRow: (e: React.DragEvent) => handleItemDragStart(file, e),
+          onDragEndRow: handleItemDragEnd,
+          ...(file.isDirectory
+            ? {
+                canDropOn: () => canDropOnFolder(file.path),
+                onDropItems: (paths: string[]) => void moveIntoFolder(file.path, paths),
+              }
+            : {}),
+        }
+      : {}),
+  });
 
   // ── Selection toolbar actions ──
   //
@@ -1336,7 +1642,17 @@ export default function FilesPage() {
   // by dragging.
   const filesActions = (
     <>
-      {isOwnerOrAdmin && (
+      {/* WARP-2966 — Favorites left the Files sub-nav: it is a FILTER over the
+          places in the section, not a place of its own, and a sub-nav row made
+          it look like a fourth location. The browser is where a filter belongs,
+          so the route keeps a door here rather than becoming an orphan. A link,
+          not a button — it is a different page, and the toolbar's other
+          controls act on this one. */}
+      <Link href="/files/favorites" className="btn ghost" aria-label="Favorites">
+        <Star size={14} />
+        <span className="hidden sm:inline">Favorites</span>
+      </Link>
+      {canConnectDrive && (
         <button
           onClick={() => setShowConnectDrive(true)}
           aria-label="Connect network drive"
@@ -1430,6 +1746,16 @@ export default function FilesPage() {
           WARP-1267). The switcher itself renders nothing when there's only
           one space to be in — no lone control.
 
+          WARP-2966 — `lg:hidden`. Libraries must appear exactly once per
+          viewport, and from `lg` up the sidebar's Libraries rail
+          (`components/nav/FilesLibrariesNav`) owns that choice: the addendum's
+          §2.2 supersedes this control "at every width", and two library
+          pickers on one screen read as two different questions. Below `lg`
+          the aside is `hidden lg:flex` and the rail's other mount lives
+          inside the More drawer — a modal — so deleting this outright would
+          leave the browser itself with no visible way to change library.
+          It stays as the small-screen half, and only that.
+
           WARP-1667: `relative z-30` for the same reason the search bar above
           carries `relative z-40` — ds-rise's `fill-mode: both` makes every
           `.page-inner` child a permanent stacking context, so the Spaces
@@ -1437,7 +1763,7 @@ export default function FilesPage() {
           siblings (breadcrumbs, banner, volumes, file rows) painted over it.
           z-30 and NOT z-40: a tie would go to this wrapper on DOM order and
           put the search results back underneath the pills (WARP-1139). */}
-      <div className="mb-4 relative z-30">
+      <div className="lg:hidden mb-4 relative z-30">
         <SpaceSwitcher
           spaces={spaces}
           active={space}
@@ -1461,6 +1787,15 @@ export default function FilesPage() {
             // WARP-1944 — root crumb named after the active space.
             rootLabel={breadcrumbRootLabel}
             labelForSegment={crumbLabelForSegment}
+            // Drag-to-move onto a crumb. Crumb paths are space-relative;
+            // `movablePaths` compares in the home-relative form entries carry.
+            {...(canModify
+              ? {
+                  canDropOn: (crumb: string) => canDropOnFolder(toHomeRelative(crumb)),
+                  onDropItems: (crumb: string, paths: string[]) =>
+                    void moveIntoFolder(toHomeRelative(crumb), paths),
+                }
+              : {})}
           />
         </div>
       )}
@@ -1494,10 +1829,6 @@ export default function FilesPage() {
         </div>
       )}
 
-      {/* Volumes — only on the personal root so it doesn't dominate deep
-          folder views or the shared space. */}
-      {space === "personal" && currentPath === "/" && <VolumesPanel />}
-
       {/* New folder dialog */}
       {showNewFolder && !isReaderSpace && (
         <div className="card flex items-center gap-2 mb-4" style={{ padding: 12 }}>
@@ -1510,7 +1841,7 @@ export default function FilesPage() {
               if (e.key === "Escape") setShowNewFolder(false);
             }}
             placeholder="Folder name..."
-            className="flex-1 py-2 px-3 outline-none focus:border-[var(--brand)] text-[16px] lg:text-[13.5px]"
+            className="flex-1 py-2 px-3 outline-none focus:ring-2 focus:ring-[var(--brand)] text-[16px] lg:text-[13.5px]"
             style={{
               background: "var(--surface)",
               border: "1px solid var(--border)",
@@ -1613,19 +1944,52 @@ export default function FilesPage() {
       <div className="flex flex-col lg:flex-row gap-6">
         {/* File list */}
         <div className="flex-1 min-w-0">
+            {/* Icons (grid) / List toggle — remembered per browser. */}
+            <div
+              role="group"
+              aria-label="View"
+              className="flex items-center justify-end gap-1 mb-2"
+            >
+              {(
+                [
+                  ["list", "List view", ListIcon],
+                  ["grid", "Icons view", LayoutGrid],
+                ] as const
+              ).map(([mode, label, ModeIcon]) => (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-pressed={fm.viewMode === mode}
+                  aria-label={label}
+                  title={label}
+                  onClick={() => fm.setViewMode(mode)}
+                  className="btn ghost sm"
+                  style={
+                    fm.viewMode === mode
+                      ? { background: "var(--brand-subtle)", color: "var(--brand)" }
+                      : undefined
+                  }
+                >
+                  <ModeIcon size={14} />
+                </button>
+              ))}
+            </div>
             <div
               className="card overflow-hidden min-h-[300px]"
               style={{ padding: 0 }}
+              onContextMenu={handleListBackgroundContextMenu}
             >
+              {fm.viewMode !== "grid" && (
               <div
                 className="flex items-center gap-3 px-4 py-2 type-caption-1 uppercase tracking-wider"
                 style={{ color: "var(--text-faint)", borderBottom: "1px solid var(--card-bd)" }}
               >
                 <span className="flex-1">Name</span>
-                <span className="w-20 text-right hidden sm:block">Size</span>
-                <span className="w-32 text-right hidden md:block">Modified</span>
+                <span className="w-24 text-right hidden sm:block">Size</span>
+                <span className="w-40 text-right hidden md:block">Modified</span>
                 <span className="w-16" />
               </div>
+              )}
 
               {isLoading ? (
                 <div
@@ -1648,17 +2012,21 @@ export default function FilesPage() {
                   style={{ color: "var(--text-muted)" }}
                 >
                   <p className="type-subheadline mb-1">
-                    {driveNotConnected
-                      ? "This drive isn't connected to the file browser yet"
-                      : "We couldn't load your files"}
+                    {filesUnavailable
+                      ? FILES_UNAVAILABLE_TITLE
+                      : driveNotConnected
+                        ? "This drive isn't connected to the file browser yet"
+                        : "We couldn't load your files"}
                   </p>
                   <p
                     className="type-caption-1 mb-3"
                     style={{ color: "var(--text-faint)" }}
                   >
-                    {driveNotConnected
-                      ? "Its files will show up here once it finishes connecting. Try again in a moment."
-                      : "Something interrupted the connection. Try again in a moment."}
+                    {filesUnavailable
+                      ? FILES_UNAVAILABLE_HINT
+                      : driveNotConnected
+                        ? "Its files will show up here once it finishes connecting. Try again in a moment."
+                        : "Something interrupted the connection. Try again in a moment."}
                   </p>
                   <button
                     type="button"
@@ -1679,27 +2047,33 @@ export default function FilesPage() {
                   </p>
                 </div>
               ) : (
+                fm.viewMode === "grid" ? (
+                  <div
+                    className="grid gap-1 p-3"
+                    style={{ gridTemplateColumns: "repeat(auto-fill, minmax(128px, 1fr))" }}
+                  >
+                    {files.map((file) => (
+                      <FileTile
+                        key={file.path}
+                        file={file}
+                        {...itemInteractionProps(file)}
+                      />
+                    ))}
+                  </div>
+                ) : (
                 <div className="rows">
                   {files.map((file) => (
                     <FileRow
                       key={file.path}
                       file={file}
-                      isSelected={fm.isSelected(file.path)}
-                      isRenaming={fm.renamingPath === file.path}
                       favoritedPaths={favoritedPaths}
-                      onSelect={(e) => handleRowSelect(file, e)}
-                      onToggleSelect={() => fm.toggleSelection(file.path, "toggle", files)}
-                      onOpen={() => handleRowOpen(file)}
                       onDownload={() => handleDownload(file.path)}
-                      onDelete={() => handleDelete(file.path)}
-                      onRename={(name) => handleRenameCommit(file, name)}
-                      onCancelRename={fm.endRename}
-                      onContextMenu={(x, y) => handleRowContextMenu(file, x, y)}
                       onFavoriteChanged={refreshFavorites}
-                      canWrite={!isReaderSpace}
+                      {...itemInteractionProps(file)}
                     />
                   ))}
                 </div>
+                )
               )}
             </div>
         </div>
@@ -1772,6 +2146,8 @@ export default function FilesPage() {
                   onClick={() => handleShare(selectedFile)}
                   className="btn ghost sm"
                   type="button"
+                  disabled={!!shareBlockedReason}
+                  title={shareBlockedReason}
                 >
                   <LinkIcon size={14} />
                   Share…
@@ -1820,6 +2196,7 @@ export default function FilesPage() {
           fileName={shareFile.name}
           isDirectory={shareFile.isDirectory}
           existingShares={existingShares}
+          publicLinkBlockedReason={publicLinkBlockedReason}
           onChange={() => loadExistingShares(shareFile.path)}
           onClose={() => {
             setShareFile(null);
@@ -2057,6 +2434,14 @@ export default function FilesPage() {
       )}
 
       {/* Context menu */}
+      {backgroundMenu && (
+        <ContextMenu
+          x={backgroundMenu.x}
+          y={backgroundMenu.y}
+          items={backgroundMenuItems}
+          onClose={() => setBackgroundMenu(null)}
+        />
+      )}
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x}
@@ -2066,10 +2451,11 @@ export default function FilesPage() {
         />
       )}
 
-      {/* Connect-network-drive instructions (owner/admin) */}
+      {/* Connect-network-drive instructions (owner/admin/family) */}
       <ConnectDriveDialog
         open={showConnectDrive}
         onClose={() => setShowConnectDrive(false)}
+        showSharedDrive={isOwnerOrAdmin}
       />
 
       {/* Move / Copy dialog */}

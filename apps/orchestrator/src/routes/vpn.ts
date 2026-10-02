@@ -53,21 +53,30 @@ import {
   fetchBridgeUplinkIp,
   fetchBridgeStunProbe,
 } from "../lib/vpn-home-endpoint.js";
-import { observePlacement } from "../services/overlay-placement.service.js";
+import {
+  observePlacement,
+  parsePortForward,
+} from "../services/overlay-placement.service.js";
 import {
   readNetworkSummary,
   resolveVpnLanRouting,
   type NetworkSummaryRead,
 } from "../lib/vpn-lan.js";
 import { notePeerCreated } from "../services/screen-qr.service.js";
-import { requireRole } from "../middleware/auth.js";
+import { recordAccessDenied, requireRole } from "../middleware/auth.js";
+import { OVERLAY_PEER_USER_ID } from "@droplet/auth-policy";
+import { decidePeerRevoke } from "../lib/vpn-revoke-policy.js";
 import { computeOffLanReachable } from "../lib/remote-access.js";
 import { readLivePeerState } from "../lib/vpn-live-peers.js";
 import { overlayRequiresApproval } from "../services/overlay-enroll-policy.service.js";
 import { createLogger } from "../lib/logger.js";
 import {
+  defaultOverlayRevoke,
+  revokeVpnPeer,
+  type OverlayRevokeFn,
+} from "../services/vpn-peer-revoke.service.js";
+import {
   enrollOverlayDevice,
-  revokeOverlayDeviceAtHq,
   OverlayEnrollRejectedError,
   type OverlayEnrollInput,
 } from "../services/overlay-connect.service.js";
@@ -88,6 +97,7 @@ import {
   verifyStatusPop,
 } from "../services/overlay-link.service.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
+import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
 
 const logger = createLogger("vpn-route");
 
@@ -213,6 +223,16 @@ const overlayRouter: OverlayProvisionRouter = {
 async function resolveOverlayEndpointCandidates(
   read?: NetworkSummaryRead,
 ): Promise<OverlayEndpointCandidate[]> {
+  // WARP-3018 — an operator-declared gateway forward becomes the `mapped`
+  // candidate. Read per call like everything else here; a bad value costs the
+  // candidate, never the profile.
+  const { forward, error: forwardError } = parsePortForward(config.WIREGUARD_PUBLIC_FORWARD);
+  if (forwardError) {
+    logger.warn(
+      { value: config.WIREGUARD_PUBLIC_FORWARD, reason: forwardError },
+      "overlay: WIREGUARD_PUBLIC_FORWARD ignored — expected <port> or <public-ipv4>:<port>",
+    );
+  }
   const snapshot = await observePlacement(
     {
       wanAddress: () => fetchBridgeUplinkIp(),
@@ -223,7 +243,7 @@ async function resolveOverlayEndpointCandidates(
       // only on a POSITIVE address-dependent finding, never on absence of
       // evidence. Wiring a second server is the remaining half of WARP-1758.
     },
-    { listenPort: config.WIREGUARD_LISTEN_PORT },
+    { listenPort: config.WIREGUARD_LISTEN_PORT, forward },
   );
   if (snapshot.relayRequired) {
     logger.warn(
@@ -327,10 +347,9 @@ function getUser(req: Request): { username: string; role: string } {
   };
 }
 
-function isAdmin(req: Request): boolean {
-  const role = req.user?.role;
-  return role === "owner" || role === "admin";
-}
+/** WARP-3121 — who may enroll a device into the overlay (the office LAN).
+ *  Owner, admin and member (wire role `family`); never an external `guest`. */
+const OVERLAY_ENROLL_ROLES: ReadonlySet<string> = new Set(["owner", "admin", "family"]);
 
 /** WARP-1385 — the box→HQ vouching call. Injected so the route unit-tests
  *  without the gRPC device-identity sidecar; production wires it to
@@ -350,24 +369,8 @@ function defaultOverlayEnroll(input: OverlayEnrollInput): Promise<unknown> {
   );
 }
 
-/** WARP-2061 — the box→HQ revocation call, the enroll's inverse. Same
- *  injection seam and the same PoP channel. Without it an owner revoke never
- *  reaches HQ, the device stays 'active' in the registry, and the connect
- *  tick resurrects the peer on the device's next connect request. */
-export type OverlayRevokeFn = (wgPublicKey: string) => Promise<void>;
-
-function defaultOverlayRevoke(wgPublicKey: string): Promise<void> {
-  return revokeOverlayDeviceAtHq(
-    {
-      config: {
-        hqBaseUrl: config.HQ_ISSUANCE_URL,
-        deviceId: config.DROPLET_DEVICE_ID,
-      },
-      identity: createDeviceIdentityClient(),
-    },
-    wgPublicKey,
-  );
-}
+/** WARP-2061 — the box→HQ revocation call; lives with the shared revoke path. */
+export type { OverlayRevokeFn };
 
 // WARP-1385 (Part D) — body for POST /api/vpn/overlay/devices. base64 wg key
 // (43 chars + '='); a PEM public key; a human label.
@@ -542,6 +545,8 @@ export function createVpnRouter(
       wgPublicKey: string;
       label: string;
       linkTokenId: string;
+      /** WARP-3152: the member who asked (sign-in path); null ⇒ QR / legacy row. */
+      requestedBy?: string | null;
     },
     provenance: {
       linkTokenEnrolledBy: string | null;
@@ -568,6 +573,9 @@ export function createVpnRouter(
         {
           wgPublicKey: pending.wgPublicKey,
           label: pending.label,
+          // WARP-3152: the requester owns the device, not the approver and not
+          // the synthetic `overlay` user. Undefined keeps QR/legacy rows admin-only.
+          userId: pending.requestedBy ?? undefined,
           linkTokenId: pending.linkTokenId,
           linkTokenEnrolledBy: provenance.linkTokenEnrolledBy,
           enrolledAt: provenance.enrolledAt,
@@ -590,6 +598,25 @@ export function createVpnRouter(
     }
   };
 
+  // WARP-3152 review — a sign-in enrollment waits in the review queue, and its
+  // requester may be deactivated, deleted or demoted to external guest before
+  // an owner gets to it. Approving then would hand a leaver a tunnel into the
+  // office LAN. `null` (QR / legacy row) has no requester to check.
+  const requesterStillEligible = async (
+    requestedBy: string | null | undefined,
+  ): Promise<boolean> => {
+    if (!requestedBy) return true;
+    const person = await prisma.user.findUnique({
+      where: { username: requestedBy },
+      select: { directoryStatus: true, role: true },
+    });
+    return (
+      !!person &&
+      person.directoryStatus === "ACTIVE" &&
+      OVERLAY_ENROLL_ROLES.has(person.role)
+    );
+  };
+
   // ── POST /api/vpn/overlay/devices ──
   // WARP-1385 (ADR-030) — enroll an owner device into the direct-punch overlay.
   // Owner/admin only: the box signs a grant over the client's key material and
@@ -610,9 +637,15 @@ export function createVpnRouter(
   // resolvers. That is the "two halves never joined" shape the epic already
   // hit once, sitting in the path that should have been the primary one.
   //
-  // Not owner/admin-gated. A family member enrolling THEIR OWN device is the
-  // ordinary case, and the peer is scoped to them — which is what makes it
-  // show up in their own device list and be revocable without an admin.
+  // Not owner/admin-gated. A member (role `family`) enrolling THEIR OWN device
+  // is the ordinary case, and the peer is scoped to them — which is what makes
+  // it show up in their own device list and be revocable without an admin
+  // (DELETE /vpn/peers/:id, WARP-3121).
+  //
+  // WARP-3121 — but it IS gated to the company's own people. The profile this
+  // returns routes the office LAN, so an external `guest` (or any role this
+  // route doesn't know) must never get one. Allow-list, not deny-list: a role
+  // added later stays locked out until someone decides otherwise here.
   //
   // Idempotent on the device's WireGuard public key: calling it again refreshes
   // and returns the same profile. That is deliberate and it is why there is no
@@ -623,6 +656,23 @@ export function createVpnRouter(
     "/vpn/overlay/devices",
     async (req: Request, res: Response, next: NextFunction) => {
       try {
+        const role = req.user?.role;
+        if (!role || !OVERLAY_ENROLL_ROLES.has(role)) {
+          recordAccessDenied(req, role ? "role-not-permitted" : "no-role");
+          audit({
+            event: "overlay_enroll_refused",
+            method: req.method,
+            route: "/vpn/overlay/devices",
+            status: 403,
+            clientId: req.user?.id ?? `ip:${req.ip ?? "unknown"}`,
+            refs: { role: role ?? null },
+          });
+          return res.status(403).json({
+            code: "REMOTE_ACCESS_NOT_PERMITTED",
+            error:
+              "Remote access is for people in this company. Ask an owner or admin if you need it.",
+          });
+        }
         const parsed = overlayEnrollSchema.safeParse(req.body);
         if (!parsed.success) {
           return res.status(400).json({
@@ -658,7 +708,7 @@ export function createVpnRouter(
         const clash = await prisma.vpnPeer.findFirst({
           where: { publicKey: parsed.data.wg_public_key, status: "active" },
         });
-        if (clash && clash.userId !== owner && clash.userId !== "overlay") {
+        if (clash && clash.userId !== owner && clash.userId !== OVERLAY_PEER_USER_ID) {
           return res.status(409).json({
             error: "wg_key_conflict",
             message:
@@ -697,6 +747,9 @@ export function createVpnRouter(
                 label: parsed.data.label,
                 presentedAt: now(),
                 state: "pending",
+                // WARP-3152: carried to the peer at approval so the device is
+                // the member's own, not the synthetic `overlay` user's.
+                requestedBy: owner,
               },
             }));
           audit({
@@ -1285,6 +1338,8 @@ export function createVpnRouter(
             presented_at: r.presentedAt,
             state: r.state,
             conflict: r.conflict,
+            // WARP-3152: who asked (sign-in path); null for a QR-linked device.
+            requested_by: r.requestedBy ?? null,
           })),
         );
       } catch (err) {
@@ -1306,6 +1361,31 @@ export function createVpnRouter(
         });
         if (!pending) {
           return res.status(404).json({ error: "not_found" });
+        }
+        if (!(await requesterStillEligible(pending.requestedBy))) {
+          // Deny a still-pending row so the queue stops offering it; an
+          // already-approved row is left as is and simply not re-provisioned
+          // (the leaver sweep has revoked or will revoke its peer).
+          const denied =
+            pending.state === "pending"
+              ? await prisma.pendingOverlayEnrollment.updateMany({
+                  where: { id: pending.id, state: "pending" },
+                  data: { state: "denied" },
+                })
+              : { count: 0 };
+          audit({
+            event: "overlay_enroll_requester_ineligible",
+            method: req.method,
+            route: ROUTE_APPROVE,
+            status: 409,
+            clientId,
+            refs: { pending_id: pending.id, requested_by: pending.requestedBy, denied: denied.count > 0 },
+          });
+          return res.status(409).json({
+            error: "requester_not_active",
+            message:
+              "The person who asked for this device is no longer an active member of this company, so it can't be approved.",
+          });
         }
         if (pending.state === "approved") {
           // Idempotent re-approve — return the recorded HQ device ref.
@@ -1680,7 +1760,17 @@ export function createVpnRouter(
   // exposed broadly. Family users still get `endpointConfigured: boolean`
   // so the "Add device" button can light up at the right time without
   // leaking the hostname itself.
-  router.get("/vpn/status", async (req: Request, res: Response, next: NextFunction) => {
+  //
+  // WARP-3156: external guests are refused (they have no remote access — they
+  // can't enroll or mint — and the answer is reconnaissance about the company
+  // network: the LAN address and how many staff devices tunnel in). Every web
+  // and iOS surface a guest can reach treats a failed status read as "no
+  // signal". Members see only their OWN device count; the box-wide live count
+  // is owner/admin.
+  router.get(
+    "/vpn/status",
+    requireRole("owner", "admin", "family"),
+    async (req: Request, res: Response, next: NextFunction) => {
     try {
       const status = await vpnStatus();
       // Resolve the operator-set endpoint host. Same helper used in
@@ -1688,7 +1778,8 @@ export function createVpnRouter(
       // the moment WIREGUARD_ENDPOINT_HOST is configured.
       const endpointHost = await resolveEndpointHost();
       const endpointConfigured = endpointHost !== "";
-      const exposeEndpointHost = isAdmin(req);
+      const admin = isOwnerOrAdmin(req);
+      const exposeEndpointHost = admin;
       // ADR-023 (C4): the publicly-trusted per-device FQDN. Unlike endpointHost
       // (which can leak the box's public reachability), the FQDN is already
       // published to Certificate Transparency for everyone — it carries no PII
@@ -1704,9 +1795,10 @@ export function createVpnRouter(
       // Hybrid P1: the box's home-facing LAN IP a HOME-mode peer dials directly.
       // Discovered dynamically (DHCP — never hardcoded); null when it can't be
       // discovered and no fallback is set. Unlike endpointHost this is a private
-      // LAN address that every household member on the home network already
-      // sees, so it is not admin-gated. `.local`-style leakage isn't a concern
-      // (it's an IP the client needs to build a home-mode conf).
+      // LAN address every employee on the office network already sees, so it
+      // is not admin-gated among members; external guests never reach this
+      // handler (WARP-3156). The web widget and iOS gate the home-mode toggle
+      // on it.
       const homeEndpointHost = await resolveHomeEndpointHost();
       if (!status) {
         return res.json({
@@ -1728,7 +1820,11 @@ export function createVpnRouter(
         listenPort: status.listen_port,
         serverPublicKey: status.public_key,
         addresses: status.addresses,
-        peerCount: status.peer_count,
+        peerCount: admin
+          ? status.peer_count
+          : await prisma.vpnPeer.count({
+              where: { userId: getUser(req).username, status: "active" },
+            }),
         // WARP-2689 — kernel truth beside the uci intent. `configured: true`
         // above only says the router HOLDS a wg0 section; on a router flashed
         // without WireGuard (every field RB5009 before edge 4aa8a39) that
@@ -1737,7 +1833,7 @@ export function createVpnRouter(
         // dashboard must act on (no conf minted here can handshake); `null`
         // means the router could not say and changes nothing.
         interfaceLive: status.interface_live ?? null,
-        livePeerCount: status.live_peer_count ?? null,
+        livePeerCount: admin ? (status.live_peer_count ?? null) : null,
       });
     } catch (err) {
       // WARP-1283: every other input to this handler already degrades to null,
@@ -1761,7 +1857,8 @@ export function createVpnRouter(
       }
       next(err);
     }
-  });
+    },
+  );
 
   // ── GET /api/vpn/peers ──
   // Lists peers visible to the caller. Family users see their own; admins
@@ -1802,7 +1899,7 @@ export function createVpnRouter(
       const isMcpService =
         req.user?.id === "_service:mcp" && req.user.role === "service";
       const where =
-        isAdmin(req) || isMcpService ? {} : { userId: user.username };
+        isOwnerOrAdmin(req) || isMcpService ? {} : { userId: user.username };
       const peers = await prisma.vpnPeer.findMany({
         where,
         orderBy: { createdAt: "desc" },
@@ -2041,116 +2138,99 @@ export function createVpnRouter(
   // the row (status="revoked", revokedAt set) so the dashboard can show a
   // brief "removed just now" state and so we have an audit trail.
   //
-  // WARP-171: per-route guard. owner + admin only — matches the
-  // matrix in ADR-004 §3. This is a behavior change from
-  // pre-WARP-171: previously a family-tier user could delete their
-  // OWN peer (peer.userId === user.username escape hatch). Now they
-  // must ask an admin. The intent is consistency with POST: if a
-  // family user can't mint a peer self-service, they shouldn't be
-  // able to revoke one self-service either.
+  // Who may revoke — lib/vpn-revoke-policy.ts is the rule (also driven by the
+  // RBAC matrix):
+  //   • owner/admin — any peer (WARP-171, ADR-004 §3).
+  //   • member / guest — only an OVERLAY device they enrolled themselves
+  //     (WARP-3121). Signing in is the enrollment (WARP-1882), so signing out
+  //     of — or losing — that device has to be undoable by the same person;
+  //     otherwise a forgotten or stolen laptop keeps a route into the office
+  //     LAN until an admin happens to notice. "Themselves" is the row's
+  //     `userId`, which the sign-in enroll stamps with the caller's username
+  //     (and which GET /vpn/peers already uses to scope a member's list).
+  //     Static peers stay admin-only: a member can't mint one, so they don't
+  //     revoke one either (WARP-171's original reasoning still holds there).
   router.delete(
     "/vpn/peers/:id",
-    requireRole("owner", "admin"),
     async (req: Request, res: Response, next: NextFunction) => {
     try {
       const id = req.params.id;
+      const clientId = req.user?.id ?? "unknown";
+      // Parity with the requireRole guard this route used to have: a caller
+      // who could not revoke even a device of their OWN (no session, a service
+      // principal, an unknown role) is refused before the row is looked up.
+      const couldOwnAny = decidePeerRevoke(req.user, {
+        kind: "overlay",
+        userId: req.user?.username ?? "",
+      });
+      if (couldOwnAny === "no-role" || couldOwnAny === "not-yours") {
+        recordAccessDenied(req, couldOwnAny === "no-role" ? "no-role" : "role-not-permitted");
+        return res.status(403).json({
+          error:
+            couldOwnAny === "no-role"
+              ? "Forbidden: no role on session"
+              : "Forbidden: role not permitted",
+        });
+      }
       const peer = await prisma.vpnPeer.findUnique({ where: { id } });
       if (!peer) {
         return res.status(404).json({ error: "Peer not found" });
       }
-      // WARP-171: per-resource ownership check used to live here
-      // (`peer.userId !== user.username && !isAdmin(req)` returning 403).
-      // After requireRole("owner", "admin") was added at the route guard
-      // above, the branch became unreachable: family-tier callers never
-      // pass the guard, and owner/admin always do. Removing the dead code
-      // so future readers don't think family users can still hit this
-      // handler. Behavior is unchanged — see the comment above the route
-      // for the WARP-171 family-tier deletion semantics.
+      const decision = decidePeerRevoke(req.user, peer);
+      const admin = decision === "admin";
+      if (decision !== "admin" && decision !== "own") {
+        recordAccessDenied(req, "not-own-device");
+        audit({
+          event: "overlay_revoke_refused",
+          method: req.method,
+          route: "/vpn/peers/:id",
+          status: 403,
+          clientId,
+          refs: { peer_id: id },
+        });
+        return res.status(403).json({
+          code: "NOT_YOUR_DEVICE",
+          error: "You can only remove your own devices. Ask an owner or admin to remove this one.",
+        });
+      }
       if (peer.status === "revoked") {
         // Already gone in our world; treat as idempotent success.
         return res.json({ status: "revoked", id });
       }
 
-      // WARP-2061 — for a QR-enrolled overlay device, revoke at HQ FIRST.
-      // A local-only revoke silently un-revokes itself: the device stays
-      // 'active' in HQ's registry, its next connect request passes HQ's
-      // client-PoP gate, and the box's own connect tick (on by default since
-      // WARP-1767) receives the offer and reinstalls the peer — the owner
-      // revoked a stolen phone and it is back inside the LAN within one poll
-      // tick of trying. HQ's revoke is idempotent and also expires the
-      // client's in-flight sessions, so this ordering leaves no window where
-      // an already-brokered session lands after the local peer is gone. If HQ
-      // is unreachable, fail the whole revoke honestly — nothing has changed,
-      // the retry is safe, and the alternative (revoked-looking row that
-      // quietly reactivates later) is this exact bug.
-      if (peer.kind === "overlay") {
-        try {
-          await overlayRevoke(peer.publicKey);
-        } catch (err) {
-          logger.error(
-            { err, peerId: id, publicKey: peer.publicKey },
-            "vpn: HQ overlay revoke failed — device left enrolled; nothing revoked locally either",
-          );
-          return res.status(502).json({
-            code: "HQ_REVOKE_FAILED",
-            error:
-              "Couldn't reach the fleet directory to revoke this device. Nothing was changed — try again in a moment.",
-            id,
-          });
-        }
+      // WARP-2061 / WARP-3160 — HQ first for an overlay peer, then the
+      // router, then a conditional row flip; shared with the sweep that runs
+      // when a person is deactivated. Any failure leaves the row active so the
+      // retry stays visible.
+      const outcome = await revokeVpnPeer({ prisma, overlayRevoke }, peer);
+      if (outcome !== "revoked") {
+        audit({
+          event: "overlay_revoke_failed",
+          method: req.method,
+          route: "/vpn/peers/:id",
+          status: 502,
+          clientId,
+          refs: { peer_id: id, outcome, device_owner: peer.userId },
+        });
+        return res.status(502).json({
+          code: outcome,
+          error:
+            outcome === "HQ_REVOKE_FAILED"
+              ? "Couldn't reach the fleet directory to revoke this device. Nothing was changed — try again in a moment."
+              : "We removed this device from the router's configuration, but the change didn't take effect — the device is still connected. Try revoking it again in a moment.",
+          id,
+        });
       }
 
-      // Delete on the router first. If that fails we leave the DB row
-      // intact so the user can retry. If it returns 404 (peer already gone
-      // on the router side) we still mark our row revoked.
-      try {
-        const removal = await deleteVpnPeer({ publicKey: peer.publicKey });
-        // A 200 from routing is not proof the tunnel is down. On `uci.apply`
-        // failure it answers `status: "staged" / applied: false` — the peer is
-        // out of the config but STILL LIVE on wg0 until a reload. Marking the
-        // row revoked here would tell an owner revoking a stolen phone that
-        // the device is cut off while it still holds a route into the LAN, and
-        // would then HIDE the retry (the row renders "· revoked" and the trash
-        // button disappears). So: leave the row active, and say so.
-        if (!isRevokeApplied(removal)) {
-          logger.error(
-            { peerId: id, publicKey: peer.publicKey, removed: removal.removed },
-            "vpn: router staged the peer removal but never applied it — peer is still live on the interface; row left active",
-          );
-          return res.status(502).json({
-            code: "REVOKE_STAGED",
-            error:
-              "We removed this device from the router's configuration, but the change didn't take effect — the device is still connected. Try revoking it again in a moment.",
-            id,
-          });
-        }
-      } catch (err) {
-        if (!(err instanceof RouterError && err.status === 404)) {
-          throw err;
-        }
-        logger.warn(
-          { peerId: id, publicKey: peer.publicKey },
-          "vpn: peer already gone on router — marking row revoked anyway",
-        );
-      }
-
-      // Conditional write, not a blind `update` keyed on id alone. The read
-      // above, this check and this write are three statements, and the router
-      // call between them is the long pole — plenty of room for a concurrent
-      // writer to flip the row. Re-asserting `status: "active"` in the WHERE
-      // makes the transition atomic; `count === 0` means somebody else already
-      // revoked it, which is the same terminal state the caller asked for, so
-      // it stays a success and we do NOT re-stamp their `revokedAt`.
-      const { count } = await prisma.vpnPeer.updateMany({
-        where: { id, status: "active" },
-        data: { status: "revoked", revokedAt: new Date() },
+      // WARP-3121 — every revoke leaves a signed trace naming who did it.
+      audit({
+        event: admin ? "overlay_revoke" : "overlay_revoke_own",
+        method: req.method,
+        route: "/vpn/peers/:id",
+        status: 200,
+        clientId,
+        refs: { peer_id: id, kind: peer.kind, device_owner: peer.userId, label: peer.deviceLabel },
       });
-      if (count === 0) {
-        logger.warn(
-          { peerId: id },
-          "vpn: peer left active status concurrently during revoke — treating as already revoked",
-        );
-      }
 
       res.json({ status: "revoked", id });
     } catch (err) {

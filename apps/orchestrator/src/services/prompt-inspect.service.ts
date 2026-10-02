@@ -36,6 +36,7 @@ import type { PrismaClient } from "@prisma/client";
 import {
   buildBaseSystemPrompt,
   buildMemoryFactsBlock,
+  todayLine,
 } from "./system-prompt.service.js";
 import { loadIdentityPrompt, IDENTITY_MAX_CHARS } from "./identity-prompt.js";
 import { composeToolGuidance } from "./tool-guidance.service.js";
@@ -47,7 +48,10 @@ import {
 } from "./business-profile.service.js";
 import { buildBrainBlock, BRAIN_BLOCK_CHAR_BUDGET } from "./brain/brain-block.service.js";
 import { INTERVIEW_CONDUCTOR_BLOCK } from "./business-onboarding.service.js";
-import { OFF_LAN_WITHHELD_NOTICE } from "./stored-content-egress.service.js";
+import {
+  OFF_LAN_WITHHELD_NOTICE,
+  withholdPromptBlocksForOffLan,
+} from "./stored-content-egress.service.js";
 import { CONTEXT_PIN_BLOCK_MAX_CHARS } from "./context-pin-prompt.js";
 import { MEMORY_FACTS_CHAR_BUDGET } from "./tool-budget.service.js";
 import {
@@ -55,6 +59,7 @@ import {
   BUSINESS_CONTEXT_MAX_CHARS,
   TOOL_GUIDANCE_MAX_CHARS,
   INTERVIEW_PROMPT_MAX_CHARS,
+  DATE_LINE_MAX_CHARS,
 } from "./prompt-budget.consts.js";
 import {
   resolveAttributedToolAccess,
@@ -74,7 +79,9 @@ export type PromptBlockStatus =
   /** Present, but the budget gate would drop it on this turn. */
   | "dropped"
   /** Real, and outside what this inspector can reconstruct — see `note`. */
-  | "not_modelled";
+  | "not_modelled"
+  /** WARP-2746 — composed, but never sent on a cloud-model turn. */
+  | "withheld_off_lan";
 
 export interface PromptBlockView {
   /** Stable machine key. The UI's grouping and the tests both key on this. */
@@ -135,6 +142,15 @@ export interface PromptInspectInput {
    * `buildBaseSystemPrompt`'s own contract for the parameter.
    */
   allowedToolNames?: string[];
+  /**
+   * WARP-3116 — tools the modelled turn's pool drops whatever
+   * `allowedToolNames` says: the navigation tools on a turn with no dashboard
+   * page list. The real turn hands this (`navigationWithheld`) to BOTH of its
+   * guidance sites, because `allowedToolNames` cannot carry it for the owner,
+   * whose `undefined` means "the default scope". Same here, or the inspector
+   * would show guidance naming a tool the turn does not carry (WARP-642).
+   */
+  withheldToolNames?: ReadonlySet<string>;
   /** Model an interview turn. */
   interview?: boolean;
   /** Model an off-LAN turn. */
@@ -231,6 +247,9 @@ export async function inspectPromptForPerson(
     false,
     async () => composePersonaBlock(await getPersona(prisma)),
   );
+  // WARP-3281 — the business's zone for the date line, read off the same row
+  // the route reads it from.
+  let workspaceTz: string | null = null;
   const business = await compose(
     "business",
     "About this business",
@@ -240,6 +259,7 @@ export async function inspectPromptForPerson(
       // The route's own gate, in the route's own order: a HOME box composes
       // nothing, and a missing singleton reads as BUSINESS (WARP-1341).
       const workspace = await prisma.workspace.findUnique({ where: { id: 1 } });
+      workspaceTz = workspace?.tz ?? null;
       const workspaceType = (workspace?.type ?? "BUSINESS") as WorkspaceTypeName;
       if (workspaceType !== "BUSINESS") return "";
       return composeBusinessBlock(role, await getBusinessProfile(prisma), workspaceType);
@@ -250,7 +270,17 @@ export async function inspectPromptForPerson(
     "How to use its tools",
     TOOL_GUIDANCE_MAX_CHARS,
     true,
-    () => composeToolGuidance(input.allowedToolNames),
+    () => composeToolGuidance(input.allowedToolNames, input.withheldToolNames),
+  );
+  // WARP-3281 — the date line, as its own block so the admin view accounts
+  // for it. After `business`, which reads the zone off the Workspace row. The
+  // route's off-LAN rule: a cloud turn carries the day without the zone.
+  const date = await compose(
+    "date",
+    "Today's date",
+    DATE_LINE_MAX_CHARS,
+    true,
+    () => todayLine(new Date(), workspaceTz, { withZone: !offLan }),
   );
   const memory = await compose(
     "memory",
@@ -300,11 +330,25 @@ export async function inspectPromptForPerson(
       "their own system message. This view is per person, so it does not show them.",
   };
 
+  // WARP-2746 — the route's off-LAN filter, not a copy of it: the same
+  // function decides, so this page cannot show a block the turn withholds.
+  const gate = withholdPromptBlocksForOffLan(
+    { memory: memory.text ?? "", brain: brain.text ?? "", business: business.text ?? "" },
+    offLan,
+  );
+  for (const view of [memory, brain, business]) {
+    if (!gate.withheld.includes(view.key as "memory" | "brain" | "business")) continue;
+    view.status = "withheld_off_lan";
+    view.text = null;
+    view.note = "Not sent on a cloud-model turn: stored content stays on the Droplet.";
+  }
+
   const blocks = [
     identity,
     persona,
     business,
     toolGuidance,
+    date,
     memory,
     brain,
     interviewBlock,
@@ -321,6 +365,8 @@ export async function inspectPromptForPerson(
       input.allowedToolNames,
       persona.text ?? "",
       business.text ?? "",
+      date.text ?? "",
+      input.withheldToolNames,
     ) +
     (memory.text ?? "") +
     (brain.text ?? "") +

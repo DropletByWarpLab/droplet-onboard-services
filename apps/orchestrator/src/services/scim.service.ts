@@ -41,6 +41,7 @@ import type { DirectoryRole } from "./scim-role-mapping.service.js";
 import type { ParsedScimUser } from "./scim-resource.js";
 import type { Role } from "./jwt.service.js";
 import {
+  ADMIN_TIER_ROLES,
   assertDisableAllowed,
   assertDisableInvariantsTx,
   assertRoleChangeAllowed,
@@ -54,6 +55,7 @@ import {
   type GuardActor,
 } from "./role-mutation-guard.service.js";
 import { createLogger } from "../lib/logger.js";
+import { isUserIdShaped } from "@droplet/auth-policy";
 
 const logger = createLogger("scim-service");
 
@@ -93,11 +95,13 @@ const SCIM_AUDIT_ACTOR = `scim:${OKTA_PROVIDER}`;
 const SCIM_RANK_MESSAGE =
   "SCIM cannot assign a role above the directory-sync ceiling";
 
-/** Local-part of an email, sanitized into a username seed (mirrors sso.ts). */
+/** Local-part of an email, sanitized into a username seed (mirrors sso.ts).
+ *  WARP-2911: never the shape of a `User.id` — notifications refuse a
+ *  UUID-shaped recipient, so such a username would be refused every one. */
 function usernameSeedFromEmail(email: string): string {
   const local = email.split("@")[0] ?? email;
   const cleaned = local.replace(/[^a-zA-Z0-9._-]/g, "").slice(0, 48);
-  return cleaned.length >= 2 ? cleaned : `scim-${cleaned}`;
+  return cleaned.length >= 2 && !isUserIdShaped(cleaned) ? cleaned : `scim-${cleaned}`;
 }
 
 export interface ProvisionUserResult {
@@ -125,6 +129,17 @@ export async function provisionUser(
   // WARP-233: blind-index lookup (email at rest is a dcv1 ciphertext).
   const existing = await findUserByEmail(prisma, parsed.email);
   if (existing) {
+    // WARP-3193 SEC-AUTH-1 — refused BEFORE any write (same ordering contract
+    // as below): the Okta link is what routes/sso.ts signs in by, so binding
+    // a new subject to an operator row hands that account to whoever holds
+    // the Okta identity named in `externalId`. An operator already linked to
+    // this exact subject (an Okta retry) is not a new binding and converges.
+    if (isOperatorTier(existing.role)) {
+      const link = await prisma.ssoIdentity.findUnique({
+        where: { provider_subject: { provider: OKTA_PROVIDER, subject: parsed.externalId ?? existing.id } },
+      });
+      if (link?.userId !== existing.id) throw operatorAccountRefusal();
+    }
     // WARP-2550 — an email-matched POST is a full replace in everything but
     // the verb: it carries `active`, so it MUST flip active-state through the
     // one guarded funnel, exactly like `replaceUser` (PUT). Until this it did
@@ -165,6 +180,8 @@ export async function provisionUser(
       ...emailWriteData(parsed.email),
       role: "family", // least privilege; provisionGroup raises it
       isLocal: true,
+      // WARP-2858: explicit origin — the box never sets a local password on it.
+      provisionSource: "SCIM",
       directoryStatus: targetStatus,
       // No passwordHash — SCIM-provisioned users authenticate via Okta SSO
       // only; /auth/login fails closed on a null hash.
@@ -261,18 +278,59 @@ export async function deactivateUser(prisma: PrismaClient, id: string): Promise<
     targetUserId: existing.id,
     username: existing.username,
     actor: { type: "system", id: null },
+    devices: { prisma, username: existing.username },
   });
   return updated;
 }
 
 /** Re-activate a soft-deactivated user (active:true on a DEACTIVATED row).
- *  Deliberately rail-free (WARP-2016): a reactivate removes no operator
- *  capacity, and the sole DEACTIVATED admin must always be able to come
- *  back — a rail here would be a second lockout, not a safeguard. */
+ *  An already-ACTIVE row is an idempotent no-op (Okta PUTs active:true on
+ *  every sync).
+ *
+ *  WARP-3193 SEC-AUTH-1 — a DEACTIVATED owner/admin is refused: that state
+ *  is a local operator decision, and SCIM must not undo it. This is no
+ *  lockout (the WARP-2016 worry): the owner is disable-immutable and rail 5
+ *  always leaves one ACTIVE operator, who re-enables from the dashboard.
+ *  The write pins role + status so a promotion landing in the window is a
+ *  0-row miss (CONCURRENT_MUTATION), not a stale decision. */
 export async function reactivateUser(prisma: PrismaClient, id: string): Promise<User | null> {
   const existing = await prisma.user.findUnique({ where: { id } });
   if (!existing) return null;
-  return prisma.user.update({ where: { id }, data: { directoryStatus: "ACTIVE" } });
+  if (existing.directoryStatus === "ACTIVE") return existing;
+  if (isOperatorTier(existing.role)) throw operatorAccountRefusal();
+  // WARP-3113: pinned to NONE, as the dashboard enable is. A person
+  // scheduled for deletion (PENDING, or PURGING under the nightly job) is
+  // not brought back by the IdP; an admin cancels the deletion first.
+  // Also pinned to role + directoryStatus (WARP-3193), so a concurrent
+  // promotion or disable is a miss, not a silent overwrite.
+  const reactivated = await prisma.user.updateMany({
+    where: {
+      id,
+      role: existing.role,
+      directoryStatus: existing.directoryStatus,
+      deletionStatus: "NONE",
+    },
+    data: { directoryStatus: "ACTIVE" },
+  });
+  if (reactivated.count === 0) {
+    throw existing.deletionStatus === "NONE"
+      ? RoleMutationRefusedError.concurrentMutation()
+      : RoleMutationRefusedError.deletionPending();
+  }
+  return prisma.user.findUnique({ where: { id } });
+}
+
+/** WARP-3193 SEC-AUTH-1 — operator rows are outside SCIM's reach for
+ *  identity binding and reactivation. Rail 3's code: the ceiling is admin,
+ *  and SCIM may not act on a row at or above it. */
+function isOperatorTier(role: string): boolean {
+  return (ADMIN_TIER_ROLES as readonly string[]).includes(role);
+}
+
+function operatorAccountRefusal(): RoleMutationRefusedError {
+  return RoleMutationRefusedError.rankExceeded(
+    "SCIM cannot bind identities to, or reactivate, operator accounts",
+  );
 }
 
 /** Apply a SCIM PATCH/PUT `active` change by id (true → ACTIVE, false →

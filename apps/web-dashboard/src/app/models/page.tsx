@@ -55,6 +55,7 @@ import { Badge } from "@/components/shell/primitives";
 import { useModelsPage } from "@/lib/hooks/useModelsPage";
 import { useModelsCatalog } from "@/lib/hooks/useModelsCatalog";
 import { useModelPull } from "@/lib/hooks/useModelPull";
+import { useRefreshLlmModels } from "@/lib/hooks/useModels";
 import { useAuth } from "@/lib/auth";
 import { isAdminRole } from "@/lib/access";
 import { KpiStrip } from "@/components/models/KpiStrip";
@@ -62,11 +63,55 @@ import { LocalModelCard } from "@/components/models/LocalModelCard";
 import { ActiveModelPicker } from "@/components/models/ActiveModelPicker";
 import { CatalogModelCard } from "@/components/models/CatalogModelCard";
 import { CloudSection } from "@/components/models/CloudSection";
+import type { ModelsCatalogPayload } from "@/lib/types";
 
 // Honesty-contract copy — local-first framing. Owners/admins can change the
 // active local model here (WARP-1112); members see it read-only.
 const SUB =
   "The AI models your Droplet uses. Local inference runs on the box; cloud models are opt-in and off by default.";
+
+/**
+ * WARP-3048 — why "Available to install" has nothing to offer, as one
+ * honest line; null while there are cards to show or nothing is known yet.
+ *
+ * The section used to render NOTHING whenever it was empty, so a box whose
+ * GPU memory read as 0 GB — or whose catalog was unreachable — looked
+ * exactly like a box with no way to add a model, and said nothing. The
+ * optional flags are absent on an older orchestrator; each check below
+ * only fires on an explicit value.
+ */
+function catalogNote(
+  data: ModelsCatalogPayload | undefined,
+  error: Error | undefined,
+): string | null {
+  if (!data) {
+    return error
+      ? "Couldn’t read the model catalog from your Droplet, so no downloads are offered right now. This page keeps checking."
+      : null;
+  }
+  if (data.tags_unreachable === true) {
+    return "Couldn’t check which models are already on this Droplet, so downloads are paused until it can. This page keeps checking.";
+  }
+  const models = data.models ?? [];
+  if (models.some((m) => !m.pulled)) return null;
+  if (models.length > 0) {
+    return "Everything this Droplet can run is already installed.";
+  }
+  if (data.degraded_manifest === true) {
+    return "Couldn’t read this Droplet’s list of supported models, so no downloads are offered right now.";
+  }
+  // `null` is "couldn't size this box". A `0` is a real measurement only when
+  // the orchestrator also says where it came from (`vram_source`, C1); with
+  // no source (absent on an older orchestrator, or `null` from a failed read)
+  // 0 is the iGPU carve-out mis-read and means unknown too.
+  const vram = data.detected_vram_gb;
+  if (vram == null || (vram === 0 && data.vram_source == null)) {
+    return "Couldn’t measure this Droplet’s GPU memory, so no downloads are offered.";
+  }
+  // A GPU-less / APU / Jetson box is sized from memory it shares with the OS.
+  const memory = data.vram_source === "unified_memory" ? "memory" : "GPU memory";
+  return `None of the models Droplet offers fit this Droplet’s ${vram} GB of ${memory}.`;
+}
 
 /** Owner/admin can change the active model; everyone else sees it read-only.
  *  Mirrors the orchestrator's requireRole("owner","admin") on the write. */
@@ -75,6 +120,9 @@ export default function ModelsPage() {
   const catalog = useModelsCatalog();
   const { user } = useAuth();
   const canManage = isAdminRole(user?.role);
+  // WARP-3048 — /chat and Home read `/api/llm/models`, not this page's
+  // payload; refill that cache too whenever the answer changes here.
+  const refreshLlmModels = useRefreshLlmModels();
 
   // WARP-1827 — one download at a time; a finished pull refreshes BOTH
   // payloads so the model moves from "Available to install" to the local list.
@@ -87,6 +135,7 @@ export default function ModelsPage() {
   } = useModelPull(() => {
     void refresh();
     void catalog.refresh();
+    void refreshLlmModels();
   });
 
   const icon = <Cpu size={15} />;
@@ -156,11 +205,13 @@ export default function ModelsPage() {
   // model-degraded note: never render "no local models" for an outage.
   const degraded = data.degraded === true;
 
-  // WARP-1827 — the eligible catalog minus what's already installed. The
-  // section is an enhancement: while the catalog is loading/unreachable, or
-  // when every eligible model is pulled, it renders NOTHING (no empty shell —
-  // the page's own degraded state already tells the AI-service-down story).
+  // WARP-1827 — the eligible catalog minus what's already installed.
+  // WARP-3048 — whenever there is a note, it REPLACES the cards: that is how
+  // nothing says why it can't be installed, and how `tags_unreachable` (where
+  // `pulled` is a guess, so a card could re-download the serving model)
+  // offers no card at all.
   const installable = (catalog.data?.models ?? []).filter((m) => !m.pulled);
+  const installNote = catalogNote(catalog.data, catalog.error);
 
   // WARP-1827 — placement banner: ONE line for the whole page, and only on an
   // EXPLICIT "cpu"/"partial" report. A missing placement (older orchestrator,
@@ -233,6 +284,7 @@ export default function ModelsPage() {
             canManage={canManage}
             onChanged={() => {
               void refresh();
+              void refreshLlmModels();
             }}
           />
         )}
@@ -307,40 +359,55 @@ export default function ModelsPage() {
         </section>
 
         {/* WARP-1827 — "Available to install": the eligible catalog minus
-            what's already on the box. Renders NOTHING when there's nothing
-            installable — no empty shell. */}
-        {installable.length > 0 && (
-          <section aria-labelledby="models-catalog-heading">
+            what's already on the box. WARP-3048 — when that is empty, one
+            honest line says why; nothing renders only while the catalog
+            has not answered yet. */}
+        {(installable.length > 0 || installNote) && (
+          <section id="models-catalog" aria-labelledby="models-catalog-heading">
             <div className="sect">
               <h2 id="models-catalog-heading">Available to install</h2>
-              <span className="sx">Ready for this Droplet’s hardware</span>
+              {!installNote && (
+                <span className="sx">Ready for this Droplet’s hardware</span>
+              )}
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {installable.map((entry) => (
-                <CatalogModelCard
-                  key={entry.name}
-                  entry={entry}
-                  canManage={canManage}
-                  pulling={pulling === entry.name}
-                  pullBusy={pulling != null}
-                  progressPct={pulling === entry.name ? progressPct : null}
-                  progressStatus={pulling === entry.name ? progressStatus : null}
-                  error={pullError?.model === entry.name ? pullError.message : null}
-                  onDownload={() => {
-                    void startPull(entry.name);
-                  }}
-                />
-              ))}
-            </div>
+            {installNote ? (
+              <p
+                className="type-footnote"
+                role="status"
+                style={{ color: "var(--text-muted)", margin: 0 }}
+              >
+                {installNote}
+              </p>
+            ) : (
+              <>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  {installable.map((entry) => (
+                    <CatalogModelCard
+                      key={entry.name}
+                      entry={entry}
+                      canManage={canManage}
+                      pulling={pulling === entry.name}
+                      pullBusy={pulling != null}
+                      progressPct={pulling === entry.name ? progressPct : null}
+                      progressStatus={pulling === entry.name ? progressStatus : null}
+                      error={pullError?.model === entry.name ? pullError.message : null}
+                      onDownload={() => {
+                        void startPull(entry.name);
+                      }}
+                    />
+                  ))}
+                </div>
 
-            <p
-              className="type-caption-1"
-              style={{ color: "var(--text-muted)", marginTop: 12 }}
-            >
-              Downloads come from the model registry and run on your Droplet —
-              once installed, a model works entirely on the box.
-            </p>
+                <p
+                  className="type-caption-1"
+                  style={{ color: "var(--text-muted)", marginTop: 12 }}
+                >
+                  Downloads come from the model registry and run on your Droplet —
+                  once installed, a model works entirely on the box.
+                </p>
+              </>
+            )}
           </section>
         )}
 

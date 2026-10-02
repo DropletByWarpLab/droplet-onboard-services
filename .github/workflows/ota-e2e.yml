@@ -23,8 +23,8 @@ name: ota-e2e
 #     wizard COMPLETED (ApplianceSetup ready — the apply path defers
 #     mid-wizard, by design);
 #   - OTA apply provisioned: DROPLET_OTA_APPLY_SCRIPT set on the
-#     orchestrator service + the compose socket / apply-update.sh mounts
-#     (docker/docker-compose.yml, orchestrator service, WARP-539 comments);
+#     orchestrator service + the compose socket mount; the helper runs on
+#     the host (docker/ota/apply-update.sh, WARP-3007);
 #   - a `beta-test` channel release published (release.json + .sig signed
 #     by the box's baked-in trust anchor, images pushed by digest) at the
 #     `releases_url` passed to the dispatch;

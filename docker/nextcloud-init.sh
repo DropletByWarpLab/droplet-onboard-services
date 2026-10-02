@@ -174,11 +174,29 @@ else
   echo "[droplet] group folder '${SHARED_FOLDER_NAME}' already exists (id ${FOLDER_ID}) — skipping create"
 fi
 
-# 4. Assign the household group with read/write/share permissions.
-#    `groupfolders:group <id> <group>` is idempotent (re-assigning the same
-#    group is a no-op). Permission bits: 31 = read+update+create+delete+share.
-$OCC groupfolders:group "$FOLDER_ID" "$HOUSEHOLD_GROUP" || true
-$OCC groupfolders:permissions "$FOLDER_ID" "$HOUSEHOLD_GROUP" 31 || true
+# 4. Group permissions on the Workspace folder. `groupfolders:group <id>
+#    <group> [words...]` attaches the group if needed and SETS its mask on
+#    every run. It takes permission WORDS, not a number: read is always
+#    included, write = update+create (6), delete = 8, share = 16, and no
+#    words means read only (1). Do not add `groupfolders:permissions` here:
+#    that is the ACL command and never sets a group's folder mask. The
+#    orchestrator's reconciler (workspaceMasks) re-asserts the same masks
+#    every tick; this hook sets them right at boot so there is no window.
+#    - Workspace group (members, owners, admins): 15, NO share bit
+#      (WARP-3168: members may not share Workspace items at all; every member
+#      already sees the whole Workspace. Same mask as a department's rw group.)
+#    - droplet-admins (owners/admins): 31, so they keep sharing.
+#    - admin (only the Nextcloud service account): 31; the box mints
+#      `space=shared` shares with that credential.
+#    - guest (external guests): 1, read only (WARP-3179), matching the box's
+#      `reader` grant. Guests are no longer put in the Workspace group.
+for grp in droplet-admins guest; do
+  $OCC group:list --output=json | grep -q "\"${grp}\"" || $OCC group:add "$grp" || true
+done
+for gm in "${HOUSEHOLD_GROUP}:write delete" "droplet-admins:write share delete" "admin:write share delete" "guest:"; do
+  # shellcheck disable=SC2086 # the words after ':' are split on purpose
+  $OCC groupfolders:group "$FOLDER_ID" "${gm%%:*}" ${gm#*:} || true
+done
 
 # 5. Set the quota (idempotent — re-applying the same quota is a no-op).
 $OCC groupfolders:quota "$FOLDER_ID" "$SHARED_FOLDER_QUOTA" || true
@@ -620,8 +638,18 @@ if [ "$DOCS_ENABLED_NORM" = "1" ] || [ "$DOCS_ENABLED_NORM" = "true" ]; then
             --value="http://docserver/" || true
           occ_www config:app:set onlyoffice StorageUrl \
             --value="http://nextcloud/" || true
-          occ_www config:app:set onlyoffice jwt_secret \
-            --value="${ONLYOFFICE_JWT_SECRET}" || true
+          # WARP-3193 SEC-DATA-12: never put the secret on argv
+          # (/proc/<pid>/cmdline is world-readable). config:app:set has no
+          # stdin/file form, so write it to a 0600 JSON file (mktemp) owned by
+          # www-data and `config:import` that. printf is a builtin (no argv).
+          if oo_cfg=$(mktemp); then
+            printf '%s' "$ONLYOFFICE_JWT_SECRET" \
+              | php -r 'echo json_encode(["apps" => ["onlyoffice" => ["jwt_secret" => stream_get_contents(STDIN)]]]);' \
+              > "$oo_cfg" || true
+            chown www-data "$oo_cfg" 2>/dev/null || true
+            occ_www config:import "$oo_cfg" || true
+            rm -f "$oo_cfg"
+          fi
           occ_www config:app:set onlyoffice jwt_header \
             --value="Authorization" || true
           echo "[droplet] WARP-882: OnlyOffice connector configured (DOCS_ENGINE=onlyoffice)"

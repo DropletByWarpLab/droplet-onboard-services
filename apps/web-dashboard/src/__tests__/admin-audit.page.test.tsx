@@ -69,13 +69,11 @@ function wireApi({
   items = [makeItem()],
   nextCursor = null as string | null,
   verify = { ok: true, rowsChecked: 42, verifiedAt: "2026-06-30T10:05:00.000Z" } as unknown,
-  users = null as Array<{ id: string; username: string; displayName: string }> | null,
+  users = null as Array<{ id: string; username: string; displayName: string; userId?: string }> | null,
 } = {}) {
   authFetchMock.mockImplementation(async (url: string) => {
-    // WARP-2180 — the page now hosts the Background runs panel, which reads
-    // /api/agent-runs on mount. Answer it empty so it neither shifts the
-    // call count below nor renders anything the assertions could trip on.
-    if (url.startsWith("/api/agent-runs")) return okJson({ items: [], nextCursor: null });
+    // WARP-2925 — the runs panel moved to /workshop; this page makes no
+    // /api/agent-runs call any more (audit.deeplink.test.tsx pins that).
     if (url.includes("/api/auth/users")) {
       if (users) return okJson({ users });
       throw new Error("users directory unavailable");
@@ -212,10 +210,8 @@ describe("/admin/audit pagination + export", () => {
   it("appends the next page via the cursor on Load more", async () => {
     let call = 0;
     authFetchMock.mockImplementation(async (url: string) => {
-    // WARP-2180 — the page now hosts the Background runs panel, which reads
-    // /api/agent-runs on mount. Answer it empty so it neither shifts the
-    // call count below nor renders anything the assertions could trip on.
-    if (url.startsWith("/api/agent-runs")) return okJson({ items: [], nextCursor: null });
+    // WARP-2925 — the runs panel moved to /workshop; this page makes no
+    // /api/agent-runs call any more (audit.deeplink.test.tsx pins that).
       if (url.includes("/api/auth/users")) throw new Error("users directory unavailable");
       if (url.startsWith("/api/activity/verify")) {
         return okJson({ ok: true, rowsChecked: 2, verifiedAt: "2026-06-30T10:05:00.000Z" });
@@ -281,10 +277,8 @@ describe("/admin/audit pagination + export", () => {
     // neither append nor clobber the fresh nextCursor.
     let resolveStale: (() => void) | null = null;
     authFetchMock.mockImplementation(async (url: string) => {
-    // WARP-2180 — the page now hosts the Background runs panel, which reads
-    // /api/agent-runs on mount. Answer it empty so it neither shifts the
-    // call count below nor renders anything the assertions could trip on.
-    if (url.startsWith("/api/agent-runs")) return okJson({ items: [], nextCursor: null });
+    // WARP-2925 — the runs panel moved to /workshop; this page makes no
+    // /api/agent-runs call any more (audit.deeplink.test.tsx pins that).
       if (url.includes("/api/auth/users")) throw new Error("users directory unavailable");
       if (url.startsWith("/api/activity/verify")) {
         return okJson({ ok: true, rowsChecked: 2, verifiedAt: "2026-06-30T10:05:00.000Z" });
@@ -330,10 +324,8 @@ describe("/admin/audit pagination + export", () => {
     // `loading` is true (and the button is disabled).
     let resolveFiltered: (() => void) | null = null;
     authFetchMock.mockImplementation(async (url: string) => {
-    // WARP-2180 — the page now hosts the Background runs panel, which reads
-    // /api/agent-runs on mount. Answer it empty so it neither shifts the
-    // call count below nor renders anything the assertions could trip on.
-    if (url.startsWith("/api/agent-runs")) return okJson({ items: [], nextCursor: null });
+    // WARP-2925 — the runs panel moved to /workshop; this page makes no
+    // /api/agent-runs call any more (audit.deeplink.test.tsx pins that).
       if (url.includes("/api/auth/users")) throw new Error("users directory unavailable");
       if (url.startsWith("/api/activity/verify")) {
         return okJson({ ok: true, rowsChecked: 1, verifiedAt: "2026-06-30T10:05:00.000Z" });
@@ -370,19 +362,36 @@ describe("/admin/audit pagination + export", () => {
 
 describe("/admin/audit actor attribution (WARP-1009)", () => {
   it("renders the actor on every row, resolving user ids to directory names", async () => {
+    // WARP-3155 — `id` (Nextcloud/login handle) and `userId` (the canonical
+    // local id `actorId` actually carries) deliberately differ here: the old
+    // map keyed on `id` and this row would have missed.
     wireApi({
       items: [
         makeItem({ id: "1", what: "File shared", actorType: "user", actorId: "u-42" }),
         makeItem({ id: "2", what: "Camera armed", actorType: "ai", actorId: null }),
         makeItem({ id: "3", what: "Nightly purge", actorType: "system", actorId: null }),
       ],
-      users: [{ id: "u-42", username: "bob", displayName: "Bob Martin" }],
+      users: [{ id: "bob-nc", username: "bob", displayName: "Bob Martin", userId: "u-42" }],
     });
     render(<AuditPage />);
 
     expect(await screen.findByText(/by Bob Martin/i)).toBeInTheDocument();
     expect(screen.getByText(/by Droplet AI/i)).toBeInTheDocument();
     expect(screen.getByText(/by the system/i)).toBeInTheDocument();
+  });
+
+  it("never resolves an actor id against a roster row's `id` — only `userId` (WARP-3155)", async () => {
+    wireApi({
+      items: [makeItem({ id: "1", what: "File shared", actorType: "user", actorId: "u-42" })],
+      // This row's `id` collides with the OTHER row's actorId-bearing
+      // `userId` below it would have matched under the old (wrong) keying —
+      // here it's the row's own `userId` that is missing, so it must be
+      // skipped rather than mis-keyed on `id`.
+      users: [{ id: "u-42", username: "carol", displayName: "Carol Diaz" }],
+    });
+    render(<AuditPage />);
+    expect(await screen.findByText(/by user u-42/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Carol Diaz/i)).not.toBeInTheDocument();
   });
 
   it("degrades a user actor to its short id when the directory is unavailable", async () => {
@@ -422,10 +431,8 @@ describe("/admin/audit actor attribution (WARP-1009)", () => {
   it("downloads the sealed NDJSON bundle via POST /api/activity/export with the active filters", async () => {
     const bundleBlob = new Blob(['{"manifest":true}\n'], { type: "application/x-ndjson" });
     authFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
-    // WARP-2180 — the page now hosts the Background runs panel, which reads
-    // /api/agent-runs on mount. Answer it empty so it neither shifts the
-    // call count below nor renders anything the assertions could trip on.
-    if (url.startsWith("/api/agent-runs")) return okJson({ items: [], nextCursor: null });
+    // WARP-2925 — the runs panel moved to /workshop; this page makes no
+    // /api/agent-runs call any more (audit.deeplink.test.tsx pins that).
       if (url.includes("/api/auth/users")) throw new Error("users directory unavailable");
       if (url.startsWith("/api/activity/verify")) {
         return okJson({ ok: true, rowsChecked: 1, verifiedAt: "2026-06-30T10:05:00.000Z" });

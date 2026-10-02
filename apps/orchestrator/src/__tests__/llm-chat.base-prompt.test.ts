@@ -81,15 +81,17 @@ vi.mock("../services/file-citation.service.js", () => ({
 }));
 
 vi.mock("../services/chat-persistence.service.js", () => ({
-  ChatPersistenceService: vi.fn().mockImplementation(() => ({
-    ensureConversation: vi.fn().mockResolvedValue(null),
-    createTurnRows: vi.fn().mockResolvedValue(null),
-    finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
-    updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
-    listConversationsForUser: vi.fn().mockResolvedValue([]),
-    getConversationForUser: vi.fn().mockResolvedValue(null),
-    deleteConversationForUser: vi.fn().mockResolvedValue(false),
-  })),
+  ChatPersistenceService: vi.fn().mockImplementation(function () {
+    return {
+      ensureConversation: vi.fn().mockResolvedValue(null),
+      createTurnRows: vi.fn().mockResolvedValue(null),
+      finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
+      updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
+      listConversationsForUser: vi.fn().mockResolvedValue([]),
+      getConversationForUser: vi.fn().mockResolvedValue(null),
+      deleteConversationForUser: vi.fn().mockResolvedValue(false),
+    };
+  }),
 }));
 
 const mockRunAgent = vi.fn();
@@ -426,5 +428,43 @@ describe("POST /api/llm/chat — base system prompt + memory injection", () => {
     const sys = agentMessages()[0]!;
     expect(sys.role).toBe("system");
     expect(sys.content).toContain("search_content");
+  });
+
+  // WARP-3281 — the date line, in the business's zone (Workspace.tz), and not
+  // on voice turns, whose own prompt already carries a clock.
+  describe("today's date (WARP-3281)", () => {
+    function appAs(user: { id: string; username: string; role: string }, prisma: ReturnType<typeof createPrismaMock>) {
+      const app = express();
+      app.use(express.json());
+      app.use((req, _res, next) => {
+        (req as unknown as { user?: typeof user }).user = user;
+        next();
+      });
+      app.use("/api", createLlmRouter(prisma as never));
+      return app;
+    }
+
+    it("carries today's date in the Workspace.tz zone", async () => {
+      const prisma = createPrismaMock([]);
+      prisma.workspace.findUnique.mockResolvedValue({ id: 1, type: "BUSINESS", tz: "Pacific/Auckland" } as never);
+      const res = await request(appAs({ id: "user-uuid", username: "test", role: "owner" }, prisma))
+        .post("/api/llm/chat")
+        .send({ model: "m1", messages: [{ role: "user", content: "weather in Boston on 2026-10-03?" }] });
+
+      expect(res.status).toBe(200);
+      expect(agentMessages()[0]!.content).toMatch(/Today is \w+ \d{4}-\d{2}-\d{2} \(Pacific\/Auckland\); use that timezone/);
+    });
+
+    it("leaves the date out for the voice principal", async () => {
+      const res = await request(appAs({ id: "_service:voice", username: "voice", role: "service" }, createPrismaMock([])))
+        .post("/api/llm/chat")
+        .send({ model: "m1", messages: [{ role: "user", content: "what's on today?" }] });
+
+      expect(res.status).toBe(200);
+      const sys = agentMessages()[0]!;
+      expect(sys.role).toBe("system");
+      expect(sys.content).toContain("You are Droplet");
+      expect(sys.content).not.toContain("Today is");
+    });
   });
 });

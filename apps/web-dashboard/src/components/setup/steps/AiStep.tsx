@@ -13,6 +13,7 @@ import { CodeBlock } from "@/components/CodeBlock";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 import { ReasoningDisclosure } from "@/components/chat/ReasoningDisclosure";
+import { SAFE_MARKDOWN_COMPONENTS } from "@/components/chat/safe-markdown";
 import { isLocalProvider } from "@/lib/provider";
 
 // Module-level constants so ReactMarkdown receives stable references across
@@ -22,6 +23,8 @@ import { isLocalProvider } from "@/lib/provider";
 const REMARK_PLUGINS = [remarkGfm];
 const REHYPE_PLUGINS = [rehypeHighlight];
 const MARKDOWN_COMPONENTS = {
+  // WARP-3193 SEC-INJ-1: no remote images; hardened links.
+  ...SAFE_MARKDOWN_COMPONENTS,
   // WARP-295 parity: keep wide GFM tables from blowing out the answer card
   // on narrow viewports.
   table: ({ node, ...props }: any) => (
@@ -174,8 +177,12 @@ export function AiStep({
       // WARP-1287 — the backend answered; whatever it said, the fetch
       // itself is healthy again.
       setFetchFailed(false);
-      const local = pickDefaultLocalModel(list);
-      if (local) setSelectedModel(local.id);
+      // WARP-3048 — open on the model the box actually answers with
+      // (`defaultModel`), not just the first local one. (No pick to protect
+      // here: the only re-read is the WARP-849 poll, which stops as soon as
+      // the list has a model — before the user can choose one.)
+      const preferred = pickDefaultLocalModel(list, resp.defaultModel);
+      if (preferred) setSelectedModel(preferred.id);
     } catch {
       // WARP-1287 — the request never got an answer (orchestrator down,
       // 5xx, auth blip). The step stays renderable with an empty picker +
@@ -738,7 +745,14 @@ export function isLocalModel(m: ModelInfo): boolean {
   return /^(llama|mistral|phi|qwen|gemma|tinyllama|gpt-oss)/.test(id);
 }
 
-export function pickDefaultLocalModel(list: ModelInfo[]): ModelInfo | null {
+export function pickDefaultLocalModel(
+  list: ModelInfo[],
+  defaultModel?: string | null,
+): ModelInfo | null {
+  // WARP-3048 — the box's active model first, when it is listed and local.
+  const active = defaultModel
+    ? list.find((m) => m.id === defaultModel && isLocalModel(m))
+    : undefined;
   const local = list.find(isLocalModel);
-  return local ?? list[0] ?? null;
+  return active ?? local ?? list[0] ?? null;
 }

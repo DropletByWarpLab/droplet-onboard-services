@@ -4,6 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import request from "supertest";
+import express from "express";
 import { PrismaClient } from "@prisma/client";
 
 vi.mock("../services/ai-gateway.client.js", () => ({
@@ -68,16 +69,22 @@ import {
   getAggregateHealth,
   onHealthSnapshot,
   stopHealthMonitor,
+  refreshCurrentVersion,
   type ComponentHealth,
 } from "../services/health-monitor.service.js";
 import { AnalyticsAgent } from "../services/analytics/agent.js";
 import type { AnalyticsClient } from "../services/analytics/client.js";
 import { forwardHealthSnapshot } from "../services/analytics/service-health.js";
+import { createHealthRouter } from "../routes/health.js";
 import { createApp } from "../app.js";
 import { initDeviceService } from "../services/device.service.js";
 import { isRedisHealthy } from "../services/cache.service.js";
 import { healthCheck as routingHealth } from "../services/openwrt.client.js";
 import { ncPing } from "../services/nextcloud.client.js";
+import { recordMqttState } from "../services/mqtt-status.js";
+
+// WARP-2548: the orchestrator's MQTT client is up unless a test says not.
+recordMqttState("connected");
 import { healthCheck as aiGatewayHealth } from "../services/ai-gateway.client.js";
 import { healthCheck as fileIndexerHealth } from "../services/file-indexer.client.js";
 
@@ -191,7 +198,8 @@ describe("runAllProbes (WARP-43)", () => {
       "redis",
       "routing",
       "storage",
-    ]);
+      "mqtt",
+    ].sort());
     expect(results.every((r) => r.status === "ok")).toBe(true);
   });
 
@@ -239,6 +247,27 @@ describe("runAllProbes (WARP-43)", () => {
     // permanent connection refusal must NOT flip the global pill.
     expect(storage?.status).toBe("ok");
     expect(classifyAggregate(results)).toBe("ok");
+  });
+
+  it("sends the bridge shared secret on the /pools read (WARP-3193 SEC-DATA-6: /pools is token-gated)", async () => {
+    process.env.BRIDGE_AUTH_TOKEN = "hm-bridge-token";
+    try {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ pools: [], count: 0 }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const prisma = {
+        $queryRaw: vi.fn().mockResolvedValue([]),
+      } as unknown as PrismaClient;
+
+      await runAllProbes(prisma);
+      const call = fetchMock.mock.calls.find((c) => String(c[0]).endsWith("/pools"));
+      expect(call?.[1]?.headers).toEqual({ "X-Droplet-Auth": "hm-bridge-token" });
+    } finally {
+      delete process.env.BRIDGE_AUTH_TOKEN;
+    }
   });
 
   it("marks storage down when the bridge is REACHABLE but errors (present-but-broken is still a real fault, WARP-1146 review)", async () => {
@@ -304,6 +333,30 @@ describe("runAllProbes (WARP-43)", () => {
     expect(classifyAggregate(results)).toBe("degraded");
   });
 
+  it("marks mqtt down WITH the client's last connect error, and it stays SOFT (WARP-2548)", async () => {
+    // The incident: the broker crash-looped on an unreadable TLS key and the
+    // orchestrator's client could only ever see a refused connection.
+    recordMqttState("disconnected", "connect ECONNREFUSED 172.18.0.9:8883");
+    recordMqttState("connecting");
+    try {
+      const results = await runAllProbes({
+        $queryRaw: vi.fn().mockResolvedValue([]),
+      } as unknown as PrismaClient);
+      const mqtt = results.find((r) => r.name === "mqtt");
+
+      expect(mqtt?.status).toBe("down");
+      expect(mqtt?.error).toBe("MQTT broker connecting: connect ECONNREFUSED 172.18.0.9:8883");
+      expect(classifyAggregate(results)).toBe("degraded");
+    } finally {
+      recordMqttState("connected");
+    }
+    // A reconnect clears the stale reason.
+    const again = await runAllProbes({
+      $queryRaw: vi.fn().mockResolvedValue([]),
+    } as unknown as PrismaClient);
+    expect(again.find((r) => r.name === "mqtt")).toMatchObject({ status: "ok", error: undefined });
+  });
+
   it("marks components down when probes return false", async () => {
     (isRedisHealthy as any).mockResolvedValueOnce(false);
     (ncPing as any).mockResolvedValueOnce(false);
@@ -335,7 +388,7 @@ describe("runAllProbes (WARP-43)", () => {
   });
 });
 
-/** All 8 components the probe set produces today (kept in one place so the
+/** All 9 components the probe set produces today (kept in one place so the
  *  WARP-618 observer tests don't repeat the WARP-43 list assertions). */
 const ALL_COMPONENTS = [
   "ai-gateway",
@@ -346,7 +399,8 @@ const ALL_COMPONENTS = [
   "redis",
   "routing",
   "storage",
-];
+  "mqtt",
+].sort();
 
 describe("health snapshot observers (WARP-618)", () => {
   const okPrisma = () =>
@@ -547,8 +601,13 @@ describe("GET /api/orchestrator/health", () => {
     expect(res.body).toHaveProperty("status");
     expect(res.body).toHaveProperty("components");
     expect(Array.isArray(res.body.components)).toBe(true);
-    expect(res.body.components.length).toBe(8);
-    expect(res.body.version).toBe("0.1.0");
+    expect(res.body.components.length).toBe(ALL_COMPONENTS.length);
+    // WARP-3154 — no `startHealthMonitor` call in this test, so the version
+    // never resolved off its default: null, same honest state as a factory-
+    // image box. No hardcoded "0.1.0" literal any more. The key is ABSENT,
+    // not null: droplet-android's non-null `version: String = "0.0.0"` only
+    // falls back to its default when the key is missing.
+    expect(res.body).not.toHaveProperty("version");
     expect(typeof res.body.uptime).toBe("number");
   });
 
@@ -582,5 +641,134 @@ describe("GET /api/orchestrator/health", () => {
     const snapshot = getAggregateHealth();
     expect(snapshot.components).toEqual([]);
     expect(snapshot.status).toBe("ok");
+  });
+
+  it("WARP-3154: never leaks a down probe's raw error text — the route is unauthenticated", async () => {
+    // The storage probe's error names an actual device — exactly the class
+    // of internal-topology leak the ticket calls out (a refused connection
+    // would name a container IP:port the same way).
+    stubBridgePools([{ device: "md127", status: "degraded" }]);
+    const prisma = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+    } as unknown as PrismaClient;
+    await runAllProbes(prisma);
+
+    // getAggregateHealth() (used internally, e.g. by other services) still
+    // carries the reason — only the public route response is sanitized.
+    expect(getAggregateHealth().components.find((c) => c.name === "storage")?.error).toMatch(
+      /md127/,
+    );
+
+    const res = await request(app).get("/api/orchestrator/health");
+    for (const component of res.body.components) {
+      expect(component).not.toHaveProperty("error");
+    }
+    expect(JSON.stringify(res.body)).not.toMatch(/md127/);
+    // The rest of the shape is untouched.
+    const storage = res.body.components.find((c: { name: string }) => c.name === "storage");
+    expect(storage).toMatchObject({ name: "storage", status: "down" });
+    expect(typeof storage.latencyMs).toBe("number");
+  });
+});
+
+describe("GET /api/orchestrator/health/details (WARP-3154 — owner/admin only)", () => {
+  // A minimal app around just this router, with a synthetic req.user —
+  // the same pattern as routes/access.routes.test.ts's buildApp. This
+  // exercises the real `requireRole` guard on the route without needing a
+  // live session/JWT through the full authMiddleware stack that
+  // createApp() wires up (irrelevant here: the thing under test is the
+  // route-level guard, not session resolution).
+  function detailsApp(prisma: PrismaClient, role: string) {
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => {
+      (req as unknown as { user: { id: string; username: string; role: string } }).user = {
+        id: "u1",
+        username: "u1",
+        role,
+      };
+      next();
+    });
+    app.use("/api", createHealthRouter(prisma));
+    return app;
+  }
+
+  beforeEach(() => {
+    stopHealthMonitor();
+    stubBridgePools([{ device: "md127", status: "degraded" }]);
+  });
+
+  afterEach(() => {
+    stopHealthMonitor();
+    vi.unstubAllGlobals();
+  });
+
+  it.each(["family", "guest", "service"])(
+    "403s a %s session — same set the public route now withholds error from",
+    async (role) => {
+      const prisma = { $queryRaw: vi.fn().mockResolvedValue([]) } as unknown as PrismaClient;
+      await runAllProbes(prisma);
+
+      const res = await request(detailsApp(prisma, role)).get("/api/orchestrator/health/details");
+      expect(res.status).toBe(403);
+    },
+  );
+
+  it.each(["owner", "admin"])("gives a %s session the down component's error text", async (role) => {
+    const prisma = { $queryRaw: vi.fn().mockResolvedValue([]) } as unknown as PrismaClient;
+    await runAllProbes(prisma);
+
+    const res = await request(detailsApp(prisma, role)).get("/api/orchestrator/health/details");
+    expect(res.status).toBe(200);
+    const storage = res.body.components.find((c: { name: string }) => c.name === "storage");
+    expect(storage.error).toMatch(/md127/);
+  });
+});
+
+describe("refreshCurrentVersion + getAggregateHealth().version (WARP-3154)", () => {
+  afterEach(() => {
+    stopHealthMonitor();
+  });
+
+  it("is absent when the box has never taken an OTA update", async () => {
+    const prisma = {
+      deviceUpdate: { findFirst: vi.fn().mockResolvedValue(null) },
+    } as unknown as PrismaClient;
+    await refreshCurrentVersion(prisma);
+    expect(getAggregateHealth()).not.toHaveProperty("version");
+  });
+
+  it("is the newest committed release's tag", async () => {
+    const findFirst = vi.fn().mockResolvedValue({ releaseTag: "ota-stage-42-gabc1234", gitSha: "abc1234" });
+    const prisma = { deviceUpdate: { findFirst } } as unknown as PrismaClient;
+    await refreshCurrentVersion(prisma);
+    expect(getAggregateHealth().version).toBe("ota-stage-42-gabc1234");
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { status: "committed" } }),
+    );
+  });
+
+  it("falls back to the git sha when a committed row was never tagged", async () => {
+    const prisma = {
+      deviceUpdate: {
+        findFirst: vi.fn().mockResolvedValue({ releaseTag: null, gitSha: "abc1234567890" }),
+      },
+    } as unknown as PrismaClient;
+    await refreshCurrentVersion(prisma);
+    expect(getAggregateHealth().version).toBe("git-abc1234567");
+  });
+
+  it("keeps the last known version when the DB read fails, rather than resetting to null", async () => {
+    const prisma = {
+      deviceUpdate: { findFirst: vi.fn().mockResolvedValue({ releaseTag: "ota-stage-9-gdeadbee", gitSha: "deadbee" }) },
+    } as unknown as PrismaClient;
+    await refreshCurrentVersion(prisma);
+    expect(getAggregateHealth().version).toBe("ota-stage-9-gdeadbee");
+
+    const brokenPrisma = {
+      deviceUpdate: { findFirst: vi.fn().mockRejectedValue(new Error("connection lost")) },
+    } as unknown as PrismaClient;
+    await refreshCurrentVersion(brokenPrisma);
+    expect(getAggregateHealth().version).toBe("ota-stage-9-gdeadbee");
   });
 });

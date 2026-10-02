@@ -30,10 +30,25 @@ import httpx
 
 from timeouts import TIMEOUT_PULL
 
-from .base import OllamaWireRuntime, deleted_result, pulled_result
+from .base import OllamaWireRuntime, deleted_result, pulled_result, unload_result
 
 PULL_PATH = "/api/pull"
 DELETE_PATH = "/api/delete"
+# WARP-3047 — Ollama's documented unload is a prompt-less generate with
+# `keep_alive: 0`; there is no dedicated endpoint.
+GENERATE_PATH = "/api/generate"
+
+
+def _resident_names(ps: dict) -> list[str]:
+    """Model names from an ``/api/ps`` body, in order, without repeats."""
+    names: list[str] = []
+    for entry in ps.get("models") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name") or entry.get("model")
+        if isinstance(name, str) and name.strip() and name not in names:
+            names.append(name)
+    return names
 
 
 class OllamaRuntime(OllamaWireRuntime):
@@ -92,3 +107,22 @@ class OllamaRuntime(OllamaWireRuntime):
         resp = await self._client.request("DELETE", DELETE_PATH, json={"name": model})
         resp.raise_for_status()
         return deleted_result(model)
+
+    async def unload_others(self, keep: str) -> dict[str, list[str]]:
+        """Unload every resident model except ``keep`` (WARP-3047).
+
+        Added, not moved: nothing on the pre-WARP-1743 path unloaded. Ollama
+        honours ``OLLAMA_MAX_LOADED_MODELS`` itself, so on this backend the
+        call mostly saves the swap's cold-reload thrash; it exists so a model
+        switch behaves the same on both daemons. Names come back from
+        ``/api/ps`` exactly as Ollama reports them — the caller's vocabulary —
+        so ``keep`` is compared as-is. Re-listed afterwards: a model mid-
+        request finishes before Ollama drops it.
+        """
+        target = (keep or "").strip()
+        others = [n for n in _resident_names(await self.list_loaded()) if n != target]
+        for name in others:
+            resp = await self._client.post(GENERATE_PATH, json={"model": name, "keep_alive": 0})
+            resp.raise_for_status()
+        after = [n for n in _resident_names(await self.list_loaded()) if n != target]
+        return unload_result([n for n in others if n not in after], after)

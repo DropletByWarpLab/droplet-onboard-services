@@ -27,8 +27,10 @@ import { healthCheck as routingHealth } from "./openwrt.client.js";
 import { healthCheck as displayHealth } from "./display.client.js";
 import { healthCheck as fileIndexerHealth } from "./file-indexer.client.js";
 import { ncPing } from "./nextcloud.client.js";
+import { mqttHealth } from "./mqtt-status.js";
 import { config } from "../config.js";
-import { isBridgeConnectionError } from "../lib/bridge-errors.js";
+import { bridgeAuthToken, isBridgeConnectionError } from "../lib/bridge-errors.js";
+import type { CronRuntime } from "./cron-runtime.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("health-monitor");
@@ -41,7 +43,8 @@ export type ComponentName =
   | "nextcloud"
   | "display"
   | "file-indexer"
-  | "storage";
+  | "storage"
+  | "mqtt";
 export type ComponentHealthStatus = "ok" | "down";
 export type AggregateStatus = "ok" | "degraded" | "down";
 
@@ -57,7 +60,12 @@ export interface AggregateHealth {
   status: AggregateStatus;
   components: ComponentHealth[];
   uptime: number; // seconds
-  version: string;
+  // WARP-3154 — the committed OTA release tag. OMITTED (key absent, never
+  // `null`) on a box that has never taken an OTA update (still on its factory
+  // image): droplet-android decodes `version` as a non-null `String` with a
+  // default, which only applies when the key is absent — an explicit `null`
+  // throws and leaves its Home on "Checking system status" forever.
+  version?: string;
 }
 
 type Probe = () => Promise<boolean>;
@@ -70,7 +78,15 @@ const PROBE_TIMEOUT_MS = 5_000; // keep probes snappy so the 15s cadence isn't s
 
 const startTime = Date.now();
 const cache: Map<ComponentName, ComponentHealth> = new Map();
-let intervalHandle: NodeJS.Timeout | null = null;
+let started = false;
+// WARP-3154 — resolved once at boot and re-checked every poll cycle by
+// `refreshCurrentVersion` (called from `startHealthMonitor`, NOT from
+// `runAllProbes` — the latter is exercised directly by tests with minimal
+// Prisma stubs that don't carry a `deviceUpdate` model). Read synchronously
+// by `getAggregateHealth()` so the route stays sync. Kept on a DB read
+// failure rather than reset, so a flaky poll never flips a known-good
+// version back to unknown.
+let currentVersion: string | null = null;
 
 /**
  * WARP-618: per-poll snapshot observers. Every completed probe cycle hands
@@ -150,8 +166,11 @@ export async function storagePoolsHealth(): Promise<boolean> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 4000);
   try {
+    // WARP-3193 SEC-DATA-6: /pools is token-gated on the bridge.
+    const token = bridgeAuthToken();
     const r = await fetch(`${config.DEVICE_BRIDGE_URL}/pools`, {
       signal: ctrl.signal,
+      ...(token ? { headers: { "X-Droplet-Auth": token } } : {}),
     });
     if (!r.ok) throw new Error(`bridge returned ${r.status}`);
     const snap = (await r.json()) as {
@@ -207,6 +226,11 @@ function buildProbes(prisma: PrismaClient): Array<{ name: ComponentName; probe: 
     // serves on a degraded mirror; the point is the WARNING pill, not a
     // container restart (`down` would 503 the Docker healthcheck).
     { name: "storage", probe: storagePoolsHealth },
+    // WARP-2548: the broker is SOFT (degraded-class) — events, indexer
+    // pipelines and cameras lose their bus, but the box still serves. The
+    // point is that a crash-looping broker shows as Degraded WITH a reason
+    // (the client's last connect error) instead of nothing at all.
+    { name: "mqtt", probe: mqttHealth },
   ];
 }
 
@@ -246,38 +270,63 @@ export function getAggregateHealth(): AggregateHealth {
     status: classifyAggregate(components),
     components,
     uptime: Math.floor((Date.now() - startTime) / 1000),
-    version: "0.1.0",
+    ...(currentVersion ? { version: currentVersion } : {}),
   };
 }
 
 /**
- * Kick off the background poller. Seeds the cache with one immediate run so
- * the first `/orchestrator/health` hit doesn't return an empty `components`.
+ * WARP-3154 — the box's actual running release: the newest COMMITTED
+ * `DeviceUpdate` row (mirrors routes/updates.ts's "currently running" read).
+ * Null when the box has never taken an OTA update (still on its factory
+ * image) — honest, rather than a hardcoded literal divorced from what
+ * actually shipped. A DB read failure logs and leaves `currentVersion`
+ * whatever it already was; never throws (called from the boot seed + every
+ * poll tick, both fire-and-forget). Exported for tests.
  */
-export function startHealthMonitor(prisma: PrismaClient): void {
-  if (intervalHandle !== null) {
+export async function refreshCurrentVersion(prisma: PrismaClient): Promise<void> {
+  try {
+    const row = await prisma.deviceUpdate.findFirst({
+      where: { status: "committed" },
+      orderBy: { updatedAt: "desc" },
+      select: { releaseTag: true, gitSha: true },
+    });
+    currentVersion = row ? row.releaseTag ?? `git-${row.gitSha.slice(0, 10)}` : null;
+  } catch (err) {
+    logger.warn({ err }, "resolving current release version failed — keeping last known value");
+  }
+}
+
+/**
+ * Kick off the background poller on `cron` (WARP-3193 QUAL-7: index.ts main();
+ * `cron.stop()` tears the schedule down). Seeds the cache with one immediate
+ * run so the first `/orchestrator/health` hit doesn't return an empty
+ * `components`.
+ */
+export function startHealthMonitor(
+  prisma: PrismaClient,
+  cron: Pick<CronRuntime, "scheduleInterval">,
+): void {
+  if (started) {
     logger.warn("health monitor already running — ignoring start");
     return;
   }
-  // Seed immediately so the first request has a populated snapshot.
-  runAllProbes(prisma).catch((err) => {
-    logger.warn({ err }, "initial health probe failed");
-  });
-  intervalHandle = setInterval(() => {
-    runAllProbes(prisma).catch((err) => {
-      logger.warn({ err }, "health probe cycle failed");
-    });
-  }, POLL_INTERVAL_MS);
-  // Node doesn't exit while an interval is active; unref so tests and graceful
-  // shutdown don't hang on this.
-  intervalHandle.unref?.();
+  started = true;
+  cron.scheduleInterval(
+    POLL_INTERVAL_MS,
+    async () => {
+      await runAllProbes(prisma).catch((err) => {
+        logger.warn({ err }, "health probe cycle failed");
+      });
+      // WARP-3154: re-check the running release every tick (never throws).
+      await refreshCurrentVersion(prisma);
+    },
+    { immediate: true },
+  );
   logger.info({ intervalMs: POLL_INTERVAL_MS }, "health monitor started");
 }
 
 export function stopHealthMonitor(): void {
-  if (intervalHandle !== null) {
-    clearInterval(intervalHandle);
-    intervalHandle = null;
-  }
+  started = false;
   cache.clear();
+  currentVersion = null;
 }

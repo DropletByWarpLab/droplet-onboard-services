@@ -108,6 +108,7 @@ vi.mock("../middleware/auth.js", () => ({
 
 import { createFilesRouter } from "../routes/files.js";
 import * as nc from "../services/nextcloud.client.js";
+import { userDirectory } from "./helpers/user-directory.js";
 
 const ncListFiles = nc.ncListFiles as unknown as ReturnType<typeof vi.fn>;
 const ncCreateDirectory = nc.ncCreateDirectory as unknown as ReturnType<typeof vi.fn>;
@@ -119,7 +120,12 @@ function buildApp(asUser: { id: string; username: string; role: string }) {
     (req as unknown as { user?: typeof asUser }).user = asUser;
     next();
   });
-  const prismaStub = { fileCitation: { findMany: vi.fn().mockResolvedValue([]) } };
+  const prismaStub = {
+    fileCitation: { findMany: vi.fn().mockResolvedValue([]) },
+    // WARP-3117: the asserted header resolves to a person, who acts as their
+    // Nextcloud login (files.mcp-nextcloud-login.test.ts covers the mapping).
+    user: userDirectory([{ id: "u-alice", username: "alice", nextcloudUsername: "alice", role: "family" }]),
+  };
   app.use("/api", createFilesRouter(prismaStub as never));
   return app;
 }

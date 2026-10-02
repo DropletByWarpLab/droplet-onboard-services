@@ -40,6 +40,7 @@ vi.mock("../services/department-validation.js", () => ({
 }));
 
 import { createDepartmentsRouter } from "./departments.js";
+import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
 
 function mkPrisma(overrides: Record<string, any> = {}) {
   const self: any = {
@@ -56,7 +57,9 @@ function mkPrisma(overrides: Record<string, any> = {}) {
     },
     ...overrides,
   };
-  self.$transaction = vi.fn(async (fn: (tx: any) => Promise<any>) => fn(self));
+  // WARP-1570: the shared transaction seam, never a hand-rolled stub (it
+  // records the options argument the code under test opens its transaction with).
+  self.$transaction = createTransactionSeam({ client: () => self }).$transaction;
   return self;
 }
 

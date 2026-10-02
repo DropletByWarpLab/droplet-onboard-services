@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x15\x64\x65vice_identity.proto\x12\x17\x64roplet.device_identity\"\x1e\n\x0bSignRequest\x12\x0f\n\x07payload\x18\x01 \x01(\x0c\"4\n\x0cSignResponse\x12\x11\n\tsignature\x18\x01 \x01(\x0c\x12\x11\n\talgorithm\x18\x02 \x01(\t\"\x10\n\x0eGetCertRequest\"#\n\x0fGetCertResponse\x12\x10\n\x08\x63\x65rt_pem\x18\x01 \x01(\t\"\x12\n\x10GetStatusRequest\"\xe1\x02\n\x11GetStatusResponse\x12\x13\n\x0bprovisioned\x18\x01 \x01(\x08\x12\x0f\n\x07\x62\x61\x63kend\x18\x02 \x01(\t\x12\x14\n\x0c\x63\x65rt_subject\x18\x03 \x01(\t\x12\x18\n\x10\x63\x65rt_fingerprint\x18\x04 \x01(\t\x12\x17\n\x0f\x63\x65rt_expires_at\x18\x05 \x01(\t\x12\x14\n\x0csealing_pcrs\x18\x06 \x03(\x05\x12\x12\n\nseal_valid\x18\x07 \x01(\x08\x12\x16\n\x0elast_reseal_at\x18\x08 \x01(\t\x12`\n\x14\x63urrent_pcr_snapshot\x18\t \x03(\x0b\x32\x42.droplet.device_identity.GetStatusResponse.CurrentPcrSnapshotEntry\x1a\x39\n\x17\x43urrentPcrSnapshotEntry\x12\x0b\n\x03key\x18\x01 \x01(\x05\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\",\n\rResealRequest\x12\x1b\n\x13operator_auth_nonce\x18\x01 \x01(\t\"W\n\x0eResealResponse\x12\x10\n\x08resealed\x18\x01 \x01(\x08\x12\x11\n\tsealed_at\x18\x02 \x01(\t\x12 \n\x18new_pcr_snapshot_indices\x18\x03 \x03(\x05\x32\x89\x03\n\x15\x44\x65viceIdentityService\x12S\n\x04Sign\x12$.droplet.device_identity.SignRequest\x1a%.droplet.device_identity.SignResponse\x12\\\n\x07GetCert\x12\'.droplet.device_identity.GetCertRequest\x1a(.droplet.device_identity.GetCertResponse\x12\x62\n\tGetStatus\x12).droplet.device_identity.GetStatusRequest\x1a*.droplet.device_identity.GetStatusResponse\x12Y\n\x06Reseal\x12&.droplet.device_identity.ResealRequest\x1a\'.droplet.device_identity.ResealResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x15\x64\x65vice_identity.proto\x12\x17\x64roplet.device_identity\"\x1e\n\x0bSignRequest\x12\x0f\n\x07payload\x18\x01 \x01(\x0c\"4\n\x0cSignResponse\x12\x11\n\tsignature\x18\x01 \x01(\x0c\x12\x11\n\talgorithm\x18\x02 \x01(\t\"\x10\n\x0eGetCertRequest\"#\n\x0fGetCertResponse\x12\x10\n\x08\x63\x65rt_pem\x18\x01 \x01(\t\"\x12\n\x10GetStatusRequest\"\xa0\x03\n\x11GetStatusResponse\x12\x13\n\x0bprovisioned\x18\x01 \x01(\x08\x12\x0f\n\x07\x62\x61\x63kend\x18\x02 \x01(\t\x12\x14\n\x0c\x63\x65rt_subject\x18\x03 \x01(\t\x12\x18\n\x10\x63\x65rt_fingerprint\x18\x04 \x01(\t\x12\x17\n\x0f\x63\x65rt_expires_at\x18\x05 \x01(\t\x12\x14\n\x0csealing_pcrs\x18\x06 \x03(\x05\x12\x12\n\nseal_valid\x18\x07 \x01(\x08\x12\x16\n\x0elast_reseal_at\x18\x08 \x01(\t\x12`\n\x14\x63urrent_pcr_snapshot\x18\t \x03(\x0b\x32\x42.droplet.device_identity.GetStatusResponse.CurrentPcrSnapshotEntry\x12\x1a\n\x12\x65xtension_spki_der\x18\n \x01(\x0c\x12!\n\x19\x65xtension_key_fingerprint\x18\x0b \x01(\t\x1a\x39\n\x17\x43urrentPcrSnapshotEntry\x12\x0b\n\x03key\x18\x01 \x01(\x05\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\",\n\rResealRequest\x12\x1b\n\x13operator_auth_nonce\x18\x01 \x01(\t\"W\n\x0eResealResponse\x12\x10\n\x08resealed\x18\x01 \x01(\x08\x12\x11\n\tsealed_at\x18\x02 \x01(\t\x12 \n\x18new_pcr_snapshot_indices\x18\x03 \x03(\x05\"1\n\x1cSignExtensionManifestRequest\x12\x11\n\tstatement\x18\x01 \x01(\x0c\"t\n\x1dSignExtensionManifestResponse\x12\x11\n\tsignature\x18\x01 \x01(\x0c\x12\x11\n\talgorithm\x18\x02 \x01(\t\x12\x1a\n\x12\x65xtension_spki_der\x18\x03 \x01(\x0c\x12\x11\n\tkey_usage\x18\x04 \x01(\t2\x92\x04\n\x15\x44\x65viceIdentityService\x12S\n\x04Sign\x12$.droplet.device_identity.SignRequest\x1a%.droplet.device_identity.SignResponse\x12\\\n\x07GetCert\x12\'.droplet.device_identity.GetCertRequest\x1a(.droplet.device_identity.GetCertResponse\x12\x62\n\tGetStatus\x12).droplet.device_identity.GetStatusRequest\x1a*.droplet.device_identity.GetStatusResponse\x12Y\n\x06Reseal\x12&.droplet.device_identity.ResealRequest\x1a\'.droplet.device_identity.ResealResponse\x12\x86\x01\n\x15SignExtensionManifest\x12\x35.droplet.device_identity.SignExtensionManifestRequest\x1a\x36.droplet.device_identity.SignExtensionManifestResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -44,13 +44,17 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_GETSTATUSREQUEST']._serialized_start=191
   _globals['_GETSTATUSREQUEST']._serialized_end=209
   _globals['_GETSTATUSRESPONSE']._serialized_start=212
-  _globals['_GETSTATUSRESPONSE']._serialized_end=565
-  _globals['_GETSTATUSRESPONSE_CURRENTPCRSNAPSHOTENTRY']._serialized_start=508
-  _globals['_GETSTATUSRESPONSE_CURRENTPCRSNAPSHOTENTRY']._serialized_end=565
-  _globals['_RESEALREQUEST']._serialized_start=567
-  _globals['_RESEALREQUEST']._serialized_end=611
-  _globals['_RESEALRESPONSE']._serialized_start=613
-  _globals['_RESEALRESPONSE']._serialized_end=700
-  _globals['_DEVICEIDENTITYSERVICE']._serialized_start=703
-  _globals['_DEVICEIDENTITYSERVICE']._serialized_end=1096
+  _globals['_GETSTATUSRESPONSE']._serialized_end=628
+  _globals['_GETSTATUSRESPONSE_CURRENTPCRSNAPSHOTENTRY']._serialized_start=571
+  _globals['_GETSTATUSRESPONSE_CURRENTPCRSNAPSHOTENTRY']._serialized_end=628
+  _globals['_RESEALREQUEST']._serialized_start=630
+  _globals['_RESEALREQUEST']._serialized_end=674
+  _globals['_RESEALRESPONSE']._serialized_start=676
+  _globals['_RESEALRESPONSE']._serialized_end=763
+  _globals['_SIGNEXTENSIONMANIFESTREQUEST']._serialized_start=765
+  _globals['_SIGNEXTENSIONMANIFESTREQUEST']._serialized_end=814
+  _globals['_SIGNEXTENSIONMANIFESTRESPONSE']._serialized_start=816
+  _globals['_SIGNEXTENSIONMANIFESTRESPONSE']._serialized_end=932
+  _globals['_DEVICEIDENTITYSERVICE']._serialized_start=935
+  _globals['_DEVICEIDENTITYSERVICE']._serialized_end=1465
 # @@protoc_insertion_point(module_scope)

@@ -3,33 +3,42 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  BookOpen,
   ChevronRight,
   Cloud,
   DownloadCloud,
+  HardDrive,
   Mic,
   Plus,
   Settings as SettingsIcon,
-  Sparkles,
   Trash2,
   Users,
   X,
 } from "lucide-react";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { NavLayoutToggle } from "@/components/NavLayoutToggle";
 import { PasskeysSection } from "@/components/settings/PasskeysSection";
 import { FeaturesCard } from "@/components/settings/FeaturesCard";
 import { PersonalityCard } from "@/components/settings/PersonalityCard";
 import { EmailAccountCard } from "@/components/settings/EmailAccountCard";
+import { Microsoft365Card } from "@/components/settings/Microsoft365Card";
 import { EmailChannelSection } from "@/components/settings/EmailChannelSection";
 import { DangerZoneSection } from "@/components/settings/DangerZoneSection";
+import { PersonalDriveCard } from "@/components/settings/PersonalDriveCard";
 import { BusinessProfileCard } from "@/components/settings/BusinessProfileCard";
 import { LocationsCard } from "@/components/settings/LocationsCard";
+import { PlaceLookupSwitch } from "@/components/settings/PlaceLookupSwitch";
 import { LogsSection } from "@/components/settings/LogsSection";
+import { CertificateRows } from "@/components/settings/CertificateRows";
+import { BackupRows } from "@/components/settings/BackupRows";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { validatePassword, isValidEmail } from "@droplet/auth-policy";
 import { useDevice } from "@/lib/hooks/useDevice";
 import { useModuleGate } from "@/lib/hooks/useModuleGate";
+import { useCapabilities } from "@/lib/hooks/useCapabilities";
+// WARP-2967 — the Settings front door's rows are DERIVED from the one nav
+// definition, the same function the sidebar's contextual panel renders from.
+import { settingsGroups, type AuthRole, type NavItem } from "@/components/nav-config";
 import { boxDisplayHost } from "@/lib/box-identity";
 import { useAuth } from "@/lib/auth";
 import {
@@ -37,7 +46,8 @@ import {
   createUser,
   deleteUser as apiDeleteUser,
 } from "@/lib/api";
-import type { AuthUser } from "@/lib/types";
+import { DELETE_USER_COPY, DELETION_RETENTION_DAYS } from "@/lib/leaver-deletion";
+import { ROSTER_SOURCE_LABEL, type RosterUser } from "@/lib/types";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Sect, Badge } from "@/components/shell/primitives";
 import { inferenceRuntimeLabel } from "@/lib/provider";
@@ -45,10 +55,52 @@ import { inferenceRuntimeLabel } from "@/lib/provider";
 export default function SettingsPage() {
   const { device, health } = useDevice();
   const { user: currentUser } = useAuth();
-  // WARP-1807: the tucked Knowledge row below mirrors the nav's module gate
-  // (fail-open — hidden only on a positive "off").
+  // WARP-1807 / WARP-2967: the tucked rows below mirror the nav's own gates.
+  // The module gate is fail-open (hidden only on a positive "off"); the
+  // capability probe fails closed, exactly as it does in the sidebar.
   const isModuleOn = useModuleGate();
-  const [users, setUsers] = useState<AuthUser[]>([]);
+  const adminCapabilities = useCapabilities();
+  const settingsSections = settingsGroups(
+    currentUser?.role as AuthRole | undefined,
+    { ...adminCapabilities, medicalConnector: false },
+    isModuleOn,
+  );
+  // PersonalityCard renders (and owns the "Workspace" heading) for exactly
+  // these roles — the same expression it gates on.
+  const workspaceInCard =
+    currentUser?.role === "owner" || currentUser?.role === "admin";
+  const workspaceRows =
+    settingsSections.find((s) => s.label === "Workspace")?.items ?? [];
+  const linkRows = (items: NavItem[]) => (
+    <div className="card" style={{ padding: 0 }}>
+      <div className="rows">
+        {items.map((item) => {
+          const Icon = item.icon;
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              className="lrow"
+              style={{ padding: "12px 16px", alignItems: "center" }}
+            >
+              <span className="ri">
+                <Icon size={16} />
+              </span>
+              <span className="rt">
+                <span className="nm">{item.label}</span>
+                <span className="sub">{item.settingsBlurb}</span>
+              </span>
+              <ChevronRight
+                size={16}
+                style={{ marginLeft: "auto", opacity: 0.5 }}
+              />
+            </Link>
+          );
+        })}
+      </div>
+    </div>
+  );
+  const [users, setUsers] = useState<RosterUser[]>([]);
   const [showAddUser, setShowAddUser] = useState(false);
   const [newEmail, setNewEmail] = useState("");
   const [newDisplayName, setNewDisplayName] = useState("");
@@ -151,6 +203,19 @@ export default function SettingsPage() {
                   set the width and takes the indigo shell surface. */}
               <ThemeToggle fit="content" />
             </div>
+            {/* WARP-2971 — which navigation shell this person sees. A display
+                preference like Theme (same storage, same radiogroup), never a
+                permission: every layout resolves the same nav-config gates.
+                WARP-3062 added the third, Assistant. */}
+            <div className="lrow" style={{ padding: "12px 16px" }}>
+              <span className="rt">
+                <span className="nm">Navigation</span>
+                <span className="sub">
+                  Sidebar, Workspace tabs, or Assistant, which opens on Ask AI
+                </span>
+              </span>
+              <NavLayoutToggle />
+            </div>
           </div>
         </div>
 
@@ -159,50 +224,40 @@ export default function SettingsPage() {
             owner/admin like the cards below. */}
         <FeaturesCard />
 
-        {/* Advanced (WARP-1807) — the way in to the tucked Knowledge + Context
-            surfaces. Not daily operation, so they left the primary nav
-            (hidden: true in nav-config), but they must stay reachable.
-            Knowledge mirrors the nav's fail-open module gate; Context carries
-            no module and always renders. */}
-        <Sect title="Advanced" />
-        <div className="card" style={{ padding: 0 }}>
-          <div className="rows">
-            {isModuleOn("knowledge") && (
-              <Link
-                href="/knowledge"
-                className="lrow"
-                style={{ padding: "12px 16px", alignItems: "center" }}
-              >
-                <span className="ri">
-                  <BookOpen size={16} />
-                </span>
-                <span className="rt">
-                  <span className="nm">Knowledge</span>
-                  <span className="sub">
-                    What&apos;s indexed for retrieval
-                  </span>
-                </span>
-                <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
-              </Link>
-            )}
-            <Link
-              href="/context"
-              className="lrow"
-              style={{ padding: "12px 16px", alignItems: "center" }}
-            >
-              <span className="ri">
-                <Sparkles size={16} />
-              </span>
-              <span className="rt">
-                <span className="nm">Context</span>
-                <span className="sub">
-                  Indexing coverage and pipeline health
-                </span>
-              </span>
-              <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
-            </Link>
-          </div>
-        </div>
+        {/* WARP-2967 — the Settings front door.
+            ────────────────────────────────────────────────────────────────
+            Sixteen destinations left the main nav tree when it was cut to
+            four groups, plus the WARP-1807 pair (Knowledge, Context) and
+            WARP-2966's Sync devices. Every one of them keeps its route, and
+            THIS is where they are reachable from — the same `settingsGroups`
+            the sidebar's contextual panel renders, so the two surfaces cannot
+            disagree about what exists or who may see it.
+
+            Derived, not hand-listed. The rows this replaces were hand-written,
+            and that is exactly how a tucked surface goes missing: nothing
+            breaks, builds or type-checks when a row is forgotten — the page
+            just quietly stops leading anywhere. Adding `hidden: true` +
+            `settingsSection` in nav-config is now the whole edit.
+
+            `capabilities` comes from /api/admin/capabilities, which fails
+            CLOSED (hidden until positively known) — correct here, since
+            Activity and RAG eval genuinely do not exist without their backing
+            integration. `medicalConnector` is the Sidebar's own
+            /api/integrations probe and no tucked item uses it (pinned in
+            nav-config.four-groups.test.ts), so this page does not run that
+            second probe. The MODULE gate stays fail-OPEN via `useModuleGate`,
+            which is the WARP-1807 posture: a probe blip must never hide the
+            last path in. */}
+        {settingsSections
+          // Owner/admin get the Workspace rows inside PersonalityCard's own
+          // "Workspace" group below — two "Workspace" headings otherwise.
+          .filter((section) => !(workspaceInCard && section.label === "Workspace"))
+          .map((section) => (
+            <div key={section.label}>
+              <Sect title={section.label} />
+              {linkRows(section.items)}
+            </div>
+          ))}
 
         {/* Workspace (WARP-1119) — the "AI personality" card (design brief §6
             Card 1). Owns its own "Workspace" group header and self-gates to
@@ -233,6 +288,14 @@ export default function SettingsPage() {
               the same `user.role` expression PersonalityCard uses, and
               renders nothing for lesser roles. */}
           <LocationsCard />
+          {/* WARP-3264 — owner-only "Look up places online" (off by default). */}
+          <PlaceLookupSwitch />
+
+          {/* WARP-2967 — the derived Workspace rows (Sync devices,
+              Integrations, Credentials, Company files) for owner/admin; the
+              map above renders them under their own heading for everyone
+              else. */}
+          {workspaceInCard && workspaceRows.length > 0 && linkRows(workspaceRows)}
         </PersonalityCard>
 
         {/* Passkeys (PR #377) — enrol a passwordless sign-in credential. */}
@@ -294,7 +357,7 @@ export default function SettingsPage() {
                   value={newEmail}
                   onChange={(e) => setNewEmail(e.target.value)}
                   placeholder="you@company.com"
-                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                  className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                   style={{
                     background: "var(--surface)",
                     border: "1px solid var(--border)",
@@ -313,7 +376,7 @@ export default function SettingsPage() {
                   value={newDisplayName}
                   onChange={(e) => setNewDisplayName(e.target.value)}
                   placeholder="Display name (optional)"
-                  className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                  className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                   style={{
                     background: "var(--surface)",
                     border: "1px solid var(--border)",
@@ -333,7 +396,7 @@ export default function SettingsPage() {
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 placeholder="Create a password"
-                className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                 style={{
                   background: "var(--surface)",
                   border: "1px solid var(--border)",
@@ -403,6 +466,13 @@ export default function SettingsPage() {
                       <span className="nm">{u.displayName || u.id}</span>
                       <span className="sub mono">{u.id}</span>
                     </span>
+                    {/* WARP-2984: where the account comes from — the roster
+                        lists every account, so the origin is shown, not implied. */}
+                    {u.source && (
+                      <span className="chip" style={{ cursor: "default", height: 26, padding: "0 10px", fontSize: 12 }}>
+                        {ROSTER_SOURCE_LABEL[u.source]}
+                      </span>
+                    )}
                     {u.id !== currentUser?.username ? (
                       // Always rendered (no opacity-gate on hover) so the
                       // action is discoverable for touch + keyboard users.
@@ -432,6 +502,10 @@ export default function SettingsPage() {
             through. Two halves of mail that people confuse constantly, so they
             sit together and each says which it is. */}
         <EmailAccountCard />
+        {/* WARP-3056 — each person's own Microsoft 365 (mail, calendar,
+            contacts, OneDrive), beside the mailboxes Droplet reads. Renders
+            for owner/admin/family; the callback lands here with ?m365=. */}
+        <Microsoft365Card />
         <EmailChannelSection />
 
         {/* Device Info */}
@@ -442,10 +516,23 @@ export default function SettingsPage() {
                 modal tells the owner to read, so it must render the same
                 canonical name the server compares against — never a leaked
                 container-id hostname from a stale Device row. */}
-            <InfoRow label="Hostname" value={boxDisplayHost(device?.hostname)} />
-            <InfoRow label="Hardware" value={device?.hardwareRev ?? "—"} />
-            <InfoRow label="Network mode" value={device?.networkMode ?? "—"} />
-            <InfoRow label="IP address" value={device?.ip ?? "Not assigned"} />
+            {/* WARP-3378 — the box's own device row: hostname and hardware are
+                for members and up, network mode and the IP address for owner
+                and admin only, and an external guest is served none of it (403).
+                Rows the box does not send are left out rather than rendered as
+                "—" / "Not assigned". */}
+            {currentUser?.role !== "guest" && (
+              <>
+                <InfoRow label="Hostname" value={boxDisplayHost(device?.hostname)} />
+                <InfoRow label="Hardware" value={device?.hardwareRev ?? "—"} />
+              </>
+            )}
+            {(currentUser?.role === "owner" || currentUser?.role === "admin") && (
+              <>
+                <InfoRow label="Network mode" value={device?.networkMode ?? "—"} />
+                <InfoRow label="IP address" value={device?.ip ?? "Not assigned"} />
+              </>
+            )}
             <InfoRow
               label="Services"
               value={
@@ -455,6 +542,13 @@ export default function SettingsPage() {
               }
             />
             <InfoRow label="Uptime" value={health ? formatUptime(health.uptime) : "—"} />
+            {/* WARP-2944 — the certificate lifecycle (days left, renewal,
+                the one action when renewal is failing). Owner/admin only;
+                reads the state row the daily tick maintains, no new poll. */}
+            <CertificateRows />
+            {/* WARP-1405 — backup health: last success, and the reason
+                when backups have stopped. Owner/admin only. */}
+            <BackupRows />
           </div>
         </div>
 
@@ -507,6 +601,41 @@ export default function SettingsPage() {
             </Link>
           </div>
         </div>
+
+        {/* Storage (WARP-2959) — a single link row; pools, volumes, the
+            system disk and the erase/adopt/reclaim actions live on the
+            /settings/storage surface (same pattern as the Voice and Software
+            updates rows). The surface moved here from the Files sub-nav: it
+            is box hardware, not a place files live. It carries no role gate
+            of its own — exactly as it did under Files — because DrivesPanel
+            already hides every destructive control from non-admins and the
+            orchestrator refuses them server-side. */}
+        <Sect title="Storage" />
+        <div className="card" style={{ padding: 0 }}>
+          <div className="rows">
+            <Link
+              href="/settings/storage"
+              className="lrow"
+              style={{ padding: "12px 16px", alignItems: "center" }}
+            >
+              <span className="ri">
+                <HardDrive size={16} />
+              </span>
+              <span className="rt">
+                <span className="nm">Storage</span>
+                <span className="sub">
+                  Storage pools, drives, and the system disk
+                </span>
+              </span>
+              <ChevronRight size={16} style={{ marginLeft: "auto", opacity: 0.5 }} />
+            </Link>
+          </div>
+        </div>
+
+        {/* Personal drives — the owner switch for per-user Finder / File
+            Explorer drives (off by default). Self-gates to the owner role and
+            renders nothing for anyone else. */}
+        <PersonalDriveCard />
 
         {/* Diagnostics (WARP-823) — owner/admin downloadable, redacted log bundle. */}
         <LogsSection />
@@ -569,11 +698,11 @@ export default function SettingsPage() {
           onCancel={() => setDeleteUserTarget(null)}
           title={
             deleteUserTarget
-              ? `Delete user "${deleteUserTarget}"?`
+              ? `Delete "${deleteUserTarget}"?`
               : "Delete user?"
           }
-          description="The account, sessions, and per-user state are removed. This cannot be undone."
-          confirmLabel="Delete"
+          description={DELETE_USER_COPY}
+          confirmLabel={`Keep for ${DELETION_RETENTION_DAYS} days, then delete`}
           variant="destructive"
         />
       </div>

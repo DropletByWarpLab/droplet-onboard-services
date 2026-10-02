@@ -37,9 +37,19 @@ export function contentToText(
     .join("\n");
 }
 
+/**
+ * WARP-3338 — which block a system message that routes/llm.ts adds after its
+ * base prompt carries. The agent loop folds every system message into index 0
+ * and heads the blocks that do not label themselves, so the model can tell
+ * them apart (`foldSystemMessages`, llm-agent.service.ts).
+ */
+export type ContextBlockKind = "attachments" | "pins" | "chat_instructions";
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | ContentBlock[];
+  /** WARP-3338 — set by routes/llm.ts on the system messages it adds. */
+  contextBlock?: ContextBlockKind;
   // Only populated on assistant messages that request tool execution.
   tool_calls?: ToolCall[];
   // Set on tool-role messages to correlate the result with the request.
@@ -74,6 +84,13 @@ export interface ToolDefinition {
     parameters: Record<string, unknown>;
   };
 }
+
+/**
+ * WARP-3409 — the ai-gateway's `max_tokens` ceiling (services/ai-gateway
+ * schemas.py `ChatRequest.max_tokens`, `le=4096`). Anything above it is a 422
+ * at the gateway, which is how the daily report's doubled retry failed.
+ */
+export const GATEWAY_MAX_TOKENS = 4096;
 
 export interface ChatRequest {
   model: string;
@@ -192,6 +209,9 @@ export interface ModelInfo {
   // Additive (optional for back-compat): modalities the model supports.
   // Populated by the ai-gateway; drives vision routing + the dashboard badge.
   capabilities?: ModelCapabilities;
+  // WARP-3409 (additive, optional): what `reasoning_effort` does for this
+  // model — levels (gpt-oss), "low" = thinking off (GLM on DMR), or nothing.
+  thinking_control?: "reasoning_effort" | "enable_thinking" | null;
 }
 
 export interface ModelsResponse {
@@ -302,7 +322,9 @@ export interface StorageStats {
 export interface HealthResponse {
   status: "ok" | "degraded";
   uptime: number;
-  version: string;
+  // WARP-3154 — the real committed OTA release tag; the key is absent (not
+  // `null`) on a box that has never taken an update — see AggregateHealth.
+  version?: string;
   /**
    * WARP-1926 — the local inference runtime this box serves from: `dmr`
    * (Docker Model Runner, the shipped default since WARP-1870) or `ollama`.
@@ -322,6 +344,9 @@ export interface HealthResponse {
     // service is up — note this stays `true` even in "simulated" mode
     // (no physical USB device); query /display/status for the backend.
     display: boolean;
+    // WARP-3052 — file service (Nextcloud) reachability, from the cached
+    // health-monitor probe. Informational: never affects `status`.
+    nextcloud: boolean;
   };
 }
 

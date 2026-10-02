@@ -25,6 +25,12 @@ on:
       # lane too — otherwise a wrapper-only edit lands unchecked and the pin
       # detonates on the next unrelated scripts/** PR
       - "tests/mqtt-mtls.integration.test.sh"
+      # WARP-2548: every secret mount's reader uid vs the modes setup writes.
+      # The reader uid of a built image comes from its Dockerfile USER, so a
+      # Dockerfile edit must fire this lane too (docker-compose.yml already
+      # does). Dockerfile edits are rare: < 50 runner-min/month.
+      - "tests/secret-readers.test.sh"
+      - "**/Dockerfile"
       # WARP-1061: internal-mTLS wiring guards + nginx internal-scheme checks
       - "tests/internal-mtls-wiring.test.sh"
       - "tests/nginx-internal-scheme.test.sh"
@@ -54,6 +60,8 @@ on:
       # is the only PR class they newly catch.
       - "tests/systemd.test.sh"
       - "tests/redis-acl.test.sh"
+      # WARP-1401: cache persistence + wipe/backup classification
+      - "tests/cache-persistence.test.sh"
       - "tests/internal-ca.test.sh"
       - "tests/image-pipeline.test.sh"
       - "tests/single-box-openwrt-readiness.test.sh"
@@ -67,8 +75,23 @@ on:
       # WARP-2938: the device id is derived from the hardware, never the
       # hostname; the image default `droplet` is migrated and fails verify.
       - "tests/device-id-seed.test.sh"
+      # WARP-2985: migrate_env backfills a missing/public DEVICE_SECRET once
+      # and never rotates a real one.
+      - "tests/device-secret-backfill.test.sh"
+      # WARP-2944: the bootstrap cert's SAN follows the box's address around
+      # the SAME key, so pinned pairings survive a move.
+      - "tests/tls-bootstrap-cert-follows-the-box.test.sh"
+      # WARP-2941: the box advertises _droplet._tcp with fqdn=/state= hints
+      # that follow the served certificate through every reload.
+      - "tests/local-dns-avahi.test.sh"
+      - "scripts/lib/avahi-service.sh"
+      - "scripts/lib/local-dns.sh"
+      - "scripts/lib/tls-reload.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
+      # WARP-2995: the OTA host .env reconcile ships under docker/ (the only
+      # tree a release delivers); its suite lives in scripts/test/.
+      - "docker/ota/**"
       - "docker/mosquitto.conf"
       - "docker/mosquitto.acl"
       - "docker/frigate/config.yml"
@@ -90,6 +113,12 @@ on:
       # lane too — otherwise a wrapper-only edit lands unchecked and the pin
       # detonates on the next unrelated scripts/** PR
       - "tests/mqtt-mtls.integration.test.sh"
+      # WARP-2548: every secret mount's reader uid vs the modes setup writes.
+      # The reader uid of a built image comes from its Dockerfile USER, so a
+      # Dockerfile edit must fire this lane too (docker-compose.yml already
+      # does). Dockerfile edits are rare: < 50 runner-min/month.
+      - "tests/secret-readers.test.sh"
+      - "**/Dockerfile"
       # WARP-1061: internal-mTLS wiring guards + nginx internal-scheme checks
       - "tests/internal-mtls-wiring.test.sh"
       - "tests/nginx-internal-scheme.test.sh"
@@ -119,6 +148,8 @@ on:
       # is the only PR class they newly catch.
       - "tests/systemd.test.sh"
       - "tests/redis-acl.test.sh"
+      # WARP-1401: cache persistence + wipe/backup classification
+      - "tests/cache-persistence.test.sh"
       - "tests/internal-ca.test.sh"
       - "tests/image-pipeline.test.sh"
       - "tests/single-box-openwrt-readiness.test.sh"
@@ -132,8 +163,21 @@ on:
       # WARP-2938: the device id is derived from the hardware, never the
       # hostname; the image default `droplet` is migrated and fails verify.
       - "tests/device-id-seed.test.sh"
+      # WARP-2985: migrate_env backfills a missing/public DEVICE_SECRET once
+      # and never rotates a real one.
+      - "tests/device-secret-backfill.test.sh"
+      # WARP-2944: the bootstrap cert's SAN follows the box's address around
+      # the SAME key, so pinned pairings survive a move.
+      - "tests/tls-bootstrap-cert-follows-the-box.test.sh"
+      # WARP-2941: the box advertises _droplet._tcp with fqdn=/state= hints
+      # that follow the served certificate through every reload.
+      - "tests/local-dns-avahi.test.sh"
+      - "scripts/lib/avahi-service.sh"
+      - "scripts/lib/local-dns.sh"
+      - "scripts/lib/tls-reload.sh"
       - "docker/nextcloud-init.sh"
       - "docker/nginx/**"
+      - "docker/ota/**"
       - "docker/mosquitto.conf"
       - "docker/mosquitto.acl"
       - "docker/frigate/config.yml"
@@ -168,6 +212,14 @@ jobs:
         # WARP-235: single :8883 mTLS listener, per-CN topic ACLs, generator/
         # tracked-file parity, shared-password retirement. Pure bash, no Docker.
         run: bash tests/mosquitto-conf.test.sh
+      - name: Run secret-reader uid guard (WARP-2548)
+        # Every data/secrets mount in compose: derived reader uid vs the modes
+        # the real setup writers produce; SECRET_READERS parity; the host-side
+        # repair + check; the db/cache/broker start-time secret-guard.
+        run: |
+          python3 -c 'import yaml' 2>/dev/null \
+            || sudo apt-get install -y -qq python3-yaml
+          bash tests/secret-readers.test.sh
       - name: Run internal-mTLS wiring guards
         # WARP-1061: setup writes the knob, compose mounts every mesh bundle +
         # passes the knob where env_file is absent, images use the TLS-aware
@@ -260,6 +312,12 @@ jobs:
         # docker; the pin-resolution assertions run the real
         # `docker compose config` client-side (no daemon needed).
         run: bash scripts/test/apply-update.test.sh
+      - name: Run OTA host .env reconcile tests
+        # WARP-2995: docker/ota/env-reconcile.sh — additive/idempotent .env
+        # backfill + boot-unit profile flags an OTA runs on the host before
+        # any swap, plus the drift gate against migrate_env's key list.
+        # Pure POSIX sh over a tmp dir, no Docker. ~1 s.
+        run: bash scripts/test/ota-env-reconcile.test.sh
       - name: Run LUKS2 data-partition tests
         # WARP-232: HERMETICALLY EXECUTES droplet-luks-provision.sh provision +
         # the existing-LUKS re-run refusal, scripts/lib/luks.sh secrets
@@ -298,6 +356,14 @@ jobs:
         # scripts/test/redis-tls.test.sh, which is declared developer-only; this
         # is the half a runner can prove.
         run: bash tests/redis-acl.test.sh
+
+      - name: Run cache persistence tests
+        # WARP-1401: the `cache` Redis keeps sessions, the refresh denylist
+        # and NC app-passwords across recreate/reboot (AOF on the named
+        # cache-data volume, noeviction, maxmemory under mem_limit), factory
+        # reset wipes that volume and device-backup never captures it. Static;
+        # the live recreate proof is scripts/test/redis-tls.test.sh.
+        run: bash tests/cache-persistence.test.sh
 
       - name: Run internal-CA issuance tests
         # WARP-236: scripts/lib/internal-ca.sh — CA mint idempotency, leaf
@@ -363,3 +429,29 @@ jobs:
         # `droplet` is migrated, and verify.sh refuses it when HQ is configured.
         # Pure bash over a fixture /sys tree; no Docker, no root.
         run: bash tests/device-id-seed.test.sh
+
+      - name: Run DEVICE_SECRET backfill tests
+        # WARP-2985: the orchestrator refuses a missing/public DEVICE_SECRET on
+        # DROPLET_ENV=production, so migrate_env must give every box one —
+        # absent/empty/placeholder → a fresh random value, a real value never
+        # rewritten, a re-run byte-identical, the value never logged. Runs the
+        # real migrate_env in a temp REPO_ROOT; no Docker, no root.
+        run: bash tests/device-secret-backfill.test.sh
+
+      - name: Run bootstrap-certificate key-reuse tests
+        # WARP-2944 / ADR-058: the self-signed bootstrap certificate names the
+        # box's CURRENT addresses (a moved box regenerates its SAN) around the
+        # SAME private key, so every app that pinned the key keeps working; a
+        # torn pair still mints fresh; a public-CA leaf is never touched. Runs
+        # the real _generate_tls_cert in a temp REPO_ROOT with the address
+        # discovery overridden; openssl only, no Docker, no root.
+        run: bash tests/tls-bootstrap-cert-follows-the-box.test.sh
+      - name: Run avahi _droplet._tcp advertisement tests
+        # WARP-2941 / ADR-008 §4: the apps find a Droplet by TYPE. The rendered
+        # service file carries _droplet._tcp with fqdn=/state= TXT hints, the
+        # hints follow the served certificate (self-signed → bootstrap, CA-
+        # signed leaf → issued, FQDN from env or .env, XML-escaped, nothing
+        # non-public), the install is idempotent, and tls-reload's hook alone
+        # re-renders it. Real functions, sudo stubbed, openssl fixtures; no
+        # Docker, no root.
+        run: bash tests/local-dns-avahi.test.sh

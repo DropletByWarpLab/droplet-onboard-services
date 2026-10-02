@@ -177,13 +177,13 @@ describe("runAgent — tool selection (spec §3)", () => {
       model: "m",
       messages: [{ role: "user", content: "hello there" }],
       tool_selection_mode: "domains",
-      // Ceiling = window - OUTPUT_RESERVE(1024) - fixed blocks(11800 chars
-      // ~= 2950 tokens), so 4070 leaves ~96 tokens: comfortably above the
+      // Ceiling = window - OUTPUT_RESERVE(1024) - fixed blocks(11950 chars
+      // ~= 2988 tokens; WARP-3281 added the 150-char date line), so 4108 leaves ~96 tokens: comfortably above the
       // 89-token core-only advertisement that opens the turn, and well below
       // what admitting the smart-home domain would cost. That isolates the
       // heal as the thing being refused — a smaller window would trip the
       // PRE-loop assertion instead and prove nothing about this branch.
-      context_window: 4070,
+      context_window: 4108,
     });
 
     // The advertisement did NOT widen: the refused heal leaves the turn on
@@ -246,3 +246,110 @@ function messages_(call: unknown) {
   return (call as { messages: { role: string; tool_call_id?: string; content: string }[] })
     .messages;
 }
+
+// WARP-2896 — the workshop's tools reach the wire ONLY through a caller's
+// binding (`bound_tool_domains`, set by the agent-run worker for a workshop
+// run). Chat's explicit `allowed_tools` is narrowed by role/scope alone, so a
+// chat client can put workspace_* in the pool; without a binding the loop must
+// still never advertise them.
+describe("runAgent — bound_tool_domains (WARP-2896)", () => {
+  const WORKSPACE = ["workspace_read", "workspace_write", "workspace_run", "workspace_propose"];
+  const GOAL = "add a lines field to the word counter, run the tests, and propose it";
+
+  function depsWithWorkspace() {
+    const chat = vi.fn().mockImplementation(async () => ({
+      ok: true,
+      json: async () => ({ choices: [{ message: { role: "assistant", content: "done" } }] }),
+    }));
+    const listed = [...POOL_TOOLS, ...WORKSPACE.map((name) => ({ name, description: "d", inputSchema: {} }))];
+    const deps: AgentDeps = {
+      mcp: { listTools: vi.fn().mockResolvedValue(listed), callTool: vi.fn() } as never,
+      aiGateway: { chat } as never,
+    };
+    return { deps, chat };
+  }
+
+  it("a chat-shaped request that lists workspace tools in allowed_tools advertises none of them", async () => {
+    const { deps, chat } = depsWithWorkspace();
+    await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: GOAL }],
+      allowed_tools: [...POOL_TOOLS.map((t) => t.name), ...WORKSPACE],
+      tool_selection_mode: "domains",
+    });
+    const names = toolNames(chat.mock.calls[0]![0]);
+    for (const name of WORKSPACE) expect(names, name).not.toContain(name);
+  });
+
+  it("the same request WITH the binding advertises all of them", async () => {
+    // MUTATION: drop `boundDomains: req.bound_tool_domains` from the loop's
+    // selection call and this goes red.
+    const { deps, chat } = depsWithWorkspace();
+    await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: GOAL }],
+      allowed_tools: [...POOL_TOOLS.map((t) => t.name), ...WORKSPACE],
+      tool_selection_mode: "domains",
+      bound_tool_domains: ["workspace"],
+    });
+    const names = toolNames(chat.mock.calls[0]![0]);
+    for (const name of WORKSPACE) expect(names, name).toContain(name);
+  });
+
+  it("a binding cannot resurrect a tool outside allowed_tools", async () => {
+    const { deps, chat } = depsWithWorkspace();
+    await runAgent(deps, {
+      model: "m",
+      messages: [{ role: "user", content: GOAL }],
+      allowed_tools: POOL_TOOLS.map((t) => t.name),
+      tool_selection_mode: "domains",
+      bound_tool_domains: ["workspace"],
+    });
+    const names = toolNames(chat.mock.calls[0]![0]);
+    for (const name of WORKSPACE) expect(names, name).not.toContain(name);
+  });
+});
+
+describe("WARP-2979 — a Security tool on a cloud turn (ADR-059 P4 §6.13)", () => {
+  it("is not in the pool, and a forced call stays UNKNOWN_TOOL — never dispatched, never self-healed", async () => {
+    const { withholdStoredContentTools } = await import("../services/stored-content-egress.service.js");
+    const pool = [
+      { name: "search_content", description: "d", inputSchema: {} },
+      { name: "list_network_devices", description: "d", inputSchema: {} },
+      { name: "security_list_incidents", description: "d", inputSchema: {} },
+      { name: "security_search_events", description: "d", inputSchema: {} },
+    ];
+    const forced = {
+      role: "assistant",
+      content: null,
+      tool_calls: [{ id: "s1", type: "function", function: { name: "security_list_incidents", arguments: '{"period":"last_night"}' } }],
+    };
+    const turns = [forced, { role: "assistant", content: "done" }];
+    const chat = vi.fn().mockImplementation(async () => ({
+      ok: true,
+      json: async () => ({ choices: [{ message: turns[Math.min(chat.mock.calls.length - 1, turns.length - 1)] }] }),
+    }));
+    const callTool = vi.fn();
+    const deps: AgentDeps = { mcp: { listTools: vi.fn().mockResolvedValue(pool), callTool } as never, aiGateway: { chat } as never };
+
+    // The route's off-LAN step: the materialised pool minus the withheld domains (files and security here).
+    const allowed = withholdStoredContentTools(pool.map((t) => t.name));
+    expect(allowed).toEqual(["list_network_devices"]);
+
+    await runAgent(deps, {
+      model: "m",
+      // A Security question: the selection rule would bring the domain in, if it were allowed at all.
+      messages: [{ role: "user", content: "anything odd at the back door last night?" }],
+      tool_selection_mode: "domains",
+      allowed_tools: allowed,
+    });
+
+    expect(callTool).not.toHaveBeenCalled();
+    const reply = messages_(chat.mock.calls[1]![0]).find((m) => m.role === "tool" && m.tool_call_id === "s1") as { content: string } | undefined;
+    expect(JSON.parse(reply!.content).error.code).toBe("UNKNOWN_TOOL");
+    for (const call of chat.mock.calls) {
+      expect(toolNames(call[0])).not.toContain("security_list_incidents");
+      expect(toolNames(call[0])).not.toContain("security_search_events");
+    }
+  });
+});

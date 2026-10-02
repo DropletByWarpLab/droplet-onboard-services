@@ -18,14 +18,16 @@ __setColumnCryptoKeyForTest(Buffer.alloc(32, 42).toString("base64"));
 // --- Mock ioredis ---
 // Disable caching in tests to avoid stale data between test cases
 vi.mock("ioredis", () => {
-  const RedisMock = vi.fn().mockImplementation(() => ({
-    connect: vi.fn().mockResolvedValue(undefined),
-    get: vi.fn().mockResolvedValue(null),    // Always cache miss
-    set: vi.fn().mockResolvedValue("OK"),    // Accept but don't store
-    del: vi.fn().mockResolvedValue(1),
-    ping: vi.fn().mockResolvedValue("PONG"),
-    disconnect: vi.fn(),
-  }));
+  const RedisMock = vi.fn().mockImplementation(function () {
+    return {
+      connect: vi.fn().mockResolvedValue(undefined),
+      get: vi.fn().mockResolvedValue(null),    // Always cache miss
+      set: vi.fn().mockResolvedValue("OK"),    // Accept but don't store
+      del: vi.fn().mockResolvedValue(1),
+      ping: vi.fn().mockResolvedValue("PONG"),
+      disconnect: vi.fn(),
+    };
+  });
   return { default: RedisMock };
 });
 
@@ -255,7 +257,7 @@ vi.mock("@prisma/client", () => {
   }).$transaction;
 
   return {
-    PrismaClient: vi.fn(() => mockPrisma),
+    PrismaClient: vi.fn(function () { return mockPrisma; }),
     // Mirrors the generated client's top-level enum exports (const objects
     // whose values equal their keys). off-lan-gate.service.ts imports the
     // `OffLanChannelKey` value to key its `offLanAllowlistChannel.findUnique`
@@ -268,6 +270,8 @@ vi.mock("@prisma/client", () => {
       telemetry: "telemetry",
       web_fetch: "web_fetch",
       ambient_data: "ambient_data",
+      web_push: "web_push",
+      place_lookup: "place_lookup",
     },
     // WARP-181: actor attribution on ActivityRow. Mirrors the schema's
     // `enum ActivityActorType` — keep in lockstep or ~200 suites cascade
@@ -297,4 +301,19 @@ vi.mock("@prisma/client", () => {
       AnyNull: makeJsonNullSentinel("AnyNull"),
     },
   };
+});
+
+// --- WARP-2972: the module verdict starts PERMISSIVE in every suite ---
+// The chat pool, /api/llm/tools and the mcp-server's verdict route now ask
+// `resolveToolModuleVerdict` which tool domains a module toggle withholds, and
+// an UNWIRED process fails closed (every module-owned tool withheld). A suite
+// that predates WARP-2972 and never touches modules must keep testing what it
+// tests, so the real module is pre-bound to "withhold nothing" the first time
+// it is loaded — which also makes app.ts's idempotent `initToolModuleVerdict`
+// a no-op under createApp. A suite that is ABOUT the gate replaces the binding
+// with `_setToolModuleVerdictForTests(...)`; `null` models an unwired process.
+vi.mock("../services/tool-module-verdict.service.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/tool-module-verdict.service.js")>();
+  actual._setToolModuleVerdictForTests(async () => ({ withheldDomains: new Set<string>() }));
+  return actual;
 });

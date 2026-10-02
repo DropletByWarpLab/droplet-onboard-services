@@ -16,12 +16,14 @@ import {
   assertTransitionAllowed,
   transitionDeviceUpdate,
   supersedePendingUpdates,
+  recordCommittedOutcome,
 } from "./transitions.js";
 
 interface Row {
   id: string;
   status: string;
   failureReason: string | null;
+  outcome?: string;
 }
 
 function createPrismaStub(rows: Row[]) {
@@ -38,12 +40,13 @@ function createPrismaStub(rows: Row[]) {
       },
       updateMany: async (args: {
         where: { id?: string; status?: string };
-        data: { status?: string; failureReason?: string | null };
+        data: { status?: string; failureReason?: string | null; outcome?: string };
       }) => {
         let count = 0;
         for (const row of rows) {
           if (args.where.id !== undefined && row.id !== args.where.id) continue;
           if (args.where.status !== undefined && row.status !== args.where.status) continue;
+          if (args.data.outcome !== undefined) row.outcome = args.data.outcome;
           if (args.data.status !== undefined) row.status = args.data.status;
           if ("failureReason" in args.data) row.failureReason = args.data.failureReason ?? null;
           count += 1;
@@ -175,6 +178,34 @@ describe("DeviceUpdate advance-only transitions (WARP-541)", () => {
       "superseded",
       "applying",
       "committed",
+    ]);
+  });
+});
+
+describe("DeviceUpdate outcome (WARP-3007)", () => {
+  it("a status transition carries its outcome in the same guarded write", async () => {
+    const stub = createPrismaStub([{ id: "du-1", status: "applying", failureReason: null }]);
+    await transitionDeviceUpdate(asPrisma(stub), {
+      id: "du-1",
+      to: "rolled_back",
+      failureReason: "health_gate_failed",
+      outcome: "rolled_back",
+    });
+    expect(stub.deviceUpdate._rows()[0]).toMatchObject({ status: "rolled_back", outcome: "rolled_back" });
+  });
+
+  it("the post-commit outcome only ever lands on a committed row", async () => {
+    const stub = createPrismaStub([
+      { id: "du-1", status: "committed", failureReason: null, outcome: "starting_services" },
+      { id: "du-2", status: "rolled_back", failureReason: "health_gate_failed", outcome: "rolled_back" },
+    ]);
+    expect(
+      await recordCommittedOutcome(asPrisma(stub), { id: "du-1", outcome: "services_start_failed" }),
+    ).toBe(true);
+    expect(await recordCommittedOutcome(asPrisma(stub), { id: "du-2", outcome: "committed" })).toBe(false);
+    expect(stub.deviceUpdate._rows().map((r) => r.outcome)).toEqual([
+      "services_start_failed",
+      "rolled_back",
     ]);
   });
 });

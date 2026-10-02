@@ -87,16 +87,54 @@ import {
 } from "@droplet/shared-types";
 import { config } from "../config.js";
 import { getApplianceContract } from "../services/appliance-contract.service.js";
-import { verifyAccessToken } from "../services/jwt.service.js";
+import {
+  verifyAccessToken,
+  type JwtPayload,
+  type Role,
+} from "../services/jwt.service.js";
 import { checkSession } from "../services/session.service.js";
+import { isUserDenied } from "../services/auth-denylist.service.js";
 import { SESSION_COOKIE_NAME } from "../middleware/auth.js";
 import { cacheGet, cacheSet, cacheDel } from "../services/cache.service.js";
 import { kickScreenQRRefresh } from "../services/screen-qr.service.js";
-import { warmDefaultModel } from "../services/model-readiness.service.js";
+import { warmActiveModel } from "../services/active-model.service.js";
 import { createLogger } from "../lib/logger.js";
 import { sensitiveRateLimit, standardRateLimit } from "../middleware/rate-limit.js";
 
 const logger = createLogger("setup-route");
+
+/**
+ * WARP-3193 SEC-AUTH-5 — the write gate for a SET-UP ("ready") box on this
+ * pre-authMiddleware router. `verifyAccessToken` alone accepts ANY role and a
+ * revoked-but-unexpired (≤15 min) token, so mirror what authMiddleware would
+ * have checked: the hard-revocation denylist, a live session record (a Redis
+ * error fails OPEN, as in the middleware and /setup/box-name), then the role.
+ * First-run (unclaimed) writes never reach this — onboarding stays open.
+ */
+type ReadyBoxWriteGate =
+  | { ok: true }
+  | { ok: false; reason: "unauthenticated" | "session_expired" | "forbidden" };
+
+async function gateReadyBoxWrite(
+  session: JwtPayload | null,
+  allowedRoles: readonly Role[],
+): Promise<ReadyBoxWriteGate> {
+  if (!session) return { ok: false, reason: "unauthenticated" };
+  if (await isUserDenied(session.sub)) return { ok: false, reason: "session_expired" };
+  if (session.sid) {
+    const sess = await checkSession(session.sid);
+    if (sess.kind !== "ok" && sess.kind !== "error") {
+      return { ok: false, reason: "session_expired" };
+    }
+  }
+  if (!allowedRoles.includes(session.role)) return { ok: false, reason: "forbidden" };
+  return { ok: true };
+}
+
+const SESSION_EXPIRED_BODY = {
+  error: "Your session is no longer valid.",
+  code: "SESSION_EXPIRED",
+} as const;
 
 // PR #373 / WARP-804 — STEP_AFTER_CLAIM (the wizard step the customer lands on
 // after a successful claim: `account`, since claim slots FIRST) is now owned by
@@ -340,8 +378,9 @@ export function createSetupRouter(
      *  survives); tests inject a fake so they never touch the real config. */
     getEnvBoxName?: () => string;
     /** WARP-1041 — fire-and-forget model pre-warm. Defaults to the
-     *  production `warmDefaultModel` (debounced, error-swallowing); route
-     *  tests inject a spy so no Ollama is touched. */
+     *  production `warmActiveModel` (WARP-3047: the box's ACTIVE model,
+     *  resolved from the cached gateway listing; debounced per model,
+     *  error-swallowing); route tests inject a spy so no Ollama is touched. */
     warmDefaultModel?: () => Promise<void>;
   },
 ): Router {
@@ -352,7 +391,7 @@ export function createSetupRouter(
   const releaseBoxNameFromHq = deps?.releaseBoxName ?? createBoxNameReleaser();
   const reissueTls = deps?.reissueTls ?? reissueTlsNow;
   const getEnvBoxName = deps?.getEnvBoxName ?? (() => config.DROPLET_BOX_NAME);
-  const warmModel = deps?.warmDefaultModel ?? warmDefaultModel;
+  const warmModel = deps?.warmDefaultModel ?? (() => warmActiveModel(prisma));
 
   // ── GET /api/setup/state ───────────────────────────────────────
   router.get("/setup/state", async (_req: Request, res, next) => {
@@ -408,10 +447,40 @@ export function createSetupRouter(
       //       exists, so an anonymous pre-claim caller can never flip it.
       // The session check here is a fast 403 for the common anonymous case;
       // the M2 precondition in the service is the authoritative backstop.
+      //
+      // WARP-3193 SEC-AUTH-5: none of that applies once the box is SET UP.
+      // Every write then needs a live, non-revoked session; moving the step
+      // or re-asserting `ready` is owner-only. Completing the tour is open to
+      // any signed-in member: AuthGate shows the pending tour to whoever
+      // signs in first, and owner-only would re-trap everyone else in it.
+      const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
+      const session = sessionToken ? verifyAccessToken(sessionToken) : null;
+      if ((await getSetupState(prisma)).appliance === "ready") {
+        const ownerOnly = body.setup_step !== undefined || body.appliance !== undefined;
+        const gate = await gateReadyBoxWrite(
+          session,
+          ownerOnly ? ["owner"] : ["owner", "admin", "family", "guest"],
+        );
+        if (!gate.ok) {
+          if (gate.reason === "unauthenticated") {
+            res.status(401).json({
+              error: "Changing setup state on a set-up appliance requires an authenticated session.",
+              code: "SETUP_AUTH_REQUIRED",
+            });
+          } else if (gate.reason === "session_expired") {
+            res.status(401).json(SESSION_EXPIRED_BODY);
+          } else {
+            res.status(403).json({
+              error: "Only the owner can change the setup state.",
+              code: "SETUP_FORBIDDEN",
+            });
+          }
+          return;
+        }
+      }
+
       let claimAuthorized = false;
       if (body.appliance === "ready") {
-        const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
-        const session = sessionToken ? verifyAccessToken(sessionToken) : null;
         if (session) {
           claimAuthorized = true;
         } else if ((await prisma.user.count()) === 0) {
@@ -670,15 +739,30 @@ export function createSetupRouter(
       // tz/logo, or re-reserve its slug — so we require a session then. This
       // also closes the unauthenticated slug-uniqueness probe oracle on a
       // set-up box.
+      //
+      // WARP-3193 SEC-AUTH-5: "a valid session cookie" is not enough on a
+      // set-up box — the signature alone accepts any role and a revoked
+      // token. Owner only (the POST /settings/workspace bar), on a live,
+      // non-revoked session.
       const sessionToken = req.cookies?.[SESSION_COOKIE_NAME];
       const session = sessionToken ? verifyAccessToken(sessionToken) : null;
-      if (!session) {
-        const { appliance } = await getSetupState(prisma);
-        if (appliance === "ready") {
-          res.status(401).json({
-            error: "Editing the workspace requires an authenticated session.",
-            code: "ORG_AUTH_REQUIRED",
-          });
+      const { appliance } = await getSetupState(prisma);
+      if (appliance === "ready") {
+        const gate = await gateReadyBoxWrite(session, ["owner"]);
+        if (!gate.ok) {
+          if (gate.reason === "unauthenticated") {
+            res.status(401).json({
+              error: "Editing the workspace requires an authenticated session.",
+              code: "ORG_AUTH_REQUIRED",
+            });
+          } else if (gate.reason === "session_expired") {
+            res.status(401).json(SESSION_EXPIRED_BODY);
+          } else {
+            res.status(403).json({
+              error: "Only the owner can edit the workspace.",
+              code: "ORG_FORBIDDEN",
+            });
+          }
           return;
         }
       }

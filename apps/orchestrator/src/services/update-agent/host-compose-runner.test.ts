@@ -3,7 +3,7 @@
  *
  * The runner is the ONLY thing in the update agent that touches the host
  * compose socket, and it does so exclusively by exec'ing
- * scripts/lib/apply-update.sh with an ARGV array (never a shell string) so
+ * docker/ota/apply-update.sh with an ARGV array (never a shell string) so
  * a manifest field can never be interpreted as a command. These tests pin
  * that contract: the exact subcommand + argv the runner builds for each
  * step, the JSON it hands the script via a temp file (not argv, to dodge
@@ -12,10 +12,16 @@
  * exec boundary is faked so the command surface is asserted deterministically.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createHostComposeRunner, type ExecFn } from "./host-compose-runner.js";
+import { ncTransferOwnership, NcTransferError } from "./host-compose-runner.js";
+import {
+  createHostComposeRunner,
+  parseEnvReconcileReport,
+  type ExecFn,
+} from "./host-compose-runner.js";
 import type { ReleaseManifest, ReleaseService } from "./manifest.js";
 
 const DIGEST = (c: string) => `sha256:${c.repeat(64)}`;
@@ -69,7 +75,7 @@ afterEach(() => {
 
 function makeRunner(exec: ExecFn) {
   return createHostComposeRunner({
-    scriptPath: "/opt/droplet/scripts/lib/apply-update.sh",
+    scriptPath: "/opt/droplet/docker/ota/apply-update.sh",
     composeFile: "/opt/droplet/docker/docker-compose.yml",
     updatesDir: workDir,
     exec,
@@ -94,7 +100,7 @@ describe("createHostComposeRunner (WARP-539)", () => {
       missing: null,
     });
     // Never a shell string — subcommand + argv only.
-    expect(calls[0]!.file).toBe("/opt/droplet/scripts/lib/apply-update.sh");
+    expect(calls[0]!.file).toBe("/opt/droplet/docker/ota/apply-update.sh");
     expect(calls[0]!.args).toEqual([
       "current-image-refs",
       "--compose-file",
@@ -237,6 +243,163 @@ describe("createHostComposeRunner (WARP-539)", () => {
     expect(calls[0]!.args).toContain(tarPath);
   });
 
+  it("stageClientApp lets the caller write into clients/ then hands the helper that HOST path (WARP-3120)", async () => {
+    const calls: Array<{ args: string[]; timeoutMs?: number }> = [];
+    const runner = createHostComposeRunner({
+      scriptPath: "/opt/droplet/docker/ota/apply-update.sh",
+      composeFile: "/opt/droplet/docker/docker-compose.yml",
+      updatesDir: workDir,
+      helperUpdatesDir: "/host/updates",
+      exec: async (_file, args, opts) => {
+        calls.push({ args, timeoutMs: opts?.timeoutMs });
+        return { stdout: "", stderr: "" };
+      },
+    });
+    const client = {
+      platform: "macos" as const,
+      version: "0.2.0",
+      file: "Droplet-0.2.0.dmg",
+      size: 3,
+      sha256: "e".repeat(64),
+    };
+    let written = "";
+    await runner.stageClientApp({
+      updateId: "du-1",
+      client,
+      write: async (dest) => {
+        written = dest;
+        writeFileSync(dest, "dmg");
+      },
+    });
+    expect(written).toBe(path.join(workDir, "du-1", "clients", "Droplet-0.2.0.dmg"));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.args).toEqual([
+      "stage-client-apps",
+      "--compose-file",
+      "/opt/droplet/docker/docker-compose.yml",
+      "--update-id",
+      "du-1",
+      "--platform",
+      "macos",
+      "--version",
+      "0.2.0",
+      "--file",
+      "/host/updates/du-1/clients/Droplet-0.2.0.dmg",
+    ]);
+    expect(calls[0]!.timeoutMs).toBeGreaterThan(60_000);
+    // The update dir's copy is gone once stage.sh has it.
+    expect(existsSync(written)).toBe(false);
+  });
+
+  describe("stageClientApp skips what /downloads already serves", () => {
+    const client = {
+      platform: "macos" as const,
+      version: "0.2.0",
+      file: "Droplet-0.2.0.dmg",
+      size: 3,
+      sha256: "e".repeat(64),
+    };
+    function catalogDir(entry: { version: string; name: string; sha256: string }): string {
+      const dir = path.join(workDir, "app-downloads");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        path.join(dir, "catalog.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          platforms: [
+            { platform: "macos", version: entry.version, primary: entry.name,
+              assets: [{ name: entry.name, kind: "installer", size: 3, sha256: entry.sha256 }] },
+          ],
+        }),
+      );
+      return dir;
+    }
+    function runnerWith(appDownloadsDir: string, exec: ExecFn) {
+      return createHostComposeRunner({
+        scriptPath: "/opt/droplet/docker/ota/apply-update.sh",
+        composeFile: "/opt/droplet/docker/docker-compose.yml",
+        updatesDir: workDir,
+        appDownloadsDir,
+        exec,
+      });
+    }
+
+    it("same version, file and sha256 → no download, no helper call", async () => {
+      const { fn, calls } = fakeExec();
+      const runner = runnerWith(
+        catalogDir({ version: "0.2.0", name: "Droplet-0.2.0.dmg", sha256: "e".repeat(64) }),
+        fn,
+      );
+      let wrote = false;
+      const outcome = await runner.stageClientApp({
+        updateId: "du-1",
+        client,
+        write: async () => {
+          wrote = true;
+        },
+      });
+      expect(outcome).toBe("already_staged");
+      expect(wrote).toBe(false);
+      expect(calls).toHaveLength(0);
+    });
+
+    it.each([
+      ["a different version", { version: "0.1.0", name: "Droplet-0.2.0.dmg", sha256: "e".repeat(64) }],
+      ["a different sha256", { version: "0.2.0", name: "Droplet-0.2.0.dmg", sha256: "f".repeat(64) }],
+      ["a different file", { version: "0.2.0", name: "Droplet-0.2.0b.dmg", sha256: "e".repeat(64) }],
+    ])("%s in the catalog → downloads and stages", async (_l, entry) => {
+      const { fn, calls } = fakeExec();
+      const runner = runnerWith(catalogDir(entry), fn);
+      const outcome = await runner.stageClientApp({
+        updateId: "du-1",
+        client,
+        write: async (dest) => writeFileSync(dest, "dmg"),
+      });
+      expect(outcome).toBe("staged");
+      expect(calls[0]!.args[0]).toBe("stage-client-apps");
+    });
+
+    it("no catalog at all → downloads and stages", async () => {
+      const { fn, calls } = fakeExec();
+      const runner = runnerWith(path.join(workDir, "nothing-here"), fn);
+      await runner.stageClientApp({ updateId: "du-1", client, write: async (d) => writeFileSync(d, "dmg") });
+      expect(calls).toHaveLength(1);
+    });
+  });
+
+  it("stageClientApp removes the downloaded copy when the helper fails too", async () => {
+    const runner = makeRunner(async () => {
+      throw Object.assign(new Error("Command failed"), { stderr: "no stage.sh" });
+    });
+    let written = "";
+    await expect(
+      runner.stageClientApp({
+        updateId: "du-1",
+        client: { platform: "macos", version: "0.2.0", file: "D.dmg", size: 3, sha256: "e".repeat(64) },
+        write: async (dest) => {
+          written = dest;
+          writeFileSync(dest, "dmg");
+        },
+      }),
+    ).rejects.toThrow("Command failed");
+    expect(existsSync(written)).toBe(false);
+  });
+
+  it("stageClientApp never calls the helper when the download fails", async () => {
+    const { fn, calls } = fakeExec();
+    const runner = makeRunner(fn);
+    await expect(
+      runner.stageClientApp({
+        updateId: "du-1",
+        client: { platform: "macos", version: "0.2.0", file: "D.dmg", size: 1, sha256: "e".repeat(64) },
+        write: async () => {
+          throw new Error("sha256 mismatch");
+        },
+      }),
+    ).rejects.toThrow("sha256 mismatch");
+    expect(calls).toHaveLength(0);
+  });
+
   it("recreateServices passes the service list + target and NOT the orchestrator implicitly", async () => {
     const { fn, calls } = fakeExec();
     const runner = makeRunner(fn);
@@ -325,6 +488,116 @@ describe("createHostComposeRunner (WARP-539)", () => {
     expect(calls[1]!.args).toContain("du-1");
   });
 
+  it("enabledServices parses one service per line and drops anything not service-shaped (WARP-2970)", async () => {
+    const { fn, calls } = fakeExec({
+      "enabled-services": "orchestrator\nemail-indexer\n\nWARN something odd\n",
+    });
+    const runner = makeRunner(fn);
+    expect(await runner.enabledServices({ updateId: "du-none" })).toEqual([
+      "orchestrator",
+      "email-indexer",
+    ]);
+    // WARP-2995: no reconcile report → explicit EMPTY profiles (profile-less
+    // services only), never "whatever this container's env says".
+    expect(calls[0]!.args).toEqual([
+      "enabled-services",
+      "--compose-file",
+      "/opt/droplet/docker/docker-compose.yml",
+      "--profiles",
+      "",
+    ]);
+  });
+
+  it("enabledServices passes the box's real profiles from the update's reconcile report (WARP-2995)", async () => {
+    const { fn, calls } = fakeExec({ "enabled-services": "gateway\n" });
+    const runner = makeRunner(fn);
+    mkdirSync(path.join(workDir, "du-7"), { recursive: true });
+    writeFileSync(
+      path.join(workDir, "du-7", "env-reconcile.json"),
+      '{"addedKeys":[],"addedProfiles":["email"],"profiles":"linux,eval,email","unitUpdated":true,"backup":null}\n',
+    );
+    await runner.enabledServices({ updateId: "du-7" });
+    expect(calls[0]!.args.slice(-2)).toEqual(["--profiles", "linux,eval,email"]);
+  });
+
+  it("reconcileEnv runs the helper with the release image and parses its report (WARP-2995)", async () => {
+    const report =
+      '{"addedKeys":["SANDBOX_SERVICE_TOKEN"],"addedProfiles":["email"],"profiles":"linux,email","unitUpdated":true,"backup":"/d/.env.bak.ota-du-3"}';
+    const { fn, calls } = fakeExec({ "reconcile-env": `${report}\n` });
+    const runner = makeRunner(fn);
+    const img = `ghcr.io/x/droplet-orchestrator@${DIGEST("a")}`;
+    await expect(runner.reconcileEnv({ updateId: "du-3", image: img })).resolves.toEqual({
+      addedKeys: ["SANDBOX_SERVICE_TOKEN"],
+      addedProfiles: ["email"],
+      profiles: "linux,email",
+      unitUpdated: true,
+    });
+    expect(calls[0]!.args).toEqual([
+      "reconcile-env",
+      "--compose-file",
+      "/opt/droplet/docker/docker-compose.yml",
+      "--update-id",
+      "du-3",
+      "--image",
+      img,
+    ]);
+  });
+
+  it("parseEnvReconcileReport refuses an off-shape report (a value where a name belongs)", () => {
+    expect(() =>
+      parseEnvReconcileReport('{"addedKeys":["A=secret"],"addedProfiles":[],"profiles":"","unitUpdated":false}'),
+    ).toThrow(/unexpected shape/);
+    expect(() =>
+      parseEnvReconcileReport('{"addedKeys":[],"addedProfiles":[],"profiles":"a;b","unitUpdated":false}'),
+    ).toThrow(/unexpected shape/);
+    expect(() => parseEnvReconcileReport("not json")).toThrow();
+  });
+
+  it("startServices pins each service in override-grow.yml and recreates with --target grow (WARP-2970)", async () => {
+    const { fn, calls } = fakeExec();
+    const runner = makeRunner(fn);
+    const svc: ReleaseService = {
+      name: "email-indexer",
+      image: `ghcr.io/x/email-indexer@${DIGEST("5")}`,
+      digest: DIGEST("5"),
+      healthcheck: { type: "none" },
+    };
+    await mkdir(path.join(workDir, "du-9"), { recursive: true });
+    await runner.startServices({ updateId: "du-9", services: [svc] });
+    const yaml = readFileSync(path.join(workDir, "du-9", "override-grow.yml"), "utf8");
+    expect(yaml).toContain(`  email-indexer:\n    image: ghcr.io/x/email-indexer@${DIGEST("5")}`);
+    expect(calls[0]!.args).toEqual([
+      "recreate-services",
+      "--compose-file",
+      "/opt/droplet/docker/docker-compose.yml",
+      "--update-id",
+      "du-9",
+      "--services",
+      "email-indexer",
+      "--target",
+      "grow",
+    ]);
+  });
+
+  it("startServices reports only what the helper started, not what it skipped (WARP-2970)", async () => {
+    const { fn } = fakeExec({
+      "recreate-services": '{"failed":[],"skipped":["mcp-server"]}\n',
+    });
+    const runner = makeRunner(fn);
+    const svc = (name: string): ReleaseService => ({
+      name,
+      image: `ghcr.io/x/${name}@${DIGEST("5")}`,
+      digest: DIGEST("5"),
+      healthcheck: { type: "none" },
+    });
+    await mkdir(path.join(workDir, "du-10"), { recursive: true });
+    const res = await runner.startServices({
+      updateId: "du-10",
+      services: [svc("email-indexer"), svc("mcp-server")],
+    });
+    expect(res.started).toEqual(["email-indexer"]);
+  });
+
   it("never builds a shell string — argv is always an array of discrete tokens", async () => {
     const { fn, calls } = fakeExec({ "current-image-refs": "{}" });
     const runner = makeRunner(fn);
@@ -332,5 +605,125 @@ describe("createHostComposeRunner (WARP-539)", () => {
     await runner.currentImageRefs(["orchestrator; rm -rf /"]);
     // The whole thing lands as ONE argv token, never split by a shell.
     expect(calls[0]!.args).toContain("orchestrator; rm -rf /");
+  });
+});
+
+describe("WARP-3007 — the helper runs on the host", () => {
+  it("hands the helper HOST paths (helperUpdatesDir) while writing through its own mount", async () => {
+    const calls: Array<{ args: string[] }> = [];
+    const runner = createHostComposeRunner({
+      scriptPath: "/opt/droplet/docker/ota/apply-update.sh",
+      composeFile: "/opt/droplet/docker/docker-compose.yml",
+      updatesDir: workDir,
+      helperUpdatesDir: "/var/lib/docker/volumes/docker_ota-updates/_data",
+      exec: async (_file, args) => {
+        calls.push({ args });
+        return { stdout: "", stderr: "" };
+      },
+    });
+    await runner.snapshot({
+      updateId: "du-1",
+      manifest: buildManifest(),
+      previousRefs: { orchestrator: DIGEST("5"), "web-dashboard": DIGEST("6") },
+    });
+    await runner.stageConfigs({
+      updateId: "du-1",
+      configsTar: Buffer.from("tar"),
+      manifest: buildManifest(),
+    });
+    const host = "/var/lib/docker/volumes/docker_ota-updates/_data/du-1";
+    expect(calls[0]!.args).toContain(`${host}/backup`);
+    expect(calls[1]!.args).toContain(`${host}/configs.tar.gz`);
+    // …and the files themselves landed through this process's mount.
+    expect(readFileSync(path.join(workDir, "du-1", "configs.tar.gz"), "utf8")).toBe("tar");
+    expect(readFileSync(path.join(workDir, "du-1", "services.txt"), "utf8")).toContain("orchestrator");
+  });
+
+  it("passes the registry token to pull-images ONLY", async () => {
+    const seen: Array<{ sub: string; env?: Record<string, string> }> = [];
+    const runner = createHostComposeRunner({
+      scriptPath: "/opt/droplet/docker/ota/apply-update.sh",
+      composeFile: "/opt/droplet/docker/docker-compose.yml",
+      updatesDir: workDir,
+      githubToken: "ghp_secret",
+      exec: async (_file, args, opts) => {
+        seen.push({ sub: args[0]!, env: opts?.env });
+        return { stdout: "{}", stderr: "" };
+      },
+    });
+    await runner.currentImageRefs(["orchestrator"]);
+    await runner.pullImages(buildManifest().services);
+    await runner.migrateDeploy();
+    expect(seen.find((c) => c.sub === "pull-images")?.env).toEqual({
+      DROPLET_OTA_GITHUB_TOKEN: "ghp_secret",
+    });
+    expect(seen.filter((c) => c.sub !== "pull-images").every((c) => c.env === undefined)).toBe(true);
+  });
+});
+
+
+describe("ncTransferOwnership (WARP-3169 leaver hand-over)", () => {
+  const base = { scriptPath: "/h/apply-update.sh", composeFile: "/h/compose.yml" };
+
+  it("passes both ids as separate argv entries and parses the folder", async () => {
+    const exec = vi.fn().mockResolvedValue({
+      stdout: "Transferring files to anna@corp.example/files/transferred from tomas.w on 2026-09-25 10-00-00 ...\n",
+      stderr: "",
+    });
+    const out = await ncTransferOwnership({ ...base, exec, from: "tomas.w", to: "anna@corp.example" });
+    expect(exec).toHaveBeenCalledWith(
+      "/h/apply-update.sh",
+      ["nc-transfer-ownership", "--compose-file", "/h/compose.yml", "--from", "tomas.w", "--to", "anna@corp.example"],
+      { timeoutMs: 660_000 },
+    );
+    expect(out.folder).toBe("transferred from tomas.w on 2026-09-25 10-00-00");
+  });
+
+  it.each(["--", "-rf", "--help", "a;rm -rf /", "a b", "a'b", "a$(id)", "a/../b", "a\nb", "", "x".repeat(65)])(
+    "refuses %j before touching the exec boundary",
+    async (bad) => {
+      const exec = vi.fn();
+      await expect(ncTransferOwnership({ ...base, exec, from: bad, to: "anna" })).rejects.toBeInstanceOf(NcTransferError);
+      await expect(ncTransferOwnership({ ...base, exec, from: "tomas", to: bad })).rejects.toBeInstanceOf(NcTransferError);
+      expect(exec).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses a transfer to the same user", async () => {
+    const exec = vi.fn();
+    await expect(ncTransferOwnership({ ...base, exec, from: "anna", to: "anna" })).rejects.toBeInstanceOf(NcTransferError);
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it("a helper failure becomes an NcTransferError and never logs occ's stdout", async () => {
+    const err: any = new Error("exited 1");
+    err.stdout = "secret-looking/file/name.pdf";
+    err.stderr = "noise\n[apply-update] ERROR: unknown Nextcloud user: anna";
+    const logger: any = { error: vi.fn() };
+    await expect(
+      ncTransferOwnership({ ...base, exec: vi.fn().mockRejectedValue(err), from: "tomas", to: "anna", logger }),
+    ).rejects.toBeInstanceOf(NcTransferError);
+    const logged = JSON.stringify(logger.error.mock.calls);
+    expect(logged).toContain("unknown Nextcloud user: anna");
+    expect(logged).not.toContain("name.pdf");
+  });
+
+  it("a timeout after occ started is flagged as possibly partial; a pre-start refusal is not", async () => {
+    const timedOut = new Error("OTA host exec: nc-transfer-ownership did not finish within 660000 ms");
+    const e1 = await ncTransferOwnership({ ...base, exec: vi.fn().mockRejectedValue(timedOut), from: "tomas", to: "anna", logger: { error: vi.fn() } as any }).catch((e) => e);
+    expect(e1).toMatchObject({ mayBePartial: true, reason: "timed out" });
+    expect(e1.message).toMatch(/may already be in/);
+
+    const refused: any = new Error("exited 1");
+    refused.stderr = "[apply-update] ERROR: unknown Nextcloud user: anna\n";
+    const e2 = await ncTransferOwnership({ ...base, exec: vi.fn().mockRejectedValue(refused), from: "tomas", to: "anna", logger: { error: vi.fn() } as any }).catch((e) => e);
+    expect(e2).toMatchObject({ mayBePartial: false, reason: "unknown Nextcloud user: anna" });
+
+    const occFailed: any = new Error("OTA host helper nc-transfer-ownership exited 1: boom");
+    occFailed.stderr = "[apply-update] nc-transfer-ownership tomas -> anna\nboom /files/secret.pdf\n";
+    const logger: any = { error: vi.fn() };
+    const e3 = await ncTransferOwnership({ ...base, exec: vi.fn().mockRejectedValue(occFailed), from: "tomas", to: "anna", logger }).catch((e) => e);
+    expect(e3).toMatchObject({ mayBePartial: true, reason: "exited 1" });
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain("secret.pdf");
   });
 });

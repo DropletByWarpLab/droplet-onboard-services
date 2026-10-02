@@ -19,8 +19,9 @@ async def test_health_ok(client, respx_mock):
     body = resp.json()
     # WARP-284: schema_version is the canonical drift detector for the
     # cross-repo contract. The orchestrator's _LimitsCache logs a warning
-    # when this is newer than what it knows. v2 = WARP-1825 placement block.
-    assert body["schema_version"] == 2
+    # when this is newer than what it knows. v2 = WARP-1825 placement block;
+    # v3 = WARP-3047 (max_loaded_models only where a cap is enforced).
+    assert body["schema_version"] == 3
     assert body["status"] == "ok"
     assert body["ollama_reachable"] is True
     assert body["models_loading"] == []
@@ -101,3 +102,34 @@ async def test_health_degraded_when_circuit_open(client, respx_mock):
         # The autouse _reset_circuit fixture resets between tests, but reset
         # here too in case this assertion fails before the fixture runs.
         reset_circuit()
+
+
+@pytest.mark.asyncio
+async def test_health_omits_max_loaded_models_on_dmr(client, respx_mock, monkeypatch):
+    """WARP-3047 — DMR enforces no loaded-model cap (slot-count eviction, up
+    to min(NumCPU, 8) runners, 5-min idle timeout), so advertising
+    OLLAMA_MAX_LOADED_MODELS=1 on a DMR box was a false promise that code
+    and operators relied on. The key is OMITTED (the gateway keeps its own
+    default) rather than sent as null, which its int() parse would reject."""
+    import main
+
+    monkeypatch.setattr(main, "INFERENCE_RUNTIME", "dmr")
+    monkeypatch.setenv("OLLAMA_MAX_LOADED_MODELS", "1")
+    respx_mock.get("http://mock-ollama:11434/api/tags").mock(
+        return_value=Response(200, json={"models": []})
+    )
+    body = (await client.get("/health")).json()
+    assert "max_loaded_models" not in body["limits"]
+    assert body["limits"]["num_parallel"] >= 1
+    assert "max_queue" in body["limits"]
+
+
+@pytest.mark.asyncio
+async def test_health_keeps_max_loaded_models_on_ollama(client, respx_mock, monkeypatch):
+    """Ollama DOES enforce OLLAMA_MAX_LOADED_MODELS, so it is still reported."""
+    monkeypatch.setenv("OLLAMA_MAX_LOADED_MODELS", "2")
+    respx_mock.get("http://mock-ollama:11434/api/tags").mock(
+        return_value=Response(200, json={"models": []})
+    )
+    body = (await client.get("/health")).json()
+    assert body["limits"]["max_loaded_models"] == 2

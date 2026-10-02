@@ -66,6 +66,14 @@ export interface RuntimeToolDescriptor {
   description: string;
   /** JSON Schema for the tool's arguments, serialised into `tools[]`. */
   inputSchema: Record<string, unknown>;
+  /**
+   * WARP-2900 — where this tool's code came from, when the box knows more
+   * than the server id: `extension:<slug>@<version>` for a promoted
+   * workshop extension. Absent for a vendor server (its code is not ours to
+   * name). Read by the inspector and /tools surfaces (H4); never by
+   * selection or dispatch.
+   */
+  provenance?: string;
 }
 
 /**
@@ -94,6 +102,11 @@ export const DEFAULT_RUNTIME_TOOL_DOMAIN: ToolDomain = "data";
  * the only party who can see how their own box is organised, and a server's
  * self-declared domain is a hint from outside the trust boundary. A server
  * cannot override an operator's mapping.
+ *
+ * Only the operator route AUTHORIZES: a role grant admits a runtime tool to a
+ * scoped person solely when its source is `"operator"` (tool-layers.service.ts
+ * `runtimeLayer`). A `"server"` or `"default"` domain still steers selection
+ * for unscoped callers (owners, role-less people), but no role grant reaches it.
  */
 export function resolveRuntimeToolDomain(input: {
   toolName: string;

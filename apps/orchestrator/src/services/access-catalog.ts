@@ -13,7 +13,9 @@
  *     states and is never trusted),
  *   - zod validation of grant/exception module ids.
  *
- * Floor model (ADR-004 via brief §9): `view` is never floored; `act`/
+ * Floor model (ADR-004 via brief §9): `view` is not floored on ordinary
+ * features, and is REFUSED below family on `security`, `crm`, `projects` and
+ * `money` (`refuseBelowFloor`); `act`/
  * `manage` floor at the FAMILY tier on ordinary features; network and
  * managed-switch writes floor at ADMIN; voice `act` is deliberately
  * un-floored (guests may talk to the assistant). The always-on trio of the
@@ -23,17 +25,24 @@
  * ModuleIds.
  *
  * Tool-domain axis: features map to tools-core `ToolDomain` values via the
- * module registry's `toolDomains` field. Domains NO module claims
- * (system / business / data / erp) are not module-gated and always pass the
- * feature intersection — matching how the shipped module-off drop treats
- * them. `erp` is additionally excluded from GRANTABLE_TOOL_DOMAINS:
- * connector reach is the §5.4 connectors axis (AccessRoleConnectorGrant),
- * never a tool grant.
+ * module registry's `toolDomains` field. A domain NO module claims passes the
+ * feature intersection ONLY if it is declared in FEATURE_UNGATED_TOOL_DOMAINS
+ * below, with a written reason; any other domain is DENIED (WARP-2742 — the
+ * gate used to pass every unclaimed domain, which is how `money` and five
+ * others slipped past it). `erp` is additionally excluded from
+ * GRANTABLE_TOOL_DOMAINS: connector reach is the §5.4 connectors axis
+ * (AccessRoleConnectorGrant), never a tool grant.
  */
 import type { ModuleId } from "@prisma/client";
-import { TOOL_CATALOG, TOOL_DOMAINS } from "@droplet/tools-core";
+import { TOOL_DOMAINS, type ToolDomain } from "@droplet/tools-core";
 import type { Role } from "./jwt.service.js";
 import { MODULES } from "../modules/module-registry.js";
+import {
+  populatedDomains,
+  readableDomains,
+  toolLayers,
+  type ToolLayers,
+} from "./tool-layers.service.js";
 
 export type FeatureLevel = "view" | "act" | "manage";
 export type ToolLevel = "view" | "use";
@@ -56,6 +65,20 @@ interface CatalogLevelDef {
   level: FeatureLevel;
   /** Minimum starting-point tier that may hold this level; absent = un-floored. */
   minTier?: "family" | "admin";
+  /**
+   * ADR-055 — meaningful on a module's `view` only. `view` is the lowest rung,
+   * so a tier below its `minTier` normally clamps DOWN to it and holds it
+   * anyway: the floor is documentation the routes back with `requireRole`.
+   * `true` makes the floor a REFUSAL: a tier below `minTier` holds no grant on
+   * the module at all (`maxLevelFor` / `clampLevel` answer `null`), so the role
+   * writer stores none and the resolver hands none out. Opt-in per module:
+   * `security` (family floor, ADR-059), `crm` and `projects` (family floor,
+   * WARP-3365 / WARP-3369: external guests get nothing from company-wide
+   * business data), and `doors` (admin floor, ADR-055). The same fact drives the role floor on the routes
+   * (`requireModuleTierFloor`) and on the assistant's data hops
+   * (`requireMcpActingUserToolDomain`), so the three cannot disagree.
+   */
+  refuseBelowFloor?: true;
 }
 
 /**
@@ -79,10 +102,48 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
     { level: "act", minTier: "family" },
     { level: "manage", minTier: "family" },
   ],
+  // WARP-3091: `view` stays un-floored on purpose. It gates the whole
+  // /api/network prefix, the Network nav entry and the `network` tool domain,
+  // so a family floor here would also take status and summary from guests.
+  // What guests must not see (the device roster, DHCP leases, the Wi-Fi
+  // settings read) is role-floored on those routes instead: see
+  // `requireNetworkMember` in routes/network-status.routes.ts.
   network: [
     { level: "view" },
     { level: "act", minTier: "admin" },
     { level: "manage", minTier: "admin" },
+  ],
+  // WARP-2977 (ADR-059 §6). `view` is the feed; `act` is acknowledging, the
+  // expected/not-expected verdicts and the mode (P2b/P3); `manage` is zones,
+  // links, schedule, suppressions, routing and retention. Presence data about
+  // identifiable people, so even `view` is floored at family — no guest tier.
+  // `manage` is business policy (a suppression can hide a real intrusion), so
+  // it is floored at admin. `refuseBelowFloor` makes the family floor on `view`
+  // bite: `view` is the lowest rung, so without it a guest role could store
+  // security:view, advertising reach every /api/security route refuses (each
+  // refusal is a denial row that becomes a threat incident).
+  security: [
+    { level: "view", minTier: "family", refuseBelowFloor: true },
+    { level: "act", minTier: "family" },
+    { level: "manage", minTier: "admin" },
+  ],
+  // ADR-055 (P4a). `view` only — deliberately no `act` or `manage` rung. §11.4:
+  // door authority is the OWNER's, "not admin", and does not inherit the rank
+  // ladder that lets an admin escalate on some update paths. Every write route
+  // floors at `owner` (routes/doors.ts) and an owner holds every catalog level
+  // through the §3 bypass, so a `manage` rung could only advertise a
+  // permission that no one but the owner may use. Add one when there is a
+  // door-group grant for it to mean something (AC-017).
+  //
+  // The `view` floor is `admin`, not `family`: with no per-door-group grants
+  // yet (§11.4 — out of scope, they depend on AC-017) the module's own grant
+  // is the ONLY narrowing, and access logs identify people entering places at
+  // times. Default-deny until a narrower grant exists; widening is this one
+  // line and the router's role list. `refuseBelowFloor` is what makes the floor
+  // bite: without it `view` is the lowest rung and a family or guest role could
+  // store doors:view, advertising reach the routes refuse.
+  doors: [
+    { level: "view", minTier: "admin", refuseBelowFloor: true },
   ],
   smart_home: [
     { level: "view" },
@@ -104,17 +165,28 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
     { level: "act", minTier: "family" },
     { level: "manage", minTier: "family" },
   ],
+  // WARP-3369 (Romain, 2026-09-30: external guests get NOTHING from company-wide
+  // business data unless it is explicitly shared with them). Work items,
+  // comments and the activity feed are the company's own, and nothing in
+  // Projects is shared with a guest per item, so `view` is a REFUSAL below the
+  // family floor (ADR-055 `refuseBelowFloor`, the `security` pattern): a guest
+  // holds no Projects grant, the role writer stores none, and
+  // `requireModuleTierFloor` (middleware/feature-gate.ts) answers 404 on every
+  // /api/pm and /api/mobile/pm route for the tier.
   projects: [
-    { level: "view" },
+    { level: "view", minTier: "family", refuseBelowFloor: true },
     { level: "act", minTier: "family" },
     { level: "manage", minTier: "family" },
   ],
   // WARP-2117. Same ladder as `projects`, which it lives inside: `act` is
   // logging a call and moving a deal, `manage` is editing the pipeline itself.
-  // Both floored at `family` — a pipeline is business-sensitive, so the guest
-  // tier gets read-only or nothing.
+  // Both floored at `family` — a pipeline is business-sensitive.
+  // WARP-3365: `view` is refused below `family` too. Customer phone numbers,
+  // addresses, contact e-mail and deal amounts are the company's own data,
+  // and an external guest is someone outside the company (same ruling and
+  // mechanism as `projects` above).
   crm: [
-    { level: "view" },
+    { level: "view", minTier: "family", refuseBelowFloor: true },
     { level: "act", minTier: "family" },
     { level: "manage", minTier: "family" },
   ],
@@ -122,8 +194,13 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
   // record — so there is no `act` level to offer: there is no action. `manage`
   // is floored at `admin` because the only management verb in reach is
   // connecting or disconnecting the ledger itself, which is credential work.
+  // WARP-3365 review (Romain, 2026-09-30: external guests get nothing of the
+  // company's data): what the business is owed and owes is the company's own,
+  // so `view` is a REFUSAL below the family floor too (`refuseBelowFloor`).
+  // The routes already refused a guest by role; the catalog, the tier floor on
+  // the prefix and the assistant's data hop now say the same thing.
   money: [
-    { level: "view", minTier: "family" },
+    { level: "view", minTier: "family", refuseBelowFloor: true },
     { level: "manage", minTier: "admin" },
   ],
   // WARP-2018/2032. `manage` is where connecting an address-book SOURCE will
@@ -152,7 +229,7 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
   ],
 };
 
-/** The 12 grant-bearing ModuleIds (everything but the always-on chat). */
+/** The grant-bearing ModuleIds (everything but the always-on chat). */
 export const GATEABLE_MODULE_IDS = Object.keys(CATALOG) as ReadonlyArray<
   Exclude<ModuleId, "chat">
 >;
@@ -179,12 +256,20 @@ function tierMayHold(tier: Role, def: CatalogLevelDef): boolean {
   return TIER_RANK[tier] >= TIER_RANK[def.minTier];
 }
 
+/** ADR-055 — a module whose `view` floor is a refusal, and a tier below it: that tier may hold nothing on the module. */
+function tierRefused(tier: Role, moduleId: GateableModuleId): boolean {
+  const view = CATALOG[moduleId].find((d) => d.level === "view");
+  return view?.refuseBelowFloor === true && !tierMayHold(tier, view);
+}
+
 /**
- * The highest §9 level `tier` may hold on `moduleId`. Every module offers an
- * un-floored `view`, so the result is always at least "view" for a valid
- * gateable module.
+ * The highest §9 level `tier` may hold on `moduleId`. Every module offers a
+ * `view`, so the result is at least "view" — except where `view` itself is a
+ * refusal below its floor (`refuseBelowFloor`: security, doors): `null` = the tier may
+ * hold nothing on this module.
  */
-export function maxLevelFor(tier: Role, moduleId: GateableModuleId): FeatureLevel {
+export function maxLevelFor(tier: Role, moduleId: GateableModuleId): FeatureLevel | null {
+  if (tierRefused(tier, moduleId)) return null;
   const defs = CATALOG[moduleId];
   let best: FeatureLevel = "view";
   for (const def of defs) {
@@ -196,16 +281,30 @@ export function maxLevelFor(tier: Role, moduleId: GateableModuleId): FeatureLeve
 }
 
 /**
+ * The modules some human tier may hold NOTHING on (`refuseBelowFloor`), derived
+ * from the catalog so the route gate, the assistant gate and the role writer
+ * all read the same fact. Today: `security`, `crm`, `projects`, `money`. A `service`
+ * principal is not a human tier and is excluded from the probe.
+ */
+export function tierRefusingModuleIds(): GateableModuleId[] {
+  return GATEABLE_MODULE_IDS.filter((id) => tierRefused("guest", id) || tierRefused("family", id));
+}
+
+/**
  * Clamp a requested grant level to the highest §9-legal level ≤ the request
  * for this tier — the server-side re-clamp of the dashboard's refloor
  * behavior. A level the module doesn't offer (managed_switch `act`) clamps
- * down the ladder to the nearest offered-and-held level.
+ * down the ladder to the nearest offered-and-held level. `null` = the tier may
+ * hold NO grant on this module (see `maxLevelFor`), so the row must not be
+ * written and a stored one grants nothing — the same contract as
+ * `clampConnectorLevel`.
  */
 export function clampLevel(
   tier: Role,
   moduleId: GateableModuleId,
   requested: FeatureLevel,
-): FeatureLevel {
+): FeatureLevel | null {
+  if (tierRefused(tier, moduleId)) return null;
   const defs = CATALOG[moduleId];
   let best: FeatureLevel = "view";
   for (const def of defs) {
@@ -224,7 +323,7 @@ export function clampLevel(
  * The tier's FULL catalog — what a person with `accessRoleId = null` holds
  * (today's world, bit-for-bit: the coarse ADR-004 floors keep enforcing at
  * layer 1; this is the §9 ceiling view of the same tier). Every gateable
- * module at the tier's max level, plus the always-on chat row.
+ * module the tier may hold, at the tier's max level, plus the always-on chat row.
  */
 export function fullCatalogFeatures(
   tier: Role,
@@ -233,7 +332,8 @@ export function fullCatalogFeatures(
     ...ALWAYS_ON_FEATURES.map((f) => ({ ...f })),
   ];
   for (const moduleId of GATEABLE_MODULE_IDS) {
-    out.push({ moduleId, level: maxLevelFor(tier, moduleId) });
+    const level = maxLevelFor(tier, moduleId);
+    if (level !== null) out.push({ moduleId, level });
   }
   return out;
 }
@@ -282,27 +382,112 @@ export function clampConnectorLevel(
 
 // ── Tool-domain axis ──────────────────────────────────────────────
 
-/** domain → owning module, from the ONE canonical module registry. */
-const MODULE_BY_DOMAIN: ReadonlyMap<string, ModuleId> = new Map(
-  MODULES.flatMap((def) => def.toolDomains.map((d) => [d, def.id] as const)),
-);
+/**
+ * domain → the modules that claim it, from the ONE canonical module registry.
+ * Usually one. A domain claimed by SEVERAL modules passes the feature
+ * intersection when ANY of them is held (WARP-2988: `business` is claimed by
+ * `crm` and `projects`, per Romain's "CRM or Projects" decision). Because a
+ * second claim WIDENS a domain, `access-catalog.test.ts` pins the multi-owner
+ * set exactly.
+ */
+export const OWNERS_BY_DOMAIN: ReadonlyMap<string, readonly ModuleId[]> = (() => {
+  const m = new Map<string, ModuleId[]>();
+  for (const def of MODULES) {
+    for (const d of def.toolDomains) m.set(d, [...(m.get(d) ?? []), def.id]);
+  }
+  return m;
+})();
 
-/** Catalog domains no module claims — never module-gated. */
-const UNCLAIMED_DOMAINS: ReadonlySet<string> = new Set(
-  TOOL_DOMAINS.filter((d) => !MODULE_BY_DOMAIN.has(d)),
-);
+/**
+ * WARP-2742 — the tool domains that are DELIBERATELY not feature-gated, each
+ * with the reason. The feature intersection is fail-CLOSED: a domain passes
+ * `domainsForFeatures` only if its owning module (module-registry
+ * `toolDomains`) is in the feature set, or it is listed here. A domain that is
+ * neither — typically one a new tools-core slice just added — is denied to
+ * every role-holder until someone decides which of the two it is, and
+ * `access-catalog.test.ts` fails CI on it first.
+ *
+ * Before this, "ungated" was DERIVED from absence (any domain no module
+ * claimed), so the set grew silently: `money` (whose module shipped with
+ * `toolDomains: []`), `cloud`, `agent_runs` and `routines` all joined it
+ * without anyone deciding they should. Listing is the decision.
+ *
+ * "Ungated" here means the FEATURE axis only. Every entry still clears the
+ * tier write filter and the role's own tool grant (§3), and the routes behind
+ * the tools keep their layer-1 guards. Owners and role-less users never reach
+ * this function at all (tool-access.service.ts: null scope).
+ */
+export const FEATURE_UNGATED_TOOL_DOMAINS: Readonly<Partial<Record<ToolDomain, string>>> = {
+  system:
+    "Box health, drives, audit log, updates. No module owns the box itself; the tier " +
+    "write filter strips apply_update below admin, and the routes behind the tools " +
+    "(/api/updates, /api/storage, /api/activity, /api/hardware) keep their own guards.",
+  data:
+    "Pure utilities (calculate, encode, date math, unit/currency conversion, translate, " +
+    "weather). They read no box or business data, so there is no feature to withhold.",
+  agent_runs:
+    "Durable background runs (WARP-2180). Not a module: it is the agent loop running " +
+    "unattended, and /api/agent-runs is owner/admin-gated on the acting user (WARP-2742 comment " +
+    "from the domain's author). The tool grant withholds the offer.",
+  routines:
+    "Stored ToolSpecs (WARP-2894). Not a module; every step a routine runs is re-checked " +
+    "against this same scope by the ToolSpec runner (WARP-1580), so a routine reaches no " +
+    "domain the role could not reach directly.",
+  workspace:
+    "The workshop's tools (WARP-2896). Not a module: they are excluded from chat and reach " +
+    "the model only inside a workshop run (bound_tool_domains), which only owner/admin may " +
+    "start, and /api/workspace refuses any call whose run is not the actor's, running, and " +
+    "bound to that workspace. The tool grant withholds the offer.",
+  erp:
+    "Connector reach is the §5.4 connectors axis (AccessRoleConnectorGrant), not a feature, " +
+    "and erp is never a grantable tool domain.",
+  cloud:
+    "cloud_query_dataset (WARP-2497) reads connected SaaS accounts; /api/erp/dataset is " +
+    "owner/admin-only on the resolved user and needs a live connection. OPEN (WARP-2742): " +
+    "which feature, if any, should gate it is Romain's call; kept as-is until then.",
+};
+
+function isFeatureUngated(domain: string): boolean {
+  return Object.prototype.hasOwnProperty.call(FEATURE_UNGATED_TOOL_DOMAINS, domain);
+}
+
+/**
+ * Tools-core domains with NO feature decision: no module claims them and they
+ * are not declared ungated. Must be empty; the gate denies whatever is here.
+ */
+export function unmappedToolDomains(): string[] {
+  return TOOL_DOMAINS.filter((d) => !OWNERS_BY_DOMAIN.has(d) && !isFeatureUngated(d));
+}
 
 /**
  * §3 `moduleToolDomains(features)`: the tools-core domains reachable given
- * an effective feature set — claimed domains whose module is in the set,
- * plus every unclaimed domain (system / business / data / erp are not
- * feature-gated; their reach is governed by the other resolver axes).
+ * an effective feature set — claimed domains with at least one owning module
+ * in the set (OR across owners), plus the declared
+ * FEATURE_UNGATED_TOOL_DOMAINS. Everything else is denied.
  */
-export function domainsForFeatures(featureIds: ReadonlySet<ModuleId>): Set<string> {
-  const out = new Set<string>(UNCLAIMED_DOMAINS);
+export function domainsForFeatures(
+  featureIds: ReadonlySet<ModuleId>,
+  /**
+   * WARP-2897 — runtime-only domains (tool-layers.service.ts
+   * `runtimeOnlyDomains`). They pass the feature term: the one exception to
+   * WARP-2742's fail-closed rule, and a deliberate one. They cannot be listed
+   * in FEATURE_UNGATED_TOOL_DOMAINS because an attached server or extension
+   * defines them at runtime, and no module toggle exists that could switch
+   * them off, so denying them here would make every such grant dead on
+   * arrival. Their reach is still governed by the role's own tool grant and
+   * the tier write filter, and a domain a module claims is left to the module.
+   */
+  runtimeDomains: Iterable<string> = [],
+): Set<string> {
+  const out = new Set<string>();
+  for (const domain of runtimeDomains) {
+    if (!OWNERS_BY_DOMAIN.has(domain)) out.add(domain);
+  }
   for (const domain of TOOL_DOMAINS) {
-    const owner = MODULE_BY_DOMAIN.get(domain);
-    if (owner !== undefined && featureIds.has(owner)) out.add(domain);
+    const owners = OWNERS_BY_DOMAIN.get(domain);
+    if (owners !== undefined ? owners.some((m) => featureIds.has(m)) : isFeatureUngated(domain)) {
+      out.add(domain);
+    }
   }
   return out;
 }
@@ -316,46 +501,67 @@ export function domainsForFeatures(featureIds: ReadonlySet<ModuleId>): Set<strin
  *  (apps/web-dashboard/src/lib/access.ts TOOL_DOMAIN_GROUPS) is the
  *  hand-kept half of that pair and has to move with it: WARP-2583's review
  *  found `business` filed under the System row there while the Projects row
- *  still wrote a grant for the emptied `pm`. Note `business` is UNCLAIMED
- *  (no module owns it), which is precisely why the grant axis has to hold it:
- *  the module filter passes it unconditionally. */
+ *  still wrote a grant for the emptied `pm`. `business` is claimed by BOTH
+ *  `crm` and `projects` (WARP-2988, OR semantics). */
 export const GRANTABLE_TOOL_DOMAINS: ReadonlyArray<string> = TOOL_DOMAINS.filter(
   (d) => d !== "erp",
 );
 
 /**
- * §3 `writeFilter(tier)` at domain granularity: the domains that still
- * contain at least one tool after the shipped role write-filter
- * (routes/llm.ts narrowAllowedToolsForRole — owner/admin keep everything,
- * family/guest lose every `requiresWrite` tool). A domain whose every tool
- * is a write tool is unreachable for the family/guest tiers.
+ * WARP-2897 — may a role hold a grant row on `domain`?
  *
- * AN EMPTY DOMAIN IS UNREACHABLE TOO, and that is a DIFFERENT statement this
- * function cannot tell apart from the one above: it adds a domain only on
- * FINDING a non-write tool in it, so a domain holding no tools at all reads
- * as "every tool here writes" when the truth is "no tool here yet". Today
- * that is `crm` and `pm` — ADR-045 slices C and D moved every CRM and PM tool
- * into `business`, and catalog.ts keeps the two declared but empty as the
- * landing slots for a remote catalog (HubSpot, Atlassian).
- *
- * WARP-2760/2761 resolved the collision that produced — five role templates
- * granting `crm` — by dropping those grants, NOT by returning empty domains
- * from here. This is a live term in the effective-access intersection
- * (effective-access.service.ts `reachable ∩ featureDomains ∩ granted`), so
- * widening it would leave family and guest holding a standing grant on every
- * toolless domain, and the FIRST tool a remote catalog registers into one may
- * be a write — the exact case this filter exists to catch. Deciding otherwise
- * is a change to the write filter and belongs in its own ticket;
- * `access-catalog.test.ts` pins the current answer so it cannot be reversed
- * by accident.
+ * The compiled grantable set (GRANTABLE_TOOL_DOMAINS) plus every domain the
+ * RUNTIME layer currently carries, minus `erp` in both. A runtime-only domain
+ * (an extension's, once slice H names them) is grantable exactly while some
+ * attached, non-denied runtime tool lives in it — the write paths validate
+ * against this at write time, so a grant on a domain nothing on this box
+ * provides is refused with the domain named rather than stored as a row
+ * that can never reach anything.
  */
-export function tierReachableDomains(tier: Role): Set<string> {
+export function isGrantableDomain(domain: string, layers: ToolLayers = toolLayers()): boolean {
+  if (domain === "erp") return false;
+  if (GRANTABLE_TOOL_DOMAINS.includes(domain)) return true;
+  return layers.runtime.some((t) => t.domain === domain);
+}
+
+/**
+ * §3 `writeFilter(tier)` at domain granularity, over BOTH tool layers
+ * (tool-layers.service.ts — the compiled catalog and the runtime registry as
+ * classified by the operator's RemoteToolClassification record).
+ *
+ *   • owner/admin keep write tools, so they reach every POPULATED domain —
+ *     every domain at least one tool in either layer lives in.
+ *   • family/guest lose every `requiresWrite` tool (routes/llm.ts
+ *     narrowAllowedToolsForRole), so they reach only READABLE domains — those
+ *     holding at least one non-write tool. A runtime tool counts as a write
+ *     unless its classification row says otherwise; the wire's own hints are
+ *     never read.
+ *
+ * AN EMPTY DOMAIN IS UNREACHABLE FOR EVERY TIER. `crm` and `pm` hold no tool
+ * (ADR-045 slices C and D moved every CRM and PM tool into `business`;
+ * catalog.ts keeps the two declared as landing slots for a remote catalog),
+ * and an extension's domain is empty the moment the extension is disabled.
+ *
+ * History, because this reverses a pinned decision. WARP-2760/2761 kept
+ * owner/admin on `new Set(TOOL_DOMAINS)` — every DECLARED domain, empty or not
+ * — and resolved the resulting template collision by dropping `crm` grants
+ * from the templates rather than by changing this function; its comment said
+ * reversing it "belongs in its own ticket". WARP-2897 is that ticket (ADR-056
+ * §5.4's two-layer reachability guard): with runtime domains in play, "admin
+ * reaches every declared domain" would call a disabled extension's domain
+ * reachable for every admin template. The family/guest half — never widen to
+ * a toolless domain, because the first tool a remote catalog registers there
+ * may be a write — is unchanged. `access-catalog.test.ts` pins both halves
+ * and names both mutations.
+ *
+ * `layers` defaults to the compiled catalog alone, which keeps every
+ * synchronous caller that has no runtime state to hand compiling and honest
+ * for the local-only world; the effective-access resolver passes the loaded
+ * runtime layer.
+ */
+export function tierReachableDomains(tier: Role, layers: ToolLayers = toolLayers()): Set<string> {
   if (tier === "owner" || tier === "admin") {
-    return new Set<string>(TOOL_DOMAINS);
+    return populatedDomains(layers);
   }
-  const out = new Set<string>();
-  for (const entry of TOOL_CATALOG) {
-    if (!entry.requiresWrite) out.add(entry.domain);
-  }
-  return out;
+  return readableDomains(layers);
 }

@@ -81,6 +81,9 @@ import removeDevice from "./handlers/smart-home/remove-device.js";
 import createScene from "./handlers/smart-home/create-scene.js";
 // WARP-1447: room assignment ("move the lamp to the den"; auto-creates rooms)
 import assignDeviceRoom from "./handlers/smart-home/assign-device-room.js";
+// Device gateway (BACnet/IP, Modbus TCP, SNMP, KNX/IP) via /api/building
+import getBuildingDevices from "./handlers/smart-home/get-building-devices.js";
+import setBuildingPoint from "./handlers/smart-home/set-building-point.js";
 
 // cameras
 import listCameras from "./handlers/cameras/list-cameras.js";
@@ -182,6 +185,9 @@ import erpFindPatient from "./handlers/erp/find-patient.js";
 import erpGetArSummary from "./handlers/erp/get-ar-summary.js";
 import erpScheduleAppointment from "./handlers/erp/schedule-appointment.js";
 import moneyListOpenDocuments from "./handlers/money/list-open-documents.js";
+// ADR-055 (P4b) — doors: two READ-ONLY tools. Never a third that writes (§11.5).
+import doorsList from "./handlers/doors/list.js";
+import doorsRecentEvents from "./handlers/doors/recent-events.js";
 
 // cloud (WARP-2497) — the connected SaaS accounts (Stripe / HubSpot /
 // Mailchimp). Deliberately ONE tool for all three vendors and all ten record
@@ -233,12 +239,36 @@ import translateText from "./handlers/data/translate-text.js";
 // /api/web routes — ambient_data off-LAN channel, fail-closed.
 import getWeather from "./handlers/data/get-weather.js";
 import currencyConvert from "./handlers/data/currency-convert.js";
+import classifyItems from "./handlers/data/classify-items.js";
+// data (WARP-3116): dashboard navigation — resolve a page from the list the
+// dashboard sent with the turn; the dashboard does the moving.
+import findDashboardPage from "./handlers/dashboard/find-dashboard-page.js";
+import openDashboardPage from "./handlers/dashboard/open-dashboard-page.js";
 // WARP-2180: durable background runs (epic WARP-2176)
 import startAgentRun from "./handlers/agent-runs/start-agent-run.js";
 import listAgentRuns from "./handlers/agent-runs/list-agent-runs.js";
+import cancelAgentRun from "./handlers/agent-runs/cancel-agent-run.js";
 import routineDraft from "./handlers/routines/routine-draft.js";
 import routineList from "./handlers/routines/routine-list.js";
 import routineRun from "./handlers/routines/routine-run.js";
+// WARP-2896 (ADR-056 §6.2): the workshop's workspace tools — run-bound.
+import workspaceRead from "./handlers/workspace/workspace-read.js";
+import workspaceSearch from "./handlers/workspace/workspace-search.js";
+import workspaceDiff from "./handlers/workspace/workspace-diff.js";
+import workspaceLog from "./handlers/workspace/workspace-log.js";
+import workspaceWrite from "./handlers/workspace/workspace-write.js";
+import workspaceCommit from "./handlers/workspace/workspace-commit.js";
+import workspaceRun from "./handlers/workspace/workspace-run.js";
+import workspacePropose from "./handlers/workspace/workspace-propose.js";
+// WARP-2979 (ADR-059 P4 §6.12): Security — four READ-ONLY tools over the
+// orchestrator's assistant routes (routes/security-assistant.ts), which admit
+// only the MCP principal and scope every answer to the person it acts for.
+import securityListIncidents from "./handlers/security/security-list-incidents.js";
+import securityGetIncident from "./handlers/security/security-get-incident.js";
+import securitySearchEvents from "./handlers/security/security-search-events.js";
+import securityZoneStatus from "./handlers/security/security-zone-status.js";
+// WARP-2980 (ADR-059 P5 PR-E): what normal looks like for one place — A5 on the same router.
+import securityExplainPattern from "./handlers/security/security-explain-pattern.js";
 
 const allTools: Tool[] = [
   // network
@@ -312,6 +342,8 @@ const allTools: Tool[] = [
   // WARP-1447: put a device in a room (write tier, no confirmation —
   // reversible household bookkeeping, same posture as create_reminder)
   assignDeviceRoom,
+  getBuildingDevices,
+  setBuildingPoint,
   // cameras
   listCameras,
   listDiscoveredCameras,
@@ -386,6 +418,11 @@ const allTools: Tool[] = [
   erpFindPatient,
   erpGetArSummary,
   moneyListOpenDocuments,
+  // ADR-055 (P4b, brief §11.5): doors. Two reads; the assistant never opens a
+  // door, issues a credential or changes a grant. Enforced at dispatch too
+  // (interceptor.ts), not only here.
+  doorsList,
+  doorsRecentEvents,
   erpScheduleAppointment,
   // WARP-2497: cloud connectors (Stripe/HubSpot/Mailchimp) — one Read-tier
   // tool covering all ten datasets; the dataset arg picks the provider.
@@ -423,10 +460,19 @@ const allTools: Tool[] = [
   // WARP-1436: ambient web data (Tier-1; screened egress via /api/web)
   getWeather,
   currencyConvert,
+  // WARP-3074: bulk labelling via the Kev decision model (Tier-1)
+  classifyItems,
+  // WARP-3116: dashboard navigation (Tier-1; pure lookup over the page list
+  // the dashboard sent — the handler moves nothing, the dashboard routes)
+  findDashboardPage,
+  openDashboardPage,
   // WARP-2180: background agent runs — start is Tier-2 (unattended compute),
   // list is Tier-1. The worker keeps start_agent_run OUT of a run's pool.
   startAgentRun,
   listAgentRuns,
+  // WARP-3302: stop one run (write, no prompt: it only stops work). Checking
+  // one run is list_agent_runs({run_id}). The worker keeps cancel out of runs.
+  cancelAgentRun,
   // WARP-2894 (ADR-056 §5.1): routines — the model DRAFTS, a person PROMOTES.
   // draft is Write-tier with no confirmation (a draft is inert: POST
   // /api/tools has no status field, the row is born `draft`); list is
@@ -435,6 +481,28 @@ const allTools: Tool[] = [
   routineDraft,
   routineList,
   routineRun,
+  // WARP-2896 (ADR-056 §6.2): the workshop. Four reads; write / commit /
+  // run are Write-tier with NO confirmation — their whole blast radius is
+  // one checkout in the sandbox, and only a run bound to that workspace can
+  // reach them (routes/workspace.ts "run owns workspace"); propose is
+  // Tier-2 and ENDS the run. Every one refuses outside a workshop run.
+  workspaceRead,
+  workspaceSearch,
+  workspaceDiff,
+  workspaceLog,
+  workspaceWrite,
+  workspaceCommit,
+  workspaceRun,
+  workspacePropose,
+  // WARP-2979 (ADR-059 P4 §6.12.4): Security. Every one Tier-1 read — no
+  // write, no confirmation, and none ever may be (ADR-055 §11.5; the domain
+  // pin in __tests__/registry.test.ts). Security never goes to a cloud model
+  // (the orchestrator's OFF_LAN_WITHHELD_DOMAINS and the history rule).
+  securityListIncidents,
+  securityGetIncident,
+  securitySearchEvents,
+  securityZoneStatus,
+  securityExplainPattern,
 ];
 
 export const TOOLS: ReadonlyMap<string, Tool> = new Map(allTools.map((t) => [t.name, t]));

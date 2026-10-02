@@ -250,6 +250,33 @@ describe("🔴 the assembled prompt is the real string, in the real order", () =
     expect(both.assembled.length).toBeGreaterThan(plain.assembled.length);
   });
 
+  it("WARP-2746: an off-LAN preview withholds memory, brain and business, exactly as the turn does", async () => {
+    const r = await inspectPromptForPerson(prisma, { targetUserId: "u1", offLan: true });
+    for (const key of ["memory", "brain", "business"]) {
+      expect(blockOf(r, key).status).toBe("withheld_off_lan");
+      expect(blockOf(r, key).text).toBeNull();
+    }
+    expect(r.assembled).not.toContain("MEMORY");
+    expect(r.assembled).not.toContain("BRAIN");
+    expect(r.assembled).not.toContain("BUSINESS");
+    expect(r.assembled).toContain("PERSONA");
+  });
+
+  it("WARP-3281: shows the date line as its own block, zone withheld off-LAN like the turn", async () => {
+    const ws = (prisma as unknown as { workspace: { findUnique: ReturnType<typeof vi.fn> } }).workspace;
+    const aucklandRow = { id: 1, type: "BUSINESS", tz: "Pacific/Auckland" };
+    ws.findUnique.mockResolvedValueOnce(aucklandRow).mockResolvedValueOnce(aucklandRow);
+    const onLan = await inspectPromptForPerson(prisma, { targetUserId: "u1" });
+    expect(blockOf(onLan, "date").status).toBe("present");
+    expect(blockOf(onLan, "date").neverDropped).toBe(true);
+    expect(blockOf(onLan, "date").text).toMatch(/^Today is \w+ \d{4}-\d{2}-\d{2} \(Pacific\/Auckland\)/);
+    expect(onLan.assembled).toContain(blockOf(onLan, "date").text!);
+
+    const offLan = await inspectPromptForPerson(prisma, { targetUserId: "u1", offLan: true });
+    expect(blockOf(offLan, "date").text).toMatch(/^Today is \w+ \d{4}-\d{2}-\d{2}\.$/);
+    expect(offLan.assembled).not.toContain("Pacific/Auckland");
+  });
+
   it("passes the caller's allowed tool names to the guidance composer, verbatim", async () => {
     // WARP-642: guidance must never name a tool the person cannot call.
     // `undefined` is the builder's own encoding for "privileged, every tool"
@@ -259,11 +286,31 @@ describe("🔴 the assembled prompt is the real string, in the real order", () =
       targetUserId: "u1",
       allowedToolNames: ["read_file", "list_files"],
     });
-    expect(mocks.composeToolGuidance).toHaveBeenCalledWith(["read_file", "list_files"]);
+    expect(mocks.composeToolGuidance).toHaveBeenCalledWith(["read_file", "list_files"], undefined);
 
     mocks.composeToolGuidance.mockClear();
     await inspectPromptForPerson(prisma, { targetUserId: "u1" });
-    expect(mocks.composeToolGuidance).toHaveBeenCalledWith(undefined);
+    expect(mocks.composeToolGuidance).toHaveBeenCalledWith(undefined, undefined);
+  });
+
+  it("WARP-3116: passes the turn's withheld tools to BOTH guidance sites, as the real turn does", async () => {
+    // The chat route composes guidance twice (the budget estimate and the
+    // system message) and hands `navigationWithheld` to each. `allowedToolNames`
+    // cannot carry it for the owner, whose `undefined` means "the default
+    // scope" — so it arrives separately, and the assembled prompt must not name
+    // a navigation tool the modelled turn does not carry (WARP-642).
+    const withheld = new Set(["find_dashboard_page", "open_dashboard_page"]);
+    await inspectPromptForPerson(prisma, {
+      targetUserId: "u1",
+      allowedToolNames: undefined,
+      withheldToolNames: withheld,
+    });
+    // The block's own composer + the assembled prompt's builder.
+    expect(mocks.composeToolGuidance).toHaveBeenCalledTimes(2);
+    for (const call of mocks.composeToolGuidance.mock.calls) {
+      expect(call[0]).toBeUndefined();
+      expect(call[1]).toBe(withheld);
+    }
   });
 });
 

@@ -9,13 +9,15 @@
  * These tests use an in-memory signer constructed from a fixed key so
  * the assertions are deterministic.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from "vitest";
+import type { Logger } from "pino";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   createHmacSigner,
   canonicalizeRowContent,
+  canonicalRefsJson,
   hashSignature,
   loadAuditKeyFromDisk,
   _setLoggerForTests,
@@ -107,6 +109,41 @@ describe("audit-signing.service — canonical content", () => {
   });
 });
 
+describe("audit-signing.service — canonicalRefsJson (WARP-3011)", () => {
+  const refs = {
+    b: 0.1 + 0.2,
+    a: { z: [3, { y: 1, x: 2 }], w: "s" },
+    c: null,
+    d: undefined,
+  };
+
+  it("is byte-identical to the refs inside the signed canonical string, v1 and v2", () => {
+    const text = canonicalRefsJson(refs)!;
+    for (const schemaVersion of [1, 2]) {
+      const c = canonicalizeRowContent({ ...sampleContent, refs, schemaVersion });
+      expect(c).toContain(`"refs":${text},`);
+    }
+  });
+
+  it("sorts keys at every depth, keeps array order, and drops undefined like the signer", () => {
+    expect(canonicalRefsJson(refs)).toBe(
+      '{"a":{"w":"s","z":[3,{"x":2,"y":1}]},"b":0.30000000000000004,"c":null}',
+    );
+  });
+
+  it("keeps every digit of a double that needs 17 significant digits", () => {
+    const text = canonicalRefsJson({ v: 1.7976931348623157e308, w: 123.45600000000002 })!;
+    const back = JSON.parse(text) as { v: number; w: number };
+    expect(back.v).toBe(1.7976931348623157e308);
+    expect(back.w).toBe(123.45600000000002);
+  });
+
+  it("is null for absent refs (the recorder then binds SQL NULL)", () => {
+    expect(canonicalRefsJson(null)).toBeNull();
+    expect(canonicalRefsJson(undefined)).toBeNull();
+  });
+});
+
 describe("audit-signing.service — HMAC signer", () => {
   it("computes a base64-url signature with no padding", () => {
     const signer = createHmacSigner(KEY);
@@ -190,7 +227,7 @@ describe("audit-signing.service — loadAuditKeyFromDisk (WARP-476)", () => {
 
   let dir: string;
   let diskPath: string;
-  let warnSpy: ReturnType<typeof vi.fn>;
+  let warnSpy: Mock<Logger["warn"]>;
   const originalEnvKey = process.env.AUDIT_SIGNING_KEY;
   const originalNodeEnv = process.env.NODE_ENV;
 
@@ -199,7 +236,7 @@ describe("audit-signing.service — loadAuditKeyFromDisk (WARP-476)", () => {
     diskPath = path.join(dir, "audit.key");
     delete process.env.AUDIT_SIGNING_KEY;
     delete process.env.NODE_ENV;
-    warnSpy = vi.fn();
+    warnSpy = vi.fn<Logger["warn"]>();
     _setLoggerForTests({ warn: warnSpy });
   });
 

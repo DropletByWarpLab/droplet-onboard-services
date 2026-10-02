@@ -27,7 +27,7 @@ import type pino from "pino";
 import type { ExecFn } from "./host-compose-runner.js";
 import { purgeSelfSwapHelpers } from "./purge-self-swap-helpers.js";
 
-const SCRIPT = "/opt/droplet/scripts/lib/apply-update.sh";
+const SCRIPT = "/opt/droplet/docker/ota/apply-update.sh";
 const DAY_MS = 86400_000;
 
 function createPrismaStub(rows: Array<{ id: string; status: string }>) {

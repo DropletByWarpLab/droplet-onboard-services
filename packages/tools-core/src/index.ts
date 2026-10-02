@@ -17,7 +17,12 @@ export {
   type ToolCatalogEntry,
   type ToolDomain,
 } from "./catalog.js";
-export { confirmationRequired, isConfirmationResponse, passThroughConfirmation } from "./confirmation.js";
+export {
+  confirmationRequired,
+  isConfirmationResponse,
+  passThroughConfirmation,
+  redactConfirmationTokensForModel,
+} from "./confirmation.js";
 // WARP-2821 — the ONE corpus-visibility rule, called by the orchestrator's
 // Files search route and by the mcp-server's chunk-owner resolver. Two copies
 // of this disagreed once, and every shared document was invisible to the
@@ -62,6 +67,19 @@ export {
   type RuntimeDenyTier,
   type ToolCallInterceptor,
 } from "./interceptor.js";
+// WARP-2972 — module gating for the tool surface: ONE predicate, shared by the
+// orchestrator (chat pool, /api/llm/tools) and the mcp-server (tools/list,
+// tools/call). See module-gate.ts.
+export {
+  FAIL_CLOSED_MODULE_VERDICT,
+  MODULE_OWNED_TOOL_DOMAINS,
+  isToolWithheldByModule,
+  namesForGuidance,
+  parseModuleVerdict,
+  serializeModuleVerdict,
+  withholdModuleTools,
+  type ModuleVerdict,
+} from "./module-gate.js";
 export {
   TOOL_ROUTES,
   type ToolClient,

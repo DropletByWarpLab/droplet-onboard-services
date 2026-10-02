@@ -148,7 +148,7 @@ describe("Ollama — untouched (WARP-1749 acceptance)", () => {
     const fetchMock = routedFetch({ tags: ["gpt-oss:20b"] });
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    await ensureDefaultModelPulled();
+    await ensureDefaultModelPulled(async () => "gpt-oss:20b");
     await new Promise((r) => setTimeout(r, 0));
 
     // Exactly the two requests this path always made: the tags listing and the
@@ -246,7 +246,7 @@ describe("DMR — a listed model is corroborated against the native listing", ()
     });
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    await ensureDefaultModelPulled();
+    await ensureDefaultModelPulled(async () => MODEL);
     await new Promise((r) => setTimeout(r, 0));
 
     expect(callsTo(fetchMock, "/api/pull")).toHaveLength(0);
@@ -260,7 +260,7 @@ describe("DMR — a listed model is corroborated against the native listing", ()
     const fetchMock = routedFetch({ tags: [MODEL], native: [], pull: "error" });
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    await ensureDefaultModelPulled();
+    await ensureDefaultModelPulled(async () => MODEL);
     await new Promise((r) => setTimeout(r, 0));
 
     expect(callsTo(fetchMock, "/api/pull")).toHaveLength(1);
@@ -284,7 +284,7 @@ describe("DMR — a listed model is corroborated against the native listing", ()
       global.fetch = fetchMock as unknown as typeof fetch;
       resetWarmStateForTests();
 
-      await ensureDefaultModelPulled();
+      await ensureDefaultModelPulled(async () => MODEL);
       await new Promise((r) => setTimeout(r, 0));
 
       expect(callsTo(fetchMock, "/api/pull")).toHaveLength(1);
@@ -299,7 +299,7 @@ describe("DMR — a listed model is corroborated against the native listing", ()
       global.fetch = fetchMock as unknown as typeof fetch;
       resetWarmStateForTests();
 
-      await ensureDefaultModelPulled();
+      await ensureDefaultModelPulled(async () => MODEL);
       await new Promise((r) => setTimeout(r, 0));
 
       // A probe outage must never trigger a pull storm against a store that is

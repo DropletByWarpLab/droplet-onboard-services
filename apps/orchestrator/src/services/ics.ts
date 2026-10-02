@@ -5,9 +5,10 @@
  * public calendars, Fastmail, etc.) and to serialize the user's own events
  * for the /api/calendar/publish endpoint so phones can subscribe via
  * webcal://. We deliberately do NOT implement RRULE expansion or VALARM
- * semantics. Recurring events coming from a feed are stored as their first
- * instance only, with no marker — `IcsEvent` carries the raw `rrule`, but
- * `calendar.service.ts` has no column to persist it into.
+ * semantics HERE. Recurring events (RRULE, EXDATE, RECURRENCE-ID overrides)
+ * are parsed into `IcsEvent` and expanded by `ics-recurrence.ts` at sync time
+ * (WARP-3266); a rule outside the supported subset is stored as its first
+ * instance with `recurrence = "unexpanded"`, never silently.
  *
  * Nested components (VALARM, and anything else opened with BEGIN: inside a
  * VEVENT) are SKIPPED, not merely unmodelled — see `parseIcs`. That
@@ -39,14 +40,16 @@
  * the documented drop class rather than producing a wrong time.
  *
  * Extending this module:
- *  - Recurring events: add an `rrule` library + expand on read in
- *    calendar.service.ts. NOTE: `utils/rrule.ts`'s `nextFireFromRrule` is a
- *    next-fire advancer, NOT an expander — it ignores COUNT/UNTIL and rejects
- *    the bare `FREQ=WEEKLY;BYDAY=TU` Google emits. Do not reuse it here.
+ *  - Recurring events: see `ics-recurrence.ts`. NOTE: `utils/rrule.ts`'s
+ *    `nextFireFromRrule` is a next-fire advancer, NOT an expander — it
+ *    ignores COUNT/UNTIL and rejects the bare `FREQ=WEEKLY;BYDAY=TU` Google
+ *    emits. Do not reuse it here.
  *  - Windows zone names: vendor the CLDR windowsZones map, or read the
  *    STANDARD/DAYLIGHT offsets out of the VTIMEZONE the feed already ships.
  *  - Attendees / RSVP: parse ATTENDEE lines into a separate table.
  */
+
+import { zoneFormatter, zonedWallClockToUtc } from "../lib/zoned-time.js";
 
 export interface IcsEvent {
   uid: string;
@@ -56,8 +59,27 @@ export interface IcsEvent {
   startsAt: Date;
   endsAt: Date;
   allDay: boolean;
-  // Raw RRULE if present — caller may surface as text rather than expand.
+  // Raw RRULE if present — expanded by ics-recurrence.ts (WARP-3266).
   rrule?: string;
+  /** The resolved IANA zone DTSTART was written in; absent for UTC, floating
+   *  and DATE values. Recurrence repeats the WALL CLOCK in this zone, so a
+   *  9:00 meeting stays at 9:00 across a DST change. */
+  tzid?: string;
+  /** EXDATE instants (DATE-TIME form). */
+  exdates?: Date[];
+  /** EXDATE days in DATE form, `YYYY-MM-DD`: excludes whichever occurrence
+   *  falls on that calendar day in the series' own zone. */
+  exdateDays?: string[];
+  /** RECURRENCE-ID: this VEVENT overrides the instance of series `uid` that
+   *  originally started at this instant. */
+  recurrenceId?: Date;
+  /** RECURRENCE-ID's RANGE parameter, uppercased (`THISANDFUTURE`). */
+  recurrenceRange?: string;
+  /** DTSTART's wall clock as written, when it carries a TZID. Recurrence
+   *  repeats this, not the instant read back (which a DST gap shifts). */
+  dtstartWall?: { ymd: string; minuteOfDay: number };
+  /** STATUS, uppercased. A CANCELLED override removes its instance. */
+  status?: string;
 }
 
 /** Unfold continuation lines (RFC 5545 §3.1) — a line beginning with
@@ -108,117 +130,11 @@ function parseLine(
   return { name, params, value };
 }
 
-/** The offset, in ms, that `tz` was running at the given instant —
- *  `utcInstant + offset === wall clock in tz`. Positive east of UTC.
- *
- *  Derived by formatting the instant *in* the zone and reading the wall-clock
- *  fields back, which is the only offset source available without a tz
- *  database dependency. Throws `RangeError` for a zone the runtime cannot
- *  resolve — callers must handle that rather than defaulting to UTC. */
-/** One `Intl.DateTimeFormat` per zone, reused. Constructing a formatter is the
- *  expensive part, and resolving a feed costs several offset probes per event
- *  (two per DTSTART/DTEND, plus one per candidate) — a 500-event feed would
- *  otherwise build thousands of throwaway formatters on a box that is also
- *  running everything else. Keyed by zone; the set of zones a box ever sees is
- *  tiny and bounded by its subscriptions, so this never grows unboundedly. */
-const zoneFormatters = new Map<string, Intl.DateTimeFormat>();
-
-function zoneFormatter(tz: string): Intl.DateTimeFormat {
-  const hit = zoneFormatters.get(tz);
-  if (hit) return hit;
-  // Throws RangeError for a zone the runtime cannot resolve — deliberately not
-  // caught here, so callers keep the drop-rather-than-guess behaviour.
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    // `hourCycle: h23` — `hour12: false` reports midnight as hour 24 on some
-    // ICU builds, which would silently shift a midnight event by a day.
-    hourCycle: "h23",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-  zoneFormatters.set(tz, fmt);
-  return fmt;
-}
-
-function timeZoneOffsetMs(utcInstantMs: number, tz: string): number {
-  const parts = zoneFormatter(tz).formatToParts(new Date(utcInstantMs));
-  const field = (type: string): number => {
-    const p = parts.find((x) => x.type === type);
-    return p ? Number(p.value) : NaN;
-  };
-  const asIfUtc = Date.UTC(
-    field("year"),
-    field("month") - 1,
-    field("day"),
-    field("hour"),
-    field("minute"),
-    field("second"),
-  );
-  return asIfUtc - utcInstantMs;
-}
-
-/** Resolve a wall clock in a named IANA zone to the UTC instant it denotes.
- *  Returns an Invalid Date if `tz` is not resolvable by the runtime — never a
- *  UTC guess, because a plausible wrong instant is worse than a dropped event
- *  (WARP-2764).
- *
- *  RFC 5545 §3.3.5 specifies both awkward cases, and they need opposite
- *  treatment, which is why this is not a single subtraction:
- *
- *   - **Repeated** local time (autumn fall-back — the hour occurs twice):
- *     *"the DATE-TIME value refers to the first occurrence"*. So: the EARLIER
- *     of the two valid instants.
- *   - **Nonexistent** local time (spring-forward gap — the hour never occurs):
- *     *"interpreted using the UTC offset before the gap in local times"*. That
- *     is the pre-gap offset, which shifts the event forward past the gap — the
- *     same answer Temporal's `compatible`, luxon and java.time give.
- *
- *  Method: an instant denotes wall clock `w` in `tz` iff `instant +
- *  offset(instant) === w`. Probe the offset a day either side (a single probe
- *  at the wall clock cannot see both sides of a transition — in the ambiguous
- *  hour the second reading always agrees with the first), build a candidate per
- *  distinct offset, and keep only those that actually round-trip. Zero
- *  survivors means the wall clock is in a gap, and the pre-gap offset is the
- *  spec's answer. Two survivors is the repeated hour, and `Math.min` is "first
- *  occurrence".
- *
- *  🔴 Do not "simplify" this back to correct-once-and-return. That version
- *  resolved the gap BACKWARD (a 02:30 New York start became 01:30 EST, two
- *  hours early) and, in the three zones whose transition is at midnight
- *  (America/Santiago, America/Havana, Atlantic/Azores), moved a 00:00 event to
- *  the PREVIOUS CALENDAR DAY. It also returned the LATER occurrence of the
- *  repeated hour in every zone east of UTC — 73 of 130 DST zones — which is a
- *  §3.3.5 violation, not a defensible policy choice. */
-function zonedWallClockToUtc(
-  y: number,
-  mo: number,
-  d: number,
-  h: number,
-  mi: number,
-  s: number,
-  tz: string,
-): Date {
-  const wallAsUtc = Date.UTC(y, mo - 1, d, h, mi, s);
-  const DAY_MS = 86_400_000;
-  let offsetBefore: number;
-  let offsetAfter: number;
-  try {
-    offsetBefore = timeZoneOffsetMs(wallAsUtc - DAY_MS, tz);
-    offsetAfter = timeZoneOffsetMs(wallAsUtc + DAY_MS, tz);
-  } catch {
-    return new Date(NaN);
-  }
-  const valid = [...new Set([offsetBefore, offsetAfter])]
-    .map((off) => wallAsUtc - off)
-    .filter((instant) => timeZoneOffsetMs(instant, tz) === wallAsUtc - instant);
-  // No candidate round-trips ⇒ the local time does not exist ⇒ §3.3.5's
-  // "UTC offset before the gap".
-  return new Date(valid.length > 0 ? Math.min(...valid) : wallAsUtc - offsetBefore);
-}
+// The RFC 5545 wall-clock converter (`zoneFormatter`, `timeZoneOffsetMs`,
+// `zonedWallClockToUtc`) moved VERBATIM to lib/zoned-time.ts (WARP-2977 P2b)
+// so the Security opening hours resolve wall clocks through the SAME code this
+// parser does. Its RFC 5545 §3.3.5 rationale lives there now; this file's
+// tests (src/__tests__/ics.test.ts) still pin it.
 
 /** Normalize a TZID parameter value to a zone `Intl` can resolve.
  *
@@ -274,7 +190,7 @@ function normalizeTzid(tzid: string): string | undefined {
  *  to state which of the two it is passing. RFC 5545 §3.3.5 forbids TZID on a
  *  value that already carries `Z`, so an explicit `Z` wins and the parameter
  *  is ignored rather than double-applied. */
-function parseIcsDateTime(value: string, tzid: string | undefined): Date {
+export function parseIcsDateTime(value: string, tzid: string | undefined): Date {
   const v = value.trim();
   // DATE form: YYYYMMDD. TZID does not apply — a DATE has no time of day.
   if (/^\d{8}$/.test(v)) {
@@ -410,6 +326,13 @@ export function parseIcs(text: string): IcsEvent[] {
           endsAt: current.endsAt,
           allDay: current._allDay === true,
           rrule: current.rrule,
+          tzid: current.tzid,
+          exdates: current.exdates,
+          exdateDays: current.exdateDays,
+          recurrenceId: current.recurrenceId,
+          recurrenceRange: current.recurrenceRange,
+          dtstartWall: current.dtstartWall,
+          status: current.status,
         });
       }
       current = {};
@@ -447,6 +370,17 @@ export function parseIcs(text: string): IcsEvent[] {
         break;
       case "DTSTART":
         current.startsAt = parseIcsDateTime(parsed.value, parsed.params.TZID);
+        current.tzid =
+          parsed.params.TZID !== undefined && !parsed.value.trim().endsWith("Z")
+            ? normalizeTzid(parsed.params.TZID)
+            : undefined;
+        {
+          const w = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/.exec(parsed.value.trim());
+          current.dtstartWall =
+            current.tzid && w
+              ? { ymd: `${w[1]}-${w[2]}-${w[3]}`, minuteOfDay: Number(w[4]) * 60 + Number(w[5]) }
+              : undefined;
+        }
         if (parsed.params.VALUE === "DATE" || /^\d{8}$/.test(parsed.value.trim())) {
           current._allDay = true;
         }
@@ -456,6 +390,28 @@ export function parseIcs(text: string): IcsEvent[] {
         break;
       case "RRULE":
         current.rrule = parsed.value;
+        break;
+      case "EXDATE":
+        // Comma-separated list; the line may repeat. A value that does not
+        // parse is ignored rather than dropping the event.
+        for (const raw of parsed.value.split(",")) {
+          const v = raw.trim();
+          if (/^\d{8}$/.test(v)) {
+            (current.exdateDays ??= []).push(`${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}`);
+          } else {
+            const at = parseIcsDateTime(v, parsed.params.TZID);
+            if (!isNaN(at.getTime())) (current.exdates ??= []).push(at);
+          }
+        }
+        break;
+      case "RECURRENCE-ID": {
+        const at = parseIcsDateTime(parsed.value, parsed.params.TZID);
+        if (!isNaN(at.getTime())) current.recurrenceId = at;
+        current.recurrenceRange = parsed.params.RANGE?.toUpperCase();
+        break;
+      }
+      case "STATUS":
+        current.status = parsed.value.trim().toUpperCase();
         break;
     }
   }

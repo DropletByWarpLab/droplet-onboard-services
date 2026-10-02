@@ -147,8 +147,11 @@ export default function BusinessPage(): JSX.Element {
   return (
     <ShellPage
       icon={<Sparkles size={15} />}
-      label="Planning"
-      title="Planning"
+      // WARP-2967 — "Insights", matching the nav row. It was "Planning" while
+      // it was a lone entry; it now heads Brief and Reports, and "Planning"
+      // named only the first of the three tenses the section carries.
+      label="Insights"
+      title="Insights"
       sub={SUB}
     >
       <div className="droplet-business">

@@ -45,10 +45,14 @@ function SessionsCard({
   person,
   now,
   onRevoked,
+  canRevoke,
 }: {
   person: SessionsForUser;
   now: number;
   onRevoked: () => void;
+  /** WARP-3111: the box refuses revoking your own sessions or the owner's,
+   *  so the action is not offered on those rows. */
+  canRevoke: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -118,7 +122,7 @@ function SessionsCard({
         {/* Offered only where there is something to revoke AND the box could
             actually see it. On Unknown, a Sign out button would let an
             operator believe an outage-blind action had taken effect. */}
-        {!unknown && count > 0 ? (
+        {canRevoke && !unknown && count > 0 ? (
           confirming ? (
             <Row
               title={`Sign ${name} out of every session?`}
@@ -291,7 +295,13 @@ export default function AdminSessionsPage() {
             </Card>
           ) : (
             active.map((p) => (
-              <SessionsCard key={p.username} person={p} now={now} onRevoked={load} />
+              <SessionsCard
+                key={p.username}
+                person={p}
+                now={now}
+                onRevoked={load}
+                canRevoke={p.role !== "owner" && p.username !== user?.username}
+              />
             ))
           )}
 
@@ -299,7 +309,13 @@ export default function AdminSessionsPage() {
             <>
               <Sect title="Everyone else" />
               {rest.map((p) => (
-                <SessionsCard key={p.username} person={p} now={now} onRevoked={load} />
+                <SessionsCard
+                  key={p.username}
+                  person={p}
+                  now={now}
+                  onRevoked={load}
+                  canRevoke={p.role !== "owner" && p.username !== user?.username}
+                />
               ))}
             </>
           ) : null}

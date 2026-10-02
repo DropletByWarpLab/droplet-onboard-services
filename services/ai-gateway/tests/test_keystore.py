@@ -91,6 +91,34 @@ class TestDeviceSecretSafety:
             keystore._assert_device_secret_safe()
 
 
+class TestNoFallbackSecret:
+    """WARP-2985: no literal key is ever used — unset means refuse, not default."""
+
+    def test_unset_env_yields_no_default(self, monkeypatch):
+        import importlib.util
+
+        monkeypatch.delenv("DEVICE_SECRET", raising=False)
+        monkeypatch.delenv("DROPLET_ENV", raising=False)
+        monkeypatch.delenv("DROPLET_FIPS_REQUIRED", raising=False)
+        spec = importlib.util.spec_from_file_location("keystore_fresh", keystore.__file__)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert mod.DEVICE_SECRET == ""
+
+    @pytest.mark.parametrize(
+        "value", ["", "   ", "change-me", "dev-secret-change-in-production", "dev-only-not-secure"]
+    )
+    async def test_store_refuses_weak_secret(self, keys_dir, monkeypatch, value):
+        monkeypatch.setattr(keystore, "DEVICE_SECRET", value)
+        with pytest.raises(RuntimeError, match="DEVICE_SECRET"):
+            await store_key("anthropic", "sk-ant-never-stored")
+        assert not (keys_dir / keystore._SHARED_NAMESPACE / "anthropic.enc").exists()
+
+    def test_real_secret_derives_a_key(self, keys_dir, monkeypatch):
+        monkeypatch.setattr(keystore, "DEVICE_SECRET", "a-real-per-device-secret")
+        assert keystore._get_fernet() is not None
+
+
 class TestPathContainment:
     """CodeQL py/path-injection: neither the provider (URL path segment) nor
     the user id may steer the key file outside KEYS_DIR."""

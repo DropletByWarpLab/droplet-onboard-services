@@ -28,11 +28,14 @@ import {
   Clock,
   FileEdit,
   Lightbulb,
+  Lock,
   Play,
   Repeat,
   ShieldCheck,
+  Users,
 } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
   useRoutine,
   useRoutineRuns,
@@ -45,6 +48,7 @@ import {
   deleteRoutineSchedule,
   runRoutine,
   setRoutineStatus,
+  setRoutineVisibility,
   updateRoutineSchedule,
 } from "@/lib/api";
 import {
@@ -52,7 +56,12 @@ import {
   describeSchedule,
   readbackSentence,
 } from "@/lib/routine-readback";
-import type { Routine, RoutineRun, RoutineStatus } from "@/lib/types";
+import type {
+  Routine,
+  RoutineRun,
+  RoutineStatus,
+  RoutineVisibility,
+} from "@/lib/types";
 
 const SUB =
   "Sequences your Droplet can run for you — on a schedule, or whenever you press Run.";
@@ -207,7 +216,10 @@ function RoutineCard({
       >
         <div className="sect" style={{ marginTop: 0 }}>
           <h2 style={{ fontSize: 15 }}>{routine.name}</h2>
-          <ImpactChip writes={routine.writes} reversible={routine.reversible} />
+          <span style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <VisibilityChip visibility={routine.visibility} />
+            <ImpactChip writes={routine.writes} reversible={routine.reversible} />
+          </span>
         </div>
         {routine.description ? (
           <p className="muted" style={{ margin: 0 }}>
@@ -217,6 +229,28 @@ function RoutineCard({
       </button>
       {open ? <RoutineDetail routine={routine} onChanged={onChanged} /> : null}
     </section>
+  );
+}
+
+/** WARP-3354 — who can see this routine. The box enforces it; this only says it. */
+function VisibilityChip({ visibility }: { visibility: RoutineVisibility }) {
+  if (visibility === "WORKSPACE") {
+    return (
+      <span
+        className="chip"
+        title="Shared with the Workspace: every member can see it and run it."
+      >
+        <Users size={13} aria-hidden /> Workspace
+      </span>
+    );
+  }
+  return (
+    <span
+      className="chip"
+      title="Private: only the person who created it, owners and admins can see it."
+    >
+      <Lock size={13} aria-hidden /> Private
+    </span>
   );
 }
 
@@ -263,6 +297,9 @@ function RoutineDetail({
   // this the routines the gate exists to protect could never be run from
   // here — every click re-showed the same message (review, WARP-2671).
   const [runConfirm, setRunConfirm] = useState(false);
+  // WARP-3354 — which sharing confirmation is open: a plain one to share, a
+  // red one to make private (members who use it lose it).
+  const [sharing, setSharing] = useState<"share" | "unshare" | null>(null);
 
   const catalog = useMemo(
     () => new Map(tools.map((t) => [t.name, t])),
@@ -292,6 +329,16 @@ function RoutineDetail({
       setNotice((e as Error).message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function changeVisibility(to: RoutineVisibility) {
+    setNotice(null);
+    try {
+      await setRoutineVisibility(routine.slug, to);
+      onChanged();
+    } catch (e) {
+      setNotice((e as Error).message);
     }
   }
 
@@ -344,6 +391,34 @@ function RoutineDetail({
         >
           {readback.impactLine}
         </p>
+        {/* WARP-2895 — a routine that runs code shows the code. The readback
+            says "runs code you wrote" and the person reads exactly what,
+            before turning it on; the sandbox it runs in reaches no network,
+            no file and no tool. */}
+        {readback.code.length > 0 ? (
+          <div style={{ marginTop: 10, display: "grid", gap: 8 }} data-testid="routine-code">
+            <p className="muted" style={{ margin: 0 }}>
+              Runs code you wrote, in a sandbox that reaches no network, no file and no tool.
+            </p>
+            {readback.code.map((c, i) => (
+              <pre
+                key={i}
+                aria-label={c.kind === "when" ? "Condition code" : "Transform code"}
+                style={{
+                  margin: 0,
+                  padding: "10px 12px",
+                  borderRadius: 8,
+                  background: "var(--inset)",
+                  fontSize: 12,
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                }}
+              >
+                {c.code}
+              </pre>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       <StepList routine={full ?? routine} />
@@ -414,7 +489,50 @@ function RoutineDetail({
             Turn on&hellip;
           </button>
         )}
+        {/* WARP-3354 — only its creator, an owner or an admin is offered this
+            (the box says so via `canShare`); a suggestion is the box's, not
+            anyone's to share. */}
+        {routine.canShare && routine.status !== "suggested" ? (
+          routine.visibility === "WORKSPACE" ? (
+            <button
+              type="button"
+              className="btn ghost"
+              disabled={busy}
+              onClick={() => setSharing("unshare")}
+            >
+              <Lock size={14} aria-hidden /> Make private
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn ghost"
+              disabled={busy}
+              onClick={() => setSharing("share")}
+            >
+              <Users size={14} aria-hidden /> Share with Workspace
+            </button>
+          )
+        ) : null}
       </div>
+
+      <ConfirmDialog
+        open={sharing === "share"}
+        onCancel={() => setSharing(null)}
+        onConfirm={() => changeVisibility("WORKSPACE")}
+        variant="neutral"
+        title="Share with the Workspace?"
+        description={`Every member will be able to see "${routine.name}", including its steps and what they do, and run it. You can make it private again at any time.`}
+        confirmLabel="Share"
+      />
+      <ConfirmDialog
+        open={sharing === "unshare"}
+        onCancel={() => setSharing(null)}
+        onConfirm={() => changeVisibility("PRIVATE")}
+        variant="destructive"
+        title="Make this routine private?"
+        description={`Members who use "${routine.name}" will lose access: it disappears from their list and they can no longer run it. Its schedules keep running as the person who created it.`}
+        confirmLabel="Make private"
+      />
     </div>
   );
 }
@@ -434,9 +552,13 @@ function StepList({ routine }: { routine: Routine }) {
           const tool =
             s.kind === "summarize"
               ? "Write a summary"
-              : typeof args?.tool === "string"
-                ? args.tool
-                : "(unreadable step)";
+              : s.kind === "transform"
+                ? "Run code (shape the results)"
+                : s.kind === "when"
+                  ? "Run code (continue only if true)"
+                  : typeof args?.tool === "string"
+                    ? args.tool
+                    : "(unreadable step)";
           const as = typeof args?.as === "string" ? args.as : null;
           return (
             <li key={s.id}>

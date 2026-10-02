@@ -23,10 +23,14 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
+from apscheduler.executors.pool import ThreadPoolExecutor as APSThreadPoolExecutor
+from apscheduler.schedulers.background import BackgroundScheduler
 from watchdog.events import FileDeletedEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.polling import PollingObserver
@@ -112,9 +116,47 @@ GROUPFOLDERS_PATTERN = re.compile(
 # Nextcloud uploads generate create + modify events in rapid succession.
 # We debounce per-path: delay indexing by DEBOUNCE_SECONDS and reset the
 # timer on each new event for the same path.
+#
+# WARP-3193 PERF-4: this used to be one `threading.Timer` (one OS thread) per
+# path, each running the whole pipeline — a 5k-file copy meant 5k threads
+# extracting/OCRing/embedding at once. Now one apscheduler BackgroundScheduler
+# holds the per-path debounce (a `date` job keyed by path, replaced on every
+# new event), and on expiry hands the path to a fixed pool of INDEX_WORKERS.
+# `_queued` dedupes paths waiting for a worker; a path leaves it when its run
+# starts, so an edit made DURING indexing is still picked up afterwards.
 DEBOUNCE_SECONDS = 2.0
-_debounce_timers: dict[str, threading.Timer] = {}
+INDEX_WORKERS = 2
 _debounce_lock = threading.Lock()
+_debounce_scheduler: BackgroundScheduler | None = None
+_index_pool: ThreadPoolExecutor | None = None
+_queued: set[str] = set()
+
+
+def _get_debounce_scheduler() -> BackgroundScheduler:
+    """Lazily start the debounce scheduler + index pool (caller holds
+    `_debounce_lock`). Lazy so importing the module starts no threads."""
+    global _debounce_scheduler, _index_pool
+    if _debounce_scheduler is None:
+        _index_pool = ThreadPoolExecutor(
+            max_workers=INDEX_WORKERS, thread_name_prefix="file-index"
+        )
+        # apscheduler logs every add/run at INFO; per-file that is two lines
+        # per upload, so this scheduler's loggers are held at WARNING (named
+        # apart from scheduler_service's, which keeps its INFO lines).
+        sched_logger = logging.getLogger("watcher.debounce")
+        sched_logger.setLevel(logging.WARNING)
+        logging.getLogger("apscheduler.executors.debounce").setLevel(logging.WARNING)
+        _debounce_scheduler = BackgroundScheduler(
+            # The job only hands the path to _index_pool, so one thread is
+            # enough; misfire_grace_time=None means a late fire still runs
+            # rather than being dropped.
+            executors={"debounce": APSThreadPoolExecutor(max_workers=1)},
+            job_defaults={"misfire_grace_time": None, "coalesce": True},
+            logger=sched_logger,
+            daemon=True,
+        )
+        _debounce_scheduler.start()
+    return _debounce_scheduler
 
 
 @dataclass(frozen=True)
@@ -162,11 +204,11 @@ def _parse_watch_target(absolute_path: str) -> Optional[WatchTarget]:
         dept = _lookup_department_for_groupfolder(gfid)
         if dept is None:
             # WARP-1264: fail-closed — an unrecognized groupfolder id must
-            # never be attributed to a personal (or any) corpus.
-            logger.warning(
-                "Unknown groupfolder id=%d for %s — skipping (no Department row)",
-                gfid, rel,
-            )
+            # never be attributed to a personal (or any) corpus. The WARNING
+            # is logged once per lookup in _lookup_department_for_groupfolder
+            # (WARP-3425: the backfill sweep revisits every such file, so a
+            # per-file warning would flood the log).
+            logger.debug("Unknown groupfolder id=%d for %s — skipping", gfid, rel)
             return None
         if dept["kind"] == "HOUSEHOLD":
             # Legacy sentinel preserved verbatim — no reindex of existing rows.
@@ -244,6 +286,17 @@ def _lookup_department_for_groupfolder(gfid: int) -> Optional[dict]:
         )
         return _HOUSEHOLD_FALLBACK
 
+    if dept is None:
+        # WARP-3425: the only branch that leaves a groupfolder file with no
+        # FileIndexStatus row at all, which is what every company Workspace
+        # file showed on the test box. The orchestrator now re-discovers the
+        # Workspace's groupfolder id every reconcile tick; this line is the
+        # trace that a folder is still unmapped.
+        logger.warning(
+            "groupfolder %d has no Department row (Department.ncGroupfolderId) — "
+            "its files are skipped until one does; the backfill sweep retries them",
+            gfid,
+        )
     with _gf_dept_cache_lock:
         _gf_dept_cache[gfid] = (dept, now)
     return dept
@@ -499,18 +552,30 @@ class IndexHandler(FileSystemEventHandler):
     def _schedule(self, path: str) -> None:
         """Debounce: delay indexing by DEBOUNCE_SECONDS, resetting on repeat events."""
         with _debounce_lock:
-            existing = _debounce_timers.get(path)
-            if existing:
-                existing.cancel()
-            timer = threading.Timer(DEBOUNCE_SECONDS, self._run_index, args=(path,))
-            timer.daemon = True
-            _debounce_timers[path] = timer
-            timer.start()
+            _get_debounce_scheduler().add_job(
+                self._enqueue_index,
+                trigger="date",
+                run_date=datetime.now(timezone.utc) + timedelta(seconds=DEBOUNCE_SECONDS),
+                args=(path,),
+                id=path,
+                replace_existing=True,
+                executor="debounce",
+            )
+
+    def _enqueue_index(self, path: str) -> None:
+        """Debounce expired: hand the path to the bounded pool, unless it is
+        already waiting there."""
+        with _debounce_lock:
+            if path in _queued:
+                return
+            _queued.add(path)
+            pool = _index_pool
+        pool.submit(self._run_index, path)
 
     def _run_index(self, path: str) -> None:
         """Run the indexing pipeline, called after debounce expires."""
         with _debounce_lock:
-            _debounce_timers.pop(path, None)
+            _queued.discard(path)
         try:
             self._index(path)
         except Exception as e:
@@ -723,7 +788,13 @@ def reconcile_index(handler: IndexHandler | None = None) -> dict:
     Runs in a daemon thread at startup (a one-shot pass, not a scheduling
     loop — the apscheduler rule governs recurring schedules).
     """
-    handler = handler or IndexHandler()
+    try:
+        return _reconcile_index(handler or IndexHandler())
+    finally:
+        _startup_reconcile_done.set()
+
+
+def _reconcile_index(handler: IndexHandler) -> dict:
     try:
         status_map = fetch_index_status_map()
     except Exception as e:
@@ -773,6 +844,63 @@ def reconcile_index(handler: IndexHandler | None = None) -> dict:
     return {"scanned": scanned, "processed": processed}
 
 
+# ── WARP-3425: periodic backfill of never-seen files ──
+#
+# The startup reconcile is one pass. A file it could not attribute (a
+# groupfolder whose Department row did not carry its id yet — the company
+# Workspace on the test box) was skipped with no FileIndexStatus row and then
+# never looked at again until the next restart, because inotify only reports
+# NEW events. The orchestrator heals the Workspace's groupfolder id at boot and
+# on every 5-minute tick, which can land after this service's startup pass has
+# already walked the Workspace — an OTA restarts both at once. This sweep is
+# what turns that heal into indexed files.
+#
+# Only files with NO status row are queued: retrying `failed` / stale rows
+# stays the startup pass's job (once per process), so a permanently failing
+# file is not re-run every interval. Queued paths go through the same bounded
+# pool and `_queued` dedupe as live events.
+BACKFILL_INTERVAL_MINUTES = 15
+
+# Set when the startup reconcile finishes; the sweep waits for it, since the
+# startup pass already indexes every never-seen file (inline) and a sweep
+# racing it would index the same files twice.
+_startup_reconcile_done = threading.Event()
+
+
+def backfill_unseen(handler: IndexHandler) -> int:
+    """Queue every watched file that has no FileIndexStatus row. Returns the
+    number queued."""
+    if not _startup_reconcile_done.is_set():
+        return 0
+    try:
+        status_map = fetch_index_status_map()
+    except Exception as e:
+        logger.warning("backfill: cannot read FileIndexStatus (%s) — skipping sweep", e)
+        return 0
+    # ponytail: a full walk of the watched tree + the whole status map per
+    # sweep; fine at SMB corpus sizes (tens of thousands of files). Page the
+    # map or walk incrementally if a box grows well past that.
+    queued = 0
+    for abs_path in iter_watch_paths():
+        target = _parse_watch_target(abs_path)
+        if not target or _is_ignored_basename(os.path.basename(target.relpath)):
+            continue
+        if (target.index_user, target.stored_path) in status_map:
+            continue
+        # `_index` returns before writing any status row for an empty file, so
+        # without this every empty file would be re-queued every sweep forever.
+        try:
+            if os.path.getsize(abs_path) == 0:
+                continue
+        except OSError:
+            continue
+        handler._enqueue_index(abs_path)
+        queued += 1
+    if queued:
+        logger.info("backfill: queued %d never-indexed file(s)", queued)
+    return queued
+
+
 def start_watcher() -> Observer:
     """Start watching the Nextcloud data root for file changes.
 
@@ -794,4 +922,15 @@ def start_watcher() -> Observer:
     observer.schedule(handler, NEXTCLOUD_DATA_ROOT, recursive=True)
     observer.start()
     logger.info("Watching %s for file changes", NEXTCLOUD_DATA_ROOT)
+    # WARP-3425: the never-seen backfill rides the debounce scheduler's default
+    # executor (the sweep only walks and queues; the index pool does the work).
+    with _debounce_lock:
+        _get_debounce_scheduler().add_job(
+            backfill_unseen,
+            trigger="interval",
+            minutes=BACKFILL_INTERVAL_MINUTES,
+            args=(handler,),
+            id="warp3425-backfill-unseen",
+            replace_existing=True,
+        )
     return observer

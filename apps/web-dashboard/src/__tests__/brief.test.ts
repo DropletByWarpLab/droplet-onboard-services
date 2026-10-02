@@ -15,9 +15,13 @@ import { describe, it, expect } from "vitest";
 import { brainIsOff, formatImpact, type Coverage } from "@/app/brief/api";
 import { NAV_GROUPS, MOBILE_PRIMARY_HREFS, moduleForPath } from "@/components/nav-config";
 
+/** WARP-2967 nested Brief under Insights, beside Reports — the three business
+ *  tenses (what is coming, what the box noticed, how it went) read together.
+ *  Its own gate travels with it and is what the cases below still pin. */
 function briefItem() {
   const business = NAV_GROUPS.find((g) => g.label === "Business");
-  return business?.items.find((i) => i.href === "/brief");
+  const insights = business?.items.find((i) => i.href === "/business");
+  return insights?.children?.find((c) => c.href === "/brief");
 }
 
 describe("formatImpact (WARP-2752)", () => {
@@ -63,7 +67,7 @@ describe("formatImpact (WARP-2752)", () => {
 });
 
 describe("/brief nav entry (WARP-2752)", () => {
-  it("sits in the Business group", () => {
+  it("sits in the Business group, under Insights", () => {
     expect(briefItem()).toBeTruthy();
   });
 

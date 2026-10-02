@@ -20,6 +20,7 @@ import {
   Bot,
   HardDrive,
   KeyRound,
+  Puzzle,
   ScrollText,
   ServerCog,
   ShieldCheck,
@@ -69,6 +70,13 @@ const AREAS = [
     icon: <Bot size={15} />,
     title: "Assistant",
     sub: "The prompt and the tools each person's assistant actually gets, and what is holding the rest back.",
+  },
+  // WARP-2900 (ADR-056 slice H4) — promoted workshop extensions.
+  {
+    href: "/admin/extensions",
+    icon: <Puzzle size={15} />,
+    title: "Extensions",
+    sub: "Tools built in the workshop: review a proposal before it is signed, and disable or uninstall what runs.",
   },
   {
     href: "/settings",

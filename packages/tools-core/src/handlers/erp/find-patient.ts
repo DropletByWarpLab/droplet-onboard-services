@@ -24,8 +24,7 @@ const tool: Tool = {
   name: "erp_find_patient",
   description:
     "Search patients in the connected ERP (Eaglesoft) by name, returning minimum-necessary " +
-    "fields. Read-only. Not live yet — returns ERP_NOT_CONNECTED until the integration " +
-    "ships (WARP-1095+).",
+    "fields. Read-only. Not live yet — returns ERP_NOT_CONNECTED.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+html,body{margin:0;padding:0;background:#0f1117;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased;}
+*{box-sizing:border-box;}
+a{color:#818cf8;text-decoration:none;}a:hover{color:#a5b4fc;}
+input::placeholder{color:#71717a;}
+input:-webkit-autofill,input:-webkit-autofill:focus{-webkit-box-shadow:0 0 0 1000px #1a1d27 inset;-webkit-text-fill-color:#e4e4e7;caret-color:#e4e4e7;}
+input:focus-visible,button:focus-visible{outline:2px solid #818cf8;outline-offset:2px;}
+@keyframes gemFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-14px)}}
+@keyframes fadeRise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+@keyframes haloPulse{0%,100%{opacity:.55;transform:scale(1)}50%{opacity:.9;transform:scale(1.08)}}
+@media (prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;animation-iteration-count:1!important;}}
+</style>
+</helmet>
+<div data-screen-label="Login" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr));min-height:100vh;background:#0f1117;">
+  <section ref="{{ leftRef }}" onMouseMove="{{ onMove }}" onMouseLeave="{{ onLeave }}" onMouseDown="{{ onDown }}" style="position:relative;overflow:hidden;min-height:100vh;background:#0f1117;cursor:crosshair;">
+    <canvas ref="{{ canvasRef }}" style="position:absolute;inset:0;width:100%;height:100%;display:block;"></canvas>
+    <div style="position:absolute;inset:0;background:radial-gradient(ellipse 70% 60% at 50% 45%, rgba(15,17,23,0) 0%, rgba(15,17,23,.55) 100%);pointer-events:none;"></div>
+    <div style="position:absolute;top:32px;left:36px;display:flex;align-items:center;gap:10px;animation:fadeRise .5s cubic-bezier(.25,.1,.25,1) both;">
+      <svg width="20" height="24" viewBox="0 0 36 48" fill="none"><polygon points="18,2 36,30 28,50 8,50 0,30" fill="#6366f1"></polygon><polygon points="18,2 36,30 18,38" fill="#818cf8"></polygon></svg>
+      <span style="font-weight:700;letter-spacing:-0.8px;font-size:22px;color:#e4e4e7;">Droplet</span>
+    </div>
+    <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:40px;padding:96px 36px 80px;pointer-events:none;">
+      <div ref="{{ tiltRef }}" style="position:relative;width:180px;height:180px;perspective:700px;transition:transform .25s cubic-bezier(.25,.1,.25,1);pointer-events:auto;cursor:pointer;transform-style:preserve-3d;" onMouseEnter="{{ gemEnter }}" onMouseLeave="{{ gemLeave }}">
+        <div style="position:absolute;left:50%;top:50%;width:240px;height:240px;margin:-120px 0 0 -120px;border-radius:50%;background:radial-gradient(circle, rgba(99,102,241,.5) 0%, rgba(79,70,229,.2) 35%, rgba(15,17,23,0) 70%);filter:blur(18px);animation:haloPulse 6s ease-in-out infinite;"></div>
+        <div style="position:absolute;inset:0;animation:gemFloat 7s ease-in-out infinite;transform-style:preserve-3d;">
+          <canvas ref="{{ gemRef }}" width="360" height="360" style="position:absolute;inset:0;width:180px;height:180px;filter:drop-shadow(0 24px 30px rgba(49,46,129,.7));"></canvas>
+        </div>
+      </div>
+      <div style="max-width:560px;text-align:center;display:flex;flex-direction:column;gap:20px;align-items:center;">
+        <h1 style="margin:0;font-size:clamp(34px,4.2vw,54px);font-weight:700;letter-spacing:-1.4px;line-height:1.05;color:#f4f4f5;text-wrap:balance;animation:fadeRise .5s cubic-bezier(.25,.1,.25,1) .12s both;">Your company's brain.<br>On your premises.</h1>
+        <p style="margin:0;font-size:17px;line-height:1.5;color:#a1a1aa;max-width:460px;text-wrap:pretty;animation:fadeRise .5s cubic-bezier(.25,.1,.25,1) .22s both;">One box runs your AI, files, cameras, and network — and nothing leaves the building unless you say so.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;animation:fadeRise .5s cubic-bezier(.25,.1,.25,1) .32s both;pointer-events:auto;">
+          <span style="display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:999px;border:1px solid rgba(129,140,248,.35);background:rgba(26,29,39,.72);backdrop-filter:blur(12px) saturate(150%);font-size:13px;color:#e4e4e7;" style-hover="border-color:#818cf8;background:rgba(31,41,55,.85)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>On-prem</span>
+          <span style="display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:999px;border:1px solid rgba(129,140,248,.35);background:rgba(26,29,39,.72);backdrop-filter:blur(12px) saturate(150%);font-size:13px;color:#e4e4e7;" style-hover="border-color:#818cf8;background:rgba(31,41,55,.85)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>Encrypted at rest</span>
+          <span style="display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:999px;border:1px solid rgba(129,140,248,.35);background:rgba(26,29,39,.72);backdrop-filter:blur(12px) saturate(150%);font-size:13px;color:#e4e4e7;" style-hover="border-color:#818cf8;background:rgba(31,41,55,.85)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"></path></svg>Yours, not licensed</span>
+        </div>
+      </div>
+    </div>
+    <div style="position:absolute;left:36px;bottom:28px;display:flex;align-items:center;gap:10px;font-size:13px;color:#a1a1aa;">
+      <span style="width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.18);"></span>
+      <span>Online · on your local network</span>
+      <span style="color:#71717a;">·</span>
+      <span style="font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:12px;color:#71717a;">{{ hostname }}</span>
+    </div>
+  </section>
+
+  <section style="display:flex;align-items:center;justify-content:center;padding:64px 36px;background:#0f1117;border-left:1px solid #2a2d3a;">
+    <form onSubmit="{{ onSubmit }}" style="width:100%;max-width:400px;display:flex;flex-direction:column;gap:20px;">
+      <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:8px;">
+        <h2 style="margin:0;font-size:34px;font-weight:700;letter-spacing:-0.6px;line-height:1.1;color:#e4e4e7;">Welcome back</h2>
+        <p style="margin:0;font-size:17px;line-height:1.5;color:#71717a;">Sign in to your Droplet workspace.</p>
+      </div>
+      <label style="display:flex;flex-direction:column;gap:8px;font-size:13px;font-weight:600;color:#e4e4e7;">Work email
+        <div style="position:relative;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#71717a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="position:absolute;left:14px;top:50%;transform:translateY(-50%);"><rect x="2" y="4" width="20" height="16" rx="2"></rect><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path></svg>
+          <input type="email" autoComplete="email" placeholder="you@company.com" value="{{ email }}" onChange="{{ setEmail }}" style="width:100%;height:48px;padding:0 14px 0 42px;border-radius:8px;border:1px solid #2a2d3a;background:#1a1d27;color:#e4e4e7;font-size:16px;font-family:inherit;outline:none;transition:border-color .2s cubic-bezier(.25,.1,.25,1);" style-focus="border-color:#818cf8;outline:none;box-shadow:0 0 0 1px #818cf8" style-hover="border-color:#3f4356">
+        </div>
+      </label>
+      <label style="display:flex;flex-direction:column;gap:8px;font-size:13px;font-weight:600;color:#e4e4e7;">
+        <span style="display:flex;justify-content:space-between;align-items:center;">Password<a href="#" style="font-weight:500;font-size:13px;">Forgot?</a></span>
+        <div style="position:relative;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#71717a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="position:absolute;left:14px;top:50%;transform:translateY(-50%);"><rect x="3" y="11" width="18" height="11" rx="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+          <input type="{{ pwType }}" autoComplete="current-password" placeholder="••••••••••••" value="{{ password }}" onChange="{{ setPassword }}" style="width:100%;height:48px;padding:0 48px 0 42px;border-radius:8px;border:1px solid #2a2d3a;background:#1a1d27;color:#e4e4e7;font-size:16px;font-family:inherit;outline:none;letter-spacing:.5px;transition:border-color .2s cubic-bezier(.25,.1,.25,1);" style-focus="border-color:#818cf8;outline:none;box-shadow:0 0 0 1px #818cf8" style-hover="border-color:#3f4356">
+          <button type="button" onClick="{{ togglePw }}" aria-label="Toggle password visibility" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);width:36px;height:36px;display:grid;place-items:center;border:0;background:transparent;border-radius:6px;cursor:pointer;color:#71717a;" style-hover="background:#1f2937;color:#e4e4e7">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+          </button>
+        </div>
+      </label>
+      <sc-if value="{{ showError }}" hint-placeholder-val="{{ false }}">
+        <div role="alert" style="display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border-radius:8px;border:1px solid #7f1d1d;background:rgba(127,29,29,.18);font-size:13px;line-height:1.45;color:#fca5a5;">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;margin-top:1px;"><circle cx="12" cy="12" r="10"></circle><path d="M12 8v4m0 4h.01"></path></svg>
+          <span>We can't reach this Droplet right now. Check the connection and try again.</span>
+        </div>
+      </sc-if>
+      <button type="submit" style="height:48px;display:flex;align-items:center;justify-content:center;gap:8px;border:0;border-radius:8px;background:#818cf8;color:#0f1117;font-size:16px;font-weight:600;font-family:inherit;cursor:pointer;transition:background .2s cubic-bezier(.25,.1,.25,1),transform .15s;" style-hover="background:#6366f1" style-active="transform:scale(.97);opacity:.9">
+        <span>{{ submitLabel }}</span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14m-7-7 7 7-7 7"></path></svg>
+      </button>
+      <div style="display:flex;align-items:center;gap:12px;color:#71717a;font-size:12px;letter-spacing:.14em;text-transform:uppercase;">
+        <span style="flex:1;height:1px;background:#2a2d3a;"></span>or<span style="flex:1;height:1px;background:#2a2d3a;"></span>
+      </div>
+      <button type="button" style="height:48px;display:flex;align-items:center;justify-content:center;gap:10px;border:1px solid #2a2d3a;border-radius:8px;background:#1a1d27;color:#a5b4fc;font-size:16px;font-weight:500;font-family:inherit;cursor:pointer;transition:background .2s cubic-bezier(.25,.1,.25,1),border-color .2s;" style-hover="background:#1f2937;border-color:#3f4356" style-active="transform:scale(.97)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"></circle><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 6l-3-3"></path></svg>
+        Sign in with a passkey
+      </button>
+      <p style="margin:12px 0 0;text-align:center;font-size:13px;line-height:1.5;color:#71717a;">Sign-in happens on your local network — nothing leaves the box.</p>
+      <p style="margin:0;text-align:center;font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:12px;color:#52525b;">Droplet v0.1.0</p>
+    </form>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;dotPitch&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:18,&quot;min&quot;:10,&quot;max&quot;:40,&quot;step&quot;:1,&quot;unit&quot;:&quot;px&quot;,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Dot matrix&quot;},&quot;flowSpeed&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:1,&quot;min&quot;:0.2,&quot;max&quot;:3,&quot;step&quot;:0.1,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Dot matrix&quot;},&quot;showError&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Form&quot;},&quot;hostname&quot;:{&quot;editor&quot;:&quot;text&quot;,&quot;default&quot;:&quot;droplet-01.local&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Form&quot;}}">
+// Low-poly droplet, same geometry + baked face colors as Blender/Droplet.glb (Y-up, height 2, centered).
+// Square equator with a vertex toward the camera, apex above, 45°-twisted square base below.
+const GEM = (() => {
+  const s = 2 / 2.2, mid = (1.57 - 0.63) / 2;               // scale to height 2, center vertically
+  const V = [[0, (1.57 - mid) * s, 0]];                        // 0: apex
+  for (let i = 0; i < 4; i++) { const a = i * Math.PI / 2; V.push([Math.sin(a) * s, -mid * s, Math.cos(a) * s]); }               // 1-4: equator, 1 = front (+z)
+  for (let i = 0; i < 4; i++) { const a = Math.PI / 4 + i * Math.PI / 2; V.push([0.82 * Math.sin(a) * s, (-0.63 - mid) * s, 0.82 * Math.cos(a) * s]); } // 5-8: base
+  const LAV = '#a2adfd', MID = '#604ff3', BAND = '#4d3dde', DARK = '#4735d4';
+  const eq = i => 1 + (i & 3), bs = i => 5 + (i & 3);
+  const F = [];
+  for (let i = 0; i < 4; i++) {
+    F.push([[eq(i), eq(i + 1), 0], i % 2 ? MID : LAV]);                      // top facets (front-right lavender, back mirrors)
+    F.push([[eq(i), bs(i), bs(i + 3)], i % 2 ? DARK : BAND]);               // lower tri under each equator vertex
+    F.push([[eq(i), eq(i + 1), bs(i)], i % 2 ? DARK : BAND]);               // lower tri between equator vertices
+  }
+  F.push([[8, 7, 6, 5], DARK]);                                            // base
+  return { V, F };
+})();
+
+class Component extends DCLogic {
+  state = { email: '', password: '', showPw: false, submitting: false };
+  canvasRef = React.createRef();
+  leftRef = React.createRef();
+  tiltRef = React.createRef();
+  gemRef = React.createRef();
+  gemSpeed = 0.5;     // rad/s, same as the three.js preview (t/2000)
+  gemAngle = 0;
+  gemLast = 0;
+  mouse = { x: -9999, y: -9999, vx: 0, vy: 0, active: false };
+  ripples = [];
+  particles = [];
+  t = 0;
+
+  componentDidMount() {
+    this.resize();
+    this.ro = new ResizeObserver(() => this.resize());
+    this.ro.observe(this.leftRef.current);
+    this.raf = requestAnimationFrame(this.loop);
+  }
+  componentDidUpdate(prev) {  }
+  componentWillUnmount() { cancelAnimationFrame(this.raf); this.ro && this.ro.disconnect(); }
+
+  resize() {
+    const c = this.canvasRef.current, el = this.leftRef.current; if (!c || !el) return;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    this.W = el.clientWidth; this.H = el.clientHeight;
+    c.width = this.W * dpr; c.height = this.H * dpr;
+    c.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.seed();
+  }
+  seed() { this.particles = []; }
+
+  // Orthographic, 22° elevation (matches AppIcon.png), steady spin about Y, painter's sort — convex solid so no z-buffer needed.
+  drawGem(now) {
+    const c = this.gemRef.current; if (!c) return;
+    const dt = this.gemLast ? (now - this.gemLast) / 1000 : 0; this.gemLast = now;
+    this.gemAngle += dt * this.gemSpeed;
+    const ctx = c.getContext('2d'), S = 72, cx = 90, cy = 92;
+    const el = 22 * Math.PI / 180, ce = Math.cos(el), se = Math.sin(el);
+    const ca = Math.cos(this.gemAngle), sa = Math.sin(this.gemAngle);
+    const P = GEM.V.map(([x, y, z]) => {
+      const rx = x * ca + z * sa, rz = -x * sa + z * ca;               // spin about Y
+      return [cx + rx * S, cy - (y * ce - rz * se) * S, rz * ce + y * se]; // screen x, screen y, depth toward camera
+    });
+    ctx.setTransform(2, 0, 0, 2, 0, 0); ctx.clearRect(0, 0, 180, 180);
+    GEM.F.map(([idx, col]) => ({ idx, col, d: idx.reduce((a, i) => a + P[i][2], 0) / idx.length }))
+      .sort((a, b) => a.d - b.d)
+      .forEach(({ idx, col }) => {
+        ctx.fillStyle = col; ctx.strokeStyle = col; ctx.lineWidth = 0.6; // hairline stroke hides AA seams between facets
+        ctx.beginPath(); idx.forEach((i, k) => k ? ctx.lineTo(P[i][0], P[i][1]) : ctx.moveTo(P[i][0], P[i][1]));
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+      });
+  }
+
+  loop = (now) => {
+    this.raf = requestAnimationFrame(this.loop);
+    this.drawGem(now || performance.now());
+    const c = this.canvasRef.current; if (!c) return;
+    const ctx = c.getContext('2d'), W = this.W, H = this.H;
+    const speed = this.props.flowSpeed ?? 1;
+    const pitch = this.props.dotPitch ?? 18;
+    this.t += 0.012 * speed;
+    const t = this.t, m = this.mouse, R = 180;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.clearRect(0, 0, W, H);
+    const cx = W / 2, cy = H * 0.45, maxD = Math.hypot(W, H) * 0.55;
+    const ramp = [[67,56,202],[79,70,229],[99,102,241],[129,140,248],[165,180,252],[199,210,254]];
+    const ox = (W % pitch) / 2, oy = (H % pitch) / 2;
+    for (let x = ox; x <= W; x += pitch) for (let y = oy; y <= H; y += pitch) {
+      const dc = Math.hypot(x - cx, y - cy);
+      const mask = Math.max(0, 1 - dc / maxD);
+      const wave = 0.5 + 0.5 * Math.sin(dc * 0.018 - t * 2.2) * Math.sin(x * 0.004 + t * 0.6);
+      let a = (0.08 + wave * 0.28) * mask * mask, r = 1, ci = Math.min(5, Math.floor(wave * 3));
+      let heat = 0;
+      if (m.active) { const d = Math.hypot(x - m.x, y - m.y); if (d < R) { heat = Math.pow(1 - d / R, 1.6); } }
+      for (const rp of this.ripples) { const d = Math.abs(Math.hypot(x - rp.x, y - rp.y) - rp.t * 300); if (d < 24) heat = Math.max(heat, (1 - d / 24) * (1 - rp.t)); }
+      if (heat > 0) { a = Math.min(1, a + heat * 0.9); r += heat * 2.4; ci = Math.min(5, ci + Math.round(heat * 3)); }
+      if (a < 0.015) continue;
+      const col = ramp[ci];
+      ctx.fillStyle = `rgba(${col[0]},${col[1]},${col[2]},${a})`;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2832); ctx.fill();
+    }
+    if (m.active) {
+      const g = ctx.createRadialGradient(m.x, m.y, 0, m.x, m.y, R);
+      g.addColorStop(0, 'rgba(129,140,248,0.09)'); g.addColorStop(1, 'rgba(129,140,248,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(m.x, m.y, R, 0, 6.2832); ctx.fill();
+    }
+    for (const rp of this.ripples) rp.t += 0.014;
+    this.ripples = this.ripples.filter(r => r.t < 1);
+  };
+  _oldSeed() {
+    const density = this.props.particleDensity ?? 1;
+    const n = Math.round((this.W * this.H) / 3200 * density);
+    const arr = [];
+    for (let i = 0; i < n; i++) arr.push(this.spawn(true, i % 6));
+    this.particles = arr;
+  }
+  spawn(anywhere, band) {
+    return {
+      x: anywhere ? Math.random() * this.W : -10,
+      baseY: Math.random() * this.H,
+      band, depth: Math.random(),
+      r: 0.6 + Math.random() * 1.6,
+      ox: 0, oy: 0, vx: 0, vy: 0, heat: 0,
+      ph: Math.random() * Math.PI * 2
+    };
+  }
+  onMove = (e) => {
+    const r = this.leftRef.current.getBoundingClientRect();
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    this.mouse.vx = x - (this.mouse.active ? this.mouse.x : x);
+    this.mouse.vy = y - (this.mouse.active ? this.mouse.y : y);
+    this.mouse.x = x; this.mouse.y = y; this.mouse.active = true;
+    const t = this.tiltRef.current;
+    if (t) {
+      const tr = t.getBoundingClientRect();
+      const dx = (e.clientX - (tr.left + tr.width / 2)) / r.width;
+      const dy = (e.clientY - (tr.top + tr.height / 2)) / r.height;
+      t.style.transform = `rotateX(${(-dy * 22).toFixed(2)}deg) rotateY(${(dx * 22).toFixed(2)}deg)`;
+    }
+  };
+  onLeave = () => { this.mouse.active = false; this.mouse.x = -9999; const t = this.tiltRef.current; if (t) t.style.transform = 'rotateX(0) rotateY(0)'; };
+  onDown = (e) => { const r = this.leftRef.current.getBoundingClientRect(); this.ripples.push({ x: e.clientX - r.left, y: e.clientY - r.top, t: 0 }); };
+  gemEnter = () => { this.gemSpeed = 1.5; };
+  gemLeave = () => { this.gemSpeed = 0.5; };
+
+  renderVals() {
+    const { email, password, showPw, submitting } = this.state;
+    return {
+      canvasRef: this.canvasRef, leftRef: this.leftRef, tiltRef: this.tiltRef, gemRef: this.gemRef,
+      onMove: this.onMove, onLeave: this.onLeave, onDown: this.onDown, gemEnter: this.gemEnter, gemLeave: this.gemLeave,
+      email, password, pwType: showPw ? 'text' : 'password',
+      setEmail: e => this.setState({ email: e.target.value }),
+      setPassword: e => this.setState({ password: e.target.value }),
+      togglePw: () => this.setState(s => ({ showPw: !s.showPw })),
+      showError: !!this.props.showError,
+      submitLabel: submitting ? 'Signing in' : 'Sign in',
+      hostname: this.props.hostname ?? 'droplet-01.local',
+      onSubmit: e => { e.preventDefault(); this.setState({ submitting: true }); setTimeout(() => this.setState({ submitting: false }), 1400); }
+    };
+  }
+}
+</script>
+</body>
+</html>

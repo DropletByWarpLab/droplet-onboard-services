@@ -163,8 +163,9 @@ describe("POST /api/auth/login?return=body — WARP-582 browser gate", () => {
     expect(res.body.accessToken).toEqual(expect.any(String));
     expect(res.body.refreshToken).toEqual(expect.any(String));
     expect(res.body.accessTokenExpiresAt).toEqual(expect.any(Number));
-    // Cookies are still set alongside (unchanged native contract).
-    expect(setCookieText(res)).toContain("droplet_session=");
+    // WARP-3038 — a body-token login sets NO session cookies: a default
+    // URLSession cookie jar would persist them to disk.
+    expect(res.headers["set-cookie"]).toBeUndefined();
   });
 
   it("accepts the legacy ?return=body=1 spelling from a native client", async () => {
@@ -201,6 +202,14 @@ describe("POST /api/auth/login?return=body — WARP-582 browser gate", () => {
     },
   );
 
+  it("WARP-3038: the browser path (no ?return=body) still sets BOTH session cookies and no body tokens", async () => {
+    const res = await request(publicApp()).post("/api/auth/login").send(CREDS);
+    expect(res.status).toBe(200);
+    expect(res.body.accessToken).toBeUndefined();
+    expect(setCookieText(res)).toContain("droplet_session=");
+    expect(setCookieText(res)).toContain("droplet_refresh=");
+  });
+
   it("a browser-marked login WITHOUT return=body is byte-identical to before (no tokens)", async () => {
     const res = await request(publicApp())
       .post("/api/auth/login")
@@ -208,5 +217,83 @@ describe("POST /api/auth/login?return=body — WARP-582 browser gate", () => {
       .send(CREDS);
     expect(res.status).toBe(200);
     expect(res.body.accessToken).toBeUndefined();
+  });
+});
+
+// WARP-3193 SEC-AUTH-7 — /auth/refresh used to return BOTH tokens in the body
+// unconditionally, undoing the gate above: any XSS on the dashboard origin
+// could POST /api/auth/refresh and read a fresh 7-day refresh token. Same rule
+// as login now: tokens ride the body only for a native client (it presented
+// its refresh token IN the body, with no browser marker header). Browsers
+// keep the httpOnly cookies, which rotate exactly as before.
+describe("POST /api/auth/refresh — WARP-582 browser gate (WARP-3193 SEC-AUTH-7)", () => {
+  async function nativeRefreshToken(app: ReturnType<typeof publicApp>): Promise<string> {
+    const login = await request(app).post("/api/auth/login?return=body").send(CREDS);
+    expect(login.status).toBe(200);
+    return login.body.refreshToken as string;
+  }
+
+  function refreshCookieFrom(res: request.Response): string {
+    const raw = res.headers["set-cookie"];
+    const cookies: string[] = Array.isArray(raw) ? raw : [raw ?? ""];
+    const c = cookies.find((x) => x.startsWith("droplet_refresh="));
+    if (!c) throw new Error("droplet_refresh cookie not set");
+    return c.split(";")[0]!;
+  }
+
+  it("ACCEPTED shape: a native client (body token, no browser markers) gets the rotated pair in the body", async () => {
+    const app = publicApp();
+    const refreshToken = await nativeRefreshToken(app);
+
+    const res = await request(app).post("/api/auth/refresh").send({ refreshToken });
+
+    expect(res.status).toBe(200);
+    expect(res.body.accessToken).toEqual(expect.any(String));
+    expect(res.body.refreshToken).toEqual(expect.any(String));
+    expect(res.body.accessTokenExpiresAt).toEqual(expect.any(Number));
+    expect(res.body.refreshTokenExpiresAt).toEqual(expect.any(Number));
+    // WARP-3038 — no cookies on a body-token rotation either.
+    expect(res.headers["set-cookie"]).toBeUndefined();
+  });
+
+  it.each([
+    ["sec-fetch-site", "same-origin"],
+    ["sec-fetch-mode", "cors"],
+    ["sec-fetch-dest", "empty"],
+    ["origin", "https://droplet-ai.local"],
+    ["referer", "https://droplet-ai.local/"],
+  ])(
+    "REJECTED shape: %s marks a browser — refresh succeeds via cookies but the body carries NO tokens",
+    async (header, value) => {
+      const app = publicApp();
+      const refreshToken = await nativeRefreshToken(app);
+
+      const res = await request(app)
+        .post("/api/auth/refresh")
+        .set(header, value)
+        .send({ refreshToken });
+
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("ok");
+      expect(res.body.accessToken).toBeUndefined();
+      expect(res.body.refreshToken).toBeUndefined();
+      expect(res.body.accessTokenExpiresAt).toBeUndefined();
+      expect(res.body.refreshTokenExpiresAt).toBeUndefined();
+      expect(setCookieText(res)).toContain("droplet_session=");
+      expect(setCookieText(res)).toContain("droplet_refresh=");
+    },
+  );
+
+  it("a cookie-only refresh (the dashboard's path) never gets body tokens, even without markers", async () => {
+    const app = publicApp();
+    const login = await request(app).post("/api/auth/login").send(CREDS);
+    const cookie = refreshCookieFrom(login);
+
+    const res = await request(app).post("/api/auth/refresh").set("Cookie", cookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.accessToken).toBeUndefined();
+    expect(res.body.refreshToken).toBeUndefined();
+    expect(setCookieText(res)).toContain("droplet_session=");
   });
 });

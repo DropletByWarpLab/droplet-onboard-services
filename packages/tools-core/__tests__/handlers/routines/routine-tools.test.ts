@@ -67,6 +67,16 @@ describe("routine_draft (WARP-2894)", () => {
     expect(Object.keys(body)).not.toContain("status");
   });
 
+  it("reports the slug the box stored, which may carry a short suffix (WARP-3354)", async () => {
+    const post = vi.fn(async () =>
+      makeResponse(201, { slug: "daily-files-7f3a", status: "draft", writes: false, steps: [{}] }),
+    );
+    const res = await routineDraft.handler({ slug: "daily-files", name: "Daily files", steps }, ctxWith({ post }));
+    const data = (res as { data: { slug: string; message: string } }).data;
+    expect(data.slug).toBe("daily-files-7f3a");
+    expect(data.message).toContain("daily-files-7f3a");
+  });
+
   it("relays the route's unknown-tools 400 with the names, so the model can fix the draft", async () => {
     const post = vi.fn(async () =>
       makeResponse(400, { error: "unknown_tools", detail: "these steps name tools this box does not have", tools: ["list_reciept"] }),
@@ -167,6 +177,22 @@ describe("routine_list (WARP-2894)", () => {
     expect(path).toContain("status=live");
   });
 
+  it("passes the route's visibility through, so the model can say a routine is private to the person (WARP-3354)", async () => {
+    const get = vi.fn(async () =>
+      makeResponse(200, {
+        specs: [
+          { id: "s1", slug: "mine", name: "Mine", status: "draft", visibility: "PRIVATE", writes: false, reversible: true, updatedAt: "2026-09-30T10:00:00.000Z" },
+          { id: "s2", slug: "ours", name: "Ours", status: "live", visibility: "WORKSPACE", writes: false, reversible: true, updatedAt: "2026-09-30T10:00:00.000Z" },
+        ],
+      }),
+    );
+    const res = await routineList.handler({}, ctxWith({ get }));
+    expect((res as { data: { routines: Array<{ slug: string; visibility?: string }> } }).data.routines).toMatchObject([
+      { slug: "mine", visibility: "PRIVATE" },
+      { slug: "ours", visibility: "WORKSPACE" },
+    ]);
+  });
+
   it("drops an unknown status filter rather than forwarding it (the route would 400)", async () => {
     const get = vi.fn(async () => makeResponse(200, { specs: [] }));
     await routineList.handler({ status: "archived" }, ctxWith({ get }));
@@ -219,6 +245,32 @@ describe("routine_run (WARP-2894)", () => {
     // person on the page, never to the tool.
     const [path] = post.mock.calls[0] as unknown as [string];
     expect(path).not.toContain("confirm");
+  });
+
+  it("says an ok run had gaps when a read failed or the write-up was a fallback or cut short (WARP-3409)", async () => {
+    const run = (trace: Record<string, unknown>[]) =>
+      routineRun.handler(
+        { slug: "daily-report" },
+        ctxWith({ post: vi.fn(async () => makeResponse(200, { runId: "r", slug: "daily-report", status: "ok", error: null, trace })) }),
+      );
+    const message = async (trace: Record<string, unknown>[]) =>
+      ((await run(trace)) as { data: { message: string } }).data.message;
+
+    expect(await message([{ idx: 0, tool: "get_system_health", ok: true }, { idx: 1, ok: true, result: "prose" }])).toBe(
+      'Ran "daily-report": 2 steps completed.',
+    );
+    expect(
+      await message([
+        { idx: 0, tool: "get_system_health", ok: true },
+        { idx: 1, tool: "(summarize)", ok: true, result: "readout", fallback: true },
+      ]),
+    ).toBe('Ran "daily-report": 2 steps completed, 1 with gaps.');
+    expect(
+      await message([
+        { idx: 0, tool: "list_recent_files", ok: false, error: "nextcloud returned 503" },
+        { idx: 1, tool: "(summarize)", ok: true, result: "prose", truncated: true },
+      ]),
+    ).toBe('Ran "daily-report": 2 steps completed, 2 with gaps.');
   });
 
   it("reports a failed run (the route's 207) with the failed steps named", async () => {

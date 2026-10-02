@@ -235,6 +235,7 @@ vi.mock("@/components/FileManager/ShareDialog", () => ({
 }));
 
 import FilesPage from "./page";
+import { FilesUnavailableError } from "@/lib/files-unavailable";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -267,9 +268,44 @@ describe("<FilesPage /> (WARP-883 smoke)", () => {
     expect(screen.getByRole("tab", { name: /workspace/i })).toBeInTheDocument();
   });
 
+  // WARP-2966 — libraries must appear exactly ONCE per viewport. The sidebar's
+  // Libraries rail owns the choice from `lg` up (and the mobile More drawer
+  // mounts the same rail), so the in-page switcher is the small-screen half
+  // and must not double up with it.
+  it("hides the SpaceSwitcher from lg up — the sidebar rail owns it there", () => {
+    render(<FilesPage />);
+    const tab = screen.getByRole("tab", { name: /my files/i });
+    expect(tab.closest(".lg\\:hidden")).not.toBeNull();
+  });
+
+  // WARP-2966 — Favorites left the Files sub-nav because it is a FILTER over
+  // the places, not a place. That only holds if the browser itself offers it;
+  // otherwise the route is orphaned.
+  it("offers Favorites from the browser's own toolbar", () => {
+    render(<FilesPage />);
+    expect(screen.getByRole("link", { name: /favorites/i })).toHaveAttribute(
+      "href",
+      "/files/favorites",
+    );
+  });
+
   it("renders the file list rows", () => {
     render(<FilesPage />);
     expect(screen.getByText("report.pdf")).toBeInTheDocument();
+  });
+
+  // Personal WebDAV drives are open to owner/admin/family only — a guest has
+  // nothing to connect (the route 403s them), so the toolbar hides the button.
+  it.each(["owner", "admin", "family"])("offers Connect drive to %s", (role) => {
+    mockUser = { id: "u1", email: "x@example.com", role };
+    render(<FilesPage />);
+    expect(screen.getByRole("button", { name: "Connect network drive" })).toBeInTheDocument();
+  });
+
+  it("hides Connect drive from a guest", () => {
+    mockUser = { id: "u1", email: "guest@example.com", role: "guest" };
+    render(<FilesPage />);
+    expect(screen.queryByRole("button", { name: "Connect network drive" })).not.toBeInTheDocument();
   });
 });
 
@@ -294,6 +330,18 @@ describe("<FilesPage /> — failed listing is distinct from empty (WARP-1338)", 
     render(<FilesPage />);
     expect(screen.getByText(/couldn't load your files/i)).toBeInTheDocument();
     expect(screen.queryByText(/this folder is empty/i)).not.toBeInTheDocument();
+  });
+
+  // WARP-3076 — the box marked the listing degraded (Nextcloud down).
+  it("renders 'Files are unavailable' with a retry (not 'empty', not 'not connected') when degraded", () => {
+    mockSearchParamsString = "path=%2Fpool-cafef00d";
+    mockFilesError = new FilesUnavailableError();
+    render(<FilesPage />);
+    expect(screen.getByText("Files are unavailable right now")).toBeInTheDocument();
+    expect(screen.getByText("Try again in a moment.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
+    expect(screen.queryByText(/this folder is empty/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/isn't connected to the file browser/i)).not.toBeInTheDocument();
   });
 
   it("keeps the honest empty state when the listing succeeds with zero entries", () => {
@@ -1049,6 +1097,43 @@ describe("<FilesPage /> — Share from the selection toolbar (WARP-1540)", () =>
     mockFiles = [file("a.pdf")];
     mockSelectedPaths = ["/a.pdf"];
     render(<FilesPage />);
+    expect(shareBtn()).not.toBeDisabled();
+  });
+
+  // WARP-3168: a member shares nothing from the Workspace; the button stays
+  // visible, disabled, with the reason. Owner/admin keep it.
+  it("disables Share for a member in the Workspace, with the reason", () => {
+    mockFiles = [file("a.pdf")];
+    mockSelectedPaths = ["/a.pdf"];
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /workspace/i }));
+    expect(shareBtn()).toBeDisabled();
+    expect(shareBtn()).toHaveAttribute(
+      "title",
+      "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside."
+    );
+  });
+
+  // Review of #2416: the detail panel's "Share…" honours the same gate.
+  it("disables the detail panel's Share… for a member in the Workspace", () => {
+    mockFiles = [file("a.pdf")];
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /workspace/i }));
+    fireEvent.click(screen.getAllByText("a.pdf")[0]);
+    const detailShare = screen.getByRole("button", { name: /^share…$/i });
+    expect(detailShare).toBeDisabled();
+    expect(detailShare).toHaveAttribute(
+      "title",
+      "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside.",
+    );
+  });
+
+  it("keeps Share for an admin in the Workspace", () => {
+    mockUser = { id: "admin-1", email: "dana@example.com", role: "admin" };
+    mockFiles = [file("a.pdf")];
+    mockSelectedPaths = ["/a.pdf"];
+    render(<FilesPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /workspace/i }));
     expect(shareBtn()).not.toBeDisabled();
   });
 

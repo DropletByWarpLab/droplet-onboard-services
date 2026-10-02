@@ -72,7 +72,7 @@ vi.mock("../services/nextcloud-session.service.js", () => ({
   getNcToken: vi.fn().mockResolvedValue(null),
   deleteNcToken: vi.fn().mockResolvedValue(undefined),
   touchNcToken: vi.fn().mockResolvedValue(undefined),
-  resolveNcToken: vi.fn().mockResolvedValue("test-nc-token"),
+  resolveNcToken: vi.fn().mockResolvedValue("caller-nc-token"),
 }));
 
 vi.mock("../services/jwt.service.js", async () => {
@@ -110,11 +110,15 @@ import type { Role } from "../services/jwt.service.js";
  * Prisma stub for the add-user handler. Includes:
  *   - user.findFirst  — used by deriveUniqueUserId collision check
  *   - user.upsert     — idempotent local-row write
+ *   - user.findUnique — WARP-3263 liveUserId: the caller (`<role>-id`) exists
  */
 function createPrismaMock(seed: any[] = []) {
   const users: any[] = [...seed];
   const self: any = {};
   self.user = {
+    findUnique: vi.fn(async ({ where }: any) =>
+      /^(owner|admin)-id$/.test(where?.id) ? { id: where.id } : null,
+    ),
     findFirst: vi.fn(async ({ where }: any) => {
       const candidate = where?.OR?.[0]?.username;
       if (!candidate) return null;
@@ -182,6 +186,15 @@ describe("POST /api/auth/users — email-based user creation with derived userid
 
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("WEAK_PASSWORD");
+  });
+
+  it("records the creating admin as the new account's inviter (WARP-3263)", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma, "admin"))
+      .post("/api/auth/users")
+      .send({ email: "ext@warp.test", password: "Ext-secret123", role: "guest" });
+    expect(res.status).toBe(201);
+    expect(prisma.user.upsert.mock.calls[0][0].create.invitedById).toBe("admin-id");
   });
 
   it("creates a user from email and derives the userid", async () => {
@@ -396,7 +409,7 @@ describe("POST /api/auth/users — email-based user creation with derived userid
         "ada",
         "Ada-secret123",
         undefined,
-        ["admin", "droplet-admins", "household"],
+        ["droplet-admins", "household"],
       );
       // The group is created lazily by the department provisioner, so a box
       // with no departments has never seen it and OCS would reject the whole

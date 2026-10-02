@@ -26,7 +26,6 @@ import {
   ncDeleteAppPassword,
   ncGetCurrentUser,
   ncCreateUser,
-  ncDeleteUser,
   ncEnsureGroup,
   ncListUsers,
   ncUpdateUser,
@@ -61,16 +60,15 @@ import {
   assertRoleAssignable,
   assertRoleChangeAllowed,
   assertDirectoryEditAllowed,
-  assertRemovalAllowed,
   assertDisableAllowed,
+  assertSessionRevokeAllowed,
   assertAssignableForCreate,
-  assertRemovalInvariantsTx,
   assertDisableInvariantsTx,
   readGuardTargetTx,
   isConcurrencyConflict,
   SERIALIZABLE_TX,
-  runRemovalPostEffects,
   runDisablePostEffects,
+  type NcMirror,
 } from "../services/role-mutation-guard.service.js";
 import {
   SESSION_COOKIE_NAME,
@@ -86,7 +84,13 @@ import {
   listUserSessions,
   idleLimitSecondsForRole,
   absoluteLimitSecondsForRole,
+  readSessionDeadline,
 } from "../services/session.service.js";
+import {
+  issueSessionTokens,
+  sessionTokenBody,
+  setSessionCookies,
+} from "../services/session-mint.js";
 import {
   storeNcToken,
   getNcToken,
@@ -104,23 +108,38 @@ import {
   TOTP_ISSUER,
   generateTotpEnrollment,
   encryptTotpSecret,
-  decryptTotpSecret,
-  verifyTotpCode,
+  acceptTotpCode,
 } from "../services/totp.service.js";
 import {
   generateRecoveryCodes,
-  findMatchingRecoveryCodeHash,
+  consumeRecoveryCode,
 } from "../services/recovery.service.js";
+import { checkLoginSecondFactor } from "../services/login-second-factor.service.js";
+import {
+  passwordChangeBackoffSeconds,
+  checkPasswordChangeLock,
+  recordPasswordChangeFailure,
+  clearPasswordChangeRateState,
+} from "../services/password-change-throttle.service.js";
+import {
+  createRequireCredentialStepUp,
+  passCredentialStepUp,
+} from "../middleware/require-credential-step-up.js";
 import QRCode from "qrcode";
-import { findUserByEmail, emailWriteData, emailWriteDataOrNull } from "../services/user-directory.service.js";
-import { warmDefaultModel } from "../services/model-readiness.service.js";
+import { findUserByEmail, emailWriteData, emailWriteDataOrNull, readUserEmail } from "../services/user-directory.service.js";
+import { warmActiveModel } from "../services/active-model.service.js";
 import { config } from "../config.js";
 import { buildNcGroups, householdGroupName } from "./auth-groups.js";
 // WARP-1558: the create paths below must ensure this box-wide group exists
 // before OCS is asked to provision an admin-tier account into it.
-import { DROPLET_ADMINS_GROUP } from "../services/department-provisioner.service.js";
-import { purgeUserData } from "../services/brain-memory.service.js";
-import { purgeM365ForUser } from "../services/m365/m365-auth.service.js";
+import { DROPLET_ADMINS_GROUP, adminBasicToken } from "../services/department-provisioner.service.js";
+import {
+  deleteDispositionSchema,
+  handOverAndDeleteUser,
+  HandoverRefusedError,
+  scheduleUserDeletion,
+  UNKNOWN_DISPOSITION_BODY,
+} from "../services/leaver-deletion.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { verifyClaimCodePresence } from "../services/setup-claim.service.js";
@@ -313,6 +332,7 @@ const recoveryConsumeSchema = z.object({
 // Role enum so the DB column (now typed as `Role`) and the request body
 // share a vocabulary. The shared `inviteRoleField` is declared above
 // createUserSchema (WARP-1042 reuses it for direct user creation).
+
 const createInviteSchema = z.object({
   displayName: z.string().min(1).max(128).optional(),
   // ADR-013: the invite email is the invitee's directory login key on
@@ -353,82 +373,10 @@ function getRequestIp(req: Request): string | null {
   return req.ip ?? req.socket?.remoteAddress ?? null;
 }
 
-/**
- * Progressive backoff for failed current-password checks on
- * POST /auth/change-password (PR #549 reviewer follow-up: without a lockout
- * the endpoint is a current-password brute-force oracle for whoever holds a
- * session cookie). Mirrors the WARP-631 claim-code model: a small free tier,
- * then FIXED escalating locks that always elapse on their own; the failure
- * counter resets after an hour without failures and on a successful verify.
- * Keyed by user id — the gate protects the ACCOUNT's password, and a NATed
- * household shares one IP. Fails OPEN on cache errors so a flaky Redis can
- * never lock a legitimate user out of rotating their password.
- */
-const PW_CHANGE_FREE_TIER = 5;
-/** Lock seconds for the 1st, 2nd, 3rd … lock; the last value is the cap. */
-const PW_CHANGE_BACKOFF_SCHEDULE = [30, 60, 120, 300, 900] as const;
-/** Failure counter resets after an hour of no failures (rolling window). */
-const PW_CHANGE_FAILS_TTL_SEC = 60 * 60;
-
-function pwChangeFailsKey(userId: string): string {
-  return `ratelimit:change-password:fails:${userId}`;
-}
-function pwChangeLockKey(userId: string): string {
-  return `ratelimit:change-password:lock:${userId}`;
-}
-
-/** PURE schedule map (failure count → lock seconds). Exported for tests. */
-export function passwordChangeBackoffSeconds(failureCount: number): number {
-  const idx = failureCount - PW_CHANGE_FREE_TIER - 1;
-  if (idx < 0) return 0;
-  return PW_CHANGE_BACKOFF_SCHEDULE[
-    Math.min(idx, PW_CHANGE_BACKOFF_SCHEDULE.length - 1)
-  ];
-}
-
-async function checkPasswordChangeLock(
-  userId: string,
-): Promise<{ locked: boolean; retryAfterSeconds: number }> {
-  try {
-    const until = (await cacheGet<number>(pwChangeLockKey(userId))) ?? 0;
-    const now = Date.now();
-    if (until > now) {
-      return { locked: true, retryAfterSeconds: Math.ceil((until - now) / 1000) };
-    }
-    return { locked: false, retryAfterSeconds: 0 };
-  } catch {
-    return { locked: false, retryAfterSeconds: 0 };
-  }
-}
-
-async function recordPasswordChangeFailure(userId: string): Promise<void> {
-  try {
-    // cacheIncr is atomic (Redis INCR) — avoids the read-modify-write race
-    // where two concurrent wrong-password requests both read N and both write
-    // N+1, keeping the counter artificially low.
-    const next = await cacheIncr(pwChangeFailsKey(userId), PW_CHANGE_FAILS_TTL_SEC);
-    if (next === null) return; // Redis error — fail open
-    const lockedSeconds = passwordChangeBackoffSeconds(next);
-    if (lockedSeconds > 0) {
-      await cacheSet(
-        pwChangeLockKey(userId),
-        Date.now() + lockedSeconds * 1000,
-        lockedSeconds,
-      );
-    }
-  } catch {
-    // fail open — see the model comment above.
-  }
-}
-
-async function clearPasswordChangeRateState(userId: string): Promise<void> {
-  try {
-    await cacheDel(pwChangeFailsKey(userId));
-    await cacheDel(pwChangeLockKey(userId));
-  } catch {
-    // fail open.
-  }
-}
+// WARP-3193 — the current-password throttle (PR #549) now lives in
+// services/password-change-throttle.service.ts, shared with the credential
+// step-up gate. Re-exported so existing imports keep working.
+export { passwordChangeBackoffSeconds };
 
 /**
  * WARP-579 — progressive backoff for failed /auth/login credential checks.
@@ -574,6 +522,10 @@ const updateUserSchema = z
     quota: z.union([z.string().min(1).max(32), z.number().int().min(0)]).optional(),
     // ADR-013: same shared policy the setup/add-user/invite paths enforce.
     password: passwordZod.optional(),
+    // WARP-3111: an admin password reset signs the person out everywhere by
+    // default. `true` keeps their live sessions (the forced change still
+    // applies). Only meaningful alongside `password`; not a field on its own.
+    keepSessions: z.boolean().optional(),
   })
   .refine(
     (d) =>
@@ -605,16 +557,14 @@ export async function getRedirectUri(
 }
 
 /**
- * Resolve the session token from cookie (browser) or Authorization header (API client).
+ * Resolve the session token from the Authorization header (API client) or cookie (browser).
  */
 function resolveToken(req: import("express").Request): string | null {
-  const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
-  if (cookieToken) return cookieToken;
-
+  // WARP-3038 — the Bearer wins when both are sent, as in authMiddleware.
   const authHeader = req.headers.authorization;
   if (authHeader?.startsWith("Bearer ")) return authHeader.slice(7);
 
-  return null;
+  return req.cookies?.[SESSION_COOKIE_NAME] ?? null;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -631,7 +581,8 @@ function resolveToken(req: import("express").Request): string | null {
 // token cache key; the OCS auth path was already normalized in round 1
 // inside `src/middleware/auth.ts`):
 //
-//   1. POST /api/auth/login        — line ~275: signAccessToken({ id })
+//   1. POST /api/auth/login        — issueSessionTokens({ id })
+//                                    (services/session-mint.ts)
 //                                  — line ~267: storeNcToken(id, ...)
 //   2. POST /api/auth/refresh      — line ~447: signAccessToken({ id })
 //                                  — line ~452: touchNcToken(id, ...)
@@ -677,6 +628,95 @@ async function deriveUniqueUserId(
     if (!taken) return candidate;
   }
   throw new Error("deriveUniqueUserId: exhausted candidate space");
+}
+
+/**
+ * WARP-2820 / WARP-2858 — resolve an admin route's `:username` path param to
+ * the local directory row. The ONE lookup every `/auth/users/:username` write
+ * route uses (update, disable, enable, revoke-sessions, delete).
+ *
+ * The Nextcloud mapping key FIRST, then the local login handle. Resolving only
+ * `nextcloudUsername` missed every SCIM- and SSO-provisioned account:
+ * `provisionUser` and the SSO just-in-time create both seed `username` from the
+ * email and never write the mapping key (schema: `String? @unique`, no
+ * default). Those rows list as live everywhere that keys off `User.id`, while
+ * every write here fell through to the rowless legacy branch.
+ *
+ * Two ORDERED findUniques, not one `findFirst({ OR: [...] })`: both columns are
+ * @unique, and keeping the mapping key ahead of the login handle means no call
+ * that resolved before this change can resolve to a different row after it.
+ * An OR would leave the winner to row order. Every path that writes
+ * `nextcloudUsername` writes the same value into `username`, so the second
+ * lookup only ever runs for rows that never had a mapping key at all.
+ *
+ * `nextcloudUsername` is returned so the caller keys the Nextcloud side off the
+ * RESOLVED row — null means the account has no Nextcloud user, and the NC call
+ * is skipped with an explicit `ncMirror: "no_account"`, never attempted
+ * against a name Nextcloud has never seen.
+ */
+const DIRECTORY_USER_SELECT = {
+  id: true,
+  username: true,
+  nextcloudUsername: true,
+  role: true,
+  directoryStatus: true,
+  provisionSource: true,
+  deletionStatus: true,
+  deletionDueAt: true,
+} as const;
+
+/**
+ * WARP-2858 — true for an account the IdP created (SSO just-in-time or SCIM
+ * push), read from the explicit `User.provisionSource` column. Such an account
+ * never gets, changes or uses a local password: its credential lives at the
+ * IdP, whose disable/deprovision would not reach a local one. Named sources,
+ * not `!== "LOCAL"`, so a future enum member is a deliberate decision here
+ * rather than an accidental lockout.
+ */
+function isIdpProvisioned(u: { provisionSource?: string | null }): boolean {
+  return u.provisionSource === "SSO" || u.provisionSource === "SCIM";
+}
+
+/** WARP-2984 — where a roster row's account comes from. Explicit, per row:
+ *  `local` / `sso` / `scim` read `User.provisionSource`; `nextcloud` is a
+ *  Nextcloud user with no local directory row (legacy). */
+type RosterSource = "local" | "sso" | "scim" | "nextcloud";
+
+/** WARP-2858 — the one refusal body for a local-password write on an
+ *  SSO/SCIM-provisioned account (admin PUT and self-service change). */
+const SSO_MANAGED_ACCOUNT_BODY = {
+  error: "This account signs in through your identity provider, so it cannot have a Droplet password",
+  code: "SSO_MANAGED_ACCOUNT",
+} as const;
+
+/**
+ * WARP-3263 — `id` if it still names a User row, else null. Guards the
+ * User.invitedById FK: the inviter may have been deleted between issuing
+ * the invite and its accept, or the caller may not be a directory row.
+ */
+async function liveUserId(
+  prisma: import("@prisma/client").PrismaClient,
+  id: string | null | undefined,
+): Promise<string | null> {
+  if (!id) return null;
+  const row = await prisma.user.findUnique({ where: { id }, select: { id: true } });
+  return row?.id ?? null;
+}
+
+async function findDirectoryUserByHandle(
+  prisma: import("@prisma/client").PrismaClient,
+  handle: string,
+) {
+  return (
+    (await prisma.user.findUnique({
+      where: { nextcloudUsername: handle },
+      select: DIRECTORY_USER_SELECT,
+    })) ??
+    (await prisma.user.findUnique({
+      where: { username: handle },
+      select: DIRECTORY_USER_SELECT,
+    }))
+  );
 }
 
 export function createPublicAuthRouter(
@@ -1109,10 +1149,17 @@ export function createPublicAuthRouter(
       // wire-indistinguishable from a non-existent one (no oracle for "this
       // email exists but is disabled") and the timing matches (dummy verify
       // spent, real argon2id verify never runs).
+      // WARP-2858: an SSO/SCIM-provisioned account never password-logs-in,
+      // even if a hash reached its row before the box refused to write one
+      // (an admin PUT predating the SSO_MANAGED_ACCOUNT refusal). The IdP's
+      // disable/deprovision cannot reach a local password, so honouring one
+      // would be a login that outlives the offboarding. Same deny branch —
+      // wire-indistinguishable from an unknown email.
       if (
         !localUser ||
         !localUser.passwordHash ||
-        localUser.directoryStatus === "DEACTIVATED"
+        localUser.directoryStatus === "DEACTIVATED" ||
+        isIdpProvisioned(localUser)
       ) {
         await verifyDummyPassword(password);
         await denyInvalid(loginEmail);
@@ -1151,51 +1198,14 @@ export function createPublicAuthRouter(
       // On a successful challenge we stamp `mfaStampIso` into the access
       // token (signAccessToken) so require-recent-mfa (WARP-230) can gate
       // sensitive routes for this session.
+      //
+      // WARP-3193 SEC-AUTH-2 — the check itself lives in
+      // services/login-second-factor.service.ts, shared with the passkey and
+      // SSO sign-ins so neither can skip an enrolled factor.
       let mfaStampIso: string | undefined;
-      const totpCred = await prisma.totpCredential.findUnique({
-        where: { userId },
-      });
-      if (totpCred && totpCred.confirmedAt) {
-        const totpCode =
-          typeof parsed.data.totp === "string" ? parsed.data.totp.trim() : "";
-        const recoveryCode =
-          typeof parsed.data.recoveryCode === "string"
-            ? parsed.data.recoveryCode
-            : "";
-
-        let secondFactorOk = false;
-
-        if (totpCode) {
-          const secret = decryptTotpSecret(totpCred.secretEnc);
-          secondFactorOk = await verifyTotpCode(secret, totpCode);
-        } else if (recoveryCode) {
-          // Match against the user's UNUSED codes only; consume exactly the
-          // matched row so a replay of the same code finds nothing.
-          const unused = await prisma.recoveryCode.findMany({
-            where: { userId, usedAt: null },
-          });
-          const matchHash = await findMatchingRecoveryCodeHash(
-            recoveryCode,
-            unused.map((r) => r.codeHash),
-          );
-          if (matchHash) {
-            const consumed = unused.find((r) => r.codeHash === matchHash);
-            if (consumed) {
-              // Atomic single-use: only flip the row if it is STILL unused.
-              // Two concurrent logins presenting the same code both read it
-              // unused above; the usedAt:null guard means exactly one update
-              // flips a row (count 1) and the loser sees count 0 → the factor
-              // fails. Mirrors claimRefreshRotation / invite single-use.
-              const claimed = await prisma.recoveryCode.updateMany({
-                where: { id: consumed.id, usedAt: null },
-                data: { usedAt: new Date() },
-              });
-              secondFactorOk = claimed.count > 0;
-            }
-          }
-        }
-
-        if (!secondFactorOk) {
+      const secondFactor = await checkLoginSecondFactor(prisma, userId, parsed.data);
+      if (secondFactor !== "not_enrolled") {
+        if (secondFactor === "failed") {
           // WARP-579 finding 1: a wrong second factor IS a failed login attempt
           // for throttling purposes. Without this, an attacker holding a valid
           // password could spin through ~10^6 TOTP codes with no lockout. Bump
@@ -1284,51 +1294,66 @@ export function createPublicAuthRouter(
         );
       }
 
-      // WARP-247 — create the server-side session record FIRST so its sid
-      // rides inside both tokens. createSession enforces the concurrent-
-      // session cap (evicting + auditing the oldest) and starts the
-      // idle/absolute clocks for this login.
-      const { sid } = await createSession({ id: userId, role });
+      // WARP-247 — the shared mint creates the server-side session record
+      // FIRST so its sid rides inside both tokens (createSession enforces the
+      // concurrent-session cap and starts the idle/absolute clocks), then
+      // signs the pair and indexes the refresh token (WARP-116) so an admin
+      // "revoke now" reaches every live device session. The access token
+      // carries the MFA stamp (PR #375) when a second factor was just
+      // satisfied.
+      const minted = await issueSessionTokens(
+        {
+          id: userId,
+          username,
+          displayName,
+          role,
+          // WARP-1582 — snapshot the assigned custom role from the row we
+          // just authenticated against. `?? null` is the MEANINGFUL value
+          // ("no custom role"), not a defensive default: it is what lets the
+          // chat path skip a per-turn read for the role-less majority.
+          accessRoleId: localUser.accessRoleId ?? null,
+        },
+        { lastMfaAt: mfaStampIso },
+      );
 
-      // Issue JWT access + refresh tokens. The access token carries the
-      // MFA stamp (PR #375) when a second factor was just satisfied.
-      const accessToken = signAccessToken({
-        id: userId,
-        username,
-        displayName,
-        role,
-        lastMfaAt: mfaStampIso,
-        sid,
-        // WARP-1582 — snapshot the assigned custom role from the row we
-        // just authenticated against. `?? null` is the MEANINGFUL value
-        // ("no custom role"), not a defensive default: it is what lets the
-        // chat path skip a per-turn read for the role-less majority.
-        accessRoleId: localUser.accessRoleId ?? null,
-      });
-      const refreshToken = signRefreshToken({ id: userId, username, displayName, role, sid });
-      // WARP-116: index this refresh token so an admin "revoke now" (role
-      // change / disable) can denylist every live device session for the user.
-      await registerRefreshSession(userId, refreshToken);
+      // ADR-008 §3 + action item #2: native mobile clients can't read
+      // httpOnly Set-Cookie headers reliably (URLSession on iOS hides
+      // them; Android's OkHttp can but it's ugly). When the caller
+      // opts in with `?return=body=1`, return the JWTs in the JSON
+      // body INSTEAD of cookies.
+      //
+      // WARP-582 — the escape hatch is NATIVE-client-only. A browser context
+      // must never receive tokens in the body (an XSS payload could read them
+      // where the httpOnly cookies are script-unreadable), so the opt-in is
+      // refused whenever the request carries a browser-only marker header
+      // (Sec-Fetch-* / Origin / Referer — browsers attach at least one to
+      // every request they originate, and Sec-Fetch-*+Origin are forbidden
+      // header names page script cannot strip; see lib/browser-context.ts).
+      // The login itself still succeeds for a browser — it keeps its normal
+      // cookie-only session. The shipped native callers (droplet-android
+      // OkHttp, droplet-ios URLSession) send none of these headers;
+      // droplet-windows never uses ?return=body at all (its WebView2 runs
+      // the dashboard's ordinary cookie login).
+      //
+      // WARP-3038 — a body-token login sets NO session cookies. A default
+      // URLSession/CookieJar would otherwise persist the session to disk,
+      // breaking the client's tokens-only-in-Keychain guarantee, and a stale
+      // cookie could later authenticate a request the client meant to send
+      // bearer-less. A browser (no opt-in, or refused above) keeps its
+      // cookies exactly as before.
+      const wantBodyParam = req.query.return === "body" || req.query.return === "body=1";
+      const browserMarker = wantBodyParam ? browserMarkerHeader(req.headers) : null;
+      if (wantBodyParam && browserMarker !== null) {
+        logger.warn(
+          { marker: browserMarker, username },
+          "login: ?return=body refused for a browser context — cookie-only session issued (WARP-582)",
+        );
+      }
+      const wantBody = wantBodyParam && browserMarker === null;
 
-      const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
-
-      // Access token in session cookie
-      res.cookie(SESSION_COOKIE_NAME, accessToken, {
-        httpOnly: true,
-        secure: isHttps,
-        sameSite: "lax",
-        path: "/",
-        maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
-      });
-
-      // Refresh token in separate cookie (scoped to /api/auth)
-      res.cookie(REFRESH_COOKIE_NAME, refreshToken, {
-        httpOnly: true,
-        secure: isHttps,
-        sameSite: "lax",
-        path: "/api/auth",
-        maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
-      });
+      // Access token in the session cookie, refresh token in its own cookie
+      // scoped to /api/auth — browsers only (WARP-3038).
+      if (!wantBody) setSessionCookies(req, res, minted);
 
       // WARP-456: successful sign-in audit row.
       await recordActivity({
@@ -1347,51 +1372,13 @@ export function createPublicAuthRouter(
         actor: { type: "user", id: userId },
       });
 
-      // ADR-008 §3 + action item #2: native mobile clients can't read
-      // httpOnly Set-Cookie headers reliably (URLSession on iOS hides
-      // them; Android's OkHttp can but it's ugly). When the caller
-      // opts in with `?return=body=1`, return the JWTs in the JSON
-      // body too. The cookies are STILL set so browsers behave
-      // unchanged. No behavior change for any existing caller — the
-      // body field is only added when the query param is present.
-      //
-      // WARP-582 — the escape hatch is NATIVE-client-only. A browser context
-      // must never receive tokens in the body (an XSS payload could read them
-      // where the httpOnly cookies are script-unreadable), so the opt-in is
-      // refused whenever the request carries a browser-only marker header
-      // (Sec-Fetch-* / Origin / Referer — browsers attach at least one to
-      // every request they originate, and Sec-Fetch-*+Origin are forbidden
-      // header names page script cannot strip; see lib/browser-context.ts).
-      // The login itself still succeeds for a browser — it keeps its normal
-      // cookie-only session. The shipped native callers (droplet-android
-      // OkHttp, droplet-ios URLSession) send none of these headers;
-      // droplet-windows never uses ?return=body at all (its WebView2 runs
-      // the dashboard's ordinary cookie login).
-      const wantBodyParam = req.query.return === "body" || req.query.return === "body=1";
-      const browserMarker = wantBodyParam ? browserMarkerHeader(req.headers) : null;
-      if (wantBodyParam && browserMarker !== null) {
-        logger.warn(
-          { marker: browserMarker, username },
-          "login: ?return=body refused for a browser context — cookie-only session issued (WARP-582)",
-        );
-      }
-      const wantBody = wantBodyParam && browserMarker === null;
       res.json({
         // WARP-824: surface the explicit forced-change flag so the dashboard
         // redirects an admin-created temp-password user to the change-password
         // screen. This is a UX convenience — the post-auth gate enforces it
         // server-side regardless of whether the client honours the redirect.
         user: { id: userId, username, displayName, role, mustChangePassword: localUser.mustChangePassword },
-        ...(wantBody
-          ? {
-              accessToken,
-              refreshToken,
-              accessTokenExpiresAt:
-                Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
-              refreshTokenExpiresAt:
-                Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
-            }
-          : {}),
+        ...(wantBody ? sessionTokenBody(minted) : {}),
       });
 
       // WARP-1954 — the user just signed in; their next stop is usually
@@ -1404,10 +1391,16 @@ export function createPublicAuthRouter(
       // never awaited, so a cold/hung runtime can never stall or fail the
       // login. Placed on the COMPLETED-login path only (password AND
       // second factor satisfied) so the warm can't become a pre-auth
-      // probe surface.
-      setImmediate(() => {
-        void warmDefaultModel().catch(() => undefined);
-      });
+      // probe surface. WARP-3047: the ACTIVE model — warming env
+      // LLM_MODEL loaded the old model next to a switched-to one.
+      // `prisma` is always wired by here (directory login fails closed
+      // without it, above); the guard only narrows it for the closure.
+      if (prisma) {
+        const db = prisma;
+        setImmediate(() => {
+          void warmActiveModel(db).catch(() => undefined);
+        });
+      }
     } catch (err) {
       next(err);
     }
@@ -1514,9 +1507,9 @@ export function createPublicAuthRouter(
   // ── Refresh: exchange refresh token for new access token ──
   router.post("/auth/refresh", sensitiveRateLimit, async (req, res, next) => {
     try {
-      // ADR-008: native clients (iOS / Android / Tauri Win) POST the
-      // refresh token in the JSON body since they can't read httpOnly
-      // cookies. Browsers continue to use the REFRESH_COOKIE_NAME cookie
+      // ADR-008: native clients (iOS / Android / the ADR-062 desktop
+      // clients) POST the refresh token in the JSON body since they can't
+      // read httpOnly cookies. Browsers continue to use the REFRESH_COOKIE_NAME cookie
       // set by /auth/login. Body takes precedence if both are present
       // so a mobile client deliberately rotating doesn't get blocked by
       // a stale cookie.
@@ -1695,35 +1688,54 @@ export function createPublicAuthRouter(
         // original 7-day window elapses even though their JWT is fresh).
         await touchNcToken(sub, REFRESH_TOKEN_TTL_SECONDS);
 
-        const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
-        res.cookie(SESSION_COOKIE_NAME, newAccessToken, {
-          httpOnly: true,
-          secure: isHttps,
-          sameSite: "lax",
-          path: "/",
-          maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
-        });
-        res.cookie(REFRESH_COOKIE_NAME, newRefreshToken, {
-          httpOnly: true,
-          secure: isHttps,
-          sameSite: "lax",
-          path: "/api/auth",
-          maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
-        });
-
         // Native clients want the new tokens in body since they can't
-        // read Set-Cookie. Always include them — browsers ignore the
-        // body's accessToken (they use the cookie that was just set
-        // above), so this is non-breaking.
+        // read Set-Cookie. WARP-3193 SEC-AUTH-7: ONLY native clients — the
+        // same WARP-582 rule as /auth/login?return=body. A browser rotates
+        // through the cookies set above; tokens in its body would be
+        // readable by any XSS on the dashboard origin. Native = presented
+        // its refresh token in the body (ADR-008) AND carries no browser
+        // marker header (lib/browser-context.ts).
+        const browserMarker = browserMarkerHeader(req.headers);
+        if (refreshTokenBody !== null && browserMarker !== null) {
+          logger.warn(
+            { marker: browserMarker, sub },
+            "refresh: body tokens refused for a browser context — cookie-only rotation (WARP-582)",
+          );
+        }
+        const wantBody = refreshTokenBody !== null && browserMarker === null;
+
+        // WARP-3038 — a native body-token rotation sets NO cookies, matching
+        // /auth/login?return=body; browsers rotate through the cookies.
+        if (!wantBody) {
+          const isHttps = req.secure || req.headers["x-forwarded-proto"] === "https";
+          res.cookie(SESSION_COOKIE_NAME, newAccessToken, {
+            httpOnly: true,
+            secure: isHttps,
+            sameSite: "lax",
+            path: "/",
+            maxAge: ACCESS_TOKEN_TTL_SECONDS * 1000,
+          });
+          res.cookie(REFRESH_COOKIE_NAME, newRefreshToken, {
+            httpOnly: true,
+            secure: isHttps,
+            sameSite: "lax",
+            path: "/api/auth",
+            maxAge: REFRESH_TOKEN_TTL_SECONDS * 1000,
+          });
+        }
         res.json({
           status: "ok",
           expiresIn: ACCESS_TOKEN_TTL_SECONDS,
-          accessToken: newAccessToken,
-          refreshToken: newRefreshToken,
-          accessTokenExpiresAt:
-            Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
-          refreshTokenExpiresAt:
-            Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
+          ...(wantBody
+            ? {
+                accessToken: newAccessToken,
+                refreshToken: newRefreshToken,
+                accessTokenExpiresAt:
+                  Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL_SECONDS,
+                refreshTokenExpiresAt:
+                  Math.floor(Date.now() / 1000) + REFRESH_TOKEN_TTL_SECONDS,
+              }
+            : {}),
         });
         return;
       }
@@ -1934,7 +1946,7 @@ export function createPublicAuthRouter(
       // ── WARP-490: single-use enforcement via compare-and-swap ──
       // Two near-simultaneous POSTs to the same token both clear the
       // isUsed() fast-path above before either write lands. The
-      // conditional updateMany (acceptedAt: null) is the atomic
+      // conditional updateMany (status: "pending") is the atomic
       // enforcement point: exactly one caller flips the row (count === 1)
       // and proceeds to create the account; the other sees count === 0
       // and 410s WITHOUT ever calling Nextcloud — so no duplicate NC
@@ -1949,9 +1961,13 @@ export function createPublicAuthRouter(
       // atomic single-use — a transient-failure auto-release would reopen
       // a (smaller) version of the same race.
       const acceptedFrom = getRequestIp(req);
+      // WARP-3193 QUAL-3: the guard is the explicit status, so a revoke or
+      // the expiry sweep landing between the fast-path read and this write
+      // also loses the race, not just a second accept.
       const claim = await prisma.userInvite.updateMany({
-        where: { id: invite.id, acceptedAt: null },
+        where: { id: invite.id, status: "pending" },
         data: {
+          status: "accepted",
           acceptedAt: new Date(),
           acceptedFrom: acceptedFrom ?? undefined,
         },
@@ -1966,12 +1982,10 @@ export function createPublicAuthRouter(
 
       try {
         await ncCreateUser(
-          // Use the configured admin token from env. No request-bound NC
-          // token is available since the invitee isn't logged in yet.
-          process.env.NEXTCLOUD_ADMIN_TOKEN ||
-            Buffer.from(
-              `${process.env.NEXTCLOUD_ADMIN_USER || "admin"}:${process.env.NEXTCLOUD_ADMIN_PASSWORD || ""}`,
-            ).toString("base64"),
+          // WARP-2993 — the box service account. The previous
+          // `NEXTCLOUD_ADMIN_TOKEN || <bare base64>` went out as a Bearer
+          // (no `basic:` prefix) and NEXTCLOUD_ADMIN_TOKEN is wired nowhere.
+          adminBasicToken(),
           invite.username,
           password,
           invite.displayName || undefined,
@@ -2062,6 +2076,9 @@ export function createPublicAuthRouter(
       const accessRoleAssignment = acceptedAccessRole
         ? { role: acceptedAccessRole.startingPoint, accessRoleId: acceptedAccessRole.id }
         : null;
+      // WARP-3263 — who brought this person onto the box, as an explicit id
+      // (a guest's Messages roster shows them). Null on a pre-column invite.
+      const invitedById = await liveUserId(prisma, invite.createdById);
       const userRow = await prisma.user.upsert({
         where: { nextcloudUsername: invite.username },
         update: {
@@ -2086,6 +2103,7 @@ export function createPublicAuthRouter(
           // Canonical Role enum: the applied role's startingPoint, else the
           // invite's tier (pre-T9 behavior, bit-for-bit).
           role: invite.role,
+          invitedById,
           // `isLocal` defaults to true in the schema; mirror-from-NC
           // would only flip false for setup-time admins.
           ...(accessRoleAssignment ?? {}),
@@ -2273,12 +2291,23 @@ export function createProtectedAuthRouter(
         }
       }
 
+      // WARP-2981 (ADR-059 §6.2) — the latest this sign-in can last (the
+      // absolute cap; idle expiry, the concurrent-session cap and revocation
+      // can end it sooner, and the idle deadline moves with every request, so
+      // it is not offered).
+      // null = cannot tell: a sid-less grace-path token, a service principal
+      // (no sign-in to end), or a record that is missing or unreadable. A
+      // plain read — it never slides the idle clock and never fails /auth/me.
+      const deadline =
+        req.user.role !== "service" && req.user.sid ? await readSessionDeadline(req.user.sid) : null;
+
       res.json({
         id: req.user.id,
         username: req.user.username,
         displayName: req.user.displayName,
         role: req.user.role,
         mustChangePassword,
+        session: deadline ? { endsAt: deadline.endsAt.toISOString() } : null,
       });
     } catch (err) {
       next(err);
@@ -2353,6 +2382,12 @@ export function createProtectedAuthRouter(
       // row with no hash cannot rotate a password. Fail closed.
       if (!localUser || !localUser.passwordHash) {
         res.status(400).json({ error: "Invalid current password", code: "INVALID_PASSWORD" });
+        return;
+      }
+      // WARP-2858: the IdP owns this account's credential — see
+      // SSO_MANAGED_ACCOUNT on PUT /auth/users/:username.
+      if (isIdpProvisioned(localUser)) {
+        res.status(409).json(SSO_MANAGED_ACCOUNT_BODY);
         return;
       }
 
@@ -2480,6 +2515,11 @@ export function createProtectedAuthRouter(
         return;
       }
 
+      // WARP-3193 SEC-AUTH-9 — re-prove identity before minting a factor, so
+      // a hijacked session cannot plant its own authenticator. After the 409
+      // on purpose: the setup wizard reads it when the owner steps back.
+      if (!(await passCredentialStepUp(prisma, req, res))) return;
+
       // Label the authenticator entry with the user's email when present,
       // else the username — both are non-secret display identifiers.
       const label = req.user.username;
@@ -2547,7 +2587,9 @@ export function createProtectedAuthRouter(
   // recovery codes — returned ONCE in this response and never again. A
   // verify against an already-enabled factor is a re-challenge (e.g. a
   // step-up) and returns no new codes.
-  router.post("/auth/totp/verify", authRateLimit, async (req, res, next) => {
+  // WARP-3193 SEC-AUTH-9 — the same step-up as enroll (the confirming
+  // verify is what turns the factor on).
+  router.post("/auth/totp/verify", authRateLimit, createRequireCredentialStepUp(prisma), async (req, res, next) => {
     try {
       if (!req.user) {
         res.status(401).json({ error: "Not authenticated" });
@@ -2573,8 +2615,9 @@ export function createProtectedAuthRouter(
         return;
       }
 
-      const secret = decryptTotpSecret(cred.secretEnc);
-      const codeOk = await verifyTotpCode(secret, parsed.data.code);
+      // WARP-3193 SEC-AUTH-10 — the same single-use accept as login, so the
+      // code that confirms enrollment cannot be replayed at sign-in.
+      const codeOk = await acceptTotpCode(prisma, cred, parsed.data.code);
       if (!codeOk) {
         res.status(401).json({ error: "Invalid code", code: "TOTP_INVALID" });
         return;
@@ -2686,37 +2729,14 @@ export function createProtectedAuthRouter(
       }
       const userId = req.user.id;
 
-      const unused = await prisma.recoveryCode.findMany({
-        where: { userId, usedAt: null },
-      });
-      const matchHash = await findMatchingRecoveryCodeHash(
-        parsed.data.code,
-        unused.map((r) => r.codeHash),
-      );
-      if (!matchHash) {
+      // WARP-3193 ARCH-3 — the same single-use consume /auth/login uses. A
+      // racer that spent the code first leaves this one unconsumed → 401.
+      const result = await consumeRecoveryCode(prisma, userId, parsed.data.code);
+      if (!result.consumed) {
         res.status(401).json({ error: "Invalid code", code: "RECOVERY_INVALID" });
         return;
       }
-      const consumed = unused.find((r) => r.codeHash === matchHash);
-      if (!consumed) {
-        res.status(401).json({ error: "Invalid code", code: "RECOVERY_INVALID" });
-        return;
-      }
-      // Atomic single-use: the usedAt:null guard makes the consume safe
-      // against a concurrent step-up presenting the same code. If a racer
-      // already spent it between our read and here, count is 0 → reject as
-      // invalid rather than re-authenticating. Mirrors claimRefreshRotation.
-      const claimed = await prisma.recoveryCode.updateMany({
-        where: { id: consumed.id, usedAt: null },
-        data: { usedAt: new Date() },
-      });
-      if (claimed.count === 0) {
-        res.status(401).json({ error: "Invalid code", code: "RECOVERY_INVALID" });
-        return;
-      }
-
-      const remaining = unused.length - 1;
-      res.json({ ok: true, remaining });
+      res.json({ ok: true, remaining: result.remaining });
     } catch (err) {
       next(err);
     }
@@ -2815,11 +2835,10 @@ export function createProtectedAuthRouter(
   // PR #258 review (a "admin only" comment with no enforcing guard).
   router.get("/auth/users", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
-      }
+      // WARP-2993 — provisioning_api needs NC instance admin, which only the
+      // box service account holds. The caller's own NC credential is never
+      // used here; Droplet's requireRole + rails above/below are the authority.
+      const token = adminBasicToken();
 
       // Hide the Nextcloud system/database admin account — it exists for
       // internal orchestrator use only and must never appear in the UI.
@@ -2831,12 +2850,23 @@ export function createProtectedAuthRouter(
       // plain built-in tier) — the T8 RosterUser extension. The select stays
       // EXPLICIT: never return raw User rows from this endpoint (the full
       // passwordHash serialization sweep is WARP-1539 — don't widen it here).
+      // WARP-2984 (Romain, 2026-09-22): the roster shows EVERYONE — Nextcloud
+      // users AND local directory rows with no Nextcloud user (SSO / SCIM),
+      // merged, no duplicates, each tagged with where it comes from. It used
+      // to map over Nextcloud only, so an IdP-provisioned account could be
+      // signed in (GET /auth/sessions lists it) with no row to disable it from.
       type LocalRosterRow = {
         id: string;
         username: string;
+        displayName: string;
+        email: string | null;
         nextcloudUsername: string | null;
         role: string;
         accessRoleId: string | null;
+        directoryStatus: string;
+        provisionSource: string;
+        deletionStatus: string;
+        deletionDueAt: Date | null;
       };
       const [allUsers, localRows] = await Promise.all([
         ncListUsers(token),
@@ -2845,9 +2875,15 @@ export function createProtectedAuthRouter(
               select: {
                 id: true,
                 username: true,
+                displayName: true,
+                email: true,
                 nextcloudUsername: true,
                 role: true,
                 accessRoleId: true,
+                directoryStatus: true,
+                provisionSource: true,
+                deletionStatus: true,
+                deletionDueAt: true,
               },
             }) as Promise<LocalRosterRow[]>)
           : ([] as LocalRosterRow[]),
@@ -2859,17 +2895,49 @@ export function createProtectedAuthRouter(
         if (row.nextcloudUsername) localByNcUsername.set(row.nextcloudUsername.toLowerCase(), row);
         localByUsername.set(row.username.toLowerCase(), row);
       }
+      const sourceOf = (row: LocalRosterRow): RosterSource =>
+        row.provisionSource === "SSO" ? "sso" : row.provisionSource === "SCIM" ? "scim" : "local";
+      const matched = new Set<string>();
       const users = ncUsers.map((u) => {
         const key = u.id.toLowerCase();
         const local = localByNcUsername.get(key) ?? localByUsername.get(key) ?? null;
+        if (local) matched.add(local.id);
         return {
           ...u,
           userId: local?.id ?? null,
           // No local row → no fabricated tier; the dashboard renders no chip.
           role: local?.role ?? null,
           accessRoleId: local?.accessRoleId ?? null,
+          source: local ? sourceOf(local) : ("nextcloud" satisfies RosterSource),
+          hasStorage: true,
+          // WARP-3113: explicit enum; a Nextcloud-only account has no row to schedule.
+          deletionStatus: local?.deletionStatus ?? "NONE",
+          deletionDueAt: local?.deletionDueAt ?? null,
         };
       });
+      // Local rows Nextcloud does not list: every SSO/SCIM account, plus any
+      // local row whose Nextcloud user is gone. `id` is the handle the write
+      // routes' resolver (findDirectoryUserByHandle) accepts, so every action
+      // on the row reaches it. Service principals are machine accounts, not
+      // people — kept off the roster like the Nextcloud system admin above.
+      for (const row of localRows) {
+        if (matched.has(row.id) || row.role === "service") continue;
+        users.push({
+          id: row.nextcloudUsername ?? row.username,
+          displayName: row.displayName,
+          email: readUserEmail(row.email),
+          // No Nextcloud flag exists for this row; the directory status is
+          // the whole state.
+          enabled: row.directoryStatus === "ACTIVE",
+          userId: row.id,
+          role: row.role,
+          accessRoleId: row.accessRoleId,
+          source: sourceOf(row),
+          hasStorage: false,
+          deletionStatus: row.deletionStatus,
+          deletionDueAt: row.deletionDueAt,
+        });
+      }
       res.json({ users });
     } catch (err: any) {
       if (err.message?.includes("403") || err.message?.includes("997")) {
@@ -2925,11 +2993,10 @@ export function createProtectedAuthRouter(
         throw err;
       }
 
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
-      }
+      // WARP-2993 — provisioning_api needs NC instance admin, which only the
+      // box service account holds. The caller's own NC credential is never
+      // used here; Droplet's requireRole + rails above/below are the authority.
+      const token = adminBasicToken();
 
       // WARP-485 follow-up (Romain PR #279 review): fail-CLOSED if
       // prisma isn't wired so we never create an NC user that we
@@ -3020,6 +3087,8 @@ export function createProtectedAuthRouter(
           // WARP-824: explicit forced-change-on-first-login flag (default
           // true). The post-auth gate reads this fresh on every request.
           mustChangePassword,
+          // WARP-3263 — the creating admin, same role as an invite's issuer.
+          invitedById: await liveUserId(prisma, req.user?.id),
         },
       });
 
@@ -3089,20 +3158,18 @@ export function createProtectedAuthRouter(
   // WARP-171: per-route guard. owner + admin only.
   router.put("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
-      }
+      // WARP-2993 — provisioning_api needs NC instance admin, which only the
+      // box service account holds. The caller's own NC credential is never
+      // used here; Droplet's requireRole + rails above/below are the authority.
+      const token = adminBasicToken();
 
       // The target row, read ONCE and shared by both guarded branches below.
       // WARP-1526 looked it up only inside the role branch; WARP-1564 needs it
       // on every request, because the credential branch is guarded too.
+      // WARP-2858: resolved through the shared handle resolver so SSO/SCIM
+      // rows (no `nextcloudUsername`) are found and guarded like any other.
       const target = prisma
-        ? await prisma.user.findUnique({
-            where: { nextcloudUsername: req.params.username },
-            select: { id: true, role: true },
-          })
+        ? await findDirectoryUserByHandle(prisma, req.params.username)
         : null;
 
       try {
@@ -3207,7 +3274,42 @@ export function createProtectedAuthRouter(
       }
 
       const { username } = req.params;
-      const { displayName, email, quota, password } = parsed.data;
+      const { displayName, email, quota, password, keepSessions } = parsed.data;
+      // WARP-3111: a password set by SOMEONE ELSE is a reset — the admin now
+      // knows it, and a reset is what an admin does when an account may be
+      // compromised or the person is leaving. So it is temporary (the WARP-824
+      // forced change) and, unless `keepSessions: true`, ends every live
+      // session. Your OWN password through this route is plain maintenance:
+      // forcing a change of a password you just chose is noise, and revoking
+      // your own sessions would sign you out mid-request (self-service
+      // changes go through POST /auth/password, which revokes the others).
+      // Rowless targets have no local flag or sessions to act on.
+      const isReset =
+        password !== undefined && target !== null && req.user?.id !== target.id;
+
+      // WARP-2858: the Nextcloud user this row mirrors to. A row with no
+      // mapping key (SSO/SCIM-provisioned) has NO Nextcloud account, so the
+      // mirror below is skipped rather than aimed at a name Nextcloud has
+      // never seen. No local row (legacy NC-only account / no directory):
+      // the path param IS the Nextcloud user, as before.
+      const ncUsername = target ? target.nextcloudUsername : username;
+      // Quota is a Nextcloud storage attribute and nothing else — on an
+      // account with no Nextcloud user there is nothing to apply it to.
+      // Refuse explicitly, BEFORE any write, instead of 200-ing a no-op.
+      // WARP-2858 (Romain, 2026-09-22): no local password on an account the
+      // IdP provisioned. It would be a login that the IdP's disable and
+      // SCIM deprovision cannot reach. Refused before any write.
+      if (password !== undefined && target && isIdpProvisioned(target)) {
+        res.status(409).json(SSO_MANAGED_ACCOUNT_BODY);
+        return;
+      }
+      if (quota !== undefined && ncUsername === null) {
+        res.status(409).json({
+          error: "This account has no file storage, so it has no storage quota to set",
+          code: "NO_NEXTCLOUD_ACCOUNT",
+        });
+        return;
+      }
 
       // ADR-013: the built-in directory is the auth source of truth and
       // /auth/login verifies the LOCAL passwordHash by email. An email or
@@ -3238,6 +3340,7 @@ export function createProtectedAuthRouter(
         // WARP-233: an email change re-encrypts + re-indexes atomically.
         if (email !== undefined) Object.assign(data, emailWriteData(email));
         if (password !== undefined) data.passwordHash = await hashPassword(password);
+        if (isReset) data.mustChangePassword = true;
         if (Object.keys(data).length > 0) {
           const updated = await prisma.user.updateMany({
             // WARP-1564 (review L2): PIN `role` to the value rail 1b decided
@@ -3262,8 +3365,10 @@ export function createProtectedAuthRouter(
             // credential rotation. `target` is null only where there is no
             // local row to pin against (legacy shim / NC-only account), and
             // that case already fails closed below.
+            // WARP-2858: pinned by the resolved row's id, not the mapping
+            // key — an SSO/SCIM row has no `nextcloudUsername` to match.
             where: target
-              ? { nextcloudUsername: username, role: target.role }
+              ? { id: target.id, role: target.role }
               : { nextcloudUsername: username },
             data,
           });
@@ -3294,22 +3399,58 @@ export function createProtectedAuthRouter(
         }
       }
 
+      // WARP-3111: the local credential is committed, so the old holder is
+      // cut off now, not at their 12 h session limit. Before the Nextcloud
+      // mirror, so an NC failure below can't leave the sessions alive.
+      // `sessionsRevoked` is null when the admin opted out (distinct from 0 =
+      // nothing was signed in).
+      let sessionsRevoked: number | null = null;
+      if (isReset && target) {
+        if (keepSessions !== true) {
+          sessionsRevoked = await revokeAllSessions(target.id);
+        }
+        await recordActivity({
+          kind: "auth",
+          severity: "warn",
+          sourceIcon: "key-round",
+          what: "Password reset",
+          sub: `for user ${username}`,
+          refs: {
+            targetUserId: target.id,
+            username,
+            mustChangePassword: true,
+            sessionsRevoked,
+          },
+          actor: actorFromRequest(req),
+        });
+      }
+      const resetFields = isReset ? { mustChangePassword: true, sessionsRevoked } : {};
+
       // Mirror the changes to Nextcloud (the WebDAV account + NC-side
       // attributes). One OCS PUT per field; the plaintext password is sent
       // here so the user's Files/WebDAV login keeps working.
+      if (ncUsername === null) {
+        res.json({
+          status: "ok",
+          username,
+          ncMirror: "no_account" satisfies NcMirror,
+          ...resetFields,
+        });
+        return;
+      }
       if (displayName !== undefined) {
-        await ncUpdateUser(token, username, "displayname", displayName);
+        await ncUpdateUser(token, ncUsername, "displayname", displayName);
       }
       if (email !== undefined) {
-        await ncUpdateUser(token, username, "email", email);
+        await ncUpdateUser(token, ncUsername, "email", email);
       }
       if (quota !== undefined) {
-        await ncUpdateUser(token, username, "quota", String(quota));
+        await ncUpdateUser(token, ncUsername, "quota", String(quota));
       }
       if (password !== undefined) {
-        await ncUpdateUser(token, username, "password", password);
+        await ncUpdateUser(token, ncUsername, "password", password);
       }
-      res.json({ status: "ok", username });
+      res.json({ status: "ok", username, ncMirror: "synced" satisfies NcMirror, ...resetFields });
     } catch (err: any) {
       if (err.message?.includes("403") || err.message?.includes("997")) {
         res.status(403).json({ error: "Admin access required" });
@@ -3326,19 +3467,19 @@ export function createProtectedAuthRouter(
     requireRole("owner", "admin"),
     async (req, res, next) => {
       try {
-        const token = await resolveNcToken(req);
-        if (!token) {
-          res.status(401).json({ error: "Authentication required" });
-          return;
-        }
+        // WARP-2993 — provisioning_api needs NC instance admin, which only the
+        // box service account holds. The caller's own NC credential is never
+        // used here; Droplet's requireRole + rails above/below are the authority.
+        const token = adminBasicToken();
 
         // WARP-1526: resolve the LOCAL row first — the ADR-013 directory is
         // the auth source of truth and the guard rails key off it.
+        // WARP-2858: via the shared resolver — SSO/SCIM rows have no
+        // `nextcloudUsername` and used to fall through to the rowless branch
+        // below, whose Nextcloud call then failed against a user Nextcloud
+        // never had: the account stayed ACTIVE with live sessions.
         const row = prisma
-          ? await prisma.user.findUnique({
-              where: { nextcloudUsername: req.params.username },
-              select: { id: true, role: true, directoryStatus: true },
-            })
+          ? await findDirectoryUserByHandle(prisma, req.params.username)
           : null;
 
         if (row && prisma) {
@@ -3380,15 +3521,20 @@ export function createProtectedAuthRouter(
           // NC outage must not fail a disable whose authoritative local
           // write already committed. Logged at error for operator
           // follow-up; re-running disable is idempotent.
-          let ncMirror: "synced" | "failed" = "synced";
-          try {
-            await ncSetUserEnabled(token, req.params.username, false);
-          } catch (err) {
-            ncMirror = "failed";
-            logger.error(
-              { err, username: req.params.username },
-              "disable: Nextcloud mirror failed (non-blocking; local directoryStatus is authoritative)",
-            );
+          // WARP-2858: a row with no mapping key has no Nextcloud account —
+          // the local DEACTIVATED is the whole disable, stated as such.
+          let ncMirror: NcMirror = "no_account";
+          if (row.nextcloudUsername !== null) {
+            try {
+              await ncSetUserEnabled(token, row.nextcloudUsername, false);
+              ncMirror = "synced";
+            } catch (err) {
+              ncMirror = "failed";
+              logger.error(
+                { err, username: req.params.username },
+                "disable: Nextcloud mirror failed (non-blocking; local directoryStatus is authoritative)",
+              );
+            }
           }
 
           // Rail 6 (consolidated): WARP-116/247 session-record revocation +
@@ -3406,6 +3552,9 @@ export function createProtectedAuthRouter(
             username: req.params.username,
             actor: actorFromRequest(req),
             ncMirror,
+            // WARP-3160: devices are keyed by the directory username, not the
+            // handle in the URL (which may be the Nextcloud name).
+            devices: { prisma, username: row.username },
           });
           res.json({
             status: "disabled",
@@ -3433,6 +3582,7 @@ export function createProtectedAuthRouter(
           // failure would have thrown), so the mirror is synced by
           // construction.
           ncMirror: "synced",
+          devices: prisma ? { prisma, username: req.params.username } : null,
         });
         res.json({
           status: "disabled",
@@ -3465,32 +3615,61 @@ export function createProtectedAuthRouter(
     requireRole("owner", "admin"),
     async (req, res, next) => {
       try {
-        const token = await resolveNcToken(req);
-        if (!token) {
-          res.status(401).json({ error: "Authentication required" });
-          return;
-        }
+        // WARP-2993 — provisioning_api needs NC instance admin, which only the
+        // box service account holds. The caller's own NC credential is never
+        // used here; Droplet's requireRole + rails above/below are the authority.
+        const token = adminBasicToken();
         // WARP-1526: dashboard-disable parks the LOCAL row on
         // directoryStatus=DEACTIVATED (see the disable handler) — re-enable
         // must flip it back or the account stays locally locked out
         // forever. Local truth first, then the NC mirror (fatal on failure,
         // as before — a retry converges both sides). No guard rails here:
         // enabling restores access, it can never strand the box.
-        if (prisma) {
-          const row = await prisma.user.findUnique({
-            where: { nextcloudUsername: req.params.username },
-            select: { id: true },
+        // WARP-2858: resolved through the shared resolver, and the NC call
+        // keys off the resolved row — skipped (explicit `no_account`) for an
+        // SSO/SCIM row that has no Nextcloud user.
+        const row = prisma
+          ? await findDirectoryUserByHandle(prisma, req.params.username)
+          : null;
+        if (row && prisma) {
+          // WARP-3113: a person scheduled for deletion is reactivated only
+          // after the deletion is cancelled — two explicit decisions, never
+          // one click that silently keeps a purge date on a live account.
+          // Pinned to NONE so the nightly job's claim can't race this.
+          const reactivated = await prisma.user.updateMany({
+            where: { id: row.id, deletionStatus: "NONE" },
+            data: { directoryStatus: "ACTIVE" },
           });
-          if (row) {
-            await prisma.user.update({
-              where: { id: row.id },
-              data: { directoryStatus: "ACTIVE" },
-            });
-          }
+          if (reactivated.count === 0) throw RoleMutationRefusedError.deletionPending();
         }
-        await ncSetUserEnabled(token, req.params.username, true);
-        res.json({ status: "enabled", username: req.params.username });
+        const ncUsername = row ? row.nextcloudUsername : req.params.username;
+        let ncMirror: NcMirror = "no_account";
+        if (ncUsername !== null) {
+          await ncSetUserEnabled(token, ncUsername, true);
+          ncMirror = "synced";
+        }
+        // WARP-3113: reactivation restores access to the company's box, so
+        // it is audited with the actor, like disable.
+        await recordActivity({
+          kind: "auth",
+          severity: "ok",
+          sourceIcon: "user-check",
+          what: "User reactivated",
+          sub: req.params.username,
+          refs: {
+            actor: req.user?.username ?? null,
+            username: req.params.username,
+            targetUserId: row?.id ?? null,
+            ncMirror,
+          },
+          actor: actorFromRequest(req),
+        });
+        res.json({ status: "enabled", username: req.params.username, ncMirror });
       } catch (err: any) {
+        if (err instanceof RoleMutationRefusedError) {
+          res.status(err.status).json(err.toJSON());
+          return;
+        }
         if (err.message?.includes("403") || err.message?.includes("997")) {
           res.status(403).json({ error: "Admin access required" });
           return;
@@ -3599,18 +3778,24 @@ export function createProtectedAuthRouter(
         // order. Every path that writes `nextcloudUsername` writes the same
         // value into `username`, so the second lookup only ever runs for rows
         // that never had a mapping key at all.
-        const row =
-          (await prisma.user.findUnique({
-            where: { nextcloudUsername: req.params.username },
-            select: { id: true },
-          })) ??
-          (await prisma.user.findUnique({
-            where: { username: req.params.username },
-            select: { id: true },
-          }));
+        const row = await findDirectoryUserByHandle(prisma, req.params.username);
         if (!row) {
           res.status(404).json({ error: "User not found", code: "USER_NOT_FOUND" });
           return;
+        }
+        // WARP-3111: the WARP-1526 rails — never yourself, never the owner,
+        // never someone above your rank. See assertSessionRevokeAllowed.
+        try {
+          assertSessionRevokeAllowed({
+            actor: { id: req.user?.id, role: req.user?.role },
+            target: row,
+          });
+        } catch (err) {
+          if (err instanceof RoleMutationRefusedError) {
+            res.status(err.status).json(err.toJSON());
+            return;
+          }
+          throw err;
         }
         // WARP-247 — kill session RECORDS (access tokens die at the next
         // middleware check) as well as the refresh denylist (swept internally
@@ -3635,188 +3820,78 @@ export function createProtectedAuthRouter(
   );
 
   // ── Delete user (admin only) ──
-  // WARP-205: Cascade brain-memory items + chunks + on-disk bytes the
-  // user owned. We do this AFTER Nextcloud-side delete succeeds so a
-  // failed upstream call doesn't leave the brain tier partially purged
-  // (the dashboard would then list a user that no longer exists in
-  // Nextcloud — strictly worse than the converse). The cascade is
-  // best-effort: if it throws we still return success, but log loud
-  // — orphaned local rows are recoverable later via a janitor job;
-  // returning 500 here would also fail to undo the upstream delete.
+  // WARP-3113: Delete no longer purges on the spot. An employee's work files
+  // belong to the business, so the request must say what happens to them:
+  // `{ disposition: "retention" }` keeps everything for RETENTION_DAYS, then the
+  // nightly leaver-deletion job (leaver-deletion.service.ts) completes the
+  // removal. Until then an admin can cancel. WARP-3169: or
+  // `{ disposition: "handover", recipientId }` moves the files to an active
+  // owner/admin/member first and completes the deletion at once.
+  //
+  // What happens NOW is the revocation: the same guarded, SERIALIZABLE write
+  // Deactivate makes (WARP-1526 rails 1/2/4/5, directoryStatus=DEACTIVATED),
+  // plus the pending-deletion mark in the same transaction, then the
+  // Nextcloud enable-flag mirror and session revocation. A DELETE with no
+  // disposition (iOS and the Mac on main send none) gets "retention", the
+  // non-destructive, cancellable option, and the audit row says it was
+  // defaulted, so the choice is recorded rather than guessed. An unknown
+  // disposition is still a 400.
   // WARP-171: per-route guard. owner + admin only.
   router.delete("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      const token = await resolveNcToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
+      const parsed = deleteDispositionSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json(UNKNOWN_DISPOSITION_BODY);
         return;
       }
-
-      // WARP-1526 rails. This surface predated every people-surface
-      // invariant — an admin could delete the owner's account here. Resolve
-      // the local row and run rails 2 + 1 pre-tx (self-delete, owner
-      // untouchable), then rails 4 + 5 inside a SERIALIZABLE transaction
-      // (SERIALIZABLE_TX — explicit; Prisma/Postgres default to READ
-      // COMMITTED) for a consistent count snapshot (the actual NC delete
-      // runs after commit — the same post-commit-mirror posture as every
-      // other NC effect).
-      // WARP-1565 residual 1 — the removal is no longer half-done. The
-      // transaction below still only REVOKES (directoryStatus=DEACTIVATED),
-      // because that is the half that must be atomic with the rails; the
-      // local row is deleted at the end, once Nextcloud has confirmed the
-      // account is gone. See the delete below for why that order.
+      // WARP-2858: via the shared resolver so SSO/SCIM rows are removable.
       const row = prisma
-        ? await prisma.user.findUnique({
-            where: { nextcloudUsername: req.params.username },
-            select: { id: true, username: true, role: true },
-          })
+        ? await findDirectoryUserByHandle(prisma, req.params.username)
         : null;
-      if (row && prisma) {
-        assertRemovalAllowed({
-          actor: { id: req.user?.id, role: req.user?.role },
-          target: row,
+      if (!row || !prisma) {
+        // A legacy Nextcloud-only account has no row to hold the retention
+        // state; purging it on the spot is exactly what WARP-3113 forbids.
+        res.status(409).json({
+          error: "This account has no directory entry, so its deletion can't be scheduled.",
+          code: "NO_DIRECTORY_ROW",
         });
-        // pr-reviewer #1229 B3: this transaction used to wrap a COUNT with
-        // no write — a read-only transaction pins nothing, so it read as
-        // protection without being any, and because the route never touched
-        // the local row the "removed" admin stayed role=admin/ACTIVE:
-        //   • it kept counting as a live operator for the NEXT removal's
-        //     rail 5, so admins could be emptied one DELETE at a time; and
-        //   • /auth/login verifies the LOCAL passwordHash, so once the
-        //     ACCESS_TOKEN_TTL denylist entry expired (~15 min) they could
-        //     simply sign back in with full admin.
-        // What this transaction owns is the REVOCATION: the same
-        // directoryStatus lever the disable path uses, which /auth/login,
-        // SSO, WebAuthn and the auth middleware all already fail closed on.
-        // Check and change commit together, at SERIALIZABLE, with the write
-        // optimistically pinned to the role the rails were evaluated
-        // against. The row's DELETION (WARP-1565) is deliberately not in
-        // here — see below.
-        await prisma.$transaction(async (tx) => {
-          const fresh = await readGuardTargetTx(tx, row.id);
-          if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
-          await assertRemovalInvariantsTx(tx, { target: fresh });
-          await tx.user.update({
-            where: { id: fresh.id, role: fresh.role },
-            data: { directoryStatus: "DEACTIVATED" },
-          });
-        }, SERIALIZABLE_TX);
+        return;
       }
-
-      await ncDeleteUser(token, req.params.username);
-
-      if (prisma) {
-        try {
-          const purged = await purgeUserData(prisma, req.params.username);
-          logger.info(
-            {
-              username: req.params.username,
-              items: purged.items,
-              chunks: purged.chunks,
-            },
-            "Cascaded brain-memory purge after user delete",
-          );
-        } catch (err) {
-          // Don't fail the user-delete if the local cascade trips —
-          // the upstream NC delete already succeeded, and undoing it
-          // is awkward. Log loud so on-call can clean up later.
-          logger.error(
-            { err, username: req.params.username },
-            "Brain-memory cascade purge failed (user already deleted in Nextcloud)",
-          );
-        }
-      } else {
-        // Should never happen in production; createProtectedAuthRouter
-        // is invoked with prisma in app.ts.
-        logger.warn(
-          { username: req.params.username },
-          "purgeUserData skipped — protected auth router instantiated without prisma",
-        );
-      }
-
-      // WARP-1565 residual 1 — finish the removal.
-      //
-      // WARP-1526 bounded the exposure of the surviving row (DEACTIVATED,
-      // and every login gate fails closed on it), but a route called DELETE
-      // whose Nextcloud account is genuinely gone left the local row behind.
-      // The consequence an operator actually hits is not the roster entry:
-      // `username`, `email` and `nextcloudUsername` are UNIQUE columns, so
-      // the orphan keeps holding an identity that is supposed to be free —
-      // and re-inviting the same person (the obvious next action after a
-      // mistaken removal, or when someone returns) collides on it.
-      //
-      // ORDER IS THE CONTRACT: after ncDeleteUser, never before. A row
-      // deleted first, followed by a failing NC call, would strand an
-      // account with working WebDAV — Nextcloud is proxied without
-      // orchestrator auth in front — and nothing local to reconcile it
-      // from. This way a failed NC delete leaves a fully-revoked row to
-      // retry against, which is exactly the pre-WARP-1565 state rather than
-      // a new hole.
-      //
-      // `deleteMany` pinned to DEACTIVATED, not `delete` by id: it is
-      // idempotent on a retry, and it refuses to remove a row that someone
-      // re-activated in the window since the transaction above — that row
-      // is live again and deleting it would be a silent second decision.
-      // No rails re-run here: a DEACTIVATED row holds no operator capacity
-      // (rail 5 already excludes it), so removing it cannot strand the box.
-      if (prisma && row) {
-        const removed = await prisma.user.deleteMany({
-          where: { id: row.id, directoryStatus: "DEACTIVATED" },
+      if (parsed.data.disposition === "handover") {
+        // WARP-3169: transfer first, then delete at once. A failed transfer
+        // changes nothing (HandoverRefusedError below).
+        const handed = await handOverAndDeleteUser(prisma, row, {
+          guardActor: { id: req.user?.id, role: req.user?.role },
+          actorUsername: req.user?.username ?? null,
+          actor: actorFromRequest(req),
+          recipientId: parsed.data.recipientId,
         });
-        if (removed.count === 0) {
-          logger.warn(
-            { username: req.params.username, userId: row.id },
-            "local row not deleted after Nextcloud removal — re-activated concurrently; left for operator review",
-          );
-        } else {
-          // WARP-2115 — the deleted person may hold a Microsoft 365 link whose
-          // refresh token is still valid. Nothing cascades (userId is not an
-          // FK), and the /api/m365 routes scope to the requester's OWN
-          // connection, so an orphaned row could never be disconnected by
-          // anyone. Purge it here, gated on a CONFIRMED delete so a
-          // concurrently re-activated account keeps its link.
-          try {
-            const purgedM365 = await purgeM365ForUser(prisma, row.id);
-            if (purgedM365 > 0) {
-              logger.info(
-                { username: req.params.username, userId: row.id },
-                "Purged Microsoft 365 connection after user delete",
-              );
-            }
-          } catch (err) {
-            // Same posture as the brain-memory cascade above: the account is
-            // already gone upstream, so do not fail the request — but log loud,
-            // because what is left behind is a live cloud credential.
-            logger.error(
-              { err, username: req.params.username, userId: row.id },
-              "Microsoft 365 purge failed after user delete — a live refresh token may remain",
-            );
-          }
-        }
+        res.json({
+          status: handed.removed ? "deleted" : "deletion_retrying",
+          username: req.params.username,
+          recipient: handed.recipient,
+          folder: handed.folder,
+        });
+        return;
       }
-
-      // Rail 6 (consolidated, WARP-490 parity): this surface previously
-      // revoked NOTHING and audited NOTHING on delete — the removed user's
-      // sessions rode out their TTL. Hard-revoke + denylist + the
-      // mandatory-emit "User removed" row now land here exactly as on
-      // DELETE /api/people/:id (legacy NC-only rows keep a null
-      // targetUserId and skip the revocation they never had).
-      await runRemovalPostEffects({
-        targetUserId: row?.id ?? null,
-        targetUsername: row?.username ?? req.params.username,
-        targetRole: row?.role ?? null,
+      const scheduled = await scheduleUserDeletion(prisma, row, {
+        guardActor: { id: req.user?.id, role: req.user?.role },
         actorUsername: req.user?.username ?? null,
         actor: actorFromRequest(req),
-        // WARP-1565: the qualified headline existed only while the removal
-        // was half-done (pr-reviewer #1229 B3 — "User removed" would have
-        // been a false statement in an append-only, signature-chained audit
-        // log). The Nextcloud account is gone AND the local row is deleted,
-        // so the shipped default is true again and this surface reads
-        // identically to DELETE /api/people/:id.
+        disposition: parsed.data.disposition ?? "retention",
+        dispositionDefaulted: parsed.data.disposition === undefined,
       });
-
-      res.json({ status: "deleted", username: req.params.username });
+      res.json({
+        status: "pending_deletion",
+        username: req.params.username,
+        deletionDueAt: scheduled.deletionDueAt,
+        ...(scheduled.ncMirror ? { ncMirror: scheduled.ncMirror } : {}),
+      });
     } catch (err) {
+      if (err instanceof HandoverRefusedError) {
+        res.status(err.status).json(err.toJSON());
+        return;
+      }
       if (err instanceof RoleMutationRefusedError) {
         res.status(err.status).json(err.toJSON());
         return;
@@ -3831,6 +3906,53 @@ export function createProtectedAuthRouter(
       next(err);
     }
   });
+
+  // WARP-3113: cancel a scheduled deletion. The person stays deactivated;
+  // reactivating them is a separate, deliberate step. Matches PENDING only:
+  // once the nightly job has claimed the row (PURGING) the removal is under
+  // way and cannot be half-undone.
+  router.post(
+    "/auth/users/:username/cancel-deletion",
+    requireRole("owner", "admin"),
+    async (req, res, next) => {
+      try {
+        const row = prisma
+          ? await findDirectoryUserByHandle(prisma, req.params.username)
+          : null;
+        if (!row || !prisma) {
+          res.status(404).json({ error: "User not found" });
+          return;
+        }
+        const cancelled = await prisma.user.updateMany({
+          where: { id: row.id, deletionStatus: "PENDING" },
+          data: { deletionStatus: "NONE", deletionDueAt: null, deletionRequestedBy: null },
+        });
+        if (cancelled.count === 0) {
+          res.status(409).json({
+            error: "This person isn't scheduled for deletion, or the deletion is already running.",
+            code: "NO_PENDING_DELETION",
+          });
+          return;
+        }
+        await recordActivity({
+          kind: "auth",
+          severity: "ok",
+          sourceIcon: "user-check",
+          what: "User deletion cancelled",
+          sub: row.username,
+          refs: {
+            actor: req.user?.username ?? null,
+            targetUserId: row.id,
+            targetUsername: row.username,
+          },
+          actor: actorFromRequest(req),
+        });
+        res.json({ status: "disabled", username: req.params.username });
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
 
   // ────────────────────────────────────────────────────────────
   // WARP-217 — Admin invite management
@@ -3990,6 +4112,8 @@ export function createProtectedAuthRouter(
           email: parsed.data.email,
           role: parsed.data.role,
           createdBy: req.user?.username ?? "unknown",
+          // WARP-3263 — copied to User.invitedById at accept.
+          createdById: req.user?.id ?? null,
           expiresAt,
           // WARP-1533: validated custom access role (null = plain tier).
           accessRoleId: inviteAccessRole?.id ?? null,
@@ -4018,26 +4142,31 @@ export function createProtectedAuthRouter(
 
       // WARP-1533: an access-role invite lands in Activity with the ADR-032
       // §5 wording (kind `auth`, free-text `what`, refs carry the role UUID).
-      // Plain tier invites keep this surface's shipped behavior (log-only) —
-      // the people surface owns the "Teammate invited" entry.
-      if (inviteAccessRole) {
-        await recordActivity({
-          kind: "auth",
-          severity: "ok",
-          sourceIcon: "user-plus",
-          what: "Invite created with access role",
-          sub: `${parsed.data.email} · ${inviteAccessRole.name}`,
-          refs: {
-            actor: req.user?.username ?? null,
-            email: parsed.data.email,
-            role: parsed.data.role,
-            accessRoleId: inviteAccessRole.id,
-            accessRoleName: inviteAccessRole.name,
-            accessRoleStartingPoint: inviteAccessRole.startingPoint,
-          },
-          actor: actorFromRequest(req),
-        });
-      }
+      // WARP-3113: a plain tier invite is audited too, with the people
+      // surface's "Teammate invited" wording — an invite decides who can get
+      // into the company's box, whichever surface created it. Never the token.
+      await recordActivity({
+        kind: "auth",
+        severity: "ok",
+        sourceIcon: "user-plus",
+        what: inviteAccessRole ? "Invite created with access role" : "Teammate invited",
+        sub: inviteAccessRole
+          ? `${parsed.data.email} · ${inviteAccessRole.name}`
+          : `${parsed.data.email} · ${parsed.data.role}`,
+        refs: {
+          actor: req.user?.username ?? null,
+          email: parsed.data.email,
+          role: parsed.data.role,
+          ...(inviteAccessRole
+            ? {
+                accessRoleId: inviteAccessRole.id,
+                accessRoleName: inviteAccessRole.name,
+                accessRoleStartingPoint: inviteAccessRole.startingPoint,
+              }
+            : {}),
+        },
+        actor: actorFromRequest(req),
+      });
 
       // BUG-11 — deliver the invite email. The row is created above; the email
       // is a separate, fallible step over the operator's SMTP relay.
@@ -4114,6 +4243,11 @@ export function createProtectedAuthRouter(
         createdBy: r.createdBy,
         createdAt: r.createdAt,
         expiresAt: r.expiresAt,
+        // WARP-3193 QUAL-3: the lifecycle, so the client reads one field
+        // instead of re-deriving it from the timestamps. A pending row past
+        // expiresAt reads as expired here, exactly as the accept route
+        // treats it, until the 03:00 sweep stamps the column.
+        status: r.status === "pending" && isExpired(r) ? "expired" : r.status,
         acceptedAt: r.acceptedAt,
         revokedAt: r.revokedAt,
       }));
@@ -4139,10 +4273,29 @@ export function createProtectedAuthRouter(
           return;
         }
         // Idempotent: revoking an already-revoked invite is a no-op success.
-        if (!invite.revokedAt) {
-          await prisma.userInvite.update({
-            where: { id: invite.id },
-            data: { revokedAt: new Date() },
+        // WARP-3193 QUAL-3: only a pending or expired invite moves to
+        // revoked, in one conditional write with its timestamp. An accepted
+        // invite stays accepted — that person already holds the account, and
+        // the old unconditional stamp made the record claim otherwise.
+        const revoked = await prisma.userInvite.updateMany({
+          where: { id: invite.id, status: { in: ["pending", "expired"] } },
+          data: { status: "revoked", revokedAt: new Date() },
+        });
+        if (revoked.count > 0) {
+          // WARP-3113: audited once, on the transition — never the token.
+          await recordActivity({
+            kind: "auth",
+            severity: "ok",
+            sourceIcon: "user-minus",
+            what: "Invite revoked",
+            sub: invite.email ?? invite.username,
+            refs: {
+              actor: req.user?.username ?? null,
+              inviteId: invite.id,
+              email: invite.email ?? null,
+              role: invite.role,
+            },
+            actor: actorFromRequest(req),
           });
         }
         res.json({ revoked: true });

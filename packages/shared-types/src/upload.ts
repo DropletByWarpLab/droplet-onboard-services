@@ -10,10 +10,11 @@
  * raises, so the user was told their field name was wrong when the real problem
  * was the count, and all 36 files were dropped.
  *
- * The ceiling is a memory bound, not a policy one: uploads are buffered in RAM
- * (`multer.memoryStorage()`) and each file may be as large as the caller's
- * effective `MAX_UPLOAD_SIZE_MB`, so raising this raises peak resident memory
- * per in-flight request on the box.
+ * WARP-2093: no longer a memory bound — parts stream through the
+ * orchestrator into Nextcloud one at a time and are never buffered whole. It
+ * stays 20 because a request is committed as a unit (every part staged,
+ * then moved into place), so it bounds how much one request stages before
+ * anything lands, and how much a failed request throws away.
  */
 export const MAX_FILES_PER_UPLOAD = 20;
 
@@ -21,12 +22,12 @@ export const MAX_FILES_PER_UPLOAD = 20;
  * Byte ceiling for the files packed into a single `POST /api/files/upload`
  * request.
  *
- * WARP-1843: nginx caps every `/api/` request body at
- * `client_max_body_size 100M` (`docker/nginx/nginx.conf`) and rejects an
+ * WARP-1843: nginx caps the upload request body (`client_max_body_size` on
+ * `location = /api/files/upload`, `docker/nginx/nginx.conf`) and rejects an
  * over-cap request WHOLESALE with a 413 — so a batch of files that are each
  * within the per-file limit still all failed together whenever their SUM
  * crossed the cap. The dashboard packs upload batches so summed file bytes
- * stay at or under this ceiling; it sits ~10% below the nginx cap to leave
+ * stay at or under this ceiling, ~10% below the nginx cap (1100M) to leave
  * headroom for multipart framing (per-part headers + boundaries).
  *
  * A single file larger than this ceiling is still sent — alone in its own
@@ -34,8 +35,35 @@ export const MAX_FILES_PER_UPLOAD = 20;
  * with its honest 413 / policy error instead of the client silently dropping
  * the file.
  *
- * Do NOT raise this toward (or past) the nginx 100M: that cap doubles as the
- * orchestrator's OOM guard — uploads are buffered in RAM by
- * `multer.memoryStorage()` inside a 768MB container (ADR-021).
+ * WARP-2093: the old 90 MB value was the orchestrator's OOM guard (uploads
+ * were buffered by `multer.memoryStorage()` in a 768 MB container). Uploads
+ * now stream, so this tracks nginx instead. Raise the two together; the
+ * per-file ceiling is Nextcloud's own 1 GiB request limit (APACHE_BODY_LIMIT),
+ * mirrored by the orchestrator's MAX_UPLOAD_SIZE_MB default.
  */
-export const MAX_UPLOAD_BATCH_BYTES = 90 * 1024 * 1024;
+export const MAX_UPLOAD_BATCH_BYTES = 1000 * 1024 * 1024;
+
+/**
+ * WARP-2096 — what `POST /api/files/upload` did with each file, per entry of
+ * its `uploaded` array:
+ *   - `uploaded`  written under the requested name, nothing replaced;
+ *   - `renamed`   the name was taken, so it was kept under `name` and the
+ *                 entry carries `requestedName` (the dashboard default —
+ *                 never a silent overwrite);
+ *   - `replaced`  an existing file was overwritten: `?overwrite=true` on the
+ *                 multipart path, or write_file's documented contract on the
+ *                 JSON path.
+ * Independently, `duplicateOf` names a file with the SAME bytes the caller
+ * already has in that space (advisory; the upload is still kept).
+ */
+export type UploadEntryStatus = "uploaded" | "renamed" | "replaced";
+
+export interface UploadedFileEntry {
+  /** Final basename on the box (differs from `requestedName` when renamed). */
+  name: string;
+  path: string;
+  size: number;
+  status: UploadEntryStatus;
+  requestedName?: string;
+  duplicateOf?: string;
+}

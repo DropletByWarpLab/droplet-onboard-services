@@ -23,10 +23,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // only logger this module constructs at load.
 const loggerInfo = vi.hoisted(() => vi.fn());
 const loggerDebug = vi.hoisted(() => vi.fn());
+const loggerWarn = vi.hoisted(() => vi.fn());
 vi.mock("pino", () => ({
   default: () => ({
     info: loggerInfo,
-    warn: vi.fn(),
+    warn: loggerWarn,
     error: vi.fn(),
     debug: loggerDebug,
   }),
@@ -38,6 +39,9 @@ import {
   warmDefaultModel,
   resetWarmStateForTests,
   probeColdModel,
+  probeModelResidency,
+  warmModelIfCold,
+  onDemandWarmState,
 } from "./model-readiness.service.js";
 
 /**
@@ -141,6 +145,9 @@ describe("model-readiness backgroundPull — progress forwarding", () => {
   });
 });
 
+/** WARP-3047 — the injected active-model resolver: a fixed answer. */
+const activeIs = (model: string | null) => async () => model;
+
 describe("model-readiness ensureDefaultModelPulled — vision model", () => {
   const realFetch = global.fetch;
 
@@ -178,7 +185,7 @@ describe("model-readiness ensureDefaultModelPulled — vision model", () => {
     });
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    await ensureDefaultModelPulled();
+    await ensureDefaultModelPulled(activeIs("mistral:7b-instruct"));
     // Flush the fire-and-forget background pulls' first tick.
     await new Promise((r) => setTimeout(r, 0));
 
@@ -204,7 +211,7 @@ describe("model-readiness ensureDefaultModelPulled — vision model", () => {
     });
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    await ensureDefaultModelPulled();
+    await ensureDefaultModelPulled(activeIs("mistral:7b-instruct"));
     await new Promise((r) => setTimeout(r, 0));
 
     const pulled = pullRequests(fetchMock);
@@ -213,9 +220,10 @@ describe("model-readiness ensureDefaultModelPulled — vision model", () => {
 });
 
 // ──────────────────────────────────────────────────────────────────
-// WARP-1041 — warmDefaultModel: pre-load the configured chat model
-// into GPU memory so the wizard's first "Ask the AI" doesn't eat the
-// 30-90 s cold load behind a frozen "Thinking…" button.
+// WARP-1041 — warmDefaultModel: pre-load the chat model into GPU
+// memory so the wizard's first "Ask the AI" doesn't eat the 30-90 s
+// cold load behind a frozen "Thinking…" button. WARP-3047: the caller
+// names the model (the box's ACTIVE model), and the debounce is per model.
 // ──────────────────────────────────────────────────────────────────
 
 /** Model names of every warm request (POST /v1/chat/completions — the
@@ -240,6 +248,7 @@ describe("model-readiness warmDefaultModel (WARP-1041)", () => {
   beforeEach(() => {
     loggerInfo.mockReset();
     loggerDebug.mockReset();
+    loggerWarn.mockReset();
     resetWarmStateForTests();
     global.fetch = vi.fn();
   });
@@ -251,11 +260,10 @@ describe("model-readiness warmDefaultModel (WARP-1041)", () => {
   });
 
   it("POSTs the OpenAI chat path with max_tokens=1 and NO keep_alive (runtime-agnostic warm, WARP-1772)", async () => {
-    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
     const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
     fetchMock.mockResolvedValue(okJsonResponse());
 
-    await warmDefaultModel();
+    await warmDefaultModel("gpt-oss:20b");
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -275,81 +283,125 @@ describe("model-readiness warmDefaultModel (WARP-1041)", () => {
     });
   });
 
-  it("is a no-op when LLM_MODEL is unset", async () => {
-    vi.stubEnv("LLM_MODEL", "");
+  it("warms the model it is GIVEN, never env LLM_MODEL (WARP-3047)", async () => {
+    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
+    const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(okJsonResponse());
+
+    await warmDefaultModel("qwen3:8b");
+
+    expect(warmRequests(fetchMock)).toEqual(["qwen3:8b"]);
+  });
+
+  it("is a no-op when no model resolved (null, undefined, blank)", async () => {
+    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
     const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
 
-    await warmDefaultModel();
+    await warmDefaultModel(null);
+    await warmDefaultModel(undefined);
+    await warmDefaultModel("   ");
 
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("debounces: a second trigger within 10 minutes does not re-fetch, a later one does", async () => {
     vi.useFakeTimers();
-    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
     const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
     fetchMock.mockResolvedValue(okJsonResponse());
 
-    await warmDefaultModel();
+    await warmDefaultModel("gpt-oss:20b");
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     // 5 min later — inside the window, debounced.
     await vi.advanceTimersByTimeAsync(5 * 60_000);
-    await warmDefaultModel();
+    await warmDefaultModel("gpt-oss:20b");
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     // 6 more min (11 total) — outside the window, fires again.
     await vi.advanceTimersByTimeAsync(6 * 60_000);
-    await warmDefaultModel();
+    await warmDefaultModel("gpt-oss:20b");
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("swallows a 404 (model not pulled yet) with a debug log, and lets the NEXT trigger retry", async () => {
-    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
+  it("debounces PER MODEL: a login warm of A never swallows the switch's warm of B (WARP-3047)", async () => {
+    vi.useFakeTimers();
+    const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(okJsonResponse());
+
+    await warmDefaultModel("gpt-oss:20b"); // the login warm
+    await vi.advanceTimersByTimeAsync(60_000);
+    await warmDefaultModel("qwen3:8b"); // the owner switches a minute later
+    await warmDefaultModel("gpt-oss:20b"); // A itself is still debounced
+
+    expect(warmRequests(fetchMock)).toEqual(["gpt-oss:20b", "qwen3:8b"]);
+  });
+
+  it("force: an explicit model switch warms even inside the debounce window (WARP-3047)", async () => {
+    // A→B→A→B within ten minutes: B's earlier warm is stale — the swap back
+    // to A unloaded it — so the owner's switch must not be debounced away.
+    vi.useFakeTimers();
+    const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(okJsonResponse());
+
+    await warmDefaultModel("qwen3:8b");
+    await vi.advanceTimersByTimeAsync(60_000);
+    await warmDefaultModel("qwen3:8b"); // login/setup trigger: debounced
+    await warmDefaultModel("qwen3:8b", { force: true }); // the switch: not
+
+    expect(warmRequests(fetchMock)).toEqual(["qwen3:8b", "qwen3:8b"]);
+  });
+
+  it("logs a non-2xx at WARN with the status and the runtime's reason, and lets the NEXT trigger retry", async () => {
     const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
     fetchMock.mockResolvedValue({
       ok: false,
-      status: 404,
-      json: () => Promise.resolve({ error: "model not found" }),
+      status: 500,
+      text: () =>
+        Promise.resolve(
+          "unable to load runner: not enough GPU memory to load the model (CUDA)",
+        ),
     } as unknown as Response);
 
-    await expect(warmDefaultModel()).resolves.toBeUndefined();
-    expect(loggerDebug).toHaveBeenCalled();
+    await expect(warmDefaultModel("gpt-oss:20b")).resolves.toBeUndefined();
+    // WARP-3047: a warm that fails to LOAD is the out-of-memory signal —
+    // debug level hid it entirely.
+    expect(loggerWarn).toHaveBeenCalledTimes(1);
+    const [fields] = loggerWarn.mock.calls[0] as [Record<string, unknown>, string];
+    expect(fields).toMatchObject({ model: "gpt-oss:20b", status: 500 });
+    expect(String(fields.detail)).toContain("not enough GPU memory");
 
     // A failed attempt must NOT hold the 10-min debounce — otherwise the
     // pull-complete hook that fires minutes later would be silently
     // swallowed and the boot never warms (finding risk 3).
-    await warmDefaultModel();
+    await warmDefaultModel("gpt-oss:20b");
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("drains the error body on a non-ok response (undici socket release)", async () => {
-    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
     const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
     // Under Node's undici fetch an undrained body can pin the socket until
-    // GC — the 404 branch must consume it, same as the ok branch does.
-    const json = vi.fn(() => Promise.resolve({ error: "model not found" }));
+    // GC — the non-2xx branch must consume it, same as the ok branch does.
+    const text = vi.fn(() => Promise.resolve("model not found"));
     fetchMock.mockResolvedValue({
       ok: false,
       status: 404,
-      json,
+      text,
     } as unknown as Response);
 
-    await warmDefaultModel();
+    await warmDefaultModel("gpt-oss:20b");
 
-    expect(json).toHaveBeenCalledTimes(1);
+    expect(text).toHaveBeenCalledTimes(1);
   });
 
   it("swallows a network error (ECONNREFUSED) non-fatally with a debug log", async () => {
-    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
     const fetchMock = global.fetch as ReturnType<typeof vi.fn>;
     fetchMock.mockRejectedValue(new Error("connect ECONNREFUSED"));
 
-    await expect(warmDefaultModel()).resolves.toBeUndefined();
+    await expect(warmDefaultModel("gpt-oss:20b")).resolves.toBeUndefined();
     expect(loggerDebug).toHaveBeenCalled();
 
-    // Retryable on the next trigger, same as the 404 case.
-    await warmDefaultModel();
+    // Retryable on the next trigger, same as the non-2xx case.
+    await warmDefaultModel("gpt-oss:20b");
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
@@ -387,16 +439,42 @@ describe("model-readiness warm hooks (WARP-1041)", () => {
     });
   }
 
-  it("startup: warms when the default chat model is already present", async () => {
+  it("startup: warms when the active chat model is already present", async () => {
     vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
     vi.stubEnv("VISION_MODEL", "");
     const fetchMock = routedFetch(["gpt-oss:20b"]);
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    await ensureDefaultModelPulled();
+    await ensureDefaultModelPulled(activeIs("gpt-oss:20b"));
     await new Promise((r) => setTimeout(r, 0));
 
     expect(warmRequests(fetchMock)).toEqual(["gpt-oss:20b"]);
+  });
+
+  it("startup: warms the ACTIVE model — not LLM_MODEL — when the owner switched (WARP-3047)", async () => {
+    // LLM_MODEL is still provisioned (the env loop checks it), but the box
+    // answers with B: warming A here would load it next to B on DMR.
+    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
+    vi.stubEnv("VISION_MODEL", "");
+    const fetchMock = routedFetch(["gpt-oss:20b", "qwen3:8b"]);
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await ensureDefaultModelPulled(activeIs("qwen3:8b"));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(warmRequests(fetchMock)).toEqual(["qwen3:8b"]);
+  });
+
+  it("startup: nothing resolved → no warm", async () => {
+    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
+    vi.stubEnv("VISION_MODEL", "");
+    const fetchMock = routedFetch(["gpt-oss:20b"]);
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await ensureDefaultModelPulled(activeIs(null));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(warmRequests(fetchMock)).toEqual([]);
   });
 
   it("startup: does NOT warm when only the vision model is present (chat model still pulling)", async () => {
@@ -425,7 +503,7 @@ describe("model-readiness warm hooks (WARP-1041)", () => {
     });
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    await ensureDefaultModelPulled();
+    await ensureDefaultModelPulled(activeIs("gpt-oss:20b"));
     await new Promise((r) => setTimeout(r, 0));
 
     // The chat model is mid-pull; warming now would 404. The
@@ -433,22 +511,22 @@ describe("model-readiness warm hooks (WARP-1041)", () => {
     expect(warmRequests(fetchMock)).toEqual([]);
   });
 
-  it("backgroundPull: warms right after model_pull_complete for the default model", async () => {
-    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
+  it("backgroundPull: warms right after model_pull_complete when the pulled model is the ACTIVE one", async () => {
     const fetchMock = routedFetch([]);
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    await backgroundPull("gpt-oss:20b");
+    await backgroundPull("gpt-oss:20b", activeIs("gpt-oss:20b"));
     await new Promise((r) => setTimeout(r, 0));
 
     expect(warmRequests(fetchMock)).toEqual(["gpt-oss:20b"]);
   });
 
-  it("backgroundPull: does not warm after pulling a non-default model", async () => {
-    vi.stubEnv("LLM_MODEL", "gpt-oss:20b");
+  it("backgroundPull: does not warm after pulling a model that is not the active one", async () => {
+    vi.stubEnv("LLM_MODEL", "llava:7b");
     const fetchMock = routedFetch([]);
     global.fetch = fetchMock as unknown as typeof fetch;
 
+    await backgroundPull("llava:7b", activeIs("gpt-oss:20b"));
     await backgroundPull("llava:7b");
     await new Promise((r) => setTimeout(r, 0));
 
@@ -635,5 +713,373 @@ describe("model-readiness probeColdModel (WARP-903)", () => {
 
     // The resolved /api/tags body was consumed exactly once — no leak.
     expect(tagsJson).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────
+// WARP-3127 — warm on wake. The voice module asks the orchestrator to load
+// the active model the moment the wake word is heard, so the (re)load
+// overlaps the user speaking + STT instead of landing after them. The 5 min
+// residency (WARP-1826) is untouched: this is probe-first, never sets
+// keep_alive, and never uses warmDefaultModel's 10-minute debounce.
+// ──────────────────────────────────────────────────────────────────
+
+type ListAnswer = unknown[] | Error | { status: number };
+
+/**
+ * Runtime fetch router for the on-demand path: /api/ps + /api/tags feed the
+ * residency probe, /v1/chat/completions is the warm. `warm` defaults to 200;
+ * pass a function to control when (or whether) the load finishes.
+ */
+function runtimeFetch(opts: {
+  loaded?: ListAnswer;
+  installed?: ListAnswer;
+  warm?: () => Promise<Response>;
+}) {
+  const respond = (v: ListAnswer | undefined): Promise<Response> => {
+    if (v instanceof Error) return Promise.reject(v);
+    if (v && !Array.isArray(v) && typeof v === "object" && "status" in v) {
+      return Promise.resolve({
+        ok: false,
+        status: v.status,
+        json: () => Promise.resolve({}),
+      } as unknown as Response);
+    }
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ models: v ?? [] }),
+    } as unknown as Response);
+  };
+  return vi.fn((url: string, _init?: RequestInit) => {
+    const u = String(url);
+    if (u.endsWith("/api/ps")) return respond(opts.loaded);
+    if (u.endsWith("/api/tags")) return respond(opts.installed);
+    if (u.endsWith("/v1/chat/completions")) {
+      return opts.warm ? opts.warm() : Promise.resolve(okJsonResponse());
+    }
+    return Promise.reject(new Error(`unexpected runtime fetch: ${u}`));
+  });
+}
+
+/** A warm whose load the test finishes by hand — models a 30-90 s cold load. */
+function deferredWarm() {
+  let finish: (r: Response) => void = () => undefined;
+  const pending = new Promise<Response>((resolve) => {
+    finish = resolve;
+  });
+  return { warm: () => pending, finish: () => finish(okJsonResponse()) };
+}
+
+function probeRequests(fetchMock: { mock: { calls: unknown[][] } }): number {
+  return fetchMock.mock.calls.filter((c) => String(c[0]).endsWith("/api/ps")).length;
+}
+
+const GPT = "gpt-oss:20b";
+
+describe("model-readiness probeModelResidency (WARP-3127)", () => {
+  const realFetch = global.fetch;
+
+  beforeEach(() => {
+    loggerDebug.mockReset();
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+  });
+
+  it("'loaded' when /api/ps lists the model", async () => {
+    global.fetch = runtimeFetch({
+      loaded: [{ name: GPT }],
+      installed: [{ name: GPT }],
+    }) as unknown as typeof fetch;
+    await expect(probeModelResidency(GPT)).resolves.toBe("loaded");
+  });
+
+  it("'cold' when the model is installed (/api/tags) but not loaded (/api/ps)", async () => {
+    global.fetch = runtimeFetch({ loaded: [], installed: [{ name: GPT }] }) as unknown as typeof fetch;
+    await expect(probeModelResidency(GPT)).resolves.toBe("cold");
+  });
+
+  it("'unknown' — never 'loaded' — when the runtime is unreachable", async () => {
+    global.fetch = runtimeFetch({
+      loaded: new Error("connect ECONNREFUSED"),
+      installed: new Error("connect ECONNREFUSED"),
+    }) as unknown as typeof fetch;
+    await expect(probeModelResidency(GPT)).resolves.toBe("unknown");
+  });
+
+  it("'unknown' when /api/ps answers non-2xx (loadedness cannot be known)", async () => {
+    global.fetch = runtimeFetch({ loaded: { status: 500 }, installed: [{ name: GPT }] }) as unknown as typeof fetch;
+    await expect(probeModelResidency(GPT)).resolves.toBe("unknown");
+  });
+
+  it("'unknown' when the model is neither loaded nor listed in /api/tags", async () => {
+    global.fetch = runtimeFetch({ loaded: [], installed: [{ name: "qwen3:8b" }] }) as unknown as typeof fetch;
+    await expect(probeModelResidency(GPT)).resolves.toBe("unknown");
+  });
+
+  it("'unknown' when /api/tags fails and the model is not loaded", async () => {
+    global.fetch = runtimeFetch({ loaded: [], installed: { status: 503 } }) as unknown as typeof fetch;
+    await expect(probeModelResidency(GPT)).resolves.toBe("unknown");
+  });
+
+  it("matches DMR's registry-qualified ids against a non-qualified model (docker.io/ai/... vs ai/...)", async () => {
+    // DMR reports `docker.io/ai/<name>:<tag>` from /api/ps and /api/tags
+    // (ADR-036). A stored / fallback id without the registry host is the
+    // same model and must read as loaded, or every wake would reload it.
+    global.fetch = runtimeFetch({
+      loaded: [{ name: "docker.io/ai/gpt-oss:20B-F16", model: "docker.io/ai/gpt-oss:20B-F16" }],
+      installed: [{ name: "docker.io/ai/gpt-oss:20B-F16" }],
+    }) as unknown as typeof fetch;
+    await expect(probeModelResidency("ai/gpt-oss:20B-F16")).resolves.toBe("loaded");
+
+    global.fetch = runtimeFetch({
+      loaded: [],
+      installed: [{ name: "docker.io/ai/smollm2:latest" }],
+    }) as unknown as typeof fetch;
+    await expect(probeModelResidency("ai/smollm2")).resolves.toBe("cold");
+  });
+
+  it("reads the /api/ps `model` key when `name` is absent", async () => {
+    global.fetch = runtimeFetch({ loaded: [{ model: GPT }], installed: [{ name: GPT }] }) as unknown as typeof fetch;
+    await expect(probeModelResidency(GPT)).resolves.toBe("loaded");
+  });
+
+  it("treats a bare name and its :latest tag as the same model (Ollama canonicalisation)", async () => {
+    global.fetch = runtimeFetch({ loaded: [{ name: "qwen3:latest" }], installed: [] }) as unknown as typeof fetch;
+    await expect(probeModelResidency("qwen3")).resolves.toBe("loaded");
+  });
+
+  it("time-budgets both probe requests with an abort signal", async () => {
+    const fetchMock = runtimeFetch({ loaded: [], installed: [{ name: GPT }] });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    await probeModelResidency(GPT);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const call of fetchMock.mock.calls) {
+      expect((call[1] as RequestInit | undefined)?.signal).toBeInstanceOf(AbortSignal);
+    }
+  });
+
+  it("drains the resolved sibling body when the other probe request rejects", async () => {
+    const tagsJson = vi.fn(() => Promise.resolve({ models: [{ name: GPT }] }));
+    global.fetch = vi.fn((url: string) =>
+      String(url).endsWith("/api/ps")
+        ? Promise.reject(new Error("socket hang up"))
+        : Promise.resolve({ ok: true, status: 200, json: tagsJson } as unknown as Response),
+    ) as unknown as typeof fetch;
+    await expect(probeModelResidency(GPT)).resolves.toBe("unknown");
+    expect(tagsJson).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("model-readiness warmModelIfCold — on-demand warm (WARP-3127)", () => {
+  const realFetch = global.fetch;
+
+  beforeEach(() => {
+    loggerInfo.mockReset();
+    loggerDebug.mockReset();
+    loggerWarn.mockReset();
+    resetWarmStateForTests();
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    vi.useRealTimers();
+  });
+
+  it("cold: issues ONE runtime-agnostic warm with no keep_alive, and logs it at info", async () => {
+    const fetchMock = runtimeFetch({ loaded: [], installed: [{ name: GPT }] });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(warmModelIfCold(GPT)).resolves.toBe("warmed");
+
+    const warms = fetchMock.mock.calls.filter((c) => String(c[0]).endsWith("/v1/chat/completions"));
+    expect(warms).toHaveLength(1);
+    // Residency stays owned by OLLAMA_KEEP_ALIVE / the runtime (WARP-1826).
+    expect(JSON.parse((warms[0]![1] as RequestInit).body as string)).toEqual({
+      model: GPT,
+      messages: [{ role: "user", content: "ping" }],
+      max_tokens: 1,
+      stream: false,
+    });
+    expect(loggerInfo.mock.calls.map((c) => c[1])).toContain("model_warm_complete");
+  });
+
+  it("loaded: no warm, and only a debug line", async () => {
+    const fetchMock = runtimeFetch({ loaded: [{ name: GPT }], installed: [{ name: GPT }] });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(warmModelIfCold(GPT)).resolves.toBe("loaded");
+
+    expect(warmRequests(fetchMock)).toEqual([]);
+    expect(loggerInfo).not.toHaveBeenCalled();
+    expect(loggerDebug).toHaveBeenCalled();
+  });
+
+  it("does NOT use the 10-minute setup debounce: a cold model is warmed again on the next wake", async () => {
+    const fetchMock = runtimeFetch({ loaded: [], installed: [{ name: GPT }] });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await warmDefaultModel(GPT); // login / setup warm: stamps the 10-min debounce
+    await warmModelIfCold(GPT); // model since unloaded, probe says cold
+    await warmModelIfCold(GPT);
+
+    expect(warmRequests(fetchMock)).toEqual([GPT, GPT, GPT]);
+  });
+
+  it("concurrent wakes share ONE probe and ONE load", async () => {
+    const load = deferredWarm();
+    const fetchMock = runtimeFetch({ loaded: [], installed: [{ name: GPT }], warm: load.warm });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const calls = [warmModelIfCold(GPT), warmModelIfCold(GPT), warmModelIfCold(GPT)];
+    await vi.waitFor(() => expect(warmRequests(fetchMock)).toHaveLength(1));
+    load.finish();
+
+    await expect(Promise.all(calls)).resolves.toEqual(["warmed", "warmed", "warmed"]);
+    expect(warmRequests(fetchMock)).toEqual([GPT]);
+    expect(probeRequests(fetchMock)).toBe(1);
+  });
+
+  it("joins an in-flight login/setup warm of the same model instead of stacking a second load", async () => {
+    const load = deferredWarm();
+    const fetchMock = runtimeFetch({ loaded: [], installed: [{ name: GPT }], warm: load.warm });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const login = warmDefaultModel(GPT);
+    await vi.waitFor(() => expect(warmRequests(fetchMock)).toHaveLength(1));
+    const wake = warmModelIfCold(GPT);
+    load.finish();
+
+    await login;
+    await expect(wake).resolves.toBe("warmed");
+    expect(warmRequests(fetchMock)).toEqual([GPT]);
+    // The wake saw the load already under way, so it did not even probe.
+    expect(probeRequests(fetchMock)).toBe(0);
+  });
+
+  it("a setup/login warm joins an in-flight on-demand warm of the same model", async () => {
+    const load = deferredWarm();
+    const fetchMock = runtimeFetch({ loaded: [], installed: [{ name: GPT }], warm: load.warm });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const wake = warmModelIfCold(GPT);
+    await vi.waitFor(() => expect(warmRequests(fetchMock)).toHaveLength(1));
+    const login = warmDefaultModel(GPT, { force: true });
+    load.finish();
+
+    await Promise.all([wake, login]);
+    expect(warmRequests(fetchMock)).toEqual([GPT]);
+  });
+
+  it("unknown residency: warms, unless a warm of that model completed in the last ~4 min", async () => {
+    vi.useFakeTimers();
+    // /api/ps unreachable: loadedness unknowable, /v1/chat/completions fine.
+    const fetchMock = runtimeFetch({ loaded: new Error("ECONNRESET"), installed: new Error("ECONNRESET") });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(warmModelIfCold(GPT)).resolves.toBe("warmed");
+    expect(warmRequests(fetchMock)).toHaveLength(1);
+
+    // 3 min later: that warm left the model resident for at least another
+    // minute of the 5 min residency, so no second load.
+    await vi.advanceTimersByTimeAsync(3 * 60_000);
+    await expect(warmModelIfCold(GPT)).resolves.toBe("recently-warmed");
+    expect(warmRequests(fetchMock)).toHaveLength(1);
+
+    // 4.5 min after the warm: it may be about to expire, so warm again.
+    await vi.advanceTimersByTimeAsync(90_000);
+    await expect(warmModelIfCold(GPT)).resolves.toBe("warmed");
+    expect(warmRequests(fetchMock)).toHaveLength(2);
+  });
+
+  it("a recent warm of ANOTHER model does not suppress an unknown-residency warm", async () => {
+    const fetchMock = runtimeFetch({ loaded: { status: 500 }, installed: [] });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await warmModelIfCold("qwen3:8b");
+    await warmModelIfCold(GPT);
+
+    expect(warmRequests(fetchMock)).toEqual(["qwen3:8b", GPT]);
+  });
+
+  it("runtime unreachable: resolves (never throws) as warm-failed, and the next wake retries", async () => {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      Promise.reject(new Error("connect ECONNREFUSED")),
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(warmModelIfCold(GPT)).resolves.toBe("warm-failed");
+    await expect(warmModelIfCold(GPT)).resolves.toBe("warm-failed");
+    expect(warmRequests(fetchMock)).toEqual([GPT, GPT]);
+    expect(loggerInfo.mock.calls.map((c) => c[1])).not.toContain("model_warm_complete");
+  });
+
+  it("a runtime that cannot load the model is a WARN (the out-of-memory signal), not a throw", async () => {
+    const fetchMock = runtimeFetch({
+      loaded: [],
+      installed: [{ name: GPT }],
+      warm: () =>
+        Promise.resolve({
+          ok: false,
+          status: 500,
+          text: () => Promise.resolve("unable to load runner: not enough GPU memory"),
+        } as unknown as Response),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(warmModelIfCold(GPT)).resolves.toBe("warm-failed");
+    expect(loggerWarn).toHaveBeenCalledTimes(1);
+  });
+
+  it("no model resolved: no runtime traffic at all", async () => {
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(warmModelIfCold(null)).resolves.toBe("no-model");
+    await expect(warmModelIfCold("  ")).resolves.toBe("no-model");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("model-readiness onDemandWarmState — the 202's advisory state (WARP-3127)", () => {
+  const realFetch = global.fetch;
+
+  beforeEach(() => {
+    resetWarmStateForTests();
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    vi.useRealTimers();
+  });
+
+  it("'unknown' before anything is known", () => {
+    expect(onDemandWarmState()).toBe("unknown");
+  });
+
+  it("'warming' while a load is in flight, 'warm' once it completes, 'unknown' again after ~4 min", async () => {
+    vi.useFakeTimers();
+    const load = deferredWarm();
+    const fetchMock = runtimeFetch({ loaded: [], installed: [{ name: GPT }], warm: load.warm });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const wake = warmModelIfCold(GPT);
+    await vi.waitFor(() => expect(warmRequests(fetchMock)).toHaveLength(1));
+    expect(onDemandWarmState()).toBe("warming");
+
+    load.finish();
+    await wake;
+    expect(onDemandWarmState()).toBe("warm");
+
+    await vi.advanceTimersByTimeAsync(4 * 60_000 + 1);
+    expect(onDemandWarmState()).toBe("unknown");
+  });
+
+  it("'warm' after the probe found the model resident", async () => {
+    global.fetch = runtimeFetch({ loaded: [{ name: GPT }], installed: [{ name: GPT }] }) as unknown as typeof fetch;
+    await warmModelIfCold(GPT);
+    expect(onDemandWarmState()).toBe("warm");
   });
 });

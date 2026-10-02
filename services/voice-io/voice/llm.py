@@ -43,9 +43,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Iterator, Literal, Optional
+from typing import Any, Callable, Iterator, Literal, Optional, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -94,6 +96,23 @@ ToolChoice = Literal["auto", "none"]
 DEFAULT_LLM_URL = "http://orchestrator:3000"
 DEFAULT_LLM_CHAT_PATH = "/api/llm/chat"
 DEFAULT_LLM_HEALTH_PATH = "/api/orchestrator/health"
+# WARP-3047 — where voice asks which model the box answers with: the same
+# `defaultModel` the dashboard chat defaults to (the owner's active model on
+# the Models page). GET endpoints admit the service principal (ADR-004 §3).
+DEFAULT_LLM_MODELS_PATH = "/api/llm/models"
+# How long one answer is reused. A switch reaches voice within this window;
+# the listing is never fetched per turn. Matches the orchestrator's own
+# 30 s model-list cache, so a shorter TTL would buy nothing.
+ACTIVE_MODEL_TTL_S = 30.0
+# WARP-3127 — warm on wake. The pipeline POSTs here the moment the wake word
+# fires, so the orchestrator starts loading the box's ACTIVE model while the
+# person is still speaking (a reload after WARP-1826's 5 min residency then
+# overlaps speech + STT instead of following them). The orchestrator answers
+# 202 at once and picks the model itself — the body names none.
+DEFAULT_LLM_WARM_PATH = "/api/llm/warm"
+# A nudge, not a turn: short enough that a wedged orchestrator holds the
+# background warm thread at most this long. Never the agent-loop timeout.
+LLM_WARM_TIMEOUT_S = 1.5
 # Model the orchestrator's agent loop will ask ai-gateway for. ai-gateway
 # routes `llama*`/`qwen*`/`mistral*`/`phi*` to the local Ollama instance
 # (or its ollama-manager sidecar when deployed); the model must already
@@ -102,6 +121,11 @@ DEFAULT_LLM_HEALTH_PATH = "/api/orchestrator/health"
 # `/models/sync`). `qwen2.5:3b-instruct` is the agent docs' default —
 # tool-calling-capable, fits a 7 GB RAM budget. Override via LLM_MODEL
 # env if the deployment has a larger / different model loaded.
+#
+# WARP-3047: in production this is only the FALLBACK — build_llm_from_env
+# makes voice follow the box's active model (see OrchestratorLLM
+# `follow_active_model`), and LLM_MODEL is used only when the orchestrator
+# can't name one.
 DEFAULT_LLM_MODEL = "qwen2.5:3b-instruct"
 # Agent loop can take noticeably longer than a single LLM call because
 # every tool_call adds an MCP round-trip + a re-prompt iteration.
@@ -109,15 +133,31 @@ DEFAULT_LLM_MODEL = "qwen2.5:3b-instruct"
 # slower models.
 DEFAULT_LLM_TIMEOUT_S = 120.0
 # Cap the agent loop. The orchestrator hard-caps at 10; we ask for a
-# much lower number so voice replies stay snappy. A voice turn should
-# resolve in at most one tool-call iteration ("list_cameras" → result
-# → final answer). Letting the model take 3-5 iterations on noisy or
-# ambiguous transcripts is the main reason voice replies feel slow —
-# each iteration is a full ai-gateway round-trip (~2-4 s on the POC's
-# 8 B model). 2 is the smallest value that still preserves the "one
-# tool call, then answer" pattern. Override via the request body's
-# max_iter for callers that explicitly need a multi-step plan.
-DEFAULT_LLM_MAX_ITER = 2
+# much lower number so voice replies stay snappy — each iteration is a
+# full ai-gateway round-trip (~2-4 s on the POC's 8 B model), so letting
+# the model wander on noisy transcripts is what makes replies feel slow.
+# But the budget must still cover a realistic multi-tool turn: iteration
+# 0 is the first tool call and the LAST iteration is the answer, so a
+# budget of 2 (the old value) dies on the SECOND tool call with the
+# orchestrator's iteration_limit fallback ("couldn't finish… within my
+# step limit") (WARP-3316). 4 = up to three tool calls (or one tool call
+# plus a TOOL_NOW_AVAILABLE self-heal retry) and then the answer. Tune
+# per box via VOICE_MAX_ITER; a request body's max_iter can still ask
+# for a longer multi-step plan.
+DEFAULT_LLM_MAX_ITER = 4
+# The orchestrator bound (AGENT_MAX_ITER_CAP default 10; routes/llm.ts —
+# int, >= 1). VOICE_MAX_ITER is clamped into this window.
+#
+# COUPLING (WARP-3316): MAX_LLM_MAX_ITER hardcodes the orchestrator's
+# DEFAULT AGENT_MAX_ITER_CAP; voice cannot read the operator's actual value.
+# The route validates the request's max_iter against
+# config.agentMaxIter.capIter (the `max_iter` field of the chat request
+# schema in routes/llm.ts) and answers 400 on overflow. So if an operator
+# lowers AGENT_MAX_ITER_CAP below what voice sends (DEFAULT_LLM_MAX_ITER, or
+# VOICE_MAX_ITER), EVERY voice turn fails with a 400 until VOICE_MAX_ITER is
+# lowered to fit. Keep this constant in step with that default.
+MIN_LLM_MAX_ITER = 1
+MAX_LLM_MAX_ITER = 10
 # WARP-1432 — voice turn shaping (client-side request-shape only).
 #
 # gpt-oss:20b (the box's voice model) spends reasoning-channel tokens
@@ -187,16 +227,23 @@ DEFAULT_VOICE_ALLOWED_TOOLS: tuple[str, ...] = (
 # (apps/orchestrator/data/droplet-identity.md) still rides on every
 # tool-enabled turn server-side; keep this compact so voice turns don't
 # pay for it twice.
+#
+# WARP-3125 — on tool-enabled turns the orchestrator folds this text into
+# its own index-0 system message (after its base prompt), because the
+# gpt-oss chat template drops any system message that is not first. It
+# carries no clock or location — those open the user turn instead
+# (`build_turn_context`) — so it is byte-identical on every turn and stays
+# inside the prompt prefix llama-server can reuse.
 DEFAULT_LLM_SYSTEM_PROMPT = (
-    "You're Droplet — the private AI that lives on the little box in "
-    "this home, and you're its voice. You're not a cloud service: "
-    "everything you hear, say, and know stays right here in the house. "
-    "Talk warmly and casually, like a helpful housemate you'd hand a "
-    "coffee to — never a corporate bot: use contractions, keep it "
-    "natural, one short spoken sentence per reply. No markdown, no "
+    "You're Droplet — the private AI that runs on this business's own "
+    "appliance, and you're its voice. You're not a cloud service: "
+    "everything you hear, say, and know stays right here on site. "
+    "Talk warmly and plainly, like a capable colleague — never a "
+    "corporate bot: use contractions, keep it natural, one short "
+    "spoken sentence per reply. No markdown, no "
     "lists, no emojis — every reply gets read aloud. If you don't know, "
     "just say so plainly without apologizing twice. You can check the "
-    "home's cameras, network, files, smart devices, calendar, and "
+    "premises' cameras, network, files, devices, calendar, and "
     "reminders (read-only); changes still happen on the dashboard."
 )
 
@@ -206,22 +253,33 @@ DEFAULT_LLM_SYSTEM_PROMPT = (
 DEFAULT_TIMEZONE = "UTC"
 
 
-def build_system_prompt(
-    base: str,
+def build_turn_context(
     *,
     location: Optional[str],
     timezone: str,
     now: Optional[datetime] = None,
 ) -> str:
-    """Compose the system prompt for ONE LLM call.
+    """The one-line context that opens the user turn of ONE LLM call.
 
-    The base prompt (a constant) defines the voice persona. We append a
-    fresh "Right now" footer with current local time + the device's
-    configured location so the model can answer "what time is it?" or
-    "what's the weather in our area?" without freelancing.
+    Current local time (minute resolution, with weekday and zone) and the
+    device's configured location, so the model can answer "what time is
+    it?" or "what's the weather in our area?" without freelancing.
+
+    WARP-3125 — this used to be a "Right now" footer on the system
+    message. It moved to the user turn for two reasons:
+
+    * Prefix caching. llama-server reuses the KV cache only for the prompt
+      prefix that is byte-identical to the previous request, and the
+      system message sits at the front. A minute clock there made the
+      prefix different every minute. The user turn is past the cacheable
+      prefix anyway.
+    * It never reached the model on tool turns. The orchestrator puts its
+      own system message at index 0 on tool-enabled turns, and the gpt-oss
+      chat template drops any system message after index 0. The user turn
+      is rendered on every path.
 
     Pure function — `now` is injectable for tests + the timezone is an
-    explicit arg so we can construct prompts deterministically.
+    explicit arg so we can construct the line deterministically.
     """
     tz = _safe_zone(timezone)
     if now is None:
@@ -234,15 +292,19 @@ def build_system_prompt(
     # "Wednesday, May 14, 2026 at 9:34 PM EDT" — explicit weekday lets
     # the model handle "is it the weekend?" without extra reasoning.
     when = now.strftime("%A, %B %d, %Y at %I:%M %p %Z").replace(" 0", " ")
-    parts = [base, f"\n\nRight now it is {when}."]
-    if location and location.strip():
-        parts.append(f"\nThe Droplet is located in {location.strip()}.")
-    parts.append(
-        "\nIf the user asks for the time, the date, or anything tied "
-        "to location, use the information above directly — do not say "
-        "you don't have access to the time or location."
+    # Collapse whitespace so an operator's multi-line location cannot
+    # split the line.
+    place = " ".join((location or "").split())
+    if place:
+        return (
+            f"[Context: it is {when}; the Droplet is located in {place}. "
+            "Use this for time, date, and location questions; do not say "
+            "you don't have access to them.]"
+        )
+    return (
+        f"[Context: it is {when}. Use this for time and date questions; "
+        "do not say you don't have access to them.]"
     )
-    return "".join(parts)
 
 
 def _safe_zone(name: str) -> ZoneInfo:
@@ -293,6 +355,40 @@ def parse_max_tokens(raw: Optional[str]) -> int:
     return n
 
 
+def parse_max_iter(raw: Optional[str]) -> int:
+    """Resolve VOICE_MAX_ITER → the agent-loop budget voice sends.
+
+    Unset / empty / non-numeric fall back to DEFAULT_LLM_MAX_ITER with a
+    warning. A number outside [1, 10] is clamped to the nearest bound
+    (with a warning) rather than defaulted: the operator clearly wanted
+    "more" or "fewer" steps, and the orchestrator would reject or cap
+    anything beyond its own window anyway. Voice must never break on a
+    fat-fingered env."""
+    s = (raw or "").strip()
+    if not s:
+        return DEFAULT_LLM_MAX_ITER
+    try:
+        n = int(s)
+    except ValueError:
+        logger.warning(
+            "VOICE_MAX_ITER=%r is not an integer — using default %d.",
+            raw,
+            DEFAULT_LLM_MAX_ITER,
+        )
+        return DEFAULT_LLM_MAX_ITER
+    clamped = max(MIN_LLM_MAX_ITER, min(MAX_LLM_MAX_ITER, n))
+    if clamped != n:
+        logger.warning(
+            "VOICE_MAX_ITER=%d is outside the accepted range %d..%d — "
+            "clamping to %d.",
+            n,
+            MIN_LLM_MAX_ITER,
+            MAX_LLM_MAX_ITER,
+            clamped,
+        )
+    return clamped
+
+
 def parse_allowed_tools(raw: Optional[str]) -> list[str]:
     """Resolve VOICE_ALLOWED_TOOLS → the scoped tool list voice sends.
 
@@ -314,6 +410,30 @@ class LLMUnavailable(Exception):
     returns an error. The pipeline catches this and surfaces the
     error_message via /voice/status; the user hears nothing (no TTS
     playback)."""
+
+
+# WARP-3124 — the orchestrator SSE events worth a short spoken cue. A tool
+# question is two serial generations plus a dispatch (8-15 s of silence on
+# the box), and the orchestrator holds the first generation's text until it
+# knows the turn called a tool (WARP-1602 deferContent) — so `tool_call` is
+# the first frame such a turn sees. `model_loading` precedes a cold load.
+CueKind = Literal["tool_call", "model_loading"]
+_CUE_EVENT_TYPES: frozenset[str] = frozenset(("tool_call", "model_loading"))
+
+
+@dataclass(frozen=True)
+class SpokenCue:
+    """A non-text item in a reply-event stream (WARP-3124): the orchestrator
+    reported something the listener should hear a short cue for, in order
+    with the text deltas. Carries only the kind — never the model name or a
+    size (`model_loading.sizeGb` is always null on DMR), so the spoken copy
+    can't state something the box doesn't know."""
+
+    kind: CueKind
+
+
+# What `LLMClient.reply_events` yields: text deltas and cue markers.
+ReplyEvent = Union[str, SpokenCue]
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -356,6 +476,18 @@ class LLMClient(ABC):
         if text:
             yield text
 
+    def reply_events(
+        self, user_text: str, *, tool_choice: Optional[ToolChoice] = None,
+    ) -> Iterator[ReplyEvent]:
+        """Yield the reply as text pieces interleaved, in order, with
+        `SpokenCue` markers (WARP-3124). The voice pipeline consumes this.
+
+        Default: exactly `reply_stream()` — text only, no cues — so MockLLM
+        and every client that only knows `reply()`/`reply_stream()` keep
+        working unchanged. `OrchestratorLLM` overrides it to surface the
+        first `tool_call` and the `model_loading` SSE frames as cues."""
+        yield from self.reply_stream(user_text, tool_choice=tool_choice)
+
     @property
     @abstractmethod
     def available(self) -> bool:
@@ -367,6 +499,15 @@ class LLMClient(ABC):
         No-op by default so main.py's shutdown hook can call it on whatever
         ``build_llm_from_env`` returned. ``OrchestratorLLM`` overrides it to
         close its pooled httpx.Client; ``MockLLM`` inherits this no-op.
+        """
+
+    def warm(self) -> None:
+        """Ask the backend to start loading its chat model (WARP-3127).
+
+        Called by the pipeline, off the capture thread, the moment the wake
+        word fires. No-op by default, so the pipeline can call it on whatever
+        ``build_llm_from_env`` returned; ``OrchestratorLLM`` overrides it and
+        ``MockLLM`` inherits this no-op. Implementations must never raise.
         """
 
 
@@ -391,11 +532,22 @@ class OrchestratorLLM(LLMClient):
         timezone: str = DEFAULT_TIMEZONE,
         now_provider: Optional[Callable[[], datetime]] = None,
         persona_fetcher: Optional[PersonaFetcher] = None,
+        follow_active_model: bool = False,
+        models_path: str = DEFAULT_LLM_MODELS_PATH,
+        time_source: Callable[[], float] = time.monotonic,
     ):
         self._base_url = _internal_base_url(base_url.rstrip("/"))
         self._chat_path = chat_path
         self._health_path = health_path
+        # WARP-3047 — `model` is the configured (env) model. With
+        # `follow_active_model` it is only the fallback: each turn sends the
+        # box's ACTIVE model, read from the orchestrator (`_current_model`).
         self._model = model
+        self._follow_active_model = follow_active_model
+        self._models_path = models_path
+        self._time_source = time_source
+        self._active_model: Optional[str] = None
+        self._active_checked_at: Optional[float] = None
         self._bearer_token = bearer_token
         self._system_prompt = system_prompt
         self._timeout_s = timeout_s
@@ -416,7 +568,7 @@ class OrchestratorLLM(LLMClient):
         # Context-enrichment fields. `location` is a free-form string
         # ("Greenwich, CT, USA") — what the operator set in env, no
         # geocoding. `timezone` is an IANA name; we resolve it to a
-        # ZoneInfo at call time (in build_system_prompt) so a typo
+        # ZoneInfo at call time (in build_turn_context) so a typo
         # falls back to UTC instead of crashing reply().
         self._location = location
         self._timezone = timezone
@@ -464,12 +616,46 @@ class OrchestratorLLM(LLMClient):
             )
             return False
 
+    def warm(self) -> None:
+        """POST /api/llm/warm so the orchestrator starts loading the box's
+        active model now, while the person is still speaking (WARP-3127).
+
+        Rides the pooled client (no new connection or mTLS handshake per
+        wake). The body names no model: the orchestrator warms the model it
+        resolves as active — the one ``_current_model`` follows — so voice
+        can never put a second model on the GPU. Probe-first and
+        in-flight-guarded on that side; this side only has to be cheap.
+
+        Best-effort and never raises: every failure (orchestrator down, a
+        401/403, a timeout) logs at DEBUG only. A missed warm costs nothing
+        but the head start — the turn itself still loads the model.
+        """
+        try:
+            resp = self._client.post(
+                f"{self._base_url}{DEFAULT_LLM_WARM_PATH}",
+                json={},
+                timeout=LLM_WARM_TIMEOUT_S,
+                headers=self._headers(),
+            )
+            if resp.is_success:
+                logger.debug("llm warm requested: %s", resp.text[:80])
+            else:
+                logger.debug("llm warm refused: HTTP %s", resp.status_code)
+        except (httpx.HTTPError, OSError, RuntimeError) as exc:
+            # RuntimeError: httpx's "client has been closed" — the warm runs
+            # on a background thread and can land after shutdown's close().
+            logger.debug("llm warm failed (non-fatal): %s", exc)
+
     def close(self) -> None:
         """Close the pooled httpx.Client (WARP-1433).
 
         Idempotent — httpx.Client tolerates a double close. main.py calls
-        this from its shutdown hook AFTER the pipeline worker has joined, so
-        no reply()/reply_stream() can be in flight.
+        this from its shutdown hook AFTER the pipeline worker has joined.
+        A stream can still be in flight: a WARP-3124 synth-ahead producer
+        that outlived its bounded join, or a worker that outlived stop().
+        That turn is already over (its channel is closed or the shutdown
+        flag is set), so nothing more of the reply is spoken, whatever the
+        read then does.
         """
         self._client.close()
 
@@ -487,13 +673,15 @@ class OrchestratorLLM(LLMClient):
         Wire shape matches `apps/orchestrator/src/routes/llm.ts`
         `chatRequestSchema` (Zod). Carries all Wave-C turn shaping
         (WARP-1432): ephemeral + max_tokens + the curated allowed_tools
-        scope + the per-turn tool_choice, plus a fresh "right now"
-        timestamp (rebuilt every call) and the WARP-1119 workspace persona
-        on the greeting fast path.
+        scope + the per-turn tool_choice, plus the WARP-1119 workspace
+        persona on the greeting fast path.
+
+        WARP-3125 — the system message is the persona text only, identical
+        on every turn; the live time + location open the user turn instead
+        (`build_turn_context`, rebuilt every call).
         """
-        # Build a fresh system prompt on every call so the embedded
-        # "right now" timestamp is current. Cheap (string concat +
-        # one datetime.now()) — no need to cache.
+        # Resample the clock on every call so the context line is current.
+        # Cheap (string concat + one datetime.now()) — no need to cache.
         now = self._now_provider() if self._now_provider else None
         # WARP-1119 (§14): greeting turns (tool_choice="none") skip the
         # orchestrator base prompt, so the workspace persona block is
@@ -508,8 +696,10 @@ class OrchestratorLLM(LLMClient):
             persona_block = self._persona_fetcher.get_block()
             if persona_block:
                 base_prompt = f"{persona_block}\n\n{self._system_prompt}"
-        system_msg = build_system_prompt(
-            base_prompt,
+        # WARP-3125 — the context line leads the user turn, the transcript
+        # follows on its own line. The system message stays `base_prompt`
+        # verbatim so it is byte-identical turn to turn.
+        context_line = build_turn_context(
             location=self._location,
             timezone=self._timezone,
             now=now,
@@ -526,10 +716,10 @@ class OrchestratorLLM(LLMClient):
         #   * max_tokens — cap runaway generation (see DEFAULT_VOICE_MAX_
         #     TOKENS: covers gpt-oss reasoning + a short spoken answer).
         body: dict[str, Any] = {
-            "model": self._model,
+            "model": self._current_model(),
             "messages": [
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_text.strip()},
+                {"role": "system", "content": base_prompt},
+                {"role": "user", "content": f"{context_line}\n{user_text.strip()}"},
             ],
             "stream": stream,
             "max_iter": self._max_iter,
@@ -587,6 +777,73 @@ class OrchestratorLLM(LLMClient):
 
         return _extract_assistant_text(data)
 
+    def _current_model(self) -> str:
+        """The model this turn names (WARP-3047).
+
+        Following: the orchestrator's ``defaultModel`` — the box's active
+        model — fetched at most once per ``ACTIVE_MODEL_TTL_S`` on the pooled
+        client. Voice pinned to env LLM_MODEL kept asking for the old model
+        after an owner switched, and on DMR that loads it next to the active
+        one. Every failure is soft: the last known answer stands, else the
+        configured model — a voice turn never fails because this lookup did.
+        An active model the listing states can't call tools is not followed
+        (``_states_no_tools``): voice is a tool-driven loop.
+        """
+        if not self._follow_active_model:
+            return self._model
+        now = self._time_source()
+        if (
+            self._active_checked_at is not None
+            and now - self._active_checked_at < ACTIVE_MODEL_TTL_S
+        ):
+            return self._active_model or self._model
+        # Stamp before the fetch: both outcomes hold for the TTL, so an
+        # orchestrator that is down is asked once per window, not per turn.
+        self._active_checked_at = now
+        try:
+            resp = self._client.get(
+                f"{self._base_url}{self._models_path}",
+                timeout=2.0,
+                headers=self._headers(),
+            )
+            if resp.is_success:
+                data = resp.json()
+                default = data.get("defaultModel") if isinstance(data, dict) else None
+                if isinstance(default, str) and default.strip():
+                    default = default.strip()
+                    if _states_no_tools(data.get("models"), default):
+                        # Voice is a tool-driven loop (``allowed_tools``). An
+                        # active model the box says can't call tools (a
+                        # vision-only one) keeps voice on its configured
+                        # model — the rule agent runs get from the
+                        # orchestrator's resolveActiveModel({requireTools}).
+                        logger.info(
+                            "active model %s can't call tools — voice keeps %s",
+                            default,
+                            self._model,
+                        )
+                        self._active_model = None
+                    else:
+                        self._active_model = default
+                else:
+                    logger.info(
+                        "orchestrator named no active model — keeping %s",
+                        self._active_model or self._model,
+                    )
+            else:
+                logger.info(
+                    "active-model lookup got %d — keeping %s",
+                    resp.status_code,
+                    self._active_model or self._model,
+                )
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            logger.info(
+                "active-model lookup failed (%s) — keeping %s",
+                exc,
+                self._active_model or self._model,
+            )
+        return self._active_model or self._model
+
     def _headers(self, accept: str = "application/json") -> dict[str, str]:
         h = {"Content-Type": "application/json", "Accept": accept}
         if self._bearer_token:
@@ -610,7 +867,8 @@ class OrchestratorLLM(LLMClient):
         line, JSON payload on `data:`):
           * content_delta → yield `.text`
           * tool_call / tool_result / reasoning_step / model_loading →
-            ignored for audio (tool activity logged at debug)
+            ignored for audio (tool activity logged at debug) — use
+            `reply_events()` to receive the WARP-3124 spoken-cue markers
           * done → stop; a done with stop_reason:"error" (the WARP-854
             empty-completion rewrite) raises LLMUnavailable
 
@@ -622,6 +880,34 @@ class OrchestratorLLM(LLMClient):
         LLMUnavailable rather than re-running reply() (which would double
         the audio).
         """
+        inner = self._stream_reply(user_text, tool_choice, cues=False)
+        try:
+            for piece in inner:
+                if isinstance(piece, str):
+                    yield piece
+        finally:
+            # A caller that stops early must tear the SSE down now, not
+            # whenever the inner generator is collected (WARP-329).
+            inner.close()
+
+    def reply_events(
+        self, user_text: str, *, tool_choice: Optional[ToolChoice] = None,
+    ) -> Iterator[ReplyEvent]:
+        """`reply_stream()` plus spoken-cue markers (WARP-3124): the SAME
+        SSE consume and fallbacks, but the FIRST `tool_call` frame and the
+        `model_loading` frame are yielded as `SpokenCue` items in order with
+        the text deltas (each kind at most once per stream). The blocking
+        fallbacks carry no cues — they only ever see a finished reply."""
+        yield from self._stream_reply(user_text, tool_choice, cues=True)
+
+    def _stream_reply(
+        self,
+        user_text: str,
+        tool_choice: Optional[ToolChoice],
+        *,
+        cues: bool,
+    ) -> Iterator[ReplyEvent]:
+        """The shared body of `reply_stream` / `reply_events`."""
         if not user_text or not user_text.strip():
             return
         body = self._build_chat_body(
@@ -663,8 +949,12 @@ class OrchestratorLLM(LLMClient):
                     if text:
                         yield text
                     return
-                for piece in self._parse_sse(resp):
-                    yielded = True
+                for piece in self._parse_sse(resp, cues=cues):
+                    # Only CONTENT makes a later break unrecoverable: a cue
+                    # is not part of the answer, so re-running reply() after
+                    # a cue-only prefix can't double any spoken reply.
+                    if isinstance(piece, str):
+                        yielded = True
                     yield piece
                 return
         except httpx.HTTPError as exc:
@@ -691,16 +981,23 @@ class OrchestratorLLM(LLMClient):
         if text:
             yield text
 
-    def _parse_sse(self, resp: "httpx.Response") -> Iterator[str]:
-        """Yield content_delta text pieces from an SSE response. Raises
+    def _parse_sse(
+        self, resp: "httpx.Response", *, cues: bool = False,
+    ) -> Iterator[ReplyEvent]:
+        """Yield content_delta text pieces from an SSE response — plus, with
+        `cues`, one `SpokenCue` per cue kind (WARP-3124). Raises
         LLMUnavailable on a done error frame; stops after the done frame."""
+        # Cue kinds already surfaced on THIS stream; None = cues off.
+        cues_sent: Optional[set[str]] = set() if cues else None
         event_type: Optional[str] = None
         data_lines: list[str] = []
         for line in resp.iter_lines():
             if line == "":
                 # Blank line = frame boundary — dispatch what we accumulated.
                 if event_type is not None or data_lines:
-                    stop = yield from self._dispatch_frame(event_type, data_lines)
+                    stop = yield from self._dispatch_frame(
+                        event_type, data_lines, cues_sent,
+                    )
                     if stop:
                         return
                 event_type, data_lines = None, []
@@ -713,15 +1010,23 @@ class OrchestratorLLM(LLMClient):
                 data_lines.append(line[len("data:"):].lstrip())
         # A trailing frame with no terminating blank line.
         if event_type is not None or data_lines:
-            yield from self._dispatch_frame(event_type, data_lines)
+            yield from self._dispatch_frame(event_type, data_lines, cues_sent)
 
     def _dispatch_frame(
-        self, event_type: Optional[str], data_lines: list[str],
-    ) -> Iterator[str]:
+        self,
+        event_type: Optional[str],
+        data_lines: list[str],
+        cues_sent: Optional[set[str]] = None,
+    ) -> Iterator[ReplyEvent]:
         """Handle one SSE frame: yield content text (if any) and RETURN True
         when the stream should stop (the `done` frame). Raises LLMUnavailable
         on a done error frame. The generator's return value is read by the
-        caller via `yield from`."""
+        caller via `yield from`.
+
+        `cues_sent` (WARP-3124) is the stream's set of cue kinds already
+        yielded, or None when the caller didn't ask for cues. A tool_call or
+        model_loading frame yields a `SpokenCue` only the first time its kind
+        appears, so a two-tool turn cues once."""
         raw = "\n".join(data_lines)
         try:
             payload = json.loads(raw) if raw else {}
@@ -744,11 +1049,37 @@ class OrchestratorLLM(LLMClient):
                     or "stream ended with stop_reason=error",
                 )
             return True
-        # tool_call / tool_result / reasoning_step / model_loading are not
-        # spoken. Log tool activity at debug for diagnosis; drop the rest.
+        # tool_call / tool_result / reasoning_step / model_loading are never
+        # spoken as text. Log tool activity at debug for diagnosis; surface
+        # tool_call + model_loading as cue markers when asked; drop the rest.
         if etype in ("tool_call", "tool_result"):
-            logger.debug("voice stream: ignoring %s frame for audio", etype)
+            logger.debug("voice stream: %s frame", etype)
+        if (
+            cues_sent is not None
+            and etype in _CUE_EVENT_TYPES
+            and etype not in cues_sent
+        ):
+            cues_sent.add(etype)
+            yield SpokenCue(etype)
         return False
+
+
+def _states_no_tools(models: Any, model_id: str) -> bool:
+    """WARP-3047 — True only when the orchestrator's listing STATES that
+    ``model_id`` cannot call tools (``capabilities.tools is False``).
+
+    Absent from the listing, no ``capabilities``, or anything but an explicit
+    ``False`` reads as unknown — and unknown keeps the active model: moving
+    voice to another model is a second model on the GPU, so only a stated
+    "no" is worth that.
+    """
+    if not isinstance(models, list):
+        return False
+    for entry in models:
+        if isinstance(entry, dict) and entry.get("id") == model_id:
+            caps = entry.get("capabilities")
+            return isinstance(caps, dict) and caps.get("tools") is False
+    return False
 
 
 def _extract_error_detail(resp: "httpx.Response") -> str:
@@ -778,6 +1109,8 @@ def _extract_assistant_text(payload: dict) -> str:
         "trace":       [...],
         "iterations":  N,
         "stop_reason": "model_done" | "iteration_limit" | "error"
+                     | "context_budget" | "repetition" | "no_progress"
+                     | "needs_details"
       }
 
     Legacy fallback (ai-gateway / OpenAI-compatible) — kept so the same
@@ -920,10 +1253,13 @@ def build_llm_from_env(
     # breaks the voice loop. VOICE_ALLOWED_TOOLS unset → the curated
     # DEFAULT scope; VOICE_MAX_TOKENS unset → DEFAULT_VOICE_MAX_TOKENS.
     max_tokens = parse_max_tokens(os.environ.get("VOICE_MAX_TOKENS"))
+    max_iter = parse_max_iter(os.environ.get("VOICE_MAX_ITER"))
     allowed_tools = parse_allowed_tools(os.environ.get("VOICE_ALLOWED_TOOLS"))
     logger.info(
-        "voice turn shaping: ephemeral=on, max_tokens=%d, allowed_tools=%d scoped",
+        "voice turn shaping: ephemeral=on, max_tokens=%d, max_iter=%d, "
+        "allowed_tools=%d scoped",
         max_tokens,
+        max_iter,
         len(allowed_tools),
     )
 
@@ -931,7 +1267,11 @@ def build_llm_from_env(
         base_url=raw,
         model=model,
         bearer_token=token,
+        # WARP-3047 — voice follows the box's active model; `model` (env
+        # LLM_MODEL) is only the fallback when the orchestrator can't name one.
+        follow_active_model=True,
         max_tokens=max_tokens,
+        max_iter=max_iter,
         allowed_tools=allowed_tools,
         location=geo.description,
         timezone=geo.timezone,

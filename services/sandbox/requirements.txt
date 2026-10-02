@@ -1,0 +1,17 @@
+# Pinned to the fastapi/uvicorn line every sibling service uses (doc-render,
+# web-fetch, ai-gateway, routing, switch, ops-console).
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+
+# The workspace `run` allow-list (WARP-2896): `pytest` and `ruff` execute
+# INSIDE a workspace checkout as `python -m pytest` / `python -m ruff`. They
+# are NOT reachable from a routine's transform code — runner.py starts the
+# child with `-I -S` (no site-packages on the path at all) and an explicit
+# stdlib allowlist (ADR-047 §4.3). Nothing else goes here: a package added
+# to this file is a package a workspace can import, and a curated set is a
+# later decision, never `pip install` from a run.
+pytest==9.1.1
+ruff==0.16.8
+
+# OSV floor (same idiom as web-fetch / doc-render).
+idna>=3.15

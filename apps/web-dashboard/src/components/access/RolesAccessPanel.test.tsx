@@ -23,6 +23,7 @@ const restoreAccessRoleMock = vi.fn();
 const assignAccessRoleMock = vi.fn();
 const listRoleTemplatesMock = vi.fn();
 const createRoleFromTemplateMock = vi.fn();
+const listAccessToolDomainsMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   listAccessRoles: (...a: any[]) => listAccessRolesMock(...a),
@@ -38,6 +39,8 @@ vi.mock("@/lib/api", () => ({
   // so the mock moves with the component's imports.
   listRoleTemplates: (...a: any[]) => listRoleTemplatesMock(...a),
   createRoleFromTemplate: (...a: any[]) => createRoleFromTemplateMock(...a),
+  // WARP-2897 — the builder's Extensions rows come from here.
+  listAccessToolDomains: (...a: any[]) => listAccessToolDomainsMock(...a),
 }));
 
 vi.mock("framer-motion", async () => {
@@ -173,6 +176,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   listAccessRolesMock.mockResolvedValue({ roles: [role()] });
   listRoleTemplatesMock.mockResolvedValue(TEMPLATES);
+  listAccessToolDomainsMock.mockResolvedValue({ compiled: [], runtime: [] });
 });
 
 afterEach(() => {
@@ -206,9 +210,9 @@ describe("§10 state trio — roles list", () => {
     await waitFor(() => {
       expect(screen.getByText(ACCESS_COPY.emptyRoles)).toBeInTheDocument();
     });
-    // Built-in five remain listed beneath (Staff display label, never Family).
+    // Built-in five remain listed beneath (Member display label, never Family).
     expect(screen.getByText("Owner")).toBeInTheDocument();
-    expect(screen.getByText("Staff")).toBeInTheDocument();
+    expect(screen.getByText("Member")).toBeInTheDocument();
     expect(screen.getByText("Service")).toBeInTheDocument();
     expect(screen.queryByText("Family")).not.toBeInTheDocument();
   });
@@ -220,7 +224,7 @@ describe("§4.1 roles list", () => {
     await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
     // Slug renders on the card and again in the auto-selected detail head.
     expect(screen.getAllByText("finance").length).toBeGreaterThan(0);
-    expect(screen.getByText(/1 person · based on Staff/)).toBeInTheDocument();
+    expect(screen.getByText(/1 person · based on Member/)).toBeInTheDocument();
     expect(screen.getByText(ACCESS_COPY.yourRoles)).toBeInTheDocument();
     expect(screen.getByText(ACCESS_COPY.builtinRoles)).toBeInTheDocument();
     // §4.1 (UX-10): the pane's primary action is filled accent.
@@ -253,7 +257,7 @@ describe("§4.2 role detail", () => {
     await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
     const detail = screen.getByTestId("access-role-detail");
-    expect(within(detail).getByText(/Based on Staff/)).toBeInTheDocument();
+    expect(within(detail).getByText(/Based on Member/)).toBeInTheDocument();
     expect(within(detail).getByText(/Files · edit/i)).toBeInTheDocument();
     expect(within(detail).getByText(/25 GB storage/)).toBeInTheDocument();
     expect(within(detail).getByText(/Cloud models off/)).toBeInTheDocument();
@@ -330,9 +334,18 @@ describe("§4.2 role detail", () => {
     expect(within(detail).getByText("Files · share & manage")).toBeInTheDocument();
     expect(within(detail).getByText("No limit storage")).toBeInTheDocument();
     expect(within(detail).getByText(ACCESS_COPY.builtinFixed)).toBeInTheDocument();
-    // Guest ceilings clamp to view.
-    const guestDetail = await selectRole(/Guest/);
+    // The admin tier holds Security, CRM, Projects and Money…
+    for (const label of [/^Security/, /^CRM/, /^Projects/, /^Money/]) {
+      expect(within(detail).queryAllByText(label).length, String(label)).toBeGreaterThan(0);
+    }
+    // External guest ceilings clamp to view.
+    const guestDetail = await selectRole(/External guest/);
     expect(within(guestDetail).getByText("Network · view")).toBeInTheDocument();
+    // …and a module the box refuses the guest tier outright is not listed as held
+    // (Security, CRM, Projects and Money: WARP-3365, WARP-3369).
+    for (const label of [/^Security/, /^CRM/, /^Projects/, /^Money/]) {
+      expect(within(guestDetail).queryAllByText(label), String(label)).toHaveLength(0);
+    }
     // Service is a system principal — notes only, no feature chips.
     const serviceDetail = await selectRole(/Service/);
     expect(within(serviceDetail).queryByText(/Network ·/)).not.toBeInTheDocument();
@@ -849,7 +862,10 @@ describe("WARP-2738 — the template gallery", () => {
     await waitFor(() => expect(screen.getByText(ACCESS_COPY.emptyRoles)).toBeInTheDocument());
     // The gallery is present…
     expect(await screen.findByTestId("access-template-gallery")).toBeInTheDocument();
-    expect(screen.getByText("Front Desk")).toBeInTheDocument();
+    // WARP-2756: the gallery section renders while its own templates read is
+    // still loading (skeletons), so the test-id is true one fetch too early.
+    // Wait for the card itself, not for its container.
+    expect(await screen.findByText("Front Desk")).toBeInTheDocument();
     // …and starting from nothing is still reachable, in the same card.
     expect(screen.getByRole("button", { name: /New role/ })).toBeInTheDocument();
   });
@@ -1106,7 +1122,7 @@ describe("WARP-2738 — the detail pane names the tool grants", () => {
     expect(within(detail).queryByText(ACCESS_COPY.toolsReadOnlyBelowAdmin)).not.toBeInTheDocument();
   });
 
-  it("says a Staff-based role's tools are read-only whatever the level claims", async () => {
+  it("says a Member-based role's tools are read-only whatever the level claims", async () => {
     // `tierKeepsWriteTools` admits owner and admin only — below that, a `use`
     // grant IS a `view` grant, and the chip alone would imply otherwise.
     listAccessRolesMock.mockResolvedValue({
@@ -1126,5 +1142,56 @@ describe("WARP-2738 — the detail pane names the tool grants", () => {
     fireEvent.click(screen.getByRole("button", { name: /Finance/ }));
     const detail = screen.getByTestId("access-role-detail");
     expect(within(detail).getByText(ACCESS_COPY.noToolsGranted)).toBeInTheDocument();
+  });
+});
+
+// ── WARP-2897 — runtime (extension) tool domains reach the builder ──────
+
+describe("WARP-2897 — the builder renders this box's runtime tool domains", () => {
+  const RUNTIME = {
+    compiled: ["files", "money"],
+    runtime: [
+      { domain: "ext-bookings", sources: ["runtime:bookings"], tools: 2, populated: true, readable: true },
+      // A compiled domain served as runtime is refused client-side too.
+      { domain: "money", sources: ["runtime:x"], tools: 1, populated: true, readable: false },
+    ],
+  };
+
+  it("New role shows one Extensions row per runtime domain, starting Off", async () => {
+    listAccessToolDomainsMock.mockResolvedValue(RUNTIME);
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    await waitFor(() => expect(listAccessToolDomainsMock).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "New role" }));
+    const row = await screen.findByTestId("access-tools-ext:ext-bookings");
+    expect(within(row).getByRole("button", { name: "Off" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByTestId("access-tools-ext:money")).not.toBeInTheDocument();
+  });
+
+  it("a failed tool-domains read keeps the static table (no Extensions section)", async () => {
+    listAccessToolDomainsMock.mockRejectedValue(new Error("boom"));
+    renderPanel();
+    await waitFor(() => expect(screen.getByText("Finance")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "New role" }));
+    await screen.findByPlaceholderText("Name this role");
+    expect(screen.queryByTestId("access-tools-extensions")).not.toBeInTheDocument();
+  });
+
+  it("Edit badges a grant whose runtime domain is gone", async () => {
+    listAccessRolesMock.mockResolvedValue({
+      roles: [
+        role({
+          toolGrants: [
+            { domain: "files", level: "use", state: "live", deadReason: null },
+            { domain: "ext-bookings", level: "view", state: "dead", deadReason: "not_provided" },
+          ],
+        }),
+      ],
+    });
+    renderPanel();
+    await waitForRoleSelection();
+    fireEvent.click(screen.getByRole("button", { name: "Edit role" }));
+    const dead = await screen.findByTestId("access-tools-dead-ext-bookings");
+    expect(within(dead).getByText("Reaches nothing")).toBeInTheDocument();
   });
 });

@@ -203,8 +203,13 @@ function tryParseJsonArray(text: string): string[] | null {
 export interface EnhancementFactoryOptions {
   /** ai-gateway gRPC endpoint, e.g. "ai-gateway:50051". */
   aiGatewayGrpcUrl: string;
-  /** Default chat model for HyDE / multi-query rewrites. */
-  defaultModel: string;
+  /**
+   * The chat model for HyDE / multi-query rewrites, asked LAZILY — only when
+   * a rewrite actually runs. WARP-3047: /llm/chat supplies "this turn's model
+   * when it is local, else the box's active model", so a rewrite never loads
+   * a second model mid-turn. Null → no rewrite (the raw query is used).
+   */
+  resolveModel: () => Promise<string | null>;
 }
 
 /**
@@ -221,11 +226,13 @@ export interface EnhancementFactoryOptions {
  *   (`aiGateway.chat` throws on non-OK non-stream responses; the catch
  *   below subsumes both the throw path and any other transport error.)
  */
-function makeHttpChatAdapter(defaultModel: string): ChatClient {
+function makeHttpChatAdapter(resolveModel: () => Promise<string | null>): ChatClient {
   return async (args) => {
     try {
+      const model = await resolveModel();
+      if (!model) return { content: "" };
       const res = await aiGateway.chat({
-        model: defaultModel,
+        model,
         messages: [{ role: "user", content: args.prompt }],
         stream: false,
         temperature: args.temperature,
@@ -273,7 +280,7 @@ export function createEnhancementDeps(
   const embedder = new EmbeddingClient({ url: opts.aiGatewayGrpcUrl });
   const classifier = new QueryClassifierClient({ url: opts.aiGatewayGrpcUrl });
   const cache = makeRedisClassifierCache();
-  const chat = makeHttpChatAdapter(opts.defaultModel);
+  const chat = makeHttpChatAdapter(opts.resolveModel);
 
   return {
     classify: (query: string) =>

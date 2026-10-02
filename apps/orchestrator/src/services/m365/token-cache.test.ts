@@ -21,7 +21,12 @@ import {
   deriveEmailColumnKey,
   isEncryptedColumn,
 } from "../column-crypto.service.js";
-import { sealTokenCache, unsealTokenCache } from "./token-cache.js";
+import {
+  sealPendingFlow,
+  sealTokenCache,
+  unsealPendingFlow,
+  unsealTokenCache,
+} from "./token-cache.js";
 
 // 32-byte base64 test key so derivation works without env setup.
 const TEST_KEY = Buffer.alloc(32, 11).toString("base64");
@@ -74,5 +79,43 @@ describe("sealTokenCache / unsealTokenCache", () => {
     // info label than the email column, so one key's compromise is contained.
     const sealed = sealTokenCache("user-1", CACHE_JSON);
     expect(() => decryptColumn(deriveEmailColumnKey(), sealed, "user-1")).toThrow();
+  });
+});
+
+describe("sealPendingFlow / unsealPendingFlow (WARP-2704)", () => {
+  const FLOW = {
+    codeVerifier: "pkce-verifier-that-must-not-sit-in-the-clear-0123456789",
+    nonce: "nonce-1",
+    redirectUri: "https://droplet-ai.local/api/m365/callback",
+  };
+
+  it("round-trips the in-flight sign-in for its owner", () => {
+    expect(unsealPendingFlow("user-1", sealPendingFlow("user-1", FLOW))).toEqual(FLOW);
+  });
+
+  it("never stores the PKCE verifier in the clear", () => {
+    const sealed = sealPendingFlow("user-1", FLOW);
+    expect(isEncryptedColumn(sealed)).toBe(true);
+    expect(sealed).not.toContain(FLOW.codeVerifier);
+  });
+
+  it("refuses another user's blob", () => {
+    const sealed = sealPendingFlow("user-1", FLOW);
+    expect(() => unsealPendingFlow("user-2", sealed)).toThrow();
+  });
+
+  it("cannot be opened as a token cache, nor a token cache as a flow", () => {
+    // Same key, different AAD: a blob moved between the row's two sealed
+    // columns fails to decrypt instead of being parsed as the other kind.
+    const flow = sealPendingFlow("user-1", FLOW);
+    expect(() => unsealTokenCache("user-1", flow)).toThrow();
+    const cache = sealTokenCache("user-1", CACHE_JSON);
+    expect(() => unsealPendingFlow("user-1", cache)).toThrow();
+  });
+
+  it("refuses a blob that decrypts to the wrong shape", () => {
+    // Defence in depth: a verifier that is not a string must not reach MSAL.
+    const sealed = sealPendingFlow("user-1", { ...FLOW, codeVerifier: 7 } as never);
+    expect(() => unsealPendingFlow("user-1", sealed)).toThrow();
   });
 });

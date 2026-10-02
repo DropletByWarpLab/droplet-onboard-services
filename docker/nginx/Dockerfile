@@ -48,6 +48,9 @@ RUN sh /tmp/install-fips-provider.sh /tmp/fips.so && \
 COPY docker/nginx/cipher-profile.default.conf /etc/nginx/cipher-profile.default.conf
 COPY docker/nginx/cipher-profile.fips.conf    /etc/nginx/cipher-profile.fips.conf
 COPY docker/nginx/nginx.conf                  /etc/nginx/nginx.conf
+# WARP-3193 SEC-DATA-8: response-header sets nginx.conf includes per leg.
+COPY docker/nginx/security-headers.conf          /etc/nginx/security-headers.conf
+COPY docker/nginx/security-headers.upstream.conf /etc/nginx/security-headers.upstream.conf
 COPY docker/nginx/docker-entrypoint-fips.sh   /docker-entrypoint.d/00-fips-profile.sh
 # WARP-1061: first-party upstream scheme variants + the selector that picks
 # one from DROPLET_INTERNAL_TLS at container start (same pattern as the
@@ -192,9 +195,11 @@ RUN set -eu; \
     disc="$(req /docs/hosting/discovery)"; \
     caps="$(req /docs/hosting/capabilities)"; \
     other="$(req /anything-else)"; \
+    health="$(req /healthz)"; \
     nginx -c /tmp/leg-test.conf -g 'pid /tmp/leg.pid; error_log /tmp/leg.err;' -s stop; \
     rm -f /tmp/leg.conf /tmp/leg-test.conf /tmp/leg.err; \
     printf '%s' "$disc" | grep -q 'HTTP/1.1 200'                                   || { echo "WARP-2903: discovery via the leg did not return 200"; printf '%s\n' "$disc"; exit 1; }; \
+    printf '%s' "$health" | grep -q 'HTTP/1.1 200'                                 || { echo "#2320 review: the OTA health probe /healthz on :9981 did not return 200"; printf '%s\n' "$health"; exit 1; }; \
     [ "$(printf '%s' "$disc" | grep -o 'urlsrc="/docs/browser/1/cool.html?"' | wc -l)" -eq 3 ] \
                                                                                    || { echo "WARP-2903: urlsrc was NOT rewritten to a path-relative /docs/… (all three: two https, one http — sub_filter_once must be off)"; printf '%s\n' "$disc"; exit 1; }; \
     printf '%s' "$disc" | grep -q 'docserver:9980'                                  && { echo "WARP-2903: an absolute docserver:9980 origin survived the rewrite"; printf '%s\n' "$disc"; exit 1; }; \

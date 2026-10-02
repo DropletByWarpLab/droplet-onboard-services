@@ -256,6 +256,22 @@ fi
 install -m 0755 "$TLS_RELOAD_SCRIPT_SRC" "$TLS_RELOAD_SCRIPT_DST"
 log "installed $TLS_RELOAD_SCRIPT_DST"
 
+# WARP-2944 (ADR-058): bootstrap-certificate refresh host executor. The bridge
+# runs this when the box's uplink address changes (and once at boot) so the
+# self-signed cert's SAN names where the box is NOW, regenerated around the
+# SAME key — every app that pinned the key keeps working. Delegates to
+# scripts/lib/secrets.sh::_generate_tls_cert (idempotent; never touches a
+# public-CA leaf). Repo-tracked (architecture-guard rule 20), installed here so
+# factory-reset removes it cleanly. Repo source is scripts/host/.
+TLS_REFRESH_SCRIPT_SRC="$REPO_ROOT/scripts/host/droplet-tls-bootstrap-refresh.sh"
+TLS_REFRESH_SCRIPT_DST="/usr/local/sbin/droplet-tls-bootstrap-refresh.sh"
+if [[ ! -f "$TLS_REFRESH_SCRIPT_SRC" ]]; then
+  log "missing source: $TLS_REFRESH_SCRIPT_SRC"
+  exit 1
+fi
+install -m 0755 "$TLS_REFRESH_SCRIPT_SRC" "$TLS_REFRESH_SCRIPT_DST"
+log "installed $TLS_REFRESH_SCRIPT_DST"
+
 # ADR-023 PR-1: public-FQDN write-back host executor. The orchestrator's
 # tls-issuance service POSTs /host/public-fqdn to the bridge once it has LEARNED
 # the box's opaque per-device FQDN from HQ; the bridge execs this wrapper, which

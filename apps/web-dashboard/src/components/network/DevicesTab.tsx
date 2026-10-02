@@ -146,7 +146,7 @@ export function DevicesTab({ onOpenWifiSettings }: DevicesTabProps = {}) {
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search devices…"
           aria-label="Search devices"
-          className="flex-1 min-w-[200px] px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+          className="flex-1 min-w-[200px] px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
           style={{
             background: "var(--surface)",
             border: "1px solid var(--border)",
@@ -169,7 +169,7 @@ export function DevicesTab({ onOpenWifiSettings }: DevicesTabProps = {}) {
             value={sort}
             onChange={(e) => setSort(e.target.value as DeviceSort)}
             aria-label="Sort devices"
-            className="px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+            className="px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-colors"
             style={{
               background: "var(--surface)",
               border: "1px solid var(--border)",

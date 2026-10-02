@@ -272,7 +272,7 @@ function SshLoginSection({
               value={username}
               onChange={(e) => setUsername(e.target.value.trim())}
               placeholder="support"
-              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
               style={{
                 background: "var(--surface)",
                 border: "1px solid var(--border)",
@@ -298,7 +298,7 @@ function SshLoginSection({
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Password"
-                className="w-full px-3 py-2.5 pr-10 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+                className="w-full px-3 py-2.5 pr-10 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
                 style={{
                   background: "var(--surface)",
                   border: "1px solid var(--border)",

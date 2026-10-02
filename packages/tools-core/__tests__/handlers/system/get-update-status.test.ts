@@ -48,6 +48,7 @@ const CURRENT_ROW = {
   gitSha: "aaaaaaaaaaaabbbbbbbbbbbbccccccccccccdddd",
   builtAt: "2026-07-01T00:00:00.000Z",
   failureReason: null,
+  outcome: "services_start_failed",
   createdAt: "2026-07-01T01:00:00.000Z",
   updatedAt: "2026-07-01T02:00:00.000Z",
 };
@@ -133,6 +134,8 @@ describe("get_update_status", () => {
           gitSha: CURRENT_ROW.gitSha,
           builtAt: "2026-07-01T00:00:00.000Z",
           committedAt: "2026-07-01T02:00:00.000Z",
+          // WARP-3007 — the explicit apply outcome rides through.
+          outcome: "services_start_failed",
         },
         pending: {
           version: "v1.4.2",
@@ -149,6 +152,7 @@ describe("get_update_status", () => {
           status: "committed",
           phase: "committed — the update was applied and the system is healthy",
           failureReason: null,
+          outcome: "services_start_failed",
           at: "2026-07-01T02:00:00.000Z",
         },
         degraded: false,

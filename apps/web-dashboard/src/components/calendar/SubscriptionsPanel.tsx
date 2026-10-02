@@ -7,7 +7,9 @@ import {
   createSource,
   deleteSource,
   syncSource,
-  getPublishUrl,
+  usePublishLinkStatus,
+  rotatePublishLink,
+  revokePublishLink,
 } from "@/lib/hooks/useCalendar";
 import { useToast } from "@/components/Toast";
 import { translateError } from "@/lib/friendly-errors";
@@ -25,6 +27,8 @@ export function SubscriptionsPanel() {
   const [busy, setBusy] = useState<string | null>(null);
   const [publishUrl, setPublishUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const { status: publishStatus, refresh: refreshPublish } = usePublishLinkStatus();
+  const [confirmRevoke, setConfirmRevoke] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(
     null,
   );
@@ -105,14 +109,33 @@ export function SubscriptionsPanel() {
     }
   }
 
-  async function loadPublishUrl() {
+  // WARP-2767 — minting a link ends the previous one server-side, so a phone
+  // still subscribed to the old URL stops updating. The URL is only ever
+  // shown here, once; the server keeps a hash.
+  async function newPublishLink() {
+    setBusy("publish");
     try {
-      const { url } = await getPublishUrl();
-      const fullUrl = `${window.location.origin}${url}`;
-      setPublishUrl(fullUrl);
+      const { url } = await rotatePublishLink();
+      setPublishUrl(`${window.location.origin}${url}`);
+      refreshPublish();
     } catch (err) {
       // WARP-294: friendly translation; never raw err.message.
       toast(translateError(err, "subscription"), "error");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function performRevoke() {
+    try {
+      await revokePublishLink();
+      setPublishUrl(null);
+      setConfirmRevoke(false);
+      toast("Calendar link turned off", "success");
+      refreshPublish();
+    } catch (err) {
+      toast(translateError(err, "subscription"), "error");
+      throw err;
     }
   }
 
@@ -166,7 +189,7 @@ export function SubscriptionsPanel() {
               placeholder="e.g. Personal iCloud"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="text-sm outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+              className="text-sm outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
               style={{
                 background: "var(--surface)",
                 border: "1px solid var(--border)",
@@ -186,7 +209,7 @@ export function SubscriptionsPanel() {
               placeholder="https://…"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              className="text-sm outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+              className="text-sm outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
               style={{
                 background: "var(--surface)",
                 border: "1px solid var(--border)",
@@ -221,7 +244,7 @@ export function SubscriptionsPanel() {
                 placeholder="Username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="text-sm outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+                className="text-sm outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
                 style={{
                   background: "var(--surface)",
                   border: "1px solid var(--border)",
@@ -236,7 +259,7 @@ export function SubscriptionsPanel() {
                 placeholder="Password or app password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="text-sm outline-none focus:border-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
+                className="text-sm outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[color:var(--text-muted)]"
                 style={{
                   background: "var(--surface)",
                   border: "1px solid var(--border)",
@@ -327,17 +350,42 @@ export function SubscriptionsPanel() {
               {copied ? <Check size={14} style={{ color: "var(--success)" }} /> : <Copy size={14} />}
             </button>
           </div>
-        ) : (
-          <button onClick={loadPublishUrl} className="btn ghost text-sm">
-            Reveal publish URL
+        ) : publishStatus?.state === "active" ? (
+          <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
+            A link is active until{" "}
+            {publishStatus.expiresAt ? new Date(publishStatus.expiresAt).toLocaleDateString() : "—"}.
+            For your security it can&apos;t be shown again. Create a new link to copy one.
+          </p>
+        ) : null}
+        <div className="flex gap-2 mt-2">
+          <button onClick={newPublishLink} disabled={busy === "publish"} className="btn ghost text-sm">
+            {publishStatus?.state === "active" || publishUrl ? "Create new link" : "Create link"}
           </button>
-        )}
+          {(publishStatus?.state === "active" || publishUrl) && (
+            <button onClick={() => setConfirmRevoke(true)} className="btn ghost text-sm">
+              Turn off link
+            </button>
+          )}
+        </div>
         <p className="type-caption-1 mt-2" style={{ color: "var(--text-muted)" }}>
-          This goes the other direction — paste this URL into your phone's
-          "Subscribe to calendar" flow and your Droplet events show up there
-          automatically.
+          This goes the other direction — paste this URL into your phone&apos;s
+          &quot;Subscribe to calendar&quot; flow and your Droplet events show up there
+          automatically. The link works like a password: anyone who has it can
+          read your calendar, without signing in. It lasts 180 days; creating a
+          new link or turning it off stops the old one right away, so any
+          phone using it stops updating.
         </p>
       </div>
+
+      <ConfirmDialog
+        open={confirmRevoke}
+        onConfirm={performRevoke}
+        onCancel={() => setConfirmRevoke(false)}
+        title="Turn off your calendar link?"
+        description="Every phone or app subscribed with it stops getting updates. You can create a new link later."
+        confirmLabel="Turn off"
+        variant="destructive"
+      />
 
       <ConfirmDialog
         open={deleteTarget !== null}

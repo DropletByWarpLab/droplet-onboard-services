@@ -18,7 +18,7 @@ import { translateError } from "./friendly-errors";
  * WARP-1912 — was this failure "the file can never fit"?
  *
  * Both size gates in front of an upload answer 413: nginx's
- * `client_max_body_size 100M` (HTML body, no code) and the orchestrator's
+ * `client_max_body_size` on the upload route (HTML body, no code) and the orchestrator's
  * per-user multer cap (JSON body with the stable `UPLOAD_TOO_LARGE` wire
  * code plus the ACTUAL applied `limitMb`). `uploadBatch` puts those fields
  * on the error (see `uploadRejectionError` in lib/api.ts); classifying here
@@ -114,6 +114,34 @@ export function uploadOutcomeMessage(
     } too large to upload${cap}.${unread}${lostFolders}`;
   }
   return `Uploaded ${uploaded} of ${total} files. ${failed} didn't upload — try again to finish.${unread}${lostFolders}`;
+}
+
+/**
+ * WARP-2096 — what the server did differently from "wrote it under that
+ * name", as a sentence to append to the run's toast ("" when nothing).
+ *
+ * A same-name upload is never an overwrite: it is kept under a new name, and
+ * the user is told so instead of it reading as a plain success. Content
+ * duplicates are advisory — the file WAS uploaded — and the copy says
+ * "already on the box", never that anything else is unique.
+ */
+export function uploadNoticeMessage(renamed: number, duplicates: number): string {
+  const parts: string[] = [];
+  if (renamed > 0) {
+    parts.push(
+      renamed === 1
+        ? "1 file had the same name as an existing one and was saved under a new name."
+        : `${renamed} files had the same name as existing ones and were saved under new names.`,
+    );
+  }
+  if (duplicates > 0) {
+    parts.push(
+      duplicates === 1
+        ? "1 file was already on the box in this space."
+        : `${duplicates} files were already on the box in this space.`,
+    );
+  }
+  return parts.length > 0 ? ` ${parts.join(" ")}` : "";
 }
 
 /**

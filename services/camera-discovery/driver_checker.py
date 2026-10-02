@@ -245,7 +245,9 @@ async def auto_fix_drivers() -> dict:
 
     # 1. Load missing but available modules
     for module, desc in REQUIRED_MODULES:
-        status = check_kernel_module(module)
+        # WARP-3193 PERF-15: lsmod/modinfo are blocking subprocess.run calls
+        # (up to 5 s each) — keep them off the event loop.
+        status = await asyncio.to_thread(check_kernel_module, module)
         if status == "available":
             loaded = await try_load_module(module)
             report["actions"].append({

@@ -49,12 +49,13 @@
  * the owner's only available action would silently stop working.
  */
 import { Prisma } from "@prisma/client";
-import { providerDescriptor } from "@droplet/shared-types";
+import { LANDED_CRM_DATASETS, providerDescriptor } from "@droplet/shared-types";
 
 import { toMinorUnits } from "@droplet/shared-types";
 import { createLogger } from "../../lib/logger.js";
 
 import { landMoneyDocuments, landsMoney, type MoneyLandingDb } from "./land-money.js";
+import { isUniqueViolation } from "../../lib/prisma-errors.js";
 
 const logger = createLogger("erp-sync-land");
 
@@ -104,8 +105,12 @@ export interface LandOutcome {
   readonly reason: LandSkipReason | null;
 }
 
-/** Datasets that land in the CRM. */
-export const LANDED_ENTITIES = ["company", "contact", "deal"] as const;
+/**
+ * Datasets that land in the CRM. WARP-3375 — declared in shared-types, where
+ * the dashboard's Disconnect copy reads the same list, so what the confirm says
+ * is copied cannot drift from what this seam copies.
+ */
+export const LANDED_ENTITIES = LANDED_CRM_DATASETS;
 
 /**
  * Datasets that must never land, listed so the refusal is a decision a reader
@@ -177,14 +182,6 @@ function date(row: Row, key: string): Date | null {
   if (raw === null) return null;
   const parsed = new Date(raw);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
-function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    (err as { code?: unknown }).code === "P2002"
-  );
 }
 
 /**

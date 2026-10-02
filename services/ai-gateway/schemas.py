@@ -102,13 +102,16 @@ class ChatRequest(BaseModel):
     tools: list[ToolDefinition] | None = None
     # WARP-1442 — optional gpt-oss reasoning-effort control. Additive +
     # backward-compatible: unset (None) → the provider builds a byte-for-byte
-    # unchanged Ollama request, so every existing caller (voice + dashboard
-    # share this path) is unaffected. When set, the local provider forwards it
-    # as a top-level `reasoning_effort` on Ollama's OpenAI-compat
-    # /v1/chat/completions call for the gpt-oss family (a no-op for other
-    # models). The three values are gpt-oss's harmony reasoning levels; the
+    # unchanged request, so every existing caller (voice + dashboard share this
+    # path) is unaffected. When set, the local provider forwards it for the
+    # gpt-oss family (a no-op for other models) as a top-level
+    # `reasoning_effort` on the OpenAI-compat /v1/chat/completions call, and on
+    # the DMR runtime also as `chat_template_kwargs.reasoning_effort`
+    # (WARP-3123). WARP-3409: for a family that only switches thinking on/off
+    # (GLM on DMR), "low" turns it off; `ModelInfo.thinking_control` says which
+    # a model takes. The three values are gpt-oss's harmony reasoning levels; the
     # Literal makes anything else a 422 at the edge rather than a malformed
-    # field silently reaching Ollama.
+    # field silently reaching the inference runtime.
     reasoning_effort: Literal["low", "medium", "high"] | None = None
 
     @model_validator(mode="after")
@@ -264,6 +267,11 @@ class ModelInfo(BaseModel):
     # Additive (defaults None for back-compat): which modalities the model
     # supports. Drives the orchestrator's vision routing + the dashboard badge.
     capabilities: ModelCapabilities | None = None
+    # WARP-3409 (additive, defaults None): what `ChatRequest.reasoning_effort`
+    # does for this model on this runtime — "reasoning_effort" (levels, e.g.
+    # gpt-oss), "enable_thinking" ("low" = thinking off, e.g. GLM on DMR), or
+    # None (not sent). providers/ollama_local.py `_THINKING_CONTROLS`.
+    thinking_control: Literal["reasoning_effort", "enable_thinking"] | None = None
 
 
 class ModelsResponse(BaseModel):

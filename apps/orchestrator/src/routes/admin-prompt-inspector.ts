@@ -30,6 +30,17 @@
  * can carry business context and durable memory facts, and an audit row that
  * copied them would put the content this endpoint exists to inspect into a
  * second table with a different retention story.
+ *
+ * ── Runtime tools (WARP-2900, H4) ──────────────────────────────────────────
+ *
+ * The tool table also lists runtime tools (promoted extensions, connected
+ * servers) with their source and the dispatch verdict. A refused runtime
+ * tool is still ADVERTISED (the model is shown it; callTool refuses it), so
+ * it counts in `advertised` and is in the composer's tool list below, and
+ * `refusedAtDispatch` says how many of those are refused. That verdict comes
+ * from the remote call policy the multiplexer dispatches through, handed in
+ * by `app.ts` as a lazy binding over the process-wide one, so this page and
+ * a real call can never disagree about whether an extension tool runs.
  */
 import { Router, type Request, type Response, type NextFunction } from "express";
 import type { PrismaClient } from "@prisma/client";
@@ -38,8 +49,9 @@ import { requireRole } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { createLogger } from "../lib/logger.js";
-import { inspectToolsForPerson } from "../services/tool-inspect.service.js";
+import { inspectToolsForPerson, type ToolInspectDeps } from "../services/tool-inspect.service.js";
 import { inspectPromptForPerson } from "../services/prompt-inspect.service.js";
+import { navigationToolsWithheld } from "../services/dashboard-navigation.js";
 
 const logger = createLogger("admin-prompt-inspector");
 
@@ -54,8 +66,19 @@ function messageOf(req: Request): string {
   return typeof v === "string" ? v : "";
 }
 
-export function createAdminPromptInspectorRouter(prisma: PrismaClient): Router {
+interface AdminPromptInspectorRouterDeps {
+  /** The multiplexer's remote call policy (app.ts passes the process-wide one). */
+  remoteCallPolicy?: ToolInspectDeps["remoteCallPolicy"];
+}
+
+export function createAdminPromptInspectorRouter(
+  prisma: PrismaClient,
+  deps: AdminPromptInspectorRouterDeps = {},
+): Router {
   const router = Router();
+  const inspectDeps: ToolInspectDeps = deps.remoteCallPolicy
+    ? { remoteCallPolicy: deps.remoteCallPolicy }
+    : {};
 
   router.get(
     "/admin/tool-inspect/:userId",
@@ -68,7 +91,7 @@ export function createAdminPromptInspectorRouter(prisma: PrismaClient): Router {
           offLan: flag(req, "offLan"),
           interview: flag(req, "interview"),
           voice: flag(req, "voice"),
-        });
+        }, inspectDeps);
         res.json(result);
 
         void recordActivity({
@@ -83,6 +106,9 @@ export function createAdminPromptInspectorRouter(prisma: PrismaClient): Router {
             target: req.params.userId,
             advertised: result.counts.advertised,
             withheld: result.counts.withheld,
+            // WARP-2900 — of `advertised`, how many the model is shown but
+            // every call to is refused at dispatch.
+            refusedAtDispatch: result.counts.refusedAtDispatch,
             unresolved: result.unresolved,
           },
         }).catch(() => {
@@ -117,20 +143,36 @@ export function createAdminPromptInspectorRouter(prisma: PrismaClient): Router {
           offLan,
           interview,
           voice: flag(req, "voice"),
-        });
+        }, inspectDeps);
         // `undefined` is `buildBaseSystemPrompt`'s own encoding for "privileged
         // caller, every tool", and it is what the route passes for an owner. A
         // resolved-but-unnarrowed person must reach the composer as undefined,
         // not as a 139-name list, or the guidance is composed by a different
         // path than the turn's.
-        const allowedToolNames =
-          tools.unresolved === null && tools.noRoleNarrowing && tools.tier === "owner"
+        //
+        // WARP-2972 — unless a module is off. The real turn composes guidance
+        // from `namesForGuidance(undefined, verdict)`: `undefined` ("every
+        // tool") stops being true, and becomes every built-in tool the module
+        // gate did not withhold — NOT the advertised set, because the turn's
+        // guidance is not narrowed by chat policy or turn relevance.
+        const ownerUnnarrowed =
+          tools.unresolved === null && tools.noRoleNarrowing && tools.tier === "owner";
+        const allowedToolNames = ownerUnnarrowed
+          ? (tools.counts.byGate.module ?? 0) === 0
             ? undefined
-            : tools.rows.filter((r) => r.advertised).map((r) => r.name);
+            : tools.rows
+                .filter((r) => r.source === "built-in" && r.gate !== "module")
+                .map((r) => r.name)
+          : tools.rows.filter((r) => r.advertised).map((r) => r.name);
 
         const result = await inspectPromptForPerson(prisma, {
           targetUserId: req.params.userId,
           allowedToolNames,
+          // WARP-3116 — the real turn withholds the navigation tools when it
+          // carries no dashboard page list. The dashboard sends one; voice
+          // never does, so a modelled voice turn withholds them and every
+          // other modelled turn is the dashboard's.
+          withheldToolNames: navigationToolsWithheld(!flag(req, "voice")),
           offLan,
           interview,
         });

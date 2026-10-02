@@ -11,8 +11,8 @@ describe("SchedulePresetCards", () => {
         onUseOverride={vi.fn()}
       />,
     );
-    expect(screen.getByText("Bedtime")).toBeInTheDocument();
-    expect(screen.getByText("School hours")).toBeInTheDocument();
+    expect(screen.getByText("After hours")).toBeInTheDocument();
+    expect(screen.getByText("Business hours")).toBeInTheDocument();
     expect(screen.getByText("Focus mode")).toBeInTheDocument();
   });
 

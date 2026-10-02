@@ -50,4 +50,21 @@ describe("buildContext", () => {
     const ctx = buildContext(buildDeps(), undefined, new AbortController().signal);
     expect(ctx.userId).toBeUndefined();
   });
+
+  // WARP-3299 — the chat turn's ids reach the handler's context.
+  it("carries the chat turn ids (conversation, message, tool call) into the context", () => {
+    const ctx = buildContext(
+      buildDeps(),
+      undefined,
+      new AbortController().signal,
+      undefined,
+      "alice",
+      undefined,
+      "owner",
+      undefined,
+      undefined,
+      { conversationId: "conv-1", messageId: "msg-1", toolCallId: "call-1" },
+    );
+    expect(ctx).toMatchObject({ conversationId: "conv-1", messageId: "msg-1", toolCallId: "call-1" });
+  });
 });

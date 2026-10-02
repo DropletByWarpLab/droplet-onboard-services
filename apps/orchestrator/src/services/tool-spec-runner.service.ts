@@ -63,6 +63,8 @@
  * genuinely cannot decide — the §3 lock rule, whose args only exist after
  * `${prev}` substitution.
  */
+import type { Transformer } from "./sandbox.client.js";
+export type { Transformer } from "./sandbox.client.js";
 import type { PrismaClient } from "@prisma/client";
 import { recordActivity } from "./activity.singleton.js";
 import {
@@ -71,9 +73,37 @@ import {
   type ToolAccessScope,
 } from "./tool-access.service.js";
 import { createLogger } from "../lib/logger.js";
+import { redactCredentials, redactCredentialValues } from "../lib/log-redaction.js";
 import type { McpCallContext } from "./mcp-client.service.js";
+import type { McpToolCallOutcome } from "./mcp-client.port.js";
+import {
+  malformedToolOutputText,
+  parseToolResultPayload,
+  toolResultPayloadValue,
+} from "./tool-result-payload.js";
 
 const logger = createLogger("tool-spec-runner");
+
+/**
+ * A step's tool reply as the walker's value, shared by the run-now
+ * dispatcher (`app.ts`) and the schedule ticker's (`mcp-step-dispatcher.ts`,
+ * built in `index.ts`). Throws on
+ * failure — the walker halts on the first one.
+ *
+ * WARP-3284 — parsed through the agent loop's `parseToolResultPayload`, so an
+ * unreadable local-tool reply fails the step with TOOL_OUTPUT_MALFORMED
+ * instead of reaching the next step as a successful `{ raw }` fragment. A
+ * remote/extension tool's plain text is still `{ raw }`.
+ */
+export function stepResultValue(tool: string, result: McpToolCallOutcome): unknown {
+  const text = result.content?.[0]?.text;
+  if (result.isError) throw new Error(text ?? "tool reported error");
+  if (typeof text !== "string" || text.length === 0) return null;
+  const payload = parseToolResultPayload(text, tool);
+  const failure = malformedToolOutputText(payload);
+  if (failure !== null) throw new Error(failure);
+  return toolResultPayloadValue(payload);
+}
 
 export interface StepDispatcher {
   /**
@@ -103,18 +133,53 @@ export interface StepDispatcher {
  * Injected rather than imported so the walk stays testable without an
  * inference backend, exactly like `StepDispatcher`.
  */
+/** WARP-3409 — the prose, or prose that had to be ended early: cut off twice,
+ *  kept up to its last complete sentence. */
+export type SummaryOutput = string | { text: string; truncated: true };
+
 export interface Summarizer {
   /**
    * `facts` is the run's trace SO FAR — the results the earlier steps
    * gathered. Returns the prose. Throws on failure, which the walk records
    * as a failed step like any other.
    */
-  summarize(prompt: string, facts: RunStepTrace[]): Promise<string>;
+  summarize(prompt: string, facts: RunStepTrace[]): Promise<SummaryOutput>;
+  /**
+   * WARP-3409 — the write-up to use when `summarize` threw, built from the
+   * same facts without a model. Present → the step succeeds with it (marked
+   * `fallback` in the trace) and the run goes on; absent → the step fails as
+   * before. A report must not fail because only its prose did.
+   */
+  fallback?(facts: RunStepTrace[], err: unknown): string;
 }
 
 /** The trace's `tool` slot for a step that calls no tool. Reserved rather
  *  than blank so a reader (and the Activity row) can tell what ran. */
 export const SUMMARIZE_PSEUDO_TOOL = "(summarize)";
+/** WARP-2895 — the same reservation for the two sandbox-backed kinds. */
+export const TRANSFORM_PSEUDO_TOOL = "(transform)";
+export const WHEN_PSEUDO_TOOL = "(when)";
+
+/**
+ * WARP-2895 (ADR-047 §4) — the `transform` / `when` steps' seam.
+ *
+ * A `transform` is a PURE FUNCTION over the run's prior results: it reads
+ * the named outputs its `inputs` reference (`${steps.<name>}`), runs
+ * customer-written Python in services/sandbox — no network, no filesystem,
+ * no tool — and publishes what the code assigned to `output`. A `when` is
+ * the same call whose truthiness decides whether the walk CONTINUES; a
+ * falsy result ends the run cleanly with the remaining steps skipped.
+ *
+ * Neither dispatches a tool. That is what keeps them outside the §3 scope
+ * check and outside the `writes` derivation (`plannedToolNames` ignores
+ * them, and `tool-spec-runner.transform.test.ts` fails the moment one ever
+ * reaches the dispatcher) — the property ROUTINES brief §4.4 says to guard
+ * with a test, because the day "transform can call a tool" is added, the
+ * safety gate would go on trusting an inference that had become false.
+ *
+ * Injected like `Summarizer`; the production binding is
+ * `createSandboxTransformer()` (sandbox.client.ts).
+ */
 
 interface StoredStep {
   id: string;
@@ -134,6 +199,16 @@ export interface RunStepTrace {
    *  was given one. Present in the trace so the run-detail drawer can show
    *  which step a later `${steps.x}` was actually reading. */
   as?: string;
+  /** WARP-2895 — set on a `when` step whose condition was false: how many
+   *  later steps the walk did NOT run. The run's status stays `ok`. */
+  skippedRemaining?: number;
+  /** WARP-3409 — set on a `summarize` step whose `result` is the model-free
+   *  fallback write-up; `fallbackReason` is why the model's was missing. */
+  fallback?: true;
+  fallbackReason?: string;
+  /** WARP-3409 — set on a `summarize` step whose prose was cut off twice and
+   *  ended at its last complete sentence. */
+  truncated?: true;
 }
 
 export interface RunOutcome {
@@ -161,6 +236,12 @@ interface RunArgs {
    */
   summarizer?: Summarizer | null;
   /**
+   * WARP-2895 — required only by specs containing a `transform` or `when`
+   * step. Absent, such a step fails honestly ("no sandbox configured")
+   * rather than silently passing its inputs through.
+   */
+  transformer?: Transformer | null;
+  /**
    * WARP-1580 — the resolved §3 tool reach this run executes under. `null` /
    * omitted = no narrowing (owner, service, role-less). Never pass `null` to
    * mean "unknown"; pass `DENY_ALL_TOOL_SCOPE`.
@@ -168,7 +249,9 @@ interface RunArgs {
   scope?: ToolAccessScope | null;
   /**
    * The identity the run's tool calls execute as (username, role, Nextcloud
-   * token). Omitted for a scheduled fire, which has no session to speak of.
+   * token). A scheduled fire has no session, so it carries the owner's
+   * username alone (WARP-2972: the mcp-server's module gate reads the person
+   * from it); never a role or a token.
    */
   callContext?: McpCallContext;
 }
@@ -384,17 +467,38 @@ function parseSummarizeStep(step: { kind: string; args: unknown }): { prompt: st
 }
 
 /**
+ * WARP-2895 — parse a `transform` or `when` step. `args.code` is the Python;
+ * `args.inputs` (optional) is an object whose values may carry `${steps.x}`
+ * references the walker resolves before the call. Returns null for any other
+ * kind, so the caller falls through to the malformed handling.
+ */
+function parseSandboxStep(step: {
+  kind: string;
+  args: unknown;
+}): { kind: "transform" | "when"; code: string; inputs: Record<string, unknown> } | null {
+  if (step.kind !== "transform" && step.kind !== "when") return null;
+  if (typeof step.args !== "object" || step.args === null) return null;
+  const a = step.args as Record<string, unknown>;
+  if (typeof a.code !== "string" || a.code.trim().length === 0) return null;
+  const inputs =
+    a.inputs !== undefined && typeof a.inputs === "object" && a.inputs !== null && !Array.isArray(a.inputs)
+      ? (a.inputs as Record<string, unknown>)
+      : {};
+  return { kind: step.kind, code: a.code, inputs };
+}
+
+/**
  * The default framing. Deliberately instructs the model to name gaps rather
  * than omit them — a report that silently drops the half it couldn't read is
- * the failure mode this whole surface is built against.
+ * the failure mode this whole surface is built against. (A source that was
+ * never connected is not a gap: WARP-3409 drops it from the facts in code.)
  */
 export const DEFAULT_SUMMARY_PROMPT =
   "Write a short briefing, in the second person, from the results above. " +
   "Two to five short paragraphs of prose — no bullet points, no headings. " +
   "Use only figures that appear in the results; never estimate or infer a " +
   "number. If a source is marked COULD NOT BE READ, say so plainly in one " +
-  "clause rather than leaving it out. If a source is marked NOT CONNECTED, " +
-  "leave it out entirely.";
+  "clause rather than leaving it out.";
 
 /**
  * WARP-1580 — the tool names a spec's steps will call, in step order.
@@ -447,7 +551,7 @@ export async function runToolSpec(
     const idx =
       args.steps.find((step) => parseCallStep(step)?.tool === forbiddenTool)?.idx ?? 0;
     const msg =
-      `step ${idx} (${forbiddenTool}): not permitted by this run's access role`;
+      `step ${idx + 1} (${forbiddenTool}): not permitted by this run's access role`;
     trace.push({ idx, tool: forbiddenTool, args: {}, ok: false, error: msg });
     outcome = {
       status: "failed",
@@ -471,7 +575,7 @@ export async function runToolSpec(
       if (!args.summarizer) {
         // Fail rather than skip. A report that quietly dropped its narrative
         // would render as a report with nothing to say.
-        const msg = `step ${step.idx}: summarize step but no summarizer configured`;
+        const msg = `step ${step.idx + 1}: summarize step but no summarizer configured`;
         trace.push({
           idx: step.idx,
           tool: SUMMARIZE_PSEUDO_TOOL,
@@ -482,10 +586,26 @@ export async function runToolSpec(
         outcome = { status: "failed", trace, error: msg };
         break;
       }
+      // The facts are the trace SO FAR — a copy, so the summarizer cannot
+      // mutate the run's own record of what happened.
+      //
+      // WARP-3282 — scrubbed of credentials: the summary model (which may
+      // be a configured cloud default) reads these results exactly as the
+      // chat loop's model reads a tool result, so it gets the same scrub.
+      // `named`/`prev` keep the real values — data flowing from one step
+      // into the next is not a model path, and a copy step must copy.
+      const facts = redactCredentialValues(trace);
+      if (facts.count > 0) {
+        logger.info(
+          { specId: args.specId, redacted: facts.count },
+          "tool_spec_step_credentials_redacted",
+        );
+      }
       try {
-        // The facts are the trace SO FAR — a copy, so the summarizer cannot
-        // mutate the run's own record of what happened.
-        const prose = await args.summarizer.summarize(summarizeStep.prompt, [...trace]);
+        const out = await args.summarizer.summarize(summarizeStep.prompt, [
+          ...(facts.value as RunStepTrace[]),
+        ]);
+        const prose = typeof out === "string" ? out : out.text;
         const outName = stepOutputName(step);
         trace.push({
           idx: step.idx,
@@ -493,20 +613,112 @@ export async function runToolSpec(
           args: { prompt: summarizeStep.prompt },
           ok: true,
           result: prose,
+          ...(typeof out === "string" ? {} : { truncated: true as const }),
           ...(outName ? { as: outName } : {}),
         });
         if (outName) named.set(outName, prose);
         prev = prose;
       } catch (err) {
         const msg = (err as Error).message ?? String(err);
+        // WARP-3409 — the facts were gathered; only the prose is missing. A
+        // summarizer that can write a fallback turns this into a finished
+        // step, marked so the log and any client can tell it apart.
+        let fallback: string | undefined;
+        let error = msg;
+        try {
+          fallback = args.summarizer.fallback?.([...(facts.value as RunStepTrace[])], err);
+        } catch (fallbackErr) {
+          // A readout that throws must still leave a recorded run (a failed
+          // step), never escape as a 500 with no ToolRun row.
+          error = `${msg} (the fallback write-up failed too: ${(fallbackErr as Error).message ?? String(fallbackErr)})`;
+        }
+        if (fallback) {
+          logger.warn({ specId: args.specId, reason: msg }, "tool_spec_summary_fallback");
+          const outName = stepOutputName(step);
+          trace.push({
+            idx: step.idx,
+            tool: SUMMARIZE_PSEUDO_TOOL,
+            args: { prompt: summarizeStep.prompt },
+            ok: true,
+            result: fallback,
+            fallback: true,
+            fallbackReason: msg,
+            ...(outName ? { as: outName } : {}),
+          });
+          if (outName) named.set(outName, fallback);
+          prev = fallback;
+          continue;
+        }
         trace.push({
           idx: step.idx,
           tool: SUMMARIZE_PSEUDO_TOOL,
           args: { prompt: summarizeStep.prompt },
           ok: false,
-          error: msg,
+          error,
         });
-        outcome = { status: "failed", trace, error: `step ${step.idx} (summarize): ${msg}` };
+        outcome = { status: "failed", trace, error: `step ${step.idx + 1} (summarize): ${error}` };
+        break;
+      }
+      continue;
+    }
+
+    // WARP-2895 — `transform` / `when`, checked BEFORE the malformed guard
+    // like `summarize`. They dispatch no tool, so they are outside the §3
+    // scope check by construction; what they read is the run's own named
+    // results, resolved here under the same reference rules a call step's
+    // args get.
+    const sandboxStep = parseSandboxStep(step);
+    if (sandboxStep) {
+      const pseudo = sandboxStep.kind === "when" ? WHEN_PSEUDO_TOOL : TRANSFORM_PSEUDO_TOOL;
+      if (!args.transformer) {
+        const msg = `step ${step.idx + 1}: ${sandboxStep.kind} step but no sandbox configured`;
+        trace.push({ idx: step.idx, tool: pseudo, args: {}, ok: false, error: msg });
+        outcome = { status: "failed", trace, error: msg };
+        break;
+      }
+      let resolvedInputs: Record<string, unknown>;
+      try {
+        resolvedInputs = resolveRefs(sandboxStep.inputs, { prev, named }) as Record<string, unknown>;
+      } catch (err) {
+        if (!(err instanceof StepReferenceError)) throw err;
+        trace.push({ idx: step.idx, tool: pseudo, args: {}, ok: false, error: err.message });
+        outcome = { status: "failed", trace, error: `step ${step.idx + 1} (${sandboxStep.kind}): ${err.message}` };
+        break;
+      }
+      try {
+        const result = await args.transformer.transform(sandboxStep.code, resolvedInputs);
+        const outName = stepOutputName(step);
+        if (sandboxStep.kind === "when") {
+          const proceed = Boolean(result);
+          const remaining = stepsToWalk.filter((s) => s.idx > step.idx).length;
+          trace.push({
+            idx: step.idx,
+            tool: pseudo,
+            args: { inputs: resolvedInputs },
+            ok: true,
+            result: proceed,
+            ...(outName ? { as: outName } : {}),
+            ...(proceed ? {} : { skippedRemaining: remaining }),
+          });
+          if (outName) named.set(outName, proceed);
+          prev = proceed;
+          if (!proceed) break; // a clean stop: status stays ok
+          continue;
+        }
+        trace.push({
+          idx: step.idx,
+          tool: pseudo,
+          args: { inputs: resolvedInputs },
+          ok: true,
+          result,
+          ...(outName ? { as: outName } : {}),
+        });
+        if (outName) named.set(outName, result);
+        prev = result;
+      } catch (err) {
+        const msg = (err as Error).message ?? String(err);
+        trace.push({ idx: step.idx, tool: pseudo, args: { inputs: resolvedInputs }, ok: false, error: msg });
+        outcome = { status: "failed", trace, error: `step ${step.idx + 1} (${sandboxStep.kind}): ${msg}` };
         break;
       }
       continue;
@@ -514,7 +726,7 @@ export async function runToolSpec(
 
     const parsed = parseCallStep(step);
     if (!parsed) {
-      const msg = `step ${step.idx}: malformed (kind=${step.kind})`;
+      const msg = `step ${step.idx + 1}: malformed (kind=${step.kind})`;
       trace.push({
         idx: step.idx,
         tool: "(unknown)",
@@ -538,7 +750,7 @@ export async function runToolSpec(
       >;
     } catch (err) {
       if (!(err instanceof StepReferenceError)) throw err;
-      const msg = `step ${step.idx} (${parsed.tool}): ${err.message}`;
+      const msg = `step ${step.idx + 1} (${parsed.tool}): ${err.message}`;
       trace.push({
         idx: step.idx,
         tool: parsed.tool,
@@ -565,7 +777,7 @@ export async function runToolSpec(
       outcome = {
         status: "failed",
         trace,
-        error: `step ${step.idx} (${parsed.tool}): ${denial.message}`,
+        error: `step ${step.idx + 1} (${parsed.tool}): ${denial.message}`,
         denialCode: denial.code,
       };
       break;
@@ -607,7 +819,7 @@ export async function runToolSpec(
       outcome = {
         status: "failed",
         trace,
-        error: `step ${step.idx} (${parsed.tool}): ${msg}`,
+        error: `step ${step.idx + 1} (${parsed.tool}): ${msg}`,
       };
       // Halt — no further steps attempted per the C1 contract.
       break;
@@ -617,9 +829,25 @@ export async function runToolSpec(
   // Optional steps that failed. The run is still `ok`, but a report written
   // around a source that could not be read must leave a signal something
   // other than the model's wording can act on: `warn` in the feed and the
-  // tool names in refs.
+  // tool names in refs. WARP-3409: a summary written by the fallback, or one
+  // ended early because it was cut off, is a gap too.
   const failedSteps =
-    outcome.status === "ok" ? trace.filter((t) => !t.ok).map((t) => t.tool) : [];
+    outcome.status === "ok" ? trace.filter((t) => !t.ok || t.fallback || t.truncated).map((t) => t.tool) : [];
+
+  // WARP-3282 — the run record (ToolRun.trace/error, the HTTP response, the
+  // run history shared across owner/admin/family) holds results and resolved
+  // args, so it gets the same credential scrub as a chat trace. Count only.
+  const stored = redactCredentialValues(outcome.trace);
+  const storedError = outcome.error ? redactCredentials(outcome.error) : null;
+  const redacted = stored.count + (storedError?.count ?? 0);
+  if (redacted > 0) {
+    logger.info({ specId: args.specId, redacted }, "tool_spec_run_credentials_redacted");
+    outcome = {
+      ...outcome,
+      trace: stored.value as RunStepTrace[],
+      error: storedError ? storedError.text : outcome.error,
+    };
+  }
 
   const endedAt = new Date();
   const run = (await prisma.toolRun.create({

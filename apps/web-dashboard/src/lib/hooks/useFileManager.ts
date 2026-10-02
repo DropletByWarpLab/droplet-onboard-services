@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FileEntryInfo, FileViewMode } from "../types";
 
 /**
@@ -12,6 +12,19 @@ export interface Clipboard {
   paths: string[];
   /** The directory the items were cut/copied from — shown for cancellation UX */
   sourceDir: string;
+}
+
+/** Per-browser choice of Icons (grid) vs List. */
+const VIEW_MODE_KEY = "droplet.files.viewMode";
+
+function readStoredViewMode(): FileViewMode | null {
+  try {
+    const v = window.localStorage.getItem(VIEW_MODE_KEY);
+    return v === "grid" || v === "list" ? v : null;
+  } catch {
+    // Private window / blocked site data — the choice just doesn't persist.
+    return null;
+  }
 }
 
 /**
@@ -30,7 +43,21 @@ export function useFileManager(currentPath: string) {
   const [selection, setSelection] = useState<Set<string>>(new Set());
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [clipboard, setClipboard] = useState<Clipboard | null>(null);
-  const [viewMode, setViewMode] = useState<FileViewMode>("list");
+  // Always "list" on the first render so server and client markup agree; the
+  // stored choice is applied right after mount.
+  const [viewMode, setViewModeState] = useState<FileViewMode>("list");
+  useEffect(() => {
+    const stored = readStoredViewMode();
+    if (stored) setViewModeState(stored);
+  }, []);
+  const setViewMode = useCallback((mode: FileViewMode) => {
+    setViewModeState(mode);
+    try {
+      window.localStorage.setItem(VIEW_MODE_KEY, mode);
+    } catch {
+      /* not persisted — see readStoredViewMode */
+    }
+  }, []);
   const [lastAnchorPath, setLastAnchorPath] = useState<string | null>(null);
 
   const isSelected = useCallback(

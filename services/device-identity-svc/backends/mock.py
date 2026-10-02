@@ -10,7 +10,9 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import logging
 import secrets
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -19,7 +21,16 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
+from extension_signing import (
+    EXTENSION_KEY_FILE,
+    EXTENSION_KEY_FILE_MODE,
+    EXTENSION_KEY_USAGE,
+    signing_envelope,
+    spki_fingerprint,
+)
 from storage import Storage
+
+logger = logging.getLogger(__name__)
 
 # Cert validity window — kept as a named constant per the "no guessing"
 # project rule. Self-signed certs live 5 years; renewal is a future ticket.
@@ -62,6 +73,13 @@ class MockBackend:
         self._pcr_state: dict[int, bytes] = _make_pcr_state()
         self._device_id: str = ""
         self._last_reseal_at: str = ""
+        # WARP-2900: the extension-signing key. A SEPARATE key from
+        # _private_key, persisted to its own file (EXTENSION_KEY_FILE), created
+        # lazily by the first sign_extension() and never by get_status(). The
+        # lock makes the first-sign create-or-load atomic across the gRPC
+        # worker threads, so two concurrent first promotes cannot mint two keys.
+        self._extension_key: ec.EllipticCurvePrivateKey | None = None
+        self._extension_lock = threading.Lock()
         # If already provisioned on disk, hydrate.
         if self._storage.is_provisioned():
             self._hydrate_from_disk()
@@ -147,6 +165,30 @@ class MockBackend:
         assert self._private_key is not None
         return self._private_key.sign(payload, ec.ECDSA(hashes.SHA256()))
 
+    def sign_extension(self, statement: bytes) -> bytes:
+        """Sign EXTENSION_STATEMENT_PREFIX || statement with the extension
+        key, creating the key on first use. Refuses (StatementRefused) any
+        statement that is not kind == keyUsage == "extension", so this method
+        cannot be used as a general-purpose signer even by in-process code."""
+        if not self.is_provisioned():
+            raise RuntimeError("not provisioned")
+        envelope = signing_envelope(statement)
+        key = self._load_extension_key(create=True)
+        assert key is not None
+        return key.sign(envelope, ec.ECDSA(hashes.SHA256()))
+
+    def extension_public_key(self) -> tuple[bytes, str] | None:
+        """(SPKI DER, "sha256:<hex>") of the extension key, or None when it
+        has not been created yet. Never creates the key."""
+        key = self._load_extension_key(create=False)
+        if key is None:
+            return None
+        spki = key.public_key().public_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        return spki, spki_fingerprint(spki)
+
     def get_cert_pem(self) -> bytes:
         if not self.is_provisioned():
             raise RuntimeError("not provisioned")
@@ -165,6 +207,21 @@ class MockBackend:
 
     def get_status(self) -> dict:
         provisioned = self.is_provisioned()
+        ext = None
+        if provisioned:
+            # GetStatus serves overlay enrolment and TLS issuance too. A
+            # damaged extension key (only the promote path uses it) must not
+            # take those down: report no extension key and log it. Signing
+            # stays fail-closed in sign_extension().
+            try:
+                ext = self.extension_public_key()
+            except Exception as exc:  # noqa: BLE001 - isolate every failure
+                logger.error(
+                    "extension key unreadable; GetStatus reports none: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+        ext_spki, ext_fp = ext if ext is not None else (b"", "")
         if not provisioned:
             return {
                 "provisioned": False,
@@ -176,6 +233,8 @@ class MockBackend:
                 "seal_valid": False,
                 "last_reseal_at": "",
                 "current_pcr_snapshot": _digest_bytes_to_hex_map(self._pcr_state),
+                "extension_spki_der": b"",
+                "extension_key_fingerprint": "",
             }
         info = self._storage.read_provisioned() or {}
         cert = x509.load_pem_x509_certificate(self.get_cert_pem())
@@ -193,6 +252,8 @@ class MockBackend:
             "seal_valid": seal_valid,
             "last_reseal_at": self._last_reseal_at,
             "current_pcr_snapshot": _digest_bytes_to_hex_map(self._pcr_state),
+            "extension_spki_der": ext_spki,
+            "extension_key_fingerprint": ext_fp,
         }
 
     def reseal(self) -> dict:
@@ -239,6 +300,52 @@ class MockBackend:
         ).digest()
 
     # ─── Internals ────────────────────────────────────────────────────
+
+    def _load_extension_key(
+        self, *, create: bool
+    ) -> ec.EllipticCurvePrivateKey | None:
+        """Return the extension key: from memory, else from
+        EXTENSION_KEY_FILE, else (only when ``create``) a freshly generated
+        ECDSA-P256 key written to EXTENSION_KEY_FILE. Custody on the mock
+        backend is a plaintext PKCS8 PEM on the boot disk, the same posture
+        as device-id.sealed (docs/security/device-identity.md)."""
+        with self._extension_lock:
+            if self._extension_key is not None:
+                return self._extension_key
+            if self._storage.exists(EXTENSION_KEY_FILE):
+                sealed = json.loads(self._storage.read(EXTENSION_KEY_FILE))
+                if sealed.get("usage") != EXTENSION_KEY_USAGE:
+                    raise RuntimeError(
+                        f"{EXTENSION_KEY_FILE} is not an extension-usage key"
+                    )
+                key = serialization.load_pem_private_key(
+                    sealed["priv_pem"].encode(), password=None
+                )
+                if not isinstance(key, ec.EllipticCurvePrivateKey):
+                    raise RuntimeError(f"{EXTENSION_KEY_FILE} is not an EC key")
+                self._extension_key = key
+                return key
+            if not create:
+                return None
+            key = ec.generate_private_key(ec.SECP256R1())
+            priv_pem = key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+            self._storage.write(
+                EXTENSION_KEY_FILE,
+                json.dumps({
+                    "usage": EXTENSION_KEY_USAGE,
+                    "priv_pem": priv_pem.decode(),
+                    "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                }).encode(),
+                # Private-key material: owner read/write only, whatever the
+                # process umask is (review #2312).
+                mode=EXTENSION_KEY_FILE_MODE,
+            )
+            self._extension_key = key
+            return key
 
     def _hydrate_from_disk(self) -> None:
         """Reconstruct in-memory state from persisted artifacts. Called on

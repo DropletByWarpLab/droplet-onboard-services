@@ -224,7 +224,7 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="Front-door camera"
-            className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+            className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
             style={{
               background: "var(--surface)",
               border: "1px solid var(--border)",
@@ -253,7 +253,7 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
               value={srcPort}
               onChange={(e) => setSrcPort(e.target.value)}
               placeholder="8080"
-              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
               style={{
                 background: "var(--surface)",
                 border: "1px solid var(--border)",
@@ -275,7 +275,7 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
               id="pf-proto"
               value={proto}
               onChange={(e) => setProto(e.target.value as Proto)}
-              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] transition-colors"
+              className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] transition-colors"
               style={{
                 background: "var(--surface)",
                 border: "1px solid var(--border)",
@@ -308,7 +308,7 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
               value={destIp}
               onChange={(e) => setDestIp(e.target.value)}
               placeholder="192.168.50.20"
-              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
               style={{
                 background: "var(--surface)",
                 border: "1px solid var(--border)",
@@ -334,7 +334,7 @@ export function PortForwardForm({ onApplied }: { onApplied?: () => void }) {
               value={destPort}
               onChange={(e) => setDestPort(e.target.value)}
               placeholder="80"
-              className="w-full px-3 py-2.5 outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+              className="w-full px-3 py-2.5 outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
               style={{
                 background: "var(--surface)",
                 border: "1px solid var(--border)",

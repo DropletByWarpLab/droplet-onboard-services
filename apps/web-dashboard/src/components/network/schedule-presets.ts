@@ -1,7 +1,7 @@
 /**
  * Canned preset templates rendered on the Schedules tab (WARP-99 / T8).
  *
- * Also the single source of truth for the Bedtime preset consumed by
+ * Also the single source of truth for the After-hours preset consumed by
  * `QuickSchedulePopover` and `ScheduleEditorModal` — callers should import
  * from here rather than hard-coding window bitmasks inline.
  */
@@ -29,28 +29,29 @@ export interface SchedulePreset {
 }
 
 export const SCHEDULE_PRESETS = [
+  // Business-only build: the `bedtime` / `school` ids are persisted in
+  // existing schedules and never user-visible, so they stay; the display
+  // names and default windows are business ones (same rule as `homework`).
   {
     id: "bedtime",
-    name: "Bedtime",
+    name: "After hours",
     kind: "recurring",
-    description: "Sun–Thu 9pm–7am, Fri–Sat 11pm–8am",
+    description: "Every day 7pm–7am",
     icon: "Moon",
     windows: [
-      // Sun=1, Mon=2, Tue=4, Wed=8, Thu=16 → 31
-      { daysOfWeek: 31, startMin: 21 * 60, endMin: 7 * 60 },
-      // Fri=32, Sat=64 → 96
-      { daysOfWeek: 96, startMin: 23 * 60, endMin: 8 * 60 },
+      // Sun..Sat → 127
+      { daysOfWeek: 127, startMin: 19 * 60, endMin: 7 * 60 },
     ],
   },
   {
     id: "school",
-    name: "School hours",
+    name: "Business hours",
     kind: "recurring",
-    description: "Mon–Fri 8am–3pm",
-    icon: "Backpack",
+    description: "Mon–Fri 9am–5pm",
+    icon: "Briefcase",
     windows: [
       // Mon=2, Tue=4, Wed=8, Thu=16, Fri=32 → 62
-      { daysOfWeek: 62, startMin: 8 * 60, endMin: 15 * 60 },
+      { daysOfWeek: 62, startMin: 9 * 60, endMin: 17 * 60 },
     ],
   },
   {

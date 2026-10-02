@@ -34,6 +34,10 @@ import {
   isChannelReady,
   EmailChannelNotConfiguredError,
   EMAIL_CHANNEL_SINGLETON_ID,
+  TRANSPORT_TIMEOUTS,
+  classifyTransportError,
+  verifyChannel,
+  CHANNEL_VERIFY_MESSAGES,
   type EmailChannelConfig,
 } from "./email-channel.service.js";
 import { __setEncryptionKeyForTest } from "./encryption.service.js";
@@ -113,6 +117,14 @@ describe("buildTransportOptions", () => {
     const opts = buildTransportOptions(baseConfig({ security: "none", port: 25 }), "pw");
     expect(opts.secure).toBe(false);
     expect(opts.requireTLS).toBeUndefined();
+  });
+
+  it("bounds every dial — nodemailer's two-minute defaults never reach a request path (WARP-2957)", () => {
+    const opts = buildTransportOptions(baseConfig(), "");
+    expect(opts.connectionTimeout).toBe(TRANSPORT_TIMEOUTS.connectionTimeout);
+    expect(opts.greetingTimeout).toBe(TRANSPORT_TIMEOUTS.greetingTimeout);
+    expect(opts.socketTimeout).toBe(TRANSPORT_TIMEOUTS.socketTimeout);
+    expect(opts.connectionTimeout).toBeLessThan(120_000);
   });
 
   it("omits auth entirely when there is no username (open relay on LAN)", () => {
@@ -258,6 +270,124 @@ describe("sendInviteEmail", () => {
     expect(result.error).toMatch(/not configured|disabled/i);
     const row = prisma._invites.get("inv-3")!;
     expect(row.sendStatus).toBe("failed");
+  });
+});
+
+// ── WARP-2957 — verifying the relay ─────────────────────────────────────────
+describe("classifyTransportError", () => {
+  it("maps nodemailer codes and SMTP replies onto the closed set", () => {
+    expect(classifyTransportError({ code: "EAUTH", responseCode: 535 })).toBe("auth_failed");
+    expect(classifyTransportError({ responseCode: 534, message: "5.7.14 needs TLS" })).toBe(
+      "auth_failed",
+    );
+    expect(classifyTransportError({ code: "ETIMEDOUT" })).toBe("timeout");
+    expect(classifyTransportError({ code: "ECONNECTION", message: "Connection timeout" })).toBe(
+      "timeout",
+    );
+    expect(classifyTransportError({ code: "EDNS", message: "getaddrinfo ENOTFOUND h" })).toBe(
+      "unreachable",
+    );
+    expect(classifyTransportError({ code: "ECONNREFUSED" })).toBe("unreachable");
+    expect(
+      classifyTransportError({ code: "ESOCKET", message: "wrong version number" }),
+    ).toBe("tls_failed");
+    expect(classifyTransportError({ code: "ECONNECTION", message: "STARTTLS not supported" })).toBe(
+      "tls_failed",
+    );
+    expect(classifyTransportError(new Error("boom"))).toBe("unknown");
+    expect(classifyTransportError(undefined)).toBe("unknown");
+  });
+});
+
+function createVerifyPrismaMock(channel: EmailChannelConfig | null) {
+  let row = channel;
+  return {
+    _row: () => row,
+    emailChannelSetting: {
+      findUnique: vi.fn(async () => row),
+      update: vi.fn(async ({ data }: { data: Partial<EmailChannelConfig> }) => {
+        row = { ...(row as EmailChannelConfig), ...data };
+        return row;
+      }),
+    },
+  };
+}
+
+describe("verifyChannel", () => {
+  it("calls transport.verify (never sendMail) and stamps lastTestedAt with lastError=null", async () => {
+    const prisma = createVerifyPrismaMock(baseConfig({ lastError: "old failure" }));
+    const verify = vi.fn().mockResolvedValue(true);
+    const sendMail = vi.fn();
+    const result = await verifyChannel(prisma as never, {
+      transportFactory: () => ({ sendMail, verify }) as never,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.error).toBeNull();
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(sendMail).not.toHaveBeenCalled();
+    expect(prisma._row()!.lastError).toBeNull();
+    expect(prisma._row()!.lastTestedAt).toEqual(result.testedAt);
+  });
+
+  it("decrypts the stored password for the dial and never persists it", async () => {
+    const { encryptSecret } = await import("./encryption.service.js");
+    const prisma = createVerifyPrismaMock(baseConfig({ passwordEnc: encryptSecret("app-pass") }));
+    const seen: unknown[] = [];
+    await verifyChannel(prisma as never, {
+      transportFactory: (opts) => {
+        seen.push(opts);
+        return { sendMail: vi.fn(), verify: vi.fn().mockResolvedValue(true) } as never;
+      },
+    });
+    expect((seen[0] as { auth: { pass: string } }).auth.pass).toBe("app-pass");
+    expect(JSON.stringify(prisma.emailChannelSetting.update.mock.calls)).not.toContain("app-pass");
+  });
+
+  it("records the closed-set sentence on failure — the server's line never reaches the row", async () => {
+    const prisma = createVerifyPrismaMock(baseConfig());
+    const err = Object.assign(
+      new Error("535-5.7.8 Username and Password not accepted for postmaster@example.com"),
+      { code: "EAUTH", responseCode: 535 },
+    );
+    const result = await verifyChannel(prisma as never, {
+      transportFactory: () => ({ sendMail: vi.fn(), verify: vi.fn().mockRejectedValue(err) }) as never,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("auth_failed");
+    expect(prisma._row()!.lastError).toBe(CHANNEL_VERIFY_MESSAGES.auth_failed);
+    expect(prisma._row()!.lastError).not.toContain("535");
+    expect(prisma._row()!.lastError).not.toContain("postmaster@example.com");
+  });
+
+  it("refuses to claim success for a transport that cannot verify", async () => {
+    const prisma = createVerifyPrismaMock(baseConfig());
+    const result = await verifyChannel(prisma as never, {
+      transportFactory: () => ({ sendMail: vi.fn() }) as never,
+    });
+    expect(result.ok).toBe(false);
+    expect(prisma._row()!.lastError).not.toBeNull();
+  });
+
+  it("leaves the row untouched when there is no host to dial", async () => {
+    const prisma = createVerifyPrismaMock(baseConfig({ host: "  " }));
+    const verify = vi.fn();
+    const result = await verifyChannel(prisma as never, {
+      transportFactory: () => ({ sendMail: vi.fn(), verify }) as never,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("not_configured");
+    expect(verify).not.toHaveBeenCalled();
+    expect(prisma.emailChannelSetting.update).not.toHaveBeenCalled();
+  });
+
+  it("dials even when the channel is disabled — an owner tests before switching it on", async () => {
+    const prisma = createVerifyPrismaMock(baseConfig({ enabled: false }));
+    const verify = vi.fn().mockResolvedValue(true);
+    const result = await verifyChannel(prisma as never, {
+      transportFactory: () => ({ sendMail: vi.fn(), verify }) as never,
+    });
+    expect(result.ok).toBe(true);
+    expect(verify).toHaveBeenCalledTimes(1);
   });
 });
 

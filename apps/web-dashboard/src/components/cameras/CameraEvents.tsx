@@ -21,14 +21,20 @@ function formatTimeAgo(timestamp: number): string {
   return `${Math.floor(seconds / 86400)}d ago`;
 }
 
+/**
+ * Renders as TWO siblings — a `.sect` heading and its card — so both land as
+ * direct children of `.page-inner` and pick up the page-rhythm rule rather
+ * than a hand-rolled `space-y-3` + `type-headline` of their own (WARP-2961).
+ */
 export function CameraEvents({ events }: CameraEventsProps) {
   if (events.length === 0) return null;
 
   return (
-    <div className="space-y-3">
-      <h2 className="type-headline" style={{ color: "var(--text)" }}>
-        Recent Detections
-      </h2>
+    <>
+      <div className="sect">
+        <h2>Recent detections</h2>
+        <span className="sx">{events.length}</span>
+      </div>
       <div className="card" style={{ padding: 0 }}>
         <div className="rows">
           {events.map((event) => {
@@ -88,6 +94,6 @@ export function CameraEvents({ events }: CameraEventsProps) {
           })}
         </div>
       </div>
-    </div>
+    </>
   );
 }

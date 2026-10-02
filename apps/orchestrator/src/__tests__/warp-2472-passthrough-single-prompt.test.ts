@@ -101,6 +101,7 @@ import type { AuthUser } from "../middleware/auth.js";
 // phase and by the orchestrator Dockerfile.
 import {
   createServer,
+  NO_MODULE_GATING,
   type ServerOptions,
   type ContextDeps,
 } from "@droplet/mcp-server";
@@ -190,7 +191,13 @@ async function connectMcp(baseUrl: string) {
         : ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() } as unknown as HttpClient),
   } as ContextDeps;
   // The PRODUCTION interceptor instance, not a test double.
-  const options: ServerOptions = { interceptor: defaultToolCallInterceptor };
+  // WARP-2972 — no orchestrator to ask a module verdict of, and this file is
+  // about the confirmation interceptor: opt out of module gating explicitly
+  // (a server built with no source fails closed).
+  const options: ServerOptions = {
+    interceptor: defaultToolCallInterceptor,
+    moduleVerdict: NO_MODULE_GATING,
+  };
   const server = createServer(deps, { kind: "local-trusted" }, options);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "warp-2305-probe", version: "0.0.1" }, { capabilities: {} });
@@ -285,9 +292,21 @@ describe("WARP-2472 — the pass-through roster, enumerated from the flag", () =
     // no confirmation (a draft is inert) and `routine_list` a read, so
     // neither moves this number. 40 + 1 = 41.
     //
+    // WARP-2896 then added ONE: `workspace_propose` — Tier-2 because a
+    // proposal is what the person reviews, so nothing unattended may file
+    // one; the interceptor challenges it and the workshop run PARKS. The
+    // other seven workspace tools are four reads and three ungated writes
+    // (one sandbox checkout is their whole reach), so none moves this
+    // number. 41 + 1 = 42.
+    //
+    // The device gateway then added ONE: `set_building_point` — a write to
+    // real building equipment (BACnet/Modbus/SNMP/KNX), confirmed by the
+    // interceptor. Its route mints no token of its own, so it is not a
+    // pass-through; `get_building_devices` is a read. 42 + 1 = 43.
+    //
     // The pass-through roster below is again unchanged: none of the tools
     // touched since relays a 202.
-    expect(confirming).toHaveLength(41);
+    expect(confirming).toHaveLength(43);
     expect(passThrough).toEqual([
       "add_port_forward",
       "approve_ap",
@@ -473,6 +492,7 @@ describe("WARP-2472 — control: a pass-through interceptor gives the same singl
     } as ContextDeps;
     const server = createServer(deps, { kind: "local-trusted" }, {
       interceptor: passThroughInterceptor,
+      moduleVerdict: NO_MODULE_GATING,
     });
     const [ct, st] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "warp-2305-before", version: "0.0.1" }, { capabilities: {} });

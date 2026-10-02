@@ -1015,3 +1015,103 @@ describe("tls-issuance.service — self-provision (WARP-983)", () => {
     expect((await store.get(FQDN))?.state).toBe("LE_RENEW_FAILED");
   });
 });
+
+// ---------------------------------------------------------------------------
+// WARP-2944 — the owner hears about renewal failing and about expiry, exactly
+// once per transition / per certificate, and a notifier can never break a tick
+// ---------------------------------------------------------------------------
+
+describe("tls-issuance.service — owner notifications (WARP-2944)", () => {
+  function unreachableHq() {
+    return makeHqClient({
+      challenge: vi.fn(async () => {
+        const e = new Error("ECONNREFUSED");
+        (e as { code?: string }).code = "ECONNREFUSED";
+        throw e;
+      }),
+    });
+  }
+  function makeNotifier() {
+    return { renewFailed: vi.fn(async () => {}), expiringSoon: vi.fn(async () => {}) };
+  }
+
+  it("fires renewFailed ONCE on the transition into LE_RENEW_FAILED, not on every failing tick", async () => {
+    const store = makeStore({ fqdn: FQDN, state: "LE_ISSUED", notAfter: daysFromNow(10) });
+    const notifier = makeNotifier();
+    const svc = createTlsIssuanceService(makeDeps({ store, hq: unreachableHq(), notifier }));
+
+    await svc.runOnce(); // LE_ISSUED → LE_RENEW_FAILED: the transition
+    await svc.runOnce(); // still failing
+    await svc.runOnce(); // still failing
+
+    expect((await store.get(FQDN))?.state).toBe("LE_RENEW_FAILED");
+    expect(notifier.renewFailed).toHaveBeenCalledTimes(1);
+    expect(notifier.renewFailed).toHaveBeenCalledWith({
+      fqdn: FQDN,
+      notAfter: expect.any(String),
+      daysLeft: 9, // floor of 10 days minus the test's few milliseconds
+    });
+  });
+
+  it("fires renewFailed again only after a recovery — a fresh failure is a fresh event", async () => {
+    const store = makeStore({ fqdn: FQDN, state: "LE_ISSUED", notAfter: daysFromNow(10) });
+    const notifier = makeNotifier();
+    const svc = createTlsIssuanceService(makeDeps({ store, hq: unreachableHq(), notifier }));
+    await svc.runOnce();
+    expect(notifier.renewFailed).toHaveBeenCalledTimes(1);
+
+    // The box renewed (some later tick succeeded) — then HQ went away again.
+    await store.upsert(FQDN, "LE_ISSUED", daysFromNow(20));
+    await svc.runOnce();
+    expect(notifier.renewFailed).toHaveBeenCalledTimes(2);
+  });
+
+  it("fires expiringSoon inside the last week and not before, and never for the bootstrap cert", async () => {
+    const notifier = makeNotifier();
+    // 10 days left: renewing, but not yet the owner's problem.
+    const calm = makeStore({ fqdn: FQDN, state: "LE_RENEW_FAILED", notAfter: daysFromNow(10) });
+    await createTlsIssuanceService(makeDeps({ store: calm, hq: unreachableHq(), notifier })).runOnce();
+    expect(notifier.expiringSoon).not.toHaveBeenCalled();
+
+    // 5 days left: warned, with the whole-day count.
+    const urgent = makeStore({ fqdn: FQDN, state: "LE_RENEW_FAILED", notAfter: daysFromNow(5) });
+    await createTlsIssuanceService(makeDeps({ store: urgent, hq: unreachableHq(), notifier })).runOnce();
+    expect(notifier.expiringSoon).toHaveBeenCalledTimes(1);
+    expect(notifier.expiringSoon).toHaveBeenCalledWith({ fqdn: FQDN, notAfter: expect.any(String), daysLeft: 4 });
+
+    // Bootstrap self-signed: nothing to count down, nothing to say.
+    const bootstrap = makeStore({ fqdn: FQDN, state: "BOOTSTRAP_SELF_SIGNED", notAfter: null });
+    await createTlsIssuanceService(makeDeps({ store: bootstrap, hq: unreachableHq(), notifier })).runOnce();
+    expect(notifier.expiringSoon).toHaveBeenCalledTimes(1);
+  });
+
+  it("a notifier that throws never aborts the tick or the state write", async () => {
+    const store = makeStore({ fqdn: FQDN, state: "LE_ISSUED", notAfter: daysFromNow(3) });
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const notifier = {
+      renewFailed: vi.fn(async () => {
+        throw new Error("mqtt down");
+      }),
+      expiringSoon: vi.fn(async () => {
+        throw new Error("mqtt down");
+      }),
+    };
+    const svc = createTlsIssuanceService(makeDeps({ store, hq: unreachableHq(), notifier, logger }));
+
+    await expect(svc.runOnce()).resolves.not.toThrow();
+    expect(notifier.expiringSoon).toHaveBeenCalledTimes(1);
+    expect(notifier.renewFailed).toHaveBeenCalledTimes(1);
+    expect((await store.get(FQDN))?.state).toBe("LE_RENEW_FAILED");
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ fqdn: FQDN }),
+      expect.stringContaining("notification failed (non-fatal)"),
+    );
+  });
+
+  it("without a notifier (dev/CI) the tick is exactly what it was", async () => {
+    const store = makeStore({ fqdn: FQDN, state: "LE_ISSUED", notAfter: daysFromNow(3) });
+    const svc = createTlsIssuanceService(makeDeps({ store, hq: unreachableHq() }));
+    await expect(svc.runOnce()).resolves.not.toThrow();
+    expect((await store.get(FQDN))?.state).toBe("LE_RENEW_FAILED");
+  });
+});

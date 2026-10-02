@@ -98,6 +98,9 @@ def test_eligible_filters_by_vram(tmp_path: Path):
     assert [m.name for m in manifest.eligible(detected_vram_gb=6)] == ["tiny"]
     assert [m.name for m in manifest.eligible(detected_vram_gb=8)] == ["tiny", "big"]
     assert [m.name for m in manifest.eligible(detected_vram_gb=0)] == []
+    # WARP-3046: UNKNOWN VRAM (None) offers nothing either — but it is a
+    # different state, reported as such by /models/eligible, not a 0.
+    assert manifest.eligible(detected_vram_gb=None) == []
 
 
 def test_by_name(tmp_path: Path):
@@ -390,6 +393,87 @@ def test_shipped_manifest_pins_glm_to_the_build_that_fits(tmp_path: Path):
     # The default must still be the incumbent, and there must be exactly one.
     assert manifest.default_entry() is not None
     assert manifest.default_entry().name == "gpt-oss:20b"
+
+
+# ── WARP-3046: every shipped entry names the exact DMR build it installs ──
+
+
+def _shipped_manifest():
+    from manifest import load_manifest
+
+    svc_root = Path(__file__).resolve().parents[1]
+    return load_manifest(svc_root / "models" / "model-manifest.json")
+
+
+def test_shipped_manifest_pins_every_entry_to_a_tagged_oci():
+    """Without `oci`, the DMR adapter derives `ai/<repo>` and DROPS the tag
+    (`to_runtime_id`, by design — the Hub's tag names are not Ollama's), so the
+    daemon resolves `latest`: "Gemma 4 26B" installed `ai/gemma4:latest`, which
+    is the 12B. Every entry must therefore declare the build it means, with a
+    real tag — `latest` is the unpinned default under another name."""
+    for m in _shipped_manifest().models:
+        declared = (m.oci or "").strip()
+        assert declared, f"{m.name} declares no oci — DMR would pull `latest`"
+        repository, _, tag = declared.rpartition("/")[2].partition(":")
+        assert tag and tag != "latest", f"{m.name}: oci {declared!r} pins no build"
+        assert declared.startswith("ai/"), f"{m.name}: {declared!r} is not first-party"
+
+
+def test_shipped_gpt_oss_oci_is_the_model_the_box_is_seeded_with():
+    """`pulled` is tag-exact now, so the default entry's `oci` must be the build
+    setup.sh seeds (single-box.sh DROPLET_DEFAULT_DMR_MODEL) — otherwise every
+    DMR box would read its own serving model as not installed and offer a
+    second ~13 GB download of it."""
+    import re
+
+    repo_root = Path(__file__).resolve().parents[3]
+    script = (repo_root / "scripts" / "lib" / "single-box.sh").read_text()
+    match = re.search(r"DROPLET_DEFAULT_DMR_MODEL:-([^}]+)\}", script)
+    assert match, "single-box.sh no longer states DROPLET_DEFAULT_DMR_MODEL's default"
+    seeded = match.group(1).strip()
+    # The seeded id is registry-qualified; the manifest addresses it without
+    # the host, exactly as the DMR adapter normalises it.
+    assert seeded.removeprefix("docker.io/") == _shipped_manifest().by_name("gpt-oss:20b").oci
+
+
+def test_shipped_min_vram_covers_the_pinned_build():
+    """`min_vram_gb` gates what DMR loads with a full offload (`-ngl 999`), so it
+    must at least cover the pinned build's weights. gemma4:26b said 14 while its
+    Q4_K_M build is 18.1 GB — a 16 GB card was offered a model it cannot load."""
+    manifest = _shipped_manifest()
+    for m in manifest.models:
+        assert m.disk_gb is not None, f"{m.name} has no disk_gb"
+        weights_gib = m.disk_gb * 1e9 / 1024**3
+        assert m.min_vram_gb >= weights_gib, (
+            f"{m.name}: min_vram_gb {m.min_vram_gb} < {weights_gib:.1f} GiB of weights"
+        )
+    at_16 = {m.name for m in manifest.eligible(16)}
+    assert at_16 == {"gpt-oss:20b", "qwen3-vl:8b", "llama3.2:3b", "glm-4.7-flash:31b"}
+
+
+def test_shipped_manifest_names_every_pinned_build_by_digest():
+    """`pulled` also accepts the pinned build installed under another tag
+    (the old catalog pulled `latest`), matched on the manifest digest DMR's
+    /api/tags reports. Every pinned entry must carry that digest, well formed:
+    a missing one silently re-offers an installed model on every such box."""
+    import re
+
+    digest = re.compile(r"sha256:[0-9a-f]{64}")
+    for m in _shipped_manifest().models:
+        assert m.oci_digest is not None, f"{m.name} pins {m.oci!r} but declares no oci_digest"
+        assert digest.fullmatch(m.oci_digest), f"{m.name}: malformed oci_digest {m.oci_digest!r}"
+    digests = [m.oci_digest for m in _shipped_manifest().models]
+    assert len(set(digests)) == len(digests), "two entries claim the same build"
+
+
+def test_oci_digest_is_optional(tmp_path: Path):
+    """Same never-brick rule as `oci`: a manifest without it still loads, and
+    such an entry falls back to tag-exact matching."""
+    from manifest import load_manifest
+
+    p = tmp_path / "m.json"
+    p.write_text(_entry_with_oci("ai/gemma4:26b-a4b-q4_K_M"))
+    assert load_manifest(p).models[0].oci_digest is None
 
 
 def _entry_with_oci(oci: str) -> str:

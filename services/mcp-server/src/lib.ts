@@ -31,3 +31,7 @@ export { createServer } from "./server.js";
 export type { TrustContext, ServerOptions } from "./server.js";
 export type { ContextDeps } from "./context.js";
 export type { Claims } from "./auth/jwt.js";
+// WARP-2972 — a server built without a module-verdict source FAILS CLOSED.
+// An embedder or test with no orchestrator to ask opts out explicitly.
+export { NO_MODULE_GATING } from "./module-verdict.js";
+export type { ModuleVerdictSource } from "./module-verdict.js";

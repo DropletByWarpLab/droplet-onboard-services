@@ -84,7 +84,8 @@ export async function provisionDevOwnerNextcloudAccount(
   // script, so on a fresh dev stack neither exists yet — and OCS REFUSES a
   // create-user naming a group that does not exist (the WARP-990 trigger).
   // Ensure them first, exactly as POST /auth/setup does.
-  const groups = ["admin", "droplet-admins", householdGroupSlug(config.DROPLET_SHARED_FOLDER_NAME)];
+  // WARP-2993: no "admin" — only the service account is an NC instance admin.
+  const groups = ["droplet-admins", householdGroupSlug(config.DROPLET_SHARED_FOLDER_NAME)];
 
   for (const groupid of groups) {
     try {

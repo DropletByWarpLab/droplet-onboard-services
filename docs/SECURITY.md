@@ -259,6 +259,109 @@ non-legacy TLD is only taken when it is written as a *value* — the whole
 string literal or the whole right-hand side of a config setting — rather than
 as a word inside running text.
 
+## Per-user WebDAV drive logins (credential surface, WARP-3318)
+
+`POST /api/storage/network-drive/personal` mints a per-user, per-computer,
+full-scope Nextcloud app password (stored encrypted as a `DeviceClient`,
+revocable from the devices list) so a user can map their drive in Finder or
+File Explorer. It is limited to owner/admin/family (never guest) and OFF by
+default behind the owner setting `Workspace.personalDriveEnabled` (Settings ->
+Personal drives). Access through the drive is NOT recorded as downloads in the
+activity log and skips the per-file upload cap; WARP-3318 records that
+unaudited-read trade-off and the owner's explicit opt-in to it. Nextcloud's OCS
+sharing API (`/nextcloud/ocs/v{1,2}.php/apps/files_sharing`) is refused at the
+gateway so no app password can mint shares or public links (WARP-3053), and so
+are the other OCS routes that mint a bearer-style URL (audit below).
+Details: [`network-drive.md`](network-drive.md#per-user-drive-webdav); gateway
+rule: [`THREAT_MODEL.md`](THREAT_MODEL.md) §3a.
+
+Turning the setting off revokes every active personal-drive login: each row
+carries the explicit `DeviceClient.kind` (`personal_drive`, set by the POST
+above; native-app pairings are `app_pairing`), and
+`PUT /api/settings/workspace/personal-drive` with `enabled: false` marks the
+active `personal_drive` rows revoked and returns the count as
+`revokedDriveLogins`. The flag change is an Activity row written right after
+the flag; the revoke outcome is a second row (the count, or "failed after N
+revoked" plus the error message if the sweep throws, in which case the request
+is a 500 and the flag stays off). Each row's `{ clientId, userId }` is listed
+in that row's `refs`. The count is rows **marked revoked**, not app passwords
+Nextcloud confirmed deleted: the upstream delete is best-effort, and
+`ncDeleteAppPassword` does not check the HTTP status (tracked as WARP-3383).
+A mint that passed its flag check just before the switch-off can insert its
+row after the sweep has run, so the POST re-reads the flag once the row exists
+and, if it is now off, revokes that login and answers 403
+`personal_drive_disabled` without returning the password. **Logins minted before the `kind` column
+existed** (migration `20260930100000_device_client_kind`) default to
+`app_pairing`: nothing explicit tells them apart from pairings (the name is
+free text, and the pairing-code link is purged daily), so they are NOT
+bulk-revoked. They show in each person's devices list (Paired devices) as
+"Finder on …" / "File Explorer on …", where each person can remove theirs
+(`DELETE /api/devices/clients/:id`).
+
+### Nextcloud OCS audit: routes that mint a bearer-style URL (WARP-3053, WARP-3318)
+
+Rule: through `/nextcloud/` an app password (paired devices, personal drive) is
+full-scope, so any OCS route that returns a URL or token usable **without the
+caller's credentials** lets it skip the orchestrator's policy (download audit,
+owner/admin-only publish). Such a route is denied at the gateway only if
+nothing legitimate calls it through the gateway. Evidence for "nothing does":
+the dashboard requests no OCS path; the orchestrator builds every OCS URL from
+`NEXTCLOUD_URL` (compose network), including the editor's direct-editing mint
+(`ncCreateRichdocumentsDirectUrl`); root `/ocs/` is not routed to Nextcloud at
+all (it falls to the dashboard), so a page served by Nextcloud cannot reach
+OCS through the gateway either. Pinned by Phase 7 of
+`tests/nginx-nextcloud-assets.test.sh`.
+
+Apps enabled on the box: the digest-pinned `nextcloud:29-apache` bundle,
+plus `groupfolders` and `files_external` (`docker/nextcloud-init.sh`),
+plus `richdocuments` (default engine; installed from the appstore, unpinned) or
+`onlyoffice` (`DOCS_ENGINE=onlyoffice`), minus the Hub apps
+`disable_hub_apps` switches off. Route names below are from the Nextcloud 29
+app sources, not probed on a live box.
+
+| App | OCS route (under `/nextcloud/ocs/v{1,2}.php/`) | Mints a credential-free URL? | Used via gateway? | Decision |
+|---|---|---|---|---|
+| files_sharing | `apps/files_sharing/…` (shares, sharees, remote_shares) | Yes: public link, any share | No (web sharing is orchestrator to `NEXTCLOUD_URL`) | **Denied** (WARP-3053) |
+| richdocuments | `apps/richdocuments/…` (`api/v1/document` direct-editing link, `api/v1/templates/new`, other editor helpers) | Yes: `…/richdocuments/direct/<token>` renders the editor with no cookie and no `Authorization`, short-lived | No: the orchestrator mints it over `NEXTCLOUD_URL`; the browser only loads the resulting page, a non-OCS route that stays proxied | **Denied**, whole app (unpinned appstore app, no consumer) |
+| files (core) | `apps/files/api/v1/directEditing/{open,create}` | Yes: `…/apps/files/directEditing/<token>` for any registered editor (text, richdocuments, onlyoffice) | No | **Denied**, by route |
+| dav | `apps/dav/api/v1/direct` (POST) | Yes: `…/remote.php/direct/<token>` downloads one file; the caller picks the lifetime (up to 24 h) | No | **Denied**, by route |
+| files (core), other routes | `apps/files/api/v1/{stats,templates,thumbnail,transferownership}` | No: authenticated reads/actions | Nextcloud clients only | Left open |
+| dav, other routes | `apps/dav/api/v1/outOfOffice/…` | No | Nextcloud clients only | Left open |
+| core | `core/getapppassword`, `core/apppassword` | No link; mints an app **password** (a credential) for a caller that already authenticated. The orchestrator uses it internally for pairing | Nextcloud clients' login | Left open, see residual below |
+| provisioning_api | `cloud/users…`, `cloud/groups…` | No; needs Nextcloud admin credentials | No (orchestrator, internal) | Left open |
+| groupfolders | `apps/groupfolders/folders…` | No; admin-only management | No | Left open |
+| federatedfilesharing, cloud_federation_api, federation | `cloud/shares`, `apps/federatedfilesharing/…` | No outward URL; inbound share offers from a remote server. Outgoing shares are created via files_sharing (denied) | No | Left open: not confirmed whether federation is configured off |
+| sharebymail | none of its own (rides the files_sharing routes) | n/a | n/a | Covered by the files_sharing denial |
+| circles, notifications, activity, files_reminders, files_downloadlimit, files_external, user_status, dashboard, comments, systemtags, serverinfo, oauth2, app_api | their own `apps/<app>/…` | No | No | Left open |
+
+Left open on purpose, for the reasons in the table. Three things the audit
+found that are NOT OCS and are NOT closed here, for a follow-up:
+
+- **Photos public albums** (and CalDAV `publish-calendar`) mint a public URL
+  from a DAV request (`PROPPATCH`/`POST` under `remote.php/dav/…`), not from
+  OCS. Not confirmed on the pinned image. Options: deny
+  `/nextcloud/remote.php/dav/photos/`, or disable `photos` in
+  `nextcloud-init.sh` the way `disable_hub_apps` does.
+- **richdocuments' non-OCS routes still mint WOPI `access_token` URLs**, and
+  they are reachable through BOTH spellings: the `/nextcloud/` leg
+  (`/nextcloud/index.php/apps/richdocuments/…`) and the root
+  `/index.php/apps/richdocuments/` leg. The root leg is a prefix, so it carries
+  every richdocuments route (the WOPI file endpoints, which need a WOPI token,
+  and token minting for a credentialed caller). The editor needs the root leg,
+  so it stays; the `/nextcloud/` spelling has no consumer and is a candidate to
+  deny by route once the route names are confirmed on a live box. Not closed
+  here; the OCS denials above do not cover it.
+- **The owner switch is not a WebDAV gate.** It controls whether the
+  orchestrator mints app passwords and, now, revokes the rows it created. A
+  user can still authenticate to `/nextcloud/remote.php/dav` with their own
+  Nextcloud password (equal to their Droplet password, THREAT_MODEL §3a), or
+  mint an app password through `core/getapppassword` or Login Flow v2
+  (`/nextcloud/index.php/login/v2`); neither leaves a `DeviceClient` row, so
+  "turn off" cannot revoke them.
+
+Cost of the three denials: the Nextcloud mobile apps cannot open a document in
+their in-app editor or ask for a direct download link through the gateway.
+
 # Supply-chain security — signing & verification {#supply-chain}
 
 How every released Droplet container image is signed, how the appliance
@@ -273,7 +376,7 @@ verifies before pulling, and how anyone can verify independently.
 
 | Layer | What it authenticates | Key/identity | Where verified |
 |---|---|---|---|
-| **Keyless image signatures** (WARP-244) | "this individual image was built by our release CI" | GitHub Actions OIDC identity of `.github/workflows/publish-release.yml@refs/heads/main` (stable) or `@refs/heads/stage` (stage channel, WARP-1670), certificate from Fulcio, entry in the public Rekor transparency log | on-device before every `docker pull` (`scripts/lib/apply-update.sh`), in CI post-sign self-check, and by anyone (below) |
+| **Keyless image signatures** (WARP-244) | "this individual image was built by our release CI" | GitHub Actions OIDC identity of `.github/workflows/publish-release.yml@refs/heads/main` (stable) or `@refs/heads/stage` (stage channel, WARP-1670), certificate from Fulcio, entry in the public Rekor transparency log | on-device before every `docker pull` (`docker/ota/apply-update.sh`), in CI post-sign self-check, and by anyone (below) |
 | **Key-based release-manifest signature** (WARP-536) | "this exact set of image digests + configs constitutes release X" | org-held cosign keypair; public half baked into the orchestrator image at `apps/orchestrator/src/services/update-agent/cosign.pub` | on-device by the OTA update agent before a manifest byte is parsed |
 
 Images are referenced **by digest only** end to end (`…@sha256:…`), so a
@@ -321,8 +424,11 @@ deliberately not in the public log; the images are).
 ## What the appliance enforces at pull time
 
 The only path that ever pulls a first-party image is the OTA apply step
-(`scripts/lib/apply-update.sh`, `pull-images`). For each digest-pinned
-ref it runs, **before** `docker pull`:
+(`docker/ota/apply-update.sh`, `pull-images`). The helper runs on the host
+(WARP-3007), which has no cosign, so it runs the orchestrator image's
+vendored, checksum-pinned cosign in a throwaway `docker run --rm` off that
+image (pinned by image ID). For each digest-pinned ref it runs, **before**
+`docker pull`:
 
 ```bash
 cosign verify \

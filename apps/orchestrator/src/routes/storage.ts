@@ -13,6 +13,7 @@ import {
 import { config } from "../config.js";
 import { isBridgeConnectionError } from "../lib/bridge-errors.js";
 import { createLogger } from "../lib/logger.js";
+import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
 
 // Rescan / eject are owner+admin device-control actions. Family users can
 // still see drives via the existing GET routes; they just can't poke the
@@ -20,11 +21,6 @@ import { createLogger } from "../lib/logger.js";
 // requireRole("owner", "admin") middleware instead of this ad-hoc check, so
 // denials there get the WARP-237 mandatory-emit ACL audit row — an on-box
 // blocked rename is diagnosable from the activity log instead of vanishing.)
-function isAdmin(req: Request): boolean {
-  const role = req.user?.role;
-  return role === "owner" || role === "admin";
-}
-
 const logger = createLogger("storage-route");
 
 /**
@@ -523,7 +519,12 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 4000);
-      const r = await fetch(`${BRIDGE_URL}/pools`, { signal: ctrl.signal });
+      // WARP-3193 SEC-DATA-6: /pools is token-gated on the bridge like /drives.
+      const token = bridgeAuthToken();
+      const r = await fetch(`${BRIDGE_URL}/pools`, {
+        signal: ctrl.signal,
+        ...(token ? { headers: { "X-Droplet-Auth": token } } : {}),
+      });
       clearTimeout(timer);
       if (!r.ok) return undefined;
       const snap = (await r.json()) as BridgePoolsSnapshot;
@@ -588,7 +589,8 @@ export function createStorageRouter(prisma: PrismaClient): Router {
         try {
           const token = await resolveNcToken(req);
           // No resolvable credential is the orphan-session case (a session that
-          // pre-dates the NC-session store), not an error.
+          // pre-dates the NC-session store) or a service principal such as the
+          // rack panel (`_service:display`), not an error.
           const quota = token ? await ncGetUserQuota(token) : null;
           if (quota) {
             const total = quota.total ?? 0;
@@ -912,7 +914,7 @@ export function createStorageRouter(prisma: PrismaClient): Router {
    * mounts or unmounts. Admin-only because it's a device-control action.
    */
   router.post("/storage/drives/rescan", sensitiveRateLimit, async (req, res) => {
-    if (!isAdmin(req)) {
+    if (!isOwnerOrAdmin(req)) {
       // WARP-1062 (audit item B): emit the WARP-237 policy-violation row —
       // local isAdmin() denials must not be silent (requireRole parity).
       // (The two label PATCHes move to requireRole outright in PR #929 /
@@ -966,7 +968,7 @@ export function createStorageRouter(prisma: PrismaClient): Router {
    * message and are logged server-side.
    */
   router.post("/storage/drives/:uuid/eject", sensitiveRateLimit, async (req, res) => {
-    if (!isAdmin(req)) {
+    if (!isOwnerOrAdmin(req)) {
       // WARP-1062 (audit item B): requireRole-parity policy-violation row.
       recordAccessDenied(req, "role-not-permitted");
       return res.status(403).json({ error: "Admin access required" });
@@ -1047,7 +1049,12 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 4000);
-      const r = await fetch(`${BRIDGE_URL}/pools`, { signal: ctrl.signal });
+      // WARP-3193 SEC-DATA-6: /pools is token-gated on the bridge like /drives.
+      const token = bridgeAuthToken();
+      const r = await fetch(`${BRIDGE_URL}/pools`, {
+        signal: ctrl.signal,
+        ...(token ? { headers: { "X-Droplet-Auth": token } } : {}),
+      });
       clearTimeout(timer);
       if (!r.ok) {
         res.status(502).json({ pools: [], count: 0, error: `bridge returned ${r.status}` });

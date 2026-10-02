@@ -65,8 +65,8 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   // carrying the password itself.
   if (args.confirmed !== true) {
     return confirmationRequired(
-      "I'd like to set a new Wi-Fi password for the household network. " +
-        "EVERY connected device — phones, laptops, cameras, smart-home gear — will be " +
+      "I'd like to set a new Wi-Fi password for the workspace network. " +
+        "EVERY connected device — phones, laptops, cameras, printers, building devices — will be " +
         "disconnected and must reconnect with the new password. " +
         "Ask the user to approve, then re-issue this call with confirmed: true. " +
         "Do NOT set confirmed: true without an explicit yes from the user.",
@@ -99,7 +99,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "set_wifi_password",
   description:
-    "Change the household Wi-Fi password (WPA2-PSK, 8-63 printable ASCII characters). " +
+    "Change the workspace Wi-Fi password (WPA2-PSK, 8-63 printable ASCII characters). " +
     "EVERY connected device is disconnected and must reconnect with the new password. " +
     "Two-step: the first call returns confirmation_required — relay it to the user, and only " +
     "after they explicitly approve, re-issue the SAME call with confirmed: true. " +

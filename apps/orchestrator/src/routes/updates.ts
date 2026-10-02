@@ -59,6 +59,7 @@
  * idempotent per row, and single-box deploys — every appliance today —
  * can't hit it.
  */
+import { randomUUID } from "node:crypto";
 import { Router, type Request, type Response, type NextFunction } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
@@ -73,11 +74,13 @@ import {
 } from "../services/update-agent/poller.js";
 import {
   applyPendingUpdate,
+  claimDeviceUpdateForApply,
+  releaseDeviceUpdateClaim,
   type ApplyRunner,
   type ApplyUpdateOptions,
   type ApplyUpdateResult,
 } from "../services/update-agent/apply.js";
-import { createHostComposeRunner } from "../services/update-agent/host-compose-runner.js";
+import { getOtaHost } from "../services/update-agent/host-exec.js";
 import {
   getUpdateAgentSettings,
   saveUpdateAgentSettings,
@@ -111,6 +114,8 @@ const ROW_SELECT = {
   gitSha: true,
   builtAt: true,
   failureReason: true,
+  // WARP-3007 — the explicit apply outcome (DeviceUpdateOutcome).
+  outcome: true,
   createdAt: true,
   updatedAt: true,
 } as const;
@@ -123,6 +128,7 @@ interface UpdateRowView {
   gitSha: string;
   builtAt: Date;
   failureReason: string | null;
+  outcome: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -153,14 +159,9 @@ function defaultDeps(): UpdatesRouterDeps {
     applyPendingUpdate,
     getUpdateAgentSettings,
     saveUpdateAgentSettings,
-    getApplyRunner: () =>
-      config.DROPLET_OTA_APPLY_SCRIPT
-        ? createHostComposeRunner({
-            scriptPath: config.DROPLET_OTA_APPLY_SCRIPT,
-            composeFile: config.DROPLET_OTA_COMPOSE_FILE,
-            updatesDir: config.DROPLET_OTA_UPDATES_DIR,
-          })
-        : null,
+    // WARP-3007 — the runner index.ts provisioned at boot (host exec); null
+    // when apply is off or the host context could not be resolved.
+    getApplyRunner: () => getOtaHost()?.runner ?? null,
   };
 }
 
@@ -307,6 +308,7 @@ export function createUpdatesRouter(
     "/updates/apply-now",
     mcpToolGuard,
     async (req: Request, res: Response, next: NextFunction) => {
+      let claim: { deviceUpdateId: string; claimId: string } | null = null;
       try {
         const runner = deps.getApplyRunner();
         if (!runner) {
@@ -333,6 +335,16 @@ export function createUpdatesRouter(
           return res.status(409).json({ error: "nothing_pending" });
         }
 
+        // WARP-3193 PERF-3 — claim the row BEFORE any side effect. The status
+        // check above is a read; the apply window (or a second click) could
+        // take the same `verifying` row in between. The claim is atomic, and
+        // the dispatched apply inherits it and hands it back when it ends.
+        const claimId = randomUUID();
+        if (!(await claimDeviceUpdateForApply(prisma, row.id, claimId))) {
+          return res.status(409).json({ error: "apply_in_progress" });
+        }
+        claim = { deviceUpdateId: row.id, claimId };
+
         applyNowInFlight = true;
         await recordActivity({
           kind: "system",
@@ -358,6 +370,7 @@ export function createUpdatesRouter(
             runner,
             releasesLatestUrl: config.DROPLET_OTA_RELEASES_URL,
             githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
+            claimed: claim,
           })
           .then((result) => {
             logger.info(
@@ -380,6 +393,12 @@ export function createUpdatesRouter(
         return res.status(202).json({ started: true, deviceUpdateId: row.id });
       } catch (err) {
         applyNowInFlight = false;
+        // Never dispatched, so nothing else will hand the claim back.
+        if (claim) {
+          await releaseDeviceUpdateClaim(prisma, claim.deviceUpdateId, claim.claimId).catch(
+            () => {},
+          );
+        }
         return next(err);
       }
     },

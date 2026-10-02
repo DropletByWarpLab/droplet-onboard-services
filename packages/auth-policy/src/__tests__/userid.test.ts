@@ -7,6 +7,8 @@ import {
   isReservedUserId,
   deriveUserId,
   RESERVED_USERNAMES,
+  USER_ID_SHAPE,
+  isUserIdShaped,
 } from "../userid.js";
 
 describe("normalizeEmail", () => {
@@ -45,6 +47,12 @@ describe("deriveUserId (pure, Set-backed isTaken)", () => {
   it("never returns a reserved id", () => {
     expect(deriveUserId("admin@x.com", () => false)).toBe("admin-2");
     expect(RESERVED_USERNAMES).toContain("admin");
+  });
+  it("never returns the overlay placeholder id (WARP-3121)", () => {
+    // `overlay` is the synthetic owner of every QR-linked VPN peer; an account
+    // with that username would pass the own-device revoke check for all of them.
+    expect(deriveUserId("overlay@company.com", () => false)).toBe("overlay-2");
+    expect(isReservedUserId("Overlay")).toBe(true);
   });
 });
 
@@ -123,5 +131,41 @@ describe("baseUserIdFromEmail — separator trim (CodeQL js/polynomial-redos)", 
     const slug = baseUserIdFromEmail(hostile);
     expect(performance.now() - started).toBeLessThan(100);
     expect(slug).toBe("user"); // run → `-`, trimmed → "x" (1 char) → fallback
+  });
+});
+
+// WARP-2911 — a username must never look like a `User.id`. The orchestrator's
+// notification subsystem is keyed on the username and REFUSES a UUID-shaped
+// recipient (that shape is how a `User.id` handed to the wrong slot is caught),
+// so an account whose username had that shape would be refused every
+// notification. The shape is defined once, here, and both the minting side
+// (below) and the refusing side (notifications.service.ts) import it.
+describe("WARP-2911 — a username never has the shape of a User.id", () => {
+  const UUID = "3b7d0195-6c1e-4f2a-9d8b-2a4c6e8f0a1b";
+
+  it("isUserIdShaped matches a UUID in either case, and nothing else", () => {
+    expect(isUserIdShaped(UUID)).toBe(true);
+    expect(isUserIdShaped(UUID.toUpperCase())).toBe(true);
+    for (const username of ["dev", "_service:mcp", "robin.banks", `${UUID}-2`, `sso-${UUID}`, UUID.replace(/-/g, "")]) {
+      expect(isUserIdShaped(username), username).toBe(false);
+    }
+  });
+
+  it("USER_ID_SHAPE is stateless (no g/y flag): repeated tests agree", () => {
+    expect(USER_ID_SHAPE.flags).not.toMatch(/[gy]/);
+    expect([USER_ID_SHAPE.test(UUID), USER_ID_SHAPE.test(UUID)]).toEqual([true, true]);
+  });
+
+  it("isReservedUserId refuses a UUID-shaped candidate", () => {
+    expect(isReservedUserId(UUID)).toBe(true);
+    expect(isReservedUserId(UUID.toUpperCase())).toBe(true);
+  });
+
+  it("MUTATION: an email whose local-part is a UUID derives `<uuid>-2`, never the UUID itself", () => {
+    // baseUserIdFromEmail keeps the local-part (it is a valid slug); the
+    // reserved check is what moves the derivation off it.
+    expect(baseUserIdFromEmail(`${UUID}@corp.example`)).toBe(UUID);
+    expect(deriveUserId(`${UUID}@corp.example`, () => false)).toBe(`${UUID}-2`);
+    expect(deriveUserId(`${UUID.toUpperCase()}@corp.example`, () => false)).toBe(`${UUID}-2`);
   });
 });

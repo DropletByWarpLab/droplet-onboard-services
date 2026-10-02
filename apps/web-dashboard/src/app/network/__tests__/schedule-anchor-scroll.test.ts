@@ -12,6 +12,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   scrollToScheduleAnchor,
   scheduleHashFromEvent,
+  scrollTabToTop,
 } from "../schedule-anchor-scroll";
 
 function makeRow(id: string): HTMLElement {
@@ -186,5 +187,36 @@ describe("scheduleHashFromEvent (WARP-100 PR #720)", () => {
   it("returns undefined when newURL is empty (native synthetic dispatch w/o detail)", () => {
     const e = new HashChangeEvent("hashchange");
     expect(scheduleHashFromEvent(e)).toBeUndefined();
+  });
+});
+
+// WARP-2963 — a deep-linked or switched tab opened scrolled down: ~300px of
+// page chrome sits above the first tab card, and native scroll restoration
+// through the Suspense → skeleton → content swap left the viewport where the
+// previous page had it. The page calls this on every `activeTab` change.
+describe("scrollTabToTop (WARP-2963)", () => {
+  beforeEach(() => {
+    setHash("");
+    vi.stubGlobal("scrollTo", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("puts the viewport at the top of the tab, instantly", () => {
+    scrollTabToTop();
+
+    // No `behavior: "smooth"` — an animated jump is exactly what a
+    // prefers-reduced-motion user must not get, so this never animates.
+    expect(window.scrollTo).toHaveBeenCalledWith({ top: 0 });
+  });
+
+  it("stands aside for a #schedule- deep link (that jump owns the scroll)", () => {
+    setHash("#schedule-abc");
+
+    scrollTabToTop();
+
+    expect(window.scrollTo).not.toHaveBeenCalled();
   });
 });

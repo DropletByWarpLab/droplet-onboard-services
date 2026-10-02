@@ -68,26 +68,25 @@ describe("SCHEDULE_PRESETS", () => {
     ]);
   });
 
-  it("Bedtime has two windows with Sun-Thu = 31 and Fri-Sat = 96", () => {
+  it("After hours (id `bedtime`) is one every-day 7pm-7am window", () => {
     const bedtime = presetById("bedtime")!;
+    expect(bedtime.name).toBe("After hours");
     expect(bedtime.kind).toBe("recurring");
     expect(bedtime.windows).toBeDefined();
-    expect(bedtime.windows).toHaveLength(2);
-    expect(bedtime.windows![0].daysOfWeek).toBe(31);
-    expect(bedtime.windows![0].startMin).toBe(21 * 60);
+    expect(bedtime.windows).toHaveLength(1);
+    expect(bedtime.windows![0].daysOfWeek).toBe(127);
+    expect(bedtime.windows![0].startMin).toBe(19 * 60);
     expect(bedtime.windows![0].endMin).toBe(7 * 60);
-    expect(bedtime.windows![1].daysOfWeek).toBe(96);
-    expect(bedtime.windows![1].startMin).toBe(23 * 60);
-    expect(bedtime.windows![1].endMin).toBe(8 * 60);
   });
 
-  it("School has a single Mon-Fri window with daysOfWeek = 62", () => {
+  it("Business hours (id `school`) has a single Mon-Fri window with daysOfWeek = 62", () => {
     const school = presetById("school")!;
+    expect(school.name).toBe("Business hours");
     expect(school.kind).toBe("recurring");
     expect(school.windows).toHaveLength(1);
     expect(school.windows![0].daysOfWeek).toBe(62);
-    expect(school.windows![0].startMin).toBe(8 * 60);
-    expect(school.windows![0].endMin).toBe(15 * 60);
+    expect(school.windows![0].startMin).toBe(9 * 60);
+    expect(school.windows![0].endMin).toBe(17 * 60);
   });
 
   it("Homework is an override preset with 90-minute duration", () => {

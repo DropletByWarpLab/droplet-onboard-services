@@ -534,3 +534,74 @@ describe("DrivesPanel — rename a storage pool (WARP-1048)", () => {
     expect(within(poolsList).queryByText("Family Vault")).not.toBeInTheDocument();
   });
 });
+
+// =====================================================================
+// WARP-2960 — a RAID 1's two mirror members were rendered TWICE: once,
+// correctly, as the single pool card ("RAID 1", capacity once, "2 drives"),
+// and again as two "In a pool / Reclaim & erase" cards under "Available
+// drives". The pool card already represents every disk mdstat currently
+// lists as a member, so those disks must not also be offered as loose
+// drives. Fail-open on purpose: a pool_member the pools payload cannot
+// account for (no md, unknown array, dropped out of the array, or a
+// degraded /storage/pools fetch) still gets its card — losing a disk from
+// the UI is worse than showing it once more.
+// =====================================================================
+describe("DrivesPanel — mirror members are not listed twice (WARP-2960)", () => {
+  const mirror: PoolInfo = {
+    device: "md127",
+    level: "raid1",
+    status: "active",
+    members: ["sda", "sdb"],
+    displayName: null,
+    notes: null,
+  };
+  const member = (name: string, over: Partial<DiskInfo> = {}): DiskInfo => ({
+    name,
+    size_bytes: 2_000_000_000_000,
+    state: "pool_member",
+    fstype: "linux_raid_member",
+    bus: "sata",
+    model: "WDC WD20EARZ",
+    md: "md127",
+    ...over,
+  });
+
+  function setupMirror(disks: DiskInfo[], pools: PoolInfo[] = [mirror]) {
+    useDrivesMock.mockReturnValue({
+      drives: [drive()],
+      disks,
+      isLoading: false,
+      bridgeError: undefined,
+      refresh: vi.fn(),
+    });
+    usePoolsMock.mockReturnValue({
+      pools,
+      isLoading: false,
+      bridgeError: undefined,
+      refresh: vi.fn(),
+    });
+    return render(<DrivesPanel />);
+  }
+
+  it("renders ONE pool entry and no Available-drives section for a RAID 1's two members", () => {
+    setupMirror([member("sda"), member("sdb")]);
+    const poolsList = screen.getByRole("list", { name: /storage pools/i });
+    expect(within(poolsList).getAllByRole("listitem")).toHaveLength(1);
+    // The one card carries the whole story: level, capacity once, member count.
+    expect(poolsList).toHaveTextContent(/raid 1/i);
+    expect(poolsList).toHaveTextContent(/2 drives/i);
+    // …and the members are not re-offered as loose drives.
+    expect(screen.queryByRole("list", { name: /available drives/i })).toBeNull();
+    expect(screen.queryByText(/available drives/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reclaim & erase/i })).toBeNull();
+  });
+
+  it("still renders a pool_member whose pool is absent from the pools payload", () => {
+    // Degraded /storage/pools fetch or an array the bridge did not report:
+    // hiding the disk here would lose it from the UI entirely.
+    setupMirror([member("sdc", { md: "md9" })]);
+    const available = screen.getByRole("list", { name: /available drives/i });
+    expect(within(available).getAllByRole("listitem")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: /^reclaim & erase$/i })).toBeInTheDocument();
+  });
+});

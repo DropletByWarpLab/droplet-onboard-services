@@ -194,7 +194,7 @@ export function CameraGroupEditor({
                   onBlur={commitNameOrIcon}
                   placeholder="🏠"
                   maxLength={4}
-                  className="w-14 h-10 text-center text-xl outline-none focus:border-[var(--brand)]"
+                  className="w-14 h-10 text-center text-xl outline-none focus:ring-2 focus:ring-[var(--brand)]"
                   style={{
                     background: "var(--surface)",
                     border: "1px solid var(--border)",
@@ -218,7 +218,7 @@ export function CameraGroupEditor({
                   placeholder="Front of house"
                   maxLength={60}
                   required
-                  className="w-full h-10 px-3 type-subheadline outline-none focus:border-[var(--brand)]"
+                  className="w-full h-10 px-3 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
                   style={{
                     background: "var(--surface)",
                     border: "1px solid var(--border)",

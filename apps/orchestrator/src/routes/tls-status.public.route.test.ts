@@ -28,6 +28,19 @@ describe("GET /api/tls/status (public)", () => {
     expect(res.body).not.toHaveProperty("redirectTo");
   });
 
+  it("carries whole days until expiry for the screen (WARP-2944) — null on the bootstrap cert", async () => {
+    const soon = await request(
+      appWith({ fqdn: "mybox.droplet-us.com", state: "LE_RENEW_FAILED", notAfter: new Date(Date.now() + 5.5 * 86_400_000) }),
+    ).get("/api/tls/status");
+    expect(soon.body.daysLeft).toBe(5);
+    const bootstrap = await request(
+      appWith({ fqdn: "mybox.droplet-us.com", state: "BOOTSTRAP_SELF_SIGNED", notAfter: null }),
+    ).get("/api/tls/status");
+    expect(bootstrap.body.daysLeft).toBeNull();
+    // Still no secrets and no navigation target.
+    expect(Object.keys(soon.body).sort()).toEqual(["daysLeft", "fqdn", "hqConfigured", "state"]);
+  });
+
   it("reports bootstrap state, also without a navigation target", async () => {
     const res = await request(
       appWith({ fqdn: "d-abc.devices.warp-lab.ai", state: "BOOTSTRAP_SELF_SIGNED", notAfter: null }),
@@ -65,6 +78,7 @@ describe("GET /api/tls/status (public)", () => {
       state: "UNKNOWN",
       fqdn: null,
       hqConfigured: false,
+      daysLeft: null,
     });
   });
 });

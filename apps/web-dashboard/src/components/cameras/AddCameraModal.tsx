@@ -286,7 +286,7 @@ export function AddCameraModal({
                   value={name}
                   onChange={(e) => setName(e.target.value.replace(/\s/g, "_"))}
                   placeholder="front_door"
-                  className="w-full px-3 py-2 type-subheadline outline-none focus:border-[var(--brand)]"
+                  className="w-full px-3 py-2 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
                   style={inputStyle}
                   maxLength={64}
                 />
@@ -312,7 +312,7 @@ export function AddCameraModal({
                   value={rtspUrl}
                   onChange={(e) => setRtspUrl(e.target.value)}
                   placeholder="rtsp://192.168.100.101:554/stream1"
-                  className="w-full px-3 py-2 type-subheadline outline-none focus:border-[var(--brand)] font-mono text-sm"
+                  className="w-full px-3 py-2 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)] font-mono text-sm"
                   style={inputStyle}
                 />
                 {rtspUrl && !urlValid && (
@@ -338,7 +338,7 @@ export function AddCameraModal({
                     value={manufacturer}
                     onChange={(e) => setManufacturer(e.target.value)}
                     placeholder="Reolink"
-                    className="w-full px-3 py-2 type-subheadline outline-none focus:border-[var(--brand)]"
+                    className="w-full px-3 py-2 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
                     style={inputStyle}
                   />
                 </div>
@@ -356,7 +356,7 @@ export function AddCameraModal({
                     value={model}
                     onChange={(e) => setModel(e.target.value)}
                     placeholder="RLC-810A"
-                    className="w-full px-3 py-2 type-subheadline outline-none focus:border-[var(--brand)]"
+                    className="w-full px-3 py-2 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
                     style={inputStyle}
                   />
                 </div>

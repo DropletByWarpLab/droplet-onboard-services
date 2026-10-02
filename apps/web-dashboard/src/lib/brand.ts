@@ -15,3 +15,13 @@ export const ACCENT_HEX = "#6366f1";
 
 /** Browser chrome / PWA theme color. Driven from the brand accent token. */
 export const THEME_COLOR = ACCENT_HEX;
+
+/**
+ * Build stamp shown in the sidebar, the workspace status strip and under the
+ * public auth form (WARP-2973).
+ *
+ * One constant rather than the three literals it replaced: the string had
+ * already been copy-pasted twice, and the auth shell would have made it three
+ * — which is how two of them end up saying different versions.
+ */
+export const VERSION_LABEL = "Droplet v0.1.0";

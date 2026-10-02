@@ -204,7 +204,7 @@ describe("runTeamChatMeetingReminderSweep", () => {
     expect(sendNotificationMock).toHaveBeenCalledWith(
       prisma,
       expect.objectContaining({
-        userId: INVITEE.username,
+        username: INVITEE.username,
         kind: "event",
         title: "Meeting reminder",
         body: expect.stringContaining("Sprint sync"),

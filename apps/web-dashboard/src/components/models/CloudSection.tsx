@@ -26,9 +26,6 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { CloudProviderRow } from "@/components/models/CloudProviderRow";
 import type { CloudAccessInfo, CloudProviderRow as Row } from "@/lib/types";
 
-// Second line sits under `.rt`: `.ri` 34px + 13px gap + 2px row padding.
-const TEXT_INDENT = 49;
-
 function changeLine(a: CloudAccessInfo): string | null {
   // A seeded row carries a date (`lastChangedAt` defaults to now()) but no
   // person — only a person means somebody actually flipped it.
@@ -128,6 +125,13 @@ export function CloudSection({
                   ? "Prompts sent to a cloud model leave the box. Only people with a key and a role that allows it can use one."
                   : "Only an admin can change this."}
               </span>
+              {/* WARP-2955: part of THIS row. A sibling `.lrow` picks up the
+                  list's inter-row divider and row padding. */}
+              {line && (
+                <span className="sub" style={{ whiteSpace: "normal", marginTop: 4 }}>
+                  {line}
+                </span>
+              )}
             </span>
             {on ? <Badge kind="ok">On</Badge> : <Badge kind="muted">Off</Badge>}
             {canManage && (
@@ -139,13 +143,6 @@ export function CloudSection({
               />
             )}
           </div>
-          {line && (
-            <div className="lrow" style={{ paddingLeft: TEXT_INDENT, paddingTop: 0, minHeight: 0 }}>
-              <span className="rt">
-                <span className="sub">{line}</span>
-              </span>
-            </div>
-          )}
         </div>
       </div>
       {error && (

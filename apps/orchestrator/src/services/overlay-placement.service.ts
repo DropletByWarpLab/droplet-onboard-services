@@ -234,6 +234,72 @@ export interface PortMapping {
   port: number;
 }
 
+/**
+ * WARP-3018 — a port forward the OPERATOR declared on the upstream gateway
+ * (`WIREGUARD_PUBLIC_FORWARD`). It is the static cousin of a PCP/UPnP
+ * {@link PortMapping}: the gateway promised to hold it, so it ranks as `mapped`.
+ *
+ * `host: null` means "the forward exists on whatever public address we have
+ * right now". The host is then taken from the STUN-reflexive address on every
+ * fetch, so a dynamic residential IP needs no reconfiguration. The PORT is the
+ * one thing STUN cannot tell us: behind two NATs the reflexive port is whatever
+ * the outer NAT picked for the box's probe, not the port the forward listens on.
+ */
+export interface PortForward {
+  host: string | null;
+  port: number;
+}
+
+/**
+ * Parse `WIREGUARD_PUBLIC_FORWARD`. Accepts `<port>` or `<public-ipv4>:<port>`.
+ *
+ * Blank ⇒ `{ forward: null }` (not configured). Anything else that does not
+ * parse ⇒ `{ forward: null, error }` so the caller can log it. A bad value must
+ * cost the candidate, never the profile fetch or orchestrator boot.
+ *
+ * The host must be a PUBLIC IPv4 literal. A hostname is refused for the same
+ * reason every other candidate is an IP literal (WARP-1391: the per-device FQDN
+ * is public-NXDOMAIN). A private or CGNAT address is refused because a forward
+ * to it is not reachable from off the LAN, which is the only reason to set this.
+ */
+export function parsePortForward(
+  raw: string | undefined | null,
+): { forward: PortForward | null; error?: string } {
+  const v = (raw ?? "").trim();
+  if (!v) return { forward: null };
+  if (/^\d+$/.test(v)) {
+    const port = Number(v);
+    if (port <= 0 || port > 65535) {
+      return { forward: null, error: `port ${v} is out of range` };
+    }
+    return { forward: { host: null, port } };
+  }
+  const ep = splitEndpoint(v);
+  if (!ep) {
+    return { forward: null, error: `"${v}" is not <port> or <ipv4>:<port>` };
+  }
+  if (!isPublicIpv4(ep.ip)) {
+    return { forward: null, error: `${ep.ip} is not a public IPv4 address` };
+  }
+  return { forward: { host: ep.ip, port: ep.port } };
+}
+
+/**
+ * Resolve a declared forward against this observation. A port-only forward
+ * borrows the reflexive public address; with no usable public address (STUN
+ * failed, or it came back CGNAT/private) there is nothing to advertise, and
+ * guessing would be the dead-endpoint bug again.
+ */
+export function forwardToMapping(
+  forward: PortForward | null | undefined,
+  placement: PlacementResult,
+): PortMapping | null {
+  if (!forward) return null;
+  const host = forward.host ?? placement.publicIp;
+  if (!host || !isPublicIpv4(host)) return null;
+  return { host, port: forward.port };
+}
+
 export interface CandidateInput {
   placement: PlacementResult;
   /** The box's LAN-facing address, for a client already on the home network.
@@ -413,7 +479,7 @@ export interface PlacementSnapshot {
  */
 export async function observePlacement(
   probes: PlacementProbes,
-  opts: { listenPort: number; mapping?: PortMapping | null },
+  opts: { listenPort: number; mapping?: PortMapping | null; forward?: PortForward | null },
 ): Promise<PlacementSnapshot> {
   const safe = async (f: () => Promise<string | null>): Promise<string | null> => {
     try {
@@ -433,7 +499,7 @@ export async function observePlacement(
   const candidates = buildCandidates({
     placement,
     lanAddress,
-    mapping: opts.mapping ?? null,
+    mapping: opts.mapping ?? forwardToMapping(opts.forward, placement),
     listenPort: opts.listenPort,
   });
   return { placement, candidates, relayRequired: needsRelay(candidates) };

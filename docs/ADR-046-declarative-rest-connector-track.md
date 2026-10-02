@@ -107,6 +107,17 @@ Unchanged from the cloud track, and restated because volume is the risk: `script
 
 ---
 
+## Drafting a profile on a box (WARP-2899)
+
+ADR-056 slice L lets a Workshop run on a customer's box **draft** a profile of this track. It changes nothing in §5: a profile still ships only with its guide, its egress entry and its ADR-042 row, in a Warp Lab PR.
+
+* **What a draft is.** A workspace made from the `rest-profile` template (`extensions/templates/rest-profile/`). The run fills one file, `connector-draft.json`, and `npm run build` renders `services/erp-connector/src/rest/vendors/<provider>.ts`, `docs/integrations/<provider>.md` (the six sections, in order), `docs/security/allowed-egress.<provider>.draft.yaml` (`kind: egress` for a static origin; `kind: dynamic` with `config_key` plus a `kind: reference` per suffix or host for a per-account one) and `docs/adr-042/<provider>.rows.md`. The sandbox has no network, so every vendor fact nobody has checked renders as `TODO(verify)`; a dynamic draft carries no scheme URL anywhere (§3's rule, enforced by the template's own check, because the egress gate does not scan `extensions/`).
+* **What a draft is not.** Data in the box's git store. `workspace_propose` tags it without an extension manifest, so nothing installs it; `restProfileFor` is still the compiled `REST_VENDOR_PROFILES` table and nothing else. That is pinned, not promised: `services/erp-connector/__tests__/rest-profile-no-store-path.test.ts` (the registry has no second door) and `apps/orchestrator/src/__tests__/connector-draft.no-runtime-path.test.ts` (the lookup seam is test-only, only the sandbox image carries `extensions/`, the store's volumes are the sandbox's alone).
+* **How it leaves the box.** An owner or admin — a person, never a run — downloads the workspace as a `git bundle`; one audit row records its sha256. The box dials nothing to do it. The PR is made by hand from the bundle (`ADD-A-PROVIDER.md` §0).
+* **The vocabulary snapshot.** The template validates fieldMaps against `vocabulary.json`, a copy of `DATASETS` / `CANONICAL_COLUMNS` / `REQUIRED_CANONICAL` that `rest-profile-template-vocabulary.test.ts` pins to the live constants.
+
+---
+
 ## Follow-ups
 
 * **WARP-2707** — the track: `RestVendorProfile`, `RestProfileConnector`, the host guard, the five pagination modes, the test suite.

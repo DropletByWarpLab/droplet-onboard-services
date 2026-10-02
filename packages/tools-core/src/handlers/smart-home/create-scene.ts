@@ -38,7 +38,7 @@ const inputSchema = {
       type: "string",
       minLength: 1,
       maxLength: NAME_MAX,
-      description: 'Scene name, e.g. "Movie night" (max 120 chars).',
+      description: 'Scene name, e.g. "Open up" (max 120 chars).',
     },
     icon: {
       type: "string",
@@ -58,7 +58,7 @@ const inputSchema = {
           device: {
             type: "string",
             description:
-              'Device nodeId OR household name (friendlyName / product name) from list_smart_home_devices, e.g. "living-room lamp". Name lookup is case-insensitive.',
+              'Device nodeId OR given name (friendlyName / product name) from list_smart_home_devices, e.g. "lobby lamp". Name lookup is case-insensitive.',
           },
           command: {
             type: "string",
@@ -210,7 +210,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
       status: "error",
       error: {
         code: "DEVICE_RESOLUTION_FAILED",
-        message: `could not list smart-home devices to resolve the scene's actions: ${
+        message: `could not list devices to resolve the scene's actions: ${
           err instanceof Error ? err.message : String(err)
         }`,
       },
@@ -241,7 +241,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
           code: "DEVICE_NOT_FOUND",
           message:
             known.length === 0
-              ? `No device matches "${action.device}" — no smart-home devices are currently listed`
+              ? `No device matches "${action.device}" — no devices are currently listed`
               : `No device matches "${action.device}" by nodeId or name`,
         },
       };
@@ -351,7 +351,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "create_scene",
   description:
-    'Create a named smart-home scene (e.g. "movie night") from a list of device actions so it can be run later with run_scene or scheduled from the dashboard. Creating a scene does NOT run any device action. Each action\'s device may be a nodeId or a household name from list_smart_home_devices. Two-step: the first call returns confirmation_required echoing the scene name and the resolved device actions — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.',
+    'Create a named device-control scene (e.g. "open up") from a list of device actions so it can be run later with run_scene or scheduled from the dashboard. Creating a scene does NOT run any device action. Each action\'s device may be a nodeId or a given name from list_smart_home_devices. Two-step: the first call returns confirmation_required echoing the scene name and the resolved device actions — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.',
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

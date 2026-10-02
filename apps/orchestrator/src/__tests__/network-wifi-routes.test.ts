@@ -65,6 +65,20 @@ vi.mock("../services/current-wifi.service.js", () => ({
   }),
 }));
 
+// WARP-3193 QUAL-15: the router-unreachable fallback must log before it
+// degrades, so the route's logger is observable here.
+const { warnSpy } = vi.hoisted(() => ({ warnSpy: vi.fn() }));
+vi.mock("../lib/logger.js", () => {
+  const log = {
+    warn: warnSpy,
+    info: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    child: () => log,
+  };
+  return { createLogger: () => log };
+});
+
 import { registerWifiRoutes } from "../routes/network-wifi.routes.js";
 import { classifyNetworkCommand } from "../config/network-safety-rules.js";
 import * as networkService from "../services/network.service.js";
@@ -188,5 +202,26 @@ describe("GET /api/network/wifi/radio (read-only host-radio detail)", () => {
       country: "US",
     });
     expect(networkService.getRadioDetail).toHaveBeenCalledOnce();
+  });
+});
+
+describe("router-unreachable fallback is logged, not swallowed (WARP-3193 QUAL-15)", () => {
+  it.each(["/api/network/wifi/current", "/api/network/wifi/join-code"])(
+    "GET %s still answers from the AP and warns with the router error",
+    async (path) => {
+      vi.mocked(networkService.getWifiSettings).mockRejectedValueOnce(new Error("router down"));
+      const res = await request(buildApp()).get(path);
+      expect(res.status).toBe(200);
+      expect(getCurrentWifi).toHaveBeenCalledWith(expect.anything(), null);
+      expect(warnSpy).toHaveBeenCalledOnce();
+      expect(warnSpy.mock.calls[0][0].err.message).toBe("router down");
+    },
+  );
+
+  it("POST /api/network/wifi/ssid warns when the router read fails", async () => {
+    vi.mocked(networkService.getWifiSettings).mockRejectedValueOnce(new Error("router down"));
+    await request(buildApp()).post("/api/network/wifi/ssid").send({ ssid: "Home" });
+    expect(warnSpy).toHaveBeenCalledOnce();
+    expect(warnSpy.mock.calls[0][0].err.message).toBe("router down");
   });
 });

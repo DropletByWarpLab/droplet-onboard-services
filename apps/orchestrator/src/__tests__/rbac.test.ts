@@ -20,6 +20,7 @@
 import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 import request from "supertest";
 import express, { Request, Response, NextFunction, Router } from "express";
+import { decidePeerRevoke } from "../lib/vpn-revoke-policy.js";
 
 // ── Config mock — must be hoisted above any route imports. ──
 vi.mock("../config.js", () => ({
@@ -90,7 +91,12 @@ vi.mock("../services/network-safety.service.js", () => ({
     .mockResolvedValue({ confirmed: true, operation: "switch_port_enable", params: { port: 3 } }),
 }));
 
-import { requireRole, authMiddleware, type AuthUser } from "../middleware/auth.js";
+import {
+  requireRole,
+  requireRoleOrService,
+  authMiddleware,
+  type AuthUser,
+} from "../middleware/auth.js";
 import type { Role } from "../services/jwt.service.js";
 import { createSwitchRouter } from "../routes/switch.js";
 import { createSystemResetRouter } from "../routes/system-reset.routes.js";
@@ -143,7 +149,8 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/network/upnp", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/network/dhcp/static-lease", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/vpn/peers", allowed: ["owner", "admin"] },
-  { method: "delete", path: "/api/vpn/peers/abc", allowed: ["owner", "admin"] },
+  // DELETE /api/vpn/peers/:id has its own per-resource grid below (WARP-3121):
+  // admin → any peer; member/guest → own overlay device only.
   // WARP-446: extender AP onboarding writes — same posture as VPN peers,
   // since approving an AP changes the household's
   // wireless surface (ADR-005 §RBAC).
@@ -213,7 +220,7 @@ const MATRIX: GuardedRoute[] = [
   { method: "post", path: "/api/system/reset", allowed: ["owner"] },
 
   // ── cameras / matter / smart-home ── (owner + admin + family) ──
-  { method: "post", path: "/api/cameras", allowed: ["owner", "admin", "family"] },
+  { method: "post", path: "/api/cameras", allowed: ["owner", "admin"] }, // WARP-3193 SEC-INJ-5
   { method: "post", path: "/api/cameras/scan", allowed: ["owner", "admin", "family"] },
   { method: "post", path: "/api/cameras/groups", allowed: ["owner", "admin", "family"] },
   { method: "delete", path: "/api/cameras/abc", allowed: ["owner", "admin", "family"] },
@@ -252,6 +259,10 @@ const MATRIX: GuardedRoute[] = [
   { method: "get", path: "/api/voice/status", allowed: ["owner", "admin"] },
   { method: "get", path: "/api/voice/devices", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/voice/say", allowed: ["owner", "admin"] },
+  // Speaker output volume — same posture as /say: it drives the room
+  // speaker, and a mute silences the household's assistant.
+  { method: "get", path: "/api/voice/volume", allowed: ["owner", "admin"] },
+  { method: "post", path: "/api/voice/volume", allowed: ["owner", "admin"] },
 
   // WARP-1056: voiceprint enrollment — owner+admin only, same posture as
   // the sibling voice-assistant proxy above. Enrollment captures and
@@ -284,6 +295,17 @@ const MATRIX: GuardedRoute[] = [
   // per-user (WARP-561); a shared credential is operator material.
   { method: "post", path: "/api/llm/keys/anthropic", allowed: ["owner", "admin"] },
   { method: "delete", path: "/api/llm/keys/anthropic", allowed: ["owner", "admin"] },
+  // WARP-3082: the keyed-provider list is the same operator material.
+  { method: "get", path: "/api/llm/keys", allowed: ["owner", "admin"] },
+  // WARP-3127: warm-on-wake — start loading the box's active model. Owner +
+  // admin among humans (loading a model is a GPU decision, not a household
+  // action). The route ALSO admits the pinned `_service:voice` principal via
+  // requireRoleOrService — this synthetic requireRole grid covers the coarse
+  // roles only, so its `service` column (a non-voice principal) is a 403 here
+  // exactly as on the real route. The voice acceptance is proven through the
+  // real authMiddleware in the service-principal block below and in
+  // routes/llm-warm.test.ts.
+  { method: "post", path: "/api/llm/warm", allowed: ["owner", "admin"] },
 
   // WARP-540: OTA update operator surface — owner+admin only INCLUDING
   // the GETs (voice-proxy posture: release SHAs, failure history, and the
@@ -525,6 +547,16 @@ describe("service-principal regression (WARP-171 AC #6)", () => {
         res.status(200).json({ ok: true });
       },
     );
+    // WARP-3127 — POST /llm/warm pins the voice principal BY ID (the same
+    // guard routes/llm-warm.ts mounts); every other service principal is
+    // refused even though it carries the same coarse `service` role.
+    router.post(
+      "/llm/warm",
+      requireRoleOrService("_service:voice", "owner", "admin"),
+      (_req, res) => {
+        res.status(202).json({ state: "unknown" });
+      },
+    );
     app.use("/api", router);
     return app;
   }
@@ -578,6 +610,24 @@ describe("service-principal regression (WARP-171 AC #6)", () => {
       .set("Authorization", "Bearer test-voice-token-32chars-padding-xyz")
       .send({});
     expect(res.status).toBe(200);
+  });
+
+  it("service token (voice) is accepted on POST /api/llm/warm (WARP-3127 — warm on wake)", async () => {
+    const app = buildAppWithRealAuth();
+    const res = await request(app)
+      .post("/api/llm/warm")
+      .set("Authorization", "Bearer test-voice-token-32chars-padding-xyz")
+      .send({});
+    expect(res.status).toBe(202);
+  });
+
+  it("service token (mcp) is rejected on POST /api/llm/warm (voice is pinned by id)", async () => {
+    const app = buildAppWithRealAuth();
+    const res = await request(app)
+      .post("/api/llm/warm")
+      .set("Authorization", "Bearer test-mcp-token-32chars-padding-1234a")
+      .send({});
+    expect(res.status).toBe(403);
   });
 });
 
@@ -828,19 +878,56 @@ describe("system-reset router RBAC wiring (WARP-825)", () => {
 // src/__tests__/rbac-census.guard.test.ts holds the layers that must
 // outlive this file's worker, including the static ban on .skip / .only.
 
+// ── DELETE /api/vpn/peers/:id — per-resource rule (WARP-3121) ─────────
+//
+// Was a plain owner+admin row. Since WARP-3121 a member (or guest) may revoke
+// their OWN overlay device, so the guard is `decidePeerRevoke`, the same
+// function the route calls. Every principal requireRole used to refuse is
+// still refused unless it owns the row — and a service principal is refused
+// even then.
+describe("DELETE /api/vpn/peers/:id (WARP-3121 own-device rule)", () => {
+  const principals: Array<AuthUser | null> = [...ALL_ROLES.map(mkUser), null];
+  for (const user of principals) {
+    const label = user ? user.role : "no session";
+    for (const whose of ["own", "someone else's"] as const) {
+      const isAdminRole = user?.role === "owner" || user?.role === "admin";
+      const ownerRoleOk = user?.role === "family" || user?.role === "guest";
+      const expected = isAdminRole || (whose === "own" && ownerRoleOk) ? 200 : 403;
+      it(`${label} × ${whose} overlay device → ${expected}`, async () => {
+        const app = express();
+        app.use((req: Request, _res: Response, next: NextFunction) => {
+          if (user) (req as Request & { user: AuthUser }).user = user;
+          next();
+        });
+        const peer = {
+          kind: "overlay",
+          userId: whose === "own" && user ? user.username : "somebody-else",
+        };
+        app.delete("/api/vpn/peers/:id", (req, res) => {
+          const d = decidePeerRevoke(req.user, peer);
+          res.status(d === "admin" || d === "own" ? 200 : 403).json({ d });
+        });
+        const res = await request(app).delete("/api/vpn/peers/abc");
+        expect(res.status).toBe(expected);
+      });
+    }
+  }
+});
+
 /**
  * Hand-written (non-generated) test count, by block:
  *   3  RBAC guard — negative cases
- *   5  service-principal regression
+ *   7  service-principal regression
  *  65  switch router wiring — 13 mutating routes × 5 principals
  *   8  switch status GETs — 4 paths × 2 roles
  *   5  system-reset wiring — 3 denied roles + no-session + owner
+ *  12  DELETE /api/vpn/peers/:id — 6 principals × (own, someone else's)
  *
  * Adding an `it()` to any of those blocks must bump this number. That
  * friction is the point: an untracked test in the RBAC matrix means the
  * census can no longer tell "the run finished" from "the run stopped".
  */
-const HAND_WRITTEN_TESTS = 3 + 5 + 65 + 8 + 5;
+const HAND_WRITTEN_TESTS = 3 + 7 + 65 + 8 + 5 + 12;
 
 /** The generated grid plus the hand-written blocks. */
 const EXPECTED_TESTS = MATRIX.length * ALL_ROLES.length + HAND_WRITTEN_TESTS;
@@ -858,7 +945,11 @@ function flattenTests(task: CensusTask): CensusTask[] {
   return [task];
 }
 
-afterAll((suite) => {
+// Vitest 4.1 passes suite-hook fixtures as the FIRST argument and the suite
+// as the second; the first must be an object pattern (vitest parses it to
+// decide which fixtures to set up), so it stays an empty one.
+// eslint-disable-next-line no-empty-pattern
+afterAll(({}, suite) => {
   const tests = flattenTests(suite as unknown as CensusTask);
 
   expect(

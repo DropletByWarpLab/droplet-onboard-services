@@ -259,7 +259,7 @@ export function DeviceDetailPanel({ mac, onClose }: Props) {
             void save("notes", notes);
           }}
           rows={3}
-          className="w-full p-2 type-body outline-none focus:border-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
+          className="w-full p-2 type-body outline-none focus:ring-2 focus:ring-[var(--brand)] placeholder:text-[var(--text-faint)] transition-colors"
           style={{
             background: "var(--surface)",
             border: "1px solid var(--border)",

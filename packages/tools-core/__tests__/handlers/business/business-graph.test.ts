@@ -4,7 +4,7 @@
  * Mocks `ctx.http.orchestrator` the way `crm-handlers.test.ts` and
  * `pm-handlers.test.ts` do. The assertions worth having here are the ones no
  * registry gate can make: that the CALLS are the ones the manifest declares,
- * that money survives the round trip as a string, that a misused argument is
+ * that money survives the round trip as an exact major-unit string, that a misused argument is
  * refused by name instead of silently ignored, that a customer's delivery work
  * costs ONE extra request and not one per deal, that a disabled module reads
  * as a switch and not as a missing customer, and that a PM comment appears
@@ -212,18 +212,54 @@ describe("business_find — searches", () => {
     expect(customers[0]!.synced_from).toBeNull();
   });
 
-  it("carries a deal amount past 2^53 through as an untouched string", async () => {
+  it("carries a deal amount past 2^53 through exactly, as a major-unit string", async () => {
     // 9007199254740993 minor units. If anything on this path treated it as a
     // number it would come back …992 — off by one, in a figure somebody is
-    // about to quote to a customer.
+    // about to quote to a customer. WARP-3400: and it arrives in MAJOR units,
+    // so the model never has to know there is a cents string to divide.
     get.mockResolvedValue(res(true, 200, { deals: [apiDeal], total: 1 }));
     const out = await businessFind.handler({ entity: "deal", status: "WON" }, ctx);
-    const deal = (expectOk(out).data as { deals: Array<{ amount_minor: string; outcome: string }> }).deals[0];
-    expect(deal.amount_minor).toBe("9007199254740993");
-    expect(typeof deal.amount_minor).toBe("string");
+    const deal = (expectOk(out).data as { deals: Array<Record<string, unknown>> }).deals[0]!;
+    expect(deal.amount).toBe("90071992547409.93");
+    expect(deal.amount_display).toBe("$90,071,992,547,409.93");
+    expect(typeof deal.amount).toBe("string");
     // Outcome comes from stage.kind — the stage NAME is "Closed — signed",
     // which no string match would classify.
     expect(deal.outcome).toBe("WON");
+  });
+
+  // WARP-3400 — the lab-box report: a $10,000 deal ("1000000" minor) was
+  // quoted as "USD 1,000,000" because the model was handed only the cents.
+  it.each([
+    ["USD", "1000000", "10000.00", "$10,000.00"],
+    ["JPY", "1000000", "1000000", "¥1,000,000"],
+    ["KWD", "1000000", "1000.000", "KWD 1,000.000"],
+    ["EUR", "-250", "-2.50", "-€2.50"],
+  ])("reports a %s deal of %s minor units as %s (%s)", async (currency, minor, amount, display) => {
+    get.mockResolvedValue(res(true, 200, { deals: [{ ...apiDeal, amountMinor: minor, currency }], total: 1 }));
+    const out = await businessFind.handler({ entity: "deal" }, ctx);
+    const deal = (expectOk(out).data as { deals: Array<Record<string, unknown>> }).deals[0]!;
+    expect(deal.amount).toBe(amount);
+    expect(deal.amount_display).toBe(display);
+    expect(deal.currency).toBe(currency);
+    // The cents string is GONE from what the model sees, not merely joined by
+    // a better field — it is the field that was misread.
+    expect(deal).not.toHaveProperty("amount_minor");
+  });
+
+  it("reports an unpriced deal with null amounts, never zero", async () => {
+    get.mockResolvedValue(
+      res(true, 200, { deals: [{ ...apiDeal, amountMinor: null, currency: null }], total: 1 }),
+    );
+    const out = await businessFind.handler({ entity: "deal" }, ctx);
+    const deal = (expectOk(out).data as { deals: Array<Record<string, unknown>> }).deals[0]!;
+    expect(deal.amount).toBeNull();
+    expect(deal.amount_display).toBeNull();
+  });
+
+  it("states in the description that amounts are in major units", () => {
+    expect(businessFind.description).toContain("major units");
+    expect(businessFind.description).not.toContain("minor");
   });
 
   it("filters deals by outcome, customer and idle days on the request", async () => {
@@ -546,6 +582,36 @@ describe("business_find — the graph edges", () => {
     ]);
   });
 
+  it("WARP-2988: a refused project lookup drops the enrichment, never the customer", async () => {
+    // A CRM-only person (or a box with Projects off) asking about a customer
+    // with a won deal: `/api/pm/projects` answers 404 module_disabled. The
+    // customer is still the answer. MUTATION: remove the catch -> the whole
+    // call fails as BUSINESS_MODULE_OFF "Projects is switched off".
+    get.mockImplementation(async (url: string) => {
+      if (url.endsWith("/record"))
+        return recordOf({ closedDeals: [{ ...wonDeal, id: "d-won", projectId: "p-won" }] });
+      if (url.includes("/api/crm/deals")) return res(true, 200, { deals: [], total: 0 });
+      if (url.includes("/api/crm/contacts")) return res(true, 200, { contacts: [], total: 0 });
+      return res(false, 404, { error: "module_disabled", module: "projects" });
+    });
+    const out = await businessFind.handler({ entity: "customer", id: "c1" }, ctx);
+    const data = expectOk(out).data as { customer: { id: string }; projects: unknown[] };
+    expect(data.customer.id).toBe("c1");
+    expect(data.projects).toEqual([]);
+  });
+
+  it("WARP-2988: any OTHER project-lookup failure still fails the call", async () => {
+    get.mockImplementation(async (url: string) => {
+      if (url.endsWith("/record"))
+        return recordOf({ closedDeals: [{ ...wonDeal, id: "d-won", projectId: "p-won" }] });
+      if (url.includes("/api/crm/deals")) return res(true, 200, { deals: [], total: 0 });
+      if (url.includes("/api/crm/contacts")) return res(true, 200, { contacts: [], total: 0 });
+      return res(false, 500, { error: "boom" });
+    });
+    const out = await businessFind.handler({ entity: "customer", id: "c1" }, ctx);
+    expect(out.ok).toBe(false);
+  });
+
   it("returns a project the customer owns directly, with no deal at all (ADR-044)", async () => {
     // `PmProject.companyId` (WARP-2562) is the edge for work that never came
     // through a deal — a warranty callout, anything begun before the CRM was
@@ -729,7 +795,10 @@ describe("business_find — the pipeline entity", () => {
     const stages = (expectOk(out).data as { stages: Array<Record<string, unknown>> }).stages;
     expect(stages[0].total_note).toBe("no amounts entered yet");
     expect(stages[1].total_note).toBe("mixed currencies — not summed");
-    expect(stages[2].amount_minor).toBe("250000");
+    // WARP-3400 — major units: 250000 cents is $2,500.00, not "250,000".
+    expect(stages[2].amount).toBe("2500.00");
+    expect(stages[2].amount_display).toBe("$2,500.00");
+    expect(stages[2]).not.toHaveProperty("amount_minor");
     expect(get.mock.calls[0][0]).toBe("/api/crm/summary");
   });
 

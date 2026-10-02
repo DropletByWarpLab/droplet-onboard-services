@@ -6,12 +6,25 @@
  *   GET    /api/tools/:slug                     — full spec + ordered steps
  *   POST   /api/tools                           — create draft
  *   PATCH  /api/tools/:slug                     — edit + publish draft→live
+ *   POST   /api/tools/:slug/share               — WARP-3354 share with the Workspace
+ *   DELETE /api/tools/:slug/share               — WARP-3354 back to private
  *   POST   /api/tools/:slug/runs                — imperative run-now
  *   GET    /api/tools/:slug/runs                — paginated history
  *   GET    /api/tools/:slug/schedules           — WARP-2665 rrule schedules
  *   POST   /api/tools/:slug/schedules           — WARP-2665 create
  *   PATCH  /api/tools/:slug/schedules/:id       — WARP-2665 edit / enable
  *   DELETE /api/tools/:slug/schedules/:id       — WARP-2665 remove
+ *
+ * WARP-3354 — a routine is PRIVATE to its creator unless shared with the
+ * Workspace; owner and admin see every routine. The rule is
+ * services/tool-spec-visibility.ts and is applied on EVERY route below: a
+ * routine the caller may not see answers 404 exactly like a missing one.
+ * A member's new routine is always stored under its requested slug plus a
+ * short random suffix (`invoice-reminder-7f3a`), free or not, so the slug they
+ * get back says nothing about other routines; its name is unchanged, sharing
+ * it later keeps the slug, and asking for a slug held by a routine they CAN see
+ * is still a plain 409. Owner and admin see every routine and keep plain
+ * slugs, as do the box's own routines (daily report, mined suggestions).
  *
  * The §7 spec model lives in this orchestrator, NOT in
  * `packages/tools-core` — that registry is the capability source of
@@ -28,12 +41,14 @@ import type { PrismaClient } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService, type AuthUser } from "../middleware/auth.js";
 import {
   plannedToolNames,
-  referencedStepNames,
   runToolSpec,
   type StepDispatcher,
   type Summarizer,
 } from "../services/tool-spec-runner.service.js";
 import { createToolSpecSummarizer } from "../services/tool-spec-summarizer.service.js";
+import { resolveFilingModel } from "../services/filing/extract.js";
+import { resolveActiveModel } from "../services/active-model.service.js";
+import { createSandboxTransformer, type Transformer } from "../services/sandbox.client.js";
 import {
   DAILY_REPORT_SLUG,
   seedDailyReportSpec,
@@ -44,10 +59,34 @@ import {
   firstToolDeniedForPrincipal,
   hasWriteTool,
   resolveToolAccessScope,
-  unknownToolsIn,
-  writeToolsIn,
 } from "../services/tool-access.service.js";
+import {
+  createDraftSpecTx,
+  DraftSlugTakenError,
+  MAX_SLUG_TRIES,
+  randomSlugSuffix,
+  suffixedSlug,
+  createSpecSchema,
+  type CreateSpecInput,
+  type DraftSpecRefusal,
+  reconcileWrites,
+  stepReferenceError,
+  stepSchema,
+  storedArgsFor,
+  toStoredShape,
+  writeToolNamesIn,
+  writesDisagreementBody,
+} from "../services/tool-spec-draft.service.js";
 import { isSupportedRrule, nextFireFromRrule } from "../utils/rrule.js";
+import { resolveAssertedUser } from "../services/asserted-user.service.js";
+import {
+  canManageToolSpec,
+  canSeeToolSpec,
+  seesEveryToolSpec,
+  visibleToolSpecWhere,
+  type ToolSpecVisibility,
+} from "../services/tool-spec-visibility.js";
+import { recordActivity } from "../services/activity.singleton.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("tools-route");
@@ -96,11 +135,12 @@ async function resolveActor(
       typeof onBehalfOf === "string" && onBehalfOf.trim().length > 0 ? onBehalfOf.trim() : undefined;
     const named = explicit ?? (header && header.trim().length > 0 ? header.trim() : undefined);
     if (!named) return null;
-    const row = (await prisma.user.findFirst({
-      where: { username: named },
-      select: { id: true, username: true, role: true },
-    })) as Actor | null;
-    return row;
+    // WARP-3098: either value is `User.username` (stdio) or `User.id` (HTTP).
+    // Nobody, more than one person, or a deactivated person is nobody.
+    const resolved = await resolveAssertedUser(prisma, named);
+    if (!resolved.ok) return null;
+    const { id, username, role } = resolved.user;
+    return { id, username, role };
   }
   return { id: user.id, username: user.username, role: user.role };
 }
@@ -128,208 +168,6 @@ async function actorOr403(
 const SPEC_STATUSES = ["live", "draft", "suggested"] as const;
 type SpecStatus = (typeof SPEC_STATUSES)[number];
 
-// Per-tool slug shape — lowercase kebab, 2..80 chars. Tight enough to
-// be URL-safe in `/api/tools/:slug` without escaping; loose enough for
-// operator-typed names.
-const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-
-/**
- * WARP-2670 — the name a step may publish its result under, for later steps
- * to read as `${steps.<name>}`. Lowercase snake so the reference syntax needs
- * no quoting or escaping, and so two names cannot differ only by case.
- */
-const OUTPUT_NAME_RE = /^[a-z][a-z0-9_]{0,31}$/;
-const outputNameSchema = z.string().regex(OUTPUT_NAME_RE).optional();
-
-/**
- * A step is either a tool CALL or — since WARP-1996 — a SUMMARIZE, which
- * turns what the earlier steps gathered into prose. `call` stays the default
- * so every spec authored before this keeps parsing unchanged.
- *
- * A summarize step names no tool: there is nothing for the §3 scope check to
- * authorize, and it can only read the trace the run already produced under
- * that check.
- */
-const callStepSchema = z.object({
-  kind: z.literal("call").default("call"),
-  tool: z.string().min(1).max(64),
-  args: z.record(z.unknown()).optional(),
-  as: outputNameSchema,
-  /** A failure of this step is recorded and the walk continues. */
-  optional: z.boolean().optional(),
-});
-
-const summarizeStepSchema = z.object({
-  kind: z.literal("summarize"),
-  /** Optional framing; the runner supplies its default when absent. */
-  prompt: z.string().min(1).max(4000).optional(),
-  as: outputNameSchema,
-});
-
-const stepSchema = z.union([callStepSchema, summarizeStepSchema]);
-
-type ParsedStep = z.infer<typeof stepSchema>;
-
-/**
- * Shape a validated step for the `ToolStep.args` JSON column.
- *
- * The two kinds store different payloads, so this cannot be one literal:
- * a `call` keeps `{tool, args}` — the shape `parseCallStep` reads — and a
- * `summarize` keeps `{prompt}`. Writing a summarize step through the call
- * shape would persist `tool: undefined` and the runner would reject it as
- * malformed on the next run.
- */
-function storedArgsFor(s: ParsedStep): Record<string, unknown> {
-  // WARP-2670 — `as` rides in the same JSON blob for both kinds. It is not a
-  // column because `ToolStep.args` is Json and `kind` is a plain String, the
-  // seam C1's schema comment already nominated for exactly this; a column
-  // would cost a migration to store something only the walker reads.
-  const named = s.as ? { as: s.as } : {};
-  if (s.kind === "summarize") {
-    return { ...(s.prompt ? { prompt: s.prompt } : {}), ...named };
-  }
-  return { tool: s.tool, args: s.args ?? {}, ...(s.optional ? { optional: true } : {}), ...named };
-}
-
-/**
- * WARP-2670 — refuse a reference graph the runner could not satisfy.
- *
- * Three ways to write a spec that parses but cannot run:
- *   - two steps publishing the same name (the second silently shadows);
- *   - `${steps.x}` where nothing is named `x`;
- *   - `${steps.x}` where `x` is published by a LATER step, or by this one.
- *
- * The walker catches all three, but only on the first fire — and for a
- * scheduled spec the first fire is at 03:00 with nobody reading. Checking
- * here means the author is told while they are still looking at the step
- * they typed. This is the same argument the schedule routes make for
- * parsing an rrule at write time instead of auto-disabling it later.
- *
- * Paths are NOT checked: `${steps.invoices.0.total}` depends on what the
- * tool returns at run time, which authoring cannot know. Only the name
- * graph — which is static — is decided here.
- *
- * A summarize step's `prompt` is NOT scanned either. The runner hands the
- * prompt to the summarizer verbatim — it never runs `resolveRefs` over it —
- * so a `${steps.x}` inside prose is text, not a reference, and refusing it
- * here would enforce a contract the runtime does not implement. Only the
- * args a `call` step dispatches are resolved, so only those are checked.
- */
-function stepReferenceError(steps: ParsedStep[]): Record<string, unknown> | null {
-  const published = new Set<string>();
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i];
-    const scanned = step.kind === "summarize" ? {} : storedArgsFor(step);
-    for (const ref of referencedStepNames(scanned)) {
-      if (!published.has(ref)) {
-        return {
-          error: `Step ${i} refers to \${steps.${ref}}, which no earlier step publishes`,
-          detail:
-            "give the producing step an `as` name, and make sure it comes first",
-          step: i,
-          reference: ref,
-        };
-      }
-    }
-    if (step.as) {
-      if (published.has(step.as)) {
-        return {
-          error: `Two steps publish the name "${step.as}"`,
-          detail: "step output names must be unique within a spec",
-          step: i,
-          reference: step.as,
-        };
-      }
-      published.add(step.as);
-    }
-  }
-  return null;
-}
-
-/**
- * WARP-2665 — the write tools a step list actually calls.
- *
- * `ToolSpec.writes` gates two safety decisions: run-now's 409 confirmation
- * (`POST /tools/:slug/runs`) and the WARP-463 ticker's refusal to auto-fire a
- * `writes && !reversible` spec unattended. Until now it was whatever the
- * author put in the request body and was never checked against the steps, so
- * a spec calling a writing tool could be stored as `writes: false` and would
- * then fire with nobody watching. The ADR-004 write tier still applied at
- * fire time — this was never an escalation — but a gate that exists for
- * "destructive, and nobody is looking" was deciding on a self-declared field.
- *
- * Names come from `plannedToolNames`, the runner's OWN parser and the same one
- * the walker dispatches through, rather than a second reading of the step
- * shape that could drift from it. A step kind that dispatches no tool (today
- * `summarize`) contributes no name, so it can never make a spec look like it
- * writes — which is also what keeps a future non-dispatching kind correct here
- * without touching this function.
- *
- * `writeToolsIn` is the classification the ticker's gate and the miner read
- * too, against `WRITE_TOOLS` — derived from each tool's `requiresWrite` in
- * `@droplet/tools-core` — so a write tool added to the registry is classified
- * everywhere without anyone remembering to update a list.
- */
-function writeToolNamesIn(
-  steps: ReadonlyArray<{ kind: string; args: unknown }>,
-): string[] {
-  return writeToolsIn(plannedToolNames(steps));
-}
-
-/** Parsed request steps in the stored `{kind, args}` shape `plannedToolNames` reads. */
-function toStoredShape(
-  steps: ParsedStep[],
-): Array<{ kind: string; args: unknown }> {
-  return steps.map((s) => ({ kind: s.kind, args: storedArgsFor(s) }));
-}
-
-/**
- * WARP-2665 — reconcile a declared `writes` against the derived one.
- *
- * Asymmetric on purpose. Declaring `writes: true` on a spec that calls no
- * write tool is a CONSERVATIVE disagreement: it can only add a confirmation
- * prompt and keep the scheduler's hands off, so it is accepted as authored.
- * Declaring `writes: false` on a spec that does call one is the only
- * direction that defeats a safety gate, and it is refused — loudly, at
- * authoring time while a human is present to read the error, rather than
- * silently at 03:00 when the schedule fires.
- *
- * Omitting the field derives it. That is what keeps existing clients and the
- * miner's draft→live promotion correct without asking either to change.
- */
-function reconcileWrites(
-  declared: boolean | undefined,
-  writeTools: string[],
-): { ok: true; writes: boolean } | { ok: false; writeTools: string[] } {
-  if (declared === false && writeTools.length > 0) {
-    return { ok: false, writeTools };
-  }
-  return { ok: true, writes: declared === true ? true : writeTools.length > 0 };
-}
-
-/** The 400 body for a `writes: false` declaration the steps contradict. */
-function writesDisagreementBody(writeTools: string[]): Record<string, unknown> {
-  return {
-    error: "Declared writes:false, but these steps call write tools",
-    detail:
-      "omit `writes` to have it derived from the steps, or declare writes:true",
-    writeTools,
-  };
-}
-
-const createSpecSchema = z.object({
-  /** WARP-2894 — username the mcp principal acts for. Ignored for everyone else. */
-  onBehalfOf: z.string().trim().min(1).max(200).optional(),
-  slug: z.string().min(2).max(80).regex(SLUG_RE),
-  name: z.string().min(1).max(200),
-  category: z.string().max(64).optional(),
-  description: z.string().max(2000).optional(),
-  share: z.string().max(64).optional(),
-  safety: z.number().int().min(1).max(3).optional(),
-  writes: z.boolean().optional(),
-  reversible: z.boolean().optional(),
-  steps: z.array(stepSchema).min(1).max(32),
-});
 
 const patchSpecSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -412,6 +250,7 @@ interface SpecRow {
   status: SpecStatus;
   ownerId: string | null;
   share: string | null;
+  visibility: ToolSpecVisibility;
   safety: number;
   writes: boolean;
   reversible: boolean;
@@ -430,13 +269,29 @@ interface RunRow {
 }
 
 /**
+ * May this viewer be offered share / un-share on this routine? Its creator, an
+ * owner or an admin (`canManageToolSpec`) — except `daily-report`: the box's
+ * own routine is always shared with the Workspace, so un-sharing it answers
+ * 409 (see `setVisibility`) and there is nothing to offer.
+ */
+function canShareSpec(actor: Actor, spec: SpecRow): boolean {
+  return spec.slug !== DAILY_REPORT_SLUG && canManageToolSpec(actor, spec);
+}
+
+/**
  * Materialize a clean DTO for a spec + its ordered steps. The
  * underlying Prisma row carries the same shape; this projects out
  * internal-only fields (`ownerId` stays, but `id` is the primary
  * identity surface — `slug` is the dashboard / API key).
+ *
+ * WARP-3354 — `visibility` is the stored column; `canShare` is per VIEWER:
+ * true when this caller may share or un-share the routine (its creator, an
+ * owner or an admin; never `daily-report`), so a client never restates the
+ * rule to decide whether to offer the action.
  */
 function projectSpec(
   spec: SpecRow & { steps: StepRow[] },
+  actor: Actor,
 ): Record<string, unknown> {
   return {
     id: spec.id,
@@ -448,6 +303,8 @@ function projectSpec(
     status: spec.status,
     ownerId: spec.ownerId,
     share: spec.share,
+    visibility: spec.visibility,
+    canShare: canShareSpec(actor, spec),
     safety: spec.safety,
     writes: spec.writes,
     reversible: spec.reversible,
@@ -470,7 +327,27 @@ export function createToolsRouter(
    * inference backend, the same reason `dispatcher` is a parameter. Defaults
    * to the on-box summarizer; a spec with no summarize step never calls it.
    */
-  summarizer: Summarizer = createToolSpecSummarizer(),
+  // WARP-2979 (#2420 review 2b) — a summary of a withheld domain's results (security, files, memory, business)
+  // is written on the LOCAL model only: the filing worker's local-only resolver, never the active (maybe cloud) one.
+  summarizer: Summarizer = createToolSpecSummarizer(
+    () => resolveActiveModel(prisma),
+    async () => {
+      const r = await resolveFilingModel(prisma);
+      return r.ok ? r.model : null;
+    },
+  ),
+  /**
+   * WARP-2895 — injected so tests can drive a `transform` / `when` step
+   * without a sandbox container, the same reason `summarizer` is a
+   * parameter. Defaults to the sandbox client; a spec with no such step
+   * never calls it.
+   */
+  transformer: Transformer = createSandboxTransformer(),
+  /**
+   * WARP-3354 — injected so tests can force a suffix collision, the same
+   * reason `summarizer` and `transformer` are parameters.
+   */
+  slugSuffix: () => string = randomSlugSuffix,
 ): Router {
   const router = Router();
 
@@ -517,6 +394,53 @@ export function createToolsRouter(
     };
   }
 
+  type DraftResult =
+    | { ok: true; spec: SpecRow & { steps: StepRow[] } }
+    | { ok: false; refusal: DraftSpecRefusal };
+
+  /**
+   * WARP-3354 — create the draft under the slug it will be stored as.
+   *
+   * A slug is unique across the whole box but a member may not see every
+   * routine, so the plain slug is an oracle: a 409 confirms that someone's
+   * private routine has that name. So a member's routine is ALWAYS stored as
+   * `<slug>-<random>`, whether or not the plain slug was free; what they get
+   * back then says nothing about other routines. Only a slug held by a routine
+   * they CAN see (shared, or their own) is refused 409, as before. Owner and
+   * admin see every routine — any collision is one they can see — so they keep
+   * plain slugs and the plain 409. Sharing later keeps the slug.
+   */
+  async function createDraftFor(actor: Actor, input: CreateSpecInput): Promise<DraftResult> {
+    const create = (slug: string) =>
+      createDraftSpecTx<SpecRow & { steps: StepRow[] }>(prisma, { ...input, slug }, actor.id);
+
+    if (seesEveryToolSpec(actor)) {
+      return create(input.slug).catch((err: unknown) => {
+        if (err instanceof DraftSlugTakenError) return { ok: false as const, refusal: err.refusal };
+        throw err;
+      });
+    }
+
+    const held = (await prisma.toolSpec.findUnique({
+      where: { slug: input.slug },
+      select: { ownerId: true, visibility: true },
+    })) as { ownerId: string | null; visibility: string } | null;
+    if (held && canSeeToolSpec(actor, held)) {
+      return { ok: false, refusal: new DraftSlugTakenError(input.slug).refusal };
+    }
+
+    let last: DraftSlugTakenError | undefined;
+    for (let i = 0; i < MAX_SLUG_TRIES; i++) {
+      try {
+        return await create(suffixedSlug(input.slug, slugSuffix()));
+      } catch (err) {
+        if (!(err instanceof DraftSlugTakenError)) throw err;
+        last = err; // the suffixed slug collided; draw again, say nothing
+      }
+    }
+    return { ok: false, refusal: last!.refusal };
+  }
+
   router.get(
     "/tools",
     // WARP-2894 — `routine_list` reaches this as the mcp principal.
@@ -527,7 +451,7 @@ export function createToolsRouter(
         if (!actor) return;
         const status = req.query.status;
         const category = req.query.category;
-        const where: { status?: SpecStatus; category?: string } = {};
+        const where: { status?: SpecStatus; category?: string; OR?: unknown } = {};
         if (typeof status === "string") {
           if (!(SPEC_STATUSES as readonly string[]).includes(status)) {
             res
@@ -540,6 +464,12 @@ export function createToolsRouter(
         if (typeof category === "string" && category.length > 0) {
           where.category = category;
         }
+        // WARP-3354 — a member lists the shared routines and their own, never
+        // another member's private ones. Filtered in the query, not after it,
+        // so a limit or a count can never be computed over rows the caller
+        // may not see. `null` = owner/admin, who see every routine.
+        const visible = visibleToolSpecWhere(actor);
+        if (visible) where.OR = visible.OR;
         // WARP-2894 — schedules ride on the list row (additive). The model's
         // routine_list needs them to answer "when does this run" without a
         // call per slug, and the dashboard's list ignores keys it does not
@@ -568,6 +498,8 @@ export function createToolsRouter(
             status: r.status,
             ownerId: r.ownerId,
             share: r.share,
+            visibility: r.visibility,
+            canShare: canShareSpec(actor, r),
             safety: r.safety,
             writes: r.writes,
             reversible: r.reversible,
@@ -589,17 +521,20 @@ export function createToolsRouter(
     requireRole("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
+        const actor = await actorOr403(prisma, req, res, undefined);
+        if (!actor) return;
         const spec = (await findSpec(req.params.slug, (where) =>
           prisma.toolSpec.findUnique({
             where,
             include: { steps: { orderBy: { idx: "asc" } } },
           }),
         )) as unknown as (SpecRow & { steps: StepRow[] }) | null;
-        if (!spec) {
+        // WARP-3354 — another member's private routine is a 404, not a 403.
+        if (!spec || !canSeeToolSpec(actor, spec)) {
           res.status(404).json({ error: "Spec not found" });
           return;
         }
-        res.json(projectSpec(spec));
+        res.json(projectSpec(spec, actor));
       } catch (err) {
         next(err);
       }
@@ -610,8 +545,9 @@ export function createToolsRouter(
     "/tools",
     // WARP-2894 — `routine_draft` reaches this as the mcp principal. It can
     // only ever CREATE a draft: `createSpecSchema` has no `status` field and
-    // the row is born `draft` by schema default, so the model has no path to
-    // `live` short of a person pressing Promote on /routines.
+    // `createDraftSpecTx` writes `status: "draft"` explicitly (WARP-2897), so
+    // the model has no path to `live` short of a person pressing Promote on
+    // /routines.
     requireRoleOrMcpService("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
@@ -625,80 +561,20 @@ export function createToolsRouter(
         const who = await actorOr403(prisma, req, res, parsed.data.onBehalfOf);
         if (!who) return;
 
-        // WARP-2894 — a step naming a tool this box does not have is refused
-        // here, where the author (a person or the model) can fix it, rather
-        // than at the first run. POST only: PATCH edits carry names the
-        // route tests seed as placeholders, and a stored spec's names are
-        // re-checked by the run pre-flight regardless.
-        const unknown = unknownToolsIn(
-          parsed.data.steps.flatMap((st) => (st.kind === "call" ? [st.tool] : [])),
-        );
-        if (unknown.length > 0) {
-          res.status(400).json({
-            error: "unknown_tools",
-            detail: "these steps name tools this box does not have",
-            tools: unknown,
-          });
+        // WARP-2897 — the validators and the create live in ONE service
+        // (tool-spec-draft.service.ts) so slice I-1's seeded drafts pass the
+        // same checks. WARP-485: ownerId is the User.id, never the username.
+        // No runtime tool sets: the walker dispatches compiled tools only.
+        // A slug collision is thrown typed (it aborts a transaction, so a
+        // multi-draft caller must unwind); here it is the 409 — unless the
+        // routine holding the slug is one this caller may not see, in which
+        // case a 409 would confirm that routine exists (WARP-3354).
+        const created = await createDraftFor(who, parsed.data);
+        if (!created.ok) {
+          res.status(created.refusal.status).json(created.refusal.body);
           return;
         }
-        // WARP-485: ownerId is a UUID (User.id), not the Nextcloud
-        // username. Storing the username would break any
-        // `WHERE ownerId = <User.id>` join (returns zero rows) and
-        // diverge from cameras / network-firewall / reminders which
-        // all key on req.user.id.
-        const actor = who.id;
-
-        // WARP-2670 — refuse a reference graph the walker could not satisfy.
-        const refError = stepReferenceError(parsed.data.steps);
-        if (refError) {
-          res.status(400).json(refError);
-          return;
-        }
-
-        // WARP-2665 — classify from the steps, not from the body.
-        const reconciled = reconcileWrites(
-          parsed.data.writes,
-          writeToolNamesIn(toStoredShape(parsed.data.steps)),
-        );
-        if (!reconciled.ok) {
-          res.status(400).json(writesDisagreementBody(reconciled.writeTools));
-          return;
-        }
-
-        try {
-          const created = (await prisma.toolSpec.create({
-            data: {
-              slug: parsed.data.slug,
-              name: parsed.data.name,
-              category: parsed.data.category ?? null,
-              description: parsed.data.description ?? null,
-              share: parsed.data.share ?? null,
-              safety: parsed.data.safety ?? 1,
-              writes: reconciled.writes,
-              reversible: parsed.data.reversible ?? true,
-              ownerId: actor,
-              steps: {
-                create: parsed.data.steps.map((s, idx) => ({
-                  idx,
-                  kind: s.kind,
-                  args: storedArgsFor(s) as any,
-                })),
-              },
-            },
-            include: { steps: { orderBy: { idx: "asc" } } },
-          })) as unknown as SpecRow & { steps: StepRow[] };
-          res.status(201).json(projectSpec(created));
-        } catch (err) {
-          // Prisma surfaces unique-constraint violations as P2002. Convert
-          // to a 409 so the dashboard can render "slug already in use".
-          if ((err as { code?: string }).code === "P2002") {
-            res
-              .status(409)
-              .json({ error: "Slug already in use", slug: parsed.data.slug });
-            return;
-          }
-          throw err;
-        }
+        res.status(201).json(projectSpec(created.spec, who));
       } catch (err) {
         next(err);
       }
@@ -717,6 +593,13 @@ export function createToolsRouter(
             .json({ error: "Invalid patch", details: parsed.error.flatten() });
           return;
         }
+        // WARP-3354 — the `owner`/`admin` floor above is also the visibility
+        // rule: those two roles see and manage every routine, so a patch needs
+        // no per-routine check. A member cannot edit a routine at all, their
+        // own included. `visibility` is deliberately NOT patchable here; it
+        // moves only through the share routes below.
+        const editor = await actorOr403(prisma, req, res, undefined);
+        if (!editor) return;
         // WARP-2665 — steps are loaded because the write classification is
         // derived from them. A patch that changes `writes` without touching
         // the steps must be checked against the steps already stored, and a
@@ -831,11 +714,97 @@ export function createToolsRouter(
           });
         })) as unknown as SpecRow & { steps: StepRow[] };
 
-        res.json(projectSpec(updated));
+        res.json(projectSpec(updated, editor));
       } catch (err) {
         next(err);
       }
     },
+  );
+
+  /**
+   * WARP-3354 — share a routine with the Workspace, or take it back to private.
+   *
+   *   POST   /tools/:slug/share   visibility → WORKSPACE
+   *   DELETE /tools/:slug/share   visibility → PRIVATE
+   *
+   * Both are idempotent and answer the routine (the same DTO as GET). Who may
+   * call: the routine's creator, an owner or an admin — `canManageToolSpec`.
+   * A member who can SEE a shared routine they did not create is refused 403
+   * (they know it exists); one who cannot see it gets the 404 every other
+   * route gives. A person's act on the Routines page, never a tool: there is
+   * no `routine_share`, and the mcp principal is not admitted here, so the
+   * assistant cannot publish a routine to the company on anyone's behalf.
+   *
+   * `version` is not bumped: it pins a run to the STEPS it ran against, and
+   * sharing changes none. The change is recorded in the activity feed.
+   */
+  async function setVisibility(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    to: ToolSpecVisibility,
+  ): Promise<void> {
+    try {
+      const actor = await actorOr403(prisma, req, res, undefined);
+      if (!actor) return;
+      const spec = (await findSpec(req.params.slug, (where) =>
+        prisma.toolSpec.findUnique({
+          where,
+          include: { steps: { orderBy: { idx: "asc" } } },
+        }),
+      )) as unknown as (SpecRow & { steps: StepRow[] }) | null;
+      if (!spec || !canSeeToolSpec(actor, spec)) {
+        res.status(404).json({ error: "Spec not found" });
+        return;
+      }
+      if (!canManageToolSpec(actor, spec)) {
+        res.status(403).json({
+          error: "forbidden_not_creator",
+          detail: "only the person who created this routine, an owner or an admin can share or un-share it",
+          slug: spec.slug,
+        });
+        return;
+      }
+      // The Reports tile runs `daily-report` for every member. Making it
+      // private would answer them 404 on a tile that is not theirs to fix.
+      if (to === "PRIVATE" && spec.slug === DAILY_REPORT_SLUG) {
+        res.status(409).json({
+          error: "box_routine_stays_shared",
+          detail: "the daily report is provided by the box and stays shared with the Workspace",
+          slug: spec.slug,
+        });
+        return;
+      }
+      if (spec.visibility === to) {
+        res.json(projectSpec(spec, actor));
+        return;
+      }
+      const from = spec.visibility;
+      const updated = (await prisma.toolSpec.update({
+        where: { id: spec.id },
+        data: { visibility: to },
+        include: { steps: { orderBy: { idx: "asc" } } },
+      })) as unknown as SpecRow & { steps: StepRow[] };
+      await recordActivity({
+        kind: "tool_run",
+        severity: "info",
+        sourceIcon: "share",
+        what: to === "WORKSPACE" ? "Routine shared with the Workspace" : "Routine made private",
+        actor: { type: "user", id: actor.id },
+        sub: spec.name,
+        refs: { specId: spec.id, slug: spec.slug, from, to },
+      });
+      res.json(projectSpec(updated, actor));
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  router.post("/tools/:slug/share", requireRole("owner", "admin", "family"), (req, res, next) =>
+    setVisibility(req, res, next, "WORKSPACE"),
+  );
+  router.delete("/tools/:slug/share", requireRole("owner", "admin", "family"), (req, res, next) =>
+    setVisibility(req, res, next, "PRIVATE"),
   );
 
   router.post(
@@ -855,7 +824,10 @@ export function createToolsRouter(
             include: { steps: { orderBy: { idx: "asc" } } },
           }),
         )) as unknown as (SpecRow & { steps: StepRow[] }) | null;
-        if (!spec) {
+        // WARP-3354 — a private routine runs for its creator, owners and admins
+        // only; for anyone else it does not exist. A shared routine follows the
+        // run rules below unchanged.
+        if (!spec || !canSeeToolSpec(actor, spec)) {
           res.status(404).json({ error: "Spec not found" });
           return;
         }
@@ -964,6 +936,7 @@ export function createToolsRouter(
           scope,
           summarizer,
           callContext: await runCallContext(req, actor),
+          transformer,
         });
 
         res.status(outcome.status === "ok" ? 200 : 207).json({
@@ -989,10 +962,12 @@ export function createToolsRouter(
     requireRole("owner", "admin", "family"),
     async (req: Request, res: Response, next: NextFunction) => {
       try {
+        const actor = await actorOr403(prisma, req, res, undefined);
+        if (!actor) return;
         const spec = (await findSpec(req.params.slug, (where) =>
           prisma.toolSpec.findUnique({ where }),
         )) as unknown as SpecRow | null;
-        if (!spec) {
+        if (!spec || !canSeeToolSpec(actor, spec)) {
           res.status(404).json({ error: "Spec not found" });
           return;
         }
@@ -1060,10 +1035,14 @@ export function createToolsRouter(
     req: Request,
     res: Response,
   ): Promise<{ spec: SpecRow; schedule: ScheduleRow | null } | null> {
+    // WARP-3354 — schedules belong to their routine's visibility: the list is
+    // open to members, so it must not reveal a private routine's cadence.
+    const actor = await actorOr403(prisma, req, res, undefined);
+    if (!actor) return null;
     const spec = (await findSpec(req.params.slug, (where) =>
       prisma.toolSpec.findUnique({ where }),
     )) as unknown as SpecRow | null;
-    if (!spec) {
+    if (!spec || !canSeeToolSpec(actor, spec)) {
       res.status(404).json({ error: "Spec not found" });
       return null;
     }

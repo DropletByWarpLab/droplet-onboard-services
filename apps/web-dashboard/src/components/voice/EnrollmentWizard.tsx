@@ -51,9 +51,9 @@ import "./voice.css";
 
 /* §5 step 2 — the four scripted lines, verbatim. */
 const SCRIPTED_LINES = [
-  "“Hey Droplet, turn off the kitchen lights.”",
+  "“Hey Droplet, turn off the conference-room lights.”",
   "“Hey Droplet, what's on my calendar today?”",
-  "“Hey Droplet, is anyone at the front door?”",
+  "“Hey Droplet, is anyone at the main entrance?”",
   "“Hey Droplet, remind me to call back after lunch.”",
 ] as const;
 
@@ -61,7 +61,7 @@ const SCRIPTED_LINES = [
    ("Two more lines will sharpen it."). Same spoken-dialogue styling. */
 const SHARPEN_LINES = [
   "“Hey Droplet, what time is it?”",
-  "“Hey Droplet, play something quiet in the kitchen.”",
+  "“Hey Droplet, how many unread emails do I have?”",
 ] as const;
 
 const ALL_LINES = [...SCRIPTED_LINES, ...SHARPEN_LINES];

@@ -200,7 +200,7 @@ export function EventFilterBar({ cameras, knownLabels, filter, onChange }: Props
               <select
                 value={activePreset}
                 onChange={(e) => setTimePreset(e.target.value)}
-                className="w-full h-9 px-2 type-footnote outline-none focus:border-[var(--brand)]"
+                className="w-full h-9 px-2 type-footnote outline-none focus:ring-2 focus:ring-[var(--brand)]"
                 style={{
                   background: "var(--surface)",
                   border: "1px solid var(--border)",

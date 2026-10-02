@@ -2,6 +2,9 @@
 # =============================================================================
 # unit tests for the factory-reset LIVE-secrets wipe on /data (WARP-2629)
 #   scripts/lib/secrets-wipe.sh  +  its call site in scripts/factory-reset.sh
+#   Phase 10: the box extension-signing key is rotated by a reset, and the
+#   compose mounts of its directory and the sidecar socket are pinned
+#   (WARP-2900, review #2312).
 #
 # Defect being pinned: since the WARP-232 relocation the real .env lives at
 # /data/droplet/env/.env and the audit / doc-KEK keys at /data/droplet/secrets/
@@ -851,6 +854,459 @@ if grep -qi 'recovery passphrase' <<<"$HELP_OUT" && grep -qi 'TPM' <<<"$HELP_OUT
   pass "--help states the same cost of --keep-storage"
 else
   fail "--help still promises drives are kept without saying their recovery path is not"
+fi
+
+# =============================================================================
+# Phase 10: the box extension-signing key is ROTATED (WARP-2900, review #2312)
+# =============================================================================
+# The device-identity sidecar keeps two keys in /var/lib/droplet/tpm. The
+# device-id key stays on purpose (WARP-980: the box stays registered and
+# self-heals). The extension-signing key signs "the owner of this box promoted
+# this extension", and boxes are leased and go to a new customer: a statement,
+# its signature and its manifest are none of them secret, so if the key
+# survived, a promotion the PREVIOUS owner made would still verify `ok` on the
+# next owner's box. The reset removes that one key file (the sidecar mints a
+# fresh one on the next owner's first promote) and leaves everything else in
+# the directory byte-identical.
+#
+# The same phase pins the compose mounts that expose the key directory and the
+# sidecar socket. CODEOWNERS works per file, not per line, so this suite is
+# the code-owned pin for those mount lines. ci.yml's `storage` leg runs it on
+# every change to docker/docker-compose.yml, its docker/docker-compose.*.yml
+# overlays and the sidecar's extension_signing.py (the three files it reads
+# besides the reset), so a mount or key-file change cannot skip it.
+echo ""
+echo "--- Phase 10: a reset rotates the extension-signing key, and only that key ---"
+
+SIDECAR_SIGNING="$REPO_ROOT_REAL/services/device-identity-svc/extension_signing.py"
+COMPOSE="$REPO_ROOT_REAL/docker/docker-compose.yml"
+FIXTURE_EXT_KEY='FAKE-extension-key-warp2900-do-not-use'
+
+# --- wiring ------------------------------------------------------------------
+# `|| true` is allowed (the reset runs under set -e); the gate below is the verdict.
+if grep -qE '^[0-9]+:secw_rotate_extension_key "\$DROPLET_TPM_DIR"( \|\| true)?$' <<<"$CODE_NUM"; then
+  pass "factory-reset calls secw_rotate_extension_key on the TPM state dir"
+else
+  fail "factory-reset never rotates the extension-signing key — the previous owner's promotions still verify"
+fi
+
+TPM_DIR_IN_RESET="$(printf '%s\n' "$CODE_NUM" | sed -nE 's/^[0-9]+:DROPLET_TPM_DIR="([^"]*)"$/\1/p' | head -n 1)"
+if [ "$TPM_DIR_IN_RESET" = "/var/lib/droplet/tpm" ]; then
+  pass "the reset targets /var/lib/droplet/tpm"
+else
+  fail "the reset's TPM dir is '${TPM_DIR_IN_RESET}', not /var/lib/droplet/tpm"
+fi
+
+# The sidecar holds the key IN MEMORY once loaded, so removing the file under a
+# live sidecar rotates nothing until it restarts. The rotation has to come
+# after Phase 1 has taken the stack down.
+ROTATE_LINE="$(printf '%s\n' "$CODE_NUM" | grep -E '^[0-9]+:secw_rotate_extension_key ' | head -n 1 | cut -d: -f1 || true)"
+DOWN_LINE="$(printf '%s\n' "$CODE_NUM" | grep -F 'down -v --remove-orphans' | head -n 1 | cut -d: -f1 || true)"
+if [ -n "$ROTATE_LINE" ] && [ -n "$DOWN_LINE" ] && [ "$ROTATE_LINE" -gt "$DOWN_LINE" ]; then
+  pass "the key is rotated AFTER the stack is down (the sidecar caches it in memory)"
+else
+  fail "the rotation does not follow Phase 1's down (rotate=$ROTATE_LINE down=$DOWN_LINE)"
+fi
+
+EXT_GATE_LINE="$(printf '%s\n' "$CODE_NUM" | grep -E '^[0-9]+:if ! secw_verify_extension_key_rotated "\$DROPLET_TPM_DIR"; then$' | head -n 1 | cut -d: -f1 || true)"
+# The gate's whole `if ... fi` (up to the first column-0 `fi`), comments stripped.
+EXT_GATE_BLOCK=""
+if [ -n "$EXT_GATE_LINE" ]; then
+  EXT_GATE_BLOCK="$(awk -v s="$EXT_GATE_LINE" 'NR >= s { print; if (NR > s && /^fi$/) exit }' "$RESET" \
+    | grep -vE '^[[:space:]]*#' || true)"
+fi
+if [ "$(awk '/SURVIVED/ { s = 1 } s && /^[[:space:]]*exit 1$/ { ok = 1 } END { print ok ? "yes" : "no" }' <<<"$EXT_GATE_BLOCK")" = "yes" ]; then
+  pass "a surviving extension key ABORTS the reset (exit 1)"
+else
+  fail "the reset does not gate on the rotation — a surviving key still reports a clean reset"
+fi
+# WARP-3207: a key dir the reset cannot look into is its own verdict. Nothing
+# is known to have SURVIVED, so it must abort as "cannot be verified", in a
+# branch of its own that exits before the survivor message.
+if [ "$(awk '
+      /"\$SECW_EXTENSION_KEY_BLOCKED" = "1"/ { inb = 1; next }
+      inb && /SURVIVED/ { bad = 1 }
+      inb && /CANNOT be verified/ { msg = 1 }
+      inb && /^[[:space:]]*exit 1$/ { if (msg) ok = 1; inb = 0 }
+      END { print (ok && !bad) ? "yes" : "no" }' <<<"$EXT_GATE_BLOCK")" = "yes" ]; then
+  pass "a key dir the reset cannot look into ABORTS it as 'cannot be verified', not 'survived'"
+else
+  fail "the rotation gate has no BLOCKED branch — an unobservable key dir reads as a rotated key"
+fi
+if [ -n "$EXT_GATE_LINE" ] && [ -n "$BRIDGE_LINE" ] && [ -n "$ROTATE_LINE" ] \
+   && [ "$EXT_GATE_LINE" -gt "$BRIDGE_LINE" ] && [ "$EXT_GATE_LINE" -gt "$ROTATE_LINE" ]; then
+  pass "the rotation gate runs at the end of Phase 4 (aborting earlier leaves more behind)"
+else
+  fail "the rotation gate runs too early (gate=$EXT_GATE_LINE rotate=$ROTATE_LINE bridge=$BRIDGE_LINE)"
+fi
+
+# WARP-980: the rest of the directory is the device's identity. No executable
+# line may remove the directory itself or name a device-id artefact.
+TPM_CODE="$(printf '%s\n' "$CODE_NUM" | grep -E 'DROPLET_TPM_DIR|/var/lib/droplet/tpm' || true)"
+if grep -qE 'rm[[:space:]]+-[a-zA-Z]*r' <<<"$TPM_CODE" \
+   || grep -qE 'device-id|provisioned\.json|ek-cert|srk-pub' <<<"$TPM_CODE"; then
+  fail "the reset removes the TPM dir or a device-id artefact — the box would lose its registration (WARP-980)"
+else
+  pass "the reset never removes the TPM dir or any device-id artefact (WARP-980)"
+fi
+# The backups rm must stay on /var/lib/droplet/backups: widening it to the
+# parent (or above) would take the whole device identity with it, and it never
+# names DROPLET_TPM_DIR, so the filter above cannot see it.
+if printf '%s\n' "$CODE_NUM" | grep -E 'rm[[:space:]]+-[a-zA-Z]*r[^|;&]*[[:space:]]"?(/var|/var/lib|/var/lib/droplet)/?"?([[:space:]]|$)' >/dev/null; then
+  fail "the reset removes /var/lib/droplet (or a parent) — that deletes the TPM dir and the device identity (WARP-980)"
+else
+  pass "the reset never removes /var/lib/droplet or a parent of it (WARP-980)"
+fi
+
+# --- grounding: the file and the directory are the sidecar's -----------------
+SIDECAR_KEY_FILE="$(sed -nE 's/^EXTENSION_KEY_FILE = "([^"]+)"$/\1/p' "$SIDECAR_SIGNING" 2>/dev/null | head -n 1)"
+LIB_KEY_FILE="$(bash -c 'SECW_SUDO=""; source "$1"; printf "%s" "${SECW_EXTENSION_KEY_FILE:-}"' _ "$LIB" 2>/dev/null || true)"
+if [ -n "$SIDECAR_KEY_FILE" ] && [ "$LIB_KEY_FILE" = "$SIDECAR_KEY_FILE" ]; then
+  pass "grounding: the reset removes the file the sidecar keeps the key in ($SIDECAR_KEY_FILE)"
+else
+  fail "the reset's key file '$LIB_KEY_FILE' is not the sidecar's EXTENSION_KEY_FILE '$SIDECAR_KEY_FILE'"
+fi
+if [ "$SIDECAR_KEY_FILE" != "device-id.sealed" ]; then
+  pass "grounding: the extension key file is not the device-id key file"
+else
+  fail "the sidecar stores the extension key in device-id.sealed — rotating it would destroy the device identity"
+fi
+
+# Every service `volumes:` bind in the base compose file whose host side is
+# the key directory, the socket directory, or a parent that would expose
+# either, as "<service> <entry>". Short syntax only; the long syntax is
+# refused below. (tmpfs: lists are container-internal and are not binds.)
+compose_key_mounts() {
+  awk -v q="'" '
+    /^[^[:space:]#]/ { top = $1; svc = ""; sect = "" }
+    top == "services:" && /^  [A-Za-z0-9_.-]+:[[:space:]]*(#.*)?$/ { svc = $1; sub(/:$/, "", svc); sect = ""; next }
+    svc != "" && /^    [A-Za-z0-9_]+:/ { sect = $1; next }
+    svc != "" && sect == "volumes:" && /^[[:space:]]+-[[:space:]]/ {
+      e = $0
+      sub(/^[[:space:]]+-[[:space:]]*/, "", e); sub(/[[:space:]]+#.*$/, "", e); gsub(/"/, "", e); gsub(q, "", e)
+      host = e; sub(/:.*$/, "", host); sub(/\/$/, "", host)
+      if (host ~ /^\/var\/lib\/droplet\/tpm(\/|$)/ || host ~ /^\/(var\/)?run\/droplet(\/|$)/ ||
+          host == "" && e ~ /^\/:/ || host == "/var" || host == "/var/lib" ||
+          host == "/var/lib/droplet" || host == "/var/run" || host == "/run")
+        print svc " " e
+    }
+  ' "$1"
+}
+EXPECTED_MOUNTS="$(printf '%s\n' \
+  'device-identity-svc /var/lib/droplet/tpm:/var/lib/droplet/tpm' \
+  'device-identity-svc /var/run/droplet:/var/run/droplet' \
+  'orchestrator /var/run/droplet:/var/run/droplet:ro' | sort)"
+ACTUAL_MOUNTS="$(compose_key_mounts "$COMPOSE" | sort)"
+if [ "$ACTUAL_MOUNTS" = "$EXPECTED_MOUNTS" ]; then
+  pass "compose: only the sidecar mounts the key dir; only it and the orchestrator (:ro) mount the socket"
+else
+  fail "compose key/socket mounts changed — expected:
+$EXPECTED_MOUNTS
+got:
+$ACTUAL_MOUNTS"
+fi
+if grep -qE "^[[:space:]]+source:[[:space:]]*[\"']?/(var/lib/droplet/tpm|(var/)?run/droplet)" "$COMPOSE"; then
+  fail "compose mounts the key or socket dir with the long volume syntax, which the pin above cannot see"
+else
+  pass "compose: no long-syntax bind of the key or socket dir slips past the pin"
+fi
+OVERLAY_HITS=""
+for _overlay in "$REPO_ROOT_REAL"/docker/docker-compose.*.yml; do
+  [ -f "$_overlay" ] || continue
+  if grep -qE '/var/lib/droplet/tpm|/(var/)?run/droplet' "$_overlay"; then
+    OVERLAY_HITS="$OVERLAY_HITS $(basename "$_overlay")"
+  fi
+done
+if [ -z "$OVERLAY_HITS" ]; then
+  pass "compose: no overlay file re-mounts the key or socket dir"
+else
+  fail "compose overlay(s) mount the key or socket dir:$OVERLAY_HITS"
+fi
+# `volumes_from:` (or a `container:` reference) inherits the sidecar's
+# read-write key bind without naming a path, so the pins above cannot see it.
+# None exists today; a service that needs the key dir must be a reviewed change.
+VOLUMES_FROM_HITS=""
+for _cf in "$COMPOSE" "$REPO_ROOT_REAL"/docker/docker-compose.*.yml; do
+  [ -f "$_cf" ] || continue
+  if grep -qE '^[[:space:]]*volumes_from:|container:[[:space:]]*"?(droplet-)?device-identity-svc' "$_cf"; then
+    VOLUMES_FROM_HITS="$VOLUMES_FROM_HITS $(basename "$_cf")"
+  fi
+done
+if [ -z "$VOLUMES_FROM_HITS" ]; then
+  pass "compose: no service inherits the sidecar's key dir through volumes_from"
+else
+  fail "compose file(s) use volumes_from/container: to inherit the key dir mount:$VOLUMES_FROM_HITS"
+fi
+# And the reset rotates the directory the sidecar actually binds.
+SIDECAR_TPM_HOST="$(compose_key_mounts "$COMPOSE" | awk '$1 == "device-identity-svc" && $2 ~ /^\/var\/lib\/droplet\/tpm/ { e = $2; sub(/:.*$/, "", e); print e; exit }')"
+if [ -n "$SIDECAR_TPM_HOST" ] && [ "$SIDECAR_TPM_HOST" = "$TPM_DIR_IN_RESET" ]; then
+  pass "grounding: the reset rotates the host dir the sidecar binds ($SIDECAR_TPM_HOST)"
+else
+  fail "the reset rotates '$TPM_DIR_IN_RESET' but the sidecar binds '$SIDECAR_TPM_HOST'"
+fi
+
+# The pins above only hold if this suite runs when the files they read change.
+# ci.yml's detect `storage` filter must list them (a ci.yml-only edit that drops
+# one is caught by the unfiltered main-push canary, which runs every leg).
+CI_STORAGE_FILTER="$(awk '
+  /^            storage:[[:space:]]*$/ { inblock = 1; next }
+  inblock && /^            [A-Za-z0-9_-]+:[[:space:]]*$/ { inblock = 0 }
+  inblock && /^              - "/ { e = $0; sub(/^[^"]*"/, "", e); sub(/".*$/, "", e); print e }
+' "$REPO_ROOT_REAL/.github/workflows/ci.yml")"
+CI_MISSING=""
+for _p in docker/docker-compose.yml 'docker/docker-compose.*.yml' \
+          services/device-identity-svc/extension_signing.py \
+          scripts/factory-reset.sh scripts/lib/secrets-wipe.sh \
+          tests/factory-reset-secrets-wipe.test.sh; do
+  grep -qxF "$_p" <<<"$CI_STORAGE_FILTER" || CI_MISSING="$CI_MISSING $_p"
+done
+if [ -z "$CI_MISSING" ]; then
+  pass "ci.yml runs this suite when the reset, the compose files or the sidecar's key file change"
+else
+  fail "ci.yml's storage filter does not fire this suite on:$CI_MISSING"
+fi
+
+# --- behaviour, against a fixture TPM dir -------------------------------------
+# A provisioned box that has promoted at least once: the device-id artefacts
+# plus the extension key, and a stale .tmp a crashed write left beside it
+# (Storage.write's sibling; it can hold the same key bytes).
+make_tpm_fixture() {
+  TMP="$(mktemp -d)"
+  export TMP
+  TPM="$TMP/tpm"
+  mkdir -p "$TPM" "$TMP/bin"
+  printf 'device-id-private-FAKE\n' > "$TPM/device-id.sealed"
+  printf 'device-id-cert\n'         > "$TPM/device-id-cert.pem"
+  printf 'device-id-pub\n'          > "$TPM/device-id-pub.pem"
+  printf 'ek-cert\n'                > "$TPM/ek-cert.pem"
+  printf 'srk-pub\n'                > "$TPM/srk-pub.pem"
+  printf '{"device_id":"droplet"}\n' > "$TPM/provisioned.json"
+  printf '{"usage":"extension","priv_pem":"%s"}\n' "$FIXTURE_EXT_KEY" > "$TPM/extension-signing.sealed"
+  printf '{"usage":"extension","priv_pem":"%s"}\n' "$FIXTURE_EXT_KEY" > "$TPM/extension-signing.sealed.tmp"
+  chmod 600 "$TPM/extension-signing.sealed" "$TPM/extension-signing.sealed.tmp"
+  SECW_SUDO=""
+  SECW_OWNER=""
+  SECW_REPO_ROOT="$TMP/repo"
+  export SECW_SUDO SECW_OWNER SECW_REPO_ROOT
+  # shellcheck disable=SC1090
+  source "$LIB"
+}
+# Content digest of everything in the dir that is NOT the extension key.
+identity_digest() {
+  ( cd "$1" && for f in device-id.sealed device-id-cert.pem device-id-pub.pem \
+                        ek-cert.pem srk-pub.pem provisioned.json; do
+      printf '%s ' "$f"; cksum < "$f"
+    done )
+}
+
+( make_tpm_fixture
+  secw_rotate_extension_key "$TPM" >/dev/null 2>&1
+  [ ! -e "$TPM/extension-signing.sealed" ] && [ ! -e "$TPM/extension-signing.sealed.tmp" ]
+) && pass "the extension key and its stale .tmp are gone" \
+  || fail "the extension key survived the rotation"
+
+( make_tpm_fixture
+  before="$(identity_digest "$TPM")"
+  secw_rotate_extension_key "$TPM" >/dev/null 2>&1
+  [ "$(identity_digest "$TPM")" = "$before" ] \
+    && [ "$(find "$TPM" -mindepth 1 | wc -l | tr -d ' ')" = "6" ]
+) && pass "every device-id artefact is byte-identical and nothing else was removed (WARP-980)" \
+  || fail "the rotation touched the device identity"
+
+( make_tpm_fixture
+  secw_rotate_extension_key "$TPM" >/dev/null 2>&1
+  first="$SECW_EXTENSION_KEY_REMOVED"
+  secw_rotate_extension_key "$TPM" >/dev/null 2>&1
+  rc=$?
+  [ "$first" = "2" ] && [ "$SECW_EXTENSION_KEY_REMOVED" = "0" ] && [ "$rc" = "0" ]
+) && pass "2 files removed on the first run; the second run is a no-op, exit 0" \
+  || fail "the rotation is not idempotent"
+
+( make_tpm_fixture
+  # A box that never promoted has no extension key: nothing to do, and a pass.
+  rm -f "$TPM/extension-signing.sealed" "$TPM/extension-signing.sealed.tmp"
+  before="$(identity_digest "$TPM")"
+  secw_rotate_extension_key "$TPM" >/dev/null 2>&1 \
+    && secw_verify_extension_key_rotated "$TPM" \
+    && [ "$(identity_digest "$TPM")" = "$before" ]
+) && pass "a box that never promoted: no-op, gate passes" \
+  || fail "a box without an extension key fails the rotation"
+
+( make_tpm_fixture
+  # A dev machine (or a box whose sidecar never started) has no TPM dir at all.
+  secw_rotate_extension_key "$TMP/absent" >/dev/null 2>&1 \
+    && secw_verify_extension_key_rotated "$TMP/absent" \
+    && [ ! -e "$TMP/absent" ]
+) && pass "no TPM dir: no-op, gate passes, nothing is created" \
+  || fail "the rotation fails (or creates the dir) when there is no TPM dir"
+
+( make_tpm_fixture
+  # The key file is a symlink to the DEVICE-ID key. Shredding through it would
+  # overwrite the device identity; the link itself is what gets removed.
+  rm -f "$TPM/extension-signing.sealed"
+  ln -s "$TPM/device-id.sealed" "$TPM/extension-signing.sealed"
+  before="$(identity_digest "$TPM")"
+  secw_rotate_extension_key "$TPM" >/dev/null 2>&1
+  [ ! -e "$TPM/extension-signing.sealed" ] && [ ! -L "$TPM/extension-signing.sealed" ] \
+    && [ "$(identity_digest "$TPM")" = "$before" ]
+) && pass "a symlinked key file is unlinked, never shredded through (device-id.sealed intact)" \
+  || fail "the rotation followed a symlink into the device-id key"
+
+( make_tpm_fixture
+  # Nothing can remove it: shred refuses, dd is a no-op, rm refuses.
+  for b in shred rm; do
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/bin/$b"
+  done
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/dd"
+  chmod +x "$TMP/bin/shred" "$TMP/bin/rm" "$TMP/bin/dd"
+  PATH="$TMP/bin:$PATH"
+  export PATH
+  hash -r
+  rc=0
+  secw_rotate_extension_key "$TPM" >/dev/null 2>&1 || rc=$?
+  gate=0
+  secw_verify_extension_key_rotated "$TPM" || gate=$?
+  [ "$rc" != "0" ] && [ "$gate" != "0" ] \
+    && grep -qxF "$TPM/extension-signing.sealed" <<<"$SECW_EXTENSION_KEY_LEFTOVER"
+) && pass "a key that cannot be removed fails the rotation AND the gate, naming the path" \
+  || fail "a surviving extension key passes the gate"
+
+# --- a key dir this user cannot search (WARP-3207) ---------------------------
+# The TPM dir belongs to the sidecar's uid. It is 0755 on every box today, but
+# 0700 (or an unsearchable parent) is a natural hardening, and the dashboard's
+# Danger Zone reset runs under the device-bridge unit's NoNewPrivileges, where
+# sudo cannot escalate. A directory we cannot search reads as EMPTY, and
+# `sudo test -e` exits non-zero both for "absent" and for "sudo failed". So the
+# gate must report BLOCKED ("cannot verify"), never a rotated key.
+#
+# chmod 000 does not lock root out, so these cases need an unprivileged runner
+# (CI's runner user, a developer shell). As root they are reported as skipped.
+#
+# ext_key_locked_run <sudo: none|broken|passthrough|working> <lock: dir|parent>
+# Locks the key dir (or its parent), runs the rotation and then the gate, and
+# unlocks again. Leaves rc, gate, LOCKED and `before` for the caller. Returns 3
+# when the lock does not hold (running as root).
+ext_key_locked_run() {
+  local _sudo="$1" _lock="$2"
+  make_tpm_fixture
+  if [ "$_lock" = parent ]; then
+    mkdir "$TMP/var"
+    mv "$TPM" "$TMP/var/tpm"
+    TPM="$TMP/var/tpm"
+    LOCKED="$TMP/var"
+  else
+    LOCKED="$TPM"
+  fi
+  before="$(identity_digest "$TPM")"
+  case "$_sudo" in
+    none) SECW_SUDO="" ;;
+    broken)
+      # NoNewPrivileges, no tty, or no sudo at all: every command fails.
+      printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/bin/sudo-broken"
+      chmod +x "$TMP/bin/sudo-broken"
+      SECW_SUDO="$TMP/bin/sudo-broken" ;;
+    passthrough)
+      # Runs every command, but as us: it "works", and still sees no more than
+      # we do. The gate's control must ask for search, not just a zero exit.
+      printf '#!/usr/bin/env bash\nexec "$@"\n' > "$TMP/bin/sudo-passthrough"
+      chmod +x "$TMP/bin/sudo-passthrough"
+      SECW_SUDO="$TMP/bin/sudo-passthrough" ;;
+    working)
+      # Stands in for a privileged view: search is granted for the one command
+      # and taken back afterwards.
+      printf '#!/usr/bin/env bash\nchmod 700 %q\n"$@"\nrc=$?\nchmod 000 %q\nexit "$rc"\n' \
+        "$LOCKED" "$LOCKED" > "$TMP/bin/sudo-working"
+      chmod +x "$TMP/bin/sudo-working"
+      SECW_SUDO="$TMP/bin/sudo-working" ;;
+  esac
+  chmod 000 "$LOCKED"
+  if [ -x "$LOCKED" ]; then
+    chmod 755 "$LOCKED"
+    return 3
+  fi
+  rc=0
+  secw_rotate_extension_key "$TPM" >/dev/null 2>&1 || rc=$?
+  gate=0
+  secw_verify_extension_key_rotated "$TPM" >/dev/null 2>&1 || gate=$?
+  chmod 755 "$LOCKED"
+}
+# locked_verdict <subshell-rc> <pass-message> <fail-message>
+locked_verdict() {
+  case "$1" in
+    0) pass "$2" ;;
+    3) printf '  - skipped (running as root; chmod 000 does not lock root out): %s\n' "$2" ;;
+    *) fail "$3" ;;
+  esac
+}
+# BLOCKED, nothing claimed as a survivor, nothing touched, and the reason names
+# the directory that could not be searched.
+locked_is_blocked() {
+  [ "$rc" != "0" ] && [ "$gate" != "0" ] \
+    && [ "${SECW_EXTENSION_KEY_BLOCKED:-}" = "1" ] \
+    && grep -qF "$LOCKED" <<<"${SECW_EXTENSION_KEY_BLOCKED_REASON:-}" \
+    && [ -z "$SECW_EXTENSION_KEY_LEFTOVER" ] \
+    && [ -e "$TPM/extension-signing.sealed" ] \
+    && [ "$(identity_digest "$TPM")" = "$before" ]
+}
+
+_r=0
+( ext_key_locked_run broken dir || exit $?
+  locked_is_blocked
+) || _r=$?
+locked_verdict "$_r" \
+  "an unsearchable key dir with a failing sudo is BLOCKED, not a rotated key" \
+  "an unsearchable key dir with a failing sudo passes the gate — 'cannot see' reads as 'gone'"
+
+_r=0
+( ext_key_locked_run none dir || exit $?
+  locked_is_blocked
+) || _r=$?
+locked_verdict "$_r" \
+  "an unsearchable key dir with no privilege command is BLOCKED" \
+  "an unsearchable key dir with SECW_SUDO empty passes the gate"
+
+_r=0
+( ext_key_locked_run passthrough dir || exit $?
+  locked_is_blocked
+) || _r=$?
+locked_verdict "$_r" \
+  "a privilege command that runs but cannot search the key dir is BLOCKED" \
+  "a sudo that runs without seeing more passes the gate's control — 'cannot see' reads as 'gone'"
+
+_r=0
+( ext_key_locked_run broken parent || exit $?
+  locked_is_blocked
+) || _r=$?
+locked_verdict "$_r" \
+  "an unsearchable PARENT of the key dir is BLOCKED, not 'no TPM dir'" \
+  "an unsearchable parent hides the key dir, and the gate reads that as a box with no TPM dir"
+
+_r=0
+( ext_key_locked_run working dir || exit $?
+  [ "$rc" = "0" ] && [ "$gate" = "0" ] && [ "${SECW_EXTENSION_KEY_BLOCKED:-0}" = "0" ] \
+    && [ ! -e "$TPM/extension-signing.sealed" ] && [ ! -e "$TPM/extension-signing.sealed.tmp" ] \
+    && [ "$(identity_digest "$TPM")" = "$before" ] \
+    && [ "$(find "$TPM" -mindepth 1 | wc -l | tr -d ' ')" = "6" ]
+) || _r=$?
+locked_verdict "$_r" \
+  "an unsearchable key dir with a working sudo: the key is rotated under sudo, identity intact" \
+  "a working sudo does not rotate the key in a dir only it can search"
+
+ROTATE_OUT="$(
+  make_tpm_fixture >/dev/null 2>&1
+  secw_rotate_extension_key "$TPM" 2>&1 || true
+  secw_verify_extension_key_rotated "$TPM" 2>&1 || true
+)"
+if printf '%s' "$ROTATE_OUT" | grep -qF "$FIXTURE_EXT_KEY"; then
+  fail "the extension key's contents appeared in the rotation output (rule 19)"
+else
+  pass "no key material in any output line (rule 19)"
+fi
+
+if "$RESET" --help 2>/dev/null | grep -qiF 'extension-signing key'; then
+  pass "--help lists the extension-signing key among what a reset rotates"
+else
+  fail "--help does not mention the extension-signing key"
 fi
 
 # =============================================================================

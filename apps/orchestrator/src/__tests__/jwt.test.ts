@@ -1,14 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import jwt from "jsonwebtoken";
+import { config } from "../config.js";
 
 // Set JWT_SECRET before imports
 process.env.JWT_SECRET = "test-jwt-secret-for-unit-tests-only-not-production";
 
 // ── Cache mock — backed by an in-memory Map so denylist tests work ──
 const cacheStore = new Map<string, unknown>();
+// QUAL-1: flip to make the strict (revocation) write fail like a Redis outage.
+let strictWriteFails = false;
 vi.mock("../services/cache.service.js", () => ({
   cacheGet: vi.fn(async (key: string) => cacheStore.get(key) ?? null),
   cacheSet: vi.fn(async (key: string, value: unknown) => { cacheStore.set(key, value); }),
   cacheDel: vi.fn(async (key: string) => { cacheStore.delete(key); }),
+  cacheSetStrict: vi.fn(async (key: string, value: unknown) => {
+    if (strictWriteFails) throw new Error("ECONNREFUSED");
+    cacheStore.set(key, value);
+  }),
+  cacheDelStrict: vi.fn(async (key: string) => { cacheStore.delete(key); }),
   // NX semantics: set only if absent. Mirrors the real Redis `SET … NX EX`
   // (true when the key was claimed, false when it already existed).
   cacheSetNx: vi.fn(async (key: string, value: unknown) => {
@@ -25,7 +34,6 @@ import {
   verifyRefreshToken,
   denyRefreshToken,
   claimRefreshRotation,
-  roleFromGroups,
   isRole,
   type Role,
 } from "../services/jwt.service.js";
@@ -185,6 +193,52 @@ describe("JWT Service", () => {
     it("should not throw for an already-expired token", async () => {
       await expect(denyRefreshToken("expired.token.here")).resolves.not.toThrow();
     });
+
+    // WARP-3193 QUAL-1 — a denylist write lost to a Redis outage used to be
+    // swallowed, so logout/rotation reported success while the token stayed
+    // live for up to 7 days. It now surfaces as a 503 the routes answer with.
+    it("REJECTS with a 503 REVOCATION_UNAVAILABLE when the denylist write fails", async () => {
+      const token = signRefreshToken({ id: "u-9", username: "d", displayName: "D", role: "family" });
+      strictWriteFails = true;
+      try {
+        await expect(denyRefreshToken(token)).rejects.toMatchObject({
+          status: 503,
+          code: "REVOCATION_UNAVAILABLE",
+        });
+      } finally {
+        strictWriteFails = false;
+      }
+    });
+  });
+
+  // WARP-3193 SEC-DATA-15 — the issuer signs HS256 only; every verify pins
+  // that algorithm, so a token signed with the same secret under any other
+  // HMAC variant is refused rather than accepted by jsonwebtoken's default
+  // "any HS* for a string secret" rule.
+  describe("algorithm pinning (WARP-3193 SEC-DATA-15)", () => {
+    const secret = config.JWT_SECRET;
+    const claims = { sub: "user-1", username: "alice", displayName: "Alice", role: "family" };
+
+    it("control: an HS256 token signed with the same secret verifies", () => {
+      const token = jwt.sign({ ...claims, type: "access" }, secret, { algorithm: "HS256", expiresIn: 60 });
+      expect(verifyAccessToken(token)).not.toBeNull();
+    });
+
+    it("verifyAccessToken rejects an HS384-signed access token", () => {
+      const token = jwt.sign({ ...claims, type: "access" }, secret, { algorithm: "HS384", expiresIn: 60 });
+      expect(verifyAccessToken(token)).toBeNull();
+    });
+
+    it("verifyRefreshToken rejects an HS512-signed refresh token", async () => {
+      const token = jwt.sign({ ...claims, type: "refresh" }, secret, { algorithm: "HS512", expiresIn: 60 });
+      expect(await verifyRefreshToken(token)).toBeNull();
+    });
+
+    it("denyRefreshToken writes nothing for an HS384-signed token", async () => {
+      const token = jwt.sign({ ...claims, type: "refresh" }, secret, { algorithm: "HS384", expiresIn: 60 });
+      await denyRefreshToken(token);
+      expect(cacheStore.size).toBe(0);
+    });
   });
 
   describe("isRole (WARP-1523 — canonical Role vocabulary guard)", () => {
@@ -204,45 +258,6 @@ describe("JWT Service", () => {
       // Not an `in`-style check: object prototype keys must not pass.
       expect(isRole("constructor")).toBe(false);
       expect(isRole("toString")).toBe(false);
-    });
-  });
-
-  describe("roleFromGroups (ADR-004 §4 mapping)", () => {
-    // The mapping is the single source of truth for translating
-    // Nextcloud groups → Role. AC #4 / ADR-004 §4 require:
-    //   admin group → owner, staff group → admin, guest group → guest,
-    //   no recognised group → family (least-privileged default).
-    // Precedence is owner > admin > guest > default so a user in
-    // overlapping groups always lands on the most-privileged tier.
-    it("maps the admin group to owner", () => {
-      expect(roleFromGroups(["admin"])).toBe("owner");
-    });
-
-    it("maps the staff group to admin", () => {
-      expect(roleFromGroups(["staff"])).toBe("admin");
-    });
-
-    it("maps the guest group to guest", () => {
-      expect(roleFromGroups(["guest"])).toBe("guest");
-    });
-
-    it("defaults to family when no recognised group is present", () => {
-      expect(roleFromGroups([])).toBe("family");
-      expect(roleFromGroups(["random-group"])).toBe("family");
-    });
-
-    it("gives admin group precedence over staff/guest/default", () => {
-      expect(roleFromGroups(["admin", "staff", "guest"])).toBe("owner");
-      expect(roleFromGroups(["staff", "admin"])).toBe("owner");
-    });
-
-    it("gives staff group precedence over guest/default", () => {
-      expect(roleFromGroups(["staff", "guest"])).toBe("admin");
-      expect(roleFromGroups(["other", "staff"])).toBe("admin");
-    });
-
-    it("gives guest group precedence over the default fallthrough", () => {
-      expect(roleFromGroups(["guest", "users"])).toBe("guest");
     });
   });
 

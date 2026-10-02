@@ -26,15 +26,17 @@ const sdkSpies = vi.hoisted(() => {
 });
 
 vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
-  Client: vi.fn().mockImplementation(() => ({
-    callTool: sdkSpies.callTool,
-    listTools: sdkSpies.listTools,
-    connect: sdkSpies.connect,
-    close: sdkSpies.close,
-  })),
+  Client: vi.fn().mockImplementation(function () {
+    return {
+      callTool: sdkSpies.callTool,
+      listTools: sdkSpies.listTools,
+      connect: sdkSpies.connect,
+      close: sdkSpies.close,
+    };
+  }),
 }));
 vi.mock("@modelcontextprotocol/sdk/client/stdio.js", () => ({
-  StdioClientTransport: vi.fn().mockImplementation(() => ({})),
+  StdioClientTransport: vi.fn().mockImplementation(function () { return {}; }),
 }));
 
 import { McpClientService } from "../services/mcp-client.service.js";

@@ -93,6 +93,23 @@ class TestStaticTableLookup:
             assert caps.vision is True, model
             assert caps.tools is False, model
 
+    def test_every_catalog_model_resolves_by_its_dmr_ref(self):
+        """WARP-3047 — on DMR `/api/show` returns only `details` (verified on
+        a v1.2.6 box 2026-09-23), so a catalog model with no row here reads
+        `tools=False` — and the orchestrator's `requireTools` then routes an
+        agent run to a SECOND model next to the active one. Every ref the
+        catalog pulls (`services/inference-manager/models/model-manifest.json`
+        `oci`, as DMR lists it) must hit a tools-capable row."""
+        for ref in (
+            "docker.io/ai/gpt-oss:20B-F16",
+            "docker.io/ai/gemma4:26b-a4b-q4_K_M",
+            "docker.io/ai/qwen3-vl:8B-UD-Q4_K_XL",
+            "docker.io/ai/llama3.2:3B-Q4_K_M",
+            "docker.io/ai/glm-4.7-flash:reap-q4_K_M",
+        ):
+            caps = static_capabilities(ref)
+            assert caps is not None and caps.tools is True, ref
+
     def test_unknown_model_misses(self):
         assert static_capabilities("some-model-nobody-ships:7b") is None
 
@@ -392,6 +409,9 @@ class TestTableMirrorsTheApplianceManifest:
         "llama3.2:3b": (["tools"], 67),
         "qwen3-vl:32b": (["vision", "tools", "thinking"], 84),
         "gemma4:31b": (["vision", "tools"], 101),
+        # WARP-3047 — in this repo's catalog copy
+        # (services/inference-manager/models/model-manifest.json:102).
+        "glm-4.7-flash:31b": (["tools", "thinking"], 102),
     }
 
     @pytest.mark.parametrize("model_id", sorted(MANIFEST_CAPABILITIES))

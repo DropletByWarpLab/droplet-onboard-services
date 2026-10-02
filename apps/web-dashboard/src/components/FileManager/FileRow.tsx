@@ -15,7 +15,9 @@ import {
   MoreVertical,
 } from "lucide-react";
 import { StarButton } from "./StarButton";
-import type { FileEntryInfo } from "@/lib/types";
+import { FolderIcon } from "./FolderIcon";
+import { useDropTarget } from "./internal-drag";
+import type { FileEntryInfo, FolderColor } from "@/lib/types";
 
 interface FileRowProps {
   file: FileEntryInfo;
@@ -47,6 +49,19 @@ interface FileRowProps {
    * existing caller (My Files / Household, always writable) is unaffected.
    */
   canWrite?: boolean;
+  /** The caller's colour for this folder (folders only). */
+  folderColor?: FolderColor;
+  /**
+   * Drag-to-move. `onDragStartRow` must call `writeDragPaths` (it decides
+   * whether the drag carries this row or the whole selection); the row is
+   * `draggable` only when it is provided. A folder row becomes a drop target
+   * when `onDropItems` is provided; `canDropOn` vetoes self/descendant drops
+   * during dragover.
+   */
+  onDragStartRow?: (e: React.DragEvent) => void;
+  onDragEndRow?: () => void;
+  canDropOn?: () => boolean;
+  onDropItems?: (paths: string[]) => void;
 }
 
 /** Verbatim copy (design brief §2) — ships as-is wherever a write action is
@@ -80,7 +95,10 @@ function formatSize(bytes: number): string {
 
 function formatDate(iso: string): string {
   const d = new Date(iso);
+  // A date from a past year is ambiguous without the year.
+  const sameYear = d.getFullYear() === new Date().getFullYear();
   return d.toLocaleDateString(undefined, {
+    ...(sameYear ? {} : { year: "numeric" }),
     month: "short",
     day: "numeric",
     hour: "2-digit",
@@ -110,11 +128,26 @@ export function FileRow({
   onContextMenu,
   onFavoriteChanged,
   canWrite = true,
+  folderColor,
+  onDragStartRow,
+  onDragEndRow,
+  canDropOn,
+  onDropItems,
 }: FileRowProps) {
   const isFavorited = favoritedPaths?.has(file.path) ?? false;
   const Icon = getFileIcon(file);
-  // Folders take the brand indigo (design .ri.brand); other files stay muted.
-  const iconColor = file.isDirectory ? "var(--brand)" : "var(--text-muted)";
+  const { isOver, handlers: dropHandlers } = useDropTarget({
+    enabled: file.isDirectory && !!onDropItems,
+    canDrop: () => canDropOn?.() ?? true,
+    onDrop: (paths) => onDropItems?.(paths),
+  });
+  // Folders render through FolderIcon (brand indigo, or the caller's colour); other files stay muted.
+  const iconColor = "var(--text-muted)";
+  const iconClass = `block transition-opacity duration-150 ${
+    isSelected
+      ? "opacity-0"
+      : "group-hover:opacity-0 group-focus-visible/select:opacity-0"
+  }`;
   const [renameValue, setRenameValue] = useState(file.name);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -235,8 +268,22 @@ export function FileRow({
         e.preventDefault();
         onContextMenu(e.clientX, e.clientY);
       }}
-      style={isSelected ? { backgroundColor: "var(--brand-subtle)" } : undefined}
-      className={`flex items-center justify-between px-4 py-3 min-h-[44px] group transition-colors duration-200 ease-smooth cursor-pointer
+      draggable={!!onDragStartRow && !isRenaming}
+      onDragStart={onDragStartRow}
+      onDragEnd={onDragEndRow}
+      {...dropHandlers}
+      data-drop-over={isOver ? "1" : undefined}
+      style={
+        isOver
+          ? {
+              backgroundColor: "var(--brand-subtle)",
+              boxShadow: "inset 0 0 0 2px var(--brand)",
+            }
+          : isSelected
+          ? { backgroundColor: "var(--brand-subtle)" }
+          : undefined
+      }
+      className={`flex items-center justify-between px-4 py-3 min-h-[56px] group transition-colors duration-200 ease-smooth cursor-pointer
         focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--brand)]
         ${isSelected ? "" : "hover:bg-[var(--hover)]"}`}
     >
@@ -272,15 +319,11 @@ export function FileRow({
           className="group/select relative flex-shrink-0 -m-2 p-2 rounded-full
             focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--brand)]"
         >
-          <Icon
-            size={18}
-            style={{ color: iconColor }}
-            className={`block transition-opacity duration-150 ${
-              isSelected
-                ? "opacity-0"
-                : "group-hover:opacity-0 group-focus-visible/select:opacity-0"
-            }`}
-          />
+          {file.isDirectory ? (
+            <FolderIcon size={26} color={folderColor} className={iconClass} />
+          ) : (
+            <Icon size={26} style={{ color: iconColor }} className={iconClass} />
+          )}
           <div
             className={`absolute inset-0 flex items-center justify-center transition-opacity duration-150 ${
               isSelected
@@ -313,7 +356,7 @@ export function FileRow({
               if (e.key === "Escape") onCancelRename();
             }}
             onBlur={commitRename}
-            className="flex-1 py-1 px-2 outline-none focus:border-[var(--brand)] text-[16px] lg:text-[13.5px]"
+            className="flex-1 py-1 px-2 outline-none focus:ring-2 focus:ring-[var(--brand)] text-[16px] lg:text-[13.5px]"
             style={{
               background: "var(--surface)",
               border: "1px solid var(--border)",
@@ -325,7 +368,11 @@ export function FileRow({
         ) : (
           <span
             className="truncate"
-            style={{ color: "var(--text)", fontSize: "13.5px", fontWeight: 500 }}
+            style={{
+              color: "var(--text)",
+              fontSize: "14.5px",
+              fontWeight: file.isDirectory ? 600 : 500,
+            }}
           >
             {file.name}
           </span>
@@ -333,15 +380,15 @@ export function FileRow({
       </div>
 
       <span
-        className="w-20 text-right hidden sm:block flex-shrink-0"
-        style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "11.5px" }}
+        className="w-24 text-right hidden sm:block flex-shrink-0"
+        style={{ color: "var(--text-muted)", fontSize: "13px" }}
       >
         {file.isDirectory ? "" : formatSize(file.size)}
       </span>
 
       <span
-        className="w-32 text-right hidden md:block flex-shrink-0"
-        style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "11.5px" }}
+        className="w-40 text-right hidden md:block flex-shrink-0"
+        style={{ color: "var(--text-muted)", fontSize: "13px" }}
       >
         {formatDate(file.modifiedAt)}
       </span>

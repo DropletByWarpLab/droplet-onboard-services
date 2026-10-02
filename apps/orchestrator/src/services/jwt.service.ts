@@ -3,9 +3,9 @@ import jwt from "jsonwebtoken";
 import { config } from "../config.js";
 import {
   cacheGet,
-  cacheSet,
+  cacheSetStrict,
   cacheSetNx,
-  cacheDel,
+  cacheDelStrict,
   cacheSetAdd,
   cacheSetRemove,
   cacheSetMembers,
@@ -73,30 +73,6 @@ const SESSION_SET_PREFIX = "jwt:sessions:";
 const VALID_ROLES: readonly Role[] = ["owner", "admin", "family", "guest", "service"] as const;
 
 /**
- * Derive a role from a Nextcloud group list. See ADR-004 §4 for the mapping.
- *
- * A HINT, NOT AN AUTHORITY (WARP-1636). Every group this reads is one that
- * a Nextcloud instance administrator can grant themselves — including the
- * literal `"admin"` group below, which is Nextcloud's OWN built-in
- * instance-administrator group and which `buildNcGroups`
- * (routes/auth-groups.ts) hands to every owner/admin-tier Droplet user. A
- * session minted straight from this function therefore lets anyone who can
- * reach Nextcloud's user-management UI hand themselves `owner`, the one
- * tier ADR-032 §3 states bypasses layer 2 entirely.
- *
- * So: never mint a session from this return value directly. Go through
- * `resolveNcSessionRole` below, which caps it at the role Droplet's own
- * store holds for that person. The docstring this replaces called it "the
- * single source of truth"; the store is, and that was the bug.
- */
-export function roleFromGroups(groups: string[]): Role {
-  if (groups.includes("admin")) return "owner";
-  if (groups.includes("staff")) return "admin";
-  if (groups.includes("guest")) return "guest";
-  return "family";
-}
-
-/**
  * Privilege ladder for the household role taxonomy (ADR-004 §3). Higher
  * number = more authority. Used to stop a lower-ranked operator from
  * minting an invite that assigns a role outranking their own — the
@@ -131,51 +107,6 @@ export function roleOutranks(a: Role, b: Role): boolean {
 }
 
 /**
- * WARP-1636 — the single funnel every NEXTCLOUD-authenticated session mint
- * runs through. Returns the role to mint at, given the holder's Nextcloud
- * groups and the role Droplet's own `User.role` column holds for them.
- *
- * The rail, in one sentence: **Nextcloud group membership may confirm or
- * narrow a session, never raise it.** `storedRole` is the ceiling.
- *
- * Why this exists rather than the bare `roleFromGroups` the OCS fallback
- * used to call (all verified on `main` before the fix):
- *
- *   • `buildNcGroups` provisions every owner/admin-tier Droplet user into
- *     Nextcloud's BUILT-IN `admin` group — they are full NC instance
- *     administrators, not members of some Droplet-scoped group.
- *   • `roleFromGroups(["admin"])` returned `owner`.
- *   • So a contractor holding a deliberately-NARROWED Admin-based custom
- *     role (ADR-032 / RBAC v2 — `User.role = "admin"`, `files` withheld)
- *     could authenticate against Nextcloud with the same password (the
- *     Droplet password IS the Nextcloud password) and come back holding an
- *     `owner` orchestrator session: the one tier ADR-032 §3 says bypasses
- *     layer 2 entirely. Full privilege escalation out of a role that was
- *     narrowed on purpose, and the dashboard's own 404 on
- *     `GET /api/files/spaces` proved layer 2 was doing its job — the
- *     bypass came in around it.
- *
- * DIRECTIONAL, and that is the whole safety property: the cap removes
- * authority the store does not back and adds none. A real owner keeps
- * `owner` (their stored role IS `owner`); an operator who stripped
- * someone's NC role groups still narrows them, because the group-derived
- * role is honoured whenever it is the LOWER of the two.
- *
- * Expressed with `roleOutranks` on purpose — the rank ladder is already
- * the codebase's one answer to "may this role stand in for that one"
- * (invite/create rank caps, rail 3 in role-mutation-guard.service.ts). A
- * second, parallel notion of privilege ordering is exactly the drift the
- * WARP-1526 consolidation removed.
- */
-export function resolveNcSessionRole(
-  ncGroups: string[],
-  storedRole: Role,
-): Role {
-  const derived = roleFromGroups(ncGroups);
-  return roleOutranks(derived, storedRole) ? storedRole : derived;
-}
-
-/**
  * Is `value` one of the canonical Role vocabulary values? Runtime guard for
  * rank-checking role strings that arrive OUTSIDE a zod-validated body — e.g.
  * the WARP-1523 role-UPDATE cap on PUT /auth/users/:username reads the raw
@@ -192,6 +123,13 @@ export function isRole(value: unknown): value is Role {
 function getSecret(): string {
   return config.JWT_SECRET;
 }
+
+/**
+ * WARP-3193 SEC-DATA-15 — every verify pins the one algorithm the signers
+ * above use (jsonwebtoken's HS256 default). Without it, a string secret
+ * accepts any HS* variant; the mcp-server's verifyJwt already pins the same.
+ */
+const VERIFY_OPTIONS: jwt.VerifyOptions = { algorithms: ["HS256"] };
 
 /**
  * Sign a short-lived access token (15 min).
@@ -275,7 +213,7 @@ export function signRefreshToken(user: {
  */
 export function verifyAccessToken(token: string): JwtPayload | null {
   try {
-    const decoded = jwt.verify(token, getSecret()) as jwt.JwtPayload & Partial<JwtPayload> & {
+    const decoded = jwt.verify(token, getSecret(), VERIFY_OPTIONS) as jwt.JwtPayload & Partial<JwtPayload> & {
       type?: string;
     };
     if (decoded.type !== "access") return null;
@@ -317,7 +255,7 @@ export async function verifyRefreshToken(
   token: string,
 ): Promise<JwtPayload | null> {
   try {
-    const decoded = jwt.verify(token, getSecret()) as jwt.JwtPayload & Partial<JwtPayload> & {
+    const decoded = jwt.verify(token, getSecret(), VERIFY_OPTIONS) as jwt.JwtPayload & Partial<JwtPayload> & {
       type?: string;
     };
     if (decoded.type !== "refresh") return null;
@@ -347,19 +285,51 @@ export async function verifyRefreshToken(
  * Uses jwt.verify (not jwt.decode) to reject unsigned or forged tokens,
  * preventing an attacker from crafting tokens with large exp values to
  * flood Redis with long-lived denylist entries.
+ *
+ * WARP-3193 QUAL-1: a denylist write that Redis refuses REJECTS with
+ * `revocationUnavailable()` (503) rather than being swallowed — the caller
+ * must not report the token revoked when it is still live.
  */
 export async function denyRefreshToken(token: string): Promise<void> {
+  let decoded: jwt.JwtPayload;
   try {
-    const decoded = jwt.verify(token, getSecret()) as jwt.JwtPayload;
-    if (!decoded?.exp) return;
-
-    const ttl = decoded.exp - Math.floor(Date.now() / 1000);
-    if (ttl <= 0) return; // Already expired — no need to denylist
-
-    await cacheSet(REFRESH_DENYLIST_PREFIX + tokenHash(token), true, ttl);
+    decoded = jwt.verify(token, getSecret(), VERIFY_OPTIONS) as jwt.JwtPayload;
   } catch {
     // Invalid signature or expired — safe to ignore; forged tokens need no denylist entry
+    return;
   }
+  if (!decoded?.exp) return;
+
+  const ttl = decoded.exp - Math.floor(Date.now() / 1000);
+  if (ttl <= 0) return; // Already expired — no need to denylist
+
+  try {
+    await cacheSetStrict(REFRESH_DENYLIST_PREFIX + tokenHash(token), true, ttl);
+  } catch {
+    throw revocationUnavailable();
+  }
+}
+
+/**
+ * WARP-3193 QUAL-1 — the one error every revocation write throws when Redis
+ * refuses it. It carries a numeric `statusCode` (the `http-errors` shape the
+ * global error handler trusts), so a route that forwards it to `next(err)`
+ * answers 503 with a stable `code` instead of reporting a revocation that
+ * never landed.
+ */
+export class RevocationUnavailableError extends Error {
+  readonly status = 503;
+  readonly statusCode = 503;
+  readonly code = "REVOCATION_UNAVAILABLE";
+
+  constructor() {
+    super("Session revocation could not be recorded. Try again in a moment.");
+    this.name = "RevocationUnavailableError";
+  }
+}
+
+export function revocationUnavailable(): RevocationUnavailableError {
+  return new RevocationUnavailableError();
 }
 
 /**
@@ -407,7 +377,7 @@ export async function registerRefreshSession(
   token: string,
 ): Promise<void> {
   try {
-    const decoded = jwt.verify(token, getSecret()) as jwt.JwtPayload & {
+    const decoded = jwt.verify(token, getSecret(), VERIFY_OPTIONS) as jwt.JwtPayload & {
       type?: string;
     };
     if (decoded.type !== "refresh" || !decoded.exp) return;
@@ -431,7 +401,7 @@ export async function unregisterRefreshSession(
   token: string,
 ): Promise<void> {
   try {
-    const decoded = jwt.verify(token, getSecret()) as jwt.JwtPayload & {
+    const decoded = jwt.verify(token, getSecret(), VERIFY_OPTIONS) as jwt.JwtPayload & {
       type?: string;
     };
     if (decoded.type !== "refresh" || !decoded.exp) return;
@@ -483,13 +453,25 @@ export async function revokeUserSessions(userId: string): Promise<number> {
     if (!Number.isFinite(exp)) continue;
     const ttl = exp - now;
     if (ttl <= 0) continue; // Already expired — denylist entry would be a no-op.
-    await cacheSet(REFRESH_DENYLIST_PREFIX + hash, true, ttl);
+    // WARP-3193 QUAL-1: strict — a failed write rejects instead of being
+    // counted, so the returned number is what actually landed.
+    try {
+      await cacheSetStrict(REFRESH_DENYLIST_PREFIX + hash, true, ttl);
+    } catch {
+      throw revocationUnavailable();
+    }
     revoked += 1;
   }
   // Clear the index whether or not anything was denylisted: leaving stale
   // (now-denylisted or expired) members would let a later revoke re-walk dead
-  // hashes and would leak the index unbounded.
-  await cacheDel(setKey);
+  // hashes and would leak the index unbounded. Strict too: SMEMBERS reads
+  // fail open to [], so this delete is what reveals an outage when the read
+  // came back empty.
+  try {
+    await cacheDelStrict(setKey);
+  } catch {
+    throw revocationUnavailable();
+  }
   return revoked;
 }
 

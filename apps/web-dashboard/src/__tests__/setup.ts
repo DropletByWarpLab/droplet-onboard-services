@@ -89,5 +89,52 @@ if (typeof globalThis.ResizeObserver === "undefined") {
   } as unknown as typeof ResizeObserver;
 }
 
+// WARP-2973: jsdom ships no 2D canvas backend. `getContext("2d")` returns
+// null AND reports `Not implemented: HTMLCanvasElement.prototype.getContext`
+// to the virtual console on every call — which the login hero's frame loop
+// makes 12+ times per run, in EVERY login / invite / passkey /
+// change-password page test, flooding the CI log.
+//
+// Same treatment, same reasoning as the ResizeObserver polyfill above: stub
+// it once here rather than wiring a spy into each file that happens to
+// render an auth surface.
+//
+// Deliberately only the operations the hero calls, and deliberately inert: a
+// test that wants to assert what was PAINTED should spy on these itself.
+// This exists to let the component mount quietly, not to emulate a canvas.
+if (typeof HTMLCanvasElement !== "undefined") {
+  const noop = () => {};
+  // One context per canvas, like a real browser — so a test that does reach
+  // for fillStyle/lineWidth doesn't see it reset between frames.
+  const contexts = new WeakMap<HTMLCanvasElement, CanvasRenderingContext2D>();
+
+  HTMLCanvasElement.prototype.getContext = function (
+    this: HTMLCanvasElement,
+    type: string,
+  ) {
+    if (type !== "2d") return null;
+    let ctx = contexts.get(this);
+    if (!ctx) {
+      ctx = {
+        setTransform: noop,
+        clearRect: noop,
+        beginPath: noop,
+        closePath: noop,
+        moveTo: noop,
+        lineTo: noop,
+        arc: noop,
+        fill: noop,
+        stroke: noop,
+        createRadialGradient: () => ({ addColorStop: noop }),
+        fillStyle: "",
+        strokeStyle: "",
+        lineWidth: 0,
+      } as unknown as CanvasRenderingContext2D;
+      contexts.set(this, ctx);
+    }
+    return ctx;
+  } as typeof HTMLCanvasElement.prototype.getContext;
+}
+
 // Suppress console noise in tests
 vi.spyOn(console, "error").mockImplementation(() => {});

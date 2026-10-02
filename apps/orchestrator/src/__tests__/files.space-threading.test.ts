@@ -19,7 +19,11 @@ vi.mock("../services/nextcloud.client.js", async () => {
   );
   return {
     NextcloudOcsError: actual.NextcloudOcsError,
+    NcPreconditionFailedError: actual.NcPreconditionFailedError,
     ncListFiles: vi.fn(),
+    ncStageUpload: vi.fn(),
+    ncCommitUpload: vi.fn(),
+    ncDiscardUpload: vi.fn(),
     ncCreateDirectory: vi.fn(),
     ncUploadFile: vi.fn(),
     ncDownloadFile: vi.fn(),
@@ -161,7 +165,16 @@ beforeEach(() => {
     if (typeof fn?.mockReset === "function") fn.mockReset();
   }
   ncMock.ncCreateDirectory.mockResolvedValue(undefined);
-  ncMock.ncUploadFile.mockResolvedValue(undefined);
+  ncMock.ncUploadFile.mockResolvedValue("created");
+  ncMock.ncStageUpload.mockImplementation(
+    async (_t: string, _u: string, _id: string, body: AsyncIterable<Buffer>) => {
+      for await (const _c of body) {
+        /* drain like the real streamed PUT */
+      }
+    },
+  );
+  ncMock.ncCommitUpload.mockResolvedValue("created");
+  ncMock.ncDiscardUpload.mockResolvedValue(undefined);
   ncMock.ncDeleteFile.mockResolvedValue(undefined);
   ncMock.ncMoveFile.mockResolvedValue(undefined);
   ncMock.ncCopyFile.mockResolvedValue(undefined);
@@ -249,12 +262,12 @@ describe("WARP-1262 (T10) — single-space write routes", () => {
       .query({ path: "/Reports", space: `dept:${DEPT_A.id}` })
       .attach("files", Buffer.from("hello"), "report.txt");
     expect(res.status).toBe(200);
-    expect(ncMock.ncUploadFile).toHaveBeenCalledWith(
+    expect(ncMock.ncCommitUpload).toHaveBeenCalledWith(
       expect.any(String),
       expect.any(String),
-      "/Alpha/Reports",
-      "report.txt",
-      expect.any(Buffer),
+      expect.any(String),
+      "/Alpha/Reports/report.txt",
+      false,
     );
   });
 
@@ -264,7 +277,7 @@ describe("WARP-1262 (T10) — single-space write routes", () => {
       .query({ path: "/Reports", space: `dept:${DEPT_A.id}` })
       .attach("files", Buffer.from("hello"), "report.txt");
     expect(res.status).toBe(403);
-    expect(ncMock.ncUploadFile).not.toHaveBeenCalled();
+    expect(ncMock.ncStageUpload).not.toHaveBeenCalled();
   });
 
   it("rename: household alias ('shared') resolves under the configured shared-folder name", async () => {
@@ -506,7 +519,8 @@ describe("WARP-1262 (security) — '..' path traversal is rejected on every spac
       .query({ path: TRAVERSAL, space: `dept:${DEPT_A.id}` })
       .attach("files", Buffer.from("x"), "report.txt");
     expect(res.status).toBe(400);
-    expect(ncMock.ncUploadFile).not.toHaveBeenCalled();
+    // WARP-2093: rejected before a byte streams, not after staging.
+    expect(ncMock.ncStageUpload).not.toHaveBeenCalled();
   });
 
   it("favorite: `..` in path → 400, NC never called", async () => {

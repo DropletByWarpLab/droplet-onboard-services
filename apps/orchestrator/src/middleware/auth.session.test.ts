@@ -31,11 +31,6 @@ vi.mock("../services/cache.service.js", () => ({
 const verifyAccessToken = vi.fn();
 vi.mock("../services/jwt.service.js", () => ({
   verifyAccessToken: (...a: unknown[]) => verifyAccessToken(...(a as [string])),
-  roleFromGroups: vi.fn().mockReturnValue("family"),
-  // WARP-1636 — the OCS fallback's session-mint funnel. See the note in
-  // middleware/auth.test.ts: the rank cap is pinned against the real
-  // module in __tests__/auth.ocs-role-cap.test.ts.
-  resolveNcSessionRole: vi.fn().mockReturnValue("family"),
 }));
 
 const checkSession = vi.fn();
@@ -262,5 +257,117 @@ describe("validateTokenForWs — WARP-247 session enforcement", () => {
     const user = await validateTokenForWs("jwt-token");
     expect(user).toBeNull();
     expect(checkSession).not.toHaveBeenCalled();
+  });
+});
+
+// WARP-2804 (review F3) — whether THIS request's session record was actually
+// confirmed live. The `sid` itself always comes from the signed token, but the
+// live-session check is skipped when the session store is unreachable (fail
+// open) and on sid-less grace tokens. An acknowledgement records which one it
+// was (`ackSessionChecked`), so "acked from that sign-in" is never claimed
+// stronger than the box could check.
+describe("authMiddleware — WARP-2804 req.sessionChecked", () => {
+  it("true only when the session store confirmed the sign-in is live", async () => {
+    verifyAccessToken.mockReturnValue(payloadWithSid);
+    checkSession.mockResolvedValue({
+      kind: "ok",
+      record: { userId: "u-uuid-1", role: "family", createdAt: 0, lastSeenAt: 0 },
+    });
+    const req = cookieReq();
+    const next = vi.fn() as unknown as NextFunction;
+    authMiddleware(req, mockRes(), next);
+    await flush();
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(req.sessionChecked).toBe(true);
+  });
+
+  it("MUTATION: false when the store is unreachable and the request is let through on the signed token alone", async () => {
+    verifyAccessToken.mockReturnValue(payloadWithSid);
+    checkSession.mockResolvedValue({ kind: "error" });
+    const req = cookieReq();
+    const next = vi.fn() as unknown as NextFunction;
+    authMiddleware(req, mockRes(), next);
+    await flush();
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(req.user?.sid).toBe("sid-abc");
+    expect(req.sessionChecked).toBe(false);
+  });
+
+  it("false on a sid-less grace token (no session record to check)", async () => {
+    const { sid: _sid, ...noSid } = payloadWithSid;
+    verifyAccessToken.mockReturnValue(noSid);
+    const req = headerReq();
+    const next = vi.fn() as unknown as NextFunction;
+    authMiddleware(req, mockRes(), next);
+    await flush();
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(req.sessionChecked).toBe(false);
+  });
+});
+
+// WARP-3038 (ADR-008 §3) — when a request carries BOTH a Bearer and a session
+// cookie, the Bearer is the identity the client meant to use. A native client
+// on a shared cookie jar (or a browser tab beside a native app) must not have
+// another user's stale cookie override its Bearer.
+describe("authMiddleware — WARP-3038 Bearer beats cookie", () => {
+  const aliceBearer = { ...payloadWithSid, sub: "u-alice", username: "alice", sid: "sid-alice" };
+  const bobCookie = { ...payloadWithSid, sub: "u-bob", username: "bob", sid: "sid-bob" };
+
+  beforeEach(() => {
+    verifyAccessToken.mockImplementation((t: string) =>
+      t === "alice-jwt" ? aliceBearer : t === "bob-jwt" ? bobCookie : null,
+    );
+    checkSession.mockResolvedValue({
+      kind: "ok",
+      record: { userId: "x", role: "family", createdAt: 0, lastSeenAt: 0 },
+    });
+  });
+
+  it("authenticates as the Bearer's user when a different user's cookie rides along", async () => {
+    const req = {
+      headers: { authorization: "Bearer alice-jwt" },
+      cookies: { droplet_session: "bob-jwt" },
+      path: "/api/llm/models",
+    } as unknown as Request;
+    const next = vi.fn() as unknown as NextFunction;
+
+    authMiddleware(req, mockRes(), next);
+    await flush();
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(req.user).toMatchObject({ id: "u-alice", sid: "sid-alice" });
+    expect(checkSession).toHaveBeenCalledWith("sid-alice");
+  });
+
+  it("a Bearer that does not verify is NOT rescued by a valid cookie", async () => {
+    const req = {
+      headers: { authorization: "Bearer garbage" },
+      cookies: { droplet_session: "bob-jwt" },
+      path: "/api/llm/models",
+    } as unknown as Request;
+    const res = mockRes();
+    const next = vi.fn() as unknown as NextFunction;
+
+    authMiddleware(req, res, next);
+    await flush();
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(req.user).toBeUndefined();
+  });
+
+  it("a cookie-only request (the browser path) still authenticates", async () => {
+    const req = {
+      headers: {},
+      cookies: { droplet_session: "bob-jwt" },
+      path: "/api/llm/models",
+    } as unknown as Request;
+    const next = vi.fn() as unknown as NextFunction;
+
+    authMiddleware(req, mockRes(), next);
+    await flush();
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(req.user).toMatchObject({ id: "u-bob" });
   });
 });

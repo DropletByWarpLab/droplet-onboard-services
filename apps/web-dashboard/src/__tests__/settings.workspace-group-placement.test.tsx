@@ -31,6 +31,9 @@ const fetchPersonaMock = vi.fn();
 const fetchWorkspaceLocationsMock = vi.fn();
 
 vi.mock("@/lib/api", () => ({
+  // WARP-3264 — Settings mounts PlaceLookupSwitch.
+  fetchPlaceLookupChannel: vi.fn().mockResolvedValue(null),
+  setPlaceLookupChannel: vi.fn(),
   fetchWorkspaceLocations: (...a: any[]) => fetchWorkspaceLocationsMock(...a),
   createWorkspaceLocation: vi.fn(),
   updateWorkspaceLocation: vi.fn(),
@@ -39,6 +42,9 @@ vi.mock("@/lib/api", () => ({
   createUser: vi.fn(),
   deleteUser: vi.fn(),
   fetchSystemHealth: () => Promise.resolve({ status: "ok" }),
+  // WARP-2967: the Settings page derives its tucked-surface rows from
+  // nav-config and resolves their capability gates through this probe.
+  fetchCapabilities: () => Promise.resolve({ claudeActivity: false, ragEval: false }),
   fetchBusinessProfile: (...a: any[]) => fetchBusinessProfileMock(...a),
   patchBusinessProfile: vi.fn(),
   startBusinessOnboarding: vi.fn(),

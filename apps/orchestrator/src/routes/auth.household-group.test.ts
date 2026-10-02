@@ -31,24 +31,26 @@ describe("WARP-883 — buildNcGroups (household membership)", () => {
     expect(householdGroupName("Family Drive")).toBe("family-drive");
   });
 
-  it("owner lands in admin + droplet-admins + household", () => {
+  // WARP-2993: no role joins NC's built-in `admin` group — only the box
+  // service account is an NC instance admin, the owner included.
+  it("owner lands in droplet-admins + household, NOT NC's `admin`", () => {
     expect(buildNcGroups("owner", HOUSEHOLD)).toEqual([
-      "admin",
       DROPLET_ADMINS_GROUP,
       HOUSEHOLD,
     ]);
   });
 
-  it("admin lands in admin + droplet-admins + household", () => {
+  it("admin lands in droplet-admins + household, NOT NC's `admin`", () => {
     expect(buildNcGroups("admin", HOUSEHOLD)).toEqual([
-      "admin",
       DROPLET_ADMINS_GROUP,
       HOUSEHOLD,
     ]);
   });
 
-  it("guest lands in guest + household", () => {
-    expect(buildNcGroups("guest", HOUSEHOLD)).toEqual(["guest", HOUSEHOLD]);
+  // WARP-3179: the Workspace group's write mask would union over the
+  // read-only one `guest` holds on the Workspace.
+  it("guest lands in guest only, never the Workspace group", () => {
+    expect(buildNcGroups("guest", HOUSEHOLD)).toEqual(["guest"]);
   });
 
   it("family lands in household only (no role group)", () => {
@@ -129,6 +131,11 @@ describe("WARP-1558 — buildNcGroups (droplet-admins / ADR-029 Tier-1 see-all)"
     const groups = buildNcGroups("owner", HOUSEHOLD);
     expect(groups.filter((g) => g === DROPLET_ADMINS_GROUP)).toHaveLength(1);
     expect(groups).toContain(HOUSEHOLD);
-    expect(groups).toContain("admin");
+  });
+
+  it("WARP-2993: no role at all is put in Nextcloud's built-in `admin` group", () => {
+    for (const role of ALL_ROLES) {
+      expect(buildNcGroups(role, HOUSEHOLD)).not.toContain("admin");
+    }
   });
 });

@@ -27,9 +27,12 @@ const fetchLatencyMock = vi.fn().mockResolvedValue(null);
 // WARP-2871 — the box-wide key listing behind `cloud[].hasKey`. Called with
 // NO user id (shared namespace); the spy records the args so that is pinned.
 const listKeysMock = vi.fn();
+// WARP-3046 — a successful pull asks the gateway to drop its model listing.
+const refreshModelsMock = vi.fn();
 vi.mock("../services/ai-gateway.client.js", () => ({
   listModels: () => listModelsMock(),
   listKeys: (...a: unknown[]) => listKeysMock(...a),
+  refreshModels: () => refreshModelsMock(),
   // WARP-2883: the latency probe is best-effort; null = gateway not asked.
   fetchLatency: () => fetchLatencyMock(),
 }));
@@ -49,6 +52,24 @@ const { recordActivityMock } = vi.hoisted(() => ({
 }));
 vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: recordActivityMock,
+}));
+
+// WARP-3047 — a switch is a REAL swap: the route unloads every other resident
+// model through the inference-manager, then warms the new one. Both are
+// network, so both are observed here.
+const { unloadAllExceptMock, warmDefaultModelMock } = vi.hoisted(() => ({
+  unloadAllExceptMock: vi.fn(async (_keep: string) => ({
+    unloaded: [] as string[],
+    stillResident: [] as string[],
+  })),
+  warmDefaultModelMock: vi.fn(async (..._a: unknown[]) => undefined),
+}));
+vi.mock("../services/model-residency.service.js", () => ({
+  unloadAllExcept: (keep: string) => unloadAllExceptMock(keep),
+}));
+vi.mock("../services/model-readiness.service.js", async (importActual) => ({
+  ...(await importActual<typeof import("../services/model-readiness.service.js")>()),
+  warmDefaultModel: (...a: unknown[]) => warmDefaultModelMock(...a),
 }));
 
 // WARP-836 — stub only the Ollama metrics *probe* (network); keep the real
@@ -86,11 +107,18 @@ const { fetchEligibleCatalogMock, openPullStreamMock } = vi.hoisted(() => ({
   fetchEligibleCatalogMock: vi.fn(),
   openPullStreamMock: vi.fn(),
 }));
-vi.mock("../services/model-catalog.service.js", () => ({
-  fetchEligibleCatalog: () => fetchEligibleCatalogMock(),
-  openPullStream: (model: string, signal: AbortSignal) =>
-    openPullStreamMock(model, signal),
-}));
+// WARP-3046: `readPullRefusal` stays REAL — the refusal mapping is exactly
+// what the pull-route tests below pin, so it must not be mocked away.
+vi.mock("../services/model-catalog.service.js", async (importActual) => {
+  const actual =
+    await importActual<typeof import("../services/model-catalog.service.js")>();
+  return {
+    ...actual,
+    fetchEligibleCatalog: () => fetchEligibleCatalogMock(),
+    openPullStream: (model: string, signal: AbortSignal) =>
+      openPullStreamMock(model, signal),
+  };
+});
 
 // WARP-1861 — stub the device-bridge probe (network), keep the real
 // `bytesToGiB` so the payload's arithmetic is exercised rather than mocked.
@@ -126,6 +154,7 @@ import {
   type ModelsPagePayload,
 } from "../services/models-summary.service.js";
 import { benchCacheKey } from "../services/model-benchmark.service.js";
+import { markModelListChanged } from "../services/model-list-generation.js";
 
 /**
  * Minimal prisma stub backing the `ai.model.chat` WorkspaceSetting. Starts at
@@ -183,6 +212,7 @@ beforeEach(() => {
   resolveEffectiveAccessMock.mockResolvedValue(null);
   // Default: no bridge → no GPU. Cases that want a card say so explicitly.
   fetchGpuTelemetryMock.mockResolvedValue(null);
+  refreshModelsMock.mockResolvedValue(undefined);
 });
 
 describe("WARP-471 — models page payload", () => {
@@ -495,6 +525,37 @@ describe("WARP-471 — /api/models route", () => {
     expect(res.body.cloud.every((c: { hasKey: unknown }) => c.hasKey === null)).toBe(true);
   });
 
+  it("withholds every keyed-vendor signal from a guest, not only hasKey (WARP-3082)", async () => {
+    // enabled = escape && hasKey, lastUsedAt and the per-provider latency
+    // sample each reveal which vendor is keyed. An admin still gets them all.
+    listModelsMock.mockResolvedValue({ models: [] });
+    listKeysMock.mockResolvedValue(["anthropic"]);
+    fetchLatencyMock.mockResolvedValue({ providers: { local: 10, anthropic: 300, openai: null } });
+    const escape = { enabled: true, lastChangedBy: "romain", lastChangedAt: new Date("2026-09-01T10:00:00.000Z") };
+
+    const guest = await request(
+      buildApp({ id: "g1", username: "visitor", role: "guest" }, createPrismaMock(null, escape)),
+    ).get("/api/models");
+    expect(guest.status).toBe(200);
+    for (const row of guest.body.cloud) {
+      expect(row.hasKey).toBeNull();
+      expect(row.enabled).toBeNull();
+      expect(row.lastUsedAt).toBeNull();
+    }
+    expect(guest.body.endpointLatencyMs).toEqual({ local: 10, anthropic: null, openai: null });
+    expect(guest.body.avgLatencyMs).toBe(10);
+
+    const admin = await request(
+      buildApp({ id: "a1", username: "romain", role: "admin" }, createPrismaMock(null, escape)),
+    ).get("/api/models");
+    const anthropic = admin.body.cloud.find((c: { provider: string }) => c.provider === "anthropic");
+    expect(anthropic.hasKey).toBe(true);
+    expect(anthropic.enabled).toBe(true);
+    expect(admin.body.endpointLatencyMs.anthropic).toBe(300);
+    expect(admin.body.avgLatencyMs).toBe(155);
+    fetchLatencyMock.mockResolvedValue(null);
+  });
+
   it("serves a degraded payload UNCACHED so it self-heals (WARP-1289)", async () => {
     // Mirror of the WARP-1284 rule on /api/llm/models: never cache the
     // degraded fallback — the next request retries the gateway so the page
@@ -517,6 +578,22 @@ describe("WARP-471 — /api/models route", () => {
     expect(res.status).toBe(200);
     expect(res.body.degraded).toBe(false);
     expect(vi.mocked(cacheSet)).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not cache a payload whose gateway read a model refresh overtook (WARP-3046)", async () => {
+    // A download finished (and busted `models:page`) while this read was in
+    // flight: its list predates the new model. Serve it to this caller, but
+    // writing it back would hide the model again for the full 30 s TTL.
+    const { cacheSet } = await import("../services/cache.service.js");
+    listModelsMock.mockImplementationOnce(async () => {
+      markModelListChanged();
+      return { models: [] };
+    });
+    const app = buildApp({ username: "stefan", role: "family" });
+    const res = await request(app).get("/api/models");
+    expect(res.status).toBe(200);
+    expect(res.body.degraded).toBe(false);
+    expect(vi.mocked(cacheSet)).not.toHaveBeenCalled();
   });
 
   it("PATCH /api/models 404s — read-only enforcement", async () => {
@@ -557,7 +634,11 @@ describe("WARP-1112 — PATCH /api/models/active", () => {
       .patch("/api/models/active")
       .send({ model: "llama3.2:3b" });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ activeModel: "llama3.2:3b", changed: true });
+    expect(res.body).toEqual({
+      activeModel: "llama3.2:3b",
+      changed: true,
+      swap: { unloaded: [], stillResident: [] },
+    });
     expect(prisma._active()).toBe("llama3.2:3b");
     expect(prisma.workspaceSetting.upsert).toHaveBeenCalledTimes(1);
     expect(recordActivityMock).toHaveBeenCalledTimes(1);
@@ -661,6 +742,119 @@ describe("WARP-1112 — PATCH /api/models/active", () => {
     const res = await request(app).get("/api/models");
     expect(res.status).toBe(200);
     expect(res.body.activeModel).toBe("llama3.2:3b");
+  });
+});
+
+describe("WARP-3047 — PATCH /api/models/active really swaps the loaded model", () => {
+  const A = "docker.io/ai/gpt-oss:20B-F16";
+  const B = "docker.io/ai/qwen3:8B-Q4_K_M";
+  const installed = {
+    models: [
+      { id: A, provider: "local", name: "Gpt-oss 20B F16", context_window: null },
+      { id: B, provider: "local", name: "Qwen3 8B Q4 K M", context_window: null },
+    ],
+  };
+  const owner = { username: "stefan", role: "owner" };
+  /** The warm fires on setImmediate AFTER the response — flush one tick. */
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  it("unloads every other resident model, reports it, THEN warms the new one", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const order: string[] = [];
+    unloadAllExceptMock.mockImplementationOnce(async (keep: string) => {
+      order.push(`unload:${keep}`);
+      return { unloaded: [A], stillResident: [] };
+    });
+    warmDefaultModelMock.mockImplementationOnce(async (model: unknown) => {
+      order.push(`warm:${String(model)}`);
+    });
+    const prisma = createPrismaMock(A);
+
+    const res = await request(buildApp(owner, prisma))
+      .patch("/api/models/active")
+      .send({ model: B });
+    await flush();
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      activeModel: B,
+      changed: true,
+      swap: { unloaded: [A], stillResident: [] },
+    });
+    expect(order).toEqual([`unload:${B}`, `warm:${B}`]);
+    // An explicit, audited owner switch is never swallowed by the warm
+    // debounce (a warm of B minutes ago may since have been unloaded).
+    expect(warmDefaultModelMock).toHaveBeenCalledWith(B, { force: true });
+  });
+
+  it("keeps the runtime id when the caller sent the display name", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    await request(buildApp(owner, createPrismaMock(A)))
+      .patch("/api/models/active")
+      .send({ model: "Qwen3 8B Q4 K M" });
+    await flush();
+    expect(unloadAllExceptMock).toHaveBeenCalledWith(B);
+    expect(warmDefaultModelMock).toHaveBeenCalledWith(B, { force: true });
+  });
+
+  it("reports a model DMR could not evict (still serving) instead of pretending", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    unloadAllExceptMock.mockResolvedValueOnce({ unloaded: [], stillResident: [A] });
+    const res = await request(buildApp(owner, createPrismaMock(A)))
+      .patch("/api/models/active")
+      .send({ model: B });
+    expect(res.status).toBe(200);
+    expect(res.body.swap).toEqual({ unloaded: [], stillResident: [A] });
+  });
+
+  it("an unreachable inference-manager never fails the switch: swap is null, the choice stands, B is warmed", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    unloadAllExceptMock.mockRejectedValueOnce(new Error("ECONNREFUSED"));
+    const prisma = createPrismaMock(A);
+    const res = await request(buildApp(owner, prisma))
+      .patch("/api/models/active")
+      .send({ model: B });
+    await flush();
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ activeModel: B, changed: true, swap: null });
+    expect(prisma._active()).toBe(B);
+    expect(warmDefaultModelMock).toHaveBeenCalledWith(B, { force: true });
+  });
+
+  it("a no-op PATCH neither unloads nor warms", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const res = await request(buildApp(owner, createPrismaMock(B)))
+      .patch("/api/models/active")
+      .send({ model: B });
+    await flush();
+    expect(res.body).toEqual({ activeModel: B, changed: false });
+    expect(unloadAllExceptMock).not.toHaveBeenCalled();
+    expect(warmDefaultModelMock).not.toHaveBeenCalled();
+  });
+
+  it("a rejected model (not installed) neither unloads nor warms", async () => {
+    listModelsMock.mockResolvedValue(installed);
+    const res = await request(buildApp(owner, createPrismaMock(A)))
+      .patch("/api/models/active")
+      .send({ model: "gemma4:26b" });
+    await flush();
+    expect(res.status).toBe(400);
+    expect(unloadAllExceptMock).not.toHaveBeenCalled();
+    expect(warmDefaultModelMock).not.toHaveBeenCalled();
+  });
+
+  it("a DEGRADED local listing is 503 ai_service_unreachable, not a false 400 not_installed", async () => {
+    // The gateway answered, but its local provider raised during the listing:
+    // "not in the list" means "couldn't confirm", not "isn't installed".
+    listModelsMock.mockResolvedValue({ models: [], degraded_providers: ["local"] });
+    const prisma = createPrismaMock(A);
+    const res = await request(buildApp(owner, prisma))
+      .patch("/api/models/active")
+      .send({ model: B });
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe("ai_service_unreachable");
+    expect(prisma.workspaceSetting.upsert).not.toHaveBeenCalled();
+    expect(unloadAllExceptMock).not.toHaveBeenCalled();
   });
 });
 
@@ -952,6 +1146,26 @@ describe("WARP-1827 — GET /api/models/catalog", () => {
     expect(res.body.models[1].pulled).toBe(false);
   });
 
+  it("passes the honesty fields through (contract C1, WARP-3046)", async () => {
+    fetchEligibleCatalogMock.mockResolvedValue({
+      detected_vram_gb: null,
+      vram_source: null,
+      tags_unreachable: false,
+      degraded_manifest: true,
+      models: [],
+    });
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).get("/api/models/catalog");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      detected_vram_gb: null,
+      vram_source: null,
+      tags_unreachable: false,
+      degraded_manifest: true,
+      models: [],
+    });
+  });
+
   it("503s ai_service_unreachable when the sidecar can't be reached", async () => {
     fetchEligibleCatalogMock.mockRejectedValue(new Error("connection refused"));
     const app = buildApp({ username: "stefan", role: "owner" });
@@ -1001,22 +1215,30 @@ describe("WARP-1827 — POST /api/models/:name/pull", () => {
     expect(openPullStreamMock).not.toHaveBeenCalled();
   });
 
-  it("passes an upstream 409 (disk preflight) through verbatim", async () => {
-    const preflight = {
-      error: "insufficient_disk",
-      detail: "Needs 9.0 GB free; 2.1 GB available.",
-    };
+  it("maps the sidecar's disk-preflight 409 to a typed insufficient_disk body (WARP-3046)", async () => {
+    // The REAL sidecar shape: FastAPI wraps the preflight's object in
+    // `detail`. Relayed verbatim, the dashboard rendered that object as a
+    // React child and the /models page crashed. The old mock sent a string
+    // here, which is why no test ever saw it.
     openPullStreamMock.mockResolvedValue({
       ok: false,
       status: 409,
-      json: async () => preflight,
+      text: async () =>
+        JSON.stringify({
+          detail: { error: "insufficient_disk", needed_gb: 28.1, free_gb: 12.4 },
+        }),
     });
     const app = buildApp({ username: "stefan", role: "owner" });
     const res = await request(app).post("/api/models/qwen3%3A14b/pull");
     expect(res.status).toBe(409);
-    expect(res.body).toEqual(preflight);
-    // The attempt was still audited as started — the sidecar refused it after.
-    expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    expect(res.body.error).toBe("insufficient_disk");
+    expect(typeof res.body.detail).toBe("string");
+    expect(res.body.needed_gb).toBe(28.1);
+    expect(res.body.free_gb).toBe(12.4);
+    // Started, then failed — the refusal closes the audit trail it opened.
+    expect(recordActivityMock).toHaveBeenCalledTimes(2);
+    expect(recordActivityMock.mock.calls[1][0].what).toBe("Model download failed");
+    expect(recordActivityMock.mock.calls[1][0].refs.reason).toBe("insufficient_disk");
   });
 
   it("502s pull_failed on any other upstream error", async () => {
@@ -1029,6 +1251,68 @@ describe("WARP-1827 — POST /api/models/:name/pull", () => {
     const res = await request(app).post("/api/models/qwen3%3A14b/pull");
     expect(res.status).toBe(502);
     expect(res.body.error).toBe("pull_failed");
+  });
+
+  it("carries DMR's own pre-stream reason through as the 502 detail (WARP-3046)", async () => {
+    // DMR resolves the registry manifest before writing a byte; a bad tag,
+    // no egress or a rate limit comes back 500 {"error":"Failed to pull
+    // model: …"}, which the sidecar relays as a string `detail`.
+    const reason = "Failed to pull model: reading model from registry: not found";
+    openPullStreamMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: async () => JSON.stringify({ detail: JSON.stringify({ error: reason }) }),
+    });
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/qwen3%3A14b/pull");
+    expect(res.status).toBe(502);
+    expect(res.body).toEqual({ error: "pull_failed", detail: reason });
+    expect(recordActivityMock).toHaveBeenCalledTimes(2);
+    expect(recordActivityMock.mock.calls[1][0].what).toBe("Model download failed");
+    expect(recordActivityMock.mock.calls[1][0].severity).toBe("warn");
+    expect(recordActivityMock.mock.calls[1][0].refs.reason).toBe(reason);
+  });
+
+  it("audits a transport failure opening the stream as failed (WARP-3046)", async () => {
+    openPullStreamMock.mockRejectedValue(new Error("connect ECONNREFUSED"));
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/qwen3%3A14b/pull");
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe("pull_failed");
+    expect(recordActivityMock).toHaveBeenCalledTimes(2);
+    expect(recordActivityMock.mock.calls[1][0].what).toBe("Model download failed");
+  });
+
+  it("503s catalog_unconfirmed while the sidecar can't read the installed list (WARP-3046)", async () => {
+    // tags_unreachable => every `pulled` flag reads false, so the
+    // already_pulled guard can't fire and the serving model would be
+    // offered — and downloaded — again.
+    fetchEligibleCatalogMock.mockResolvedValue({
+      ...eligibleCatalog(),
+      tags_unreachable: true,
+      models: eligibleCatalog().models.map((m) => ({ ...m, pulled: false })),
+    });
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/gpt-oss%3A20b/pull");
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe("catalog_unconfirmed");
+    expect(typeof res.body.detail).toBe("string");
+    expect(openPullStreamMock).not.toHaveBeenCalled();
+    expect(recordActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("a stream that ends without a terminal success is audited as failed (WARP-3046)", async () => {
+    openPullStreamMock.mockResolvedValue(
+      streamResponse(['{"status":"pulling manifest"}', '{"status":"downloading","completed":1}']),
+    );
+    const { cacheDel } = await import("../services/cache.service.js");
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/qwen3%3A14b/pull");
+    expect(res.status).toBe(200);
+    expect(vi.mocked(cacheDel)).not.toHaveBeenCalled();
+    expect(refreshModelsMock).not.toHaveBeenCalled();
+    expect(recordActivityMock).toHaveBeenCalledTimes(2);
+    expect(recordActivityMock.mock.calls[1][0].what).toBe("Model download failed");
   });
 
   it("streams the NDJSON body through and busts the page cache on success", async () => {
@@ -1046,6 +1330,15 @@ describe("WARP-1827 — POST /api/models/:name/pull", () => {
     expect(res.text).toBe(lines.map((l) => `${l}\n`).join(""));
     // Terminal success → page cache busted + started/finished audited.
     expect(vi.mocked(cacheDel)).toHaveBeenCalledWith("models:page");
+    // WARP-3046: …and the chat picker's list, and the gateway's registry —
+    // or the model just installed is missing from both for ~90 s.
+    expect(vi.mocked(cacheDel)).toHaveBeenCalledWith("llm:models");
+    expect(refreshModelsMock).toHaveBeenCalledTimes(1);
+    // The gateway is refreshed BEFORE our caches are dropped, so a read
+    // racing the bust can't re-cache the gateway's pre-pull listing.
+    expect(refreshModelsMock.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(cacheDel).mock.invocationCallOrder[0],
+    );
     expect(recordActivityMock).toHaveBeenCalledTimes(2);
     expect(recordActivityMock.mock.calls[0][0].what).toBe(
       "Model download started",
@@ -1082,6 +1375,18 @@ describe("WARP-1827 — POST /api/models/:name/pull", () => {
       "Model download failed",
     );
     expect(recordActivityMock.mock.calls[1][0].severity).toBe("warn");
+  });
+
+  it("a failed gateway refresh never fails a finished download (WARP-3046)", async () => {
+    refreshModelsMock.mockRejectedValue(new Error("AI Gateway error: 503"));
+    openPullStreamMock.mockResolvedValue(streamResponse(['{"status":"success"}']));
+    const { cacheDel } = await import("../services/cache.service.js");
+    const app = buildApp({ username: "stefan", role: "owner" });
+    const res = await request(app).post("/api/models/qwen3%3A14b/pull");
+    expect(res.status).toBe(200);
+    expect(vi.mocked(cacheDel)).toHaveBeenCalledWith("models:page");
+    expect(vi.mocked(cacheDel)).toHaveBeenCalledWith("llm:models");
+    expect(recordActivityMock.mock.calls[1][0].what).toBe("Model download finished");
   });
 
   it("tolerates unparseable NDJSON lines while watching for the terminal", async () => {
@@ -1519,7 +1824,7 @@ describe("WARP-2882 — rows carry the runtime id; probes and writes key on it",
       .patch("/api/models/active")
       .send({ model: "Gpt-oss 20B F16" });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ activeModel: "docker.io/ai/gpt-oss:20B-F16", changed: true });
+    expect(res.body).toMatchObject({ activeModel: "docker.io/ai/gpt-oss:20B-F16", changed: true });
     expect(prisma._active()).toBe("docker.io/ai/gpt-oss:20B-F16");
   });
 });

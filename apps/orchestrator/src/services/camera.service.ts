@@ -30,6 +30,11 @@ import {
 import { cacheGet, cacheSet, cacheDel } from "./cache.service.js";
 import { dispatchDetectionEvent } from "./push-dispatch.service.js";
 import { processCameraEvent } from "./camera-event-gate.js";
+import {
+  inCameraScope,
+  narrowCameraFilter,
+  type CameraScope,
+} from "./camera-access.service.js";
 import { config } from "../config.js";
 import { mqttConnectOptions } from "../lib/internal-tls.js";
 import type {
@@ -46,6 +51,18 @@ import type {
 } from "../types/camera.js";
 import { createLogger } from "../lib/logger.js";
 import { retainsFootage } from "./camera-retention-defaults.js";
+import { frigateEndToDraft, parseFrigateStatus } from "./security-event-ingest.js";
+import { createInflightTracker, type OngoingSource } from "./security-inflight.js";
+import {
+  createStatusTracker,
+  noteFrigateConnectionLost,
+  noteFrigateMessage,
+  noteFrigateSubscribeFailed,
+  noteFrigateSubscription,
+  recordSecurityEvent,
+  SECURITY_FRIGATE_TOPICS,
+  type StatusTracker,
+} from "./security-events.service.js";
 
 const logger = createLogger("camera-service");
 
@@ -55,6 +72,26 @@ const CACHE_TTL = 5; // seconds
 
 let _mqttClient: mqtt.MqttClient | null = null;
 let _initialized = false;
+let _statusTracker: StatusTracker | null = null;
+
+/** WARP-2977 — the camera/Frigate health the /security header shows. */
+export function securityStatusSnapshot(): ReturnType<StatusTracker["snapshot"]> {
+  return _statusTracker?.snapshot() ?? new Map();
+}
+
+/**
+ * WARP-2978 PR-D (ADR-059 P3 §6.12) — the people Frigate is tracking right
+ * now, fed from the raw `frigate/events` messages below (before the gate).
+ * The incident engine reads it each tick: a person in view for 30 s gets one
+ * `detection_ongoing` row, and their incident is held open until their `end`
+ * row joins it. In memory; a restart forgets it (then only `end` alerts).
+ */
+const _inflight = createInflightTracker();
+
+/** The in-flight map, as the incident engine reads it (index.ts wires it in). */
+export function securityOngoingSource(): OngoingSource {
+  return _inflight;
+}
 
 // SSE subscribers
 type SSECallback = (event: CameraSSEEvent) => void;
@@ -82,11 +119,26 @@ export async function initCameraService(prisma: PrismaClient): Promise<void> {
       ...mqttConnectOptions(config.MQTT_BROKER),
     });
 
+    _statusTracker = createStatusTracker(prisma);
+
     _mqttClient.on("connect", () => {
       logger.info("Camera service connected to MQTT");
-      _mqttClient!.subscribe("frigate/events", { qos: 1 });
       _mqttClient!.subscribe("droplet/cameras/discovered", { qos: 1 });
-      _mqttClient!.subscribe("frigate/+/status", { qos: 0 });
+      // WARP-2977 — the Security event store's topics. Until then this
+      // subscribed to `frigate/+/status`, which Frigate never publishes: its
+      // health topic is `frigate/<camera>/status/<role>`, and MQTT's `+` is
+      // exactly one level, so camera online/offline never arrived. The SUBACK
+      // is checked: a refused topic is an ingest that is down, not a quiet
+      // site, and /security says so.
+      // One list, shared with the SUBACK check, so a topic can never be
+      // subscribed without being verified (or verified without being asked for).
+      _mqttClient!.subscribe(
+        Object.fromEntries(SECURITY_FRIGATE_TOPICS.map((t) => [t, { qos: 1 as const }])),
+        (err, granted) => {
+          if (err) noteFrigateSubscribeFailed(err);
+          else noteFrigateSubscription(granted ?? []);
+        },
+      );
     });
 
     _mqttClient.on("message", (topic, payload) => {
@@ -96,6 +148,20 @@ export async function initCameraService(prisma: PrismaClient): Promise<void> {
     _mqttClient.on("error", (err) => {
       logger.error({ err }, "Camera MQTT error");
     });
+
+    // WARP-2977 — a dropped broker is an ingest that is down, not a quiet
+    // site. mqtt.js reconnects on its own; the next `connect` resubscribes and
+    // its SUBACK marks the feed live again.
+    // WARP-2978 PR-D: a dropped broker forgets nobody in the in-flight map.
+    // mqtt.js emits `close` on every reconnect cycle, and a person standing
+    // still may get no `update` after it: forgetting them would let their
+    // `end` open a second incident, and a second alert. An `end` sent while
+    // the broker was away is never redelivered (clean session); that person's
+    // hold still stops at the span cap and their entry at the 6 h age limit
+    // (security-inflight.ts). Frigate itself going away is its LWT
+    // (`frigate/available` offline), which handleMqttMessage still forgets on.
+    _mqttClient.on("close", () => noteFrigateConnectionLost());
+    _mqttClient.on("offline", () => noteFrigateConnectionLost());
   } catch (err) {
     logger.warn("Camera MQTT connection failed: %s", err);
   }
@@ -111,6 +177,8 @@ export async function shutdownCameraService(): Promise<void> {
     _mqttClient = null;
   }
   _sseSubscribers.clear();
+  _statusTracker = null;
+  _inflight.forgetCamera(null);
   _initialized = false;
 }
 
@@ -123,16 +191,33 @@ function handleMqttMessage(
 ): void {
   const raw = payload.toString();
 
-  // Frigate status topics send raw "ON"/"OFF" strings (not JSON)
-  const statusMatch = topic.match(/^frigate\/([^/]+)\/status$/);
-  if (statusMatch) {
-    const cameraName = statusMatch[1];
-    const isOnline = raw.trim().toUpperCase() === "ON";
-    broadcastSSE({
-      type: isOnline ? "camera_online" : "camera_offline",
-      camera: cameraName,
-      timestamp: Date.now(),
-    });
+  // Frigate health: `frigate/<camera>/status/detect` and `frigate/available`
+  // carry bare strings (online | offline | disabled), not JSON. Only a
+  // TRANSITION is stored or broadcast — both topics are retained, so every
+  // reconnect replays the current state.
+  if (topic === "frigate/available" || /^frigate\/[^/]+\/status\/detect$/.test(topic)) {
+    noteFrigateMessage();
+    // WARP-2978 PR-D — a camera that is down (or switched off) is tracking
+    // nobody, and Frigate going offline ends every track without an `end`:
+    // forget those people now, so they neither get a late "still in view"
+    // row nor hold an incident open.
+    const reading = parseFrigateStatus(topic, raw);
+    if (reading && reading.health !== "online") _inflight.forgetCamera(reading.camera);
+    void _statusTracker
+      ?.observe(topic, raw)
+      .then((observation) => {
+        // Broadcast every change, stored or not: a failed database write
+        // must not hide a camera going dark from the live surface.
+        const change = observation?.broadcast;
+        if (change?.camera) {
+          broadcastSSE({
+            type: change.kind === "camera_online" ? "camera_online" : "camera_offline",
+            camera: change.camera,
+            timestamp: Date.now(),
+          });
+        }
+      })
+      .catch((err) => logger.warn({ err, topic }, "security status ingest failed"));
     return;
   }
 
@@ -145,6 +230,19 @@ function handleMqttMessage(
   }
 
   if (topic === "frigate/events") {
+    noteFrigateMessage();
+    // WARP-2977 — persist BEFORE the gate, from the raw message. The gate
+    // below drops a second object while one is tracked and anything in the
+    // cooldown, and the `end` of a dropped event then reads as stale: behind
+    // it, the store would lose exactly the busy moments. One row per object,
+    // on `end`; a redelivered `end` is absorbed by the dedupe key.
+    const securityDraft = frigateEndToDraft(data);
+    if (securityDraft) void recordSecurityEvent(prisma, securityDraft);
+    // WARP-2978 PR-D — the same raw message keeps the in-flight map: `new` and
+    // `update` track a person, `end` forgets them. Nothing is written here;
+    // the incident engine writes the one "still in view" row.
+    _inflight.observe(data, new Date());
+
     const after = data.after as Record<string, unknown> | undefined;
     const before = data.before as Record<string, unknown> | undefined;
 
@@ -428,10 +526,22 @@ function broadcastSSE(event: CameraSSEEvent): void {
   }
 }
 
-export function subscribeCameraEvents(callback: SSECallback): () => void {
-  _sseSubscribers.add(callback);
+/**
+ * Subscribe to the live camera stream, filtered to what this subscriber may
+ * see (WARP-2982). `scope` is read per event, so a subscriber can refresh
+ * it (grant revoked, role changed) without reconnecting. Before this, every
+ * broadcast reached every subscriber regardless of per-camera grants.
+ */
+export function subscribeCameraEvents(
+  callback: SSECallback,
+  scope: () => CameraScope,
+): () => void {
+  const scoped: SSECallback = (event) => {
+    if (inCameraScope(scope(), event.camera ?? "")) callback(event);
+  };
+  _sseSubscribers.add(scoped);
   return () => {
-    _sseSubscribers.delete(callback);
+    _sseSubscribers.delete(scoped);
   };
 }
 
@@ -575,17 +685,30 @@ export async function invalidateCamerasCache(): Promise<void> {
 // --- Events ---
 
 export async function getRecentEvents(
+  scope: CameraScope,
   limit = 20,
   camera?: string
 ): Promise<DetectionEvent[]> {
-  const cacheKey = camera
-    ? `cameras:events:${camera}`
+  // WARP-2982: narrow to the caller's cameras BEFORE the limit, so a scoped
+  // user gets their `limit` newest events, not a slice of everyone's.
+  const cameras = narrowCameraFilter(scope, camera ? [camera] : undefined);
+  if (cameras?.length === 0) return [];
+  // Narrowed lists get their own namespace: under the bare
+  // `cameras:events:<names>` form, a camera named `recent` shared
+  // CACHE_KEY_EVENTS — the owner's all-camera list.
+  const cacheKey = cameras
+    ? `cameras:events:only:${[...cameras].sort().join(",")}`
     : CACHE_KEY_EVENTS;
   const cached = await cacheGet<DetectionEvent[]>(cacheKey);
-  if (cached) return cached;
+  // The key names cameras, not a caller: whoever wrote the entry may have
+  // had a wider scope than this reader. Re-apply the scope on a hit, the
+  // same second check the fetch path below runs.
+  if (cached) return cached.filter((e) => inCameraScope(scope, e.camera));
 
-  const rawEvents = await fetchEvents(limit, camera);
-  const events: DetectionEvent[] = (rawEvents as any[]).map((e) => ({
+  const rawEvents = await fetchEvents(limit, cameras);
+  const events: DetectionEvent[] = (rawEvents as any[])
+    .filter((e) => inCameraScope(scope, String(e.camera ?? "")))
+    .map((e) => ({
     id: e.id,
     camera: e.camera,
     label: e.label,
@@ -620,11 +743,15 @@ export interface FilteredEventsResult {
 
 export async function getEventsFiltered(
   filter: FrigateEventFilter,
+  scope: CameraScope,
 ): Promise<FilteredEventsResult> {
   const limit = filter.limit ?? 50;
-  const rawEvents = (await fetchEventsFiltered(filter)) as Array<Record<string, unknown>>;
+  const cameras = narrowCameraFilter(scope, filter.cameras);
+  const rawEvents = (await fetchEventsFiltered({ ...filter, cameras })) as Array<Record<string, unknown>>;
 
-  const events: EventDetail[] = rawEvents.map((e) => {
+  const events: EventDetail[] = rawEvents
+    .filter((e) => inCameraScope(scope, String(e.camera ?? "")))
+    .map((e) => {
     const id = String(e.id);
     const camera = String(e.camera ?? "");
     const hasClip = Boolean(e.has_clip);
@@ -702,11 +829,15 @@ export interface FilteredReviewsResult {
 
 export async function getReviewsFiltered(
   filter: FrigateReviewFilter,
+  scope: CameraScope,
 ): Promise<FilteredReviewsResult> {
   const limit = filter.limit ?? 50;
-  const raw = (await fetchReviews(filter)) as Array<Record<string, unknown>>;
+  const cameras = narrowCameraFilter(scope, filter.cameras);
+  const raw = (await fetchReviews({ ...filter, cameras })) as Array<Record<string, unknown>>;
 
-  const reviews: ReviewItem[] = raw.map((r) => {
+  const reviews: ReviewItem[] = raw
+    .filter((r) => inCameraScope(scope, String(r.camera ?? "")))
+    .map((r) => {
     const id = String(r.id);
     // Frigate nests the cluster's detection list + zones + objects + audio
     // inside `data`. Older payloads leak some fields to the top level —
@@ -779,10 +910,14 @@ export async function setReviewViewed(reviewId: string): Promise<void> {
  */
 export async function searchEventsSemanticTyped(
   filter: FrigateSearchFilter,
+  scope: CameraScope,
 ): Promise<FilteredEventsResult> {
   const limit = filter.limit ?? 50;
-  const raw = (await searchEventsSemantic(filter)) as Array<Record<string, unknown>>;
-  const events: EventDetail[] = raw.map((e) => {
+  const cameras = narrowCameraFilter(scope, filter.cameras);
+  const raw = (await searchEventsSemantic({ ...filter, cameras })) as Array<Record<string, unknown>>;
+  const events: EventDetail[] = raw
+    .filter((e) => inCameraScope(scope, String(e.camera ?? "")))
+    .map((e) => {
     const id = String(e.id);
     const camera = String(e.camera ?? "");
     const hasClip = Boolean(e.has_clip);

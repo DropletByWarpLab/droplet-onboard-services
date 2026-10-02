@@ -115,50 +115,17 @@ _install_avahi_linux() {
 }
 
 _write_avahi_service_file() {
-  local service_dir="/etc/avahi/services"
-  local service_path="${service_dir}/droplet.service"
-  # Minimal avahi installs (e.g. --no-install-recommends on a very slim base)
-  # can ship without the services/ dir. Create it defensively so the tee
-  # below doesn't fail on a missing parent.
-  sudo mkdir -p "$service_dir"
-  # Writing atomically via tee-from-stdin so we don't need a temp file and
-  # partial writes are impossible.
-  sudo tee "$service_path" >/dev/null <<'XML'
-<?xml version="1.0" standalone='no'?>
-<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
-<!--
-  Droplet Edge Platform — Avahi service advertisement.
-  Managed by scripts/lib/local-dns.sh; re-run ./scripts/setup.sh to refresh.
--->
-<service-group>
-  <name replace-wildcards="yes">Droplet (%h)</name>
-  <service>
-    <type>_http._tcp</type>
-    <port>80</port>
-  </service>
-  <service>
-    <type>_https._tcp</type>
-    <port>443</port>
-  </service>
-  <!-- Network drive: puts the box in macOS Finder's Network browser/sidebar.
-       smbd itself is the compose `samba` service (host network, :445, `linux`
-       profile) — the host daemon only advertises; if the samba container is
-       down, connecting fails but nothing else breaks. Windows discovery is
-       wsdd2 inside that same container, not avahi. -->
-  <service>
-    <type>_smb._tcp</type>
-    <port>445</port>
-  </service>
-  <!-- Finder device icon (cosmetic): _device-info is a TXT-only pseudo
-       service; port 0 is the convention for it. -->
-  <service>
-    <type>_device-info._tcp</type>
-    <port>0</port>
-    <txt-record>model=Xserve</txt-record>
-  </service>
-</service-group>
-XML
-  sudo chmod 644 "$service_path"
+  # WARP-2941: one renderer for setup and for every certificate swap
+  # (scripts/lib/avahi-service.sh) — the `_droplet._tcp` entry carries
+  # `fqdn=` / `state=` TXT hints that must follow the served certificate, so
+  # the file is no longer a static heredoc here. Idempotent: an unchanged
+  # rendering is not rewritten, and avahi re-reads a changed file itself.
+  if ! declare -F write_avahi_service_file >/dev/null 2>&1; then
+    # shellcheck source=avahi-service.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/avahi-service.sh"
+  fi
+  write_avahi_service_file "${REPO_ROOT:-}/docker/certs/droplet.crt" \
+    || log_warn "mDNS: could not write the Avahi service file — the box will not advertise _droplet._tcp until the next setup run"
 }
 
 _set_avahi_host_name() {

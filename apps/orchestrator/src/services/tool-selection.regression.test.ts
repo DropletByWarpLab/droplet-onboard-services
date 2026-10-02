@@ -24,7 +24,7 @@
 import { describe, it, expect } from "vitest";
 import { TOOLS } from "@droplet/tools-core";
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
-import { selectAdvertisedTools } from "./tool-selection.service.js";
+import { effectiveAdvertisedToolNames, selectAdvertisedTools, selectionUserText } from "./tool-selection.service.js";
 import type { RuntimeToolDescriptor } from "./runtime-tool-registry.service.js";
 import {
   assertToolAdvertisementFitsBudget,
@@ -134,6 +134,21 @@ const TURNS: Turn[] = [
     requires: "control_device",
   },
   {
+    label: "device gateway / office equipment status",
+    message: "is the printer by reception running low on toner?",
+    requires: "get_building_devices",
+  },
+  {
+    label: "device gateway / a building setpoint",
+    message: "can you bump the rooftop unit up to 22 degrees",
+    requires: "set_building_point",
+  },
+  {
+    label: "device gateway / a meter read",
+    message: "how much is the main electricity meter showing today?",
+    requires: "get_building_devices",
+  },
+  {
     label: "network / who is connected",
     message: "the internet is crawling, what's hogging it?",
     requires: "list_network_devices",
@@ -167,6 +182,12 @@ const TURNS: Turn[] = [
     label: "data / everyday utility",
     message: "what's the weather doing today?",
     requires: "get_weather",
+  },
+  {
+    // WARP-3074 — the bulk ask classify_items exists for.
+    label: "data / bulk labelling",
+    message: "go through these support emails and categorise them by department",
+    requires: "classify_items",
   },
   {
     label: "business / the shop's own details",
@@ -287,6 +308,38 @@ const TURNS: Turn[] = [
     label: "cloud dataset / the billing question this story exists to answer",
     message: "what did we bill last week",
     requires: "cloud_query_dataset",
+  },
+  {
+    // WARP-2980 (ADR-059 P5 PR-E) — the box-proof sentence from the spec, word
+    // for word. It names no Security vocabulary at all ("someone" only pulls
+    // `cameras`), which is exactly how the tool would ship advertised on zero
+    // of the turns it exists for.
+    label: "security / what is usual for a place at an hour",
+    message: "is it normal for someone to be in the stock room at 2 AM?",
+    requires: "security_explain_pattern",
+  },
+  {
+    // ADR-055 P4b. The box-proof sentence for the doors tools, run through the
+    // REAL shipping pool: a rule is not enough if the tool were excluded from
+    // chat (the old "until WARP-2972" exclusion), so this fails if either is
+    // missing.
+    label: "doors / is a door open",
+    message: "is the front door open?",
+    requires: "doors_list",
+  },
+  // WARP-3280 — two sentences from the agent-loop eval that matched NO
+  // domain, so the model never had the tool: it answered "no contact found"
+  // without searching, and did the multiplication in its head. Run through
+  // the real shipping pool, so an exclusion upstream would also show here.
+  {
+    label: "email / a contact looked up by address alone",
+    message: "Look up the contact alice@example.com.",
+    requires: "search_contacts",
+  },
+  {
+    label: "data / bare arithmetic",
+    message: "What is 187 * 43?",
+    requires: "calculate",
   },
 ];
 
@@ -522,5 +575,54 @@ describe("WARP-2454 — the closed gaps stayed closed, and stayed narrow", () =>
       runtimeTools: REMOTE_TOOLS,
     });
     expect(fresh.matchedDomains).toEqual([]);
+  });
+});
+
+describe("WARP-3302 — checking and stopping a background run is selectable", () => {
+  const pool = [...TOOLS.keys()].filter((n) => !EXCLUDED_FROM_CHAT_TOOLS.has(n));
+  const advertisedFor = (message: string, priorCalls: string[] = []) =>
+    selectAdvertisedTools({ mode: "domains", userMessage: message, pool, conversationToolNames: priorCalls }).advertised;
+
+  it("'stop that background task' advertises cancel_agent_run on its own words", () => {
+    expect(advertisedFor("stop that background task")).toContain("cancel_agent_run");
+    expect(advertisedFor("cancel the job please")).toContain("cancel_agent_run");
+  });
+
+  // Box finding 2026-09-28: the model asked "shall I start it?" in text, the
+  // person said "Yes, go ahead and start it.", and that sentence alone matched
+  // no rule — start_agent_run vanished and the model claimed a run it never
+  // started. A bare affirmation now carries the previous ask's words.
+  const advertisedAfter = (ask: string, reply: string) =>
+    effectiveAdvertisedToolNames({
+      mode: "domains",
+      messages: [
+        { role: "user", content: ask },
+        { role: "assistant", content: "Shall I start that?" },
+        { role: "user", content: reply },
+      ],
+      pool,
+    });
+
+  it("'yes, go ahead' after a background-run ask keeps start_agent_run advertised", () => {
+    expect(advertisedAfter("Do this in the background: summarize our IT policies", "Yes, go ahead and start it."))
+      .toContain("start_agent_run");
+  });
+
+  it("'yes' after a weather ask adds nothing from the runs domain", () => {
+    expect(advertisedAfter("What's the weather in Boston?", "yes")).not.toContain("start_agent_run");
+  });
+
+  it("a longer reply is judged on its own words", () => {
+    expect(selectionUserText([
+      { role: "user", content: "Do this in the background: summarize our IT policies" },
+      { role: "user", content: "yes but first tell me what files are in the Docs folder right now" },
+    ])).toBe("yes but first tell me what files are in the Docs folder right now");
+  });
+
+  it("'how is the supplier research going?' reaches the runs by continuity, not by its words", () => {
+    expect(advertisedFor("how is the supplier research going?")).not.toContain("list_agent_runs");
+    expect(advertisedFor("how is the supplier research going?", ["start_agent_run"])).toEqual(
+      expect.arrayContaining(["list_agent_runs", "cancel_agent_run"]),
+    );
   });
 });

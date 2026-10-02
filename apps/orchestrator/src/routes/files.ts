@@ -6,7 +6,7 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import multer, { MulterError } from "multer";
 import { z } from "zod";
-import { PrismaClient, type DepartmentRight } from "@prisma/client";
+import { PrismaClient, type DepartmentRight, type FolderColor } from "@prisma/client";
 import pino from "pino";
 import {
   ncListFiles,
@@ -38,11 +38,22 @@ import {
   ncListMyShares,
   ncGetShare,
   ncDirExists,
+  ncCommitUpload,
+  ncDiscardUpload,
+  type NcWriteOutcome,
   NextcloudOcsError,
   NcPreconditionFailedError,
   type ShareDetail,
 } from "../services/nextcloud.client.js";
-import { MAX_FILES_PER_UPLOAD } from "@droplet/shared-types";
+import {
+  MAX_FILES_PER_UPLOAD,
+  type UploadEntryStatus,
+  type UploadedFileEntry,
+} from "@droplet/shared-types";
+import {
+  nextcloudUploadStorage,
+  type StagedUploadInfo,
+} from "../services/nextcloud-upload-storage.js";
 import {
   sendShareNotificationEmail,
   type SendOptions as EmailSendOptions,
@@ -55,6 +66,21 @@ import {
   invalidatePrefix,
 } from "../services/cache.service.js";
 import { readUserEmail } from "../services/user-directory.service.js";
+import { resolveAssertedUser } from "../services/asserted-user.service.js";
+import {
+  exposesOutside,
+  isWorkspacePath,
+  libraryOfHomePath,
+  mayCreatePublicLink,
+  PUBLIC_LINK_REFUSAL,
+  WORKSPACE_SHARE_REFUSAL,
+  type ShareLibrary,
+} from "../services/share-policy.js";
+import {
+  assertedNextcloudLoginRefusal,
+  resolveAssertedNextcloudLogin,
+  type AssertedNextcloudLoginFailure,
+} from "../services/asserted-nextcloud-login.service.js";
 import {
   ncMintEditorSession,
   docServerHealthy,
@@ -67,6 +93,8 @@ import type { FileEntryInfo } from "../types/index.js";
 import { requireRole, requireRoleOrMcpService, recordAccessDenied } from "../middleware/auth.js";
 import { sensitiveRateLimit, standardRateLimit } from "../middleware/rate-limit.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
+import { UnsafePathError } from "../lib/unsafe-path-error.js";
+import { storedUploadName } from "../lib/upload-file-name.js";
 import { isPathUnderUser } from "../services/brain-memory.service.js";
 import {
   classifyFileContentId,
@@ -84,6 +112,7 @@ import {
 import {
   resolveFileDepartment,
   upsertFileRegistryEntry,
+  findSameContentCandidates,
 } from "../services/file-registry.service.js";
 import { adminBasicToken } from "../services/department-provisioner.service.js";
 import { departmentManagerOrAdmin } from "../services/department-membership.service.js";
@@ -126,13 +155,24 @@ const CACHE_TTL = 10;
 // workbook is slow, not stuck, and timing it out would fail a request that
 // was about to succeed.
 const DOC_RENDER_TIMEOUT_MS = 30_000;
+/**
+ * WARP-2096 — keep-both naming for a same-name upload: `report.pdf` →
+ * `report (1).pdf`; a dotfile or extensionless name gets the suffix at the
+ * end (`.env (1)`, `Makefile (1)`).
+ */
+export function keepBothName(name: string, n: number): string {
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return `${name} (${n})`;
+  return `${name.slice(0, dot)} (${n})${name.slice(dot)}`;
+}
+const MAX_KEEP_BOTH_SUFFIX = 99;
+const joinDir = (dir: string, name: string) => (dir === "/" ? `/${name}` : `${dir}/${name}`);
+
 const DOC_RENDER_MIME: Record<"pdf" | "docx" | "xlsx", string> = {
   pdf: "application/pdf",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 };
-
-const MEMORY_STORAGE = multer.memoryStorage();
 
 /**
  * WARP-1271 (T19a) — per-user upload cap. WARP-1531 (RBAC v2 T7): the cap
@@ -195,11 +235,26 @@ class MissingAuthUserError extends Error {
 }
 
 /**
+ * WARP-3117 — `_service:mcp` asserted a person these routes cannot act as in
+ * Nextcloud: nobody, more than one person, a deactivated person, or a person
+ * with no Nextcloud account (every SSO / SCIM row). handleFileError answers
+ * 403; there is no fallback identity.
+ */
+class AssertedNcLoginError extends Error {
+  constructor(readonly reason: AssertedNextcloudLoginFailure) {
+    super(`asserted user refused: ${reason}`);
+    this.name = "AssertedNcLoginError";
+  }
+}
+
+/**
  * WARP-861 — the MCP file tools call these routes with the service
  * bearer (SERVICE_TOKEN_MCP → `_service:mcp`) plus the per-user
  * Nextcloud credential the agent loop threads via `_meta.ncToken`:
  *   X-Nextcloud-Token: the user's NC app-password / session token
- *   X-Nextcloud-User:  the username the call acts as
+ *   X-Nextcloud-User:  the person the call acts for — `User.username` on
+ *                      stdio, `User.id` over HTTP (WARP-3117: resolved to
+ *                      their Nextcloud login by getUser)
  * Only the trusted mcp service principal may assert another user this
  * way (same trust posture as the stdio `_meta` channel); for every
  * other caller the headers are ignored and the session cookie rules.
@@ -219,14 +274,27 @@ async function getToken(req: Request): Promise<string> {
   return token;
 }
 
-/** Get the username from the authenticated request. */
-function getUser(req: Request): string {
+/**
+ * The Nextcloud user this request's WebDAV / OCS calls act as.
+ *
+ * WARP-3117: for the MCP service principal the header names a PERSON, not a
+ * Nextcloud account — used verbatim, every call over the HTTP transport went
+ * to `/remote.php/dav/files/<User.id>/…`, and a header naming nobody, two
+ * people or a deactivated person was never checked. It is resolved to one
+ * active person and mapped to their `nextcloudUsername`.
+ */
+async function getUser(req: Request, prisma: PrismaClient): Promise<string> {
   if (isMcpService(req)) {
     const headerUser = (req.header("x-nextcloud-user") ?? "").trim();
     // No fallback for the service principal: acting as "admin" by
     // default would be a privilege escalation, not a convenience.
     if (!headerUser) throw new MissingNcTokenError();
-    return headerUser;
+    const resolved = await resolveAssertedNextcloudLogin(prisma, headerUser);
+    if (!resolved.ok) {
+      logger.warn({ asserted: headerUser, reason: resolved.reason }, "files: MCP asserted user refused");
+      throw new AssertedNcLoginError(resolved.reason);
+    }
+    return resolved.login;
   }
   const username = req.user?.username;
   // authMiddleware guarantees req.user on these routes; an absent username is
@@ -364,19 +432,6 @@ function resolveSpaceGuardToken(req: Request): unknown {
 }
 
 /**
- * WARP-1262 (security): thrown by `rootForSpace` when a caller-supplied path
- * contains a `..` traversal segment. Mapped to HTTP 400 by `handleFileError`
- * so every space-threaded write route rejects traversal with a clean client
- * error instead of handing the escaped path to the WebDAV client.
- */
-class UnsafePathError extends Error {
-  constructor(message = "path must not contain '..' segments") {
-    super(message);
-    this.name = "UnsafePathError";
-  }
-}
-
-/**
  * WARP-1261: generalized path routing for personal/shared/department spaces.
  *
  * Map a (space, requested path) pair to the real WebDAV home-relative path.
@@ -465,34 +520,47 @@ async function activeDeptMountNames(
   // "list my files" request — fail open (nothing extra hidden) rather than
   // 500, same posture as the sharedAvailable probe above.
   try {
-    const depts = await prisma.department.findMany({
-      where: { kind: { in: ["DEPARTMENT", "TEAM"] }, state: "active" },
-      select: {
-        name: true,
-        kind: true,
-        parentId: true,
-        memberships: { where: { userId }, select: { id: true } },
-      },
-    });
-
-    const names: string[] = [];
-    for (const dept of depts) {
-      if (!isOwnerOrAdmin && dept.memberships.length === 0) continue;
-      if (dept.kind === "TEAM" && dept.parentId) {
-        const parent = await prisma.department.findUnique({
-          where: { id: dept.parentId },
-          select: { name: true },
-        });
-        names.push(parent ? `${parent.name} — ${dept.name}` : dept.name);
-      } else {
-        names.push(dept.name);
-      }
-    }
-    return names;
+    return await loadDeptMountNames(prisma, userId, isOwnerOrAdmin);
   } catch (err) {
     logger.warn({ err, userId }, "activeDeptMountNames: department lookup failed; not hiding any dept mounts");
     return [];
   }
+}
+
+/**
+ * The same lookup WITHOUT the fail-open catch: throws on a DB error. Security
+ * gates (refuseUnapprovedMcpWrite) must use this one — an unresolvable
+ * department list has to narrow what is allowed, never what is protected.
+ */
+async function loadDeptMountNames(
+  prisma: PrismaClient,
+  userId: string,
+  isOwnerOrAdmin: boolean
+): Promise<string[]> {
+  const depts = await prisma.department.findMany({
+    where: { kind: { in: ["DEPARTMENT", "TEAM"] }, state: "active" },
+    select: {
+      name: true,
+      kind: true,
+      parentId: true,
+      memberships: { where: { userId }, select: { id: true } },
+    },
+  });
+
+  const names: string[] = [];
+  for (const dept of depts) {
+    if (!isOwnerOrAdmin && dept.memberships.length === 0) continue;
+    if (dept.kind === "TEAM" && dept.parentId) {
+      const parent = await prisma.department.findUnique({
+        where: { id: dept.parentId },
+        select: { name: true },
+      });
+      names.push(parent ? `${parent.name} — ${dept.name}` : dept.name);
+    } else {
+      names.push(dept.name);
+    }
+  }
+  return names;
 }
 
 /**
@@ -630,21 +698,28 @@ interface DeptSearchCorpora {
  * user's LOCAL identity (same pattern as `middleware/space.ts`'s
  * `_service:mcp` handling) — the service principal's own `role: "service"`
  * must never be used for a department-membership decision. Returns null
- * when no caller identity can be resolved (fail-closed → personal corpus
- * only).
+ * when no caller identity can be resolved, when the header names more than
+ * one person, or when it names a deactivated one (fail-closed → personal
+ * corpus only, logged with the reason). The header is
+ * `User.username` or `User.id`, not a Nextcloud username (WARP-3061,
+ * asserted-user.service.ts).
  */
 async function resolveSearchCaller(
   req: Request,
   prisma: PrismaClient,
 ): Promise<{ id: string; role: string } | null> {
   if (isMcpService(req)) {
-    const assertedNcUser = (req.header("x-nextcloud-user") ?? "").trim();
-    if (!assertedNcUser) return null;
-    const localUser = await prisma.user.findUnique({
-      where: { nextcloudUsername: assertedNcUser },
-      select: { id: true, role: true },
-    });
-    return localUser ? { id: localUser.id, role: localUser.role } : null;
+    const assertedUser = (req.header("x-nextcloud-user") ?? "").trim();
+    if (!assertedUser) return null;
+    const resolved = await resolveAssertedUser(prisma, assertedUser);
+    if (!resolved.ok) {
+      logger.warn(
+        { asserted: assertedUser, reason: resolved.reason },
+        "search: MCP asserted user did not resolve to one active person; personal corpus only",
+      );
+      return null;
+    }
+    return resolved.user;
   }
   const id = req.user?.id;
   const role = req.user?.role;
@@ -801,7 +876,9 @@ async function deptSearchCorpora(
  * `degradeTo` (read endpoints only): when supplied AND the error means Nextcloud
  * is simply unreachable (down / 5xx / not resolvable), respond 200 with this
  * empty shape instead of a 500 so the dashboard's file surfaces don't dead-end
- * during a Nextcloud outage (mirrors models-summary.service.ts). Real errors —
+ * during a Nextcloud outage (mirrors models-summary.service.ts), and set
+ * `X-Droplet-Degraded: nextcloud-unavailable` so clients can tell it apart from
+ * a genuinely empty result (WARP-3052). Real errors —
  * auth/validation/403/404/OCS status — are handled by the checks ABOVE and keep
  * their existing behavior; only the unavailable-dependency path degrades, and we
  * deliberately do NOT cache the empty fallback so it self-heals on recovery.
@@ -816,6 +893,10 @@ async function deptSearchCorpora(
  * `NextcloudOcsError(503)` from a list fn still degrades instead of silently
  * 503-ing. The files-route test asserts exactly this.
  */
+/** WARP-3052 — marks a 200 served from `degradeTo` during a Nextcloud outage. */
+export const DEGRADED_HEADER = "X-Droplet-Degraded";
+export const DEGRADED_NEXTCLOUD = "nextcloud-unavailable";
+
 function handleFileError(
   err: unknown,
   res: Response,
@@ -839,6 +920,12 @@ function handleFileError(
   // listing.
   if (err instanceof MissingAuthUserError) {
     res.status(401).json({ error: err.message });
+    return;
+  }
+  // WARP-3117 — same ordering reason: a refused asserted person must never
+  // degrade into an empty listing.
+  if (err instanceof AssertedNcLoginError) {
+    res.status(403).json(assertedNextcloudLoginRefusal(err.reason));
     return;
   }
   // WARP-882: the document-server engine is an upstream dependency. When it is
@@ -868,6 +955,11 @@ function handleFileError(
   }
   if (degradeTo !== undefined && (isUpstreamUnavailable(err) || ocsOutage)) {
     logger.warn({ err }, "Nextcloud unreachable; serving empty file listing");
+    // WARP-3052 — the fallback body is byte-identical to a genuinely empty
+    // folder/Trash, so without this header no client can tell "nothing here"
+    // from "Nextcloud is down". Additive: old clients keep the 200 + empty
+    // body; new ones read the header and show "Files are unavailable".
+    res.setHeader(DEGRADED_HEADER, DEGRADED_NEXTCLOUD);
     res.json(degradeTo);
     return;
   }
@@ -1197,7 +1289,7 @@ export function createFilesRouter(
           return;
         }
         const token = await getToken(req);
-        const user = getUser(req);
+        const user = await getUser(req, prisma);
 
         // WARP-1260 (T8): department metadata gate — resolve BEFORE minting
         // the doc-server session so a non-member never reaches the WOPI
@@ -1361,7 +1453,7 @@ export function createFilesRouter(
         let gateDepartmentId: string | null = null;
         try {
           const gateToken = await getToken(req);
-          const gateNcUser = getUser(req);
+          const gateNcUser = await getUser(req, prisma);
           const gateFileId = await ncGetFileId(gateToken, gateNcUser, filePath);
           if (gateFileId !== null) {
             gateDepartmentId = await resolveFileDepartment(prisma, gateFileId);
@@ -1509,7 +1601,7 @@ export function createFilesRouter(
       return null;
     }
     const token = await getToken(req);
-    const ncUser = getUser(req);
+    const ncUser = await getUser(req, prisma);
     const fileId = await ncGetFileId(token, ncUser, normalizedPath);
     if (fileId === null) {
       res.status(404).json({ error: "File not found" });
@@ -1584,7 +1676,7 @@ export function createFilesRouter(
         // Topic carries the {user} segment so the WS bridge forwards it
         // (it subscribes to `droplet/files/{user}/#`); useFileRealtime then
         // does its blanket `/api/files`-prefix SWR invalidation.
-        safePublish(`droplet/files/${getUser(req)}/comment-deleted`, {
+        safePublish(`droplet/files/${await getUser(req, prisma)}/comment-deleted`, {
           id,
           ncFileId: row.ncFileId,
         });
@@ -1644,7 +1736,7 @@ export function createFilesRouter(
         });
         // {user} segment so the WS bridge (droplet/files/{user}/#) forwards
         // it → useFileRealtime invalidates the file SWR caches.
-        safePublish(`droplet/files/${getUser(req)}/comment-added`, {
+        safePublish(`droplet/files/${await getUser(req, prisma)}/comment-added`, {
           id: comment.id,
           ncFileId: fileId,
           authorUserId: comment.authorUserId,
@@ -1706,7 +1798,7 @@ export function createFilesRouter(
           // provenance (addedByUserId/createdAt) must NOT be overwritten.
           update: {},
         });
-        safePublish(`droplet/files/${getUser(req)}/tag-added`, {
+        safePublish(`droplet/files/${await getUser(req, prisma)}/tag-added`, {
           ncFileId: fileId,
           label: tag.label,
         });
@@ -1728,10 +1820,143 @@ export function createFilesRouter(
         if (!(await gateFileSpaceAccess(req, res, fileId, "reader"))) return;
         const label = req.params.label;
         await prisma.fileTag.deleteMany({ where: { ncFileId: fileId, label } });
-        safePublish(`droplet/files/${getUser(req)}/tag-removed`, {
+        safePublish(`droplet/files/${await getUser(req, prisma)}/tag-removed`, {
           ncFileId: fileId,
           label,
         });
+        res.status(204).end();
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
+  // ── Folder colours (GET/PUT/DELETE /api/files/folder-colors) ──
+  //
+  // Personal organisation: a colour is visible to the user who set it and to
+  // nobody else, so rows are keyed (req.user.id, ncFileId) and EVERY query
+  // filters on the caller's UUID (never the NC username `getUser(req)`).
+  // Any human role — guest included — may colour folders it can see: this is
+  // the caller's own palette, not a write to shared content, so there is no
+  // `requireRole` and only the `reader` space floor (which is also what the
+  // listing itself needs). The mcp service principal has no palette.
+  //
+  // `ncFileId` survives rename/move, so nothing here runs on those routes.
+  // GET returns every colour the caller has set (bounded by how many folders
+  // they coloured) so the listing stays untouched and cacheable; the
+  // dashboard joins on `ncFileId`, which listings already carry.
+  const FOLDER_COLOR_VALUES = [
+    "red",
+    "orange",
+    "yellow",
+    "green",
+    "blue",
+    "purple",
+    "gray",
+  ] as const satisfies readonly FolderColor[];
+
+  /** Local User.id for a real (non-service) caller, else 403 + null. */
+  const folderColorOwner = (req: Request, res: Response): string | null => {
+    const id = req.user?.id;
+    if (!id || req.user?.role === "service") {
+      recordAccessDenied(req, "folder-color-no-user");
+      res.status(403).json({ error: "Forbidden: folder colors are per user" });
+      return null;
+    }
+    return id;
+  };
+
+  /**
+   * (space, path) → the entry's ncFileId, or null after writing the 4xx.
+   * Does not check the entry is a folder: a colour row on a file is inert
+   * (the UI only paints folders), so a folder-only PROPFIND buys nothing.
+   */
+  const resolveColorTargetIdOr404 = async (
+    req: Request,
+    res: Response,
+    rawPath: unknown,
+  ): Promise<number | null> => {
+    if (typeof rawPath !== "string" || !rawPath || rawPath === "/") {
+      res.status(400).json({ error: "path is required" });
+      return null;
+    }
+    const resolved = await rootForSpace(
+      prisma,
+      resolveSpace(spaceQueryOrBody(req)),
+      rawPath,
+    );
+    const fileId = await ncGetFileId(await getToken(req), await getUser(req, prisma), resolved);
+    if (fileId === null) {
+      res.status(404).json({ error: "Folder not found" });
+      return null;
+    }
+    // Same department gate the tag/comment routes run: the space token only
+    // authorizes what the caller DECLARED, the file's own registry row decides.
+    if (!(await gateFileSpaceAccess(req, res, fileId, "reader"))) return null;
+    return fileId;
+  };
+
+  router.get("/files/folder-colors", async (req, res, next) => {
+    try {
+      const userId = folderColorOwner(req, res);
+      if (!userId) return;
+      const rows = await prisma.fileFolderColor.findMany({
+        where: { userId },
+        select: { ncFileId: true, color: true },
+      });
+      res.json({ colors: rows });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
+  router.put(
+    "/files/folder-colors",
+    requireSpaceAccess(prisma, "reader", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
+      try {
+        const parsed = z
+          .object({
+            path: z.string().min(1),
+            color: z.enum(FOLDER_COLOR_VALUES),
+            space: z.string().optional(),
+          })
+          .safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            error: `path and color (${FOLDER_COLOR_VALUES.join(", ")}) are required`,
+          });
+          return;
+        }
+        const userId = folderColorOwner(req, res);
+        if (!userId) return;
+        const ncFileId = await resolveColorTargetIdOr404(req, res, parsed.data.path);
+        if (ncFileId === null) return;
+        const row = await prisma.fileFolderColor.upsert({
+          where: { userId_ncFileId: { userId, ncFileId } },
+          create: { userId, ncFileId, color: parsed.data.color },
+          update: { color: parsed.data.color },
+          select: { ncFileId: true, color: true },
+        });
+        res.json({ color: row });
+      } catch (err) {
+        handleFileError(err, res, next);
+      }
+    },
+  );
+
+  // Clearing is a DELETE of the row — there is no "none" member to store.
+  // Path travels in the query string (a DELETE body is dropped by proxies).
+  router.delete(
+    "/files/folder-colors",
+    requireSpaceAccess(prisma, "reader", { resolveSpace: resolveSpaceGuardToken }),
+    async (req, res, next) => {
+      try {
+        const userId = folderColorOwner(req, res);
+        if (!userId) return;
+        const ncFileId = await resolveColorTargetIdOr404(req, res, req.query.path);
+        if (ncFileId === null) return;
+        await prisma.fileFolderColor.deleteMany({ where: { userId, ncFileId } });
         res.status(204).end();
       } catch (err) {
         handleFileError(err, res, next);
@@ -1755,17 +1980,72 @@ export function createFilesRouter(
   // field name", pointing every reader at the wrong problem. With `limits.files`
   // set, busboy raises LIMIT_FILE_COUNT first and each code again means one
   // thing only.
+  //
+  // WARP-2093: parts no longer land in memory. `nextcloudUploadStorage`
+  // streams each one into Nextcloud's upload staging area while hashing it;
+  // the route below commits (MOVEs) them only once the whole body parsed.
+  // On ANY multer error here multer calls the engine's `_removeFile` for
+  // every staged part first, so a 413 / 400 / client abort leaves nothing
+  // behind — the batch lands whole or not at all. The JSON transport
+  // (write_file / create_document) is not multipart and skips all of this.
+  class BadUploadNameError extends Error {
+    constructor() {
+      super("File name must not contain '/', a control character or a '..' segment");
+    }
+  }
+
   async function handleUpload(req: Request, res: Response, next: NextFunction) {
+    if (!req.is("multipart/form-data")) {
+      next();
+      return;
+    }
     const userId = (req as { user?: { id?: string } }).user?.id;
-    const limitMb = await resolveUploadLimitMb(prisma, userId);
+    let storage: multer.StorageEngine;
+    let limitMb: number;
+    try {
+      // Reject a bad target (`..` traversal) BEFORE a single byte streams to
+      // Nextcloud; the route resolves it again for the commit.
+      await rootForSpace(prisma, resolveSpace(req.query.space), (req.query.path as string) || "/");
+      limitMb = await resolveUploadLimitMb(prisma, userId);
+      storage = nextcloudUploadStorage(await getToken(req), await getUser(req, prisma));
+    } catch (err) {
+      handleFileError(err, res, next);
+      return;
+    }
+    // WARP-3057: busboy decoded a plain `filename=` as latin1 (so macOS's
+    // U+202F in "9.41.12 AM" landed as "â¯AM") and cut the name at the last
+    // `\` or `/`. `defParamCharset` reads it as UTF-8 (`filename*=` still
+    // wins when sent), and `preservePath` hands us the name whole so
+    // `storedUploadName` can keep a `\` and refuse traversal — checked in
+    // the fileFilter, before a byte of that part is staged.
     const scopedUpload = multer({
-      storage: MEMORY_STORAGE,
+      storage,
+      defParamCharset: "utf8",
+      preservePath: true,
+      fileFilter: (_req, file, cb) => {
+        if (storedUploadName(file.originalname) === null) {
+          cb(new BadUploadNameError());
+          return;
+        }
+        cb(null, true);
+      },
       limits: {
         fileSize: limitMb * 1024 * 1024,
         files: MAX_FILES_PER_UPLOAD,
       },
     });
     scopedUpload.array("files", MAX_FILES_PER_UPLOAD)(req, res, (err) => {
+      if (err instanceof BadUploadNameError) {
+        res.status(400).json({ error: err.message, code: "UPLOAD_BAD_NAME" });
+        return;
+      }
+      // busboy refuses a part header carrying a raw control character (and
+      // any other malformed header) before the fileFilter sees it: that is
+      // the client's bad request, not a 500.
+      if (err instanceof Error && err.message === "Malformed part header") {
+        res.status(400).json({ error: "Malformed upload", code: "UPLOAD_MALFORMED" });
+        return;
+      }
       if (err instanceof MulterError) {
         if (err.code === "LIMIT_FILE_SIZE") {
           // WARP-1912 — the dashboard's translator never echoes `error`
@@ -1789,11 +2069,72 @@ export function createFilesRouter(
         return;
       }
       if (err) {
-        next(err);
+        // A staging PUT that failed (Nextcloud down, quota) — same mapping
+        // the route's own WebDAV failures get.
+        handleFileError(err, res, next);
         return;
       }
       next();
     });
+  }
+
+  /**
+   * WARP-2096 — commit a staged upload WITHOUT ever replacing a file the
+   * caller did not ask to replace. `Overwrite: F` makes Nextcloud refuse a
+   * taken name atomically (412, staging kept), and the next candidate is
+   * tried: `report.pdf` → `report (1).pdf` → `report (2).pdf` … — "keep
+   * both", the non-destructive default. `overwrite: true` is the explicit
+   * opt-in to replace (`?overwrite=true`, the router's move/copy word).
+   */
+  async function commitStagedUpload(
+    token: string,
+    user: string,
+    dir: string,
+    name: string,
+    uploadId: string,
+    overwrite: boolean,
+  ): Promise<{ name: string; outcome: NcWriteOutcome }> {
+    for (let n = 0; n <= MAX_KEEP_BOTH_SUFFIX; n++) {
+      const candidate = n === 0 ? name : keepBothName(name, n);
+      try {
+        const outcome = await ncCommitUpload(
+          token,
+          user,
+          uploadId,
+          joinDir(dir, candidate),
+          overwrite,
+        );
+        return { name: candidate, outcome };
+      } catch (err) {
+        if (!(err instanceof NcPreconditionFailedError)) throw err;
+      }
+    }
+    throw new Error(`upload: no free name for "${name}" after ${MAX_KEEP_BOTH_SUFFIX} tries`);
+  }
+
+  /**
+   * WARP-2096 — the registry owner. A human session owns what it uploads.
+   * The mcp-server principal (`_service:mcp`) writes AS the asserted
+   * person's Nextcloud login, so the row belongs to that person — not to
+   * the service account, where every user's agent-written files would
+   * collapse into one bucket and never match the person's own duplicate
+   * lookups.
+   *
+   * WARP-3117: `ncUser` is the login getUser resolved the asserted person
+   * to, so it is looked up by `nextcloudUsername` (unique), not `username`:
+   * the two are decoupled (ADR-013), and the old `username` lookup matched
+   * nothing for a login that differs from the handle.
+   */
+  async function resolveRegistryOwner(req: Request, ncUser: string): Promise<string | null> {
+    const id = (req as { user?: { id?: string } }).user?.id;
+    if (!id) return null;
+    if (!id.startsWith("_service:")) return id;
+    // Best-effort like every registry write: a lookup failure skips the
+    // row, never the upload.
+    const row = await prisma.user
+      .findUnique({ where: { nextcloudUsername: ncUser }, select: { id: true } })
+      .catch(() => null);
+    return row?.id ?? null;
   }
 
   // ── List directory contents ──
@@ -1828,7 +2169,7 @@ export function createFilesRouter(
         const requestedPath = (req.query.path as string) || "/";
         const space = resolveSpace(req.query.space);
         const filePath = await rootForSpace(prisma, space, requestedPath);
-        const user = getUser(req);
+        const user = await getUser(req, prisma);
         const isPersonalRoot = space === "personal" && filePath === "/";
 
       // The cache identity is the (space, resolvedPath) PAIR, built by the one
@@ -1895,7 +2236,7 @@ export function createFilesRouter(
   // on Nextcloud outage (never 500).
   router.get("/files/spaces", async (req, res, next) => {
     try {
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const userId = req.user?.id;
       if (!userId) {
         res.status(401).json({ error: "Unauthorized" });
@@ -2051,7 +2392,7 @@ export function createFilesRouter(
         req.query.disposition === "inline" ? inlinePreviewContentType(filename) : null;
       const serveInline = inlineType !== null;
 
-      const stream = await ncDownloadFile(await getToken(req), getUser(req), filePath);
+      const stream = await ncDownloadFile(await getToken(req), await getUser(req, prisma), filePath);
       if (!stream) {
         res.status(404).json({ error: "File not found" });
         return;
@@ -2149,24 +2490,33 @@ export function createFilesRouter(
       const space = resolveSpace(req.query.space);
 
       // WARP-1460: two transports feed this route. multer only populates
-      // `req.files` for a multipart/form-data request — it calls next()
-      // untouched for a JSON body — so `req.files` presence discriminates the
-      // human dashboard upload (multipart; target dir in `?path=`) from the
-      // write_file / create_document tools (JSON `{dir, filename,
-      // contentBase64}`; target dir in the body `dir` field). Both shapes
-      // normalize to a single {name, buffer, size} list so the post-write
-      // bookkeeping loop below is SHARED and can never diverge between paths.
-      const files = (req.files as Express.Multer.File[] | undefined) ?? [];
+      // `req.files` for a multipart/form-data request, so `req.files`
+      // presence discriminates the human dashboard upload (multipart; target
+      // dir in `?path=`) from the write_file / create_document tools (JSON
+      // `{dir, filename, contentBase64}`; target dir in the body `dir`).
+      //
+      // WARP-2093: a multipart part arrives already STAGED in Nextcloud
+      // (streamed + hashed by `nextcloudUploadStorage`) and is committed
+      // below; a JSON write still carries its (≤10 MB) decoded buffer. Both
+      // normalize into one list so the bookkeeping loop stays SHARED.
+      const files =
+        (req.files as (Express.Multer.File & StagedUploadInfo)[] | undefined) ?? [];
       let rawTargetPath: string;
-      let uploads: { name: string; buffer: Buffer; size: number }[];
+      type PendingUpload =
+        | { name: string; requestedName: string; size: number; sha256: string; uploadId: string }
+        | { name: string; size: number; sha256: string; buffer: Buffer };
+      let uploads: PendingUpload[];
+      let jsonCreateOnly = false;
 
       if (files.length > 0) {
-        // Existing multipart path — byte-identical behavior: dir from `?path=`.
         rawTargetPath = (req.query.path as string) || "/";
         uploads = files.map((f) => ({
-          name: f.originalname,
-          buffer: f.buffer,
+          // Non-null: the fileFilter refused every name this rejects.
+          name: storedUploadName(f.originalname)!,
+          requestedName: f.originalname,
           size: f.size,
+          sha256: f.sha256,
+          uploadId: f.uploadId,
         }));
       } else if (
         typeof (req.body as { contentBase64?: unknown } | undefined)?.contentBase64 ===
@@ -2179,7 +2529,10 @@ export function createFilesRouter(
           dir?: unknown;
           filename?: unknown;
           contentBase64: string;
+          createOnly?: unknown;
         };
+        // WARP-3193 SEC-INJ-2: write_file asks for create-new only.
+        jsonCreateOnly = body.createOnly === true;
         rawTargetPath =
           typeof body.dir === "string" && body.dir.length > 0 ? body.dir : "/";
 
@@ -2212,8 +2565,8 @@ export function createFilesRouter(
 
         // Enforce the 10 MB LLM-write cap on the DECODED bytes (mirrors
         // @droplet/tools-core's MAX_WRITE_BYTES). The multipart path is capped
-        // upstream by multer's per-request `limits.fileSize`; the JSON path has
-        // no multer, so the ceiling is enforced here.
+        // by multer's per-request `limits.fileSize`; the JSON path has no
+        // multer, so the ceiling is enforced here.
         const MAX_JSON_WRITE_BYTES = 10 * 1024 * 1024;
         if (buffer.byteLength > MAX_JSON_WRITE_BYTES) {
           res.status(413).json({
@@ -2222,67 +2575,151 @@ export function createFilesRouter(
           return;
         }
 
-        uploads = [{ name: filename, buffer, size: buffer.byteLength }];
+        uploads = [
+          {
+            name: filename,
+            size: buffer.byteLength,
+            sha256: createHash("sha256").update(buffer).digest("hex"),
+            buffer,
+          },
+        ];
       } else {
         res.status(400).json({ error: "No files provided" });
         return;
       }
 
-      const targetPath = await rootForSpace(prisma, space, rawTargetPath);
-
+      // Staged parts not yet committed — discarded in `finally` if anything
+      // below throws, so an error mid-batch strands nothing in staging.
+      const uncommitted = new Set(
+        uploads.flatMap((u) => ("uploadId" in u ? [u.uploadId] : [])),
+      );
       const token = await getToken(req);
-      const user = getUser(req);
-      const results: { name: string; path: string; size: number }[] = [];
+      const user = await getUser(req, prisma);
+      try {
+        const targetPath = await rootForSpace(prisma, space, rawTargetPath);
+        // WARP-2096: replacing an existing file is an explicit opt-in on the
+        // multipart path; the default keeps both. The JSON transport keeps
+        // write_file's documented "create or overwrite" contract — but the
+        // outcome is now REPORTED (`status: "replaced"`), never silent.
+        const overwrite = req.query.overwrite === "true";
+        const results: UploadedFileEntry[] = [];
 
-      // WARP-1260 (T8) writer, WARP-1262 (T10) gate: the space was already
-      // resolved + authorized by `requireSpaceAccess` above, so the
-      // file-registry departmentId is just the guard's own resolved value
-      // — no second lookup needed.
-      const uploadDepartmentId = req.spaceDepartmentId ?? null;
-      const ownerUserId = (req as { user?: { id?: string } }).user?.id ?? null;
+        // WARP-1260 (T8) writer, WARP-1262 (T10) gate: the space was already
+        // resolved + authorized by `requireSpaceAccess` above, so the
+        // file-registry departmentId is just the guard's own resolved value
+        // — no second lookup needed.
+        const uploadDepartmentId = req.spaceDepartmentId ?? null;
+        const ownerUserId = await resolveRegistryOwner(req, user);
 
-      for (const file of uploads) {
-        await ncUploadFile(token, user, targetPath, file.name, file.buffer);
-        const uploadedPath =
-          targetPath === "/"
-            ? `/${file.name}`
-            : `${targetPath}/${file.name}`;
-        results.push({
-          name: file.name,
-          path: uploadedPath,
-          size: file.size,
-        });
-
-        // Best-effort, non-blocking: a registry-write failure must never
-        // fail the upload the user is actively waiting on.
-        if (ownerUserId) {
-          try {
-            const ncFileId = await ncGetFileId(token, user, uploadedPath);
-            if (ncFileId !== null) {
-              await upsertFileRegistryEntry(prisma, {
-                ncFileId,
-                ownerUserId,
-                path: uploadedPath,
-                departmentId: uploadDepartmentId,
-              });
+        // Sequential on purpose: one MOVE/PUT at a time, like runBulk's
+        // default — Nextcloud's WebDAV races under concurrent writes.
+        for (const file of uploads) {
+          let finalName = file.name;
+          let outcome: NcWriteOutcome;
+          if ("uploadId" in file) {
+            ({ name: finalName, outcome } = await commitStagedUpload(
+              token,
+              user,
+              targetPath,
+              file.name,
+              file.uploadId,
+              // WARP-3057: a name we changed (`\` → `_`) is not the name the
+              // caller asked to replace, so it always keeps both.
+              overwrite && file.name === file.requestedName,
+            ));
+            uncommitted.delete(file.uploadId);
+          } else {
+            if (jsonCreateOnly) {
+              // WARP-3193 SEC-INJ-2: `If-None-Match: *` — the server refuses
+              // atomically when the file exists; the tool asks the user.
+              try {
+                outcome = await ncUploadFile(token, user, targetPath, file.name, file.buffer, {
+                  ifNoneMatch: true,
+                });
+              } catch (uploadErr) {
+                if (uploadErr instanceof NcPreconditionFailedError) {
+                  res.status(409).json({
+                    error: "file already exists",
+                    path: joinDir(targetPath, file.name),
+                  });
+                  return;
+                }
+                throw uploadErr;
+              }
+            } else {
+              outcome = await ncUploadFile(token, user, targetPath, file.name, file.buffer);
             }
-          } catch (registryErr) {
-            logger.warn(
-              { err: registryErr, path: uploadedPath },
-              "upload: file-registry upsert failed (non-fatal)",
-            );
+          }
+          const uploadedPath = joinDir(targetPath, finalName);
+          // WARP-3057: a `\` stored as `_` is a rename the caller is told about.
+          const requestedName = "requestedName" in file ? file.requestedName : file.name;
+          const status: UploadEntryStatus =
+            outcome === "replaced"
+              ? "replaced"
+              : finalName !== requestedName
+                ? "renamed"
+                : "uploaded";
+          const entry: UploadedFileEntry = {
+            name: finalName,
+            path: uploadedPath,
+            size: file.size,
+            status,
+            ...(status === "renamed" ? { requestedName } : {}),
+          };
+          results.push(entry);
+
+          // Best-effort, non-blocking: a registry-write or duplicate-lookup
+          // failure must never fail the upload the user is actively waiting on.
+          if (ownerUserId) {
+            try {
+              const ncFileId = await ncGetFileId(token, user, uploadedPath);
+              if (ncFileId !== null) {
+                await upsertFileRegistryEntry(prisma, {
+                  ncFileId,
+                  ownerUserId,
+                  path: uploadedPath,
+                  departmentId: uploadDepartmentId,
+                  sha256: file.sha256,
+                  sizeBytes: file.size,
+                });
+              }
+              // WARP-2096 — same bytes already on the box, in this person's
+              // same space? Advisory only: the upload is kept (never a silent
+              // drop) and the entry says where the other copy is. A candidate
+              // counts only if it still lives at its recorded path — the
+              // registry is not maintained on delete/move, and a phantom
+              // "already on the box" would be worse than none.
+              for (const c of await findSameContentCandidates(prisma, {
+                ownerUserId,
+                departmentId: uploadDepartmentId,
+                sha256: file.sha256,
+                excludeNcFileId: ncFileId,
+              })) {
+                if (c.path && (await ncGetFileId(token, user, c.path)) === c.ncFileId) {
+                  entry.duplicateOf = c.path;
+                  break;
+                }
+              }
+            } catch (registryErr) {
+              logger.warn(
+                { err: registryErr, path: uploadedPath },
+                "upload: file-registry write or duplicate lookup failed (non-fatal)",
+              );
+            }
           }
         }
+
+        await invalidateListing(req, user, { space, path: targetPath });
+        safePublish(`droplet/files/${user}/uploaded`, {
+          path: targetPath,
+          files: results.map((r) => r.name),
+          count: results.length,
+        });
+
+        res.json({ uploaded: results });
+      } finally {
+        for (const uploadId of uncommitted) await ncDiscardUpload(token, user, uploadId);
       }
-
-      await invalidateListing(req, user, { space, path: targetPath });
-      safePublish(`droplet/files/${user}/uploaded`, {
-        path: targetPath,
-        files: results.map((r) => r.name),
-        count: results.length,
-      });
-
-      res.json({ uploaded: results });
     } catch (err) {
       handleFileError(err, res, next);
     }
@@ -2355,7 +2792,7 @@ export function createFilesRouter(
         const dir = path.posix.dirname(rawPath) || "/";
         const targetPath = await rootForSpace(prisma, space, dir);
         const token = await getToken(req);
-        const user = getUser(req);
+        const user = await getUser(req, prisma);
         const uploadedPath =
           targetPath === "/" ? `/${filename}` : `${targetPath}/${filename}`;
 
@@ -2504,7 +2941,7 @@ export function createFilesRouter(
       const space = resolveSpace(req.query.space);
       const filePath = await rootForSpace(prisma, space, rawPath);
 
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const parentPath = path.posix.dirname(filePath) || "/";
 
       // WARP-1682: invalidate the parent listing whether or not the WebDAV
@@ -2560,7 +2997,7 @@ export function createFilesRouter(
       const space = resolveSpace(spaceQueryOrBody(req));
       const targetPath = await rootForSpace(prisma, space, parsed.data.path);
 
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       await ncCreateDirectory(await getToken(req), user, targetPath);
 
       const parentPath = path.posix.dirname(targetPath) || "/";
@@ -2571,6 +3008,63 @@ export function createFilesRouter(
       handleFileError(err, res, next);
     }
   });
+
+  /**
+   * WARP-3053 — the role of the PERSON a share request acts for. The MCP
+   * service principal carries role "service"; the person it asserts is the
+   * one the share policy judges. An unresolvable assertion yields undefined,
+   * which the policy treats as "not owner/admin" (fail closed).
+   */
+  async function actingRole(req: Request): Promise<string | undefined> {
+    if (!isMcpService(req)) return req.user?.role;
+    const asserted = (req.header("x-nextcloud-user") ?? "").trim();
+    if (!asserted) return undefined;
+    const resolved = await resolveAssertedUser(prisma, asserted);
+    return resolved.ok ? resolved.user.role : undefined;
+  }
+
+  /**
+   * WARP-3053 — top-level folder names of every company library in a home:
+   * the Workspace plus every department/team mount, named as `rootForSpace`
+   * names them. Every state, not only active: an archived library's mount can
+   * linger in homes, and a stale name can only over-refuse (fail closed).
+   */
+  async function companyLibraryRoots(): Promise<string[]> {
+    const depts = await prisma.department.findMany({
+      where: { kind: { in: ["DEPARTMENT", "TEAM"] } },
+      select: { id: true, name: true, kind: true, parentId: true },
+    });
+    const nameById = new Map(depts.map((d) => [d.id, d.name]));
+    return [
+      SHARED_FOLDER_NAME,
+      ...depts.map((d) => {
+        const parent = d.kind === "TEAM" && d.parentId ? nameById.get(d.parentId) : undefined;
+        return parent ? `${parent} — ${d.name}` : d.name;
+      }),
+    ];
+  }
+
+  /**
+   * WARP-3053 — the library a share target sits in, whatever shape the client
+   * used. An explicit non-personal `space` is company data; a home path with
+   * no `space` (the web's and the Mac's shape) is classified by its first
+   * segment, so `/Household/...` is the Workspace either way.
+   */
+  async function shareLibrary(space: Space, homePath: string): Promise<ShareLibrary> {
+    if (space !== "personal") return "company";
+    return libraryOfHomePath(homePath, await companyLibraryRoots());
+  }
+
+  function refusePublicLink(req: Request, res: Response): void {
+    recordAccessDenied(req, "public-link-company-data");
+    res.status(403).json(PUBLIC_LINK_REFUSAL);
+  }
+
+  /** WARP-3168: a member sharing a Workspace item, of any kind. */
+  function refuseWorkspaceShare(req: Request, res: Response): void {
+    recordAccessDenied(req, "workspace-share-member");
+    res.status(403).json(WORKSPACE_SHARE_REFUSAL);
+  }
 
   // ── Create a share link ──
   //
@@ -2630,11 +3124,40 @@ export function createFilesRouter(
         res.status(400).json({ error: "path must not contain '..' segments" });
         return;
       }
+      // WARP-3053: no legitimate share path carries a backslash, and one
+      // could dress a company path up as a personal one for the classifier.
+      if (parsed.data.path.includes("\\")) {
+        res.status(400).json({ error: "path must not contain backslashes" });
+        return;
+      }
 
       const space = resolveSpace(spaceQueryOrBody(req));
       const targetPath = await rootForSpace(prisma, space, parsed.data.path);
+
       const departmentId = req.spaceDepartmentId ?? null;
       const shareToken = departmentId ? adminBasicToken() : await getToken(req);
+
+      // WARP-3168: a member may not share a Workspace item at all, internal
+      // shares included — the same rule Nextcloud now enforces with the
+      // Workspace group's mask 15 (see isWorkspacePath for why). Judged on
+      // the RESOLVED path, so `space=shared` and the home-path shape agree.
+      // WARP-3053: on department/team libraries, anything but an internal
+      // user/group share without the re-share bit (see exposesOutside) is
+      // owner/admin only. Owner/admin short-circuit both lookups.
+      const role = await actingRole(req);
+      if (!mayCreatePublicLink(role, "company")) {
+        if (isWorkspacePath(targetPath, SHARED_FOLDER_NAME)) {
+          refuseWorkspaceShare(req, res);
+          return;
+        }
+        if (
+          exposesOutside(parsed.data.shareType, parsed.data.permissions) &&
+          !mayCreatePublicLink(role, await shareLibrary(space, targetPath))
+        ) {
+          refusePublicLink(req, res);
+          return;
+        }
+      }
 
       const share = await ncCreateShareV2(shareToken, targetPath, {
         shareType: parsed.data.shareType,
@@ -2751,6 +3274,64 @@ export function createFilesRouter(
   }
 
   /**
+   * WARP-3193 SEC-INJ-2 — the move/copy writes the MODEL may not make alone.
+   *
+   * move_file / copy_file reach these routes as `_service:mcp`. Replacing a
+   * destination destroys it, and putting a private file into a shared folder
+   * (Household, or a department/team mount — each is a top-level folder in
+   * the caller's home) publishes it without share_file's gate. tools-core
+   * refuses both first; this is the mirror for the principal, answered as
+   * 403 USER_APPROVAL_REQUIRED so the tool can tell the model to ask the
+   * user. A move INSIDE one shared folder (rename, organize) is not a leak.
+   * A human session is never gated here: the dashboard click is the approval.
+   * `from`/`to` are the operational paths (after rootForSpace).
+   */
+  async function refuseUnapprovedMcpWrite(
+    req: Request,
+    res: Response,
+    overwrite: boolean,
+    from: string,
+    to: string,
+  ): Promise<boolean> {
+    if (!isMcpService(req)) return false;
+    let what: string | null = null;
+    if (overwrite) {
+      what = `Replacing the existing ${to}`;
+    } else {
+      const topOf = (p: string) => p.split("/")[1] ?? "";
+      let deptMounts: string[] | null;
+      try {
+        deptMounts = await loadDeptMountNames(prisma, req.user?.id ?? "", true);
+      } catch (err) {
+        // Fail CLOSED: without the department list we cannot tell a
+        // department mount from a private folder, so any move/copy into a
+        // different top-level folder needs the user.
+        logger.warn({ err }, "refuseUnapprovedMcpWrite: department lookup failed; refusing cross-folder write");
+        deptMounts = null;
+      }
+      if (deptMounts === null) {
+        if (topOf(to) !== topOf(from)) {
+          what = `Putting ${from} into /${topOf(to)} (shared folders could not be resolved)`;
+        }
+      } else {
+        const mounts = new Set([SHARED_FOLDER_NAME, ...deptMounts]);
+        const mountOf = (p: string) => {
+          const top = topOf(p);
+          return mounts.has(top) ? top : null;
+        };
+        const dest = mountOf(to);
+        if (dest !== null && dest !== mountOf(from)) {
+          what = `Putting ${from} into the shared folder /${dest}`;
+        }
+      }
+    }
+    if (what === null) return false;
+    recordAccessDenied(req, "mcp-write-needs-user");
+    res.status(403).json({ error: `${what} needs the user's approval`, code: "USER_APPROVAL_REQUIRED" });
+    return true;
+  }
+
+  /**
    * Invalidate listing caches for the parents of the given targets (source +
    * destination).
    *
@@ -2841,7 +3422,7 @@ export function createFilesRouter(
       const parentDir = path.posix.dirname(filePath) || "/";
       const newPath = parentDir === "/" ? `/${newName}` : `${parentDir}/${newName}`;
 
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       await ncMoveFile(await getToken(req), user, filePath, newPath, false);
 
       await invalidateParents(req, user, { space, path: filePath });
@@ -2900,7 +3481,9 @@ export function createFilesRouter(
       const from = await rootForSpace(prisma, fromSpaceValue, rawFrom);
       const to = await rootForSpace(prisma, toSpaceValue, rawTo);
 
-      const user = getUser(req);
+      if (await refuseUnapprovedMcpWrite(req, res, overwrite, from, to)) return;
+
+      const user = await getUser(req, prisma);
       await ncMoveFile(await getToken(req), user, from, to, overwrite);
 
       // WARP-1610: the cross-space case. `from` and `to` can be in
@@ -2965,7 +3548,9 @@ export function createFilesRouter(
       const from = await rootForSpace(prisma, fromSpaceValue, rawFrom);
       const to = await rootForSpace(prisma, toSpaceValue, rawTo);
 
-      const user = getUser(req);
+      if (await refuseUnapprovedMcpWrite(req, res, overwrite, from, to)) return;
+
+      const user = await getUser(req, prisma);
       await ncCopyFile(await getToken(req), user, from, to, overwrite);
 
       await invalidateParents(req, user, { space: toSpaceValue, path: to });
@@ -2996,7 +3581,7 @@ export function createFilesRouter(
       const paths = await Promise.all(
         parsed.data.paths.map((p) => rootForSpace(prisma, space, p)),
       );
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const token = await getToken(req);
 
       const results: BulkOperationResult[] = await runBulk(paths, async (p) => {
@@ -3046,7 +3631,7 @@ export function createFilesRouter(
       );
       const toDirResolved = await rootForSpace(prisma, space, parsed.data.toDir);
       const { overwrite } = parsed.data;
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const token = await getToken(req);
       const normalizedDir = toDirResolved.replace(/\/+$/, "") || "/";
 
@@ -3105,7 +3690,7 @@ export function createFilesRouter(
       );
       const toDirResolved = await rootForSpace(prisma, space, parsed.data.toDir);
       const { overwrite } = parsed.data;
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const token = await getToken(req);
       const normalizedDir = toDirResolved.replace(/\/+$/, "") || "/";
 
@@ -3138,7 +3723,7 @@ export function createFilesRouter(
   // ── Trash: list (GET /api/files/trash) ──
   router.get("/files/trash", async (req, res, next) => {
     try {
-      const items = await ncListTrash(await getToken(req), getUser(req));
+      const items = await ncListTrash(await getToken(req), await getUser(req, prisma));
       res.json({ items });
     } catch (err) {
       handleFileError(err, res, next, { items: [] });
@@ -3167,7 +3752,7 @@ export function createFilesRouter(
         res.status(400).json({ error: "name is required" });
         return;
       }
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       await ncRestoreTrashItem(await getToken(req), user, parsed.data.name);
       // WARP-1652: restore is the one mutating route that used to leave every
       // listing cache entry alone, so a restored file stayed invisible for the
@@ -3204,7 +3789,7 @@ export function createFilesRouter(
         res.status(400).json({ error: "name query parameter is required" });
         return;
       }
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       await ncDeleteTrashItem(await getToken(req), user, name);
       safePublish(`droplet/files/${user}/trash-purged`, { name });
       res.json({ deleted: name });
@@ -3221,7 +3806,7 @@ export function createFilesRouter(
     requireSpaceAccess(prisma, "contributor", { resolveSpace: resolveSpaceGuardToken }),
     async (req, res, next) => {
     try {
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       await ncEmptyTrash(await getToken(req), user);
       safePublish(`droplet/files/${user}/trash-emptied`, {});
       res.json({ emptied: true });
@@ -3238,7 +3823,7 @@ export function createFilesRouter(
         res.status(400).json({ error: "path query parameter is required" });
         return;
       }
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const token = await getToken(req);
       const fileId = await ncGetFileId(token, user, filePath);
       if (fileId === null) {
@@ -3278,7 +3863,7 @@ export function createFilesRouter(
       const space = resolveSpace(spaceQueryOrBody(req));
       const filePath = await rootForSpace(prisma, space, parsed.data.path);
       const { versionId } = parsed.data;
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const token = await getToken(req);
 
       const fileId = await ncGetFileId(token, user, filePath);
@@ -3350,7 +3935,7 @@ export function createFilesRouter(
       const space = resolveSpace(spaceQueryOrBody(req));
       const filePath = await rootForSpace(prisma, space, parsed.data.path);
       const { favorite } = parsed.data;
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       await ncSetFavorite(await getToken(req), user, filePath, favorite);
       // WARP-1556: the read key is ACL-scoped, so the invalidation must be
       // too. An unresolved tag means we can't name the entry — skip the del
@@ -3368,7 +3953,7 @@ export function createFilesRouter(
   // ── Favorites list (GET /api/files/favorites) ──
   router.get("/files/favorites", async (req, res, next) => {
     try {
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const cacheKey = await aclScopedKey(req, FAVORITES_CACHE_PREFIX, user);
       if (cacheKey) {
         const cached = await cacheGet<FileEntryInfo[]>(cacheKey);
@@ -3392,7 +3977,7 @@ export function createFilesRouter(
         1,
         Math.min(200, parseInt((req.query.limit as string) || "50", 10) || 50)
       );
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const cacheKey = await aclScopedKey(
         req,
         RECENTS_CACHE_PREFIX,
@@ -3431,7 +4016,7 @@ export function createFilesRouter(
         1,
         Math.min(200, parseInt((req.query.limit as string) || "50", 10) || 50)
       );
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const cacheKey = await aclScopedKey(
         req,
         SEARCH_CACHE_PREFIX,
@@ -3482,7 +4067,7 @@ export function createFilesRouter(
         16,
         Math.min(1024, parseInt((req.query.y as string) || "256", 10) || 256)
       );
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       const token = await getToken(req);
 
       const fileId = await ncGetFileId(token, user, filePath);
@@ -3496,7 +4081,6 @@ export function createFilesRouter(
         return;
       }
       res.setHeader("Content-Type", preview.contentType);
-      res.setHeader("Cache-Control", "private, max-age=3600");
       res.send(Buffer.from(preview.body));
     } catch (err) {
       handleFileError(err, res, next);
@@ -3523,12 +4107,12 @@ export function createFilesRouter(
     res: Response,
     shareId: number
   ): Promise<
-    | { ok: true; token: string; deptRow: { departmentId: string } | null }
+    | { ok: true; token: string; deptRow: { departmentId: string; shareType: number } | null }
     | { ok: false }
   > {
     const deptRow = await prisma.departmentShare.findUnique({
       where: { ncShareId: shareId },
-      select: { departmentId: true, createdById: true },
+      select: { departmentId: true, createdById: true, shareType: true },
     });
     if (!deptRow) {
       return { ok: true, token: await getToken(req), deptRow: null };
@@ -3553,7 +4137,11 @@ export function createFilesRouter(
       return { ok: false };
     }
 
-    return { ok: true, token: adminBasicToken(), deptRow: { departmentId: deptRow.departmentId } };
+    return {
+      ok: true,
+      token: adminBasicToken(),
+      deptRow: { departmentId: deptRow.departmentId, shareType: deptRow.shareType },
+    };
   }
 
   // ── Update existing share (PUT /api/files/share/:id) ──
@@ -3595,6 +4183,47 @@ export function createFilesRouter(
       const auth = await resolveShareMutationAuth(req, res, shareId);
       if (!auth.ok) return;
       const { token } = auth;
+
+      // WARP-3053: members may not edit any non-internal share (link, email,
+      // federated, ...) on company data, nor grant the re-share bit on it.
+      // Revoking (DELETE) stays open to them.
+      if (!mayCreatePublicLink(req.user?.role, "company")) {
+        const existing = auth.deptRow
+          ? {
+              shareType: auth.deptRow.shareType,
+              library: "company" as const,
+              // A recorded `space=shared` share sits on the HOUSEHOLD row.
+              workspace:
+                (
+                  await prisma.department.findUnique({
+                    where: { id: auth.deptRow.departmentId },
+                    select: { kind: true },
+                  })
+                )?.kind === "HOUSEHOLD",
+            }
+          : await ncGetShare(token, shareId).then(async (s) =>
+              s
+                ? {
+                    shareType: s.shareType,
+                    library: libraryOfHomePath(s.path, await companyLibraryRoots()),
+                    workspace: isWorkspacePath(s.path, SHARED_FOLDER_NAME),
+                  }
+                : null,
+            );
+        // WARP-3168: no member edits of any Workspace share (revoke stays open).
+        if (existing?.workspace) {
+          refuseWorkspaceShare(req, res);
+          return;
+        }
+        if (
+          existing &&
+          exposesOutside(existing.shareType, parsed.data.permissions ?? 0) &&
+          !mayCreatePublicLink(req.user?.role, existing.library)
+        ) {
+          refusePublicLink(req, res);
+          return;
+        }
+      }
 
       // OCS accepts one field per PUT — apply them sequentially.
       if (parsed.data.permissions !== undefined) {
@@ -3809,10 +4438,10 @@ export function createFilesRouter(
         1,
         Math.min(100, parseInt((req.query.limit as string) || "20", 10) || 20)
       );
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
 
       // WARP-880 / WS-2 — three content-search modes:
-      //   semantic (default) → existing inline pgvector SQL (unchanged)
+      //   semantic (default) → embed + searchByVector (WARP-3193 ARCH-2)
       //   keyword            → lexical (websearch_to_tsquery + ts_rank_cd),
       //                        works with the AI gateway down
       //   hybrid             → embed + RRF fusion of lexical + vector
@@ -3998,44 +4627,35 @@ export function createFilesRouter(
         return;
       }
 
-      // pgvector cosine similarity — Prisma can't express <=> so we use raw SQL.
-      // Two-step query: inner DISTINCT ON deduplicates per file (keeping the
-      // best chunk), outer query sorts by score and applies the limit.
+      // Semantic: the service's vector arm, then one hit per file.
       //
-      // WARP-1140: pin the corpus to source='nextcloud' so semantic searches
-      // the SAME corpus as keyword/hybrid. The unfiltered query also matched
-      // brain-memory chunks (chat attachments), whose paths aren't navigable
-      // from the Files page AND which all share ncFileId=0 — so DISTINCT ON
-      // ("ncFileId") collapsed every brain chunk into one bogus result row.
-      // The userId list mirrors the other modes (own + Household corpus).
-      const vecLiteral = `[${embedVec.join(",")}]`;
-      const userIdPlaceholders = searchUserIds
-        .map((_, i) => `$${i + 2}`)
-        .join(", ");
-      const limitParam = searchUserIds.length + 2;
-      const rows: Array<{ path: string; score: number; text: string }> =
-        await prisma.$queryRawUnsafe(
-          `
-          SELECT path, score, text FROM (
-            SELECT DISTINCT ON ("ncFileId")
-              "path",
-              1 - ("embedding" <=> $1::vector) AS score,
-              "text"
-            FROM "FileContentChunk"
-            WHERE "userId" IN (${userIdPlaceholders})
-              AND "source" = 'nextcloud'
-            ORDER BY "ncFileId", "embedding" <=> $1::vector
-          ) ranked
-          ORDER BY score DESC
-          LIMIT $${limitParam}
-          `,
-          vecLiteral,
-          ...searchUserIds,
-          limit
-        );
+      // WARP-3193 ARCH-2: this used to be an inline copy of the vector query
+      // that had drifted from `searchByVector`. Its DISTINCT ON ordering
+      // (`"ncFileId", embedding <=> $1`) cannot use the HNSW index, so every
+      // search was a sequential scan; it also skipped WARP-2193's
+      // `SET LOCAL hnsw.ef_search` and WARP-242's decrypt-on-read. The
+      // response shape is unchanged; `text` is now the service's snippet
+      // (the dashboard renders its first 200 characters).
+      //
+      // WARP-1140: the corpus stays pinned to source='nextcloud', the same as
+      // keyword/hybrid (brain-memory chunks are not navigable from Files).
+      // minSimilarity -1 (the cosine floor) keeps the inline query's
+      // no-threshold behaviour.
+      const { searchByVector } = await import(
+        "../services/file-search.service.js"
+      );
+      const hits = await searchByVector(prisma, {
+        userId: user,
+        additionalUserIds,
+        vector: embedVec,
+        limit: limit * CHUNKS_PER_FILE_FACTOR,
+        minSimilarity: -1,
+        source: "nextcloud",
+      });
+      const results = dedupeHitsPerFile(hits, limit);
 
-      await cacheSet(cacheKey, rows, 60);
-      res.json({ results: rows });
+      await cacheSet(cacheKey, results, 60);
+      res.json({ results });
     } catch (err: any) {
       // Catch Prisma/pgvector-specific errors (e.g. vector extension missing,
       // invalid vector cast) and return 503 instead of leaking raw SQL in a 500.
@@ -4076,7 +4696,7 @@ export function createFilesRouter(
   // other users' counts here.
   router.get("/files/search/status", async (req, res, next) => {
     try {
-      const user = getUser(req);
+      const user = await getUser(req, prisma);
       // WARP-1264: same corpus rule as content search — own chunks plus one
       // sentinel per ACTIVE department the caller is visible into
       // (owner/admin see all, an audited see-all consistent with
@@ -4275,7 +4895,7 @@ export function createFilesRouter(
 
       const upstream = await ncFetchFileResponse(
         await getToken(req),
-        getUser(req),
+        await getUser(req, prisma),
         ncPath,
         req.header("range"),
       );

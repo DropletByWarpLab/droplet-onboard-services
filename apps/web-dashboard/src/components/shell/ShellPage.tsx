@@ -23,12 +23,12 @@ import { useBoxAddress } from "@/lib/hooks/useBoxAddress";
 import { resolveHealthCopy } from "@/app/health-copy";
 import { AmbientLayer } from "@/components/home/AmbientLayer";
 import { Phead } from "./primitives";
+import { InboxBell } from "@/components/notifications/InboxBell";
 
 import "./indigo-tokens.css";
 import "./droplet-shell.css";
-// AmbientLayer's `.dh-ambient` / `.dh-drop` rules live in the home stylesheet;
-// import it so the decorative layer is styled on shell pages too. The `--blob-*`
-// opacities it reads are defined in the `.droplet-shell` token scope above.
+// AmbientLayer's `.dh-drop` rules live in the home stylesheet; import it so
+// the load indicator is styled on shell pages too.
 import "@/components/home/home-bento.css";
 
 function ShellStatusChip() {
@@ -72,6 +72,13 @@ export interface ShellPageProps {
   actions?: ReactNode;
   /** Render the decorative ambient layer (default true). */
   ambient?: boolean;
+  /**
+   * Opt into the page-rhythm rule (`.page-inner.rhythm`, droplet-shell.css):
+   * one 24px gap between every direct child, 34px above a `.sect`. Only pass
+   * it from a page whose children carry NO outer margin utilities of their
+   * own — the two stack. WARP-2961.
+   */
+  rhythm?: boolean;
   children: ReactNode;
 }
 
@@ -82,6 +89,7 @@ export function ShellPage({
   sub,
   actions,
   ambient = true,
+  rhythm = false,
   children,
 }: ShellPageProps) {
   return (
@@ -93,10 +101,11 @@ export function ShellPage({
           <span className="pt-t">{label}</span>
         </span>
         <span className="pt-spring" />
+        <InboxBell />
         <ShellStatusChip />
       </header>
       <div className="page-body">
-        <div className="page-inner">
+        <div className={rhythm ? "page-inner rhythm" : "page-inner"}>
           {title ? <Phead title={title} sub={sub} actions={actions} /> : null}
           {children}
         </div>

@@ -5,11 +5,12 @@ import { useRouter } from "next/navigation";
 import { Eye, EyeOff, KeyRound } from "lucide-react";
 import { validatePassword } from "@droplet/auth-policy";
 import { DropletMark } from "@/components/DropletMark";
-import { AuroraPanel } from "@/components/auth/AuroraPanel";
+import { LoginHero } from "@/components/auth/LoginHero";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { translateError } from "@/lib/friendly-errors";
 import { changePassword } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { useRemaskOnLeave } from "@/lib/hooks/useRemaskOnLeave";
 
 /**
  * WARP-824 — forced password-change screen.
@@ -34,6 +35,10 @@ export default function ChangePasswordPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  // WARP-3135: the revealed new password masks again when the window loses
+  // focus or the page is hidden (Mac parity, WARP-3086); submit re-masks too.
+  useRemaskOnLeave(setShowNew);
+
   // Client-side mirror of the server policy so we never fire a guaranteed-400:
   // the new password must satisfy the shared policy, match its confirmation,
   // and the current password must be present. The orchestrator re-checks all
@@ -44,6 +49,7 @@ export default function ChangePasswordPage() {
     currentPassword.length > 0 && newPasswordOk && confirmOk && !submitting;
 
   async function handleSubmit() {
+    setShowNew(false);
     setError(null);
     if (!canSubmit) return;
     setSubmitting(true);
@@ -70,8 +76,8 @@ export default function ChangePasswordPage() {
   }
 
   return (
-    <div className="min-h-dvh grid lg:grid-cols-[1.05fr_1fr] bg-surface-primary">
-      <AuroraPanel className="hidden lg:flex" />
+    <div className="min-h-dvh grid lg:grid-cols-2 bg-surface-primary">
+      <LoginHero className="hidden lg:block" />
 
       <div className="flex items-center justify-center p-6 sm:p-10">
         <div className="w-full max-w-[380px]">
@@ -130,6 +136,10 @@ export default function ChangePasswordPage() {
                 New password
               </label>
               <div className="relative">
+                {/* WARP-3135: `[&::-ms-reveal]:hidden` turns off Edge's native
+                    eye here and on the confirm field, whose type this toggle
+                    also drives: one eye per field. The temporary-password
+                    field above has no toggle, so it keeps the browser's. */}
                 <input
                   id="new-password"
                   data-testid="new-password"
@@ -138,12 +148,13 @@ export default function ChangePasswordPage() {
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   placeholder="Create a password"
-                  className="dp-input w-full pr-10"
+                  className="dp-input w-full pr-10 [&::-ms-reveal]:hidden"
                 />
                 <button
                   type="button"
                   onClick={() => setShowNew((s) => !s)}
                   aria-label={showNew ? "Hide password" : "Show password"}
+                  aria-pressed={showNew}
                   className="absolute right-2 top-1/2 -translate-y-1/2 text-label-tertiary hover:text-label-secondary transition-colors"
                 >
                   {showNew ? <EyeOff size={16} /> : <Eye size={16} />}
@@ -163,7 +174,7 @@ export default function ChangePasswordPage() {
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 placeholder="Re-enter the new password"
-                className="dp-input w-full"
+                className="dp-input w-full [&::-ms-reveal]:hidden"
               />
             </div>
 

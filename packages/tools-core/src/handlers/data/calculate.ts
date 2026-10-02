@@ -400,7 +400,7 @@ async function handler(
 const tool: Tool = {
   name: "calculate",
   description:
-    "Evaluate an arithmetic/scientific expression safely (hand-rolled parser, no code execution). Supports + - * / % ^ (power, right-associative), parentheses, unary minus, the functions sqrt, abs, round, floor, ceil, sin, cos, tan, asin, acos, atan, log (base 10), ln, exp, min, max (min/max take 2+ args), and the constants pi and e. Trig is in radians. Optional `precision` (0-15) rounds the result to that many decimal places. Tier-1 read; pure computation.",
+    "Evaluate an arithmetic/scientific expression safely (hand-rolled parser, no code execution). Supports + - * / % ^ (power, right-associative), parentheses, unary minus, the functions sqrt, abs, round, floor, ceil, sin, cos, tan, asin, acos, atan, log (base 10), ln, exp, min, max (min/max take 2+ args), and the constants pi and e. Trig is in radians. Optional `precision` (0-15) rounds the result to that many decimal places. Pure computation.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

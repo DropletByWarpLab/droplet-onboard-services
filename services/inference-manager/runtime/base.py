@@ -63,6 +63,18 @@ def deleted_result(model: str) -> dict[str, str]:
     return {"status": "deleted", "model": model}
 
 
+def unload_result(unloaded: list[str], still_resident: list[str]) -> dict[str, list[str]]:
+    """The body ``POST /models/unload`` returns (WARP-3047).
+
+    ``unloaded``: resident chat models this call actually freed.
+    ``still_resident``: chat models other than the one kept that are STILL
+    loaded after the call — read back from the daemon, never assumed (DMR
+    skips a runner that is serving a request). Defined once so the two
+    adapters cannot answer the route with different shapes.
+    """
+    return {"unloaded": unloaded, "still_resident": still_resident}
+
+
 class RuntimePullError(RuntimeError):
     """A pull that the backend reported as failed inside a 2xx response body.
 
@@ -142,6 +154,16 @@ class InferenceRuntime(Protocol):
         """
         ...
 
+    async def unload_others(self, keep: str) -> dict[str, list[str]]:
+        """Unload every resident CHAT model except ``keep`` (WARP-3047).
+
+        Body of ``POST /models/unload``; returns :func:`unload_result`. This is
+        how a model switch makes room: Docker Model Runner has no memory-aware
+        eviction, so the old model stays resident next to the new one until
+        something unloads it. Lifecycle only — no inference goes through here.
+        """
+        ...
+
     def comparable_id(self, model: str) -> str:
         """Reduce a model id to the form used for "is this already installed?".
 
@@ -159,6 +181,19 @@ class InferenceRuntime(Protocol):
         """
         ...
 
+    def pinned_id(self, model: str) -> str | None:
+        """The TAG-EXACT identity of ``model`` when it pins one build, else None.
+
+        WARP-3046. :meth:`comparable_id` answers "is SOME build of this
+        repository installed?" — right for an entry that addresses the
+        daemon's default build, wrong for one that pins a build: installing
+        ``ai/gemma4:latest`` (the 12B) made the pinned 26B entry read
+        installed too. `/models/eligible` compares a pinned entry through this
+        instead, both sides reduced the same way. ``None`` means "no build is
+        pinned here — fall back to :meth:`comparable_id`".
+        """
+        ...
+
 
 class OllamaWireRuntime:
     """Shared base for backends that speak Ollama's wire format on tags/ps.
@@ -169,8 +204,9 @@ class OllamaWireRuntime:
     responses feed ``/models/available``, ``/models/loaded``, ``/models/sync``'s
     already-pulled set and the health probe.
 
-    Subclasses supply only the three operations that genuinely differ: the two
-    pull forms and delete.
+    Subclasses supply only the operations that genuinely differ: the two pull
+    forms, delete, and (WARP-3047) unloading — Ollama unloads through a
+    ``keep_alive: 0`` generate, DMR through its native ``/engines/unload``.
     """
 
     #: Overridden by each concrete adapter.
@@ -204,6 +240,12 @@ class OllamaWireRuntime:
         was, not a normalisation that merely happens to agree.
         """
         return (model or "").strip()
+
+    def pinned_id(self, model: str) -> str | None:
+        """``None`` — :meth:`comparable_id` is identity here, so it is already
+        tag-exact and there is nothing finer to compare. DMR overrides this
+        (WARP-3046)."""
+        return None
 
     async def list_installed(self) -> dict[str, Any]:
         resp = await self._client.get(TAGS_PATH)
@@ -241,4 +283,7 @@ class OllamaWireRuntime:
         raise NotImplementedError
 
     async def delete(self, model: str) -> dict[str, str]:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    async def unload_others(self, keep: str) -> dict[str, list[str]]:  # pragma: no cover - abstract
         raise NotImplementedError

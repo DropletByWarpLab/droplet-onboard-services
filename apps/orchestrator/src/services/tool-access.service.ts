@@ -115,7 +115,9 @@
  * and shared with the `role` claim this function already trusts:
  *   (a) sid-less legacy access tokens skip checkSession entirely (≤15 min);
  *   (b) checkSession fails OPEN when Redis is unreachable;
- *   (c) revokeAllSessions swallows a Redis error, so a sweep can be partial.
+ *   (c) a revokeAllSessions sweep cut short by a Redis error can be partial
+ *       (WARP-3193 QUAL-1: it now rejects 503 instead of reporting success,
+ *       but what it had not reached yet stays live until retried).
  * In every one of those conditions a stale `role: "owner"` claim already
  * grants the §3 owner bypass — total reach, no narrowing, no read. A stale
  * `accessRoleId: null` is strictly narrower than a hazard already accepted.
@@ -182,6 +184,7 @@ import type { PrismaClient } from "@prisma/client";
 import { TOOL_CATALOG, TOOLS } from "@droplet/tools-core";
 import type { Role } from "./jwt.service.js";
 import { resolveEffectiveAccess } from "./effective-access.service.js";
+import { NO_RUNTIME_TOOLS, type RuntimeToolLookup } from "./tool-layers.service.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("tool-access");
@@ -258,12 +261,31 @@ export const WRITE_TOOLS: ReadonlySet<string> = new Set(
  * copy came to be a hardcoded `false`. `writeToolsIn` is the predicate;
  * `hasWriteTool` is the boolean the two gates read.
  */
-export function writeToolsIn(names: ReadonlyArray<string>): string[] {
-  return names.filter((name) => WRITE_TOOLS.has(name));
+export function writeToolsIn(
+  names: ReadonlyArray<string>,
+  /** WARP-2897 — runtime tool names to count as writes too (a runtime tool
+   *  is a write unless its classification row says otherwise). Omitted =
+   *  compiled-only, the shipped behaviour every existing caller keeps. */
+  runtimeWrite?: ReadonlySet<string>,
+): string[] {
+  return names.filter((name) => WRITE_TOOLS.has(name) || runtimeWrite?.has(name) === true);
 }
 
 export function hasWriteTool(names: ReadonlyArray<string>): boolean {
   return writeToolsIn(names).length > 0;
+}
+
+/**
+ * WARP-3287 — a catalog READ (`!requiresWrite && !requiresConfirmation`): a
+ * second dispatch has no second effect. The one test for "may this call be
+ * repeated when its outcome is unknown", shared by the run worker's lost-call
+ * re-dispatch (WARP-2877 `redispatchSafe`) and the agent loop's retry of a
+ * failed call. A name the catalog does not know — a remote or extension tool,
+ * a hallucination — is not a read.
+ */
+export function isCatalogRead(name: string): boolean {
+  const entry = CATALOG_BY_NAME.get(name);
+  return entry !== undefined && !entry.requiresWrite && !entry.requiresConfirmation;
 }
 
 /**
@@ -275,8 +297,14 @@ export function hasWriteTool(names: ReadonlyArray<string>): boolean {
  * on the next turn. Compiled catalog only, on purpose: the ToolSpec walker
  * dispatches through the local MCP child, which is exactly this catalog.
  */
-export function unknownToolsIn(names: ReadonlyArray<string>): string[] {
-  return names.filter((name) => !CATALOG_BY_NAME.has(name));
+export function unknownToolsIn(
+  names: ReadonlyArray<string>,
+  /** WARP-2897 — runtime tool names to treat as known (e.g. a toolset's own
+   *  tools at promote time). Omitted = compiled-only, the shipped behaviour:
+   *  the ToolSpec walker dispatches through the local MCP child only. */
+  extraKnown?: ReadonlySet<string>,
+): string[] {
+  return names.filter((name) => !CATALOG_BY_NAME.has(name) && extraKnown?.has(name) !== true);
 }
 
 /**
@@ -333,8 +361,20 @@ export function toolAllowedForTier(
  * May this scope invoke `name`? Fail-closed on anything unrecognised: a tool
  * with no catalog entry has no domain, so it cannot be shown to be in reach.
  */
-export function toolAllowedInScope(name: string, scope: ToolAccessScope): boolean {
-  const entry = CATALOG_BY_NAME.get(name);
+export function toolAllowedInScope(
+  name: string,
+  scope: ToolAccessScope,
+  /**
+   * WARP-2897 — the runtime layer. A name the compiled catalog does not know
+   * is looked up here: its domain from the registry descriptor, its write
+   * flag from the operator's classification record (missing row = write,
+   * denied = absent). The default knows no runtime tool, so a caller that
+   * does not pass one keeps the pre-2897 deny-every-runtime-tool answer. The
+   * catalog always answers first — a lookup can never widen a compiled tool.
+   */
+  runtime: RuntimeToolLookup = NO_RUNTIME_TOOLS,
+): boolean {
+  const entry = CATALOG_BY_NAME.get(name) ?? runtime(name);
   if (!entry) return false;
   if (!scope.domains.has(entry.domain)) return false;
   if (entry.requiresWrite && !scope.writeDomains.has(entry.domain)) return false;
@@ -345,8 +385,9 @@ export function toolAllowedInScope(name: string, scope: ToolAccessScope): boolea
 export function narrowToolNamesToScope(
   names: readonly string[],
   scope: ToolAccessScope,
+  runtime: RuntimeToolLookup = NO_RUNTIME_TOOLS,
 ): string[] {
-  return names.filter((n) => toolAllowedInScope(n, scope));
+  return names.filter((n) => toolAllowedInScope(n, scope, runtime));
 }
 
 /**
@@ -370,9 +411,10 @@ export function narrowToolNamesToScope(
 export function narrowToolsToScope<T extends { name: string }>(
   tools: readonly T[],
   scope: ToolAccessScope | null | undefined,
+  runtime: RuntimeToolLookup = NO_RUNTIME_TOOLS,
 ): readonly T[] {
   if (!scope) return tools;
-  return tools.filter((t) => toolAllowedInScope(t.name, scope));
+  return tools.filter((t) => toolAllowedInScope(t.name, scope, runtime));
 }
 
 /**
@@ -423,9 +465,18 @@ export function toolAllowedForPrincipal(
   tier: string | undefined,
   scope: ToolAccessScope | null | undefined,
   isVoice = false,
+  /**
+   * WARP-2897 — the runtime layer for the scope axis, as in
+   * {@link toolAllowedInScope}. Axis A stays catalog-only: a runtime tool is
+   * never in WRITE_TOOLS, and under a scope a write-classified one is refused
+   * by axis B anyway (non-privileged tiers hold no `writeDomains`). The
+   * default knows no runtime tool, so a caller that passes none keeps the
+   * pre-2897 answer.
+   */
+  runtime: RuntimeToolLookup = NO_RUNTIME_TOOLS,
 ): boolean {
   if (!toolAllowedForTier(name, tier, isVoice)) return false;
-  return !scope || toolAllowedInScope(name, scope);
+  return !scope || toolAllowedInScope(name, scope, runtime);
 }
 
 /**
@@ -438,8 +489,9 @@ export function narrowToolNamesForPrincipal(
   tier: string | undefined,
   scope: ToolAccessScope | null | undefined,
   isVoice = false,
+  runtime: RuntimeToolLookup = NO_RUNTIME_TOOLS,
 ): string[] {
-  return names.filter((n) => toolAllowedForPrincipal(n, tier, scope, isVoice));
+  return names.filter((n) => toolAllowedForPrincipal(n, tier, scope, isVoice, runtime));
 }
 
 /**
@@ -469,12 +521,13 @@ export function firstToolDeniedForPrincipal(
   tier: string | undefined,
   scope: ToolAccessScope | null | undefined,
   isVoice = false,
+  runtime: RuntimeToolLookup = NO_RUNTIME_TOOLS,
 ): { tool: string; axis: ToolDenialAxis } | null {
   for (const name of names) {
     if (!toolAllowedForTier(name, tier, isVoice)) {
       return { tool: name, axis: "write_tier" };
     }
-    if (scope && !toolAllowedInScope(name, scope)) {
+    if (scope && !toolAllowedInScope(name, scope, runtime)) {
       return { tool: name, axis: "role_grant" };
     }
   }
@@ -556,10 +609,16 @@ export function toolDispatchDenial(
   name: string,
   args: unknown,
   scope: ToolAccessScope | null | undefined,
+  /** WARP-2897 — the same runtime lookup the advertisement was narrowed with,
+   *  so a REGISTERED runtime tool out of scope is refused here as forbidden
+   *  rather than reaching the hallucinated-tool guard. A registered tool whose
+   *  domain is not operator-mapped is absent from the lookup, so it is never
+   *  advertised to a scoped person and the guard refuses it instead. */
+  runtime: RuntimeToolLookup = NO_RUNTIME_TOOLS,
 ): ToolDispatchDenial | null {
   if (!scope) return null;
-  if (!CATALOG_BY_NAME.has(name)) return null;
-  if (!toolAllowedInScope(name, scope)) {
+  if (!CATALOG_BY_NAME.has(name) && runtime(name) === undefined) return null;
+  if (!toolAllowedInScope(name, scope, runtime)) {
     return {
       code: "FORBIDDEN_TOOL_FOR_ROLE",
       message:
@@ -718,6 +777,16 @@ export interface AttributedToolAccess {
   tier: string | null;
   /** Non-null ⇔ `scope` is DENY_ALL because the identity could not be trusted. */
   unresolved: AttributionFailure | null;
+  /**
+   * WARP-2972 — the row's `User.username`, read in the SAME query as `tier`
+   * and `scope`, so what a caller sends downstream as `_meta.userId` and what
+   * it just decided on come from one snapshot of the row. The scheduled-run
+   * ticker used to read it in a second query: an owner deactivated between the
+   * two was refused by neither. `null` when `unresolved` is set (an identity we
+   * could not establish has no handle); a caller that needs one and finds
+   * none refuses, it never dispatches without.
+   */
+  username: string | null;
 }
 
 /**
@@ -755,23 +824,25 @@ export async function resolveAttributedToolAccess(
     scope: DENY_ALL_TOOL_SCOPE,
     tier: null,
     unresolved,
+    username: null,
   });
 
   if (!userId) return deny("no_principal");
 
   let row:
-    | (AccessRoleIdRow & { role: string; directoryStatus: string })
+    | (AccessRoleIdRow & { role: string; directoryStatus: string; username: string })
     | null;
   try {
     row = (await prisma.user.findUnique({
       where: { id: userId },
       select: {
+        username: true,
         role: true,
         directoryStatus: true,
         accessRoleId: true,
         accessRole: { select: { toolGrants: { select: { domain: true, level: true } } } },
       },
-    })) as (AccessRoleIdRow & { role: string; directoryStatus: string }) | null;
+    })) as (AccessRoleIdRow & { role: string; directoryStatus: string; username: string }) | null;
   } catch (err) {
     logger.error({ err, userId }, "attributed_tool_access_read_failed");
     return deny("read_failed");
@@ -785,11 +856,13 @@ export async function resolveAttributedToolAccess(
     return deny("user_deactivated");
   }
   // §3 owner bypass, read off the row. Service rows never reach here.
-  if (row.role === "owner") return { scope: null, tier: "owner", unresolved: null };
+  const username = row.username || null;
+  if (row.role === "owner") return { scope: null, tier: "owner", unresolved: null, username };
 
   return {
     scope: await composeScopeForRow(userId, row),
     tier: row.role,
     unresolved: null,
+    username,
   };
 }
