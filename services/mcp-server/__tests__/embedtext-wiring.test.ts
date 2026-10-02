@@ -14,6 +14,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../src/server.js";
 import type { ContextDeps } from "../src/context.js";
+import { NO_MODULE_GATING } from "../src/module-verdict.js";
 
 function buildDeps(
   searchHybrid?: ContextDeps["searchHybrid"],
@@ -40,7 +41,7 @@ describe("searchHybrid wiring (MCP server stdio path)", () => {
 
     // Trusted stdio posture, but no _meta.userId → no userId →
     // search_content returns AUTH_REQUIRED (WARP-563).
-    const server = createServer(deps, { kind: "local-trusted" });
+    const server = createServer(deps, { kind: "local-trusted" }, { moduleVerdict: NO_MODULE_GATING });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
     const client = new Client(
@@ -72,7 +73,7 @@ describe("searchHybrid wiring (MCP server stdio path)", () => {
   it("searchHybrid spy is invoked with bound userId when authed", async () => {
     const searchSpy = vi.fn().mockResolvedValue([]);
     const deps = buildDeps(searchSpy);
-    const server = createServer(deps, { kind: "authenticated", claims: { sub: "u1", role: "owner" } });
+    const server = createServer(deps, { kind: "authenticated", claims: { sub: "u1", role: "owner" } }, { moduleVerdict: NO_MODULE_GATING });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
     const client = new Client(
@@ -106,7 +107,7 @@ describe("searchHybrid wiring (MCP server stdio path)", () => {
 
   it("when ctx.searchHybrid is undefined, search_content surfaces SEARCH_UNAVAILABLE", async () => {
     const deps = buildDeps(undefined);
-    const server = createServer(deps, { kind: "authenticated", claims: { sub: "u1", role: "owner" } });
+    const server = createServer(deps, { kind: "authenticated", claims: { sub: "u1", role: "owner" } }, { moduleVerdict: NO_MODULE_GATING });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
     const client = new Client(
@@ -137,7 +138,7 @@ describe("searchHybrid wiring (MCP server stdio path)", () => {
       .fn()
       .mockRejectedValue(new Error("UNAVAILABLE: ai-gateway"));
     const deps = buildDeps(searchSpy);
-    const server = createServer(deps, { kind: "authenticated", claims: { sub: "u1", role: "owner" } });
+    const server = createServer(deps, { kind: "authenticated", claims: { sub: "u1", role: "owner" } }, { moduleVerdict: NO_MODULE_GATING });
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();
     const client = new Client(

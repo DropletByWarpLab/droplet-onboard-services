@@ -3089,10 +3089,14 @@ export interface ScheduleEvent {
  * which withholds a tool from ASKING while leaving it callable from its own
  * screen or by an MCP client. It is "not by asking", never "unavailable".
  *
- * ONE AXIS. A `module` axis was cut before it shipped: §6 module gating is
- * not applied to the chat pool for an owner or anybody holding no AccessRole,
- * so a "Module off" chip would have been a confident false statement on every
- * shipped box. WARP-2972 wires that gate; the axis returns here after it.
+ * WARP-2972 — `module` says whether the module that owns the tool's domain is
+ * on for this box and held by the caller. It was cut before it shipped: §6
+ * module gating did not reach the chat pool for an owner or anybody holding no
+ * AccessRole, so a "Module off" chip would have been a confident false
+ * statement on every shipped box. The gate is enforced for everyone now (the
+ * agent loop, `GET /api/llm/tools` and the MCP server all apply the one
+ * predicate). Like `chat` it ANNOTATES: a switched-off tool is still listed.
+ * Optional so an older orchestrator, which sends no such field, still parses.
  *
  * The per-person axes (role grants, off-LAN withholding, turn relevance) need
  * a resolved principal and a modelled turn, and live on `/admin/prompt`'s
@@ -3100,6 +3104,7 @@ export interface ScheduleEvent {
  */
 export interface ToolReach {
   chat: "allowed" | "excluded";
+  module?: "allowed" | "withheld";
 }
 
 export interface ToolCatalogEntry {
@@ -3129,6 +3134,10 @@ export interface ToolCatalogEntry {
 
 /** The gates a chat turn applies, in the order it applies them. */
 export type InspectGate =
+  // WARP-2972 — the tool's module is off for the box, or this person has not
+  // been given it. Leads: it is the workspace-level precondition, and for a
+  // role holder the role's scope already embeds it.
+  | "module"
   | "write_tier"
   | "role_grant"
   | "interview_strip"

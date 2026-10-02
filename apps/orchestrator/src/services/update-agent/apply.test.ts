@@ -47,6 +47,7 @@ import {
   applyWindowTick,
   httpHealthProbe,
   imageRefMatchesDigest,
+  releaseByTagUrl,
   SERVICES_START_FAILED_TITLE,
   type ApplyRunner,
   type EnvReconcileReport,
@@ -122,6 +123,9 @@ function buildManifest(overrides: Partial<ReleaseManifest["release"]> = {}): Rel
 let releaseServer: http.Server;
 let releaseBaseUrl = "";
 let servedTag = "ota-9-gapply";
+// WARP-3419 — what `/releases/latest` answers when it is NOT the row's release
+// (a stage row: `latest` skips prereleases). Null = the served release.
+let latestTag: string | null = null;
 let servedConfigs: Buffer = CONFIGS_TAR;
 // WARP-3120 — the client installer a release may carry.
 const DMG = Buffer.from("a Developer ID signed, notarized DMG (fake bytes)");
@@ -149,11 +153,11 @@ const healthy: Record<string, boolean> = {};
 
 beforeAll(async () => {
   releaseServer = http.createServer((req, res) => {
-    if (req.url === "/releases/latest") {
+    if (req.url === "/releases/latest" || req.url === `/releases/tags/${servedTag}`) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
-          tag_name: servedTag,
+          tag_name: req.url === "/releases/latest" ? (latestTag ?? servedTag) : servedTag,
           assets: [
             { name: "release.json", url: `${releaseBaseUrl}/assets/manifest` },
             { name: "release.json.sig", url: `${releaseBaseUrl}/assets/signature` },
@@ -525,6 +529,7 @@ function baseOpts(prisma: PrismaStub, runner: FakeRunner, logger = createLoggerS
 
 beforeEach(() => {
   servedTag = "ota-9-gapply";
+  latestTag = null;
   servedConfigs = CONFIGS_TAR;
   servedDmg = DMG;
   healthy.orchestrator = true;
@@ -877,6 +882,18 @@ describe("applyPendingUpdate (WARP-539)", () => {
     // Advance-only: the row stays parked at verifying; the next window
     // tick (or boot resume) re-runs the apply from the top.
     expect(prisma.deviceUpdate._rows()[0]!.status).toBe("verifying");
+  });
+
+  it("WARP-3419: installs a stage release even though /releases/latest names a stable one", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    servedTag = "ota-stage-404-g3c71b82";
+    latestTag = "ota-stable-399-g82be2ca"; // `latest` skips prereleases
+    await seedPendingRow(prisma, buildManifest());
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner));
+
+    expect(res.outcome).toBe("self_swap_started");
   });
 
   it("returns nothing_pending when the table has no applicable row", async () => {
@@ -1339,6 +1356,16 @@ describe("WARP-3193 PERF-3 — one apply per row, however many runners race", ()
       expect.any(String),
     );
     expect(prisma.deviceUpdate._rows()[0]!.applyClaim).toBe("unclaimed");
+  });
+});
+
+describe("releaseByTagUrl (WARP-3419)", () => {
+  it("turns the latest endpoint into the by-tag endpoint, and leaves other URLs alone", () => {
+    expect(
+      releaseByTagUrl("https://api.github.com/repos/o/r/releases/latest", "ota-stage-404-g3c71b82"),
+    ).toBe("https://api.github.com/repos/o/r/releases/tags/ota-stage-404-g3c71b82");
+    expect(releaseByTagUrl("https://mirror.example/r/latest.json", "ota-stage-1-gabc")).toBeNull();
+    expect(releaseByTagUrl("not a url", "ota-stage-1-gabc")).toBeNull();
   });
 });
 

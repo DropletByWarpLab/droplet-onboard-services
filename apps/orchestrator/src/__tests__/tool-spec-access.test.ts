@@ -178,7 +178,10 @@ function createPrismaMock(opts: {
     user: {
       findUnique: vi.fn(async ({ where }: { where: { id: string } }) => {
         if (opts.userReadThrows) throw new Error("connection reset");
-        return users.get(where.id) ?? null;
+        const row = users.get(where.id);
+        // WARP-2972 — `User.username` is NOT NULL; a scheduled fire carries it
+        // as `_meta.userId`, so every row in this table has one.
+        return row ? { username: `${row.id}-handle`, ...row } : null;
       }),
     },
   };
@@ -566,7 +569,11 @@ describe("WARP-1580 — scheduled ToolSpec runs resolve an attributed principal"
     const result = await tickToolSchedules(prisma as never, dispatcher, now);
 
     expect(result.fired).toBe(1);
-    expect(dispatcher.call).toHaveBeenCalledWith(ALLOWED_TOOL, { path: "/" });
+    expect(dispatcher.call).toHaveBeenCalledWith(
+      ALLOWED_TOOL,
+      { path: "/" },
+      { userId: "user-narrowed-handle" },
+    );
   });
 
   it("denies a scheduled lock operation at dispatch, after `${prev}` resolves", async () => {
@@ -612,7 +619,7 @@ describe("WARP-1580 — scheduled ToolSpec runs resolve an attributed principal"
     await tickToolSchedules(prisma as never, dispatcher, now);
 
     const calls = (dispatcher.call as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls).toEqual([[ALLOWED_TOOL, { path: "/" }]]);
+    expect(calls).toEqual([[ALLOWED_TOOL, { path: "/" }, { userId: "user-narrowed-handle" }]]);
     expect(
       calls.some(([name]) => name === FORBIDDEN_TOOL),
       "an unlock must not reach the dispatcher on a scheduled fire either",
@@ -647,10 +654,11 @@ describe("WARP-1580 — scheduled ToolSpec runs resolve an attributed principal"
     const result = await tickToolSchedules(prisma as never, dispatcher, now);
 
     expect(result.fired).toBe(1);
-    expect(dispatcher.call).toHaveBeenCalledWith(FORBIDDEN_TOOL, {
-      node_id: "n1",
-      command: "turn_on",
-    });
+    expect(dispatcher.call).toHaveBeenCalledWith(
+      FORBIDDEN_TOOL,
+      { node_id: "n1", command: "turn_on" },
+      { userId: "user-owner-handle" },
+    );
   });
 });
 

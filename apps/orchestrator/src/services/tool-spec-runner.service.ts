@@ -86,7 +86,8 @@ const logger = createLogger("tool-spec-runner");
 
 /**
  * A step's tool reply as the walker's value, shared by the run-now
- * dispatcher (`app.ts`) and the schedule ticker's (`index.ts`). Throws on
+ * dispatcher (`app.ts`) and the schedule ticker's (`mcp-step-dispatcher.ts`,
+ * built in `index.ts`). Throws on
  * failure — the walker halts on the first one.
  *
  * WARP-3284 — parsed through the agent loop's `parseToolResultPayload`, so an
@@ -248,7 +249,9 @@ interface RunArgs {
   scope?: ToolAccessScope | null;
   /**
    * The identity the run's tool calls execute as (username, role, Nextcloud
-   * token). Omitted for a scheduled fire, which has no session to speak of.
+   * token). A scheduled fire has no session, so it carries the owner's
+   * username alone (WARP-2972: the mcp-server's module gate reads the person
+   * from it); never a role or a token.
    */
   callContext?: McpCallContext;
 }

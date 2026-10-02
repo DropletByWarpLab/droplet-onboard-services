@@ -45,7 +45,7 @@
  *    not visible either" would be unprovable and a split into two
  *    transactions would stay green.
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi, type Mock } from "vitest";
 
 const { recordActivityMock } = vi.hoisted(() => ({
   recordActivityMock: vi.fn().mockResolvedValue(null),
@@ -182,21 +182,24 @@ const UNSTARTED_CURSOR_FIELDS = {
   lastError: null,
 } as const;
 
+/** A stubbed Prisma delegate method — any args, any result. */
+type StubFn = Mock<(...args: any[]) => any>;
+
 export interface StubPrisma {
-  integrationConnection: Record<string, ReturnType<typeof vi.fn>>;
-  erpAuditLog: Record<string, ReturnType<typeof vi.fn>>;
-  erpSyncCursor: Record<string, ReturnType<typeof vi.fn>>;
-  erpDriftRecord: Record<string, ReturnType<typeof vi.fn>>;
+  integrationConnection: Record<string, StubFn>;
+  erpAuditLog: Record<string, StubFn>;
+  erpSyncCursor: Record<string, StubFn>;
+  erpDriftRecord: Record<string, StubFn>;
   /** WARP-2549 — the CRM rows this connection landed, purged with it. */
-  crmCompany: Record<string, ReturnType<typeof vi.fn>>;
-  contact: Record<string, ReturnType<typeof vi.fn>>;
-  crmDeal: Record<string, ReturnType<typeof vi.fn>>;
-  crmPipeline: Record<string, ReturnType<typeof vi.fn>>;
-  crmPipelineStage: Record<string, ReturnType<typeof vi.fn>>;
-  crmActivity: Record<string, ReturnType<typeof vi.fn>>;
+  crmCompany: Record<string, StubFn>;
+  contact: Record<string, StubFn>;
+  crmDeal: Record<string, StubFn>;
+  crmPipeline: Record<string, StubFn>;
+  crmPipelineStage: Record<string, StubFn>;
+  crmActivity: Record<string, StubFn>;
   /** WARP-3375 — landed invoices/bills, and the raw MoneySnapshot delete. */
-  erpDocument: Record<string, ReturnType<typeof vi.fn>>;
-  $executeRaw: ReturnType<typeof vi.fn>;
+  erpDocument: Record<string, StubFn>;
+  $executeRaw: StubFn;
   $transaction: TransactionSeam["$transaction"];
   /** The live connection rows, so a test can read back what was written. */
   rows: Array<Record<string, unknown>>;

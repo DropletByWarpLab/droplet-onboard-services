@@ -9,6 +9,7 @@ import { createServer } from "../src/server.js";
 import { isWithheldOffBox, OFF_BOX_WITHHELD_DOMAINS } from "../src/rbac.js";
 import type { ContextDeps } from "../src/context.js";
 import { TOOL_CATALOG } from "@droplet/tools-core";
+import { NO_MODULE_GATING } from "../src/module-verdict.js";
 
 /**
  * WARP-2979 (#2420 review 2a; ADR-059 P4 §6.13 "security never leaves the
@@ -71,7 +72,7 @@ describe("the security domain off the box (§6.13)", () => {
         port: 0,
         host: "127.0.0.1",
         jwtSecret: SECRET,
-        buildServer: (claims) => createServer(built.deps, { kind: "authenticated", claims }),
+        buildServer: (claims) => createServer(built.deps, { kind: "authenticated", claims }, { moduleVerdict: NO_MODULE_GATING }),
       });
       await new Promise<void>((resolve) => server.once("listening", resolve));
       const addr = server.address();
@@ -116,7 +117,7 @@ describe("the security domain off the box (§6.13)", () => {
   describe("on-box chat: the orchestrator's stdio child (local-trusted)", () => {
     it("lists all four and dispatches one to the orchestrator's assistant route", async () => {
       const { deps, get } = buildDeps();
-      const server = createServer(deps, { kind: "local-trusted" });
+      const server = createServer(deps, { kind: "local-trusted" }, { moduleVerdict: NO_MODULE_GATING });
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       const client = new Client({ name: "orchestrator-agent-loop", version: "0.0.1" }, { capabilities: {} });
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

@@ -19,6 +19,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../src/server.js";
 import type { ContextDeps } from "../src/context.js";
 import { describeThrown } from "../src/thrown-cause.js";
+import { NO_MODULE_GATING } from "../src/module-verdict.js";
 
 describe("describeThrown", () => {
   it("passes a plain Error message through unchanged", () => {
@@ -126,6 +127,7 @@ describe("HANDLER_THREW end-to-end (WARP-1480)", () => {
         Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
       ),
       { kind: "local-trusted" },
+      { moduleVerdict: NO_MODULE_GATING },
     );
     const [clientTransport, serverTransport] =
       InMemoryTransport.createLinkedPair();

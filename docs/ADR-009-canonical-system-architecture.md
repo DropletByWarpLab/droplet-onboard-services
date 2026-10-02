@@ -9,6 +9,9 @@ repo; referenced here by description only).
 **Supersedes (in part):** earlier mobile + dashboard ADRs only where
 they conflict — they remain authoritative on persona, brand, and API
 contracts.
+**Superseded in part by:** [ADR-062](ADR-062-native-desktop-clients.md)
+(2026-09-26) — the Windows (Tauri) and macOS (Mac Catalyst) client
+decisions. See the notes below.
 
 ## Context
 
@@ -99,6 +102,13 @@ signal it's the mandatory transport for off-LAN clients, and the
 
 #### Clients (right half)
 
+> **Linux is not in this table; it is decided by
+> [ADR-061](ADR-061-native-linux-client.md) (Proposed, 2026-09-25):** a native
+> GTK 4 / libadwaita client with no web view. This table's desktop direction,
+> wrapping the dashboard's React build (the **Win .exe** row), since superseded
+> for Windows and macOS by [ADR-062](ADR-062-native-desktop-clients.md), does
+> not apply to it.
+
 | Client | Repo / Path | Tech | Status |
 |---|---|---|---|
 | **Web Dashboard** | `apps/web-dashboard/` | Next.js 14 + Tailwind + lucide-react | exists; under rehaul (Phase 1-3) |
@@ -106,6 +116,14 @@ signal it's the mandatory transport for off-LAN clients, and the
 | **Android App** | `stefan-cruceru/droplet-android` | Kotlin + Compose + Ktor + EncryptedSharedPrefs | scaffold shipped |
 | **macOS App** | **shares droplet-ios via Mac Catalyst** — Stefan 2026-05-18. NOT a separate repo. Add a Mac (Designed for iPad) target to the existing Xcode project; iOS UI ships on macOS with ~no per-platform code. | to do (Phase 5b) |
 | **Win .exe** | `stefan-cruceru/droplet-windows` | **Tauri** (Rust shell + WebView2) wrapping the dashboard's React build. Small .exe (~5-10 MB), native menu bar + system tray + notifications + deep links. | to do (Phase 6) |
+
+> **Superseded by [ADR-062](ADR-062-native-desktop-clients.md) (2026-09-26):**
+> the **macOS App** row is the native SwiftUI DropletAgent (WARP-3030), not
+> Mac Catalyst. The **Win .exe** row is a native C# / WinUI 3 client in
+> `droplet-windows`: unpackaged, installed per machine into
+> `%ProgramFiles%\Droplet` by an MSI, every screen native, calling `/api`
+> with a Bearer token, and no WebView. The Tauri shell never shipped a
+> release.
 
 #### VPN
 
@@ -177,6 +195,11 @@ to the Droplet — that's the wedge.
 - **Ops-console is `Apps Board`** — no need to invent a new admin UI;
   promote `feat/ops-console` to the canonical "Apps Board" surface.
 
+> **Superseded by [ADR-062](ADR-062-native-desktop-clients.md) (2026-09-26):**
+> the Mac Catalyst and Tauri bullets above. macOS ships as DropletAgent and
+> Windows reimplements its screens natively; neither reuses the iOS project
+> or the dashboard build.
+
 ### Harder
 
 - **VPN is mandatory for off-LAN** — no public TLS-only path means
@@ -186,8 +209,10 @@ to the Droplet — that's the wedge.
 - **5 client platforms now in scope** — Web + iOS + Android + macOS +
   Win. Design tokens and copy live in `apps/web-dashboard` (canonical
   CSS) + ADR-008 (SwiftUI + Compose mirror) + this ADR's macOS +
-  Windows notes. Token drift is a real risk; a future ADR-006 may
-  introduce token codegen.
+  Windows notes. Token drift is a real risk; token codegen is
+  WARP-3023's (generated design-and-style outputs). *(Pointer fixed by
+  ADR-062: this line named "a future ADR-006", a number since used by an
+  unrelated ADR.)*
 - **Apps Board on the architecture** elevates ops-console from a
   power-user tool to a customer-facing admin surface. Needs design
   pass to fit the violet brand + dual workspace.
@@ -201,6 +226,10 @@ to the Droplet — that's the wedge.
 | 3 | Document ops-console = Apps Board mapping in `feat/ops-console` README | when 2c lands | Phase 2c follow-up |
 | 4 | Wizard's remote-access step must say "VPN required for remote access" explicitly | wizard work (Phase 4) | Phase 4 |
 | 5 | Continue dashboard rehaul Phase 2c (Devices / Calendar / Knowledge / Remote-access / Events / Context) | now | Phase 2c |
+
+> **Superseded by [ADR-062](ADR-062-native-desktop-clients.md) (2026-09-26):**
+> items 1 and 2. There is no Catalyst target; `droplet-windows` is the
+> native C# client, and its Tauri tree is retired under WARP-3233.
 
 ## Future-agent notice
 
@@ -218,6 +247,12 @@ proves too limiting, supersede this ADR before forking.
 locked. If you're considering it for bundle-size or maturity reasons,
 that conversation belongs in an ADR-006 superseding this one — don't
 silently switch stacks.
+
+> **Superseded by [ADR-062](ADR-062-native-desktop-clients.md) (2026-09-26):**
+> the two notices above. macOS is the native SwiftUI DropletAgent (WARP-3030)
+> and Windows is a native C# / WinUI 3 client. ADR-062 is the superseding
+> ADR the Tauri notice asked for; it named "ADR-006", a number since used by
+> an unrelated ADR.
 
 **Do not add a public TLS endpoint to the orchestrator.** Off-LAN
 access goes through WireGuard, full stop. If a customer demands

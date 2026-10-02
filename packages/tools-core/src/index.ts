@@ -67,6 +67,19 @@ export {
   type RuntimeDenyTier,
   type ToolCallInterceptor,
 } from "./interceptor.js";
+// WARP-2972 — module gating for the tool surface: ONE predicate, shared by the
+// orchestrator (chat pool, /api/llm/tools) and the mcp-server (tools/list,
+// tools/call). See module-gate.ts.
+export {
+  FAIL_CLOSED_MODULE_VERDICT,
+  MODULE_OWNED_TOOL_DOMAINS,
+  isToolWithheldByModule,
+  namesForGuidance,
+  parseModuleVerdict,
+  serializeModuleVerdict,
+  withholdModuleTools,
+  type ModuleVerdict,
+} from "./module-gate.js";
 export {
   TOOL_ROUTES,
   type ToolClient,

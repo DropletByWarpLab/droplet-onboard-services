@@ -304,7 +304,7 @@ vi.mock("@prisma/client", () => {
     },
   };
   return {
-    PrismaClient: vi.fn(() => mockPrisma),
+    PrismaClient: vi.fn(function () { return mockPrisma; }),
     Prisma: { PrismaClientKnownRequestError },
   };
 });

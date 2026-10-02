@@ -56,7 +56,11 @@
  * sentence this box writes from the name and the source.
  */
 import type { PrismaClient } from "@prisma/client";
-import { TOOL_CATALOG } from "@droplet/tools-core";
+import {
+  TOOL_CATALOG,
+  isToolWithheldByModule,
+  type ModuleVerdict,
+} from "@droplet/tools-core";
 
 import {
   DENY_ALL_TOOL_SCOPE,
@@ -84,6 +88,7 @@ import {
   type RuntimeToolClassificationView,
 } from "./runtime-tool-view.service.js";
 import { isWithheldFromOffLan } from "./stored-content-egress.service.js";
+import { resolveToolModuleVerdict } from "./tool-module-verdict.service.js";
 import {
   CORE_TOOL_NAMES,
   effectiveAdvertisedToolNames,
@@ -92,6 +97,16 @@ import {
 
 /**
  * The gates, in the order the shipped chain applies them.
+ *
+ * 🔴 `module` LEADS (WARP-2972). It is the workspace-level precondition: the
+ * tool's module is switched off on this box, or this person was never given it.
+ * The chat pool, `GET /api/llm/tools` and the mcp-server all apply it — through
+ * the one predicate in tools-core — to people the §3 scope leaves untouched (the
+ * owner, and everybody with no AccessRole), and for a role holder the scope
+ * already embeds it: `computeEffectiveAccess` intersects the workspace's
+ * modules, so `scope.domains` drops a module-off domain. Reporting `role_grant`
+ * first for that person would tell an admin to grant a role something that is
+ * switched off. Led by `module`, the role is still named in `alsoWithheldBy`.
  *
  * 🔴 `write_tier` BEFORE `role_grant`, because that is what the code does:
  * `toolAllowedForPrincipal` (tool-access.service.ts) checks the tier first and
@@ -102,6 +117,7 @@ import {
  * that case.
  */
 export const INSPECT_GATES = [
+  "module",
   "write_tier",
   "role_grant",
   "interview_strip",
@@ -258,6 +274,9 @@ const RUNTIME_REFUSAL: Record<string, string> = {
 };
 
 const REASONS: Record<InspectGate, (e: GateSubject, tier: string | null) => string> = {
+  module: (e) =>
+    `The "${e.domain}" area is switched off for them: it is turned off on this Droplet, ` +
+    `or they have not been given it.`,
   write_tier: (_e, tier) =>
     `It changes something, and ${tier ?? "this person"} is not owner or admin. ` +
     `The assistant can read on their behalf; it cannot act on their behalf.`,
@@ -303,11 +322,14 @@ function gatesWithholding(
     offLan: boolean;
     voice: boolean;
     advertisedThisTurn: ReadonlySet<string>;
+    /** WARP-2972 — the module verdict for the target; nothing withheld when unresolved. */
+    verdict: ModuleVerdict;
   },
 ): InspectGate[] {
   const hits: InspectGate[] = [];
   const { name } = entry;
 
+  if (isToolWithheldByModule(name, opts.verdict)) hits.push("module");
   if (!toolAllowedForTier(name, opts.tier ?? undefined, opts.voice)) {
     hits.push("write_tier");
   }
@@ -340,12 +362,14 @@ function poolFor(
     interview: boolean;
     offLan: boolean;
     voice: boolean;
+    verdict: ModuleVerdict;
   },
 ): string[] {
   // WARP-2900 — `names` is the compiled catalog plus the runtime tools: the
   // chat path's pool is `mcpClient.listTools()`, which carries both, narrowed
   // by the same predicates below.
   return names.filter((name) => {
+    if (isToolWithheldByModule(name, opts.verdict)) return false;
     if (!toolAllowedForTier(name, opts.tier ?? undefined, opts.voice)) return false;
     if (opts.scope && !toolAllowedInScope(name, opts.scope)) return false;
     if (opts.interview && WRITE_TOOLS.has(name)) return false;
@@ -401,6 +425,12 @@ export async function inspectToolsForPerson(
     ? DENY_ALL_TOOL_SCOPE
     : attributed.scope;
   const tier = attributed.tier;
+  // WARP-2972 — the SAME verdict the chat pool applies, asked for the TARGET
+  // (never the caller). An unresolved identity is denied every row by
+  // DENY_ALL_TOOL_SCOPE already; a module gate there would only misattribute.
+  const verdict: ModuleVerdict = attributed.unresolved
+    ? { withheldDomains: new Set<string>() }
+    : await resolveToolModuleVerdict(input.targetUserId);
   const runtimeTools = deps.runtimeTools ?? runtimeToolRegistry.list();
   // Lazy on purpose: suites that mock the singleton never reach it unless a
   // runtime tool exists, and a box with none never consults it.
@@ -413,7 +443,7 @@ export async function inspectToolsForPerson(
         messages: [{ role: "user", content: input.message ?? "" }],
         pool: poolFor(
           [...TOOL_CATALOG.map((e) => e.name), ...runtimeTools.map((t) => t.name)],
-          { tier, scope, interview, offLan, voice },
+          { tier, scope, interview, offLan, voice, verdict },
         ),
         // The dynamic half of the universe, passed for the same reason the
         // wire path passes it: a registered remote tool can open a domain, and
@@ -427,7 +457,7 @@ export async function inspectToolsForPerson(
     number
   >;
 
-  const gateOpts = { tier, scope, interview, offLan, voice, advertisedThisTurn };
+  const gateOpts = { tier, scope, interview, offLan, voice, advertisedThisTurn, verdict };
 
   const rows: ToolInspectRow[] = TOOL_CATALOG.map((entry) => {
     const hits = gatesWithholding(entry, gateOpts);

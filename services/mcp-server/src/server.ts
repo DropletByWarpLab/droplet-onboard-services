@@ -9,6 +9,8 @@ import {
   defaultToolCallInterceptor,
   interceptOutcomeToToolResult,
   type PrivateEnhancement,
+  isToolWithheldByModule,
+  withholdModuleTools,
   type Tool,
   type ToolCallInterceptor,
   type ToolResult,
@@ -16,6 +18,7 @@ import {
 import { buildContext, type ContextDeps, type Claims } from "./context.js";
 import { canCallTool, isWithheldOffBox, filterToolsForRole } from "./rbac.js";
 import { describeThrown } from "./thrown-cause.js";
+import { FAIL_CLOSED_MODULE_SOURCE, type ModuleVerdictSource } from "./module-verdict.js";
 
 const SERVER_INFO = { name: "droplet-mcp-server", version: "0.1.0" };
 
@@ -57,6 +60,31 @@ export type TrustContext =
 export interface ServerOptions {
   additionalTools?: ReadonlyMap<string, Tool>;
   interceptor?: ToolCallInterceptor;
+  /**
+   * WARP-2972 — which tool domains a module toggle (the box) or the acting
+   * person's own grants withhold. Asked of the orchestrator, the only process
+   * that knows the module registry (module-verdict.ts).
+   *
+   *   - `tools/list` on the AUTHENTICATED transport (an external MCP client):
+   *     withheld tools are absent, for the JWT's subject.
+   *   - `tools/call` on BOTH transports: a withheld tool is refused before its
+   *     handler runs. The person is the JWT subject over HTTP and `_meta.userId`
+   *     over stdio (the orchestrator is the trust boundary for that channel).
+   *
+   * `tools/list` on the stdio child is deliberately NOT filtered: the
+   * orchestrator's client caches that list for the process lifetime, and a
+   * verdict baked into it would outlive the toggle. The orchestrator applies
+   * the same predicate to its pool at list time, on top of the cache.
+   *
+   * Absent → FAIL CLOSED (`FAIL_CLOSED_MODULE_SOURCE`): module-owned tools are
+   * withheld and unclaimed domains kept. A server built without a source used
+   * to withhold nothing, so a construction site that forgot the option was a
+   * silent fail-open; now forgetting is safe and withholding nothing is an
+   * explicit opt-out (module-verdict.ts, for tests and embedders). Both
+   * production construction sites (index.ts) pass a real one, pinned by
+   * server-module-gate.test.ts.
+   */
+  moduleVerdict?: ModuleVerdictSource;
 }
 
 export function createServer(
@@ -66,6 +94,7 @@ export function createServer(
 ) {
   const additionalTools = options.additionalTools;
   const interceptor = options.interceptor ?? defaultToolCallInterceptor;
+  const moduleVerdict: ModuleVerdictSource = options.moduleVerdict ?? FAIL_CLOSED_MODULE_SOURCE;
   const resolveTool = (name: string): Tool | undefined =>
     TOOLS.get(name) ?? additionalTools?.get(name);
   // Trust is derived solely from the declared posture, not from the presence
@@ -89,9 +118,13 @@ export function createServer(
     const advertised = additionalTools
       ? [...TOOLS.values(), ...additionalTools.values()]
       : [...TOOLS.values()];
-    const tools = filterToolsForRole(advertised, claims?.role, {
-      trustedPrincipal,
-    }).map((t) => ({
+    const permitted = filterToolsForRole(advertised, claims?.role, { trustedPrincipal });
+    // WARP-2972 — an external client's list drops what a module toggle or its
+    // person's grants withhold. Not the stdio child's (see ServerOptions).
+    const visible = trustedPrincipal
+      ? permitted
+      : withholdModuleTools(permitted, await moduleVerdict(claims?.sub));
+    const tools = visible.map((t) => ({
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema,
@@ -123,6 +156,37 @@ export function createServer(
               error: {
                 code: "withheld_off_box",
                 message: "This tool is only available to Droplet's own chat on this box.",
+              },
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    // WARP-2972 — a tool whose domain a module toggle or this person's grants
+    // withhold is refused before any role check or handler, on both transports.
+    // ABSENT, so it reads like "this part of Droplet is off", not like a role
+    // refusal. Over HTTP the JWT names the person and `_meta` cannot; over
+    // stdio `_meta.userId` does, and a call that sends none is the box (a
+    // scheduled run used to; it now carries its owner's username).
+    const callMeta = (req.params as { _meta?: Record<string, unknown> })._meta;
+    const asserted = trustedPrincipal
+      ? typeof callMeta?.userId === "string" && callMeta.userId.length > 0
+        ? callMeta.userId
+        : undefined
+      : claims?.sub;
+    if (isToolWithheldByModule(tool.name, await moduleVerdict(asserted))) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              status: "error",
+              error: {
+                code: "module_disabled",
+                message:
+                  "This part of Droplet is switched off, or is not available to this person.",
               },
             }),
           },

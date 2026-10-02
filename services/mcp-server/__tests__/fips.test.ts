@@ -8,6 +8,7 @@ import {
   assertFipsAtBoot,
   FipsSelfTestError,
 } from "@droplet/fips-selftest";
+import { NO_MODULE_GATING } from "../src/module-verdict.js";
 
 // WARP-229 — mcp-server FIPS integration tests:
 //   - boot self-test positive + negative paths
@@ -77,7 +78,7 @@ describe("mcp-server /_/fips HTTP endpoint", () => {
     server = startHttp({
       port: 0,
       jwtSecret: SECRET,
-      buildServer: (claims) => createServer(deps, { kind: "authenticated", claims }),
+      buildServer: (claims) => createServer(deps, { kind: "authenticated", claims }, { moduleVerdict: NO_MODULE_GATING }),
     });
     await new Promise<void>((resolve) =>
       server.once("listening", () => resolve()),
