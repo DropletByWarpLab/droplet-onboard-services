@@ -310,19 +310,19 @@ describe("runAgent — bound_tool_domains (WARP-2896)", () => {
   });
 });
 
-describe("WARP-2979 — a Security tool on a cloud turn (ADR-059 P4 §6.13)", () => {
+describe("a stored-content tool on a cloud turn (off-LAN withholding)", () => {
   it("is not in the pool, and a forced call stays UNKNOWN_TOOL — never dispatched, never self-healed", async () => {
     const { withholdStoredContentTools } = await import("../services/stored-content-egress.service.js");
     const pool = [
       { name: "search_content", description: "d", inputSchema: {} },
       { name: "list_network_devices", description: "d", inputSchema: {} },
-      { name: "security_list_incidents", description: "d", inputSchema: {} },
-      { name: "security_search_events", description: "d", inputSchema: {} },
+      { name: "search_files", description: "d", inputSchema: {} },
+      { name: "memory_recall", description: "d", inputSchema: {} },
     ];
     const forced = {
       role: "assistant",
       content: null,
-      tool_calls: [{ id: "s1", type: "function", function: { name: "security_list_incidents", arguments: '{"period":"last_night"}' } }],
+      tool_calls: [{ id: "s1", type: "function", function: { name: "search_files", arguments: '{"query":"lease agreement"}' } }],
     };
     const turns = [forced, { role: "assistant", content: "done" }];
     const chat = vi.fn().mockImplementation(async () => ({
@@ -332,14 +332,14 @@ describe("WARP-2979 — a Security tool on a cloud turn (ADR-059 P4 §6.13)", ()
     const callTool = vi.fn();
     const deps: AgentDeps = { mcp: { listTools: vi.fn().mockResolvedValue(pool), callTool } as never, aiGateway: { chat } as never };
 
-    // The route's off-LAN step: the materialised pool minus the withheld domains (files and security here).
+    // The route's off-LAN step: the materialised pool minus the withheld domains (files and memory here).
     const allowed = withholdStoredContentTools(pool.map((t) => t.name));
     expect(allowed).toEqual(["list_network_devices"]);
 
     await runAgent(deps, {
       model: "m",
-      // A Security question: the selection rule would bring the domain in, if it were allowed at all.
-      messages: [{ role: "user", content: "anything odd at the back door last night?" }],
+      // A files question: the selection rule would bring the domain in, if it were allowed at all.
+      messages: [{ role: "user", content: "where did I put the signed lease agreement?" }],
       tool_selection_mode: "domains",
       allowed_tools: allowed,
     });
@@ -348,8 +348,8 @@ describe("WARP-2979 — a Security tool on a cloud turn (ADR-059 P4 §6.13)", ()
     const reply = messages_(chat.mock.calls[1]![0]).find((m) => m.role === "tool" && m.tool_call_id === "s1") as { content: string } | undefined;
     expect(JSON.parse(reply!.content).error.code).toBe("UNKNOWN_TOOL");
     for (const call of chat.mock.calls) {
-      expect(toolNames(call[0])).not.toContain("security_list_incidents");
-      expect(toolNames(call[0])).not.toContain("security_search_events");
+      expect(toolNames(call[0])).not.toContain("search_files");
+      expect(toolNames(call[0])).not.toContain("memory_recall");
     }
   });
 });

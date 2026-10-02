@@ -45,7 +45,6 @@
  "run_scene": true,
  "scan_for_cameras": true,
  "send_notification": true,
- "set_building_point": true,
  "set_camera_detection": true,
  "set_detection_zones": true,
  "set_device_schedule": true,

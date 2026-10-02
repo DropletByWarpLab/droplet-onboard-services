@@ -2,8 +2,7 @@
 
 /**
  * WARP-3307 — the notification inbox's way in: a bell in every shell page's
- * slim top bar with the unread count. The Security wall (a screen facing a
- * room) does not render ShellPage, so it never shows this person's count.
+ * slim top bar with the unread count.
  */
 
 import Link from "next/link";

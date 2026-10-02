@@ -284,15 +284,13 @@ describe("sw.js → an ack the worker could not make is handed to the page (revi
   });
 });
 
-describe("sw.js — Security alerts (WARP-2978, D36, D37)", () => {
-  const INCIDENT = "/security/incidents/7f3c2a10-5b1e-4c8e-9a0d-2f6b3c4d5e6f";
-
+describe("sw.js — alert-priority notifications", () => {
   it("an alert stays in the tray until it is handled (requireInteraction)", async () => {
     const sw = loadSw();
-    await push(sw, { title: "Person in Stock room after hours", url: INCIDENT, notificationId: "clx9", priority: "alert", tag: "security-incident-1" });
+    await push(sw, { title: "Back camera offline", url: "/cameras", notificationId: "clx9", priority: "alert", tag: "camera-offline-1" });
     const options = sw.registration.showNotification.mock.calls[0]![1];
     expect(options.requireInteraction).toBe(true);
-    expect(options.tag).toBe("security-incident-1");
+    expect(options.tag).toBe("camera-offline-1");
   });
 
   it("anything else does not (the old comment claimed otherwise; the flag was always false)", async () => {
@@ -307,27 +305,18 @@ describe("sw.js — Security alerts (WARP-2978, D36, D37)", () => {
     expect(sw.registration.showNotification.mock.calls[0]![1].requireInteraction).toBe(false);
   });
 
-  it("no action buttons on an alert: one tap opens the page, where Acknowledge can say if it failed (D36)", async () => {
+  it("no action buttons on an alert: one tap opens its link", async () => {
     const sw = loadSw();
-    await push(sw, { title: "x", url: INCIDENT, notificationId: "clx9", priority: "alert" });
+    await push(sw, { title: "x", url: "/cameras", notificationId: "clx9", priority: "alert" });
     expect(sw.registration.showNotification.mock.calls[0]![1].actions).toBeUndefined();
   });
 
-  it("tapping an incident alert opens the incident with ?n=<notification>", async () => {
-    const opened = fakeClient();
-    const sw = loadSw({ opened });
-    await click(sw, { url: INCIDENT, notificationId: "clx9" }).done;
-    expect(sw.clients.openWindow).toHaveBeenCalledWith(`${INCIDENT}?n=clx9`);
-  });
-
-  it("any other link, or a tap without a valid row id, is opened as the box sent it", async () => {
+  it("a link, with or without a valid row id, is opened as the box sent it", async () => {
     const sw = loadSw({ opened: fakeClient() });
     await click(sw, { url: "/calendar", notificationId: "clx9" }).done;
     expect(sw.clients.openWindow).toHaveBeenLastCalledWith("/calendar");
-    await click(sw, { url: INCIDENT, notificationId: "../x" }).done;
-    expect(sw.clients.openWindow).toHaveBeenLastCalledWith(INCIDENT);
-    await click(sw, { url: `${INCIDENT}?n=someone-elses`, notificationId: "clx9" }).done;
-    expect(sw.clients.openWindow).toHaveBeenLastCalledWith(`${INCIDENT}?n=someone-elses`);
+    await click(sw, { url: "/cameras/front", notificationId: "../x" }).done;
+    expect(sw.clients.openWindow).toHaveBeenLastCalledWith("/cameras/front");
   });
 });
 
@@ -347,7 +336,7 @@ describe("sw.js notificationclick → re-checks the stored url (WARP-3208)", () 
     null,
     42,
   ];
-  const GOOD = ["/calendar", "/cameras/front", "/security/incidents/abc-1", "/x?y=1#z"];
+  const GOOD = ["/calendar", "/cameras/front", "/projects/abc-1", "/x?y=1#z"];
 
   it.each(BAD)("an unsafe stored url (%j) falls back to /cameras", async (url) => {
     const opened = fakeClient();

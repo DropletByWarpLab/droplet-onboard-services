@@ -98,7 +98,7 @@ const WHOLE: ActiveDepartmentResponse = { scope: "whole_business", department: n
 /** Nobody has chosen anything, on any device. */
 const UNSET: ActiveDepartmentResponse = { scope: "unset", department: null };
 
-/** A typed error as `securityFetch` throws it. */
+/** A typed error as `typedAuthFetch` throws it. */
 function httpError(status: number, code?: string): Error {
   return Object.assign(new Error(`HTTP ${status}`), { status, code });
 }

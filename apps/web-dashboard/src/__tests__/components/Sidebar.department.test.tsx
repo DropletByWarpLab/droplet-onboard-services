@@ -78,11 +78,11 @@ const security: Department = {
   teamCount: 0,
   myRight: null,
   usedBytes: null,
-  profile: { template: "security", icon: "shield-check" },
+  profile: { template: "it", icon: "shield-check" },
 };
 const securityProfile: DepartmentProfile = {
   departmentId: "sec",
-  template: "security",
+  template: "it",
   icon: "shield-check",
   navHrefs: ["/cameras", "/events", "/network", "/devices", "/integrations"],
   homeWidgets: [],

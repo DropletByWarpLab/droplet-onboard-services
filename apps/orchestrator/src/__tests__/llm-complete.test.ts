@@ -203,8 +203,8 @@ describe("completeOnce", () => {
     expect(Object.keys(mockChat.mock.calls[0][0])).not.toContain("reasoning_effort");
   });
 
-  // WARP-2979 (#2420 review) — an explicit provider rides the gateway body, so the gateway routes by it and never by
-  // the model name's prefix (a locally served fine-tune called gpt-* / claude-* would otherwise resolve to a cloud one).
+  // An explicit provider rides the gateway body, so the gateway routes by it and never by the model name's prefix
+  // (a locally served fine-tune called gpt-* / claude-* would otherwise resolve to a cloud one).
   it("forwards an explicit `provider` on the gateway body", async () => {
     mockChat.mockResolvedValueOnce(okChatResponse("Hello"));
     await completeOnce({ text: "hi", model: "gpt-my-finetune", provider: "local" });

@@ -29,7 +29,6 @@ import {
   type RecordParams,
 } from "./activity.service.js";
 import { _setActivityRecorderForTests, recordActivityInTx } from "./activity.singleton.js";
-import { SecurityAuditUnavailableError, auditSecurityInTx } from "./security-audit.js";
 import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
 import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
 import {
@@ -556,13 +555,16 @@ describe("activity.service.record", () => {
 
 // ── WARP-2977 P2b: the in-transaction append is the recorder's own body ──
 //
-// A Security change and its audit row must commit together, so the chain
+// A change and its audit row must be able to commit together, so the chain
 // writer was split: `appendActivityRowInTx(tx, signer, params)` is the body
 // that locks, reads the tail, signs and inserts; `record()` is validation +
 // `$transaction(tx => appendActivityRowInTx(...))`. There must be ONE code
 // path — a row appended in a caller's transaction has to be byte-identical to
 // the row `record()` would have written, or audit-verify breaks.
 
+// The `what` / `refs` text of rows 0 and 2 is HASHED into the golden
+// signatures below: it is inert fixture data, so never reword it without
+// recomputing the goldens.
 const P1 = new Date("2026-09-24T09:00:00.000Z");
 const CHAIN_PARAMS: RecordParams[] = [
   { kind: "system", severity: "info", sourceIcon: "shield", what: "Security: closed up", actor: { type: "user", id: "11111111-1111-4111-8111-111111111111" }, refs: { surface: "security", action: "mode.close", modeEffect: { from: "open", to: "closed" }, until: "2026-09-25T08:00:00.000Z" }, at: P1 },
@@ -1086,8 +1088,9 @@ describe("appendActivityRowInTx preconditions (WARP-2977 P2b)", () => {
   // s0-rereview-3: a COPY of the real tx. Prisma's handle keeps its methods
   // off its own enumerable keys, so a spread copies the transaction-id symbol
   // (and passes the id check) but not `$queryRawUnsafe` / `activityRow`. The
-  // first statement then threw a TypeError, which auditSecurityInTx wrapped
-  // as AUDIT_UNAVAILABLE — an outage (503) instead of the programming error.
+  // first statement then threw a TypeError, which a caller wrapping append
+  // failures as an outage (503) would have reported instead of the
+  // programming error.
   /** A handle shaped like Prisma's: methods inherited, only the id symbol its own. */
   function prismaShapedTx(state: ReturnType<typeof makePrismaFake>): FakeTx {
     const inner = state.makeTx();
@@ -1131,23 +1134,6 @@ describe("appendActivityRowInTx preconditions (WARP-2977 P2b)", () => {
     await expect(p).rejects.toBeInstanceOf(ActivityChainPreconditionError);
     expect(state.queries).toEqual([]);
     expect(state.rows).toEqual([]);
-  });
-
-  it.each(COPIES)("through auditSecurityInTx, a copy (%s) is the programming error (500), never AUDIT_UNAVAILABLE (503)", async (_n, copy) => {
-    const state = makePrismaFake();
-    _setActivityRecorderForTests(createActivityRecorder({ prisma: state.prisma as never, signer }), signer);
-    try {
-      const p = auditSecurityInTx(copy(prismaShapedTx(state)) as never, { user: { id: "u-1", role: "owner" } }, {
-        action: "zone.update",
-        what: "Security: changed an area",
-      });
-      await expect(p).rejects.toBeInstanceOf(ActivityChainPreconditionError);
-      await expect(p).rejects.not.toBeInstanceOf(SecurityAuditUnavailableError);
-      expect(state.queries).toEqual([]);
-      expect(state.rows).toEqual([]);
-    } finally {
-      _setActivityRecorderForTests(null, null);
-    }
   });
 
   it("every $transaction hands its callback a fresh handle with its own id (the fake mirrors Prisma)", async () => {

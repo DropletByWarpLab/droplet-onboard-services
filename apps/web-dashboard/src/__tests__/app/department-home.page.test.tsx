@@ -124,7 +124,7 @@ describe("/d/<slug> — not set up", () => {
     putDepartmentProfileMock.mockResolvedValue({
       profile: {
         departmentId: "sec",
-        template: "security",
+        template: "it",
         icon: "shield-check",
         navHrefs: ["/cameras"],
         homeWidgets: [{ widget: "members", size: "s" }],
@@ -136,7 +136,7 @@ describe("/d/<slug> — not set up", () => {
 
     const templates = await screen.findByRole("list", { name: "Templates" });
     const cards = within(templates).getAllByRole("button");
-    expect(cards).toHaveLength(7);
+    expect(cards).toHaveLength(6);
     expect(screen.getByRole("heading", { name: "Set up Security" })).toBeInTheDocument();
 
     fireEvent.click(within(templates).getByRole("button", { name: /^Sales/ }));
@@ -165,7 +165,7 @@ describe("/d/<slug> — not set up", () => {
     );
     renderPage();
     const templates = await screen.findByRole("list", { name: "Templates" });
-    fireEvent.click(within(templates).getByRole("button", { name: /^Security/ }));
+    fireEvent.click(within(templates).getByRole("button", { name: /^IT/ }));
     expect(await screen.findByRole("alert")).toHaveTextContent(/archived/i);
   });
 
@@ -183,7 +183,7 @@ describe("/d/<slug> — not set up", () => {
 describe("/d/<slug> — set up", () => {
   const profile = {
     departmentId: "sec",
-    template: "security" as const,
+    template: "it" as const,
     icon: "shield-check",
     navHrefs: ["/cameras", "/network", "/integrations", "/gone"],
     homeWidgets: [

@@ -1,5 +1,5 @@
 /**
- * WARP-2976 (ADR-059 §2.6) — pins on the seven templates.
+ * WARP-2976 (ADR-059 §2.6) — pins on the six templates.
  *
  * A template seeds a profile, so a bad default ships to every department
  * that picks it. These hold the three rules `templates.ts` states:
@@ -37,7 +37,6 @@ const NAV_INDEX: ReadonlySet<string> = (() => {
 })();
 
 const ALL: DepartmentTemplate[] = [
-  "security",
   "sales",
   "finance",
   "operations",
@@ -47,7 +46,7 @@ const ALL: DepartmentTemplate[] = [
 ];
 
 describe("department templates", () => {
-  it("are exactly the seven ADR-059 templates, each once", () => {
+  it("are exactly the six ADR-059 templates, each once", () => {
     expect(DEPARTMENT_TEMPLATES.map((t) => t.id)).toEqual(ALL);
   });
 
@@ -86,7 +85,6 @@ describe("department templates", () => {
   it("pins the ADR-059 default destinations", () => {
     const nav = Object.fromEntries(DEPARTMENT_TEMPLATES.map((t) => [t.id, t.navHrefs]));
     expect(nav).toEqual({
-      security: ["/security", "/cameras", "/events", "/network", "/devices", "/integrations"],
       sales: ["/customers", "/projects", "/email", "/calendar"],
       finance: ["/money", "/customers", "/files", "/reports"],
       operations: ["/projects", "/calendar", "/files", "/routines"],
@@ -99,29 +97,16 @@ describe("department templates", () => {
   it("names a headline figure for every template; custom's is the member count", () => {
     for (const t of DEPARTMENT_TEMPLATES) expect(t.headline).toBeTruthy();
     expect(templateFor("custom")?.headline).toBe("members");
-    // WARP-2978 (ADR-059 P3 §8, D38) — Security's tile counts what needs attention.
-    expect(templateFor("security")?.headline).toBe("open_incidents");
-  });
-
-  it("the Security home leads with its open incidents (WARP-2978, D38: new profiles only)", () => {
-    expect(templateFor("security")?.homeWidgets).toEqual([
-      { widget: "security-incidents", size: "m" },
-      { widget: "cameras", size: "m" },
-      { widget: "quick-links", size: "m" },
-      { widget: "members", size: "s" },
-    ]);
-    // The incidents widget reads the Security module, so it follows that module's gate.
-    expect(DEPARTMENT_WIDGETS["security-incidents"].requiresModule).toBe("security");
   });
 
   it("templateDefaults copies the lists, so an edit cannot mutate the template", () => {
-    const t = templateFor("security")!;
+    const t = templateFor("sales")!;
     const d = templateDefaults(t);
     d.navHrefs.push("/chat");
     d.homeWidgets[0].size = "l";
     expect(t.navHrefs).not.toContain("/chat");
     expect(t.homeWidgets[0].size).toBe("m");
-    expect(d.template).toBe("security");
+    expect(d.template).toBe("sales");
     expect(d.icon).toBe(t.icon);
   });
 

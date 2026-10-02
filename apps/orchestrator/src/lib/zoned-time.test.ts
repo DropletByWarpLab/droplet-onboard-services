@@ -1,7 +1,7 @@
 /**
  * WARP-2977 P2b — lib/zoned-time.ts: the ONE RFC 5545 wall-clock converter
  * (moved verbatim from services/ics.ts, still pinned by
- * src/__tests__/ics.test.ts) and the helpers the opening hours add around it.
+ * src/__tests__/ics.test.ts) and the zone / local-time helpers added around it.
  *
  * Every case runs with the process TZ unset AND under Pacific/Kiritimati
  * (UTC+14) and Pacific/Pago_Pago (UTC−11): a helper that reads the PROCESS
@@ -110,7 +110,7 @@ describe.each(PROCESS_ZONES)("zoned-time — process TZ %s", (_label, zone, noon
     });
   });
 
-  describe("localPartsOf — the site's date, weekday and minute, never the process's", () => {
+  describe("localPartsOf — the zone's date, weekday and minute, never the process's", () => {
     // 2026-09-27T23:30Z is Monday 13:30 in Kiritimati and Sunday 16:30 in Los Angeles.
     const at = new Date("2026-09-27T23:30:00.000Z");
 

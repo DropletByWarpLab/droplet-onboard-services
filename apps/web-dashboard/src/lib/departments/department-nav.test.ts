@@ -36,7 +36,7 @@ const allOn = () => true;
 const SECURITY = { name: "Security", slug: "security" };
 const securityProfile = {
   icon: "shield-check",
-  navHrefs: [...templateFor("security")!.navHrefs],
+  navHrefs: ["/cameras", "/events", "/network", "/devices", "/integrations"],
 };
 
 const hrefsOf = (items: NavItem[]) => items.map((i) => i.href);
@@ -67,11 +67,9 @@ describe("departmentNavGroups — intersection, never union", () => {
   });
 
   it("holds only the profile's destinations, in profile order", () => {
-    // /events is a CHILD of /cameras, so it arrives with its parent; Areas and
-    // Settings arrive with /security the same way (WARP-2977).
+    // /events is a CHILD of /cameras, so it arrives with its parent.
     expect(hrefsOf(groups[0].items)).toEqual([
       "/d/security",
-      "/security",
       "/cameras",
       "/network",
       "/devices",
@@ -211,7 +209,7 @@ describe("departmentNavGroups × the WARP-2967 tuck and nesting", () => {
 
   it("Operations keeps Routines; every department keeps Help", () => {
     expect(render("operations")).toContain("/routines");
-    for (const slug of ["security", "it", "finance", "operations", "sales"])
+    for (const slug of ["it", "finance", "operations", "sales"])
       expect(render(slug), slug).toContain("/help");
   });
 

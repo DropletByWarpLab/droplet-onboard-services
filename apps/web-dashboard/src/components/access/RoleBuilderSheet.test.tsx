@@ -132,23 +132,23 @@ describe("identity & starting point (axis 1)", () => {
   });
 });
 
-// ADR-059: GET /api/access/roles now lists a stored grant through the same clamp the
-// server writes with (a family role's security:manage lists as act; a guest role's
-// security:view is omitted). `dirty` is a diff against `base`, which is that listed
+// GET /api/access/roles lists a stored grant through the same clamp the server
+// writes with (a guest role's voice:manage lists as act; a guest role's
+// crm:view is omitted). `dirty` is a diff against `base`, which is that listed
 // role, so opening one must never read as an edit.
-describe("a role whose stored grants the server lists clamped (ADR-059)", () => {
+describe("a role whose stored grants the server lists clamped", () => {
   it("a level listed at the ceiling opens with the listed level selected and nothing to save", () => {
     const role = makeRole({
-      startingPoint: "family",
+      startingPoint: "guest",
       featureGrants: [
-        { moduleId: "security", level: "act" },
+        { moduleId: "voice", level: "act" },
         { moduleId: "cameras", level: "view" },
       ],
     });
     renderSheet({ mode: "edit", base: roleToDraft(role) });
     expect(screen.getByRole("button", { name: "Save role" })).toBeDisabled();
-    const security = screen.getByTestId("access-feature-security");
-    expect(within(security).getByRole("button", { name: /Respond/ })).toHaveAttribute("aria-pressed", "true");
+    const voice = screen.getByTestId("access-feature-voice");
+    expect(within(voice).getByRole("button", { name: /Use voice/ })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("a refused grant the server left out opens with that feature off and nothing to save", () => {
@@ -158,8 +158,8 @@ describe("a role whose stored grants the server lists clamped (ADR-059)", () => 
     });
     renderSheet({ mode: "edit", base: roleToDraft(role) });
     expect(screen.getByRole("button", { name: "Save role" })).toBeDisabled();
-    const security = screen.getByTestId("access-feature-security");
-    expect(within(security).getByRole("switch")).toHaveAttribute("aria-checked", "false");
+    const crm = screen.getByTestId("access-feature-crm");
+    expect(within(crm).getByRole("switch")).toHaveAttribute("aria-checked", "false");
   });
 });
 

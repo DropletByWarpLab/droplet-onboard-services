@@ -17,7 +17,6 @@ import {
   Camera,
   Cloud,
   Contact,
-  DoorOpen,
   FolderOpen,
   HardDrive,
   Heater,
@@ -34,7 +33,6 @@ import {
   type LucideIcon,
   Repeat,
   Hammer,
-  Shield,
 } from "lucide-react";
 
 import type { ToolCatalogEntry } from "./types";
@@ -89,12 +87,6 @@ export const DOMAIN_META: Record<string, DomainMeta> = {
   // WARP-2896 (ADR-056) — the workshop's workspace tools. Label matches the
   // /workshop nav entry for the same reason.
   workspace: { label: "Workshop", icon: Hammer },
-  // WARP-2979 (ADR-059 P4) — the read-only Security tools. Label and icon
-  // match the /security nav entry.
-  security: { label: "Security", icon: Shield },
-  // ADR-055 (P4b) — doors_list / doors_recent_events. Label and icon match the
-  // /doors nav entry.
-  doors: { label: "Doors", icon: DoorOpen },
 };
 
 /** Title-case a slug as a last resort: `smart-home` → `Smart home`. */

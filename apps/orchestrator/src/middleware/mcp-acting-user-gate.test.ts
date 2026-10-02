@@ -69,7 +69,7 @@ function appAs(
     next();
   });
   mountMcpActingUserGates(app, resolve, features);
-  for (const path of ["/api/crm/companies", "/api/pm/work-items", "/api/mobile/pm/projects", "/api/files/x", "/api/team-chat/contacts", "/api/money/documents", "/api/doors", "/api/doors/events"]) {
+  for (const path of ["/api/crm/companies", "/api/pm/work-items", "/api/mobile/pm/projects", "/api/files/x", "/api/team-chat/contacts", "/api/money/documents"]) {
     app.get(path, (_q, res) => { res.json({ hit: path }); });
     app.post(path, (_q, res) => { res.json({ hit: path }); });
   }
@@ -420,77 +420,6 @@ describe("mcp acting-user gate — money: who the service principal acts for (WA
   });
 });
 
-// ADR-055 P4b — `doors_list` and `doors_recent_events` reach /api/doors and
-// /api/doors/events as `_service:mcp`. The read routes floor at owner/admin for a
-// human, but they admit the principal before any role check, and neither a role-less
-// person's tool scope (null) nor an ordinary `view` grant narrows a staff member. So
-// the tier floor is asked of the ACTING person: the access catalog's `view` for doors
-// is a REFUSAL below admin (`refuseBelowFloor`), the one fact `requireModuleTierFloor`
-// applies to their browser. Without it the assistant would read doors for a person
-// whose browser is refused.
-describe("mcp acting-user gate — doors: the assistant never reads what the person's browser would refuse (ADR-055 P4b)", () => {
-  const acting = (tier: string, s: ToolAccessScope | null): ActingUserAccess => ({
-    scope: s,
-    tier,
-    unresolved: null,
-    userId: "u-sam",
-  });
-  const DOORS_PATHS = ["/api/doors", "/api/doors/events"];
-
-  beforeEach(() => {
-    heldFeatures = ["doors"];
-    heldLevel = "view";
-  });
-
-  it.each(DOORS_PATHS)("%s: an acting family, guest or service-tier person is 404 module_disabled, even holding the doors grant and domain", async (path) => {
-    for (const tier of ["family", "guest", "service"]) {
-      resolveMock.mockResolvedValue(acting(tier, scope(["doors"])));
-      const res = await request(appAs(MCP)).get(path).set("X-Nextcloud-User", "sam");
-      expect(res.status, `${path} as ${tier}`).toBe(404);
-      expect(res.body, `${path} as ${tier}`).toEqual({ error: "module_disabled", module: "doors" });
-    }
-  });
-
-  it.each(DOORS_PATHS)("%s: an acting owner (no custom role) or admin reads", async (path) => {
-    resolveMock.mockResolvedValue(acting("owner", null));
-    expect((await request(appAs(MCP)).get(path).set("X-Nextcloud-User", "sam")).status, `${path} as owner`).toBe(200);
-    resolveMock.mockResolvedValue(acting("admin", null));
-    expect((await request(appAs(MCP)).get(path).set("X-Nextcloud-User", "sam")).status, `${path} as admin`).toBe(200);
-    resolveMock.mockResolvedValue(acting("admin", scope(["doors"])));
-    expect((await request(appAs(MCP)).get(path).set("X-Nextcloud-User", "sam")).status, `${path} as admin with the doors domain`).toBe(200);
-  });
-
-  it.each(DOORS_PATHS)("%s: an admin whose custom role leaves the doors tool domain out is refused (question 1)", async (path) => {
-    resolveMock.mockResolvedValue(acting("admin", scope(["business", "files"])));
-    const res = await request(appAs(MCP)).get(path).set("X-Nextcloud-User", "sam");
-    expect(res.status).toBe(404);
-    expect(res.body).toEqual({ error: "module_disabled", module: "doors" });
-  });
-
-  it.each(DOORS_PATHS)("%s: an admin who does not hold the doors module is refused (question 2)", async (path) => {
-    heldFeatures = ["crm"];
-    resolveMock.mockResolvedValue(acting("admin", null));
-    expect((await request(appAs(MCP)).get(path).set("X-Nextcloud-User", "sam")).status).toBe(404);
-  });
-
-  it("an acting person nobody can attribute is refused (fail closed)", async () => {
-    resolveMock.mockResolvedValue({ scope: null, tier: null, unresolved: "user_missing", userId: null } as unknown as ActingUserAccess);
-    expect((await request(appAs(MCP)).get("/api/doors").set("X-Nextcloud-User", "ghost")).status).toBe(404);
-  });
-
-  it("a human's own request is not this gate's business: the route's role guard and the prefix's tier floor answer", async () => {
-    const res = await request(appAs({ id: "u-1", role: "guest" })).get("/api/doors").set("X-Nextcloud-User", "sam");
-    expect(res.status).toBe(200);
-    expect(resolveMock).not.toHaveBeenCalled();
-  });
-
-  it("no other domain grew a doors-style floor: a family person's CRM read still passes", async () => {
-    heldFeatures = ["crm", "projects"];
-    resolveMock.mockResolvedValue(acting("family", scope(["business"])));
-    expect((await request(appAs(MCP)).get("/api/crm/companies").set("X-Nextcloud-User", "sam")).status).toBe(200);
-  });
-});
-
 describe("actingUserAccessResolver — fail closed on identity", () => {
   // A Prisma double that HONOURS `where`, with the account shape that broke:
   // SSO / SCIM users have no `nextcloudUsername`.
@@ -574,7 +503,7 @@ describe("actingUserAccessResolver — fail closed on identity", () => {
 });
 
 describe("mcp acting-user gate — app.ts wiring", () => {
-  it("app.ts mounts it with the real resolver, after the module gates and before the CRM / PM / Security-assistant routers", () => {
+  it("app.ts mounts it with the real resolver, after the module gates and before the CRM / PM routers", () => {
     const src = readFileSync(join(__dirname, "..", "app.ts"), "utf8");
     const gates = src.indexOf("mountModuleGates(app, moduleGate)");
     const acting = src.indexOf("mountMcpActingUserGates(app, actingUserAccessResolver(prisma))");
@@ -582,8 +511,6 @@ describe("mcp acting-user gate — app.ts wiring", () => {
       'app.use("/api", createPmNativeRouter(prisma))',
       'app.use("/api", createCrmRouter(prisma))',
       "app.use(createPmMobileRouter(prisma))",
-      // WARP-2979 — the `security` domain's only hops.
-      'app.use("/api", createSecurityAssistantRouter(prisma))',
     ].map((r) => [r, src.indexOf(r)] as const);
     expect(gates).toBeGreaterThan(-1);
     expect(acting).toBeGreaterThan(gates);
@@ -602,25 +529,19 @@ describe("mcp acting-user gate — app.ts wiring", () => {
 // every method there, so a write tool's GET is checked as the write it serves.
 const OUTSIDE_GATED_PREFIXES: Record<string, string[]> = {
   business: ["business_find GET /api/brain/digests", "business_find GET /api/brain/findings"],
-  // WARP-2979 — every security hop is under /api/security/assistant/, inside the gated prefix.
-  security: [],
   // WARP-3145: every email hop is under /api/email.
   email: [],
   // WARP-3162: every team_chat hop is under /api/team-chat.
   team_chat: [],
   // WARP-3365 review: the one money hop is GET /api/money/documents.
   money: [],
-  // ADR-055 P4b: both doors hops (GET /api/doors, GET /api/doors/events) are under /api/doors.
-  doors: [],
 };
 
 describe("mcp acting-user gate — which domains it narrows", () => {
   // Pinned by name: the suite below iterates the list, so a domain dropped
   // from it would take its own checks with it and nothing would go red.
-  // WARP-2979: `security` — its tools' routes resolve the person too, but the
-  // mcp-server's HTTP transport runs only write-tier RBAC (ADR-059 P4 §6.12.2).
-  it("narrows exactly business, doors, email, money, security and team_chat", () => {
-    expect([...MCP_ACTING_USER_GATED_DOMAINS].sort()).toEqual(["business", "doors", "email", "money", "security", "team_chat"]);
+  it("narrows exactly business, email, money and team_chat", () => {
+    expect([...MCP_ACTING_USER_GATED_DOMAINS].sort()).toEqual(["business", "email", "money", "team_chat"]);
   });
 });
 

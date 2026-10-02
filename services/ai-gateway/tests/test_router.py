@@ -280,15 +280,14 @@ class TestReasoningEffortForwarding:
         assert "reasoning_effort" not in captured
 
 
-class TestSecurityNarratorLocalPin:
-    """WARP-2979 (ADR-059 P4 §6.10, DS-007) — Droplet's incident summaries are
-    written on the box only. The orchestrator's narrator sends
-    ``provider: "local"`` on every request (security-narrator.service.ts,
-    NARRATOR_PROVIDER), and relies on THIS behaviour: an explicit local
-    provider routes to the on-box runtime whatever the model is called — a
-    cloud-looking name included, with no configured LLM_MODEL to rescue it.
-    If this ever resolved a cloud provider, security events (presence data
-    about people) could leave the box."""
+class TestExplicitLocalProviderPin:
+    """An explicit ``provider: "local"`` is a hard pin to the on-box runtime.
+    A caller that must keep a request's content on the box sends it on every
+    request and relies on THIS behaviour: an explicit local provider routes to
+    the on-box runtime whatever the model is called — a cloud-looking name
+    included, with no configured LLM_MODEL to rescue it. If this ever
+    resolved a cloud provider, content meant to stay on the box could leave
+    it."""
 
     @patch("router.get_api_key", new_callable=AsyncMock, return_value=None)
     async def test_explicit_local_beats_every_cloud_looking_name(self, mock_key):

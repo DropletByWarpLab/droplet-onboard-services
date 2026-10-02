@@ -21,9 +21,8 @@
  * tests guard against on the tools-core side.
  */
 import { describe, it, expect } from "vitest";
-import { Braces, Shield, Wrench } from "lucide-react";
+import { Braces, Wrench } from "lucide-react";
 import { TOOL_DOMAINS } from "@droplet/tools-core";
-import { NAV_GROUPS } from "@/components/nav-config";
 import type { ToolCatalogEntry } from "./types";
 import {
   DOMAIN_META,
@@ -86,14 +85,6 @@ describe("DOMAIN_META covers the catalog (WARP-2969)", () => {
       expect(labelForDomain(d).length, d).toBeGreaterThan(0);
       expect(iconForDomain(d), d).not.toBe(Wrench);
     }
-  });
-
-  it("WARP-2979: the Security tools read as Security, with the /security nav entry's shield", () => {
-    expect(labelForDomain("security")).toBe("Security");
-    // #2420 review 12: the chip and the nav entry are one place — one icon.
-    const nav = NAV_GROUPS.flatMap((g) => g.items).find((i) => i.href === "/security");
-    expect(nav?.icon).toBe(Shield);
-    expect(iconForDomain("security")).toBe(nav?.icon);
   });
 
   it("declares no domain the catalog does not have", () => {

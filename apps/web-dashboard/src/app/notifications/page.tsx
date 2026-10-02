@@ -7,7 +7,7 @@
  *
  * Mirrors the iOS inbox and the toaster:
  *   · "Open" acknowledges as `opened` (fire-and-forget) and navigates — only
- *     to an in-app path (`isInAppPath`), with the incident `?n=` rule.
+ *     to an in-app path (`isInAppPath`).
  *   · "Mark read" acknowledges as `inbox`.
  *   · "Mark all read" sends the ids that were SHOWN (N4 never takes a time
  *     bound: a late-committed row must stay unread).
@@ -20,7 +20,7 @@ import { useRouter } from "next/navigation";
 import { Bell } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Badge, Card } from "@/components/shell/primitives";
-import { isInAppPath, withNotificationParam } from "@/components/NotificationToaster";
+import { isInAppPath } from "@/components/NotificationToaster";
 import { ackAllNotifications, ackNotification } from "@/lib/api";
 import { formatRelativeTime } from "@/lib/relative-time";
 import {
@@ -56,7 +56,7 @@ export default function NotificationsPage() {
   const open = (n: NotificationRow) => {
     if (!n.url || !isInAppPath(n.url)) return;
     if (n.ackState === "unacked") void ackNotification(n.id, { via: "opened" }).catch(() => {}).finally(refreshNotificationInbox);
-    router.push(withNotificationParam(n.url, n.id));
+    router.push(n.url);
   };
 
   const actions = (

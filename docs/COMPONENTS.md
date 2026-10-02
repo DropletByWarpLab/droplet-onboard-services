@@ -82,7 +82,6 @@ is deliberately **no separate API gateway service** in front of the orchestrator
 | **ai-gateway** | `services/ai-gateway/` | Python + FastAPI | Inference router + gRPC embed/rerank |
 | **routing** | `services/routing/` | Python + FastAPI | OpenWrt control via ubus |
 | **switch** | `services/switch/` | Python + FastAPI | Managed-switch driver |
-| **device-gateway** | `services/device-gateway/` | Python + FastAPI | Device control over BACnet/IP, Modbus TCP, SNMP, KNX/IP |
 | **file-indexer** | `services/file-indexer/` | Python + watchdog | Filesystem indexer + embedder (RAG) |
 | **email-indexer** | `services/email-indexer/` | Python + FastAPI | IMAP IDLE ingest + SMTP send |
 | **camera-discovery** | `services/camera-discovery/` | Python + FastAPI | ONVIF/RTSP discovery → Frigate |
@@ -125,7 +124,6 @@ network. Host-published ports and host-network services are called out.
 | mcp-bridge | 9096 (`MCP_BRIDGE_PORT`) | HTTP (internal JSON) | internal only (profile `remote-mcp`) — holds the customer's vendor credential in memory |
 | routing | 8080 | HTTP | **host network mode** (direct router access) |
 | switch | 8081 | HTTP | host (profile `full`) |
-| device-gateway | 8084 | HTTP (+ BACnet UDP 47808, KNX 3671) | host (profiles `full`, `single-box`) |
 | oled-display | 8082 | HTTP | host network (display profile) |
 | camera-discovery | 8085 | HTTP | internal (profile `full`) |
 | erp-sql-bridge | 9095 | HTTP | internal only (profile `erp`) — holds the practice's DB credentials |
@@ -198,7 +196,7 @@ network. Host-published ports and host-network services are called out.
 - **External guests get nothing of the company's data unless it is shared with
   them (Romain, 2026-09-30).** The box enforces it on every route; clients only
   mirror it. Modules the catalog refuses the guest tier (`refuseBelowFloor` in
-  `services/access-catalog.ts`: `security`, `crm`, `projects`, `money`) are
+  `services/access-catalog.ts`: `crm`, `projects`, `money`) are
   floored at the prefix by `requireModuleTierFloor` (mounted by
   `mountModuleGates`, 404 `module_disabled`), for the assistant acting for a
   guest by `requireMcpActingUserToolDomain`, and for context pins by the tier in
@@ -428,22 +426,6 @@ network. Host-published ports and host-network services are called out.
   (future custom PCB) is a placeholder. `create_driver()` picks by `SWITCH_DRIVER`.
   Endpoints (ports, VLANs, PoE, WAN detect, one-click camera setup) are
   driver-agnostic. Bearer `SERVICE_SECRET`. Profile `full`.
-
-## services/device-gateway
-
-- **Purpose:** Device control for commercial/industrial equipment beside
-  Matter, under the same `smart_home` ("Device control") module. BACnet/IP
-  (BACpypes3), Modbus TCP (pymodbus), SNMP v2c/v3 (pysnmp), KNX/IP (xknx), one
-  `ProtocolDriver` each. The orchestrator fronts it at `/api/building/*`
-  (`routes/building.ts`); the LLM reaches it through `get_building_devices` /
-  `set_building_point`.
-- **Gotchas:** A point exists only if an admin registered it; writable only
-  when marked, with min/max for numbers; BACnet priorities 1-7 are refused.
-  Writes are **plan-only** until `DEVICE_GATEWAY_LIVE_WRITES=1`. The
-  orchestrator's write route audits fail-closed before sending. Registry at
-  `/var/lib/droplet/device-gateway/registry.json` (named volume
-  `device-gateway-state`, backed up and wiped on factory reset). Bearer
-  `SERVICE_TOKEN_DEVICE_GATEWAY`. README has the full contract.
 
 ## services/file-indexer
 

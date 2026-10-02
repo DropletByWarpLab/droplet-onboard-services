@@ -1,5 +1,5 @@
 /**
- * WARP-2976 (ADR-059 §2.6) — the seven department templates, as DATA.
+ * WARP-2976 (ADR-059 §2.6) — the six department templates, as DATA.
  *
  * A template is three defaults and nothing else: which nav destinations the
  * department shows, which widgets its home starts with, and which one figure
@@ -19,8 +19,8 @@
  *   3. A template is never inferred from a department's NAME. Nothing here
  *      takes a name; `/d/<slug>` shows a picker when there is no profile.
  *
- * What a template does NOT do: grant anything. Seeding `/cameras` into a
- * Security profile does not let a member see a camera — the nav still runs
+ * What a template does NOT do: grant anything. Seeding `/cameras` into an
+ * IT profile does not let a member see a camera — the nav still runs
  * every existing gate after the profile filter (ADR-059 §2.5).
  */
 import type { LucideIcon } from "lucide-react";
@@ -60,8 +60,6 @@ export const DEPARTMENT_WIDGET_IDS = [
   "work",
   "cameras",
   "files",
-  // WARP-2978 (ADR-059 P3 §8) — open Security incidents (GET /api/security/incidents/summary).
-  "security-incidents",
 ] as const;
 export type DepartmentWidgetId = (typeof DEPARTMENT_WIDGET_IDS)[number];
 
@@ -76,7 +74,6 @@ export function isDepartmentWidgetId(id: string): id is DepartmentWidgetId {
  */
 export type HeadlineFigureId =
   | "cameras_online"
-  | "open_incidents"
   | "open_deals"
   | "overdue_invoices"
   | "open_work"
@@ -97,27 +94,6 @@ export interface DepartmentTemplateDef {
 }
 
 export const DEPARTMENT_TEMPLATES: readonly DepartmentTemplateDef[] = [
-  {
-    id: "security",
-    label: "Security",
-    description: "The Security feed, cameras and their events, the network and the devices on it.",
-    icon: "shield-check",
-    // WARP-2977 — /security (the command center: incidents, the feed, the
-    // site mode, and its Areas and Settings children) leads, as it does in
-    // the sidebar.
-    navHrefs: ["/security", "/cameras", "/events", "/network", "/devices", "/integrations"],
-    // WARP-2978 (ADR-059 P3 §8, D38) — the home leads with what needs
-    // attention. New profiles only: a saved profile keeps its own list
-    // (DS-001 — the owner adds the card).
-    homeWidgets: [
-      { widget: "security-incidents", size: "m" },
-      { widget: "cameras", size: "m" },
-      { widget: "quick-links", size: "m" },
-      { widget: "members", size: "s" },
-    ],
-    // WARP-2978 — the tile counts the open alerts (P3 route 17).
-    headline: "open_incidents",
-  },
   {
     id: "sales",
     label: "Sales",

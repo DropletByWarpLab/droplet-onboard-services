@@ -53,7 +53,7 @@
  *     the ones they are a member of for everyone else.
  *   · Whole business is the DEFAULT for everyone. A first draft made a
  *     non-admin member's shell their department by default; the moment an
- *     owner set up a Security profile, a family member in Security would have
+ *     owner set up an IT profile, a family member in IT would have
  *     lost Files, Email and every other destination the profile didn't list —
  *     a narrowing nobody chose. Arranging must be opt-in for the person
  *     arranged.
@@ -411,9 +411,9 @@ export function ActiveDepartmentProvider({ children }: { children: React.ReactNo
   //
   // Applied once per ARRIVAL at a /d/<slug> URL, not on every change of the
   // stored slug. Otherwise picking "Whole business" while standing on
-  // /d/security is undone on the very next render: the stored slug becomes
-  // null while the pathname still reads /d/security (the router has not moved
-  // yet), and the effect would put Security straight back.
+  // /d/sales is undone on the very next render: the stored slug becomes
+  // null while the pathname still reads /d/sales (the router has not moved
+  // yet), and the effect would put Sales straight back.
   //
   // An arrival is a pick like any other (rule 4): it is PUT, and an answer
   // from the box that was already on its way does not undo it.

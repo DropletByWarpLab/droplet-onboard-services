@@ -263,7 +263,7 @@ function normalizeGrants(args: {
   mayOperateLocks: boolean;
 }): NormalizedGrants {
   // `null` from the clamp = this starting point may hold NO grant on the module
-  // (security below family, doors below admin): the row is not written, exactly
+  // (crm, projects and money below family): the row is not written, exactly
   // as an unheldable connector grant is not (below).
   const featureGrants = args.featureGrants.flatMap((g) => {
     const level = clampLevel(args.startingPoint, g.moduleId, g.level);
@@ -330,7 +330,7 @@ function serializeAccessRole(row: RoleWithMeta, layers: ToolLayers) {
     peopleCount: row._count.users,
     // The same clamp `normalizeGrants` applies at write time, and the resolver at
     // read time (effective-access.service): a row saved before a floor existed
-    // (a Guest-based role's security:view) is inert, so the list must not show it
+    // (a Guest-based role's crm:view) is inert, so the list must not show it
     // as reach. Nothing is rewritten; `null` = the tier may hold no grant.
     // The tier here is the role's `startingPoint`; the resolver clamps by the
     // PERSON's tier. They agree only because assigning a role writes

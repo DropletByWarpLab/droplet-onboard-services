@@ -14,8 +14,8 @@ const PAGES: DashboardPage[] = [
   { href: "/network", label: "Network", section: "Systems", keywords: ["wifi"] },
   { href: "/voice", label: "Voice", section: "Systems › Network" },
   { href: "/settings", label: "Settings", section: "Admin" },
-  { href: "/security/zones", label: "Areas", section: "Systems › Security" },
-  { href: "/security/patterns", label: "Patterns", section: "Systems › Security" },
+  { href: "/files/recents", label: "Recent", section: "Work › Files" },
+  { href: "/files/shared", label: "Shared", section: "Work › Files" },
 ];
 
 function ctx(dashboardPages?: unknown): ToolContext {
@@ -67,14 +67,14 @@ describe("open_dashboard_page", () => {
   });
 
   it("hands the candidates back on a near tie so the model can ask", async () => {
-    const r = await openDashboardPage.handler({ page: "security" }, ctx(PAGES));
+    const r = await openDashboardPage.handler({ page: "files" }, ctx(PAGES));
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.error.code).toBe("AMBIGUOUS_PAGE");
       const { candidates } = r.error.details as { candidates: { href: string }[] };
       expect(candidates.map((c) => c.href).sort()).toEqual([
-        "/security/patterns",
-        "/security/zones",
+        "/files/recents",
+        "/files/shared",
       ]);
     }
   });

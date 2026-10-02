@@ -62,9 +62,8 @@ export const REPEATABLE_READ_TX = { isolationLevel: "RepeatableRead" } as const;
 /**
  * READ COMMITTED — for COMPARE-AND-SET writes on a version column.
  *
- * WARP-2977 P2b (the Security site mode, opening hours and areas). Every
- * write there is `updateMany({ where: { id, version: expected }, data: {
- * …, version: { increment: 1 } } })` and reads its `count`: 1 = this writer
+ * WARP-2977 P2b. Every such write is `updateMany({ where: { id, version:
+ * expected }, data: { …, version: { increment: 1 } } })` and reads its `count`: 1 = this writer
  * won, 0 = somebody else moved the row first (a 409, or a skipped tick).
  * The CAS row lock is the serialisation point, and under READ COMMITTED
  * Postgres re-evaluates the `version` predicate against the row a concurrent
@@ -82,10 +81,10 @@ export const REPEATABLE_READ_TX = { isolationLevel: "RepeatableRead" } as const;
  * reason as the other two: every `$transaction` call site states its level.
  *
  * REQUIRED for any transaction that appends to the audit chain in-tx
- * (`appendActivityRowInTx`, `recordActivityInTx`, `auditSecurityInTx`): the
+ * (`appendActivityRowInTx`, `recordActivityInTx`): the
  * append reads the chain tail after waiting for the chain lock, and only READ
  * COMMITTED gives that read a fresh snapshot. The append checks the level and
- * throws on anything else — so a Security write that audits can NEVER use
+ * throws on anything else — so a write that audits can NEVER use
  * SERIALIZABLE_TX or REPEATABLE_READ_TX. Order inside the callback: run every
  * CAS / row-locking write FIRST, then the audits (`Promise.all` over the
  * audits only, or one at a time) — never a CAS after any audit in the same

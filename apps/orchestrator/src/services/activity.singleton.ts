@@ -104,7 +104,7 @@ export async function recordActivity(
  * callback: it inverts the lock order against every other audited writer and
  * Postgres answers with a deadlock. After the audits, NOTHING else may run in
  * the callback — above all no global-client audit (`recordActivity`,
- * `getActivityRecorder().record`, `auditSecuritySystem`): that waits on this
+ * `getActivityRecorder().record`): that waits on this
  * same lock from another connection until the transaction times out, and the
  * change is lost.
  *
