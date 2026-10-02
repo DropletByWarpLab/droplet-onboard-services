@@ -388,8 +388,8 @@ describe("doors module — ADR-055 (ships dark)", () => {
   it("is registered as `doors` — never `access`, which is ADR-032's RBAC", () => {
     expect(doors()).toBeDefined();
     expect(doors().routePrefixes).toEqual(["/api/doors"]);
-    // No tool domain in P4a: the two read tools, and the domain that claims
-    // them, are P4b's.
+    // No tool domain yet: the two read tools, and the domain that claims them,
+    // wait on WARP-2972 (module gating does not reach the chat pool).
     expect(doors().toolDomains).toEqual([]);
     expect(MODULES.some((m) => (m.id as string) === "access")).toBe(false);
     for (const m of MODULES) {
@@ -397,11 +397,11 @@ describe("doors module — ADR-055 (ships dark)", () => {
     }
   });
 
-  it("is off by default and needs no dashboard page yet", () => {
+  it("is off by default, and its one dashboard page is /doors", () => {
     expect(doors().defaultEnabled).toBe(false);
     expect(doors().core).toBe(false);
-    // P4b adds /doors. Until then a nav entry would point at nothing.
-    expect(doors().navHrefs).toEqual([]);
+    // P4b's page. The dashboard's nav gates it on this module (nav-config.ts).
+    expect(doors().navHrefs).toEqual(["/doors"]);
   });
 
   it("is ABSENT when DOORS_ENABLED is off, and present when it is on", () => {

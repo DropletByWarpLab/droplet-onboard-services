@@ -331,15 +331,18 @@ export const MODULES: readonly ModuleDef[] = [
     // `module_disabled`, the module cannot be switched on in Settings, and it
     // is not listed under Features. Absent, not empty.
     //
-    // `navHrefs: []` — there is no dashboard page until P4b, and a nav entry
-    // pointing at nothing would be worse than none (the `docs` / `contacts`
-    // shape). It is in no BUSINESS_TYPES preset for the same reason.
+    // `navHrefs: ["/doors"]` — the dashboard page arrived with P4b, and the
+    // nav gates it on this module, so it is absent from every nav surface
+    // while the flag is off. It is in no BUSINESS_TYPES preset: a box that
+    // wants doors turns the flag on.
     //
-    // No tool domain yet: the two read-only chat tools are P4b's, and the
-    // `doors` domain is claimed here in the change that adds them (WARP-2742).
+    // No tool domain yet: the two read-only chat tools wait on WARP-2972
+    // (module gating does not reach the chat pool for an owner or a role-less
+    // user), and the `doors` domain is claimed in the change that adds them
+    // (WARP-2742).
     id: "doors", label: "Doors",
     description: "The doors this box knows about, and the log of what happened at them.",
-    category: "operations", routePrefixes: ["/api/doors"], navHrefs: [],
+    category: "operations", routePrefixes: ["/api/doors"], navHrefs: ["/doors"],
     toolDomains: [], core: false, defaultEnabled: false,
     // Absent from Settings → Features while the flag is off: a product decision
     // still open (AC-001) is not shown to a customer who was not offered it.

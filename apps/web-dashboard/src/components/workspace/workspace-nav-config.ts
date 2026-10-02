@@ -143,6 +143,9 @@ export const SPACES: SpaceDef[] = [
       "/security",
       "/cameras",
       "/events",
+      // ADR-055 (P4b). Gated exactly as the sidebar gates it: the `doors`
+      // module (absent, not just off, until DOORS_ENABLED) and owner/admin.
+      "/doors",
       "/network",
       "/devices",
       "/voice",

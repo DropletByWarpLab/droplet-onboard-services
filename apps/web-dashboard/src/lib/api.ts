@@ -9760,6 +9760,62 @@ export function putAlertRouting(userId: string, body: AlertRoutingSetBody): Prom
   );
 }
 
+// ── ADR-055 P4b: the doors page (P4a routes 1–5) ──
+// Reads are owner/admin; writes are the owner's alone. The transport is
+// `securityFetch` above (its name is historical: authFetch's token refresh
+// plus typed errors, `.code` and `.status`), so a 403 is distinguishable from
+// an outage. Render a failure with `translateError(err, "doors")`.
+// No route deletes a door: retiring one keeps its events.
+
+import type {
+  DoorCreateBody,
+  DoorEventsPage,
+  DoorPatchBody,
+  DoorView,
+  DoorsResponse,
+} from "./types";
+
+export const DOORS_PATH = "/api/doors";
+
+/** 1 — the doors, each with its newest position report. Retired doors only when asked. */
+export function getDoors(opts: { includeRetired?: boolean } = {}): Promise<DoorsResponse> {
+  return securityFetch<DoorsResponse>(`${BASE}${DOORS_PATH}${opts.includeRetired ? "?include=retired" : ""}`);
+}
+
+export interface DoorEventsQuery {
+  cursor?: string | null;
+  /** 1–200; the box defaults to 50. */
+  limit?: number;
+}
+
+export function doorEventsPath(q: DoorEventsQuery = {}): string {
+  const p = new URLSearchParams();
+  if (q.limit) p.set("limit", String(q.limit));
+  if (q.cursor) p.set("cursor", q.cursor);
+  const qs = p.toString();
+  return `${DOORS_PATH}/events${qs ? `?${qs}` : ""}`;
+}
+
+/** 2 — what happened at them, newest first, cursor-paged. */
+export function getDoorEvents(q: DoorEventsQuery = {}): Promise<DoorEventsPage> {
+  return securityFetch<DoorEventsPage>(`${BASE}${doorEventsPath(q)}`);
+}
+
+/** 3 (owner) — 201. */
+export function createDoor(body: DoorCreateBody): Promise<{ door: DoorView }> {
+  return securityFetch<{ door: DoorView }>(`${BASE}${DOORS_PATH}`, jsonBody("POST", body));
+}
+
+/** 4 (owner). 409 DOOR_RETIRED on a retired door. */
+export function patchDoor(id: string, body: DoorPatchBody): Promise<{ door: DoorView }> {
+  return securityFetch<{ door: DoorView }>(`${BASE}${DOORS_PATH}/${encodeURIComponent(id)}`, jsonBody("PATCH", body));
+}
+
+/** 5 (owner) — retiring twice is not an error. There is no way back from the dashboard. */
+export function retireDoor(id: string): Promise<{ door: DoorView }> {
+  return securityFetch<{ door: DoorView }>(`${BASE}${DOORS_PATH}/${encodeURIComponent(id)}/retire`, jsonBody("POST", {}));
+}
+
 // ── WARP-2804: notification acknowledgement (routes N1–N4) ──
 // A person reads and acknowledges their OWN notifications. The transport is
 // `securityFetch` above — authFetch (token refresh, the session cookie) with

@@ -229,6 +229,8 @@ describe("ChatHistoryPanel", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: /delete/i }));
     fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
     expect(await screen.findByText("This chat started a background task")).toBeInTheDocument();
+    // The confirm dialog's exit animation can still hold its own Cancel in the DOM under load.
+    await waitFor(() => expect(screen.queryByText("Delete this chat?")).not.toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
     expect(deleteConversationMock).toHaveBeenCalledTimes(1);
     expect(screen.getByText("chat-a")).toBeInTheDocument();
