@@ -411,7 +411,7 @@ vi.mock("@prisma/client", () => {
     deviceGroup,
   };
   return {
-    PrismaClient: vi.fn(() => mockPrisma),
+    PrismaClient: vi.fn(function () { return mockPrisma; }),
     Prisma: { PrismaClientKnownRequestError },
   };
 });

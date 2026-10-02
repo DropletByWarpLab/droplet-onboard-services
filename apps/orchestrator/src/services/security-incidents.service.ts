@@ -81,6 +81,7 @@ import type { SecurityHealthRow } from "./security-events.service.js";
 import type { EffectiveAccessResolver } from "../middleware/feature-gate.js";
 import {
   buildZoneIndex,
+  isLockLinkRef,
   loadActiveLinks,
   matchAreasForEvent,
   parseLinkRef,
@@ -716,16 +717,21 @@ async function activityReason(
   if (event.kind !== "camera_offline" || event.camera === null) return null;
   // Review #2418: offline long enough and closed/away at the drop, BEFORE any sighting is read.
   if (!dropCountsForActivity(event, onlines, now, ctx.timeline)) return null;
+  // A door-lock link has no camera: it puts no one "in" an area for this rule (D21).
+  const cameraOfLink = (l: Pick<ActiveZoneLink, "sourceKind" | "sourceRef">): string | undefined => {
+    const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
+    return parsed && !isLockLinkRef(parsed) ? parsed.camera : undefined;
+  };
   const personAreas = new Map<string, string>();
   for (const l of ctx.links) {
-    if (l.setBy === "person" && parseLinkRef(l.sourceKind, l.sourceRef)?.camera === event.camera) personAreas.set(l.zoneId, l.zoneName);
+    if (l.setBy === "person" && cameraOfLink(l) === event.camera) personAreas.set(l.zoneId, l.zoneName);
   }
   if (personAreas.size === 0) return null;
   const cameras = [
     ...new Set(
       ctx.links
         .filter((l) => l.setBy === "person" && personAreas.has(l.zoneId))
-        .map((l) => parseLinkRef(l.sourceKind, l.sourceRef)?.camera)
+        .map(cameraOfLink)
         .filter((c): c is string => c !== undefined),
     ),
   ].sort();

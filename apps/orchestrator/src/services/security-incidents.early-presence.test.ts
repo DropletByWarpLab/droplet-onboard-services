@@ -361,9 +361,10 @@ describe("a camera-limited viewer's \"still happening\" while a person holds the
     userId: MARIA,
     visibleCameras: new Set([camera]),
     mayReadThreats: false,
+    mayReadLocks: false,
     ownerOrAdmin: false,
   });
-  const owner: IncidentViewer = { userId: "u-owner", visibleCameras: "all", mayReadThreats: true, ownerOrAdmin: true };
+  const owner: IncidentViewer = { userId: "u-owner", visibleCameras: "all", mayReadThreats: true, mayReadLocks: true, ownerOrAdmin: true };
 
   /**
    * The Stock room, watched by `back` and `front`: someone passed `front` a

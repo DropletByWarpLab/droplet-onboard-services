@@ -61,6 +61,8 @@ describe("stdio roundtrip", () => {
   let transport: StdioClientTransport;
   let orchestratorMock: Server;
   let orchestratorHits = 0;
+  // WARP-2972 — what the child asked the orchestrator's verdict route, and for whom.
+  const verdictAsks: Array<string | undefined> = [];
 
   beforeAll(async () => {
     // Stand up a tiny HTTP fake at a free port so the orchestrator-backed
@@ -69,6 +71,17 @@ describe("stdio roundtrip", () => {
     // depending on a live orchestrator. ORCHESTRATOR_URL is the knob the
     // mcp-server reads for that target.
     orchestratorMock = createHttpServer((req, res) => {
+      // WARP-2972 — the module verdict route the child asks before it
+      // dispatches a tool (GET /api/modules/tool-verdict). This fake withholds
+      // the cameras module, so the roundtrip below proves the wire contract end
+      // to end: the built binary, over real stdio, against the route's JSON.
+      if (req.method === "GET" && req.url === "/api/modules/tool-verdict") {
+        verdictAsks.push(req.headers["x-nextcloud-user"] as string | undefined);
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ withheldDomains: ["cameras"] }));
+        return;
+      }
       if (req.method === "GET" && req.url === "/api/network/status") {
         orchestratorHits++;
         res.statusCode = 200;
@@ -173,6 +186,24 @@ describe("stdio roundtrip", () => {
     const parsed = JSON.parse(blocks[0].text);
     expect(parsed).toEqual(MOCK_STATUS_PAYLOAD);
     expect(orchestratorHits).toBeGreaterThan(0);
+  });
+
+  // WARP-2972 — module gating, end to end over the real stdio child.
+  it("tools/call refuses a tool of a withheld module, naming the person it asked about", async () => {
+    const res = await client.callTool({
+      name: "list_cameras",
+      arguments: {},
+      _meta: { userId: "carol" },
+    });
+    expect(res.isError).toBe(true);
+    const blocks = res.content as { type: string; text: string }[];
+    expect(JSON.parse(blocks[0].text).error.code).toBe("module_disabled");
+    expect(verdictAsks).toContain("carol");
+  });
+
+  it("tools/list on the stdio child stays the raw registry (the orchestrator gates its pool on top)", async () => {
+    const res = await client.listTools();
+    expect(res.tools.map((t) => t.name)).toContain("list_cameras");
   });
 
   // WARP-1144 regression guard: list_drives / list_storage_pools dispatch

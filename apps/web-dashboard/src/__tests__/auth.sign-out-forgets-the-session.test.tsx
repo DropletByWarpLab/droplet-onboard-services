@@ -73,6 +73,7 @@ function event(summary: string): SecurityEvent {
     summary,
     frigateEventId: null,
     zones: [],
+    observed: "live",
   };
 }
 const FEED: Record<Who, SecurityEventsPage> = {

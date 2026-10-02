@@ -15,6 +15,7 @@ import { RerankerClient } from "./reranker.client.js";
 import { readDocumentText, searchHybrid } from "./file-search.service.js";
 import { resolveChunkOwnerIds } from "./chunk-owner.js";
 import { createMatterController } from "./matter.controller.js";
+import { createModuleVerdictSource } from "./module-verdict.js";
 
 // WARP-229: FIPS 140-3 boot self-test. Same gating as the orchestrator
 // — `DROPLET_FIPS_REQUIRED` env, default-on in production. The
@@ -340,6 +341,14 @@ async function main(): Promise<void> {
     },
   };
 
+  // WARP-2972 — ONE verdict source for the process, shared by every request
+  // (the HTTP transport builds a server per request; the cache must outlive
+  // them). The orchestrator client carries the service bearer, so this asks
+  // GET /api/modules/tool-verdict as `_service:mcp`. Both transports below MUST
+  // pass it — server-module-gate.test.ts pins that — because a server built
+  // without one withholds nothing.
+  const moduleVerdict = createModuleVerdictSource({ http: createHttpClient("orchestrator") });
+
   // Disconnect cleanly when the parent SIGTERMs us. Without this the
   // PrismaClient connection pool would leak across the stdio child boundary,
   // and the gRPC channel to ai-gateway would stay half-open.
@@ -363,7 +372,7 @@ async function main(): Promise<void> {
     // stdio: one server per process, deliberately the trusted in-process
     // orchestrator child. Trust is declared explicitly via the
     // `local-trusted` posture (WARP-563) — never inferred from absent claims.
-    const server = createServer(deps, { kind: "local-trusted" });
+    const server = createServer(deps, { kind: "local-trusted" }, { moduleVerdict });
     await startStdio(server);
   } else {
     // http: per-request server with JWT-derived claims. JWT_SECRET is
@@ -382,7 +391,8 @@ async function main(): Promise<void> {
       // http: untrusted network transport. verifyJwt produces verified claims
       // for every request; wrap them in the explicit `authenticated` posture
       // so RBAC is always applied (WARP-563).
-      buildServer: (claims) => createServer(deps, { kind: "authenticated", claims }),
+      buildServer: (claims) =>
+        createServer(deps, { kind: "authenticated", claims }, { moduleVerdict }),
     });
     console.error(`mcp-server listening on :${port} (http, JWT-auth)`);
   }

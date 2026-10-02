@@ -197,15 +197,20 @@ export interface BaselineJobDeps {
   clock?: () => number;
 }
 
-/** The live ingest + tracker state, as coverage reads it. */
-function liveObservation(): Omit<CoverageObservation, "stats"> {
+/**
+ * The live ingest + tracker state, as coverage reads it. Write health is per
+ * source (WARP-2977 P2b-2); coverage vouches for DETECTIONS, so it reads
+ * Frigate's — a lock or mode save never clears a failing detection save, and
+ * a failing lock save never closes a camera's span.
+ */
+export function liveObservation(): Omit<CoverageObservation, "stats"> {
   const ingest = securityIngestHealthState();
   return {
     ingest: {
       frigateSubscribed: ingest.frigateSubscribed,
       frigateSubscribedAt: ingest.frigateSubscribedAt,
-      lastRecordedAt: ingest.lastRecordedAt,
-      lastWriteError: ingest.lastWriteError,
+      lastRecordedAt: ingest.lastRecordedAt.get("frigate") ?? null,
+      lastWriteError: ingest.lastWriteError.get("frigate") ?? null,
     },
     readings: securityStatusSnapshot(),
   };

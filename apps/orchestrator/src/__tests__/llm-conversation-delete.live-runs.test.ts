@@ -23,7 +23,7 @@ const { deleteConversationForUser, cancelAgentRun } = vi.hoisted(() => ({
   cancelAgentRun: vi.fn(),
 }));
 vi.mock("../services/chat-persistence.service.js", () => ({
-  ChatPersistenceService: vi.fn().mockImplementation(() => ({ deleteConversationForUser })),
+  ChatPersistenceService: vi.fn().mockImplementation(function () { return { deleteConversationForUser }; }),
 }));
 vi.mock("../services/agent-run-worker.service.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../services/agent-run-worker.service.js")>()),

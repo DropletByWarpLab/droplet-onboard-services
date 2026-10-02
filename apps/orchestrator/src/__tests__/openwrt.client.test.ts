@@ -354,6 +354,13 @@ describe("openwrt.client routingFetch", () => {
 describe("openwrt.client public wrappers", () => {
   const realFetch = global.fetch;
 
+  // Vitest 4's restoreAllMocks() only restores vi.spyOn spies — it no longer
+  // clears a vi.fn()'s call history, so the shared noSleep must be cleared
+  // here or a retry recorded by an earlier describe leaks into these asserts.
+  beforeEach(() => {
+    noSleep.mockClear();
+  });
+
   afterEach(() => {
     global.fetch = realFetch;
     vi.restoreAllMocks();

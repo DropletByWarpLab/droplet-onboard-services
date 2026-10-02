@@ -3,6 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../src/server.js";
 import type { ContextDeps } from "../src/context.js";
+import { NO_MODULE_GATING } from "../src/module-verdict.js";
 
 /**
  * Per-call session context plumbed via MCP `_meta.ncToken`.
@@ -42,7 +43,7 @@ async function connectStdio(deps: ContextDeps) {
   // trustedPrincipal: true, so file tools (which are read-only and not
   // gated by RBAC) reach the handler regardless. This matches how the
   // orchestrator's in-proc singleton spawns the child.
-  const server = createServer(deps, { kind: "local-trusted" });
+  const server = createServer(deps, { kind: "local-trusted" }, { moduleVerdict: NO_MODULE_GATING });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client(
     { name: "meta-nctoken-test", version: "0.0.1" },
@@ -125,7 +126,7 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
       httpFactory: () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }),
       searchHybrid: searchSpy,
     };
-    const server = createServer(deps, { kind: "local-trusted" });
+    const server = createServer(deps, { kind: "local-trusted" }, { moduleVerdict: NO_MODULE_GATING });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "meta-userid-test", version: "0.0.1" }, { capabilities: {} });
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -156,7 +157,7 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
       httpFactory: () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }),
       searchHybrid: searchSpy,
     };
-    const server = createServer(deps, { kind: "local-trusted" });
+    const server = createServer(deps, { kind: "local-trusted" }, { moduleVerdict: NO_MODULE_GATING });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "meta-userid-test", version: "0.0.1" }, { capabilities: {} });
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -233,7 +234,7 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
       httpFactory: () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }),
       searchHybrid: searchSpy,
     };
-    const server = createServer(deps, { kind: "local-trusted" });
+    const server = createServer(deps, { kind: "local-trusted" }, { moduleVerdict: NO_MODULE_GATING });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "meta-enh-test", version: "0.0.1" }, { capabilities: {} });
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -273,7 +274,7 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
       httpFactory: () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }),
       searchHybrid: searchSpy,
     };
-    const server = createServer(deps, { kind: "local-trusted" });
+    const server = createServer(deps, { kind: "local-trusted" }, { moduleVerdict: NO_MODULE_GATING });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "meta-enh-bad-test", version: "0.0.1" }, { capabilities: {} });
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -307,7 +308,7 @@ describe("MCP _meta.ncToken propagation (stdio)", () => {
       httpFactory: () => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() }),
       searchHybrid: searchSpy,
     };
-    const server = createServer(deps, { kind: "local-trusted" });
+    const server = createServer(deps, { kind: "local-trusted" }, { moduleVerdict: NO_MODULE_GATING });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "meta-enh-array-test", version: "0.0.1" }, { capabilities: {} });
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
