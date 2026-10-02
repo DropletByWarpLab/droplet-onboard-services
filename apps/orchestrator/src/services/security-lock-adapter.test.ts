@@ -14,7 +14,7 @@
  * elsewhere in the repo are not what crosses the bridge.
  */
 import { EventEmitter } from "node:events";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from "vitest";
 import {
   LOCK_READINGS,
   MATTER_DOOR_LOCK_CLUSTER_ID,
@@ -97,8 +97,10 @@ function clock(start = T0) {
   };
 }
 
-function quietLogger(): LockLogger & { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn> } {
-  return { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+type LogFn = LockLogger["info"];
+
+function quietLogger(): LockLogger & { info: Mock<LogFn>; warn: Mock<LogFn>; error: Mock<LogFn> } {
+  return { info: vi.fn<LogFn>(), warn: vi.fn<LogFn>(), error: vi.fn<LogFn>() };
 }
 
 interface StoredRow {
