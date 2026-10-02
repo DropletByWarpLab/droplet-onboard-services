@@ -51,11 +51,13 @@ describe.skipIf(!RUN)("SecurityEvent lock-baseline backfill — real-Postgres (W
     await prisma.$executeRawUnsafe(`DELETE FROM "SecurityEvent" WHERE "dedupeKey" LIKE 'warp2977fix:%'`);
   }
 
+  // A real lock row's shape (SecurityEvent_lock_shape, 20260925050100): no
+  // camera, exactly one lock label, sourceRef `matter:<node>/<endpoint>`.
   async function insertLockRow(dedupeKey: string) {
     await prisma.$executeRawUnsafe(
       `INSERT INTO "SecurityEvent"
-         ("source", "kind", "severity", "sourceRef", "dedupeKey", "labels", "cameraZones", "startedAt", "summary", "baseline")
-       VALUES ('matter_lock', 'lock_state', 'info', 'front-door', $1, '{}', '{}', now(), 'Front door locked', false)`,
+         ("source", "kind", "severity", "camera", "sourceRef", "dedupeKey", "labels", "cameraZones", "startedAt", "summary", "baseline")
+       VALUES ('matter_lock', 'lock_state', 'info', NULL, 'matter:2977999901/1', $1, '{locked}', '{}', now(), 'Front door locked', false)`,
       dedupeKey,
     );
   }
