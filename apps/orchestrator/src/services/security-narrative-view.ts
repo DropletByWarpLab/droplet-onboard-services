@@ -16,16 +16,16 @@
  * on her own cameras — the spec's per-incident audience, narrowed to viewers
  * who see everything. It never widens what anyone sees.
  *
- * Then the incident-level checks (`narrativeIncidentVisible`), unreachable
- * for today's admitted viewers — who see every camera and every reason — and
- * kept as the second fence for when the viewer rule or reasonVisibleTo's lock
- * clause widens (P4 PR-4's mayReadLocks):
+ * Then the incident-level checks (`narrativeIncidentVisible`). For a camera
+ * or threat they are the second fence behind the viewer rule; for a door lock
+ * (P4 PR-4, DS-019) they are the rule itself: an admitted viewer without
+ * `mayReadLocks` (Devices view) never gets the summary of an incident whose
+ * audience or reasons name a lock:
  *   · the view is not PARTIAL (P3's rule: no top-severity reason hidden);
  *   · EVERY reason passes THE reason-visibility rule (`reasonVisibleTo`,
  *     lib/security-reason-visibility.ts: its evidence camera, its related
- *     camera, its related lock — P4 PR-4 swaps the lock clause there for
- *     `mayReadLocks`, DS-019, and this follows), with the incident's scope
- *     rule for a camera-less reason;
+ *     camera, its related lock — `mayReadLocks`, DS-019, P4 PR-4), with
+ *     the incident's scope rule for a camera-less reason;
  *   · every camera of its audience (`narrativeAudience.cameras`) and of the
  *     incident — the union, so a Regenerate in flight or a state with no
  *     text yet is judged against the incident as it is now — and a named

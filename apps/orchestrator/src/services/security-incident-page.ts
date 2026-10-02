@@ -61,8 +61,9 @@ export async function projectedIncidentPage(
   // evidence (CHECK SecurityIncidentReason_site_evidence) that §6.2 groups only
   // into a site scope, where `reasonVisible` shows it too.
   // WARP-2979 — `reasonVisibleTo`'s related-camera and related-lock clauses (never NULL: relatedLock is NOT NULL,
-  // and the camera clause is guarded by IS NULL).
-  const visReason = Prisma.sql`((r."evidenceCamera" = ANY(${vis}::text[]) OR r."evidenceCamera" IS NULL) AND (r."relatedCamera" IS NULL OR r."relatedCamera" = ANY(${vis}::text[])) AND r."relatedLock" = false)`;
+  // and the camera clause is guarded by IS NULL). P4 PR-4 (DS-019): a related lock only with `mayReadLocks`.
+  const locks = v.mayReadLocks ? Prisma.empty : Prisma.sql` AND r."relatedLock" = false`;
+  const visReason = Prisma.sql`((r."evidenceCamera" = ANY(${vis}::text[]) OR r."evidenceCamera" IS NULL) AND (r."relatedCamera" IS NULL OR r."relatedCamera" = ANY(${vis}::text[]))${locks})`;
   const reasons = (extra: Prisma.Sql) =>
     Prisma.sql`EXISTS (SELECT 1 FROM "SecurityIncidentReason" r WHERE r."incidentId" = i."id" AND ${visReason}${extra})`;
   const someVisible = reasons(Prisma.empty);

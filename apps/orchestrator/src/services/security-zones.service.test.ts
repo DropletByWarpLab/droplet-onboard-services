@@ -856,17 +856,32 @@ describe("evidenceFor — Droplet's evidence only for a viewer who can see every
 
   it("everyone who sees both cameras gets it; a viewer missing either gets null", () => {
     expect(evidenceFor({ origin: "droplet", evidence }, everyone)).toEqual(evidence);
-    expect(evidenceFor({ origin: "droplet", evidence }, { visibleCameras: new Set(["front", "back"]) })).toEqual(evidence);
+    expect(evidenceFor({ origin: "droplet", evidence }, { visibleCameras: new Set(["front", "back"]), mayReadLocks: false })).toEqual(evidence);
     expect(evidenceFor({ origin: "droplet", evidence }, onlyFront)).toBeNull();
-    expect(evidenceFor({ origin: "droplet", evidence }, { visibleCameras: new Set(["back"]) })).toBeNull();
+    expect(evidenceFor({ origin: "droplet", evidence }, { visibleCameras: new Set(["back"]), mayReadLocks: false })).toBeNull();
   });
 
-  it("null for a person's link, without a scope, for evidence that does not parse, and for a lock it names (PR-4)", () => {
+  it("null for a person's link, without a scope, and for evidence that does not parse", () => {
     expect(evidenceFor({ origin: "person", evidence }, everyone)).toBeNull();
     expect(evidenceFor({ origin: "droplet", evidence }, null)).toBeNull();
     expect(evidenceFor({ origin: "droplet", evidence: { ...evidence, v: 2 } }, everyone)).toBeNull();
-    const lock = { ...evidence, kind: "lock_camera", reverse: null, chosen: "lock", wholeK: null, anchor: { ...evidence.anchor, sourceKind: "lock", sourceRef: "matter:4/1" } };
-    expect(evidenceFor({ origin: "droplet", evidence: lock }, everyone)).toBeNull();
+  });
+
+  it("P4 PR-4 (DS-019): evidence that names a lock needs mayReadLocks too — the lock is presence data, and the camera grant does not decide it", () => {
+    // Anchored on the lock, the candidate the front camera's porch.
+    const lock = { ...evidence, kind: "lock_camera", reverse: null, anchor: { ...evidence.anchor, sourceKind: "lock", sourceRef: LOCK_A, label: "Back door lock" } };
+    expect(evidenceFor({ origin: "droplet", evidence: lock }, everyone)).toEqual(lock);
+    expect(evidenceFor({ origin: "droplet", evidence: lock }, frontAndLocks)).toEqual(lock);
+    // Every camera, but narrowed off Devices: no numbers.
+    expect(evidenceFor({ origin: "droplet", evidence: lock }, camerasOnly)).toBeNull();
+    // The lock, but not the camera it names.
+    expect(evidenceFor({ origin: "droplet", evidence: lock }, { visibleCameras: new Set(["back"]), mayReadLocks: true })).toBeNull();
+    // A lock CANDIDATE (a camera anchor): the same rule.
+    const lockCandidate = { ...evidence, kind: "lock_camera", reverse: null, chosen: "lock", wholeK: null, candidate: { sourceKind: "lock", sourceRef: LOCK_A, label: "Back door lock" } };
+    expect(evidenceFor({ origin: "droplet", evidence: lockCandidate }, { visibleCameras: new Set(["back"]), mayReadLocks: true })).toEqual(lockCandidate);
+    expect(evidenceFor({ origin: "droplet", evidence: lockCandidate }, { visibleCameras: new Set(["back"]), mayReadLocks: false })).toBeNull();
+    // A lock ref that is not the canonical form is malformed: hidden from everyone.
+    expect(evidenceFor({ origin: "droplet", evidence: { ...lock, anchor: { ...lock.anchor, sourceRef: "matter:04660/1" } } }, everyone)).toBeNull();
   });
 });
 

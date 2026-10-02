@@ -1046,6 +1046,7 @@ export function eventRow(over: Row = {}): Row {
     startedAt,
     endedAt: new Date(startedAt.getTime() + 20_000),
     summary: "Person seen by back",
+    baseline: false,
     createdAt: new Date(startedAt.getTime() + 21_000),
     ...over,
   };

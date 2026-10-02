@@ -11,10 +11,11 @@
  * (`securityScopeForPerson`). The human routes reach it through
  * `securityViewerScope`, which only builds the person from `req`; P4's chat
  * tools reach it with the acting person their own router resolved (by
- * username, then id), through `securityScopeWithoutLocks` — the same cameras
- * and threats, door locks off — so a tool answer and a dashboard page can
- * never disagree about what one person may see of cameras, and the tools
- * never see more than the page.
+ * username, then id) — through `securityScopeWithoutLocks` (the same cameras
+ * and threats, door locks off) on the tools that do not speak of locks, and
+ * directly on the two that do (P4 PR-4: A3's lock changes, A4's lock links) —
+ * so a tool answer and a dashboard page can never disagree about what one
+ * person may see, and the tools never see more than the page.
  *
  *   · `visibleCameras` — CameraAccessGrant, via camera-access.service. A
  *     camera outside the grant is ABSENT (no row, no count, no area that is
@@ -37,8 +38,9 @@ import {
   resolveEffectiveAccessForRequest,
   type EffectiveAccessResolver,
 } from "../middleware/feature-gate.js";
-import { FEATURE_LEVEL_RANK, type FeatureLevel } from "./access-catalog.js";
-import { resolveEffectiveAccess, type EffectiveAccessResult } from "./effective-access.service.js";
+import { resolveEffectiveAccess } from "./effective-access.service.js";
+import { locksReadableWith } from "./security-lock-access.js";
+import type { FeatureLevel } from "./access-catalog.js";
 import type { SecurityLockReader } from "./security-lock-adapter.js";
 import type { OngoingSource } from "./security-inflight.js";
 
@@ -85,28 +87,13 @@ export function mayReadThreats(req: Pick<Request, "user">): boolean {
 }
 
 /**
- * WARP-2977 P2b-2 (DS-019) — may this person see door locks on the Security
- * surfaces? Devices (smart_home) at view or above in their resolved §9
- * catalog; the owner's catalog always holds it (the resolver's §3 bypass).
- *
- *   · resolved → exactly that entry. An admin narrowed off Devices is out.
- *   · unresolved (null: no local User row, a service principal, no
- *     principal) → owner/admin only. Fail closed.
- *   · the resolver throws → REJECTS. The caller answers 503; nothing guesses.
- */
-function locksReadable(access: EffectiveAccessResult | null, role: string | undefined): boolean {
-  if (!access) return role === "owner" || role === "admin";
-  const level = access.features.find((f) => f.moduleId === "smart_home")?.level;
-  return level !== undefined && FEATURE_LEVEL_RANK[level] >= FEATURE_LEVEL_RANK.view;
-}
-
-/**
- * `locksReadable` for one request's user. In production the module gate has
- * already resolved this request, and `resolveEffectiveAccessForRequest`
- * shares its memo, so this is one read.
+ * WARP-2977 P2b-2 (DS-019) — `locksReadableWith` for one request. A resolver
+ * that throws REJECTS: the caller answers 503; nothing guesses. (In
+ * production the module gate has already resolved this request, and
+ * `resolveEffectiveAccessForRequest` shares its memo, so this is one read.)
  */
 export async function mayReadLocksFor(req: Request, resolve?: EffectiveAccessResolver): Promise<boolean> {
-  return locksReadable(await resolveEffectiveAccessForRequest(req, resolve), req.user?.role);
+  return locksReadableWith(await resolveEffectiveAccessForRequest(req, resolve), req.user?.role);
 }
 
 /**
@@ -130,7 +117,7 @@ export interface SecurityPerson {
  *     `userId`; no role → nothing;
  *   · `mayReadThreats` — owner/admin;
  *   · `mayReadLocks` — Devices (smart_home) ≥ view in the person's resolved
- *     §9 catalog (`locksReadable`); `resolve` reads that catalog by `person.id`.
+ *     §9 catalog (`locksReadableWith`, the leaf rule); `resolve` reads that catalog by `person.id`.
  *
  * A grant lookup or resolver failure REJECTS (the caller answers 503, never
  * an unfiltered page).
@@ -143,14 +130,14 @@ export async function securityScopeForPerson(
   // The same "nothing to resolve" set as `resolveEffectiveAccessForRequest`: no id, or a service principal.
   const catalog = !person.id || person.role === "service" ? null : (resolve ?? resolveEffectiveAccess)(person.id);
   const [scope, access] = await Promise.all([securityScopeWithoutLocks(prisma, person), catalog]);
-  return { ...scope, mayReadLocks: locksReadable(access, person.role) };
+  return { ...scope, mayReadLocks: locksReadableWith(access, person.role) };
 }
 
 /**
  * `securityScopeForPerson` with door locks OFF (`mayReadLocks: false`), and no
  * resolver read: for a surface that does not speak of locks — the assistant's
- * chat tools (routes/security-assistant.ts) answer for cameras, and lock state
- * is presence data. Always the safe side of `securityScopeForPerson`, never
+ * A1, A2 and A5 (routes/security-assistant.ts) answer for cameras, and lock
+ * state is presence data. Always the safe side of `securityScopeForPerson`, never
  * wider; it is also where that function gets its cameras and threats from, so
  * the two cannot disagree about either.
  */

@@ -12,6 +12,14 @@
  * that are still unconsumed AND unexpired, and exactly one caller observes
  * count===1. Same single-use idiom as `claimRefreshRotation` (jwt.service)
  * and `UserInvite.acceptedAt` (invite-accept).
+ *
+ * Native handoff (RFC 8252): a NATIVE row (explicit `flowKind`) also carries
+ * the native app's redirect and PKCE challenge. The callback parks only a
+ * single-use CONSENT value on it (`parkConsent`, sha256 only); Continue on the
+ * consent page trades it for a one-time handoff code with a 60 s clock
+ * (`claimConsent`), Cancel burns it with no code (`declineConsent`), and
+ * `POST /sso/oidc/native/token` redeems that code once (`consumeHandoff`),
+ * all with the same conditional-claim idiom.
  */
 import type { PrismaClient, SsoLoginState } from "@prisma/client";
 
@@ -21,7 +29,7 @@ import type { SsoProvider } from "./sso-oidc.service.js";
  *  seconds; an abandoned flow must not be resumable minutes later. */
 export const SSO_LOGIN_STATE_TTL_SECONDS = 10 * 60;
 
-export interface CreateLoginStateInput {
+interface CreateLoginStateBase {
   provider: SsoProvider;
   state: string;
   nonce: string;
@@ -30,6 +38,22 @@ export interface CreateLoginStateInput {
   returnTo: string;
   ttlSeconds?: number;
 }
+
+/**
+ * BROWSER (the dashboard flow, the default) or NATIVE (RFC 8252 handoff for a
+ * native app: the callback parks a one-time code for the app's own redirect
+ * instead of setting cookies). The kind is written to an explicit column so
+ * the callback never infers it from a null redirect.
+ */
+export type CreateLoginStateInput =
+  | (CreateLoginStateBase & { flowKind?: "BROWSER" })
+  | (CreateLoginStateBase & {
+      flowKind: "NATIVE";
+      /** Loopback or droplet://sso/callback, validated upstream. */
+      nativeRedirectUri: string;
+      /** The app's PKCE S256 challenge (43-char base64url). */
+      nativeCodeChallenge: string;
+    });
 
 /** Persist a fresh login-state row. */
 export async function createLoginState(
@@ -45,6 +69,13 @@ export async function createLoginState(
       provider: input.provider,
       returnTo: input.returnTo,
       expiresAt: new Date(Date.now() + ttl * 1000),
+      ...(input.flowKind === "NATIVE"
+        ? {
+            flowKind: "NATIVE" as const,
+            nativeRedirectUri: input.nativeRedirectUri,
+            nativeCodeChallenge: input.nativeCodeChallenge,
+          }
+        : { flowKind: "BROWSER" as const }),
     },
   });
 }
@@ -76,6 +107,142 @@ export async function consumeLoginState(
   }
   // We won the claim; fetch the row to read its trusted fields.
   return prisma.ssoLoginState.findUnique({ where: { state } });
+}
+
+/**
+ * Read the row for `state` WITHOUT claiming it. The callback uses this only to
+ * learn the row's `flowKind` before its cookie check (a NATIVE flow has no
+ * browser cookie); the single-use claim is still `consumeLoginState`.
+ */
+export async function peekLoginState(
+  prisma: PrismaClient,
+  state: string,
+): Promise<SsoLoginState | null> {
+  return prisma.ssoLoginState.findUnique({ where: { state } });
+}
+
+/**
+ * One-time handoff code lifetime. The clock starts when the person presses
+ * Continue on the consent page (ADR-063 S5), not when the page is shown: the
+ * page itself lives as long as the state row (`SSO_LOGIN_STATE_TTL_SECONDS`).
+ */
+export const SSO_NATIVE_HANDOFF_TTL_SECONDS = 60;
+
+export interface ParkConsentInput {
+  /** sha256 (hex) of the single-use consent value embedded in the page. */
+  consentHash: string;
+  /** Local User.id the callback resolved. */
+  userId: string;
+}
+
+/**
+ * Bind a pending consent to a NATIVE row: the callback stores the hash of the
+ * page's single-use value and the person it resolved, and NO handoff code
+ * exists yet. The write is conditional on `flowKind = NATIVE` and on no code
+ * having been minted, so a browser row can never be turned into a handoff; a
+ * miss throws (the callback then fails closed with a 500, minting nothing).
+ */
+export async function parkConsent(
+  prisma: PrismaClient,
+  stateId: string,
+  input: ParkConsentInput,
+): Promise<void> {
+  const { count } = await prisma.ssoLoginState.updateMany({
+    where: { id: stateId, flowKind: "NATIVE", handoffCodeHash: null },
+    data: { nativeConsentHash: input.consentHash, handoffUserId: input.userId },
+  });
+  if (count !== 1) {
+    throw new Error("SSO consent: no NATIVE login-state row to attach the consent to");
+  }
+}
+
+/**
+ * The person pressed Continue: atomically trade the page's single-use consent
+ * value for a handoff code (`codeHash`, sha256 only) with a fresh 60 s clock.
+ * Returns the row (redirect, state, provider, the person) on success, or null
+ * if the value is unknown, already used (replay, a double click) or the state
+ * row has expired (the page's own lifetime). Same race-safe conditional claim
+ * as `consumeLoginState`: exactly one caller sees count===1, and the consent
+ * value is cleared by the claim so it can never mint a second code.
+ */
+export async function claimConsent(
+  prisma: PrismaClient,
+  consentHash: string,
+  codeHash: string,
+): Promise<SsoLoginState | null> {
+  const row = await prisma.ssoLoginState.findUnique({
+    where: { nativeConsentHash: consentHash },
+  });
+  if (!row) return null;
+  const handoffExpiresAt = new Date(Date.now() + SSO_NATIVE_HANDOFF_TTL_SECONDS * 1000);
+  const { count } = await prisma.ssoLoginState.updateMany({
+    where: {
+      id: row.id,
+      nativeConsentHash: consentHash,
+      flowKind: "NATIVE",
+      handoffCodeHash: null,
+      expiresAt: { gt: new Date() },
+    },
+    data: { nativeConsentHash: null, handoffCodeHash: codeHash, handoffExpiresAt },
+  });
+  if (count !== 1) return null;
+  return { ...row, nativeConsentHash: null, handoffCodeHash: codeHash, handoffExpiresAt };
+}
+
+/**
+ * The person pressed Cancel: atomically burn the page's single-use consent
+ * value WITHOUT minting a code. Same conditional claim as `claimConsent`, so a
+ * Cancel and a Continue racing on one page cannot both win, and a spent page
+ * can do neither. Returns the row (redirect, state, provider, the person) so
+ * the route can audit the refusal and relay `access_denied`, or null if the
+ * value is unknown, already used or the state row has expired.
+ */
+export async function declineConsent(
+  prisma: PrismaClient,
+  consentHash: string,
+): Promise<SsoLoginState | null> {
+  const row = await prisma.ssoLoginState.findUnique({
+    where: { nativeConsentHash: consentHash },
+  });
+  if (!row) return null;
+  const { count } = await prisma.ssoLoginState.updateMany({
+    where: {
+      id: row.id,
+      nativeConsentHash: consentHash,
+      flowKind: "NATIVE",
+      handoffCodeHash: null,
+      expiresAt: { gt: new Date() },
+    },
+    data: { nativeConsentHash: null },
+  });
+  if (count !== 1) return null;
+  return { ...row, nativeConsentHash: null };
+}
+
+/**
+ * Atomically redeem a handoff by its code hash. Returns the row (with the
+ * app's `nativeCodeChallenge` and the `handoffUserId`) on success, or null if
+ * the code is unknown, already redeemed (replay) or expired. Same race-safe
+ * conditional claim as `consumeLoginState`: exactly one caller sees count===1.
+ */
+export async function consumeHandoff(
+  prisma: PrismaClient,
+  codeHash: string,
+): Promise<SsoLoginState | null> {
+  const now = new Date();
+  const { count } = await prisma.ssoLoginState.updateMany({
+    where: {
+      handoffCodeHash: codeHash,
+      flowKind: "NATIVE",
+      handoffConsumedAt: null,
+      handoffExpiresAt: { gt: now },
+    },
+    data: { handoffConsumedAt: now },
+  });
+  if (count !== 1) {
+    return null;
+  }
+  return prisma.ssoLoginState.findUnique({ where: { handoffCodeHash: codeHash } });
 }
 
 /**
@@ -153,9 +320,38 @@ export async function pruneExpiredLoginStates(
   // never consumed and is expired. Guarding the expired branch on
   // `consumedAt: null` guarantees a freshly-consumed row (even one that has
   // since expired) is never swept inside the grace window.
+  //
+  // A consumed NATIVE row may still carry a redeemable handoff: the callback
+  // claims the state BEFORE the IdP code exchange, and Continue mints the
+  // handoff up to the state's own 10 minutes later, so it can land well after
+  // `consumedAt`. Such a row is spared until its handoff is past the same
+  // grace window (which also covers `consumeHandoff`'s claim-then-read), and,
+  // while a consent value is still pending (the page is live), until the state
+  // itself has expired. A NATIVE row with neither (the callback failed) goes
+  // like a browser row.
   const where = {
     OR: [
-      { consumedAt: { lt: consumedCutoff } },
+      {
+        AND: [
+          { consumedAt: { lt: consumedCutoff } },
+          {
+            OR: [
+              { flowKind: "BROWSER" as const },
+              {
+                AND: [
+                  {
+                    OR: [
+                      { handoffExpiresAt: null },
+                      { handoffExpiresAt: { lt: consumedCutoff } },
+                    ],
+                  },
+                  { OR: [{ nativeConsentHash: null }, { expiresAt: { lt: now } }] },
+                ],
+              },
+            ],
+          },
+        ],
+      },
       { AND: [{ consumedAt: null }, { expiresAt: { lt: now } }] },
     ],
   };

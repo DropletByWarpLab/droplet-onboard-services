@@ -21,8 +21,10 @@
  * `narrativeVisibleTo` admits — and only once written, never a pending or
  * failed attempt's leftover text.
  *
- * Names that DO appear are places and devices a person chose: area names and
- * camera display names — the same the dashboard shows this viewer.
+ * Names that DO appear are places and devices a person chose: area names,
+ * camera display names and (P4 PR-4) door-lock names from the lock adapter's
+ * list — the same the dashboard shows this viewer. A lock row's stored summary
+ * (`<name>: <reading>`) is never passed through either.
  *
  * SIZE. The mcp-server bounds a tool result at 8,000 chars
  * (tool-result-bounding.ts); a list cut there loses its cursor. So every
@@ -96,7 +98,8 @@ export const CODE_SENTENCE: Readonly<Record<SecurityReasonCode, string>> = {
   after_hours_presence: "A person was seen while the site was closed or set to away",
   camera_offline: "A camera stopped reporting",
   threat_signal: "A network or sign-in warning",
-  camera_offline_during_activity: "A camera stopped reporting soon after a person was seen there while the site was closed or away",
+  // P4 PR-4: the activity may be a door lock changing, not a person — the evidence rows say which.
+  camera_offline_during_activity: "A camera stopped reporting soon after someone was seen, or a door lock changed, in one of its areas while the site was closed or away",
   // P5's pattern codes never reach an incident's reasons yet (trial only); the words are here so a later build cannot send a bare code.
   out_of_place: "Activity at a place and time Droplet does not usually see",
   unusual_volume: "More activity than Droplet usually sees here",
@@ -122,6 +125,9 @@ export const ASSISTANT_EVENT_KINDS = {
   camera_online: ["camera_online", "source_online"],
   threat: ["threat"],
   mode_changed: ["mode_changed"],
+  // P4 PR-4 (DS-019): rows only a viewer with Devices view gets — `feedVisibilityWhere` removes them at AND[0]
+  // for anyone else, so asking for this kind without it is the same empty page as a kind with nothing in it.
+  lock_state: ["lock_state"],
 } as const satisfies Record<string, readonly SecurityEventKind[]>;
 export type AssistantEventKind = keyof typeof ASSISTANT_EVENT_KINDS;
 
@@ -138,6 +144,14 @@ const KIND_OF: Partial<Record<SecurityEventKind, AssistantEventKind>> = Object.f
 );
 
 const MODE_WORD: Readonly<Record<string, string>> = { open: "open", closed: "closed", away: "away" };
+
+/** A door lock's reading in words (the summaries' prompt vocabulary); never a cause. */
+const LOCK_WORD: Readonly<Record<string, string>> = {
+  locked: "lock locked",
+  unlocked: "lock unlocked",
+  not_fully_locked: "lock not fully locked",
+  unlatched: "lock unlatched",
+};
 
 /**
  * What happened, from the row's kind and labels only — never its stored
@@ -161,14 +175,23 @@ export function eventWhat(kind: string, labels: readonly string[], camera: strin
       return labels[0] === "auth" ? "sign-in warning" : "network warning";
     case "mode_changed":
       return `site set to ${MODE_WORD[labels[0] ?? ""] ?? "a new mode"}`;
+    case "lock_state":
+      return LOCK_WORD[labels[0] ?? ""] ?? "lock state unknown";
     default:
       void camera;
       return "activity";
   }
 }
 
-/** Who reported it: the camera's display name, or the site-wide source in words. */
-export function eventSource(kind: string, camera: string | null, cameraLabels: ReadonlyMap<string, string>): string {
+export const LOCK_SOURCE_FALLBACK = "Door lock";
+
+/**
+ * Who reported it: the camera's display name, a door lock's name (P4 PR-4:
+ * `lockName`, from the lock adapter's list; else "Door lock"), or the
+ * site-wide source in words.
+ */
+export function eventSource(kind: string, camera: string | null, cameraLabels: ReadonlyMap<string, string>, lockName?: string): string {
+  if (kind === "lock_state") return lockName ?? LOCK_SOURCE_FALLBACK;
   if (camera) return cameraLabels.get(camera) ?? camera;
   if (kind === "threat") return TITLE_THREAT;
   if (kind === "mode_changed") return "Site mode";

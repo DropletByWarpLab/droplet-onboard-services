@@ -434,18 +434,28 @@ export function incidentVisibilityWhere(v: IncidentViewer): Prisma.SecurityIncid
 /**
  * A reason the viewer may see — on an incident the visibility clause already let through. A camera-less reason is
  * shown: it is site-wide evidence (CHECK SecurityIncidentReason_site_evidence) that §6.2 groups only into a site scope,
- * where `reasonVisible` shows it too. WARP-2979: `reasonVisibleTo`'s related-camera and related-lock clauses, in SQL.
+ * where `reasonVisible` shows it too. WARP-2979: `reasonVisibleTo`'s related-camera and related-lock clauses, in SQL —
+ * P4 PR-4 (DS-019): a related lock only with `mayReadLocks`, every camera or not.
  */
 export function visibleReasonWhere(v: IncidentViewer): Prisma.SecurityIncidentReasonWhereInput {
-  if (v.visibleCameras === "all") return {};
+  const locks: Prisma.SecurityIncidentReasonWhereInput[] = v.mayReadLocks ? [] : [{ relatedLock: false }];
+  if (v.visibleCameras === "all") return locks.length > 0 ? locks[0]! : {};
   const cams = [...v.visibleCameras];
   return {
     AND: [
       { OR: [{ evidenceCamera: { in: cams } }, { evidenceCamera: null }] },
       { OR: [{ relatedCamera: null }, { relatedCamera: { in: cams } }] },
-      { relatedLock: false },
+      ...locks,
     ],
   };
+}
+
+/**
+ * Every reason of every incident the viewer may know is visible to them: every camera AND (P4 PR-4) the locks a
+ * reason can name. Such a viewer is never PARTIAL, so the list takes its plain filters.
+ */
+function seesEveryReason(v: IncidentViewer): boolean {
+  return v.visibleCameras === "all" && v.mayReadLocks;
 }
 
 export type IncidentStateFilter = "attention" | "open" | "acknowledged" | "resolved" | "activity" | "all";
@@ -479,9 +489,9 @@ export interface IncidentListFilters {
 export function incidentListWhere(v: IncidentViewer, f: IncidentListFilters): Prisma.SecurityIncidentWhereInput {
   const vis = visibleReasonWhere(v);
   const and: Prisma.SecurityIncidentWhereInput[] = [incidentVisibilityWhere(v)];
-  // A viewer who sees every camera sees every reason of every incident they
-  // may know: never partial, so the plain filters.
-  const neverPartial = v.visibleCameras === "all";
+  // A viewer who sees every camera and (P4 PR-4) the locks sees every reason
+  // of every incident they may know: never partial, so the plain filters.
+  const neverPartial = seesEveryReason(v);
   // `projectIncident`'s PARTIAL rule: a reason at the incident's stored (top)
   // severity whose evidence the viewer cannot see. Prisma cannot compare a
   // reason's column with its incident's, so each severity a reason can carry
@@ -872,15 +882,17 @@ export async function incidentsSummary(
  * optional — breaks compilation here until someone chooses its value for the
  * rack. Merge order with #2350 (door locks): it adds `mayReadLocks`, and
  * whichever of #2350 / #2368 lands second sets `WHOLE_SITE.mayReadLocks =
- * true` deliberately. It cannot move the rack's number either way: lock rows
- * never form an incident (D21, pinned on #2350), and `mayReadLocks` narrows
- * only an incident's members and area names, never `incidentListWhere`.
+ * true` deliberately. Lock rows never form an incident (D21, pinned on
+ * #2350), but from P4 PR-4 a camera_offline_during_activity alert can name a
+ * lock (`relatedLock`, D12), and `incidentListWhere` hides such a reason from
+ * a viewer without `mayReadLocks` — so `true` is what keeps the rack counting
+ * the owner's whole box.
  */
 const WHOLE_SITE: Required<IncidentViewer> = {
   userId: "_service:display",
   visibleCameras: "all",
   mayReadThreats: true,
-  // The owner's whole box (D20); inert for the count: lock rows never form an incident (D21), and incidentListWhere never reads it.
+  // The owner's whole box (D20); lock rows never form an incident (D21), but a lock-related reason counts (P4 PR-4 D12).
   mayReadLocks: true,
   ownerOrAdmin: true,
 };

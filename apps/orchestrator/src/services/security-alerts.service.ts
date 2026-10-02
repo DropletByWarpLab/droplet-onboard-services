@@ -25,8 +25,10 @@
  *      again because alert evidence arrived on a new camera) plans only the
  *      people whose notice is `skipped_not_visible`, updating that notice in
  *      place — still one notice, one notification at most, per person;
- *   3. per recipient, DS-005 (D27): the alert evidence on cameras they can
- *      see (`visibleCameraNames`). None → `skipped_not_visible`. The copy is
+ *   3. per recipient, DS-005 (D27): the alert evidence they may see —
+ *      `reasonVisibleTo` over the cameras they can see (`visibleCameraNames`)
+ *      and, P4 PR-4 / DS-019, whether they may read locks
+ *      (`locksReadableWith`). None → `skipped_not_visible`. The copy is
  *      built from that visible evidence only. ≥ 6 alert notifications to them
  *      in the last hour → `skipped_capped` (D28);
  *   4. ONE READ COMMITTED transaction: the incident CAS (pending → done), a
@@ -66,6 +68,7 @@ import type { EffectiveAccessResolver } from "../middleware/feature-gate.js";
 import { resolveEffectiveAccess } from "./effective-access.service.js";
 import { FEATURE_LEVEL_RANK, type FeatureLevel } from "./access-catalog.js";
 import { visibleCameraNames } from "./camera-access.service.js";
+import { locksReadableWith } from "./security-lock-access.js";
 import { deliverNotification, recordNotification } from "./notifications.service.js";
 import { webPushGate } from "./off-lan-gate.service.js";
 import { auditSecurityInTx, auditSecuritySystem, chainSafeText, stripUnsafeDisplayChars } from "./security-audit.js";
@@ -126,6 +129,11 @@ export type IneligibleReason = "inactive" | "role" | "no_address" | "no_access";
 export interface Eligibility {
   eligible: boolean;
   reason: IneligibleReason | null;
+  /**
+   * WARP-2979 P4 PR-4 (DS-019) — whether this person may read door locks, from
+   * the SAME resolver read (`locksReadableWith`, the one rule). Absent = no.
+   */
+  mayReadLocks?: boolean;
 }
 
 export interface EligibilityUser {
@@ -147,15 +155,18 @@ export async function eligibilityOf(user: EligibilityUser, resolve: EffectiveAcc
   if (!HOUSEHOLD_ROLES.includes(user.role)) return { eligible: false, reason: "role" };
   if (isUserIdShaped(user.username)) return { eligible: false, reason: "no_address" };
   let level: FeatureLevel | null = null;
+  let mayReadLocks = false;
   try {
     const access = await resolve(user.id);
     level = access?.features.find((f) => f.moduleId === "security")?.level ?? null;
+    // An owner is never narrowed: the resolver's §3 bypass gives the owner every module, Devices included.
+    mayReadLocks = user.role === "owner" || locksReadableWith(access, user.role);
   } catch (err) {
     logger.warn({ err, userId: user.id }, "alert eligibility: the access resolver failed — not told this time");
     return { eligible: false, reason: "no_access" };
   }
   if (level === null || FEATURE_LEVEL_RANK[level] < FEATURE_LEVEL_RANK.act) return { eligible: false, reason: "no_access" };
-  return { eligible: true, reason: null };
+  return { eligible: true, reason: null, mayReadLocks };
 }
 
 /** Owners are recipients by default: their `receiving` rows, created lazily. */
@@ -210,6 +221,8 @@ function alertEvidenceOf(
           seenCameraLabel: r.relatedCamera ? (labels.get(r.relatedCamera) ?? r.relatedCamera) : null,
           // Where the person was seen (review #2418) — not always the incident's area.
           seenAreaName: typeof activity?.zoneName === "string" ? activity.zoneName : null,
+          // P4 PR-4: a door lock's change was the activity — its reading, never a person.
+          seenLockReading: activity?.kind === "lock_state" && typeof activity.label === "string" ? activity.label : null,
         }
       : {}),
   };
@@ -308,11 +321,13 @@ async function planNotices(
       return { user, reason, outcome: eligibility.reason === "no_address" ? "skipped_no_address" : "skipped_no_access", copy: null };
     }
     // DS-005, per recipient: only the alert evidence they may see — `reasonVisibleTo`, the one rule (WARP-2979: a
-    // reason that names where a person was seen needs that camera visible too).
+    // reason that names where a person was seen needs that camera visible too; P4 PR-4, DS-019: one that names a
+    // door lock needs `mayReadLocks` — `locksReadableWith` over the resolver read eligibility just made).
     const visible = await visibleCameraNames(prisma, { id: user.id, role: user.role });
     const ownerOrAdmin = user.role === "owner" || user.role === "admin";
+    const scope = { visibleCameras: visible, mayReadLocks: eligibility.mayReadLocks === true };
     const evidence: AlertEvidence[] = incident.reasons
-      .filter((r) => reasonVisibleTo(r, { visibleCameras: visible }, ownerOrAdmin))
+      .filter((r) => reasonVisibleTo(r, scope, ownerOrAdmin))
       .map((r) => alertEvidenceOf(r, labels));
     if (evidence.length === 0) return { user, reason, outcome: "skipped_not_visible", copy: null };
     const recent = await prisma.securityIncidentNotice.count({
@@ -607,7 +622,8 @@ async function uncoveredAlertCameras(prisma: PrismaClient, receivers: readonly R
   const cameras = new Set<string>();
   for (const l of links) {
     const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
-    // A door lock (WARP-2977 P2b-2) is no camera: lock rows feed no rule (D21).
+    // A door lock (WARP-2977 P2b-2) is no camera: no rule fires on a lock alone (D21), and PR-4's lock activity
+    // (D12) still needs a person-linked camera to drop.
     if (parsed && !isLockLinkRef(parsed)) cameras.add(parsed.camera);
   }
   if (cameras.size === 0) return [];

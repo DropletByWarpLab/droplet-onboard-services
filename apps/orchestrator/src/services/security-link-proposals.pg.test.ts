@@ -14,6 +14,10 @@
  *   route 12 races  — a person's save and the job on one area: whichever
  *                     loses the CAS gives way (the person gets exactly one
  *                     409; the job skips the area this hour); no link is lost.
+ *   lock anchors    — (P4 PR-4) a person-linked lock's LIVE changes, stored as
+ *                     P2b-2 writes them (CHECK SecurityEvent_lock_shape), link
+ *                     the cameras that see someone then; its polled rows and
+ *                     its baseline row are no anchors (the evidence's `n`).
  *
  * Gated on RUN_PG_INTEGRATION=1 + DATABASE_URL. FIXTURE SCOPING: every area,
  * camera and event is tagged `warp2979j`; the AI settings row is set for the
@@ -283,5 +287,55 @@ describe.skipIf(!RUN)("Droplet's link proposals against real Postgres (WARP-2979
       expect((await links(zone.id)).find((r) => r.sourceRef === B)).toMatchObject({ state: "active", origin: "droplet" });
       expect((await verifyActivityChain(prisma, signer, floor)).ok).toBe(true);
     });
+  });
+
+  it("P4 PR-4: a person-linked lock's LIVE changes link the cameras that see someone then; its polled rows and baseline are no anchors", async () => {
+    const LOCK = "matter:29790001/1";
+    const zone = await area("Back door", [{ sourceKind: "lock", sourceRef: LOCK, sourceLabel: "Back door lock" }]);
+    // A lock change 1 s after each of A's 40 visits: the first 20 heard live, the other 20 found by the 60 s
+    // check (polled) — plus the baseline row the lock wrote when Droplet first saw it. Rows as P2b-2 writes them.
+    const at = (i: number) => new Date(FROM + 2 * H + i * (3 * H + 7 * MIN) + 1 * S);
+    const lockRow = (dedupe: string, startedAt: Date, reading: string, observed: "live" | "polled", baseline = false) => ({
+      source: "matter_lock" as const,
+      kind: "lock_state" as const,
+      severity: "info" as const,
+      camera: null,
+      sourceRef: LOCK,
+      dedupeKey: `${TAG}:lock:${dedupe}`,
+      labels: [reading],
+      cameraZones: [],
+      score: null,
+      startedAt,
+      endedAt: null,
+      summary: `Back door lock: ${reading}`,
+      observed,
+      baseline,
+    });
+    await prisma.securityEvent.createMany({
+      data: [
+        lockRow("matter_lock:29790001/1:after:none:locked", new Date(FROM + H), "locked", "live", true),
+        ...Array.from({ length: 40 }, (_, i) =>
+          lockRow(`matter_lock:29790001/1:after:${i}:${i % 2 === 0 ? "unlocked" : "locked"}`, at(i), i % 2 === 0 ? "unlocked" : "locked", i < 20 ? "live" : "polled"),
+        ),
+      ],
+    });
+    try {
+      const run = await runSecurityLinkProposals(prisma, NOW, { knownLocks: () => [{ ref: LOCK, name: "Back door lock" }] });
+      expect(run.activated).toBe(3);
+      const rows = await links(zone.id);
+      const b = rows.find((r) => r.sourceRef === B)!;
+      expect(b).toMatchObject({ state: "active", origin: "droplet", stateSetBy: "droplet", sourceKind: "camera", sourceLabel: `${TAG} cam B` });
+      expect(parseLinkEvidence(b.evidence)).toMatchObject({
+        kind: "lock_camera",
+        reverse: null,
+        anchor: { sourceKind: "lock", sourceRef: LOCK, label: "Back door lock" },
+        // Only the 20 LIVE changes: neither the polled 20 nor the baseline is an anchor.
+        forward: { n: 20, k: 20 },
+      });
+      expect(await auditsFor(zone.id)).toEqual(Array.from({ length: 3 }, () => ({ action: "link.activated", actorType: "system" })));
+      expect((await verifyActivityChain(prisma, signer, floor)).ok).toBe(true);
+    } finally {
+      await prisma.securityEvent.deleteMany({ where: { dedupeKey: { startsWith: `${TAG}:lock:` } } });
+    }
   });
 });

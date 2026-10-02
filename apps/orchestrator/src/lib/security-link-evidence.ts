@@ -234,9 +234,8 @@ export function parseLinkEvidence(value: unknown): LinkEvidenceV1 | null {
 /**
  * Every source the evidence NAMES — the anchor and the candidate. DS-005: the
  * evidence may be shown only to a viewer who can see ALL of them (route 3's
- * `evidence`, route 23's suggestions); a lock is visible only with
- * `mayReadLocks` (PR-4), so until then a caller that runs these through
- * `visibleLinks` drops a lock (unknown kind → malformed → hidden).
+ * `evidence`, route 23's suggestions), each through `visibleLinks`: a camera
+ * by the grant, a lock only with `mayReadLocks` (P4 PR-4, DS-019).
  */
 export function linkEvidenceSources(e: LinkEvidenceV1): Array<{ sourceKind: LinkEvidenceSourceKind; sourceRef: string }> {
   return [

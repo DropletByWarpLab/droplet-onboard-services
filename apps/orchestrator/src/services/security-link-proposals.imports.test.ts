@@ -44,8 +44,10 @@ describe("security-link-proposals imports nothing that can change what it must n
     for (const src of [SRC, LIB]) for (const m of importsOf(src)) expect(m).not.toMatch(forbidden);
     // security-hours is imported for its clock COPY only.
     expect(SRC).toMatch(/import \{ siteDayClockCopy \} from "\.\.\/lib\/security-hours\.js";/);
-    // The arithmetic is pure: no Prisma, no clock.
-    for (const m of importsOf(LIB)) expect(m).toMatch(/^\.\/security-(stats|link-evidence)\.js$/);
+    // The arithmetic is pure: no Prisma, no clock. (PR-4: which lock rows are a lock turning is pure too.)
+    for (const m of importsOf(LIB)) expect(m).toMatch(/^\.\/security-(stats|link-evidence|lock-changes)\.js$/);
+    // PR-4: lock names come in as data (`knownLocks`); the job never imports the lock adapter, which talks to devices.
+    expect(SRC).not.toMatch(/security-lock-adapter/);
   });
 
   it("its Prisma writes touch only securityZoneLink and the area's version", () => {

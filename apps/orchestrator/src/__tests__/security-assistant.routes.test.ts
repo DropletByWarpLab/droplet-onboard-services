@@ -46,6 +46,7 @@ import type { EffectiveAccessResult } from "../services/effective-access.service
 import { explainSecurityPattern } from "../services/security-patterns-read.js";
 import { loadIncidentDetail } from "../services/security-incident-view.js";
 import { SECURITY_ZONE_ACTIVE_LIMIT } from "../services/security-zones.service.js";
+import type { LockReadingsState } from "../services/security-lock-adapter.js";
 import { getTool, type ToolContext } from "@droplet/tools-core";
 import {
   areaRows as fakeAreaRows,
@@ -238,6 +239,8 @@ interface AppOpts {
   level?: Level | null;
   resolve?: (userId: string) => Promise<EffectiveAccessResult | null>;
   cameraStatus?: CameraStatusSource;
+  /** WARP-2979 PR-4 — the lock adapter as the routes read it (default: none running). */
+  locks?: () => { knownLocks(): Array<{ ref: string; name: string; connected: boolean }>; readingsState(): LockReadingsState } | null;
 }
 
 function app(f: FakeSecurityPrisma, opts: AppOpts = {}) {
@@ -248,7 +251,15 @@ function app(f: FakeSecurityPrisma, opts: AppOpts = {}) {
     if (principal) (req as unknown as { user?: unknown }).user = { ...principal, username: principal.id };
     next();
   });
-  server.use("/api", createSecurityAssistantRouter(f.client as unknown as PrismaClient, { resolve, now: () => NOW, cameraStatus: opts.cameraStatus ?? ALL_ONLINE }));
+  server.use(
+    "/api",
+    createSecurityAssistantRouter(f.client as unknown as PrismaClient, {
+      resolve,
+      now: () => NOW,
+      cameraStatus: opts.cameraStatus ?? ALL_ONLINE,
+      locks: (opts.locks ?? (() => null)) as never,
+    }),
+  );
   return { server, resolve };
 }
 
@@ -443,10 +454,10 @@ describe("DS-005 — Maria sees only `front`", () => {
   });
 });
 
-// WARP-2977 P2b-2 x WARP-2979 P4 PR-3: the tools answer for cameras ("what covers it", "is it reporting"). A door lock has
-// no honest answer to either, and lock state is presence data, so the acting person's Devices level is never widened
-// into the tools: the dashboard shows a Devices-holder their doors, the assistant does not.
-describe("door locks (DS-019) — the tools are camera-only, whatever the person holds", () => {
+// WARP-2977 P2b-2 x WARP-2979 P4: lock state is presence data (DS-019). A3 and A4 speak of door locks from P4 PR-4
+// (§6.12.3) and read the dashboard's own scope: a person with Devices view gets the lock-only area, the lock among what
+// covers an area and the lock's rows, exactly as the dashboard shows them; without it, a site without locks.
+describe("door locks (DS-019) — A3 and A4 follow Devices view, never the camera grant", () => {
   const DOOR = "0a0a0a0a-0000-4000-8000-000000000009";
   const LOCK = "matter:4660/1";
   const withDevices = async (_userId: string) =>
@@ -481,22 +492,45 @@ describe("door locks (DS-019) — the tools are camera-only, whatever the person
     });
   }
 
-  it.each(["stefan", "maria"])("A4 for %s, who holds Devices: no lock-only area, and no lock among what covers an area", async (who) => {
+  it.each(["stefan", "maria"])("A4 for %s, who holds Devices: the lock-only area, and the lock among what covers an area", async (who) => {
     f = lockWorld();
     const { server } = app(f, { resolve: withDevices });
     const res = await get(server, "/api/security/assistant/areas", who);
     expect(res.status).toBe(200);
-    // Not vacuous: the dashboard's scope for this very person WOULD show them the lock.
+    // The dashboard's scope for this very person shows them the lock: the tools read that same scope.
     const person = { id: who === "stefan" ? STEFAN : MARIA, role: who === "stefan" ? "owner" : "family" };
     expect((await securityScopeForPerson(f.client as unknown as PrismaClient, person, withDevices)).mayReadLocks).toBe(true);
+    const byName = new Map(res.body.areas.map((a: { name: string; coveredBy: unknown }) => [a.name, a.coveredBy]));
+    expect([...byName.keys()].sort()).toEqual(["Back door", "Shop floor"]);
+    // No lock adapter running: the link's snapshot name, reporting unknown.
+    expect(byName.get("Back door")).toEqual([{ source: "Back door lock", part: null, reporting: "unknown", linkedBy: "a person" }]);
+    expect(byName.get("Shop floor")).toContainEqual({ source: "Back door lock", part: null, reporting: "unknown", linkedBy: "a person" });
+  });
+
+  it.each(["maria", "jordan"])("A4 for %s, without Devices: no lock-only area, and no lock among what covers an area", async (who) => {
+    f = lockWorld();
+    const { server } = app(f);
+    const res = await get(server, "/api/security/assistant/areas", who);
+    expect(res.status).toBe(200);
     expect(res.body.areas.map((a: { name: string }) => a.name)).toEqual(["Shop floor"]);
     expect(res.body.areas[0].coveredBy).toEqual([{ source: "Front door", part: null, reporting: "yes", linkedBy: "a person" }]);
     expect(JSON.stringify(res.body)).not.toMatch(/lock|Back door/i);
   });
 
-  it.each(["stefan", "maria"])("A3 for %s: no lock row, and the lock-only area answers like an unknown one", async (who) => {
+  it.each(["stefan", "maria"])("A3 for %s, who holds Devices: the lock's row, also through the lock-only area", async (who) => {
     f = lockWorld();
     const { server } = app(f, { resolve: withDevices });
+    const all = await get(server, "/api/security/assistant/events", who);
+    expect(all.body.events.map((e: { source: string }) => e.source)).toEqual(["Door lock", "Front door"]);
+    const door = await get(server, "/api/security/assistant/events?area=Back%20door", who);
+    expect(door.body.events.map((e: { kind: string; source: string }) => [e.kind, e.source])).toEqual([["lock_state", "Door lock"]]);
+    // The stored summary never passes through.
+    expect(JSON.stringify(all.body)).not.toContain("Back door lock unlocked");
+  });
+
+  it.each(["maria", "jordan"])("A3 for %s, without Devices: no lock row, and the lock-only area answers like an unknown one", async (who) => {
+    f = lockWorld();
+    const { server } = app(f);
     const all = await get(server, "/api/security/assistant/events", who);
     expect(all.body.events.map((e: { source: string }) => e.source)).toEqual(["Front door"]);
     expect(JSON.stringify(all.body)).not.toMatch(/lock/i);
@@ -649,6 +683,142 @@ describe("the shapes", () => {
     expect(owner.body.suggestionsWaiting).toBe(0);
     const maria = await get(server, "/api/security/assistant/areas", "maria");
     expect(maria.body.suggestionsWaiting).toBeNull();
+  });
+});
+
+// ── WARP-2979 P4 PR-4: door locks in the tools (DS-019: Security view AND Devices view) ──
+
+describe("P4 PR-4 — door locks in security_search_events (A3) and security_zone_status (A4)", () => {
+  const LOCK = "matter:4660/1";
+  /** Devices (smart_home) view on top of Security view: may read locks. */
+  const withDevices = async (_userId: string) => {
+    const a = access("view");
+    a.features = [...a.features, { moduleId: "smart_home", level: "view" }] as EffectiveAccessResult["features"];
+    return a;
+  };
+  const lockRow = (id: bigint, at: Date, reading: string, observed: "live" | "polled") =>
+    eventRow({
+      id,
+      source: "matter_lock",
+      kind: "lock_state",
+      camera: null,
+      sourceRef: LOCK,
+      dedupeKey: `matter_lock:4660/1:after:${id - 1n}:${reading}`,
+      labels: [reading],
+      score: null,
+      startedAt: at,
+      endedAt: null,
+      // A stored summary names the lock (and could name more); `what` is rebuilt from the reading instead.
+      summary: `Maria's door: ${reading}${observed === "polled" ? " (found when Droplet checked)" : ""}`,
+      observed,
+    });
+  /**
+   * The real resolver's §3 bypass: the owner's catalog holds every module, Devices included (the scope resolves an
+   * owner like anyone else). Everyone else here: Security view only.
+   */
+  const ownerBypass = async (userId: string) => (userId === STEFAN ? withDevices(userId) : access("view"));
+  const lockApp = (opts: AppOpts = {}) => app(f, { resolve: ownerBypass, ...opts });
+  const known = (connected = true, readings: LockReadingsState = "current") => () => ({
+    knownLocks: () => [{ ref: LOCK, name: "Back door lock", connected }],
+    readingsState: () => readings,
+  });
+
+  beforeEach(() => {
+    f.world.securityEvent.push(lockRow(10n, new Date(T.getTime() + 120_000), "unlocked", "live"), lockRow(11n, new Date(T.getTime() + 180_000), "locked", "polled"));
+    // The Shop floor's door lock, linked by a person.
+    f.world.securityZoneLink.push({
+      id: "l-shop-lock",
+      zoneId: SHOP,
+      sourceKind: "lock",
+      sourceRef: LOCK,
+      sourceLabel: "Smart Lock (as linked)",
+      state: "active",
+      origin: "person",
+      stateSetBy: "person",
+      createdAt: T,
+      stateChangedAt: T,
+      evidence: null,
+    });
+  });
+
+  it("A3 kind=lock_state: the lock's changes, newest first — the reading, the lock's name, its areas, and whether it was heard live", async () => {
+    const { server } = lockApp({ locks: known() });
+    const res = await get(server, "/api/security/assistant/events?kind=lock_state", "stefan");
+    expect(res.status).toBe(200);
+    expect(res.body.events).toEqual([
+      {
+        at: { at: new Date(T.getTime() + 180_000).toISOString(), local: "10:17 PM" },
+        until: null,
+        kind: "lock_state",
+        what: "lock locked",
+        source: "Back door lock",
+        part: null,
+        areas: ["Shop floor"],
+        found: "when Droplet checked",
+      },
+      {
+        at: { at: new Date(T.getTime() + 120_000).toISOString(), local: "10:16 PM" },
+        until: null,
+        kind: "lock_state",
+        what: "lock unlocked",
+        source: "Back door lock",
+        part: null,
+        areas: ["Shop floor"],
+        found: "live",
+      },
+    ]);
+    expect(JSON.stringify(res.body)).not.toContain("Maria");
+  });
+
+  it("DS-019: without Devices view, kind=lock_state answers exactly as a kind with nothing in it — the same body", async () => {
+    const { server } = lockApp({ locks: known() });
+    for (const who of ["maria", "jordan"]) {
+      const locks = await get(server, "/api/security/assistant/events?kind=lock_state&period=last_24h", who);
+      const nothing = await get(server, "/api/security/assistant/events?kind=camera_online&period=last_24h", who);
+      expect(locks.status, who).toBe(200);
+      expect(locks.body, who).toEqual(nothing.body);
+      expect(locks.body.events, who).toEqual([]);
+    }
+  });
+
+  it("DS-019: the unfiltered search holds lock rows only for a viewer who may read locks — Devices view, not the camera grant", async () => {
+    const lockKinds = (body: { events: Array<{ kind: string }> }) => body.events.filter((e) => e.kind === "lock_state").length;
+    const { server } = lockApp({ locks: known() });
+    expect(lockKinds((await get(server, "/api/security/assistant/events", "stefan")).body)).toBe(2);
+    expect(lockKinds((await get(server, "/api/security/assistant/events", "maria")).body)).toBe(0);
+    const devices = lockApp({ locks: known(), resolve: withDevices });
+    expect(lockKinds((await get(devices.server, "/api/security/assistant/events", "maria")).body)).toBe(2);
+  });
+
+  it("only a lock event says how it was found: a camera row carries no `found`", async () => {
+    const { server } = lockApp({ locks: known() });
+    const res = await get(server, "/api/security/assistant/events?kind=detection", "stefan");
+    expect(res.body.events.length).toBeGreaterThan(0);
+    for (const e of res.body.events) expect(e).not.toHaveProperty("found");
+  });
+
+  it("with no lock adapter the lock's name is a plain 'Door lock', never the stored summary", async () => {
+    const { server } = lockApp();
+    const res = await get(server, "/api/security/assistant/events?kind=lock_state", "stefan");
+    expect(res.body.events.map((e: { source: string }) => e.source)).toEqual(["Door lock", "Door lock"]);
+  });
+
+  it("A4: a person-linked lock covers its area — named, reporting from the lock adapter; hidden without Devices view", async () => {
+    const shop = async (opts: AppOpts, who = "stefan") => {
+      const { server } = lockApp(opts);
+      const res = await get(server, "/api/security/assistant/areas?area=Shop%20floor", who);
+      return res.body.areas[0].coveredBy as Array<{ source: string; part: string | null; reporting: string; linkedBy: string }>;
+    };
+    expect(await shop({ locks: known() })).toEqual([
+      { source: "Front door", part: null, reporting: "yes", linkedBy: "a person" },
+      { source: "Back door lock", part: null, reporting: "yes", linkedBy: "a person" },
+    ]);
+    expect((await shop({ locks: known(false) }))[1]!.reporting).toBe("offline");
+    expect((await shop({ locks: () => ({ knownLocks: () => [], readingsState: () => "current" as const }) }))[1]).toMatchObject({ source: "Smart Lock (as linked)", reporting: "not set up" });
+    // A last list the adapter can no longer confirm is not "yes": the /security header says it can't reach the locks.
+    expect((await shop({ locks: known(true, "unreachable") }))[1]!.reporting).toBe("unknown");
+    expect((await shop({}))[1]!.reporting).toBe("unknown");
+    expect((await shop({ locks: known() }, "maria")).map((c) => c.source)).toEqual(["Front door"]);
   });
 });
 
