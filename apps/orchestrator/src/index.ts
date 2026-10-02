@@ -171,6 +171,7 @@ import { runActivityNotifySweep } from "./services/activity-notify.service.js";
 import { runFilingTick } from "./services/filing/worker.js";
 import { runFilingReconcile } from "./services/filing/reconcile.js";
 import { runFilingMaintenance } from "./services/filing/maintenance.js";
+import { reconcileFileRegistry } from "./services/file-registry.service.js";
 import { runFilingDigest } from "./services/filing/digest.js";
 import {
   purgeNetworkThroughputSamples,
@@ -1360,6 +1361,11 @@ async function main() {
   cronRuntime.scheduleInterval(
     5 * 60_000,
     async () => {
+      // WARP-3425: the Workspace seed rides every tick, not just boot (it never
+      // throws). Before it runs, the Workspace row carries a current groupfolder
+      // id — the only key the file-indexer maps Workspace files by — and every
+      // active person has a Workspace membership, which search reads.
+      await seedHouseholdDepartment(prisma);
       const result = await reconcileDepartments(prisma);
       if (
         result.departmentsConverged > 0 ||
@@ -1717,6 +1723,23 @@ async function main() {
       }
     },
     { lockKey: "droplet:filing-maintenance" },
+  );
+
+  // WARP-3425 — reconcile the File registry against Nextcloud. Rows are written
+  // on upload and nothing else ever touched them, so a delete by any path left a
+  // row claiming the file existed (33 Workspace ghosts on the test box). A row is
+  // marked `missing`, never deleted, and only after a SUCCESSFUL read of
+  // Nextcloud's file cache shows its id is gone; an outage throws to safeRun and
+  // changes nothing. Bounded to REGISTRY_SWEEP_BATCH rows per tick.
+  cronRuntime.scheduleInterval(
+    15 * 60_000,
+    async () => {
+      const result = await reconcileFileRegistry(prisma);
+      if (result.markedMissing > 0 || result.restored > 0) {
+        logger.info(result, "file registry reconcile");
+      }
+    },
+    { lockKey: "droplet:file-registry-reconcile" },
   );
 
   // The morning digest. Hourly rather than at a fixed time, because the hour

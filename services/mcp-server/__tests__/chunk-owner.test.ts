@@ -143,6 +143,20 @@ describe("resolveChunkOwnerIds — department corpora (WARP-2821)", () => {
     expect(ids).toContain(`__dept_${HOUSE}__`);
   });
 
+  it("keeps the company Workspace out of an external guest's search_content (WARP-3425)", async () => {
+    // A guest carries a seeded `reader` row on the Workspace; search must not
+    // read Workspace documents for them. An explicitly granted department
+    // still counts, and their own files stay theirs.
+    findUnique.mockResolvedValueOnce({ id: UUID, username: "vendor", role: "guest" });
+    memberFindMany.mockResolvedValueOnce([
+      { department: { id: HOUSE, kind: "HOUSEHOLD" } },
+      { department: { id: DEPT_A, kind: "DEPARTMENT" } },
+    ]);
+
+    const ids = await resolveChunkOwnerIds(prisma, "vendor");
+    expect(ids).toEqual(["vendor", UUID, `__dept_${DEPT_A}__`]);
+  });
+
   it("gives an UNKNOWN key no department corpora at all", async () => {
     // A service principal or an orphaned key must never widen into shared
     // content — it stays exactly the pre-WARP-1014 single-shape scope.

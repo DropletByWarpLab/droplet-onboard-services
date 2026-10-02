@@ -96,6 +96,30 @@ describe("visibleDepartmentsFor — who sees which departments (WARP-2821)", () 
     });
   });
 
+  it("never gives an external guest the company Workspace, even with a Workspace membership (WARP-3425)", async () => {
+    // Romain, 2026-09-30: a guest gets nothing company-wide unless explicitly
+    // shared. The seed hands every person, guests included, a `reader` row on
+    // the Workspace; that row must not open Workspace documents to search.
+    // A department the guest was explicitly added to still counts.
+    const prisma = prismaWith(
+      [],
+      [
+        { id: HOUSE, kind: "HOUSEHOLD", aclVersion: 1 },
+        { id: DEPT, kind: "DEPARTMENT", aclVersion: 2 },
+      ],
+    );
+    const out = await visibleDepartmentsFor(prisma, { id: "u-guest", role: "guest" });
+    expect(out.map((d) => d.id)).toEqual([DEPT]);
+    expect(deptCorpusKeys(out)).not.toContain(HOUSEHOLD_INDEX_USER);
+    expect(deptCorpusKeys(out)).not.toContain(`__dept_${HOUSE}__`);
+  });
+
+  it("gives a member (role `family`) the company Workspace through their membership (WARP-3425)", async () => {
+    const prisma = prismaWith([], [{ id: HOUSE, kind: "HOUSEHOLD", aclVersion: 1 }]);
+    const out = await visibleDepartmentsFor(prisma, { id: "u-member", role: "family" });
+    expect(deptCorpusKeys(out)).toContain(HOUSEHOLD_INDEX_USER);
+  });
+
   it("THROWS on a database failure rather than answering 'no departments'", async () => {
     // Both callers degrade differently and neither should have the choice made
     // here: an empty list is indistinguishable from a real answer, and the

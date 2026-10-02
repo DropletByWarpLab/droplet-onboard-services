@@ -7,13 +7,18 @@
  *
  * Logic:
  * 1. Check if a Department with kind=HOUSEHOLD exists.
- *    If yes → ensure membership backfill is current (additive only, never downgrade)
+ *    If yes → ensure membership backfill is current (additive only, never downgrade),
+ *    then re-discover its groupfolder id (WARP-3425, see rediscoverWorkspaceFolderId).
  *    If no → proceed to step 2.
  * 2. Call gfListFolders() to find a folder whose mount_point ===
  *    DROPLET_SHARED_FOLDER_NAME (configured, default "Household").
  *    If found: create Department{kind:HOUSEHOLD, ...} + DepartmentMembership
  *    for each User, role-mapped.
- *    If NOT found: log + return (fresh box before init hook ran; seed retries on each boot).
+ *    If NOT found: log + return (fresh box before init hook ran).
+ *
+ * Runs at boot AND on every 5-minute department-reconciler tick (index.ts), so
+ * a seed that found no folder at boot, a member added since, and a stale
+ * groupfolder id all converge within one tick.
  *
  * Membership role mapping (guest → reader, family → contributor, owner/admin → manager):
  * - Each User gets ONE membership row per department with right determined by their
@@ -76,6 +81,7 @@ export async function seedHouseholdDepartment(
     if (existing) {
       // Backfill memberships for any User without one.
       await backfillHouseholdMemberships(prisma, existing.id);
+      await rediscoverWorkspaceFolderId(prisma, existing.id, existing.ncGroupfolderId);
       return;
     }
 
@@ -226,4 +232,45 @@ async function backfillHouseholdMemberships(
       "household membership backfill complete",
     );
   }
+}
+
+/**
+ * WARP-3425 — keep the Workspace row's `ncGroupfolderId` pointing at the
+ * groupfolder that actually holds the Workspace's files.
+ *
+ * The file-indexer maps `__groupfolders/<id>/…` to a corpus by this column
+ * alone (`services/file-indexer/db.py fetch_department_for_groupfolder`) and
+ * SKIPS any id no Department row carries — it never guesses a corpus. The seed
+ * used to write this id once, at adoption, and nothing re-read it: the
+ * reconciler re-discovers DEPARTMENT/TEAM ids by mount point every tick
+ * (provisionDepartment) but trusts the Workspace's cached one
+ * (reconcileActiveHousehold). So once Nextcloud's id and this row disagreed —
+ * a Nextcloud reinstall, a restore of Postgres onto a fresh Nextcloud, a
+ * re-created folder — every Workspace document was skipped by the indexer,
+ * leaving no FileIndexStatus row, and search could not find a single company
+ * document.
+ *
+ * Read-only on the Nextcloud side: `gfListFolders` id discovery is the
+ * carve-out ADR-029 §2.3.1 allows ("the id is NC's opaque handle, not a
+ * decision"). An empty listing (Nextcloud down, or the folder not created yet)
+ * changes nothing — only a folder positively found at the Workspace mount point
+ * under a different id moves the row.
+ */
+async function rediscoverWorkspaceFolderId(
+  prisma: PrismaClient,
+  householdId: string,
+  currentFolderId: number | null,
+): Promise<void> {
+  const folders = await gfListFolders(adminBasicToken());
+  const folder = folders.find((f) => f.mountPoint === config.DROPLET_SHARED_FOLDER_NAME);
+  if (!folder || folder.id === currentFolderId) return;
+
+  await prisma.department.update({
+    where: { id: householdId },
+    data: { ncGroupfolderId: folder.id },
+  });
+  logger.warn(
+    { householdId, from: currentFolderId, to: folder.id },
+    "Workspace groupfolder id re-discovered; the file-indexer now maps the Workspace's files",
+  );
 }
