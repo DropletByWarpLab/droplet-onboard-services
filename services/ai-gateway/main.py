@@ -55,6 +55,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from auth import keystore
 from auth.byok import save_api_key, delete_api_key
+from llm_access import router as llm_access_router
 from middleware.off_lan_gating import get_cloud_model_escape, is_local_provider
 from middleware.rate_limit import RateLimitMiddleware, close_rate_limiter
 from middleware.request_id import RequestIdMiddleware
@@ -132,6 +133,12 @@ PRINCIPAL_HEADER = "X-Droplet-User"
 # without a token (mirrors switch's /health exemption).
 _AUTH_EXEMPT_PATHS = frozenset({"/ai/health"})
 
+# WARP-3452: /llm/* (llm_access.py) is the coding-tools API. It authenticates a
+# member's own `dlk_` token against the orchestrator on every request; the
+# box-wide service token never leaves the box, so it is not asked for there.
+# Exempting the prefix changes nothing for /ai/*.
+_AUTH_EXEMPT_PREFIX = "/llm/"
+
 
 class ServiceAuthMiddleware(BaseHTTPMiddleware):
     """Reject /ai/* requests without a valid SERVICE_TOKEN_AI_GATEWAY bearer.
@@ -145,7 +152,7 @@ class ServiceAuthMiddleware(BaseHTTPMiddleware):
         # Let CORS preflight through untouched (no Authorization header on it).
         if request.method == "OPTIONS":
             return await call_next(request)
-        if request.url.path in _AUTH_EXEMPT_PATHS:
+        if request.url.path in _AUTH_EXEMPT_PATHS or request.url.path.startswith(_AUTH_EXEMPT_PREFIX):
             request.state.principal = None
             return await call_next(request)
         if SERVICE_TOKEN_AI_GATEWAY:
@@ -373,6 +380,9 @@ app.add_middleware(
 # Starlette applies it first/outermost — it must see every request, including
 # ones CORS or auth would reject, so the response always carries x-request-id.
 app.add_middleware(RequestIdMiddleware)
+
+# --- Coding tools: the box's model runtime over /llm/* (WARP-3452) ---
+app.include_router(llm_access_router)
 
 
 # --- Health ---
