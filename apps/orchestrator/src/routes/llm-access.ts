@@ -22,11 +22,16 @@
  * The switch OFF does not revoke anything: introspection answers 403
  * `disabled` until it is back on.
  */
-import { Router, type Request, type Response, type NextFunction } from "express";
+import { Router, type Request, type Response, type NextFunction, type RequestHandler } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { config } from "../config.js";
-import { recordAccessDenied, requireRole, requireRoleOrService } from "../middleware/auth.js";
+import {
+  bearerIsServicePrincipal,
+  recordAccessDenied,
+  requireRole,
+  requireRoleOrService,
+} from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { resolveActiveModel } from "../services/active-model.service.js";
@@ -46,6 +51,26 @@ import {
 
 /** ai-gateway's principal (middleware/auth.ts SERVICE_PRINCIPALS). */
 const AI_GATEWAY_SERVICE_ID = "_service:ai-gateway";
+
+const INTERNAL_PATHS: ReadonlySet<string> = new Set(["/api/llm-access/_introspect", "/api/llm-access/_usage"]);
+
+/**
+ * Wrap the app-wide per-IP limiter so ai-gateway's two internal calls skip it.
+ * Every ai-gateway call shares one source IP, and each `/llm/` request costs
+ * two (introspect, then usage), so a dozen busy tokens would exhaust the
+ * bucket and 429 every ai-gateway call — the off-LAN gate reads included.
+ * ai-gateway already limits each token itself (LLM_ACCESS_RPM, one in flight).
+ *
+ * Exactly these two POST paths, exactly the AI_GATEWAY_SAMPLER_TOKEN bearer
+ * (constant-time, authMiddleware's matcher). Anything else — another path,
+ * another principal, a different case or a trailing slash — is counted.
+ */
+export function exemptLlmAccessInternalCalls(limiter: RequestHandler): RequestHandler {
+  return (req, res, next) =>
+    req.method === "POST" && INTERNAL_PATHS.has(req.path) && bearerIsServicePrincipal(req, AI_GATEWAY_SERVICE_ID)
+      ? next()
+      : limiter(req, res, next);
+}
 
 const settingsSchema = z.object({ enabled: z.boolean() });
 const createSchema = z.object({ label: z.string().trim().min(1).max(64) });

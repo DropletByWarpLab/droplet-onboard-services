@@ -26,7 +26,15 @@ const h = vi.hoisted(() => ({
   logged: [] as string[],
 }));
 
-vi.mock("../config.js", () => ({ config: { AUTH_ENABLED: true, OLLAMA_CONTEXT_LENGTH: 16384 } }));
+vi.mock("../config.js", () => ({
+  config: {
+    AUTH_ENABLED: true,
+    OLLAMA_CONTEXT_LENGTH: 16384,
+    // Two service principals, so the limiter exemption can be told apart from "any service token".
+    AI_GATEWAY_SAMPLER_TOKEN: "gw-sampler-token-for-tests",
+    SERVICE_TOKEN_MCP: "mcp-token-for-tests",
+  },
+}));
 vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: (...a: unknown[]) => h.recordActivity(...a),
 }));
@@ -46,7 +54,8 @@ vi.mock("../lib/logger.js", () => {
   return { createLogger: () => stub, levelFromEnv: () => "info" };
 });
 
-import { createLlmAccessRouter } from "../routes/llm-access.js";
+import { createLlmAccessRouter, exemptLlmAccessInternalCalls } from "../routes/llm-access.js";
+import { createRateLimit } from "../middleware/rate-limit.js";
 import { resolveActiveModel } from "../services/active-model.service.js";
 import {
   LLM_ACCESS_ENABLED_KEY,
@@ -428,7 +437,7 @@ describe("WARP-3452 — POST /_introspect", () => {
     expect(db.usage).toHaveLength(0);
   });
 
-  it("a holder now a guest → 403 role_not_allowed; a deactivated holder → 401 revoked, and the token is revoked", async () => {
+  it("a holder now a guest → 403 role_not_allowed and the token is revoked for good; a deactivated holder → 401 revoked", async () => {
     const db = makeDb();
     switchOn(db);
     const maria = await mint(db, P.member);
@@ -438,6 +447,12 @@ describe("WARP-3452 — POST /_introspect", () => {
     const guest = await introspect(db, maria.token);
     expect(guest.status).toBe(403);
     expect(guest.body).toEqual({ error: "role_not_allowed" });
+    expect(db.tokens.find((t) => t.id === maria.row.id)).toMatchObject({ status: "revoked", revokedReason: "role_guest" });
+    // Promoted back: the token does not come back with her.
+    db.users.get("u-member")!.role = "family";
+    const back = await introspect(db, maria.token);
+    expect(back.status).toBe(401);
+    expect(back.body).toEqual({ error: "revoked" });
 
     db.users.get("u-member2")!.directoryStatus = "DEACTIVATED";
     const gone = await introspect(db, marco.token);
@@ -469,6 +484,47 @@ describe("WARP-3452 — the internal routes admit ai-gateway alone", () => {
     const { token } = await mint(db);
     const forged = { ...P.gateway, role: "admin" };
     expect((await api(db, forged).post("/api/llm-access/_introspect").send({ token })).status).toBe(403);
+  });
+});
+
+describe("WARP-3452 — ai-gateway's two internal calls skip the per-IP limiter, and nothing else does", () => {
+  const GW = "Bearer gw-sampler-token-for-tests";
+  let n = 0;
+  /** The app-wide wrapper around a real limiter (2 per minute), in front of a 204. */
+  function limited() {
+    const app = express();
+    app.use(exemptLlmAccessInternalCalls(createRateLimit(`llm-access-test-${++n}`, { windowMs: 60_000, limit: 2 })));
+    app.use((_req, res) => void res.status(204).end());
+    return request(app);
+  }
+  async function burst(send: () => PromiseLike<{ status: number }>) {
+    const statuses: number[] = [];
+    for (let i = 0; i < 4; i++) statuses.push((await send()).status);
+    return statuses;
+  }
+
+  it("ai-gateway's bearer on POST _introspect and _usage is never counted", async () => {
+    const app = limited();
+    for (const path of ["/api/llm-access/_introspect", "/api/llm-access/_usage"]) {
+      expect(await burst(() => app.post(path).set("Authorization", GW))).toEqual([204, 204, 204, 204]);
+    }
+  });
+
+  it.each([
+    ["another service principal's bearer", "post", "/api/llm-access/_introspect", "Bearer mcp-token-for-tests"],
+    ["a near-miss token", "post", "/api/llm-access/_introspect", "Bearer gw-sampler-token-for-testz"],
+    ["no bearer", "post", "/api/llm-access/_usage", null],
+    ["ai-gateway on another route", "get", "/api/network/off-lan", GW],
+    ["ai-gateway on a public llm-access route", "post", "/api/llm-access/tokens", GW],
+    ["ai-gateway with GET", "get", "/api/llm-access/_introspect", GW],
+    ["a trailing slash", "post", "/api/llm-access/_introspect/", GW],
+  ] as const)("%s is counted", async (_name, method, path, auth) => {
+    const app = limited();
+    const send = () => {
+      const r = method === "post" ? app.post(path) : app.get(path);
+      return auth ? r.set("Authorization", auth) : r;
+    };
+    expect(await burst(send)).toEqual([204, 204, 429, 429]);
   });
 });
 

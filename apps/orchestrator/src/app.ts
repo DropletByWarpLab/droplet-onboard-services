@@ -141,7 +141,7 @@ import { createToolsRouter } from "./routes/tools.js";
 import { detachRemoteMcp, mcpClient, remoteCallPolicy } from "./services/mcp-client.singleton.js";
 import { stepResultValue, type StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
-import { createLlmAccessRouter } from "./routes/llm-access.js";
+import { createLlmAccessRouter, exemptLlmAccessInternalCalls } from "./routes/llm-access.js";
 import { createHardwareRouter } from "./routes/hardware.js";
 import { createHomeRouter } from "./routes/home.js";
 import { createBriefingsRouter } from "./routes/briefings.js";
@@ -343,7 +343,9 @@ export function createApp(
   // fan-out, a folder of thumbnails ≈ 100 requests). Each internal service
   // principal (mcp-server, email-indexer, routing, …) comes from its own
   // container IP so they don't share a bucket with a browser.
-  app.use(authenticatedApiRateLimit);
+  // WARP-3452: ai-gateway's two `/llm/` bookkeeping calls skip it (see
+  // exemptLlmAccessInternalCalls); nothing else does.
+  app.use(exemptLlmAccessInternalCalls(authenticatedApiRateLimit));
 
   // WARP-3122 — a signed recordings-segment URL stands in for the bearer on
   // GET /api/cameras/:name/playback.segment only. This router answers

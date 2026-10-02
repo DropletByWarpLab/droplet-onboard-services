@@ -242,8 +242,9 @@ const INVALID: TokenCheck = { ok: false, status: 401, error: "invalid_token" };
 
 /**
  * Resolve a presented token. Side effects: an active token past `expiresAt`
- * is stamped `expired`; an active token whose holder is deactivated is
- * revoked (the lifecycle hook is best-effort, this closes the gap); a refused
+ * is stamped `expired`; an active token whose holder is deactivated, or is
+ * now a guest, is revoked (the lifecycle hooks are best-effort, this closes
+ * the gap; the guest still gets 403 `role_not_allowed`); a refused
  * revoked/expired token writes one ActivityRow per token per hour.
  */
 export async function checkToken(prisma: PrismaClient, presented: unknown, now = new Date()): Promise<TokenCheck> {
@@ -271,7 +272,18 @@ export async function checkToken(prisma: PrismaClient, presented: unknown, now =
     await auditRefusal(prisma, row, status, now);
     return { ok: false, status: 401, error: status };
   }
-  if (!TOKEN_ROLES.has(row.user.role)) return { ok: false, status: 403, error: "role_not_allowed" };
+  if (!TOKEN_ROLES.has(row.user.role)) {
+    if (row.user.role === "guest") {
+      // A demotion whose lifecycle revoke did not land: finish it here, or a
+      // later re-promotion would silently bring the token back.
+      await prisma.modelAccessToken.updateMany({
+        where: { id: row.id, status: "active" },
+        data: { status: "revoked", revokedAt: now, revokedReason: "role_guest" },
+      });
+      await auditRefusal(prisma, row, "revoked", now);
+    }
+    return { ok: false, status: 403, error: "role_not_allowed" };
+  }
   return { ok: true, tokenId: row.id, userId: row.userId, role: row.user.role as "owner" | "admin" | "family" };
 }
 
