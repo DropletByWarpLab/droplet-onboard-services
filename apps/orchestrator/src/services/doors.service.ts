@@ -7,7 +7,7 @@
  * slice; until it exists nothing appends. The one thing this file may do to an
  * existing event is have it deleted — and only by calling the database's
  * retention function, which opens the gate the append-only trigger looks for
- * itself (migration 20260930130200). No UPDATE and no DELETE exists in this
+ * itself (migration 20261002110200). No UPDATE and no DELETE exists in this
  * file or anywhere else in the orchestrator, and no .ts file names the gate;
  * `__tests__/doors-negative-suite.test.ts` reads the source to keep it that way.
  *
@@ -399,7 +399,7 @@ export async function retireDoor(
 
 /**
  * Delete events the box received more than `retentionDays` ago, by calling the
- * database function `access_event_purge` (migration 20260930130200). The ONLY
+ * database function `access_event_purge` (migration 20261002110200). The ONLY
  * code in the orchestrator that deletes an AccessEvent, and it does not do so
  * itself: the append-only trigger refuses every DELETE except inside that
  * function, which opens the gate for its own duration with a function-level

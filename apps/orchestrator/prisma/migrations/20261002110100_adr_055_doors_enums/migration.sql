@@ -1,5 +1,5 @@
 -- ADR-055 (P4a) — the doors enums, in their own migration, before the tables
--- that use them (20260930130200_adr_055_doors_tables).
+-- that use them (20261002110200_adr_055_doors_tables).
 --
 -- Every state the doors surface has is an explicit enum, never the absence of
 -- another column (CLAUDE.md "no guessing"): `DoorPositionSource.none` is a

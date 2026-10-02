@@ -10006,7 +10006,7 @@ model SecurityPatternDay {
 // interface (§11.1) and on AC-017, both open.
 //
 // AccessEvent is append-only in the DATABASE (BEFORE UPDATE OR DELETE trigger,
-// migration 20260930130200) — Prisma cannot model triggers or the CHECKs, so
+// migration 20261002110200) — Prisma cannot model triggers or the CHECKs, so
 // `prisma migrate diff` cannot see them; the pg-lane tests pin them.
 
 /// How a door reports whether it is open (brief §9.7, §11.3). `none` is a
