@@ -689,6 +689,9 @@ export function createApp(
   // `available: false`, so every route here answers 404 module_disabled.
   // Registered before any catch-all path param (there is none at this level),
   // which the boot assertion (services/doors-wiring.ts) checks on every boot.
+  // The two GETs also admit `_service:mcp` (the P4b `doors_*` tools), behind the
+  // WARP-2988 acting-user gate above (`doors` is in MCP_ACTING_USER_GATED_DOMAINS,
+  // so the acting person's tier, tool scope and `doors` grant all apply).
   app.use("/api", createDoorsRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
   // Device control over BACnet/Modbus/SNMP/KNX (services/device-gateway).

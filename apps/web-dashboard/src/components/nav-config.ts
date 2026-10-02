@@ -588,7 +588,7 @@ export const NAV_GROUPS: NavGroup[] = [
       // off, so `isModuleEffective` treats "absent" as off for it and fails
       // CLOSED while the probe is unresolved (see `ABSENT_UNLESS_LISTED` in
       // lib/dark-modules.ts); the page is a plain 404 when off. Owner/admin only, mirroring
-      // the API's read floor (`READ_ROLES` in routes/doors.ts): the module's
+      // the API's read floor (`DOORS_READ_ROLES`, services/doors-access.ts): the module's
       // own grant is the only narrowing until door groups exist, and a page
       // that would 403 for everyone else is not offered to them. The owner
       // alone adds, changes and retires doors; the page shows those controls
