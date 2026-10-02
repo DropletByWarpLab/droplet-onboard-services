@@ -7,7 +7,8 @@
  * what (`isAdmin`, `canCreate`), never a role check here:
  *   · owner/admin: the box-wide switch (off by default) and everyone's tokens,
  *     with revoke;
- *   · switch off: anyone else sees that it is off and nothing to act on;
+ *   · switch off: anyone else sees that it is off, plus their own tokens
+ *     with Revoke only (off does not revoke them);
  *   · switch on: the two base URLs, the active model id, the context window,
  *     create a token (shown once), their own tokens, per-client snippets and
  *     the limits.
@@ -164,15 +165,28 @@ export default function CodingToolsPage() {
               </>
             ) : (
               !access.isAdmin && (
-                <div className="card" style={{ padding: 0 }}>
-                  <div className="empty">
-                    <span className="ei">
-                      <Terminal size={22} />
-                    </span>
-                    <span className="eh">Your admin hasn&rsquo;t turned this on</span>
-                    <span>An owner or admin can turn on coding tools for the business.</span>
+                <>
+                  <div className="card" style={{ padding: 0, marginBottom: 16 }}>
+                    <div className="empty">
+                      <span className="ei">
+                        <Terminal size={22} />
+                      </span>
+                      <span className="eh">Your admin hasn&rsquo;t turned this on</span>
+                      <span>An owner or admin can turn on coding tools for the business.</span>
+                    </div>
                   </div>
-                </div>
+                  {/* Off does not revoke: a token is still `active` and works
+                      again when the switch comes back on, so a person must be
+                      able to kill one now (a lost laptop). Revoke only. */}
+                  {access.tokens.length > 0 && (
+                    <YourTokens
+                      access={access}
+                      onCreated={refresh}
+                      onRenew={renew}
+                      onRevoke={setRevokeTarget}
+                    />
+                  )}
+                </>
               )
             )}
 
@@ -406,7 +420,7 @@ function YourTokens({
     <>
       <Sect title="Your tokens" />
       <div className="card" style={{ padding: 16, marginBottom: 16 }}>
-        {access.canCreate && (
+        {access.enabled && access.canCreate && (
           <form onSubmit={handleCreate} className="flex flex-wrap items-end gap-2">
             <div className="flex flex-col gap-1.5" style={{ flex: "1 1 240px" }}>
               <label htmlFor="token-label" className="px-0.5" style={{ fontSize: 12, color: "var(--text-muted)" }}>
@@ -508,14 +522,17 @@ function YourTokens({
                     <td className="py-2">
                       {t.status !== "revoked" && (
                         <div className="flex justify-end gap-1.5">
-                          <button
-                            type="button"
-                            className="btn ghost sm"
-                            aria-label={`Renew ${t.label}`}
-                            onClick={() => onRenew(t.id)}
-                          >
-                            Renew
-                          </button>
+                          {/* Renewing is pointless while the switch is off. */}
+                          {access.enabled && (
+                            <button
+                              type="button"
+                              className="btn ghost sm"
+                              aria-label={`Renew ${t.label}`}
+                              onClick={() => onRenew(t.id)}
+                            >
+                              Renew
+                            </button>
+                          )}
                           <button
                             type="button"
                             className="btn ghost sm"
@@ -533,9 +550,11 @@ function YourTokens({
             </table>
           </div>
         )}
-        <p className="mt-3" style={{ fontSize: 12, color: "var(--text-muted)" }}>
-          A token lasts 364 days. Renew it before then to keep it working.
-        </p>
+        {access.enabled && (
+          <p className="mt-3" style={{ fontSize: 12, color: "var(--text-muted)" }}>
+            A token lasts 364 days. Renew it before then to keep it working.
+          </p>
+        )}
       </div>
     </>
   );

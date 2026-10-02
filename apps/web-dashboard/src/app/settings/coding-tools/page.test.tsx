@@ -5,7 +5,8 @@
  *   1. owner/admin (`isAdmin`) see the switch and everyone's tokens; a
  *      member sees neither, and never asks for everyone's tokens;
  *   2. an external guest is gated, in the nav and on the page;
- *   3. switch off: a member sees only that it is off;
+ *   3. switch off: a member sees that it is off, and their own tokens with
+ *      Revoke only (no create, no renew);
  *   4. a created token is shown once and is gone after dismiss;
  *   5. revoke goes through the confirm dialog and calls DELETE;
  *   6. snippets carry the real base URL and model id, never a real token;
@@ -161,13 +162,19 @@ describe("an external guest is gated", () => {
 });
 
 describe("switch off", () => {
-  it("a member sees only that it is off", async () => {
+  it("a member sees that it is off, and can still revoke their own tokens", async () => {
+    // Off does not revoke: the token is still active and would work again
+    // when the switch comes back on, so a lost laptop's token must be killable.
     userRef.current = { role: "family" };
     serve(state({ enabled: false, canCreate: false, tokens: [ROW] }));
     renderPage();
     expect(await screen.findByText(/your admin hasn.t turned this on/i)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Your tokens" })).toBeInTheDocument();
+    expect(screen.getByText("dlk_AbCd1234…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `Revoke ${ROW.label}` })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /renew/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /create token/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /revoke/i })).toBeNull();
+    expect(screen.queryByLabelText("Token name")).toBeNull();
     expect(screen.queryByText(/\/llm\/v1/)).toBeNull();
   });
 });
