@@ -328,22 +328,24 @@ export const MODULES: readonly ModuleDef[] = [
     // SHIPS DARK. `available` reads DOORS_ENABLED, an EXPLICIT boolean (the
     // DOCS_ENABLED idiom — never derived from another variable's emptiness),
     // so a box that has not turned it on has NO doors module: /api/doors 404s
-    // `module_disabled`, the module cannot be switched on in Settings, and it
-    // is not listed under Features. Absent, not empty.
+    // `module_disabled`, the module cannot be switched on in Settings, it is
+    // not listed under Features, and the `doors` tool domain below is withheld
+    // from the chat pool, `/api/llm/tools` and MCP (WARP-2972). Absent, not
+    // empty.
     //
     // `navHrefs: ["/doors"]` — the dashboard page arrived with P4b, and the
     // nav gates it on this module, so it is absent from every nav surface
     // while the flag is off. It is in no BUSINESS_TYPES preset: a box that
     // wants doors turns the flag on.
     //
-    // No tool domain yet: the two read-only chat tools wait on WARP-2972
-    // (module gating does not reach the chat pool for an owner or a role-less
-    // user), and the `doors` domain is claimed in the change that adds them
-    // (WARP-2742).
+    // `toolDomains: ["doors"]` — the two read-only assistant tools (P4b,
+    // WARP-3438), claimed in the same change that adds them (WARP-2742). The
+    // domain also joins `MODULE_OWNED_TOOL_DOMAINS` in @droplet/tools-core, which
+    // the mcp-server fails closed on (pinned by tool-module-verdict.service.test.ts).
     id: "doors", label: "Doors",
     description: "The doors this box knows about, and the log of what happened at them.",
     category: "operations", routePrefixes: ["/api/doors"], navHrefs: ["/doors"],
-    toolDomains: [], core: false, defaultEnabled: false,
+    toolDomains: ["doors"], core: false, defaultEnabled: false,
     // Absent from Settings → Features while the flag is off: a product decision
     // still open (AC-001) is not shown to a customer who was not offered it.
     listedWhenUnavailable: false,

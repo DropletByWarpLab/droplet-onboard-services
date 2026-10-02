@@ -24,6 +24,7 @@ import {
   isGrantableDomain,
   tierReachableDomains,
   FEATURE_UNGATED_TOOL_DOMAINS,
+  OWNERS_BY_DOMAIN,
   unmappedToolDomains,
 } from "./access-catalog.js";
 import { toolLayers } from "./tool-layers.service.js";
@@ -543,5 +544,9 @@ describe("access-catalog — doors (ADR-055)", () => {
       expect(fullCatalogFeatures(tier).some((f) => f.moduleId === "doors"), tier).toBe(false);
     }
     expect(fullCatalogFeatures("admin").find((f) => f.moduleId === "doors")).toEqual({ moduleId: "doors", level: "view" });
+  });
+
+  it("is claimed by exactly one module, and that module is `doors` (P4b: the two read-only assistant tools)", () => {
+    expect(OWNERS_BY_DOMAIN.get("doors")).toEqual(["doors"]);
   });
 });

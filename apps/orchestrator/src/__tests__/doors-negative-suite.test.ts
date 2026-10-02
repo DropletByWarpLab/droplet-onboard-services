@@ -5,7 +5,7 @@
  * ADR-055 (P4a) — the §14 cross-cutting NEGATIVE SUITE, the items that can
  * fail a build today:
  *
- *   1. no `doors_*` tool can unlock or write (P4a ships none; the guard is forward);
+ *   1. no `doors_*` tool can unlock or write (the two real reads, and the dispatch guard);
  *   2. no `/api/doors` route lacks the RBAC grant;
  *   3. no in-place AccessEvent UPDATE or DELETE — here, as source, and that no
  *      .ts file names the retention setting (the trigger itself is proved on
@@ -31,7 +31,7 @@ import { join, relative, resolve } from "node:path";
 import request from "supertest";
 import express, { type NextFunction, type Request, type Response } from "express";
 import type { ModuleId, PrismaClient } from "@prisma/client";
-import { TOOLS, TOOL_CATALOG, TOOL_ROUTES } from "@droplet/tools-core";
+import { TOOLS, TOOL_CATALOG, TOOL_ROUTES, isToolWithheldByModule } from "@droplet/tools-core";
 
 vi.mock("../services/activity.singleton.js", () => ({
   recordActivity: vi.fn().mockResolvedValue(null),
@@ -40,7 +40,7 @@ vi.mock("../services/activity.singleton.js", () => ({
 }));
 
 import { createDoorsRouter } from "../routes/doors.js";
-import { FEATURE_GATED_MODULES, mountModuleGates } from "../modules/module-mounts.js";
+import { FEATURE_GATED_MODULES, MCP_ACTING_USER_GATED_DOMAINS, mountMcpActingUserGates, mountModuleGates } from "../modules/module-mounts.js";
 import { MODULE_BY_ID, MODULES, type AvailabilityConfig } from "../modules/module-registry.js";
 import { createModuleGate } from "../middleware/module-gate.js";
 import { isRoleGuard } from "../middleware/auth.js";
@@ -48,6 +48,8 @@ import { readFeatureGateMeta } from "../middleware/feature-gate.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
 import { computeEffectiveIds, computeModuleStates, setModuleEnabled, ModuleToggleError } from "../services/modules.service.js";
 import { WRITE_TOOLS, VOICE_WRITE_TOOLS } from "../services/tool-access.service.js";
+import { withheldDomainsFor } from "../services/tool-module-verdict.service.js";
+import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
 import { alarmClaimsFor } from "../services/door-derivations.js";
 
 // ── the router, walked ────────────────────────────────────────────────────
@@ -107,12 +109,11 @@ function admitted(guard: Handle): string[] {
 // ── 1. no doors_* tool can unlock or write ────────────────────────────────
 
 describe("negative 1 — no doors_* tool can unlock or write (§11.5)", () => {
-  // P4a ships NO doors_* tool (the two reads arrive in P4b, when the module goes
-  // live), so these pass over an empty set today. They fail the day a tool in
-  // the namespace writes, or a tool route reaches /api/doors with anything but
-  // a GET. packages/tools-core/__tests__/doors-read-only.test.ts proves the
-  // same rule rejects a synthetic writing tool, so an empty pass is not vacuous.
   const doorsNames = [...TOOLS.keys()].filter((n) => n.startsWith("doors_")).sort();
+
+  it("the doors tools are exactly the two reads (not vacuous)", () => {
+    expect(doorsNames).toEqual(["doors_list", "doors_recent_events"]);
+  });
 
   it("none is a write tool, in the registry, the catalog or the derived WRITE_TOOLS set the RBAC tiers read", () => {
     for (const name of doorsNames) {
@@ -121,17 +122,37 @@ describe("negative 1 — no doors_* tool can unlock or write (§11.5)", () => {
       expect(WRITE_TOOLS.has(name), name).toBe(false);
       expect(VOICE_WRITE_TOOLS.has(name), name).toBe(false);
     }
-    for (const entry of TOOL_CATALOG.filter((e) => e.name.startsWith("doors_"))) {
+    for (const entry of TOOL_CATALOG.filter((e) => e.domain === "doors")) {
       expect(entry.requiresWrite, entry.name).toBe(false);
     }
   });
 
-  it("every route hop any tool makes to /api/doors is a GET, and to a GET route that exists", () => {
-    const hops = TOOL_ROUTES.flatMap((e) => e.hops.map((h) => ({ tool: e.tool, ...h }))).filter((h) => h.pathPattern.startsWith("/api/doors"));
-    for (const hop of hops) {
-      expect(hop.method, `${hop.tool} ${hop.pathPattern}`).toBe("get");
-      expect(READS.map((r) => `/api${r.path}`), hop.tool).toContain(hop.pathPattern);
+  it("every route hop a doors tool makes is a GET, and to a GET route that exists", () => {
+    for (const name of doorsNames) {
+      const entry = TOOL_ROUTES.find((e) => e.tool === name)!;
+      expect(entry.hops.length, name).toBeGreaterThan(0);
+      for (const hop of entry.hops) {
+        expect(hop.method, `${name} ${hop.pathPattern}`).toBe("get");
+        expect(READS.map((r) => `/api${r.path}`), name).toContain(hop.pathPattern);
+      }
     }
+  });
+
+  it("the doors tools are the only tools in the doors domain, and are NOT excluded from chat: the module gate keeps them off a box without doors (WARP-2972)", () => {
+    expect(TOOL_CATALOG.filter((e) => e.domain === "doors").map((e) => e.name).sort()).toEqual(doorsNames);
+    // The old workaround (an EXCLUDED_FROM_CHAT_TOOLS line "until WARP-2972") is
+    // gone; the domain is claimed by the `doors` module instead, so a module off
+    // withholds both tools from the chat pool, /api/llm/tools and MCP.
+    for (const name of doorsNames) expect(EXCLUDED_FROM_CHAT_TOOLS.has(name), name).toBe(false);
+    expect(MODULE_BY_ID.get("doors" as never)!.toolDomains).toEqual(["doors"]);
+  });
+
+  it("the dispatch guard is not the deny tier: it lives in the interceptor itself (proved in tools-core and mcp-server)", () => {
+    const src = readFileSync(resolve(__dirname, "../../../../packages/tools-core/src/interceptor.ts"), "utf8");
+    // The namespace check runs inside `intercept`, before the deny tier is consulted.
+    const intercept = src.slice(src.indexOf("intercept(tool, args, meta, now = Date.now())"));
+    expect(intercept.indexOf("readOnlyNamespaceBreach(tool)")).toBeGreaterThan(-1);
+    expect(intercept.indexOf("readOnlyNamespaceBreach(tool)")).toBeLessThan(intercept.indexOf("denyTier.evaluate"));
   });
 });
 
@@ -154,8 +175,8 @@ describe("negative 2 — no /api/doors route lacks the RBAC grant", () => {
     expect(route.handles.filter(isRoleGuard), route.key).toHaveLength(1);
   });
 
-  it.each(READS.map((r) => [r.key, r] as const))("%s admits owner and admin — nobody else, and no service principal", (_key, route) => {
-    expect(admitted(route.handles.find(isRoleGuard)!), route.key).toEqual(["owner", "admin"]);
+  it.each(READS.map((r) => [r.key, r] as const))("%s admits owner, admin and the MCP service principal — nobody else", (_key, route) => {
+    expect(admitted(route.handles.find(isRoleGuard)!), route.key).toEqual(["owner", "admin", "service:mcp"]);
   });
 
   it.each(WRITES.map((r) => [r.key, r] as const))(
@@ -170,18 +191,20 @@ describe("negative 2 — no /api/doors route lacks the RBAC grant", () => {
     expect(isRoleGuard(route.handles[1]), route.key).toBe(true);
   });
 
-  it("no router-level gate is used, and no route admits the MCP service principal (source)", () => {
+  it("no router-level gate is used, and no route is `requireRoleOrMcpService` on a write (source)", () => {
     const code = readFileSync(resolve(__dirname, "../routes/doors.ts"), "utf8")
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/^\s*\/\/.*$/gm, "");
-    // P4a has no doors tool, so nothing has a reason to reach these routes as the
-    // assistant. The reads join the MCP path in P4b, with their own gate.
-    expect(code).not.toMatch(/requireRoleOrMcpService/);
+    // The one MCP-admitting guard is bound to `read` and used only by the two GETs.
+    expect(code.match(/requireRoleOrMcpService\(/g) ?? []).toHaveLength(1);
+    expect(code).toMatch(/const read = requireRoleOrMcpService\(/);
+    expect(code).not.toMatch(/router\.(post|patch|put|delete)\([^)]*\bread\b/);
     expect(code).not.toMatch(/router\.use\(/);
   });
 
-  it("the module carries a per-person grant: feature-gated and in the access catalog", () => {
+  it("the module carries a per-person grant: feature-gated, in the access catalog, and acting-user gated for the MCP path", () => {
     expect(FEATURE_GATED_MODULES.has("doors")).toBe(true);
+    expect(MCP_ACTING_USER_GATED_DOMAINS).toContain("doors");
   });
 
   // The composition, driven for real: every route, through the real gates.
@@ -197,6 +220,8 @@ describe("negative 2 — no /api/doors route lacks the RBAC grant", () => {
     toggle?: boolean | "none";
     grants: Array<{ moduleId: string; level: string }>;
     user: { id: string; role: string; username?: string };
+    acting?: { domains: string[] } | null;
+    actingTier?: string;
   }) {
     const prisma = {
       moduleSetting: {
@@ -215,6 +240,16 @@ describe("negative 2 — no /api/doors route lacks the RBAC grant", () => {
     });
     const resolve = features(opts.grants);
     mountModuleGates(app, createModuleGate(prisma, opts.cfg, 0), resolve);
+    mountMcpActingUserGates(
+      app,
+      (async () => ({
+        scope: opts.acting === null || opts.acting === undefined ? null : { domains: new Set(opts.acting.domains), writeDomains: new Set(), locks: false },
+        tier: opts.actingTier ?? "admin",
+        unresolved: null,
+        userId: "u-1",
+      })) as never,
+      resolve,
+    );
     app.use("/api", createDoorsRouter(prisma));
     return app;
   }
@@ -258,19 +293,45 @@ describe("negative 2 — no /api/doors route lacks the RBAC grant", () => {
     },
   );
 
-  it.each(ROUTES.map((r) => [r.key, r] as const))(
-    "%s: the MCP service principal is refused (403) even with the module on and the grant held — the assistant has no doors surface in P4a",
+  it.each(READS.map((r) => [r.key, r] as const))(
+    "%s: the MCP principal acting for a person without the doors domain gets 404; with it, the read goes through",
     async (_key, route) => {
-      const app = buildApp({
+      const denied = buildApp({
         cfg: CFG_ON,
         toggle: true,
         grants: [{ moduleId: "doors", level: "view" }],
         user: { id: "_service:mcp", role: "service" },
+        acting: { domains: ["files"] },
       });
-      const res = await call(app, route);
-      expect(res.status, route.key).toBe(403);
+      const deniedRes = await request(denied).get(concrete(route)).set("X-Nextcloud-User", "sam");
+      expect(deniedRes.status).toBe(404);
+
+      const allowed = buildApp({
+        cfg: CFG_ON,
+        toggle: true,
+        grants: [{ moduleId: "doors", level: "view" }],
+        user: { id: "_service:mcp", role: "service" },
+        acting: { domains: ["doors"] },
+      });
+      const okRes = await request(allowed).get(concrete(route)).set("X-Nextcloud-User", "sam");
+      expect(okRes.status).toBe(200);
     },
   );
+
+  it("the MCP principal acting for a STAFF person (family tier) is refused even holding the doors grant and domain — the assistant never reads what the browser would 403", async () => {
+    const staff = buildApp({
+      cfg: CFG_ON,
+      toggle: true,
+      grants: [{ moduleId: "doors", level: "view" }],
+      user: { id: "_service:mcp", role: "service" },
+      acting: { domains: ["doors"] },
+      actingTier: "family",
+    });
+    for (const r of READS) {
+      const res = await request(staff).get(concrete(r)).set("X-Nextcloud-User", "sam");
+      expect(res.status, r.key).toBe(404);
+    }
+  });
 
   it("with the grant held, an admin reads but the door-changing routes still refuse them (403, not 404: the module is theirs, the authority is not)", async () => {
     const app = buildApp({
@@ -458,21 +519,29 @@ describe("negative 5 — the module is ABSENT when DOORS_ENABLED is off", () => 
     expect(res.body).toEqual({ error: "module_disabled", module: "doors" });
   });
 
-  it("absent means absent everywhere: not in Features, and nothing the assistant or the nav could list", () => {
+  it("absent means absent everywhere: not in Features, not in the nav, and in no tool list the assistant or MCP could build", () => {
     const doors = MODULE_BY_ID.get("doors" as ModuleId)!;
     // Settings → Features: the module opts out of the "Not installed" row.
     expect(doors.listedWhenUnavailable).toBe(false);
     // Its nav entry is gated on this module in the dashboard (nav-config.ts, and
     // pinned there), and no preset switches the module on.
     expect(doors.navHrefs).toEqual(["/doors"]);
-    // /tools, /api/llm/tools and MCP tools/list are all built from the tools-core
-    // registry and catalog. There is no doors tool and no doors domain, so there
-    // is nothing for any of them to list. The tools wait on WARP-2972 (module
-    // gating reaching the chat pool); the change that adds them replaces this pin
-    // with the module gate that hides them.
-    expect(doors.toolDomains).toEqual([]);
-    expect([...TOOLS.keys()].filter((n) => n.startsWith("doors_"))).toEqual([]);
-    expect(TOOL_CATALOG.filter((e) => e.name.startsWith("doors_") || (e.domain as string) === "doors")).toEqual([]);
+    // /tools, /api/llm/tools, the chat pool and MCP tools/list are all built from
+    // the tools-core registry and catalog (P4b adds the two read tools). The module
+    // CLAIMS their domain, so WARP-2972's one predicate withholds both whenever the
+    // module is not effective. The surfaces themselves are driven in
+    // doors.tools-module-gate.test.ts and mcp-server's doors-dispatch.test.ts; here,
+    // that the flag off puts the domain, and with it BOTH tools, in the withheld set.
+    expect(doors.toolDomains).toEqual(["doors"]);
+    const names = TOOL_CATALOG.filter((e) => (e.domain as string) === "doors").map((e) => e.name).sort();
+    expect(names).toEqual(["doors_list", "doors_recent_events"]);
+    for (const on of [true, false] as const) {
+      // An enabling Settings row does not matter while the flag is off: the module is unavailable.
+      const box = computeEffectiveIds(new Map<ModuleId, boolean>([["doors" as ModuleId, on]]), REGISTRY_CFG(false));
+      expect(box.has("doors" as ModuleId), `flag off, row ${on}`).toBe(false);
+      const verdict = { withheldDomains: withheldDomainsFor(box) };
+      for (const name of names) expect(isToolWithheldByModule(name, verdict), `${name} / row ${on}`).toBe(true);
+    }
   });
 
   it("the registry's own `available` is the only thing that reads the flag (no second derivation)", () => {

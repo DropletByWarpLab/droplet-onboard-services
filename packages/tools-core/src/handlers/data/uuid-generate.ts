@@ -42,7 +42,7 @@ async function handler(
 const tool: Tool = {
   name: "uuid_generate",
   description:
-    "Generate one or more RFC 4122 v4 UUIDs. Optional `count` (default 1, max 100). Tier-1 read; pure computation.",
+    "Generate one or more RFC 4122 v4 UUIDs. Optional `count` (default 1, max 100). Pure computation.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

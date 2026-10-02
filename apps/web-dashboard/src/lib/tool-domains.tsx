@@ -17,6 +17,7 @@ import {
   Camera,
   Cloud,
   Contact,
+  DoorOpen,
   FolderOpen,
   HardDrive,
   Heater,
@@ -91,6 +92,9 @@ export const DOMAIN_META: Record<string, DomainMeta> = {
   // WARP-2979 (ADR-059 P4) — the read-only Security tools. Label and icon
   // match the /security nav entry.
   security: { label: "Security", icon: Shield },
+  // ADR-055 (P4b) — doors_list / doors_recent_events. Label and icon match the
+  // /doors nav entry.
+  doors: { label: "Doors", icon: DoorOpen },
 };
 
 /** Title-case a slug as a last resort: `smart-home` → `Smart home`. */

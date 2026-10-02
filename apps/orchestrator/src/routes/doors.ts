@@ -1,8 +1,8 @@
 /**
  * ADR-055 (P4a) — the doors control-plane API.
  *
- *    1  GET   /api/doors                  list doors          owner, admin
- *    2  GET   /api/doors/events           recent events       owner, admin
+ *    1  GET   /api/doors                  list doors          owner, admin (+ the MCP service principal)
+ *    2  GET   /api/doors/events           recent events       owner, admin (+ the MCP service principal)
  *    3  POST  /api/doors                  create a door       owner ONLY
  *    4  PATCH /api/doors/:id              update a door       owner ONLY
  *    5  POST  /api/doors/:id/retire       retire a door       owner ONLY
@@ -17,10 +17,15 @@
  * WHO. Reads floor at `admin`: with no per-door-group grants yet (§11.4 — they
  * depend on AC-017) the module's own grant is the only narrowing, and access
  * logs identify people entering places at times, so this is default-deny.
- * Writes are `owner` alone (§11.4: "Not admin"). No route admits the MCP
- * service principal: the assistant has no doors tool in P4a, and §11.5 says
- * it may never change a door. The read tools arrive in P4b, when the module
- * goes live, and will need their own admission and acting-user gate then.
+ * Writes are `owner` alone (§11.4: "Not admin"), and never
+ * `requireRoleOrMcpService`: the assistant can read doors and can never
+ * change one (§11.5). Reads DO admit `_service:mcp` — that is how the two
+ * `doors_*` tools (P4b) reach them — and `doors` is an acting-user gated
+ * domain (MCP_ACTING_USER_GATED_DOMAINS), so the call is narrowed by the
+ * acting person's own tool scope, `doors` grant and tier: the access catalog's
+ * `view` floor for doors is the same fact as these role lists
+ * (services/doors-access.ts, pinned equal). The assistant never reads more
+ * than the person it acts for could.
  *
  * Literal paths come before `:id` paths. Errors are `{error: {code, message,
  * issues?}}` (the dashboard's apiFetch shape), and a failed read is a 503,
@@ -29,8 +34,9 @@
 import { Router, type Request, type Response } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
-import { requireRole } from "../middleware/auth.js";
+import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { sensitiveRateLimit } from "../middleware/rate-limit.js";
+import { DOORS_READ_ROLES, DOORS_WRITE_ROLES } from "../services/doors-access.js";
 import {
   DOOR_EVENTS_DEFAULT_LIMIT,
   DOOR_EVENTS_MAX_LIMIT,
@@ -47,16 +53,6 @@ import {
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("doors-routes");
-
-/**
- * Reads floor at admin: with no per-door-group grants yet (§11.4 — they depend
- * on AC-017) the module's own grant is the only narrowing, and access logs
- * identify people entering places at times. Default-deny; widening to `family`
- * is this list and the access catalog's `view` floor. Writes are the owner
- * alone (§11.4: "Not admin").
- */
-const READ_ROLES = ["owner", "admin"] as const;
-const WRITE_ROLES = ["owner"] as const;
 
 const source = z.enum(["lock", "dp1", "none"]);
 /** Raw cap before normalising — the real rule (1–80 characters, nothing that reorders text) is normaliseDoorName's. */
@@ -105,9 +101,9 @@ export interface DoorsRouteDeps {
 
 export function createDoorsRouter(prisma: PrismaClient, deps: DoorsRouteDeps = {}): Router {
   const router = Router();
-  const read = requireRole(...READ_ROLES);
+  const read = requireRoleOrMcpService(...DOORS_READ_ROLES);
   /** Built per route, so each write carries its own gate. */
-  const write = () => [sensitiveRateLimit, requireRole(...WRITE_ROLES)];
+  const write = () => [sensitiveRateLimit, requireRole(...DOORS_WRITE_ROLES)];
   const ctx = (req: Request) => ({ req, now: deps.now?.() ?? new Date() });
 
   // ── 1. the doors ──────────────────────────────────────────────────────
