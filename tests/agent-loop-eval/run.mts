@@ -253,6 +253,10 @@ async function runCase(c: Case, repeat: number, window: number, script: any[] | 
       prior_tool_names: priorToolNames,
       allowed_tools: undefined, toolAccessScope: null,
       toolCallContext: { userId: USER, userRole: "owner" },
+      // The eval world is a box with every module on. Without an explicit
+      // verdict the loop resolves one for USER, which nothing wires here,
+      // so it fails closed and withholds every module-owned tool (WARP-2972).
+      moduleVerdict: { withheldDomains: new Set<string>() },
       captureReasoning: true,
     });
     const content = typeof res.message?.content === "string" ? res.message.content : JSON.stringify(res.message?.content ?? "");
