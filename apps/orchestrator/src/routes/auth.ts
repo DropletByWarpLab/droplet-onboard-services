@@ -1507,9 +1507,9 @@ export function createPublicAuthRouter(
   // ── Refresh: exchange refresh token for new access token ──
   router.post("/auth/refresh", sensitiveRateLimit, async (req, res, next) => {
     try {
-      // ADR-008: native clients (iOS / Android / Tauri Win) POST the
-      // refresh token in the JSON body since they can't read httpOnly
-      // cookies. Browsers continue to use the REFRESH_COOKIE_NAME cookie
+      // ADR-008: native clients (iOS / Android / the ADR-062 desktop
+      // clients) POST the refresh token in the JSON body since they can't
+      // read httpOnly cookies. Browsers continue to use the REFRESH_COOKIE_NAME cookie
       // set by /auth/login. Body takes precedence if both are present
       // so a mobile client deliberately rotating doesn't get blocked by
       // a stale cookie.

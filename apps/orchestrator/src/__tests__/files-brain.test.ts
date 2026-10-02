@@ -257,7 +257,7 @@ vi.mock("@prisma/client", () => {
     },
   };
   return {
-    PrismaClient: vi.fn(() => mockPrisma),
+    PrismaClient: vi.fn(function () { return mockPrisma; }),
     Prisma: { PrismaClientKnownRequestError: class extends Error {} },
     // WARP-218: route imports BrainMemoryItemStatus directly to pick the
     // initial status by MIME — the mock has to surface the same enum

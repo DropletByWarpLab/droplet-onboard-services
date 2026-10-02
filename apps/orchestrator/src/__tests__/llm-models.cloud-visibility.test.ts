@@ -97,7 +97,7 @@ vi.mock("../services/ai-gateway.client.js", () => ({
 }));
 
 vi.mock("../services/chat-persistence.service.js", () => ({
-  ChatPersistenceService: vi.fn().mockImplementation(() => ({})),
+  ChatPersistenceService: vi.fn().mockImplementation(function () { return {}; }),
 }));
 
 // `defaultModel` is stamped from a settings read; unset here so the field

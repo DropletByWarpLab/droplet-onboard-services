@@ -18,14 +18,16 @@ __setColumnCryptoKeyForTest(Buffer.alloc(32, 42).toString("base64"));
 // --- Mock ioredis ---
 // Disable caching in tests to avoid stale data between test cases
 vi.mock("ioredis", () => {
-  const RedisMock = vi.fn().mockImplementation(() => ({
-    connect: vi.fn().mockResolvedValue(undefined),
-    get: vi.fn().mockResolvedValue(null),    // Always cache miss
-    set: vi.fn().mockResolvedValue("OK"),    // Accept but don't store
-    del: vi.fn().mockResolvedValue(1),
-    ping: vi.fn().mockResolvedValue("PONG"),
-    disconnect: vi.fn(),
-  }));
+  const RedisMock = vi.fn().mockImplementation(function () {
+    return {
+      connect: vi.fn().mockResolvedValue(undefined),
+      get: vi.fn().mockResolvedValue(null),    // Always cache miss
+      set: vi.fn().mockResolvedValue("OK"),    // Accept but don't store
+      del: vi.fn().mockResolvedValue(1),
+      ping: vi.fn().mockResolvedValue("PONG"),
+      disconnect: vi.fn(),
+    };
+  });
   return { default: RedisMock };
 });
 
@@ -255,7 +257,7 @@ vi.mock("@prisma/client", () => {
   }).$transaction;
 
   return {
-    PrismaClient: vi.fn(() => mockPrisma),
+    PrismaClient: vi.fn(function () { return mockPrisma; }),
     // Mirrors the generated client's top-level enum exports (const objects
     // whose values equal their keys). off-lan-gate.service.ts imports the
     // `OffLanChannelKey` value to key its `offLanAllowlistChannel.findUnique`

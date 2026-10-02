@@ -1,5 +1,14 @@
 # Handoff — Windows remote access: ship vpnd in the installer, finish the WARP-1388 away-mode connect flow
 
+> **Historical (2026-09-26).** This packet describes the Tauri shell, which
+> [ADR-062](../ADR-062-native-desktop-clients.md) replaces with a native C# /
+> WinUI 3 client; the Tauri tree is retired under WARP-3233. Its client-side
+> paths (`src-tauri/…`, `tauri.bundle.conf.json`, the NSIS hooks) no longer
+> describe what gets built. vpnd itself is kept (ADR-062 row 7): the native
+> client's per-machine MSI carries it, and WARP-2079 continues as the native
+> client's overlay enrolment and remote-access page. The box-side facts below
+> may still help, but re-verify them against `stage` before building on them.
+
 > Part of the WARP-1382 remote-access epic (ADR-031 own WG overlay; ADR-037 key custody;
 > ADR-040 blind-relay fallback). Written 2026-08-16 against droplet-windows `main` with the
 > week's hardening PRs assumed merged (windows #32 tolerant candidate parsing is already in
