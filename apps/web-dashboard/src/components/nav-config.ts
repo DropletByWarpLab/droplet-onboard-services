@@ -51,6 +51,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   Stethoscope,
+  Terminal,
   Trash2,
   Clock,
   Share2,
@@ -780,6 +781,21 @@ export const NAV_GROUPS: NavGroup[] = [
         hidden: true,
         settingsSection: "System",
         settingsBlurb: "Local models and any cloud provider you opted into",
+      },
+      // WARP-3452 — personal tokens that let GitHub Copilot and other coding
+      // tools use the box's active model over `/llm/`. Beside Models, whose
+      // active model is what it serves. owner/admin/member mirrors the API: an
+      // external guest can never hold a token (GET /api/llm-access answers 403),
+      // so the row is not offered to them.
+      {
+        href: "/settings/coding-tools",
+        label: "Coding tools",
+        icon: Terminal,
+        roles: ["owner", "admin", "family"],
+        keywords: ["copilot", "api key", "token", "ollama", "vs code", "coding agent"],
+        hidden: true,
+        settingsSection: "System",
+        settingsBlurb: "Use the box's model from Copilot and other coding tools",
       },
       // PR #382: appliance/service health status page. Reads the existing
       // WARP-43 aggregate.

@@ -161,7 +161,16 @@ export const SPACES: SpaceDef[] = [
     // Ask AI · Knowledge · Context · Models · Tools, plus the WARP-2823
     // Assistant inspector — it explains what the assistant can reach, which is
     // this space's subject even though nav-config files it under Admin.
-    hrefs: ["/chat", "/knowledge", "/context", "/models", "/tools", "/admin/prompt"],
+    // WARP-3452 — Coding tools sits beside Models, whose model it serves.
+    hrefs: [
+      "/chat",
+      "/knowledge",
+      "/context",
+      "/models",
+      "/settings/coding-tools",
+      "/tools",
+      "/admin/prompt",
+    ],
   },
   {
     id: "admin",
