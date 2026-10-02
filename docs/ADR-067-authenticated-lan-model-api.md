@@ -12,7 +12,7 @@ The obvious way, publishing the runtime's port on the LAN, is ruled out:
 
 - Neither runtime checks credentials. Ollama's local API does not require authentication, and Docker Model Runner (DMR, the default since WARP-1870) ignores the `Authorization` header.
 - Their model-management endpoints are where the published vulnerabilities live: CVE-2024-37032 (`/api/pull`), CVE-2025-63389 (no auth on model management), CVE-2026-7482 (`/api/blobs` + `/api/create` + `/api/push`). On DMR, `POST /models/create` makes the box fetch an artifact of the caller's choosing, which ADR-036 calls a hard stop if reachable.
-- ADR-036 §6 binds the runtime to loopback and the compose network only. The single-box compose publishes Ollama on `127.0.0.1:11434` and DMR on `127.0.0.1:12434`.
+- ADR-036 §6 binds the runtime to loopback and the compose network only. The single-box compose publishes Ollama on `127.0.0.1:11434` and DMR on `127.0.0.1:12434`. That keeps the runtime off the box's host ports, but today the compose network itself is not sealed: on the single-box shape the OpenWrt container routes the guest Wi-Fi zone (and the staff Wi-Fi in routed-AP mode) onto it, so those clients can reach the unauthenticated runtime at its container address ([WARP-3454](https://warp-lab.atlassian.net/browse/WARP-3454), High, open). That is a defect in the network shape, not part of this design.
 
 The Foundation says the local AI "can *see* the network and *manage* the network, but is never *exposed* to it", and that "everything crossing the boundary is screened in both directions … default-deny and audited". It does not say whether "exposed" means the WAN or also the trusted LAN. Serving model tokens to authenticated colleagues on the LAN needs that question decided in writing.
 
@@ -34,7 +34,9 @@ An endpoint for coding tools is consistent with the Foundation when all five of 
 
 ### 2. The runtime itself stays where ADR-036 put it
 
-Nothing in this ADR changes a bind. The runtime stays on loopback and the compose network. ai-gateway is the only thing that talks to it, as it is today for the box's own chat. `/llm/` is a new router in ai-gateway behind a new nginx `location`, not a new listener.
+Nothing in this ADR changes a bind. The runtime stays on loopback and the compose network, and ai-gateway is the only component meant to talk to it, as it is today for the box's own chat. `/llm/` is a new router in ai-gateway behind a new nginx `location`, not a new listener.
+
+The five properties in §1 describe `/llm/`, and `/llm/` is token-gated on every path, guest Wi-Fi included. They do not describe the raw runtime: until WARP-3454 lands, guest Wi-Fi (and the staff Wi-Fi in routed-AP mode) can route to its compose address directly, management surface included. Closing that path is WARP-3454's job; this ADR neither opens nor closes it.
 
 ### 3. The box's own work comes first
 
@@ -56,12 +58,12 @@ External requests run at AUTOMATION priority in ai-gateway's inference scheduler
 
 - The Foundation's "never exposed" is now defined for the LAN: reachability is forbidden, authenticated, allowlisted, default-off, audited service is allowed. A future proposal that serves the LAN without all five properties in §1 does not meet it.
 - WARP-2780 (the droplet-local-LLM two-box compose publishing Ollama on `0.0.0.0:11434`) has a replacement: once `/llm/` reaches the inference host through ai-gateway, that publish can be removed.
-- `docs/THREAT_MODEL.md` T5.4 is corrected in the same change: the runtime is not a LAN listener.
+- `docs/THREAT_MODEL.md` T5.4 and T2.8 are corrected in the same change: the runtime's host ports are loopback-only, but its compose address is reachable from guest Wi-Fi (and the staff Wi-Fi in routed-AP mode) until WARP-3454 lands.
 - Copilot code completions never use a bring-your-own model, so this serves chat and agent mode only. The Settings page says so.
 - Widening to "all installed models" would let a coding tool evict the box's own chat model on a single GPU. That stays a later, separate decision.
 
 ## References
 
-- WARP-3452 (this work), WARP-2780, WARP-3414 (certificate fingerprint for self-signed boxes), WARP-3377 (the unaudited module switches this does not repeat).
+- WARP-3452 (this work), WARP-3454 (guest Wi-Fi routes to compose container addresses), WARP-2780, WARP-3414 (certificate fingerprint for self-signed boxes), WARP-3377 (the unaudited module switches this does not repeat).
 - `shared_brain/FOUNDATION.md` § "The core principle".
 - `docs/ADR-036-inference-runtime-abstraction.md` §6.
