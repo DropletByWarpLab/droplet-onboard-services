@@ -18,6 +18,7 @@ import { mountModuleGates } from "../modules/module-mounts.js";
 import { MODULE_BY_ID, MODULES, type AvailabilityConfig } from "../modules/module-registry.js";
 import { createModuleGate } from "../middleware/module-gate.js";
 import { createDoorsRouter } from "../routes/doors.js";
+import { TOOLS } from "@droplet/tools-core";
 import {
   DoorsWiringError,
   assertDoorsWired,
@@ -170,6 +171,28 @@ describe("DOORS_ENABLED on — every list downstream of the descriptor", () => {
     registerJobs();
     const p = await problemsOf(assertDoorsWired({ app: buildApp({ gates: false }), config: ON, prisma: db() }));
     expect(p.join("\n")).toMatch(/module gates/i);
+  });
+
+  it("the chat tools not in the registry, or claimed by no module", async () => {
+    registerJobs();
+    const noTools = new Map([...TOOLS].filter(([n]) => !n.startsWith("doors_")));
+    const p1 = await problemsOf(assertDoorsWired({ app: buildApp(), config: ON, prisma: db() }, { tools: noTools as never }));
+    expect(p1.join("\n")).toMatch(/doors_list is not registered/);
+    const p2 = await problemsOf(
+      assertDoorsWired({ app: buildApp(), config: ON, prisma: db() }, { ownersByDomain: new Map() }),
+    );
+    expect(p2.join("\n")).toMatch(/tool domain `doors` is claimed by no module/);
+  });
+
+  it("a tool whose route is not mounted — registered but dead", async () => {
+    registerJobs();
+    const p = await problemsOf(
+      assertDoorsWired(
+        { app: buildApp(), config: ON, prisma: db() },
+        { toolRoutes: [{ tool: "doors_list", client: "orchestrator", hops: [{ method: "get", pathPattern: "/api/doors/nowhere", kind: "admit" }] }] },
+      ),
+    );
+    expect(p.join("\n")).toMatch(/doors_list.*GET \/api\/doors\/nowhere/);
   });
 
   it("the retention job never registered", async () => {

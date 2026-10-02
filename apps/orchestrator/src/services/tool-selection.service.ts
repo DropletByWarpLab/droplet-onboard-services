@@ -321,6 +321,17 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // sentence, "is it normal for someone to be in the stock room at 2 AM?",
   // matched none of the words above.
   { pattern: /\b(security|incidents?|flagged|after[- ]hours|overnight|last night|while (we|i) (were|was) (out|away|closed)|break[- ]?ins?|intruders?|suspicious|unusual|anything (odd|strange|weird|unusual)|out of place|tamper(ed|ing)?|went (dark|offline)|areas?|cover(ed|age)|acknowledg(e|ed|ement)|closed up|site mode|opening hours|alerts?|offline|(anyone|anybody|someone) (in|at) the|(is|was) (it|that|this) (normal|usual)|what(['’]?s| is) (normal|usual))\b/i, domains: ["security"] },
+  // ADR-055 P4b (WARP-3438) — Doors: what each door last reported, and what
+  // happened at them. The words people use for the door itself and for a door
+  // that is not shut. "front door" / "back door" already pull `cameras` (the
+  // WARP-1921 places) and "who came in" pulls it too: a word in two rules brings
+  // in both domains, and a false-positive domain is cheap (see the rule comment
+  // above). Whole words only: `outdoor` / `indoor` are not doors, and `doorbell`
+  // is the camera rule's. Never core: two schemas on every turn would pay for a
+  // question most turns never ask, and on a box with no doors module the tools
+  // are not in the pool at all (WARP-2972), so this rule then matches a domain
+  // with nothing to advertise, like any rule whose module is off.
+  { pattern: /\b(doors?|doorways?|ajar|(forced|held|left|propped|stuck) open)\b/i, domains: ["doors"] },
   { pattern: /\b(calendar|meetings?|appointments?|events?|schedule|agenda|busy|free time|what'?s on)\b/i, domains: ["calendar"] },
   // WARP-2454 — AVAILABILITY, BOUNDED TO A TEMPORAL CUE.
   //
