@@ -7,6 +7,13 @@
  * compliance-progress.md. The dashboard polls every 30s with
  * `If-Modified-Since`; we honor that with a `Last-Modified` reply.
  *
+ * SHIPS DARK (WARP-3433). This is Warp Lab's own engineering dashboard, not a
+ * customer feature: app.ts mounts the router only when the developer flag
+ * DROPLET_DEV_ENGINEERING_DASHBOARD is on, and the handler answers as if the
+ * route did not exist (falls through to the 404) unless the `claudeActivity`
+ * capability is true, so nothing here ever dials GitHub or Jira on a customer
+ * box. Without a GitHub token no GitHub call is made.
+ *
  * Auth: admin-only. We reuse the same `role === "owner" || role === "admin"`
  * check used by other admin routes (see activity.ts). LAN-only by ops policy
  * — the gateway is the only inbound path; this endpoint adds nothing past
@@ -34,6 +41,10 @@ import {
 import { createLogger } from "../lib/logger.js";
 import { recordAccessDenied } from "../middleware/auth.js";
 import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
+import {
+  claudeActivityEnabled,
+  githubConfigured,
+} from "../services/claude-activity/enabled.js";
 
 const logger = createLogger("admin-claude-activity");
 
@@ -56,6 +67,12 @@ export function createAdminClaudeActivityRouter(): Router {
   router.get(
     "/admin/claude-activity",
     async (req: Request, res: Response, next: NextFunction) => {
+      // WARP-3433: absent, not forbidden — the same 404 any unknown route gets,
+      // before the role check, so it does not even confirm the page exists.
+      if (!claudeActivityEnabled()) {
+        next();
+        return;
+      }
       if (!isOwnerOrAdmin(req)) {
         // WARP-1062 (audit item B): emit the WARP-237 policy-violation row —
         // local isAdmin() denials must not be silent (requireRole parity).
@@ -70,10 +87,13 @@ export function createAdminClaudeActivityRouter(): Router {
         // its leaf returns an empty/unconfigured shape, never a 500.
         const [session, github, jira, compliance] = await Promise.all([
           readSessionState(),
-          getGitHubSnapshot().catch((err) => {
-            logger.warn({ err }, "github snapshot failed");
-            return null;
-          }),
+          // No token, no GitHub call: null renders "GitHub unavailable".
+          githubConfigured()
+            ? getGitHubSnapshot().catch((err) => {
+                logger.warn({ err }, "github snapshot failed");
+                return null;
+              })
+            : Promise.resolve(null),
           getJiraSnapshot().catch((err) => {
             logger.warn({ err }, "jira snapshot failed");
             return null;

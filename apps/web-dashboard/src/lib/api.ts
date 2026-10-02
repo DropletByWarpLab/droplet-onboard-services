@@ -7762,7 +7762,7 @@ export async function fetchToolCatalog(): Promise<ToolCatalogResponse> {
 // --- Admin capabilities (nav-gating for optional admin surfaces) ---
 
 export interface AdminCapabilities {
-  /** /admin/claude-activity is wired (GitHub token OR Jira configured). */
+  /** /admin/claude-activity is on: the developer flag DROPLET_DEV_ENGINEERING_DASHBOARD (off on customer boxes) AND a GitHub token or Jira. */
   claudeActivity: boolean;
   /** /admin/rag-eval is wired (RAG_EVAL_URL set). */
   ragEval: boolean;

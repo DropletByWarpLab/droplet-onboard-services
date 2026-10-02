@@ -706,7 +706,13 @@ export function createApp(
   app.use("/api", createApsRouter(prisma));
   // WARP-279: meta-observability dashboard for admin/owner roles. Aggregates
   // session-state.json + GitHub + Jira + compliance-progress.md.
-  app.use("/api", createAdminClaudeActivityRouter());
+  // WARP-3433: Warp Lab's own engineering dashboard, not a customer feature —
+  // ships dark and dark means ABSENT (as DOORS_ENABLED): not mounted, so
+  // /api/admin/claude-activity is a plain 404, unless a developer sets
+  // DROPLET_DEV_ENGINEERING_DASHBOARD=1. setup.sh and compose never do.
+  if (config.DROPLET_DEV_ENGINEERING_DASHBOARD) {
+    app.use("/api", createAdminClaudeActivityRouter());
+  }
   // WARP-230: device-identity admin routes. GET /status + POST /reseal,
   // both gated by admin role; reseal additionally requires recent MFA.
   // The gRPC client is constructed once per orchestrator instance; the
