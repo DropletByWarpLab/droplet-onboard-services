@@ -1,4 +1,5 @@
-"""WARP-3429 — unit tests for scan-ghcr-secrets.py's local (`docker save`) mode.
+"""WARP-3429 — unit tests for scan-ghcr-secrets.py (local `docker save` mode,
+baseline gate, per-key config fingerprints, gitleaks config, shard/digests).
 
 publish-release.yml scans every freshly built image between `docker build` and
 `docker push`, and refuses to push on a finding. The gate only means something
@@ -14,13 +15,16 @@ Run locally / in CI:
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import importlib.util
 import io
 import json
 import os
+import re
 import sys
 import tarfile
+import types
 from pathlib import Path
 
 import pytest
@@ -29,6 +33,7 @@ _spec = importlib.util.spec_from_file_location(
     "scan_ghcr_secrets", Path(__file__).parent / "scan-ghcr-secrets.py")
 scan = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(scan)
+_REAL_GITLEAKS = scan.gitleaks  # the autouse fixture below swaps scan.gitleaks for a stub
 
 MARKER = b"FAKE-SECRET"
 CREDS = {"app/creds.txt": b"token=" + MARKER + b"\n"}
@@ -143,15 +148,194 @@ class TestLayers:
         assert "\nfake-rule app/creds.txt\n" in out
 
 
+SECRET = MARKER.decode()
+
+
+def secret_config():
+    """An image config whose Env, labels and build history all carry a credential."""
+    return {
+        "config": {"Env": ["PATH=/usr/bin", f"API_KEY={SECRET}", f"DB_PASS={SECRET}"],
+                   "Labels": {"build.token": SECRET}, "Cmd": ["serve"]},
+        "history": [{"created_by": f"ENV TOKEN={SECRET}"}, {"created_by": "RUN true"}],
+    }
+
+
 class TestConfig:
-    def test_secret_in_the_image_config_is_a_non_vendor_finding(self, tmp_path, run):
+    def test_findings_are_fingerprinted_per_key(self, tmp_path, run):
         # A build arg / ENV that carries a credential lands in the config, not a layer.
-        config = {"config": {"Env": ["API_KEY=" + MARKER.decode()]}}
-        rc, out, records = run(docker_save(tmp_path / "i.tar", [{"app/a.txt": b"ok\n"}], config=config),
-                               "--fail-on-app")
+        archive = docker_save(tmp_path / "i.tar", [{"app/a.txt": b"ok\n"}], config=secret_config())
+        rc, out, records = run(archive, "--fail-on-app")
         assert rc == 1
-        assert [(r["file"], r["class"]) for r in records] == [("config.json", "config")]
-        assert "\nfake-rule config.json\n" in out
+        assert {r["class"] for r in records} == {"config"}
+        files = [r["file"] for r in records]
+        assert [f for f in files if not f.startswith("config.json#history.")] == [
+            "config.json#Env.API_KEY", "config.json#Env.DB_PASS", "config.json#Labels.build_token"]
+        history = [f for f in files if f.startswith("config.json#history.")]
+        assert len(history) == 1 and re.fullmatch(r"config\.json#history\.[0-9a-f]{12}", history[0])
+        assert "config.json" not in files  # never one fingerprint for the whole config
+        # The lines the failing step prints for the baseline name the key.
+        assert "\nfake-rule config.json#Env.API_KEY\n" in out
+        assert "\nfake-rule config.json#Env.DB_PASS\n" in out
+
+    def test_baselining_one_key_does_not_excuse_another(self, tmp_path, run, baseline):
+        archive = docker_save(tmp_path / "i.tar", [{"app/a.txt": b"ok\n"}], config=secret_config())
+        rc, out, _ = run(archive, "--fail-on-app", "--baseline", baseline("fake-rule config.json#Env.API_KEY\n"))
+        assert rc == 1
+        assert "\nfake-rule config.json#Env.DB_PASS\n" in out
+        assert "\nfake-rule config.json#Env.API_KEY\n" not in out
+
+    @pytest.mark.parametrize("entry", ["fake-rule config.json", "other-rule config.json#Env.API_KEY"])
+    def test_no_baseline_line_covers_the_whole_config(self, tmp_path, run, baseline, entry):
+        config = {"config": {"Env": [f"API_KEY={SECRET}"]}}
+        archive = docker_save(tmp_path / "i.tar", [{"app/a.txt": b"ok\n"}], config=config)
+        rc, _, _ = run(archive, "--fail-on-app", "--baseline", baseline(entry))
+        assert rc == 1
+
+    def test_every_config_key_baselined_passes(self, tmp_path, run, baseline):
+        config = {"config": {"Env": [f"API_KEY={SECRET}"]}}
+        archive = docker_save(tmp_path / "i.tar", [{"app/a.txt": b"ok\n"}], config=config)
+        rc, _, records = run(archive, "--fail-on-app", "--baseline", baseline("fake-rule config.json#Env.API_KEY\n"))
+        assert (rc, len(records)) == (0, 1)
+
+    def test_split_names_and_merging(self):
+        blobs = {"manifest.json": b"[]"}
+        scan.add_config_blobs(blobs, json.dumps({
+            "architecture": "amd64",
+            "config": {"Env": ["A=1", "A=2", "B.C=3", "../x=4"], "Cmd": ["run"], "Labels": {"l": "v"}},
+            "container_config": {"Env": ["A=9"]},
+            "history": [{"created_by": "ENV A=1"}, {"created_by": "ENV A=1"}],
+            "rootfs": {"diff_ids": ["sha256:x"]},
+        }).encode())
+        history = [k for k in blobs if k.startswith("config.json#history.")]
+        assert len(history) == 1 and blobs[history[0]] == b"ENV A=1\nENV A=1\n"
+        assert {k: v for k, v in blobs.items() if k not in history} == {
+            "manifest.json": b"[]",
+            "config.json#architecture": b'"amd64"\n',
+            "config.json#Env.A": b"A=1\nA=2\nA=9\n",  # same key: kept, not overwritten
+            "config.json#Env.B_C": b"B.C=3\n",
+            "config.json#Env.___x": b"../x=4\n",
+            "config.json#config.Cmd": b'["run"]\n',
+            "config.json#Labels.l": b"l=v\n",
+            "config.json#rootfs.diff_ids": b'["sha256:x"]\n',
+        }
+        assert all("/" not in k for k in blobs)
+
+    @pytest.mark.parametrize("raw", [b"not json", b"[1, 2]", b'"text"'])
+    def test_a_config_that_is_not_an_object_is_scanned_whole(self, raw):
+        blobs = {}
+        scan.add_config_blobs(blobs, raw)
+        assert blobs == {"config.json": raw}
+
+
+class TestGitleaksConfig:
+    def test_gitleaks_runs_with_the_image_config(self, monkeypatch, tmp_path):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            Path(cmd[cmd.index("--report-path") + 1]).write_text("[]")
+
+        monkeypatch.setattr(scan.subprocess, "run", fake_run)
+        assert _REAL_GITLEAKS("gitleaks-bin", str(tmp_path), str(tmp_path / "r.json")) == []
+        cmd = calls[0]
+        # Both the registry walk and the docker-save scan reach gitleaks only through this call.
+        assert cmd[cmd.index("--config") + 1] == scan.GITLEAKS_CONFIG
+        assert Path(scan.GITLEAKS_CONFIG).name == "gitleaks-images.toml"
+        assert Path(scan.GITLEAKS_CONFIG).is_file()
+
+    def _config(self):
+        tomllib = pytest.importorskip("tomllib")
+        return tomllib.loads(Path(scan.GITLEAKS_CONFIG).read_text())
+
+    def test_one_tight_allowlist_on_the_default_rules(self):
+        cfg = self._config()
+        assert set(cfg) == {"extend", "allowlist"}
+        assert cfg["extend"] == {"useDefault": True}
+        # `match`, not `line`: a config blob is one line, so a line match would
+        # excuse every other finding in the same config.
+        assert cfg["allowlist"]["regexTarget"] == "match"
+        assert len(cfg["allowlist"]["regexes"]) == 1
+        assert not {"paths", "commits", "stopwords"} & set(cfg["allowlist"])
+
+    def test_allowlist_regex_excuses_only_the_python_gpg_key(self):
+        rx = re.compile(self._config()["allowlist"]["regexes"][0])
+        fp = "0123456789ABCDEF0123456789ABCDEF01234567"  # 40 uppercase hex, not a real key
+        assert len(fp) == 40
+        for excused in (f"GPG_KEY={fp}", f'GPG_KEY={fp}"', f"GPG_KEY={fp};", f"GPG_KEY={fp} ",
+                        f"GPG_KEY={fp}\n", "GPG_KEY=" + fp + "\\n"):
+            assert rx.search(excused), excused
+        for kept in (f"GPG_KEY={fp.lower()}", f"GPG_KEY={fp[:-1]}", f"GPG_KEY={fp}0", f"GPG_KEY={fp}A",
+                     f"GPG_KEY={fp}=x", f'GPG_KEY={fp}"more', f"MY_GPG_KEY={fp}", f"gpg_key={fp}",
+                     f"API_KEY={fp}", f"GPG_KEY= {fp}", f' GPG_KEY={fp}', "GPG_KEY=REDACTED"):
+            assert not rx.search(kept), kept
+
+
+V = [{"digest": f"sha256:{i:02x}" + "f" * 62, "tags": []} for i in range(10)]
+
+
+class TestVersionSelection:
+    def test_shards_partition_the_versions(self):
+        slices = [scan.select_versions(V, (k, 3), []) for k in range(3)]
+        assert slices == [V[0::3], V[1::3], V[2::3]]
+        assert sorted(v["digest"] for s in slices for v in s) == sorted(v["digest"] for v in V)
+
+    def test_digest_prefixes_with_or_without_the_algorithm(self):
+        assert scan.select_versions(V, (0, 1), ["sha256:03"]) == [V[3]]
+        assert scan.select_versions(V, (0, 1), ["04"]) == [V[4]]
+        assert scan.select_versions(V, (0, 1), ["sha256:05", "02"]) == [V[2], V[5]]  # registry order
+
+    def test_digests_are_selected_before_sharding(self):
+        assert scan.select_versions(V, (1, 2), ["01", "02", "03"]) == [V[2]]
+
+    def test_a_prefix_that_matches_nothing_is_an_error_not_an_empty_pass(self):
+        with pytest.raises(SystemExit) as e:
+            scan.select_versions(V, (0, 1), ["03", "zz"])
+        assert "zz" in str(e.value)
+
+    @pytest.mark.parametrize("text,want", [("0/1", (0, 1)), ("7/8", (7, 8))])
+    def test_parse_shard(self, text, want):
+        assert scan.parse_shard(text) == want
+
+    @pytest.mark.parametrize("text", ["8/8", "1/0", "x", "-1/2", "1/2/3", ""])
+    def test_parse_shard_rejects(self, text):
+        with pytest.raises(argparse.ArgumentTypeError):
+            scan.parse_shard(text)
+
+    def test_parse_digests(self):
+        assert scan.parse_digests("sha256:ab, cd ,") == ["sha256:ab", "cd"]
+        for bad in ("", ",", "sha256:../x", "a b"):
+            with pytest.raises(argparse.ArgumentTypeError):
+                scan.parse_digests(bad)
+
+    @pytest.mark.parametrize("shard,digests,want", [((1, 3), [], V[1::3]), ((0, 1), ["04"], [V[4]])])
+    def test_registry_scan_visits_only_the_selected_versions(self, monkeypatch, capsys, tmp_path,
+                                                             shard, digests, want):
+        def no_network(*a, **k):
+            raise RuntimeError("no network")
+
+        monkeypatch.setattr(scan, "list_versions", lambda org, package: V)
+        monkeypatch.setattr(scan, "registry_token", lambda owner, package: "t")
+        monkeypatch.setattr(scan, "_get", no_network)
+        args = types.SimpleNamespace(owner="o", org="O", package="droplet-demo", gitleaks="x",
+                                     shard=shard, digests=digests)
+        stats = {"versions": 0, "images": 0, "other": 0, "layers": 0, "layers_reused": 0,
+                 "findings": 0, "errors": 0}
+        scan.scan_registry(args, str(tmp_path), stats, lambda *a: None)
+        out = capsys.readouterr().out
+        assert stats["versions"] == stats["errors"] == len(want)
+        for v in V:  # each visited version fails once, and is named in its warning
+            assert (v["digest"][:19] in out) == (v in want)
+
+    @pytest.mark.parametrize("flags", [["--shard", "0/2"], ["--digests", "ab"]])
+    def test_selection_flags_do_not_apply_to_docker_save(self, tmp_path, run, flags):
+        with pytest.raises(SystemExit) as e:
+            run(docker_save(tmp_path / "i.tar", [CREDS]), *flags)
+        assert e.value.code == 2
+
+    def test_bad_shard_is_a_usage_error(self, tmp_path, run):
+        with pytest.raises(SystemExit) as e:
+            run(docker_save(tmp_path / "i.tar", [CREDS]), "--shard", "3/3")
+        assert e.value.code == 2
 
 
 class TestVendorAndBaseline:

@@ -476,11 +476,24 @@ public cannot be undone and exposes every layer it holds, so
   line (no line number, no digest, so it survives a rebuild) and starts empty:
   a real secret is never baselined — rotate it and fix the image; only a
   reviewed false positive is. The failing step prints the exact lines to add.
-  `ghcr-secret-scan.yml` (WARP-3423) runs the same scanner over every
-  version already in the registry, on demand.
+  The image config is split into one pseudo-file per key before scanning, so
+  its fingerprints name the key (`config.json#Env.<NAME>`,
+  `config.json#Labels.<label>`, `config.json#history.<hash>`): a baseline line
+  can never excuse a rule across a whole config.
+  gitleaks runs with `scripts/release/gitleaks-images.toml`: the default rules
+  plus one allowlist entry, the python base images' public `GPG_KEY`
+  fingerprint (exactly `GPG_KEY=` and 40 uppercase hex characters, matched on
+  the finding's match text, not the whole line). That is the only built-in
+  exception; do not baseline it.
+  `ghcr-secret-scan.yml` (WARP-3423) runs the same scanner and config over
+  every version already in the registry, on demand (dispatch only). Its inputs
+  `package`, `shards` and `digests` scan a single package, split it over N jobs
+  (`--shard K/N` scans `versions[K::N]`), or rescan only the versions whose
+  digest starts with the given prefixes.
 - **Public-package gate.** After the pushes, every package must answer an
   anonymous `https://ghcr.io/token?scope=repository:…:pull&service=ghcr.io`
-  request with 200 (a private package gets 403). Otherwise the job fails,
+  request with 200 (a private package answers 401, checked live; 403 is what a
+  nonexistent package returns, and any non-200 fails the gate). Otherwise the job fails,
   listing each private package with its settings page
   (`https://github.com/orgs/DropletByWarpLab/packages/container/<package>/settings`)
   and the instruction to make it public. GHCR creates every *new* package

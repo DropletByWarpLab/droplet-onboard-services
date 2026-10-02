@@ -448,13 +448,14 @@ jobs:
       # release — and GHCR creates every NEW package private, so a service
       # added to services.json would otherwise ship unpullable with nothing
       # on the publisher's side noticing. ghcr.io answers an anonymous
-      # pull-token request with 200 only for a public package (403
-      # otherwise), so ask each one exactly as a box's docker would: no
-      # Authorization header. It runs right after the pushes (the package
-      # has to exist to be asked about) and before anything is signed or
-      # released, so a private package fails the job with no Release yet
-      # pointing boxes at images they cannot pull. curl retries only
-      # transient errors (5xx, timeouts, refused connections), never a 403.
+      # pull-token request with 200 only for a public package (401 for a
+      # private one, 403 for one that does not exist; any non-200 fails), so
+      # ask each one exactly as a box's docker would: no Authorization
+      # header. It runs right after the pushes (the package has to exist to
+      # be asked about) and before anything is signed or released, so a
+      # private package fails the job with no Release yet pointing boxes at
+      # images they cannot pull. curl retries only transient errors (5xx,
+      # timeouts, refused connections), never a 401 or 403.
       - name: Gate — every package is public (anonymous pull token)
         run: |
           set -euo pipefail

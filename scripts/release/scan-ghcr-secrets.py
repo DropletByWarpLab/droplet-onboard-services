@@ -30,18 +30,29 @@ and artifacts are too. Vendor paths (node_modules, site-packages, /usr/...)
 are reported separately — upstream test fixtures and docs are full of fake
 keys — but never dropped.
 
+gitleaks runs with scripts/release/gitleaks-images.toml (--config): the default
+rules plus ONE tight allowlist for the official python base images' public
+GPG_KEY fingerprint. Never the config of whatever is inside the image.
+
 Gating (WARP-3429): --fail-on-app exits 1 when any NON-vendor finding is not in
 --baseline, a reviewed list of accepted fingerprints, one `<rule> <path>` per
 line (`#` comments). A fingerprint is the gitleaks rule plus the path inside
-the image (or `config.json` / `manifest.json` for the image config): no line
-number and no digest, so it survives a rebuild. See
+the image: no line number and no digest, so it survives a rebuild. The image
+config is split into one pseudo-file per key before scanning (add_config_blobs),
+so its fingerprints name the key — `config.json#Env.GPG_KEY`,
+`config.json#Labels.<label>`, `config.json#history.<hash of the instruction>`
+— and a baseline line can never excuse a rule across a whole config. See
 scripts/release/image-secret-baseline.txt.
 
 Registry mode talks to the registry directly with the stdlib (no docker
-daemon), so the same script works for any package the token can read.
+daemon), so the same script works for any package the token can read. A big
+package can be split: --shard K/N scans versions[K::N] (0 <= K < N), and
+--digests <prefix,prefix> rescans only the versions whose digest starts with
+one of the prefixes (applied before --shard).
 
 usage: scan-ghcr-secrets.py --package droplet-orchestrator --gitleaks /tmp/gitleaks
                             --out findings.jsonl [--owner dropletbywarplab] [--org DropletByWarpLab]
+                            [--shard 0/8] [--digests sha256:ab12,sha256:cd34]
        scan-ghcr-secrets.py --package droplet-orchestrator --gitleaks /tmp/gitleaks
                             --docker-save image.tar --baseline image-secret-baseline.txt --fail-on-app
 env:   registry mode: GITHUB_TOKEN (packages: read), GITHUB_ACTOR
@@ -55,8 +66,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -79,6 +92,10 @@ IMAGE_CONFIG_TYPES = (
 )
 # Non-image blobs (signatures, attestations) bigger than this are not text.
 RAW_BLOB_LIMIT = 50 * 1024 * 1024
+# The ruleset every image scan runs with (see the file's own header). Passed
+# explicitly so gitleaks never falls back to a config found inside the scanned
+# tree; a missing file makes gitleaks fail, and so the scan, never run default.
+GITLEAKS_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gitleaks-images.toml")
 VENDOR_MARKERS = (
     "/node_modules/",
     "/site-packages/",
@@ -131,10 +148,37 @@ def list_versions(org: str, package: str) -> list[dict]:
     return [json.loads(line) for line in out.splitlines() if line.strip()]
 
 
+def parse_shard(text: str) -> tuple[int, int]:
+    m = re.fullmatch(r"([0-9]+)/([0-9]+)", text)
+    if not m or not int(m[1]) < int(m[2]):
+        raise argparse.ArgumentTypeError(f"want K/N with 0 <= K < N, got {text!r}")
+    return int(m[1]), int(m[2])
+
+
+def parse_digests(text: str) -> list[str]:
+    prefixes = [p.strip() for p in text.split(",") if p.strip()]
+    if not prefixes or not all(re.fullmatch(r"[A-Za-z0-9:]+", p) for p in prefixes):
+        raise argparse.ArgumentTypeError(f"want comma-separated digest prefixes (sha256:ab12), got {text!r}")
+    return prefixes
+
+
+def select_versions(versions: list[dict], shard: tuple[int, int], digests: list[str]) -> list[dict]:
+    """--digests first (a prefix may omit `sha256:`), then --shard K/N -> versions[K::N]."""
+    if digests:
+        hit = {p: [v for v in versions if v["digest"].startswith(p) or v["digest"].split(":")[-1].startswith(p)]
+               for p in digests}
+        missing = [p for p, vs in hit.items() if not vs]
+        if missing:  # a typo'd prefix must not turn into a scan of nothing that passes
+            raise SystemExit(f"--digests: no version matches {', '.join(missing)}")
+        versions = [v for v in versions if any(v in vs for vs in hit.values())]
+    k, n = shard
+    return versions[k::n]
+
+
 def gitleaks(binary: str, target: str, report: str) -> list[dict]:
     subprocess.run(
         [
-            binary, "dir", target,
+            binary, "dir", target, "--config", GITLEAKS_CONFIG,
             "--no-banner", "--redact", "--exit-code", "0",
             "--max-target-megabytes", "25",
             "--report-format", "json", "--report-path", report,
@@ -168,6 +212,60 @@ def scan_text_blobs(binary: str, work: str, blobs: dict[str, bytes]) -> list[dic
     findings = relativize(gitleaks(binary, d, d + ".json"), d)
     shutil.rmtree(d, ignore_errors=True)
     return findings
+
+
+def _slug(name: str) -> str:
+    # Becomes part of a file name: nothing that could be a path separator or
+    # `..`, and short enough for the filesystem (a clash just concatenates).
+    return re.sub(r"[^A-Za-z0-9_-]", "_", name)[:100] or "_"
+
+
+def add_config_blobs(blobs: dict[str, bytes], raw: bytes) -> None:
+    """Add an image config to `blobs`, split into one pseudo-file per key.
+
+    Scanned as one file every finding would be at `config.json`, so a baseline
+    line for it would excuse that rule across the WHOLE config — Env, labels
+    and build history — of every image, today and in every future build.
+    Split instead, a finding's path names its key (gitleaks reports the file):
+
+      config.json#Env.<NAME>          one per Env entry (config and container_config)
+      config.json#Labels.<label>      one per label
+      config.json#history.<hash12>    one per history entry, hashed on its
+                                      instruction text, so it survives a rebuild
+                                      but not a changed instruction (where build
+                                      args land)
+      config.json#<section>.<key>     every other key (config.Cmd, rootfs.diff_ids, ...)
+
+    Entries that share a path are concatenated, never dropped. A config that is
+    not JSON is scanned whole, as `config.json`.
+    """
+    def put(name: str, text: str) -> None:
+        blobs[name] = blobs.get(name, b"") + text.encode() + b"\n"
+
+    try:
+        cfg = json.loads(raw)
+        sections = list(cfg.items())
+    except (ValueError, AttributeError):
+        blobs["config.json"] = blobs.get("config.json", b"") + raw
+        return
+    for key, val in sections:
+        if key == "history" and isinstance(val, list):
+            for h in val:
+                text = ("\n".join(str(h[f]) for f in ("created_by", "comment") if h.get(f))
+                        if isinstance(h, dict) else str(h))
+                put(f"config.json#history.{hashlib.sha256(text.encode()).hexdigest()[:12]}", text)
+        elif isinstance(val, dict):
+            for sub, v in val.items():
+                if sub == "Env" and isinstance(v, list):
+                    for entry in map(str, v):
+                        put(f"config.json#Env.{_slug(entry.partition('=')[0])}", entry)
+                elif sub == "Labels" and isinstance(v, dict):
+                    for label, value in v.items():
+                        put(f"config.json#Labels.{_slug(str(label))}", f"{label}={value}")
+                else:
+                    put(f"config.json#{_slug(key)}.{_slug(sub)}", json.dumps(v))
+        else:
+            put(f"config.json#{_slug(key)}", json.dumps(val))
 
 
 def scan_layer(binary: str, work: str, blob: str) -> list[dict]:
@@ -286,8 +384,8 @@ def scan_docker_save(binary: str, work: str, archive: str):
         if not images:
             raise ValueError("manifest.json lists no images")
         blobs = {"manifest.json": raw}
-        for i, img in enumerate(images):
-            blobs["config.json" if i == 0 else f"config-{i}.json"] = _read_member(tf, img["Config"])
+        for img in images:
+            add_config_blobs(blobs, _read_member(tf, img["Config"]))
         yield "config:manifest+config", scan_text_blobs(binary, work, blobs)
         seen: set[str] = set()
         for img in images:
@@ -315,8 +413,10 @@ def scan_local(args, work: str, stats: dict, emit) -> None:
 
 def scan_registry(args, work: str, stats: dict, emit) -> None:
     repo = f"{args.owner}/{args.package}"
-    versions = list_versions(args.org, args.package)
-    print(f"{args.package}: {len(versions)} version(s)")
+    all_versions = list_versions(args.org, args.package)
+    versions = select_versions(all_versions, args.shard, args.digests)
+    print(f"{args.package}: {len(versions)} of {len(all_versions)} version(s)"
+          f" (shard {args.shard[0]}/{args.shard[1]})")
     stats["versions"] = len(versions)
     seen_layers: set[str] = set()
 
@@ -334,8 +434,9 @@ def scan_registry(args, work: str, stats: dict, emit) -> None:
                 stats["images"] += 1
                 with _get(f"https://ghcr.io/v2/{repo}/blobs/{manifest['config']['digest']}", auth) as r:
                     config = r.read()
-                emit(v, "config:manifest+config",
-                     scan_text_blobs(args.gitleaks, work, {"manifest.json": raw, "config.json": config}))
+                blobs = {"manifest.json": raw}
+                add_config_blobs(blobs, config)
+                emit(v, "config:manifest+config", scan_text_blobs(args.gitleaks, work, blobs))
                 for layer in manifest.get("layers", []):
                     ld = layer["digest"]
                     if ld in seen_layers:
@@ -370,10 +471,16 @@ def main() -> int:
     ap.add_argument("--out", help="write every finding (redacted) here as JSONL")
     ap.add_argument("--docker-save", metavar="TAR",
                     help="scan this `docker save` archive instead of the registry")
+    ap.add_argument("--shard", type=parse_shard, default=(0, 1), metavar="K/N",
+                    help="registry mode: scan only versions[K::N] (0 <= K < N)")
+    ap.add_argument("--digests", type=parse_digests, default=[], metavar="PREFIXES",
+                    help="registry mode: rescan only the versions whose digest starts with one of these")
     ap.add_argument("--baseline", help="reviewed accepted fingerprints, `<rule> <path>` per line")
     ap.add_argument("--fail-on-app", action="store_true",
                     help="exit 1 on any non-vendor finding that is not in --baseline")
     args = ap.parse_args()
+    if args.docker_save and (args.shard != (0, 1) or args.digests):
+        ap.error("--shard and --digests select registry versions; they do not apply to --docker-save")
 
     baseline = load_baseline(args.baseline) if args.baseline else set()
     stats = {"versions": 0, "images": 0, "other": 0, "layers": 0,

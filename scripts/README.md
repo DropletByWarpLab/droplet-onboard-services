@@ -505,8 +505,13 @@ public and `publish-release.yml` guards that. Full description:
   (`<rule> <path>` per line, starts empty) fails the publish before the
   push; the failing step prints the lines to add if it is a reviewed false
   positive. A real secret is rotated and removed from the image, never
-  baselined. Run the `ghcr-secret-scan` workflow (WARP-3423) first to see the
-  findings for every published image and curate the baseline.
+  baselined. Config findings are fingerprinted per key
+  (`config.json#Env.<NAME>`), so one line never covers a whole config. The
+  scan uses `scripts/release/gitleaks-images.toml`: default rules plus one
+  allowlist entry, the python base images' public `GPG_KEY` fingerprint. Run
+  the `ghcr-secret-scan` workflow (WARP-3423; dispatch inputs `package`,
+  `shards`, `digests` split or retry a big package) first to see the findings
+  for every published image and curate the baseline.
 - **Public-package gate.** After the pushes every package must answer an
   anonymous `ghcr.io/token` request with 200; otherwise the job lists each
   private package with its settings URL. New services start private on GHCR:
