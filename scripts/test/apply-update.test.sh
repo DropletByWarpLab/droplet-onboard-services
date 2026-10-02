@@ -980,6 +980,57 @@ else
   fail "non-auth pull failure changed shape (rc=$PULL_NET_RC, out: $PULL_NET_OUT)"
 fi
 
+# 5i. The auth scan must not read the IMAGE REF as an error. A digest is hex,
+#     so `a401b…` has `401` between two non-digits — a bare `401` grep took
+#     that for an HTTP status, and cosign echoes the ref in a REAL signature
+#     failure, which would have been retried forever instead of rejected.
+HEX_401="a401b$(printf 'c%.0s' $(seq 59))"
+REL_401="ghcr.io/dropletbywarplab/orchestrator@sha256:$HEX_401"
+
+# A real signature failure naming the ref (and, separately, only its digest)
+# stays image-verify:.
+for SIG_TEXT in \
+  "Error: no matching signatures for $REL_401: none of the expected identities matched" \
+  "Error: no matching signatures: digest sha256:$HEX_401 has no signature by the expected identity"; do
+  stub_reset
+  SIG401_OUT="$(COSIGN_STUB_EXIT=1 COSIGN_STUB_STDERR="$SIG_TEXT" run_apply pull-images --images "$REL_401" 2>&1)"
+  SIG401_RC=$?
+  if [ "$SIG401_RC" -ne 0 ] && printf '%s' "$SIG401_OUT" | grep -q "image-verify:" \
+     && ! printf '%s' "$SIG401_OUT" | grep -q "registry-auth:"; then
+    pass "a signature failure echoing a digest that contains 401 stays image-verify:"
+  else
+    fail "digest containing 401 misread as registry-auth (rc=$SIG401_RC, out: $SIG401_OUT)"
+  fi
+done
+
+# A non-auth pull failure echoing that ref keeps docker's status, no marker.
+stub_reset
+NET401_OUT="$(DOCKER_STUB_PULL_EXIT=7 \
+  DOCKER_STUB_PULL_STDERR="Error response from daemon: error pulling image $REL_401: connection refused" \
+  run_apply pull-images --images "$REL_401" 2>&1)"
+NET401_RC=$?
+if [ "$NET401_RC" -eq 7 ] && ! printf '%s' "$NET401_OUT" | grep -q "registry-auth:\|image-verify:"; then
+  pass "a network pull failure echoing a digest that contains 401 is not registry-auth"
+else
+  fail "digest containing 401 misread on pull (rc=$NET401_RC, out: $NET401_OUT)"
+fi
+
+# A real auth refusal for that same ref is still registry-auth:, by its token
+# or by an explicit status 401 (no other token on the line).
+for AUTH401_TEXT in \
+  "UNAUTHORIZED: authentication required for $REL_401" \
+  "GET https://ghcr.io/v2/dropletbywarplab/orchestrator/manifests/sha256:$HEX_401: unexpected status code 401 (HEAD responses have no body, use GET for details)"; do
+  stub_reset
+  AUTH401_OUT="$(COSIGN_STUB_EXIT=1 COSIGN_STUB_STDERR="$AUTH401_TEXT" run_apply pull-images --images "$REL_401" 2>&1)"
+  AUTH401_RC=$?
+  if [ "$AUTH401_RC" -ne 0 ] && printf '%s' "$AUTH401_OUT" | grep -q "registry-auth:.*$REL_401" \
+     && ! printf '%s' "$AUTH401_OUT" | grep -q "image-verify:"; then
+    pass "a real auth refusal for a ref containing 401 is still registry-auth: ($AUTH401_TEXT)"
+  else
+    fail "auth refusal for a ref containing 401 misclassified (rc=$AUTH401_RC, out: $AUTH401_OUT)"
+  fi
+done
+
 # =============================================================================
 echo ""
 echo "--- Phase 6: self-swap helper GC surface (WARP-1044) ---"

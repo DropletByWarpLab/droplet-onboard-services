@@ -280,9 +280,22 @@ cosign_cmd() {
 # error text, so the worst a spoofed message can do is turn a refusal into a
 # RETRY: verification still dies before the pull, so nothing unverified is
 # ever fetched either way.
+#
+# The scan is deliberately NOT a bare `401` / `denied` grep. A digest is hex, so
+# `a401b…` has `401` between two non-digits, and cosign echoes the image ref
+# (and its digest) in a REAL signature failure ("no matching signatures for
+# <ref>"): that must stay `image-verify:`. So the image ref and any sha256
+# digest are stripped from the text first, and what is left must carry a
+# registry error token or an explicit HTTP/status 401.
 registry_refused_auth() {
-  # $1 = a file holding the failed command's stderr.
-  grep -Eiq 'unauthorized|authentication required|denied:|: denied|(^|[^0-9])401([^0-9]|$)' "$1"
+  # $1 = a file holding the failed command's stderr, $2 = the image ref.
+  local text
+  text="$(<"$1")"
+  text="${text//"$2"/}"
+  # Into a variable, not a pipe into `grep -q`: under pipefail a grep that
+  # exits on its first match can SIGPIPE the writer and flip the verdict.
+  text="$(printf '%s\n' "$text" | sed -E 's/sha256:[0-9a-fA-F]{64}//g')"
+  grep -Eiq 'unauthorized|authentication required|denied:|: denied|(http|status)( code)?[ :=]+401([^0-9]|$)' <<<"$text"
 }
 
 die_registry_auth() {
@@ -314,7 +327,7 @@ verify_image_signature() {
       "$img" >/dev/null 2>"$err" || rc=$?
   cat "$err" >&2
   if [ "$rc" -ne 0 ]; then
-    if registry_refused_auth "$err"; then
+    if registry_refused_auth "$err" "$img"; then
       rm -f "$err"
       die_registry_auth "$img"
     fi
@@ -338,7 +351,7 @@ pull_image() {
   run docker pull "$img" 2>"$err" || rc=$?
   cat "$err" >&2
   if [ "$rc" -ne 0 ]; then
-    if registry_refused_auth "$err"; then
+    if registry_refused_auth "$err" "$img"; then
       rm -f "$err"
       die_registry_auth "$img"
     fi

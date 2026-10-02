@@ -88,6 +88,20 @@
  *     its health gate (WARP-538 convention: NOT a new enum value).
  *   - `env_reconcile_failed` — rides `rejected`: the host .env reconcile
  *     (step 3b) failed; configs were restored and nothing was swapped.
+ *   - `not_newer` / `channel_mismatch` — ride `superseded` (WARP-3430): the
+ *     row went stale before it could apply — see STALE ROWS below.
+ *
+ * STALE ROWS (WARP-3430) — the poller refuses a release that is not newer than
+ * the installed one, but only when it CREATES a row; a row can wait (parked
+ * `verifying` after a transient failure such as a registry refusing auth) while
+ * a newer release is created, applied and committed. Every apply path picks the
+ * newest `pending|verifying` row and would then apply the old one: a downgrade.
+ * So applyClaimedRow re-reads the floor (transitions.ts `installedRelease`, the
+ * poller's own query) and the box's channel BEFORE any side effect, and retires
+ * a row that is not strictly newer than the newest committed one, or that
+ * belongs to another channel than the box now follows, to `superseded`
+ * (`stale_superseded`). The poller also retires unclaimed `verifying` rows when
+ * it creates a newer one; this is the backstop for the window in between.
  *
  * OUTCOME (WARP-3007) — `DeviceUpdate.outcome` is the explicit verdict an
  * operator acts on, written in the same guarded write as the status:
@@ -121,6 +135,7 @@ import {
 } from "./manifest.js";
 import { getUpdateAgentSettings } from "./settings.js";
 import {
+  installedRelease,
   recordCommittedOutcome,
   transitionDeviceUpdate,
   type DeviceUpdateOutcomeName,
@@ -365,6 +380,16 @@ export type ApplyUpdateResult =
       detail: string;
     }
   | { outcome: "retry_later"; deviceUpdateId: string; detail: string }
+  /**
+   * WARP-3430 — the row was no longer the release this box should take (not
+   * strictly newer than the installed one, or another channel's): retired to
+   * `superseded` before anything was touched. Nothing was applied.
+   */
+  | {
+      outcome: "stale_superseded";
+      deviceUpdateId: string;
+      reason: "not_newer" | "channel_mismatch";
+    }
   | { outcome: "rolled_back"; deviceUpdateId: string }
   | { outcome: "failed"; deviceUpdateId: string }
   | { outcome: "self_swap_started"; deviceUpdateId: string };
@@ -395,8 +420,12 @@ export type ApplyWindowResult =
 interface DeviceUpdateRowSlice {
   id: string;
   status: string;
+  /** The manifest's channel at discovery. */
+  channel: string;
   releaseTag: string | null;
   gitSha: string;
+  /** The signed `release.builtAt` — what the never-go-backwards floor compares. */
+  builtAt: Date;
   manifestJson: unknown;
 }
 
@@ -406,7 +435,14 @@ async function setStatus(
   prisma: PrismaClient,
   log: pino.Logger,
   id: string,
-  status: "verifying" | "applying" | "committed" | "rolled_back" | "failed" | "rejected",
+  status:
+    | "verifying"
+    | "applying"
+    | "committed"
+    | "rolled_back"
+    | "failed"
+    | "rejected"
+    | "superseded",
   failureReason: string | null = null,
   outcome?: DeviceUpdateOutcomeName,
 ): Promise<void> {
@@ -969,6 +1005,41 @@ async function applyClaimedRow(
   const gate = opts.healthGate ?? DEFAULT_HEALTH_GATE;
   const probe = opts.probe ?? httpHealthProbe();
   const { prisma, runner } = opts;
+
+  // ── never go backwards (WARP-3430), before ANY status write or side effect ──
+  // The poller checked this when it created the row; a row can have waited
+  // since (parked `verifying`, an apply window that never came) while a newer
+  // release committed. Same floor query as the poller, strictly newer or
+  // nothing — and a row for another channel than the box follows now is not
+  // this box's release either. Retired, not applied: pending|verifying →
+  // superseded are both allowed edges.
+  const { channel } = await getUpdateAgentSettings(prisma);
+  const installed = await installedRelease(prisma);
+  const staleReason: "not_newer" | "channel_mismatch" | null =
+    row.channel !== channel
+      ? "channel_mismatch"
+      : installed && row.builtAt.getTime() <= installed.builtAt.getTime()
+        ? "not_newer"
+        : null;
+  if (staleReason !== null) {
+    await setStatus(prisma, log, row.id, "superseded", staleReason);
+    log.warn(
+      {
+        event: "update.stale_superseded",
+        deviceUpdateId: row.id,
+        reason: staleReason,
+        gitSha: row.gitSha,
+        releaseTag: row.releaseTag,
+        rowChannel: row.channel,
+        deviceChannel: channel,
+        builtAt: row.builtAt.toISOString(),
+        installedGitSha: installed?.gitSha ?? null,
+        installedBuiltAt: installed?.builtAt.toISOString() ?? null,
+      },
+      "OTA apply skipped — this update is no longer the release this box should take; retired to superseded, nothing touched",
+    );
+    return { outcome: "stale_superseded", deviceUpdateId: row.id, reason: staleReason };
+  }
 
   // ── setup gate: never swap containers under a mid-wizard customer ──
   const setup = await getSetupState(prisma);

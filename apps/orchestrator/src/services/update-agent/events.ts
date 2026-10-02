@@ -39,8 +39,9 @@ export const UPDATE_EVENTS = {
   "update.channel_mismatch": "poller",
   /** debug — the served release is already tracked (append-only: one row per release). */
   "update.already_known": "poller",
-  /** warn — WARP-3430: the verified release is not strictly newer (signed builtAt)
-   *  than the installed one. No row written. */
+  /** debug — WARP-3430: the verified release is not strictly newer (signed builtAt)
+   *  than the installed one. No row written. Debug because it repeats every
+   *  tick for as long as the channel's pointer is behind what the box runs. */
   "update.not_newer": "poller",
   /** info — new release verified; `pending` DeviceUpdate row created. */
   "update.pending_created": "poller",
@@ -64,6 +65,10 @@ export const UPDATE_EVENTS = {
   "update.rejected": "apply",
   /** warn — transient failure; row stays `verifying` for the next window. */
   "update.apply_retry": "apply",
+  /** warn — WARP-3430: a pending/verifying row went stale before it could apply
+   *  (not newer than what is installed, or for another channel than this box's
+   *  now): retired to `superseded`, nothing touched. Once per row. */
+  "update.stale_superseded": "apply",
   /** warn — WARP-3430: the registry refused AUTH at pull time (the package is
    *  private) — transient and retried, NOT an image-signature rejection. */
   "update.registry_auth_failed": "apply",

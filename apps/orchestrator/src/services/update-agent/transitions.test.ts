@@ -16,6 +16,8 @@ import {
   assertTransitionAllowed,
   transitionDeviceUpdate,
   supersedePendingUpdates,
+  supersedeUnclaimedVerifyingUpdates,
+  installedRelease,
   recordCommittedOutcome,
 } from "./transitions.js";
 
@@ -24,6 +26,8 @@ interface Row {
   status: string;
   failureReason: string | null;
   outcome?: string;
+  /** WARP-3193 PERF-3 — only the parked-row sweep reads it. */
+  applyClaim?: string;
 }
 
 function createPrismaStub(rows: Row[]) {
@@ -39,13 +43,14 @@ function createPrismaStub(rows: Row[]) {
         return row ? { ...row } : null;
       },
       updateMany: async (args: {
-        where: { id?: string; status?: string };
+        where: { id?: string; status?: string; applyClaim?: string };
         data: { status?: string; failureReason?: string | null; outcome?: string };
       }) => {
         let count = 0;
         for (const row of rows) {
           if (args.where.id !== undefined && row.id !== args.where.id) continue;
           if (args.where.status !== undefined && row.status !== args.where.status) continue;
+          if (args.where.applyClaim !== undefined && row.applyClaim !== args.where.applyClaim) continue;
           if (args.data.outcome !== undefined) row.outcome = args.data.outcome;
           if (args.data.status !== undefined) row.status = args.data.status;
           if ("failureReason" in args.data) row.failureReason = args.data.failureReason ?? null;
@@ -68,7 +73,9 @@ describe("DeviceUpdate advance-only transitions (WARP-541)", () => {
   it("pins the allowed-transition map to the schema diagram", () => {
     expect(DEVICE_UPDATE_ALLOWED_TRANSITIONS).toEqual({
       pending: ["superseded", "verifying"],
-      verifying: ["applying", "rejected"],
+      // WARP-3430: a parked row can be retired (a newer release overtook it, or
+      // it went stale); applying and the terminal statuses stay as they were.
+      verifying: ["applying", "rejected", "superseded"],
       applying: ["committed", "rolled_back", "failed"],
       superseded: [],
       committed: [],
@@ -76,6 +83,20 @@ describe("DeviceUpdate advance-only transitions (WARP-541)", () => {
       failed: [],
       rejected: [],
     });
+  });
+
+  it("verifying → superseded advances, and the row is then terminal (WARP-3430)", async () => {
+    const rows: Row[] = [{ id: "du-1", status: "verifying", failureReason: null }];
+    const prisma = asPrisma(createPrismaStub(rows));
+    await transitionDeviceUpdate(prisma, { id: "du-1", to: "superseded", failureReason: "not_newer" });
+    expect(rows[0]).toEqual({ id: "du-1", status: "superseded", failureReason: "not_newer" });
+    await expect(
+      transitionDeviceUpdate(prisma, { id: "du-1", to: "applying" }),
+    ).rejects.toThrow(/advance-only/);
+  });
+
+  it("applying still cannot be superseded", () => {
+    expect(() => assertTransitionAllowed("du-1", "applying", "superseded")).toThrow(/advance-only/);
   });
 
   it("advances every allowed edge and records failureReason", async () => {
@@ -179,6 +200,38 @@ describe("DeviceUpdate advance-only transitions (WARP-541)", () => {
       "applying",
       "committed",
     ]);
+  });
+
+  it("supersedeUnclaimedVerifyingUpdates retires parked rows and nothing else (WARP-3430)", async () => {
+    const rows: Row[] = [
+      { id: "du-1", status: "verifying", failureReason: null, applyClaim: "unclaimed" },
+      // Mid-apply: a runner holds it, so the sweep must not change it under them.
+      { id: "du-2", status: "verifying", failureReason: null, applyClaim: "claimed" },
+      { id: "du-3", status: "pending", failureReason: null, applyClaim: "unclaimed" },
+      { id: "du-4", status: "applying", failureReason: null, applyClaim: "claimed" },
+      { id: "du-5", status: "committed", failureReason: null, applyClaim: "unclaimed" },
+    ];
+    const count = await supersedeUnclaimedVerifyingUpdates(asPrisma(createPrismaStub(rows)));
+    expect(count).toBe(1);
+    expect(rows.map((r) => r.status)).toEqual([
+      "superseded",
+      "verifying",
+      "pending",
+      "applying",
+      "committed",
+    ]);
+  });
+
+  it("installedRelease asks for the newest COMMITTED row — the read health-monitor and the status route use", async () => {
+    // One query shared by the poller's floor and apply's re-check; pin its shape.
+    const findFirst = vi.fn().mockResolvedValue({ builtAt: new Date("2026-06-30T03:00:00Z"), gitSha: "b".repeat(40) });
+    const res = await installedRelease({ deviceUpdate: { findFirst } } as never);
+    expect(findFirst).toHaveBeenCalledWith({
+      where: { status: "committed" },
+      orderBy: { updatedAt: "desc" },
+      select: { builtAt: true, gitSha: true },
+    });
+    expect(res).toEqual({ builtAt: new Date("2026-06-30T03:00:00Z"), gitSha: "b".repeat(40) });
   });
 });
 

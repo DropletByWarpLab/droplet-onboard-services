@@ -9,7 +9,10 @@
  *   pending ──► verifying ──► applying ──► committed
  *                    │             ├─────► rolled_back
  *                    │             └─────► failed
- *                    └───► rejected
+ *                    ├───► rejected
+ *                    └───► superseded  (WARP-3430: a PARKED row — retry_later —
+ *                                       that a newer release overtook, or that
+ *                                       went stale before it could apply)
  *
  * Before WARP-541 the callers (poller.ts supersede, apply.ts setStatus)
  * each did their own raw `update`/`updateMany` — every call site happened
@@ -55,14 +58,17 @@ export type DeviceUpdateOutcomeName =
 
 /**
  * The advance-only map (mirrors the schema.prisma DeviceUpdateStatus
- * diagram). Terminal statuses map to [] — nothing ever leaves them.
+ * diagram, plus WARP-3430's `verifying → superseded`: a row parked by a
+ * transient failure is retired, not applied, once it is no longer the release
+ * this box should take). Terminal statuses map to [] — nothing ever leaves
+ * them.
  */
 export const DEVICE_UPDATE_ALLOWED_TRANSITIONS: Record<
   DeviceUpdateStatusName,
   readonly DeviceUpdateStatusName[]
 > = {
   pending: ["superseded", "verifying"],
-  verifying: ["applying", "rejected"],
+  verifying: ["applying", "rejected", "superseded"],
   applying: ["committed", "rolled_back", "failed"],
   superseded: [],
   committed: [],
@@ -221,4 +227,60 @@ export async function supersedePendingUpdates(
     );
   }
   return res.count;
+}
+
+/**
+ * WARP-3430 — the same sweep for PARKED rows. A `verifying` row is one an
+ * apply started and could not finish (a transient fetch failure, a registry
+ * that refused auth): it stays resumable, and every apply path picks the
+ * newest `pending|verifying` row. Left alone, a parked row older than a newer
+ * release would still be eligible — apply B, commit, and the next window
+ * would apply A, a downgrade. So when a newer release arrives, retire them.
+ *
+ * Only `unclaimed` rows: a claimed row is mid-apply (WARP-3193 PERF-3) and
+ * must not change status under its runner. Both predicates sit in ONE
+ * `updateMany`, so a row a runner claims between our read and write is not
+ * touched, and one we flip is no longer claimable (the claim's own WHERE
+ * needs `pending|verifying`). Advance-only by construction, like the pending
+ * sweep. Returns the retired count.
+ */
+export async function supersedeUnclaimedVerifyingUpdates(
+  db: Db,
+  logger?: pino.Logger,
+): Promise<number> {
+  const log = logger ?? defaultLog;
+  const res = await db.deviceUpdate.updateMany({
+    where: { status: "verifying", applyClaim: "unclaimed" },
+    data: { status: "superseded" },
+  });
+  if (res.count > 0) {
+    log.debug?.(
+      {
+        event: "update.status_transition",
+        from: "verifying",
+        to: "superseded",
+        count: res.count,
+      },
+      "prior parked (verifying) DeviceUpdate rows superseded",
+    );
+  }
+  return res.count;
+}
+
+/**
+ * WARP-3430 — what this box is running, for the never-go-backwards floor: the
+ * newest COMMITTED row's signed `builtAt` (the read health-monitor and
+ * routes/updates.ts use for the box's version). Null when the box has never
+ * committed an OTA release (a locally built one) — no floor. ONE query shared
+ * by the poller (row creation) and apply (before any side effect), so the two
+ * gates can never disagree about what "installed" means.
+ */
+export async function installedRelease(
+  db: Db,
+): Promise<{ builtAt: Date; gitSha: string } | null> {
+  return db.deviceUpdate.findFirst({
+    where: { status: "committed" },
+    orderBy: { updatedAt: "desc" },
+    select: { builtAt: true, gitSha: true },
+  });
 }

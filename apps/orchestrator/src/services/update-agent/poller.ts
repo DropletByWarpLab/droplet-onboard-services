@@ -41,8 +41,10 @@
  *      row — the same read health-monitor uses for the box's version) is
  *      `not_newer` and writes no row. A replayed older pointer, signed and
  *      genuine, would otherwise roll a box back. No committed row (a locally
- *      built box) means no floor.
- *   6. Otherwise, in one transaction: flip every prior `pending` row to
+ *      built box) means no floor. apply.ts re-checks the same floor before
+ *      any side effect: a row can sit parked (`verifying`) past a newer commit.
+ *   6. Otherwise, in one transaction: flip every prior `pending` row — and
+ *      every unclaimed, parked `verifying` row (WARP-3430) — to
  *      `superseded`, then insert the new `pending` row snapshotting the
  *      verified manifest (`manifestJson`) + its sha256. The apply step
  *      (WARP-539) acts on that snapshot, not a re-fetch — no
@@ -70,7 +72,11 @@ import { channelPointerUrl, releaseAssetDownloadUrl } from "./download-urls.js";
 import { verifyAndParseRelease, verifySignedBytes } from "./verify.js";
 import type { ReleaseManifest, UpdateFailureReason } from "./manifest.js";
 import { getUpdateAgentSettings } from "./settings.js";
-import { supersedePendingUpdates } from "./transitions.js";
+import {
+  installedRelease,
+  supersedePendingUpdates,
+  supersedeUnclaimedVerifyingUpdates,
+} from "./transitions.js";
 
 const defaultLog = createLogger("update-agent");
 
@@ -592,15 +598,15 @@ export async function checkForUpdate(
     // health-monitor reports as the box's version and routes/updates.ts as
     // "currently running" — compared on the SIGNED builtAt. Equal is not
     // newer: two different commits claiming one build instant cannot be
-    // ordered, so neither replaces the other.
-    const installed = await opts.prisma.deviceUpdate.findFirst({
-      where: { status: "committed" },
-      orderBy: { updatedAt: "desc" },
-      select: { builtAt: true, gitSha: true },
-    });
+    // ordered, so neither replaces the other. apply.ts re-checks the same
+    // floor (installedRelease) before it touches anything, because a row
+    // created here can wait, parked, until a newer release has committed.
+    const installed = await installedRelease(opts.prisma);
     const builtAt = new Date(manifest.release.builtAt);
     if (installed && builtAt.getTime() <= installed.builtAt.getTime()) {
-      log.warn(
+      // Debug, not warn: in steady state this repeats every tick (a box whose
+      // channel's pointer is behind what it runs). The refusal is the outcome.
+      log.debug?.(
         {
           event: "update.not_newer",
           gitSha,
@@ -619,12 +625,19 @@ export async function checkForUpdate(
       };
     }
 
-    // ── 6. supersede prior pending + insert the new pending row ──
+    // ── 6. supersede prior pending + parked rows, insert the new pending row ──
     const { supersededCount, created } = await opts.prisma.$transaction(
       async (tx) => {
         // WARP-541: through the advance-only choke point (transitions.ts)
         // — only `pending` rows can ever become `superseded`.
-        const superseded = await supersedePendingUpdates(tx, log);
+        // WARP-3430: and UNCLAIMED `verifying` rows — parked by a transient
+        // failure (registry-auth retries make that routine). Every apply path
+        // picks the newest pending|verifying row, so an older parked row left
+        // in place would be applied after this release: a downgrade. A
+        // CLAIMED row is mid-apply and is left alone.
+        const superseded =
+          (await supersedePendingUpdates(tx, log)) +
+          (await supersedeUnclaimedVerifyingUpdates(tx, log));
         const row = await tx.deviceUpdate.create({
           data: {
             status: "pending",

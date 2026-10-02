@@ -194,6 +194,8 @@ interface Row {
   manifestSha256: string;
   manifestJson: unknown;
   failureReason: string | null;
+  /** WARP-3193 PERF-3 — is an apply run holding this row (mirrors schema.prisma)? */
+  applyClaim: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -219,23 +221,25 @@ function createPrismaStub(flags: Record<string, unknown> = {}) {
       return matches[0] ? { ...matches[0] } : null;
     },
     updateMany: async (args: {
-      where: { status?: string };
+      where: { status?: string; applyClaim?: string };
       data: { status: string };
     }) => {
       let count = 0;
       for (const r of rows) {
         if (args.where.status !== undefined && r.status !== args.where.status) continue;
+        if (args.where.applyClaim !== undefined && r.applyClaim !== args.where.applyClaim) continue;
         r.status = args.data.status;
         r.updatedAt = new Date();
         count += 1;
       }
       return { count };
     },
-    create: async (args: { data: Omit<Row, "id" | "createdAt" | "updatedAt" | "failureReason"> & { failureReason?: string | null } }) => {
+    create: async (args: { data: Omit<Row, "id" | "createdAt" | "updatedAt" | "failureReason" | "applyClaim"> & { failureReason?: string | null; applyClaim?: string } }) => {
       seq += 1;
       const row: Row = {
         id: `du-${seq}`,
         failureReason: null,
+        applyClaim: "unclaimed",
         ...args.data,
         createdAt: new Date(Date.now() + seq), // strictly increasing
         updatedAt: new Date(),
@@ -731,11 +735,13 @@ function pointerOpts(
 /** A DeviceUpdate row in an arbitrary lifecycle state, for the not-newer floor. */
 async function seedRow(
   prisma: ReturnType<typeof createPrismaStub>,
-  row: { status: string; gitSha: string; builtAt: string },
+  row: { status: string; gitSha: string; builtAt: string; applyClaim?: string },
 ) {
   return prisma.deviceUpdate.create({
     data: {
       status: row.status,
+      // Absent, not undefined: the stub's spread must keep its "unclaimed" default.
+      ...(row.applyClaim ? { applyClaim: row.applyClaim } : {}),
       channel: "stage",
       releaseTag: `ota-stage-1-g${row.gitSha.slice(0, 7)}`,
       gitSha: row.gitSha,
@@ -1111,7 +1117,8 @@ describe("checkForUpdate — never go backwards (WARP-3430)", () => {
       installedBuiltAt: "2026-05-29T03:00:00.000Z",
     });
     expect(prisma.deviceUpdate._rows().map((r) => r.status)).toEqual(["committed"]);
-    expect(logger.warn).toHaveBeenCalledWith(
+    // Debug, not warn: in steady state it repeats on every poll tick.
+    expect(logger.debug).toHaveBeenCalledWith(
       expect.objectContaining({
         event: "update.not_newer",
         gitSha: "c".repeat(40),
@@ -1120,6 +1127,7 @@ describe("checkForUpdate — never go backwards (WARP-3430)", () => {
       }),
       expect.any(String),
     );
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   it("refuses a different commit built at the very same instant (equal is not newer)", async () => {
@@ -1167,6 +1175,62 @@ describe("checkForUpdate — never go backwards (WARP-3430)", () => {
 
     expect(res).toMatchObject({ outcome: "not_newer", installedBuiltAt: "2026-06-01T03:00:00.000Z" });
     expect(prisma.deviceUpdate._rows()).toHaveLength(1);
+  });
+});
+
+// A `verifying` row is one an apply started and parked on a transient failure
+// (a registry that refused auth makes that routine). Every apply path picks the
+// newest pending|verifying row, so a parked row left older than a newer release
+// would be applied AFTER it: a downgrade. Creating the newer row retires them.
+describe("a newer release retires parked rows (WARP-3430)", () => {
+  async function pollOver(
+    rows: Array<{ status: string; gitSha: string; builtAt: string; applyClaim?: string }>,
+  ) {
+    publish({ channel: "stage", tag: STAGE_TAG, release: builtRelease("release.channel-stage.json") });
+    const prisma = prismaOnChannel("stage");
+    for (const row of rows) await seedRow(prisma, row);
+    const res = await checkForUpdate(pointerOpts(prisma, createLoggerSpy()));
+    /** status by the first letter of each row's gitSha (a/b/d/e seeded; c is the new row) */
+    const byRow = Object.fromEntries(prisma.deviceUpdate._rows().map((r) => [r.gitSha[0], r.status]));
+    return { res, byRow };
+  }
+
+  it("supersedes an unclaimed verifying row older than the new release, like a pending one", async () => {
+    const { res, byRow } = await pollOver([
+      { status: "verifying", gitSha: "a".repeat(40), builtAt: "2026-05-20T03:00:00Z" },
+      { status: "pending", gitSha: "b".repeat(40), builtAt: "2026-05-21T03:00:00Z" },
+    ]);
+
+    expect(res).toMatchObject({ outcome: "pending_created", supersededCount: 2 });
+    expect(byRow).toEqual({ a: "superseded", b: "superseded", c: "pending" });
+  });
+
+  it("leaves a CLAIMED verifying row (mid-apply), an applying row and a committed row alone", async () => {
+    const { res, byRow } = await pollOver([
+      { status: "verifying", gitSha: "a".repeat(40), builtAt: "2026-05-20T03:00:00Z", applyClaim: "claimed" },
+      { status: "applying", gitSha: "b".repeat(40), builtAt: "2026-05-21T03:00:00Z" },
+      { status: "committed", gitSha: "d".repeat(40), builtAt: "2026-05-10T03:00:00Z" },
+      { status: "rolled_back", gitSha: "e".repeat(40), builtAt: "2026-05-11T03:00:00Z" },
+    ]);
+
+    expect(res).toMatchObject({ outcome: "pending_created", supersededCount: 0 });
+    expect(byRow).toEqual({
+      a: "verifying",
+      b: "applying",
+      d: "committed",
+      e: "rolled_back",
+      c: "pending",
+    });
+  });
+
+  it("retires nothing when the poll refuses the release (not_newer writes no row, changes no row)", async () => {
+    const { res, byRow } = await pollOver([
+      { status: "committed", gitSha: "d".repeat(40), builtAt: "2026-06-01T03:00:00Z" },
+      { status: "verifying", gitSha: "a".repeat(40), builtAt: "2026-05-20T03:00:00Z" },
+    ]);
+
+    expect(res.outcome).toBe("not_newer");
+    expect(byRow).toEqual({ d: "committed", a: "verifying" });
   });
 });
 

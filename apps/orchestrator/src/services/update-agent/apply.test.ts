@@ -898,12 +898,12 @@ describe("applyPendingUpdate (WARP-539)", () => {
     await prisma.deviceUpdate.create({
       data: {
         status: "pending",
-        channel: "stage",
+        channel: "stable", // the box's own channel: not the stale-row gate's business
         releaseTag: null,
         gitSha: GIT_SHA,
         builtAt: new Date("2026-06-30T03:00:00Z"),
         manifestSha256: "0".repeat(64),
-        manifestJson: buildManifest({ channel: "stage" }),
+        manifestJson: buildManifest(),
       },
     });
 
@@ -973,6 +973,165 @@ describe("applyPendingUpdate (WARP-539)", () => {
     const runner = new FakeRunner();
     const res = await applyPendingUpdate(baseOpts(prisma, runner));
     expect(res.outcome).toBe("nothing_pending");
+    expect(runner.calls).toEqual([]);
+  });
+});
+
+// The poller only refuses a not-newer release when it CREATES a row. A row can
+// wait — parked `verifying` after a registry-auth retry, say — while a newer
+// release is created, applied and committed; every apply path then picks the
+// newest pending|verifying row, i.e. the old one. applyClaimedRow re-checks.
+describe("a stale row is retired, never applied (WARP-3430)", () => {
+  /** A row in ANY lifecycle state on the box's own channel (seedPendingRow only makes pending ones). */
+  async function seedRow(
+    prisma: PrismaStub,
+    row: { status: string; gitSha: string; builtAt: string; channel?: string },
+  ) {
+    return prisma.deviceUpdate.create({
+      data: {
+        status: row.status,
+        channel: row.channel ?? "stable",
+        releaseTag: servedTag,
+        gitSha: row.gitSha,
+        builtAt: new Date(row.builtAt),
+        manifestSha256: "0".repeat(64),
+        manifestJson: buildManifest({ gitSha: row.gitSha, builtAt: row.builtAt }),
+      },
+    });
+  }
+  const COMMITTED = { status: "committed", gitSha: "b".repeat(40), builtAt: "2026-06-30T03:00:00Z" };
+
+  it.each(["pending", "verifying"])(
+    "a %s row older than the committed release is superseded, with nothing touched",
+    async (status) => {
+      const prisma = createPrismaStub();
+      const runner = new FakeRunner();
+      const logger = createLoggerSpy();
+      await seedRow(prisma, COMMITTED);
+      const stale = await seedRow(prisma, { status, gitSha: "a".repeat(40), builtAt: "2026-06-01T03:00:00Z" });
+
+      const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+      expect(res).toEqual({ outcome: "stale_superseded", deviceUpdateId: stale.id, reason: "not_newer" });
+      expect(prisma.deviceUpdate._rows().find((r) => r.id === stale.id)).toMatchObject({
+        status: "superseded",
+        failureReason: "not_newer",
+        applyClaim: "unclaimed", // handed back like every other exit
+      });
+      // The only status write is the retirement: no `verifying`, no snapshot,
+      // no pull, no download.
+      expect(prisma.deviceUpdate._statusWrites().map((w) => w.status)).toEqual(["superseded"]);
+      expect(runner.calls).toEqual([]);
+      expect(requestedUrls).toEqual([]);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: "update.stale_superseded",
+          deviceUpdateId: stale.id,
+          reason: "not_newer",
+          installedGitSha: COMMITTED.gitSha,
+        }),
+        expect.any(String),
+      );
+    },
+  );
+
+  it("equal build time is not newer", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    await seedRow(prisma, COMMITTED);
+    const row = await seedRow(prisma, { status: "verifying", gitSha: "a".repeat(40), builtAt: COMMITTED.builtAt });
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner));
+
+    expect(res).toMatchObject({ outcome: "stale_superseded", deviceUpdateId: row.id, reason: "not_newer" });
+    expect(runner.calls).toEqual([]);
+  });
+
+  it("a row for another channel than the box follows is superseded, not applied", async () => {
+    // The box was moved to the stage channel; this row is a stable release.
+    const prisma = createPrismaStub({
+      flags: { [UPDATE_AGENT_SETTINGS_KEY]: { channel: "stage", applyWindowCron: "0 3 * * *", autoApply: true } },
+    });
+    const runner = new FakeRunner();
+    const logger = createLoggerSpy();
+    const row = await seedRow(prisma, {
+      status: "pending",
+      gitSha: "a".repeat(40),
+      builtAt: "2026-06-30T03:00:00Z",
+      channel: "stable",
+    });
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res).toEqual({ outcome: "stale_superseded", deviceUpdateId: row.id, reason: "channel_mismatch" });
+    expect(prisma.deviceUpdate._rows()[0]).toMatchObject({ status: "superseded", failureReason: "channel_mismatch" });
+    expect(runner.calls).toEqual([]);
+    expect(requestedUrls).toEqual([]);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.stale_superseded", rowChannel: "stable", deviceChannel: "stage" }),
+      expect.any(String),
+    );
+  });
+
+  it("a row strictly newer than the committed one, on the box's channel, still applies", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    await seedRow(prisma, { ...COMMITTED, builtAt: "2026-06-01T03:00:00Z" });
+    await seedRow(prisma, { status: "pending", gitSha: "a".repeat(40), builtAt: "2026-06-30T03:00:00Z" });
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner));
+
+    expect(res.outcome).toBe("self_swap_started");
+  });
+
+  it("a box with no committed row (a locally built one) has no floor", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    await seedRow(prisma, { status: "pending", gitSha: "a".repeat(40), builtAt: "2020-01-01T00:00:00Z" });
+
+    expect((await applyPendingUpdate(baseOpts(prisma, runner))).outcome).toBe("self_swap_started");
+  });
+
+  it("the boot resume of a parked row retires it too when it has gone stale", async () => {
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    await seedRow(prisma, COMMITTED);
+    const row = await seedRow(prisma, { status: "verifying", gitSha: "a".repeat(40), builtAt: "2026-06-01T03:00:00Z" });
+
+    const resume = await resumeInterruptedApply(baseOpts(prisma, runner));
+
+    expect(resume).toMatchObject({
+      outcome: "resumed_apply",
+      deviceUpdateId: row.id,
+      result: { outcome: "stale_superseded", reason: "not_newer" },
+    });
+    expect(runner.calls).toEqual([]);
+  });
+
+  it("a release parked by a registry-auth retry is NOT applied after a newer one committed", async () => {
+    // The reviewed scenario end to end: A parks (the registry refuses auth),
+    // B is created, applied and committed meanwhile, then the next window
+    // would have applied A — a downgrade.
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    runner.pullImages = async () => {
+      throw Object.assign(new Error("Command failed: apply-update.sh pull-images"), {
+        stderr: "[apply-update] ERROR: registry-auth: the registry refused authentication for ghcr.io/x/y@sha256:1 — the image package is private\n",
+      });
+    };
+    const a = await seedRow(prisma, { status: "pending", gitSha: "a".repeat(40), builtAt: "2026-06-01T03:00:00Z" });
+    expect((await applyPendingUpdate(baseOpts(prisma, runner))).outcome).toBe("retry_later");
+    expect(prisma.deviceUpdate._rows()[0]!.status).toBe("verifying");
+
+    await seedRow(prisma, COMMITTED); // B: newer, committed
+    runner.calls = [];
+    runner.pullImages = async () => {
+      throw new Error("the window must not even reach the pull");
+    };
+    const res = await applyWindowTick(baseOpts(prisma, runner));
+
+    expect(res).toEqual({ outcome: "stale_superseded", deviceUpdateId: a.id, reason: "not_newer" });
+    expect(prisma.deviceUpdate._rows().find((r) => r.id === a.id)!.status).toBe("superseded");
     expect(runner.calls).toEqual([]);
   });
 });
