@@ -37,8 +37,14 @@
  *          `{error: 'module_disabled', module: 'security'}` — byte-identical
  *          to the module and feature gates, so the tool reads every refusal
  *          the same way ("switched off, or this person can't use it").
- * The acting person's scope is then `securityScopeForPerson`, the ONE
- * function the dashboard's routes use, and DS-005 is applied by the
+ * The acting person's scope is then `securityScopeWithoutLocks` — the
+ * dashboard's own `securityScopeForPerson`, minus door locks (WARP-2977 P2b-2,
+ * DS-019): the tools answer for cameras ("what covers it", "is it
+ * reporting"), which a lock has no honest answer to, and lock state is
+ * presence data. So a person holding Devices still gets no lock link, no
+ * lock-only area and no lock row here — the safe side of the dashboard's rule,
+ * never wider. Widening it is a decision for the tools, not a side effect of
+ * the person's grants. DS-005 is applied by the
  * dashboard's own projections (`listIncidents`, `loadIncidentDetail`,
  * `feedVisibilityWhere` at AND[0], `viewerAreas`, `visibleZoneViews`,
  * `zoneFilterFor`). An area or camera the person cannot see answers exactly
@@ -75,7 +81,7 @@ import type { EffectiveAccessResolver } from "../middleware/feature-gate.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
 import { FEATURE_LEVEL_RANK, type FeatureLevel } from "../services/access-catalog.js";
-import { securityScopeForPerson, type SecurityRouteDeps, type SecurityViewerScope } from "../services/security-access.js";
+import { securityScopeWithoutLocks, type SecurityRouteDeps, type SecurityViewerScope } from "../services/security-access.js";
 import {
   incidentListWhere,
   listIncidents,
@@ -93,6 +99,7 @@ import {
   listLinkProposals,
   loadActiveLinks,
   loadCameraLabels,
+  isLockLinkRef,
   loadZoneRecords,
   parseLinkRef,
   viewerAreas,
@@ -238,6 +245,7 @@ function viewerOf(actor: SecurityActor, scope: SecurityViewerScope): IncidentVie
     userId: actor.id,
     visibleCameras: scope.visibleCameras,
     mayReadThreats: scope.mayReadThreats,
+    mayReadLocks: scope.mayReadLocks,
     ownerOrAdmin: actor.role === "owner" || actor.role === "admin",
   };
 }
@@ -454,7 +462,7 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
     const now = clock();
     try {
       const who = actorOf(res);
-      const scope = await securityScopeForPerson(prisma, who, resolver);
+      const scope = await securityScopeWithoutLocks(prisma, who);
       const viewer = viewerOf(who, scope);
       const site = await siteClockOf(prisma, now);
       const p = resolveAssistantPeriod(q.data, site, now, new Date(now.getTime() - SECURITY_INCIDENT_RETENTION_DAYS * DAY_MS));
@@ -493,7 +501,7 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
     const now = clock();
     try {
       const who = actorOf(res);
-      const scope = await securityScopeForPerson(prisma, who, resolver);
+      const scope = await securityScopeWithoutLocks(prisma, who);
       const viewer = viewerOf(who, scope);
       const detail = await loadIncidentDetail(prisma, req.params.id!, viewer, "view", now, securityOngoingSource());
       if (!detail) return fail(res, 404, "INCIDENT_NOT_FOUND", "There is no such incident.");
@@ -547,7 +555,7 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
     const now = clock();
     try {
       const who = actorOf(res);
-      const scope = await securityScopeForPerson(prisma, who, resolver);
+      const scope = await securityScopeWithoutLocks(prisma, who);
       const site = await siteClockOf(prisma, now);
       const p = resolveAssistantPeriod(q.data, site, now, new Date(now.getTime() - SECURITY_EVENT_RETENTION_DAYS * DAY_MS));
       if (!p.ok) return fail(res, 400, p.code, p.message);
@@ -572,7 +580,7 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
       const kinds = q.data.kind ? ASSISTANT_EVENT_KINDS[q.data.kind] : q.data.label ? ASSISTANT_EVENT_KINDS.detection : ASSISTANT_STORED_KINDS;
       const page = await listSecurityEvents(
         prisma,
-        feedVisibilityWhere(scope.visibleCameras, scope.mayReadThreats),
+        feedVisibilityWhere(scope.visibleCameras, scope.mayReadThreats, scope.mayReadLocks),
         { limit: q.data.limit, cursor: cursor ?? undefined, kinds: { in: [...kinds] }, includeLow: false },
         extraWhere,
       );
@@ -597,7 +605,7 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
     const now = clock();
     try {
       const who = actorOf(res);
-      const scope = await securityScopeForPerson(prisma, who, resolver);
+      const scope = await securityScopeWithoutLocks(prisma, who);
       const viewer = viewerOf(who, scope);
       const [mode, records, links, labels] = await Promise.all([
         // WARP-3194: hours that cannot be evaluated leave the mode unknown, not the whole answer a 503.
@@ -625,7 +633,7 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
         if (!r) return "unknown";
         return r.health === "online" ? "yes" : r.health === "disabled" ? "detection off" : "offline";
       };
-      const visibility = feedVisibilityWhere(scope.visibleCameras, scope.mayReadThreats);
+      const visibility = feedVisibilityWhere(scope.visibleCameras, scope.mayReadThreats, scope.mayReadLocks);
       // One area's answer: its last visible activity and its open incidents (two reads), and what covers it.
       const readArea = async (z: (typeof zones)[number]) => {
         const clause = zoneFilterFor(links, z.id, scope);
@@ -643,10 +651,12 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
           openIncidents,
           coveredBy: z.links.map((l) => {
             const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
+            // No lock link reaches here (`securityScopeWithoutLocks`); the check narrows the type.
+            const camera = parsed && !isLockLinkRef(parsed) ? parsed : null;
             return {
               source: l.label,
-              part: parsed?.frigateZone ?? null,
-              reporting: reporting(parsed?.camera),
+              part: camera?.frigateZone ?? null,
+              reporting: reporting(camera?.camera),
               linkedBy: l.setBy === "droplet" ? "Droplet" : "a person",
             };
           }),
@@ -699,7 +709,7 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
     }
     try {
       const who = actorOf(res);
-      const scope = await securityScopeForPerson(prisma, who, resolver);
+      const scope = await securityScopeWithoutLocks(prisma, who);
       const site = await siteClockOf(prisma, now);
       if (q.data.period !== undefined) {
         const p = resolveAssistantPeriod({ period: q.data.period }, site, now, new Date(now.getTime() - PATTERN_AT_BACK_MS));

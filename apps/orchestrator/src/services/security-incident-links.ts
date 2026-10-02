@@ -43,7 +43,7 @@
 import type { Prisma, PrismaClient, SecurityIncidentScope, SecurityZoneKind, SecurityZoneSourceKind } from "@prisma/client";
 // The leaf, never security-incident-view.ts: that module imports this one (WARP-3193 ARCH-1).
 import { seesEverything, type IncidentViewer } from "./security-incident-viewer.js";
-import { loadCameraLabels, parseLinkRef, visibleLinks } from "./security-zones.service.js";
+import { isLockLinkRef, loadCameraLabels, parseLinkRef, visibleLinks } from "./security-zones.service.js";
 
 /** One line on the incident page: a link only Droplet set, into the incident's area. */
 export interface IncidentDropletLinkView {
@@ -101,11 +101,15 @@ export function dropletOnlyLinks(
 ): IncidentDropletLinkView[] {
   if (incident.scope !== "area" || incident.zoneId === null) return [];
   const byCamera = new Map<string, IncidentLinkRow[]>();
+  // Keep is for cameras: a door lock has no camera to keep (and P4 makes no lock link), so the lock gate is shut
+  // here whatever the viewer holds (WARP-2977 P2b-2).
   for (const l of visibleLinks(
     links.filter((l) => l.zoneId === incident.zoneId),
-    viewer,
+    { visibleCameras: viewer.visibleCameras, mayReadLocks: false },
   )) {
-    const camera = parseLinkRef(l.sourceKind, l.sourceRef)!.camera;
+    const parsed = parseLinkRef(l.sourceKind, l.sourceRef)!;
+    if (isLockLinkRef(parsed)) continue; // unreachable behind the shut gate; narrows the type
+    const camera = parsed.camera;
     const list = byCamera.get(camera);
     if (list) list.push(l);
     else byCamera.set(camera, [l]);

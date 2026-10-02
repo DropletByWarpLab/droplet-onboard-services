@@ -171,13 +171,16 @@ export function tileGrid(n: number, area?: { width: number; height: number }): {
  * the sources cell (ADR §3.2): `patterns` reads quiet for its 14 learning
  * days, `links` is off whenever linking is, `retention` and `alerts` feed
  * nothing on screen, `site_mode` is the mode cell's and `incidents` the
- * needs-attention cell's. A `Record`, so a new row id (locks, summaries)
- * cannot land in the type without being classified here.
+ * needs-attention cell's. A `Record`, so a new row id (summaries) cannot land
+ * in the type without being classified here. `locks` (WARP-2977 P2b-2) is a
+ * source: the server sends it only to a viewer with Devices view (DS-019),
+ * and it never moves `countBehind` — a lock row never forms an incident (D21).
  */
 export type WallRowRole = "source" | "engine" | "mode" | "other";
 export const WALL_ROW_ROLE: Record<SecurityHealthRow["id"], WallRowRole> = {
   camera_ingest: "source",
   camera_system: "source",
+  locks: "source",
   threat_mirror: "source",
   site_mode: "mode",
   incidents: "engine",
