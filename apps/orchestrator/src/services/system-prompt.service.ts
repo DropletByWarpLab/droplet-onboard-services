@@ -123,7 +123,7 @@ export function buildBaseSystemPrompt(
   withheldTools?: ReadonlySet<string>,
 ): string {
   // Identity leads: the full "who you are / what this box does" block
-  // from data/droplet-identity.md (fail-open to the legacy one-liner),
+  // from data/droplet-identity.md (fail-open to FALLBACK_IDENTITY),
   // shared by every surface — dashboard, voice, external MCP clients.
   const lines = [loadIdentityPrompt()];
   // Personality is appended immediately after identity, before tool
