@@ -17,7 +17,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
 
 const tool: Tool = {
   name: "get_router_system_info",
-  description: "Router hardware info, OpenWrt version, uptime, CPU load, and memory usage. Read-only.",
+  description: "Router hardware info, OpenWrt version, uptime, CPU load, and memory usage.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

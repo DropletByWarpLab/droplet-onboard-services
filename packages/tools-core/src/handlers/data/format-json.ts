@@ -100,7 +100,7 @@ const tool: Tool = {
   description:
     `Pretty-print or minify a JSON document in place. 'pretty' indents with an optional \`indent\` (${MIN_INDENT}-${MAX_INDENT} ` +
     `spaces, default ${DEFAULT_INDENT}); 'minify' strips all insignificant whitespace. Input capped at ${MAX_INPUT_CHARS} chars; ` +
-    "malformed JSON is rejected as PARSE_FAILED. Tier-1 read; pure computation, no network egress.",
+    "malformed JSON is rejected as PARSE_FAILED. Pure computation, no network egress.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

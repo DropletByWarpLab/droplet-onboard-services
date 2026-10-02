@@ -113,7 +113,7 @@ const tool: Tool = {
   description:
     `Decode text from 'base64', 'base64url', 'hex', or 'url' (percent-encoding). ` +
     `Input capped at ${MAX_TEXT_CHARS} chars; malformed input for the chosen encoding is rejected as DECODE_FAILED ` +
-    "rather than silently truncated. Tier-1 read; pure computation, no network egress.",
+    "rather than silently truncated. Pure computation, no network egress.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

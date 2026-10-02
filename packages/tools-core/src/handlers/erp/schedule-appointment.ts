@@ -26,7 +26,7 @@ const tool: Tool = {
   description:
     "Schedule (create/reschedule) an appointment in the connected ERP (Eaglesoft). Requires " +
     "confirmation. Stages a write request for human approval; never writes directly. Not live " +
-    "yet — returns ERP_NOT_CONNECTED until the integration ships (WARP-1095+).",
+    "yet — returns ERP_NOT_CONNECTED.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

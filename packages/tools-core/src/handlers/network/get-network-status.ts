@@ -21,7 +21,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
 const tool: Tool = {
   name: "get_network_status",
   description:
-    "Get current network status: WAN/LAN interface state, WiFi state, connected device count, router system info. Read-only.",
+    "Get current network status: WAN/LAN interface state, WiFi state, connected device count, router system info.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,
