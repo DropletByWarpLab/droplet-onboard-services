@@ -356,3 +356,5 @@ login challenge. WebAuthn is not part of the app login path.
 > app login path" changes only through ADR-063 (WARP-3226). The ADR-060
 > exception above was for the Tauri shell, which ADR-062 retires; see
 > ADR-062's reconciliation with ADR-060.
+
+> **Amended by [ADR-063](ADR-063-native-desktop-sign-in.md) (2026-09-26), for the native desktop clients:** they may sign in with a passkey through the platform authenticator, against the dashboard's `/auth/webauthn/*` routes, with user verification required and a relying party derived from `Host` only. They may also finish an SSO sign-in through the box-local handoff (`/sso/oidc/native/*`, RFC 8252 with PKCE S256), which leaves the IdP redirect URI unchanged. The iOS and Android apps are unchanged.
