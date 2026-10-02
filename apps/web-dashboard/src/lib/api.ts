@@ -9008,6 +9008,21 @@ export interface SaasCredentialView {
    */
   credentialsPurged?: boolean;
   configured: boolean;
+  /**
+   * WARP-3434 — the connector kind (`cloud`, `rest` or `mcp`), as the box's
+   * descriptor declares it. OPTIONAL for the reason `credentialsPurged` is: a
+   * box that predates the field sends nothing, and that is not an answer.
+   */
+  track?: "cloud" | "rest" | "mcp";
+  /** WARP-3434 — whether to `POST /:provider/connect` after a save. Optional
+   *  as above; the page falls back to the descriptor's own rule. */
+  probedOnConnect?: boolean;
+  /**
+   * WARP-3434 — the credential path `fields` belongs to (Xero: `custom-connection`),
+   * or `null` for a provider with no variants. The page sends it back as
+   * `credentialVariant`: the box refuses a first save that names no path.
+   */
+  variant?: string | null;
   fields: SaasCredentialField[];
   /** Non-secret field values only. */
   values: Record<string, string | number>;
