@@ -48,6 +48,7 @@ export const MODULE_OWNED_TOOL_DOMAINS: ReadonlySet<string> = new Set([
   "money",
   "cameras",
   "security",
+  "doors", // ADR-055 P4b: the two read-only doors tools, claimed by the `doors` module
   "smart-home",
   "network",
   "switch", // managed_switch

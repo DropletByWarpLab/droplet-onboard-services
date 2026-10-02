@@ -91,7 +91,12 @@ export type ToolDomain =
   // module toggle and the per-person Security level gate the domain. It never
   // holds a write or confirming tool (the registry pin), and it is withheld
   // from every cloud turn (the orchestrator's OFF_LAN_WITHHELD_DOMAINS).
-  | "security";
+  | "security"
+  // ADR-055 (P4b) — doors. Slug matches the `doors` ModuleId, which claims it,
+  // so the module toggle gates the domain (WARP-2972: absent from the chat pool,
+  // /api/llm/tools and MCP while the module is off). Read-only by rule (§11.5):
+  // see interceptor.ts's doors_ guard.
+  | "doors";
 
 export interface ToolCatalogEntry {
   name: string;
@@ -250,6 +255,10 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   // EXCLUDED_FROM_CHAT_TOOLS) while the base-prompt budget tripwire stands,
   // so it is MCP- and API-reachable and never advertised on a chat turn.
   money: ["money_list_open_documents"],
+  // ADR-055 (P4b) — doors. Two reads, no write, ever (§11.5). In the chat pool
+  // when the module is on, and withheld from it, /api/llm/tools and MCP when
+  // it is off (WARP-2972, module-gate.ts).
+  doors: ["doors_list", "doors_recent_events"],
   // ADR-045 — EMPTY for the same reason as `pm` above: slice C took the five
   // reads, slice D took `crm_log_activity` (now `business_create({entity:"note"})`)
   // and `crm_move_deal_stage` (now `business_update({entity:"deal", state})`).
@@ -489,6 +498,8 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   erp_schedule_appointment: "Book or move an appointment (you approve it before it's saved)",
   // Money (invoices and bills landed from a connected ledger)
   money_list_open_documents: "See what you are owed and what you owe, from your accounting systems",
+  doors_list: "See your doors and what each one last reported",
+  doors_recent_events: "See what your doors have reported lately",
   // Cloud connectors (Stripe / HubSpot / Mailchimp)
   cloud_query_dataset:
     "Look up payments, customers, deals, or mailing-list activity from your connected online accounts",
