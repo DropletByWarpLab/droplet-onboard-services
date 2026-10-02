@@ -15,7 +15,7 @@
  *
  * Proven RED first: CalibrationWizard does not exist yet.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import React from "react";
 import { readFileSync } from "node:fs";
@@ -82,10 +82,12 @@ function mockHealthyMeasurements() {
   echoMock.mockResolvedValue({ heard: true, tone_dbfs: -22, floor_dbfs: -57 });
 }
 
+type OnClose = React.ComponentProps<typeof CalibrationWizard>["onClose"];
+
 function renderWizard(
   props: Partial<React.ComponentProps<typeof CalibrationWizard>> = {},
 ) {
-  const onClose = vi.fn();
+  const onClose = vi.fn<OnClose>();
   const utils = render(
     <CalibrationWizard
       open
@@ -101,7 +103,7 @@ function renderWizard(
 /** Drive step 3 (wake ×3) by feeding fresh last_wake_at values. */
 async function driveWakeHits(
   rerender: (ui: React.ReactElement) => void,
-  onClose: ReturnType<typeof vi.fn>,
+  onClose: Mock<OnClose>,
   hits: number,
 ) {
   await screen.findByText("Now just the wake word.", undefined, {

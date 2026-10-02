@@ -82,15 +82,17 @@ vi.mock("../services/ai-gateway.client.js", () => ({
   listModels: vi.fn().mockResolvedValue({ models: [] }),
 }));
 vi.mock("../services/chat-persistence.service.js", () => ({
-  ChatPersistenceService: vi.fn().mockImplementation(() => ({
-    ensureConversation: vi.fn().mockResolvedValue(null),
-    createTurnRows: vi.fn().mockResolvedValue(null),
-    finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
-    updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
-    listConversationsForUser: vi.fn().mockResolvedValue([]),
-    getConversationForUser: vi.fn().mockResolvedValue(null),
-    deleteConversationForUser: vi.fn().mockResolvedValue(false),
-  })),
+  ChatPersistenceService: vi.fn().mockImplementation(function () {
+    return {
+      ensureConversation: vi.fn().mockResolvedValue(null),
+      createTurnRows: vi.fn().mockResolvedValue(null),
+      finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
+      updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
+      listConversationsForUser: vi.fn().mockResolvedValue([]),
+      getConversationForUser: vi.fn().mockResolvedValue(null),
+      deleteConversationForUser: vi.fn().mockResolvedValue(false),
+    };
+  }),
 }));
 
 const mockRunAgent = vi.fn();
