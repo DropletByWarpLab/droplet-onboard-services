@@ -110,6 +110,13 @@ services:
       # /docs prefix → docserver:9980 (coolwsd net.service_root); onlyoffice
       # strips it → docserver:80. Same selector pattern as the knobs above.
       - DOCS_ENGINE=${DOCS_ENGINE:-collabora}
+      # WARP-3452: /docker-entrypoint.d/04-llm-access.sh refuses /llm/ to the
+      # box's own address, which the cloudflared relay dials and so arrives
+      # from. It reads it from the host dnsmasq host-record (mount below);
+      # DROPLET_PUBLIC_FQDN_IP overrides. `relay` in the profiles means the
+      # connector runs, and then a missing address refuses every /llm/ peer.
+      - DROPLET_PUBLIC_FQDN_IP=${DROPLET_PUBLIC_FQDN_IP:-}
+      - DROPLET_COMPOSE_PROFILES=${COMPOSE_PROFILES:-}
     volumes:
       # nginx.conf moved docker/nginx.conf → docker/nginx/nginx.conf
       # (WARP-1021). Still mounted read-only over the baked copy (same file)
@@ -122,6 +129,12 @@ services:
       # presents a client cert on the orchestrator/ai-gateway upstream legs
       # when DROPLET_INTERNAL_TLS=1. Inert (never read) when the knob is 0.
       - ../data/secrets/service-tls/gateway:/etc/nginx/service-tls:ro
+      # WARP-3452: the host dnsmasq conf (lan-dhcp.conf, non-secret), whose last
+      # host-record names the address the relay arrives from. The DIRECTORY,
+      # never the file: a missing file bind source would be created as a
+      # directory and break dnsmasq (same rule as /etc/droplet on
+      # matter-controller). Read-only; local-dns.sh is the writer.
+      - /etc/droplet-host-net:/etc/droplet-host-net:ro
     depends_on:
       orchestrator:
         condition: service_started

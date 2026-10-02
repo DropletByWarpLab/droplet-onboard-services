@@ -428,6 +428,28 @@ _write_host_dnsmasq_record() {
   fi
 
   _assert_relay_dns_listener
+  _rerender_gateway_llm_access
+}
+
+# WARP-3452 — the gateway refuses /llm/ to the cloudflared relay by the address
+# in the record just written (docker/nginx/render-llm-access.sh reads it at
+# container start). setup.sh starts the stack BEFORE this runs, so re-render a
+# running gateway now. Best-effort, like reload_gateway_nginx (tls-reload.sh):
+# a failure leaves the previous map, and a gateway restart re-renders it.
+_rerender_gateway_llm_access() {
+  local compose_file="${REPO_ROOT:-}/docker/docker-compose.yml"
+  if [ ! -f "$compose_file" ] || ! command -v docker >/dev/null 2>&1; then
+    return 0
+  fi
+  docker compose -f "$compose_file" ps --services --filter status=running 2>/dev/null \
+    | grep -qx gateway || return 0
+  if docker compose -f "$compose_file" exec -T gateway \
+       sh -c '/docker-entrypoint.d/04-llm-access.sh && nginx -s reload' >/dev/null 2>&1; then
+    log_info "Gateway /llm/ relay refusal re-rendered for ${DROPLET_PUBLIC_FQDN_IP}"
+  else
+    log_warn "Gateway /llm/ map not re-rendered — restart the gateway to pick up ${DROPLET_PUBLIC_FQDN_IP}"
+  fi
+  return 0
 }
 
 # WARP-2189 — the OTHER half of the record written above.
