@@ -125,7 +125,6 @@ export function clientGuides({
       steps:
         "Add this provider to opencode.json, then set DROPLET_TOKEN to your token in your shell.",
       snippet: json({
-        $schema: "https://opencode.ai/config.json",
         provider: {
           droplet: {
             npm: "@ai-sdk/openai-compatible",
