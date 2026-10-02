@@ -261,6 +261,10 @@ configure_gpu_env() {
   _vendor="$(detect_gpu_vendor)" || return 1
   upsert_env GPU_VENDOR "$_vendor"
 
+  # WARP-3452: both runtimes read the window, so this runs before the
+  # DMR-only return below.
+  configure_context_env "$_env_target" "$_vendor"
+
   # Only DMR boxes have a vendor-selected profile; an Ollama box keeps its own
   # wiring, which this ticket deliberately does not touch.
   _runtime="$(grep -E '^INFERENCE_RUNTIME=' "$_env_target" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr '[:upper:]' '[:lower:]' || true)"
@@ -342,5 +346,84 @@ configure_gpu_env() {
   fi
 
   log_info "GPU: detected ${_vendor} — DMR profile '$(dmr_profile_for_vendor "$_vendor")'"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# WARP-3452 — the context window, sized to the card.
+# ---------------------------------------------------------------------------
+# The window costs VRAM: the KV cache grows with it. Measured on the bench box
+# (RTX 5060 Ti 16 GB, gpt-oss:20B-F16): 12.7 GB at 16k, 14.0 GB at 64k. Coding
+# tools need the 64k (Copilot agent mode sends ~24k-token prompts, refused with
+# 400 at n_ctx 16384), so a 16 GiB card gets 65536 and anything smaller, an
+# iGPU or a CPU-only box keeps 16384.
+
+# gpu_vram_mib <vendor> — total VRAM of the discrete card in MiB, or nothing
+# when it cannot be measured. Unlike vendor detection above, sizing a card
+# needs its driver: nvidia-smi on NVIDIA (the driver publishes no sysfs size),
+# amdgpu's mem_info_vram_total on AMD. The largest AMD node wins, so a Raphael
+# iGPU's 512 MiB carve-out never stands in for a discrete card.
+# SYS_DRM_ROOT is a test seam, as in scripts/dmr/flip-single-box.sh.
+gpu_vram_mib() {
+  case "${1:-none}" in
+    nvidia)
+      command -v nvidia-smi >/dev/null 2>&1 || return 0
+      nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null \
+        | tr -d ' ' | sort -n | tail -1 || true
+      ;;
+    amd)
+      _vram_max=0
+      for _vram_f in "${SYS_DRM_ROOT:-/sys/class/drm}"/card*/device/mem_info_vram_total; do
+        _vram_b="$(cat "$_vram_f" 2>/dev/null || true)"
+        case "$_vram_b" in ''|*[!0-9]*) continue ;; esac
+        [ "$_vram_b" -gt "$_vram_max" ] && _vram_max="$_vram_b"
+      done
+      [ "$_vram_max" -gt 0 ] && printf '%s' "$((_vram_max / 1048576))"
+      ;;
+    *) printf '0' ;;
+  esac
+  return 0
+}
+
+# context_window_for_vram_mib <MiB> — 65536 from 16 GiB up, else 16384; nothing
+# when the input is not a number. Rounded to the nearest GiB because a "16 GB"
+# card reports less than 16384 MiB (the bench box's RTX 5060 Ti: 16311).
+context_window_for_vram_mib() {
+  case "${1:-}" in ''|*[!0-9]*) return 0 ;; esac
+  if [ $(( ($1 + 512) / 1024 )) -ge 16 ]; then printf '65536'; else printf '16384'; fi
+}
+
+# configure_context_env <env-file> <vendor> — write DMR_CONTEXT_LENGTH and
+# OLLAMA_CONTEXT_LENGTH once, equal (WARP-854 parity: the orchestrator budgets
+# against OLLAMA_CONTEXT_LENGTH, DMR serves DMR_CONTEXT_LENGTH).
+#   a value already in the file  -> kept; an operator's choice wins. A lone
+#                                   key is copied to its missing sibling.
+#   VRAM unknown                 -> nothing written: the compose default
+#                                   (65536) applies, and the next run retries.
+# Reads the FILE, not the environment: materialize_artifacts has already
+# exported .env into the shell (see detect_gpu_vendor).
+configure_context_env() {
+  _ctx_env="${1:?configure_context_env: env file required}"
+  _ctx_dmr="$(grep -E '^DMR_CONTEXT_LENGTH=' "$_ctx_env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+  _ctx_oll="$(grep -E '^OLLAMA_CONTEXT_LENGTH=' "$_ctx_env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+
+  if [ -n "$_ctx_dmr$_ctx_oll" ]; then
+    [ -n "$_ctx_dmr" ] || upsert_env DMR_CONTEXT_LENGTH "$_ctx_oll"
+    [ -n "$_ctx_oll" ] || upsert_env OLLAMA_CONTEXT_LENGTH "$_ctx_dmr"
+    if [ -n "$_ctx_dmr" ] && [ -n "$_ctx_oll" ] && [ "$_ctx_dmr" != "$_ctx_oll" ]; then
+      log_warn "DMR_CONTEXT_LENGTH=${_ctx_dmr} != OLLAMA_CONTEXT_LENGTH=${_ctx_oll} in .env — the orchestrator budgets against the wrong window (WARP-854). Set them equal."
+    fi
+    return 0
+  fi
+
+  _ctx_mib="$(gpu_vram_mib "${2:-none}")"
+  _ctx_win="$(context_window_for_vram_mib "$_ctx_mib")"
+  if [ -z "$_ctx_win" ]; then
+    log_warn "Could not size the ${2:-none} GPU's VRAM — leaving the context window to the compose default (65536)."
+    return 0
+  fi
+  upsert_env DMR_CONTEXT_LENGTH "$_ctx_win"
+  upsert_env OLLAMA_CONTEXT_LENGTH "$_ctx_win"
+  log_info "Context window: ${_ctx_win} tokens (${2:-none} GPU, ${_ctx_mib} MiB VRAM)"
   return 0
 }

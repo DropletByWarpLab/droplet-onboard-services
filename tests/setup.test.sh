@@ -463,6 +463,15 @@ case "$SB_GPU_VENDOR" in
   *) fail "GPU_VENDOR='$SB_GPU_VENDOR' is not one of nvidia/amd/none" ;;
 esac
 
+# WARP-3452 — the same call writes the context window (configure_gpu_env ->
+# configure_context_env). A GPU-less runner must land on 16384 for both keys.
+SB_CTX="$(grep -E '^DMR_CONTEXT_LENGTH=' "$TMP_ROOT/.env" | tail -1 | cut -d= -f2- || true)/$(grep -E '^OLLAMA_CONTEXT_LENGTH=' "$TMP_ROOT/.env" | tail -1 | cut -d= -f2- || true)"
+if [ "$SB_GPU_VENDOR" != "none" ] || [ "$SB_CTX" = "16384/16384" ]; then
+  pass "context window written with GPU_VENDOR=$SB_GPU_VENDOR ($SB_CTX)"
+else
+  fail "no GPU but context window is '$SB_CTX', expected 16384/16384 — configure_context_env is not wired in"
+fi
+
 # And the runtime profile token must agree with the detected vendor — a CUDA
 # profile beside a ROCm image (or vice versa) is the exact disagreement this
 # change exists to prevent.

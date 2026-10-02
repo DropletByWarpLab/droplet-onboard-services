@@ -29,11 +29,11 @@
 import { OUTPUT_RESERVE } from "./prompt-budget.consts.js";
 
 /**
- * The shipping single-box context window (tokens). Mirrors the
- * `OLLAMA_CONTEXT_LENGTH` default in docker-compose.yml + config.ts, and is
- * the value the estimator's own tests pin against. Production passes
- * config.OLLAMA_CONTEXT_LENGTH explicitly; this is the fallback + the
- * documented default.
+ * The SMALLEST shipping single-box context window (tokens): what setup.sh
+ * writes on a GPU under 16 GiB or a CPU-only box. The compose + config.ts
+ * default is 65536 since WARP-3452; this stays 16384 on purpose so the
+ * estimator's own tests pin the worst case a box can run. Production passes
+ * config.OLLAMA_CONTEXT_LENGTH explicitly; this is only the fallback.
  */
 export const DEFAULT_CONTEXT_WINDOW = 16384;
 

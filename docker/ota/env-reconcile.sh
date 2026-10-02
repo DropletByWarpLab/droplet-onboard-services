@@ -96,6 +96,11 @@ assigns() { grep -Eq "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "$2"; }
 #   migrate_env also replaces an empty or publicly-known value; OTA does not
 #   (existing values are never touched). Every setup.sh-written .env has had a
 #   generated one since the first release, so that case is hand-authored only.
+# OLLAMA_CONTEXT_LENGTH / DMR_CONTEXT_LENGTH (WARP-3452): the compose default
+#   went 16384 -> 65536. A box without them has been serving 16384, so that is
+#   the truthful backfill (as INFERENCE_RUNTIME=ollama is): 64k on a small GPU
+#   or a CPU box can fail to load the model. setup.sh sizes them to the GPU;
+#   on an OTA-only box with a 16 GiB card, raise both in .env by hand.
 ENSURE_KEYS='
 ROUTING_SERVICE_TOKEN hex32
 DOC_RENDER_SERVICE_TOKEN hex32
@@ -121,6 +126,8 @@ JWT_SECRET hex64
 DEVICE_SECRET hex32
 NVR_MEDIA_SOURCE =nvrdata
 INFERENCE_RUNTIME =ollama
+OLLAMA_CONTEXT_LENGTH =16384
+DMR_CONTEXT_LENGTH =16384
 HQ_ISSUANCE_URL =https://droplet-fleet-hq.rjouffret.workers.dev
 TUNNEL_TOKEN =
 DROPLET_PROVISION_TOKEN =

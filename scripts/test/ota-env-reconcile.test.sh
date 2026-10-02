@@ -67,6 +67,10 @@ grep -qx "DROPLET_OTA_APPLY_SCRIPT=$BOX/docker/ota/apply-update.sh" "$BOX/.env" 
   && pass "OTA apply enabled with the release-shipped helper path (WARP-3007)" || fail "DROPLET_OTA_APPLY_SCRIPT not added"
 grep -q '^NVR_MEDIA_SOURCE=nvrdata$' "$BOX/.env" \
   && pass "missing literal-default key added" || fail "NVR_MEDIA_SOURCE literal missing"
+# WARP-3452: the compose default went to 65536; an old box keeps the 16384 it
+# has been serving, not a window its GPU may not hold.
+grep -q '^OLLAMA_CONTEXT_LENGTH=16384$' "$BOX/.env" && grep -q '^DMR_CONTEXT_LENGTH=16384$' "$BOX/.env" \
+  && pass "context window pinned to the 16384 an old box was serving" || fail "context window keys not backfilled to 16384"
 grep -q '^COMPOSE_PROFILES=linux,display,eval,email$' "$BOX/.env" \
   && pass "missing profile token appended to COMPOSE_PROFILES" || fail "email token not appended ($(grep COMPOSE_PROFILES "$BOX/.env"))"
 [ "$(grep -c '^COMPOSE_PROFILES=' "$BOX/.env")" -eq 1 ] \
