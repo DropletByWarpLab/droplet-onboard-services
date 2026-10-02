@@ -554,7 +554,7 @@ async def test_no_body_and_no_token_in_the_logs(orch, monkeypatch, caplog):
         await settle()
     for secret in (TOKEN, prompt, completion):
         assert secret not in caplog.text
-    assert "token=tok_1" in caplog.text  # the runtime's 500 is logged, by token id
+    assert "access_id=tok_1" in caplog.text  # the runtime's 500 is logged, by token id
 
 
 # ── The Copilot / Ollama-extension sequence ──────────────────────────────

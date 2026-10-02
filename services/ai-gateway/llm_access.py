@@ -173,7 +173,7 @@ def _passthrough(resp: httpx.Response) -> Response:
 
 
 def _unreachable(path: str, token_id: str, exc: Exception) -> JSONResponse:
-    logger.warning("llm_access: runtime unreachable token=%s path=%s (%s)", token_id, path, type(exc).__name__)
+    logger.warning("llm_access: runtime unreachable access_id=%s path=%s (%s)", token_id, path, type(exc).__name__)
     return _error(path, 502, "runtime_unavailable", "The model runtime did not answer.")
 
 
@@ -223,9 +223,9 @@ async def _post_usage(token_id: str, usage: _Usage, error: bool) -> None:
             {"tokenId": token_id, "promptTokens": usage.prompt, "completionTokens": usage.completion, "error": error},
         )
         if resp.status_code >= 400:
-            logger.warning("llm_access: usage report answered %d token=%s", resp.status_code, token_id)
+            logger.warning("llm_access: usage report answered %d access_id=%s", resp.status_code, token_id)
     except httpx.HTTPError as exc:
-        logger.warning("llm_access: usage report failed token=%s (%s)", token_id, type(exc).__name__)
+        logger.warning("llm_access: usage report failed access_id=%s (%s)", token_id, type(exc).__name__)
 
 
 def _report_usage(token_id: str, usage: _Usage, error: bool) -> None:
@@ -389,7 +389,7 @@ async def _generate(main, client: httpx.AsyncClient, path: str, upstream: str, b
 
     content_type = resp.headers.get("content-type", "application/json")
     if resp.status_code >= 400:
-        logger.warning("llm_access: runtime answered %d token=%s path=%s", resp.status_code, token_id, path)
+        logger.warning("llm_access: runtime answered %d access_id=%s path=%s", resp.status_code, token_id, path)
 
     async def relay():
         # Chunks go out as they arrive (SSE, NDJSON or one JSON body): nothing
@@ -410,7 +410,7 @@ async def _generate(main, client: httpx.AsyncClient, path: str, upstream: str, b
                 yield chunk
         except Exception as exc:
             failed = True
-            logger.warning("llm_access: stream broke token=%s path=%s (%s)", token_id, path, type(exc).__name__)
+            logger.warning("llm_access: stream broke access_id=%s path=%s (%s)", token_id, path, type(exc).__name__)
         finally:
             usage.feed(b"\n")  # a last line the runtime did not terminate
             try:
