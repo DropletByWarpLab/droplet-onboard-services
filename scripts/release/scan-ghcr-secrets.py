@@ -134,11 +134,17 @@ def main() -> int:
     # K/N: scan every N-th version starting at K, so one huge package can be
     # split across parallel jobs (ai-gateway's model layers outlast one job).
     ap.add_argument("--shard", default="0/1")
+    # Comma-separated digest prefixes: rescan only these (e.g. after a
+    # transient network error left some versions unscanned).
+    ap.add_argument("--digests", default="")
     args = ap.parse_args()
 
     repo = f"{args.owner}/{args.package}"
     shard, shards = (int(x) for x in args.shard.split("/"))
     versions = list_versions(args.org, args.package)[shard::shards]
+    wanted = [d.strip() for d in args.digests.split(",") if d.strip()]
+    if wanted:
+        versions = [v for v in versions if any(v["digest"].startswith(w) for w in wanted)]
     print(f"{args.package} shard {shard}/{shards}: {len(versions)} version(s)", flush=True)
 
     seen_layers: set[str] = set()
