@@ -107,10 +107,13 @@ function access(level: Level | null): EffectiveAccessResult {
   } as unknown as EffectiveAccessResult;
 }
 const THROWS = new Set<string>();
+/** WARP-2979 PR-4 — the people who hold Devices (smart_home) view: they may read locks (DS-019). */
+const DEVICES = new Set<string>();
 async function defaultResolve(userId: string): Promise<EffectiveAccessResult | null> {
   if (THROWS.has(userId)) throw new Error("resolver down");
-  if (!(userId in LEVELS)) return access("manage");
-  return LEVELS[userId] === null ? null : access(LEVELS[userId]!);
+  const a = !(userId in LEVELS) ? access("manage") : LEVELS[userId] === null ? null : access(LEVELS[userId]!);
+  if (a && DEVICES.has(userId)) a.features = [...a.features, { moduleId: "smart_home", level: "view" }] as EffectiveAccessResult["features"];
+  return a;
 }
 const resolve = vi.fn(defaultResolve);
 
@@ -205,6 +208,7 @@ beforeEach(() => {
   h.inTxAudit.mockReset().mockResolvedValue({ id: 2n });
   resolve.mockReset().mockImplementation(defaultResolve);
   for (const k of Object.keys(LEVELS)) delete LEVELS[k];
+  DEVICES.clear();
   THROWS.clear();
   _resetAlertsHealthForTests();
 });
@@ -368,6 +372,52 @@ describe("the notifier (§6.7)", () => {
     await notifyPendingIncidents(client(f), deps(), NOW);
     expect(f.world.notificationLog.find((r) => r.username === "maria")!.body).toBe(
       "Front door stopped reporting at 10:19 PM, soon after someone was seen in Stock room at 10:18 PM. The site was closed.",
+    );
+  });
+
+  // P4 PR-4 (D12, DS-019): the activity was a door lock changing — a reason that names a lock.
+  const lockDropped = (camera: string, at: Date) =>
+    reason(camera, at, {
+      code: "camera_offline_during_activity",
+      evidenceKind: "camera_offline",
+      evidenceSource: "frigate_status",
+      evidenceLabel: null,
+      relatedCamera: null,
+      relatedLock: true,
+      detail: {
+        offlineForSec: null,
+        backAt: null,
+        mode: "closed",
+        modeSource: "schedule",
+        activity: { eventId: "8", kind: "lock_state", label: "unlocked", at: plus(at, -60_000).toISOString(), zoneId: STOCK, zoneName: "Stock room" },
+      },
+    });
+
+  it("PR-4: an alert whose activity was a LOCK change: the owner is told in the lock words; a family member who sees the camera but not the locks is skipped_not_visible", async () => {
+    const f = world({
+      securityAlertRecipient: [{ userId: MARIA, state: "receiving", origin: "chosen", version: 1, setById: STEFAN }],
+      securityIncidentReason: [lockDropped("front", plus(NOW, -30_000))],
+      securityIncident: [incident({ cameras: ["front"], reasonCodes: ["camera_offline_during_activity"] })],
+    });
+    LEVELS[MARIA] = "act";
+    await notifyPendingIncidents(client(f), deps(), NOW);
+    expect(noticeOf(f, MARIA)).toMatchObject({ outcome: "skipped_not_visible", notificationLogId: null });
+    const owner = f.world.notificationLog.find((r) => r.username === "stefan")!;
+    expect(owner.title).toBe("A camera in Stock room stopped reporting after hours");
+    expect(owner.body).toBe("Front door stopped reporting at 10:19 PM, soon after a door lock in Stock room was unlocked at 10:18 PM. The site was closed.");
+  });
+
+  it("PR-4: …and with Devices view she is told in the lock words", async () => {
+    const f = world({
+      securityAlertRecipient: [{ userId: MARIA, state: "receiving", origin: "chosen", version: 1, setById: STEFAN }],
+      securityIncidentReason: [lockDropped("front", plus(NOW, -30_000))],
+      securityIncident: [incident({ cameras: ["front"], reasonCodes: ["camera_offline_during_activity"] })],
+    });
+    LEVELS[MARIA] = "act";
+    DEVICES.add(MARIA);
+    await notifyPendingIncidents(client(f), deps(), NOW);
+    expect(f.world.notificationLog.find((r) => r.username === "maria")!.body).toBe(
+      "Front door stopped reporting at 10:19 PM, soon after a door lock in Stock room was unlocked at 10:18 PM. The site was closed.",
     );
   });
 
@@ -797,7 +847,7 @@ describe("the alerts health row (§6.11)", () => {
     expect((await computeAlertsHealthRow(client(onlyEntry), resolve, NOW)).state).toBe("not_configured");
   });
 
-  // WARP-2977 P2b-2 × WARP-2978 — lock rows feed no rule (D21): a door lock on an area is no camera.
+  // WARP-2977 P2b-2 × WARP-2978 — no rule fires on a lock alone (D21; PR-4's lock activity needs a camera to drop).
   it("not configured: an Inside / Staff only area whose only link is a door lock can never raise an alert", async () => {
     const lockLink = { id: "stock-lock", zoneId: STOCK, sourceKind: "lock", sourceRef: "matter:7/1", sourceLabel: "Stock room lock", state: "active" };
     const onlyLock = world({ securityZoneLink: [lockLink] });

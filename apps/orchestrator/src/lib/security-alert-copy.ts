@@ -22,6 +22,12 @@
  * recipient can see one (the P3 words, counting sightings only); otherwise the
  * earliest dropped camera does. The caller has already applied
  * `reasonVisibleTo`, so the recipient may see where the person was seen.
+ *
+ * P4 PR-4 (D12) — when the activity was a door lock changing, the body says
+ * what the lock reported and where it is: `…, soon after a door lock in
+ * <area> was unlocked | locked | unlatched at <site clock>.` Never a cause
+ * (no "someone unlocked it"). The caller has applied `reasonVisibleTo`, so
+ * the recipient may read locks (DS-019).
  */
 import { siteClockCopy } from "./security-hours.js";
 import { stripUnsafeDisplayChars } from "../services/security-audit.js";
@@ -45,7 +51,15 @@ export interface AlertEvidence {
    * be on a camera only in the other (review #2418). Absent → the incident's area.
    */
   seenAreaName?: string | null;
+  /**
+   * camera_offline_during_activity (P4 PR-4): the activity was a door lock's change — its reading
+   * (`detail.activity.label`). Absent or null: the activity was a person seen.
+   */
+  seenLockReading?: string | null;
 }
+
+/** What a lock's reading reads as: the three the rule counts; anything else is only "changed". */
+const LOCK_WORDS: Readonly<Record<string, string>> = { locked: "was locked", unlocked: "was unlocked", unlatched: "was unlatched" };
 
 const MODE_WORDS: Readonly<Record<string, string>> = { closed: "closed", away: "set to away" };
 
@@ -75,9 +89,13 @@ export function alertCopy(input: { zoneName: string; evidence: readonly AlertEvi
     const by = seenCamera && seenCamera !== camera ? ` by ${seenCamera}` : "";
     const seenIn = safe(lead.seenAreaName ?? "", area);
     const seenAt = lead.seenAt && Number.isFinite(lead.seenAt.getTime()) && input.tz ? ` at ${siteClockCopy(lead.seenAt, input.tz)}` : "";
+    const soonAfter =
+      lead.seenLockReading != null
+        ? `a door lock in ${seenIn} ${LOCK_WORDS[lead.seenLockReading] ?? "changed"}${seenAt}`
+        : `someone was seen${by} in ${seenIn}${seenAt}`;
     return {
       title: `A camera in ${area} stopped reporting after hours`,
-      body: `${camera} stopped reporting${when}, soon after someone was seen${by} in ${seenIn}${seenAt}. ${site}${tail}`,
+      body: `${camera} stopped reporting${when}, soon after ${soonAfter}. ${site}${tail}`,
     };
   }
   return {

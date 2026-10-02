@@ -15,10 +15,13 @@ import { resolve } from "node:path";
 const index = readFileSync(resolve(__dirname, "../index.ts"), "utf8").replace(/\r\n/g, "\n");
 
 describe("index.ts wires Droplet's link proposals (WARP-2979)", () => {
-  it("imports registerSecurityLinkJobs from the proposal service and calls it once, with the cron runtime and prisma", () => {
+  it("imports registerSecurityLinkJobs from the proposal service and calls it once, with the cron runtime, prisma and the lock names", () => {
     expect(index).toMatch(/import \{ registerSecurityLinkJobs \} from "\.\/services\/security-link-proposals\.service\.js";/);
     expect(index.match(/registerSecurityLinkJobs\(/g)).toHaveLength(1);
-    expect(index).toMatch(/\n  registerSecurityLinkJobs\(cronRuntime, prisma\);\n/);
+    // P4 PR-4: the started lock adapter's list names lock candidates — a function, read at each tick.
+    expect(index).toMatch(/\n  registerSecurityLinkJobs\(cronRuntime, prisma, \{ knownLocks: \(\) => securityLocks\.knownLocks\(\) \}\);\n/);
+    expect(index.indexOf("const securityLocks = startSecurityLockAdapter(")).toBeGreaterThan(0);
+    expect(index.indexOf("const securityLocks = startSecurityLockAdapter(")).toBeLessThan(index.indexOf("registerSecurityLinkJobs(cronRuntime"));
   });
 
   it("right after the incident engine's registration, before the baseline job's", () => {

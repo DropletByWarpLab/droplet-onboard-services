@@ -722,27 +722,36 @@ export async function loadCameraLabels(prisma: Pick<PrismaClient, "camera">): Pr
  * WARP-2979 (§7 route 3, D13) — Droplet's evidence for ONE viewer: the parsed
  * `LinkEvidenceV1` when the link is Droplet's (`origin = droplet`), the
  * stored value is exactly that shape, and the viewer can see EVERY source it
- * names (the anchor and the candidate — `linkEvidenceSources`). A lock the
- * evidence names is never shown, whatever `mayReadLocks` says: P4 scores
- * camera links only, and a lock-naming evidence is P4 PR-4's to define.
- * Anything else is null: the evidence says when someone stood at a camera
- * (DS-005), so a viewer who can see the link but not the anchor gets the
- * chip without the numbers.
+ * names (the anchor and the candidate — `linkEvidenceSources`), by the ONE
+ * link rule, `visibleLinks`: a camera through the grant, and (P4 PR-4,
+ * DS-019) a lock only with `mayReadLocks`. Anything else is null: the
+ * evidence says when someone stood at a camera or turned a lock (DS-005), so
+ * a viewer who can see the link but not everything it names gets the chip
+ * without the numbers.
  */
 export function evidenceFor(
   link: { origin: SecurityLinkActor; evidence: unknown },
-  scope: Pick<SecurityViewerScope, "visibleCameras"> | null,
+  scope: LinkScope | null,
 ): LinkEvidenceV1 | null {
   if (!scope || link.origin !== "droplet") return null;
   const e = parseLinkEvidence(link.evidence);
   if (!e) return null;
   const named = linkEvidenceSources(e);
-  const shown = visibleLinks(
-    named.filter((s): s is { sourceKind: SecurityZoneSourceKind; sourceRef: string } => s.sourceKind === "camera" || s.sourceKind === "camera_zone"),
-    // Camera sources only (above), so the lock gate is moot.
-    { visibleCameras: scope.visibleCameras, mayReadLocks: false },
-  );
-  return shown.length === named.length ? e : null;
+  return visibleLinks(named, scope).length === named.length ? e : null;
+}
+
+/**
+ * WARP-2977 P2b-2 — the names a page load can put on lock links without
+ * asking the smart-home service: the lock adapter's last list (alias, else
+ * the device's own name). Empty for a viewer who may not read locks (DS-019)
+ * or when no adapter runs; a lock link then shows its snapshot.
+ */
+export function lockLabelsFor(
+  scope: Pick<SecurityViewerScope, "mayReadLocks">,
+  reader: { knownLocks(): ReadonlyArray<{ ref: string; name: string }> } | null,
+): Map<string, string> {
+  if (!scope.mayReadLocks || !reader) return new Map();
+  return new Map(reader.knownLocks().map((l) => [l.ref, l.name]));
 }
 
 /**
@@ -756,7 +765,7 @@ export function toZoneView(
   links: readonly StoredZoneLink[],
   cameraLabels: ReadonlyMap<string, string>,
   lockLabels: ReadonlyMap<string, string> = new Map(),
-  scope: Pick<SecurityViewerScope, "visibleCameras"> | null = null,
+  scope: LinkScope | null = null,
 ): SecurityZoneView {
   return {
     id: zone.id,
@@ -1593,6 +1602,8 @@ export async function listLinkProposals(
   prisma: Pick<PrismaClient, "securityZoneLink">,
   scope: LinkScope,
   cameraLabels: ReadonlyMap<string, string>,
+  /** P4 PR-4: a lock suggestion's live name (`lockLabelsFor`), else its snapshot. */
+  lockLabels: ReadonlyMap<string, string> = new Map(),
 ): Promise<SecurityLinkProposalView[]> {
   const rows = await prisma.securityZoneLink.findMany({
     where: { state: "proposed", origin: "droplet", zone: { state: "active" } },
@@ -1612,6 +1623,8 @@ export async function listLinkProposals(
   const out = visibleLinks(rows, scope).map((r) => {
     const parsed = parseLinkRef(r.sourceKind, r.sourceRef);
     const camera = parsed && !isLockLinkRef(parsed) ? parsed.camera : undefined;
+    // A lock suggestion by the lock's current name (P4 PR-4); a camera by its display name; else the snapshot.
+    const live = parsed && isLockLinkRef(parsed) ? lockLabels.get(r.sourceRef) : camera !== undefined ? cameraLabels.get(camera) : undefined;
     const evidence = evidenceFor(r, scope);
     return {
       match: evidence?.names.match ?? false,
@@ -1620,7 +1633,7 @@ export async function listLinkProposals(
         zone: { id: r.zone.id, name: r.zone.name, kind: r.zone.kind },
         sourceKind: r.sourceKind,
         sourceRef: r.sourceRef,
-        label: (camera !== undefined ? cameraLabels.get(camera) : undefined) ?? r.sourceLabel,
+        label: live ?? r.sourceLabel,
         confidence: r.confidence ?? 0,
         evidence,
         suggestedAt: (r.evidenceAt ?? r.stateChangedAt).toISOString(),
