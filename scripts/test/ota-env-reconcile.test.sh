@@ -193,6 +193,10 @@ ctx_case keep 'GPU_VENDOR=nvidia\nDMR_CONTEXT_LENGTH=32768\nOLLAMA_CONTEXT_LENGT
   "existing values kept on a 16 GB card"
 [ "$(grep -c '_CONTEXT_LENGTH=' "$TMP/ctx-keep/.env")" -eq 2 ] \
   && pass "existing values not duplicated" || fail "context keys duplicated"
+ctx_case lone-ollama 'GPU_VENDOR=nvidia\nOLLAMA_CONTEXT_LENGTH=65536\n' 65536/65536 \
+  "lone OLLAMA_ key copied to DMR_ (never a 64k budget over a 16k server)"
+ctx_case lone-dmr 'GPU_VENDOR=nvidia\nDMR_CONTEXT_LENGTH=32768\n' 32768/32768 \
+  "lone DMR_ key copied to OLLAMA_"
 stub nvidia-smi 'echo "Failed to initialize NVML: Unknown Error"'
 ctx_case blind 'GPU_VENDOR=nvidia\n' 16384/16384 "unreadable probe -> 16384, never 64k blind"
 ctx_case old '' 16384/16384 "pre-GPU_VENDOR box with nothing readable -> 16384"

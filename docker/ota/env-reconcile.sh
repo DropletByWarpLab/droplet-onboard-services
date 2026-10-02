@@ -192,10 +192,13 @@ done
 # beside this file): >= 16 GiB of discrete VRAM -> 65536, otherwise 16384.
 # VRAM unreadable here -> 16384, what these boxes were serving before the
 # compose default went to 65536, so a box never jumps to 64k blind. With one
-# key already set, the missing one gets 16384 too: an existing value is never
-# touched, and nothing is guessed from it.
+# key already set, the missing one copies it (as setup does): the estimator's
+# window must equal the server's (WARP-854), and a 64k OLLAMA_ beside a 16k
+# DMR_ would let the orchestrator send prompts the runtime refuses.
 if assigns DMR_CONTEXT_LENGTH "$STAGE" || assigns OLLAMA_CONTEXT_LENGTH "$STAGE"; then
-  ctx=16384
+  ctx="$(sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?(DMR|OLLAMA)_CONTEXT_LENGTH[[:space:]]*=//p' "$STAGE" \
+    | tail -n 1 | tr -d '\r' | sed 's/[[:space:]]#.*//' | tr -d ' \t"'"'")"
+  ctx="${ctx:-16384}"
 else
   # shellcheck source=vram.sh
   . "$(dirname "$0")/vram.sh"
