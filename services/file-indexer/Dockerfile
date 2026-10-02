@@ -56,6 +56,25 @@ COPY services/file-indexer/requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
+# WARP-3426 — bake every Hugging Face asset this service loads; the Hub is
+# off-limits at runtime. The appliance never phones home (and an air-gapped
+# box cannot): before this, the chunker fetched the bge-small-en-v1.5
+# tokenizer from the Hub on every fresh container, and the audio extractor
+# fetched faster-whisper small.en (~484 MB) on the first audio file.
+#   * The image's only Hub access. It sits above the source COPY so a
+#     source-only rebuild reuses the ~490 MB layer instead of re-downloading.
+#   * Revisions are commits, never branches, and must equal the code's pins
+#     (embedding_models.py hf_revision, extractors/audio.py
+#     _PINNED_REVISIONS) — the offline proof below fails the build otherwise.
+#   * The sha256 pins the bytes, not just the commit: tokenizer.json decides
+#     every chunk boundary of a corpus that is already embedded (WARP-2196);
+#     model.bin is the ASR weights. Both read off the Hub's pinned tree.
+ENV HF_HOME=/opt/huggingface
+RUN python -c "from huggingface_hub import hf_hub_download; hf_hub_download('BAAI/bge-small-en-v1.5', 'tokenizer.json', revision='5c38ec7c405ec4b44b94cc5a9bb96e735b38267a')" && \
+    python -c "from faster_whisper import download_model; download_model('small.en', revision='d1d751a5f8271d482d14ca55d9e2deeebbae577f')" && \
+    echo "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66  ${HF_HOME}/hub/models--BAAI--bge-small-en-v1.5/snapshots/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/tokenizer.json" | sha256sum -c - && \
+    echo "62b2a45b05ee59acb4a5341b33ee35e041395d378d418a18acfe4c9e768ee37a  ${HF_HOME}/hub/models--Systran--faster-whisper-small.en/snapshots/d1d751a5f8271d482d14ca55d9e2deeebbae577f/model.bin" | sha256sum -c -
+
 # Copy proto from the monorepo root and generate gRPC stubs at build time.
 COPY proto/ /app/proto/
 RUN mkdir -p /app/grpc_generated && \
@@ -67,6 +86,19 @@ RUN mkdir -p /app/grpc_generated && \
       /app/proto/inference.proto
 
 COPY services/file-indexer/ .
+
+# WARP-3426 — from here on the Hub does not exist. HF_HUB_OFFLINE makes every
+# huggingface_hub lookup resolve from the baked cache or raise; it never
+# downloads. TRANSFORMERS_OFFLINE / HF_DATASETS_OFFLINE are belt-and-braces
+# for libraries that check their own flag.
+# Then prove it: load through the PRODUCTION loaders with no network at all.
+# A missing asset, or a code pin that drifted from the bake above, fails the
+# image build here, not a customer's first upload.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_DATASETS_OFFLINE=1
+RUN --network=none python -c "import chunker; chunker._get_measuring_tokenizer()" && \
+    python -c "from extractors.audio import _load_model; _load_model('cpu')"
 
 # WARP-229/WARP-967: ship the FIPS-provider OpenSSL config + shared
 # self-test helper. The config is in place at /etc/ssl/openssl-fips.cnf

@@ -45,6 +45,13 @@ SUPPORTED_MIMES = frozenset(
 # Allowed model names — keep the env var honest.
 _ALLOWED_MODELS = frozenset({"tiny.en", "base.en", "small.en", "medium.en", "large-v3"})
 
+# WARP-3426: pinned Hub commit of each model the image bakes. faster-whisper
+# fetches its weights from the Hugging Face Hub on first use (~484 MB for
+# small.en), which an appliance that never phones home cannot do. The
+# Dockerfile bakes ONLY the default at this revision and the image runs with
+# HF_HUB_OFFLINE=1, so another ASR_MODEL raises at load instead of downloading.
+_PINNED_REVISIONS = {"small.en": "d1d751a5f8271d482d14ca55d9e2deeebbae577f"}
+
 # Lazy import — keep the module importable even when faster-whisper isn't
 # installed yet (helps unit tests that mock WhisperModel).
 try:
@@ -76,7 +83,12 @@ def _load_model(device: str):
     key = f"{name}:{device}"
     if key not in _model_cache:
         compute_type = "float16" if device == "cuda" else "int8"
-        _model_cache[key] = WhisperModel(name, device=device, compute_type=compute_type)
+        _model_cache[key] = WhisperModel(
+            name,
+            device=device,
+            compute_type=compute_type,
+            revision=_PINNED_REVISIONS.get(name),
+        )
     return _model_cache[key]
 
 

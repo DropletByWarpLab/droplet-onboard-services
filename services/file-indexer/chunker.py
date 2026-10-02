@@ -77,6 +77,7 @@ from embedding_models import (
     ChunkBudgetError,
     assert_chunk_budget_fits,
     body_capacity,
+    spec_for,
     tokenizer_repo,
 )
 from extractors.spans import Span
@@ -100,10 +101,10 @@ def _tokenizer_repo() -> str:
     return tokenizer_repo(EMBEDDING_MODEL)
 
 
-# Module-level cached splitter. ``TextSplitter.from_huggingface_tokenizer``
-# does a model-config download on first call (~1 MB JSON, no model
-# weights), so we memoise. Threading lock keeps the lazy-init safe under
-# the watcher's IndexHandler thread + the transcription worker thread.
+# Module-level cached splitter. Building it parses the ~700 KB baked
+# tokenizer.json (WARP-3426: never downloaded at runtime), so we memoise.
+# Threading lock keeps the lazy-init safe under the watcher's IndexHandler
+# thread + the transcription worker thread.
 _splitter_lock = threading.Lock()
 _splitter = None  # type: ignore[var-annotated]
 _splitter_capacity: Optional[int] = None
@@ -127,9 +128,24 @@ def _get_measuring_tokenizer():
     global _measuring_tokenizer
     with _tokenizer_lock:
         if _measuring_tokenizer is None:
+            from huggingface_hub import hf_hub_download  # noqa: PLC0415
             from tokenizers import Tokenizer  # noqa: PLC0415
 
-            tokenizer = Tokenizer.from_pretrained(_tokenizer_repo())
+            # WARP-3426 — the appliance never phones home. This used to be
+            # `Tokenizer.from_pretrained(repo)`, which fetched tokenizer.json
+            # from the Hugging Face Hub on every fresh container (nothing
+            # cached it), so indexing depended on the internet and a third
+            # party. The file is now baked into the image at the pinned
+            # commit (see the Dockerfile), and hf_hub_download with a commit
+            # hash resolves the baked copy without a network call; under the
+            # image's HF_HUB_OFFLINE=1 a missing file raises, never downloads.
+            tokenizer = Tokenizer.from_file(
+                hf_hub_download(
+                    _tokenizer_repo(),
+                    "tokenizer.json",
+                    revision=spec_for(EMBEDDING_MODEL).hf_revision,
+                )
+            )
 
             # WARP-2055 — the splitter measures a candidate chunk by asking
             # this tokenizer how many tokens it holds, so the tokenizer MUST

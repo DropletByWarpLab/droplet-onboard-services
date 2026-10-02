@@ -1,8 +1,8 @@
 """Local embedding provider using sentence-transformers.
 
-Loaded lazily on first call — the model (~130 MB for bge-small) is downloaded
-once and cached in HuggingFace's default cache dir. Subsequent loads are
-instant from disk.
+Loaded lazily on first call from the image: WARP-3426 bakes the model (~130 MB
+for bge-small) at the commit pinned in `PINNED_REVISIONS`, and the gateway runs
+with HF_HUB_OFFLINE=1, so nothing is ever downloaded at runtime.
 
 Default model: bge-small-en-v1.5 (MIT, 384 dimensions, 512-token window,
 ~33M params, CPU-friendly).
@@ -49,6 +49,16 @@ DEFAULT_MODEL = "bge-small-en-v1.5"
 # INVALID_ARGUMENT and stops writing, which is the outcome we want.
 SUPPORTED_MODELS: dict[str, str] = {
     "bge-small-en-v1.5": "BAAI/bge-small-en-v1.5",
+}
+
+# WARP-3426 — the Hub commit each repo is baked at (the Dockerfile bakes and
+# then reloads it with no network). A commit, never a branch: the vectors in
+# FileContentChunk.embedding were produced by exactly these weights, and a
+# moving `main` would change the space under them without changing the id.
+# The file-indexer pins the same commit for its measuring tokenizer
+# (services/file-indexer/embedding_models.py).
+PINNED_REVISIONS: dict[str, str] = {
+    "BAAI/bge-small-en-v1.5": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
 }
 
 MAX_BATCH_SIZE = 256  # Cap to prevent OOM on constrained devices
@@ -101,7 +111,7 @@ def _get_model(model_name: str | None = None):
             raise RuntimeError("sentence-transformers not available") from e
 
         logger.info("Loading embedding model: %s (%s)", name, repo)
-        model = SentenceTransformer(repo)
+        model = SentenceTransformer(repo, revision=PINNED_REVISIONS[repo])
         _model_cache[name] = model
         logger.info(
             "Embedding model loaded: %s (dim=%d)",

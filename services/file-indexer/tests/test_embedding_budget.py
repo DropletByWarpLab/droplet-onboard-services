@@ -154,7 +154,7 @@ def test_declared_window_matches_the_hub_artifact():
     for model_id, spec in em.EMBEDDING_MODELS.items():
         url = (
             f"https://huggingface.co/{spec.hf_repo}"
-            "/resolve/main/sentence_bert_config.json"
+            f"/resolve/{spec.hf_revision}/sentence_bert_config.json"
         )
         try:
             with urllib.request.urlopen(url, timeout=20) as r:

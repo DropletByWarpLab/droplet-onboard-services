@@ -62,6 +62,11 @@ class EmbeddingModelSpec:
     #: Fully-qualified HuggingFace repo. The org is NOT derivable from
     #: ``model_id`` — that assumption is the bug this registry replaces.
     hf_repo: str
+    #: Pinned commit of ``hf_repo`` (WARP-3426). The image bakes exactly this
+    #: revision and runs with ``HF_HUB_OFFLINE=1``; never a branch name, because
+    #: a moving ``main`` would let the tokenizer, and so every chunk boundary,
+    #: drift under a corpus that is already embedded.
+    hf_revision: str
     #: ``max_seq_length`` from the repo's ``sentence_bert_config.json``.
     #: Tokens past this are dropped by the embedder before pooling.
     max_seq_length: int
@@ -77,6 +82,7 @@ EMBEDDING_MODELS: dict[str, EmbeddingModelSpec] = {
     "bge-small-en-v1.5": EmbeddingModelSpec(
         model_id="bge-small-en-v1.5",
         hf_repo="BAAI/bge-small-en-v1.5",
+        hf_revision="5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
         max_seq_length=512,
         dimensions=384,
         license="MIT",
@@ -90,6 +96,7 @@ EMBEDDING_MODELS: dict[str, EmbeddingModelSpec] = {
     "all-MiniLM-L6-v2": EmbeddingModelSpec(
         model_id="all-MiniLM-L6-v2",
         hf_repo="sentence-transformers/all-MiniLM-L6-v2",
+        hf_revision="1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
         max_seq_length=256,
         dimensions=384,
         license="Apache-2.0",
