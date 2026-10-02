@@ -47,15 +47,17 @@ vi.mock("../middleware/auth.js", () => ({
 // Postgres connection (same shape as llm.test.ts; /llm/complete itself
 // never touches persistence — that's the point of the route).
 vi.mock("../services/chat-persistence.service.js", () => ({
-  ChatPersistenceService: vi.fn().mockImplementation(() => ({
-    renameConversationForUser: vi.fn(),
-    createTurnRows: vi.fn(),
-    finalizeAssistantMessage: vi.fn(),
-    listConversationsForUser: vi.fn().mockResolvedValue([]),
-    getConversationForUser: vi.fn().mockResolvedValue(null),
-    deleteConversationForUser: vi.fn().mockResolvedValue(false),
-    ensureConversation: vi.fn().mockResolvedValue({ id: "conv-1", created: true }),
-  })),
+  ChatPersistenceService: vi.fn().mockImplementation(function () {
+    return {
+      renameConversationForUser: vi.fn(),
+      createTurnRows: vi.fn(),
+      finalizeAssistantMessage: vi.fn(),
+      listConversationsForUser: vi.fn().mockResolvedValue([]),
+      getConversationForUser: vi.fn().mockResolvedValue(null),
+      deleteConversationForUser: vi.fn().mockResolvedValue(false),
+      ensureConversation: vi.fn().mockResolvedValue({ id: "conv-1", created: true }),
+    };
+  }),
 }));
 
 // Controllable ai-gateway client mock. `isTimeoutError` must be exported

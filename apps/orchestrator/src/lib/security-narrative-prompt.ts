@@ -286,6 +286,8 @@ function whatOf(kind: SecurityEventKind, labels: readonly string[]): string | nu
       return "network or sign-in warning";
     case "detection_low":
     case "mode_changed":
+    // A door-lock row forms no incident (D21), so a summary never names one.
+    case "lock_state":
       return null;
   }
 }

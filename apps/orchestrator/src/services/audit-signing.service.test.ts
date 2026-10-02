@@ -9,7 +9,8 @@
  * These tests use an in-memory signer constructed from a fixed key so
  * the assertions are deterministic.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from "vitest";
+import type { Logger } from "pino";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -226,7 +227,7 @@ describe("audit-signing.service — loadAuditKeyFromDisk (WARP-476)", () => {
 
   let dir: string;
   let diskPath: string;
-  let warnSpy: ReturnType<typeof vi.fn>;
+  let warnSpy: Mock<Logger["warn"]>;
   const originalEnvKey = process.env.AUDIT_SIGNING_KEY;
   const originalNodeEnv = process.env.NODE_ENV;
 
@@ -235,7 +236,7 @@ describe("audit-signing.service — loadAuditKeyFromDisk (WARP-476)", () => {
     diskPath = path.join(dir, "audit.key");
     delete process.env.AUDIT_SIGNING_KEY;
     delete process.env.NODE_ENV;
-    warnSpy = vi.fn();
+    warnSpy = vi.fn<Logger["warn"]>();
     _setLoggerForTests({ warn: warnSpy });
   });
 

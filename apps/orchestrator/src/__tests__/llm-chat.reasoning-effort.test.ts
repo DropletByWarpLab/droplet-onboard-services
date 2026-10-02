@@ -70,15 +70,17 @@ vi.mock("../services/file-citation.service.js", () => ({
 }));
 
 vi.mock("../services/chat-persistence.service.js", () => ({
-  ChatPersistenceService: vi.fn().mockImplementation(() => ({
-    ensureConversation: vi.fn().mockResolvedValue(null),
-    createTurnRows: vi.fn().mockResolvedValue(null),
-    finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
-    updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
-    listConversationsForUser: vi.fn().mockResolvedValue([]),
-    getConversationForUser: vi.fn().mockResolvedValue(null),
-    deleteConversationForUser: vi.fn().mockResolvedValue(false),
-  })),
+  ChatPersistenceService: vi.fn().mockImplementation(function () {
+    return {
+      ensureConversation: vi.fn().mockResolvedValue(null),
+      createTurnRows: vi.fn().mockResolvedValue(null),
+      finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
+      updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
+      listConversationsForUser: vi.fn().mockResolvedValue([]),
+      getConversationForUser: vi.fn().mockResolvedValue(null),
+      deleteConversationForUser: vi.fn().mockResolvedValue(false),
+    };
+  }),
 }));
 
 // WARP-1442 — the streaming path fires a cold-model probe before the agent

@@ -87,7 +87,7 @@ describe.skipIf(!RUN)("Incident acknowledgement against real Postgres (WARP-2978
     expect(foreignRowKept).toBe(true);
   });
 
-  const viewer = (key: string): IncidentViewer => ({ userId: users[key]!.id, visibleCameras: "all", mayReadThreats: true, ownerOrAdmin: true });
+  const viewer = (key: string): IncidentViewer => ({ userId: users[key]!.id, visibleCameras: "all", mayReadThreats: true, mayReadLocks: true, ownerOrAdmin: true });
   const actor = (key: string, role: string): IncidentActor => ({
     id: users[key]!.id,
     username: users[key]!.username,

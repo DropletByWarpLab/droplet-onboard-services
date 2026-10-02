@@ -195,6 +195,10 @@ jobs:
               # to the tracked contract files merges with ZERO test signal —
               # which is how the original gap survived.
               - "data/app-downloads/**"
+              # WARP-3286: the agent-loop eval selftest runs on this leg (it
+              # drives the orchestrator's real runAgent), so a PR that changes
+              # only the harness, its cases or its scorer must re-prove it.
+              - "tests/agent-loop-eval/**"
             web-dashboard:
               - "apps/web-dashboard/**"
               # The dashboard's @droplet/* deps resolve from source (see the
@@ -693,6 +697,27 @@ jobs:
       - name: Test @droplet/orchestrator
         if: matrix.suite == 'orchestrator'
         run: npm run -w @droplet/orchestrator test
+
+      # WARP-3286: the agent-loop eval's selftest. Scripted good and bad agents
+      # drive the REAL runAgent, tool catalog, interceptor and approval store
+      # (tests/agent-loop-eval), and every verdict must match selftest/
+      # expected.json. It closes two escapes the unit suites cannot see: a loop
+      # or catalog change that silently breaks the harness the bench-box model
+      # runs depend on (found only hours into a GPU run), and a scorer that
+      # drifts lenient — a write tool added to tools-core without
+      # write_tools.json would pass hard gate H1 unseen; run.mts refuses that,
+      # and `build_cases.py --check` refuses cases edited apart from their
+      # generator. No model, no network, python3 is the runner's own. Cost:
+      # 1.3 s measured (bench box, cold tsx cache), so ~4 s on a runner, on a
+      # leg that already paid for checkout, npm ci, Prisma and the leaf builds
+      # it needs. 65 of the last 100 stage merges fired this leg; at ~750
+      # PRs/month and ~2 runs each that is ~1,000 runs, adding ~65 billed
+      # min/month on average (a job rounds up to the minute) and ~1,000 at
+      # worst: under the docs/ci-cost-budget.md 2k callout. Model runs stay
+      # opt-in (AGENT_EVAL_GATEWAY_URL, bench-box.sh) and never run in CI.
+      - name: Agent-loop eval selftest (scripted agents, no model)
+        if: matrix.suite == 'orchestrator'
+        run: npm run eval:agent-loop:selftest
 
       # WARP-2647: the guarded migration entrypoint's own suite (WARP-573) —
       # 33 assertions over apps/orchestrator/scripts/migrate-and-start.sh, and

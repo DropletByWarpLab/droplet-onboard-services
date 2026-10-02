@@ -142,6 +142,15 @@ export interface PromptInspectInput {
    * `buildBaseSystemPrompt`'s own contract for the parameter.
    */
   allowedToolNames?: string[];
+  /**
+   * WARP-3116 — tools the modelled turn's pool drops whatever
+   * `allowedToolNames` says: the navigation tools on a turn with no dashboard
+   * page list. The real turn hands this (`navigationWithheld`) to BOTH of its
+   * guidance sites, because `allowedToolNames` cannot carry it for the owner,
+   * whose `undefined` means "the default scope". Same here, or the inspector
+   * would show guidance naming a tool the turn does not carry (WARP-642).
+   */
+  withheldToolNames?: ReadonlySet<string>;
   /** Model an interview turn. */
   interview?: boolean;
   /** Model an off-LAN turn. */
@@ -261,7 +270,7 @@ export async function inspectPromptForPerson(
     "How to use its tools",
     TOOL_GUIDANCE_MAX_CHARS,
     true,
-    () => composeToolGuidance(input.allowedToolNames),
+    () => composeToolGuidance(input.allowedToolNames, input.withheldToolNames),
   );
   // WARP-3281 — the date line, as its own block so the admin view accounts
   // for it. After `business`, which reads the zone off the Workspace row. The
@@ -357,6 +366,7 @@ export async function inspectPromptForPerson(
       persona.text ?? "",
       business.text ?? "",
       date.text ?? "",
+      input.withheldToolNames,
     ) +
     (memory.text ?? "") +
     (brain.text ?? "") +

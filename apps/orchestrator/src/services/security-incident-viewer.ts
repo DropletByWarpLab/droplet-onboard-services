@@ -12,6 +12,11 @@ export interface IncidentViewer {
   /** `"all"` for owner/admin; otherwise exactly the granted Frigate camera names. */
   visibleCameras: "all" | ReadonlySet<string>;
   mayReadThreats: boolean;
+  /**
+   * WARP-2977 P2b-2 (DS-019) — door-lock rows among the members, and lock
+   * links when naming areas: the feed's own `mayReadLocks` (Devices view).
+   */
+  mayReadLocks: boolean;
   /** Owner/admin: every notice. Anyone else: their own (D34). */
   ownerOrAdmin: boolean;
 }
