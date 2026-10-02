@@ -4,7 +4,7 @@
 - **Epic:** [WARP-1382](https://warp-lab.atlassian.net/browse/WARP-1382) · this doc: [WARP-1596](https://warp-lab.atlassian.net/browse/WARP-1596)
 - **Builds on:** ADR-031 (own WireGuard overlay), ADR-023 (per-device public-CA TLS, split-horizon), [WARP-1757](https://warp-lab.atlassian.net/browse/WARP-1757) (profile issuance), WARP-894 (DPAPI secure store on Windows)
 - **Forces a decision on:** [WARP-1591](https://warp-lab.atlassian.net/browse/WARP-1591) (iOS discards its enrolled key), [WARP-359](https://warp-lab.atlassian.net/browse/WARP-359) / [WARP-1388](https://warp-lab.atlassian.net/browse/WARP-1388) (Windows tunnel client)
-- **Amended by:** [Amendment 1](#amendment-1-the-native-windows-client-warp-3245) (2026-09-27, [WARP-3245](https://warp-lab.atlassian.net/browse/WARP-3245)) for the native Windows client of [ADR-062](ADR-062-native-desktop-clients.md): the client is named, the pipe is machine-wide, the token file is write-only, the client-process gate is specified, and the vpnd pipe protocol is `PROTOCOL.md` v1. The custody rule itself is unchanged.
+- **Amended by:** [Amendment 1](#amendment-1-the-native-windows-client-warp-3245) (2026-09-27, [WARP-3245](https://warp-lab.atlassian.net/browse/WARP-3245)) for the native Windows client of [ADR-062](ADR-062-native-desktop-clients.md): the client is named, the pipe is machine-wide, the token file is write-only, the client-process gate is specified, and the vpnd pipe protocol is `PROTOCOL.md` v1. The custody rule itself is unchanged. [ADR-061](ADR-061-native-linux-client.md) Decision 7 records one Linux exception to it (Proposed).
 
 ## Context
 
@@ -62,6 +62,14 @@ Android is listed for completeness: there is no privilege boundary to cross, so
 "born in the tunnel owner" and "born in the app" are the same place. The rule is
 not "hide the key from the app" for its own sake; it is "never move a private
 key across a privilege boundary."
+
+> **Linux is a recorded exception, not a row in this table**
+> ([ADR-061](ADR-061-native-linux-client.md) Decision 7, Proposed):
+> NetworkManager owns the tunnel, and the app generates the keypair and hands
+> the private half to NetworkManager once, over D-Bus, into a connection bound
+> to the enrolling user. The app does see the private half for that moment, so
+> the headline rule above is not met. ADR-061 records why that is acceptable
+> and under which conditions.
 
 ### Consequences for enrollment
 

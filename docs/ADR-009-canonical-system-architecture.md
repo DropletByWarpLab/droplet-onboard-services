@@ -102,6 +102,13 @@ signal it's the mandatory transport for off-LAN clients, and the
 
 #### Clients (right half)
 
+> **Linux is not in this table; it is decided by
+> [ADR-061](ADR-061-native-linux-client.md) (Proposed, 2026-09-25):** a native
+> GTK 4 / libadwaita client with no web view. This table's desktop direction,
+> wrapping the dashboard's React build (the **Win .exe** row), since superseded
+> for Windows and macOS by [ADR-062](ADR-062-native-desktop-clients.md), does
+> not apply to it.
+
 | Client | Repo / Path | Tech | Status |
 |---|---|---|---|
 | **Web Dashboard** | `apps/web-dashboard/` | Next.js 14 + Tailwind + lucide-react | exists; under rehaul (Phase 1-3) |
