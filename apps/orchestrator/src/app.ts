@@ -141,6 +141,7 @@ import { createToolsRouter } from "./routes/tools.js";
 import { detachRemoteMcp, mcpClient, remoteCallPolicy } from "./services/mcp-client.singleton.js";
 import { stepResultValue, type StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
+import { createLlmAccessRouter } from "./routes/llm-access.js";
 import { createHardwareRouter } from "./routes/hardware.js";
 import { createHomeRouter } from "./routes/home.js";
 import { createBriefingsRouter } from "./routes/briefings.js";
@@ -855,6 +856,10 @@ export function createApp(
 
   // WARP-471: F3 models page endpoint (READ-ONLY per one-model rule).
   app.use("/api", createModelsRouter(prisma));
+  // WARP-3452 (ADR-067): coding-tool tokens for the local model API — the
+  // Settings page's routes, plus the two ai-gateway-only routes behind `/llm/`
+  // (introspect on every request, usage after it). No module claims the prefix.
+  app.use("/api", createLlmAccessRouter(prisma));
 
   // WARP-469: F1 home aggregation. Single round-trip backing
   // FEATURES.md §2.1 (greeting + tiles + timeline + suggestions).
