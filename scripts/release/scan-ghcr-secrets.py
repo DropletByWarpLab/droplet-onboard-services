@@ -131,11 +131,15 @@ def main() -> int:
     ap.add_argument("--org", default="DropletByWarpLab")
     ap.add_argument("--gitleaks", required=True)
     ap.add_argument("--out", required=True)
+    # K/N: scan every N-th version starting at K, so one huge package can be
+    # split across parallel jobs (ai-gateway's model layers outlast one job).
+    ap.add_argument("--shard", default="0/1")
     args = ap.parse_args()
 
     repo = f"{args.owner}/{args.package}"
-    versions = list_versions(args.org, args.package)
-    print(f"{args.package}: {len(versions)} version(s)")
+    shard, shards = (int(x) for x in args.shard.split("/"))
+    versions = list_versions(args.org, args.package)[shard::shards]
+    print(f"{args.package} shard {shard}/{shards}: {len(versions)} version(s)", flush=True)
 
     seen_layers: set[str] = set()
     stats = {"versions": len(versions), "images": 0, "other": 0, "layers": 0,
