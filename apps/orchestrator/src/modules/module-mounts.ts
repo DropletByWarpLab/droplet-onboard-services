@@ -120,6 +120,10 @@ export const FEATURE_GATED_MODULES: ReadonlySet<ModuleId> = new Set<ModuleId>([
   // WARP-2977 (ADR-059 §6) — gated from the day it exists, so a custom role
   // narrowed away from Security never reaches `/api/security`.
   "security",
+  // ADR-055 (P4a) — gated from the day it exists, exactly as `security` was:
+  // a role narrowed away from Doors never reaches `/api/doors`. `/api/doors`
+  // nests inside no other module's prefix, so `gateScopeFor` is null for it.
+  "doors",
 ]);
 
 /**

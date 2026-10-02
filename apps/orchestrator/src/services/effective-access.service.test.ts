@@ -152,8 +152,10 @@ describe("effective-access — tier-only floors (null accessRoleId = today's wor
     expect(featureLevel(res, "files")).toBe("manage");
     expect(featureLevel(res, "network")).toBe("view");
     expect(featureLevel(res, "managed_switch")).toBe("view");
-    // full catalog: chat + every gateable module
-    expect(res.features).toHaveLength(GATEABLE_MODULE_IDS.length + 1);
+    // full catalog: chat + every gateable module the tier may hold (doors is
+    // refused below admin, ADR-055 — pinned in its own block below)
+    expect(res.features).toHaveLength(GATEABLE_MODULE_IDS.length);
+    expect(featureLevel(res, "doors")).toBeUndefined();
     // write-filtered domain reach only (family loses all-write domains)
     expect(res.toolDomains).toContain("files");
     expect(res.toolDomains).toContain("network");
@@ -1081,6 +1083,7 @@ describe("resolveEffectiveAccess — bound fetch wrapper", () => {
       DROPLET_MATTER_SERVICE_URL: "http://matter:8083",
       ROUTING_SERVICE_URL: "http://routing:8080",
       SWITCH_SERVICE_URL: "http://switch:8081",
+      DOORS_ENABLED: "1",
     };
     const prisma: any = {
       user: {
@@ -1116,5 +1119,48 @@ describe("resolveEffectiveAccess — bound fetch wrapper", () => {
       }),
     );
     _setEffectiveAccessForTests(null, null);
+  });
+});
+
+// ── ADR-055 — a tier below the doors floor holds NO doors grant ──
+//
+// `view` is the lowest rung, so before the refusal a stored doors:view on a
+// family or guest role clamped to itself and the resolver handed it out. The
+// routes refuse them anyway (requireRole), so nothing was reachable — but the
+// role list and the nav advertised reach that does not exist.
+describe("effective-access — doors is refused below admin (ADR-055)", () => {
+  const doorsView = [{ moduleId: "doors" as ModuleId, level: "view" as const }];
+
+  it.each(["family", "guest"] as const)("a %s-based role holding a stored doors:view resolves to no doors", (tier) => {
+    const res = computeEffectiveAccess(
+      baseInputs({ user: { id: "u-1", role: tier, accessRole: role({ featureGrants: [...doorsView, { moduleId: "files", level: "view" }] }) } }),
+    );
+    expect(featureLevel(res, "doors")).toBeUndefined();
+    expect(featureLevel(res, "files")).toBe("view"); // and nothing else is disturbed
+  });
+
+  it("an admin-based role holding doors:view resolves to it (the floor is a floor, not a ban)", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({ user: { id: "u-1", role: "admin", accessRole: role({ featureGrants: doorsView }) } }),
+    );
+    expect(featureLevel(res, "doors")).toBe("view");
+  });
+
+  it("a per-person `allow` exception cannot hand a family person doors either", () => {
+    const res = computeEffectiveAccess(
+      baseInputs({
+        user: { id: "u-1", role: "family", accessRole: role({ featureGrants: [] }) },
+        exceptions: [{ moduleId: "doors" as ModuleId, effect: "allow", level: "view" }] as EffectiveAccessInputs["exceptions"],
+      }),
+    );
+    expect(featureLevel(res, "doors")).toBeUndefined();
+  });
+
+  it("a role-less family or guest person resolves to no doors; a role-less admin to view; the owner to manage (bypass)", () => {
+    for (const tier of ["family", "guest"] as const) {
+      expect(featureLevel(computeEffectiveAccess(baseInputs({ user: { id: "u-1", role: tier, accessRole: null } })), "doors"), tier).toBeUndefined();
+    }
+    expect(featureLevel(computeEffectiveAccess(baseInputs({ user: { id: "u-1", role: "admin", accessRole: null } })), "doors")).toBe("view");
+    expect(featureLevel(computeEffectiveAccess(baseInputs({ user: { id: "u-1", role: "owner", accessRole: null } })), "doors")).toBe("manage");
   });
 });

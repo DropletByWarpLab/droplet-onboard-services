@@ -87,6 +87,7 @@ import { createSecuritySiteRouter } from "./routes/security-site.js";
 import { createSecurityIncidentsRouter } from "./routes/security-incidents.js";
 import { createSecurityPatternsRouter } from "./routes/security-patterns.js";
 import { createSecurityAssistantRouter } from "./routes/security-assistant.js";
+import { createDoorsRouter } from "./routes/doors.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createBuildingRouter } from "./routes/building.js";
 import { createDisplayRouter } from "./routes/display.js";
@@ -682,6 +683,13 @@ export function createApp(
   // acting-user gate above (`security` is in MCP_ACTING_USER_GATED_DOMAINS).
   // The last Security router: every path is under the literal /assistant/.
   app.use("/api", createSecurityAssistantRouter(prisma));
+  // ADR-055 (P4a) — the doors control-plane spine. Mounted unconditionally: the
+  // `doors` module gate (toggle + per-person view) that mountModuleGates put in
+  // front of /api/doors ABOVE is what makes it absent — DOORS_ENABLED off means
+  // `available: false`, so every route here answers 404 module_disabled.
+  // Registered before any catch-all path param (there is none at this level),
+  // which the boot assertion (services/doors-wiring.ts) checks on every boot.
+  app.use("/api", createDoorsRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
   // Device control over BACnet/Modbus/SNMP/KNX (services/device-gateway).
   app.use("/api", createBuildingRouter(prisma));

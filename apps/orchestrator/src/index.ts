@@ -208,6 +208,8 @@ import { jitteredPeriodMs } from "./services/erp-sync/schedule-jitter.js";
 import { pruneExpiredXeroTokens } from "@droplet/erp-connector";
 import { registerErpDriftRetention } from "./services/erp-sync/drift-record.service.js";
 import { registerSecurityJobs } from "./services/security-events.service.js";
+import { registerDoorsJobs } from "./services/doors.service.js";
+import { assertDoorsWired } from "./services/doors-wiring.js";
 import { registerSecurityModeJobs } from "./services/security-mode.service.js";
 import { registerSecurityIncidentJobs } from "./services/security-incidents.service.js";
 import { registerSecurityLinkJobs } from "./services/security-link-proposals.service.js";
@@ -1152,6 +1154,13 @@ async function main() {
   // (continuing the 03:00 … 03:45 spacing). Registered unconditionally, like
   // the ingest itself: the module toggle decides the surface, not the capture.
   registerSecurityJobs(cronRuntime, prisma);
+
+  // ADR-055 (P4a) — the door event log's retention: one daily leg at 03:55 (the
+  // next free slot after Security's 03:50), DOORS_EVENT_RETENTION_DAYS days,
+  // 365 by default. Registered UNCONDITIONALLY, like the Security jobs above
+  // and for a sharper reason: DOORS_ENABLED switches the SURFACE, but rows
+  // already written keep identifying people, so their clock does not stop.
+  registerDoorsJobs(cronRuntime, prisma, config.DOORS_EVENT_RETENTION_DAYS);
   // WARP-2977 P2b-2 — the door-lock sweep: every 60 s, on its own advisory
   // lock, it reads the paired locks and writes a `polled` row for any change
   // the live stream missed (a sidecar restart, a dropped SSE frame).
@@ -2143,6 +2152,13 @@ async function main() {
   // pins this call, because a route wired only here answers 503 in every unit
   // test and a deleted argument would otherwise be invisible to that lane.
   const app = createApp(prisma, sceneMatterDispatcher, brainPassTrigger);
+  // ADR-055 §11.2 — "I am registered where I claim to be". With DOORS_ENABLED on
+  // and any list downstream of the module descriptor missing (a route, a gate,
+  // a tool, the purge job, a migration, the append-only trigger) this throws
+  // and the box does not start listening; with it off it asserts the module is
+  // ABSENT. Before `server.listen` on purpose: a doors surface that answers
+  // some requests and not others is worse than one that refuses to boot.
+  await assertDoorsWired({ app, config, prisma });
   // WARP-236: when internal mTLS is enabled the SAME port serves HTTPS and
   // every caller (nginx gateway included) must present a CA-signed client
   // cert. Dev installs (DROPLET_INTERNAL_TLS unset) keep plain HTTP.
