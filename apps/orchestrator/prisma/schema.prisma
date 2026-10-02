@@ -2129,6 +2129,70 @@ model CalendarFeedToken {
   @@index([userId, state])
 }
 
+/// WARP-3452: lifecycle of a coding-tool token. Explicit, never derived from
+/// `revokedAt` / `expiresAt`. `expired` is written when introspection or a
+/// listing finds `expiresAt` passed; renewal takes it back to `active`.
+/// `revoked` is terminal.
+enum ModelAccessTokenStatus {
+  active
+  revoked
+  expired
+}
+
+/// WARP-3452: why a token was revoked. `manual` = its holder or an
+/// owner/admin (see `revokedById`); the other two are the lifecycle hooks in
+/// role-mutation-guard.service.ts.
+enum ModelAccessTokenRevokeReason {
+  manual
+  user_deactivated
+  role_guest
+}
+
+/// WARP-3452: a per-person bearer credential (`dlk_…`) that lets a coding tool
+/// on the LAN use the box's model runtime through ai-gateway's `/llm/` router.
+/// Only sha256(full token) is stored; `prefix` (8 chars after `dlk_`) is for
+/// display. ai-gateway checks every request against this row through
+/// POST /api/llm-access/_introspect, so a revoke is effective immediately.
+model ModelAccessToken {
+  id               String                        @id @default(uuid())
+  userId           String
+  label            String                        @db.VarChar(64)
+  prefix           String
+  secretHash       String                        @unique
+  status           ModelAccessTokenStatus        @default(active)
+  createdAt        DateTime                      @default(now())
+  /// createdAt (or the last renewal) + 364 days.
+  expiresAt        DateTime
+  /// Written at most once a minute per token.
+  lastUsedAt       DateTime?
+  revokedAt        DateTime?
+  revokedReason    ModelAccessTokenRevokeReason?
+  /// Who revoked it by hand; null for the lifecycle hooks.
+  revokedById      String?
+  /// Last time a refused (revoked/expired) use wrote an ActivityRow — at most
+  /// one per token per hour.
+  refusalAuditedAt DateTime?
+  user             User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  usage            ModelAccessTokenUsage[]
+
+  @@index([userId, status])
+}
+
+/// WARP-3452: per-token, per-day (UTC) usage counters. Never any prompt or
+/// completion content — counts only. One row per token per day instead of an
+/// ActivityRow per request (an agent session makes hundreds).
+model ModelAccessTokenUsage {
+  tokenId          String
+  day              DateTime         @db.Date
+  requests         Int              @default(0)
+  promptTokens     Int              @default(0)
+  completionTokens Int              @default(0)
+  errors           Int              @default(0)
+  token            ModelAccessToken @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@id([tokenId, day])
+}
+
 model CalendarEvent {
   id           String   @id @default(uuid())
   userId       String // Nextcloud username
@@ -2988,6 +3052,9 @@ model User {
   // the user cascades them, so a reused username can never inherit an old
   // link (see CalendarFeedToken).
   calendarFeedTokens  CalendarFeedToken[]
+  // WARP-3452: coding-tool tokens for the local model API (`/llm/`). Deleting
+  // the user cascades them; deactivation revokes them (see ModelAccessToken).
+  modelAccessTokens   ModelAccessToken[]
 
   // PR #375 — TOTP second factor (ADR-013 directory). One credential row
   // per user (the secret is encrypted at rest). `confirmedAt` is the

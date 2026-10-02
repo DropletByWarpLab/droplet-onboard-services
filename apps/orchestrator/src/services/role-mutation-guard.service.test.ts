@@ -68,6 +68,10 @@ vi.mock("./vpn-peer-revoke.service.js", () => ({
   revokeUserVpnDevices: revokeUserVpnDevicesMock,
   revokeOverlayDevicesForUser: revokeOverlayDevicesForUserMock,
 }));
+const revokeModelAccessTokensForUserMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock("./model-access-token.service.js", () => ({
+  revokeModelAccessTokensForUser: revokeModelAccessTokensForUserMock,
+}));
 vi.mock("./department-provisioner.service.js", () => ({
   adminBasicToken: vi.fn(() => "basic:dGVzdDp0ZXN0"),
   DROPLET_ADMINS_GROUP: "droplet-admins",
@@ -1190,5 +1194,34 @@ describe("rail 6 — leaver VPN devices (WARP-3160)", () => {
       actor: { type: "user", id: "admin-1" },
     });
     expect(revokeOverlayDevicesForUserMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── WARP-3452 — a leaver's coding-tool tokens go with the account ──────────
+describe("rail 6 — coding-tool tokens (WARP-3452)", () => {
+  const actor = { type: "user" as const, id: "admin-1" };
+
+  it("a disable revokes the person's tokens as user_deactivated", async () => {
+    revokeModelAccessTokensForUserMock.mockClear();
+    await runDisablePostEffects({ targetUserId: "u-bob", username: "bob", actor, devices: null });
+    expect(revokeModelAccessTokensForUserMock).toHaveBeenCalledWith("u-bob", "user_deactivated", actor);
+  });
+
+  it("a legacy disable with no local row has no tokens to revoke", async () => {
+    revokeModelAccessTokensForUserMock.mockClear();
+    await runDisablePostEffects({ targetUserId: null, username: "legacy", actor, devices: null });
+    expect(revokeModelAccessTokensForUserMock).not.toHaveBeenCalled();
+  });
+
+  it("a demotion to external guest revokes them as role_guest; any other role change leaves them alone", async () => {
+    const target = { id: "u-bob", username: "bob", nextcloudUsername: null };
+    revokeModelAccessTokensForUserMock.mockClear();
+    await runRoleChangePostEffects({ target, previousRole: "family", nextRole: "guest", actorUsername: "admin", actor, devices: null });
+    expect(revokeModelAccessTokensForUserMock).toHaveBeenCalledWith("u-bob", "role_guest", actor);
+
+    revokeModelAccessTokensForUserMock.mockClear();
+    await runRoleChangePostEffects({ target, previousRole: "family", nextRole: "admin", actorUsername: "admin", actor, devices: null });
+    await runRoleChangePostEffects({ target, previousRole: "guest", nextRole: "guest", actorUsername: "admin", actor, devices: null });
+    expect(revokeModelAccessTokensForUserMock).not.toHaveBeenCalled();
   });
 });

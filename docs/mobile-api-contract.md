@@ -588,6 +588,26 @@ Body is raw audio bytes (not multipart/JSON); `rate` 8000..48000 (default 16000)
 retry; `400 empty_audio` / `400 invalid_rate`; `503 stt_unavailable` when the STT
 sidecar is down.
 
+#### Coding-tool tokens (`/api/llm-access`)
+
+WARP-3452 / ADR-067. Tokens (`dlk_…`) that let a coding tool use the box's model at
+`https://<box>/llm/`. Owner, admin and members only: a guest gets
+`403 role_not_allowed` on every route.
+
+| Method | Path | Auth | Body | Returns |
+|---|---|---|---|---|
+| GET | `/llm-access` | owner/admin/family | — | `{ enabled, canCreate, isAdmin, activeModel, contextWindow, tokens: TokenRow[] }` (the caller's own tokens, newest first) |
+| PUT | `/llm-access/settings` | owner/admin | `{ enabled }` | same as GET |
+| POST | `/llm-access/tokens` | owner/admin/family | `{ label }` (1–64 chars, trimmed) | 201 `{ token, row: TokenRow }`; `token` is shown this once. `409 disabled` while the switch is off |
+| POST | `/llm-access/tokens/:id/renew` | own token, or owner/admin | — | `TokenRow` (expires 364 days on); `409 revoked` |
+| DELETE | `/llm-access/tokens/:id` | own token, or owner/admin | — | `204` (revoked, row kept) |
+| GET | `/llm-access/tokens/all` | owner/admin | — | `{ tokens: Array<TokenRow & { user: { id, displayName } }> }` |
+
+`TokenRow` = `{ id, label, prefix, status: "active"|"revoked"|"expired", createdAt,
+expiresAt, lastUsedAt, revokedAt, usage30d: { requests, promptTokens,
+completionTokens, errors } }`. Someone else's token id → `404 not_found`. The
+`_introspect` and `_usage` routes under the same prefix are for ai-gateway only.
+
 ### Files (`/api/files/*`)
 
 | Method | Path | Auth | Returns / body |

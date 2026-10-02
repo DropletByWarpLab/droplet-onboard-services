@@ -87,6 +87,7 @@ import {
 } from "./vpn-peer-revoke.service.js";
 import { recordActivity } from "./activity.singleton.js";
 import type { ActivityActor } from "./activity.service.js";
+import { revokeModelAccessTokensForUser } from "./model-access-token.service.js";
 import {
   adminBasicToken,
   DROPLET_ADMINS_GROUP,
@@ -757,6 +758,10 @@ export async function runRoleChangePostEffects(args: {
     args.nextRole === "guest" && args.previousRole !== "guest"
       ? await revokeLeaverDevices(args.devices, args.target.username, args.actor, "role_change")
       : null;
+  // WARP-3452: nor may a guest hold a coding-tool token.
+  if (args.nextRole === "guest" && args.previousRole !== "guest") {
+    await revokeModelAccessTokensForUser(args.target.id, "role_guest", args.actor);
+  }
   await syncAdminTierGroup({
     userId: args.target.id,
     nextcloudUsername: args.target.nextcloudUsername,
@@ -900,6 +905,10 @@ export async function runDisablePostEffects(args: {
     }
   }
   const vpn = await revokeLeaverDevices(args.devices, args.username, args.actor, "deactivation");
+  // WARP-3452: and their coding-tool tokens (best-effort, never throws).
+  if (args.targetUserId) {
+    await revokeModelAccessTokensForUser(args.targetUserId, "user_deactivated", args.actor);
+  }
   await recordActivity({
     kind: "auth",
     severity: "warn",
