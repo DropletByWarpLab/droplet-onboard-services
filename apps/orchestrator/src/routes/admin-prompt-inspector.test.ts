@@ -49,6 +49,7 @@ vi.mock("../services/prompt-inspect.service.js", () => ({
 }));
 
 import { createAdminPromptInspectorRouter } from "./admin-prompt-inspector.js";
+import { DASHBOARD_NAVIGATION_TOOLS } from "../services/dashboard-navigation.js";
 
 const prisma = {} as never;
 
@@ -184,6 +185,46 @@ describe("🔴 the path parameter is the target, and the query models the turn",
     expect(mocks.inspectPrompt).toHaveBeenCalledWith(
       prisma,
       expect.objectContaining({ allowedToolNames: undefined }),
+    );
+  });
+
+  it("🔴 models the navigation tools the way the real turn withholds them (WARP-3116)", async () => {
+    // A dashboard turn carries a page list, so nothing is withheld; a voice
+    // turn has none, so the navigation tools are — and the guidance must not
+    // name what the modelled turn does not carry.
+    await request(appAs("owner")).get("/api/admin/prompt-inspect/u1");
+    expect(mocks.inspectPrompt).toHaveBeenLastCalledWith(
+      prisma,
+      expect.objectContaining({ withheldToolNames: new Set() }),
+    );
+    await request(appAs("owner")).get("/api/admin/prompt-inspect/u1?voice=1");
+    expect(mocks.inspectPrompt).toHaveBeenLastCalledWith(
+      prisma,
+      expect.objectContaining({ withheldToolNames: DASHBOARD_NAVIGATION_TOOLS }),
+    );
+  });
+
+  it("🔴 an owner on a box with a module OFF gets every tool the turn's guidance names, minus that module's (WARP-2972)", async () => {
+    // The real turn composes guidance from `namesForGuidance(undefined, verdict)`:
+    // every registered tool except the module-withheld ones — chat-policy and
+    // turn-relevance exclusions do NOT apply to guidance. Sending `undefined`
+    // here would render guidance naming tools the turn no longer holds.
+    mocks.inspectTools.mockResolvedValue({
+      ...TOOLS_RESULT,
+      tier: "owner",
+      noRoleNarrowing: true,
+      counts: { ...TOOLS_RESULT.counts, byGate: { module: 1 } },
+      rows: [
+        { name: "read_file", advertised: true, gate: null, source: "built-in" },
+        { name: "list_cameras", advertised: false, gate: "module", source: "built-in" },
+        { name: "set_wifi_ssid", advertised: false, gate: "chat_policy", source: "built-in" },
+        { name: "ext_thing", advertised: true, gate: null, source: "extension:x@1" },
+      ],
+    });
+    await request(appAs("owner")).get("/api/admin/prompt-inspect/u1");
+    expect(mocks.inspectPrompt).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({ allowedToolNames: ["read_file", "set_wifi_ssid"] }),
     );
   });
 

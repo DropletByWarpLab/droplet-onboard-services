@@ -318,6 +318,19 @@ network. Host-published ports and host-network services are called out.
   read-only (`requiresWrite === false`). RBAC is **re-checked on `tools/call`**
   (not just `tools/list`). Matter tool calls **proxy back** to the orchestrator's
   `/api/matter/*` — the Matter fabric lives in the orchestrator.
+- **Module gating (WARP-2972):** a tool whose domain a module toggle (box) or the
+  acting person's own grants withhold is absent from `tools/list` (HTTP) and refused
+  by `tools/call` (both transports, `module_disabled`). The verdict is asked of the
+  orchestrator (`GET /api/modules/tool-verdict`, admits `_service:mcp` **and the
+  owner** — with `AUTH_ENABLED=false` every request is the synthetic `dev` owner, so
+  `_service:mcp` alone would 403 the mcp-server in a no-auth dev stack) — this
+  container has no module registry or availability config — and **fails closed**
+  when it can't be had: module-owned domains withheld, unclaimed ones kept, one
+  `[mcp-server] module verdict unavailable (<reason>)` warning a minute. A
+  `createServer` built with no verdict source fails closed the same way; tests and
+  embedders opt out with `NO_MODULE_GATING`. The stdio child's `tools/list` stays the
+  raw registry; the orchestrator gates its chat pool and `/api/llm/tools` on top of
+  that cached list.
 - **Gotchas:** the `claims === undefined` "trusted" sentinel is **stdio-only** —
   HTTP always requires a valid JWT. gRPC/Redis/Prisma connect lazily so a missing
   dependency at boot doesn't kill the stdio child.

@@ -302,3 +302,18 @@ vi.mock("@prisma/client", () => {
     },
   };
 });
+
+// --- WARP-2972: the module verdict starts PERMISSIVE in every suite ---
+// The chat pool, /api/llm/tools and the mcp-server's verdict route now ask
+// `resolveToolModuleVerdict` which tool domains a module toggle withholds, and
+// an UNWIRED process fails closed (every module-owned tool withheld). A suite
+// that predates WARP-2972 and never touches modules must keep testing what it
+// tests, so the real module is pre-bound to "withhold nothing" the first time
+// it is loaded — which also makes app.ts's idempotent `initToolModuleVerdict`
+// a no-op under createApp. A suite that is ABOUT the gate replaces the binding
+// with `_setToolModuleVerdictForTests(...)`; `null` models an unwired process.
+vi.mock("../services/tool-module-verdict.service.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/tool-module-verdict.service.js")>();
+  actual._setToolModuleVerdictForTests(async () => ({ withheldDomains: new Set<string>() }));
+  return actual;
+});

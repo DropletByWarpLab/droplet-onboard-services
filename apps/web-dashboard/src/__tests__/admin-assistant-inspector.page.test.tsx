@@ -49,6 +49,7 @@ const TOOLS = {
     advertised: 6,
     withheld: 133,
     byGate: {
+      module: 0,
       write_tier: 40,
       role_grant: 20,
       interview_strip: 0,
@@ -148,6 +149,32 @@ describe("the assistant inspector", () => {
     expect(
       screen.getByText(/It changes something, and family is not owner or admin/),
     ).toBeTruthy();
+  });
+
+  it("names a switched-off module as its own group, in the person's language (WARP-2972)", async () => {
+    fetchToolInspectMock.mockResolvedValue({
+      ...TOOLS,
+      counts: { ...TOOLS.counts, byGate: { ...TOOLS.counts.byGate, module: 1 } },
+      rows: [
+        ...TOOLS.rows,
+        {
+          name: "list_cameras",
+          domain: "cameras",
+          homeDescription: "See your cameras",
+          requiresWrite: false,
+          requiresConfirmation: false,
+          advertised: false,
+          gate: "module",
+          reason: 'The "cameras" area is switched off for them: it is turned off on this Droplet, or they have not been given it.',
+          alsoWithheldBy: [],
+        },
+      ],
+    });
+    render(<AssistantInspectorPage />);
+    await selectPerson();
+    await screen.findByText("See your cameras");
+    expect(screen.getByText("Switched off")).toBeTruthy();
+    expect(screen.getByText(/area is switched off for them/)).toBeTruthy();
   });
 
   it("says how many OTHER reasons hold a tool back", async () => {

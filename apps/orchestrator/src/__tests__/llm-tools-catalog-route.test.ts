@@ -14,13 +14,14 @@
  * information-disclosure of the destructive surface).
  */
 
-import { describe, it, expect, vi, beforeAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterEach } from "vitest";
 import request from "supertest";
 import { PrismaClient } from "@prisma/client";
 import type { Request, Response, NextFunction } from "express";
 import { TOOL_CATALOG } from "@droplet/tools-core";
 // WARP-2969 — asserted against the SHIPPED list, never a restated copy.
 import { EXCLUDED_FROM_CHAT_TOOLS } from "../services/chat-tool-scope.js";
+import { _setToolModuleVerdictForTests } from "../services/tool-module-verdict.service.js";
 
 vi.mock("../middleware/auth.js", () => ({
   authMiddleware: (req: Request, _res: Response, next: NextFunction) => {
@@ -171,15 +172,16 @@ describe("GET /api/llm/tools/catalog (WARP-555)", () => {
  * verdict is `EXCLUDED_FROM_CHAT_TOOLS` itself, called, not re-derived; the
  * same list `tool-inspect.service.ts` reports as its `chat_policy` gate.
  *
- * ONE AXIS ON PURPOSE. An earlier cut of this shipped a `module` axis too,
- * from `domainsForFeatures`. It would have LIED: §6 module gating is not
- * applied to the chat pool for an owner or anybody holding no AccessRole —
- * `resolveToolAccessScope` returns a null scope for them
- * (tool-access.service.ts), `narrowToolsToScope` passes a null scope through
- * untouched, and `llm-agent.service.ts` narrows the pool by
- * EXCLUDED_FROM_CHAT_TOOLS alone. `list_cameras` reaches the model on a box
- * with `cameras` switched off. Wiring that gate for everyone is WARP-2972;
- * the axis comes back here once it is true.
+ * WARP-2972 — THE MODULE AXIS. `reach.module` says whether the module that owns
+ * the tool's domain is on for this box and held by the caller. It shipped as a
+ * second axis once and was cut, because it would have LIED: §6 module gating did
+ * not reach the chat pool for an owner or anybody holding no AccessRole
+ * (`resolveToolAccessScope` returns a null scope for them, and a null scope
+ * narrows nothing), so `list_cameras` reached the model on a box with `cameras`
+ * switched off. The gate is enforced for everyone now (the agent loop,
+ * GET /api/llm/tools and the mcp-server all apply the one predicate in
+ * tools-core), so the axis is true — and, like `chat`, it ANNOTATES: the page
+ * still lists a switched-off tool, with the reason it is not offered.
  */
 describe("GET /api/llm/tools/catalog reach (WARP-2969)", () => {
   let app: ReturnType<typeof createApp>;
@@ -190,6 +192,11 @@ describe("GET /api/llm/tools/catalog reach (WARP-2969)", () => {
     app = createApp(prisma);
   });
 
+  afterEach(() =>
+    // Back to the suite-wide permissive default (setup.ts).
+    _setToolModuleVerdictForTests(async () => ({ withheldDomains: new Set<string>() })),
+  );
+
   async function reachFor(name: string) {
     const res = await request(app)
       .get("/api/llm/tools/catalog")
@@ -199,17 +206,17 @@ describe("GET /api/llm/tools/catalog reach (WARP-2969)", () => {
       (t) => t.name === name,
     );
     expect(tool, `${name} missing from the catalog`).toBeDefined();
-    return tool!.reach as { chat: string };
+    return tool!.reach as { chat: string; module: string };
   }
 
   it("marks a chat-excluded tool as chat:excluded", async () => {
     // The switch fabric is a dashboard/installer surface — every one of its
     // tools sits in EXCLUDED_FROM_CHAT_TOOLS.
-    expect(await reachFor("get_switch_ports")).toEqual({ chat: "excluded" });
+    expect(await reachFor("get_switch_ports")).toEqual({ chat: "excluded", module: "allowed" });
   });
 
   it("marks a tool a turn can reach as chat:allowed", async () => {
-    expect(await reachFor("get_system_health")).toEqual({ chat: "allowed" });
+    expect(await reachFor("get_system_health")).toEqual({ chat: "allowed", module: "allowed" });
   });
 
   it("agrees with EXCLUDED_FROM_CHAT_TOOLS for every tool, not just the samples", async () => {
@@ -225,8 +232,37 @@ describe("GET /api/llm/tools/catalog reach (WARP-2969)", () => {
     }
   });
 
-  it("carries NO module axis — that gate is not enforced on chat yet (WARP-2972)", async () => {
-    expect(await reachFor("list_cameras")).not.toHaveProperty("module");
+  // WARP-2972 — this pin used to read "carries NO module axis — that gate is
+  // not enforced on chat yet". It is enforced now, so the axis is asserted, in
+  // both directions and against an unclaimed domain.
+  it("carries the module axis: withheld when the module is off, allowed when it is on (WARP-2972)", async () => {
+    _setToolModuleVerdictForTests(async () => ({ withheldDomains: new Set(["cameras"]) }));
+    expect(await reachFor("list_cameras")).toEqual({ chat: "allowed", module: "withheld" });
+    expect(await reachFor("list_network_devices")).toMatchObject({ module: "allowed" });
+    _setToolModuleVerdictForTests(async () => ({ withheldDomains: new Set<string>() }));
+    expect(await reachFor("list_cameras")).toEqual({ chat: "allowed", module: "allowed" });
+  });
+
+  it("annotates and never filters: a switched-off tool is still listed (WARP-2972)", async () => {
+    _setToolModuleVerdictForTests(async () => ({ withheldDomains: new Set(["cameras"]) }));
+    const res = await request(app).get("/api/llm/tools/catalog").set("x-test-role", "owner");
+    expect(res.body.tools.length).toBe(TOOL_CATALOG.length);
+  });
+
+  it("an unclaimed domain is never marked withheld, even when the verdict fails closed (WARP-2972)", async () => {
+    _setToolModuleVerdictForTests(null);
+    expect(await reachFor("get_system_health")).toMatchObject({ module: "allowed" });
+    expect(await reachFor("list_cameras")).toMatchObject({ module: "withheld" });
+  });
+
+  it("carries the axis for the CALLER's verdict, the owner included (null §3 scope) (WARP-2972)", async () => {
+    const seen: Array<string | null | undefined> = [];
+    _setToolModuleVerdictForTests(async (asserted) => {
+      seen.push(asserted);
+      return { withheldDomains: new Set(["email"]) };
+    });
+    expect(await reachFor("email_search")).toMatchObject({ module: "withheld" });
+    expect(seen.length).toBeGreaterThan(0);
   });
 
   it("keeps the response additive — the WARP-555 fields are untouched", async () => {

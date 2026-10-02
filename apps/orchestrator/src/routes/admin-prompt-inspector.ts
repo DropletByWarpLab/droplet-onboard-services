@@ -51,6 +51,7 @@ import { actorFromRequest } from "../services/activity.service.js";
 import { createLogger } from "../lib/logger.js";
 import { inspectToolsForPerson, type ToolInspectDeps } from "../services/tool-inspect.service.js";
 import { inspectPromptForPerson } from "../services/prompt-inspect.service.js";
+import { navigationToolsWithheld } from "../services/dashboard-navigation.js";
 
 const logger = createLogger("admin-prompt-inspector");
 
@@ -148,14 +149,30 @@ export function createAdminPromptInspectorRouter(
         // resolved-but-unnarrowed person must reach the composer as undefined,
         // not as a 139-name list, or the guidance is composed by a different
         // path than the turn's.
-        const allowedToolNames =
-          tools.unresolved === null && tools.noRoleNarrowing && tools.tier === "owner"
+        //
+        // WARP-2972 — unless a module is off. The real turn composes guidance
+        // from `namesForGuidance(undefined, verdict)`: `undefined` ("every
+        // tool") stops being true, and becomes every built-in tool the module
+        // gate did not withhold — NOT the advertised set, because the turn's
+        // guidance is not narrowed by chat policy or turn relevance.
+        const ownerUnnarrowed =
+          tools.unresolved === null && tools.noRoleNarrowing && tools.tier === "owner";
+        const allowedToolNames = ownerUnnarrowed
+          ? (tools.counts.byGate.module ?? 0) === 0
             ? undefined
-            : tools.rows.filter((r) => r.advertised).map((r) => r.name);
+            : tools.rows
+                .filter((r) => r.source === "built-in" && r.gate !== "module")
+                .map((r) => r.name)
+          : tools.rows.filter((r) => r.advertised).map((r) => r.name);
 
         const result = await inspectPromptForPerson(prisma, {
           targetUserId: req.params.userId,
           allowedToolNames,
+          // WARP-3116 — the real turn withholds the navigation tools when it
+          // carries no dashboard page list. The dashboard sends one; voice
+          // never does, so a modelled voice turn withholds them and every
+          // other modelled turn is the dashboard's.
+          withheldToolNames: navigationToolsWithheld(!flag(req, "voice")),
           offLan,
           interview,
         });

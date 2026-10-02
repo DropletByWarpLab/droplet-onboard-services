@@ -286,11 +286,31 @@ describe("🔴 the assembled prompt is the real string, in the real order", () =
       targetUserId: "u1",
       allowedToolNames: ["read_file", "list_files"],
     });
-    expect(mocks.composeToolGuidance).toHaveBeenCalledWith(["read_file", "list_files"]);
+    expect(mocks.composeToolGuidance).toHaveBeenCalledWith(["read_file", "list_files"], undefined);
 
     mocks.composeToolGuidance.mockClear();
     await inspectPromptForPerson(prisma, { targetUserId: "u1" });
-    expect(mocks.composeToolGuidance).toHaveBeenCalledWith(undefined);
+    expect(mocks.composeToolGuidance).toHaveBeenCalledWith(undefined, undefined);
+  });
+
+  it("WARP-3116: passes the turn's withheld tools to BOTH guidance sites, as the real turn does", async () => {
+    // The chat route composes guidance twice (the budget estimate and the
+    // system message) and hands `navigationWithheld` to each. `allowedToolNames`
+    // cannot carry it for the owner, whose `undefined` means "the default
+    // scope" — so it arrives separately, and the assembled prompt must not name
+    // a navigation tool the modelled turn does not carry (WARP-642).
+    const withheld = new Set(["find_dashboard_page", "open_dashboard_page"]);
+    await inspectPromptForPerson(prisma, {
+      targetUserId: "u1",
+      allowedToolNames: undefined,
+      withheldToolNames: withheld,
+    });
+    // The block's own composer + the assembled prompt's builder.
+    expect(mocks.composeToolGuidance).toHaveBeenCalledTimes(2);
+    for (const call of mocks.composeToolGuidance.mock.calls) {
+      expect(call[0]).toBeUndefined();
+      expect(call[1]).toBe(withheld);
+    }
   });
 });
 

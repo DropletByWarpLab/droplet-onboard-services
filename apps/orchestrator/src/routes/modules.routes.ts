@@ -3,6 +3,8 @@
  * type. Design: docs/superpowers/specs/2026-07-07-module-toggles-design.md.
  *
  *   GET  /api/modules                  any authed user (drives nav + settings page)
+ *   GET  /api/modules/tool-verdict     the mcp-server's `_service:mcp` principal, or an owner
+ *                                      (WARP-2972 — which tool domains are withheld)
  *   PATCH /api/admin/modules/:id       owner/admin — body { enabled: boolean }
  *   GET  /api/business-types           any authed user (preset catalog)
  *   POST /api/admin/business-type      owner/admin — body { type: BusinessType }
@@ -27,9 +29,14 @@ import {
   type AvailabilityConfig,
 } from "../modules/module-registry.js";
 import type { ModuleGate } from "../middleware/module-gate.js";
-import { recordAccessDenied } from "../middleware/auth.js";
+import { recordAccessDenied, requireRoleOrMcpService } from "../middleware/auth.js";
 import { resolveEffectiveAccessForRequest } from "../middleware/feature-gate.js";
 import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
+import { serializeModuleVerdict } from "@droplet/tools-core";
+import {
+  resolveToolModuleVerdict,
+  type ModuleVerdictResolver,
+} from "../services/tool-module-verdict.service.js";
 
 const logger = createLogger("modules-route");
 
@@ -81,7 +88,9 @@ async function resolveEffectiveForUser(req: Request) {
 export function createModulesRouter(
   prisma: PrismaClient,
   cfg: AvailabilityConfig,
-  gate: ModuleGate
+  gate: ModuleGate,
+  /** WARP-2972 — injectable for tests; production reads the process-wide binding. */
+  resolveVerdict: ModuleVerdictResolver = resolveToolModuleVerdict,
 ): Router {
   const router = Router();
 
@@ -103,6 +112,34 @@ export function createModulesRouter(
       // server and a client that disagree about the wire shape is exactly how
       // the next person gets misled.
       res.json(effectiveForUser?.length ? { ...view, effectiveForUser } : view);
+    } catch (e) { next(e); }
+  });
+
+  // ── GET /api/modules/tool-verdict ──────────────────────────────────────────
+  // WARP-2972. Which tool domains a module toggle (box) and the named person's
+  // own grants withhold — the ONE derivation (tool-module-verdict.service.ts),
+  // asked by the mcp-server before it lists or dispatches a tool, so the HTTP
+  // transport and the stdio child answer the same question the chat pool does.
+  //
+  // `_service:mcp` and the owner. `requireRoleOrMcpService("owner")` admits that
+  // principal id plus the owner tier. Owner and admin can already read any
+  // person's effective access (`GET /api/people/:id/effective-access`), so this
+  // discloses nothing new; and with AUTH_ENABLED=false every request is the
+  // synthetic `dev` OWNER, so a route that admitted `_service:mcp` alone would
+  // 403 the mcp-server in a no-auth dev stack and it would fail closed. Admins,
+  // family, guests and every other service principal are refused. The person is the mcp-server's usual `X-Nextcloud-User` assertion
+  // (a username on stdio, a `User.id` over HTTP), resolved as every other
+  // asserted-person surface resolves it. An unnamed caller is the box.
+  //
+  // A verdict that cannot be established is still a 200: it is the fail-closed
+  // verdict, as data. The mcp-server treats a non-200 the same way, so the only
+  // thing this distinction buys is an honest access log.
+  router.get("/modules/tool-verdict", requireRoleOrMcpService("owner"), async (req, res, next) => {
+    try {
+      const asserted = (req.header("x-nextcloud-user") ?? "").trim();
+      const verdict = await resolveVerdict(asserted === "" ? null : asserted);
+      res.setHeader("Cache-Control", "no-store");
+      res.json(serializeModuleVerdict(verdict));
     } catch (e) { next(e); }
   });
 
