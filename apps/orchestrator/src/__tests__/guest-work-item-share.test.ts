@@ -2,18 +2,20 @@
  * WARP-3369 (Romain, 2026-09-30) — assigning a work item to an external guest
  * SHARES that one item with them. The guest may read it, read and write its
  * comments and move its state, and sees NOTHING else in Projects: no other item,
- * no project list, no board, no search, no activity feed, no relations.
+ * no project list, no board, no search, no activity feed, no relations. To find
+ * those items (WARP-3407) they list the ones assigned to them, and only those.
  *
  * Driven through the REAL mount (`mountModuleGates`, whose `projects` tier floor
  * refuses a guest on the whole of `/api/pm`) and the REAL native PM router, with
  * a prisma double that answers only the per-item lookup:
  *
- *   - `modules/guest-shares.ts` names five requests that get past the prefix
+ *   - `modules/guest-shares.ts` names six requests that get past the prefix
  *     floor; every other route of the three PM routers (found by scanning their
  *     source, so a route added tomorrow is covered) stays 404 for a guest even
  *     when an item IS assigned to them;
- *   - the five are then guarded per record (`middleware/guest-share.ts`):
+ *   - five are then guarded per record (`middleware/guest-share.ts`):
  *     assigned → served, not assigned → the same 404, existing item or not;
+ *     the sixth, the own list, lists by the caller's id and nothing else;
  *   - the allowlist and the guards cannot drift apart: every pattern is served
  *     by a route carrying the guard, and every route carrying the guard is on the
  *     allowlist.
@@ -117,18 +119,22 @@ const PM_ROUTES: RouteRow[] = [
   ...scanRoutes("routes", "mobile", "pm.ts"),
 ];
 
-/** The five requests a guest may make, as `METHOD /registered/path`. */
+/** The six requests a guest may make, as `METHOD /registered/path`. */
 const SHARED_KEYS = [
   "GET /pm/work-items/:id",
   "GET /pm/work-items/:id/comments",
   "POST /pm/work-items/:id/comments",
   "POST /pm/work-items/:id/transition",
   "GET /pm/projects/:id/states",
+  "GET /pm/assigned-to-me",
 ] as const;
+/** The one of the six with no record to check: it lists the caller's own. */
+const OWN_LIST = "GET /pm/assigned-to-me";
 const key = (r: RouteRow): string => `${r.method.toUpperCase()} ${r.path}`;
 
 const findFirst = vi.fn();
-const prisma = { pmWorkItemAssignee: { findFirst } } as never;
+const findMany = vi.fn();
+const prisma = { pmWorkItemAssignee: { findFirst }, pmWorkItem: { findMany } } as never;
 
 function appAs(role: Role): Express {
   const app = express();
@@ -161,6 +167,8 @@ async function probe(app: Express, routes: RouteRow[]): Promise<Map<string, bool
 
 beforeEach(() => {
   findFirst.mockReset();
+  findMany.mockReset();
+  findMany.mockResolvedValue([]);
 });
 
 describe("the allowlist and the per-record guards cannot drift apart", () => {
@@ -187,7 +195,7 @@ describe("the allowlist and the per-record guards cannot drift apart", () => {
     expect(routes.length).toBeGreaterThanOrEqual(25);
   });
 
-  it("the routes carrying a guest share guard are exactly the five", () => {
+  it("the routes carrying a guest share guard are exactly the six", () => {
     expect(routes.filter((r) => r.guarded).map((r) => r.key).sort()).toEqual([...SHARED_KEYS].sort());
   });
 
@@ -210,13 +218,13 @@ describe("the allowlist and the per-record guards cannot drift apart", () => {
   });
 });
 
-describe("a guest to whom an item IS assigned: exactly five requests get through", () => {
+describe("a guest to whom an item IS assigned: exactly six requests get through", () => {
   it("every other route of the three PM routers stays 404 module_disabled", async () => {
     findFirst.mockResolvedValue({ id: "as-1" }); // "assigned" for any item or project
     const out = await probe(appAs("guest"), PM_ROUTES);
     const admitted = [...out.entries()].filter(([, isRefused]) => !isRefused).map(([k]) => k);
     expect(admitted.sort()).toEqual([...SHARED_KEYS].sort());
-    // the lookups were made for the five only, with the guest's own id
+    // the per-record lookups were made with the guest's own id
     expect(findFirst).toHaveBeenCalled();
     for (const [args] of findFirst.mock.calls) {
       expect(args.where.userId).toBe("u-guest");
@@ -252,10 +260,19 @@ describe("a guest to whom an item IS assigned: exactly five requests get through
 });
 
 describe("a guest to whom the item is NOT assigned: the same 404 on all five, exists or not", () => {
-  it("is refused on every route", async () => {
+  it("is refused on every route but their own (empty) list", async () => {
     findFirst.mockResolvedValue(null);
     const out = await probe(appAs("guest"), PM_ROUTES);
-    expect([...out.values()].every(Boolean), [...out.entries()].filter(([, r]) => !r).map(([k]) => k).join(", ")).toBe(true);
+    const admitted = [...out.entries()].filter(([, isRefused]) => !isRefused).map(([k]) => k);
+    expect(admitted).toEqual([OWN_LIST]);
+  });
+
+  it("the own list asks for the caller's id, whatever the query names (WARP-3407)", async () => {
+    const res = await request(appAs("guest")).get("/api/pm/assigned-to-me?assignee=u-owner&userId=u-owner");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ work_items: [] });
+    expect(findMany).toHaveBeenCalledTimes(1);
+    expect(findMany.mock.calls[0][0].where).toEqual({ isArchived: false, assignees: { some: { userId: "u-guest" } } });
   });
 
   it("asks for the item by the guest's id: the item routes by workItemId, the state list by the project", async () => {
