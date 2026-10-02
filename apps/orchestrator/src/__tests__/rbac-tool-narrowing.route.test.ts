@@ -138,18 +138,20 @@ const persistence = vi.hoisted(() => ({
   getConversationToolNames: vi.fn<(id: string, userId: string) => Promise<string[]>>(),
 }));
 vi.mock("../services/chat-persistence.service.js", () => ({
-  ChatPersistenceService: vi.fn().mockImplementation(() => ({
-    ensureConversation: vi.fn(async () =>
-      persistence.sessionId ? { id: persistence.sessionId } : null,
-    ),
-    createTurnRows: vi.fn().mockResolvedValue(null),
-    finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
-    updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
-    listConversationsForUser: vi.fn().mockResolvedValue([]),
-    getConversationForUser: vi.fn().mockResolvedValue(null),
-    deleteConversationForUser: vi.fn().mockResolvedValue(false),
-    getConversationToolNames: persistence.getConversationToolNames,
-  })),
+  ChatPersistenceService: vi.fn().mockImplementation(function () {
+    return {
+      ensureConversation: vi.fn(async () =>
+        persistence.sessionId ? { id: persistence.sessionId } : null,
+      ),
+      createTurnRows: vi.fn().mockResolvedValue(null),
+      finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
+      updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
+      listConversationsForUser: vi.fn().mockResolvedValue([]),
+      getConversationForUser: vi.fn().mockResolvedValue(null),
+      deleteConversationForUser: vi.fn().mockResolvedValue(false),
+      getConversationToolNames: persistence.getConversationToolNames,
+    };
+  }),
 }));
 const mockRunAgent = vi.fn();
 vi.mock("../services/llm-agent.service.js", () => ({

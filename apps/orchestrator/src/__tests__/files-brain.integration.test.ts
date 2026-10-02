@@ -114,7 +114,7 @@ vi.mock("@prisma/client", () => {
     },
   };
   return {
-    PrismaClient: vi.fn(() => mockPrisma),
+    PrismaClient: vi.fn(function () { return mockPrisma; }),
     Prisma: { PrismaClientKnownRequestError: class extends Error {} },
     BrainMemoryItemStatus: {
       queued_for_transcription: "queued_for_transcription",
