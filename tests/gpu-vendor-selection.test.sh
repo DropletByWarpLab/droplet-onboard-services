@@ -460,7 +460,9 @@ _stub_smi() {
   _sd="$(mktemp -d)"
   printf '%s\n' "$1" > "$_sd/out"
   printf '#!/bin/sh\ncat %s\n' "$_sd/out" > "$_sd/nvidia-smi"
-  chmod +x "$_sd/nvidia-smi"
+  # No DMR container to ask either: keeps the docker exec fallback hermetic.
+  printf '#!/bin/sh\nexit 1\n' > "$_sd/docker"
+  chmod +x "$_sd/nvidia-smi" "$_sd/docker"
   printf '%s' "$_sd"
 }
 

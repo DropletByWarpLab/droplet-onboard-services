@@ -352,46 +352,12 @@ configure_gpu_env() {
 # ---------------------------------------------------------------------------
 # WARP-3452 — the context window, sized to the card.
 # ---------------------------------------------------------------------------
-# The window costs VRAM: the KV cache grows with it. Measured on the bench box
-# (RTX 5060 Ti 16 GB, gpt-oss:20B-F16): 12.7 GB at 16k, 14.0 GB at 64k. Coding
-# tools need the 64k (Copilot agent mode sends ~24k-token prompts, refused with
-# 400 at n_ctx 16384), so a 16 GiB card gets 65536 and anything smaller, an
-# iGPU or a CPU-only box keeps 16384.
-
-# gpu_vram_mib <vendor> — total VRAM of the discrete card in MiB, or nothing
-# when it cannot be measured. Unlike vendor detection above, sizing a card
-# needs its driver: nvidia-smi on NVIDIA (the driver publishes no sysfs size),
-# amdgpu's mem_info_vram_total on AMD. The largest AMD node wins, so a Raphael
-# iGPU's 512 MiB carve-out never stands in for a discrete card.
-# SYS_DRM_ROOT is a test seam, as in scripts/dmr/flip-single-box.sh.
-gpu_vram_mib() {
-  case "${1:-none}" in
-    nvidia)
-      command -v nvidia-smi >/dev/null 2>&1 || return 0
-      nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null \
-        | tr -d ' ' | sort -n | tail -1 || true
-      ;;
-    amd)
-      _vram_max=0
-      for _vram_f in "${SYS_DRM_ROOT:-/sys/class/drm}"/card*/device/mem_info_vram_total; do
-        _vram_b="$(cat "$_vram_f" 2>/dev/null || true)"
-        case "$_vram_b" in ''|*[!0-9]*) continue ;; esac
-        [ "$_vram_b" -gt "$_vram_max" ] && _vram_max="$_vram_b"
-      done
-      [ "$_vram_max" -gt 0 ] && printf '%s' "$((_vram_max / 1048576))"
-      ;;
-    *) printf '0' ;;
-  esac
-  return 0
-}
-
-# context_window_for_vram_mib <MiB> — 65536 from 16 GiB up, else 16384; nothing
-# when the input is not a number. Rounded to the nearest GiB because a "16 GB"
-# card reports less than 16384 MiB (the bench box's RTX 5060 Ti: 16311).
-context_window_for_vram_mib() {
-  case "${1:-}" in ''|*[!0-9]*) return 0 ;; esac
-  if [ $(( ($1 + 512) / 1024 )) -ge 16 ]; then printf '65536'; else printf '16384'; fi
-}
+# The VRAM probe and the window rule live in docker/ota/vram.sh, shared with
+# the OTA .env reconcile: OTA ships only docker/, so that is the one place both
+# callers can reach. Sizing a card needs its driver, unlike vendor detection
+# above.
+# shellcheck source=../../docker/ota/vram.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../../docker/ota/vram.sh"
 
 # configure_context_env <env-file> <vendor> — write DMR_CONTEXT_LENGTH and
 # OLLAMA_CONTEXT_LENGTH once, equal (WARP-854 parity: the orchestrator budgets

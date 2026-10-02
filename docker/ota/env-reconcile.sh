@@ -96,11 +96,8 @@ assigns() { grep -Eq "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "$2"; }
 #   migrate_env also replaces an empty or publicly-known value; OTA does not
 #   (existing values are never touched). Every setup.sh-written .env has had a
 #   generated one since the first release, so that case is hand-authored only.
-# OLLAMA_CONTEXT_LENGTH / DMR_CONTEXT_LENGTH (WARP-3452): the compose default
-#   went 16384 -> 65536. A box without them has been serving 16384, so that is
-#   the truthful backfill (as INFERENCE_RUNTIME=ollama is): 64k on a small GPU
-#   or a CPU box can fail to load the model. setup.sh sizes them to the GPU;
-#   on an OTA-only box with a 16 GiB card, raise both in .env by hand.
+# OLLAMA_CONTEXT_LENGTH / DMR_CONTEXT_LENGTH are not listed here: they are
+#   sized to the GPU below (WARP-3452).
 ENSURE_KEYS='
 ROUTING_SERVICE_TOKEN hex32
 DOC_RENDER_SERVICE_TOKEN hex32
@@ -126,8 +123,6 @@ JWT_SECRET hex64
 DEVICE_SECRET hex32
 NVR_MEDIA_SOURCE =nvrdata
 INFERENCE_RUNTIME =ollama
-OLLAMA_CONTEXT_LENGTH =16384
-DMR_CONTEXT_LENGTH =16384
 HQ_ISSUANCE_URL =https://droplet-fleet-hq.rjouffret.workers.dev
 TUNNEL_TOKEN =
 DROPLET_PROVISION_TOKEN =
@@ -192,6 +187,28 @@ echo "$ENSURE_KEYS" | while read -r key gen; do
   printf '%s=%s\n' "$key" "$val" >> "$STAGE"
   printf '%s\n' "$key" >> "$STAGE.keys"
 done
+
+# WARP-3452 — the context window, by setup's rule (docker/ota/vram.sh, shipped
+# beside this file): >= 16 GiB of discrete VRAM -> 65536, otherwise 16384.
+# VRAM unreadable here -> 16384, what these boxes were serving before the
+# compose default went to 65536, so a box never jumps to 64k blind. With one
+# key already set, the missing one gets 16384 too: an existing value is never
+# touched, and nothing is guessed from it.
+if assigns DMR_CONTEXT_LENGTH "$STAGE" || assigns OLLAMA_CONTEXT_LENGTH "$STAGE"; then
+  ctx=16384
+else
+  # shellcheck source=vram.sh
+  . "$(dirname "$0")/vram.sh"
+  vendor="$(sed -n 's/^GPU_VENDOR=//p' "$STAGE" | tail -n 1 | tr -d '"')"
+  ctx="$(context_window_for_vram_mib "$(gpu_vram_mib "$vendor")")"
+  ctx="${ctx:-16384}"
+fi
+for key in DMR_CONTEXT_LENGTH OLLAMA_CONTEXT_LENGTH; do
+  assigns "$key" "$STAGE" && continue
+  printf '%s=%s\n' "$key" "$ctx" >> "$STAGE"
+  printf '%s\n' "$key" >> "$STAGE.keys"
+done
+
 if [ -f "$STAGE.keys" ]; then
   added_keys="$(tr '\n' ' ' < "$STAGE.keys")"
   rm -f "$STAGE.keys"
