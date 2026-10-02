@@ -146,7 +146,16 @@ RUN set -eu; \
     grep -q ' 192\.168\.1\.87 ' /tmp/llm.conf; \
     printf 'events{}\nhttp{\n include /tmp/llm.conf;\n}\n' > /tmp/test-nginx.conf; \
     nginx -t -c /tmp/test-nginx.conf; \
-    rm -f /tmp/route /tmp/llm.conf; \
+    # The relay box's address comes from the host dnsmasq's last host-record;
+    # with the relay on and no record, every peer is refused.
+    printf 'host-record=d-old.example,192.168.20.1\nhost-record=d-new.example,192.168.9.250\n' > /tmp/hostdns.conf; \
+    DROPLET_LLM_ACCESS_ROUTES=/tmp/route DROPLET_LLM_ACCESS_OUT=/tmp/llm.conf DROPLET_COMPOSE_PROFILES=single-box,relay \
+      DROPLET_LLM_ACCESS_HOST_DNS_CONF=/tmp/hostdns.conf /docker-entrypoint.d/04-llm-access.sh; \
+    grep -q ' 192\.168\.9\.250 ' /tmp/llm.conf; \
+    DROPLET_LLM_ACCESS_ROUTES=/tmp/route DROPLET_LLM_ACCESS_OUT=/tmp/llm.conf DROPLET_COMPOSE_PROFILES=single-box,relay \
+      DROPLET_LLM_ACCESS_HOST_DNS_CONF=/nonexistent /docker-entrypoint.d/04-llm-access.sh; \
+    grep -qE '^ +default +1;' /tmp/llm.conf; \
+    rm -f /tmp/route /tmp/llm.conf /tmp/hostdns.conf; \
     # WARP-1688: and finally the REAL /etc/nginx/nginx.conf, end to end.
     # Everything above validates an INCLUDE variant in a throwaway config —
     # nothing validated nginx.conf itself, because its server block loads TLS

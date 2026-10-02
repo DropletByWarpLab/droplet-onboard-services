@@ -142,7 +142,15 @@ per `INFERENCE_RUNTIME`) to employees' coding tools through nginx's
   own chat (`503 preempted_for_chat` before the answer starts, an error frame
   after). One request in flight per token, plus `LLM_ACCESS_RPM`.
 - Token counts are posted to `/api/llm-access/_usage` after each generation;
-  bodies are never logged or stored.
+  bodies are never logged or stored. Known limit: a streamed OpenAI-dialect
+  answer (`/llm/v1/chat/completions`, `/llm/v1/completions` with
+  `"stream": true`) carries a `usage` chunk only when the client sends
+  `stream_options.include_usage`, so without it the request is counted with
+  0 prompt and 0 completion tokens. Ollama and Anthropic streams always carry
+  their counts.
+- nginx refuses `/llm/` to the cloudflared relay and the guest Wi-Fi by peer
+  address (`docker/nginx/render-llm-access.sh`, rendered at gateway start and
+  by `scripts/lib/local-dns.sh` when it rewrites the host-record).
 
 ## Adding a New Tool
 

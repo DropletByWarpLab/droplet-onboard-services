@@ -120,8 +120,11 @@ def _error(path: str, status: int, code: str, message: str, retry_after: int | N
 
 
 async def _orchestrator(route: str, payload: dict) -> httpx.Response:
-    """POST to an internal /api/llm-access route as the ai-gateway principal."""
-    async with httpx.AsyncClient(timeout=5.0, **httpx_client_kwargs()) as client:
+    """POST to an internal /api/llm-access route as the ai-gateway principal.
+
+    15 s: introspection can wait on the orchestrator's own model listing from
+    ai-gateway, which it allows 10 s on a cold start."""
+    async with httpx.AsyncClient(timeout=15.0, **httpx_client_kwargs()) as client:
         return await client.post(
             f"{ORCHESTRATOR_URL}/api/llm-access/{route}",
             json=payload,
