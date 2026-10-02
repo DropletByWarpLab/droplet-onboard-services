@@ -110,6 +110,10 @@ services:
       # /docs prefix → docserver:9980 (coolwsd net.service_root); onlyoffice
       # strips it → docserver:80. Same selector pattern as the knobs above.
       - DOCS_ENGINE=${DOCS_ENGINE:-collabora}
+      # WARP-3452: /docker-entrypoint.d/04-llm-access.sh refuses /llm/ to this
+      # address — the box's own, which the cloudflared relay dials, so relay
+      # traffic arrives from it. Empty = the 192.168.20.1 default, always refused.
+      - DROPLET_PUBLIC_FQDN_IP=${DROPLET_PUBLIC_FQDN_IP:-}
     volumes:
       # nginx.conf moved docker/nginx.conf → docker/nginx/nginx.conf
       # (WARP-1021). Still mounted read-only over the baked copy (same file)
