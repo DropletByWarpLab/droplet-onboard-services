@@ -110,6 +110,8 @@ function createPrismaMock(opts: {
     // tool-spec-access.test.ts.
     user: {
       findUnique: vi.fn(async () => ({
+        // WARP-2972 — the handle a fire's tool calls carry as `_meta.userId`.
+        username: "owner-handle",
         role: "owner",
         directoryStatus: "ACTIVE",
         accessRoleId: null,
@@ -385,6 +387,10 @@ describe("WARP-463 — tickToolSchedules", () => {
       ],
     });
     await tickToolSchedules(prisma as any, dispatcher, now);
-    expect(dispatcher.call).toHaveBeenCalledWith("list_recent_files", { limit: 5 });
+    expect(dispatcher.call).toHaveBeenCalledWith(
+      "list_recent_files",
+      { limit: 5 },
+      { userId: "owner-handle" },
+    );
   });
 });

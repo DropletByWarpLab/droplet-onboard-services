@@ -48,8 +48,8 @@ const T0 = new Date("2026-09-23T21:14:00Z");
 const plus = (d: Date, ms: number) => new Date(d.getTime() + ms);
 
 /** Maria: family, sees FRONT only. */
-const MARIA: IncidentViewer = { userId: randomUUID(), visibleCameras: new Set([FRONT]), mayReadThreats: false, ownerOrAdmin: false };
-const OWNER: IncidentViewer = { userId: randomUUID(), visibleCameras: "all", mayReadThreats: true, ownerOrAdmin: true };
+const MARIA: IncidentViewer = { userId: randomUUID(), visibleCameras: new Set([FRONT]), mayReadThreats: false, mayReadLocks: false, ownerOrAdmin: false };
+const OWNER: IncidentViewer = { userId: randomUUID(), visibleCameras: "all", mayReadThreats: true, mayReadLocks: true, ownerOrAdmin: true };
 
 describe.skipIf(!RUN)("route 18 `dropletLinks` — real Postgres, the real engine, route 24's write (WARP-3195)", () => {
   let prisma: PrismaClient;
@@ -248,7 +248,7 @@ describe.skipIf(!RUN)("route 18 `dropletLinks` — real Postgres, the real engin
     expect((await loadIncidentDetail(prisma, id, OWNER, "manage", plus(T0, 280_000)))!.dropletLinks!.map((l) => l.linkId)).toEqual([backLink]);
 
     const ctx: ZoneWriteContext = { req: { user: { id: OWNER.userId, role: "owner" } }, now: plus(T0, 300_000) };
-    const kept = await decideDropletLink(prisma, ctx, backLink, "accept", { scope: { visibleCameras: "all" }, cameraLabels: new Map() });
+    const kept = await decideDropletLink(prisma, ctx, backLink, "accept", { scope: { visibleCameras: "all", mayReadLocks: true }, cameraLabels: new Map() });
     expect(kept.changed).toBe(true);
     expect(await prisma.securityZoneLink.findUniqueOrThrow({ where: { id: backLink } })).toMatchObject({ state: "active", origin: "droplet", stateSetBy: "person" });
     expect((await loadIncidentDetail(prisma, id, OWNER, "manage", plus(T0, 300_000)))!.dropletLinks).toEqual([]);

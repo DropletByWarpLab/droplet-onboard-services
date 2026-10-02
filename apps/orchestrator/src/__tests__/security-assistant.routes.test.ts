@@ -40,6 +40,7 @@ vi.mock("../services/security-incident-page.js", async () => ({
 }));
 
 import { AREA_READ_BATCH, createSecurityAssistantRouter, type CameraStatusSource } from "../routes/security-assistant.js";
+import { securityScopeForPerson } from "../services/security-access.js";
 import { assistantBodyBudget } from "../services/security-assistant-view.js";
 import type { EffectiveAccessResult } from "../services/effective-access.service.js";
 import { explainSecurityPattern } from "../services/security-patterns-read.js";
@@ -439,6 +440,70 @@ describe("DS-005 — Maria sees only `front`", () => {
       expect(res.body.events.map((e: { what: string }) => e.what), who).toEqual(["sign-in warning"]);
     }
     expect((await get(server, "/api/security/assistant/events?kind=threat", "maria")).body.events).toEqual([]);
+  });
+});
+
+// WARP-2977 P2b-2 x WARP-2979 P4 PR-3: the tools answer for cameras ("what covers it", "is it reporting"). A door lock has
+// no honest answer to either, and lock state is presence data, so the acting person's Devices level is never widened
+// into the tools: the dashboard shows a Devices-holder their doors, the assistant does not.
+describe("door locks (DS-019) — the tools are camera-only, whatever the person holds", () => {
+  const DOOR = "0a0a0a0a-0000-4000-8000-000000000009";
+  const LOCK = "matter:4660/1";
+  const withDevices = async (_userId: string) =>
+    ({
+      ...access("view"),
+      features: [
+        { moduleId: "security", level: "view" },
+        { moduleId: "smart_home", level: "manage" },
+      ],
+    }) as unknown as EffectiveAccessResult;
+
+  function lockWorld(): FakeSecurityPrisma {
+    const shop = areaRows(SHOP, "Shop floor", "interior", ["front"]);
+    const door = areaRows(DOOR, "Back door", "entry", []);
+    const lockLink = (id: string, zoneId: string) => ({
+      id, zoneId, sourceKind: "lock", sourceRef: LOCK, sourceLabel: "Back door lock", state: "active", origin: "person", stateSetBy: "person", stateChangedAt: T, evidence: null,
+    });
+    return world({
+      securityZone: [shop.zone, door.zone],
+      securityZoneLink: [...shop.links, lockLink("door-l0", DOOR), lockLink("shop-l9", SHOP)],
+      securityEvent: [
+        eventRow({ id: 1n, camera: "front", startedAt: T, summary: "Person seen by Front door", sourceRef: "front/1.5-abc", dedupeKey: "k1" }),
+        eventRow({
+          id: 7n, source: "matter_lock", kind: "lock_state", camera: null, labels: [], cameraZones: [], sourceRef: LOCK, dedupeKey: "k7",
+          startedAt: new Date(T.getTime() + 30_000), endedAt: null, summary: "Back door lock unlocked",
+        }),
+      ],
+      securityEventTriage: [],
+      securityIncident: [],
+      securityIncidentReason: [],
+      securityIncidentAck: [],
+    });
+  }
+
+  it.each(["stefan", "maria"])("A4 for %s, who holds Devices: no lock-only area, and no lock among what covers an area", async (who) => {
+    f = lockWorld();
+    const { server } = app(f, { resolve: withDevices });
+    const res = await get(server, "/api/security/assistant/areas", who);
+    expect(res.status).toBe(200);
+    // Not vacuous: the dashboard's scope for this very person WOULD show them the lock.
+    const person = { id: who === "stefan" ? STEFAN : MARIA, role: who === "stefan" ? "owner" : "family" };
+    expect((await securityScopeForPerson(f.client as unknown as PrismaClient, person, withDevices)).mayReadLocks).toBe(true);
+    expect(res.body.areas.map((a: { name: string }) => a.name)).toEqual(["Shop floor"]);
+    expect(res.body.areas[0].coveredBy).toEqual([{ source: "Front door", part: null, reporting: "yes", linkedBy: "a person" }]);
+    expect(JSON.stringify(res.body)).not.toMatch(/lock|Back door/i);
+  });
+
+  it.each(["stefan", "maria"])("A3 for %s: no lock row, and the lock-only area answers like an unknown one", async (who) => {
+    f = lockWorld();
+    const { server } = app(f, { resolve: withDevices });
+    const all = await get(server, "/api/security/assistant/events", who);
+    expect(all.body.events.map((e: { source: string }) => e.source)).toEqual(["Front door"]);
+    expect(JSON.stringify(all.body)).not.toMatch(/lock/i);
+    const door = await get(server, "/api/security/assistant/events?area=Back%20door", who);
+    const unknown = await get(server, "/api/security/assistant/events?area=Nowhere", who);
+    expect(door.body.events).toEqual([]);
+    expect(door.body).toEqual(unknown.body);
   });
 });
 
@@ -1134,7 +1199,7 @@ const LOADING = "0c0c0c0c-0000-4000-8000-000000000003";
 const AT_2AM = "2026-09-23T02:00:00+01:00";
 /** Wednesday 2 PM in London: someone in the Stock room on 18 of 20 weekdays. */
 const AT_2PM = "2026-09-23T14:00:00+01:00";
-const OWNER_SCOPE = { visibleCameras: "all" as const, mayReadThreats: true };
+const OWNER_SCOPE = { visibleCameras: "all" as const, mayReadThreats: true, mayReadLocks: false };
 const enc = encodeURIComponent;
 
 /** Expected activity, as route 33 stores it: a person's own reason and name — neither may reach the tool. */
@@ -1455,7 +1520,7 @@ describe("WARP-2980 D30 — A1/A2 never carry a pattern flag, trial or quietened
     const detail = await loadIncidentDetail(
       f.client as unknown as PrismaClient,
       INC_FRONT,
-      { userId: STEFAN, visibleCameras: "all", mayReadThreats: true, ownerOrAdmin: true },
+      { userId: STEFAN, visibleCameras: "all", mayReadThreats: true, mayReadLocks: true, ownerOrAdmin: true },
       "manage",
       NOW,
     );

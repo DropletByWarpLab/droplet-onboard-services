@@ -20,12 +20,12 @@ import {
 } from "./security-narrative-view.js";
 import type { IncidentProjection, IncidentViewer } from "./security-incident-view.js";
 
-const OWNER: IncidentViewer = { userId: "u-owner", visibleCameras: "all", mayReadThreats: true, ownerOrAdmin: true };
-const FAMILY_BOTH: IncidentViewer = { userId: "u-fam", visibleCameras: new Set(["back_cam", "till_cam"]), mayReadThreats: false, ownerOrAdmin: false };
-const FAMILY_BACK: IncidentViewer = { userId: "u-fam", visibleCameras: new Set(["back_cam"]), mayReadThreats: false, ownerOrAdmin: false };
-const ADMIN_NO_THREATS: IncidentViewer = { userId: "u-adm", visibleCameras: "all", mayReadThreats: false, ownerOrAdmin: true };
+const OWNER: IncidentViewer = { userId: "u-owner", visibleCameras: "all", mayReadThreats: true, mayReadLocks: true, ownerOrAdmin: true };
+const FAMILY_BOTH: IncidentViewer = { userId: "u-fam", visibleCameras: new Set(["back_cam", "till_cam"]), mayReadThreats: false, mayReadLocks: false, ownerOrAdmin: false };
+const FAMILY_BACK: IncidentViewer = { userId: "u-fam", visibleCameras: new Set(["back_cam"]), mayReadThreats: false, mayReadLocks: false, ownerOrAdmin: false };
+const ADMIN_NO_THREATS: IncidentViewer = { userId: "u-adm", visibleCameras: "all", mayReadThreats: false, mayReadLocks: true, ownerOrAdmin: true };
 /** Anyone who sees every camera and may read threats — not only an owner. */
-const SEES_EVERYTHING: IncidentViewer = { userId: "u-adm", visibleCameras: "all", mayReadThreats: true, ownerOrAdmin: false };
+const SEES_EVERYTHING: IncidentViewer = { userId: "u-adm", visibleCameras: "all", mayReadThreats: true, mayReadLocks: false, ownerOrAdmin: false };
 
 const WRITTEN_AT = new Date("2026-09-22T01:31:00Z");
 

@@ -127,6 +127,7 @@ import {
   loadUserEffectiveScopes,
 } from "./services/scope-loader.service.js";
 import { initEffectiveAccess } from "./services/effective-access.service.js";
+import { initToolModuleVerdict } from "./services/tool-module-verdict.service.js";
 import { createSettingsRouter } from "./routes/settings.js";
 import { createTlsCertificateRouter } from "./routes/tls-certificate.js";
 import { createBackupStatusRouter } from "./routes/backup-status.js";
@@ -411,6 +412,15 @@ export function createApp(
 
   const moduleGate = createModuleGate(prisma, config);
   mountModuleGates(app, moduleGate);
+  // WARP-2972 — bind the module→tool-domain verdict to the SAME gate the routes
+  // use, so a toggle leaves the tool list (chat pool, /api/llm/tools, the
+  // mcp-server) on the tick it 404s the route. The tool list is built long
+  // after boot, so this needs no ordering beyond "before the first request".
+  //
+  // `AUTH_ENABLED=false` has no identity system — every request is the
+  // synthetic `dev` owner, who has no User row — so there is no person to
+  // narrow by and only the box axis applies.
+  initToolModuleVerdict(prisma, moduleGate.effectiveIds, () => config.AUTH_ENABLED);
   // WARP-2988 — layer 2 for the `_service:mcp` principal: tool calls reaching
   // the CRM / PM routes are narrowed by the ACTING user's §3 tool scope
   // (`business` needs CRM or Projects), and, since WARP-3145, tool calls

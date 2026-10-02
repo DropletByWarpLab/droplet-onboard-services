@@ -103,7 +103,7 @@ export const MCP_PRINCIPAL_ID = "_service:mcp";
 export type ActingUserFailure = AttributionFailure | "user_ambiguous";
 
 /** The acting person's tool reach, plus their `User.id` (null when unresolved). */
-export type ActingUserAccess = Omit<AttributedToolAccess, "unresolved"> & {
+export type ActingUserAccess = Omit<AttributedToolAccess, "unresolved" | "username"> & {
   unresolved: ActingUserFailure | null;
   userId: string | null;
 };
@@ -134,7 +134,10 @@ export function actingUserAccessResolver(prisma: PrismaClient): ActingUserAccess
     }
     if (!resolved.ok) return deny(ASSERTED_USER_FAILURE[resolved.reason]);
     const { id } = resolved.user;
-    return { ...(await resolveAttributedToolAccess(prisma, id)), userId: id };
+    // The gate has no use for the row's handle (WARP-2972 added it for the
+    // scheduler); it stays out of what this resolver hands its callers.
+    const { username: _handle, ...access } = await resolveAttributedToolAccess(prisma, id);
+    return { ...access, userId: id };
   };
 }
 

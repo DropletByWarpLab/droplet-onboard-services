@@ -230,7 +230,7 @@ describe.skipIf(!RUN)("Droplet's link proposals against real Postgres (WARP-2979
 
   describe("a person's route-12 save racing the job on one area", () => {
     const deps = () => ({
-      scope: { visibleCameras: "all" as const },
+      scope: { visibleCameras: "all" as const, mayReadLocks: true },
       cameraLabels: new Map([[A, "A"], [B, "B"], [C, "C"]]),
       frigateConfig: async () => ({ cameras: {} }),
     });

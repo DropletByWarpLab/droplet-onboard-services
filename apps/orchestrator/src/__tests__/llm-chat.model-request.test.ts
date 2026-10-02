@@ -187,9 +187,9 @@ vi.mock("../services/chat-persistence.service.js", async () => {
     ...actual,
     ChatPersistenceService: vi
       .fn()
-      .mockImplementation((prisma: ConstructorParameters<
+      .mockImplementation(function (prisma: ConstructorParameters<
         typeof actual.ChatPersistenceService
-      >[0]) => {
+      >[0]) {
         const real = new actual.ChatPersistenceService(prisma);
         return {
           ensureConversation: vi.fn(async () =>

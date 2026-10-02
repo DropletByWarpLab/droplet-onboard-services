@@ -32,8 +32,13 @@
  * (blocking `chat()` and streaming `chatStream()`) now agree on this.
  */
 
-import type { PrivateEnhancement, ToolDomain } from "@droplet/tools-core";
-import { redactConfirmationTokensForModel, TOOL_CATALOG } from "@droplet/tools-core";
+import type { ModuleVerdict, PrivateEnhancement, ToolDomain } from "@droplet/tools-core";
+import {
+  redactConfirmationTokensForModel,
+  TOOL_CATALOG,
+  withholdModuleTools,
+} from "@droplet/tools-core";
+import { resolveToolModuleVerdict } from "./tool-module-verdict.service.js";
 
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
@@ -612,6 +617,23 @@ export interface AgentRequest {
    * service callers (email-analysis) also pass nothing and are unaffected.
    */
   toolAccessScope?: ToolAccessScope | null;
+  /**
+   * WARP-2972 — the tool domains a module toggle (the box) and this person's
+   * own grants withhold, applied to the advertised pool on top of the MCP
+   * client's cached `tools/list`. The chat route resolves it ONCE per turn and
+   * hands the same value to its budget estimate; a caller that passes none
+   * (the durable-run worker, email analysis) gets one resolved here for
+   * `toolCallContext.userId`.
+   *
+   * Independent of `toolAccessScope`, and that is the point: the scope is null
+   * for the owner and for everybody with no AccessRole, and a null scope
+   * narrows nothing. This axis applies to them too.
+   *
+   * There is no "unset means unrestricted": an unset verdict is RESOLVED, and
+   * one that cannot be resolved fails closed (module-owned tools withheld,
+   * unclaimed domains kept).
+   */
+  moduleVerdict?: ModuleVerdict;
   /**
    * WARP-2177 — durable-run checkpoint port (epic WARP-2176).
    *
@@ -1657,7 +1679,16 @@ export async function runAgent(deps: AgentDeps, req: AgentRequest): Promise<Agen
   // also receives tool_choice="none", but advertising zero tools makes
   // it impossible by construction.
   const toolChoice: "auto" | "none" = req.tool_choice ?? "auto";
-  const allTools = toolChoice === "none" ? [] : await deps.mcp.listTools();
+  // WARP-2972 — module gating, on top of the client's cached list (the verdict
+  // must NOT be baked into that cache: it would outlive the toggle). Absent,
+  // not empty: a withheld tool is dropped and the turn runs on the rest.
+  const allTools =
+    toolChoice === "none"
+      ? []
+      : withholdModuleTools(
+          await deps.mcp.listTools(),
+          req.moduleVerdict ?? (await resolveToolModuleVerdict(req.toolCallContext?.userId)),
+        );
   // Distinguish `undefined` (no restriction → the default chat scope) from
   // an explicit empty array (caller asked for ZERO tools). Truthiness on
   // `.length` would conflate the two and silently advertise the default

@@ -5,6 +5,7 @@ import {
 } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer } from "../src/server.js";
 import type { ContextDeps } from "../src/context.js";
+import { NO_MODULE_GATING } from "../src/module-verdict.js";
 
 function buildDeps(): ContextDeps {
   return {
@@ -21,7 +22,7 @@ describe("createServer", () => {
     // exposes `serverInfo` with the expected name. This avoids leaning on
     // SDK private fields like `_serverInfo`, which can rename across
     // patch versions of @modelcontextprotocol/sdk.
-    const server = createServer(buildDeps(), { kind: "local-trusted" });
+    const server = createServer(buildDeps(), { kind: "local-trusted" }, { moduleVerdict: NO_MODULE_GATING });
 
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client(

@@ -66,6 +66,7 @@ const UNKNOWN = "—";
  * reading "role_grant" learns nothing they could act on.
  */
 const GATE_LABEL: Record<InspectGate, string> = {
+  module: "Switched off",
   write_tier: "Not owner or admin",
   role_grant: "Their role doesn't reach it",
   interview_strip: "Setup conversation",
@@ -75,6 +76,7 @@ const GATE_LABEL: Record<InspectGate, string> = {
 };
 
 const GATE_ORDER: InspectGate[] = [
+  "module",
   "write_tier",
   "role_grant",
   "interview_strip",

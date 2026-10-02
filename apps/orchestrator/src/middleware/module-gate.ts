@@ -20,6 +20,13 @@ const logger = createLogger("module-gate");
 
 export interface ModuleGate {
   requireModuleEnabled: (id: ModuleId) => RequestHandler;
+  /**
+   * WARP-2972 — the EFFECTIVE module ids this gate enforces, through the same
+   * cache. The tool list reads the box axis from here so a module switched off
+   * leaves the tool list on the same tick it 404s the route — one cache, one
+   * `invalidate()`, no second reader that could disagree for the length of a TTL.
+   */
+  effectiveIds: () => Promise<ReadonlySet<ModuleId>>;
   /** Bust the cache — call after any enablement write. */
   invalidate: () => void;
 }
@@ -58,5 +65,5 @@ export function createModuleGate(
     };
   }
 
-  return { requireModuleEnabled, invalidate: () => { cache = null; } };
+  return { requireModuleEnabled, effectiveIds: effective, invalidate: () => { cache = null; } };
 }

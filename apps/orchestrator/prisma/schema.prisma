@@ -9034,6 +9034,9 @@ enum SecurityEventSource {
   activity_mirror
   /// WARP-2977 P2b — a change of the site mode (SecurityModeState). One row per change.
   site_mode
+  /// WARP-2977 P2b-2 — a Matter DoorLock endpoint's LockState, read from the
+  /// smart-home service (security-lock-adapter.ts). Transitions only.
+  matter_lock
 }
 
 enum SecurityEventKind {
@@ -9062,6 +9065,18 @@ enum SecurityEventKind {
   /// the object's `end` is still its own `detection` row. Never a baseline
   /// input (P5 counts `detection` only).
   detection_ongoing
+  /// A door lock's reading changed (or was first seen). labels = [reading], reading ∈
+  /// {locked, unlocked, not_fully_locked, unlatched, unknown}; sourceRef = `matter:<nodeId>/<endpointId>`;
+  /// camera NULL. Never claims a cause (no "someone unlocked it").
+  lock_state
+}
+
+/// WARP-2977 P2b-2 — how a row's startedAt was observed.
+/// live = startedAt is when it happened; polled = when Droplet's 60 s check found it.
+/// polled rows are never timing evidence (P4 co-occurrence, P5 dwell). P5 adds `synced`.
+enum SecurityObservation {
+  live
+  polled
 }
 
 /// info < notice < alert. On an event this is the source's own weight; the
@@ -9093,6 +9108,13 @@ model SecurityEvent {
   startedAt   DateTime
   endedAt     DateTime?
   summary     String
+  /// WARP-2977 P2b-2. Every P2a/P2b writer is live; the lock sweep writes polled.
+  observed    SecurityObservation @default(live)
+  /// WARP-2977 P2b-2. A lock row written with no earlier stored reading to
+  /// compare against (first ever, or after retention emptied its history):
+  /// its time is when Droplet first saw the lock, not a turn. Only
+  /// matter_lock rows are ever true. Readers key on this, never on the dedupeKey.
+  baseline    Boolean             @default(false)
   createdAt   DateTime            @default(now())
   /// WARP-2978 — the engine's exactly-once marker and the incident membership.
   triage      SecurityEventTriage?
@@ -9100,6 +9122,8 @@ model SecurityEvent {
   @@index([startedAt])
   @@index([camera, startedAt])
   @@index([kind, startedAt])
+  // Brief §5's (sourceRef): a lock's history read-back and the area filter's lock links join here.
+  @@index([sourceRef, startedAt])
 }
 
 /// Ingest bookkeeping — one row. The threat mirror's cursor is the last
@@ -9146,6 +9170,9 @@ enum SecurityZoneState {
 enum SecurityZoneSourceKind {
   camera
   camera_zone
+  /// WARP-2977 P2b-2 — one Matter DoorLock endpoint, `matter:<nodeId>/<endpointId>`
+  /// (equal to its lock_state rows' sourceRef). Visible only with smart_home ≥ view (DS-019).
+  lock
 }
 
 /// `removed` = a person unlinked it. `rejected` = a person turned down or undid Droplet's link.
