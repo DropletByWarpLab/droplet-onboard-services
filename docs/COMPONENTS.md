@@ -330,7 +330,9 @@ network. Host-published ports and host-network services are called out.
   `createServer` built with no verdict source fails closed the same way; tests and
   embedders opt out with `NO_MODULE_GATING`. The stdio child's `tools/list` stays the
   raw registry; the orchestrator gates its chat pool and `/api/llm/tools` on top of
-  that cached list.
+  that cached list. A scheduled ToolSpec run is FOR its spec's owner (`ToolSpec.ownerId`,
+  WARP-1580): the ticker sends the owner's username as `_meta.userId`, so the person axis
+  applies to it as to their chat, and an owner whose username can't be read does not run.
 - **Gotchas:** the `claims === undefined` "trusted" sentinel is **stdio-only** —
   HTTP always requires a valid JWT. gRPC/Redis/Prisma connect lazily so a missing
   dependency at boot doesn't kill the stdio child.

@@ -676,6 +676,7 @@ describe("firstToolDeniedForPrincipal — the composed A ∧ B pre-flight", () =
 });
 
 interface FakeAttributedRow {
+  username?: string;
   role: string;
   directoryStatus: "ACTIVE" | "DEACTIVATED";
   accessRoleId: string | null;
@@ -706,6 +707,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
       scope: DENY_ALL_TOOL_SCOPE,
       tier: null,
       unresolved: "no_principal",
+      username: null,
     });
   });
 
@@ -716,6 +718,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
       scope: DENY_ALL_TOOL_SCOPE,
       tier: null,
       unresolved: "user_missing",
+      username: null,
     });
   });
 
@@ -734,6 +737,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
       scope: DENY_ALL_TOOL_SCOPE,
       tier: null,
       unresolved: "user_deactivated",
+      username: null,
     });
   });
 
@@ -744,6 +748,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
       scope: DENY_ALL_TOOL_SCOPE,
       tier: null,
       unresolved: "read_failed",
+      username: null,
     });
   });
 
@@ -751,6 +756,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
     await expect(
       resolveAttributedToolAccess(
         fakeAttributedPrisma({
+          username: "olive",
           role: "owner",
           directoryStatus: "ACTIVE",
           accessRoleId: null,
@@ -758,7 +764,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
         }),
         "u1",
       ),
-    ).resolves.toEqual({ scope: null, tier: "owner", unresolved: null });
+    ).resolves.toEqual({ scope: null, tier: "owner", unresolved: null, username: "olive" });
     expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
   });
 
@@ -772,6 +778,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
     await expect(
       resolveAttributedToolAccess(
         fakeAttributedPrisma({
+          username: "fran",
           role: "family",
           directoryStatus: "ACTIVE",
           accessRoleId: null,
@@ -779,7 +786,7 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
         }),
         "u1",
       ),
-    ).resolves.toEqual({ scope: null, tier: "family", unresolved: null });
+    ).resolves.toEqual({ scope: null, tier: "family", unresolved: null, username: "fran" });
     expect(resolveEffectiveAccessMock).not.toHaveBeenCalled();
   });
 
@@ -821,6 +828,64 @@ describe("resolveAttributedToolAccess — the no-token principal", () => {
     // `unresolved` stays null — the identity WAS resolved; it is the §3
     // composition that failed, and that already fails closed to DENY_ALL.
     expect(attributed.scope).toEqual(DENY_ALL_TOOL_SCOPE);
+  });
+
+  // WARP-2972 — the scheduler sends the handle as `_meta.userId`; it must be
+  // the SAME row the tier and deactivation were decided on, not a second read.
+  describe("the handle (`username`)", () => {
+    it("comes back for a role holder too, from ONE read that selects it", async () => {
+      resolveEffectiveAccessMock.mockResolvedValue({
+        tier: "admin",
+        toolDomains: ["files"],
+        locks: false,
+      });
+      const prisma = fakeAttributedPrisma({
+        username: "alice",
+        role: "admin",
+        directoryStatus: "ACTIVE",
+        accessRoleId: "r1",
+        accessRole: { toolGrants: [{ domain: "files", level: "use" }] },
+      });
+      const attributed = await resolveAttributedToolAccess(prisma, "u1");
+      expect(attributed.username).toBe("alice");
+      const findUnique = (prisma as unknown as { user: { findUnique: ReturnType<typeof vi.fn> } })
+        .user.findUnique;
+      expect(findUnique).toHaveBeenCalledTimes(1);
+      expect(findUnique.mock.calls[0]![0].select.username).toBe(true);
+    });
+
+    it("is null for every unresolved identity, so a denied person's handle never travels", async () => {
+      for (const row of [
+        null,
+        new Error("db down"),
+        {
+          username: "gone",
+          role: "owner",
+          directoryStatus: "DEACTIVATED",
+          accessRoleId: null,
+          accessRole: null,
+        } as FakeAttributedRow,
+      ]) {
+        const attributed = await resolveAttributedToolAccess(fakeAttributedPrisma(row), "u1");
+        expect(attributed.unresolved).not.toBeNull();
+        expect(attributed.username).toBeNull();
+      }
+    });
+
+    it("is null for a resolved row whose username is blank: the caller refuses, it does not guess", async () => {
+      const attributed = await resolveAttributedToolAccess(
+        fakeAttributedPrisma({
+          username: "",
+          role: "family",
+          directoryStatus: "ACTIVE",
+          accessRoleId: null,
+          accessRole: null,
+        }),
+        "u1",
+      );
+      expect(attributed.unresolved).toBeNull();
+      expect(attributed.username).toBeNull();
+    });
   });
 });
 

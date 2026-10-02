@@ -153,7 +153,7 @@ import type { MatterDispatcher } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
 import { createExtensionAttacher } from "./services/extension-attach.service.js";
-import { stepResultValue, type StepDispatcher } from "./services/tool-spec-runner.service.js";
+import { createMcpStepDispatcher } from "./services/mcp-step-dispatcher.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
 import { runActivityNotifySweep } from "./services/activity-notify.service.js";
@@ -657,11 +657,7 @@ async function main() {
   // ToolSchedule rows, dispatches via the imperative walker shared
   // with run-now. Multi-instance deploys lock on `droplet:tool-
   // schedule-ticker` so only one replica fires each due schedule.
-  const toolSchedulerDispatcher: StepDispatcher = {
-    async call(tool, args) {
-      return stepResultValue(tool, await mcpClient.callTool(tool, args));
-    },
-  };
+  const toolSchedulerDispatcher = createMcpStepDispatcher(mcpClient);
   cronRuntime.scheduleInterval(
     60_000,
     async () => {
