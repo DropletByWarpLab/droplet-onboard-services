@@ -52,6 +52,7 @@ import {
   type EnvReconcileReport,
   type RecreateTarget,
 } from "./apply.js";
+import { HqTokenError } from "../hq-token.service.js";
 import { createHostComposeRunner } from "./host-compose-runner.js";
 import type { ReleaseClient, ReleaseManifest, ReleaseService } from "./manifest.js";
 import { UPDATE_AGENT_SETTINGS_KEY } from "./settings.js";
@@ -947,6 +948,56 @@ describe("applyPendingUpdate (WARP-539)", () => {
     );
     // Nothing past the pull ran, and it was not logged as a rejection.
     expect(runner.calls.some((c) => c.startsWith("stageConfigs"))).toBe(false);
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.rejected" }),
+      expect.any(String),
+    );
+  });
+
+  it("WARP-3503: HQ issuing no pull token (a revoked box) is the same transient retry — the box keeps its release", async () => {
+    // The REAL runner, so the message apply.ts classifies is the one the runner
+    // actually raises when HQ issues no registry token.
+    const real = createHostComposeRunner({
+      scriptPath: "/opt/droplet/docker/ota/apply-update.sh",
+      composeFile: "/opt/droplet/docker/docker-compose.yml",
+      updatesDir: tmpdir(),
+      hqToken: {
+        host: "hq.example",
+        getToken: async () => {
+          throw new HqTokenError("revoked", "/v1/device/token");
+        },
+      },
+      exec: async () => {
+        throw new Error("no helper may run when HQ issued no token");
+      },
+    });
+    const prisma = createPrismaStub();
+    const runner = new FakeRunner();
+    runner.pullImages = (services) => real.pullImages(services);
+    const logger = createLoggerSpy();
+    const manifest = buildManifest();
+    manifest.services = manifest.services.map((s) => ({
+      ...s,
+      image: s.image.replace("ghcr.io", "hq.example"),
+    }));
+    await seedPendingRow(prisma, manifest);
+
+    const res = await applyPendingUpdate(baseOpts(prisma, runner, logger));
+
+    expect(res).toMatchObject({ outcome: "retry_later", deviceUpdateId: "du-1" });
+    expect((res as { detail: string }).detail).toMatch(/registry-auth: .*\(revoked: /);
+    expect(prisma.deviceUpdate._rows()[0]).toMatchObject({
+      status: "verifying",
+      failureReason: null,
+      applyClaim: "unclaimed",
+    });
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "update.registry_auth_failed", deviceUpdateId: "du-1" }),
+      expect.any(String),
+    );
+    // Nothing past the pull ran: the current release keeps running.
+    expect(runner.calls.some((c) => c.startsWith("stageConfigs"))).toBe(false);
+    expect(runner.calls.some((c) => c.startsWith("recreate"))).toBe(false);
     expect(logger.warn).not.toHaveBeenCalledWith(
       expect.objectContaining({ event: "update.rejected" }),
       expect.any(String),

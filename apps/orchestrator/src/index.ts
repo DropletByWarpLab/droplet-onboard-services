@@ -114,6 +114,7 @@ import {
   resumeInterruptedApply,
 } from "./services/update-agent/apply.js";
 import { getOtaHost, initOtaHost } from "./services/update-agent/host-exec.js";
+import { initHqTokenService } from "./services/hq-token.service.js";
 import { purgeUpdateBackups } from "./services/update-agent/purge-update-backups.js";
 import { purgeSelfSwapHelpers } from "./services/update-agent/purge-self-swap-helpers.js";
 import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
@@ -1517,6 +1518,16 @@ async function main() {
   // other cron in this file (checkForUpdate + applyWindowTick return typed
   // outcomes for expected failures; only genuine bugs throw).
   const updateAgentSettings = await getUpdateAgentSettings(prisma);
+  // WARP-3503 (ADR-068) — the ONE HQ device-token client: the OTA image pull
+  // takes `registry:pull` from it, the telemetry sender `telemetry:ingest`
+  // (getHqTokenService()). Null when HQ is not configured (dev/CI): the pull
+  // then runs without an HQ credential.
+  const hqTokens = config.HQ_ISSUANCE_URL
+    ? initHqTokenService({
+        baseUrl: config.HQ_ISSUANCE_URL,
+        identity: createDeviceIdentityClient(),
+      })
+    : null;
   // WARP-3007 — DROPLET_OTA_APPLY_SCRIPT is the enable flag; the helper is
   // always the release-shipped docker/ota/apply-update.sh, run ON THE HOST
   // (host-exec.ts). A box whose host context can't be resolved keeps apply off.
@@ -1528,6 +1539,7 @@ async function main() {
           updatesDir: config.DROPLET_OTA_UPDATES_DIR,
           appDownloadsDir: config.DROPLET_APP_DOWNLOADS_DIR,
           githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
+          hqToken: hqTokens ?? undefined,
         })
       )?.runner ?? null)
     : null;

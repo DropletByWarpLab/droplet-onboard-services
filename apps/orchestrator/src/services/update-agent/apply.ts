@@ -16,9 +16,11 @@
  * The nine apply steps (design §WARP-539):
  *   1. snapshot previous digests + configs + DB schema into
  *      .data/updates/<id>/backup/;
- *   2. pull the release images BY DIGEST (a cosign refusal rejects the
- *      update; a registry that refuses AUTH — the `registry-auth:` marker,
- *      WARP-3430 — only retries, since no signature was ever judged);
+ *   2. pull the release images BY DIGEST with a short-lived HQ device token
+ *      (WARP-3503, ADR-068; a cosign refusal rejects the update; no token —
+ *      HQ unreachable, box revoked or not enrolled — or a registry that
+ *      refuses AUTH, the `registry-auth:` marker, only retries and keeps the
+ *      current release, since no signature was ever judged);
  *   3. stage the release configs, downloaded from `<download base>/<tag>/`
  *      (WARP-3430: anonymous, by the row's own tag), sha256-gated against
  *      the VERIFIED manifest before a byte is unpacked;
@@ -864,11 +866,13 @@ const IMAGE_VERIFY_REFUSAL_MARKER = "image-verify:";
 
 /**
  * WARP-3430 — the other canonical prefix: the registry refused AUTH (401,
- * UNAUTHORIZED, DENIED — the GHCR package is still private) before any
- * signature could be judged. That is not a signature verdict, so it must
- * NOT land in `rejected`/`image_signature_failed`: the update is fine, the
- * box just cannot read the registry yet. Transient — the row stays
- * `verifying` and the next window retries once the package is public.
+ * UNAUTHORIZED, DENIED) before any signature could be judged. WARP-3503: the
+ * runner raises the same prefix when HQ will not issue the pull token
+ * (unreachable, revoked, not enrolled, bad signature), with the reason in the
+ * line. That is not a signature verdict, so it must NOT land in
+ * `rejected`/`image_signature_failed`: the update is fine, the box just
+ * cannot read the registry yet. Transient — the row stays `verifying`, the
+ * box keeps its current release, and the next window retries.
  */
 const REGISTRY_AUTH_REFUSAL_MARKER = "registry-auth:";
 
@@ -1165,12 +1169,12 @@ async function applyClaimedRow(
       };
     }
     // WARP-3430 — the registry refused auth: transient, and said so by name
-    // so an operator can tell "make the package public" from "attack".
+    // so an operator can tell "no HQ token / revoked box" from "attack".
     const authDetail = helperRefusalDetail(err, REGISTRY_AUTH_REFUSAL_MARKER);
     if (authDetail !== null) {
       log.warn(
         { event: "update.registry_auth_failed", deviceUpdateId: row.id, detail: authDetail },
-        "OTA apply paused — the registry refused authentication (the image package is private); row stays verifying for the next window",
+        "OTA apply paused — no registry credential (HQ token not issued, or the registry refused it); the box keeps its current release, row stays verifying for the next window",
       );
       return { outcome: "retry_later", deviceUpdateId: row.id, detail: authDetail };
     }
