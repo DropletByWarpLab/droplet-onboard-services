@@ -142,6 +142,10 @@ async function ensureCameraRows(
         displayName: name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
         ipAddress: "",
         autoDiscovered: false,
+        // These names are cameras that exist in Frigate, not discovery
+        // candidates: an explicit ADOPTED (WARP-3510), so the row is never
+        // offered back as something to add or merged away by discovery.
+        adoption: "ADOPTED",
       },
       select: { id: true, name: true },
     });
