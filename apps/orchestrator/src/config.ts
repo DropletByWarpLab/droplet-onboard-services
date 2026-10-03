@@ -789,6 +789,20 @@ const envSchema = z.object({
   //   device-identity sidecar reads (docker-compose.yml). Defaults to the
   //   hostname-derived `droplet` placeholder (matches scripts/lib/secrets.sh).
   DROPLET_DEVICE_ID: z.string().default("droplet"),
+  // DROPLET_TELEMETRY_PORTAL_URL — origin of the operator portal the box
+  //   telemetry sender posts to (WARP-3504, ADR-068). The sender appends
+  //   `/api/v1/telemetry/*`. A value that still ends in `/api/v1` (the
+  //   fleet-agent's older convention for this same variable) is accepted and
+  //   normalised, so the two readers of one name cannot disagree.
+  DROPLET_TELEMETRY_PORTAL_URL: z.string().default("https://analytics.warp-lab.ai"),
+  // DROPLET_TELEMETRY_DISABLED — LAB / DEV ONLY kill switch for that sender.
+  //   Telemetry is part of the managed lease and always on for an enrolled
+  //   box; this is not a customer setting and is deliberately not in the UI.
+  //   Explicit string->bool (same idiom as ANALYTICS_ENABLED): only "1"/"true".
+  DROPLET_TELEMETRY_DISABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
 
   // --- Direct-punch remote-access overlay (ADR-030 / WARP-1385) ---
   // OVERLAY_CONNECT_ENABLED — the box overlay connect agent (WARP-1767).
