@@ -33,6 +33,24 @@ function hangsUntilAborted(_url?: string, init?: RequestInit): Promise<never> {
   return new Promise((_resolve, reject) => init!.signal!.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
 }
 
+/**
+ * Drive `AbortSignal.timeout` from the (faked) global clock.
+ *
+ * Vitest 4's jsdom environment hands tests Node's `AbortSignal` — so `fetch`
+ * and `Request` accept it — and Node's `AbortSignal.timeout` runs on an
+ * internal timer that `vi.useFakeTimers()` does not reach, so advancing the
+ * clock would never fire the 20 s bound. Rebuild it on `setTimeout`, which the
+ * fakes do drive; the bound the code asks for is still the one that fires.
+ * Call after `vi.useFakeTimers()`; restore the returned spy when done.
+ */
+function timeoutOnFakeClock() {
+  return vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(new DOMException("The operation timed out.", "TimeoutError")), ms);
+    return ctrl.signal;
+  });
+}
+
 function lastCall(): [string, RequestInit] {
   return mockFetch.mock.calls[mockFetch.mock.calls.length - 1] as [string, RequestInit];
 }
@@ -121,6 +139,7 @@ describe("getWallModules", () => {
 
   it("a hung read is given up (a TIMEOUT error), never left pending", async () => {
     vi.useFakeTimers();
+    const timeoutSpy = timeoutOnFakeClock();
     try {
       mockFetch.mockImplementation(hangsUntilAborted);
       const pending = getWallModules();
@@ -128,6 +147,7 @@ describe("getWallModules", () => {
       await vi.advanceTimersByTimeAsync(20_000);
       await assertion;
     } finally {
+      timeoutSpy.mockRestore();
       vi.useRealTimers();
     }
   });
@@ -187,6 +207,7 @@ describe("getWallCameraSnapshot", () => {
 
   it("a hung picture is given up after 20 s (a TIMEOUT error)", async () => {
     vi.useFakeTimers();
+    const timeoutSpy = timeoutOnFakeClock();
     try {
       mockFetch.mockImplementation(hangsUntilAborted);
       const pending = getWallCameraSnapshot("till");
@@ -194,6 +215,7 @@ describe("getWallCameraSnapshot", () => {
       await vi.advanceTimersByTimeAsync(20_000);
       await assertion;
     } finally {
+      timeoutSpy.mockRestore();
       vi.useRealTimers();
     }
   });

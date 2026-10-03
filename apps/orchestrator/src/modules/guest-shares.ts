@@ -8,12 +8,13 @@
  * exception Romain decided: assigning a work item to a guest shares that one
  * item. The guest may read it, read and write its comments, and move its state
  * — and see nothing else in Projects (no other item, no project list, no board,
- * no activity feed, no relations, no search).
+ * no activity feed, no relations, no search). To FIND those items (WARP-3407)
+ * they may list the items assigned to them, which names nothing else.
  *
  * This file declares only WHICH REQUESTS a guest may get past the prefix floor,
  * by method and path. It is not the authorization: every route listed here
- * carries a per-record guard (`middleware/guest-share.ts`) that answers 404
- * unless the record is assigned to the caller, and
+ * carries a guard (`middleware/guest-share.ts`) that answers 404 unless the
+ * record is assigned to the caller (or, for the list, pins the caller's own id), and
  * `__tests__/guest-work-item-share.test.ts` pins that every path below is served
  * by a route carrying that guard. A request not listed stays 404 for a guest, so
  * a route added under `/api/pm` tomorrow is closed to them until someone opens
@@ -44,6 +45,8 @@ export const GUEST_SHARES: Partial<Record<ModuleId, readonly GuestShare[]>> = {
     { method: "POST", path: new RegExp(`^${WORK_ITEM}/transition$`) },
     // …and the state names to move it to (only for a project holding an item assigned to them)
     { method: "GET", path: /^\/api\/pm\/projects\/[^/]+\/states$/ },
+    // WARP-3407 — find them: the list of the items assigned to the caller, and only those
+    { method: "GET", path: /^\/api\/pm\/assigned-to-me$/ },
   ],
 };
 

@@ -2,6 +2,7 @@
 
 import useSWR from "swr";
 import { authFetch, useAuth } from "../auth";
+import { ABSENT_UNLESS_LISTED } from "../dark-modules";
 
 /**
  * WARP-1397 — the sidebar's module gate. Returns a predicate that answers
@@ -69,6 +70,10 @@ async function fetchModules(): Promise<ModulesView> {
  *    disagree with the server, which is the authority)
  *  - otherwise: module known → its `effective` flag
  *  - module unknown to the registry → shown (never hide what we can't classify)
+ *  - a module that ships dark (`ABSENT_UNLESS_LISTED`, ADR-055) is the
+ *    exception to BOTH fail-open rules: unresolved is off, and a resolved
+ *    payload that does not list it is off. Nothing about it shows until the
+ *    module list positively lists it
  *
  * An EMPTY `effectiveForUser` is treated as unresolved, not as "nothing" — a
  * malformed/partial payload must not blank the whole nav.
@@ -87,13 +92,16 @@ export function isModuleEffective(
   data: ModulesView | undefined,
   moduleId: string,
 ): boolean {
-  if (!data) return true;
+  if (!data) return !ABSENT_UNLESS_LISTED.has(moduleId);
   const perUser = data.effectiveForUser;
   if (perUser && perUser.length > 0) {
     return perUser.some((f) => f.moduleId === moduleId);
   }
   const m = data.modules.find((x) => x.id === moduleId);
-  return m ? m.effective : true;
+  if (m) return m.effective;
+  // Not in a payload that DID resolve. For a module we can't classify that is
+  // "show it" (above); for one that ships dark it is the definition of off.
+  return !ABSENT_UNLESS_LISTED.has(moduleId);
 }
 
 const MODULES_SWR_OPTIONS = {
@@ -110,6 +118,22 @@ export function useModuleGate(): (moduleId: string) => boolean {
   const { data } = useSWR<ModulesView>(MODULES_KEY, fetchModules, MODULES_SWR_OPTIONS);
 
   return (moduleId: string): boolean => isModuleEffective(data, moduleId);
+}
+
+/**
+ * Where a module stands, with "the probe has not answered" kept apart from
+ * "the module is off" — `useModuleGate`'s predicate cannot tell them apart, and
+ * a page that ships dark needs to: unresolved renders NOTHING (no flash of a
+ * 404 on a box that has the module), off is a 404 (ADR-055, `dark-modules.ts`).
+ * A failed probe stays `unresolved` until the next re-read, which is the
+ * closed direction.
+ */
+export type ModuleGateState = "unresolved" | "on" | "off";
+
+export function useModuleGateState(moduleId: string): ModuleGateState {
+  const { data } = useSWR<ModulesView>(MODULES_KEY, fetchModules, MODULES_SWR_OPTIONS);
+  if (!data) return "unresolved";
+  return isModuleEffective(data, moduleId) ? "on" : "off";
 }
 
 /** The caller's §9 level on one module, or `none` when they hold none of it. */

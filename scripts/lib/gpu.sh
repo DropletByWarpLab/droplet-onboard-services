@@ -261,6 +261,10 @@ configure_gpu_env() {
   _vendor="$(detect_gpu_vendor)" || return 1
   upsert_env GPU_VENDOR "$_vendor"
 
+  # WARP-3452: both runtimes read the window, so this runs before the
+  # DMR-only return below.
+  configure_context_env "$_env_target" "$_vendor"
+
   # Only DMR boxes have a vendor-selected profile; an Ollama box keeps its own
   # wiring, which this ticket deliberately does not touch.
   _runtime="$(grep -E '^INFERENCE_RUNTIME=' "$_env_target" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' | tr '[:upper:]' '[:lower:]' || true)"
@@ -342,5 +346,50 @@ configure_gpu_env() {
   fi
 
   log_info "GPU: detected ${_vendor} — DMR profile '$(dmr_profile_for_vendor "$_vendor")'"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# WARP-3452 — the context window, sized to the card.
+# ---------------------------------------------------------------------------
+# The VRAM probe and the window rule live in docker/ota/vram.sh, shared with
+# the OTA .env reconcile: OTA ships only docker/, so that is the one place both
+# callers can reach. Sizing a card needs its driver, unlike vendor detection
+# above.
+# shellcheck source=../../docker/ota/vram.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../../docker/ota/vram.sh"
+
+# configure_context_env <env-file> <vendor> — write DMR_CONTEXT_LENGTH and
+# OLLAMA_CONTEXT_LENGTH once, equal (WARP-854 parity: the orchestrator budgets
+# against OLLAMA_CONTEXT_LENGTH, DMR serves DMR_CONTEXT_LENGTH).
+#   a value already in the file  -> kept; an operator's choice wins. A lone
+#                                   key is copied to its missing sibling.
+#   VRAM unknown                 -> nothing written: the compose default
+#                                   (65536) applies, and the next run retries.
+# Reads the FILE, not the environment: materialize_artifacts has already
+# exported .env into the shell (see detect_gpu_vendor).
+configure_context_env() {
+  _ctx_env="${1:?configure_context_env: env file required}"
+  _ctx_dmr="$(grep -E '^DMR_CONTEXT_LENGTH=' "$_ctx_env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+  _ctx_oll="$(grep -E '^OLLAMA_CONTEXT_LENGTH=' "$_ctx_env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+
+  if [ -n "$_ctx_dmr$_ctx_oll" ]; then
+    [ -n "$_ctx_dmr" ] || upsert_env DMR_CONTEXT_LENGTH "$_ctx_oll"
+    [ -n "$_ctx_oll" ] || upsert_env OLLAMA_CONTEXT_LENGTH "$_ctx_dmr"
+    if [ -n "$_ctx_dmr" ] && [ -n "$_ctx_oll" ] && [ "$_ctx_dmr" != "$_ctx_oll" ]; then
+      log_warn "DMR_CONTEXT_LENGTH=${_ctx_dmr} != OLLAMA_CONTEXT_LENGTH=${_ctx_oll} in .env — the orchestrator budgets against the wrong window (WARP-854). Set them equal."
+    fi
+    return 0
+  fi
+
+  _ctx_mib="$(gpu_vram_mib "${2:-none}")"
+  _ctx_win="$(context_window_for_vram_mib "$_ctx_mib")"
+  if [ -z "$_ctx_win" ]; then
+    log_warn "Could not size the ${2:-none} GPU's VRAM — leaving the context window to the compose default (65536)."
+    return 0
+  fi
+  upsert_env DMR_CONTEXT_LENGTH "$_ctx_win"
+  upsert_env OLLAMA_CONTEXT_LENGTH "$_ctx_win"
+  log_info "Context window: ${_ctx_win} tokens (${2:-none} GPU, ${_ctx_mib} MiB VRAM)"
   return 0
 }

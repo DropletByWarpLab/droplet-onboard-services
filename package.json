@@ -31,6 +31,7 @@
     "test:openwrt-attach": "bash tests/openwrt-attach-firewall.test.sh",
     "test:storage-pool": "bash tests/storage-pool-destroy-superblock.test.sh",
     "test:integration": "cd tests && npm run test:docker",
+    "eval:agent-loop:selftest": "bash tests/agent-loop-eval/selftest/selftest.sh",
     "lint": "turbo run lint",
     "gen:anchor-schema": "node scripts/gen-anchor-schema.mjs"
   },

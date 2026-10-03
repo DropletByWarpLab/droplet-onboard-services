@@ -23,7 +23,9 @@
  * Rules (D18–D21): severity comes from the codes only. after_hours_presence
  * alerts; camera_offline and threat_signal are notices and never alert in P3
  * (a CHECK pins the pairs). Codes are monotonic: a reason is never deleted or
- * downgraded. Lock rows feed no rule (D21).
+ * downgraded. Lock rows form no incident of their own (D21); from version 5
+ * (P4 PR-4, D12, below) a live lock change is camera_offline_during_activity's
+ * activity, never its trigger.
  *
  * Changing any number in RULESET needs a SECURITY_RULESET_VERSION bump
  * (lib/ruleset-fingerprint.test.ts fails otherwise).
@@ -59,6 +61,13 @@
  * camera_offline_during_activity: a camera a person linked to an area stops
  * reporting for over a minute, within two minutes of someone being seen in one
  * of its person-linked areas, while the site is closed or away.
+ *
+ * Version 5 (WARP-2979 P4 PR-4, D12): a door lock changing counts as that
+ * activity too — a LIVE change (`isLockChange`, lib/security-lock-changes:
+ * never a `polled` row, never the baseline, only locked / unlocked /
+ * unlatched) of a lock a person linked to one of the dropped camera's areas,
+ * inside the same window. The reason then names the lock (`relatedLock`),
+ * never a camera, and is shown only with `mayReadLocks` (DS-019).
  */
 import type {
   SecurityIncidentScope,
@@ -95,10 +104,11 @@ import {
   type PatternRelease,
 } from "./security-baseline-math.js";
 import { poissonUpperTail } from "./security-stats.js";
+import { LOCK_CHANGE_READINGS, isLockChange } from "./security-lock-changes.js";
 import { dayTypeOf, type SecurityDayTypeValue } from "./security-baseline-slots.js";
 import { isoWeekdayOf, localPartsOf, ymdAddDays } from "./zoned-time.js";
 
-export const SECURITY_RULESET_VERSION = 4;
+export const SECURITY_RULESET_VERSION = 5;
 
 export const RULESET = {
   after_hours_presence: {
@@ -125,6 +135,11 @@ export const RULESET = {
     /** A person's sighting; PR-D's still-in-view row too (a camera that dies mid-visit may never write the `end`). */
     kinds: ["detection", "detection_ongoing"],
     modes: ["closed", "away"],
+    /**
+     * v5 (P4 PR-4) — a door lock's change counts too: only these readings, only
+     * rows heard live (`isLockChange` holds the rule; this pins it to the version).
+     */
+    locks: { readings: LOCK_CHANGE_READINGS, observed: "live" },
   },
 } as const;
 
@@ -567,6 +582,12 @@ export interface ReasonDraft {
    * can see this camera too (`reasonVisibleTo`). Absent = none.
    */
   relatedCamera?: string | null;
+  /**
+   * WARP-2979 (P4 PR-4) — the evidence names a door lock's reading
+   * (camera_offline_during_activity whose activity was a lock change).
+   * DS-019: shown only with `mayReadLocks` (`reasonVisibleTo`). Absent = false.
+   */
+  relatedLock?: boolean;
 }
 
 /** The P3 codes (and P4's), each with ONE severity in RULESET. The pattern codes (P5) never reach `evidenceOf`. */
@@ -701,6 +722,25 @@ export interface ActivitySighting extends TriageEvent {
 }
 
 /**
+ * WARP-2979 (P4 PR-4, D12) — one `lock_state` row the rule may cite: a lock's
+ * reading, how it was observed, and the areas a PERSON linked that lock to
+ * (`zonesForEvent` over the person-only index).
+ */
+export interface LockActivity {
+  id: bigint;
+  /** `matter:<nodeId>/<endpointId>`. */
+  sourceRef: string;
+  /** `labels[0]`. */
+  reading: string | undefined;
+  observed: string;
+  /** `SecurityEvent.baseline`: the lock's first stored reading, not a turn. */
+  baseline: boolean;
+  startedAt: Date;
+  /** The active areas a person linked this lock to. */
+  personZoneIds: readonly string[];
+}
+
+/**
  * camera_offline_during_activity (alert, p4-spec D12). For a `camera_offline`
  * row `o` on camera C, it fires when ALL hold:
  *   1. offline for real — camera_offline's own verdict (`cameraOfflineVerdict`,
@@ -711,8 +751,11 @@ export interface ActivitySighting extends TriageEvent {
  *   3. activity there: a person sighting (`detection`, or PR-D's still-in-view
  *      row) whose span `[startedAt, endedAt ?? …]` meets `[o − 120 s, o + 60 s]`
  *      and whose person-linked areas meet `personAreas`. C's own sighting
- *      counts (someone walked up, then the camera died). The LATEST such row
- *      is the evidence;
+ *      counts (someone walked up, then the camera died). v5 (P4 PR-4): or a
+ *      door lock's CHANGE (`isLockChange`: 🔴 a `polled` row never counts, nor
+ *      the baseline) at an instant inside that window, on a lock a person
+ *      linked to an area in `personAreas`. The LATEST such row, sighting or
+ *      lock change, is the evidence;
  *   4. after hours: the mode at the drop is closed or away (in opening hours
  *      P3's camera_offline notice covers it — usually Wi-Fi).
  * Not Frigate-wide: `source_offline` (camera NULL) never fires it (Frigate
@@ -745,6 +788,8 @@ export function cameraOfflineDuringActivity(input: {
   /** Areas(C): active areas where C has a person-set active link. */
   personAreas: ReadonlyMap<string, string>;
   activity: readonly ActivitySighting[];
+  /** v5 (P4 PR-4): lock rows of the locks a person linked to those areas. */
+  lockActivity?: readonly LockActivity[];
   timeline: ModeTimeline;
 }): ReasonDraft | null {
   const rule = RULESET.camera_offline_during_activity;
@@ -757,18 +802,34 @@ export function cameraOfflineDuringActivity(input: {
   const mode = modeAt(input.timeline, o.startedAt);
   const from = o.startedAt.getTime() - rule.activityBeforeMs;
   const to = o.startedAt.getTime() + rule.activityAfterMs;
-  let best: { a: ActivitySighting; zoneId: string } | null = null;
+  type Candidate =
+    | { lock: false; a: ActivitySighting; zoneId: string }
+    | { lock: true; a: LockActivity; zoneId: string };
+  let best: Candidate | null = null;
+  const later = (c: Candidate): boolean =>
+    !best || c.a.startedAt.getTime() > best.a.startedAt.getTime() || (c.a.startedAt.getTime() === best.a.startedAt.getTime() && c.a.id > best.a.id);
+  const areaOf = (zoneIds: readonly string[]) => [...zoneIds].sort(byString).find((z) => input.personAreas.has(z));
   for (const a of input.activity) {
     if (a.camera === null || !(rule.kinds as readonly string[]).includes(a.kind) || !a.labels.includes(rule.label)) continue;
     const span = eventSpan(a);
     if (span.s.getTime() > to || span.e.getTime() < from) continue;
-    const zoneId = [...a.personZoneIds].sort(byString).find((z) => input.personAreas.has(z));
+    const zoneId = areaOf(a.personZoneIds);
     if (zoneId === undefined) continue;
-    if (!best || a.startedAt.getTime() > best.a.startedAt.getTime() || (a.startedAt.getTime() === best.a.startedAt.getTime() && a.id > best.a.id)) {
-      best = { a, zoneId };
-    }
+    const c: Candidate = { lock: false, a, zoneId };
+    if (later(c)) best = c;
+  }
+  // v5 (P4 PR-4): a lock's change is an instant; only a LIVE turn counts (never polled, never the baseline).
+  for (const a of input.lockActivity ?? []) {
+    if (!isLockChange(a)) continue;
+    const t = a.startedAt.getTime();
+    if (t > to || t < from) continue;
+    const zoneId = areaOf(a.personZoneIds);
+    if (zoneId === undefined) continue;
+    const c: Candidate = { lock: true, a, zoneId };
+    if (later(c)) best = c;
   }
   if (!best) return null;
+  const chosen: Candidate = best;
   const offlineDetail = verdict.reason.detail;
   return {
     ...evidenceOf("camera_offline_during_activity", o, null, {
@@ -777,15 +838,15 @@ export function cameraOfflineDuringActivity(input: {
       mode: mode.mode,
       modeSource: mode.source,
       activity: {
-        eventId: best.a.id.toString(),
-        kind: best.a.kind === "detection_ongoing" ? "detection_ongoing" : "detection",
-        label: rule.label,
-        at: best.a.startedAt.toISOString(),
-        zoneId: best.zoneId,
-        zoneName: input.personAreas.get(best.zoneId)!,
+        eventId: chosen.a.id.toString(),
+        kind: chosen.lock ? "lock_state" : chosen.a.kind === "detection_ongoing" ? "detection_ongoing" : "detection",
+        label: chosen.lock ? chosen.a.reading! : rule.label,
+        at: chosen.a.startedAt.toISOString(),
+        zoneId: chosen.zoneId,
+        zoneName: input.personAreas.get(chosen.zoneId)!,
       },
     }),
-    relatedCamera: best.a.camera,
+    ...(chosen.lock ? { relatedCamera: null, relatedLock: true } : { relatedCamera: chosen.a.camera }),
   };
 }
 

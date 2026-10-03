@@ -182,6 +182,7 @@ must never touch (runtime tools live outside `TOOLS`, ADR-043).
 - The MCP server picks the tool up from `TOOLS` with no registration of its own.
 - RBAC write-intent tracking follows `requiresWrite` (see the read-only table).
 - Confirmation follows `requiresConfirmation` through the generic interceptor.
+- Module gating follows the tool's DOMAIN (WARP-2972): a tool in a module-claimed domain leaves the chat pool, `/api/llm/tools` and MCP when its module is off. `apps/orchestrator/src/__tests__/setup.ts` installs a PERMISSIVE verdict, so a pool or route test only sees gating if it calls `_setToolModuleVerdictForTests` (`services/tool-module-verdict.service.ts`); a NEW domain a module claims must also join `MODULE_OWNED_TOOL_DOMAINS` in `packages/tools-core/src/module-gate.ts` or `tool-module-verdict.service.test.ts` fails.
 
 ## Running the gates
 

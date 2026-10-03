@@ -12,9 +12,10 @@
  * has a global `fetch`), so we use the REST API directly. Adding a new
  * dep just for this dashboard would be more code, not less.
  *
- * Auth: `GITHUB_TOKEN` env var. Falls back to unauthenticated requests
- * (much lower rate limit) so dev laptops without a token can still hit
- * /admin/claude-activity. Public-repo reads work fine without a token.
+ * Auth: `GITHUB_TOKEN` env var, required (WARP-3433). Without one `ghFetch`
+ * makes no request at all: an unauthenticated call would still tell GitHub the
+ * box's public IP and name the vendor in the User-Agent, which a box that
+ * "never phones home" must not do.
  *
  * Failure modes: when GitHub is slow, errors, or rate-limits us, each
  * function logs and returns an empty array. The dashboard renders a
@@ -81,13 +82,15 @@ interface GhRequestOpts {
 }
 
 async function ghFetch<T>(pathname: string): Promise<T | null> {
-  const token = process.env.GITHUB_TOKEN;
+  const token = process.env.GITHUB_TOKEN?.trim();
+  // WARP-3433: no token, no call. The one place this adapter dials GitHub.
+  if (!token) return null;
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
     "User-Agent": `${OWNER}-orchestrator-warp-279`,
   };
-  if (token) headers.Authorization = `Bearer ${token}`;
+  headers.Authorization = `Bearer ${token}`;
 
   // Hand-rolled timeout — global fetch on Node 20 supports AbortSignal.
   const controller = new AbortController();

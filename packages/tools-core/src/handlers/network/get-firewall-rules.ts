@@ -17,7 +17,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
 
 const tool: Tool = {
   name: "get_firewall_rules",
-  description: "List current firewall zones, rules, and port-forwarding configuration. Read-only.",
+  description: "List current firewall zones, rules, and port-forwarding configuration.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

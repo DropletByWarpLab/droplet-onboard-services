@@ -74,7 +74,7 @@ interface CatalogLevelDef {
    * writer stores none and the resolver hands none out. Opt-in per module:
    * `security` (family floor, ADR-059), `crm` and `projects` (family floor,
    * WARP-3365 / WARP-3369: external guests get nothing from company-wide
-   * business data). The same fact drives the role floor on the routes
+   * business data), and `doors` (admin floor, ADR-055). The same fact drives the role floor on the routes
    * (`requireModuleTierFloor`) and on the assistant's data hops
    * (`requireMcpActingUserToolDomain`), so the three cannot disagree.
    */
@@ -126,6 +126,24 @@ const CATALOG: Record<Exclude<ModuleId, "chat">, CatalogLevelDef[]> = {
     { level: "view", minTier: "family", refuseBelowFloor: true },
     { level: "act", minTier: "family" },
     { level: "manage", minTier: "admin" },
+  ],
+  // ADR-055 (P4a). `view` only — deliberately no `act` or `manage` rung. §11.4:
+  // door authority is the OWNER's, "not admin", and does not inherit the rank
+  // ladder that lets an admin escalate on some update paths. Every write route
+  // floors at `owner` (routes/doors.ts) and an owner holds every catalog level
+  // through the §3 bypass, so a `manage` rung could only advertise a
+  // permission that no one but the owner may use. Add one when there is a
+  // door-group grant for it to mean something (AC-017).
+  //
+  // The `view` floor is `admin`, not `family`: with no per-door-group grants
+  // yet (§11.4 — out of scope, they depend on AC-017) the module's own grant
+  // is the ONLY narrowing, and access logs identify people entering places at
+  // times. Default-deny until a narrower grant exists; widening is this one
+  // line and the router's role list. `refuseBelowFloor` is what makes the floor
+  // bite: without it `view` is the lowest rung and a family or guest role could
+  // store doors:view, advertising reach the routes refuse.
+  doors: [
+    { level: "view", minTier: "admin", refuseBelowFloor: true },
   ],
   smart_home: [
     { level: "view" },
@@ -247,7 +265,7 @@ function tierRefused(tier: Role, moduleId: GateableModuleId): boolean {
 /**
  * The highest §9 level `tier` may hold on `moduleId`. Every module offers a
  * `view`, so the result is at least "view" — except where `view` itself is a
- * refusal below its floor (`refuseBelowFloor`, security): `null` = the tier may
+ * refusal below its floor (`refuseBelowFloor`: security, doors): `null` = the tier may
  * hold nothing on this module.
  */
 export function maxLevelFor(tier: Role, moduleId: GateableModuleId): FeatureLevel | null {

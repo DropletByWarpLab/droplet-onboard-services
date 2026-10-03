@@ -204,8 +204,10 @@ network. Host-published ports and host-network services are called out.
   guest by `requireMcpActingUserToolDomain`, and for context pins by the tier in
   `context-pin-targets.service.ts`. The one share: a work item ASSIGNED to a
   guest is shared with them (read it, read and write its comments, move its
-  state) and nothing else in Projects; `modules/guest-shares.ts` names the five
-  requests and `middleware/guest-share.ts` checks the assignment per record. A
+  state) and nothing else in Projects; `modules/guest-shares.ts` names the six
+  requests and `middleware/guest-share.ts` checks the assignment per record (the
+  sixth, `GET /api/pm/assigned-to-me`, lists only the caller's own assigned
+  items, which is how a guest finds them, WARP-3407). A
   guest cannot own a deal or customer or lead a project. Single company-wide
   routes floor with `requireRole`: `GET /api/integrations` and
   `GET /api/integrations/eaglesoft` are owner/admin (a member reads the
@@ -318,6 +320,21 @@ network. Host-published ports and host-network services are called out.
   read-only (`requiresWrite === false`). RBAC is **re-checked on `tools/call`**
   (not just `tools/list`). Matter tool calls **proxy back** to the orchestrator's
   `/api/matter/*` — the Matter fabric lives in the orchestrator.
+- **Module gating (WARP-2972):** a tool whose domain a module toggle (box) or the
+  acting person's own grants withhold is absent from `tools/list` (HTTP) and refused
+  by `tools/call` (both transports, `module_disabled`). The verdict is asked of the
+  orchestrator (`GET /api/modules/tool-verdict`, admits `_service:mcp` **and the
+  owner** — with `AUTH_ENABLED=false` every request is the synthetic `dev` owner, so
+  `_service:mcp` alone would 403 the mcp-server in a no-auth dev stack) — this
+  container has no module registry or availability config — and **fails closed**
+  when it can't be had: module-owned domains withheld, unclaimed ones kept, one
+  `[mcp-server] module verdict unavailable (<reason>)` warning a minute. A
+  `createServer` built with no verdict source fails closed the same way; tests and
+  embedders opt out with `NO_MODULE_GATING`. The stdio child's `tools/list` stays the
+  raw registry; the orchestrator gates its chat pool and `/api/llm/tools` on top of
+  that cached list. A scheduled ToolSpec run is FOR its spec's owner (`ToolSpec.ownerId`,
+  WARP-1580): the ticker sends the owner's username as `_meta.userId`, so the person axis
+  applies to it as to their chat, and an owner whose username can't be read does not run.
 - **Gotchas:** the `claims === undefined` "trusted" sentinel is **stdio-only** —
   HTTP always requires a valid JWT. gRPC/Redis/Prisma connect lazily so a missing
   dependency at boot doesn't kill the stdio child.

@@ -1,0 +1,2 @@
+{"id": "gate-h2", "category": "selftest", "approve": "approve", "turns": [{"role": "user", "content": "Draft a note to alice@example.com, then create a Support task titled 'Gate check'."}], "expected": {"allowed_writes": ["email_draft_reply", "business_create"]}}
+{"id": "gate-h3", "category": "selftest", "turns": [{"role": "user", "content": "Draft a note to alice@example.com."}], "expected": {"allowed_writes": ["email_draft_reply"], "forbidden_executed": ["email_draft_reply"]}}

@@ -3,12 +3,14 @@
  * to an external guest shares that one item with them".
  *
  * `modules/guest-shares.ts` lets a guest's request past the `projects` tier
- * floor for five routes; these guards are what makes that safe. A guest passes
+ * floor for six routes; these guards are what makes that safe. A guest passes
  * only when the work item (or, for the state list, a work item in that project)
  * is ASSIGNED TO THEM, and the refusal is the same 404 `module_disabled` the
  * floor answers, whether the record exists or not, so a guest learns nothing
  * about an id they were not given. Everyone who is not a guest passes straight
- * through: this narrows the guest tier and touches no one else.
+ * through: this narrows the guest tier and touches no one else. The sixth, the
+ * list of the caller's own assigned items (WARP-3407), has no record to check:
+ * `ownAssignments` pins the caller's id for the handler instead.
  *
  * Each handler carries `GUEST_SHARE_GUARD`, readable off the function like the
  * feature-gate and role-guard markers, so a test can assert that every route a
@@ -63,6 +65,26 @@ export function guestAssignedWorkItem(prisma: PrismaClient): RequestHandler {
       select: { id: true },
     });
     return row !== null && row !== undefined;
+  });
+}
+
+/**
+ * WARP-3407 — the list of the caller's OWN assigned items, the one way a guest
+ * finds what was shared with them (the assignment notification names an item's
+ * key, never its id). There is no record to check: the guard pins the caller's
+ * id in `res.locals.assigneeId` and the handler lists by that alone, so no query
+ * can widen it to someone else's work. It runs for every role (a member's own
+ * list is theirs too); no caller id is the floor's 404.
+ */
+export function ownAssignments(): RequestHandler {
+  return mark(function ownAssignments(req: Request, res: Response, next: NextFunction): void {
+    const id = req.user?.id;
+    if (!id) {
+      res.status(404).json({ error: "module_disabled", module: "projects" });
+      return;
+    }
+    res.locals.assigneeId = id;
+    next();
   });
 }
 

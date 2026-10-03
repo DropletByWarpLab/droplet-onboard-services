@@ -132,6 +132,10 @@ export const WORKSPACE_SETTING_DEFAULTS: readonly WorkspaceSettingDefault[] = [
   // installed model. NOT editable via the generic /api/settings PATCH:
   // `ai` is intentionally absent from that route's SECTION_VALUES.
   { key: "ai.model.chat", section: "ai", type: "string", value: "" },
+  // WARP-3452 — the box-wide switch "Coding tools can use the local model".
+  // Default OFF. Written only by PUT /api/llm-access/settings (owner/admin,
+  // audited); `ai` keeps it off the generic /api/settings PATCH, as above.
+  { key: "ai.llm_access.enabled", section: "ai", type: "bool", value: false },
 ];
 
 export interface SeedResult {

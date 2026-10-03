@@ -204,11 +204,11 @@ def _parse_watch_target(absolute_path: str) -> Optional[WatchTarget]:
         dept = _lookup_department_for_groupfolder(gfid)
         if dept is None:
             # WARP-1264: fail-closed — an unrecognized groupfolder id must
-            # never be attributed to a personal (or any) corpus.
-            logger.warning(
-                "Unknown groupfolder id=%d for %s — skipping (no Department row)",
-                gfid, rel,
-            )
+            # never be attributed to a personal (or any) corpus. The WARNING
+            # is logged once per lookup in _lookup_department_for_groupfolder
+            # (WARP-3425: the backfill sweep revisits every such file, so a
+            # per-file warning would flood the log).
+            logger.debug("Unknown groupfolder id=%d for %s — skipping", gfid, rel)
             return None
         if dept["kind"] == "HOUSEHOLD":
             # Legacy sentinel preserved verbatim — no reindex of existing rows.
@@ -286,6 +286,17 @@ def _lookup_department_for_groupfolder(gfid: int) -> Optional[dict]:
         )
         return _HOUSEHOLD_FALLBACK
 
+    if dept is None:
+        # WARP-3425: the only branch that leaves a groupfolder file with no
+        # FileIndexStatus row at all, which is what every company Workspace
+        # file showed on the test box. The orchestrator now re-discovers the
+        # Workspace's groupfolder id every reconcile tick; this line is the
+        # trace that a folder is still unmapped.
+        logger.warning(
+            "groupfolder %d has no Department row (Department.ncGroupfolderId) — "
+            "its files are skipped until one does; the backfill sweep retries them",
+            gfid,
+        )
     with _gf_dept_cache_lock:
         _gf_dept_cache[gfid] = (dept, now)
     return dept
@@ -777,7 +788,13 @@ def reconcile_index(handler: IndexHandler | None = None) -> dict:
     Runs in a daemon thread at startup (a one-shot pass, not a scheduling
     loop — the apscheduler rule governs recurring schedules).
     """
-    handler = handler or IndexHandler()
+    try:
+        return _reconcile_index(handler or IndexHandler())
+    finally:
+        _startup_reconcile_done.set()
+
+
+def _reconcile_index(handler: IndexHandler) -> dict:
     try:
         status_map = fetch_index_status_map()
     except Exception as e:
@@ -827,6 +844,63 @@ def reconcile_index(handler: IndexHandler | None = None) -> dict:
     return {"scanned": scanned, "processed": processed}
 
 
+# ── WARP-3425: periodic backfill of never-seen files ──
+#
+# The startup reconcile is one pass. A file it could not attribute (a
+# groupfolder whose Department row did not carry its id yet — the company
+# Workspace on the test box) was skipped with no FileIndexStatus row and then
+# never looked at again until the next restart, because inotify only reports
+# NEW events. The orchestrator heals the Workspace's groupfolder id at boot and
+# on every 5-minute tick, which can land after this service's startup pass has
+# already walked the Workspace — an OTA restarts both at once. This sweep is
+# what turns that heal into indexed files.
+#
+# Only files with NO status row are queued: retrying `failed` / stale rows
+# stays the startup pass's job (once per process), so a permanently failing
+# file is not re-run every interval. Queued paths go through the same bounded
+# pool and `_queued` dedupe as live events.
+BACKFILL_INTERVAL_MINUTES = 15
+
+# Set when the startup reconcile finishes; the sweep waits for it, since the
+# startup pass already indexes every never-seen file (inline) and a sweep
+# racing it would index the same files twice.
+_startup_reconcile_done = threading.Event()
+
+
+def backfill_unseen(handler: IndexHandler) -> int:
+    """Queue every watched file that has no FileIndexStatus row. Returns the
+    number queued."""
+    if not _startup_reconcile_done.is_set():
+        return 0
+    try:
+        status_map = fetch_index_status_map()
+    except Exception as e:
+        logger.warning("backfill: cannot read FileIndexStatus (%s) — skipping sweep", e)
+        return 0
+    # ponytail: a full walk of the watched tree + the whole status map per
+    # sweep; fine at SMB corpus sizes (tens of thousands of files). Page the
+    # map or walk incrementally if a box grows well past that.
+    queued = 0
+    for abs_path in iter_watch_paths():
+        target = _parse_watch_target(abs_path)
+        if not target or _is_ignored_basename(os.path.basename(target.relpath)):
+            continue
+        if (target.index_user, target.stored_path) in status_map:
+            continue
+        # `_index` returns before writing any status row for an empty file, so
+        # without this every empty file would be re-queued every sweep forever.
+        try:
+            if os.path.getsize(abs_path) == 0:
+                continue
+        except OSError:
+            continue
+        handler._enqueue_index(abs_path)
+        queued += 1
+    if queued:
+        logger.info("backfill: queued %d never-indexed file(s)", queued)
+    return queued
+
+
 def start_watcher() -> Observer:
     """Start watching the Nextcloud data root for file changes.
 
@@ -848,4 +922,15 @@ def start_watcher() -> Observer:
     observer.schedule(handler, NEXTCLOUD_DATA_ROOT, recursive=True)
     observer.start()
     logger.info("Watching %s for file changes", NEXTCLOUD_DATA_ROOT)
+    # WARP-3425: the never-seen backfill rides the debounce scheduler's default
+    # executor (the sweep only walks and queues; the index pool does the work).
+    with _debounce_lock:
+        _get_debounce_scheduler().add_job(
+            backfill_unseen,
+            trigger="interval",
+            minutes=BACKFILL_INTERVAL_MINUTES,
+            args=(handler,),
+            id="warp3425-backfill-unseen",
+            replace_existing=True,
+        )
     return observer

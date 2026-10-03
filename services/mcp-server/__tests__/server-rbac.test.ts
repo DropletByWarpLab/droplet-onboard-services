@@ -3,6 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer, type TrustContext } from "../src/server.js";
 import type { ContextDeps } from "../src/context.js";
+import { NO_MODULE_GATING } from "../src/module-verdict.js";
 
 /**
  * RBAC at the MCP-protocol layer (not the helper layer that
@@ -28,7 +29,7 @@ async function connectClient(role: "admin" | "family" | "guest" | undefined) {
     role === undefined
       ? { kind: "local-trusted" }
       : { kind: "authenticated", claims: { sub: `u-${role}`, role } };
-  const server = createServer(buildDeps(), trust);
+  const server = createServer(buildDeps(), trust, { moduleVerdict: NO_MODULE_GATING });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "rbac-test", version: "0.0.1" }, { capabilities: {} });
   await Promise.all([
@@ -89,7 +90,7 @@ describe("server-level RBAC", () => {
     const server = createServer(buildDeps(), {
       kind: "authenticated",
       claims: { sub: "u-no-role", role: undefined },
-    });
+    }, { moduleVerdict: NO_MODULE_GATING });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "rbac-test", version: "0.0.1" }, { capabilities: {} });
     await Promise.all([
@@ -109,7 +110,7 @@ describe("server-level RBAC", () => {
     const server = createServer(buildDeps(), {
       kind: "authenticated",
       claims: { sub: "u-no-role", role: undefined },
-    });
+    }, { moduleVerdict: NO_MODULE_GATING });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "rbac-test", version: "0.0.1" }, { capabilities: {} });
     await Promise.all([

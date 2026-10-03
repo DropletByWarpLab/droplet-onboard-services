@@ -35,6 +35,7 @@ import { tickSecurityIncidents, _resetIncidentHealthForTests, type SecurityIncid
 import {
   INCIDENT_VIEW_SELECT,
   REASON_VIEW_SELECT,
+  incidentListWhere,
   incidentsSummary,
   listIncidents,
   loadIncidentDetail,
@@ -66,8 +67,8 @@ const T0 = new Date("2026-09-23T21:14:00Z");
 const plus = (d: Date, ms: number) => new Date(d.getTime() + ms);
 
 /** Maria: family, sees FRONT and SIDE — never BACK. */
-const MARIA: IncidentViewer = { userId: randomUUID(), visibleCameras: new Set([FRONT, SIDE]), mayReadThreats: false, ownerOrAdmin: false };
-const OWNER: IncidentViewer = { userId: randomUUID(), visibleCameras: "all", mayReadThreats: true, ownerOrAdmin: true };
+const MARIA: IncidentViewer = { userId: randomUUID(), visibleCameras: new Set([FRONT, SIDE]), mayReadThreats: false, mayReadLocks: false, ownerOrAdmin: false };
+const OWNER: IncidentViewer = { userId: randomUUID(), visibleCameras: "all", mayReadThreats: true, mayReadLocks: true, ownerOrAdmin: true };
 
 describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — real Postgres (WARP-2978 review R1)", () => {
   let prisma: PrismaClient;
@@ -294,6 +295,8 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
       camera: string | null;
       /** WARP-2979 — where the person was seen (camera_offline_during_activity only); may be a camera outside the incident. */
       related?: string;
+      /** WARP-2979 P4 PR-4 — the activity was a door lock changing (camera_offline_during_activity only): `relatedLock`. */
+      lock?: boolean;
     };
     /** One incident to insert: the CHECKs are derived from it (severity, reason codes, notify state, closedAt). */
     interface Spec {
@@ -362,7 +365,8 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
             evidenceAt: T0,
             evidenceSummary: "x",
             detail: {},
-            relatedCamera: c.related ?? null,
+            relatedCamera: c.lock ? null : (c.related ?? null),
+            relatedLock: c.lock === true,
           },
         });
       }
@@ -394,8 +398,15 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
           for (const cam of cams) {
             if (r() < 0.5) codes.push({ code: "after_hours_presence", severity: "alert", camera: cam });
             if (r() < 0.3) codes.push({ code: "camera_offline", severity: "notice", camera: cam });
-            // WARP-2979 — the new alert, naming a second camera the viewer may not see (reasonVisibleTo's related clause).
-            if (r() < 0.25) codes.push({ code: "camera_offline_during_activity", severity: "alert", camera: cam, related: pick(CAMS3) });
+            // WARP-2979 — the new alert, naming a second camera the viewer may not see (reasonVisibleTo's related clause),
+            // or (P4 PR-4) a door lock, which only a viewer with mayReadLocks may see.
+            if (r() < 0.25) {
+              codes.push(
+                r() < 0.4
+                  ? { code: "camera_offline_during_activity", severity: "alert", camera: cam, lock: true }
+                  : { code: "camera_offline_during_activity", severity: "alert", camera: cam, related: pick(CAMS3) },
+              );
+            }
           }
         }
         const state = codes.length ? pick(["open", "acknowledged", "resolved"] as const) : "open";
@@ -433,6 +444,9 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
       { ...MARIA, visibleCameras: new Set([BACK]), mayReadThreats: true },
       { ...MARIA, visibleCameras: new Set<string>() },
       { ...MARIA, visibleCameras: new Set([FRONT, BACK, SIDE]) },
+      // P4 PR-4 (DS-019): Devices view shows a lock-related reason; the camera grant alone never does.
+      { ...MARIA, visibleCameras: new Set([FRONT]), mayReadLocks: true },
+      { ...MARIA, visibleCameras: new Set([FRONT, BACK, SIDE]), mayReadLocks: true },
     ];
     const STATES: IncidentStateFilter[] = ["all", "attention", "open", "acknowledged", "resolved", "activity"];
 
@@ -482,6 +496,30 @@ describe.skipIf(!RUN)("route 16 for a viewer who cannot see every camera — rea
       }
       expect(compared).toBeGreaterThan(300); // not vacuous
       expect(partials).toBeGreaterThan(10); // partial views were exercised
+      // P4 PR-4: lock-related reasons were seeded (the generator may draw none otherwise).
+      expect(await prisma.securityIncidentReason.count({ where: { incidentId: { in: [...mine] }, relatedLock: true } })).toBeGreaterThan(0);
+    });
+
+    it("P4 PR-4: every camera but no Devices view — Prisma's list where holds exactly what the pure projection gives (lock-related reasons hidden)", async () => {
+      const mine = new Set([...(await seed(60, 2979))]);
+      const narrowed: IncidentViewer = { ...OWNER, mayReadLocks: false };
+      expect(await prisma.securityIncidentReason.count({ where: { incidentId: { in: [...mine] }, relatedLock: true } })).toBeGreaterThan(0);
+      let differs = 0;
+      for (const v of [narrowed, OWNER]) {
+        const projected = await projections(mine, v);
+        for (const state of STATES) {
+          for (const severity of [undefined, "alert", "notice"] as const) {
+            const f: IncidentListFilters = { state, severity };
+            const rows = await prisma.securityIncident.findMany({ where: incidentListWhere(v, f), select: { id: true } });
+            const sql = rows.map((x) => x.id).filter((id) => mine.has(id)).sort();
+            const pure = projected.filter(({ row, p }) => pureHolds(p, row, f)).map(({ row }) => row.id).sort();
+            expect(sql, JSON.stringify({ locks: v.mayReadLocks, f })).toEqual(pure);
+          }
+        }
+        if (v === narrowed) differs = projected.filter((x) => x.p?.partial).length;
+      }
+      // Hiding a lock-related alert makes some of the owner's incidents PARTIAL for a viewer narrowed off Devices.
+      expect(differs).toBeGreaterThan(0);
     });
 
     // WARP-2979 (P4 §6.12.3; review #2420) — the chat tools' period is judged on HER span, in the SQL itself.

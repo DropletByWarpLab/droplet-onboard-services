@@ -26,6 +26,17 @@
  * dashboard's apiFetch shape). Who sees what comes from
  * services/security-access.ts only; the rules and the audited writes live in
  * services/security-zones.service.ts.
+ *
+ * WARP-2977 P2b-2 — door locks (DS-019: Security view AND Devices view):
+ *   · a `lock` link (`matter:<nodeId>/<endpointId>`) is shown, listed and
+ *     accepted only for a viewer with `mayReadLocks`; for anyone else a lock
+ *     link does not exist (an area made only of locks is hidden, and asking
+ *     to link one is SOURCE_NOT_FOUND);
+ *   · /sources gains a `locks` half from ONE fresh device-control list, asked
+ *     only for such a viewer, degrading on its own (`unavailable`);
+ *   · a NEW lock link is checked against a fresh list; an existing one is
+ *     kept without a check;
+ *   · lock labels on page loads come from the last sweep (no device-control call).
  */
 import { Router, type Request, type Response } from "express";
 import type { PrismaClient } from "@prisma/client";
@@ -43,6 +54,7 @@ import {
   type SecurityRouteDeps,
   type SecurityViewerScope,
 } from "../services/security-access.js";
+import { securityLockAdapter, type SecurityLockReader } from "../services/security-lock-adapter.js";
 import { readSecurityAiSettings } from "../services/security-ai-settings.js";
 import {
   SECURITY_ZONE_KINDS,
@@ -53,8 +65,10 @@ import {
   decideDropletLink,
   listLinkProposals,
   frigatePartsFromConfig,
+  linkableLocks,
   loadActiveLinks,
   loadCameraLabels,
+  lockLabelsFor,
   loadZoneRecords,
   normaliseZoneName,
   parseLinkRef,
@@ -65,6 +79,7 @@ import {
   visibleLinks,
   visibleZoneViews,
   type DesiredZoneLink,
+  type LinkableLock,
   type ZoneRecord,
   type ZoneWriteContext,
 } from "../services/security-zones.service.js";
@@ -93,7 +108,7 @@ const linksBody = z
   .object({
     // Deduped below; this raw cap only bounds the work.
     links: z
-      .array(z.object({ sourceKind: z.enum(["camera", "camera_zone"]), sourceRef: z.string().max(160) }).strict())
+      .array(z.object({ sourceKind: z.enum(["camera", "camera_zone", "lock"]), sourceRef: z.string().max(160) }).strict())
       .max(SECURITY_ZONE_LINK_LIMIT * 2),
     expectedVersion,
   })
@@ -157,9 +172,14 @@ function writeContext(req: Request, deps: SecurityRouteDeps): ZoneWriteContext {
   return { req, now: deps.now?.() ?? new Date() };
 }
 
-/** The written area as its writer sees it: only the links visible to them (DS-005, even for a write). */
-function writtenView(zone: ZoneRecord, scope: SecurityViewerScope, labels: ReadonlyMap<string, string>) {
-  return toZoneView(zone, visibleLinks(zone.links, scope), labels, scope);
+interface WriteLabels {
+  cameras: ReadonlyMap<string, string>;
+  locks: ReadonlyMap<string, string>;
+}
+
+/** The written area as its writer sees it: only the links visible to them (DS-005, DS-019, even for a write). */
+function writtenView(zone: ZoneRecord, scope: SecurityViewerScope, labels: WriteLabels) {
+  return toZoneView(zone, visibleLinks(zone.links, scope), labels.cameras, labels.locks, scope);
 }
 
 export function createSecurityZonesRouter(prisma: PrismaClient, deps: SecurityRouteDeps = {}): Router {
@@ -172,18 +192,26 @@ export function createSecurityZonesRouter(prisma: PrismaClient, deps: SecurityRo
     requireFeatureAccess("security", "manage", deps.resolve),
   ];
   const frigateConfig = deps.frigateConfig ?? fetchConfig;
+  /** The lock adapter, read per request (it is started after the routers are built). */
+  const lockReader = (): SecurityLockReader | null => (deps.locks ?? securityLockAdapter)();
+  /** One FRESH device-control list as the catalog's lock half. Throws when it cannot be read — never an empty list. */
+  const freshLocks = async (): Promise<Map<string, LinkableLock>> => {
+    const reader = lockReader();
+    if (!reader) throw new Error("the door-lock adapter is not running");
+    return linkableLocks(await reader.listLocks());
+  };
 
   /**
    * What a write needs to answer, read BEFORE it: the writer's scope and the
-   * camera labels. A failure here is a 503 with nothing changed, never a
-   * failure after a commit.
+   * camera (and lock) labels. A failure here is a 503 with nothing changed,
+   * never a failure after a commit.
    */
-  async function beforeWrite(req: Request): Promise<{ scope: SecurityViewerScope; labels: Map<string, string> }> {
-    const [scope, labels] = await Promise.all([
+  async function beforeWrite(req: Request): Promise<{ scope: SecurityViewerScope; labels: WriteLabels }> {
+    const [scope, cameras] = await Promise.all([
       securityViewerScope(prisma, req, deps.resolve),
       loadCameraLabels(prisma),
     ]);
-    return { scope, labels };
+    return { scope, labels: { cameras, locks: lockLabelsFor(scope, lockReader()) } };
   }
 
   // ── 3. the areas this viewer may see ────────────────────────────────────
@@ -199,7 +227,7 @@ export function createSecurityZonesRouter(prisma: PrismaClient, deps: SecurityRo
       const includeArchived =
         q.data.include === "archived" && mayListArchivedZones(req, await securityLevelFor(req, deps.resolve));
       const [zones, labels] = await Promise.all([loadZoneRecords(prisma, includeArchived), loadCameraLabels(prisma)]);
-      res.json({ zones: visibleZoneViews(zones, scope, labels) });
+      res.json({ zones: visibleZoneViews(zones, scope, labels, lockLabelsFor(scope, lockReader())) });
     } catch (err) {
       logger.error({ err }, "security zones read failed");
       unavailable(res);
@@ -225,10 +253,15 @@ export function createSecurityZonesRouter(prisma: PrismaClient, deps: SecurityRo
     // the answer needed the unreadable half (`linkSourceStatus`), and with
     // both halves down every visible link is `unknown`. An empty list would
     // read on the Areas page as "nothing to flag".
-    const [rows, links, cfg] = await Promise.allSettled([
+    //
+    // WARP-2977 P2b-2: the lock half is a fourth read, and only for a viewer
+    // who may read locks (DS-019) — nobody else's page load asks the
+    // device-control service anything.
+    const [rows, links, cfg, locks] = await Promise.allSettled([
       loadCameraLabels(prisma),
       loadActiveLinks(prisma),
       frigateConfig().then(frigatePartsFromConfig),
+      scope.mayReadLocks ? freshLocks() : Promise.resolve(null),
     ]);
     if (links.status === "rejected") {
       // Nothing to give a status FOR, and `linkStatus: []` would claim every
@@ -240,11 +273,13 @@ export function createSecurityZonesRouter(prisma: PrismaClient, deps: SecurityRo
     }
     if (rows.status === "rejected") logger.warn({ err: rows.reason }, "security sources: camera rows unreadable");
     if (cfg.status === "rejected") logger.warn({ err: cfg.reason }, "security sources: camera system config unavailable");
+    if (locks.status === "rejected") logger.warn({ err: locks.reason }, "security sources: door locks unavailable");
     res.json(
       buildSourcesView(
         {
           cameraRows: rows.status === "fulfilled" ? rows.value : null,
           frigate: cfg.status === "fulfilled" ? cfg.value : null,
+          locks: locks.status === "fulfilled" ? locks.value : null,
         },
         links.value,
         scope,
@@ -349,7 +384,7 @@ export function createSecurityZonesRouter(prisma: PrismaClient, deps: SecurityRo
     const issues: unknown[] = [];
     body.data.links.forEach((l, i) => {
       if (!parseLinkRef(l.sourceKind, l.sourceRef)) {
-        issues.push({ path: ["links", i, "sourceRef"], message: "not a camera or part-of-view reference" });
+        issues.push({ path: ["links", i, "sourceRef"], message: "not a camera, part-of-view or door-lock reference" });
         return;
       }
       const key = `${l.sourceKind}\u0000${l.sourceRef}`;
@@ -372,7 +407,7 @@ export function createSecurityZonesRouter(prisma: PrismaClient, deps: SecurityRo
         writeContext(req, deps),
         id.data,
         { links: desired, expectedVersion: body.data.expectedVersion },
-        { scope, cameraLabels: labels, frigateConfig },
+        { scope, cameraLabels: labels.cameras, frigateConfig, listLocks: freshLocks },
       );
       res.json({ zone: writtenView(out.zone, scope, labels), changed: out.changed });
     } catch (err) {
@@ -393,7 +428,11 @@ export function createSecurityZonesRouter(prisma: PrismaClient, deps: SecurityRo
         return;
       }
       const [scope, labels] = await Promise.all([securityViewerScope(prisma, req, deps.resolve), loadCameraLabels(prisma)]);
-      res.json({ level: "manage", linking: settings.linking, proposals: await listLinkProposals(prisma, scope, labels) });
+      res.json({
+        level: "manage",
+        linking: settings.linking,
+        proposals: await listLinkProposals(prisma, scope, labels, lockLabelsFor(scope, lockReader())),
+      });
     } catch (err) {
       logger.error({ err }, "security link proposals read failed");
       fail(res, 503, "LINKS_UNAVAILABLE", "Droplet's suggestions are unavailable right now");
@@ -418,7 +457,7 @@ export function createSecurityZonesRouter(prisma: PrismaClient, deps: SecurityRo
       }
       try {
         const { scope, labels } = await beforeWrite(req);
-        const out = await decideDropletLink(prisma, writeContext(req, deps), id.data, decision, { scope, cameraLabels: labels });
+        const out = await decideDropletLink(prisma, writeContext(req, deps), id.data, decision, { scope, cameraLabels: labels.cameras });
         res.json({ zone: writtenView(out.zone, scope, labels), changed: out.changed });
       } catch (err) {
         answerWriteError(res, err, `security link ${decision}`);

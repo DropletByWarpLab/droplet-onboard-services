@@ -1407,6 +1407,63 @@ describe("WARP-2979 — Security questions reach the security domain (ADR-059 P4
   });
 });
 
+describe("ADR-055 P4b — door questions reach the doors domain", () => {
+  const DOORS = ["doors_list", "doors_recent_events"];
+  const DOORS_POOL = [...POOL, ...DOORS];
+  const select = (sentence: string) =>
+    selectAdvertisedTools({ mode: "domains", userMessage: sentence, pool: DOORS_POOL, conversationToolNames: [] });
+
+  // Whole sentences a person would type, not the pattern's own vocabulary.
+  it.each([
+    "is the front door open?",
+    "which doors are open?",
+    "was the warehouse door left open last night?",
+    "what happened at the back door today?",
+    "did anyone force a door over the weekend",
+    "is the side gate ajar",
+    "has the stock room door been propped open",
+    "show me the doors",
+  ])("routes to doors: %s", (sentence) => {
+    const r = select(sentence);
+    expect(r.matchedDomains, `"${sentence}" advertised only [${r.advertised.join(", ")}]`).toContain("doors");
+    for (const name of DOORS) expect(r.advertised, name).toContain(name);
+  });
+
+  // A word in two rules brings in both domains, and that is fine: the camera
+  // rule already owns "front door" (WARP-1921).
+  it("a place word that is also a camera word pulls both domains", () => {
+    const r = select("is anyone at the front door?");
+    expect(r.matchedDomains).toEqual(expect.arrayContaining(["doors", "cameras"]));
+  });
+
+  it.each([
+    "add an outdoor light to the garden",
+    "what is the indoor temperature",
+    "ring the doorbell",
+    "block my son's tablet",
+    "add a dentist appointment tomorrow",
+  ])("does not route to doors: %s", (sentence) => {
+    const r = select(sentence);
+    expect(r.matchedDomains, sentence).not.toContain("doors");
+    for (const name of DOORS) expect(r.advertised, name).not.toContain(name);
+  });
+
+  it("is never in the core pool: pulled in by the turn, or not at all", () => {
+    for (const name of DOORS) expect(CORE_TOOL_NAMES.has(name), name).toBe(false);
+    for (const name of DOORS) expect(domainOfTool(name), name).toBe("doors");
+  });
+
+  it("a follow-up keeps the domain by continuity", () => {
+    const r = selectAdvertisedTools({
+      mode: "domains",
+      userMessage: "and the one before that?",
+      pool: DOORS_POOL,
+      conversationToolNames: ["doors_list"],
+    });
+    expect(r.advertised).toContain("doors_recent_events");
+  });
+});
+
 describe("WARP-3280 — contacts and the calculator are reachable from a fresh turn", () => {
   const CONTACTS_POOL = [...POOL, "search_contacts", "email_search"];
   const DATA_POOL = [...POOL, "calculate", "get_weather"];

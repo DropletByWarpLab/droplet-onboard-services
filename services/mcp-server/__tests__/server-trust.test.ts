@@ -3,6 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer, type TrustContext } from "../src/server.js";
 import type { ContextDeps } from "../src/context.js";
+import { NO_MODULE_GATING } from "../src/module-verdict.js";
 
 /**
  * WARP-563 — tool trust must be an explicit, named TrustContext, never
@@ -35,7 +36,7 @@ function buildDeps(): ContextDeps {
 }
 
 async function connect(trust: TrustContext) {
-  const server = createServer(buildDeps(), trust);
+  const server = createServer(buildDeps(), trust, { moduleVerdict: NO_MODULE_GATING });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
   const client = new Client(

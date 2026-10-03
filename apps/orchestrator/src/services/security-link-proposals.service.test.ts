@@ -50,6 +50,7 @@ import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js
 import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
 import { LINK_RULES_VERSION, type PairCandidateResult } from "../lib/security-cooccurrence.js";
 import { parseLinkEvidence } from "../lib/security-link-evidence.js";
+import { lockRowDraft, type LockReading } from "./security-lock-adapter.js";
 
 const S = 1000;
 const MIN = 60 * S;
@@ -64,7 +65,7 @@ type Actor = "person" | "droplet";
 interface Link {
   id: string;
   zoneId: string;
-  sourceKind: "camera" | "camera_zone";
+  sourceKind: "camera" | "camera_zone" | "lock";
   sourceRef: string;
   sourceLabel: string;
   state: State;
@@ -92,11 +93,21 @@ interface Ev {
   startedAt: Date;
   endedAt: Date | null;
 }
+/** A `lock_state` row (P2b-2). */
+interface LockEv {
+  sourceRef: string;
+  labels: string[];
+  observed: "live" | "polled";
+  baseline: boolean;
+  startedAt: Date;
+}
 interface World {
   settings: { linking: "link_and_suggest" | "suggest_only" | "off"; summaries: "on" | "off"; version: number } | null;
   zones: Zone[];
   links: Link[];
   events: Ev[];
+  /** WARP-2979 PR-4 — lock_state rows. */
+  locks?: LockEv[];
   cameras: Array<{ name: string; displayName: string; enabled: boolean }>;
   log: string[];
   updateWheres: unknown[];
@@ -109,7 +120,7 @@ function link(zoneId: string, sourceRef: string, over: Partial<Link> = {}): Link
   return {
     id: `l${String(seq).padStart(3, "0")}`,
     zoneId,
-    sourceKind: sourceRef.includes("/") ? "camera_zone" : "camera",
+    sourceKind: sourceRef.startsWith("matter:") ? "lock" : sourceRef.includes("/") ? "camera_zone" : "camera",
     sourceRef,
     sourceLabel: sourceRef,
     state: "active",
@@ -243,6 +254,11 @@ function fake(w: World) {
     securityEvent: {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       findMany: vi.fn(async ({ where }: any) => {
+        if (where.kind === "lock_state") {
+          return (w.locks ?? [])
+            .filter((l) => where.source === "matter_lock" && inRange(l.startedAt, where.startedAt))
+            .map((l) => ({ sourceRef: l.sourceRef, labels: l.labels, observed: l.observed, baseline: l.baseline, startedAt: l.startedAt }));
+        }
         if (where.kind === "detection") {
           return w.events
             .filter((e) => e.kind === "detection" && e.labels.includes(where.labels.has) && e.camera !== null && inRange(e.startedAt, where.startedAt))
@@ -455,6 +471,55 @@ describe("the anchors", () => {
     w.cameras[1]!.enabled = false;
     await runOn(w);
     expect(rowOf(w, "cam_b")).toBeUndefined();
+  });
+});
+
+// #2350 pinned these while P4 scored cameras only. From P4 PR-4 a person's lock link anchors — through its LIVE
+// changes alone (the lock arm's own tests are in "P4 PR-4 — …" below and in security-cooccurrence.test.ts) — so what
+// stays true of a lock link with no such change is pinned here.
+describe("door-lock links with no live change (P4 PR-4: a lock anchors only through its live changes)", () => {
+  const LOCK = "matter:4660/1";
+  const lockLink = (over: Partial<Link> = {}) => link("z-stock", LOCK, { sourceKind: "lock", sourceLabel: "Back door lock", ...over });
+
+  it("an area made only of a lock whose window holds no live change scores nothing and changes nothing", async () => {
+    const w = world({ links: [lockLink()] });
+    const before = structuredClone(w.links);
+    const { prisma, summary } = await runOn(w);
+    expect(summary.scored).toBe(0);
+    expect(prisma.securityZoneLink.createMany).not.toHaveBeenCalled();
+    expect(w.links).toEqual(before);
+    expect(w.log.filter((l) => l.startsWith("create:") || l.startsWith("update:"))).toEqual([]);
+  });
+
+  it("beside a camera anchor, the lock link is left exactly as it is and only cameras are ever created", async () => {
+    const w = world();
+    w.links.push(lockLink());
+    const lockBefore = structuredClone(rowOf(w, LOCK));
+    await runOn(w);
+    expect(rowOf(w, "cam_b")).toMatchObject({ state: "active", origin: "droplet", sourceKind: "camera" });
+    expect(rowOf(w, LOCK)).toEqual(lockBefore);
+    expect(w.links.filter((l) => l.origin === "droplet").map((l) => l.sourceKind)).toEqual(["camera"]);
+    expect(w.log.some((l) => l.includes(LOCK))).toBe(false);
+  });
+
+  it("a lock link still counts toward the area's 32 active links (the cap is per area, whatever the kind)", async () => {
+    const w = world();
+    w.links.push(lockLink());
+    for (let i = 0; i < 30; i += 1) w.links.push(link("z-stock", `filler_${i}`)); // cam_a + lock + 30 = 32 active
+    await runOn(w);
+    expect(rowOf(w, "cam_b")).toMatchObject({ state: "proposed" });
+  });
+
+  it("a lock row on the feed (camera NULL) is not a sighting: it feeds no co-occurrence", async () => {
+    const w = world();
+    w.links.push(lockLink());
+    w.events.push({ kind: "lock_state", camera: null, labels: [], cameraZones: [], startedAt: new Date(FROM + 2 * H), endedAt: null });
+    const { summary } = await runOn(w);
+    const clean = world();
+    clean.links.push(lockLink());
+    const { summary: baseline } = await runOn(clean);
+    expect(summary.scored).toBe(baseline.scored);
+    expect(w.links.map((l) => `${l.sourceRef}:${l.state}`)).toEqual(clean.links.map((l) => `${l.sourceRef}:${l.state}`));
   });
 });
 
@@ -694,6 +759,155 @@ describe("the `links` health row (§6.15)", () => {
   });
 });
 
+// ── P4 PR-4: lock anchors (§6.2.1–§6.2.3, D31) ───────────────────────────────
+
+const LOCK = "matter:4660/1";
+/** What P2b PR-2's own writer marks as `baseline` for a row after `prevId` (null: no earlier stored reading). */
+const BASELINE = (prevId: string | null, reading: string) =>
+  lockRowDraft({ obs: { nodeId: "4660", endpointId: 1, ref: LOCK, reading: reading as LockReading }, prevId, name: "Back door lock", via: "live", at: new Date(FROM) }).baseline;
+
+/** A live lock change (after an earlier row) at `at`, unless said otherwise. */
+const turn = (at: number, over: Partial<LockEv> = {}): LockEv => ({
+  sourceRef: LOCK,
+  labels: [over.labels?.[0] ?? "unlocked"],
+  observed: "live",
+  baseline: false,
+  startedAt: new Date(at),
+  ...over,
+});
+
+/** `n` lock changes, 3 h apart; every camera in `linked` sees someone 2 s after each. */
+function lockTraffic(linked: string[], n = 20, over: Partial<LockEv> = {}): { locks: LockEv[]; events: Ev[] } {
+  const locks: LockEv[] = [];
+  const events: Ev[] = [];
+  for (let i = 0; i < n; i += 1) {
+    const t = FROM + 2 * H + i * (3 * H + 7 * MIN);
+    locks.push(turn(t, { labels: [i % 2 === 0 ? "unlocked" : "locked"], ...over }));
+    for (const cam of linked) events.push(person(cam, t + 2 * S));
+  }
+  return { locks, events };
+}
+
+/** The Back door area, its lock linked by a person; cam_b sees someone at every lock change. */
+function lockWorld(over: Partial<LockEv> = {}): World {
+  const { locks, events } = lockTraffic(["cam_b"], 20, over);
+  return world({
+    zones: [{ id: "z-back", name: "Back door", state: "active", version: 2 }],
+    links: [link("z-back", LOCK, { sourceLabel: "Smart Lock (as linked)" })],
+    events,
+    locks,
+  });
+}
+
+const KNOWN = [{ ref: LOCK, name: "Back door lock" }];
+
+describe("P4 PR-4 — a person-linked lock's changes anchor (lock ↔ camera)", () => {
+  it("a camera that sees someone within 10 s of the lock's LIVE changes becomes 'Linked by Droplet' — lock_camera evidence, one direction", async () => {
+    const w = lockWorld();
+    const { summary } = await runOn(w, { knownLocks: () => KNOWN });
+    const b = rowOf(w, "cam_b", "z-back")!;
+    expect(b).toMatchObject({ state: "active", origin: "droplet", stateSetBy: "droplet", sourceKind: "camera", sourceLabel: "Stock cam B" });
+    const e = parseLinkEvidence(b.evidence)!;
+    expect(e).toMatchObject({
+      kind: "lock_camera",
+      reverse: null,
+      chosen: "whole",
+      gate: "auto",
+      anchor: { sourceKind: "lock", sourceRef: LOCK, label: "Back door lock" },
+      candidate: { sourceKind: "camera", sourceRef: "cam_b", label: "Stock cam B" },
+    });
+    expect(e.forward).toMatchObject({ n: 20, k: 20 });
+    expect(summary).toMatchObject({ activated: 1, scored: 1 });
+    expect(audit.calls).toEqual([
+      expect.objectContaining({
+        action: "link.activated",
+        what: 'Security: Droplet linked Stock cam B to the area "Back door"',
+        refs: expect.objectContaining({ kind: "lock_camera", sourceKind: "camera", sourceRef: "cam_b", gate: "auto", from: "none" }),
+      }),
+    ]);
+  });
+
+  it("🔴 POLLED lock rows are never anchors: the same changes, found by the 60 s check, link nothing", async () => {
+    const w = lockWorld({ observed: "polled" });
+    const { summary } = await runOn(w, { knownLocks: () => KNOWN });
+    expect(rowOf(w, "cam_b", "z-back")).toBeUndefined();
+    expect(summary.scored).toBe(0);
+  });
+
+  it("the BASELINE row is never an anchor — the explicit `baseline` column, as P2b PR-2's own writer sets it (`lockRowDraft`, no earlier row)", async () => {
+    expect(BASELINE(null, "locked")).toBe(true);
+    expect(BASELINE("42", "locked")).toBe(false);
+    const w = lockWorld();
+    for (const l of w.locks!) l.baseline = BASELINE(null, l.labels[0]!);
+    await runOn(w, { knownLocks: () => KNOWN });
+    expect(rowOf(w, "cam_b", "z-back")).toBeUndefined();
+  });
+
+  it("only a lock TURNING anchors: not_fully_locked and unknown readings are not", async () => {
+    for (const reading of ["not_fully_locked", "unknown"]) {
+      const w = lockWorld({ labels: [reading] });
+      await runOn(w, { knownLocks: () => KNOWN });
+      expect(rowOf(w, "cam_b", "z-back"), reading).toBeUndefined();
+    }
+  });
+
+  it("the lock rows are read once, by source, kind and the window — every other rule is the one pure predicate's", async () => {
+    const w = lockWorld();
+    const { prisma } = await runOn(w, { knownLocks: () => KNOWN });
+    const lockQuery = prisma.securityEvent.findMany.mock.calls.map((c: unknown[]) => c[0]).find((a: { where: { kind: unknown } }) => a.where.kind === "lock_state");
+    expect(lockQuery).toEqual({
+      where: {
+        source: "matter_lock",
+        kind: "lock_state",
+        startedAt: { gte: new Date(FROM - 30 * MIN), lte: new Date(NOW.getTime() - 15 * MIN) },
+      },
+      select: { sourceRef: true, labels: true, observed: true, baseline: true, startedAt: true },
+    });
+  });
+
+  it("a lock link Droplet set on its own is never an anchor", async () => {
+    const w = lockWorld();
+    w.links[0] = { ...w.links[0]!, origin: "droplet", stateSetBy: "droplet", evidence: { v: 1 }, confidence: 0.6, rulesVersion: 1, evidenceAt: NOW };
+    await runOn(w, { knownLocks: () => KNOWN });
+    expect(rowOf(w, "cam_b", "z-back")).toBeUndefined();
+  });
+
+  it("camera anchor → the lock: a LOCK candidate, its sourceLabel the lock's device-list name, snapshotted", async () => {
+    // cam_a (person-linked to the Stock room) sees someone 2 s before every lock change.
+    const { locks, events } = lockTraffic([], 20);
+    const w = world({ events: [...events, ...locks.map((l) => person("cam_a", l.startedAt.getTime() - 2 * S))], locks });
+    await runOn(w, { knownLocks: () => KNOWN });
+    const lock = rowOf(w, LOCK)!;
+    expect(lock).toMatchObject({ state: "active", origin: "droplet", sourceKind: "lock", sourceLabel: "Back door lock" });
+    expect(parseLinkEvidence(lock.evidence)).toMatchObject({ kind: "lock_camera", chosen: "lock", anchor: { sourceKind: "camera", sourceRef: "cam_a" }, candidate: { sourceKind: "lock", label: "Back door lock" } });
+    expect(audit.calls.map((a) => a.what)).toContain('Security: Droplet linked Back door lock to the area "Stock room"');
+  });
+
+  it("the lock's name: the device list's, else the snapshot a person's link of it holds, else 'Lock …<last 4>'", async () => {
+    const { locks, events } = lockTraffic([], 20);
+    const withCam = () => world({ events: [...events, ...locks.map((l) => person("cam_a", l.startedAt.getTime() - 2 * S))], locks });
+    const none = withCam();
+    await runOn(none, {});
+    expect(rowOf(none, LOCK)!.sourceLabel).toBe("Lock …4660");
+    const snap = withCam();
+    snap.zones.push({ id: "z-hall", name: "Hall", state: "active", version: 0 });
+    snap.links.push(link("z-hall", LOCK, { sourceLabel: "Hall door lock" }));
+    await runOn(snap, { knownLocks: () => [] });
+    expect(rowOf(snap, LOCK)!.sourceLabel).toBe("Hall door lock");
+  });
+
+  it("a lock the area already holds a row on — removed, rejected, or a person's — is never proposed again", async () => {
+    const { locks, events } = lockTraffic([], 20);
+    for (const state of ["removed", "rejected"] as const) {
+      const w = world({ events: [...events, ...locks.map((l) => person("cam_a", l.startedAt.getTime() - 2 * S))], locks });
+      w.links.push(link("z-stock", LOCK, { state, origin: state === "rejected" ? "droplet" : "person", stateSetBy: "person" }));
+      await runOn(w, { knownLocks: () => KNOWN });
+      expect(rowOf(w, LOCK)!.state, state).toBe(state);
+      expect(audit.calls.filter((a) => a.refs.sourceRef === LOCK), state).toEqual([]);
+    }
+  });
+});
+
 describe("registration and the tick", () => {
   it("scheduleInterval(1 h, …, {lockKey}) and registeredAt — the boot assertion", () => {
     const scheduleInterval = vi.fn();
@@ -703,6 +917,24 @@ describe("registration and the tick", () => {
     expect(scheduleInterval.mock.calls[0]![0]).toBe(SECURITY_LINK_INTERVAL_MS);
     expect(scheduleInterval.mock.calls[0]![2]).toEqual({ lockKey: SECURITY_LINK_LOCK_KEY });
     expect(linkHealthState().registeredAt).toBeInstanceOf(Date);
+  });
+
+  it("PR-4: the registered tick names a lock candidate from the running lock adapter's list", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+    try {
+      const scheduleInterval = vi.fn();
+      const { locks, events } = lockTraffic([], 20);
+      const w = world({ events: [...events, ...locks.map((l) => person("cam_a", l.startedAt.getTime() - 2 * S))], locks });
+      const { prisma } = fake(w);
+      const knownLocks = vi.fn(() => KNOWN);
+      registerSecurityLinkJobs({ scheduleInterval }, prisma, { knownLocks });
+      await scheduleInterval.mock.calls[0]![1]();
+      expect(knownLocks).toHaveBeenCalled();
+      expect(rowOf(w, LOCK)).toMatchObject({ sourceLabel: "Back door lock" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a completed tick records lastOkAt and lastRun; a throw records a fixed reason (never the raw error) and rethrows", async () => {

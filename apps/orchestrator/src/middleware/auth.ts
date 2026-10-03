@@ -601,6 +601,18 @@ function matchServiceToken(token: string): AuthUser | null {
 }
 
 /**
+ * WARP-3452 — whether `req`'s header bearer is exactly the service token of
+ * principal `serviceId`, through the same constant-time matcher as
+ * authMiddleware. For the one check that runs BEFORE authMiddleware: the
+ * per-IP limiter's exemption for ai-gateway's `/llm/` introspection calls
+ * (routes/llm-access.ts).
+ */
+export function bearerIsServicePrincipal(req: Request, serviceId: string): boolean {
+  const header = req.headers.authorization;
+  return !!header?.startsWith("Bearer ") && matchServiceToken(header.slice(7))?.id === serviceId;
+}
+
+/**
  * WARP-237: ACL denials are mandatory-emit policy violations. Fire-and-forget
  * (`void`) — the 403 must not wait on the append lock, and recordActivity is
  * a no-op pre-init so this is safe in every test/boot ordering. Known

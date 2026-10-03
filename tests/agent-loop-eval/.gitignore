@@ -1,0 +1,3 @@
+# Run output (bench-box.sh, run.mts, the selftest). Dated reports are copied
+# into the PR or ticket that cites them, not committed.
+runs/

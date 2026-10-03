@@ -26,7 +26,7 @@ import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../../middleware/auth.js";
-import { guestAssignedInProject, guestAssignedWorkItem } from "../../middleware/guest-share.js";
+import { guestAssignedInProject, guestAssignedWorkItem, ownAssignments } from "../../middleware/guest-share.js";
 import * as pm from "../../services/pm/pm.service.js";
 import { actorOf } from "./actor.js";
 import { listRelationsFor } from "../../services/pm/pm-relations.service.js";
@@ -508,6 +508,29 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
       }
     },
   );
+
+  // WARP-3407 — the caller's OWN assigned work items, across projects (newest
+  // change first). The one list an external guest gets: it is how they find
+  // the items shared with them by assignment (WARP-3369), and it names nothing
+  // else. Every role may read their own; `ownAssignments` pins the caller's id
+  // and nothing in the query can change whose items are listed.
+  router.get("/pm/assigned-to-me", ownAssignments(), async (req, res, next) => {
+    try {
+      const pageParsed = paginationQuerySchema.safeParse({
+        per_page: req.query.per_page,
+        page: req.query.page,
+      });
+      if (!pageParsed.success) return badRequest(res, pageParsed);
+      const work_items = await pm.listAssignedWorkItems(prisma, String(res.locals.assigneeId), {
+        perPage: pageParsed.data.per_page,
+        page: pageParsed.data.page,
+      });
+      res.json({ work_items });
+    } catch (err) {
+      if (mapServiceError(err, res)) return;
+      next(err);
+    }
+  });
 
   // Workspace-wide search (backs pm_search_work_items). Registered before the
   // /:id route — distinct path, no conflict.

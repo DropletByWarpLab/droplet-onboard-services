@@ -6,9 +6,16 @@
  *
  * WARP-2980 PR-B (spec D16; review items 2, 3): who sees a pattern flag, and
  * what a viewer can judge.
+ *
+ * WARP-2977 × WARP-2981: the rack's viewer (`WHOLE_SITE`) reads door locks,
+ * and the list's SQL never reads `mayReadLocks`, so that choice cannot move
+ * the rack's number.
  */
 import { describe, expect, it } from "vitest";
 import { QUIET_MS, SETTLE_MS } from "../lib/security-rules.js";
+import { REPEATABLE_READ_TX } from "../lib/prisma-tx.js";
+import { readPackageFile } from "../__tests__/helpers/test-paths.js";
+import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
 import {
   flagCamerasVisible,
   flagVisible,
@@ -16,7 +23,9 @@ import {
   seesEverything,
   type FlagForView,
   incidentListWhere,
+  type IncidentListFilters,
   incidentVisibilityWhere,
+  panelOpenIncidents,
   projectIncident,
   projectedLastActivity,
   reasonVisibleTo,
@@ -30,8 +39,8 @@ const T = new Date("2026-09-23T21:14:00Z");
 const plus = (d: Date, ms: number) => new Date(d.getTime() + ms);
 const NOW = plus(T, 60_000);
 
-const owner: IncidentViewer = { userId: "u-owner", visibleCameras: "all", mayReadThreats: true, ownerOrAdmin: true };
-const frontOnly: IncidentViewer = { userId: "u-maria", visibleCameras: new Set(["front"]), mayReadThreats: false, ownerOrAdmin: false };
+const owner: IncidentViewer = { userId: "u-owner", visibleCameras: "all", mayReadThreats: true, mayReadLocks: true, ownerOrAdmin: true };
+const frontOnly: IncidentViewer = { userId: "u-maria", visibleCameras: new Set(["front"]), mayReadThreats: false, mayReadLocks: false, ownerOrAdmin: false };
 
 function incident(over: Partial<IncidentRowForView> = {}): IncidentRowForView {
   return {
@@ -271,7 +280,7 @@ describe("the list's SQL mirrors the projection (DS-005 in the query, visibility
 
   it("a visible reason is one on a visible camera (or a site-wide one on a visible incident)", () => {
     expect(visibleReasonWhere(owner)).toEqual({});
-    // WARP-2979 — plus the reason's related camera (where a person was seen) and, until PR-4's mayReadLocks, no related lock.
+    // WARP-2979 — plus the reason's related camera (where a person was seen) and (PR-4) no related lock without mayReadLocks.
     expect(visibleReasonWhere(frontOnly)).toEqual({
       AND: [
         { OR: [{ evidenceCamera: { in: ["front"] } }, { evidenceCamera: null }] },
@@ -327,6 +336,67 @@ describe("the list's SQL mirrors the projection (DS-005 in the query, visibility
         { reasons: { none: { AND: [visibleReasonWhere(frontOnly), { severity: "alert" }] } } },
       ],
     });
+  });
+});
+
+describe("WARP-2977 × WARP-2981 — the rack's viewer and door locks (D20, D21)", () => {
+  const STATES: IncidentListFilters["state"][] = ["attention", "open", "acknowledged", "resolved", "activity", "all"];
+  /** `v` with a `mayReadLocks` that throws when read. */
+  const lockBlind = (v: IncidentViewer): IncidentViewer =>
+    Object.defineProperty({ ...v }, "mayReadLocks", {
+      enumerable: true,
+      get() {
+        throw new Error("incidentListWhere read mayReadLocks");
+      },
+    });
+
+  it("lock rows never form an incident (D21): incidentListWhere names no lock row — mayReadLocks only hides a reason that NAMES a lock (P4 PR-4, D12)", () => {
+    for (const v of [owner, frontOnly]) {
+      for (const state of STATES) {
+        for (const severity of [undefined, "alert", "notice"] as const) {
+          const f: IncidentListFilters = severity ? { state, severity } : { state };
+          for (const mayReadLocks of [true, false]) {
+            const where = JSON.stringify(incidentListWhere({ ...v, mayReadLocks }, f));
+            const at = `${v.userId} ${state} ${severity ?? "-"} locks=${mayReadLocks}`;
+            expect(where, at).not.toMatch(/matter_lock|lock_state|sourceRef/);
+            // The reason clause: present exactly for a viewer without Devices view (when a reason is read at all).
+            if (mayReadLocks) expect(where, at).not.toContain("relatedLock");
+          }
+          // Reading it is the whole rule: a viewer whose lock view cannot be read is never guessed.
+          expect(() => incidentListWhere(lockBlind(v), f)).toThrow(/mayReadLocks/);
+        }
+      }
+    }
+  });
+
+  it("panelOpenIncidents counts over the owner's where — the whole box, lock-related reasons included", async () => {
+    const wheres: unknown[] = [];
+    const tx = { securityIncident: { count: async ({ where }: { where: unknown }) => (wheres.push(where), 0) } };
+    // The shared transaction seam (WARP-1570): it records the isolation
+    // level the read asks for, which a hand-rolled `$transaction` discards.
+    const seam = createTransactionSeam({ client: () => tx });
+    expect(await panelOpenIncidents({ $transaction: seam.$transaction } as never)).toEqual({ open: 0, alerts: 0 });
+    expect(seam.calls()).toEqual([REPEATABLE_READ_TX]);
+    const v = { ...owner, mayReadLocks: true };
+    expect(wheres).toEqual([incidentListWhere(v, { state: "attention" }), incidentListWhere(v, { state: "attention", severity: "alert" })]);
+    expect(wheres).not.toEqual([
+      incidentListWhere({ ...owner, mayReadLocks: false }, { state: "attention" }),
+      incidentListWhere({ ...owner, mayReadLocks: false }, { state: "attention", severity: "alert" }),
+    ]);
+  });
+
+  it("WHOLE_SITE sets mayReadLocks: true, deliberately — the owner's whole box, with the reason beside it", () => {
+    // Normalised: a Windows checkout (core.autocrlf) has CRLF line ends.
+    const src = readPackageFile("src", "services", "security-incident-view.ts").replace(/\r\n/g, "\n");
+    const literal = /const WHOLE_SITE: Required<IncidentViewer> = \{([^}]*)\};/.exec(src)?.[1];
+    expect(literal, "the WHOLE_SITE literal").toBeDefined();
+    // P4 PR-4: no longer inert — a lock-related reason (D12) counts only with mayReadLocks.
+    expect(literal).toMatch(/^\s*\/\/ .*\(D20\).*\(D21\).*lock-related reason counts \(P4 PR-4 D12\)\.\n\s*mayReadLocks: true,$/m);
+  });
+
+  it("P4 PR-4: the rack counts a lock-related alert — WHOLE_SITE's where does not hide `relatedLock` reasons", () => {
+    const where = JSON.stringify(incidentListWhere({ ...owner, userId: "_service:display" }, { state: "attention", severity: "alert" }));
+    expect(where).not.toContain("relatedLock");
   });
 });
 
@@ -416,10 +486,38 @@ describe("reasonVisibleTo — the one rule, with the camera where a person was s
     expect(reasonVisibleTo(dropped("front", "back"), owner, false)).toBe(true);
   });
 
-  it("a related lock is shown only to a viewer who sees every camera (PR-4 makes it mayReadLocks)", () => {
+  it("P4 PR-4 (DS-019): a related lock is shown only with mayReadLocks — never by the camera grant alone", () => {
     const lock = { ...dropped("front", null), relatedLock: true };
-    expect(reasonVisibleTo(lock, frontOnly, false)).toBe(false);
     expect(reasonVisibleTo(lock, owner, false)).toBe(true);
+    // Every camera, narrowed off Devices: hidden.
+    expect(reasonVisibleTo(lock, { ...owner, mayReadLocks: false }, false)).toBe(false);
+    // One camera, with Devices: shown, as long as the dropped camera is hers.
+    expect(reasonVisibleTo(lock, { ...frontOnly, mayReadLocks: true }, false)).toBe(true);
+    expect(reasonVisibleTo({ ...lock, evidenceCamera: "back" }, { ...frontOnly, mayReadLocks: true }, false)).toBe(false);
+    expect(reasonVisibleTo(lock, frontOnly, false)).toBe(false);
+    // A scope that does not say reads as "may not" (fail closed).
+    expect(reasonVisibleTo(lock, { visibleCameras: "all" }, false)).toBe(false);
+  });
+
+  it("P4 PR-4: projectIncident hides a lock-related reason from an owner/admin narrowed off Devices — the visible severity drops, a PARTIAL view", () => {
+    const lock = { ...dropped("front", null), relatedLock: true };
+    const reasons = [lock, reason("camera_offline", "front", "notice")];
+    const narrowed = projectIncident(incident({ reasonCodes: ["camera_offline", "camera_offline_during_activity"] }), reasons, { ...owner, mayReadLocks: false }, NOW)!;
+    expect(narrowed).toMatchObject({ codes: ["camera_offline"], severity: "notice", partial: true, actionable: false });
+    const full = projectIncident(incident({ reasonCodes: ["camera_offline", "camera_offline_during_activity"] }), reasons, owner, NOW)!;
+    expect(full).toMatchObject({ codes: ["camera_offline", "camera_offline_during_activity"], severity: "alert", partial: false });
+  });
+
+  it("P4 PR-4: the list's SQL twin — `relatedLock: false` for every viewer without mayReadLocks, every camera or not; a viewer who sees every camera AND the locks is never partial", () => {
+    expect(visibleReasonWhere(owner)).toEqual({});
+    expect(visibleReasonWhere({ ...owner, mayReadLocks: false })).toEqual({ relatedLock: false });
+    expect(JSON.stringify(visibleReasonWhere({ ...frontOnly, mayReadLocks: true }))).not.toContain("relatedLock");
+    // Never-partial is only for who sees everything a reason can name: the plain `open` filter for the owner…
+    expect(incidentListWhere(owner, { state: "open" })).toEqual({ AND: [{}, { state: "open", reasons: { some: {} } }] });
+    // …the partial-aware one for an owner/admin narrowed off Devices.
+    const narrowed = JSON.stringify(incidentListWhere({ ...owner, mayReadLocks: false }, { state: "open" }));
+    expect(narrowed).toContain('"state":{"in":["open","acknowledged"]}');
+    expect(narrowed).toContain('"relatedLock":false');
   });
 
   it("projectIncident uses it: the reason drops out, and the visible severity with it — a PARTIAL view, never actionable", () => {

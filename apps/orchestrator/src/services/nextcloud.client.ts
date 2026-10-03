@@ -1000,19 +1000,32 @@ export async function ncLoginWithCredentials(
   }
 }
 
-export async function ncDeleteAppPassword(token: string): Promise<void> {
-  if (token.startsWith("basic:")) return; // Basic auth tokens can't be revoked
+/**
+ * Delete an app password upstream. Never throws; the answer is whether
+ * Nextcloud CONFIRMED it (HTTP 2xx). `false` means the credential may still be
+ * live: refused, unreachable, timed out, already expired, or — the leaver
+ * case — its owner's account is disabled, so the token can no longer
+ * authenticate its own deletion. Callers that report an outcome must read it
+ * (WARP-3383); the session-logout callers ignore it on purpose.
+ */
+export async function ncDeleteAppPassword(token: string): Promise<boolean> {
+  if (token.startsWith("basic:")) return false; // Basic auth tokens can't be revoked
 
   try {
-    await fetch(ocsUrl("/ocs/v2.php/core/apppassword"), {
+    const resp = await fetch(ocsUrl("/ocs/v2.php/core/apppassword"), {
       method: "DELETE",
       headers: {
         Authorization: `Bearer ${token}`,
         "OCS-APIRequest": "true",
       },
+      // A hung Nextcloud must not stall the lifecycle post-effects (WARP-3384)
+      // that sweep a leaver's devices serially.
+      signal: AbortSignal.timeout(8000),
     });
+    return resp.ok;
   } catch {
     // Non-fatal — token might already be expired
+    return false;
   }
 }
 

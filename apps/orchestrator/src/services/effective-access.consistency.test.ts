@@ -78,6 +78,7 @@ const CFG: AvailabilityConfig = {
   DROPLET_MATTER_SERVICE_URL: "http://matter:8100",
   ROUTING_SERVICE_URL: "http://routing:8000",
   SWITCH_SERVICE_URL: "http://switch:8000",
+  DOORS_ENABLED: "1",
 };
 
 // ── the slice of state the resolver reads ──────────────────────────

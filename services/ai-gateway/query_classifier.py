@@ -1,9 +1,11 @@
 """WARP-437 — Deberta zero-shot query classifier singleton.
 
-Mirrors the lazy-init pattern of `reranker.RerankerSingleton`. Model is
-~110 MB int8 ONNX, cached to /var/cache/droplet/models/. First call
-pays the load cost; subsequent calls are CPU-bound NLI scoring (~50 ms
-on x86_64 / the inference host).
+Mirrors the lazy-init pattern of `reranker.RerankerSingleton`. The model is
+baked into the image under /var/cache/droplet/models/ at
+`CLASSIFIER_MODEL_REVISION` (WARP-3426: the gateway runs with
+HF_HUB_OFFLINE=1 and never downloads at runtime). First call pays the load
+cost; subsequent calls are CPU-bound NLI scoring (~50 ms on x86_64 / the
+inference host).
 
 Returns one of QUERY_CLASSES, or "unknown" when top-1 confidence is
 below CLASSIFIER_CONFIDENCE_FLOOR (we don't route on noise — CLAUDE.md
@@ -20,6 +22,8 @@ from typing import Optional, Tuple
 logger = logging.getLogger(__name__)
 
 CLASSIFIER_MODEL_ID = "MoritzLaurer/deberta-v3-base-zeroshot-v2.0"
+# WARP-3426: the Hub commit the image bakes (never a branch; runtime is offline).
+CLASSIFIER_MODEL_REVISION = "8e7e5af5983a0ddb1a5b45a38b129ab69e2258e8"
 CLASSIFIER_CACHE_DIR = Path("/var/cache/droplet/models/query-classifier")
 
 QUERY_CLASSES: Tuple[str, ...] = (
@@ -49,6 +53,7 @@ class QueryClassifierSingleton:
         self._pipeline = pipeline(
             "zero-shot-classification",
             model=CLASSIFIER_MODEL_ID,
+            revision=CLASSIFIER_MODEL_REVISION,
             device=-1,  # CPU
             # WARP-437: explicit cache_dir — relying on HF_HOME would collide
             # with RerankerSingleton's os.environ.setdefault on the same env var.

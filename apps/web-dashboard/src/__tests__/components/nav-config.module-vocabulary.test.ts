@@ -54,6 +54,9 @@ const MODULE_IDS: readonly AccessModuleId[] = [
   "money",
   // WARP-2977 — /security is gated on it in the Operations group.
   "security",
+  // ADR-055 P4b — /doors is gated on it in the Systems group. It ships dark:
+  // the orchestrator lists it only while DOORS_ENABLED is on.
+  "doors",
 ];
 
 /** Every `requiresModule` in the tree, parents and children alike. */

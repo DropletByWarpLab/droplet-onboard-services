@@ -318,6 +318,15 @@ const TURNS: Turn[] = [
     message: "is it normal for someone to be in the stock room at 2 AM?",
     requires: "security_explain_pattern",
   },
+  {
+    // ADR-055 P4b. The box-proof sentence for the doors tools, run through the
+    // REAL shipping pool: a rule is not enough if the tool were excluded from
+    // chat (the old "until WARP-2972" exclusion), so this fails if either is
+    // missing.
+    label: "doors / is a door open",
+    message: "is the front door open?",
+    requires: "doors_list",
+  },
   // WARP-3280 — two sentences from the agent-loop eval that matched NO
   // domain, so the model never had the tool: it answered "no contact found"
   // without searching, and did the multiplication in its head. Run through

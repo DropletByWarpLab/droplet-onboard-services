@@ -120,6 +120,10 @@ export const FEATURE_GATED_MODULES: ReadonlySet<ModuleId> = new Set<ModuleId>([
   // WARP-2977 (ADR-059 §6) — gated from the day it exists, so a custom role
   // narrowed away from Security never reaches `/api/security`.
   "security",
+  // ADR-055 (P4a) — gated from the day it exists, exactly as `security` was:
+  // a role narrowed away from Doors never reaches `/api/doors`. `/api/doors`
+  // nests inside no other module's prefix, so `gateScopeFor` is null for it.
+  "doors",
 ]);
 
 /**
@@ -258,8 +262,24 @@ export function mountModuleGates(
  * could read the company's receivables and payables by asking the assistant.
  * Its one hop is under `/api/money` (the same test pins it). Money is
  * feature-gated for humans, so the gate asks question 2 as well.
+ *
+ * ADR-055 P4b (WARP-3438) — `doors`: `doors_list` and `doors_recent_events` reach
+ * routes/doors.ts as `_service:mcp`, and access logs identify people entering
+ * places at times, so the assistant must never read more than the person it
+ * acts for could. Both tools are reads and every `doors` hop is under
+ * `/api/doors` (the same test pins it). The doors read routes floor at
+ * owner/admin for a human, and `requireRoleOrMcpService` admits `_service:mcp`
+ * before any role check, so the tier floor is asked of the ACTING person here:
+ * the access catalog's `view` for doors is a refusal below admin
+ * (`refuseBelowFloor`), the one fact `requireModuleTierFloor` applies to a
+ * browser and this gate applies to the assistant, so a family or guest person
+ * cannot ask for what their browser refuses (mcp-acting-user-gate.test.ts and
+ * doors-negative-suite.test.ts pin it, and pin that the route's role list is the
+ * same fact). Doors is feature-gated for humans, so question 2 (the person's
+ * `doors` grant) is asked too. There is no write hop to gate: the write routes
+ * admit no service principal at all (§11.5).
  */
-export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business", "email", "team_chat", "security", "money"];
+export const MCP_ACTING_USER_GATED_DOMAINS: readonly string[] = ["business", "email", "team_chat", "security", "money", "doors"];
 
 /** Mount after `mountModuleGates` (and therefore after `authMiddleware`). */
 export function mountMcpActingUserGates(

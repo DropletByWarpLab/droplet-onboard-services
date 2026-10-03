@@ -140,7 +140,7 @@ vi.mock("@prisma/client", () => {
   }).$transaction;
 
   return {
-    PrismaClient: vi.fn(() => mockPrisma),
+    PrismaClient: vi.fn(function () { return mockPrisma; }),
     Prisma: { PrismaClientKnownRequestError },
   };
 });

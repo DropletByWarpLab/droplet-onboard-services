@@ -3,6 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createServer, type TrustContext } from "../src/server.js";
 import type { ContextDeps } from "../src/context.js";
+import { NO_MODULE_GATING } from "../src/module-verdict.js";
 
 /**
  * WARP-3116 — the dashboard's page list rides `_meta.dashboardPages` from
@@ -23,7 +24,7 @@ const deps: ContextDeps = {
 };
 
 async function connect(trust: TrustContext) {
-  const server = createServer(deps, trust);
+  const server = createServer(deps, trust, { moduleVerdict: NO_MODULE_GATING });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "meta-dashboard-pages-test", version: "0.0.1" }, { capabilities: {} });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

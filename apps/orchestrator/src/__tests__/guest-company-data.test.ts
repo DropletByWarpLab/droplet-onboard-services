@@ -88,6 +88,7 @@ const CFG: AvailabilityConfig = {
   DROPLET_MATTER_SERVICE_URL: "http://matter:8083",
   ROUTING_SERVICE_URL: "http://routing:8080",
   SWITCH_SERVICE_URL: "http://switch:8081",
+  DOORS_ENABLED: "1",
 };
 
 /** Every module switched ON box-wide: the workspace toggle is not what is under test. */
@@ -227,9 +228,10 @@ describe.each(SURFACES)("$label: every route, through the real module mount", (s
   it("an external guest is refused on EVERY route: 404 module_disabled, and the handler never runs — bar the requests declared as shared", async () => {
     const app = mountedWithStubs("guest", routes);
     const rows = await probeAll(app, routes);
-    // WARP-3369: a work item assigned to a guest is shared with them. The five
-    // requests in modules/guest-shares.ts get past the prefix floor to the
-    // route's own per-record guard (proved in guest-work-item-share.test.ts);
+    // WARP-3369: a work item assigned to a guest is shared with them. The six
+    // requests in modules/guest-shares.ts (five per record, plus their own list,
+    // WARP-3407) get past the prefix floor to the route's own guard (proved in
+    // guest-work-item-share.test.ts);
     // nothing else does, for Projects or for any other module.
     const shares = GUEST_SHARES[surface.module] ?? [];
     const isShared = (r: RouteRow): boolean =>
@@ -254,8 +256,8 @@ describe.each(SURFACES)("$label: every route, through the real module mount", (s
 });
 
 describe("the floor is exactly the catalog's refusal", () => {
-  it("is security, crm, projects and money — the modules a guest holds nothing on", () => {
-    expect([...tierRefusingModuleIds()].sort()).toEqual(["crm", "money", "projects", "security"]);
+  it("is security, crm, projects, money and doors — the modules a guest holds nothing on", () => {
+    expect([...tierRefusingModuleIds()].sort()).toEqual(["crm", "doors", "money", "projects", "security"]);
   });
 
   it("a guest still reaches every OTHER module's prefix (their shared files, Messages, own chats, the rest)", async () => {

@@ -22,6 +22,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { defaultToolCallInterceptor, type Tool } from "@droplet/tools-core";
 import { createServer, type ServerOptions } from "../src/server.js";
 import type { ContextDeps } from "../src/context.js";
+import { NO_MODULE_GATING } from "../src/module-verdict.js";
 
 function buildDeps(): ContextDeps {
   return {
@@ -58,7 +59,7 @@ function syntheticRemoteTool() {
 }
 
 async function connect(options: ServerOptions) {
-  const server = createServer(buildDeps(), { kind: "local-trusted" }, options);
+  const server = createServer(buildDeps(), { kind: "local-trusted" }, { moduleVerdict: NO_MODULE_GATING, ...options });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "interceptor-test", version: "0.0.1" }, { capabilities: {} });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -493,7 +494,7 @@ describe("the real team-chat tools refuse an address nobody in the Workspace has
       matter: {} as never,
       httpFactory: () => orchestrator as never,
     };
-    const server = createServer(deps, { kind: "local-trusted" });
+    const server = createServer(deps, { kind: "local-trusted" }, { moduleVerdict: NO_MODULE_GATING });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "precheck-e2e", version: "0.0.1" }, { capabilities: {} });
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

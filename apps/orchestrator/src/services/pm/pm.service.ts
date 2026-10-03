@@ -1122,6 +1122,33 @@ export async function searchWorkItems(
   return rows.map((r) => mapWorkItem(r, r.project.identifier, r.project.department));
 }
 
+/** WARP-3407 — the work items assigned to ONE person, across projects, newest
+ *  change first. Backs `GET /pm/assigned-to-me`, which passes only the caller's
+ *  own id: for an external guest this is how they find the items shared with
+ *  them by assignment (WARP-3369), and it names nothing that isn't. */
+export async function listAssignedWorkItems(
+  prisma: PrismaClient,
+  userId: string,
+  opts: { perPage?: number; page?: number } = {},
+): Promise<ApiWorkItem[]> {
+  const perPage = Math.max(1, Math.min(200, opts.perPage ?? 100));
+  const page = Math.max(1, opts.page ?? 1);
+  const rows = await prisma.pmWorkItem.findMany({
+    where: { isArchived: false, assignees: { some: { userId } } },
+    // Spans projects, so it joins the project per row (searchWorkItems' rule).
+    include: {
+      ...WORK_ITEM_INCLUDE,
+      project: {
+        select: { identifier: true, department: { select: DEPARTMENT_SELECT } },
+      },
+    },
+    orderBy: { updatedAt: "desc" },
+    skip: (page - 1) * perPage,
+    take: perPage,
+  });
+  return rows.map((r) => mapWorkItem(r, r.project.identifier, r.project.department));
+}
+
 export async function createWorkItem(
   prisma: PrismaClient,
   actorId: string | null,

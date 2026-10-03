@@ -22,6 +22,7 @@ import {
   ChartColumn,
   Repeat,
   Cpu,
+  DoorOpen,
   Download,
   Film,
   FlaskConical,
@@ -50,6 +51,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   Stethoscope,
+  Terminal,
   Trash2,
   Clock,
   Share2,
@@ -580,6 +582,29 @@ export const NAV_GROUPS: NavGroup[] = [
           },
         ],
       },
+      // ADR-055 (P4b) — Doors: the doors this box knows about, what each last
+      // reported and when, and the log of what happened at them. Its own
+      // module (`doors`), which SHIPS DARK: DOORS_ENABLED is off by default and
+      // the module is then ABSENT from GET /api/modules rather than listed as
+      // off, so `isModuleEffective` treats "absent" as off for it and fails
+      // CLOSED while the probe is unresolved (see `ABSENT_UNLESS_LISTED` in
+      // lib/dark-modules.ts); the page is a plain 404 when off. Owner/admin only, mirroring
+      // the API's read floor (`DOORS_READ_ROLES`, services/doors-access.ts): the module's
+      // own grant is the only narrowing until door groups exist, and a page
+      // that would 403 for everyone else is not offered to them. The owner
+      // alone adds, changes and retires doors; the page shows those controls
+      // to no one else.
+      //
+      // The seventeenth top-level row, and the four-groups test's cap moves to
+      // 17 with it (WARP-2967's ≤ 14, plus Security, Workshop and this). It
+      // shows on no box until the flag is set.
+      {
+        href: "/doors",
+        label: "Doors",
+        icon: DoorOpen,
+        roles: ["owner", "admin"],
+        requiresModule: "doors",
+      },
       {
         href: "/network",
         label: "Network",
@@ -757,6 +782,21 @@ export const NAV_GROUPS: NavGroup[] = [
         settingsSection: "System",
         settingsBlurb: "Local models and any cloud provider you opted into",
       },
+      // WARP-3452 — personal tokens that let GitHub Copilot and other coding
+      // tools use the box's active model over `/llm/`. Beside Models, whose
+      // active model is what it serves. owner/admin/member mirrors the API: an
+      // external guest can never hold a token (GET /api/llm-access answers 403),
+      // so the row is not offered to them.
+      {
+        href: "/settings/coding-tools",
+        label: "Coding tools",
+        icon: Terminal,
+        roles: ["owner", "admin", "family"],
+        keywords: ["copilot", "api key", "token", "ollama", "vs code", "coding agent"],
+        hidden: true,
+        settingsSection: "System",
+        settingsBlurb: "Use the box's model from Copilot and other coding tools",
+      },
       // PR #382: appliance/service health status page. Reads the existing
       // WARP-43 aggregate.
       {
@@ -810,8 +850,10 @@ export const NAV_GROUPS: NavGroup[] = [
         settingsSection: "Advanced",
         settingsBlurb: "The signed record of everything the box did",
       },
-      // WARP-279: admin-only Activity log entry. Role-gated AND hidden unless
-      // GitHub/Jira is configured (capabilities.claudeActivity) — #14.
+      // WARP-279: admin-only Activity log entry. Role-gated AND absent unless the
+      // box runs with the developer flag DROPLET_DEV_ENGINEERING_DASHBOARD and
+      // GitHub/Jira is configured (capabilities.claudeActivity) — #14, WARP-3433.
+      // Warp Lab's own engineering dashboard: no customer box ever shows it.
       {
         href: "/admin/claude-activity",
         label: "Activity",

@@ -28,6 +28,7 @@ export interface AvailabilityConfig {
   DROPLET_MATTER_SERVICE_URL: string;
   ROUTING_SERVICE_URL: string;
   SWITCH_SERVICE_URL: string;
+  DOORS_ENABLED: unknown; // ADR-055 — string "1"/"true"/… or boolean, normalized by isTruthy
 }
 
 const isSet = (v: string | undefined | null): boolean => !!(v && v.trim().length > 0);
@@ -90,6 +91,23 @@ export interface ModuleDef {
   ownedPaths?: string[];
   /** Fallback enablement when there's no ModuleSetting row and no preset applied. */
   defaultEnabled: boolean;
+  /**
+   * ADR-055 — does Settings → Features still list this module on a box where it
+   * is NOT available? `true` (what a module that leaves the field out gets) keeps
+   * the greyed "Not installed on this Droplet" row that tells an operator the
+   * capability exists. `false` makes the module ABSENT until `available` is true
+   * — no row at all — for a module whose existence is not yet something
+   * customers are offered (doors ships dark while AC-001, product line or
+   * feature, is undecided).
+   *
+   * An explicit flag, never derived: "unavailable" says the backend is not
+   * deployed, and "not listed" says the product is not on offer. Those are two
+   * facts, and the second is a decision someone makes per module, not something
+   * to be inferred from the first or from the module's id. It filters the
+   * operator's VIEW only (`getModulesView`); effectiveness, gates and the
+   * toggle's own rejection still read `available`.
+   */
+  listedWhenUnavailable?: boolean;
   /** Availability signal, reusing the existing deploy-time config reads. NOTE:
    *  modules gated only by a URL with a non-empty default (files/cameras/network/
    *  switch/knowledge) read as always-available in v1 — a health-probe refinement
@@ -301,6 +319,37 @@ export const MODULES: readonly ModuleDef[] = [
     category: "operations", routePrefixes: ["/api/security"], navHrefs: ["/security"],
     toolDomains: ["security"], core: false, defaultEnabled: false,
     available: () => true, // native to the orchestrator; threats need no camera
+  },
+  {
+    // ADR-055 (P4a) — doors: the access points a box knows about and the
+    // append-only log of what happened at them. Named `doors`, never `access`:
+    // /api/access, routes/access.ts and lib/access.ts are ADR-032's RBAC.
+    //
+    // SHIPS DARK. `available` reads DOORS_ENABLED, an EXPLICIT boolean (the
+    // DOCS_ENABLED idiom — never derived from another variable's emptiness),
+    // so a box that has not turned it on has NO doors module: /api/doors 404s
+    // `module_disabled`, the module cannot be switched on in Settings, it is
+    // not listed under Features, and the `doors` tool domain below is withheld
+    // from the chat pool, `/api/llm/tools` and MCP (WARP-2972). Absent, not
+    // empty.
+    //
+    // `navHrefs: ["/doors"]` — the dashboard page arrived with P4b, and the
+    // nav gates it on this module, so it is absent from every nav surface
+    // while the flag is off. It is in no BUSINESS_TYPES preset: a box that
+    // wants doors turns the flag on.
+    //
+    // `toolDomains: ["doors"]` — the two read-only assistant tools (P4b,
+    // WARP-3438), claimed in the same change that adds them (WARP-2742). The
+    // domain also joins `MODULE_OWNED_TOOL_DOMAINS` in @droplet/tools-core, which
+    // the mcp-server fails closed on (pinned by tool-module-verdict.service.test.ts).
+    id: "doors", label: "Doors",
+    description: "The doors this box knows about, and the log of what happened at them.",
+    category: "operations", routePrefixes: ["/api/doors"], navHrefs: ["/doors"],
+    toolDomains: ["doors"], core: false, defaultEnabled: false,
+    // Absent from Settings → Features while the flag is off: a product decision
+    // still open (AC-001) is not shown to a customer who was not offered it.
+    listedWhenUnavailable: false,
+    available: (c) => isTruthy(c.DOORS_ENABLED),
   },
   {
     id: "smart_home", label: "Devices",

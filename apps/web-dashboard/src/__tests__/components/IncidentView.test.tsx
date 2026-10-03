@@ -93,6 +93,7 @@ function member(over: Partial<IncidentMemberView> = {}): IncidentMemberView {
     endedAt: at("01:15"),
     summary: "Person in aisle",
     frigateEventId: "1727140000.1-person",
+    observed: "live",
     zones: [{ id: "z1", name: "Stock room" }],
     alsoIn: [],
     ...over,

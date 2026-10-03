@@ -13,10 +13,13 @@
  *     camera's offline/online rows). camera_zone `C/F` matches C's detections
  *     whose cameraZones include F, AND C's offline/online rows (an area
  *     watched through part of a view must still show its camera went blind).
+ *   · lock `matter:<node>/<ep>` (WARP-2977 P2b-2) matches that endpoint's
+ *     lock_state rows, by exact sourceRef (the `(sourceRef, startedAt)` index).
  *   · threat, source_offline/online and mode_changed rows are site-wide and
  *     never match an area.
  *   · DS-005 applied to places: an area whose every active link is hidden
  *     from the viewer is hidden entirely; an area with zero links is shown.
+ *     A lock link is visible only with `mayReadLocks` (DS-019).
  *   · `zoneEventWhere` never returns `{}` or `{OR: []}` — an empty visible
  *     link set is the sentinel "none", and the caller answers an empty page
  *     WITHOUT calling findMany.
@@ -57,9 +60,10 @@ import type {
   SecurityZoneSourceKind,
   SecurityZoneState,
 } from "@prisma/client";
-import type { SecurityViewerScope } from "./security-access.js";
+import type { SecurityViewerScope } from "./security-viewer-scope.js";
 import { FRIGATE_NAME, type SecurityEventKind, type SecurityEventSource } from "./security-event-ingest.js";
 import { auditSecurityInTx, chainSafeText, stripUnsafeDisplayChars } from "./security-audit.js";
+import { lockRef, parseLockRef } from "./security-lock-ref.js";
 import { READ_COMMITTED_TX } from "../lib/prisma-tx.js";
 import { linkEvidenceSources, parseLinkEvidence, type LinkEvidenceV1 } from "../lib/security-link-evidence.js";
 
@@ -75,7 +79,7 @@ export interface ActiveZoneLink {
   zoneName: string;
   zoneKind: SecurityZoneKind;
   sourceKind: SecurityZoneSourceKind;
-  /** camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`. */
+  /** camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`; lock: `matter:<nodeId>/<endpointId>`. */
   sourceRef: string;
   /**
    * WARP-2979 — who set the link's current (active) state: `person` for a link
@@ -86,12 +90,28 @@ export interface ActiveZoneLink {
   setBy: SecurityLinkActor;
 }
 
-/** What a link points at. PR-2 widens this with `{nodeId, endpointId}` for `lock`. */
-export interface ParsedLinkRef {
+/** A camera or camera_zone link's target. */
+export interface CameraLinkRef {
   camera: string;
   /** The Frigate zone for camera_zone; null for a whole-camera link. */
   frigateZone: string | null;
 }
+
+/** A lock link's target (WARP-2977 P2b-2): one Matter DoorLock endpoint. */
+export interface LockLinkRef {
+  nodeId: string;
+  endpointId: number;
+}
+
+/** What a link points at. */
+export type ParsedLinkRef = CameraLinkRef | LockLinkRef;
+
+export function isLockLinkRef(parsed: ParsedLinkRef): parsed is LockLinkRef {
+  return "nodeId" in parsed;
+}
+
+/** The scope a link filter reads: the camera grant and the lock gate (DS-005, DS-019). */
+export type LinkScope = Pick<SecurityViewerScope, "visibleCameras" | "mayReadLocks">;
 
 /** The fields of a stored SecurityEvent the in-memory matcher reads. */
 export interface ZoneMatchableEvent {
@@ -100,23 +120,24 @@ export interface ZoneMatchableEvent {
   camera: string | null;
   cameraZones: readonly string[];
   /**
-   * Read ONLY by PR-2's lock arm (`matter:<nodeId>/<endpointId>`), which
-   * matches nothing when it is absent. Optional so PR-1's row decoration can
-   * build this from a `listSecurityEvents` page, which does not select it.
+   * Read ONLY by the lock arm (`matter:<nodeId>/<endpointId>`), which
+   * matches nothing when it is absent.
    */
   sourceRef?: string;
 }
 
 /**
  * The in-memory index `zonesForEvent` matches against, built once per page
- * from the viewer's VISIBLE links of VISIBLE areas. Owned by B, which may
- * reshape it — callers only pass it from `buildZoneIndex` to `zonesForEvent`.
+ * from the viewer's VISIBLE links of VISIBLE areas. Callers only pass it from
+ * `buildZoneIndex` to `zonesForEvent`.
  */
 export interface ZoneIndex {
   /** camera → area ids linked to the whole camera. */
   readonly byCamera: ReadonlyMap<string, readonly string[]>;
   /** camera → Frigate zone → area ids linked to that part of the view. */
   readonly byCameraZone: ReadonlyMap<string, ReadonlyMap<string, readonly string[]>>;
+  /** lock ref (`matter:<nodeId>/<endpointId>`) → area ids linked to that lock (WARP-2977 P2b-2). */
+  readonly byLockRef: ReadonlyMap<string, readonly string[]>;
 }
 
 /** A link as requested by route 12's body. */
@@ -159,7 +180,7 @@ export interface ZoneLinkDiff {
 export interface SecurityZoneLinkView {
   id: string;
   sourceKind: SecurityZoneSourceKind;
-  /** camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`. */
+  /** camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`; lock: `matter:<nodeId>/<endpointId>`. */
   sourceRef: string;
   /**
    * ALWAYS the CAMERA's display name — the live `Camera.displayName` when the
@@ -169,6 +190,8 @@ export interface SecurityZoneLinkView {
    * part is always `sourceRef.slice(sourceRef.indexOf('/') + 1)`.
    * `SecurityZoneLink.sourceLabel` is snapshotted at link time as that same
    * camera display name (never "camera / part").
+   * A lock link's label is the lock's name: its current one (alias, else the
+   * device's own name) as the last lock sweep saw it, else the snapshot.
    */
   label: string;
   state: SecurityZoneLinkState;
@@ -202,16 +225,36 @@ export interface SecurityZoneView {
 
 export type SecurityLinkStatus = "present" | "missing" | "unknown";
 
+/** One paired Matter DoorLock endpoint a lock link can point at (route 4's `locks.items`). */
+export interface LinkableLock {
+  ref: string;
+  nodeId: string;
+  endpointId: number;
+  /** The lock's name: its DeviceAlias name, else the device's own name, else `Lock …<last4>`. */
+  label: string;
+  room: string | null;
+  /** The device is connected to the smart-home service right now. */
+  connected: boolean;
+}
+
 /**
  * Route 4, GET /api/security/sources. Degrades per half (Camera rows,
- * Frigate's config); a whole 503 only when the viewer's grants or the links
- * themselves cannot be read (there is then nothing safe or true to list).
+ * Frigate's config, and — WARP-2977 P2b-2 — the smart-home service's lock
+ * list); a whole 503 only when the viewer's grants or the links themselves
+ * cannot be read (there is then nothing safe or true to list).
  */
 export interface SecuritySourcesView {
   frigate: "ok" | "unavailable";
   /** Visible cameras only; `parts` are that camera's Frigate zone keys that pass FRIGATE_NAME. */
   cameras: Array<{ name: string; label: string; parts: string[] }>;
   linkStatus: Array<{ linkId: string; status: SecurityLinkStatus }>;
+  /**
+   * `hidden` — the viewer may not read locks (DS-019): no items, and none of
+   * their lock links is listed anywhere. `unavailable` — the smart-home
+   * service could not answer (never an empty "no locks"). `ok` — every
+   * paired DoorLock endpoint, sorted by label.
+   */
+  locks: { state: "ok" | "hidden" | "unavailable"; items: LinkableLock[] };
 }
 
 // ── read-time resolution ──────────────────────────────────────────────────
@@ -246,7 +289,10 @@ export async function loadActiveLinks(
   }));
 }
 
-/** The single link-ref parser; the DS-005 filter reads the camera from it. Null = malformed. */
+/**
+ * The single link-ref parser; the DS-005 filter reads the camera from it and
+ * the DS-019 filter the lock. Null = malformed.
+ */
 export function parseLinkRef(kind: SecurityZoneSourceKind, ref: string): ParsedLinkRef | null {
   switch (kind) {
     case "camera":
@@ -258,15 +304,19 @@ export function parseLinkRef(kind: SecurityZoneSourceKind, ref: string): ParsedL
       const frigateZone = ref.slice(slash + 1);
       return FRIGATE_NAME.test(camera) && FRIGATE_NAME.test(frigateZone) ? { camera, frigateZone } : null;
     }
+    case "lock":
+      // Only the canonical form a lock row carries: the join is exact string equality.
+      return parseLockRef(ref);
     default:
-      // A kind this build does not know (PR-2's `lock` on a PR-1 reader) is
-      // treated as malformed: never visible, never matched — fail closed.
+      // A kind this build does not know (a later source kind on an older
+      // reader) is treated as malformed: never visible, never matched — fail closed.
       return null;
   }
 }
 
 /** The inverse of `parseLinkRef`: the `{sourceKind, sourceRef}` a parsed ref is stored as. */
 export function formatLinkRef(parsed: ParsedLinkRef): DesiredZoneLink {
+  if (isLockLinkRef(parsed)) return { sourceKind: "lock", sourceRef: lockRef(parsed.nodeId, parsed.endpointId) };
   return parsed.frigateZone === null
     ? { sourceKind: "camera", sourceRef: parsed.camera }
     : { sourceKind: "camera_zone", sourceRef: `${parsed.camera}/${parsed.frigateZone}` };
@@ -274,17 +324,20 @@ export function formatLinkRef(parsed: ParsedLinkRef): DesiredZoneLink {
 
 /**
  * Keep a camera / camera_zone link only when its camera is in
- * `scope.visibleCameras` (owner/admin: "all"). PR-2 keeps lock links only
- * when `scope.mayReadLocks`. A malformed ref is dropped (fail closed).
+ * `scope.visibleCameras` (owner/admin: "all"), and a lock link only when
+ * `scope.mayReadLocks` is TRUE (DS-019; a scope that does not say reads as
+ * "may not"). A malformed ref is dropped (fail closed).
  */
 export function visibleLinks<L extends Pick<ActiveZoneLink, "sourceKind" | "sourceRef">>(
   links: readonly L[],
-  scope: Pick<SecurityViewerScope, "visibleCameras">,
+  scope: LinkScope,
 ): L[] {
   const cams = scope.visibleCameras;
   return links.filter((l) => {
     const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
-    return parsed !== null && (cams === "all" || cams.has(parsed.camera));
+    if (parsed === null) return false;
+    if (isLockLinkRef(parsed)) return scope.mayReadLocks === true;
+    return cams === "all" || cams.has(parsed.camera);
   });
 }
 
@@ -310,16 +363,25 @@ const CAMERA_STATUS_KINDS = ["camera_offline", "camera_online"] as const;
 
 const byString = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
-/** Whole-camera links and camera → parts, deduped; a whole-camera link subsumes that camera's parts. */
+/**
+ * Whole-camera links, camera → parts and lock refs, deduped; a whole-camera
+ * link subsumes that camera's parts.
+ */
 function groupLinks(links: readonly Pick<ActiveZoneLink, "sourceKind" | "sourceRef">[]): {
   whole: string[];
   parts: Array<[camera: string, parts: string[]]>;
+  locks: string[];
 } {
   const whole = new Set<string>();
   const parts = new Map<string, Set<string>>();
+  const locks = new Set<string>();
   for (const l of links) {
     const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
     if (!parsed) continue;
+    if (isLockLinkRef(parsed)) {
+      locks.add(lockRef(parsed.nodeId, parsed.endpointId));
+      continue;
+    }
     if (parsed.frigateZone === null) {
       whole.add(parsed.camera);
       continue;
@@ -334,6 +396,7 @@ function groupLinks(links: readonly Pick<ActiveZoneLink, "sourceKind" | "sourceR
       .filter(([camera]) => !whole.has(camera))
       .map(([camera, set]): [string, string[]] => [camera, [...set].sort(byString)])
       .sort(([a], [b]) => byString(a, b)),
+    locks: [...locks].sort(byString),
   };
 }
 
@@ -345,7 +408,7 @@ function groupLinks(links: readonly Pick<ActiveZoneLink, "sourceKind" | "sourceR
 export function zoneEventWhere(
   links: readonly Pick<ActiveZoneLink, "sourceKind" | "sourceRef">[],
 ): Prisma.SecurityEventWhereInput | "none" {
-  const { whole, parts } = groupLinks(links);
+  const { whole, parts, locks } = groupLinks(links);
   const arms: Prisma.SecurityEventWhereInput[] = [];
   // A whole camera: every row that camera produced — detections and its own
   // offline/online rows. Site-wide rows carry camera NULL and never match.
@@ -359,6 +422,8 @@ export function zoneEventWhere(
       ],
     });
   }
+  // A lock: that endpoint's lock_state rows (camera NULL, so no camera arm can reach them).
+  if (locks.length > 0) arms.push({ source: "matter_lock", sourceRef: { in: locks } });
   return arms.length === 0 ? "none" : { OR: arms };
 }
 
@@ -380,6 +445,7 @@ export function buildZoneIndex(
 ): ZoneIndex {
   const byCamera = new Map<string, string[]>();
   const byCameraZone = new Map<string, Map<string, string[]>>();
+  const byLockRef = new Map<string, string[]>();
   const addTo = <K>(map: Map<K, string[]>, key: K, zoneId: string): void => {
     const ids = map.get(key);
     if (!ids) map.set(key, [zoneId]);
@@ -389,6 +455,10 @@ export function buildZoneIndex(
     if (opts.personOnly && l.setBy !== "person") continue;
     const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
     if (!parsed) continue;
+    if (isLockLinkRef(parsed)) {
+      addTo(byLockRef, lockRef(parsed.nodeId, parsed.endpointId), l.zoneId);
+      continue;
+    }
     if (parsed.frigateZone === null) {
       addTo(byCamera, parsed.camera, l.zoneId);
       continue;
@@ -397,11 +467,14 @@ export function buildZoneIndex(
     if (!zones) byCameraZone.set(parsed.camera, (zones = new Map()));
     addTo(zones, parsed.frigateZone, l.zoneId);
   }
-  return { byCamera, byCameraZone };
+  return { byCamera, byCameraZone, byLockRef };
 }
 
 /** The area ids one row belongs to — exactly `zoneEventWhere`'s rules, in memory. Sorted. */
 export function zonesForEvent(row: ZoneMatchableEvent, index: ZoneIndex): string[] {
+  if (row.source === "matter_lock") {
+    return row.sourceRef === undefined ? [] : [...(index.byLockRef.get(row.sourceRef) ?? [])].sort(byString);
+  }
   if (row.camera === null) return [];
   const out = new Set<string>(index.byCamera.get(row.camera) ?? []);
   const parts = index.byCameraZone.get(row.camera);
@@ -442,7 +515,11 @@ export interface ZoneEventMatch {
  * cameraZones include it, and all of that camera's offline/online rows —
  * plus, per area, the link ids that matched and whether a part-of-view link
  * did (`specificity`, for the engine's rank). Sorted by zone id; link ids
- * sorted. A property test pins that the zone ids agree with `zonesForEvent`.
+ * sorted. A property test pins that the zone ids agree with `zonesForEvent`
+ * for every camera row. The ONE difference is door locks (WARP-2977 P2b-2):
+ * the feed puts a lock row in the areas its lock is linked to, but lock rows
+ * feed no rule (D21), so here a lock link matches nothing and a lock row
+ * (camera NULL) matches no area.
  * WARP-2979: plus whether a person-set link matched (`personLinked`).
  */
 export function matchAreasForEvent(row: ZoneMatchableEvent, links: readonly ActiveZoneLink[]): ZoneEventMatch[] {
@@ -452,7 +529,9 @@ export function matchAreasForEvent(row: ZoneMatchableEvent, links: readonly Acti
   const byZone = new Map<string, ZoneEventMatch>();
   for (const l of links) {
     const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
-    if (!parsed || parsed.camera !== row.camera) continue;
+    // A lock link places only lock rows (the feed's chips); the engine never
+    // groups a lock row (D21), so it matches nothing here.
+    if (!parsed || isLockLinkRef(parsed) || parsed.camera !== row.camera) continue;
     const matched =
       parsed.frigateZone === null || isStatus || (isDetection && row.cameraZones.includes(parsed.frigateZone));
     if (!matched) continue;
@@ -524,7 +603,7 @@ export interface ViewerAreas {
 /** Group `loadActiveLinks` rows per area and keep only what this viewer may see. */
 export function viewerAreas(
   all: readonly ActiveZoneLink[],
-  scope: Pick<SecurityViewerScope, "visibleCameras">,
+  scope: LinkScope,
 ): ViewerAreas {
   const perZone = new Map<string, ActiveZoneLink[]>();
   for (const l of all) {
@@ -564,7 +643,7 @@ export function zoneChipsFor(row: ZoneMatchableEvent, areas: ViewerAreas): Array
 export function zoneFilterFor(
   all: readonly ActiveZoneLink[],
   zoneId: string,
-  scope: Pick<SecurityViewerScope, "visibleCameras">,
+  scope: LinkScope,
 ): Prisma.SecurityEventWhereInput | "none" {
   const links = all.filter((l) => l.zoneId === zoneId);
   const visible = visibleLinks(links, scope);
@@ -643,37 +722,50 @@ export async function loadCameraLabels(prisma: Pick<PrismaClient, "camera">): Pr
  * WARP-2979 (§7 route 3, D13) — Droplet's evidence for ONE viewer: the parsed
  * `LinkEvidenceV1` when the link is Droplet's (`origin = droplet`), the
  * stored value is exactly that shape, and the viewer can see EVERY source it
- * names (the anchor and the candidate — `linkEvidenceSources`; a lock is
- * never visible before PR-4's `mayReadLocks`). Anything else is null: the
- * evidence says when someone stood at a camera (DS-005), so a viewer who can
- * see the link but not the anchor gets the chip without the numbers.
+ * names (the anchor and the candidate — `linkEvidenceSources`), by the ONE
+ * link rule, `visibleLinks`: a camera through the grant, and (P4 PR-4,
+ * DS-019) a lock only with `mayReadLocks`. Anything else is null: the
+ * evidence says when someone stood at a camera or turned a lock (DS-005), so
+ * a viewer who can see the link but not everything it names gets the chip
+ * without the numbers.
  */
 export function evidenceFor(
   link: { origin: SecurityLinkActor; evidence: unknown },
-  scope: Pick<SecurityViewerScope, "visibleCameras"> | null,
+  scope: LinkScope | null,
 ): LinkEvidenceV1 | null {
   if (!scope || link.origin !== "droplet") return null;
   const e = parseLinkEvidence(link.evidence);
   if (!e) return null;
   const named = linkEvidenceSources(e);
-  const shown = visibleLinks(
-    named.filter((s): s is { sourceKind: SecurityZoneSourceKind; sourceRef: string } => s.sourceKind === "camera" || s.sourceKind === "camera_zone"),
-    scope,
-  );
-  return shown.length === named.length ? e : null;
+  return visibleLinks(named, scope).length === named.length ? e : null;
+}
+
+/**
+ * WARP-2977 P2b-2 — the names a page load can put on lock links without
+ * asking the smart-home service: the lock adapter's last list (alias, else
+ * the device's own name). Empty for a viewer who may not read locks (DS-019)
+ * or when no adapter runs; a lock link then shows its snapshot.
+ */
+export function lockLabelsFor(
+  scope: Pick<SecurityViewerScope, "mayReadLocks">,
+  reader: { knownLocks(): ReadonlyArray<{ ref: string; name: string }> } | null,
+): Map<string, string> {
+  if (!scope.mayReadLocks || !reader) return new Map();
+  return new Map(reader.knownLocks().map((l) => [l.ref, l.name]));
 }
 
 /**
  * One area's wire view over the links the CALLER already filtered for the
- * viewer. `label` is the live camera display name, else the snapshot.
- * `scope` (WARP-2979) decides who sees Droplet's evidence; without it no
- * evidence is sent.
+ * viewer. `label` is the live camera display name (a lock link: the lock's
+ * current name from `lockLabels`), else the snapshot. `scope` (WARP-2979)
+ * decides who sees Droplet's evidence; without it no evidence is sent.
  */
 export function toZoneView(
   zone: Omit<ZoneRecord, "links">,
   links: readonly StoredZoneLink[],
   cameraLabels: ReadonlyMap<string, string>,
-  scope: Pick<SecurityViewerScope, "visibleCameras"> | null = null,
+  lockLabels: ReadonlyMap<string, string> = new Map(),
+  scope: LinkScope | null = null,
 ): SecurityZoneView {
   return {
     id: zone.id,
@@ -682,12 +774,18 @@ export function toZoneView(
     state: zone.state,
     version: zone.version,
     links: links.map((l) => {
-      const camera = parseLinkRef(l.sourceKind, l.sourceRef)?.camera;
+      const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
+      const live =
+        parsed === null
+          ? undefined
+          : isLockLinkRef(parsed)
+            ? lockLabels.get(l.sourceRef)
+            : cameraLabels.get(parsed.camera);
       return {
         id: l.id,
         sourceKind: l.sourceKind,
         sourceRef: l.sourceRef,
-        label: (camera !== undefined ? cameraLabels.get(camera) : undefined) ?? l.sourceLabel,
+        label: live ?? l.sourceLabel,
         state: l.state,
         stateChangedAt: l.stateChangedAt.toISOString(),
         origin: l.origin,
@@ -698,17 +796,18 @@ export function toZoneView(
   };
 }
 
-/** Route 3: the areas this viewer may see, each with only its visible links (DS-005). */
+/** Route 3: the areas this viewer may see, each with only its visible links (DS-005, DS-019). */
 export function visibleZoneViews(
   zones: readonly ZoneRecord[],
-  scope: Pick<SecurityViewerScope, "visibleCameras">,
+  scope: LinkScope,
   cameraLabels: ReadonlyMap<string, string>,
+  lockLabels: ReadonlyMap<string, string> = new Map(),
 ): SecurityZoneView[] {
   const out: SecurityZoneView[] = [];
   for (const z of zones) {
     const visible = visibleLinks(z.links, scope);
     if (!zoneVisibleTo(z, z.links, visible)) continue;
-    out.push(toZoneView(z, visible, cameraLabels, scope));
+    out.push(toZoneView(z, visible, cameraLabels, lockLabels, scope));
   }
   return out;
 }
@@ -716,15 +815,33 @@ export function visibleZoneViews(
 // ── B: what a link can point at (route 4, route 12's existence check) ─────
 
 /**
- * What the camera system has, from its two halves. Either half may be
- * unreadable (null) — the sources list degrades per half, and a link whose
- * answer depends on an unreadable half is `unknown`, never `missing`.
+ * What the sources have, from their halves. Any half may be unreadable
+ * (null) — the sources list degrades per half, and a link whose answer
+ * depends on an unreadable half is `unknown`, never `missing`.
  */
 export interface SourceCatalog {
   /** Camera rows: Frigate name → display name. Null = could not be read. */
   cameraRows: ReadonlyMap<string, string> | null;
   /** Frigate's config: camera → its parts (zone keys that pass FRIGATE_NAME). Null = unavailable. */
   frigate: ReadonlyMap<string, readonly string[]> | null;
+  /**
+   * WARP-2977 P2b-2 — the paired DoorLock endpoints, by ref, from a FRESH
+   * smart-home list. Null = could not be read, or not asked (a viewer who
+   * may not read locks — whose lock links are never shown anyway).
+   */
+  locks: ReadonlyMap<string, LinkableLock> | null;
+}
+
+/** A fresh lock list (the adapter's `listLocks`) as the catalog's lock half, keyed by ref. */
+export function linkableLocks(
+  known: ReadonlyArray<{ ref: string; nodeId: string; endpointId: number; name: string; room: string | null; connected: boolean }>,
+): Map<string, LinkableLock> {
+  return new Map(
+    known.map((l) => [
+      l.ref,
+      { ref: l.ref, nodeId: l.nodeId, endpointId: l.endpointId, label: l.name, room: l.room, connected: l.connected },
+    ]),
+  );
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -758,10 +875,18 @@ export function frigatePartsFromConfig(config: unknown): Map<string, string[]> {
  *   · camera_zone C/F: only Frigate's config knows parts — present when F is
  *     one of C's zones there, missing when it is not, unknown when the config
  *     could not be read.
+ *   · lock (WARP-2977 P2b-2): present when the smart-home service lists that
+ *     endpoint (connected or not — a lock that is not reporting is still
+ *     paired), missing when a successful list does not (decommissioned, or
+ *     re-commissioned under a new node id), unknown when it could not answer.
  */
 export function linkSourceStatus(link: DesiredZoneLink, catalog: SourceCatalog): SecurityLinkStatus {
   const parsed = parseLinkRef(link.sourceKind, link.sourceRef);
   if (!parsed) return "missing";
+  if (isLockLinkRef(parsed)) {
+    if (!catalog.locks) return "unknown";
+    return catalog.locks.has(lockRef(parsed.nodeId, parsed.endpointId)) ? "present" : "missing";
+  }
   if (parsed.frigateZone === null) {
     if (catalog.cameraRows?.has(parsed.camera) || catalog.frigate?.has(parsed.camera)) return "present";
     return catalog.cameraRows && catalog.frigate ? "missing" : "unknown";
@@ -779,7 +904,7 @@ export function linkSourceStatus(link: DesiredZoneLink, catalog: SourceCatalog):
 export function buildSourcesView(
   catalog: SourceCatalog,
   links: readonly ActiveZoneLink[],
-  scope: Pick<SecurityViewerScope, "visibleCameras">,
+  scope: LinkScope,
 ): SecuritySourcesView {
   const cams = scope.visibleCameras;
   const names = new Set<string>([...(catalog.cameraRows?.keys() ?? []), ...(catalog.frigate?.keys() ?? [])]);
@@ -797,7 +922,15 @@ export function buildSourcesView(
     linkId: l.linkId,
     status: linkSourceStatus(l, catalog),
   }));
-  return { frigate: catalog.frigate ? "ok" : "unavailable", cameras, linkStatus };
+  const locks: SecuritySourcesView["locks"] = !scope.mayReadLocks
+    ? { state: "hidden", items: [] }
+    : catalog.locks === null
+      ? { state: "unavailable", items: [] }
+      : {
+          state: "ok",
+          items: [...catalog.locks.values()].sort((a, b) => byString(a.label, b.label) || byString(a.ref, b.ref)),
+        };
+  return { frigate: catalog.frigate ? "ok" : "unavailable", cameras, linkStatus, locks };
 }
 
 // ── B: the audited writes (routes 8–12) ───────────────────────────────────
@@ -1126,17 +1259,20 @@ function labelSnapshot(label: string): string {
  *   3. Verify only the NEW refs (added + reactivated) — an existing link that
  *      went stale does not block saving the rest. Camera: a Camera row, else
  *      Frigate's config (fetched only when needed, before the transaction —
- *      it can take up to its own timeout). Part: Frigate's config. Missing →
- *      422 SOURCE_NOT_FOUND; couldn't check → 503 SOURCE_CHECK_UNAVAILABLE.
+ *      it can take up to its own timeout). Part: Frigate's config. Lock
+ *      (WARP-2977 P2b-2): a DoorLock endpoint in a FRESH smart-home list
+ *      (fetched only when a new lock ref needs it). Missing → 422
+ *      SOURCE_NOT_FOUND; couldn't check → 503 SOURCE_CHECK_UNAVAILABLE.
  *   4. One transaction: CAS the area version FIRST (locks the area row), then
  *      re-read and re-diff the links under that lock, apply, audit LAST.
  *      Every link write bumps the version, so a won CAS means the links are
  *      exactly what step 1 read; a re-diff that disagrees is a 409 anyway.
  *
- * DS-005: links the viewer cannot see are left exactly as they are and are
- * not in the diff; asking for a hidden camera is SOURCE_NOT_FOUND (the same
- * answer as a camera that does not exist). Manage is owner/admin, who see
- * every camera, so this is defence in depth.
+ * DS-005 / DS-019: links the viewer cannot see are left exactly as they are
+ * and are not in the diff; asking for a hidden camera — or for a lock without
+ * Devices view — is SOURCE_NOT_FOUND (the same answer as a source that does
+ * not exist). Manage is owner/admin, who see every camera, so for cameras
+ * this is defence in depth; an admin narrowed off Devices is a real case.
  */
 export async function replaceZoneLinks(
   prisma: PrismaClient,
@@ -1144,10 +1280,17 @@ export async function replaceZoneLinks(
   id: string,
   input: { links: readonly DesiredZoneLink[]; expectedVersion: number },
   sources: {
-    scope: Pick<SecurityViewerScope, "visibleCameras">;
+    scope: LinkScope;
     /** `loadCameraLabels`, read by the caller before the write (it also labels the response). */
     cameraLabels: ReadonlyMap<string, string>;
     frigateConfig: () => Promise<unknown>;
+    /**
+     * WARP-2977 P2b-2 — a fresh list of the paired DoorLock endpoints
+     * (`linkableLocks(await adapter.listLocks())`). Throws when the
+     * smart-home service cannot answer; absent = the lock adapter is not
+     * running. Either way a NEW lock link cannot be checked (503).
+     */
+    listLocks?: () => Promise<ReadonlyMap<string, LinkableLock>>;
   },
 ): Promise<{ zone: ZoneRecord; changed: boolean }> {
   const zone = await prisma.securityZone.findUnique({ where: { id }, select: ZONE_SELECT });
@@ -1157,7 +1300,7 @@ export async function replaceZoneLinks(
 
   const hidden = input.links.filter((l) => visibleLinks([l], sources.scope).length === 0);
   if (hidden.length > 0) {
-    throw new ZoneWriteError(422, "SOURCE_NOT_FOUND", "A camera to link was not found", {
+    throw new ZoneWriteError(422, "SOURCE_NOT_FOUND", "A source to link was not found", {
       issues: hidden.map((l) => ({ sourceKind: l.sourceKind, sourceRef: l.sourceRef, status: "missing" })),
     });
   }
@@ -1177,7 +1320,9 @@ export async function replaceZoneLinks(
 
   const cameraRows = sources.cameraLabels;
   let frigate: Map<string, string[]> | null = null;
-  const needsFrigate = fresh.some((l) => l.sourceKind !== "camera" || !cameraRows.has(l.sourceRef));
+  const needsFrigate = fresh.some(
+    (l) => l.sourceKind === "camera_zone" || (l.sourceKind === "camera" && !cameraRows.has(l.sourceRef)),
+  );
   if (needsFrigate) {
     try {
       frigate = frigatePartsFromConfig(await sources.frigateConfig());
@@ -1185,19 +1330,32 @@ export async function replaceZoneLinks(
       frigate = null;
     }
   }
-  const catalog: SourceCatalog = { cameraRows, frigate };
+  let locks: ReadonlyMap<string, LinkableLock> | null = null;
+  if (fresh.some((l) => l.sourceKind === "lock") && sources.listLocks) {
+    try {
+      locks = await sources.listLocks();
+    } catch {
+      locks = null;
+    }
+  }
+  const catalog: SourceCatalog = { cameraRows, frigate, locks };
   const statuses = fresh.map((l) => ({ l, status: linkSourceStatus(l, catalog) }));
   const bad = statuses.filter((s) => s.status !== "present");
   const issues = bad.map((s) => ({ sourceKind: s.l.sourceKind, sourceRef: s.l.sourceRef, status: s.status }));
   if (bad.some((s) => s.status === "missing")) {
-    throw new ZoneWriteError(422, "SOURCE_NOT_FOUND", "A camera or part of a view to link was not found", { issues });
+    throw new ZoneWriteError(422, "SOURCE_NOT_FOUND", "A camera, part of a view or door lock to link was not found", {
+      issues,
+    });
   }
   if (bad.length > 0) {
-    throw new ZoneWriteError(503, "SOURCE_CHECK_UNAVAILABLE", "Couldn't check the camera system", { issues });
+    throw new ZoneWriteError(503, "SOURCE_CHECK_UNAVAILABLE", "Couldn't check the cameras or door locks", { issues });
   }
   const verified = new Set(fresh.map(linkKey));
   const labelFor = (ref: DesiredZoneLink): string => {
-    const camera = parseLinkRef(ref.sourceKind, ref.sourceRef)?.camera ?? ref.sourceRef;
+    const parsed = parseLinkRef(ref.sourceKind, ref.sourceRef);
+    // A lock snapshots the name it was linked under (only verified refs reach here).
+    if (parsed !== null && isLockLinkRef(parsed)) return labelSnapshot(locks?.get(ref.sourceRef)?.label ?? ref.sourceRef);
+    const camera = parsed?.camera ?? ref.sourceRef;
     return labelSnapshot(cameraRows.get(camera) ?? camera);
   };
   const actorId = ctx.req.user?.id ?? null;
@@ -1288,8 +1446,9 @@ const notDecidable = (): ZoneWriteError =>
 /** How the audit line names a link's view: `Back camera`, or `the "till" part of Back camera`. */
 function linkPhrase(l: { sourceKind: SecurityZoneSourceKind; sourceRef: string; sourceLabel: string }, labels: ReadonlyMap<string, string>): string {
   const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
-  const label = stripUnsafeDisplayChars((parsed ? labels.get(parsed.camera) : undefined) ?? l.sourceLabel);
-  return parsed?.frigateZone ? `the "${parsed.frigateZone}" part of ${label}` : label;
+  const cameraRef = parsed && !isLockLinkRef(parsed) ? parsed : null;
+  const label = stripUnsafeDisplayChars((cameraRef ? labels.get(cameraRef.camera) : undefined) ?? l.sourceLabel);
+  return cameraRef?.frigateZone ? `the "${cameraRef.frigateZone}" part of ${label}` : label;
 }
 
 /**
@@ -1321,7 +1480,7 @@ export async function decideDropletLink(
   ctx: ZoneWriteContext,
   linkId: string,
   decision: LinkDecision,
-  sources: { scope: Pick<SecurityViewerScope, "visibleCameras">; cameraLabels: ReadonlyMap<string, string> },
+  sources: { scope: LinkScope; cameraLabels: ReadonlyMap<string, string> },
 ): Promise<{ zone: ZoneRecord; changed: boolean }> {
   const actorId = ctx.req.user?.id ?? null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1441,8 +1600,10 @@ export interface SecurityLinkProposalView {
  */
 export async function listLinkProposals(
   prisma: Pick<PrismaClient, "securityZoneLink">,
-  scope: Pick<SecurityViewerScope, "visibleCameras">,
+  scope: LinkScope,
   cameraLabels: ReadonlyMap<string, string>,
+  /** P4 PR-4: a lock suggestion's live name (`lockLabelsFor`), else its snapshot. */
+  lockLabels: ReadonlyMap<string, string> = new Map(),
 ): Promise<SecurityLinkProposalView[]> {
   const rows = await prisma.securityZoneLink.findMany({
     where: { state: "proposed", origin: "droplet", zone: { state: "active" } },
@@ -1460,7 +1621,10 @@ export async function listLinkProposals(
     },
   });
   const out = visibleLinks(rows, scope).map((r) => {
-    const camera = parseLinkRef(r.sourceKind, r.sourceRef)?.camera;
+    const parsed = parseLinkRef(r.sourceKind, r.sourceRef);
+    const camera = parsed && !isLockLinkRef(parsed) ? parsed.camera : undefined;
+    // A lock suggestion by the lock's current name (P4 PR-4); a camera by its display name; else the snapshot.
+    const live = parsed && isLockLinkRef(parsed) ? lockLabels.get(r.sourceRef) : camera !== undefined ? cameraLabels.get(camera) : undefined;
     const evidence = evidenceFor(r, scope);
     return {
       match: evidence?.names.match ?? false,
@@ -1469,7 +1633,7 @@ export async function listLinkProposals(
         zone: { id: r.zone.id, name: r.zone.name, kind: r.zone.kind },
         sourceKind: r.sourceKind,
         sourceRef: r.sourceRef,
-        label: (camera !== undefined ? cameraLabels.get(camera) : undefined) ?? r.sourceLabel,
+        label: live ?? r.sourceLabel,
         confidence: r.confidence ?? 0,
         evidence,
         suggestedAt: (r.evidenceAt ?? r.stateChangedAt).toISOString(),

@@ -137,6 +137,15 @@ vi.mock("../services/vpn-peer-revoke.service.js", async (importOriginal) => ({
   revokeOverlayDevicesForUser: revokeOverlayDevicesMock,
 }));
 
+// WARP-3384 — Delete revokes the person's paired file-sync devices.
+const { revokeDeviceClientsMock } = vi.hoisted(() => ({
+  revokeDeviceClientsMock: vi.fn(async () => ({ revoked: 2, appPasswordsNotDeleted: 0, failed: 0 })),
+}));
+vi.mock("../services/device-client-revoke.service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/device-client-revoke.service.js")>()),
+  revokeDeviceClientsForUser: revokeDeviceClientsMock,
+}));
+
 // WARP-3169 — the hand-over transfer runs through the host helper; the exec
 // boundary is the seam, so the argv ncTransferOwnership builds is asserted.
 const { hostExecMock } = vi.hoisted(() => ({ hostExecMock: vi.fn() }));
@@ -425,6 +434,28 @@ describe("DELETE /api/auth/users/:username — WARP-3113 schedules, never purges
     );
   });
 
+  // WARP-3384: scheduling the deletion revokes the person's paired devices
+  // (file-sync app passwords, drive logins) now, as the removal it is, and
+  // BEFORE the Nextcloud account is disabled: a disabled account cannot
+  // authenticate its own app-password delete.
+  it("WARP-3384: revokes the person's paired devices (removal, by the admin) BEFORE disabling Nextcloud, once", async () => {
+    const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
+    const res = await del(buildApp(prisma), "alice");
+
+    expect(res.status).toBe(200);
+    expect(revokeDeviceClientsMock).toHaveBeenCalledTimes(1);
+    expect(revokeDeviceClientsMock).toHaveBeenCalledWith("alice", { type: "user", id: "owner-id" }, "removal");
+    expect(revokeDeviceClientsMock.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(nc.ncSetUserEnabled).mock.invocationCallOrder[0],
+    );
+  });
+
+  it("WARP-3384: a refused delete (the owner) revokes no devices", async () => {
+    const owner = createPrismaMock([{ ...OWNER_ROW, id: "u-boss", nextcloudUsername: "boss" }]);
+    expect((await del(buildApp(owner, "admin"), "boss")).body.code).toBe("OWNER_IMMUTABLE");
+    expect(revokeDeviceClientsMock).not.toHaveBeenCalled();
+  });
+
   it("an explicit disposition is recorded as chosen, not defaulted; an unknown one is a 400", async () => {
     const prisma = createPrismaMock([seededAlice(), OWNER_ROW]);
     const app = buildApp(prisma);
@@ -616,6 +647,15 @@ describe("purgeDueDeletions — the nightly job (WARP-3113)", () => {
         refs: expect.objectContaining({ actor: "user-owner", targetUserId: "u-alice" }),
         actor: { type: "system" },
       }),
+    );
+  });
+
+  it("WARP-3384: sweeps the person's device clients BEFORE the Nextcloud account is deleted", async () => {
+    const prisma = createPrismaMock([due()]);
+    expect(await purgeDueDeletions(prisma)).toEqual({ completed: 1, failed: 0 });
+    expect(revokeDeviceClientsMock).toHaveBeenCalledWith("alice", { type: "system" }, "removal");
+    expect(revokeDeviceClientsMock.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(nc.ncDeleteUser).mock.invocationCallOrder[0],
     );
   });
 

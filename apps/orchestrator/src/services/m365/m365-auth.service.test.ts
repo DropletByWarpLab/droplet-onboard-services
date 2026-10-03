@@ -1084,7 +1084,7 @@ describe("a reconnect as someone else starts their sync from nothing (#2347 revi
     const prisma = await connectedAsAWithCursors();
     grantDied(prisma);
     const stateAtPurge: unknown[] = [];
-    const purge = vi.mocked(prisma.m365DeltaCursor.deleteMany);
+    const purge = prisma.m365DeltaCursor.deleteMany;
     const realPurge = purge.getMockImplementation()!;
     purge.mockImplementation(async (args: any) => {
       stateAtPurge.push((prisma.__row() as any).state);
