@@ -11,7 +11,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const fetchRawConfigYaml = vi.hoisted(() => vi.fn());
 const saveRawConfig = vi.hoisted(() => vi.fn());
-vi.mock("./frigate.client.js", () => ({ fetchRawConfigYaml, saveRawConfig }));
+const configLock = vi.hoisted(() => vi.fn());
+vi.mock("./frigate.client.js", () => ({
+  fetchRawConfigYaml,
+  saveRawConfig,
+  // WARP-3510: the backfill is a Frigate config write, so it takes the lock.
+  withFrigateConfigLock: (section: () => Promise<unknown>) => configLock(section),
+}));
 
 import { parse } from "yaml";
 import {
@@ -74,6 +80,7 @@ const DEFAULTS = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  configLock.mockImplementation((section: () => Promise<unknown>) => section());
   fetchRawConfigYaml.mockResolvedValue(YAML);
   saveRawConfig.mockResolvedValue({ ok: true, status: 200, text: async () => "" });
 });
@@ -169,5 +176,51 @@ describe("applying", () => {
     await expect(backfillCameraRetention(prismaWith(["legacy"]), DEFAULTS)).rejects.toThrow(
       /rejected the retention backfill \(400\)/,
     );
+  });
+});
+
+describe("a Frigate config write (WARP-3510)", () => {
+  it("holds the config lock from the plan through the save", async () => {
+    // The plan reads the YAML and the apply step reads it again; another writer
+    // landing between the two would be overwritten by the backfill's save.
+    let locked = false;
+    const order: string[] = [];
+    configLock.mockImplementation(async (section: () => Promise<unknown>) => {
+      locked = true;
+      try {
+        return await section();
+      } finally {
+        locked = false;
+      }
+    });
+    fetchRawConfigYaml.mockImplementation(async () => {
+      order.push(locked ? "read:locked" : "read:UNLOCKED");
+      return YAML;
+    });
+    saveRawConfig.mockImplementation(async () => {
+      order.push(locked ? "save:locked" : "save:UNLOCKED");
+      return { ok: true, status: 200, text: async () => "" };
+    });
+
+    await backfillCameraRetention(prismaWith(["legacy"]), DEFAULTS);
+
+    expect(configLock).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["read:locked", "read:locked", "save:locked"]);
+  });
+
+  it("hands the YAML it replaces to saveRawConfig as the pre-image", async () => {
+    await backfillCameraRetention(prismaWith(["legacy"]), DEFAULTS);
+
+    expect(saveRawConfig.mock.calls[0][1]).toBe(YAML);
+  });
+
+  it("finds a camera by its canonical Frigate key when the DB name differs in case", async () => {
+    const plan = await planRetentionBackfill(prismaWith(["Legacy"]));
+    expect(plan[0]).toMatchObject({ camera: "Legacy", reason: "no_retention_authored", willWrite: true });
+
+    await backfillCameraRetention(prismaWith(["Legacy"]), DEFAULTS);
+    const saved = parse(saveRawConfig.mock.calls[0][0] as string);
+    expect(saved.cameras.legacy.record.continuous.days).toBe(3);
+    expect(saved.cameras.Legacy).toBeUndefined();
   });
 });
