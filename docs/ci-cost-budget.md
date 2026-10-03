@@ -118,6 +118,15 @@ included tier, headroom to ~1.6× today's PR volume.
   After the ceremony, re-enabling per-merge (or tag) publishing must also
   drop its inline gate jobs in favor of the ci-summary result for the
   same sha (the WARP-536 follow-up).
+- **publish-release's R2 mirror (WARP-3502) adds ~5-15 min per publish**
+  (estimate, not yet measured): ~1 min to install the pinned `crane` + `aws`
+  and probe the bucket, plus reading every layer R2 lacks from GHCR and
+  writing it to R2. Dedupe is weaker than it sounds, because the no-cache
+  `docker build` gives every app layer a new digest each publish; only base
+  layers repeat. That is +4-12% on a ~2 h publish; publishing is manual
+  dispatch only, so ~20 publishes/month add under 300 min, below the 2k
+  min/month callout line. The job summary prints the measured bytes and
+  seconds; replace the estimate in the workflow header with it.
 - **Don't "fix" a flaky suite by re-running it on more triggers.** Fix the
   flake; reruns are minutes.
 - **Scheduled jobs are cheap but not free** — the nightly setup-e2e is

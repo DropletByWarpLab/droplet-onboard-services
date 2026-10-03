@@ -492,6 +492,40 @@ carry a secret, so `publish-release.yml` scans it before it is pushed
   (`--shard K/N` scans `versions[K::N]`), or rescan only the versions whose
   digest starts with the given prefixes.
 
+## R2 registry mirror (private images, WARP-3502) {#r2-registry-mirror}
+
+Because the packages stay private, a box pulls from the fleet HQ read-only
+registry (a Cloudflare Worker in front of an R2 bucket, device-authenticated;
+fleet contract v1 section 3), not from GHCR. CI is the only writer of that
+bucket. After the images are pushed, keyless-signed and self-verified, and
+before the GitHub Release exists, `publish-release.yml` runs
+`scripts/release/mirror-to-r2.py copy`, which for every image in the release:
+
+- reads the image by digest from GHCR with the pinned `crane`: the manifest (or
+  the index and each child manifest), the config blob and every layer blob;
+- reads the cosign signature artifact at tag `sha256-<hex>.sig` the same way
+  (the publish fails if an image has none, since a box could never verify it);
+- writes them with the pinned `aws` CLI to R2's S3 endpoint in the layout the
+  Worker serves: `oci/blobs/sha256/<hex>`, `oci/manifests/sha256/<hex>` with
+  `Content-Type` = the manifest media type, and
+  `oci/tags/droplet-<name>/sha256-<hex>.sig` = text `sha256:<manifest hex>`.
+
+Properties that matter for the trust model: the copy is by digest and every
+blob and manifest is re-hashed before it is stored, so R2 cannot hold bytes
+that do not match their name; blobs are written first, then manifests, then
+tags, so nothing in the bucket points at missing content; a copy failure fails
+the job before the Release exists, so no signed `release.json` can name a
+digest the registry cannot serve; and an object already present with the right
+size is skipped. Multipart uploads use one explicit 64MB part size because R2
+requires equal-sized parts.
+
+`release.json` names the HQ host (`<host>/droplet-<name>@sha256:…`, same
+digests) only when the `OTA_REGISTRY_HOST` repo variable is set; empty keeps
+`ghcr.io`. With no R2 secrets and no variable the mirror is skipped with a
+warning, with the variable set missing secrets fail the publish before the
+build. The secrets, the variable and the one-time setup are in
+`scripts/README.md` ("R2 registry mirror: one-time setup").
+
 ## Signed channel index (`ota-index`) {#channel-index}
 
 After the Release exists, the workflow's `index` job publishes a **signed
