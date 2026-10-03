@@ -33,6 +33,7 @@ import os
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -199,6 +200,41 @@ def _require_auth(request: Request) -> None:
 
 MAX_REJECTED_MACS = 1000  # Cap rejected set to prevent unbounded growth
 
+# --- Camera keys (WARP-3508) ---
+#
+# ``pending_cameras``, ``known_cameras`` and ``rejected_macs`` are all keyed by ONE
+# canonical form: the lower-case MAC. ``scan_and_discover`` lower-cases every lease
+# and the lookups in accept/reject are exact, so a caller that spelled the same MAC
+# in upper case — the orchestrator's candidate ids carry ``E4:30:...`` — got a 404
+# for a camera that was sitting right there in the list.
+#
+# A camera with no DHCP lease is filed under a synthetic key instead: ``ip:<addr>``
+# (found by the subnet sweep) or ``onvif_<addr_with_underscores>`` (found by ONVIF).
+# Those travel through the same ``{mac}`` routes, so they are valid keys too.
+_CAMERA_KEY = re.compile(
+    r"[0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}"  # hardware address
+    r"|ip:\d{1,3}(?:\.\d{1,3}){3}"  # synthetic: subnet sweep, no lease
+    r"|onvif_\d{1,3}(?:_\d{1,3}){3}"  # synthetic: ONVIF, no lease
+)
+
+
+def _camera_key(raw: str) -> str:
+    """Canonical key for a ``{mac}`` path parameter; a 400 when it cannot be one.
+
+    Call it AFTER ``_require_auth`` so an unauthenticated caller learns nothing
+    about what a valid key looks like, and BEFORE the key touches any state — the
+    in-flight guard in accept/reject must claim the canonical spelling, or an
+    accept for ``E4:..`` would not stop a reject for ``e4:..``.
+    """
+    key = raw.strip().lower()
+    if not _CAMERA_KEY.fullmatch(key):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid camera identifier — expected a MAC address",
+        )
+    return key
+
+
 # --- State ---
 
 # Known cameras: MAC address -> camera info
@@ -214,6 +250,95 @@ rejected_macs: set[str] = set()
 # reject (or a second accept) from acting on a MAC that is being committed —
 # preserving the invariant that a MAC is never both accepted AND rejected.
 accepting_macs: set[str] = set()
+
+# --- Persisted dismissals (WARP-3508) ---
+#
+# ``rejected_macs`` is the one piece of state here that is the OPERATOR'S DECISION
+# rather than something discovery can re-derive from the network, so it is the one
+# piece that must outlive the process. It lived only in memory, so every restart
+# (and every update, which recreates the container) resurrected each dismissed
+# camera as a fresh "Needs sign-in" card.
+#
+# Stored as a small JSON file in a named volume (``camera-discovery-state``).
+# ``known_cameras`` is deliberately NOT persisted: its records embed ``user:pass@``
+# stream URLs, so saving it would put camera credentials in a file — and what
+# Frigate already manages is re-derived from Frigate itself on startup.
+_REJECTED_FILE = "rejected-macs.json"
+
+
+def _rejected_path() -> Path:
+    """Where the dismissed-camera list lives. Resolved per call, like
+    ``services/switch/provision_state.py``, so the directory is overridable
+    without an import-order trap."""
+    base = os.getenv("CAMERA_DISCOVERY_STATE_DIR", "/var/lib/droplet/camera-discovery")
+    return Path(base) / _REJECTED_FILE
+
+
+def _load_rejected_macs() -> None:
+    """Restore the dismissed-camera list written by ``_save_rejected_macs``.
+
+    Runs once at startup and never raises: a missing, unreadable or malformed file
+    means "nothing dismissed yet", never a service that will not start. The file is
+    outside this process's control, so every entry is re-validated, and the
+    ``MAX_REJECTED_MACS`` cap holds on load as it does on reject.
+    """
+    path = _rejected_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError) as exc:
+        logger.warning("Ignoring unreadable %s (%s) — no dismissed cameras restored", path, exc)
+        return
+    entries = raw.get("rejected_macs") if isinstance(raw, dict) else None
+    if not isinstance(entries, list):
+        logger.warning('Ignoring %s — expected {"rejected_macs": [...]}', path)
+        return
+    for entry in entries:
+        if len(rejected_macs) >= MAX_REJECTED_MACS:
+            logger.warning("%s holds more than %d entries — the rest are ignored", path, MAX_REJECTED_MACS)
+            break
+        key = entry.strip().lower() if isinstance(entry, str) else ""
+        if _CAMERA_KEY.fullmatch(key):
+            rejected_macs.add(key)
+    if rejected_macs:
+        logger.info("Restored %d dismissed camera(s) from %s", len(rejected_macs), path)
+
+
+def _save_rejected_macs() -> bool:
+    """Write the dismissed-camera list to disk. True on success; never raises.
+
+    Best-effort by the same contract as ``services/switch/provision_state.py``: an
+    unwritable state dir must not stop the operator dismissing a camera, and the
+    dismissal still holds for this run. The failure is logged at ERROR and returned,
+    so it is loud rather than silent.
+
+    Atomic: the list is written to a temp file in the SAME directory, flushed to
+    disk, then renamed over the target. A crash or a full disk part-way leaves the
+    previous list intact instead of a truncated file the next startup cannot read.
+    """
+    path = _rejected_path()
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump({"rejected_macs": sorted(rejected_macs)}, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.error(
+            "Could not save the dismissed-camera list to %s (%s) — dismissals will not survive a restart",
+            path,
+            exc,
+        )
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+    return True
+
 
 # --- MQTT ---
 
@@ -879,6 +1004,9 @@ async def _reconcile_with_frigate() -> None:
 @app.on_event("startup")
 async def startup():
     global mqtt_client, _scan_scheduler
+    # WARP-3508: restore what the operator dismissed before any scan can run —
+    # the first sweep must already know not to resurrect it.
+    _load_rejected_macs()
     try:
         mqtt_client = _connect_mqtt()
         logger.info("Connected to MQTT broker")
@@ -965,8 +1093,12 @@ async def accept_camera(mac: str, request: Request):
 
     Gated by DEVICE_SECRET (NET-05): pushing an arbitrary pending camera
     into Frigate is a privileged write, not a public action.
+
+    ``mac`` may be spelled in any case (WARP-3508); it is normalised to the
+    canonical lower-case key before anything is looked up or claimed.
     """
     _require_auth(request)
+    mac = _camera_key(mac)
     # PYNET-014: peek, don't pop — the record stays in pending until the add
     # actually succeeds, so a transient exception from verify_stream/add_camera
     # can't silently drop the camera from the list until the next scan.
@@ -1024,12 +1156,17 @@ async def accept_camera(mac: str, request: Request):
 
 @app.post("/cameras/discovered/{mac}/reject")
 async def reject_camera(mac: str, request: Request):
-    """Reject a discovered camera — won't be discovered again.
+    """Reject a discovered camera — won't be discovered again, across restarts.
 
     Gated by DEVICE_SECRET (NET-05): mutates the rejected-MAC set, a
     privileged write.
+
+    ``mac`` may be spelled in any case (WARP-3508). The dismissal is saved to the
+    state volume; ``persisted`` in the response says whether that write worked —
+    a ``false`` is still a rejection for this run, not an error.
     """
     _require_auth(request)
+    mac = _camera_key(mac)
     # PYNET-017: refuse to reject a MAC whose accept is mid-flight. Otherwise the
     # in-flight accept could still commit it to Frigate *after* we mark it
     # rejected, leaving a "rejected" camera live. reject_camera has no awaits, so
@@ -1050,10 +1187,17 @@ async def reject_camera(mac: str, request: Request):
         pending_cameras[mac] = camera
         raise HTTPException(
             status_code=507,
-            detail="Rejected-camera list is full; cannot persist this rejection. Clear rejected cameras first.",
+            detail=(
+                "Rejected-camera list is full; cannot persist this rejection. "
+                "Remove entries from rejected-macs.json and restart camera-discovery first."
+            ),
         )
     rejected_macs.add(mac)
-    return {"status": "rejected", "mac": mac}
+    # Synchronous on purpose: this handler's atomicity against an in-flight accept
+    # (PYNET-017) rests on there being no await between the claim check above and
+    # here, and the file is a few hundred bytes.
+    persisted = _save_rejected_macs()
+    return {"status": "rejected", "mac": mac, "persisted": persisted}
 
 
 @app.post("/scan")

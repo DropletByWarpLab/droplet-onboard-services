@@ -17,9 +17,23 @@ os.environ.setdefault("MQTT_BROKER", "mqtt://localhost:1883")
 os.environ.setdefault("DEVICE_SECRET", "pytest-fake-secret")
 os.environ.setdefault("CAMERA_SUBNET", "192.168.100.0/24")
 
+import pytest
+
 _SERVICE_DIR = Path(__file__).resolve().parent.parent
 if str(_SERVICE_DIR) not in sys.path:
     sys.path.insert(0, str(_SERVICE_DIR))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_state_dir(tmp_path, monkeypatch):
+    """Give every test its own camera-discovery state dir.
+
+    A rejected camera is written to disk (WARP-3508), so a test that rejects one
+    must never touch the real default dir, and one test's dismissals must never
+    leak into the next test's startup. The service resolves the path from the
+    environment at call time, so this applies to modules already imported.
+    """
+    monkeypatch.setenv("CAMERA_DISCOVERY_STATE_DIR", str(tmp_path / "camera-discovery-state"))
 
 # WARP-235/236 — main.py's mqtts:// path imports `_shared.internal_tls`.
 # In-container the helper is COPY'd to /app/_shared; in the repo it lives at

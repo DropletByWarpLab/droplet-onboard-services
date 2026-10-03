@@ -138,6 +138,7 @@ EXCLUDED_VOLUMES=(
   openwrt-config     # single-box router config — re-provisioned
   openwrt-overlay    # single-box router overlay — re-provisioned
   switch-state       # managed-switch state — re-provisioned by setup
+  camera-discovery-state # WARP-3508 dismissed-camera list — cheap to re-dismiss; a restore must not resurrect stale dismissals
   workspace-checkouts # WARP-2896: working trees — `git clone` from workspace-git rebuilds them
   extensions-installed # WARP-2900: installed extensions — re-exported from workspace-git on reconcile
 )

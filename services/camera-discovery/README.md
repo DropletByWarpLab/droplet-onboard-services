@@ -36,11 +36,17 @@ ONVIF WS-Discovery ─────┘      │
 | GET | `/cameras/discovered` | Pending cameras (not yet in Frigate) |
 | GET | `/cameras/known` | Active cameras (configured in Frigate) |
 | POST | `/cameras/discovered/{mac}/accept` | Accept camera into Frigate |
-| POST | `/cameras/discovered/{mac}/reject` | Reject camera (won't rediscover) |
+| POST | `/cameras/discovered/{mac}/reject` | Reject camera (won't rediscover — the dismissal survives a restart, see [State](#state)) |
 | POST | `/scan` | Manually trigger a discovery scan |
 | GET | `/subnet/status` | Which subnet is being scanned |
 | GET | `/drivers` | Camera driver status report (kernel modules, V4L2, USB) |
 | POST | `/drivers/fix` | Auto-fix driver issues (requires auth) |
+
+`{mac}` is the camera's key: its MAC, or `ip:<addr>` / `onvif_<addr_with_underscores>`
+for a camera found without a DHCP lease. It may be spelled in any case — it is
+lower-cased before use, because the pending list is keyed by the lower-case form
+(the orchestrator sends it lower-case, but nothing depends on that). Anything that
+cannot be a key is a `400`; a well-formed key that is not pending is a `404`.
 
 ## Configuration
 
@@ -53,6 +59,30 @@ ONVIF WS-Discovery ─────┘      │
 | `CAMERA_SUBNET` | `192.168.100.0/24` | Subnet to scan (empty = all private; `auto` = resolve from the edge router at scan time) |
 | `CAMERA_INIT_CA_CERT` | (unset) | Path to a CA bundle/cert for TLS verification of the camera first-run (vendor-init) HTTPS clients (WARP-583). When set, httpx verifies the camera cert against it; a set-but-missing path fails closed rather than silently downgrading. When unset, verification is disabled — cameras ship per-device self-signed certs on first run, so pinning is not always feasible — and a warning is logged once per process. Residual risk while unpinned: an on-LAN MITM between this service and the camera VLAN can intercept the first-run admin-password set. Pinning also verifies the hostname/IP against the cert's SANs, so a device cert without the camera's IP in its SANs will fail verification against raw-IP targets — fail-closed, by design; provision a cert carrying the device IP in its SANs, or fall back to unpinned. Mirrors the switch service's `SWITCH_CA_CERT`. |
 | `DEVICE_SECRET` | (empty) | Auth token for `/drivers/fix` |
+| `CAMERA_DISCOVERY_STATE_DIR` | `/var/lib/droplet/camera-discovery` | Directory for the dismissed-camera list (`rejected-macs.json`). Compose mounts the `camera-discovery-state` named volume here; set it only to run the service outside the container (WARP-3508). |
+
+## State
+
+Camera-discovery keeps its working state in memory and re-derives it from the
+network and from Frigate on every start. The one exception is the list of cameras
+the operator **dismissed** (`POST .../reject`): that is a decision, not something
+discovery can re-derive, so it is written to `rejected-macs.json` under
+`CAMERA_DISCOVERY_STATE_DIR` and read back at startup.
+
+- The file is `{"rejected_macs": ["aa:bb:...", ...]}` — MACs only, no credentials.
+- Writes are atomic (temp file in the same directory, `fsync`, rename), so a crash
+  or full disk leaves the previous list intact.
+- Saving is best-effort: if the directory is unwritable the camera is still
+  dismissed for this run, the error is logged, and the reject response carries
+  `"persisted": false`.
+- A missing, corrupt or over-long file never stops the service from starting; the
+  list is capped at 1000 entries, as it is in memory.
+- There is no "un-reject" endpoint. To bring a dismissed camera back, delete its
+  entry from the file (or the file) and restart the service; a factory reset wipes
+  the volume.
+- `known_cameras` is deliberately **not** persisted: its records embed
+  `user:pass@` stream URLs, and what Frigate already manages is re-derived from
+  Frigate itself.
 
 ## Files
 
