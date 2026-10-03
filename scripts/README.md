@@ -512,11 +512,6 @@ public and `publish-release.yml` guards that. Full description:
   the `ghcr-secret-scan` workflow (WARP-3423; dispatch inputs `package`,
   `shards`, `digests` split or retry a big package) first to see the findings
   for every published image and curate the baseline.
-- **Public-package gate.** After the pushes every package must answer an
-  anonymous `ghcr.io/token` request with 200; otherwise the job lists each
-  private package with its settings URL. New services start private on GHCR:
-  make the package public (settings → Danger Zone → Change visibility)
-  *before* the first release that includes it.
 - **Signed channel index.** The `index` job writes `channel-<channel>.json`
   (`scripts/release/gen-channel-pointer.py`), signs it like `release.json`,
   and uploads it to the rolling `ota-index` release (a prerelease, never

@@ -37,10 +37,8 @@ name: publish-release
 #      and `docker push`; a non-vendor finding outside the reviewed baseline
 #      (scripts/release/image-secret-baseline.txt) fails the publish BEFORE
 #      the image reaches the registry.
-#   2. Public-package gate — after the pushes, every package must answer an
-#      anonymous pull-token request with 200. A new service's package is born
-#      private on GHCR, so a service added to services.json cannot silently
-#      ship unpullable. Runs before anything is signed or released.
+#   2. (Removed 2026-10-03: the "every package is public" gate. The images
+#      stay private; box pulls become device-authenticated, WARP-3423.)
 #   3. Signed channel index — once the Release exists, the `index` job signs
 #      channel-<channel>.json (the newest tag + the sha256 of its release.json)
 #      like release.json and uploads it to the rolling `ota-index` release,
@@ -442,46 +440,11 @@ jobs:
           print(json.dumps(digests, indent=2))
           PY
 
-      # WARP-3429 — drift gate: every first-party package must be pullable
-      # ANONYMOUSLY. A box carries no GitHub token (ADR-045), so a private
-      # package means `docker pull` fails on every box that tries this
-      # release — and GHCR creates every NEW package private, so a service
-      # added to services.json would otherwise ship unpullable with nothing
-      # on the publisher's side noticing. ghcr.io answers an anonymous
-      # pull-token request with 200 only for a public package (401 for a
-      # private one, 403 for one that does not exist; any non-200 fails), so
-      # ask each one exactly as a box's docker would: no Authorization
-      # header. It runs right after the pushes (the package has to exist to
-      # be asked about) and before anything is signed or released, so a
-      # private package fails the job with no Release yet pointing boxes at
-      # images they cannot pull. curl retries only transient errors (5xx,
-      # timeouts, refused connections), never a 401 or 403.
-      - name: Gate — every package is public (anonymous pull token)
-        run: |
-          set -euo pipefail
-          owner_lc="${GITHUB_REPOSITORY_OWNER,,}"
-          private=()
-          while read -r name _; do
-            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
-              --retry 3 --retry-connrefused \
-              "https://ghcr.io/token?scope=repository:${owner_lc}/droplet-${name}:pull&service=ghcr.io" || true)"
-            if [ "${code}" != "200" ]; then
-              private+=("droplet-${name} (HTTP ${code}) https://github.com/orgs/${GITHUB_REPOSITORY_OWNER}/packages/container/droplet-${name}/settings")
-            fi
-          done < dist/digests.txt
-          if [ "${#private[@]}" -gt 0 ]; then
-            echo "::error::${#private[@]} package(s) are not public: boxes pull anonymously (ADR-045), so OTA would fail on every box. Make each one public (Package settings > Danger Zone > Change visibility > Public), then re-run."
-            printf '  %s\n' "${private[@]}"
-            {
-              echo "### Private GHCR packages"
-              echo
-              echo "Boxes pull anonymously (ADR-045). Make each of these public, then re-run:"
-              echo
-              printf -- '- %s\n' "${private[@]}"
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          echo "all $(wc -l < dist/digests.txt) packages answer an anonymous pull token"
+      # WARP-3423 — there is deliberately no "every package is public" gate
+      # here any more. Romain, 2026-10-03: the images stay private, and box
+      # pulls will be device-authenticated instead (WARP-3423, ADR-066 to be
+      # superseded). The gate WARP-3429 added made every publish fail after
+      # the full build while the packages are private.
 
       # WARP-244 — keyless (Sigstore) signature on EVERY pushed image. The
       # signer is this workflow's GitHub Actions OIDC identity: Fulcio

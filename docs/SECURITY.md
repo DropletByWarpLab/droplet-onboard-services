@@ -456,13 +456,14 @@ cosign verify \
   surface on purpose — it requires the same physical/SSH trust as any
   other host-level intervention.
 
-## Public packages: pre-push secret scan and anonymous-pull gate {#public-packages}
+## Image packages: pre-push secret scan {#public-packages}
 
-A box pulls images and reads releases with **no GitHub token** (ADR-045: no
-GitHub token may ever sit on a customer appliance), so every first-party
-package `ghcr.io/dropletbywarplab/droplet-*` is **public**. Making a package
-public cannot be undone and exposes every layer it holds, so
-`publish-release.yml` guards both ends of that (WARP-3429):
+The first-party packages `ghcr.io/dropletbywarplab/droplet-*` stay **private**
+(Romain, 2026-10-03). A box carries no GitHub token (ADR-045), so box pulls are
+to become device-authenticated instead (WARP-3423; ADR-066's anonymous-delivery
+decision is to be superseded). Whatever the transport, an image must never
+carry a secret, so `publish-release.yml` scans it before it is pushed
+(WARP-3429):
 
 - **Secret scan before the push.** Each image is built, exported with
   `docker save`, and scanned with the pinned gitleaks (v8.30.1, same as
@@ -490,16 +491,6 @@ public cannot be undone and exposes every layer it holds, so
   `package`, `shards` and `digests` scan a single package, split it over N jobs
   (`--shard K/N` scans `versions[K::N]`), or rescan only the versions whose
   digest starts with the given prefixes.
-- **Public-package gate.** After the pushes, every package must answer an
-  anonymous `https://ghcr.io/token?scope=repository:…:pull&service=ghcr.io`
-  request with 200 (a private package answers 401, checked live; 403 is what a
-  nonexistent package returns, and any non-200 fails the gate). Otherwise the job fails,
-  listing each private package with its settings page
-  (`https://github.com/orgs/DropletByWarpLab/packages/container/<package>/settings`)
-  and the instruction to make it public. GHCR creates every *new* package
-  private, so this is what stops a service added to
-  `scripts/release/services.json` from silently shipping an image no box can
-  pull. It runs before anything is signed or the Release is created.
 
 ## Signed channel index (`ota-index`) {#channel-index}
 
