@@ -276,7 +276,8 @@ describe("DELETE /api/admin/devices/clients/:id", () => {
     expect(mockPrisma.deviceClient.findUnique).not.toHaveBeenCalled();
     expect(mockNcDelete).not.toHaveBeenCalled();
     expect(mockPrisma.deviceClient.update).not.toHaveBeenCalled();
-    expect(recordActivityMock).not.toHaveBeenCalled();
+    // The role guard audits the denial itself; no revoke row is written.
+    expect(recordActivityMock.mock.calls.map((c) => c[0].what)).toEqual(["Access denied"]);
   });
 });
 
