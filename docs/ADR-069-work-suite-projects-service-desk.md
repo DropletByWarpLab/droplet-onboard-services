@@ -67,7 +67,7 @@ A ticket's requester is either an external `Contact` (ADR-044: the one person ro
 `PmTicket.channel` (`EMAIL | INTERNAL | WEB_FORM | CHAT | API | PHONE`) records where a ticket came from.
 
 - **Email is the external channel.** A service desk binds one existing `EmailAccount`; the email sync the box already runs is the intake, and the account's own send path delivers public replies with `In-Reply-To` / `References` threading and a `[KEY-123]` subject token. No new mail server, no MX change, no inbound port.
-- **No public web form or customer portal is exposed off-LAN by this ADR.** The Foundation is an air-gapped mentality: the box dials out, it is not dialled into. Staff file tickets from the dashboard (`INTERNAL`), customers email, and the assistant files on someone's behalf (`CHAT`, confirm-to-apply). An internet-facing portal is a separate decision with its own threat model.
+- **No public web form or customer portal is exposed off-LAN by this ADR.** The Foundation is an air-gapped mentality and ADR-009 already allows inbound only over WireGuard: the box dials out, it is not dialled into. Staff file tickets from the dashboard (`INTERNAL`), customers email, and the assistant files on someone's behalf (`CHAT`, confirm-to-apply). An internet-facing portal is a separate decision with its own threat model.
 
 ### 5. Ticket status is the project's states, with an explicit SLA clock
 
@@ -77,11 +77,15 @@ A service desk seeds its own states — New, Open, Pending (on customer), On hol
 
 `PmSlaPolicy` (targets per priority for first response, next response and resolution) runs against a `PmBusinessCalendar` (timezone, weekly windows, holidays). Due times and an explicit `PmTicket.slaStatus` (`NONE | ON_TRACK | AT_RISK | BREACHED | MET | PAUSED`) are materialised on the ticket by pure functions — business-hours arithmetic is the one place in this ADR where DST bugs live, so it is a library with exhaustive tests, not inline date math. A `cron-runtime` interval re-evaluates open tickets each minute and emits notifications and escalation actions on transitions. No `while (true)`.
 
-### 7. One filter language
+### 7. `PmActivity` is the outbox
+
+Every PM mutation already writes `PmActivity` inside its own transaction (`writeActivity` in `pm.service.ts`), and the assignee notification sweep already tails it. That makes it a transactional outbox, and every new consumer reads it instead of adding emit calls throughout the service: webhooks (WS-16), automation (WS-9), live board updates (WS-19). Each consumer walks rows in `(createdAt, id)` order from its own cursor, stored in the existing `SystemFlag` key/value table under `pm-outbox:<consumer>`. It runs on a `cron-runtime` interval with an advisory lock, gets an in-process nudge after commit, and is idempotent. No consumer can miss an event that committed, and none sees one that rolled back.
+
+### 8. One filter language
 
 A typed, zod-validated filter DSL (`field / op / value` trees) is the single way to describe a set of work items. The API compiles it to a Prisma `where`; saved views persist it; automation conditions are written in it; the assistant's list tools accept it. Four consumers, one grammar, one compiler, one test suite.
 
-### 8. Integrations leave the box only through the egress gate
+### 9. Integrations leave the box only through the egress gate
 
 - **Off-LAN delivery** — webhooks, Slack / Teams / Discord / Google Chat, GitHub / GitLab API polling — is gated by one new `OffLanChannelKey` value, `work_integrations`, owner-switched and default **off**. Extending the closed vocabulary is the schema change ADR-012 requires.
 - **LAN destinations** (a local n8n, Home Assistant, a NAS) do not need the switch but always pass an SSRF guard that refuses loopback, link-local, the compose network and the box's own addresses, resolves once and pins the IP for the request.
@@ -90,11 +94,11 @@ A typed, zod-validated filter DSL (`field / op / value` trees) is the single way
 - **Calendar** is a read-only ICS feed of due dates behind the existing `CalendarFeedToken` mechanism — no second token scheme.
 - **Scripts and other tools** use personal access tokens: hashed at rest, shown once, scoped (`pm:read`, `pm:write`, `support:read`, `support:write`), revocable, last-used tracked — the ADR-067 shape. An OpenAPI 3.1 document describes `/api/pm/*` and `/api/support/*`.
 
-### 9. Automation is typed, bounded and audited
+### 10. Automation is typed, bounded and audited
 
-`PmAutomationRule` = trigger (enum) + conditions (§7 DSL) + actions (typed list). Rules run after the triggering transaction commits, never inside it; a chain stops at depth 3 and a rule never re-triggers itself. Every automated change writes `PmActivity` with `actorKind = AUTOMATION` and the rule id, so "who did this" always has an answer. Recurring work and templates are the same machinery's scheduled and manual entry points.
+`PmAutomationRule` = trigger (enum) + conditions (§8 DSL) + actions (typed list). Rules run after the triggering transaction commits, never inside it; a chain stops at depth 3 and a rule never re-triggers itself. Every automated change writes `PmActivity` with `actorKind = AUTOMATION` and the rule id, so "who did this" always has an answer. Recurring work and templates are the same machinery's scheduled and manual entry points.
 
-### 10. The assistant gets the whole surface through the existing verbs
+### 11. The assistant gets the whole surface through the existing verbs
 
 No noun-shaped tools come back. WARP-2583 collapsed ten `pm_*` / `crm_*` tools into the verb-shaped `business_find` / `business_timeline` / `business_create` / `business_update` / `business_link` over one business graph, because a 20B local model chooses badly between many schemas and every description costs serialized budget. Tickets join that graph: `ticket` becomes an `entity` value where it makes sense (one enum member, measured before and after), a customer-visible reply is a `business_create` of a reply-kind note on a `ticket` parent, and every write stays behind the generic WARP-2305 confirmation interceptor. Drafting a reply is a read; sending it is a confirmed write. The assistant never emails a customer on its own.
 
@@ -111,7 +115,7 @@ No noun-shaped tools come back. WARP-2583 collapsed ten `pm_*` / `crm_*` tools i
 
 **Positive.** A box can replace a work tracker and a help desk with one surface pair, one login, one backup, and an assistant that can see both. Every slice ships independently with the box bootable, and the schema ADR-026 laid down finally earns its keep.
 
-**Negative.** This is the largest single feature program on the board: nineteen slices touching the Prisma schema, the orchestrator, the dashboard, the `business_*` tools and the mobile read contract. Several slices touch the same PM files and will need rebases as they land. The SLA engine introduces time-zone arithmetic the codebase has not needed before.
+**Negative.** This is the largest single feature program on the board: twenty slices touching the Prisma schema, the orchestrator, the dashboard, the `business_*` tools and the mobile read contract. Several slices touch the same PM files and will need rebases as they land. The SLA engine introduces time-zone arithmetic the codebase has not needed before.
 
 **Neutral.** The `support` module adds a `ModuleId` value — a Prisma enum migration plus its mirrored sites, which ADR-044 deliberately avoided for `/business` and which `/support` genuinely needs: it is a whole surface with its own API prefix and tool domain. The mobile PM contract only gains fields.
 
@@ -125,9 +129,9 @@ One PR per slice, each against `stage`, each with its own WARP story. Specs and 
 | WS-1 | Projects reliability: uncapped board/list, names + date-only dates, project archive/restore with owner-only delete and audit, complete module gates, AA contrast | WARP-3371 · WARP-3372 · WARP-3370 · WARP-1625 · WARP-3181 |
 | WS-2 | Collaboration: comment edit/delete/@mention/reactions, watchers, activity timeline | WARP-3519 |
 | WS-3 | Attachments on work items and comments | WARP-1505 |
-| WS-4 | Fields: custom properties, work-item types, estimates, start dates | WARP-3520 |
+| WS-4 | Editing everywhere: inline editors for every work-item property, relations, item archive, project settings (states, labels, fields), custom fields, types, estimates | WARP-3520 |
 | WS-5 | Cycles (sprints) and modules (milestones), backlog planning, burndown | WARP-3521 |
-| WS-6 | Filter DSL, saved views, table layout, grouping, bulk edit, command palette | WARP-3522 |
+| WS-6 | Filter DSL, saved views, deep links, table layout, grouping, bulk edit, command palette | WARP-3522 |
 | WS-7 | Calendar, timeline (Gantt) and My Work | WARP-3523 |
 | WS-8 | Insights: throughput, cycle time, CFD, workload, `unassigned` summary | WARP-3524 |
 | WS-9 | Templates, recurring work, automation rules | WARP-3525 |
@@ -140,3 +144,4 @@ One PR per slice, each against `stage`, each with its own WARP story. Specs and 
 | WS-16 | Webhooks and chat-app notifications behind `work_integrations` | WARP-3532 |
 | WS-17 | ICS feed, personal API tokens, OpenAPI | WARP-3533 |
 | WS-18 | GitHub / GitLab development panel | WARP-3535 |
+| WS-19 | Live updates: boards, lists and drawers refresh when someone else changes work | WARP-3536 |

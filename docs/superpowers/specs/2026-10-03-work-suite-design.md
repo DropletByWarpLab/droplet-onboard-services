@@ -40,6 +40,7 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 | WS-16 | `20261004160000` | `feat/warp-3532-work-webhooks` |
 | WS-17 | `20261004170000` | `feat/warp-3533-work-ics-api-tokens` |
 | WS-18 | `20261004180000` | `feat/warp-3535-work-github-gitlab` |
+| WS-19 | `20261004190000` | `feat/warp-3536-pm-live-updates` |
 
 ---
 
@@ -89,17 +90,38 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 
 ---
 
-## WS-4 — Fields: custom properties, types, estimates, start date
+## WS-4 — Editing everywhere: inline editors, relations, item archive, project settings, custom fields, types, estimates
 
 **Ticket:** WARP-3520.
 
-**Data.** `PmWorkItem` + `type PmWorkItemType (task|bug|feature|improvement|question|incident) @default(task)`, `estimate Float?` (points). Custom properties use the existing `PmCustomProperty` / `PmWorkItemPropertyValue`; `options` JSON is validated per `PmPropertyType` (select options: `{id,label,color}[]`). Verbs `type_changed`, `estimate_changed`, `start_date_changed`, `property_changed`.
+**Why.** Today the drawer can add a label and a comment and nothing else. No work-item property except labels, and nothing about a project, can be changed from the UI. That gap blocks every other slice.
 
-**API.** `GET|POST /api/pm/projects/:id/properties`, `PATCH|DELETE /api/pm/properties/:id` (owner/admin/lead), `PUT /api/pm/work-items/:id/properties/:propertyId` (value validated against type: number range, date `YYYY-MM-DD`, member must be a user, select must be an existing option id), `DELETE` to clear. Work-item create/update accept `type`, `estimate`, `startDate`. List endpoints return property values.
+**Data.** `PmWorkItem` + `type PmWorkItemType (task|bug|feature|improvement|question|incident) @default(task)` and `estimate Float?` (points). Custom properties use the existing `PmCustomProperty` / `PmWorkItemPropertyValue`. `options` JSON is validated per `PmPropertyType` (select options: `{id,label,color}[]`). New verbs: `type_changed`, `estimate_changed`, `start_date_changed`, `property_changed`.
 
-**UI.** Project settings → Fields (create, rename, reorder, edit options, delete with "values will be removed" confirmation). Detail drawer properties panel renders every field with the right inline editor. Type icon on cards and rows; estimate chip; start date beside due date.
+**API.**
+- Work-item create/update accept `type`, `estimate` and `startDate` (date-only, WS-1 rule).
+- `POST /api/pm/work-items/:id/archive` and `/restore`. `DELETE` hard-deletes, owner/admin only.
+- Properties: `GET|POST /api/pm/projects/:id/properties` and `PATCH|DELETE /api/pm/properties/:id`, owner/admin/lead.
+- `PUT /api/pm/work-items/:id/properties/:propertyId` validates the value against its type: number range, date `YYYY-MM-DD`, member must be an active user, select must be an existing option id. `DELETE` clears it.
+- List endpoints return property values.
+- State management gains **set default** and **delete with reassign-to** if absent.
 
-**AC.** Invalid values rejected with field-level errors. Deleting a select option clears it from items (activity row per item). Values survive project export/import (WS-11 reads them through the same service).
+**UI.**
+- **Drawer.**
+  - Inline editors for title (click to edit, Enter saves, Esc cancels), description, state, priority, assignees (multi-select with search), labels, start date, due date, parent (search picker; cycles refused by the API), department, type, estimate, and every custom field with the right editor.
+  - Description stays a plain multi-line editor converted to sanitized paragraphs. WS-2 adds the shared rich-text editor, and a follow-up swaps it in.
+  - A **Relations** panel to add and remove blocks / blocked by / relates / duplicates, using the existing relations API, with a work-item search picker.
+  - An **Archive / Restore / Delete** menu.
+- **Optimistic updates** with rollback and an inline error (brief §4.2, §4.4).
+- **Project settings** (from the project header): details (name, description, icon, color, lead, department, customer), **States** (create, rename, recolor, reorder, set default, delete with reassign), **Labels** (create, rename, recolor, delete), **Fields** (create, rename, reorder, edit options, delete with "values will be removed").
+- Cards and rows show a type icon, an estimate chip, and the start date beside the due date.
+
+**AC.**
+- Every built-in property is editable by writers and read-only for readers. RBAC is tested per role.
+- Invalid values are rejected with field-level errors.
+- Deleting a select option clears it from items, with an activity row per item.
+- Archiving hides an item from board and list but keeps it in "Archived".
+- Every editor is keyboard-operable with visible focus.
 
 ---
 
@@ -126,6 +148,8 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 **Data.** `PmSavedView {id, workspaceId, projectId String? (null = cross-project), ownerId, scope PmViewScope (PERSONAL|SHARED), name, layout PmViewLayout (BOARD|LIST|TABLE|CALENDAR|TIMELINE), filter Json, groupBy String?, sortBy Json?, columns Json?, sortOrder Int, createdAt, updatedAt}`.
 
 **API.** `POST /api/pm/work-items/query` `{filter, sort, groupBy, cursor, limit}`; saved views CRUD (`SHARED` create/edit/delete: owner/admin/lead; `PERSONAL`: owner only); `POST /api/pm/work-items/bulk` `{ids[], patch: {stateId?, priority?, assigneeIds?, addLabelIds?, removeLabelIds?, cycleId?, moduleId?, type?, isArchived?}}` — one transaction, ≤ 500 ids, per-item permission check, one activity row per changed field per item.
+
+**Deep links.** `/projects` reads and writes its state to the URL: `?p=<identifier>&view=<board|list|table|cycles|modules|…>&item=<KEY-123>&v=<savedViewId>` plus the serialized filter. Opening a URL restores the project, view, filter and open drawer. Back/forward work. Notifications, ICS feeds and webhooks link to `?p=…&item=…`. No route restructure — the single `/projects` route stays (ADR-044: the route is live and deep-linked).
 
 **UI.** Brief §3.9 filter/command bar with chips; save / update / rename / delete views; views listed in the project header and a cross-project "Views" index. **Table layout**: sortable columns, column picker (built-in fields + custom properties when present), inline edit for state / priority / assignee / due date, sticky header, keyboard row navigation. **Grouping** for list and table (state, assignee, priority, label, type, cycle, module, department) with collapsible groups and counts. **Bulk**: checkbox column + shift-range select, floating action bar. **Command palette** (`Ctrl/⌘ K`) and shortcuts per brief §5.6 (`c` create, `/` search, `j/k` move, `x` select, `e` edit, `a` assign, `s` state, `p` priority).
 
@@ -158,7 +182,7 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 
 ---
 
-## WS-9 — Templates, recurring work, automation rules
+## WS-9 — Templates, recurring work, automation rules (stacked on WS-16)
 
 **Ticket:** WARP-3525.
 
@@ -166,7 +190,7 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 
 **Triggers:** item created, state changed, assignee changed, priority changed, comment added, due date approaching (N days), due date passed, scheduled (cron). **Actions:** set state / priority / assignee / labels / type / cycle / module, add comment (internal), notify user(s), create sub-task from template, send webhook (when WS-16 is present).
 
-**Engine.** Post-commit event bus from the PM service mutations; chain depth ≤ 3; a rule never fires on its own action; per-rule rate limit; every action audited. Built-in project templates: Software delivery, Marketing campaign, Client onboarding, Office operations, IT requests.
+**Engine.** A `PmActivity` outbox consumer (ADR-069 §7; framework from WS-16) — not emit calls scattered through the service. Conditions use the WS-6 filter DSL (copy WS-6's DSL module verbatim if WS-6 has not merged; identical files merge cleanly); chain depth ≤ 3; a rule never fires on its own action; per-rule rate limit; every action audited. Built-in project templates: Software delivery, Marketing campaign, Client onboarding, Office operations, IT requests.
 
 **AC.** Loop guard tested (A triggers B triggers A stops). Recurrence across DST and month-end (31st → 30th/28th) tested. Disabled rules never run.
 
@@ -194,7 +218,7 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 
 **Import.** `PmImportJob {id, projectId, source (CSV|JIRA_CSV|ASANA_CSV|TRELLO_JSON|LINEAR_CSV|GITHUB_CSV), status (PENDING|PREVIEWED|RUNNING|SUCCEEDED|FAILED|CANCELLED), mapping Json, stats Json, error, createdById, createdAt, finishedAt}`; `PmWorkItem.externalSystem String?` + `externalId String?` with `@@unique([projectId, externalSystem, externalId])` so re-import updates instead of duplicating. Upload → parse (bounded rows, 10 MB) → preview with auto-mapped columns (status → state, priority, assignee by email/name, labels, dates, parent, description) → user adjusts mapping → run in background with progress → summary (created / updated / skipped with reasons).
 
-**UI.** Project ⋯ menu → Import / Export; a wizard with a mapping table and preview of the first 20 rows.
+**UI.** Project ⋯ menu → Import / Export: a wizard with a mapping table and a preview of the first 20 rows. When the existing read-only Atlassian connector is connected, offer "Import from Jira" straight from it (project picker, then the same mapping and preview) alongside CSV.
 
 **AC.** Fixtures from each source format parse correctly. Re-running the same import is idempotent. Unknown assignees are reported, never silently dropped.
 
@@ -222,9 +246,9 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 
 **Data.** `PmSupportChannel {id, projectId, kind (EMAIL), emailAccountId @unique, enabled, autoAckEnabled, autoAckTemplate, reopenWindowDays Int @default(14), createdAt, updatedAt}`; `PmTicketEmailLink {id, workItemId, emailThreadId @unique, emailMessageId?, direction (INBOUND|OUTBOUND), messageIdHeader, createdAt}`.
 
-**Intake.** Hook into the existing email sync at the point a new `EmailMessage` is persisted for a bound account (no second IMAP poller). New thread → ticket (requester `Contact` found by `ContactEmail` or created with an explicit origin), subject → title, sanitized body → description (HTML through `sanitize-html.ts`), attachments referenced. Reply on a linked thread (by `In-Reply-To`/`References`, then by `[KEY-123]` subject token) → PUBLIC comment from the CONTACT; Pending/Solved within the reopen window → Open (`reopenCount++`); Closed → new ticket linked `RELATES`. **Loop protection:** ignore `Auto-Submitted` ≠ `no`, `Precedence: bulk|junk|list`, `X-Autoreply`, mailer-daemon/bounces, messages from the bound account's own address, and > 20 messages / hour from one sender (rate-limited to one notification to admins).
+**Intake.** `services/email-indexer` (Python) already runs IMAP IDLE per `EmailAccount` and posts each new message to `POST /api/email/:accountId/messages-ingest` (`routes/email.ts`). Today only CRM filing (`services/filing/email-arm.ts`) consumes it. Hook ticket intake in at the same point the filing arm is invoked, after the `EmailMessage` row commits. No second IMAP poller and no change to the Python service unless strictly needed. New thread → ticket (requester `Contact` found by `ContactEmail` or created with an explicit origin), subject → title, sanitized body → description (HTML through `sanitize-html.ts`), attachments referenced. Reply on a linked thread (by `In-Reply-To`/`References`, then by `[KEY-123]` subject token) → PUBLIC comment from the CONTACT; Pending/Solved within the reopen window → Open (`reopenCount++`); Closed → new ticket linked `RELATES`. **Loop protection:** ignore `Auto-Submitted` ≠ `no`, `Precedence: bulk|junk|list`, `X-Autoreply`, mailer-daemon/bounces, messages from the bound account's own address, and > 20 messages / hour from one sender (rate-limited to one notification to admins).
 
-**Outbound.** A PUBLIC reply sends through the bound account's existing send path with `In-Reply-To` / `References` and `[KEY-123]` in the subject; failures surface on the comment (`deliveryStatus` explicit enum: `PENDING|SENT|FAILED`) with a retry action. Auto-acknowledgement on new tickets when enabled (template variables `{{requester.firstName}}`, `{{ticket.key}}`, `{{ticket.title}}`, `{{desk.name}}`). Sending respects the existing `outbound_email` egress channel.
+**Outbound.** A PUBLIC reply sends through the bound account's existing send path. The mailbox outbox is `EmailDraft`, which `services/email-indexer` sends with threading headers; the org SMTP relay in `services/email-channel.service.ts` is for invites and shares only and is not used here. with `In-Reply-To` / `References` and `[KEY-123]` in the subject; failures surface on the comment (`deliveryStatus` explicit enum: `PENDING|SENT|FAILED`) with a retry action. Auto-acknowledgement on new tickets when enabled (template variables `{{requester.firstName}}`, `{{ticket.key}}`, `{{ticket.title}}`, `{{desk.name}}`). Sending respects the existing `outbound_email` egress channel.
 
 **UI.** `/support` → Settings → Channels: bind an email account, toggle auto-acknowledge, edit the template with a preview. Ticket conversation shows email delivery state.
 
@@ -264,11 +288,13 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 
 **Ticket:** WARP-3532.
 
-**Egress.** New `OffLanChannelKey` value `work_integrations` (owner switch, default off) with its settings copy; `off-lan-gate.service.ts` consulted before every off-LAN delivery.
+**Egress.** New `OffLanChannelKey` value `work_integrations` (owner switch, default off) with its settings copy, plus the `docs/security/allowed-egress.yaml` entry the `egress-gate` check requires; `off-lan-gate.service.ts` consulted before every off-LAN delivery.
 
-**SSRF guard.** `safe-outbound.ts`: resolve the hostname once, refuse loopback, link-local, multicast, unspecified, the docker/compose networks, the box's own interface addresses and metadata addresses; connect to the pinned IP with the original Host/SNI; LAN (RFC 1918) destinations allowed without the egress switch, everything else requires it. No redirects followed.
+**SSRF guard.** Extend the existing `apps/orchestrator/src/lib/outbound-url-guard.ts` (do not write a second guard): resolve the hostname once, refuse loopback, link-local, multicast, unspecified, the docker/compose networks, the box's own interface addresses and metadata addresses; connect to the pinned IP with the original Host/SNI; LAN (RFC 1918) destinations allowed without the egress switch, everything else requires it. No redirects followed.
 
 **Data.** `PmWebhook {id, workspaceId, projectId?, name, url, format PmWebhookFormat (JSON|SLACK|TEAMS|DISCORD|GOOGLE_CHAT), secretEnc, events String[], enabled, status (ACTIVE|DISABLED_FAILING|PAUSED), consecutiveFailures Int, createdById, createdAt, updatedAt}`; `PmWebhookDelivery {id, webhookId, event, payload Json, status (PENDING|DELIVERED|FAILED|GIVEN_UP), attempts, nextAttemptAt, lastStatusCode, lastError, createdAt, deliveredAt}`.
+
+**Outbox consumer framework (shared).** `apps/orchestrator/src/services/pm/pm-outbox.ts`: `readOutboxBatch(consumer, limit)` returns `PmActivity` rows after the consumer's cursor in `(createdAt, id)` order. `advanceOutboxCursor(consumer, row)` stores the cursor in `SystemFlag` under key `pm-outbox:<consumer>`. `registerOutboxConsumer({name, intervalMs, handle})` schedules a `cron-runtime` interval with an advisory lock and exposes `nudgeOutbox()`, which `writeActivity` calls after the transaction commits. A brand-new consumer starts at "now" and never replays history. Handlers must be idempotent. WS-9 (automation) and WS-19 (live updates) register their own consumers on this framework.
 
 **Delivery.** Events: `work_item.created|updated|state_changed|assigned|commented|archived`, `ticket.created|replied|solved` (when support exists), `sla.at_risk|breached`. JSON payload v1 documented in `docs/` (id, event, occurredAt, workspace, project, workItem summary, actor, changes). Header `X-Droplet-Signature: t=<unix>,v1=<hex hmac_sha256(secret, t + "." + body)>`, `X-Droplet-Event`, `X-Droplet-Delivery`. Retries 1m, 5m, 30m, 2h, 6h, 12h, 24h; auto-disable after 20 consecutive failures with an admin notification. Delivery processing on `cron-runtime`.
 
@@ -296,10 +322,22 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 
 **Ticket:** WARP-3535.
 
-**Connector.** Declared through the existing connector framework (ADR-041 / ADR-046) with customer-supplied credentials (ADR-042): GitHub (fine-grained PAT, `contents:read`, `pull_requests:read`) or GitLab (PAT `read_api`, self-hosted base URL allowed). Owner/admin connects and picks repositories, and maps each to PM projects. Egress through `work_integrations` (WS-16's key; if WS-16 is not merged yet, this slice adds the key and WS-16 rebases).
+**Connector.** GitHub and GitLab already exist as read-only providers (`packages/shared-types/src/provider-registry.ts`, `routes/integrations.ts`, `IntegrationConnection`, `/integrations` UI). Extend those providers. Do not declare new ones. Credentials are customer-supplied (ADR-042): GitHub (fine-grained PAT, `contents:read`, `pull_requests:read`) or GitLab (PAT `read_api`, self-hosted base URL allowed). Owner/admin connects and picks repositories, and maps each to PM projects. Egress through `work_integrations` (WS-16's key; if WS-16 is not merged yet, this slice adds the key and WS-16 rebases).
 
 **Sync.** `cron-runtime` every 5 min with conditional requests (ETag / `If-Modified-Since`): open + recently-updated PRs / MRs, recent commits on default branch, branches. Match `IDENTIFIER-123` (case-insensitive, word-bounded) in branch names, titles, bodies, commit messages. `PmExternalLink {id, workItemId, provider (GITHUB|GITLAB), kind (PULL_REQUEST|COMMIT|BRANCH), externalId, url, title, state (OPEN|MERGED|CLOSED|DRAFT), author, updatedAt; @@unique([provider, kind, externalId, workItemId])}`. Optional per-project rules: PR opened → state X; PR merged → state Y (writes activity with `actorKind = SYSTEM`).
 
 **UI.** Work-item drawer "Development" section (PRs / commits / branches with status pills, links open externally), copy-branch-name button (`identifier-123-short-title`), integration settings page with last sync time and errors.
 
 **AC.** Matching tested against a corpus (no false positives on `ABC-1234` when the project is `ABC` and item 123 — word boundaries). Rate-limit headers respected (back off). Disconnect removes credentials and stops sync.
+
+---
+
+## WS-19 — Live updates (stacked on WS-16)
+
+**Ticket:** WARP-3536.
+
+**Server.** A `pm-live` outbox consumer (WS-16 framework, interval 1 s plus nudge) maps each `PmActivity` row to the users who can read the item. For a project item: every role with Projects access, minus guests who are not assigned. For a service-desk item: users with the `support` grant. It publishes a compact event `{type:"pm.changed", projectId, workItemId, verb}` to each recipient's existing per-user MQTT topic. That topic is already forwarded by `services/ws-bridge.service.ts` to `/api/ws/events`. No content is published, only ids: the client refetches through the normal authorized API. Presence: the drawer sends a heartbeat (`POST /api/pm/work-items/:id/presence`, 20 s TTL, in memory); `GET` returns other viewers.
+
+**Client.** One `usePmLive()` hook subscribes to the dashboard's existing WebSocket client and revalidates the affected SWR keys (project list, work-item list, the open drawer, support queues). Updates are debounced to 250 ms. The hook pauses while a drag is in progress, so a remote change cannot yank a card mid-drag. The drawer header shows "Also viewing: <avatars>".
+
+**AC.** Two sessions on the same board: a change in one appears in the other within 3 s. A user who cannot read an item receives no event for it (test). With MQTT down, the dashboard falls back to its current behaviour and shows no errors.
