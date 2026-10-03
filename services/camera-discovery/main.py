@@ -250,6 +250,13 @@ rejected_macs: set[str] = set()
 # reject (or a second accept) from acting on a MAC that is being committed —
 # preserving the invariant that a MAC is never both accepted AND rejected.
 accepting_macs: set[str] = set()
+# WARP-3508: IPs that are already a Frigate camera input. Frigate is the source of
+# truth for "this host is a camera": a camera added by hand (the orchestrator's
+# POST /cameras) never passes through this service, so without this set it sat in
+# `pending_cameras` as "needs sign-in" and was re-probed — ONVIF as admin/blank,
+# then the default-credential ladder — on every sweep. Refreshed from Frigate's
+# config (see `_refresh_managed_ips`); the sweep skips these IPs entirely.
+managed_ips: set[str] = set()
 
 # --- Persisted dismissals (WARP-3508) ---
 #
@@ -734,6 +741,12 @@ async def scan_and_discover() -> None:
             continue  # Skip IPs outside camera subnet when isolation is active
         if mac in known_cameras or mac in rejected_macs:
             continue
+        if ip in managed_ips:
+            # Frigate already pulls a stream from this host (WARP-3508): it is a
+            # camera the operator has, not a candidate. Probing it would mean an
+            # ONVIF login and the credential ladder against a camera that is
+            # already set up — and Hanwha locks the account after ~5 failures.
+            continue
 
         candidates[mac] = {
             "ip": ip,
@@ -759,6 +772,8 @@ async def scan_and_discover() -> None:
 
         if mac in known_cameras or mac in rejected_macs:
             continue
+        if ip in managed_ips:
+            continue  # already a Frigate camera — see the lease loop above
 
         candidates[mac] = {
             **candidates.get(mac, {}),
@@ -924,13 +939,35 @@ async def scan_and_discover() -> None:
 
 _scan_scheduler: AsyncIOScheduler | None = None
 
+# WARP-3508: how often the scheduled sweeps re-read which hosts Frigate pulls
+# streams from. Startup and an operator-triggered /scan always do. Between those a
+# camera added by hand is invisible to discovery, so it keeps being probed until
+# the next refresh — 10 sweeps is ~5 minutes at the default 30 s SCAN_INTERVAL,
+# which bounds that, for the cost of one small GET to the local Frigate.
+RECONCILE_EVERY_SWEEPS = 10
+_sweeps_since_refresh = 0
+
 
 async def run_scan() -> None:
     """One discovery sweep, with the try/except the old loop body had.
 
     A failing scan is logged and swallowed so a transient sweep error
     never tears down the schedule — the next interval tick retries.
+
+    Every ``RECONCILE_EVERY_SWEEPS``-th sweep first refreshes ``managed_ips``
+    (WARP-3508). Only that half of the Frigate reconcile runs on a schedule: the
+    other half drops ``known_cameras`` that ``/api/stats`` does not list, and a
+    camera added moments ago is not listed until Frigate has restarted — fine
+    once at startup or on an operator's say-so, wrong on a timer.
     """
+    global _sweeps_since_refresh
+    _sweeps_since_refresh += 1
+    if _sweeps_since_refresh >= RECONCILE_EVERY_SWEEPS:
+        _sweeps_since_refresh = 0
+        try:
+            await _refresh_managed_ips()
+        except Exception as e:  # never raises by contract; a bug in it must not cost the sweep
+            logger.error("Managed-host refresh error: %s", e)
     try:
         await scan_and_discover()
     except Exception as e:
@@ -972,33 +1009,75 @@ def build_scan_scheduler() -> AsyncIOScheduler:
 app = FastAPI(title="Droplet Camera Discovery", version="0.1.0")
 
 
-async def _reconcile_with_frigate() -> None:
-    """Drop ``known_cameras`` entries that Frigate no longer has.
+async def _refresh_managed_ips() -> None:
+    """Recompute ``managed_ips``: every host a Frigate camera input pulls from.
 
-    ``known_cameras`` is our in-memory cache of what we told Frigate
-    about. If someone wipes the Frigate config.yml, recreates the
-    container, or manually removes a camera, our cache goes stale and
-    the scan loop skips re-adding because the MAC looks "already
-    known". Reconcile on startup (and after explicit /scan calls) by
-    asking Frigate for its active camera list and dropping any of our
-    records whose Frigate name no longer exists.
+    A camera Frigate already records from is a camera, whoever added it. This
+    service only ever learned about the adoptions it made itself, so a camera added
+    by hand stayed in ``pending_cameras`` as "needs sign-in" and was re-probed every
+    sweep — ONVIF as admin/blank, then the default-credential ladder. Hanwha locks
+    the admin account after ~5 failed logins (HTTP 490), so the service was locking
+    out cameras the operator had already set up.
+
+    The result REPLACES the previous set, so a camera removed from Frigate becomes
+    discoverable again. A failed read changes nothing: Frigate restarts after every
+    adoption, and a refresh that lands in that window must not make a managed
+    camera look new. Pending records on a managed IP are dropped — the sweep no
+    longer probes them, so nothing else would ever clear them. Never raises.
+    """
+    try:
+        hosts = await frigate.get_camera_input_hosts()
+    except Exception as exc:
+        logger.debug("Frigate managed-host refresh skipped (config fetch failed): %s", exc)
+        return
+    if hosts != managed_ips:
+        logger.info("Frigate pulls streams from %d host(s) — discovery leaves them alone", len(hosts))
+    managed_ips.clear()
+    managed_ips.update(hosts)
+    for mac in [m for m, record in pending_cameras.items() if record.get("ip") in managed_ips]:
+        record = pending_cameras.pop(mac)
+        logger.info(
+            "Dropping pending camera %s (%s) — Frigate already pulls a stream from it",
+            mac, record.get("ip"),
+        )
+
+
+async def _reconcile_with_frigate() -> None:
+    """Re-sync discovery's picture of the world with what Frigate actually has.
+
+    Two independent halves; each fails quietly, because Frigate being down for a
+    restart must never take discovery with it.
+
+    1. Drop ``known_cameras`` entries that Frigate no longer has.
+       ``known_cameras`` is our in-memory cache of what we told Frigate
+       about. If someone wipes the Frigate config.yml, recreates the
+       container, or manually removes a camera, our cache goes stale and
+       the scan loop skips re-adding because the MAC looks "already
+       known". Ask Frigate for its active camera list and drop any of our
+       records whose Frigate name no longer exists.
+    2. Refresh ``managed_ips`` (WARP-3508) — see ``_refresh_managed_ips``.
+
+    Runs on startup and before an operator-triggered /scan, so the sweep the
+    operator asked for already knows what Frigate has. The scheduled sweeps run
+    only the second half (``run_scan`` says why).
     """
     try:
         frigate_cams = await frigate.get_cameras()
     except Exception as exc:
-        logger.debug("Frigate reconcile skipped (stats fetch failed): %s", exc)
-        return
-    live_names = set(frigate_cams.keys())
-    stale = [
-        mac for mac, rec in known_cameras.items()
-        if rec.get("name") and rec["name"] not in live_names
-    ]
-    for mac in stale:
-        logger.info(
-            "Dropping stale known-camera %s (%s) — not present in Frigate",
-            mac, known_cameras[mac].get("name"),
-        )
-        known_cameras.pop(mac, None)
+        logger.debug("Frigate reconcile of known cameras skipped (stats fetch failed): %s", exc)
+    else:
+        live_names = set(frigate_cams.keys())
+        stale = [
+            mac for mac, rec in known_cameras.items()
+            if rec.get("name") and rec["name"] not in live_names
+        ]
+        for mac in stale:
+            logger.info(
+                "Dropping stale known-camera %s (%s) — not present in Frigate",
+                mac, known_cameras[mac].get("name"),
+            )
+            known_cameras.pop(mac, None)
+    await _refresh_managed_ips()
 
 
 @app.on_event("startup")
@@ -1209,6 +1288,9 @@ async def trigger_scan(request: Request):
     action — an unauthenticated LAN peer must not be able to launch it.
     """
     _require_auth(request)
+    # WARP-3508: the operator asked for a scan NOW — bring discovery's picture of
+    # Frigate up to date first, so it skips cameras added since the last refresh.
+    await _reconcile_with_frigate()
     await scan_and_discover()
     return {
         "status": "scan_complete",

@@ -20,6 +20,21 @@ ONVIF WS-Discovery ─────┘      │
 5. **Auto-configure** — push camera config to Frigate NVR via its API
 6. **Publish** discovery event on MQTT for the orchestrator to relay to clients
 
+### Cameras Frigate already has (WARP-3508)
+
+Frigate is the source of truth for "this host is a camera". Discovery reads
+`cameras.<name>.ffmpeg.inputs[].path` from Frigate's config and treats every IP it
+finds as *managed*: a managed IP is never probed (no ONVIF login, no
+default-credential ladder), never published, and any pending record sitting on it is
+dropped. This is what stops a camera added by hand — which never passes through
+this service — from lingering in the discovered list as "needs sign-in" and being
+re-probed every sweep; Hanwha locks the admin account after ~5 failed logins.
+
+The managed set is refreshed at startup, before an operator-triggered
+`POST /scan`, and every 10th scheduled sweep (~5 minutes at the default
+`SCAN_INTERVAL`). Each refresh *replaces* the set, so a camera removed from Frigate
+becomes discoverable again; if Frigate cannot be reached the previous set is kept.
+
 ## Security
 
 - **IP validation** — only probes RFC 1918 private addresses (10.x, 172.16-31.x, 192.168.x). Rejects loopback, link-local, multicast, and public IPs.
