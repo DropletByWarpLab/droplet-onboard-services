@@ -32,8 +32,8 @@ export function useCapabilities(): AdminCapabilities {
 }
 
 /**
- * WARP-3433 — a surface that ships dark and is ABSENT, not empty (the `/doors`
- * pattern): its page renders nothing until the probe has answered, then a plain
+ * WARP-3433 — a surface that ships dark and is ABSENT, not empty: its page
+ * renders nothing until the probe has answered, then a plain
  * 404 unless the capability is on. A failed probe (a non-admin's 403, an older
  * orchestrator) is "off": never a flash of the page, never a card hinting that
  * the product has it.

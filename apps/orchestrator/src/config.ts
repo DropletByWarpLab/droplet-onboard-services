@@ -1458,7 +1458,7 @@ const envSchema = z.object({
   //   dashboard (/admin/claude-activity) is NOT a customer feature: it reads the
   //   AI engineer's session notes, the lab's GitHub PRs and CI, WARP Jira
   //   tickets with staff names, and calls api.github.com / atlassian.net. So it
-  //   ships DARK and dark means ABSENT, the same idiom as DOORS_ENABLED: an
+  //   ships DARK and dark means ABSENT: an
   //   EXPLICIT developer switch, default OFF, never derived from a token being
   //   present. Only "1"/"true" enable it; anything else, including an empty
   //   string, is OFF. OFF: the router is not mounted (404), the `claudeActivity`
