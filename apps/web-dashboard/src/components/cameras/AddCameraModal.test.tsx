@@ -770,6 +770,66 @@ describe("errors are tied to the fields (F9)", () => {
     expect(password.selectionEnd).toBe("s3cret!".length);
   });
 
+  it.each(["INVALID_CREDENTIALS", "UNSUPPORTED_PASSWORD"])(
+    "%s IS about the fields (the server refused them before touching the camera), so both are flagged",
+    async (code) => {
+      addDiscoveredCameraWithCredentials.mockRejectedValue(coded(code, "Refused."));
+      renderCredentials();
+      typeCreds("admin", "has space");
+      submitCredentials();
+
+      const alert = await screen.findByRole("alert");
+      for (const field of [screen.getByLabelText(USERNAME), screen.getByLabelText(PASSWORD)]) {
+        expect(field).toHaveAttribute("aria-invalid", "true");
+        expect(field).toHaveAttribute("aria-describedby", alert.id);
+      }
+    },
+  );
+
+  it("an unsupported password puts focus on the password, selected, to be changed", async () => {
+    addDiscoveredCameraWithCredentials.mockRejectedValue(coded("UNSUPPORTED_PASSWORD", "No spaces."));
+    renderCredentials();
+    typeCreds("admin", "has space");
+    submitCredentials();
+
+    const password = screen.getByLabelText(PASSWORD) as HTMLInputElement;
+    await waitFor(() => expect(password).toHaveFocus());
+    expect(password.selectionStart).toBe(0);
+    expect(password.selectionEnd).toBe("has space".length);
+  });
+
+  it("the manual form flags its account fields and focuses the password for an unsupported password too", async () => {
+    addCameraManual.mockRejectedValue(coded("UNSUPPORTED_PASSWORD", "No spaces."));
+    render(<AddCameraModal onClose={vi.fn()} onAdded={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText(/Camera name/), { target: { value: "front_door" } });
+    fireEvent.change(screen.getByLabelText(/Stream address/), {
+      target: { value: "rtsp://192.168.9.60:554/live" },
+    });
+    typeCreds("admin", "has space");
+    fireEvent.click(screen.getByRole("button", { name: /Add camera/ }));
+
+    const alert = await screen.findByRole("alert");
+    for (const field of [screen.getByLabelText(USERNAME), screen.getByLabelText(PASSWORD)]) {
+      expect(field).toHaveAttribute("aria-invalid", "true");
+      expect(field).toHaveAttribute("aria-describedby", alert.id);
+    }
+    await waitFor(() => expect(screen.getByLabelText(PASSWORD)).toHaveFocus());
+  });
+
+  it("the manual form leaves its fields alone for a failure that is not about them", async () => {
+    addCameraManual.mockRejectedValue(coded("UNREACHABLE", "Down."));
+    render(<AddCameraModal onClose={vi.fn()} onAdded={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText(/Camera name/), { target: { value: "front_door" } });
+    fireEvent.change(screen.getByLabelText(/Stream address/), {
+      target: { value: "rtsp://192.168.9.60:554/live" },
+    });
+    typeCreds("admin", "pw");
+    fireEvent.click(screen.getByRole("button", { name: /Add camera/ }));
+
+    await screen.findByRole("alert");
+    expect(screen.getByLabelText(PASSWORD)).not.toHaveAttribute("aria-invalid");
+  });
+
   it.each(["UNREACHABLE", "LOCKED", "NO_STREAM_PATH", "TIMEOUT", "DISCOVERY_UNAVAILABLE"])(
     "%s is described by the alert but does NOT mark the fields invalid — they are not what is wrong",
     async (code) => {

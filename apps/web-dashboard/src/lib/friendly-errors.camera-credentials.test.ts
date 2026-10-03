@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-import { addDiscoveredCameraWithCredentials } from "./api";
+import { addCameraManual, addDiscoveredCameraWithCredentials } from "./api";
 import { authFetch } from "./auth";
 import { translateError } from "./friendly-errors";
 
@@ -76,9 +76,36 @@ describe("camera credentials failures — copy per reason", () => {
     expect(copy).not.toMatch(/isn't running/);
   });
 
+  it("unsupported_password says which characters, and what to do about it", async () => {
+    const copy = await copyFor(400, { error: "password cannot contain spaces or curly braces", code: "unsupported_password" });
+    expect(copy).toMatch(/space/);
+    expect(copy).toMatch(/curly brace/);
+    expect(copy).toMatch(/Change the camera's password/);
+  });
+
+  it("invalid_credentials says to check them", async () => {
+    const copy = await copyFor(400, { error: "username contains invalid characters", code: "invalid_credentials" });
+    expect(copy).toMatch(/Check the username and password/);
+  });
+
+  it("the manual form's add explains an unsupported password the same way", async () => {
+    authFetchMock.mockResolvedValue(failure(400, { error: "password cannot contain spaces", code: "unsupported_password" }));
+    const err = await addCameraManual("cam", "rtsp://192.168.9.5/live", undefined, undefined, "admin", "has space").catch((e) => e);
+    expect(translateError(err, "camera")).toMatch(/Change the camera's password/);
+  });
+
   it("gives each reason its own words, none of them the generic fallback", async () => {
     const copies = await Promise.all(
-      ["auth_failed", "locked", "no_stream_path", "unreachable", "discovery_unavailable", "timeout"].map((code) =>
+      [
+        "auth_failed",
+        "locked",
+        "no_stream_path",
+        "unreachable",
+        "discovery_unavailable",
+        "timeout",
+        "invalid_credentials",
+        "unsupported_password",
+      ].map((code) =>
         copyFor(422, { error: "x", code }),
       ),
     );

@@ -97,6 +97,20 @@ function codeOf(err: unknown): string | undefined {
   return typeof code === "string" ? code : undefined;
 }
 
+/**
+ * Failures that are ABOUT the username/password fields, so they are flagged
+ * invalid (aria-invalid) — the camera refused them, or the server refused them
+ * before touching the camera. Every other failure (unreachable, timeout, no
+ * stream path, lockout) is not the fields' fault and does not mark them.
+ */
+const ACCOUNT_FAULT_CODES: ReadonlySet<string> = new Set([
+  "AUTH_FAILED",
+  "INVALID_CREDENTIALS",
+  "UNSUPPORTED_PASSWORD",
+]);
+/** Of those, the ones where the next thing to do is retype the password. */
+const PASSWORD_FAULT_CODES: ReadonlySet<string> = new Set(["AUTH_FAILED", "UNSUPPORTED_PASSWORD"]);
+
 /** m:ss — the ClaimStep lockout format (WARP-631). */
 function formatCountdown(totalSeconds: number): string {
   const safe = Math.max(0, Math.floor(totalSeconds));
@@ -451,9 +465,10 @@ export function AddCameraModal({
       );
     } catch (err) {
       if (!isCurrent(token)) return;
-      failureFocus.current = "problem";
+      const code = codeOf(err);
+      failureFocus.current = code && PASSWORD_FAULT_CODES.has(code) ? "password" : "problem";
       setInflightKey(null);
-      setProblem({ key, message: translateError(err, "camera"), code: codeOf(err) });
+      setProblem({ key, message: translateError(err, "camera"), code });
       return;
     }
     onAdded();
@@ -483,7 +498,7 @@ export function AddCameraModal({
       // UNREACHABLE codes to their own copy. The fields are kept so a typo can be
       // corrected without retyping everything.
       const message = translateError(err, "camera");
-      failureFocus.current = code === "AUTH_FAILED" ? "password" : "problem";
+      failureFocus.current = code && PASSWORD_FAULT_CODES.has(code) ? "password" : "problem";
       setInflightKey(null);
       setProblem({ key, message, code });
       if (code === "LOCKED") startLock(target.id, message);
@@ -528,7 +543,7 @@ export function AddCameraModal({
   const example = exampleStreamUrl(manufacturer, found?.ip);
 
   const describedBy = shownProblem || lockedHere ? ERROR_ID : undefined;
-  const accountInvalid = shownProblem?.code === "AUTH_FAILED";
+  const accountInvalid = !!shownProblem?.code && ACCOUNT_FAULT_CODES.has(shownProblem.code);
 
   /**
    * The failure message. role="alert" announces it once as it appears — except
@@ -881,6 +896,8 @@ export function AddCameraModal({
                       autoCapitalize="none"
                       spellCheck={false}
                       maxLength={128}
+                      aria-invalid={accountInvalid ? true : undefined}
+                      aria-describedby={describedBy}
                       className={INPUT_CLASS}
                       style={INPUT_STYLE}
                     />
@@ -892,6 +909,9 @@ export function AddCameraModal({
                     onChange={setPassword}
                     shown={showPassword}
                     onToggle={() => setShowPassword((s) => !s)}
+                    inputRef={setPasswordRef}
+                    describedBy={describedBy}
+                    invalid={accountInvalid}
                   />
                 </div>
                 <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>

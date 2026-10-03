@@ -1,9 +1,10 @@
 /**
  * WARP-3505 F7 — a credentials submit can legitimately run for most of a
- * minute: camera-discovery tries ONVIF (<= 10 s) and then walks the stream
- * paths (<= 30 s), and the orchestrator waits up to 60 s for the answer. Every
- * proxy hop between the browser and the orchestrator has to outlast that, or a
- * camera that WAS added reads as a failed request.
+ * minute: camera-discovery's probing phase has a hard 45 s deadline (the RTSP
+ * stream paths, then ONVIF only when RTSP found none) and the orchestrator waits
+ * up to 60 s for the answer. Every proxy hop between the browser and the
+ * orchestrator has to outlast that, or a camera that WAS added reads as a failed
+ * request.
  *
  * Two hops exist:
  *   - production: nginx `location /api/` straight to the orchestrator;

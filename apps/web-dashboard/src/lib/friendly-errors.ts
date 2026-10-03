@@ -525,6 +525,14 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     // sending the operator to retry blind with a password that may be right.
     TIMEOUT:
       "The camera took too long to answer. If it was added, it will appear in your cameras shortly; otherwise check it's powered on and try again.",
+    // Refused by the server BEFORE the camera was touched, so nothing was spent
+    // on it. UNSUPPORTED_PASSWORD: the camera account is fine, but a password with
+    // a space or a curly brace cannot be written into the stream address
+    // Frigate is given, and there is no workaround on this side.
+    INVALID_CREDENTIALS:
+      "Check the username and password — one of them has a character that can't be used — and try again.",
+    UNSUPPORTED_PASSWORD:
+      "Droplet can't pass a password with a space or a curly brace { } to the camera's video stream. Change the camera's password to one without them, then try again.",
   },
   device: {
     NETWORK:

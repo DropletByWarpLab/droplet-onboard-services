@@ -178,6 +178,8 @@ describe("addDiscoveredCameraWithCredentials (WARP-3505)", () => {
     ["unreachable", "UNREACHABLE"],
     ["discovery_unavailable", "DISCOVERY_UNAVAILABLE"],
     ["timeout", "TIMEOUT"],
+    ["invalid_credentials", "INVALID_CREDENTIALS"],
+    ["unsupported_password", "UNSUPPORTED_PASSWORD"],
   ])("maps the server's %s to a %s error code for friendly copy", async (serverCode, expected) => {
     authFetchMock.mockResolvedValue(
       res({ ok: false, status: 422, json: { error: "Prose.", code: serverCode } }),
@@ -202,6 +204,23 @@ describe("addCameraManual credentials (WARP-3505)", () => {
     const body = JSON.parse((authFetchMock.mock.calls[0][1] as RequestInit).body as string);
     expect(body).toMatchObject({ name: "front_door", rtspUrl: "rtsp://192.168.9.60:554/live", username: "admin", password: "s3cret!" });
     expect(String(authFetchMock.mock.calls[0][0])).not.toContain("s3cret");
+  });
+
+  it.each([
+    ["invalid_credentials", "INVALID_CREDENTIALS"],
+    ["unsupported_password", "UNSUPPORTED_PASSWORD"],
+  ])("throws the server's %s as a %s error code, so the form can explain it", async (serverCode, expected) => {
+    authFetchMock.mockResolvedValue(res({ ok: false, status: 400, json: { error: "Prose.", code: serverCode } }));
+    await expect(
+      addCameraManual("front_door", "rtsp://192.168.9.60/live", undefined, undefined, "admin", "has space"),
+    ).rejects.toMatchObject({ code: expected, status: 400 });
+  });
+
+  it("keeps a plain error (no code) plain", async () => {
+    authFetchMock.mockResolvedValue(res({ ok: false, status: 500, json: { error: "Failed to add camera to Frigate" } }));
+    const err = await addCameraManual("front_door", "rtsp://192.168.9.60/live").catch((e) => e);
+    expect(err.message).toBe("Failed to add camera to Frigate");
+    expect(err.code).toBeUndefined();
   });
 
   it("omits them when blank, so a URL with embedded credentials still works", async () => {
