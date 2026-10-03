@@ -11,6 +11,18 @@ const nextConfig = {
   // leaving it there would silently flatten the standalone layout that
   // apps/web-dashboard/Dockerfile's COPY paths depend on).
   outputFileTracingRoot: path.join(__dirname, "../../"),
+  experimental: {
+    // WARP-3505 — `next dev` proxies /api/* to the orchestrator through the
+    // rewrite below, and Next's proxy drops a request after 30 s by default
+    // (a 40 s one was cut mid-flight). Adding a camera with typed credentials
+    // can run most of a minute: camera-discovery probes ONVIF (<= 10 s) then
+    // the stream paths (<= 30 s), and the orchestrator waits up to 60 s for it.
+    // A camera that WAS added must not read as a failed request, so outlast
+    // that. Production does not use this proxy: nginx `location /api/` reads
+    // for up to a day (see docker/nginx/nginx.conf), pinned by
+    // src/__tests__/camera-credentials.proxy-timeout.test.ts.
+    proxyTimeout: 90_000,
+  },
   webpack: (config) => {
     // `@droplet/auth-policy` is authored for NodeNext (the orchestrator
     // consumes it), so its barrel uses explicit `.js` import extensions

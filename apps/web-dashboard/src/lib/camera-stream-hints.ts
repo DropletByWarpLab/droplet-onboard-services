@@ -16,14 +16,35 @@ const VENDOR_PATHS: ReadonlyArray<readonly [RegExp, string]> = [
   [/reolink/i, "/h264Preview_01_main"],
 ];
 
-/** The known stream path for a manufacturer, or null when we have no proven one. */
-export function streamPathFor(manufacturer: string | null | undefined): string | null {
+/** A manufacturer we hold a proven stream path for. */
+export interface VendorHint {
+  /**
+   * The brand that matched, in plain words ("Hanwha"), NOT the raw ONVIF
+   * manufacturer string ("Hanwha Techwin Co., Ltd.") — this is what goes in a
+   * sentence read by a non-technical operator.
+   */
+  label: string;
+  /** The stream path (with query) to follow the camera's address. */
+  path: string;
+}
+
+/** The vendor hint for a manufacturer, or null when we have no proven path. */
+export function vendorHintFor(manufacturer: string | null | undefined): VendorHint | null {
   const m = manufacturer?.trim();
   if (!m) return null;
   for (const [pattern, path] of VENDOR_PATHS) {
-    if (pattern.test(m)) return path;
+    const hit = pattern.exec(m);
+    if (hit) {
+      const word = hit[0];
+      return { label: word.charAt(0).toUpperCase() + word.slice(1).toLowerCase(), path };
+    }
   }
   return null;
+}
+
+/** The known stream path for a manufacturer, or null when we have no proven one. */
+export function streamPathFor(manufacturer: string | null | undefined): string | null {
+  return vendorHintFor(manufacturer)?.path ?? null;
 }
 
 /**

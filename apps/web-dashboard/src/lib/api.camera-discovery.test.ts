@@ -177,6 +177,7 @@ describe("addDiscoveredCameraWithCredentials (WARP-3505)", () => {
     ["no_stream_path", "NO_STREAM_PATH"],
     ["unreachable", "UNREACHABLE"],
     ["discovery_unavailable", "DISCOVERY_UNAVAILABLE"],
+    ["timeout", "TIMEOUT"],
   ])("maps the server's %s to a %s error code for friendly copy", async (serverCode, expected) => {
     authFetchMock.mockResolvedValue(
       res({ ok: false, status: 422, json: { error: "Prose.", code: serverCode } }),
