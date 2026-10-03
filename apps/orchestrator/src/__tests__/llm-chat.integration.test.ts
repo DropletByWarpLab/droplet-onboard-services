@@ -122,10 +122,18 @@ import {
 // WARP-2655 reads the context-budget drops off the same spy.
 const composers = guardComposerFailOpen();
 
-/** The shipped budget ceiling, derived rather than restated: the route passes
- *  `config.OLLAMA_CONTEXT_LENGTH` (16384, the docker-compose default that
- *  `DEFAULT_CONTEXT_WINDOW` mirrors) and the estimator reserves `OUTPUT_RESERVE`
- *  for the answer. 15360 today; a window change moves the assertions with it. */
+// WARP-3452 — the shipped default window is now 65536, which the oversized
+// message below no longer overflows. Pin the route's `config.OLLAMA_CONTEXT_LENGTH`
+// to `DEFAULT_CONTEXT_WINDOW` (16384, the worst-case window these budget cases
+// are about) before config.ts is first imported.
+vi.hoisted(() => {
+  process.env.OLLAMA_CONTEXT_LENGTH = "16384";
+});
+
+/** The budget ceiling, derived rather than restated: the route passes
+ *  `config.OLLAMA_CONTEXT_LENGTH` (pinned above to `DEFAULT_CONTEXT_WINDOW`)
+ *  and the estimator reserves `OUTPUT_RESERVE` for the answer. 15360 today; a
+ *  window change moves the assertions with it. */
 const THRESHOLD_TOKENS = DEFAULT_CONTEXT_WINDOW - OUTPUT_RESERVE;
 
 /** The oversized user message the two budget cases below send. Their token
@@ -404,7 +412,7 @@ describe("/api/llm/chat (orchestrator agent loop)", () => {
       .send({
         model: "ollama/qwen3",
         messages: [
-          // Comfortably over the default 16384-window guard threshold
+          // Comfortably over the pinned 16384-window guard threshold
           // (~55k chars) on its own, so the guard fires on iteration 1
           // regardless of the system-prompt overhead.
           { role: "user", content: "x".repeat(OVERSIZED_MESSAGE_CHARS) },
