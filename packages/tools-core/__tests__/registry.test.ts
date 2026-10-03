@@ -38,6 +38,7 @@ const EXPECTED_TOOL_NAMES = [
   "read_document_text",    // WARP-2057
   "search_content",
   "search_files",
+  "search_m365_files",     // WARP-3538
   "write_file",
   // smart-home
   "accept_discovered_camera",
@@ -367,6 +368,10 @@ describe("TOOLS registry", () => {
     // separate tool call on the normal write-confirmation path.
     expect(TOOLS.get("classify_items")?.requiresWrite).toBe(false);
     expect(TOOLS.get("classify_items")?.requiresConfirmation).toBe(false);
+    // WARP-3538 — a read of the person's own OneDrive / SharePoint file lists,
+    // from rows the box already holds: no Microsoft call, no write, no prompt.
+    expect(TOOLS.get("search_m365_files")?.requiresWrite).toBe(false);
+    expect(TOOLS.get("search_m365_files")?.requiresConfirmation).toBe(false);
     // WARP-1436 — ambient web-data tools are Tier-1 (read-only; egress is
     // gated + audited server-side, not a state write).
     expect(TOOLS.get("get_weather")?.requiresWrite).toBe(false);

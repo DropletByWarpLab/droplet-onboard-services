@@ -161,6 +161,11 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "list_files", client: "nextcloud", hops: [admit("get", "/api/files")] },
   { tool: "read_file", client: "nextcloud", hops: [admit("get", "/api/files/download")] },
   { tool: "search_files", client: "nextcloud", hops: [admit("get", "/api/files/search")] },
+  // WARP-3538 — the person's own OneDrive + SharePoint file lists, through the
+  // orchestrator (the rows are per person and ciphertext at rest). The route
+  // must admit the mcp principal and resolve the acting person from
+  // X-Nextcloud-User (toolActingUser) — the admission suite reads it.
+  { tool: "search_m365_files", client: "orchestrator", hops: [admit("get", "/api/m365/files")] },
   none("search_content"), // ctx.searchHybrid shim (no ctx.http hop)
   none("read_document_text"), // ctx.readDocumentText shim (no ctx.http hop)
   { tool: "list_recent_files", client: "nextcloud", hops: [admit("get", "/api/files/recents")] },
