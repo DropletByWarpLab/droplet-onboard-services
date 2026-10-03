@@ -86,3 +86,79 @@ export function canPrepareDrive(
   if (drivePoolName(d)) return false;
   return wholeDisk !== "";
 }
+
+/**
+ * Which drive did a Prepare / pool format just create?
+ *
+ * The recovery key is requested by drive id, and the id is the NEW filesystem's
+ * UUID (erasing a drive gives it a fresh one), so after the wipe the panel has
+ * to find it in the refreshed list. Preference order:
+ *
+ *   1. an encrypted drive on the pool array or disk that was just prepared (the
+ *      orchestrator's `pool` annotation / the bridge's `parent_disk`);
+ *   2. otherwise the ONE encrypted drive that was not in the list before. A
+ *      mapper node has no recognisable whole-disk name, so older bridges leave
+ *      `parent_disk` unset.
+ *
+ * Several candidates and no way to tell them apart returns `undefined`: handing
+ * the owner another drive's recovery key would be worse than asking them to try
+ * again.
+ */
+export function pickPreparedDrive(
+  drives: readonly DriveInfo[],
+  query: { diskName?: string; poolDevice?: string; knownUuids: ReadonlySet<string> },
+): DriveInfo | undefined {
+  const candidates = drives.filter((d) => d.uuid && driveEncryptionState(d) === "encrypted");
+  if (query.poolDevice) {
+    const byPool = candidates.find((d) => drivePoolName(d) === query.poolDevice);
+    if (byPool) return byPool;
+  }
+  if (query.diskName) {
+    const byDisk = candidates.find((d) => d.parent_disk === query.diskName);
+    if (byDisk) return byDisk;
+  }
+  const fresh = candidates.filter((d) => !query.knownUuids.has(d.uuid));
+  return fresh.length === 1 ? fresh[0] : undefined;
+}
+
+/**
+ * Resolve the id of a drive that is still appearing. The host mounts the new
+ * filesystem as the last step of the op, but the bridge caches its drive
+ * snapshot for a few seconds, so the first refresh can miss it: retry, spaced
+ * out, before telling the owner it is "not visible yet". A failing refresh is
+ * "not yet", never an error; the dialog that awaits this has its own retry.
+ */
+export async function resolveNewDriveId({
+  refresh,
+  pick,
+  current,
+  attempts = 3,
+  delayMs = 1500,
+  sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+  isCancelled = () => false,
+}: {
+  refresh: () => Promise<{ drives?: DriveInfo[] } | undefined>;
+  pick: (drives: DriveInfo[]) => DriveInfo | undefined;
+  /** The panel's latest list, used when a refresh hands back nothing. */
+  current: () => DriveInfo[];
+  attempts?: number;
+  delayMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  /** Checked before every attempt: a lookup whose panel has gone away stops
+   *  polling instead of refreshing a list nobody is looking at. */
+  isCancelled?: () => boolean;
+}): Promise<string | null> {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (isCancelled()) return null;
+    let fresh: DriveInfo[] | undefined;
+    try {
+      fresh = (await refresh())?.drives;
+    } catch {
+      fresh = undefined;
+    }
+    const found = pick(fresh ?? current());
+    if (found?.uuid) return found.uuid;
+    if (attempt < attempts - 1) await sleep(delayMs);
+  }
+  return null;
+}

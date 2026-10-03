@@ -7,13 +7,16 @@
  * then renders nothing about encryption — it never guesses a drive is plain, and
  * above all never claims a drive is encrypted it has not been told is.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import type { DriveInfo } from "@/lib/types";
 import {
   canPrepareDrive,
   driveEncryptionState,
   isEncryptionReported,
   isRecordingsDrive,
+  pickPreparedDrive,
   recordingsReservedBytes,
+  resolveNewDriveId,
 } from "./drive-encryption";
 
 describe("driveEncryptionState", () => {
@@ -122,5 +125,149 @@ describe("canPrepareDrive — the gate on the Prepare drive action", () => {
 
   it("never offers it without a whole-disk name the host script can act on", () => {
     expect(canPrepareDrive({ ...plain, device: "/dev/mapper/x" }, "")).toBe(false);
+  });
+});
+
+function drive(overrides: Partial<DriveInfo> = {}): DriveInfo {
+  return {
+    device: "/dev/mapper/droplet-bay-1",
+    mount: "/mnt/droplet/x",
+    label: "",
+    uuid: "U-1",
+    size_bytes: 1,
+    used_bytes: 0,
+    free_bytes: 1,
+    mounted: true,
+    encryption: "luks2",
+    preparation: "prepared",
+    ...overrides,
+  };
+}
+
+describe("pickPreparedDrive — finding the drive a Prepare just created", () => {
+  const none = new Set<string>();
+
+  it("prefers the encrypted drive on the disk that was prepared", () => {
+    const hit = drive({ uuid: "U-NEW", parent_disk: "sdb" });
+    const other = drive({ uuid: "U-OLD", parent_disk: "sdc" });
+    expect(
+      pickPreparedDrive([other, hit], { diskName: "sdb", knownUuids: new Set(["U-OLD"]) }),
+    ).toBe(hit);
+  });
+
+  it("falls back to the one NEW encrypted drive when the bridge reports no parent disk", () => {
+    const fresh = drive({ uuid: "U-NEW", parent_disk: undefined });
+    const old = drive({ uuid: "U-OLD" });
+    expect(
+      pickPreparedDrive([old, fresh], { diskName: "sdb", knownUuids: new Set(["U-OLD"]) }),
+    ).toBe(fresh);
+  });
+
+  it("will not guess between several new encrypted drives", () => {
+    const a = drive({ uuid: "U-A" });
+    const b = drive({ uuid: "U-B" });
+    expect(pickPreparedDrive([a, b], { diskName: "sdb", knownUuids: none })).toBeUndefined();
+  });
+
+  it("ignores plain drives and drives with no id", () => {
+    expect(
+      pickPreparedDrive(
+        [
+          drive({ encryption: "none", preparation: "needs_preparing", uuid: "U-1", parent_disk: "sdb" }),
+          drive({ uuid: "", parent_disk: "sdb" }),
+        ],
+        { diskName: "sdb", knownUuids: none },
+      ),
+    ).toBeUndefined();
+  });
+
+  it("finds the filesystem backing a freshly formatted pool by its array name", () => {
+    const hit = drive({ uuid: "U-POOL", device: "/dev/md127", pool: "md127" });
+    expect(
+      pickPreparedDrive([drive({ uuid: "U-X", parent_disk: "sdz" }), hit], {
+        poolDevice: "md127",
+        knownUuids: none,
+      }),
+    ).toBe(hit);
+  });
+
+  it("returns undefined when nothing has appeared yet", () => {
+    expect(pickPreparedDrive([], { diskName: "sdb", knownUuids: none })).toBeUndefined();
+  });
+});
+
+describe("resolveNewDriveId — the drive list can lag the host by a few seconds", () => {
+  const hit = drive({ uuid: "U-NEW", parent_disk: "sdb" });
+  const pick = (ds: DriveInfo[]) => ds.find((d) => d.parent_disk === "sdb");
+  const noWait = async () => {};
+
+  it("returns the id as soon as the refreshed list has the drive", async () => {
+    const refresh = vi.fn().mockResolvedValue({ drives: [hit] });
+    await expect(
+      resolveNewDriveId({ refresh, pick, current: () => [], attempts: 3, delayMs: 5, sleep: noWait }),
+    ).resolves.toBe("U-NEW");
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries, waiting between attempts, until the drive shows up", async () => {
+    const refresh = vi
+      .fn()
+      .mockResolvedValueOnce({ drives: [] })
+      .mockResolvedValueOnce({ drives: [] })
+      .mockResolvedValueOnce({ drives: [hit] });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(
+      resolveNewDriveId({ refresh, pick, current: () => [], attempts: 3, delayMs: 7, sleep }),
+    ).resolves.toBe("U-NEW");
+    expect(refresh).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledWith(7);
+  });
+
+  it("gives up with null after the last attempt, and does not sleep after it", async () => {
+    const refresh = vi.fn().mockResolvedValue({ drives: [] });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(
+      resolveNewDriveId({ refresh, pick, current: () => [], attempts: 3, delayMs: 5, sleep }),
+    ).resolves.toBeNull();
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back to the panel's current list when a refresh returns nothing", async () => {
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    await expect(
+      resolveNewDriveId({ refresh, pick, current: () => [hit], attempts: 1, delayMs: 0, sleep: noWait }),
+    ).resolves.toBe("U-NEW");
+  });
+
+  it("stops polling the moment it is cancelled", async () => {
+    const refresh = vi.fn().mockResolvedValue({ drives: [] });
+    let cancelled = false;
+    const sleep = vi.fn(async () => {
+      cancelled = true;
+    });
+    await expect(
+      resolveNewDriveId({
+        refresh,
+        pick,
+        current: () => [],
+        attempts: 5,
+        delayMs: 1,
+        sleep,
+        isCancelled: () => cancelled,
+      }),
+    ).resolves.toBeNull();
+    // One attempt ran; the cancellation after its sleep ended the loop.
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a failing refresh as 'not yet' rather than throwing", async () => {
+    const refresh = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("bridge"))
+      .mockResolvedValueOnce({ drives: [hit] });
+    await expect(
+      resolveNewDriveId({ refresh, pick, current: () => [], attempts: 2, delayMs: 0, sleep: noWait }),
+    ).resolves.toBe("U-NEW");
   });
 });
