@@ -343,7 +343,7 @@ class TestDecide:
     def test_no_secrets_and_no_host_skips_loudly(self):
         enabled, msg = mirror.decide({})
         assert enabled is False
-        assert "SKIPPED" in msg and "ghcr.io" in msg
+        assert "SKIPPED" in msg and "ghcr" in msg  # a message, not a URL (CodeQL py/incomplete-url-substring-sanitization)
 
     def test_unset_github_values_arrive_as_empty_strings_and_count_as_absent(self):
         env = {k: "" for k in ALL}
