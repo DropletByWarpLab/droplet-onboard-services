@@ -38,7 +38,7 @@ vi.mock("../services/frigate.client.js", () => ({
   fetchKnownPlates: vi.fn(), fetchFaceImage: vi.fn(), deleteKnownFace: vi.fn(),
   deleteFaceImage: vi.fn(), deleteKnownPlate: vi.fn(), nameKnownPlate: vi.fn(),
   regenerateEventDescription: vi.fn(), tagEventAsFace: vi.fn(), openBirdseyeStream: vi.fn(),
-  openMjpegStream: vi.fn(), enableDetection: vi.fn(), disableDetection: vi.fn(),
+  openMjpegStream: vi.fn(),
   deleteCamera: vi.fn(), deleteEvent: vi.fn(), addCamera: vi.fn(),
   syncCamerasFromDb: vi.fn().mockResolvedValue([]),
   fetchEvents: vi.fn(), buildRecordingClipUrl: vi.fn(), buildVodMasterUrl: vi.fn(),
@@ -76,7 +76,6 @@ vi.mock("../lib/internal-tls.js", () => ({
 
 import { createCamerasRouter } from "../routes/cameras.js";
 import { userDirectory } from "./helpers/user-directory.js";
-import { enableDetection, disableDetection } from "../services/frigate.client.js";
 import { updateCameraSettings } from "../services/camera-settings.service.js";
 import {
   evaluateNetworkCommand,
@@ -85,8 +84,6 @@ import {
 import { internalFetch } from "../lib/internal-tls.js";
 import type { AuthUser } from "../middleware/auth.js";
 
-const mockEnable = vi.mocked(enableDetection);
-const mockDisable = vi.mocked(disableDetection);
 const mockUpdateSettings = vi.mocked(updateCameraSettings);
 const mockEvaluate = vi.mocked(evaluateNetworkCommand);
 const mockConfirm = vi.mocked(confirmNetworkCommand);
@@ -128,8 +125,8 @@ function buildApp(user: AuthUser): express.Express {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockEnable.mockResolvedValue(undefined);
-  mockDisable.mockResolvedValue(undefined);
+  // WARP-3511: enable/disable write the persisted detect.enabled setting.
+  mockUpdateSettings.mockResolvedValue({} as never);
 });
 
 describe("camera write-route guards admit the MCP service principal (WARP-1440)", () => {
@@ -141,7 +138,7 @@ describe("camera write-route guards admit the MCP service principal (WARP-1440)"
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: "enabled", camera: "front" });
-    expect(mockEnable).toHaveBeenCalledWith("front");
+    expect(mockUpdateSettings).toHaveBeenCalledWith("front", { detectEnabled: true });
   });
 
   it("POST /cameras/:name/disable — MCP principal gets the Tier-2 202 mint", async () => {
@@ -155,7 +152,7 @@ describe("camera write-route guards admit the MCP service principal (WARP-1440)"
 
     expect(res.status).toBe(202);
     expect(res.body.confirmationToken).toBe("tok-1");
-    expect(mockDisable).not.toHaveBeenCalled();
+    expect(mockUpdateSettings).not.toHaveBeenCalled();
   });
 
   it("POST /cameras/command/confirm — MCP principal completes the handshake", async () => {
@@ -174,7 +171,7 @@ describe("camera write-route guards admit the MCP service principal (WARP-1440)"
     expect(mockConfirm).toHaveBeenCalledWith(
       prismaShim, "tok-1", "_service:mcp", { operation: "disable_camera" },
     );
-    expect(mockDisable).toHaveBeenCalledWith("front");
+    expect(mockUpdateSettings).toHaveBeenCalledWith("front", { detectEnabled: false });
   });
 
   it("PATCH /cameras/:name/settings — MCP principal reaches the settings service", async () => {
@@ -202,7 +199,7 @@ describe("camera write-route guards admit the MCP service principal (WARP-1440)"
       // tools assert one, so the test must too.
       .set("X-Nextcloud-User", "alice");
     expect(denied.status).toBe(403);
-    expect(mockEnable).toHaveBeenCalledTimes(1);
+    expect(mockUpdateSettings).toHaveBeenCalledTimes(1);
   });
 });
 
