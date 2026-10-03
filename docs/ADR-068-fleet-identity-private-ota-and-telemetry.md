@@ -216,19 +216,23 @@ Both are defaults, tunable by environment variable. Purges run on a scheduler, n
 - **Discovery is unchanged.** It is the signed channel pointer on the public `ota-index` release (ADR-066 §3), plus downloads by tag, the no-downgrade floor and the `registry-auth:` classification (ADR-066 §4–§6). Moving discovery from GitHub to HQ is optional and later.
 - **The pre-push image secret scan stays.** The images are private now, but a box still holds them.
 
-### 7. Product claim change: Romain to approve
+### 7. Product claim change (approved by Romain, 2026-10-03)
 
 PRODUCT.md says the product "never phones home" (lines 39 and 118) and uses "Off-LAN: 0 B" as sovereignty language (lines 152 and 205). **For updates and operational telemetry, those claims are no longer accurate.** The box now authenticates to Warp to update itself and sends health counters and redacted error records.
 
 FOUNDATION.md's own rule, that everything crossing the boundary is "default-deny and audited", still holds: each destination is allowlisted and has a data class.
 
-Proposed replacement wording:
+Replacement wording, approved by Romain on 2026-10-03 ("approve the wording"):
 
 > "Customer data never leaves the box. The box sends Warp only signed update requests and operational health counters, which the owner can inspect."
 
 The badge would read "Customer data off-LAN: 0 B".
 
-**Romain to approve.** PRODUCT.md lives outside this repository and is not edited here.
+PRODUCT.md lives outside this repository; it is updated to this wording separately.
+
+### 7a. Customer assignment (decided by Romain, 2026-10-03)
+
+A box is assigned to its customer by a **Warp provisioning step in the portal**: before a box ships, an operator pre-registers its HQ identity (`did` / `key_fingerprint`) against the customer. The portal links the machine record to that customer on its first valid telemetry call. A box that authenticates without a pre-registration lands with an explicit `unassigned` status (never inferred from a missing customer id) and shows in an "Unassigned boxes" list for an operator to assign; reassignment is audited. HQ stays customer-agnostic: the JWT carries no customer claim.
 
 ### 8. Egress changes the implementation PRs make
 
@@ -291,7 +295,6 @@ The deltas are in [`THREAT_MODEL.md`](THREAT_MODEL.md) §7:
 ## Not decided here
 
 - **Opt-out for a future non-leased SKU.** Telemetry is always on under the lease, and whether a box the customer owns outright may turn it off is open.
-- **Which customer a portal machine belongs to.** Today a machine's customer comes from the provisioning code. A machine created from an HQ JWT has no customer until someone assigns it, either an operator in the portal or a field in the HQ enrollment record.
 - **Token lifetime against slow, multi-GB pulls** (WARP-3423 comment 15567, item 1). The contract caps tokens at 600 s. This ADR relies on authorization at request start, a token per image, and resumable retries. If field data shows pulls that do not converge, the contract needs a longer, pull-scoped TTL.
 - **A narrower signer.** device-identity-svc's `Sign` signs any payload for any caller on its socket. A dedicated RPC that signs only the `droplet-hq-token:v1:` form, like the extension-signing envelope, would shrink who can mint tokens.
 - **R2 retention and garbage collection** for old releases.
