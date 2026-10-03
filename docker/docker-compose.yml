@@ -1013,6 +1013,10 @@ services:
       - NETBIOS_DISABLE=1
       - SAMBA_CONF_WORKGROUP=WORKGROUP
       - SAMBA_CONF_SERVER_STRING=Droplet
+      # Unknown logins must fail (LOGON_FAILURE), not map to guest (the image
+      # default is `Bad User`): Windows 11 24H2+ refuses unsigned guest
+      # sessions and then never prompts for the `droplet` login (WARP-3516).
+      - SAMBA_CONF_MAP_TO_GUEST=Never
       # Device-wide share credential, generated per-device by setup.sh
       # (scripts/lib/secrets.sh). Username is deliberately FIXED to `droplet`
       # — the dashboard dialog, the orchestrator endpoint, and this account
