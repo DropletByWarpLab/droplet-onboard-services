@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -174,6 +175,71 @@ async def probe_onvif_device(ip: str, port: int = 80,
     except Exception as e:
         logger.debug("ONVIF probe failed for %s:%d — %s", ip, port, e)
         return None
+
+
+# A camera REFUSING the credentials, in whatever words its SOAP stack uses
+# ("Sender not Authorized", ter:NotAuthorized, "401 ... Unauthorized").
+_ONVIF_REFUSED = re.compile(r"not\s?authori[sz]ed|unauthori[sz]ed|\b401\b")
+
+
+def classify_onvif_error(exc: BaseException) -> str:
+    """``"auth_failed"`` when the camera refused the credentials, else ``"unsupported"``.
+
+    The distinction matters: the credentials flow asks ONVIF for a stream path only
+    after RTSP found none, i.e. before anything has checked the password, so a
+    refusal here IS the wrong-password answer and must not be reported as "no
+    stream path". Connection refused, a timeout, a 404 or an unknown action all
+    mean the camera simply does not speak ONVIF here.
+    """
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status == 401:
+        return "auth_failed"
+    if _ONVIF_REFUSED.search(f"{type(exc).__name__} {exc}".lower()):
+        return "auth_failed"
+    return "unsupported"
+
+
+async def onvif_stream_uri(ip: str, port: int = 80, username: str = "admin",
+                           password: str = "") -> tuple[str, str | None]:
+    """ONVIF GetStreamUri with the operator's credentials, as ``(status, uri)``.
+
+    ``status`` is ``"ok"`` (``uri`` is the camera's own stream URI),
+    ``"auth_failed"`` (the camera refused the credentials) or ``"unsupported"``
+    (no ONVIF service, no profile, library missing).
+
+    Nothing the exception says is logged — zeep/onvif errors can quote the SOAP
+    request, which carries the password. Only the kind and the exception TYPE are.
+    """
+    try:
+        from onvif import ONVIFCamera
+    except ImportError:
+        logger.debug("onvif-zeep not available — no ONVIF stream URI for %s", ip)
+        return "unsupported", None
+
+    loop = asyncio.get_event_loop()
+    try:
+        cam = await loop.run_in_executor(
+            None, lambda: ONVIFCamera(ip, port, username, password)
+        )
+        media = await loop.run_in_executor(None, cam.create_media_service)
+        profiles = await loop.run_in_executor(None, media.GetProfiles)
+        if not profiles:
+            return "unsupported", None
+        setup = {"Stream": "RTP-Unicast", "Transport": {"Protocol": "RTSP"}}
+        reply = await loop.run_in_executor(
+            None,
+            lambda: media.GetStreamUri(
+                {"StreamSetup": setup, "ProfileToken": profiles[0].token}
+            ),
+        )
+        uri = getattr(reply, "Uri", None)
+        return ("ok", uri) if uri else ("unsupported", None)
+    except Exception as exc:
+        kind = classify_onvif_error(exc)
+        logger.debug("ONVIF stream URI for %s: %s (%s)", ip, kind, type(exc).__name__)
+        return kind, None
 
 
 async def discover_cameras() -> list[dict]:

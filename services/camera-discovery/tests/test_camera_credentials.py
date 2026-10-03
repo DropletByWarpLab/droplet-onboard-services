@@ -11,13 +11,21 @@ credentials embedded server-side.
 Pinned here:
   * outcome classification — ok / auth_failed / locked / no_path / unreachable —
     so the operator is told which thing is wrong;
-  * a wrong password burns ONE auth attempt, not one per stream path (Hanwha
-    locks the account after ~5 failures);
+  * a wrong password costs ONE failed sign-in in total: RTSP is tried first and
+    stops at the first path that refuses it, and ONVIF (a second protocol, a
+    second failed sign-in) only runs when RTSP found no stream path at all
+    (Hanwha locks the account after ~5 failures);
+  * a camera that is ALREADY locked is reported as locked on the first reply;
   * a Hanwha-style qop=auth digest camera works end to end;
   * NET-05: the password never appears in the response, the logs, or the
     MQTT event payload;
-  * credentials are URL-encoded the way ffmpeg needs (WARP-1873) and inputs that
-    could inject RTSP headers are rejected.
+  * the stream address is guarded (an ONVIF device chooses its own path) and a
+    bad port in a record is a clean answer, not a 500;
+  * inputs that could inject RTSP headers, or that cannot be expressed in a
+    Frigate stream URL, are refused with a code before any attempt is spent.
+
+What Frigate and ffmpeg then do to the stored URL is pinned in
+test_frigate_credentials.py (the password must reach the camera as typed).
 """
 
 from __future__ import annotations
@@ -32,7 +40,7 @@ import time
 import pytest
 
 import rtsp_prober
-from tests.test_rtsp_digest_qop import FakeDigestServer, _auth_params
+from tests.test_rtsp_digest_qop import REALM, FakeDigestServer, _auth_params, _md5
 
 SECRET = "pytest-fake-secret"
 USER, PW = "admin", "s3cret!"
@@ -45,13 +53,31 @@ class _Server(FakeDigestServer):
     and (optionally) answers a failed auth with a vendor lockout status."""
 
     def __init__(self, good_paths=(GOOD_PATH,), mode="qop", password=PW,
-                 fail_line="401 Unauthorized", delay=0.0):
+                 fail_line="401 Unauthorized", delay=0.0, username=USER,
+                 anonymous_line=None):
         super().__init__(mode, password)
         self.good_paths = set(good_paths)
         self.fail_line = fail_line
         self.delay = delay  # seconds a slow camera takes to answer each request
+        self.username = username
+        # What an already-locked camera answers to a DESCRIBE that carries no
+        # Authorization header at all, e.g. "490 Account Blocked".
+        self.anonymous_line = anonymous_line
         self.auth_attempts = 0
         self.paths_seen: list[str] = []
+
+    def _math_ok(self, p: dict) -> bool:
+        if p.get("username") != self.username:
+            return False
+        ha1 = _md5(f"{self.username}:{REALM}:{self.password}")
+        ha2 = _md5(f"DESCRIBE:{p.get('uri', '')}")
+        if "qop" in p:
+            expect = _md5(
+                f'{ha1}:{p.get("nonce","")}:{p.get("nc","")}:{p.get("cnonce","")}:{p["qop"]}:{ha2}'
+            )
+        else:
+            expect = _md5(f'{ha1}:{p.get("nonce","")}:{ha2}')
+        return p.get("response") == expect
 
     async def _handle(self, reader, writer):
         conn_nonce = None
@@ -80,6 +106,10 @@ class _Server(FakeDigestServer):
                     if ln.lower().startswith("authorization:"):
                         auth = ln.split(":", 1)[1].strip()
                         break
+                if not auth and self.anonymous_line:
+                    writer.write(f"RTSP/1.0 {self.anonymous_line}\r\nCSeq: 1\r\n\r\n".encode())
+                    await writer.drain()
+                    return
                 if not auth:
                     conn_nonce = self._issue()
                     writer.write(
@@ -134,6 +164,16 @@ class TestOutcome:
         assert out == "locked"
 
     @pytest.mark.asyncio
+    async def test_already_locked_camera_is_locked_on_the_first_anonymous_reply(self):
+        """A Hanwha that is already blocked answers even the unauthenticated
+        DESCRIBE with 490; that is a lockout, not 'this path does not exist'."""
+        async with _Server(anonymous_line="490 Account Blocked") as srv:
+            out = await rtsp_prober.describe_outcome("127.0.0.1", srv.port, GOOD_PATH, USER, PW)
+            attempts = srv.auth_attempts
+        assert out == "locked"
+        assert attempts == 0  # no sign-in was spent finding that out
+
+    @pytest.mark.asyncio
     async def test_unknown_path_is_no_path(self):
         async with _Server() as srv:
             out = await rtsp_prober.describe_outcome("127.0.0.1", srv.port, "/stream1", USER, PW)
@@ -184,6 +224,34 @@ class TestProbeWithCredentials:
         port = await _closed_port()
         res = await rtsp_prober.probe_with_credentials("127.0.0.1", port, USER, PW, timeout=1.0)
         assert res == ("unreachable", None)
+
+    @pytest.mark.asyncio
+    async def test_already_locked_camera_stops_the_walk_at_the_first_path(self):
+        async with _Server(anonymous_line="490 Account Blocked") as srv:
+            res = await rtsp_prober.probe_with_credentials("127.0.0.1", srv.port, USER, PW)
+            walked = list(srv.paths_seen)
+        assert res == ("locked", None)
+        assert len(walked) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_walk_can_be_limited_to_the_hint_paths(self):
+        """After ONVIF names a path, only THAT path is worth another request."""
+        async with _Server(good_paths=("/onvif/only",)) as srv:
+            res = await rtsp_prober.probe_with_credentials(
+                "127.0.0.1", srv.port, USER, PW,
+                hint_paths=["/onvif/only"], include_known_paths=False,
+            )
+            walked = list(srv.paths_seen)
+        assert res == ("ok", "/onvif/only")
+        assert walked and set(walked) == {"/onvif/only"}
+
+    @pytest.mark.asyncio
+    async def test_success_does_not_log_the_username_at_info(self, caplog):
+        caplog.set_level(logging.INFO)
+        async with _Server(username="svc_operator") as srv:
+            res = await rtsp_prober.probe_with_credentials("127.0.0.1", srv.port, "svc_operator", PW)
+        assert res == ("ok", GOOD_PATH)
+        assert "svc_operator" not in caplog.text
 
     @pytest.mark.asyncio
     async def test_budget_bounds_how_long_the_path_walk_can_run(self):
@@ -272,7 +340,9 @@ def _fresh_main(monkeypatch, port):
         "name": "xnv_c8083r",
         "manufacturer": "Hanwha",
         "model": "XNV-C8083R",
-        "rtsp_url": "rtsp://127.0.0.1:554/stream1",
+        # What the prober's placeholder looks like: the guess carries the port that
+        # was actually open.
+        "rtsp_url": f"rtsp://127.0.0.1:{port}/stream1",
         "detection_method": "rtsp_port_open",
         "status": "needs_setup",
     }
@@ -283,12 +353,14 @@ def _fresh_main(monkeypatch, port):
         return True
 
     async def no_onvif(*a, **k):
-        return None
+        return ("unsupported", None)
 
     published: list[dict] = []
     monkeypatch.setattr(main.frigate, "add_camera", fake_add)
-    monkeypatch.setattr(main, "probe_onvif_device", no_onvif)
+    monkeypatch.setattr(main, "onvif_stream_uri", no_onvif)
     monkeypatch.setattr(main, "publish_discovery", lambda payload: published.append(payload))
+    # The fake cameras listen on loopback, which the real guard (rightly) refuses.
+    monkeypatch.setattr(main, "is_safe_ip", lambda ip: True)
     return main, added, published
 
 
@@ -297,7 +369,7 @@ def _body(resp):
 
 
 @pytest.mark.asyncio
-async def test_success_adds_camera_with_encoded_credentials(monkeypatch):
+async def test_success_adds_the_camera_with_its_credentials(monkeypatch):
     async with _Server() as srv:
         main, added, published = _fresh_main(monkeypatch, srv.port)
         out = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
@@ -306,23 +378,31 @@ async def test_success_adds_camera_with_encoded_credentials(monkeypatch):
     assert len(added) == 1
     name, url = added[0]
     assert name == "xnv_c8083r"
-    # `!` is a legal userinfo sub-delim and ffmpeg does not percent-decode, so
-    # it must go on the wire literally (WARP-1873).
+    # The INTERNAL form (what discovery keeps and hands to Frigate's boundary,
+    # which rewrites it into what Frigate must hold — test_frigate_credentials.py).
     assert url == f"rtsp://{USER}:{PW}@127.0.0.1:{srv.port}{GOOD_PATH}"
     assert MAC in main.known_cameras and MAC not in main.pending_cameras
     assert main.known_cameras[MAC]["status"] == "active"
 
 
 @pytest.mark.asyncio
-async def test_userinfo_delimiters_in_password_are_encoded(monkeypatch):
+async def test_the_record_keeps_a_url_that_parses_and_can_be_redacted(monkeypatch):
+    """The orchestrator strips userinfo with a regex that stops at '/' and '@', and
+    verify_stream URL-decodes it, so the INTERNAL url must encode those. (What
+    Frigate is then given is a different form — test_frigate_credentials.py.)"""
+    from urllib.parse import unquote, urlsplit
+
     tricky = "p@ss/w:rd#1"
     async with _Server(password=tricky) as srv:
         main, added, _ = _fresh_main(monkeypatch, srv.port)
         out = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": tricky}))
     assert out["status"] == "accepted"
-    url = added[0][1]
-    userinfo = url.split("://", 1)[1].rsplit("@", 1)[0]
-    assert userinfo == f"{USER}:p%40ss%2Fw%3Ard%231"
+    for url in (added[0][1], main.known_cameras[MAC]["rtsp_url"]):
+        userinfo = url.split("://", 1)[1].rsplit("@", 1)[0]
+        assert userinfo == f"{USER}:p%40ss%2Fw%3Ard%231"
+        parts = urlsplit(url)
+        assert (unquote(parts.username), unquote(parts.password)) == (USER, tricky)
+        assert parts.hostname == "127.0.0.1" and parts.path == GOOD_PATH
 
 
 @pytest.mark.asyncio
@@ -367,57 +447,275 @@ async def test_unreachable_camera_is_reported_as_unreachable(monkeypatch):
     assert added == []
 
 
+# --- RTSP first, ONVIF only when RTSP found no path (a wrong password = ONE failed login)
+
+
 @pytest.mark.asyncio
-async def test_onvif_stream_uri_path_is_used_when_available(monkeypatch):
+async def test_a_wrong_password_never_reaches_onvif(monkeypatch):
+    """ONVIF is a second protocol and so a second failed sign-in on the same
+    account. A password RTSP already refused must not be tried on it."""
+    async with _Server() as srv:
+        main, added, _ = _fresh_main(monkeypatch, srv.port)
+        onvif_calls = []
+
+        async def onvif(*a, **k):
+            onvif_calls.append(a)
+            return ("ok", f"rtsp://127.0.0.1:{srv.port}{GOOD_PATH}")
+
+        monkeypatch.setattr(main, "onvif_stream_uri", onvif)
+        resp = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": "wrong"}))
+        attempts = srv.auth_attempts
+    assert resp.status_code == 422 and _body(resp)["code"] == "auth_failed"
+    assert onvif_calls == []
+    assert attempts == 1  # the whole attempt cost the camera exactly one failed login
+    assert added == []
+
+
+@pytest.mark.asyncio
+async def test_a_successful_rtsp_probe_never_runs_onvif_either(monkeypatch):
+    async with _Server() as srv:
+        main, added, _ = _fresh_main(monkeypatch, srv.port)
+        onvif_calls = []
+
+        async def onvif(*a, **k):
+            onvif_calls.append(a)
+            return ("unsupported", None)
+
+        monkeypatch.setattr(main, "onvif_stream_uri", onvif)
+        out = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+    assert out["status"] == "accepted" and onvif_calls == []
+
+
+@pytest.mark.asyncio
+async def test_onvif_names_the_path_when_the_known_list_has_none(monkeypatch):
     async with _Server(good_paths=("/onvif-media/main",)) as srv:
         main, added, _ = _fresh_main(monkeypatch, srv.port)
+        calls = []
 
-        async def onvif(ip, port=80, username="admin", password=""):
-            assert (username, password) == (USER, PW)  # creds reach GetStreamUri
-            return {"ip": ip, "rtsp_url": f"rtsp://{ip}:{srv.port}/onvif-media/main"}
+        async def onvif(ip, port, username, password):
+            calls.append((ip, port, username, password))
+            return ("ok", f"rtsp://{ip}:{srv.port}/onvif-media/main")
 
-        monkeypatch.setattr(main, "probe_onvif_device", onvif)
+        monkeypatch.setattr(main, "onvif_stream_uri", onvif)
         out = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+        walked = list(srv.paths_seen)
     assert out["status"] == "accepted"
     assert added[0][1].endswith("/onvif-media/main")
+    assert calls == [("127.0.0.1", 80, USER, PW)]  # the credentials reach GetStreamUri
+    # RTSP's own walk came first; the hint was then probed once, on its own.
+    assert "/profile2/media.smp" in walked and walked[-1] == "/onvif-media/main"
 
 
 @pytest.mark.asyncio
-async def test_slow_onvif_cannot_stall_the_rtsp_probe(monkeypatch):
-    """ONVIF is best effort and bounded, so a camera whose ONVIF service hangs
-    still gets its RTSP walk — the whole submit stays inside "up to a minute"."""
-    async with _Server() as srv:
+async def test_onvif_refusing_the_credentials_is_auth_failed_not_no_stream_path(monkeypatch):
+    """RTSP found no path, so nothing has checked the password yet; ONVIF is the
+    first thing that did, and it said no. That is a wrong password."""
+    async with _Server(good_paths=("/totally/custom/vendor/path",)) as srv:
+        main, added, _ = _fresh_main(monkeypatch, srv.port)
+
+        async def onvif(*a, **k):
+            return ("auth_failed", None)
+
+        monkeypatch.setattr(main, "onvif_stream_uri", onvif)
+        resp = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+    assert resp.status_code == 422 and _body(resp)["code"] == "auth_failed"
+    assert added == []
+
+
+@pytest.mark.asyncio
+async def test_onvif_not_supported_stays_no_stream_path(monkeypatch):
+    async with _Server(good_paths=("/totally/custom/vendor/path",)) as srv:
+        main, added, _ = _fresh_main(monkeypatch, srv.port)  # onvif -> ("unsupported", None)
+        resp = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+    assert resp.status_code == 422 and _body(resp)["code"] == "no_stream_path"
+
+
+@pytest.mark.asyncio
+async def test_slow_onvif_cannot_stall_the_answer(monkeypatch):
+    """ONVIF is best effort and bounded: a camera whose ONVIF service hangs still
+    gets a prompt no_stream_path, not a hang."""
+    async with _Server(good_paths=("/totally/custom/vendor/path",)) as srv:
         main, added, _ = _fresh_main(monkeypatch, srv.port)
         monkeypatch.setattr(main, "_CRED_ONVIF_TIMEOUT_S", 0.2)
 
         async def hangs(*a, **k):
             await asyncio.sleep(30)
 
-        monkeypatch.setattr(main, "probe_onvif_device", hangs)
+        monkeypatch.setattr(main, "onvif_stream_uri", hangs)
         started = time.monotonic()
-        out = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+        resp = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
         elapsed = time.monotonic() - started
-    assert out["status"] == "accepted"
+    assert resp.status_code == 422 and _body(resp)["code"] == "no_stream_path"
     assert elapsed < 5.0
-    assert len(added) == 1
 
 
 @pytest.mark.asyncio
 async def test_rtsp_walk_is_given_a_bounded_budget(monkeypatch):
-    """ONVIF (<= 10 s) + the RTSP budget (<= 30 s) + one in-flight DESCRIBE must
-    stay under the orchestrator's 60 s wait, or a camera that WAS added reads as
-    a timeout."""
     main, _, _ = _fresh_main(monkeypatch, 1)
-    seen = {}
+    seen = []
 
-    async def spy(ip, port, user, pw, hint_paths=None, timeout=3.0, max_seconds=None):
-        seen["max_seconds"] = max_seconds
-        return ("no_path", None)
+    async def spy(ip, port, user, pw, hint_paths=None, timeout=3.0, max_seconds=None,
+                  include_known_paths=True):
+        seen.append(max_seconds)
+        return ("unreachable", None)
 
     monkeypatch.setattr(main, "probe_with_credentials", spy)
     await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
-    assert seen["max_seconds"] == main._CRED_RTSP_BUDGET_S
-    assert main._CRED_ONVIF_TIMEOUT_S + main._CRED_RTSP_BUDGET_S + 12 < 60
+    assert seen and all(s == main._CRED_RTSP_BUDGET_S for s in seen)
+
+
+def test_the_whole_probe_stays_inside_the_orchestrators_wait():
+    """The orchestrator gives up at 60 s (camera-candidates.service.ts). The probing
+    phase has a HARD deadline; the Frigate commit that follows is sub-second."""
+    import main
+
+    assert main._CRED_ONVIF_TIMEOUT_S + main._CRED_RTSP_BUDGET_S < main._CRED_TOTAL_BUDGET_S
+    assert main._CRED_TOTAL_BUDGET_S <= 45 < 60
+
+
+@pytest.mark.asyncio
+async def test_a_probe_that_outlasts_its_deadline_is_a_timeout_not_a_hang(monkeypatch):
+    main, added, _ = _fresh_main(monkeypatch, 1)
+    monkeypatch.setattr(main, "_CRED_TOTAL_BUDGET_S", 0.2)
+
+    async def stuck(*a, **k):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(main, "probe_with_credentials", stuck)
+    started = time.monotonic()
+    resp = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+    assert time.monotonic() - started < 5.0
+    assert resp.status_code == 504 and _body(resp)["code"] == "timeout"
+    assert added == []
+    assert MAC in main.pending_cameras and not main.accepting_macs  # the claim was released
+
+
+# --- the address and ports come from a device / a record: never trusted blindly
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_path",
+    ["/{FRIGATE_CAMERA_X_PASSWORD}", "/has space", "/ctl\x01", "/}", "no-leading-slash"],
+)
+async def test_an_onvif_path_with_template_or_whitespace_characters_is_never_used(monkeypatch, bad_path):
+    """SEC-INJ-5: Frigate expands {FRIGATE_*} in a stream path. ONVIF is a device
+    telling us what to write into Frigate's config."""
+    async with _Server(good_paths=("/totally/custom/vendor/path",)) as srv:
+        main, added, _ = _fresh_main(monkeypatch, srv.port)
+
+        async def onvif(ip, port, username, password):
+            return ("ok", f"rtsp://{ip}:{srv.port}{bad_path}")
+
+        monkeypatch.setattr(main, "onvif_stream_uri", onvif)
+        resp = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+        walked = list(srv.paths_seen)
+    assert resp.status_code == 422 and _body(resp)["code"] == "no_stream_path"
+    assert added == []
+    assert bad_path not in walked  # never even sent to the camera
+
+
+@pytest.mark.asyncio
+async def test_an_onvif_uri_for_another_host_is_not_followed(monkeypatch):
+    async with _Server(good_paths=("/totally/custom/vendor/path",)) as srv:
+        main, added, _ = _fresh_main(monkeypatch, srv.port)
+
+        async def onvif(ip, port, username, password):
+            return ("ok", f"rtsp://10.9.9.9:{srv.port}/totally/custom/vendor/path")
+
+        monkeypatch.setattr(main, "onvif_stream_uri", onvif)
+        resp = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+    assert resp.status_code == 422 and _body(resp)["code"] == "no_stream_path"
+    assert added == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_ip", ["8.8.8.8", "127.0.0.1", "169.254.1.1", "not-an-ip"])
+async def test_a_record_whose_address_is_not_a_safe_lan_ip_is_refused_before_any_probe(monkeypatch, bad_ip):
+    from fastapi import HTTPException
+
+    import main as main_module
+
+    main = importlib.reload(main_module)  # the real is_safe_ip, not the loopback-friendly test one
+    main.known_cameras.clear()
+    main.pending_cameras.clear()
+    main.accepting_macs.clear()
+    main.pending_cameras[MAC] = {"mac": MAC, "ip": bad_ip, "name": "x", "status": "needs_setup"}
+    probed = []
+
+    async def spy(*a, **k):
+        probed.append(a)
+        return ("ok", "/x")
+
+    monkeypatch.setattr(main, "probe_with_credentials", spy)
+    with pytest.raises(HTTPException) as ei:
+        await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+    assert ei.value.status_code == 400
+    assert probed == []
+    assert not main.accepting_macs  # the claim was released
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"port": 99999},
+        {"port": "not-a-number"},
+        {"port": -1},
+        {"port": None, "rtsp_url": "rtsp://127.0.0.1:99999/x"},
+        {"port": None, "rtsp_url": "rtsp://127.0.0.1:abc/x"},
+    ],
+)
+async def test_a_bad_port_in_the_record_is_ignored_not_a_500(monkeypatch, record):
+    """urlparse().port raises ValueError for a bad port; a corrupt record must not
+    turn into an unhandled 500."""
+    async with _Server() as srv:
+        main, added, _ = _fresh_main(monkeypatch, srv.port)
+        main.pending_cameras[MAC].update(record)
+
+        async def scan(ip, ports=None, timeout=2.0):
+            return [srv.port]
+
+        monkeypatch.setattr(main, "scan_ports", scan)
+        out = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+    assert out["status"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_an_onvif_records_own_port_is_the_onvif_port_not_an_rtsp_one(monkeypatch):
+    """For a record an ONVIF/WS-Discovery probe made, `port` is the ONVIF HTTP port
+    (80). Pointing an RTSP DESCRIBE at it finds a web server and a bogus
+    'no stream path'; the stream URI's own port is the RTSP one."""
+    async with _Server() as srv:
+        main, added, _ = _fresh_main(monkeypatch, srv.port)
+        main.pending_cameras[MAC].update(
+            {"detection_method": "onvif", "port": 80, "rtsp_url": f"rtsp://127.0.0.1:{srv.port}/profile2/media.smp"}
+        )
+        ports = []
+        real = main.probe_with_credentials
+
+        async def spy(ip, port, *a, **k):
+            ports.append(port)
+            return await real(ip, port, *a, **k)
+
+        monkeypatch.setattr(main, "probe_with_credentials", spy)
+        out = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+    assert out["status"] == "accepted"
+    assert ports == [srv.port]
+
+
+@pytest.mark.asyncio
+async def test_a_bad_port_in_an_onvif_uri_is_ignored_not_a_500(monkeypatch):
+    async with _Server(good_paths=("/onvif-media/main",)) as srv:
+        main, added, _ = _fresh_main(monkeypatch, srv.port)
+
+        async def onvif(ip, port, username, password):
+            return ("ok", f"rtsp://{ip}:99999/onvif-media/main")
+
+        monkeypatch.setattr(main, "onvif_stream_uri", onvif)
+        out = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+    assert out["status"] == "accepted"
+    assert added[0][1].endswith(f":{srv.port}/onvif-media/main")
 
 
 @pytest.mark.asyncio
@@ -459,6 +757,10 @@ async def test_requires_device_secret(monkeypatch):
         {"username": USER, "password": "pw\r\nCSeq: 9"},
         {"username": "a" * 200, "password": PW},
         {"username": USER, "password": "p" * 500},
+        {"username": "   ", "password": PW},          # whitespace-only username
+        {"username": USER, "password": "bad\ud800pw"},  # lone surrogate: not UTF-8
+        {"username": "bad\udfffname", "password": PW},
+        {"username": "ad:min", "password": PW},        # ffmpeg splits the decoded userinfo at ':'
         ValueError("bad json"),
         ["not", "a", "dict"],
     ],
@@ -471,6 +773,57 @@ async def test_invalid_input_is_400(monkeypatch, body):
         await main.submit_camera_credentials(MAC, _Req(body))
     assert ei.value.status_code == 400
     assert added == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pw", ["has space", "tab\there", "brace{", "{FRIGATE_X}", "}"])
+async def test_a_password_that_cannot_be_written_into_a_frigate_url_is_refused_up_front(monkeypatch, pw):
+    """Frigate str.format()s its config (braces) and its userinfo regex stops at
+    whitespace, so for a username it matches the password cannot be stored. It is
+    refused BEFORE any sign-in is spent on the camera, with a code the dashboard
+    can explain."""
+    main, added, _ = _fresh_main(monkeypatch, 1)
+    probed = []
+
+    async def spy(*a, **k):
+        probed.append(a)
+        return ("ok", "/x")
+
+    monkeypatch.setattr(main, "probe_with_credentials", spy)
+    with pytest.raises(main.CredentialsRejected) as ei:
+        await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": pw}))
+    assert ei.value.status_code == 400
+    assert ei.value.code == "unsupported_password"
+    assert pw not in str(ei.value.detail)
+    assert probed == [] and added == []
+
+
+@pytest.mark.asyncio
+async def test_that_limit_does_not_apply_to_a_username_frigate_does_not_match(monkeypatch):
+    """Percent-encoded, so spaces and braces are fine — for john.doe the camera
+    receives them as typed (test_frigate_credentials.py proves it)."""
+    async with _Server(username="john.doe", password="has space{") as srv:
+        main, added, _ = _fresh_main(monkeypatch, srv.port)
+        out = await main.submit_camera_credentials(
+            MAC, _Req({"username": "john.doe", "password": "has space{"})
+        )
+    assert out["status"] == "accepted"
+
+
+def test_rejections_are_rendered_with_their_code(monkeypatch):
+    """The orchestrator reads {detail, code}; an HTTPException alone has no code."""
+    from fastapi.testclient import TestClient
+
+    main, _, _ = _fresh_main(monkeypatch, 1)
+    client = TestClient(main.app)
+    resp = client.post(
+        f"/cameras/discovered/{MAC}/credentials",
+        headers={"Authorization": f"Bearer {SECRET}"},
+        json={"username": USER, "password": "has space"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "unsupported_password"
+    assert "has space" not in resp.text
 
 
 @pytest.mark.asyncio

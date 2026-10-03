@@ -17,9 +17,10 @@ import re
 import secrets
 import socket
 import time
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import unquote, urlsplit
 
 from default_credentials import get_credentials
+from rtsp_url import INTERNAL_USERINFO_SAFE, internal_url
 
 logger = logging.getLogger(__name__)
 
@@ -29,25 +30,21 @@ _AUTH_PARAM_RE = re.compile(r'([A-Za-z][\w-]*)\s*=\s*(?:"([^"]*)"|([^\s,]*))')
 # Common RTSP ports used by IP cameras
 RTSP_PORTS = [554, 8554, 8080]
 
-# Characters that must survive un-escaped in the credential half of an RTSP URL.
+# Characters left literal in the credential half of an INTERNAL stream URL (the
+# one camera-discovery stores, verifies and hands to the orchestrator for
+# redaction). RFC 3986 allows these sub-delims in userinfo, so the URL parses and
+# `T3stCamPw!` stays readable; everything else is percent-encoded so the password
+# can never terminate the authority.
 #
-# RFC 3986 defines userinfo as `*( unreserved / pct-encoded / sub-delims / ":" )`,
-# so every sub-delim below is already legal there and never needed escaping. That
-# matters because the consumer of this URL is Frigate's bundled ffmpeg, and ffmpeg
-# does NOT percent-decode userinfo before authenticating — whatever we write goes
-# on the wire literally. Encoding a legal character (quote(pw, safe="") turning
-# `T3stCamPw!` into `T3stCamPw%21`) therefore sends the wrong password: the
-# camera answers 401, ffmpeg retries, and a Hanwha locks the account after ~5
-# attempts. docker/frigate/config.yml carries the same warning for hand-written
-# camera entries. (WARP-1873)
-#
-# Anything outside this set stays encoded. `@` and `/` would otherwise terminate
-# the userinfo, and `%` or whitespace would corrupt the parse — a password using
-# those cannot be expressed in an ffmpeg RTSP URL at all, so escaping them is
-# both correct per spec and the best available answer for any consumer that does
-# decode. `:` is deliberately excluded: a literal one would split user from
-# password on the wrong boundary.
-RTSP_USERINFO_SAFE = "!$&'()*+,;="
+# This is NOT what Frigate is given. Before ffmpeg sees it, Frigate 0.17
+# percent-encodes the password itself (escape_special_characters) and ffmpeg then
+# decodes it once, so a password written into Frigate's config must be RAW — a
+# pre-encoded one is encoded twice and the camera receives the percent-escape
+# (401, then a lockout). The rewrite happens once, at the Frigate boundary
+# (FrigateClient.add_camera -> rtsp_url.to_frigate_url); see rtsp_url.py for the
+# whole chain. (An earlier version of this comment said ffmpeg does not decode
+# userinfo; it does, once, and that misreading is how `%40` got stored.)
+RTSP_USERINFO_SAFE = INTERNAL_USERINFO_SAFE
 
 # Common RTSP stream paths by manufacturer/convention.
 # Paths are ordered by observed hit rate; Hanwha Wisenet lives near the
@@ -432,6 +429,13 @@ async def describe_outcome(ip: str, port: int, path: str,
     if _is_rtsp_200(resp1):
         _close_rtsp(writer)
         return OUTCOME_OK
+    if _rtsp_status(resp1) == 490:
+        # Hanwha's "Account Blocked", answered even to a DESCRIBE with no
+        # Authorization at all: the camera is ALREADY locked. Reading it as "this
+        # path does not exist" would walk every other path and finally report
+        # "no stream path" for a camera that needs to be left alone.
+        _close_rtsp(writer)
+        return OUTCOME_LOCKED
     if "RTSP/1.0 401" not in resp1 and "RTSP/2.0 401" not in resp1:
         _close_rtsp(writer)
         return OUTCOME_NO_PATH  # 404 / 400 / 501 / etc — path doesn't exist here
@@ -491,7 +495,8 @@ async def _try_credentials_once(ip: str, port: int, path: str,
 async def probe_with_credentials(ip: str, port: int, user: str, pw: str,
                                  hint_paths: list[str] | None = None,
                                  timeout: float = 3.0,
-                                 max_seconds: float = 30.0
+                                 max_seconds: float = 30.0,
+                                 include_known_paths: bool = True
                                  ) -> tuple[str, str | None]:
     """Find a stream path that works with ONE operator-supplied credential.
 
@@ -515,9 +520,13 @@ async def probe_with_credentials(ip: str, port: int, user: str, pw: str,
     orchestrator gives up after 60 s) must outlast ONVIF + this + one in-flight
     DESCRIBE, or a camera that WAS added reads as a timeout. Checked between
     paths, so the walk can overrun by at most one DESCRIBE.
+
+    ``include_known_paths=False`` probes ONLY ``hint_paths``: after ONVIF has
+    named the stream path, the rest of the list has already been walked and
+    refused, so only the new path is worth another request.
     """
     ordered: list[str] = []
-    for path in [*(hint_paths or []), *STREAM_PATHS]:
+    for path in [*(hint_paths or []), *(STREAM_PATHS if include_known_paths else [])]:
         if path and path not in ordered:
             ordered.append(path)
 
@@ -529,8 +538,9 @@ async def probe_with_credentials(ip: str, port: int, user: str, pw: str,
             break
         outcome = await describe_outcome(ip, port, path, user, pw, timeout)
         if outcome == OUTCOME_OK:
-            logger.info("Operator credential for '%s' authenticated at %s:%d%s",
-                        user, ip, port, path)
+            # DEBUG, and without the username: an account name in an INFO log is
+            # reconnaissance for anyone who can read the log bundle.
+            logger.debug("Operator credential authenticated at %s:%d%s", ip, port, path)
             return OUTCOME_OK, path
         if outcome in (OUTCOME_AUTH_FAILED, OUTCOME_LOCKED):
             return outcome, None
@@ -563,10 +573,7 @@ async def probe_rtsp_with_credentials(ip: str, port: int
     for path in STREAM_PATHS:
         for user, pw in credentials:
             if await _try_credentials_once(ip, port, path, user, pw):
-                logger.info(
-                    "Credential '%s' authenticated at %s:%d%s",
-                    user, ip, port, path,
-                )
+                logger.debug("Default credential authenticated at %s:%d%s", ip, port, path)
                 return path, user, pw
     return None
 
@@ -597,9 +604,7 @@ async def probe_camera(ip: str) -> dict | None:
         creds = await probe_rtsp_with_credentials(ip, port)
         if creds:
             path, user, pw = creds
-            url = (f"rtsp://{quote(user, safe=RTSP_USERINFO_SAFE)}"
-                   f":{quote(pw, safe=RTSP_USERINFO_SAFE)}"
-                   f"@{ip}:{port}{path}")
+            url = internal_url(user, pw, ip, port, path)
             return {
                 "ip": ip,
                 "port": port,

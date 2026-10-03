@@ -12,6 +12,7 @@ import re
 import httpx
 
 from camera_retention_defaults import build_record_block, build_snapshots_block
+from rtsp_url import UnsafeStreamUrl, scrub_credentials, to_frigate_url
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,9 @@ class FrigateClient:
             logger.warning(
                 "Frigate rejected birdseye config (%d): %s",
                 resp.status_code,
-                str(body.get("message", resp.text))[:200],
+                # Frigate's config errors can quote ANY camera's ffmpeg path, and
+                # that path carries the camera's password.
+                scrub_credentials(str(body.get("message", resp.text)))[:200],
             )
             return False
         except Exception as e:
@@ -135,6 +138,21 @@ class FrigateClient:
         """
         # Sanitize camera name: lowercase, alphanumeric + underscores only
         safe_name = re.sub(r"[^a-z0-9_]", "_", name.lower()).strip("_")
+
+        # The ONE place an internal stream URL becomes what Frigate must hold
+        # (WARP-3505). Callers pass the percent-encoded internal form; Frigate
+        # percent-encodes the password itself before ffmpeg URL-decodes it once,
+        # so for a username it matches the password has to be stored RAW — see
+        # rtsp_url.py. Refuses (rather than writes) a URL Frigate cannot be given
+        # safely: a lone brace in a config string stops Frigate starting, and
+        # {FRIGATE_*} in a device-chosen path is a placeholder it would expand.
+        try:
+            rtsp_url = to_frigate_url(rtsp_url)
+        except UnsafeStreamUrl as exc:
+            logger.warning(
+                "Refusing to add camera %s to Frigate: %s", safe_name, exc.message
+            )
+            return False
 
         # 🔴 `record` MUST carry the retention windows explicitly. This
         # block used to be {"enabled": True}, which inherits
@@ -199,7 +217,7 @@ class FrigateClient:
                     return True
                 logger.warning(
                     "Frigate config set rejected camera %s: %s",
-                    safe_name, body.get("message", "")[:200],
+                    safe_name, scrub_credentials(str(body.get("message", "")))[:200],
                 )
                 return False
 
@@ -207,11 +225,15 @@ class FrigateClient:
                 "Frigate config set returned %d for camera %s: %s",
                 resp.status_code,
                 safe_name,
-                resp.text[:200],
+                # Frigate echoes the offending config path, which carries the
+                # camera's password.
+                scrub_credentials(resp.text)[:200],
             )
             return False
         except Exception as e:
-            logger.error("Failed to add camera %s to Frigate: %s", safe_name, e)
+            logger.error(
+                "Failed to add camera %s to Frigate: %s", safe_name, scrub_credentials(str(e))
+            )
             return False
 
     async def _trigger_restart(self, camera_name: str) -> None:
