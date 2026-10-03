@@ -41,6 +41,21 @@ import {
   Building2,
   Briefcase,
   Handshake,
+  // WARP-3520 — work-item kinds, the item / project menus, field-type glyphs.
+  Bug,
+  SquareCheck,
+  TrendingUp,
+  CircleHelp,
+  Siren,
+  Archive,
+  ArchiveRestore,
+  Settings,
+  ArrowUp,
+  ArrowDown,
+  Type,
+  Hash,
+  ToggleLeft,
+  ListChecks,
   type LucideIcon,
 } from "lucide-react";
 
@@ -87,6 +102,22 @@ export const ICONS: Record<string, LucideIcon> = {
   building: Building2,
   briefcase: Briefcase,
   handshake: Handshake,
+  // WARP-3520 — one glyph per work-item kind (`feature` reuses `spark`).
+  task: SquareCheck,
+  bug: Bug,
+  improve: TrendingUp,
+  help: CircleHelp,
+  siren: Siren,
+  archive: Archive,
+  restore: ArchiveRestore,
+  settings: Settings,
+  arrowUp: ArrowUp,
+  arrowDown: ArrowDown,
+  // WARP-3520 — custom-field types (`date` is `cal`, `member` is `user`).
+  text: Type,
+  hash: Hash,
+  toggle: ToggleLeft,
+  checks: ListChecks,
 };
 
 export function PmIcon({

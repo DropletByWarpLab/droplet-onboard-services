@@ -457,6 +457,13 @@ export function DetailDrawer({
   item: PmWorkItem;
   onClose: () => void;
   onChanged: () => void;
+  /** WARP-3520 — hide every editor (members, viewers, guests read only).
+   *  Default: editable, so existing callers and fixtures keep their editors;
+   *  the Projects page always passes the real value. */
+  readOnly?: boolean;
+  /** WARP-3520 — owner/admin: may hard-delete the item (the API refuses
+   *  everyone else). Default: false. */
+  canDelete?: boolean;
 }): JSX.Element {
   const titleId = useId();
   return (
