@@ -182,7 +182,7 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 **UI + API.**
 - **Calendar layout** (month / week): items placed on `dueDate`; items with `startDate` span; drag to reschedule (PATCH, optimistic with rollback); "Unscheduled" side panel to drag from; overdue styling per brief §2.
 - **Timeline layout**: rows = items (grouped like list), bars from `startDate` to `dueDate` (single-day diamond when only one date), zoom day / week / month / quarter, drag to move, drag edges to resize, `BLOCKS` relations drawn as dependency connectors, module target dates as milestone markers, today line, keyboard nudging (`←/→` ±1 day, `Shift` ±1 week). Server: `GET /api/pm/projects/:id/timeline?from&to` returns items + relations in range.
-- **My Work** (`/projects/my-work`): cross-project for the signed-in user — Assigned, Created, Mentioned, Watching (if WS-2 has landed; hidden otherwise), Overdue, Due this week — each a server-side query, grouped by project, using the same row component as list.
+- **My Work** (`/projects?view=my-work`): cross-project for the signed-in user. It is a view of the existing route, not a new nav row, because `nav-config.four-groups.test.ts` caps top-level rows at 15 and an owner already has 15 — Assigned, Created, Mentioned, Watching (if WS-2 has landed; hidden otherwise), Overdue, Due this week — each a server-side query, grouped by project, using the same row component as list.
 
 **AC.** Dates round-trip as calendar dates (WS-1 rule). Dragging across a DST boundary keeps the calendar date. Timeline renders 1,000 items without layout thrash (virtualised rows).
 
@@ -194,7 +194,7 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 
 **API.** `GET /api/pm/insights?projectId&from&to&groupBy` returns: throughput (completed per week), created vs completed per week, cycle time (started→completed) and lead time (created→completed) distributions (p50 / p85 / p95), cumulative flow (daily count per state group, reconstructed from `PmActivity` state changes), workload (open items and open estimate per assignee), aging WIP. Aggregation in SQL; cached per (project, range) for 5 min. Add `unassigned` to `GET /api/pm/summary` (ADR-044 follow-up).
 
-**UI.** Project "Insights" tab and a workspace-level insights page: chart cards using the dashboard's existing chart primitives and tokens, each with a one-line plain-language reading ("Most work finishes within 4 days"), range picker, empty states for new projects.
+**UI.** A project "Insights" tab, and workspace-level insights at `/projects?view=insights` (no new nav row, because of the 15-row cap): chart cards using the dashboard's existing chart primitives and tokens, each with a one-line plain-language reading ("Most work finishes within 4 days"), range picker, empty states for new projects.
 
 **AC.** Numbers verified by pg tests against a fixture with known transitions. No chart introduces new color tokens.
 
@@ -236,7 +236,7 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 
 **Import.** `PmImportJob {id, projectId, source (CSV|JIRA_CSV|ASANA_CSV|TRELLO_JSON|LINEAR_CSV|GITHUB_CSV), status (PENDING|PREVIEWED|RUNNING|SUCCEEDED|FAILED|CANCELLED), mapping Json, stats Json, error, createdById, createdAt, finishedAt}`; `PmWorkItem.externalSystem String?` + `externalId String?` with `@@unique([projectId, externalSystem, externalId])` so re-import updates instead of duplicating. Upload → parse (bounded rows, 10 MB) → preview with auto-mapped columns (status → state, priority, assignee by email/name, labels, dates, parent, description) → user adjusts mapping → run in background with progress → summary (created / updated / skipped with reasons).
 
-**UI.** Project ⋯ menu → Import / Export: a wizard with a mapping table and a preview of the first 20 rows. When the existing read-only Atlassian connector is connected, offer "Import from Jira" straight from it (project picker, then the same mapping and preview) alongside CSV.
+**UI.** Project ⋯ menu → Import / Export: a wizard with a mapping table and a preview of the first 20 rows. The Atlassian connector is an outbound MCP client (ADR-043), so a direct "Import from Jira" is a stretch goal. Build it only if the MCP read path yields issues with their fields cheaply; CSV import is the contract. If built, offer "Import from Jira" straight from it (project picker, then the same mapping and preview) alongside CSV.
 
 **AC.** Fixtures from each source format parse correctly. Re-running the same import is idempotent. Unknown assignees are reported, never silently dropped.
 
@@ -264,9 +264,17 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 
 **Data.** `PmSupportChannel {id, projectId, kind (EMAIL), emailAccountId @unique, enabled, autoAckEnabled, autoAckTemplate, reopenWindowDays Int @default(14), createdAt, updatedAt}`; `PmTicketEmailLink {id, workItemId, emailThreadId @unique, emailMessageId?, direction (INBOUND|OUTBOUND), messageIdHeader, createdAt}`.
 
+**Prerequisites (verified).**
+- **Email module.** `/api/email` is gated by the `email` module (default off; available only with `SERVICE_TOKEN_EMAIL`). A desk can bind a mailbox only when Email is effective, and the channel settings say so plainly.
+- **Headers.** The ingest zod schema and the indexer's `ParsedMessage` carry no `References`, `Auto-Submitted`, `Precedence` or `X-Autoreply`. Loop protection therefore needs three extensions, all in this slice: the Python parser (`services/email-indexer`), the ingest schema, and `EmailMessage` columns (or one validated `headers` Json).
+- **Contact owner.** Contacts are owner-scoped: `Contact.userId` is NOT NULL, and `createContact(prisma, userId, …)` lives in `services/contacts/contacts.service.ts`. The channel carries an explicit `contactOwnerUserId` (owner/admin chooses; default is the desk lead), used for every contact that intake creates. The ticket snapshots the requester's name and email.
+
 **Intake.** `services/email-indexer` (Python) already runs IMAP IDLE per `EmailAccount` and posts each new message to `POST /api/email/:accountId/messages-ingest` (`routes/email.ts`). Today only CRM filing (`services/filing/email-arm.ts`) consumes it. Hook ticket intake in at the same point the filing arm is invoked, after the `EmailMessage` row commits. No second IMAP poller and no change to the Python service unless strictly needed. New thread → ticket (requester `Contact` found by `ContactEmail` or created with an explicit origin), subject → title, sanitized body → description (HTML through `sanitize-html.ts`), attachments referenced. Reply on a linked thread (by `In-Reply-To`/`References`, then by `[KEY-123]` subject token) → PUBLIC comment from the CONTACT; Pending/Solved within the reopen window → Open (`reopenCount++`); Closed → new ticket linked `RELATES`. **Loop protection:** ignore `Auto-Submitted` ≠ `no`, `Precedence: bulk|junk|list`, `X-Autoreply`, mailer-daemon/bounces, messages from the bound account's own address, and > 20 messages / hour from one sender (rate-limited to one notification to admins).
 
-**Outbound.** A PUBLIC reply sends through the bound account's existing send path. The mailbox outbox is `EmailDraft`, which `services/email-indexer` sends with threading headers; the org SMTP relay in `services/email-channel.service.ts` is for invites and shares only and is not used here. with `In-Reply-To` / `References` and `[KEY-123]` in the subject; failures surface on the comment (`deliveryStatus` explicit enum: `PENDING|SENT|FAILED`) with a retry action. Auto-acknowledgement on new tickets when enabled (template variables `{{requester.firstName}}`, `{{ticket.key}}`, `{{ticket.title}}`, `{{desk.name}}`). Sending respects the existing `outbound_email` egress channel.
+**Outbound.** A PUBLIC reply sends through the bound account's existing send path. The mailbox outbox is `EmailDraft`, which `services/email-indexer` sends with threading headers; the org SMTP relay in `services/email-channel.service.ts` is for invites and shares only and is not used here.
+
+- **Enqueue.** `POST /api/email/drafts/:id/send` is owner/admin-only. The desk therefore enqueues the `EmailDraft` itself (status `queued`) in service code, after its own support-grant check and the `outbound_email` gate.
+- **Message-ID.** The indexer does not store the outbound `Message-ID`. Generate it in the orchestrator, store it on the draft, and have the indexer use it (a small Python change), so header-based reply matching works for outbound-first threads. The `[KEY-123]` subject token remains the fallback. with `In-Reply-To` / `References` and `[KEY-123]` in the subject; failures surface on the comment (`deliveryStatus` explicit enum: `PENDING|SENT|FAILED`) with a retry action. Auto-acknowledgement on new tickets when enabled (template variables `{{requester.firstName}}`, `{{ticket.key}}`, `{{ticket.title}}`, `{{desk.name}}`). Sending respects the existing `outbound_email` egress channel.
 
 **UI.** `/support` → Settings → Channels: bind an email account, toggle auto-acknowledge, edit the template with a preview. Ticket conversation shows email delivery state.
 
@@ -326,9 +334,23 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 
 **Ticket:** WARP-3533.
 
-**ICS.** Extend the existing calendar-feed mechanism (`CalendarFeedToken`) with PM feeds: "My work" (assigned to me, due dates) and per-project. All-day `VEVENT` per item with a due date, `URL` to the item, `STATUS:COMPLETED` when done; feed tokens revocable from the same UI as calendar feeds.
+**ICS.** Extend the existing calendar-feed mechanism (`CalendarFeedToken`). The pieces: the feed `GET /api/calendar/publish/:user.ics?token=` in `routes/calendar.ts` (mounted before auth), `verifyFeedToken` in `services/calendar-feed-token.service.ts`, and the serializer `serializeIcs` in `services/ics.ts`.
 
-**Tokens.** `PmApiToken {id, userId, name, prefix, hash, scopes String[] (pm:read|pm:write|support:read|support:write), lastUsedAt, expiresAt?, revokedAt?, createdAt}` — token shown once, stored hashed (follow ADR-067's `ModelAccessToken` hashing and comparison exactly), accepted as `Authorization: Bearer` on `/api/pm/*` and `/api/support/*` only, acting as the issuing user with scope checks layered on top of the user's own permissions; rate-limited; owner/admin can disable API tokens workspace-wide. Settings → Developer: create, list, revoke.
+Four things to handle:
+- The route bypasses every gate, so the PM source must re-check the `projects` module and the guest tier floor itself.
+- `CalendarEvent.userId` is a username, while PM assignees are `User.id`.
+- `serializeIcs` needs an optional `STATUS`.
+- The feed has no rate limit; add one.
+
+PM feeds: "My work" (assigned to me, due dates) and per-project. All-day `VEVENT` per item with a due date, `URL` to the item, `STATUS:COMPLETED` when done; feed tokens revocable from the same UI as calendar feeds.
+
+**Tokens.** `PmApiToken {id, userId, name, prefix, hash, scopes String[] (pm:read|pm:write|support:read|support:write), lastUsedAt, expiresAt?, revokedAt?, createdAt}`. The token is shown once and stored as a sha256 with a display prefix — ADR-067's `ModelAccessToken` shape, though that token is only introspected by ai-gateway and never reaches `authMiddleware`.
+
+- **Auth branch.** Add a new prefix branch to `authMiddleware` (`middleware/auth.ts` ~282-330, beside `SERVICE_TOKEN_*`, `dxt_` and JWT). It resolves to the issuing human's `AuthUser`, so every role, module and feature gate runs unchanged.
+- **Scope guard.** Modelled on `extensionPrincipalGuard` (app.ts ~355). It confines the token to `/api/pm/*` and `/api/support/*`.
+- **Revocation and limits.** Revoke hooks on role mutation (as `ModelAccessToken` has), plus a rate limit.
+
+Accepted as `Authorization: Bearer` on those two prefixes only, acting as the issuing user with scope checks layered on top of the user's own permissions; rate-limited; owner/admin can disable API tokens workspace-wide. Settings → Developer: create, list, revoke.
 
 **OpenAPI.** `GET /api/pm/openapi.json` (OpenAPI 3.1) generated from the zod schemas where the repo already has a generator, otherwise a checked-in document with a test asserting every mounted PM/support route appears in it. Developer page links to it.
 
@@ -340,7 +362,7 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 
 **Ticket:** WARP-3535.
 
-**Connector.** GitHub and GitLab already exist as read-only providers (`packages/shared-types/src/provider-registry.ts`, `routes/integrations.ts`, `IntegrationConnection`, `/integrations` UI). Extend those providers. Do not declare new ones. Credentials are customer-supplied (ADR-042): GitHub (fine-grained PAT, `contents:read`, `pull_requests:read`) or GitLab (PAT `read_api`, self-hosted base URL allowed). Owner/admin connects and picks repositories, and maps each to PM projects. Egress through `work_integrations` (WS-16's key; if WS-16 is not merged yet, this slice adds the key and WS-16 rebases).
+**Connector.** GitHub and GitLab already exist as read-only REST vendor profiles (`services/erp-connector/src/rest/vendors/github.ts` / `gitlab.ts`, ADR-046). They emit canonical `task` rows that no table stores today. Extend those profiles: PRs/MRs are already there; add commits and branches only if the profile shape allows, otherwise link at PR level only. Land matches into `PmExternalLink`. They are also registered as read-only providers (`packages/shared-types/src/provider-registry.ts`, `routes/integrations.ts`, `IntegrationConnection`, `/integrations` UI). Extend those providers. Do not declare new ones. Credentials are customer-supplied (ADR-042): GitHub (fine-grained PAT, `contents:read`, `pull_requests:read`) or GitLab (PAT `read_api`, self-hosted base URL allowed). Owner/admin connects and picks repositories, and maps each to PM projects. Egress through `work_integrations` (WS-16's key; if WS-16 is not merged yet, this slice adds the key and WS-16 rebases).
 
 **Sync.** `cron-runtime` every 5 min with conditional requests (ETag / `If-Modified-Since`): open + recently-updated PRs / MRs, recent commits on default branch, branches. Match `IDENTIFIER-123` (case-insensitive, word-bounded) in branch names, titles, bodies, commit messages. `PmExternalLink {id, workItemId, provider (GITHUB|GITLAB), kind (PULL_REQUEST|COMMIT|BRANCH), externalId, url, title, state (OPEN|MERGED|CLOSED|DRAFT), author, updatedAt; @@unique([provider, kind, externalId, workItemId])}`. Optional per-project rules: PR opened → state X; PR merged → state Y (writes activity with `actorKind = SYSTEM`).
 
@@ -354,7 +376,7 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 
 **Ticket:** WARP-3536.
 
-**Server.** A `pm-live` outbox consumer (WS-16 framework, interval 1 s plus nudge) maps each `PmActivity` row to the users who can read the item. For a project item: every role with Projects access, minus guests who are not assigned. For a service-desk item: users with the `support` grant. It publishes a compact event `{type:"pm.changed", projectId, workItemId, verb}` to each recipient's existing per-user MQTT topic. That topic is already forwarded by `services/ws-bridge.service.ts` to `/api/ws/events`. No content is published, only ids: the client refetches through the normal authorized API. Presence: the drawer sends a heartbeat (`POST /api/pm/work-items/:id/presence`, 20 s TTL, in memory); `GET` returns other viewers.
+**Server.** A `pm-live` outbox consumer (WS-16 framework, interval 1 s plus nudge) maps each `PmActivity` row to the users who can read the item. For a project item: every role with Projects access, minus guests who are not assigned. For a service-desk item: users with the `support` grant. It publishes a compact event `{type:"pm.changed", projectId, workItemId, verb}` on a new per-user topic, `droplet/pm/<username>`. Add that topic to the forwarded list in `services/ws-bridge.service.ts` (~108-128). Copy the `publishTeamChatEvent` pattern in `services/team-chat-events.service.ts`: ids and kind only, fire-and-forget, QoS 0, via `publish` in `services/mqtt.service.ts`. No content is published, only ids: the client refetches through the normal authorized API. Presence: the drawer sends a heartbeat (`POST /api/pm/work-items/:id/presence`, 20 s TTL, in memory); `GET` returns other viewers.
 
 **Client.** One `usePmLive()` hook subscribes to the dashboard's existing WebSocket client and revalidates the affected SWR keys (project list, work-item list, the open drawer, support queues). Updates are debounced to 250 ms. The hook pauses while a drag is in progress, so a remote change cannot yank a card mid-drag. The drawer header shows "Also viewing: <avatars>".
 
