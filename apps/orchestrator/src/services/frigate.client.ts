@@ -9,6 +9,7 @@ import { parseDocument, isMap, isScalar } from "yaml";
 
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
+import { scrubUrlCredentials } from "../lib/rtsp-credentials.js";
 import { FrigateNotFoundError } from "../types/frigate-error.js";
 import {
   buildRecordBlock,
@@ -1004,7 +1005,9 @@ export async function addCamera(
   if (!resp.ok) {
     const errBody = await resp.text().catch(() => "");
     logger.warn(
-      { status: resp.status, camera: safeName, body: errBody.slice(0, 200) },
+      // Frigate echoes the offending config path, which carries the camera's
+      // password (WARP-3505) — scrubbed before it can reach a log.
+      { status: resp.status, camera: safeName, body: scrubUrlCredentials(errBody).slice(0, 200) },
       "Frigate config/set rejected while adding camera",
     );
     return false;

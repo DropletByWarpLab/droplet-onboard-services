@@ -289,11 +289,40 @@ describe("submitLiveCandidateCredentials (WARP-3505)", () => {
     delete process.env.DEVICE_SECRET;
   });
 
+  it("carries which camera was added (and only that — never a stream URL) so the caller can match its DB row", async () => {
+    internalFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          status: "accepted",
+          camera: {
+            name: "xnv_c8083r",
+            ip: "192.168.9.219",
+            mac: "e4:30:22:50:2a:fd",
+            status: "active",
+            rtsp_url: "rtsp://admin:s3cret%21@192.168.9.219:554/profile2/media.smp",
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    const r = await submitLiveCandidateCredentials("E4:30:22:50:2A:FD", "admin", "s3cret!");
+    expect(r).toEqual({
+      ok: true,
+      status: 200,
+      camera: { name: "xnv_c8083r", ip: "192.168.9.219", mac: "e4:30:22:50:2a:fd" },
+    });
+    expect(JSON.stringify(r)).not.toContain("rtsp");
+    expect(JSON.stringify(r)).not.toContain("s3cret");
+  });
+
   it.each([
     [422, "auth_failed"],
     [423, "locked"],
     [422, "no_stream_path"],
     [502, "unreachable"],
+    [504, "timeout"],
+    [400, "invalid_credentials"],
+    [400, "unsupported_password"],
   ])("carries upstream %i / %s through as a structured failure", async (status, code) => {
     internalFetch.mockResolvedValue(
       new Response(JSON.stringify({ detail: "Operator-facing prose.", code }), { status }),

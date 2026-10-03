@@ -134,7 +134,11 @@ import {
   submitLiveCandidateCredentials,
 } from "../services/camera-candidates.service.js";
 import { getCameraStorage } from "../services/camera-storage.service.js";
-import { embedRtspCredentials, validateCameraCredentials } from "../lib/rtsp-credentials.js";
+import {
+  embedRtspCredentials,
+  UnsafeCredentialsError,
+  validateCameraCredentials,
+} from "../lib/rtsp-credentials.js";
 import {
   backfillCameraRetention,
   planRetentionBackfill,
@@ -1285,22 +1289,33 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       }
       // WARP-3505: optional camera account, merged into the URL here so the
       // password never has to be hand-typed into (or shown in) an address.
-      // Validated BEFORE the Frigate write; the error names the field only.
+      // Validated BEFORE the Frigate write; the error names the field only, and
+      // carries a code the dashboard turns into words.
       const credCheck = validateCameraCredentials(username, password);
       if (!credCheck.ok) {
-        return res.status(400).json({ error: credCheck.error });
+        return res.status(400).json({ error: credCheck.error, code: credCheck.code });
       }
-      const rtspUrl = embedRtspCredentials(rawRtspUrl, username, password);
       // rtsp: is not a WHATWG "special" scheme, so its host is left opaque;
-      // parse it as http(s) to get a validated hostname.
+      // parse it as http(s) to get a validated hostname. From the address AS
+      // TYPED, before the account is merged in: a raw password may hold '/', '?',
+      // '#' or '@', which move where a parser ends the authority.
       let ipAddress: string;
       try {
-        ipAddress = new URL(rtspUrl.replace(/^rtsp:\/\//, "http://").replace(/^rtsps:\/\//, "https://")).hostname;
+        ipAddress = new URL(rawRtspUrl.replace(/^rtsp:\/\//, "http://").replace(/^rtsps:\/\//, "https://")).hostname;
       } catch {
         return res.status(400).json({ error: "rtspUrl is not a valid URL" });
       }
       if (!ipAddress) {
         return res.status(400).json({ error: "rtspUrl must name a host" });
+      }
+      let rtspUrl: string;
+      try {
+        rtspUrl = embedRtspCredentials(rawRtspUrl, username, password);
+      } catch (err) {
+        if (err instanceof UnsafeCredentialsError) {
+          return res.status(400).json({ error: err.message, code: err.code });
+        }
+        throw err;
       }
 
       // Add to Frigate
@@ -1987,7 +2002,10 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // Live (`mac:`) candidates only — a DB row has no probed stream to verify
   // against. NET-05: the body is forwarded to the internal service and nowhere
   // else — not logged, not stored, not echoed; failures return camera-discovery's
-  // prose + a `code` (auth_failed | locked | no_stream_path | unreachable).
+  // prose + a `code` (auth_failed | locked | no_stream_path | unreachable |
+  // timeout), and credentials that cannot be used at all are a 400 with
+  // invalid_credentials | unsupported_password — refused before camera-discovery
+  // is asked, so no sign-in is spent on the camera.
   router.post("/cameras/discovered/:id/credentials", sensitiveRateLimit, requireRole(...CAMERA_ADMIN_ROLES), async (req, res, next) => {
     try {
       const mac = macFromCandidateId(req.params.id);
@@ -1998,14 +2016,14 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       }
       const { username, password } = (req.body ?? {}) as { username?: unknown; password?: unknown };
       if (typeof username !== "string" || !username.trim()) {
-        return res.status(400).json({ error: "username is required" });
+        return res.status(400).json({ error: "username is required", code: "invalid_credentials" });
       }
       if (typeof password !== "string" || !password) {
-        return res.status(400).json({ error: "password is required" });
+        return res.status(400).json({ error: "password is required", code: "invalid_credentials" });
       }
       const credCheck = validateCameraCredentials(username, password);
       if (!credCheck.ok) {
-        return res.status(400).json({ error: credCheck.error });
+        return res.status(400).json({ error: credCheck.error, code: credCheck.code });
       }
 
       const result = await submitLiveCandidateCredentials(mac, username, password);
@@ -2016,9 +2034,15 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
           ...(result.code ? { code: result.code } : {}),
         });
       }
-      // In Frigate now — keep the DB in step, same as the plain accept.
+      // In Frigate now — keep the DB in step, same as the plain accept. By MAC
+      // AND by the name / address discovery says it added: a static-IP camera is
+      // keyed `ip:<addr>` there and its row has no macAddress, so a MAC-only match
+      // left `enabled` false and the camera out of the list it had just joined.
+      const matches: Prisma.CameraWhereInput[] = [{ macAddress: { in: [mac, mac.toLowerCase()] } }];
+      if (result.camera?.name) matches.push({ name: result.camera.name });
+      if (result.camera?.ip) matches.push({ ipAddress: result.camera.ip });
       await prisma.camera.updateMany({
-        where: { macAddress: { in: [mac, mac.toLowerCase()] } },
+        where: { OR: matches },
         data: { enabled: true },
       });
       await reconcileFrigateCameras();

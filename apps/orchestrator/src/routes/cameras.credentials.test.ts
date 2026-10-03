@@ -141,6 +141,7 @@ vi.mock("../services/camera-settings.service.js", () => ({
   updateCameraSettings: vi.fn(),
 }));
 
+import { cameraReceives } from "../__tests__/frigate-credentials.fake.js";
 import { createCamerasRouter } from "./cameras.js";
 
 const HANWHA_ID = "mac:E4:30:22:50:2A:FD";
@@ -175,7 +176,11 @@ const SECRET_PW = "s3cret!";
 
 describe("POST /api/cameras/discovered/:id/credentials", () => {
   it("hands the credentials to camera-discovery, syncs the DB and returns accepted — without the password", async () => {
-    submitLiveCandidateCredentials.mockResolvedValue({ ok: true, status: 200 });
+    submitLiveCandidateCredentials.mockResolvedValue({
+      ok: true,
+      status: 200,
+      camera: { name: "xnv_c8083r", ip: "192.168.9.219", mac: "e4:30:22:50:2a:fd" },
+    });
     const prisma = makePrisma();
 
     const res = await request(makeApp(prisma))
@@ -185,12 +190,46 @@ describe("POST /api/cameras/discovered/:id/credentials", () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ status: "accepted" });
     expect(submitLiveCandidateCredentials).toHaveBeenCalledWith("E4:30:22:50:2A:FD", "admin", SECRET_PW);
-    expect(prisma.camera.updateMany).toHaveBeenCalledWith({
-      where: { macAddress: { in: ["E4:30:22:50:2A:FD", "e4:30:22:50:2a:fd"] } },
-      data: { enabled: true },
-    });
     expect(syncCamerasFromDb).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(res.body)).not.toContain(SECRET_PW);
+  });
+
+  it("enables the DB row by MAC, and by the name and address discovery returns — a static-IP camera has no MAC on its row (F6)", async () => {
+    submitLiveCandidateCredentials.mockResolvedValue({
+      ok: true,
+      status: 200,
+      camera: { name: "camera_192_168_9_5", ip: "192.168.9.5", mac: "ip:192.168.9.5" },
+    });
+    const prisma = makePrisma();
+
+    await request(makeApp(prisma))
+      .post("/api/cameras/discovered/mac:IP:192.168.9.5/credentials")
+      .send({ username: "admin", password: SECRET_PW });
+
+    expect(prisma.camera.updateMany).toHaveBeenCalledWith({
+      where: {
+        OR: [
+          { macAddress: { in: ["IP:192.168.9.5", "ip:192.168.9.5"] } },
+          { name: "camera_192_168_9_5" },
+          { ipAddress: "192.168.9.5" },
+        ],
+      },
+      data: { enabled: true },
+    });
+  });
+
+  it("falls back to the MAC alone when an older camera-discovery returns no camera", async () => {
+    submitLiveCandidateCredentials.mockResolvedValue({ ok: true, status: 200 });
+    const prisma = makePrisma();
+
+    await request(makeApp(prisma))
+      .post(`/api/cameras/discovered/${HANWHA_ID}/credentials`)
+      .send({ username: "admin", password: SECRET_PW });
+
+    expect(prisma.camera.updateMany).toHaveBeenCalledWith({
+      where: { OR: [{ macAddress: { in: ["E4:30:22:50:2A:FD", "e4:30:22:50:2a:fd"] } }] },
+      data: { enabled: true },
+    });
   });
 
   it.each([
@@ -234,18 +273,50 @@ describe("POST /api/cameras/discovered/:id/credentials", () => {
     [{ username: "admin" }],
     [{ password: SECRET_PW }],
     [{ username: "", password: SECRET_PW }],
+    [{ username: "   ", password: SECRET_PW }],
     [{ username: "ad\r\nmin", password: SECRET_PW }],
+    [{ username: "ad:min", password: SECRET_PW }],
     [{ username: "admin", password: "pw\r\nCSeq: 9" }],
+    [{ username: "admin", password: "bad\ud800pw" }],
     [{ username: "admin", password: "p".repeat(300) }],
     [{ username: 7, password: SECRET_PW }],
-  ])("rejects an invalid body %j with 400 before calling camera-discovery", async (body) => {
+  ])("rejects an invalid body %j with 400 and a code before calling camera-discovery", async (body) => {
     const res = await request(makeApp(makePrisma()))
       .post(`/api/cameras/discovered/${HANWHA_ID}/credentials`)
       .send(body);
 
     expect(res.status).toBe(400);
+    expect(res.body.code).toBe("invalid_credentials");
     expect(submitLiveCandidateCredentials).not.toHaveBeenCalled();
     expect(JSON.stringify(res.body)).not.toContain(SECRET_PW);
+  });
+
+  it.each(["has space", "brace{", "{FRIGATE_CAMERA_X_PASSWORD}"])(
+    "a password Frigate cannot store (%j) is a 400 unsupported_password — before any sign-in is spent on the camera",
+    async (pw) => {
+      const res = await request(makeApp(makePrisma()))
+        .post(`/api/cameras/discovered/${HANWHA_ID}/credentials`)
+        .send({ username: "admin", password: pw });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("unsupported_password");
+      expect(JSON.stringify(res.body)).not.toContain(pw);
+      expect(submitLiveCandidateCredentials).not.toHaveBeenCalled();
+    },
+  );
+
+  it("passes a camera-discovery 400 through with its code", async () => {
+    submitLiveCandidateCredentials.mockResolvedValue({
+      ok: false,
+      status: 400,
+      code: "unsupported_password",
+      message: "password cannot contain spaces or curly braces for this camera account",
+    });
+    const res = await request(makeApp(makePrisma()))
+      .post(`/api/cameras/discovered/${HANWHA_ID}/credentials`)
+      .send({ username: "john.doe", password: SECRET_PW });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("unsupported_password");
   });
 
   it("refuses a non-live id — only camera-discovery can probe, so a DB row has nothing to verify against", async () => {
@@ -310,12 +381,54 @@ describe("POST /api/cameras — optional username/password merged server-side", 
     expect(JSON.stringify(prisma.camera.upsert.mock.calls)).not.toContain(SECRET_PW);
   });
 
-  it("URL-encodes characters that would corrupt the authority", async () => {
+  it.each(["C@mera!2024", "Qa@2024#x", "p:ss/w?rd", "WarpLab123!", "100%sure"])(
+    "Frigate is given a path that delivers %j to the camera exactly as typed",
+    async (pw) => {
+      addCamera.mockResolvedValue(true);
+      const prisma = makePrisma();
+
+      const res = await request(makeApp(prisma))
+        .post("/api/cameras")
+        .send({ name: "cam", rtspUrl: "rtsp://192.168.9.60:554/live", username: "admin", password: pw });
+
+      expect(res.status).toBe(200);
+      const stored = addCamera.mock.calls[0][1] as string;
+      expect(cameraReceives(stored)).toEqual({ user: "admin", password: pw });
+      // The host came from the address as typed, NOT from a string with the raw
+      // password merged in (a '/', '?', '#' or '@' in it moves where a parser ends the authority).
+      expect(prisma.camera.upsert.mock.calls[0][0].create.ipAddress).toBe("192.168.9.60");
+    },
+  );
+
+  it("percent-encodes for a username Frigate's pattern does not match, which nothing then re-encodes", async () => {
     addCamera.mockResolvedValue(true);
     await request(makeApp(makePrisma()))
       .post("/api/cameras")
-      .send({ name: "cam", rtspUrl: "rtsp://192.168.9.60/live", username: "admin", password: "p@ss/w:rd" });
-    expect(addCamera).toHaveBeenCalledWith("cam", "rtsp://admin:p%40ss%2Fw%3Ard@192.168.9.60/live");
+      .send({ name: "cam", rtspUrl: "rtsp://192.168.9.60/live", username: "john.doe", password: "p@ss/w:rd" });
+    expect(addCamera).toHaveBeenCalledWith("cam", "rtsp://john.doe:p%40ss%2Fw%3Ard@192.168.9.60/live");
+    expect(cameraReceives(addCamera.mock.calls[0][1] as string)).toEqual({ user: "john.doe", password: "p@ss/w:rd" });
+  });
+
+  it.each(["has space", "brace{", "{FRIGATE_CAMERA_X_PASSWORD}"])(
+    "refuses a password Frigate cannot store (%j) with a 400 and a code, writing nothing",
+    async (pw) => {
+      const res = await request(makeApp(makePrisma()))
+        .post("/api/cameras")
+        .send({ name: "cam", rtspUrl: "rtsp://192.168.9.60/live", username: "admin", password: pw });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("unsupported_password");
+      expect(JSON.stringify(res.body)).not.toContain(pw);
+      expect(addCamera).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses a password that would be rewritten inside the address too, instead of storing a broken URL", async () => {
+    const res = await request(makeApp(makePrisma()))
+      .post("/api/cameras")
+      .send({ name: "cam", rtspUrl: "rtsp://192.168.9.60/a/b", username: "admin", password: "/" });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("unsupported_password");
+    expect(addCamera).not.toHaveBeenCalled();
   });
 
   it("leaves a URL that already embeds credentials alone when no username is sent (back-compat)", async () => {
@@ -332,11 +445,25 @@ describe("POST /api/cameras — optional username/password merged server-side", 
     [{ password: "orphan" }],
     [{ username: "a".repeat(200), password: "x" }],
     [{ username: 5, password: "x" }],
-  ])("rejects invalid credentials %j with 400 before any Frigate write", async (creds) => {
+    [{ username: "   ", password: "x" }], // whitespace-only username
+    [{ username: "   " }],
+    [{ username: "admin", password: "bad\ud800pw" }], // a lone surrogate: encodeURIComponent throws on it
+    [{ username: "ad:min", password: "x" }],
+  ])("rejects invalid credentials %j with 400 and a code, not a 500, before any Frigate write", async (creds) => {
     const res = await request(makeApp(makePrisma()))
       .post("/api/cameras")
       .send({ name: "cam", rtspUrl: "rtsp://192.168.9.60/live", ...creds });
     expect(res.status).toBe(400);
+    expect(res.body.code).toBe("invalid_credentials");
     expect(addCamera).not.toHaveBeenCalled();
+  });
+
+  it("an empty username with an empty password is just a blank form, not an error", async () => {
+    addCamera.mockResolvedValue(true);
+    const res = await request(makeApp(makePrisma()))
+      .post("/api/cameras")
+      .send({ name: "cam", rtspUrl: "rtsp://192.168.9.60/live", username: "", password: "" });
+    expect(res.status).toBe(200);
+    expect(addCamera).toHaveBeenCalledWith("cam", "rtsp://192.168.9.60/live");
   });
 });

@@ -316,8 +316,18 @@ export interface DiscoveryMutationResult {
   status: number;
   /** Upstream `detail` text when it failed — operator-facing, already prose. */
   message?: string;
-  /** Machine-readable failure reason (credentials route only): auth_failed, locked, no_stream_path, unreachable. */
+  /**
+   * Machine-readable failure reason (credentials route only): auth_failed,
+   * locked, no_stream_path, unreachable, timeout, invalid_credentials,
+   * unsupported_password.
+   */
   code?: string;
+  /**
+   * Which camera a successful credentials add put into Frigate (credentials route
+   * only). A static-IP camera has no MAC on its DB row, so the caller matches on
+   * these too. Never carries a stream URL.
+   */
+  camera?: { name?: string; ip?: string; mac?: string };
 }
 
 /** POST accept/reject for a live candidate to camera-discovery, keyed by MAC. */
@@ -367,11 +377,12 @@ export async function submitLiveCandidateCredentials(
         method: "POST",
         headers: { ...discoveryAuthHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
-        // camera-discovery bounds its own work: ONVIF (<= 10 s) + the RTSP path
-        // walk (<= 30 s budget, plus the one DESCRIBE in flight) before the
-        // Frigate commit. 60 s outlasts that, and every proxy hop in front of
-        // the browser outlasts this (apps/web-dashboard/next.config.js,
-        // docker/nginx/nginx.conf).
+        // camera-discovery bounds its own work: the probing phase (RTSP walk
+        // <= 25 s, then ONVIF <= 8 s and one named path <= 10 s, only when RTSP
+        // found no path) has a HARD 45 s deadline, answered as a 504 `timeout`;
+        // the Frigate commit that follows is sub-second. 60 s outlasts that, and
+        // every proxy hop in front of the browser outlasts this
+        // (apps/web-dashboard/next.config.js, docker/nginx/nginx.conf).
         signal: AbortSignal.timeout(60_000),
       },
     );
@@ -395,8 +406,18 @@ export async function submitLiveCandidateCredentials(
       message: "Camera discovery isn't running, so the camera couldn't be checked.",
     };
   }
-  if (resp.ok) return { ok: true, status: resp.status };
-  const body = (await resp.json().catch(() => ({}))) as { detail?: unknown; code?: unknown };
+  const body = (await resp.json().catch(() => ({}))) as {
+    detail?: unknown;
+    code?: unknown;
+    camera?: Record<string, unknown> | null;
+  };
+  if (resp.ok) {
+    const added = body.camera;
+    const pick = (key: string) => (typeof added?.[key] === "string" ? (added[key] as string) : undefined);
+    // Only the three identifying fields are carried, whatever else the reply holds.
+    const camera = added ? { name: pick("name"), ip: pick("ip"), mac: pick("mac") } : undefined;
+    return { ok: true, status: resp.status, ...(camera ? { camera } : {}) };
+  }
   return {
     ok: false,
     status: resp.status,

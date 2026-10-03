@@ -1,26 +1,114 @@
 /**
- * Operator-typed camera credentials (WARP-3505): validation + embedding into an
- * RTSP URL.
+ * Operator-typed camera credentials (WARP-3505): validation + writing them into
+ * the RTSP URL Frigate is given.
  *
  * The camera's password used to have to be hand-typed into the RTSP URL
  * (`rtsp://user:password@host/...`) with no field for it and no help getting
  * the escaping right. The dashboard now has Username / Password fields and the
  * orchestrator merges them here, server-side, so the password is never part of
  * a URL the browser shows, stores or logs.
+ *
+ * What Frigate must be given is NOT "the password, percent-encoded"
+ * ----------------------------------------------------------------
+ * Frigate 0.17 runs `escape_special_characters` (frigate/util/builtin.py) over
+ * every ffmpeg input path before handing it to ffmpeg:
+ *
+ *     REGEX_RTSP_CAMERA_USER_PASS = r":\/\/[a-zA-Z0-9_-]+:[\S]+@"
+ *     found = re.search(REGEX, path).group(0)[3:-1]       # user:password
+ *     pw = found[found.index(":") + 1:]
+ *     return path.replace(pw, urllib.parse.quote_plus(pw))
+ *
+ * and ffmpeg then URL-decodes the `user:password` text ONCE (httpauth.c) and
+ * splits it at the first `:`. So:
+ *
+ *  - a username matching [A-Za-z0-9_-]+ : store the password RAW. Frigate encodes
+ *    it, ffmpeg decodes it, the camera gets what was typed. Pre-encoded
+ *    (`C%40mera!2024`) is encoded AGAIN (`%2540`) and the camera receives the
+ *    percent-escape: 401 on every retry, then a Hanwha lockout.
+ *  - any other username : Frigate's regex does not match, nothing re-encodes the
+ *    password, and ffmpeg's single decode is the only layer — percent-encode it.
+ *
+ * (WARP-1873 prescribed leaving RFC 3986 sub-delims literal and encoding the rest
+ * on the theory that "ffmpeg does not decode userinfo". It does, once; that fix
+ * only ever worked for `!`.) A RAW password cannot contain braces (Frigate runs
+ * `str.format` over its config, so `{FRIGATE_*}` is a placeholder and a lone
+ * brace stops it starting) or whitespace (the regex's `\S+` stops there).
  */
 
 /** RTSP/ONVIF account names are short; the caps bound what is hashed/sent downstream. */
 export const MAX_CAMERA_USERNAME = 128;
 export const MAX_CAMERA_PASSWORD = 256;
 
-export type CredentialValidation = { ok: true } | { ok: false; error: string };
+/** Frigate's REGEX_RTSP_CAMERA_USER_PASS username class. */
+const FRIGATE_USERNAME = /^[A-Za-z0-9_-]+$/;
+const CONTROL = /[\x00-\x1f\x7f]/;
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+/** Never legal in a RAW password: braces (Frigate str.format), whitespace (its \S+), controls. */
+const RAW_UNSAFE = /[{}\s\x00-\x1f\x7f]/;
 
-function hasControlChars(value: string): boolean {
-  for (let i = 0; i < value.length; i++) {
-    const c = value.charCodeAt(i);
-    if (c < 0x20 || c === 0x7f) return true;
+export type CredentialCode = "invalid_credentials" | "unsupported_password";
+
+export type CredentialValidation = { ok: true } | { ok: false; error: string; code: CredentialCode };
+
+/**
+ * A credential that cannot be written into a Frigate stream URL. `field` names
+ * what is wrong; the message never contains the value (NET-05).
+ */
+export class UnsafeCredentialsError extends Error {
+  constructor(
+    readonly field: "username" | "password",
+    readonly code: CredentialCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "UnsafeCredentialsError";
   }
-  return false;
+}
+
+function checkEncodable(field: "username" | "password", value: string): void {
+  // A lone surrogate is legal in a JSON string and in a JS string, but is not
+  // UTF-8: encodeURIComponent throws on it, and so would the request encoding
+  // downstream. Refuse it here as a 400, not there as a 500.
+  if (LONE_SURROGATE.test(value) || CONTROL.test(value)) {
+    throw new UnsafeCredentialsError(field, "invalid_credentials", `${field} contains invalid characters`);
+  }
+}
+
+/** Python `quote(value, safe="")`: everything but the RFC 3986 unreserved set is %XX. */
+function percentEncode(value: string): string {
+  return encodeURIComponent(value).replace(
+    /[!'()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`,
+  );
+}
+
+/** Python `urllib.parse.quote_plus` — what Frigate does to the password. Used only to detect a rewrite. */
+function quotePlus(value: string): string {
+  return percentEncode(value).replace(/%20/g, "+");
+}
+
+/**
+ * The `user:password` text Frigate's config must hold for this account. Throws
+ * UnsafeCredentialsError when the account cannot be expressed.
+ */
+export function frigateUserinfo(username: string, password: string): string {
+  checkEncodable("username", username);
+  checkEncodable("password", password);
+  if (username.includes(":")) {
+    // ffmpeg decodes the userinfo and THEN splits at the first ':'.
+    throw new UnsafeCredentialsError("username", "invalid_credentials", "username cannot contain a colon");
+  }
+  if (FRIGATE_USERNAME.test(username)) {
+    if (RAW_UNSAFE.test(password)) {
+      throw new UnsafeCredentialsError(
+        "password",
+        "unsupported_password",
+        "password cannot contain spaces or curly braces for this camera account",
+      );
+    }
+    return `${username}:${password}`;
+  }
+  return `${percentEncode(username)}:${percentEncode(password)}`;
 }
 
 /**
@@ -28,52 +116,50 @@ function hasControlChars(value: string): boolean {
  *
  * Control characters are refused: the values are written into an RTSP
  * `Authorization` header downstream, and a CR/LF would let a caller inject
- * headers. Errors name the FIELD only — never the value (NET-05).
+ * headers. Errors name the FIELD only — never the value (NET-05). The account
+ * must also be expressible in a Frigate stream URL — checked here, before a
+ * single sign-in is spent on the camera.
  */
 export function validateCameraCredentials(username: unknown, password: unknown): CredentialValidation {
+  const fail = (error: string, code: CredentialCode = "invalid_credentials"): CredentialValidation => ({
+    ok: false,
+    error,
+    code,
+  });
   if (username !== undefined && username !== null && typeof username !== "string") {
-    return { ok: false, error: "username must be a string" };
+    return fail("username must be a string");
   }
   if (password !== undefined && password !== null && typeof password !== "string") {
-    return { ok: false, error: "password must be a string" };
+    return fail("password must be a string");
   }
   const user = typeof username === "string" ? username : "";
   const pw = typeof password === "string" ? password : "";
-  if (pw && !user) {
-    return { ok: false, error: "username is required when a password is given" };
+  // "" is a blank form field (nothing given); "   " is a username that is not one.
+  if (user !== "" && user.trim() === "") return fail("username must not be blank");
+  if (pw && !user) return fail("username is required when a password is given");
+  if (user.length > MAX_CAMERA_USERNAME) return fail("username is too long");
+  if (pw.length > MAX_CAMERA_PASSWORD) return fail("password is too long");
+  if (!user) return { ok: true };
+  try {
+    frigateUserinfo(user, pw);
+  } catch (err) {
+    if (err instanceof UnsafeCredentialsError) return fail(err.message, err.code);
+    throw err;
   }
-  if (user.length > MAX_CAMERA_USERNAME) return { ok: false, error: "username is too long" };
-  if (pw.length > MAX_CAMERA_PASSWORD) return { ok: false, error: "password is too long" };
-  if (hasControlChars(user)) return { ok: false, error: "username contains invalid characters" };
-  if (hasControlChars(pw)) return { ok: false, error: "password contains invalid characters" };
   return { ok: true };
 }
 
 /**
- * Percent-encode one userinfo component for an RTSP URL.
- *
- * RFC 3986 userinfo already permits the sub-delims `!$&'()*+,;=`, and the
- * consumer — Frigate's bundled ffmpeg — does NOT percent-decode userinfo before
- * authenticating, so encoding a legal character (`!` → `%21`) sends the wrong
- * password and a Hanwha locks the account after ~5 attempts (WARP-1873). Only
- * what would corrupt the parse (`@ / : # % ?`, whitespace, non-ASCII) is
- * encoded. Mirrors `RTSP_USERINFO_SAFE` in services/camera-discovery/rtsp_prober.py.
- */
-function encodeUserinfo(value: string): string {
-  return encodeURIComponent(value)
-    .replace(/%24/g, "$")
-    .replace(/%26/g, "&")
-    .replace(/%2B/g, "+")
-    .replace(/%2C/g, ",")
-    .replace(/%3B/g, ";")
-    .replace(/%3D/g, "=");
-}
-
-/**
  * Merge `username`/`password` into `rtspUrl`, replacing any userinfo already
- * there. With no username the URL is returned untouched. The authority is
- * located with a regex rather than `new URL()` because `rtsp:` is not a WHATWG
- * special scheme and a parser would risk normalising the vendor-specific path.
+ * there, in the form Frigate needs (see the header). With no username the URL is
+ * returned untouched. The authority is located with a regex rather than
+ * `new URL()` because `rtsp:` is not a WHATWG special scheme and a parser would
+ * risk normalising the vendor-specific path.
+ *
+ * Parse the HOST from `rtspUrl` BEFORE calling this: a raw password may hold
+ * `/`, `?`, `#` or `@`, so the merged string is not a URL any parser will read
+ * the same way. Throws UnsafeCredentialsError for an account it cannot store;
+ * validate first (validateCameraCredentials) to answer with a 400 instead.
  */
 export function embedRtspCredentials(
   rtspUrl: string,
@@ -83,5 +169,28 @@ export function embedRtspCredentials(
   if (!username) return rtspUrl;
   const m = /^(rtsps?:\/\/)(?:[^/]*@)?(.*)$/i.exec(rtspUrl);
   if (!m) return rtspUrl;
-  return `${m[1]}${encodeUserinfo(username)}:${encodeUserinfo(password ?? "")}@${m[2]}`;
+  const pw = password ?? "";
+  const userinfo = frigateUserinfo(username, pw);
+  const rest = m[2]!;
+  if (FRIGATE_USERNAME.test(username) && pw && rest.includes(pw) && quotePlus(pw) !== pw) {
+    // Frigate does path.replace(pw, quote_plus(pw)) over the WHOLE string, so a
+    // password that also occurs in the address would be rewritten there too.
+    throw new UnsafeCredentialsError(
+      "password",
+      "unsupported_password",
+      "password cannot also appear in the camera's stream address",
+    );
+  }
+  return `${m[1]}${userinfo}@${rest}`;
+}
+
+/**
+ * Remove `user:password@` from any RTSP URL in `text` (for logs and errors).
+ * Frigate echoes the config path in some of its error replies, and that path
+ * carries the camera's password. Greedy to the last `@` of the whitespace-
+ * delimited token — the reading Frigate and ffmpeg take — so a password holding
+ * `@` or `/` is removed whole.
+ */
+export function scrubUrlCredentials(text: string): string {
+  return text.replace(/(rtsps?:\/\/)\S*@/gi, "$1***@");
 }
