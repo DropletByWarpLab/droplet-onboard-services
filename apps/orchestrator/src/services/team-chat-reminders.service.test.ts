@@ -25,6 +25,14 @@ vi.mock("./notifications.service.js", () => ({
   sendNotification: sendNotificationMock,
 }));
 
+// WARP-3485 — the live team-chat event the card posts on the event socket.
+const { published } = vi.hoisted(() => ({
+  published: [] as Array<{ topic: string; payload: Record<string, unknown> }>,
+}));
+vi.mock("./mqtt.service.js", () => ({
+  publish: (topic: string, payload: Record<string, unknown>) => published.push({ topic, payload }),
+}));
+
 import { runTeamChatMeetingReminderSweep } from "./team-chat-reminders.service.js";
 
 // ── stub ────────────────────────────────────────────────────────────
@@ -171,6 +179,7 @@ function baseStub(m: MeetingRow[]) {
 
 beforeEach(() => {
   sendNotificationMock.mockClear();
+  published.length = 0;
 });
 
 describe("runTeamChatMeetingReminderSweep", () => {
@@ -194,6 +203,19 @@ describe("runTeamChatMeetingReminderSweep", () => {
     expect(prisma.teamChatMeeting.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ orderBy: { startsAt: "asc" }, take: 500 }),
     );
+  });
+
+  it("publishes the card on every participant's team-chat topic: ids and a kind only (WARP-3485)", async () => {
+    const prisma = baseStub([meeting()]);
+    await runTeamChatMeetingReminderSweep(prisma as never);
+
+    const card = prisma.messages[0];
+    expect(published.map((p) => p.topic).sort()).toEqual(
+      [`droplet/team-chat/${INVITEE.username}`, `droplet/team-chat/${ORGANIZER.username}`].sort(),
+    );
+    for (const p of published) {
+      expect(p.payload).toEqual({ kind: "message", conversationId: "thread-1", messageId: card.id });
+    }
   });
 
   it("notifies every participant EXCEPT the organizer, keyed by USERNAME", async () => {

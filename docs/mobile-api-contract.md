@@ -1696,8 +1696,9 @@ Source: `apps/orchestrator/src/services/ws-bridge.service.ts`.
 - **Topics:** there is no subscribe message. The server subscribes each
   connection to the person's own topics only: `droplet/files/<username>/#`
   (and `droplet/files/<userId>/#`), `droplet/devices/<username>/#`,
-  `droplet/index/<username>/#`, `droplet/notifications/<username>` and
-  `droplet/chat/<username>/#`. Other people's topics are never forwarded.
+  `droplet/index/<username>/#`, `droplet/notifications/<username>`,
+  `droplet/chat/<username>/#`, `droplet/agent-runs/<username>` and
+  `droplet/team-chat/<username>`. Other people's topics are never forwarded.
 - **Frames:** server to client JSON text frames
   `{ "topic": "<mqtt topic>", "payload": <json> }`. Client-sent frames are
   ignored. The server sends a WebSocket ping every 25 s (the client library
@@ -1723,6 +1724,20 @@ Source: `apps/orchestrator/src/services/ws-bridge.service.ts`.
   push and in N1's row: open route 18 with `data.incidentId`, and send
   `payload.id` as `notificationId` on route 19 (see "Alert notifications" under
   Security).
+- **Team chat frames (Messages).** A frame on `droplet/team-chat/<username>`
+  says something changed in a conversation the person belongs to, and carries
+  **IDs and a kind only, never message text, titles or names**:
+  `{ kind: "message" | "read" | "conversation", conversationId, messageId? }`.
+  `message`: a message was posted (or its meeting card changed, for example an
+  RSVP); `messageId` names it. `read`: the person's own read cursor moved (sent
+  to that person's own sockets only, so a colleague's reading is never
+  announced). `conversation`: a conversation was created. Re-read through the
+  usual routes, which keep their gates: `GET /team-chat/threads/:id/messages`
+  for that conversation, `GET /team-chat/threads` for the list and
+  `GET /team-chat/unread-count` for the badge. Only members receive a frame for
+  a conversation, and an external guest only for conversations they were added
+  to. Frames are best-effort and not replayed, so keep a slow poll as a
+  fallback, and re-read after a reconnect. The polls stay valid for older clients.
 - **Reconnect:** on close, reconnect with exponential backoff and jitter, and
   stop once sign-in has ended. Events are not replayed, so after a reconnect
   re-fetch state (`GET /notifications`, files, devices).

@@ -72,6 +72,8 @@ import { checkSpaceAccess, departmentSpaceToken } from "../middleware/space.js";
 import { resolveFileDepartment } from "../services/file-registry.service.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import { findUserByEmail } from "../services/user-directory.service.js";
+// WARP-3485 — live events (IDs only) on the person's event-socket topic.
+import { publishTeamChatEvent } from "../services/team-chat-events.service.js";
 import { createLogger } from "../lib/logger.js";
 // WARP-1874 — the single https-only gate for a value that becomes an href.
 import { meetingUrlSchema } from "../lib/meeting-url.js";
@@ -670,6 +672,7 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
         },
         include: { participants: true },
       });
+      await publishTeamChatEvent(prisma, { kind: "conversation", conversationId: created.id });
       res.status(201).json({ thread: threadCreatedDto(created) });
     } catch (err) {
       next(err);
@@ -897,6 +900,11 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
           data: { lastMessageAt: new Date() },
         }),
       ]);
+      await publishTeamChatEvent(prisma, {
+        kind: "message",
+        conversationId: req.params.id,
+        messageId: message.id,
+      });
       res.status(201).json({ message: toMessageDto(message) });
     } catch (err) {
       next(err);
@@ -922,6 +930,8 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
         res.status(404).json({ error: "thread_not_found" });
         return;
       }
+      // Only the reader's own sockets: nobody learns when a colleague read.
+      await publishTeamChatEvent(prisma, { kind: "read", conversationId: req.params.id }, me.username);
       res.status(204).end();
     } catch (err) {
       next(err);
@@ -1045,6 +1055,11 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
           );
         }
 
+        await publishTeamChatEvent(prisma, {
+          kind: "message",
+          conversationId: req.params.id,
+          messageId: message.id,
+        });
         const dto = toMeetingDto({ ...finalMeeting, rsvps: [] });
         res.status(201).json({
           meeting: dto,
@@ -1134,6 +1149,12 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
         },
         update: { response: parsed.data.response, respondedAt: new Date() },
       });
+      // The invite card renders the RSVP chips, so it changed.
+      await publishTeamChatEvent(prisma, {
+        kind: "message",
+        conversationId: meeting.threadId,
+        ...(meeting.inviteMessageId ? { messageId: meeting.inviteMessageId } : {}),
+      });
       res.json({
         rsvp: {
           userId: rsvp.userId,
@@ -1181,8 +1202,9 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
           res.status(409).json({ error: "meeting_already_cancelled" });
           return;
         }
+        let cancelMessageId: string;
         try {
-          await prisma.$transaction(async (tx) => {
+          cancelMessageId = await prisma.$transaction(async (tx) => {
             const claimed = await tx.teamChatMeeting.updateMany({
               where: { id: meeting.id, status: "scheduled" },
               data: { status: "cancelled" },
@@ -1196,7 +1218,7 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
               where: { id: meeting.id, reminderStatus: "pending" },
               data: { reminderStatus: "not_needed" },
             });
-            await tx.teamChatMessage.create({
+            const posted = await tx.teamChatMessage.create({
               data: {
                 threadId: meeting.threadId,
                 senderId: me.id,
@@ -1208,6 +1230,7 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
               where: { id: meeting.threadId },
               data: { lastMessageAt: new Date() },
             });
+            return posted.id;
           });
         } catch (err) {
           if (err instanceof MeetingAlreadyCancelledError) {
@@ -1216,6 +1239,11 @@ export function createTeamChatRouter(prisma: PrismaClient): Router {
           }
           throw err;
         }
+        await publishTeamChatEvent(prisma, {
+          kind: "message",
+          conversationId: meeting.threadId,
+          messageId: cancelMessageId,
+        });
         // Best-effort: retract the organizer-calendar mirror. deleteMany —
         // an already-deleted event is a no-op, never a throw.
         if (meeting.calendarEventId) {
