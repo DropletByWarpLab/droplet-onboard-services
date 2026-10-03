@@ -29,6 +29,7 @@ import {
   isLiveCandidateId,
   macFromCandidateId,
   redactRtspCredentials,
+  submitLiveCandidateCredentials,
 } from "./camera-candidates.service.js";
 
 type DbRow = {
@@ -266,5 +267,57 @@ describe("candidate id helpers", () => {
   it("treats a uuid as a database id", () => {
     expect(isLiveCandidateId("6f0c7f10-6e5b-4a1e-9a2f-1d3c5b7e9f11")).toBe(false);
     expect(macFromCandidateId("6f0c7f10-6e5b-4a1e-9a2f-1d3c5b7e9f11")).toBeNull();
+  });
+});
+
+describe("submitLiveCandidateCredentials (WARP-3505)", () => {
+  it("POSTs the credentials to camera-discovery's credentials route, keyed by lower-case MAC, with the device secret", async () => {
+    process.env.DEVICE_SECRET = "test-secret";
+    internalFetch.mockResolvedValue(new Response(JSON.stringify({ status: "accepted" }), { status: 200 }));
+
+    const r = await submitLiveCandidateCredentials("E4:30:22:50:2A:FD", "admin", "s3cret!");
+
+    expect(r).toEqual({ ok: true, status: 200 });
+    const [url, init] = internalFetch.mock.calls[0];
+    expect(url).toBe(
+      "http://camera-discovery.test:8085/cameras/discovered/e4%3A30%3A22%3A50%3A2a%3Afd/credentials",
+    );
+    expect(init.method).toBe("POST");
+    expect(init.headers.Authorization).toBe("Bearer test-secret");
+    expect(init.headers["Content-Type"]).toBe("application/json");
+    expect(JSON.parse(init.body)).toEqual({ username: "admin", password: "s3cret!" });
+    delete process.env.DEVICE_SECRET;
+  });
+
+  it.each([
+    [422, "auth_failed"],
+    [423, "locked"],
+    [422, "no_stream_path"],
+    [502, "unreachable"],
+  ])("carries upstream %i / %s through as a structured failure", async (status, code) => {
+    internalFetch.mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Operator-facing prose.", code }), { status }),
+    );
+    const r = await submitLiveCandidateCredentials("AA:BB", "admin", "s3cret!");
+    expect(r).toEqual({ ok: false, status, code, message: "Operator-facing prose." });
+  });
+
+  it("never reflects the password in a failure result", async () => {
+    internalFetch.mockResolvedValue(
+      new Response(JSON.stringify({ detail: "The camera rejected that username and password.", code: "auth_failed" }), {
+        status: 422,
+      }),
+    );
+    const r = await submitLiveCandidateCredentials("AA:BB", "admin", "s3cret!");
+    expect(JSON.stringify(r)).not.toContain("s3cret");
+  });
+
+  it("reports camera-discovery being down as a 502 unreachable, not a thrown error", async () => {
+    internalFetch.mockRejectedValue(new Error("ECONNREFUSED"));
+    const r = await submitLiveCandidateCredentials("AA:BB", "admin", "s3cret!");
+    expect(r.ok).toBe(false);
+    expect(r.status).toBe(502);
+    expect(r.code).toBe("discovery_unavailable");
+    expect(JSON.stringify(r)).not.toContain("s3cret");
   });
 });

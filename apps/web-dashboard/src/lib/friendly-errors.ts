@@ -492,6 +492,18 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     AUTH_REQUIRED:
       "That camera needs a username and password. Check the credentials and try again.",
     NOT_FOUND: "We couldn't find that camera on your network.",
+    // WARP-3505 — typing a camera's username/password. The next step differs
+    // for each, so each gets its own copy; the form shows these inline.
+    AUTH_FAILED:
+      "The camera didn't accept that username and password. Check them and try again.",
+    LOCKED:
+      "The camera has locked its account after too many wrong sign-ins. Wait a few minutes, then try again.",
+    NO_STREAM_PATH:
+      "We reached the camera but couldn't find its video stream. Choose Enter details and type the stream address from your camera's manual.",
+    UNREACHABLE:
+      "We couldn't reach the camera. Check it's powered on and on the same network, then try again.",
+    DISCOVERY_UNAVAILABLE:
+      "Camera discovery isn't running, so we couldn't check the camera. Try again in a moment.",
   },
   device: {
     NETWORK:

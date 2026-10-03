@@ -316,6 +316,8 @@ export interface DiscoveryMutationResult {
   status: number;
   /** Upstream `detail` text when it failed — operator-facing, already prose. */
   message?: string;
+  /** Machine-readable failure reason (credentials route only): auth_failed, locked, no_stream_path, unreachable. */
+  code?: string;
 }
 
 /** POST accept/reject for a live candidate to camera-discovery, keyed by MAC. */
@@ -337,4 +339,54 @@ export async function mutateLiveCandidate(
   const body = (await resp.json().catch(() => ({}))) as { detail?: unknown };
   const detail = typeof body.detail === "string" ? body.detail : undefined;
   return { ok: false, status: resp.status, message: detail };
+}
+
+/**
+ * Add a live candidate using credentials the operator typed (WARP-3505).
+ *
+ * camera-discovery re-runs ONVIF GetStreamUri + the RTSP path probe with these
+ * credentials and, on success, commits the camera to Frigate itself — it is the
+ * only place that knows the probed path and holds the pending record.
+ *
+ * NET-05: the password travels only in the POST body to the internal service.
+ * It is never logged here, never put in the URL, and the returned result
+ * carries only camera-discovery's operator prose + a code, so a caller can't
+ * accidentally echo it.
+ */
+export async function submitLiveCandidateCredentials(
+  mac: string,
+  username: string,
+  password: string,
+): Promise<DiscoveryMutationResult> {
+  let resp: Response;
+  try {
+    resp = await internalFetch(
+      // camera-discovery keys its pending map lower-case.
+      `${internalBaseUrl(config.CAMERA_DISCOVERY_URL)}/cameras/discovered/${encodeURIComponent(mac.toLowerCase())}/credentials`,
+      {
+        method: "POST",
+        headers: { ...discoveryAuthHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+        // ONVIF (≤15 s) + a bounded RTSP path walk before the Frigate commit.
+        signal: AbortSignal.timeout(60_000),
+      },
+    );
+  } catch {
+    // Deliberately drop the error object: undici errors can carry request
+    // context, and the body of this request is the password.
+    return {
+      ok: false,
+      status: 502,
+      code: "discovery_unavailable",
+      message: "Camera discovery isn't running, so the camera couldn't be checked.",
+    };
+  }
+  if (resp.ok) return { ok: true, status: resp.status };
+  const body = (await resp.json().catch(() => ({}))) as { detail?: unknown; code?: unknown };
+  return {
+    ok: false,
+    status: resp.status,
+    code: typeof body.code === "string" ? body.code : undefined,
+    message: typeof body.detail === "string" ? body.detail : undefined,
+  };
 }

@@ -409,6 +409,17 @@ async def test_invalid_input_is_400(monkeypatch, body):
 
 
 @pytest.mark.asyncio
+async def test_mac_lookup_is_case_insensitive(monkeypatch):
+    """The orchestrator addresses a candidate by its upper-cased MAC; the
+    pending map is keyed lower-case."""
+    async with _Server() as srv:
+        main, added, _ = _fresh_main(monkeypatch, srv.port)
+        out = await main.submit_camera_credentials(MAC.upper(), _Req({"username": USER, "password": PW}))
+    assert out["status"] == "accepted"
+    assert len(added) == 1
+
+
+@pytest.mark.asyncio
 async def test_unknown_mac_is_404(monkeypatch):
     from fastapi import HTTPException
 
