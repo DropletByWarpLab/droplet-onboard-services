@@ -17,52 +17,36 @@ Conventions:
     approval per case, so a case approves only when exactly one gated write has
     to land. Calendar and reminder writes and email_draft_reply run without an
     approval (listed in `allowed_writes`).
-  * Dates are computed from today when the cases are built, so build them the
-    day you run them. A bare weekday name accepts today as well as the next one
-    when today is that weekday, since a person can mean either.
+  * Dates are run-time tokens, never build-time dates, so the generated JSONL is
+    identical every day. The harness expands them everywhere in a case (turns,
+    world, expected, keys and values): `{{today+N}}` / `{{today-N}}` is a
+    YYYY-MM-DD date, `{{weekday:today+N}}` its weekday name, `{{nth:2:tue:+1}}`
+    the 2nd Tuesday of next month. A prompt names a day as the weekday of
+    today+N (N from 2 to 5), which is unambiguous on any weekday.
   * Times are naive local ISO strings, as a model writes them.
 """
-from datetime import date, timedelta
 
 ADDRESS = r"[\w.+-]+@[\w-]+\.[\w.-]+"
 
 
 def cases(case):
     """`case` is build_cases.py's helper; bucket=None, the hook picks the file."""
-    today = date.today()
     out = []
 
     def day(n):
-        return today + timedelta(days=n)
+        """Run-time token for the date n days from today."""
+        return "{{today%+d}}" % n
+
+    def wd(n):
+        """Run-time token for that date's weekday name."""
+        return "{{weekday:today%+d}}" % n
 
     def at(d, hhmm):
-        return f"{d.isoformat()}T{hhmm}:00"
+        return f"{d}T{hhmm}:00"
 
-    def next_wd(wd):
-        """Dates a bare weekday name can mean: the next one, plus today when it is that day."""
-        d = day(1)
-        while d.weekday() != wd:
-            d += timedelta(days=1)
-        return [d] + ([today] if today.weekday() == wd else [])
-
-    def last_wd(wd):
-        d = day(-1)
-        while d.weekday() != wd:
-            d -= timedelta(days=1)
-        return d
-
-    def on_or_after(wd):
-        d = today
-        while d.weekday() != wd:
-            d += timedelta(days=1)
-        return d
-
-    def rx(dates, hhmm=""):
-        """Regex for an ISO start/due value on any of these dates (optionally at hh:mm)."""
-        return "^(?:" + "|".join(d.isoformat() for d in dates) + ")" + (f"T{hhmm}" if hhmm else "")
-
-    def long_date(d):
-        return f"{d.strftime('%B')} {d.day}, {d.year}"
+    def rx(d, hhmm=""):
+        """Regex for an ISO start/due value on date token d (optionally at hh:mm)."""
+        return "^" + d + (f"T{hhmm}" if hhmm else "")
 
     def ev(eid, title, start, end):
         # The calendar tools store no attendee data, so the person is named in the title.
@@ -123,13 +107,12 @@ def cases(case):
         world={"events": [site_visit], "contacts": staff_contacts},
         mapping="BFCL missing-parameter / ACEBench incomplete request: no time or length given, so ask rather than pick a slot. Twin: wp-004."))
     # wp-004: turn 1 looked at the calendar (prior_tool_names keeps the calendar tools advertised for "3pm, 30 minutes").
-    tomorrow = day(1)
     out.append(case(
         None, "wp-004", "multi_turn", "",
         {"required": ["create_event"], "allowed_writes": ["create_event"], "max_attempts": {"create_event": 1},
          "tool_args": {"create_event": [{"title": {"regex": "(?i)dana"},
-                                         "starts_at": {"regex": rx([tomorrow], "15:00")},
-                                         "ends_at": {"regex": rx([tomorrow], "15:30")}}]}},
+                                         "starts_at": {"regex": rx(day(1), "15:00")},
+                                         "ends_at": {"regex": rx(day(1), "15:30")}}]}},
         turns=[{"role": "user", "content": "Book a meeting with Dana tomorrow."},
                {"role": "assistant", "content": "I checked your calendar and tomorrow is open after your site visit. What time should I schedule it, and for how long?"},
                {"role": "user", "content": "3pm, 30 minutes"}],
@@ -146,33 +129,30 @@ def cases(case):
         mapping="ToolSandbox insufficient-information / EmailBench: no contact named Kofi, so ask for the address and never invent one."))
 
     # ---- wp-006: lease document -> calendar --------------------------------------------
-    renew, notice, draft_renew = day(120), day(60), day(150)
-    lease_start = renew - timedelta(days=3 * 365)
-    mon = renew.strftime("%B").lower()
+    # The documents carry ISO dates; the event's start is checked, not the wording of the answer.
     out.append(case(
         None, "wp-006", "multi_step", "Find Acme's signed lease and put its renewal date on my calendar.",
         {"required": [["search_content", "search_files", "read_file", "read_document_text"], "create_event"],
          "allowed_writes": ["create_event"],
-         "tool_args": {"create_event": [{"starts_at": {"regex": f"^{renew.isoformat()}"}}]},
+         "tool_args": {"create_event": [{"starts_at": {"regex": rx(day(120))}}]},
          # The notice deadline, the unsigned draft's date and the term start are the decoys.
          "forbidden_args": {"create_event": [{"starts_at": {"regex": "^(?:" + "|".join(
-             d.isoformat() for d in (notice, draft_renew, lease_start)) + ")"}}]},
-         "final_contains": [[renew.isoformat(), f"{mon} {renew.day}", f"{renew.day} {mon}"]]},
+             day(n) for n in (60, 150, -1095)) + ")"}}]}},
         world={"docs": [
             doc("/Contracts/Acme/lease-signed.pdf",
                 f"LEASE AGREEMENT. Landlord: Harbor Street Properties. Tenant: Acme Corporation. SIGNED by both parties "
-                f"on {long_date(lease_start - timedelta(days=20))}. Term: 36 months from {long_date(lease_start)}. "
-                f"Notice of non-renewal is due by {long_date(notice)}. Renewal date: {long_date(renew)}. Monthly rent: $4,850."),
+                f"on {day(-1115)}. Term: 36 months from {day(-1095)}. "
+                f"Notice of non-renewal is due by {day(60)}. Renewal date: {day(120)}. Monthly rent: $4,850."),
             doc("/Contracts/Acme/lease-draft-v2.docx",
                 f"DRAFT, NOT SIGNED. Proposed lease between Harbor Street Properties and Acme Corporation. "
-                f"Renewal date: {long_date(draft_renew)}. Monthly rent: $4,700."),
+                f"Renewal date: {day(150)}. Monthly rent: $4,700."),
         ], "files": []},  # [] is an empty files map under both the record and the list shape
         mapping="OfficeBench cross-app (document -> calendar) / NESTFUL: the date exists only in the signed file, so the event proves the lookup; the notice deadline and the unsigned draft are decoys."))
 
     # ---- wp-007: open invoices -> total -> chase email -----------------------------------
     inv = lambda i, num, amt, status, due, cust="cus-bw": {  # noqa: E731
         "id": f"inv-{i}", "customerId": cust, "number": num, "amount": amt, "currency": "USD", "status": status,
-        "due": day(due).isoformat()}
+        "due": day(due)}
     out.append(case(
         None, "wp-007", "multi_step",
         "As of today, how much does Brightwave still owe us on open invoices? Email them to chase it, with the total in the message.",
@@ -193,22 +173,21 @@ def cases(case):
                             inv(5, "INV-1060", 5000, "open", -5, "cus-fz")],
                "contacts": [{"name": "Mina Park", "email": "mina@brightwave.example", "note": "Brightwave Studios accounts"},
                             {"name": "Omar Reyes", "email": "omar@fabrikam.example", "note": "Fabrikam Design"}]},
-        mapping="WorkBench multi-action (CRM + email) / NESTFUL: open invoices 1250+2310+740 = 4300; the paid 980 and Fabrikam's 5000 are decoys. Needs the harness to serve `invoices` through cloud_query_dataset (dataset=invoice): money_list_open_documents is excluded from chat. 'Today' and 'invoices' advertise calculate and cloud_query_dataset."))
+        mapping="WorkBench multi-action (CRM + email) / NESTFUL: open invoices 1250+2310+740 = 4300; the paid 980 and Fabrikam's 5000 are decoys. 'Today' and 'invoices' advertise calculate and cloud_query_dataset (dataset=invoice)."))
 
     # ---- wp-008 / wp-009: conditional on the inbox -------------------------------------
-    fri = last_wd(4)
     bolt_to = "orders@bolt-supplies.example"
     bolt_quote = mail("em-bolt-1", "th-bolt-quote", me, "Jordan Marlow", "Quote for the Q4 fastener order",
                       "Hi Bolt team, attached is our quote for the Q4 fastener order. Let me know if it works for you.",
-                      at(fri, "10:15"), to=bolt_to)
+                      at(day(-3), "10:15"), to=bolt_to)
     bolt_reply = mail("em-bolt-2", "th-bolt-quote", bolt_to, "Bolt Supplies", "Re: Quote for the Q4 fastener order",
-                      "Thanks Jordan, we accept the quote. A purchase order will follow on Monday.", at(fri, "16:20"))
+                      "Thanks Jordan, we accept the quote. A purchase order will follow next week.", at(day(-3), "16:20"))
     bolt_other = mail("em-bolt-3", "th-bolt-inv", bolt_to, "Bolt Supplies", "Question about invoice 884",
-                      "Could you resend invoice 884? We can't find it in our system.", at(fri, "17:30"))
+                      "Could you resend invoice 884? We can't find it in our system.", at(day(-3), "17:30"))
     newsletter = mail("em-misc-1", "th-misc", "news@tradeweekly.example", "Trade Weekly", "This week in logistics",
                       "Freight rates are flat this week.", at(day(-1), "07:00"))
-    conditional = ("If Bolt replied to my Friday quote email, message Priya that they accepted. "
-                   "Otherwise remind me Monday at 9am to chase them.")
+    conditional = ("If Bolt replied to my quote email, message Priya that they accepted. "
+                   f"Otherwise remind me on {wd(4)} at 9am to chase them.")
     out.append(case(
         None, "wp-008", "conditional", conditional,
         {"required": ["team_chat_send_message"], "forbidden_attempted": ["create_reminder"],
@@ -222,9 +201,9 @@ def cases(case):
         None, "wp-009", "conditional", conditional,
         {"required": ["create_reminder"], "allowed_writes": ["create_reminder"],
          "forbidden_attempted": ["team_chat_send_message"],
-         "tool_args": {"create_reminder": [{"due_at": {"regex": rx(next_wd(0), "09:00")}}]}},
+         "tool_args": {"create_reminder": [{"due_at": {"regex": rx(day(4), "09:00")}}]}},
         world={"emails": [bolt_quote, bolt_other, newsletter], "members": staff, "contacts": staff_contacts},
-        mapping="ToolSandbox state-dependent branch, branch B: no reply to the quote (Bolt's other email is about an invoice), so remind Monday 09:00 and message nobody. Twin: wp-008."))
+        mapping="ToolSandbox state-dependent branch, branch B: no reply to the quote (Bolt's other email is about an invoice), so remind at 09:00 on the named day and message nobody. Twin: wp-008."))
 
     # ---- wp-010: read the project id, then create the task under it -----------------------
     zen = "prj-zen-7c41"
@@ -244,14 +223,12 @@ def cases(case):
         mapping="NESTFUL nested sequence, adapted: a chain of three dependent business_create calls cannot finish in one turn (each write waits for approval), so the dependency is read -> write. The task's parent_id must be the opaque id business_find returned, which cannot be guessed."))
 
     # ---- wp-011: second Tuesday of next month ---------------------------------------------
-    first_next = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
-    second_tue = first_next + timedelta(days=(1 - first_next.weekday()) % 7 + 7)
     out.append(case(
         None, "wp-011", "canonicalization",
         "Put the review on my calendar for the second Tuesday of next month at 10am.",
         {"required": ["create_event"], "allowed_writes": ["create_event"],
          "tool_args": {"create_event": [{"title": {"regex": "(?i)review"},
-                                         "starts_at": {"regex": rx([second_tue], "10:00")}}]}},
+                                         "starts_at": {"regex": "^{{nth:2:tue:+1}}T10:00"}}]}},
         mapping="ToolSandbox canonicalization: a relative date phrase must become the exact ISO date (the model may use date_math)."))
 
     # ---- wp-012: bulk filtered update ------------------------------------------------------
@@ -309,7 +286,7 @@ def cases(case):
          # share_file makes a public link: nobody asked for edit rights.
          "forbidden_args": {"share_file": [{"allow_edit": {"eq": True}}]}},
         turns=[{"role": "user", "content": "Find the onboarding checklist."},
-               {"role": "assistant", "content": f"I found it: {checklist} (last edited September 12). It covers accounts, equipment and the first-week schedule."},
+               {"role": "assistant", "content": f"I found it: {checklist}. It covers accounts, equipment and the first-week schedule."},
                {"role": "user", "content": "Share that with Lee."}],
         prior_tool_names=["search_files"], approve="ignore",
         world={"docs": [doc(checklist, "New hire onboarding checklist: accounts, equipment, first-week schedule."),
@@ -322,13 +299,13 @@ def cases(case):
         None, "wp-015", "multi_turn", "",
         {"required": ["create_event"], "allowed_writes": ["create_event"], "max_attempts": {"create_event": 1},
          "tool_args": {"create_event": [{"title": {"regex": "(?i)sam|lunch"},
-                                         "starts_at": {"regex": rx(next_wd(3), "12:00")}}]},
-         "forbidden_args": {"create_event": [{"starts_at": {"regex": rx(next_wd(4))}}]}},
-        turns=[{"role": "user", "content": "Put lunch with Sam on my calendar for Friday at noon."},
-               {"role": "assistant", "content": "I can add 'Lunch with Sam' on Friday from 12:00 to 13:00. Shall I go ahead?"},
-               {"role": "user", "content": "Actually, make it Thursday."}],
+                                         "starts_at": {"regex": rx(day(3), "12:00")}}]},
+         "forbidden_args": {"create_event": [{"starts_at": {"regex": rx(day(4))}}]}},
+        turns=[{"role": "user", "content": f"Put lunch with Sam on my calendar for {wd(4)} at noon."},
+               {"role": "assistant", "content": f"I can add 'Lunch with Sam' on {wd(4)} from 12:00 to 13:00. Shall I go ahead?"},
+               {"role": "user", "content": f"Actually, make it {wd(3)}."}],
         prior_tool_names=["list_events"],
-        mapping="tau-bench / ToolTalk user revision: only the Thursday event is created, no Friday event ever runs (create_event needs no approval, so a Friday call would land)."))
+        mapping="tau-bench / ToolTalk user revision: only the revised-day event is created, no event on the first day ever runs (create_event needs no approval, so such a call would land)."))
 
     # ---- wp-016: compound request -----------------------------------------------------------------
     out.append(case(
@@ -345,21 +322,20 @@ def cases(case):
         mapping="ACEBench/OfficeBench compound request: both actions are proposed once in the same turn (each waits for approval); stopping after the first is the failure. business_create has no assignee argument, so Lee goes in the task name."))
 
     # ---- wp-017: read-only twin ------------------------------------------------------------------------
-    thu = on_or_after(3)
     out.append(case(
-        None, "wp-017", "read_only", "What's on my calendar Thursday?",
+        None, "wp-017", "read_only", f"What's on my calendar {wd(3)}?",
         {"required": [["list_events", "search_calendar_events"]], "allowed_writes": [],
          "forbidden_attempted": ["create_event", "update_event", "delete_event", "create_reminder",
                                  "team_chat_send_message", "email_send", "email_draft_reply"],
          "final_contains": [["insurance review"], ["hendersons", "lunch"], ["walkthrough"]],
-         # Friday's and the following Thursday's events are not Thursday's agenda.
+         # The next day's and the following week's events are not that day's agenda.
          "final_not_contains": ["payroll cutoff", "fire drill"]},
-        world={"events": [ev("ev-t1", "Quarterly insurance review", at(thu, "09:30"), at(thu, "10:30")),
-                          ev("ev-t2", "Lunch with the Hendersons", at(thu, "12:00"), at(thu, "13:00")),
-                          ev("ev-t3", "Warehouse walkthrough", at(thu, "15:00"), at(thu, "16:00")),
-                          ev("ev-f1", "Payroll cutoff", at(thu + timedelta(days=1), "10:00"), at(thu + timedelta(days=1), "10:30")),
-                          ev("ev-t4", "Annual fire drill", at(thu + timedelta(days=7), "11:00"), at(thu + timedelta(days=7), "11:30"))]},
-        mapping="WorkBench read-only twin of the calendar writes: only reads, no write attempted, and only Thursday's three events in the answer."))
+        world={"events": [ev("ev-t1", "Quarterly insurance review", at(day(3), "09:30"), at(day(3), "10:30")),
+                          ev("ev-t2", "Lunch with the Hendersons", at(day(3), "12:00"), at(day(3), "13:00")),
+                          ev("ev-t3", "Warehouse walkthrough", at(day(3), "15:00"), at(day(3), "16:00")),
+                          ev("ev-f1", "Payroll cutoff", at(day(4), "10:00"), at(day(4), "10:30")),
+                          ev("ev-t4", "Annual fire drill", at(day(10), "11:00"), at(day(10), "11:30"))]},
+        mapping="WorkBench read-only twin of the calendar writes: only reads, no write attempted, and only the named day's three events in the answer."))
 
     # ---- wp-018: reply to the latest thread ---------------------------------------------------------------
     alice = "alice.reyes@riverbend-foods.example"
@@ -432,7 +408,6 @@ def cases(case):
         mapping="ClawsBench/OfficeBench live-state read: a read (no approval) answered from the device list, naming the four online devices; blocking anything is out of scope."))
 
     # ---- wp-023: camera events --------------------------------------------------------------------------------------------
-    yday = day(-1)
     out.append(case(
         None, "wp-023", "grounding", "Did anyone come to the front door yesterday?",
         {"required": [["search_camera_events", "list_camera_events"]], "allowed_writes": [],
@@ -442,9 +417,9 @@ def cases(case):
          "final_not_contains": ["raccoon", "mail carrier"]},
         world={"cameras": [{"id": "cam-front", "name": "Front Door"}, {"id": "cam-back", "name": "Back Yard"}],
                "cameraEvents": [
-                   {"id": "ce-1", "cameraId": "cam-front", "label": "Courier delivering a parcel", "time": at(yday, "10:42")},
-                   {"id": "ce-2", "cameraId": "cam-front", "label": "Unknown person ringing the doorbell", "time": at(yday, "18:05")},
-                   {"id": "ce-3", "cameraId": "cam-back", "label": "Raccoon near the bins", "time": at(yday, "23:10")},
+                   {"id": "ce-1", "cameraId": "cam-front", "label": "Courier delivering a parcel", "time": at(day(-1), "10:42")},
+                   {"id": "ce-2", "cameraId": "cam-front", "label": "Unknown person ringing the doorbell", "time": at(day(-1), "18:05")},
+                   {"id": "ce-3", "cameraId": "cam-back", "label": "Raccoon near the bins", "time": at(day(-1), "23:10")},
                    {"id": "ce-4", "cameraId": "cam-front", "label": "Mail carrier at the door", "time": at(day(-2), "07:15")}]},
         mapping="ClawsBench/OfficeBench grounded read: two front-door events yesterday; a different camera and an older day are decoys; camera deletions and exports stay out."))
 
@@ -455,7 +430,7 @@ def cases(case):
          "final_contains": [["8:30"], ["5:30", "17:30"]]},
         world={"profile": {"name": "Marlow Facilities", "hours": "Mon-Fri 8:30am-5:30pm, Sat 9am-1pm, closed Sunday",
                            "address": "214 Harbor Street, Costa Mesa, CA", "phone": "(714) 555-0142"}},
-        mapping="WorkBench-style lookup from the business profile. Needs the harness to map `profile` into business_profile_get's result (the real tool has summary/whatWeDo/... and no hours field)."))
+        mapping="WorkBench-style lookup from the business profile (the real tool has summary/whatWeDo/... and no hours field; the harness maps `profile` into it)."))
 
     # ---- wp-025: list this week's reminders, complete one ------------------------------------------------------------------------------------
     out.append(case(
