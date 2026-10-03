@@ -222,6 +222,14 @@ direct-editing links, direct-download links; audit in `docs/SECURITY.md`).
   re-run `./scripts/setup.sh`, then recreate the container
   (`docker compose … up -d --force-recreate samba` — `docker restart` does
   NOT re-read `.env`).
+- **Windows 11: `Windows cannot access \\DROPLET`, no password prompt** —
+  the box must have `map to guest = Never` (`SAMBA_CONF_MAP_TO_GUEST` on the
+  `samba` service, shipped since WARP-3516). Without it Samba answers
+  Windows' first try (the PC's own account) with a guest session, which
+  Windows 11 24H2+ refuses, so it never prompts. With it, Windows asks for
+  the user `droplet` and the password from **Files → Connect drive**; tick
+  **Remember my credentials**. Never enable insecure guest logons on the PC
+  to get around it.
 - **SMB write not visible in the web UI** — the `/Droplet` external mount
   re-stats on access (`filesystem_check_changes=1`); a hard refresh of the
   Files page re-lists. If the mount is missing entirely, the next Nextcloud

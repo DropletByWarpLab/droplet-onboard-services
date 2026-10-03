@@ -954,6 +954,45 @@ else
 fi
 
 # =============================================================================
+# Test 25: WARP-3516 — the samba share never maps unknown logins to guest
+# =============================================================================
+# The servercontainers/samba entrypoint defaults `map to guest = Bad User`
+# when SAMBA_CONF_MAP_TO_GUEST is unset, so Windows' first logon (the PC's own
+# account, unknown to Samba) got a GUEST session. Windows 11 24H2+ refuses an
+# unsigned guest session and gives up without prompting for the `droplet`
+# password; `Never` returns LOGON_FAILURE instead, which makes it prompt.
+# MUTATION: delete SAMBA_CONF_MAP_TO_GUEST from the samba service (or set it
+# to `Bad User`) and this goes red.
+_samba_exit=0
+_samba_output=$(python3 - "$COMPOSE_FILE" <<'PYEOF' 2>&1
+import sys, yaml
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = yaml.safe_load(f)
+
+samba = (data.get("services") or {}).get("samba")
+if not isinstance(samba, dict):
+    print("services.samba is missing")
+    sys.exit(1)
+
+env = samba.get("environment") or []
+if isinstance(env, list):
+    env = dict(str(e).split("=", 1) for e in env if "=" in str(e))
+got = env.get("SAMBA_CONF_MAP_TO_GUEST")
+if got != "Never":
+    print(f"samba must set SAMBA_CONF_MAP_TO_GUEST=Never, got {got!r}")
+    sys.exit(1)
+PYEOF
+) || _samba_exit=$?
+
+if [ "$_samba_exit" -eq 0 ]; then
+  pass "docker-compose.yml: samba never maps unknown logins to guest (WARP-3516)"
+else
+  fail "docker-compose.yml: samba must set SAMBA_CONF_MAP_TO_GUEST=Never (WARP-3516)"
+  printf "${_RED}%s${_RESET}\n" "$_samba_output" >&2
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n"
