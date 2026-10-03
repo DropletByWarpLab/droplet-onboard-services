@@ -16,6 +16,7 @@ import { useCameras } from "@/lib/hooks/useCameras";
 import { useEvents } from "@/lib/hooks/useEvents";
 import { useReviews } from "@/lib/hooks/useReviews";
 import { searchEventsSemantic, setEventRetain } from "@/lib/api";
+import { cameraLabeler } from "@/lib/camera-display";
 import {
   CAMERAS_UNAVAILABLE_TITLE,
   FILES_UNAVAILABLE_HINT,
@@ -58,6 +59,8 @@ const TAB_DEFS: Array<{ id: Tab; label: string; icon: typeof AlertTriangle }> = 
  */
 export default function EventsPage() {
   const { cameras } = useCameras();
+  // WARP-3509: cards and modals name a camera the way the filter chip does.
+  const cameraLabel = useMemo(() => cameraLabeler(cameras), [cameras]);
   const [tab, setTab] = useState<Tab>("alerts");
 
   const [eventFilter, setEventFilter] = useState<EventFilter>({});
@@ -282,6 +285,7 @@ export default function EventsPage() {
           hasMore={false}
           loadMore={() => {}}
           error={searchError}
+          cameraLabel={cameraLabel}
           onOpen={setPlayingEvent}
           searchMode
         />
@@ -294,6 +298,7 @@ export default function EventsPage() {
           loadMore={eventsHook.loadMore}
           error={eventsHook.error}
           onRetry={eventsHook.refresh}
+          cameraLabel={cameraLabel}
           onOpen={setPlayingEvent}
         />
       ) : (
@@ -305,6 +310,7 @@ export default function EventsPage() {
           loadMore={reviewsHook.loadMore}
           error={reviewsHook.error}
           onRetry={reviewsHook.refresh}
+          cameraLabel={cameraLabel}
           onOpen={setPlayingReview}
         />
       )}
@@ -312,6 +318,7 @@ export default function EventsPage() {
       {playingEvent && (
         <EventClipModal
           event={playingEvent}
+          cameraName={cameraLabel(playingEvent.camera)}
           onClose={() => setPlayingEvent(null)}
           onToggleRetain={handleRetainToggle}
         />
@@ -319,6 +326,7 @@ export default function EventsPage() {
       {playingReview && (
         <ReviewClipModal
           review={playingReview}
+          cameraName={cameraLabel(playingReview.camera)}
           onClose={() => setPlayingReview(null)}
           onMarkViewed={(rv) => reviewsHook.markViewed(rv.id)}
         />
@@ -340,6 +348,7 @@ function EventsBody({
   loadMore,
   error,
   onRetry,
+  cameraLabel,
   onOpen,
   searchMode,
 }: {
@@ -349,6 +358,8 @@ function EventsBody({
   hasMore: boolean;
   loadMore: () => void;
   error: unknown;
+  /** Frigate camera key → the name to show (see `cameraLabeler`). */
+  cameraLabel: (key: string) => string;
   onOpen: (e: EventDetail) => void;
   onRetry?: () => void;
   /** When true, the empty-state copy reflects a no-results-for-query
@@ -400,7 +411,7 @@ function EventsBody({
     <>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {events.map((ev) => (
-          <EventCard key={ev.id} event={ev} onClick={onOpen} />
+          <EventCard key={ev.id} event={ev} cameraName={cameraLabel(ev.camera)} onClick={onOpen} />
         ))}
       </div>
       {hasMore && (
@@ -429,6 +440,7 @@ function ReviewsBody({
   loadMore,
   error,
   onRetry,
+  cameraLabel,
   onOpen,
 }: {
   reviews: ReviewItem[];
@@ -437,6 +449,8 @@ function ReviewsBody({
   hasMore: boolean;
   loadMore: () => void;
   error: unknown;
+  /** Frigate camera key → the name to show (see `cameraLabeler`). */
+  cameraLabel: (key: string) => string;
   onOpen: (rv: ReviewItem) => void;
   onRetry?: () => void;
 }) {
@@ -485,7 +499,7 @@ function ReviewsBody({
     <>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {reviews.map((rv) => (
-          <ReviewCard key={rv.id} review={rv} onClick={onOpen} />
+          <ReviewCard key={rv.id} review={rv} cameraName={cameraLabel(rv.camera)} onClick={onOpen} />
         ))}
       </div>
       {hasMore && (

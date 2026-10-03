@@ -13,14 +13,20 @@ import {
   X,
 } from "lucide-react";
 import { regenerateEventDescription, tagEventAsFace } from "@/lib/api";
+import { prettifyCameraKey } from "@/lib/camera-display";
 import type { EventDetail } from "@/lib/types";
 import { useToast } from "@/components/Toast";
 import { useAuth } from "@/lib/auth";
 import { translateError } from "@/lib/friendly-errors";
 import { Dialog } from "@/components/Dialog";
+import { ThumbImage } from "./ThumbImage";
 
 interface Props {
   event: EventDetail;
+  /** The name the household gave the camera (WARP-3509). The page resolves it
+   *  from the cameras list; without one the modal shows the prettified key,
+   *  never the raw slug. */
+  cameraName?: string;
   onClose: () => void;
   /** Toggle the retain-indefinitely flag. When wired, the modal
    *  renders a "Save / Saved" button. The handler should call the
@@ -49,7 +55,7 @@ interface Props {
  * `translateError(err, "media")` copy, never the raw err.message —
  * the audit found these were leaking orchestrator-level strings.
  */
-export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
+export function EventClipModal({ event, cameraName, onClose, onToggleRetain }: Props) {
   const headingId = useId();
   const { toast } = useToast();
   const { user } = useAuth();
@@ -139,7 +145,7 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
     }
   };
 
-  const cameraDisplay = event.camera.replace(/_/g, " ");
+  const cameraDisplay = cameraName || prettifyCameraKey(event.camera);
   const startedAt = new Date(event.startTime * 1000);
 
   return (
@@ -179,18 +185,20 @@ export function EventClipModal({ event, onClose, onToggleRetain }: Props) {
               style={{ background: "var(--inset)" }}
             />
           ) : event.snapshotUrl ? (
-            <img
+            <ThumbImage
               src={event.snapshotUrl}
               alt={`${event.label} on ${cameraDisplay}`}
               className="w-full max-h-[60vh] object-contain"
-              style={{ background: "var(--inset)" }}
+              placeholderClassName="w-full aspect-video"
+              iconSize={40}
             />
           ) : (
-            <img
+            <ThumbImage
               src={event.thumbnail}
               alt={`${event.label} on ${cameraDisplay}`}
               className="w-full max-h-[60vh] object-contain"
-              style={{ background: "var(--inset)" }}
+              placeholderClassName="w-full aspect-video"
+              iconSize={40}
             />
           )}
         </div>

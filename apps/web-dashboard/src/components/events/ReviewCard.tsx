@@ -1,10 +1,16 @@
 "use client";
 
 import { AlertTriangle, Eye, EyeOff, Layers } from "lucide-react";
+import { prettifyCameraKey } from "@/lib/camera-display";
 import type { ReviewItem } from "@/lib/types";
+import { ThumbImage } from "./ThumbImage";
 
 interface Props {
   review: ReviewItem;
+  /** The name the household gave the camera (WARP-3509). The page resolves it
+   *  from the cameras list; without one the card shows the prettified key,
+   *  never the raw slug. */
+  cameraName?: string;
   onClick: (review: ReviewItem) => void;
 }
 
@@ -44,7 +50,8 @@ function fmtRel(epochSec: number): string {
 }
 
 function fmtRange(start: number, end: number | null): string {
-  if (!end) return "Active";
+  // No end time: Frigate is still grouping detections into this cluster.
+  if (!end) return "In progress";
   const sec = Math.max(0, Math.round(end - start));
   if (sec < 60) return `${sec}s`;
   const m = Math.floor(sec / 60);
@@ -63,8 +70,8 @@ function fmtRange(start: number, end: number | null): string {
  * The unreviewed state gets a subtle brand ring so it pops out of
  * the grid — cuts down on hunt-and-peck triage.
  */
-export function ReviewCard({ review, onClick }: Props) {
-  const cameraDisplay = review.camera.replace(/_/g, " ");
+export function ReviewCard({ review, cameraName, onClick }: Props) {
+  const cameraDisplay = cameraName || prettifyCameraKey(review.camera);
   const sev = SEVERITY_BADGE[review.severity];
   const SevIcon = sev.icon;
 
@@ -79,7 +86,7 @@ export function ReviewCard({ review, onClick }: Props) {
       style={{ padding: 0 }}
     >
       <div className="relative aspect-video overflow-hidden" style={{ background: "var(--inset)" }}>
-        <img
+        <ThumbImage
           src={review.thumbnailUrl}
           alt={`${review.severity} on ${cameraDisplay}`}
           className="w-full h-full object-cover transition-transform group-hover:scale-105"

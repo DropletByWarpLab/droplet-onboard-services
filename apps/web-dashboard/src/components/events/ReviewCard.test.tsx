@@ -11,7 +11,7 @@
  * overrode the base ring on focus. These tests lock that mechanism in.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { render, cleanup } from "@testing-library/react";
+import { render, cleanup, fireEvent, screen } from "@testing-library/react";
 import React from "react";
 import { ReviewCard } from "./ReviewCard";
 import type { ReviewItem } from "@/lib/types";
@@ -70,5 +70,76 @@ describe("ReviewCard unreviewed indicator (WARP-1089)", () => {
     const btn = container.querySelector("button")! as HTMLButtonElement;
     expect(btn.style.boxShadow).toBe("");
     expect(btn.className).not.toMatch(BASE_RING);
+  });
+});
+
+describe("ReviewCard camera name (WARP-3509)", () => {
+  it("shows the name the household gave the camera, as the filter chip does", () => {
+    render(
+      <ReviewCard
+        review={makeReview({ camera: "front_door" })}
+        cameraName="Lobby"
+        onClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Lobby")).toBeInTheDocument();
+    expect(screen.queryByText("front door")).toBeNull();
+  });
+
+  it("falls back to the prettified key, never the raw lower-case key", () => {
+    render(<ReviewCard review={makeReview({ camera: "warp_lab_office" })} onClick={vi.fn()} />);
+
+    expect(screen.getByText("Warp Lab Office")).toBeInTheDocument();
+    expect(screen.queryByText("warp lab office")).toBeNull();
+  });
+
+  it("names the camera by its display name in the thumbnail's alt text too", () => {
+    const { container } = render(
+      <ReviewCard
+        review={makeReview({ camera: "front_door", severity: "alert" })}
+        cameraName="Lobby"
+        onClick={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector("img")!.getAttribute("alt")).toBe("alert on Lobby");
+  });
+});
+
+describe("ReviewCard thumbnail failure (WARP-3509)", () => {
+  it("replaces a thumbnail that fails to load with a placeholder, so alt text cannot print over the badges", () => {
+    const { container } = render(<ReviewCard review={makeReview()} onClick={vi.fn()} />);
+
+    fireEvent.error(container.querySelector("img")!);
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("[data-testid='thumb-fallback']")).not.toBeNull();
+    // The words that were being overprinted are still the card's own.
+    expect(screen.getByText("Alert")).toBeInTheDocument();
+    expect(screen.getByText("New")).toBeInTheDocument();
+    expect(container.textContent).not.toContain("alert on Front Door");
+  });
+});
+
+describe("ReviewCard in-progress state (WARP-3509)", () => {
+  it("labels a review that has not ended 'In progress'", () => {
+    render(<ReviewCard review={makeReview({ endTime: null })} onClick={vi.fn()} />);
+
+    expect(screen.getByText("In progress")).toBeInTheDocument();
+  });
+
+  it("shows the duration once it has ended", () => {
+    // Fixed times: makeReview() reads the clock twice, and a second boundary
+    // between the two reads would make this 59s or 61s.
+    render(
+      <ReviewCard
+        review={makeReview({ startTime: 1_800_000_000, endTime: 1_800_000_060 })}
+        onClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("1m 0s")).toBeInTheDocument();
+    expect(screen.queryByText("In progress")).toBeNull();
   });
 });

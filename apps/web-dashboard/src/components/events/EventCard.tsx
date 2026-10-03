@@ -1,10 +1,16 @@
 "use client";
 
 import { Bookmark, Film, Image as ImageIcon } from "lucide-react";
+import { prettifyCameraKey } from "@/lib/camera-display";
 import type { EventDetail } from "@/lib/types";
+import { ThumbImage } from "./ThumbImage";
 
 interface Props {
   event: EventDetail;
+  /** The name the household gave the camera (WARP-3509). The page resolves it
+   *  from the cameras list; without one the card shows the prettified key,
+   *  never the raw slug. */
+  cameraName?: string;
   onClick: (event: EventDetail) => void;
 }
 
@@ -35,8 +41,8 @@ function fmtDuration(start: number, end: number | null): string {
  * duration. Badges in the corners surface saved-clip vs snapshot-only
  * and the retain-indefinitely state ("Saved").
  */
-export function EventCard({ event, onClick }: Props) {
-  const cameraDisplay = event.camera.replace(/_/g, " ");
+export function EventCard({ event, cameraName, onClick }: Props) {
+  const cameraDisplay = cameraName || prettifyCameraKey(event.camera);
   return (
     <button
       onClick={() => onClick(event)}
@@ -44,7 +50,7 @@ export function EventCard({ event, onClick }: Props) {
       style={{ padding: 0 }}
     >
       <div className="relative aspect-video overflow-hidden" style={{ background: "var(--inset)" }}>
-        <img
+        <ThumbImage
           src={event.thumbnail}
           alt={`${event.label} on ${cameraDisplay}`}
           className="w-full h-full object-cover transition-transform group-hover:scale-105"
