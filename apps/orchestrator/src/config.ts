@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import { z } from "zod";
 // WARP-2825 — the daily-retention horizon lives next to the downsample that
 // enforces it, and every reader that must sit inside it imports the same
@@ -383,6 +384,23 @@ const envSchema = z.object({
   // nextcloud:29-apache image's APACHE_BODY_LIMIT (1 GiB per request), past
   // which Nextcloud itself answers 413. Per-user policies can only lower it.
   MAX_UPLOAD_SIZE_MB: z.coerce.number().default(1024),
+  // WARP-1505 (ADR-026) — work-item attachments. The bytes live on the
+  // orchestrator-owned `pm-attachments` volume (docker-compose.yml mounts it at
+  // this path; the mount target is derived from the same variable so the two
+  // cannot disagree) and are served only by GET /api/pm/attachments/:id.
+  //   DIR        — a CONTAINER path, never a host path. Must be absolute:
+  //                a relative value would resolve against the process cwd and
+  //                put customer files next to the code. Boot fails on one.
+  //   MAX_BYTES  — per-file cap, enforced WHILE streaming (the upload is
+  //                never buffered). 25 MiB default; nginx's /api/ location
+  //                allows 100M, so a cap above ~95 MiB also needs
+  //                `client_max_body_size` raised there.
+  PM_ATTACHMENTS_DIR: z
+    .string()
+    .min(1)
+    .refine((p) => isAbsolute(p), { message: "PM_ATTACHMENTS_DIR must be an absolute path" })
+    .default("/data/pm-attachments"),
+  PM_ATTACHMENT_MAX_BYTES: z.coerce.number().int().positive().default(25 * 1024 * 1024),
 
   // --- CORS (WARP-562) ---
   // Comma-separated allowlist of browser Origins permitted to make

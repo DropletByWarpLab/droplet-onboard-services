@@ -5787,6 +5787,10 @@ model PmComment {
   commentHtml String
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @default(now()) @updatedAt
+  /// WARP-1505 — files attached through this comment. Cascade: a comment that
+  /// goes takes its attachment ROWS with it, so every path that can delete a
+  /// comment is also a path that must unlink the blobs (pm-attachments.service).
+  attachments PmAttachment[]
 
   @@index([workItemId, createdAt])
 }
@@ -5908,21 +5912,63 @@ model PmWorkItemPropertyValue {
   @@index([propertyId])
 }
 
-/// File attached to a work item. Bytes live on the orchestrator-managed
-/// `pm-attachments` volume keyed by the opaque `storageKey` (never a public
-/// path); served only via the authenticated GET /api/pm/attachments/:id route.
+/// Lifecycle of one attachment (WARP-1505). An explicit column, never derived
+/// from whether a file exists or a digest is empty ("No guessing" — CLAUDE.md).
+///
+///   UPLOADING ──► READY                (bytes on disk, digest recorded)
+///   UPLOADING ──► FAILED               (refused or aborted; bytes not kept)
+///   READY     ──► DELETED              (owner removed it; invisible at once)
+///   FAILED | DELETED | stale UPLOADING ──► row gone, blob unlinked (the sweep)
+///
+/// Only READY rows are ever listed or served. FAILED and DELETED are the
+/// sweep's work queue: a crash between "the user's intent is recorded" and
+/// "the blob is gone" leaves a row the next sweep finishes, never a file with
+/// no row that nothing will ever look at again.
+enum PmAttachmentStatus {
+  UPLOADING
+  READY
+  FAILED
+  DELETED
+}
+
+/// File attached to a work item, or to one of its comments (`commentId`).
+/// Bytes live on the orchestrator-managed `pm-attachments` volume (ADR-026) keyed
+/// by the opaque `storageKey` — never by the user's file name, which is display
+/// metadata only — and are served solely by the authenticated
+/// GET /api/pm/attachments/:id route (WARP-1505).
+///
+/// INVARIANT the schema language cannot express: a READY row carries a real
+/// SHA-256 (`PmAttachment_ready_has_sha256`, a CHECK in the WS-3 migration).
+/// UPLOADING / FAILED / DELETED rows carry the empty string, because the digest
+/// does not exist until the last byte has streamed.
 model PmAttachment {
-  id           String     @id @default(uuid())
+  id           String             @id @default(uuid())
   workItemId   String
-  workItem     PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  workItem     PmWorkItem         @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  /// Set when the file was attached through a comment; null = attached to the
+  /// work item itself. Always a comment of `workItemId` (the service checks).
+  commentId    String?
+  comment      PmComment?         @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  /// Display name only, already stripped of path parts and control/bidi
+  /// characters by the upload path. Never used to build a filesystem path.
   fileName     String
+  /// The type the SERVER verified (magic bytes agree with extension and the
+  /// client's claim), not what the client said. `application/octet-stream`
+  /// when nothing could be verified or the type is active content.
   mimeType     String
   sizeBytes    BigInt
-  storageKey   String     @unique
+  /// Lowercase hex SHA-256 of exactly the stored bytes; "" until READY.
+  sha256       String
+  storageKey   String             @unique
+  status       PmAttachmentStatus @default(UPLOADING)
   uploadedById String?
-  createdAt    DateTime   @default(now())
+  createdAt    DateTime           @default(now())
 
   @@index([workItemId])
+  /// WARP-845 — the commentId FK cascades, so it is indexed.
+  @@index([commentId])
+  /// The sweep's scan: "UPLOADING older than the cutoff, FAILED, DELETED".
+  @@index([status, createdAt])
 }
 
 enum PmActivityVerb {
@@ -5959,6 +6005,13 @@ enum PmActivityVerb {
   /// mirroring what parent_removed does for orphaned sub-issues.
   relation_added
   relation_removed
+  /// WARP-1505: a file landed on the work item (or on one of its comments).
+  /// `newValue` is the display file name. Never notifies (not in the
+  /// activity-notify allowlist) — it is history, not an interruption.
+  attachment_added
+  /// WARP-1505: a file was removed by its uploader or an owner/admin.
+  /// `oldValue` is the display file name.
+  attachment_removed
 }
 
 /// WARP-2587 (ADR-045 slice I) — the notification claim on an activity row.

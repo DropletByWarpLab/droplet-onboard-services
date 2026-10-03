@@ -24,6 +24,7 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
 import { sanitizePmHtml } from "./sanitize-html.js";
+import { removeAttachmentBlobs } from "./pm-attachment-storage.js";
 import {
   DEPARTMENT_SELECT,
   PM_DEPARTMENT_ERRORS,
@@ -779,6 +780,16 @@ export async function updateProject(
 export async function deleteProject(prisma: PrismaClient, projectId: string): Promise<void> {
   const existing = await prisma.pmProject.findUnique({ where: { id: projectId } });
   if (!existing) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  // WARP-1505: the cascade below drops every PmAttachment ROW under this project,
+  // and the files are on a volume the database cannot reach. Read the keys first,
+  // unlink after the delete has committed (never before: a delete that then
+  // fails must not have already destroyed the files).
+  const blobKeys = (
+    await prisma.pmAttachment.findMany({
+      where: { workItem: { projectId } },
+      select: { storageKey: true },
+    })
+  ).map((a) => a.storageKey);
   // findUnique + delete is two round-trips: a concurrent delete between them
   // makes this delete throw Prisma P2025. Map it to the same 404 the existence
   // check would have raised (review finding: delete-helper TOCTOU → P2025).
@@ -788,6 +799,7 @@ export async function deleteProject(prisma: PrismaClient, projectId: string): Pr
     if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
     throw err;
   }
+  await removeAttachmentBlobs(blobKeys);
 }
 
 // ── States ───────────────────────────────────────────────────────────────────
@@ -1581,8 +1593,20 @@ export async function deleteWorkItem(
 ): Promise<void> {
   const existing = await prisma.pmWorkItem.findUnique({ where: { id } });
   if (!existing) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+  // WARP-1505: filled inside the transaction, used after it commits.
+  let blobKeys: string[] = [];
   try {
     await prisma.$transaction(async (tx) => {
+      // WARP-1505: the cascade drops this item's PmAttachment rows (and its
+      // comments' — they carry the same workItemId), but the bytes are files on
+      // a volume the database cannot reach. Read the keys here, inside the
+      // SERIALIZABLE transaction, so an upload that commits between this read and
+      // the delete aborts the delete (409, retry) instead of being cascaded with
+      // its blob forgotten; the files themselves go after the commit, below.
+      blobKeys = (
+        await tx.pmAttachment.findMany({ where: { workItemId: id }, select: { storageKey: true } })
+      ).map((a) => a.storageKey);
+
       // WARP-885: `parentId ON DELETE SET NULL` would otherwise silently
       // promote every sub-issue to a root item with zero audit trail the
       // instant the parent is deleted. Emit one parent_removed activity row
@@ -1641,6 +1665,8 @@ export async function deleteWorkItem(
     if (isPrismaCode(err, "P2034")) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
     throw err;
   }
+  // Committed: the rows are gone, so the files are unreachable. Never throws.
+  await removeAttachmentBlobs(blobKeys);
 }
 
 // ── Comments ─────────────────────────────────────────────────────────────────
