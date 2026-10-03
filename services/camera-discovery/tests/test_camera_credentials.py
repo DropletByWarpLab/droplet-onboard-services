@@ -27,6 +27,7 @@ import contextlib
 import importlib
 import json
 import logging
+import time
 
 import pytest
 
@@ -44,10 +45,11 @@ class _Server(FakeDigestServer):
     and (optionally) answers a failed auth with a vendor lockout status."""
 
     def __init__(self, good_paths=(GOOD_PATH,), mode="qop", password=PW,
-                 fail_line="401 Unauthorized"):
+                 fail_line="401 Unauthorized", delay=0.0):
         super().__init__(mode, password)
         self.good_paths = set(good_paths)
         self.fail_line = fail_line
+        self.delay = delay  # seconds a slow camera takes to answer each request
         self.auth_attempts = 0
         self.paths_seen: list[str] = []
 
@@ -67,6 +69,8 @@ class _Server(FakeDigestServer):
                 rest = uri.split("://", 1)[1]
                 path = "/" + rest.split("/", 1)[1] if "/" in rest else "/"
                 self.paths_seen.append(path)
+                if self.delay:
+                    await asyncio.sleep(self.delay)
                 if path not in self.good_paths:
                     writer.write(b"RTSP/1.0 400 Bad Request\r\nCSeq: 1\r\n\r\n")
                     await writer.drain()
@@ -180,6 +184,29 @@ class TestProbeWithCredentials:
         port = await _closed_port()
         res = await rtsp_prober.probe_with_credentials("127.0.0.1", port, USER, PW, timeout=1.0)
         assert res == ("unreachable", None)
+
+    @pytest.mark.asyncio
+    async def test_budget_bounds_how_long_the_path_walk_can_run(self):
+        """A slow camera must not turn "up to a minute" into several: the walk
+        stops once its time budget is spent, however many paths remain."""
+        async with _Server(good_paths=("/totally/custom/vendor/path",), delay=0.2) as srv:
+            started = time.monotonic()
+            res = await rtsp_prober.probe_with_credentials(
+                "127.0.0.1", srv.port, USER, PW, max_seconds=0.5
+            )
+            elapsed = time.monotonic() - started
+            walked = len(srv.paths_seen)
+        assert res == ("no_path", None)
+        assert elapsed < 2.0
+        assert walked < len(rtsp_prober.STREAM_PATHS)
+
+    @pytest.mark.asyncio
+    async def test_budget_does_not_cut_off_a_walk_that_fits(self):
+        async with _Server() as srv:
+            res = await rtsp_prober.probe_with_credentials(
+                "127.0.0.1", srv.port, USER, PW, max_seconds=30.0
+            )
+        assert res == ("ok", GOOD_PATH)
 
     def test_quote_in_username_cannot_break_the_digest_header(self):
         """A username containing a double quote must not be able to smuggle
@@ -353,6 +380,44 @@ async def test_onvif_stream_uri_path_is_used_when_available(monkeypatch):
         out = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
     assert out["status"] == "accepted"
     assert added[0][1].endswith("/onvif-media/main")
+
+
+@pytest.mark.asyncio
+async def test_slow_onvif_cannot_stall_the_rtsp_probe(monkeypatch):
+    """ONVIF is best effort and bounded, so a camera whose ONVIF service hangs
+    still gets its RTSP walk — the whole submit stays inside "up to a minute"."""
+    async with _Server() as srv:
+        main, added, _ = _fresh_main(monkeypatch, srv.port)
+        monkeypatch.setattr(main, "_CRED_ONVIF_TIMEOUT_S", 0.2)
+
+        async def hangs(*a, **k):
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(main, "probe_onvif_device", hangs)
+        started = time.monotonic()
+        out = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+        elapsed = time.monotonic() - started
+    assert out["status"] == "accepted"
+    assert elapsed < 5.0
+    assert len(added) == 1
+
+
+@pytest.mark.asyncio
+async def test_rtsp_walk_is_given_a_bounded_budget(monkeypatch):
+    """ONVIF (<= 10 s) + the RTSP budget (<= 30 s) + one in-flight DESCRIBE must
+    stay under the orchestrator's 60 s wait, or a camera that WAS added reads as
+    a timeout."""
+    main, _, _ = _fresh_main(monkeypatch, 1)
+    seen = {}
+
+    async def spy(ip, port, user, pw, hint_paths=None, timeout=3.0, max_seconds=None):
+        seen["max_seconds"] = max_seconds
+        return ("no_path", None)
+
+    monkeypatch.setattr(main, "probe_with_credentials", spy)
+    await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+    assert seen["max_seconds"] == main._CRED_RTSP_BUDGET_S
+    assert main._CRED_ONVIF_TIMEOUT_S + main._CRED_RTSP_BUDGET_S + 12 < 60
 
 
 @pytest.mark.asyncio

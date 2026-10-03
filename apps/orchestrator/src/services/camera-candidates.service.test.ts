@@ -312,6 +312,21 @@ describe("submitLiveCandidateCredentials (WARP-3505)", () => {
     expect(JSON.stringify(r)).not.toContain("s3cret");
   });
 
+  it("tells a timeout apart from camera-discovery being down", async () => {
+    // The wait is 60 s; camera-discovery bounds its own work to ~52 s worst
+    // case, so this means it hung, not that it is not running. Calling that
+    // "Camera discovery isn't running" would send the operator off to fix the
+    // wrong thing, and the camera may in fact have been added.
+    internalFetch.mockRejectedValue(
+      Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" }),
+    );
+    const r = await submitLiveCandidateCredentials("AA:BB", "admin", "s3cret!");
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe("timeout");
+    expect(r.message).toMatch(/too long/);
+    expect(JSON.stringify(r)).not.toContain("s3cret");
+  });
+
   it("reports camera-discovery being down as a 502 unreachable, not a thrown error", async () => {
     internalFetch.mockRejectedValue(new Error("ECONNREFUSED"));
     const r = await submitLiveCandidateCredentials("AA:BB", "admin", "s3cret!");

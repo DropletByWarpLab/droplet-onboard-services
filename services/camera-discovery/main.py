@@ -1037,6 +1037,13 @@ async def accept_camera(mac: str, request: Request):
 _MAX_CRED_USERNAME = 128
 _MAX_CRED_PASSWORD = 256
 
+# Time budget for one credentials submit, so "up to a minute" is true and the
+# orchestrator's 60 s wait (camera-candidates.service.ts) is never the thing that
+# gives up on a camera that was in fact added: ONVIF (best effort) + the RTSP
+# path walk + at most one DESCRIBE in flight when the walk's budget runs out.
+_CRED_ONVIF_TIMEOUT_S = 10.0
+_CRED_RTSP_BUDGET_S = 30.0
+
 # probe_with_credentials outcome -> (HTTP status, machine code, operator prose).
 # Prose never includes the username or password (NET-05).
 _CREDENTIAL_FAILURES: dict[str, tuple[int, str, str]] = {
@@ -1153,7 +1160,8 @@ async def submit_camera_credentials(mac: str, request: Request):
         onvif_port: int | None = None
         try:
             onvif_info = await asyncio.wait_for(
-                probe_onvif_device(ip, 80, username, password), timeout=15.0
+                probe_onvif_device(ip, 80, username, password),
+                timeout=_CRED_ONVIF_TIMEOUT_S,
             )
         except Exception:
             onvif_info = None
@@ -1177,7 +1185,12 @@ async def submit_camera_credentials(mac: str, request: Request):
         outcome, path, port = "unreachable", None, ports[0]
         for candidate_port in dict.fromkeys(ports):
             outcome, path = await probe_with_credentials(
-                ip, candidate_port, username, password, hint_paths=hint_paths
+                ip,
+                candidate_port,
+                username,
+                password,
+                hint_paths=hint_paths,
+                max_seconds=_CRED_RTSP_BUDGET_S,
             )
             port = candidate_port
             if outcome in ("ok", "auth_failed", "locked"):

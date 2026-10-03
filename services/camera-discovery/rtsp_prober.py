@@ -16,6 +16,7 @@ import logging
 import re
 import secrets
 import socket
+import time
 from urllib.parse import quote, unquote, urlsplit
 
 from default_credentials import get_credentials
@@ -489,7 +490,8 @@ async def _try_credentials_once(ip: str, port: int, path: str,
 
 async def probe_with_credentials(ip: str, port: int, user: str, pw: str,
                                  hint_paths: list[str] | None = None,
-                                 timeout: float = 3.0
+                                 timeout: float = 3.0,
+                                 max_seconds: float = 30.0
                                  ) -> tuple[str, str | None]:
     """Find a stream path that works with ONE operator-supplied credential.
 
@@ -507,6 +509,12 @@ async def probe_with_credentials(ip: str, port: int, user: str, pw: str,
     the bad password on every remaining path — Hanwha, Axis and some Hikvision
     firmwares lock the account after ~5 failures. ``unreachable`` is returned
     only when no path got a usable reply at all.
+
+    ``max_seconds`` bounds the whole walk. A slow camera could otherwise spend a
+    connect + read timeout on each of ~15 paths; the caller's own wait (the
+    orchestrator gives up after 60 s) must outlast ONVIF + this + one in-flight
+    DESCRIBE, or a camera that WAS added reads as a timeout. Checked between
+    paths, so the walk can overrun by at most one DESCRIBE.
     """
     ordered: list[str] = []
     for path in [*(hint_paths or []), *STREAM_PATHS]:
@@ -515,7 +523,10 @@ async def probe_with_credentials(ip: str, port: int, user: str, pw: str,
 
     reached = False
     silent = 0
+    started = time.monotonic()
     for path in ordered:
+        if time.monotonic() - started >= max_seconds:
+            break
         outcome = await describe_outcome(ip, port, path, user, pw, timeout)
         if outcome == OUTCOME_OK:
             logger.info("Operator credential for '%s' authenticated at %s:%d%s",

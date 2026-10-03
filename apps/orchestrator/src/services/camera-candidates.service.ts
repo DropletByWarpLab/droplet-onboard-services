@@ -367,13 +367,27 @@ export async function submitLiveCandidateCredentials(
         method: "POST",
         headers: { ...discoveryAuthHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
-        // ONVIF (≤15 s) + a bounded RTSP path walk before the Frigate commit.
+        // camera-discovery bounds its own work: ONVIF (<= 10 s) + the RTSP path
+        // walk (<= 30 s budget, plus the one DESCRIBE in flight) before the
+        // Frigate commit. 60 s outlasts that, and every proxy hop in front of
+        // the browser outlasts this (apps/web-dashboard/next.config.js,
+        // docker/nginx/nginx.conf).
         signal: AbortSignal.timeout(60_000),
       },
     );
-  } catch {
+  } catch (err) {
     // Deliberately drop the error object: undici errors can carry request
-    // context, and the body of this request is the password.
+    // context, and the body of this request is the password. Only its NAME is
+    // read, to tell "took too long" (the camera may well have been added) from
+    // "camera-discovery is not running".
+    if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+      return {
+        ok: false,
+        status: 504,
+        code: "timeout",
+        message: "The camera took too long to answer. If it was added, it will appear in your cameras shortly.",
+      };
+    }
     return {
       ok: false,
       status: 502,

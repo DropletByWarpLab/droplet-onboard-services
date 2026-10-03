@@ -198,6 +198,8 @@ describe("POST /api/cameras/discovered/:id/credentials", () => {
     [423, "locked", 423],
     [422, "no_stream_path", 422],
     [502, "unreachable", 502],
+    // camera-discovery hung past the orchestrator's wait: still a coded 502 to the browser.
+    [504, "timeout", 502],
   ])("passes upstream %i / %s through with its code so the dashboard can say what is wrong", async (status, code, expected) => {
     submitLiveCandidateCredentials.mockResolvedValue({
       ok: false,
