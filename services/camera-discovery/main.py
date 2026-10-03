@@ -1131,6 +1131,9 @@ async def submit_camera_credentials(mac: str, request: Request):
         body = None
     username, password = _validated_credentials(body)
 
+    # pending_cameras keys are lower-case (DHCP MACs are lowered on ingest) but
+    # the orchestrator addresses candidates by the upper-cased `mac:` id.
+    mac = mac.lower()
     camera = pending_cameras.get(mac)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found in pending list")

@@ -12,8 +12,11 @@ import React from "react";
 import type { DiscoveredCamera } from "@/lib/types";
 
 const addCameraManual = vi.fn();
+const addDiscoveredCameraWithCredentials = vi.fn();
 vi.mock("@/lib/api", () => ({
   addCameraManual: (...args: unknown[]) => addCameraManual(...args),
+  addDiscoveredCameraWithCredentials: (...args: unknown[]) =>
+    addDiscoveredCameraWithCredentials(...args),
 }));
 
 vi.mock("@/lib/friendly-errors", () => ({
@@ -83,7 +86,7 @@ describe("AddCameraModal", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("moves a needs-sign-in camera to the manual form with its details filled in", () => {
+  it("opens a username/password form for a needs-sign-in camera", () => {
     render(
       <AddCameraModal
         onClose={vi.fn()}
@@ -95,14 +98,92 @@ describe("AddCameraModal", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Set up/ }));
 
+    expect(screen.getByLabelText(/Username/)).toBeTruthy();
+    const pw = screen.getByLabelText(/Password/) as HTMLInputElement;
+    expect(pw.type).toBe("password");
+    // The appliance already knows the address, so it is not asked for again.
+    expect(screen.queryByLabelText(/Stream address/)).toBeNull();
+    expect(screen.getByText(/192\.168\.9\.219/)).toBeTruthy();
+  });
+
+  it("submits the typed credentials for the discovered camera and closes", async () => {
+    addDiscoveredCameraWithCredentials.mockResolvedValue(undefined);
+    const onAdded = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <AddCameraModal
+        onClose={onClose}
+        onAdded={onAdded}
+        cameras={[camera({ status: "needs_credentials" })]}
+        onAccept={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Set up/ }));
+
+    const submit = screen.getByRole("button", { name: /Add camera/ }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true); // nothing typed yet
+
+    fireEvent.change(screen.getByLabelText(/Username/), { target: { value: "admin" } });
+    fireEvent.change(screen.getByLabelText(/Password/), { target: { value: "s3cret!" } });
+    fireEvent.click(submit);
+
+    await waitFor(() =>
+      expect(addDiscoveredCameraWithCredentials).toHaveBeenCalledWith(
+        "mac:E4:30:22:50:2A:FD",
+        "admin",
+        "s3cret!",
+      ),
+    );
+    await waitFor(() => expect(onAdded).toHaveBeenCalled());
+    expect(onClose).toHaveBeenCalled();
+    expect(addCameraManual).not.toHaveBeenCalled();
+  });
+
+  it("keeps the form open and shows the reason when the camera rejects the credentials", async () => {
+    addDiscoveredCameraWithCredentials.mockRejectedValue(
+      new Error("The camera did not accept that username and password."),
+    );
+    const onClose = vi.fn();
+    render(
+      <AddCameraModal
+        onClose={onClose}
+        onAdded={vi.fn()}
+        cameras={[camera({ status: "needs_credentials" })]}
+        onAccept={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Set up/ }));
+    fireEvent.change(screen.getByLabelText(/Username/), { target: { value: "admin" } });
+    fireEvent.change(screen.getByLabelText(/Password/), { target: { value: "wrong" } });
+    fireEvent.click(screen.getByRole("button", { name: /Add camera/ }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/did not accept/);
+    expect(onClose).not.toHaveBeenCalled();
+    // Still there to correct, not wiped.
+    expect((screen.getByLabelText(/Username/) as HTMLInputElement).value).toBe("admin");
+  });
+
+  it("lets the operator fall back to typing the stream address", () => {
+    render(
+      <AddCameraModal
+        onClose={vi.fn()}
+        onAdded={vi.fn()}
+        cameras={[camera({ status: "needs_credentials" })]}
+        onAccept={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Set up/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Enter the stream address instead/ }));
+
     expect((screen.getByLabelText(/Camera name/) as HTMLInputElement).value).toBe("XNV_C8083R");
+    // Prefilled with the manufacturer's known path, not the prober's /stream1 guess.
     expect((screen.getByLabelText(/Stream address/) as HTMLInputElement).value).toBe(
-      "rtsp://192.168.9.219:554/",
+      "rtsp://192.168.9.219:554/profile2/media.smp",
     );
     expect((screen.getByLabelText(/Manufacturer/) as HTMLInputElement).value).toBe("Hanwha");
   });
 
-  it("opens straight onto the prefilled form when handed a camera to set up", () => {
+  it("opens straight onto the credentials form when handed a live camera to set up", () => {
     render(
       <AddCameraModal
         onClose={vi.fn()}
@@ -111,8 +192,21 @@ describe("AddCameraModal", () => {
         prefill={camera({ status: "needs_credentials" })}
       />,
     );
+    expect(screen.getByLabelText(/Username/)).toBeTruthy();
+    expect(screen.queryByLabelText(/Camera name/)).toBeNull();
+  });
+
+  it("opens the manual form prefilled for a camera discovery cannot probe (no live record)", () => {
+    render(
+      <AddCameraModal
+        onClose={vi.fn()}
+        onAdded={vi.fn()}
+        cameras={[]}
+        prefill={camera({ id: "db-1", source: "database", status: "unverified" })}
+      />,
+    );
     expect((screen.getByLabelText(/Camera name/) as HTMLInputElement).value).toBe("XNV_C8083R");
-    // Tells the operator what the appliance already knows and what's missing.
+    // Tells the operator what the appliance already knows and what is missing.
     expect(screen.getByText(/couldn't open its video/)).toBeTruthy();
   });
 
@@ -132,6 +226,8 @@ describe("AddCameraModal", () => {
       expect(addCameraManual).toHaveBeenCalledWith(
         "front_door",
         "rtsp://192.168.9.60:554/stream1",
+        undefined,
+        undefined,
         undefined,
         undefined,
       ),
@@ -160,5 +256,72 @@ describe("AddCameraModal", () => {
     );
     expect(screen.getByText(/discovery isn't running/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /^Scan$/ })).toBeNull();
+  });
+
+  describe("manual form credentials and hint (WARP-3505)", () => {
+    it("has optional Username and Password fields, password masked", () => {
+      render(<AddCameraModal onClose={vi.fn()} onAdded={vi.fn()} />);
+      expect(screen.getByLabelText(/Username/)).toBeTruthy();
+      expect((screen.getByLabelText(/Password/) as HTMLInputElement).type).toBe("password");
+    });
+
+    it("submits them separately from the address so the server can merge and encode them", async () => {
+      addCameraManual.mockResolvedValue(undefined);
+      render(<AddCameraModal onClose={vi.fn()} onAdded={vi.fn()} />);
+
+      fireEvent.change(screen.getByLabelText(/Camera name/), { target: { value: "front_door" } });
+      fireEvent.change(screen.getByLabelText(/Stream address/), {
+        target: { value: "rtsp://192.168.9.60:554/live" },
+      });
+      fireEvent.change(screen.getByLabelText(/Username/), { target: { value: "admin" } });
+      fireEvent.change(screen.getByLabelText(/Password/), { target: { value: "p@ss:w/rd" } });
+      fireEvent.click(screen.getByRole("button", { name: /Add camera/ }));
+
+      await waitFor(() =>
+        expect(addCameraManual).toHaveBeenCalledWith(
+          "front_door",
+          "rtsp://192.168.9.60:554/live",
+          undefined,
+          undefined,
+          "admin",
+          "p@ss:w/rd",
+        ),
+      );
+    });
+
+    it("shows the detected manufacturer's real stream path, never user:password@ or /stream1", () => {
+      render(
+        <AddCameraModal
+          onClose={vi.fn()}
+          onAdded={vi.fn()}
+          cameras={[]}
+          prefill={camera({ id: "db-1", source: "database", status: "unverified" })}
+        />,
+      );
+      const text = document.body.textContent ?? "";
+      expect(text).toContain("rtsp://192.168.9.219:554/profile2/media.smp");
+      expect(text).not.toMatch(/user:password@/);
+      expect(text).not.toMatch(/stream1/);
+      expect(
+        (screen.getByLabelText(/Stream address/) as HTMLInputElement).placeholder,
+      ).not.toMatch(/stream1/);
+    });
+
+    it("does not imply a stream path for an unknown manufacturer", () => {
+      render(
+        <AddCameraModal
+          onClose={vi.fn()}
+          onAdded={vi.fn()}
+          cameras={[]}
+          prefill={camera({
+            id: "db-1",
+            source: "database",
+            status: "unverified",
+            manufacturer: "Acme Optics",
+          })}
+        />,
+      );
+      expect(document.body.textContent ?? "").not.toMatch(/stream1|profile2/);
+    });
   });
 });

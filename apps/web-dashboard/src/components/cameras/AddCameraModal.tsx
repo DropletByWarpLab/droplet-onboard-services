@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { X, Plus, Loader2, Radar, Check, Video } from "lucide-react";
-import { addCameraManual } from "@/lib/api";
+import { X, Plus, Loader2, Radar, Check, Video, KeyRound } from "lucide-react";
+import { addCameraManual, addDiscoveredCameraWithCredentials } from "@/lib/api";
+import { exampleStreamUrl, streamPathFor } from "@/lib/camera-stream-hints";
 import { translateError } from "@/lib/friendly-errors";
 import type { DiscoveredCamera } from "@/lib/types";
 
@@ -21,16 +22,35 @@ interface AddCameraModalProps {
   onScan?: () => void;
   onAccept?: (camera: DiscoveredCamera) => Promise<void> | void;
   /**
-   * Prefill the manual form from a camera we found but can't stream — its
-   * name and address are known, only the credentials and path are missing.
+   * A camera we found but can't stream — its name and address are known, only
+   * the credentials (and sometimes the path) are missing. A live record opens
+   * the username/password form; anything else opens the manual form prefilled.
    */
   prefill?: DiscoveredCamera | null;
 }
 
-/** rtsp://user:pass@host:554/path skeleton for a camera we know the address of. */
+/**
+ * WARP-3505 — a found camera whose stream needs a sign-in AND that
+ * camera-discovery still holds a live record for can be added by typing its
+ * username and password: discovery re-probes with them. A database-only row has
+ * no probed stream to verify against, so it keeps the manual form.
+ */
+function acceptsCredentials(camera: DiscoveredCamera | null | undefined): camera is DiscoveredCamera {
+  return !!camera && camera.id.startsWith("mac:") && camera.status === "needs_credentials";
+}
+
+/**
+ * rtsp://host:554/path skeleton for a camera we know the address of.
+ *
+ * A `rtsp_port_open` URL is the prober's placeholder GUESS (`…/stream1`), not a
+ * stream anything answered — wrong for the cameras that most need help (a
+ * Hanwha 400s it) — so it is replaced with the manufacturer's known path, or a
+ * bare address when we don't have one.
+ */
 function suggestRtspUrl(camera: DiscoveredCamera): string {
-  if (camera.rtspUrl) return camera.rtspUrl;
-  return camera.ip ? `rtsp://${camera.ip}:554/` : "";
+  if (camera.rtspUrl && camera.detectionMethod !== "rtsp_port_open") return camera.rtspUrl;
+  if (!camera.ip) return "";
+  return `rtsp://${camera.ip}:554${streamPathFor(camera.manufacturer) ?? "/"}`;
 }
 
 export function AddCameraModal({
@@ -47,29 +67,61 @@ export function AddCameraModal({
   const [rtspUrl, setRtspUrl] = useState(prefill ? suggestRtspUrl(prefill) : "");
   const [manufacturer, setManufacturer] = useState(prefill?.manufacturer ?? "");
   const [model, setModel] = useState(prefill?.model ?? "");
+  // WARP-3505: optional camera account for the manual form, and the required
+  // one for the discovered-camera form. Kept apart from the URL so the server
+  // merges and encodes them — the password is never part of a visible address.
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // The camera the open form was started from — drives the "we found …" copy
+  // and which camera the credentials are submitted for.
+  const [found, setFound] = useState<DiscoveredCamera | null>(prefill);
   // Open on the list when there's something to pick and we weren't sent here to
   // finish a specific camera's setup.
-  const [tab, setTab] = useState<"discovered" | "manual">(
-    !prefill && cameras.length > 0 ? "discovered" : "manual",
+  const [tab, setTab] = useState<"discovered" | "manual" | "credentials">(
+    prefill
+      ? acceptsCredentials(prefill)
+        ? "credentials"
+        : "manual"
+      : cameras.length > 0
+        ? "discovered"
+        : "manual",
   );
+
+  function openManualFor(cam: DiscoveredCamera) {
+    setFound(cam);
+    setName(cam.name);
+    setRtspUrl(suggestRtspUrl(cam));
+    setManufacturer(cam.manufacturer ?? "");
+    setModel(cam.model ?? "");
+    setError(null);
+    setTab("manual");
+  }
+
+  function openCredentialsFor(cam: DiscoveredCamera) {
+    setFound(cam);
+    setUsername("");
+    setPassword("");
+    setError(null);
+    setTab("credentials");
+  }
 
   // The modal stays mounted while the caller switches which camera is being set
   // up (Set up on a second row), so follow the prefill.
   useEffect(() => {
     if (!prefill) return;
-    setName(prefill.name);
-    setRtspUrl(suggestRtspUrl(prefill));
-    setManufacturer(prefill.manufacturer ?? "");
-    setModel(prefill.model ?? "");
-    setTab("manual");
+    if (acceptsCredentials(prefill)) openCredentialsFor(prefill);
+    else openManualFor(prefill);
   }, [prefill]);
 
   const nameValid = /^[a-zA-Z0-9_-]{1,64}$/.test(name);
   const urlValid = /^rtsps?:\/\/.+/.test(rtspUrl);
-  const canSubmit = nameValid && urlValid && !loading;
+  // A password only makes sense with a username; the server refuses one without.
+  const manualCredsValid = !password || !!username.trim();
+  const canSubmit = nameValid && urlValid && manualCredsValid && !loading;
+  const canSubmitCredentials = !!username.trim() && !!password && !loading;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -78,10 +130,37 @@ export function AddCameraModal({
     setLoading(true);
     setError(null);
     try {
-      await addCameraManual(name, rtspUrl, manufacturer || undefined, model || undefined);
+      await addCameraManual(
+        name,
+        rtspUrl,
+        manufacturer || undefined,
+        model || undefined,
+        username.trim() || undefined,
+        password || undefined,
+      );
       onAdded();
       onClose();
     } catch (err) {
+      setError(translateError(err, "camera"));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleCredentialsSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!found || !canSubmitCredentials) return;
+
+    setLoading(true);
+    setError(null);
+    try {
+      await addDiscoveredCameraWithCredentials(found.id, username.trim(), password);
+      onAdded();
+      onClose();
+    } catch (err) {
+      // translateError maps the API's AUTH_FAILED / LOCKED / NO_STREAM_PATH /
+      // UNREACHABLE codes to their own copy. The fields are kept so a typo can
+      // be corrected without retyping everything.
       setError(translateError(err, "camera"));
     } finally {
       setLoading(false);
@@ -108,6 +187,21 @@ export function AddCameraModal({
     borderRadius: "var(--radius-input)",
     color: "var(--text)",
   } as const;
+
+  const alertBox = error && (
+    <p
+      className="type-footnote rounded-lg px-3 py-2"
+      style={{ color: "var(--danger)", background: "rgba(239,68,68,0.1)" }}
+      role="alert"
+    >
+      {error}
+    </p>
+  );
+
+  // Example for the hint + placeholder: the manufacturer's real path, never a
+  // guessed /stream1 (WARP-3505).
+  const knownPath = streamPathFor(manufacturer);
+  const example = exampleStreamUrl(manufacturer, found?.ip);
 
   return (
     // WARP-1153: p-6 backdrop inset (matches the shared Dialog backdrop) so
@@ -144,7 +238,7 @@ export function AddCameraModal({
             <button
               type="button"
               onClick={() => setTab("discovered")}
-              className={"chip" + (tab === "discovered" ? " on" : "")}
+              className={"chip" + (tab === "discovered" || tab === "credentials" ? " on" : "")}
               aria-current={tab === "discovered" ? "true" : undefined}
             >
               <Radar size={14} />
@@ -206,13 +300,9 @@ export function AddCameraModal({
                         <button
                           type="button"
                           className="btn sm"
-                          onClick={() => {
-                            setName(cam.name);
-                            setRtspUrl(suggestRtspUrl(cam));
-                            setManufacturer(cam.manufacturer ?? "");
-                            setModel(cam.model ?? "");
-                            setTab("manual");
-                          }}
+                          onClick={() =>
+                            acceptsCredentials(cam) ? openCredentialsFor(cam) : openManualFor(cam)
+                          }
                         >
                           Set up
                         </button>
@@ -221,16 +311,97 @@ export function AddCameraModal({
                   );
                 })}
               </ul>
-              {error && (
-                <p
-                  className="type-footnote rounded-lg px-3 py-2"
-                  style={{ color: "var(--danger)", background: "rgba(239,68,68,0.1)" }}
-                  role="alert"
-                >
-                  {error}
-                </p>
-              )}
+              {alertBox}
             </div>
+          ) : tab === "credentials" && found ? (
+            <form onSubmit={handleCredentialsSubmit} className="p-4 space-y-4">
+              <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
+                We found{" "}
+                <strong style={{ color: "var(--text)" }}>
+                  {found.displayName || found.name.replace(/_/g, " ")}
+                </strong>{" "}
+                at <strong style={{ color: "var(--text)" }}>{found.ip}</strong>
+                {found.manufacturer ? ` (${found.manufacturer})` : ""} but it needs a sign-in
+                before we can watch it. Enter the username and password you set on the camera —
+                we'll use them to find its video.
+              </p>
+
+              <div>
+                <label
+                  className="type-footnote font-medium block mb-1"
+                  style={{ color: "var(--text-muted)" }}
+                  htmlFor="camera-cred-username"
+                >
+                  Username *
+                </label>
+                <input
+                  id="camera-cred-username"
+                  type="text"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder="admin"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  maxLength={128}
+                  className="w-full px-3 py-2 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
+                  style={inputStyle}
+                />
+              </div>
+
+              <div>
+                <label
+                  className="type-footnote font-medium block mb-1"
+                  style={{ color: "var(--text-muted)" }}
+                  htmlFor="camera-cred-password"
+                >
+                  Password *
+                </label>
+                <input
+                  id="camera-cred-password"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="new-password"
+                  maxLength={256}
+                  className="w-full px-3 py-2 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
+                  style={inputStyle}
+                />
+              </div>
+
+              {alertBox}
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => (cameras.length > 0 ? setTab("discovered") : onClose())}
+                  className="btn ghost flex-1 type-subheadline"
+                >
+                  {cameras.length > 0 ? "Back" : "Cancel"}
+                </button>
+                <button
+                  type="submit"
+                  disabled={!canSubmitCredentials}
+                  className="btn primary flex-1 type-subheadline disabled:opacity-50"
+                >
+                  {loading ? (
+                    <Loader2 size={16} className="animate-spin" />
+                  ) : (
+                    <KeyRound size={16} />
+                  )}
+                  {loading ? "Checking…" : "Add camera"}
+                </button>
+              </div>
+
+              <button
+                type="button"
+                className="type-caption-1 underline"
+                style={{ color: "var(--text-muted)", background: "none", border: 0, padding: 0 }}
+                onClick={() => openManualFor(found)}
+              >
+                Enter the stream address instead
+              </button>
+            </form>
           ) : (
             <form onSubmit={handleSubmit} className="p-4 space-y-4">
               {cameras.length === 0 && onScan && (
@@ -258,16 +429,19 @@ export function AddCameraModal({
                 </div>
               )}
 
-              {prefill && (
+              {found && (
                 <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
-                  We found <strong style={{ color: "var(--text)" }}>{prefill.ip}</strong> but
-                  couldn't open its video. Add the camera account's username and password to the
-                  address below — most cameras look like
-                  {" "}
-                  <code style={{ fontFamily: "var(--font-mono)" }}>
-                    rtsp://user:password@{prefill.ip}:554/stream1
-                  </code>
-                  . Your camera's manual lists its exact stream path.
+                  We found <strong style={{ color: "var(--text)" }}>{found.ip}</strong> but
+                  couldn't open its video. Enter its stream address below
+                  {knownPath ? (
+                    <>
+                      {" "}— {manufacturer} cameras usually look like{" "}
+                      <code style={{ fontFamily: "var(--font-mono)" }}>{example}</code>
+                    </>
+                  ) : null}
+                  . Your camera's manual lists its exact stream path. If it asks for a sign-in,
+                  add the username and password in the fields below — we'll add them to the
+                  address for you.
                 </p>
               )}
 
@@ -311,7 +485,7 @@ export function AddCameraModal({
                   type="text"
                   value={rtspUrl}
                   onChange={(e) => setRtspUrl(e.target.value)}
-                  placeholder="rtsp://192.168.100.101:554/stream1"
+                  placeholder={example}
                   className="w-full px-3 py-2 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)] font-mono text-sm"
                   style={inputStyle}
                 />
@@ -321,6 +495,60 @@ export function AddCameraModal({
                   </p>
                 )}
               </div>
+
+              {/* Camera account (optional) — merged into the address server-side */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label
+                    className="type-footnote font-medium block mb-1"
+                    style={{ color: "var(--text-muted)" }}
+                    htmlFor="camera-username"
+                  >
+                    Username
+                  </label>
+                  <input
+                    id="camera-username"
+                    type="text"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    placeholder="admin"
+                    autoComplete="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    maxLength={128}
+                    className="w-full px-3 py-2 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
+                    style={inputStyle}
+                  />
+                </div>
+                <div>
+                  <label
+                    className="type-footnote font-medium block mb-1"
+                    style={{ color: "var(--text-muted)" }}
+                    htmlFor="camera-password"
+                  >
+                    Password
+                  </label>
+                  <input
+                    id="camera-password"
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    autoComplete="new-password"
+                    maxLength={256}
+                    className="w-full px-3 py-2 type-subheadline outline-none focus:ring-2 focus:ring-[var(--brand)]"
+                    style={inputStyle}
+                  />
+                </div>
+              </div>
+              <p className="type-caption-2" style={{ color: "var(--text-muted)", marginTop: -8 }}>
+                Optional. Only needed if the camera asks for a sign-in and the address above
+                doesn't already include one.
+              </p>
+              {password && !username.trim() && (
+                <p className="type-caption-2" style={{ color: "var(--danger)", marginTop: -8 }}>
+                  Enter the username that goes with this password
+                </p>
+              )}
 
               {/* Optional fields */}
               <div className="grid grid-cols-2 gap-3">
@@ -363,15 +591,7 @@ export function AddCameraModal({
               </div>
 
               {/* Error */}
-              {error && (
-                <p
-                  className="type-footnote rounded-lg px-3 py-2"
-                  style={{ color: "var(--danger)", background: "rgba(239,68,68,0.1)" }}
-                  role="alert"
-                >
-                  {error}
-                </p>
-              )}
+              {alertBox}
 
               {/* Actions */}
               <div className="flex gap-2 pt-2">
