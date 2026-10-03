@@ -50,7 +50,7 @@ from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kw
 from driver_checker import full_driver_report, auto_fix_drivers
 from frigate_client import FrigateClient
 from onvif_scanner import discover_cameras, probe_onvif_device
-from rtsp_prober import probe_camera, verify_stream
+from rtsp_prober import credential_probing_paused, probe_camera, verify_stream
 from vendor_init import check_status as vendor_status_check
 from vendor_init import initialize_camera as vendor_initialize
 
@@ -831,8 +831,14 @@ async def scan_and_discover() -> None:
         if candidate.get("rtsp_url"):
             camera_info = candidate
         else:
-            # Try ONVIF probe first
-            onvif_info = await probe_onvif_device(ip)
+            # Try ONVIF probe first. It logs in as admin/blank — one more failed
+            # login per sweep — so it stands down with the credential ladder
+            # whenever this camera has been rejecting logins (WARP-3508); on its
+            # own it would spend the camera's lockout budget every 30 s.
+            if credential_probing_paused(ip):
+                onvif_info = None
+            else:
+                onvif_info = await probe_onvif_device(ip)
             if onvif_info:
                 camera_info = {**candidate, **onvif_info}
             else:

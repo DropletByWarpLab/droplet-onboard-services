@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import enum
 import hashlib
 import logging
 import secrets
 import socket
+import time
+from dataclasses import dataclass
 from urllib.parse import quote, unquote, urlsplit
 
 from default_credentials import get_credentials
@@ -361,10 +364,29 @@ def _is_rtsp_200(resp: str) -> bool:
     return "RTSP/1.0 200" in resp or "RTSP/2.0 200" in resp
 
 
-async def _try_credentials_once(ip: str, port: int, path: str,
-                                user: str, pw: str,
-                                timeout: float = 3.0) -> bool:
-    """Open RTSP, send DESCRIBE, retry with auth on 401.
+class _Attempt(enum.Enum):
+    """What one credential attempt told us about the camera (WARP-3508)."""
+
+    ACCEPTED = "accepted"  # a 200: this credential works on this path
+    REJECTED = "rejected"  # challenged, we answered, it said no — a failed login on the device
+    LOCKED_OUT = "locked_out"  # 490: the account is blocked; any further login only prolongs it
+    NO_CHALLENGE = "no_challenge"  # nothing to log in to on this path (404, unusable auth, garbage)
+    UNREACHABLE = "unreachable"  # the exchange could not be completed; no verdict on the credential
+
+
+def _auth_verdict(resp: str) -> _Attempt:
+    """Classify the camera's answer to a DESCRIBE that carried credentials."""
+    if _is_rtsp_200(resp):
+        return _Attempt.ACCEPTED
+    if _rtsp_status_code(resp) == 490:
+        return _Attempt.LOCKED_OUT
+    return _Attempt.REJECTED
+
+
+async def _attempt_credentials(ip: str, port: int, path: str,
+                               user: str, pw: str,
+                               timeout: float = 3.0) -> _Attempt:
+    """Open RTSP, send DESCRIBE, retry with auth on 401 — and report what happened.
 
     WARP-1812: the authenticated retry runs on the SAME connection as the
     challenge. This Hanwha Wisenet firmware binds the digest nonce to the
@@ -374,25 +396,34 @@ async def _try_credentials_once(ip: str, port: int, path: str,
     Wisenet firmwares that hard-close after a 401), we fall back to a fresh
     connection reusing the same challenge, which is what the previous
     always-new-connection code was compensating for.
+
+    WARP-3508: returns the outcome rather than a bare bool, because the ladder
+    has to tell "this credential was wrong" (a failed login on the camera, which
+    spends its lockout budget) from "this path has nothing to log in to" (free)
+    and from "the account is locked" (stop at once).
     """
     url = f"rtsp://{ip}:{port}{path}"
     try:
         reader, writer = await _open_rtsp(ip, port, timeout)
     except (asyncio.TimeoutError, OSError):
-        return False
+        return _Attempt.UNREACHABLE
 
     try:
         resp1 = await _rtsp_describe(reader, writer, url, 1, None, timeout)
     except (asyncio.TimeoutError, OSError, UnicodeDecodeError, ValueError):
         _close_rtsp(writer)
-        return False
+        return _Attempt.NO_CHALLENGE  # reset / silent on this path: nothing to log in to
 
     if _is_rtsp_200(resp1):
         _close_rtsp(writer)
-        return True
+        return _Attempt.ACCEPTED
     if "RTSP/1.0 401" not in resp1 and "RTSP/2.0 401" not in resp1:
         _close_rtsp(writer)
-        return False  # 404 / 501 / etc — path doesn't exist here
+        # 404 / 501 / etc — path doesn't exist here. 490 is the one answer that is
+        # about the ACCOUNT rather than the path: the camera is locked out.
+        if _rtsp_status_code(resp1) == 490:
+            return _Attempt.LOCKED_OUT
+        return _Attempt.NO_CHALLENGE
 
     auth_line = ""
     for ln in resp1.split("\r\n"):
@@ -408,7 +439,7 @@ async def _try_credentials_once(ip: str, port: int, path: str,
         auth_header = _digest_header(user, pw, "DESCRIBE", url, auth_info)
     else:
         _close_rtsp(writer)
-        return False
+        return _Attempt.NO_CHALLENGE  # an auth scheme we do not speak
 
     # Retry on the SAME connection (CSeq 2) — connection-bound-nonce firmwares
     # require it. A well-formed RTSP reply here is authoritative: 200 →
@@ -423,20 +454,88 @@ async def _try_credentials_once(ip: str, port: int, path: str,
         resp2 = ""
     _close_rtsp(writer)
     if resp2.startswith(("RTSP/1.0", "RTSP/2.0")):
-        return _is_rtsp_200(resp2)
+        return _auth_verdict(resp2)
 
     try:
         reader2, writer2 = await _open_rtsp(ip, port, timeout)
     except (asyncio.TimeoutError, OSError):
-        return False
+        return _Attempt.UNREACHABLE
     try:
         resp2 = await _rtsp_describe(reader2, writer2, url, 1, auth_header, timeout)
     except (asyncio.TimeoutError, OSError, UnicodeDecodeError, ValueError):
-        return False
+        return _Attempt.UNREACHABLE
     finally:
         _close_rtsp(writer2)
 
-    return _is_rtsp_200(resp2)
+    if resp2.startswith(("RTSP/1.0", "RTSP/2.0")):
+        return _auth_verdict(resp2)
+    return _Attempt.UNREACHABLE  # no verdict: the camera never answered the login
+
+
+async def _try_credentials_once(ip: str, port: int, path: str,
+                                user: str, pw: str,
+                                timeout: float = 3.0) -> bool:
+    """True iff this credential gets a 200 on this path (see ``_attempt_credentials``).
+
+    The bool seam ``verify_stream`` and its tests rely on: replaying one stored
+    credential is not a ladder and spends none of its budget.
+    """
+    return await _attempt_credentials(ip, port, path, user, pw, timeout) is _Attempt.ACCEPTED
+
+
+# --- Failed-login budget for the credential ladder (WARP-3508) ---------------
+#
+# Every 30 s sweep used to re-run the whole ladder against any camera still
+# pending. Hanwha / Axis / some Hikvision firmware lock the admin account after
+# ~5 failed logins and answer 490 for several minutes (default_credentials.py,
+# WARP-1873), so a camera waiting for the operator's password was held in
+# permanent lockout by the service meant to adopt it — and the operator could not
+# sign in either. The budget is per IP (not per port: it is the camera's account
+# that locks).
+#
+#   * a run spends at most LADDER_FAILED_AUTH_BUDGET REJECTED logins, then stands
+#     down for LADDER_RETRY_SECONDS. Kept well under the ~5 lockout threshold, and
+#     the ONVIF admin/blank login that precedes each run counts toward it too.
+#   * the next run RESUMES at the next credential: restarting at the first would
+#     never reach the later defaults, or the operator's own (prepended to the list).
+#   * a 490 stops the run at once, for LADDER_COOLDOWN_SECONDS.
+#   * once every credential has been rejected the camera has a password we do not
+#     know and only the operator can supply it: wait LADDER_COOLDOWN_SECONDS before
+#     starting a new pass.
+#
+# The cost is slower adoption of a camera whose factory default is not among the
+# first few credentials — minutes instead of one sweep. Set CAMERA_DEFAULT_PASSWORD
+# on a deployed site and the right credential is the first one tried.
+LADDER_FAILED_AUTH_BUDGET = 2
+LADDER_RETRY_SECONDS = 600.0
+LADDER_COOLDOWN_SECONDS = 3600.0
+
+
+@dataclass
+class _LadderState:
+    """What the ladder remembers about one camera between sweeps."""
+
+    next_credential: int = 0  # how many leading credentials it has already rejected
+    quiet_until: float = 0.0  # monotonic deadline: the ladder stays off until then
+
+
+_ladder: dict[str, _LadderState] = {}
+
+
+def _clock() -> float:
+    """Monotonic seconds — a function so tests can move time without sleeping."""
+    return time.monotonic()
+
+
+def credential_probing_paused(ip: str) -> bool:
+    """True while the ladder is standing down on ``ip``.
+
+    Anything else that logs in to the camera on a sweep (the ONVIF admin/blank
+    probe) should stand down with it, or it would spend the camera's lockout
+    budget on its own.
+    """
+    state = _ladder.get(ip)
+    return state is not None and _clock() < state.quiet_until
 
 
 async def probe_rtsp_with_credentials(ip: str, port: int
@@ -444,21 +543,64 @@ async def probe_rtsp_with_credentials(ip: str, port: int
     """Find a (path, user, password) triple that authenticates on this
     camera. Returns the first match or None.
 
-    Loop order is paths OUTER, credentials INNER so a path the camera
-    doesn't expose short-circuits the whole credential list for that
-    path via _try_credentials_once() returning False on a non-401
-    non-200 status (typically 404). For a camera that accepts the third
-    credential on path /live that's ~13 DESCRIBEs instead of ~195.
+    Loop order is paths OUTER, credentials INNER. A path that does not exist, or
+    does not challenge, costs one anonymous DESCRIBE and no login: credentials
+    cannot change that, so the rest of the list is skipped for it (WARP-3508 — it
+    used to cost one DESCRIBE per credential). For a camera that accepts the third
+    credential on path /live that is ~3 logins instead of ~195.
+
+    The run is bounded by the failed-login budget above: it returns None when the
+    budget is spent, when the camera reports a lockout, or while it is standing down.
     """
     credentials = get_credentials()
+    state = _ladder.setdefault(ip, _LadderState())
+    if _clock() < state.quiet_until:
+        logger.debug("Default-credential probing of %s is standing down", ip)
+        return None
+    if state.next_credential >= len(credentials):
+        state.next_credential = 0  # a whole pass was rejected and its cooldown is over
+    budget = LADDER_FAILED_AUTH_BUDGET
     for path in STREAM_PATHS:
-        for user, pw in credentials:
-            if await _try_credentials_once(ip, port, path, user, pw):
+        for index in range(state.next_credential, len(credentials)):
+            user, pw = credentials[index]
+            outcome = await _attempt_credentials(ip, port, path, user, pw)
+            if outcome is _Attempt.ACCEPTED:
                 logger.info(
                     "Credential '%s' authenticated at %s:%d%s",
                     user, ip, port, path,
                 )
+                _ladder.pop(ip, None)
                 return path, user, pw
+            if outcome is _Attempt.LOCKED_OUT:
+                state.quiet_until = _clock() + LADDER_COOLDOWN_SECONDS
+                logger.warning(
+                    "%s reports its account is locked out (RTSP 490) — "
+                    "no more logins for %d s",
+                    ip, LADDER_COOLDOWN_SECONDS,
+                )
+                return None
+            if outcome is _Attempt.REJECTED:
+                state.next_credential = index + 1
+                budget -= 1
+                if state.next_credential >= len(credentials):
+                    state.quiet_until = _clock() + LADDER_COOLDOWN_SECONDS
+                    logger.info(
+                        "%s rejected every default credential — it needs its "
+                        "operator's password; no more logins for %d s",
+                        ip, LADDER_COOLDOWN_SECONDS,
+                    )
+                    return None
+                if budget <= 0:
+                    state.quiet_until = _clock() + LADDER_RETRY_SECONDS
+                    logger.info(
+                        "%s rejected %d login(s) — pausing credential probing for %d s",
+                        ip, LADDER_FAILED_AUTH_BUDGET, LADDER_RETRY_SECONDS,
+                    )
+                    return None
+            elif outcome is _Attempt.UNREACHABLE:
+                return None  # no verdict on the credential and nothing spent: next sweep
+            else:
+                break  # NO_CHALLENGE: nothing to log in to on this path — next path
     return None
 
 

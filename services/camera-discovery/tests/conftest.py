@@ -35,6 +35,21 @@ def _isolated_state_dir(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("CAMERA_DISCOVERY_STATE_DIR", str(tmp_path / "camera-discovery-state"))
 
+
+@pytest.fixture(autouse=True)
+def _fresh_credential_budget():
+    """Start every test with cameras that have never rejected a login.
+
+    The credential ladder keeps a per-IP failed-login budget (WARP-3508), and most
+    prober tests aim a fake camera at 127.0.0.1. One test that exhausts the budget
+    would otherwise leave the ladder standing down for the next test's camera.
+    """
+    import rtsp_prober
+
+    rtsp_prober._ladder.clear()
+    yield
+    rtsp_prober._ladder.clear()
+
 # WARP-235/236 — main.py's mqtts:// path imports `_shared.internal_tls`.
 # In-container the helper is COPY'd to /app/_shared; in the repo it lives at
 # services/_shared, so add services/ to the path (voice-io precedent).

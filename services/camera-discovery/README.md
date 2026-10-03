@@ -35,6 +35,30 @@ The managed set is refreshed at startup, before an operator-triggered
 `SCAN_INTERVAL`). Each refresh *replaces* the set, so a camera removed from Frigate
 becomes discoverable again; if Frigate cannot be reached the previous set is kept.
 
+### Credential probing budget (WARP-3508)
+
+Hanwha, Axis and some Hikvision cameras lock the admin account after ~5 failed
+logins and answer `490 Account Blocked` for several minutes. A camera still waiting
+for the operator's password used to be re-probed every sweep — ONVIF as
+admin/blank, then up to ~14 default logins per stream path — and so sat in
+permanent lockout, the operator locked out with it. The default-credential ladder
+now keeps a per-IP budget (`LADDER_*` in `rtsp_prober.py`):
+
+- at most 2 rejected logins per run, then it stands down for 10 minutes; the ONVIF
+  admin/blank login stands down with it. The next run *resumes at the next
+  credential* rather than restarting at the first;
+- a `490` stops it at once, for an hour; so does a camera that has rejected every
+  credential (it needs the operator's password), before a new pass starts;
+- a stream path that does not exist, or does not challenge, costs one anonymous
+  request and no login.
+
+Anonymous probes (port scan, `OPTIONS`, the classifier's `DESCRIBE`) never spend a
+camera's lockout budget and keep running every sweep, so a camera that is standing
+down still appears in the list as needing credentials. The price is slower adoption
+of a camera whose factory default is not among the first few credentials — set
+`CAMERA_DEFAULT_USERNAME` / `CAMERA_DEFAULT_PASSWORD` and the site's real credential
+is the first one tried.
+
 ### Decisions made while a sweep is probing
 
 A sweep spends seconds per candidate (ONVIF, RTSP, the credential ladder, Frigate).

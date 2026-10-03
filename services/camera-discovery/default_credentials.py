@@ -14,7 +14,10 @@ lock the admin account after ~5 failed auth attempts and return HTTP
 490 ("Account Blocked") for several minutes. Always populate
 ``CAMERA_DEFAULT_PASSWORD`` on a deployed site so the known-good
 credential is tried first — the factory-default sweep only exists to
-bootstrap a brand-new camera nobody has provisioned yet.
+bootstrap a brand-new camera nobody has provisioned yet. The prober enforces a
+per-IP failed-login budget on top of this (WARP-3508, ``rtsp_prober.LADDER_*``): a
+couple of rejected logins per run, a quiet period between runs that resumes at the
+next credential, and an immediate stop on a 490 lockout.
 
 Ordering: most common factory default first (by hit rate across
 residential / SMB deployments), then vendor-specific specials. The
