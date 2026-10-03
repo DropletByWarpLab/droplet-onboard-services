@@ -258,6 +258,30 @@ accepting_macs: set[str] = set()
 # config (see `_refresh_managed_ips`); the sweep skips these IPs entirely.
 managed_ips: set[str] = set()
 
+
+def _already_decided(mac: str, ip: str) -> bool:
+    """True when something has already decided this camera's fate (WARP-3508, F5).
+
+    A sweep awaits for seconds per candidate — ONVIF, the RTSP probe, the
+    credential ladder, Frigate — and writes its result afterwards. In that window
+    an operator can accept the camera (``known_cameras``, or mid-flight in
+    ``accepting_macs``), dismiss it (``rejected_macs``) or add it by hand (its IP
+    becomes a ``managed_ips`` entry). Writing the sweep's now-stale result over any
+    of those undoes the decision: a camera already live in Frigate reappears as
+    "needs credentials", a dismissed one reappears at all.
+
+    So a sweep asks this when it builds its candidate list, again before it spends
+    any probes on a candidate, and once more — with no await between the check and
+    the write — before it adds the camera to Frigate or records what it found.
+    """
+    return (
+        mac in known_cameras
+        or mac in accepting_macs
+        or mac in rejected_macs
+        or ip in managed_ips
+    )
+
+
 # --- Persisted dismissals (WARP-3508) ---
 #
 # ``rejected_macs`` is the one piece of state here that is the OPERATOR'S DECISION
@@ -739,13 +763,11 @@ async def scan_and_discover() -> None:
             continue  # Skip non-LAN IPs (loopback, link-local, public)
         if not is_camera_subnet_ip(ip):
             continue  # Skip IPs outside camera subnet when isolation is active
-        if mac in known_cameras or mac in rejected_macs:
-            continue
-        if ip in managed_ips:
-            # Frigate already pulls a stream from this host (WARP-3508): it is a
-            # camera the operator has, not a candidate. Probing it would mean an
-            # ONVIF login and the credential ladder against a camera that is
-            # already set up — and Hanwha locks the account after ~5 failures.
+        if _already_decided(mac, ip):
+            # Accepted, dismissed, or a host Frigate already pulls a stream from
+            # (WARP-3508): a camera the operator has, not a candidate. Probing it
+            # would mean an ONVIF login and the credential ladder against a camera
+            # that is already set up — and Hanwha locks the account after ~5 failures.
             continue
 
         candidates[mac] = {
@@ -770,10 +792,8 @@ async def scan_and_discover() -> None:
             # No DHCP match — use IP as key
             mac = f"onvif_{ip.replace('.', '_')}"
 
-        if mac in known_cameras or mac in rejected_macs:
-            continue
-        if ip in managed_ips:
-            continue  # already a Frigate camera — see the lease loop above
+        if _already_decided(mac, ip):
+            continue  # see the lease loop above
 
         candidates[mac] = {
             **candidates.get(mac, {}),
@@ -793,6 +813,12 @@ async def scan_and_discover() -> None:
 
     for mac, candidate in candidates.items():
         ip = candidate["ip"]
+
+        # The candidates were listed before any probe ran, and each probe takes
+        # seconds: the operator may have accepted, dismissed or hand-added THIS one
+        # since. Don't spend a login attempt on a camera that is already decided.
+        if _already_decided(mac, ip):
+            continue
 
         # First-run provisioning: Hanwha/Wisenet etc. reject every API
         # call (403 on SUNAPI, 401 on RTSP) until the operator sets the
@@ -822,9 +848,12 @@ async def scan_and_discover() -> None:
                     # doesn't speak RTSP — probe_camera returns None for it).
                     # Drop any prior pending/known entry so a device that was
                     # mis-classified before this confirmation clears without a
-                    # restart, instead of lingering in the discovered list.
-                    pending_cameras.pop(mac, None)
-                    known_cameras.pop(mac, None)
+                    # restart, instead of lingering in the discovered list. Unless
+                    # an operator decided this camera while it was being probed:
+                    # an accept that landed in that window must survive this.
+                    if not _already_decided(mac, ip):
+                        pending_cameras.pop(mac, None)
+                        known_cameras.pop(mac, None)
                     continue
 
         camera_name = _sanitize_camera_name(
@@ -871,6 +900,17 @@ async def scan_and_discover() -> None:
                 logger.debug("Stream verify raised for %s: %s", ip, exc)
                 verified = False
 
+        # Everything above awaited. If an operator accepted, dismissed or hand-added
+        # this camera in the meantime, what the probes found is stale, and writing it
+        # would undo that decision (WARP-3508, F5). Nothing below awaits between this
+        # check and the state writes except the Frigate add, which holds a claim.
+        if _already_decided(mac, ip):
+            logger.debug(
+                "Dropping stale probe result for %s (%s) — decided while it was being probed",
+                mac, ip,
+            )
+            continue
+
         # Guard the Frigate call: a 5xx / connection-refused / timeout from
         # frigate.add_camera must NOT escape and abort the candidate loop —
         # that would silently skip every remaining candidate this sweep. A
@@ -879,6 +919,12 @@ async def scan_and_discover() -> None:
         # known_cameras (so it can't go stagnant on a stream Frigate refused).
         added = False
         if verified:
+            # PYNET-017, for the sweep: claim the MAC for the add exactly as
+            # accept_camera does, so a reject (or an accept) arriving during the
+            # Frigate round-trip is refused with a 409 instead of leaving the
+            # camera both live and dismissed. The check above and this claim have
+            # no await between them.
+            accepting_macs.add(mac)
             try:
                 added = await frigate.add_camera(camera_name, rtsp_url)
             except Exception as exc:
@@ -890,6 +936,8 @@ async def scan_and_discover() -> None:
                     exc,
                 )
                 added = False
+            finally:
+                accepting_macs.discard(mac)
 
         if added:
             camera_info["status"] = "active"

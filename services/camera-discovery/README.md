@@ -35,6 +35,17 @@ The managed set is refreshed at startup, before an operator-triggered
 `SCAN_INTERVAL`). Each refresh *replaces* the set, so a camera removed from Frigate
 becomes discoverable again; if Frigate cannot be reached the previous set is kept.
 
+### Decisions made while a sweep is probing
+
+A sweep spends seconds per candidate (ONVIF, RTSP, the credential ladder, Frigate).
+If the operator accepts, dismisses or hand-adds that camera in the meantime, the
+sweep drops what it found instead of writing it back — otherwise a camera already
+live in Frigate reappears as "needs credentials", and a dismissed one reappears at
+all. The check runs when the candidate list is built, before each candidate's
+probes, and again immediately before the sweep records a result or adds the camera
+to Frigate (`_already_decided` in `main.py`). The sweep's own Frigate add holds the
+same in-flight claim `accept` does, so a reject arriving during it gets a `409`.
+
 ## Security
 
 - **IP validation** — only probes RFC 1918 private addresses (10.x, 172.16-31.x, 192.168.x). Rejects loopback, link-local, multicast, and public IPs.
