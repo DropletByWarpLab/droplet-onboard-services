@@ -1472,8 +1472,13 @@ def _rail_content(disp, v: dict) -> dict:
                     fallback=host, faces=faces, face_index=0)
 
     ssid = str((v.get("wifi") or {}).get("ssid") or "Wi-Fi")
+    # The next tap leaves this face for the fingerprint whenever one is on
+    # offer (display._tap_rail_qr), so the line names where the tap goes: it
+    # is the on-glass instruction and must not point at the wrong face.
     return dict(payload=wifi_payload, caption="JOIN WI-FI", headline=ssid,
-                fallback="TAP FOR DASHBOARD", faces=faces, face_index=1)
+                fallback=("TAP FOR FINGERPRINT" if fingerprint
+                          else "TAP FOR DASHBOARD"),
+                faces=faces, face_index=1)
 
 
 def _bind_cell_regions(disp) -> None:

@@ -1444,6 +1444,33 @@ def test_the_tap_steps_pair_then_wifi_then_fingerprint_then_pair(with_pair):
     assert with_pair._rail_wifi_until == 0.0
 
 
+def test_the_wifi_face_names_the_face_the_next_tap_opens(with_pair, monkeypatch):
+    """The Wi-Fi face's typed line is the on-glass instruction. With a
+    fingerprint on offer the next tap goes THERE, not to the dashboard; with
+    none (older bridge, or the face switched off) it still goes to the
+    dashboard."""
+    with_pair._pyportal_send("qr", dict(BRIDGE_QR_OK))
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "wifi"
+    c = lw._rail_content(with_pair, with_pair._v3)
+    assert c["fallback"] == "TAP FOR FINGERPRINT"
+    # The line is true: that tap really does land on the fingerprint.
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "fingerprint"
+    # No fingerprint to go to: the old instruction, and it is still true.
+    pair = {k: v for k, v in BRIDGE_PAIR_OK.items() if k != "fingerprint"}
+    with_pair._mirror_to_v3("pair", pair)
+    with_pair._rail_wifi_until = time.time() + 60
+    assert with_pair.rail_face() == "wifi"
+    assert lw._rail_content(with_pair, with_pair._v3)["fallback"] == "TAP FOR DASHBOARD"
+    # Face switched off: same.
+    with_pair._mirror_to_v3("pair", dict(BRIDGE_PAIR_OK))
+    monkeypatch.setattr(display_module, "RAIL_FINGERPRINT", False)
+    assert lw._rail_content(with_pair, with_pair._v3)["fallback"] == "TAP FOR DASHBOARD"
+
+
 def test_the_bridge_taking_the_fingerprint_back_takes_the_face_down(with_pair):
     """`ok: False` (no LAN address, unreadable certificate) beats a previously
     good frame — a merge would leave a stale key on the front of the rack."""

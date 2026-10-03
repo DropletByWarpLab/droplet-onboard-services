@@ -35,7 +35,7 @@ export const FINGERPRINT_APP_COPY =
 
 export const FINGERPRINT_NOT_PROOF_COPY =
   "This page reaches you over the same connection the app will trust, so on its own it proves nothing. " +
-  "Compare it with the fingerprint on the Droplet's own screen (tap the code on the front panel until it says Droplet fingerprint), " +
+  "Compare it with the fingerprint on the Droplet's front panel, if your Droplet has one (tap the code until it says Droplet fingerprint), " +
   "in the setup output, or run droplet-fingerprint on the Droplet.";
 
 export function KeyFingerprint({ fingerprint }: { fingerprint: string }) {

@@ -139,7 +139,8 @@ describe("<CertificateRows />", () => {
     );
     const notProof = screen.getByTestId("key-fingerprint-not-proof");
     expect(notProof).toHaveTextContent("proves nothing");
-    expect(notProof).toHaveTextContent("front panel");
+    // Not every Droplet has a front panel that can show it (WARP-3418).
+    expect(notProof).toHaveTextContent("front panel, if your Droplet has one");
     expect(notProof).toHaveTextContent("setup output");
     expect(notProof).toHaveTextContent("droplet-fingerprint");
   });
