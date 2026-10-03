@@ -78,8 +78,14 @@ export function AddCameraModal({
     setLoading(true);
     setError(null);
     try {
-      await addCameraManual(name, rtspUrl, manufacturer || undefined, model || undefined);
+      const result = await addCameraManual(name, rtspUrl, manufacturer || undefined, model || undefined);
       onAdded();
+      // WARP-3506: added, but no video yet. Keep the dialog so the address or
+      // password can be corrected (re-adding the same name updates the camera).
+      if (result?.status === "added_no_stream") {
+        setError(result.reason ?? "The camera was added, but no video is coming from it yet.");
+        return;
+      }
       onClose();
     } catch (err) {
       setError(translateError(err, "camera"));
