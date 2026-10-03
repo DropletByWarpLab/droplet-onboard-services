@@ -4888,6 +4888,13 @@ enum OffLanChannelKey {
   /// OpenStreetMap (Nominatim) lookup. Owner-only switch, default off;
   /// read fail-closed by `placeLookupGate` in GET /api/calendar/places.
   place_lookup
+  /// WARP-3532 (ADR-069 §9) — "may work data leave this box": the one switch
+  /// for webhooks and Slack / Teams / Discord / Google Chat notifications, and
+  /// for WS-18's GitHub / GitLab poll. Owner-only, default off; read
+  /// fail-closed by `workIntegrationsGate` before every off-LAN delivery. LAN
+  /// destinations never need it (they still pass the SSRF guard). One key, not
+  /// one per integration: an owner decides this once.
+  work_integrations
 }
 
 /// WARP-473 — Phase G1. File ↔ ChatMessage citations.
