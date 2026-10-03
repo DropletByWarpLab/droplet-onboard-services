@@ -1477,6 +1477,20 @@ const envSchema = z.object({
   VAPID_CONTACT_EMAIL: z.string().default(""),
 
   // --- WARP-279: Claude-activity meta-observability dashboard ---
+  // DROPLET_DEV_ENGINEERING_DASHBOARD — WARP-3433. Warp Lab's own engineering
+  //   dashboard (/admin/claude-activity) is NOT a customer feature: it reads the
+  //   AI engineer's session notes, the lab's GitHub PRs and CI, WARP Jira
+  //   tickets with staff names, and calls api.github.com / atlassian.net. So it
+  //   ships DARK and dark means ABSENT, the same idiom as DOORS_ENABLED: an
+  //   EXPLICIT developer switch, default OFF, never derived from a token being
+  //   present. Only "1"/"true" enable it; anything else, including an empty
+  //   string, is OFF. OFF: the router is not mounted (404), the `claudeActivity`
+  //   capability is false (no nav entry, the page is a plain 404) and nothing
+  //   ever dials GitHub or Jira. setup.sh and the compose defaults never set it.
+  DROPLET_DEV_ENGINEERING_DASHBOARD: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
   // GitHub adapter — optional PAT. Repo defaults to the public droplet repo
   // and is documented under GITHUB_REPO_OWNER / GITHUB_REPO_NAME in
   // .env.example. We deliberately don't list those here: they're only read

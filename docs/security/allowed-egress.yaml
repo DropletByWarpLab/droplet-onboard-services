@@ -76,6 +76,56 @@ entries:
     review_by: 2027-07-04
     code_refs: [apps/orchestrator/src/config.ts]
 
+  # WARP-3433 — Warp Lab's own engineering dashboard (/admin/claude-activity,
+  # WARP-279). Two entries, one per host, because the two have different
+  # credentials and neither is the OTA fetch above or the customer-connector
+  # `github-api` entry below: retiring any one of the three must not silently
+  # un-register another. DEVELOPER-FLAG ONLY: every call below is behind
+  # DROPLET_DEV_ENGINEERING_DASHBOARD=1 (default 0; setup.sh and the compose
+  # defaults never set it), so on a customer box the code path is unreachable —
+  # the router is not mounted, the capability is false, and nothing dials either
+  # host. With the flag on, the GitHub half also needs GITHUB_TOKEN (no token,
+  # no request) and the Jira half needs host + email + API token.
+  - id: claude-activity-github
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [api.github.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      DEVELOPER-FLAG ONLY (DROPLET_DEV_ENGINEERING_DASHBOARD=1, off by default,
+      never on a customer box). Reads Warp Lab's own repository (commits, open
+      pull requests, CI runs) for the engineering dashboard under a
+      fine-grained read-only GITHUB_TOKEN. Carries no customer data: the
+      requests name the lab's repo and send the token; nothing from the box's
+      files, people or network is in them. Without GITHUB_TOKEN no request is
+      made. 60 s Redis cache.
+    ticket: WARP-3433
+    added: 2026-10-02
+    review_by: 2027-10-02
+    code_refs: [apps/orchestrator/src/services/claude-activity/github-adapter.ts]
+
+  - id: claude-activity-jira
+    kind: dynamic
+    service: orchestrator
+    config_key: JIRA_HOST
+    phase: runtime
+    data_class: none
+    purpose: >-
+      DEVELOPER-FLAG ONLY (DROPLET_DEV_ENGINEERING_DASHBOARD=1, off by default,
+      never on a customer box). The lab's own Jira Cloud site (JIRA_HOST, the
+      bare atlassian.net subdomain) for the engineering dashboard's WARP ticket
+      panels, under JIRA_EMAIL + JIRA_API_TOKEN basic auth. Carries no customer
+      data: a fixed project JQL query out, ticket titles and status back. Never
+      called unless host, email and token are all set. 60 s Redis cache.
+    ticket: WARP-3433
+    added: 2026-10-02
+    review_by: 2027-10-02
+    code_refs: [apps/orchestrator/src/services/claude-activity/jira-adapter.ts]
+
   - id: fleet-telemetry-portal
     kind: egress
     service: fleet-agent

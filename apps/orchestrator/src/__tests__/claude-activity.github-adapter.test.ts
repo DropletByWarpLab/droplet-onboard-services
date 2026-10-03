@@ -19,6 +19,7 @@ import {
 } from "../services/claude-activity/github-adapter.js";
 
 const FETCH = global.fetch;
+const TOKEN = process.env.GITHUB_TOKEN;
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -30,12 +31,28 @@ function jsonResponse(body: unknown, status = 200) {
 describe("github-adapter", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    // WARP-3433: the adapter makes no call without a token.
+    process.env.GITHUB_TOKEN = "ghp_test";
     // Default mocks Redis to "always miss" via setup.ts, so withCache
     // always falls through to fetch.
   });
 
   afterEach(() => {
     global.fetch = FETCH;
+    if (TOKEN === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = TOKEN;
+  });
+
+  it("makes no request without a token (WARP-3433)", async () => {
+    delete process.env.GITHUB_TOKEN;
+    const spy = vi.fn();
+    global.fetch = spy;
+    expect(await getGitHubSnapshot({ bypassCache: true })).toEqual({
+      commits: [],
+      prs: [],
+      ci_runs: [],
+    });
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it("maps recent commits into the dashboard shape", async () => {
