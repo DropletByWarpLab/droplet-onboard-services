@@ -92,6 +92,22 @@ export function deriveEmailColumnKey(): Buffer { return hkdf(deviceIkm(), "user-
  *  and unlike User.email, a token need NOT survive a disaster restore, because
  *  the person can simply sign in again. */
 export function deriveM365TokenCacheKey(): Buffer { return hkdf(deviceIkm(), "m365-token-cache"); }
+/** WARP-3538 / ADR-041 §4 — column key for the human-readable columns of the
+ *  landed Microsoft 365 drive metadata: `M365DriveItem` (name, URL, last
+ *  modifier) and `M365SharePointLibrary` (site name, library name, URL). A file
+ *  name in a practice routinely carries a patient's name, so these are
+ *  encrypted at rest even though the table makes no such promise to inherit.
+ *
+ *  Its OWN `info` label, not `deriveM365TokenCacheKey`: that key opens a refresh
+ *  token — a long-lived key to the customer's mailbox — and this one opens file
+ *  names, a different class of data with a different blast radius. One compromised
+ *  key must not open the other, in either direction.
+ *
+ *  Rides the DEVICE_SECRET_KEY ikm like its siblings, so a factory reset
+ *  crypto-shreds the landed metadata along with the tokens even if the rows
+ *  survive. Unlike User.email, it need NOT survive a restore: it is a copy of
+ *  Microsoft's data and re-syncs from scratch once the person reconnects. */
+export function deriveM365DriveMetadataKey(): Buffer { return hkdf(deviceIkm(), "m365-drive-metadata"); }
 /** WARP-2137 / ADR-041 — column key for
  *  `IntegrationConnection.providerTokensEnc`, which holds the OAuth tokens of a
  *  cloud ERP track (QuickBooks Online's rotating refresh token, Dentrix

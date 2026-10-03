@@ -7873,6 +7873,26 @@ model M365Connection {
   /// plain-language sentence.
   lastError String?
 
+  /// WARP-3538 — has this person opted in to SharePoint document libraries?
+  /// An explicit column, never inferred from the grant or from cursors that
+  /// happen to exist (the no-guessing-from-absence rule): discovery of the
+  /// `sharepoint` workload runs only when this is true AND the grant covers
+  /// `Sites.Read.All`, and a sign-in asks Microsoft for that scope only when
+  /// it is true. Off by default and reset by a disconnect — a person who did
+  /// not ask for SharePoint must never be asked for the scope, because a
+  /// tenant that has not approved it fails the WHOLE sign-in ("Need admin
+  /// approval") under Microsoft-managed consent settings, mail and calendar
+  /// included.
+  sharePointEnabled Boolean @default(false)
+
+  /// WARP-3538 — how many document libraries the last discovery that could say
+  /// found beyond MAX_SHAREPOINT_LIBRARIES_PER_PERSON and so did NOT register.
+  /// Persisted because the cap is visible by design (the card says "N more
+  /// libraries not read") and nothing else keeps the count: dropped libraries
+  /// have no row. Written only by a discovery that read enough to know, never
+  /// by one that failed or stopped at a page bound.
+  sharePointLibrariesCapped Int @default(0)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -7910,7 +7930,8 @@ model M365DeltaCursor {
   /// M365Connection.userId; delegated auth means every read is scoped to them.
   userId String
 
-  /// `mail` | `calendar` | `contacts` | `files`.
+  /// `mail` | `calendar` | `contacts` | `files` | `todo` | `sharepoint`. Free
+  /// text here; `M365_WORKLOADS` (graph-resources.ts) is the gate.
   workload String
 
   /// The specific resource inside that workload — a mail folder id, a drive
@@ -7957,6 +7978,128 @@ model M365DeltaCursor {
   @@unique([userId, workload, resourceId])
   /// The scheduler's claim query: "what is due now".
   @@index([state, nextAttemptAt])
+  @@index([userId])
+}
+
+/// WARP-3538 — one file or folder in a person's OneDrive (`files`) or in a
+/// SharePoint document library they can open (`sharepoint`), as the Graph
+/// delta feed reports it. The first thing the M365 sync engine LANDS (ADR-041
+/// §4): until this table every page was counted and discarded.
+///
+/// METADATA ONLY — never content. A file's bytes are a 302 to a per-tenant host
+/// no `allowed-egress.yaml` entry can name, so nothing here is ever fetched.
+///
+/// The human-readable columns (`nameEnc`, `webUrlEnc`, `lastModifiedByEnc`) are
+/// `dcv1:` blobs under their OWN column-crypto label (`m365-drive-metadata`).
+/// A file name in a practice routinely carries a patient's name, and ADR-041 §4
+/// requires synced content be encrypted at rest. WARP-2549's narrow reading
+/// would have allowed plaintext here (this table makes no encryption promise)
+/// — encrypted anyway, because this table claims only what it implements and
+/// what it implements is the stronger thing. The AAD is an unambiguous encoding
+/// of (userId, driveId, itemId, column) — see drive-metadata.ts — so a
+/// ciphertext cannot be moved between rows, people or columns.
+///
+/// Not encrypted, on purpose: ids, the folder flag, MIME type, size and the
+/// timestamps. They are what the table is filtered, ordered and swept by.
+///
+/// Items are tracked by ID, never by path: delta returns no
+/// `parentReference.path`, and a rename would silently orphan a path-keyed row.
+/// `userId` is not a foreign key (like every M365 table): nothing cascades, so
+/// disconnect, a leaver's deletion, switching SharePoint off and a reconnect as
+/// a different account all delete these rows by hand.
+model M365DriveItem {
+  id String @id @default(uuid())
+
+  /// The Droplet user whose connection read this item. Every query is scoped
+  /// to it — a person only ever sees their own rows.
+  userId String
+
+  /// `files` | `sharepoint`. Free text; the landing handler is the gate.
+  workload String
+
+  /// The Graph drive this item lives in. For `sharepoint` it is the cursor's
+  /// resource id (the library); for `files` it is the item's own
+  /// `parentReference.driveId`, because OneDrive's cursor is the singleton `-`.
+  driveId String
+
+  /// Graph's driveItem id, stable across renames and moves.
+  itemId String
+
+  /// The containing folder's item id — the chain a path is rebuilt from. Null
+  /// for an item directly under the drive root, which is not stored.
+  parentItemId String?
+
+  isFolder Boolean
+
+  /// `dcv1:` blob of the item's name. Never null: an item with no name is not
+  /// landed.
+  nameEnc String
+
+  /// `dcv1:` blob of the browser URL, when Graph sent one.
+  webUrlEnc String?
+
+  /// `dcv1:` blob of the last modifier's display name, when Graph sent one.
+  lastModifiedByEnc String?
+
+  mimeType String?
+
+  /// A FILE's size. Null for a folder (Graph reports a folder's cumulative size,
+  /// which is not what anyone asks for), and BigInt because a file can pass 2 GiB.
+  sizeBytes BigInt?
+
+  /// Graph's own created / modified times — not when this row was written.
+  createdAtRemote      DateTime?
+  lastModifiedAtRemote DateTime?
+
+  /// The state of a FULL enumeration's sweep, explicit and durable across the
+  /// ticks a big drive takes: a run that starts from scratch marks every row of
+  /// the drive `true`, every item it sees sets it back to `false`, and when the
+  /// run reaches its deltaLink the rows still `true` were not returned — they
+  /// are gone upstream — and are deleted. Incremental runs never touch it.
+  sweepPending Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// One row per item per drive per person — the upsert key.
+  @@unique([userId, driveId, itemId])
+  @@index([userId, workload])
+  @@index([userId, lastModifiedAtRemote])
+}
+
+/// WARP-3538 — the identity and display names of a SharePoint document library
+/// a person's `sharepoint` cursor reads. The cursor knows only a drive id; this
+/// is what the card and the file search show for it ("Front desk › Documents").
+///
+/// The names and the URL are `dcv1:` blobs under the same `m365-drive-metadata`
+/// label as `M365DriveItem`, AAD-bound to (userId, driveId, column): a site or
+/// library name can carry a patient or a matter. Not an FK, like every M365 table
+/// — disconnect, a leaver's deletion and switching SharePoint off delete these
+/// rows by hand, and a COMPLETE discovery prunes the libraries that are gone.
+model M365SharePointLibrary {
+  id String @id @default(uuid())
+
+  userId String
+
+  /// The library's drive id — the `sharepoint` cursor's `resourceId`.
+  driveId String
+
+  /// Graph's composite site id (`hostname,siteCollectionId,webId`).
+  siteId String
+
+  siteNameEnc    String
+  libraryNameEnc String
+  webUrlEnc      String
+
+  /// True when the person FOLLOWS the site, false when it was found by search
+  /// alone. Explicit, because the order libraries are registered in (and so
+  /// which survive the per-person cap) depends on it.
+  followed Boolean
+
+  discoveredAt DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([userId, driveId])
   @@index([userId])
 }
 
