@@ -195,13 +195,14 @@ const envSchema = z.object({
   // WARP-1118 (§10) — the local model's effective context window in tokens,
   // read by the orchestrator's request-size estimator (context-budget.service.ts)
   // to PREVENT (not merely detect) the WARP-854 overflow. Mirrors the bundled
-  // Ollama's own `OLLAMA_CONTEXT_LENGTH`: the compose file already sets both to
-  // 16384 (the WARP-854 fix — Ollama's baked-in 4096 default is overflowed by
-  // the owner-role tool schemas alone, which surfaced as instant empty chat
-  // answers). Keep this equal to the deployed Ollama window so the estimator
+  // Ollama's own `OLLAMA_CONTEXT_LENGTH`: the compose file defaults both to
+  // 65536 (WARP-3452, for coding tools; WARP-854 was the 4096 → 16384 fix —
+  // Ollama's baked-in 4096 default is overflowed by the owner-role tool
+  // schemas alone). setup.sh writes 16384 into .env on a GPU under 16 GiB or a
+  // CPU-only box. Keep this equal to the deployed runtime window so the estimator
   // doesn't degrade blocks the model could actually carry. This configures the
   // window only — it is NOT a model swap and does not touch the One-Model Rule.
-  OLLAMA_CONTEXT_LENGTH: z.coerce.number().int().positive().default(16384),
+  OLLAMA_CONTEXT_LENGTH: z.coerce.number().int().positive().default(65536),
   // Agent step-budget knobs (2026-07-21 agent-budgets spec §1). DEFAULT is
   // the per-turn iteration count when the caller sends no `max_iter`; CAP is
   // the ceiling both the /api/llm/chat zod schema and the agent loop's clamp
