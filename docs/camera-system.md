@@ -92,13 +92,52 @@ Accept/reject accept two id shapes: `mac:<MAC>` routes to camera-discovery (whic
 verifies the stream before committing it to Frigate, answering 422 when it can't),
 and a uuid takes the DB path.
 
+### Camera identity: key, label, adoption (WARP-3506, WARP-3510)
+
+A camera has ONE name that Frigate and the database share, and a separate label.
+
+- **`Camera.name` is the Frigate key** — always `toFrigateKey(name)`
+  (`apps/orchestrator/src/services/camera-key.ts`): lower case, `[a-z0-9_]` only.
+  Typing `Warp_Lab_Office` or `Front-Door` files the camera as `warp_lab_office` /
+  `front_door` in both Frigate and the DB. What the operator typed becomes
+  `displayName`. Everything that writes to or reads from Frigate's config (add,
+  delete, reconcile, settings, accept, the discovery merge) goes through that one
+  function; camera-discovery's Python `add_camera` applies the same rule.
+- **`Camera.adoption` is an explicit state** — `CANDIDATE` (a placeholder
+  discovery found, not yet in Frigate) or `ADOPTED` (a real camera). It is never
+  inferred from `enabled`, which is only the operator's detection toggle: a
+  disabled live camera is `enabled = false` and still `ADOPTED`.
+  - A discovery merge keeps the `ADOPTED` row (then the oldest), deletes only
+    `CANDIDATE` duplicates, and never renames an `ADOPTED` row. Two `ADOPTED` rows
+    on one device are both left alone and logged.
+  - **Add camera** and **accept** adopt the placeholder row for the device (found
+    by MAC, then IP) in place instead of minting a duplicate.
+  - A reconcile never prunes a Frigate key an `ADOPTED` row owns, and refuses a
+    save that would leave `cameras` empty while `ADOPTED` rows exist.
+
+Every Frigate config writer (add, delete, the reconcile prune, a settings save,
+the retention backfill) holds one process-wide lock across read → edit → save, and
+the reconcile reads the DB inside it. Before each save the YAML it replaces is
+written to `$FRIGATE_CONFIG_PREIMAGE_DIR` (default
+`/data/migration-snapshots/frigate-config/config-<timestamp>.yml`, newest 20 kept,
+mode 0600; skipped when that volume is absent). To undo a bad write, POST the file
+back as `text/plain` to Frigate's `/api/config/save?save_option=restart`.
+
 ### Manual Flow (Dashboard)
 
 1. Go to **Cameras** page in the dashboard
 2. Click **Add Camera** button
 3. Enter camera name and RTSP URL (e.g., `rtsp://192.168.100.101:554/stream1`)
 4. Optionally add manufacturer and model
-5. Click **Add Camera** — it's immediately configured in Frigate
+5. Click **Add Camera** — the camera is written to Frigate, Frigate is restarted
+   (on 0.17 `config/set` only writes `config.yml`; nothing starts until a restart),
+   and the dashboard waits up to ~45 s for the camera to produce a frame before it
+   says it worked
+
+If no frame arrives the camera is still added, but the API answers
+`202 { "status": "added_no_stream", "code", "reason" }` instead of `200 ok` and the
+dialog stays open with the reason — typically a wrong address, path or password.
+Re-adding under the same name updates that camera.
 
 ### Manual Flow (Frigate Config)
 
