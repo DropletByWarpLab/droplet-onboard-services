@@ -188,6 +188,24 @@ class TestMalformedIdentifier:
         assert excinfo.value.status_code == 403
 
 
+class TestEveryMacRouteNormalises:
+    def test_no_mac_route_can_forget_to_normalise_its_key(self, main):
+        """The 404 came from one handler doing an exact lookup on whatever it was
+        handed. A route added later (WARP-3505's credentials endpoint is one) must not
+        be able to repeat that: any ``{mac}`` route has to go through ``_camera_key``."""
+        import inspect
+
+        mac_routes = [r for r in main.app.routes if "{mac}" in getattr(r, "path", "")]
+        paths = {r.path for r in mac_routes}
+        assert {"/cameras/discovered/{mac}/accept", "/cameras/discovered/{mac}/reject"} <= paths
+
+        for route in mac_routes:
+            assert "_camera_key(" in inspect.getsource(route.endpoint), (
+                f"{route.path} does not normalise its {{mac}} key: it will answer 404 for any "
+                "letter case the caller did not guess (WARP-3508)"
+            )
+
+
 class TestOverHttp:
     """The same contract through the real router: the path the orchestrator dials."""
 
