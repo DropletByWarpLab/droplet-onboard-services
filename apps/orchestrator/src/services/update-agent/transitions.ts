@@ -37,6 +37,29 @@ const defaultLog = createLogger("update-agent");
 /** Both the root client and a $transaction client can write status. */
 type Db = PrismaClient | Prisma.TransactionClient;
 
+/**
+ * WARP-3504 — one observer per consumer of status changes (the box telemetry
+ * sender turns them into OTA events). Fired AFTER the guarded write landed,
+ * with the row's release tag; an observer that throws is swallowed, so no
+ * consumer can ever fail an update.
+ */
+export interface DeviceUpdateTransition {
+  id: string;
+  from: string;
+  to: DeviceUpdateStatusName;
+  failureReason: string | null;
+  releaseTag: string | null;
+}
+const transitionObservers = new Set<(t: DeviceUpdateTransition) => void>();
+
+/** Subscribe to every future guarded status write. Returns an unsubscribe. */
+export function onDeviceUpdateTransition(observer: (t: DeviceUpdateTransition) => void): () => void {
+  transitionObservers.add(observer);
+  return () => {
+    transitionObservers.delete(observer);
+  };
+}
+
 export type DeviceUpdateStatusName =
   | "pending"
   | "superseded"
@@ -137,7 +160,7 @@ export async function transitionDeviceUpdate(
   const log = opts.logger ?? defaultLog;
   const row = await db.deviceUpdate.findFirst({
     where: { id: opts.id },
-    select: { status: true },
+    select: { status: true, releaseTag: true },
   });
   if (!row) {
     throw new DeviceUpdateTransitionError(opts.id, null, opts.to, "no such row");
@@ -174,6 +197,19 @@ export async function transitionDeviceUpdate(
     },
     "DeviceUpdate status advanced",
   );
+  for (const observe of transitionObservers) {
+    try {
+      observe({
+        id: opts.id,
+        from: row.status,
+        to: opts.to,
+        failureReason: opts.failureReason ?? null,
+        releaseTag: row.releaseTag,
+      });
+    } catch {
+      // Observers are best-effort by contract.
+    }
+  }
 }
 
 /**
