@@ -1,0 +1,37 @@
+# gitleaks configuration for IMAGE scans — WARP-3423 / WARP-3429.
+#
+# Used only by scripts/release/scan-ghcr-secrets.py (--config), for both the
+# registry-history scan and the pre-push `docker save` scan in
+# publish-release.yml. The repo's own .gitleaks.toml (WARP-243, source scans)
+# is a different file with a different allowlist and is NOT used here.
+#
+# Extends the default ruleset and adds exactly ONE allowlist entry. Anything
+# else in an image — including every other value of the generic-api-key rule —
+# fails the pre-push gate unless a reviewed baseline line accepts that one
+# finding (scripts/release/image-secret-baseline.txt).
+#
+# The one entry: the official python base images export
+#   ENV GPG_KEY=<the release manager's PGP key fingerprint>
+# so that the build can verify the interpreter source tarball. It is a public
+# fingerprint, not a secret, but 40 hex characters next to the word KEY is
+# exactly what generic-api-key flags, in the Env and in the build history of
+# every image built on those bases.
+#
+# Matched on the finding's MATCH text (regexTarget = "match"), not on the whole
+# line: a config blob is a single line of JSON, so a line-wide match would
+# silence every other finding in that config the moment GPG_KEY appears in it.
+# The match is one key=value pair, so the pattern is anchored at both ends:
+# the key must be exactly GPG_KEY (not MY_GPG_KEY), the value exactly 40
+# uppercase hex characters (so a longer or lowercase value is not excused),
+# and the only thing allowed after it is the delimiter the rule consumes
+# (a quote, whitespace, `;` or an escaped newline).
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Python base images' public GPG_KEY fingerprint (40 uppercase hex), nothing else"
+regexTarget = "match"
+regexes = [
+  '''^GPG_KEY=[0-9A-F]{40}(?:[\x60'"\s;]|\\[nr])?$''',
+]
