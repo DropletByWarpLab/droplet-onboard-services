@@ -7726,7 +7726,7 @@ export async function fetchToolCatalog(): Promise<ToolCatalogResponse> {
 // --- Admin capabilities (nav-gating for optional admin surfaces) ---
 
 export interface AdminCapabilities {
-  /** /admin/claude-activity is wired (GitHub token OR Jira configured). */
+  /** /admin/claude-activity is on: the developer flag DROPLET_DEV_ENGINEERING_DASHBOARD (off on customer boxes) AND a GitHub token or Jira. */
   claudeActivity: boolean;
   /** /admin/rag-eval is wired (RAG_EVAL_URL set). */
   ragEval: boolean;
@@ -8137,6 +8137,8 @@ export type CheckNowOutcome =
   | "verify_failed"
   | "channel_mismatch"
   | "already_known"
+  /** WARP-3430 — a verified release not strictly newer than the installed one. */
+  | "not_newer"
   | "pending_created";
 
 export interface CheckNowResult {
@@ -8972,6 +8974,21 @@ export interface SaasCredentialView {
    */
   credentialsPurged?: boolean;
   configured: boolean;
+  /**
+   * WARP-3434 — the connector kind (`cloud`, `rest` or `mcp`), as the box's
+   * descriptor declares it. OPTIONAL for the reason `credentialsPurged` is: a
+   * box that predates the field sends nothing, and that is not an answer.
+   */
+  track?: "cloud" | "rest" | "mcp";
+  /** WARP-3434 — whether to `POST /:provider/connect` after a save. Optional
+   *  as above; the page falls back to the descriptor's own rule. */
+  probedOnConnect?: boolean;
+  /**
+   * WARP-3434 — the credential path `fields` belongs to (Xero: `custom-connection`),
+   * or `null` for a provider with no variants. The page sends it back as
+   * `credentialVariant`: the box refuses a first save that names no path.
+   */
+  variant?: string | null;
   fields: SaasCredentialField[];
   /** Non-secret field values only. */
   values: Record<string, string | number>;

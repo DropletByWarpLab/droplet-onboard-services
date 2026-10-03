@@ -142,6 +142,7 @@ import {
 } from "../services/leaver-deletion.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
+import { revokeDeviceClientsForUser } from "../services/device-client-revoke.service.js";
 import { verifyClaimCodePresence } from "../services/setup-claim.service.js";
 import {
   passwordZod,
@@ -3515,6 +3516,14 @@ export function createProtectedAuthRouter(
               data: { directoryStatus: "DEACTIVATED" },
             });
           }, SERIALIZABLE_TX);
+
+          // WARP-3384: the person's paired devices (file-sync app passwords,
+          // drive logins) go BEFORE the Nextcloud account is disabled. A
+          // disabled account cannot authenticate its own app-password delete,
+          // so afterwards the delete is refused and the credential would work
+          // again on reactivation. Best-effort; the outcome (including any app
+          // password Nextcloud did not confirm deleting) is on its own audit row.
+          await revokeDeviceClientsForUser(row.username, actorFromRequest(req), "deactivation");
 
           // The Nextcloud flag is the downstream mirror — best-effort and
           // non-blocking (same posture as the droplet-admins cascade): an

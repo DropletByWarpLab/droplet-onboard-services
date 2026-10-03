@@ -791,8 +791,10 @@ export const NAV_GROUPS: NavGroup[] = [
         settingsSection: "Advanced",
         settingsBlurb: "The signed record of everything the box did",
       },
-      // WARP-279: admin-only Activity log entry. Role-gated AND hidden unless
-      // GitHub/Jira is configured (capabilities.claudeActivity) — #14.
+      // WARP-279: admin-only Activity log entry. Role-gated AND absent unless the
+      // box runs with the developer flag DROPLET_DEV_ENGINEERING_DASHBOARD and
+      // GitHub/Jira is configured (capabilities.claudeActivity) — #14, WARP-3433.
+      // Warp Lab's own engineering dashboard: no customer box ever shows it.
       {
         href: "/admin/claude-activity",
         label: "Activity",

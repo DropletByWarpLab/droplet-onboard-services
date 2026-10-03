@@ -141,8 +141,12 @@ out="$( GPU_VENDOR_OVERRIDE=NVIDIA detect_gpu_vendor )"
 # so the test would claim detection is driver-independent precisely when it
 # had found evidence that it is not. `[[:space:]]` rather than `\s`, which is
 # a GNU extension.
-_lib_code="$(grep -vE '^[[:space:]]*#' "$LIB")"
-if grep -qE 'nvidia-smi|/dev/nvidia' <<<"$_lib_code"; then
+# WARP-3452: scoped to the two detection functions. gpu_vram_mib sizes the card
+# with nvidia-smi on purpose: sizing needs a driver, classifying must not.
+_lib_code="$(awk '/^gpu_vendor_from_bus\(\)/,/^}/ { print } /^detect_gpu_vendor\(\)/,/^}/ { print }' "$LIB" | grep -vE '^[[:space:]]*#')"
+if [ -z "$_lib_code" ]; then
+  bad "could not extract gpu_vendor_from_bus / detect_gpu_vendor from gpu.sh — the driver check below would pass vacuously"
+elif grep -qE 'nvidia-smi|/dev/nvidia' <<<"$_lib_code"; then
   bad "detect_gpu_vendor keys off a loaded driver — it must read the PCI bus"
 else
   ok "detection does not depend on a loaded driver (reads the PCI bus)"
@@ -436,6 +440,100 @@ if [ -n "$_dmr_default" ] && [ "$_dmr_default" = "$_im_default" ]; then
 else
   bad "inference-manager's DMR_MEM_LIMIT default ('$_im_default') differs from the dmr service's mem_limit ('$_dmr_default') — the catalog would size models against the wrong cap"
 fi
+
+# --- 6. WARP-3452: the context window follows the card's VRAM ----------------
+#
+# 64k on a 16 GiB card (Copilot agent mode sends ~24k-token prompts), 16k on a
+# smaller card or no GPU, nothing when VRAM is unknown, and a value already in
+# .env always wins.
+
+# A "16 GB" card reports under 16384 MiB: the bench box's RTX 5060 Ti says 16311.
+for c in "16311:65536" "24576:65536" "12282:16384" "0:16384" ":" "N/A:"; do
+  mib="${c%%:*}"; want="${c#*:}"
+  got="$(context_window_for_vram_mib "$mib")"
+  [ "$got" = "$want" ] && ok "VRAM '${mib}' MiB -> window '${want:-unknown}'" \
+                       || bad "VRAM '${mib}' MiB -> '$got', expected '${want:-unknown}'"
+done
+
+_stub_smi() {
+  # $1 = what nvidia-smi prints; writes a stub onto a bin dir and echoes it
+  _sd="$(mktemp -d)"
+  printf '%s\n' "$1" > "$_sd/out"
+  printf '#!/bin/sh\ncat %s\n' "$_sd/out" > "$_sd/nvidia-smi"
+  # No DMR container to ask either: keeps the docker exec fallback hermetic.
+  printf '#!/bin/sh\nexit 1\n' > "$_sd/docker"
+  chmod +x "$_sd/nvidia-smi" "$_sd/docker"
+  printf '%s' "$_sd"
+}
+
+got="$( PATH="/nonexistent-$$"; gpu_vram_mib nvidia )"
+[ -z "$got" ] && ok "NVIDIA without nvidia-smi (no driver yet) -> VRAM unknown, not 0" \
+              || bad "NVIDIA without nvidia-smi reported '$got' MiB"
+
+drm="$(mktemp -d)"
+mkdir -p "$drm/card0/device" "$drm/card1/device"
+echo 536870912   > "$drm/card0/device/mem_info_vram_total"   # Raphael iGPU carve-out
+echo 17163091968 > "$drm/card1/device/mem_info_vram_total"   # 16 GB discrete card
+got="$(SYS_DRM_ROOT="$drm" gpu_vram_mib amd)"
+[ "$got" = "16368" ] && ok "AMD: the discrete card's node wins (16368 MiB), not the iGPU's" \
+                     || bad "AMD sysfs read '$got' MiB, expected 16368"
+rm -rf "$drm/card1"
+got="$(SYS_DRM_ROOT="$drm" gpu_vram_mib amd)"
+[ "$got" = "512" ] && ok "AMD APU only: the 512 MiB iGPU is what gets sized (-> 16384)" \
+                   || bad "AMD iGPU-only sysfs read '$got' MiB, expected 512"
+rm -rf "$drm"
+
+ctx="$(mktemp -d)"
+upsert_env() {  # strip-then-append, like the real one
+  { grep -vE "^$1=" "$ctx/.env" || true; printf '%s=%s\n' "$1" "$2"; } > "$ctx/.env.new"
+  mv "$ctx/.env.new" "$ctx/.env"
+}
+_ctx() {
+  # $1 = starting .env, $2 = vendor, $3 = nvidia-smi output -> "DMR/OLLAMA"
+  printf '%s' "$1" > "$ctx/.env"
+  _d="$(_stub_smi "$3")"
+  ( PATH="$_d:$PATH"; configure_context_env "$ctx/.env" "$2" ) >/dev/null 2>&1
+  rm -rf "$_d"
+  printf '%s/%s' "$(grep '^DMR_CONTEXT_LENGTH=' "$ctx/.env" | cut -d= -f2)" \
+                 "$(grep '^OLLAMA_CONTEXT_LENGTH=' "$ctx/.env" | cut -d= -f2)"
+}
+
+got="$(_ctx $'INFERENCE_RUNTIME=dmr\n' nvidia 16311)"
+[ "$got" = "65536/65536" ] && ok "16 GB NVIDIA card -> both keys 65536" || bad "16 GB card wrote '$got'"
+
+got="$(_ctx $'INFERENCE_RUNTIME=dmr\n' nvidia 12282)"
+[ "$got" = "16384/16384" ] && ok "12 GB NVIDIA card -> both keys 16384" || bad "12 GB card wrote '$got'"
+
+got="$(_ctx $'INFERENCE_RUNTIME=dmr\n' none '')"
+[ "$got" = "16384/16384" ] && ok "no GPU -> both keys 16384" || bad "no GPU wrote '$got'"
+
+got="$(_ctx $'INFERENCE_RUNTIME=dmr\n' nvidia 'NVIDIA-SMI has failed: no driver')"
+[ "$got" = "/" ] && ok "VRAM unknown -> nothing written (compose default stands, next run retries)" \
+                 || bad "unknown VRAM wrote '$got'"
+
+got="$(_ctx $'DMR_CONTEXT_LENGTH=65536\nOLLAMA_CONTEXT_LENGTH=65536\n' none '')"
+[ "$got" = "65536/65536" ] && ok "existing values kept (an operator's 64k survives a GPU-less run)" \
+                           || bad "existing values overwritten: '$got'"
+
+got="$(_ctx $'OLLAMA_CONTEXT_LENGTH=32768\n' nvidia 16311)"
+[ "$got" = "32768/32768" ] && ok "a lone existing key is copied to its sibling, not replaced" \
+                           || bad "lone key case wrote '$got'"
+
+printf 'INFERENCE_RUNTIME=dmr\n' > "$ctx/.env"
+_d="$(_stub_smi 16311)"
+( PATH="$_d:$PATH"; configure_context_env "$ctx/.env" nvidia
+  cp "$ctx/.env" "$ctx/first"; configure_context_env "$ctx/.env" nvidia ) >/dev/null 2>&1
+rm -rf "$_d"
+cmp -s "$ctx/.env" "$ctx/first" && [ "$(grep -c '_CONTEXT_LENGTH=' "$ctx/.env")" -eq 2 ] \
+  && ok "re-run is a no-op (idempotent)" || bad "re-run changed .env: $(tr '\n' ' ' < "$ctx/.env")"
+
+# Wired into configure_gpu_env BEFORE its DMR-only return: Ollama reads it too.
+printf 'INFERENCE_RUNTIME=ollama\n' > "$ctx/.env"
+( GPU_VENDOR_OVERRIDE=none configure_gpu_env "$ctx/.env" ) >/dev/null 2>&1
+grep -q '^OLLAMA_CONTEXT_LENGTH=16384$' "$ctx/.env" \
+  && ok "configure_gpu_env writes the window on an Ollama box too" \
+  || bad "configure_gpu_env did not write the window on an Ollama box"
+rm -rf "$ctx"
 
 printf '\n  %d passed, %d failed\n\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -23,6 +23,7 @@ vi.mock("../config.js", () => ({
   config: {
     AUTH_ENABLED: true,
     DROPLET_OTA_RELEASES_URL: "https://releases.test/latest",
+    DROPLET_OTA_DOWNLOAD_BASE: "https://downloads.test/releases/download",
     DROPLET_OTA_GITHUB_TOKEN: "",
     DROPLET_OTA_APPLY_SCRIPT: "",
     DROPLET_OTA_COMPOSE_FILE: "/opt/droplet/docker/docker-compose.yml",

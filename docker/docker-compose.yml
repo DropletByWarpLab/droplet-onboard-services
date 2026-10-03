@@ -246,9 +246,11 @@ services:
       # (context-budget.service.ts) budgets the assembled chat request against
       # this window before dispatch, PREVENTING (not merely detecting) the
       # WARP-854 overflow. Mirrors the `ollama` service's OLLAMA_CONTEXT_LENGTH
-      # (both default 16384 via the same env token) so the estimator's window
+      # (both default 65536 via the same env token) so the estimator's window
       # tracks the model server's actual window. NOT a model swap — window only.
-      - OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH:-16384}
+      # WARP-3452: setup.sh writes both keys once, sized to the GPU (gpu.sh
+      # configure_context_env): 65536 on a 16 GiB card, 16384 otherwise.
+      - OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH:-65536}
       - NEXTCLOUD_URL=http://nextcloud:80
       # WARP-101: the orchestrator's MCP client spawns the mcp-server's
       # dist as a stdio child. Pin the path explicitly so we don't rely
@@ -410,6 +412,13 @@ services:
       - DROPLET_OTA_COMPOSE_FILE=${DROPLET_OTA_COMPOSE_FILE:-${DROPLET_HOST_ROOT:-/opt/droplet}/docker/docker-compose.yml}
       - DROPLET_OTA_CONFIG_ROOT=${DROPLET_OTA_CONFIG_ROOT:-${DROPLET_HOST_ROOT:-/opt/droplet}}
       - DROPLET_OTA_UPDATES_DIR=/data/updates
+      # WARP-3430 — where the box downloads its release, anonymously and
+      # without the GitHub REST API: the signed channel pointer under
+      # ota-index/ and each release's assets under <tag>/. Empty falls back
+      # to the canonical publisher in config.ts (so this line never crashes
+      # the boot); set it only for a mirror. No GitHub token is provisioned
+      # on a box (ADR-045) — nothing on this path uses one.
+      - DROPLET_OTA_DOWNLOAD_BASE=${DROPLET_OTA_DOWNLOAD_BASE:-}
       # Where the client-app installers are mounted (see the volume below).
       # REQUIRE_SIGNATURE stays off until the OTA key ceremony runs — the
       # cosign anchor is still the WARP-535 placeholder, so switching it on
@@ -3063,10 +3072,12 @@ services:
       # owner-role agent loop ships ~80 tool schemas (~11k tokens of
       # prompt), so the default overflowed before generation even began —
       # Ollama returned finish_reason=length with ZERO output tokens and
-      # every dashboard chat surfaced as an instant empty answer. 16k
-      # fits tools + memory block + history while keeping gpt-oss:20b's
-      # KV cache fully resident on a 16 GB GPU.
-      OLLAMA_CONTEXT_LENGTH: "${OLLAMA_CONTEXT_LENGTH:-16384}"
+      # every dashboard chat surfaced as an instant empty answer.
+      # WARP-3452: 64k, so coding tools fit (Copilot agent mode sends ~24k-
+      # token prompts). gpt-oss:20b's KV cache stays resident on a 16 GB GPU
+      # (measured 12.7 -> 14.0 GB). setup.sh writes 16384 into .env on a
+      # smaller GPU or a CPU-only box (gpu.sh configure_context_env).
+      OLLAMA_CONTEXT_LENGTH: "${OLLAMA_CONTEXT_LENGTH:-65536}"
       # 2026-07-21 agent-budgets spec §5 — window-experiment levers. Empty
       # defaults = Ollama's own defaults (f16 KV cache, flash attention off),
       # so today's behavior is byte-identical. OLLAMA_KV_CACHE_TYPE=q8_0
@@ -3161,7 +3172,8 @@ services:
       MODELS_PATH: /models
       # Same single-GPU pin as `ollama` above.
       ROCR_VISIBLE_DEVICES: "0"
-      # WARP-854 parity: the same 16k window as OLLAMA_CONTEXT_LENGTH above,
+      # WARP-854 parity: the same window as OLLAMA_CONTEXT_LENGTH above (64k,
+      # WARP-3452; setup.sh writes both keys, sized to the GPU),
       # expressed the only way that provably applies AND survives a container
       # restart. LLAMA_ARG_CTX_SIZE is llama.cpp's env form of --ctx-size; the
       # image itself relies on that mechanism (its baked env sets
@@ -3174,7 +3186,7 @@ services:
       # DELIBERATELY ABSENT: HSA_OVERRIDE_GFX_VERSION. gfx1200 (RDNA4) is
       # native; the override forces gfx1100 kernels onto it and breaks it —
       # same warning as `ollama` above.
-      LLAMA_ARG_CTX_SIZE: "${DMR_CONTEXT_LENGTH:-16384}"
+      LLAMA_ARG_CTX_SIZE: "${DMR_CONTEXT_LENGTH:-65536}"
     volumes:
       # Its OWN store, never ollama-data. The two runtimes use different
       # on-disk formats (OCI artifact layout vs Ollama's manifest/blob
@@ -3296,11 +3308,11 @@ services:
       # the GPU-residency healthcheck below depends on. Dropping `utility`
       # makes the check unable to distinguish "no GPU" from "no tooling".
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
-      # Same 16k window as `dmr` above, same mechanism and the same reason:
+      # Same window as `dmr` above, same mechanism and the same reason:
       # llama.cpp's env form provably applies and survives a restart, whereas
       # the HTTP _configure route returns 202 and silently no-ops unless the
       # model id is registry-qualified (measured 2026-08-08).
-      LLAMA_ARG_CTX_SIZE: "${DMR_CONTEXT_LENGTH:-16384}"
+      LLAMA_ARG_CTX_SIZE: "${DMR_CONTEXT_LENGTH:-65536}"
     volumes:
       # The SAME named volume as `dmr`. The two never run together, the
       # on-disk OCI artifact layout is identical across both builds, and

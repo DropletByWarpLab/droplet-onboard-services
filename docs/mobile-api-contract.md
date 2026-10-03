@@ -291,12 +291,20 @@ status pill in the chrome.
 | POST | `/devices/pair` | Bearer (dashboard) | `{ deviceName, deviceType: "desktop"\|"mobile", platform }` | `{ code, expiresAt, pairUrl }` |
 | GET | `/devices/pair/:code/status` | Bearer | — | `{ code, used, expired, expiresAt, claimedBy? }` |
 | POST | `/devices/pair/claim` | **Bearer** | `{ code, deviceName?, appVersion? }` | `{ deviceId, ncUsername, webdavUrl, appPassword }` |
-| GET | `/devices/clients` | Bearer | — | `{ clients: [{ id, deviceName, deviceType, platform, appVersion, lastSeen, status, createdAt }] }` |
-| DELETE | `/devices/clients/:id` | Bearer | — | `{ revoked: "<deviceId>" }` |
+| GET | `/devices/clients` | Bearer | — | `{ clients: [{ id, deviceName, deviceType, platform, appVersion, kind: "app_pairing"\|"personal_drive", lastSeen, status, createdAt }] }` (the caller's own) |
+| DELETE | `/devices/clients/:id` | Bearer | — | `{ revoked: "<deviceId>" }` (the caller's own) |
+| GET | `/admin/devices/clients?userId=` | Bearer, owner/admin only | — | `{ clients: [{ …the row above, userId, displayName, personStatus: "active"\|"deactivated"\|"removed" }] }`; `userId` omitted lists everyone. Members, guests: 403 |
+| DELETE | `/admin/devices/clients/:id` | Bearer, owner/admin only | — | `{ revoked, appPasswordDeleted: true\|false\|null, warning? }`; `false` = marked revoked but Nextcloud did not confirm deleting the app password, `null` = already revoked. Audited with actor and person |
 | GET | `/devices/push/vapid-public-key` | Bearer | — | `{ publicKey }` |
 | POST | `/devices/push/subscribe` | Bearer | `{ endpoint, keys: { p256dh, auth }, deviceClientId? }` | `{ id }` |
 | DELETE | `/devices/push/subscribe` | Bearer | `{ endpoint }` | 204 |
 | POST | `/devices/push/test` | Bearer | — | dispatch result |
+
+`lastSeen` is the pairing time until the client's tool-host connects the WS bridge
+(it then moves with each hello and heartbeat). A client that never does, such as a
+Finder / File Explorer drive login, keeps the pairing time. Deactivating or deleting
+a person revokes all their clients (both kinds) and writes one audit row with the
+actor, the person and the counts.
 
 **Push status:** only **WebPush (VAPID)** subscribe exists today. A native
 **APNs/FCM token-registration endpoint is NOT yet implemented** — native
@@ -1139,8 +1147,9 @@ Source: `apps/orchestrator/src/services/ws-bridge.service.ts`.
 - **Topics:** there is no subscribe message. The server subscribes each
   connection to the person's own topics only: `droplet/files/<username>/#`
   (and `droplet/files/<userId>/#`), `droplet/devices/<username>/#`,
-  `droplet/index/<username>/#`, `droplet/notifications/<username>` and
-  `droplet/chat/<username>/#`. Other people's topics are never forwarded.
+  `droplet/index/<username>/#`, `droplet/notifications/<username>`,
+  `droplet/chat/<username>/#`, `droplet/agent-runs/<username>` and
+  `droplet/team-chat/<username>`. Other people's topics are never forwarded.
 - **Frames:** server to client JSON text frames
   `{ "topic": "<mqtt topic>", "payload": <json> }`. Client-sent frames are
   ignored. The server sends a WebSocket ping every 25 s (the client library
@@ -1154,6 +1163,20 @@ Source: `apps/orchestrator/src/services/ws-bridge.service.ts`.
   not `null`, when the notification has none or the box refused them.
   `priority` is present, as `"alert"`, only on an alert. There is no `tag`: that
   is a web push field.
+- **Team chat frames (Messages).** A frame on `droplet/team-chat/<username>`
+  says something changed in a conversation the person belongs to, and carries
+  **IDs and a kind only, never message text, titles or names**:
+  `{ kind: "message" | "read" | "conversation", conversationId, messageId? }`.
+  `message`: a message was posted (or its meeting card changed, for example an
+  RSVP); `messageId` names it. `read`: the person's own read cursor moved (sent
+  to that person's own sockets only, so a colleague's reading is never
+  announced). `conversation`: a conversation was created. Re-read through the
+  usual routes, which keep their gates: `GET /team-chat/threads/:id/messages`
+  for that conversation, `GET /team-chat/threads` for the list and
+  `GET /team-chat/unread-count` for the badge. Only members receive a frame for
+  a conversation, and an external guest only for conversations they were added
+  to. Frames are best-effort and not replayed, so keep a slow poll as a
+  fallback, and re-read after a reconnect. The polls stay valid for older clients.
 - **Reconnect:** on close, reconnect with exponential backoff and jitter, and
   stop once sign-in has ended. Events are not replayed, so after a reconnect
   re-fetch state (`GET /notifications`, files, devices).

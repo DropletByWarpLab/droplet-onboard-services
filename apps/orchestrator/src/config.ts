@@ -194,13 +194,14 @@ const envSchema = z.object({
   // WARP-1118 (§10) — the local model's effective context window in tokens,
   // read by the orchestrator's request-size estimator (context-budget.service.ts)
   // to PREVENT (not merely detect) the WARP-854 overflow. Mirrors the bundled
-  // Ollama's own `OLLAMA_CONTEXT_LENGTH`: the compose file already sets both to
-  // 16384 (the WARP-854 fix — Ollama's baked-in 4096 default is overflowed by
-  // the owner-role tool schemas alone, which surfaced as instant empty chat
-  // answers). Keep this equal to the deployed Ollama window so the estimator
+  // Ollama's own `OLLAMA_CONTEXT_LENGTH`: the compose file defaults both to
+  // 65536 (WARP-3452, for coding tools; WARP-854 was the 4096 → 16384 fix —
+  // Ollama's baked-in 4096 default is overflowed by the owner-role tool
+  // schemas alone). setup.sh writes 16384 into .env on a GPU under 16 GiB or a
+  // CPU-only box. Keep this equal to the deployed runtime window so the estimator
   // doesn't degrade blocks the model could actually carry. This configures the
   // window only — it is NOT a model swap and does not touch the One-Model Rule.
-  OLLAMA_CONTEXT_LENGTH: z.coerce.number().int().positive().default(16384),
+  OLLAMA_CONTEXT_LENGTH: z.coerce.number().int().positive().default(65536),
   // Agent step-budget knobs (2026-07-21 agent-budgets spec §1). DEFAULT is
   // the per-turn iteration count when the caller sends no `max_iter`; CAP is
   // the ceiling both the /api/llm/chat zod schema and the agent loop's clamp
@@ -960,9 +961,18 @@ const envSchema = z.object({
   //   polls for cosign-signed OTA release manifests. Default is the
   //   canonical publisher (this repo's publish-release.yml); overridable
   //   for forks/mirrors and for the file-served fake in integration tests.
-  // GITHUB_TOKEN — bearer for the private releases repo. Empty = send no
-  //   Authorization header (public repos / the test fake). Injected via
-  //   .env by setup.sh when fleet provisioning lands; never hardcoded.
+  // DOWNLOAD_BASE — WARP-3430: where a box downloads its release, anonymously
+  //   and without the GitHub REST API (60 unauthenticated requests/hour per IP
+  //   breaks at ~15 boxes behind one NAT, and ADR-045 forbids a token on an
+  //   appliance): the signed channel pointer at
+  //   `<base>/ota-index/channel-<channel>.json(.sig)` and each release's
+  //   assets at `<base>/<tag>/<name>`. Default is the canonical publisher
+  //   (publish-release.yml); set it only for a mirror. RELEASES_URL above is
+  //   now the FALLBACK discovery path, used only while no pointer exists.
+  // GITHUB_TOKEN — bearer for the private releases repo. LAB/DEV ONLY: it is
+  //   NOT provisioned on appliances (ADR-045), and nothing on the anonymous
+  //   path needs it. Empty = send no Authorization header (the default, and
+  //   the test fake). Never hardcoded.
   // POLL_INTERVAL — seconds between checks. 900 (15 min) per the design;
   //   floor of 60 keeps a typo'd "0" from hot-looping the GitHub API.
   DROPLET_OTA_RELEASES_URL: z
@@ -970,6 +980,12 @@ const envSchema = z.object({
     .url()
     .default(
       "https://api.github.com/repos/DropletByWarpLab/droplet-onboard-services/releases/latest",
+    ),
+  DROPLET_OTA_DOWNLOAD_BASE: z
+    .string()
+    .url()
+    .default(
+      "https://github.com/DropletByWarpLab/droplet-onboard-services/releases/download",
     ),
   DROPLET_OTA_GITHUB_TOKEN: z.string().default(""),
   DROPLET_OTA_POLL_INTERVAL: z.coerce.number().int().min(60).finite().default(900),
@@ -1438,6 +1454,20 @@ const envSchema = z.object({
   VAPID_CONTACT_EMAIL: z.string().default(""),
 
   // --- WARP-279: Claude-activity meta-observability dashboard ---
+  // DROPLET_DEV_ENGINEERING_DASHBOARD — WARP-3433. Warp Lab's own engineering
+  //   dashboard (/admin/claude-activity) is NOT a customer feature: it reads the
+  //   AI engineer's session notes, the lab's GitHub PRs and CI, WARP Jira
+  //   tickets with staff names, and calls api.github.com / atlassian.net. So it
+  //   ships DARK and dark means ABSENT, the same idiom as DOORS_ENABLED: an
+  //   EXPLICIT developer switch, default OFF, never derived from a token being
+  //   present. Only "1"/"true" enable it; anything else, including an empty
+  //   string, is OFF. OFF: the router is not mounted (404), the `claudeActivity`
+  //   capability is false (no nav entry, the page is a plain 404) and nothing
+  //   ever dials GitHub or Jira. setup.sh and the compose defaults never set it.
+  DROPLET_DEV_ENGINEERING_DASHBOARD: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
   // GitHub adapter — optional PAT. Repo defaults to the public droplet repo
   // and is documented under GITHUB_REPO_OWNER / GITHUB_REPO_NAME in
   // .env.example. We deliberately don't list those here: they're only read
@@ -1533,16 +1563,23 @@ const envForParse: NodeJS.ProcessEnv = {
     process.env.DEVICE_BRIDGE_URL,
     process.env.BRIDGE_URL,
   ),
-  // WARP-2758 — same rescue, and this key needs it most: it is the schema's
-  // ONLY `.url()`, so a bare `DROPLET_OTA_RELEASES_URL=` is a defined-but-empty
-  // value that `.default()` never replaces and `.url()` rejects, killing the
-  // hard `.parse()` below and the whole boot. The key is documented as an
-  // operator knob for fleet-agent (services/fleet-agent/README.md), whose
-  // config.py:157 treats blank as "use the canonical publisher" — and the
-  // orchestrator inherits the same root `.env` via `env_file:`. Without this,
-  // one blank line in `.env` bricks the orchestrator and not fleet-agent.
+  // WARP-2758 — same rescue, and this key needs it most: it is one of the
+  // schema's `.url()`s, so a bare `DROPLET_OTA_RELEASES_URL=` is a
+  // defined-but-empty value that `.default()` never replaces and `.url()`
+  // rejects, killing the hard `.parse()` below and the whole boot. The key is
+  // documented as an operator knob for fleet-agent (services/fleet-agent/
+  // README.md), whose config.py:157 treats blank as "use the canonical
+  // publisher" — and the orchestrator inherits the same root `.env` via
+  // `env_file:`. Without this, one blank line in `.env` bricks the
+  // orchestrator and not fleet-agent.
   DROPLET_OTA_RELEASES_URL: firstNonEmpty(
     process.env.DROPLET_OTA_RELEASES_URL,
+  ),
+  // WARP-3430 — the same trap, doubly: docker-compose.yml hands the
+  // orchestrator `${DROPLET_OTA_DOWNLOAD_BASE:-}`, which is a defined-but-empty
+  // string on EVERY box that never set it — i.e. the whole fleet.
+  DROPLET_OTA_DOWNLOAD_BASE: firstNonEmpty(
+    process.env.DROPLET_OTA_DOWNLOAD_BASE,
   ),
 };
 

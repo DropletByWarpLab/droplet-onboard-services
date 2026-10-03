@@ -76,6 +76,120 @@ entries:
     review_by: 2027-07-04
     code_refs: [apps/orchestrator/src/config.ts]
 
+  # WARP-3430 — `github.com` and the two release-asset CDN hosts are ALSO
+  # registered above under `ota-github-releases`, which is now the FALLBACK
+  # discovery path (the REST API, used only while no channel pointer is
+  # published). Separate rows on purpose, as with `github-api`: this is the
+  # path every box takes, it needs no token and never touches api.github.com,
+  # and retiring the API fallback must not un-register it.
+  - id: ota-release-downloads
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [github.com, release-assets.githubusercontent.com, objects.githubusercontent.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      Anonymous, token-free OTA discovery and download (WARP-3430): the
+      cosign-signed channel pointer (ota-index/channel-<channel>.json), each
+      release's release.json and signature, configs.tar.gz and the client
+      installers, all plain file downloads under releases/download. GitHub
+      answers with a redirect to its release-asset CDN, so the two
+      githubusercontent.com hosts are dialled on the same requests. Carries no
+      credential (ADR-045: none on an appliance) and nothing from the box
+      beyond what an HTTPS GET itself reveals.
+    ticket: WARP-3430
+    added: 2026-10-01
+    review_by: 2027-10-01
+    code_refs: [apps/orchestrator/src/config.ts]
+    no_code_literal:
+      release-assets.githubusercontent.com: >-
+        GitHub's redirect target for a release download; the Location header
+        names it, no Droplet source does.
+      objects.githubusercontent.com: >-
+        The older name of the same redirect target; the Location header names
+        it, no Droplet source does.
+
+  - id: ota-image-registry
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [ghcr.io, pkg-containers.githubusercontent.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      OTA release image pulls by digest and the cosign signature-bundle fetch
+      that gates them (WARP-244), run by docker/ota/apply-update.sh on the
+      host. Anonymous since WARP-3430: the first-party images are public and
+      no registry credential is provisioned on a box (ADR-045). A registry
+      that still refuses auth is reported as `registry-auth:`, never as a
+      signature failure. GHCR redirects blob downloads to
+      pkg-containers.githubusercontent.com. Registered at phase `runtime`
+      beside `build-container-registries`, which covers the same ghcr.io for
+      image builds.
+    ticket: WARP-3430
+    added: 2026-10-01
+    review_by: 2027-10-01
+    code_refs: [docker/ota/apply-update.sh, docker/docker-compose.yml]
+    no_code_literal:
+      pkg-containers.githubusercontent.com: >-
+        GHCR's blob redirect target, dialled by the docker daemon on a pull;
+        no Droplet source names it.
+
+  # WARP-3433 — Warp Lab's own engineering dashboard (/admin/claude-activity,
+  # WARP-279). Two entries, one per host, because the two have different
+  # credentials and neither is the OTA fetch above or the customer-connector
+  # `github-api` entry below: retiring any one of the three must not silently
+  # un-register another. DEVELOPER-FLAG ONLY: every call below is behind
+  # DROPLET_DEV_ENGINEERING_DASHBOARD=1 (default 0; setup.sh and the compose
+  # defaults never set it), so on a customer box the code path is unreachable —
+  # the router is not mounted, the capability is false, and nothing dials either
+  # host. With the flag on, the GitHub half also needs GITHUB_TOKEN (no token,
+  # no request) and the Jira half needs host + email + API token.
+  - id: claude-activity-github
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [api.github.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      DEVELOPER-FLAG ONLY (DROPLET_DEV_ENGINEERING_DASHBOARD=1, off by default,
+      never on a customer box). Reads Warp Lab's own repository (commits, open
+      pull requests, CI runs) for the engineering dashboard under a
+      fine-grained read-only GITHUB_TOKEN. Carries no customer data: the
+      requests name the lab's repo and send the token; nothing from the box's
+      files, people or network is in them. Without GITHUB_TOKEN no request is
+      made. 60 s Redis cache.
+    ticket: WARP-3433
+    added: 2026-10-02
+    review_by: 2027-10-02
+    code_refs: [apps/orchestrator/src/services/claude-activity/github-adapter.ts]
+
+  - id: claude-activity-jira
+    kind: dynamic
+    service: orchestrator
+    config_key: JIRA_HOST
+    phase: runtime
+    data_class: none
+    purpose: >-
+      DEVELOPER-FLAG ONLY (DROPLET_DEV_ENGINEERING_DASHBOARD=1, off by default,
+      never on a customer box). The lab's own Jira Cloud site (JIRA_HOST, the
+      bare atlassian.net subdomain) for the engineering dashboard's WARP ticket
+      panels, under JIRA_EMAIL + JIRA_API_TOKEN basic auth. Carries no customer
+      data: a fixed project JQL query out, ticket titles and status back. Never
+      called unless host, email and token are all set. 60 s Redis cache.
+    ticket: WARP-3433
+    added: 2026-10-02
+    review_by: 2027-10-02
+    code_refs: [apps/orchestrator/src/services/claude-activity/jira-adapter.ts]
+
   - id: fleet-telemetry-portal
     kind: egress
     service: fleet-agent

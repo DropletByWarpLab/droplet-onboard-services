@@ -66,8 +66,16 @@ export type VerifyAndParseResult =
   | { ok: true; manifest: ReleaseManifest }
   | { ok: false; failureReason: UpdateFailureReason; detail: string };
 
+/** WARP-3430 — bytes the release key signed: the verified buffer, or the refusal. */
+export type VerifySignedBytesResult =
+  | { ok: true; raw: Buffer }
+  | { ok: false; failureReason: UpdateFailureReason; detail: string };
+
 export interface VerifyReleaseOptions {
-  /** Path to the release.json bytes exactly as downloaded. */
+  /**
+   * Path to the signed document's bytes exactly as downloaded: release.json,
+   * or (WARP-3430) a channel pointer — the release key signs both.
+   */
   manifestPath: string;
   /** Path to the detached cosign signature (release.json.sig). */
   signaturePath: string;
@@ -191,26 +199,25 @@ export async function verifyReleaseSignature(
 }
 
 /**
- * The full WARP-537 trust chain: trust anchor → signature → parse/schema.
- * Only signature-verified bytes ever reach the parser; the returned
- * manifest is safe to act on (WARP-538 poller / WARP-539 apply).
+ * WARP-3430 — the signature half of the trust chain, for ANY document the
+ * release key signs (release.json, a channel pointer): read the bytes exactly
+ * ONCE and hand back THOSE bytes only if they verify. The caller parses the
+ * returned buffer, never the path again.
  *
- * TOCTOU guard (WARP-537 review): the manifest bytes are read exactly
- * ONCE; THOSE bytes are verified and THOSE bytes are parsed. The naive
- * shape — verify the file at `opts.manifestPath`, then re-read the path
- * to parse — lets any writer swap the file between the two operations
- * and march unverified bytes straight into the parser. Because `cosign
- * verify-blob` takes a file path (not bytes), verification runs against
- * a private copy of the read bytes under a fresh `mkdtemp` directory
- * that only this process knows; the caller-visible path is never
- * consulted again after the single read. (`signaturePath` needs no such
- * treatment: whatever bytes are there, verification only succeeds if
- * they are a valid signature by the trusted key over the exact bytes we
- * parse — a swapped signature can never bless different content.)
+ * TOCTOU guard (WARP-537 review): the naive shape — verify the file at
+ * `opts.manifestPath`, then re-read the path to parse — lets any writer swap
+ * the file between the two operations and march unverified bytes straight
+ * into the parser. Because `cosign verify-blob` takes a file path (not
+ * bytes), verification runs against a private copy of the read bytes under a
+ * fresh `mkdtemp` directory that only this process knows; the caller-visible
+ * path is never consulted again after the single read. (`signaturePath`
+ * needs no such treatment: whatever bytes are there, verification only
+ * succeeds if they are a valid signature by the trusted key over the exact
+ * bytes we parse — a swapped signature can never bless different content.)
  */
-export async function verifyAndParseRelease(
+export async function verifySignedBytes(
   opts: VerifyReleaseOptions,
-): Promise<VerifyAndParseResult> {
+): Promise<VerifySignedBytesResult> {
   let raw: Buffer;
   try {
     raw = readFileSync(opts.manifestPath);
@@ -240,5 +247,19 @@ export async function verifyAndParseRelease(
     rmSync(privateDir, { recursive: true, force: true });
   }
 
-  return parseReleaseManifest(raw);
+  return { ok: true, raw };
+}
+
+/**
+ * The full WARP-537 trust chain: trust anchor → signature → parse/schema.
+ * Only signature-verified bytes ever reach the parser; the returned
+ * manifest is safe to act on (WARP-538 poller / WARP-539 apply). The TOCTOU
+ * guard lives in verifySignedBytes.
+ */
+export async function verifyAndParseRelease(
+  opts: VerifyReleaseOptions,
+): Promise<VerifyAndParseResult> {
+  const signed = await verifySignedBytes(opts);
+  if (!signed.ok) return signed;
+  return parseReleaseManifest(signed.raw);
 }

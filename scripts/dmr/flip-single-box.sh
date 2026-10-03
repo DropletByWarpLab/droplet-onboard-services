@@ -37,7 +37,10 @@ DMR_URL="${DMR_URL:-http://127.0.0.1:12434}"
 OLLAMA_LOCAL_URL="${OLLAMA_LOCAL_URL:-http://127.0.0.1:11434}"
 MODEL_REPO_KEY="${MODEL_REPO_KEY:-gpt-oss}"   # repository to serve, tag-free
 DMR_PULL_REF="${DMR_PULL_REF:-ai/gpt-oss:20B-F16}"
-EXPECTED_CTX="${EXPECTED_CTX:-16384}"
+# WARP-3452: canary against the window this box is configured for (setup sizes
+# it to the GPU), else the compose default.
+EXPECTED_CTX="${EXPECTED_CTX:-$(grep -E '^DMR_CONTEXT_LENGTH=' "$REPO_ROOT/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' || true)}"
+EXPECTED_CTX="${EXPECTED_CTX:-65536}"
 # Pins the DRM card whose VRAM the two runtimes contend for, e.g.
 # FLIP_GPU_CARD=card1. Empty (the default) discovers it — see
 # resolve_vram_node() in step 4. Set it when a box carries more than one

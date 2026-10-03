@@ -175,6 +175,7 @@ import {
 } from "./services/activity.singleton.js";
 import { initVpnDeviceRevoke } from "./services/vpn-peer-revoke.service.js";
 import { initModelAccessTokenRevoke } from "./services/model-access-token.service.js";
+import { initDeviceClientRevoke } from "./services/device-client-revoke.service.js";
 import { createErpSyncRunner } from "./services/erp-sync/erp-sync.service.js";
 import {
   discoverResources,
@@ -279,6 +280,8 @@ async function main() {
   initVpnDeviceRevoke(prisma);
   // WARP-3452: and their coding-tool tokens.
   initModelAccessTokenRevoke(prisma);
+  // WARP-3384: and their paired file-sync devices (app passwords, drive logins).
+  initDeviceClientRevoke(prisma);
   // WARP-3165: a key rotated while the orchestrator was down
   // (scripts/rotate-audit-key.sh) gets its "Audit key rotated" row as the
   // first new-key row, before the start-up row below.
@@ -1393,7 +1396,10 @@ async function main() {
   // WARP-538: OTA update agent — poll + maintenance-window ticks.
   //
   // Poll (every DROPLET_OTA_POLL_INTERVAL s, default 15 min): discover the
-  // latest GitHub Release, verify release.json through the WARP-537 trust
+  // newest release for this box's channel — the signed channel pointer under
+  // DROPLET_OTA_DOWNLOAD_BASE first (anonymous, no GitHub API: WARP-3430),
+  // the GitHub Releases API only until a pointer is published — verify
+  // release.json through the WARP-537 trust
   // chain (baked-in cosign.pub; fails closed on the WARP-535 placeholder
   // until the key ceremony runs), and track it as a `pending` DeviceUpdate
   // superseding any prior pending. A verification failure writes NO row.
@@ -1436,7 +1442,7 @@ async function main() {
     ? {
         prisma,
         runner: otaApplyRunner,
-        releasesLatestUrl: config.DROPLET_OTA_RELEASES_URL,
+        downloadBase: config.DROPLET_OTA_DOWNLOAD_BASE,
         githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
         // WARP-2911 — contained per recipient (notifications.service.ts).
         notifyOwners: async (title: string, body: string) => {
@@ -1479,6 +1485,7 @@ async function main() {
       await checkForUpdate({
         prisma,
         releasesLatestUrl: config.DROPLET_OTA_RELEASES_URL,
+        downloadBase: config.DROPLET_OTA_DOWNLOAD_BASE,
         githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
       });
     },

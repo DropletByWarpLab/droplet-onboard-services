@@ -102,6 +102,7 @@ describe("chat /chat — interview resume banner is never a dead end (WARP-1668)
   beforeEach(() => {
     push.mockClear();
     fetchBusinessProfile.mockReset();
+    localStorage.clear();
   });
   afterEach(() => cleanup());
 
@@ -160,6 +161,57 @@ describe("chat /chat — interview resume banner is never a dead end (WARP-1668)
         `/chat?c=${encodeURIComponent(INTERVIEW_CHAT_ID)}`,
       ),
     );
+  });
+
+  it("pins the banner above the chat scroll, at the top of /chat (WARP-3475)", async () => {
+    fetchBusinessProfile.mockResolvedValue({
+      onboardingState: "in_progress",
+      interviewChatId: INTERVIEW_CHAT_ID,
+      interviewResumable: true,
+      workspaceType: "BUSINESS",
+    });
+
+    render(<ChatPage />);
+
+    const banner = await screen.findByTestId("interview-resume-banner");
+    const scroll = screen.getByTestId("chat-scroll");
+    expect(scroll.contains(banner)).toBe(false);
+    // Before the scroll region in document order: above it on the page.
+    expect(banner.compareDocumentPosition(scroll) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("closing the banner keeps it closed for that interview, and a new one shows it again (WARP-3475)", async () => {
+    fetchBusinessProfile.mockResolvedValue({
+      onboardingState: "in_progress",
+      interviewChatId: INTERVIEW_CHAT_ID,
+      interviewResumable: true,
+      workspaceType: "BUSINESS",
+    });
+
+    render(<ChatPage />);
+    await screen.findByTestId("interview-resume-banner");
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByTestId("interview-resume-banner")).toBeNull());
+    // Closing neither resumes nor wraps up.
+    expect(push).not.toHaveBeenCalled();
+    expect(localStorage.getItem("droplet.interviewResumeDismissed")).toBe(INTERVIEW_CHAT_ID);
+
+    // A later visit, same parked interview: still closed.
+    cleanup();
+    render(<ChatPage />);
+    await screen.findByTestId("chat-empty");
+    expect(screen.queryByTestId("interview-resume-banner")).toBeNull();
+
+    // A different parked interview: the banner is back.
+    cleanup();
+    fetchBusinessProfile.mockResolvedValue({
+      onboardingState: "re_running",
+      interviewChatId: "conv-interview-new",
+      interviewResumable: true,
+      workspaceType: "BUSINESS",
+    });
+    render(<ChatPage />);
+    expect(await screen.findByTestId("interview-resume-banner")).toBeInTheDocument();
   });
 
   it("treats a profile with no resumability field as not resumable", async () => {
