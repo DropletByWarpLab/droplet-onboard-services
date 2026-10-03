@@ -12,6 +12,9 @@ interface CameraGridProps {
    *  still drop the grid in without taking on pin state. */
   pinnedSet?: Set<string>;
   onTogglePin?: (camera: CameraInfo) => void | Promise<void>;
+  /** WARP-3511: opens a camera's settings from its tile. Wired only for
+   *  owners and admins; absent, no tile draws the gear. */
+  onOpenSettings?: (camera: CameraInfo) => void;
 }
 
 export function CameraGrid({
@@ -19,6 +22,7 @@ export function CameraGrid({
   onCameraClick,
   pinnedSet,
   onTogglePin,
+  onOpenSettings,
 }: CameraGridProps) {
   if (cameras.length === 0) return null;
 
@@ -31,6 +35,7 @@ export function CameraGrid({
           onClick={onCameraClick}
           isPinned={pinnedSet?.has(camera.name) ?? false}
           onTogglePin={onTogglePin}
+          onOpenSettings={onOpenSettings}
         />
       ))}
     </div>

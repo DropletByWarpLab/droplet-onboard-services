@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import {
   ArrowLeft,
@@ -22,29 +23,26 @@ import { useCameraPins } from "@/lib/hooks/useCameraPins";
 import { fetchPtzCapabilities, getCameraLiveUrl, getCameraSnapshotUrl } from "@/lib/api";
 import { authFetch, useAuth } from "@/lib/auth";
 import { PtzOverlay } from "@/components/ptz/PtzOverlay";
+import { CameraRecordingSummary } from "@/components/cameras/CameraRecordingSummary";
+import { CameraServiceNotice } from "@/components/cameras/CameraServiceNotice";
+import { RetentionFixButton } from "@/components/cameras/RetentionFixButton";
+import { SafetyChip } from "@/components/integrations/SafetyChip";
+import { isRecordingDegraded, statusLabel } from "@/lib/camera-recording";
+import { isCamerasUnavailableError } from "@/lib/files-unavailable";
 import type { CameraInfo, DetectionEvent, PtzCapabilities } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
 
 const STATUS_COLORS: Record<CameraInfo["status"], string> = {
   recording: "text-system-green",
-  detecting: "text-system-orange",
+  // WARP-3511: blue (info). It shared orange with "not saving", so a camera
+  // that was working and one keeping nothing looked the same.
+  detecting: "text-system-blue",
   // WARP-1974: healthy stream, nothing retained. Not green — green here
   // told the household their footage was safe when none was being kept.
   live: "text-system-orange",
   idle: "text-label-quaternary",
   offline: "text-system-red",
-};
-
-/**
- * What each state means in words a household member can act on.
- *
- * `live` in particular has to say what to DO. "Live · not saving" states
- * the fact; someone who does not know what a retention window is still
- * needs telling where to fix it.
- */
-const STATUS_HELP: Partial<Record<CameraInfo["status"], string>> = {
-  live: "This camera is working, but nothing is being saved — there'll be nothing to look back at. Set how long to keep footage in Settings.",
 };
 
 /**
@@ -69,8 +67,11 @@ export default function CameraFullscreenPage() {
     [params],
   );
 
-  const { cameras, isLoading, enableCam, disableCam, removeCam } = useCameras();
+  const { cameras, isLoading, refresh, enableCam, disableCam, removeCam } = useCameras();
   const [removeOpen, setRemoveOpen] = useState(false);
+  // WARP-3511: enabling / disabling is a settings write that restarts the
+  // camera service, so it is confirmed first and its failures are said.
+  const [toggle, setToggle] = useState<"enable" | "disable" | null>(null);
   const { toast } = useToast();
   const { user } = useAuth();
   // WARP-3104: turning detection on or off, PTZ, settings and removing the
@@ -80,10 +81,17 @@ export default function CameraFullscreenPage() {
 
   // PTZ capabilities — fetched once per camera, cheap. Drives whether
   // the "PTZ" button shows up in the toolbar at all.
+  // WARP-3511: a camera with no PTZ is the normal case (adoption writes no
+  // `onvif:` block), and it used to be retried forever. Never retry on error;
+  // ask again only while the answer was "unknown" (the service was down).
   const { data: ptzCaps } = useSWR<PtzCapabilities>(
     name ? `/api/cameras/${encodeURIComponent(name)}/ptz` : null,
     () => fetchPtzCapabilities(name),
-    { revalidateOnFocus: false },
+    {
+      revalidateOnFocus: false,
+      shouldRetryOnError: false,
+      refreshInterval: (latest) => (latest?.degraded ? 10_000 : 0),
+    },
   );
   const hasPtz =
     !!ptzCaps &&
@@ -115,6 +123,31 @@ export default function CameraFullscreenPage() {
       router.replace("/cameras");
     } catch (e) {
       toast(e instanceof Error ? e.message : "Failed to remove camera", "error");
+      throw e;
+    }
+  };
+
+  const performToggle = async () => {
+    if (!camera || !toggle) return;
+    try {
+      if (toggle === "disable") await disableCam(camera.name);
+      else await enableCam(camera.name);
+      toast(
+        toggle === "disable"
+          ? `${camera.displayName} is disabled.`
+          : `${camera.displayName} is enabled.`,
+        "success",
+      );
+    } catch (e) {
+      toast(
+        isCamerasUnavailableError(e)
+          ? "The camera service isn't responding. Try again in a moment."
+          : e instanceof Error && e.message
+            ? e.message
+            : "Couldn't change this camera.",
+        "error",
+      );
+      // ConfirmDialog keeps itself open when this rejects, so it can be retried.
       throw e;
     }
   };
@@ -183,14 +216,21 @@ export default function CameraFullscreenPage() {
     );
   }
 
-  const offline = camera.status === "offline";
-  const statusHelp = STATUS_HELP[camera.status];
+  // WARP-3511: while the camera service cannot be read, the cameras are not
+  // known to be offline — and not known to be recording either.
+  const degraded = isRecordingDegraded(camera);
+  const offline = camera.status === "offline" && !degraded;
+  const notSaving = !degraded && camera.status === "live";
+  const settingsHref = `/cameras/${encodeURIComponent(camera.name)}/settings`;
 
   return (
     <div className="fixed inset-0 z-40 bg-black flex flex-col">
       {/* Top bar — back, title, status, primary actions */}
-      <header className="flex items-center justify-between px-4 sm:px-6 h-14 border-b border-white/10 bg-black/80 backdrop-blur-md">
-        <div className="flex items-center gap-3 min-w-0 flex-1">
+      {/* flex-wrap: on a phone the actions drop to a second row instead of
+          squeezing the camera's name to nothing — every control, Settings
+          included, keeps its label (WARP-3511). */}
+      <header className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 px-4 sm:px-6 py-1.5 min-h-14 border-b border-white/10 bg-black/80 backdrop-blur-md">
+        <div className="flex items-center gap-3 min-w-0 flex-1 basis-40">
           <button
             onClick={() => router.replace("/cameras")}
             className="p-2 -ml-2 rounded-full hover:bg-white/10 transition-colors text-white"
@@ -203,12 +243,12 @@ export default function CameraFullscreenPage() {
             <div className="flex items-center gap-2 mt-0.5">
               <Circle
                 size={8}
-                className={`${STATUS_COLORS[camera.status]} fill-current ${
-                  camera.status === "detecting" ? "animate-pulse" : ""
+                className={`${degraded ? "text-label-quaternary" : STATUS_COLORS[camera.status]} fill-current ${
+                  !degraded && camera.status === "detecting" ? "animate-pulse" : ""
                 }`}
               />
-              <span className="type-caption-1 text-white/70 capitalize">
-                {camera.status === "live" ? "Live · not saving" : camera.status}
+              <span className="type-caption-1 text-white/70">
+                {statusLabel(camera)}
               </span>
               {camera.manufacturer && (
                 <>
@@ -221,10 +261,10 @@ export default function CameraFullscreenPage() {
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
+        <div className="flex flex-wrap items-center justify-end gap-1 sm:gap-2">
           {!canManage ? null : camera.enabled ? (
             <button
-              onClick={() => disableCam(camera.name)}
+              onClick={() => setToggle("disable")}
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-white/90 hover:bg-white/10 transition-colors"
             >
               <PowerOff size={16} />
@@ -232,7 +272,7 @@ export default function CameraFullscreenPage() {
             </button>
           ) : (
             <button
-              onClick={() => enableCam(camera.name)}
+              onClick={() => setToggle("enable")}
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-accent text-white hover:bg-accent/90 transition-colors"
             >
               <Power size={16} />
@@ -264,12 +304,14 @@ export default function CameraFullscreenPage() {
           </button>
           {canManage && (
           <button
-            onClick={() => router.push(`/cameras/${encodeURIComponent(camera.name)}/settings`)}
+            onClick={() => router.push(settingsHref)}
             className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-white/90 hover:bg-white/10 transition-colors"
             title="Detection, recording, and zone settings"
           >
             <Settings size={16} />
-            <span className="type-subheadline hidden sm:inline">Settings</span>
+            {/* Always labelled: it is where "not saving" is fixed, and an
+                unlabelled gear is easy to miss on a phone (WARP-3511). */}
+            <span className="type-subheadline">Settings</span>
           </button>
           )}
           <button
@@ -327,15 +369,57 @@ export default function CameraFullscreenPage() {
       {/* WARP-1974 — the state that used to read as a green "Recording".
           Saying "not saving" is the fact; a household member also needs
           telling what to do about it. */}
-      {statusHelp && (
+      {degraded && <CameraServiceNotice appearance="dark" />}
+      {notSaving && (
         <div
           data-testid="status-help"
-          className="flex items-start gap-2 px-4 sm:px-6 py-2 bg-system-orange/15 border-b border-system-orange/30"
+          className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 sm:px-6 py-2 bg-system-orange/15 border-b border-system-orange/30"
         >
-          <Circle size={8} className="text-system-orange fill-current mt-1.5 shrink-0" />
-          <p className="type-caption-1 text-white/80">{statusHelp}</p>
+          <Circle size={8} className="text-system-orange fill-current shrink-0" />
+          <p className="type-caption-1 text-white/80 flex-1 basis-60">
+            This camera is working, but nothing is being saved, so there will be
+            nothing to look back at.{" "}
+            {canManage ? (
+              <>
+                Set how long to keep footage in{" "}
+                <Link href={settingsHref} className="underline underline-offset-2 text-white">
+                  Settings
+                </Link>
+                .
+              </>
+            ) : (
+              "Ask an owner or admin to turn recording on."
+            )}
+          </p>
+          {canManage && (
+            <RetentionFixButton
+              cameraName={camera.name}
+              cameras={cameras}
+              onDone={refresh}
+              appearance="dark"
+            />
+          )}
         </div>
       )}
+
+      <ConfirmDialog
+        open={toggle !== null}
+        onConfirm={performToggle}
+        onCancel={() => setToggle(null)}
+        title={
+          toggle === "disable"
+            ? `Disable "${camera.displayName}"?`
+            : `Enable "${camera.displayName}"?`
+        }
+        description={
+          toggle === "disable"
+            ? "Detection stops, so this camera won't raise events or alerts. Live video stays on. The camera service restarts to apply this, so every camera drops for a few seconds."
+            : "Detection starts again, so this camera raises events and alerts. The camera service restarts to apply this, so every camera drops for a few seconds."
+        }
+        confirmLabel={toggle === "disable" ? "Disable" : "Enable"}
+        variant={toggle === "disable" ? "destructive" : "neutral"}
+        accessory={<SafetyChip variant="write" />}
+      />
 
       <ConfirmDialog
         open={removeOpen}
@@ -357,7 +441,12 @@ export default function CameraFullscreenPage() {
           id="camera-feed"
           className="relative flex-1 bg-black flex items-center justify-center min-h-0"
         >
-          {offline ? (
+          {degraded ? (
+            <div className="flex flex-col items-center gap-3 p-6 text-center">
+              <VideoOff size={56} className="text-label-quaternary" />
+              <p className="type-subheadline text-label-tertiary">Waiting for the camera service</p>
+            </div>
+          ) : offline ? (
             <div className="flex flex-col items-center gap-3 p-6 text-center">
               <VideoOff size={56} className="text-label-quaternary" />
               <p className="type-subheadline text-label-tertiary">Camera offline</p>
@@ -377,7 +466,7 @@ export default function CameraFullscreenPage() {
             />
           )}
 
-          {!offline && !liveError && (
+          {!offline && !degraded && !liveError && (
             <div className="absolute top-3 left-3 flex items-center gap-1.5 px-2 py-1 rounded-full bg-system-red/90 backdrop-blur-sm">
               <Circle
                 size={8}
@@ -404,7 +493,17 @@ export default function CameraFullscreenPage() {
             feed on small screens. */}
         <aside className="w-full lg:w-80 lg:border-l border-t lg:border-t-0 border-white/10 bg-black/40 overflow-y-auto">
           <div className="p-4 space-y-4">
-            <div>
+            {/* WARP-3511 — is it keeping footage, and how much? */}
+            <CameraRecordingSummary
+              camera={camera}
+              appearance="rail"
+              current="detail"
+              canManage={canManage}
+              cameras={cameras}
+              onRepaired={refresh}
+            />
+
+            <div className="pt-4 border-t border-white/10">
               <h2 className="type-caption-1 text-white/60 uppercase tracking-wide mb-2">
                 Recent events
               </h2>
