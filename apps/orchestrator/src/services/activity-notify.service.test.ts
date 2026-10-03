@@ -99,6 +99,9 @@ function makeStub(seed: {
   users?: Array<{ id: string; username: string; role?: string }>;
   crm?: CrmRow[];
   stages?: Array<{ id: string; name: string; kind: "OPEN" | "WON" | "LOST" }>;
+  /** WARP-3522 — a work item's project identifier + number, where a case needs
+   *  more than the default INBOX-1. */
+  items?: Record<string, { identifier: string; sequenceId: number }>;
 }) {
   const pm = [...(seed.pm ?? [])];
   const crm = [...(seed.crm ?? [])];
@@ -120,8 +123,8 @@ function makeStub(seed: {
           workItem: {
             id: r.workItemId,
             name: `item ${r.workItemId}`,
-            sequenceId: 1,
-            project: { identifier: "INBOX" },
+            sequenceId: seed.items?.[r.workItemId]?.sequenceId ?? 1,
+            project: { identifier: seed.items?.[r.workItemId]?.identifier ?? "INBOX" },
           },
         })),
     ),
@@ -375,6 +378,88 @@ describe("WARP-2804 — each toast carries the id of the row recorded for it", (
     expect(toasts.sort((a, b) => a.username.localeCompare(b.username))).toEqual(
       recorded.sort((a, b) => a.username.localeCompare(b.username)),
     );
+  });
+});
+
+describe("WARP-3522 — a PM notification links to what it is about", () => {
+  const bob = { assignees: [{ workItemId: "w1", userId: "u-bob" }, { workItemId: "w2", userId: "u-bob" }, { workItemId: "w3", userId: "u-bob" }], users: [{ id: "u-bob", username: "bob" }] };
+
+  it("one item: the link opens that item's drawer, and the durable row and the toast carry the same one", async () => {
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "assigned" })],
+      ...bob,
+      items: { w1: { identifier: "INBOX", sequenceId: 42 } },
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock.mock.calls[0][1]).toMatchObject({ url: "/projects?p=INBOX&item=INBOX-42" });
+    expect(publishMock.mock.calls[0][0]).toMatchObject({ url: "/projects?p=INBOX&item=INBOX-42" });
+  });
+
+  it("a digest over ONE item still opens that item", async () => {
+    const prisma = makeStub({
+      pm: [
+        pmRow({ id: "a1", workItemId: "w1", verb: "commented" }),
+        pmRow({ id: "a2", workItemId: "w1", verb: "state_changed", newValue: "s-done" }),
+      ],
+      ...bob,
+      items: { w1: { identifier: "INBOX", sequenceId: 7 } },
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock.mock.calls[0][1]).toMatchObject({ title: "2 updates on your work", url: "/projects?p=INBOX&item=INBOX-7" });
+  });
+
+  it("a digest over several items of one project opens the project", async () => {
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "assigned" }), pmRow({ id: "a2", workItemId: "w2", verb: "assigned" })],
+      ...bob,
+      items: { w1: { identifier: "OPS", sequenceId: 1 }, w2: { identifier: "OPS", sequenceId: 2 } },
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock.mock.calls[0][1]).toMatchObject({ url: "/projects?p=OPS" });
+  });
+
+  it("a digest across projects opens Projects", async () => {
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "assigned" }), pmRow({ id: "a2", workItemId: "w2", verb: "assigned" })],
+      ...bob,
+      items: { w1: { identifier: "OPS", sequenceId: 1 }, w2: { identifier: "HR", sequenceId: 2 } },
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock.mock.calls[0][1]).toMatchObject({ url: "/projects" });
+  });
+
+  it("is a same-origin path the notification validators accept (one leading slash, no scheme, no backslash)", async () => {
+    const prisma = makeStub({
+      pm: [pmRow({ id: "a1", workItemId: "w1", verb: "assigned" })],
+      ...bob,
+    });
+    await runActivityNotifySweep(prisma, opts);
+    const url = String((recordMock.mock.calls[0][1] as { url?: string }).url);
+    expect(url).toMatch(/^\/[^/\\]/);
+    expect(url.length).toBeLessThanOrEqual(512);
+    expect(url).not.toMatch(/[\\\r\n\0]/);
+  });
+
+  it("the CRM sweep still sends no link (the CRM has no deep link yet)", async () => {
+    const prisma = makeStub({
+      crm: [
+        {
+          id: "c1",
+          kind: "STAGE_CHANGE",
+          toStageId: "st-won",
+          actorId: "u-actor",
+          createdAt: OLD,
+          notifyStatus: "pending",
+          notifiedAt: null,
+          deal: { id: "d1", title: "Big deal", ownerId: "u-bob" },
+        },
+      ],
+      stages: [{ id: "st-won", name: "Won", kind: "WON" }],
+      users: [{ id: "u-bob", username: "bob" }],
+    });
+    await runActivityNotifySweep(prisma, opts);
+    expect(recordMock).toHaveBeenCalledOnce();
+    expect(recordMock.mock.calls[0][1]).not.toHaveProperty("url");
   });
 });
 

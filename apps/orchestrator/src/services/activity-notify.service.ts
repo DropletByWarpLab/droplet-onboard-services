@@ -102,6 +102,7 @@ import {
 } from "./notifications.service.js";
 import { createLogger } from "../lib/logger.js";
 import { isUserIdShaped } from "@droplet/auth-policy";
+import { buildPmPath, pmWorkItemPath } from "@droplet/shared-types";
 
 const logger = createLogger("activity-notify");
 
@@ -208,6 +209,28 @@ function workItemLabel(item: {
   return key ? `${key} — ${item.name}` : item.name;
 }
 
+/**
+ * WARP-3522 — where a tap on a PM notification should land, in the `/projects`
+ * deep-link contract (`?p=<IDENTIFIER>&item=<KEY>`, packages/shared-types
+ * `pm-links.ts`). One item opens that item's drawer; several items in one
+ * project open the project; a mix opens Projects. A notification used to carry
+ * no link at all, so a tap went nowhere.
+ */
+function pmLink(
+  rows: ReadonlyArray<{
+    workItemId: string;
+    workItem: { sequenceId: number; project: { identifier: string } | null };
+  }>,
+): string {
+  const identifier = rows[0]?.workItem.project?.identifier;
+  if (!identifier) return buildPmPath({});
+  if (new Set(rows.map((r) => r.workItemId)).size === 1) {
+    return pmWorkItemPath(identifier, `${identifier}-${rows[0].workItem.sequenceId}`);
+  }
+  const sameProject = rows.every((r) => r.workItem.project?.identifier === identifier);
+  return sameProject ? buildPmPath({ p: identifier }) : buildPmPath({});
+}
+
 /** "2 assigned · 1 moved" — insertion-ordered so the tally reads in the order
  *  things happened rather than alphabetically. */
 function tally(words: string[]): string {
@@ -224,6 +247,9 @@ interface Outgoing {
   username: string;
   title: string;
   body: string;
+  /** WARP-3522 — where a tap on the notification lands: a same-origin dashboard
+   *  path. PM sets it; the CRM sweep does not (the CRM has no deep link yet). */
+  url?: string;
 }
 
 /**
@@ -320,6 +346,7 @@ async function claimAndNotify(
         kind: "event",
         title: o.title,
         body: o.body,
+        ...(o.url ? { url: o.url } : {}),
       });
       ids.push(log.id);
     }
@@ -342,6 +369,7 @@ async function claimAndNotify(
       kind: "event",
       title: o.title,
       body: o.body,
+      ...(o.url ? { url: o.url } : {}),
     });
     (channels.length > 0 ? delivered : failed).push(logIds[i]);
   });
@@ -533,6 +561,7 @@ async function sweepPm(
         username,
         title: truncate(title, TITLE_MAX),
         body: truncate(label, BODY_MAX),
+        url: pmLink([row]),
       });
       continue;
     }
@@ -540,6 +569,7 @@ async function sweepPm(
       username,
       title: truncate(`${list.length} updates on your work`, TITLE_MAX),
       body: truncate(tally(list.map((r) => PM_VERB_WORD[r.verb] ?? "updated")), BODY_MAX),
+      url: pmLink(list),
     });
   }
 
