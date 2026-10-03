@@ -291,12 +291,20 @@ status pill in the chrome.
 | POST | `/devices/pair` | Bearer (dashboard) | `{ deviceName, deviceType: "desktop"\|"mobile", platform }` | `{ code, expiresAt, pairUrl }` |
 | GET | `/devices/pair/:code/status` | Bearer | — | `{ code, used, expired, expiresAt, claimedBy? }` |
 | POST | `/devices/pair/claim` | **Bearer** | `{ code, deviceName?, appVersion? }` | `{ deviceId, ncUsername, webdavUrl, appPassword }` |
-| GET | `/devices/clients` | Bearer | — | `{ clients: [{ id, deviceName, deviceType, platform, appVersion, lastSeen, status, createdAt }] }` |
-| DELETE | `/devices/clients/:id` | Bearer | — | `{ revoked: "<deviceId>" }` |
+| GET | `/devices/clients` | Bearer | — | `{ clients: [{ id, deviceName, deviceType, platform, appVersion, kind: "app_pairing"\|"personal_drive", lastSeen, status, createdAt }] }` (the caller's own) |
+| DELETE | `/devices/clients/:id` | Bearer | — | `{ revoked: "<deviceId>" }` (the caller's own) |
+| GET | `/admin/devices/clients?userId=` | Bearer, owner/admin only | — | `{ clients: [{ …the row above, userId, displayName, personStatus: "active"\|"deactivated"\|"removed" }] }`; `userId` omitted lists everyone. Members, guests: 403 |
+| DELETE | `/admin/devices/clients/:id` | Bearer, owner/admin only | — | `{ revoked, appPasswordDeleted: true\|false\|null, warning? }`; `false` = marked revoked but Nextcloud did not confirm deleting the app password, `null` = already revoked. Audited with actor and person |
 | GET | `/devices/push/vapid-public-key` | Bearer | — | `{ publicKey }` |
 | POST | `/devices/push/subscribe` | Bearer | `{ endpoint, keys: { p256dh, auth }, deviceClientId? }` | `{ id }` |
 | DELETE | `/devices/push/subscribe` | Bearer | `{ endpoint }` | 204 |
 | POST | `/devices/push/test` | Bearer | — | dispatch result |
+
+`lastSeen` is the pairing time until the client's tool-host connects the WS bridge
+(it then moves with each hello and heartbeat). A client that never does, such as a
+Finder / File Explorer drive login, keeps the pairing time. Deactivating or deleting
+a person revokes all their clients (both kinds) and writes one audit row with the
+actor, the person and the counts.
 
 **Push status:** only **WebPush (VAPID)** subscribe exists today. A native
 **APNs/FCM token-registration endpoint is NOT yet implemented** — native

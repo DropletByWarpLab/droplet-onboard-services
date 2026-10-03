@@ -72,6 +72,12 @@ const revokeModelAccessTokensForUserMock = vi.hoisted(() => vi.fn().mockResolved
 vi.mock("./model-access-token.service.js", () => ({
   revokeModelAccessTokensForUser: revokeModelAccessTokensForUserMock,
 }));
+const revokeDeviceClientsForUserMock = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ revoked: 2, appPasswordsNotDeleted: 1, failed: 0 }),
+);
+vi.mock("./device-client-revoke.service.js", () => ({
+  revokeDeviceClientsForUser: revokeDeviceClientsForUserMock,
+}));
 vi.mock("./department-provisioner.service.js", () => ({
   adminBasicToken: vi.fn(() => "basic:dGVzdDp0ZXN0"),
   DROPLET_ADMINS_GROUP: "droplet-admins",
@@ -1223,5 +1229,69 @@ describe("rail 6 — coding-tool tokens (WARP-3452)", () => {
     await runRoleChangePostEffects({ target, previousRole: "family", nextRole: "admin", actorUsername: "admin", actor, devices: null });
     await runRoleChangePostEffects({ target, previousRole: "guest", nextRole: "guest", actorUsername: "admin", actor, devices: null });
     expect(revokeModelAccessTokensForUserMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── WARP-3384 — a leaver's paired file-sync devices go with the account ────
+describe("rail 6 — paired file-sync devices (WARP-3384)", () => {
+  const actor = { type: "user" as const, id: "admin-1" };
+  const prisma = {} as any;
+
+  beforeEach(() => revokeDeviceClientsForUserMock.mockClear());
+
+  it("a disable revokes the person's device clients as a deactivation, by the admin", async () => {
+    await runDisablePostEffects({ targetUserId: "u-bob", username: "bob", actor });
+    expect(revokeDeviceClientsForUserMock).toHaveBeenCalledWith("bob", actor, "deactivation");
+  });
+
+  it("keys on the directory username the caller resolved, not the handle it was given", async () => {
+    await runDisablePostEffects({
+      targetUserId: "u-bob",
+      username: "bob-nc-handle",
+      actor,
+      devices: { prisma, username: "bob" },
+    });
+    expect(revokeDeviceClientsForUserMock).toHaveBeenCalledWith("bob", actor, "deactivation");
+  });
+
+  it("a legacy disable with no local row still revokes by username", async () => {
+    await runDisablePostEffects({ targetUserId: null, username: "legacy", actor });
+    expect(revokeDeviceClientsForUserMock).toHaveBeenCalledWith("legacy", actor, "deactivation");
+  });
+
+  it("a delete revokes them as a removal", async () => {
+    await runRemovalPostEffects({
+      targetUserId: "u-bob",
+      targetUsername: "bob",
+      targetRole: "family",
+      actorUsername: "admin",
+      actor,
+    });
+    expect(revokeDeviceClientsForUserMock).toHaveBeenCalledWith("bob", actor, "removal");
+  });
+
+  it("devices: null leaves them to the caller, which revokes them before it disables the Nextcloud account", async () => {
+    await runDisablePostEffects({ targetUserId: "u-bob", username: "bob", actor, devices: null });
+    await runRemovalPostEffects({
+      targetUserId: "u-bob",
+      targetUsername: "bob",
+      targetRole: "family",
+      actorUsername: "admin",
+      actor,
+      devices: null,
+    });
+    expect(revokeDeviceClientsForUserMock).not.toHaveBeenCalled();
+  });
+
+  it("a role change, even to external guest, leaves paired devices alone", async () => {
+    await runRoleChangePostEffects({
+      target: { id: "u-bob", username: "bob", nextcloudUsername: null },
+      previousRole: "family",
+      nextRole: "guest",
+      actorUsername: "admin",
+      actor,
+      devices: null,
+    });
+    expect(revokeDeviceClientsForUserMock).not.toHaveBeenCalled();
   });
 });
