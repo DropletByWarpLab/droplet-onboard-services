@@ -154,7 +154,10 @@ import type {
   NotificationAckAllResult,
   NotificationAckResult,
   NotificationsPage,
+  RecordingStorageChange,
+  RecordingStorageResult,
 } from "./types";
+import { normalizeRecordingStorage } from "./recording-storage";
 import { DEFAULT_API_FETCH_TIMEOUT_MS, apiFetch, type TypedError } from "./hooks/apiFetch";
 import type { RouterPortDisableGuard } from "@/lib/types/router-ports";
 import type {
@@ -1330,6 +1333,162 @@ export async function updatePoolLabel(
     throw storageWriteError(body, res.status, "Failed to update pool");
   }
   return res.json();
+}
+
+// --- Recording storage (WARP-3512 contract / ADR-070, consumed by WARP-3515) ---
+//
+// Decision record: docs/ADR-070-camera-recording-storage.md.
+//
+// The orchestrator side lands in WARP-3513/WARP-3514, separately from this
+// dashboard, so every function below is written to be called against an
+// orchestrator that does not have the endpoint (or the field) yet.
+
+/**
+ * GET /api/storage/recordings — where camera recordings live, how much is set
+ * aside, what each camera needs, any move in flight, and what is wrong.
+ *
+ * ABSENCE IS NOT AN ERROR: a 404 (an orchestrator that predates WARP-3514) and a
+ * 403 (a role that may not read it) both RESOLVE, to `{ available: false }`, so
+ * the card can hide itself or say "not available on this Droplet yet" instead of
+ * flashing an error. Only a transport failure or a 5xx THROWS — that is the
+ * "couldn't load right now" case, and it must not read as "not available".
+ *
+ * The body is normalised (lib/recording-storage.ts): a partial payload becomes a
+ * complete, safe value, and a 200 that is not a JSON object (a proxy's fallback
+ * page) counts as "not supported" rather than a crash.
+ */
+export async function fetchRecordingStorage(): Promise<RecordingStorageResult> {
+  const res = await authFetch(`${BASE}/api/storage/recordings`);
+  if (res.status === 404) return { available: false, reason: "not_supported" };
+  if (res.status === 403) return { available: false, reason: "forbidden" };
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw storageWriteError(body, res.status, "Failed to fetch recording storage");
+  }
+  const raw: unknown = await res.json().catch(() => null);
+  const data = normalizeRecordingStorage(raw);
+  if (!data) return { available: false, reason: "not_supported" };
+  return { available: true, data };
+}
+
+/**
+ * The tail of a tier-2 / tier-3 storage write. These routes answer 202 + a
+ * single-use confirmation token; the owner has ALREADY confirmed in the dialog
+ * that called us (a click for tier 2, a typed phrase for tier 3), so the
+ * handshake is completed here by echoing the token back through the storage
+ * confirm — the one wire path every other storage write uses
+ * (`POST /api/storage/command/confirm`, the `rebootRouter` / `disableCamera`
+ * pattern). A reply with no token means the write was accepted as-is.
+ *
+ * A refusal throws with the HTTP status attached (`storageWriteError`) so the UI
+ * can choose its copy (403 role, 409 move-in-progress, 404 not-there-yet).
+ */
+async function finishStorageWrite(res: Response, fallback: string): Promise<void> {
+  const body = (await res.json().catch(() => ({}))) as {
+    confirmationToken?: unknown;
+    service?: unknown;
+    resourceId?: unknown;
+    error?: unknown;
+    code?: unknown;
+  };
+  if (!res.ok) throw storageWriteError(body, res.status, fallback);
+  if (typeof body.confirmationToken === "string" && body.confirmationToken) {
+    if (typeof body.service !== "string" || typeof body.resourceId !== "string") {
+      throw new Error("Unexpected 202 response: missing service or resourceId");
+    }
+    await confirmStorageCommand({
+      confirmationToken: body.confirmationToken,
+      service: body.service,
+      resourceId: body.resourceId,
+    });
+  }
+}
+
+/**
+ * PUT /api/storage/recordings — change the recording mode (auto-sized slice vs
+ * whole drive) and/or the drive recordings go to. Owner/admin, tier 2: the
+ * caller confirms in a dialog first. Choosing a different drive starts a move;
+ * poll `fetchRecordingStorage` for `migration` progress.
+ */
+export async function updateRecordingStorage(change: RecordingStorageChange): Promise<void> {
+  if (!change.mode && !change.fsUuid) throw new Error("There's nothing to change.");
+  const res = await authFetch(`${BASE}/api/storage/recordings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(change),
+  });
+  await finishStorageWrite(res, "Failed to update recording storage");
+}
+
+/**
+ * POST /api/storage/recordings/old-footage/delete — permanently delete the
+ * recordings still on the system drive after a move. Owner only, tier 3: the
+ * caller has the owner type a phrase first. Irreversible.
+ */
+export async function deleteOldRecordings(): Promise<void> {
+  const res = await authFetch(`${BASE}/api/storage/recordings/old-footage/delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  await finishStorageWrite(res, "Failed to delete the old recordings");
+}
+
+/**
+ * Why a drive's recovery key could not be handed over. `gone` is the one the UI
+ * has to word carefully: the key is shown ONCE, so 410 means it already was.
+ */
+export class RecoveryKeyUnavailableError extends Error {
+  readonly reason: "gone" | "not_found" | "forbidden";
+  constructor(reason: "gone" | "not_found" | "forbidden") {
+    super(
+      reason === "gone"
+        ? "This recovery key has already been shown."
+        : reason === "forbidden"
+          ? "Only the owner can view a recovery key."
+          : "No recovery key is available for this drive.",
+    );
+    this.name = "RecoveryKeyUnavailableError";
+    this.reason = reason;
+  }
+}
+
+/**
+ * GET /api/storage/drives/:id/recovery-key — the drive's LUKS recovery key,
+ * handed over ONCE (owner only): 200 `{ recoveryKey }` the first time, 410 ever
+ * after. `:id` is the drive's filesystem UUID, as on every other
+ * `/storage/drives/:uuid/*` route.
+ *
+ * Because the read consumes the key, this function has three hard rules:
+ *   - never retry (a retry after a read that succeeded server-side would 410 and
+ *     the key would be lost — `authFetch` only re-sends after a 401, which never
+ *     reached the handler);
+ *   - never cache (`cache: "no-store"` — a secret in an HTTP cache outlives the
+ *     one-time promise);
+ *   - keep "already shown" (410 → RecoveryKeyUnavailableError "gone") distinct
+ *     from "couldn't ask" (a plain Error with its status), so a flaky network is
+ *     never worded as a lost key.
+ * The key is returned, never stored: the caller holds it in component state for
+ * exactly as long as the dialog is open.
+ */
+export async function fetchRecoveryKey(driveId: string): Promise<string> {
+  if (!driveId) throw new RecoveryKeyUnavailableError("not_found");
+  const res = await authFetch(
+    `${BASE}/api/storage/drives/${encodeURIComponent(driveId)}/recovery-key`,
+    { cache: "no-store" },
+  );
+  if (res.status === 410) throw new RecoveryKeyUnavailableError("gone");
+  if (res.status === 404) throw new RecoveryKeyUnavailableError("not_found");
+  if (res.status === 403) throw new RecoveryKeyUnavailableError("forbidden");
+  const body = (await res.json().catch(() => ({}))) as {
+    recoveryKey?: unknown;
+    error?: unknown;
+    code?: unknown;
+  };
+  if (!res.ok) throw storageWriteError(body, res.status, "Failed to fetch the recovery key");
+  const key = typeof body.recoveryKey === "string" ? body.recoveryKey.trim() : "";
+  if (!key) throw new Error("The recovery key response was empty.");
+  return key;
 }
 
 // --- Health ---
