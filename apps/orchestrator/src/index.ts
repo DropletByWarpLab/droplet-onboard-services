@@ -186,6 +186,7 @@ import {
 } from "./services/activity.singleton.js";
 import { initVpnDeviceRevoke } from "./services/vpn-peer-revoke.service.js";
 import { initModelAccessTokenRevoke } from "./services/model-access-token.service.js";
+import { initDeviceClientRevoke } from "./services/device-client-revoke.service.js";
 import { createErpSyncRunner } from "./services/erp-sync/erp-sync.service.js";
 import {
   discoverResources,
@@ -300,6 +301,8 @@ async function main() {
   initVpnDeviceRevoke(prisma);
   // WARP-3452: and their coding-tool tokens.
   initModelAccessTokenRevoke(prisma);
+  // WARP-3384: and their paired file-sync devices (app passwords, drive logins).
+  initDeviceClientRevoke(prisma);
   // WARP-3165: a key rotated while the orchestrator was down
   // (scripts/rotate-audit-key.sh) gets its "Audit key rotated" row as the
   // first new-key row, before the start-up row below.
