@@ -2,7 +2,7 @@
  * WARP-2979 (ADR-059 P4 §6.1, §6.2, §9) — the co-occurrence arithmetic behind
  * Droplet's link proposals. Pure: every case builds its own timeline in epoch
  * ms, and §6.1's camera ↔ camera worked example is reproduced number by
- * number (the lock example is PR-4's).
+ * number, and so is the lock ↔ camera one (P4 PR-4).
  *
  * The fixtures that guard the design, each named for the mutation it kills
  * (§10):
@@ -12,14 +12,18 @@
  *   · the blind spell (exclusion removed); the burst (debounce removed);
  *   · Bonferroni's m; Wilson against the raw k/n;
  *   · the street camera (the reverse direction ignored);
- *   · the part share.
+ *   · the part share;
+ *   · (PR-4) a polled row, a baseline row, a reading that is not a turn —
+ *     none is ever an anchor.
  */
 import { describe, it, expect } from "vitest";
 import {
   LINK_RULES,
   blindSpells,
   buildCameraSeries,
+  buildLockSeries,
   cameraPairEvidence,
+  lockPairEvidence,
   coveredMs,
   debounceAnchors,
   gateFor,
@@ -31,13 +35,17 @@ import {
   poissonTail,
   scoreCameraPairs,
   scoreDirection,
+  scoreLinkPairs,
+  scoreLockPairs,
   wilsonLowerBound,
   type CameraSeries,
   type DirectionInput,
   type Interval,
   type LinkAnchor,
+  type LockStateRow,
   type PersonSighting,
 } from "./security-cooccurrence.js";
+import { LOCK_CHANGE_READINGS, isLockChange } from "./security-lock-changes.js";
 import { poissonUpperTail } from "./security-stats.js";
 import { parseLinkEvidence } from "./security-link-evidence.js";
 
@@ -582,6 +590,374 @@ describe("cameraPairEvidence — what the link stores (LinkEvidenceV1, integers 
     const { results, hypotheses } = run(world({ shared: 34, aOnly: 6, bOnly: 11, bZones: (i) => (i < 33 ? ["door"] : []) }));
     const e = cameraPairEvidence(results[0]!, { window: W, hypotheses });
     expect(e).toMatchObject({ chosen: "part", wholeK: 34, candidate: { sourceKind: "camera_zone", sourceRef: "b/door" } });
+  });
+});
+
+// ── P4 PR-4: lock ↔ camera (§6.1 worked example, §6.2.1–§6.2.3) ──────────────
+
+const LOCK = "matter:4660/1";
+const LOCK_B = "matter:99/2";
+/** A `lock_state` row as the job loads it; a live change after an earlier row unless said otherwise. */
+const change = (at: number, over: Partial<LockStateRow> = {}): LockStateRow => ({
+  sourceRef: LOCK,
+  reading: "unlocked",
+  observed: "live",
+  baseline: false,
+  startedAt: at,
+  ...over,
+});
+
+describe("isLockChange — which lock rows are a lock turning (§6.2.1)", () => {
+  it("a LIVE change to locked, unlocked or unlatched after an earlier row", () => {
+    expect(LOCK_CHANGE_READINGS).toEqual(["locked", "unlocked", "unlatched"]);
+    for (const reading of LOCK_CHANGE_READINGS) expect(isLockChange(change(0, { reading }))).toBe(true);
+  });
+
+  it("🔴 never a polled row: its time is when the 60 s check found it, not when the lock turned", () => {
+    expect(isLockChange(change(0, { observed: "polled" }))).toBe(false);
+  });
+
+  it("never the baseline (the first row a lock wrote: when Droplet first saw it, not a turn) — read from the explicit column", () => {
+    expect(isLockChange(change(0, { baseline: true, reading: "locked" }))).toBe(false);
+  });
+
+  it("never not_fully_locked or unknown (a jammed bolt, a lock that stopped answering), or a row with no reading", () => {
+    expect(isLockChange(change(0, { reading: "not_fully_locked" }))).toBe(false);
+    expect(isLockChange(change(0, { reading: "unknown" }))).toBe(false);
+    expect(isLockChange({ reading: undefined, observed: "live", baseline: false })).toBe(false);
+  });
+});
+
+describe("buildLockSeries — every lock with at least one live change in W (§6.2.2)", () => {
+  it("per lock: its changes inside W, sorted; polled, baseline and non-turn rows dropped; a lock with none is absent", () => {
+    const t = W.from + DAY;
+    const series = buildLockSeries(
+      [
+        change(t + 2 * H),
+        change(t, { reading: "locked" }),
+        change(W.from - MIN), // before W
+        change(W.observedEnd + MIN), // after E
+        change(t + 3 * H, { observed: "polled" }),
+        change(t + 4 * H, { baseline: true }),
+        change(t + 5 * H, { reading: "not_fully_locked" }),
+        change(t, { sourceRef: LOCK_B, observed: "polled" }),
+      ],
+      W,
+    );
+    expect([...series.entries()]).toEqual([[LOCK, [t, t + 2 * H]]]);
+  });
+});
+
+/**
+ * §6.1's lock ↔ camera worked example, built as a timeline. Area *Back door*
+ * (Way in), *Back door lock* linked by a person. One kept lock change a day
+ * for 14 days (noon, W-relative); three of them followed 30 s later by the
+ * lock turning back (merged by the debounce): 17 live changes, n = 14. Plus a
+ * baseline row, a polled row and a not-fully-locked row, which are never
+ * anchors.
+ *
+ * Around each kept change, in the hour either side:
+ *   · Back camera: a person in its 'back_door' part for 23.2 s (padded ±10 s:
+ *     43.2 s of the hour) — ON the change for 12 of the 14, five minutes after
+ *     it for the other two — and a person elsewhere in its view for 26.8 s
+ *     (46.8 s padded), ten minutes after. Whole view: 90 s of the hour
+ *     (q = 0.025, λ = 0.35); the part: 43.2 s (q = 0.012, λ = 0.168);
+ *   · Shop floor camera: busy — 1,620 s of every such hour (q = 0.45,
+ *     λ = 6.3), on the change 9 times; its 'till' and 'aisle' parts take
+ *     alternate days, so neither keeps 90 % of the hits (the whole view);
+ *   · Yard camera: people three hours later only, in 'gate' and 'drive'.
+ * Three cameras + five parts = m = 8.
+ */
+function lockWorld(opts: { changes?: number } = {}) {
+  const days = opts.changes ?? 14;
+  const merged = [2, 5, 9];
+  const hits = (d: number) => d !== 4 && d !== 11;
+  const rows: LockStateRow[] = [];
+  const sightings: PersonSighting[] = [];
+  const kept: number[] = [];
+  for (let d = 1; d <= 14; d += 1) {
+    const t = W.from + d * DAY - 12 * H;
+    kept.push(t);
+    if (d <= days) {
+      rows.push(change(t, { reading: d % 2 === 0 ? "locked" : "unlocked" }));
+      if (merged.includes(d)) rows.push(change(t + 30 * S, { reading: d % 2 === 0 ? "unlocked" : "locked" }));
+    }
+    const on = hits(d) ? t + 2 * S : t + 5 * MIN;
+    sightings.push({ camera: "back_cam", zones: ["back_door"], startedAt: on, endedAt: on + 23_200 });
+    sightings.push({ camera: "back_cam", zones: [], startedAt: t + 10 * MIN, endedAt: t + 10 * MIN + 26_800 });
+    sightings.push(
+      d <= 9
+        ? { camera: "floor_cam", zones: [d % 2 === 0 ? "aisle" : "till"], startedAt: t - 800 * S, endedAt: t + 800 * S }
+        : { camera: "floor_cam", zones: [d % 2 === 0 ? "aisle" : "till"], startedAt: t + 60 * S, endedAt: t + 1_660 * S },
+    );
+    sightings.push({ camera: "yard_cam", zones: [d % 2 === 0 ? "gate" : "drive"], startedAt: t + 3 * H, endedAt: t + 3 * H + 5 * S });
+  }
+  if (days > 0) {
+    // Never anchors: the baseline (first row the lock wrote), a change found by the 60 s check, a jammed bolt.
+    rows.push(change(W.from + 6 * H, { reading: "locked", baseline: true }));
+    rows.push(change(kept[6]! + 7 * S, { observed: "polled" })); // on a person, 7 s after a kept change — it would move k if it counted
+    rows.push(change(kept[7]! + 6 * H, { reading: "not_fully_locked" }));
+  }
+  return { rows, sightings, kept };
+}
+
+const lockAnchor = (over: Partial<LinkAnchor> = {}): LinkAnchor => ({
+  linkId: "link-lock",
+  zoneId: "z-back",
+  zoneName: "Back door",
+  sourceKind: "lock",
+  sourceRef: LOCK,
+  label: "Back door lock",
+  ...over,
+});
+
+const CAMERA_LABELS: Record<string, string> = { back_cam: "Back camera", floor_cam: "Shop floor", yard_cam: "Yard camera" };
+
+function lockInput(world: { rows: LockStateRow[]; sightings: PersonSighting[] }, anchors: LinkAnchor[]) {
+  const series = buildCameraSeries(world.sightings, W);
+  return {
+    anchors,
+    series,
+    locks: buildLockSeries(world.rows, W),
+    blind: blindSpells([], series.keys(), W),
+    observedEnd: W.observedEnd,
+    skipCamera: (_z: string, _cam: string) => false,
+    pinnedRef: () => null,
+    skipLock: (_z: string, _ref: string) => false,
+    candidateLabel: (cam: string) => CAMERA_LABELS[cam] ?? cam,
+    lockLabel: (ref: string) => (ref === LOCK ? "Back door lock" : "Side gate lock"),
+  };
+}
+
+function runLocks(
+  world: { rows: LockStateRow[]; sightings: PersonSighting[] },
+  anchors: LinkAnchor[] = [lockAnchor()],
+  opts: { skipCamera?: (z: string, cam: string) => boolean; skipLock?: (z: string, ref: string) => boolean } = {},
+) {
+  return scoreLockPairs({
+    ...lockInput(world, anchors),
+    ...(opts.skipCamera ? { skipCamera: opts.skipCamera } : {}),
+    ...(opts.skipLock ? { skipLock: opts.skipLock } : {}),
+  });
+}
+
+describe("§6.1's lock ↔ camera worked example, every number (P4 PR-4)", () => {
+  const world = lockWorld();
+  const { results, hypotheses } = runLocks(world);
+  const back = results.find((r) => r.camera === "back_cam")!;
+  const floor = results.find((r) => r.camera === "floor_cam")!;
+
+  it("17 live changes; the debounce merges 3 lock-then-unlock pairs under 60 s → n = 14; baseline, polled and jammed rows never count", () => {
+    expect(world.rows.filter((r) => isLockChange(r))).toHaveLength(17);
+    expect(back.forward).toMatchObject({ n: 14, k: 12, excluded: 0 });
+  });
+
+  it("m = 8: one lock × 3 cameras + 5 parts", () => {
+    expect(hypotheses).toBe(8);
+  });
+
+  it("Back camera's 'back_door' part: k = 12, λ = 0.168, lift 71.4, pAdj 7.2e−18, confidence 0.601 → the part (12 ≥ 0.9 × 12), auto", () => {
+    expect(back).toMatchObject({
+      kind: "lock_camera",
+      camera: "back_cam",
+      part: "back_door",
+      sourceKind: "camera_zone",
+      sourceRef: "back_cam/back_door",
+      label: "Back camera",
+      wholeK: 12,
+      gate: "auto",
+    });
+    expect(back.forward.lambda).toBeCloseTo(0.168, 9);
+    expect(back.forward.lift).toBeCloseTo(71.4, 1);
+    expect(back.forwardPAdj.toPrecision(2)).toBe("7.2e-18");
+    expect(back.forwardPAdj).toBe(Math.min(1, 8 * back.forward.pChance));
+    expect(back.confidence).toBeCloseTo(0.601, 3);
+    expect(back.confidence).toBe(back.forward.confidence);
+    expect(back.names).toEqual({ match: true, shared: ["back", "door"] });
+  });
+
+  it("Back camera's whole view (the part's rival): k = 12, λ = 0.35, lift 34.3, pChance 5.1e−15, pAdj 4.1e−14, confidence 0.601, auto", () => {
+    const series = buildCameraSeries(world.sightings, W);
+    const whole = scoreDirection({
+      anchors: debounceAnchors(buildLockSeries(world.rows, W).get(LOCK)!, LINK_RULES.debounceMs, LINK_RULES.maxAnchors),
+      coverage: series.get("back_cam")!.whole.coverage,
+      blind: [],
+      observedEnd: W.observedEnd,
+    });
+    expect(whole).toMatchObject({ n: 14, k: 12 });
+    expect(whole.lambda).toBeCloseTo(0.35, 9);
+    expect(whole.lift).toBeCloseTo(34.3, 1);
+    expect(whole.pChance.toPrecision(2)).toBe("5.1e-15");
+    expect(Math.min(1, 8 * whole.pChance).toPrecision(2)).toBe("4.1e-14");
+    expect(whole.confidence).toBeCloseTo(0.601, 3);
+    expect(gateFor("lockCamera", whole, Math.min(1, 8 * whole.pChance))).toBe("auto");
+  });
+
+  it("Shop floor camera (busy all day): k = 9 but λ = 6.3, lift 1.4 → nothing. The case local chance exists for", () => {
+    expect(floor).toMatchObject({ part: null, sourceRef: "floor_cam" });
+    expect(floor.forward).toMatchObject({ n: 14, k: 9 });
+    expect(floor.forward.lambda).toBeCloseTo(6.3, 9);
+    expect(floor.forward.lift).toBeCloseTo(1.4, 1);
+    expect(floor.gate).toBeNull();
+  });
+
+  it("a lock seen 6 times, 5 with a person: lift 41.7, pAdj 1.5e−6, confidence 0.436 → propose, never auto", () => {
+    // Back camera covers 72 s of each hour (a 52 s visit, padded), all of it in 'back_door'.
+    const rows: LockStateRow[] = [];
+    const sightings: PersonSighting[] = [];
+    for (let d = 1; d <= 6; d += 1) {
+      const t = W.from + d * DAY - 12 * H;
+      rows.push(change(t, { reading: d % 2 === 0 ? "locked" : "unlocked" }));
+      const on = d === 6 ? t + 5 * MIN : t + 2 * S;
+      sightings.push({ camera: "back_cam", zones: ["back_door"], startedAt: on, endedAt: on + 52 * S });
+      sightings.push({ camera: "floor_cam", zones: [d % 2 === 0 ? "till" : "aisle"], startedAt: t + 2 * H, endedAt: t + 2 * H + 5 * S });
+      sightings.push({ camera: "yard_cam", zones: [d % 2 === 0 ? "gate" : "drive"], startedAt: t + 3 * H, endedAt: t + 3 * H + 5 * S });
+    }
+    const { results: r, hypotheses: m } = runLocks({ rows, sightings });
+    expect(m).toBe(8);
+    const b = r.find((x) => x.camera === "back_cam")!;
+    expect(b.forward).toMatchObject({ n: 6, k: 5 });
+    expect(b.forward.lift).toBeCloseTo(41.7, 1);
+    // 1.5e−6 (JavaScript writes it "0.0000015": exponent notation starts below 1e−6).
+    expect(Number(b.forwardPAdj.toPrecision(2))).toBe(1.5e-6);
+    expect(b.confidence).toBeCloseTo(0.436, 3);
+    expect(b.gate).toBe("propose");
+  });
+});
+
+describe("scoreLockPairs — the pairs (§6.2.3)", () => {
+  const world = lockWorld();
+
+  it("🔴 a polled row is never an anchor: the same changes, found by the 60 s check on a person, give no candidate", () => {
+    const polledOnly = { rows: world.kept.map((t) => change(t, { observed: "polled" })), sightings: world.sightings };
+    expect(runLocks(polledOnly)).toEqual({ results: [], hypotheses: 0 });
+  });
+
+  it("the baseline row is never an anchor, even on a person", () => {
+    const only = { rows: world.kept.map((t) => change(t, { baseline: true })), sightings: world.sightings };
+    expect(runLocks(only)).toEqual({ results: [], hypotheses: 0 });
+  });
+
+  it("camera or part C → lock L: anchors are L's changes, coverage C's people — the same statistic, the candidate is the lock", () => {
+    const camAnchor: LinkAnchor = { linkId: "link-back", zoneId: "z-back", zoneName: "Back door", sourceKind: "camera_zone", sourceRef: "back_cam/back_door", label: "Back camera" };
+    const { results, hypotheses } = runLocks(world, [camAnchor]);
+    expect(hypotheses).toBe(1);
+    expect(results).toHaveLength(1);
+    const r = results[0]!;
+    expect(r).toMatchObject({ kind: "lock_camera", camera: null, part: null, sourceKind: "lock", sourceRef: LOCK, label: "Back door lock", wholeK: null, gate: "auto" });
+    expect(r.forward).toMatchObject({ n: 14, k: 12 });
+    expect(r.forward.lambda).toBeCloseTo(0.168, 9);
+    expect(r.names).toEqual({ match: true, shared: ["back", "door"] });
+  });
+
+  it("both ways in one run count each (lock, camera view) statistic ONCE in m", () => {
+    const camAnchor: LinkAnchor = { linkId: "link-back", zoneId: "z-yard", zoneName: "Yard", sourceKind: "camera", sourceRef: "back_cam", label: "Back camera" };
+    expect(runLocks(world, [lockAnchor(), camAnchor]).hypotheses).toBe(8);
+  });
+
+  it("a lock anchor never pairs with a lock; a camera anchor pairs with every lock (camera ↔ camera is PR-1's arm)", () => {
+    const withB = { rows: [...world.rows, ...world.kept.map((t) => change(t + 3 * H, { sourceRef: LOCK_B }))], sightings: world.sightings };
+    expect(runLocks(withB).results.every((r) => r.sourceKind !== "lock")).toBe(true);
+    const camAnchor: LinkAnchor = { linkId: "l-a", zoneId: "z-back", zoneName: "Back door", sourceKind: "camera", sourceRef: "floor_cam", label: "Shop floor" };
+    expect(runLocks(withB, [camAnchor]).results.map((r) => r.sourceRef).sort()).toEqual([LOCK, LOCK_B].sort());
+  });
+
+  it("candidates: only locks with a live change in W; a lock or camera the area already holds a row on is skipped (not scored, not in m)", () => {
+    const camAnchor: LinkAnchor = { linkId: "l-a", zoneId: "z-back", zoneName: "Back door", sourceKind: "camera", sourceRef: "back_cam", label: "Back camera" };
+    const polledB = { rows: [...world.rows, change(world.kept[0]!, { sourceRef: LOCK_B, observed: "polled" })], sightings: world.sightings };
+    expect(runLocks(polledB, [camAnchor]).results.map((r) => r.sourceRef)).toEqual([LOCK]);
+    expect(runLocks(world, [camAnchor], { skipLock: (_z, ref) => ref === LOCK })).toEqual({ results: [], hypotheses: 0 });
+    const skipped = runLocks(world, [lockAnchor()], { skipCamera: (_z, cam) => cam === "back_cam" });
+    expect(skipped.results.map((r) => r.camera).sort()).toEqual(["floor_cam", "yard_cam"]);
+    expect(skipped.hypotheses).toBe(6);
+  });
+
+  it("a lock anchor with no live change in W is not scored at all", () => {
+    expect(runLocks(world, [lockAnchor({ sourceRef: LOCK_B })])).toEqual({ results: [], hypotheses: 0 });
+  });
+
+  it("an anchor inside the camera's blind spell is excluded, never a miss", () => {
+    const input = lockInput(world, [lockAnchor()]);
+    const blind = blindSpells(
+      [
+        { camera: "back_cam", kind: "offline", at: world.kept[3]! - MIN },
+        { camera: "back_cam", kind: "online", at: world.kept[3]! + MIN },
+      ],
+      input.series.keys(),
+      W,
+    );
+    const r = scoreLockPairs({ ...input, blind }).results.find((x) => x.camera === "back_cam")!;
+    // Day 4 was a miss: excluded now.
+    expect(r.forward).toMatchObject({ n: 13, k: 12, excluded: 1 });
+  });
+});
+
+describe("scoreLinkPairs — both arms in one run: one m, the best gate per area and candidate", () => {
+  it("m is the camera arm's plus the lock arm's; every pAdj uses it", () => {
+    const world = lockWorld();
+    const camAnchor: LinkAnchor = { linkId: "link-floor", zoneId: "z-shop", zoneName: "Shop", sourceKind: "camera", sourceRef: "floor_cam", label: "Shop floor" };
+    const out = scoreLinkPairs(lockInput(world, [lockAnchor(), camAnchor]));
+    // Camera arm: floor → back (whole + back_door), yard (whole + gate + drive), each both ways = 2 × 5.
+    // Lock arm: the lock anchor × 8 views, and floor → the lock (the (lock, floor whole) statistic, already counted).
+    expect(out.hypotheses).toBe(2 * 5 + 8);
+    for (const r of out.results) {
+      expect(r.forwardPAdj).toBe(Math.min(1, out.hypotheses * r.forward.pChance));
+    }
+    const back = out.results.find((r) => r.anchor.zoneId === "z-back" && r.camera === "back_cam")!;
+    expect(back.kind).toBe("lock_camera");
+    expect(out.results.some((r) => r.anchor.zoneId === "z-shop" && r.sourceKind === "lock")).toBe(true);
+  });
+
+  it("a camera another anchor in the same area also pairs with: the better gate wins, and names its anchor", () => {
+    const world = lockWorld();
+    // A person-set camera anchor in the Back door area that never sees anyone with Back camera.
+    for (let i = 0; i < 25; i += 1) {
+      const t = W.from + 12 * DAY + i * 17 * MIN;
+      world.sightings.push({ camera: "door_cam", zones: [], startedAt: t, endedAt: t + 4 * S });
+    }
+    const doorAnchor: LinkAnchor = { linkId: "link-door", zoneId: "z-back", zoneName: "Back door", sourceKind: "camera", sourceRef: "door_cam", label: "Door cam" };
+    const out = scoreLinkPairs(lockInput(world, [lockAnchor(), doorAnchor]));
+    const back = out.results.filter((r) => r.anchor.zoneId === "z-back" && r.camera === "back_cam");
+    expect(back).toHaveLength(1);
+    expect(back[0]).toMatchObject({ kind: "lock_camera", gate: "auto", anchor: { linkId: "link-lock" } });
+  });
+});
+
+describe("lockPairEvidence — what a lock ↔ camera link stores", () => {
+  it("round-trips parseLinkEvidence: kind lock_camera, no reverse, the part and the whole camera's hits, a string pAdj, 5 newest samples", () => {
+    const { results, hypotheses } = runLocks(lockWorld());
+    const r = results.find((x) => x.camera === "back_cam")!;
+    const e = lockPairEvidence(r, { window: W, hypotheses });
+    expect(parseLinkEvidence(JSON.parse(JSON.stringify(e)))).toEqual(e);
+    expect(e).toMatchObject({
+      v: 1,
+      kind: "lock_camera",
+      anchor: { linkId: "link-lock", sourceKind: "lock", sourceRef: LOCK, label: "Back door lock" },
+      candidate: { sourceKind: "camera_zone", sourceRef: "back_cam/back_door", label: "Back camera" },
+      reverse: null,
+      chosen: "part",
+      wholeK: 12,
+      hypotheses: 8,
+      pAdj: "7.2e-18",
+      gate: "auto",
+      samplesTrimmedBefore: null,
+    });
+    expect(e.forward).toEqual({ n: 14, k: 12, excluded: 0, lambdaMilli: 168, liftTenths: 714, confidenceBp: Math.round(r.confidence * 10_000) });
+    expect(e.samples).toHaveLength(5);
+    expect(Date.parse(e.samples[0]!.anchorAt)).toBeGreaterThan(Date.parse(e.samples[4]!.anchorAt));
+  });
+
+  it("a lock candidate: chosen 'lock', no wholeK", () => {
+    const camAnchor: LinkAnchor = { linkId: "link-back", zoneId: "z-back", zoneName: "Back door", sourceKind: "camera", sourceRef: "back_cam", label: "Back camera" };
+    const { results, hypotheses } = runLocks(lockWorld(), [camAnchor]);
+    const e = lockPairEvidence(results[0]!, { window: W, hypotheses });
+    expect(e).toMatchObject({ chosen: "lock", wholeK: null, candidate: { sourceKind: "lock", sourceRef: LOCK, label: "Back door lock" } });
+    expect(parseLinkEvidence(JSON.parse(JSON.stringify(e)))).toEqual(e);
+  });
+
+  it("an ungated candidate has no evidence to store", () => {
+    const { results, hypotheses } = runLocks(lockWorld());
+    expect(() => lockPairEvidence(results.find((x) => x.camera === "floor_cam")!, { window: W, hypotheses })).toThrow(/ungated/);
   });
 });
 

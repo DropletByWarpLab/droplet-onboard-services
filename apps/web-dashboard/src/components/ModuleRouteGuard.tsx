@@ -28,6 +28,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ArrowRight } from "lucide-react";
 import { moduleForPath } from "@/components/nav-config";
+import { ABSENT_UNLESS_LISTED } from "@/lib/dark-modules";
 import { useModuleGate } from "@/lib/hooks/useModuleGate";
 
 export function ModuleRouteGuard({ children }: { children: React.ReactNode }) {
@@ -36,6 +37,14 @@ export function ModuleRouteGuard({ children }: { children: React.ReactNode }) {
 
   const gated = moduleForPath(pathname);
   if (!gated || isModuleOn(gated.moduleId)) return <>{children}</>;
+
+  // A module that ships dark (ADR-055) is absent, not merely off, and absent is
+  // a plain 404, never this card: its "An owner or admin can turn it on" is not
+  // true of a module only a flag switches on, and it would hint the product
+  // exists. The PAGE owns that 404 (and renders nothing until the module list
+  // has answered): a `notFound()` thrown from here sits above the layout's
+  // boundary and would not reach `app/not-found.tsx`.
+  if (ABSENT_UNLESS_LISTED.has(gated.moduleId)) return <>{children}</>;
 
   const SectionIcon = gated.icon;
   return (

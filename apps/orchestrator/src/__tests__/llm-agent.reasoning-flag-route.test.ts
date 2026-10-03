@@ -76,16 +76,18 @@ const mockCreateTurnRows = vi.fn().mockResolvedValue({
 });
 
 vi.mock("../services/chat-persistence.service.js", () => ({
-  ChatPersistenceService: vi.fn().mockImplementation(() => ({
-    ensureConversation: mockEnsureConversation,
-    createTurnRows: mockCreateTurnRows,
-    finalizeAssistantMessage: mockFinalizeAssistantMessage,
-    updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
-    listConversationsForUser: vi.fn().mockResolvedValue([]),
-    getConversationForUser: vi.fn().mockResolvedValue(null),
-    deleteConversationForUser: vi.fn().mockResolvedValue(false),
-    renameConversationForUser: vi.fn().mockResolvedValue(null),
-  })),
+  ChatPersistenceService: vi.fn().mockImplementation(function () {
+    return {
+      ensureConversation: mockEnsureConversation,
+      createTurnRows: mockCreateTurnRows,
+      finalizeAssistantMessage: mockFinalizeAssistantMessage,
+      updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
+      listConversationsForUser: vi.fn().mockResolvedValue([]),
+      getConversationForUser: vi.fn().mockResolvedValue(null),
+      deleteConversationForUser: vi.fn().mockResolvedValue(false),
+      renameConversationForUser: vi.fn().mockResolvedValue(null),
+    };
+  }),
 }));
 
 // Capture ActivityRow writes so we can assert one-per-turn (AC §6).

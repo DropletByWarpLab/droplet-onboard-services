@@ -53,17 +53,17 @@ else
   fail "mtls variant is missing the https map or a proxy_ssl directive"
 fi
 
-# 3) nginx.conf includes the active variant; the four first-party legs use
-#    $internal_scheme (the three orchestrator/ai-gateway legs plus the
-#    WARP-2093 streaming `location = /api/files/upload`); user-plane legs are
-#    still literal http://.
+# 3) nginx.conf includes the active variant; the five first-party legs use
+#    $internal_scheme (the three orchestrator/ai-gateway legs, the WARP-2093
+#    streaming `location = /api/files/upload`, and the WARP-3452 /llm/ leg to
+#    ai-gateway); user-plane legs are still literal http://.
 conf="$NGINX_DIR/nginx.conf"
 scheme_legs=$(grep -cE 'proxy_pass[[:space:]]+\$internal_scheme://' "$conf")
 if grep -qE 'include[[:space:]]+/etc/nginx/internal-scheme\.active\.conf;' "$conf" \
-   && [ "$scheme_legs" -eq 4 ]; then
-  pass "nginx.conf includes internal-scheme.active.conf; 4 first-party legs use \$internal_scheme"
+   && [ "$scheme_legs" -eq 5 ]; then
+  pass "nginx.conf includes internal-scheme.active.conf; 5 first-party legs use \$internal_scheme"
 else
-  fail "nginx.conf include/scheme-leg count wrong (got $scheme_legs \$internal_scheme legs, want 4)"
+  fail "nginx.conf include/scheme-leg count wrong (got $scheme_legs \$internal_scheme legs, want 5)"
 fi
 # WARP-1686: the docserver leg moved out of nginx.conf into the DOCS_ENGINE
 # variant pair (docs-engine.{collabora,onlyoffice}.conf — selected at container

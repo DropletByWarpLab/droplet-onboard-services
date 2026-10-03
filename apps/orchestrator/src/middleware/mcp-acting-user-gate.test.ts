@@ -53,8 +53,10 @@ const resolveMock = vi.fn<ActingUserAccessResolver>();
 
 /** The acting person's §9 features; both business modules held unless a case says otherwise. */
 let heldFeatures: ModuleId[] = ["crm", "projects"];
+/** The level they hold them at: a full member catalog (`manage`) unless a case narrows it (WARP-3365). */
+let heldLevel: "view" | "act" | "manage" = "manage";
 const featuresOf: EffectiveAccessResolver = async () =>
-  ({ features: heldFeatures.map((moduleId) => ({ moduleId, level: "view" })) }) as unknown as EffectiveAccessResult;
+  ({ features: heldFeatures.map((moduleId) => ({ moduleId, level: heldLevel })) }) as unknown as EffectiveAccessResult;
 
 function appAs(
   user: { id: string; role: string },
@@ -67,7 +69,7 @@ function appAs(
     next();
   });
   mountMcpActingUserGates(app, resolve, features);
-  for (const path of ["/api/crm/companies", "/api/pm/work-items", "/api/mobile/pm/projects", "/api/files/x", "/api/team-chat/contacts"]) {
+  for (const path of ["/api/crm/companies", "/api/pm/work-items", "/api/mobile/pm/projects", "/api/files/x", "/api/team-chat/contacts", "/api/money/documents", "/api/doors", "/api/doors/events"]) {
     app.get(path, (_q, res) => { res.json({ hit: path }); });
     app.post(path, (_q, res) => { res.json({ hit: path }); });
   }
@@ -79,6 +81,7 @@ const MCP = { id: MCP_PRINCIPAL_ID, role: "service" };
 beforeEach(() => {
   resolveMock.mockReset();
   heldFeatures = ["crm", "projects"];
+  heldLevel = "manage";
 });
 
 describe("mcp acting-user gate — who it applies to", () => {
@@ -280,6 +283,214 @@ describe("mcp acting-user gate — the feature check mirrors the browser's", () 
   });
 });
 
+// WARP-3365 / WARP-3369 (Romain, 2026-09-30) — an external guest gets nothing
+// of the company's customers or work, and asking the assistant is not a way
+// round it. A role-less guest has a null tool scope (question 1 passes) and
+// `projects` is not feature-gated (question 2 is not asked), so the acting
+// person's TIER is the check that refuses them, off the same catalog fact as
+// the browser's `requireModuleTierFloor`.
+describe("mcp acting-user gate — the tier floor (WARP-3365, WARP-3369)", () => {
+  const acting = (tier: string, s: ToolAccessScope | null = null): ActingUserAccess => ({
+    scope: s,
+    tier,
+    unresolved: null,
+    userId: "u-sam",
+  });
+
+  it("an external guest with no custom role is 404 module_disabled on CRM and on PM, whatever the resolver says they hold", async () => {
+    resolveMock.mockResolvedValue(acting("guest"));
+    heldFeatures = ["crm", "projects"];
+    const app = appAs(MCP);
+    for (const [path, module] of [
+      ["/api/crm/companies", "crm"],
+      ["/api/pm/work-items", "projects"],
+      ["/api/mobile/pm/projects", "projects"],
+    ] as const) {
+      const read = await request(app).get(path).set("X-Nextcloud-User", "sam");
+      expect(read.status, `GET ${path}`).toBe(404);
+      expect(read.body, `GET ${path}`).toEqual({ error: "module_disabled", module });
+      const write = await request(app).post(path).set("X-Nextcloud-User", "sam");
+      expect(write.status, `POST ${path}`).toBe(404);
+    }
+  });
+
+  it("a guest whose role grants the business tool domain is refused all the same", async () => {
+    resolveMock.mockResolvedValue(acting("guest", scope(["business"], [])));
+    heldFeatures = ["crm", "projects"];
+    expect((await request(appAs(MCP)).get("/api/pm/work-items").set("X-Nextcloud-User", "sam")).status).toBe(404);
+  });
+
+  it("a member, an admin and an owner are not refused by the floor", async () => {
+    heldFeatures = ["crm", "projects"];
+    for (const tier of ["family", "admin", "owner"]) {
+      resolveMock.mockResolvedValue(acting(tier, scope(["business"], ["business"])));
+      const app = appAs(MCP);
+      expect((await request(app).get("/api/crm/companies").set("X-Nextcloud-User", "sam")).status, tier).toBe(200);
+      expect((await request(app).get("/api/pm/work-items").set("X-Nextcloud-User", "sam")).status, tier).toBe(200);
+    }
+  });
+
+  it("the floor is scoped to the modules the catalog refuses: a guest on Messages and Files is not refused by it", async () => {
+    resolveMock.mockResolvedValue(acting("guest"));
+    const app = appAs(MCP);
+    expect((await request(app).get("/api/team-chat/contacts").set("X-Nextcloud-User", "sam")).status).toBe(200);
+    expect((await request(app).get("/api/files/x").set("X-Nextcloud-User", "sam")).status).toBe(200);
+  });
+});
+
+// WARP-3365 review — the LEVEL, not just the module. A role holding
+// `crm: view` could not write in the browser once routes/crm.ts named the level
+// on every write, but the assistant passed on "holds the module": the same
+// person could create and move customers through the tools.
+describe("mcp acting-user gate — the acting person's LEVEL (WARP-3365)", () => {
+  const asMember = () => resolveMock.mockResolvedValue(ok(scope(["business"], ["business"])));
+
+  it("crm: view reads through the assistant and cannot write through it", async () => {
+    asMember();
+    heldLevel = "view";
+    const app = appAs(MCP);
+    expect((await request(app).get("/api/crm/companies").set("X-Nextcloud-User", "sam")).status).toBe(200);
+    const write = await request(app).post("/api/crm/companies").set("X-Nextcloud-User", "sam");
+    expect(write.status).toBe(404);
+    expect(write.body).toEqual({ error: "module_disabled", module: "crm" });
+  });
+
+  it("crm: act and crm: manage write through the assistant", async () => {
+    for (const level of ["act", "manage"] as const) {
+      asMember();
+      heldLevel = level;
+      const app = appAs(MCP);
+      expect((await request(app).post("/api/crm/companies").set("X-Nextcloud-User", "sam")).status, level).toBe(200);
+    }
+  });
+
+  it("the owner's full catalog (manage) is unchanged", async () => {
+    resolveMock.mockResolvedValue(ok(null));
+    heldLevel = "manage";
+    expect((await request(appAs(MCP)).post("/api/crm/companies").set("X-Nextcloud-User", "sam")).status).toBe(200);
+  });
+});
+
+// WARP-3365 review — `money_list_open_documents` reaches /api/money/documents as
+// `_service:mcp`. The route admits that principal on its own account, so who it
+// ACTS FOR is asked one layer up, like the other business domains.
+describe("mcp acting-user gate — money: who the service principal acts for (WARP-3365)", () => {
+  const acting = (tier: string, s: ToolAccessScope | null): ActingUserAccess => ({
+    scope: s,
+    tier,
+    unresolved: null,
+    userId: "u-sam",
+  });
+
+  it("an external guest (a null scope) asking the assistant for the receivables is 404 module_disabled", async () => {
+    resolveMock.mockResolvedValue(acting("guest", null));
+    heldFeatures = ["money"];
+    const res = await request(appAs(MCP)).get("/api/money/documents").set("X-Nextcloud-User", "sam");
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "module_disabled", module: "money" });
+  });
+
+  it("a member who holds Money and the money tool domain reads; one who lacks either does not", async () => {
+    heldFeatures = ["money"];
+    heldLevel = "view";
+    resolveMock.mockResolvedValue(acting("family", scope(["money"])));
+    expect((await request(appAs(MCP)).get("/api/money/documents").set("X-Nextcloud-User", "sam")).status).toBe(200);
+    // the role leaves the money tool domain out of their §3 scope
+    resolveMock.mockResolvedValue(acting("family", scope(["business"])));
+    expect((await request(appAs(MCP)).get("/api/money/documents").set("X-Nextcloud-User", "sam")).status).toBe(404);
+    // the person does not hold the Money feature
+    heldFeatures = ["crm"];
+    resolveMock.mockResolvedValue(acting("family", scope(["money"])));
+    expect((await request(appAs(MCP)).get("/api/money/documents").set("X-Nextcloud-User", "sam")).status).toBe(404);
+  });
+
+  it("an admin and an owner with no custom role (null scope) read", async () => {
+    heldFeatures = ["money"];
+    heldLevel = "manage";
+    for (const tier of ["admin", "owner"]) {
+      resolveMock.mockResolvedValue(acting(tier, null));
+      expect((await request(appAs(MCP)).get("/api/money/documents").set("X-Nextcloud-User", "sam")).status, tier).toBe(200);
+    }
+  });
+
+  it("a human's own request is not this gate's business (the route's role floor and the prefix's tier floor answer)", async () => {
+    const res = await request(appAs({ id: "u-1", role: "guest" })).get("/api/money/documents").set("X-Nextcloud-User", "sam");
+    expect(res.status).toBe(200);
+    expect(resolveMock).not.toHaveBeenCalled();
+  });
+});
+
+// ADR-055 P4b — `doors_list` and `doors_recent_events` reach /api/doors and
+// /api/doors/events as `_service:mcp`. The read routes floor at owner/admin for a
+// human, but they admit the principal before any role check, and neither a role-less
+// person's tool scope (null) nor an ordinary `view` grant narrows a staff member. So
+// the tier floor is asked of the ACTING person: the access catalog's `view` for doors
+// is a REFUSAL below admin (`refuseBelowFloor`), the one fact `requireModuleTierFloor`
+// applies to their browser. Without it the assistant would read doors for a person
+// whose browser is refused.
+describe("mcp acting-user gate — doors: the assistant never reads what the person's browser would refuse (ADR-055 P4b)", () => {
+  const acting = (tier: string, s: ToolAccessScope | null): ActingUserAccess => ({
+    scope: s,
+    tier,
+    unresolved: null,
+    userId: "u-sam",
+  });
+  const DOORS_PATHS = ["/api/doors", "/api/doors/events"];
+
+  beforeEach(() => {
+    heldFeatures = ["doors"];
+    heldLevel = "view";
+  });
+
+  it.each(DOORS_PATHS)("%s: an acting family, guest or service-tier person is 404 module_disabled, even holding the doors grant and domain", async (path) => {
+    for (const tier of ["family", "guest", "service"]) {
+      resolveMock.mockResolvedValue(acting(tier, scope(["doors"])));
+      const res = await request(appAs(MCP)).get(path).set("X-Nextcloud-User", "sam");
+      expect(res.status, `${path} as ${tier}`).toBe(404);
+      expect(res.body, `${path} as ${tier}`).toEqual({ error: "module_disabled", module: "doors" });
+    }
+  });
+
+  it.each(DOORS_PATHS)("%s: an acting owner (no custom role) or admin reads", async (path) => {
+    resolveMock.mockResolvedValue(acting("owner", null));
+    expect((await request(appAs(MCP)).get(path).set("X-Nextcloud-User", "sam")).status, `${path} as owner`).toBe(200);
+    resolveMock.mockResolvedValue(acting("admin", null));
+    expect((await request(appAs(MCP)).get(path).set("X-Nextcloud-User", "sam")).status, `${path} as admin`).toBe(200);
+    resolveMock.mockResolvedValue(acting("admin", scope(["doors"])));
+    expect((await request(appAs(MCP)).get(path).set("X-Nextcloud-User", "sam")).status, `${path} as admin with the doors domain`).toBe(200);
+  });
+
+  it.each(DOORS_PATHS)("%s: an admin whose custom role leaves the doors tool domain out is refused (question 1)", async (path) => {
+    resolveMock.mockResolvedValue(acting("admin", scope(["business", "files"])));
+    const res = await request(appAs(MCP)).get(path).set("X-Nextcloud-User", "sam");
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "module_disabled", module: "doors" });
+  });
+
+  it.each(DOORS_PATHS)("%s: an admin who does not hold the doors module is refused (question 2)", async (path) => {
+    heldFeatures = ["crm"];
+    resolveMock.mockResolvedValue(acting("admin", null));
+    expect((await request(appAs(MCP)).get(path).set("X-Nextcloud-User", "sam")).status).toBe(404);
+  });
+
+  it("an acting person nobody can attribute is refused (fail closed)", async () => {
+    resolveMock.mockResolvedValue({ scope: null, tier: null, unresolved: "user_missing", userId: null } as unknown as ActingUserAccess);
+    expect((await request(appAs(MCP)).get("/api/doors").set("X-Nextcloud-User", "ghost")).status).toBe(404);
+  });
+
+  it("a human's own request is not this gate's business: the route's role guard and the prefix's tier floor answer", async () => {
+    const res = await request(appAs({ id: "u-1", role: "guest" })).get("/api/doors").set("X-Nextcloud-User", "sam");
+    expect(res.status).toBe(200);
+    expect(resolveMock).not.toHaveBeenCalled();
+  });
+
+  it("no other domain grew a doors-style floor: a family person's CRM read still passes", async () => {
+    heldFeatures = ["crm", "projects"];
+    resolveMock.mockResolvedValue(acting("family", scope(["business"])));
+    expect((await request(appAs(MCP)).get("/api/crm/companies").set("X-Nextcloud-User", "sam")).status).toBe(200);
+  });
+});
+
 describe("actingUserAccessResolver — fail closed on identity", () => {
   // A Prisma double that HONOURS `where`, with the account shape that broke:
   // SSO / SCIM users have no `nextcloudUsername`.
@@ -397,6 +608,10 @@ const OUTSIDE_GATED_PREFIXES: Record<string, string[]> = {
   email: [],
   // WARP-3162: every team_chat hop is under /api/team-chat.
   team_chat: [],
+  // WARP-3365 review: the one money hop is GET /api/money/documents.
+  money: [],
+  // ADR-055 P4b: both doors hops (GET /api/doors, GET /api/doors/events) are under /api/doors.
+  doors: [],
 };
 
 describe("mcp acting-user gate — which domains it narrows", () => {
@@ -404,8 +619,8 @@ describe("mcp acting-user gate — which domains it narrows", () => {
   // from it would take its own checks with it and nothing would go red.
   // WARP-2979: `security` — its tools' routes resolve the person too, but the
   // mcp-server's HTTP transport runs only write-tier RBAC (ADR-059 P4 §6.12.2).
-  it("narrows exactly business, email, security and team_chat", () => {
-    expect([...MCP_ACTING_USER_GATED_DOMAINS].sort()).toEqual(["business", "email", "security", "team_chat"]);
+  it("narrows exactly business, doors, email, money, security and team_chat", () => {
+    expect([...MCP_ACTING_USER_GATED_DOMAINS].sort()).toEqual(["business", "doors", "email", "money", "security", "team_chat"]);
   });
 });
 

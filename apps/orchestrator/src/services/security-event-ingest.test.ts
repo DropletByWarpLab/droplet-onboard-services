@@ -57,6 +57,7 @@ describe("frigateEndToDraft — one row per tracked object, on end", () => {
       startedAt: new Date(START * 1000),
       endedAt: new Date((START + 12) * 1000),
       summary: "Person in porch",
+      observed: "live",
     });
   });
 
@@ -255,6 +256,28 @@ describe("threatRowToDraft — a pointer to the chain row, not a copy of it", ()
   });
 });
 
+describe("observed (WARP-2977 P2b-2) — every P2a row is timed when it happened", () => {
+  it("detections, camera and Frigate status rows and mirrored threats are all `live`; only the lock sweep writes `polled`", () => {
+    expect(frigateEndToDraft(endMessage())!.observed).toBe("live");
+    expect(statusTransitionToDraft({ camera: "back_door", health: "offline" }, "online", new Date(0))!.observed).toBe("live");
+    expect(statusTransitionToDraft({ camera: null, health: "offline" }, "online", new Date(0))!.observed).toBe("live");
+    expect(
+      threatRowToDraft({ id: 1n, at: new Date(0), kind: "network", severity: "warn", what: "x" }).observed,
+    ).toBe("live");
+    // WARP-2978 PR-D: a person still in view is timed from when Frigate started tracking them.
+    expect(
+      frigateOngoingToDraft({
+        id: "1790000000.123456-abc123",
+        camera: "front_door",
+        label: "person",
+        startedAt: new Date(0),
+        topScore: 0.9,
+        enteredZones: [],
+      }).observed,
+    ).toBe("live");
+  });
+});
+
 // ── WARP-2978 PR-D (ADR-059 P3 §6.12) — early presence ──────────────────
 
 describe("parseFrigateInflight — the raw new/update/end messages the in-flight map keeps", () => {
@@ -325,6 +348,7 @@ describe("frigateOngoingToDraft — the ONE still-in-view row of a person", () =
       startedAt: new Date(START * 1000),
       endedAt: null,
       summary: "Person still in view after 30 s",
+      observed: "live",
     });
     expect(SECURITY_ONGOING_SUMMARY).toBe("Person still in view after 30 s");
   });

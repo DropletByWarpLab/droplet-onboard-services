@@ -4,10 +4,11 @@
  *
  * voice-io has NO auth of its own — it binds on the internal Docker
  * network only — so this route is the auth wall, exactly like the
- * admin-rag-eval proxy. Owner/admin only: voice status exposes the last
- * transcript + reply (household-private speech), and `/say` drives the
- * room speaker. Service principals are denied by the same guard
- * (`requireRole` never lists the `service` role here) — the one
+ * admin-rag-eval proxy. Owner/admin only: `/say` drives the room speaker,
+ * and voice-io's status carries the last transcript + reply (private speech
+ * in the room), which this proxy STRIPS from `GET /voice/status` unless the
+ * caller asks for them (WARP-3396, below). Service principals are denied by
+ * the same guard (`requireRole` never lists the `service` role here) — the one
  * exception is POST /voice/events (WARP-1058), which is the inverse:
  * ONLY the `_service:voice` principal may push pipeline events into
  * the activity chain, and every human role is denied.
@@ -223,8 +224,10 @@ async function proxy(
   path: string,
   body?: unknown,
   timeoutMs: number = READ_TIMEOUT_MS,
+  /** Reshapes the relayed JSON (WARP-3396: drop the transcript fields). */
+  transform?: (payload: unknown) => unknown,
 ): Promise<number> {
-  return (await proxyWithPayload(res, method, path, body, timeoutMs)).status;
+  return (await proxyWithPayload(res, method, path, body, timeoutMs, transform)).status;
 }
 
 /**
@@ -238,6 +241,8 @@ async function proxyWithPayload(
   path: string,
   body?: unknown,
   timeoutMs: number = READ_TIMEOUT_MS,
+  /** Reshapes the relayed JSON (WARP-3396: drop the transcript fields). */
+  transform?: (payload: unknown) => unknown,
 ): Promise<{ status: number; payload: unknown }> {
   const target = `${voiceIoBaseUrl()}${path}`;
   try {
@@ -266,8 +271,9 @@ async function proxyWithPayload(
         payload = { raw: text };
       }
     }
-    res.status(upstream.status).json(payload);
-    return { status: upstream.status, payload };
+    const relayed = transform ? transform(payload) : payload;
+    res.status(upstream.status).json(relayed);
+    return { status: upstream.status, payload: relayed };
   } catch (err) {
     // Connection refused / DNS failure (profile inactive) or timeout.
     logger.warn(
@@ -280,6 +286,27 @@ async function proxyWithPayload(
   }
 }
 
+/**
+ * WARP-3396 — what was last SAID in the room and what the assistant answered.
+ * voice-io keeps them until the next wake; nothing on the dashboard's Voice
+ * page or the Home row reads them, yet the page polls the status every second,
+ * so they sat in every open tab's memory, HAR export and proxy log. The
+ * default status answer leaves them out.
+ */
+const TRANSCRIPT_FIELDS = [
+  "last_transcript",
+  "last_transcript_at",
+  "last_response",
+  "last_response_at",
+] as const;
+
+function withoutTranscript(payload: unknown): unknown {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return payload;
+  const out: Record<string, unknown> = { ...(payload as Record<string, unknown>) };
+  for (const field of TRANSCRIPT_FIELDS) delete out[field];
+  return out;
+}
+
 export function createVoiceRouter(): Router {
   const router = Router();
 
@@ -287,8 +314,18 @@ export function createVoiceRouter(): Router {
   // never includes `service`, so service principals are denied too.
   const guard = requireRole("owner", "admin");
 
-  router.get("/voice/status", guard, async (_req, res) => {
-    await proxy(res, "GET", "/voice/status");
+  // `?include=transcript` is the setup wizard's voice step asking for "what it
+  // heard" during its one try-it; owner/admin only like the rest of the route.
+  router.get("/voice/status", guard, async (req, res) => {
+    const withTranscript = req.query.include === "transcript";
+    await proxy(
+      res,
+      "GET",
+      "/voice/status",
+      undefined,
+      READ_TIMEOUT_MS,
+      withTranscript ? undefined : withoutTranscript,
+    );
   });
 
   router.get("/voice/devices", guard, async (_req, res) => {

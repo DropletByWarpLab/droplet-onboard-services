@@ -20,12 +20,12 @@ import {
 } from "./security-narrative-view.js";
 import type { IncidentProjection, IncidentViewer } from "./security-incident-view.js";
 
-const OWNER: IncidentViewer = { userId: "u-owner", visibleCameras: "all", mayReadThreats: true, ownerOrAdmin: true };
-const FAMILY_BOTH: IncidentViewer = { userId: "u-fam", visibleCameras: new Set(["back_cam", "till_cam"]), mayReadThreats: false, ownerOrAdmin: false };
-const FAMILY_BACK: IncidentViewer = { userId: "u-fam", visibleCameras: new Set(["back_cam"]), mayReadThreats: false, ownerOrAdmin: false };
-const ADMIN_NO_THREATS: IncidentViewer = { userId: "u-adm", visibleCameras: "all", mayReadThreats: false, ownerOrAdmin: true };
+const OWNER: IncidentViewer = { userId: "u-owner", visibleCameras: "all", mayReadThreats: true, mayReadLocks: true, ownerOrAdmin: true };
+const FAMILY_BOTH: IncidentViewer = { userId: "u-fam", visibleCameras: new Set(["back_cam", "till_cam"]), mayReadThreats: false, mayReadLocks: false, ownerOrAdmin: false };
+const FAMILY_BACK: IncidentViewer = { userId: "u-fam", visibleCameras: new Set(["back_cam"]), mayReadThreats: false, mayReadLocks: false, ownerOrAdmin: false };
+const ADMIN_NO_THREATS: IncidentViewer = { userId: "u-adm", visibleCameras: "all", mayReadThreats: false, mayReadLocks: true, ownerOrAdmin: true };
 /** Anyone who sees every camera and may read threats — not only an owner. */
-const SEES_EVERYTHING: IncidentViewer = { userId: "u-adm", visibleCameras: "all", mayReadThreats: true, ownerOrAdmin: false };
+const SEES_EVERYTHING: IncidentViewer = { userId: "u-adm", visibleCameras: "all", mayReadThreats: true, mayReadLocks: true, ownerOrAdmin: false };
 
 const WRITTEN_AT = new Date("2026-09-22T01:31:00Z");
 
@@ -138,10 +138,32 @@ describe("narrativeIncidentVisible — the incident-level checks, after the view
     expect(narrativeIncidentVisible(byScope, reasons(null), projected(["threat_signal"]), ADMIN_NO_THREATS)).toBe(false);
   });
 
-  it("a lock named (P4 PR-4) needs a viewer who sees every camera until mayReadLocks exists", () => {
+  it("a lock named (P4 PR-4) needs mayReadLocks (Devices view), not only a viewer who sees every camera", () => {
     const l = row({ narrativeAudience: { cameras: ["back_cam"], threats: false, locks: true }, cameras: ["back_cam"] });
-    expect(narrativeIncidentVisible(l, r, projected(["after_hours_presence"]), OWNER)).toBe(true);
-    expect(narrativeIncidentVisible(l, r, projected(["after_hours_presence"]), FAMILY_BOTH)).toBe(false);
+    const lockReason = [{ evidenceCamera: "back_cam", relatedCamera: null, relatedLock: true }];
+    const codes = projected(["after_hours_presence"]);
+    expect(narrativeIncidentVisible(l, r, codes, OWNER)).toBe(true);
+    expect(narrativeIncidentVisible(l, r, codes, FAMILY_BOTH)).toBe(false);
+    // Sees every camera and threats, but not Devices: the audience's lock alone hides it.
+    const noDevices: IncidentViewer = { ...SEES_EVERYTHING, mayReadLocks: false };
+    expect(narrativeIncidentVisible(l, r, codes, noDevices)).toBe(false);
+    expect(narrativeIncidentVisible(l, r, codes, { ...noDevices, mayReadLocks: true })).toBe(true);
+    // The same for a lock-related reason with an audience that predates the lock.
+    const bare = row({ narrativeAudience: { cameras: ["back_cam"], threats: false, locks: false }, cameras: ["back_cam"] });
+    expect(narrativeIncidentVisible(bare, lockReason, codes, noDevices)).toBe(false);
+    expect(narrativeIncidentVisible(bare, lockReason, codes, SEES_EVERYTHING)).toBe(true);
+  });
+
+  it("a lock-related incident's summary is visible with Devices view and hidden without it (narrativeVisibleTo, narrativeView)", () => {
+    const l = row({ narrativeAudience: { cameras: ["back_cam"], threats: false, locks: true }, cameras: ["back_cam"] });
+    const lockReason = [{ evidenceCamera: "back_cam", relatedCamera: null, relatedLock: true }];
+    const codes = projected(["after_hours_presence"]);
+    const withDevices: IncidentViewer = { ...SEES_EVERYTHING, mayReadLocks: true };
+    const withoutDevices: IncidentViewer = { ...SEES_EVERYTHING, mayReadLocks: false };
+    expect(narrativeVisibleTo(l, lockReason, codes, withDevices)).toBe(true);
+    expect(narrativeVisibleTo(l, lockReason, codes, withoutDevices)).toBe(false);
+    expect(narrativeView(l, lockReason, codes, withDevices, true)?.state).toBe("written");
+    expect(narrativeView(l, lockReason, codes, withoutDevices, true)).toBeNull();
   });
 
   it("the viewer's projected codes must equal the stored codes (as a set)", () => {

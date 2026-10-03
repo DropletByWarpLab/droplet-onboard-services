@@ -70,6 +70,27 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+// WARP-3396 — the box leaves the last transcript and reply out of the default
+// /api/voice/status answer; the wizard's "what it heard" try-it is the one
+// caller that asks for them, on both the first load and every poll tick.
+describe("VoiceStep — asks the box for the transcript (WARP-3396)", () => {
+  it("passes { transcript: true } on the first load and on the poll", async () => {
+    vi.useFakeTimers();
+    render(
+      <VoiceStep onComplete={vi.fn()} onSkip={vi.fn()} onAutoSkip={vi.fn()} />,
+    );
+    await act(async () => {});
+    expect(fetchVoiceStatus).toHaveBeenCalledTimes(1);
+    expect(fetchVoiceStatus).toHaveBeenLastCalledWith({ transcript: true });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1100);
+    });
+    expect(fetchVoiceStatus.mock.calls.length).toBeGreaterThan(1);
+    for (const call of fetchVoiceStatus.mock.calls) expect(call).toEqual([{ transcript: true }]);
+  });
+});
+
 describe("VoiceStep — happy path (mic present, listening)", () => {
   it("renders the wake-phrase hero and Continue advances", async () => {
     const onComplete = vi.fn();

@@ -22,6 +22,7 @@ import { purgeUserData } from "./brain-memory.service.js";
 import { purgeM365ForUser } from "./m365/m365-auth.service.js";
 import { purgeUsernameKeyedData } from "./username-data-purge.service.js";
 import { revokeOverlayDevicesForUser } from "./vpn-peer-revoke.service.js";
+import { revokeDeviceClientsForUser } from "./device-client-revoke.service.js";
 import {
   assertRemovalAllowed,
   assertRemovalInvariantsTx,
@@ -131,6 +132,13 @@ export async function scheduleUserDeletion(
     });
   }, SERIALIZABLE_TX);
 
+  // WARP-3384: the person's paired devices (file-sync app passwords, drive
+  // logins) go BEFORE the Nextcloud account is disabled. A disabled account
+  // cannot authenticate its own app-password delete, so afterwards the delete is
+  // refused and the credential would work again on reactivation. Best-effort;
+  // the outcome is on the sweep's own audit row.
+  await revokeDeviceClientsForUser(target.username, req.actor, "removal");
+
   // Best-effort, as on disable: the reconciler's mirror pass converges it.
   let ncMirror: NcMirror = "no_account";
   if (target.nextcloudUsername !== null) {
@@ -196,6 +204,11 @@ export async function completeUserDeletion(
   row: RemovableRow,
   audit: { actor: ActivityActor; actorUsername: string | null },
 ): Promise<{ ncMirror: NcMirror }> {
+  // WARP-3384: a hand-over reaches here with the person's device clients still
+  // active (a retention purge finds them revoked at scheduling). Revoke them
+  // while their Nextcloud account still exists to answer the app-password delete.
+  await revokeDeviceClientsForUser(row.username, audit.actor, "removal");
+
   let ncMirror: NcMirror = "no_account";
   if (row.nextcloudUsername !== null) {
     await ncDeleteUser(adminBasicToken(), row.nextcloudUsername);

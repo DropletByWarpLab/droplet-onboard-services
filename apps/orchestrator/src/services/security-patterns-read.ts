@@ -32,7 +32,15 @@
 import type { PrismaClient, SecurityBaselineCell } from "@prisma/client";
 import type { SecurityViewerScope } from "./security-access.js";
 import { resolveSecurityTimezone } from "./security-mode.service.js";
-import { loadActiveLinks, loadCameraLabels, parseLinkRef, visibleLinks, zoneVisibleTo, type ActiveZoneLink } from "./security-zones.service.js";
+import {
+  isLockLinkRef,
+  loadActiveLinks,
+  loadCameraLabels,
+  parseLinkRef,
+  visibleLinks,
+  zoneVisibleTo,
+  type ActiveZoneLink,
+} from "./security-zones.service.js";
 import {
   BASELINE,
   DWELL_MIN_SAMPLES,
@@ -203,7 +211,8 @@ export type ExplainPatternResult =
   | { status: "ok"; view: ExplainPatternView };
 
 type ReadDb = PrismaClient;
-type Scope = Pick<SecurityViewerScope, "visibleCameras">;
+/** `mayReadLocks` (DS-019): an area is judged on the links the viewer can see, lock links included, as on the Areas page. */
+type Scope = Pick<SecurityViewerScope, "visibleCameras" | "mayReadLocks">;
 
 const DAYS_NEEDED = BASELINE.learningDays as 14;
 const NOT_FOUND = { status: "not_found" } as const;
@@ -234,7 +243,11 @@ const windowOf = (b: ReadyBuild) => ({ from: b.windowFrom, to: b.windowTo, built
 
 /** The cameras of an area's current active camera / camera_zone links, sorted, deduped. */
 function linkCameras(own: readonly ActiveZoneLink[]): string[] {
-  const cams = own.map((l) => parseLinkRef(l.sourceKind, l.sourceRef)?.camera).filter((c): c is string => !!c);
+  const cams = own.flatMap((l) => {
+    const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
+    // A lock link (WARP-2977 P2b-2) has no camera: it is never baseline evidence.
+    return parsed && !isLockLinkRef(parsed) ? [parsed.camera] : [];
+  });
   return [...new Set(cams)].sort(byString);
 }
 

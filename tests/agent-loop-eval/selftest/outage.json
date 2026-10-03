@@ -1,0 +1,22 @@
+{
+ "seed-001": [
+  {
+   "throw": "AI Gateway error 502: Upstream provider error"
+  }
+ ],
+ "seed-002": [
+  {
+   "throw": "AI Gateway error 502: Upstream provider error"
+  }
+ ],
+ "seed-003": [
+  {
+   "throw": "AI Gateway error 502: Upstream provider error"
+  }
+ ],
+ "seed-005": [
+  {
+   "text": "Unreachable: the run aborts first."
+  }
+ ]
+}

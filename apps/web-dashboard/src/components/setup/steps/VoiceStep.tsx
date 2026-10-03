@@ -86,7 +86,7 @@ export function VoiceStep({
 
   const load = useCallback(async () => {
     try {
-      const s = await fetchVoiceStatus();
+      const s = await fetchVoiceStatus({ transcript: true });
       if (!alive.current) return;
       if (baseline.current === null) {
         baseline.current = {
@@ -125,7 +125,7 @@ export function VoiceStep({
   useEffect(() => {
     const timer = setInterval(() => {
       if (skipped.current) return;
-      void fetchVoiceStatus()
+      void fetchVoiceStatus({ transcript: true })
         .then((s) => {
           if (!alive.current || skipped.current) return;
           if (baseline.current === null) {

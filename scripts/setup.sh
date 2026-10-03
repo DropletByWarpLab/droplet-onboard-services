@@ -499,6 +499,13 @@ main() {
   # See scripts/lib/single-box.sh.
   if [ "$SINGLE_BOX_MODE" = "true" ]; then
     configure_single_box_env
+  else
+    # WARP-3452: single-box sizes the context window to its GPU
+    # (configure_gpu_env). Here a remote inference host serves its own window
+    # (droplet-local-LLM defaults to 16384), so pin the orchestrator's
+    # estimator to that rather than the 65536 compose default. Raise both ends
+    # together.
+    grep -qE '^OLLAMA_CONTEXT_LENGTH=' "$REPO_ROOT/.env" || _upsert_env_kv OLLAMA_CONTEXT_LENGTH 16384
   fi
   # WARP-318: FIPS 140-3 per-customer activation. Only acts when the operator
   # EXPLICITLY passed --fips / --no-fips (FIPS_MODE tri-state; "" = leave .env

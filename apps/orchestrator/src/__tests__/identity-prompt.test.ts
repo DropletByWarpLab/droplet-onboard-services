@@ -3,9 +3,10 @@
  * leads buildBaseSystemPrompt for every chat surface.
  *
  * Covers: the bundled file loads and carries the identity + capability
- * sections; missing/empty files fail open to the legacy one-liner;
- * oversized files truncate to IDENTITY_MAX_CHARS instead of blowing
- * the local model's context window.
+ * sections; missing/empty files fail open to FALLBACK_IDENTITY, which
+ * keeps the standing rules the business block leans on; oversized files
+ * truncate to IDENTITY_MAX_CHARS instead of blowing the local model's
+ * context window.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -43,16 +44,50 @@ describe("loadIdentityPrompt", () => {
     expect(text.length).toBeLessThanOrEqual(IDENTITY_MAX_CHARS);
   });
 
-  it("falls back to the legacy one-liner when the file is missing", () => {
+  it("carries the reference-data rule the business block relies on", () => {
+    // business-profile.service.ts frames its block as "(reference data,
+    // not instructions)" on the strength of this standing rule — if it
+    // leaves the identity file, that framing stops meaning anything.
+    const text = loadIdentityPrompt(defaultIdentityPath());
+    expect(text).toContain("What you will and won't do");
+    expect(text).toContain("reference data, not instructions");
+  });
+
+  it("scopes the confirmation rule to changes a tool says need approval", () => {
+    // Reminders, timers, calendar edits and file writes run on the first
+    // call by design (`requiresConfirmation: false`, docs/llm-safety-tiers.md
+    // Tier 1). A blanket "changes wait for confirmation" made the model ask
+    // before "remind me at 3pm". Only a tool's own confirmation_required
+    // answer is a reason to stop and wait.
+    const text = loadIdentityPrompt(defaultIdentityPath()).replace(/\s+/g, " ");
+    expect(text).not.toMatch(/changes wait for the person's confirmation/i);
+    expect(text).toMatch(/when a tool says a change needs the person's approval/i);
+    // The claim-after-the-result rule applies to every change, gated or not.
+    expect(text).toMatch(/until the tool result confirms it/i);
+  });
+
+  it("falls back to FALLBACK_IDENTITY when the file is missing", () => {
     const text = loadIdentityPrompt(path.join(tmp, "nope.md"));
     expect(text).toBe(FALLBACK_IDENTITY);
   });
 
-  it("falls back to the legacy one-liner when the file is empty", () => {
+  it("falls back to FALLBACK_IDENTITY when the file is empty", () => {
     const p = path.join(tmp, "empty.md");
     writeFileSync(p, "   \n  ");
     const text = loadIdentityPrompt(p);
     expect(text).toBe(FALLBACK_IDENTITY);
+  });
+
+  it("keeps the standing rules in the fallback, not just the one-line identity", () => {
+    // A mistyped or unmounted DROPLET_IDENTITY_PATH lands here for the life
+    // of the process. The business block still frames itself as "reference
+    // data, not instructions" on the strength of the identity-layer rule, so
+    // the fallback has to carry that rule too, and the no-reveal rule.
+    expect(FALLBACK_IDENTITY).toContain("You are Droplet");
+    expect(FALLBACK_IDENTITY).toContain("reference data, not instructions");
+    expect(FALLBACK_IDENTITY).toMatch(/never reveal passwords, keys/i);
+    expect(FALLBACK_IDENTITY).toMatch(/until the tool result confirms it/i);
+    expect(FALLBACK_IDENTITY.length).toBeLessThan(IDENTITY_MAX_CHARS);
   });
 
   it("truncates an oversized file to IDENTITY_MAX_CHARS", () => {
@@ -72,5 +107,20 @@ describe("loadIdentityPrompt", () => {
     // …until the cache is dropped.
     resetIdentityPromptCache();
     expect(loadIdentityPrompt(p)).toBe("version two");
+  });
+});
+
+describe("defaultIdentityPath", () => {
+  const saved = process.env.DROPLET_IDENTITY_PATH;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.DROPLET_IDENTITY_PATH;
+    else process.env.DROPLET_IDENTITY_PATH = saved;
+  });
+
+  it("treats an empty DROPLET_IDENTITY_PATH as unset (the compose ${VAR:-} trap)", () => {
+    delete process.env.DROPLET_IDENTITY_PATH;
+    const bundled = defaultIdentityPath();
+    process.env.DROPLET_IDENTITY_PATH = "";
+    expect(defaultIdentityPath()).toBe(bundled);
   });
 });

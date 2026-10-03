@@ -20,6 +20,10 @@
  * returns to the tab it was opened from. Each tab's data is read only while
  * it is shown. The area picked is shared by both tabs.
  *
+ * WARP-2977 P2b-2: door locks, for people with Devices view — a Doors view
+ * while the header offers one (a picked Doors view falls back to Everything
+ * when it stops), and areas counted per kind of link.
+ *
  * WARP-2981 (ADR-059 P6) — the header's one action opens the Security wall
  * (/security/wall), the read-only TV view. It is not in the nav.
  */
@@ -29,7 +33,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Shield, Tv } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { ModeCard } from "@/components/security/ModeCard";
-import { AlertsLine, SecurityFeed, kindsForView, type SecurityView } from "@/components/security/SecurityFeed";
+import { AlertsLine, SecurityFeed, kindsForView, viewFor, type SecurityView } from "@/components/security/SecurityFeed";
 import { COPY as LIST_COPY, IncidentList, type IncidentFilter } from "@/components/security/IncidentList";
 import { fill } from "@/components/security/TimezoneSelect";
 import {
@@ -54,7 +58,7 @@ const TAB_LABEL = { incidents: LIST_COPY.tabIncidents, everything: LIST_COPY.tab
 type Tab = keyof typeof TAB_LABEL;
 const TABS: readonly Tab[] = ["incidents", "everything"];
 
-type Area = SecurityZoneRef & { linkCount: number };
+type Area = SecurityZoneRef & { linkCount: number; cameraLinkCount: number; lockLinkCount: number };
 
 interface TabProps {
   zone: string | null;
@@ -95,8 +99,22 @@ function SecurityCenter() {
   const { zones } = useSecurityZones();
   // `links` is the viewer's VISIBLE active links — the set the server filters by —
   // so a count of 0 is an area nothing covers (the lists say so, never "quiet").
+  // Split by kind (P2b-2): a camera view of an area only a lock covers is "not
+  // covered" too.
   const areas = useMemo(
-    () => (zones ?? []).filter((z) => z.state === "active").map((z) => ({ id: z.id, name: z.name, linkCount: z.links.length })),
+    () =>
+      (zones ?? [])
+        .filter((z) => z.state === "active")
+        .map((z) => {
+          const lockLinkCount = z.links.filter((l) => l.sourceKind === "lock").length;
+          return {
+            id: z.id,
+            name: z.name,
+            linkCount: z.links.length,
+            cameraLinkCount: z.links.length - lockLinkCount,
+            lockLinkCount,
+          };
+        }),
     [zones],
   );
   const health = useSecurityHealth();
@@ -236,8 +254,10 @@ function IncidentsTab(props: TabProps & { onShowEverything: () => void }) {
 }
 
 function EverythingTab(props: TabProps) {
-  const [view, setView] = useState<SecurityView>("all");
+  const [pickedView, setView] = useState<SecurityView>("all");
   const [includeLow, setIncludeLow] = useState(false);
+  // A picked Doors view falls back to Everything once the header stops offering it.
+  const view = viewFor(pickedView, props.health.sources);
   const canManageAreas = levelAtLeast(useModuleLevel("security"), "manage");
   // An area removed (or no longer visible) since it was picked stops
   // filtering: the feed falls back to all areas instead of a silent empty

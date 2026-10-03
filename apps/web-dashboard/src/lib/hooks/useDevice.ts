@@ -8,7 +8,9 @@ export function useDevice() {
   const { data: devices, error: devicesError } = useSWR<DeviceInfo[]>(
     "/api/devices",
     fetchDevices,
-    { refreshInterval: 10000 }
+    // An empty answer means the box refused this role (WARP-3378, an external
+    // guest): stop polling it rather than ask again every 10 s.
+    { refreshInterval: (latest) => (latest && latest.length === 0 ? 0 : 10000) }
   );
 
   const { data: health, error: healthError } = useSWR<HealthResponse>(

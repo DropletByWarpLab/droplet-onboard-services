@@ -17,7 +17,7 @@
  * the gates would be testing a fiction.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { TOOL_CATALOG } from "@droplet/tools-core";
+import { FAIL_CLOSED_MODULE_VERDICT, TOOL_CATALOG } from "@droplet/tools-core";
 
 const attributed = vi.hoisted(() => ({ fn: vi.fn() }));
 
@@ -34,6 +34,7 @@ import {
 import { EXCLUDED_FROM_CHAT_TOOLS } from "./chat-tool-scope.js";
 import { WRITE_TOOLS, type ToolAccessScope } from "./tool-access.service.js";
 import { isWithheldFromOffLan } from "./stored-content-egress.service.js";
+import { _setToolModuleVerdictForTests } from "./tool-module-verdict.service.js";
 
 const prisma = {} as never;
 
@@ -70,17 +71,26 @@ const SOME_WRITE_TOOL = TOOL_CATALOG.find(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // WARP-2972 — the suite-wide default (setup.ts): no module withheld.
+  _setToolModuleVerdictForTests(async () => ({ withheldDomains: new Set<string>() }));
 });
 
 // ── the gate order is the dispatch order ────────────────────────────────────
 
 describe("🔴 the reported gate order is the order the chain applies", () => {
-  it("puts write_tier before role_grant, as toolAllowedForPrincipal does", () => {
+  it("puts write_tier before role_grant, as toolAllowedForPrincipal does — and `module` before both", () => {
+    // WARP-2972: `module` leads. It is the workspace-level precondition (a
+    // switched-off feature, or one this person was never given), and for a
+    // role holder the §3 scope already embeds it — `scope.domains` drops a
+    // module-off domain — so reporting `role_grant` first would tell an admin
+    // to grant a role something that is switched off. Reported first, the role
+    // is still listed in `alsoWithheldBy`.
     // Not cosmetic. `toolAllowedForPrincipal` checks the tier first and only
     // then the scope, and `firstToolDeniedForPrincipal`'s doc says why: a
     // role-less caller holds no scope at all, so scope-first would report "no
     // grant" for somebody whose real refusal is the ADR-004 write floor.
     expect([...INSPECT_GATES]).toEqual([
+      "module",
       "write_tier",
       "role_grant",
       "interview_strip",
@@ -91,6 +101,91 @@ describe("🔴 the reported gate order is the order the chain applies", () => {
       // decided inside callTool, after the tool was advertised, so it is a
       // caveat on the row (`callRefusal`), never a withholding gate.
     ]);
+  });
+});
+
+// ── WARP-2972: the module gate ──────────────────────────────────────────────
+
+describe("the `module` gate — the tool's module is off for the box or for this person", () => {
+  const CAMERA_TOOL = "list_cameras";
+  const withhold = (...domains: string[]) =>
+    _setToolModuleVerdictForTests(async () => ({ withheldDomains: new Set(domains) }));
+
+  it("withholds a module-off tool from the OWNER, whose §3 scope is null", async () => {
+    // The trap this gate exists for: `scope === null` narrows nothing, so
+    // before WARP-2972 this row read `advertised` while the model could not be
+    // trusted to be denied it.
+    withhold("cameras");
+    asOwner();
+    const r = await inspectToolsForPerson(prisma, { targetUserId: "u1", selectionMode: "off" });
+    const cam = row(r, CAMERA_TOOL);
+    expect(cam.advertised).toBe(false);
+    expect(cam.gate).toBe("module");
+    expect(cam.reason).toMatch(/switched off|not been given/i);
+    expect(r.counts.byGate.module).toBeGreaterThan(0);
+  });
+
+  it("withholds it from a role-less family member too", async () => {
+    withhold("cameras");
+    asRolelessFamily();
+    const r = await inspectToolsForPerson(prisma, { targetUserId: "u2", selectionMode: "off" });
+    expect(row(r, CAMERA_TOOL).gate).toBe("module");
+  });
+
+  it("names `module` (not `role_grant`) for a role holder, and keeps the role in alsoWithheldBy", async () => {
+    // The role's scope drops the domain as a CONSEQUENCE of the module being
+    // off (computeEffectiveAccess intersects the workspace), so it would also
+    // have been refused by `role_grant`.
+    withhold("cameras");
+    asScoped(scope({ domains: new Set(["system"]) }), "admin");
+    const r = await inspectToolsForPerson(prisma, { targetUserId: "u3", selectionMode: "off" });
+    const cam = row(r, CAMERA_TOOL);
+    expect(cam.gate).toBe("module");
+    expect(cam.alsoWithheldBy).toContain("role_grant");
+  });
+
+  it("never fires for a tool in a domain no module claims, even when every module-owned domain is withheld", async () => {
+    withhold(...FAIL_CLOSED_MODULE_VERDICT.withheldDomains);
+    asOwner();
+    const r = await inspectToolsForPerson(prisma, { targetUserId: "u1", selectionMode: "off" });
+    const health = row(r, "get_system_health");
+    expect(health.gate).not.toBe("module");
+    expect(health.advertised).toBe(true);
+  });
+
+  it("changes nothing when nothing is withheld", async () => {
+    asOwner();
+    const r = await inspectToolsForPerson(prisma, { targetUserId: "u1", selectionMode: "off" });
+    expect(r.counts.byGate.module).toBe(0);
+    expect(row(r, CAMERA_TOOL).gate).not.toBe("module");
+  });
+
+  it("keeps the counts honest: byGate still sums to withheld", async () => {
+    withhold("cameras", "email");
+    asRolelessFamily();
+    const r = await inspectToolsForPerson(prisma, { targetUserId: "u2", message: "hi" });
+    const summed = Object.values(r.counts.byGate).reduce((a, b) => a + b, 0);
+    expect(summed).toBe(r.counts.withheld);
+    expect(r.counts.registered).toBe(TOOL_CATALOG.length);
+  });
+
+  it("asks the shipped verdict about the TARGET, not the caller", async () => {
+    const resolver = vi.fn(async () => ({ withheldDomains: new Set<string>() }));
+    _setToolModuleVerdictForTests(resolver);
+    asOwner();
+    await inspectToolsForPerson(prisma, { targetUserId: "the-target" });
+    expect(resolver).toHaveBeenCalledWith("the-target");
+  });
+
+  it("does not add a module verdict to an unresolved identity (DENY_ALL already covers every row)", async () => {
+    withhold("cameras");
+    attributed.fn.mockResolvedValue({
+      scope: { domains: new Set(), writeDomains: new Set(), locks: false },
+      tier: null,
+      unresolved: "user_missing",
+    });
+    const r = await inspectToolsForPerson(prisma, { targetUserId: "ghost" });
+    expect(r.counts.byGate.module).toBe(0);
   });
 });
 

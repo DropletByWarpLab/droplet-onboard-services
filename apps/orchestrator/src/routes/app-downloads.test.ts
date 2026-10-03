@@ -241,3 +241,124 @@ describe("GET /api/app-downloads/:platform/:asset", () => {
     expect(res.status).toBe(404);
   });
 });
+
+// WARP-3390 — the refusals' `detail` is the store's own text: filesystem paths
+// and raw `err.message`s. The route is open to every signed-in role on purpose
+// (a guest needs the client app too), so what it may SAY is what differs: only
+// an owner or admin gets `detail`; everyone else gets the stable `reason` code
+// (the page branches on it) and no path or raw error anywhere in the body.
+describe("WARP-3390 — `detail` is for owner and admin only", () => {
+  const PATH_DETAIL =
+    "cannot read /var/lib/droplet/app-downloads/catalog.json: EACCES: permission denied, open '/var/lib/droplet/app-downloads/catalog.json'";
+  const FILE_DETAIL = "catalog lists Droplet-setup.exe but it is not on disk: ENOENT /var/lib/droplet/app-downloads/windows/Droplet-setup.exe";
+
+  /** The router behind a stand-in principal: `null` = nobody stamped a `req.user`. */
+  function appAs(store: AppDownloadsStore, role: string | null) {
+    const app = express();
+    app.use((req, _res, next) => {
+      if (role !== null) {
+        (req as unknown as { user: unknown }).user = {
+          id: `u-${role}`,
+          username: role,
+          displayName: role,
+          role,
+        };
+      }
+      next();
+    });
+    app.use("/api", createAppDownloadsRouter({ store }));
+    return app;
+  }
+
+  const catalogFault = (failureReason: "catalog_missing" | "catalog_unreadable") =>
+    fakeStore({
+      loadCatalog: async () => ({ ok: false as const, failureReason, detail: PATH_DETAIL }),
+    });
+
+  it.each(["owner", "admin"])("a %s gets the detail on the empty-box answer and on a real fault", async (role) => {
+    const empty = await request(appAs(catalogFault("catalog_missing"), role)).get("/api/app-downloads");
+    expect(empty.status).toBe(200);
+    expect(empty.body.detail).toBe(PATH_DETAIL);
+    const fault = await request(appAs(catalogFault("catalog_unreadable"), role)).get("/api/app-downloads");
+    expect(fault.status).toBe(503);
+    expect(fault.body.detail).toBe(PATH_DETAIL);
+  });
+
+  it.each(["family", "guest", null])("a %s gets the reason code and NO path or raw error from the catalog", async (role) => {
+    for (const [failureReason, status] of [
+      ["catalog_missing", 200],
+      ["catalog_unreadable", 503],
+    ] as const) {
+      const res = await request(appAs(catalogFault(failureReason), role)).get("/api/app-downloads");
+      expect(res.status).toBe(status);
+      // the shape the page and the Mac decode is intact
+      expect(res.body).toEqual({
+        available: false,
+        reason: failureReason,
+        detail: null,
+        attestation: null,
+        platforms: [],
+      });
+      expect(JSON.stringify(res.body)).not.toMatch(/\/var\/|EACCES|catalog\.json/);
+    }
+  });
+
+  it("a guest still gets the catalog when apps are staged — the installer is for every signed-in role", async () => {
+    const res = await request(appAs(fakeStore({ loadCatalog: async () => CATALOG_OK }), "guest")).get(
+      "/api/app-downloads",
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.available).toBe(true);
+    expect(res.body.detail).toBeNull();
+    expect(res.body.platforms[0].assets[0].url).toBe("/api/app-downloads/windows/Droplet-setup.exe");
+  });
+
+  it("a guest still downloads the installer bytes", async () => {
+    const store = fakeStore({
+      loadCatalog: async () => CATALOG_OK,
+      openAsset: async () => {
+        const { Readable } = await import("node:stream");
+        return {
+          ok: true as const,
+          stream: Readable.from([INSTALLER]) as never,
+          asset: { name: "Droplet-setup.exe", kind: "installer" as const, size: INSTALLER.length, sha256: "a".repeat(64) },
+          size: INSTALLER.length,
+          contentType: "application/vnd.microsoft.portable-executable",
+        };
+      },
+    });
+    const res = await request(appAs(store, "guest"))
+      .get("/api/app-downloads/windows/Droplet-setup.exe")
+      .responseType("blob");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(INSTALLER);
+  });
+
+  const bytesRefusal = (failureReason: "asset_unreadable" | "asset_missing") =>
+    fakeStore({
+      loadCatalog: async () => CATALOG_OK,
+      openAsset: async () => ({ ok: false as const, failureReason, detail: FILE_DETAIL }),
+    });
+
+  it.each(["owner", "admin"])("a %s gets `detail` on a refused download", async (role) => {
+    const res = await request(appAs(bytesRefusal("asset_unreadable"), role)).get(
+      "/api/app-downloads/windows/Droplet-setup.exe",
+    );
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: "asset_unreadable", detail: FILE_DETAIL });
+  });
+
+  it.each(["family", "guest", null])("a %s gets only the error code on a refused download", async (role) => {
+    for (const [failureReason, status] of [
+      ["asset_unreadable", 503],
+      ["asset_missing", 404],
+    ] as const) {
+      const res = await request(appAs(bytesRefusal(failureReason), role)).get(
+        "/api/app-downloads/windows/Droplet-setup.exe",
+      );
+      expect(res.status).toBe(status);
+      expect(res.body).toEqual({ error: failureReason });
+      expect(JSON.stringify(res.body)).not.toMatch(/\/var\/|ENOENT/);
+    }
+  });
+});

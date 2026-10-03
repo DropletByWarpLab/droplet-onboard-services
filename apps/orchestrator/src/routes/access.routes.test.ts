@@ -872,6 +872,28 @@ describe("POST /api/access/roles (create)", () => {
     expect(res.body.role.connectorGrants).toEqual([{ provider: "eaglesoft", level: "read" }]);
   });
 
+  // ADR-055 — the doors `view` floor is a refusal: below admin a tier holds no
+  // doors grant, so the server does not store one (the client is never trusted).
+  it.each(["family", "guest"] as const)("does not store doors:view on a %s-based role at create (ADR-055)", async (startingPoint) => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma))
+      .post("/api/access/roles")
+      .send(payload({ startingPoint, featureGrants: [{ moduleId: "doors", level: "view" }, { moduleId: "files", level: "view" }] }));
+    expect(res.status).toBe(200);
+    expect(res.body.role.featureGrants).toEqual([{ moduleId: "files", level: "view" }]);
+    expect(prisma._roles().get(res.body.role.id).featureGrants).toEqual([{ moduleId: "files", level: "view" }]);
+  });
+
+  it("keeps doors:view on an Admin-based role — the floor is a floor, not a ban (ADR-055)", async () => {
+    const prisma = createPrismaMock();
+    const res = await request(buildApp(prisma))
+      .post("/api/access/roles")
+      .send(payload({ startingPoint: "admin", featureGrants: [{ moduleId: "doors", level: "manage" }] }));
+    expect(res.status).toBe(200);
+    // manage is clamped to view (doors offers no more), and admin may hold it.
+    expect(res.body.role.featureGrants).toEqual([{ moduleId: "doors", level: "view" }]);
+  });
+
   it("uniquifies a colliding slug with a numeric suffix", async () => {
     const prisma = createPrismaMock({
       roles: [{ id: "r1", name: "Reception", slug: "reception", startingPoint: "family" }],
@@ -1438,6 +1460,15 @@ describe("PATCH /api/access/roles/:id", () => {
       .send({ startingPoint: "guest" });
     expect(res.status).toBe(200);
     expect(res.body.role.connectorGrants).toEqual([]);
+  });
+
+  it("…and drops a STORED doors:view when the starting point drops below admin (ADR-055)", async () => {
+    const prisma = createPrismaMock({
+      roles: [{ ...baseRole, startingPoint: "admin", featureGrants: [{ moduleId: "doors", level: "view" }] }],
+    });
+    const res = await request(buildApp(prisma)).patch("/api/access/roles/r1").send({ startingPoint: "family" });
+    expect(res.status).toBe(200);
+    expect(res.body.role.featureGrants).toEqual([]);
   });
 
   it("keeps read_write on an Admin-based role (the cap is a floor, not a ban)", async () => {

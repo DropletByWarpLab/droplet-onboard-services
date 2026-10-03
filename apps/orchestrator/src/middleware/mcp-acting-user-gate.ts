@@ -25,6 +25,11 @@
  * match wins": a value that is one person's username and another's id is
  * AMBIGUOUS, and picking either scopes the call with a stranger's reach.
  *
+ * Before both questions, the TIER FLOOR (WARP-3365 / WARP-3369): a module the
+ * access catalog refuses the acting person's tier (`refuseBelowFloor`: an
+ * external guest and CRM or Projects) is 404 `module_disabled`, as it is for
+ * that person's browser (`requireModuleTierFloor`).
+ *
  * Two questions, both about the acting person:
  *   1. the tool scope — is `domain` in their §3 reach (a write needs `use`)?
  *      The method stands in for "a write": a GET is a read tool's hop. Where
@@ -35,8 +40,10 @@
  *   2. the feature — ONLY where the browser asks it: when the module serving
  *      this prefix is in FEATURE_GATED_MODULES (module-mounts.ts), the acting
  *      person must hold it, the same check `requireFeatureAccess` makes of a
- *      human on that URL. Today that is `crm` (/api/crm); `projects` is not
- *      feature-gated, so /api/pm asks question 1 only. The rule is browser
+ *      human on that URL, and at the LEVEL the method needs: `view` for a read,
+ *      `act` for a write (WARP-3365). Today that is `crm` (/api/crm) and
+ *      `money` (/api/money); `projects` is not feature-gated, so /api/pm asks
+ *      question 1 only. The rule is browser
  *      parity: the assistant never reaches more than the person could in the
  *      browser, and never LESS either — a CRM-only person's `business_find`
  *      on a customer reads that customer's projects, as their browser can.
@@ -72,6 +79,13 @@ import {
 } from "../services/tool-access.service.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
 import {
+  FEATURE_LEVEL_RANK,
+  isGateableModuleId,
+  maxLevelFor,
+  type FeatureLevel,
+} from "../services/access-catalog.js";
+import type { Role } from "../services/jwt.service.js";
+import {
   resolveAssertedUser,
   type AssertedUserFailure,
   type AssertedUserResolution,
@@ -89,7 +103,7 @@ export const MCP_PRINCIPAL_ID = "_service:mcp";
 export type ActingUserFailure = AttributionFailure | "user_ambiguous";
 
 /** The acting person's tool reach, plus their `User.id` (null when unresolved). */
-export type ActingUserAccess = Omit<AttributedToolAccess, "unresolved"> & {
+export type ActingUserAccess = Omit<AttributedToolAccess, "unresolved" | "username"> & {
   unresolved: ActingUserFailure | null;
   userId: string | null;
 };
@@ -120,7 +134,10 @@ export function actingUserAccessResolver(prisma: PrismaClient): ActingUserAccess
     }
     if (!resolved.ok) return deny(ASSERTED_USER_FAILURE[resolved.reason]);
     const { id } = resolved.user;
-    return { ...(await resolveAttributedToolAccess(prisma, id)), userId: id };
+    // The gate has no use for the row's handle (WARP-2972 added it for the
+    // scheduler); it stays out of what this resolver hands its callers.
+    const { username: _handle, ...access } = await resolveAttributedToolAccess(prisma, id);
+    return { ...access, userId: id };
   };
 }
 
@@ -181,6 +198,22 @@ export function requireMcpActingUserToolDomain(
       deny(req, res, access.unresolved);
       return;
     }
+    // WARP-3365 / WARP-3369 — the tier floor, asked of the ACTING person: a
+    // module the catalog refuses their tier (an external guest and CRM or
+    // Projects) is refused to the assistant acting for them too, whatever
+    // their tool scope says. A role-less guest has a null scope (question 1
+    // passes), and `projects` is not feature-gated (question 2 is not asked),
+    // so without this a guest could read the company's customers and work
+    // items by asking the assistant. Same catalog fact as
+    // `requireModuleTierFloor` on the browser path.
+    if (
+      access.tier !== null &&
+      isGateableModuleId(moduleId) &&
+      maxLevelFor(access.tier as Role, moduleId) === null
+    ) {
+      deny(req, res, "tier_below_module_floor");
+      return;
+    }
     const scope = access.scope;
     if (scope !== null) {
       const write = everyToolWrites || !READ_METHODS.has(req.method);
@@ -198,9 +231,21 @@ export function requireMcpActingUserToolDomain(
     }
     try {
       const effective = access.userId ? await features(access.userId) : null;
-      if (effective && !effective.features.some((f) => f.moduleId === moduleId)) {
-        deny(req, res, "feature_not_held");
-        return;
+      if (effective) {
+        const held = effective.features.find((f) => f.moduleId === moduleId);
+        if (!held) {
+          deny(req, res, "feature_not_held");
+          return;
+        }
+        // WARP-3365 review — the LEVEL, not just the module. A write through a
+        // tool needs `act`, as it does for the same person in the browser
+        // (routes/crm.ts names the level on every write); a role that holds
+        // `crm: view` reads through the assistant and cannot write through it.
+        const needed: FeatureLevel = READ_METHODS.has(req.method) ? "view" : "act";
+        if (FEATURE_LEVEL_RANK[held.level] < FEATURE_LEVEL_RANK[needed]) {
+          deny(req, res, "feature_level_too_low");
+          return;
+        }
       }
     } catch (err) {
       logger.error({ err }, "mcp_acting_user_feature_read_failed");

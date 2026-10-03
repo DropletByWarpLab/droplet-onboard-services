@@ -266,7 +266,7 @@ function partOf(zones: readonly string[]): string | null {
     .join(", ")} and '${keys[keys.length - 1]}' parts of the view`;
 }
 
-/** What happened, in plain words; null for a row a summary never names (mode changes, low detections). */
+/** What happened, in plain words; null for a row a summary never names (mode changes, low detections, lock readings). */
 function whatOf(kind: SecurityEventKind, labels: readonly string[]): string | null {
   switch (kind) {
     case "detection":
@@ -284,6 +284,9 @@ function whatOf(kind: SecurityEventKind, labels: readonly string[]): string | nu
       return "camera system back";
     case "threat":
       return "network or sign-in warning";
+    // A lock reading is never narrated (P4 PR-4): the row carries no `observed` (live or polled), so a summary
+    // could not say "when Droplet checked", and it would have to name a lock. The incident's reasons still count it.
+    case "lock_state":
     case "detection_low":
     case "mode_changed":
       return null;

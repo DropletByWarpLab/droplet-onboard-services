@@ -4,6 +4,8 @@ LAN-only views surfaced to `owner` / `admin` roles in the web dashboard. Authent
 
 ## `/admin/claude-activity` — meta-observability
 
+> **Developer-only (WARP-3433).** This is Warp Lab's own engineering dashboard, not a customer feature: it ships **dark and absent** unless the box runs with `DROPLET_DEV_ENGINEERING_DASHBOARD=1` (default off; `setup.sh` and compose never set it). Without the flag the orchestrator does not mount the route (404), `capabilities.claudeActivity` is `false`, the nav entry and the page are absent, and nothing calls GitHub or Jira. With it, the route and capability also need `GITHUB_TOKEN` or a fully configured Jira, and no GitHub call is made without a token.
+
 **What it shows.** A live view of what the AI engineer (Claude) is doing on this repo. Seven widgets in a responsive 3-column grid:
 
 | Widget | Source | What it answers |
@@ -75,7 +77,8 @@ The file lives at the repo root, is gitignored (only `.claude/session-state.exam
 
 | Variable | Default | Notes |
 |---|---|---|
-| `GITHUB_TOKEN` | empty | Optional fine-grained PAT scoped to this repo with `metadata: read`, `actions: read`, `pull-requests: read`, `contents: read`. Without one, calls go unauthenticated (60 req/h ceiling — fine for sandbox/dev). |
+| `DROPLET_DEV_ENGINEERING_DASHBOARD` | `0` | The explicit developer flag. `1`/`true` turn the dashboard on; anything else (including empty) leaves it absent. Never set on a customer box. |
+| `GITHUB_TOKEN` | empty | Fine-grained PAT scoped to this repo with `metadata: read`, `actions: read`, `pull-requests: read`, `contents: read`. Required for any GitHub data: without one no GitHub request is made and the GitHub panels show "unavailable". |
 | `GITHUB_REPO_OWNER` | `DropletByWarpLab` | Override for forks. |
 | `GITHUB_REPO_NAME` | `droplet-onboard-services` | Override for forks. |
 | `JIRA_HOST` | `warp-lab.atlassian.net` | Bare cloud subdomain (no scheme). |

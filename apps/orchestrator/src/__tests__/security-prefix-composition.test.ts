@@ -65,6 +65,7 @@ const CFG: AvailabilityConfig = {
   DROPLET_MATTER_SERVICE_URL: "http://matter:8083",
   ROUTING_SERVICE_URL: "http://routing:8080",
   SWITCH_SERVICE_URL: "http://switch:8081",
+  DOORS_ENABLED: "1",
 };
 
 /** Security switched off box-wide — today's default on every box. */

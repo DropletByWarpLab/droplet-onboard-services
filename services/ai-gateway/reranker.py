@@ -1,8 +1,9 @@
 """WARP-286 / WARP-644 — BGE-reranker-base singleton.
 
-Loads the model lazily on first use. Cached on disk at
-`/var/cache/droplet/models/bge-reranker-base/` so subsequent
-container starts skip the model download.
+Loads the model lazily on first use from
+`/var/cache/droplet/models/bge-reranker-base/`, where the image bakes it at
+`RERANKER_MODEL_REVISION` (WARP-3426: the gateway runs with HF_HUB_OFFLINE=1
+and never downloads at runtime).
 
 Inference runs via optimum.onnxruntime on CPU. Future tickets may
 add a TensorRT backend for inference-host GPU acceleration.
@@ -31,9 +32,23 @@ logger = logging.getLogger(__name__)
 # was stale and was the second half of the import/load failure). optimum 2.x
 # resolves it via subfolder + file_name below.
 RERANKER_MODEL_ID = "BAAI/bge-reranker-base"
+# WARP-3426: the Hub commit the image bakes. A commit, never a branch — the
+# runtime is offline, so this must match the baked snapshot exactly.
+RERANKER_MODEL_REVISION = "2cfc18c9415c912f9d8155881c133215df768a70"
 RERANKER_MODEL_SUBFOLDER = "onnx"
 RERANKER_MODEL_FILE = "model.onnx"
 RERANKER_CACHE_DIR = Path("/var/cache/droplet/models/bge-reranker-base")
+# Everything the tokenizer + ONNX session read, and nothing else: the repo also
+# carries model.safetensors and pytorch_model.bin (~1.1 GB each) that the ONNX
+# path never touches.
+RERANKER_FILES = [
+    "config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "sentencepiece.bpe.model",
+    f"{RERANKER_MODEL_SUBFOLDER}/{RERANKER_MODEL_FILE}",
+]
 
 # Hard caps used by the gRPC handler + this module. Documented as named
 # constants per CLAUDE.md no-guessing rule.
@@ -77,6 +92,7 @@ class RerankerSingleton:
         # gRPC server). optimum masks the real cause as "Could not import
         # module 'ORTModelForSequenceClassification'"; see WARP-644.
         try:
+            from huggingface_hub import snapshot_download
             from optimum.onnxruntime import ORTModelForSequenceClassification
             from transformers import AutoTokenizer
         except Exception as e:  # noqa: BLE001 — surface any import failure
@@ -88,12 +104,22 @@ class RerankerSingleton:
             RERANKER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
             os.environ.setdefault("HF_HOME", str(RERANKER_CACHE_DIR))
             logger.info("Loading BGE-reranker-base from %s", RERANKER_CACHE_DIR)
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                RERANKER_MODEL_ID, cache_dir=RERANKER_CACHE_DIR
-            )
-            self._model = ORTModelForSequenceClassification.from_pretrained(
+            # WARP-3426: load from the local snapshot directory, never by repo
+            # id. Given a repo id, optimum lists the repo's files over the Hub
+            # API on every load (even fully cached), and in offline mode it
+            # resolves the snapshot through refs/<revision>, which a pinned
+            # commit never has. snapshot_download with a commit hash returns
+            # the baked directory without a network call (and, at image build,
+            # is what bakes it).
+            model_dir = snapshot_download(
                 RERANKER_MODEL_ID,
+                revision=RERANKER_MODEL_REVISION,
                 cache_dir=RERANKER_CACHE_DIR,
+                allow_patterns=RERANKER_FILES,
+            )
+            self._tokenizer = AutoTokenizer.from_pretrained(model_dir)
+            self._model = ORTModelForSequenceClassification.from_pretrained(
+                model_dir,
                 subfolder=RERANKER_MODEL_SUBFOLDER,
                 file_name=RERANKER_MODEL_FILE,
             )

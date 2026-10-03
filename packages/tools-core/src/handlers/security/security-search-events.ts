@@ -2,7 +2,9 @@
  * WARP-2979 (ADR-059 P4 §6.12.3) — `security_search_events`: the Security
  * events the person may see, newest first — detections, cameras going
  * offline or back, network and sign-in warnings (owner/admin only, by the
- * route) and changes of the site mode.
+ * route), changes of the site mode and (P4 PR-4) door lock changes (Devices
+ * view only, by the route). Each lock event says how it was `found`: a change
+ * found by Droplet's 60 s check carries that check's time, not the change's.
  *
  * Read-only (§6.12.4): GET A3 only. A camera or area the person cannot see
  * answers exactly like one that does not exist. See ./common.ts.
@@ -54,7 +56,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "security_search_events",
   description:
-    "Search the last 30 days of Security events: camera detections, cameras going offline or coming back, network or sign-in warnings and site mode changes. Filter by area, camera, label, kind and period; times are local. Use for 'was anyone in the stock room after 9?'. Droplet knows a person was seen, not who. Only covers what this person may see.",
+    "Search the last 30 days of Security events: camera detections, cameras going offline or coming back, door lock changes, network or sign-in warnings and site mode changes. Filter by area, camera, label, kind and period; times are local. found 'when Droplet checked': the time is when Droplet noticed, not when it happened. Use for 'was anyone in the stock room after 9?'. Droplet knows a person was seen, not who. Only covers what this person may see.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

@@ -37,6 +37,7 @@ import {
   type ReasonDraft,
   type ReasonState,
   type ActivitySighting,
+  type LockActivity,
   type AreaMatch,
   type SuppressionMatchRow,
   type TriageEvent,
@@ -849,5 +850,84 @@ describe("camera_offline_during_activity (alert, §6.7.2)", () => {
   it("a person still in view (PR-D's ongoing row) counts over [startedAt, written]", () => {
     const ongoing = seen(-300_000, { kind: "detection_ongoing", endedAt: null, createdAt: plus(DROP, -30_000) });
     expect(judge({ activity: [ongoing] })).toMatchObject({ detail: { activity: { kind: "detection_ongoing" } } });
+  });
+
+  // ── P4 PR-4 (D12): a door lock changing counts as activity ──────────────
+  const LOCK = "matter:4660/1";
+  /** A LIVE change of a lock person-linked to the Stock room, `offsetMs` from the drop. */
+  const turned = (offsetMs: number, over: Partial<LockActivity> = {}): LockActivity => {
+    const id = nextId++;
+    return {
+      id,
+      sourceRef: LOCK,
+      reading: "unlocked",
+      observed: "live",
+      baseline: false,
+      startedAt: plus(DROP, offsetMs),
+      personZoneIds: [STOCK],
+      ...over,
+    };
+  };
+
+  it.each([
+    ["closed", scheduleTl(), "closed"],
+    ["away", awayTl, "away"],
+  ] as const)("PR-4: a LIVE change of a lock a person linked to one of C's areas counts while %s — relatedLock, no related camera", (_n, tl, mode) => {
+    const lock = turned(-30_000);
+    const r = judge({ timeline: tl, activity: [], lockActivity: [lock] });
+    expect(r).toMatchObject({
+      code: "camera_offline_during_activity",
+      severity: "alert",
+      evidenceCamera: "back",
+      evidenceKind: "camera_offline",
+      relatedCamera: null,
+      relatedLock: true,
+      detail: {
+        mode,
+        activity: { eventId: lock.id.toString(), kind: "lock_state", label: "unlocked", at: lock.startedAt.toISOString(), zoneId: STOCK, zoneName: "Stock room" },
+      },
+    });
+    expect(RULESET.camera_offline_during_activity.locks).toEqual({ readings: ["locked", "unlocked", "unlatched"], observed: "live" });
+  });
+
+  it("🔴 PR-4: a POLLED lock row never counts — its time is when the 60 s check found it; nor the baseline, nor a jammed or unknown reading", () => {
+    expect(judge({ activity: [], lockActivity: [turned(-30_000, { observed: "polled" })] })).toBeNull();
+    expect(judge({ activity: [], lockActivity: [turned(-30_000, { baseline: true })] })).toBeNull();
+    expect(judge({ activity: [], lockActivity: [turned(-30_000, { reading: "not_fully_locked" })] })).toBeNull();
+    expect(judge({ activity: [], lockActivity: [turned(-30_000, { reading: "unknown" })] })).toBeNull();
+    for (const reading of ["locked", "unlocked", "unlatched"]) {
+      expect(judge({ activity: [], lockActivity: [turned(-30_000, { reading })] }), reading).not.toBeNull();
+    }
+  });
+
+  it("PR-4: the window's edges for a lock change (an instant): −120 s fires, −121 s does not; +60 s fires, +61 s does not", () => {
+    expect(judge({ activity: [], lockActivity: [turned(-120_000)] })).not.toBeNull();
+    expect(judge({ activity: [], lockActivity: [turned(-120_001)] })).toBeNull();
+    expect(judge({ activity: [], lockActivity: [turned(-121_000)] })).toBeNull();
+    expect(judge({ activity: [], lockActivity: [turned(60_000)] })).not.toBeNull();
+    expect(judge({ activity: [], lockActivity: [turned(60_001)] })).toBeNull();
+    expect(judge({ activity: [], lockActivity: [turned(61_000)] })).toBeNull();
+  });
+
+  it("PR-4: only through PERSON links — a lock only Droplet linked, or one in another camera's area, is nothing", () => {
+    expect(judge({ activity: [], lockActivity: [turned(-30_000, { personZoneIds: [] })] })).toBeNull();
+    expect(judge({ activity: [], lockActivity: [turned(-30_000, { personZoneIds: ["z-yard"] })] })).toBeNull();
+    expect(judge({ personAreas: new Map(), activity: [], lockActivity: [turned(-30_000)] })).toBeNull();
+  });
+
+  it("PR-4: never in opening hours, lock or not", () => {
+    expect(
+      judge({ offline: offline({ startedAt: WED_NOON, createdAt: WED_NOON }), now: plus(WED_NOON, 90_000), activity: [], lockActivity: [{ ...turned(0), startedAt: plus(WED_NOON, -10_000) }] }),
+    ).toBeNull();
+  });
+
+  it("PR-4: the LATEST activity is the evidence, a sighting or a lock change", () => {
+    const person = seen(-60_000);
+    const lock = turned(-10_000);
+    expect(judge({ activity: [person], lockActivity: [lock] })).toMatchObject({ relatedCamera: null, relatedLock: true, detail: { activity: { eventId: lock.id.toString() } } });
+    const later = seen(-5_000);
+    const r = judge({ activity: [later], lockActivity: [lock] })!;
+    expect(r).toMatchObject({ relatedCamera: "stock_cam", detail: { activity: { kind: "detection", eventId: later.id.toString() } } });
+    expect(r.relatedLock ?? false).toBe(false);
   });
 });

@@ -26,8 +26,8 @@ import type { IncidentViewer } from "./security-incident-view.js";
 const ZONE = { id: "z1", name: "Stock room", kind: "interior" as const };
 const OTHER_ZONE = { id: "z2", name: "Office", kind: "interior" as const };
 
-const owner: IncidentViewer = { userId: "u-owner", visibleCameras: "all", mayReadThreats: true, ownerOrAdmin: true };
-const frontOnly: IncidentViewer = { userId: "u-maria", visibleCameras: new Set(["front"]), mayReadThreats: false, ownerOrAdmin: false };
+const owner: IncidentViewer = { userId: "u-owner", visibleCameras: "all", mayReadThreats: true, mayReadLocks: true, ownerOrAdmin: true };
+const frontOnly: IncidentViewer = { userId: "u-maria", visibleCameras: new Set(["front"]), mayReadThreats: false, mayReadLocks: false, ownerOrAdmin: false };
 
 function link(id: string, sourceRef: string, setBy: "person" | "droplet", over: Partial<IncidentLinkRow> = {}): IncidentLinkRow {
   return {
@@ -84,6 +84,16 @@ describe("dropletOnlyLinks — the cameras of an area incident linked there only
     expect(out).toEqual([
       { linkId: "l-back", zone: ZONE, sourceKind: "camera", sourceRef: "back", camera: "back", label: "Back camera" },
     ]);
+  });
+
+  // WARP-2977 P2b-2 x P4: Keep is for cameras. A lock link sits in the area but is never offered, even to a viewer
+  // who may read locks, and never disturbs a camera's own Droplet-only test.
+  it("a door-lock link is never offered for Keep, and never counts as a camera's link", () => {
+    const door = link("l-door", "matter:4660/1", "droplet", { sourceKind: "lock", sourceLabel: "Back door lock" });
+    expect(owner.mayReadLocks).toBe(true);
+    expect(dropletOnlyLinks(incident(), [door], owner, LABELS)).toEqual([]);
+    expect(dropletOnlyLinks(incident(), [door, link("l-back", "back", "droplet")], owner, LABELS).map((l) => l.linkId)).toEqual(["l-back"]);
+    expect(dropletOnlyLinks(incident(), [link("l-door2", "matter:4660/1", "person", { sourceKind: "lock" }), link("l-back", "back", "droplet")], owner, LABELS).map((l) => l.linkId)).toEqual(["l-back"]);
   });
 
   it("a camera a person linked too (any part of its view) is not Droplet-only: nothing for it", () => {

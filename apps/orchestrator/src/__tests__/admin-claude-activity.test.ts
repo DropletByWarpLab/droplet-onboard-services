@@ -6,6 +6,10 @@
  *   - non-admin (role = "family") gets 403
  *   - admin (role = "owner") gets 200 with the documented shape
  *
+ * WARP-3433: the dashboard ships dark, so these cases switch the developer flag
+ * on and give it a GitHub token (the capability needs both); the flag-off and
+ * no-token behaviour is pinned in claude-activity.dev-flag.test.ts.
+ *
  * The session-state file location is overridden via
  * CLAUDE_SESSION_STATE_PATH so tests don't depend on what's sitting in
  * the repo's .claude/ at the moment.
@@ -17,6 +21,7 @@ import request from "supertest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { config } from "../config.js";
 import { createAdminClaudeActivityRouter } from "../routes/admin-claude-activity.js";
 import type { Role } from "../services/jwt.service.js";
 
@@ -78,14 +83,22 @@ describe("GET /api/admin/claude-activity", () => {
   let dir: string;
   let stateFile: string;
   const originalEnv = process.env.CLAUDE_SESSION_STATE_PATH;
+  const originalToken = process.env.GITHUB_TOKEN;
+  const cfg = config as unknown as { DROPLET_DEV_ENGINEERING_DASHBOARD: boolean };
+  const originalFlag = cfg.DROPLET_DEV_ENGINEERING_DASHBOARD;
 
   beforeEach(async () => {
     dir = await mkdtemp(path.join(tmpdir(), "warp-279-route-"));
     stateFile = path.join(dir, "session-state.json");
     process.env.CLAUDE_SESSION_STATE_PATH = stateFile;
+    cfg.DROPLET_DEV_ENGINEERING_DASHBOARD = true;
+    process.env.GITHUB_TOKEN = "ghp_test";
   });
 
   afterEach(async () => {
+    cfg.DROPLET_DEV_ENGINEERING_DASHBOARD = originalFlag;
+    if (originalToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = originalToken;
     if (originalEnv === undefined) {
       delete process.env.CLAUDE_SESSION_STATE_PATH;
     } else {

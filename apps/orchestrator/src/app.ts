@@ -87,6 +87,7 @@ import { createSecuritySiteRouter } from "./routes/security-site.js";
 import { createSecurityIncidentsRouter } from "./routes/security-incidents.js";
 import { createSecurityPatternsRouter } from "./routes/security-patterns.js";
 import { createSecurityAssistantRouter } from "./routes/security-assistant.js";
+import { createDoorsRouter } from "./routes/doors.js";
 import { createSwitchRouter } from "./routes/switch.js";
 import { createBuildingRouter } from "./routes/building.js";
 import { createDisplayRouter } from "./routes/display.js";
@@ -127,6 +128,7 @@ import {
   loadUserEffectiveScopes,
 } from "./services/scope-loader.service.js";
 import { initEffectiveAccess } from "./services/effective-access.service.js";
+import { initToolModuleVerdict } from "./services/tool-module-verdict.service.js";
 import { createSettingsRouter } from "./routes/settings.js";
 import { createTlsCertificateRouter } from "./routes/tls-certificate.js";
 import { createBackupStatusRouter } from "./routes/backup-status.js";
@@ -139,6 +141,7 @@ import { createToolsRouter } from "./routes/tools.js";
 import { detachRemoteMcp, mcpClient, remoteCallPolicy } from "./services/mcp-client.singleton.js";
 import { stepResultValue, type StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
+import { createLlmAccessRouter, exemptLlmAccessInternalCalls } from "./routes/llm-access.js";
 import { createHardwareRouter } from "./routes/hardware.js";
 import { createHomeRouter } from "./routes/home.js";
 import { createBriefingsRouter } from "./routes/briefings.js";
@@ -340,7 +343,9 @@ export function createApp(
   // fan-out, a folder of thumbnails ≈ 100 requests). Each internal service
   // principal (mcp-server, email-indexer, routing, …) comes from its own
   // container IP so they don't share a bucket with a browser.
-  app.use(authenticatedApiRateLimit);
+  // WARP-3452: ai-gateway's two `/llm/` bookkeeping calls skip it (see
+  // exemptLlmAccessInternalCalls); nothing else does.
+  app.use(exemptLlmAccessInternalCalls(authenticatedApiRateLimit));
 
   // WARP-3122 — a signed recordings-segment URL stands in for the bearer on
   // GET /api/cameras/:name/playback.segment only. This router answers
@@ -411,6 +416,15 @@ export function createApp(
 
   const moduleGate = createModuleGate(prisma, config);
   mountModuleGates(app, moduleGate);
+  // WARP-2972 — bind the module→tool-domain verdict to the SAME gate the routes
+  // use, so a toggle leaves the tool list (chat pool, /api/llm/tools, the
+  // mcp-server) on the tick it 404s the route. The tool list is built long
+  // after boot, so this needs no ordering beyond "before the first request".
+  //
+  // `AUTH_ENABLED=false` has no identity system — every request is the
+  // synthetic `dev` owner, who has no User row — so there is no person to
+  // narrow by and only the box axis applies.
+  initToolModuleVerdict(prisma, moduleGate.effectiveIds, () => config.AUTH_ENABLED);
   // WARP-2988 — layer 2 for the `_service:mcp` principal: tool calls reaching
   // the CRM / PM routes are narrowed by the ACTING user's §3 tool scope
   // (`business` needs CRM or Projects), and, since WARP-3145, tool calls
@@ -672,6 +686,16 @@ export function createApp(
   // acting-user gate above (`security` is in MCP_ACTING_USER_GATED_DOMAINS).
   // The last Security router: every path is under the literal /assistant/.
   app.use("/api", createSecurityAssistantRouter(prisma));
+  // ADR-055 (P4a) — the doors control-plane spine. Mounted unconditionally: the
+  // `doors` module gate (toggle + per-person view) that mountModuleGates put in
+  // front of /api/doors ABOVE is what makes it absent — DOORS_ENABLED off means
+  // `available: false`, so every route here answers 404 module_disabled.
+  // Registered before any catch-all path param (there is none at this level),
+  // which the boot assertion (services/doors-wiring.ts) checks on every boot.
+  // The two GETs also admit `_service:mcp` (the P4b `doors_*` tools), behind the
+  // WARP-2988 acting-user gate above (`doors` is in MCP_ACTING_USER_GATED_DOMAINS,
+  // so the acting person's tier, tool scope and `doors` grant all apply).
+  app.use("/api", createDoorsRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
   // Device control over BACnet/Modbus/SNMP/KNX (services/device-gateway).
   app.use("/api", createBuildingRouter(prisma));
@@ -685,7 +709,13 @@ export function createApp(
   app.use("/api", createApsRouter(prisma));
   // WARP-279: meta-observability dashboard for admin/owner roles. Aggregates
   // session-state.json + GitHub + Jira + compliance-progress.md.
-  app.use("/api", createAdminClaudeActivityRouter());
+  // WARP-3433: Warp Lab's own engineering dashboard, not a customer feature —
+  // ships dark and dark means ABSENT (as DOORS_ENABLED): not mounted, so
+  // /api/admin/claude-activity is a plain 404, unless a developer sets
+  // DROPLET_DEV_ENGINEERING_DASHBOARD=1. setup.sh and compose never do.
+  if (config.DROPLET_DEV_ENGINEERING_DASHBOARD) {
+    app.use("/api", createAdminClaudeActivityRouter());
+  }
   // WARP-230: device-identity admin routes. GET /status + POST /reseal,
   // both gated by admin role; reseal additionally requires recent MFA.
   // The gRPC client is constructed once per orchestrator instance; the
@@ -834,6 +864,10 @@ export function createApp(
 
   // WARP-471: F3 models page endpoint (READ-ONLY per one-model rule).
   app.use("/api", createModelsRouter(prisma));
+  // WARP-3452 (ADR-067): coding-tool tokens for the local model API — the
+  // Settings page's routes, plus the two ai-gateway-only routes behind `/llm/`
+  // (introspect on every request, usage after it). No module claims the prefix.
+  app.use("/api", createLlmAccessRouter(prisma));
 
   // WARP-469: F1 home aggregation. Single round-trip backing
   // FEATURES.md §2.1 (greeting + tiles + timeline + suggestions).

@@ -134,10 +134,34 @@ describe("alertCopy", () => {
     expect(both.body).toBe("Back camera saw someone at 2:15 AM. The site was closed.");
   });
 
+  // P4 PR-4 (D12): the activity was a door lock changing — the words say what the lock reported, never who or why.
+  const lockDropped = (at: Date, reading: string | null = "unlocked"): AlertEvidence => ({
+    ...dropped(at),
+    seenCameraLabel: null,
+    seenLockReading: reading,
+  });
+
+  it("PR-4: soon after a door lock changed — the lock's reading, where it is, and when; never a cause", () => {
+    expect(alertCopy({ zoneName: "Stock room", evidence: [lockDropped(plus(T, 120_000))], tz: "Europe/London" })).toEqual({
+      title: "A camera in Stock room stopped reporting after hours",
+      body: "Back camera stopped reporting at 2:16 AM, soon after a door lock in Stock room was unlocked at 2:15 AM. The site was closed.",
+    });
+    expect(alertCopy({ zoneName: "Stock room", evidence: [lockDropped(T, "locked")], tz: null }).body).toBe(
+      "Back camera stopped reporting, soon after a door lock in Stock room was locked. The site was closed.",
+    );
+    expect(alertCopy({ zoneName: "Stock room", evidence: [lockDropped(T, "unlatched")], tz: null }).body).toContain("a door lock in Stock room was unlatched");
+    // A reading the rule never writes reads as a change, never as a guess.
+    expect(alertCopy({ zoneName: "Stock room", evidence: [lockDropped(T, "made-up")], tz: null }).body).toContain("a door lock in Stock room changed");
+    // Where the LOCK is, not the incident's area.
+    expect(alertCopy({ zoneName: "Stock room", evidence: [{ ...lockDropped(T), seenAreaName: "Back door" }], tz: null }).body).toContain("a door lock in Back door was unlocked");
+  });
+
   it("the new wording passes the BANNED list and names no person", () => {
     for (const v of [
       alertCopy({ zoneName: "Office", evidence: [dropped(T)], tz: "Europe/London" }),
       alertCopy({ zoneName: "Office", evidence: [dropped(T), dropped(plus(T, 5_000), "away")], tz: null }),
+      alertCopy({ zoneName: "Office", evidence: [lockDropped(T)], tz: "Europe/London" }),
+      alertCopy({ zoneName: "Office", evidence: [lockDropped(T, "locked"), lockDropped(plus(T, 5_000), "unlatched")], tz: null }),
     ]) {
       for (const text of [v.title, v.body]) {
         for (const [name, re] of BANNED) expect(text, `${name} in "${text}"`).not.toMatch(re);

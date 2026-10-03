@@ -16,10 +16,21 @@ import { initCameraService, securityOngoingSource, shutdownCameraService } from 
 import { attachWsBridge } from "./services/ws-bridge.service.js";
 import { attachClientDispatchBridge } from "./services/client-dispatch.service.js";
 import {
+  getCommissionedDevices,
   initMatterService,
+  isMatterInitialized,
   shutdownMatterService,
   setPrismaForMatter,
+  subscribeConnectionChanges,
+  subscribeStateChanges,
 } from "./services/matter.service.js";
+import { enrichGrouped } from "./services/rooms.service.js";
+import {
+  createPrismaLockStore,
+  matterLockDeviceSource,
+  registerSecurityLockJobs,
+  startSecurityLockAdapter,
+} from "./services/security-lock-adapter.js";
 import { initDeviceRegistration } from "./services/device-registration.service.js";
 import {
   startHealthMonitor,
@@ -153,13 +164,14 @@ import type { MatterDispatcher } from "./routes/scenes.js";
 import { sendMatterCommand } from "./services/matter.service.js";
 import { mcpClient } from "./services/mcp-client.singleton.js";
 import { createExtensionAttacher } from "./services/extension-attach.service.js";
-import { stepResultValue, type StepDispatcher } from "./services/tool-spec-runner.service.js";
+import { createMcpStepDispatcher } from "./services/mcp-step-dispatcher.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
 import { runActivityNotifySweep } from "./services/activity-notify.service.js";
 import { runFilingTick } from "./services/filing/worker.js";
 import { runFilingReconcile } from "./services/filing/reconcile.js";
 import { runFilingMaintenance } from "./services/filing/maintenance.js";
+import { reconcileFileRegistry } from "./services/file-registry.service.js";
 import { runFilingDigest } from "./services/filing/digest.js";
 import {
   purgeNetworkThroughputSamples,
@@ -173,6 +185,8 @@ import {
   getActivityRecorder,
 } from "./services/activity.singleton.js";
 import { initVpnDeviceRevoke } from "./services/vpn-peer-revoke.service.js";
+import { initModelAccessTokenRevoke } from "./services/model-access-token.service.js";
+import { initDeviceClientRevoke } from "./services/device-client-revoke.service.js";
 import { createErpSyncRunner } from "./services/erp-sync/erp-sync.service.js";
 import {
   discoverResources,
@@ -197,6 +211,8 @@ import { jitteredPeriodMs } from "./services/erp-sync/schedule-jitter.js";
 import { pruneExpiredXeroTokens } from "@droplet/erp-connector";
 import { registerErpDriftRetention } from "./services/erp-sync/drift-record.service.js";
 import { registerSecurityJobs } from "./services/security-events.service.js";
+import { registerDoorsJobs } from "./services/doors.service.js";
+import { assertDoorsWired } from "./services/doors-wiring.js";
 import { registerSecurityModeJobs } from "./services/security-mode.service.js";
 import { registerSecurityIncidentJobs } from "./services/security-incidents.service.js";
 import { registerSecurityLinkJobs } from "./services/security-link-proposals.service.js";
@@ -283,6 +299,10 @@ async function main() {
   initActivityRecorder(prisma);
   // WARP-3160: lifecycle post-effects revoke a leaver's VPN devices through it.
   initVpnDeviceRevoke(prisma);
+  // WARP-3452: and their coding-tool tokens.
+  initModelAccessTokenRevoke(prisma);
+  // WARP-3384: and their paired file-sync devices (app passwords, drive logins).
+  initDeviceClientRevoke(prisma);
   // WARP-3165: a key rotated while the orchestrator was down
   // (scripts/rotate-audit-key.sh) gets its "Audit key rotated" row as the
   // first new-key row, before the start-up row below.
@@ -434,6 +454,25 @@ async function main() {
   } catch (err) {
     logger.warn("Matter controller unavailable: %s", (err as Error).message);
   }
+
+  // WARP-2977 P2b-2 (ADR-059 §3.2) — door locks into the Security event
+  // store: DoorLock.LockState changes from the Matter bridge's live stream as
+  // lock_state rows (transitions only), plus a 60 s sweep (registered with
+  // the other Security jobs below) that finds what the stream missed.
+  // Outside the try above on purpose: the bridge self-heals a failed init,
+  // and capture must be listening when it does. Unconditional, like the rest
+  // of the Security capture: the module toggles decide the surface (DS-015).
+  const securityLocks = startSecurityLockAdapter({
+    store: createPrismaLockStore(prisma),
+    source: matterLockDeviceSource({
+      getCommissionedDevices: async () => enrichGrouped(prisma, await getCommissionedDevices()),
+      isMatterInitialized,
+    }),
+    subscribeStateChanges,
+    // A change heard while its lock is not Connected is recorded as found
+    // (polled), not live: a reconnecting lock replays what changed while away.
+    subscribeConnectionChanges,
+  });
 
   // Connect OpenWrt router (non-fatal if unavailable)
   try {
@@ -657,11 +696,7 @@ async function main() {
   // ToolSchedule rows, dispatches via the imperative walker shared
   // with run-now. Multi-instance deploys lock on `droplet:tool-
   // schedule-ticker` so only one replica fires each due schedule.
-  const toolSchedulerDispatcher: StepDispatcher = {
-    async call(tool, args) {
-      return stepResultValue(tool, await mcpClient.callTool(tool, args));
-    },
-  };
+  const toolSchedulerDispatcher = createMcpStepDispatcher(mcpClient);
   cronRuntime.scheduleInterval(
     60_000,
     async () => {
@@ -1126,6 +1161,17 @@ async function main() {
   // (continuing the 03:00 … 03:45 spacing). Registered unconditionally, like
   // the ingest itself: the module toggle decides the surface, not the capture.
   registerSecurityJobs(cronRuntime, prisma);
+
+  // ADR-055 (P4a) — the door event log's retention: one daily leg at 03:55 (the
+  // next free slot after Security's 03:50), DOORS_EVENT_RETENTION_DAYS days,
+  // 365 by default. Registered UNCONDITIONALLY, like the Security jobs above
+  // and for a sharper reason: DOORS_ENABLED switches the SURFACE, but rows
+  // already written keep identifying people, so their clock does not stop.
+  registerDoorsJobs(cronRuntime, prisma, config.DOORS_EVENT_RETENTION_DAYS);
+  // WARP-2977 P2b-2 — the door-lock sweep: every 60 s, on its own advisory
+  // lock, it reads the paired locks and writes a `polled` row for any change
+  // the live stream missed (a sidecar restart, a dropped SSE frame).
+  registerSecurityLockJobs(cronRuntime, securityLocks);
   // WARP-2977 P2b (ADR-059 §3.6) — the site-mode ticker: every 60 s it
   // reconciles SecurityModeState with the opening hours (level-triggered, on
   // its own advisory lock). Unconditional, like the jobs above.
@@ -1148,8 +1194,11 @@ async function main() {
   // placed in an area with every other camera, and suggests (or, above a
   // higher bar, makes) links — never an alert by itself. Unconditional, like
   // the jobs above; `SecurityAiSettings.linking = off` is honoured inside the
-  // tick. Registration is the `links` health row's boot assertion.
-  registerSecurityLinkJobs(cronRuntime, prisma);
+  // tick. Registration is the `links` health row's boot assertion. P4 PR-4:
+  // a person-linked lock's LIVE changes anchor too, and the lock adapter's
+  // list names a lock Droplet suggests (read at each tick; the job itself
+  // never reaches the adapter).
+  registerSecurityLinkJobs(cronRuntime, prisma, { knownLocks: () => securityLocks.knownLocks() });
   // WARP-2979 (ADR-059 P4 §6.9) — Droplet's incident summaries: every minute,
   // with NO advisory lock (a model call outlives the lock's transaction), it
   // writes a short summary for each sealed notice or alert incident, on THIS
@@ -1318,6 +1367,11 @@ async function main() {
   cronRuntime.scheduleInterval(
     5 * 60_000,
     async () => {
+      // WARP-3425: the Workspace seed rides every tick, not just boot (it never
+      // throws). Before it runs, the Workspace row carries a current groupfolder
+      // id — the only key the file-indexer maps Workspace files by — and every
+      // active person has a Workspace membership, which search reads.
+      await seedHouseholdDepartment(prisma);
       const result = await reconcileDepartments(prisma);
       if (
         result.departmentsConverged > 0 ||
@@ -1675,6 +1729,23 @@ async function main() {
       }
     },
     { lockKey: "droplet:filing-maintenance" },
+  );
+
+  // WARP-3425 — reconcile the File registry against Nextcloud. Rows are written
+  // on upload and nothing else ever touched them, so a delete by any path left a
+  // row claiming the file existed (33 Workspace ghosts on the test box). A row is
+  // marked `missing`, never deleted, and only after a SUCCESSFUL read of
+  // Nextcloud's file cache shows its id is gone; an outage throws to safeRun and
+  // changes nothing. Bounded to REGISTRY_SWEEP_BATCH rows per tick.
+  cronRuntime.scheduleInterval(
+    15 * 60_000,
+    async () => {
+      const result = await reconcileFileRegistry(prisma);
+      if (result.markedMissing > 0 || result.restored > 0) {
+        logger.info(result, "file registry reconcile");
+      }
+    },
+    { lockKey: "droplet:file-registry-reconcile" },
   );
 
   // The morning digest. Hourly rather than at a fixed time, because the hour
@@ -2110,6 +2181,13 @@ async function main() {
   // pins this call, because a route wired only here answers 503 in every unit
   // test and a deleted argument would otherwise be invisible to that lane.
   const app = createApp(prisma, sceneMatterDispatcher, brainPassTrigger);
+  // ADR-055 §11.2 — "I am registered where I claim to be". With DOORS_ENABLED on
+  // and any list downstream of the module descriptor missing (a route, a gate,
+  // a tool, the purge job, a migration, the append-only trigger) this throws
+  // and the box does not start listening; with it off it asserts the module is
+  // ABSENT. Before `server.listen` on purpose: a doors surface that answers
+  // some requests and not others is worse than one that refuses to boot.
+  await assertDoorsWired({ app, config, prisma });
   // WARP-236: when internal mTLS is enabled the SAME port serves HTTPS and
   // every caller (nginx gateway included) must present a CA-signed client
   // cert. Dev installs (DROPLET_INTERNAL_TLS unset) keep plain HTTP.
@@ -2159,6 +2237,10 @@ async function main() {
     // is cron-runtime's (WARP-3193 QUAL-7), already cleared by
     // `cronRuntime.stop()` above.
     stopScreenQRPoller();
+    // WARP-2977 P2b-2 — drop the lock adapter's subscriptions to the Matter
+    // bridge before the bridge goes: no lock frame starts a write during
+    // teardown (the sweep already stopped with the cron runtime). Never throws.
+    securityLocks.stop();
     await shutdownMatterService();
     await shutdownCameraService();
     // Stop the MCP stdio child first so it doesn't keep its Prisma

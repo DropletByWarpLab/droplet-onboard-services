@@ -3,10 +3,11 @@
  * are actually wired so it can hide nav entries that would lead to a dead /
  * unconfigured page (issues #14, #15).
  *
- *   claudeActivity — the /admin/claude-activity surface is useful when at least
- *     one of its backing integrations is configured: a GitHub token
- *     (github-adapter.ts reads process.env.GITHUB_TOKEN) OR a fully configured
- *     Jira (jira-adapter.ts isConfigured(): host + email + token).
+ *   claudeActivity — Warp Lab's own engineering dashboard (WARP-3433). True only
+ *     when the explicit developer flag DROPLET_DEV_ENGINEERING_DASHBOARD is on
+ *     (default OFF: customer boxes never show it) AND at least one backing
+ *     integration is configured: a GitHub token OR a fully configured Jira.
+ *     See services/claude-activity/enabled.ts.
  *   ragEval — the /admin/rag-eval proxy is wired only when RAG_EVAL_URL is set
  *     (admin-rag-eval.ts ragEvalBaseUrl() reads process.env.RAG_EVAL_URL
  *     DIRECTLY — we mirror that exact read here, NOT a config field).
@@ -16,20 +17,9 @@
  */
 
 import { Router, Request, Response } from "express";
-import { config } from "../config.js";
 import { recordAccessDenied } from "../middleware/auth.js";
 import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
-
-/** Mirrors jira-adapter.ts isConfigured(). */
-function jiraConfigured(): boolean {
-  return !!(config.JIRA_HOST && config.JIRA_EMAIL && config.JIRA_API_TOKEN);
-}
-
-/** Mirrors github-adapter.ts: a non-empty GITHUB_TOKEN. */
-function githubConfigured(): boolean {
-  const t = process.env.GITHUB_TOKEN;
-  return !!(t && t.trim().length > 0);
-}
+import { claudeActivityEnabled } from "../services/claude-activity/enabled.js";
 
 /** Mirrors admin-rag-eval.ts ragEvalBaseUrl(): RAG_EVAL_URL set + non-blank. */
 function ragEvalWired(): boolean {
@@ -54,7 +44,7 @@ export function createAdminCapabilitiesRouter(): Router {
       return;
     }
     const body: AdminCapabilities = {
-      claudeActivity: githubConfigured() || jiraConfigured(),
+      claudeActivity: claudeActivityEnabled(),
       ragEval: ragEvalWired(),
     };
     res.json(body);

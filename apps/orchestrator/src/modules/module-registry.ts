@@ -28,6 +28,7 @@ export interface AvailabilityConfig {
   DROPLET_MATTER_SERVICE_URL: string;
   ROUTING_SERVICE_URL: string;
   SWITCH_SERVICE_URL: string;
+  DOORS_ENABLED: unknown; // ADR-055 — string "1"/"true"/… or boolean, normalized by isTruthy
 }
 
 const isSet = (v: string | undefined | null): boolean => !!(v && v.trim().length > 0);
@@ -90,6 +91,23 @@ export interface ModuleDef {
   ownedPaths?: string[];
   /** Fallback enablement when there's no ModuleSetting row and no preset applied. */
   defaultEnabled: boolean;
+  /**
+   * ADR-055 — does Settings → Features still list this module on a box where it
+   * is NOT available? `true` (what a module that leaves the field out gets) keeps
+   * the greyed "Not installed on this Droplet" row that tells an operator the
+   * capability exists. `false` makes the module ABSENT until `available` is true
+   * — no row at all — for a module whose existence is not yet something
+   * customers are offered (doors ships dark while AC-001, product line or
+   * feature, is undecided).
+   *
+   * An explicit flag, never derived: "unavailable" says the backend is not
+   * deployed, and "not listed" says the product is not on offer. Those are two
+   * facts, and the second is a decision someone makes per module, not something
+   * to be inferred from the first or from the module's id. It filters the
+   * operator's VIEW only (`getModulesView`); effectiveness, gates and the
+   * toggle's own rejection still read `available`.
+   */
+  listedWhenUnavailable?: boolean;
   /** Availability signal, reusing the existing deploy-time config reads. NOTE:
    *  modules gated only by a URL with a non-empty default (files/cameras/network/
    *  switch/knowledge) read as always-available in v1 — a health-probe refinement
@@ -102,14 +120,14 @@ export interface ModuleDef {
 export const MODULES: readonly ModuleDef[] = [
   {
     id: "chat", label: "Ask AI",
-    description: "The local AI assistant — chat, tools, and agent actions.",
+    description: "Ask your private assistant questions and have it do tasks for you.",
     category: "workspace", routePrefixes: ["/api/llm"], navHrefs: ["/chat"],
     toolDomains: [], core: true, defaultEnabled: true,
     available: (c) => isSet(c.AI_GATEWAY_URL),
   },
   {
     id: "team_chat", label: "Messages",
-    description: "Direct and small-group messages between members, with file and AI-chat forwarding.",
+    description: "Message members one to one or in small groups, and share files and assistant chats.",
     category: "workspace", routePrefixes: ["/api/team-chat"], navHrefs: ["/messages"],
     // WARP-1685: the assistant can now SEND (message + meeting invite) on
     // the acting human's behalf — the `team_chat` tool domain is claimed
@@ -122,7 +140,7 @@ export const MODULES: readonly ModuleDef[] = [
   },
   {
     id: "knowledge", label: "Knowledge",
-    description: "Retrieval over your indexed files and notes (RAG).",
+    description: "Lets the assistant answer from your files and notes.",
     category: "workspace", routePrefixes: ["/api/files/knowledge"], navHrefs: ["/knowledge"],
     // The two routes files-knowledge.ts serves — its header says "nothing
     // else should" target this namespace. Anything ELSE under
@@ -143,14 +161,14 @@ export const MODULES: readonly ModuleDef[] = [
   },
   {
     id: "files", label: "Files",
-    description: "Nextcloud-backed file storage, sharing, and search.",
+    description: "Company files and shared folders: store, share and search.",
     category: "workspace", routePrefixes: ["/api/files"], navHrefs: ["/files"],
     toolDomains: ["files"], core: false, defaultEnabled: true,
     available: (c) => isSet(c.NEXTCLOUD_URL),
   },
   {
     id: "docs", label: "Documents",
-    description: "In-browser document editing / co-authoring (OnlyOffice).",
+    description: "Edit and co-write documents in the browser.",
     category: "workspace", routePrefixes: ["/api/files/docs"], navHrefs: [],
     // The doc-engine health probe is the module's ONLY route (it is declared
     // in files.ts, registered before the `:filePath(*)` wildcard). Everything
@@ -174,14 +192,14 @@ export const MODULES: readonly ModuleDef[] = [
   },
   {
     id: "email", label: "Email",
-    description: "Inbox triage and email search over the operator's mailbox.",
+    description: "Sort and search the company mailbox.",
     category: "workspace", routePrefixes: ["/api/email"], navHrefs: ["/email"],
     toolDomains: ["email"], core: false, defaultEnabled: false,
     available: (c) => isSet(c.SERVICE_TOKEN_EMAIL),
   },
   {
     id: "calendar", label: "Calendar",
-    description: "Scheduling and events.",
+    description: "Company calendar, events and reminders.",
     category: "workspace", routePrefixes: ["/api/calendar"], navHrefs: ["/calendar"],
     // WARP-1527: reminders + notifications ride the calendar module (the
     // WARP-1532 grouping) — turning Calendar off drops all three suites.
@@ -190,7 +208,7 @@ export const MODULES: readonly ModuleDef[] = [
   },
   {
     id: "projects", label: "Projects",
-    description: "Lightweight project / task tracking.",
+    description: "Track projects and tasks.",
     // WARP-2875: the prefix is `/api/pm`, NOT `/api/pm/projects`. The native
     // PM router (routes/pm/native.ts) and the relations router both mount at
     // `/api` and register work-items, workspaces, summary, states, labels,
@@ -241,7 +259,7 @@ export const MODULES: readonly ModuleDef[] = [
   },
   {
     id: "money", label: "Money",
-    description: "Invoices and bills landed from a connected ledger.",
+    description: "See invoices and bills from your connected accounting system.",
     category: "workspace", routePrefixes: ["/api/money"],
     navHrefs: ["/money"],
     // WARP-2742 — claimed. WARP-2581 shipped this `[]` because the tool is
@@ -260,7 +278,7 @@ export const MODULES: readonly ModuleDef[] = [
   },
   {
     id: "contacts", label: "Contacts",
-    description: "The address book — people entered here or synced from an address-book source.",
+    description: "The company address book: people you add, plus those brought in from your other accounts.",
     category: "workspace", routePrefixes: ["/api/contacts"],
     // No surface yet; WARP-2038 adds /contacts and its nav entry. Same shape as
     // `docs` above, which also carries none.
@@ -272,14 +290,14 @@ export const MODULES: readonly ModuleDef[] = [
   },
   {
     id: "voice", label: "Voice",
-    description: "Hands-free voice assistant (speech in / speech out).",
+    description: "Talk to the assistant and hear it answer, hands-free.",
     category: "operations", routePrefixes: ["/api/voice", "/api/stt"], navHrefs: ["/voice"],
     toolDomains: [], core: false, defaultEnabled: false,
     available: (c) => isSet(c.SERVICE_TOKEN_VOICE),
   },
   {
     id: "cameras", label: "Cameras",
-    description: "Camera streams, events, and object detection (Frigate).",
+    description: "Live cameras, recordings and what they detect.",
     category: "operations", routePrefixes: ["/api/cameras"], navHrefs: ["/cameras", "/events"],
     toolDomains: ["cameras"], core: false, defaultEnabled: false,
     available: (c) => isSet(c.FRIGATE_URL),
@@ -303,8 +321,39 @@ export const MODULES: readonly ModuleDef[] = [
     available: () => true, // native to the orchestrator; threats need no camera
   },
   {
+    // ADR-055 (P4a) — doors: the access points a box knows about and the
+    // append-only log of what happened at them. Named `doors`, never `access`:
+    // /api/access, routes/access.ts and lib/access.ts are ADR-032's RBAC.
+    //
+    // SHIPS DARK. `available` reads DOORS_ENABLED, an EXPLICIT boolean (the
+    // DOCS_ENABLED idiom — never derived from another variable's emptiness),
+    // so a box that has not turned it on has NO doors module: /api/doors 404s
+    // `module_disabled`, the module cannot be switched on in Settings, it is
+    // not listed under Features, and the `doors` tool domain below is withheld
+    // from the chat pool, `/api/llm/tools` and MCP (WARP-2972). Absent, not
+    // empty.
+    //
+    // `navHrefs: ["/doors"]` — the dashboard page arrived with P4b, and the
+    // nav gates it on this module, so it is absent from every nav surface
+    // while the flag is off. It is in no BUSINESS_TYPES preset: a box that
+    // wants doors turns the flag on.
+    //
+    // `toolDomains: ["doors"]` — the two read-only assistant tools (P4b,
+    // WARP-3438), claimed in the same change that adds them (WARP-2742). The
+    // domain also joins `MODULE_OWNED_TOOL_DOMAINS` in @droplet/tools-core, which
+    // the mcp-server fails closed on (pinned by tool-module-verdict.service.test.ts).
+    id: "doors", label: "Doors",
+    description: "The doors this box knows about, and the log of what happened at them.",
+    category: "operations", routePrefixes: ["/api/doors"], navHrefs: ["/doors"],
+    toolDomains: ["doors"], core: false, defaultEnabled: false,
+    // Absent from Settings → Features while the flag is off: a product decision
+    // still open (AC-001) is not shown to a customer who was not offered it.
+    listedWhenUnavailable: false,
+    available: (c) => isTruthy(c.DOORS_ENABLED),
+  },
+  {
     id: "smart_home", label: "Devices",
-    description: "Device control over Matter, BACnet, Modbus, SNMP and KNX.",
+    description: "Control lights, locks, sensors and building systems.",
     // Gate ONLY the Matter/smart-home surface. "/api/devices" is deliberately
     // NOT gated here: it hosts the appliance/fleet device registry, device
     // pairing (/api/devices/pair*), push-notification subscribe
@@ -321,14 +370,14 @@ export const MODULES: readonly ModuleDef[] = [
   },
   {
     id: "network", label: "Network",
-    description: "Router supervision, Wi-Fi, and remote access (VPN).",
+    description: "Your network: router, Wi-Fi and secure remote access.",
     category: "operations", routePrefixes: ["/api/network", "/api/vpn"], navHrefs: ["/network", "/remote-access"],
     toolDomains: ["network"], core: false, defaultEnabled: true,
     available: (c) => isSet(c.ROUTING_SERVICE_URL),
   },
   {
     id: "managed_switch", label: "Managed switch",
-    description: "Managed network switch (VLANs, PoE, port control).",
+    description: "Manage your network switch: ports, separate networks and power to connected devices.",
     category: "operations", routePrefixes: ["/api/switch"], navHrefs: [],
     toolDomains: ["switch"], core: false, defaultEnabled: false,
     available: (c) => isSet(c.SWITCH_SERVICE_URL),

@@ -2129,6 +2129,70 @@ model CalendarFeedToken {
   @@index([userId, state])
 }
 
+/// WARP-3452: lifecycle of a coding-tool token. Explicit, never derived from
+/// `revokedAt` / `expiresAt`. `expired` is written when introspection or a
+/// listing finds `expiresAt` passed; renewal takes it back to `active`.
+/// `revoked` is terminal.
+enum ModelAccessTokenStatus {
+  active
+  revoked
+  expired
+}
+
+/// WARP-3452: why a token was revoked. `manual` = its holder or an
+/// owner/admin (see `revokedById`); the other two are the lifecycle hooks in
+/// role-mutation-guard.service.ts.
+enum ModelAccessTokenRevokeReason {
+  manual
+  user_deactivated
+  role_guest
+}
+
+/// WARP-3452: a per-person bearer credential (`dlk_…`) that lets a coding tool
+/// on the LAN use the box's model runtime through ai-gateway's `/llm/` router.
+/// Only sha256(full token) is stored; `prefix` (8 chars after `dlk_`) is for
+/// display. ai-gateway checks every request against this row through
+/// POST /api/llm-access/_introspect, so a revoke is effective immediately.
+model ModelAccessToken {
+  id               String                        @id @default(uuid())
+  userId           String
+  label            String                        @db.VarChar(64)
+  prefix           String
+  secretHash       String                        @unique
+  status           ModelAccessTokenStatus        @default(active)
+  createdAt        DateTime                      @default(now())
+  /// createdAt (or the last renewal) + 364 days.
+  expiresAt        DateTime
+  /// Written at most once a minute per token.
+  lastUsedAt       DateTime?
+  revokedAt        DateTime?
+  revokedReason    ModelAccessTokenRevokeReason?
+  /// Who revoked it by hand; null for the lifecycle hooks.
+  revokedById      String?
+  /// Last time a refused (revoked/expired) use wrote an ActivityRow — at most
+  /// one per token per hour.
+  refusalAuditedAt DateTime?
+  user             User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  usage            ModelAccessTokenUsage[]
+
+  @@index([userId, status])
+}
+
+/// WARP-3452: per-token, per-day (UTC) usage counters. Never any prompt or
+/// completion content — counts only. One row per token per day instead of an
+/// ActivityRow per request (an agent session makes hundreds).
+model ModelAccessTokenUsage {
+  tokenId          String
+  day              DateTime         @db.Date
+  requests         Int              @default(0)
+  promptTokens     Int              @default(0)
+  completionTokens Int              @default(0)
+  errors           Int              @default(0)
+  token            ModelAccessToken @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@id([tokenId, day])
+}
+
 model CalendarEvent {
   id           String   @id @default(uuid())
   userId       String // Nextcloud username
@@ -2988,6 +3052,9 @@ model User {
   // the user cascades them, so a reused username can never inherit an old
   // link (see CalendarFeedToken).
   calendarFeedTokens  CalendarFeedToken[]
+  // WARP-3452: coding-tool tokens for the local model API (`/llm/`). Deleting
+  // the user cascades them; deactivation revokes them (see ModelAccessToken).
+  modelAccessTokens   ModelAccessToken[]
 
   // PR #375 — TOTP second factor (ADR-013 directory). One credential row
   // per user (the secret is encrypted at rest). `confirmedAt` is the
@@ -3111,7 +3178,44 @@ model SsoLoginState {
   expiresAt    DateTime
   createdAt    DateTime  @default(now())
 
+  // ── Native handoff (RFC 8252) — the native Windows client's SSO leg ──
+  // The IdP still redirects to the box callback (ADR-016); a NATIVE row then
+  // hands the result to the app's own redirect instead of setting cookies.
+  // Which leg the callback takes is this explicit column, never derived from
+  // `nativeRedirectUri` being null. A migration CHECK pins that a NATIVE row
+  // always has its redirect + challenge.
+  flowKind            SsoFlowKind @default(BROWSER)
+  // http://127.0.0.1:<port>/<path>, http://[::1]:<port>/<path> or
+  // droplet://sso/callback — validated at /sso/oidc/native/begin.
+  nativeRedirectUri   String?
+  // The app's PKCE S256 challenge for the handoff (43-char base64url). Not
+  // the IdP-side verifier above, which never leaves the box.
+  nativeCodeChallenge String?
+  // sha256 (hex) of the single-use consent value the callback embedded in the
+  // consent page (ADR-063 S5). Set by the callback, cleared when Continue
+  // claims it; the page lives as long as `expiresAt` (10 minutes). Plaintext
+  // is never stored.
+  nativeConsentHash   String?     @unique
+  // sha256 (hex) of the one-time handoff code; the plaintext is never stored.
+  handoffCodeHash     String?     @unique
+  // Local User.id the callback resolved (parked with the consent value, before
+  // any code exists); re-read at redemption.
+  handoffUserId       String?
+  // 60 s after Continue minted the code (ADR-063 S5), not after the callback.
+  handoffExpiresAt    DateTime?
+  // Single-use stamp for the redemption (same idiom as `consumedAt`).
+  handoffConsumedAt   DateTime?
+
   @@index([expiresAt])
+}
+
+/// Which leg an SSO login state finishes on. BROWSER: the dashboard flow
+/// (state cookie + session cookies). NATIVE: the RFC 8252 handoff to a
+/// native app's loopback / droplet:// redirect, redeemed with PKCE at
+/// POST /api/sso/oidc/native/token.
+enum SsoFlowKind {
+  BROWSER
+  NATIVE
 }
 
 // PR #375 — TOTP (RFC 6238) enrollment for the built-in directory's
@@ -3534,8 +3638,9 @@ model File {
   ownerUserId  String
   departmentId String? // WARP-1255: department this file belongs to (null = personal/household)
   scope        Scope    @default(team)
-  // Cached path for display. Refreshed from the file-indexer's MQTT
-  // bridge when Nextcloud renames or moves the file.
+  // Cached path for display, as of the upload that wrote the row. Nothing
+  // refreshes it on a rename or move (WARP-2096 Leg 5), so treat it as a hint
+  // and confirm it against Nextcloud before relying on it.
   path         String?
   // WARP-2096: SHA-256 (hex) of the bytes, computed while the upload streams
   // through, and their length. Null for rows written before it or outside
@@ -3544,6 +3649,19 @@ model File {
   // reported to the uploader, never refused by the database.
   sha256       String?
   sizeBytes    BigInt?
+  // WARP-3425: whether Nextcloud still has this file. Rows are written on
+  // upload, and a delete by any path (Files, Nextcloud, a sync client, a trash
+  // purge, a wiped folder) used to leave them claiming the file existed.
+  // `reconcileFileRegistry` (file-registry.service.ts) sets `missing` only
+  // after a SUCCESSFUL read of Nextcloud's file cache did not contain
+  // `ncFileId`, and sets `live` again if the id comes back (a Nextcloud
+  // restore); an upload always writes `live`. A file in the trash bin is still
+  // `live`: it keeps its id and can be restored.
+  //
+  // Kept, never deleted: `departmentId` is what the metadata gates
+  // (`resolveFileDepartment`, `filterVisibleLinks`) fail closed on, and a
+  // missing row would read as personal-space semantics there.
+  status       FileRegistryStatus @default(live)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -3551,6 +3669,13 @@ model File {
   @@index([scope])
   @@index([departmentId])
   @@index([ownerUserId, sha256])
+}
+
+/// WARP-3425 — see `File.status`. Explicit (CLAUDE.md "no guessing"): a row's
+/// existence in Nextcloud is never inferred from a NULL or from the row's absence.
+enum FileRegistryStatus {
+  live
+  missing
 }
 
 // ── WARP-456: signed append-only activity log ──
@@ -5024,6 +5149,10 @@ enum ModuleId {
   /// in it too, and folding it into cameras would hide those behind a camera
   /// grant. Camera grants still filter every camera row inside it (DS-005).
   security
+  /// ADR-055 (P4a) — doors: the access points a box knows about and the
+  /// append-only log of what happened at them. Named `doors`, never `access`:
+  /// that word is ADR-032's RBAC. Available only when DOORS_ENABLED is on.
+  doors
 }
 
 /// Module-toggles feature — per-install runtime enablement of a module. ONE row
@@ -8997,6 +9126,9 @@ enum SecurityEventSource {
   activity_mirror
   /// WARP-2977 P2b — a change of the site mode (SecurityModeState). One row per change.
   site_mode
+  /// WARP-2977 P2b-2 — a Matter DoorLock endpoint's LockState, read from the
+  /// smart-home service (security-lock-adapter.ts). Transitions only.
+  matter_lock
 }
 
 enum SecurityEventKind {
@@ -9025,6 +9157,18 @@ enum SecurityEventKind {
   /// the object's `end` is still its own `detection` row. Never a baseline
   /// input (P5 counts `detection` only).
   detection_ongoing
+  /// A door lock's reading changed (or was first seen). labels = [reading], reading ∈
+  /// {locked, unlocked, not_fully_locked, unlatched, unknown}; sourceRef = `matter:<nodeId>/<endpointId>`;
+  /// camera NULL. Never claims a cause (no "someone unlocked it").
+  lock_state
+}
+
+/// WARP-2977 P2b-2 — how a row's startedAt was observed.
+/// live = startedAt is when it happened; polled = when Droplet's 60 s check found it.
+/// polled rows are never timing evidence (P4 co-occurrence, P5 dwell). P5 adds `synced`.
+enum SecurityObservation {
+  live
+  polled
 }
 
 /// info < notice < alert. On an event this is the source's own weight; the
@@ -9056,6 +9200,13 @@ model SecurityEvent {
   startedAt   DateTime
   endedAt     DateTime?
   summary     String
+  /// WARP-2977 P2b-2. Every P2a/P2b writer is live; the lock sweep writes polled.
+  observed    SecurityObservation @default(live)
+  /// WARP-2977 P2b-2. A lock row written with no earlier stored reading to
+  /// compare against (first ever, or after retention emptied its history):
+  /// its time is when Droplet first saw the lock, not a turn. Only
+  /// matter_lock rows are ever true. Readers key on this, never on the dedupeKey.
+  baseline    Boolean             @default(false)
   createdAt   DateTime            @default(now())
   /// WARP-2978 — the engine's exactly-once marker and the incident membership.
   triage      SecurityEventTriage?
@@ -9063,6 +9214,8 @@ model SecurityEvent {
   @@index([startedAt])
   @@index([camera, startedAt])
   @@index([kind, startedAt])
+  // Brief §5's (sourceRef): a lock's history read-back and the area filter's lock links join here.
+  @@index([sourceRef, startedAt])
 }
 
 /// Ingest bookkeeping — one row. The threat mirror's cursor is the last
@@ -9109,6 +9262,9 @@ enum SecurityZoneState {
 enum SecurityZoneSourceKind {
   camera
   camera_zone
+  /// WARP-2977 P2b-2 — one Matter DoorLock endpoint, `matter:<nodeId>/<endpointId>`
+  /// (equal to its lock_state rows' sourceRef). Visible only with smart_home ≥ view (DS-019).
+  lock
 }
 
 /// `removed` = a person unlinked it. `rejected` = a person turned down or undid Droplet's link.
@@ -9966,4 +10122,129 @@ model SecurityPatternDay {
   updatedAt DateTime               @updatedAt
 
   @@id([date, outcome])
+}
+
+// ── ADR-055 (P4a): doors — the control-plane spine ──────────────────────────
+//
+// Two tables and five enums. The physical devices, cells, credentials and
+// grants of the brief (§11.3) are NOT here: they depend on the cartridge
+// interface (§11.1) and on AC-017, both open.
+//
+// AccessEvent is append-only in the DATABASE (BEFORE UPDATE OR DELETE trigger,
+// migration 20261002110200) — Prisma cannot model triggers or the CHECKs, so
+// `prisma migrate diff` cannot see them; the pg-lane tests pin them.
+
+/// How a door reports whether it is open (brief §9.7, §11.3). `none` is a
+/// state, not a missing value: it switches OFF the forced-door and held-open
+/// claims for that door, and the UI says so.
+enum DoorPositionSource {
+  /// The lock is its own witness: latch, bolt and frame magnet (LK-1/2/2E).
+  lock
+  /// A standalone DP-1 on a strike-only or passive door: position and REX,
+  /// and NO latch term — its forced-door claim is the weaker one.
+  dp1
+  /// No position source. No forced-door claim, no held-open claim.
+  none
+}
+
+/// A door is retired, never deleted: its events are evidence and reference it.
+enum AccessPointStatus {
+  active
+  retired
+}
+
+/// Brief §11.3, verbatim. `forced_door` and `held_open` are DERIVED alarms:
+/// each references the `door_open` row it was derived from.
+enum AccessEventKind {
+  door_open
+  door_closed
+  latch_retracted
+  latch_extended
+  bolt_thrown
+  bolt_withdrawn
+  rex
+  key_override
+  unlock_granted
+  unlock_denied
+  forced_door
+  held_open
+  tamper
+  trouble
+}
+
+/// Which of the two §9.7 forced-door claims a `forced_door` row makes. The UI
+/// says which one (a lock is its own witness; a strike-only door is not).
+enum AccessForcedClaim {
+  /// Door open while the latch still reported extended, with no grant, REX or
+  /// key override before it. Only a `lock` door can make this claim.
+  latch_witnessed
+  /// Door open with no preceding grant or REX. The weaker claim; only a `dp1`
+  /// door makes it, because no latch term exists there.
+  unwitnessed_open
+}
+
+/// What a `trouble` row is about. One value today: §9.7's "position unknown".
+enum AccessTroubleCode {
+  /// Three missed heartbeats: the door's position is unknown, never "closed".
+  position_unknown
+}
+
+/// A door.
+model AccessPoint {
+  id                      String             @id @default(uuid())
+  name                    String             @db.VarChar(80)
+  doorPositionSource      DoorPositionSource
+  /// §9.7 "the door's held-open time". The brief gives no number; 30 s is a
+  /// default the owner edits, not a spec value.
+  heldOpenSeconds         Int                @default(30)
+  /// When `doorPositionSource` last took its current value (set on create and
+  /// on every change of source). A position event the box received before this
+  /// was reported under the OLD wiring and says nothing about the door now, so
+  /// the doors service reads the position as unknown until a newer one arrives.
+  doorPositionSourceSince DateTime           @default(now())
+  status                  AccessPointStatus  @default(active)
+  /// Set exactly when `status = retired` (CHECK).
+  retiredAt               DateTime?
+  createdAt               DateTime           @default(now())
+  updatedAt               DateTime           @updatedAt
+  events                  AccessEvent[]
+
+  @@index([status])
+}
+
+/// Evidence. Append-only: never updated, and deleted only by the retention
+/// job. A correction would be a new row that references the old one; the
+/// fourteen kinds have no correction kind yet, so none exists.
+model AccessEvent {
+  id             BigInt             @id @default(autoincrement())
+  accessPointId  String
+  accessPoint    AccessPoint        @relation(fields: [accessPointId], references: [id], onDelete: Restrict)
+  kind           AccessEventKind
+  /// When the device says it happened. Display order — but retention counts
+  /// from `createdAt`, which is the box's own clock.
+  occurredAt     DateTime
+  /// Unique per observation: the cartridge queues events while the box is down
+  /// and replays them, so a redelivered event lands on this and adds nothing.
+  dedupeKey      String             @unique
+  /// §11.8 — a key a camera clip can be found by. The camera stack owns the
+  /// image; this only carries the handle.
+  correlationKey String?            @db.VarChar(128)
+  /// Set exactly for `forced_door` and `held_open` (CHECK): the `door_open`
+  /// row the alarm was derived from (trigger: same door, kind `door_open`).
+  derivedFromId  BigInt?
+  derivedFrom    AccessEvent?       @relation("AccessEventDerivation", fields: [derivedFromId], references: [id], onDelete: NoAction)
+  derived        AccessEvent[]      @relation("AccessEventDerivation")
+  /// Set exactly for `forced_door` (CHECK).
+  forcedClaim    AccessForcedClaim?
+  /// Set exactly for `trouble` (CHECK).
+  troubleCode    AccessTroubleCode?
+  createdAt      DateTime           @default(now())
+
+  @@index([accessPointId, occurredAt])
+  @@index([occurredAt, id])
+  @@index([kind, occurredAt])
+  /// One derived alarm of each kind per opening, whatever its dedupeKey. Rows
+  /// that derive from nothing carry a NULL, which a unique index never compares.
+  @@unique([derivedFromId, kind])
+  @@index([createdAt])
 }

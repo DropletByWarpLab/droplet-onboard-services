@@ -186,10 +186,12 @@ not the same as `(never stamped …)`: the first means the query failed, the
 second means the corpus genuinely predates the guard. Only the second tells
 you a re-embed is due.
 
-Expect the ai-gateway's first embed call after the swap to pull
-`BAAI/bge-small-en-v1.5` (~130 MB) from the HuggingFace Hub. On a box with
-restricted egress, pre-warm the HF cache first or the rebuild stalls at the
-first batch.
+Nothing is downloaded during the re-embed. Since WARP-3426 the ai-gateway
+image bakes `BAAI/bge-small-en-v1.5` at a pinned commit and runs with
+`HF_HUB_OFFLINE=1` (the file-indexer bakes the matching tokenizer the same
+way), so a box with restricted or no egress re-embeds exactly like any other.
+An image built before WARP-3426 still pulls ~130 MB from the Hugging Face Hub
+on its first embed call.
 
 There is **no automatic pre-migration snapshot** for this operation (no
 migration runs, so `migrate-and-start.sh` takes none). If you want a rollback

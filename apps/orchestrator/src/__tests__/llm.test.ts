@@ -68,16 +68,18 @@ const mockDeleteConversationForUser = vi.fn().mockResolvedValue(false);
 const mockSetConversationPinned = vi.fn().mockResolvedValue(false);
 
 vi.mock("../services/chat-persistence.service.js", () => ({
-  ChatPersistenceService: vi.fn().mockImplementation(() => ({
-    renameConversationForUser: mockRenameConversationForUser,
-    createTurnRows: mockCreateTurnRows,
-    finalizeAssistantMessage: mockFinalizeAssistantMessage,
-    listConversationsForUser: mockListConversationsForUser,
-    getConversationForUser: mockGetConversationForUser,
-    deleteConversationForUser: mockDeleteConversationForUser,
-    setConversationPinned: mockSetConversationPinned,
-    ensureConversation: vi.fn().mockResolvedValue({ id: "conv-1", created: true }),
-  })),
+  ChatPersistenceService: vi.fn().mockImplementation(function () {
+    return {
+      renameConversationForUser: mockRenameConversationForUser,
+      createTurnRows: mockCreateTurnRows,
+      finalizeAssistantMessage: mockFinalizeAssistantMessage,
+      listConversationsForUser: mockListConversationsForUser,
+      getConversationForUser: mockGetConversationForUser,
+      deleteConversationForUser: mockDeleteConversationForUser,
+      setConversationPinned: mockSetConversationPinned,
+      ensureConversation: vi.fn().mockResolvedValue({ id: "conv-1", created: true }),
+    };
+  }),
 }));
 
 // Mock the ai-gateway client with controllable implementations

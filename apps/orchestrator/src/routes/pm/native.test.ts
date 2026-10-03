@@ -257,7 +257,20 @@ function makeFake(hooks: Hooks = {}) {
         if (where.projectId !== undefined) rows = rows.filter((i) => i.projectId === where.projectId);
         if (where.stateId !== undefined) rows = rows.filter((i) => i.stateId === where.stateId);
         if (where.parentId !== undefined) rows = rows.filter((i) => i.parentId === where.parentId);
-        return rows.map((i) => resolveItem(i, include));
+        // WARP-3407 — `assignees: { some: { userId } }` (the own-assignments list, and `?assignee=`).
+        const some = (where.assignees as { some?: { userId?: string } } | undefined)?.some;
+        if (some?.userId) {
+          rows = rows.filter((i) => db.assignees.some((a) => a.workItemId === i.id && a.userId === some.userId));
+        }
+        return rows.map((i) => {
+          const out = resolveItem(i, include);
+          // The cross-project readers join the project per row.
+          if (include?.project) {
+            const p = db.projects.find((x) => x.id === i.projectId);
+            out.project = { identifier: p?.identifier, department: null };
+          }
+          return out;
+        });
       },
       create: async ({ data }: { data: Row }) => {
         fire("pmWorkItem.create");
@@ -321,6 +334,16 @@ function makeFake(hooks: Hooks = {}) {
     },
 
     pmWorkItemAssignee: {
+      // WARP-3369 — the per-item guard's lookup: "is this item (or, for the
+      // state list, an item in this project) assigned to this user".
+      findFirst: async ({ where }: { where: Row }) =>
+        db.assignees.find(
+          (a) =>
+            (where.userId === undefined || a.userId === where.userId) &&
+            (where.workItemId === undefined || a.workItemId === where.workItemId) &&
+            (where.workItem === undefined ||
+              db.items.find((i) => i.id === a.workItemId)?.projectId === (where.workItem as Row).projectId),
+        ) ?? null,
       deleteMany: async ({ where }: { where: Row }) => {
         db.assignees = db.assignees.filter((a) => a.workItemId !== where.workItemId);
         return {};
@@ -426,7 +449,11 @@ describe("native PM routes — RBAC", () => {
     expect(res.status).toBe(403);
   });
 
-  it("guest CAN read projects (200)", async () => {
+  // WARP-3369: this router alone does not floor reads, and this pins that it
+  // does not — the external-guest refusal is the `projects` module's tier floor
+  // mounted by `mountModuleGates` (proved through the real mount in
+  // __tests__/guest-company-data.test.ts), so a guest never reaches here.
+  it("a read that reaches the router unguarded is served (the guest floor is the module gate's, not this router's)", async () => {
     const res = await request(makeApp(prisma, GUEST)).get("/api/pm/projects");
     expect(res.status).toBe(200);
     expect(res.body.projects).toEqual([]);
@@ -987,5 +1014,161 @@ describe("native PM routes — project → customer link (ADR-048)", () => {
       .post("/api/pm/projects")
       .send({ name: "Roof", company_id: COMPANY });
     expect(res.body.error).not.toBe("company_not_found");
+  });
+});
+
+// ── WARP-3369 (Romain, 2026-09-30): assigning a work item to an external guest
+// SHARES that one item with them. The router's own per-item guard, with the
+// router mounted alone (no prefix floor): the defence that holds if the mount
+// ever changes. The mount-level half is __tests__/guest-work-item-share.test.ts.
+describe("native PM routes — a work item assigned to an external guest is shared with them (WARP-3369)", () => {
+  const GUEST_ASSIGNED = { id: "user-guest", role: "guest" };
+  const OTHER_GUEST = { id: "user-other-guest", role: "guest" };
+  let prisma: unknown;
+  let pid: string;
+  let mine: string;
+  let theirs: string;
+  let doneStateId: string;
+
+  beforeEach(async () => {
+    id = 0;
+    prisma = makeFake().prisma;
+    const owner = makeApp(prisma, OWNER);
+    pid = (await request(owner).post("/api/pm/projects").send({ name: "Inbox" })).body.project.id;
+    mine = (
+      await request(owner)
+        .post(`/api/pm/projects/${pid}/work-items`)
+        .send({ name: "Mine", assignees: [GUEST_ASSIGNED.id] })
+    ).body.work_item.id;
+    theirs = (
+      await request(owner).post(`/api/pm/projects/${pid}/work-items`).send({ name: "Theirs" })
+    ).body.work_item.id;
+    const states = await request(owner).get(`/api/pm/projects/${pid}/states`);
+    doneStateId = states.body.states.find((s: { group: string }) => s.group === "completed").id;
+  });
+
+  const refused = (res: { status: number; body: { error?: string; module?: string } }) =>
+    res.status === 404 && res.body.error === "module_disabled" && res.body.module === "projects";
+
+  it("the assigned guest reads the item, reads and writes its comments, and moves its state", async () => {
+    const app = makeApp(prisma, GUEST_ASSIGNED);
+    const item = await request(app).get(`/api/pm/work-items/${mine}`);
+    expect(item.status).toBe(200);
+    expect(item.body.work_item.name).toBe("Mine");
+
+    expect((await request(app).get(`/api/pm/work-items/${mine}/comments`)).status).toBe(200);
+    const comment = await request(app)
+      .post(`/api/pm/work-items/${mine}/comments`)
+      .send({ comment_html: "<p>on it</p>" });
+    expect(comment.status).toBe(201);
+
+    // the state names to move it to, for the project holding an item assigned to them
+    const states = await request(app).get(`/api/pm/projects/${pid}/states`);
+    expect(states.status).toBe(200);
+    const moved = await request(app)
+      .post(`/api/pm/work-items/${mine}/transition`)
+      .send({ state_id: doneStateId });
+    expect(moved.status).toBe(200);
+    expect(moved.body.work_item.state.name).toBe("Done");
+  });
+
+  it("the guest's detail carries the item and NO relations (a relation names another item)", async () => {
+    const res = await request(makeApp(prisma, GUEST_ASSIGNED)).get(`/api/pm/work-items/${mine}`);
+    expect(res.body.relations).toEqual([]);
+  });
+
+  it("an item NOT assigned to them is 404 module_disabled on all five routes — and so is one that does not exist", async () => {
+    const app = makeApp(prisma, GUEST_ASSIGNED);
+    for (const [method, url] of [
+      ["get", `/api/pm/work-items/${theirs}`],
+      ["get", `/api/pm/work-items/${theirs}/comments`],
+      ["post", `/api/pm/work-items/${theirs}/comments`],
+      ["post", `/api/pm/work-items/${theirs}/transition`],
+      ["get", `/api/pm/work-items/no-such-item`],
+      ["post", `/api/pm/work-items/no-such-item/comments`],
+    ] as const) {
+      const res = await request(app)[method](url).send({ comment_html: "<p>x</p>", state_id: doneStateId });
+      expect(refused(res), `${method} ${url} -> ${res.status}`).toBe(true);
+    }
+    // nothing was written
+    expect((await request(makeApp(prisma, OWNER)).get(`/api/pm/work-items/${theirs}/comments`)).body.comments).toEqual([]);
+  });
+
+  it("the state list is for a project holding an item assigned to them, and for no other", async () => {
+    const other = (await request(makeApp(prisma, OWNER)).post("/api/pm/projects").send({ name: "Other" })).body.project.id;
+    const res = await request(makeApp(prisma, GUEST_ASSIGNED)).get(`/api/pm/projects/${other}/states`);
+    expect(refused(res)).toBe(true);
+  });
+
+  it("another guest, to whom nothing is assigned, reaches none of it", async () => {
+    const app = makeApp(prisma, OTHER_GUEST);
+    expect(refused(await request(app).get(`/api/pm/work-items/${mine}`))).toBe(true);
+    expect(refused(await request(app).get(`/api/pm/projects/${pid}/states`))).toBe(true);
+    expect(refused(await request(app).post(`/api/pm/work-items/${mine}/comments`).send({ comment_html: "<p>x</p>" }))).toBe(true);
+  });
+
+  it("the assigned guest still cannot edit, delete or assign: those routes stay role-gated", async () => {
+    const app = makeApp(prisma, GUEST_ASSIGNED);
+    expect((await request(app).patch(`/api/pm/work-items/${mine}`).send({ name: "renamed" })).status).toBe(403);
+    expect((await request(app).delete(`/api/pm/work-items/${mine}`)).status).toBe(403);
+    expect((await request(app).post(`/api/pm/projects/${pid}/work-items`).send({ name: "new" })).status).toBe(403);
+  });
+
+  it("members, admins and owners are untouched by the guard (no lookup is made for them)", async () => {
+    for (const role of ["family", "admin", "owner"]) {
+      const app = makeApp(prisma, { id: `user-${role}`, role });
+      expect((await request(app).get(`/api/pm/work-items/${theirs}`)).status, role).toBe(200);
+      expect((await request(app).get(`/api/pm/work-items/${theirs}/comments`)).status, role).toBe(200);
+    }
+    // a member's detail still carries the relations key as before
+    const detail = await request(makeApp(prisma, { id: "user-family", role: "family" })).get(`/api/pm/work-items/${theirs}`);
+    expect(Array.isArray(detail.body.relations)).toBe(true);
+  });
+
+  // WARP-3407 — how the guest FINDS what was shared with them: the list of the
+  // items assigned to them, and nothing else.
+  it("the assigned guest lists exactly the items assigned to them", async () => {
+    const res = await request(makeApp(prisma, GUEST_ASSIGNED)).get("/api/pm/assigned-to-me");
+    expect(res.status).toBe(200);
+    expect(res.body.work_items.map((w: { id: string }) => w.id)).toEqual([mine]);
+    expect(res.body.work_items[0].key).toBe("INBOX-1");
+  });
+
+  it("another guest lists nothing, and no query widens anyone's list to someone else's work", async () => {
+    const other = await request(makeApp(prisma, OTHER_GUEST)).get("/api/pm/assigned-to-me");
+    expect(other.status).toBe(200);
+    expect(other.body.work_items).toEqual([]);
+    const widened = await request(makeApp(prisma, GUEST_ASSIGNED)).get(
+      `/api/pm/assigned-to-me?assignee=user-owner&userId=user-owner&project=${pid}`,
+    );
+    expect(widened.body.work_items.map((w: { id: string }) => w.id)).toEqual([mine]);
+  });
+
+  it("a member's own list is theirs too, and a bad page is a 400", async () => {
+    const owner = makeApp(prisma, OWNER);
+    const theirsToo = (
+      await request(owner).post(`/api/pm/projects/${pid}/work-items`).send({ name: "Member's", assignees: ["user-family"] })
+    ).body.work_item.id;
+    const app = makeApp(prisma, { id: "user-family", role: "family" });
+    expect((await request(app).get("/api/pm/assigned-to-me")).body.work_items.map((w: { id: string }) => w.id)).toEqual([theirsToo]);
+    expect((await request(app).get("/api/pm/assigned-to-me?per_page=abc")).status).toBe(400);
+  });
+
+  it("the MCP service principal is not a guest: the guard lets it through", async () => {
+    const res = await request(makeApp(prisma, MCP)).get(`/api/pm/work-items/${theirs}`);
+    expect(res.status).toBe(200);
+  });
+
+  it("a guest cannot lead a project (lead_is_guest, 422), wherever the lead id is asserted", async () => {
+    // the fake has no `user` model: give the service the one lookup it makes
+    (prisma as { user?: unknown }).user = {
+      findUnique: async ({ where }: { where: { id: string } }) => ({ role: where.id.startsWith("user-guest") ? "guest" : "family" }),
+    };
+    const owner = makeApp(prisma, OWNER);
+    const refused422 = await request(owner).patch(`/api/pm/projects/${pid}`).send({ leadId: GUEST_ASSIGNED.id });
+    expect(refused422.status).toBe(422);
+    expect(refused422.body).toEqual({ error: "lead_is_guest" });
+    const ok = await request(owner).patch(`/api/pm/projects/${pid}`).send({ leadId: "user-family" });
+    expect(ok.status).toBe(200);
   });
 });

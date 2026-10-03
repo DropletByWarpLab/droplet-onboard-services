@@ -516,8 +516,10 @@ export interface DeviceInfo {
   deviceId: string;
   hostname: string;
   hardwareRev: string;
-  networkMode: string;
-  ip: string | null;
+  /** Owner and admin only (WARP-3378): absent from a member's answer. */
+  networkMode?: string;
+  /** Owner and admin only (WARP-3378): absent from a member's answer. */
+  ip?: string | null;
   lastSeen: string;
 }
 
@@ -1038,7 +1040,9 @@ export interface OverlayApproveResult {
  *  voice-io FastAPI response model). The wizard's voice step polls this
  *  while the customer tries "hey droplet": a `last_wake_at` change is the
  *  wake confirmation; `last_transcript` / `last_response` land afterwards
- *  as STT and the reply complete. `state === "no_mic"` drives the
+ *  as STT and the reply complete — but only when asked for with
+ *  `fetchVoiceStatus({ transcript: true })` (WARP-3396: the box strips the
+ *  four transcript fields from the default answer). `state === "no_mic"` drives the
  *  plug-in-a-mic panel (hot-plug recovery needs no restart). */
 export interface VoiceStatusInfo {
   /** WARP-1599 — the admin kill switch, relayed verbatim. `false` means
@@ -1549,7 +1553,9 @@ export type AccessModuleId =
   /** WARP-2581 — invoices and bills landed from a cloud ledger. */
   | "money"
   /** WARP-2977 — the Security command center (ADR-059). */
-  | "security";
+  | "security"
+  /** ADR-055 — the doors this box knows about. Ships dark (DOORS_ENABLED). */
+  | "doors";
 
 export interface AccessRoleFeatureGrant {
   moduleId: AccessModuleId;
@@ -3085,10 +3091,14 @@ export interface ScheduleEvent {
  * which withholds a tool from ASKING while leaving it callable from its own
  * screen or by an MCP client. It is "not by asking", never "unavailable".
  *
- * ONE AXIS. A `module` axis was cut before it shipped: §6 module gating is
- * not applied to the chat pool for an owner or anybody holding no AccessRole,
- * so a "Module off" chip would have been a confident false statement on every
- * shipped box. WARP-2972 wires that gate; the axis returns here after it.
+ * WARP-2972 — `module` says whether the module that owns the tool's domain is
+ * on for this box and held by the caller. It was cut before it shipped: §6
+ * module gating did not reach the chat pool for an owner or anybody holding no
+ * AccessRole, so a "Module off" chip would have been a confident false
+ * statement on every shipped box. The gate is enforced for everyone now (the
+ * agent loop, `GET /api/llm/tools` and the MCP server all apply the one
+ * predicate). Like `chat` it ANNOTATES: a switched-off tool is still listed.
+ * Optional so an older orchestrator, which sends no such field, still parses.
  *
  * The per-person axes (role grants, off-LAN withholding, turn relevance) need
  * a resolved principal and a modelled turn, and live on `/admin/prompt`'s
@@ -3096,6 +3106,7 @@ export interface ScheduleEvent {
  */
 export interface ToolReach {
   chat: "allowed" | "excluded";
+  module?: "allowed" | "withheld";
 }
 
 export interface ToolCatalogEntry {
@@ -3125,6 +3136,10 @@ export interface ToolCatalogEntry {
 
 /** The gates a chat turn applies, in the order it applies them. */
 export type InspectGate =
+  // WARP-2972 — the tool's module is off for the box, or this person has not
+  // been given it. Leads: it is the workspace-level precondition, and for a
+  // role holder the role's scope already embeds it.
+  | "module"
   | "write_tier"
   | "role_grant"
   | "interview_strip"
@@ -3639,10 +3654,16 @@ export type SecurityEventKind =
    * one row per person, endedAt null; their `end` is still its own
    * `detection` row. Shown as "Still in view".
    */
-  | "detection_ongoing";
+  | "detection_ongoing"
+  /**
+   * WARP-2977 P2b-2 — a door lock's reading changed. labels = [reading], one of
+   * locked | unlocked | not_fully_locked | unlatched | unknown. Only people with
+   * Devices view get these rows.
+   */
+  | "lock_state";
 
 /** Mirrors the orchestrator's SecurityEventSource enum. */
-export type SecurityEventSource = "frigate" | "frigate_status" | "activity_mirror" | "site_mode";
+export type SecurityEventSource = "frigate" | "frigate_status" | "activity_mirror" | "site_mode" | "matter_lock";
 
 /** An area a feed row belongs to — only areas the viewer can see. */
 export interface SecurityZoneRef {
@@ -3673,6 +3694,12 @@ export interface SecurityEvent {
    */
   zones: SecurityZoneRef[];
   /**
+   * WARP-2977 P2b-2 — `live`: startedAt is when it happened. `polled`: when
+   * Droplet's 60 s check found it (a door lock changed while the live stream
+   * was down), so the time is not when it happened.
+   */
+  observed: "live" | "polled";
+  /**
    * WARP-2978 (ADR-059 P3 route 1) — the incident the engine grouped this row
    * into, or null. A row the viewer can see implies its incident is visible
    * to them. Absent from a box older than P3.
@@ -3687,17 +3714,20 @@ export interface SecurityEventsPage {
 
 /**
  * One line of the feed header: what the feed is listening to, and whether it
- * is reporting. Served in the order camera_ingest, camera_system,
- * threat_mirror, site_mode, incidents, alerts, patterns, retention (PR-2 adds
- * `locks` after camera_system). WARP-2978: `incidents` is every viewer's;
- * `alerts` (who alerts reach) is owner/admin only. `links` (WARP-2979) is
- * Droplet's link-finding job's row, after `alerts`. `patterns` (WARP-2980) is
- * the baseline job's row. Mirrors the orchestrator's `SecurityHealthId`.
+ * is reporting. Served in the order camera_ingest, camera_system, locks,
+ * threat_mirror, site_mode, incidents, alerts, links, patterns, retention.
+ * `locks` (WARP-2977 P2b-2) comes only to people with Devices view;
+ * `threat_mirror` and `alerts` (WARP-2978) only to owners and admins.
+ * `incidents` (WARP-2978) is the incident engine's row, every viewer's.
+ * `links` (WARP-2979) is Droplet's link-finding job's row, after `alerts`.
+ * `patterns` (WARP-2980) is the baseline job's row. Mirrors the
+ * orchestrator's `SecurityHealthId`.
  */
 export interface SecurityHealthRow {
   id:
     | "camera_ingest"
     | "camera_system"
+    | "locks"
     | "threat_mirror"
     | "site_mode"
     | "incidents"
@@ -3719,8 +3749,8 @@ export interface SecurityHealthRow {
 
 export type SecurityZoneKind = "entry" | "interior" | "perimeter" | "parking" | "restricted";
 export type SecurityZoneState = "active" | "archived";
-/** PR-2 adds "lock". */
-export type SecurityZoneSourceKind = "camera" | "camera_zone";
+/** `lock` (WARP-2977 P2b-2): one Matter door-lock endpoint; shown only to people with Devices view. */
+export type SecurityZoneSourceKind = "camera" | "camera_zone" | "lock";
 /**
  * `removed` = a person unlinked it. WARP-2979: `proposed` = Droplet suggests it
  * (nothing uses it until a person adds it); `rejected` = a person turned
@@ -3781,7 +3811,7 @@ export interface LinkEvidenceView {
 export interface SecurityZoneLinkView {
   id: string;
   sourceKind: SecurityZoneSourceKind;
-  /** camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`. */
+  /** camera: `<frigateCamera>`; camera_zone: `<frigateCamera>/<frigateZone>`; lock: `matter:<nodeId>/<endpointId>`. */
   sourceRef: string;
   /**
    * ALWAYS the CAMERA's display name — the live camera name when the camera
@@ -3790,6 +3820,7 @@ export interface SecurityZoneLinkView {
    * link as "<label> (the '<part>' part of the view)", where the part is always
    * `sourceRef.slice(sourceRef.indexOf("/") + 1)`. The server snapshots
    * `sourceLabel` at link time as that same camera display name.
+   * A lock link's label is the lock's name.
    */
   label: string;
   state: SecurityZoneLinkState;
@@ -3828,12 +3859,30 @@ export interface SecurityZonesResponse {
 
 export type SecurityLinkStatus = "present" | "missing" | "unknown";
 
+/** One paired door-lock endpoint an area can be linked to (WARP-2977 P2b-2). */
+export interface SecurityLinkableLock {
+  /** `matter:<nodeId>/<endpointId>` — the link's sourceRef. */
+  ref: string;
+  nodeId: string;
+  endpointId: number;
+  label: string;
+  room: string | null;
+  /** Reporting to Droplet right now. A lock that isn't is still paired and linkable. */
+  connected: boolean;
+}
+
 /** GET /api/security/sources — what can be linked, and whether each link still points at something. */
 export interface SecuritySourcesView {
   frigate: "ok" | "unavailable";
   /** Visible cameras only. `parts` = the camera's Frigate zones ("parts of the camera's view"). */
   cameras: Array<{ name: string; label: string; parts: string[] }>;
   linkStatus: Array<{ linkId: string; status: SecurityLinkStatus }>;
+  /**
+   * WARP-2977 P2b-2. `hidden`: no Devices view (no items, and no lock link is
+   * shown anywhere). `unavailable`: the smart-home service couldn't answer —
+   * never an empty "no locks". `ok`: every paired lock, sorted by label.
+   */
+  locks: { state: "ok" | "hidden" | "unavailable"; items: SecurityLinkableLock[] };
 }
 
 /** POST /api/security/zones. */
@@ -3967,6 +4016,27 @@ export interface SecurityModeActionResult {
   mode: SecurityModeView;
   /** false = already in that state; nothing was written. */
   changed: boolean;
+  /**
+   * WARP-2977 P2b-2 — on a Close up or Away, for people with Devices view:
+   * the connected door locks last heard open, by name, when `locksChecked` is
+   * true. Never read as "all locked". Absent when `locksChecked` is false, and
+   * for everyone else.
+   */
+  unlockedLocks?: string[];
+  /**
+   * WARP-2977 P2b-2 (rjouffret, review of 4fa950c8) — beside `unlockedLocks`:
+   * the locks Droplet can't vouch for while the others' readings stand (not
+   * reporting, never heard, or unknown), by name. Same presence rules as
+   * `unlockedLocks`.
+   */
+  uncheckedLocks?: string[];
+  /**
+   * WARP-2977 P2b-2 (review F4) — false when every lock reading may be stale
+   * (no lock adapter, not checked yet, or the smart-home service unreachable):
+   * say so, name nothing, never "none open". Absent for people without
+   * Devices view.
+   */
+  locksChecked?: boolean;
 }
 
 export type SecurityHoursState = "not_set" | "set";
@@ -4650,3 +4720,96 @@ export interface NotificationAckAllResult {
   acked: number;
   unread: number;
 }
+
+// ── ADR-055 P4b: the doors page (routes /api/doors/*, ADR-055 P4a) ──
+
+/** Where a door's open/closed report comes from (AccessPoint.doorPositionSource). */
+export type DoorPositionSource = "lock" | "dp1" | "none";
+
+/**
+ * What the newest position report says. `unknown` is "no report yet" or "the
+ * door's device stopped reporting" — never closed. `not_monitored` is a door
+ * with no position source. The server never ages a report into `unknown`
+ * itself: that waits for link supervision, so a position is always the LAST
+ * report, and `positionSince` is how old it is.
+ */
+export type DoorPosition = "open" | "closed" | "unknown" | "not_monitored";
+
+/** Which forced-door claim a door can make; null when it can make none (§9.7). */
+export type DoorForcedClaim = "latch_witnessed" | "unwitnessed_open";
+
+export interface DoorView {
+  id: string;
+  name: string;
+  doorPositionSource: DoorPositionSource;
+  heldOpenSeconds: number;
+  status: "active" | "retired";
+  retiredAt: string | null;
+  position: DoorPosition;
+  /** When the newest position report happened. Null when none has, and for a `none` door. */
+  positionSince: string | null;
+  claims: { forcedDoor: DoorForcedClaim | null; heldOpen: boolean };
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** GET /api/doors[?include=retired]. */
+export interface DoorsResponse {
+  doors: DoorView[];
+}
+
+/** The fourteen AccessEvent kinds (brief §11.3). */
+export type DoorEventKind =
+  | "door_open"
+  | "door_closed"
+  | "latch_retracted"
+  | "latch_extended"
+  | "bolt_thrown"
+  | "bolt_withdrawn"
+  | "rex"
+  | "key_override"
+  | "unlock_granted"
+  | "unlock_denied"
+  | "forced_door"
+  | "held_open"
+  | "tamper"
+  | "trouble";
+
+export interface DoorEventView {
+  id: string;
+  doorId: string;
+  doorName: string;
+  kind: DoorEventKind;
+  /** When the DEVICE says it happened. */
+  occurredAt: string;
+  forcedClaim: DoorForcedClaim | null;
+  troubleCode: "position_unknown" | null;
+  derivedFromId: string | null;
+  correlationKey: string | null;
+}
+
+/** GET /api/doors/events. `nextCursor` is null on the last page. */
+export interface DoorEventsPage {
+  events: DoorEventView[];
+  nextCursor: string | null;
+}
+
+/** POST /api/doors (owner only). */
+export interface DoorCreateBody {
+  name: string;
+  doorPositionSource: DoorPositionSource;
+}
+
+/** PATCH /api/doors/:id (owner only) — at least one field. */
+export interface DoorPatchBody {
+  name?: string;
+  doorPositionSource?: DoorPositionSource;
+}
+
+/** The `error.code`s the doors routes answer with. */
+export type DoorsErrorCode =
+  | "INVALID_NAME"
+  | "DOOR_NOT_FOUND"
+  | "DOOR_RETIRED"
+  | "VALIDATION_ERROR"
+  | "DOORS_UNAVAILABLE";

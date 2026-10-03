@@ -26,8 +26,7 @@ const tool: Tool = {
   name: "erp_get_schedule_today",
   description:
     "Get the practice's appointment schedule for a day (defaults to today) from the " +
-    "connected ERP (Eaglesoft). Read-only. Not live yet — returns ERP_NOT_CONNECTED " +
-    "until the integration ships (WARP-1095+).",
+    "connected ERP (Eaglesoft). Read-only. Not live yet — returns ERP_NOT_CONNECTED.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

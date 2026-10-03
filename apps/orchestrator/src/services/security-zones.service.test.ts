@@ -38,12 +38,22 @@ import {
   matchAreasForEvent,
 } from "./security-zones.service.js";
 
-const onlyFront = { visibleCameras: new Set(["front"]) as ReadonlySet<string> };
-const everyone = { visibleCameras: "all" as const };
+const onlyFront = { visibleCameras: new Set(["front"]) as ReadonlySet<string>, mayReadLocks: false };
+const everyone = { visibleCameras: "all" as const, mayReadLocks: true };
+/** WARP-2977 P2b-2: a family member granted camera `front` AND Devices (smart_home) view. */
+const frontAndLocks = { ...onlyFront, mayReadLocks: true };
+/** An owner/admin narrowed off Devices: every camera, no locks. */
+const camerasOnly = { visibleCameras: "all" as const, mayReadLocks: false };
+
+/** What a P2b link row carries since WARP-2979: a person made it and set its state; no evidence. */
+const PERSON_LINK = { origin: "person", stateSetBy: "person", evidence: null } as const;
+
+const LOCK_A = "matter:4660/1";
+const LOCK_B = "matter:99/2";
 
 function link(
   zoneId: string,
-  sourceKind: "camera" | "camera_zone",
+  sourceKind: "camera" | "camera_zone" | "lock",
   sourceRef: string,
   name = zoneId,
   setBy: "person" | "droplet" = "person",
@@ -76,9 +86,24 @@ describe("parseLinkRef — the one parser", () => {
     ["camera_zone", "/till"],
     ["camera_zone", "back/till/x"],
     ["camera_zone", "back/ti ll"],
-    ["lock", "matter:1/1"],
+    // WARP-2977 P2b-2: `lock` is a kind now — but only the canonical lock ref, and never a camera name.
+    ["lock", "front"],
+    ["lock", "matter:04660/1"],
+    ["lock", "matter:4660/0"],
+    ["lock", "matter:4660"],
+    ["camera", "matter:4660/1"],
+    ["camera_zone", "matter:4660/1"],
   ])("rejects %s %j", (kind, ref) => {
     expect(parseLinkRef(kind as "camera", ref)).toBeNull();
+  });
+
+  it("WARP-2977 P2b-2: lock matter:<node>/<endpoint> → {nodeId, endpointId}, and back", () => {
+    expect(parseLinkRef("lock", LOCK_A)).toEqual({ nodeId: "4660", endpointId: 1 });
+    expect(formatLinkRef({ nodeId: "4660", endpointId: 1 })).toEqual({ sourceKind: "lock", sourceRef: LOCK_A });
+  });
+
+  it("a kind this build does not know is malformed — never visible, never matched (fail closed)", () => {
+    expect(parseLinkRef("access_point" as "camera", "ap-1")).toBeNull();
   });
 });
 
@@ -88,7 +113,16 @@ describe("visibleLinks / zoneVisibleTo — DS-005 applied to places", () => {
   it("keeps a link only when its camera is granted; a malformed ref is never visible", () => {
     expect(visibleLinks(links, onlyFront).map((l) => l.sourceRef)).toEqual(["front"]);
     expect(visibleLinks(links, everyone).map((l) => l.sourceRef)).toEqual(["front", "back/porch"]);
-    expect(visibleLinks(links, { visibleCameras: new Set() })).toEqual([]);
+    expect(visibleLinks(links, { visibleCameras: new Set(), mayReadLocks: false })).toEqual([]);
+  });
+
+  it("WARP-2977 P2b-2 (DS-019): a lock link is kept only with mayReadLocks — whatever the camera grant", () => {
+    const withLock = [...links, link("x", "lock", LOCK_A), link("x", "lock", "matter:007/1")];
+    expect(visibleLinks(withLock, frontAndLocks).map((l) => l.sourceRef)).toEqual(["front", LOCK_A]);
+    expect(visibleLinks(withLock, onlyFront).map((l) => l.sourceRef)).toEqual(["front"]);
+    expect(visibleLinks(withLock, camerasOnly).map((l) => l.sourceRef)).toEqual(["front", "back/porch"]);
+    // A scope that does not say is read as "may not" (fail closed).
+    expect(visibleLinks([link("x", "lock", LOCK_A)], { visibleCameras: "all" } as never)).toEqual([]);
   });
 
   it("an area whose every link is hidden is hidden; one with no links at all is shown", () => {
@@ -131,6 +165,16 @@ describe("zoneEventWhere — the feed clause for one area", () => {
   it('nothing to match is the sentinel "none" — never {} and never {OR: []}', () => {
     expect(zoneEventWhere([])).toBe("none");
     expect(zoneEventWhere([link("x", "camera", "bad/ref")])).toBe("none");
+    expect(zoneEventWhere([link("x", "lock", "matter:007/1")])).toBe("none");
+  });
+
+  it("WARP-2977 P2b-2: lock links match that endpoint's lock_state rows, in one sorted, deduped arm after the cameras", () => {
+    expect(
+      zoneEventWhere([link("x", "lock", LOCK_B), link("x", "camera", "front"), link("x", "lock", LOCK_A), link("y", "lock", LOCK_A)]),
+    ).toEqual({ OR: [{ camera: "front" }, { source: "matter_lock", sourceRef: { in: [LOCK_A, LOCK_B] } }] });
+    expect(zoneEventWhere([link("x", "lock", LOCK_A)])).toEqual({
+      OR: [{ source: "matter_lock", sourceRef: { in: [LOCK_A] } }],
+    });
   });
 });
 
@@ -191,6 +235,22 @@ describe("zonesForEvent — the in-memory twin", () => {
   it("an unlinked camera matches nothing", () => {
     expect(zonesForEvent(row({ camera: "side", cameraZones: ["porch"] }), index)).toEqual([]);
   });
+
+  it("WARP-2977 P2b-2: a lock row belongs to the areas its endpoint is linked to — by sourceRef, exactly", () => {
+    const withLocks = buildZoneIndex([
+      link("shop", "camera", "front"),
+      link("door", "lock", LOCK_A),
+      link("shop", "lock", LOCK_A),
+      link("gate", "lock", LOCK_B),
+    ]);
+    const lockRow = (sourceRef?: string) => row({ source: "matter_lock", kind: "lock_state", camera: null, sourceRef });
+    expect(zonesForEvent(lockRow(LOCK_A), withLocks)).toEqual(["door", "shop"]);
+    expect(zonesForEvent(lockRow(LOCK_B), withLocks)).toEqual(["gate"]);
+    expect(zonesForEvent(lockRow("matter:4660/2"), withLocks)).toEqual([]);
+    // Without its sourceRef a lock row matches nothing; a camera row never matches a lock link.
+    expect(zonesForEvent(lockRow(undefined), withLocks)).toEqual([]);
+    expect(zonesForEvent(row({ camera: "front", sourceRef: LOCK_A }), withLocks)).toEqual(["shop"]);
+  });
 });
 
 describe("viewerAreas / zoneFilterFor — what one viewer's feed resolves", () => {
@@ -211,6 +271,23 @@ describe("viewerAreas / zoneFilterFor — what one viewer's feed resolves", () =
     expect(zoneFilterFor(all, "yard", onlyFront)).toBe("none");
     expect(zoneFilterFor(all, "nope", everyone)).toBe("none");
     expect(zoneFilterFor(all, "shop", onlyFront)).toEqual({ OR: [{ camera: "front" }] });
+  });
+
+  it("WARP-2977 P2b-2: an area made only of locks is hidden without Devices view, and its lock links never leak into another's", () => {
+    const withLocks = [...all, link("door", "lock", LOCK_A, "Back door"), link("shop", "lock", LOCK_B, "Shop floor")];
+    const noLocks = viewerAreas(withLocks, camerasOnly);
+    expect([...noLocks.names.keys()].sort()).toEqual(["shop", "yard"]);
+    expect(zoneFilterFor(withLocks, "door", camerasOnly)).toBe("none");
+    expect(zoneFilterFor(withLocks, "shop", camerasOnly)).toEqual({ OR: [{ camera: "front" }, { camera: "back", OR: expect.any(Array) }] });
+    const lockRow = row({ source: "matter_lock", kind: "lock_state", camera: null, sourceRef: LOCK_B });
+    expect(zonesForEvent(lockRow, noLocks.index)).toEqual([]);
+
+    const locks = viewerAreas(withLocks, everyone);
+    expect([...locks.names.keys()].sort()).toEqual(["door", "shop", "yard"]);
+    expect(zonesForEvent(lockRow, locks.index)).toEqual(["shop"]);
+    expect(zoneFilterFor(withLocks, "door", frontAndLocks)).toEqual({
+      OR: [{ source: "matter_lock", sourceRef: { in: [LOCK_A] } }],
+    });
   });
 });
 
@@ -272,6 +349,10 @@ describe("loadActiveLinks", () => {
 });
 
 describe("the sources list (route 4) and link status", () => {
+  const LOCKS = new Map([
+    [LOCK_A, { ref: LOCK_A, nodeId: "4660", endpointId: 1, label: "Back door lock", room: "Hall", connected: true }],
+    [LOCK_B, { ref: LOCK_B, nodeId: "99", endpointId: 2, label: "Annex lock", room: null, connected: false }],
+  ]);
   const both: SourceCatalog = {
     cameraRows: new Map([
       ["front", "Front camera"],
@@ -282,6 +363,7 @@ describe("the sources list (route 4) and link status", () => {
       ["back", ["door", "till"]],
       ["side", []],
     ]),
+    locks: LOCKS,
   };
 
   it("frigatePartsFromConfig: camera → zone keys that pass FRIGATE_NAME, sorted; no cameras map = unreadable", () => {
@@ -311,17 +393,51 @@ describe("the sources list (route 4) and link status", () => {
     ["a part that was removed", { sourceKind: "camera_zone", sourceRef: "back/gate" }, both, "missing"],
     ["a part of a camera Frigate lost", { sourceKind: "camera_zone", sourceRef: "cam3/till" }, both, "missing"],
     ["a part, Frigate down", { sourceKind: "camera_zone", sourceRef: "back/till" }, { ...both, frigate: null }, "unknown"],
+    ["a paired lock", { sourceKind: "lock", sourceRef: LOCK_A }, both, "present"],
+    ["a paired lock that is not reporting", { sourceKind: "lock", sourceRef: LOCK_B }, both, "present"],
+    ["a lock the smart-home service no longer lists", { sourceKind: "lock", sourceRef: "matter:1/1" }, both, "missing"],
+    ["a lock, smart-home service unreachable", { sourceKind: "lock", sourceRef: LOCK_A }, { ...both, locks: null }, "unknown"],
+    ["a lock ref that is not canonical", { sourceKind: "lock", sourceRef: "matter:04660/1" }, both, "missing"],
   ] as const)("%s → %s", (_n, l, catalog, status) => {
     expect(linkSourceStatus(l, catalog)).toBe(status);
   });
 
   it("family sees only granted cameras, and statuses only for links it can see", () => {
-    const links = [link("shop", "camera", "front"), link("shop", "camera_zone", "back/till"), link("yard", "camera", "back")];
+    const links = [
+      link("shop", "camera", "front"),
+      link("shop", "camera_zone", "back/till"),
+      link("yard", "camera", "back"),
+      link("shop", "lock", LOCK_A),
+    ];
     expect(buildSourcesView(both, links, onlyFront)).toEqual({
       frigate: "ok",
       cameras: [{ name: "front", label: "Front camera", parts: ["porch"] }],
       linkStatus: [{ linkId: "shop:front", status: "present" }],
+      locks: { state: "hidden", items: [] },
     });
+  });
+
+  it("WARP-2977 P2b-2: with Devices view the locks half lists every paired lock endpoint, sorted by label, and lock links get a status", () => {
+    const view = buildSourcesView(both, [link("shop", "lock", LOCK_A), link("gate", "lock", "matter:1/1")], frontAndLocks);
+    expect(view.locks).toEqual({
+      state: "ok",
+      items: [
+        { ref: LOCK_B, nodeId: "99", endpointId: 2, label: "Annex lock", room: null, connected: false },
+        { ref: LOCK_A, nodeId: "4660", endpointId: 1, label: "Back door lock", room: "Hall", connected: true },
+      ],
+    });
+    expect(view.linkStatus).toEqual([
+      { linkId: "shop:" + LOCK_A, status: "present" },
+      { linkId: "gate:matter:1/1", status: "missing" },
+    ]);
+  });
+
+  it("WARP-2977 P2b-2: the smart-home service unreachable → the locks half is unavailable (never an empty 'no locks'), lock links unknown", () => {
+    const view = buildSourcesView({ ...both, locks: null }, [link("shop", "lock", LOCK_A)], everyone);
+    expect(view.locks).toEqual({ state: "unavailable", items: [] });
+    expect(view.linkStatus).toEqual([{ linkId: "shop:" + LOCK_A, status: "unknown" }]);
+    // …and the camera half is untouched by it.
+    expect(view.frigate).toBe("ok");
   });
 
   it("owner: every camera from either half, labelled, sorted by label; degrades per half", () => {
@@ -379,6 +495,27 @@ describe("the areas list (route 3)", () => {
     );
     expect(view.links.map((l) => l.label)).toEqual(["Back camera", "snapshot of cam3"]);
     expect(view.links[0].stateChangedAt).toBe(at.toISOString());
+  });
+
+  it("WARP-2977 P2b-2: a lock link's label is the lock's current name, else the snapshot taken when it was linked", () => {
+    const z: ZoneRecord = {
+      ...zone("z", []),
+      links: [
+        { id: "l1", sourceKind: "lock", sourceRef: LOCK_A, sourceLabel: "Smart Lock", state: "active", stateChangedAt: at, ...PERSON_LINK },
+        { id: "l2", sourceKind: "lock", sourceRef: LOCK_B, sourceLabel: "Old gate lock", state: "active", stateChangedAt: at, ...PERSON_LINK },
+      ],
+    };
+    const view = toZoneView(z, z.links, new Map(), new Map([[LOCK_A, "Back door lock"]]));
+    expect(view.links.map((l) => l.label)).toEqual(["Back door lock", "Old gate lock"]);
+  });
+
+  it("WARP-2977 P2b-2: an area made only of locks is hidden from a viewer without Devices view", () => {
+    const lockOnly: ZoneRecord = {
+      ...zone("door", []),
+      links: [{ id: "l1", sourceKind: "lock", sourceRef: LOCK_A, sourceLabel: "Back door lock", state: "active", stateChangedAt: at, ...PERSON_LINK }],
+    };
+    expect(visibleZoneViews([lockOnly], camerasOnly, new Map()).map((v) => v.id)).toEqual([]);
+    expect(visibleZoneViews([lockOnly], everyone, new Map()).map((v) => v.id)).toEqual(["door"]);
   });
 });
 
@@ -555,6 +692,50 @@ describe("matchAreasForEvent — exactly zonesForEvent's rules, plus the rank in
     }
   });
 
+  it("WARP-2977 P2b-2: lock links never place a camera row; a lock row is in its lock's areas on the feed, in none for the engine (D21)", () => {
+    const r = rng(2977);
+    const LOCKS = ["matter:7/1", "matter:7/2", "matter:9/1"];
+    let placedOnFeed = 0;
+    for (let round = 0; round < 20; round++) {
+      const links: ActiveZoneLink[] = [];
+      for (const zoneId of ZONES) {
+        const n = Math.floor(r() * 4);
+        for (let k = 0; k < n; k++) {
+          const camera = pick(r, CAMS);
+          const shape = r();
+          links.push({
+            linkId: `${zoneId}-${round}-${k}`,
+            zoneId,
+            zoneName: zoneId,
+            zoneKind: "interior",
+            sourceKind: shape < 0.3 ? "lock" : shape < 0.6 ? "camera" : "camera_zone",
+            sourceRef: shape < 0.3 ? pick(r, LOCKS) : shape < 0.6 ? camera : `${camera}/${pick(r, PARTS)}`,
+            setBy: "person",
+          });
+        }
+      }
+      const index = buildZoneIndex(links);
+      for (let e = 0; e < 10; e++) {
+        if (r() < 0.3) {
+          const lock = { source: "matter_lock" as const, kind: "lock_state" as const, camera: null, cameraZones: [], sourceRef: pick(r, LOCKS) };
+          expect(matchAreasForEvent(lock, links)).toEqual([]);
+          placedOnFeed += zonesForEvent(lock, index).length;
+          continue;
+        }
+        const kind = pick(r, KINDS);
+        const siteWide = kind === "source_offline" || kind === "threat" || kind === "mode_changed";
+        const row = { source: "frigate" as const, kind, camera: siteWide ? null : pick(r, CAMS), cameraZones: PARTS.filter(() => r() < 0.3) };
+        const got = matchAreasForEvent(row, links);
+        expect(got.map((m) => m.zoneId), JSON.stringify({ row, links })).toEqual(zonesForEvent(row, index));
+        // No lock link is ever one of the links that matched.
+        const lockLinkIds = new Set(links.filter((l) => l.sourceKind === "lock").map((l) => l.linkId));
+        expect(got.flatMap((m) => m.linkIds).filter((id) => lockLinkIds.has(id))).toEqual([]);
+      }
+    }
+    // Not vacuous: the feed really did place lock rows in areas.
+    expect(placedOnFeed).toBeGreaterThan(5);
+  });
+
   it("carries the matched link ids and 'part' when a part-of-view link matched", () => {
     const links: ActiveZoneLink[] = [
       { linkId: "a1", zoneId: "za", zoneName: "Shop", zoneKind: "interior", sourceKind: "camera", sourceRef: "front", setBy: "person" },
@@ -675,17 +856,32 @@ describe("evidenceFor — Droplet's evidence only for a viewer who can see every
 
   it("everyone who sees both cameras gets it; a viewer missing either gets null", () => {
     expect(evidenceFor({ origin: "droplet", evidence }, everyone)).toEqual(evidence);
-    expect(evidenceFor({ origin: "droplet", evidence }, { visibleCameras: new Set(["front", "back"]) })).toEqual(evidence);
+    expect(evidenceFor({ origin: "droplet", evidence }, { visibleCameras: new Set(["front", "back"]), mayReadLocks: false })).toEqual(evidence);
     expect(evidenceFor({ origin: "droplet", evidence }, onlyFront)).toBeNull();
-    expect(evidenceFor({ origin: "droplet", evidence }, { visibleCameras: new Set(["back"]) })).toBeNull();
+    expect(evidenceFor({ origin: "droplet", evidence }, { visibleCameras: new Set(["back"]), mayReadLocks: false })).toBeNull();
   });
 
-  it("null for a person's link, without a scope, for evidence that does not parse, and for a lock it names (PR-4)", () => {
+  it("null for a person's link, without a scope, and for evidence that does not parse", () => {
     expect(evidenceFor({ origin: "person", evidence }, everyone)).toBeNull();
     expect(evidenceFor({ origin: "droplet", evidence }, null)).toBeNull();
     expect(evidenceFor({ origin: "droplet", evidence: { ...evidence, v: 2 } }, everyone)).toBeNull();
-    const lock = { ...evidence, kind: "lock_camera", reverse: null, chosen: "lock", wholeK: null, anchor: { ...evidence.anchor, sourceKind: "lock", sourceRef: "matter:4/1" } };
-    expect(evidenceFor({ origin: "droplet", evidence: lock }, everyone)).toBeNull();
+  });
+
+  it("P4 PR-4 (DS-019): evidence that names a lock needs mayReadLocks too — the lock is presence data, and the camera grant does not decide it", () => {
+    // Anchored on the lock, the candidate the front camera's porch.
+    const lock = { ...evidence, kind: "lock_camera", reverse: null, anchor: { ...evidence.anchor, sourceKind: "lock", sourceRef: LOCK_A, label: "Back door lock" } };
+    expect(evidenceFor({ origin: "droplet", evidence: lock }, everyone)).toEqual(lock);
+    expect(evidenceFor({ origin: "droplet", evidence: lock }, frontAndLocks)).toEqual(lock);
+    // Every camera, but narrowed off Devices: no numbers.
+    expect(evidenceFor({ origin: "droplet", evidence: lock }, camerasOnly)).toBeNull();
+    // The lock, but not the camera it names.
+    expect(evidenceFor({ origin: "droplet", evidence: lock }, { visibleCameras: new Set(["back"]), mayReadLocks: true })).toBeNull();
+    // A lock CANDIDATE (a camera anchor): the same rule.
+    const lockCandidate = { ...evidence, kind: "lock_camera", reverse: null, chosen: "lock", wholeK: null, candidate: { sourceKind: "lock", sourceRef: LOCK_A, label: "Back door lock" } };
+    expect(evidenceFor({ origin: "droplet", evidence: lockCandidate }, { visibleCameras: new Set(["back"]), mayReadLocks: true })).toEqual(lockCandidate);
+    expect(evidenceFor({ origin: "droplet", evidence: lockCandidate }, { visibleCameras: new Set(["back"]), mayReadLocks: false })).toBeNull();
+    // A lock ref that is not the canonical form is malformed: hidden from everyone.
+    expect(evidenceFor({ origin: "droplet", evidence: { ...lock, anchor: { ...lock.anchor, sourceRef: "matter:04660/1" } } }, everyone)).toBeNull();
   });
 });
 

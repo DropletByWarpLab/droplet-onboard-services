@@ -81,7 +81,7 @@ const tool: Tool = {
   description:
     `Compute a hex digest of text using 'sha256', 'sha1', or 'md5' (Node built-in crypto, no app secrets, no ` +
     `network egress). Input capped at ${MAX_TEXT_CHARS} chars. NON-SECURITY-GRADE: unsalted, unstretched — a ` +
-    "general text/checksum digest, not a password/credential hash. Tier-1 read.",
+    "general text/checksum digest, not a password/credential hash.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

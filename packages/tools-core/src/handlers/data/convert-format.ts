@@ -240,7 +240,7 @@ const tool: Tool = {
     "JSON<->YAML round-trips exactly. JSON<->CSV requires a flat array of objects; every value is stringified on " +
     "the way to CSV and returned as a string on the way back (no type-guessing) — lossless for string-only records, " +
     "documented type-widening for numbers/booleans/nested values. Malformed, non-tabular, ragged, or duplicate-header " +
-    "input is rejected with a specific error code rather than silently coerced or dropped. Tier-1 read; pure " +
+    "input is rejected with a specific error code rather than silently coerced or dropped. Pure " +
     "computation, no network egress.",
   inputSchema,
   requiresWrite: false,

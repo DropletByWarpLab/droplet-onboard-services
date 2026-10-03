@@ -124,21 +124,58 @@ else:
     raise SystemExit("FIPS python self-test FAILED: MD5 succeeded under the FIPS config")
 PY
 
-# WARP-437: pre-download the deberta zero-shot model so first request
-# doesn't pay the 110 MB cold-load latency. Soft-fail (build does not
-# break on prewarm failure) but emits to stderr so build logs surface
-# the issue — otherwise a silent fail makes the prewarm pointless.
-RUN python -c "from query_classifier import QueryClassifierSingleton; QueryClassifierSingleton.instance()" \
-    || (echo "WARP-437: query_classifier prewarm FAILED — first runtime call will pay the model-download cost" >&2; true)
+# WARP-3426 — bake every Hugging Face asset the gateway loads; the Hub is
+# off-limits at runtime (offline proof below). The appliance never phones
+# home: before this, the embedding model (~130 MB) was fetched on the first
+# EmbedText after every container recreate, and the classifier/reranker
+# loaders re-checked the Hub on each load even when cached. The steps up to
+# the HF_HUB_OFFLINE line are the image's only Hub access. Each runs the
+# production loader, so the cache holds exactly what runtime asks for, at the
+# commit the code pins (providers/embeddings.py PINNED_REVISIONS,
+# query_classifier.py, reranker.py).
+#
+# Embedding model: HARD fail. EmbedText is the indexing path, and the runtime
+# can no longer fetch a model this step failed to bake.
+ENV HF_HOME=/var/cache/droplet/models/hf
+RUN python -c "from providers.embeddings import _get_model; _get_model()"
+
+# WARP-437: the deberta zero-shot classifier. WARP-3426 makes this a HARD
+# fail: a failed prewarm used to mean "the first runtime call downloads it";
+# with the runtime offline it would mean ClassifyQuery never works.
+RUN python -c "from query_classifier import QueryClassifierSingleton; QueryClassifierSingleton.instance()"
 
 # WARP-644: pre-warm + availability self-check for BGE-reranker-base. Uses
 # RerankerSingleton.available(), which fails closed (logs once at WARNING and
 # returns False) if the optimum/onnxruntime import or model load is broken,
 # so a regression surfaces in the build log instead of as silent empty-score
-# Rerank responses at runtime. Soft-fail like the classifier prewarm above —
-# the runtime handler already degrades gracefully.
-RUN python -c "from reranker import RerankerSingleton; raise SystemExit(0 if RerankerSingleton.available() else 1)" \
+# Rerank responses at runtime. Still soft-fail — the runtime handler degrades
+# gracefully to unranked retrieval — but WARP-3426 checks the ONNX bytes too.
+RUN (python -c "from reranker import RerankerSingleton; raise SystemExit(0 if RerankerSingleton.available() else 1)" && \
+     echo "15b9a8c3da82eddf263df571281166e00e9308fe19d077084b642ebfcaf06d2b  /var/cache/droplet/models/bge-reranker-base/models--BAAI--bge-reranker-base/snapshots/2cfc18c9415c912f9d8155881c133215df768a70/onnx/model.onnx" | sha256sum -c -) \
     || (echo "WARP-644: reranker prewarm/self-check FAILED — Rerank will return empty scores until the optimum/onnxruntime import is repaired" >&2; true)
+
+# WARP-3426: pin the bytes, not just the commit, for what defines the
+# embedding space (tokenizer + weights — every stored vector came from these;
+# WARP-2196) and for the classifier weights. Read off the Hub's pinned tree.
+RUN echo "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66  ${HF_HOME}/hub/models--BAAI--bge-small-en-v1.5/snapshots/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/tokenizer.json" | sha256sum -c - && \
+    echo "3c9f31665447c8911517620762200d2245a2518d6e7208acc78cd9db317e21ad  ${HF_HOME}/hub/models--BAAI--bge-small-en-v1.5/snapshots/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/model.safetensors" | sha256sum -c - && \
+    echo "6e8f2af78c828dcbd5243aac40fb87430376f0b8a9c288f4993df3ea3558d557  /var/cache/droplet/models/query-classifier/models--MoritzLaurer--deberta-v3-base-zeroshot-v2.0/snapshots/8e7e5af5983a0ddb1a5b45a38b129ab69e2258e8/model.safetensors" | sha256sum -c -
+
+# WARP-3426 — from here on the Hub does not exist. HF_HUB_OFFLINE makes every
+# huggingface_hub lookup resolve from the baked cache or raise; it never
+# downloads. TRANSFORMERS_OFFLINE / HF_DATASETS_OFFLINE are belt-and-braces
+# for libraries that check their own flag.
+# Then prove it: reload through the production loaders with no network at
+# all. A missing asset, or a code pin that drifted from the bake, fails the
+# image build here instead of on a customer's box. The reranker keeps its
+# WARP-644 soft-fail, but an offline-only failure is named in the build log.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_DATASETS_OFFLINE=1
+RUN --network=none python -c "from providers.embeddings import _get_model; _get_model()" && \
+    python -c "from query_classifier import QueryClassifierSingleton; QueryClassifierSingleton.instance()"
+RUN --network=none python -c "from reranker import RerankerSingleton; raise SystemExit(0 if RerankerSingleton.available() else 1)" \
+    || (echo "WARP-3426: reranker did not load OFFLINE — Rerank will return empty scores on the box" >&2; true)
 
 EXPOSE 8000
 CMD ["python", "-m", "_shared.serve", "main:app", "--host", "0.0.0.0", "--port", "8000"]

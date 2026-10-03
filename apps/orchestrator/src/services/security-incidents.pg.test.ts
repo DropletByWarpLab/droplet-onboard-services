@@ -44,6 +44,7 @@ import {
   type SecurityIncidentDeps,
 } from "./security-incidents.service.js";
 import { buildZoneIndex, loadActiveLinks, matchAreasForEvent, zoneEventWhere, zonesForEvent } from "./security-zones.service.js";
+import { SECURITY_RULESET_VERSION } from "../lib/security-rules.js";
 
 const RUN =
   process.env.RUN_PG_INTEGRATION === "1" &&
@@ -532,11 +533,70 @@ describe.skipIf(!RUN)("Security incidents against real Postgres (WARP-2978)", ()
       const reasons = await prisma.securityIncidentReason.findMany({ where: { evidenceEventId: off.id } });
       expect(reasons.map((r) => r.code).sort()).toEqual(["camera_offline", "camera_offline_during_activity"]);
       const r = reasons.find((x) => x.code === "camera_offline_during_activity")!;
-      expect(r).toMatchObject({ severity: "alert", evidenceCamera: CAM, relatedCamera: CAM, relatedLock: false, rulesetVersion: 4 });
+      expect(r).toMatchObject({ severity: "alert", evidenceCamera: CAM, relatedCamera: CAM, relatedLock: false, rulesetVersion: SECURITY_RULESET_VERSION });
       expect(r.detail).toMatchObject({ mode: "closed", activity: { eventId: seen.id.toString(), zoneId } });
       const incident = await prisma.securityIncident.findUniqueOrThrow({ where: { id: r.incidentId } });
       expect(incident.reasonCodes).toContain("camera_offline_during_activity");
       expect(incident.severity).toBe("alert");
+    });
+
+    it("P4 PR-4: a LIVE change of the area's person-linked lock before the drop → the alert names the lock (relatedLock, CHECK-valid); a POLLED one never counts", async () => {
+      await engineAtHead();
+      const LOCK = "matter:29790002/1";
+      const link = await prisma.securityZoneLink.create({
+        data: { zoneId, sourceKind: "lock", sourceRef: LOCK, sourceLabel: "Stock room lock", state: "active", origin: "person", stateSetBy: "person" },
+      });
+      const lockRow = (at: Date, observed: "live" | "polled", n: number) => ({
+        source: "matter_lock" as const,
+        kind: "lock_state" as const,
+        severity: "info" as const,
+        camera: null,
+        sourceRef: LOCK,
+        dedupeKey: `${TAG}:matter_lock:29790002/1:after:${n}:unlocked`,
+        labels: ["unlocked"],
+        cameraZones: [],
+        score: null,
+        startedAt: at,
+        endedAt: null,
+        summary: "Stock room lock: unlocked",
+        observed,
+      });
+      const offline = (at: Date) =>
+        prisma.securityEvent.create({
+          data: {
+            source: "frigate_status",
+            kind: "camera_offline",
+            severity: "notice",
+            camera: CAM,
+            sourceRef: `${CAM}/status/detect`,
+            dedupeKey: `${TAG}:off-lock-${at.getTime()}`,
+            labels: [],
+            cameraZones: [],
+            score: null,
+            startedAt: at,
+            summary: "Camera back stopped reporting",
+          },
+        });
+      try {
+        // Live: the lock turned 30 s before the camera dropped.
+        const liveDrop = plus(T0, 2 * 3_600_000);
+        const turned = await prisma.securityEvent.create({ data: lockRow(plus(liveDrop, -30_000), "live", 1) });
+        const off = await offline(liveDrop);
+        await tickSecurityIncidents(prisma, deps(plus(liveDrop, 61_000)));
+        const r = await prisma.securityIncidentReason.findFirstOrThrow({ where: { evidenceEventId: off.id, code: "camera_offline_during_activity" } });
+        expect(r).toMatchObject({ severity: "alert", evidenceCamera: CAM, relatedCamera: null, relatedLock: true, rulesetVersion: SECURITY_RULESET_VERSION });
+        expect(r.detail).toMatchObject({ mode: "closed", activity: { eventId: turned.id.toString(), kind: "lock_state", label: "unlocked", zoneId } });
+
+        // Polled: the same change, found by the 60 s check — only P3's camera_offline notice.
+        const polledDrop = plus(T0, 3 * 3_600_000);
+        await prisma.securityEvent.create({ data: lockRow(plus(polledDrop, -30_000), "polled", 2) });
+        const off2 = await offline(polledDrop);
+        await tickSecurityIncidents(prisma, deps(plus(polledDrop, 61_000)));
+        const codes = (await prisma.securityIncidentReason.findMany({ where: { evidenceEventId: off2.id } })).map((x) => x.code);
+        expect(codes).toEqual(["camera_offline"]);
+      } finally {
+        await prisma.securityZoneLink.delete({ where: { id: link.id } });
+      }
     });
 
     it("the floor: a row whose transaction is still open when a later row is triaged is triaged after it commits — never skipped", async () => {

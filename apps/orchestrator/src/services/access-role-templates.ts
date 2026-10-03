@@ -77,8 +77,9 @@
  * used to sit outside the registered `routePrefix` entirely, so it carried
  * NEITHER gate. It now carries the box-wide one. The per-person gap stands.)
  *
- *   • `read-only-auditor` holds `projects: view` AND `crm: view`, so
- *     `business` is exactly the reach it already advertised — substituted.
+ *   • `read-only-auditor` used to hold `projects: view` AND `crm: view` and
+ *     `business`; WARP-3365 / WARP-3369 refuse both modules to the guest tier,
+ *     so all three are gone from it.
  *   • `front-desk` and `marketing-outreach` hold `crm` but NOT `projects`.
  *     Giving them `business` would hand the assistant project and work-item
  *     reads their feature set does not authorise, so their dead grant is
@@ -377,21 +378,18 @@ export const ROLE_TEMPLATES = [
     id: "read-only-auditor",
     name: "Read-only Auditor",
     description:
-      "An outside accountant, compliance reviewer or consultant. External-guest-based, which makes read-only STRUCTURAL rather than a setting: the tier cannot hold act or manage on anything except Voice and Messages, so no later edit widens this into a writing role by accident. Carries no Money grant on purpose — /api/money admits member and up, so a Money card here would advertise reach the API refuses.",
+      "An outside accountant, compliance reviewer or consultant. External-guest-based, which makes read-only STRUCTURAL rather than a setting: the tier cannot hold act or manage on anything except Voice and Messages. Carries no Money, CRM or Projects grant on purpose — an external guest holds none of the company's customers, money or work unless it is shared with them, so those cards here would advertise reach the API refuses.",
     startingPoint: "guest",
     featureGrants: [
       { moduleId: "files", level: "view" },
       { moduleId: "docs", level: "view" },
-      { moduleId: "crm", level: "view" },
       { moduleId: "calendar", level: "view" },
       { moduleId: "contacts", level: "view" },
       { moduleId: "knowledge", level: "view" },
-      { moduleId: "projects", level: "view" },
       { moduleId: "team_chat", level: "view" },
     ],
     toolGrants: [
       { domain: "files", level: "view" },
-      { domain: "business", level: "view" },
       { domain: "calendar", level: "view" },
       { domain: "reminders", level: "view" },
       { domain: "notifications", level: "view" },

@@ -37,8 +37,18 @@
  *          `{error: 'module_disabled', module: 'security'}` — byte-identical
  *          to the module and feature gates, so the tool reads every refusal
  *          the same way ("switched off, or this person can't use it").
- * The acting person's scope is then `securityScopeForPerson`, the ONE
- * function the dashboard's routes use, and DS-005 is applied by the
+ * The acting person's scope is then `securityScopeWithoutLocks` — the
+ * dashboard's own `securityScopeForPerson`, minus door locks (WARP-2977 P2b-2,
+ * DS-019): lock state is presence data, and A1, A2 and A5 do not speak of
+ * locks. So on those a person holding Devices still gets no lock link, no
+ * lock-only area and no lock row — the safe side of the dashboard's rule,
+ * never wider. Widening it is a decision for the tools, not a side effect of
+ * the person's grants, and P4 PR-4 (§6.12.3) makes it for exactly two: A3
+ * (`security_search_events`, `kind: lock_state`, each lock event's `found`) and
+ * A4 (`security_zone_status`, a person-linked lock covering its area, its
+ * `reporting` from the lock adapter) read `securityScopeForPerson` itself, so
+ * a person with Devices view gets lock rows and lock links there and anyone
+ * else gets exactly what a site without locks answers. DS-005 is applied by the
  * dashboard's own projections (`listIncidents`, `loadIncidentDetail`,
  * `feedVisibilityWhere` at AND[0], `viewerAreas`, `visibleZoneViews`,
  * `zoneFilterFor`). An area or camera the person cannot see answers exactly
@@ -75,7 +85,7 @@ import type { EffectiveAccessResolver } from "../middleware/feature-gate.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import { resolveEffectiveAccess } from "../services/effective-access.service.js";
 import { FEATURE_LEVEL_RANK, type FeatureLevel } from "../services/access-catalog.js";
-import { securityScopeForPerson, type SecurityRouteDeps, type SecurityViewerScope } from "../services/security-access.js";
+import { securityScopeForPerson, securityScopeWithoutLocks, type SecurityRouteDeps, type SecurityViewerScope } from "../services/security-access.js";
 import {
   incidentListWhere,
   listIncidents,
@@ -93,7 +103,9 @@ import {
   listLinkProposals,
   loadActiveLinks,
   loadCameraLabels,
+  isLockLinkRef,
   loadZoneRecords,
+  lockLabelsFor,
   parseLinkRef,
   viewerAreas,
   visibleZoneViews,
@@ -102,6 +114,7 @@ import {
   type ViewerAreas,
 } from "../services/security-zones.service.js";
 import { securityOngoingSource, securityStatusSnapshot } from "../services/camera.service.js";
+import { securityLockAdapter } from "../services/security-lock-adapter.js";
 import { explainSecurityPattern } from "../services/security-patterns-read.js";
 import {
   ASSISTANT_EVENT_KINDS,
@@ -238,6 +251,7 @@ function viewerOf(actor: SecurityActor, scope: SecurityViewerScope): IncidentVie
     userId: actor.id,
     visibleCameras: scope.visibleCameras,
     mayReadThreats: scope.mayReadThreats,
+    mayReadLocks: scope.mayReadLocks,
     ownerOrAdmin: actor.role === "owner" || actor.role === "admin",
   };
 }
@@ -355,21 +369,36 @@ interface EventLike {
   endedAt: string | null;
 }
 
+/** P4 PR-4 — what a lock row needs beside itself: its ref (never on the wire) and the lock names this viewer may read. */
+interface LockContext {
+  sourceRef?: string;
+  lockLabels: ReadonlyMap<string, string>;
+}
+
 function areaNames(chips: ReadonlyArray<{ name: string }>): string[] {
   const names = chips.slice(0, AREAS_PER_EVENT).map((z) => z.name);
   return chips.length > AREAS_PER_EVENT ? [...names, `and ${chips.length - AREAS_PER_EVENT} more`] : names;
 }
 
-function eventItem(e: EventLike, areas: ViewerAreas, labels: ReadonlyMap<string, string>, tz: string | null, now: Date) {
+function eventItem(e: EventLike, areas: ViewerAreas, labels: ReadonlyMap<string, string>, tz: string | null, now: Date, lock?: LockContext) {
+  const lockName = lock?.sourceRef !== undefined ? lock.lockLabels.get(lock.sourceRef) : undefined;
   return {
     at: assistantInstant(new Date(e.startedAt), tz, now),
     until: e.endedAt ? assistantInstant(new Date(e.endedAt), tz, now) : null,
     kind: assistantKindOf(e.kind),
     what: eventWhat(e.kind, e.labels, e.camera),
-    source: eventSource(e.kind, e.camera, labels),
+    source: eventSource(e.kind, e.camera, labels, lockName),
     part: e.cameraZones.length > 0 ? e.cameraZones.join(", ") : null,
-    areas: areaNames(zoneChipsFor({ source: e.source as never, kind: e.kind as never, camera: e.camera, cameraZones: e.cameraZones }, areas)),
+    // A lock row joins its areas on its sourceRef (P2b-2), handed over beside the page.
+    areas: areaNames(
+      zoneChipsFor({ source: e.source as never, kind: e.kind as never, camera: e.camera, cameraZones: e.cameraZones, sourceRef: lock?.sourceRef }, areas),
+    ),
   };
+}
+
+/** A3's `found` (P4 PR-4): a polled row's time is when Droplet's 60 s check found it, not when it happened. */
+function foundWord(observed: string): "live" | "when Droplet checked" {
+  return observed === "polled" ? "when Droplet checked" : "live";
 }
 
 /**
@@ -441,6 +470,8 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
   const clock = (): Date => (deps.now ? deps.now() : new Date());
   const resolver = deps.resolve ?? resolveEffectiveAccess;
   const cameraStatus: CameraStatusSource = deps.cameraStatus ?? securityStatusSnapshot;
+  /** The lock adapter, read per request (it is started after the routers are built); null = none is running. */
+  const lockReader = () => (deps.locks ?? securityLockAdapter)();
   // Step 1: exactly the MCP principal, no human role (a person gets 403).
   const assistantOnly = requireRoleOrService(MCP_PRINCIPAL_ID);
   const actor = resolveSecurityActor(prisma, resolver);
@@ -454,7 +485,7 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
     const now = clock();
     try {
       const who = actorOf(res);
-      const scope = await securityScopeForPerson(prisma, who, resolver);
+      const scope = await securityScopeWithoutLocks(prisma, who);
       const viewer = viewerOf(who, scope);
       const site = await siteClockOf(prisma, now);
       const p = resolveAssistantPeriod(q.data, site, now, new Date(now.getTime() - SECURITY_INCIDENT_RETENTION_DAYS * DAY_MS));
@@ -493,7 +524,7 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
     const now = clock();
     try {
       const who = actorOf(res);
-      const scope = await securityScopeForPerson(prisma, who, resolver);
+      const scope = await securityScopeWithoutLocks(prisma, who);
       const viewer = viewerOf(who, scope);
       const detail = await loadIncidentDetail(prisma, req.params.id!, viewer, "view", now, securityOngoingSource());
       if (!detail) return fail(res, 404, "INCIDENT_NOT_FOUND", "There is no such incident.");
@@ -547,6 +578,8 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
     const now = clock();
     try {
       const who = actorOf(res);
+      // P4 PR-4 (§6.12.3, DS-019): A3 and A4 speak of door locks, so their scope is the dashboard's own —
+      // lock rows and lock links for a person with Devices view, none for anyone else.
       const scope = await securityScopeForPerson(prisma, who, resolver);
       const site = await siteClockOf(prisma, now);
       const p = resolveAssistantPeriod(q.data, site, now, new Date(now.getTime() - SECURITY_EVENT_RETENTION_DAYS * DAY_MS));
@@ -572,12 +605,18 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
       const kinds = q.data.kind ? ASSISTANT_EVENT_KINDS[q.data.kind] : q.data.label ? ASSISTANT_EVENT_KINDS.detection : ASSISTANT_STORED_KINDS;
       const page = await listSecurityEvents(
         prisma,
-        feedVisibilityWhere(scope.visibleCameras, scope.mayReadThreats),
+        feedVisibilityWhere(scope.visibleCameras, scope.mayReadThreats, scope.mayReadLocks),
         { limit: q.data.limit, cursor: cursor ?? undefined, kinds: { in: [...kinds] }, includeLow: false },
         extraWhere,
       );
       const areas = viewerAreas(links, scope);
-      const items = page.events.map((e) => eventItem(e, areas, labels, site.timezone, now));
+      // P4 PR-4 (DS-019): lock names only for a viewer who may read locks (their lock rows are already gone otherwise).
+      const lockLabels = lockLabelsFor(scope, lockReader());
+      const items = page.events.map((e) => ({
+        ...eventItem(e, areas, labels, site.timezone, now, { sourceRef: page.sourceRefs.get(e.id), lockLabels }),
+        // Only a lock row can be polled (the lock sweep is the one polled writer), so only it says how it was found.
+        ...(e.kind === "lock_state" ? { found: foundWord(e.observed) } : {}),
+      }));
       const n = fitList(items, (kept) => ({ ...head, events: kept, nextCursor: "0000000000000.9223372036854775807" }));
       const tail = page.events[n - 1];
       res.json({
@@ -597,6 +636,8 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
     const now = clock();
     try {
       const who = actorOf(res);
+      // P4 PR-4 (§6.12.3, DS-019): A3 and A4 speak of door locks, so their scope is the dashboard's own —
+      // lock rows and lock links for a person with Devices view, none for anyone else.
       const scope = await securityScopeForPerson(prisma, who, resolver);
       const viewer = viewerOf(who, scope);
       const [mode, records, links, labels] = await Promise.all([
@@ -610,7 +651,9 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
         loadCameraLabels(prisma),
       ]);
       const tz = mode ? mode.displayTimezone : await unreadableHoursZone(prisma);
-      let zones = visibleZoneViews(records, scope, labels);
+      // P4 PR-4 (DS-019): lock links reach only a viewer who may read locks (`visibleLinks`), named from the adapter's list.
+      const reader = lockReader();
+      let zones = visibleZoneViews(records, scope, labels, lockLabelsFor(scope, reader));
       if (q.data.area !== undefined) {
         const key = nameKey(q.data.area);
         zones = zones.filter((z) => nameKey(z.name) === key);
@@ -618,14 +661,22 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
       const status = cameraStatus();
       const frigateDown = status.get(null)?.health === "offline";
       // "detection off": Frigate says the camera is there but not detecting — neither reporting nor offline.
-      const reporting = (camera: string | undefined): "yes" | "offline" | "detection off" | "not set up" | "unknown" => {
+      type Reporting = "yes" | "offline" | "detection off" | "not set up" | "unknown";
+      // A door lock: the adapter's last list — connected is reporting; not listed is not set up; no adapter, unknown.
+      // A last list the adapter can't currently confirm (bridge down, sweep failing) is unknown too, as on Close up.
+      const lockReporting = (ref: string): Reporting => {
+        if (!reader || reader.readingsState() !== "current") return "unknown";
+        const lock = reader.knownLocks().find((l) => l.ref === ref);
+        return !lock ? "not set up" : lock.connected ? "yes" : "offline";
+      };
+      const reporting = (camera: string | undefined): Reporting => {
         if (!camera || !labels.has(camera)) return "not set up";
         if (frigateDown) return "offline";
         const r = status.get(camera);
         if (!r) return "unknown";
         return r.health === "online" ? "yes" : r.health === "disabled" ? "detection off" : "offline";
       };
-      const visibility = feedVisibilityWhere(scope.visibleCameras, scope.mayReadThreats);
+      const visibility = feedVisibilityWhere(scope.visibleCameras, scope.mayReadThreats, scope.mayReadLocks);
       // One area's answer: its last visible activity and its open incidents (two reads), and what covers it.
       const readArea = async (z: (typeof zones)[number]) => {
         const clause = zoneFilterFor(links, z.id, scope);
@@ -643,10 +694,13 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
           openIncidents,
           coveredBy: z.links.map((l) => {
             const parsed = parseLinkRef(l.sourceKind, l.sourceRef);
+            // A lock link reaches here only for a viewer who may read locks (`visibleZoneViews`, DS-019).
+            const lock = parsed !== null && isLockLinkRef(parsed);
+            const camera = parsed && !isLockLinkRef(parsed) ? parsed : null;
             return {
               source: l.label,
-              part: parsed?.frigateZone ?? null,
-              reporting: reporting(parsed?.camera),
+              part: camera?.frigateZone ?? null,
+              reporting: lock ? lockReporting(l.sourceRef) : reporting(camera?.camera),
               linkedBy: l.setBy === "droplet" ? "Droplet" : "a person",
             };
           }),
@@ -699,7 +753,7 @@ export function createSecurityAssistantRouter(prisma: PrismaClient, deps: Securi
     }
     try {
       const who = actorOf(res);
-      const scope = await securityScopeForPerson(prisma, who, resolver);
+      const scope = await securityScopeWithoutLocks(prisma, who);
       const site = await siteClockOf(prisma, now);
       if (q.data.period !== undefined) {
         const p = resolveAssistantPeriod({ period: q.data.period }, site, now, new Date(now.getTime() - PATTERN_AT_BACK_MS));

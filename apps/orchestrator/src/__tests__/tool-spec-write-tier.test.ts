@@ -196,9 +196,12 @@ function createPrismaMock(
       ),
     },
     user: {
-      findUnique: vi.fn(async ({ where }: { where: { id: string } }) =>
-        users.get(where.id) ?? null,
-      ),
+      findUnique: vi.fn(async ({ where }: { where: { id: string } }) => {
+        const row = users.get(where.id);
+        // WARP-2972 — `User.username` is NOT NULL; a scheduled fire carries it
+        // as `_meta.userId`, so every row in this table has one.
+        return row ? { username: `${row.id}-handle`, ...row } : null;
+      }),
     },
   };
 }
@@ -400,7 +403,11 @@ describe("WARP-1621 — the ticker applies the same write-tier gate", () => {
     const result = await tickToolSchedules(prisma as never, dispatcher, now);
 
     expect(result.fired).toBe(1);
-    expect(dispatcher.call).toHaveBeenCalledWith(FILES_READ, { path: "/" });
+    expect(dispatcher.call).toHaveBeenCalledWith(
+      FILES_READ,
+      { path: "/" },
+      { userId: "user-family-handle" },
+    );
   });
 
   /**
@@ -429,7 +436,11 @@ describe("WARP-1621 — the ticker applies the same write-tier gate", () => {
     const result = await tickToolSchedules(prisma as never, dispatcher, now);
 
     expect(result.fired).toBe(1);
-    expect(dispatcher.call).toHaveBeenCalledWith(FILES_READ, { path: "/" });
+    expect(dispatcher.call).toHaveBeenCalledWith(
+      FILES_READ,
+      { path: "/" },
+      { userId: "user-family-handle" },
+    );
     // Recorded as the scheduler's run, authorised against the CREATOR's scope.
     expect(prisma.runs[0]).toMatchObject({ triggeredBy: "scheduler" });
     expect(
@@ -448,10 +459,11 @@ describe("WARP-1621 — the ticker applies the same write-tier gate", () => {
     const result = await tickToolSchedules(prisma as never, dispatcher, now);
 
     expect(result.fired).toBe(1);
-    expect(dispatcher.call).toHaveBeenCalledWith(SMART_HOME_WRITE, {
-      node_id: "n1",
-      command: "turn_on",
-    });
+    expect(dispatcher.call).toHaveBeenCalledWith(
+      SMART_HOME_WRITE,
+      { node_id: "n1", command: "turn_on" },
+      { userId: "user-admin-handle" },
+    );
   });
 });
 

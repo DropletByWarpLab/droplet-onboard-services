@@ -25,7 +25,27 @@ interface StateRow {
   consumedAt: Date | null;
   expiresAt: Date;
   createdAt: Date;
+  // Native handoff (RFC 8252). `flowKind` mirrors the DB default (BROWSER).
+  flowKind: "BROWSER" | "NATIVE";
+  nativeRedirectUri: string | null;
+  nativeCodeChallenge: string | null;
+  nativeConsentHash: string | null;
+  handoffCodeHash: string | null;
+  handoffUserId: string | null;
+  handoffExpiresAt: Date | null;
+  handoffConsumedAt: Date | null;
 }
+
+const NO_NATIVE = {
+  flowKind: "BROWSER" as const,
+  nativeRedirectUri: null,
+  nativeCodeChallenge: null,
+  nativeConsentHash: null,
+  handoffCodeHash: null,
+  handoffUserId: null,
+  handoffExpiresAt: null,
+  handoffConsumedAt: null,
+};
 
 /**
  * Minimal recursive evaluator for the Prisma `where` shapes the service
@@ -71,6 +91,10 @@ function createPrismaMock(seed: StateRow[] = []) {
         consumedAt: null,
         expiresAt: data.expiresAt,
         createdAt: new Date(),
+        ...NO_NATIVE,
+        flowKind: data.flowKind ?? "BROWSER",
+        nativeRedirectUri: data.nativeRedirectUri ?? null,
+        nativeCodeChallenge: data.nativeCodeChallenge ?? null,
       };
       rows.push(row);
       return row;
@@ -79,15 +103,19 @@ function createPrismaMock(seed: StateRow[] = []) {
     updateMany: vi.fn(async ({ where, data }: { where: any; data: any }) => {
       let count = 0;
       for (const r of rows) {
-        if (r.state !== where.state) continue;
-        if (where.consumedAt === null && r.consumedAt !== null) continue;
-        if (where.expiresAt?.gt && !(r.expiresAt > where.expiresAt.gt)) continue;
-        r.consumedAt = data.consumedAt;
+        if (!rowMatches(r, where)) continue;
+        Object.assign(r, data);
         count++;
       }
       return { count };
     }),
     findUnique: vi.fn(async ({ where }: { where: any }) => {
+      if (where.nativeConsentHash !== undefined) {
+        return rows.find((r) => r.nativeConsentHash === where.nativeConsentHash) ?? null;
+      }
+      if (where.handoffCodeHash !== undefined) {
+        return rows.find((r) => r.handoffCodeHash === where.handoffCodeHash) ?? null;
+      }
       return rows.find((r) => r.state === where.state) ?? null;
     }),
     // Batched-prune surface: select the next oldest-first id batch matching
@@ -115,6 +143,11 @@ function createPrismaMock(seed: StateRow[] = []) {
 import {
   createLoginState,
   consumeLoginState,
+  peekLoginState,
+  parkConsent,
+  claimConsent,
+  declineConsent,
+  consumeHandoff,
   pruneExpiredLoginStates,
   SSO_LOGIN_STATE_PRUNE_GRACE_MS,
 } from "./sso-login-state.service.js";
@@ -134,6 +167,7 @@ function freshRow(over: Partial<StateRow> = {}): StateRow {
     consumedAt: null,
     expiresAt: new Date(Date.now() + 10 * 60 * 1000),
     createdAt: new Date(),
+    ...NO_NATIVE,
     ...over,
   };
 }
@@ -198,6 +232,243 @@ describe("consumeLoginState", () => {
   });
 });
 
+// ── Native handoff (RFC 8252) ──
+
+const CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+const LOOPBACK = "http://127.0.0.1:49152/sso/cb";
+
+function nativeRow(over: Partial<StateRow> = {}): StateRow {
+  return freshRow({
+    flowKind: "NATIVE",
+    nativeRedirectUri: LOOPBACK,
+    nativeCodeChallenge: CHALLENGE,
+    ...over,
+  });
+}
+
+describe("createLoginState — flow kind", () => {
+  it("writes an explicit BROWSER flow kind for the dashboard flow", async () => {
+    const prisma = createPrismaMock();
+    await createLoginState(prisma, {
+      provider: "google",
+      state: "state-aaa",
+      nonce: "nonce-aaa",
+      codeVerifier: "verifier-aaa",
+      returnTo: "/",
+    });
+    const data = prisma.ssoLoginState.create.mock.calls[0]![0].data;
+    expect(data.flowKind).toBe("BROWSER");
+    expect(data.nativeRedirectUri).toBeUndefined();
+    expect(data.nativeCodeChallenge).toBeUndefined();
+  });
+
+  it("persists a NATIVE row with the app's redirect URI and PKCE challenge", async () => {
+    const prisma = createPrismaMock();
+    const row = await createLoginState(prisma, {
+      provider: "entra",
+      state: "state-nat",
+      nonce: "nonce-nat",
+      codeVerifier: "verifier-nat",
+      returnTo: "/",
+      flowKind: "NATIVE",
+      nativeRedirectUri: LOOPBACK,
+      nativeCodeChallenge: CHALLENGE,
+    });
+    const data = prisma.ssoLoginState.create.mock.calls[0]![0].data;
+    expect(data.flowKind).toBe("NATIVE");
+    expect(data.nativeRedirectUri).toBe(LOOPBACK);
+    expect(data.nativeCodeChallenge).toBe(CHALLENGE);
+    expect(row.flowKind).toBe("NATIVE");
+  });
+});
+
+describe("peekLoginState", () => {
+  it("reads the row WITHOUT consuming it", async () => {
+    const prisma = createPrismaMock([nativeRow()]);
+    const row = await peekLoginState(prisma, "state-aaa");
+    expect(row?.flowKind).toBe("NATIVE");
+    expect(prisma.ssoLoginState.updateMany).not.toHaveBeenCalled();
+    // Still claimable afterwards.
+    expect(await consumeLoginState(prisma, "state-aaa")).not.toBeNull();
+  });
+
+  it("returns null for an unknown state", async () => {
+    const prisma = createPrismaMock([freshRow()]);
+    expect(await peekLoginState(prisma, "state-nope")).toBeNull();
+  });
+});
+
+describe("parkConsent", () => {
+  it("parks the consent hash and the user on the NATIVE row — and no handoff code", async () => {
+    const prisma = createPrismaMock([nativeRow({ consumedAt: new Date() })]);
+    await parkConsent(prisma, "sls-1", { consentHash: "consent-1", userId: "u-1" });
+    const row = prisma._rows()[0] as StateRow;
+    expect(row.nativeConsentHash).toBe("consent-1");
+    expect(row.handoffUserId).toBe("u-1");
+    expect(row.handoffCodeHash).toBeNull();
+    expect(row.handoffExpiresAt).toBeNull();
+    const where = prisma.ssoLoginState.updateMany.mock.calls[0]![0].where;
+    expect(where).toEqual({ id: "sls-1", flowKind: "NATIVE", handoffCodeHash: null });
+  });
+
+  it("refuses a BROWSER row — a dashboard flow can never be turned into a handoff", async () => {
+    const prisma = createPrismaMock([freshRow({ consumedAt: new Date() })]);
+    await expect(
+      parkConsent(prisma, "sls-1", { consentHash: "consent-1", userId: "u-1" }),
+    ).rejects.toThrow();
+    expect((prisma._rows()[0] as StateRow).nativeConsentHash).toBeNull();
+  });
+
+  it("refuses a row that already has a handoff code", async () => {
+    const prisma = createPrismaMock([nativeRow({ consumedAt: new Date(), handoffCodeHash: "h" })]);
+    await expect(
+      parkConsent(prisma, "sls-1", { consentHash: "consent-1", userId: "u-1" }),
+    ).rejects.toThrow();
+  });
+});
+
+describe("claimConsent", () => {
+  function pending(over: Partial<StateRow> = {}): StateRow {
+    return nativeRow({
+      consumedAt: new Date(),
+      nativeConsentHash: "consent-1",
+      handoffUserId: "u-1",
+      ...over,
+    });
+  }
+
+  it("trades the consent value for a handoff code with a fresh 60 s clock, exactly once", async () => {
+    const prisma = createPrismaMock([pending()]);
+    const before = Date.now();
+    const row = await claimConsent(prisma, "consent-1", "code-hash-1");
+    expect(row?.handoffUserId).toBe("u-1");
+    expect(row?.handoffCodeHash).toBe("code-hash-1");
+    const stored = prisma._rows()[0] as StateRow;
+    expect(stored.handoffCodeHash).toBe("code-hash-1");
+    expect(stored.nativeConsentHash).toBeNull();
+    expect(stored.handoffConsumedAt).toBeNull();
+    const ttl = stored.handoffExpiresAt!.getTime() - before;
+    expect(ttl).toBeGreaterThan(55_000);
+    expect(ttl).toBeLessThanOrEqual(60_000 + 1000);
+
+    // Replay / double click: the value was cleared by the claim.
+    expect(await claimConsent(prisma, "consent-1", "code-hash-2")).toBeNull();
+    expect((prisma._rows()[0] as StateRow).handoffCodeHash).toBe("code-hash-1");
+  });
+
+  it("counts the 60 s from Continue, not from when the page was shown", async () => {
+    const prisma = createPrismaMock([pending({ createdAt: new Date(Date.now() - 5 * 60_000) })]);
+    const row = await claimConsent(prisma, "consent-1", "code-hash-1");
+    expect(row).not.toBeNull();
+    expect(row!.handoffExpiresAt!.getTime()).toBeGreaterThan(Date.now() + 55_000);
+  });
+
+  it("refuses once the state row (the page's lifetime) has expired", async () => {
+    const prisma = createPrismaMock([pending({ expiresAt: new Date(Date.now() - 1000) })]);
+    expect(await claimConsent(prisma, "consent-1", "code-hash-1")).toBeNull();
+    expect((prisma._rows()[0] as StateRow).handoffCodeHash).toBeNull();
+  });
+
+  it("refuses an unknown consent value", async () => {
+    const prisma = createPrismaMock([pending()]);
+    expect(await claimConsent(prisma, "consent-other", "code-hash-1")).toBeNull();
+  });
+
+  it("only one of two concurrent claims wins", async () => {
+    const prisma = createPrismaMock([pending()]);
+    const [a, b] = await Promise.all([
+      claimConsent(prisma, "consent-1", "code-a"),
+      claimConsent(prisma, "consent-1", "code-b"),
+    ]);
+    expect([a, b].filter((r) => r !== null)).toHaveLength(1);
+  });
+});
+
+describe("declineConsent", () => {
+  function pending(over: Partial<StateRow> = {}): StateRow {
+    return nativeRow({
+      consumedAt: new Date(),
+      nativeConsentHash: "consent-1",
+      handoffUserId: "u-1",
+      ...over,
+    });
+  }
+
+  it("burns the consent value without minting a code, exactly once", async () => {
+    const prisma = createPrismaMock([pending()]);
+    const row = await declineConsent(prisma, "consent-1");
+    expect(row?.handoffUserId).toBe("u-1");
+    expect(row?.nativeRedirectUri).not.toBeNull();
+    const stored = prisma._rows()[0] as StateRow;
+    expect(stored.nativeConsentHash).toBeNull();
+    expect(stored.handoffCodeHash).toBeNull();
+    expect(stored.handoffExpiresAt).toBeNull();
+    expect(await declineConsent(prisma, "consent-1")).toBeNull();
+    // A Continue after the Cancel finds nothing to claim.
+    expect(await claimConsent(prisma, "consent-1", "code-hash-1")).toBeNull();
+  });
+
+  it("refuses once the state row has expired, and an unknown value", async () => {
+    const prisma = createPrismaMock([pending({ expiresAt: new Date(Date.now() - 1000) })]);
+    expect(await declineConsent(prisma, "consent-1")).toBeNull();
+    expect((prisma._rows()[0] as StateRow).nativeConsentHash).toBe("consent-1");
+    expect(await declineConsent(createPrismaMock([pending()]), "consent-other")).toBeNull();
+  });
+
+  it("a Cancel and a Continue racing on one page: exactly one wins", async () => {
+    const prisma = createPrismaMock([pending()]);
+    const [denied, approved] = await Promise.all([
+      declineConsent(prisma, "consent-1"),
+      claimConsent(prisma, "consent-1", "code-a"),
+    ]);
+    expect([denied, approved].filter((r) => r !== null)).toHaveLength(1);
+  });
+});
+
+describe("consumeHandoff", () => {
+  function withHandoff(over: Partial<StateRow> = {}): StateRow {
+    return nativeRow({
+      consumedAt: new Date(),
+      handoffCodeHash: "hash-1",
+      handoffUserId: "u-1",
+      handoffExpiresAt: new Date(Date.now() + 60_000),
+      ...over,
+    });
+  }
+
+  it("claims a live handoff exactly once and returns the row", async () => {
+    const prisma = createPrismaMock([withHandoff()]);
+    const row = await consumeHandoff(prisma, "hash-1");
+    expect(row?.handoffUserId).toBe("u-1");
+    expect(row?.nativeCodeChallenge).toBe(CHALLENGE);
+    expect(row?.handoffConsumedAt).toBeInstanceOf(Date);
+    // Race-safe conditional claim, same idiom as consumeLoginState.
+    const where = prisma.ssoLoginState.updateMany.mock.calls[0]![0].where;
+    expect(where.handoffCodeHash).toBe("hash-1");
+    expect(where.flowKind).toBe("NATIVE");
+    expect(where.handoffConsumedAt).toBeNull();
+    expect(where.handoffExpiresAt.gt).toBeInstanceOf(Date);
+  });
+
+  it("refuses a replay — the second redemption of the same code fails", async () => {
+    const prisma = createPrismaMock([withHandoff()]);
+    expect(await consumeHandoff(prisma, "hash-1")).not.toBeNull();
+    expect(await consumeHandoff(prisma, "hash-1")).toBeNull();
+  });
+
+  it("refuses an expired handoff", async () => {
+    const prisma = createPrismaMock([
+      withHandoff({ handoffExpiresAt: new Date(Date.now() - 1000) }),
+    ]);
+    expect(await consumeHandoff(prisma, "hash-1")).toBeNull();
+  });
+
+  it("refuses an unknown code", async () => {
+    const prisma = createPrismaMock([withHandoff()]);
+    expect(await consumeHandoff(prisma, "hash-other")).toBeNull();
+  });
+});
+
 describe("pruneExpiredLoginStates", () => {
   const HOUR = 60 * 60 * 1000;
 
@@ -212,6 +483,7 @@ describe("pruneExpiredLoginStates", () => {
       consumedAt: null,
       expiresAt: new Date(Date.now() + 10 * 60 * 1000),
       createdAt: new Date(),
+      ...NO_NATIVE,
       ...over,
     };
   }
@@ -318,6 +590,76 @@ describe("pruneExpiredLoginStates", () => {
     // 70 rows remain for subsequent nightly runs → the backlog drains safely.
     expect(prisma._rows()).toHaveLength(70);
     expect(prisma.ssoLoginState.deleteMany).toHaveBeenCalledTimes(3);
+  });
+
+  it("spares a consumed NATIVE row whose handoff is still redeemable, prunes it once the handoff is past grace", async () => {
+    const now = new Date();
+    const longAgo = new Date(now.getTime() - HOUR);
+    const prisma = createPrismaMock([
+      // State consumed long ago, but the handoff parked on it is still live
+      // (a slow IdP code exchange can put the handoff well after consumedAt).
+      seedRow("live-handoff", {
+        flowKind: "NATIVE",
+        nativeRedirectUri: "droplet://sso/callback",
+        nativeCodeChallenge: "c",
+        consumedAt: longAgo,
+        handoffCodeHash: "h-live",
+        handoffExpiresAt: new Date(now.getTime() + 30_000),
+      }),
+      // Handoff expired more than the grace window ago → prunable.
+      seedRow("dead-handoff", {
+        flowKind: "NATIVE",
+        nativeRedirectUri: "droplet://sso/callback",
+        nativeCodeChallenge: "c",
+        consumedAt: longAgo,
+        handoffCodeHash: "h-dead",
+        handoffExpiresAt: new Date(now.getTime() - SSO_LOGIN_STATE_PRUNE_GRACE_MS - 1000),
+      }),
+      // Callback failed before a handoff was minted → prunable like a browser row.
+      seedRow("no-handoff", {
+        flowKind: "NATIVE",
+        nativeRedirectUri: "droplet://sso/callback",
+        nativeCodeChallenge: "c",
+        consumedAt: longAgo,
+      }),
+    ]);
+
+    const deleted = await pruneExpiredLoginStates(prisma, { now });
+
+    expect(deleted).toBe(2);
+    expect(prisma._rows().map((r: StateRow) => r.id)).toEqual(["live-handoff"]);
+  });
+
+  it("spares a consumed NATIVE row whose consent page is still live (consent pending), prunes it once the state has expired", async () => {
+    const now = new Date();
+    const longAgo = new Date(now.getTime() - HOUR);
+    const prisma = createPrismaMock([
+      // The callback consumed the state minutes ago and parked a consent value;
+      // the person may still press Continue until the state's own expiry.
+      seedRow("live-consent", {
+        flowKind: "NATIVE",
+        nativeRedirectUri: "droplet://sso/callback",
+        nativeCodeChallenge: "c",
+        consumedAt: longAgo,
+        expiresAt: new Date(now.getTime() + 5 * 60_000),
+        nativeConsentHash: "consent-live",
+        handoffUserId: "u-1",
+      }),
+      seedRow("dead-consent", {
+        flowKind: "NATIVE",
+        nativeRedirectUri: "droplet://sso/callback",
+        nativeCodeChallenge: "c",
+        consumedAt: longAgo,
+        expiresAt: new Date(now.getTime() - 1000),
+        nativeConsentHash: "consent-dead",
+        handoffUserId: "u-1",
+      }),
+    ]);
+
+    const deleted = await pruneExpiredLoginStates(prisma, { now });
+
+    expect(deleted).toBe(1);
+    expect(prisma._rows().map((r: StateRow) => r.id)).toEqual(["live-consent"]);
   });
 
   it("no-ops on an empty table", async () => {

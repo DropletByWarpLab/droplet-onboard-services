@@ -263,8 +263,8 @@ function normalizeGrants(args: {
   mayOperateLocks: boolean;
 }): NormalizedGrants {
   // `null` from the clamp = this starting point may hold NO grant on the module
-  // (doors below admin, ADR-055): the row is not written, exactly as an
-  // unheldable connector grant is not (below).
+  // (security below family, doors below admin): the row is not written, exactly
+  // as an unheldable connector grant is not (below).
   const featureGrants = args.featureGrants.flatMap((g) => {
     const level = clampLevel(args.startingPoint, g.moduleId, g.level);
     return level === null ? [] : [{ moduleId: g.moduleId as ModuleId, level }];

@@ -62,22 +62,24 @@ vi.mock("../middleware/auth.js", () => ({
 }));
 
 vi.mock("../services/chat-persistence.service.js", () => ({
-  ChatPersistenceService: vi.fn().mockImplementation(() => ({
-    ensureConversation: vi
-      .fn()
-      .mockResolvedValue({ id: "conv-1", created: true }),
-    createTurnRows: vi.fn().mockResolvedValue({
-      userMessageId: "user-1",
-      assistantMessageId: "asst-1",
-      assistantAlreadyFinal: false,
-    }),
-    finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
-    updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
-    listConversationsForUser: vi.fn().mockResolvedValue([]),
-    getConversationForUser: vi.fn().mockResolvedValue(null),
-    deleteConversationForUser: vi.fn().mockResolvedValue(false),
-    renameConversationForUser: vi.fn().mockResolvedValue(null),
-  })),
+  ChatPersistenceService: vi.fn().mockImplementation(function () {
+    return {
+      ensureConversation: vi
+        .fn()
+        .mockResolvedValue({ id: "conv-1", created: true }),
+      createTurnRows: vi.fn().mockResolvedValue({
+        userMessageId: "user-1",
+        assistantMessageId: "asst-1",
+        assistantAlreadyFinal: false,
+      }),
+      finalizeAssistantMessage: vi.fn().mockResolvedValue(undefined),
+      updateAssistantStreaming: vi.fn().mockResolvedValue(undefined),
+      listConversationsForUser: vi.fn().mockResolvedValue([]),
+      getConversationForUser: vi.fn().mockResolvedValue(null),
+      deleteConversationForUser: vi.fn().mockResolvedValue(false),
+      renameConversationForUser: vi.fn().mockResolvedValue(null),
+    };
+  }),
 }));
 
 vi.mock("../services/activity.singleton.js", () => ({

@@ -1378,6 +1378,10 @@ export async function fetchHealth(): Promise<HealthResponse> {
 
 export async function fetchDevices(): Promise<DeviceInfo[]> {
   const res = await authFetch(`${BASE}/api/devices`);
+  // WARP-3378: the box's own device row is not served to an external guest
+  // (403). That is "no device to show", not a fault: the header chip falls back
+  // to the LAN name, and `useDevice` stops polling on an empty answer.
+  if (res.status === 403) return [];
   if (!res.ok) throw new Error(`Failed to fetch devices: ${res.status}`);
   return res.json();
 }
@@ -7102,8 +7106,18 @@ async function throwVoiceError(res: Response, fallback: string): Promise<never> 
   throw e;
 }
 
-export async function fetchVoiceStatus(): Promise<VoiceStatusInfo> {
-  const res = await authFetch(`${BASE}/api/voice/status`);
+/**
+ * `transcript: true` also asks for the last utterance and reply
+ * (`last_transcript`, `last_response` and their times). WARP-3396: the box
+ * leaves them out of the default answer, so only the setup wizard's voice step
+ * (its "what it heard" try-it) asks; the Voice page's 1 s poll does not.
+ */
+export async function fetchVoiceStatus(
+  opts: { transcript?: boolean } = {},
+): Promise<VoiceStatusInfo> {
+  const res = await authFetch(
+    `${BASE}/api/voice/status${opts.transcript ? "?include=transcript" : ""}`,
+  );
   if (!res.ok) await throwVoiceError(res, "Failed to fetch voice status");
   return res.json();
 }
@@ -7752,7 +7766,7 @@ export async function fetchToolCatalog(): Promise<ToolCatalogResponse> {
 // --- Admin capabilities (nav-gating for optional admin surfaces) ---
 
 export interface AdminCapabilities {
-  /** /admin/claude-activity is wired (GitHub token OR Jira configured). */
+  /** /admin/claude-activity is on: the developer flag DROPLET_DEV_ENGINEERING_DASHBOARD (off on customer boxes) AND a GitHub token or Jira. */
   claudeActivity: boolean;
   /** /admin/rag-eval is wired (RAG_EVAL_URL set). */
   ragEval: boolean;
@@ -8998,6 +9012,21 @@ export interface SaasCredentialView {
    */
   credentialsPurged?: boolean;
   configured: boolean;
+  /**
+   * WARP-3434 — the connector kind (`cloud`, `rest` or `mcp`), as the box's
+   * descriptor declares it. OPTIONAL for the reason `credentialsPurged` is: a
+   * box that predates the field sends nothing, and that is not an answer.
+   */
+  track?: "cloud" | "rest" | "mcp";
+  /** WARP-3434 — whether to `POST /:provider/connect` after a save. Optional
+   *  as above; the page falls back to the descriptor's own rule. */
+  probedOnConnect?: boolean;
+  /**
+   * WARP-3434 — the credential path `fields` belongs to (Xero: `custom-connection`),
+   * or `null` for a provider with no variants. The page sends it back as
+   * `credentialVariant`: the box refuses a first save that names no path.
+   */
+  variant?: string | null;
   fields: SaasCredentialField[];
   /** Non-secret field values only. */
   values: Record<string, string | number>;
@@ -9748,6 +9777,62 @@ export function putAlertRouting(userId: string, body: AlertRoutingSetBody): Prom
     `${BASE}${SECURITY_ALERT_ROUTING_PATH}/${encodeURIComponent(userId)}`,
     jsonBody("PUT", body),
   );
+}
+
+// ── ADR-055 P4b: the doors page (P4a routes 1–5) ──
+// Reads are owner/admin; writes are the owner's alone. The transport is
+// `securityFetch` above (its name is historical: authFetch's token refresh
+// plus typed errors, `.code` and `.status`), so a 403 is distinguishable from
+// an outage. Render a failure with `translateError(err, "doors")`.
+// No route deletes a door: retiring one keeps its events.
+
+import type {
+  DoorCreateBody,
+  DoorEventsPage,
+  DoorPatchBody,
+  DoorView,
+  DoorsResponse,
+} from "./types";
+
+export const DOORS_PATH = "/api/doors";
+
+/** 1 — the doors, each with its newest position report. Retired doors only when asked. */
+export function getDoors(opts: { includeRetired?: boolean } = {}): Promise<DoorsResponse> {
+  return securityFetch<DoorsResponse>(`${BASE}${DOORS_PATH}${opts.includeRetired ? "?include=retired" : ""}`);
+}
+
+export interface DoorEventsQuery {
+  cursor?: string | null;
+  /** 1–200; the box defaults to 50. */
+  limit?: number;
+}
+
+export function doorEventsPath(q: DoorEventsQuery = {}): string {
+  const p = new URLSearchParams();
+  if (q.limit) p.set("limit", String(q.limit));
+  if (q.cursor) p.set("cursor", q.cursor);
+  const qs = p.toString();
+  return `${DOORS_PATH}/events${qs ? `?${qs}` : ""}`;
+}
+
+/** 2 — what happened at them, newest first, cursor-paged. */
+export function getDoorEvents(q: DoorEventsQuery = {}): Promise<DoorEventsPage> {
+  return securityFetch<DoorEventsPage>(`${BASE}${doorEventsPath(q)}`);
+}
+
+/** 3 (owner) — 201. */
+export function createDoor(body: DoorCreateBody): Promise<{ door: DoorView }> {
+  return securityFetch<{ door: DoorView }>(`${BASE}${DOORS_PATH}`, jsonBody("POST", body));
+}
+
+/** 4 (owner). 409 DOOR_RETIRED on a retired door. */
+export function patchDoor(id: string, body: DoorPatchBody): Promise<{ door: DoorView }> {
+  return securityFetch<{ door: DoorView }>(`${BASE}${DOORS_PATH}/${encodeURIComponent(id)}`, jsonBody("PATCH", body));
+}
+
+/** 5 (owner) — retiring twice is not an error. There is no way back from the dashboard. */
+export function retireDoor(id: string): Promise<{ door: DoorView }> {
+  return securityFetch<{ door: DoorView }>(`${BASE}${DOORS_PATH}/${encodeURIComponent(id)}/retire`, jsonBody("POST", {}));
 }
 
 // ── WARP-2804: notification acknowledgement (routes N1–N4) ──

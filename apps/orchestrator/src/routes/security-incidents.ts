@@ -140,6 +140,7 @@ async function viewerOf(prisma: PrismaClient, req: Request, deps: SecurityRouteD
     userId: req.user!.id,
     visibleCameras: scope.visibleCameras,
     mayReadThreats: scope.mayReadThreats,
+    mayReadLocks: scope.mayReadLocks,
     ownerOrAdmin: role === "owner" || role === "admin",
   };
 }
@@ -211,7 +212,8 @@ export function createSecurityIncidentsRouter(prisma: PrismaClient, deps: Securi
       const viewer = await viewerOf(prisma, req, deps);
       if (q.data.zone && viewer.visibleCameras !== "all") {
         // A hidden (or missing, archived, unlinked) area answers the empty page, no query.
-        const areas = viewerAreas(await loadActiveLinks(prisma), { visibleCameras: viewer.visibleCameras });
+        // The feed's area rule (DS-005, DS-019): a lock link shows an area only with Devices view.
+        const areas = viewerAreas(await loadActiveLinks(prisma), viewer);
         if (!areas.names.has(q.data.zone)) {
           res.json({ incidents: [], nextCursor: null });
           return;

@@ -472,7 +472,7 @@ describe("route 35 POST /api/security/incidents/:id/verdict (act, owner/admin fl
 
 describe("setIncidentVerdict — the DS-005 rules behind route 35 (D15)", () => {
   const actor = { id: MARIA, username: "maria", role: "family", displayName: "Maria", sessionId: null, sessionChecked: false, client: null };
-  const maria = { userId: MARIA, visibleCameras: new Set(["front"]), mayReadThreats: false, ownerOrAdmin: false };
+  const maria = { userId: MARIA, visibleCameras: new Set(["front"]), mayReadThreats: false, mayReadLocks: false, ownerOrAdmin: false };
   const db = () => f.client as unknown as PrismaClient;
 
   it("a hidden incident answers exactly like a missing one", async () => {

@@ -19,7 +19,7 @@ const tool: Tool = {
   description:
     "Get an accounts-receivable summary (total outstanding balance, aggregated in SQL) from " +
     "the connected ERP (Eaglesoft). Read-only; financial tables are never written. Not live " +
-    "yet — returns ERP_NOT_CONNECTED until the integration ships (WARP-1095+).",
+    "yet — returns ERP_NOT_CONNECTED.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

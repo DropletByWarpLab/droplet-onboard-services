@@ -116,7 +116,7 @@ async function handler(
 const tool: Tool = {
   name: "get_current_datetime",
   description:
-    "Get the current date and time — the agent's clock. LLMs hallucinate the current date; call this for the real \"now\". Optional `timezone` (IANA name like \"Europe/Paris\") renders the time in that zone; defaults to the system timezone. Returns ISO-8601 with offset, UTC ISO, epoch seconds, weekday, and a human-readable form. Tier-1 read; pure computation.",
+    "Get the current date and time — the agent's clock. LLMs hallucinate the current date; call this for the real \"now\". Optional `timezone` (IANA name like \"Europe/Paris\") renders the time in that zone; defaults to the system timezone. Returns ISO-8601 with offset, UTC ISO, epoch seconds, weekday, and a human-readable form. Pure computation.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

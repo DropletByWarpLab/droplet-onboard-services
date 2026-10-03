@@ -72,6 +72,16 @@ describe("security_search_events", () => {
     expect(get).not.toHaveBeenCalled();
   });
 
+  it("P4 PR-4: kind lock_state is offered and forwarded (the route answers only what the person may read)", async () => {
+    expect(SECURITY_EVENT_KIND_ARGS).toContain("lock_state");
+    const get = vi.fn().mockResolvedValue(reply(200, { period: null, timezone: null, events: [], nextCursor: null }));
+    expectOk(await tool.handler({ kind: "lock_state" }, ctxWith(get)));
+    expect(get.mock.calls[0]![1].params).toEqual({ kind: "lock_state" });
+    // The model reads what a polled row's time means before it answers.
+    expect(tool.description).toMatch(/door lock/i);
+    expect(tool.description).toMatch(/when Droplet checked/);
+  });
+
   it("the kinds it offers are Prisma's event kinds (type-level), and never the low-score one", () => {
     expectTypeOf<SecurityEventKindName>().toExtend<PrismaEventKind>();
     expect(SECURITY_EVENT_KIND_ARGS).not.toContain("detection_low");
