@@ -22,8 +22,10 @@ import { confirmCameraCommand } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import type { CameraSystemStatus } from "@/lib/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { RecordingStorageCard } from "@/components/cameras/RecordingStorageCard";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { Card, Kpi, Meter } from "@/components/shell/primitives";
+import { formatBinaryBytes as fmtBytes } from "@/lib/format-bytes";
 
 /**
  * /cameras/system — Frigate-wide health surface (Phase 5).
@@ -380,6 +382,19 @@ export default function CameraSystemPage() {
             </p>
           </Card>
 
+        </>
+      )}
+
+      {/* WARP-3515 — where recordings are kept, and the two choices that are the
+          owner's (auto-sized vs whole drive, which drive). It reads the
+          ORCHESTRATOR's allocation, not the camera engine's status, so it sits
+          outside the `data` gate above and below: a missing recording drive is
+          exactly when the engine is likely to be unreachable too. It sits with
+          the other storage cards, ahead of the volumes it sits on. */}
+      <RecordingStorageCard style={{ marginBottom: 16 }} />
+
+      {data && (
+        <>
           {/* Storage table */}
           {data.storage.length > 0 && (
             <Card title="Storage" className="span2" style={{ marginBottom: 16 }}>
@@ -414,6 +429,43 @@ export default function CameraSystemPage() {
             className="span2"
             style={{ marginBottom: 16 }}
           >
+            {/* WARP-1963 — footage on the wrong disk.
+                Louder than near-full on purpose: a full drive shortens
+                retention, but this means the dedicated recordings drive
+                is doing nothing at all while the system disk fills. It
+                is the exact silent failure that left this box's 1.8 TB
+                array empty for a month.
+
+                WARP-3515 — lifted OUT of the "cameras are present" branch
+                below. Inside it, a box with no cameras (where footage lands
+                on the boot disk by default and nobody is watching) never saw
+                the warning at all. Gated on a successful read: while usage is
+                unavailable (`storageError`) we do not know, and an outage must
+                not be reported as a finding. Error text is --danger-ink, the
+                AA-clearing red for text in both themes. */}
+            {!storageError && storage?.recordingsOnBootDisk === true && (
+              <div
+                data-testid="boot-disk-warning"
+                role="alert"
+                style={{
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "flex-start",
+                  marginBottom: 12,
+                  color: "var(--danger-ink)",
+                  fontSize: 12,
+                }}
+              >
+                <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                <span>
+                  <strong>Recordings are being written to the system disk.</strong>{" "}
+                  The dedicated recordings drive isn&apos;t mounted, so footage
+                  is filling the same disk the appliance runs on and you have
+                  far less room than you think. Check that the recordings
+                  volume is mounted, then restart the camera service.
+                </span>
+              </div>
+            )}
             {storageError ? (
               <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
                 Storage usage is unavailable right now, so this list may be
@@ -428,34 +480,6 @@ export default function CameraSystemPage() {
               </p>
             ) : (
               <>
-                {/* WARP-1963 — footage on the wrong disk.
-                    Louder than near-full on purpose: a full drive shortens
-                    retention, but this means the dedicated recordings drive
-                    is doing nothing at all while the system disk fills. It
-                    is the exact silent failure that left this box's 1.8 TB
-                    array empty for a month. */}
-                {storage.recordingsOnBootDisk === true && (
-                  <div
-                    data-testid="boot-disk-warning"
-                    style={{
-                      display: "flex",
-                      gap: 8,
-                      alignItems: "flex-start",
-                      marginBottom: 12,
-                      color: "#ef4444",
-                      fontSize: 12,
-                    }}
-                  >
-                    <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-                    <span>
-                      <strong>Recordings are being written to the system disk.</strong>{" "}
-                      The dedicated recordings drive isn&apos;t mounted, so footage
-                      is filling the same disk the appliance runs on and you have
-                      far less room than you think. Check that the recordings
-                      volume is mounted, then restart the camera service.
-                    </span>
-                  </div>
-                )}
                 {storage.nearFull && (
                   <div
                     style={{
@@ -641,27 +665,6 @@ export default function CameraSystemPage() {
 }
 
 // --- helpers ---
-
-/**
- * Binary maths with binary labels.
- *
- * This divided by 1024 while labelling the result "KB"/"MB"/"GB" — SI
- * names for binary quantities, so every drive figure on this page read
- * ~2.4% low against the label it carried (WARP-1960). Frigate reports MiB
- * and the array is sized in TiB, so binary is the right base; the labels
- * are what were wrong.
- */
-function fmtBytes(b: number): string {
-  if (!Number.isFinite(b) || b < 0) return "—";
-  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-  let v = b;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2)} ${units[i]}`;
-}
 
 function fmtUptime(sec: number): string {
   if (!Number.isFinite(sec) || sec <= 0) return "—";
