@@ -363,7 +363,7 @@ To GENERATE a code, the dashboard (already authenticated) POSTs
 | GET | `/cameras/events?limit=` | Bearer | recent events, newest first |
 | GET | `/cameras/events/:eventId/thumbnail` | Bearer (owner, admin, family) | image bytes: Frigate's own `Content-Type` (`image/jpeg` when it sends none), `Cache-Control: private, no-store`. `:eventId` is a Frigate event id, `^[a-zA-Z0-9._-]{1,128}$`; errors below the table |
 | GET | `/cameras/events/:eventId/snapshot` | Bearer | event JPEG |
-| GET | `/cameras/reviews/:reviewId/thumbnail` | Bearer | review item image bytes |
+| GET | `/cameras/reviews/:reviewId/thumbnail` | Bearer | review item image bytes: `Content-Type: image/webp` (`image/jpeg` on an older Frigate), `Cache-Control: private, no-store`. 404 `{ "error": "review_not_found" }` or `{ "error": "thumbnail_not_found" }` when Frigate has no such review or no file for it (an in-progress review may not have one yet; key on the status). 503 `{ "error": "frigate_unavailable" }` with `X-Droplet-Degraded: frigate-unavailable` when Frigate is unreachable or answers with an error |
 | GET | `/cameras/events/sse` | Bearer | SSE stream of camera events (`data: {json}`; `: heartbeat` every 30 s; first frame `{ "type": "connected" }`) |
 | GET | `/cameras/clips?camera=&limit=` | Bearer | `{ clips: [{ id, camera, label, score, start_time, end_time, thumbnail_url, clip_url }] }` (`limit` default 50, max 200; only events that have a clip) |
 | GET | `/cameras/clips/event/:eventId` | Bearer | mp4 bytes |

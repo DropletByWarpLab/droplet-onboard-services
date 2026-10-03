@@ -598,6 +598,12 @@ describe("camera footage is private, no-store", () => {
     const frigate = await import("../services/frigate.client.js");
     vi.mocked(frigate.fetchSnapshot).mockResolvedValue(jpeg() as never);
     vi.mocked(frigate.fetchEventThumbnail).mockResolvedValue(jpeg() as never);
+    // WARP-3509: a review thumbnail comes from fetchReviewThumbnail (the review's
+    // thumb_path file), not from a bare fetch of an /api/review/<id>/thumbnail route.
+    vi.mocked(frigate.fetchReviewThumbnail).mockResolvedValue({
+      bytes: Buffer.from([0xff, 0xd8, 0xff]),
+      contentType: "image/webp",
+    });
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => jpeg());
     try {
       const res = await request(appAs("owner")).get(path);

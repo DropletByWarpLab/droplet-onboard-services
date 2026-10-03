@@ -36,6 +36,8 @@ import {
   fetchEventCamera,
   fetchEventThumbnail,
   fetchReviewCamera,
+  fetchReviewPreview,
+  fetchReviewThumbnail,
   fetchKnownFaces,
   fetchKnownPlates,
   fetchFaceImage,
@@ -66,7 +68,11 @@ import {
   NoRecordingsInRangeError,
   type PtzAction,
 } from "../services/frigate.client.js";
-import { FrigateNotFoundError } from "../types/frigate-error.js";
+import {
+  FrigateNotFoundError,
+  FrigateUpstreamError,
+  type FrigateNotFoundCode,
+} from "../types/frigate-error.js";
 
 /**
  * WARP-1961 — who may LOOK at a camera.
@@ -1634,6 +1640,50 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     }
   });
 
+  // --- Review viewed flag, preview and thumbnail (WARP-3509) ---
+  //
+  // Frigate 0.17 serves these at paths this router was never written against,
+  // so the thumbnail and preview 404'd and the viewed POST met a 405 that
+  // surfaced as an unhandled 500 (the paths are spelled out in
+  // frigate.client.ts). The client throws typed errors and this maps them:
+  //
+  //   FrigateNotFoundError                  → 404 { error: <code>, message }
+  //   FrigateUpstreamError, or a Frigate    → 503 { error: "frigate_unavailable", message }
+  //   that is unreachable or timed out        + X-Droplet-Degraded: frigate-unavailable
+  //
+  // The 503 is the WARP-3105 contract for routes whose answer is bytes. The
+  // list routes serve an empty 200 marked degraded, which an <img> or <video>
+  // cannot use, so these say the same thing with the status. A caller can tell
+  // "Frigate is down" (503) from "there is nothing here" (404). Anything else
+  // is a bug and still goes to the error handler.
+  const REVIEW_NOT_FOUND_MESSAGES: Partial<Record<FrigateNotFoundCode, string>> = {
+    review_not_found: "That review item no longer exists.",
+    thumbnail_not_found: "This review item has no thumbnail.",
+    preview_not_found: "No preview clip is available for this review item yet.",
+  };
+
+  /** Answers `err` and returns true when it is one of the review failures above. */
+  function answerReviewFrigateFailure(res: Response, err: unknown, reviewId: string): boolean {
+    if (err instanceof FrigateNotFoundError) {
+      // Only the not-founds these routes raise. Any other code reaching here
+      // (an event's, say) is a wiring bug, and the error handler should say so.
+      const message = REVIEW_NOT_FOUND_MESSAGES[err.code];
+      if (!message) return false;
+      res.status(404).json({ error: err.code, message });
+      return true;
+    }
+    if (err instanceof FrigateUpstreamError || isUpstreamUnavailable(err)) {
+      logger.warn({ err, reviewId }, "Frigate review request failed; answering degraded");
+      res.status(503);
+      sendFrigateDegraded(res, {
+        error: "frigate_unavailable",
+        message: "The camera service is not responding right now. Try again in a moment.",
+      });
+      return true;
+    }
+    return false;
+  }
+
   /** Frigate review IDs are UUID-ish — looser than event IDs but bound
    *  to the same character class. Same regex serves both. */
   router.post("/cameras/reviews/:reviewId/viewed", requireRole("owner", "admin", "family"), cameraAccess, async (req, res, next) => {
@@ -1644,22 +1694,20 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       await setReviewViewed(req.params.reviewId);
       res.status(204).end();
     } catch (err) {
+      if (answerReviewFrigateFailure(res, err, req.params.reviewId)) return;
       next(err);
     }
   });
 
-  // Review preview clip (Frigate-rendered cluster summary mp4).
+  // Review preview clip (Frigate-rendered cluster summary, as mp4).
   router.get("/cameras/reviews/:reviewId/preview", requireRole(...CAMERA_VIEW_ROLES), cameraAccess, async (req, res, next) => {
     try {
       if (!isValidEventId(req.params.reviewId)) {
         return res.status(400).json({ error: "Invalid review ID format" });
       }
-      const url = `${config.FRIGATE_URL}/api/review/${encodeURIComponent(req.params.reviewId)}/preview.mp4`;
-      const upstream = await fetch(url, { signal: AbortSignal.timeout(30_000) });
-      if (!upstream.ok) {
-        return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
-      }
-      res.setHeader("Content-Type", upstream.headers.get("content-type") || "video/mp4");
+      const upstream = await fetchReviewPreview(req.params.reviewId);
+      res.setHeader("Content-Type", "video/mp4");
+      res.setHeader("Cache-Control", "private, no-store"); // WARP-3103: footage never lands in a cache
       const len = upstream.headers.get("content-length");
       if (len) res.setHeader("Content-Length", len);
       if (upstream.body) {
@@ -1668,26 +1716,25 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         res.end();
       }
     } catch (err) {
+      if (answerReviewFrigateFailure(res, err, req.params.reviewId)) return;
       next(err);
     }
   });
 
-  // Review thumbnail.
+  // Review thumbnail — the file the review's `thumb_path` names, which Frigate
+  // 0.17 serves from /clips/review/ rather than from an /api route.
   router.get("/cameras/reviews/:reviewId/thumbnail", requireRole(...CAMERA_VIEW_ROLES), cameraAccess, async (req, res, next) => {
     try {
       if (!isValidEventId(req.params.reviewId)) {
         return res.status(400).json({ error: "Invalid review ID format" });
       }
-      const url = `${config.FRIGATE_URL}/api/review/${encodeURIComponent(req.params.reviewId)}/thumbnail.jpg`;
-      const upstream = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-      if (!upstream.ok) {
-        return res.status(upstream.status).json({ error: `frigate ${upstream.status}` });
-      }
-      res.setHeader("Content-Type", upstream.headers.get("content-type") || "image/jpeg");
+      const thumb = await fetchReviewThumbnail(req.params.reviewId);
+      // From the validated extension: Frigate labels `.webp` under /clips/ application/octet-stream.
+      res.setHeader("Content-Type", thumb.contentType);
       res.setHeader("Cache-Control", "private, no-store"); // WARP-3103: footage never lands in a cache
-      const buffer = Buffer.from(await upstream.arrayBuffer());
-      res.send(buffer);
+      res.send(thumb.bytes);
     } catch (err) {
+      if (answerReviewFrigateFailure(res, err, req.params.reviewId)) return;
       next(err);
     }
   });
