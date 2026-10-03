@@ -23,6 +23,10 @@ vi.mock("@/lib/auth", () => ({
 import { CertificateRows, RENEW_ACTION, certificateCopy } from "./CertificateRows";
 import type { TlsCertificate } from "@/lib/api";
 
+/** The known bootstrap leaf's key fingerprint (served-cert-pin.test.ts). */
+const FINGERPRINT =
+  "F017 AFA8 6AD7 8BED 4ABD E646 90F0 5B7B 8DBB E36B 26E9 C8F4 10E5 36A6 1E3D F25C";
+
 function cert(over: Partial<TlsCertificate> = {}): TlsCertificate {
   return {
     state: "LE_ISSUED",
@@ -33,6 +37,7 @@ function cert(over: Partial<TlsCertificate> = {}): TlsCertificate {
     expiringSoon: false,
     hqConfigured: true,
     checkedAt: "2026-09-20T04:00:00.000Z",
+    fingerprint: FINGERPRINT,
     ...over,
   };
 }
@@ -107,10 +112,51 @@ describe("<CertificateRows />", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  // WARP-3414 — the key fingerprint, in full, four groups to a line, with
+  // copy that never presents it as proof.
+  it("shows the key fingerprint in full, four groups to a line, selectable, with a Copy action", async () => {
+    fetchTlsCertificate.mockResolvedValue(cert({ state: "BOOTSTRAP_SELF_SIGNED", fqdn: null, daysLeft: null, renewsInDays: null }));
+    render(<CertificateRows />);
+    const block = await screen.findByTestId("key-fingerprint");
+    expect(block).toHaveTextContent("Key fingerprint (SHA-256)");
+    const value = screen.getByTestId("key-fingerprint-value");
+    expect(Array.from(value.children).map((l) => l.textContent)).toEqual([
+      "F017 AFA8 6AD7 8BED",
+      "4ABD E646 90F0 5B7B",
+      "8DBB E36B 26E9 C8F4",
+      "10E5 36A6 1E3D F25C",
+    ]);
+    expect(value.className).toContain("select-all");
+    expect(screen.getByRole("button", { name: "Copy key fingerprint" })).toBeInTheDocument();
+  });
+
+  it("says what the apps do with it, and that this page alone proves nothing", async () => {
+    fetchTlsCertificate.mockResolvedValue(cert());
+    render(<CertificateRows />);
+    await screen.findByTestId("key-fingerprint");
+    expect(screen.getByTestId("key-fingerprint-app-copy")).toHaveTextContent(
+      "Apps check this fingerprint the first time they connect to a Droplet that uses its own certificate.",
+    );
+    const notProof = screen.getByTestId("key-fingerprint-not-proof");
+    expect(notProof).toHaveTextContent("proves nothing");
+    // Not every Droplet has a front panel that can show it (WARP-3418).
+    expect(notProof).toHaveTextContent("front panel, if your Droplet has one");
+    expect(notProof).toHaveTextContent("setup output");
+    expect(notProof).toHaveTextContent("droplet-fingerprint");
+  });
+
+  it("shows no fingerprint block when the box has none to offer", async () => {
+    fetchTlsCertificate.mockResolvedValue(cert({ fingerprint: null }));
+    render(<CertificateRows />);
+    await waitFor(() => expect(screen.getByTestId("certificate-row")).toHaveTextContent("renews in 30 days"));
+    expect(screen.queryByTestId("key-fingerprint")).toBeNull();
+  });
+
   it("renders nothing for a family member (Settings is an admin surface)", () => {
     mockRole = "family";
     render(<CertificateRows />);
     expect(screen.queryByTestId("certificate-row")).toBeNull();
+    expect(screen.queryByTestId("key-fingerprint")).toBeNull();
     expect(fetchTlsCertificate).not.toHaveBeenCalled();
   });
 });

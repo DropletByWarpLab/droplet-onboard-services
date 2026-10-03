@@ -6,17 +6,33 @@ vi.mock("../config.js", () => ({
   config: { DROPLET_PUBLIC_FQDN: "", HQ_ISSUANCE_URL: "https://hq.example" },
 }));
 
-// The gate is exercised separately (middleware/auth.test.ts); here it is a
-// pass-through so the view is what's under test. The mount itself is checked
-// in the last case — a route that forgot its requireRole would be an
+// The gate is exercised in full in middleware/auth.test.ts; here it is a
+// faithful stand-in — it admits exactly the roles the route registers and
+// answers 403 to everyone else, like the real one — so the route's own
+// allowlist is what the role-split cases below actually test. The mount
+// itself is checked too: a route that forgot its requireRole would be an
 // unauthenticated owner surface.
 const requireRoleSpy = vi.fn(
-  (..._roles: string[]) =>
-    (_req: unknown, _res: unknown, next: () => void) =>
-      next(),
+  (...roles: string[]) =>
+    (
+      req: { user?: { role?: string } },
+      res: { status: (n: number) => { json: (b: unknown) => void } },
+      next: () => void,
+    ) =>
+      roles.includes(String(req.user?.role))
+        ? next()
+        : res.status(403).json({ error: "Forbidden: role not permitted" }),
 );
 vi.mock("../middleware/auth.js", () => ({
   requireRole: (...roles: string[]) => requireRoleSpy(...roles),
+}));
+
+// WARP-3414: the served certificate's key fingerprint comes from the leaf on
+// disk (lib/served-cert-pin.ts, tested on its own); a fixed value here.
+const FINGERPRINT =
+  "F017 AFA8 6AD7 8BED 4ABD E646 90F0 5B7B 8DBB E36B 26E9 C8F4 10E5 36A6 1E3D F25C";
+vi.mock("../lib/served-cert-pin.js", () => ({
+  servedCertFingerprint: () => FINGERPRINT,
 }));
 
 import { certificateView, createTlsCertificateRouter } from "./tls-certificate.js";
@@ -24,9 +40,14 @@ import { certificateView, createTlsCertificateRouter } from "./tls-certificate.j
 const NOW = new Date("2026-09-20T12:00:00Z");
 const day = 86_400_000;
 
-function appWith(row: unknown) {
+// `role: null` is an anonymous request (an explicit `undefined` would take the default).
+function appWith(row: unknown, role: string | null = "owner") {
   const prisma = { tlsCert: { findFirst: async () => row } } as never;
   const app = express();
+  app.use((req, _res, next) => {
+    if (role) (req as unknown as { user: { role: string } }).user = { role };
+    next();
+  });
   app.use("/api", createTlsCertificateRouter(prisma));
   return app;
 }
@@ -97,5 +118,32 @@ describe("GET /api/tls/certificate", () => {
     // unauthenticated owner surface; one that widened it would show the
     // certificate's lifecycle to every family member.
     expect(requireRoleSpy).toHaveBeenCalledWith("owner", "admin");
+  });
+
+  // WARP-3414: the key fingerprint is public data, but it is shown only over
+  // the box's authenticated, owner/admin surface — never to a member or an
+  // external guest, and never by an anonymous request.
+  it("carries the served key fingerprint to an owner and an admin", async () => {
+    for (const role of ["owner", "admin"]) {
+      const res = await request(appWith(null, role)).get("/api/tls/certificate");
+      expect(res.status).toBe(200);
+      expect(res.body.fingerprint).toBe(FINGERPRINT);
+    }
+  });
+
+  it("gives a member (family), an external guest and an anonymous request no fingerprint", async () => {
+    for (const role of ["family", "guest", null]) {
+      const res = await request(appWith(null, role)).get("/api/tls/certificate");
+      expect(res.status).toBe(403);
+      expect(JSON.stringify(res.body)).not.toContain("F017");
+      expect(res.body.fingerprint).toBeUndefined();
+    }
+  });
+});
+
+describe("certificateView — fingerprint", () => {
+  it("is null unless the caller supplies one (an unreadable leaf shows nothing, not a placeholder)", () => {
+    expect(certificateView(null, NOW).fingerprint).toBeNull();
+    expect(certificateView(null, NOW, FINGERPRINT).fingerprint).toBe(FINGERPRINT);
   });
 });

@@ -323,6 +323,14 @@ EOF
   sudo install -m 0755 "$host_src/droplet-tls-bootstrap-refresh.sh" \
     /usr/local/sbin/droplet-tls-bootstrap-refresh.sh
 
+  # --- certificate key fingerprint CLI (WARP-3414) -------------------------
+  # `droplet-fingerprint`: the box's certificate key fingerprint, in the form
+  # the Droplet apps show, for an admin at the console or in the `support`
+  # shell. One of the channels an attacker on the LAN cannot rewrite (the
+  # dashboard shows it too, but over the connection under question).
+  sudo install -m 0755 "$host_src/usr-local-bin/droplet-fingerprint" \
+    /usr/local/bin/droplet-fingerprint
+
   # --- network self-heal (WARP-1680) --------------------------------------
   # Backstop for a NIC rename / dead uplink leaving the box with no IPv4 and
   # no remote path in. Acts ONLY when nothing holds a usable address, so it is
