@@ -970,10 +970,13 @@ const envSchema = z.object({
   //   assets at `<base>/<tag>/<name>`. Default is the canonical publisher
   //   (publish-release.yml); set it only for a mirror. RELEASES_URL above is
   //   now the FALLBACK discovery path, used only while no pointer exists.
-  // GITHUB_TOKEN — bearer for the private releases repo. LAB/DEV ONLY: it is
-  //   NOT provisioned on appliances (ADR-045), and nothing on the anonymous
-  //   path needs it. Empty = send no Authorization header (the default, and
-  //   the test fake). Never hardcoded.
+  // GITHUB_TOKEN — bearer for the private releases repo, and for ghcr.io image
+  //   refs. LAB/DEV ONLY: it is NOT provisioned on appliances (ADR-045), and
+  //   nothing on the release-download path needs it. Since WARP-3503 (ADR-068)
+  //   the images are private and a box pulls them from the HQ registry with a
+  //   short-lived HQ device token (hq-token.service.ts), never this token.
+  //   Empty = send no Authorization header (the default, and the test fake).
+  //   Never hardcoded.
   // POLL_INTERVAL — seconds between checks. 900 (15 min) per the design;
   //   floor of 60 keeps a typo'd "0" from hot-looping the GitHub API.
   DROPLET_OTA_RELEASES_URL: z
