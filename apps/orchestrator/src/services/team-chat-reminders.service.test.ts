@@ -210,10 +210,9 @@ describe("runTeamChatMeetingReminderSweep", () => {
     await runTeamChatMeetingReminderSweep(prisma as never);
 
     const card = prisma.messages[0];
-    expect(published.map((p) => p.topic).sort()).toEqual([
-      `droplet/team-chat/${INVITEE.username}`,
-      `droplet/team-chat/${ORGANIZER.username}`,
-    ]);
+    expect(published.map((p) => p.topic).sort()).toEqual(
+      [`droplet/team-chat/${INVITEE.username}`, `droplet/team-chat/${ORGANIZER.username}`].sort(),
+    );
     for (const p of published) {
       expect(p.payload).toEqual({ kind: "message", conversationId: "thread-1", messageId: card.id });
     }
