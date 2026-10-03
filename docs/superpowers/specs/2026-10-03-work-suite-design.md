@@ -28,6 +28,7 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 | WS-4 | `20261004040000` | `feat/warp-3520-pm-fields` |
 | WS-5 | `20261004050000` | `feat/warp-3521-pm-cycles-modules` |
 | WS-6 | `20261004060000` | `feat/warp-3522-pm-views-filters` |
+| WS-6b | `20261004061000` | `feat/warp-3537-pm-table-bulk` |
 | WS-7 | `20261004070000` | `feat/warp-3523-pm-calendar-timeline` |
 | WS-8 | `20261004080000` | `feat/warp-3524-pm-insights` |
 | WS-9 | `20261004090000` | `feat/warp-3525-pm-automation` |
@@ -139,7 +140,7 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 
 ---
 
-## WS-6 — Filter DSL, saved views, table, grouping, bulk edit, command palette
+## WS-6 — Filter DSL, query API, saved views, deep links
 
 **Ticket:** WARP-3522.
 
@@ -147,13 +148,30 @@ Every slice is one PR against `stage`, independently shippable, box bootable bef
 
 **Data.** `PmSavedView {id, workspaceId, projectId String? (null = cross-project), ownerId, scope PmViewScope (PERSONAL|SHARED), name, layout PmViewLayout (BOARD|LIST|TABLE|CALENDAR|TIMELINE), filter Json, groupBy String?, sortBy Json?, columns Json?, sortOrder Int, createdAt, updatedAt}`.
 
-**API.** `POST /api/pm/work-items/query` `{filter, sort, groupBy, cursor, limit}`; saved views CRUD (`SHARED` create/edit/delete: owner/admin/lead; `PERSONAL`: owner only); `POST /api/pm/work-items/bulk` `{ids[], patch: {stateId?, priority?, assigneeIds?, addLabelIds?, removeLabelIds?, cycleId?, moduleId?, type?, isArchived?}}` — one transaction, ≤ 500 ids, per-item permission check, one activity row per changed field per item.
+**API.** `POST /api/pm/work-items/query` `{filter, sort, groupBy, cursor, limit}`; saved views CRUD (`SHARED` create/edit/delete: owner/admin/lead; `PERSONAL`: owner only).
 
 **Deep links.** `/projects` reads and writes its state to the URL: `?p=<identifier>&view=<board|list|table|cycles|modules|…>&item=<KEY-123>&v=<savedViewId>` plus the serialized filter. Opening a URL restores the project, view, filter and open drawer. Back/forward work. Notifications, ICS feeds and webhooks link to `?p=…&item=…`. No route restructure — the single `/projects` route stays (ADR-044: the route is live and deep-linked).
 
-**UI.** Brief §3.9 filter/command bar with chips; save / update / rename / delete views; views listed in the project header and a cross-project "Views" index. **Table layout**: sortable columns, column picker (built-in fields + custom properties when present), inline edit for state / priority / assignee / due date, sticky header, keyboard row navigation. **Grouping** for list and table (state, assignee, priority, label, type, cycle, module, department) with collapsible groups and counts. **Bulk**: checkbox column + shift-range select, floating action bar. **Command palette** (`Ctrl/⌘ K`) and shortcuts per brief §5.6 (`c` create, `/` search, `j/k` move, `x` select, `e` edit, `a` assign, `s` state, `p` priority).
+**UI.** Brief §3.9 filter/command bar with chips (every DSL field reachable, relative dates offered as presets); save / update / rename / delete views; views listed in the project header and a cross-project "Views" index; the URL deep links above.
 
-**AC.** Every DSL op has a compiler test and a pg test proving the SQL returns the right rows. Bulk edit partially-permitted batches fail atomically with a list of forbidden ids. Shared views are read-only to non-editors.
+**AC.** Every DSL op has a compiler test and a pg test proving the SQL returns the right rows. Shared views are read-only to non-editors. A deep link round-trips (open URL → same project, view, filter, drawer). The board and list read through the query API so filters are server-side (the client-side filtering in usePm goes away).
+
+---
+
+## WS-6b — Table layout, grouping, bulk edit, command palette
+
+**Ticket:** WARP-3537.
+
+**API.** `POST /api/pm/work-items/bulk` `{ids[], patch: {stateId?, priority?, assigneeIds?, addLabelIds?, removeLabelIds?, cycleId?, moduleId?, type?, isArchived?}}`: one transaction, at most 500 ids, a per-item permission check, and one activity row per changed field per item. A batch with any forbidden item fails atomically with the list of forbidden ids. Keys this slice does not own (cycleId, moduleId, type) are accepted only if the column exists on `stage` when it is built; otherwise they are omitted and listed as follow-ups.
+
+**UI.**
+- **Table layout:** sortable columns, a column picker (built-in fields, plus custom properties when present), inline edit for state, priority, assignee and due date, a sticky header, and keyboard row navigation (↑/↓, Enter opens the drawer).
+- **Grouping** for list and table: by state, assignee, priority, label, type, cycle, module or department, with collapsible groups and counts, persisted per view in local storage until WS-6 saved views carry it.
+- **Bulk:** a checkbox column, shift-range select, and a floating action bar (state, priority, assignee, labels, archive) with an undo toast.
+- **Command palette** (`Ctrl/⌘ K`): jump to project / item by key or title, create item, switch view, run bulk actions on the selection.
+- **Shortcuts** per brief §5.6 (`c` create, `/` search, `j`/`k` move, `x` select, `e` edit, `a` assign, `s` state, `p` priority, `?` shortcut sheet). Shortcuts are disabled while typing in inputs.
+
+**AC.** Bulk partial-permission batches fail atomically (route and pg tests). Every shortcut has a test and is listed on the `?` sheet. The table renders 1,000 rows smoothly (virtualised).
 
 ---
 

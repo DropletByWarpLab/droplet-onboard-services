@@ -115,7 +115,7 @@ No noun-shaped tools come back. WARP-2583 collapsed ten `pm_*` / `crm_*` tools i
 
 **Positive.** A box can replace a work tracker and a help desk with one surface pair, one login, one backup, and an assistant that can see both. Every slice ships independently with the box bootable, and the schema ADR-026 laid down finally earns its keep.
 
-**Negative.** This is the largest single feature program on the board: twenty slices touching the Prisma schema, the orchestrator, the dashboard, the `business_*` tools and the mobile read contract. Several slices touch the same PM files and will need rebases as they land. The SLA engine introduces time-zone arithmetic the codebase has not needed before.
+**Negative.** This is the largest single feature program on the board: twenty-one slices touching the Prisma schema, the orchestrator, the dashboard, the `business_*` tools and the mobile read contract. Several slices touch the same PM files and will need rebases as they land. The SLA engine introduces time-zone arithmetic the codebase has not needed before.
 
 **Neutral.** The `support` module adds a `ModuleId` value — a Prisma enum migration plus its mirrored sites, which ADR-044 deliberately avoided for `/business` and which `/support` genuinely needs: it is a whole surface with its own API prefix and tool domain. The mobile PM contract only gains fields.
 
@@ -131,7 +131,8 @@ One PR per slice, each against `stage`, each with its own WARP story. Specs and 
 | WS-3 | Attachments on work items and comments | WARP-1505 |
 | WS-4 | Editing everywhere: inline editors for every work-item property, relations, item archive, project settings (states, labels, fields), custom fields, types, estimates | WARP-3520 |
 | WS-5 | Cycles (sprints) and modules (milestones), backlog planning, burndown | WARP-3521 |
-| WS-6 | Filter DSL, saved views, deep links, table layout, grouping, bulk edit, command palette | WARP-3522 |
+| WS-6 | Filter DSL, query API, saved views, deep links | WARP-3522 |
+| WS-6b | Table layout, grouping, bulk edit, command palette, shortcuts | WARP-3537 |
 | WS-7 | Calendar, timeline (Gantt) and My Work | WARP-3523 |
 | WS-8 | Insights: throughput, cycle time, CFD, workload, `unassigned` summary | WARP-3524 |
 | WS-9 | Templates, recurring work, automation rules | WARP-3525 |
