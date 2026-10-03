@@ -2,8 +2,8 @@
  * WARP-3365 / WARP-3369 (Romain, 2026-09-30) — an external guest (role `guest`)
  * gets NOTHING from the company's customers or work unless it is explicitly
  * shared with them, and the box enforces it on every route. Nothing in the CRM
- * or in Projects is shared per record, so both modules take the `security`
- * pattern (ADR-055 `refuseBelowFloor`): a guest holds no grant, and the tier
+ * or in Projects is shared per record, so both modules refuse `view` below the
+ * family floor (`refuseBelowFloor`): a guest holds no grant, and the tier
  * floor refuses them at the module's prefix.
  *
  * What is pinned here, all through the REAL mount (`mountModuleGates`) and the
@@ -88,7 +88,6 @@ const CFG: AvailabilityConfig = {
   DROPLET_MATTER_SERVICE_URL: "http://matter:8083",
   ROUTING_SERVICE_URL: "http://routing:8080",
   SWITCH_SERVICE_URL: "http://switch:8081",
-  DOORS_ENABLED: "1",
 };
 
 /** Every module switched ON box-wide: the workspace toggle is not what is under test. */
@@ -256,8 +255,8 @@ describe.each(SURFACES)("$label: every route, through the real module mount", (s
 });
 
 describe("the floor is exactly the catalog's refusal", () => {
-  it("is security, crm, projects, money and doors — the modules a guest holds nothing on", () => {
-    expect([...tierRefusingModuleIds()].sort()).toEqual(["crm", "doors", "money", "projects", "security"]);
+  it("is crm, projects and money — the modules a guest holds nothing on", () => {
+    expect([...tierRefusingModuleIds()].sort()).toEqual(["crm", "money", "projects"]);
   });
 
   it("a guest still reaches every OTHER module's prefix (their shared files, Messages, own chats, the rest)", async () => {

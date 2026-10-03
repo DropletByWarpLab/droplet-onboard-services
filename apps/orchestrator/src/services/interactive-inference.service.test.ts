@@ -1,8 +1,8 @@
 /**
- * WARP-2979 (ADR-059 P4 §6.9.2) — how the box knows chat is busy: an
+ * WARP-2979 — how the box knows chat is busy: an
  * in-flight counter on the two interactive LLM routes, over a mini app with
- * the real middleware. The narrator reads `interactiveInferenceIdle` before
- * it starts a call and aborts its call from `onInteractiveInferenceStart`.
+ * the real middleware. Background model work reads `interactiveInferenceIdle`
+ * before it starts a call and aborts its call from `onInteractiveInferenceStart`.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import express, { type NextFunction, type Request, type Response } from "express";

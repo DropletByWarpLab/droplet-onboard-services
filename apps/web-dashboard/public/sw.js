@@ -21,13 +21,9 @@
  * (review F1; see handOff). If no page takes it within a minute, the row
  * stays unread and findable.
  *
- * WARP-2978 (ADR-059 P3 D36, D37) — a Security alert (`priority: "alert"`,
- * pushed with TTL 1 h and urgency high) stays in the tray until it is handled
- * (`requireInteraction`). It has NO action buttons: one tap opens the incident
- * page — with `?n=<notificationId>`, so the page's Acknowledge records which
- * alert it came from — where a failed acknowledge can be seen. A background
- * ack from the tray could not show a 409/503 and would skip the page's level
- * check.
+ * An alert-priority notification (`priority: "alert"`) stays in the tray until
+ * it is handled (`requireInteraction`). It has NO action buttons: one tap opens
+ * its link.
  *
  * No caching. The dashboard's main bundle is served by Next.js with
  * its own cache rules; the SW exists purely to register a push
@@ -65,8 +61,8 @@ self.addEventListener("push", (event) => {
     // WARP-2804 — `notificationId` last for the same reason: only the box's
     // own id for this push is ever acked, never one smuggled in `data`.
     data: { ...(payload.data || {}), url: payload.url || "/cameras", notificationId: payload.notificationId },
-    // WARP-2978 — only a Security alert stays until it is handled. The box's
-    // own `priority`, never one in `data`. No `actions` (D36).
+    // Only an alert-priority notification stays until it is handled. The box's
+    // own `priority`, never one in `data`. No `actions`.
     requireInteraction: payload.priority === "alert",
   };
 
@@ -84,14 +80,6 @@ const HANDOFF_WAIT_MS = 60000;
  * signed-in dashboard page to take them: notificationId → release().
  */
 const pendingAcks = new Map();
-
-/** An incident page, the only link that takes `?n=`. */
-const INCIDENT_PATH_RE = /^\/security\/incidents\/[A-Za-z0-9-]+$/;
-
-/** WARP-2978 — the incident link with the notification it came from; anything else as sent. */
-function withNotificationParam(url, id) {
-  return id && INCIDENT_PATH_RE.test(url) ? url + "?n=" + encodeURIComponent(id) : url;
-}
 
 /**
  * WARP-3208 — the same rule as `isInAppPath` in src/components/NotificationToaster.tsx
@@ -180,7 +168,7 @@ self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const id = ackIdOf(event.notification.data);
   const stored = event.notification.data && event.notification.data.url;
-  const url = withNotificationParam(isInAppPath(stored) ? stored : "/cameras", id);
+  const url = isInAppPath(stored) ? stored : "/cameras";
   // Started first, awaited last: the focus/navigation below never waits on it.
   const ack = id ? ackOpened(id) : Promise.resolve(true);
 

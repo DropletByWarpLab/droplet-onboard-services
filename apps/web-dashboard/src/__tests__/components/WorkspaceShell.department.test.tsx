@@ -53,11 +53,11 @@ const security = {
   kind: "DEPARTMENT",
   state: "active",
   memberCount: 3,
-  profile: { template: "security", icon: "shield-check" },
+  profile: { template: "it", icon: "shield-check" },
 } as unknown as Department;
 const profile: DepartmentProfile = {
   departmentId: "sec",
-  template: "security",
+  template: "it",
   icon: "shield-check",
   navHrefs: ["/cameras", "/events", "/network"],
   homeWidgets: [],

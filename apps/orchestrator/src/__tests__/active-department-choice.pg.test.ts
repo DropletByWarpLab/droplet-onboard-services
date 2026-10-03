@@ -427,7 +427,7 @@ describe.skipIf(!RUN)("ActiveDepartmentChoice — real Postgres (WARP-2981)", ()
       const sec = await department("security");
       await join_(sec.id, maria.id);
       await prisma.departmentProfile.create({
-        data: { departmentId: sec.id, template: "security", icon: "shield", navHrefs: ["/security"], homeWidgets: [], updatedBy: "warp2981-test" },
+        data: { departmentId: sec.id, template: "operations", icon: "shield", navHrefs: ["/cameras"], homeWidgets: [], updatedBy: "warp2981-test" },
       });
       const a = app(() => maria);
       expect((await request(a).get(PATH)).body).toEqual({ scope: "unset", department: null });
@@ -436,7 +436,7 @@ describe.skipIf(!RUN)("ActiveDepartmentChoice — real Postgres (WARP-2981)", ()
       expect(put.status).toBe(200);
       expect(put.body).toEqual({
         scope: "department",
-        department: { id: sec.id, slug: sec.slug, name: sec.name, profile: { template: "security", icon: "shield" } },
+        department: { id: sec.id, slug: sec.slug, name: sec.name, profile: { template: "operations", icon: "shield" } },
       });
       expect((await request(a).get(PATH)).body).toEqual(put.body);
 

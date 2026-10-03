@@ -176,7 +176,7 @@ export async function fetchEventsFiltered(
 
 // --- Stats ---
 
-/** `timeoutMs` — WARP-2980: the baseline job's per-minute read uses a short one. */
+/** `timeoutMs` — a caller that must not wait on a slow Frigate may pass a short one. */
 export async function fetchStats(opts: { timeoutMs?: number } = {}): Promise<Record<string, unknown>> {
   const resp = await fetch(`${FRIGATE_URL}/api/stats`, { signal: timeout(opts.timeoutMs) });
   if (!resp.ok) throw new Error(`Frigate stats: ${resp.status}`);

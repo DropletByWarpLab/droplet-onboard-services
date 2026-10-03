@@ -248,11 +248,11 @@ html {
    in the sheet, which is what the source-level contrast tests
    (dp-btn-secondary, files-rail) read the dark contract tokens from.
    The dark values also match `html .dark` because the ink they pair with,
-   `--color-on-accent`, flips under ANY `.dark` ancestor — and forced-dark
-   subtrees exist inside a light page (the Security wall, WallNotice). With
-   `html.dark` alone, a primary button in one of those would pair the dark
-   ink #1d1d1f with the light fill #4f46e5: 2.68:1. `html .dark` is not a
-   bare `.dark`, so the drift gate does not read it as a contract block.
+   `--color-on-accent`, flips under ANY `.dark` ancestor — and a forced-dark
+   subtree can sit inside a light page. With `html.dark` alone, a primary
+   button in one of those would pair the dark ink #1d1d1f with the light fill
+   #4f46e5: 2.68:1. `html .dark` is not a bare `.dark`, so the drift gate does
+   not read it as a contract block.
    Promoting both tokens to the canon is the follow-up. */
 html {
   --color-accent-fill: #4f46e5;       /* indigo-600 — white ink 6.29:1 */

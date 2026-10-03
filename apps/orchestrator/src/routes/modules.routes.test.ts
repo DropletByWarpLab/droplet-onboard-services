@@ -47,7 +47,6 @@ const CFG: AvailabilityConfig = {
   DROPLET_MATTER_SERVICE_URL: "http://matter:8003",
   ROUTING_SERVICE_URL: "http://routing:8004",
   SWITCH_SERVICE_URL: "http://switch:8005",
-  DOORS_ENABLED: "1",
 };
 
 interface Seed {
@@ -330,49 +329,5 @@ describe("GET /api/modules — additive, resilient, unchanged", () => {
     expect(prisma.user.findUnique).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: "u-staff" } }),
     );
-  });
-});
-
-// ADR-055 — doors ships dark. With the flag off the module is ABSENT from what
-// the Settings → Features card reads, whoever asks, and from `effectiveForUser`
-// (the owner's included); with it on, it is a normal (off-by-default) row.
-describe("GET /api/modules — doors is absent while DOORS_ENABLED is off (ADR-055)", () => {
-  const OFF: AvailabilityConfig = { ...CFG, DOORS_ENABLED: "0" };
-  const OWNER: AuthUser = { id: "u-owner", username: "own", displayName: "Own", role: "owner" };
-  const seedFor = (id: string, role: string) => ({
-    user: { id, role, accessRole: null },
-  });
-  const listed = (body: { modules: Array<{ id: string }> }) => body.modules.map((m) => m.id);
-
-  it.each([
-    ["staff", STAFF, seedFor("u-staff", "family")],
-    ["owner", OWNER, seedFor("u-owner", "owner")],
-  ] as const)("the workspace view has no doors row for %s", async (_who, user, seed) => {
-    const { app } = makeApp(seed, user, OFF);
-    const res = await request(app).get("/api/modules");
-    expect(res.status).toBe(200);
-    expect(listed(res.body)).not.toContain("doors");
-    expect(JSON.stringify(res.body.modules)).not.toMatch(/door/i);
-  });
-
-  it.each([
-    ["staff", STAFF, seedFor("u-staff", "family")],
-    ["owner", OWNER, seedFor("u-owner", "owner")],
-  ] as const)("effectiveForUser has no doors for %s — the owner bypass lists every gateable id, so the route drops the unlisted one", async (_who, user, seed) => {
-    const { app } = makeApp(seed, user, OFF);
-    const res = await request(app).get("/api/modules");
-    expect(ids(res.body)).not.toContain("doors");
-    // …and only that one is dropped: the owner still resolves the rest.
-    if (_who === "owner") expect(ids(res.body)).toEqual(expect.arrayContaining(["chat", "files", "security"]));
-  });
-
-  it("with the flag on, doors is listed (and off until an operator turns it on)", async () => {
-    const { app } = makeApp(seedFor("u-owner", "owner"), OWNER, CFG);
-    const res = await request(app).get("/api/modules");
-    expect(res.body.modules.find((m: { id: string }) => m.id === "doors")).toMatchObject({
-      available: true,
-      enabled: false,
-      effective: false,
-    });
   });
 });

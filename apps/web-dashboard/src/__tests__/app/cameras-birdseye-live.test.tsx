@@ -8,7 +8,7 @@
  * contract so the fix stays honest end-to-end:
  *
  *  - the page probes the proxied route (GET /api/cameras/birdseye/live, status
- *    read and the request aborted — never HEAD, see the F2 block below; the
+ *    read and the request aborted — never HEAD, see the block below; the
  *    orchestrator answers 404 only when Frigate reports birdseye disabled);
  *  - the composite grid `<img>` renders when the probe says enabled;
  *  - the empty state renders ONLY when the probe says disabled.
@@ -98,24 +98,24 @@ describe("Birdseye live view (WARP-1918)", () => {
 });
 
 /**
- * Wall follow-up F2 (WARP-2981, #2368). Birdseye is an endless MJPEG stream,
- * and two things about it went wrong on this page:
+ * Birdseye is an endless MJPEG stream, and two things about it went wrong on
+ * this page:
  *
  *  - Express runs the GET handler for a HEAD, and Node sends a HEAD's headers
  *    only when the response ends, which a live stream never does. The page's
  *    HEAD check therefore never answered, and (having no signal) stayed open,
  *    holding a proxied Frigate stream for as long as the tab lived, and after
  *    it was left. The check is now a GET whose status is read off the headers
- *    and aborted at once (`getBirdseyeStatus`), the wall's own check.
+ *    and aborted at once (`getBirdseyeStatus`).
  *  - A clean end of the upstream stream freezes the last frame with no
  *    `error` event. Only reconnecting bounds a frozen picture, so a live
- *    stream reconnects every 5 minutes, the wall's cadence.
+ *    stream reconnects every 5 minutes.
  *
  * The route is modelled as the orchestrator behaves: a GET answers its headers
  * at once and the body stays open until the request is aborted; a HEAD is
  * never answered.
  */
-describe("Birdseye live view — a live stream never freezes the page (wall F2)", () => {
+describe("Birdseye live view — a live stream never freezes the page", () => {
   const fetchMock = vi.fn();
   /** Requests still open: not aborted, and (a HEAD) never answered. */
   let open: Set<number>;

@@ -23,11 +23,10 @@ const RECONNECT_MS = 5 * 60_000;
  * enabled in its config. We show a clean message instead of a black
  * box so the operator knows what to do (turn it on in config.yml).
  *
- * The feed is an endless MJPEG stream (wall follow-up F2, WARP-2981): the
- * "is it enabled" check is a GET whose status is read and the request aborted
- * (`getBirdseyeStatus`, never HEAD, which a live stream never answers), and a
- * live stream reconnects (`RECONNECT_MS`), since a clean upstream end fires no
- * `error` event.
+ * The feed is an endless MJPEG stream, so the "is it enabled" check is a GET
+ * whose status is read and the request aborted (`getBirdseyeStatus`, never
+ * HEAD, which a live stream never answers), and a live stream reconnects
+ * (`RECONNECT_MS`), since a clean upstream end fires no `error` event.
  */
 export default function BirdseyePage() {
   const router = useRouter();

@@ -35,9 +35,6 @@ vi.mock("@/components/assistant/AssistantShell", () => ({
 vi.mock("@/components/help/HelpLauncher", () => ({
   HelpLauncher: () => <div data-testid="help-launcher" />,
 }));
-vi.mock("@/lib/hooks/useSecurity", () => ({
-  WallModulesKeeper: () => <div data-testid="wall-modules-keeper" />,
-}));
 vi.mock("@/components/ModuleRouteGuard", () => ({
   ModuleRouteGuard: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));

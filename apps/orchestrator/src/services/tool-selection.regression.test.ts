@@ -95,7 +95,7 @@ interface Turn {
 }
 
 /**
- * The corpus. 19 turns, of which 4 require a remote tool — the last four
+ * The corpus. 30 turns, of which 4 require a remote tool — the last four
  * added by WARP-2454, which fixed the rules that used to miss them.
  * Phrased as real sentences; the required tool is named from the shipping
  * catalog, so a turn goes red the moment selection stops reaching it.
@@ -132,21 +132,6 @@ const TURNS: Turn[] = [
     label: "smart-home / plain control",
     message: "it's freezing in here, can you turn the heating up",
     requires: "control_device",
-  },
-  {
-    label: "device gateway / office equipment status",
-    message: "is the printer by reception running low on toner?",
-    requires: "get_building_devices",
-  },
-  {
-    label: "device gateway / a building setpoint",
-    message: "can you bump the rooftop unit up to 22 degrees",
-    requires: "set_building_point",
-  },
-  {
-    label: "device gateway / a meter read",
-    message: "how much is the main electricity meter showing today?",
-    requires: "get_building_devices",
   },
   {
     label: "network / who is connected",
@@ -308,24 +293,6 @@ const TURNS: Turn[] = [
     label: "cloud dataset / the billing question this story exists to answer",
     message: "what did we bill last week",
     requires: "cloud_query_dataset",
-  },
-  {
-    // WARP-2980 (ADR-059 P5 PR-E) — the box-proof sentence from the spec, word
-    // for word. It names no Security vocabulary at all ("someone" only pulls
-    // `cameras`), which is exactly how the tool would ship advertised on zero
-    // of the turns it exists for.
-    label: "security / what is usual for a place at an hour",
-    message: "is it normal for someone to be in the stock room at 2 AM?",
-    requires: "security_explain_pattern",
-  },
-  {
-    // ADR-055 P4b. The box-proof sentence for the doors tools, run through the
-    // REAL shipping pool: a rule is not enough if the tool were excluded from
-    // chat (the old "until WARP-2972" exclusion), so this fails if either is
-    // missing.
-    label: "doors / is a door open",
-    message: "is the front door open?",
-    requires: "doors_list",
   },
   // WARP-3280 — two sentences from the agent-loop eval that matched NO
   // domain, so the model never had the tool: it answered "no contact found"

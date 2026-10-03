@@ -58,7 +58,6 @@ const CFG: AvailabilityConfig = {
   DROPLET_MATTER_SERVICE_URL: "http://matter:8083",
   ROUTING_SERVICE_URL: "http://routing:8080",
   SWITCH_SERVICE_URL: "http://switch:8081",
-  DOORS_ENABLED: "1",
 };
 
 /** A prisma stub for `createModuleGate` — only `moduleSetting.findMany` is read. */
@@ -439,14 +438,10 @@ describe("FEATURE_GATED_MODULES — every module whose grant the panel offers", 
       "cameras",
       "crm",
       "docs",
-      // ADR-055 — gated from the day it exists, so a role narrowed away from
-      // Doors never reaches /api/doors.
-      "doors",
       "files",
       "knowledge",
       "money",
       "network",
-      "security",
       "smart_home",
     ]);
   });

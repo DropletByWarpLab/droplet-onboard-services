@@ -45,7 +45,7 @@ const OLD: Row = { id: "d-old", name: "Old", kind: "DEPARTMENT", parentId: null,
 
 const PROFILE = {
   departmentId: "d-sec",
-  template: "security",
+  template: "operations",
   icon: "shield-check",
   navHrefs: ["/cameras", "/events"],
   homeWidgets: [{ widget: "cameras", size: "m" }],
@@ -55,7 +55,7 @@ const PROFILE = {
 };
 
 const VALID_BODY = {
-  template: "security",
+  template: "operations",
   icon: "shield-check",
   navHrefs: ["/cameras", "/events", "/network"],
   homeWidgets: [
@@ -147,7 +147,7 @@ describe("GET /api/departments/:id/profile", () => {
     });
     const res = await request(mkApp(prisma, FAMILY("u-r"))).get("/api/departments/d-sec/profile");
     expect(res.status).toBe(200);
-    expect(res.body.profile).toMatchObject({ template: "security", navHrefs: ["/cameras", "/events"] });
+    expect(res.body.profile).toMatchObject({ template: "operations", navHrefs: ["/cameras", "/events"] });
     expect(res.body.inheritedFrom).toBeNull();
     expect(res.body.canEdit).toBe(false);
   });
@@ -198,14 +198,14 @@ describe("PUT /api/departments/:id/profile", () => {
     const prisma = mkPrisma();
     const res = await request(mkApp(prisma, OWNER)).put("/api/departments/d-sec/profile").send(VALID_BODY);
     expect(res.status).toBe(200);
-    expect(res.body.profile).toMatchObject({ departmentId: "d-sec", template: "security", icon: "shield-check" });
+    expect(res.body.profile).toMatchObject({ departmentId: "d-sec", template: "operations", icon: "shield-check" });
     const arg = prisma.departmentProfile.upsert.mock.calls[0][0];
     expect(arg.where).toEqual({ departmentId: "d-sec" });
     expect(arg.create).toMatchObject({ departmentId: "d-sec", updatedBy: "u-owner", navHrefs: VALID_BODY.navHrefs });
     expect(recordActivityMock).toHaveBeenCalledTimes(1);
     expect(recordActivityMock.mock.calls[0][0]).toMatchObject({
       what: "Department set up",
-      refs: { departmentId: "d-sec", template: "security", navHrefCount: 3, homeWidgetCount: 2 },
+      refs: { departmentId: "d-sec", template: "operations", navHrefCount: 3, homeWidgetCount: 2 },
     });
   });
 
@@ -285,7 +285,7 @@ describe("PUT /api/departments/:id/profile", () => {
     ["an extra key on a widget", { ...VALID_BODY, homeWidgets: [{ widget: "cameras", size: "s", html: "<b>" }] }],
     ["an icon that is not a lucide name", { ...VALID_BODY, icon: "<svg>" }],
     ["an unexpected top-level key", { ...VALID_BODY, departmentId: "d-other" }],
-    ["a missing field", { template: "security", icon: "shield-check", navHrefs: [] }],
+    ["a missing field", { template: "operations", icon: "shield-check", navHrefs: [] }],
   ])("400 VALIDATION_ERROR for %s, before any database read", async (_label, body) => {
     const prisma = mkPrisma();
     const res = await request(mkApp(prisma, OWNER)).put("/api/departments/d-sec/profile").send(body);
@@ -325,7 +325,7 @@ describe("GET /api/departments — the switcher's profile summary", () => {
   it("loads the summary in the same query and returns {template, icon} — or null when not set up", async () => {
     const prisma = mkPrisma();
     prisma.department.findMany.mockResolvedValue([
-      { ...LIST_ROW, profile: { template: "security", icon: "shield-check" } },
+      { ...LIST_ROW, profile: { template: "operations", icon: "shield-check" } },
       { ...LIST_ROW, id: "d-sales", slug: "sales", name: "Sales", profile: null },
     ]);
     const res = await request(mkApp(prisma, OWNER)).get("/api/departments");
@@ -334,20 +334,20 @@ describe("GET /api/departments — the switcher's profile summary", () => {
       select: { template: true, icon: true },
     });
     const byId = Object.fromEntries(res.body.departments.map((d: any) => [d.id, d]));
-    expect(byId["d-sec"].profile).toEqual({ template: "security", icon: "shield-check" });
+    expect(byId["d-sec"].profile).toEqual({ template: "operations", icon: "shield-check" });
     expect(byId["d-sales"].profile).toBeNull();
   });
 
   it("a TEAM row omits the key — a team reads its parent's profile, so null would claim 'not set up'", async () => {
     const prisma = mkPrisma();
     prisma.department.findMany.mockResolvedValue([
-      { ...LIST_ROW, profile: { template: "security", icon: "shield-check" } },
+      { ...LIST_ROW, profile: { template: "operations", icon: "shield-check" } },
       { ...LIST_ROW, id: "t-nights", slug: "nights", name: "Nights", kind: "TEAM", parentId: "d-sec", profile: null },
     ]);
     const res = await request(mkApp(prisma, OWNER)).get("/api/departments");
     expect(res.status).toBe(200);
     const byId = Object.fromEntries(res.body.departments.map((d: any) => [d.id, d]));
-    expect(byId["d-sec"].profile).toEqual({ template: "security", icon: "shield-check" });
+    expect(byId["d-sec"].profile).toEqual({ template: "operations", icon: "shield-check" });
     expect("profile" in byId["t-nights"]).toBe(false);
   });
 

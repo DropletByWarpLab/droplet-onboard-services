@@ -1,8 +1,8 @@
 /**
  * WARP-2804 — `describeClient`: what the acking client SAID it was.
  *
- * Reported, never proof: the value is stored on the ack (`ackClient`) and on
- * WARP-2978's incident ack, labelled as what the device said. So the contract
+ * Reported, never proof: the value is stored on the ack (`ackClient`),
+ * labelled as what the device said. So the contract
  * is about keeping it HONEST and SAFE to display, not about believing it:
  * a well-formed `X-Droplet-Client` wins, anything else falls back to a coarse
  * User-Agent label, and nothing usable is NULL.

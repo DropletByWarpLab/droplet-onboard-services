@@ -43,7 +43,7 @@ interface EffectiveFeature {
   moduleId: string;
   level: "view" | "act" | "manage";
 }
-/** Exported for the Security wall's own modules read (WARP-2981), which mirrors into this key. */
+/** The `GET /api/modules` payload, exported so a caller can type its own read of it. */
 export interface ModulesView {
   modules: ModuleState[];
   /**
@@ -70,7 +70,7 @@ async function fetchModules(): Promise<ModulesView> {
  *    disagree with the server, which is the authority)
  *  - otherwise: module known → its `effective` flag
  *  - module unknown to the registry → shown (never hide what we can't classify)
- *  - a module that ships dark (`ABSENT_UNLESS_LISTED`, ADR-055) is the
+ *  - a module that ships dark (`ABSENT_UNLESS_LISTED`) is the
  *    exception to BOTH fail-open rules: unresolved is off, and a resolved
  *    payload that does not list it is off. Nothing about it shows until the
  *    module list positively lists it
@@ -124,7 +124,7 @@ export function useModuleGate(): (moduleId: string) => boolean {
  * Where a module stands, with "the probe has not answered" kept apart from
  * "the module is off" — `useModuleGate`'s predicate cannot tell them apart, and
  * a page that ships dark needs to: unresolved renders NOTHING (no flash of a
- * 404 on a box that has the module), off is a 404 (ADR-055, `dark-modules.ts`).
+ * 404 on a box that has the module), off is a 404 (`dark-modules.ts`).
  * A failed probe stays `unresolved` until the next re-read, which is the
  * closed direction.
  */
@@ -140,14 +140,13 @@ export function useModuleGateState(moduleId: string): ModuleGateState {
 export type ModuleLevel = "none" | "view" | "act" | "manage";
 
 /**
- * WARP-2977 P2b — WHICH level the caller holds, for hiding act/manage
- * controls. Extracted pure for testing.
+ * WHICH level the caller holds, for hiding act/manage controls. Extracted pure
+ * for testing.
  *
  * Fail-CLOSED for actions, the opposite posture to `isModuleEffective`, and
  * deliberately so: a nav entry hidden by mistake is an annoyance, but a
  * control rendered to someone the server will refuse turns every click into
- * a `requireFeatureAccess` denial — an auth/warn ActivityRow that the
- * Security threat mirror then shows as a threat. So:
+ * a `requireFeatureAccess` denial — an auth/warn ActivityRow. So:
  *  - probe not resolved, or it failed (`data` undefined) → `view`;
  *  - the server sent a (non-empty) PER-USER set → that entry's level, or
  *    `none` when the module is absent from it;

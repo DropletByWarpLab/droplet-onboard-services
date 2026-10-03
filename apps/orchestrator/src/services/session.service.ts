@@ -313,7 +313,7 @@ export async function checkSession(
 }
 
 /**
- * WARP-2981 (ADR-059 §6.2, D22) — the latest this sign-in can last: the
+ * WARP-2981 — the latest this sign-in can last: the
  * record's createdAt + the ABSOLUTE limit for the role it was minted with, the
  * same arithmetic checkSession enforces. It can end sooner (idle expiry, the
  * concurrent-session cap's eviction, revocation), so a client shows it as a

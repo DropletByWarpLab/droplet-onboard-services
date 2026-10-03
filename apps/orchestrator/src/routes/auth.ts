@@ -2292,7 +2292,7 @@ export function createProtectedAuthRouter(
         }
       }
 
-      // WARP-2981 (ADR-059 §6.2) — the latest this sign-in can last (the
+      // WARP-2981 — the latest this sign-in can last (the
       // absolute cap; idle expiry, the concurrent-session cap and revocation
       // can end it sooner, and the idle deadline moves with every request, so
       // it is not offered).

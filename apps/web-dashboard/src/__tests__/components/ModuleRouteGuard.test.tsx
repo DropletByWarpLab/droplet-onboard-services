@@ -13,7 +13,9 @@
  *   - an unresolved gate renders normally (fail-open preserved);
  *   - the always-on surfaces (/, /chat, /settings) are never blockable —
  *     design §9 note (c), self-integrity + self-lockout;
- *   - a route no module claims renders normally.
+ *   - a route no module claims renders normally;
+ *   - a module that ships dark (`dark-modules.ts`) is absent, not merely off,
+ *     and absent is a plain 404 the PAGE renders: the guard steps aside for it.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
@@ -41,6 +43,11 @@ vi.mock("@/lib/hooks/useModuleGate", () => ({
   useModuleGate: () => (moduleId: string) => modulesRef.current[moduleId] !== false,
 }));
 
+// The real registry of modules that ship dark is empty in this build; these
+// tests fill a synthetic one.
+const dark = vi.hoisted(() => ({ ids: new Set<string>() }));
+vi.mock("@/lib/dark-modules", () => ({ ABSENT_UNLESS_LISTED: dark.ids }));
+
 import { ModuleRouteGuard } from "@/components/ModuleRouteGuard";
 
 function renderAt(path: string) {
@@ -55,6 +62,7 @@ function renderAt(path: string) {
 beforeEach(() => {
   modulesRef.current = {};
   pathnameRef.current = "/";
+  dark.ids.clear();
 });
 
 describe("<ModuleRouteGuard>", () => {
@@ -142,5 +150,22 @@ describe("<ModuleRouteGuard>", () => {
     modulesRef.current = { network: false };
     renderAt("/networking-guide");
     expect(screen.getByTestId("page-content")).toBeInTheDocument();
+  });
+
+  it("steps aside for a module that ships dark: absent is a plain 404 the PAGE renders, never this card", () => {
+    dark.ids.add("cameras");
+    modulesRef.current = { cameras: false };
+    renderAt("/cameras");
+    expect(screen.getByTestId("page-content")).toBeInTheDocument();
+    expect(screen.queryByTestId("module-route-blocked")).toBeNull();
+    expect(screen.queryByText(/an owner or admin can turn it on/i)).toBeNull();
+  });
+
+  it("steps aside only for the ids the registry lists", () => {
+    dark.ids.add("network");
+    modulesRef.current = { cameras: false };
+    renderAt("/cameras");
+    expect(screen.queryByTestId("page-content")).toBeNull();
+    expect(screen.getByTestId("module-route-blocked")).toBeInTheDocument();
   });
 });

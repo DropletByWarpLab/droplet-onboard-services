@@ -40,7 +40,6 @@ const CFG: AvailabilityConfig = {
   DROPLET_MATTER_SERVICE_URL: "",
   ROUTING_SERVICE_URL: "",
   SWITCH_SERVICE_URL: "",
-  DOORS_ENABLED: "0",
 };
 
 function fakePrisma(

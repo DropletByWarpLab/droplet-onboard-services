@@ -38,16 +38,6 @@ export interface ModuleState {
   requiresUnmet: boolean;
 }
 
-/**
- * The rows an operator is shown: every module, minus one that is unavailable AND
- * has said it is not listed when unavailable (`listedWhenUnavailable: false`,
- * ADR-055). Filters the view only — `computeModuleStates` and the gates still
- * carry every module, so nothing about effectiveness changes.
- */
-function listedStates(states: ModuleState[]): ModuleState[] {
-  return states.filter((s) => s.available || getModuleDef(s.id)!.listedWhenUnavailable !== false);
-}
-
 export interface ModulesView {
   businessType: BusinessType | null;
   modules: ModuleState[];
@@ -154,7 +144,7 @@ export async function getModulesView(
 ): Promise<ModulesView> {
   const overrides = await readEnablement(prisma);
   const ws = await prisma.workspace.findUnique({ where: { id: 1 } });
-  return { businessType: ws?.businessType ?? null, modules: listedStates(computeModuleStates(overrides, cfg)) };
+  return { businessType: ws?.businessType ?? null, modules: computeModuleStates(overrides, cfg) };
 }
 
 /**

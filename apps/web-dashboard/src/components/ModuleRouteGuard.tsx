@@ -38,7 +38,7 @@ export function ModuleRouteGuard({ children }: { children: React.ReactNode }) {
   const gated = moduleForPath(pathname);
   if (!gated || isModuleOn(gated.moduleId)) return <>{children}</>;
 
-  // A module that ships dark (ADR-055) is absent, not merely off, and absent is
+  // A module that ships dark is absent, not merely off, and absent is
   // a plain 404, never this card: its "An owner or admin can turn it on" is not
   // true of a module only a flag switches on, and it would hint the product
   // exists. The PAGE owns that 404 (and renders nothing until the module list

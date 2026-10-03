@@ -195,56 +195,6 @@ describe("NotificationToaster deep link (WARP-2909)", () => {
   );
 });
 
-describe("NotificationToaster on the Security wall (WARP-2981)", () => {
-  function at(pathname: string) {
-    Object.defineProperty(window, "location", {
-      configurable: true,
-      value: { protocol: "http:", host: "localhost", pathname } as Location,
-    });
-  }
-
-  beforeEach(() => {
-    FakeWebSocket.instances.length = 0;
-    toastSpy.mockReset();
-    (globalThis as unknown as { WebSocket: typeof FakeWebSocket }).WebSocket = FakeWebSocket;
-  });
-
-  it.each(["/security/wall", "/security/wall/"])("a notification on %s is not toasted — the socket stays up", async (path) => {
-    at(path);
-    render(<NotificationToaster />);
-    await act(async () => {
-      await Promise.resolve();
-      deliver({ kind: "event", title: "Alert: person in the Stock room", priority: "alert" });
-    });
-    expect(toastSpy).not.toHaveBeenCalled();
-    expect(FakeWebSocket.instances).toHaveLength(1);
-    expect(FakeWebSocket.instances[0]!.readyState).toBe(1);
-  });
-
-  it("…but on /security/wallpaper it is", async () => {
-    at("/security/wallpaper");
-    render(<NotificationToaster />);
-    await act(async () => {
-      await Promise.resolve();
-      deliver({ kind: "event", title: "Alert: person in the Stock room" });
-    });
-    expect(toastSpy).toHaveBeenCalledTimes(1);
-  });
-
-  it("the same notification on /security is toasted, and leaving the wall toasts again", async () => {
-    at("/security/wall");
-    render(<NotificationToaster />);
-    await act(async () => {
-      await Promise.resolve();
-    });
-    at("/security");
-    await act(async () => {
-      deliver({ kind: "event", title: "Alert: person in the Stock room" });
-    });
-    expect(toastSpy).toHaveBeenCalledTimes(1);
-  });
-});
-
 describe("NotificationToaster acknowledgement (WARP-2804)", () => {
   beforeEach(() => {
     FakeWebSocket.instances.length = 0;
@@ -437,7 +387,7 @@ describe("NotificationToaster ← the service worker (WARP-2804, review F1)", ()
   });
 });
 
-describe("NotificationToaster — Security alerts (WARP-2978)", () => {
+describe("NotificationToaster — alert priority", () => {
   beforeEach(() => {
     FakeWebSocket.instances.length = 0;
     toastSpy.mockReset();
@@ -463,41 +413,28 @@ describe("NotificationToaster — Security alerts (WARP-2978)", () => {
   const ALERT = {
     id: "clx9abc",
     kind: "event",
-    title: "Person in Stock room after hours",
-    body: "Back camera saw someone at 2:14 AM. The site was closed.",
-    url: "/security/incidents/7f3c2a10-5b1e-4c8e-9a0d-2f6b3c4d5e6f",
-    data: { incidentId: "7f3c2a10-5b1e-4c8e-9a0d-2f6b3c4d5e6f" },
+    title: "Back camera offline",
+    body: "The back camera stopped responding at 2:14 AM.",
+    url: "/cameras",
     priority: "alert",
   };
 
   it("priority alert → the persistent error toast (role=alert, never times out), with Open", async () => {
     const [message, type, action] = await toastFor(ALERT);
     expect(type).toBe("error");
-    expect(message).toBe("Person in Stock room after hours — Back camera saw someone at 2:14 AM. The site was closed.");
+    expect(message).toBe("Back camera offline — The back camera stopped responding at 2:14 AM.");
     expect(action?.label).toBe("Open");
   });
 
-  it("Open goes to the incident with ?n=<notification>, so Acknowledge carries it — and acks the notification as opened", async () => {
+  it("Open goes to the link and acks the notification as opened", async () => {
     const [, , action] = await toastFor(ALERT);
     action!.onClick();
-    expect(routerPush).toHaveBeenCalledWith("/security/incidents/7f3c2a10-5b1e-4c8e-9a0d-2f6b3c4d5e6f?n=clx9abc");
+    expect(routerPush).toHaveBeenCalledWith("/cameras");
     expect(ackSpy).toHaveBeenCalledWith("clx9abc", { via: "opened" });
   });
 
   it("without priority, an event keeps its ordinary toast", async () => {
     const [, type] = await toastFor({ ...ALERT, priority: undefined });
     expect(type).toBe("success");
-  });
-
-  it("only an incident page gets ?n=; any other link is left as the box sent it", async () => {
-    const [, , action] = await toastFor({ ...ALERT, url: "/calendar" });
-    action!.onClick();
-    expect(routerPush).toHaveBeenCalledWith("/calendar");
-  });
-
-  it("no row id (an older box): the incident link opens without ?n=", async () => {
-    const [, , action] = await toastFor({ ...ALERT, id: undefined });
-    action!.onClick();
-    expect(routerPush).toHaveBeenCalledWith("/security/incidents/7f3c2a10-5b1e-4c8e-9a0d-2f6b3c4d5e6f");
   });
 });

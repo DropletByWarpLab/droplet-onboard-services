@@ -224,7 +224,7 @@ describe("N3 POST /api/notifications/:id/ack (WARP-2804)", () => {
 
   it.each([
     ["an unknown via", { via: "all" }],
-    ["via: incident (WARP-2978's, never a route's)", { via: "incident" }],
+    ["via: incident (reserved, never a route's)", { via: "incident" }],
     ["an unknown key", { via: "opened", method: "all" }],
   ])("400 VALIDATION_ERROR for %s (the body is strict)", async (_label, body) => {
     const { app, log } = makeAckApp();

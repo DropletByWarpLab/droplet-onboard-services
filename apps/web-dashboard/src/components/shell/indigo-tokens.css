@@ -68,7 +68,7 @@
   /* Red for TEXT (an inline problem line), never a fill. --danger is the fill
      token and its dark value (#7f1d1d) reads ~1.8:1 as text on the dark card;
      this pair is .badge.danger's ramp: 6.5:1 on white, 9.5:1 on the dark
-     --card-bg. WARP-2980. */
+     --card-bg. */
   --danger-ink: #b91c1c;
   --user-bubble: #dbe4ff;
   --user-bubble-text: #1c3a5e;

@@ -548,7 +548,7 @@ describe("WARP-3409 — the report never fails because only its write-up did", (
       ],
       triggeredBy: "romain",
       // Active and local resolvers both name GLM, as on the box (the file
-      // listing makes this a local-only summary, WARP-2979).
+      // listing makes this a local-only summary).
       summarizer: createToolSpecSummarizer(glm, glm),
     });
 

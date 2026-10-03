@@ -78,12 +78,11 @@ export interface DispatchInput {
   data?: Record<string, string | number | boolean>;
   /** WARP-2909 — collapse key (web push `tag`): repeated notifications with
    *  one tag replace each other in the tray. `^[A-Za-z0-9._:/-]{1,128}$`
-   *  (`/` since WARP-2804, for per-incident tags like `incident/42`). */
+   *  (`/` since WARP-2804, for hierarchical tags like `thread/42`). */
   tag?: string;
-  /** WARP-2978 (ADR-059 P3 §6.7) — `alert`: web push kept for an hour with
-   *  urgency high, and the toast / push payloads carry `priority` so the
-   *  clients keep it on screen until it is handled. Transport only: it is
-   *  not stored on the row. */
+  /** `alert`: web push kept for an hour with urgency high, and the toast /
+   *  push payloads carry `priority` so the clients keep it on screen until it
+   *  is handled. Transport only: it is not stored on the row. */
   priority?: NotificationPriority;
 }
 
@@ -96,8 +95,8 @@ const MAX_DATA_BYTES = 1024;
 /**
  * The collapse key. Its only consumer is the service worker's
  * `showNotification({ tag })` — an opaque string compared for equality, never
- * a path, URL, topic or file name — so `/` is as safe as `:` and lets P3 tag
- * alerts per incident (`incident/42`). Whitespace, backslash, `?`, `#` and
+ * a path, URL, topic or file name — so `/` is as safe as `:` and lets a
+ * caller tag hierarchically (`thread/42`). Whitespace, backslash, `?`, `#` and
  * anything non-ASCII stay out.
  */
 const TAG_RE = /^[A-Za-z0-9._:/-]{1,128}$/;
@@ -283,8 +282,8 @@ export interface DeliverOptions {
   /** Web-push collapse key, `^[A-Za-z0-9._:/-]{1,128}$`. A bad one is dropped
    *  (only the tag — review F5), recorded as `delivery: invalid_tag`, never thrown on. */
   tag?: string;
-  /** WARP-2978 (ADR-059 P3 §6.7, D37) — `alert`: the push is dialled with TTL
-   *  3600 s and urgency high, and both payloads carry `priority`. */
+  /** `alert`: the push is dialled with TTL 3600 s and urgency high, and both
+   *  payloads carry `priority`. */
   priority?: NotificationPriority;
 }
 
@@ -673,7 +672,7 @@ export interface AckNotificationInput extends AckAttribution {
   id: string;
   /** The acting person's USERNAME. Only the recipient can ack: it is in the where-clause. */
   username: string;
-  /** `all` is ack-all's alone; `incident` is WARP-2978's. The routes pass `inbox` or `opened`. */
+  /** `all` is ack-all's alone; no route here sets `incident`. The routes pass `inbox` or `opened`. */
   method: Exclude<NotificationAckMethod, "all">;
 }
 
