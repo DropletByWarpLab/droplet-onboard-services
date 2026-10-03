@@ -134,6 +134,11 @@ case "${1:-}" in
     esac
     exit 0
     ;;
+  pull)
+    # WARP-3430: scripted `docker pull` failure — stderr text + exit code.
+    [ -z "${DOCKER_STUB_PULL_STDERR:-}" ] || printf '%s\n' "$DOCKER_STUB_PULL_STDERR" >&2
+    exit "${DOCKER_STUB_PULL_EXIT:-0}"
+    ;;
   run)
     case "$*" in
       # WARP-2995 reconcile-env: scripted host report + exit code.
@@ -154,7 +159,10 @@ cat > "$STUB_BIN/cosign" <<EOF
 #!/usr/bin/env bash
 # Fake cosign for apply-update.test.sh (WARP-244): records the argv into the
 # shared calls.log and obeys COSIGN_STUB_EXIT so tests drive both verdicts.
+# COSIGN_STUB_STDERR (WARP-3430) scripts what a refusal says on stderr, so the
+# registry-auth vs image-verify classification can be driven both ways.
 printf 'cosign %s\n' "\$*" >> "$STUB_DIR/calls.log"
+[ -z "\${COSIGN_STUB_STDERR:-}" ] || printf '%s\n' "\$COSIGN_STUB_STDERR" >&2
 exit "\${COSIGN_STUB_EXIT:-0}"
 EOF
 chmod +x "$STUB_BIN/cosign"
@@ -178,6 +186,9 @@ run_apply() {
   DOCKER_STUB_RUN_OUT="${DOCKER_STUB_RUN_OUT:-}" \
   DOCKER_STUB_RUN_EXIT="${DOCKER_STUB_RUN_EXIT:-0}" \
   COSIGN_STUB_EXIT="${COSIGN_STUB_EXIT:-0}" \
+  COSIGN_STUB_STDERR="${COSIGN_STUB_STDERR:-}" \
+  DOCKER_STUB_PULL_EXIT="${DOCKER_STUB_PULL_EXIT:-0}" \
+  DOCKER_STUB_PULL_STDERR="${DOCKER_STUB_PULL_STDERR:-}" \
   DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
   DROPLET_OTA_CONFIG_ROOT="${DROPLET_OTA_CONFIG_ROOT:-}" \
   DROPLET_OTA_HOST_IMAGE="${DROPLET_OTA_HOST_IMAGE-$HOST_IMG}" \
@@ -904,6 +915,121 @@ if DROPLET_OTA_APPLY_DRY_RUN=1 DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
 else
   pass "pull-images refuses without a pinned host image to run cosign from"
 fi
+
+# 5e. WARP-3430: a registry that refuses AUTH (the package is still private)
+#     is NOT a bad signature. Each refusal wording GHCR/docker use gets the
+#     distinct `registry-auth:` prefix naming the image — never `image-verify:`
+#     (apply.ts rejects on that one and would never retry) — and no pull ran.
+for AUTH_TEXT in \
+  "UNAUTHORIZED: authentication required" \
+  "GET https://ghcr.io/v2/token: DENIED: denied" \
+  "error: getting signature bundle: unexpected status 401 Unauthorized"; do
+  stub_reset
+  AUTH_OUT="$(COSIGN_STUB_EXIT=1 COSIGN_STUB_STDERR="$AUTH_TEXT" run_apply pull-images --images "$REL_ORCH" 2>&1)"
+  AUTH_RC=$?
+  if [ "$AUTH_RC" -ne 0 ] \
+     && printf '%s' "$AUTH_OUT" | grep -q "registry-auth:.*$REL_ORCH.*private" \
+     && ! printf '%s' "$AUTH_OUT" | grep -q "image-verify:" \
+     && ! grep -q "^pull " "$STUB_DIR/calls.log" 2>/dev/null; then
+    pass "cosign auth refusal ($AUTH_TEXT) → registry-auth: naming the image, not image-verify:, no pull"
+  else
+    fail "cosign auth refusal ($AUTH_TEXT) misclassified (rc=$AUTH_RC, out: $AUTH_OUT)"
+  fi
+done
+
+# 5f. A genuine signature failure that merely mentions a registry stays
+#     `image-verify:` — the auth classification must not swallow real refusals.
+stub_reset
+SIG_OUT="$(COSIGN_STUB_EXIT=1 COSIGN_STUB_STDERR="Error: no matching signatures: none of the expected identities matched ghcr.io/x/y" \
+  run_apply pull-images --images "$REL_ORCH" 2>&1)"
+SIG_RC=$?
+if [ "$SIG_RC" -ne 0 ] && printf '%s' "$SIG_OUT" | grep -q "image-verify:" \
+   && ! printf '%s' "$SIG_OUT" | grep -q "registry-auth:"; then
+  pass "a real signature failure stays image-verify: (not reclassified as registry-auth)"
+else
+  fail "signature failure misclassified (rc=$SIG_RC, out: $SIG_OUT)"
+fi
+
+# 5g. The pull itself refused auth (cosign passed): registry-auth:, non-zero.
+stub_reset
+PULL_AUTH_OUT="$(DOCKER_STUB_PULL_EXIT=1 \
+  DOCKER_STUB_PULL_STDERR="Error response from daemon: pull access denied for ${REL_ORCH%@*}, repository does not exist or may require 'docker login': denied: requested access to the resource is denied" \
+  run_apply pull-images --images "$REL_ORCH" 2>&1)"
+PULL_AUTH_RC=$?
+if [ "$PULL_AUTH_RC" -ne 0 ] \
+   && printf '%s' "$PULL_AUTH_OUT" | grep -q "registry-auth:.*$REL_ORCH.*private" \
+   && ! printf '%s' "$PULL_AUTH_OUT" | grep -q "image-verify:"; then
+  pass "docker pull access denied → registry-auth: naming the image"
+else
+  fail "docker pull auth refusal misclassified (rc=$PULL_AUTH_RC, out: $PULL_AUTH_OUT)"
+fi
+
+# 5h. Any other pull failure keeps its old shape: docker's own stderr and
+#     docker's exit status, with neither canonical marker (apply.ts retries it
+#     as a plain transient error).
+stub_reset
+PULL_NET_OUT="$(DOCKER_STUB_PULL_EXIT=7 \
+  DOCKER_STUB_PULL_STDERR="Error response from daemon: Get \"https://ghcr.io/v2/\": dial tcp: lookup ghcr.io: no such host" \
+  run_apply pull-images --images "$REL_ORCH" 2>&1)"
+PULL_NET_RC=$?
+if [ "$PULL_NET_RC" -eq 7 ] \
+   && printf '%s' "$PULL_NET_OUT" | grep -q "no such host" \
+   && ! printf '%s' "$PULL_NET_OUT" | grep -q "registry-auth:\|image-verify:"; then
+  pass "a non-auth pull failure keeps docker's stderr and exit status, no canonical marker"
+else
+  fail "non-auth pull failure changed shape (rc=$PULL_NET_RC, out: $PULL_NET_OUT)"
+fi
+
+# 5i. The auth scan must not read the IMAGE REF as an error. A digest is hex,
+#     so `a401b…` has `401` between two non-digits — a bare `401` grep took
+#     that for an HTTP status, and cosign echoes the ref in a REAL signature
+#     failure, which would have been retried forever instead of rejected.
+HEX_401="a401b$(printf 'c%.0s' $(seq 59))"
+REL_401="ghcr.io/dropletbywarplab/orchestrator@sha256:$HEX_401"
+
+# A real signature failure naming the ref (and, separately, only its digest)
+# stays image-verify:.
+for SIG_TEXT in \
+  "Error: no matching signatures for $REL_401: none of the expected identities matched" \
+  "Error: no matching signatures: digest sha256:$HEX_401 has no signature by the expected identity"; do
+  stub_reset
+  SIG401_OUT="$(COSIGN_STUB_EXIT=1 COSIGN_STUB_STDERR="$SIG_TEXT" run_apply pull-images --images "$REL_401" 2>&1)"
+  SIG401_RC=$?
+  if [ "$SIG401_RC" -ne 0 ] && printf '%s' "$SIG401_OUT" | grep -q "image-verify:" \
+     && ! printf '%s' "$SIG401_OUT" | grep -q "registry-auth:"; then
+    pass "a signature failure echoing a digest that contains 401 stays image-verify:"
+  else
+    fail "digest containing 401 misread as registry-auth (rc=$SIG401_RC, out: $SIG401_OUT)"
+  fi
+done
+
+# A non-auth pull failure echoing that ref keeps docker's status, no marker.
+stub_reset
+NET401_OUT="$(DOCKER_STUB_PULL_EXIT=7 \
+  DOCKER_STUB_PULL_STDERR="Error response from daemon: error pulling image $REL_401: connection refused" \
+  run_apply pull-images --images "$REL_401" 2>&1)"
+NET401_RC=$?
+if [ "$NET401_RC" -eq 7 ] && ! printf '%s' "$NET401_OUT" | grep -q "registry-auth:\|image-verify:"; then
+  pass "a network pull failure echoing a digest that contains 401 is not registry-auth"
+else
+  fail "digest containing 401 misread on pull (rc=$NET401_RC, out: $NET401_OUT)"
+fi
+
+# A real auth refusal for that same ref is still registry-auth:, by its token
+# or by an explicit status 401 (no other token on the line).
+for AUTH401_TEXT in \
+  "UNAUTHORIZED: authentication required for $REL_401" \
+  "GET https://ghcr.io/v2/dropletbywarplab/orchestrator/manifests/sha256:$HEX_401: unexpected status code 401 (HEAD responses have no body, use GET for details)"; do
+  stub_reset
+  AUTH401_OUT="$(COSIGN_STUB_EXIT=1 COSIGN_STUB_STDERR="$AUTH401_TEXT" run_apply pull-images --images "$REL_401" 2>&1)"
+  AUTH401_RC=$?
+  if [ "$AUTH401_RC" -ne 0 ] && printf '%s' "$AUTH401_OUT" | grep -q "registry-auth:.*$REL_401" \
+     && ! printf '%s' "$AUTH401_OUT" | grep -q "image-verify:"; then
+    pass "a real auth refusal for a ref containing 401 is still registry-auth: ($AUTH401_TEXT)"
+  else
+    fail "auth refusal for a ref containing 401 misclassified (rc=$AUTH401_RC, out: $AUTH401_OUT)"
+  fi
+done
 
 # =============================================================================
 echo ""

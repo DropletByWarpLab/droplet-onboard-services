@@ -8173,6 +8173,8 @@ export type CheckNowOutcome =
   | "verify_failed"
   | "channel_mismatch"
   | "already_known"
+  /** WARP-3430 — a verified release not strictly newer than the installed one. */
+  | "not_newer"
   | "pending_created";
 
 export interface CheckNowResult {

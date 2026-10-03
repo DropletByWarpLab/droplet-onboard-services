@@ -278,6 +278,7 @@ export function createUpdatesRouter(
         const result = await deps.checkForUpdate({
           prisma,
           releasesLatestUrl: config.DROPLET_OTA_RELEASES_URL,
+          downloadBase: config.DROPLET_OTA_DOWNLOAD_BASE,
           githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
         });
         await recordActivity({
@@ -368,7 +369,7 @@ export function createUpdatesRouter(
           .applyPendingUpdate({
             prisma,
             runner,
-            releasesLatestUrl: config.DROPLET_OTA_RELEASES_URL,
+            downloadBase: config.DROPLET_OTA_DOWNLOAD_BASE,
             githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
             claimed: claim,
           })

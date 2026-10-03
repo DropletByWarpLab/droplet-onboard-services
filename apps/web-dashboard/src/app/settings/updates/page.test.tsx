@@ -120,6 +120,14 @@ describe("/settings/updates — current release card", () => {
     ).toBeInTheDocument();
   });
 
+  it("says a not-newer release is nothing to update, not an unreachable feed (WARP-3430)", async () => {
+    checkForUpdatesNow.mockResolvedValue({ outcome: "not_newer", gitSha: SHA_CURRENT });
+    render(<UpdatesSettingsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /check now/i }));
+    expect(await screen.findByText(/not newer than the one installed/i)).toBeInTheDocument();
+    expect(screen.queryByText(/check failed/i)).not.toBeInTheDocument();
+  });
+
   it("reports a failed check as a failure, never silently", async () => {
     checkForUpdatesNow.mockResolvedValue({ outcome: "fetch_failed", detail: "boom" });
     render(<UpdatesSettingsPage />);
