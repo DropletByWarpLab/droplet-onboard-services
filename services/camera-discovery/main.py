@@ -33,7 +33,7 @@ import os
 import re
 import time
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 import paho.mqtt.client as mqtt
@@ -49,7 +49,14 @@ from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kw
 from driver_checker import full_driver_report, auto_fix_drivers
 from frigate_client import FrigateClient
 from onvif_scanner import discover_cameras, probe_onvif_device
-from rtsp_prober import probe_camera, verify_stream
+from rtsp_prober import (
+    RTSP_PORTS,
+    RTSP_USERINFO_SAFE,
+    probe_camera,
+    probe_with_credentials,
+    scan_ports,
+    verify_stream,
+)
 from vendor_init import check_status as vendor_status_check
 from vendor_init import initialize_camera as vendor_initialize
 
@@ -1018,6 +1025,186 @@ async def accept_camera(mac: str, request: Request):
 
         # Still in pending (peeked, not popped) — just surface the failure.
         raise HTTPException(status_code=500, detail="Failed to add camera to Frigate")
+    finally:
+        accepting_macs.discard(mac)
+
+
+# --- Operator-supplied credentials (WARP-3505) ---
+
+# Credential field limits. RTSP/ONVIF accounts are short; the caps keep a
+# pathological body from being hashed/base64'd/sent and keep the digest header
+# well inside a single read.
+_MAX_CRED_USERNAME = 128
+_MAX_CRED_PASSWORD = 256
+
+# probe_with_credentials outcome -> (HTTP status, machine code, operator prose).
+# Prose never includes the username or password (NET-05).
+_CREDENTIAL_FAILURES: dict[str, tuple[int, str, str]] = {
+    "auth_failed": (
+        422,
+        "auth_failed",
+        "The camera rejected that username and password. Check them and try again.",
+    ),
+    "locked": (
+        423,
+        "locked",
+        "The camera has temporarily locked its account after too many failed "
+        "sign-ins. Wait a few minutes before trying again.",
+    ),
+    "no_path": (
+        422,
+        "no_stream_path",
+        "The camera is reachable but none of the usual video stream addresses "
+        "worked. Enter the stream address manually (see your camera's manual).",
+    ),
+    "unreachable": (
+        502,
+        "unreachable",
+        "Couldn't reach the camera. Check that it is powered on and on the "
+        "same network, then try again.",
+    ),
+}
+
+
+def _credential_error(outcome: str) -> JSONResponse:
+    status, code, message = _CREDENTIAL_FAILURES[outcome]
+    return JSONResponse(status_code=status, content={"detail": message, "code": code})
+
+
+def _validated_credentials(body: object) -> tuple[str, str]:
+    """Pull ``(username, password)`` out of a request body or raise 400.
+
+    Control characters are refused outright: the values are written into an RTSP
+    request (``Authorization`` header) and a CR/LF would let a caller inject
+    extra headers. The 400 detail names the FIELD, never its value.
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    username = body.get("username")
+    password = body.get("password")
+    if not isinstance(username, str) or not username.strip():
+        raise HTTPException(status_code=400, detail="username is required")
+    if not isinstance(password, str) or not password:
+        raise HTTPException(status_code=400, detail="password is required")
+    if len(username) > _MAX_CRED_USERNAME:
+        raise HTTPException(status_code=400, detail="username is too long")
+    if len(password) > _MAX_CRED_PASSWORD:
+        raise HTTPException(status_code=400, detail="password is too long")
+    for field, value in (("username", username), ("password", password)):
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+            raise HTTPException(
+                status_code=400, detail=f"{field} contains invalid characters"
+            )
+    return username, password
+
+
+def _redact_camera(camera: dict) -> dict:
+    """A camera record safe to return/publish: no RTSP URL, no credentials."""
+    return {
+        k: camera.get(k)
+        for k in ("name", "ip", "mac", "manufacturer", "model", "status", "detection_method")
+    }
+
+
+@app.post("/cameras/discovered/{mac}/credentials")
+async def submit_camera_credentials(mac: str, request: Request):
+    """Add a discovered camera using credentials the operator typed in.
+
+    The default-credential ladder only knows factory defaults, so a camera with
+    a real password could never be adopted. This re-runs ONVIF GetStreamUri and
+    the RTSP path probe with the SUPPLIED ``{username, password}`` and, when a
+    stream answers, commits the camera to Frigate with the credentials embedded
+    in the RTSP URL (percent-encoded the way ffmpeg needs, see
+    ``RTSP_USERINFO_SAFE``).
+
+    Failure modes are distinct so the dashboard can say what is wrong:
+    422 ``auth_failed`` / 422 ``no_stream_path`` / 423 ``locked`` /
+    502 ``unreachable``.
+
+    NET-05: gated by DEVICE_SECRET; the password is never logged, never put on
+    MQTT, and the response carries no RTSP URL.
+    """
+    _require_auth(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    username, password = _validated_credentials(body)
+
+    camera = pending_cameras.get(mac)
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found in pending list")
+
+    # Same mutual exclusion as accept_camera (PYNET-017): claim the MAC before
+    # the first await so a concurrent reject/accept can't act mid-commit.
+    if mac in accepting_macs:
+        raise HTTPException(status_code=409, detail="Camera accept already in progress")
+    accepting_macs.add(mac)
+    try:
+        ip = camera["ip"]
+
+        # 1) ONVIF GetStreamUri with the real credentials — the camera's own
+        # answer for its stream path beats guessing. Best effort: many cameras
+        # (and Hanwha with ONVIF off) don't answer, and RTSP probing follows.
+        hint_paths: list[str] = []
+        onvif_port: int | None = None
+        try:
+            onvif_info = await asyncio.wait_for(
+                probe_onvif_device(ip, 80, username, password), timeout=15.0
+            )
+        except Exception:
+            onvif_info = None
+        if onvif_info and onvif_info.get("rtsp_url"):
+            parsed = urlparse(onvif_info["rtsp_url"])
+            if parsed.hostname == ip and parsed.path:
+                hint_paths.append(
+                    parsed.path + (f"?{parsed.query}" if parsed.query else "")
+                )
+                onvif_port = parsed.port
+
+        # 2) RTSP port: ONVIF's, else the one discovery found, else sweep.
+        known_port = camera.get("port") or urlparse(camera.get("rtsp_url") or "").port
+        ports = [p for p in (onvif_port, known_port) if p]
+        if not ports:
+            ports = await scan_ports(ip, RTSP_PORTS)
+        if not ports:
+            return _credential_error("unreachable")
+
+        # 3) Probe each candidate port; stop on a definitive answer.
+        outcome, path, port = "unreachable", None, ports[0]
+        for candidate_port in dict.fromkeys(ports):
+            outcome, path = await probe_with_credentials(
+                ip, candidate_port, username, password, hint_paths=hint_paths
+            )
+            port = candidate_port
+            if outcome in ("ok", "auth_failed", "locked"):
+                break
+        if outcome != "ok" or path is None:
+            return _credential_error(outcome)
+
+        rtsp_url = (
+            f"rtsp://{quote(username, safe=RTSP_USERINFO_SAFE)}"
+            f":{quote(password, safe=RTSP_USERINFO_SAFE)}"
+            f"@{ip}:{port}{path}"
+        )
+
+        name = camera.get("name", _sanitize_camera_name(camera.get("hostname", ""), ip))
+        if not await frigate.add_camera(name, rtsp_url):
+            # Still pending (peeked, not popped) — the credentials are good, the
+            # failure is downstream, so say that rather than blaming them.
+            raise HTTPException(status_code=500, detail="Failed to add camera to Frigate")
+
+        pending_cameras.pop(mac, None)
+        camera["rtsp_url"] = rtsp_url
+        camera["username"] = username
+        camera["port"] = port
+        camera["detection_method"] = "operator_credentials"
+        camera["status"] = "active"
+        known_cameras[mac] = camera
+        logger.info("Added camera %s (%s) with operator-supplied credentials", name, ip)
+        safe = _redact_camera(camera)
+        publish_discovery({"event": "camera_accepted", "camera": safe})
+        return {"status": "accepted", "camera": safe}
     finally:
         accepting_macs.discard(mac)
 

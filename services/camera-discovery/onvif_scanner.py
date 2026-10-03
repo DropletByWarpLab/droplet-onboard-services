@@ -107,18 +107,23 @@ async def ws_discovery_scan(timeout: float = 5.0) -> list[dict]:
     return devices
 
 
-async def probe_onvif_device(ip: str, port: int = 80) -> dict | None:
+async def probe_onvif_device(ip: str, port: int = 80,
+                             username: str = "admin",
+                             password: str = "") -> dict | None:
     """Probe an IP for ONVIF device information.
 
     Attempts to connect to the ONVIF device service and retrieve
-    device info and media stream URIs.
+    device info and media stream URIs. ``username`` / ``password`` default to
+    the pair used by the discovery sweep; the operator-credential flow
+    (WARP-3505) passes the camera's real account so GetStreamUri works on
+    cameras whose password isn't a factory default. Never logged.
     """
     try:
         from onvif import ONVIFCamera
 
         cam = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: ONVIFCamera(ip, port, "admin", ""),
+            lambda: ONVIFCamera(ip, port, username, password),
         )
 
         # Get device information
