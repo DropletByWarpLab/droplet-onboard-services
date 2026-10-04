@@ -1449,11 +1449,30 @@ const envSchema = z.object({
   // secrets.sh-generated value). authMiddleware's matchServiceToken sets
   // `_service:rag-eval`. Empty default = principal disabled (same posture
   // as SERVICE_TOKEN_EMAIL); deliberately NOT in
-  // PRODUCTION_REQUIRED_SECRET_KEYS — the eval endpoint 404s in production,
-  // so a box without the rag-eval profile must still boot. To rotate:
-  // change here AND in the rag-eval container's compose env
+  // PRODUCTION_REQUIRED_SECRET_KEYS — the eval endpoint 404s unless
+  // RAG_EVAL_ENABLED is on, so a box without the rag-eval profile must still
+  // boot. To rotate: change here AND in the rag-eval container's compose env
   // (ORCHESTRATOR_SERVICE_TOKEN).
   SERVICE_TOKEN_RAG_EVAL: z.string().default(""),
+
+  // WARP-3609 — explicit positive gate for /api/admin/retrieval-eval/*. OFF
+  // unless "1"/"true" (same string→bool idiom as DROPLET_CLAIM_GATE_ENABLED:
+  // z.coerce.boolean() would read "0"/"false" as true). Replaces the old
+  // `NODE_ENV === "production"` check, which the orchestrator container never
+  // satisfied (so the route was live on every box) and which would have
+  // 404'd the scheduled eval the day WARP-2551 arms NODE_ENV. secrets.sh
+  // writes it for boxes that run the rag-eval profile.
+  RAG_EVAL_ENABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
+
+  // WARP-3609 — the ONE account the `_service:rag-eval` principal may name via
+  // `?user=` on those routes. The same RAGAS_EVAL_USER the rag-eval container
+  // reads (both receive it through env_file ../.env; never re-declare it in a
+  // compose `environment:` block — WARP-1908). Empty = the principal can name
+  // nobody (403), so a missing value fails closed.
+  RAGAS_EVAL_USER: z.string().default(""),
 
   // SERVICE_TOKEN_DISPLAY — WARP-165 wired this orchestrator → oled-display.
   // WARP-1800 uses the SAME token for the reverse leg: device-bridge presents
