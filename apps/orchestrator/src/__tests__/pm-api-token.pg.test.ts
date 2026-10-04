@@ -127,6 +127,24 @@ describe.skipIf(!RUN)("PmApiToken + scoped CalendarFeedToken — the database's 
     await expect(token({ scopes: ["PM:READ"] })).rejects.toThrow(/PmApiToken_scopes_valid/);
   });
 
+  it("rejects a row with no scopes value at all: a NULL cannot slip past the CHECK (PmApiToken_scopes_valid)", async () => {
+    // Prisma cannot write a NULL list, so this goes in as SQL. A CHECK passes when its expression is
+    // NULL, and cardinality(NULL) is NULL: the constraint has to say IS NOT NULL itself.
+    const insert = (scopesSql: string) =>
+      prisma.$executeRawUnsafe(
+        `INSERT INTO "PmApiToken" ("id", "userId", "name", "prefix", "hash", "scopes", "issuedRole")
+         VALUES ($1, $2, 'ci', 'abcd1234', $3, ${scopesSql}, 'family'::"Role")`,
+        `warp3533-null-${Date.now()}-${++n}`,
+        userId,
+        `warp3533-null-hash-${Date.now()}-${++n}`,
+      );
+    await expect(insert("NULL")).rejects.toThrow(/PmApiToken_scopes_valid/);
+    await expect(insert("ARRAY[NULL]::text[]")).rejects.toThrow(/PmApiToken_scopes_valid/);
+    await expect(insert("ARRAY['pm:read', NULL]::text[]")).rejects.toThrow(/PmApiToken_scopes_valid/);
+    // the control: the same statement with a real scope list is accepted
+    await expect(insert("ARRAY['pm:read']::text[]")).resolves.toBe(1);
+  });
+
   // ── PmApiToken_role_may_hold ─────────────────────────────────────────────
 
   it("holds a token for owner, admin and family only (PmApiToken_role_may_hold)", async () => {

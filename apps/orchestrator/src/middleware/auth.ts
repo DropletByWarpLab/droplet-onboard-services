@@ -334,9 +334,16 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   // database or a log line is its sha256 and the row id.
   if (headerToken?.startsWith(PM_API_TOKEN_PREFIX)) {
     if (!tokenAreaForPath(req.path)) {
-      recordAccessDenied(req, "api-token-route");
+      // NO audit row here, deliberately. Nothing has been looked up, so the caller
+      // is anonymous: `Authorization: Bearer dpm_anything` needs no credential, and
+      // a row per request would let anyone append signed, hash-chained entries
+      // carrying a path of their choosing (and queue every other audit writer on
+      // the chain's lock). A 401 is not audited either. The guard's own refusal
+      // (pm-api-token-guard.ts) only ever sees a validated, rate-limited token,
+      // so that one can be.
+      logger.debug({ method: req.method }, "api token refused outside its routes");
       res.status(403).json({
-        error: "Forbidden: an API token may call only /api/pm and /api/support",
+        error: "Forbidden: an API token cannot call this route",
         code: "TOKEN_ROUTE_FORBIDDEN",
       });
       return;
@@ -473,7 +480,12 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
 /**
  * Validate a session token outside the Express pipeline (WebSocket upgrade).
  */
-export async function validateTokenForWs(token: string | null): Promise<AuthUser | null> {
+export async function validateTokenForWs(
+  token: string | null,
+  // WARP-3612 — the periodic re-check of an open socket must not slide the
+  // session's idle window (a keepalive is not user activity).
+  opts: { touch?: boolean } = {},
+): Promise<AuthUser | null> {
   if (!config.AUTH_ENABLED) {
     return { id: "dev", username: "dev", displayName: "Developer", role: "owner" };
   }
@@ -493,7 +505,7 @@ export async function validateTokenForWs(token: string | null): Promise<AuthUser
     // Fails open on Redis error (isUserDenied → false), same as the HTTP path.
     if (await isUserDenied(jwtPayload.sub)) return null;
     if (jwtPayload.sid) {
-      const result = await checkSession(jwtPayload.sid);
+      const result = await checkSession(jwtPayload.sid, opts);
       if (result.kind !== "ok" && result.kind !== "error") return null;
     }
     return {
@@ -824,13 +836,13 @@ export function requireRoleOrService(
   ...allowed: Role[]
 ): (req: Request, res: Response, next: NextFunction) => void {
   const base = requireRole(...allowed);
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return markAsRoleGuard((req: Request, res: Response, next: NextFunction): void => {
     if (req.user?.id === serviceId && req.user.role === "service") {
       next();
       return;
     }
     base(req, res, next);
-  };
+  });
 }
 
 /**

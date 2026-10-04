@@ -18,12 +18,17 @@
  * a token is a person's script and the surface is "the whole PM API", so a route
  * added under `/api/pm` tomorrow is reachable by a token with the right scope
  * the day it lands, with the holder's role/module/feature gates in front of it.
- * Nothing else is reachable: not `/api/auth`, not `/api/developer` (so a token
- * can never mint a token, a feed link or flip the switch), not `/api/files`.
+ * Two things are carved out of that prefix: admin configuration
+ * (`SESSION_ONLY_ROUTES`: webhooks, project and desk settings), which only a
+ * session may touch. Nothing else is reachable: not `/api/auth`, not
+ * `/api/developer` (so a token can never mint a token, a feed link or flip the
+ * switch), not `/api/files`.
  *
  * Scope is by METHOD: every read needs `<area>:read` and everything else
- * `<area>:write`; write implies read. Scopes only NARROW — the holder's own
- * role checks run after this and are unchanged.
+ * `<area>:write`; write implies read. The one exception is the tiny
+ * `READ_ONLY_POSTS` list: POSTs that only read (a filter too big for a query
+ * string). Scopes only NARROW — the holder's own role checks run after this and
+ * are unchanged.
  */
 import type { NextFunction, Request, Response } from "express";
 import { recordAccessDenied } from "./auth.js";
@@ -62,13 +67,13 @@ export function pmApiTokenScopeGuard(req: Request, res: Response, next: NextFunc
     // second lock, for any path it did not see (a router mounted ahead of it).
     recordAccessDenied(req, "api-token-route");
     res.status(403).json({
-      error: "Forbidden: an API token may call only /api/pm and /api/support",
+      error: "Forbidden: an API token cannot call this route",
       code: "TOKEN_ROUTE_FORBIDDEN",
     });
     return;
   }
-  if (!scopeAllows(token.scopes, area, req.method)) {
-    const required = requiredScope(area, req.method);
+  if (!scopeAllows(token.scopes, area, req.method, req.path)) {
+    const required = requiredScope(area, req.method, req.path);
     recordAccessDenied(req, "api-token-scope");
     res
       .status(403)

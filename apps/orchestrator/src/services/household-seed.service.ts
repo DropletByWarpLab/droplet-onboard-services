@@ -172,7 +172,7 @@ export async function seedHouseholdDepartment(
       kind: "system",
       severity: "ok",
       sourceIcon: "folder-check",
-      what: "Household department absorbed from Nextcloud",
+      what: "Household department absorbed from the File Store",
       sub: config.DROPLET_SHARED_FOLDER_NAME,
       refs: {
         householdId: household.id,

@@ -22,9 +22,10 @@ import request from "supertest";
 import type { Router } from "express";
 import { createPmNativeRouter } from "./native.js";
 import { createPmRelationsRouter } from "./relations.js";
+import { createPmScheduleRouter } from "./schedule.js";
 import { createPmOpenApiRouter } from "./openapi.js";
 import { repoPath, packagePath } from "../../__tests__/helpers/test-paths.js";
-import { requiredScope } from "../../services/pm/pm-api-token.service.js";
+import { READ_ONLY_POSTS, requiredScope, tokenAreaForPath } from "../../services/pm/pm-api-token.service.js";
 
 const DOCS_PATH = repoPath("docs", "openapi", "pm.openapi.json");
 const EMBEDDED_PATH = packagePath("src", "routes", "pm", "pm.openapi.json");
@@ -52,7 +53,12 @@ function mountedRoutes(router: Router): string[] {
 }
 
 const stub = {} as never;
-const MOUNTED = [createPmNativeRouter(stub), createPmRelationsRouter(stub), createPmOpenApiRouter()].flatMap(mountedRoutes).sort();
+const MOUNTED = [
+  createPmNativeRouter(stub),
+  createPmRelationsRouter(stub),
+  createPmScheduleRouter(stub),
+  createPmOpenApiRouter(),
+].flatMap(mountedRoutes).sort();
 const DOCUMENTED = Object.entries(doc.paths)
   .flatMap(([path, ops]) => Object.keys(ops).map((m) => `${m.toUpperCase()} ${path}`))
   .sort();
@@ -63,9 +69,11 @@ const HOW_TO_FIX =
 
 describe("the PM OpenAPI document — coverage (WARP-3533)", () => {
   it("found the routes it is meant to cover (so an empty walk can never pass)", () => {
-    expect(MOUNTED.length).toBeGreaterThanOrEqual(31);
+    expect(MOUNTED.length).toBeGreaterThanOrEqual(33);
     expect(MOUNTED).toContain("GET /api/pm/projects");
     expect(MOUNTED).toContain("POST /api/pm/work-items/{id}/relations");
+    expect(MOUNTED).toContain("GET /api/pm/projects/{id}/timeline");
+    expect(MOUNTED).toContain("GET /api/pm/my-work");
     expect(MOUNTED).toContain("GET /api/pm/openapi.json");
   });
 
@@ -193,9 +201,39 @@ describe("the PM OpenAPI document — scopes mirror the server's scope guard", (
   it("every read needs pm:read and every other method pm:write, on the bearer scheme", () => {
     for (const [path, ops] of Object.entries(doc.paths)) {
       for (const [method, op] of Object.entries(ops)) {
-        const want = requiredScope("pm", method);
+        // The server decides what a request needs, including the tiny read-only-POST list: ask it.
+        const want = requiredScope("pm", method, path);
         const bearer = (op.security as Array<Record<string, string[]>>).find((r) => "bearerAuth" in r);
         expect(bearer?.bearerAuth, `${method.toUpperCase()} ${path}`).toEqual([want]);
+      }
+    }
+  });
+});
+
+describe("the PM OpenAPI document — what a token can reach (WARP-3533 review)", () => {
+  it("documents only routes an API token may call: no session-only (admin configuration) route belongs in it", () => {
+    for (const path of Object.keys(doc.paths)) {
+      const concrete = path.replace(/\{[^}]+\}/g, "x");
+      expect(tokenAreaForPath(concrete), `${path} is session-only or outside the token areas`).toBe("pm");
+    }
+  });
+
+  it("no parameterised write route can be reached through a read-only POST path", () => {
+    // READ_ONLY_POSTS lets a pm:read token POST. That is only safe while no route that
+    // WRITES answers the same URL: a `POST /pm/work-items/:id` would, with id = "query".
+    type Layer = { regexp: RegExp; route?: { path: string; methods: Record<string, boolean> } };
+    const layers = [createPmNativeRouter(stub), createPmRelationsRouter(stub), createPmOpenApiRouter()].flatMap(
+      (r) => (r as unknown as { stack: Layer[] }).stack,
+    );
+    expect(READ_ONLY_POSTS.size).toBeGreaterThan(0);
+    for (const apiPath of READ_ONLY_POSTS) {
+      const routerPath = apiPath.replace(/^\/api/, "");
+      for (const layer of layers) {
+        if (!layer.route || !layer.regexp.test(routerPath)) continue;
+        // Only a route that can answer a POST matters (a GET handler never sees one).
+        if (!layer.route.methods.post && !layer.route.methods._all) continue;
+        // The one route allowed to answer it is the route written for it, by its literal path.
+        expect(layer.route.path, `${Object.keys(layer.route.methods).join(",")} ${layer.route.path} also answers ${apiPath}`).toBe(routerPath);
       }
     }
   });

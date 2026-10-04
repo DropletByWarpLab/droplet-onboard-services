@@ -2136,7 +2136,7 @@ enum CalendarFeedTokenScope {
 /// link reads; rotating or revoking one feed's link leaves the others alone.
 /// INVARIANT NOT EXPRESSIBLE HERE: CalendarFeedToken_project_scope_coherent —
 /// CHECK (("scope" = 'pm_project') = ("projectId" IS NOT NULL)) lives in
-/// migration SQL and is proven in calendar-feed-token-scope.pg.test.ts.
+/// migration SQL and is proven in pm-api-token.pg.test.ts.
 model CalendarFeedToken {
   id         String                 @id @default(uuid())
   userId     String
@@ -3383,6 +3383,10 @@ model ScimGroup {
   // The local Role this group grants. Explicit column (not recomputed from
   // displayName on every read) so an operator override survives re-sync.
   mappedRole  Role     @default(family)
+  // WARP-3631: local User.ids in the group as of the last push, so a person
+  // dropped from a push can be demoted (the group's grant is recomputed from
+  // the groups they remain in).
+  memberUserIds String[] @default([])
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

@@ -52,14 +52,18 @@ import { createRequestLogger } from "../middleware/request-logger.js";
 import {
   PM_API_TOKENS_ENABLED_KEY,
   PM_API_TOKEN_MAX_LIFETIME_MS,
+  READ_ONLY_POSTS,
+  SESSION_ONLY_ROUTES,
   authenticatePmApiToken,
   bindPmApiTokenPrisma,
   createPmApiToken,
   hashPmApiToken,
   isPmApiTokensEnabled,
+  isReadRequest,
   listPmApiTokens,
   normalizeScopes,
   recordPmApiTokenUse,
+  requiredScope,
   resetPmApiTokenUseMemo,
   revokePmApiToken,
   revokePmApiTokensForUser,
@@ -202,8 +206,24 @@ function buildApp(db: Db, limit = 300) {
   app.use(authMiddleware);
   app.use(createPmApiTokenRateLimit(limit, `pm-api-token-test-${++appSeq}`));
   app.use(pmApiTokenScopeGuard);
-  app.all(["/api/pm/ping", "/api/support/ping", "/api/files/ping", "/api/auth/me", "/api/developer", "/api/pmx/ping"], (req, res) =>
-    res.json({ user: req.user, apiToken: req.apiToken, method: req.method }),
+  app.all(
+    [
+      "/api/pm/ping",
+      "/api/support/ping",
+      "/api/files/ping",
+      "/api/auth/me",
+      "/api/developer",
+      "/api/pmx/ping",
+      // WARP-3533 review: a read-only POST, and the admin routes a token may never call.
+      "/api/pm/work-items/query",
+      "/api/pm/work-items/bulk",
+      "/api/pm/webhooks",
+      "/api/pm/webhooks/:id/deliveries",
+      "/api/pm/projects/:id/settings",
+      "/api/support/webhooks",
+      "/api/support/settings",
+    ],
+    (req, res) => res.json({ user: req.user, apiToken: req.apiToken, method: req.method }),
   );
   return app;
 }
@@ -544,6 +564,191 @@ describe("WARP-3533 — a token never leaves /api/pm and /api/support", () => {
   });
 });
 
+describe("WARP-3533 review — an anonymous caller cannot write audit rows", () => {
+  it("N junk dpm_ bearers at routes a token may never call: 403 each, zero ActivityRows, zero lookups, no path in any log", async () => {
+    const db = makeDb();
+    switchOn(db);
+    const app = buildApp(db, 100_000);
+    const longTail = "x".repeat(2000);
+    const targets = [
+      `/api/developer/${longTail}`,
+      `/api/files/${longTail}`,
+      "/api/auth/me",
+      `/api/pm/webhooks/${longTail}`, // session-only: out of a token's reach even under /api/pm
+      `/api/support/settings/${longTail}`,
+    ];
+    db.pmApiToken.findUnique.mockClear();
+    let n = 0;
+    for (const path of targets) {
+      for (let i = 0; i < 6; i++, n++) {
+        const res = await request(app)
+          .get(path)
+          .set(bearer(`dpm_${"J".repeat(43)}${i}`));
+        expect(res.status, path.slice(0, 40)).toBe(403);
+        expect(res.body.code).toBe("TOKEN_ROUTE_FORBIDDEN");
+      }
+    }
+    expect(n).toBe(30);
+    expect(h.recordActivity).not.toHaveBeenCalled();
+    expect(db.pmApiToken.findUnique).not.toHaveBeenCalled();
+    expect(h.logged.join("\n")).not.toContain(longTail);
+  });
+
+  it("the same with a VALID token on those routes: still 403, still no row (the refusal happens before the lookup)", async () => {
+    const db = makeDb();
+    switchOn(db);
+    const { token } = await mint(db, "u-owner", ["pm:read", "pm:write", "support:read", "support:write"]);
+    const app = buildApp(db, 100_000);
+    db.pmApiToken.findUnique.mockClear();
+    for (const path of ["/api/developer", "/api/pm/webhooks", "/api/support/settings"]) {
+      expect((await request(app).get(path).set(bearer(token))).status, path).toBe(403);
+    }
+    expect(h.recordActivity).not.toHaveBeenCalled();
+    expect(db.pmApiToken.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("a scope denial of a validated token still audits, bounded by that token's rate limit", async () => {
+    const db = makeDb();
+    switchOn(db);
+    const { token } = await mint(db, "u-member", ["pm:read"]);
+    const app = buildApp(db, 3);
+    for (let i = 0; i < 6; i++) await request(app).post("/api/pm/ping").set(bearer(token));
+    expect(h.recordActivity.mock.calls.filter((c) => (c[0] as { what: string }).what === "Access denied")).toHaveLength(3);
+  });
+});
+
+describe("WARP-3533 review — admin configuration is session-only", () => {
+  const SESSION_ONLY_PATHS = [
+    "/api/pm/webhooks",
+    "/api/pm/webhooks/",
+    "/api/pm/webhooks/wh-1",
+    "/api/pm/webhooks/wh-1/deliveries",
+    "/API/PM/WEBHOOKS",
+    "/api/pm/projects/p1/settings",
+    "/api/pm/projects/p1/settings/states",
+    "/api/pm/workspaces/settings",
+    "/api/support/webhooks",
+    "/api/support/settings",
+    "/api/support/settings/sla",
+    "/api/support/queues/settings",
+  ];
+
+  it("tokenAreaForPath refuses every session-only shape, whatever the case or trailing slash", () => {
+    for (const path of SESSION_ONLY_PATHS) expect(tokenAreaForPath(path), path).toBeNull();
+  });
+
+  it("and only those: the neighbours stay reachable (segment-bounded)", () => {
+    for (const path of [
+      "/api/pm/webhooks-archive",
+      "/api/pm/webhookss",
+      "/api/pm/projects/p1/settingsx",
+      "/api/pm/projects/p1/work-items",
+      "/api/pm/projects/settings-of-the-year/states",
+      "/api/pm/work-items/p1/comments",
+    ]) {
+      expect(tokenAreaForPath(path), path).toBe("pm");
+    }
+    expect(tokenAreaForPath("/api/support/tickets/t1")).toBe("support");
+  });
+
+  it("is listed in one place, and every entry names a prefix under the two areas", () => {
+    expect(SESSION_ONLY_ROUTES.length).toBeGreaterThan(0);
+    for (const pattern of SESSION_ONLY_ROUTES) {
+      expect(pattern, pattern).toMatch(/^\/api\/(pm|support)\/[a-z*/-]+$/);
+      expect(pattern.endsWith("/"), pattern).toBe(false);
+    }
+  });
+
+  it("a token holding every scope is a 403 TOKEN_ROUTE_FORBIDDEN on each, with no lookup and no row", async () => {
+    const db = makeDb();
+    switchOn(db);
+    const { token } = await mint(db, "u-owner", ["pm:read", "pm:write", "support:read", "support:write"]);
+    const app = buildApp(db);
+    db.pmApiToken.findUnique.mockClear();
+    const concrete: Array<[string, string]> = [
+      ["get", "/api/pm/webhooks"],
+      ["post", "/api/pm/webhooks"],
+      ["delete", "/api/pm/webhooks/wh-1/deliveries"],
+      ["patch", "/api/pm/projects/p1/settings"],
+      ["get", "/API/PM/Webhooks/"],
+      ["put", "/api/support/settings"],
+      ["post", "/api/support/webhooks"],
+    ];
+    for (const [verb, path] of concrete) {
+      const res = await (request(app) as unknown as Record<string, (p: string) => request.Test>)[verb](path).set(bearer(token));
+      // The test app serves the paths that exist in it; the guard answers first either way.
+      expect(res.status, `${verb} ${path}`).toBe(403);
+      expect(res.body.code, `${verb} ${path}`).toBe("TOKEN_ROUTE_FORBIDDEN");
+    }
+    expect(db.pmApiToken.findUnique).not.toHaveBeenCalled();
+    expect(h.recordActivity).not.toHaveBeenCalled();
+  });
+
+  it("the same routes are untouched for a SESSION principal (the guard only ever looks at tokens)", async () => {
+    const db = makeDb();
+    const app = express();
+    app.use((req, _res, next) => {
+      req.user = { id: "u-owner", username: "olivia", displayName: "Olivia", role: "owner" } as never;
+      next();
+    });
+    app.use(pmApiTokenScopeGuard);
+    app.all("/api/pm/webhooks", (_req, res) => res.json({ ok: true }));
+    expect((await request(app).post("/api/pm/webhooks")).status).toBe(200);
+    void db;
+  });
+});
+
+describe("WARP-3533 review — read-only POSTs", () => {
+  it("scope semantics: a POST to a READ_ONLY_POSTS path needs only read, in any case and with a trailing slash", () => {
+    expect([...READ_ONLY_POSTS]).toEqual(["/api/pm/work-items/query"]);
+    for (const path of ["/api/pm/work-items/query", "/api/pm/work-items/query/", "/API/PM/Work-Items/QUERY"]) {
+      expect(isReadRequest("POST", path), path).toBe(true);
+      expect(scopeAllows(["pm:read"], "pm", "POST", path), path).toBe(true);
+      expect(requiredScope("pm", "POST", path), path).toBe("pm:read");
+    }
+  });
+
+  it("and ONLY that: not another verb, not another path, not another area", () => {
+    const q = "/api/pm/work-items/query";
+    for (const verb of ["PUT", "PATCH", "DELETE", "PROPFIND", "PURGE"]) {
+      expect(scopeAllows(["pm:read"], "pm", verb, q), verb).toBe(false);
+      expect(requiredScope("pm", verb, q), verb).toBe("pm:write");
+    }
+    for (const path of [
+      "/api/pm/work-items/queryx",
+      "/api/pm/work-items/query/extra",
+      "/api/pm/work-items/bulk",
+      "/api/pm/work-items",
+      "/api/pm/projects/p1/work-items",
+      "/api/pm/work-items/p1/query",
+      "",
+    ]) {
+      expect(scopeAllows(["pm:read"], "pm", "POST", path), path).toBe(false);
+      expect(requiredScope("pm", "POST", path), path).toBe("pm:write");
+    }
+    // The old two-argument form still means "a POST is a write".
+    expect(scopeAllows(["pm:read"], "pm", "POST")).toBe(false);
+    // A support-only token has no pm scope at all.
+    expect(scopeAllows(["support:read"], "pm", "POST", q)).toBe(false);
+    // Write still implies read, so a write token may call it too.
+    expect(scopeAllows(["pm:write"], "pm", "POST", q)).toBe(true);
+  });
+
+  it("over HTTP: a pm:read token may POST the query route and nothing else; a write route stays 403", async () => {
+    const db = makeDb();
+    switchOn(db);
+    const { token } = await mint(db, "u-member", ["pm:read"]);
+    const app = buildApp(db);
+    const ok = await request(app).post("/api/pm/work-items/query").set(bearer(token)).send({ filter: {} });
+    expect(ok.status).toBe(200);
+    expect(ok.body.method).toBe("POST");
+    const denied = await request(app).post("/api/pm/work-items/bulk").set(bearer(token)).send({});
+    expect(denied.status).toBe(403);
+    expect(denied.body).toEqual({ error: "insufficient_scope", required: "pm:write" });
+    expect((await request(app).put("/api/pm/work-items/query").set(bearer(token))).status).toBe(403);
+  });
+});
+
 describe("WARP-3533 — the workspace switch", () => {
   it("defaults to off: a missing row, a malformed value and an unreadable table are all off", async () => {
     const db = makeDb();
@@ -742,7 +947,9 @@ describe("WARP-3533 — AC: the token never appears in logs, audit rows or respo
     // the same through authenticatePmApiToken directly
     await authenticatePmApiToken(db as never, token);
 
-    expect(h.recordActivity.mock.calls.length).toBeGreaterThan(2);
+    // The scope denial and the expired-token refusal: the rows the scan below is about. (A junk
+    // bearer at a route a token may never call writes none: see the audit-flood describe.)
+    expect(h.recordActivity.mock.calls.length).toBeGreaterThanOrEqual(2);
     const everything = JSON.stringify(h.recordActivity.mock.calls) + h.logged.join("\n") + bodies.join("\n");
     expect(everything).not.toContain(token);
     expect(everything).not.toContain(secret);

@@ -1,5 +1,17 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { purgeAuditLogs } from "./audit-retention-purge.service.js";
+import { recordActivity } from "./activity.singleton.js";
+
+// WARP-3628: ActivityRow deletes go through the droplet_purge_activity_rows()
+// SQL function (the table's trigger refuses a plain DELETE), and a run that
+// removed rows records an "Audit log purged" row in the chain.
+vi.mock("./activity.singleton.js", () => ({
+  recordActivity: vi.fn(async () => null),
+}));
+
+beforeEach(() => {
+  vi.mocked(recordActivity).mockClear();
+});
 
 /**
  * WARP-586 — retention purge for ActivityRow / CommandAuditLog /
@@ -54,8 +66,10 @@ function createPrismaMock(counts: {
           })),
         )
         .mockResolvedValue([]),
-      deleteMany: vi.fn().mockResolvedValue({ count: counts.activity }),
     },
+    $queryRawUnsafe: vi
+      .fn()
+      .mockResolvedValue([{ n: BigInt(counts.activity) }]),
     commandAuditLog: {
       findMany: vi
         .fn()
@@ -130,11 +144,15 @@ function makeActivityTable(rows: ActivityRecord[]) {
         .slice(0, take)
         .map((r) => ({ id: r.id }));
     }),
-    deleteMany: vi.fn(async (args: any) => {
-      const ids: bigint[] = args.where.id.in;
+    // Stands in for `SELECT droplet_purge_activity_rows($1::text[]::bigint[])`.
+    purgeFn: vi.fn(async (sql: string, idStrings: string[]) => {
+      if (!sql.includes("droplet_purge_activity_rows")) {
+        throw new Error(`unexpected SQL: ${sql}`);
+      }
+      const ids = idStrings.map((x) => BigInt(x));
       const before = store.length;
       store = store.filter((r) => !ids.includes(r.id));
-      return { count: before - store.length };
+      return [{ n: BigInt(before - store.length) }];
     }),
   };
 }
@@ -228,10 +246,12 @@ describe("WARP-586 — purgeAuditLogs", () => {
 
     await purgeAuditLogs(prisma as any, 30);
 
-    const delArg = prisma.activityRow.deleteMany.mock.calls[0][0];
-    // No `at` filter on the delete — only an id set.
-    expect(delArg.where.at).toBeUndefined();
-    expect(delArg.where.id).toBeDefined();
+    const [sql, ids] = prisma.$queryRawUnsafe.mock.calls[0];
+    // The sanctioned SQL function, handed only an id set — no `at` filter.
+    expect(sql).toContain("droplet_purge_activity_rows");
+    expect(sql).not.toMatch(/DELETE\s+FROM/i);
+    expect(Array.isArray(ids)).toBe(true);
+    expect(ids.length).toBeGreaterThan(0);
   });
 
   it("skips entirely when the window is 0 (keep-forever / disabled)", async () => {
@@ -249,7 +269,7 @@ describe("WARP-586 — purgeAuditLogs", () => {
       notificationDeleted: 0,
       skipped: true,
     });
-    expect(prisma.activityRow.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.$queryRawUnsafe).not.toHaveBeenCalled();
     expect(prisma.activityRow.findFirst).not.toHaveBeenCalled();
     expect(prisma.commandAuditLog.deleteMany).not.toHaveBeenCalled();
     expect(prisma.notificationLog.deleteMany).not.toHaveBeenCalled();
@@ -272,7 +292,7 @@ describe("WARP-586 — purgeAuditLogs", () => {
 
     expect(result.skipped).toBe(true);
     expect(prisma.activityRow.findFirst).not.toHaveBeenCalled();
-    expect(prisma.activityRow.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.$queryRawUnsafe).not.toHaveBeenCalled();
   });
 
   it("no-ops on ActivityRow when no row is old enough (boundary lookup is null)", async () => {
@@ -282,6 +302,7 @@ describe("WARP-586 — purgeAuditLogs", () => {
     ]);
     const prisma = {
       activityRow: activity,
+      $queryRawUnsafe: activity.purgeFn,
       commandAuditLog: makeLogTable([]),
       notificationLog: makeLogTable([]),
     };
@@ -291,7 +312,7 @@ describe("WARP-586 — purgeAuditLogs", () => {
     expect(result.activityDeleted).toBe(0);
     // Boundary lookup ran; the delete loop never did (no row < cutoff).
     expect(activity.findFirst).toHaveBeenCalledTimes(1);
-    expect(activity.deleteMany).not.toHaveBeenCalled();
+    expect(activity.purgeFn).not.toHaveBeenCalled();
     expect(activity.rows).toHaveLength(2);
   });
 
@@ -326,6 +347,7 @@ describe("WARP-586 — purgeAuditLogs", () => {
     ]);
     const prisma = {
       activityRow: activity,
+      $queryRawUnsafe: activity.purgeFn,
       commandAuditLog: makeLogTable([]),
       notificationLog: makeLogTable([]),
     };
@@ -357,6 +379,7 @@ describe("WARP-586 — purgeAuditLogs", () => {
     const activity = makeActivityTable(rows);
     const prisma = {
       activityRow: activity,
+      $queryRawUnsafe: activity.purgeFn,
       commandAuditLog: makeLogTable([]),
       notificationLog: makeLogTable([]),
     };
@@ -366,9 +389,9 @@ describe("WARP-586 — purgeAuditLogs", () => {
     expect(result.activityDeleted).toBe(25);
     expect(activity.rows).toHaveLength(0);
     // 3 delete batches, each bounded to <= batchSize rows.
-    expect(activity.deleteMany).toHaveBeenCalledTimes(3);
-    for (const call of activity.deleteMany.mock.calls) {
-      expect(call[0].where.id.in.length).toBeLessThanOrEqual(10);
+    expect(activity.purgeFn).toHaveBeenCalledTimes(3);
+    for (const call of activity.purgeFn.mock.calls) {
+      expect(call[1].length).toBeLessThanOrEqual(10);
     }
   });
 
@@ -386,6 +409,7 @@ describe("WARP-586 — purgeAuditLogs", () => {
     const activity = makeActivityTable(rows);
     const prisma = {
       activityRow: activity,
+      $queryRawUnsafe: activity.purgeFn,
       commandAuditLog: makeLogTable([]),
       notificationLog: makeLogTable([]),
     };
@@ -399,7 +423,7 @@ describe("WARP-586 — purgeAuditLogs", () => {
     // 70 rows remain for subsequent nightly runs → drains over nights.
     expect(activity.rows).toHaveLength(70);
     // Capped at 3 batches (30 / 10), not 10 (100 / 10).
-    expect(activity.deleteMany).toHaveBeenCalledTimes(3);
+    expect(activity.purgeFn).toHaveBeenCalledTimes(3);
   });
 
   it("Finding 2: log tables (CommandAuditLog/NotificationLog) also batch + cap", async () => {
@@ -417,6 +441,7 @@ describe("WARP-586 — purgeAuditLogs", () => {
     const notification = makeLogTable(notifs);
     const prisma = {
       activityRow: makeActivityTable([]),
+      $queryRawUnsafe: vi.fn(),
       commandAuditLog: command,
       notificationLog: notification,
     };
@@ -430,5 +455,38 @@ describe("WARP-586 — purgeAuditLogs", () => {
     // 14 rows / batch 5 → 3 batches each (5 + 5 + 4).
     expect(command.deleteMany).toHaveBeenCalledTimes(3);
     expect(notification.deleteMany).toHaveBeenCalledTimes(3);
+  });
+
+  it("WARP-3628: a run that removed ActivityRows records an 'Audit log purged' row", async () => {
+    const prisma = createPrismaMock({
+      activity: 4,
+      commandAudit: 0,
+      notification: 0,
+    });
+
+    await purgeAuditLogs(prisma as any, 365);
+
+    expect(recordActivity).toHaveBeenCalledTimes(1);
+    const arg = vi.mocked(recordActivity).mock.calls[0][0];
+    expect(arg.what).toBe("Audit log purged");
+    expect(arg.actor).toEqual({ type: "system" });
+    expect(arg.refs).toMatchObject({
+      action: "audit.retention_purge",
+      activityDeleted: 4,
+      retentionDays: 365,
+    });
+  });
+
+  it("WARP-3628: a run that removed nothing records nothing", async () => {
+    const prisma = createPrismaMock({
+      activity: 0,
+      commandAudit: 2,
+      notification: 0,
+    });
+    prisma.$queryRawUnsafe.mockResolvedValue([{ n: 0n }]);
+
+    await purgeAuditLogs(prisma as any, 365);
+
+    expect(recordActivity).not.toHaveBeenCalled();
   });
 });

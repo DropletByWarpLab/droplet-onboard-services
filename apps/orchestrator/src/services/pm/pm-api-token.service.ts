@@ -77,13 +77,49 @@ export function normalizeScopes(scopes: readonly string[]): PmApiTokenScope[] {
 }
 
 /**
- * Which prefix `path` is under, or null. Segment-bounded and case-insensitive,
- * through the SAME normaliser the module gates use, so this and the `projects`
- * gate can never disagree about what `/api/pm` is: Express routes `/API/PM/x`
- * to the PM router, and so does this.
+ * SESSION-ONLY ROUTES: under the two prefixes, but never reachable with an API
+ * token, whatever its scopes and whoever it acts as. These are admin
+ * configuration (they define where work data is SENT, or how a project or the
+ * desk behaves for everyone), and a token is a script's credential, not an
+ * admin's: a leaked `pm:write` token of an owner must not be able to point a
+ * webhook at an attacker. A route that does not exist yet is listed too, so the
+ * day a slice mounts it, it is session-only with no edit here (WS-16 webhooks,
+ * WS-4 project settings, WS-12/14 desk setup).
+ *
+ * Patterns are matched segment by segment against the normalised path (lower
+ * case, no trailing slash) and match as PREFIXES: `/api/pm/webhooks` covers
+ * `/api/pm/webhooks/<id>/deliveries` too. `*` stands for exactly one segment.
+ * To let a token reach one of these on purpose, remove it here and say why in
+ * the PR; to keep a new admin surface session-only, add it here.
+ */
+export const SESSION_ONLY_ROUTES: readonly string[] = [
+  "/api/pm/webhooks",
+  "/api/pm/*/settings",
+  "/api/pm/projects/*/settings",
+  "/api/support/webhooks",
+  "/api/support/settings",
+  "/api/support/*/settings",
+];
+
+function isSessionOnly(normalizedPath: string): boolean {
+  // Split WITHOUT dropping empty segments: `//api/pm/webhooks` must not read as `/api/pm/webhooks`.
+  const segments = normalizedPath.split("/");
+  return SESSION_ONLY_ROUTES.some((pattern) => {
+    const want = pattern.split("/");
+    return want.length <= segments.length && want.every((w, i) => w === "*" || w === segments[i]);
+  });
+}
+
+/**
+ * The area a token may call at `path`, or null when it may not call it at all:
+ * outside `/api/pm` and `/api/support`, or a {@link SESSION_ONLY_ROUTES} route.
+ * Segment-bounded and case-insensitive, through the SAME normaliser the module
+ * gates use, so this and the `projects` gate can never disagree about what
+ * `/api/pm` is: Express routes `/API/PM/x` to the PM router, and so does this.
  */
 export function tokenAreaForPath(path: string): PmApiTokenArea | null {
   const p = normalizeGatePath(path);
+  if (isSessionOnly(p)) return null;
   for (const area of Object.keys(AREA_PREFIX) as PmApiTokenArea[]) {
     if (pathIsUnder(p, AREA_PREFIX[area])) return area;
   }
@@ -92,20 +128,36 @@ export function tokenAreaForPath(path: string): PmApiTokenArea | null {
 
 const READ_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD", "OPTIONS"]);
 
-/** Every method that is not plainly a read is a write: an unknown verb fails closed. */
-export function isReadMethod(method: string): boolean {
-  return READ_METHODS.has(method.toUpperCase());
+/**
+ * POSTs that only READ, because the filter they carry is too large for a query
+ * string (WS-6: `POST /api/pm/work-items/query`, which the board and list read
+ * through). Exact paths, normalised, and tiny on purpose: every entry is a hole
+ * in "everything that is not a GET is a write", so each must be a route that
+ * cannot change anything. `routes/pm/openapi.test.ts` checks that no
+ * parameterised write route can be reached through one of these paths.
+ */
+export const READ_ONLY_POSTS: ReadonlySet<string> = new Set(["/api/pm/work-items/query"]);
+
+/**
+ * Is this request a read? GET, HEAD and OPTIONS are; so is a POST to one of
+ * {@link READ_ONLY_POSTS}; every other method (an unknown verb included) is a
+ * write, so it fails closed.
+ */
+export function isReadRequest(method: string, path = ""): boolean {
+  const m = method.toUpperCase();
+  if (READ_METHODS.has(m)) return true;
+  return m === "POST" && READ_ONLY_POSTS.has(normalizeGatePath(path));
 }
 
 /** The scope a request needs: `<area>:read` for a read, `<area>:write` for anything else. */
-export function requiredScope(area: PmApiTokenArea, method: string): PmApiTokenScope {
-  return `${area}:${isReadMethod(method) ? "read" : "write"}` as PmApiTokenScope;
+export function requiredScope(area: PmApiTokenArea, method: string, path = ""): PmApiTokenScope {
+  return `${area}:${isReadRequest(method, path) ? "read" : "write"}` as PmApiTokenScope;
 }
 
 /** Write implies read; read implies nothing more. */
-export function scopeAllows(scopes: readonly string[], area: PmApiTokenArea, method: string): boolean {
+export function scopeAllows(scopes: readonly string[], area: PmApiTokenArea, method: string, path = ""): boolean {
   if (scopes.includes(`${area}:write`)) return true;
-  return isReadMethod(method) && scopes.includes(`${area}:read`);
+  return isReadRequest(method, path) && scopes.includes(`${area}:read`);
 }
 
 // ── Shapes ──────────────────────────────────────────────────────────────────

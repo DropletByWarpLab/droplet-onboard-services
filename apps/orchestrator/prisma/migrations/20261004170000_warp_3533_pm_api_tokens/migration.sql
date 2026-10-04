@@ -100,12 +100,18 @@ END $$;
 
 -- The scope vocabulary, and "at least one". The service validates the same
 -- list; this is the database refusing a writer that does not.
+--
+-- `"scopes" IS NOT NULL` is part of the test on purpose: a CHECK passes when its
+-- expression is NULL, and `cardinality(NULL)` is NULL, so without it a row with no
+-- scopes value at all would be accepted. (Prisma declares a scalar list nullable at
+-- the database, so the column cannot simply be NOT NULL without drifting from
+-- schema.prisma.) Dropped first so a database that already carries the earlier,
+-- weaker definition converges to this one.
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'PmApiToken_scopes_valid' AND conrelid = '"PmApiToken"'::regclass) THEN
-    ALTER TABLE "PmApiToken" ADD CONSTRAINT "PmApiToken_scopes_valid"
-      CHECK (cardinality("scopes") > 0 AND "scopes" <@ ARRAY['pm:read', 'pm:write', 'support:read', 'support:write']::text[]);
-  END IF;
+  ALTER TABLE "PmApiToken" DROP CONSTRAINT IF EXISTS "PmApiToken_scopes_valid";
+  ALTER TABLE "PmApiToken" ADD CONSTRAINT "PmApiToken_scopes_valid"
+    CHECK ("scopes" IS NOT NULL AND cardinality("scopes") > 0 AND "scopes" <@ ARRAY['pm:read', 'pm:write', 'support:read', 'support:write']::text[]);
 END $$;
 
 -- An external guest or a service principal never holds a token.

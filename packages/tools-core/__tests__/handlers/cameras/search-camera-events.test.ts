@@ -117,6 +117,19 @@ describe("search_camera_events", () => {
         query: "delivery truck last week",
         events: EVENTS,
         count: 2,
+        // WARP-3691: only the event that has a clip/still becomes a card.
+        media: [
+          {
+            kind: "camera_clip",
+            camera: "front_door",
+            eventId: "1719000000.123-abc",
+            clipUrl: "/api/cameras/clips/event/1719000000.123-abc",
+            thumbnailUrl: "/api/cameras/events/1719000000.123-abc/thumbnail",
+            label: "car",
+            startTime: 1719000000.1,
+            endTime: 1719000042.5,
+          },
+        ],
       });
     }
   });
@@ -143,7 +156,7 @@ describe("search_camera_events", () => {
     });
     expect(res.ok).toBe(true);
     if (res.ok) {
-      expect(res.data).toEqual({
+      expect(res.data).toMatchObject({
         type: "search_camera_events",
         query: "white truck",
         events: [EVENTS[0]],

@@ -169,6 +169,48 @@ describe("createApp mounts the API-token guard before every protected router", (
     expect(db.settings.get(PM_API_TOKENS_ENABLED_KEY)).toBe(true);
   });
 
+  // The security boundary is a path classifier in front of Express, so the shapes
+  // that could make the two disagree are pinned here, against the real app: a
+  // token holding every scope must never get the developer router, the switch or a
+  // minted token out of any spelling of its path.
+  const CONFUSED_PATHS = [
+    "/api/developer",
+    "/api/developer/",
+    "/API/DEVELOPER",
+    "//api/developer",
+    "/api/./developer",
+    "/api/developer.json",
+    "/api/developer;x=1",
+    "/api/developer%2f",
+    "/api%2fdeveloper",
+    "/api/%64eveloper",
+    "/api/developer%00",
+    "/api/pm/../developer",
+    "/api/support/../developer",
+    "/api/pm/..%2fdeveloper",
+    "/api/pm/%2e%2e/developer",
+    "/api/pm%2f..%2fdeveloper",
+    "/api/pm/webhooks",
+    "/API/PM/WEBHOOKS/",
+    "/api/pm/projects/p1/settings",
+  ];
+
+  it("no spelling of a forbidden path reaches the developer router, the switch or a minted token", async () => {
+    const token = await mint(db, "u-owner", ["pm:read", "pm:write", "support:read", "support:write"]);
+    const before = { tokens: db.tokens.length, enabled: db.settings.get(PM_API_TOKENS_ENABLED_KEY) };
+    for (const path of CONFUSED_PATHS) {
+      for (const verb of ["get", "post", "put", "delete"] as const) {
+        const res = await request(app)[verb](path).set(bearer(token)).send({ name: "x", scopes: ["pm:read"], enabled: false });
+        // 403 (the classifier) or 404 (a path Express never routes), never a 2xx, never the developer payload.
+        expect([403, 404], `${verb.toUpperCase()} ${path} -> ${res.status}`).toContain(res.status);
+        if (res.status === 403) expect(["TOKEN_ROUTE_FORBIDDEN"], `${verb} ${path}`).toContain(res.body.code);
+        expect(res.body.tokens, `${verb} ${path}`).toBeUndefined();
+        expect(res.body.token, `${verb} ${path}`).toBeUndefined();
+      }
+    }
+    expect({ tokens: db.tokens.length, enabled: db.settings.get(PM_API_TOKENS_ENABLED_KEY) }).toEqual(before);
+  });
+
   it("a pm:read token is a 403 insufficient_scope on a PM write, before any router or gate answers", async () => {
     const token = await mint(db, "u-member", ["pm:read"]);
     const res = await request(app).post("/api/pm/projects").set(bearer(token)).send({ name: "Nope" });

@@ -3,7 +3,7 @@
   "info": {
     "title": "Droplet Projects API",
     "version": "1.0.0",
-    "description": "The native Projects (work tracking) API of a Droplet box, under `/api/pm`.\n\n**Authentication.** Scripts use a personal API token: create one in the dashboard under Settings -> Developer (an owner or admin must first allow API tokens), then send `Authorization: Bearer dpm_...`. A token is shown once. It acts as the person who created it, so it can never do more than that person's role allows; its scopes only narrow it: `pm:read` for GET requests, `pm:write` for everything else (write implies read). A token works only on `/api/pm` and `/api/support`. It stops working when the person is deactivated or their role changes, when it expires, or when it is revoked.\n\n**Errors.** Every error is JSON with an `error` field. 401: the token is invalid, revoked, expired, or API tokens are switched off. 403: the role or the scope does not permit it. 404: the row is missing, or the Projects module is off. 429: over the limit of 300 requests a minute per token.\n\n**Dates.** `dueDate` and `startDate` are calendar dates stored at 00:00:00Z."
+    "description": "The native Projects (work tracking) API of a Droplet box, under `/api/pm`.\n\n**Authentication.** Scripts use a personal API token: create one in the dashboard under Settings -> Developer (an owner or admin must first allow API tokens), then send `Authorization: Bearer dpm_...`. A token is shown once. It acts as the person who created it, so it can never do more than that person's role allows; its scopes only narrow it: `pm:read` for GET requests, `pm:write` for everything else (write implies read). A token works only on `/api/pm` and `/api/support`, and not on admin configuration there (webhooks, project and desk settings), which needs a dashboard session. A POST that only reads (a filter too large for a query string, such as the work-item query) needs just `pm:read`, and says so in its `security`. It stops working when the person is deactivated or their role changes, when it expires, or when it is revoked.\n\n**Errors.** Every error is JSON with an `error` field. 401: the token is invalid, revoked, expired, or API tokens are switched off. 403: the role or the scope does not permit it. 404: the row is missing, or the Projects module is off. 429: over the limit of 300 requests a minute per token.\n\n**Dates.** `dueDate` and `startDate` are calendar dates stored at 00:00:00Z."
   },
   "servers": [
     {
@@ -38,6 +38,9 @@
     },
     {
       "name": "Meta"
+    },
+    {
+      "name": "Timeline and My Work"
     }
   ],
   "paths": {
@@ -2215,6 +2218,179 @@
           }
         ]
       }
+    },
+    "/api/pm/projects/{id}/timeline": {
+      "get": {
+        "operationId": "getProjectTimeline",
+        "summary": "Get a project timeline",
+        "description": "Read the scheduled work items, blocking relations, and module milestones in a bounded date window. The inclusive window may span at most 1100 days.",
+        "tags": [
+          "Timeline and My Work"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The project id."
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Inclusive first calendar day (YYYY-MM-DD)."
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Inclusive last calendar day (YYYY-MM-DD)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiTimeline"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": [
+              "pm:read"
+            ]
+          },
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/pm/my-work": {
+      "get": {
+        "operationId": "getMyWork",
+        "summary": "List my work",
+        "description": "Read the signed-in person’s work across projects. The person is taken from the credential; query parameters cannot select another person.",
+        "tags": [
+          "Timeline and My Work"
+        ],
+        "parameters": [
+          {
+            "name": "section",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "assigned",
+                "created",
+                "overdue",
+                "due_this_week"
+              ]
+            }
+          },
+          {
+            "name": "today",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "The viewer’s calendar date; defaults to the server’s UTC date."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 200
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000,
+              "default": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiMyWork"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": [
+              "pm:read"
+            ]
+          },
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -3505,6 +3681,250 @@
           "kind"
         ],
         "additionalProperties": false
+      },
+      "ApiTimelineRelation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "BLOCKS"
+            ]
+          },
+          "fromId": {
+            "type": "string",
+            "description": "The blocking work item."
+          },
+          "toId": {
+            "type": "string",
+            "description": "The blocked work item."
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "fromId",
+          "toId"
+        ],
+        "additionalProperties": false
+      },
+      "ApiTimelineMilestone": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ModuleStatus"
+          },
+          "targetDate": {
+            "type": "string",
+            "format": "date"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status",
+          "targetDate"
+        ],
+        "additionalProperties": false
+      },
+      "ApiTimeline": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date"
+          },
+          "to": {
+            "type": "string",
+            "format": "date"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkItem"
+            }
+          },
+          "relations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiTimelineRelation"
+            }
+          },
+          "milestones": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiTimelineMilestone"
+            }
+          },
+          "unscheduledCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "items",
+          "relations",
+          "milestones",
+          "unscheduledCount",
+          "truncated"
+        ],
+        "additionalProperties": false
+      },
+      "ApiMyWorkProject": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "identifier": {
+            "type": "string"
+          },
+          "icon": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "identifier",
+          "icon",
+          "color"
+        ],
+        "additionalProperties": false
+      },
+      "ApiMyWorkCounts": {
+        "type": "object",
+        "properties": {
+          "assigned": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "created": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "overdue": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "dueThisWeek": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "assigned",
+          "created",
+          "overdue",
+          "dueThisWeek"
+        ],
+        "additionalProperties": false
+      },
+      "ApiMyWork": {
+        "type": "object",
+        "properties": {
+          "section": {
+            "type": "string",
+            "enum": [
+              "assigned",
+              "created",
+              "overdue",
+              "due_this_week"
+            ]
+          },
+          "today": {
+            "type": "string",
+            "format": "date"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkItem"
+            }
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiMyWorkProject"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "counts": {
+            "$ref": "#/components/schemas/ApiMyWorkCounts"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "nextOffset": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "section",
+          "today",
+          "items",
+          "projects",
+          "total",
+          "counts",
+          "limit",
+          "offset",
+          "nextOffset"
+        ],
+        "additionalProperties": false
+      },
+      "ModuleStatus": {
+        "type": "string",
+        "enum": [
+          "backlog",
+          "planned",
+          "in_progress",
+          "paused",
+          "completed",
+          "cancelled"
+        ]
       }
     }
   }
