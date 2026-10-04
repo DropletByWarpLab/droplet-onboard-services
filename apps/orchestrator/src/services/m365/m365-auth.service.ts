@@ -33,7 +33,8 @@ import type { PrismaClient } from "@prisma/client";
 
 import { recordActivity } from "../activity.singleton.js";
 import { purgeCursorsForUser } from "./delta-cursor.service.js";
-import { purgeM365FileDataForUser } from "./drive-data.service.js";
+import { purgeM365FileDataForUser, purgeSharePointDataForUser } from "./drive-data.service.js";
+import { GRAPH_RESOURCES, grantCovers } from "./graph-resources.js";
 import { scopesForRefresh, scopesForSignIn } from "./scopes.js";
 import {
   sealPendingFlow,
@@ -171,6 +172,47 @@ export type M365State =
   | "ERROR";
 
 /**
+ * WARP-3538 — where a person stands on SharePoint: what they chose, whether
+ * Microsoft has allowed it, and whether they have to act.
+ *
+ * Three facts, kept apart because three different things change them. `enabled`
+ * is the PERSON's switch and only they move it. `granted` is MICROSOFT's side:
+ * the grant on the connection covers what finding a person's libraries needs
+ * (`Sites.Read.All`), which an administrator may not have approved and which a
+ * connection made before this existed never asked for. `needsConsent` is the
+ * two together — on, and not allowed — and is what the card turns into "Sign in
+ * again": the box says it so a card cannot disagree with the box about whether
+ * a person has to act.
+ */
+export interface M365SharePointView {
+  enabled: boolean;
+  granted: boolean;
+  needsConsent: boolean;
+}
+
+/**
+ * Build the SharePoint view from the two columns it is made of.
+ *
+ * `enabled` is `=== true`, not truthiness: an absent or malformed flag is OFF
+ * (explicit state, never inferred). `granted` is judged by the SAME function and
+ * the SAME scope discovery uses (`grantCovers` against the sharepoint workload's
+ * `leastPrivilegeScope`), so the view says "needs consent" exactly when
+ * discovery would report the workload `notGranted` — never a second opinion.
+ * A grant that was never recorded (`null`) covers nothing.
+ */
+export function sharePointViewOf(
+  sharePointEnabled: unknown,
+  grantedScopes: string | null | undefined,
+): M365SharePointView {
+  const enabled = sharePointEnabled === true;
+  const granted = grantCovers(
+    (grantedScopes ?? "").split(" ").filter(Boolean),
+    GRAPH_RESOURCES.sharepoint.leastPrivilegeScope,
+  );
+  return { enabled, granted, needsConsent: enabled && !granted };
+}
+
+/**
  * What a route may return. Built field-by-field rather than by spreading the
  * row, so a column added later (another secret, say) cannot leak by default.
  */
@@ -187,6 +229,8 @@ export interface M365ConnectionView {
   lastRefreshOkAt: Date | null;
   /** Redacted, human-readable reason for ERROR / NEEDS_RECONNECT. */
   lastError: string | null;
+  /** WARP-3538 — the person's SharePoint choice and Microsoft's answer to it. */
+  sharePoint: M365SharePointView;
 }
 
 interface ConnectionRow {
@@ -320,6 +364,7 @@ const DISCONNECTED_VIEW: M365ConnectionView = {
   connectedAt: null,
   lastRefreshOkAt: null,
   lastError: null,
+  sharePoint: { enabled: false, granted: false, needsConsent: false },
 };
 
 function toView(row: ConnectionRow, now: Date): M365ConnectionView {
@@ -340,6 +385,7 @@ function toView(row: ConnectionRow, now: Date): M365ConnectionView {
     connectedAt: row.connectedAt ?? null,
     lastRefreshOkAt: row.lastRefreshOkAt ?? null,
     lastError: row.lastError ?? null,
+    sharePoint: sharePointViewOf(row.sharePointEnabled, row.grantedScopes),
   };
 }
 
@@ -855,6 +901,108 @@ export async function markNeedsReconnect(
     reason,
     userInitiated: false,
   });
+}
+
+// --- The SharePoint switch ------------------------------------------------
+
+/** What `setSharePointEnabled` did. */
+export type SharePointSwitchResult =
+  | {
+      ok: true;
+      /** True when the person's choice actually changed; false for a repeat. */
+      changed: boolean;
+      /** The connection as it is AFTER the change — what the card should now show. */
+      view: M365ConnectionView;
+    }
+  /** Turning it ON needs a CONNECTED account to ask for the scope on. */
+  | { ok: false; reason: "not_connected" };
+
+/**
+ * WARP-3538 — the person's own SharePoint switch.
+ *
+ * ## On
+ *
+ * Records the choice on a connection that exists and is CONNECTED. It asks
+ * Microsoft for nothing and reads nothing by itself: the NEXT sign-in requests
+ * `Sites.Read.All` (`scopesForSignIn`), and until the grant holds it the view
+ * says `needsConsent` and discovery reports SharePoint `notGranted`. Refused
+ * unless CONNECTED — a person cannot opt in before they have an account to ask
+ * the scope on, and a disconnect resets the choice precisely so that a later
+ * sign-in is never asked for a scope nobody asked for (`disconnect`).
+ *
+ * The write is CONDITIONAL on the row still being CONNECTED. A disconnect that
+ * lands between the read and the write would otherwise be undone into "SharePoint
+ * on" for an account that is gone — and the next sign-in would ask a tenant for a
+ * scope that was never requested. A write that matched nothing is the same
+ * refusal.
+ *
+ * ## Off
+ *
+ * Is the deletion the confirmation dialog promised — "Droplet deletes the list of
+ * SharePoint files it kept and stops reading them" — and so is ONE transaction:
+ * the flag, the cap count, the SharePoint cursors, the library rows and the landed
+ * SharePoint items go together or not at all. Half of it would be the worst case:
+ * the person told it is off while the list is still searchable, or the list gone
+ * while discovery carries on re-reading. OneDrive's cursor, source and items,
+ * every other workload and every other person are untouched
+ * (`purgeSharePointDataForUser`).
+ *
+ * Off is never refused, whatever state the connection is in, and it is
+ * idempotent AND repairing: pressed again — or after a discovery that was already
+ * running re-created a library — it removes whatever is there, and says nothing
+ * to the log when nothing about the person's choice changed.
+ *
+ * Both directions are audited as the other lifecycle events are (`auditM365`):
+ * widening or narrowing what the box reads on a person's behalf belongs in the
+ * log beside connect and disconnect.
+ */
+export async function setSharePointEnabled(
+  prisma: PrismaClient,
+  userId: string,
+  enabled: boolean,
+  now: Date = new Date(),
+): Promise<SharePointSwitchResult> {
+  const row = (await prisma.m365Connection.findUnique({
+    where: { userId },
+  })) as ConnectionRow | null;
+  const was = row?.sharePointEnabled === true;
+
+  if (enabled) {
+    if (!row || row.state !== "CONNECTED") return { ok: false, reason: "not_connected" };
+    if (!was) {
+      const { count } = await prisma.m365Connection.updateMany({
+        where: { userId, state: "CONNECTED" },
+        data: { sharePointEnabled: true },
+      });
+      if (count === 0) return { ok: false, reason: "not_connected" };
+      await auditM365({
+        what: "Microsoft 365 SharePoint turned on",
+        state: "CONNECTED",
+        userId,
+        severity: "info",
+        userInitiated: true,
+      });
+    }
+  } else {
+    await prisma.$transaction(async (tx) => {
+      await tx.m365Connection.updateMany({
+        where: { userId },
+        data: { sharePointEnabled: false, sharePointLibrariesCapped: 0 },
+      });
+      await purgeSharePointDataForUser(tx, userId);
+    });
+    if (was) {
+      await auditM365({
+        what: "Microsoft 365 SharePoint turned off",
+        state: toView(row!, now).state,
+        userId,
+        severity: "info",
+        userInitiated: true,
+      });
+    }
+  }
+
+  return { ok: true, changed: enabled !== was, view: await getConnectionView(prisma, userId, now) };
 }
 
 // --- Disconnect -----------------------------------------------------------

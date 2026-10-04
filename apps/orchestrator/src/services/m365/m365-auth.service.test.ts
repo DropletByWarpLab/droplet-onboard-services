@@ -201,6 +201,74 @@ describe("getConnectionView", () => {
     });
     expect((await getConnectionView(prisma as never, USER)).state).toBe("PENDING_CONSENT");
   });
+
+  describe("sharePoint (WARP-3538)", () => {
+    const BASE = "offline_access User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite Files.ReadWrite.All";
+    const viewOf = async (over: Record<string, unknown>) =>
+      (
+        await getConnectionView(
+          fakePrisma({ id: "row-1", userId: USER, state: "CONNECTED", grantedScopes: BASE, ...over }) as never,
+          USER,
+        )
+      ).sharePoint;
+
+    it("says nothing is on, granted or needed for a person who never connected", async () => {
+      const view = await getConnectionView(fakePrisma(null) as never, USER);
+      expect(view.sharePoint).toEqual({ enabled: false, granted: false, needsConsent: false });
+    });
+
+    it("is off, not granted and needs nothing for an existing connection that never asked for it", async () => {
+      expect(await viewOf({})).toEqual({ enabled: false, granted: false, needsConsent: false });
+    });
+
+    it("needs consent when the person switched it on and the grant lacks Sites.Read.All", async () => {
+      // 🔴 This is what an EXISTING connection looks like the moment its owner
+      // flips the switch: the base grant reads drives but cannot find one.
+      expect(await viewOf({ sharePointEnabled: true })).toEqual({ enabled: true, granted: false, needsConsent: true });
+    });
+
+    it("needs nothing once the grant holds Sites.Read.All", async () => {
+      expect(await viewOf({ sharePointEnabled: true, grantedScopes: `${BASE} Sites.Read.All` })).toEqual({
+        enabled: true,
+        granted: true,
+        needsConsent: false,
+      });
+    });
+
+    it("judges the grant exactly as discovery does — a broader Sites grant and a resource-qualified one count, Sites.Selected does not", async () => {
+      // The view and the engine must agree about whether a person has to act:
+      // a card that says "needs consent" while discovery reads their libraries
+      // (or the reverse) is worse than either alone.
+      const granted = (grantedScopes: string) => viewOf({ sharePointEnabled: true, grantedScopes }).then((v) => v.granted);
+      expect(await granted("Sites.ReadWrite.All")).toBe(true);
+      expect(await granted("https://graph.microsoft.com/Sites.Read.All")).toBe(true);
+      expect(await granted("sites.read.all")).toBe(true);
+      expect(await granted("Sites.Selected")).toBe(false);
+      expect(await granted("Files.ReadWrite.All")).toBe(false);
+    });
+
+    it("reports a held grant even while the switch is off — `granted` is about Microsoft, `enabled` is about the person", async () => {
+      expect(await viewOf({ sharePointEnabled: false, grantedScopes: `${BASE} Sites.Read.All` })).toEqual({
+        enabled: false,
+        granted: true,
+        needsConsent: false,
+      });
+    });
+
+    it("reads an absent or non-boolean switch as OFF — explicit state, never inferred", async () => {
+      for (const sharePointEnabled of [undefined, null, "true", 1, "yes"]) {
+        expect((await viewOf({ sharePointEnabled })).enabled, String(sharePointEnabled)).toBe(false);
+      }
+    });
+
+    it("reads a legacy row with no recorded grant as not granted", async () => {
+      expect(await viewOf({ sharePointEnabled: true, grantedScopes: null })).toEqual({
+        enabled: true,
+        granted: false,
+        needsConsent: true,
+      });
+    });
+  });
 });
 
 describe("beginDeviceCodeConnect", () => {
