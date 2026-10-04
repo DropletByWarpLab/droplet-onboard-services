@@ -7,7 +7,7 @@
  * of the repository made elsewhere. This lets the owner take the derived key
  * off the box one time.
  *
- * Same derivation, byte for byte, as the host script: HKDF-SHA256 with salt
+ * Same derivation, byte for byte, as the host script: HKDF-SHA256 (hkdfSync) with salt
  * "droplet-restic-v1" and info "droplet-restic-repository-password", L=32,
  * hex-encoded. Pinned by a known-answer test (here and in
  * tests/restic-backup.test.sh): changing it bricks every existing repository.
@@ -17,7 +17,7 @@
  * cannot both receive it. The key is never logged, never stored, and the
  * activity row records that an export happened, not what was exported.
  */
-import { createHmac } from "node:crypto";
+import { hkdfSync } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { recordActivity } from "./activity.singleton.js";
 import type { ActivityActor } from "./activity.service.js";
@@ -35,11 +35,11 @@ export class BackupKeyExportError extends Error {
   }
 }
 
-export function deriveBackupKey(deviceSecretKey: string): string {
-  const prk = createHmac("sha256", "droplet-restic-v1").update(deviceSecretKey).digest();
-  return createHmac("sha256", prk)
-    .update(Buffer.concat([Buffer.from("droplet-restic-repository-password"), Buffer.from([1])]))
-    .digest("hex");
+/** RFC 5869 HKDF-SHA256, one output block: identical to the host script's two HMACs. */
+export function deriveBackupKey(ikm: string): string {
+  return Buffer.from(
+    hkdfSync("sha256", ikm, "droplet-restic-v1", "droplet-restic-repository-password", 32),
+  ).toString("hex");
 }
 
 export async function exportBackupKeyOnce(
