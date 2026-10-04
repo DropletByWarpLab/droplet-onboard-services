@@ -4442,7 +4442,7 @@ class Handler(BaseHTTPRequestHandler):
         if BRIDGE_ADMIN_TOKEN and hmac.compare_digest(got, BRIDGE_ADMIN_TOKEN):
             return True
         cls = _route_class(getattr(self, "command", None),
-                           urlparse(self.path).path)
+                           urlparse(getattr(self, "path", "")).path)
         return (cls in _PANEL_CLASSES and bool(BRIDGE_AUTH_TOKEN)
                 and hmac.compare_digest(got, BRIDGE_AUTH_TOKEN))
 
