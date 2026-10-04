@@ -2175,6 +2175,11 @@ def drives_snapshot(invalidate=False):
     return snap
 
 
+# The automount state file eject_drive() reads (a module constant so a test can
+# point it at a scratch file; drives_snapshot() keeps its own literal).
+_AUTOMOUNT_STATE_PATH = "/var/lib/droplet-automount/mounts.json"
+
+
 def _device_at_mountpoint(mountpoint):
     """The backing device the kernel currently has mounted at `mountpoint`, or
     None. Reads /proc/mounts (the kernel's source of truth) so a tampered
@@ -2200,11 +2205,15 @@ def eject_drive(uuid):
     and fstab-installed mounts are never in that set, so they are never
     ejectable. Does not use `umount -l`: a busy drive should fail loudly so the
     user closes files and retries, not silently lazy-unmount.
+
+    WARP-3514: the drive that holds the camera recordings is never ejectable —
+    the refusal's message object carries a machine `code`
+    ("recordings_drive_active", see _CodedRefusal in the NVR section below).
     Returns (ok, message_or_dict). Never raises.
     """
     if not uuid:
         return False, "missing uuid"
-    state_path = "/var/lib/droplet-automount/mounts.json"
+    state_path = _AUTOMOUNT_STATE_PATH
     try:
         with open(state_path) as f:
             state = json.load(f)
@@ -2215,6 +2224,13 @@ def eject_drive(uuid):
     if not target:
         return False, "no hot-plug drive with that uuid"
     mp = (target.get("mount") or "").rstrip("/")
+    # WARP-3514: yanking the recordings drive out from under Frigate would fill
+    # the OS disk (or lose footage), so refuse before anything is synced or
+    # unmounted. Fails OPEN — an unreadable status never blocks an eject (the
+    # orchestrator layer is the fail-closed one).
+    refusal = _eject_recordings_refusal(target, mp)
+    if refusal is not None:
+        return False, refusal
     # Bus-agnostic (ADR-011): any hot-plug drive the automounter placed under
     # /mnt/droplet/ is ejectable — USB, external NVMe, SD, SATA dock, etc.
     # System/boot disks are never in the automount state, so membership + the
@@ -2928,9 +2944,18 @@ def run_pool_command(operation, params):
     carrying the script's rc/stdout/stderr. This function only (a) refuses
     operations outside the allow-list, (b) refuses a second in-flight write,
     and (c) surfaces the executor's result honestly. Returns (ok, info);
-    never raises — mirrors eject_drive()."""
+    never raises — mirrors eject_drive().
+
+    WARP-3514: an operation that names a device backing the ACTIVE camera
+    recordings is refused ("recordings_drive_active" — a machine `code` on the
+    message object, see _CodedRefusal in the NVR section below) before anything
+    is spooled. A missing/failed status read does NOT block (fail open here; the
+    orchestrator layer is fail-closed)."""
     if operation not in _POOL_OPS:
         return False, "unknown pool operation: {}".format(operation)
+    refusal = _pool_recordings_refusal(params)
+    if refusal is not None:
+        return False, refusal
     if not _POOL_LOCK.acquire(blocking=False):
         logger.warning("pool command %s rejected: another storage operation "
                        "is already in progress", operation)
@@ -3037,6 +3062,636 @@ def _run_pool_via_executor(operation, params):
         return True, json.loads(script_out or "{}")
     except (ValueError, TypeError):
         return True, {"message": script_out.strip()}
+
+
+# ---------------------------------------------------------------------------
+# NVR recordings storage (WARP-3514)
+# ---------------------------------------------------------------------------
+#
+# Camera recordings are allocated automatically (ADR-070): the orchestrator
+# measures the cameras, sizes a slice, and asks THIS bridge to carve it out of an
+# encrypted bay drive, to resize it, and to move the existing footage across.
+# Same split as the storage-pool write path above, and for the same reason: the
+# bridge runs as the unprivileged `droplet` user inside ProtectSystem=strict +
+# NoNewPrivileges, where project quotas, chattr, rsync and docker all fail. So it
+# only ever
+#
+#   * READS   — `droplet-set-nvr-media.sh --status` (works unprivileged);
+#   * SPOOLS  — writes the request into its own StateDirectory (nvr-spool/) and
+#               `systemctl start`s a root oneshot (polkit: start verb only, see
+#               50-droplet-device-bridge.rules):
+#                 droplet-nvr-storage-apply.service  apply / resize. Quick, so
+#                     the start BLOCKS: request.json in, result.json out, the
+#                     exact pool-spool protocol.
+#                 droplet-nvr-migrate.service        migrate / delete_old. Runs
+#                     as long as the copy takes, so the start is `--no-block`:
+#                     migrate-request.json in, migrate-state.json out (written
+#                     by the root job, polled via GET .../migrate).
+#
+# Params in a spooled request are exactly the validated body fields, camelCase:
+#   apply   {"fsUuid", "mode": "reserved"|"full", "limitBytes"?}   (full: none)
+#   resize  {"limitBytes"}
+#   migrate {"fsUuid"}                          delete_old  {}
+# and the root units re-validate them anyway — the spool is droplet-writable, so
+# to root every request is untrusted input (WARP-843).
+#
+# NOT routed through _POOL_OPS / STORAGE_OPS: those are Tier-3 data-destroying
+# ops behind a typed confirm. WHEN the recordings move is the orchestrator's
+# call (and deleting old footage is its tier-3 confirm); this layer owns only
+# validation, one in-process lock and an honest status mapping.
+#
+# Status codes are keyed on MACHINE codes only — never on a substring of a human
+# message (WARP-834 finding 1: systemd's "already queued or in progress" once
+# read as lock contention). Bridge codes: bad_request 400, busy 409,
+# migration_running 409, executor_failed 502, host_script_unavailable 502; any
+# code the writer itself refuses with (os_disk, not_encrypted, below_used, ...)
+# is a 422 carrying that code.
+
+
+def _nvr_env(name, default):
+    """An env override, or `default` when it is unset or blank — a blank spool
+    path would silently become CWD-relative."""
+    return (os.environ.get(name) or "").strip() or default
+
+
+NVR_SCRIPT = _nvr_env(
+    "DROPLET_NVR_SCRIPT", "/usr/local/sbin/droplet-set-nvr-media.sh")
+NVR_SPOOL_DIR = _nvr_env(
+    "DROPLET_NVR_SPOOL_DIR", "/var/lib/droplet-bridge/nvr-spool")
+NVR_APPLY_UNIT = _nvr_env(
+    "DROPLET_NVR_APPLY_UNIT", "droplet-nvr-storage-apply.service")
+NVR_MIGRATE_UNIT = _nvr_env(
+    "DROPLET_NVR_MIGRATE_UNIT", "droplet-nvr-migrate.service")
+
+# ONE lock for apply / resize / migrate / delete (mirrors _POOL_LOCK). The
+# synchronous spool holds exactly one request/result pair and the migrate spool
+# one request, so two racing POSTs would clobber each other; non-blocking
+# acquire — the second caller is refused (409 busy), never queued. Deliberately
+# separate from _POOL_LOCK: a pool op on another drive must not stall the
+# recordings allocator. It covers only the request handling; whether a migration
+# JOB is still running is asked of systemd (see _nvr_migrate_unit_active).
+_NVR_LOCK = threading.Lock()
+
+# Budgets. The bridge's own `systemctl start` wait sits just above the apply
+# unit's TimeoutStartSec=110, so systemd reports its failure before we give up.
+_NVR_STATUS_TIMEOUT_S = 20        # GET /host/nvr-storage
+_NVR_GUARD_STATUS_TIMEOUT_S = 8   # the eject / pool-op guards (eject is ~30 s
+                                  # worst case already and is waited on)
+_NVR_APPLY_TIMEOUT_S = 125        # blocking start of the apply unit
+_NVR_START_TIMEOUT_S = 30         # `--no-block` start returns immediately
+_NVR_ACTIVE_TIMEOUT_S = 10        # systemctl is-active
+_NVR_MESSAGE_MAX = 300            # longest error text relayed to the caller
+
+# A filesystem UUID: ext4/xfs 8-4-4-4-12 hex, a 16-hex vfat/ntfs serial, a short
+# 8-hex vfat id. Matched with fullmatch — `$` would let a trailing newline slip
+# through. The root units validate the same shape again.
+_NVR_FS_UUID_RE = re.compile(r"[0-9A-Fa-f][0-9A-Fa-f-]{6,35}")
+_NVR_MODES = ("reserved", "full")
+_NVR_LIMIT_MAX = 2 ** 62
+# What a writer refusal's `code` must look like to be relayed as-is.
+_NVR_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+# `systemctl is-active` states in which the migrate unit is (still) doing work.
+_NVR_ACTIVE_UNIT_STATES = frozenset(
+    {"active", "activating", "reloading", "deactivating"})
+
+_NVR_JOB_STATES = frozenset({"idle", "running", "done", "failed"})
+# GET /host/nvr-storage/migrate with no job on record — and the defaults every
+# state the root job reports is laid over, so the schema is always complete.
+_NVR_IDLE_STATE = {
+    "state": "idle", "job": None, "phase": None, "progressPct": 0,
+    "bytesCopied": 0, "bytesTotal": 0, "startedAt": None, "finishedAt": None,
+    "error": None, "errorCode": None, "oldSource": None,
+}
+
+_RECORDINGS_DRIVE_ACTIVE = "recordings_drive_active"
+_EJECT_RECORDINGS_MESSAGE = (
+    "this drive holds your camera recordings — it cannot be ejected")
+_POOL_RECORDINGS_MESSAGE = (
+    "this drive holds your camera recordings — it cannot be adopted, "
+    "reclaimed, reformatted or changed")
+
+
+class _CodedRefusal(str):
+    """A refusal message that also carries a stable machine `code`.
+
+    eject_drive() and run_pool_command() keep their long-standing `(ok, info)`
+    contract, where `info` is a human string. The HTTP layer must key its status
+    mapping on a machine code, never on a substring of that message (WARP-834
+    finding 1), so the code rides on the message object itself: it IS the string
+    (equal, hashable, JSON-serializable) and has a `.code` attribute.
+    """
+
+    def __new__(cls, message, code):
+        obj = super().__new__(cls, message)
+        obj.code = code
+        return obj
+
+
+def _nvr_error(status, code, message):
+    return status, {"ok": False, "code": code, "error": message}
+
+
+def _nvr_clip(text):
+    return (text or "").strip()[:_NVR_MESSAGE_MAX]
+
+
+def _nvr_json_object(text):
+    """`text` parsed as a JSON object, else None."""
+    try:
+        value = json.loads(text or "")
+    except (ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _nvr_valid_fs_uuid(value):
+    return (isinstance(value, str)
+            and _NVR_FS_UUID_RE.fullmatch(value) is not None)
+
+
+def _nvr_valid_limit(value):
+    # bool is an int subclass: `true` must not pass as a 1-byte quota.
+    return (isinstance(value, int) and not isinstance(value, bool)
+            and 1 <= value <= _NVR_LIMIT_MAX)
+
+
+# --- status read (also what the guards below stand on) ----------------------
+
+def _nvr_status_read(timeout):
+    """Run `<writer> --status`. Returns (status_dict, "") or (None, reason).
+
+    Read-only and unprivileged. Never raises."""
+    try:
+        rc, out, err = _run([NVR_SCRIPT, "--status"], timeout=timeout)
+    except Exception as e:                                          # noqa: BLE001
+        return None, _nvr_clip(str(e)) or "the NVR status script could not run"
+    if rc != 0:
+        return None, (_nvr_clip(err) or _nvr_clip(out)
+                      or "the NVR status script failed")
+    data = _nvr_json_object(out)
+    if data is None:
+        return None, "the NVR status script returned no JSON object"
+    return data, ""
+
+
+def nvr_storage_status():
+    """GET /host/nvr-storage → (http_status, body). The writer's status fields
+    verbatim plus `ok`."""
+    data, problem = _nvr_status_read(_NVR_STATUS_TIMEOUT_S)
+    if data is None:
+        logger.warning("nvr status unavailable: %s", problem)
+        return _nvr_error(502, "host_script_unavailable", problem)
+    return 200, dict(data, ok=True)
+
+
+# --- guards: the drive that holds the recordings ----------------------------
+
+def _nvr_device_name(value):
+    """A kernel/mapper device name from a param: `/dev/sdb` → `sdb`,
+    `/dev/mapper/droplet-bay-ab12` → `droplet-bay-ab12`; "" if not a string."""
+    if not isinstance(value, str):
+        return ""
+    name = value.strip()
+    if name.startswith("/dev/"):
+        name = name[len("/dev/"):]
+    if name.startswith("mapper/"):
+        name = name[len("mapper/"):]
+    return name
+
+
+def _nvr_recordings_drive():
+    """The drive the ACTIVE recordings live on, from the writer's `--status`:
+    {"mountPath": str, "backingDevices": set}, or None.
+
+    None whenever it cannot be established — status unreadable, the source is
+    the named volume (the OS disk), or the bay is not mounted — so every caller
+    FAILS OPEN. The orchestrator layer, which knows the allocation from its DB,
+    is the fail-closed one."""
+    data, _problem = _nvr_status_read(_NVR_GUARD_STATUS_TIMEOUT_S)
+    if (data is None or data.get("kind") != "path"
+            or data.get("mounted") is not True):
+        return None
+    mount = data.get("mountPath")
+    mount = mount.rstrip("/") if isinstance(mount, str) and mount.startswith("/") else ""
+    devices = data.get("backingDevices")
+    names = ({d for d in devices if isinstance(d, str) and d}
+             if isinstance(devices, list) else set())
+    if not mount and not names:
+        return None
+    return {"mountPath": mount, "backingDevices": names}
+
+
+def _eject_recordings_refusal(target, mount):
+    """A _CodedRefusal when the automount `target` entry (mounted at `mount`) is
+    the drive holding the recordings, else None. Never raises."""
+    try:
+        active = _nvr_recordings_drive()
+        if active is None:
+            return None
+        mine = {mount} if mount else set()
+        if mount:
+            mine.add(os.path.realpath(mount))
+        theirs = {active["mountPath"]} if active["mountPath"] else set()
+        if active["mountPath"]:
+            theirs.add(os.path.realpath(active["mountPath"]))
+        # The mount path is what the contract compares; the device is an extra
+        # that costs nothing — every device in backingDevices is an ANCESTOR of
+        # the recordings filesystem, so a drive registered under one of those
+        # names holds them however its mount path happens to be spelled.
+        device = _nvr_device_name(target.get("device"))
+        if (mine & theirs) or (device and device in active["backingDevices"]):
+            logger.warning("eject refused: that drive holds the camera "
+                           "recordings (mount=%s device=%s)", mount, device)
+            return _CodedRefusal(_EJECT_RECORDINGS_MESSAGE, _RECORDINGS_DRIVE_ACTIVE)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("eject: recordings guard unavailable (%s) — not blocking", e)
+    return None
+
+
+def _pool_recordings_refusal(params):
+    """A _CodedRefusal when a pool/adopt/reclaim request names a device that
+    backs the ACTIVE recordings, else None. Never raises.
+
+    Device names come from every param the host script takes a disk from:
+    `device`, `member`, `members[]`, `md` (a `/dev/` prefix is stripped)."""
+    try:
+        if not isinstance(params, dict):
+            return None
+        names = set()
+        for key in ("device", "member", "md"):
+            name = _nvr_device_name(params.get(key))
+            if name:
+                names.add(name)
+        members = params.get("members")
+        for member in (members if isinstance(members, (list, tuple)) else [members]):
+            name = _nvr_device_name(member)
+            if name:
+                names.add(name)
+        if not names:
+            return None          # nothing to compare: do not even read status
+        active = _nvr_recordings_drive()
+        if active is None or not (names & active["backingDevices"]):
+            return None
+        logger.warning("storage operation refused: it names a device that holds "
+                       "the camera recordings (%s)",
+                       ", ".join(sorted(names & active["backingDevices"])))
+        return _CodedRefusal(_POOL_RECORDINGS_MESSAGE, _RECORDINGS_DRIVE_ACTIVE)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("storage op: recordings guard unavailable (%s) — not "
+                       "blocking", e)
+    return None
+
+
+# --- the spool ---------------------------------------------------------------
+
+def _nvr_spool_prepare():
+    # 0700 like the StateDirectory it lives in. os.makedirs ignores `mode` on an
+    # existing directory, so chmod explicitly every time to close the window
+    # where an older install left it looser (same as the pool spool).
+    os.makedirs(NVR_SPOOL_DIR, mode=0o700, exist_ok=True)
+    os.chmod(NVR_SPOOL_DIR, 0o700)
+
+
+def _nvr_spool_remove(name):
+    """Remove a spool file; absent is fine, anything else propagates."""
+    try:
+        os.remove(os.path.join(NVR_SPOOL_DIR, name))
+    except FileNotFoundError:
+        pass
+
+
+def _nvr_spool_discard(name):
+    """Best-effort cleanup of a spool file (never raises)."""
+    try:
+        os.remove(os.path.join(NVR_SPOOL_DIR, name))
+    except OSError:
+        pass
+
+
+def _nvr_spool_write(name, payload):
+    """Atomically place `payload` (JSON) at <spool>/<name>, 0600.
+
+    Written to a fresh `<name>.tmp` (any leftover is removed, and O_EXCL |
+    O_NOFOLLOW refuses anything that reappears) then renamed over the target, so
+    the root consumer never sees a half-written request."""
+    path = os.path.join(NVR_SPOOL_DIR, name)
+    tmp = path + ".tmp"
+    try:
+        os.remove(tmp)
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                 | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = -1
+            json.dump(payload, f)
+        os.replace(tmp, path)
+    except BaseException:
+        if fd != -1:
+            os.close(fd)
+        _nvr_spool_discard(name + ".tmp")
+        raise
+
+
+# --- is a migration job running? ---------------------------------------------
+
+def _nvr_migrate_unit_active():
+    """True iff the migrate unit is running right now (`systemctl is-active` is
+    an unprivileged read). Anything unparseable counts as "not running". Never
+    raises."""
+    try:
+        _rc, out, _err = _run(["systemctl", "is-active", NVR_MIGRATE_UNIT],
+                              timeout=_NVR_ACTIVE_TIMEOUT_S)
+    except Exception:                                               # noqa: BLE001
+        return False
+    lines = (out or "").strip().splitlines()
+    return bool(lines) and lines[0].strip().lower() in _NVR_ACTIVE_UNIT_STATES
+
+
+# --- executors ---------------------------------------------------------------
+
+def _nvr_writer_outcome(operation, result, success_key):
+    """Map the writer outcome carried in result.json to (http_status, body).
+
+    Keyed on the writer's own stdout JSON — `{"ok": true, ...}` on success,
+    `{"ok": false, "code": ..., "message": ...}` on a refusal — never on message
+    text. A result with no usable verdict is the EXECUTOR failing (502), not a
+    refusal (422)."""
+    rc = result.get("rc")
+    out = result.get("stdout") if isinstance(result.get("stdout"), str) else ""
+    err = result.get("stderr") if isinstance(result.get("stderr"), str) else ""
+    parsed = _nvr_json_object(out)
+    if (isinstance(rc, int) and not isinstance(rc, bool) and rc == 0
+            and parsed is not None and parsed.get("ok") is True):
+        return 200, {"ok": True, success_key: parsed}
+    if parsed is not None and parsed.get("ok") is False:
+        code = parsed.get("code")
+        if isinstance(code, str) and _NVR_CODE_RE.fullmatch(code):
+            message = parsed.get("message")
+            if not isinstance(message, str) or not message.strip():
+                message = err.strip() or code
+            logger.warning("nvr %s refused by the writer (%s): %s",
+                           operation, code, _nvr_clip(message))
+            return _nvr_error(422, code, _nvr_clip(message))
+    message = _nvr_clip(err) or _nvr_clip(out) or (
+        "the NVR storage writer returned no usable result")
+    logger.warning("nvr %s: writer produced no usable result (rc=%s): %s",
+                   operation, rc, message)
+    return _nvr_error(502, "executor_failed", message)
+
+
+def _nvr_run_via_executor(operation, params, success_key):
+    """Spool the request, start the apply unit (blocking), collect the result.
+
+    Same protocol as _run_pool_via_executor: 0700 spool, any stale pair removed,
+    tmp + rename, request_id must match, the result is consumed + deleted, and a
+    failed start removes the unconsumed request. → (http_status, body); never
+    raises."""
+    request_id = secrets.token_hex(8)
+    res_path = os.path.join(NVR_SPOOL_DIR, "result.json")
+    try:
+        _nvr_spool_prepare()
+        # Drop any stale pair from an interrupted earlier run so the executor
+        # can never consume an old request and we never read an old result.
+        _nvr_spool_remove("request.json")
+        _nvr_spool_remove("result.json")
+        _nvr_spool_write("request.json", {
+            "request_id": request_id, "operation": operation, "params": params})
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("nvr %s: failed to spool the request: %s", operation, e)
+        return _nvr_error(502, "executor_failed",
+                          "could not spool the NVR storage request")
+    try:
+        rc, out, err = _run(["systemctl", "start", NVR_APPLY_UNIT],
+                            timeout=_NVR_APPLY_TIMEOUT_S)
+    except Exception as e:                                          # noqa: BLE001
+        rc, out, err = 1, "", str(e)
+    if rc != 0:
+        # The unit never ran (polkit denied / not installed) or died at the
+        # executor level. Remove the unconsumed request so a later start cannot
+        # pick it up.
+        _nvr_spool_discard("request.json")
+        message = (_nvr_clip(err) or _nvr_clip(out)
+                   or "the NVR storage executor failed to start")
+        logger.warning("nvr %s: executor start failed (rc=%s): %s",
+                       operation, rc, message)
+        return _nvr_error(502, "executor_failed", message)
+    try:
+        with open(res_path, encoding="utf-8") as f:
+            result = json.load(f)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("nvr %s: executor wrote no readable result: %s",
+                       operation, e)
+        return _nvr_error(502, "executor_failed",
+                          "the NVR storage executor returned no readable result")
+    finally:
+        _nvr_spool_discard("result.json")
+    if not isinstance(result, dict) or result.get("request_id") != request_id:
+        # A leftover from some other run — never report it as ours.
+        logger.warning("nvr %s: stale executor result ignored", operation)
+        return _nvr_error(502, "executor_failed",
+                          "the NVR storage executor result did not match this "
+                          "request")
+    return _nvr_writer_outcome(operation, result, success_key)
+
+
+def _nvr_start_job(operation, params):
+    """Spool a migrate / delete_old request and start the migrate unit WITHOUT
+    waiting for it. → (http_status, body); never raises.
+
+    The previous job's migrate-state.json is removed first: a new job must never
+    be reported as the old one's `done`. (Until the root job writes its first
+    state, GET .../migrate reads as "idle".)"""
+    request_id = secrets.token_hex(8)
+    try:
+        _nvr_spool_prepare()
+        _nvr_spool_remove("migrate-request.json")
+        _nvr_spool_remove("migrate-state.json")
+        _nvr_spool_write("migrate-request.json", {
+            "request_id": request_id, "operation": operation, "params": params})
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("nvr %s: failed to spool the request: %s", operation, e)
+        return _nvr_error(502, "executor_failed",
+                          "could not spool the NVR storage request")
+    try:
+        rc, out, err = _run(["systemctl", "start", "--no-block", NVR_MIGRATE_UNIT],
+                            timeout=_NVR_START_TIMEOUT_S)
+    except Exception as e:                                          # noqa: BLE001
+        rc, out, err = 1, "", str(e)
+    if rc != 0:
+        _nvr_spool_discard("migrate-request.json")
+        message = (_nvr_clip(err) or _nvr_clip(out)
+                   or "the NVR migration unit failed to start")
+        logger.warning("nvr %s: migrate unit start failed (rc=%s): %s",
+                       operation, rc, message)
+        return _nvr_error(502, "executor_failed", message)
+    return 202, {"ok": True, "state": "running"}
+
+
+def _nvr_refresh_drives():
+    """The drive inventory carries usage.role / reservedBytes — refresh it."""
+    try:
+        drives_snapshot(invalidate=True)
+    except Exception as e:                                          # noqa: BLE001
+        logger.warning("nvr: drive inventory refresh failed: %s", e)
+
+
+def _nvr_exclusive(action, refresh_drives):
+    """Run `action()` (→ (status, body)) under the NVR lock, refused while a
+    migration job runs. Refreshes the drive inventory after a success."""
+    if not _NVR_LOCK.acquire(blocking=False):
+        logger.warning("nvr storage request rejected: another NVR storage "
+                       "operation is already in progress")
+        return _nvr_error(409, "busy",
+                          "another NVR storage operation is already in progress")
+    try:
+        if _nvr_migrate_unit_active():
+            return _nvr_error(409, "migration_running",
+                              "a recordings migration job is running")
+        status, body = action()
+    finally:
+        _NVR_LOCK.release()
+    if refresh_drives and status in (200, 202):
+        _nvr_refresh_drives()
+    return status, body
+
+
+# --- endpoints (each → (http_status, body); validation BEFORE any exec) ------
+
+def _nvr_not_object():
+    return _nvr_error(400, "bad_request", "the request body must be a JSON object")
+
+
+def nvr_storage_apply(body):
+    """POST /host/nvr-storage {fsUuid, mode: reserved|full, limitBytes?}: record
+    the target + set the quota. Does NOT migrate (that is a separate step)."""
+    if not isinstance(body, dict):
+        return _nvr_not_object()
+    fs_uuid = body.get("fsUuid")
+    if not _nvr_valid_fs_uuid(fs_uuid):
+        return _nvr_error(400, "bad_request",
+                          "fsUuid must be a filesystem UUID (7-36 hex digits and "
+                          "hyphens)")
+    mode = body.get("mode")
+    if not isinstance(mode, str) or mode not in _NVR_MODES:
+        return _nvr_error(400, "bad_request", "mode must be 'reserved' or 'full'")
+    params = {"fsUuid": fs_uuid, "mode": mode}
+    if mode == "reserved":
+        limit = body.get("limitBytes")
+        if not _nvr_valid_limit(limit):
+            return _nvr_error(400, "bad_request",
+                              "limitBytes must be an integer between 1 and 2**62")
+        params["limitBytes"] = limit
+    # mode "full": the limit is the filesystem size and any limitBytes is ignored.
+    return _nvr_exclusive(
+        lambda: _nvr_run_via_executor("apply", params, "applied"), True)
+
+
+def nvr_storage_resize(body):
+    """POST /host/nvr-storage/resize {limitBytes}: quota only, no Frigate
+    restart."""
+    if not isinstance(body, dict):
+        return _nvr_not_object()
+    limit = body.get("limitBytes")
+    if not _nvr_valid_limit(limit):
+        return _nvr_error(400, "bad_request",
+                          "limitBytes must be an integer between 1 and 2**62")
+    return _nvr_exclusive(
+        lambda: _nvr_run_via_executor("resize", {"limitBytes": limit}, "resized"),
+        True)
+
+
+def nvr_storage_migrate_start(body):
+    """POST /host/nvr-storage/migrate {fsUuid}: start the root migration job."""
+    if not isinstance(body, dict):
+        return _nvr_not_object()
+    fs_uuid = body.get("fsUuid")
+    if not _nvr_valid_fs_uuid(fs_uuid):
+        return _nvr_error(400, "bad_request",
+                          "fsUuid must be a filesystem UUID (7-36 hex digits and "
+                          "hyphens)")
+    return _nvr_exclusive(
+        lambda: _nvr_start_job("migrate", {"fsUuid": fs_uuid}), True)
+
+
+def nvr_storage_old_delete(body):
+    """POST /host/nvr-storage/old/delete: delete the previous source after a
+    migration (the orchestrator gates this at tier 3). The client names NOTHING
+    — which source goes is decided by the root-only migration record."""
+    if not isinstance(body, dict):
+        return _nvr_not_object()
+    return _nvr_exclusive(lambda: _nvr_start_job("delete_old", {}), False)
+
+
+def nvr_storage_migrate_state():
+    """GET /host/nvr-storage/migrate → the root job's migrate-state.json, laid
+    over the idle defaults, plus `ok`.
+
+    A file that says `running` while the unit is no longer active means the job
+    died without finishing (reboot, OOM, kill): report it as failed/interrupted
+    rather than running forever. Never takes the lock — polling must keep
+    working while a long operation holds it."""
+    path = os.path.join(NVR_SPOOL_DIR, "migrate-state.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return 200, dict(_NVR_IDLE_STATE, ok=True)
+    except OSError as e:
+        logger.warning("nvr migrate state could not be read: %s", e)
+        return 200, dict(_NVR_IDLE_STATE, ok=True, state="failed",
+                         errorCode="internal",
+                         error="the migration state file could not be read")
+    state = _nvr_json_object(raw)
+    if (state is None or not isinstance(state.get("state"), str)
+            or state["state"] not in _NVR_JOB_STATES):
+        logger.warning("nvr migrate state file is not a valid state record")
+        return 200, dict(_NVR_IDLE_STATE, ok=True, state="failed",
+                         errorCode="internal",
+                         error="the migration state file is unreadable")
+    merged = dict(_NVR_IDLE_STATE)
+    merged.update(state)
+    if merged["state"] == "running" and not _nvr_migrate_unit_active():
+        merged["state"] = "failed"
+        merged["errorCode"] = "interrupted"
+        if not merged.get("error"):
+            merged["error"] = "the migration job stopped before it finished"
+    merged["ok"] = True
+    return 200, merged
+
+
+# --- HTTP glue ---------------------------------------------------------------
+
+def _nvr_read_json_body(handler):
+    """Read the (<= 4096 B) JSON-object body of an NVR POST. → (body, None), or
+    (None, (status, payload)) for a 400.
+
+    A module function taking the handler — not a Handler method — so the
+    dispatch depends on nothing but `headers` / `rfile` / `_authed` / `_send`
+    (the sibling tests drive Handler through a minimal fake that binds only
+    those)."""
+    try:
+        n = min(max(int(handler.headers.get("Content-Length") or 0), 0), 4096)
+        raw = handler.rfile.read(n).decode("utf-8") if n else ""
+        body = json.loads(raw) if raw else {}
+    except Exception:                                               # noqa: BLE001
+        return None, _nvr_error(400, "bad_request", "bad json")
+    if not isinstance(body, dict):
+        return None, _nvr_not_object()
+    return body, None
+
+
+def _nvr_post_handler(path):
+    """The endpoint function for an NVR POST path, or None. Looked up by name at
+    call time so the functions stay individually replaceable."""
+    return {
+        "/host/nvr-storage": nvr_storage_apply,
+        "/host/nvr-storage/resize": nvr_storage_resize,
+        "/host/nvr-storage/migrate": nvr_storage_migrate_start,
+        "/host/nvr-storage/old/delete": nvr_storage_old_delete,
+    }.get(path)
 
 
 # ---------------------------------------------------------------------------
@@ -4527,6 +5182,24 @@ class Handler(BaseHTTPRequestHandler):
                     # script error). The orchestrator maps this to a clean error.
                     return self._send(502, {"error": info})
                 return self._send(200, info)
+            if path == "/host/nvr-storage":
+                # WARP-3514: where the camera recordings live right now (the
+                # writer's --status, verbatim: drive, quota, usage, OS-disk /
+                # encryption verdicts). Box-internal storage topology — gated
+                # like /drives. Read-only and unprivileged; a missing/broken
+                # writer is a 502 with a machine code, never a guessed answer.
+                if not self._authed():
+                    return self._send(401, {"ok": False, "error": "unauthorized"})
+                status, body = nvr_storage_status()
+                return self._send(status, body)
+            if path == "/host/nvr-storage/migrate":
+                # WARP-3514: progress of the root migration / old-footage-delete
+                # job, from the state file the job maintains. Polled by the
+                # orchestrator; takes no lock (see nvr_storage_migrate_state).
+                if not self._authed():
+                    return self._send(401, {"ok": False, "error": "unauthorized"})
+                status, body = nvr_storage_migrate_state()
+                return self._send(status, body)
             if path == "/health":
                 return self._send(200, {"ok": True})
         except Exception as e:                                       # noqa: BLE001
@@ -4605,7 +5278,15 @@ class Handler(BaseHTTPRequestHandler):
             if not ok:
                 # 409 Conflict — the drive is busy or not ejectable; the
                 # caller surfaces the message and the user retries.
-                return self._send(409, {"ok": False, "error": info})
+                refusal = {"ok": False, "error": info}
+                # WARP-3514: the drive that holds the camera recordings is
+                # refused with a MACHINE code the caller can branch on (it must
+                # never parse the message). Every other eject failure keeps
+                # its code-less body.
+                code = getattr(info, "code", None)
+                if code:
+                    refusal["code"] = code
+                return self._send(409, refusal)
             return self._send(200, {"ok": True, **(info if isinstance(info, dict) else {})})
         if self.path == "/pools/command":
             # BUG-3 / ADR-019: destructive mdadm op. Auth-gated exactly like
@@ -4627,6 +5308,12 @@ class Handler(BaseHTTPRequestHandler):
             params = j.get("params", {})
             ok, info = run_pool_command(operation, params)
             if not ok:
+                # WARP-3514: an op naming the drive that holds the camera
+                # recordings is a 409 Conflict. Keyed on the machine `code`
+                # carried by the refusal, never on its message text.
+                if getattr(info, "code", None) == _RECORDINGS_DRIVE_ACTIVE:
+                    return self._send(409, {"ok": False, "error": info,
+                                            "code": _RECORDINGS_DRIVE_ACTIVE})
                 # 422 — the host-script pre-flight refused (mounted/has-data/
                 # OS-disk/bad confirm) or the op was outside the allow-list.
                 return self._send(422, {"ok": False, "error": info})
@@ -4864,6 +5551,24 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(502, {"ok": False, "error": info})
             return self._send(200, {"ok": True,
                                     **(info if isinstance(info, dict) else {"info": info})})
+        nvr_handler = _nvr_post_handler(self.path)
+        if nvr_handler is not None:
+            # WARP-3514: camera-recordings storage — apply / resize / migrate /
+            # delete the old footage. Auth-gated exactly like /pools/command; the
+            # orchestrator only reaches here for an owner/admin action (+ its
+            # tier-2/3 confirm where the product requires one), and the bridge
+            # requires its own token on top. STRICT validation happens inside
+            # the handler BEFORE anything is spooled or exec'd — junk is a 400,
+            # never an exec. The privileged work runs in root units the bridge
+            # only `systemctl start`s (see the NVR section above); nothing here
+            # is routed through _POOL_OPS.
+            if not self._authed():
+                return self._send(401, {"ok": False, "error": "unauthorized"})
+            body, bad_request = _nvr_read_json_body(self)
+            if bad_request is not None:
+                return self._send(*bad_request)
+            status, payload = nvr_handler(body)
+            return self._send(status, payload)
         if self.path == "/openwrt/wifi/rotate":
             if not self._authed():
                 return self._send(401, {"ok": False, "error": "unauthorized"})
