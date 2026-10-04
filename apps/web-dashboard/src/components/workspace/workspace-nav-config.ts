@@ -148,6 +148,7 @@ export const SPACES: SpaceDef[] = [
       "/remote-access",
       "/integrations",
       "/integrations/credentials",
+      "/integrations/work-notifications",
     ],
   },
   {
