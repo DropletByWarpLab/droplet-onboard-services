@@ -24,6 +24,7 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
 import { sanitizePmHtml } from "./sanitize-html.js";
+import { nudgeOutbox } from "./pm-outbox.js";
 import {
   DEPARTMENT_SELECT,
   PM_DEPARTMENT_ERRORS,
@@ -388,6 +389,10 @@ async function writeActivity(
       newValue: input.newValue ?? null,
     },
   });
+  // WARP-3532 (ADR-069 §7) — wake the outbox consumers. Runs inside the caller's
+  // transaction, which is fine: the wake-up is deferred past the settle window,
+  // and the consumers' interval is what guarantees the row is read.
+  nudgeOutbox();
 }
 
 /** Re-fetch a work item with all includes and map it. Throws if it vanished
@@ -1629,6 +1634,7 @@ export async function deleteWorkItem(
             };
           }),
         });
+        nudgeOutbox();
       }
 
       await tx.pmWorkItem.delete({ where: { id } });
