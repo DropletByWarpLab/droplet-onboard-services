@@ -21,15 +21,15 @@
 import path from "node:path";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
-import { createAtlassianRemoteCallPolicy } from "./atlassian-tool-policy.js";
 import { McpBridgeClient } from "./mcp-bridge.client.js";
 import { McpClientService } from "./mcp-client.service.js";
-import { DENY_ALL_REMOTE_TOOLS, McpToolMultiplexer } from "./mcp-multiplexer.service.js";
+import { McpToolMultiplexer } from "./mcp-multiplexer.service.js";
 import {
   composeRemoteCallPolicy,
   createRecordBackedRemoteCallPolicy,
   remoteToolClassificationCache,
 } from "./remote-tool-classification.service.js";
+import { remoteToolTablePolicy } from "./remote-tool-tables.js";
 import type { RemoteCallPolicy } from "./mcp-multiplexer.service.js";
 import { installedExtensionIds } from "./extension-lifecycle.service.js";
 import { EXTENSION_SERVER_PREFIX } from "./extension-token.js";
@@ -88,11 +88,13 @@ const localClient = new McpClientService({
  * configured `attachRemote` refuses every server.
  *
  * WARP-2316 — the remote call policy is no longer the bare deny-everything
- * default. It is the ATLASSIAN policy, layered OVER that default: a name in
- * `atlassian-tool-policy.ts`'s explicit read list is allowed, and everything
- * else — every Atlassian write, every Atlassian tool nobody classified, and
- * every tool of every other server — falls through to
- * {@link DENY_ALL_REMOTE_TOOLS}.
+ * default. It is the compiled TABLES, layered OVER that default: a name in a
+ * server's explicit read list is allowed (today `atlassian-tool-policy.ts`'s),
+ * and everything else — every write, every tool nobody classified, and every
+ * tool of a server no table speaks for — falls through to
+ * {@link DENY_ALL_REMOTE_TOOLS}. WARP-3703: which table speaks for which server
+ * is `remote-tool-tables.ts`'s registry, so a second vendor is a data entry
+ * there and no change here.
  *
  * That is ADR-043 §3 read as written rather than relaxed: *"Read-only
  * invocation of tools an operator has explicitly demoted to read status under
@@ -122,22 +124,19 @@ export function isRemoteServerAllowed(serverId: string): boolean {
 }
 
 // WARP-2426 — the operator-owned classification record, layered over the
-// reviewed Atlassian table: the record's `denied` wins over everything; its
+// reviewed per-server tables: the record's `denied` wins over everything; its
 // reviewed reads fill only the table's holes; the table's write-blocks are
 // a floor no demotion reaches around. Read from a cache the attach path and
 // the owner route refresh — a row the cache has not seen is "not
 // classified", never "allowed".
+//
+// WARP-3703 — the table is the registry's, by server id. Atlassian's reviewed
+// table is registered there exactly as it was built here (API-token mode, deny-all
+// fallback), and a server with NO table is DENIED by default: the shipping
+// deny-all, which the record may then fill one reviewed read at a time.
 const vendorRemoteCallPolicy: RemoteCallPolicy = composeRemoteCallPolicy({
   lookup: remoteToolClassificationCache.lookup,
-  // `api-token` because that is the only credential a v1 box can hold: ADR-043
-  // §7 classifies Atlassian as the customer-created-credential model and the
-  // OAuth endpoint (`/v1/mcp/authv2`) is an explicit non-goal. The mode is a
-  // parameter rather than an assumption so the Compass half of the auth-mode
-  // matrix is expressible and testable.
-  table: createAtlassianRemoteCallPolicy({
-    authMode: "api-token",
-    fallback: DENY_ALL_REMOTE_TOOLS,
-  }),
+  table: remoteToolTablePolicy,
 });
 
 /**

@@ -68,6 +68,7 @@ import {
   detachRemoteMcp,
   ensureRemoteMcpAttached,
   mcpClient,
+  remoteCallPolicy,
   remoteMcpReconcilerDeps,
 } from "./mcp-client.singleton.js";
 import { remoteMcpLifecycle } from "./remote-mcp-lifecycle.service.js";
@@ -670,6 +671,29 @@ describe("a disconnect tears down ONE server and leaves the other attached (TC-1
     expect(bridge.callsTo(FIXTURE, "call")).toHaveLength(0);
 
     expect((await mcpClient.callTool("atlassian__getJiraIssue", {})).isError).toBe(false);
+  });
+});
+
+describe("the singleton's call policy speaks through the table registry (TC-1.3)", () => {
+  const decide = (serverId: string, wireName: string) =>
+    remoteCallPolicy({ serverId, wireName, namespacedName: `${serverId}__${wireName}`, args: {} });
+
+  it("is Atlassian's reviewed table for Atlassian: a read runs, a write is blocked, a Compass tool is refused for the credential it needs", () => {
+    expect(decide(ATLASSIAN, "getJiraIssue")).toEqual({ kind: "allow" });
+    expect(decide(ATLASSIAN, "createJiraIssue")).toMatchObject({
+      kind: "deny",
+      code: "REMOTE_WRITE_NOT_PERMITTED",
+    });
+    expect(decide(ATLASSIAN, "getCompassComponents")).toMatchObject({
+      kind: "deny",
+      code: "ATLASSIAN_TOOL_UNAVAILABLE_IN_AUTH_MODE",
+    });
+    expect(decide(ATLASSIAN, "notATool")).toMatchObject({ kind: "deny", code: "REMOTE_TOOL_NOT_CLASSIFIED" });
+  });
+
+  it("is the shipping deny-all for every server no table speaks for — even one named like an Atlassian read", () => {
+    expect(decide(FIXTURE, "getJiraIssue")).toMatchObject({ kind: "deny", code: "REMOTE_TOOL_NOT_CLASSIFIED" });
+    expect(decide("constructor", "getJiraIssue")).toMatchObject({ kind: "deny" });
   });
 });
 
