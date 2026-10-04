@@ -56,6 +56,10 @@ export type ErrorDomain =
   | "vpn"
   | "camera"
   | "projects"
+  // WARP-3528 (ADR-069) — the service desk. Its own domain: a failed ticket
+  // write must name tickets and requesters, not "that change", and its codes
+  // (invalid_assignee, contact_email_exists, desk_archived) mean nothing to PM.
+  | "support"
   // WARP-2734 — connecting a mailbox. Its own domain because every code here
   // is about somebody ELSE's mail server, and the remedy is always a field on
   // the form rather than something to do on this Droplet.
@@ -123,6 +127,8 @@ const FALLBACK: Record<ErrorDomain, string> = {
     "We couldn't reach that device right now. Check it's powered on and nearby, then try again.",
   projects:
     "We couldn't save that change right now. Try again in a moment.",
+  support:
+    "We couldn't save that change to the ticket right now. Try again in a moment.",
   // WARP-1141 — drive/pool rename + other storage settings writes. The files
   // fallback ("couldn't load those files") misdescribed a failed WRITE as a
   // load hiccup, which is exactly how the Drives-page rename bug went
@@ -519,6 +525,66 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Couldn't reach the device in time. Put it into pairing mode again, make sure it's within a few feet of the Droplet, and retry.",
     "503":
       "The Droplet's smart-device service is still starting up. Give it a few seconds and try again.",
+  },
+  // WARP-3528 (ADR-069) — the service desk (/api/support/*). Codes are the
+  // stable snake_case strings its routes emit (SUPPORT_ERRORS in
+  // services/support/support.types.ts, plus the PM / department codes the
+  // shared helpers throw). Each says what happened and what to do, in the
+  // words of the front desk: ticket, customer, status, assignee — never
+  // requester, work item or compare-and-set.
+  support: {
+    // Emitted by BOTH the box-wide module gate and the per-person grant check
+    // (identical bodies by design), so it names neither as the reason.
+    module_disabled:
+      "Support isn't available. This feature is switched off for this Droplet, or it isn't part of your access. An owner or admin can turn it on.",
+    desk_not_found:
+      "We couldn't find that service desk anymore. It may have been removed.",
+    ticket_not_found:
+      "We couldn't find that ticket anymore. It may have been removed.",
+    contact_not_found:
+      "That customer isn't available anymore. Search for them again.",
+    project_not_found:
+      "That project isn't available anymore. Pick another one.",
+    state_not_found:
+      "That status isn't available anymore. Refresh the ticket and try again.",
+    invalid_state:
+      "That status isn't available anymore. Refresh the ticket and try again.",
+    label_not_found:
+      "That label isn't available anymore. Refresh the ticket and try again.",
+    invalid_label:
+      "That label isn't available anymore. Refresh the ticket and try again.",
+    company_not_found:
+      "That customer record isn't available anymore. Refresh and try again.",
+    department_not_found:
+      "That department isn't available anymore. Refresh and try again.",
+    department_not_assignable:
+      "That department can't take tickets. Pick another one.",
+    department_archived:
+      "That department has been archived. Pick another one.",
+    invalid_assignee:
+      "That person can't be given this ticket. They need access to Support — pick someone else.",
+    invalid_requester:
+      "That person isn't an active member, so they can't be the one asking. Pick someone else.",
+    invalid_channel:
+      "Tickets you file by hand arrive as added by the team or a phone call.",
+    desk_archived:
+      "That service desk is archived, so its tickets can't be changed. Restore the desk first.",
+    identifier_taken:
+      "That key is already taken — pick another.",
+    empty_body:
+      "Write something first — there's nothing to send.",
+    contact_needs_a_name:
+      "Add a name or an email address so we know who this is.",
+    contact_email_exists:
+      "That address is already in your contacts.",
+    invalid_cursor:
+      "We couldn't load the next page of tickets. Refresh the list.",
+    // A lost compare-and-set: another person changed the ticket first and
+    // nothing was applied. Not the user's fault, and retrying is the remedy.
+    concurrent_mutation:
+      "Someone changed this ticket at the same time, so nothing was applied. Refresh and try again.",
+    "403": "You don't have permission to do that on this ticket.",
+    "404": "We couldn't find that. It may have been removed.",
   },
   // WARP-1154/1155 — the native Projects (PM) surface. Codes are the stable
   // snake_case strings the orchestrator's /api/pm/* routes emit (PM_ERRORS in
