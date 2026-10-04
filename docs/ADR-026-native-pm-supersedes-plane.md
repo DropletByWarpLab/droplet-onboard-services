@@ -144,7 +144,10 @@ Phased, one PR per phase; the box stays bootable throughout and Plane is removed
 - All Prisma models and DB tables are `Pm`-prefixed to stay clear of the existing dashboard
   `Workspace`/`WorkspaceType` (ADR-007) and `ActivityRow`.
 - Native HTTP routes live under `/api/pm/*`; no `DROPLET_PM_*` env vars are introduced (the native
-  module needs none — it uses the orchestrator's DB + session auth).
+  module needs none — it uses the orchestrator's DB + session auth). The one exception is
+  attachments (WARP-1505), which need a storage location and a size cap: `PM_ATTACHMENTS_DIR`
+  (container path of the `pm-attachments` volume, default `/data/pm-attachments`) and
+  `PM_ATTACHMENT_MAX_BYTES` (per-file cap, default 25 MiB).
 - MCP tool names are unchanged (`pm_list_projects`, `pm_create_work_item`, …) to preserve the contract.
 
 ### Tests to add

@@ -499,8 +499,9 @@ BACKUP_KEEP=14 ./scripts/host/device-backup.sh
 ```
 
 **Captured surfaces:** orchestrator Postgres (`db`) and the `nextcloud-data`,
-`aikeys`, `matter-data`, `brain-memory-data`, `nvrdata` (NVR recordings), and
-`ops-audit` (WARP-337 audit trail) volumes. These are the real top-level
+`aikeys`, `matter-data`, `brain-memory-data`, `nvrdata` (NVR recordings),
+`ops-audit` (WARP-337 audit trail), and `pm-attachments` (WARP-1505 work-item
+attachments) volumes. These are the real top-level
 volumes in `docker/docker-compose.yml`; the backup script's `DATA_VOLUMES` list
 is kept in lock-step with `factory-reset.sh`'s wipe list, and a static test
 asserts every captured name is a genuine compose volume (a wrong name would

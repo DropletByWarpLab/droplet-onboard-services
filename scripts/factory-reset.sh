@@ -679,6 +679,7 @@ VOLUMES=(
   "nvrdata"
   "ops-audit"            # WARP-337 append-only audit trail
   "workspace-git"        # WARP-2896 workshop git store: the customer's extension work
+  "pm-attachments"       # WARP-1505 files customers attached to work items
   # WARP-573: pre-migration DB snapshots from the orchestrator's guarded boot
   # entrypoint. Wiped on reset so factory-reset truly returns to out-of-box.
   "migration-snapshots"
