@@ -1,0 +1,122 @@
+/* Calendar layout of a project — WARP-3523.
+ *
+ * Scoped under `.pm-scope`, whose aliases (`--accent`, `--text`, `--border`,
+ * `--warn`, …) map onto the real dashboard tokens and flip in dark mode. No hex
+ * literals and no new tokens (brief §2): every colour here is an existing alias,
+ * or a `color-mix()` of two of them. State dots take the API's own `color`
+ * through `--chip-accent` — that is data, not a token. */
+
+.pm-scope .pm-cal { display: flex; gap: 14px; align-items: flex-start; }
+.pm-scope .pm-cal-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+
+.pm-scope .pm-cal-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pm-scope .pm-cal-title { margin: 0 6px; min-width: 150px; font-size: 15px; font-weight: 600; color: var(--text); }
+.pm-scope .pm-cal-spacer { flex: 1 1 auto; }
+.pm-scope .pm-cal-hint { margin: 0; font-size: 12.5px; color: var(--text-2); }
+
+/* ── grid ───────────────────────────────────────────────────────────────── */
+.pm-scope .pm-cal-grid { isolation: isolate; background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.pm-scope .pm-cal-dow,
+.pm-scope .pm-cal-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.pm-scope .pm-cal-dow { background: var(--bg-tint); border-bottom: 1px solid var(--border); }
+.pm-scope .pm-cal-dow > span { padding: 7px 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-2); }
+.pm-scope .pm-cal-week + .pm-cal-week { border-top: 1px solid var(--border); }
+
+.pm-scope .pm-cal-day { display: flex; flex-direction: column; gap: 0; min-width: 0; min-height: 118px; padding: 4px 0 6px; border-left: 1px solid var(--border); }
+.pm-scope .pm-cal-day:first-child { border-left: none; }
+.pm-scope .pm-cal-day.is-tall { min-height: 360px; }
+.pm-scope .pm-cal-day.is-outside { background: var(--bg-tint); }
+.pm-scope .pm-cal-day.is-drop {
+  outline: 2px solid var(--accent); outline-offset: -2px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-canvas));
+}
+.pm-scope .pm-cal-dayhead { display: flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 6px 2px; }
+.pm-scope .pm-cal-daynum {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 24px; padding: 0 4px;
+  border-radius: 999px; font-size: 12px; font-weight: 600; color: var(--text-2); font-variant-numeric: tabular-nums;
+}
+.pm-scope .pm-cal-day.is-today .pm-cal-daynum { color: var(--text); font-weight: 700; background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.pm-scope .pm-cal-todaytag { font-size: 11px; font-weight: 600; color: var(--text); }
+
+/* ── chips (one per day of an item, joined into a bar) ──────────────────── */
+.pm-scope .pm-cal-slot { flex: none; height: 24px; margin-bottom: 2px; }
+.pm-scope .pm-cal-chip {
+  --chip-accent: var(--text-4);
+  display: flex; align-items: center; gap: 6px; flex: none; height: 24px; min-width: 0; margin: 0 4px 2px; padding: 0 7px;
+  background: color-mix(in srgb, var(--chip-accent) 14%, var(--bg-canvas));
+  border: 1px solid color-mix(in srgb, var(--chip-accent) 45%, var(--border));
+  border-radius: 6px; color: var(--text); font: inherit; font-size: 12px; line-height: 1; text-align: left;
+  overflow: hidden; cursor: pointer;
+  transition: box-shadow 150ms var(--ease), opacity 150ms var(--ease);
+}
+.pm-scope .pm-cal-chip:hover { box-shadow: 0 0 0 1px color-mix(in srgb, var(--chip-accent) 55%, var(--border)); }
+.pm-scope .pm-cal-chip:focus-visible { outline: none; position: relative; z-index: 1; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 38%, transparent); }
+.pm-scope .pm-cal-chip.is-dragging { opacity: 0.5; }
+.pm-scope .pm-cal-chip .key { flex: none; font-size: 10.5px; color: var(--text-2); }
+.pm-scope .pm-cal-chip .ttl { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+
+/* Segments: adjacent days of one item touch, so the bar reads as one piece. */
+.pm-scope .pm-cal-chip.seg-start { margin-right: -1px; border-top-right-radius: 0; border-bottom-right-radius: 0; border-right-color: transparent; }
+.pm-scope .pm-cal-chip.seg-mid { margin-left: -1px; margin-right: -1px; border-radius: 0; border-left-color: transparent; border-right-color: transparent; }
+.pm-scope .pm-cal-chip.seg-end { margin-left: -1px; border-top-left-radius: 0; border-bottom-left-radius: 0; border-left-color: transparent; }
+
+/* Overdue is orange (never red) and also carries an icon and text for assistive
+ * tech — colour is never the only signal (brief §5.1). */
+.pm-scope .pm-cal-chip.overdue { background: var(--warn-soft); border-color: var(--warn); }
+.pm-scope .pm-cal-chip.overdue .pm-dot { background: var(--warn) !important; }
+.pm-scope .pm-cal-chip.done { opacity: 0.66; }
+.pm-scope .pm-cal-chip.done .ttl { text-decoration: line-through; text-decoration-thickness: 1px; }
+
+.pm-scope .pm-cal-more {
+  margin: 0 4px; height: 24px; padding: 0 6px; background: transparent; border: none; border-radius: 6px;
+  font: inherit; font-size: 11.5px; font-weight: 600; color: var(--text-2); text-align: left; cursor: pointer;
+}
+.pm-scope .pm-cal-more:hover { background: var(--bg-hover); color: var(--text); }
+.pm-scope .pm-cal-more:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 38%, transparent); }
+
+/* ── Unscheduled panel ──────────────────────────────────────────────────── */
+.pm-scope .pm-cal-panel {
+  display: flex; flex-direction: column; gap: 8px; flex: none; width: 264px; max-height: 72vh; overflow: auto; padding: 10px;
+  background: var(--bg-tint); border: 1px solid var(--border); border-radius: 12px;
+}
+.pm-scope .pm-cal-panel-empty { display: flex; flex-direction: column; gap: 2px; padding: 6px 2px; font-size: 12.5px; color: var(--text-2); }
+.pm-scope .pm-cal-panel-empty strong { color: var(--text); font-weight: 600; }
+.pm-scope .pm-cal-ulist { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.pm-scope .pm-cal-ucard {
+  display: flex; flex-direction: column; gap: 6px; padding: 8px; background: var(--bg-canvas);
+  border: 1px solid var(--border); border-radius: 10px; cursor: grab;
+}
+.pm-scope .pm-cal-ucard-open {
+  display: flex; flex-direction: column; gap: 4px; padding: 0; background: transparent; border: none; border-radius: 6px;
+  font: inherit; text-align: left; color: var(--text); cursor: pointer;
+}
+.pm-scope .pm-cal-ucard-open:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 38%, transparent); }
+.pm-scope .pm-cal-ukey { flex: none; font-size: 11px; color: var(--text-2); }
+.pm-scope .pm-cal-utitle { font-size: 13px; font-weight: 500; line-height: 1.35; }
+.pm-scope .pm-cal-schedule { display: flex; align-items: center; gap: 6px; }
+.pm-scope .pm-cal-dateinput { flex: 1 1 auto; min-width: 0; height: 30px; font-size: 12px; }
+.pm-scope .pm-cal-dateinput[aria-invalid="true"] { border-color: var(--warn); }
+
+/* ── agenda (narrow screens) ────────────────────────────────────────────── */
+.pm-scope .pm-cal-agenda { display: flex; flex-direction: column; gap: 14px; }
+.pm-scope .pm-cal-agenda-empty { padding: 20px 4px; font-size: 13px; color: var(--text-2); }
+.pm-scope .pm-cal-agenda-head { display: flex; align-items: center; gap: 8px; margin: 0 0 4px; font-size: 12.5px; font-weight: 600; color: var(--text); }
+.pm-scope .pm-cal-agenda-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.pm-scope .pm-cal-agenda-list > li + li { border-top: 1px solid var(--border); }
+.pm-scope .pm-cal-agenda-row {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 8px 12px; background: transparent;
+  border: none; font: inherit; font-size: 13.5px; color: var(--text); text-align: left; cursor: pointer;
+}
+.pm-scope .pm-cal-agenda-row:focus-visible { outline: none; box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--accent) 38%, transparent); }
+.pm-scope .pm-cal-agenda-row.done .pm-cal-agenda-title { text-decoration: line-through; text-decoration-thickness: 1px; opacity: 0.7; }
+.pm-scope .pm-cal-agenda-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.pm-scope .pm-cal-overdue { display: inline-flex; align-items: center; gap: 4px; flex: none; font-size: 11.5px; font-weight: 600; color: var(--text); background: var(--warn-soft); border-radius: 999px; padding: 2px 8px; }
+
+@media (max-width: 960px) {
+  .pm-scope .pm-cal { flex-direction: column; }
+  .pm-scope .pm-cal-panel { width: auto; align-self: stretch; max-height: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pm-scope .pm-cal-chip { transition: none; }
+}

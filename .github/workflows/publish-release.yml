@@ -134,10 +134,11 @@ concurrency:
   group: publish-release-${{ github.ref }}
   cancel-in-progress: false
 
+# WARP-3677: read-only by default. The write, packages and id-token scopes are
+# granted to the one job that uses them (`publish`, below) instead of to the
+# `channel` and gate jobs, which only resolve the ref and run tests.
 permissions:
-  contents: write # gh release create
-  packages: write # push images to GHCR
-  id-token: write # cosign / future keyless & provenance work
+  contents: read
 
 jobs:
   # WARP-1670 — resolve the channel from the dispatch ref and refuse
@@ -345,6 +346,24 @@ jobs:
     # spend: runner-minutes are only billed when they are used.
     timeout-minutes: 180
     needs: [channel, gate-node, gate-python]
+    # WARP-3565 (workflow half). Names the protected environment that is meant
+    # to hold the signing secrets behind a required reviewer. Safe to merge at
+    # any time, but it protects NOTHING until the repository owner finishes the
+    # settings runbook (shared_brain operations/runbooks/github-org-hardening.md,
+    # Step 6): GitHub creates a referenced environment that does not exist
+    # UNPROTECTED on the first run, and COSIGN_PRIVATE_KEY / COSIGN_PASSWORD
+    # stay repository-level secrets, readable by every job, until the owner
+    # creates `release` with a required reviewer and moves them in. The `index`
+    # job below also reads those two secrets: give it the same environment (or
+    # keep the repository-level copies) before removing them.
+    environment: release
+    # WARP-3677: the scopes the top-level block no longer grants. contents:
+    # write for `gh release create`; packages: write for the GHCR push;
+    # id-token: write for keyless cosign signing of the pushed images.
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
     outputs:
       # The release tag, for the `index` job — computed once, in the step
       # that creates the Release, so the pointer can never name another tag.
