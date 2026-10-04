@@ -17,6 +17,8 @@ refreshed at startup, before an operator-triggered /scan, and every
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -375,6 +377,31 @@ class TestWhenItIsRefreshed:
         result = await main.trigger_scan(_FakeRequest())
 
         assert calls == ["reconcile", "scan"]
+        assert result["status"] == "scan_complete"
+
+    @pytest.mark.asyncio
+    async def test_a_hung_frigate_cannot_stall_an_operator_triggered_scan(self, monkeypatch):
+        """Frigate restarts after every adoption and can hold a connection open for the
+        whole httpx timeout (15 s per request). The orchestrator gives the entire /scan
+        call 30 s, so waiting on Frigate unbounded would turn "a camera was just added"
+        into a "scan_unavailable" the operator reads as "discovery is not running"."""
+        main = _main()
+        assert main.RECONCILE_TIMEOUT_SECONDS <= 10  # leaves most of the 30 s for the scan itself
+        monkeypatch.setattr(main, "RECONCILE_TIMEOUT_SECONDS", 0.05)
+        scanned: list[str] = []
+
+        async def never_answers():
+            await asyncio.Event().wait()
+
+        async def scan():
+            scanned.append("scan")
+
+        monkeypatch.setattr(main, "_reconcile_with_frigate", never_answers)
+        monkeypatch.setattr(main, "scan_and_discover", scan)
+
+        result = await asyncio.wait_for(main.trigger_scan(_FakeRequest()), timeout=3)
+
+        assert scanned == ["scan"]
         assert result["status"] == "scan_complete"
 
     @pytest.mark.asyncio

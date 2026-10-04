@@ -1000,6 +1000,12 @@ _scan_scheduler: AsyncIOScheduler | None = None
 # which bounds that, for the cost of one small GET to the local Frigate.
 RECONCILE_EVERY_SWEEPS = 10
 _sweeps_since_refresh = 0
+# The longest an operator-triggered /scan waits on Frigate before scanning anyway.
+# Frigate restarts after every adoption and can hold a connection open for the
+# whole httpx timeout (15 s per request); the orchestrator gives the entire /scan
+# call 30 s, so an unbounded wait would turn "a camera was just added" into a
+# "scan_unavailable" the operator reads as "discovery is not running".
+RECONCILE_TIMEOUT_SECONDS = 5.0
 
 
 async def run_scan() -> None:
@@ -1344,7 +1350,15 @@ async def trigger_scan(request: Request):
     _require_auth(request)
     # WARP-3508: the operator asked for a scan NOW — bring discovery's picture of
     # Frigate up to date first, so it skips cameras added since the last refresh.
-    await _reconcile_with_frigate()
+    # Bounded: a slow Frigate costs this refresh (the sweep falls back to the managed
+    # hosts from the last one), never the scan.
+    try:
+        await asyncio.wait_for(_reconcile_with_frigate(), timeout=RECONCILE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Frigate did not answer within %.0f s — scanning with the managed hosts from the last refresh",
+            RECONCILE_TIMEOUT_SECONDS,
+        )
     await scan_and_discover()
     return {
         "status": "scan_complete",

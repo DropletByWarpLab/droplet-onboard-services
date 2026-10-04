@@ -34,6 +34,8 @@ The managed set is refreshed at startup, before an operator-triggered
 `POST /scan`, and every 10th scheduled sweep (~5 minutes at the default
 `SCAN_INTERVAL`). Each refresh *replaces* the set, so a camera removed from Frigate
 becomes discoverable again; if Frigate cannot be reached the previous set is kept.
+The refresh before `POST /scan` waits at most 5 s (`RECONCILE_TIMEOUT_SECONDS`): a
+Frigate that is restarting costs that refresh, never the scan.
 
 ### Credential probing budget (WARP-3508)
 
