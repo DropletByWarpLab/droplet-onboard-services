@@ -12,6 +12,9 @@ vi.mock("../middleware/auth.js", () => ({
   SESSION_COOKIE_NAME: "droplet_session",
   validateTokenForWs: (...a: unknown[]) => validateTokenForWs(...a),
 }));
+vi.mock("../config.js", () => ({
+  config: { corsAllowedOrigins: ["https://droplet-ai.local"] },
+}));
 vi.mock("./mqtt.service.js", () => ({
   subscribeToTopic: vi.fn(() => () => undefined),
 }));
