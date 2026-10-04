@@ -140,6 +140,11 @@ concurrency:
 env:
   COMPOSE: docker compose -f docker/docker-compose.yml --profile full --profile eval
 
+# WARP-3677: least privilege. Top-level default is read-only; every job that
+# needs more (see the per-job `permissions:` blocks below) declares its own.
+permissions:
+  contents: read
+
 jobs:
   detect:
     name: detect affected images

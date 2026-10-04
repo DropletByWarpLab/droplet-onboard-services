@@ -65,6 +65,11 @@ concurrency:
   group: orchestrator-tests-${{ github.ref }}
   cancel-in-progress: true
 
+# WARP-3677: least privilege. Top-level default is read-only; every job that
+# needs more (see the per-job `permissions:` blocks below) declares its own.
+permissions:
+  contents: read
+
 jobs:
   # WARP-1026: real-Postgres lane. The unit suite (ci.yml's orchestrator
   # leg) runs with mocked Prisma and structurally cannot catch chain

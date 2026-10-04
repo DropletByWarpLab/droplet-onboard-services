@@ -19,6 +19,13 @@ concurrency:
   group: file-indexer-tests-${{ github.ref }}
   cancel-in-progress: true
 
+# WARP-3677: least privilege. Every job here only checks out the repo and
+# runs tests (no step uses the token for anything else), so read is all the
+# GITHUB_TOKEN needs. Stated explicitly so a new job cannot inherit a wider
+# repository default by omission.
+permissions:
+  contents: read
+
 jobs:
   pytest:
     runs-on: ubuntu-latest

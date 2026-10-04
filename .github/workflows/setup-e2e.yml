@@ -71,6 +71,11 @@ concurrency:
   group: setup-e2e-${{ github.ref }}
   cancel-in-progress: true
 
+# WARP-3677: least privilege. Top-level default is read-only; every job that
+# needs more (see the per-job `permissions:` blocks below) declares its own.
+permissions:
+  contents: read
+
 jobs:
   setup-script:
     runs-on: ubuntu-latest

@@ -82,6 +82,11 @@ concurrency:
   group: test-fips-${{ github.ref }}
   cancel-in-progress: true
 
+# WARP-3677: least privilege. Top-level default is read-only; every job that
+# needs more (see the per-job `permissions:` blocks below) declares its own.
+permissions:
+  contents: read
+
 jobs:
   # WARP-316 deliberate-sabotage proof: builds one throwaway image, installs the
   # validated provider for real, deletes fips.so, and asserts the FIPS provider
