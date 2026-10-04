@@ -1883,7 +1883,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const thumb = await fetchReviewThumbnail(req.params.reviewId);
       // From the validated extension: Frigate labels `.webp` under /clips/ application/octet-stream.
       res.setHeader("Content-Type", thumb.contentType);
+      res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader("Cache-Control", "private, no-store"); // WARP-3103: footage never lands in a cache
+      // Binary Buffer; the client derives a closed JPEG/WebP MIME type from a
+      // validated thumbnail filename, never from upstream HTML or user input.
+      // nosemgrep: javascript.express.security.audit.xss.direct-response-write.direct-response-write
       res.send(thumb.bytes);
     } catch (err) {
       if (answerFrigateFailure(res, err, { reviewId: req.params.reviewId }, REVIEW_NOT_FOUND_MESSAGES)) return;

@@ -238,7 +238,8 @@ describe("GET /api/cameras/reviews/:reviewId/thumbnail (WARP-3509)", () => {
     const res = await request(buildApp()).get(THUMB_ROUTE);
 
     expect(res.status).toBe(200);
-    expect(res.headers["content-type"]).toBe("image/webp");
+      expect(res.headers["content-type"]).toBe("image/webp");
+      expect(res.headers["x-content-type-options"]).toBe("nosniff");
     expect(res.headers["cache-control"]).toBe("private, no-store");
     expect(Buffer.from(res.body as Buffer).equals(Buffer.from(WEBP))).toBe(true);
     // Exactly the 0.17 sequence: the row, then the static file it names. Never
