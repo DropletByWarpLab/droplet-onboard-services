@@ -95,6 +95,7 @@ export function staleNoticeText(count: number): string {
 
 const FILTER_UNREADABLE = "That link's filter couldn't be read, so it was ignored.";
 const VIEW_GONE = "That view isn't available anymore.";
+const VIEW_UNREADABLE = "Couldn't load that view, so everything is shown.";
 
 function ProjectsFallback(): JSX.Element {
   return (
@@ -200,12 +201,14 @@ function ProjectsWorkspace(): JSX.Element {
     const saved = scopedViews.find((v) => v.id === url.v);
     return saved ? { id: saved.id, name: saved.name, filter: saved.filter, canEdit: saved.canEdit } : null;
   }, [url.v, scopedViews]);
-  const viewsReady = viewsScope === null || savedViews !== undefined;
+  const viewsReady = savedViews !== undefined;
   const namedSavedView = !!url.v && !isPmBuiltinViewId(url.v);
   // A saved view's filter is not known until the list arrives; querying before
-  // then would flash the wrong rows.
+  // then would flash the wrong rows (and "that view is gone" before it could be
+  // looked for).
   const viewPending = namedSavedView && !activeView && !viewsReady && !viewsErr;
   const viewMissing = namedSavedView && !activeView && viewsReady && (mode === "project" || mode === "workspace");
+  const viewUnreadable = namedSavedView && !activeView && !!viewsErr && (mode === "project" || mode === "workspace");
 
   const baseFilter: PmFilter = activeView?.filter ?? EMPTY_FILTER;
   // `f` absent → the view's own filter. `f` present → this, even when empty.
@@ -265,7 +268,8 @@ function ProjectsWorkspace(): JSX.Element {
     if (query.effectiveFilter) go({ f: filterParam(query.effectiveFilter) }, "replace");
   }, [staleSig, query.stale, query.effectiveFilter, go, filterParam]);
 
-  const noticeText = notice ?? (fUnreadable ? FILTER_UNREADABLE : viewMissing ? VIEW_GONE : null);
+  const noticeText =
+    notice ?? (fUnreadable ? FILTER_UNREADABLE : viewMissing ? VIEW_GONE : viewUnreadable ? VIEW_UNREADABLE : null);
 
   // ── the open drawer ──
   const listItem: PmWorkItem | undefined = url.item
@@ -273,8 +277,13 @@ function ProjectsWorkspace(): JSX.Element {
     : undefined;
   const byKey = useWorkItemByKey(url.item, !!url.item && !listItem);
   const drawerItem = listItem ?? byKey.item ?? null;
+  // An item link that answers 404: say so ONCE, and take it out of the URL. (Once
+  // per key: `go` and `toast` change identity, and without the guard this would
+  // toast again on every render until the navigation lands.)
+  const handledMissingItem = useRef<string | null>(null);
   useEffect(() => {
-    if (!url.item || !byKey.error) return;
+    if (!url.item || !byKey.error || handledMissingItem.current === url.item) return;
+    handledMissingItem.current = url.item;
     toast(translateError(byKey.error, "projects"), "error");
     go({ item: null }, "replace");
   }, [byKey.error, url.item, go, toast]);

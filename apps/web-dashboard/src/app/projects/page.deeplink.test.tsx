@@ -35,6 +35,7 @@ const h = vi.hoisted(() => ({
   labels: [] as unknown[],
   items: [] as unknown[],
   savedViews: [] as unknown[] | undefined,
+  viewsError: undefined as unknown,
   byKey: {} as Record<string, unknown>,
   byKeyError: undefined as unknown,
   stale: undefined as unknown,
@@ -102,7 +103,12 @@ vi.mock("@/components/projects/usePm", () => ({
     error: key && enabled ? h.byKeyError : undefined,
     mutate: vi.fn(),
   }),
-  useSavedViews: (scope: unknown) => ({ views: scope ? h.savedViews : undefined, error: undefined, isLoading: false, mutate: vi.fn() }),
+  useSavedViews: (scope: unknown) => ({
+    views: scope ? h.savedViews : undefined,
+    error: scope ? h.viewsError : undefined,
+    isLoading: false,
+    mutate: vi.fn(),
+  }),
   useDepartments: () => ({ departments: undefined }),
   usePeople: () => ({
     person: (id: string) => ({ id, name: "Tester", initials: "T", tone: 1 }),
@@ -207,6 +213,7 @@ beforeEach(() => {
   h.labels = [{ id: "l1", projectId: "p1", name: "Bug", color: null }];
   h.items = [item(1, "First task"), item(2, "Second task")];
   h.savedViews = [];
+  h.viewsError = undefined;
   h.byKey = {};
   h.byKeyError = undefined;
   h.stale = undefined;
@@ -312,6 +319,33 @@ describe("a link that cannot be honoured degrades, and never errors", () => {
     render(<ProjectsPage />);
     expect(screen.getByText("That view isn't available anymore.")).toBeInTheDocument();
     expect(lastQuery().filter).toEqual({ and: [] });
+  });
+
+  it("does not say a view is gone while the projects that would hold it are still loading", () => {
+    h.projectsLoaded = false;
+    visit("/projects?p=INBOX&v=3f2b8c1e-9a44-4d3b-8f10-2a6c1b7d9e01");
+    render(<ProjectsPage />);
+    expect(screen.queryByText("That view isn't available anymore.")).toBeNull();
+    expect(lastQuery().enabled).toBe(false);
+  });
+
+  it("a view list that cannot be loaded says so, and shows everything rather than nothing", () => {
+    h.savedViews = undefined;
+    h.viewsError = new Error("offline");
+    visit("/projects?p=INBOX&v=3f2b8c1e-9a44-4d3b-8f10-2a6c1b7d9e01");
+    render(<ProjectsPage />);
+    expect(screen.getByText("Couldn't load that view, so everything is shown.")).toBeInTheDocument();
+    expect(lastQuery()).toMatchObject({ enabled: true, filter: { and: [] } });
+  });
+
+  it("tells the user once that an item link is dead, however often the page re-renders", () => {
+    h.byKeyError = Object.assign(new Error("not found"), { status: 404, code: "work_item_not_found" });
+    visit("/projects?p=INBOX&item=INBOX-99");
+    const { rerender } = render(<ProjectsPage />);
+    rerender(<ProjectsPage />);
+    rerender(<ProjectsPage />);
+    expect(h.toast).toHaveBeenCalledTimes(1);
+    expect(h.replace).toHaveBeenCalledTimes(1);
   });
 
   it("values the contract rejects are dropped, not acted on", () => {
