@@ -169,6 +169,8 @@ def test_recovery_key_spool_and_capture_stay_on_volatile_run_tmpfs():
     assert "RuntimeDirectory=droplet-bridge-pool-spool" in unit
     assert "RuntimeDirectoryMode=0700" in unit
     assert "/run/droplet-bridge-pool-spool/request.json" in apply_unit
+    assert 'SPOOL_FS="$(findmnt -n -o FSTYPE --target "$SPOOL_DIR"' in apply
+    assert '[ "$SPOOL_FS" = "tmpfs" ]' in apply
     assert 'CAPTURE_FS="$(findmnt -n -o FSTYPE --target "$CAPTURE_DIR"' in apply
     assert '[ "$CAPTURE_FS" = "tmpfs" ]' in apply
     assert "refusing to write the key to persistent storage" in apply

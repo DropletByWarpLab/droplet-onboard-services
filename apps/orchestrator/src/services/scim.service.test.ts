@@ -46,12 +46,30 @@ vi.mock("./department-provisioner.service.js", () => ({
   adminBasicToken: vi.fn(() => "basic-token"),
   DROPLET_ADMINS_GROUP: "droplet-admins",
 }));
+// WARP-3631 — observe the upgrade warning without changing logging.
+const { warnMock } = vi.hoisted(() => ({ warnMock: vi.fn() }));
+vi.mock("../lib/logger.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/logger.js")>();
+  return {
+    ...actual,
+    createLogger: (...a: Parameters<typeof actual.createLogger>) => {
+      const l = actual.createLogger(...a);
+      const warn = l.warn.bind(l);
+      (l as { warn: unknown }).warn = (...args: unknown[]) => {
+        warnMock(...args);
+        return (warn as (...x: unknown[]) => unknown)(...args);
+      };
+      return l;
+    },
+  };
+});
 vi.mock("./nextcloud-groups.client.js", () => ({
   ncAddUserToGroup: ncAddUserToGroupMock,
   ncRemoveUserFromGroup: ncRemoveUserFromGroupMock,
 }));
 
 import { isUserIdShaped } from "@droplet/auth-policy";
+import { config } from "../config.js";
 import { readUserEmail } from "./user-directory.service.js";
 import {
   provisionUser,
@@ -62,6 +80,7 @@ import {
   findUserById,
   findUserByUserName,
   provisionGroup,
+  warnLegacyScimRoleMapping,
 } from "./scim.service.js";
 import {
   assertRoleChangeInvariantsTx,
@@ -83,6 +102,7 @@ interface UserRow {
   role: string;
   isLocal: boolean;
   directoryStatus: "ACTIVE" | "DEACTIVATED";
+  provisionSource?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -98,6 +118,7 @@ interface GroupRow {
   externalId: string | null;
   displayName: string;
   mappedRole: string;
+  memberUserIds?: string[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -231,12 +252,16 @@ function createPrismaMock(seed: UserRow[] = []) {
         }) ?? null
       );
     }),
+    findMany: vi.fn(async ({ where }: { where: any }) =>
+      self._groups.filter((g: GroupRow) => (g.memberUserIds ?? []).includes(where.memberUserIds.has)),
+    ),
     create: vi.fn(async ({ data }: { data: any }) => {
       const row: GroupRow = {
         id: data.id ?? `g-${self._groups.length + 1}`,
         externalId: data.externalId ?? null,
         displayName: data.displayName,
         mappedRole: data.mappedRole ?? "family",
+        memberUserIds: data.memberUserIds ?? [],
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -254,8 +279,14 @@ function createPrismaMock(seed: UserRow[] = []) {
   return self;
 }
 
+// WARP-3631 — SCIM groups elevate only when the operator names them. These are
+// the names this suite's cases push as admin-mapped groups.
+// Elevation is keyed on the stable SCIM group id (`externalId`), never the name.
+const GROUP_ROLE_MAP = { "id:okta-admins": "admin", "id:okta-owners": "owner" };
+
 beforeEach(() => {
   vi.clearAllMocks();
+  (config as { SCIM_GROUP_ROLE_MAP: string }).SCIM_GROUP_ROLE_MAP = JSON.stringify(GROUP_ROLE_MAP);
 });
 
 /** Seed an existing SsoIdentity(okta, subject) → userId link. */
@@ -706,7 +737,7 @@ describe("findUserById / findUserByUserName", () => {
 describe("provisionGroup — upsert + role mapping (highest-privilege-wins floor)", () => {
   it("creates the group with the mapped role from its display name", async () => {
     const prisma = createPrismaMock();
-    const g = await provisionGroup(prisma, { displayName: "Droplet Admins", externalId: "okta-grp-1", memberUserIds: [] });
+    const g = await provisionGroup(prisma, { displayName: "Droplet Admins", externalId: "okta-admins", memberUserIds: [] });
     expect(g.mappedRole).toBe("admin");
     expect(prisma.scimGroup.create).toHaveBeenCalledTimes(1);
   });
@@ -722,7 +753,7 @@ describe("provisionGroup — upsert + role mapping (highest-privilege-wins floor
     const prisma = createPrismaMock();
     const { user } = await provisionUser(prisma, { email: "m@acme.test", displayName: "M", active: true, externalId: "okta-11" });
     expect(user.role).toBe("family");
-    await provisionGroup(prisma, { displayName: "Admins", externalId: "okta-grp-3", memberUserIds: [user.id] });
+    await provisionGroup(prisma, { displayName: "Admins", externalId: "okta-admins", memberUserIds: [user.id] });
     const after = await findUserById(prisma, user.id);
     expect(after?.role).toBe("admin");
   });
@@ -771,7 +802,7 @@ describe("WARP-1568 — SCIM role writes are guarded and capped at admin", () =>
     const prisma = createPrismaMock([member("u-target")]);
     const group = await provisionGroup(prisma, {
       displayName: "Business Owners",
-      externalId: "okta-grp-owner",
+      externalId: "okta-owners",
       memberUserIds: ["u-target"],
     });
 
@@ -783,20 +814,21 @@ describe("WARP-1568 — SCIM role writes are guarded and capped at admin", () =>
     expect(prisma._users.some((u: UserRow) => u.role === "owner")).toBe(false);
   });
 
-  it("no group name whatsoever can produce an owner row", async () => {
-    for (const displayName of ["Owners", "owner", "Owners and Admins", "co-owner"]) {
+  it("no group can produce an owner row, even when the operator maps its id to owner", async () => {
+    const ids = ["g-1", "g-2", "g-3", "g-4"];
+    (config as { SCIM_GROUP_ROLE_MAP: string }).SCIM_GROUP_ROLE_MAP = JSON.stringify(
+      Object.fromEntries(ids.map((i) => [`id:${i}`, "owner"])),
+    );
+    for (const [i, externalId] of ids.entries()) {
       const prisma = createPrismaMock([member("u-x")]);
-      await provisionGroup(prisma, { displayName, externalId: undefined, memberUserIds: ["u-x"] });
-      expect(
-        (await findUserById(prisma, "u-x"))?.role,
-        `group "${displayName}" escalated past the ceiling`,
-      ).toBe("admin");
+      await provisionGroup(prisma, { displayName: ["Owners", "owner", "Owners and Admins", "co-owner"][i], externalId, memberUserIds: ["u-x"] });
+      expect((await findUserById(prisma, "u-x"))?.role, `group ${externalId} escalated past the ceiling`).toBe("admin");
     }
   });
 
   it("the role write runs in ONE explicitly SERIALIZABLE transaction", async () => {
     const prisma = createPrismaMock([member("u-tx")]);
-    await provisionGroup(prisma, { displayName: "Admins", memberUserIds: ["u-tx"] });
+    await provisionGroup(prisma, { displayName: "Admins", externalId: "okta-admins", memberUserIds: ["u-tx"] });
     // Fails if the write ever drops back to a bare $transaction (READ
     // COMMITTED), which is invisible to Postgres SSI and defeats rails 4/5.
     expectAllTransactionsAt(prisma._seam, SERIALIZABLE_TX);
@@ -804,7 +836,7 @@ describe("WARP-1568 — SCIM role writes are guarded and capped at admin", () =>
 
   it("emits the SAME audit row as the interactive surfaces, attributed to the SCIM principal", async () => {
     const prisma = createPrismaMock([member("u-audit")]);
-    await provisionGroup(prisma, { displayName: "Droplet Admins", memberUserIds: ["u-audit"] });
+    await provisionGroup(prisma, { displayName: "Droplet Admins", externalId: "okta-admins", memberUserIds: ["u-audit"] });
 
     // Rail 6, byte-identical to people.ts / access.ts: kind "system",
     // "Role changed", previous → next in `sub`, and the actor is the box
@@ -897,5 +929,132 @@ describe("WARP-1568 — SCIM role writes are guarded and capped at admin", () =>
         SERIALIZABLE_TX,
       ),
     ).resolves.toBeUndefined();
+  });
+});
+
+
+/**
+ * WARP-3631 — groups map by configured exact name or id (never a substring),
+ * and a person dropped from a mapped group is lowered on the next push.
+ */
+describe("WARP-3631 — SCIM group → role mapping is explicit and reversible", () => {
+  const scimMember = (id: string, role = "family"): UserRow => ({
+    id,
+    username: id,
+    nextcloudUsername: id,
+    displayName: id.toUpperCase(),
+    email: `${id}@acme.test`,
+    passwordHash: null,
+    role,
+    isLocal: true,
+    directoryStatus: "ACTIVE",
+    provisionSource: "SCIM",
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+  const setMap = (m: object | string) =>
+    ((config as { SCIM_GROUP_ROLE_MAP: string }).SCIM_GROUP_ROLE_MAP = typeof m === "string" ? m : JSON.stringify(m));
+
+  it.each(["Sales Managers", "Project Managers", "Administrative Assistants", "Badminton Club", "Admins", "Droplet Admins"])(
+    "a group named %s with no id entry maps to the member role and raises nobody",
+    async (displayName) => {
+      const prisma = createPrismaMock([scimMember("u-a")]);
+      const group = await provisionGroup(prisma, { displayName, externalId: "not-configured", memberUserIds: ["u-a"] });
+      expect(group.mappedRole).toBe("family");
+      expect((await findUserById(prisma, "u-a"))?.role).toBe("family");
+    },
+  );
+
+  it("a group whose display name equals a configured id is not elevated", async () => {
+    const prisma = createPrismaMock([scimMember("u-a")]);
+    await provisionGroup(prisma, { displayName: "okta-admins", externalId: "attacker-made", memberUserIds: ["u-a"] });
+    expect((await findUserById(prisma, "u-a"))?.role).toBe("family");
+  });
+
+  it("with NO map configured, a guest-named group still maps to guest and never to more", async () => {
+    setMap("");
+    for (const displayName of ["Guests", "External Guests", "Guest Admins"]) {
+      const prisma = createPrismaMock([scimMember("u-g", "guest")]);
+      const group = await provisionGroup(prisma, { displayName, externalId: "g", memberUserIds: ["u-g"] });
+      expect(group.mappedRole, displayName).toBe("guest");
+      expect((await findUserById(prisma, "u-g"))?.role, displayName).toBe("guest");
+    }
+  });
+
+  it("a malformed map leaves every elevating group at the member role", async () => {
+    setMap("id:okta-admins=admin");
+    const prisma = createPrismaMock();
+    expect((await provisionGroup(prisma, { displayName: "Admins", externalId: "okta-admins", memberUserIds: [] })).mappedRole).toBe("family");
+  });
+
+  it("removing a member from the elevating group lowers their role on the next sync", async () => {
+    const prisma = createPrismaMock([scimMember("u-a"), scimMember("u-keep", "admin")]);
+    // Someone else keeps the box operable (last-operator invariant).
+    await provisionGroup(prisma, { displayName: "Admins", externalId: "okta-admins", memberUserIds: ["u-a", "u-keep"] });
+    expect((await findUserById(prisma, "u-a"))?.role).toBe("admin");
+
+    await provisionGroup(prisma, { displayName: "Admins", externalId: "okta-admins", memberUserIds: ["u-keep"] });
+    expect((await findUserById(prisma, "u-a"))?.role).toBe("family");
+    expect((await findUserById(prisma, "u-keep"))?.role).toBe("admin");
+  });
+
+  it("keeps the role another mapped group still grants", async () => {
+    setMap({ "id:okta-admins": "admin", "id:okta-ops": "admin" });
+    const prisma = createPrismaMock([scimMember("u-a"), scimMember("u-keep", "admin")]);
+    await provisionGroup(prisma, { displayName: "Admins", externalId: "okta-admins", memberUserIds: ["u-a", "u-keep"] });
+    await provisionGroup(prisma, { displayName: "Ops", externalId: "okta-ops", memberUserIds: ["u-a"] });
+    await provisionGroup(prisma, { displayName: "Admins", externalId: "okta-admins", memberUserIds: ["u-keep"] });
+    expect((await findUserById(prisma, "u-a"))?.role).toBe("admin");
+  });
+
+  it("does not lower a role set above the group's grant, a non-SCIM person, or an owner", async () => {
+    const hand = scimMember("u-hand", "admin");
+    const local = { ...scimMember("u-local", "admin"), provisionSource: "LOCAL" };
+    const owner = scimMember("u-owner", "owner");
+    setMap({ "name:Guests": "guest", "id:okta-admins": "admin" });
+    const prisma = createPrismaMock([hand, local, owner, scimMember("u-other", "admin")]);
+    // u-hand is admin by hand and sits in a guest-mapped group: leaving it grants nothing to take back.
+    await provisionGroup(prisma, { displayName: "Guests", externalId: "g", memberUserIds: ["u-hand"] });
+    await provisionGroup(prisma, { displayName: "Guests", externalId: "g", memberUserIds: [] });
+    await provisionGroup(prisma, { displayName: "Admins", externalId: "okta-admins", memberUserIds: ["u-local", "u-owner", "u-other"] });
+    await provisionGroup(prisma, { displayName: "Admins", externalId: "okta-admins", memberUserIds: ["u-other"] });
+    expect((await findUserById(prisma, "u-hand"))?.role).toBe("admin");
+    expect((await findUserById(prisma, "u-local"))?.role).toBe("admin");
+    expect((await findUserById(prisma, "u-owner"))?.role).toBe("owner");
+  });
+
+  it("lowering the configured mapping lowers everyone the old mapping had raised", async () => {
+    const prisma = createPrismaMock([scimMember("u-a"), scimMember("u-keep", "admin")]);
+    await provisionGroup(prisma, { displayName: "Admins", externalId: "okta-admins", memberUserIds: ["u-a"] });
+    expect((await findUserById(prisma, "u-a"))?.role).toBe("admin");
+    setMap("{}");
+    await provisionGroup(prisma, { displayName: "Admins", externalId: "okta-admins", memberUserIds: ["u-a"] });
+    expect((await findUserById(prisma, "u-a"))?.role).toBe("family");
+  });
+
+  it("the last-operator invariant stops a push from lowering the only admin", async () => {
+    const prisma = createPrismaMock([scimMember("u-only")]);
+    await provisionGroup(prisma, { displayName: "Admins", externalId: "okta-admins", memberUserIds: ["u-only"] });
+    await provisionGroup(prisma, { displayName: "Admins", externalId: "okta-admins", memberUserIds: [] });
+    expect((await findUserById(prisma, "u-only"))?.role).toBe("admin");
+  });
+});
+
+describe("warnLegacyScimRoleMapping — upgrade notice (WARP-3631)", () => {
+  it("names each group that used to elevate by name and the exact entry that restores it; grants nothing", async () => {
+    (config as { SCIM_GROUP_ROLE_MAP: string }).SCIM_GROUP_ROLE_MAP = "";
+    const prisma = createPrismaMock();
+    prisma._groups.push(
+      { id: "g1", externalId: "okta-77", displayName: "Admins", mappedRole: "admin", memberUserIds: [] },
+      { id: "g2", externalId: null, displayName: "Store Managers", mappedRole: "admin", memberUserIds: [] },
+      { id: "g3", externalId: "okta-88", displayName: "Everyone", mappedRole: "family", memberUserIds: [] },
+    );
+    prisma.scimGroup.findMany = vi.fn(async () => prisma._groups);
+    await warnLegacyScimRoleMapping(prisma);
+    const calls = warnMock.mock.calls.filter((c) => (c[0] as { group?: string })?.group).map((c) => c[0] as { group: string; restoreWith: unknown });
+    expect(calls.map((c) => c.group)).toEqual(["Admins", "Store Managers"]);
+    expect(calls[0].restoreWith).toEqual({ variable: "SCIM_GROUP_ROLE_MAP", entry: { "id:okta-77": "admin" } });
+    expect(typeof calls[1].restoreWith).toBe("string");
+    expect(prisma._groups[0].mappedRole).toBe("admin");
   });
 });

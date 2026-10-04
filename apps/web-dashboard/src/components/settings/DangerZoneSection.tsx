@@ -9,6 +9,7 @@ import {
   confirmStorageCommand,
   getResetStatus,
   triggerFactoryReset,
+  downloadResetReceipt,
   type ResetJob,
 } from "@/lib/api";
 import type { DriveInfo } from "@/lib/types";
@@ -345,6 +346,9 @@ function FactoryResetCard() {
     // Settings → Device information). The API only ever gives us a masked
     // hint, so the typed value goes to the server verbatim and the SERVER
     // decides — a mismatch throws and the modal surfaces it for retry.
+    // WARP-3640: keep a sealed receipt of the activity log BEFORE the chain is
+    // destroyed. If it cannot be saved the reset is not started.
+    await downloadResetReceipt();
     const res = await triggerFactoryReset(typed);
     // Success: the wipe is dispatched and the box is going down. Close the modal
     // and switch the section to the terminal progress notice.
@@ -433,8 +437,10 @@ function FactoryResetCard() {
             This erases every account, file, message, device setup, and
             setting on the box, and returns it to first-run setup. Your data
             cannot be recovered afterward. The dashboard will go offline while
-            the reset runs. To confirm, type your device&rsquo;s name — you can
-            find it under Settings → Device information.
+            the reset runs. Your browser first saves a signed receipt of this
+            Droplet&rsquo;s activity log, so you keep proof of what was erased.
+            To confirm, type your device&rsquo;s name — you can find it under
+            Settings → Device information.
           </>
         }
         confirmPrompt="your device's name"

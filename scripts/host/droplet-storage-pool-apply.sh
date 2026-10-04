@@ -92,6 +92,11 @@ fi
 OPERATION="$(parse_request operation)"
 PARAMS_JSON="$(parse_request params)"
 [ -n "$OPERATION" ] || die "spooled request has no operation"
+if [ "$OPERATION" = "recovery_key_reveal" ] && [ -z "${DROPLET_POOL_SPOOL_DIR:-}" ]; then
+  SPOOL_FS="$(findmnt -n -o FSTYPE --target "$SPOOL_DIR" 2>/dev/null || true)"
+  [ "$SPOOL_FS" = "tmpfs" ] \
+    || die "recovery-key result requires a tmpfs spool — refusing to write the key to persistent storage"
+fi
 
 # --- Run the pool script, capturing rc / stdout / stderr -----------------------
 # The pool script's own allow-list + hard pre-flight (typed double-confirm,

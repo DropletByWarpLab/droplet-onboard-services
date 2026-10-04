@@ -343,35 +343,54 @@ bay_escrow_put() {
 }
 
 # bay_recovery_key_reveal <fs-uuid>: the one-time hand-over. Consumption is an
-# atomic rename out of the escrow directory, so even two racing requests yield
-# the key to exactly one caller. Every NORMAL outcome exits 0 with an explicit
+# atomically claimed retrieved tombstone so even two racing requests yield the
+# key to exactly one caller. Every NORMAL outcome exits 0 with an explicit
 # `status` enum — revealed | already_retrieved | expired | not_found (the
 # orchestrator maps it to 200 / 410 / 410 / 404); only a malformed request or a
 # corrupt escrow file is an error. The key goes to STDOUT only.
 bay_recovery_key_reveal() {
-  local uuid="$1" f consumed key tomb
+  local uuid="$1" f key tomb tomb_tmp
   [[ "$uuid" =~ ^[A-Fa-f0-9-]{8,64}$ ]] \
-    || die "invalid uuid for recovery_key_reveal (expected the filesystem UUID)"
+  || die "invalid uuid for recovery_key_reveal (expected the filesystem UUID)"
   for f in "$BAY_ESCROW_DIR"/*__"$uuid".key; do
     [ -f "$f" ] || continue
+    tomb="$(printf '%s' "$f" | sed 's/\.key$/.retrieved/')"
+    if [ -f "$tomb" ]; then
+      bay_shred "$f"
+      printf '{"ok": true, "operation": "recovery_key_reveal", "status": "already_retrieved", "uuid": "%s"}\n' "$uuid"
+      return 0
+    fi
     if bay_escrow_expired "$f"; then
       # Past its TTL: shredded here and now, never handed out.
       bay_escrow_expire_file "$f"
       printf '{"ok": true, "operation": "recovery_key_reveal", "status": "expired", "uuid": "%s"}\n' "$uuid"
       return 0
     fi
-    consumed="$BAY_ESCROW_DIR/.consumed.$$"
-    mv -T "$f" "$consumed" 2>/dev/null || continue   # lost the race
     key=""
-    IFS= read -r key < "$consumed" || true
-    bay_shred "$consumed"
+    IFS= read -r key < "$f" || true
     if ! [[ "$key" =~ ^[a-z0-9-]{16,}$ ]]; then
-      # Never echo the value. The file is already consumed, so the damage is
-      # contained: regenerate the key to issue a fresh one.
+      # Never echo the value; leave an expired marker so Regenerate can still
+      # find the LUKS UUID after discarding corrupt escrow.
+      bay_escrow_expire_file "$f"
       die "the escrowed recovery key for $uuid is malformed and has been discarded — regenerate the recovery key to issue a new one"
     fi
-    tomb="${f%.key}.retrieved"
-    ( umask 077; date -u +%Y-%m-%dT%H:%M:%SZ > "$tomb" ) 2>/dev/null || true
+    tomb_tmp="$tomb.tmp.$$"
+    if ! ( umask 077; date -u +%Y-%m-%dT%H:%M:%SZ > "$tomb_tmp" ) 2>/dev/null; then
+      rm -f "$tomb_tmp"
+      die "could not record the one-time retrieval; the key remains escrowed — retry"
+    fi
+    if ! ln -T "$tomb_tmp" "$tomb" 2>/dev/null; then
+      rm -f "$tomb_tmp"
+      if [ -f "$tomb" ]; then
+        bay_shred "$f"
+        printf '{"ok": true, "operation": "recovery_key_reveal", "status": "already_retrieved", "uuid": "%s"}\n' "$uuid"
+        return 0
+      fi
+      die "could not record the one-time retrieval; the key remains escrowed — retry"
+    fi
+    rm -f "$tomb_tmp"
+    bay_shred "$f"
+    [ ! -e "$f" ] || die "could not remove the consumed recovery key — regenerate the recovery key to issue a new one"
     printf '{"ok": true, "operation": "recovery_key_reveal", "status": "revealed", "uuid": "%s", "recovery_key": "%s"}\n' \
       "$uuid" "$key"
     return 0
@@ -396,7 +415,14 @@ bay_recovery_key_reveal() {
 # TTL (leaving `.expired` tombstones). Run daily by
 # droplet-bay-recovery-expiry.timer; reveal enforces the same TTL on its own.
 bay_recovery_key_expire() {
-  local f n=0
+  local f key n=0
+  # A crash after creating the one-time marker but before removing the key can
+  # leave an orphan escrow file. The marker wins; clear any such copy.
+  for f in "$BAY_ESCROW_DIR"/*__*.retrieved; do
+    [ -f "$f" ] || continue
+    key="${f%.retrieved}.key"
+    [ -f "$key" ] && bay_shred "$key"
+  done
   for f in "$BAY_ESCROW_DIR"/*.key; do
     [ -f "$f" ] || continue
     if bay_escrow_expired "$f"; then
@@ -420,7 +446,7 @@ try:
     meta = json.load(sys.stdin)
 except Exception:
     sys.exit(1)
-if not isinstance(meta, dict) or not isinstance(meta.get("tokens", {}), dict):
+if not isinstance(meta, dict) or not isinstance(meta.get("tokens"), dict):
     sys.exit(1)
 for tok in meta["tokens"].values():
     if isinstance(tok, dict) and tok.get("type") == "systemd-recovery":

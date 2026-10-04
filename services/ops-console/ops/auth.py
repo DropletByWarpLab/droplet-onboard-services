@@ -19,6 +19,7 @@ import hashlib
 import logging
 import os
 import secrets
+from datetime import datetime, timezone
 
 from fastapi import Header, HTTPException, status
 
@@ -53,6 +54,49 @@ if not _OPS_TOKEN:
     )
 
 
+# WARP-3641: explicit expiry on the support window. OPS_ACCESS_EXPIRES_AT is an
+# ISO-8601 timestamp (a trailing Z or an offset; no zone means UTC) set by
+# whoever enables the `ops` profile for an engagement. Once it passes, every
+# /ops/* request is refused even with the right token, until the value is
+# changed and the container recreated. Unset = no expiry (the behaviour before
+# this setting existed; a deployed box is not locked out by an upgrade).
+# FAIL CLOSED on a value that does not parse: a typo must end the window, not
+# silently leave it open forever. The deadline is checked per request, not
+# only at boot, so a long-running container cannot outlive it.
+_EXPIRY_ENV = "OPS_ACCESS_EXPIRES_AT"
+
+
+def _parse_expiry(raw: str | None) -> datetime | None:
+    value = (raw or "").strip()
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        logger.error(
+            "%s=%r is not an ISO-8601 timestamp; the support window is "
+            "CLOSED until it is fixed", _EXPIRY_ENV, value,
+        )
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+_ACCESS_EXPIRES_AT = _parse_expiry(os.environ.get(_EXPIRY_ENV))
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def window_description() -> str:
+    """One line for the boot audit record: when the window ends, if ever."""
+    if _ACCESS_EXPIRES_AT is None:
+        return "support window: no expiry configured"
+    return f"support window ends {_ACCESS_EXPIRES_AT.isoformat()}"
+
+
 def require_token(authorization: str | None = Header(default=None)) -> None:
     """FastAPI dependency that 401s on missing / mismatched bearer.
 
@@ -63,6 +107,13 @@ def require_token(authorization: str | None = Header(default=None)) -> None:
     Constant-time compare via secrets.compare_digest so timing-side-
     channel attacks don't leak the token a byte at a time.
     """
+    if _ACCESS_EXPIRES_AT is not None and _now() >= _ACCESS_EXPIRES_AT:
+        logger.warning("refusing /ops request: the support window ended %s",
+                       _ACCESS_EXPIRES_AT.isoformat())
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Support access window has ended",
+        )
     if not authorization:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -76,7 +127,9 @@ def require_token(authorization: str | None = Header(default=None)) -> None:
             detail="Authorization header must be `Bearer <token>`",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if not secrets.compare_digest(presented, _OPS_TOKEN):
+    # Compare bytes: compare_digest on str raises TypeError (a 500) for any
+    # non-ASCII character in the header, which an unauthenticated caller can send.
+    if not secrets.compare_digest(presented.encode("utf-8"), _OPS_TOKEN.encode("utf-8")):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid token",

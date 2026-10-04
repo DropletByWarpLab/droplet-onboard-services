@@ -72,6 +72,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type pino from "pino";
 import { createLogger } from "../../lib/logger.js";
+import { HqTokenError, type HqTokenService } from "../hq-token.service.js";
 import {
   ReconcileUnsupportedError,
   SELF_SERVICE_NAME,
@@ -109,8 +110,20 @@ export interface HostComposeRunnerOptions {
    * serves. Absent → never skip.
    */
   appDownloadsDir?: string;
-  /** Private-GHCR token, handed to pull-images only (never another call). */
+  /**
+   * LAB/DEV ONLY (ADR-045: never on a customer box). A GitHub token for
+   * ghcr.io image refs, handed to pull-images only (never another call).
+   */
   githubToken?: string;
+  /**
+   * WARP-3503 — the HQ device-token client. When set, every image whose ref
+   * names the HQ registry host (`hqToken.host`) is pulled with a fresh
+   * `registry:pull` token, handed to pull-images only, as an env var (never
+   * argv, never logged). A refused or unreachable HQ throws a
+   * `registry-auth:` error, which apply.ts retries and keeps the current
+   * release.
+   */
+  hqToken?: Pick<HqTokenService, "host" | "getToken">;
   exec?: ExecFn;
   logger?: pino.Logger;
   /**
@@ -312,6 +325,33 @@ async function catalogHas(dir: string, client: ReleaseClient): Promise<boolean> 
   }
 }
 
+/** The registry host of a `host[:port]/repo@sha256:…` image ref, lowercase. */
+function imageHost(image: string): string {
+  return image.split("/", 1)[0]!.toLowerCase();
+}
+
+/** A token handed to pull-images must have at least this long left (5 min). */
+const REGISTRY_TOKEN_MIN_REMAINING_MS = 300_000;
+
+/**
+ * A `registry:pull` token that outlives one image pull. A refusal is
+ * rethrown as the helper's own canonical `registry-auth:` line, so apply.ts
+ * classifies it exactly like a registry that refused auth: retry later, row
+ * stays verifying, reason preserved. Never touches the token in a message.
+ */
+async function registryPullToken(hq: Pick<HqTokenService, "getToken">): Promise<string> {
+  try {
+    return (
+      await hq.getToken(["registry:pull"], { minRemainingMs: REGISTRY_TOKEN_MIN_REMAINING_MS })
+    ).token;
+  } catch (err) {
+    if (!(err instanceof HqTokenError)) throw err;
+    throw new Error(
+      `registry-auth: HQ issued no registry token (${err.reason}: ${err.detail}) — the box keeps its current release and retries`,
+    );
+  }
+}
+
 export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRunner {
   const log = opts.logger ?? defaultLog;
   const exec = opts.exec ?? defaultExec();
@@ -428,12 +468,25 @@ export function createHostComposeRunner(opts: HostComposeRunnerOptions): ApplyRu
     },
 
     async pullImages(services: ReleaseService[]): Promise<void> {
-      await run(
-        "pull-images",
-        ["--images", ...services.map((s) => s.image)],
-        timeouts.pullMs,
-        opts.githubToken ? { DROPLET_OTA_GITHUB_TOKEN: opts.githubToken } : undefined,
-      );
+      const githubEnv = opts.githubToken ? { DROPLET_OTA_GITHUB_TOKEN: opts.githubToken } : undefined;
+      const hq = opts.hqToken;
+      if (!hq || !services.some((s) => imageHost(s.image) === hq.host)) {
+        await run("pull-images", ["--images", ...services.map((s) => s.image)], timeouts.pullMs, githubEnv);
+        return;
+      }
+      // One exec per image, each asking for a token with at least
+      // REGISTRY_TOKEN_MIN_REMAINING_MS left: an HQ token lives 10 minutes and a
+      // multi-image pull can outlast it. HQ rate-limits challenges (5 per
+      // minute per key), so a token is reused until it nears that floor rather
+      // than minted once per image.
+      for (const s of services) {
+        const env: Record<string, string> = { ...githubEnv };
+        if (imageHost(s.image) === hq.host) {
+          env.DROPLET_OTA_REGISTRY_HOST = hq.host;
+          env.DROPLET_OTA_REGISTRY_TOKEN = await registryPullToken(hq);
+        }
+        await run("pull-images", ["--images", s.image], timeouts.pullMs, env);
+      }
     },
 
     async stageConfigs(args: {
@@ -681,7 +734,7 @@ export async function ncTransferOwnership(args: {
 }): Promise<{ folder: string | null }> {
   const log = args.logger ?? defaultLog;
   if (!NC_USER_ID_RE.test(args.from) || !NC_USER_ID_RE.test(args.to)) {
-    throw new NcTransferError("A Nextcloud account name has characters the hand-over can't accept.");
+    throw new NcTransferError("A File Store account name has characters the hand-over can't accept.");
   }
   if (args.from === args.to) {
     throw new NcTransferError("The recipient can't be the person being deleted.");

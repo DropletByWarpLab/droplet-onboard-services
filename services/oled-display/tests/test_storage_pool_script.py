@@ -1585,8 +1585,9 @@ def test_a_failed_prepare_leaves_no_half_built_bay_behind(fail_env, why, tmp_pat
     if fail_env.get("CRYPTSETUP_FAIL_OP") != "open":
         assert _idx(cmds, "cryptsetup close", BAY_MAPPER) >= 0, (why, cmds)
     erase = _idx(cmds, "cryptsetup luksErase --batch-mode /dev/sdb")
-    signature = _idx(cmds, "wipefs -a /dev/sdb")
-    assert 0 <= erase < signature, (why, cmds)
+    cleanup_wipes = [i for i, command in enumerate(cmds)
+                     if i > erase and "wipefs -a /dev/sdb" in command]
+    assert erase >= 0 and cleanup_wipes, (why, cmds)
     _assert_no_key_material(tmp_path, proc, cmds)
 
 
@@ -1599,8 +1600,9 @@ def test_a_failed_mkfs_leaves_no_half_built_bay_behind(tmp_path):
     assert _crypttab(tmp_path) == [] and _escrow(tmp_path) == []
     assert _idx(cmds, "cryptsetup close", BAY_MAPPER) >= 0, cmds
     erase = _idx(cmds, "cryptsetup luksErase --batch-mode /dev/sdb")
-    signature = _idx(cmds, "wipefs -a /dev/sdb")
-    assert 0 <= erase < signature, cmds
+    cleanup_wipes = [i for i, command in enumerate(cmds)
+                     if i > erase and "wipefs -a /dev/sdb" in command]
+    assert erase >= 0 and cleanup_wipes, cmds
     assert list((tmp_path / "run").glob(".bay-key.*")) == []
 
 
@@ -1869,9 +1871,35 @@ def test_reveal_refuses_a_malformed_escrow_file_without_echoing_it(tmp_path):
     assert "THE-SECRET" not in proc.stdout + proc.stderr
 
 
+def test_reveal_keeps_key_if_one_time_marker_cannot_be_recorded(tmp_path):
+    key_file = _seed_escrow(tmp_path)
+    # A directory at the exact marker path forces the real `ln -T` to fail,
+    # without depending on PATH-based stubbing of a utility not used elsewhere.
+    marker = key_file.with_suffix(".retrieved")
+    marker.mkdir()
+    proc, _cmds = _reveal(tmp_path)
+    assert proc.returncode != 0
+    assert key_file.exists(), "do not consume a key without durable retrieval state"
+    assert marker.is_dir()
+    assert FAKE_RECOVERY_KEY not in proc.stdout + proc.stderr
+
+
+def test_reveal_clears_orphaned_key_when_retrieval_marker_exists(tmp_path):
+    key_file = _seed_escrow(tmp_path)
+    tomb = key_file.with_suffix(".retrieved")
+    tomb.write_text("retrieved\n", encoding="utf-8")
+    _age(key_file, 8)  # the committed retrieval state outranks the stale key TTL
+    proc, _cmds = _reveal(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["status"] == "already_retrieved"
+    assert not key_file.exists(), "a committed retrieval marker must win over a stale key copy"
+    assert tomb.exists()
+    assert FAKE_RECOVERY_KEY not in proc.stdout + proc.stderr
+
+
 def test_reveal_has_exactly_one_winner_when_two_requests_race(tmp_path):
-    # Consumption is an atomic rename out of the escrow dir, so even if the
-    # root executor were ever started twice only ONE caller gets the key.
+    # The retrieved marker is an atomic no-clobber claim, so even if the root
+    # executor were ever started twice only ONE caller gets the key.
     _seed_escrow(tmp_path)
     import concurrent.futures as cf
 
@@ -1940,6 +1968,21 @@ def test_the_expiry_sweep_shreds_only_stale_unrevealed_keys(tmp_path):
     assert FAKE_RECOVERY_KEY not in proc.stdout + proc.stderr
 
 
+def test_the_expiry_sweep_clears_key_left_after_retrieval_marker_commit(tmp_path):
+    key_file = _seed_escrow(tmp_path)
+    other_key = _seed_escrow(
+        tmp_path, luks="2b2b2b2b-1111-4222-8333-444455556666", fs=FS_UUID)
+    tomb = key_file.with_suffix(".retrieved")
+    tomb.write_text("retrieved\n", encoding="utf-8")
+    proc, _cmds = _exec_run("recovery_key_expire", {}, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["expired"] == 0
+    assert not key_file.exists()
+    assert other_key.exists(), "a marker must only consume its matching LUKS container key"
+    assert tomb.exists()
+    assert FAKE_RECOVERY_KEY not in proc.stdout + proc.stderr
+
+
 def test_the_expiry_sweep_with_nothing_escrowed_is_a_clean_no_op(tmp_path):
     proc, cmds = _exec_run("recovery_key_expire", {}, tmp_path)
     assert proc.returncode == 0, proc.stderr
@@ -2005,7 +2048,7 @@ def test_regenerate_restarts_the_seven_day_clock(tmp_path):
 
 def test_regenerate_with_no_old_recovery_slot_just_enrols_one(tmp_path):
     _seed_escrow(tmp_path)
-    proc, cmds = _regen(tmp_path, LUKS_DUMP_JSON="{}")
+    proc, cmds = _regen(tmp_path, LUKS_DUMP_JSON='{"tokens":{}}')
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout)["status"] == "regenerated"
     assert _idx(cmds, "systemd-cryptenroll", "--recovery-key") >= 0
@@ -2019,7 +2062,8 @@ def test_regenerate_refuses_when_recovery_slot_metadata_cannot_be_read(tmp_path)
     assert proc.returncode != 0
     assert "inspect the existing recovery keyslots" in (proc.stderr + proc.stdout)
     assert old.read_text(encoding="utf-8") == before
-    assert _first(cmds, "systemd-cryptenroll") == -1, cmds
+    assert _idx(cmds, "--recovery-key") == -1, cmds
+    assert _idx(cmds, "--wipe-slot=") == -1, cmds
 
 
 def test_regenerate_of_an_unknown_drive_is_not_found(tmp_path):
