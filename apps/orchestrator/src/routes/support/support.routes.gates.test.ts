@@ -47,7 +47,7 @@ import { mountModuleGates } from "../../modules/module-mounts.js";
 import { createModuleGate } from "../../middleware/module-gate.js";
 import { MODULES, type AvailabilityConfig } from "../../modules/module-registry.js";
 import { createSupportRouter } from "./support.routes.js";
-import { ROUTES, grants } from "./support.test-support.js";
+import { ROUTES, grants } from "../../__tests__/helpers/support-routes.js";
 import type { AuthUser } from "../../middleware/auth.js";
 import type { FeatureLevel } from "../../services/access-catalog.js";
 

@@ -18,7 +18,7 @@ import type { AuthUser } from "../../middleware/auth.js";
 import type { EffectiveAccessResolver } from "../../middleware/feature-gate.js";
 import type { ModuleId } from "@prisma/client";
 import type { FeatureLevel } from "../../services/access-catalog.js";
-import { ROUTES, grants, type RouteCase } from "./support.test-support.js";
+import { ROUTES, grants, type RouteCase } from "../../__tests__/helpers/support-routes.js";
 
 vi.mock("../../config.js", () => ({
   config: { AUTH_ENABLED: false, agentMaxIter: { defaultIter: 5, capIter: 10 } },
