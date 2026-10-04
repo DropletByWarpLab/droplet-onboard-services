@@ -408,6 +408,7 @@ STOCK="Enabled:
   - files: 2.1.1
   - firstrunwizard: 2.18.0
   - nextcloud_announcements: 1.18.0
+  - photos: 2.5.0
   - recommendations: 2.1.0
   - richdocuments: 8.4.16
   - support: 1.12.0
@@ -436,7 +437,7 @@ for app in survey_client nextcloud_announcements; do
   fi
 done
 
-for app in updatenotification support weather_status recommendations; do
+for app in updatenotification support weather_status recommendations photos; do
   if grep -qx "$app" "$WORK/state/disabled"; then
     pass "$app is disabled"
   else

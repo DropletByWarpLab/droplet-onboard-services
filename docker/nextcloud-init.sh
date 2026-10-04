@@ -539,6 +539,11 @@ reconcile_overwrite_protocol() {
 #     not apply on its own schedule — the box updates as a unit.
 #   * `support` advertises Nextcloud Enterprise; `weather_status` calls an
 #     external weather API from the user menu; `recommendations` is noise.
+#   * `photos` (WARP-3606) can publish a public album from a plain DAV request
+#     (PROPPATCH under remote.php/dav/photos), a route that mints a
+#     credential-free URL without the owner/admin publish rule or an audit
+#     row. Nothing here uses it: the dashboard reads files and previews
+#     through core, and the mobile apps' auto-upload is plain WebDAV.
 #
 # NOT `dashboard` and NOT `activity`, deliberately. `dashboard` is Nextcloud's
 # default landing app — disabling it changes what the bare /nextcloud/ route
@@ -552,7 +557,7 @@ reconcile_overwrite_protocol() {
 disable_hub_apps() {
   hub_disabled=""
   for hub_app in firstrunwizard updatenotification nextcloud_announcements \
-                 survey_client support weather_status recommendations; do
+                 survey_client support weather_status recommendations photos; do
     # Match the app NAME in the Enabled block, not anywhere in occ's output:
     # every one of these also appears under "Disabled:" once it is off, and a
     # loose grep would retry the disable on every single boot forever.
