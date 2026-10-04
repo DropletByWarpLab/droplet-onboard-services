@@ -1,0 +1,51 @@
+/**
+ * WARP-3532 — `writeActivity` is the choke point every PM mutation goes through
+ * (ADR-069 §7), and the one place the outbox consumers are woken.
+ */
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+vi.mock("./pm-outbox.js", () => ({ nudgeOutbox: vi.fn() }));
+
+import { nudgeOutbox } from "./pm-outbox.js";
+import { addComment } from "./pm.service.js";
+
+const T0 = new Date("2026-10-04T12:00:00.000Z");
+
+function prismaStub() {
+  const tx = {
+    pmComment: {
+      create: vi.fn(async () => ({
+        id: "c-1", workItemId: "wi-1", authorId: "u-1", commentHtml: "<p>hi</p>", createdAt: T0, updatedAt: T0,
+      })),
+    },
+    pmActivity: { create: vi.fn(async () => ({})) },
+  };
+  return {
+    tx,
+    pmWorkItem: { findUnique: vi.fn(async () => ({ id: "wi-1" })) },
+    $transaction: vi.fn(async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx)),
+  };
+}
+
+beforeEach(() => vi.clearAllMocks());
+
+describe("writeActivity nudges the outbox", () => {
+  it("after writing the activity row, once per row", async () => {
+    const prisma = prismaStub();
+    await addComment(prisma as never, "u-1", "wi-1", "<p>hi</p>");
+
+    expect(prisma.tx.pmActivity.create).toHaveBeenCalledTimes(1);
+    expect(nudgeOutbox).toHaveBeenCalledTimes(1);
+    // Order: the row first, then the wake-up (the wake-up is useless before it).
+    const rowAt = prisma.tx.pmActivity.create.mock.invocationCallOrder[0]!;
+    const nudgeAt = vi.mocked(nudgeOutbox).mock.invocationCallOrder[0]!;
+    expect(nudgeAt).toBeGreaterThan(rowAt);
+  });
+
+  it("does not nudge when the activity write fails", async () => {
+    const prisma = prismaStub();
+    prisma.tx.pmActivity.create.mockRejectedValueOnce(new Error("boom"));
+    await expect(addComment(prisma as never, "u-1", "wi-1", "<p>hi</p>")).rejects.toThrow("boom");
+    expect(nudgeOutbox).not.toHaveBeenCalled();
+  });
+});
