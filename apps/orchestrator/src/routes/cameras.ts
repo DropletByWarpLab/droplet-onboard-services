@@ -661,6 +661,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!pathValid.ok) {
         return res.status(400).json({ error: pathValid.error });
       }
+      // WARP-3642 — only recorded clips are shareable: the path must sit under
+      // the clips folder, not anywhere in the person's Nextcloud.
+      if (!pathValid.path.startsWith(CLIPS_SHARE_PREFIX)) {
+        return res.status(400).json({ error: "nc_path must be inside the clips folder" });
+      }
 
       // Post-confirmation re-issue: the caller echoes the token from the 202.
       // The MCP principal is BARRED from confirming (mirrors the human-only
@@ -3497,6 +3502,10 @@ function parseRecordingRange(req: import("express").Request):
   }
   return { after: a, before: Math.min(b, nowSec) };
 }
+
+/** WARP-3642 — the folder exportClip writes to (clips.service.ts CLIPS_NC_ROOT);
+ *  the only place a share link may point. */
+const CLIPS_SHARE_PREFIX = "/Clips/";
 
 /** Defense-in-depth path validation mirroring PR #1's validateNcPath
  *  logic. Reject traversal markers (raw and percent-decoded) so a caller
