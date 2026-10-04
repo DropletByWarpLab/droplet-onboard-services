@@ -66,10 +66,12 @@ _img_parse_flags() {
 # lifting (pinned ISO download, SHA256 verify, xorriso repack) lives in
 # scripts/image/build-iso.sh so the builder stays mirror-able to openwrt/build.sh.
 image_build() {
-  local FLAG_SHAPE="" FLAG_VERSION=""
+  local FLAG_SHAPE="" FLAG_VERSION="" FLAG_REF=""
   _img_parse_flags "$@"
   local shape="${FLAG_SHAPE:-single-box}"
   local version="${FLAG_VERSION:-}"
+  local ref="${FLAG_REF:-}"
+  [ -n "$ref" ] || img_die "build needs --ref <release-tag|commit-sha>: an image must pin the platform release it installs (WARP-3599)"
 
   if [ "$shape" != "single-box" ]; then
     img_die "unsupported --shape '$shape' (Phase 1 builds single-box only)"
@@ -81,7 +83,7 @@ image_build() {
   log_info "Building appliance image: shape=$shape version=${version:-<from package.json>}"
   # Delegate. build-iso.sh reads --version (or falls back to package.json) and
   # emits output/droplet-${shape}-<version>.iso.
-  exec bash "$build_iso" --shape "$shape" ${version:+--version "$version"}
+  exec bash "$build_iso" --shape "$shape" --ref "$ref" ${version:+--version "$version"}
 }
 
 # =============================================================================

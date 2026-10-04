@@ -110,6 +110,8 @@ interface DiscoveryRecord {
   manufacturer?: string | null;
   model?: string | null;
   rtsp_url?: string | null;
+  /** WARP-3597: camera-discovery strips `user:pass@` from `rtsp_url` and says so here. */
+  has_credentials?: boolean;
   status?: string;
   detection_method?: string | null;
   discovered_at?: string;
@@ -210,7 +212,7 @@ function toCandidate(record: DiscoveryRecord): CameraCandidate | null {
     status: deriveCandidateStatus(record),
     detectionMethod: record.detection_method ?? null,
     rtspUrl: redacted.rtspUrl,
-    hasCredentials: redacted.hasCredentials,
+    hasCredentials: record.has_credentials ?? redacted.hasCredentials,
     discoveredAt: record.discovered_at ?? null,
     source: "live",
   };
@@ -445,6 +447,18 @@ export interface DiscoveryMutationResult {
   status: number;
   /** Upstream `detail` text when it failed — operator-facing, already prose. */
   message?: string;
+  /**
+   * Machine-readable failure reason (credentials route only): auth_failed,
+   * locked, no_stream_path, unreachable, timeout, invalid_credentials,
+   * unsupported_password.
+   */
+  code?: string;
+  /**
+   * Which camera a successful credentials add put into Frigate (credentials route
+   * only). A static-IP camera has no MAC on its DB row, so the caller matches on
+   * these too. Never carries a stream URL.
+   */
+  camera?: { name?: string; ip?: string; mac?: string };
 }
 
 /**
@@ -471,4 +485,78 @@ export async function mutateLiveCandidate(
   const body = (await resp.json().catch(() => ({}))) as { detail?: unknown };
   const detail = typeof body.detail === "string" ? body.detail : undefined;
   return { ok: false, status: resp.status, message: detail };
+}
+
+/**
+ * Add a live candidate using credentials the operator typed (WARP-3505).
+ *
+ * camera-discovery re-runs ONVIF GetStreamUri + the RTSP path probe with these
+ * credentials and, on success, commits the camera to Frigate itself — it is the
+ * only place that knows the probed path and holds the pending record.
+ *
+ * NET-05: the password travels only in the POST body to the internal service.
+ * It is never logged here, never put in the URL, and the returned result
+ * carries only camera-discovery's operator prose + a code, so a caller can't
+ * accidentally echo it.
+ */
+export async function submitLiveCandidateCredentials(
+  mac: string,
+  username: string,
+  password: string,
+): Promise<DiscoveryMutationResult> {
+  let resp: Response;
+  try {
+    resp = await internalFetch(
+      `${internalBaseUrl(config.CAMERA_DISCOVERY_URL)}/cameras/discovered/${encodeURIComponent(discoveryKey(mac))}/credentials`,
+      {
+        method: "POST",
+        headers: { ...discoveryAuthHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+        // camera-discovery bounds its own work: the probing phase (RTSP walk
+        // <= 25 s, then ONVIF <= 8 s and one named path <= 10 s, only when RTSP
+        // found no path) has a HARD 45 s deadline, answered as a 504 `timeout`;
+        // the Frigate commit that follows is sub-second. 60 s outlasts that, and
+        // every proxy hop in front of the browser outlasts this
+        // (apps/web-dashboard/next.config.js, docker/nginx/nginx.conf).
+        signal: AbortSignal.timeout(60_000),
+      },
+    );
+  } catch (err) {
+    // Deliberately drop the error object: undici errors can carry request
+    // context, and the body of this request is the password. Only its NAME is
+    // read, to tell "took too long" (the camera may well have been added) from
+    // "camera-discovery is not running".
+    if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+      return {
+        ok: false,
+        status: 504,
+        code: "timeout",
+        message: "The camera took too long to answer. If it was added, it will appear in your cameras shortly.",
+      };
+    }
+    return {
+      ok: false,
+      status: 502,
+      code: "discovery_unavailable",
+      message: "Camera discovery isn't running, so the camera couldn't be checked.",
+    };
+  }
+  const body = (await resp.json().catch(() => ({}))) as {
+    detail?: unknown;
+    code?: unknown;
+    camera?: Record<string, unknown> | null;
+  };
+  if (resp.ok) {
+    const added = body.camera;
+    const pick = (key: string) => (typeof added?.[key] === "string" ? (added[key] as string) : undefined);
+    // Only the three identifying fields are carried, whatever else the reply holds.
+    const camera = added ? { name: pick("name"), ip: pick("ip"), mac: pick("mac") } : undefined;
+    return { ok: true, status: resp.status, ...(camera ? { camera } : {}) };
+  }
+  return {
+    ok: false,
+    status: resp.status,
+    code: typeof body.code === "string" ? body.code : undefined,
+    message: typeof body.detail === "string" ? body.detail : undefined,
+  };
 }

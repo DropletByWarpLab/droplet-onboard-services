@@ -142,6 +142,8 @@ class _ScriptedCamera:
 
 @pytest.fixture(autouse=True)
 def _fresh_budget(monkeypatch):
+    # The local scripted camera deliberately uses Basic. Production stays Digest-only.
+    monkeypatch.setenv("CAMERA_RTSP_BASIC_ALLOW_IPS", IP)
     rtsp_prober._ladder.clear()
     monkeypatch.setattr(rtsp_prober, "get_credentials", lambda: list(CREDENTIALS))
     clock = _Clock()
@@ -155,6 +157,15 @@ async def _ladder(camera: _ScriptedCamera):
 
 
 class TestTheBudget:
+    @pytest.mark.asyncio
+    async def test_a_basic_only_camera_gets_no_login_without_an_explicit_allowance(self, monkeypatch):
+        monkeypatch.setenv("CAMERA_RTSP_BASIC_ALLOW_IPS", "")
+        async with _ScriptedCamera() as camera:
+            assert await _ladder(camera) is None
+        assert camera.logins == []
+        assert camera.requests == 1
+        assert rtsp_prober._ladder[IP].next_credential == 0
+
     @pytest.mark.asyncio
     async def test_a_run_spends_at_most_the_failed_login_budget(self):
         async with _ScriptedCamera() as camera:

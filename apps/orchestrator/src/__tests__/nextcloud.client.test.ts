@@ -40,6 +40,7 @@ import {
   ncFetchThumbnail,
   ncCreateShareV2,
   ncUpdateShare,
+  ncIsDirectory,
   ncDeleteShare,
   ncListSharedWithMe,
   ncListOutboundShares,
@@ -902,6 +903,24 @@ describe("nextcloud.client — shares v2", () => {
       await expect(
         ncCreateShareV2("t", "/report.pdf", { shareType: 3, password: "pwned" })
       ).rejects.toThrow(/compromised password list/);
+    });
+  });
+
+  describe("ncIsDirectory (WARP-3586)", () => {
+    const propfind = (status: number, text = "") =>
+      mockResponse({ ok: status >= 200 && status < 300, status, text });
+
+    it("true for a collection, false for a file, false for 404, throws otherwise", async () => {
+      const collection = '<d:multistatus xmlns:d="DAV:"><d:response><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>';
+      const file = '<d:multistatus xmlns:d="DAV:"><d:response><d:propstat><d:prop><d:resourcetype/></d:prop></d:propstat></d:response></d:multistatus>';
+      global.fetch = vi.fn().mockResolvedValueOnce(propfind(207, collection)) as unknown as typeof fetch;
+      await expect(ncIsDirectory("t", "mia", "/Docs")).resolves.toBe(true);
+      global.fetch = vi.fn().mockResolvedValueOnce(propfind(207, file)) as unknown as typeof fetch;
+      await expect(ncIsDirectory("t", "mia", "/Docs/a.pdf")).resolves.toBe(false);
+      global.fetch = vi.fn().mockResolvedValueOnce(propfind(404)) as unknown as typeof fetch;
+      await expect(ncIsDirectory("t", "mia", "/nope")).resolves.toBe(false);
+      global.fetch = vi.fn().mockResolvedValueOnce(propfind(500)) as unknown as typeof fetch;
+      await expect(ncIsDirectory("t", "mia", "/x")).rejects.toThrow(/PROPFIND failed/);
     });
   });
 

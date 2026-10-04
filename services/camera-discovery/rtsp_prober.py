@@ -3,49 +3,81 @@
 Checks common RTSP ports on a given IP address and attempts to find
 valid stream paths by issuing RTSP OPTIONS/DESCRIBE requests. When an
 unauthenticated DESCRIBE is refused (401), the prober iterates the
-default-credential list in ``default_credentials.py`` and retries with
-Basic / Digest auth before giving up.
+default-credential list in ``default_credentials.py`` and retries with Digest
+auth. Basic credentials are sent only to IPs explicitly listed in
+``CAMERA_RTSP_BASIC_ALLOW_IPS``; a Basic-only challenge otherwise stops the probe.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
-import enum
 import hashlib
 import logging
+import os
+import re
 import secrets
 import socket
 import time
 from dataclasses import dataclass
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import unquote, urlsplit
 
 from default_credentials import get_credentials
+from rtsp_url import INTERNAL_USERINFO_SAFE, internal_url
 
 logger = logging.getLogger(__name__)
+
+# key="quoted, value" | key=token — one Digest/Basic challenge parameter.
+_AUTH_PARAM_RE = re.compile(r'([A-Za-z][\w-]*)\s*=\s*(?:"([^"]*)"|([^\s,]*))')
 
 # Common RTSP ports used by IP cameras
 RTSP_PORTS = [554, 8554, 8080]
 
-# Characters that must survive un-escaped in the credential half of an RTSP URL.
+# Characters left literal in the credential half of an INTERNAL stream URL (the
+# one camera-discovery stores, verifies and hands to the orchestrator for
+# redaction). RFC 3986 allows these sub-delims in userinfo, so the URL parses and
+# `T3stCamPw!` stays readable; everything else is percent-encoded so the password
+# can never terminate the authority.
 #
-# RFC 3986 defines userinfo as `*( unreserved / pct-encoded / sub-delims / ":" )`,
-# so every sub-delim below is already legal there and never needed escaping. That
-# matters because the consumer of this URL is Frigate's bundled ffmpeg, and ffmpeg
-# does NOT percent-decode userinfo before authenticating — whatever we write goes
-# on the wire literally. Encoding a legal character (quote(pw, safe="") turning
-# `T3stCamPw!` into `T3stCamPw%21`) therefore sends the wrong password: the
-# camera answers 401, ffmpeg retries, and a Hanwha locks the account after ~5
-# attempts. docker/frigate/config.yml carries the same warning for hand-written
-# camera entries. (WARP-1873)
-#
-# Anything outside this set stays encoded. `@` and `/` would otherwise terminate
-# the userinfo, and `%` or whitespace would corrupt the parse — a password using
-# those cannot be expressed in an ffmpeg RTSP URL at all, so escaping them is
-# both correct per spec and the best available answer for any consumer that does
-# decode. `:` is deliberately excluded: a literal one would split user from
-# password on the wrong boundary.
-RTSP_USERINFO_SAFE = "!$&'()*+,;="
+# This is NOT what Frigate is given. Before ffmpeg sees it, Frigate 0.17
+# percent-encodes the password itself (escape_special_characters) and ffmpeg then
+# decodes it once, so a password written into Frigate's config must be RAW — a
+# pre-encoded one is encoded twice and the camera receives the percent-escape
+# (401, then a lockout). The rewrite happens once, at the Frigate boundary
+# (FrigateClient.add_camera -> rtsp_url.to_frigate_url); see rtsp_url.py for the
+# whole chain. (An earlier version of this comment said ffmpeg does not decode
+# userinfo; it does, once, and that misreading is how `%40` got stored.)
+RTSP_USERINFO_SAFE = INTERNAL_USERINFO_SAFE
+
+
+def basic_auth_allowed(ip: str) -> bool:
+    """True only for a camera the operator explicitly listed as Basic-only.
+
+    HTTP-style Basic puts ``user:password`` on the wire in clear, so the prober
+    answers a Basic challenge only for hosts named in
+    ``CAMERA_RTSP_BASIC_ALLOW_IPS`` (comma-separated). Everything else that
+    merely answered on the camera subnet gets Digest or nothing. Read per call
+    so a config change needs no re-import.
+    """
+    allowed = {i.strip() for i in os.getenv("CAMERA_RTSP_BASIC_ALLOW_IPS", "").split(",")}
+    return ip in allowed
+
+
+def redact_rtsp_url(url: str | None) -> str | None:
+    """``rtsp://user:pw@host:554/p`` -> ``rtsp://host:554/p`` (no-op without userinfo).
+
+    Splits on the LAST ``@`` of the authority, so a password that contains ``@``
+    cannot leave a fragment behind. Used for MQTT payloads, API responses and logs.
+    """
+    if not url:
+        return url
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        return url
+    authority, slash, tail = rest.partition("/")
+    if "@" not in authority:
+        return url
+    return f"{scheme}://{authority.rsplit('@', 1)[1]}{slash}{tail}"
 
 # Common RTSP stream paths by manufacturer/convention.
 # Paths are ordered by observed hit rate; Hanwha Wisenet lives near the
@@ -265,18 +297,20 @@ def _parse_www_authenticate(header_value: str) -> dict:
 
     Handles both ``Basic realm="..."`` and ``Digest realm="..." nonce="..."
     qop="auth" ...``. The ``scheme`` key holds the lowercased auth scheme.
+
+    Quoted values may contain commas — ``qop="auth-int,auth"`` is a legal RFC
+    7616 challenge — so params are matched as ``key=("quoted"|token)`` rather
+    than split on every comma (a naive split truncated that to ``auth-int``,
+    which dropped us onto the qop-less form the camera rejects). WARP-3505.
     """
     result = {"scheme": ""}
     if not header_value:
         return result
     scheme, _, rest = header_value.partition(" ")
     result["scheme"] = scheme.strip().lower()
-    # Split on commas but tolerate commas inside quoted values. Cameras
-    # almost never use nested quotes, so a simple split-then-strip is fine.
-    for part in rest.split(","):
-        if "=" in part:
-            k, _, v = part.strip().partition("=")
-            result[k.strip().lower()] = v.strip().strip('"')
+    for m in _AUTH_PARAM_RE.finditer(rest):
+        value = m.group(2) if m.group(2) is not None else m.group(3)
+        result[m.group(1).lower()] = value
     return result
 
 
@@ -307,6 +341,9 @@ def _digest_header(user: str, pw: str, method: str, uri: str,
     realm = auth_info.get("realm", "")
     nonce = auth_info.get("nonce", "")
     qop_values = [q.strip().lower() for q in auth_info.get("qop", "").split(",") if q.strip()]
+    # Quoted-string escape (RFC 7230): a `"` or `\` in an operator-typed
+    # username must not be able to close the quote and inject digest params.
+    quoted_user = user.replace("\\", "\\\\").replace('"', '\\"')
     ha1 = _digest_md5(f"{user}:{realm}:{pw}")
     ha2 = _digest_md5(f"{method}:{uri}")
 
@@ -314,13 +351,13 @@ def _digest_header(user: str, pw: str, method: str, uri: str,
         cnonce = secrets.token_hex(8)
         nc = "00000001"
         response = _digest_md5(f"{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}")
-        return (f'Digest username="{user}", realm="{realm}", nonce="{nonce}", '
+        return (f'Digest username="{quoted_user}", realm="{realm}", nonce="{nonce}", '
                 f'uri="{uri}", algorithm=MD5, qop=auth, nc={nc}, '
                 f'cnonce="{cnonce}", response="{response}"')
 
     # RFC 2069 (qop-less) fallback.
     response = _digest_md5(f"{ha1}:{nonce}:{ha2}")
-    return (f'Digest username="{user}", realm="{realm}", nonce="{nonce}", '
+    return (f'Digest username="{quoted_user}", realm="{realm}", nonce="{nonce}", '
             f'uri="{uri}", response="{response}"')
 
 
@@ -364,29 +401,45 @@ def _is_rtsp_200(resp: str) -> bool:
     return "RTSP/1.0 200" in resp or "RTSP/2.0 200" in resp
 
 
-class _Attempt(enum.Enum):
-    """What one credential attempt told us about the camera (WARP-3508)."""
-
-    ACCEPTED = "accepted"  # a 200: this credential works on this path
-    REJECTED = "rejected"  # challenged, we answered, it said no — a failed login on the device
-    LOCKED_OUT = "locked_out"  # 490: the account is blocked; any further login only prolongs it
-    NO_CHALLENGE = "no_challenge"  # nothing to log in to on this path (404, unusable auth, garbage)
-    UNREACHABLE = "unreachable"  # the exchange could not be completed; no verdict on the credential
-
-
-def _auth_verdict(resp: str) -> _Attempt:
-    """Classify the camera's answer to a DESCRIBE that carried credentials."""
-    if _is_rtsp_200(resp):
-        return _Attempt.ACCEPTED
-    if _rtsp_status_code(resp) == 490:
-        return _Attempt.LOCKED_OUT
-    return _Attempt.REJECTED
+# Outcomes of one authenticated DESCRIBE (describe_outcome). Distinguishing them
+# is what lets the operator be told WHICH thing is wrong (WARP-3505) instead of
+# a blanket "stream did not verify".
+OUTCOME_OK = "ok"                    # 200 — stream answers with these credentials
+OUTCOME_AUTH_FAILED = "auth_failed"  # path exists, credentials rejected (401/403)
+OUTCOME_LOCKED = "locked"            # vendor account lockout (Hanwha 490)
+# Camera asks for clear-text Basic and is not listed in CAMERA_RTSP_BASIC_ALLOW_IPS
+# (WARP-3597): nothing was sent, so the password is neither right nor wrong.
+OUTCOME_BASIC_ONLY = "basic_only"
+OUTCOME_NO_PATH = "no_path"          # camera reachable but this path isn't a stream
+OUTCOME_UNREACHABLE = "unreachable"  # TCP connect / first reply failed
+_MAX_SILENT_PATHS = 3
 
 
-async def _attempt_credentials(ip: str, port: int, path: str,
-                               user: str, pw: str,
-                               timeout: float = 3.0) -> _Attempt:
-    """Open RTSP, send DESCRIBE, retry with auth on 401 — and report what happened.
+def _rtsp_status(resp: str) -> int | None:
+    """Status code of a well-formed RTSP reply, else None (EOF / garbage)."""
+    status_line = resp.split("\r\n", 1)[0]
+    if not status_line.startswith(("RTSP/1.0", "RTSP/2.0")):
+        return None
+    parts = status_line.split(" ", 2)
+    return int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+
+
+def _outcome_from_auth_reply(resp: str) -> str:
+    """Classify the reply to the AUTHENTICATED DESCRIBE."""
+    code = _rtsp_status(resp)
+    if code == 200:
+        return OUTCOME_OK
+    if code == 490:
+        return OUTCOME_LOCKED
+    if code in (401, 403):
+        return OUTCOME_AUTH_FAILED
+    return OUTCOME_NO_PATH
+
+
+async def describe_outcome(ip: str, port: int, path: str,
+                           user: str, pw: str,
+                           timeout: float = 3.0) -> str:
+    """Open RTSP, send DESCRIBE, retry with auth on 401; classify the result.
 
     WARP-1812: the authenticated retry runs on the SAME connection as the
     challenge. This Hanwha Wisenet firmware binds the digest nonce to the
@@ -396,50 +449,59 @@ async def _attempt_credentials(ip: str, port: int, path: str,
     Wisenet firmwares that hard-close after a 401), we fall back to a fresh
     connection reusing the same challenge, which is what the previous
     always-new-connection code was compensating for.
-
-    WARP-3508: returns the outcome rather than a bare bool, because the ladder
-    has to tell "this credential was wrong" (a failed login on the camera, which
-    spends its lockout budget) from "this path has nothing to log in to" (free)
-    and from "the account is locked" (stop at once).
     """
     url = f"rtsp://{ip}:{port}{path}"
     try:
         reader, writer = await _open_rtsp(ip, port, timeout)
     except (asyncio.TimeoutError, OSError):
-        return _Attempt.UNREACHABLE
+        return OUTCOME_UNREACHABLE
 
     try:
         resp1 = await _rtsp_describe(reader, writer, url, 1, None, timeout)
     except (asyncio.TimeoutError, OSError, UnicodeDecodeError, ValueError):
         _close_rtsp(writer)
-        return _Attempt.NO_CHALLENGE  # reset / silent on this path: nothing to log in to
+        return OUTCOME_UNREACHABLE
 
     if _is_rtsp_200(resp1):
         _close_rtsp(writer)
-        return _Attempt.ACCEPTED
+        return OUTCOME_OK
+    if _rtsp_status(resp1) == 490:
+        # Hanwha's "Account Blocked", answered even to a DESCRIBE with no
+        # Authorization at all: the camera is ALREADY locked. Reading it as "this
+        # path does not exist" would walk every other path and finally report
+        # "no stream path" for a camera that needs to be left alone.
+        _close_rtsp(writer)
+        return OUTCOME_LOCKED
     if "RTSP/1.0 401" not in resp1 and "RTSP/2.0 401" not in resp1:
         _close_rtsp(writer)
-        # 404 / 501 / etc — path doesn't exist here. 490 is the one answer that is
-        # about the ACCOUNT rather than the path: the camera is locked out.
-        if _rtsp_status_code(resp1) == 490:
-            return _Attempt.LOCKED_OUT
-        return _Attempt.NO_CHALLENGE
+        return OUTCOME_NO_PATH  # 404 / 400 / 501 / etc — path doesn't exist here
 
-    auth_line = ""
-    for ln in resp1.split("\r\n"):
-        if ln.lower().startswith("www-authenticate:"):
-            auth_line = ln.split(":", 1)[1].strip()
-            break
-    auth_info = _parse_www_authenticate(auth_line)
+    # A host may offer several schemes (one WWW-Authenticate line each); Digest
+    # wins over Basic when both are offered.
+    challenges = [
+        _parse_www_authenticate(ln.split(":", 1)[1].strip())
+        for ln in resp1.split("\r\n")
+        if ln.lower().startswith("www-authenticate:")
+    ]
+    auth_info = next((c for c in challenges if c["scheme"] == "digest"),
+                     challenges[0] if challenges else _parse_www_authenticate(""))
 
     if auth_info["scheme"] == "basic":
+        if not basic_auth_allowed(ip):
+            # Never send the password in clear to a host that has not been
+            # listed as Basic-only (WARP-3597).
+            logger.warning(
+                "%s:%d offered only Basic auth; not sending credentials "
+                "(list it in CAMERA_RTSP_BASIC_ALLOW_IPS to allow)", ip, port)
+            _close_rtsp(writer)
+            return OUTCOME_BASIC_ONLY
         token = base64.b64encode(f"{user}:{pw}".encode()).decode()
         auth_header = f"Basic {token}"
     elif auth_info["scheme"] == "digest":
         auth_header = _digest_header(user, pw, "DESCRIBE", url, auth_info)
     else:
         _close_rtsp(writer)
-        return _Attempt.NO_CHALLENGE  # an auth scheme we do not speak
+        return OUTCOME_AUTH_FAILED  # a scheme we can't speak — can't authenticate
 
     # Retry on the SAME connection (CSeq 2) — connection-bound-nonce firmwares
     # require it. A well-formed RTSP reply here is authoritative: 200 →
@@ -454,33 +516,95 @@ async def _attempt_credentials(ip: str, port: int, path: str,
         resp2 = ""
     _close_rtsp(writer)
     if resp2.startswith(("RTSP/1.0", "RTSP/2.0")):
-        return _auth_verdict(resp2)
+        return _outcome_from_auth_reply(resp2)
 
     try:
         reader2, writer2 = await _open_rtsp(ip, port, timeout)
     except (asyncio.TimeoutError, OSError):
-        return _Attempt.UNREACHABLE
+        return OUTCOME_UNREACHABLE
     try:
         resp2 = await _rtsp_describe(reader2, writer2, url, 1, auth_header, timeout)
     except (asyncio.TimeoutError, OSError, UnicodeDecodeError, ValueError):
-        return _Attempt.UNREACHABLE
+        return OUTCOME_UNREACHABLE
     finally:
         _close_rtsp(writer2)
 
-    if resp2.startswith(("RTSP/1.0", "RTSP/2.0")):
-        return _auth_verdict(resp2)
-    return _Attempt.UNREACHABLE  # no verdict: the camera never answered the login
+    return _outcome_from_auth_reply(resp2)
 
 
 async def _try_credentials_once(ip: str, port: int, path: str,
                                 user: str, pw: str,
                                 timeout: float = 3.0) -> bool:
-    """True iff this credential gets a 200 on this path (see ``_attempt_credentials``).
+    """True iff an authenticated DESCRIBE on ``path`` returns 200."""
+    return await describe_outcome(ip, port, path, user, pw, timeout) == OUTCOME_OK
 
-    The bool seam ``verify_stream`` and its tests rely on: replaying one stored
-    credential is not a ladder and spends none of its budget.
+
+async def probe_with_credentials(ip: str, port: int, user: str, pw: str,
+                                 hint_paths: list[str] | None = None,
+                                 timeout: float = 3.0,
+                                 max_seconds: float = 30.0,
+                                 include_known_paths: bool = True
+                                 ) -> tuple[str, str | None]:
+    """Find a stream path that works with ONE operator-supplied credential.
+
+    Used when the operator types the camera's real username/password (the
+    camera's password is not a factory default, so the default-credential
+    ladder can never succeed). ``hint_paths`` (e.g. the path ONVIF
+    GetStreamUri reported) are tried before the generic ``STREAM_PATHS``.
+
+    Returns ``(outcome, path)``. ``path`` is set only for ``"ok"``.
+
+    A path the camera doesn't serve is rejected BEFORE authentication (400/404),
+    so walking the list costs no failed logins. The first path that *does*
+    challenge for credentials is authoritative: if the credentials are refused
+    there we stop at once with ``auth_failed``/``locked`` rather than repeating
+    the bad password on every remaining path — Hanwha, Axis and some Hikvision
+    firmwares lock the account after ~5 failures. A camera that challenges for
+    clear-text Basic and is not on CAMERA_RTSP_BASIC_ALLOW_IPS (WARP-3597) stops
+    the walk the same way, as ``basic_only``: nothing was sent, and every other
+    path would be refused alike. ``unreachable`` is returned only when no path
+    got a usable reply at all.
+
+    ``max_seconds`` bounds the whole walk. A slow camera could otherwise spend a
+    connect + read timeout on each of ~15 paths; the caller's own wait (the
+    orchestrator gives up after 60 s) must outlast ONVIF + this + one in-flight
+    DESCRIBE, or a camera that WAS added reads as a timeout. Checked between
+    paths, so the walk can overrun by at most one DESCRIBE.
+
+    ``include_known_paths=False`` probes ONLY ``hint_paths``: after ONVIF has
+    named the stream path, the rest of the list has already been walked and
+    refused, so only the new path is worth another request.
     """
-    return await _attempt_credentials(ip, port, path, user, pw, timeout) is _Attempt.ACCEPTED
+    ordered: list[str] = []
+    for path in [*(hint_paths or []), *(STREAM_PATHS if include_known_paths else [])]:
+        if path and path not in ordered:
+            ordered.append(path)
+
+    reached = False
+    silent = 0
+    started = time.monotonic()
+    for path in ordered:
+        if time.monotonic() - started >= max_seconds:
+            break
+        outcome = await describe_outcome(ip, port, path, user, pw, timeout)
+        if outcome == OUTCOME_OK:
+            # Do not include the account or stream path in diagnostic bundles.
+            logger.debug("Operator RTSP sign-in succeeded at %s:%d", ip, port)
+            return OUTCOME_OK, path
+        if outcome in (OUTCOME_AUTH_FAILED, OUTCOME_LOCKED, OUTCOME_BASIC_ONLY):
+            return outcome, None
+        if outcome == OUTCOME_NO_PATH:
+            reached = True
+            silent = 0
+            continue
+        # Some firmwares reset the socket on a path they dislike, so one silent
+        # path isn't conclusive — but a host that is down/filtered would
+        # otherwise cost a full connect timeout PER path (~45 s). Three silent
+        # paths in a row with nothing ever answering means unreachable.
+        silent += 1
+        if not reached and silent >= _MAX_SILENT_PATHS:
+            break
+    return (OUTCOME_NO_PATH if reached else OUTCOME_UNREACHABLE), None
 
 
 # --- Failed-login budget for the credential ladder (WARP-3508) ---------------
@@ -563,15 +687,12 @@ async def probe_rtsp_with_credentials(ip: str, port: int
     for path in STREAM_PATHS:
         for index in range(state.next_credential, len(credentials)):
             user, pw = credentials[index]
-            outcome = await _attempt_credentials(ip, port, path, user, pw)
-            if outcome is _Attempt.ACCEPTED:
-                logger.info(
-                    "Credential '%s' authenticated at %s:%d%s",
-                    user, ip, port, path,
-                )
+            outcome = await describe_outcome(ip, port, path, user, pw)
+            if outcome == OUTCOME_OK:
+                logger.debug("Default RTSP sign-in succeeded at %s:%d", ip, port)
                 _ladder.pop(ip, None)
                 return path, user, pw
-            if outcome is _Attempt.LOCKED_OUT:
+            if outcome == OUTCOME_LOCKED:
                 state.quiet_until = _clock() + LADDER_COOLDOWN_SECONDS
                 logger.warning(
                     "%s reports its account is locked out (RTSP 490) — "
@@ -579,7 +700,7 @@ async def probe_rtsp_with_credentials(ip: str, port: int
                     ip, LADDER_COOLDOWN_SECONDS,
                 )
                 return None
-            if outcome is _Attempt.REJECTED:
+            if outcome == OUTCOME_AUTH_FAILED:
                 state.next_credential = index + 1
                 budget -= 1
                 if state.next_credential >= len(credentials):
@@ -597,10 +718,12 @@ async def probe_rtsp_with_credentials(ip: str, port: int
                         ip, LADDER_FAILED_AUTH_BUDGET, LADDER_RETRY_SECONDS,
                     )
                     return None
-            elif outcome is _Attempt.UNREACHABLE:
+            elif outcome == OUTCOME_BASIC_ONLY:
+                return None  # Nothing was sent; other paths cannot make Basic safe.
+            elif outcome == OUTCOME_UNREACHABLE:
                 return None  # no verdict on the credential and nothing spent: next sweep
             else:
-                break  # NO_CHALLENGE: nothing to log in to on this path — next path
+                break  # NO_PATH: nothing to log in to on this path — next path
     return None
 
 
@@ -630,9 +753,7 @@ async def probe_camera(ip: str) -> dict | None:
         creds = await probe_rtsp_with_credentials(ip, port)
         if creds:
             path, user, pw = creds
-            url = (f"rtsp://{quote(user, safe=RTSP_USERINFO_SAFE)}"
-                   f":{quote(pw, safe=RTSP_USERINFO_SAFE)}"
-                   f"@{ip}:{port}{path}")
+            url = internal_url(user, pw, ip, port, path)
             return {
                 "ip": ip,
                 "port": port,
