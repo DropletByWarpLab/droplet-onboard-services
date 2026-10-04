@@ -83,6 +83,8 @@ interface DragState {
   item: PmWorkItem;
   mode: DragMode;
   originX: number;
+  /** Only this pointer drives the gesture; a second finger must not end it. */
+  pointerId: number;
   base: Schedule;
   delta: number;
   moved: boolean;
@@ -203,7 +205,7 @@ export function TimelineView({
     el.scrollLeft = Math.max(0, scale.x(focusDay) + scale.pxPerDay / 2 - track / 3);
     // Re-centre only when the window, the zoom or the requested day changes — not on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [range.from, zoom, focusDay]);
+  }, [range.from, zoom, focusDay, labelW]);
 
   /** The day currently a third of the way across the visible track. */
   const dayInView = (): DateOnly => {
@@ -266,25 +268,15 @@ export function TimelineView({
   };
 
   // ── pointer drag / resize ────────────────────────────────────────────────────
+  //
+  // The gesture lives on `window`, not on the bar or grip that started it. Pointer
+  // capture ties a gesture to one element's lifetime, and that element can go away
+  // mid-drag (a re-render, a bar carried across the edge of the fetched window);
+  // window listeners outlive any element, so a release anywhere — over the label
+  // column, the toolbar, off the chart — settles the gesture. Capture is still set
+  // (it keeps events coming from outside the browser window); losing it is harmless.
 
-  const beginDrag = (e: ReactPointerEvent<HTMLElement>, item: PmWorkItem, mode: DragMode) => {
-    if (readOnly || e.button !== 0) return;
-    e.stopPropagation();
-    e.currentTarget.setPointerCapture?.(e.pointerId);
-    drag.current = { item, mode, originX: e.clientX, base: scheduleOf(item), delta: 0, moved: false };
-  };
-
-  const moveDrag = (e: ReactPointerEvent<HTMLElement>) => {
-    const d = drag.current;
-    if (!d) return;
-    const dx = e.clientX - d.originX;
-    if (!d.moved && Math.abs(dx) < DRAG_THRESHOLD) return;
-    d.moved = true;
-    const delta = Math.round(dx / scale.pxPerDay);
-    if (delta === d.delta && preview) return;
-    d.delta = delta;
-    setPreview({ id: d.item.id, schedule: applyDrag(d.base, d.mode, delta) });
-  };
+  const stopTracking = useRef<(() => void) | null>(null);
 
   const swallowNextClick = () => {
     suppressClick.current = true;
@@ -293,10 +285,34 @@ export function TimelineView({
     }, 0);
   };
 
-  const endDrag = () => {
+  /** Ends tracking and returns the gesture that was in progress, if any. */
+  const takeGesture = (): DragState | null => {
     const d = drag.current;
     drag.current = null;
-    if (!d || !d.moved) return;
+    stopTracking.current?.();
+    stopTracking.current = null;
+    return d;
+  };
+
+  const moveDrag = (d: DragState, clientX: number, dayWidth: number) => {
+    if (drag.current !== d) return;
+    const dx = clientX - d.originX;
+    if (!d.moved && Math.abs(dx) < DRAG_THRESHOLD) return;
+    const delta = Math.round(dx / dayWidth);
+    if (d.moved && delta === d.delta) return;
+    d.moved = true;
+    d.delta = delta;
+    setPreview({ id: d.item.id, schedule: applyDrag(d.base, d.mode, delta) });
+  };
+
+  const endDrag = () => {
+    const d = takeGesture();
+    if (!d) return;
+    if (!d.moved) {
+      // A click: nothing to save — and no preview may outlive it.
+      setPreview(null);
+      return;
+    }
     swallowNextClick();
     const next = applyDrag(d.base, d.mode, d.delta);
     setPreview(null);
@@ -304,10 +320,46 @@ export function TimelineView({
   };
 
   const cancelDrag = () => {
-    const d = drag.current;
-    drag.current = null;
+    const d = takeGesture();
     if (d?.moved) swallowNextClick();
     setPreview(null);
+  };
+
+  const beginDrag = (e: ReactPointerEvent<HTMLElement>, item: PmWorkItem, mode: DragMode) => {
+    if (readOnly || e.button !== 0) return;
+    e.stopPropagation();
+    // A gesture that never saw its release must not leak into this one.
+    if (drag.current) cancelDrag();
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    const d: DragState = {
+      item,
+      mode,
+      originX: e.clientX,
+      pointerId: e.pointerId,
+      base: scheduleOf(item),
+      delta: 0,
+      moved: false,
+    };
+    drag.current = d;
+    const dayWidth = scale.pxPerDay;
+    const mine = (ev: PointerEvent) => ev.pointerId === d.pointerId;
+    const onMove = (ev: PointerEvent) => {
+      if (mine(ev)) moveDrag(d, ev.clientX, dayWidth);
+    };
+    const onUp = (ev: PointerEvent) => {
+      if (mine(ev)) endDrag();
+    };
+    const onCancel = (ev: PointerEvent) => {
+      if (mine(ev)) cancelDrag();
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    stopTracking.current = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+    };
   };
 
   useEffect(() => {
@@ -315,7 +367,11 @@ export function TimelineView({
       if (e.key === "Escape" && drag.current) cancelDrag();
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      stopTracking.current?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const onBarKeyDown = (e: KeyboardEvent<HTMLElement>, item: PmWorkItem) => {
@@ -451,7 +507,7 @@ export function TimelineView({
         <p className="pm-tl-note">
           {unscheduled > 0 && (
             <span>
-              {unscheduled} {unscheduled === 1 ? "item has" : "items have"} no dates, so {unscheduled === 1 ? "it isn't" : "they aren't"} shown here. They are listed under Unscheduled in the calendar.
+              {unscheduled} {unscheduled === 1 ? "item has" : "items have"} no dates, so {unscheduled === 1 ? "it isn't" : "they aren't"} shown here. Open ones are listed under Unscheduled in the calendar.
             </span>
           )}
           {timeline?.truncated && <span> This range has more items than can be drawn. Zoom in or move the window to see the rest.</span>}
@@ -569,9 +625,6 @@ export function TimelineView({
                     onFocusBar={() => setActiveId(row.item.id)}
                     onKeyDown={onBarKeyDown}
                     onBeginDrag={beginDrag}
-                    onMoveDrag={moveDrag}
-                    onEndDrag={endDrag}
-                    onCancelDrag={cancelDrag}
                   />
                 ),
               )}
@@ -615,9 +668,6 @@ function Row({
   onFocusBar,
   onKeyDown,
   onBeginDrag,
-  onMoveDrag,
-  onEndDrag,
-  onCancelDrag,
 }: {
   row: ItemRow;
   scale: Scale;
@@ -633,9 +683,6 @@ function Row({
   onFocusBar: () => void;
   onKeyDown: (e: KeyboardEvent<HTMLElement>, item: PmWorkItem) => void;
   onBeginDrag: (e: ReactPointerEvent<HTMLElement>, item: PmWorkItem, mode: DragMode) => void;
-  onMoveDrag: (e: ReactPointerEvent<HTMLElement>) => void;
-  onEndDrag: () => void;
-  onCancelDrag: () => void;
 }): JSX.Element {
   const item = row.item;
   const span = spanOf(schedule);
@@ -675,10 +722,8 @@ function Row({
       onClick: onOpen,
       onFocus: onFocusBar,
       onKeyDown: (e: KeyboardEvent<HTMLElement>) => onKeyDown(e, item),
+      // Only the start of a gesture is element-level; its move / end live on window.
       onPointerDown: (e: ReactPointerEvent<HTMLElement>) => onBeginDrag(e, item, "move"),
-      onPointerMove: onMoveDrag,
-      onPointerUp: onEndDrag,
-      onPointerCancel: onCancelDrag,
     };
     const cls = (base: string) =>
       base +
@@ -712,7 +757,7 @@ function Row({
         style={{ left: labelW + geom.left, width: geom.width, ...accent }}
         {...common}
       >
-        {resizable && !geom.clippedStart && (
+        {resizable && (dragging || !geom.clippedStart) && (
           <span
             className="pm-tl-grip start"
             data-tl-grip="start"
@@ -721,7 +766,7 @@ function Row({
           />
         )}
         <span className="pm-tl-bar-label">{geom.width >= 96 ? item.name : ""}</span>
-        {resizable && !geom.clippedEnd && (
+        {resizable && (dragging || !geom.clippedEnd) && (
           <span className="pm-tl-grip end" data-tl-grip="end" aria-hidden="true" onPointerDown={(e) => onBeginDrag(e, item, "end")} />
         )}
         {geom.width < 96 && <span className="pm-tl-outlabel" style={{ left: geom.width + 6 }}>{item.name}</span>}

@@ -474,6 +474,145 @@ describe("pointer: move and resize", () => {
     }
   });
 
+  describe("the gesture does not depend on the element that started it", () => {
+    const winDown = down;
+    const release = (x: number, pointerId = 1) => fireEvent.pointerUp(document.body, { clientX: x, pointerId });
+
+    it("an edge dragged before the fetched window keeps its grip mounted, and a release anywhere saves it", async () => {
+      // Week zoom starts 2026-07-11. This bar starts two days later.
+      const a = span("2026-07-13", "2026-07-30");
+      updateItem.mockResolvedValueOnce({ work_item: a });
+      const { container } = setup([a]);
+      const handle = grip(bar(container, a.id), "start");
+      winDown(handle, 700);
+      move(handle, 700 - 5 * PPD); // start 2026-07-08: before the window, so the bar is now clipped
+      expect(bar(container, a.id)).toHaveClass("clip-start", "is-dragging");
+      // The element that owns the pointer capture is still in the document ...
+      expect(handle.isConnected).toBe(true);
+      expect(grip(bar(container, a.id), "start")).toBe(handle);
+      // ... and, because the gesture is on window, so is a release over something else entirely.
+      await act(async () => {
+        release(700 - 5 * PPD);
+      });
+      expect(updateItem).toHaveBeenCalledTimes(1);
+      expect(updateItem).toHaveBeenCalledWith(a.id, { start_date: "2026-07-08T00:00:00.000Z" });
+      expect(bar(container, a.id)).not.toHaveClass("is-dragging");
+    });
+
+    it("an edge dragged past the end of the window does the same", async () => {
+      // Week zoom ends 2027-04-03.
+      const a = span("2027-03-25", "2027-04-01");
+      updateItem.mockResolvedValueOnce({ work_item: a });
+      const { container } = setup([a]);
+      const handle = grip(bar(container, a.id), "end");
+      winDown(handle, 900);
+      move(handle, 900 + 5 * PPD); // due 2027-04-06
+      expect(bar(container, a.id)).toHaveClass("clip-end");
+      expect(handle.isConnected).toBe(true);
+      await act(async () => {
+        release(900 + 5 * PPD);
+      });
+      expect(updateItem).toHaveBeenCalledWith(a.id, { due_date: "2027-04-06T00:00:00.000Z" });
+    });
+
+    it("a bar carried entirely out of the window stays mounted until it is released", async () => {
+      const a = span("2026-10-05", "2026-10-10");
+      updateItem.mockResolvedValueOnce({ work_item: a });
+      const { container } = setup([a]);
+      const el = bar(container, a.id);
+      winDown(el, 500);
+      move(el, 500 + 300 * PPD); // ~10 months later, long past the window's end
+      expect(el.isConnected).toBe(true);
+      expect(bar(container, a.id)).toBe(el);
+      await act(async () => {
+        release(500 + 300 * PPD);
+      });
+      expect(updateItem).toHaveBeenCalledWith(a.id, {
+        start_date: "2027-08-01T00:00:00.000Z",
+        due_date: "2027-08-06T00:00:00.000Z",
+      });
+    });
+
+    it("a pointercancel anywhere abandons the gesture without saving", () => {
+      const a = span("2026-10-05", "2026-10-10");
+      const { container } = setup([a]);
+      const el = bar(container, a.id);
+      winDown(el, 500);
+      move(el, 500 + 3 * PPD);
+      expect(px(bar(container, a.id)).left).toBe(leftOf("2026-10-08"));
+      fireEvent.pointerCancel(document.body, { pointerId: 1 });
+      expect(px(bar(container, a.id)).left).toBe(leftOf("2026-10-05"));
+      expect(bar(container, a.id)).not.toHaveClass("is-dragging");
+      expect(updateItem).not.toHaveBeenCalled();
+    });
+
+    it("once settled, later pointer movement does nothing (the window listeners are gone)", async () => {
+      const a = span("2026-10-05", "2026-10-10");
+      let resolve!: (v: unknown) => void;
+      updateItem.mockImplementationOnce(() => new Promise((r) => (resolve = r)));
+      const { container } = setup([a]);
+      const el = bar(container, a.id);
+      winDown(el, 500);
+      move(el, 500 + 2 * PPD);
+      release(500 + 2 * PPD);
+      expect(px(bar(container, a.id)).left).toBe(leftOf("2026-10-07")); // optimistic, from the save
+      fireEvent.pointerMove(document.body, { clientX: 500 + 9 * PPD, pointerId: 1 });
+      expect(px(bar(container, a.id)).left).toBe(leftOf("2026-10-07"));
+      fireEvent.pointerUp(document.body, { clientX: 500 + 9 * PPD, pointerId: 1 });
+      expect(updateItem).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        resolve({ work_item: a });
+      });
+    });
+
+    it("another finger cannot move or end the gesture", async () => {
+      const a = span("2026-10-05", "2026-10-10");
+      updateItem.mockResolvedValueOnce({ work_item: a });
+      const { container } = setup([a]);
+      const el = bar(container, a.id);
+      winDown(el, 500);
+      move(el, 500 + 2 * PPD);
+      fireEvent.pointerMove(document.body, { clientX: 500 + 9 * PPD, pointerId: 2 });
+      release(500 + 9 * PPD, 2);
+      expect(updateItem).not.toHaveBeenCalled();
+      expect(px(bar(container, a.id)).left).toBe(leftOf("2026-10-07"));
+      await act(async () => {
+        release(500 + 2 * PPD, 1);
+      });
+      expect(updateItem).toHaveBeenCalledWith(a.id, {
+        start_date: "2026-10-07T00:00:00.000Z",
+        due_date: "2026-10-12T00:00:00.000Z",
+      });
+    });
+
+    it("starting a new gesture while one never saw its release drops the old preview", () => {
+      const a = span("2026-10-05", "2026-10-10");
+      const b = span("2026-10-06", "2026-10-12");
+      const { container } = setup([a, b]);
+      winDown(bar(container, a.id), 500);
+      move(bar(container, a.id), 500 + 3 * PPD);
+      expect(px(bar(container, a.id)).left).toBe(leftOf("2026-10-08"));
+      // The release was lost; the user presses another bar.
+      winDown(bar(container, b.id), 300);
+      expect(px(bar(container, a.id)).left).toBe(leftOf("2026-10-05"));
+      expect(bar(container, a.id)).not.toHaveClass("is-dragging");
+      release(300);
+      expect(updateItem).not.toHaveBeenCalled();
+    });
+
+    it("a plain click after a press that moved nowhere leaves no preview behind", () => {
+      const a = span("2026-10-05", "2026-10-10");
+      const { container, onOpen } = setup([a]);
+      const el = bar(container, a.id);
+      winDown(el, 500);
+      release(500);
+      fireEvent.click(el);
+      expect(onOpen).toHaveBeenCalledTimes(1);
+      expect(bar(container, a.id)).not.toHaveClass("is-dragging");
+      expect(px(bar(container, a.id)).left).toBe(leftOf("2026-10-05"));
+    });
+  });
+
   it("Escape cancels a drag in progress", () => {
     const a = span("2026-10-05", "2026-10-10");
     const { container } = setup([a]);
