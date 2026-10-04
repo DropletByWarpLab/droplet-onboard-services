@@ -392,7 +392,10 @@ describe("WARP-3522 — a PM notification links to what it is about", () => {
     });
     await runActivityNotifySweep(prisma, opts);
     expect(recordMock.mock.calls[0][1]).toMatchObject({ url: "/projects?p=INBOX&item=INBOX-42" });
-    expect(publishMock.mock.calls[0][0]).toMatchObject({ url: "/projects?p=INBOX&item=INBOX-42" });
+    // (an untyped vi.fn infers a zero-length args tuple; the toast's arg is the object)
+    expect((publishMock.mock.calls as unknown as Array<[Record<string, unknown>]>)[0][0]).toMatchObject({
+      url: "/projects?p=INBOX&item=INBOX-42",
+    });
   });
 
   it("a digest over ONE item still opens that item", async () => {
