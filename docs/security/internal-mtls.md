@@ -13,7 +13,9 @@
 > the behaviour **when the flag is on**. Flipping the default is tracked in
 > WARP-2565 and needs live-box validation first.
 
-When `DROPLET_INTERNAL_TLS=1`, every first-party internal HTTP/gRPC hop and the
+## Target design
+
+With `DROPLET_INTERNAL_TLS=1`, every first-party internal HTTP/gRPC hop and the
 MQTT broker authenticate peers with X.509 client certificates issued by a
 compose-network-scoped internal CA. The single shared MQTT password is retired;
 MQTT identity is the client-cert CN.
@@ -80,11 +82,13 @@ device-identity-svc issuance. Rationale:
 5. WARP-235 removes the password listener entirely (single mTLS listener :8883).
    The dev compose stack keeps its own anonymous 1883 broker — untouched.
 
-## Enforcement matrix (implemented — WARP-1061)
+## Enforcement matrix (implemented but off by default — WARP-1061)
 
 Every row below is wired end-to-end (client presents its bundle AND the
 server requires a CA-signed client cert) and gated on `DROPLET_INTERNAL_TLS`
-(default `0` = plaintext, byte-identical to the pre-mTLS posture). "impl."
+(default `0` = plaintext, byte-identical to the pre-mTLS posture). The "Flag
+on" column describes the Target posture; the shipped default is the "Flag
+off" column. "impl."
 notes which ticket landed the last missing half.
 
 | # | Client → Server | Transport | Flag off | Flag on | impl. |
@@ -151,7 +155,9 @@ the mesh. Three host identities are issued by `internal_ca_issue_all` into
 
 - **Live everywhere:** the internal CA + per-service bundle
   issuance/rotation, Postgres TLS (WARP-233), Redis TLS (WARP-234), MQTT
-  mTLS :8883 (WARP-235, scheme-gated, always on).
+  mTLS :8883 (WARP-235, scheme-gated, always on). Postgres and Redis use TLS
+  with password or ACL authentication; they do not require client certificates
+  (`--tls-auth-clients no` on Redis).
 - **Wired and flag-gated (everything in the matrix):** flipping
   `DROPLET_INTERNAL_TLS=1` + recreating the stack turns every row on
   together. `scripts/setup.sh` writes the knob (default `0`) into fresh

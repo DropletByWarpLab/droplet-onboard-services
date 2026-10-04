@@ -566,8 +566,10 @@ services:
       #
       # A Docker socket is ROOT-EQUIVALENT on the host. It is granted here on a
       # deliberate, fenced basis:
-      #   * this is the ONLY service in the whole compose file that mounts it —
-      #     no sidecar, no gateway, no ai-gateway ever gets the socket;
+      #   * this is the only service in the default (customer) profile set that
+      #     mounts it — no sidecar, no gateway, no ai-gateway gets the socket.
+      #     The operator-only ops-console service (compose profile "ops", off
+      #     by default) also mounts it, read-write, further down this file;
       #   * exactly ONE module talks to the socket: host-exec.ts, and only to
       #     create/start/wait/log/remove the one-shot below. Every daemon op
       #     funnels through host-compose-runner.ts → the single audited host
