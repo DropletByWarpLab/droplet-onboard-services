@@ -47,6 +47,7 @@ import {
 import { GraphRequestError, type GraphPage } from "./graph-client.js";
 import { M365NotConnectedError } from "./m365-auth.service.js";
 import type { DueCursor } from "./delta-cursor.service.js";
+import { makeFakeCloudFileDb } from "../../__tests__/helpers/fake-cloud-files.js";
 
 const USER = "user-1";
 const NOW = new Date("2026-09-04T12:00:00Z");
@@ -404,8 +405,18 @@ describe("syncCursor — an enumeration bigger than one tick's page budget (WARP
 describe("discoverResources — only what the grant covers (WARP-3059)", () => {
   function discoveryPrisma(grantedScopes: string | null) {
     const upserts: Array<{ workload: string; resourceId: string }> = [];
+    // WARP-3538 — OneDrive's files land under a SOURCE that discovery registers
+    // from GET /me/drive, and a person who has not opted in to SharePoint has
+    // whatever SharePoint left behind removed on every discovery. These fakes
+    // already hold the OneDrive source (so discovery asks Microsoft nothing about
+    // it) and no SharePoint anything (so the removals find nothing); the delegates
+    // must exist to be called.
+    const cloud = makeFakeCloudFileDb();
+    cloud.seedSource({ userId: USER, provider: "M365", kind: "ONEDRIVE", sourceId: "od-1", nameEnc: "dcv1:x" });
     return {
       upserts,
+      cloudFileItem: cloud.cloudFileItem,
+      cloudFileSource: cloud.cloudFileSource,
       m365Connection: { findUnique: vi.fn(async () => ({ grantedScopes })) },
       m365DeltaCursor: {
         upsert: vi.fn(async ({ where }: any) => {
@@ -415,6 +426,8 @@ describe("discoverResources — only what the grant covers (WARP-3059)", () => {
           });
           return {};
         }),
+        findMany: vi.fn(async () => []),
+        deleteMany: vi.fn(async () => ({ count: 0 })),
       },
     };
   }
@@ -425,7 +438,7 @@ describe("discoverResources — only what the grant covers (WARP-3059)", () => {
     }) as unknown as M365SyncDeps["client"];
 
   it("does not attempt To Do without a Tasks grant, and does not report it as a fault", async () => {
-    // What the connector actually requests (M365_SCOPES), as Microsoft returns it.
+    // What the connector actually requests (M365_BASE_SCOPES), as Microsoft returns it.
     const prisma = discoveryPrisma(
       "offline_access User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite Files.ReadWrite.All",
     );
@@ -437,6 +450,9 @@ describe("discoverResources — only what the grant covers (WARP-3059)", () => {
     );
 
     expect(found.notGranted).toEqual(["todo"]);
+    // SharePoint is the person's choice (WARP-3538): off by default, so neither
+    // a refusal nor a break — its own word.
+    expect(found.disabled).toEqual(["sharepoint"]);
     expect(found.skipped).toEqual([]); // nothing index.ts would log as a fault
     const urls = vi.mocked(client.getPage).mock.calls.map((c) => String(c[0]));
     expect(urls.some((u) => u.includes("/todo/"))).toBe(false);
@@ -454,6 +470,7 @@ describe("discoverResources — only what the grant covers (WARP-3059)", () => {
       USER,
     );
     expect(found.notGranted).toEqual(["mail", "calendar", "contacts", "files", "todo"]);
+    expect(found.disabled).toEqual(["sharepoint"]);
     expect(client.getPage).not.toHaveBeenCalled();
   });
 });
@@ -490,9 +507,17 @@ describe("runSyncTick — a person disconnects while the tick holds their cursor
 
 describe("a grant that covers no workload says so (#2347 review)", () => {
   function prismaWithGrant(grantedScopes: string | null) {
+    const cloud = makeFakeCloudFileDb();
+    cloud.seedSource({ userId: USER, provider: "M365", kind: "ONEDRIVE", sourceId: "od-1", nameEnc: "dcv1:x" });
     return {
+      cloudFileItem: cloud.cloudFileItem,
+      cloudFileSource: cloud.cloudFileSource,
       m365Connection: { findUnique: vi.fn(async () => ({ grantedScopes })) },
-      m365DeltaCursor: { upsert: vi.fn(async () => ({})) },
+      m365DeltaCursor: {
+        upsert: vi.fn(async () => ({})),
+        findMany: vi.fn(async () => []),
+        deleteMany: vi.fn(async () => ({ count: 0 })),
+      },
     };
   }
   const discover = (grantedScopes: string | null) =>
@@ -523,6 +548,17 @@ describe("a grant that covers no workload says so (#2347 review)", () => {
     );
     expect(found.notGranted).toEqual(["todo"]);
     expect(grantCoversNoWorkload(found)).toBe(false);
+  });
+
+  it("judges a person who has not opted in to SharePoint on the OTHER workloads only (WARP-3538)", async () => {
+    // Five of the six workloads not granted, and the sixth — SharePoint — is the
+    // person's own off switch, not a refusal. Before `disabled` existed this was
+    // 5 !== 6 and read as "something is covered", so a grant that covered
+    // nothing was never warned about for anyone who had not opted in.
+    const found = await discover("offline_access User.Read openid profile");
+    expect(found.notGranted).toEqual(["mail", "calendar", "contacts", "files", "todo"]);
+    expect(found.disabled).toEqual(["sharepoint"]);
+    expect(grantCoversNoWorkload(found)).toBe(true);
   });
 
   it("is false when the grant covers a workload discovery could not list — that is logged as skipped", async () => {
