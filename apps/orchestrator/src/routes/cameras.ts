@@ -156,6 +156,7 @@ import {
   type RetentionWindows,
 } from "../services/camera-budget.service.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
+import { resolveRetentionDefaults } from "../services/camera-retention-defaults.js";
 import { pipeUpstreamBody } from "../lib/pipe-upstream.js";
 import { config } from "../config.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
@@ -3471,8 +3472,23 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     requireRole(...CAMERA_CUSTODY_ROLES),
     async (_req, res, next) => {
       try {
-        res.json({ plan: await planRetentionBackfill(prisma) });
+        // WARP-3511: the dry run also says WHAT the repair would write, so the
+        // dashboard's confirm can state it. These are the repair's own
+        // effective defaults (the POST below applies the same function's
+        // result); they are configurable per box, so they are read here and
+        // never written into copy. Only the four windows a person reads.
+        const d = resolveRetentionDefaults();
+        res.json({
+          plan: await planRetentionBackfill(prisma),
+          defaults: {
+            continuousDays: d.continuousDays,
+            motionDays: d.motionDays,
+            alertsRetainDays: d.alertsRetainDays,
+            detectionsRetainDays: d.detectionsRetainDays,
+          },
+        });
       } catch (err) {
+        if (respondToConfigError(res, err)) return;
         next(err);
       }
     },
@@ -3487,6 +3503,8 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         // failed quietly" must not look the same to the caller.
         res.json(await backfillCameraRetention(prisma));
       } catch (err) {
+        // WARP-3511: an unreachable camera service is the 503 degraded answer.
+        if (respondToConfigError(res, err)) return;
         next(err);
       }
     },
