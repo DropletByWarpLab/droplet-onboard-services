@@ -19,12 +19,12 @@
 # (orchestrator, mcp-server, web-dashboard, file-indexer, ai-gateway)
 # so BuildKit resolves it to ONE compile per builder/arch instead of
 # five. Keep it in lockstep across those five Dockerfiles.
-FROM debian:bookworm-slim AS fips-builder
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS fips-builder
 COPY docker/fips/build-openssl-fips.sh /tmp/build-openssl-fips.sh
 RUN sh /tmp/build-openssl-fips.sh /out
 
 # --- Build stage ---
-FROM node:20-bookworm-slim AS builder
+FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS builder
 
 # Install build-time openssl + ca-certificates. `--no-install-recommends`
 # keeps the image trim.
@@ -104,7 +104,7 @@ RUN npm run -w @droplet/mcp-server build
 RUN npm run -w @droplet/orchestrator build
 
 # --- Run stage ---
-FROM node:20-bookworm-slim
+FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
 
 # Runtime needs the OpenSSL FIPS provider available. The bookworm-slim
 # base image already ships `openssl` and `libssl3`, which together

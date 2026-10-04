@@ -1,7 +1,7 @@
 # ops-console — operator-side monitoring. Sees the rest of the stack;
 # is NOT customer-facing. Mounts /var/run/docker.sock so it can read
 # container logs + restart containers — that's the whole point.
-FROM python:3.12-slim AS base
+FROM python:3.12-slim@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d AS base
 
 # Tiny base — just the python deps + the source. No build deps needed
 # (FastAPI / docker / psutil are pure-python or ship binary wheels).

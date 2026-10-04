@@ -31,13 +31,13 @@
  *      a runtime that can run them perfectly well.
  *
  * The second probe is a real request, not a version comparison: it asks the
- * running runtime the actual question, so it stays correct when Node 20 goes
+ * running runtime the actual question, so it stays correct when the pinned Node goes
  * away, when undici is bumped, and — the case it now exists for — if the
  * connector is ever "simplified" back onto the built-in fetch. It runs in a
  * child process (`preflight-probe.mjs`) only because the answer has to be
  * synchronous — see that file.
  *
- * CI runs Node 20 and has openssl, so both gates are open there and nothing is
+ * CI runs Node 22 and has openssl, so both gates are open there and nothing is
  * hidden — each suite additionally ASSERTS that, so losing the coverage on a
  * runner is a red test rather than a silent skip.
  */
@@ -50,7 +50,7 @@ import { opensslAvailable } from "./certs.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 /** Node major this repo is pinned to (`.nvmrc`, `engines.node`, CI setup-node). */
-const PINNED_NODE_MAJOR = "20";
+const PINNED_NODE_MAJOR = "22";
 
 function installedUndiciVersion() {
   try {

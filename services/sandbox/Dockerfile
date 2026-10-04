@@ -23,10 +23,12 @@
 # write at runtime outside /tmp and the two workspace volumes.
 
 # Node from the official image, copied in rather than apt-installed: Debian
-# bookworm ships Node 18, and the toolchain ceiling is 20 (WARP-2069).
-FROM node:20-bookworm-slim AS node
+# bookworm ships Node 18, and the toolchain ceiling is 20 (WARP-2069). This stays
+# on Node 20 deliberately: extension manifests name the runtime `node20`, so
+# moving it needs a new runtime id decision (WARP-3654 follow-up).
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS node
 
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \

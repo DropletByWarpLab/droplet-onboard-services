@@ -155,7 +155,7 @@ prepare_and_build() {
     "eclipse-mosquitto:2"
     "nginx:alpine"
     "nextcloud:29-apache"
-    "node:20-alpine"
+    "node:22-alpine"
     "python:3.12-slim"
   )
   # Frigate is gated to the `linux` compose profile (see docker-compose.yml);

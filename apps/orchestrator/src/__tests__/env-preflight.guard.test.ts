@@ -127,12 +127,12 @@ describe("env preflight guard (WARP-1872)", () => {
   it("reads engines.node from the root package.json", () => {
     const range = requiredNodeRange();
     expect(range).toBeTruthy();
-    expect(majorFromRange(range!)).toBe(20);
+    expect(majorFromRange(range!)).toBe(22);
   });
 
   it("warns only on a mismatched Node major", () => {
-    expect(nodeWarningIfMismatched("20.11.0")).toBeNull();
-    expect(nodeWarningIfMismatched("24.15.0")).toMatch(/Node 20\.x expected/);
+    expect(nodeWarningIfMismatched("22.13.0")).toBeNull();
+    expect(nodeWarningIfMismatched("24.15.0")).toMatch(/Node 22\.x expected/);
   });
 
   // The failure mode this whole ticket is about: a guard that names the
@@ -145,7 +145,7 @@ describe("env preflight guard (WARP-1872)", () => {
   });
 
   it("the Node warning never blames Node for signature failures", () => {
-    const msg = nodeMismatchMessage("20.x", "v24.15.0");
+    const msg = nodeMismatchMessage("22.x", "v24.15.0");
     expect(msg).toMatch(/does NOT cause signature-test failures/);
     expect(msg).toMatch(/check cosign, not your Node version/);
   });
@@ -155,7 +155,7 @@ describe("env preflight guard (WARP-1872)", () => {
   // class of failure it hides, and nothing failed when a runner drifted off it.
   describe("Node pin enforcement (WARP-2626)", () => {
     it("names the pin, how to switch, and the failure class it hides", () => {
-      const msg = nodeMismatchMessage("20.x", "v26.0.0");
+      const msg = nodeMismatchMessage("22.x", "v26.0.0");
       expect(msg, "must name every place the pin is declared").toMatch(/\.nvmrc/);
       expect(msg).toMatch(/engines\.node/);
       expect(msg, "must say how to switch, not just that it is wrong").toMatch(/nvm use/);
@@ -175,8 +175,8 @@ describe("env preflight guard (WARP-1872)", () => {
     });
 
     it("is silent on a matching Node, in CI and out", () => {
-      expect(nodePinVerdict("20.11.0", { CI: "true" })).toBeNull();
-      expect(nodePinVerdict("20.11.0", {})).toBeNull();
+      expect(nodePinVerdict("22.13.0", { CI: "true" })).toBeNull();
+      expect(nodePinVerdict("22.13.0", {})).toBeNull();
     });
 
     it("warns locally but FAILS in CI on a mismatched major", () => {

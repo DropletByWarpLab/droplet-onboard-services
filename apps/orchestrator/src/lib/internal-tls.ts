@@ -11,8 +11,7 @@ import { readFileSync } from "node:fs";
 import type https from "node:https";
 import type { IClientOptions } from "mqtt";
 // Import fetch from undici alongside Agent so the client cert dispatcher is
-// always version-matched to the fetch it feeds. The appliance runs Node 20
-// (undici 6 is the bundled fetch engine there), but pairing undici's own fetch
+// always version-matched to the fetch it feeds. The appliance runs Node 22, but pairing undici's own fetch
 // with its own Agent keeps this correct on any host Node (e.g. a newer Node
 // whose bundled undici would reject a v6 dispatcher passed to the GLOBAL fetch).
 import { Agent, fetch as undiciFetch, type Dispatcher } from "undici";
