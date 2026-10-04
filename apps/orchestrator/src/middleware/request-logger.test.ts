@@ -188,9 +188,10 @@ describe("requestLogger overlay QR link-token redaction (WARP-1474)", () => {
   });
 
   // AC2 defense-in-depth: some clients pass the redeem token in the query
-  // string, which pino-std-serializers DOES emit under `req.query`. Without
-  // `req.query.token` in the redact list it rides straight into the log line.
-  it("redacts req.query.token (a token passed as a query param)", () => {
+  // string, which pino-std-serializers DOES emit under `req.query`. Since
+  // WARP-3622 the serializer drops `req.query` altogether, so the token cannot
+  // ride into a log line whether or not the redact list still names it.
+  it("never logs a token passed as a query param", () => {
     const SECRET_TOKEN = "PLAINTEXT-OVERLAY-LINK-TOKEN-q1w2e3";
     const lines: string[] = [];
     const logger = createRequestLogger({
@@ -211,10 +212,7 @@ describe("requestLogger overlay QR link-token redaction (WARP-1474)", () => {
       logger(req as never, res as never);
       req.log.info({ req }, "explicit req serialize");
     });
-    const output = lines.join("");
-    expect(output).not.toContain(SECRET_TOKEN);
-    const line = JSON.parse(lines[lines.length - 1]);
-    expect(line.req.query.token).toBe("[Redacted]");
+    expect(lines.join("")).not.toContain(SECRET_TOKEN);
   });
 });
 
@@ -246,7 +244,50 @@ describe("requestLogger secret query params (WARP-3122)", () => {
     expect(output).not.toContain("SECRET-TOKEN-q");
     const completion = JSON.parse(lines[lines.length - 1]);
     expect(completion.req.url).toBe("/api/cameras/front/playback.segment");
-    expect(completion.req.query.sig).toBe("[Redacted]");
+  });
+});
+
+describe("requestLogger personal data in the request (WARP-3622)", () => {
+  // `scrubReq` cut the URL at `?` but still emitted the parsed `req.query`, so a
+  // file path or search term reached container logs and the diagnostics bundle.
+  const TERM = "salary-review-2026";
+  const PATH_PARAM = "alice.martin";
+
+  function serialized() {
+    const lines: string[] = [];
+    const logger = createRequestLogger({
+      dest: { write: (s: string) => lines.push(s) },
+      level: "info",
+    });
+    const req = Object.assign(mockReq("PD-ID"), {
+      url: `/api/files/search?q=${TERM}&path=/HR/${TERM}.xlsx`,
+      query: { q: TERM, path: `/HR/${TERM}.xlsx` },
+      params: { username: PATH_PARAM },
+    }) as unknown as ReturnType<typeof mockReq> & {
+      log: { info: (obj: unknown, msg: string) => void };
+    };
+    const res = mockRes();
+    runWithRequestId("PD-ID", () => {
+      logger(req as never, res as never);
+      req.log.info({ req }, "explicit req serialize");
+    });
+    res.emit("finish");
+    return lines;
+  }
+
+  it("omits req.query and req.params from the serialized request", () => {
+    for (const line of serialized()) {
+      const parsed = JSON.parse(line);
+      if (parsed.req) {
+        expect(parsed.req).not.toHaveProperty("query");
+        expect(parsed.req).not.toHaveProperty("params");
+      }
+    }
   });
 
+  it("a files search request logs neither the term nor the path it asked for", () => {
+    const output = serialized().join("");
+    expect(output).not.toContain(TERM);
+    expect(output).not.toContain(PATH_PARAM);
+  });
 });

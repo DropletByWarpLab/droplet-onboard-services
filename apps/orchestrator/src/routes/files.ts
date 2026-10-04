@@ -3170,7 +3170,13 @@ export function createFilesRouter(
     try {
       const schema = z.object({
         path: z.string().min(1),
-        shareType: z.number().int().min(0).max(6).optional().default(3), // public link
+        // WARP-3622: user (0), group (1), public link (3), email (4). A federated
+        // cloud share (6) makes Nextcloud connect out to a caller-supplied host,
+        // and the rest (2, 5, 7+) are not offered by any client.
+        shareType: z
+          .union([z.literal(0), z.literal(1), z.literal(3), z.literal(4)])
+          .optional()
+          .default(3), // public link
         permissions: z.number().int().min(1).max(31).optional().default(1),
         expireDate: z
           .string()
