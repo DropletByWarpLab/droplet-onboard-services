@@ -71,6 +71,13 @@ function makeFake(hooks: Hooks = {}) {
     // store and its model methods must exist, because the work-item DETAIL
     // read and deleteWorkItem now both consult it.
     relations: [] as Row[],
+    // WARP-3519 — the collaboration tables the comment / create / assign paths
+    // now write or read. The watch list is written by createWorkItem,
+    // updateWorkItem and addComment; mentions and reactions are read back by
+    // every comment list.
+    watchers: [] as Row[],
+    mentions: [] as Row[],
+    reactions: [] as Row[],
   };
 
   const resolveItem = (it: Row, include?: Row) => {
@@ -371,6 +378,29 @@ function makeFake(hooks: Hooks = {}) {
         db.comments.push(c);
         return c;
       },
+    },
+
+    // WARP-3519 — `skipDuplicates` on the unique (workItemId, userId), as the
+    // real table does it.
+    pmWorkItemWatcher: {
+      createMany: async ({ data }: { data: Row[] }) => {
+        let count = 0;
+        for (const w of data) {
+          if (db.watchers.some((x) => x.workItemId === w.workItemId && x.userId === w.userId)) continue;
+          db.watchers.push({ id: uid("wt"), createdAt: new Date(), ...w });
+          count++;
+        }
+        return { count };
+      },
+    },
+    // The comment list batches mentions and reactions in two reads.
+    pmCommentMention: {
+      findMany: async ({ where }: { where: Row }) =>
+        db.mentions.filter((m) => (where.commentId as { in: string[] }).in.includes(m.commentId as string)),
+    },
+    pmCommentReaction: {
+      findMany: async ({ where }: { where: Row }) =>
+        db.reactions.filter((r) => (where.commentId as { in: string[] }).in.includes(r.commentId as string)),
     },
 
     pmActivity: {
@@ -908,6 +938,180 @@ describe("native PM routes — identity PATCH writes no spurious activity row", 
     expect(res.status).toBe(200);
     const after = db.activity.filter((a) => a.verb === "updated").length;
     expect(after).toBe(before);
+  });
+});
+
+// ── WARP-3519 — updateWorkItem names what changed ────────────────────────────
+// A name, description, priority, start-date or label change used to share ONE
+// generic `updated` row (priority had its own field on it). Each now has a verb
+// that names it, so the item's timeline can say what happened.
+
+describe("native PM routes — activity names what changed (WARP-3519)", () => {
+  let prisma: unknown;
+  let db: ReturnType<typeof makeFake>["db"];
+  let pid: string;
+  let wiId: string;
+
+  const patch = (body: Record<string, unknown>) =>
+    request(makeApp(prisma, OWNER)).patch(`/api/pm/work-items/${wiId}`).send(body);
+
+  beforeEach(async () => {
+    id = 0;
+    const fake = makeFake();
+    prisma = fake.prisma;
+    db = fake.db;
+    const proj = await request(makeApp(prisma, OWNER)).post("/api/pm/projects").send({ name: "Inbox" });
+    pid = proj.body.project.id;
+    const wi = await request(makeApp(prisma, OWNER))
+      .post(`/api/pm/projects/${pid}/work-items`)
+      .send({ name: "Item", assignees: ["u1"] });
+    wiId = wi.body.work_item.id;
+  });
+
+  const written = (before: number) => db.activity.slice(before);
+
+  it("a rename writes title_changed with the old and the new name, and nothing generic", async () => {
+    const before = db.activity.length;
+    expect((await patch({ name: "Renamed" })).status).toBe(200);
+    expect(written(before)).toEqual([
+      expect.objectContaining({ verb: "title_changed", field: "name", oldValue: "Item", newValue: "Renamed" }),
+    ]);
+  });
+
+  it("a description edit writes description_changed WITHOUT storing the document", async () => {
+    const before = db.activity.length;
+    expect((await patch({ description_html: "<p>new text</p>" })).status).toBe(200);
+    const rows = written(before);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ verb: "description_changed", field: "description" });
+    expect(rows[0].oldValue ?? null).toBeNull();
+    expect(rows[0].newValue ?? null).toBeNull();
+  });
+
+  it("a priority change writes priority_changed (it used to be updated/priority)", async () => {
+    const before = db.activity.length;
+    expect((await patch({ priority: "high" })).status).toBe(200);
+    expect(written(before)).toEqual([
+      expect.objectContaining({ verb: "priority_changed", field: "priority", oldValue: "none", newValue: "high" }),
+    ]);
+  });
+
+  it("a start-date change is the one that still writes `updated`, with an explicit field", async () => {
+    const before = db.activity.length;
+    expect((await patch({ start_date: "2026-10-05T00:00:00.000Z" })).status).toBe(200);
+    expect(written(before)).toEqual([
+      expect.objectContaining({
+        verb: "updated",
+        field: "startDate",
+        oldValue: null,
+        newValue: "2026-10-05T00:00:00.000Z",
+      }),
+    ]);
+  });
+
+  it("label changes write one label_added / label_removed per label, carrying the label id", async () => {
+    db.labels.push(
+      { id: "lab-old", projectId: pid, name: "old", color: null },
+      { id: "lab-new", projectId: pid, name: "new", color: null },
+    );
+    db.itemLabels.push({ id: "il-seed", workItemId: wiId, labelId: "lab-old" });
+    const before = db.activity.length;
+    expect((await patch({ label_ids: ["lab-new"] })).status).toBe(200);
+    const rows = written(before);
+    expect(rows.find((r) => r.verb === "label_added")).toMatchObject({
+      field: "labels",
+      oldValue: null,
+      newValue: "lab-new",
+    });
+    expect(rows.find((r) => r.verb === "label_removed")).toMatchObject({
+      field: "labels",
+      oldValue: "lab-old",
+      newValue: null,
+    });
+    expect(rows).toHaveLength(2);
+  });
+
+  it("an identity PATCH of all of them writes nothing", async () => {
+    const before = db.activity.length;
+    expect((await patch({ name: "Item", priority: "none", label_ids: [] })).status).toBe(200);
+    expect(written(before)).toEqual([]);
+  });
+});
+
+// ── WARP-3519 — the automatic half of the watch list ─────────────────────────
+
+describe("native PM routes — creating, assigning and commenting subscribe (WARP-3519)", () => {
+  let prisma: unknown;
+  let db: ReturnType<typeof makeFake>["db"];
+  let pid: string;
+
+  beforeEach(async () => {
+    id = 0;
+    const fake = makeFake();
+    prisma = fake.prisma;
+    db = fake.db;
+    const proj = await request(makeApp(prisma, OWNER)).post("/api/pm/projects").send({ name: "Inbox" });
+    pid = proj.body.project.id;
+  });
+
+  const create = (body: Record<string, unknown>, user = OWNER) =>
+    request(makeApp(prisma, user)).post(`/api/pm/projects/${pid}/work-items`).send(body);
+
+  it("the creator watches as CREATOR and each assignee as ASSIGNEE", async () => {
+    const res = await create({ name: "Item", assignees: ["u1", "u2"] });
+    expect(res.status).toBe(201);
+    const rows = db.watchers.filter((w) => w.workItemId === res.body.work_item.id);
+    expect(rows.map((w) => [w.userId, w.reason]).sort()).toEqual(
+      [
+        [OWNER.id, "CREATOR"],
+        ["u1", "ASSIGNEE"],
+        ["u2", "ASSIGNEE"],
+      ].sort(),
+    );
+  });
+
+  it("a creator who is also an assignee is ONE watcher, recorded as the creator", async () => {
+    const res = await create({ name: "Item", assignees: [OWNER.id] });
+    const rows = db.watchers.filter((w) => w.workItemId === res.body.work_item.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ userId: OWNER.id, reason: "CREATOR" });
+  });
+
+  it("a newly assigned person watches; unassigning them does NOT unwatch", async () => {
+    const res = await create({ name: "Item", assignees: ["u1"] });
+    const wid = res.body.work_item.id as string;
+    await request(makeApp(prisma, OWNER)).patch(`/api/pm/work-items/${wid}`).send({ assignees: ["u1", "u3"] });
+    expect(db.watchers.find((w) => w.workItemId === wid && w.userId === "u3")).toMatchObject({
+      reason: "ASSIGNEE",
+    });
+    await request(makeApp(prisma, OWNER)).patch(`/api/pm/work-items/${wid}`).send({ assignees: ["u3"] });
+    expect(db.watchers.some((w) => w.workItemId === wid && w.userId === "u1")).toBe(true);
+  });
+
+  it("commenting watches as COMMENTER, and a comment carries its id on the activity row", async () => {
+    const res = await create({ name: "Item" });
+    const wid = res.body.work_item.id as string;
+    const comment = await request(makeApp(prisma, { id: "user-member", role: "family" }))
+      .post(`/api/pm/work-items/${wid}/comments`)
+      .send({ comment_html: "<p>hello</p>" });
+    expect(comment.status).toBe(201);
+    expect(db.watchers.find((w) => w.workItemId === wid && w.userId === "user-member")).toMatchObject({
+      reason: "COMMENTER",
+    });
+    // The notify sweep reads the comment id off this row (field + newValue).
+    expect(db.activity.find((a) => a.verb === "commented")).toMatchObject({
+      field: "comment",
+      newValue: comment.body.comment.id,
+    });
+    // The wire shape grew, additively.
+    expect(comment.body.comment).toMatchObject({
+      editedAt: null,
+      deleted: false,
+      deletedAt: null,
+      deletedById: null,
+      mentions: [],
+      reactions: [],
+    });
   });
 });
 

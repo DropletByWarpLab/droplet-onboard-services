@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { sanitizePmHtml } from "./sanitize-html.js";
+import { sanitizePmHtml, extractMentionIds } from "./sanitize-html.js";
 
 describe("sanitizePmHtml", () => {
   it("strips <script> tags and their contents", () => {
@@ -68,5 +68,116 @@ describe("sanitizePmHtml", () => {
 
   it("returns an empty string for empty input", () => {
     expect(sanitizePmHtml("")).toBe("");
+  });
+});
+
+// WARP-3519 (WS-2) — @mentions. The allowlist grows by exactly one attribute on
+// exactly one tag, and the id it carries is validated by SHAPE: it is parsed
+// back out of the stored html to decide who gets notified, so everything else
+// about the span (class, style, handlers, a hostile id) must not survive.
+describe("sanitizePmHtml — @mention spans (WARP-3519)", () => {
+  const ID = "0d9c5c1e-2f4a-4b6d-8e10-3a5c7e9b1d2f";
+
+  it("keeps <span data-mention-id> and its @Name text", () => {
+    const out = sanitizePmHtml(`<p>hi <span data-mention-id="${ID}">@Ana</span></p>`);
+    expect(out).toBe(`<p>hi <span data-mention-id="${ID}">@Ana</span></p>`);
+  });
+
+  it("strips every other attribute from the mention span", () => {
+    const out = sanitizePmHtml(
+      `<p><span data-mention-id="${ID}" class="x" style="position:fixed" onclick="steal()" id="y">@Ana</span></p>`,
+    );
+    expect(out).toBe(`<p><span data-mention-id="${ID}">@Ana</span></p>`);
+  });
+
+  it("unwraps a plain <span> to its text — spans are allowed ONLY as mentions", () => {
+    const out = sanitizePmHtml('<p><span style="color:red">plain</span> text</p>');
+    expect(out).toBe("<p>plain text</p>");
+  });
+
+  it.each([
+    ["an empty id", '<span data-mention-id="">@x</span>'],
+    ["an id with a quote", '<span data-mention-id="a&quot; onmouseover=&quot;alert(1)">@x</span>'],
+    ["an id with markup", '<span data-mention-id="&lt;img src=x&gt;">@x</span>'],
+    ["an id with a space", '<span data-mention-id="a b">@x</span>'],
+    ["an over-long id", `<span data-mention-id="${"a".repeat(65)}">@x</span>`],
+  ])("unwraps a mention span carrying %s", (_label, html) => {
+    const out = sanitizePmHtml(`<p>${html}</p>`);
+    expect(out).toBe("<p>@x</p>");
+    expect(out).not.toContain("data-mention-id");
+  });
+
+  it("drops data-mention-id from every OTHER tag", () => {
+    const out = sanitizePmHtml(
+      `<p data-mention-id="${ID}">x</p><a href="https://e.example" data-mention-id="${ID}">l</a>`,
+    );
+    expect(out).not.toContain("data-mention-id");
+  });
+
+  it("with allowedMentionIds, unwraps a mention of anyone not in the set (text kept)", () => {
+    const html = `<p><span data-mention-id="u-1">@Ana</span> and <span data-mention-id="u-2">@Ben</span></p>`;
+    const out = sanitizePmHtml(html, { allowedMentionIds: new Set(["u-1"]) });
+    expect(out).toBe('<p><span data-mention-id="u-1">@Ana</span> and @Ben</p>');
+  });
+
+  it("with an EMPTY allowedMentionIds set, unwraps every mention", () => {
+    const out = sanitizePmHtml('<p><span data-mention-id="u-1">@Ana</span></p>', {
+      allowedMentionIds: new Set(),
+    });
+    expect(out).toBe("<p>@Ana</p>");
+  });
+
+  // A dropped mention followed by a KEPT one at the same depth closed the kept
+  // one as `</x-unwrap>` when spans were dropped by renaming them: sanitize-html
+  // keeps its rename bookkeeping per depth and never clears it for a dropped tag.
+  // Found by the real-Postgres suite (pm-collaboration.pg.test.ts), pinned here.
+  it("a dropped mention BEFORE a kept one leaves the kept one well-formed", () => {
+    const html =
+      '<p><span data-mention-id="bad id">@Dee</span> <span data-mention-id="u-1">@Cara</span> <span data-mention-id="u-2">@Gus</span></p>';
+    expect(sanitizePmHtml(html, { allowedMentionIds: new Set(["u-1"]) })).toBe(
+      '<p>@Dee <span data-mention-id="u-1">@Cara</span> @Gus</p>',
+    );
+    expect(sanitizePmHtml(html)).toBe(
+      '<p>@Dee <span data-mention-id="u-1">@Cara</span> <span data-mention-id="u-2">@Gus</span></p>',
+    );
+  });
+
+  it("alternating dropped and kept mentions all close correctly", () => {
+    const span = (id: string) => `<span data-mention-id="${id}">@${id}</span>`;
+    const html = `<p>${span("a b")}${span("u-1")}${span("c d")}${span("u-2")}${span("e f")}</p>`;
+    const out = sanitizePmHtml(html);
+    expect(out).toBe(`<p>@a b${span("u-1")}@c d${span("u-2")}@e f</p>`);
+    expect(out).not.toContain("x-unwrap");
+  });
+
+  it("is idempotent: sanitizing the output again changes nothing", () => {
+    const once = sanitizePmHtml(`<p>a <span data-mention-id="${ID}" class="z">@Ana</span></p>`);
+    expect(sanitizePmHtml(once)).toBe(once);
+  });
+});
+
+describe("extractMentionIds (WARP-3519)", () => {
+  it("returns the ids in document order, de-duplicated", () => {
+    const html =
+      '<p><span data-mention-id="u-2">@B</span> <span data-mention-id="u-1">@A</span> <span data-mention-id="u-2">@B</span></p>';
+    expect(extractMentionIds(html)).toEqual(["u-2", "u-1"]);
+  });
+
+  it("finds a mention nested inside other formatting", () => {
+    expect(
+      extractMentionIds('<ul><li><strong><span data-mention-id="u-1">@A</span></strong></li></ul>'),
+    ).toEqual(["u-1"]);
+  });
+
+  it("ignores spans without a valid id and never throws on junk", () => {
+    expect(extractMentionIds('<span>x</span><span data-mention-id="bad id">y</span>')).toEqual([]);
+    expect(extractMentionIds("")).toEqual([]);
+    expect(extractMentionIds("<<<>>>")).toEqual([]);
+  });
+
+  it("reads only what SURVIVES sanitization — a span smuggled inside <script> is not a mention", () => {
+    expect(
+      extractMentionIds('<script><span data-mention-id="u-9">@x</span></script><p>ok</p>'),
+    ).toEqual([]);
   });
 });

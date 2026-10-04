@@ -178,9 +178,10 @@ const SURFACES: ReadonlyArray<{ module: ModuleId; label: string; files: string[]
     files: [
       ["routes", "pm", "native.ts"],
       ["routes", "pm", "relations.ts"],
+      ["routes", "pm", "collaboration.ts"],
       ["routes", "mobile", "pm.ts"],
     ],
-    atLeast: 30,
+    atLeast: 38,
   },
   // WARP-3365 review: what the business is owed and owes is the company's own.
   {

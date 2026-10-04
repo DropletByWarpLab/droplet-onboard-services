@@ -56,6 +56,7 @@ import { createMatterRouter } from "./routes/matter.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
+import { createPmCollaborationRouter } from "./routes/pm/collaboration.js";
 import { createCrmRouter } from "./routes/crm.js";
 import { createMoneyRouter } from "./routes/money.js";
 import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
@@ -556,6 +557,12 @@ export function createApp(
   // (blocks / relates / duplicates). Its own router on the same prefix; the
   // paths are disjoint from the native router's, so neither shadows the other.
   app.use("/api", createPmRelationsRouter(prisma));
+  // WARP-3519 (ADR-069 WS-2) — comment edit/delete, reactions, watchers and the
+  // merged activity timeline. Its own router on the same prefix; its paths
+  // (`/pm/comments/:id…`, `/pm/work-items/:id/{watchers,timeline}`) are disjoint
+  // from the native router's, so neither shadows the other, and it sits after the
+  // module gates and the MCP acting-user gate like every PM router.
+  app.use("/api", createPmCollaborationRouter(prisma));
   // WARP-2117 — the CRM, which lives inside the Projects surface. Mounted
   // AFTER the PM router but on a disjoint prefix (`/api/crm`), so neither
   // shadows the other; the `crm` module gate comes from the registry.
