@@ -157,6 +157,44 @@ describe.skipIf(!RUN)("activity notify sweep — real Postgres (WARP-2587)", () 
     expect(row.notifiedAt).toBeNull();
   });
 
+  // WARP-3528 (ADR-069 section 1) -- a work item in a SERVICE_DESK project is a
+  // ticket: only an assignment tells anyone, only the user the row names, and
+  // the notification links to /support. Real rows, real claim.
+  it("a ticket assignment tells the assignee it names, with the ticket key and the support link", async () => {
+    const ws = await prisma.pmWorkspace.findFirstOrThrow({ where: { slug: `${PREFIX}ws` } });
+    const desk = await prisma.pmProject.create({
+      data: { workspaceId: ws.id, name: "Sweep desk", identifier: "SWPDK", kind: "SERVICE_DESK" },
+    });
+    const ticket = await prisma.pmWorkItem.create({
+      data: { projectId: desk.id, sequenceId: 7, name: "Printer jams on page two" },
+    });
+    // The actor is also on the ticket; the assignment row names the assignee.
+    await prisma.pmWorkItemAssignee.create({ data: { workItemId: ticket.id, userId: actorId } });
+    await prisma.pmActivity.create({
+      data: { workItemId: ticket.id, actorId, verb: "assigned", newValue: assigneeId, createdAt: settled() },
+    });
+    await prisma.pmActivity.create({
+      data: { workItemId: ticket.id, actorId: assigneeId, verb: "commented", createdAt: settled() },
+    });
+
+    await runActivityNotifySweep(prisma);
+    await runActivityNotifySweep(prisma);
+
+    const logs = await prisma.notificationLog.findMany({ where: { username: OURS } });
+    expect(logs.map((l) => [l.username, l.kind, l.title, l.body, l.url])).toEqual([
+      [`${PREFIX}assignee`, "event", "Ticket SWPDK-7 assigned to you", "Printer jams on page two", "/support?t=SWPDK-7"],
+    ]);
+    // Sorted here, not by Postgres: an enum column sorts by declaration order,
+    // which is not the alphabet.
+    const rows = await prisma.pmActivity.findMany({ where: { workItemId: ticket.id } });
+    expect(
+      rows.map((r) => [r.verb, r.notifyStatus, r.notifiedAt !== null] as const).sort(),
+    ).toEqual([
+      ["assigned", "sent", true],
+      ["commented", "not_needed", false],
+    ]);
+  });
+
   it("a non-notifiable verb reaches not_needed with notifiedAt NULL", async () => {
     await prisma.pmActivity.create({
       data: { workItemId, actorId, verb: "updated", field: "fields", createdAt: settled() },

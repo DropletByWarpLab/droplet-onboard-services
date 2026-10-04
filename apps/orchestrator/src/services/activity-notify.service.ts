@@ -75,11 +75,21 @@
  * gets that clause right for the organizer and this copies it.
  * CRM: the deal's `ownerId`, minus the actor.
  *
+ * TICKETS (WARP-3528, ADR-069 section 1): a work item in a SERVICE_DESK project
+ * is not told like the above. Its subject is a customer's words and the people
+ * who handle it hold the `support` grant, not necessarily `pm`, so a department
+ * WATCHER is never a recipient and `state_changed` / `commented` /
+ * `due_date_changed` interrupt nobody. Exactly one verb tells anyone -- `assigned`
+ * -- and it tells the user the row NAMES (`newValue`), never the actor, a guest,
+ * or an account with no deliverable username. Every other ticket verb takes the
+ * explicit `not_needed` terminal. See `sweepTickets`.
+ *
  * ── COALESCING, AND ITS WINDOW ─────────────────────────────────────────────
  *
  * A bulk import that assigns 200 tickets must not send 200 notifications, so
  * the unit of delivery is (recipient, tick, source) — at most ONE
- * NotificationLog row per recipient per 60s tick from PM and one from the CRM.
+ * NotificationLog row per recipient per 60s tick from PM, one from the CRM and
+ * one from the service desk.
  * One activity gets a specific message; two or more get a counted digest.
  *
  * Two constants make that work:
@@ -102,6 +112,7 @@ import {
 } from "./notifications.service.js";
 import { createLogger } from "../lib/logger.js";
 import { isUserIdShaped } from "@droplet/auth-policy";
+import { isServiceDesk } from "./pm/pm.service.js";
 
 const logger = createLogger("activity-notify");
 
@@ -174,7 +185,7 @@ export const noDepartmentWatchers: DepartmentWatchersResolver = async () =>
   new Map<string, string[]>();
 
 export interface ActivityNotifySweepResult {
-  /** PmActivity rows claimed `sent`. */
+  /** PmActivity rows claimed `sent` (project items and tickets alike). */
   pmNotified: number;
   /** PmActivity rows given the explicit `not_needed` terminal. */
   pmSkipped: number;
@@ -224,6 +235,10 @@ interface Outgoing {
   username: string;
   title: string;
   body: string;
+  /** WARP-3528 — where a click opens: a same-origin dashboard path (the toast
+   *  and the NotificationLog row both carry it; `assertNotificationLink` checks
+   *  it). Only the ticket notification has one; PM and CRM send none. */
+  url?: string;
 }
 
 /**
@@ -320,6 +335,7 @@ async function claimAndNotify(
         kind: "event",
         title: o.title,
         body: o.body,
+        ...(o.url !== undefined ? { url: o.url } : {}),
       });
       ids.push(log.id);
     }
@@ -342,6 +358,7 @@ async function claimAndNotify(
       kind: "event",
       title: o.title,
       body: o.body,
+      ...(o.url !== undefined ? { url: o.url } : {}),
     });
     (channels.length > 0 ? delivered : failed).push(logIds[i]);
   });
@@ -387,12 +404,28 @@ async function markNotNeeded(
   return res.count;
 }
 
+/** What the PM sweep reads with every activity row. `project.kind` is how a
+ *  ticket is told from a project item (WARP-3528). */
+const SWEEP_INCLUDE = {
+  workItem: {
+    select: {
+      id: true,
+      name: true,
+      sequenceId: true,
+      project: { select: { identifier: true, kind: true } },
+    },
+  },
+} satisfies Prisma.PmActivityInclude;
+
+type SweepRow = Prisma.PmActivityGetPayload<{ include: typeof SWEEP_INCLUDE }>;
+type SweepCounts = { notified: number; skipped: number; logs: number };
+
 async function sweepPm(
   prisma: PrismaClient,
   cutoff: Date,
   now: Date,
   resolveWatchers: DepartmentWatchersResolver,
-): Promise<{ notified: number; skipped: number; logs: number }> {
+): Promise<SweepCounts> {
   // Ordered by createdAt so a backlog drains FIFO. The
   // [notifyStatus, createdAt] index makes the `pending` prefix selective even
   // though the table is append-only and almost every row is terminal.
@@ -400,17 +433,31 @@ async function sweepPm(
     where: { notifyStatus: "pending", createdAt: { lte: cutoff } },
     orderBy: { createdAt: "asc" },
     take: BATCH,
-    include: {
-      workItem: {
-        select: {
-          id: true,
-          name: true,
-          sequenceId: true,
-          project: { select: { identifier: true } },
-        },
-      },
-    },
+    include: SWEEP_INCLUDE,
   });
+  // WARP-3528 — one read, two audiences: a ticket is told by `sweepTickets`
+  // under its own rules, a project item by the rules below, unchanged.
+  const isTicket = (r: SweepRow): boolean => isServiceDesk(r.workItem.project);
+  const items = await sweepProjectItems(
+    prisma,
+    rows.filter((r) => !isTicket(r)),
+    now,
+    resolveWatchers,
+  );
+  const tickets = await sweepTickets(prisma, rows.filter(isTicket), now);
+  return {
+    notified: items.notified + tickets.notified,
+    skipped: items.skipped + tickets.skipped,
+    logs: items.logs + tickets.logs,
+  };
+}
+
+async function sweepProjectItems(
+  prisma: PrismaClient,
+  rows: SweepRow[],
+  now: Date,
+  resolveWatchers: DepartmentWatchersResolver,
+): Promise<SweepCounts> {
   if (rows.length === 0) return { notified: 0, skipped: 0, logs: 0 };
 
   const candidates = rows.filter((r) => NOTIFIABLE_PM_VERBS.has(r.verb));
@@ -551,6 +598,91 @@ async function sweepPm(
   const logs = await claimAndNotify(prisma, "pmActivity", finalSendIds, outgoing, now);
   const skipped = await markNotNeeded(prisma, "pmActivity", skipIds);
   return { notified: logs > 0 ? finalSendIds.length : 0, skipped, logs };
+}
+
+/**
+ * WARP-3528 (ADR-069 section 1) — the ticket half of the sweep: the activity
+ * rows of work items that live in a SERVICE_DESK project. See the header's
+ * TICKETS paragraph for why none of the project-item rules above apply.
+ *
+ * Only `assigned` tells anyone, and only the user the row names (`newValue` is
+ * that assignee's User.id) -- not the item's current assignees, not a department
+ * watcher. A ticket's recipients are therefore never looked up; the one user
+ * lookup is for the named assignees, and it reads the role so a guest is skipped
+ * (WARP-3365) the way the CRM sweep skips one. Everything undeliverable, and
+ * every other verb, takes the explicit `not_needed` terminal.
+ *
+ * Its own coalescing unit and its own claim: one NotificationLog row per
+ * recipient per tick, apart from the PM one. The claim keeps the same
+ * exactly-once discipline as every other phase (`claimAndNotify`).
+ */
+async function sweepTickets(
+  prisma: PrismaClient,
+  rows: SweepRow[],
+  now: Date,
+): Promise<SweepCounts> {
+  if (rows.length === 0) return { notified: 0, skipped: 0, logs: 0 };
+
+  const skipIds: string[] = [];
+  // assignee User.id -> the assignment rows that name them.
+  const perUser = new Map<string, SweepRow[]>();
+  for (const row of rows) {
+    const userId = row.newValue;
+    if (row.verb !== "assigned" || !userId || userId === row.actorId) {
+      skipIds.push(row.id);
+      continue;
+    }
+    const list = perUser.get(userId) ?? [];
+    list.push(row);
+    perUser.set(userId, list);
+  }
+
+  const users =
+    perUser.size === 0
+      ? []
+      : await prisma.user.findMany({
+          where: { id: { in: [...perUser.keys()] } },
+          select: { id: true, username: true, role: true },
+        });
+  const usernames = new Map(users.map((u) => [u.id, u.username] as const));
+  const guestIds = new Set(users.filter((u) => u.role === "guest").map((u) => u.id));
+
+  const outgoing: Outgoing[] = [];
+  const sendIds: string[] = [];
+  for (const [userId, list] of perUser) {
+    const username = deliverableUsername("pmActivity", userId, usernames);
+    if (!username || guestIds.has(userId)) {
+      for (const r of list) skipIds.push(r.id);
+      continue;
+    }
+    for (const r of list) sendIds.push(r.id);
+    // One ticket assigned twice in a tick is still one ticket.
+    const tickets = [...new Map(list.map((r) => [r.workItemId, r] as const)).values()];
+    if (tickets.length === 1) {
+      const row = tickets[0];
+      const key = `${row.workItem.project.identifier}-${row.workItem.sequenceId}`;
+      outgoing.push({
+        username,
+        title: truncate(`Ticket ${key} assigned to you`, TITLE_MAX),
+        body: truncate(row.workItem.name, BODY_MAX),
+        url: `/support?t=${encodeURIComponent(key)}`,
+      });
+      continue;
+    }
+    outgoing.push({
+      username,
+      title: truncate(`${tickets.length} tickets assigned to you`, TITLE_MAX),
+      body: truncate(
+        tickets.map((r) => `${r.workItem.project.identifier}-${r.workItem.sequenceId}`).join(", "),
+        BODY_MAX,
+      ),
+      url: "/support",
+    });
+  }
+
+  const logs = await claimAndNotify(prisma, "pmActivity", sendIds, outgoing, now);
+  const skipped = await markNotNeeded(prisma, "pmActivity", skipIds);
+  return { notified: logs > 0 ? sendIds.length : 0, skipped, logs };
 }
 
 async function sweepCrm(
