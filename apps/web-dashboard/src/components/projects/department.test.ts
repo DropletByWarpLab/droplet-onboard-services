@@ -1,4 +1,7 @@
-// ADR-045 §5.3 (slice 8) — the board's department filter, dashboard side.
+// ADR-045 §5.3 (slice 8) — the board's department filter, dashboard side: the
+// OPTIONS the picker offers. (WS-6 moved the filtering itself to the server —
+// the DSL's `department` condition — where the DEPARTMENT-includes-its-TEAMs rule
+// is proven against Postgres in pm-filter-query.pg.test.ts.)
 //
 // The assertion that earns its keep is the option UNION: a department the
 // caller is not a member of, or one that has been archived, is absent from
@@ -9,13 +12,7 @@
 import { describe, it, expect } from "vitest";
 import type { Department } from "@/lib/types";
 import type { PmWorkItem } from "./types";
-import {
-  DEPARTMENT_ANY,
-  DEPARTMENT_NONE,
-  departmentOptions,
-  matchesDepartment,
-  type DepartmentOption,
-} from "./department";
+import { departmentOptions, type DepartmentOption } from "./department";
 
 const CLINICAL: DepartmentOption = {
   id: "d-clinical",
@@ -134,39 +131,5 @@ describe("departmentOptions", () => {
       [scopedRow(FRONT), scopedRow(HYGIENE), scopedRow(CLINICAL)],
     );
     expect(opts.map((o) => o.name)).toEqual(["Clinical", "Hygiene", "Front desk"]);
-  });
-});
-
-describe("matchesDepartment", () => {
-  const OPTS = [CLINICAL, HYGIENE, FRONT];
-
-  it("matches everything under the default", () => {
-    expect(matchesDepartment(item("a", null), DEPARTMENT_ANY, OPTS)).toBe(true);
-  });
-
-  it("'no department' means neither the item nor its project owns it", () => {
-    expect(matchesDepartment(item("a", null), DEPARTMENT_NONE, OPTS)).toBe(true);
-    // Inherited from the project still counts as owned.
-    expect(
-      matchesDepartment(item("b", CLINICAL, "project"), DEPARTMENT_NONE, OPTS),
-    ).toBe(false);
-  });
-
-  it("a DEPARTMENT carries its TEAMs", () => {
-    expect(matchesDepartment(item("a", HYGIENE), CLINICAL.id, OPTS)).toBe(true);
-  });
-
-  it("a TEAM does not reach up to its parent", () => {
-    expect(matchesDepartment(item("a", CLINICAL), HYGIENE.id, OPTS)).toBe(false);
-  });
-
-  it("matches an inherited department the same as an overridden one", () => {
-    expect(
-      matchesDepartment(item("a", FRONT, "project"), FRONT.id, OPTS),
-    ).toBe(true);
-  });
-
-  it("does not match a sibling department", () => {
-    expect(matchesDepartment(item("a", FRONT), CLINICAL.id, OPTS)).toBe(false);
   });
 });
