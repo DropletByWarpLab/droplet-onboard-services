@@ -32,8 +32,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY services/fleet-agent/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY services/fleet-agent/requirements.lock .
+RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements.lock
 # Ships the update-poll trust anchor too (services/fleet-agent/cosign.pub,
 # WARP-1025) — the placeholder fails closed until the key ceremony stamps
 # the real key over BOTH copies (scripts/README.md "OTA release signing").
