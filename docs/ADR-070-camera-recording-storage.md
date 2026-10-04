@@ -116,7 +116,11 @@ Prepare is the existing "Erase & adopt" (`drive_adopt`) and pool format, which n
 
 A plain drive that is already adopted is shown as `needs_preparing`. It is not wiped, and it is not eligible for an allocation.
 
-The recovery key leaves the box once, through `GET /api/storage/drives/:id/recovery-key`. It is owner only and sits behind a Tier-2 confirmation. The first call returns `200 { recoveryKey }` and every later call returns `410`. §8.2 has the custody rules.
+Prepare requires a TPM2, as `/data` provisioning does: on a box without one it is refused with `409 tpm_required` and nothing is wiped.
+
+A still-plain adopted drive keeps its existing drive-root Nextcloud registration until it is prepared, so nothing it holds is hidden; Prepare wipes it and replaces the registration with `files/` only.
+
+The recovery key leaves the box once, through `POST /api/storage/drives/:id/recovery-key/reveal` (a `POST`, so it uses the existing confirmation handshake). It is owner only and sits behind a Tier-2 confirmation. The first call returns `200 { recoveryKey }` and every later call returns `410`. §8.2 has the custody rules.
 
 #### 4.3 Bridge endpoints (WARP-3514)
 
@@ -132,7 +136,7 @@ Two things differ from `box-name`. The timeout is at least 120 s, where `box-nam
 | Endpoint | Request | Effect |
 |---|---|---|
 | `GET /host/nvr-storage` | none | `{ source, kind, fsUuid, mountPath, physicalDisk, isSystemDisk, encrypted, mounted, rw, projectId, limitBytes, usedBytes, fsSizeBytes, fsFreeBytes }`. `source` is the effective `NVR_MEDIA_SOURCE`, and `kind` is `"volume"` or `"path"`. |
-| `POST /host/nvr-storage` | `{ fsUuid, mode, limitBytes }`, where `mode` is `"reserved"` or `"full"` | Validates the target: not the OS disk, mounted, read-write, LUKS-backed. Creates `nvr/`, sets the quota and writes `NVR_MEDIA_SOURCE` through `_upsert_env_kv`. It does not migrate. |
+| `POST /host/nvr-storage` | `{ fsUuid, mode, limitBytes }`, where `mode` is `"reserved"` or `"full"` | Validates the target: not the OS disk, mounted, read-write, LUKS-backed. Creates `nvr/`, sets its quota and the `files/` reservation quota (§5), and records the target as pending. It does **not** write `NVR_MEDIA_SOURCE` and does not migrate: only the migration's flip step writes it (§6.3), so Frigate can never be recreated on an empty slice. |
 | `POST /host/nvr-storage/resize` | `{ limitBytes }` | Changes the quota only. Frigate is not restarted. |
 | `POST /host/nvr-storage/migrate` | `{ fsUuid }` | Starts the root oneshot described in §6.3. |
 | `GET /host/nvr-storage/migrate` | none | `{ state, progressPct, bytesCopied, bytesTotal, startedAt, error? }`, where `state` is `"idle"`, `"running"`, `"done"` or `"failed"`. |
@@ -273,7 +277,7 @@ Steps:
 6. **Flip** `NVR_MEDIA_SOURCE` to `<mount>/nvr`.
 7. **Start Frigate** on the new source.
 
-The copy is path-preserving, and the container path stays `/media/frigate`, so the rows in Frigate's recordings database stay valid. Frigate is down between steps 3 and 7, which is the only recording gap. The old source is kept after the flip. It is deleted only when the owner confirms, through `POST /api/storage/recordings/old-footage/delete`, and until then `oldFootage` reports `present: true` with `location: "system_disk"`. A failed run leaves the old source as the live source.
+The copy is path-preserving, and the container path stays `/media/frigate`, so the rows in Frigate's recordings database stay valid. Frigate is down between steps 3 and 7, which is the only recording gap. The old source is kept after the flip. It is deleted only when the owner confirms, through `POST /api/storage/recordings/old-footage/delete`, and until then `oldFootage` reports `present: true` with `location: "system_disk"`. A failed run leaves the old source as the live source: if it fails after Frigate was stopped, the oneshot restarts Frigate on the old source before reporting `failed`. The orchestrator retries a failed migration automatically up to three times with backoff (1 h, 6 h, 24 h), then leaves the allocation `PENDING`, raises a warning and notifies the owner. The flip is the only writer of `NVR_MEDIA_SOURCE`; a box with no footage yet still goes through the same (trivial) migration, so there is one path.
 
 ### 7. Guards and alerts
 
@@ -307,7 +311,9 @@ Every data drive uses the `/data` scheme (decision 1 in §1): LUKS2, a TPM2 keys
 
 - The key is retrieved once: owner only, behind a Tier-2 confirmation, `200 { recoveryKey }` the first time and `410` after that.
 - The key never appears in a tracked file, `.env`, a log line or a database row. Tests and fixtures use made-up values, never real key material.
-- The principle is the one `/data` uses: the key is shown once and the owner keeps it offline. For `/data` it is printed once on the provisioning console and never written to disk. The bay flow adds an API read, so the key has to be held somewhere between Prepare and that read. The contract leaves the holding place to WARP-3513 (see "Not decided here").
+- The principle is the one `/data` uses: the key is shown once and the owner keeps it offline. For `/data` it is printed once on the provisioning console and never written to disk.
+- Between Prepare and the owner's single reveal, the root Prepare oneshot holds the key in a root-only file (`0600`, directory `0700`) on `/data` — the TPM-sealed LUKS volume, never the unencrypted root filesystem. The reveal is served through the root spool pattern and shreds the file; an unrevealed key is shredded after 7 days. If the owner missed it, "Regenerate recovery key" (owner, Tier 3) enrolls a new recovery keyslot and wipes the old one, then holds the new key the same way.
+- Prepare is refused without a TPM2 (`409 tpm_required`).
 
 #### 8.3 Nextcloud scope
 
@@ -350,7 +356,7 @@ Frigate stays unprivileged, and so does the bridge. Creating `nvr/`, setting the
 - **Migration downtime.** Frigate is stopped for the delta, verify and flip (§6.3). Cameras record nothing in that window. The old footage stays on the OS disk until the owner confirms its deletion, so the OS disk does not get its space back automatically.
 - **A missing drive means no recording.** While the drive is missing, nothing records and the allocation shows `MISSING`. That is the price of decision 3, and the alerts (§7) are the mitigation.
 - **No RAID, so a failing bay loses its footage.** Decision 2 means nothing mirrors the drive. SMART is the only early warning (`smart_failed`), and the footage on a dead drive is gone.
-- **A slice is a cap, not a reservation.** The quota limits `nvr/`. It does not set blocks aside. Files written to `files/` can use space the slice has not used yet, so a full drive can stop recordings below the slice's limit. The bridge reports `fsFreeBytes`, so the orchestrator can see this coming.
+- **A slice is a cap, not a reservation — so `files/` gets one too.** A project quota alone limits `nvr/` without setting blocks aside. To make the slice a real reservation, `files/` carries its own project quota (id 4097) of filesystem size − recordings slice − 2 % slack, updated whenever the slice changes. In FULL mode the drive is dedicated to recordings: it is allowed only when `files/` is empty, and `files/` is then deregistered from Nextcloud. The bridge still reports `fsFreeBytes` as a backstop.
 - **Hitting the cap shortens retention.** Frigate evicts oldest-first when under an hour of headroom remains (`camera-storage.service.ts` documents this), so a full slice means less retention, not a crash. Growth runs hourly, and the 1.25 headroom and the 85% trigger are the buffer between passes.
 - **Locks follow the TPM.** A firmware or Secure Boot change that breaks the TPM seal locks the bays the way it locks `/data`. Recovery is the owner's recovery key, one per drive.
 - **One more host dependency.** Setting limits needs the `quota` tools or `quotactl`, which the host does not have today (§2).
@@ -386,16 +392,20 @@ Verified 2026-10-03 on `stage` at `7209ae868`.
 | The volume total Frigate reports is the filesystem. | It is the quota, so the existing near-full ratio measures the slice. |
 | Drive objects carry no encryption or usage state. | `encryption`, `preparation`, `usage` and `isSystemDisk`. |
 
-## Not decided here
+## Decided after review (2026-10-04)
 
-- **Where the recovery key waits.** The bay flow gives the owner a one-time API read, so the key has to be held between Prepare and that read. `/data` never needed this. WARP-3513 picks the holding place, makes the read consume it, and documents it in `at-rest-encryption.md`. It cannot be the database, a log, `.env` or a tracked file. How a `GET` carries a Tier-2 confirmation is also WARP-3513's call, because the existing handshake (`evalAndRespond`, then `POST /api/storage/command/confirm`) is built around `POST`.
-- **Prepare on a box without a TPM.** `/data` provisioning refuses without one. The contract says nothing about bays.
-- **The order of the `NVR_MEDIA_SOURCE` write.** The contract has `POST /host/nvr-storage` write it and the migration flip it at the end. If the first write lands before the footage moves, any recreate of Frigate in between (an update apply, a `compose up`) would start it on an empty slice. The order has to guarantee that Frigate is never recreated on the slice before its footage is there. WARP-3514 settles how.
-- **Ranking and retries.** The contract does not rank API statuses that hold together, map `read_only` or `smart_failed` to an `AllocationStatus`, or set a retry policy after a `failed` migration. It also does not say what happens to the previous drive's `StorageAllocation` row when the owner moves recordings to another drive with `PUT`.
-- **`usage.role` values.** The contract lists `recordings`, `files` and `null`, and says WARP-3514 fills `recordings`. It does not say when a drive reports `files` rather than `null`.
-- **Existing cameras and the 7-day default.** The retention backfill (WARP-1974) repairs only cameras whose authored record block lacks retention keys, and it is manual and reported. Cameras adopted since WARP-1957 carry the old defaults explicitly. WARP-3514 says whether and how they move to 7 days.
-- **Plain drives and Nextcloud.** An adopted plain drive may hold files at its root, and a `files/`-only registration would hide them. Whether a still-plain drive keeps its drive-root registration until it is prepared is WARP-3513's call.
-- **Roles other than owner and admin.** The contract says a family account gets "a read-only subset or a 403" on `GET /api/storage/recordings`, per the existing storage gating. WARP-3514 aligns it with `GET /api/storage/drives` and picks one.
+These were open in the first draft; they are now part of the decision.
+
+- **Recovery key holding place:** root-only `0600` file on `/data` (encrypted), consumed by the single reveal, shredded after 7 days if unrevealed; "Regenerate recovery key" (owner, Tier 3) re-enrolls (§8.2). The reveal is `POST /api/storage/drives/:id/recovery-key/reveal` so it uses the existing `evalAndRespond` → `POST /api/storage/command/confirm` handshake (§4.2).
+- **No TPM:** Prepare is refused with `409 tpm_required`, as `/data` provisioning is.
+- **`NVR_MEDIA_SOURCE` order:** `POST /host/nvr-storage` prepares the target only; the migration's flip (after delta + verify, Frigate stopped) is the only writer (§4.3, §6.3).
+- **API status precedence** when several hold: `missing` > `migrating` > `degraded` > `on_system_disk` > `pending` > `active` > `no_eligible_drive`. `read_only` and `smart_failed` map to `DEGRADED` with the matching warning; Droplet does not move recordings off a failing drive by itself — the owner is notified and can `PUT` another drive.
+- **Failed migration:** rollback to the old source, automatic retries at 1 h / 6 h / 24 h, then `PENDING` + warning + owner notification (§6.3). **Moving to another drive (`PUT`):** a new `StorageAllocation` row is created `PENDING` and migrated; on success the previous row is deleted and its `nvr/` becomes old footage awaiting the owner's Tier-3 deletion.
+- **`usage.role`:** `"recordings"` when the drive hosts the `ACTIVE` or `MIGRATING` allocation; otherwise `"files"` when it has a `files/` Nextcloud registration; otherwise `null`.
+- **Existing cameras and 7 days:** a one-time, idempotent pass sets continuous / motion / alerts / detections / snapshots to 7 days for every camera whose windows are still the previous defaults (3 / 30 / 14 / 14 / 14) or missing. Cameras an operator customised are left alone and listed in the activity log.
+- **Plain drives and Nextcloud:** a still-plain drive keeps its drive-root registration until it is prepared (§4.2).
+- **Roles:** `GET /api/storage/recordings` and the recordings writes are owner and admin only; family accounts get `403`, aligned with the storage-route role gating (WARP-3465).
+- **Reservation:** `files/` carries a project quota so files cannot consume the recordings slice; FULL mode requires an empty `files/` (risks, Consequences).
 
 ## Alternatives considered
 
