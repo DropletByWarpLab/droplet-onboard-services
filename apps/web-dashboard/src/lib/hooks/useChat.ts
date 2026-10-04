@@ -261,6 +261,7 @@ interface ToolResultEvent extends SSEEventBase {
       tool: string;
       fields: { key: string; kind: string; detail: string; value?: boolean }[];
       truncatedFields: number;
+      shown?: { key: string; text: string }[];
     };
   };
 }

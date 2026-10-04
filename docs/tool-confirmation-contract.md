@@ -424,3 +424,49 @@ missing arrow.
 The legacy `confirmed: true` acceptance was retired by WARP-2002 (§3):
 this round-trip is now the only way a chat write completes. Route-owned tools (§13) never enter this flow at all — their approval
 happens in the dashboard, on the route's own token.
+
+## 15. What the approving person sees (WARP-3569)
+
+The token is bound to the tool name and the exact arguments (§4), so the
+approval is only informed if the person can see the arguments that decide the
+action. A prompt that said only "to: 1 item" or "path: 24 characters" bound
+the token to a call the human could not read.
+
+`apps/orchestrator/src/services/confirmation-summary.ts` builds the summary
+the prompt renders. It has two parts:
+
+- `fields` — every argument by key, kind and size, never the value (§11
+  posture, unchanged).
+- `shown` — the **decisive** arguments of the tool, as display text, taken
+  from a closed per-tool allowlist (`APPROVAL_SHOWN_ARGUMENTS`): the
+  recipients or thread of a message, the path of a delete, restore or share
+  and the share permission, the device, network, camera or port being
+  changed, the title of a background run. Message bodies, subjects,
+  descriptions, record contents and credentials are never on the list.
+
+Rules that keep `shown` safe:
+
+- The arguments are secret-scrubbed first (`redactSecretParams`), so a
+  secret-shaped value is replaced before it is displayed.
+- Display text has control, line-separator, zero-width and bidirectional
+  characters removed, is capped at 200 characters per value, and a list at 10
+  items ("and N more"). The client renders it as text, never as markup.
+- `shown` is sent to the browser of the approving user only: in the SSE
+  challenge (`ToolApprovalPrompt`) and in the parked-run read the owner
+  fetches (`RunCard`, the run page). It is **not** given to the model (the
+  agent loop's tool result is unchanged and still withholds the token), **not**
+  written to the audit chain (§11: the rows carry tool name and outcome and
+  have no field an argument could be put in) and **not** put in the
+  background-run notification, which keeps using key and size.
+- A confirming tool with nothing safe to show carries a written waiver in
+  `APPROVAL_NO_SAFE_VALUE` (for example `restart_router`, which takes no
+  arguments, or `set_wifi_password`, whose only argument is the password).
+  `confirmation-approval-values.guard.test.ts` reads the live registry and
+  fails when a confirming tool has neither, when an entry names an argument
+  the tool's schema does not declare, or when a credential or free-text
+  content argument is allowlisted.
+
+Known gap: `email_send` takes only a draft id, so the recipient is not an
+argument and cannot be shown from the call. It is waived with that reason
+until the approval is bound to the draft content (WARP-3010), at which point
+the draft's recipients become the shown value.

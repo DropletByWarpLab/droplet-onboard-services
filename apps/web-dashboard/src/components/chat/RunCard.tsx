@@ -172,14 +172,22 @@ export function RunCard({ call }: { call: ChatToolCall }) {
               {title} wants to {plainTool(run.pending.tool)}
             </span>
           </div>
-          {run.pending.summary.fields.length > 0 && (
-            <dl className="ws-facts">
-              {run.pending.summary.fields.map((f) => (
-                <div key={f.key} className="contents">
-                  <dt>{f.key}</dt>
-                  <dd>{f.detail}</dd>
+          {(run.pending.summary.fields.length > 0 || (run.pending.summary.shown ?? []).length > 0) && (
+            <dl className="ws-facts" data-testid="run-card-pending-summary">
+              {(run.pending.summary.shown ?? []).map((v) => (
+                <div key={`shown-${v.key}`} className="contents">
+                  <dt>{v.key}</dt>
+                  <dd className="break-words">{v.text}</dd>
                 </div>
               ))}
+              {run.pending.summary.fields
+                .filter((f) => !(run.pending!.summary.shown ?? []).some((v) => v.key === f.key))
+                .map((f) => (
+                  <div key={f.key} className="contents">
+                    <dt>{f.key}</dt>
+                    <dd>{f.detail}</dd>
+                  </div>
+                ))}
             </dl>
           )}
           <div className="ws-decision-acts">

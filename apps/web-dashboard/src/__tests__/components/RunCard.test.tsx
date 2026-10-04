@@ -139,7 +139,12 @@ describe("RunCard", () => {
     const pending = {
       tool: "create_email_draft",
       args: {},
-      summary: { tool: "create_email_draft", fields: [{ key: "to", kind: "string", detail: "18 characters" }], truncatedFields: 0 },
+      summary: {
+        tool: "create_email_draft",
+        fields: [{ key: "to", kind: "string", detail: "18 characters" }],
+        truncatedFields: 0,
+        shown: [{ key: "to", text: "buyer@brightline.example" }],
+      },
       parkedAt: null,
       decision: null,
       decidedAt: null,
@@ -149,6 +154,10 @@ describe("RunCard", () => {
     decideAgentRun.mockResolvedValue(undefined);
     render(<RunCard call={call} />);
     expect(await screen.findByText("Supplier price check wants to create email draft")).toBeTruthy();
+    // WARP-3569 — the parked-run approval shows the same decisive value, once.
+    const facts = screen.getByTestId("run-card-pending-summary").textContent ?? "";
+    expect(facts).toContain("buyer@brightline.example");
+    expect(facts).not.toContain("18 characters");
     fireEvent.click(screen.getByTestId("run-card-approve"));
     await waitFor(() => expect(decideAgentRun).toHaveBeenCalledWith("run-7", "approved"));
     await waitFor(() => expect(screen.queryByTestId("run-card-approve")).toBeNull());
