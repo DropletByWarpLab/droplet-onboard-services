@@ -20,7 +20,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
-import type { PmFilter, PmGroupByField, PmSortSpec } from "@droplet/shared-types";
+import { PM_FILTER_FIELDS, pmFilterConditions, type PmFilter, type PmGroupByField, type PmSortSpec } from "@droplet/shared-types";
 import {
   queryWorkItems,
   findWorkItemByKey,
@@ -264,7 +264,11 @@ describe.skipIf(!RUN)("PM filter DSL → SQL (WARP-3522)", () => {
   // ── helpers ──
   const ME = () => id.ana;
 
+  /** Every (field, op) a query below filtered on — see the last test. */
+  const exercised = new Set<string>();
+
   async function run(filter: PmFilter | undefined, over: Partial<PmQueryRequest> = {}, userId: string | null = ME()): Promise<PmQueryResult> {
+    if (filter) for (const c of pmFilterConditions(filter)) exercised.add(`${c.field}.${c.op}`);
     return queryWorkItems(
       prisma,
       { userId },
@@ -400,6 +404,8 @@ describe.skipIf(!RUN)("PM filter DSL → SQL (WARP-3522)", () => {
 
     it("module (many-to-many)", async () => {
       expect(await names(leaf("module", "is", id.module))).toEqual(["alpha"]);
+      expect(await names(leaf("module", "in", [id.module]))).toEqual(["alpha"]);
+      expect(await names(leaf("module", "notIn", [id.module]))).toEqual(except("alpha"));
       expect(await names(leaf("module", "isNot", id.module))).toEqual(except("alpha"));
       expect(await names(leaf("module", "isEmpty"))).toEqual(except("alpha"));
       expect(await names(leaf("module", "isNotEmpty"))).toEqual(["alpha"]);
@@ -407,6 +413,8 @@ describe.skipIf(!RUN)("PM filter DSL → SQL (WARP-3522)", () => {
 
     it("parent", async () => {
       expect(await names(leaf("parent", "is", id.alpha))).toEqual(["echo"]);
+      expect(await names(leaf("parent", "in", [id.alpha]))).toEqual(["echo"]);
+      expect(await names(leaf("parent", "notIn", [id.alpha]))).toEqual(except("echo"));
       expect(await names(leaf("parent", "isNot", id.alpha))).toEqual(except("echo"));
       expect(await names(leaf("parent", "isEmpty"))).toEqual(except("echo"));
       expect(await names(leaf("parent", "isNotEmpty"))).toEqual(["echo"]);
@@ -517,6 +525,7 @@ describe.skipIf(!RUN)("PM filter DSL → SQL (WARP-3522)", () => {
 
     it("startDate", async () => {
       expect(await names(leaf("startDate", "before", "today"))).toEqual(["alpha", "charlie"]);
+      expect(await names(leaf("startDate", "after", "2026-09-20"))).toEqual(["charlie"]);
       expect(await names(leaf("startDate", "is", "2026-09-20"))).toEqual(["alpha"]);
       expect(await names(leaf("startDate", "between", ["2026-09-01", "2026-09-30"]))).toEqual(["alpha"]);
       expect(await names(leaf("startDate", "isEmpty"))).toEqual(except("alpha", "charlie"));
@@ -967,6 +976,20 @@ describe.skipIf(!RUN)("PM filter DSL → SQL (WARP-3522)", () => {
 
     it("does not cross workspaces", async () => {
       await expect(findWorkItemByKey(prisma, "W6A-1", "home")).rejects.toThrow("work_item_not_found");
+    });
+  });
+
+  // After every case that filters, on purpose (a file's tests run in order): the
+  // AC is "every DSL op has a pg test", and the field table is where ops are
+  // added. A new field or op with no case above fails HERE, by name, instead of
+  // shipping unproven.
+  describe("coverage", () => {
+    it("has run every op of every field of the grammar against Postgres", () => {
+      const missing: string[] = [];
+      for (const [field, spec] of Object.entries(PM_FILTER_FIELDS)) {
+        for (const op of spec.ops) if (!exercised.has(`${field}.${op}`)) missing.push(`${field}.${op}`);
+      }
+      expect(missing).toEqual([]);
     });
   });
 
