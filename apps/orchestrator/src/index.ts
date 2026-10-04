@@ -477,19 +477,20 @@ async function main() {
     logger.warn("MCP stdio child failed to start: %s", (err as Error).message);
   }
 
-  // WARP-2627 / ADR-043 §5: attach the OUTBOUND MCP session, if this box is
-  // entitled to one. On the shipping default (REMOTE_MCP_SERVER_ALLOWLIST
-  // empty) this constructs nothing and dials nothing — it returns
+  // WARP-2627 / ADR-043 §5: attach the OUTBOUND MCP sessions, if this box is
+  // entitled to any. On the shipping default (REMOTE_MCP_SERVER_ALLOWLIST
+  // empty) this constructs nothing and dials nothing — every server answers
   // `not_allowlisted` and the boot path is unchanged. Non-fatal either way: a
   // vendor session that cannot be opened must not stop the appliance booting.
   try {
-    const attached = await ensureRemoteMcpAttached(prisma);
-    if (!attached.attached) {
-      logger.info(
-        "Remote MCP not attached (%s): %s",
-        attached.reason,
-        attached.message,
-      );
+    for (const attached of await ensureRemoteMcpAttached(prisma)) {
+      if (!attached.attached) {
+        logger.info(
+          "Remote MCP not attached (%s): %s",
+          attached.reason,
+          attached.message,
+        );
+      }
     }
   } catch (err) {
     logger.warn("Remote MCP attach failed: %s", (err as Error).message);
