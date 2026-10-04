@@ -10,6 +10,11 @@ import {
   evaluateStorageCommand,
   confirmStorageCommand,
 } from "../services/storage-safety.service.js";
+import {
+  endpointMismatchReason,
+  RECOVERY_KEY_REGENERATE_OPERATION,
+  RECOVERY_KEY_REVEAL_OPERATION,
+} from "../config/storage-safety-rules.js";
 import { config } from "../config.js";
 import { bridgeAdminToken, bridgeAuthToken, isBridgeConnectionError } from "../lib/bridge-errors.js";
 import { createLogger } from "../lib/logger.js";
@@ -80,6 +85,95 @@ interface BridgeDrive {
    *  bus-agnostic ejectability signal (ADR-011). The UI shows Eject on this,
    *  not on bus. */
   removable?: boolean;
+  /** WARP-3513: what the bridge sees on this drive — "luks2" | "none" |
+   *  "unknown". Typed `unknown` on purpose: the bridge is untrusted input and
+   *  `normaliseDriveEncryption` is the ONLY reader (a bridge older than
+   *  WARP-3513 omits it). */
+  encryption?: unknown;
+  /** WARP-3513: bare md array name (e.g. "md127") when this filesystem lives
+   *  on a LUKS container over an md array, so the drive's own `device` is a
+   *  mapper node and the `/dev/md*` pattern cannot see the pool. Untrusted,
+   *  like `encryption`: it reaches the client only as the validated `pool`. */
+  md?: unknown;
+}
+
+// ── WARP-3513: encrypted bay drives ──
+//
+// Every drive the dashboard prepares is LUKS2-encrypted at rest (TPM2
+// auto-unlock plus a recovery key escrowed on the host). The bridge reports what
+// it sees; the orchestrator turns that into EXPLICIT enums the dashboard
+// branches on. Nothing below is ever derived from the absence or nullness of
+// another field.
+
+/** The closed set a drive's (or disk's) `encryption` can take. */
+export const DRIVE_ENCRYPTION_STATES = ["luks2", "none", "unknown"] as const;
+export type DriveEncryption = (typeof DRIVE_ENCRYPTION_STATES)[number];
+
+/**
+ * Validate the bridge's `encryption` against the closed set. Anything else —
+ * absent (an older bridge), null, a wrong case, a wrong type, an unlisted
+ * scheme such as "luks1" — is "unknown": we do not guess, and we do not forward
+ * a string we never validated.
+ */
+export function normaliseDriveEncryption(raw: unknown): DriveEncryption {
+  return DRIVE_ENCRYPTION_STATES.find((state) => state === raw) ?? "unknown";
+}
+
+/**
+ * Is the drive usable as Droplet storage as it stands? An explicit enum
+ * computed from the NORMALISED encryption — never from null/absence of another
+ * field. Only a verified LUKS2 drive is "prepared"; both `none` (plain) and
+ * `unknown` (we could not tell) are "needs_preparing", so a drive whose state
+ * is in doubt is never offered for allocation (fail closed). Plain drives are
+ * never used for allocation and never wiped automatically: preparing is the
+ * owner's explicit, confirmed "Erase & adopt".
+ */
+export const DRIVE_PREPARATION_STATES = ["prepared", "needs_preparing"] as const;
+export type DrivePreparation = (typeof DRIVE_PREPARATION_STATES)[number];
+
+export function drivePreparationFor(encryption: DriveEncryption): DrivePreparation {
+  switch (encryption) {
+    case "luks2":
+      return "prepared";
+    case "none":
+    case "unknown":
+      return "needs_preparing";
+  }
+}
+
+/** What a prepared drive is used for. WARP-3514 assigns `recordings`. */
+export type DriveUsageRole = "recordings" | "files";
+
+export interface DriveUsage {
+  role: DriveUsageRole | null;
+  reservedBytes: number | null;
+}
+
+/** Every drive is unassigned until WARP-3514 allocates it. Explicit nulls, so
+ *  clients branch on the field and never on its absence. */
+export function unassignedDriveUsage(): DriveUsage {
+  return { role: null, reservedBytes: null };
+}
+
+/** A bare md array name as the bridge reports it. */
+const BRIDGE_MD_RE = /^md\d+$/;
+
+/** The bridge's `md` hint, validated; null when absent or not a bare md name. */
+export function bridgeMdName(raw: unknown): string | null {
+  return typeof raw === "string" && BRIDGE_MD_RE.test(raw) ? raw : null;
+}
+
+/**
+ * Does this partition live on the OS/root disk? The ONE definition, shared by
+ * the data-drive inclusion filter (rule 4 below) and the `isSystemDisk` flag.
+ * Fails open like the filter: with no os_disk or no parent_disk reported the
+ * answer is false.
+ */
+export function isOnSystemDisk(
+  d: { parent_disk?: string },
+  osDisk: string | undefined,
+): boolean {
+  return Boolean(osDisk && d.parent_disk && d.parent_disk === osDisk);
 }
 
 /** Fallback bus class for the icon when the bridge omits `bus` (older bridge).
@@ -173,7 +267,7 @@ function isUserDataDrive(d: BridgeDrive, osDisk?: string): boolean {
   // gate); this is the defense-in-depth boundary check, exercised when the
   // bridge tags drives (parent_disk) + reports os_disk. Fails open: with no
   // os_disk we hide nothing, so a real data drive is never lost.
-  if (osDisk && d.parent_disk && d.parent_disk === osDisk) return false;
+  if (isOnSystemDisk(d, osDisk)) return false;
   return true;
 }
 
@@ -205,6 +299,15 @@ interface BridgeDisk {
   serial?: string;
   /** md array name (e.g. "md127") when state is pool_member. */
   md?: string;
+  /** WARP-3513: encryption of the whole disk as the bridge reports it. Untrusted
+   *  (see BridgeDrive.encryption); forwarded only as a DriveEncryption. */
+  encryption?: unknown;
+}
+
+/** A forwarded whole-disk entry: every bridge field as before, with
+ *  `encryption` normalised to the closed set (WARP-3513). */
+interface DiskWithEncryption extends Omit<BridgeDisk, "encryption"> {
+  encryption: DriveEncryption;
 }
 
 interface BridgeDrivesSnapshot {
@@ -327,9 +430,9 @@ interface BridgePoolsSnapshot {
   snapshot_at?: string;
 }
 
-/** Destructive storage operations, mapped to the bridge `/pools/command`
- *  `operation` field. Keep in lock-step with STORAGE_TIER_3_OPERATIONS and the
- *  host script's allow-list. */
+/** Storage operations, mapped to the bridge `/pools/command` `operation` field.
+ *  Keep in lock-step with STORAGE_TIER_2/3_OPERATIONS, the bridge's _POOL_OPS and
+ *  the host script's allow-list (the four-place allow-list). */
 const STORAGE_OPS = [
   "pool_create",
   "pool_destroy",
@@ -339,6 +442,10 @@ const STORAGE_OPS = [
   "pool_remove_disk",
   "drive_adopt", // WARP-662: wipe + reformat + mount a previously-used disk
   "drive_reclaim", // WARP-1048: detach a pool member from its md array, then adopt it
+  // WARP-3513: the recovery-key custody ops. Neither erases a drive, and each has
+  // its own response shape (see revealRecoveryKey / regenerateRecoveryKey).
+  RECOVERY_KEY_REVEAL_OPERATION, // one-time retrieval of a bay drive's key (owner, Tier 2)
+  RECOVERY_KEY_REGENERATE_OPERATION, // new recovery keyslot, old one wiped (owner, Tier 3)
 ] as const;
 type StorageOp = (typeof STORAGE_OPS)[number];
 const CONFIRMABLE_STORAGE_OPS: ReadonlySet<string> = new Set([
@@ -347,15 +454,49 @@ const CONFIRMABLE_STORAGE_OPS: ReadonlySet<string> = new Set([
   RECORDINGS_DELETE_OLD,
 ]);
 
+/** The executable ops as a set, for the confirm route's endpoint gate. */
+const STORAGE_OP_SET: ReadonlySet<string> = new Set<string>(STORAGE_OPS);
+
+/** Narrow a confirmed token's service to an op POST /storage/command/confirm
+ *  may execute: only the listed storage ops, whatever the client echoed. */
+function isStorageOp(service: string): service is StorageOp {
+  return STORAGE_OP_SET.has(service);
+}
+
+/** WARP-3513: the ops only the box OWNER may run (an admin may not). */
+const OWNER_ONLY_OPS: ReadonlySet<StorageOp> = new Set<StorageOp>([
+  RECOVERY_KEY_REVEAL_OPERATION,
+  RECOVERY_KEY_REGENERATE_OPERATION,
+]);
+
+/** WARP-3513: the ops that PREPARE a drive. Each now ends in an encrypted ext4
+ *  bay, and the host reports `encrypted` / `uuid` / `recovery_key_pending`. */
+const PREPARE_OPS: ReadonlySet<StorageOp> = new Set<StorageOp>([
+  "drive_adopt",
+  "drive_reclaim",
+  "pool_format",
+]);
+
+/** The host script runs mdadm/mkfs/cryptsetup, which can take minutes on a
+ *  large array. */
+const BRIDGE_POOL_COMMAND_TIMEOUT_MS = 600_000;
+
+/** The reveal is one small file read on the host and the regenerate is a couple
+ *  of TPM-unlocked keyslot operations: a minute is generous, and a hung bridge
+ *  must not hold an owner's request open for ten. */
+const RECOVERY_KEY_OP_TIMEOUT_MS = 60_000;
+
 /**
- * Forward an owner-confirmed destructive op to the device-bridge's auth-gated
+ * Forward an owner-confirmed op to the device-bridge's auth-gated
  * POST /pools/command. Mirrors the eject path's auth + connection-error
- * handling. Returns the bridge's parsed body; throws on a non-ok bridge reply
- * so the route can surface it.
+ * handling. Returns the bridge's parsed body; throws when the bridge cannot be
+ * called (no auth token, unreachable, timed out) so the route can surface it.
+ * `opts.timeoutMs` overrides the 10-minute default of the erase/format ops.
  */
 async function bridgePoolCommand(
   operation: StorageOp,
   params: Record<string, unknown>,
+  opts: { timeoutMs?: number } = {},
 ): Promise<{ ok: boolean; body: Record<string, unknown> }> {
   const bridgeToken = bridgeAdminToken();
   if (!bridgeToken) {
@@ -366,8 +507,7 @@ async function bridgePoolCommand(
     throw err;
   }
   const ctrl = new AbortController();
-  // The host script runs mdadm/mkfs which can take minutes on a large array.
-  const timer = setTimeout(() => ctrl.abort(), 600_000);
+  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? BRIDGE_POOL_COMMAND_TIMEOUT_MS);
   try {
     const r = await fetch(`${BRIDGE_URL}/pools/command`, {
       method: "POST",
@@ -383,6 +523,102 @@ async function bridgePoolCommand(
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ── WARP-3513: recovery-key custody ──
+//
+// The recovery key is escrowed on the host and shown to the owner exactly once.
+// Nothing in this file may log it, persist it, cache it, or relay it anywhere
+// but the single response of the confirm that executes the reveal. The helpers
+// below keep that structural, not a matter of care at each call site.
+
+/** Reply field names a recovery key could ride in. */
+const RECOVERY_KEY_FIELDS = ["recovery_key", "recoveryKey"] as const;
+
+/**
+ * A copy of a host reply with any recovery-key field removed. Applied to every
+ * reply of the executable ops: a PREPARE op reports that a key is PENDING,
+ * never the key, and if a host ever attached one it would otherwise be relayed
+ * by the owner/admin confirm route and written to the log on a refusal.
+ */
+function withoutRecoveryKey(body: Record<string, unknown>): Record<string, unknown> {
+  const copy = { ...body };
+  for (const field of RECOVERY_KEY_FIELDS) delete copy[field];
+  return copy;
+}
+
+/**
+ * What the host's recovery_key_reveal reply means. `unusable` carries a reason
+ * from OUR vocabulary, for the server log: nothing in it is copied from the
+ * reply, so it can never carry the key or a host error string.
+ */
+type RecoveryKeyReveal =
+  | { kind: "revealed"; recoveryKey: string }
+  | { kind: "already_retrieved" }
+  | { kind: "expired" }
+  | { kind: "not_found" }
+  | {
+      kind: "unusable";
+      reason: "bridge_refused" | "unrecognised_status" | "revealed_without_key" | "wrong_drive";
+    };
+
+function interpretRecoveryKeyReply(
+  httpOk: boolean,
+  body: Record<string, unknown>,
+  requestedUuid: string,
+): RecoveryKeyReveal {
+  if (!httpOk || body.ok === false) return { kind: "unusable", reason: "bridge_refused" };
+  switch (body.status) {
+    case "revealed": {
+      const key = typeof body.recovery_key === "string" ? body.recovery_key.trim() : "";
+      if (key === "") return { kind: "unusable", reason: "revealed_without_key" };
+      // The host echoes the uuid it acted on. A key for a DIFFERENT drive must
+      // never reach the owner as "this drive's key" — they would save the wrong
+      // one. Case-insensitive: the route accepts upper-case hex.
+      if (typeof body.uuid !== "string" || body.uuid.toLowerCase() !== requestedUuid.toLowerCase()) {
+        return { kind: "unusable", reason: "wrong_drive" };
+      }
+      return { kind: "revealed", recoveryKey: key };
+    }
+    case "already_retrieved":
+      return { kind: "already_retrieved" };
+    case "expired":
+      // Unrevealed for 7 days: the host shredded it. Not a failure — the owner
+      // needs to Regenerate.
+      return { kind: "expired" };
+    case "not_found":
+      return { kind: "not_found" };
+    default:
+      return { kind: "unusable", reason: "unrecognised_status" };
+  }
+}
+
+/** A filesystem UUID, as the recovery-key routes accept it: hex and hyphens only. */
+const RECOVERY_KEY_UUID_RE = /^[A-Fa-f0-9-]{8,64}$/;
+
+/**
+ * WARP-3513: preconditions the box can fail BEFORE anything is touched. The host
+ * script refuses with a machine exit code, the bridge turns it into `code`
+ * (HTTP 409), and the owner sees one of these fixed sentences — never the
+ * script's own words (host paths, tool names). Prepare needs a TPM2 chip, as
+ * /data's provisioning does, and an encrypted /data to hold the recovery key.
+ */
+const PRECONDITION_REFUSALS: ReadonlyMap<string, string> = new Map([
+  [
+    "tpm_required",
+    "This Droplet has no usable TPM2 chip, so it cannot encrypt a drive. Nothing was erased.",
+  ],
+  [
+    "encrypted_data_required",
+    "This Droplet's own storage is not encrypted yet, so it cannot safely hold a drive's recovery key. Nothing was changed.",
+  ],
+]);
+
+/** {code, error} when the bridge's reply is one of the known precondition refusals. */
+function preconditionRefusal(body: Record<string, unknown>): { code: string; error: string } | null {
+  const code = typeof body.code === "string" ? body.code : "";
+  const error = PRECONDITION_REFUSALS.get(code);
+  return error === undefined ? null : { code, error };
 }
 
 /**
@@ -458,7 +694,7 @@ async function fetchBridgeDrives(): Promise<BridgeDrivesSnapshot> {
  * wizard's Storage step (or in /storage later); `null` when no Drive
  * row exists yet for this UUID.
  */
-interface DriveWithLabel extends BridgeDrive {
+interface DriveWithLabel extends Omit<BridgeDrive, "encryption" | "md"> {
   displayName: string | null;
   icon: string | null;
   notes: string | null;
@@ -470,8 +706,25 @@ interface DriveWithLabel extends BridgeDrive {
    *  drive tile. `null` (explicit — clients branch on the field, never on
    *  its absence) for a standalone drive. The drive is NEVER dropped
    *  server-side: it is the pool's only fs-level capacity/browse source,
-   *  and tools-core's list_drives stays an honest annotated list. */
+   *  and tools-core's list_drives stays an honest annotated list.
+   *
+   *  WARP-3513: a LUKS-over-md drive's own `device` is a mapper node, so the
+   *  device pattern alone cannot see its pool; it falls back to the bridge's
+   *  validated `md` hint, and still joins the pool card. */
   pool: string | null;
+  /** WARP-3513: "luks2" | "none" | "unknown" — validated, never the bridge's
+   *  raw string. */
+  encryption: DriveEncryption;
+  /** WARP-3513: explicit enum from `encryption` (see drivePreparationFor). */
+  preparation: DrivePreparation;
+  /** WARP-3513: what the drive is used for. Unassigned (nulls) until
+   *  WARP-3514 allocates recordings. */
+  usage: DriveUsage;
+  /** WARP-3513: true when the bridge says this partition lives on the OS disk.
+   *  Such drives are filtered out of this list, so today it is always false
+   *  here; it is the flag an allocation or erase guard reads instead of
+   *  re-deriving the rule. */
+  isSystemDisk: boolean;
 }
 
 /** WARP-1339: md node (/dev/md127) or a partition of one (/dev/md127p1).
@@ -725,6 +978,21 @@ export function createStorageRouter(prisma: PrismaClient): Router {
    * WARP-174: each drive is enriched with the customer-chosen
    * `displayName` / `icon` / `notes` from the `Drive` table when one
    * exists. Fields are `null` for drives the customer hasn't named yet.
+   *
+   * WARP-3513: every drive also carries
+   *   - `encryption`  "luks2" | "none" | "unknown" — the bridge's value
+   *                   validated against that closed set (anything else, or
+   *                   absent, is "unknown");
+   *   - `preparation` "prepared" | "needs_preparing" — an explicit enum from
+   *                   `encryption`: only luks2 is prepared, so a plain drive
+   *                   AND a drive whose state is in doubt both need preparing
+   *                   (never offered for allocation, never auto-wiped);
+   *   - `usage`       `{ role, reservedBytes }`, all null until WARP-3514
+   *                   allocates recordings;
+   *   - `isSystemDisk` boolean;
+   * and `pool` falls back to the bridge's `md` so a LUKS-over-md pool still
+   * joins the pool card. Each `disks[]` entry's `encryption` is normalised the
+   * same way.
    */
   // CodeQL js/missing-rate-limiting — inline per-IP ceilings on the bridge-
   // proxied drive handlers. /drives is a plain read the dashboard fetches on
@@ -766,8 +1034,13 @@ export function createStorageRouter(prisma: PrismaClient): Router {
 
       const drives: DriveWithLabel[] = dataDrives.map((d) => {
         const label = byUuid.get(d.uuid);
+        // WARP-3513: `encryption` and `md` are untrusted bridge input. Neither
+        // is forwarded raw: `encryption` is replaced by its validated enum
+        // below, and `md` reaches the client only as the validated `pool`.
+        const { encryption: bridgeEncryption, md: bridgeMd, ...bridgeDrive } = d;
+        const encryption = normaliseDriveEncryption(bridgeEncryption);
         return {
-          ...d,
+          ...bridgeDrive,
           // Guarantee a bus class for the dashboard even if the bridge is
           // older than the WARP-612 enrichment.
           bus: d.bus ?? deriveBus(d.device),
@@ -776,8 +1049,15 @@ export function createStorageRouter(prisma: PrismaClient): Router {
           notes: label?.notes ?? null,
           // WARP-1339: annotate (never drop) the mounted md filesystem with
           // its bare array name so the dashboard can merge it into the pool
-          // card instead of rendering it twice.
-          pool: MD_DEVICE_RE.exec(d.device)?.[1] ?? null,
+          // card instead of rendering it twice. WARP-3513: a LUKS-over-md
+          // drive's device is a mapper node, so fall back to the bridge's
+          // validated `md` hint and it still joins the pool card.
+          pool: MD_DEVICE_RE.exec(d.device)?.[1] ?? bridgeMdName(bridgeMd),
+          // WARP-3513: encryption + the explicit enums derived from it.
+          encryption,
+          preparation: drivePreparationFor(encryption),
+          usage: unassignedDriveUsage(),
+          isSystemDisk: isOnSystemDisk(d, snap.os_disk),
         };
       });
 
@@ -791,9 +1071,14 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       // on `disks ?? null` to fall back to the mounted-drives reclaim list
       // (WARP-662). An empty array would read as an authoritative "no disks"
       // and silently drop that fallback.
-      const disks =
+      //
+      // WARP-3513: entries are forwarded as before, with `encryption`
+      // normalised to the closed set exactly like a drive's.
+      const disks: DiskWithEncryption[] | undefined =
         snap.disks !== undefined
-          ? snap.disks.filter((d) => !snap.os_disk || d.name !== snap.os_disk)
+          ? snap.disks
+              .filter((d) => !snap.os_disk || d.name !== snap.os_disk)
+              .map((d) => ({ ...d, encryption: normaliseDriveEncryption(d.encryption) }))
           : undefined;
 
       // WARP-2098: the box's data-storage total, summed over the post-filter
@@ -1042,6 +1327,205 @@ export function createStorageRouter(prisma: PrismaClient): Router {
   });
 
   // =====================================================================
+  // WARP-3513 — recovery-key custody: the one-time reveal + regenerate
+  // =====================================================================
+  //
+  // Every drive Droplet prepares is LUKS2-encrypted. The recovery key that can
+  // unlock it without the TPM is escrowed on the host (root-only, on the
+  // encrypted /data) and reaches a browser exactly once. Both operations ride the
+  // EXISTING destructive-op handshake (ADR-070 section 4.2), so a stray, replayed
+  // or prefetched request can never spend the one-time retrieval:
+  //
+  //   POST /storage/drives/:uuid/recovery-key/reveal      owner, Tier 2
+  //   POST /storage/drives/:uuid/recovery-key/regenerate  owner, Tier 3
+  //     -> evalAndRespond: 202 { status: "confirmation_required", confirmationToken,
+  //                              service, resourceId, tier, reason, expiresIn: 60 }
+  //   POST /storage/command/confirm { confirmationToken, service, resourceId }
+  //     -> executeStorageOp -> revealRecoveryKey / regenerateRecoveryKey below.
+  //
+  // `:uuid` is the drive's FILESYSTEM uuid (the `uuid` on GET /storage/drives, and
+  // on a prepare op's confirm response). OWNER ONLY — not admin: the key is the
+  // master secret for the drive's data. A denial goes through requireRole and so
+  // emits the WARP-237 "Access denied" activity row.
+
+  /** What a 502 on these ops says. Generic on purpose: the host's and the
+   *  bridge's own words (paths, mapper names, error text) are never echoed. */
+  const RECOVERY_KEY_FAILED_MESSAGE = "The storage service could not complete this request.";
+
+  /**
+   * The bridge could not be called (or timed out). Shared by both recovery-key
+   * ops; logs the error's NAME only — its message is free text from fetch or the
+   * bridge and must never be assumed free of the secret.
+   */
+  function recoveryKeyBridgeFailure(
+    res: import("express").Response,
+    err: unknown,
+    uuid: string,
+    operation: string,
+  ) {
+    if ((err as { code?: string }).code === "BRIDGE_AUTH_UNCONFIGURED") {
+      return res.status(503).json({
+        error: "Storage management is unavailable — the device-bridge auth token is not configured.",
+      });
+    }
+    if (isBridgeConnectionError(err)) {
+      logger.warn({ uuid }, `device-bridge not reachable for ${operation} (bridge_unavailable)`);
+      return res.status(503).json({
+        reason: "bridge_unavailable",
+        error: "The storage service isn't reachable right now.",
+      });
+    }
+    logger.warn({ uuid, failure: err instanceof Error ? err.name : "unknown" }, `${operation} failed`);
+    return res.status(502).json({ error: RECOVERY_KEY_FAILED_MESSAGE });
+  }
+
+  /**
+   * Ask the host to reveal the key and answer the confirm request. Called ONLY
+   * after the owner's confirmation token was consumed. The reply is mapped, never
+   * relayed: the key leaves here in exactly one place, the 200 below, and nothing
+   * in this function logs the host's reply or an error (either could carry it).
+   *   200 { recoveryKey }                                first and only time
+   *   410 { error: "recovery_key_already_retrieved" }    every time after
+   *   410 { error: "recovery_key_expired" }              unrevealed for 7 days: regenerate
+   *   404 { error: "recovery_key_not_found" }            no key was ever escrowed
+   *   502 generic / 503 bridge unconfigured or unreachable
+   * Every response carries `Cache-Control: no-store`.
+   */
+  async function revealRecoveryKey(res: import("express").Response, uuid: string) {
+    res.set("Cache-Control", "no-store");
+    try {
+      const { ok, body } = await bridgePoolCommand(
+        RECOVERY_KEY_REVEAL_OPERATION,
+        { uuid },
+        { timeoutMs: RECOVERY_KEY_OP_TIMEOUT_MS },
+      );
+      const outcome = interpretRecoveryKeyReply(ok, body, uuid);
+      switch (outcome.kind) {
+        case "revealed":
+          return res.status(200).json({ recoveryKey: outcome.recoveryKey });
+        case "already_retrieved":
+          return res.status(410).json({ error: "recovery_key_already_retrieved" });
+        case "expired":
+          return res.status(410).json({ error: "recovery_key_expired" });
+        case "not_found":
+          return res.status(404).json({ error: "recovery_key_not_found" });
+        case "unusable":
+          logger.warn(
+            { uuid, reason: outcome.reason },
+            "recovery_key_reveal: the storage host's reply could not be used",
+          );
+          return res.status(502).json({ error: RECOVERY_KEY_FAILED_MESSAGE });
+      }
+    } catch (err) {
+      return recoveryKeyBridgeFailure(res, err, uuid, RECOVERY_KEY_REVEAL_OPERATION);
+    }
+  }
+
+  /**
+   * "Regenerate recovery key": the host enrols a NEW recovery keyslot, escrows the
+   * new key and wipes the old keyslot — the key the owner holds stops working. The
+   * reply carries NO key: the owner retrieves the new one through the same
+   * one-time reveal.
+   *   200 { ok, status: "ok", operation, uuid, recoveryKeyPending: true }
+   *   404 { error: "recovery_key_not_found" }   no record of this drive
+   *   409 { code: "drive_not_present" }         known, but not plugged in
+   *   409 { code: "tpm_required" | "encrypted_data_required" }
+   *   422 { error }   the host refused or failed (its message is actionable, e.g.
+   *                   "... run Regenerate again to retry"; it never holds a key)
+   */
+  async function regenerateRecoveryKey(res: import("express").Response, uuid: string) {
+    res.set("Cache-Control", "no-store");
+    try {
+      const { ok, body } = await bridgePoolCommand(
+        RECOVERY_KEY_REGENERATE_OPERATION,
+        { uuid },
+        { timeoutMs: RECOVERY_KEY_OP_TIMEOUT_MS },
+      );
+      if (!ok) {
+        const refusal = preconditionRefusal(body);
+        if (refusal) return res.status(409).json({ ok: false, ...refusal });
+        logger.warn({ uuid }, "recovery_key_regenerate refused by the host");
+        return res.status(422).json({
+          ok: false,
+          error: typeof body.error === "string" && body.error ? body.error : RECOVERY_KEY_FAILED_MESSAGE,
+        });
+      }
+      switch (body.status) {
+        case "regenerated":
+          return res.status(200).json({
+            ok: true,
+            status: "ok",
+            operation: RECOVERY_KEY_REGENERATE_OPERATION,
+            uuid,
+            recoveryKeyPending: true,
+          });
+        case "not_found":
+          return res.status(404).json({ error: "recovery_key_not_found" });
+        case "drive_absent":
+          return res.status(409).json({
+            ok: false,
+            code: "drive_not_present",
+            error: "That drive isn't connected right now — plug it in and try again.",
+          });
+        default:
+          logger.warn({ uuid }, "recovery_key_regenerate: the storage host's reply could not be used");
+          return res.status(502).json({ error: RECOVERY_KEY_FAILED_MESSAGE });
+      }
+    } catch (err) {
+      return recoveryKeyBridgeFailure(res, err, uuid, RECOVERY_KEY_REGENERATE_OPERATION);
+    }
+  }
+
+  /**
+   * POST /api/storage/drives/:uuid/recovery-key/reveal — step 1 of showing a bay
+   * drive's recovery key, ONCE: owner-only; answers 202 + a confirmation token
+   * (Tier 2). Nothing is revealed or consumed here; the owner's confirm
+   * (POST /storage/command/confirm) executes it and gets 200 { recoveryKey } the
+   * first time, 410 after. sensitiveRateLimit keeps a client from hammering a
+   * secret-bearing action.
+   */
+  router.post(
+    "/storage/drives/:uuid/recovery-key/reveal",
+    sensitiveRateLimit,
+    requireRole("owner"),
+    async (req, res, next) => {
+      try {
+        res.set("Cache-Control", "no-store");
+        const { uuid } = req.params;
+        if (!RECOVERY_KEY_UUID_RE.test(uuid)) {
+          return res.status(400).json({ error: "Invalid drive UUID" });
+        }
+        return evalAndRespond(res, prisma, RECOVERY_KEY_REVEAL_OPERATION, uuid, {}, req.user?.id);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  /**
+   * POST /api/storage/drives/:uuid/recovery-key/regenerate — step 1 of replacing a
+   * bay drive's recovery key (for an owner who missed, lost or let the 7-day
+   * window pass): owner-only; answers 202 + a confirmation token (Tier 3).
+   */
+  router.post(
+    "/storage/drives/:uuid/recovery-key/regenerate",
+    sensitiveRateLimit,
+    requireRole("owner"),
+    async (req, res, next) => {
+      try {
+        res.set("Cache-Control", "no-store");
+        const { uuid } = req.params;
+        if (!RECOVERY_KEY_UUID_RE.test(uuid)) {
+          return res.status(400).json({ error: "Invalid drive UUID" });
+        }
+        return evalAndRespond(res, prisma, RECOVERY_KEY_REGENERATE_OPERATION, uuid, {}, req.user?.id);
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
+
+  // =====================================================================
   // BUG-3 / ADR-019 — storage pools (mdadm software RAID)
   // =====================================================================
 
@@ -1184,6 +1668,10 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     resourceId: string,
     params: Record<string, unknown>,
   ) {
+    // WARP-3513: the recovery-key custody ops have their own response shapes (and
+    // must never take the generic path, which spreads the host's reply).
+    if (service === RECOVERY_KEY_REVEAL_OPERATION) return revealRecoveryKey(res, resourceId);
+    if (service === RECOVERY_KEY_REGENERATE_OPERATION) return regenerateRecoveryKey(res, resourceId);
     // WARP-1337: pool_create may carry the owner's chosen displayName in its
     // confirm-token params. It is orchestrator-side seeding only — the host
     // script has no such parameter — so split it off before the bridge call.
@@ -1191,11 +1679,23 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       displayName?: unknown;
     };
     try {
-      const { ok, body } = await bridgePoolCommand(service, {
+      const reply = await bridgePoolCommand(service, {
         ...bridgeParams,
         device: resourceId,
       });
+      const { ok } = reply;
+      // WARP-3513: a host reply never legitimately carries a recovery key here
+      // (a prepare op reports `recovery_key_pending`); drop one if it does, so
+      // neither the response below nor the refusal log can ever relay it.
+      const body = withoutRecoveryKey(reply.body);
       if (!ok) {
+        // WARP-3513: a precondition the box does not meet (no TPM2 / /data not
+        // encrypted): HTTP 409 + a machine code, nothing was erased.
+        const refusal = preconditionRefusal(body);
+        if (refusal) {
+          logger.warn({ service, resourceId, code: refusal.code }, "Storage op refused: precondition not met");
+          return res.status(409).json({ ok: false, ...refusal });
+        }
         // The host-script pre-flight refused (mounted / has-data / OS-disk /
         // bad confirm) — surface its message; it's owner-actionable.
         logger.warn({ service, resourceId, body }, "Storage op refused by host script");
@@ -1238,7 +1738,25 @@ export function createStorageRouter(prisma: PrismaClient): Router {
           }
         }
       }
-      return res.json({ ok: true, status: "ok", operation: service, device: resourceId, ...body });
+      // WARP-3513: preparing a drive now ALWAYS encrypts it. The host reports
+      // `encrypted`, the filesystem `uuid` (the id the reveal route takes) and
+      // `recovery_key_pending` (snake_case, as the host sends it) — passed
+      // through, with strict camelCase booleans the dashboard can branch on.
+      // `encrypted` is false, not absent, when an older host did not say.
+      const prepared = PREPARE_OPS.has(service)
+        ? {
+            encrypted: body.encrypted === true,
+            recoveryKeyPending: body.recovery_key_pending === true,
+          }
+        : {};
+      return res.json({
+        ok: true,
+        status: "ok",
+        operation: service,
+        device: resourceId,
+        ...body,
+        ...prepared,
+      });
     } catch (err) {
       if ((err as { code?: string }).code === "BRIDGE_AUTH_UNCONFIGURED") {
         return res.status(503).json({
@@ -1266,6 +1784,13 @@ export function createStorageRouter(prisma: PrismaClient): Router {
    *
    * The caller MUST echo {service, resourceId}; a mismatch or an
    * unknown/expired token is refused and never reaches the bridge.
+   *
+   * WARP-3513: only the ops in STORAGE_OPS execute here, whatever the client
+   * echoed or omitted; a token minted for anything else is refused with
+   * TOKEN_ENDPOINT_MISMATCH. This is also where the one-time recovery-key reveal
+   * (200 { recoveryKey } once, then 410) and the recovery-key regenerate run;
+   * both are owner-only, so an admin session is refused even though this route
+   * admits admins for the erase ops.
    */
   router.post(
     "/storage/command/confirm",
@@ -1316,9 +1841,24 @@ export function createStorageRouter(prisma: PrismaClient): Router {
             return next(err);
           }
         }
+        // allowedServices has already refused everything else; this narrows the
+        // type for executeStorageOp and fails closed should the two ever drift.
+        if (!isStorageOp(result.service)) {
+          return res.status(400).json({
+            error: endpointMismatchReason(result.service),
+            code: "TOKEN_ENDPOINT_MISMATCH",
+          });
+        }
+        // WARP-3513: the recovery-key custody ops are OWNER-only (the route that
+        // mints their token already is, and the token is bound to that user —
+        // this is the second lock, so an admin session can never run one).
+        if (OWNER_ONLY_OPS.has(result.service) && req.user?.role !== "owner") {
+          recordAccessDenied(req, "role-not-permitted");
+          return res.status(403).json({ error: "Owner access required" });
+        }
         return executeStorageOp(
           res,
-          result.service as StorageOp,
+          result.service,
           result.resourceId,
           (result.params as Record<string, unknown>) || {},
         );
@@ -1402,7 +1942,15 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     return typeof d === "string" &&
       /^(sd[a-z]{1,2}|nvme\d+n\d+|mmcblk\d+|vd[a-z]{1,2})$/.test(d);
   }
-  const VALID_FSTYPES = new Set(["ext4", "xfs", "btrfs"]);
+  // WARP-3513: preparing a drive ALWAYS encrypts it (LUKS2 + TPM2 + recovery
+  // key) and formats ext4 inside the container — the recordings slice is an
+  // ext4 PROJECT QUOTA, which xfs/btrfs would not give us. So ext4 is the only
+  // filesystem accepted by adopt, reclaim and pool format. (Mounted drives of
+  // other filesystems still LIST — that is the data-drive inclusion filter, not
+  // this allow-list — they simply report as needing preparing.)
+  const VALID_FSTYPES = new Set(["ext4"]);
+  const UNSUPPORTED_FSTYPE_ERROR =
+    "Only ext4 is supported — Droplet encrypts every drive it prepares and formats it as ext4.";
   const VALID_WIPE = new Set(["quick", "secure"]);
 
   function evalAndRespond(
@@ -1500,7 +2048,7 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       }
       const fs = typeof fstype === "string" && fstype ? fstype : "ext4";
       if (!VALID_FSTYPES.has(fs)) {
-        return res.status(400).json({ error: "Invalid filesystem type" });
+        return res.status(400).json({ error: UNSUPPORTED_FSTYPE_ERROR });
       }
       const wipe = typeof wipeMethod === "string" && wipeMethod ? wipeMethod : "quick";
       if (!VALID_WIPE.has(wipe)) {
@@ -1551,7 +2099,7 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       }
       const fs = typeof fstype === "string" && fstype ? fstype : "ext4";
       if (!VALID_FSTYPES.has(fs)) {
-        return res.status(400).json({ error: "Invalid filesystem type" });
+        return res.status(400).json({ error: UNSUPPORTED_FSTYPE_ERROR });
       }
       const wipe = typeof wipeMethod === "string" && wipeMethod ? wipeMethod : "quick";
       if (!VALID_WIPE.has(wipe)) {
@@ -1610,16 +2158,18 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       // shape-only regex admitted fstypes whose mkfs doesn't take -L (vfat
       // uses -n), and the host's pool_format now unconditionally runs
       // `mkfs.$FSTYPE -L pool` — a loose fstype would fail the op there.
+      // WARP-3513: that allow-list is now ext4 alone, and the host is told so
+      // explicitly rather than left to default it.
       const fstype = req.body?.fstype;
       if (fstype !== undefined && !VALID_FSTYPES.has(String(fstype))) {
-        return res.status(400).json({ error: "Invalid fstype" });
+        return res.status(400).json({ error: UNSUPPORTED_FSTYPE_ERROR });
       }
       return evalAndRespond(
         res,
         prisma,
         "pool_format",
         device,
-        { fstype, confirm_phrase: req.body?.confirmPhrase ?? "" },
+        { fstype: "ext4", confirm_phrase: req.body?.confirmPhrase ?? "" },
         req.user?.id,
       );
     } catch (err) {

@@ -15,7 +15,11 @@ Description=Droplet drive reconcile (pool remount safety net + Nextcloud externa
 # Wants=, not Requires=docker.service — same P6 posture as
 # droplet-automount@.service: a docker restart must never cascade here.
 Wants=docker.service
-After=docker.service local-fs.target mnt-droplet.mount
+# WARP-3513: After=cryptsetup.target so the encrypted bay drives' crypttab
+# unlock attempts (their x-systemd.device-timeout=30s waits included) are over
+# before the late-unlock loop decides a bay is "present but not mounted".
+# Ordering ONLY — no Requires=: a bay that cannot unlock never fails this unit.
+After=docker.service local-fs.target mnt-droplet.mount cryptsetup.target
 
 [Service]
 Type=oneshot

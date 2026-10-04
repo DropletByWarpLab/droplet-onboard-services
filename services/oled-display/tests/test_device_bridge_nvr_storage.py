@@ -1317,7 +1317,7 @@ def _stub_executor(nvr, monkeypatch):
     """Replace the pool executor: records whether the guard let a call through."""
     called: list[tuple] = []
 
-    def fake(operation, params):
+    def fake(operation, params, refusal=None):
         called.append((operation, params))
         return True, {"ok": True, "operation": operation}
 
@@ -1455,10 +1455,27 @@ def test_pool_guard_runs_before_the_pool_lock(nvr, monkeypatch):
     assert ok is False and info.code == "recordings_drive_active"
 
 
+def test_extended_pool_command_keeps_the_active_recordings_refusal(nvr, monkeypatch):
+    called = _stub_executor(nvr, monkeypatch)
+    ok, info, code = nvr.bridge.run_pool_command_ex("drive_adopt", {"device": "sdb"})
+    assert ok is False and code == "recordings_drive_active"
+    assert info.code == code
+    assert called == []
+
+
+def test_recovery_key_operation_keeps_uuid_only_params_and_skips_the_disk_guard(nvr, monkeypatch):
+    called = _stub_executor(nvr, monkeypatch)
+    ok, _info, code = nvr.bridge.run_pool_command_ex(
+        "recovery_key_regenerate", {"uuid": _BAY_UUID, "device": "sdb"})
+    assert ok is True and code == ""
+    assert called == [("recovery_key_regenerate", {"uuid": _BAY_UUID})]
+    assert nvr.host.calls == []
+
+
 def test_other_pool_refusals_keep_their_422(nvr, monkeypatch):
     # Lock contention / host-script refusals are unchanged: 422, no code.
     monkeypatch.setattr(nvr.bridge, "_run_pool_via_executor",
-                        lambda op, params: (False, "refusing: /dev/sdc is mounted"))
+                        lambda op, params, refusal=None: (False, "refusing: /dev/sdc is mounted"))
     status, body = _post(nvr.bridge, "/pools/command",
                          {"operation": "drive_adopt", "params": {"device": "sdc"}})
     assert status == 422

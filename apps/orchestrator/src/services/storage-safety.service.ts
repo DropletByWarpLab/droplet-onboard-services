@@ -9,6 +9,12 @@
  * A token minted to destroy `md0` cannot confirm a destroy of `md1`, nor a
  * format of `md0` — both the operation and the resource must match.
  *
+ * WARP-3513: the one-time recovery-key reveal rides the same machinery as a
+ * Tier-2 operation. The tier in every response and CommandAuditLog row is the
+ * classification's (it used to be a hard-coded 3), and a confirmation can be
+ * restricted to the services an endpoint is able to execute, so a token minted
+ * for the reveal can never be spent at the generic confirm route.
+ *
  * Mirrors network-safety.service.ts (same in-memory pending map, same
  * CommandAuditLog dual-write shape, same WARP-41 operation-mismatch defense),
  * specialised for the {service, resourceId} binding.
@@ -53,7 +59,7 @@ export type EvaluateStorageResult =
     };
 
 /**
- * Evaluate a destructive storage command.
+ * Evaluate a storage command.
  *
  * - `source: "ai"` → BLOCKED. The AI can never mutate storage. (Belt to the
  *   braces of D5: these operations aren't in tools-core at all, so the AI
@@ -61,6 +67,10 @@ export type EvaluateStorageResult =
  * - `source: "api"` (the dashboard owner) → returns a single-use confirm token
  *   bound to {service, resourceId}. Nothing executes here; the caller must
  *   confirm via confirmStorageCommand to run it.
+ *
+ * Every result and audit row carries the operation's OWN tier
+ * (classifyStorageCommand): 3 for the erase ops and for unrecognised ones, 2
+ * for the recovery-key reveal and recording allocation changes.
  */
 export async function evaluateStorageCommand(
   prisma: PrismaClient,
@@ -71,6 +81,7 @@ export async function evaluateStorageCommand(
   source: "api" | "ai" = "api",
 ): Promise<EvaluateStorageResult> {
   const classification = classifyStorageCommand(service);
+  const tier = classification.tier;
 
   // All storage writes + AI → hard block.
   if (source === "ai") {
@@ -159,6 +170,12 @@ export interface ExpectedStorageConfirmation {
  * rejected with TOKEN_OPERATION_MISMATCH (WARP-41 defense generalised to the
  * {service, resourceId} binding). Single-use: the token is consumed whether or
  * not it matched-and-executed, and is gone on a second call.
+ *
+ * `expected.allowedServices` (WARP-3513) is checked LAST, after the requesting
+ * user: a different user cannot burn the owner's token by presenting it at the
+ * wrong endpoint, but the owner presenting it there loses it (a confused or
+ * forged caller must start over). Nothing is audited as confirmed in that case:
+ * nothing ran.
  */
 export async function confirmStorageCommand(
   prisma: PrismaClient,

@@ -1,14 +1,28 @@
 /**
  * BUG-3 / ADR-019 — Storage safety-tier classification.
  *
- * Pool mutations are Tier 3. Recording allocation changes are Tier 2: they
- * require an owner/admin confirmation but do not erase data. Reads are not
+ * Every pool/drive mutation is DATA-DESTROYING, so those writes are all
+ * Tier-3-class (owner-only, AI-blocked, confirm required). Reads are not
  * classified here — they don't pass through the safety service at all.
+ *
+ * WARP-3513 adds the recovery-key operations for the bay drives every Prepare now
+ * encrypts (storage decision record ADR-070, section 8.5). The one-time reveal is the first
+ * Tier-2 secret-revealing action: it erases nothing, but it hands out the secret that unlocks
+ * the drive's data without the TPM, so it is owner-only and needs one confirmation
+ * round-trip. "Regenerate recovery key" replaces that secret (the old key stops
+ * working), so it is Tier 3. The AI is hard-blocked from both like from every other
+ * storage operation (see evaluateStorageCommand).
  *
  * Mirrors network-safety-rules.ts / safety-rules.ts.
  */
 
 import type { TierClassification } from "./safety-rules.js";
+
+/** Host operation that reveals a bay drive's escrowed recovery key, once (Tier 2). */
+export const RECOVERY_KEY_REVEAL_OPERATION = "recovery_key_reveal";
+
+/** Host operation that enrols a new recovery keyslot and wipes the old one (Tier 3). */
+export const RECOVERY_KEY_REGENERATE_OPERATION = "recovery_key_regenerate";
 
 /**
  * Destructive storage operations. All are Tier 3: blocked for the AI,
@@ -27,12 +41,27 @@ export const STORAGE_TIER_3_OPERATIONS = new Set([
   // WARP-1048: reclaim a pool-member disk — detach it from its md array then
   // adopt it. Equally destructive; same owner-only / AI-blocked / confirm gate.
   "drive_reclaim",
+  // WARP-3513: replace a bay drive's recovery key — a new keyslot is enrolled and the
+  // old one wiped, so the key the owner holds stops working. Owner-only, AI-blocked,
+  // single-use confirm token.
+  RECOVERY_KEY_REGENERATE_OPERATION,
   "recordings_old_footage_delete",
 ]);
 
-/** Writes that need an explicit owner/admin confirmation but do not erase data. */
-export const STORAGE_TIER_2_OPERATIONS = new Set(["recordings_set"]);
+/**
+ * Non-destructive storage operations. Tier 2 requires one confirmation and
+ * remains AI-blocked: recovery-key reveal is owner-only; recording allocation
+ * is available to owner/admin.
+ */
+export const STORAGE_TIER_2_OPERATIONS = new Set<string>([
+  RECOVERY_KEY_REVEAL_OPERATION,
+  "recordings_set",
+]);
 
+/**
+ * The reason shown when a confirmation token is presented to an endpoint that
+ * cannot execute the operation it was minted for.
+ */
 export function endpointMismatchReason(service: string): string {
   return `A '${service}' confirmation cannot be executed at this endpoint`;
 }
@@ -46,17 +75,42 @@ export const STORAGE_MAX_PENDING_CONFIRMATIONS = 200;
 /**
  * Classify a storage operation. Unknown ops are treated as Tier 3 too —
  * fail safe: if we don't recognise a storage mutation, it does NOT get the
- * benefit of the doubt. (There is no legitimate Tier-1 storage write.)
+ * benefit of the doubt. The match is exact, so a near-miss spelling of a
+ * Tier-2 operation is an unknown (Tier 3, refused) one.
  */
 export function classifyStorageCommand(operation: string): TierClassification {
-  const tier2 = STORAGE_TIER_2_OPERATIONS.has(operation);
-  const known = tier2 || STORAGE_TIER_3_OPERATIONS.has(operation);
+  if (operation === "recordings_set") {
+    return {
+      tier: 2,
+      requiresConfirmation: true,
+      reason: "Changes where camera recordings are stored and requires owner/admin confirmation",
+    };
+  }
+  if (operation === RECOVERY_KEY_REVEAL_OPERATION) {
+    return {
+      tier: 2,
+      requiresConfirmation: true,
+      reason:
+        "Shows this drive's recovery key one time. Anyone who has the key can unlock the " +
+        "drive's data without this Droplet, so only the owner can ask for it — copy it " +
+        "somewhere safe, because it cannot be shown again",
+    };
+  }
+  if (operation === RECOVERY_KEY_REGENERATE_OPERATION) {
+    return {
+      tier: 3,
+      requiresConfirmation: true,
+      reason:
+        "Replaces this drive's recovery key: a new key is issued and the old one stops working. " +
+        "The drive stays encrypted and keeps unlocking with this Droplet's TPM. Owner-only",
+    };
+  }
+  // Every other storage mutation is data-destroying → Tier 3.
+  const known = STORAGE_TIER_3_OPERATIONS.has(operation);
   return {
-    tier: tier2 ? 2 : 3,
+    tier: 3,
     requiresConfirmation: true,
-    reason: tier2
-      ? `'${operation}' changes where camera recordings are stored and requires owner/admin confirmation`
-      : known
+    reason: known
       ? `'${operation}' permanently erases data on the target disks and is owner-only`
       : `'${operation}' is an unrecognised storage operation and is refused`,
   };
