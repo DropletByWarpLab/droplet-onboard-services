@@ -354,9 +354,10 @@ escrow** until the owner retrieves it — the only deliberate deviation from
          -> 404 recovery_key_not_found     no escrowed key for that drive
   ```
 
-  Retrieval is an atomic rename out of the escrow directory, so two racing
-  requests yield the key to exactly one; a `.retrieved` tombstone (no secret)
-  makes every later request `410 Gone`. The confirm token is single-use, bound to
+  Retrieval atomically claims a `.retrieved` tombstone (no secret) before
+  shredding the escrowed key, so two racing requests yield the key to exactly
+  one. The marker makes every later request `410 Gone`, including after a crash
+  between the claim and key removal. The confirm token is single-use, bound to
   the operation, the drive and the user, and valid for 60 seconds. A response
   that is lost in transit has still spent the retrieval — **regenerate** is the
   way back;
