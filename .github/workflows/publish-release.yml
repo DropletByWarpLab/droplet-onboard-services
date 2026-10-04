@@ -195,6 +195,37 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      # WARP-3665 — dependency vulnerability gate on the release path. Closes
+      # the class "a known-vulnerable pinned dependency ships over the air
+      # with every unit suite green": this workflow ran tests and a secret
+      # scan but no vulnerability scan, so only the (non-required)
+      # docker-build Trivy job ever looked. Same scan, same inputs as the
+      # PR-time step in ci.yml's `gitleaks` job: Trivy over every lockfile and
+      # requirements file, against the DB snapshot pinned in
+      # .github/trivy-db-version, with .trivyignore as the reviewed baseline.
+      # It fails on a fixable HIGH/CRITICAL that is NOT in the baseline (or
+      # whose baseline entry has expired), so a dispatch on a tree with a new
+      # finding stops here, before `publish` builds, pushes or signs anything.
+      # The pinned DB keeps the verdict reproducible for a given commit.
+      - name: Read pinned Trivy DB digest
+        id: trivydb
+        run: echo "ref=$(grep -v '^#' .github/trivy-db-version | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy dependency scan (block new HIGH/CRITICAL before publish)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_DB_REPOSITORY: ghcr.io/aquasecurity/trivy-db@${{ steps.trivydb.outputs.ref }}
+          TRIVY_SKIP_VERSION_CHECK: "true"
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+          skip-dirs: node_modules,.git
+
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
