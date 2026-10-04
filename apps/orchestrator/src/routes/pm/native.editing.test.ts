@@ -223,6 +223,16 @@ describe("work item create / patch — type, estimate, dates", () => {
     expect((await patch({ due_date: bad })).body.details.fieldErrors.due_date).toBeTruthy();
   });
 
+  it.each([OWNER, ADMIN, FAMILY])("lets $role edit every built-in field this slice added", async (user) => {
+    const res = await patch(
+      { type: "bug", estimate: 3, start_date: "2026-10-04", due_date: "2026-10-09", parent_id: "w2", department_id: "d1" },
+      user,
+    );
+    expect(res.status).toBe(200);
+    expect(svc.updateWorkItem).toHaveBeenLastCalledWith(expect.anything(), user.id, "w1", expect.objectContaining({ type: "bug", estimate: 3 }));
+    expect((await create({ name: "x", type: "feature", estimate: 2 }, user)).status).toBe(201);
+  });
+
   it("refuses a guest and a missing session, and admits the MCP principal (the confirmed write path)", async () => {
     expect((await patch({ type: "bug" }, GUEST)).status).toBe(403);
     expect((await request(makeApp(null)).patch("/api/pm/work-items/w1").send({ type: "bug" })).status).toBe(403);
