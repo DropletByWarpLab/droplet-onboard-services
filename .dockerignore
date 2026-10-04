@@ -29,6 +29,9 @@ docker/secrets
 docker/certs
 docker/mosquitto_passwd
 docker/mosquitto_passwd_dir
+# WARP-3656: the per-box secret tree (keys, internal CA, service TLS bundles).
+# Only tests/Dockerfile.test copies the whole context today; keep it out anyway.
+data/secrets
 
 # Per-app build output
 apps/*/dist
