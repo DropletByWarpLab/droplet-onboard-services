@@ -364,6 +364,42 @@ export function isPrismaCode(
   return typeof err === "object" && err !== null && (err as { code?: unknown }).code === code;
 }
 
+/**
+ * WARP-3527 (ADR-069 WS-11) — what the IMPORT RUNNER supplies on a write, and
+ * nobody else: `services/pm/import/` builds it, the HTTP create/patch routes
+ * never do, so a client cannot forge provenance through them.
+ *
+ * Imports go through `createWorkItem` / `updateWorkItem` and not around them
+ * because everything those two guarantee is the point: the per-project
+ * sequence counter bumped under its row lock, the same-project parent guard,
+ * the isCompleted / completedAt sync, HTML sanitising, and one activity row per
+ * change. What an import adds on top is exactly this:
+ *   - the idempotency key (`externalSystem` + `externalId`, UNIQUE per project),
+ *   - the source's own timestamps, so lead/cycle-time insights are not zero for
+ *     every imported item,
+ *   - the history marker: the `created` row carries `field: "import"` and
+ *     `newValue: "<source>:<jobId>"`, and every activity row an import writes is
+ *     born `not_needed` for the notification sweep. A migration is history, not
+ *     news: without that, 3,000 imported issues would digest-notify every
+ *     assignee on every 60 s tick for as long as the import ran.
+ */
+export interface PmImportedWrite {
+  jobId: string;
+  /** `PmImportSource` — written into the history marker. */
+  source: string;
+  externalSystem: string;
+  externalId: string;
+  /** The source's reporter when it resolves to a user; otherwise the importing user. */
+  createdById?: string | null;
+  createdAt?: Date;
+  updatedAt?: Date;
+  /** Honoured only when the landing state is terminal. */
+  completedAt?: Date | null;
+}
+
+/** Input to {@link writeActivity}; named so `updateWorkItem`'s wrapper can reuse it. */
+type ActivityInput = Parameters<typeof writeActivity>[1];
+
 async function writeActivity(
   db: Db,
   input: {
@@ -376,6 +412,9 @@ async function writeActivity(
     field?: string | null;
     oldValue?: string | null;
     newValue?: string | null;
+    /** WARP-3527 — `not_needed` for rows an import writes (see
+     *  {@link PmImportedWrite}). Omitted = the column default, `pending`. */
+    notifyStatus?: Prisma.PmActivityCreateManyInput["notifyStatus"];
   },
 ): Promise<void> {
   await db.pmActivity.create({
@@ -386,6 +425,7 @@ async function writeActivity(
       field: input.field ?? null,
       oldValue: input.oldValue ?? null,
       newValue: input.newValue ?? null,
+      ...(input.notifyStatus ? { notifyStatus: input.notifyStatus } : {}),
     },
   });
 }
@@ -1165,6 +1205,8 @@ export async function createWorkItem(
     departmentId?: string;
     startDate?: Date;
     dueDate?: Date;
+    /** WARP-3527 — importer-only provenance; see {@link PmImportedWrite}. */
+    imported?: PmImportedWrite;
   },
 ): Promise<ApiWorkItem> {
   const project = await prisma.pmProject.findUnique({
@@ -1241,8 +1283,11 @@ export async function createWorkItem(
     : null;
   const initialIsCompleted =
     resolvedStateGroup === "completed" || resolvedStateGroup === "cancelled";
-  const initialCompletedAt = initialIsCompleted ? new Date() : null;
+  const initialCompletedAt = initialIsCompleted
+    ? (input.imported?.completedAt ?? new Date())
+    : null;
 
+  const imp = input.imported;
   let created;
   try {
     created = await prisma.$transaction(async (tx) => {
@@ -1271,12 +1316,22 @@ export async function createWorkItem(
           priority: input.priority ?? "none",
           parentId: input.parentId ?? null,
           departmentId: input.departmentId ?? null,
-          createdById: actorId,
+          createdById: imp?.createdById ?? actorId,
           startDate: input.startDate ?? null,
           dueDate: input.dueDate ?? null,
           sortOrder: sequenceId,
           isCompleted: initialIsCompleted,
           completedAt: initialCompletedAt,
+          // WARP-3527 — importer-only columns; absent (so untouched defaults)
+          // for every other caller.
+          ...(imp
+            ? {
+                externalSystem: imp.externalSystem,
+                externalId: imp.externalId,
+                ...(imp.createdAt ? { createdAt: imp.createdAt } : {}),
+                ...(imp.updatedAt ? { updatedAt: imp.updatedAt } : {}),
+              }
+            : {}),
           assignees: input.assignees?.length
             ? { create: input.assignees.map((userId) => ({ userId })) }
             : undefined,
@@ -1285,7 +1340,14 @@ export async function createWorkItem(
             : undefined,
         },
       });
-      await writeActivity(tx, { workItemId: item.id, actorId, verb: "created" });
+      await writeActivity(tx, {
+        workItemId: item.id,
+        actorId,
+        verb: "created",
+        ...(imp
+          ? { field: "import", newValue: `${imp.source}:${imp.jobId}`, notifyStatus: "not_needed" as const }
+          : {}),
+      });
       // WARP-2587: a create WITH assignees is an assignment, and `created`
       // does not say who. One `assigned` row per assignee, so the notify
       // sweep sees the same shape whether the assignment happened at create
@@ -1299,6 +1361,7 @@ export async function createWorkItem(
           field: "assignees",
           oldValue: null,
           newValue: userId,
+          ...(imp ? { notifyStatus: "not_needed" as const } : {}),
         });
       }
       return item;
@@ -1336,6 +1399,10 @@ export async function updateWorkItem(
     departmentId?: string | null;
     sortOrder?: number;
   },
+  /** WARP-3527 — set only by the import runner: every activity row this call
+   *  writes is born `not_needed`, and an effective change is followed by one
+   *  `updated` / `import` row naming the job. See {@link PmImportedWrite}. */
+  opts: { imported?: { jobId: string; source: string } } = {},
 ): Promise<ApiWorkItem> {
   const existing = await prisma.pmWorkItem.findUnique({
     where: { id },
@@ -1399,6 +1466,14 @@ export async function updateWorkItem(
   }
 
   await prisma.$transaction(async (tx) => {
+    // WARP-3527 — every activity row in this function goes through `write`, so
+    // the importer's `not_needed` flag cannot be forgotten at one call site and
+    // the "did anything change" count that gates the provenance row is exact.
+    let wrote = 0;
+    const write = (input: ActivityInput): Promise<void> => {
+      wrote += 1;
+      return writeActivity(tx, opts.imported ? { ...input, notifyStatus: "not_needed" } : input);
+    };
     const data: Prisma.PmWorkItemUpdateInput = {};
     if (fields.name !== undefined) data.name = fields.name;
     if (fields.descriptionHtml !== undefined) {
@@ -1447,7 +1522,7 @@ export async function updateWorkItem(
 
     // One activity row per meaningful change.
     if (fields.stateId !== undefined && fields.stateId !== existing.stateId) {
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: "state_changed",
@@ -1465,7 +1540,7 @@ export async function updateWorkItem(
       fields.departmentId !== undefined &&
       fields.departmentId !== existing.departmentId
     ) {
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: "updated",
@@ -1475,7 +1550,7 @@ export async function updateWorkItem(
       });
     }
     if (fields.priority !== undefined && fields.priority !== existing.priority) {
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: "updated",
@@ -1511,7 +1586,7 @@ export async function updateWorkItem(
       const before = new Set(existingAssignees);
       for (const userId of next) {
         if (before.has(userId)) continue;
-        await writeActivity(tx, {
+        await write({
           workItemId: id,
           actorId,
           verb: "assigned",
@@ -1522,7 +1597,7 @@ export async function updateWorkItem(
       }
       for (const userId of before) {
         if (next.has(userId)) continue;
-        await writeActivity(tx, {
+        await write({
           workItemId: id,
           actorId,
           verb: "unassigned",
@@ -1536,7 +1611,7 @@ export async function updateWorkItem(
       fields.dueDate !== undefined &&
       fields.dueDate?.toISOString() !== existing.dueDate?.toISOString();
     if (dueDateChanged) {
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: "due_date_changed",
@@ -1558,7 +1633,19 @@ export async function updateWorkItem(
         fields.startDate?.toISOString() !== existing.startDate?.toISOString()) ||
       setChanged(fields.labelIds, existingLabelIds);
     if (scalarChanged) {
-      await writeActivity(tx, { workItemId: id, actorId, verb: "updated", field: "fields" });
+      await write({ workItemId: id, actorId, verb: "updated", field: "fields" });
+    }
+    // WARP-3527 — one marker per effective import update, so the item's own
+    // history says which job changed it. Nothing changed, nothing written.
+    if (opts.imported && wrote > 0) {
+      await writeActivity(tx, {
+        workItemId: id,
+        actorId,
+        verb: "updated",
+        field: "import",
+        newValue: `${opts.imported.source}:${opts.imported.jobId}`,
+        notifyStatus: "not_needed",
+      });
     }
   });
 
