@@ -208,5 +208,5 @@ export function highestRole(roles: ReadonlyArray<DirectoryRole>): DirectoryRole 
  * (or only unrecognized ones) → `family`.
  */
 export function effectiveRoleForGroupNames(groupNames: ReadonlyArray<string>): Role {
-  return highestRole(groupNames.map(roleForScimGroupName));
+  return highestRole(groupNames.map((name) => roleForScimGroupName(name)));
 }
