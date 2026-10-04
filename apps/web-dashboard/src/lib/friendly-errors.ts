@@ -548,6 +548,19 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That parent item isn't available anymore. Refresh and try again.",
     identifier_taken:
       "That project ID is already in use. Pick a different one.",
+    // WARP-3522 — saved views and the filter bar. Each says what to do next.
+    view_name_taken:
+      "A view with that name already exists. Pick another.",
+    view_limit_reached:
+      "You've reached the saved-view limit — delete one to add another.",
+    view_forbidden:
+      "You can't change this view. Save your own copy instead.",
+    view_not_found:
+      "That view isn't available anymore. Refresh and try again.",
+    view_is_builtin:
+      "The built-in views can't be changed.",
+    invalid_filter:
+      "That filter couldn't be applied. Clear it and try again.",
     // WARP-2730 (ADR-048) — the filing review surface, which lives inside the
     // CRM and therefore inside this domain. Each string says what happened and
     // what to do about it, in the owner's words: file, customer, look, undo —
