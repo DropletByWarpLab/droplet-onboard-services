@@ -20,6 +20,25 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
+import {
+  PM_API_TOKENS_ENABLED_KEY,
+  authenticatePmApiToken,
+  bindPmApiTokenPrisma,
+  createPmApiToken,
+  listPmApiTokens,
+  recordPmApiTokenUse,
+  resetPmApiTokenUseMemo,
+  revokePmApiToken,
+  revokePmApiTokensForUser,
+  setPmApiTokensEnabled,
+} from "../services/pm/pm-api-token.service.js";
+import {
+  getFeedTokenStatus,
+  listActivePmFeedLinks,
+  resolveFeedToken,
+  revokeFeedTokens,
+  rotateFeedToken,
+} from "../services/calendar-feed-token.service.js";
 
 // The global unit setup mocks @prisma/client so the DB-less lane never needs
 // Postgres. This file must talk to a REAL one.
@@ -219,5 +238,178 @@ describe.skipIf(!RUN)("PmApiToken + scoped CalendarFeedToken — the database's 
     await link({ scope: "pm_project", projectId });
     await prisma.user.delete({ where: { id: userId } });
     expect(await prisma.calendarFeedToken.count({ where: { userId } })).toBe(0);
+  });
+});
+
+// ── The services, against the real database ─────────────────────────────────
+//
+// The CHECK constraints above are only half of the risk: the other half is that
+// every WRITE the services make satisfies them. A violation inside the auth path
+// would be a 500 on a request that should be a 401, and a fake database cannot
+// tell. So the lifecycle is driven here through the real services and the real
+// constraints, with the rows read back.
+describe.skipIf(!RUN)("the token and feed-link services over real Postgres (WARP-3533)", () => {
+  let prisma: PrismaClient;
+  const OURS = { startsWith: "warp3533s-" } as const;
+  let user: { id: string; username: string };
+  let projectId = "";
+  let otherProjectId = "";
+  let n = 0;
+
+  beforeAll(async () => {
+    const { PrismaClient: RealPrismaClient } = await vi.importActual<typeof import("@prisma/client")>("@prisma/client");
+    prisma = new RealPrismaClient();
+    await prisma.$connect();
+    bindPmApiTokenPrisma(prisma);
+    await setPmApiTokensEnabled(prisma, true);
+  });
+
+  async function wipe() {
+    await prisma.user.deleteMany({ where: { username: OURS } });
+    await prisma.pmProject.deleteMany({ where: { name: OURS } });
+    await prisma.pmWorkspace.deleteMany({ where: { slug: OURS } });
+  }
+
+  afterAll(async () => {
+    await wipe();
+    // Leave the switch as a fresh box has it: no row until someone writes one.
+    await prisma.workspaceSetting.deleteMany({ where: { key: PM_API_TOKENS_ENABLED_KEY } });
+    bindPmApiTokenPrisma(null);
+    await prisma.$disconnect();
+  });
+
+  beforeEach(async () => {
+    await wipe();
+    resetPmApiTokenUseMemo();
+    const u = await prisma.user.create({
+      data: { username: `warp3533s-${Date.now()}-${++n}`, displayName: "warp3533s person", role: "family", directoryStatus: "ACTIVE" },
+    });
+    user = { id: u.id, username: u.username };
+    const ws = await prisma.pmWorkspace.create({ data: { slug: `warp3533s-ws-${Date.now()}`, name: "warp3533s-ws" } });
+    projectId = (await prisma.pmProject.create({ data: { workspaceId: ws.id, name: "warp3533s-a", identifier: "S33A" } })).id;
+    otherProjectId = (await prisma.pmProject.create({ data: { workspaceId: ws.id, name: "warp3533s-b", identifier: "S33B" } })).id;
+  });
+
+  const mint = (scopes = ["pm:read"], expiresAt: Date | null = null) =>
+    createPmApiToken(prisma, { id: user.id, role: "family" }, { name: "ci", scopes, expiresAt });
+  const rowOf = (id: string) => prisma.pmApiToken.findUniqueOrThrow({ where: { id } });
+
+  it("a minted token authenticates as its holder, carrying its scopes and the holder's current role", async () => {
+    const { token, row } = await mint(["pm:write", "pm:read"]);
+    const auth = await authenticatePmApiToken(prisma, token);
+    expect(auth).toMatchObject({ ok: true, tokenId: row.id, scopes: ["pm:read", "pm:write"] });
+    if (auth.ok) expect(auth.principal).toMatchObject({ id: user.id, username: user.username, role: "family" });
+    expect((await rowOf(row.id)).hash).not.toContain(token.slice(4));
+  });
+
+  it("every lazy stamp the auth path writes satisfies the CHECKs: role change, deactivation, expiry", async () => {
+    // role change
+    const a = await mint();
+    await prisma.user.update({ where: { id: user.id }, data: { role: "admin" } });
+    expect(await authenticatePmApiToken(prisma, a.token)).toEqual({ ok: false, code: "TOKEN_REVOKED" });
+    expect(await rowOf(a.row.id)).toMatchObject({ status: "revoked", revokedReason: "role_changed" });
+    expect((await rowOf(a.row.id)).revokedAt).toBeInstanceOf(Date);
+    await prisma.user.update({ where: { id: user.id }, data: { role: "family" } });
+    // back to the role it was issued under: still dead
+    expect(await authenticatePmApiToken(prisma, a.token)).toEqual({ ok: false, code: "TOKEN_REVOKED" });
+
+    // deactivation
+    const b = await mint();
+    await prisma.user.update({ where: { id: user.id }, data: { directoryStatus: "DEACTIVATED" } });
+    expect(await authenticatePmApiToken(prisma, b.token)).toEqual({ ok: false, code: "TOKEN_REVOKED" });
+    expect(await rowOf(b.row.id)).toMatchObject({ status: "revoked", revokedReason: "user_deactivated" });
+    await prisma.user.update({ where: { id: user.id }, data: { directoryStatus: "ACTIVE" } });
+
+    // expiry
+    const c = await mint(["pm:read"], new Date(Date.now() + 60_000));
+    await prisma.pmApiToken.update({ where: { id: c.row.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    expect(await authenticatePmApiToken(prisma, c.token)).toEqual({ ok: false, code: "TOKEN_EXPIRED" });
+    expect(await rowOf(c.row.id)).toMatchObject({ status: "expired", revokedAt: null, revokedReason: null });
+  });
+
+  it("a refused use is audited once an hour: the claim is one conditional write", async () => {
+    const { token, row } = await mint();
+    await prisma.pmApiToken.update({ where: { id: row.id }, data: { status: "revoked", revokedAt: new Date(), revokedReason: "manual" } });
+    await authenticatePmApiToken(prisma, token);
+    const first = (await rowOf(row.id)).refusalAuditedAt;
+    expect(first).toBeInstanceOf(Date);
+    await authenticatePmApiToken(prisma, token);
+    expect((await rowOf(row.id)).refusalAuditedAt).toEqual(first);
+  });
+
+  it("manual revoke and the lifecycle hook leave coherent rows, and are idempotent", async () => {
+    const a = await mint();
+    const b = await mint();
+    expect(await revokePmApiToken(prisma, a.row.id, { userId: user.id, isAdmin: false })).toMatchObject({ userId: user.id });
+    expect(await rowOf(a.row.id)).toMatchObject({ status: "revoked", revokedReason: "manual", revokedById: user.id });
+    expect(await revokePmApiToken(prisma, a.row.id, { userId: user.id, isAdmin: false })).toBe("already");
+
+    await revokePmApiTokensForUser(user.id, "role_changed", { type: "system", id: null });
+    expect(await rowOf(b.row.id)).toMatchObject({ status: "revoked", revokedReason: "role_changed", revokedById: null });
+    // the manual one keeps its own reason
+    expect(await rowOf(a.row.id)).toMatchObject({ revokedReason: "manual" });
+  });
+
+  it("lastUsedAt is one write a minute, even across a restart (the statement itself is conditional)", async () => {
+    const { row } = await mint();
+    const t0 = new Date();
+    await recordPmApiTokenUse(prisma, row.id, t0);
+    const first = (await rowOf(row.id)).lastUsedAt;
+    expect(first?.getTime()).toBe(t0.getTime());
+    resetPmApiTokenUseMemo(); // a new process
+    await recordPmApiTokenUse(prisma, row.id, new Date(t0.getTime() + 5_000));
+    expect((await rowOf(row.id)).lastUsedAt?.getTime()).toBe(t0.getTime());
+    resetPmApiTokenUseMemo();
+    await recordPmApiTokenUse(prisma, row.id, new Date(t0.getTime() + 61_000));
+    expect((await rowOf(row.id)).lastUsedAt?.getTime()).toBe(t0.getTime() + 61_000);
+  });
+
+  it("a listing stamps an overdue active token expired and returns newest first", async () => {
+    const old = await mint(["pm:read"], new Date(Date.now() + 60_000));
+    await prisma.pmApiToken.update({ where: { id: old.row.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    const fresh = await mint();
+    const rows = await listPmApiTokens(prisma, user.id);
+    expect(rows.map((r) => [r.id, r.status])).toEqual([
+      [fresh.row.id, "active"],
+      [old.row.id, "expired"],
+    ]);
+  });
+
+  it("feed links: each feed has its own link, resolved for its own feed only, and the writes satisfy the CHECK", async () => {
+    const calendar = await rotateFeedToken(prisma, user.id);
+    const mine = await rotateFeedToken(prisma, user.id, { scope: "pm_my_work" });
+    const projA = await rotateFeedToken(prisma, user.id, { scope: "pm_project", projectId });
+    const projB = await rotateFeedToken(prisma, user.id, { scope: "pm_project", projectId: otherProjectId });
+
+    const ok = (token: string, target?: Parameters<typeof resolveFeedToken>[3]) => resolveFeedToken(prisma, token, user.username, target);
+    expect(await ok(calendar.token)).toMatchObject({ userId: user.id, username: user.username, role: "family" });
+    expect(await ok(mine.token, { scope: "pm_my_work" })).not.toBeNull();
+    expect(await ok(projA.token, { scope: "pm_project", projectId })).not.toBeNull();
+    // every wrong pairing is null
+    expect(await ok(calendar.token, { scope: "pm_my_work" })).toBeNull();
+    expect(await ok(mine.token)).toBeNull();
+    expect(await ok(projA.token, { scope: "pm_project", projectId: otherProjectId })).toBeNull();
+    expect(await ok(projB.token, { scope: "pm_project", projectId })).toBeNull();
+    expect(await ok(projA.token)).toBeNull();
+
+    // rotating one feed ends only that feed's link
+    const mineAgain = await rotateFeedToken(prisma, user.id, { scope: "pm_my_work" });
+    expect(mineAgain.rotated).toBe(1);
+    expect(await ok(mine.token, { scope: "pm_my_work" })).toBeNull();
+    expect(await ok(mineAgain.token, { scope: "pm_my_work" })).not.toBeNull();
+    expect(await ok(calendar.token)).not.toBeNull();
+    expect(await ok(projA.token, { scope: "pm_project", projectId })).not.toBeNull();
+
+    // the list is the live PM links only, once per feed
+    const byKey = (a: unknown, b: unknown) => JSON.stringify(a).localeCompare(JSON.stringify(b));
+    const live = await listActivePmFeedLinks(prisma, user.id);
+    expect(live.map((l) => l.target).sort(byKey)).toEqual(
+      [{ scope: "pm_my_work" }, { scope: "pm_project", projectId }, { scope: "pm_project", projectId: otherProjectId }].sort(byKey),
+    );
+
+    expect(await revokeFeedTokens(prisma, user.id, { scope: "pm_project", projectId })).toBe(1);
+    expect((await getFeedTokenStatus(prisma, user.id, { scope: "pm_project", projectId })).state).toBe("none");
+    expect((await getFeedTokenStatus(prisma, user.id, { scope: "pm_project", projectId: otherProjectId })).state).toBe("active");
+    expect((await getFeedTokenStatus(prisma, user.id)).state).toBe("active");
   });
 });
