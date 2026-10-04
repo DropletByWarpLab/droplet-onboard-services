@@ -38,160 +38,160 @@
 # =============================================================================
 
 # stdlib: 17 fixable HIGH/CRITICAL [orchestrator]; fix→ 1.21.9, 1.22.2. Burn-down: WARP-243-D3.
-CVE-2023-45288
-CVE-2024-24790
-CVE-2024-34156
-CVE-2025-61726
-CVE-2025-61729
-CVE-2025-68121
-CVE-2026-25679
-CVE-2026-27145
-CVE-2026-32280
-CVE-2026-32281
-CVE-2026-32283
-CVE-2026-33811
-CVE-2026-33814
-CVE-2026-39820
-CVE-2026-39836
-CVE-2026-42499
-CVE-2026-42504
+CVE-2023-45288 exp:2027-01-02
+CVE-2024-24790 exp:2027-01-02
+CVE-2024-34156 exp:2027-01-02
+CVE-2025-61726 exp:2027-01-02
+CVE-2025-61729 exp:2027-01-02
+CVE-2025-68121 exp:2027-01-02
+CVE-2026-25679 exp:2027-01-02
+CVE-2026-27145 exp:2027-01-02
+CVE-2026-32280 exp:2027-01-02
+CVE-2026-32281 exp:2027-01-02
+CVE-2026-32283 exp:2027-01-02
+CVE-2026-33811 exp:2027-01-02
+CVE-2026-33814 exp:2027-01-02
+CVE-2026-39820 exp:2027-01-02
+CVE-2026-39836 exp:2027-01-02
+CVE-2026-42499 exp:2027-01-02
+CVE-2026-42504 exp:2027-01-02
 
 # golang.org/x/crypto: 9 fixable HIGH/CRITICAL [orchestrator]; fix→ 0.52.0. Burn-down: WARP-243-D3.
-CVE-2026-39827
-CVE-2026-39828
-CVE-2026-39829
-CVE-2026-39830
-CVE-2026-39832
-CVE-2026-39835
-CVE-2026-42508
-CVE-2026-46595
-CVE-2026-46597
+CVE-2026-39827 exp:2027-01-02
+CVE-2026-39828 exp:2027-01-02
+CVE-2026-39829 exp:2027-01-02
+CVE-2026-39830 exp:2027-01-02
+CVE-2026-39832 exp:2027-01-02
+CVE-2026-39835 exp:2027-01-02
+CVE-2026-42508 exp:2027-01-02
+CVE-2026-46595 exp:2027-01-02
+CVE-2026-46597 exp:2027-01-02
 
 # protobufjs: 6 fixable HIGH/CRITICAL [mcp-server,orchestrator]; fix→ 8.0.1, 7.5.5. Burn-down: WARP-243-D3.
-CVE-2026-41242
-CVE-2026-44289
-CVE-2026-44290
-CVE-2026-44291
-CVE-2026-44293
-CVE-2026-48712
+CVE-2026-41242 exp:2027-01-02
+CVE-2026-44289 exp:2027-01-02
+CVE-2026-44290 exp:2027-01-02
+CVE-2026-44291 exp:2027-01-02
+CVE-2026-44293 exp:2027-01-02
+CVE-2026-48712 exp:2027-01-02
 
 # tar: 6 fixable HIGH/CRITICAL [orchestrator]; fix→ 7.5.3. Burn-down: WARP-243-D3.
-CVE-2026-23745
-CVE-2026-23950
-CVE-2026-24842
-CVE-2026-26960
-CVE-2026-29786
-CVE-2026-31802
+CVE-2026-23745 exp:2027-01-02
+CVE-2026-23950 exp:2027-01-02
+CVE-2026-24842 exp:2027-01-02
+CVE-2026-26960 exp:2027-01-02
+CVE-2026-29786 exp:2027-01-02
+CVE-2026-31802 exp:2027-01-02
 
 # libgnutls30: 5 fixable HIGH/CRITICAL [orchestrator]; fix→ 3.7.9-2+deb12u7. Burn-down: WARP-243-D3.
-CVE-2026-33845
-CVE-2026-33846
-CVE-2026-3833
-CVE-2026-42009
-CVE-2026-42010
+CVE-2026-33845 exp:2027-01-02
+CVE-2026-33846 exp:2027-01-02
+CVE-2026-3833 exp:2027-01-02
+CVE-2026-42009 exp:2027-01-02
+CVE-2026-42010 exp:2027-01-02
 
 # ci-observed (amd64 base/gobinary): 4 fixable HIGH/CRITICAL [amd64-only]. Burn-down: WARP-243-D3.
-CVE-2025-45691
-CVE-2026-23949
-CVE-2026-24049
-CVE-2026-4372
+CVE-2025-45691 exp:2027-01-02
+CVE-2026-23949 exp:2027-01-02
+CVE-2026-24049 exp:2027-01-02
+CVE-2026-4372 exp:2027-01-02
 
 # golang.org/x/net: 4 fixable HIGH/CRITICAL [orchestrator]; fix→ 0.55.0. Burn-down: WARP-243-D3.
-CVE-2026-25681
-CVE-2026-27136
-CVE-2026-39821
-CVE-2026-42502
+CVE-2026-25681 exp:2027-01-02
+CVE-2026-27136 exp:2027-01-02
+CVE-2026-39821 exp:2027-01-02
+CVE-2026-42502 exp:2027-01-02
 
 # minimatch: 3 fixable HIGH/CRITICAL [orchestrator]; fix→ 10.2.1, 9.0.6, 8.0.5, 7.4.7, 6.2.1, 5.1.7, 4.2.4, 3.1.3. Burn-down: WARP-243-D3.
-CVE-2026-26996
-CVE-2026-27903
-CVE-2026-27904
+CVE-2026-26996 exp:2027-01-02
+CVE-2026-27903 exp:2027-01-02
+CVE-2026-27904 exp:2027-01-02
 
 # starlette: 3 fixable HIGH/CRITICAL [camera-discovery,email-indexer,routing,switch]; fix→ 0.49.1. Burn-down: WARP-243-D3.
-CVE-2025-62727
-CVE-2026-48818
-CVE-2026-54283
+CVE-2025-62727 exp:2027-01-02
+CVE-2026-48818 exp:2027-01-02
+CVE-2026-54283 exp:2027-01-02
 
 # @grpc/grpc-js: 2 fixable HIGH/CRITICAL [mcp-server,orchestrator]; fix→ 1.9.16, 1.10.12, 1.11.4, 1.12.7, 1.13.5, 1.14.4. Burn-down: WARP-243-D3.
-CVE-2026-48068
-CVE-2026-48069
+CVE-2026-48068 exp:2027-01-02
+CVE-2026-48069 exp:2027-01-02
 
 # fast-uri: 2 fixable HIGH/CRITICAL [mcp-server,orchestrator]; fix→ 3.1.1. Burn-down: WARP-243-D3.
-CVE-2026-6321
-CVE-2026-6322
+CVE-2026-6321 exp:2027-01-02
+CVE-2026-6322 exp:2027-01-02
 
 # go.opentelemetry.io/otel/sdk: 2 fixable HIGH/CRITICAL [orchestrator]; fix→ 1.40.0. Burn-down: WARP-243-D3.
-CVE-2026-24051
-CVE-2026-39883
+CVE-2026-24051 exp:2027-01-02
+CVE-2026-39883 exp:2027-01-02
 
 # next: 2 fixable HIGH/CRITICAL [web-dashboard]; fix→ 15.5.16, 16.2.5. Burn-down: WARP-243-D3.
-CVE-2026-44573
-CVE-2026-44578
+CVE-2026-44573 exp:2027-01-02
+CVE-2026-44578 exp:2027-01-02
 
 # nodemailer: 2 fixable HIGH/CRITICAL [mcp-server,orchestrator]; fix→ 7.0.11. Burn-down: WARP-243-D3.
-CVE-2025-14874
-GHSA-p6gq-j5cr-w38f
+CVE-2025-14874 exp:2027-01-02
+GHSA-p6gq-j5cr-w38f exp:2027-01-02
 
 # cross-spawn: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 7.0.5, 6.0.6. Burn-down: WARP-243-D3.
-CVE-2024-21538
+CVE-2024-21538 exp:2027-01-02
 
 # cryptography: 1 fixable HIGH/CRITICAL [camera-discovery,email-indexer,routing]; fix→ 46.0.5. Burn-down: WARP-243-D3.
-CVE-2026-26007
+CVE-2026-26007 exp:2027-01-02
 
 # form-data: 1 fixable HIGH/CRITICAL [matter-controller,mcp-server,orchestrator]; fix→ 2.5.6, 3.0.5, 4.0.6. Burn-down: WARP-243-D3.
-CVE-2026-12143
+CVE-2026-12143 exp:2027-01-02
 
 # github.com/docker/cli: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 29.2.0. Burn-down: WARP-243-D3.
-CVE-2025-15558
+CVE-2025-15558 exp:2027-01-02
 
 # github.com/go-jose/go-jose/v4: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 4.1.4. Burn-down: WARP-243-D3.
-CVE-2026-34986
+CVE-2026-34986 exp:2027-01-02
 
 # github.com/sigstore/fulcio: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 1.8.6. Burn-down: WARP-243-D3.
-CVE-2026-49478
+CVE-2026-49478 exp:2027-01-02
 
 # github.com/sigstore/rekor: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 1.5.2. Burn-down: WARP-243-D3.
-CVE-2026-48702
+CVE-2026-48702 exp:2027-01-02
 
 # glob: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 11.1.0, 10.5.0. Burn-down: WARP-243-D3.
-CVE-2025-64756
+CVE-2025-64756 exp:2027-01-02
 
 # go.opentelemetry.io/otel: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 1.41.0. Burn-down: WARP-243-D3.
-CVE-2026-29181
+CVE-2026-29181 exp:2027-01-02
 
 # google.golang.org/grpc: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 1.79.3. Burn-down: WARP-243-D3.
-CVE-2026-33186
+CVE-2026-33186 exp:2027-01-02
 
 # hono: 1 fixable HIGH/CRITICAL [mcp-server,orchestrator]; fix→ 4.12.25. Burn-down: WARP-243-D3.
-CVE-2026-54290
+CVE-2026-54290 exp:2027-01-02
 
 # libcap2: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 1:2.66-4+deb12u3. Burn-down: WARP-243-D3.
-CVE-2026-4878
+CVE-2026-4878 exp:2027-01-02
 
 # multer: 1 fixable HIGH/CRITICAL [mcp-server,orchestrator]; fix→ 2.2.0, 3.0.0-alpha.2. Burn-down: WARP-243-D3.
-CVE-2026-5079
+CVE-2026-5079 exp:2027-01-02
 
 # sigstore: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 4.1.1. Burn-down: WARP-243-D3.
-CVE-2026-48815
+CVE-2026-48815 exp:2027-01-02
 
 # vite: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 8.0.16, 7.3.5, 6.4.3. Burn-down: WARP-243-D3.
-CVE-2026-53571
+CVE-2026-53571 exp:2027-01-02
 
 # vitest: 1 fixable HIGH/CRITICAL [orchestrator]; fix→ 4.1.0, 3.2.6. Burn-down: WARP-243-D3.
-CVE-2026-47429
+CVE-2026-47429 exp:2027-01-02
 
 # ws: 1 fixable HIGH/CRITICAL [matter-controller,mcp-server,orchestrator]; fix→ 5.2.5, 6.2.4, 7.5.11, 8.21.0. Burn-down: WARP-243-D3.
-CVE-2026-48779
+CVE-2026-48779 exp:2027-01-02
 
 # --- drift reconciliation (2026-07-05 pinned-DB rescan of the current build) ---
 # cryptography: subgroup attack (camera-discovery,email-indexer,routing); fix→ 48.0.1. WARP-243-D3.
-GHSA-537c-gmf6-5ccf
+GHSA-537c-gmf6-5ccf exp:2027-01-02
 # libssl3/openssl: PKCS7_verify UAF (web-dashboard base); fix→ 3.0.20-1~deb12u2. WARP-243-D3.
-CVE-2026-45447
+CVE-2026-45447 exp:2027-01-02
 # next: 3 advisories (web-dashboard); fix→ 15.5.16+. WARP-243-D3.
-GHSA-8h8q-6873-q5fj
-GHSA-h25m-26qc-wcjf
-GHSA-q4gf-8mx6-v5v3
+GHSA-8h8q-6873-q5fj exp:2027-01-02
+GHSA-h25m-26qc-wcjf exp:2027-01-02
+GHSA-q4gf-8mx6-v5v3 exp:2027-01-02
 
 # --- gateway (nginx:1.27-bookworm) base reconciliation (2026-07-06 amd64 CI) ---
 # WARP-1021's gateway image (#846) and the WARP-243 scanner (#834) both landed on
@@ -203,40 +203,40 @@ GHSA-q4gf-8mx6-v5v3
 # contract — not a PR-introduced regression. Burn-down: WARP-243-D3 (retire as the
 # pinned nginx base picks up Debian point-releases). Pinned DB sha256:a8a1af88…
 # gpgv; fix→ 2.2.40-1.1+deb12u2.
-CVE-2025-68973
+CVE-2025-68973 exp:2027-01-02
 # libexpat1; fix→ 2.5.0-1+deb12u2.
-CVE-2023-52425
+CVE-2023-52425 exp:2027-01-02
 # libgnutls30; fix→ 3.7.9-2+deb12u5.
-CVE-2025-32988
-CVE-2025-32990
+CVE-2025-32988 exp:2027-01-02
+CVE-2025-32990 exp:2027-01-02
 # libnghttp2-14; fix→ 1.52.0-1+deb12u3.
-CVE-2026-27135
+CVE-2026-27135 exp:2027-01-02
 # libpam-modules/-bin/-runtime/libpam0g; fix→ 1.5.2-6+deb12u2.
-CVE-2025-6020
+CVE-2025-6020 exp:2027-01-02
 # libpng16-16; fix→ 1.6.39-2+deb12u1/u2/u3.
-CVE-2025-64720
-CVE-2025-65018
-CVE-2025-66293
-CVE-2026-22695
-CVE-2026-22801
-CVE-2026-25646
+CVE-2025-64720 exp:2027-01-02
+CVE-2025-65018 exp:2027-01-02
+CVE-2025-66293 exp:2027-01-02
+CVE-2026-22695 exp:2027-01-02
+CVE-2026-22801 exp:2027-01-02
+CVE-2026-25646 exp:2027-01-02
 # libtiff6; fix→ 4.5.0-6+deb12u3/u4.
-CVE-2025-9900
-CVE-2026-4775
+CVE-2025-9900 exp:2027-01-02
+CVE-2026-4775 exp:2027-01-02
 # libxml2 (incl. the lone CRITICAL, CVE-2024-56171); fix→ 2.9.14+dfsg-1.3~deb12u2/u3.
-CVE-2024-56171
-CVE-2022-49043
-CVE-2024-25062
-CVE-2025-24928
-CVE-2025-27113
-CVE-2025-32414
-CVE-2025-32415
-CVE-2025-49794
-CVE-2025-49796
+CVE-2024-56171 exp:2027-01-02
+CVE-2022-49043 exp:2027-01-02
+CVE-2024-25062 exp:2027-01-02
+CVE-2025-24928 exp:2027-01-02
+CVE-2025-27113 exp:2027-01-02
+CVE-2025-32414 exp:2027-01-02
+CVE-2025-32415 exp:2027-01-02
+CVE-2025-49794 exp:2027-01-02
+CVE-2025-49796 exp:2027-01-02
 # libxslt1.1; fix→ 1.1.35-1+deb12u2.
-CVE-2025-7424
+CVE-2025-7424 exp:2027-01-02
 # perl-base; fix→ 5.36.0-7+deb12u3.
-CVE-2023-31484
+CVE-2023-31484 exp:2027-01-02
 
 # langchain-core: 1 fixable HIGH [rag-eval]; fix→ 1.2.22. WARP-1406: the fix
 # lives only in langchain-core 1.x, which ragas==0.2.13 (the version whose
@@ -247,4 +247,4 @@ CVE-2023-31484
 # untrusted paths; the container is `eval`-profile-gated, internal-network
 # only, no auth surface. Burn-down: retire when the eval harness moves to a
 # ragas that supports langchain-core 1.x (re-baseline run required).
-CVE-2026-34070
+CVE-2026-34070 exp:2027-01-02
