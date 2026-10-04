@@ -1,0 +1,27 @@
+# =============================================================================
+# WARP-3653 -- renew internal CA leaf certificates before they expire
+# =============================================================================
+#
+# Oneshot, driven by droplet-internal-cert-renew.timer. Installed and
+# @REPO_ROOT@-substituted by setup.sh (scripts/lib/internal-ca.sh::
+# install_internal_cert_renewal) -- never hand-placed. Runs the script from the
+# checkout, as root, because it signs with the CA key (never mounted into any
+# container) and restarts compose services.
+#
+#   journalctl -u droplet-internal-cert-renew.service
+#   systemctl list-timers droplet-internal-cert-renew.timer
+#
+# The orchestrator's cron runtime is deliberately not used: it cannot read the
+# CA key and cannot restart sibling containers.
+# =============================================================================
+[Unit]
+Description=Renew Droplet internal CA leaf certificates
+Documentation=https://warp-lab.atlassian.net/browse/WARP-3653
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=@REPO_ROOT@/scripts/host/droplet-renew-internal-certs.sh
+UMask=0077
+Nice=10

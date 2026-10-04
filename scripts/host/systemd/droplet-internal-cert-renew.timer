@@ -1,0 +1,22 @@
+# =============================================================================
+# WARP-3653 -- daily trigger for droplet-internal-cert-renew.service
+# =============================================================================
+#
+# Leaf certificates last 90 days and are renewed once less than a third of that
+# remains, so there are ~30 daily chances before one lapses. 04:30 local time
+# sits clear of the 03:15 backup. Not Persistent on purpose: a catch-up run at
+# boot would restart services while the stack is still coming up, and the next
+# day's run does the same job.
+# =============================================================================
+[Unit]
+Description=Daily Droplet internal certificate renewal
+Documentation=https://warp-lab.atlassian.net/browse/WARP-3653
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=1800
+Persistent=false
+Unit=droplet-internal-cert-renew.service
+
+[Install]
+WantedBy=timers.target

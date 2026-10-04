@@ -83,4 +83,64 @@ REPO_ROOT_OVERRIDE="$WORK" bash "$REPO_ROOT/scripts/rotate-internal-certs.sh" --
 openssl verify -CAfile "$WORK/data/secrets/internal-ca/ca.pem" \
   "$WORK/data/secrets/service-tls/broker/cert.pem" >/dev/null || fail "broker not reissued under new CA"
 
+# 7. WARP-3653: the daily host renewal pass (scripts/host/droplet-renew-internal-certs.sh).
+RENEW="$REPO_ROOT/scripts/host/droplet-renew-internal-certs.sh"
+# 7a. no CA on the box: a clear no-op, never mints one.
+EMPTY="$(mktemp -d)"
+out="$(REPO_ROOT_OVERRIDE="$EMPTY" bash "$RENEW" 2>&1)" || fail "renew with no CA must exit 0: $out"
+echo "$out" | grep -q "nothing to renew" || fail "no-CA log line missing: $out"
+[ ! -e "$EMPTY/data/secrets/internal-ca" ] || fail "renew minted a CA on a box without one"
+rm -rf "$EMPTY"
+
+# 7b. healthy bundles: nothing due, nothing touched, nothing restarted.
+fp_before="$(openssl x509 -in "$WORK/data/secrets/service-tls/db/cert.pem" -noout -fingerprint)"
+out="$(REPO_ROOT_OVERRIDE="$WORK" RENEW_NO_RESTART=1 bash "$RENEW" 2>&1)" || fail "healthy renew pass failed: $out"
+echo "$out" | grep -q "nothing to do" || fail "healthy pass should report nothing to do: $out"
+[ "$fp_before" = "$(openssl x509 -in "$WORK/data/secrets/service-tls/db/cert.pem" -noout -fingerprint)" ] || fail "healthy pass reissued db"
+
+# 7c. bundles near expiry (issued for 1 day, so inside the one-third window of
+# the 90-day lifetime = the box 'clock set forward'): renewed without setup.sh.
+INTERNAL_CERT_DAYS=1 INTERNAL_CA_FORCE=1 internal_ca_issue_all
+openssl x509 -in "$WORK/data/secrets/service-tls/db/cert.pem" -noout -checkend 2592000 >/dev/null 2>&1 \
+  && fail "test setup: db cert should be inside the renewal window"
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+# compose stub: two services running; log every restart.
+case " $* " in
+  *" ps "*) printf 'orchestrator\ndb\n' ;;
+  *" restart "*) echo "${*: -1}" >> "$DOCKER_STUB_LOG" ;;
+esac
+STUB
+chmod +x "$WORK/bin/docker"
+: > "$WORK/restarts.log"
+out="$(PATH="$WORK/bin:$PATH" DOCKER_STUB_LOG="$WORK/restarts.log" REPO_ROOT_OVERRIDE="$WORK" bash "$RENEW" 2>&1)" \
+  || fail "renewal pass failed: $out"
+for svc in orchestrator db broker cache; do
+  openssl x509 -in "$WORK/data/secrets/service-tls/$svc/cert.pem" -noout -checkend $((80 * 86400)) >/dev/null 2>&1 \
+    || fail "$svc was not renewed to a full lifetime"
+  openssl verify -CAfile "$WORK/data/secrets/internal-ca/ca.pem" "$WORK/data/secrets/service-tls/$svc/cert.pem" >/dev/null \
+    || fail "$svc renewed cert does not chain to the CA"
+done
+# only running compose services are restarted, each once; markers all cleared
+sort "$WORK/restarts.log" | tr '\n' ' ' | grep -qx "db orchestrator " || fail "unexpected restarts: $(cat "$WORK/restarts.log")"
+[ -z "$(find "$WORK/data/secrets/service-tls" -name .restart-pending)" ] || fail "restart markers left behind"
+# and the next pass is a no-op
+out="$(PATH="$WORK/bin:$PATH" DOCKER_STUB_LOG="$WORK/restarts.log" REPO_ROOT_OVERRIDE="$WORK" bash "$RENEW" 2>&1)" || fail "follow-up pass failed"
+echo "$out" | grep -q "nothing to do" || fail "follow-up pass should be a no-op: $out"
+[ "$(wc -l < "$WORK/restarts.log" | tr -d ' ')" = "2" ] || fail "follow-up pass restarted something"
+
+# 7d. a failed restart is remembered and retried (the certs are already fresh).
+INTERNAL_CERT_DAYS=1 INTERNAL_CA_FORCE=1 internal_ca_issue orchestrator "DNS:host.docker.internal"
+cat > "$WORK/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+case " $* " in
+  *" ps "*) printf 'orchestrator\n' ;;
+  *" restart "*) exit 1 ;;
+esac
+STUB
+rc=0; PATH="$WORK/bin:$PATH" REPO_ROOT_OVERRIDE="$WORK" bash "$RENEW" >/dev/null 2>&1 || rc=$?
+[ "$rc" -ne 0 ] || fail "a failed restart must fail the pass"
+[ -e "$WORK/data/secrets/service-tls/orchestrator/.restart-pending" ] || fail "failed restart lost its pending marker"
+
 echo "PASS tests/internal-ca.test.sh"

@@ -332,6 +332,8 @@ export interface HealthResponse {
    * on-box inference regardless of which of these two answers it.
    */
   inferenceRuntime: "dmr" | "ollama";
+  /** WARP-3653 — days left on the internal CA leaf certificate; absent when none is readable. */
+  internalCertDaysLeft?: number;
   services: {
     db: boolean;
     redis: boolean;

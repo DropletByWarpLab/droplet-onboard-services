@@ -575,6 +575,11 @@ main() {
   install_restic_backup \
     || log_warn "restic backup host integration had issues (continuing)"
 
+  # WARP-3653: daily host timer that renews internal CA leaf certificates
+  # before the 90-day expiry. Non-fatal, idempotent.
+  install_internal_cert_renewal \
+    || log_warn "internal certificate renewal timer had issues (continuing)"
+
   # --- Phase 5: Build ---
   log_step 5 $total_steps "Build"
   if [ "$SKIP_BUILD" = "true" ]; then

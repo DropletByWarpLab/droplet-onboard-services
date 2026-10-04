@@ -37,8 +37,10 @@ INTERNAL_CA_DIR="${INTERNAL_CA_DIR:-$REPO_ROOT/data/secrets/internal-ca}"
 SERVICE_TLS_DIR="${SERVICE_TLS_DIR:-$REPO_ROOT/data/secrets/service-tls}"
 INTERNAL_CA_DAYS="${INTERNAL_CA_DAYS:-3650}"
 INTERNAL_CERT_DAYS="${INTERNAL_CERT_DAYS:-90}"
-# Renew when less than 30 days of validity remain (2592000 s).
-INTERNAL_CERT_RENEW_WINDOW_S=2592000
+# Renew when less than a third of the lifetime remains (WARP-3653): 30 of the
+# 90 days (2592000 s) by default. Derived, so a shorter test lifetime keeps the
+# same proportion.
+INTERNAL_CERT_RENEW_WINDOW_S=$(( INTERNAL_CERT_DAYS * 86400 / 3 ))
 
 # Canonical identity list. CN == compose service name. The Postgres/Redis
 # workstream appends its services here (db, cache) — nothing else to change.
@@ -152,4 +154,29 @@ internal_ca_issue_all() {
     [ "$svc" = "orchestrator" ] && extra="DNS:host.docker.internal${gateway_ip:+,IP:$gateway_ip}"
     internal_ca_issue "$svc" "$extra"
   done
+}
+
+# install_internal_cert_renewal -- WARP-3653. Installs + enables the daily host
+# timer that runs scripts/host/droplet-renew-internal-certs.sh. Without it the
+# 90-day leaf certificates (db/cache/broker TLS among them) are only ever
+# renewed when someone re-runs setup.sh. Same @REPO_ROOT@ unit-substitution
+# pattern as install_restic_backup (scripts/lib/backup.sh). Non-fatal.
+install_internal_cert_renewal() {
+  if [ "$(uname)" != "Linux" ] || ! command -v systemctl >/dev/null 2>&1; then
+    log_info "Internal cert renewal timer: skipping (not a systemd Linux host)"
+    return 0
+  fi
+  local host_src="$REPO_ROOT/scripts/host" unit
+  for unit in droplet-internal-cert-renew.service droplet-internal-cert-renew.timer; do
+    if [ ! -f "$host_src/systemd/$unit" ]; then
+      log_warn "Internal cert renewal timer: missing $unit -- skipping"
+      return 0
+    fi
+    sed "s|@REPO_ROOT@|$REPO_ROOT|g" "$host_src/systemd/$unit" \
+      | sudo tee "/etc/systemd/system/$unit" >/dev/null
+    sudo chmod 0644 "/etc/systemd/system/$unit"
+  done
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now droplet-internal-cert-renew.timer >/dev/null 2>&1
+  log_success "Installed droplet-internal-cert-renew.timer (daily internal certificate renewal)"
 }
