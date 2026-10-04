@@ -14,3 +14,5 @@ export * from "./pm-filter";
 export * from "./pm-filter-schema";
 export * from "./pm-links";
 export * from "./pm-views";
+export * from "./pm-bulk";
+export * from "./pm-table";
