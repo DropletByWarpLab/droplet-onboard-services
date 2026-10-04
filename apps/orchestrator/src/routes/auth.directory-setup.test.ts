@@ -135,6 +135,11 @@ import * as nc from "../services/nextcloud.client.js";
 import { config } from "../config.js";
 import { readUserEmail } from "../services/user-directory.service.js";
 import { emailLookupHash } from "../services/column-crypto.service.js";
+import {
+  createTransactionSeam,
+  expectAllTransactionsAt,
+} from "../__tests__/helpers/prisma-tx-harness.js";
+import { SERIALIZABLE_TX } from "../lib/prisma-tx.js";
 
 function createPrismaMock(seed: any[] = []) {
   const users: any[] = [...seed];
@@ -201,10 +206,12 @@ function createPrismaMock(seed: any[] = []) {
     }),
   };
   // WARP-3589 — the owner check + write run in one interactive transaction.
-  // The mock hands the callback the same client; isolation is asserted by the
-  // WARP-3589 tests on the options argument, real behaviour by the pg lane
-  // (__tests__/auth-setup-first-owner.pg.test.ts).
-  self.$transaction = vi.fn(async (fn: (tx: any) => Promise<unknown>, _opts?: unknown) => fn(self));
+  // The shared seam (WARP-1570) records the options argument and models
+  // rollback and the Serializable conflict rule; real behaviour is proven by
+  // the pg lane (__tests__/auth-setup-first-owner.pg.test.ts).
+  const txSeam = createTransactionSeam({ client: () => self, stores: { users } });
+  self.$transaction = txSeam.$transaction;
+  self._txSeam = txSeam;
   self._users = users;
   self._callOrder = callOrder;
   return self;
@@ -721,9 +728,7 @@ describe("WARP-3589 — /auth/setup requires the physical claim", () => {
 
     expect(res.status).toBe(200);
     expect(prisma.$transaction).toHaveBeenCalledTimes(1);
-    expect((prisma.$transaction as any).mock.calls[0][1]).toEqual({
-      isolationLevel: "Serializable",
-    });
+    expectAllTransactionsAt(prisma._txSeam, SERIALIZABLE_TX);
   });
 
   it("serialization conflict (a concurrent setup won) → 409 OWNER_EXISTS, Nextcloud untouched", async () => {

@@ -16,9 +16,12 @@
  * files). Local: scripts/test-orchestrator-pg.sh. CI: the `pg-integration` job.
  *
  * FIXTURE SCOPING — rows this file mints are namespaced `warp3589-` and every
- * cleanup is scoped to that prefix. "An owner exists" is a box-wide fact, so
- * the premise (no foreign owner row) is asserted rather than assumed; the pg
- * lane runs --no-file-parallelism and every owner-creating suite cleans up.
+ * cleanup is scoped to that prefix. "An owner exists" and "the box is claimed"
+ * are box-wide facts, though, and the shared pg database is not guaranteed to
+ * be free of other suites' owner or consumed-claim rows (it was not, in CI).
+ * So beforeAll sets any such foreign rows aside (owner -> admin, consumed ->
+ * available) and afterAll puts them back exactly as found. The pg lane runs
+ * --no-file-parallelism, so no other suite observes the interim state.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import request from "supertest";
@@ -144,15 +147,56 @@ describe.skipIf(!RUN)("POST /auth/setup — real Postgres (WARP-3589)", () => {
   const OURS = { startsWith: "warp3589-" } as const;
   const PASSWORD = "Real-pg-secret123";
 
+  let setAsideOwners: string[] = [];
+  let setAsideClaims: string[] = [];
+
   beforeAll(async () => {
     const { PrismaClient: RealPrismaClient } =
       await vi.importActual<typeof import("@prisma/client")>("@prisma/client");
     prisma = new RealPrismaClient();
     await prisma.$connect();
+    await cleanup();
+
+    setAsideOwners = (
+      await prisma.user.findMany({
+        where: { role: "owner", NOT: { username: OURS } },
+        select: { id: true },
+      })
+    ).map((u) => u.id);
+    if (setAsideOwners.length) {
+      await prisma.user.updateMany({
+        where: { id: { in: setAsideOwners } },
+        data: { role: "admin" },
+      });
+    }
+    setAsideClaims = (
+      await prisma.claimCode.findMany({
+        where: { state: "consumed", NOT: { codeHash: OURS } },
+        select: { id: true },
+      })
+    ).map((c) => c.id);
+    if (setAsideClaims.length) {
+      await prisma.claimCode.updateMany({
+        where: { id: { in: setAsideClaims } },
+        data: { state: "available" },
+      });
+    }
   });
 
   afterAll(async () => {
     await cleanup();
+    if (setAsideOwners.length) {
+      await prisma.user.updateMany({
+        where: { id: { in: setAsideOwners } },
+        data: { role: "owner" },
+      });
+    }
+    if (setAsideClaims.length) {
+      await prisma.claimCode.updateMany({
+        where: { id: { in: setAsideClaims } },
+        data: { state: "consumed" },
+      });
+    }
     await prisma.$disconnect();
   });
 
@@ -168,14 +212,6 @@ describe.skipIf(!RUN)("POST /auth/setup — real Postgres (WARP-3589)", () => {
     vi.clearAllMocks();
     authRateLimit.resetKey("127.0.0.1");
     await cleanup();
-    const foreign = await prisma.user.findMany({
-      where: { role: "owner", NOT: { username: OURS } },
-      select: { username: true },
-    });
-    expect(
-      foreign,
-      "a foreign owner row makes every setup attempt 409 for the wrong reason — namespace that suite's fixtures",
-    ).toEqual([]);
   });
 
   function buildApp() {
@@ -198,9 +234,8 @@ describe.skipIf(!RUN)("POST /auth/setup — real Postgres (WARP-3589)", () => {
     });
   }
 
-  // isClaimed() is a box-wide COUNT of consumed rows. If another suite left a
-  // consumed row behind the "unclaimed" case below would be meaningless, so
-  // assert the premise instead of silently passing.
+  // isClaimed() is a box-wide COUNT of consumed rows; beforeAll set any foreign
+  // ones aside, so assert the premise instead of silently passing.
   async function expectNoClaimedRows(): Promise<void> {
     expect(await prisma.claimCode.count({ where: { state: "consumed" } })).toBe(0);
   }
