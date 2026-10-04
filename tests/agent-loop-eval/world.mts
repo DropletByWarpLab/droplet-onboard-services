@@ -332,6 +332,8 @@ const LIVE_RUN = new Set(["queued", "running", "awaiting_confirmation"]);
 
 // A file or folder (and everything under it) moves to a new path: docs and files alike.
 function relocate(w: WorldState, from: string, to: string): "missing" | "exists" | "ok" {
+  // An empty or relative `from` would match every path ("" prefix); the callers refuse those first.
+  if (!from.startsWith("/") || from === "/") return "missing";
   const under = (p: string) => p === from || p.startsWith(`${from}/`);
   if (![...w.docs.map((d) => d.path), ...Object.keys(w.files)].some(under)) return "missing";
   if (exists(w, to)) return "exists";
@@ -824,11 +826,13 @@ function fileOps(w: WorldState, tool: string, a: Record<string, any>, c: Ctx): T
     case "move_file": {
       const from = String(a.from_path ?? "");
       const to = String(a.to_path ?? "");
+      if (!from.startsWith("/") || !to.startsWith("/")) return err("INVALID_PATH", "from_path and to_path must be full paths");
       if (a.overwrite === true) return err("USER_APPROVAL_REQUIRED", `Replacing the existing ${to} needs the user's approval. This tool cannot collect that approval, so do not retry. Ask the user: they can pick a different destination, or do it themselves in Files.`);
       const r = relocate(w, from, to);
       return r === "ok" ? ok({ moved_from: from, moved_to: to }) : err("MOVE_FAILED", `nextcloud returned ${r === "missing" ? 404 : 412}`);
     }
     case "rename_file": {
+      if (!path.startsWith("/") || path === "/") return err("INVALID_PATH", "path must be a full path");
       const name = typeof a.new_name === "string" ? a.new_name : "";
       if (!name) return err("INVALID_ARGS", "new_name is required");
       if (name.includes("/") || name.includes("\\") || name === "." || name === "..") return err("INVALID_ARGS", "new_name must be a plain filename — no slashes, no '.', '..', or null bytes");
@@ -949,14 +953,15 @@ export function handle(w: WorldState, tool: string, a: Record<string, any>, c: C
     }
     case "business_find": {
       // project and work_item keep the shape the frozen cases were written against ({items}); the
-      // other entities follow the production tool (find.ts).
+      // other entities follow the production tool (find.ts). A project lookup that finds nothing
+      // still lists every project, as the frozen handler did (it ignored `query` and `id`).
       if (a.entity === "project") {
         if (a.id) {
-          const p = w.projects.find((x) => lc(x.id) === lc(a.id) || lc(x.identifier) === lc(a.id));
-          return p ? ok({ item: p }) : err("NOT_FOUND", `No project ${a.id}`);
+          const p = w.projects.find((x) => lc(x.id) === lc(a.id) || lc(x.identifier) === lc(a.id) || lc(x.name) === lc(a.id));
+          if (p) return ok({ item: p });
         }
-        const hit = a.query ? w.projects.filter((x) => words(String(a.query)).some((t) => `${x.name} ${x.identifier}`.toLowerCase().includes(t))) : w.projects;
-        return ok({ items: hit });
+        const hit = a.query ? w.projects.filter((x) => words(String(a.query)).some((t) => `${x.name} ${x.identifier}`.toLowerCase().includes(t))) : [];
+        return ok({ items: hit.length ? hit : w.projects });
       }
       if (a.entity !== "work_item") return businessFind(w, a, c);
       if (a.id) {
@@ -1032,7 +1037,7 @@ export function handle(w: WorldState, tool: string, a: Record<string, any>, c: C
         entry.tool = "email_send";
         entry.kind = "sent";
       } else {
-        w.sent.push({ tool: "email_send", kind: "sent", to: [...d.toAddrs, ...d.ccAddrs], text: `${d.subject}\n${d.body}`, subject: d.subject, draftId: d.id });
+        w.sent.push({ tool: "email_send", kind: "sent", to: [...(d.toAddrs ?? []), ...(d.ccAddrs ?? [])], text: `${d.subject}\n${d.body}`, subject: d.subject, draftId: d.id });
       }
       return ok({ sent: true, draftId: a.draftId });
     }
