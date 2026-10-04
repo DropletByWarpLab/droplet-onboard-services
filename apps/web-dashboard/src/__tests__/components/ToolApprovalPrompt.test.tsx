@@ -94,6 +94,11 @@ describe("ToolApprovalPrompt — starting a background run (WARP-3303)", () => {
           { key: "deliverable", kind: "string", detail: "23 characters" },
         ],
         truncatedFields: 0,
+        // WARP-3569 — the server decides what is shown; the prompt renders it.
+        shown: [
+          { key: "title", text: "Supplier price check" },
+          { key: "deliverable", text: "A short table of prices" },
+        ],
       },
     },
   });
@@ -116,6 +121,46 @@ describe("ToolApprovalPrompt — starting a background run (WARP-3303)", () => {
     render(<ToolApprovalPrompt call={challengedCall()} now={NOW} />);
     expect(screen.queryByTestId("approval-shown-values")).toBeNull();
     expect(screen.queryByTestId("approval-run-bounds")).toBeNull();
+  });
+});
+
+describe("ToolApprovalPrompt — the decisive values the server chose to show (WARP-3569)", () => {
+  const shareCall = challengedCall({
+    name: "share_file",
+    // The raw args carry a password; the prompt must never read them.
+    args: { path: "/Shared/payroll.xlsx", password: "hunter2hunter2" },
+    confirmation: {
+      kind: "tool_confirmation",
+      challengeId: "chal-share",
+      tool: "share_file",
+      status: "pending",
+      expiresAt: NOW + 60_000,
+      summary: {
+        tool: "share_file",
+        fields: [
+          { key: "password", kind: "string", detail: "10 characters" },
+          { key: "path", kind: "string", detail: "20 characters" },
+        ],
+        truncatedFields: 0,
+        shown: [{ key: "path", text: "/Shared/payroll.xlsx" }],
+      },
+    },
+  });
+
+  it("renders the shown path once, and leaves the other argument shape-only", () => {
+    const { container } = render(<ToolApprovalPrompt call={shareCall} now={NOW} />);
+    expect(screen.getByTestId("approval-shown-values").textContent).toContain("/Shared/payroll.xlsx");
+    expect(screen.getByTestId("approval-arg-summary").textContent).toContain("password: 10 characters");
+    expect(screen.getByTestId("approval-arg-summary").textContent).not.toContain("path:");
+    expect(container.textContent).not.toContain("hunter2");
+  });
+
+  it("renders a shown value as text, never as markup", () => {
+    const call = challengedCall();
+    call.confirmation!.summary!.shown = [{ key: "to", text: "<img src=x onerror=alert(1)>" }];
+    const { container } = render(<ToolApprovalPrompt call={call} now={NOW} />);
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByTestId("approval-shown-values").textContent).toContain("<img src=x");
   });
 });
 

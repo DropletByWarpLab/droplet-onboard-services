@@ -111,8 +111,8 @@ export const HELP_INDEX: readonly HelpEntry[] = [
     id: "files",
     title: "Files",
     summary:
-      "The Files page is your view into the Droplet's Nextcloud-powered storage. Upload, download, and share — shares are encrypted-in-transit and can be set to expire. Sync Devices lets you pair a desktop machine so a chosen folder stays mirrored between your computer and the Droplet, OneDrive-style but without OneDrive.",
-    keywords: ["files", "nextcloud", "upload", "download", "share", "sharing", "sync", "folder", "desktop", "mirror"],
+      "The Files page is your view into the Droplet's File Store. Upload, download, and share — shares are encrypted-in-transit and can be set to expire. Sync Devices lets you pair a desktop machine so a chosen folder stays mirrored between your computer and the Droplet, OneDrive-style but without OneDrive.",
+    keywords: ["files", "file store", "upload", "download", "share", "sharing", "sync", "folder", "desktop", "mirror"],
   },
 ];
 

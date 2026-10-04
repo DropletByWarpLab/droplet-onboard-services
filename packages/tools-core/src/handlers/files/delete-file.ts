@@ -98,14 +98,14 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     `/?path=${encodeURIComponent(v.path)}`,
     { headers },
   );
-  if (!res.ok) return err("DELETE_FAILED", `nextcloud returned ${res.status}`);
+  if (!res.ok) return err("DELETE_FAILED", `the File Store returned ${res.status}`);
   return { ok: true, data: { deleted: v.path } };
 }
 
 const tool: Tool = {
   name: "delete_file",
   description:
-    "Delete a file, or a folder AND EVERYTHING INSIDE IT, to the Nextcloud trash (restorable from the dashboard). Asks the user to approve.",
+    "Delete a file, or a folder AND EVERYTHING INSIDE IT, to the File Store trash (restorable from the dashboard). Asks the user to approve.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

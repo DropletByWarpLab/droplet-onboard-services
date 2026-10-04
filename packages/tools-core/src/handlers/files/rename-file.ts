@@ -64,7 +64,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     { from: v.path, to: dest, overwrite: false },
     { headers },
   );
-  if (!res.ok) return err("RENAME_FAILED", `nextcloud returned ${res.status}`);
+  if (!res.ok) return err("RENAME_FAILED", `the File Store returned ${res.status}`);
   return { ok: true, data: { renamed_from: v.path, renamed_to: dest } };
 }
 

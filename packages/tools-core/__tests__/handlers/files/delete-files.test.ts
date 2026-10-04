@@ -242,7 +242,7 @@ describe("delete_files", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect((r.data as any).failed).toEqual([
-      { path: "/Broken/x.tmp", reason: "could not read /Broken (nextcloud returned 500)" },
+      { path: "/Broken/x.tmp", reason: "could not read /Broken (the File Store returned 500)" },
     ]);
     expect(del).not.toHaveBeenCalled();
   });
@@ -327,7 +327,7 @@ describe("delete_files", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const d = r.data as Record<string, any>;
-    expect(d.failed).toEqual([{ path: "/Downloads/a.tmp", reason: "nextcloud returned 423" }]);
+    expect(d.failed).toEqual([{ path: "/Downloads/a.tmp", reason: "the File Store returned 423" }]);
     expect(d.deleted).toEqual(["/Downloads/b.tmp"]);
   });
 

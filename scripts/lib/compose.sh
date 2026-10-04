@@ -532,7 +532,7 @@ recover_nextcloud_autoinstall() {
     esac
     ep_i=$((ep_i + 1))
     if [ "$ep_i" -eq 1 ]; then
-      log_info "Nextcloud's entrypoint is still initializing (first-boot rsync/install) — waiting for it instead of racing it (WARP-1064)..."
+      log_info "The File Store's entrypoint is still initializing (first-boot rsync/install) — waiting for it instead of racing it (WARP-1064)..."
     fi
     sleep "$ep_interval"
   done
@@ -542,7 +542,7 @@ recover_nextcloud_autoinstall() {
     # (2026-07-11): both installers fight over the same DB and the entrypoint
     # burns its whole retry loop against an already-installed instance. Bail;
     # the degraded-path breadcrumb stands and the next bring-up reconciles.
-    log_warn "Nextcloud's entrypoint is still initializing after $((ep_tries * ep_interval))s — not racing it with a second install (WARP-1064); re-run setup once it settles."
+    log_warn "The File Store's entrypoint is still initializing after $((ep_tries * ep_interval))s — not racing it with a second install (WARP-1064); re-run setup once it settles."
     return 1
   fi
 
@@ -556,7 +556,7 @@ recover_nextcloud_autoinstall() {
     *) return 1 ;;            # container not answering occ — not ours to fix
   esac
 
-  log_warn "Nextcloud is running but NOT installed (first-boot auto-install never completed) — recovering with occ maintenance:install (WARP-1064)..."
+  log_warn "The File Store is running but NOT installed (first-boot auto-install never completed) — recovering with occ maintenance:install (WARP-1064)..."
 
   # --- Stale-DB guard (see the block comment above) --------------------------
   # A leftover oc_migrations table means a previous install's schema is in the
@@ -570,7 +570,7 @@ recover_nextcloud_autoinstall() {
     psql -U "${POSTGRES_USER:-droplet}" -w -d nextcloud -tAc \
     "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='oc_migrations'" 2>/dev/null || true)
   if [ "$(printf '%s' "$stale_probe" | tr -d '[:space:]')" = "1" ]; then
-    log_warn "Stale Nextcloud schema found in the 'nextcloud' database (dead previous install) — recreating it so the install can converge..."
+    log_warn "Stale File Store schema found in the 'nextcloud' database (dead previous install) — recreating it so the install can converge..."
     if ! run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
       exec -T -e PGPASSWORD="${POSTGRES_PASSWORD:-}" db \
       psql -U "${POSTGRES_USER:-droplet}" -w -d postgres -v ON_ERROR_STOP=1 \
@@ -621,7 +621,7 @@ run_nextcloud_post_install_hook() {
   local hook_path="/docker-entrypoint-hooks.d/before-starting/init-droplet.sh"
   local recover_cmd="docker compose -f docker/docker-compose.yml exec -u 33 nextcloud bash $hook_path"
 
-  log_info "Reconciling Nextcloud Droplet provisioning (household group + shared folder + OnlyOffice connector — WARP-990)..."
+  log_info "Reconciling File Store Droplet provisioning (household group + shared folder + OnlyOffice connector — WARP-990)..."
 
   if ! wait_for_nextcloud_installed; then
     # WARP-1064: before declaring the box degraded, try to self-heal the
@@ -648,11 +648,11 @@ run_nextcloud_post_install_hook() {
   # Keep the full hook transcript in the setup log either way.
   printf '%s\n' "$hook_out" >> "$LOG_FILE" 2>/dev/null || true
   if [ "$hook_rc" -eq 0 ]; then
-    log_success "Nextcloud Droplet provisioning reconciled (hook exit 0)"
+    log_success "File Store Droplet provisioning reconciled (hook exit 0)"
   else
-    log_error "Nextcloud Droplet provisioning hook FAILED (exit $hook_rc) — household group / shared folder / OnlyOffice connector may be missing, and the setup wizard's account creation will 500 (WARP-989/990):"
+    log_error "File Store Droplet provisioning hook FAILED (exit $hook_rc) — household group / shared folder / OnlyOffice connector may be missing, and the setup wizard's account creation will 500 (WARP-989/990):"
     printf '%s\n' "$hook_out" | tail -20 >&2
-    log_error "Setup continues; re-run the hook manually once Nextcloud is healthy:  $recover_cmd"
+    log_error "Setup continues; re-run the hook manually once the File Store is healthy:  $recover_cmd"
   fi
 
   apply_file_indexer_nc_grants
@@ -673,7 +673,7 @@ apply_file_indexer_nc_grants() {
   # connects as (WARP-1327); an operator overriding that env var must grant
   # the override role equivalently (docs/ENVIRONMENT.md).
   local app_role="${POSTGRES_USER:-droplet}"
-  log_info "Granting file-indexer read access to Nextcloud's oc_* lookup tables (WARP-1328)..."
+  log_info "Granting file-indexer read access to the File Store's oc_* lookup tables (WARP-1328)..."
   local grant_out="" grant_rc=0
   grant_out=$(run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
     exec -T -e PGPASSWORD="${POSTGRES_PASSWORD:-}" db \
@@ -733,7 +733,7 @@ start_stack() {
   fi
 
   # --- Ensure Nextcloud database exists (init script only runs on fresh volumes) ---
-  log_info "Ensuring Nextcloud database exists..."
+  log_info "Ensuring File Store database exists..."
   run_docker_compose -f "$COMPOSE_FILE" --env-file "$COMPOSE_ENV_FILE" \
     exec -T -e PGPASSWORD="${POSTGRES_PASSWORD:-}" db \
     psql -U "${POSTGRES_USER:-droplet}" -w -tc \
