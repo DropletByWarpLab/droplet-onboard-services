@@ -729,12 +729,14 @@ describe("switch router RBAC wiring (WARP-559)", () => {
     }
   });
 
-  describe("status GETs stay open to viewers (no over-restriction)", () => {
+  // WARP-3632: switch reads name every port's attached device and the VLAN
+  // layout, so they take the member floor; an external guest is refused.
+  describe("status GETs take the member floor (WARP-3632)", () => {
     for (const path of READS) {
-      it(`GET ${path}: guest → 200`, async () => {
+      it(`GET ${path}: guest → 403`, async () => {
         const app = buildSwitchApp(mkUser("guest"));
         const res = await request(app).get(path);
-        expect(res.status).toBe(200);
+        expect(res.status).toBe(403);
       });
 
       it(`GET ${path}: family → 200`, async () => {
