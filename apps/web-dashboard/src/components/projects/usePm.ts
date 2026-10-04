@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import { authFetch } from "@/lib/auth";
 import type { Department } from "@/lib/types";
 import { makePerson } from "./config";
+import { localToday } from "./date-only";
 import type {
   PmProject,
   PmState,
@@ -85,7 +86,11 @@ export function useProjects(includeArchived: boolean) {
  * /business mounts this hook on every box, and Projects is off by default.
  */
 export function useSummary(enabled: boolean) {
-  const { data, error, isLoading, mutate } = useSWR(enabled ? "/api/pm/summary" : null, (u: string) =>
+  // WARP-3372 — "overdue" is measured against the viewer's own calendar day, the
+  // same one the board's overdue chip uses, so the two cannot disagree. The day
+  // is part of the key: it rolls over with midnight, not with a stale cache.
+  const url = enabled ? `/api/pm/summary?today=${localToday()}` : null;
+  const { data, error, isLoading, mutate } = useSWR(url, (u: string) =>
     getJson<{ summary: PmSummary }>(u),
   );
   return { summary: data?.summary, error, isLoading, mutate };
@@ -279,40 +284,42 @@ export function useActivity(workItemId: string | null) {
 }
 
 
-interface DirectoryUser {
+/** One entry of `GET /api/pm/people` — what Projects needs to show a person. */
+interface PmPerson {
   id: string;
-  // WARP-947: the local `User.id` UUID. PM attribution surfaces (activity feed,
-  // comment authors, assignees) reference this UUID — not the Nextcloud
-  // username in `id`. Optional/nullable: a directory user with no local row, or
-  // an older orchestrator that predates the field, yields null.
-  userId?: string | null;
-  username: string;
   displayName: string;
+  avatarUrl: string | null;
 }
 
-/** Resolve assignee/lead user ids → display names + avatar tone. Falls back to a
- *  short id stub when the directory hasn't loaded or the user is unknown. */
+/** An id the people list does not know, once the list HAS loaded: a leaver, or
+ *  a machine. Never a guess at who it was. */
+export const FORMER_MEMBER = "Former member";
+/** What an id shows before the list has answered (or if it cannot). Neutral on
+ *  purpose: "Former member" would be false for someone who is on the list. */
+const MEMBER_PENDING = "Team member";
+
+/**
+ * Resolve the user ids on PM rows (lead, assignee, creator, comment author,
+ * activity actor — all the local `User.id`) to a name and an avatar.
+ *
+ * WARP-3372 — this used to read `GET /api/auth/users`, which is owner/admin-only,
+ * so every member saw "User 1a2b" for every colleague. `/api/pm/people` is the
+ * PM-scoped projection every role that can read the board is allowed to read.
+ * A known id is its person; an unknown id is "Former member" once the list has
+ * loaded; before that (or if it fails) it is a neutral label — never the id.
+ */
 export function usePeople() {
-  const { data } = useSWR("/api/auth/users", (u: string) =>
-    getJson<{ users: DirectoryUser[] }>(u),
-  );
+  const { data } = useSWR("/api/pm/people", (u: string) => getJson<{ people: PmPerson[] }>(u));
   const map = useMemo(() => {
     const m = new Map<string, Person>();
-    for (const u of data?.users ?? []) {
-      const person = makePerson(u.id, u.displayName);
-      // PM ids (actorId, authorId, assignees) are the local User.id UUID, so the
-      // UUID is the primary resolution key. Also index the Nextcloud username so
-      // any username-keyed caller still resolves. (WARP-947)
-      if (u.userId) m.set(u.userId, person);
-      m.set(u.id, person);
-    }
+    for (const p of data?.people ?? []) m.set(p.id, makePerson(p.id, p.displayName, p.avatarUrl));
     return m;
   }, [data]);
   const person = useCallback(
-    (id: string): Person => map.get(id) ?? makePerson(id, `User ${id.slice(0, 4)}`),
-    [map],
+    (id: string): Person => map.get(id) ?? makePerson(id, data ? FORMER_MEMBER : MEMBER_PENDING),
+    [map, data],
   );
-  return { person, users: data?.users };
+  return { person, people: data?.people };
 }
 
 // ── Mutations ───────────────────────────────────────────────────────────────

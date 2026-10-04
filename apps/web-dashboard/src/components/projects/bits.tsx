@@ -161,7 +161,16 @@ export function Avatar({ id, size = 26, ring }: { id: string; size?: number; rin
         ...(ring ? { border: "2px solid var(--bg-canvas)" } : {}),
       }}
     >
-      {p.initials}
+      {p.avatarUrl ? (
+        // eslint-disable-next-line @next/next/no-img-element -- a tiny server-supplied avatar, not a content image
+        <img
+          src={p.avatarUrl}
+          alt=""
+          style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }}
+        />
+      ) : (
+        p.initials
+      )}
     </span>
   );
 }

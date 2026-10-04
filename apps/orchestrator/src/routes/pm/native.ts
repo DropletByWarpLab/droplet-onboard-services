@@ -31,6 +31,7 @@ import * as pm from "../../services/pm/pm.service.js";
 import { actorOf } from "./actor.js";
 import { listRelationsFor } from "../../services/pm/pm-relations.service.js";
 import { resolveDepartmentFilter } from "../../services/pm/pm-department.js";
+import { isDateOnly, parseDateInput } from "../../services/pm/pm-dates.js";
 import { parsePaging } from "./paging.js";
 
 
@@ -155,6 +156,24 @@ const labelPatchSchema = z.object({
   color: z.string().max(32).nullable().optional(),
 });
 
+/**
+ * WARP-3372 — a date field is a CALENDAR DATE: `YYYY-MM-DD` (or, for a client
+ * that predates this, an ISO instant ending in `Z`, whose UTC date is taken).
+ * It parses to that day at 00:00:00Z — the value stored — so no zone is ever
+ * applied to it (pm-dates.ts). `2026-02-30` is a 400, not March.
+ */
+const dateField = z
+  .string()
+  .max(40)
+  .transform((s, ctx) => {
+    const d = parseDateInput(s);
+    if (!d) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "expected a calendar date, YYYY-MM-DD" });
+      return z.NEVER;
+    }
+    return d;
+  });
+
 const workItemCreateSchema = z.object({
   name: z.string().min(1).max(500),
   description_html: z.string().max(100000).optional(),
@@ -169,8 +188,8 @@ const workItemCreateSchema = z.object({
     // claiming "the zod schemas reject '' at the boundary" was true of
     // `company_id` and not of this one.
     department_id: z.string().min(1).max(64).optional(),
-  start_date: z.string().datetime().optional(),
-  due_date: z.string().datetime().optional(),
+  start_date: dateField.optional(),
+  due_date: dateField.optional(),
 });
 
 const workItemPatchSchema = z.object({
@@ -186,8 +205,8 @@ const workItemPatchSchema = z.object({
   // WARP-2724 — `.min(1)`, and `null` stays the way to CLEAR an
     // assignment. "" was neither: it skipped the guard and disconnected.
     department_id: z.string().min(1).max(64).nullable().optional(),
-  start_date: z.string().datetime().nullable().optional(),
-  due_date: z.string().datetime().nullable().optional(),
+  start_date: dateField.nullable().optional(),
+  due_date: dateField.nullable().optional(),
   // .int() already rejects floats and (via Number.isInteger) NaN/Infinity;
   // .finite() makes the NaN/Infinity rejection explicit and self-documenting so
   // a non-finite sortOrder can never reach Prisma's Int column (review finding:
@@ -197,6 +216,14 @@ const workItemPatchSchema = z.object({
 
 const transitionSchema = z.object({ state_id: z.string().min(1).max(64) });
 const commentCreateSchema = z.object({ comment_html: z.string().min(1).max(100000) });
+
+const summaryQuerySchema = z.object({
+  // The caller's own calendar day; a date that does not exist is a 400.
+  today: z
+    .string()
+    .refine(isDateOnly, "expected a calendar date, YYYY-MM-DD")
+    .optional(),
+});
 
 const WRITE = ["owner", "admin", "family"] as const;
 
@@ -238,11 +265,31 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
     }
   });
 
-  // Index KPI strip.
+  // Index KPI strip. `?today=YYYY-MM-DD` is the caller's own calendar day, so
+  // "overdue" (due BEFORE today) means the same thing here as on the board
+  // (WARP-3372); absent, it is the UTC date.
   router.get("/pm/summary", async (req, res, next) => {
     try {
+      const parsed = summaryQuerySchema.safeParse(req.query);
+      if (!parsed.success) return badRequest(res, parsed);
       const slug = req.query.workspace ? String(req.query.workspace) : undefined;
-      res.json({ summary: await pm.getSummary(prisma, slug) });
+      res.json({ summary: await pm.getSummary(prisma, slug, parsed.data.today) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // WARP-3372 — who a PM user id names (lead, assignee, creator, author, actor).
+  // GET /auth/users is owner/admin-only, so a member saw "User 1a2b" for every
+  // colleague; this is the minimal {id, displayName, avatarUrl} projection of
+  // the ACTIVE people on the box, readable by every role that reads the board.
+  // Sits under /api/pm, so the `projects` module gate and the guest tier floor
+  // (404 for an external guest, who is not on the GUEST_SHARES list) already
+  // apply; the role guard here is the router being honest on its own, and keeps
+  // the MCP service principal — which has no use for a roster — out.
+  router.get("/pm/people", requireRole("owner", "admin", "family"), async (_req, res, next) => {
+    try {
+      res.json({ people: await pm.listPeople(prisma) });
     } catch (err) {
       next(err);
     }
@@ -495,8 +542,8 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
           labelIds: d.label_ids,
           parentId: d.parent_id,
           departmentId: d.department_id,
-          startDate: d.start_date ? new Date(d.start_date) : undefined,
-          dueDate: d.due_date ? new Date(d.due_date) : undefined,
+          startDate: d.start_date,
+          dueDate: d.due_date,
         });
         res.status(201).json({ work_item });
       } catch (err) {
@@ -605,8 +652,9 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
           labelIds: d.label_ids,
           parentId: d.parent_id,
           departmentId: d.department_id,
-          startDate: d.start_date === undefined ? undefined : d.start_date === null ? null : new Date(d.start_date),
-          dueDate: d.due_date === undefined ? undefined : d.due_date === null ? null : new Date(d.due_date),
+          // `undefined` leaves the date alone, `null` clears it.
+          startDate: d.start_date,
+          dueDate: d.due_date,
           sortOrder: d.sortOrder,
         });
         res.json({ work_item });

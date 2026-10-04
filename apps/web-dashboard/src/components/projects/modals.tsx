@@ -91,7 +91,10 @@ export function NewItemModal({
           : undefined,
         state_id: stateId || undefined,
         priority,
-        due_date: dueDate ? new Date(dueDate).toISOString() : undefined,
+        // WARP-3372 — the date input already speaks YYYY-MM-DD. Send it as is: a
+        // `new Date(...)` here read it as UTC midnight and the display read it
+        // back in local time, so west of UTC it landed a day early.
+        due_date: dueDate || undefined,
       });
       toast("Item created", "success");
       onCreated();

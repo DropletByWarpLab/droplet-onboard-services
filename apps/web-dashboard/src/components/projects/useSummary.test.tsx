@@ -7,7 +7,7 @@
 // useSWR a null key when it is false — exactly how useCrmSummary is told not
 // to fetch without a pipeline.
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import type { ReactNode } from "react";
@@ -33,13 +33,38 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+describe("useSummary — overdue is the viewer's own calendar day (WARP-3372)", () => {
+  const ORIGINAL_TZ = process.env.TZ;
+  afterEach(() => {
+    vi.useRealTimers();
+    if (ORIGINAL_TZ === undefined) delete process.env.TZ;
+    else process.env.TZ = ORIGINAL_TZ;
+  });
+
+  // One instant, two viewers: 23:30Z on the 25th is 16:30 on the 25th in Los
+  // Angeles and 11:30 on the 26th in Auckland. The KPI must be measured against
+  // the day each of them sees on their own wall, the same one the board's
+  // overdue chip uses.
+  it.each([
+    ["America/Los_Angeles", "2026-06-25"],
+    ["Pacific/Auckland", "2026-06-26"],
+  ])("TZ=%s asks for today=%s", async (zone, day) => {
+    process.env.TZ = zone;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-06-25T23:30:00.000Z"));
+    renderHook(() => useSummary(true), { wrapper });
+    await waitFor(() => expect(authFetchMock).toHaveBeenCalled());
+    expect(authFetchMock).toHaveBeenCalledWith(`/api/pm/summary?today=${day}`);
+  });
+});
+
 describe("useSummary(enabled) — WARP-2875", () => {
-  it("fetches /api/pm/summary when Projects is on", async () => {
+  it("fetches /api/pm/summary when Projects is on, naming the viewer's own day (WARP-3372)", async () => {
     const { result } = renderHook(() => useSummary(true), { wrapper });
     await waitFor(() => {
       expect(result.current.summary).toBeDefined();
     });
-    expect(authFetchMock).toHaveBeenCalledWith("/api/pm/summary");
+    expect(authFetchMock).toHaveBeenCalledWith(expect.stringMatching(/^\/api\/pm\/summary\?today=\d{4}-\d{2}-\d{2}$/));
   });
 
   it("issues NO request when Projects is off", async () => {

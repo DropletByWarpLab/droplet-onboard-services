@@ -34,6 +34,7 @@ import {
   type DepartmentRefRow,
   type PmDepartmentRef,
 } from "./pm-department.js";
+import { dateToDateOnly, parseDateInput, todayDateOnly } from "./pm-dates.js";
 import {
   INVALID_CURSOR,
   ORDER_ASSIGNED,
@@ -223,7 +224,9 @@ export interface ApiWorkItem {
   department: PmDepartmentRef | null;
   assignees: string[];
   labels: ApiLabel[];
+  /** WARP-3372 — a CALENDAR DATE, `YYYY-MM-DD`, never an instant (pm-dates.ts). */
   startDate: string | null;
+  /** WARP-3372 — a CALENDAR DATE, `YYYY-MM-DD`, never an instant (pm-dates.ts). */
   dueDate: string | null;
   sortOrder: number;
   completedAt: string | null;
@@ -311,8 +314,8 @@ function mapWorkItem(
     department: resolveDepartmentRef(row.department, projectDepartment),
     assignees: row.assignees.map((a) => a.userId),
     labels: row.labels.map((l) => mapLabel(l.label)),
-    startDate: row.startDate ? row.startDate.toISOString() : null,
-    dueDate: row.dueDate ? row.dueDate.toISOString() : null,
+    startDate: row.startDate ? dateToDateOnly(row.startDate) : null,
+    dueDate: row.dueDate ? dateToDateOnly(row.dueDate) : null,
     sortOrder: row.sortOrder,
     completedAt: row.completedAt ? row.completedAt.toISOString() : null,
     createdById: row.createdById,
@@ -440,6 +443,43 @@ export async function getWorkspaceBySlug(prisma: PrismaClient, slug: string): Pr
   return mapWorkspace(row);
 }
 
+// ── People ───────────────────────────────────────────────────────────────────
+
+/** A person a PM id can name — the whole of what Projects needs to render one. */
+export interface ApiPerson {
+  id: string;
+  displayName: string;
+  /** Always null today: the box stores no avatar images. The field is part of
+   *  the contract so a future avatar source needs a server change and nothing
+   *  else; the dashboard draws initials until then. */
+  avatarUrl: string | null;
+}
+
+/**
+ * WARP-3372 — the people a lead, assignee, creator, comment author or activity
+ * actor id can name: every ACTIVE person on the box, owner and admin through
+ * member and external guest (a guest can be assigned an item, WARP-3369).
+ *
+ * Why this exists: the roster the dashboard read for names, GET /auth/users,
+ * is owner/admin-only, so a member saw "User 1a2b" for every colleague. PM is
+ * household-shared — every role that can read the board has to be able to name
+ * the people on it — and this is the minimal projection that lets them: id,
+ * name, avatar. No email, no role, no source, no deletion state.
+ *
+ * Who is NOT here, on purpose: service principals (machines), and anyone
+ * deactivated or on their way out — their ids still sit on old work, and the
+ * dashboard renders an id this list does not know as "Former member" rather
+ * than keep a leaver's name in circulation.
+ */
+export async function listPeople(prisma: PrismaClient): Promise<ApiPerson[]> {
+  const rows = await prisma.user.findMany({
+    where: { directoryStatus: "ACTIVE", role: { in: ["owner", "admin", "family", "guest"] } },
+    select: { id: true, displayName: true },
+    orderBy: [{ displayName: "asc" }, { id: "asc" }],
+  });
+  return rows.map((r) => ({ id: r.id, displayName: r.displayName, avatarUrl: null }));
+}
+
 // ── Projects ─────────────────────────────────────────────────────────────────
 
 export async function listProjects(
@@ -509,11 +549,22 @@ export async function listProjects(
 }
 
 /** Index KPI strip: active projects, open items, done in the last 7 days, and
- *  overdue (open items past their due date). One scan over the workspace. */
+ *  overdue (open items due BEFORE `today`). One scan over the workspace.
+ *
+ *  WARP-3372 — a due date is a calendar day, so "overdue" starts the day AFTER
+ *  it, not at 00:00Z on the day itself (which is the previous evening west of
+ *  UTC). `today` is the viewer's own calendar day, `YYYY-MM-DD`, so the KPI and
+ *  the board's overdue chip answer the same question for the same person; a
+ *  caller that does not know it gets the UTC date. */
 export async function getSummary(
   prisma: PrismaClient,
   workspaceSlug: string = HOME_WORKSPACE_SLUG,
+  today: string = todayDateOnly(),
 ): Promise<ApiPmSummary> {
+  const startOfToday = parseDateInput(today);
+  // The route validates `today` at the boundary; a bad value here is a bug in a
+  // caller, not input to guess about.
+  if (!startOfToday) throw new Error("invalid_today");
   const projects = await prisma.pmProject.findMany({
     where: { workspace: { slug: workspaceSlug }, isArchived: false },
     select: { id: true },
@@ -530,8 +581,7 @@ export async function getSummary(
       state: { select: { group: true } },
     },
   });
-  const now = new Date();
-  const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
   let itemsOpen = 0;
   let doneThisWeek = 0;
   let overdue = 0;
@@ -543,7 +593,7 @@ export async function getSummary(
     const open = g === undefined || g === "backlog" || g === "unstarted" || g === "started";
     if (open) {
       itemsOpen += 1;
-      if (it.dueDate && it.dueDate < now) overdue += 1;
+      if (it.dueDate && it.dueDate < startOfToday) overdue += 1;
     }
     // WARP-884: `isCompleted` is the canonical completion signal — no longer
     // re-derived from `state.group` combined with a `completedAt` truthy

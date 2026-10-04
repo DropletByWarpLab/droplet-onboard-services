@@ -9,7 +9,7 @@
  * per-project sequence numbering, default-state landing, and activity logging.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import express from "express";
 import request from "supertest";
 import type { Request, Response, NextFunction } from "express";
@@ -131,6 +131,8 @@ function makeFake(hooks: Hooks = {}) {
     // store and its model methods must exist, because the work-item DETAIL
     // read and deleteWorkItem now both consult it.
     relations: [] as Row[],
+    // WARP-3372 — the people roster reads `user`.
+    users: [] as Row[],
   };
 
   const resolveItem = (it: Row, include?: Row) => {
@@ -153,6 +155,17 @@ function makeFake(hooks: Hooks = {}) {
 
   const prisma: Record<string, unknown> = {
     $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma),
+
+    // WARP-3372 — `where` / `orderBy` are interpreted, so the roster's filter
+    // (ACTIVE humans only) is what is under test, not a stub that ignores it.
+    user: {
+      findMany: async ({ where, orderBy }: { where?: Row; orderBy?: unknown } = {}) =>
+        sortRows(
+          db.users.filter((u) => matchesWhere(u, where, db.assignees)),
+          orderBy,
+        ),
+      findUnique: async ({ where }: { where: Row }) => db.users.find((u) => u.id === where.id) ?? null,
+    },
 
     pmWorkspace: {
       upsert: async ({ where, create }: { where: Row; create: Row }) => {
@@ -1469,3 +1482,186 @@ describe("native PM routes — work-item lists are pages, never a silent ceiling
     expect(bad.body.error).toBe("invalid_cursor");
   });
 });
+
+// ── WARP-3372 — who a PM id names ───────────────────────────────────────────
+
+describe("native PM routes — GET /pm/people names the people on the board (WARP-3372)", () => {
+  let fake: ReturnType<typeof makeFake>;
+  const user = (userId: string, displayName: string, over: Row = {}): Row => ({
+    id: userId,
+    displayName,
+    role: "family",
+    directoryStatus: "ACTIVE",
+    // Everything the admin roster carries that this one must NOT leak.
+    username: `${userId}-handle`,
+    email: `${userId}@example.test`,
+    ...over,
+  });
+
+  beforeEach(() => {
+    id = 0;
+    fake = makeFake();
+    fake.db.users.push(
+      user("u-zoe", "Zoe Park", { role: "owner" }),
+      user("u-sam", "Sam Rubinchik", { role: "admin" }),
+      user("u-ana", "Ana Lopez"),
+      user("u-gus", "Gus Guest", { role: "guest" }),
+      user("_service:mcp", "MCP", { role: "service" }),
+      user("u-old", "Olga Leaver", { directoryStatus: "DEACTIVATED" }),
+    );
+  });
+
+  it("a MEMBER (family) is answered — the 403 that left them looking at `User 1a2b` is gone", async () => {
+    const res = await request(makeApp(fake.prisma, { id: "u-ana", role: "family" })).get("/api/pm/people");
+    expect(res.status).toBe(200);
+    expect(res.body.people).toHaveLength(4);
+  });
+
+  it("owners and admins are answered too", async () => {
+    for (const role of ["owner", "admin"]) {
+      const res = await request(makeApp(fake.prisma, { id: "x", role })).get("/api/pm/people");
+      expect(res.status, role).toBe(200);
+    }
+  });
+
+  it("returns exactly {id, displayName, avatarUrl}, ordered by name — and nothing from the admin roster", async () => {
+    const res = await request(makeApp(fake.prisma, OWNER)).get("/api/pm/people");
+    expect(res.body).toEqual({
+      people: [
+        { id: "u-ana", displayName: "Ana Lopez", avatarUrl: null },
+        { id: "u-gus", displayName: "Gus Guest", avatarUrl: null },
+        { id: "u-sam", displayName: "Sam Rubinchik", avatarUrl: null },
+        { id: "u-zoe", displayName: "Zoe Park", avatarUrl: null },
+      ],
+    });
+    // No email, username or role crosses this boundary.
+    expect(JSON.stringify(res.body)).not.toMatch(/example\.test|-handle|"role"/);
+  });
+
+  it("leaves out service principals and deactivated people (their ids render as 'Former member')", async () => {
+    const res = await request(makeApp(fake.prisma, OWNER)).get("/api/pm/people");
+    const ids = res.body.people.map((p: { id: string }) => p.id);
+    expect(ids).not.toContain("_service:mcp");
+    expect(ids).not.toContain("u-old");
+  });
+
+  it("an external guest and the MCP principal are refused by the router itself (the module floor 404s a guest before it gets here)", async () => {
+    expect((await request(makeApp(fake.prisma, GUEST)).get("/api/pm/people")).status).toBe(403);
+    expect((await request(makeApp(fake.prisma, MCP)).get("/api/pm/people")).status).toBe(403);
+  });
+});
+
+// ── WARP-3372 — a due date is a calendar date, the same in every zone ───────
+
+describe.each(["America/Los_Angeles", "Pacific/Auckland"])(
+  "native PM routes — dates are calendar dates under TZ=%s (WARP-3372)",
+  (zone) => {
+    const originalTz = process.env.TZ;
+    let fake: ReturnType<typeof makeFake>;
+    let app: ReturnType<typeof makeApp>;
+    let pid: string;
+
+    beforeAll(() => {
+      process.env.TZ = zone;
+      expect(new Date(2026, 5, 25).getTimezoneOffset()).toBe(zone === "America/Los_Angeles" ? 420 : -720);
+    });
+    afterAll(() => {
+      if (originalTz === undefined) delete process.env.TZ;
+      else process.env.TZ = originalTz;
+    });
+
+    beforeEach(async () => {
+      id = 0;
+      fake = makeFake();
+      app = makeApp(fake.prisma, OWNER);
+      pid = (await request(app).post("/api/pm/projects").send({ name: "Inbox" })).body.project.id;
+    });
+
+    const create = (body: Row) =>
+      request(app).post(`/api/pm/projects/${pid}/work-items`).send({ name: "Dated", ...body });
+
+    it("the date entered is the date returned, and the stored value is that day at 00:00:00Z", async () => {
+      const res = await create({ start_date: "2026-06-20", due_date: "2026-06-25" });
+      expect(res.status).toBe(201);
+      expect(res.body.work_item.dueDate).toBe("2026-06-25");
+      expect(res.body.work_item.startDate).toBe("2026-06-20");
+      const stored = fake.db.items[0];
+      expect((stored.dueDate as Date).toISOString()).toBe("2026-06-25T00:00:00.000Z");
+      expect((stored.startDate as Date).toISOString()).toBe("2026-06-20T00:00:00.000Z");
+
+      const list = await request(app).get(`/api/pm/projects/${pid}/work-items`);
+      expect(list.body.work_items[0].dueDate).toBe("2026-06-25");
+      const one = await request(app).get(`/api/pm/work-items/${res.body.work_item.id}`);
+      expect(one.body.work_item.dueDate).toBe("2026-06-25");
+    });
+
+    it("a client that still sends an ISO instant ending in Z keeps working, with the UTC date it names", async () => {
+      const res = await create({ due_date: "2026-06-25T00:00:00.000Z" });
+      expect(res.status).toBe(201);
+      expect(res.body.work_item.dueDate).toBe("2026-06-25");
+      const late = await create({ due_date: "2026-06-25T17:30:00Z" });
+      expect(late.body.work_item.dueDate).toBe("2026-06-25");
+    });
+
+    it.each([
+      ["a day that does not exist", "2026-02-30"],
+      ["a locale format", "25/06/2026"],
+      ["an offset instant (ambiguous)", "2026-06-25T00:00:00+02:00"],
+      ["free text", "next tuesday"],
+      ["a number", 1750000000000],
+    ])("rejects %s with 400, never March", async (_label, bad) => {
+      const res = await create({ due_date: bad });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("invalid_request");
+      expect(fake.db.items).toHaveLength(0);
+    });
+
+    it("PATCH sets, changes and clears a date; null clears, absent leaves it", async () => {
+      const wi = (await create({ due_date: "2026-06-25" })).body.work_item;
+      const set = await request(app).patch(`/api/pm/work-items/${wi.id}`).send({ due_date: "2026-07-01" });
+      expect(set.body.work_item.dueDate).toBe("2026-07-01");
+      const untouched = await request(app).patch(`/api/pm/work-items/${wi.id}`).send({ name: "Renamed" });
+      expect(untouched.body.work_item.dueDate).toBe("2026-07-01");
+      const cleared = await request(app).patch(`/api/pm/work-items/${wi.id}`).send({ due_date: null });
+      expect(cleared.body.work_item.dueDate).toBeNull();
+    });
+
+    it("re-sending the SAME date writes no due_date_changed row; changing it writes exactly one", async () => {
+      const wi = (await create({ due_date: "2026-06-25" })).body.work_item;
+      const rows = () => fake.db.activity.filter((a) => a.verb === "due_date_changed").length;
+      await request(app).patch(`/api/pm/work-items/${wi.id}`).send({ due_date: "2026-06-25" });
+      await request(app).patch(`/api/pm/work-items/${wi.id}`).send({ due_date: "2026-06-25T00:00:00.000Z" });
+      expect(rows()).toBe(0);
+      await request(app).patch(`/api/pm/work-items/${wi.id}`).send({ due_date: "2026-06-26" });
+      expect(rows()).toBe(1);
+    });
+
+    describe("summary overdue is measured against the caller's own calendar day", () => {
+      it("due today is NOT overdue; due yesterday is — for the day the caller names", async () => {
+        await create({ due_date: "2026-06-25" });
+        const on = (today: string) =>
+          request(app)
+            .get(`/api/pm/summary?today=${today}`)
+            .then((r) => r.body.summary.overdue as number);
+        expect(await on("2026-06-24")).toBe(0);
+        expect(await on("2026-06-25")).toBe(0);
+        expect(await on("2026-06-26")).toBe(1);
+      });
+
+      it("with no `today` it falls back to the UTC date (an item due long ago is overdue)", async () => {
+        await create({ due_date: "2020-01-01" });
+        await create({ due_date: "2999-01-01" });
+        const res = await request(app).get("/api/pm/summary");
+        expect(res.body.summary.overdue).toBe(1);
+      });
+
+      it("a `today` that is not a calendar date is a 400", async () => {
+        for (const bad of ["2026-02-30", "today", "2026-06-25T00:00:00Z"]) {
+          const res = await request(app).get(`/api/pm/summary?today=${encodeURIComponent(bad)}`);
+          expect(res.status, bad).toBe(400);
+        }
+      });
+    });
+  },
+);
+
