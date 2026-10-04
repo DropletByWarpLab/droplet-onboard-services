@@ -3,10 +3,27 @@
 **Audience:** operators flipping the option, auditors verifying it, engineers
 debugging it.
 **One-line summary:** FIPS mode is a **per-customer runtime option, default
-OFF**, switched by a single knob (`DROPLET_FIPS_MODE`), that makes every
-crypto-bearing service run on the **NIST-validated OpenSSL FIPS provider**
-(OpenSSL 3.0.9 module, CMVP certificate **#4282**) that is already baked —
-dormant — into every shipped image. Flipping it requires **no rebuild**.
+OFF**, switched by a single knob (`DROPLET_FIPS_MODE`), that makes the
+provider-carrying services listed in [Scope](#scope-which-services-enforce)
+run on the **OpenSSL FIPS provider** (OpenSSL 3.0.9 module, cited against CMVP
+certificate **#4282**) that is already baked — dormant — into their images.
+Flipping it requires **no rebuild**.
+
+> **Current state (corrected 2026-10-03, WARP-3657).** Shipped boxes run with
+> FIPS mode **off**. When it is switched on, only the services marked as
+> enforcing in the Scope table are confined to the provider; the other
+> first-party services are pinned off or have no boot gate, and pulled
+> third-party images (Postgres, Redis, Mosquitto, Nextcloud, Collabora) are
+> outside the boundary. Some code paths use primitives outside the approved set
+> (Argon2id password hashing, the SHA-512 crypt SSH login hash); they are
+> listed under "Known deviations" in
+> [`docs/security/fips-allowed-algorithms.md`](security/fips-allowed-algorithms.md).
+> **Do not describe a box as "FIPS 140-3 validated" from this document.**
+> Before anyone does, verify certificate #4282 against the NIST CMVP listing:
+> module name, whether it was issued under FIPS 140-2 or 140-3, status, and the
+> tested operating environments. The module is built from source in our
+> images, and a validation applies to specific tested builds and environments,
+> so applicability of the certificate to our build is not established here.
 
 Related: [`docs/security/fips-allowed-algorithms.md`](security/fips-allowed-algorithms.md)
 (what crypto is allowed), [`docs/security/fips-exceptions.md`](security/fips-exceptions.md)
@@ -240,6 +257,13 @@ reaching for a workaround:
 
 ## Scope — which services enforce
 
+With `DROPLET_FIPS_MODE=1`, `setup.sh` sets `DROPLET_FIPS_REQUIRED=true` for
+the services that read it from `.env`: orchestrator, web-dashboard, mcp-server,
+ai-gateway and file-indexer. The nginx gateway keys its cipher profile and
+provider off `DROPLET_FIPS_MODE` directly. Every service pinned off in compose
+keeps `DROPLET_FIPS_REQUIRED=false` regardless of the knob. The table below is
+the intended list of enforced services; keep it and the compose pins in step.
+
 | Service | Provider in image | Under `--fips` | Why |
 |---|---|---|---|
 | orchestrator | ✅ (WARP-967) | boots FIPS-enforcing with working TLS clients — Node and Prisma's system libssl each activate their own `fips.so` copy (WARP-1063) | The FIPS boundary |
@@ -248,7 +272,8 @@ reaching for a workaround:
 | file-indexer | ✅ (WARP-967) | boots FIPS-enforcing — same dual-instance shape and fix as ai-gateway | The FIPS boundary |
 | gateway (nginx edge) | ✅ (WARP-1021) | FIPS cipher profile + provider for edge TLS | Customer-facing TLS termination |
 | matter-controller, email-indexer, device-identity-svc, camera-discovery, fleet-agent | ❌ | **pinned OFF** in compose (`DROPLET_FIPS_REQUIRED=false`, stock `OPENSSL_CONF`) | No validated module in the image — the pin prevents a `setup.sh --fips` crash-loop (the boot self-test would exit 1 forever). Enforcement here is a deliberate future decision, not an oversight. |
-| cache (redis:7-alpine) | ❌ | untouched | Terminates no TLS (plaintext on the private bridge, `requirepass`-guarded; WARP-234 owns the Redis-TLS hop) and performs no customer-facing crypto. Alpine/musl has no validated provider path. |
+| cache (redis:7-alpine) | ❌ | untouched | Terminates TLS 1.3 on `:6380` with per-user ACL passwords (WARP-234) using Redis's own crypto, which is outside the FIPS boundary. Alpine/musl has no validated provider path. |
+| routing, switch, rag-eval, voice-io, oled-display, ops-console and other first-party services not named above | ❌ | no provider in the image and no FIPS boot gate in compose | Outside the boundary today; listed so the scope is complete. Whether to bring them in is an open decision. |
 | db, nextcloud, broker, frigate, ollama, … (pulled images) | ❌ | untouched | `OPENSSL_CONF` points at a path that does not exist in these images; OpenSSL ignores a missing config file. |
 
 Application-source discipline is enforced separately and always-on:
