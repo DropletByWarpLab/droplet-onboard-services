@@ -1,31 +1,68 @@
 /**
- * WARP-3509 — the event modal's camera naming and picture fallback, the same
- * two fixes as the review modal. Everything else about this modal (retain,
- * tag, regenerate, download) is unchanged and out of scope here.
+ * WARP-3509 — the event modal.
+ *
+ * Camera naming and the picture fallback, the same two fixes as the review
+ * modal, and the reason events looked broken on Frigate 0.17: an event's clip
+ * was played by pointing a <video> at Frigate's clip.mp4, a FRAGMENTED mp4 that
+ * ffmpeg streams on the fly (duration 0 in its header, the index at the END, no
+ * Content-Length, Range ignored). A browser cannot read a duration from that (a
+ * 12 s clip showed 6.1 s), cannot seek it, and stalls on a long one. The clip
+ * now plays as HLS through the same player the Recordings page uses, and
+ * clip.mp4 stays for the Download button alone.
+ *
+ * `HlsPlayer` is stubbed: hls.js needs MediaSource, which jsdom does not have.
+ * What is under test is what the modal hands it and what it does with its
+ * failure. Everything else about this modal (retain, tag, regenerate) is
+ * unchanged and out of scope here.
  *
  * The modal is built on <Dialog>, which portals to document.body: query
  * through `screen` / `document`, not the render container.
  */
-import { describe, it, expect, afterEach, vi } from "vitest";
-import { render, cleanup, fireEvent, screen } from "@testing-library/react";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
+import { render, cleanup, fireEvent, screen, act } from "@testing-library/react";
 import React from "react";
 
-vi.mock("@/lib/auth", () => ({ useAuth: () => ({ user: { role: "owner" } }) }));
+const h = vi.hoisted(() => ({
+  role: "owner",
+  player: {
+    props: null as null | { src: string; onError?: (message: string) => void },
+    mounts: 0,
+  },
+}));
+
+vi.mock("@/lib/auth", () => ({ useAuth: () => ({ user: { role: h.role } }) }));
+vi.mock("@/components/recordings/HlsPlayer", () => ({
+  HlsPlayer: (props: { src: string; onError?: (message: string) => void }) => {
+    h.player.props = props;
+    React.useEffect(() => {
+      h.player.mounts += 1;
+    }, []);
+    return <div data-testid="hls-player" data-src={props.src} />;
+  },
+}));
 
 import { EventClipModal } from "./EventClipModal";
 import type { EventDetail } from "@/lib/types";
 
+beforeEach(() => {
+  h.role = "owner";
+  h.player.props = null;
+  h.player.mounts = 0;
+});
 afterEach(() => cleanup());
+
+const ID = "1791059989.433851-abc123";
+const HLS = `/api/cameras/events/${ID}/playback.m3u8`;
 
 function makeEvent(overrides: Partial<EventDetail> = {}): EventDetail {
   return {
-    id: "1791059989.433851-abc123",
+    id: ID,
     camera: "warp_lab_office",
     label: "person",
     score: 0.91,
     startTime: 1_800_000_000,
     endTime: 1_800_000_060,
-    thumbnail: "/api/cameras/events/1791059989.433851-abc123/thumbnail",
+    thumbnail: `/api/cameras/events/${ID}/thumbnail`,
     hasClip: false,
     hasSnapshot: true,
     subLabel: null,
@@ -33,11 +70,18 @@ function makeEvent(overrides: Partial<EventDetail> = {}): EventDetail {
     zones: [],
     retainIndefinitely: false,
     clipUrl: null,
-    snapshotUrl: "/api/cameras/events/1791059989.433851-abc123/snapshot",
+    snapshotUrl: `/api/cameras/events/${ID}/snapshot`,
     description: null,
     ...overrides,
   };
 }
+
+/** An event with a clip: Frigate kept recordings for it. */
+const withClip = (overrides: Partial<EventDetail> = {}) =>
+  makeEvent({ hasClip: true, clipUrl: `/api/cameras/clips/event/${ID}`, ...overrides });
+
+const PLAY_FAILED = "This clip can't be played right now. Try again in a moment.";
+const IN_PROGRESS = "In progress — showing footage up to now.";
 
 describe("EventClipModal camera name", () => {
   it("names the camera by its display name in the details line", () => {
@@ -79,16 +123,137 @@ describe("EventClipModal picture failure", () => {
   });
 
   it("the thumbnail used when there is neither a clip nor a snapshot gets the same fallback", () => {
-    render(
-      <EventClipModal event={makeEvent({ snapshotUrl: null, hasSnapshot: false })} onClose={vi.fn()} />,
-    );
+    render(<EventClipModal event={makeEvent({ snapshotUrl: null, hasSnapshot: false })} onClose={vi.fn()} />);
 
-    expect(document.querySelector("img")!.getAttribute("src")).toBe(
-      "/api/cameras/events/1791059989.433851-abc123/thumbnail",
-    );
+    expect(document.querySelector("img")!.getAttribute("src")).toBe(`/api/cameras/events/${ID}/thumbnail`);
     fireEvent.error(document.querySelector("img")!);
 
     expect(document.querySelector("img")).toBeNull();
     expect(document.querySelector("[data-testid='thumb-fallback']")).not.toBeNull();
+  });
+});
+
+describe("EventClipModal clip playback (WARP-3509)", () => {
+  it("plays the clip as HLS through the shared player, never a <video src> of the fragmented mp4", () => {
+    render(<EventClipModal event={withClip()} onClose={vi.fn()} />);
+
+    expect(screen.getByTestId("hls-player").getAttribute("data-src")).toBe(HLS);
+    expect(document.querySelector("video")).toBeNull();
+    // No picture while the clip plays; the player is the picture.
+    expect(document.querySelector("img")).toBeNull();
+  });
+
+  it("an event without a clip shows its snapshot and starts no player", () => {
+    render(<EventClipModal event={makeEvent()} onClose={vi.fn()} />);
+
+    expect(screen.queryByTestId("hls-player")).toBeNull();
+    expect(document.querySelector("img")).not.toBeNull();
+  });
+
+  it("a finished event offers neither the in-progress notice nor Refresh", () => {
+    render(<EventClipModal event={withClip()} onClose={vi.fn()} />);
+
+    expect(screen.queryByText(IN_PROGRESS)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Refresh/ })).toBeNull();
+  });
+
+  it("an event still in progress says so, and plays footage up to now", () => {
+    render(<EventClipModal event={withClip({ endTime: null })} onClose={vi.fn()} />);
+
+    expect(screen.getByText(IN_PROGRESS)).toBeInTheDocument();
+    expect(screen.getByTestId("hls-player").getAttribute("data-src")).toBe(HLS);
+  });
+
+  it("Refresh asks for the playlist again, so an event in progress plays further", () => {
+    render(<EventClipModal event={withClip({ endTime: null })} onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Refresh/ }));
+    expect(screen.getByTestId("hls-player").getAttribute("data-src")).toBe(`${HLS}?refresh=1`);
+
+    fireEvent.click(screen.getByRole("button", { name: /Refresh/ }));
+    expect(screen.getByTestId("hls-player").getAttribute("data-src")).toBe(`${HLS}?refresh=2`);
+  });
+
+  it("a clip that cannot play falls back to the snapshot, with a notice, instead of a black box", () => {
+    render(<EventClipModal event={withClip()} cameraName="Warp Lab Office" onClose={vi.fn()} />);
+
+    act(() => h.player.props!.onError!("We couldn't load that recording."));
+
+    expect(screen.queryByTestId("hls-player")).toBeNull();
+    expect(document.querySelector("img")!.getAttribute("src")).toBe(`/api/cameras/events/${ID}/snapshot`);
+    expect(screen.getByText(PLAY_FAILED)).toBeInTheDocument();
+  });
+
+  it("the notice does not repeat the player's engineer-facing message", () => {
+    render(<EventClipModal event={withClip()} onClose={vi.fn()} />);
+
+    act(() => h.player.props!.onError!("manifestLoadError"));
+
+    expect(screen.queryByText(/manifestLoadError/)).toBeNull();
+    // And not the Recordings page's wording, which talks about segments.
+    expect(screen.queryByText(/segment/i)).toBeNull();
+  });
+
+  it("an unrelated state change does not restart playback", () => {
+    render(<EventClipModal event={withClip()} onClose={vi.fn()} />);
+    const onErrorBefore = h.player.props!.onError;
+    const mountsBefore = h.player.mounts;
+
+    // Opening the tag panel re-renders the modal. hls.js is torn down and rebuilt
+    // whenever the player's `src` OR `onError` identity changes, which would
+    // restart the clip from the beginning on every click.
+    fireEvent.click(screen.getByRole("button", { name: /Tag person/ }));
+
+    expect(h.player.props!.onError).toBe(onErrorBefore);
+    expect(h.player.mounts).toBe(mountsBefore);
+  });
+
+  it("moving the modal to another event starts a fresh player, failure and refresh forgotten", () => {
+    const { rerender } = render(<EventClipModal event={withClip({ endTime: null })} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /Refresh/ }));
+    act(() => h.player.props!.onError!("x"));
+    expect(screen.queryByTestId("hls-player")).toBeNull();
+
+    const other = "1791070000.5-zzzzzz";
+    rerender(
+      <EventClipModal
+        event={withClip({ id: other, clipUrl: `/api/cameras/clips/event/${other}` })}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("hls-player").getAttribute("data-src")).toBe(
+      `/api/cameras/events/${other}/playback.m3u8`,
+    );
+    expect(screen.queryByText(PLAY_FAILED)).toBeNull();
+  });
+});
+
+describe("EventClipModal Download (WARP-3103, WARP-3509)", () => {
+  it("saves the clip as a file through clip.mp4?download=1 for an owner", () => {
+    render(<EventClipModal event={withClip()} onClose={vi.fn()} />);
+
+    const link = screen.getByRole("link", { name: /Download/ });
+    expect(link.getAttribute("href")).toBe(`/api/cameras/clips/event/${ID}?download=1`);
+    expect(link.getAttribute("download")).toBe(`warp_lab_office-person-${ID}.mp4`);
+  });
+
+  it("is not offered to a member, who may watch but not save", () => {
+    h.role = "family";
+    render(<EventClipModal event={withClip()} onClose={vi.fn()} />);
+
+    expect(screen.queryByRole("link", { name: /Download/ })).toBeNull();
+    // Watching is theirs: the player still plays.
+    expect(screen.getByTestId("hls-player")).toBeInTheDocument();
+  });
+
+  it("stays available when the clip cannot play: the file is the way to watch it elsewhere", () => {
+    render(<EventClipModal event={withClip()} onClose={vi.fn()} />);
+
+    act(() => h.player.props!.onError!("x"));
+
+    expect(screen.getByRole("link", { name: /Download/ }).getAttribute("href")).toBe(
+      `/api/cameras/clips/event/${ID}?download=1`,
+    );
   });
 });
