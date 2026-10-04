@@ -78,17 +78,17 @@ async function request<T>(url: string, method: string, body?: unknown): Promise<
 
 // ── SWR keys ────────────────────────────────────────────────────────────────
 // The strings the READ hooks use, so a write can revalidate exactly the cache
-// it changed (`useRevalidate`). `items`, `states`, `labels` and `activity` are
-// the keys usePm.ts already uses — keep them byte-identical.
+// it changed (`useRevalidate`). `states` and `labels` are the keys usePm.ts
+// already uses — keep them byte-identical. The board's own item list is NOT
+// here: it is revalidated through the page's `onItemsChanged` / `onChanged`
+// callbacks, because how it is keyed is the page's business (and changes).
 export const pmKeys = {
-  items: (projectId: string) => `/api/pm/projects/${projectId}/work-items`,
   states: (projectId: string) => `/api/pm/projects/${projectId}/states`,
   labels: (projectId: string) => `/api/pm/projects/${projectId}/labels`,
   properties: (projectId: string) => `/api/pm/projects/${projectId}/properties`,
   archived: (projectId: string) =>
     `/api/pm/projects/${projectId}/work-items?archived=only&per_page=200`,
   relations: (itemId: string) => `/api/pm/work-items/${itemId}/relations`,
-  activity: (itemId: string) => `/api/pm/work-items/${itemId}/activity`,
 } as const;
 
 /** Revalidate SWR keys through the surrounding `SWRConfig` (so tests with a
