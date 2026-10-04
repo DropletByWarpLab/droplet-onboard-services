@@ -94,16 +94,40 @@ for a `DEACTIVATED` user (wire-indistinguishable from unknown-email at login).
 
 ### Role mapping
 
-`scim-role-mapping.service.ts` maps a SCIM group → local `Role` from the
-operator-configured `SCIM_GROUP_ROLE_MAP` (WARP-3631): a JSON object of exact
-group name or SCIM group id → role, e.g. `{"Droplet Admins":"admin","Guests":"guest"}`.
-Matching is whole-string and case-insensitive, never a substring; any group not
-listed maps to the least-privilege `family` role (`service` is NEVER
-assignable). `POST /scim/v2/Groups` RAISES each member's role to at least the
-group's mapped role (highest-privilege-wins floor) and remembers the push's
-member list, so a person dropped from a later push is lowered to the highest
-role of the groups they remain in. The gated Team-membership UI is **NOT**
-built here (AC).
+`scim-role-mapping.service.ts` maps a SCIM group → local `Role` (WARP-3631).
+Names are chosen by whoever can create a group at the identity provider and are
+not unique, so **a role above `family` is granted only to a group's stable SCIM
+group id** (the `externalId` the directory sends). The operator lists them in
+`SCIM_GROUP_ROLE_MAP`, a JSON object with two separate key namespaces:
+
+```
+SCIM_GROUP_ROLE_MAP='{"id:00g1abc2DEF":"admin","name:Contractors":"guest"}'
+```
+
+- `id:<SCIM group id>` → any role up to the `admin` ceiling; matched exactly
+  against the group's `externalId`, nothing else.
+- `name:<display name>` → `guest` only (a name can restrict, never elevate);
+  matched whole-string after Unicode NFKC and case folding.
+- Keys with neither prefix, unknown roles and a malformed value are ignored with
+  a warning. A group with no `externalId` can never be elevated.
+- Unlisted groups map to the least-privilege `family` role (`service` is NEVER
+  assignable), except that a group whose name contains "guest" still maps to
+  `guest` with no configuration, so the change never widens an external-guest
+  group.
+
+`POST /scim/v2/Groups` RAISES each member's role to at least the group's mapped
+role (highest-privilege-wins floor) and remembers the push's member list, so a
+person dropped from a later push is lowered to the highest role of the groups
+they remain in. The gated Team-membership UI is **NOT** built here (AC).
+
+> **Upgrade step (decision for the maintainer).** Before WARP-3631 any group
+> whose name contained "owner", "admin" or "manager" raised its members to
+> admin. That no longer happens. Nothing is granted or removed automatically:
+> people who already hold admin keep it until they are dropped from a group,
+> but a box with no `SCIM_GROUP_ROLE_MAP` stops raising new members. At every
+> start the orchestrator logs a warning per stored group that used to elevate,
+> with the exact `id:` entry that would restore it. Review each group, then add
+> only the ones that should grant admin.
 
 > **Ceiling: `admin` (WARP-1568).** `owner` is **not** an Okta-assignable
 > role. A group whose name says "owner" is clamped to `SCIM_ROLE_CEILING`

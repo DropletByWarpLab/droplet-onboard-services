@@ -34,6 +34,7 @@ import { findUserByEmail, emailWriteData } from "./user-directory.service.js";
 import {
   effectiveRoleForGroupNames,
   highestRole,
+  matchedLegacyElevationRule,
   roleForScimGroupName,
   ROLE_PRIVILEGE,
   SCIM_ROLE_CEILING,
@@ -481,6 +482,35 @@ export async function provisionGroup(
   }
 
   return { id: groupRow.id, displayName: groupRow.displayName, mappedRole: groupRow.mappedRole };
+}
+
+/**
+ * WARP-3631 upgrade notice. Group names no longer elevate by substring, so a
+ * box that relied on a directory group called "Admins" or "Managers" stops
+ * granting admin to its members until the operator names the group's SCIM id
+ * in `SCIM_GROUP_ROLE_MAP`. Nothing is granted automatically: this logs, at
+ * every start, each stored group that used to elevate and no longer does, with
+ * the exact entry that would restore it.
+ */
+export async function warnLegacyScimRoleMapping(prisma: PrismaClient): Promise<void> {
+  const groups = await prisma.scimGroup.findMany({
+    select: { displayName: true, externalId: true, mappedRole: true },
+  });
+  for (const g of groups) {
+    const wasElevated =
+      ROLE_PRIVILEGE[g.mappedRole as DirectoryRole] > ROLE_PRIVILEGE.family || matchedLegacyElevationRule(g.displayName);
+    const now = roleForScimGroupName(g.displayName, g.externalId);
+    if (!wasElevated || ROLE_PRIVILEGE[now] > ROLE_PRIVILEGE.family) continue;
+    logger.warn(
+      {
+        group: g.displayName,
+        restoreWith: g.externalId
+          ? { variable: "SCIM_GROUP_ROLE_MAP", entry: { [`id:${g.externalId}`]: "admin" } }
+          : "no SCIM group id on record; the directory must send externalId for this group before it can be mapped",
+      },
+      "SCIM group no longer grants admin by name (WARP-3631); its members keep their current role but are not raised again. Add the entry shown to SCIM_GROUP_ROLE_MAP to restore it.",
+    );
+  }
 }
 
 /**

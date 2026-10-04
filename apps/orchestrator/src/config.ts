@@ -1281,11 +1281,13 @@ const envSchema = z.object({
     .default("0")
     .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
 
-  // WARP-3631 — SCIM group → role map: a JSON object of exact group name (or
-  // SCIM group id) → role, e.g. {"Droplet Admins":"admin","Guests":"guest"}.
-  // Empty (default) means every SCIM group maps to the member role (`family`);
-  // matching is whole-string, never a substring, and `admin` is the ceiling.
-  // Parsed (and bad JSON rejected, fail-safe) in scim-role-mapping.service.ts.
+  // WARP-3631 — SCIM group → role map: a JSON object with two key namespaces,
+  // e.g. {"id:00g1abc":"admin","name:Contractors":"guest"}. `id:` keys match a
+  // group's stable SCIM id and may grant up to `admin`; `name:` keys match the
+  // display name (NFKC + case folded) and may only name `guest`. Empty (default)
+  // means every SCIM group maps to the member role (`family`) except groups
+  // named "guest", which stay `guest`. Parsed (bad JSON ignored, fail-safe) in
+  // scim-role-mapping.service.ts.
   SCIM_GROUP_ROLE_MAP: z.string().default(""),
 
   // WARP-3630 — privileged-account two-step policy. On, (1) an owner or admin

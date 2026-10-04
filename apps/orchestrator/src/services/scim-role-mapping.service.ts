@@ -11,10 +11,13 @@
  *
  * Three hard rules (security):
  *   1. LEAST PRIVILEGE BY DEFAULT. An unconfigured group → `family`. WARP-3631:
- *      a group elevates ONLY when the operator names it (exact display name or
- *      exact SCIM group id) in `SCIM_GROUP_ROLE_MAP`. Never by substring: a
- *      group called "Store Managers" or "Badminton Club" grants nothing. The
- *      default floor is `family`, never owner.
+ *      a group raises a role above `family` ONLY when the operator names its
+ *      stable SCIM group id (`id:<externalId>`) in `SCIM_GROUP_ROLE_MAP`.
+ *      Display names are chosen by whoever can create a group at the identity
+ *      provider and are not unique, so a name key (`name:<display name>`) can
+ *      only ever LOWER to `guest`. Never by substring elevation: a group called
+ *      "Store Managers" or "Badminton Club" grants nothing. The default floor
+ *      is `family`, never owner.
  *   2. `service` IS NOT ASSIGNABLE FROM SCIM. It's the inbound-service-
  *      principal role (voice / mcp / email tokens). A directory user must
  *      never be minted with it — that would confuse the privilege shape RBAC
@@ -82,14 +85,32 @@ export const DEFAULT_DIRECTORY_ROLE: DirectoryRole = "family";
 export const SCIM_ROLE_CEILING: DirectoryRole = "admin";
 
 /**
- * WARP-3631 — the operator-configured group → role map, from the JSON object in
- * `SCIM_GROUP_ROLE_MAP`: `{"<exact group name or SCIM group id>": "<role>"}`.
- * Keys are matched whole (trimmed, case-insensitive), never as substrings.
- * Unparseable JSON or an unknown role value is ignored with a warning, so a
- * typo leaves the safe default (`family`) rather than granting anything.
+ * Display names fold the way identity providers compare them: Unicode NFKC
+ * (so full-width and compatibility look-alikes collapse), then lower case.
  */
-function configuredRoleMap(): Map<string, DirectoryRole> {
-  const out = new Map<string, DirectoryRole>();
+function normalizeName(name: string): string {
+  return name.normalize("NFKC").trim().toLowerCase();
+}
+
+interface ConfiguredRoleMap {
+  /** Stable SCIM group id (exact, case-sensitive) → role. */
+  byId: Map<string, DirectoryRole>;
+  /** Normalized display name → role; only ever `guest`. */
+  byName: Map<string, DirectoryRole>;
+}
+
+/**
+ * WARP-3631 — the operator-configured group → role map, from the JSON object in
+ * `SCIM_GROUP_ROLE_MAP`: `{"id:<SCIM group id>": "<role>", "name:<display
+ * name>": "guest"}`. The two namespaces are separate: `id:` keys are matched
+ * only against the group's SCIM `externalId`, `name:` keys only against its
+ * display name, and a name key may only name `guest` (names are attacker-
+ * influenced and not unique, so they can restrict but never elevate). Any
+ * other key, role or combination is ignored with a warning, so a mistake
+ * leaves the safe default (`family`) rather than granting anything.
+ */
+function configuredRoleMap(): ConfiguredRoleMap {
+  const out: ConfiguredRoleMap = { byId: new Map(), byName: new Map() };
   const raw = (config.SCIM_GROUP_ROLE_MAP ?? "").trim();
   if (!raw) return out;
   try {
@@ -98,22 +119,42 @@ function configuredRoleMap(): Map<string, DirectoryRole> {
       throw new Error("not an object");
     }
     for (const [key, value] of Object.entries(parsed)) {
-      const k = normalize(key);
-      if (k && typeof value === "string" && Object.hasOwn(ROLE_PRIVILEGE, value)) {
-        out.set(k, value as DirectoryRole);
+      const validRole = typeof value === "string" && Object.hasOwn(ROLE_PRIVILEGE, value);
+      if (!validRole) {
+        logger.warn({ key }, "SCIM_GROUP_ROLE_MAP entry ignored (unknown role)");
+      } else if (key.startsWith("id:") && key.slice(3).trim()) {
+        out.byId.set(key.slice(3).trim(), value as DirectoryRole);
+      } else if (key.startsWith("name:") && normalizeName(key.slice(5))) {
+        if (value === "guest") out.byName.set(normalizeName(key.slice(5)), "guest");
+        else logger.warn({ key }, "SCIM_GROUP_ROLE_MAP name: entry ignored (names can only map to guest; use an id: key)");
       } else {
-        logger.warn({ key }, "SCIM_GROUP_ROLE_MAP entry ignored (empty key or unknown role)");
+        logger.warn({ key }, "SCIM_GROUP_ROLE_MAP entry ignored (key must start with id: or name:)");
       }
     }
   } catch {
     logger.warn("SCIM_GROUP_ROLE_MAP is not a JSON object; every SCIM group maps to the default role");
-    return new Map();
+    return { byId: new Map(), byName: new Map() };
   }
   return out;
 }
 
-function normalize(name: string): string {
-  return name.trim().toLowerCase();
+/**
+ * The pre-WARP-3631 behaviour that only ever RESTRICTED: a group whose name
+ * contains "guest" maps to the external `guest` role. Kept without any
+ * configuration so that removing elevation-by-substring never turns an
+ * external-guest group into regular members on upgrade.
+ */
+function looksLikeGuestGroup(displayName: string): boolean {
+  return normalizeName(displayName).includes("guest");
+}
+
+/**
+ * The pre-WARP-3631 elevating rules, for the boot-time upgrade warning only.
+ * Never used to grant anything.
+ */
+export function matchedLegacyElevationRule(displayName: string): boolean {
+  const n = normalizeName(displayName);
+  return ["owner", "admin", "manager"].some((k) => n.includes(k));
 }
 
 /** WARP-1568 — clamp anything above the ceiling down to it. */
@@ -124,20 +165,25 @@ function clampToCeiling(role: DirectoryRole): DirectoryRole {
 }
 
 /**
- * Map a SCIM group to the local Role it grants: the configured entry for its
- * SCIM group id, else for its exact display name, else the least-privilege
- * default (`family`). Never returns `service`, and never anything above
- * SCIM_ROLE_CEILING (WARP-1568) — this is the single group → role boundary
- * the whole SCIM surface goes through, so the clamp lives here rather than at
- * each caller.
+ * Map a SCIM group to the local Role it grants: the `id:` entry for its SCIM
+ * group id, else a `name:` entry (guest only) for its display name, else
+ * `guest` if the name looks like a guest group (the old restrictive rule, kept
+ * so an upgrade never widens an external-guest group), else the
+ * least-privilege default (`family`). Never returns `service`, and never
+ * anything above SCIM_ROLE_CEILING (WARP-1568) — this is the single group →
+ * role boundary the whole SCIM surface goes through, so the clamp lives here
+ * rather than at each caller.
  */
 export function roleForScimGroupName(displayName: string, externalId?: string | null): DirectoryRole {
   const map = configuredRoleMap();
-  const role =
-    (externalId ? map.get(normalize(externalId)) : undefined) ??
-    map.get(normalize(displayName)) ??
-    DEFAULT_DIRECTORY_ROLE;
-  return clampToCeiling(role);
+  const id = externalId?.trim();
+  const configured = (id ? map.byId.get(id) : undefined) ?? map.byName.get(normalizeName(displayName));
+  if (configured) return clampToCeiling(configured);
+  if (looksLikeGuestGroup(displayName)) {
+    logger.info({ group: displayName }, "SCIM group name contains 'guest'; mapped to the guest role");
+    return "guest";
+  }
+  return DEFAULT_DIRECTORY_ROLE;
 }
 
 /**
