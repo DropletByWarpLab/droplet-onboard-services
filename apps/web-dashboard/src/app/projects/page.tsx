@@ -7,7 +7,7 @@
  * writes, and the same data the in-app AI reads/writes through the MCP tools.
  */
 
-import { useMemo, useState, type JSX } from "react";
+import { Suspense, useMemo, useState, type JSX } from "react";
 import Link from "next/link";
 import { FolderKanban } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
@@ -41,6 +41,8 @@ import { IndexView } from "@/components/projects/IndexView";
 import { BoardView, ListView, PlaceholderView, type Domain } from "@/components/projects/board";
 import { ViewSwitcher, SavedViews, FilterBar, type ProjectView, type SavedView } from "@/components/projects/chrome";
 import { DetailDrawer } from "@/components/projects/detail";
+import { InsightsView } from "@/components/projects/insights/InsightsView";
+import { useInsightsDeepLink, useSyncInsightsParam } from "@/components/projects/insights/deepLink";
 import { NewItemModal, NewProjectModal } from "@/components/projects/modals";
 
 function matchQuery(item: PmWorkItem, q: string): boolean {
@@ -74,7 +76,13 @@ export default function ProjectsPage(): JSX.Element {
   // else. It used to also read `crm` and render the CRM's sub-tabs, which is
   // why its header renamed itself when a module it does not own flipped. The
   // CRM lives at /customers now.
-  return <ProjectsWorkspace />;
+  // WARP-3524 — `useSearchParams` (the `?view=insights` deep link) has to sit
+  // under a Suspense boundary, or the route cannot be prerendered.
+  return (
+    <Suspense fallback={null}>
+      <ProjectsWorkspace />
+    </Suspense>
+  );
 }
 
 function ProjectsWorkspace(): JSX.Element {
@@ -84,7 +92,9 @@ function ProjectsWorkspace(): JSX.Element {
   const { toast } = useToast();
   const { person } = usePeople();
 
-  const [view, setView] = useState<ProjectView | "index">("index");
+  // WARP-3524 — `/projects?view=insights` opens the workspace-level Insights.
+  const insightsLink = useInsightsDeepLink();
+  const [view, setView] = useState<ProjectView | "index">(insightsLink ? "insights" : "index");
   const [projectId, setProjectId] = useState<string | null>(null);
   const [savedView, setSavedView] = useState<SavedView>("all");
   const [q, setQ] = useState("");
@@ -99,6 +109,7 @@ function ProjectsWorkspace(): JSX.Element {
   const [showArchived, setShowArchived] = useState(false);
   const [drawer, setDrawer] = useState<PmWorkItem | null>(null);
   const [modal, setModal] = useState<"newitem" | "newproject" | null>(null);
+  useSyncInsightsParam(view === "insights" && projectId === null);
 
   const { projects, error: projErr, isLoading: projLoading, mutate: mutateProjects } = useProjects(showArchived);
   // ProjectsWorkspace only mounts behind the `projects` capability gate above.
@@ -168,6 +179,11 @@ function ProjectsWorkspace(): JSX.Element {
     setProjectId(null);
   };
 
+  const openInsights = () => {
+    setView("insights");
+    setProjectId(null);
+  };
+
   const onTransition = async (item: PmWorkItem, stateId: string) => {
     try {
       await pmActions().transitionItem(item.id, stateId);
@@ -194,7 +210,9 @@ function ProjectsWorkspace(): JSX.Element {
       ? `${summary?.activeProjects ?? projects?.filter((p) => !p.archived).length ?? 0} projects · ${summary?.itemsOpen ?? 0} items open`
       : project
         ? `${project.openCount} open · ${project.doneCount} done`
-        : undefined;
+        : view === "insights"
+          ? "Insights across all projects"
+          : undefined;
 
   const actions = view === "index" ? (
       <>
@@ -203,6 +221,9 @@ function ProjectsWorkspace(): JSX.Element {
             <FolderKanban size={14} /> New project
           </button>
         )}
+        <button className="btn" type="button" onClick={openInsights}>
+          <PmIcon name="chart" size={14} /> Insights
+        </button>
         <button className="btn" type="button" onClick={refreshAll} aria-label="Refresh">
           <PmIcon name="refresh" size={15} />
         </button>
@@ -270,7 +291,7 @@ function ProjectsWorkspace(): JSX.Element {
                 <SavedViews active={savedView} onPick={setSavedView} counts={counts} />
               </div>
             )}
-            {(view === "cycles" || view === "modules") && (
+            {(view === "cycles" || view === "modules" || (view === "insights" && projectId !== null)) && (
               <div style={{ marginBottom: 14 }}>
                 <ViewSwitcher view={view} onView={(v) => setView(v)} />
               </div>
@@ -309,6 +330,7 @@ function ProjectsWorkspace(): JSX.Element {
               )}
               {view === "cycles" && <PlaceholderView kind="cycles" />}
               {view === "modules" && <PlaceholderView kind="modules" />}
+              {view === "insights" && <InsightsView projectId={projectId} />}
             </div>
           </div>
         </div>

@@ -41,6 +41,7 @@ import {
   Building2,
   Briefcase,
   Handshake,
+  ChartColumn,
   type LucideIcon,
 } from "lucide-react";
 
@@ -87,6 +88,8 @@ export const ICONS: Record<string, LucideIcon> = {
   building: Building2,
   briefcase: Briefcase,
   handshake: Handshake,
+  // WARP-3524 — the Insights tab.
+  chart: ChartColumn,
 };
 
 export function PmIcon({
