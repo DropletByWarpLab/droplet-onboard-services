@@ -124,6 +124,7 @@ import { initToolModuleVerdict } from "./services/tool-module-verdict.service.js
 import { createSettingsRouter } from "./routes/settings.js";
 import { createTlsCertificateRouter } from "./routes/tls-certificate.js";
 import { createBackupStatusRouter } from "./routes/backup-status.js";
+import { createBackupKeyRouter } from "./routes/backup-key.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createUpdatesRouter } from "./routes/updates.js";
 import { createTelemetryRouter } from "./routes/telemetry.js";
@@ -767,6 +768,8 @@ export function createApp(
   // WARP-1405: backup health for Settings → Device information (last success,
   // last failure, reason, overdue / key-mismatch). Owner + admin, read-only.
   app.use("/api", createBackupStatusRouter());
+  // WARP-3610: the owner takes the backup repository key off the box, once.
+  app.use("/api", createBackupKeyRouter(prisma));
 
   // WARP-540: OTA update operator surface (/api/updates/*) — status,
   // history, check-now, apply-now, skip, and the WARP-538 settings knobs.

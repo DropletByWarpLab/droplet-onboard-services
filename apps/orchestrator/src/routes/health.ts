@@ -9,6 +9,7 @@ import { isFrigateHealthy } from "../services/camera.service.js";
 import { switchHealthDetail } from "../services/switch.client.js";
 import { getAggregateHealth } from "../services/health-monitor.service.js";
 import { inferenceRuntime } from "../services/inference-runtime.js";
+import { internalCertDaysLeft } from "../services/internal-cert-expiry.service.js";
 import type { HealthResponse } from "../types/index.js";
 
 const startTime = Date.now();
@@ -17,7 +18,7 @@ export function createHealthRouter(prisma: PrismaClient): Router {
   const router = Router();
 
   router.get("/health", async (_req, res) => {
-    const [dbOk, redisOk, aiOk, routerOk, frigateOk, switchDetail] = await Promise.all([
+    const [dbOk, redisOk, aiOk, routerOk, frigateOk, switchDetail, certDays] = await Promise.all([
       prisma.$queryRaw`SELECT 1`
         .then(() => true)
         .catch(() => false),
@@ -29,6 +30,7 @@ export function createHealthRouter(prisma: PrismaClient): Router {
       // reports auth_configured=false (fail-closed deploy) — `switchOk` still
       // reflects only connectivity, so a missing secret never fails /health.
       switchHealthDetail(),
+      internalCertDaysLeft(),
     ]);
     const switchOk = switchDetail.connected;
 
@@ -72,6 +74,10 @@ export function createHealthRouter(prisma: PrismaClient): Router {
       // and the `services` map already on this unauthenticated route — it
       // names a runtime, never an endpoint, model or credential.
       inferenceRuntime: inferenceRuntime(),
+      // WARP-3653 — days left on the internal CA leaf certificate (db, cache
+      // and broker TLS depend on it). Absent when there is no readable
+      // certificate; informational, never part of `status`.
+      ...(certDays !== null ? { internalCertDaysLeft: certDays } : {}),
       services: {
         db: dbOk,
         redis: redisOk,

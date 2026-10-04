@@ -1986,6 +1986,8 @@ export interface DiskInfo {
  *  never appear in any of them (WARP-827 keeps it out, and that stays). A
  *  distinct type is the guardrail: nothing that iterates drives can pick this
  *  up by accident, and passing it where a DriveInfo is expected won't compile. */
+export type DiskEncryptionState = "tpm_sealed" | "recovery_key_only" | "not_encrypted" | "unknown";
+
 export interface SystemDiskInfo {
   /** Whole-disk kernel name, e.g. "nvme0n1". */
   name: string;
@@ -2006,6 +2008,9 @@ export interface SystemDiskInfo {
    *    unavailable — nothing measurable; the pair is null and `filesystems`
    *                  is empty. */
   measurement: "complete" | "partial" | "unavailable";
+  /** WARP-3608: explicit at-rest encryption state of the data volume, decided
+   *  by the bridge. Absent on an older bridge (render as unknown). */
+  encryption?: DiskEncryptionState;
   model: string;
   serial: string;
   bus: string;

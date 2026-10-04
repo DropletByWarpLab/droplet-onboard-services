@@ -249,6 +249,11 @@ interface BridgeSystemDisk {
    *  and it is forwarded verbatim — the dashboard branches on it, never on
    *  the nulls. */
   measurement: "complete" | "partial" | "unavailable";
+  /** WARP-3608: at-rest encryption of the data volume, an explicit state the
+   *  bridge decides (lsblk ancestry + /etc/crypttab) and this route forwards
+   *  verbatim. "unknown" means the bridge could not tell; absent on an older
+   *  bridge. Never derive it from anything else. */
+  encryption?: "tpm_sealed" | "recovery_key_only" | "not_encrypted" | "unknown";
   model: string;
   serial: string;
   bus: string;

@@ -1853,8 +1853,70 @@ def _os_disk_filesystems(mount_meta, os_disk):
     return sorted(rows, key=lambda r: r["mount"]), complete
 
 
+def _read_crypttab():
+    """/etc/crypttab text, or None when unreadable. World-readable, so the
+    sandboxed bridge (User=droplet) can read it; it cannot run cryptsetup."""
+    try:
+        with open("/etc/crypttab") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _mount_chain(node, mountpoint, chain=()):
+    """The lsblk ancestry (outermost first) of the node mounted at
+    `mountpoint`, or None. Types in the chain tell what the filesystem sits on."""
+    chain = chain + (node,)
+    if node.get("mountpoint") == mountpoint or mountpoint in (node.get("mountpoints") or []):
+        return chain
+    for child in node.get("children") or []:
+        found = _mount_chain(child, mountpoint, chain)
+        if found:
+            return found
+    return None
+
+
+def data_encryption_state(lsblk_tree, crypttab_text):
+    """WARP-3608 -- is the box's data volume encrypted at rest? An explicit
+    enum, never inferred by the consumer from absence.
+
+      tpm_sealed         the data filesystem sits on a dm-crypt volume whose
+                         /etc/crypttab entry unlocks via the TPM
+      recovery_key_only  dm-crypt, but no TPM unlock token (key slot only)
+      not_encrypted      no dm-crypt layer under the data filesystem
+      unknown            cannot tell (no lsblk tree, or encrypted and crypttab
+                         unreadable) -- reported as unknown, never guessed
+
+    The data filesystem is /data (where droplet-luks-provision.sh puts the
+    docker data-root), else "/" (Docker then lives on the root filesystem).
+    Unprivileged on purpose: the bridge cannot run `cryptsetup luksDump`.
+    """
+    if not lsblk_tree:
+        return "unknown"
+    chain = None
+    for mp in ("/data", "/"):
+        for dev in lsblk_tree.get("blockdevices") or []:
+            chain = _mount_chain(dev, mp)
+            if chain:
+                break
+        if chain:
+            break
+    if not chain:
+        return "unknown"
+    crypt = next((n for n in reversed(chain) if (n.get("type") or "") == "crypt"), None)
+    if crypt is None:
+        return "not_encrypted"
+    if crypttab_text is None:
+        return "unknown"
+    for line in crypttab_text.splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and not parts[0].startswith("#") and parts[0] == crypt.get("name"):
+            return "tpm_sealed" if "tpm2-device" in parts[3] else "recovery_key_only"
+    return "recovery_key_only"
+
+
 def system_disk_info(lsblk_tree, os_disk, os_filesystems,
-                     filesystems_complete=True):
+                     filesystems_complete=True, crypttab_text=None):
     """WARP-2098 — the appliance's OWN install disk, as its own object.
 
     WARP-827 removed the OS/boot disk from BOTH lists this bridge emits: from
@@ -1966,6 +2028,8 @@ def system_disk_info(lsblk_tree, os_disk, os_filesystems,
         "serial": (node.get("serial") or "").strip(),
         "bus": (node.get("tran") or "").lower(),
         "filesystems": filesystems,
+        # WARP-3608: explicit at-rest encryption state of the data volume.
+        "encryption": data_encryption_state(lsblk_tree, crypttab_text),
     }
 
 
@@ -2223,7 +2287,8 @@ def drives_snapshot(invalidate=False):
     # into either — see system_disk_info.
     os_filesystems, os_fs_complete = _os_disk_filesystems(mount_meta, os_disk)
     system_disk = system_disk_info(
-        lsblk_tree, os_disk, os_filesystems, os_fs_complete)
+        lsblk_tree, os_disk, os_filesystems, os_fs_complete,
+        crypttab_text=_read_crypttab())
     if system_disk is not None:
         snap["system_disk"] = system_disk
     _drives_cache["snap"] = snap
