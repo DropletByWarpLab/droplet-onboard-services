@@ -477,7 +477,7 @@ describe("createToolSpecSummarizer — follows the active model (WARP-3047)", ()
 });
 
 // A routine's `summarize` step writes up the results of the steps before it. When any of those came from a
-// domain that never goes to a cloud model (OFF_LAN_WITHHELD_DOMAINS: files, memory, business), the prose is
+// domain that never goes to a cloud model (OFF_LAN_WITHHELD_DOMAINS), the prose is
 // written on the box's LOCAL model — never the active model, which may be a cloud one — or not at all.
 describe("summarize after a withheld domain's step: the local model only", () => {
   const localModel = vi.fn(async (): Promise<string | null> => "gpt-oss:20b");
@@ -491,6 +491,13 @@ describe("summarize after a withheld domain's step: the local model only", () =>
     ["files", "search_files"],
     ["memory", "memory_recall"],
     ["business", "business_find"],
+    ["email", "email_search"],
+    ["calendar", "list_events"],
+    ["team_chat", "team_chat_send_message"],
+    ["cameras", "list_camera_events"],
+    ["cloud", "cloud_query_dataset"],
+    ["money", "money_list_open_documents"],
+    ["erp", "erp_get_schedule_today"],
   ])("a %s step before it → the LOCAL model writes the summary, whatever the active model", async (_d, tool) => {
     const summarizer = createToolSpecSummarizer(activeModel, localModel);
     await summarizer.summarize("Write it up.", [ok(tool, { results: [] }), ok("get_system_health", { status: "ok" })]);

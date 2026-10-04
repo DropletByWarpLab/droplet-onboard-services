@@ -300,6 +300,8 @@ describe("the withheld set is DERIVED from the tool catalog", () => {
 
   it("the notice says what is withheld and that it stays on the Droplet", () => {
     expect(OFF_LAN_WITHHELD_NOTICE).toMatch(/no file, memory or business-record tools are offered/);
+    // WARP-3570 — the notice names the other withheld surfaces too.
+    expect(OFF_LAN_WITHHELD_NOTICE).toMatch(/email, calendar, team chat, camera/);
     expect(OFF_LAN_WITHHELD_NOTICE).toMatch(/it stays on the Droplet/);
   });
 
