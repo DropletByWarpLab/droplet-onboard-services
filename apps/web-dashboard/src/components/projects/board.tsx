@@ -15,6 +15,7 @@ import {
   Skel,
 } from "./bits";
 import { cardAccent, isOverdue, fmtDate } from "./config";
+import { EstimateChip, StartChip, TypeIcon } from "./TypeBits";
 import type { PmWorkItem, PmState } from "./types";
 
 export type Domain = "populated" | "loading" | "empty" | "error" | "filtered";
@@ -59,8 +60,11 @@ export function WorkItemCard({
       }}
     >
       <div className="pm-row" style={{ justifyContent: "space-between" }}>
-        <span className="pm-mono" style={{ fontSize: 11, color: "var(--text-4)", fontWeight: 600 }}>
-          {item.key}
+        <span className="pm-row" style={{ gap: 6 }}>
+          <TypeIcon type={item.type} size={12} />
+          <span className="pm-mono" style={{ fontSize: 11, color: "var(--text-4)", fontWeight: 600 }}>
+            {item.key}
+          </span>
         </span>
         <PriorityFlag p={item.priority} />
       </div>
@@ -84,9 +88,11 @@ export function WorkItemCard({
         </div>
       )}
       <div className="pm-row" style={{ justifyContent: "space-between", marginTop: 1 }}>
-        <div className="pm-row" style={{ gap: 8 }}>
+        <div className="pm-row" style={{ gap: 8, flexWrap: "wrap" }}>
           <AvatarStack ids={item.assignees} size={22} />
+          <StartChip item={item} />
           <DueChip item={item} />
+          <EstimateChip estimate={item.estimate} />
         </div>
         <CountMeta item={item} />
       </div>
@@ -295,6 +301,7 @@ function ListRow({
       }}
       style={{ gap: 13, padding: "10px 6px", borderBottom: "1px solid var(--border)", cursor: "pointer", minHeight: 44 }}
     >
+      <TypeIcon type={item.type} />
       <span className="pm-mono" style={{ fontSize: 11.5, color: "var(--text-4)", width: 72, flex: "none" }}>
         {item.key}
       </span>
@@ -319,9 +326,11 @@ function ListRow({
           <LabelTag key={l.id} label={l} small />
         ))}
       </div>
+      <EstimateChip estimate={item.estimate} />
       <span style={{ flex: "none" }}>
         <AvatarStack ids={item.assignees} size={22} />
       </span>
+      <StartChip item={item} />
       <span
         className="pm-mono"
         style={{ fontSize: 11.5, color: overdue ? "var(--warn)" : "var(--text-4)", width: 56, flex: "none", textAlign: "right" }}

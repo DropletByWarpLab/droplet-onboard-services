@@ -43,3 +43,11 @@
 .pm-scope select.pm-input.sm { padding-right: 4px; }
 .pm-scope .pm-input.invalid { border-color: var(--err); }
 .pm-scope .pm-field-error { margin-top: 4px; font-size: 11.5px; color: var(--err); }
+
+/* ── work-item kind, estimate, start date (cards, rows, drawer) ──────────── */
+.pm-scope .pm-type { display: inline-flex; align-items: center; flex: none; }
+.pm-scope .pm-estimate {
+  display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 999px;
+  font-size: 11px; font-variant-numeric: tabular-nums; color: var(--text-3);
+  background: var(--bg-sunken); border: 1px solid var(--border); white-space: nowrap;
+}
