@@ -24,9 +24,11 @@
  *    passed through `started` (Todo straight to Done) has a lead time but no
  *    cycle time. Work that was re-opened is measured from its first start.
  *  - Days and weeks are the workspace's own calendar (`Workspace.tz` → the box
- *    zone → UTC). Weeks start on Monday. `from` is moved back to the first day of
- *    the bucket that holds it, so no bucket is ever half-counted at the left
- *    edge; `to` is clamped to today. The response says what it measured.
+ *    zone → UTC; a zone Postgres does not recognise also falls back to UTC, and
+ *    `meta.timezone` says which was used). Weeks start on Monday. `from` is
+ *    moved back to the first day of the bucket that holds it, so no bucket is
+ *    ever half-counted at the left edge; `to` is clamped to today. The response
+ *    says what it measured.
  *  - Workload and aging work-in-progress describe NOW, not the range.
  *
  * ── Rebuilding history (cumulative flow, started-at, aging) ─────────────────
@@ -292,6 +294,37 @@ async function resolveScope(
   return { scope: "workspace", projectId: null, projectIds: projects.map((p) => p.id) };
 }
 
+/**
+ * The zone the buckets are cut in, and that zone's calendar day. Postgres does the
+ * bucketing, so it has to understand the zone as well as Node does. They ship their
+ * own time zone tables, and `Workspace.tz` is whatever setup stored (any string up
+ * to 64 characters, checked against neither), so a zone one knows and the other does
+ * not is possible. That is not worth a 500 on a charts page: fall back to UTC, which
+ * `meta.timezone` then reports.
+ */
+export async function resolveInsightsZone(
+  prisma: PrismaClient,
+  now: Date,
+  preferred: string | null,
+): Promise<{ zone: string; today: string }> {
+  const wanted = localDayInZone(now, preferred);
+  if (wanted.zone === "UTC" || (await databaseKnowsZone(prisma, wanted.zone))) {
+    return { zone: wanted.zone, today: wanted.date };
+  }
+  return { zone: "UTC", today: localDayInZone(now, "UTC").date };
+}
+
+async function databaseKnowsZone(prisma: PrismaClient, zone: string): Promise<boolean> {
+  try {
+    await prisma.$queryRaw`SELECT now() AT TIME ZONE ${zone}`;
+    return true;
+  } catch {
+    // Postgres raises `time zone "…" not recognized`. Any other failure (the
+    // connection) is raised again, properly, by the queries that follow.
+    return false;
+  }
+}
+
 async function computeInsights(
   prisma: PrismaClient,
   q: InsightsQuery,
@@ -303,7 +336,7 @@ async function computeInsights(
     where: { id: 1 },
     select: { tz: true },
   });
-  const { date: today, zone } = localDayInZone(now, timezone ?? workspace?.tz ?? null);
+  const { today, zone } = await resolveInsightsZone(prisma, now, timezone ?? workspace?.tz ?? null);
   const { from, to } = resolveInsightsRange({ from: q.from, to: q.to, groupBy }, today);
   const { scope, projectId, projectIds } = await resolveScope(prisma, q);
 

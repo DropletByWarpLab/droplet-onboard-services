@@ -1,7 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   bucketStart,
   resolveInsightsRange,
+  resolveInsightsZone,
   INSIGHTS_ERRORS,
   INSIGHTS_MAX_DAYS,
 } from "./pm-insights.service.js";
@@ -86,5 +87,37 @@ describe("resolveInsightsRange (WARP-3524)", () => {
     expect(() => resolveInsightsRange({ from: "2026-02-30", groupBy: "day" }, TODAY)).toThrow(
       INSIGHTS_ERRORS.INVALID_RANGE,
     );
+  });
+});
+
+describe("resolveInsightsZone (WARP-3524)", () => {
+  // 05:00Z on 4 October is still the evening of the 3rd in Los Angeles (PDT, UTC-7).
+  const NOW = new Date("2026-10-04T05:00:00.000Z");
+  const prismaWhere = (probe: () => Promise<unknown>) => ({ $queryRaw: vi.fn(probe) }) as never;
+
+  it("uses the zone it is given, and that zone's own calendar day, when Postgres knows it", async () => {
+    const prisma = prismaWhere(async () => [{}]);
+    expect(await resolveInsightsZone(prisma, NOW, "America/Los_Angeles")).toEqual({
+      zone: "America/Los_Angeles",
+      today: "2026-10-03",
+    });
+  });
+
+  it("falls back to UTC, and UTC's day, when Postgres does not recognise the zone", async () => {
+    // Node and Postgres ship their own time zone tables, and Workspace.tz is stored unchecked.
+    const prisma = prismaWhere(async () => {
+      throw new Error('time zone "America/Coyhaique" not recognized');
+    });
+    expect(await resolveInsightsZone(prisma, NOW, "America/Los_Angeles")).toEqual({
+      zone: "UTC",
+      today: "2026-10-04",
+    });
+  });
+
+  it("does not ask Postgres about UTC", async () => {
+    const prisma = prismaWhere(async () => {
+      throw new Error("must not be called");
+    });
+    expect(await resolveInsightsZone(prisma, NOW, "UTC")).toEqual({ zone: "UTC", today: "2026-10-04" });
   });
 });
