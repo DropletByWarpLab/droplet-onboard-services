@@ -1,0 +1,61 @@
+[Unit]
+Description=Droplet camera-recordings migration (root job: move old footage onto the protected bay drive, or delete it after owner confirmation)
+# WARP-3514 / ADR-070: Frigate's recordings move from their old home (the
+# `nvrdata` docker volume on the OS disk, or a previous bay drive) onto the
+# encrypted bay drive's `nvr/` directory. The device-bridge runs as the
+# unprivileged `droplet` user inside a sandbox (ProtectSystem=strict,
+# NoNewPrivileges) and can neither rsync across /mnt and docker's data root nor
+# stop/recreate containers as root, so it spools a request into its own
+# StateDirectory (/var/lib/droplet-bridge/nvr-spool/migrate-request.json) and
+# starts THIS unit with `systemctl start --no-block` through polkit
+# (50-droplet-device-bridge.rules: start verb, this unit only, user droplet
+# only). ExecStart consumes that one request as root, does the work, and keeps
+# /var/lib/droplet-bridge/nvr-spool/migrate-state.json up to date so the bridge
+# (GET /host/nvr-storage/migrate) can report progress.
+#
+# Two operations travel in the request: `migrate` (copy, stop, delta, verify,
+# flip, restart; the OLD footage is KEPT) and `delete_old` (the owner confirmed
+# deleting the kept footage at tier 3). The spool request is droplet-writable,
+# so the script treats it as UNTRUSTED input and decides what to delete from the
+# root-only record in /var/lib/droplet-nvr/migration.json alone.
+#
+# Deliberately NO [Install] section: this unit is never enabled and never runs
+# at boot; it only runs on demand, one job at a time (systemd serializes starts
+# of the same unit, and the script also takes a lock).
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/droplet-nvr-migrate.sh
+# The installer replaces @REPO_ROOT@ (like every unit installed from
+# services/oled-display). The script reads <repo>/.env for NVR_MEDIA_SOURCE and
+# runs `docker compose -f <repo>/docker/docker-compose.yml up -d
+# --force-recreate frigate` to put Frigate on the new drive.
+Environment=REPO_ROOT=@REPO_ROOT@
+# systemd's default PATH for a unit is fine, but pin it: this root script execs
+# docker, rsync, findmnt, du and python3 by name and must never pick them up
+# from anywhere else.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=/root
+# A multi-terabyte copy takes hours; the bridge polls the state file instead of
+# waiting on this unit. Stopping the unit (systemctl stop) is the supported way
+# to abort: the script then restarts Frigate on its old location and reports
+# `interrupted`.
+TimeoutStartSec=infinity
+TimeoutStopSec=300
+
+# --- Hardening ---
+# Root is required to read the docker volume, write the bay drive and drive the
+# docker daemon; the job also rewrites <repo>/.env (under /home) and rsyncs
+# onto /mnt, so ProtectHome / ProtectSystem / PrivateDevices are off the table.
+# The orthogonal reductions cost nothing: the docker CLI only ever talks to the
+# daemon over its unix socket, so the network namespace can stay empty
+# (PrivateNetwork) and only AF_UNIX is needed; the job never touches kernel
+# tunables, modules, logs or cgroups.
+PrivateNetwork=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=true
+RestrictRealtime=true
