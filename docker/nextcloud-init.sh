@@ -107,12 +107,12 @@ fi
 # compose always mounts the volume at the default path.
 DROPLET_SHARE_DIR="${DROPLET_SHARE_DIR:-/droplet-share}"
 if [ -d "$DROPLET_SHARE_DIR" ]; then
-  # Fresh named volumes materialize root-owned; Nextcloud (and smbd via
-  # `force user` uid 33) writes as www-data. Non-recursive on purpose — only
-  # the root dir's ownership matters for a local mount, and a recursive chown
-  # over a populated share would stall every boot. `|| true`: already-correct
-  # ownership or an unprivileged re-run must not abort the hook.
-  chown www-data:www-data "$DROPLET_SHARE_DIR" 2>/dev/null || true
+  # The share root's ownership is set by the compose `nextcloud` entrypoint
+  # (chown 33:33 as root, non-recursive: a recursive chown over a populated
+  # share would stall every boot), NOT here. A fresh named volume is root:root
+  # 755 and this hook runs as www-data (the stock entrypoint's run_as() su's
+  # before-starting hooks), so a chown from here can never take ownership of
+  # it — it was a silent EPERM that left the SMB drive read-only (WARP-3693).
   if EXT_LIST="$($OCC files_external:list --output=json 2>/dev/null)"; then
     EXT_ID="$(printf '%s' "$EXT_LIST" | php -r '
         $j = json_decode(stream_get_contents(STDIN), true) ?: [];
