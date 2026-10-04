@@ -152,7 +152,7 @@ export function validateCameraCredentials(username: unknown, password: unknown):
 /**
  * Merge `username`/`password` into `rtspUrl`, replacing any userinfo already
  * there, in the form Frigate needs (see the header). With no username the URL is
- * returned untouched. The authority is located with a regex rather than
+ * returned untouched. The authority is located with a linear scan rather than
  * `new URL()` because `rtsp:` is not a WHATWG special scheme and a parser would
  * risk normalising the vendor-specific path.
  *
@@ -167,11 +167,17 @@ export function embedRtspCredentials(
   password: string | undefined | null,
 ): string {
   if (!username) return rtspUrl;
-  const m = /^(rtsps?:\/\/)(?:[^/?#]*@)?(.*)$/i.exec(rtspUrl);
-  if (!m) return rtspUrl;
+  const scheme = /^rtsps?:\/\//i.exec(rtspUrl)?.[0];
+  if (!scheme || /[\r\n\u2028\u2029]/.test(rtspUrl)) return rtspUrl;
+  let authorityEnd = rtspUrl.length;
+  for (const separator of ["/", "?", "#"]) {
+    const position = rtspUrl.indexOf(separator, scheme.length);
+    if (position !== -1) authorityEnd = Math.min(authorityEnd, position);
+  }
+  const at = rtspUrl.lastIndexOf("@", authorityEnd - 1);
   const pw = password ?? "";
   const userinfo = frigateUserinfo(username, pw);
-  const rest = m[2]!;
+  const rest = rtspUrl.slice(at >= scheme.length ? at + 1 : scheme.length);
   if (FRIGATE_USERNAME.test(username) && rest.includes("@")) {
     throw new UnsafeCredentialsError(
       "address",
@@ -179,10 +185,10 @@ export function embedRtspCredentials(
       "stream address cannot contain an at sign for this camera account",
     );
   }
-  const stored = `${m[1]}${userinfo}@${rest}`;
+  const stored = `${scheme}${userinfo}@${rest}`;
   const escapedPw = quotePlus(pw);
   if (FRIGATE_USERNAME.test(username) && pw && escapedPw !== pw &&
-      stored.split(pw).join(escapedPw) !== `${m[1]}${username}:${escapedPw}@${rest}`) {
+      stored.split(pw).join(escapedPw) !== `${scheme}${username}:${escapedPw}@${rest}`) {
     // Frigate does path.replace(pw, quote_plus(pw)) over the WHOLE string, so a
     // password occurrence outside its field (even across the field boundary)
     // would change the username, scheme or camera address too.
@@ -203,5 +209,11 @@ export function embedRtspCredentials(
  * `@` or `/` is removed whole.
  */
 export function scrubUrlCredentials(text: string): string {
-  return text.replace(/(rtsps?:\/\/)\S*@/gi, "$1***@");
+  return text.replace(/\S+/g, (token) => {
+    const scheme = /rtsps?:\/\//i.exec(token);
+    if (!scheme) return token;
+    const start = scheme.index + scheme[0].length;
+    const at = token.lastIndexOf("@");
+    return at >= start ? `${token.slice(0, start)}***@${token.slice(at + 1)}` : token;
+  });
 }

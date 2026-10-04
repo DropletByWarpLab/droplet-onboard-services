@@ -247,7 +247,23 @@ describe("validateCameraCredentials", () => {
   });
 });
 
+describe("embedRtspCredentials — hostile authority", () => {
+  it("replaces repeated old userinfo without changing the vendor path", () => {
+    const address = `RTSP://${'@"'.repeat(20_000)}old@camera:554/vendor?channel=2#view`;
+    expect(embedRtspCredentials(address, "admin", "new-secret")).toBe("RTSP://admin:new-secret@camera:554/vendor?channel=2#view");
+  });
+
+  it("preserves the refusal of a line break in the supplied address", () => {
+    const address = `rtsp://${'@"'.repeat(20_000)}camera/live\n`;
+    expect(embedRtspCredentials(address, "admin", "new-secret")).toBe(address);
+  });
+});
+
 describe("scrubUrlCredentials", () => {
+  it("redacts a long hostile token and preserves separate credential-free URLs", () => {
+    const hostile = `rtsp://admin:${'@"'.repeat(20_000)}secret@camera/live`;
+    expect(scrubUrlCredentials(`${hostile} rtsp://camera/clean`)).toBe("rtsp://***@camera/live rtsp://camera/clean");
+  });
   it.each([
     "Invalid path rtsp://admin:C@mera!2024@192.168.9.5:554/profile2/media.smp for camera x",
     '{"path": "rtsp://admin:s3cret!@192.168.9.5/x", "roles": ["detect"]}',
