@@ -185,6 +185,12 @@ model StorageAllocation {
   /// BIGINT: a multi-TB drive overflows INT4.
   reservedBytes BigInt
   status        AllocationStatus @default(PENDING)
+  /// Failed moves of footage onto this drive since it was last confirmed. Drives
+  /// the auto-retry schedule (1 h, 6 h, 24 h, then the row stays PENDING and the
+  /// owner is told); reset to 0 by a success or by the owner's explicit retry.
+  migrationFailures Int          @default(0)
+  /// When the most recent failed move ended: the retry clock. Null until one failed.
+  lastFailureAt DateTime?
   createdAt     DateTime         @default(now())
   updatedAt     DateTime         @updatedAt
 

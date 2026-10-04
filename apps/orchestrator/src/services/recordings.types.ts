@@ -112,6 +112,10 @@ export interface AllocationRecord {
   mode: AllocationModeName;
   reservedBytes: number;
   status: AllocationStatusName;
+  /** Failed moves onto this drive since it was last confirmed (drives the 1 h / 6 h / 24 h retry schedule). */
+  migrationFailures: number;
+  /** When the most recent failed move ended — the retry clock; null until one failed. */
+  lastFailureAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -159,7 +163,14 @@ export interface RecordingsFrigateFacts {
  */
 export interface RecordingsFacts {
   at: Date;
+  /**
+   * The row the API and the status are ABOUT: while a move onto another drive is
+   * in flight (PUT to a different drive, or the first allocation) that is the
+   * TARGET row; otherwise the row Frigate records onto. See `selectSubjectAllocation`.
+   */
   allocation: AllocationRecord | null;
+  /** Every RECORDINGS row. Two exist only while a drive switch is in flight (target + the live row). */
+  allocations: AllocationRecord[];
   host: NvrHostStatus | null;
   hostError: string | null;
   migration: NvrMigrationStatus | null;

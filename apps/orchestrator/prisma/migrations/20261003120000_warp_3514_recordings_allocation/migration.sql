@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS "StorageAllocation" (
     "mode" "AllocationMode" NOT NULL DEFAULT 'AUTO_RESERVED',
     "reservedBytes" BIGINT NOT NULL,
     "status" "AllocationStatus" NOT NULL DEFAULT 'PENDING',
+    "migrationFailures" INTEGER NOT NULL DEFAULT 0,
+    "lastFailureAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
