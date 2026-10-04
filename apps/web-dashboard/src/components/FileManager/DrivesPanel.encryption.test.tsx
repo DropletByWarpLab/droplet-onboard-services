@@ -12,7 +12,8 @@
  *   - offers "Prepare drive" (erase + set up encrypted) on a plain drive behind
  *     the same confirm-token + typed-name friction as Reclaim;
  *   - hands the owner the one-time recovery key right after, via a dialog that
- *     can never be dismissed by accident;
+ *     can never be dismissed by accident (and offers a new one if it was missed);
+ *   - says plainly when the box has no TPM and so cannot encrypt;
  *   - disables Eject on the recordings drive, WITH an explanation;
  *   - and degrades silently on an orchestrator that predates all of it
  *     (WARP-3513 lands separately): no field → no claim, no crash.
@@ -45,7 +46,8 @@ vi.mock("@/lib/api", async () => {
     reclaimDrive: vi.fn(),
     confirmStorageCommand: vi.fn(),
     requestFormatPool: vi.fn(),
-    fetchRecoveryKey: vi.fn(),
+    revealRecoveryKey: vi.fn(),
+    regenerateRecoveryKey: vi.fn(),
   };
 });
 
@@ -55,8 +57,10 @@ import {
   adoptDrive,
   confirmStorageCommand,
   ejectDrive,
-  fetchRecoveryKey,
+  RecoveryKeyUnavailableError,
+  regenerateRecoveryKey,
   requestFormatPool,
+  revealRecoveryKey,
 } from "@/lib/api";
 import { DrivesPanel } from "./DrivesPanel";
 
@@ -414,22 +418,22 @@ describe("DrivesPanel — the one-time recovery key, right after preparing", () 
   it("offers the owner the key in a dialog naming the drive — and has consumed nothing yet", async () => {
     const keyDialog = await prepareAsOwner();
     expect(keyDialog).toHaveTextContent(/Wedding Photos/);
-    expect(fetchRecoveryKey).not.toHaveBeenCalled();
+    expect(revealRecoveryKey).not.toHaveBeenCalled();
   });
 
   it("looks up the NEW filesystem's id only when the owner asks, and shows the key", async () => {
-    (fetchRecoveryKey as ReturnType<typeof vi.fn>).mockResolvedValue(KEY);
+    (revealRecoveryKey as ReturnType<typeof vi.fn>).mockResolvedValue(KEY);
     await prepareAsOwner();
 
     fireEvent.click(screen.getByRole("button", { name: /show recovery key/i }));
 
     expect(await screen.findByTestId("recovery-key-value")).toHaveTextContent(KEY);
-    expect(fetchRecoveryKey).toHaveBeenCalledTimes(1);
-    expect(fetchRecoveryKey).toHaveBeenCalledWith("U-NEW-LUKS");
+    expect(revealRecoveryKey).toHaveBeenCalledTimes(1);
+    expect(revealRecoveryKey).toHaveBeenCalledWith("U-NEW-LUKS");
   });
 
   it("an encrypted drive carries a Recovery key button for the owner — for a key never viewed", async () => {
-    (fetchRecoveryKey as ReturnType<typeof vi.fn>).mockResolvedValue(KEY);
+    (revealRecoveryKey as ReturnType<typeof vi.fn>).mockResolvedValue(KEY);
     setup({ drives: [encrypted()] });
     const button = within(cardOf("Bay 2")).getByRole("button", { name: /recovery key/i });
     expect(button.className).toMatch(/(?:^|\s)relative(?:\s|$)/);
@@ -437,7 +441,7 @@ describe("DrivesPanel — the one-time recovery key, right after preparing", () 
     fireEvent.click(button);
     fireEvent.click(await screen.findByRole("button", { name: /show recovery key/i }));
     await screen.findByTestId("recovery-key-value");
-    expect(fetchRecoveryKey).toHaveBeenCalledWith("U-ENC");
+    expect(revealRecoveryKey).toHaveBeenCalledWith("U-ENC");
   });
 
   it("an admin and a family member are not offered the recovery key", () => {
@@ -556,5 +560,102 @@ describe("DrivesPanel — never crashes on a half-adopted payload", () => {
     setup({ drives: [makeDrive({ preparation: "needs_preparing" }), makeDrive({ uuid: "U-2", displayName: "Other", usage: { role: "recordings", reservedBytes: null } })] });
     expect(screen.getByText("Needs preparing — will be encrypted")).toBeInTheDocument();
     expect(screen.getByText("Used for: Camera recordings")).toBeInTheDocument();
+  });
+});
+
+describe("DrivesPanel — a Droplet with no TPM cannot encrypt a drive", () => {
+  const TPM = "This Droplet has no security chip (TPM); drives can't be encrypted.";
+  const tpmError = () =>
+    Object.assign(new Error("tpm_required"), { status: 409, code: "tpm_required" });
+  const mintToken = {
+    status: "confirmation_required",
+    confirmationToken: "tok",
+    service: "drive_adopt",
+    resourceId: "sdb",
+  };
+
+  it("Prepare: a refusal when the token is minted says so, and no dialog opens", async () => {
+    (adoptDrive as ReturnType<typeof vi.fn>).mockRejectedValue(tpmError());
+    setup();
+    fireEvent.click(within(cardOf("Wedding Photos")).getByRole("button", { name: /prepare drive/i }));
+    await waitFor(() => expect(toastMock).toHaveBeenCalledWith(TPM, "error"));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("Prepare: a refusal on the confirm says so too — and still closes (a used token is not retryable)", async () => {
+    (adoptDrive as ReturnType<typeof vi.fn>).mockResolvedValue(mintToken);
+    (confirmStorageCommand as ReturnType<typeof vi.fn>).mockRejectedValue(tpmError());
+    setup();
+    fireEvent.click(within(cardOf("Wedding Photos")).getByRole("button", { name: /prepare drive/i }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox"), { target: { value: "Wedding Photos" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /^prepare drive$/i }));
+    await waitFor(() => expect(toastMock).toHaveBeenCalledWith(TPM, "error"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("Erase & adopt on an older orchestrator says it as well", async () => {
+    (adoptDrive as ReturnType<typeof vi.fn>).mockRejectedValue(tpmError());
+    setup({ drives: [makeDrive()], disks: [makeDisk()] });
+    fireEvent.click(screen.getByRole("button", { name: /erase & adopt/i }));
+    await waitFor(() => expect(toastMock).toHaveBeenCalledWith(TPM, "error"));
+  });
+
+  it("Format & mount says it too", async () => {
+    (requestFormatPool as ReturnType<typeof vi.fn>).mockRejectedValue(tpmError());
+    setup({
+      pools: [{ device: "md127", level: "raid1", status: "active", members: ["sda", "sdb"], displayName: "Pool" }],
+      drives: [],
+    });
+    fireEvent.click(screen.getByRole("button", { name: /format & mount/i }));
+    await waitFor(() => expect(toastMock).toHaveBeenCalledWith(TPM, "error"));
+  });
+
+  it("any other failure still gets the calm 'couldn't prepare' copy — not the TPM sentence", async () => {
+    (adoptDrive as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("boom"));
+    setup();
+    fireEvent.click(within(cardOf("Wedding Photos")).getByRole("button", { name: /prepare drive/i }));
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith(expect.stringMatching(/couldn't prepare that drive/i), "error"),
+    );
+    expect(toastMock).not.toHaveBeenCalledWith(TPM, "error");
+  });
+});
+
+describe("DrivesPanel — replacing a missed or expired recovery key (tier 3)", () => {
+  it("gone → generate a new key → type the drive's name → regenerate for THAT drive → reveal the new one", async () => {
+    (revealRecoveryKey as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new RecoveryKeyUnavailableError("gone"))
+      .mockResolvedValueOnce(KEY);
+    (regenerateRecoveryKey as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    setup({ drives: [encrypted()] });
+
+    fireEvent.click(within(cardOf("Bay 2")).getByRole("button", { name: /recovery key/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /show recovery key/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /generate a new recovery key/i }));
+
+    const heading = await screen.findByRole("heading", { name: /generate a new recovery key\?/i });
+    const confirm = heading.closest('[role="dialog"]') as HTMLElement;
+    expect(regenerateRecoveryKey).not.toHaveBeenCalled();
+    fireEvent.change(within(confirm).getByRole("textbox"), { target: { value: "Bay 2" } });
+    fireEvent.click(within(confirm).getByRole("button", { name: /^generate new key$/i }));
+
+    await waitFor(() => expect(regenerateRecoveryKey).toHaveBeenCalledWith("U-ENC"));
+    fireEvent.click(await screen.findByRole("button", { name: /show recovery key/i }));
+    expect(await screen.findByTestId("recovery-key-value")).toHaveTextContent(KEY);
+  });
+});
+
+describe("DrivesPanel — the recordings explanation, for whoever reads it", () => {
+  it("an owner or admin is pointed at where the recordings drive is changed", () => {
+    setup({ role: "admin", drives: [recordingsDrive()] });
+    expect(within(cardOf("Bay 2")).getByRole("link", { name: /recording storage/i })).toBeInTheDocument();
+  });
+
+  it("a family member gets the reason but not a link into a card they cannot see", () => {
+    setup({ role: "family", drives: [recordingsDrive()] });
+    const card = cardOf("Bay 2");
+    expect(card).toHaveTextContent(/camera recordings are stored on this drive/i);
+    expect(within(card).queryByRole("link", { name: /recording storage/i })).not.toBeInTheDocument();
   });
 });

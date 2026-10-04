@@ -1064,7 +1064,7 @@ export async function requestCreatePool(input: {
   });
   if (res.status !== 202) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Could not start pool creation: ${res.status}`);
+    throw storageWriteError(body, res.status, "Could not start pool creation");
   }
   return res.json();
 }
@@ -1105,7 +1105,7 @@ export async function requestFormatPool(
   );
   if (res.status !== 202) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Could not start pool format: ${res.status}`);
+    throw storageWriteError(body, res.status, "Could not start pool format");
   }
   return res.json();
 }
@@ -1129,7 +1129,7 @@ export async function requestAdoptDrive(input: {
   });
   if (res.status !== 202) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Could not start drive adopt: ${res.status}`);
+    throw storageWriteError(body, res.status, "Could not start drive adopt");
   }
   return res.json();
 }
@@ -1156,7 +1156,7 @@ export async function reclaimDrive(input: {
   });
   if (res.status !== 202) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Could not start drive reclaim: ${res.status}`);
+    throw storageWriteError(body, res.status, "Could not start drive reclaim");
   }
   return res.json();
 }
@@ -1174,7 +1174,7 @@ export async function confirmPoolCommand(input: {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Could not complete the operation: ${res.status}`);
+    throw storageWriteError(body, res.status, "Could not complete the operation");
   }
   return res.json();
 }
@@ -1454,41 +1454,117 @@ export class RecoveryKeyUnavailableError extends Error {
 }
 
 /**
- * GET /api/storage/drives/:id/recovery-key — the drive's LUKS recovery key,
- * handed over ONCE (owner only): 200 `{ recoveryKey }` the first time, 410 ever
- * after. `:id` is the drive's filesystem UUID, as on every other
- * `/storage/drives/:uuid/*` route.
+ * POST /api/storage/drives/:id/recovery-key/reveal — hand over the drive's
+ * LUKS recovery key, ONCE (owner only, tier 2). `:id` is the drive's filesystem
+ * UUID, as on every other `/storage/drives/:uuid/*` route.
  *
- * Because the read consumes the key, this function has three hard rules:
- *   - never retry (a retry after a read that succeeded server-side would 410 and
- *     the key would be lost — `authFetch` only re-sends after a 401, which never
- *     reached the handler);
- *   - never cache (`cache: "no-store"` — a secret in an HTTP cache outlives the
- *     one-time promise);
- *   - keep "already shown" (410 → RecoveryKeyUnavailableError "gone") distinct
- *     from "couldn't ask" (a plain Error with its status), so a flaky network is
+ * It is a tier-2 write, so it follows the storage handshake: the POST answers
+ * 202 + a single-use token, the owner has ALREADY confirmed in the dialog that
+ * called us, and echoing the token through `POST /api/storage/command/confirm`
+ * is what executes the reveal and returns `{ recoveryKey }`. 200 the first time,
+ * 410 ever after (revealed already, or shredded after its 7-day hold). A server
+ * that answers the first POST with the key directly is accepted too.
+ *
+ * Because the reveal consumes the key, this function has hard rules:
+ *   - never retry (a retry after a reveal that succeeded server-side would 410
+ *     and the key would be lost — `authFetch` only re-sends after a 401, which
+ *     never reached the handler); a lost key is what `regenerateRecoveryKey`
+ *     is for;
+ *   - never cache (`cache: "no-store"` on BOTH requests — a secret in an HTTP
+ *     cache outlives the one-time promise);
+ *   - keep "gone" (410 → RecoveryKeyUnavailableError "gone") distinct from
+ *     "couldn't ask" (a plain Error with its status), so a flaky network is
  *     never worded as a lost key.
  * The key is returned, never stored: the caller holds it in component state for
  * exactly as long as the dialog is open.
  */
-export async function fetchRecoveryKey(driveId: string): Promise<string> {
+export async function revealRecoveryKey(driveId: string): Promise<string> {
   if (!driveId) throw new RecoveryKeyUnavailableError("not_found");
-  const res = await authFetch(
-    `${BASE}/api/storage/drives/${encodeURIComponent(driveId)}/recovery-key`,
-    { cache: "no-store" },
+  const first = await authFetch(
+    `${BASE}/api/storage/drives/${encodeURIComponent(driveId)}/recovery-key/reveal`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+      cache: "no-store",
+    },
   );
+  const afterFirst = await readRecoveryKeyReply(first);
+  if (afterFirst.key) return afterFirst.key;
+  if (!afterFirst.token) throw new Error("The recovery key response was empty.");
+  const { confirmationToken, service, resourceId } = afterFirst.token;
+  const confirmed = await authFetch(`${BASE}/api/storage/command/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirmationToken, service, resourceId }),
+    cache: "no-store",
+  });
+  const afterConfirm = await readRecoveryKeyReply(confirmed);
+  if (!afterConfirm.key) throw new Error("The recovery key response was empty.");
+  return afterConfirm.key;
+}
+
+/** One reply of the reveal handshake: a key, a token to confirm, or a typed
+ *  refusal. Anything else is a plain failure that carries its status. */
+async function readRecoveryKeyReply(
+  res: Response,
+): Promise<{
+  key?: string;
+  token?: { confirmationToken: string; service: string; resourceId: string };
+}> {
   if (res.status === 410) throw new RecoveryKeyUnavailableError("gone");
   if (res.status === 404) throw new RecoveryKeyUnavailableError("not_found");
   if (res.status === 403) throw new RecoveryKeyUnavailableError("forbidden");
   const body = (await res.json().catch(() => ({}))) as {
     recoveryKey?: unknown;
+    confirmationToken?: unknown;
+    service?: unknown;
+    resourceId?: unknown;
     error?: unknown;
     code?: unknown;
   };
   if (!res.ok) throw storageWriteError(body, res.status, "Failed to fetch the recovery key");
   const key = typeof body.recoveryKey === "string" ? body.recoveryKey.trim() : "";
-  if (!key) throw new Error("The recovery key response was empty.");
-  return key;
+  if (key) return { key };
+  if (typeof body.confirmationToken === "string" && body.confirmationToken) {
+    if (typeof body.service !== "string" || typeof body.resourceId !== "string") {
+      throw new Error("Unexpected 202 response: missing service or resourceId");
+    }
+    return {
+      token: {
+        confirmationToken: body.confirmationToken,
+        service: body.service,
+        resourceId: body.resourceId,
+      },
+    };
+  }
+  return {};
+}
+
+/**
+ * POST /api/storage/drives/:id/recovery-key/regenerate — replace the drive's
+ * recovery key with a new one (owner only, tier 3), for when the key was missed
+ * or its 7-day hold expired. The old key stops working, so the caller has the
+ * owner type a phrase first; the new key is then revealed the same way as the
+ * first (`revealRecoveryKey`).
+ *
+ * NOTE: the WARP-3512 contract names this action ("Regenerate recovery key",
+ * owner, tier 3) but not its path. `.../recovery-key/regenerate` is the sibling
+ * of `.../recovery-key/reveal` and is assumed; this function is the one place
+ * to change if the orchestrator names it differently.
+ */
+export async function regenerateRecoveryKey(driveId: string): Promise<void> {
+  if (!driveId) throw new Error("There's no drive to generate a recovery key for.");
+  const res = await authFetch(
+    `${BASE}/api/storage/drives/${encodeURIComponent(driveId)}/recovery-key/regenerate`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+      cache: "no-store",
+    },
+  );
+  await finishStorageWrite(res, "Failed to generate a new recovery key");
 }
 
 // --- Health ---

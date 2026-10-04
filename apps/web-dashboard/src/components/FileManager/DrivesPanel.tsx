@@ -26,6 +26,7 @@ import {
   confirmStorageCommand,
   ejectDrive,
   reclaimDrive,
+  regenerateRecoveryKey,
   requestFormatPool,
   rescanDrives,
   updateDriveLabel,
@@ -39,7 +40,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 // DestructiveConfirm the Settings Danger zone puts in front of a reformat.
 // One primitive for every type-to-confirm destructive flow, never a fork.
 import { DestructiveConfirm } from "@/components/settings/DestructiveConfirm";
-import { translateError } from "@/lib/friendly-errors";
+import { TPM_REQUIRED_MESSAGE, isTpmRequired, translateError } from "@/lib/friendly-errors";
 import { RECORDING_STORAGE_HREF } from "@/lib/recording-storage";
 import type {
   DataStorageTotals,
@@ -235,6 +236,9 @@ function friendlyPrepareError(err: unknown): string {
   const raw = err instanceof Error ? err.message.toLowerCase() : "";
   // eslint-disable-next-line no-console
   console.error("[drives-panel:prepare]", err);
+  // ADR-070: Prepare seals the drive's key to the TPM; a box without one refuses
+  // (409 tpm_required) before it wipes anything.
+  if (isTpmRequired(err)) return TPM_REQUIRED_MESSAGE;
   if (/system disk|never adoptable|os\/boot|backs the os|boot disk/.test(raw)) {
     return "That's the Droplet's system disk — it can't be erased or prepared.";
   }
@@ -285,20 +289,28 @@ function UsageBadge({ drive }: { drive: Pick<DriveInfo, "usage"> }) {
 
 /** Why the recordings drive cannot be ejected or erased — also the accessible
  *  description of the disabled Eject. Links to where it IS changed. */
-function RecordingsLock({ id }: { id: string }) {
+function RecordingsLock({ id, canChange }: { id: string; canChange: boolean }) {
   return (
     <p id={id} className="mt-2" style={{ fontSize: "12px", color: "var(--text-muted)" }}>
       Camera recordings are stored on this drive, so it can&rsquo;t be ejected or
-      erased. To use a different drive,{" "}
-      <Link
-        href={RECORDING_STORAGE_HREF}
-        // Lifted above the card's stretched title link, like every control here.
-        className="relative underline focus-visible:outline-none focus-visible:ring-2"
-        style={{ color: "var(--brand)", borderRadius: "var(--radius-input)" }}
-      >
-        change it in Recording storage
-      </Link>
-      .
+      erased.
+      {/* The Recording storage card is owner/admin only (a family account gets a
+          403 and no card), so a link to it would be a dead end for anyone else. */}
+      {canChange && (
+        <>
+          {" "}
+          To use a different drive,{" "}
+          <Link
+            href={RECORDING_STORAGE_HREF}
+            // Lifted above the card's stretched title link, like every control here.
+            className="relative underline focus-visible:outline-none focus-visible:ring-2"
+            style={{ color: "var(--brand)", borderRadius: "var(--radius-input)" }}
+          >
+            change it in Recording storage
+          </Link>
+          .
+        </>
+      )}
     </p>
   );
 }
@@ -532,7 +544,7 @@ export function DrivesPanel() {
         pool,
       });
     } catch (err) {
-      toast(translateError(err, "files"), "error");
+      toast(isTpmRequired(err) ? TPM_REQUIRED_MESSAGE : translateError(err, "files"), "error");
     } finally {
       setFormatBusy(null);
     }
@@ -553,7 +565,7 @@ export function DrivesPanel() {
       void offerRecoveryKey({ name: poolName(p.pool), poolDevice: p.pool.device, known });
     } catch (err) {
       setFormatPending(null);
-      toast(translateError(err, "files"), "error");
+      toast(isTpmRequired(err) ? TPM_REQUIRED_MESSAGE : translateError(err, "files"), "error");
     }
   }
 
@@ -1179,6 +1191,9 @@ export function DrivesPanel() {
         open={keyPrompt !== null}
         driveName={keyPrompt?.name ?? ""}
         resolveDriveId={keyPrompt?.resolve ?? (async () => null)}
+        // A key that was missed (or expired after 7 days) can be replaced — tier 3,
+        // owner only. Only an owner is ever shown this dialog.
+        onRegenerate={isOwner ? (id) => regenerateRecoveryKey(id) : undefined}
         onClose={() => setKeyPrompt(null)}
         triggerRef={destructiveTriggerRef}
       />
@@ -1708,7 +1723,7 @@ function DriveCard({
           {system && <Badge kind="muted">System drive</Badge>}
         </div>
       )}
-      {recordings && <RecordingsLock id={lockId} />}
+      {recordings && <RecordingsLock id={lockId} canChange={isAdmin} />}
 
       {/* Hardware facts — friendly only. The raw /dev/sdX path is deliberately
           never surfaced (home-user persona, ADR-002); the bus label above is
