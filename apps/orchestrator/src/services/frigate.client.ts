@@ -374,6 +374,46 @@ export async function fetchEventCamera(eventId: string): Promise<string | null> 
   return typeof body.camera === "string" && body.camera ? body.camera : null;
 }
 
+export interface EventPlaybackSpan {
+  camera: string;
+  /** Unix seconds. */
+  startTime: number;
+  /** Unix seconds; null while Frigate is still tracking the event. */
+  endTime: number | null;
+}
+
+/**
+ * WARP-3509 — where and when an event happened, for building the window its
+ * clip plays over as HLS (`GET /api/events/<id>`, frigate/api/event.py).
+ *
+ * `FrigateNotFoundError("event_not_found")` when Frigate has no such event.
+ * Every other non-2xx, a body that is not JSON, and a row without a camera or
+ * a start time (a proxy's page, a Frigate that changed shape) is a
+ * `FrigateUpstreamError`: the caller cannot build a window from it.
+ */
+export async function fetchEventPlaybackSpan(eventId: string): Promise<EventPlaybackSpan> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/events/${encodeURIComponent(eventId)}`,
+    { signal: timeout() },
+  );
+  if (resp.status === 404) throw new FrigateNotFoundError("event_not_found");
+  if (!resp.ok) throw new FrigateUpstreamError("event lookup", resp.status);
+
+  let body: { camera?: unknown; start_time?: unknown; end_time?: unknown } | null;
+  try {
+    body = (await resp.json()) as typeof body;
+  } catch (err) {
+    throw new FrigateUpstreamError("event lookup", resp.status, "not JSON", err);
+  }
+
+  const { camera, start_time: start, end_time: end } = body ?? {};
+  const finite = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
+  if (typeof camera !== "string" || !camera || !finite(start) || !(end === null || end === undefined || finite(end))) {
+    throw new FrigateUpstreamError("event lookup", resp.status, "unexpected shape");
+  }
+  return { camera, startTime: start, endTime: end ?? null };
+}
+
 /** WARP-2982 — which camera does this review cluster belong to? */
 export async function fetchReviewCamera(reviewId: string): Promise<string | null> {
   const resp = await fetch(
@@ -607,6 +647,13 @@ export async function fetchReviewThumbnail(reviewId: string): Promise<ReviewThum
  *
  * Frigate answers 404 while it has nothing to render — the normal state of a
  * review that is still open — which is `FrigateNotFoundError("preview_not_found")`.
+ *
+ * Unlike an event's `clip.mp4` (a fragmented mp4 streamed as ffmpeg makes it,
+ * which a <video> cannot read a length from or seek in — that plays as HLS, see
+ * `GET /cameras/events/:eventId/playback.m3u8`), this is a regular file:
+ * `preview_mp4` in frigate/api/media.py writes it with `-movflags +faststart`
+ * (both of its ffmpeg paths) and nginx serves it from disk through
+ * X-Accel-Redirect, with a Content-Length. It plays in a plain <video src> as is.
  */
 export async function fetchReviewPreview(reviewId: string): Promise<Response> {
   const resp = await fetch(
