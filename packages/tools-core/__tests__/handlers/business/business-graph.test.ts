@@ -961,6 +961,33 @@ describe("business_timeline", () => {
     expect((expectOk(out).data as { timeline: unknown[] }).timeline).toHaveLength(1);
   });
 
+  it("leaves out a deleted comment's tombstone and the mention queue rows (WARP-3519)", async () => {
+    // A deleted comment stays in the orchestrator's list with an empty body, and
+    // `mentioned` is the notification-queue row for a person the comment names.
+    // Neither is something that happened that a model should read about.
+    // Mutation: drop `if (c.deleted) continue` → an empty COMMENT entry;
+    // drop the `mentioned` skip → a "comment: <id> → <id>" line of raw ids.
+    get.mockImplementation(async (url: string) =>
+      url.endsWith("/activity")
+        ? res(true, 200, {
+            activity: [
+              { id: "a1", verb: "mentioned", field: "comment", oldValue: "cm1", newValue: "u-bob", createdAt: "2026-08-02T00:00:00.000Z" },
+              { id: "a2", verb: "comment_deleted", field: "comment", oldValue: "cm2", newValue: null, createdAt: "2026-08-03T00:00:00.000Z" },
+            ],
+          })
+        : res(true, 200, {
+            comments: [
+              { id: "cm1", commentHtml: "<p>Kept</p>", createdAt: "2026-08-02T00:00:00.000Z" },
+              { id: "cm2", commentHtml: "", deleted: true, createdAt: "2026-08-02T01:00:00.000Z" },
+            ],
+          }),
+    );
+    const out = await businessTimeline.handler({ entity: "work_item", id: "w1" }, ctx);
+    const feed = (expectOk(out).data as { timeline: Array<{ id: string; kind: string }> }).timeline;
+    // The deletion itself is still history; the tombstone and the queue row are not entries.
+    expect(feed.map((e) => e.id)).toEqual(["a2", "cm1"]);
+  });
+
   it("caps the MERGED feed, not each source", async () => {
     get.mockImplementation(async (url: string) =>
       url.endsWith("/activity")
