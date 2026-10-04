@@ -78,8 +78,15 @@
 .pm-scope .pm-btn:hover { background: var(--bg-hover); border-color: var(--border-strong); }
 .pm-scope .pm-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
 .pm-scope .pm-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.pm-scope .pm-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.pm-scope .pm-btn.primary:hover { background: var(--color-accent-hover, var(--accent)); border-color: var(--color-accent-hover, var(--accent)); }
+/* WARP-3181 — the primary button is the accent as a SOLID FILL under text, so it
+ * takes the fill/ink pair globals.css measures for exactly that, not the raw
+ * accent with literal white. White on the vivid accent is 4.47:1 in light
+ * (#fff on #6366f1) and 2.98:1 in dark (#fff on #818cf8) — both under AA's
+ * 4.5:1. The pair below is 6.29:1 / 5.64:1 at rest and 7.90:1 / 8.44:1 on hover
+ * (light / dark); ink flips with the theme (--color-on-accent), so it must
+ * never be hardcoded here. Pinned by src/__tests__/projects-btn-primary.contrast.test.ts. */
+.pm-scope .pm-btn.primary { background: var(--color-accent-fill); border-color: var(--color-accent-fill); color: var(--color-on-accent); }
+.pm-scope .pm-btn.primary:hover { background: var(--color-accent-fill-hover); border-color: var(--color-accent-fill-hover); }
 .pm-scope .pm-btn.ghost { background: transparent; border-color: transparent; color: var(--text-2); }
 .pm-scope .pm-btn.ghost:hover { background: var(--bg-hover); color: var(--text); }
 .pm-scope .pm-btn.danger { background: var(--err); border-color: var(--err); color: #fff; }
