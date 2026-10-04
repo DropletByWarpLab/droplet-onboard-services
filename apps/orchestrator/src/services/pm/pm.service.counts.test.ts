@@ -9,28 +9,60 @@ import { getSummary, listProjects } from "./pm.service.js";
  *    group this week, not only `completed`.
  */
 
-const now = new Date();
-const threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);
-const tenDaysAgo = new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000);
+const now = new Date("2026-10-04T12:00:00.000Z");
+const weekAgo = new Date("2026-09-27T12:00:00.000Z");
 
 describe("getSummary count correctness", () => {
-  it("counts stateless items as open and includes cancelled-this-week in doneThisWeek", async () => {
-    const items = [
-      { dueDate: null, completedAt: null, isCompleted: false, state: { group: "started" } }, // open
-      { dueDate: null, completedAt: null, isCompleted: false, state: null }, // stateless → open (finding 5)
-      { dueDate: null, completedAt: null, isCompleted: false, state: null }, // stateless → open (finding 5)
-      { dueDate: null, completedAt: threeDaysAgo, isCompleted: true, state: { group: "completed" } }, // done this week
-      { dueDate: null, completedAt: threeDaysAgo, isCompleted: true, state: { group: "cancelled" } }, // done this week (finding 6)
-      { dueDate: null, completedAt: tenDaysAgo, isCompleted: true, state: { group: "cancelled" } }, // too old → not counted
-    ];
+  // The numbers themselves are proved against Postgres in
+  // __tests__/pm-insights.pg.test.ts (stateless item, cancelled-this-week,
+  // unassigned, archived project). What a mock can pin is the QUESTION each
+  // count asks, so the rules findings 5 and 6 established cannot drift.
+  it("asks the database four questions and maps each answer to its field", async () => {
+    const wheres: Array<Record<string, unknown>> = [];
+    const answers = [11, 2, 5, 3]; // itemsOpen, overdue, doneThisWeek, unassigned — in call order
     const prisma = {
-      pmProject: { findMany: async () => [{ id: "p1" }] },
-      pmWorkItem: { findMany: async () => items },
+      pmProject: { findMany: async () => [{ id: "p1" }, { id: "p2" }] },
+      pmWorkItem: {
+        count: async ({ where }: { where: Record<string, unknown> }) => {
+          wheres.push(where);
+          return answers[wheres.length - 1];
+        },
+      },
     } as never;
 
-    const summary = await getSummary(prisma);
-    expect(summary.itemsOpen).toBe(3); // 1 started + 2 stateless
-    expect(summary.doneThisWeek).toBe(2); // 1 completed + 1 cancelled this week
+    const summary = await getSummary(prisma, "home", now);
+
+    expect(summary).toEqual({ activeProjects: 2, itemsOpen: 11, overdue: 2, doneThisWeek: 5, unassigned: 3 });
+    expect(wheres).toHaveLength(4);
+    const [itemsOpen, overdue, doneThisWeek, unassigned] = wheres;
+    for (const where of wheres) {
+      expect(where).toMatchObject({ projectId: { in: ["p1", "p2"] }, isArchived: false });
+    }
+    // Open = a started-ish group OR no state at all (finding 5: stateless counts as open).
+    const open = { OR: [{ stateId: null }, { state: { group: { in: ["backlog", "unstarted", "started"] } } }] };
+    expect(itemsOpen).toMatchObject(open);
+    expect(overdue).toMatchObject({ ...open, dueDate: { lt: now } });
+    expect(unassigned).toMatchObject({ ...open, assignees: { none: {} } });
+    // Done = isCompleted, whatever the group: cancelled counts (finding 6). No open filter here.
+    expect(doneThisWeek).toMatchObject({ isCompleted: true, completedAt: { gte: weekAgo } });
+    expect(doneThisWeek).not.toHaveProperty("OR");
+  });
+
+  it("is all zeros, and asks no count, for a workspace with no live project", async () => {
+    const count = async () => {
+      throw new Error("must not be called");
+    };
+    const prisma = {
+      pmProject: { findMany: async () => [] },
+      pmWorkItem: { count },
+    } as never;
+    expect(await getSummary(prisma, "home", now)).toEqual({
+      activeProjects: 0,
+      itemsOpen: 0,
+      doneThisWeek: 0,
+      overdue: 0,
+      unassigned: 0,
+    });
   });
 });
 

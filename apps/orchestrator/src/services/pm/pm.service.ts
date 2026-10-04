@@ -160,6 +160,8 @@ export interface ApiPmSummary {
   itemsOpen: number;
   doneThisWeek: number;
   overdue: number;
+  /** Open items with nobody assigned (ADR-044 follow-up, WARP-3524). */
+  unassigned: number;
 }
 
 type PmStateGroup = StateRow["group"];
@@ -494,49 +496,44 @@ export async function listProjects(
   return projects;
 }
 
-/** Index KPI strip: active projects, open items, done in the last 7 days, and
- *  overdue (open items past their due date). One scan over the workspace. */
+/** Index KPI strip: active projects, open items, done in the last 7 days,
+ *  overdue (open items past their due date) and unassigned (open items nobody
+ *  owns). Four counts in the database, not a scan of every row in JS — the
+ *  numbers must stay exact however many items the workspace holds.
+ *
+ *  "Open" is the same rule as `listProjects`: a state in backlog / unstarted /
+ *  started, or no state at all (WARP-884 / finding #5). `doneThisWeek` counts
+ *  anything with `isCompleted` — cancelled included — which is what the strip
+ *  has always shown and what finding #6 pinned. `now` is injectable for tests. */
 export async function getSummary(
   prisma: PrismaClient,
   workspaceSlug: string = HOME_WORKSPACE_SLUG,
+  now: Date = new Date(),
 ): Promise<ApiPmSummary> {
   const projects = await prisma.pmProject.findMany({
     where: { workspace: { slug: workspaceSlug }, isArchived: false },
     select: { id: true },
   });
   if (projects.length === 0) {
-    return { activeProjects: 0, itemsOpen: 0, doneThisWeek: 0, overdue: 0 };
+    return { activeProjects: 0, itemsOpen: 0, doneThisWeek: 0, overdue: 0, unassigned: 0 };
   }
-  const items = await prisma.pmWorkItem.findMany({
-    where: { projectId: { in: projects.map((p) => p.id) }, isArchived: false },
-    select: {
-      dueDate: true,
-      completedAt: true,
-      isCompleted: true,
-      state: { select: { group: true } },
-    },
-  });
-  const now = new Date();
   const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  let itemsOpen = 0;
-  let doneThisWeek = 0;
-  let overdue = 0;
-  for (const it of items) {
-    const g = it.state?.group;
-    // Stateless items are uncategorised-but-open (mirrors listProjects bucketing
-    // them as "unstarted"); count them in itemsOpen so the KPI strip isn't
-    // understated, not silently dropped (finding #5).
-    const open = g === undefined || g === "backlog" || g === "unstarted" || g === "started";
-    if (open) {
-      itemsOpen += 1;
-      if (it.dueDate && it.dueDate < now) overdue += 1;
-    }
-    // WARP-884: `isCompleted` is the canonical completion signal — no longer
-    // re-derived from `state.group` combined with a `completedAt` truthy
-    // check (the exact dual-signal split-brain this ticket closes).
-    if (it.isCompleted && it.completedAt && it.completedAt >= weekAgo) doneThisWeek += 1;
-  }
-  return { activeProjects: projects.length, itemsOpen, doneThisWeek, overdue };
+  const inScope: Prisma.PmWorkItemWhereInput = {
+    projectId: { in: projects.map((p) => p.id) },
+    isArchived: false,
+  };
+  const open: Prisma.PmWorkItemWhereInput = {
+    OR: [{ stateId: null }, { state: { group: { in: OPEN_GROUPS } } }],
+  };
+  const [itemsOpen, overdue, doneThisWeek, unassigned] = await Promise.all([
+    prisma.pmWorkItem.count({ where: { ...inScope, ...open } }),
+    prisma.pmWorkItem.count({ where: { ...inScope, ...open, dueDate: { lt: now } } }),
+    // WARP-884: `isCompleted` is the canonical completion signal — not
+    // re-derived from `state.group` plus a `completedAt` check.
+    prisma.pmWorkItem.count({ where: { ...inScope, isCompleted: true, completedAt: { gte: weekAgo } } }),
+    prisma.pmWorkItem.count({ where: { ...inScope, ...open, assignees: { none: {} } } }),
+  ]);
+  return { activeProjects: projects.length, itemsOpen, doneThisWeek, overdue, unassigned };
 }
 
 export async function getProject(prisma: PrismaClient, projectId: string): Promise<ApiProject> {
