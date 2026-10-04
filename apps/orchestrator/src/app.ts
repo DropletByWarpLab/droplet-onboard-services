@@ -56,6 +56,7 @@ import { createMatterRouter } from "./routes/matter.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
+import { createPmFieldsRouter } from "./routes/pm/fields.js";
 import { createCrmRouter } from "./routes/crm.js";
 import { createMoneyRouter } from "./routes/money.js";
 import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
@@ -556,6 +557,11 @@ export function createApp(
   // (blocks / relates / duplicates). Its own router on the same prefix; the
   // paths are disjoint from the native router's, so neither shadows the other.
   app.use("/api", createPmRelationsRouter(prisma));
+  // WARP-3520 (ADR-069 WS-4) — custom fields: per-project definitions and the
+  // values items hold. Its own router for the same reason: disjoint paths
+  // (`/pm/properties/...`, `.../properties/:propertyId`), its own error
+  // vocabulary. `/api/pm` is gated by prefix, so the `projects` gate covers it.
+  app.use("/api", createPmFieldsRouter(prisma));
   // WARP-2117 — the CRM, which lives inside the Projects surface. Mounted
   // AFTER the PM router but on a disjoint prefix (`/api/crm`), so neither
   // shadows the other; the `crm` module gate comes from the registry.
