@@ -311,8 +311,8 @@ selection happened to hide was still obeyed.
 ### Checks added in WARP-3545
 
 Keys of a case's `expected` (the full list is `build_cases.py`'s docstring). **An
-unknown key, an unknown `world` key, a matcher key that does not exist or a regex
-that does not compile is an error** (`validate_expected`), not a check switched off:
+unknown key, an unknown `world` key, a matcher key that does not exist, a regex
+that does not compile or a mistyped date token is an error** (`validate_expected`), not a check switched off:
 evaluate.py refuses the run, and the selftest validates every committed case.
 
 | Key | Meaning |

@@ -183,6 +183,13 @@ def validate_expected(case):
                             re.compile(m["regex"])
                         except re.error as e:
                             out.append(f"{cid}: {k} {tool}.{arg}: '{m['regex']}' is not a regex ({e})")
+    # A mistyped date token would otherwise raise in the middle of a scoring run. Expanding against a
+    # fixed day finds it up front; "no 5th ... in that month" depends on the day, so it is not a typo.
+    try:
+        expand_today(exp, "2026-10-03")
+    except ValueError as e:
+        if not str(e).startswith("no "):
+            out.append(f"{cid}: {e}")
     return out
 
 

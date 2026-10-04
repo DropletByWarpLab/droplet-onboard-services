@@ -128,8 +128,12 @@ for c in ({"id": "t1", "expected": {"final_contain": ["a"]}},
           {"id": "t3", "expected": {"tool_args": {"t": [{"a": {"contian": "x"}}]}}},
           {"id": "t4", "expected": {"forbidden_args": {"*": [{"a": {}}]}}},
           {"id": "t5", "expected": {"final_regex": ["("]}},
-          {"id": "t6", "expected": {"final_regex": "abc"}}):
+          {"id": "t6", "expected": {"final_regex": "abc"}},
+          {"id": "t7", "expected": {"final_contains": ["{{today+x}}"]}},
+          {"id": "t8", "expected": {"world": {"event_start": {"Review": "{{tomorrow}}T09:00"}}}}):
     assert ev.validate_expected(c), c
+# a day-dependent overflow ("no 5th mon in that month") is not a typo
+assert not ev.validate_expected({"id": "t9", "expected": {"final_contains": ["{{nth:5:mon:+0}}"]}})
 try:
     ev.evaluate({"expected": {"bogus": 1}, "category": "x"}, run_for("x"), {})
     raise AssertionError("an unknown expected key was accepted")
