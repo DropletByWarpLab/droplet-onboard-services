@@ -2755,8 +2755,28 @@ def pair_link(pin):
         base64.urlsafe_b64encode(raw).decode("ascii").rstrip("="))
 
 
+def format_key_fingerprint(pin):
+    """WARP-3414 — the pin as a person reads it: SHA-256 of the DER SPKI as
+    UPPERCASE hex in 4-character groups separated by single spaces (16 groups).
+
+    EXACTLY the form the Droplet Mac app shows when it asks an admin to
+    confirm a box's certificate on a manual connect, and byte-identical to the
+    orchestrator's `formatKeyFingerprint` (lib/served-cert-pin.ts), the
+    installer output and `droplet-fingerprint` — each of them pinned against
+    the same known certificate. The panel is the channel this exists for: a
+    local screen no attacker on the LAN can rewrite, so an admin can compare
+    it with what the app shows. Raises ValueError on a pin that is not 32
+    bytes — a shortened or malformed value must never reach the glass, because
+    a short prefix can be ground out by an impostor."""
+    raw = base64.b64decode(pin, validate=True)
+    if len(raw) != 32:
+        raise ValueError("a SHA-256 key pin is 32 bytes")
+    hexs = raw.hex().upper()
+    return " ".join(hexs[i:i + 4] for i in range(0, 64, 4))
+
+
 def pair_qr_snapshot():
-    """{"ok": True, "server", "spki", "payload"} for the rail, or
+    """{"ok": True, "server", "spki", "payload", "fingerprint"} for the rail, or
     {"ok": False, "error"} — honest about WHY there is nothing to show, so the
     panel can keep its dashboard link rather than a broken QR."""
     ip = None
@@ -2770,8 +2790,10 @@ def pair_qr_snapshot():
     if not pin:
         return {"ok": False, "error": "served certificate not readable"}
     server = "https://{}".format(ip)
+    # WARP-3414: `fingerprint` is the reading form of the same pin, for the
+    # rail's "Droplet fingerprint" face. Public data, like the pin itself.
     return {"ok": True, "server": server, "spki": pin,
-            "payload": pair_link(pin)}
+            "payload": pair_link(pin), "fingerprint": format_key_fingerprint(pin)}
 
 
 # ---------------------------------------------------------------------------

@@ -1433,6 +1433,10 @@ export interface TlsCertificate {
   expiringSoon: boolean;
   hqConfigured: boolean;
   checkedAt: string | null;
+  /** WARP-3414: SHA-256 of the served leaf's DER SPKI, uppercase hex in 16
+   *  groups of 4 — what the Droplet apps show. Owner/admin only; null when
+   *  the leaf is unreadable. NOT proof when read over this connection. */
+  fingerprint: string | null;
 }
 
 export async function fetchTlsCertificate(): Promise<TlsCertificate> {
