@@ -470,3 +470,33 @@ Known gap: `email_send` takes only a draft id, so the recipient is not an
 argument and cannot be shown from the call. It is waived with that reason
 until the approval is bound to the draft content (WARP-3010), at which point
 the draft's recipients become the shown value.
+
+## 16. Over the HTTP transport — what holds and what does not (WARP-3621)
+
+The standalone streamable-HTTP MCP transport (`services/mcp-server`, JWT
+Bearer, expose-only on the compose network by default) goes through the same
+interceptor as chat (§1), so a confirming tool is still refused until a bound
+token comes back. Three things are different from the chat flow in §14, and
+are stated here so nobody assumes the chat guarantees:
+
+- **The caller receives the token.** In chat the model never sees it and a
+  role-gated route redeems it after a human decision. Over HTTP the
+  challenge carries `error.details.interceptor.confirmationToken` back to the
+  caller, which re-presents it on `_meta`. A client that forwards the token
+  without showing a person the call approves its own write. Approval over
+  HTTP is therefore only as good as the client's own approval UI.
+- **The Bearer token is not checked against a session.** `auth/jwt.ts`
+  verifies signature, algorithm, `type: access`, role and `sub`. A logged-out,
+  demoted or deactivated owner or admin keeps the access they had at issue
+  until the access token expires (15 minutes).
+- **No audit rows are written by this transport.** The signed `tool_call` and
+  interceptor rows of §11 are produced by the orchestrator's stdio wrapper.
+  A `tools/call` over HTTP, including a challenge, a confirmation and a
+  database-direct write such as `memory_forget`, leaves no row.
+
+Not yet changed, tracked on WARP-3621: emitting the §11 rows from the
+mcp-server `tools/call` handler (needs an orchestrator audit endpoint for the
+service principal), refusing or orchestrator-binding confirmation over HTTP,
+and a per-call session or role re-check. Until then, leave the MCP port
+unpublished and treat any HTTP client holding an owner or admin token as
+trusted.
