@@ -39,6 +39,7 @@ import { RouterError, routerErrorFromResponse } from "../types/router-error.js";
 import {
   isBridgeConnectionError,
   isTimeoutOrAbort,
+  bridgeAdminToken,
   bridgeAuthToken,
 } from "../lib/bridge-errors.js";
 import type { WriteResult } from "./openwrt.client.js";
@@ -151,7 +152,7 @@ export async function applyWifi(
   const staged = stagedSsidByUser.get(key) ?? null;
   stagedSsidByUser.delete(key);
 
-  const token = bridgeAuthToken();
+  const token = bridgeAdminToken();
   if (!token) {
     // Fail closed: with no bridge auth token we cannot safely mutate the host
     // AP. Mirrors storage.ts's BRIDGE_AUTH_UNCONFIGURED posture.
@@ -275,7 +276,7 @@ async function guestBridgeWrite(
   method: "POST" | "DELETE",
   body?: { ssid: string; psk: string },
 ): Promise<WriteResult> {
-  const token = bridgeAuthToken();
+  const token = bridgeAdminToken();
   if (!token) {
     // Fail closed: with no bridge auth token we cannot safely mutate the host.
     const err = new Error(

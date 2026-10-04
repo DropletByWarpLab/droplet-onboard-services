@@ -27,6 +27,11 @@ from pathlib import Path
 # --- Pre-import env setup (must run before `import main` / `import display`) ---
 TEST_SERVICE_SECRET = "pytest-oled-secret"
 os.environ.setdefault("SERVICE_SECRET", TEST_SERVICE_SECRET)
+# device-bridge: the older bridge tests drive destructive routes with the one
+# token they set as BRIDGE_AUTH_TOKEN; give that value the admin role too so
+# they keep exercising the routes. test_device_bridge_route_classes.py loads
+# the bridge with two distinct tokens to test the split itself (WARP-3595).
+os.environ.setdefault("BRIDGE_ADMIN_TOKEN", "pytest-bridge-token")
 # Force the simulated backend: never probe or open a real serial port in tests.
 os.environ.setdefault("DISPLAY_BACKEND", "sim")
 # Keep preview PNGs out of the way of the device's default /tmp path and make

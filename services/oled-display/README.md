@@ -114,7 +114,7 @@ removes them.
 | `PYPORTAL_BAUD` | `115200` | PyPortal serial baud rate |
 | `DISPLAY_TIMEZONE` | `America/Los_Angeles` | Timezone for the wall-clock pushed to the PyPortal |
 | `SERVICE_SECRET` | _(empty)_ | Bearer token required on all non-`/health` routes |
-| `BRIDGE_AUTH_TOKEN` | falls back to `SERVICE_SECRET` | Token the container sends to `device-bridge` when calling `POST /openwrt/wifi/rotate` |
+| `BRIDGE_AUTH_TOKEN` | falls back to `SERVICE_SECRET` | Panel token the container sends to `device-bridge` for reads and the panel's own writes (`POST /openwrt/wifi/rotate`, `/wifi/connect`, `/panel/console`). The bridge refuses it on destructive routes (WARP-3595); those need `BRIDGE_ADMIN_TOKEN`, which this container never holds |
 | `DROPLET_AP_MODE` | `uci` | Pairing-QR creds source: `uci` (multi-box, read SSID/PSK over SSH), `hostapd` (single-box, read from env / `/etc/hostapd.conf`), or `auto` |
 | `DROPLET_AP_SSID` | _(empty)_ | hostapd-mode AP SSID. When set, used directly (and forces `auto` to hostapd) |
 | `DROPLET_AP_PSK` | _(empty)_ | hostapd-mode AP passphrase (paired with `DROPLET_AP_SSID`) |

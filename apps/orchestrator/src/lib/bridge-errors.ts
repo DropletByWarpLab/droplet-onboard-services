@@ -74,3 +74,17 @@ export function bridgeAuthToken(): string {
     ""
   ).trim();
 }
+
+/**
+ * WARP-3595: the token for the bridge's destructive routes (factory reset,
+ * pool operations, Wi-Fi AP / guest writes, TLS reload, public name and box
+ * name). It is SERVICE_TOKEN_BRIDGE, which the display container never holds;
+ * the bridge accepts the panel token (bridgeAuthToken) on read routes only.
+ * Falls back to the panel token so a box whose .env predates the new key keeps
+ * working against a bridge that has not been re-installed yet; a re-installed
+ * bridge answers 401 to that fallback on these routes, by design.
+ * Use this ONLY on destructive routes; reads keep using bridgeAuthToken().
+ */
+export function bridgeAdminToken(): string {
+  return (process.env.SERVICE_TOKEN_BRIDGE || "").trim() || bridgeAuthToken();
+}

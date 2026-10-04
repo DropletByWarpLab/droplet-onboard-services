@@ -36,7 +36,7 @@ import { Prisma } from "@prisma/client";
 import type { PrismaClient, ResetJob } from "@prisma/client";
 import { config } from "../config.js";
 import {
-  bridgeAuthToken,
+  bridgeAdminToken,
   isBridgeConnectionError,
   isTimeoutOrAbort,
 } from "../lib/bridge-errors.js";
@@ -289,7 +289,7 @@ export async function requestFactoryReset(
 
   // Fail closed: no bridge token → we cannot safely invoke a data-destroying
   // host action. Mark the job failed and surface BRIDGE_AUTH_UNCONFIGURED.
-  const token = bridgeAuthToken();
+  const token = bridgeAdminToken();
   if (!token) {
     await prisma.resetJob.update({
       where: { id: job.id },

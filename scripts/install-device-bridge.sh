@@ -399,6 +399,27 @@ if [[ -f "$REPO_ENV" ]]; then
     set_env_if_blank "BRIDGE_AUTH_TOKEN" "$DEVICE_SECRET_KEY"
   fi
 
+  # WARP-3595: the bridge's destructive routes accept only BRIDGE_ADMIN_TOKEN,
+  # which is SERVICE_TOKEN_BRIDGE and never reaches the display container. Mirror
+  # it UNCONDITIONALLY (like DROPLET_INTERNAL_TLS below) so a rotation in the repo
+  # .env reaches the bridge on the next run, and refuse a value equal to the
+  # panel token: that would hand the display container the destructive routes.
+  if [[ -n "${SERVICE_TOKEN_BRIDGE:-}" ]]; then
+    panel_token=$(grep -E '^BRIDGE_AUTH_TOKEN=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)
+    if [[ "$SERVICE_TOKEN_BRIDGE" = "$panel_token" ]]; then
+      log "ERROR: SERVICE_TOKEN_BRIDGE equals BRIDGE_AUTH_TOKEN; not writing BRIDGE_ADMIN_TOKEN (destructive bridge routes stay closed)"
+    else
+      if grep -qE '^#?[[:space:]]*BRIDGE_ADMIN_TOKEN=' "$ENV_FILE"; then
+        _set_env_kv "$ENV_FILE" "BRIDGE_ADMIN_TOKEN" "$SERVICE_TOKEN_BRIDGE"
+      else
+        printf '%s=%s\n' "BRIDGE_ADMIN_TOKEN" "$SERVICE_TOKEN_BRIDGE" >> "$ENV_FILE"
+      fi
+      log "set BRIDGE_ADMIN_TOKEN in $ENV_FILE (WARP-3595)"
+    fi
+  else
+    log "SERVICE_TOKEN_BRIDGE not in $REPO_ENV yet; run setup.sh, then re-run this script (destructive bridge routes stay closed until then)"
+  fi
+
   if [[ -n "${OPENWRT_PASSWORD:-}" ]]; then
     set_env_if_blank "OPENWRT_PASS" "$OPENWRT_PASSWORD"
   fi

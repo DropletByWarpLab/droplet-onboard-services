@@ -18,7 +18,7 @@ import { open, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
-import { bridgeAuthToken } from "../lib/bridge-errors.js";
+import { bridgeAdminToken } from "../lib/bridge-errors.js";
 import { RouterError, routingFetch } from "./openwrt.client.js";
 import {
   claimBoxName,
@@ -256,7 +256,7 @@ export function createDiskTlsFileOps(): TlsFileOps {
  * throw — the box keeps serving the previous cert and the next tick retries.
  */
 export async function bridgeNginxReloader(): Promise<void> {
-  const token = bridgeAuthToken();
+  const token = bridgeAdminToken();
   if (!token) {
     logger.warn(
       {},
@@ -308,7 +308,7 @@ export async function bridgeNginxReloader(): Promise<void> {
  */
 export function createBridgeFqdnPersister(): (fqdn: string) => Promise<void> {
   return async function persistFqdn(fqdn: string): Promise<void> {
-    const token = bridgeAuthToken();
+    const token = bridgeAdminToken();
     if (!token) {
       logger.warn(
         {},
@@ -361,7 +361,7 @@ export function createBridgeFqdnPersister(): (fqdn: string) => Promise<void> {
  */
 export function createBridgeBoxNamePersister(): (name: string) => Promise<void> {
   return async function persistBoxName(name: string): Promise<void> {
-    const token = bridgeAuthToken();
+    const token = bridgeAdminToken();
     if (!token) {
       logger.warn(
         {},
