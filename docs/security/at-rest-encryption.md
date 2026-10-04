@@ -58,7 +58,7 @@ source of truth).
 | `.env` (carries `DEVICE_SECRET_KEY`) | `/data/droplet/env/.env` (symlinked) |
 | `data/secrets` (audit signing key, doc-KEK keyfile) | `/data/droplet/secrets` (symlinked) |
 | Hot-plugged USB drives | per-drive LUKS2 under `/mnt/droplet/<usb>` |
-| Off-box backups | restic repo, per-customer key = HKDF(`DEVICE_SECRET_KEY`) (WARP-254) |
+| Backups | restic repo, per-customer key = HKDF(`DEVICE_SECRET_KEY`) (WARP-254). **Default location is a local path on the same box** (`DROPLET_BACKUP_TARGET`, default `/var/lib/droplet/restic-repo`), so it is a restore point, not off-box protection; off-device targets are planned. Retention is 7 daily, 4 weekly and 6 monthly snapshots. |
 
 Any table not listed above that holds customer content (mail, chats, notes,
 file text) is protected by the LUKS layer and the encrypted backup repository
@@ -128,7 +128,10 @@ chunks stay plaintext-in-Postgres (inside LUKS). Their source files ship in
 the same snapshots via the `nextcloud-data` volume tar, so chunk-level shred
 could never deliver right-to-delete for them — deleting a Nextcloud file
 already deletes its chunks (`delete_chunks_for_file`), and its recoverability
-window is governed by backup retention, same as the file itself. Brain
+window is governed by backup retention, same as the file itself: such data
+stays in restic snapshots until the last snapshot containing it ages out of
+the 7 daily / 4 weekly / 6 monthly retention, up to about six months. Showing
+this window in the delete and offboarding flows is planned (WARP-3663). Brain
 content is different: its ONLY backup copy is the pg_dump, so per-document
 shred is real there. Full lexical (BM25) search is preserved for the
 Nextcloud corpus; encrypted brain chunks are vector-search-only (their

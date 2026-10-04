@@ -884,6 +884,54 @@ else
 fi
 
 # =============================================================================
+# Test 21c: WARP-3693 — the nextcloud entrypoint chowns the droplet-share root
+# as root, so the SMB network drive is writable
+# =============================================================================
+# The `droplet-share` named volume is exported over SMB by the samba service
+# (`force user` uid 33) and mounted into nextcloud at /droplet-share (www-data,
+# uid 33). A fresh named volume materializes root:root 755, so neither writer
+# could create anything: Windows/macOS users could log in to the share but not
+# add a file or folder. The ONLY place that can fix it is the nextcloud
+# service's `entrypoint:` override, which runs as root before /entrypoint.sh
+# drops to www-data. nextcloud-init.sh is a before-starting hook, which the
+# stock entrypoint runs as www-data (run_as), so a chown there is a silent
+# EPERM no-op. The chown must stay non-recursive (a recursive one over a
+# populated share would stall every boot) and come BEFORE the exec hand-off.
+# MUTATION: delete `chown 33:33 /droplet-share` from the nextcloud entrypoint
+# (or move it after `exec /entrypoint.sh`) and this goes red.
+_dshare_exit=0
+_dshare_output=$(python3 - "$COMPOSE_FILE" <<'PYEOF' 2>&1
+import re, sys, yaml
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = yaml.safe_load(f)
+
+nc = (data.get("services") or {}).get("nextcloud")
+if not isinstance(nc, dict):
+    print("services.nextcloud is missing")
+    sys.exit(1)
+
+ep = nc.get("entrypoint")
+script = " ".join(str(a) for a in ep) if isinstance(ep, list) else str(ep or "")
+chown = re.search(r"\bchown\s+33:33\s+/droplet-share(?![\w./-])", script)
+handoff = re.search(r"\bexec\s+/entrypoint\.sh\b", script)
+if not chown:
+    print("nextcloud entrypoint must run a non-recursive `chown 33:33 /droplet-share`")
+    sys.exit(1)
+if not handoff or chown.start() > handoff.start():
+    print("the droplet-share chown must run BEFORE `exec /entrypoint.sh`")
+    sys.exit(1)
+PYEOF
+) || _dshare_exit=$?
+
+if [ "$_dshare_exit" -eq 0 ]; then
+  pass "docker-compose.yml: nextcloud entrypoint chowns droplet-share as root before exec (WARP-3693)"
+else
+  fail "docker-compose.yml: nextcloud entrypoint must chown 33:33 /droplet-share before exec (WARP-3693)"
+  printf "${_RED}%s${_RESET}\n" "$_dshare_output" >&2
+fi
+
+# =============================================================================
 # Test 22: WARP-3193 SEC-DATA-1 — `env_file: ../.env` only on an allowlist
 # =============================================================================
 # The root .env carries JWT_SECRET, DEVICE_SECRET_KEY, POSTGRES_PASSWORD and
