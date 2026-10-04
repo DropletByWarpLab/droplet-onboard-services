@@ -33,6 +33,7 @@ import { requireRole } from "../middleware/auth.js";
 import { asyncHandler } from "../lib/async-handler.js";
 import { createLogger } from "../lib/logger.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
+import { serviceBearerHeader, VOICE_IO_TOKEN_ENV } from "../lib/service-bearer.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 
@@ -79,7 +80,8 @@ async function proxy(
   try {
     const init: RequestInit = {
       method,
-      headers: { Accept: "application/json" },
+      // WARP-3625: voice-io fails closed without the shared service bearer.
+      headers: { Accept: "application/json", ...serviceBearerHeader(VOICE_IO_TOKEN_ENV) },
       signal: AbortSignal.timeout(timeoutMs),
     };
     if (method === "POST") {

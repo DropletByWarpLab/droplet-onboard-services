@@ -6,6 +6,7 @@ Entry point for Docker. Runs forever until SIGINT/SIGTERM.
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import signal
@@ -18,6 +19,44 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("file-indexer")
+
+try:  # fastapi's own dependency; absent only in minimal non-HTTP test envs
+    from starlette.requests import HTTPConnection
+except ImportError:  # pragma: no cover
+    HTTPConnection = None  # type: ignore[assignment,misc]
+
+# WARP-3625: inbound bearer, shared with the orchestrator's reindex call
+# (FILE_INDEXER_SERVICE_TOKEN). Read at import; require_bearer looks the module
+# global up at call time so tests can monkeypatch it (web-fetch precedent).
+FILE_INDEXER_SERVICE_TOKEN = os.environ.get("FILE_INDEXER_SERVICE_TOKEN", "").strip()
+
+# /health stays reachable without a token (Docker healthcheck, health monitor).
+AUTH_EXEMPT_PATHS = frozenset({"/health"})
+
+
+def require_bearer(conn: HTTPConnection) -> None:
+    """Reject requests without a matching `Authorization: Bearer <token>`.
+
+    Fails CLOSED: an unset FILE_INDEXER_SERVICE_TOKEN yields 503 on every
+    non-/health route rather than letting any container on the bridge trigger
+    reindex work. Same posture as web-fetch / erp-sql-bridge.
+    """
+    from fastapi import HTTPException
+
+    if conn.url.path in AUTH_EXEMPT_PATHS:
+        return
+    if not FILE_INDEXER_SERVICE_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="file-indexer auth is not configured (FILE_INDEXER_SERVICE_TOKEN unset)",
+        )
+    header = conn.headers.get("authorization", "")
+    scheme, _, token = header.partition(" ")
+    # compare_digest raises on non-ASCII str; encode so a bad header is a 401.
+    if scheme.lower() != "bearer" or not hmac.compare_digest(
+        token.strip().encode("utf-8"), FILE_INDEXER_SERVICE_TOKEN.encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 def _run_fips_boot_self_test() -> None:
@@ -68,10 +107,10 @@ def build_http_app():
     to its only caller, to keep the indexer's single HTTP surface in one
     place.
     """
-    from fastapi import FastAPI, HTTPException
+    from fastapi import Depends, FastAPI, HTTPException
     from fastapi.responses import JSONResponse
 
-    api = FastAPI()
+    api = FastAPI(dependencies=[Depends(require_bearer)])
 
     @api.get("/health")
     def health():

@@ -116,3 +116,22 @@ def _isolate_env(monkeypatch):
         "VOICE_SAMPLE_RATE",
     ):
         monkeypatch.delenv(k, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _service_bearer_open_for_route_tests():
+    """WARP-3625: the app now requires VOICE_IO_SERVICE_TOKEN on every route but
+    /health. The existing route tests exercise behaviour, not auth, so they run
+    with the dependency overridden; tests/test_main_bearer.py clears the override
+    to pin the real gate. Acts only when a test module has already imported main.
+    """
+    main = sys.modules.get("main")
+    dep = getattr(main, "require_bearer", None)
+    if main is None or dep is None:
+        yield
+        return
+    main.app.dependency_overrides[dep] = lambda: None
+    try:
+        yield
+    finally:
+        main.app.dependency_overrides.pop(dep, None)

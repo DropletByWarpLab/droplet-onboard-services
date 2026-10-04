@@ -29,6 +29,7 @@
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
+import { serviceBearerHeader, FILE_INDEXER_TOKEN_ENV } from "../lib/service-bearer.js";
 
 export interface ReindexFileParams {
   /** Opaque file identifier (Nextcloud fileId or BrainMemoryItem id). */
@@ -130,7 +131,11 @@ async function callFileIndexerReindex(
   // + dial https:// when DROPLET_INTERNAL_TLS=1 (identity when off).
   const base = internalBaseUrl(config.FILE_INDEXER_URL);
   const url = `${base}/reindex/${encodeURIComponent(fileId)}`;
-  const resp = await internalFetch(url, { method: "POST" });
+  // WARP-3625: file-indexer fails closed without the shared service bearer.
+  const resp = await internalFetch(url, {
+    method: "POST",
+    headers: serviceBearerHeader(FILE_INDEXER_TOKEN_ENV),
+  });
   if (!resp.ok) {
     const body = await resp.text();
     throw new Error(`file-indexer returned ${resp.status}: ${body}`);

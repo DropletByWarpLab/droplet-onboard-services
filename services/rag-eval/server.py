@@ -2,9 +2,10 @@
 
 Lets operators fire ad-hoc RAGAS runs and the baseline bootstrap from the
 dashboard (via the orchestrator proxy) without `docker exec`. Binds on the
-internal Docker network ONLY — no host publish, no auth here. The
-orchestrator's `/api/admin/rag-eval/*` route is the auth wall; this server
-trusts that anything reaching it on the bridge network is already gated.
+internal Docker network ONLY — no host publish. The orchestrator's
+`/api/admin/rag-eval/*` route is the user-facing auth wall; WARP-3625 adds a
+fail-closed service bearer (RAG_EVAL_SERVICE_TOKEN) on every route but
+/health, so another container on the bridge network cannot start runs.
 
 Endpoints:
   POST /run            → start one RAGAS pass as a background task; 202.
@@ -33,15 +34,17 @@ import asyncio
 import json
 import logging
 import os
+import hmac
 import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from starlette.requests import HTTPConnection
 
 import runner
 # Paths are read as `config.X` at CALL time (not `from config import X`) so
@@ -385,8 +388,40 @@ def _get_run_sync(
 # ── App factory ─────────────────────────────────────────────────────────
 
 
+# WARP-3625: inbound bearer, shared with the orchestrator's rag-eval proxy
+# (RAG_EVAL_SERVICE_TOKEN). Read at import; require_bearer looks the module
+# global up at call time so tests can monkeypatch it (web-fetch precedent).
+RAG_EVAL_SERVICE_TOKEN = os.environ.get("RAG_EVAL_SERVICE_TOKEN", "").strip()
+
+# /health stays reachable without a token (Docker healthcheck).
+AUTH_EXEMPT_PATHS = frozenset({"/health"})
+
+
+def require_bearer(conn: HTTPConnection) -> None:
+    """Reject requests without a matching `Authorization: Bearer <token>`.
+
+    Fails CLOSED: an unset RAG_EVAL_SERVICE_TOKEN yields 503 on every
+    non-/health route rather than letting any container on the bridge start
+    evaluation runs (which post results with the orchestrator service token).
+    """
+    if conn.url.path in AUTH_EXEMPT_PATHS:
+        return
+    if not RAG_EVAL_SERVICE_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="rag-eval auth is not configured (RAG_EVAL_SERVICE_TOKEN unset)",
+        )
+    header = conn.headers.get("authorization", "")
+    scheme, _, token = header.partition(" ")
+    # compare_digest raises on non-ASCII str; encode so a bad header is a 401.
+    if scheme.lower() != "bearer" or not hmac.compare_digest(
+        token.strip().encode("utf-8"), RAG_EVAL_SERVICE_TOKEN.encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="rag-eval HTTP trigger", version="1.0.0")
+    app = FastAPI(title="rag-eval HTTP trigger", version="1.0.0", dependencies=[Depends(require_bearer)])
 
     @app.get("/health")
     async def health() -> dict[str, str]:
