@@ -297,26 +297,82 @@ STATE_FILE = os.environ.get(
 if not os.access(os.path.dirname(STATE_FILE) or "/", os.W_OK):
     STATE_FILE = "/tmp/droplet-bridge-state.json"
 
-# Shared-secret auth for mutating endpoints. Primary source is
-# BRIDGE_AUTH_TOKEN, populated by install-device-bridge.sh from
-# SERVICE_TOKEN_DISPLAY in the repo .env (WARP-165). Older installs may
-# still have DEVICE_SECRET_KEY / SERVICE_SECRET as the bridge token —
-# we keep those as fallbacks so a bridge that hasn't been re-installed
-# yet still authenticates correctly against an orchestrator that's also
-# still on the old token. The next `sudo ./scripts/install-device-bridge.sh`
-# run rotates the bridge env to SERVICE_TOKEN_DISPLAY.
+# Two bearer tokens (WARP-3595). The host-network `oled-display` container holds
+# the PANEL token (BRIDGE_AUTH_TOKEN, the same value as SERVICE_TOKEN_DISPLAY):
+# it may call the read and write routes the rack panel itself uses, nothing
+# else. The orchestrator holds the ADMIN token (BRIDGE_ADMIN_TOKEN, minted as
+# SERVICE_TOKEN_BRIDGE and never given to the display container): it is the only
+# credential accepted on destructive routes. ROUTE_CLASSES below is the single
+# table that says which route needs which. There is deliberately no fallback to
+# DEVICE_SECRET_KEY (the master encryption key) or SERVICE_SECRET.
 #
-# Even with the bridge bound to loopback, any unprivileged process on
-# the inference host could currently POST to /openwrt/wifi/rotate or
-# /wifi/connect — requiring the token moves that capability from
-# "anyone with a shell" to "anyone with the secret".
+# A bridge started before the admin token reaches its env file (a box
+# mid-update) still serves the panel's reads and writes with the old token and
+# answers 401 on every destructive route until
+# `sudo ./scripts/install-device-bridge.sh` writes BRIDGE_ADMIN_TOKEN.
 BRIDGE_AUTH_TOKEN = (
     os.environ.get("BRIDGE_AUTH_TOKEN")
     or os.environ.get("SERVICE_TOKEN_DISPLAY")
-    or os.environ.get("DEVICE_SECRET_KEY")
-    or os.environ.get("SERVICE_SECRET")
     or ""
 ).strip()
+BRIDGE_ADMIN_TOKEN = (os.environ.get("BRIDGE_ADMIN_TOKEN") or "").strip()
+
+# Every route this bridge serves, classified once. Classes:
+#   open        no token (liveness probe only)
+#   read        reads; panel token or admin token
+#   write       the panel's own reversible actions (hand the screen back to the
+#               console, rotate / join Wi-Fi from the touch UI, cache
+#               invalidation from the automount hook); panel token or admin token
+#   destructive anything else that changes the box (data, storage, Wi-Fi AP,
+#               TLS, name, factory reset); admin token ONLY
+# An unlisted route is treated as destructive. tests/test_device_bridge_route_classes.py
+# fails when a route is added to a handler without an entry here.
+ROUTE_CLASSES = {
+    ("GET", "/health"): "open",
+    ("GET", "/wifi"): "read",
+    ("GET", "/openwrt/qr"): "read",
+    ("GET", "/pair/qr"): "read",
+    ("GET", "/openwrt/wifi/guest"): "read",
+    ("GET", "/files"): "read",
+    ("GET", "/cameras"): "read",
+    ("GET", "/services"): "read",
+    ("GET", "/drives"): "read",
+    ("GET", "/pools"): "read",
+    ("GET", "/host/uplink-ip"): "read",
+    ("GET", "/host/stun-probe"): "read",
+    ("GET", "/host/topology"): "read",
+    ("GET", "/gpu"): "read",
+    ("GET", "/logs/bundle"): "read",
+    ("POST", "/drives/changed"): "write",
+    ("POST", "/panel/console"): "write",
+    ("POST", "/openwrt/wifi/rotate"): "write",
+    ("POST", "/wifi/connect"): "write",
+    ("POST", "/drives/{uuid}/eject"): "destructive",
+    ("POST", "/pools/command"): "destructive",
+    ("POST", "/openwrt/wifi/hostapd"): "destructive",
+    ("POST", "/openwrt/wifi/guest"): "destructive",
+    ("DELETE", "/openwrt/wifi/guest"): "destructive",
+    ("POST", "/system/factory-reset"): "destructive",
+    ("POST", "/tls/bootstrap-refresh"): "destructive",
+    ("POST", "/tls/reload"): "destructive",
+    ("POST", "/host/public-fqdn"): "destructive",
+    ("POST", "/host/box-name"): "destructive",
+}
+_PANEL_CLASSES = ("read", "write")
+
+
+def _route_class(method, path):
+    """Class of a request. Unknown routes are destructive (admin only). With no
+    method (a bare handler in a test) the strictest class across methods wins."""
+    if path.startswith("/drives/") and path.endswith("/eject"):
+        path = "/drives/{uuid}/eject"
+    if method:
+        return ROUTE_CLASSES.get((method, path), "destructive")
+    found = {c for (m, p), c in ROUTE_CLASSES.items() if p == path}
+    for c in ("destructive", "write", "read", "open"):
+        if c in found:
+            return c
+    return "destructive"
 
 # Minimum seconds between wifi-key rotations. Stops a stuck client or a
 # fat-fingered human from bouncing hostapd repeatedly (each rotation kicks
@@ -4364,18 +4420,17 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _authed(self):
-        """Return True if the request carries the right auth token.
+        """Return True if the request carries a token allowed for its route class.
 
-        Fail closed: if BRIDGE_AUTH_TOKEN is empty every auth-gated route
-        returns 401. _boot_banner() also refuses to start the server with
-        an empty token (see __main__), so this is belt-and-braces.
+        The admin token is accepted everywhere; the panel token only on `read`
+        and `write` routes (see ROUTE_CLASSES). Fail closed: an empty token is
+        never accepted, and _boot_banner() refuses to start without a panel
+        token.
 
         Accepts either `X-Droplet-Auth: <token>` or `Authorization:
         Bearer <token>` for flexibility with the orchestrator's existing
         bearer-token style.
         """
-        if not BRIDGE_AUTH_TOKEN:
-            return False
         got = (self.headers.get("X-Droplet-Auth") or "").strip()
         if not got:
             authz = (self.headers.get("Authorization") or "").strip()
@@ -4383,8 +4438,13 @@ class Handler(BaseHTTPRequestHandler):
                 got = authz.split(None, 1)[1].strip()
         if not got:
             return False
-        # Constant-time compare to avoid timing-oracle leaks of the token.
-        return hmac.compare_digest(got, BRIDGE_AUTH_TOKEN)
+        # Constant-time compares to avoid timing-oracle leaks of the tokens.
+        if BRIDGE_ADMIN_TOKEN and hmac.compare_digest(got, BRIDGE_ADMIN_TOKEN):
+            return True
+        cls = _route_class(getattr(self, "command", None),
+                           urlparse(getattr(self, "path", "")).path)
+        return (cls in _PANEL_CLASSES and bool(BRIDGE_AUTH_TOKEN)
+                and hmac.compare_digest(got, BRIDGE_AUTH_TOKEN))
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -4954,15 +5014,22 @@ def _boot_banner():
     logger.info("device-bridge starting on %s:%s (openwrt=%s, state=%s)",
                 BRIDGE_BIND, BRIDGE_PORT, OPENWRT_HOST, STATE_FILE)
     if not BRIDGE_AUTH_TOKEN:
-        # Fail closed: refuse to start. /openwrt/wifi/rotate + /wifi/connect
-        # are mutation paths that reach OpenWrt and nmcli respectively; even
-        # loopback exposure to an unprivileged process is not acceptable.
+        # Fail closed: refuse to start without the panel token.
         raise RuntimeError(
-            "BRIDGE_AUTH_TOKEN (or SERVICE_TOKEN_DISPLAY / "
-            "DEVICE_SECRET_KEY / SERVICE_SECRET) is required — refusing "
-            "to start device-bridge without an auth secret. "
+            "BRIDGE_AUTH_TOKEN (or SERVICE_TOKEN_DISPLAY) is required — "
+            "refusing to start device-bridge without an auth secret. "
             "sudo ./scripts/install-device-bridge.sh provisions this "
             "automatically from the repo .env (WARP-165).")
+    if BRIDGE_ADMIN_TOKEN and BRIDGE_ADMIN_TOKEN == BRIDGE_AUTH_TOKEN:
+        raise RuntimeError(
+            "BRIDGE_ADMIN_TOKEN equals BRIDGE_AUTH_TOKEN — the display "
+            "container's token must not be the destructive-route token "
+            "(WARP-3595). Re-run sudo ./scripts/install-device-bridge.sh.")
+    if not BRIDGE_ADMIN_TOKEN:
+        logger.warning(
+            "BRIDGE_ADMIN_TOKEN is not set: destructive routes (factory "
+            "reset, pools, Wi-Fi AP, TLS, box name) answer 401 until "
+            "sudo ./scripts/install-device-bridge.sh writes it (WARP-3595)")
 
 
 if __name__ == "__main__":

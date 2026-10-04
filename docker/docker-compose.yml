@@ -2427,6 +2427,9 @@ services:
       - CAMERA_DEFAULT_USERNAME
       - CAMERA_DEFAULT_PASSWORD
       - CAMERA_CREDENTIALS_JSON
+      # WARP-3597: camera IPs (comma-separated) allowed to be answered with RTSP
+      # Basic auth. Empty = Digest only.
+      - CAMERA_RTSP_BASIC_ALLOW_IPS
       - ONVIF_WS_DISCOVERY_ENABLED
       - DROPLET_INTERNAL_TLS
       - DROPLET_TLS_CERT
@@ -2843,7 +2846,9 @@ services:
       # FastAPI app inside this container and the host-side device-bridge
       # — verify the same value, wired below.
       - SERVICE_SECRET=${SERVICE_TOKEN_DISPLAY:-}
-      # Same token — the container talks to host-side device-bridge.
+      # Same token — the container talks to host-side device-bridge. The bridge
+      # accepts it for the panel's read and write routes only; destructive
+      # routes need a separate token this container is never given (WARP-3595).
       - BRIDGE_AUTH_TOKEN=${SERVICE_TOKEN_DISPLAY:-}
       - PORT=8082
       - DISPLAY_BACKEND=${DISPLAY_BACKEND:-auto}

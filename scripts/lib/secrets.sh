@@ -526,6 +526,13 @@ generate_env() {
   # + device-bridge.py's BRIDGE_AUTH_TOKEN MUST read the same value;
   # compose wires both ends to ${SERVICE_TOKEN_DISPLAY}.
   service_token_display=$(openssl rand -hex 32)
+  # WARP-3595: the device-bridge's destructive routes (factory reset, pool
+  # operations, Wi-Fi AP, TLS, box name) accept only this token. The orchestrator
+  # sends it as SERVICE_TOKEN_BRIDGE; the host bridge reads it as
+  # BRIDGE_ADMIN_TOKEN (install-device-bridge.sh mirrors it). It is never wired
+  # into the oled-display container, which holds only SERVICE_TOKEN_DISPLAY.
+  local service_token_bridge
+  service_token_bridge=$(openssl rand -hex 32)
   # Shared bearer for orchestrator → switch service HTTP calls (/ports,
   # /vlans, /poe, /provision/*). Same WARP-165 rationale as the display
   # token: the switch container's SERVICE_SECRET previously reused
@@ -883,6 +890,11 @@ SERVICE_TOKEN_VOICE=$service_token_voice
 # SERVICE_SECRET + device-bridge's BRIDGE_AUTH_TOKEN MUST read the same
 # value; compose wires all three to \${SERVICE_TOKEN_DISPLAY}.
 SERVICE_TOKEN_DISPLAY=$service_token_display
+
+# --- Device-bridge destructive-route bearer (orchestrator → host bridge) ---
+# WARP-3595. Distinct from SERVICE_TOKEN_DISPLAY on purpose: the display
+# container holds that one and the bridge refuses it on destructive routes.
+SERVICE_TOKEN_BRIDGE=$service_token_bridge
 
 # --- Switch service bearer (orchestrator → switch service HTTP) ---
 # Used by switch.client.ts to authenticate to the switch service's
@@ -1365,6 +1377,9 @@ migrate_env() {
   # display bearer; without this key the orchestrator → oled-display path
   # falls back to the empty-string bearer and 401s on every health probe.
   _migrate_ensure_key SERVICE_TOKEN_DISPLAY "$(openssl rand -hex 32)"
+  # WARP-3595 backfill: destructive device-bridge routes need their own token.
+  # Absent-only, so an existing value is never rotated under a running bridge.
+  _migrate_ensure_key SERVICE_TOKEN_BRIDGE "$(openssl rand -hex 32)"
   # Switch-bearer backfill: existing installs wired the switch container's
   # SERVICE_SECRET to DEVICE_SECRET_KEY while the orchestrator side sent no
   # bearer at all — so any install with a DEVICE_SECRET_KEY in .env had the
