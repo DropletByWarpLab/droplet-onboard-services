@@ -805,13 +805,32 @@ services:
         condition: service_healthy
       cache:
         condition: service_started
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3585: NO env_file. Nextcloud parses member uploads, serves public
+    # share pages and runs unpinned appstore apps, so it must not carry the
+    # box's .env (JWT_SECRET, DEVICE_SECRET_KEY, SERVICE_TOKEN_*, the other
+    # services' Redis passwords, ...). Every variable the image entrypoint,
+    # docker/nextcloud-init.sh and docker/nextcloud/* read is listed below,
+    # interpolated from .env by compose (--env-file); the allowlist is pinned
+    # by scripts/test-security.sh (Test 22). A new knob read by those files
+    # must be added here too.
     environment:
-      # Static Nextcloud config — passwords come from .env via env_file
+      # Image entrypoint auto-install (occ maintenance:install) — Postgres and
+      # the first admin. POSTGRES_* is the shared db role until a separate
+      # follow-up (a dedicated Nextcloud role) lands.
       - POSTGRES_HOST=db
       - POSTGRES_DB=nextcloud
+      - POSTGRES_USER=${POSTGRES_USER:-droplet}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
+      - NEXTCLOUD_ADMIN_USER=${NEXTCLOUD_ADMIN_USER:-admin}
+      - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD:-}
+      # nextcloud-init.sh document-engine connector (read only when the
+      # engine is wired; DOCS_ENGINE=onlyoffice needs the JWT secret).
+      - DOCS_ENABLED=${DOCS_ENABLED:-1}
+      - DOCS_ENGINE=${DOCS_ENGINE:-collabora}
+      - ONLYOFFICE_JWT_SECRET=${ONLYOFFICE_JWT_SECRET:-}
+      # Redis ACL user `nextcloud` secret — read by zz-redis-tls.config.php
+      # and zz-redis-session.ini.
+      - REDIS_HOST_PASSWORD=${REDIS_HOST_PASSWORD:-}
       # WARP-233: the db's pg_hba.conf is TLS-only (hostssl + reject plaintext),
       # so Nextcloud must speak TLS to Postgres or it can never reach
       # 'installed'. Nextcloud connects via PHP's PDO_pgsql/libpq, which honours
@@ -1054,7 +1073,7 @@ services:
   # ==========================================================================
   # The engine behind the Nextcloud connector app (WOPI-style handshake).
   # Mirrors the `nextcloud` block: default network, NO `ports:` (reached only
-  # via the gateway's `location /docs/` + sibling containers), env_file,
+  # via the gateway's `location /docs/` + sibling containers),
   # restart: always, shared logging.
   #
   # ENGINE-SELECTABLE (WARP-1686 / ADR-034): `DOCS_ENGINE` picks the engine;
