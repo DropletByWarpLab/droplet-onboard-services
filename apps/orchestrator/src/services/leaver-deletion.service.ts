@@ -16,11 +16,16 @@
  */
 import type { PrismaClient } from "@prisma/client";
 import { z } from "zod";
-import { ncDeleteUser, ncSetUserEnabled } from "./nextcloud.client.js";
+import { ncDeleteShare, ncDeleteUser, ncSetUserEnabled } from "./nextcloud.client.js";
 import { adminBasicToken } from "./department-provisioner.service.js";
 import { purgeUserData } from "./brain-memory.service.js";
 import { purgeM365ForUser } from "./m365/m365-auth.service.js";
 import { purgeUsernameKeyedData } from "./username-data-purge.service.js";
+import {
+  purgeLeaverOwnedData,
+  revokeLeaverDepartmentShares,
+  type LeaverOwnedDataCounts,
+} from "./leaver-owned-data-purge.service.js";
 import { revokeOverlayDevicesForUser } from "./vpn-peer-revoke.service.js";
 import { revokeDeviceClientsForUser } from "./device-client-revoke.service.js";
 import {
@@ -237,19 +242,27 @@ export async function completeUserDeletion(
   // CalDAV credentials, reminders, chats, push subscriptions) go in the SAME
   // transaction as the row, and only when the row really goes — the username
   // must never be free while data still answers to it.
-  const removed = await prisma.$transaction(async (tx) => {
+  //
+  // WARP-3600: the same transaction also removes the mailboxes the person
+  // connected (scoped by their User.id; the cascade takes the mail and the
+  // stored credential) and their Nextcloud file-index rows (scoped by their
+  // own Nextcloud login, which is reusable).
+  const { removed, owned } = await prisma.$transaction(async (tx) => {
     const r = await tx.user.deleteMany({
       where: { id: row.id, directoryStatus: "DEACTIVATED", deletionStatus: "PURGING" },
     });
+    let counts: LeaverOwnedDataCounts | null = null;
     if (r.count > 0) {
       const purged = await purgeUsernameKeyedData(tx, row.username);
+      counts = await purgeLeaverOwnedData(tx, row);
       logger.info(
-        { username: row.username, userId: row.id, purged },
+        { username: row.username, userId: row.id, purged, owned: counts },
         "Purged username-keyed private data with the deleted user row",
       );
     }
-    return r;
+    return { removed: r, owned: counts };
   }, SERIALIZABLE_TX);
+  let shares: Awaited<ReturnType<typeof revokeLeaverDepartmentShares>> | null = null;
   if (removed.count === 0) {
     logger.warn(
       { username: row.username, userId: row.id },
@@ -266,6 +279,30 @@ export async function completeUserDeletion(
         "Microsoft 365 purge failed after user delete — a live refresh token may remain",
       );
     }
+    // WARP-3600: shares the person minted on department and Workspace folders
+    // are owned by the box's Nextcloud admin account, so they outlive the
+    // person's own account. Revoked only on a confirmed row delete; any that
+    // could not be are listed on the "User removed" row for an admin.
+    try {
+      shares = await revokeLeaverDepartmentShares(prisma, row.id, (id) =>
+        ncDeleteShare(adminBasicToken(), id),
+      );
+    } catch (err) {
+      logger.error(
+        { err, username: row.username, userId: row.id },
+        "department share revoke failed after user delete — the person's public links may remain",
+      );
+    }
+    // The email-indexer drops a deleted mailbox on its next scan; nudge it so
+    // the removed credential is not used again in the meantime. Best-effort.
+    if (owned?.emailAccounts) {
+      try {
+        const { requestIndexerRefresh } = await import("./email/provision.service.js");
+        await requestIndexerRefresh();
+      } catch (err) {
+        logger.warn({ err }, "email-indexer refresh after leaver mailbox removal failed (non-blocking)");
+      }
+    }
   }
 
   // WARP-3160: runRemovalPostEffects revokes the person's overlay/VPN devices
@@ -278,6 +315,12 @@ export async function completeUserDeletion(
     targetRole: row.role,
     actorUsername: audit.actorUsername,
     actor: audit.actor,
+    // WARP-3600: counts only, never names or content.
+    purged: {
+      ...(owned ?? {}),
+      ...(shares ? { departmentSharesRevoked: shares.revoked } : {}),
+      ...(shares && shares.failed.length > 0 ? { departmentSharesNeedingReview: shares.failed } : {}),
+    },
   });
   return { ncMirror };
 }
