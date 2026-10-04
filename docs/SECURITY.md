@@ -197,41 +197,49 @@ and the `docker` ecosystem in `.github/dependabot.yml` moves the pins in one
 grouped pull request a month. The digests are the multi-architecture index
 digests, so one pin serves amd64 and arm64.
 
-Python service images still install floating requirements (only
-`inference-manager` installs hash-locked requirements today). A resolver is
-needed to produce hashes, so this is run by a person on the test box, never
-hand-written. Per service, in `services/<name>/`:
+Every Python service image installs a hash-locked requirements file with
+`pip install --require-hashes --no-deps -r <lock>` (inference-manager does the
+same through `uv pip install`). `scripts/check-dockerfile-hash-locks.sh` fails
+the `hadolint` leg of `ci.yml` when a Dockerfile installs from a requirements
+file without `--require-hashes` (self-test:
+`tests/check-dockerfile-hash-locks.test.sh`; the exemption list in the script is
+empty). The layout is `inference-manager`'s: `requirements.txt` keeps the
+human-written specifiers and `requirements.lock` is the resolver output that
+the image installs. ops-console and voice-io install `requirements-dev.txt`
+(it begins with `-r requirements.txt`), so they lock that file as
+`requirements-dev.lock`; voice-io also locks its one `--no-deps` package in
+`requirements-openwakeword.txt` / `.lock`.
 
-    git mv requirements.txt requirements.in      # today's specifiers become the input
+A resolver is needed to produce hashes, so a lock is refreshed by a person on
+the test box (a throwaway `python:3.12-slim` container), never hand-written
+and never on a laptop. Per service, in `services/<name>/`, with the Python
+version of that service's Dockerfile base image:
+
+    pip install uv==0.12.23
     uv pip compile --universal --python-version 3.12 --generate-hashes \
-        -o requirements.txt requirements.in      # hashed, fully pinned output
+        -o requirements.lock requirements.txt
 
-then change that service's Dockerfile install line to
-`pip install --require-hashes --no-deps -r requirements.txt` in the same commit
-(the Dockerfile already copies `requirements.txt`, so nothing else moves).
-Install uv on the box with `pip install uv==0.4.27` (the version
-`inference-manager` already pins). Keeping the `.in` / hashed `.txt` pair is
-the layout Dependabot's pip ecosystem re-compiles; check that its next pull
-request updates both files.
+`--universal` makes one lock that covers every platform (the appliance is
+x86_64; the lock also carries the arm64 and other hashes), so there is no
+per-architecture file. A change to a specifier in `requirements.txt` needs the
+lock recompiled in the same pull request, or the image keeps installing the old
+set. Dependabot's pip ecosystem edits `requirements.txt` only; recompile the
+lock on its pull request before merging. Two things to know:
 
-Plain services (no extra steps): camera-discovery, device-identity-svc,
-doc-render, email-indexer, erp-sql-bridge, file-indexer, fleet-agent,
-oled-display, routing, sandbox, switch, web-fetch. Services that need a
-decision first:
-
-- **ai-gateway**: the `torch --index-url https://download.pytorch.org/whl/cpu`
-  line sets the package index for the whole file. Compile with
-  `--index-url https://pypi.org/simple --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match`
-  and review that torch resolves to the CPU build before committing.
-- **ops-console** and **voice-io**: the Dockerfile installs
-  `requirements-dev.txt` (it begins with `-r requirements.txt`), so lock the dev
-  file the image uses (`requirements-dev.in` to `requirements-dev.txt`).
-  voice-io also runs `pip install --no-deps openwakeword==0.6.0`; give that a
-  one-line input and a hashed lock of its own.
-- **rag-eval**: very large dependency tree; compile on the box and check the
-  image still builds before merging.
-- **inference-manager** already installs a hashed `requirements.lock` and is
-  unchanged.
+- **ai-gateway**: `requirements.txt` carries
+  `torch --index-url https://download.pytorch.org/whl/cpu`. pip ignores an
+  option written on a requirement line, so today's image installs torch from
+  PyPI (the CUDA-enabled build, with its nvidia and triton packages), and uv
+  rejects the line. The lock therefore keeps exactly what the image installs
+  today and is compiled from the same file with that one line reduced to
+  `torch`: `sed 's/^torch --index-url .*/torch/' requirements.txt | uv pip compile --universal --python-version 3.12 --generate-hashes -o requirements.lock -`.
+  Moving ai-gateway to the CPU-only torch build is a separate decision (image
+  size, any GPU use of the gateway); it needs `--index-url`/`--extra-index-url`
+  at compile and install time and a check that the CPU wheels cover the
+  appliance platform.
+- **device-identity-svc** builds `tpm2-pytss` from source (it needs the apt
+  packages the Dockerfile installs), so its lock could only be resolved, not
+  trial-installed, outside the image; CI's image build is the install test.
 
 ## osv nightly
 
