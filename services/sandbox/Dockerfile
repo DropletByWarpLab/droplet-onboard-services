@@ -44,8 +44,8 @@ RUN groupadd --gid 1000 sandbox && \
     useradd --uid 1000 --gid sandbox --shell /usr/sbin/nologin --create-home sandbox
 
 WORKDIR /app
-COPY services/sandbox/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY services/sandbox/requirements.lock .
+RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements.lock
 COPY services/sandbox/ .
 COPY extensions/templates/ /app/templates/
 
