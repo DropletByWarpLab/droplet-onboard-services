@@ -354,6 +354,14 @@ export function pmActions() {
       send<{ comment: PmComment }>(`/api/pm/work-items/${itemId}/comments`, "POST", {
         comment_html: commentHtml,
       }),
-    deleteProject: (id: string) => send<{ deleted: string }>(`/api/pm/projects/${id}`, "DELETE"),
+    // WARP-3370 — archive / restore are PATCH `archived` (a member may); delete is
+    // for good, owner/admin only, archived projects only, and the API wants the
+    // identifier typed again.
+    archiveProject: (id: string) =>
+      send<{ project: PmProject }>(`/api/pm/projects/${id}`, "PATCH", { archived: true }),
+    restoreProject: (id: string) =>
+      send<{ project: PmProject }>(`/api/pm/projects/${id}`, "PATCH", { archived: false }),
+    deleteProject: (id: string, confirmIdentifier: string) =>
+      send<{ deleted: string }>(`/api/pm/projects/${id}`, "DELETE", { confirm_identifier: confirmIdentifier }),
   };
 }

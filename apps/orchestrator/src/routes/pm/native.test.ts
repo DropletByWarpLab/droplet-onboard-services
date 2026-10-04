@@ -9,12 +9,23 @@
  * per-project sequence numbering, default-state landing, and activity logging.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import express from "express";
 import request from "supertest";
 import type { Request, Response, NextFunction } from "express";
 import type { AuthUser } from "../../middleware/auth.js";
 import { createPmNativeRouter } from "./native.js";
+
+// WARP-3370 — the audit recorder is the real singleton's job (and is proved
+// against Postgres in __tests__/pm-project-lifecycle.pg.test.ts); here it is a
+// pair of spies so the route's CALLS to it — which row, what it names, who — are
+// what is asserted. `recordActivityInTx` is the in-transaction append the hard
+// delete uses; `recordActivity` is the best-effort one archive/restore use.
+const audit = vi.hoisted(() => ({
+  recordActivity: vi.fn(async (_row: unknown) => null),
+  recordActivityInTx: vi.fn(async (_tx: unknown, _row: unknown) => ({})),
+}));
+vi.mock("../../services/activity.singleton.js", () => audit);
 
 // ── In-memory Prisma fake ────────────────────────────────────────────────────
 // Only the methods the service uses, with just enough relation resolution.
@@ -250,6 +261,19 @@ function makeFake(hooks: Hooks = {}) {
         fire("pmProject.delete");
         db.projects = db.projects.filter((x) => x.id !== where.id);
         return {};
+      },
+      // WARP-3370 — compare-and-set writes: the `where` carries the state the
+      // row must STILL be in, and `count` says whether this call moved it.
+      updateMany: async ({ where, data }: { where: Row; data: Row }) => {
+        const hit = db.projects.filter((p) => matchesWhere(p, where, db.assignees));
+        for (const p of hit) Object.assign(p, data);
+        return { count: hit.length };
+      },
+      deleteMany: async ({ where }: { where: Row }) => {
+        fire("pmProject.deleteMany");
+        const hit = db.projects.filter((p) => matchesWhere(p, where, db.assignees));
+        db.projects = db.projects.filter((p) => !hit.includes(p));
+        return { count: hit.length };
       },
     },
 
@@ -822,14 +846,32 @@ describe("native PM routes — Prisma race → typed HTTP mapping", () => {
     expect(res.body.error).toBe("identifier_taken");
   });
 
-  it("deleteProject concurrent-delete race → P2025 → 404", async () => {
+  it("deleteProject: the project is deleted by someone else between the check and the delete → 404", async () => {
+    // (Was a P2025 on `delete`; the delete is now a compare-and-set `deleteMany`
+    // whose count says whether it landed, so there is no P2025 to map.)
     id = 0;
     const fake = makeFake();
     const proj = await request(makeApp(fake.prisma, OWNER)).post("/api/pm/projects").send({ name: "Inbox" });
-    fake.hooks["pmProject.delete"] = "P2025";
-    const res = await request(makeApp(fake.prisma, OWNER)).delete(`/api/pm/projects/${proj.body.project.id}`);
+    const projectId = proj.body.project.id;
+    await request(makeApp(fake.prisma, OWNER)).patch(`/api/pm/projects/${projectId}`).send({ archived: true });
+    // The service reads the row (archived, exists), then another request removes it.
+    const prisma = fake.prisma as { pmProject: { findUnique: (a: unknown) => Promise<unknown> } };
+    const realFind = prisma.pmProject.findUnique;
+    let first = true;
+    prisma.pmProject.findUnique = async (a) => {
+      const row = await realFind(a);
+      if (first) {
+        first = false;
+        fake.db.projects = fake.db.projects.filter((p) => p.id !== projectId);
+      }
+      return row;
+    };
+    const res = await request(makeApp(fake.prisma, OWNER))
+      .delete(`/api/pm/projects/${projectId}`)
+      .send({ confirm_identifier: "INBOX" });
     expect(res.status).toBe(404);
     expect(res.body.error).toBe("project_not_found");
+    expect(audit.recordActivityInTx).not.toHaveBeenCalled();
   });
 
   it("deleteWorkItem concurrent-delete race → P2025 → 404", async () => {
@@ -1665,3 +1707,222 @@ describe.each(["America/Los_Angeles", "Pacific/Auckland"])(
   },
 );
 
+// ── WARP-3370 — archive / restore are audited transitions; hard delete is gated ──
+
+describe("native PM routes — archive, restore and hard delete (WARP-3370)", () => {
+  let fake: ReturnType<typeof makeFake>;
+  let owner: ReturnType<typeof makeApp>;
+  let pid: string;
+  const MEMBER = { id: "user-family", role: "family" };
+  const ADMIN = { id: "user-admin", role: "admin" };
+
+  const project = () => fake.db.projects.find((p) => p.id === pid)!;
+  const archive = (app: ReturnType<typeof makeApp>, archived: boolean) =>
+    request(app).patch(`/api/pm/projects/${pid}`).send({ archived });
+  const hardDelete = (app: ReturnType<typeof makeApp>, body?: Row) => {
+    const req = request(app).delete(`/api/pm/projects/${pid}`);
+    return body === undefined ? req : req.send(body);
+  };
+
+  beforeEach(async () => {
+    id = 0;
+    audit.recordActivity.mockClear();
+    audit.recordActivityInTx.mockClear();
+    fake = makeFake();
+    owner = makeApp(fake.prisma, OWNER);
+    const res = await request(owner).post("/api/pm/projects").send({ name: "Home Reno", identifier: "RENO" });
+    pid = res.body.project.id;
+  });
+
+  describe("archive and restore", () => {
+    it("a MEMBER can archive: it hides the project and stamps archivedAt together with isArchived", async () => {
+      const res = await archive(makeApp(fake.prisma, MEMBER), true);
+      expect(res.status).toBe(200);
+      expect(res.body.project.archived).toBe(true);
+      expect(project().isArchived).toBe(true);
+      expect(project().archivedAt).toBeInstanceOf(Date);
+      // gone from the default index, back behind ?archived=1
+      expect((await request(owner).get("/api/pm/projects")).body.projects).toHaveLength(1);
+    });
+
+    it("restore puts it back and clears archivedAt", async () => {
+      await archive(owner, true);
+      const res = await archive(owner, false);
+      expect(res.status).toBe(200);
+      expect(res.body.project.archived).toBe(false);
+      expect(project().isArchived).toBe(false);
+      expect(project().archivedAt).toBeNull();
+    });
+
+    it("each transition writes ONE audit row naming the actor and the project", async () => {
+      await archive(makeApp(fake.prisma, MEMBER), true);
+      expect(audit.recordActivity).toHaveBeenCalledTimes(1);
+      expect(audit.recordActivity.mock.calls[0][0]).toMatchObject({
+        kind: "system",
+        severity: "ok",
+        what: "Project archived",
+        sub: "Home Reno (RENO)",
+        actor: { type: "user", id: "user-family" },
+        refs: { actor: "user-family", projectId: pid, projectName: "Home Reno", projectIdentifier: "RENO" },
+      });
+
+      await archive(owner, false);
+      expect(audit.recordActivity).toHaveBeenCalledTimes(2);
+      expect(audit.recordActivity.mock.calls[1][0]).toMatchObject({
+        what: "Project restored",
+        actor: { type: "user", id: "user-owner" },
+        refs: { projectId: pid },
+      });
+    });
+
+    it("asking for the state it is already in is a 200 that audits nothing", async () => {
+      await archive(owner, true);
+      audit.recordActivity.mockClear();
+      const again = await archive(owner, true);
+      expect(again.status).toBe(200);
+      expect(again.body.project.archived).toBe(true);
+      const notArchivedRestore = await archive(makeApp(fake.prisma, ADMIN), false);
+      expect(notArchivedRestore.status).toBe(200);
+      audit.recordActivity.mockClear();
+      expect((await archive(owner, false)).status).toBe(200); // already active
+      expect(audit.recordActivity).not.toHaveBeenCalled();
+    });
+
+    it("an archive-only PATCH does not rewrite the row's other fields, and a field PATCH still works", async () => {
+      await request(owner).patch(`/api/pm/projects/${pid}`).send({ name: "Renamed", archived: true });
+      expect(project().name).toBe("Renamed");
+      expect(project().isArchived).toBe(true);
+      // the audit row names the project AS IT IS NOW
+      expect(audit.recordActivity.mock.calls.at(-1)?.[0]).toMatchObject({ sub: "Renamed (RENO)" });
+    });
+
+    it("a project that does not exist is a 404, audited as nothing", async () => {
+      const res = await request(owner).patch("/api/pm/projects/nope").send({ archived: true });
+      expect(res.status).toBe(404);
+      expect(audit.recordActivity).not.toHaveBeenCalled();
+    });
+
+    it("a guest cannot archive (403) and nothing is audited", async () => {
+      expect((await archive(makeApp(fake.prisma, GUEST), true)).status).toBe(403);
+      expect(project().isArchived).toBe(false);
+      // (the role guard's own "Access denied" row is a different audit and is fine)
+      const projectRows = (audit.recordActivity.mock.calls as unknown as Array<[{ what: string }]>).filter(([row]) =>
+        row.what.startsWith("Project "),
+      );
+      expect(projectRows).toEqual([]);
+    });
+  });
+
+  describe("hard delete", () => {
+    beforeEach(async () => {
+      await archive(owner, true);
+      audit.recordActivity.mockClear();
+    });
+
+    it("an ARCHIVED project, with its identifier typed, by an owner is deleted and its audit row is appended in the transaction", async () => {
+      const res = await hardDelete(owner, { confirm_identifier: "RENO" });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ deleted: pid });
+      expect(fake.db.projects.find((p) => p.id === pid)).toBeUndefined();
+
+      expect(audit.recordActivityInTx).toHaveBeenCalledTimes(1);
+      const [tx, params] = audit.recordActivityInTx.mock.calls[0] as unknown as [unknown, Row];
+      expect(tx).toBe(fake.prisma); // the transaction handle, not the bare client path
+      expect(params).toMatchObject({
+        kind: "system",
+        severity: "warn",
+        what: "Project deleted",
+        sub: "Home Reno (RENO)",
+        actor: { type: "user", id: "user-owner" },
+        refs: { actor: "user-owner", projectId: pid, projectName: "Home Reno", projectIdentifier: "RENO", workItemsDeleted: 0 },
+      });
+      // never through the best-effort recorder
+      expect(audit.recordActivity).not.toHaveBeenCalled();
+    });
+
+    it("the audit row says how many work items went with the project", async () => {
+      await request(owner).patch(`/api/pm/projects/${pid}`).send({ archived: false });
+      for (let i = 0; i < 3; i += 1) {
+        await request(owner).post(`/api/pm/projects/${pid}/work-items`).send({ name: `Item ${i}` });
+      }
+      await archive(owner, true);
+      await hardDelete(owner, { confirm_identifier: "RENO" });
+      expect((audit.recordActivityInTx.mock.calls[0] as unknown as [unknown, Row])[1].refs).toMatchObject({
+        workItemsDeleted: 3,
+      });
+    });
+
+    it("an admin may delete too", async () => {
+      const res = await hardDelete(makeApp(fake.prisma, ADMIN), { confirm_identifier: "RENO" });
+      expect(res.status).toBe(200);
+      expect(audit.recordActivityInTx.mock.calls[0]).toBeDefined();
+    });
+
+    it("a MEMBER gets 403 — they archive, they cannot destroy — and nothing is touched", async () => {
+      const res = await hardDelete(makeApp(fake.prisma, MEMBER), { confirm_identifier: "RENO" });
+      expect(res.status).toBe(403);
+      expect(project()).toBeDefined();
+      expect(audit.recordActivityInTx).not.toHaveBeenCalled();
+    });
+
+    it("a guest and the MCP principal are refused too", async () => {
+      expect((await hardDelete(makeApp(fake.prisma, GUEST), { confirm_identifier: "RENO" })).status).toBe(403);
+      expect((await hardDelete(makeApp(fake.prisma, MCP), { confirm_identifier: "RENO" })).status).toBe(403);
+      expect(project()).toBeDefined();
+    });
+
+    it("an ACTIVE project cannot be deleted: 409 project_not_archived, and nothing is audited", async () => {
+      await archive(owner, false);
+      const res = await hardDelete(owner, { confirm_identifier: "RENO" });
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: "project_not_archived" });
+      expect(project()).toBeDefined();
+      expect(audit.recordActivityInTx).not.toHaveBeenCalled();
+    });
+
+    it("the identifier must be typed: missing is 400, wrong is 422 identifier_mismatch (case-sensitive)", async () => {
+      expect((await hardDelete(owner)).status).toBe(400);
+      expect((await hardDelete(owner, {})).status).toBe(400);
+      expect((await hardDelete(owner, { confirm_identifier: "" })).status).toBe(400);
+      const wrong = await hardDelete(owner, { confirm_identifier: "OTHER" });
+      expect(wrong.status).toBe(422);
+      expect(wrong.body).toEqual({ error: "identifier_mismatch" });
+      expect((await hardDelete(owner, { confirm_identifier: "reno" })).status).toBe(422);
+      expect(project()).toBeDefined();
+      expect(audit.recordActivityInTx).not.toHaveBeenCalled();
+    });
+
+    it("a restore that wins the race against the delete cancels it: 409, not cascaded away", async () => {
+      // The service has read `archived`; another request restores it before the
+      // compare-and-set delete lands.
+      const prisma = fake.prisma as { pmProject: { findUnique: (a: unknown) => Promise<unknown> } };
+      const realFind = prisma.pmProject.findUnique;
+      let first = true;
+      prisma.pmProject.findUnique = async (a) => {
+        const row = await realFind(a);
+        if (first) {
+          first = false;
+          project().isArchived = false; // restored under us
+        }
+        return row;
+      };
+      const res = await hardDelete(owner, { confirm_identifier: "RENO" });
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe("project_not_archived");
+      expect(project()).toBeDefined();
+      expect(audit.recordActivityInTx).not.toHaveBeenCalled();
+    });
+
+    it("a project that does not exist is a 404", async () => {
+      const res = await request(owner).delete("/api/pm/projects/nope").send({ confirm_identifier: "RENO" });
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe("project_not_found");
+    });
+
+    it("if the audit row cannot be appended the delete fails (500) — the real transaction rolls it back", async () => {
+      audit.recordActivityInTx.mockRejectedValueOnce(new Error("activity recorder not initialised"));
+      const res = await hardDelete(owner, { confirm_identifier: "RENO" });
+      expect(res.status).toBe(500);
+    });
+  });
+});

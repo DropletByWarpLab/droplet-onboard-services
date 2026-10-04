@@ -22,7 +22,7 @@
  */
 
 import type { Prisma, PrismaClient } from "@prisma/client";
-import { SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
+import { READ_COMMITTED_TX, SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
 import { sanitizePmHtml } from "./sanitize-html.js";
 import {
   DEPARTMENT_SELECT,
@@ -73,6 +73,10 @@ export const PM_ERRORS = {
   LEAD_IS_GUEST: "lead_is_guest",
   /** WARP-3371 — a `cursor` this list did not mint. The route answers 400. */
   INVALID_CURSOR,
+  /** WARP-3370 — hard delete is for an ARCHIVED project only. The route answers 409. */
+  PROJECT_NOT_ARCHIVED: "project_not_archived",
+  /** WARP-3370 — the identifier typed to confirm a hard delete is not the project's. 422. */
+  IDENTIFIER_MISMATCH: "identifier_mismatch",
   // ADR-045 §5.3 — the department dimension's codes live beside its rules in
   // pm-department.ts and are folded in here so `mapServiceError` keeps ONE
   // vocabulary to switch on.
@@ -773,7 +777,6 @@ export async function updateProject(
      * what a person may do.
      */
     companyId?: string | null;
-    archived?: boolean;
   },
 ): Promise<ApiProject> {
   const existing = await prisma.pmProject.findUnique({ where: { id: projectId } });
@@ -818,12 +821,9 @@ export async function updateProject(
       ? { connect: { id: fields.companyId } }
       : { disconnect: true };
   }
-  if (fields.archived !== undefined) {
-    // isArchived is the canonical signal (WARP-884); archivedAt stays the
-    // audit timestamp, written/cleared alongside it so the two never diverge.
-    data.isArchived = fields.archived;
-    data.archivedAt = fields.archived ? new Date() : null;
-  }
+  // WARP-3370 — archive / restore is NOT a field of this update any more: it has
+  // its own function (`setProjectArchived`) because a change of that kind has to
+  // say whether it actually moved the project, so the caller can audit it.
   // Same FK race as `createProject`: the existence check above and this write
   // are two round-trips, and the customer can vanish in between.
   let updated;
@@ -840,15 +840,105 @@ export async function updateProject(
   return mapProject(updated);
 }
 
-export async function deleteProject(prisma: PrismaClient, projectId: string): Promise<void> {
-  const existing = await prisma.pmProject.findUnique({ where: { id: projectId } });
+/**
+ * WARP-3370 — archive or restore a project.
+ *
+ * Archiving is the reversible half of "delete project": the project leaves the
+ * index (behind its Archived filter), its work items stay where they are, and
+ * restoring puts it back. `isArchived` is the canonical signal (WARP-884);
+ * `archivedAt` is its audit timestamp, written and cleared with it so the two
+ * never diverge.
+ *
+ * The write is a compare-and-set on the CURRENT value, so two concurrent
+ * requests move the project once, and `changed` tells the caller whether THIS
+ * call was the one that did — the route audits a transition, never a no-op
+ * repeat. Asking for the state a project is already in is not an error.
+ */
+export async function setProjectArchived(
+  prisma: PrismaClient,
+  projectId: string,
+  archived: boolean,
+): Promise<{ project: ApiProject; changed: boolean }> {
+  const moved = await prisma.pmProject.updateMany({
+    where: { id: projectId, isArchived: !archived },
+    data: { isArchived: archived, archivedAt: archived ? new Date() : null },
+  });
+  // Also the existence check: a project that is not there is a 404 either way.
+  const project = await getProject(prisma, projectId);
+  return { project, changed: moved.count === 1 };
+}
+
+/** What the audit row for a hard delete is told about the project that is going. */
+export interface DeletedProjectInfo {
+  id: string;
+  name: string;
+  identifier: string;
+  /** How many work items went with it — the number an audit reader needs. */
+  workItemCount: number;
+}
+
+/** A project with thousands of items cascades through several tables; the
+ *  interactive-transaction default of 5s is not a bound this delete can promise. */
+const DELETE_TX_TIMEOUT_MS = 60_000;
+
+/**
+ * WARP-3370 — delete a project, its work items and everything under them, for
+ * good. Three conditions, each its own refusal, checked in this order:
+ *
+ *   1. the project is ARCHIVED (`project_not_archived`, 409) — archiving is the
+ *      step that makes a deletion deliberate, and until then nothing here runs;
+ *   2. the caller typed the project's identifier (`identifier_mismatch`, 422) —
+ *      the route also pins who may ask (owner / admin only);
+ *   3. the project is still archived when the delete lands. The delete is a
+ *      compare-and-set on `isArchived: true`, so a restore that wins the race
+ *      cancels it (409) instead of being cascaded away.
+ *
+ * `audit` appends the ActivityRow INSIDE the delete's transaction
+ * (`recordActivityInTx`): a project is never destroyed without its audit row,
+ * because the row and the delete commit together — and if the row cannot be
+ * written the delete rolls back. It runs AFTER the delete, as that helper
+ * requires (row-locking writes first, the chain-append lock last).
+ */
+export async function deleteProject(
+  prisma: PrismaClient,
+  projectId: string,
+  opts: {
+    /** The identifier the caller typed. Compared exactly. */
+    confirmIdentifier: string;
+    audit: (tx: Prisma.TransactionClient, project: DeletedProjectInfo) => Promise<unknown>;
+  },
+): Promise<void> {
+  const existing = await prisma.pmProject.findUnique({
+    where: { id: projectId },
+    select: { id: true, name: true, identifier: true, isArchived: true },
+  });
   if (!existing) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
-  // findUnique + delete is two round-trips: a concurrent delete between them
-  // makes this delete throw Prisma P2025. Map it to the same 404 the existence
-  // check would have raised (review finding: delete-helper TOCTOU → P2025).
+  if (!existing.isArchived) throw new Error(PM_ERRORS.PROJECT_NOT_ARCHIVED);
+  if (opts.confirmIdentifier !== existing.identifier) throw new Error(PM_ERRORS.IDENTIFIER_MISMATCH);
+
   try {
-    await prisma.pmProject.delete({ where: { id: projectId } });
+    await prisma.$transaction(
+      async (tx) => {
+        const workItemCount = await tx.pmWorkItem.count({ where: { projectId } });
+        const gone = await tx.pmProject.deleteMany({ where: { id: projectId, isArchived: true } });
+        // Restored (or already deleted) between the read above and here. Throwing
+        // rolls back; nothing was applied.
+        if (gone.count === 0) throw new Error(PM_ERRORS.PROJECT_NOT_ARCHIVED);
+        await opts.audit(tx, {
+          id: existing.id,
+          name: existing.name,
+          identifier: existing.identifier,
+          workItemCount,
+        });
+      },
+      { ...READ_COMMITTED_TX, timeout: DELETE_TX_TIMEOUT_MS },
+    );
   } catch (err) {
+    if (err instanceof Error && err.message === PM_ERRORS.PROJECT_NOT_ARCHIVED) {
+      // Which of the two it was: restored (409) or deleted by someone else (404).
+      const still = await prisma.pmProject.findUnique({ where: { id: projectId }, select: { id: true } });
+      throw new Error(still ? PM_ERRORS.PROJECT_NOT_ARCHIVED : PM_ERRORS.PROJECT_NOT_FOUND);
+    }
     if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
     throw err;
   }

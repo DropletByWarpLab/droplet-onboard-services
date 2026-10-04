@@ -548,6 +548,11 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That parent item isn't available anymore. Refresh and try again.",
     identifier_taken:
       "That project ID is already in use. Pick a different one.",
+    // WARP-3370 — hard delete. Each says what is wrong and the one thing to do.
+    project_not_archived:
+      "Only an archived project can be deleted for good. Archive it first.",
+    identifier_mismatch:
+      "That doesn't match the project's ID. Type it exactly as shown.",
     // WARP-2730 (ADR-048) — the filing review surface, which lives inside the
     // CRM and therefore inside this domain. Each string says what happened and
     // what to do about it, in the owner's words: file, customer, look, undo —

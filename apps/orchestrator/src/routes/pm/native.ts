@@ -32,6 +32,8 @@ import { actorOf } from "./actor.js";
 import { listRelationsFor } from "../../services/pm/pm-relations.service.js";
 import { resolveDepartmentFilter } from "../../services/pm/pm-department.js";
 import { isDateOnly, parseDateInput } from "../../services/pm/pm-dates.js";
+import { recordActivity, recordActivityInTx } from "../../services/activity.singleton.js";
+import { actorFromRequest } from "../../services/activity.service.js";
 import { parsePaging } from "./paging.js";
 
 
@@ -88,6 +90,17 @@ function mapServiceError(err: unknown, res: Response): boolean {
       // not a missing row, so 400 rather than a 404 or an empty page.
       res.status(400).json({ error: msg });
       return true;
+    // WARP-3370 — a hard delete asked of a project that is not archived. The
+    // request is well-formed and the caller may delete; the project's CURRENT
+    // state is what forbids it (archive it first), the same class as
+    // state_is_last — a conflict, not a validation failure.
+    case "project_not_archived":
+      res.status(409).json({ error: msg });
+      return true;
+    // WARP-3370 — the identifier typed to confirm is not this project's.
+    case "identifier_mismatch":
+      res.status(422).json({ error: msg });
+      return true;
     default:
       return false;
   }
@@ -131,6 +144,10 @@ const projectPatchSchema = z.object({
   company_id: z.string().min(1).max(64).nullable().optional(),
   archived: z.boolean().optional(),
 });
+
+// WARP-3370 — hard delete is confirmed by typing the project's identifier. The
+// dashboard asks for it; the API asks too, so a script cannot skip the question.
+const projectDeleteSchema = z.object({ confirm_identifier: z.string().min(1).max(64) });
 
 const stateCreateSchema = z.object({
   name: z.string().min(1).max(100),
@@ -240,6 +257,34 @@ const WRITE_OR_ASSIGNED_GUEST = [...WRITE, "guest"] as const;
 
 function badRequest(res: Response, parsed: { error: z.ZodError }): void {
   res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+}
+
+/**
+ * WARP-3370 — the audit row for a project archive / restore, through the same
+ * recorder every other admin action on the box uses (`kind: "system"`, like a
+ * department restore or a workspace-location change). Best-effort and AFTER the
+ * commit, because both are reversible; the irreversible hard delete appends its
+ * row inside its own transaction instead.
+ */
+async function auditProjectLifecycle(
+  req: Request,
+  verb: "archived" | "restored",
+  project: pm.ApiProject,
+): Promise<void> {
+  await recordActivity({
+    kind: "system",
+    severity: "ok",
+    sourceIcon: verb === "archived" ? "archive" : "archive-restore",
+    what: verb === "archived" ? "Project archived" : "Project restored",
+    sub: `${project.name} (${project.identifier})`,
+    refs: {
+      actor: req.user?.username ?? null,
+      projectId: project.id,
+      projectName: project.name,
+      projectIdentifier: project.identifier,
+    },
+    actor: actorFromRequest(req),
+  });
 }
 
 export function createPmNativeRouter(prisma: PrismaClient): Router {
@@ -370,23 +415,62 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
       // ADR-048 — `company_id` renames for the same reason `department_id`
       // does, and carries the same three-state meaning: absent leaves the
       // customer alone, `null` clears it, an id sets it.
-      const { department_id, company_id, ...rest } = parsed.data;
-      res.json({
-        project: await pm.updateProject(prisma, req.params.id, {
+      //
+      // WARP-3370 — `archived` is split out: archiving and restoring are audited
+      // transitions with their own function, not one more field of the update.
+      const { department_id, company_id, archived, ...rest } = parsed.data;
+      const hasFields = [...Object.values(rest), department_id, company_id].some((v) => v !== undefined);
+      let project: pm.ApiProject | null = null;
+      // An archive-only PATCH must not also rewrite the row for nothing.
+      if (hasFields || archived === undefined) {
+        project = await pm.updateProject(prisma, req.params.id, {
           ...rest,
           departmentId: department_id,
           companyId: company_id,
-        }),
-      });
+        });
+      }
+      if (archived !== undefined) {
+        const out = await pm.setProjectArchived(prisma, req.params.id, archived);
+        project = out.project;
+        // A transition is audited; asking for the state it is already in is not.
+        if (out.changed) await auditProjectLifecycle(req, archived ? "archived" : "restored", out.project);
+      }
+      res.json({ project });
     } catch (err) {
       if (mapServiceError(err, res)) return;
       next(err);
     }
   });
 
-  router.delete("/pm/projects/:id", requireRole(...WRITE), async (req, res, next) => {
+  // WARP-3370 — HARD delete. Not what "delete" meant before: it used to remove
+  // any project, with every work item, for any member, leaving no trace. Now it
+  // is owner/admin only, only for an ARCHIVED project, only with the identifier
+  // typed, and it writes its audit row in the same transaction as the delete.
+  // Members archive (PATCH `archived`); they cannot destroy. The MCP principal
+  // is not admitted — no tool deletes a project.
+  router.delete("/pm/projects/:id", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      await pm.deleteProject(prisma, req.params.id);
+      const parsed = projectDeleteSchema.safeParse(req.body);
+      if (!parsed.success) return badRequest(res, parsed);
+      await pm.deleteProject(prisma, req.params.id, {
+        confirmIdentifier: parsed.data.confirm_identifier,
+        audit: (tx, project) =>
+          recordActivityInTx(tx, {
+            kind: "system",
+            severity: "warn",
+            sourceIcon: "trash-2",
+            what: "Project deleted",
+            sub: `${project.name} (${project.identifier})`,
+            refs: {
+              actor: req.user?.username ?? null,
+              projectId: project.id,
+              projectName: project.name,
+              projectIdentifier: project.identifier,
+              workItemsDeleted: project.workItemCount,
+            },
+            actor: actorFromRequest(req),
+          }),
+      });
       res.json({ deleted: req.params.id });
     } catch (err) {
       if (mapServiceError(err, res)) return;

@@ -126,6 +126,12 @@ export function canWrite(role: string | undefined): boolean {
   return role === "owner" || role === "admin" || role === "family";
 }
 
+/** Roles that may delete a project for good (WARP-3370, mirrors `DELETE
+ *  /api/pm/projects/:id`). Members can archive and restore; they cannot destroy. */
+export function canDeleteProject(role: string | undefined): boolean {
+  return role === "owner" || role === "admin";
+}
+
 export interface PmActivity {
   id: string;
   workItemId: string;

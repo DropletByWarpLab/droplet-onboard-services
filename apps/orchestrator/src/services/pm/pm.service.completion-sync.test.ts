@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createWorkItem, deleteState, deleteWorkItem, updateProject, updateState } from "./pm.service.js";
+import { createWorkItem, deleteState, deleteWorkItem, setProjectArchived, updateState } from "./pm.service.js";
 import { SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
 // WARP-1570: pm.service.ts now declares an isolation level (deleteWorkItem's
 // relation audit), so its suites must inherit the shared seam rather than
@@ -389,7 +389,12 @@ describe("deleteWorkItem parent-removal audit (WARP-885)", () => {
   });
 });
 
-describe("updateProject archival signal sync (WARP-884)", () => {
+// WARP-3370 — archive / restore moved out of `updateProject` into
+// `setProjectArchived`, a compare-and-set that also says whether it moved the
+// project. The WARP-884 invariant these two pin is unchanged: `isArchived` (the
+// canonical signal) and `archivedAt` (its timestamp) are written and cleared
+// TOGETHER. Lifecycle + audit behaviour is in native.test.ts and the pg suite.
+describe("setProjectArchived archival signal sync (WARP-884)", () => {
   function baseProjectRow(overrides: Row = {}): Row {
     return {
       id: "p1",
@@ -407,49 +412,78 @@ describe("updateProject archival signal sync (WARP-884)", () => {
   }
 
   it("archiving sets isArchived=true and stamps archivedAt", async () => {
-    let persisted: Row | undefined;
+    let persisted: { where: Row; data: Row } | undefined;
+    let row = baseProjectRow();
     const prisma = {
       pmProject: {
-        findUnique: async () => baseProjectRow(),
-        update: async ({ data, include }: { data: Row; include?: Row }) => {
-          persisted = data;
-          return {
-            ...baseProjectRow(),
-            ...data,
-            ...(include?.workspace ? { workspace: { slug: "home" } } : {}),
-          };
+        updateMany: async (args: { where: Row; data: Row }) => {
+          persisted = args;
+          row = { ...row, ...args.data };
+          return { count: 1 };
         },
+        findUnique: async ({ include }: { include?: Row }) => ({
+          ...row,
+          ...(include?.workspace ? { workspace: { slug: "home" } } : {}),
+        }),
       },
     } as never;
 
-    const result = await updateProject(prisma, "p1", { archived: true });
+    const { project, changed } = await setProjectArchived(prisma, "p1", true);
 
-    expect(persisted!.isArchived).toBe(true);
-    expect(persisted!.archivedAt).toBeInstanceOf(Date);
-    expect(result.archived).toBe(true);
+    // compare-and-set: only a project that is NOT yet archived is moved
+    expect(persisted!.where).toEqual({ id: "p1", isArchived: false });
+    expect(persisted!.data.isArchived).toBe(true);
+    expect(persisted!.data.archivedAt).toBeInstanceOf(Date);
+    expect(project.archived).toBe(true);
+    expect(changed).toBe(true);
   });
 
   it("unarchiving clears isArchived and archivedAt together", async () => {
-    let persisted: Row | undefined;
+    let persisted: { where: Row; data: Row } | undefined;
+    let row = baseProjectRow({ isArchived: true, archivedAt: new Date() });
     const prisma = {
       pmProject: {
-        findUnique: async () => baseProjectRow({ isArchived: true, archivedAt: new Date() }),
-        update: async ({ data, include }: { data: Row; include?: Row }) => {
-          persisted = data;
-          return {
-            ...baseProjectRow(),
-            ...data,
-            ...(include?.workspace ? { workspace: { slug: "home" } } : {}),
-          };
+        updateMany: async (args: { where: Row; data: Row }) => {
+          persisted = args;
+          row = { ...row, ...args.data };
+          return { count: 1 };
         },
+        findUnique: async ({ include }: { include?: Row }) => ({
+          ...row,
+          ...(include?.workspace ? { workspace: { slug: "home" } } : {}),
+        }),
       },
     } as never;
 
-    const result = await updateProject(prisma, "p1", { archived: false });
+    const { project, changed } = await setProjectArchived(prisma, "p1", false);
 
-    expect(persisted!.isArchived).toBe(false);
-    expect(persisted!.archivedAt).toBeNull();
-    expect(result.archived).toBe(false);
+    expect(persisted!.where).toEqual({ id: "p1", isArchived: true });
+    expect(persisted!.data.isArchived).toBe(false);
+    expect(persisted!.data.archivedAt).toBeNull();
+    expect(project.archived).toBe(false);
+    expect(changed).toBe(true);
+  });
+
+  it("a project already in the asked state is not moved and says so (the route audits transitions only)", async () => {
+    const prisma = {
+      pmProject: {
+        updateMany: async () => ({ count: 0 }), // the compare-and-set matched nothing
+        findUnique: async ({ include }: { include?: Row }) => ({
+          ...baseProjectRow({ isArchived: true, archivedAt: new Date() }),
+          ...(include?.workspace ? { workspace: { slug: "home" } } : {}),
+        }),
+      },
+    } as never;
+    const { project, changed } = await setProjectArchived(prisma, "p1", true);
+    expect(changed).toBe(false);
+    expect(project.archived).toBe(true);
+  });
+
+  it("a project that does not exist is project_not_found", async () => {
+    const prisma = {
+      pmProject: { updateMany: async () => ({ count: 0 }), findUnique: async () => null },
+    } as never;
+    await expect(setProjectArchived(prisma, "nope", true)).rejects.toThrow("project_not_found");
   });
 });
 

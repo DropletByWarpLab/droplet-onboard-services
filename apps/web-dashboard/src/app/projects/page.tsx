@@ -21,7 +21,7 @@ import { PmIcon } from "@/components/projects/icons";
 import { ListProgress, PeopleContext } from "@/components/projects/bits";
 import { ProjectsDisabled } from "@/components/projects/ProjectsDisabled";
 import { stageRecordPinHandoff } from "@/lib/pin-handoff";
-import { canWrite, type PmProject, type PmWorkItem } from "@/components/projects/types";
+import { canDeleteProject, canWrite, type PmProject, type PmWorkItem } from "@/components/projects/types";
 import { isOverdue } from "@/components/projects/config";
 import {
   useProjects,
@@ -41,7 +41,12 @@ import { IndexView } from "@/components/projects/IndexView";
 import { BoardView, ListView, PlaceholderView, type Domain } from "@/components/projects/board";
 import { ViewSwitcher, SavedViews, FilterBar, type ProjectView, type SavedView } from "@/components/projects/chrome";
 import { DetailDrawer } from "@/components/projects/detail";
-import { NewItemModal, NewProjectModal } from "@/components/projects/modals";
+import {
+  ConfirmArchiveProject,
+  ConfirmDeleteProject,
+  NewItemModal,
+  NewProjectModal,
+} from "@/components/projects/modals";
 
 function matchQuery(item: PmWorkItem, q: string): boolean {
   const needle = q.toLowerCase();
@@ -81,6 +86,8 @@ function ProjectsWorkspace(): JSX.Element {
   const { user } = useAuth();
   const role = user?.role;
   const readOnly = !canWrite(role);
+  // WARP-3370 — members archive and restore; only owner/admin may delete for good.
+  const mayDelete = canDeleteProject(role);
   const { toast } = useToast();
   const { person } = usePeople();
 
@@ -98,7 +105,7 @@ function ProjectsWorkspace(): JSX.Element {
   const [department, setDepartment] = useState<string>(DEPARTMENT_ANY);
   const [showArchived, setShowArchived] = useState(false);
   const [drawer, setDrawer] = useState<PmWorkItem | null>(null);
-  const [modal, setModal] = useState<"newitem" | "newproject" | null>(null);
+  const [modal, setModal] = useState<"newitem" | "newproject" | "archive" | "delete" | null>(null);
 
   const { projects, error: projErr, isLoading: projLoading, mutate: mutateProjects } = useProjects(showArchived);
   // ProjectsWorkspace only mounts behind the `projects` capability gate above.
@@ -185,6 +192,26 @@ function ProjectsWorkspace(): JSX.Element {
     setProjectId(null);
   };
 
+  // WARP-3370 — leaving a project for good (archived or deleted): back to the
+  // index, with the list and the KPIs re-read.
+  const afterProjectGone = () => {
+    backToIndex();
+    void mutateProjects();
+    void mutateSummary();
+  };
+
+  const onRestore = async () => {
+    if (!project) return;
+    try {
+      await pmActions().restoreProject(project.id);
+      toast("Project restored", "success");
+      void mutateProjects();
+      void mutateSummary();
+    } catch (e) {
+      toast(translateError(e, "projects"), "error");
+    }
+  };
+
   const onTransition = async (item: PmWorkItem, stateId: string) => {
     try {
       await pmActions().transitionItem(item.id, stateId);
@@ -267,9 +294,41 @@ function ProjectsWorkspace(): JSX.Element {
         <div className="pm-scope">
           <div className="pm-page">
             {view !== "index" && (
-              <button className="pm-btn ghost sm" type="button" onClick={backToIndex} style={{ alignSelf: "flex-start", marginBottom: 14 }}>
-                <PmIcon name="chevL" size={14} /> All projects
-              </button>
+              <div className="pm-row" style={{ justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+                <button className="pm-btn ghost sm" type="button" onClick={backToIndex}>
+                  <PmIcon name="chevL" size={14} /> All projects
+                </button>
+                {!readOnly && project && !project.archived && (
+                  <button className="pm-btn ghost sm" type="button" onClick={() => setModal("archive")}>
+                    <PmIcon name="archive" size={14} /> Archive project
+                  </button>
+                )}
+              </div>
+            )}
+            {/* WARP-3370 — an archived project says so, and owns the two ways out:
+                put it back, or (owner/admin) delete it for good. */}
+            {view !== "index" && project?.archived && (
+              <div
+                className="pm-surface pm-row"
+                role="status"
+                style={{ justifyContent: "space-between", gap: 12, flexWrap: "wrap", padding: "12px 16px", marginBottom: 14 }}
+              >
+                <span style={{ fontSize: 13, color: "var(--text-2)" }}>
+                  This project is archived. It&apos;s hidden from your project list.
+                </span>
+                <span className="pm-row" style={{ gap: 8 }}>
+                  {!readOnly && (
+                    <button className="pm-btn sm" type="button" onClick={() => void onRestore()}>
+                      <PmIcon name="restore" size={14} /> Restore
+                    </button>
+                  )}
+                  {mayDelete && (
+                    <button className="pm-btn danger sm" type="button" onClick={() => setModal("delete")}>
+                      <PmIcon name="trash" size={14} /> Delete permanently
+                    </button>
+                  )}
+                </span>
+              </div>
             )}
 
             {isProjectView && (
@@ -359,6 +418,12 @@ function ProjectsWorkspace(): JSX.Element {
         <NewItemModal project={project} onClose={() => setModal(null)} onCreated={refreshAll} />
       )}
       {modal === "newproject" && <NewProjectModal onClose={() => setModal(null)} onCreated={refreshAll} />}
+      {modal === "archive" && project && (
+        <ConfirmArchiveProject project={project} onClose={() => setModal(null)} onArchived={afterProjectGone} />
+      )}
+      {modal === "delete" && project && (
+        <ConfirmDeleteProject project={project} onClose={() => setModal(null)} onDeleted={afterProjectGone} />
+      )}
     </PeopleContext.Provider>
   );
 }
