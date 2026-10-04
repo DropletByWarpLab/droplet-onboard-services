@@ -157,6 +157,19 @@ function normaliseMac(mac: string | undefined | null): string | null {
   return trimmed ? trimmed.toUpperCase() : null;
 }
 
+/**
+ * The key camera-discovery files a camera under: the MAC, lower-case.
+ *
+ * `normaliseMac` (upper-case) is how this service compares and displays MACs;
+ * this is how it TALKS to camera-discovery. They are deliberately a pair — the
+ * synthetic keys discovery mints for a camera with no DHCP lease (`ip:<addr>`,
+ * `onvif_<addr>`) go through both, so `IP:192.168.9.77` must become
+ * `ip:192.168.9.77` again on the wire.
+ */
+function discoveryKey(mac: string): string {
+  return mac.trim().toLowerCase();
+}
+
 function toCandidate(record: DiscoveryRecord): CameraCandidate | null {
   const ip = record.ip?.trim();
   if (!ip) return null; // nothing actionable without an address
@@ -371,8 +384,7 @@ export async function submitLiveCandidateCredentials(
   let resp: Response;
   try {
     resp = await internalFetch(
-      // camera-discovery keys its pending map lower-case.
-      `${internalBaseUrl(config.CAMERA_DISCOVERY_URL)}/cameras/discovered/${encodeURIComponent(mac.toLowerCase())}/credentials`,
+      `${internalBaseUrl(config.CAMERA_DISCOVERY_URL)}/cameras/discovered/${encodeURIComponent(discoveryKey(mac))}/credentials`,
       {
         method: "POST",
         headers: { ...discoveryAuthHeaders(), "Content-Type": "application/json" },

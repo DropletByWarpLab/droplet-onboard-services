@@ -316,6 +316,21 @@ describe("submitLiveCandidateCredentials (WARP-3505)", () => {
   });
 
   it.each([
+    ["E4:30:22:50:2A:FD", "e4%3A30%3A22%3A50%3A2a%3Afd"],
+    [" E4:30:22:50:2A:FD ", "e4%3A30%3A22%3A50%3A2a%3Afd"], // surrounding whitespace is not part of the key
+    ["IP:192.168.9.77", "ip%3A192.168.9.77"], // synthetic keys discovery mints for a camera with no lease
+    ["ONVIF_192_168_9_77", "onvif_192_168_9_77"],
+  ])("files %j under the key camera-discovery uses (lower-case, trimmed): %s", async (mac, wire) => {
+    // The same normalisation accept/reject use (WARP-3508's discoveryKey): one
+    // way of talking to camera-discovery about a camera, not one per call.
+    internalFetch.mockResolvedValue(new Response("{}", { status: 200 }));
+    await submitLiveCandidateCredentials(mac, "admin", "s3cret!");
+    expect(String(internalFetch.mock.calls[0][0])).toBe(
+      `http://camera-discovery.test:8085/cameras/discovered/${wire}/credentials`,
+    );
+  });
+
+  it.each([
     [422, "auth_failed"],
     [423, "locked"],
     [422, "no_stream_path"],

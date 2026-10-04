@@ -213,6 +213,41 @@ def _require_auth(request: Request) -> None:
 
 MAX_REJECTED_MACS = 1000  # Cap rejected set to prevent unbounded growth
 
+# --- Camera keys (WARP-3508) ---
+#
+# ``pending_cameras``, ``known_cameras`` and ``rejected_macs`` are all keyed by ONE
+# canonical form: the lower-case MAC. ``scan_and_discover`` lower-cases every lease
+# and the lookups in accept/reject are exact, so a caller that spelled the same MAC
+# in upper case — the orchestrator's candidate ids carry ``E4:30:...`` — got a 404
+# for a camera that was sitting right there in the list.
+#
+# A camera with no DHCP lease is filed under a synthetic key instead: ``ip:<addr>``
+# (found by the subnet sweep) or ``onvif_<addr_with_underscores>`` (found by ONVIF).
+# Those travel through the same ``{mac}`` routes, so they are valid keys too.
+_CAMERA_KEY = re.compile(
+    r"[0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}"  # hardware address
+    r"|ip:\d{1,3}(?:\.\d{1,3}){3}"  # synthetic: subnet sweep, no lease
+    r"|onvif_\d{1,3}(?:_\d{1,3}){3}"  # synthetic: ONVIF, no lease
+)
+
+
+def _camera_key(raw: str) -> str:
+    """Canonical key for a ``{mac}`` path parameter; a 400 when it cannot be one.
+
+    Call it AFTER ``_require_auth`` so an unauthenticated caller learns nothing
+    about what a valid key looks like, and BEFORE the key touches any state — the
+    in-flight guard in accept/reject must claim the canonical spelling, or an
+    accept for ``E4:..`` would not stop a reject for ``e4:..``.
+    """
+    key = raw.strip().lower()
+    if not _CAMERA_KEY.fullmatch(key):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid camera identifier — expected a MAC address",
+        )
+    return key
+
+
 # --- State ---
 
 # Known cameras: MAC address -> camera info
@@ -1299,15 +1334,17 @@ async def submit_camera_credentials(mac: str, request: Request):
     MQTT, and the response carries no RTSP URL.
     """
     _require_auth(request)
+    # One canonical key (lower-case MAC, or a synthetic ip:/onvif_ key) before the
+    # key touches any state: the orchestrator addresses a candidate by its
+    # UPPER-case id, and the in-flight claim below must be taken on the canonical
+    # spelling. WARP-3508 owns the helper; every {mac} route goes through it.
+    mac = _camera_key(mac)
     try:
         body = await request.json()
     except Exception:
         body = None
     username, password = _validated_credentials(body)
 
-    # pending_cameras keys are lower-case (DHCP MACs are lowered on ingest) but
-    # the orchestrator addresses candidates by the upper-cased `mac:` id.
-    mac = mac.lower()
     camera = pending_cameras.get(mac)
     if not camera:
         raise HTTPException(status_code=404, detail="Camera not found in pending list")

@@ -847,6 +847,171 @@ async def test_unknown_mac_is_404(monkeypatch):
     assert ei.value.status_code == 404
 
 
+# --- the {mac} key: one canonical form, shared with accept/reject (WARP-3508) ----
+#
+# pending_cameras / known_cameras / rejected_macs are keyed by the lower-case MAC
+# (or a synthetic `ip:<addr>` / `onvif_<addr>` key for a camera with no DHCP
+# lease), while the orchestrator addresses a candidate by its UPPER-case id. Any
+# `{mac}` route has to normalise the key before it touches state, and an
+# identifier that cannot be a key is a 400, not a silent 404.
+
+# (key as camera-discovery files it, key as a caller might spell it)
+SPELLINGS = [
+    (MAC, "AA:BB:CC:DD:EE:FF"),
+    (MAC, "aa:bb:cc:dd:EE:ff"),
+    ("ip:127.0.0.9", "IP:127.0.0.9"),
+    ("onvif_127_0_0_9", "ONVIF_127_0_0_9"),
+]
+
+MALFORMED_KEYS = [
+    "not-a-mac",
+    "aa:bb:cc:dd:ee",  # too short
+    "aa:bb:cc:dd:ee:ff:00",  # too long
+    "zz:zz:zz:zz:zz:zz",  # not hex
+    "../../etc/passwd",
+    "ip:999",  # not an address
+    "onvif_1_2",
+    "a" * 300,
+    "",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored,spelled", SPELLINGS)
+async def test_the_credentials_route_finds_the_camera_whatever_its_key_is_spelled_as(
+    monkeypatch, stored, spelled
+):
+    async with _Server() as srv:
+        main, added, _ = _fresh_main(monkeypatch, srv.port)
+        record = main.pending_cameras.pop(MAC)
+        record["mac"] = stored
+        main.pending_cameras[stored] = record
+
+        out = await main.submit_camera_credentials(spelled, _Req({"username": USER, "password": PW}))
+
+    assert out["status"] == "accepted"
+    # Filed under the canonical key, never under the spelling the caller used.
+    assert set(main.known_cameras) == {stored}
+    assert main.pending_cameras == {}
+    assert len(added) == 1
+
+
+@pytest.mark.asyncio
+async def test_surrounding_whitespace_in_the_key_is_ignored(monkeypatch):
+    async with _Server() as srv:
+        main, added, _ = _fresh_main(monkeypatch, srv.port)
+        out = await main.submit_camera_credentials(
+            f" {MAC.upper()} ", _Req({"username": USER, "password": PW})
+        )
+    assert out["status"] == "accepted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", MALFORMED_KEYS)
+async def test_an_identifier_that_cannot_be_a_key_is_a_400_not_a_silent_404(monkeypatch, bad):
+    from fastapi import HTTPException
+
+    main, added, _ = _fresh_main(monkeypatch, 1)
+    probed = []
+
+    async def spy(*a, **k):
+        probed.append(a)
+        return ("ok", "/x")
+
+    monkeypatch.setattr(main, "probe_with_credentials", spy)
+    with pytest.raises(HTTPException) as ei:
+        await main.submit_camera_credentials(bad, _Req({"username": USER, "password": PW}))
+    assert ei.value.status_code == 400
+    assert probed == [] and added == []
+    assert not main.accepting_macs
+
+
+@pytest.mark.asyncio
+async def test_auth_is_checked_before_the_identifier(monkeypatch):
+    """An unauthenticated caller learns nothing about what a valid key looks like."""
+    from fastapi import HTTPException
+
+    main, _, _ = _fresh_main(monkeypatch, 1)
+    with pytest.raises(HTTPException) as ei:
+        await main.submit_camera_credentials("not-a-mac", _Req({"username": USER, "password": PW}, token="wrong"))
+    assert ei.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_the_in_flight_claim_is_taken_on_the_canonical_key(monkeypatch):
+    """PYNET-017: a MAC is never both added and rejected. Claimed as typed, a
+    submit for `AA:BB:..` would not stop a reject for `aa:bb:..` (or a second
+    submit in another spelling) and the camera could end up live AND dismissed."""
+    from fastapi import HTTPException
+
+    main, added, _ = _fresh_main(monkeypatch, 1)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked(*a, **k):
+        entered.set()
+        await release.wait()
+        return ("no_path", None)
+
+    monkeypatch.setattr(main, "probe_with_credentials", blocked)
+    first = asyncio.create_task(
+        main.submit_camera_credentials(MAC.upper(), _Req({"username": USER, "password": PW}))
+    )
+    await asyncio.wait_for(entered.wait(), timeout=2.0)
+
+    assert main.accepting_macs == {MAC}  # the canonical spelling
+    with pytest.raises(HTTPException) as reject_err:
+        await main.reject_camera(MAC, _Req({}))
+    assert reject_err.value.status_code == 409
+    with pytest.raises(HTTPException) as second_err:
+        await main.submit_camera_credentials("aa:bb:cc:dd:EE:ff", _Req({"username": USER, "password": PW}))
+    assert second_err.value.status_code == 409
+    assert main.rejected_macs == set()
+
+    release.set()
+    resp = await asyncio.wait_for(first, timeout=5.0)
+    assert resp.status_code == 422  # no_stream_path
+    assert main.accepting_macs == set()
+
+
+class TestOverHttp:
+    """The same contract through the real router: the path the orchestrator dials."""
+
+    @pytest.fixture
+    def client(self, monkeypatch):
+        testclient = pytest.importorskip("fastapi.testclient")
+        main, added, _ = _fresh_main(monkeypatch, 1)
+        return main, added, testclient.TestClient(main.app)
+
+    AUTH = {"Authorization": f"Bearer {SECRET}"}
+    BODY = {"username": USER, "password": PW}
+
+    def test_a_malformed_identifier_is_a_400(self, client):
+        _, _, http = client
+        resp = http.post("/cameras/discovered/not-a-mac/credentials", headers=self.AUTH, json=self.BODY)
+        assert resp.status_code == 400
+
+    def test_an_unknown_but_well_formed_camera_is_a_404(self, client):
+        _, _, http = client
+        resp = http.post(
+            "/cameras/discovered/11%3A22%3A33%3A44%3A55%3A66/credentials", headers=self.AUTH, json=self.BODY
+        )
+        assert resp.status_code == 404
+
+    def test_the_upper_case_id_the_orchestrator_sends_finds_the_camera(self, client, monkeypatch):
+        main, _, http = client
+
+        async def refuse(*a, **k):
+            return ("auth_failed", None)
+
+        monkeypatch.setattr(main, "probe_with_credentials", refuse)
+        resp = http.post(
+            "/cameras/discovered/AA%3ABB%3ACC%3ADD%3AEE%3AFF/credentials", headers=self.AUTH, json=self.BODY
+        )
+        # Found (not a 404) and answered by the probe: a wrong password.
+        assert resp.status_code == 422 and resp.json()["code"] == "auth_failed"
+
+
 # --- NET-05: the password never leaves the service ---------------------------
 
 
