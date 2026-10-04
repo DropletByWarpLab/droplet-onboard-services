@@ -50,11 +50,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       media-types \
       openssl ca-certificates
 
-COPY services/file-indexer/requirements.txt .
+COPY services/file-indexer/requirements.lock .
 # WARP-1065: persistent pip wheel/http cache (replaces --no-cache-dir; the
 # cache lives in the mount, not the image).
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    pip install --require-hashes --no-deps -r requirements.lock
 
 # WARP-3426 — bake every Hugging Face asset this service loads; the Hub is
 # off-limits at runtime. The appliance never phones home (and an air-gapped
