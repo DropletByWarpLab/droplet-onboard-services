@@ -56,6 +56,7 @@ import { createMatterRouter } from "./routes/matter.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
+import { createPmOpenApiRouter } from "./routes/pm/openapi.js";
 import { createCrmRouter } from "./routes/crm.js";
 import { createMoneyRouter } from "./routes/money.js";
 import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
@@ -566,6 +567,12 @@ export function createApp(
   // factory-reset.sh).
   app.use("/api", createSystemResetRouter(prisma));
   app.use("/api", createMatterRouter(prisma));
+  // WARP-3533 — GET /api/pm/openapi.json, the OpenAPI 3.1 description of the PM
+  // API. First among the PM routers on purpose: a literal path goes ahead of the
+  // `/pm/<thing>/:id` routes below, so no parameterised sibling can ever shadow
+  // it. It sits under /api/pm, so the projects module gate, the tier floor and
+  // (for a token) the pm:read scope all apply to it.
+  app.use("/api", createPmOpenApiRouter());
   // ADR-026 — native PM (projects, work-items, states, labels, comments).
   // The Droplet-owned project-management surface: state in the orchestrator's
   // own Postgres, dashboard session is the auth, no embedded third-party stack.
