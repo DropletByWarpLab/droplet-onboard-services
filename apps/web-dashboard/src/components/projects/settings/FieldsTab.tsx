@@ -86,7 +86,7 @@ export function FieldsTab({
                     <span style={{ fontSize: 13.5 }}>{p.name}</span>
                   )}
                 </span>
-                <span className="pm-tag">{PROPERTY_TYPES[p.type].label}</span>
+                <span className="pm-tag" style={{ minWidth: 84, justifyContent: "center" }}>{PROPERTY_TYPES[p.type].label}</span>
                 {hasOptions(p.type) && (
                   <button
                     type="button"

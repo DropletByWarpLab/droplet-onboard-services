@@ -10,8 +10,10 @@
 .pm-scope .pm-set-list { list-style: none; margin: 0; padding: 0; }
 .pm-scope .pm-set-item { padding: 9px 2px; border-bottom: 1px solid var(--border); }
 .pm-scope .pm-set-item:last-child { border-bottom: none; }
-.pm-scope .pm-set-row { display: flex; align-items: center; gap: 8px; min-height: 32px; }
-.pm-scope .pm-set-row .grow { flex: 1; min-width: 0; }
+.pm-scope .pm-set-row { display: flex; align-items: center; gap: 8px; min-height: 32px; flex-wrap: wrap; }
+/* The name takes what is left, and drops to its own line before it is squeezed
+ * unreadable (a phone-width dialog has no room for swatch + name + group + four buttons). */
+.pm-scope .pm-set-row .grow { flex: 1 1 140px; min-width: 0; }
 .pm-scope .pm-set-note { font-size: 12px; color: var(--text-3); margin: 6px 0 0; }
 .pm-scope .pm-set-add { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: 12px; }
 

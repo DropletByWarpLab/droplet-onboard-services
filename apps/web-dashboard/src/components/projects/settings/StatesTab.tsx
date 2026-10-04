@@ -143,7 +143,7 @@ function StateRow({
         <span className="grow">
           <DraftInput label={`Name of ${state.name}`} value={state.name} maxLength={100} required disabled={busy} onCommit={onRename} />
         </span>
-        <span className="pm-tag">{GROUP_LABEL[state.group]}</span>
+        <span className="pm-tag" style={{ minWidth: 84, justifyContent: "center" }}>{GROUP_LABEL[state.group]}</span>
         {state.isDefault ? (
           <span className="badge info" title="New items start here">Default</span>
         ) : (
