@@ -17,7 +17,7 @@
 # Debian-slim rather than Alpine to match every other Node image in this repo,
 # and because hadolint's DL3008 (unpinned apt versions) is baselined here while
 # DL3018 (unpinned apk versions) is not — see .hadolint.yaml for the rationale.
-FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
 
 # openssl only: the harness mints its own private CA at start-up so TLS
 # verification can stay ON (Node has no X.509 signing API). No curl — the

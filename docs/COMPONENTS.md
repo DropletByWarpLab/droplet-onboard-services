@@ -253,7 +253,7 @@ network. Host-published ports and host-network services are called out.
   **dev**, `next.config.js` rewrites `/api/*`→orchestrator and `/ai/*`→ai-gateway;
   in **prod**, nginx does the routing.
 - **Build/deploy:** Next.js **standalone** output (monorepo-aware
-  `outputFileTracingRoot`); multi-stage Docker (`node:22`), served on 3001.
+  `outputFileTracingRoot`); multi-stage Docker (`node:20`), served on 3001.
   Requires `@droplet/shared-types` at build — **cannot build standalone**.
   Fonts are vendored under `src/app/fonts/` (`next/font/local`) so `next build`
   needs no network — don't import `next/font/google` (test-guarded, WARP-3317).

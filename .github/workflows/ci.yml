@@ -522,7 +522,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "20"
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -1026,7 +1026,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "20"
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -1261,7 +1261,7 @@ jobs:
           /tmp/hadolint --config .hadolint.yaml --failure-threshold warning "${files[@]}"
 
       # WARP-3670: why this step exists -- a floating base tag (python:3.12-slim,
-      # node:22-bookworm-slim) lets two builds of one commit ship different base
+      # node:20-bookworm-slim) lets two builds of one commit ship different base
       # layers, and the cosign signature covers the resulting image digest, not
       # how reproducible its contents were. Escape class closed: an unpinned
       # `FROM` or `COPY --from=<image>` reaching a signed OTA image. A step in

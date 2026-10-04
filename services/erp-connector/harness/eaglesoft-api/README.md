@@ -66,12 +66,12 @@ Two prerequisites, both probed by `preflight.mjs` (WARP-2611):
 
 - the `openssl` CLI, because the harness mints its own CA so TLS verification
   can stay **on** (Node has no X.509 signing API);
-- **Node 22** — the version `.nvmrc`, `engines.node` and every CI `setup-node`
-  pin. The connector hands an `undici` `Agent` carrying the harness CA to the
-  npm `undici`'s own `fetch` (`api-auth.ts:resolveFetch`, WARP-2626), because the
-  runtime's built-in undici rejects another copy's dispatcher
-  (`UND_ERR_INVALID_ARG: invalid onError method`). The probe drives that same
-  pairing, so the suites run on any Node major that can.
+- **Node 20** — the version `.nvmrc`, `engines.node` and every CI `setup-node`
+  pin. The connector reaches this box by handing an `undici` `Agent` carrying
+  the harness CA to the built-in `fetch`, and from Node 22 on the built-in
+  undici rejects an undici@6 dispatcher outright (`UND_ERR_INVALID_ARG: invalid
+  onError method`). Every request then fails as a bare `fetch failed`, which
+  reads exactly like an unreachable box.
 
 Missing either, the suites **skip with the reason printed** — never red on a
 clean checkout — and **fail in CI**, where both hold, so the coverage can never

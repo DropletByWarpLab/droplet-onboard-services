@@ -11,7 +11,7 @@
 # web-dashboard, mcp-server, ai-gateway, file-indexer, gateway), and compose
 # pins DROPLET_FIPS_REQUIRED=false / the stock OpenSSL config for it, the same
 # way it does for web-fetch and erp-sql-bridge.
-FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS builder
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS builder
 
 WORKDIR /app
 
@@ -39,7 +39,7 @@ COPY services/mcp-bridge ./services/mcp-bridge
 RUN npm run -w @droplet/mcp-bridge build
 
 # --- Run stage ---
-FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
 
 # wget is the healthcheck client the compose `healthcheck` block invokes.
 # ca-certificates so the TLS dial to a remote MCP server can verify its chain —

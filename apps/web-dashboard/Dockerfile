@@ -23,7 +23,7 @@ RUN sh /tmp/build-openssl-fips.sh /out
 # (WARP-229 kept it as a build-cache optimization; the "no Alpine base
 # remains in shipped services" AC retires that trade-off, and a single
 # base lineage keeps the layer cache shared with the runtime stage).
-FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS builder
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS builder
 
 WORKDIR /app
 
@@ -74,7 +74,7 @@ RUN npm run -w @droplet/web-dashboard build
 # would be a Next.js route file, not an Express middleware. The
 # orchestrator and mcp-server are the auditable surfaces; the dashboard
 # rides on whatever cryptographic posture they enforce. WARP-229.
-FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
 
 # Runtime openssl + ca-certificates: the openssl CLI runs the WARP-967
 # fipsinstall + build-time FIPS self-test below against the validated

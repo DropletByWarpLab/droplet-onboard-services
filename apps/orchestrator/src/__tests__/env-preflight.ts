@@ -67,7 +67,7 @@ export function isCosignDependent(filepath: string): boolean {
   return COSIGN_DEPENDENT_SUITES.includes(toOrchestratorRelative(filepath));
 }
 
-/** `engines.node` from the root package.json (e.g. "22.x"), or null. */
+/** `engines.node` from the root package.json (e.g. "20.x"), or null. */
 export function requiredNodeRange(): string | null {
   try {
     const pkg = JSON.parse(
@@ -79,7 +79,7 @@ export function requiredNodeRange(): string | null {
   }
 }
 
-/** Leading major from a simple range like "22.x" / ">=22" / "22". */
+/** Leading major from a simple range like "20.x" / ">=20" / "20". */
 export function majorFromRange(range: string): number | null {
   const m = /(\d+)/.exec(range);
   return m ? Number(m[1]) : null;

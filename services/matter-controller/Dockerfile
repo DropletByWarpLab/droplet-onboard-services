@@ -6,7 +6,7 @@
 #
 # node:20-bookworm-slim for FIPS-provider parity with the orchestrator
 # (WARP-229) — Debian's OpenSSL ships the provider, Alpine's does not.
-FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS builder
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS builder
 
 # Build deps:
 #  - openssl/ca-certificates: FIPS posture parity (WARP-229).
@@ -59,7 +59,7 @@ RUN npm run -w @droplet/matter-controller build
 RUN mkdir -p services/matter-controller/node_modules
 
 # --- Run stage ---
-FROM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
 
 # Runtime: OpenSSL for the FIPS provider config; libbluetooth3 is the
 # runtime shared library behind noble's HCI socket bindings.

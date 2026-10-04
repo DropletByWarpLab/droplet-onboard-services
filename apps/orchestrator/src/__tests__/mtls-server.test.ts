@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:https";
 // Use undici's own fetch with its own Agent so the dispatcher is version-matched
-// (the appliance runs Node 22; a dev machine may run a different Node whose bundled
+// (the appliance runs Node 20; a dev machine may run a newer Node whose bundled
 // global fetch rejects a v6 dispatcher).
 import { Agent, fetch } from "undici";
 

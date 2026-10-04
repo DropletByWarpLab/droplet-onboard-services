@@ -170,7 +170,7 @@ describe("undici dispatcher/fetch pairing (WARP-2626)", () => {
             `${b.file} puts a dispatcher into a fetch init (line ${b.offenders[0]?.line}: ` +
             `${b.offenders[0]?.text}) but does not import \`fetch\` from "undici". ` +
             `A dispatcher is only honoured by the undici that minted it: handing an ` +
-            `npm-undici Agent to the runtime's built-in fetch works on Node 20 (built-in undici 6) ` +
+            `npm-undici Agent to the runtime's built-in fetch works on the pinned Node 20 ` +
             `and throws UND_ERR_INVALID_ARG on Node >= 22, where every call degrades to a ` +
             `bare "fetch failed" that reads as an unreachable box. ` +
             `Add: import { fetch as undiciFetch } from "undici" — and use it. (WARP-2626)`,

@@ -77,17 +77,6 @@ a dedicated **copy** of `fips.so` into each bundled runtime's own baked
 `MODULESDIR` (`docker/fips/install-fips-provider.sh`, WARP-1063), so every
 libcrypto resolves and activates its own module.
 
-**Node runtime and the module (WARP-3654).** The Node images are on the Node 22
-LTS line. Node 20 bundled OpenSSL 3.0.x; current Node 22 releases bundle
-OpenSSL 3.5.x, so the validated 3.0.9 `fips.so` is now loaded by a newer
-libcrypto than the one it was validated beside. The image-build probes
-(`install-fips-provider.sh` and the node `getFips()` / MD5-rejection probe in
-each Node Dockerfile) exercise exactly that pairing and fail the build if it
-does not activate, but they are build-time evidence only: run the
-"Verifying a FIPS-on box" steps below on a Node 22 build before relying on it
-for a FIPS customer. Node 24 bundles the same OpenSSL line and is not adopted
-until that has been done.
-
 Do **not** hand-edit the derived vars; `setup.sh --fips/--no-fips` converges
 them in both directions (`tests/fips-mode.test.sh` proves the round-trip).
 

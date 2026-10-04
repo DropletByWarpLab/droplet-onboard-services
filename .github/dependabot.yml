@@ -198,14 +198,13 @@ updates:
 
       # #1746 (2026-08-26): @types/node 20.19.37 -> 26.2.0 reds ci-summary,
       # docker-build, `build orchestrator`, `node / orchestrator` and
-      # fips-stack. Typings must track the RUNTIME, and this repo is Node 22
-      # everywhere it declares one (WARP-3654 moved it off end-of-life Node 20):
-      # root package.json `engines.node: "22.x"`, `.nvmrc` = 22, and every
-      # workflow `node-version: "22"`. A major past 22 describes APIs the
-      # shipped runtime does not have. Lift this WITH the next runtime bump,
-      # never before it -- and note the `typescript` entry above already records
-      # that TS 7 needs @types/node to move in the same change, so these two
-      # come off the list together.
+      # fips-stack. Typings must track the RUNTIME, and this repo is Node 20
+      # everywhere it declares one: root package.json `engines.node: "20.x"`,
+      # `.nvmrc` = 20, and every ci.yml `node-version: "20"`. A major past 20
+      # describes APIs the shipped runtime does not have. Lift this WITH the
+      # runtime bump, never before it -- and note the `typescript` entry above
+      # already records that TS 7 needs @types/node to move in the same change,
+      # so these two come off the list together.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
 
@@ -222,14 +221,18 @@ updates:
       # #2059 (2026-09-07): jsdom 24 -> 30 declares
       # engines.node "^22.22.2 || ^24.15.0 || >=26.0.0" -- 20 is excluded
       # outright. #2121 (2026-09-08): undici 6 -> 8 declares ">=22.19.0", same
-      # story.
+      # story. Neither is a code-compat question we can resolve in this repo:
+      # npm refuses the engine, so there is no diff that makes them install.
       #
-      # WARP-3654 moved the runtime to Node 22 (root `engines.node: "22.x"`,
-      # `.nvmrc` = 22, every workflow `node-version: "22"`), so the engine
-      # refusal no longer applies. These two entries stay because each is still
-      # a major-version migration (jsdom 24 -> 30, undici 7 -> 8) that needs its
-      # own reviewed change, not because of the runtime. Lift each WITH its
-      # migration PR. The `@types/node` entry above now means "nothing past 22".
+      # Same ceiling as the `@types/node` entry above, from the other side --
+      # that one says typings must not run ahead of the runtime, these two say
+      # dependencies must not either. This repo is Node 20 everywhere it
+      # declares one: root `engines.node: "20.x"`, `.nvmrc` = 20, and every
+      # ci.yml `node-version: "20"`.
+      #
+      # RECHECK TRIGGER: the Node 22+ runtime bump. Lift all three of these
+      # WITH it, in one change, never before -- and note `typescript` above
+      # already records that TS 7 needs @types/node to move at the same time.
       - dependency-name: "jsdom"
         update-types: ["version-update:semver-major"]
       - dependency-name: "undici"
@@ -425,9 +428,8 @@ updates:
   # moves them, and this is that something. One grouped PR a month keeps the
   # docker-build cost bounded (it rebuilds the affected images once, not once
   # per base image). Major/minor runtime jumps are a deliberate migration, not
-  # a refresh: node is on the Node 22 LTS line (WARP-3654; Node 24 needs the
-  # FIPS provider re-verified against its bundled OpenSSL) and python is 3.12
-  # (the requirements files are resolved against it).
+  # a refresh: node stays on its current major until the Node 22 move (WARP-3654)
+  # lands, and python is 3.12 (the requirements files are resolved against it).
   - package-ecosystem: docker
     directories:
       - "/apps/*"
