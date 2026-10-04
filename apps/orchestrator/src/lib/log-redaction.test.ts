@@ -478,3 +478,50 @@ describe("redactSecrets — JSON-shaped (pino) log lines (WARP-3193 SEC-DATA-2)"
     expect(out).toContain("X-Nextcloud-Token");
   });
 });
+
+describe("redactSecrets - LUKS recovery key (WARP-3572)", () => {
+  // Real systemd shape (src/shared/recovery-key.c): 64 modhex chars from
+  // `cbdefghijklnrtuv`, eight groups of eight. This one contains `b`.
+  const KEY = "cbdefghi-jklnrtuv-bbcdbefg-hijklnrt-uvcbdefg-hijklnrt-uvbcdefg-hijklnrb";
+  const SEED = "cbdefghi-jklnrtuv";
+
+  it("redacts a bare recovery-key line, including one containing b", () => {
+    const out = redactSecrets(KEY);
+    expect(out).not.toContain(SEED);
+    expect(out).toBe(REDACTION_PLACEHOLDER);
+  });
+
+  it("redacts it behind a journald prefix and in front of punctuation", () => {
+    const out = redactSecrets(`Oct 03 10:00:01 droplet droplet-firstboot[812]: ${KEY}.`);
+    expect(out).not.toContain(SEED);
+    expect(out).toContain("droplet-firstboot[812]: " + REDACTION_PLACEHOLDER + ".");
+  });
+
+  it("redacts it quoted, in brackets, and glued to _ or a digit", () => {
+    for (const line of [`"${KEY}"`, `key='${KEY}',`, `(${KEY})`, `rk_${KEY}_9`, `1${KEY}2`]) {
+      expect(redactSecrets(line)).not.toContain(SEED);
+    }
+  });
+
+  it("redacts the upper-case and the dash-less forms", () => {
+    expect(redactSecrets(KEY.toUpperCase())).not.toContain("CBDEFGHI");
+    expect(redactSecrets(KEY.replace(/-/g, ""))).toBe(REDACTION_PLACEHOLDER);
+  });
+
+  it("redacts two keys separated by a single character", () => {
+    const out = redactSecrets(`${KEY} ${KEY}`);
+    expect(out).toBe(`${REDACTION_PLACEHOLDER} ${REDACTION_PLACEHOLDER}`);
+  });
+
+  it("does not eat ordinary hyphenated words, UUIDs or short groups", () => {
+    for (const benign of [
+      "well-known-name and a-very-long-hyphenated-compound-word-here",
+      "id 3f2a9c1e-7b4d-4e8a-9c3f-1a2b3c4d5e6f",
+      "reconnect-deceived-hijinks-celebrity",
+      // seven groups: not a key
+      "cbdefghi-jklnrtuv-bbcdbefg-hijklnrt-uvcbdefg-hijklnrt-uvbcdefg",
+    ]) {
+      expect(redactSecrets(benign)).toBe(benign);
+    }
+  });
+});

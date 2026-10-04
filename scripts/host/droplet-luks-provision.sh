@@ -6,7 +6,9 @@
 # Creates the encrypted data LV from the free VG extents the autoinstall
 # storage layout leaves behind (Task 232.1), seals the unlock key to the TPM2
 # (systemd-cryptenroll, PCRs default 0+2+4+7 — device-identity parity), enrolls
-# an OFFLINE recovery key shown exactly once, wires crypttab/fstab for
+# an OFFLINE recovery key delivered to the owner once (WARP-3572: printed only
+# on an interactive terminal, otherwise staged root-only for `show-recovery-key`;
+# never written to a service's stdout/journal), wires crypttab/fstab for
 # auto-unlock, and gates docker on /data so a PCR mismatch fails closed.
 #
 #   /dev/ubuntu-vg/droplet-data           LUKS2/Argon2id container
@@ -18,7 +20,7 @@
 # See droplet-tpm-lib.sh for why systemd tooling (systemd-cryptenroll) and not
 # clevis / raw tpm2-tools / tpm2-pytss.
 #
-# Subcommands: provision | status   (see --help)
+# Subcommands: provision | status | show-recovery-key   (see --help)
 # Exit codes:  0 ok · 2 precondition (no TPM / no free extents / bad usage)
 #
 # Crypto-shred: `cryptsetup luksErase` + TPM clear destroys every keyslot →
@@ -36,6 +38,13 @@ MAPPER="${DROPLET_LUKS_MAPPER:-droplet-data-crypt}"
 DATA_MOUNT="${DROPLET_DATA_MOUNT:-/data}"
 ETC_DIR="${DROPLET_ETC_DIR:-/etc}"
 RUNTIME_DIR="${DROPLET_LUKS_RUNTIME_DIR:-/run/droplet}"
+# WARP-3572: where a recovery key waits for the owner when provisioning had no
+# terminal. Staged on the tmpfs runtime dir first, then moved onto the encrypted
+# volume once it is mounted so it survives the post-install reboot.
+STATE_DIR="${DROPLET_STATE_DIR:-/var/lib/droplet}"
+PENDING_NAME="recovery-key.pending"
+PENDING_DIR="$RUNTIME_DIR/recovery"
+PERSIST_DIR="$DATA_MOUNT/droplet/recovery"
 
 # Tool seams (default to production binaries; tests inject PATH stubs).
 LVCREATE="${DROPLET_LVCREATE_BIN:-lvcreate}"
@@ -210,6 +219,80 @@ _append_if_absent() { # $1=file $2=match $3=line
   printf '%s\n' "$line" >> "$file"
 }
 
+# --- recovery-key delivery (WARP-3572) --------------------------------------
+# The key must reach the owner exactly once (losing it after a TPM failure
+# makes the data unrecoverable) but must NEVER land in a service's stdout: under
+# droplet-firstboot that is the journal on the unencrypted root, and setup.sh
+# tees it into .data/setup.log. So:
+#   * interactive terminal on stdout -> print it (the person is looking at it);
+#   * anything else                  -> stage it root-only (0400, dir 0700) and
+#                                       log only WHERE; `show-recovery-key`
+#                                       displays it on a terminal and deletes
+#                                       it after the owner types "stored".
+# The setup wizard / front panel reading the staged file is a product decision
+# (docs/security/at-rest-encryption.md "Recovery key delivery").
+_recovery_banner() { printf '\n=== STORE THIS RECOVERY KEY OFFLINE - IT IS SHOWN ONCE ===\n'; }
+
+_deliver_recovery_key() {
+  local key="$1"
+  if [ -t 1 ]; then
+    _recovery_banner
+    printf '%s\n' "$key"
+    printf '=== (not written to disk; see docs/security/at-rest-encryption.md) ===\n\n'
+    return 0
+  fi
+  if ! { mkdir -p "$PENDING_DIR" && chmod 700 "$PENDING_DIR" \
+         && rm -f "$PENDING_DIR/$PENDING_NAME" \
+         && ( umask 277 && printf '%s\n' "$key" > "$PENDING_DIR/$PENDING_NAME" ); }; then
+    err "could not stage the recovery key; aborting before the TPM enroll (the container holds no data yet)."
+    exit 2
+  fi
+  log "recovery key NOT printed (stdout is not a terminal). Staged root-only at $PENDING_DIR/$PENDING_NAME."
+  log "Retrieve it once on a console: sudo droplet-luks-provision.sh show-recovery-key"
+}
+
+# Move the staged key onto the (now mounted) encrypted volume so it survives a
+# reboot. Only when /data really is the mapper; otherwise it stays on tmpfs.
+_persist_pending_recovery_key() {
+  [ -f "$PENDING_DIR/$PENDING_NAME" ] || return 0
+  case "$(findmnt -n -o SOURCE "$DATA_MOUNT" 2>/dev/null || true)" in
+    *"$MAPPER"*) : ;;
+    *) return 0 ;;
+  esac
+  mkdir -p "$PERSIST_DIR" && chmod 700 "$PERSIST_DIR" \
+    && ( umask 277 && cp "$PENDING_DIR/$PENDING_NAME" "$PERSIST_DIR/$PENDING_NAME" ) \
+    && { shred -u "$PENDING_DIR/$PENDING_NAME" 2>/dev/null || rm -f "$PENDING_DIR/$PENDING_NAME"; } \
+    && log "staged recovery key moved onto the encrypted volume ($PERSIST_DIR)" \
+    || log "could not move the staged recovery key onto $DATA_MOUNT; it stays in $PENDING_DIR (lost on reboot)"
+}
+
+cmd_show_recovery_key() {
+  local f="" d ans=""
+  for d in "$PERSIST_DIR" "$PENDING_DIR"; do
+    if [ -f "$d/$PENDING_NAME" ]; then f="$d/$PENDING_NAME"; break; fi
+  done
+  if [ -z "$f" ]; then
+    err "no staged recovery key (already acknowledged, or none was staged)."
+    exit 2
+  fi
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    err "refusing to show the recovery key: run this on an interactive terminal (not over a pipe or a service)."
+    exit 2
+  fi
+  _recovery_banner
+  cat "$f"
+  printf '=== record it offline, then type "stored" to delete it from this box ===\n> '
+  read -r ans || true
+  if [ "$ans" != "stored" ]; then
+    err "not acknowledged - the key stays staged; re-run to see it again."
+    exit 1
+  fi
+  shred -u "$f" 2>/dev/null || rm -f "$f"
+  mkdir -p "$STATE_DIR"
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$STATE_DIR/recovery-key-acknowledged"
+  log "recovery key deleted from this box; acknowledgement recorded in $STATE_DIR/recovery-key-acknowledged"
+}
+
 cmd_provision() {
   # Production is Linux-only. The hermetic harness sets DROPLET_LUKS_SKIP_OS_GATE=1
   # so the stubbed drill can exercise the full flow on any OS (macOS CI/dev).
@@ -288,12 +371,11 @@ cmd_provision() {
   # then leaves a container whose recovery key already exists and was already
   # shown — never the zero-keyslot stranded state (the tmpfs install keyfile
   # is no keyslot that survives a reboot).
-  log "enrolling recovery keyslot — the key is shown ONCE below"
+  log "enrolling recovery keyslot (WARP-3572: the key is never written to service output)"
   local recovery
   recovery="$("$CRYPTENROLL" --unlock-key-file="$keyfile" --recovery-key "$LV_DEV")"
-  printf '\n=== STORE THIS RECOVERY KEY OFFLINE — IT IS SHOWN ONCE ===\n'
-  printf '%s\n' "$recovery"
-  printf '=== (never written to disk; see docs/security/at-rest-encryption.md) ===\n\n'
+  _deliver_recovery_key "$recovery"
+  recovery=""
 
   # WARP-232 (finding 6): the TPM enroll must be SKIPPED on a TPM-less dev box
   # running with DROPLET_LUKS_ALLOW_NO_TPM=1 — `systemd-cryptenroll
@@ -319,6 +401,7 @@ cmd_provision() {
     "$MKFS" -L droplet-data "$MAPPER_DEV"
   fi
   _mount_and_wire
+  _persist_pending_recovery_key
   _maybe_write_docker_data_root
   log "provisioned encrypted data partition at $DATA_MOUNT"
 }
@@ -384,6 +467,7 @@ cmd_status() {
 case "${1:-}" in
   provision) cmd_provision ;;
   status)    cmd_status ;;
+  show-recovery-key) cmd_show_recovery_key ;;
   -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-  *) err "usage: droplet-luks-provision.sh {provision|status}"; exit 2 ;;
+  *) err "usage: droplet-luks-provision.sh {provision|status|show-recovery-key}"; exit 2 ;;
 esac

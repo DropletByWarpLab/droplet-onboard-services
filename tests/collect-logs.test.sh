@@ -62,6 +62,11 @@ DATABASE_URL=postgresql://droplet:pgpass-supersecret@db:5432/droplet
 REDIS_URL=redis://:redis-empty-user-pw-5544@cache:6379/0
 {"level":30,"name":"http","req":{"method":"POST","url":"/api/files/list","headers":{"x-nextcloud-token":"ncAppPwPlanted-Q7wE9-rT2yU","x-api-key":"apiKeyPlanted-zXcV-1234"}},"msg":"request completed"}
 proxy: X-Nextcloud-Token: Basic YWxpY2U6cA==
+cbdefghi-jklnrtuv-bbcdbefg-hijklnrt-uvcbdefg-hijklnrt-uvbcdefg-hijklnrb
+Oct 03 10:00:01 droplet droplet-firstboot[812]: cbdefghi-jklnrtuv-bbcdbefg-hijklnrt-uvcbdefg-hijklnrt-uvbcdefg-hijklnrb.
+recovery key is "bcdefghi-jklnrtuv-bbcdbefg-hijklnrt-uvcbdefg-hijklnrt-uvbcdefg-hijklnrb", store it
+UPPERCASE DBCEFGHI-JKLNRTUV-BBCDBEFG-HIJKLNRT-UVCBDEFG-HIJKLNRT-UVBCDEFG-HIJKLNRB and ebdcfghi-jklnrtuv-bbcdbefg-hijklnrt-uvcbdefg-hijklnrt-uvbcdefg-hijklnrb fbdcehgi-jklnrtuv-bbcdbefg-hijklnrt-uvcbdefg-hijklnrt-uvbcdefg-hijklnrb
+ordinary hyphenated words: well-known-name a-very-long-hyphenated-compound-word-here
 EOF
 
 cat > "$FIXDIR/ai-gateway.log" <<'EOF'
@@ -132,6 +137,21 @@ assert_absent "ncAppPwPlanted-Q7wE9-rT2yU"                          "x-nextcloud
 assert_absent "apiKeyPlanted-zXcV-1234"                             "x-api-key in a pino JSON line"
 assert_absent "YWxpY2U6cA=="                                        "X-Nextcloud-Token Basic credential"
 assert_absent "MIIEPLANTEDprivatekeymaterialmustnotleak0000000000"  "PEM key body"
+# WARP-3572 - a bare LUKS recovery-key line (no KEY= label to key on).
+# The key is 64 modhex chars from `cbdefghijklnrtuv` (systemd recovery-key.c),
+# eight groups of eight. Shapes a journal line really has: bare, journald
+# prefix + trailing punctuation, quoted, upper-case, two keys one space apart.
+assert_absent "jklnrtuv-bbcdbefg-hijklnrt"                          "LUKS recovery key (bare / prefixed / punctuation)"
+assert_absent "bcdefghi-jklnrtuv"                                   "LUKS recovery key (quoted)"
+assert_absent "JKLNRTUV-BBCDBEFG"                                   "LUKS recovery key (upper-case)"
+assert_absent "ebdcfghi-jklnrtuv"                                   "first of two adjacent LUKS recovery keys"
+assert_absent "fbdcehgi-jklnrtuv"                                   "second of two adjacent LUKS recovery keys"
+# ...and ordinary hyphenated words are not eaten.
+if echo "$OUT" | grep -qF "well-known-name a-very-long-hyphenated-compound-word-here"; then
+  pass "ordinary hyphenated words survive the recovery-key rule"
+else
+  fail "recovery-key rule ate ordinary hyphenated words"
+fi
 # WARP-1688 — bearer-equivalent credential in a URL PATH SEGMENT (both the
 # index.php and pretty-URL route shapes).
 assert_absent "pLaNtEdDiReCtToKeN0123456789abcd"                    "richdocuments direct token (index.php route)"

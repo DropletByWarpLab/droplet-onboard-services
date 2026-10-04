@@ -153,6 +153,30 @@ const CREDENTIAL_SHAPE_RULES: readonly ShapeRule[] = [
       `${pre}${placeholder}${at}`,
   },
   {
+    // WARP-3572 - a systemd LUKS recovery key (`systemd-cryptenroll
+    // --recovery-key`). Defence in depth only: the primary control is that
+    // droplet-luks-provision.sh never writes the key to an unattended
+    // service's stdout.
+    //
+    // Shape, from systemd's src/shared/recovery-key.c (modhex_alphabet,
+    // RECOVERY_KEY_MODHEX_RAW_LENGTH, make_recovery_key): 32 random bytes
+    // rendered as 64 modhex characters from the 16-symbol alphabet
+    // `cbdefghijklnrtuv` (note the `b`), printed as eight dash-separated
+    // groups of eight; the same code also accepts the dash-less 64-character
+    // form and upper case, so all three are matched here.
+    //
+    // No `\b`: `_` and digits are word characters, so `\b` would miss a key
+    // glued to them. The boundary is "start, or a character outside the
+    // alphabet" on each side (the same boundary as the sed rule in
+    // scripts/host/droplet-collect-logs.sh - keep the two in sync). The
+    // trailing boundary is a lookahead so two keys separated by one
+    // character both match in a single pass.
+    name: "luks-recovery-key",
+    pattern:
+      /(^|[^cbdefghijklnrtuvCBDEFGHIJKLNRTUV])([cbdefghijklnrtuvCBDEFGHIJKLNRTUV]{8}(?:-?[cbdefghijklnrtuvCBDEFGHIJKLNRTUV]{8}){7})(?=[^cbdefghijklnrtuvCBDEFGHIJKLNRTUV]|$)/g,
+    replace: (placeholder, _m, pre: string) => `${pre}${placeholder}`,
+  },
+  {
     // AWS access key id (long-term AKIA, temporary ASIA): fixed 20-char shape.
     name: "aws-access-key-id",
     pattern: /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
