@@ -1,6 +1,8 @@
 // Wire types for the native Projects (PM) surface — mirror the orchestrator's
 // /api/pm/* responses (apps/orchestrator/src/services/pm/pm.service.ts).
 
+import type { PmActivityVerbName } from "@droplet/shared-types";
+
 export type Priority = "urgent" | "high" | "medium" | "low" | "none";
 export type StateGroup = "backlog" | "unstarted" | "started" | "completed" | "cancelled";
 
@@ -94,13 +96,31 @@ export interface PmWorkItem {
   updatedAt: string;
 }
 
+/** WARP-3519 — one emoji's tally on a comment, in allowlist order, count > 0. */
+export interface PmReaction {
+  emoji: string;
+  count: number;
+  userIds: string[];
+}
+
 export interface PmComment {
   id: string;
   workItemId: string;
+  /** null = Droplet AI. */
   authorId: string | null;
+  /** Server-sanitized HTML; "" for a tombstone. */
   commentHtml: string;
   createdAt: string;
   updatedAt: string;
+  /** WARP-3519 — when the author last changed the body; null = never edited. */
+  editedAt: string | null;
+  /** WARP-3519 — a deleted comment stays in the thread as a tombstone. */
+  deleted: boolean;
+  deletedAt: string | null;
+  deletedById: string | null;
+  /** User ids @mentioned in the comment (derived server-side). */
+  mentions: string[];
+  reactions: PmReaction[];
 }
 
 export interface PmSummary {
@@ -126,9 +146,34 @@ export interface PmActivity {
   id: string;
   workItemId: string;
   actorId: string | null;
-  verb: string;
+  /** A newer server may send a verb this build has never heard of;
+   *  `describeActivity` renders a generic sentence for it instead of crashing. */
+  verb: PmActivityVerbName;
   field: string | null;
   oldValue: string | null;
   newValue: string | null;
+  createdAt: string;
+}
+
+/** WARP-3519 — the merged comment + activity stream, oldest first. */
+export type PmTimelineEntry =
+  | { type: "comment"; id: string; at: string; comment: PmComment }
+  | { type: "activity"; id: string; at: string; activity: PmActivity };
+
+/** Names for the ids the activity rows on a page carry — resolved server-side
+ *  at read time, so a renamed state reads right and a deleted one is absent. */
+export interface PmTimelineRefs {
+  /** stateId → name */
+  states: Record<string, string>;
+  labels: Record<string, { name: string; color: string | null }>;
+  /** relation_* / parent_removed targets */
+  workItems: Record<string, { key: string; name: string }>;
+}
+
+export type PmWatchReason = "CREATOR" | "ASSIGNEE" | "COMMENTER" | "MENTIONED" | "MANUAL";
+
+export interface PmWatcher {
+  userId: string;
+  reason: PmWatchReason;
   createdAt: string;
 }

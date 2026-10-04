@@ -19,11 +19,25 @@ import { makePerson } from "./config";
 import type { PmProject, PmWorkItem } from "./types";
 
 vi.mock("@/lib/auth", () => ({
+  // The drawer reads the viewer (WARP-3519: Edit on your own comments, Watch).
+  useAuth: () => ({ user: { id: "u1", role: "family" } }),
   authFetch: vi.fn(() =>
     Promise.resolve({
       ok: true,
       status: 200,
-      json: () => Promise.resolve({ states: [], comments: [], activity: [], work_items: [], users: [] }),
+      json: () =>
+        Promise.resolve({
+          states: [],
+          comments: [],
+          activity: [],
+          work_items: [],
+          users: [],
+          timeline: [],
+          refs: { states: {}, labels: {}, workItems: {} },
+          nextCursor: null,
+          total: 0,
+          watchers: [],
+        }),
     } as Response),
   ),
 }));

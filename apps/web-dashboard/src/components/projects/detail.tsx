@@ -12,16 +12,16 @@ import {
   StatePill,
   LabelTag,
   DepartmentTag,
-  Avatar,
   AvatarStack,
   usePerson,
 } from "./bits";
 import { fmtISODate, isOverdue } from "./config";
-import { useActivity, useComments, useSubIssues, useProjectLabels, pmActions } from "./usePm";
+import { useSubIssues, useProjectLabels, pmActions } from "./usePm";
 import type { PmWorkItem } from "./types";
-import { escapeHtml } from "@/lib/escape-html";
-import { formatRelativeTime } from "@/lib/relative-time";
 import { translateError } from "@/lib/friendly-errors";
+import { useAuth } from "@/lib/auth";
+import { ActivitySection } from "./timeline";
+import { WatchControl } from "./watchers";
 
 function PropRow({
   icon,
@@ -195,110 +195,11 @@ function SubIssueRow({ sub }: { sub: PmWorkItem }): JSX.Element {
   );
 }
 
-function Comment({ authorId, html, when }: { authorId: string | null; html: string; when: string }): JSX.Element {
-  const person = usePerson();
-  const ai = authorId === null;
-  return (
-    <div className="pm-row" style={{ gap: 10, alignItems: "flex-start" }}>
-      {ai ? <span className="pm-ai-av">AI</span> : <Avatar id={authorId} size={28} />}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div className="pm-row" style={{ gap: 7, marginBottom: 3 }}>
-          <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>
-            {ai ? "Droplet AI" : person(authorId).name}
-          </span>
-          <span style={{ fontSize: 11, color: "var(--text-4)" }}>{when}</span>
-        </div>
-        {/* Comment HTML is server-sanitized against a strict allowlist at the
-            write boundary (orchestrator sanitizePmHtml in addComment) — every
-            persisted value, whether from the dashboard, the mobile API, or an
-            MCP tool call, is clean before it ever reaches this render. */}
-        <div
-          className={"pm-prose" + (ai ? " pm-ai-bubble" : "")}
-          style={ai ? { padding: "9px 11px", borderRadius: 10 } : undefined}
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
-      </div>
-    </div>
-  );
-}
-
-
-function humanizeActivity(verb: string, field: string | null): string {
-  switch (verb) {
-    case "created":
-      return "created this item";
-    case "state_changed":
-      return "changed the state";
-    case "commented":
-      return "added a comment";
-    case "assigned":
-      return "changed assignees";
-    case "updated":
-      if (field === "priority") return "changed the priority";
-      // ADR-045 §5.3 — re-routing work to another department is a decision
-      // about who owns it, and "updated the item" hides exactly that.
-      if (field === "department") return "changed the department";
-      return "updated the item";
-    default:
-      return verb.replace(/_/g, " ");
-  }
-}
-
-function Composer({ itemId, onSent }: { itemId: string; onSent: () => void }): JSX.Element {
-  const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const actions = pmActions();
-  const { toast } = useToast();
-  const submit = async () => {
-    const body = text.trim();
-    if (!body || busy) return;
-    setBusy(true);
-    try {
-      await actions.addComment(itemId, `<p>${escapeHtml(body)}</p>`);
-      setText("");
-      onSent();
-    } catch (e) {
-      // DASH-002: a failed comment POST used to surface as an unhandled
-      // rejection — the button just reset with no feedback. Toast like the
-      // sibling composers (NewItemModal / LabelsEditor).
-      toast(e instanceof Error ? e.message : "Couldn't send the comment", "error");
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <div style={{ marginTop: 14 }}>
-      <textarea
-        className="pm-input"
-        placeholder="Write a comment"
-        rows={2}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => {
-          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submit();
-        }}
-        aria-label="Write a comment"
-      />
-      <div className="pm-row" style={{ justifyContent: "space-between", marginTop: 8 }}>
-        <SafetyChip tier="write" />
-        <button className="pm-btn primary sm" type="button" onClick={submit} disabled={busy || !text.trim()}>
-          <PmIcon name="send" size={13} />
-          {busy ? "Sending…" : "Send"}
-          <span className="pm-kbd" style={{ marginLeft: 2 }}>⌘↵</span>
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function DetailBody({ item, onChanged }: { item: PmWorkItem; onChanged: () => void }): JSX.Element {
   const person = usePerson();
+  const { user } = useAuth();
   const { subIssues } = useSubIssues(item.projectId, item.id);
-  const { comments, mutate: mutateComments } = useComments(item.id);
-  const { activity, mutate: mutateActivity } = useActivity(item.id);
   const subs = subIssues ?? [];
-  const list = comments ?? [];
-  const acts = activity ?? [];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -306,7 +207,8 @@ function DetailBody({ item, onChanged }: { item: PmWorkItem; onChanged: () => vo
         <div className="pm-row" style={{ gap: 10, marginBottom: 9 }}>
           <span className="pm-mono" style={{ fontSize: 12, color: "var(--text-4)" }}>{item.key}</span>
           {item.state && <StatePill state={item.state} />}
-          <span style={{ marginLeft: "auto" }}>
+          <span style={{ marginLeft: "auto" }} className="pm-row">
+            <WatchControl itemId={item.id} viewerId={user?.id} role={user?.role} assignees={item.assignees} />
             <SafetyChip tier="read" />
           </span>
         </div>
@@ -394,57 +296,11 @@ function DetailBody({ item, onChanged }: { item: PmWorkItem; onChanged: () => vo
         )}
       </div>
 
-      <div>
-        <div className="pm-sect" style={{ marginBottom: 12 }}>
-          Comments <span className="sx">{list.length}</span>
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          {list.length ? (
-            list.map((c) => <Comment key={c.id} authorId={c.authorId} html={c.commentHtml} when={formatRelativeTime(c.createdAt)} />)
-          ) : (
-            <div style={{ fontSize: 13, color: "var(--text-4)" }}>No comments yet.</div>
-          )}
-        </div>
-        <Composer
-          itemId={item.id}
-          onSent={() => {
-            // addComment writes a PmComment AND a verb:commented PmActivity row in
-            // the same transaction — revalidate both so the timeline refreshes
-            // immediately instead of waiting for SWR window-focus. (ADR-026 P5)
-            void mutateComments();
-            void mutateActivity();
-            onChanged();
-          }}
-        />
-      </div>
-
-      <div>
-        <div className="pm-sect" style={{ marginBottom: 12 }}>
-          Activity <span className="sx">{acts.length}</span>
-        </div>
-        {acts.length ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {acts.map((a) => (
-              <div key={a.id} className="pm-row" style={{ gap: 9, alignItems: "flex-start" }}>
-                {a.actorId ? (
-                  <Avatar id={a.actorId} size={22} />
-                ) : (
-                  <span className="pm-ai-av" style={{ width: 22, height: 22, fontSize: 8 }}>AI</span>
-                )}
-                <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: "var(--text-2)" }}>
-                  <span style={{ fontWeight: 600, color: "var(--text)" }}>
-                    {a.actorId ? person(a.actorId).name : "Droplet AI"}
-                  </span>{" "}
-                  {humanizeActivity(a.verb, a.field)}
-                  <span style={{ color: "var(--text-4)", marginLeft: 6 }}>{formatRelativeTime(a.createdAt)}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div style={{ fontSize: 13, color: "var(--text-4)" }}>No activity yet.</div>
-        )}
-      </div>
+      {/* WARP-3519 — comments and history as one thread: edit/delete, reactions,
+          @mentions, watchers. The server writes a `commented` activity row in the
+          same transaction as the comment; the section re-reads the merged
+          timeline itself, and `onChanged` refreshes the board's comment counts. */}
+      <ActivitySection itemId={item.id} viewerId={user?.id} role={user?.role} onChanged={onChanged} />
     </div>
   );
 }

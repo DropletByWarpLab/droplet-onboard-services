@@ -13,7 +13,9 @@ import type {
   PmWorkItem,
   PmComment,
   PmSummary,
-  PmActivity,
+  PmTimelineEntry,
+  PmTimelineRefs,
+  PmWatcher,
   Person,
 } from "./types";
 
@@ -146,20 +148,75 @@ export function useSubIssues(projectId: string | null, parentId: string | null) 
   return { subIssues: data?.work_items };
 }
 
-export function useComments(workItemId: string | null) {
-  const { data, mutate } = useSWR(
-    workItemId ? `/api/pm/work-items/${workItemId}/comments` : null,
-    (u: string) => getJson<{ comments: PmComment[] }>(u),
-  );
-  return { comments: data?.comments, mutate };
+// WARP-3519 — the work item's comments and activity as ONE stream, oldest first
+// ("newest last", the order a thread is read in). One page is up to 500 entries;
+// the fetcher walks `nextCursor` so the drawer always holds the whole thread,
+// and stops at TIMELINE_MAX_PAGES so a server that never runs out of cursors
+// cannot hold the drawer on a spinner. Hitting the cap is reported as
+// `truncated`, and the section says "Showing the first N of M entries."
+const TIMELINE_PAGE_LIMIT = 500;
+const TIMELINE_MAX_PAGES = 20;
+
+interface TimelinePage {
+  timeline: PmTimelineEntry[];
+  refs: PmTimelineRefs;
+  nextCursor: string | null;
+  total: number;
 }
 
-export function useActivity(workItemId: string | null) {
-  const { data, mutate } = useSWR(
-    workItemId ? `/api/pm/work-items/${workItemId}/activity` : null,
-    (url: string) => getJson<{ activity: PmActivity[] }>(url),
+interface TimelineData {
+  entries: PmTimelineEntry[];
+  refs: PmTimelineRefs;
+  total: number;
+  truncated: boolean;
+}
+
+const NO_REFS: PmTimelineRefs = { states: {}, labels: {}, workItems: {} };
+
+async function fetchTimeline(base: string): Promise<TimelineData> {
+  const entries: PmTimelineEntry[] = [];
+  // `refs` names only the ids on THEIR page, so each page's are folded in.
+  const refs: PmTimelineRefs = { states: {}, labels: {}, workItems: {} };
+  let total = 0;
+  let cursor: string | null = null;
+  let pages = 0;
+  do {
+    const query: string =
+      `limit=${TIMELINE_PAGE_LIMIT}` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : "");
+    const page: TimelinePage = await getJson<TimelinePage>(`${base}?${query}`);
+    entries.push(...page.timeline);
+    Object.assign(refs.states, page.refs.states);
+    Object.assign(refs.labels, page.refs.labels);
+    Object.assign(refs.workItems, page.refs.workItems);
+    total = page.total;
+    cursor = page.nextCursor;
+    pages += 1;
+  } while (cursor !== null && pages < TIMELINE_MAX_PAGES);
+  return { entries, refs, total, truncated: cursor !== null };
+}
+
+export function useTimeline(workItemId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    workItemId ? `/api/pm/work-items/${workItemId}/timeline` : null,
+    fetchTimeline,
   );
-  return { activity: data?.activity, mutate };
+  return {
+    entries: data?.entries,
+    refs: data?.refs ?? NO_REFS,
+    total: data?.total,
+    truncated: data?.truncated ?? false,
+    isLoading,
+    error,
+    mutate,
+  };
+}
+
+export function useWatchers(workItemId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    workItemId ? `/api/pm/work-items/${workItemId}/watchers` : null,
+    (u: string) => getJson<{ watchers: PmWatcher[] }>(u),
+  );
+  return { watchers: data?.watchers, error, isLoading, mutate };
 }
 
 
@@ -231,6 +288,27 @@ export function pmActions() {
       send<{ comment: PmComment }>(`/api/pm/work-items/${itemId}/comments`, "POST", {
         comment_html: commentHtml,
       }),
+    // WARP-3519 — author-only edit; the author or an owner/admin may delete
+    // (the server leaves a tombstone), and a reaction is one emoji per user.
+    editComment: (commentId: string, commentHtml: string) =>
+      send<{ comment: PmComment }>(`/api/pm/comments/${commentId}`, "PATCH", {
+        comment_html: commentHtml,
+      }),
+    deleteComment: (commentId: string) =>
+      send<{ comment: PmComment }>(`/api/pm/comments/${commentId}`, "DELETE"),
+    addReaction: (commentId: string, emoji: string) =>
+      send<{ comment: PmComment }>(`/api/pm/comments/${commentId}/reactions`, "POST", { emoji }),
+    removeReaction: (commentId: string, emoji: string) =>
+      send<{ comment: PmComment }>(
+        `/api/pm/comments/${commentId}/reactions?emoji=${encodeURIComponent(emoji)}`,
+        "DELETE",
+      ),
+    // Self only: the viewer's own watch. (An assignee cannot leave — the server
+    // keeps them on the list — so the dashboard does not offer it.)
+    watch: (itemId: string) =>
+      send<{ watchers: PmWatcher[] }>(`/api/pm/work-items/${itemId}/watchers`, "POST", {}),
+    unwatch: (itemId: string) =>
+      send<{ watchers: PmWatcher[] }>(`/api/pm/work-items/${itemId}/watchers`, "DELETE"),
     deleteProject: (id: string) => send<{ deleted: string }>(`/api/pm/projects/${id}`, "DELETE"),
   };
 }
