@@ -56,6 +56,7 @@ import { createMatterRouter } from "./routes/matter.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
+import { createPmInsightsRouter } from "./routes/pm/insights.js";
 import { createCrmRouter } from "./routes/crm.js";
 import { createMoneyRouter } from "./routes/money.js";
 import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
@@ -557,6 +558,11 @@ export function createApp(
   // (blocks / relates / duplicates). Its own router on the same prefix; the
   // paths are disjoint from the native router's, so neither shadows the other.
   app.use("/api", createPmRelationsRouter(prisma));
+  // WARP-3524 (WS-8) — GET /api/pm/insights. Its own router for the same
+  // reason relations has one: the path is disjoint from native.ts's, which
+  // several slices are editing at once. Covered by the `projects` module gate
+  // through the `/api/pm` prefix like the two routers above.
+  app.use("/api", createPmInsightsRouter(prisma));
   // WARP-2117 — the CRM, which lives inside the Projects surface. Mounted
   // AFTER the PM router but on a disjoint prefix (`/api/crm`), so neither
   // shadows the other; the `crm` module gate comes from the registry.
