@@ -72,7 +72,7 @@ async function world() {
 }
 
 const search = (db: FakeCloudFileDb, over: Partial<CloudFileSearchParams> = {}) =>
-  searchCloudFiles(asDb(db), { userId: USER, limit: 25, ...over });
+  searchCloudFiles(asDb(db), { userId: USER, providers: ["M365"], limit: 25, ...over });
 const names = (r: { items: Array<{ name: string }> }) => r.items.map((i) => i.name);
 
 describe("searchCloudFiles — what a result says", () => {
@@ -116,12 +116,32 @@ describe("searchCloudFiles — what a result says", () => {
     });
   });
 
-  it("falls back to the provider's own name for a file whose source row is not there yet — a file still shows up", async () => {
-    // A crash between discovery's two writes, or a OneDrive not yet registered,
-    // is a transient state; a person's file must not vanish from search for it.
+  it("does NOT show a file whose source is not registered — it is what a removed library left behind", async () => {
+    // A library is removed (SharePoint switched off, or pruned) while a page of it
+    // is still being handled, and a row lands under a source that is gone. The
+    // landing handler refuses such pages, but a race can still slip one through
+    // for an instant, and nothing lists or deletes it afterwards. It must never be
+    // found: a person who was told "Droplet deleted the list" cannot be shown a
+    // name from it, and a file with no source cannot even say where it lives.
+    // (Mutation: drop the source filter and it comes back under the provider's name.)
     const db = await world();
     await item(db, { externalId: "x1", name: "orphan.pdf", sourceId: "b!no-such-source" });
-    expect((await search(db)).items[0]).toMatchObject({ name: "orphan.pdf", location: "Microsoft 365" });
+    await item(db, { externalId: "x2", name: "kept.pdf", sourceId: LIB });
+    expect(names(await search(db))).toEqual(["kept.pdf"]);
+    expect((await search(db)).total).toBe(1);
+    expect(names(await search(db, { query: "orphan" }))).toEqual([]);
+  });
+
+  it("reads only the files of sources the person has — pushed into the query, not filtered after", async () => {
+    const db = await world();
+    await item(db, { externalId: "a", name: "a.pdf" });
+    await search(db);
+    expect(db.cloudFileItem.findMany.mock.calls[0]![0]!.where).toMatchObject({
+      userId: USER,
+      provider: { in: ["M365"] },
+      sourceId: { in: expect.arrayContaining([OD, LIB, LIB2]) },
+    });
+    expect((db.cloudFileItem.findMany.mock.calls[0]![0]!.where as { sourceId: { in: string[] } }).sourceId.in).toHaveLength(3);
   });
 
   it("is a number for sizeBytes, null for a folder and for anything a double cannot hold exactly", async () => {
@@ -208,7 +228,7 @@ describe("searchCloudFiles — whose files, which cloud, where, and since when",
     const result = await search(db, { query: "budget" });
     expect(result.items).toHaveLength(1);
     expect(result.total).toBe(1);
-    expect(await searchCloudFiles(asDb(db), { userId: "nobody", limit: 25 })).toEqual({ items: [], total: 0, unreadable: 0 });
+    expect(await searchCloudFiles(asDb(db), { userId: "nobody", providers: ["M365"], limit: 25 })).toEqual({ items: [], total: 0, unreadable: 0 });
   });
 
   it("never lets another person's source name label a file", async () => {
@@ -220,11 +240,44 @@ describe("searchCloudFiles — whose files, which cloud, where, and since when",
     expect((await search(db)).items[0]!.location).toBe("Front desk › Documents");
   });
 
-  it("filters by provider", async () => {
-    const db = await world();
-    await item(db, { externalId: "m", name: "ms.pdf" });
-    db.seedItem({ userId: USER, provider: "GOOGLE", sourceId: "g1", externalId: "g", isFolder: false, nameEnc: "dcv1:x" });
-    expect(names(await search(db, { provider: "M365" }))).toEqual(["ms.pdf"]);
+  describe("which clouds", () => {
+    // The caller passes the clouds the person has CONNECTED. A cloud whose
+    // connection has died keeps its rows until they are deleted, and its files
+    // must not be found as if it were still connected.
+    async function twoClouds() {
+      const db = await world();
+      await upsertSource(asDb(db), { userId: USER, provider: "GOOGLE" as never, sourceId: "g1", kind: "ONEDRIVE", siteId: null, siteName: null, name: "My Drive", webUrl: null, followed: false });
+      await item(db, { externalId: "m", name: "ms.pdf" });
+      await upsertItem(asDb(db), {
+        userId: USER, provider: "GOOGLE" as never, sourceId: "g1", externalId: "g", parentExternalId: null, isFolder: false, name: "google.pdf",
+        webUrl: null, lastModifiedBy: null, mimeType: null, sizeBytes: null, remoteCreatedAt: null, remoteModifiedAt: t("2026-10-02T00:00:00Z"),
+      });
+      return db;
+    }
+
+    it("searches only the clouds it is given", async () => {
+      const db = await twoClouds();
+      expect(names(await search(db, { providers: ["M365"] }))).toEqual(["ms.pdf"]);
+      expect(names(await search(db, { providers: ["GOOGLE" as never] }))).toEqual(["google.pdf"]);
+      expect(names(await search(db, { providers: ["M365", "GOOGLE" as never] })).sort()).toEqual(["google.pdf", "ms.pdf"]);
+    });
+
+    it("reads nothing at all for no clouds — not 'every cloud'", async () => {
+      // Mutation: treat an empty list as "no filter" and a person with nothing
+      // connected searches everything the store holds for them.
+      const db = await twoClouds();
+      db.cloudFileItem.findMany.mockClear();
+      db.cloudFileSource.findMany.mockClear();
+      expect(await search(db, { providers: [] })).toEqual({ items: [], total: 0, unreadable: 0 });
+      expect(db.cloudFileItem.findMany).not.toHaveBeenCalled();
+    });
+
+    it("does not let one cloud's source id label another cloud's file", async () => {
+      const db = await twoClouds();
+      // A Google container that happens to share a Microsoft drive id.
+      await upsertSource(asDb(db), { userId: USER, provider: "GOOGLE" as never, sourceId: LIB, kind: "ONEDRIVE", siteId: null, siteName: null, name: "Imposter", webUrl: null, followed: false });
+      expect((await search(db, { providers: ["M365"] })).items.map((i) => i.location)).toEqual(["Front desk › Documents"]);
+    });
   });
 
   it("narrows by location — case-insensitive, a substring of where the file lives", async () => {

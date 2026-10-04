@@ -35,6 +35,19 @@
  * never stored), so a file directly under the root has an empty path. Only the
  * answer's own rows are resolved, a level per query, not the whole store.
  *
+ * ## Only files that sit in a source the person has, in a cloud they have connected
+ *
+ * Every file is found through its SOURCE: the place it lives, which says where to
+ * show it ("OneDrive", "Front desk › Documents") and whose list it belongs to. A
+ * file with no source row is not found. The rows have no foreign key, so a library
+ * that is removed while a page of it is still landing (SharePoint switched off, a
+ * library pruned) can leave a row under a source that no longer exists; nothing
+ * lists it and nothing deletes it, and it must never reach a person who was told
+ * "Droplet deleted that list". The caller also names the clouds the person has
+ * CONNECTED: a cloud whose connection has died keeps its rows until they are
+ * deleted, and its files must not be found as if it were still connected. An empty
+ * list searches nothing — never "every cloud".
+ *
  * Every query is scoped to `userId`: a person only ever finds their own files.
  * A row that cannot be opened (a rotated device key) is skipped and counted, never
  * shown as something else.
@@ -93,7 +106,11 @@ export interface CloudFileSearchParams {
   readonly userId: string;
   /** Words that must ALL appear in the file's name, in any order, ignoring case. */
   readonly query?: string;
-  readonly provider?: CloudFileProvider;
+  /**
+   * The clouds to search: the ones the person has CONNECTED. Required, so a caller
+   * cannot forget to decide; empty means nothing is searched.
+   */
+  readonly providers: readonly CloudFileProvider[];
   /** Matches (case-insensitively, as a substring) where the file lives: "OneDrive", a library, a site. */
   readonly source?: string;
   /** Only files modified at or after this moment. A file whose modified time is unknown is not "since" anything. */
@@ -164,24 +181,31 @@ function tryOpen(open: () => string): string | null {
   }
 }
 
-/** The person's sources as they are shown: where each lives, in words. */
+/**
+ * The person's sources as they are shown: where each lives, in words. EVERY
+ * source row is here, so this is also the list of places a file may be found in.
+ *
+ * A source whose name cannot be opened (a rotated device key) is still a source
+ * the person has; it is shown as its provider, never as a guess.
+ */
 async function locationsOf(
   db: CloudFileDb,
   crypto: CloudFileCrypto,
   userId: string,
-  provider: CloudFileProvider | undefined,
+  providers: readonly CloudFileProvider[],
 ): Promise<Map<string, string>> {
   const rows = await db.cloudFileSource.findMany({
-    where: { userId, ...(provider ? { provider } : {}) },
+    where: { userId, provider: { in: [...providers] } },
     select: { provider: true, sourceId: true, kind: true, siteNameEnc: true, nameEnc: true },
   });
   const out = new Map<string, string>();
   for (const row of rows) {
     const ref = { provider: row.provider, userId, sourceId: row.sourceId };
     const name = tryOpen(() => crypto.openSource(ref, "name", row.nameEnc));
-    // A source whose name cannot be opened is shown as its provider, never as a
-    // guess — and its items cannot be opened either, so nothing is lost by it.
-    if (name === null) continue;
+    if (name === null) {
+      out.set(key(row.provider, row.sourceId), PROVIDER_DISPLAY_NAMES[row.provider]);
+      continue;
+    }
     const siteName = row.siteNameEnc === null ? null : tryOpen(() => crypto.openSource(ref, "siteName", row.siteNameEnc!));
     out.set(key(row.provider, row.sourceId), LOCATION_LABELS[row.kind]({ siteName, name }));
   }
@@ -267,26 +291,30 @@ export async function searchCloudFiles(
   db: CloudFileDb,
   params: CloudFileSearchParams,
 ): Promise<CloudFileSearchResult> {
-  const { userId, provider, modifiedSince, limit } = params;
+  const { userId, providers, modifiedSince, limit } = params;
+  const empty: CloudFileSearchResult = { items: [], total: 0, unreadable: 0 };
+  // Nothing connected is nothing to search — checked before ANY read, so an empty
+  // list can never fall through into "no filter".
+  if (providers.length === 0) return empty;
+
   const crypto = cloudFileCrypto();
   const terms = (params.query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
   const needle = (params.source ?? "").trim().toLowerCase();
 
-  const locations = await locationsOf(db, crypto, userId, provider);
+  const locations = await locationsOf(db, crypto, userId, providers);
 
-  // `source` is a statement about WHERE a file lives, so it can only be answered
-  // for files whose source is known; it narrows the query to those sources.
-  let sourceIds: string[] | undefined;
-  if (needle) {
-    sourceIds = [...locations].filter(([, label]) => label.toLowerCase().includes(needle)).map(([k]) => k.split("\u0000")[1]!);
-    if (sourceIds.length === 0) return { items: [], total: 0, unreadable: 0 };
-  }
+  // Files are found through the sources the person has — see the module header.
+  // `source` is a statement about WHERE a file lives, so it narrows them further.
+  const places = [...locations].filter(([, label]) => !needle || label.toLowerCase().includes(needle));
+  if (places.length === 0) return empty;
+  const allowed = new Set(places.map(([k]) => k));
+  const sourceIds = [...new Set(places.map(([k]) => k.split("\u0000")[1]!))];
 
   const rows = await db.cloudFileItem.findMany({
     where: {
       userId,
-      ...(provider ? { provider } : {}),
-      ...(sourceIds ? { sourceId: { in: sourceIds } } : {}),
+      provider: { in: [...providers] },
+      sourceId: { in: sourceIds },
       ...(modifiedSince ? { remoteModifiedAt: { gte: modifiedSince } } : {}),
     },
     select: {
@@ -306,11 +334,11 @@ export async function searchCloudFiles(
   });
   if (rows.length > MAX_SEARCH_CANDIDATES) throw new CloudFileSearchTooLargeError(MAX_SEARCH_CANDIDATES);
 
-  // The query's `in` is a superset of the sources the label matched (it does not
-  // know the provider alongside each id), so the exact (provider, source) pair is
-  // checked again here — and a file whose source is unknown cannot match a location.
+  // The query's two `in` lists are a superset of the (provider, source) pairs
+  // allowed — it cannot say which id belongs to which cloud — so the exact pair is
+  // checked again here.
   const candidates = (rows as Candidate[])
-    .filter((row) => !needle || locations.has(key(row.provider, row.sourceId)))
+    .filter((row) => allowed.has(key(row.provider, row.sourceId)))
     .sort(newestFirst);
 
   const nameOf = new Map<Candidate, string>();
@@ -362,7 +390,7 @@ export async function searchCloudFiles(
       name: nameOf.get(row)!,
       isFolder: row.isFolder,
       provider: providerToWire(row.provider),
-      location: locations.get(key(row.provider, row.sourceId)) ?? PROVIDER_DISPLAY_NAMES[row.provider],
+      location: locations.get(key(row.provider, row.sourceId))!,
       path: paths.get(row) ?? "",
       webUrl: row.webUrlEnc === null ? null : tryOpen(() => crypto.openItem(ref, "webUrl", row.webUrlEnc!)),
       lastModifiedAt: row.remoteModifiedAt === null ? null : row.remoteModifiedAt.toISOString(),
