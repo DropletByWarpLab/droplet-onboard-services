@@ -33,11 +33,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       tzdata
 
 # Python deps first (cache-friendly).
-COPY services/rag-eval/requirements.txt .
+COPY services/rag-eval/requirements.lock .
 # WARP-1065: persistent pip wheel/http cache (replaces --no-cache-dir; the
 # cache lives in the mount, not the image).
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    pip install --require-hashes --no-deps -r requirements.lock
 
 # Goldens + queries + the canonical runner — baked at build time per the
 # "image-first, no repo on appliance" deploy convention. Mirror the repo
