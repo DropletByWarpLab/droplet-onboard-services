@@ -101,6 +101,12 @@ if [ -f "$BACKUP_SCRIPT" ] && [ -f "$RESTORE_SCRIPT" ] && [ -f "$DRILL_SCRIPT" ]
     || fail "backup has no DROPLET_BACKUP_TARGET knob"
   grep -q 'nextcloud-data' "$BACKUP_SCRIPT" \
     && pass "backup captures nextcloud-data" || fail "backup omits nextcloud-data"
+  # WARP-1505: Projects attachments are primary customer files; the pg_dump holds
+  # only their metadata rows. Assert the stage CALL, not a mention in a comment:
+  # a header line would satisfy a loose grep even if the call were deleted.
+  grep -qxF 'stage_volume pm-attachments' "$BACKUP_SCRIPT" \
+    && pass "backup captures the pm-attachments volume (WARP-1505)" \
+    || fail "backup omits pm-attachments — a restore would bring back every attachment row and none of the files"
   # WARP-1013: the db container hosts BOTH databases. Dumping only droplet
   # while tarring the nextcloud-data blobs means a restore pairs fresh files
   # with a stale metadata DB (file cache / shares / users skew — missing or
@@ -729,6 +735,7 @@ services:
     volumes:
       - nextcloud-data:/var/www/html
       - nvrdata:/data/nvr
+      - pm-attachments:/data/pm-attachments
     healthcheck:
       # WARP-1571: TCP-gated on purpose — a socket probe reports healthy
       # during the initdb temp server. Never inline a socket probe here.
@@ -739,6 +746,7 @@ services:
 volumes:
   nextcloud-data:
   nvrdata:
+  pm-attachments:
 YAML
 }
 
@@ -759,6 +767,7 @@ wait_healthy() {
 db_count() { dc exec -T db sh -c 'psql -U droplet -d droplet -tAc "SELECT count(*) FROM t WHERE id=42;"' 2>/dev/null | tr -d '[:space:]'; }
 nc_db_count() { dc exec -T db sh -c 'psql -U droplet -d nextcloud -tAc "SELECT count(*) FROM oc_filecache WHERE fileid=1;"' 2>/dev/null | tr -d '[:space:]'; }
 nc_marker() { dc exec -T db sh -c '[ -f /var/www/html/marker.txt ] && echo yes || echo no' 2>/dev/null | tr -d '[:space:]'; }
+pm_marker() { dc exec -T db sh -c '[ -f /data/pm-attachments/marker.txt ] && echo yes || echo no' 2>/dev/null | tr -d '[:space:]'; }
 
 if ! command -v docker >/dev/null 2>&1 || ! have_docker; then
   skip "Docker not available — live drill skipped (static checks ran)"
@@ -806,7 +815,7 @@ else
     # init-nextcloud-db.sh, with an oc_filecache-shaped sanity table (WARP-1013).
     dc exec -T db sh -c 'psql -U droplet -d droplet -tAc "SELECT 1 FROM pg_database WHERE datname='"'"'nextcloud'"'"';" | grep -q 1 || psql -U droplet -d droplet -c "CREATE DATABASE nextcloud;"' >/dev/null
     dc exec -T db sh -c 'psql -U droplet -d nextcloud -c "CREATE TABLE IF NOT EXISTS oc_filecache(fileid int); INSERT INTO oc_filecache VALUES (1);"' >/dev/null
-    dc exec -T db sh -c 'echo NEXTCLOUD-MARKER > /var/www/html/marker.txt; echo NVR-FOOTAGE > /data/nvr/footage.bin'
+    dc exec -T db sh -c 'echo NEXTCLOUD-MARKER > /var/www/html/marker.txt; echo NVR-FOOTAGE > /data/nvr/footage.bin; echo PM-ATTACHMENT-MARKER > /data/pm-attachments/marker.txt'
     pass "seeded both DBs + volume markers"
 
     # --- Backup #1 (daily) --------------------------------------------------
@@ -844,6 +853,9 @@ else
     latest_files="$(RESTIC_PASSWORD="$DERIVED_PW" restic -r "$REPO_TARGET" ls latest 2>/dev/null || true)"
     printf '%s\n' "$latest_files" | grep -q 'nextcloud-data' \
       && pass "nextcloud-data captured in snapshot" || fail "nextcloud-data missing from snapshot"
+    printf '%s\n' "$latest_files" | grep -q 'pm-attachments' \
+      && pass "pm-attachments captured in snapshot (WARP-1505)" \
+      || fail "pm-attachments missing from snapshot — restored attachments would have no files"
     printf '%s\n' "$latest_files" | grep -q 'nextcloud\.sql\.gz' \
       && pass "nextcloud DB dump captured in snapshot" \
       || fail "nextcloud DB dump missing from snapshot (WARP-1013)"
@@ -892,7 +904,7 @@ else
     # --- Mutate --------------------------------------------------------------
     dc exec -T db sh -c 'psql -U droplet -d droplet -c "DELETE FROM t;"' >/dev/null 2>&1
     dc exec -T db sh -c 'psql -U droplet -d nextcloud -c "DELETE FROM oc_filecache;"' >/dev/null 2>&1
-    dc exec -T db sh -c 'rm -f /var/www/html/marker.txt' >/dev/null 2>&1
+    dc exec -T db sh -c 'rm -f /var/www/html/marker.txt /data/pm-attachments/marker.txt' >/dev/null 2>&1
     [ "$(db_count)" = "0" ] && pass "data mutated (rows dropped)" || fail "mutation did not take"
     [ "$(nc_db_count)" = "0" ] && pass "nextcloud DB mutated (rows dropped)" || fail "nextcloud mutation did not take"
 
@@ -919,6 +931,7 @@ else
     [ "$(nc_db_count)" = "1" ] && pass "nextcloud DB row restored (WARP-1013 round-trip)" \
       || fail "nextcloud DB NOT restored (count=$(nc_db_count))"
     [ "$(nc_marker)" = "yes" ] && pass "nextcloud-data volume restored" || fail "nextcloud-data NOT restored"
+    [ "$(pm_marker)" = "yes" ] && pass "pm-attachments volume restored (WARP-1505)" || fail "pm-attachments NOT restored"
     # Config surfaces land in a staging dir for the operator, never applied live.
     if ls "$STATE_DIR"/restored-config-*/.env >/dev/null 2>&1; then
       pass "restore staged .env + config for operator review"

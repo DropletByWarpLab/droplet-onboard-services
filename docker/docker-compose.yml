@@ -508,15 +508,15 @@ services:
       #
       # A NAMED volume, never a host bind: this is customer data, and a named
       # volume lives under the Docker data-root, which on a provisioned box is
-      # /data/docker on the LUKS partition (droplet-luks-provision.sh) — so it
-      # is encrypted at rest with nothing extra to configure. A bind to some
-      # other host path would silently leave that guarantee behind.
+      # /data/docker on the LUKS partition (droplet-luks-provision.sh) — so
+      # there it is encrypted at rest with nothing extra to configure. A bind to
+      # some other host path would silently leave that guarantee behind.
       #
       # The target comes from PM_ATTACHMENTS_DIR (environment above), not a
       # second literal: were the two to disagree, the service would write into
       # the container's ephemeral layer and every file would vanish on recreate.
-      # In device-backup.sh's DATA_VOLUMES and factory-reset.sh's wipe list,
-      # like brain-memory-data.
+      # In the nightly restic backup (droplet-backup.sh), device-backup.sh's
+      # DATA_VOLUMES and factory-reset.sh's wipe list.
       - pm-attachments:${PM_ATTACHMENTS_DIR:-/data/pm-attachments}
       # WARP-456: HMAC signing key for the append-only activity log.
       # setup.sh writes the 32-byte key to <repo>/data/secrets/audit.key
@@ -3833,8 +3833,9 @@ volumes:
   migration-snapshots:
   brain-memory-data:
   # WARP-1505 (ADR-026): PM work-item attachment bytes, mounted only into the
-  # orchestrator (see its volumes list). Customer data: captured by
-  # device-backup.sh and wiped by factory reset, like brain-memory-data.
+  # orchestrator (see its volumes list). Customer data: captured by the
+  # nightly restic backup (droplet-backup.sh) and by device-backup.sh, and wiped
+  # by factory reset.
   pm-attachments:
   # WARP-539: OTA per-update rollback backups + staged configs
   # (<id>/{backup,configs.tar.gz}). GC'd by the daily purge cron (terminal

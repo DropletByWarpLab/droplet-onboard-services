@@ -385,7 +385,7 @@ automated restore drill.
 
 | Script | Purpose |
 |--------|---------|
-| `droplet-backup.sh` | restic backup: staged `pg_dump` of the orchestrator Postgres + the `nextcloud-data` volume + `.env` + config dirs. `--full` re-reads every byte (`restic backup --force`, tag `weekly-full`) |
+| `droplet-backup.sh` | restic backup: staged `pg_dump` of the orchestrator Postgres + the `nextcloud-data` and `pm-attachments` volumes + `.env` + config dirs. `--full` re-reads every byte (`restic backup --force`, tag `weekly-full`) |
 | `droplet-restore.sh` | Restore a snapshot into the live stack (DESTRUCTIVE; confirm-gated, `--force` to skip, `--list` / `--snapshot ID` to pick). `.env`/config are staged for operator review, never applied live |
 | `droplet-restore-drill.sh` | Monthly drill: `restic check` (with data re-read) + restore latest into a throwaway sandbox Postgres + smoke query + **explicit** `ok\|failed` status file |
 | `droplet-backup-lib.sh` | Shared lib (sourced): HKDF-SHA256 password derivation + restic env plumbing |
