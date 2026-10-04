@@ -1476,7 +1476,7 @@ EOF
     upsert_env DROPLET_TRUSTED_LAN_IPS "$_lan_ips"
     log_info "DROPLET_TRUSTED_LAN_IPS derived from the box's interfaces: $_lan_ips"
   else
-    log_warn "could not enumerate the box's LAN IPv4 addresses — leaving DROPLET_TRUSTED_LAN_IPS unchanged; browsing this box BY IP may answer 400 on Nextcloud legs (the embedded editor included) until the next setup run"
+    log_warn "could not enumerate the box's LAN IPv4 addresses — leaving DROPLET_TRUSTED_LAN_IPS unchanged; browsing this box BY IP may answer 400 on File Store legs (the embedded editor included) until the next setup run"
   fi
   # WARP-1772: the inference runtime is a durable, operator-set property, and
   # upsert_env is an OVERWRITE — before this guard, any re-run of setup on a

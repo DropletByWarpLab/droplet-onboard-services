@@ -221,7 +221,7 @@ async function resolveUploadLimitMb(
  */
 class MissingNcTokenError extends Error {
   constructor() {
-    super("Nextcloud session is missing — please log in again");
+    super("File Store session is missing — please log in again");
     this.name = "MissingNcTokenError";
   }
 }

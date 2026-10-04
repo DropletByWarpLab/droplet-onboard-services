@@ -3626,7 +3626,7 @@ export function createProtectedAuthRouter(
             ...(ncMirror === "failed"
               ? {
                   warning:
-                    "Access to this Droplet is revoked, but Nextcloud could not be reached — their file access will be cut off automatically when it is back.",
+                    "Access to this Droplet is revoked, but the File Store could not be reached — their file access will be cut off automatically when it is back.",
                 }
               : {}),
           });
