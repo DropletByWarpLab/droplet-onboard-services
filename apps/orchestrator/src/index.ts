@@ -52,6 +52,7 @@ import {
   LEAVER_DELETION_LOCK_KEY,
 } from "./services/leaver-deletion.service.js";
 import { createCronRuntime } from "./services/cron-runtime.service.js";
+import { warnLegacyScimRoleMapping } from "./services/scim.service.js";
 import { recordRotationFoundAtBoot } from "./services/audit-key-rotation.service.js";
 import {
   AGENT_RUN_LOCK_KEY,
@@ -110,6 +111,8 @@ import {
   resumeInterruptedApply,
 } from "./services/update-agent/apply.js";
 import { getOtaHost, initOtaHost } from "./services/update-agent/host-exec.js";
+import { initHqTokenService } from "./services/hq-token.service.js";
+import { startBoxTelemetry } from "./services/box-telemetry/index.js";
 import { purgeUpdateBackups } from "./services/update-agent/purge-update-backups.js";
 import { purgeSelfSwapHelpers } from "./services/update-agent/purge-self-swap-helpers.js";
 import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
@@ -294,6 +297,10 @@ async function main() {
   // first new-key row, before the start-up row below.
   await recordRotationFoundAtBoot(prisma).catch((err) =>
     logger.error({ err }, "audit key rotation check at boot failed"),
+  );
+  // WARP-3631: tell the operator which SCIM groups stopped granting admin by name.
+  await warnLegacyScimRoleMapping(prisma).catch((err) =>
+    logger.error({ err }, "SCIM role mapping upgrade check failed"),
   );
   // Genesis-or-restart event so the first row of every container's
   // lifetime is always a `system` start-up. Makes the chain easier to
@@ -1147,7 +1154,7 @@ async function main() {
       const dnsBlockDeleted = await purgeDnsBlockSamples(prisma, 30);
       // WARP-586: retention purge for the append-only audit/log tables
       // (ActivityRow, CommandAuditLog, NotificationLog). Window is
-      // operator-tunable via DROPLET_AUDIT_RETENTION_DAYS (default 90);
+      // operator-tunable via DROPLET_AUDIT_RETENTION_DAYS (default 365, minimum 90);
       // <= 0 disables the purge. ActivityRow is hash-chained, so this is
       // an id-contiguous oldest-prefix seal-and-truncate, not a mid-chain
       // delete — see audit-retention-purge.service.ts for the integrity
@@ -1426,6 +1433,20 @@ async function main() {
   // other cron in this file (checkForUpdate + applyWindowTick return typed
   // outcomes for expected failures; only genuine bugs throw).
   const updateAgentSettings = await getUpdateAgentSettings(prisma);
+  // WARP-3503 (ADR-068) — the ONE HQ device-token client: the OTA image pull
+  // takes `registry:pull` from it, the telemetry sender `telemetry:ingest`
+  // (getHqTokenService()). Null when HQ is not configured (dev/CI): the pull
+  // then runs without an HQ credential.
+  const hqTokens = config.HQ_ISSUANCE_URL
+    ? initHqTokenService({
+        baseUrl: config.HQ_ISSUANCE_URL,
+        identity: createDeviceIdentityClient(),
+      })
+    : null;
+  // WARP-3504 (ADR-068) — operational telemetry to the operator portal with the
+  // `telemetry:ingest` token from the same client. Always on for an enrolled
+  // box; idle (no sends) while HQ issues it no token.
+  await startBoxTelemetry({ prisma, cron: cronRuntime, hqTokens });
   // WARP-3007 — DROPLET_OTA_APPLY_SCRIPT is the enable flag; the helper is
   // always the release-shipped docker/ota/apply-update.sh, run ON THE HOST
   // (host-exec.ts). A box whose host context can't be resolved keeps apply off.
@@ -1437,6 +1458,7 @@ async function main() {
           updatesDir: config.DROPLET_OTA_UPDATES_DIR,
           appDownloadsDir: config.DROPLET_APP_DOWNLOADS_DIR,
           githubToken: config.DROPLET_OTA_GITHUB_TOKEN || undefined,
+          hqToken: hqTokens ?? undefined,
         })
       )?.runner ?? null)
     : null;

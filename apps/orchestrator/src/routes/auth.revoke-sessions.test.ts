@@ -720,7 +720,7 @@ describe("POST /api/auth/users/:username/disable — N1 degraded-mirror honesty"
       username: "alice",
       ncMirror: "failed",
     });
-    expect(res.body.warning).toMatch(/Nextcloud/i);
+    expect(res.body.warning).toMatch(/File Store/i);
     expect(prisma._users[0].directoryStatus).toBe("DEACTIVATED");
   });
 

@@ -195,7 +195,7 @@ export function BrainMemoryTab() {
           No files indexed yet.
         </p>
         <p className="type-footnote text-label-tertiary mt-1">
-          Drop a file in chat or upload to your Droplet&apos;s Nextcloud at{" "}
+          Drop a file in chat or upload to your Droplet&apos;s File Store at{" "}
           <a href="/files" className="text-accent hover:underline">
             /files
           </a>

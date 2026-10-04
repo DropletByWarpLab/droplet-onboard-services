@@ -860,6 +860,8 @@ export async function runRemovalPostEffects(args: {
   actor: ActivityActor;
   /** WARP-3160: the person's VPN devices are revoked with the account (and, WARP-3384, their paired file-sync devices). */
   devices?: LeaverDevices;
+  /** WARP-3600: counts of what the final purge removed, recorded on the row. Counts and ids only. */
+  purged?: Record<string, unknown>;
 }): Promise<void> {
   let revokeError: { err: unknown } | null = null;
   if (args.targetUserId) {
@@ -881,6 +883,7 @@ export async function runRemovalPostEffects(args: {
       role: args.targetRole,
       ...(vpn ? { vpnDevicesRevoked: vpn.revoked, vpnDevicesFailed: vpn.failed } : {}),
       ...(revokeError ? { sessionRevoke: "failed" } : {}),
+      ...(args.purged && Object.keys(args.purged).length > 0 ? { purged: args.purged } : {}),
     },
     actor: args.actor,
   });
