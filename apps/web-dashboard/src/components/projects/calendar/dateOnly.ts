@@ -12,11 +12,14 @@
 // The one place local time legitimately appears is `todayLocal`: "today" is the
 // viewer's wall-calendar day, read from a real instant.
 //
-// WS-1 (WARP-3372) is introducing its own date-only helper for the dashboard;
-// it had not landed when this was written. Keep this file self-contained so the
-// two can be reconciled by swapping imports, not by untangling behaviour.
+// Reading a wire value and "today" are WS-1's (WARP-3372) shared helper,
+// `../date-only` — copied here verbatim so the two slices agree on both. What
+// this file adds on top is arithmetic, validation, formatting and the PATCH wire
+// form, which the board and list do not need.
 
 /** A calendar date, `YYYY-MM-DD`. Lexicographic order == chronological order. */
+import { dateOnly, localToday } from "../date-only";
+
 export type DateOnly = string;
 
 export type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6; // 0 = Sunday
@@ -172,30 +175,21 @@ export function dayOfMonth(d: DateOnly): number {
   return Number(d.slice(8, 10));
 }
 
-/**
- * The viewer's wall-calendar day. The one local-time read in this module: it is
- * taken from a real instant, so the viewer's own zone is exactly what we want.
- */
+/** The viewer's wall-calendar day — WS-1's `localToday`, the one local-time read. */
 export function todayLocal(now: Date = new Date()): DateOnly {
-  return format({ y: now.getFullYear(), m: now.getMonth() + 1, d: now.getDate() });
+  return localToday(now);
 }
 
 /**
- * Wire value -> calendar date. Accepts what the PM API emits today (an ISO
- * datetime stored at 00:00:00Z) and what it will emit once WS-1 lands
- * (`YYYY-MM-DD`). A datetime's calendar date is its UTC date — never a
- * local-time reading of it.
+ * Wire value -> calendar date. WS-1's `dateOnly` reads the leading `YYYY-MM-DD`
+ * of what the PM API emits today (an ISO datetime stored at 00:00:00Z) and of
+ * what it emits once WS-1 lands (`YYYY-MM-DD`) — never through `Date`. On top of
+ * that, a date that does not exist (`2026-02-30`) is null here, so it can never
+ * be placed on a day it is not.
  */
 export function parseDateOnly(value: string | null | undefined): DateOnly | null {
-  if (!value) return null;
-  if (isDateOnly(value)) return value;
-  const head = value.slice(0, 10);
-  if (/^\d{4}-\d{2}-\d{2}T/.test(value) && isDateOnly(head) && /(Z|[+-]00:?00)$/.test(value)) return head;
-  // Anything else (an offset datetime, a bare datetime): resolve the instant, then read its UTC date.
-  const t = new Date(value).getTime();
-  if (Number.isNaN(t)) return null;
-  const u = new Date(t);
-  return format({ y: u.getUTCFullYear(), m: u.getUTCMonth() + 1, d: u.getUTCDate() });
+  const d = dateOnly(value);
+  return d !== null && isDateOnly(d) ? d : null;
 }
 
 /**

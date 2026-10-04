@@ -137,9 +137,10 @@ describe("wire values", () => {
     expect(parseDateOnly("not a date")).toBeNull();
   });
 
-  it("an offset datetime resolves to its UTC calendar date", () => {
-    expect(parseDateOnly("2026-10-03T23:00:00-08:00")).toBe("2026-10-04");
-    expect(parseDateOnly("2026-10-04T01:00:00+14:00")).toBe("2026-10-03");
+  it("a date that does not exist is not a date, even though the shared reader would pass it through", () => {
+    expect(parseDateOnly("2026-02-30")).toBeNull();
+    expect(parseDateOnly("2026-02-30T00:00:00.000Z")).toBeNull();
+    expect(parseDateOnly("2028-02-29T00:00:00.000Z")).toBe("2028-02-29");
   });
 
   it("serialises a calendar date as UTC midnight, exactly what PATCH's z.string().datetime() takes", () => {
