@@ -597,6 +597,30 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Workspace can't own work — it's the group everyone is already in. Pick a department or a team.",
     department_archived:
       "That department has been archived, so new work can't be assigned to it. Pick another one, or restore it first.",
+    // WARP-1505 — files on work items and comments. Each says what happened and
+    // what to do. The upload queue builds its own sentence for too-large and
+    // blocked files (it knows the file name); these are the wording for every
+    // other path that can hit the same code.
+    attachment_forbidden:
+      "Only the person who added a file, or an owner or admin, can remove it.",
+    attachment_not_found:
+      "That file isn't available anymore. It may have been removed.",
+    attachment_storage_full:
+      "The Droplet is out of storage space, so the file wasn't saved. Free up some space and try again.",
+    attachment_bad_request:
+      "That upload didn't go through. Try adding the file again.",
+    attachment_file_required:
+      "Choose a file to attach, then try again.",
+    attachment_empty:
+      "That file is empty, so it can't be attached.",
+    attachment_too_large:
+      "That file is larger than this Droplet accepts. Try a smaller one.",
+    attachment_type_blocked:
+      "Executable files can't be attached.",
+    attachment_type_mismatch:
+      "That file doesn't look like the type its name says, so it wasn't attached.",
+    comment_not_found:
+      "That comment isn't available anymore. Refresh and try again.",
     invalid_request:
       "Some of those details weren't valid. Check the form and try again.",
     NETWORK:

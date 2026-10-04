@@ -41,6 +41,7 @@ import {
   Building2,
   Briefcase,
   Handshake,
+  Paperclip,
   type LucideIcon,
 } from "lucide-react";
 
@@ -87,6 +88,8 @@ export const ICONS: Record<string, LucideIcon> = {
   building: Building2,
   briefcase: Briefcase,
   handshake: Handshake,
+  // WARP-1505 — attach a file to a comment.
+  attach: Paperclip,
 };
 
 export function PmIcon({

@@ -14,6 +14,7 @@ import type {
   PmComment,
   PmSummary,
   PmActivity,
+  PmAttachment,
   Person,
 } from "./types";
 
@@ -29,11 +30,14 @@ import type {
 export class PmRequestError extends Error {
   readonly status: number;
   readonly code?: string;
-  constructor(message: string, status: number, code?: string) {
+  /** Only on an attachment upload's 413: the per-file limit the server enforces. */
+  readonly maxBytes?: number;
+  constructor(message: string, status: number, code?: string, maxBytes?: number) {
     super(message);
     this.name = "PmRequestError";
     this.status = status;
     this.code = code;
+    this.maxBytes = maxBytes;
   }
 }
 
@@ -162,6 +166,16 @@ export function useActivity(workItemId: string | null) {
   return { activity: data?.activity, mutate };
 }
 
+/** WARP-1505 — every READY file on the item, comment files included (oldest
+ *  first), plus the per-file size limit the server enforces. */
+export function useAttachments(workItemId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    workItemId ? `/api/pm/work-items/${workItemId}/attachments` : null,
+    (u: string) => getJson<{ attachments: PmAttachment[]; limits: { maxBytes: number } }>(u),
+  );
+  return { attachments: data?.attachments, maxBytes: data?.limits?.maxBytes, error, isLoading, mutate };
+}
+
 
 interface DirectoryUser {
   id: string;
@@ -232,5 +246,60 @@ export function pmActions() {
         comment_html: commentHtml,
       }),
     deleteProject: (id: string) => send<{ deleted: string }>(`/api/pm/projects/${id}`, "DELETE"),
+    deleteAttachment: (id: string) => send<{ deleted: string }>(`/api/pm/attachments/${id}`, "DELETE"),
   };
+}
+
+/** WARP-1505 — POST one file to a work item, or to one of its comments.
+ *
+ *  XMLHttpRequest rather than `send`/fetch because fetch has no upload progress
+ *  (the same reason `uploadBatch` in lib/api.ts is XHR). One file per request —
+ *  how many run at once is the caller's call. Failures reject with the same
+ *  PmRequestError the other writes use, so `translateError(e, "projects")` works. */
+export function uploadAttachment(
+  itemId: string,
+  file: File,
+  {
+    commentId,
+    onProgress,
+    signal,
+  }: { commentId?: string; onProgress?: (fraction: number) => void; signal?: AbortSignal } = {},
+): Promise<PmAttachment> {
+  const url =
+    `/api/pm/work-items/${itemId}/attachments` +
+    (commentId ? `?comment_id=${encodeURIComponent(commentId)}` : "");
+  return new Promise((resolve, reject) => {
+    const aborted = () => new DOMException("Upload aborted", "AbortError");
+    if (signal?.aborted) {
+      reject(aborted());
+      return;
+    }
+    const form = new FormData();
+    form.append("file", file);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.withCredentials = true;
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && e.total > 0) onProgress?.(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let body: { attachment?: PmAttachment; error?: string; maxBytes?: number } = {};
+      try {
+        body = JSON.parse(xhr.responseText) ?? {};
+      } catch {
+        /* not JSON — a proxy's error page; the status still says what happened */
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && body.attachment) {
+        resolve(body.attachment);
+      } else {
+        reject(
+          new PmRequestError(body.error ?? `Request failed (${xhr.status})`, xhr.status, body.error, body.maxBytes),
+        );
+      }
+    };
+    xhr.onerror = () => reject(new Error("Upload failed: network error"));
+    xhr.onabort = () => reject(aborted());
+    signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+    xhr.send(form);
+  });
 }

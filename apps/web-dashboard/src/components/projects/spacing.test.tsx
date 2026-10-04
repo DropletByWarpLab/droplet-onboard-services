@@ -19,6 +19,8 @@ import { makePerson } from "./config";
 import type { PmProject, PmWorkItem } from "./types";
 
 vi.mock("@/lib/auth", () => ({
+  // The drawer reads the role to decide whether to offer attachment writes (WARP-1505).
+  useAuth: () => ({ user: { id: "u1", username: "ada", displayName: "Ada", role: "owner" } }),
   authFetch: vi.fn(() =>
     Promise.resolve({
       ok: true,
