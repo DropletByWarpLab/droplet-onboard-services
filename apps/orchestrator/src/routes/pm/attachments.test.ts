@@ -18,7 +18,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AuthUser } from "../../middleware/auth.js";
-import { createPmAttachmentsRouter } from "./attachments.js";
+import { createPmAttachmentsRouter, type PmAttachmentsRouterOptions } from "./attachments.js";
 import { blobPath } from "../../services/pm/pm-attachment-storage.js";
 import { makeAttachmentFake } from "../../__tests__/helpers/pm-attachment-fake.js";
 
@@ -52,7 +52,12 @@ afterEach(() => {
   rmSync(parent, { recursive: true, force: true });
 });
 
-function makeApp(fake: ReturnType<typeof makeAttachmentFake>, user: { id: string; role: string } | null, maxBytes = MAX) {
+function makeApp(
+  fake: ReturnType<typeof makeAttachmentFake>,
+  user: { id: string; role: string } | null,
+  maxBytes = MAX,
+  routerOpts: Partial<PmAttachmentsRouterOptions> = {},
+) {
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -62,7 +67,7 @@ function makeApp(fake: ReturnType<typeof makeAttachmentFake>, user: { id: string
     }
     next();
   });
-  app.use("/api", createPmAttachmentsRouter(fake.prisma, { root, maxBytes }));
+  app.use("/api", createPmAttachmentsRouter(fake.prisma, { root, maxBytes, ...routerOpts }));
   app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
     res.status(500).json({ error: "internal", message: err.message });
   });
@@ -397,6 +402,109 @@ describe("POST /api/pm/work-items/:id/attachments", () => {
         .attach("file", Buffer.from("x"), { filename: "invoice\u202Egnp.txt", contentType: "text/plain" });
       expect(res.status).toBe(201);
       expect(res.body.attachment.fileName).toBe("invoicegnp.txt");
+    });
+  });
+});
+
+describe("limits that protect the box (review: a stolen session must not be able to fill the disk)", () => {
+  const upload = (app: ReturnType<typeof makeApp>) =>
+    request(app).post("/api/pm/work-items/wi-1/attachments").attach("file", Buffer.from("x"), "a.txt");
+
+  describe("the per-IP upload ceiling", () => {
+    it("answers 429 past the ceiling — and the refused request costs no row and no file", async () => {
+      const fake = makeAttachmentFake();
+      const app = makeApp(fake, ALICE, MAX, { uploadsPerMinute: 3 });
+      for (let i = 0; i < 3; i += 1) expect((await upload(app)).status).toBe(201);
+
+      const refused = await upload(app);
+      expect(refused.status).toBe(429);
+      expect(refused.body).toEqual({ error: "Too many requests, slow down" });
+      expect(refused.headers.ratelimit).toBeTruthy(); // the IETF draft-8 header, so a client can back off
+      expect(fake.stats.creates).toBe(3);
+      expect(filesUnder(root)).toHaveLength(3);
+    });
+
+    it("counts per router, so one router's budget never leaks into another's", async () => {
+      const fake = makeAttachmentFake();
+      const first = makeApp(fake, ALICE, MAX, { uploadsPerMinute: 1 });
+      expect((await upload(first)).status).toBe(201);
+      expect((await upload(first)).status).toBe(429);
+      expect((await upload(makeApp(fake, ALICE, MAX, { uploadsPerMinute: 1 }))).status).toBe(201);
+    });
+
+    it("defaults to 30 a minute", async () => {
+      const fake = makeAttachmentFake();
+      const app = makeApp(fake, ALICE);
+      const res = await upload(app);
+      expect(res.status).toBe(201);
+      // draft-8: the policy names the quota, the other header what is left of it
+      expect(res.headers["ratelimit-policy"]).toMatch(/q=30/);
+      expect(res.headers.ratelimit).toMatch(/r=29/);
+    });
+  });
+
+  describe("the free-space floor", () => {
+    // free = bavail * bsize, total = blocks * bsize, floor = max(2 x cap, 5% of total)
+    const space = (bavail: number, bsize: number, blocks: number) => async () => ({ bavail, bsize, blocks });
+
+    it("answers 507 attachment_storage_full BEFORE accepting a byte: no row, no file", async () => {
+      const fake = makeAttachmentFake();
+      const app = makeApp(fake, ALICE, MAX, { statfs: space(10, 4096, 1_000_000) }); // 40 KB free of 4 GB
+      const res = await upload(app);
+      expect(res.status).toBe(507);
+      expect(res.body).toEqual({ error: "attachment_storage_full" });
+      expect(fake.stats.creates).toBe(0);
+      expect(filesUnder(root)).toEqual([]);
+    });
+
+    it("the floor is 5% of the filesystem when that is larger than two files", async () => {
+      // total 4,096,000 B -> 5% = 204,800 B; two files = 40,000 B
+      const at = makeApp(makeAttachmentFake(), ALICE, MAX, { statfs: space(50, 4096, 1000) }); // exactly 204,800 free
+      expect((await upload(at)).status).toBe(201);
+      const under = makeApp(makeAttachmentFake(), ALICE, MAX, { statfs: space(49, 4096, 1000) }); // 200,704 free
+      expect((await upload(under)).status).toBe(507);
+    });
+
+    it("the floor is two maximal files when that is larger than 5% of the filesystem", async () => {
+      // total 100,000 B -> 5% = 5,000 B; two files = 2 x 20,000 = 40,000 B
+      const at = makeApp(makeAttachmentFake(), ALICE, MAX, { statfs: space(40_000, 1, 100_000) });
+      expect((await upload(at)).status).toBe(201);
+      const under = makeApp(makeAttachmentFake(), ALICE, MAX, { statfs: space(39_999, 1, 100_000) });
+      expect((await upload(under)).status).toBe(507);
+    });
+
+    it("asks about the storage root itself", async () => {
+      const asked: string[] = [];
+      const app = makeApp(makeAttachmentFake(), ALICE, MAX, {
+        statfs: async (path) => {
+          asked.push(path);
+          return { bavail: 1_000_000, bsize: 4096, blocks: 1_000_000 };
+        },
+      });
+      await upload(app);
+      expect(asked).toEqual([root]);
+    });
+
+    it("a volume whose space cannot be read does not switch uploads off", async () => {
+      const app = makeApp(makeAttachmentFake(), ALICE, MAX, {
+        statfs: async () => {
+          throw new Error("ENOSYS");
+        },
+      });
+      expect((await upload(app)).status).toBe(201);
+    });
+
+    it("is not asked for a request that is refused earlier (wrong role, not multipart)", async () => {
+      let asked = 0;
+      const statfs = async () => {
+        asked += 1;
+        return { bavail: 1_000_000, bsize: 4096, blocks: 1_000_000 };
+      };
+      const guest = makeApp(makeAttachmentFake(), { id: "u-guest", role: "guest" }, MAX, { statfs });
+      expect((await upload(guest)).status).toBe(403);
+      const json = makeApp(makeAttachmentFake(), ALICE, MAX, { statfs });
+      expect((await request(json).post("/api/pm/work-items/wi-1/attachments").send({})).status).toBe(400);
+      expect(asked).toBe(0);
     });
   });
 });

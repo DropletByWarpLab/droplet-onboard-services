@@ -21,6 +21,13 @@
  * `pm-attachments` volume. The cap is enforced WHILE streaming; `Content-Length`
  * is only a fast refusal in front of it. One file per request, field `file`.
  *
+ * Limits that protect the box, not just the file: uploads are rate-limited per IP
+ * (the global backstop of 1,200 requests a minute would admit ~20 files of 25 MiB
+ * a second), and refused with 507 while the volume is nearly full — a full disk
+ * takes Postgres down with Projects, so the check happens BEFORE a byte is
+ * accepted rather than after ENOSPC. The other three routes carry the standard
+ * per-IP ceiling like the other fs-touching handlers (routes/files.ts).
+ *
  * Download: `Content-Disposition: attachment` and `application/octet-stream` for
  * everything, except a server-verified raster image asked for with `?inline=1`,
  * which is served inline. Every response carries `nosniff` and a `sandbox` CSP
@@ -30,13 +37,14 @@
 import { Router, type Response } from "express";
 import multer, { MulterError } from "multer";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { mkdir, stat, statfs } from "node:fs/promises";
 import { pipeline } from "node:stream";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { config } from "../../config.js";
 import { createLogger } from "../../lib/logger.js";
 import { requireRole } from "../../middleware/auth.js";
+import { createRateLimit, standardRateLimit } from "../../middleware/rate-limit.js";
 import { actorOf } from "./actor.js";
 import {
   abortUpload,
@@ -64,7 +72,46 @@ const ADMIN_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
  *  declared Content-Length beyond cap + this cannot be a file within the cap. */
 const MULTIPART_OVERHEAD_BYTES = 64 * 1024;
 
+/** Uploads per minute per IP. A drawer pastes or drops a handful of files at a
+ *  time; this is a ceiling for a retry loop or a stolen session, not a pace. */
+const UPLOADS_PER_MINUTE = 30;
+
 const uploadQuerySchema = z.object({ comment_id: z.string().min(1).max(64).optional() });
+
+/** What `fs.statfs` answers, as numbers (the router never asks for bigint). */
+export interface VolumeSpace {
+  bavail: number;
+  bsize: number;
+  blocks: number;
+}
+
+/**
+ * Does the volume have room to take an upload? Free space (as an unprivileged
+ * process sees it) must stay above max(2 x the per-file cap, 5% of the
+ * filesystem): two maximal files of headroom for work in flight, and a share of
+ * the disk the database and everything else keep to themselves.
+ *
+ * A volume whose space cannot be read is allowed through, and logged: the
+ * ENOSPC mapping below remains the backstop, and an exotic filesystem must not
+ * be able to switch uploads off.
+ */
+async function volumeHasRoom(
+  root: string,
+  maxBytes: number,
+  space: (path: string) => Promise<VolumeSpace>,
+): Promise<boolean> {
+  try {
+    // First upload on a fresh volume: the root may not exist yet.
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    const fs = await space(root);
+    const free = fs.bavail * fs.bsize;
+    const total = fs.blocks * fs.bsize;
+    return free >= Math.max(2 * maxBytes, 0.05 * total);
+  } catch (err) {
+    logger.warn({ err }, "could not read the attachment volume's free space; allowing the upload");
+    return true;
+  }
+}
 
 /** What the busboy parser says about a body that is not a well-formed multipart
  *  form. Those are the CLIENT's fault (400); anything else out of the parser or
@@ -119,6 +166,10 @@ export interface PmAttachmentsRouterOptions {
   root?: string;
   /** Per-file cap in bytes. Defaults to `config.PM_ATTACHMENT_MAX_BYTES`. */
   maxBytes?: number;
+  /** Uploads per minute per IP. Defaults to 30. */
+  uploadsPerMinute?: number;
+  /** Free-space probe. Defaults to `fs.statfs`; a seam so a test can say "full". */
+  statfs?: (path: string) => Promise<VolumeSpace>;
 }
 
 export function createPmAttachmentsRouter(
@@ -128,9 +179,15 @@ export function createPmAttachmentsRouter(
   const router = Router();
   const root = opts.root ?? config.PM_ATTACHMENTS_DIR;
   const maxBytes = opts.maxBytes ?? config.PM_ATTACHMENT_MAX_BYTES;
+  const space = opts.statfs ?? ((path: string) => statfs(path));
+  // One limiter per router, not per module: the counter is this router's own.
+  const uploadLimit = createRateLimit("pm-attachment-upload", {
+    windowMs: 60_000,
+    limit: opts.uploadsPerMinute ?? UPLOADS_PER_MINUTE,
+  });
 
   // Read — any authenticated role, matching every other PM read.
-  router.get("/pm/work-items/:id/attachments", async (req, res, next) => {
+  router.get("/pm/work-items/:id/attachments", standardRateLimit, async (req, res, next) => {
     try {
       const attachments = await listAttachments(prisma, req.params.id);
       // The cap travels with the list so the dashboard states the real number
@@ -142,7 +199,7 @@ export function createPmAttachmentsRouter(
     }
   });
 
-  router.post("/pm/work-items/:id/attachments", requireRole(...WRITE), async (req, res, next) => {
+  router.post("/pm/work-items/:id/attachments", uploadLimit, requireRole(...WRITE), async (req, res, next) => {
     let ticket: UploadTicket | undefined;
     try {
       const query = uploadQuerySchema.safeParse(req.query);
@@ -160,6 +217,12 @@ export function createPmAttachmentsRouter(
       const declared = Number(req.headers["content-length"]);
       if (Number.isFinite(declared) && declared > maxBytes + MULTIPART_OVERHEAD_BYTES) {
         res.status(413).json({ error: PM_ATTACHMENT_ERRORS.TOO_LARGE, maxBytes });
+        return;
+      }
+
+      // Not while the disk is nearly full: nothing is accepted, no row is made.
+      if (!(await volumeHasRoom(root, maxBytes, space))) {
+        res.status(507).json({ error: PM_ATTACHMENT_ERRORS.STORAGE_FULL });
         return;
       }
 
@@ -203,7 +266,7 @@ export function createPmAttachmentsRouter(
     }
   });
 
-  router.get("/pm/attachments/:id", async (req, res, next) => {
+  router.get("/pm/attachments/:id", standardRateLimit, async (req, res, next) => {
     try {
       const attachment = await getServableAttachment(prisma, req.params.id);
       const path = blobPath(root, attachment.storageKey);
@@ -273,7 +336,7 @@ export function createPmAttachmentsRouter(
     }
   });
 
-  router.delete("/pm/attachments/:id", requireRole(...WRITE), async (req, res, next) => {
+  router.delete("/pm/attachments/:id", standardRateLimit, requireRole(...WRITE), async (req, res, next) => {
     try {
       await deleteAttachment(
         prisma,
