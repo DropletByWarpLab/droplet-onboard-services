@@ -632,3 +632,67 @@ describe("withholdPromptBlocksForOffLan — the one definition", () => {
     });
   });
 });
+
+// ── WARP-3692 — tool-returned images (camera snapshots, show_file) ─────────
+//
+// The same egress rule, applied to the images the model's own tools fetch
+// mid-turn. The route builds one `toolVision` per turn from the turn's
+// off-LAN verdict; these cases pin that wiring end to end through the route
+// (the policy itself is pinned in services/tool-vision.service.test.ts).
+// `inspect` is driven with a real tools-core snapshot descriptor; both cases
+// below return before any network call, so nothing is dialled.
+import * as aiGatewayMock from "../services/ai-gateway.client.js";
+import { cameraSnapshotMedia } from "@droplet/shared-types";
+import type { ToolVision } from "../services/tool-vision.service.js";
+
+describe("POST /api/llm/chat — images a tool returns (WARP-3692)", () => {
+  const snapshot = { camera: "front_door", media: cameraSnapshotMedia("front_door") };
+  const toolVisionOf = (): ToolVision | undefined =>
+    (mockRunAgent.mock.calls[0][1] as { toolVision?: ToolVision }).toolVision;
+
+  it("a CLOUD turn's tool vision withholds the bytes (even though the model can see)", async () => {
+    mockGetModelProvider.mockResolvedValue("anthropic");
+    vi.mocked(aiGatewayMock.getModelCapabilities).mockResolvedValue({ vision: true } as never);
+    const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "claude-opus-4-20250514",
+        provider: "anthropic",
+        messages: [{ role: "user", content: "is anyone at the door?" }],
+      });
+    expect(res.status).toBe(200);
+    const tv = toolVisionOf();
+    expect(tv).toBeDefined();
+    const out = await tv!.inspect("get_camera_snapshot", snapshot);
+    expect(out.blocks).toEqual([]);
+    expect(out.attached).toBe(0);
+    expect(out.notes.join(" ")).toMatch(/withheld/);
+  });
+
+  it("a LOCAL turn on a non-vision model is told so, and fetches nothing", async () => {
+    mockGetModelProvider.mockResolvedValue("local");
+    vi.mocked(aiGatewayMock.getModelCapabilities).mockResolvedValue({ vision: false } as never);
+    const app = buildApp({ id: OWNER_ID, username: "stefan", role: "owner" });
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({
+        model: "llama3:8b",
+        provider: "local",
+        messages: [{ role: "user", content: "is anyone at the door?" }],
+      });
+    expect(res.status).toBe(200);
+    const out = await toolVisionOf()!.inspect("get_camera_snapshot", snapshot);
+    expect(out.blocks).toEqual([]);
+    expect(out.notes.join(" ")).toMatch(/not viewable by the current model/);
+  });
+
+  it("a SERVICE principal (voice, MCP) gets no tool vision at all", async () => {
+    const app = buildApp({ username: "voice", role: "service" });
+    const res = await request(app)
+      .post("/api/llm/chat")
+      .send({ model: "llama3:8b", messages: [{ role: "user", content: "hi" }] });
+    expect(res.status).toBe(200);
+    expect(toolVisionOf()).toBeUndefined();
+  });
+});
