@@ -135,6 +135,7 @@ import { detachRemoteMcp, mcpClient, remoteCallPolicy } from "./services/mcp-cli
 import { stepResultValue, type StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createLlmAccessRouter, exemptLlmAccessInternalCalls } from "./routes/llm-access.js";
+import { createDeveloperRouter } from "./routes/developer.js";
 import { createHardwareRouter } from "./routes/hardware.js";
 import { createHomeRouter } from "./routes/home.js";
 import { createBriefingsRouter } from "./routes/briefings.js";
@@ -828,6 +829,11 @@ export function createApp(
   // Settings page's routes, plus the two ai-gateway-only routes behind `/llm/`
   // (introspect on every request, usage after it). No module claims the prefix.
   app.use("/api", createLlmAccessRouter(prisma));
+  // WARP-3533: Settings -> Developer — personal API tokens, their switch, and
+  // the ICS feed links for "my work" and each project. Deliberately NOT under
+  // /api/pm: an API token is confined to /api/pm + /api/support by the guard
+  // above, so it can never mint a token, a feed link or flip the switch.
+  app.use("/api", createDeveloperRouter(prisma));
 
   // WARP-469: F1 home aggregation. Single round-trip backing
   // FEATURES.md §2.1 (greeting + tiles + timeline + suggestions).

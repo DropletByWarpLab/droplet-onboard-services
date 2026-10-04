@@ -41,6 +41,23 @@ function targetWhere(target: FeedTarget): { scope: FeedTarget["scope"]; projectI
   return { scope: target.scope, projectId: target.scope === "pm_project" ? target.projectId : null };
 }
 
+/**
+ * The path a feed is served at, for the username it is bound to. The caller
+ * appends `?token=` + the freshly minted token (the one and only time it is
+ * shown). Kept beside the routes it names: routes/calendar.ts.
+ */
+export function feedPath(username: string, target: FeedTarget): string {
+  const user = encodeURIComponent(username);
+  switch (target.scope) {
+    case "calendar":
+      return `/api/calendar/publish/${user}.ics`;
+    case "pm_my_work":
+      return `/api/calendar/publish/${user}/my-work.ics`;
+    case "pm_project":
+      return `/api/calendar/publish/${user}/projects/${encodeURIComponent(target.projectId)}.ics`;
+  }
+}
+
 function hashSecret(secret: string): string {
   return crypto.createHash("sha256").update(secret).digest("hex");
 }

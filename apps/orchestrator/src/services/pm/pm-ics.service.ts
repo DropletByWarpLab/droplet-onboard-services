@@ -80,6 +80,16 @@ export function findFeedProject(prisma: PrismaClient, projectId: string) {
   });
 }
 
+/** The projects a person may keep a feed link for, in board order (the Developer page lists them). */
+export function listFeedProjects(prisma: PrismaClient, limit = 200) {
+  return prisma.pmProject.findMany({
+    where: FEED_PROJECT_WHERE,
+    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+    select: { id: true, name: true, identifier: true },
+    take: limit,
+  });
+}
+
 /** Items of `projectId` that have a due date in the window. */
 export function listProjectFeedItems(prisma: PrismaClient, projectId: string, now = new Date()): Promise<PmFeedItem[]> {
   return prisma.pmWorkItem.findMany({
