@@ -16,7 +16,11 @@ import {
   formatDay,
   fromDayNum,
   isDateOnly,
+  isPlausibleScheduleDate,
+  MAX_YEAR,
+  MIN_YEAR,
   parseDateOnly,
+  plausibleScheduleRange,
   startOfMonth,
   startOfWeek,
   todayLocal,
@@ -51,6 +55,43 @@ describe("isDateOnly", () => {
     expect(isDateOnly("2026-10-03T00:00:00.000Z")).toBe(false);
     expect(isDateOnly(null)).toBe(false);
     expect(isDateOnly(20261003)).toBe(false);
+  });
+});
+
+describe("the year is bounded, so a keystroke is never a date", () => {
+  it("accepts 1900 through 2200 and nothing outside", () => {
+    expect([MIN_YEAR, MAX_YEAR]).toEqual([1900, 2200]);
+    expect(isDateOnly("1900-01-01")).toBe(true);
+    expect(isDateOnly("2200-12-31")).toBe(true);
+    expect(isDateOnly("1899-12-31")).toBe(false);
+    expect(isDateOnly("2201-01-01")).toBe(false);
+  });
+
+  it("refuses the intermediate values a segmented date input reports while the year is typed", () => {
+    for (const typed of ["0002-10-20", "0020-10-20", "0202-10-20", "0000-10-20", "9999-12-31"]) {
+      expect(isDateOnly(typed)).toBe(false);
+    }
+    expect(isDateOnly("2026-10-20")).toBe(true);
+  });
+
+  it("an API value in an implausible year reads as no date rather than as a date nobody meant", () => {
+    expect(parseDateOnly("0002-10-20T00:00:00.000Z")).toBeNull();
+    expect(parseDateOnly("0002-10-20")).toBeNull();
+    expect(parseDateOnly("2026-10-20T00:00:00.000Z")).toBe("2026-10-20");
+  });
+
+  it("the plausible span for scheduling is five years back to twenty ahead of today", () => {
+    expect(plausibleScheduleRange("2026-10-03")).toEqual({ min: "2021-01-01", max: "2046-12-31" });
+    // Clamped to the hard bounds at the edges of the calendar.
+    expect(plausibleScheduleRange("1902-06-01").min).toBe("1900-01-01");
+    expect(plausibleScheduleRange("2199-06-01").max).toBe("2200-12-31");
+    expect(isPlausibleScheduleDate("2021-01-01", "2026-10-03")).toBe(true);
+    expect(isPlausibleScheduleDate("2046-12-31", "2026-10-03")).toBe(true);
+    expect(isPlausibleScheduleDate("2020-12-31", "2026-10-03")).toBe(false);
+    expect(isPlausibleScheduleDate("2047-01-01", "2026-10-03")).toBe(false);
+    expect(isPlausibleScheduleDate("0202-10-20", "2026-10-03")).toBe(false);
+    expect(isPlausibleScheduleDate("2026-02-30", "2026-10-03")).toBe(false);
+    expect(isPlausibleScheduleDate("", "2026-10-03")).toBe(false);
   });
 });
 

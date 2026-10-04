@@ -117,13 +117,14 @@ export function CalendarView({ items, domain, readOnly, onOpen, onChanged, onNew
   useLayoutEffect(() => {
     const id = focusAfter.current;
     if (!id || !rootRef.current) return;
+    // One render is all a focus request gets, whether or not the chip is drawn
+    // (it may sit under "+N more"): left pending, it would steal focus on some
+    // later render, such as switching to the week view.
+    focusAfter.current = null;
     const el = [...rootRef.current.querySelectorAll<HTMLElement>('[data-cal-first="true"]')].find(
       (n) => n.dataset.calItem === id,
     );
-    if (el) {
-      el.focus();
-      focusAfter.current = null;
-    }
+    el?.focus();
   });
 
   const title =
@@ -254,6 +255,7 @@ export function CalendarView({ items, domain, readOnly, onOpen, onChanged, onNew
     <UnscheduledPanel
       items={unscheduled}
       readOnly={readOnly}
+      today={today}
       onOpen={onOpen}
       onSchedule={(item, day) => apply(item, dueOn(day))}
       onDragStart={(e, item) => startDrag(e, item, null)}

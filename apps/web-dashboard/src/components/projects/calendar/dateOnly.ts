@@ -25,6 +25,15 @@ export type DateOnly = string;
 export type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6; // 0 = Sunday
 
 const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/**
+ * The years a calendar date may have. A four-digit year is a real date to the
+ * calendar ("0002-10-20" exists), but nobody schedules work there: a segmented
+ * date control reports it while a person is still typing the year, and the API
+ * would store it. Bounding it here keeps a keystroke from becoming a date.
+ */
+export const MIN_YEAR = 1900;
+export const MAX_YEAR = 2200;
 const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] as const;
 
 function isLeapYear(y: number): boolean {
@@ -44,6 +53,8 @@ export function isDateOnly(value: unknown): boolean {
   if (typeof value !== "string") return false;
   const m = DATE_ONLY_RE.exec(value);
   if (!m) return false;
+  const year = Number(m[1]);
+  if (year < MIN_YEAR || year > MAX_YEAR) return false;
   const month = Number(m[2]);
   const day = Number(m[3]);
   if (month < 1 || month > 12 || day < 1) return false;
@@ -89,6 +100,24 @@ function fromDayNumber(n: number): Ymd {
   const d = doy - Math.floor((153 * mp + 2) / 5) + 1;
   const m = mp < 10 ? mp + 3 : mp - 9;
   return { y: yoe + era * 400 + (m <= 2 ? 1 : 0), m, d };
+}
+
+/**
+ * The window a person could plausibly mean when they pick a date to schedule
+ * work on: five years back to twenty ahead of `today`, inside the hard bounds
+ * above. The date control uses it to refuse `0002-10-20` and `0202-10-20`, the
+ * intermediate values a segmented input reports on the way to `2026-10-20`.
+ */
+export function plausibleScheduleRange(today: DateOnly): { min: DateOnly; max: DateOnly } {
+  const year = Number(today.slice(0, 4));
+  const pad = (y: number) => String(Math.min(MAX_YEAR, Math.max(MIN_YEAR, y))).padStart(4, "0");
+  return { min: `${pad(year - 5)}-01-01`, max: `${pad(year + 20)}-12-31` };
+}
+
+export function isPlausibleScheduleDate(value: string, today: DateOnly): boolean {
+  if (!isDateOnly(value)) return false;
+  const { min, max } = plausibleScheduleRange(today);
+  return value >= min && value <= max;
 }
 
 /** Days since 1970-01-01 (negative before). The unit every helper below works in. */

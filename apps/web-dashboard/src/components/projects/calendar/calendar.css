@@ -93,7 +93,9 @@
 .pm-scope .pm-cal-ucard-open:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 38%, transparent); }
 .pm-scope .pm-cal-ukey { flex: none; font-size: 11px; color: var(--text-2); }
 .pm-scope .pm-cal-utitle { font-size: 13px; font-weight: 500; line-height: 1.35; }
-.pm-scope .pm-cal-dateinput { height: 30px; font-size: 12px; }
+.pm-scope .pm-cal-schedule { display: flex; align-items: center; gap: 6px; }
+.pm-scope .pm-cal-dateinput { flex: 1 1 auto; min-width: 0; height: 30px; font-size: 12px; }
+.pm-scope .pm-cal-dateinput[aria-invalid="true"] { border-color: var(--warn); }
 
 /* ── agenda (narrow screens) ────────────────────────────────────────────── */
 .pm-scope .pm-cal-agenda { display: flex; flex-direction: column; gap: 14px; }

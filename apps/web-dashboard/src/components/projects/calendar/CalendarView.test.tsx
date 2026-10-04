@@ -332,15 +332,82 @@ describe("Unscheduled panel", () => {
     expect(container.querySelector(`[data-unscheduled-item="${open.id}"]`)).toBeNull();
   });
 
-  it("the date control on a card is the keyboard / touch route to schedule it", async () => {
+  it("the date control on a card is the keyboard / touch route: pick a day, press Set", async () => {
     const open = item({ name: "No date yet" });
     serverApplies();
     render(<Harness initial={[open]} />);
     const input = screen.getByLabelText("Set due date for INBOX-1");
+    const set = screen.getByRole("button", { name: "Schedule INBOX-1 on the chosen date" });
+    expect(set).toBeDisabled();
+    fireEvent.change(input, { target: { value: "2026-10-20" } });
+    // Choosing a date is a draft: nothing is written until Set.
+    expect(updateItem).not.toHaveBeenCalled();
+    expect(set).toBeEnabled();
     await act(async () => {
-      fireEvent.change(input, { target: { value: "2026-10-20" } });
+      fireEvent.click(set);
     });
+    expect(updateItem).toHaveBeenCalledTimes(1);
     expect(updateItem).toHaveBeenCalledWith(open.id, { due_date: "2026-10-20T00:00:00.000Z" });
+  });
+
+  it("typing a year digit by digit schedules ONCE, on the real year — never on 0002, 0020 or 0202", async () => {
+    // A segmented date input reports a complete date after each digit typed into
+    // its year segment. Saving from `change` wrote the item into year 2.
+    const open = item({ name: "No date yet" });
+    serverApplies();
+    render(<Harness initial={[open]} />);
+    const input = screen.getByLabelText("Set due date for INBOX-1");
+    const set = screen.getByRole("button", { name: "Schedule INBOX-1 on the chosen date" });
+
+    for (const intermediate of ["0002-10-20", "0020-10-20", "0202-10-20"]) {
+      fireEvent.change(input, { target: { value: intermediate } });
+      expect(set).toBeDisabled();
+      expect(input).toHaveAttribute("aria-invalid", "true");
+      // Even if the form is submitted another way (Enter), an implausible year is refused.
+      fireEvent.submit(input.closest("form")!);
+    }
+    expect(updateItem).not.toHaveBeenCalled();
+
+    fireEvent.change(input, { target: { value: "2026-10-20" } });
+    expect(updateItem).not.toHaveBeenCalled();
+    expect(set).toBeEnabled();
+    expect(input).not.toHaveAttribute("aria-invalid");
+    await act(async () => {
+      fireEvent.click(set);
+    });
+    expect(updateItem).toHaveBeenCalledTimes(1);
+    expect(updateItem).toHaveBeenCalledWith(open.id, { due_date: "2026-10-20T00:00:00.000Z" });
+  });
+
+  it("Enter in the field (a form submit) commits a plausible date, and the control limits the picker to a sensible span", async () => {
+    const open = item({ name: "No date yet" });
+    serverApplies();
+    render(<Harness initial={[open]} />);
+    const input = screen.getByLabelText("Set due date for INBOX-1");
+    // Five years back to twenty ahead of today (2026-10-03).
+    expect(input).toHaveAttribute("min", "2021-01-01");
+    expect(input).toHaveAttribute("max", "2046-12-31");
+    fireEvent.change(input, { target: { value: "2026-11-02" } });
+    await act(async () => {
+      fireEvent.submit(input.closest("form")!);
+    });
+    expect(updateItem).toHaveBeenCalledWith(open.id, { due_date: "2026-11-02T00:00:00.000Z" });
+  });
+
+  it("refuses a date far outside the span even when it is a complete, real date", () => {
+    const open = item({ name: "No date yet" });
+    render(<Harness initial={[open]} />);
+    const input = screen.getByLabelText("Set due date for INBOX-1");
+    const set = screen.getByRole("button", { name: "Schedule INBOX-1 on the chosen date" });
+    for (const far of ["1999-10-20", "2020-12-31", "2047-01-01", "2099-10-20"]) {
+      fireEvent.change(input, { target: { value: far } });
+      expect(set).toBeDisabled();
+    }
+    for (const near of ["2021-01-01", "2046-12-31"]) {
+      fireEvent.change(input, { target: { value: near } });
+      expect(set).toBeEnabled();
+    }
+    expect(updateItem).not.toHaveBeenCalled();
   });
 
   it("says so when there is nothing to schedule", () => {
@@ -401,6 +468,27 @@ describe("keyboard nudging", () => {
     });
     // Nov 8 is outside the Nov 1–7 week: the view moves with it.
     await waitFor(() => expect(chipsIn(cell(container, "2026-11-08")).map((c) => c.dataset.calItem)).toEqual([a.id]));
+  });
+
+  it("a nudged chip that lands under '+N more' does not steal focus on a later render", async () => {
+    // Three items already fill the three visible lanes of Oct 7; the fourth, nudged
+    // onto that day from Oct 6, is hidden behind "+1 more". Its focus request must
+    // die with that render, not wait for the week view to draw it.
+    const crowd = [1, 2, 3].map(() => item({ dueDate: wire("2026-10-07") }));
+    const mover = item({ dueDate: wire("2026-10-06") });
+    serverApplies();
+    const { container } = render(<Harness initial={[...crowd, mover]} />);
+    firstChip(container, mover.id).focus();
+    await act(async () => {
+      fireEvent.keyDown(firstChip(container, mover.id), { key: "ArrowRight" });
+    });
+    await waitFor(() => expect(updateItem).toHaveBeenCalledTimes(1));
+    expect(container.querySelector(`[data-cal-first="true"][data-cal-item="${mover.id}"]`)).toBeNull();
+
+    fireEvent.click(within(cell(container, "2026-10-07")).getByRole("button", { name: /1 more on Wednesday, October 7/ }));
+    // The week view now draws it — and focus stays where it was, not on the chip.
+    expect(firstChip(container, mover.id)).toBeTruthy();
+    expect(document.activeElement).not.toBe(firstChip(container, mover.id));
   });
 
   it("ignores modified arrows so browser shortcuts keep working", () => {
