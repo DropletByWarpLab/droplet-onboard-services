@@ -350,6 +350,11 @@ jobs:
               - "**/Dockerfile*"
               - "Dockerfile*"
               - ".hadolint.yaml"
+              # WARP-3670: the digest-pin gate runs in this leg, so a change to
+              # the gate or its self-test must run the leg. Adds one ~1 min leg
+              # to the rare PR that edits those two files, nothing else.
+              - "scripts/check-dockerfile-base-pins.sh"
+              - "tests/check-dockerfile-base-pins.test.sh"
             # WARP-2455: the pre-PR gate's own sources. ship-check.sh is
             # mandated by the preflight skill but was executed by NO
             # workflow — all eight `ship-check` mentions under .github/ were
@@ -517,7 +522,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -1021,7 +1026,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -1254,6 +1259,18 @@ jobs:
           mapfile -t files < <(git ls-files '*Dockerfile*')
           echo "Linting ${#files[@]} Dockerfiles"
           /tmp/hadolint --config .hadolint.yaml --failure-threshold warning "${files[@]}"
+
+      # WARP-3670: why this step exists -- a floating base tag (python:3.12-slim,
+      # node:22-bookworm-slim) lets two builds of one commit ship different base
+      # layers, and the cosign signature covers the resulting image digest, not
+      # how reproducible its contents were. Escape class closed: an unpinned
+      # `FROM` or `COPY --from=<image>` reaching a signed OTA image. A step in
+      # the existing leg, not a new job: same filter, no added minutes.
+      - name: Every Dockerfile image is pinned by digest
+        run: |
+          set -eu
+          bash tests/check-dockerfile-base-pins.test.sh
+          bash scripts/check-dockerfile-base-pins.sh
   # WARP-2455: the pre-PR gate's own gate. scripts/test/ship-check.sh is
   # mandated by the preflight skill, but until this leg NO workflow executed
   # it — all eight `ship-check` mentions under .github/ were comments of the

@@ -183,6 +183,56 @@ security updates are repo settings, enabled one-time by an admin:
     gh api -X PUT repos/DropletByWarpLab/droplet-onboard-services/vulnerability-alerts
     gh api -X PUT repos/DropletByWarpLab/droplet-onboard-services/automated-security-fixes
 
+The security-updates setting is the repository owner's to change; the
+runbook is in shared_brain pull request 37 (not repeated here). The
+remediation deadline by severity is policy, drafted in shared_brain pull
+request 34; this file will link to the adopted text rather than restate it.
+
+### Base-image digest pins and the Python hash-lock runbook (WARP-3670)
+
+Every Dockerfile `FROM` (and the one `COPY --from=<image>`) is pinned
+`tag@sha256:<digest>`. `scripts/check-dockerfile-base-pins.sh` enforces it in
+the `hadolint` leg of `ci.yml` (self-test: `tests/check-dockerfile-base-pins.test.sh`),
+and the `docker` ecosystem in `.github/dependabot.yml` moves the pins in one
+grouped pull request a month. The digests are the multi-architecture index
+digests, so one pin serves amd64 and arm64.
+
+Python service images still install floating requirements (only
+`inference-manager` installs hash-locked requirements today). A resolver is
+needed to produce hashes, so this is run by a person on the test box, never
+hand-written. Per service, in `services/<name>/`:
+
+    git mv requirements.txt requirements.in      # today's specifiers become the input
+    uv pip compile --universal --python-version 3.12 --generate-hashes \
+        -o requirements.txt requirements.in      # hashed, fully pinned output
+
+then change that service's Dockerfile install line to
+`pip install --require-hashes --no-deps -r requirements.txt` in the same commit
+(the Dockerfile already copies `requirements.txt`, so nothing else moves).
+Install uv on the box with `pip install uv==0.4.27` (the version
+`inference-manager` already pins). Keeping the `.in` / hashed `.txt` pair is
+the layout Dependabot's pip ecosystem re-compiles; check that its next pull
+request updates both files.
+
+Plain services (no extra steps): camera-discovery, device-identity-svc,
+doc-render, email-indexer, erp-sql-bridge, file-indexer, fleet-agent,
+oled-display, routing, sandbox, switch, web-fetch. Services that need a
+decision first:
+
+- **ai-gateway**: the `torch --index-url https://download.pytorch.org/whl/cpu`
+  line sets the package index for the whole file. Compile with
+  `--index-url https://pypi.org/simple --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match`
+  and review that torch resolves to the CPU build before committing.
+- **ops-console** and **voice-io**: the Dockerfile installs
+  `requirements-dev.txt` (it begins with `-r requirements.txt`), so lock the dev
+  file the image uses (`requirements-dev.in` to `requirements-dev.txt`).
+  voice-io also runs `pip install --no-deps openwakeword==0.6.0`; give that a
+  one-line input and a hashed lock of its own.
+- **rag-eval**: very large dependency tree; compile on the box and check the
+  image still builds before merging.
+- **inference-manager** already installs a hashed `requirements.lock` and is
+  unchanged.
+
 ## osv nightly
 
 Red-on-findings by design and NOT PR-blocking. The initial baseline
