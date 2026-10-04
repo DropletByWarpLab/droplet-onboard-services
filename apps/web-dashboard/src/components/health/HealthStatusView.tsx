@@ -61,7 +61,7 @@ const SERVICE_LABELS: Record<string, string> = {
   redis: "Cache",
   routing: "Router",
   "ai-gateway": "AI gateway",
-  nextcloud: "Files (Nextcloud)",
+  nextcloud: "File Store",
   display: "Front display",
   "file-indexer": "File search indexing",
   // WARP-1146 — degraded/failed RAID pools surface through the monitor.

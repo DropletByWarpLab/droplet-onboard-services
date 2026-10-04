@@ -18,6 +18,7 @@ import {
 } from "../services/network.service.js";
 import { evaluateNetworkCommand } from "../services/network-safety.service.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
+import { requireNetworkMember } from "./network-status.routes.js";
 
 export interface FirewallDeps {
   prisma: PrismaClient;
@@ -26,7 +27,7 @@ export interface FirewallDeps {
 export function registerFirewallRoutes(router: Router, deps: FirewallDeps): void {
   const { prisma } = deps;
 
-  router.get("/network/firewall", async (_req, res, next) => {
+  router.get("/network/firewall", requireNetworkMember, async (_req, res, next) => {
     try {
       const config = await getFirewallConfig();
       res.json(config);
@@ -37,7 +38,7 @@ export function registerFirewallRoutes(router: Router, deps: FirewallDeps): void
 
   // UPnP / NAT-PMP read — reflects the box's real state. available=false means
   // miniupnpd isn't installed (the secure default for a privacy appliance).
-  router.get("/network/upnp", async (_req, res, next) => {
+  router.get("/network/upnp", requireNetworkMember, async (_req, res, next) => {
     try {
       res.json(await getUpnp());
     } catch (err) {

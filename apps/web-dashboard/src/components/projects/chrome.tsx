@@ -11,7 +11,7 @@ import {
 
 import type { JSX } from "react";
 
-export type ProjectView = "board" | "list" | "cycles" | "modules" | "time";
+export type ProjectView = "board" | "list" | "calendar" | "timeline" | "cycles" | "modules" | "time";
 export type SavedView = "all" | "mine" | "active" | "overdue" | "noassignee";
 
 export function ViewSwitcher({
@@ -24,6 +24,8 @@ export function ViewSwitcher({
   const tabs: Array<[ProjectView, string, string]> = [
     ["board", "Board", "board"],
     ["list", "List", "list"],
+    ["calendar", "Calendar", "cal"],
+    ["timeline", "Timeline", "gantt"],
     ["cycles", "Cycles", "target"],
     ["modules", "Modules", "layers"],
     ["time", "Time", "clock"],

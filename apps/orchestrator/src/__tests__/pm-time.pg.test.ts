@@ -491,6 +491,163 @@ describe.skipIf(!RUN)("PM time tracking — the database's own guarantees (WARP-
     });
   });
 
+  // ── a timer racing the deletion of an item ──────────────────────────────
+
+  describe("a timer racing the deletion of an item (review S3)", () => {
+    /**
+     * Delete `itemId` in a transaction that stays OPEN until `release()`. While it
+     * is open the row is locked, so a concurrent insert that references the item
+     * waits on it - and when the delete then commits, that insert fails its foreign
+     * key: the race, staged deterministically instead of hoped for.
+     */
+    async function holdDeleteOpen(itemId: string) {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let deleted!: () => void;
+      const hasDeleted = new Promise<void>((resolve) => {
+        deleted = resolve;
+      });
+      const done = prisma.$transaction(
+        async (tx) => {
+          await tx.pmWorkItem.delete({ where: { id: itemId } });
+          deleted();
+          await gate;
+        },
+        { timeout: 30_000, maxWait: 30_000 },
+      );
+      await hasDeleted;
+      return { release, done };
+    }
+
+    /** Wait until a backend is blocked on a lock inside an INSERT into `table`. */
+    async function waitUntilInsertIsBlocked(table: "PmWorklog" | "PmTimer"): Promise<void> {
+      const needle = `%INSERT INTO%${table}%`;
+      for (let i = 0; i < 200; i += 1) {
+        const rows = await prisma.$queryRaw<Array<{ n: bigint }>>`
+          SELECT count(*)::bigint AS n FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE ${needle}`;
+        if (Number(rows[0].n) > 0) return;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      throw new Error(`nothing ever blocked inserting into ${table}: the race this test stages did not happen`);
+    }
+
+    it("stopping a timer whose item is deleted at that moment is timer_not_found: the stop rolls back, the timer went with the item", async () => {
+      const a = await item(projectA, "stop-vs-delete");
+      await startTimer(prisma, ana.id, a.id, at("2026-10-04T09:00:00.000Z"));
+
+      const held = await holdDeleteOpen(a.id);
+      const stopping = stopTimer(prisma, ana.id, at("2026-10-04T09:30:00.000Z"));
+      const outcome = stopping.then(
+        () => "stopped",
+        (e: Error) => e.message,
+      );
+      await waitUntilInsertIsBlocked("PmWorklog");
+      held.release();
+      await held.done;
+
+      // Not a raw foreign-key error (a 500): the honest answer is that there is no timer to stop.
+      expect(await outcome).toBe("timer_not_found");
+      expect(await getTimer(prisma, ana.id)).toBeNull();
+      expect(await prisma.pmWorklog.count({ where: { userId: ana.id } })).toBe(0);
+    });
+
+    it("starting a timer while the PREVIOUS timer's item is deleted is a retryable conflict, not 'item not found' for an item that exists", async () => {
+      const old = await item(projectA, "old-item");
+      const next = await item(projectA, "next-item");
+      await startTimer(prisma, ana.id, old.id, at("2026-10-04T09:00:00.000Z"));
+
+      const held = await holdDeleteOpen(old.id);
+      const starting = startTimer(prisma, ana.id, next.id, at("2026-10-04T09:30:00.000Z"));
+      const outcome = starting.then(
+        () => "started",
+        (e: Error) => e.message,
+      );
+      await waitUntilInsertIsBlocked("PmWorklog"); // stopping the old timer writes its worklog
+      held.release();
+      await held.done;
+
+      // The item being started EXISTS; what vanished is the old timer's. Nothing was applied.
+      expect(await outcome).toBe("concurrent_mutation");
+      expect(await getTimer(prisma, ana.id)).toBeNull();
+
+      // ...and trying again simply works: the old timer went with its item, so there is nothing to stop.
+      const again = await startTimer(prisma, ana.id, next.id, at("2026-10-04T09:31:00.000Z"));
+      expect(again.stopped).toBeNull();
+      expect(again.timer.workItemId).toBe(next.id);
+      expect(await prisma.pmWorklog.count({ where: { userId: ana.id } })).toBe(0);
+    });
+
+    it("starting a timer on an item that is deleted at that moment is still work_item_not_found", async () => {
+      const doomed = await item(projectA, "doomed");
+      const held = await holdDeleteOpen(doomed.id);
+      const starting = startTimer(prisma, ana.id, doomed.id);
+      const outcome = starting.then(
+        () => "started",
+        (e: Error) => e.message,
+      );
+      await waitUntilInsertIsBlocked("PmTimer");
+      held.release();
+      await held.done;
+      expect(await outcome).toBe("work_item_not_found");
+      expect(await getTimer(prisma, ana.id)).toBeNull();
+    });
+  });
+
+  // ── whose entry it was ────────────────────────────────────────────────────
+
+  describe("the activity row records whose entry it was when somebody else acted on it (review S7)", () => {
+    const worklogRows = async (workItemId: string) =>
+      (await prisma.pmActivity.findMany({ where: { workItemId }, orderBy: { createdAt: "asc" } })).filter((a) =>
+        a.verb.startsWith("time_log"),
+      );
+
+    it("an owner or admin removing a member's entry is 'worklog:<owner of the entry>'; the member removing their own is plain 'worklog'", async () => {
+      const wi = await item();
+      const hers = await createWorklog(prisma, ana, wi.id, { minutes: 90 });
+      const his = await createWorklog(prisma, ben, wi.id, { minutes: 20 });
+
+      await deleteWorklog(prisma, boss, hers.id);
+      await deleteWorklog(prisma, ben, his.id);
+
+      const removed = (await worklogRows(wi.id)).filter((a) => a.verb === "time_log_removed");
+      expect(removed).toHaveLength(2);
+      expect(removed[0]).toMatchObject({ actorId: boss.id, field: `worklog:${ana.id}`, oldValue: "90" });
+      expect(removed[1]).toMatchObject({ actorId: ben.id, field: "worklog", oldValue: "20" });
+    });
+
+    it("an owner or admin editing a member's entry says whose it was; a member editing their own does not need to", async () => {
+      const wi = await item();
+      const hers = await createWorklog(prisma, ana, wi.id, { minutes: 30 });
+
+      await updateWorklog(prisma, boss, hers.id, { minutes: 40 });
+      await updateWorklog(prisma, ana, hers.id, { minutes: 50 });
+
+      const updated = (await worklogRows(wi.id)).filter((a) => a.verb === "time_log_updated");
+      expect(updated).toHaveLength(2);
+      expect(updated[0]).toMatchObject({ actorId: boss.id, field: `worklog:${ana.id}`, oldValue: "30", newValue: "40" });
+      expect(updated[1]).toMatchObject({ actorId: ana.id, field: "worklog", oldValue: "40", newValue: "50" });
+    });
+
+    it("logging time on someone's behalf says for whom; logging your own, by hand or by stopping a timer, does not", async () => {
+      const wi = await item();
+      const sam = await prisma.user.create({ data: { username: "warp3526-sam", displayName: "Sam Test" } });
+      await createWorklog(prisma, boss, wi.id, { minutes: 45, userId: sam.id }, NOW);
+      await createWorklog(prisma, ana, wi.id, { minutes: 15 });
+      await startTimer(prisma, ben.id, wi.id, at("2026-10-04T09:00:00.000Z"));
+      await stopTimer(prisma, ben.id, at("2026-10-04T09:10:00.000Z"));
+
+      const logged = (await worklogRows(wi.id)).filter((a) => a.verb === "time_logged");
+      expect(logged.map((a) => [a.actorId, a.field, a.newValue])).toEqual([
+        [boss.id, `worklog:${sam.id}`, "45"],
+        [ana.id, "worklog", "15"],
+        [ben.id, "worklog", "10"],
+      ]);
+    });
+  });
+
   // ── timesheet ────────────────────────────────────────────────────────────
 
   describe("getTimesheet", () => {
@@ -537,6 +694,14 @@ describe.skipIf(!RUN)("PM time tracking — the database's own guarantees (WARP-
       await expect(getTimesheet(prisma, { userId: ana.id, weekStart: "2026-02-30" })).rejects.toThrow(
         "invalid_week_start",
       );
+    });
+
+    it("refuses a year no calendar means (review S4): 9999 used to crash the converter, 0001 was quietly read as 1901", async () => {
+      for (const weekStart of ["9999-12-27", "9999-12-31", "0001-01-01", "0099-12-31"]) {
+        await expect(getTimesheet(prisma, { userId: ana.id, weekStart }), weekStart).rejects.toThrow(
+          "invalid_week_start",
+        );
+      }
     });
   });
 
@@ -658,6 +823,16 @@ describe.skipIf(!RUN)("PM time tracking — the database's own guarantees (WARP-
     it("refuses a range that runs backwards or is longer than a year and a day", async () => {
       await expect(getTimeReport(prisma, { from: "2026-10-05", to: "2026-10-04" })).rejects.toThrow("invalid_range");
       await expect(getTimeReport(prisma, { from: "2025-01-01", to: "2026-01-02" })).rejects.toThrow("invalid_range");
+    });
+
+    it("refuses a year no calendar means (review S4), whichever end of the range it is on", async () => {
+      for (const [from, to] of [
+        ["9999-12-30", "9999-12-31"],
+        ["0001-01-01", "0001-01-02"],
+        ["2026-01-01", "9999-12-31"],
+      ]) {
+        await expect(getTimeReport(prisma, { from, to }), `${from}..${to}`).rejects.toThrow("invalid_range");
+      }
     });
   });
 });

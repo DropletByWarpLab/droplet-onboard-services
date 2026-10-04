@@ -13,6 +13,7 @@ import {
   mondayOf,
   parseDuration,
   startedAtForDay,
+  validReportRange,
   weekdayShort,
   ymdInZone,
 } from "./format";
@@ -115,6 +116,27 @@ describe("calendar dates (YYYY-MM-DD)", () => {
   it("labels a week, with the year once unless it spans two", () => {
     expect(formatWeekRange("2026-09-28")).toBe("Sep 28 – Oct 4, 2026");
     expect(formatWeekRange("2026-12-28")).toBe("Dec 28, 2026 – Jan 3, 2027");
+  });
+});
+
+describe("report range", () => {
+  it("counts inclusive calendar days across leap days, independently of DST", () => {
+    expect(validReportRange("2024-01-01", "2024-12-31")).toBe(true);
+    expect(validReportRange("2024-01-01", "2025-01-01")).toBe(false);
+    expect(validReportRange("2026-03-08", "2026-03-08")).toBe(true);
+  });
+
+  it.each([
+    ["", "2026-10-04"], ["2026-10-04", ""],
+    ["2026-10-05", "2026-10-04"], ["2026-02-30", "2026-03-01"],
+    ["1999-12-31", "2000-01-01"], ["2100-12-31", "2101-01-01"],
+  ])("refuses invalid or API-out-of-bounds dates %s to %s", (from, to) => {
+    expect(validReportRange(from, to)).toBe(false);
+  });
+
+  it("allows the API year boundaries", () => {
+    expect(validReportRange("2000-01-01", "2000-01-01")).toBe(true);
+    expect(validReportRange("2100-12-31", "2100-12-31")).toBe(true);
   });
 });
 

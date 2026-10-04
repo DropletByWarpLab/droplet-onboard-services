@@ -14,6 +14,7 @@ come in subsequent commits.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import os
 import threading
@@ -21,7 +22,8 @@ import time
 from typing import Literal, Optional
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Response
+from starlette.requests import HTTPConnection
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -204,7 +206,43 @@ VOICE_FLATLINE_DBFS = float(
     or str(DEFAULT_FLATLINE_DBFS),
 )
 
-app = FastAPI(title="voice-io", version="0.1.0")
+# WARP-3625: inbound bearer, shared with the orchestrator's voice proxy
+# (VOICE_IO_SERVICE_TOKEN). Read at import; require_bearer looks the module
+# global up at call time so tests can monkeypatch it (web-fetch precedent).
+VOICE_IO_SERVICE_TOKEN = os.environ.get("VOICE_IO_SERVICE_TOKEN", "").strip()
+
+# /health stays reachable without a token (Docker healthcheck, ops-console).
+AUTH_EXEMPT_PATHS = frozenset({"/health"})
+
+
+def require_bearer(conn: HTTPConnection) -> None:
+    """Reject requests without a matching `Authorization: Bearer <token>`.
+
+    Fails CLOSED when no token is configured: an unset VOICE_IO_SERVICE_TOKEN
+    yields 503 on every non-/health route rather than leaving the box speaker,
+    the listening switch and the voiceprints open to any container on the
+    compose network. Same posture as web-fetch / erp-sql-bridge, deliberately
+    WITHOUT a dev escape hatch.
+    """
+    if conn.url.path in AUTH_EXEMPT_PATHS:
+        return
+    if not VOICE_IO_SERVICE_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="voice-io auth is not configured (VOICE_IO_SERVICE_TOKEN unset)",
+        )
+    header = conn.headers.get("authorization", "")
+    scheme, _, token = header.partition(" ")
+    # compare_digest raises on non-ASCII str; encode so a bad header is a 401.
+    if scheme.lower() != "bearer" or not hmac.compare_digest(
+        token.strip().encode("utf-8"), VOICE_IO_SERVICE_TOKEN.encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+app = FastAPI(
+    title="voice-io", version="0.1.0", dependencies=[Depends(require_bearer)]
+)
 
 # WARP-1055 — default capture window for /audio/measure when the
 # wizard doesn't specify one. Long enough for a stable noise-floor

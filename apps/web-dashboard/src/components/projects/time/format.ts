@@ -9,12 +9,27 @@
 // is consulted are `ymdInZone` (an `Intl` formatter with an explicit zone) and
 // `startedAtForDay` (which means local time and says so).
 
+import { diffDays, isDateOnly } from "../calendar/dateOnly";
+
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 /** The per-entry limits — the same numbers the orchestrator enforces. */
 export const MIN_ENTRY_MINUTES = 1;
 export const MAX_ENTRY_MINUTES = 24 * 60;
+
+/** Report limits — the same calendar-year bounds and inclusive day cap as the API. */
+export const MIN_TIME_DATE = "2000-01-01";
+export const MAX_TIME_DATE = "2100-12-31";
+export const MAX_REPORT_DAYS = 366;
+
+export function validReportRange(from: string, to: string): boolean {
+  return (
+    isDateOnly(from) && isDateOnly(to) &&
+    from >= MIN_TIME_DATE && to <= MAX_TIME_DATE &&
+    from <= to && diffDays(from, to) + 1 <= MAX_REPORT_DAYS
+  );
+}
 
 // ── Durations ───────────────────────────────────────────────────────────────
 

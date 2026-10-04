@@ -242,6 +242,20 @@ function assertNotFuture(startedAt: Date, now: Date): void {
   }
 }
 
+/**
+ * What `PmActivity.field` says about a worklog row.
+ *
+ * `worklog` is a person acting on their OWN time. `worklog:<userId>` is somebody
+ * acting on ANOTHER person's entry (an owner or admin logging, correcting or
+ * removing it), with the entry's owner after the colon. Without it, "Sam removed
+ * 90m" and "Sam removed Mia's 90m" are the same row, and these are hours that may
+ * end up on a payslip or an invoice. The row's `actorId` stays the person who did
+ * it. WS-2's timeline decides the wording; this is the one encoding it reads.
+ */
+function worklogField(actorId: string, entryUserId: string): string {
+  return actorId === entryUserId ? "worklog" : `worklog:${entryUserId}`;
+}
+
 /** An entry is its writer's to change; an owner or admin may change anybody's.
  *  `userId` is immutable, so this read-then-write cannot be raced into a
  *  different answer between the check and the write. */
@@ -334,7 +348,7 @@ export async function createWorklog(
         workItemId,
         actorId: actor.id,
         verb: "time_logged",
-        field: "worklog",
+        field: worklogField(actor.id, userId),
         newValue: String(row.minutes),
       });
       return mapWorklog(row);
@@ -385,7 +399,7 @@ export async function updateWorklog(
         workItemId: row.workItemId,
         actorId: actor.id,
         verb: "time_log_updated",
-        field: "worklog",
+        field: worklogField(actor.id, existing.userId),
         oldValue: String(existing.minutes),
         newValue: String(row.minutes),
       });
@@ -408,7 +422,7 @@ export async function deleteWorklog(prisma: PrismaClient, actor: TimeActor, id: 
         workItemId: existing.workItemId,
         actorId: actor.id,
         verb: "time_log_removed",
-        field: "worklog",
+        field: worklogField(actor.id, existing.userId),
         oldValue: String(existing.minutes),
       });
     }, READ_COMMITTED_TX);
@@ -458,6 +472,19 @@ async function stopRunningTimer(
   return { worklog: mapWorklog(row), capped };
 }
 
+/**
+ * Is this foreign-key violation the one on the worklog being written?
+ * `meta.field_name` names the constraint (`PmWorklog_workItemId_fkey (index)`),
+ * the same discriminator pm.service.ts uses for the project's company FK. Pinned
+ * against a real Prisma error in pm-time.pg.test.ts, so a client upgrade that
+ * changes the shape fails there instead of quietly changing a status code.
+ */
+function isWorklogFkViolation(err: unknown): boolean {
+  if (!isPrismaCode(err, "P2003")) return false;
+  const field = (err as { meta?: { field_name?: unknown } }).meta?.field_name;
+  return typeof field === "string" && field.startsWith("PmWorklog_workItemId_fkey");
+}
+
 /** The caller's running timer, with the item it is on, or null. */
 export async function getTimer(prisma: PrismaClient, userId: string): Promise<ApiTimer | null> {
   const row = await prisma.pmTimer.findUnique({
@@ -498,8 +525,14 @@ export async function startTimer(
   } catch (err) {
     // A writer that skipped the lock hit the primary key: nothing was applied.
     if (isPrismaCode(err, "P2002")) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
-    // The item was deleted between the read and the insert.
-    if (isPrismaCode(err, "P2003")) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+    // An item was deleted under the request, and two different ones can be. If it
+    // is the OLD timer's (stopping it writes a worklog whose foreign key fails),
+    // the item being started exists and the whole start rolled back — a conflict
+    // to retry, and the retry finds no timer to stop. Only if it is the item being
+    // started is it "not found".
+    if (isPrismaCode(err, "P2003")) {
+      throw new Error(isWorklogFkViolation(err) ? PM_ERRORS.CONCURRENT_MUTATION : PM_ERRORS.WORK_ITEM_NOT_FOUND);
+    }
     throw err;
   }
 }
@@ -510,12 +543,21 @@ export async function stopTimer(
   userId: string,
   now: Date = new Date(),
 ): Promise<{ worklog: ApiWorklog; capped: boolean }> {
-  return prisma.$transaction(async (tx) => {
-    await lockTimerOf(tx, userId);
-    const running = await tx.pmTimer.findUnique({ where: { userId } });
-    if (!running) throw new Error(PM_TIME_ERRORS.TIMER_NOT_FOUND);
-    return stopRunningTimer(tx, running, now);
-  }, READ_COMMITTED_TX);
+  try {
+    return await prisma.$transaction(async (tx) => {
+      await lockTimerOf(tx, userId);
+      const running = await tx.pmTimer.findUnique({ where: { userId } });
+      if (!running) throw new Error(PM_TIME_ERRORS.TIMER_NOT_FOUND);
+      return stopRunningTimer(tx, running, now);
+    }, READ_COMMITTED_TX);
+  } catch (err) {
+    // The timer's item was deleted between reading the timer and writing its
+    // worklog: the worklog's foreign key fails and the stop rolls back. The timer
+    // went with the item (the cascade), so there is no timer to stop — a 404, not
+    // the raw constraint error a 500 would carry.
+    if (isPrismaCode(err, "P2003")) throw new Error(PM_TIME_ERRORS.TIMER_NOT_FOUND);
+    throw err;
+  }
 }
 
 // ── Timesheet ───────────────────────────────────────────────────────────────

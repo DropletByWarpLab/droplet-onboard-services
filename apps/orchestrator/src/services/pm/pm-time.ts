@@ -50,6 +50,16 @@ export const MAX_REPORT_DAYS = 366;
 /** How far past "now" a start time may be: clock skew between a browser and the
  *  box, not a licence to log tomorrow. */
 export const FUTURE_START_SKEW_MS = 5 * 60_000;
+/**
+ * The years a caller may name in a week or a report range. `YYYY-MM-DD` with four
+ * digits is all the route's schema checks, and two things go wrong outside any
+ * sane window: year 9999 overflows the zone converter's four-digit year (a bare
+ * RangeError, a 500), and years 0001 to 0099 are read by `Date.UTC` as 1901 to
+ * 1999 — an empty week where an error belongs. Applied to what the CALLER sends,
+ * not to the box's own clock: a default week is whatever "now" is.
+ */
+export const MIN_TIME_YEAR = 2000;
+export const MAX_TIME_YEAR = 2100;
 
 export const PM_TIME_PARAM_ERRORS = {
   INVALID_TIMEZONE: "invalid_timezone",
@@ -90,6 +100,12 @@ export function resolveZone(tz: string | undefined): string {
   return canonicalZone(tz);
 }
 
+/** True when a calendar date's year is one a caller may ask about. */
+function inTimeYears(ymd: string): boolean {
+  const year = Number(ymd.slice(0, 4));
+  return year >= MIN_TIME_YEAR && year <= MAX_TIME_YEAR;
+}
+
 /** The local calendar date (`YYYY-MM-DD`) of an instant in `tz`. */
 export function localDay(instant: Date, tz: string): string {
   return localPartsOf(instant, tz).ymd;
@@ -113,7 +129,9 @@ export interface TimeWeek {
  */
 export function resolveWeek(weekStart: string | undefined, tz: string, now: Date): TimeWeek {
   const anchor = weekStart ?? localDay(now, tz);
-  if (!isCalendarYmd(anchor)) throw new Error(PM_TIME_PARAM_ERRORS.INVALID_WEEK_START);
+  if (!isCalendarYmd(anchor) || (weekStart !== undefined && !inTimeYears(weekStart))) {
+    throw new Error(PM_TIME_PARAM_ERRORS.INVALID_WEEK_START);
+  }
   const monday = ymdAddDays(anchor, -(isoWeekdayOf(anchor) - 1));
   const days = Array.from({ length: 7 }, (_, i) => ymdAddDays(monday, i));
   return {
@@ -142,7 +160,13 @@ export interface TimeRange {
 
 /** An inclusive calendar range in `tz`: whole local days, at most a year and a day. */
 export function resolveRange(fromYmd: string, toYmd: string, tz: string): TimeRange {
-  if (!isCalendarYmd(fromYmd) || !isCalendarYmd(toYmd) || toYmd < fromYmd) {
+  if (
+    !isCalendarYmd(fromYmd) ||
+    !isCalendarYmd(toYmd) ||
+    !inTimeYears(fromYmd) ||
+    !inTimeYears(toYmd) ||
+    toYmd < fromYmd
+  ) {
     throw new Error(PM_TIME_PARAM_ERRORS.INVALID_RANGE);
   }
   // `YYYY-MM-DD` sorts as dates do, so `toYmd < fromYmd` above is a date

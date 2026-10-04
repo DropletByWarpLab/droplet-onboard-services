@@ -14,7 +14,7 @@ import { useToast } from "@/components/Toast";
 import { PmIcon } from "../icons";
 import { EmptyBlock, Skel, usePerson } from "../bits";
 import type { PmProject } from "../types";
-import { usePeople } from "../usePm";
+import { PmRequestError, usePeople, useProjects } from "../usePm";
 import { useTimeAccess } from "./access";
 import { timeErrorCopy } from "./copy";
 import {
@@ -23,7 +23,11 @@ import {
   fmtYmd,
   formatMinutes,
   formatWeekRange,
+  MAX_REPORT_DAYS,
+  MAX_TIME_DATE,
+  MIN_TIME_DATE,
   mondayOf,
+  validReportRange,
   weekdayShort,
   ymdInZone,
 } from "./format";
@@ -56,13 +60,16 @@ function TableSkeleton(): JSX.Element {
   );
 }
 
-function LoadError({ onRetry }: { onRetry: () => void }): JSX.Element {
+function LoadError({ error, onRetry }: { error: unknown; onRetry: () => void }): JSX.Element {
+  const message = error instanceof PmRequestError && error.status >= 400 && error.status < 500
+    ? timeErrorCopy(error)
+    : LOAD_ERROR;
   return (
     <div className="pm-surface">
       <EmptyBlock
         icon="alert"
         tone="error"
-        heading={LOAD_ERROR}
+        heading={message}
         cta={
           <button className="pm-btn ghost" type="button" onClick={onRetry}>
             Try again
@@ -151,7 +158,7 @@ function TimesheetTab(): JSX.Element {
       {isLoading && !timesheet ? (
         <TableSkeleton />
       ) : error && !timesheet ? (
-        <LoadError onRetry={() => void mutate()} />
+        <LoadError error={error} onRetry={() => void mutate()} />
       ) : timesheet && timesheet.rows.length === 0 ? (
         <div className="pm-surface">
           <EmptyBlock
@@ -233,6 +240,7 @@ function firstOfMonth(ymd: string): string {
 
 function ReportTab({ projects, projectId }: { projects: PmProject[] | undefined; projectId: string | null }): JSX.Element {
   const person = usePerson();
+  const { projects: reportProjects } = useProjects(true);
   const { toast } = useToast();
   const actions = useTimeActions();
   const tz = browserTimeZone();
@@ -243,7 +251,7 @@ function ReportTab({ projects, projectId }: { projects: PmProject[] | undefined;
   const [groupBy, setGroupBy] = useState<ReportGroupBy>("user");
   const [exporting, setExporting] = useState(false);
 
-  const valid = from !== "" && to !== "" && from <= to;
+  const valid = validReportRange(from, to);
   const query = useMemo(
     () => (valid ? { projectId: project, from, to, groupBy, tz } : null),
     [valid, project, from, to, groupBy, tz],
@@ -293,9 +301,9 @@ function ReportTab({ projects, projectId }: { projects: PmProject[] | undefined;
             onChange={(e) => setProject(e.target.value === "" ? null : e.target.value)}
           >
             <option value="">All projects</option>
-            {(projects ?? []).map((p) => (
+            {(reportProjects ?? projects ?? []).map((p) => (
               <option key={p.id} value={p.id}>
-                {p.name}
+                {p.name}{p.archived ? " (archived)" : ""}
               </option>
             ))}
           </select>
@@ -305,7 +313,8 @@ function ReportTab({ projects, projectId }: { projects: PmProject[] | undefined;
             type="date"
             aria-label="From"
             value={from}
-            max={to || undefined}
+            min={MIN_TIME_DATE}
+            max={to && to < MAX_TIME_DATE ? to : MAX_TIME_DATE}
             onChange={(e) => setFrom(e.target.value)}
           />
           <input
@@ -314,7 +323,8 @@ function ReportTab({ projects, projectId }: { projects: PmProject[] | undefined;
             type="date"
             aria-label="To"
             value={to}
-            min={from || undefined}
+            min={from && from > MIN_TIME_DATE ? from : MIN_TIME_DATE}
+            max={MAX_TIME_DATE}
             onChange={(e) => setTo(e.target.value)}
           />
           <span className="pm-pills" role="group" aria-label="Group by">
@@ -335,7 +345,7 @@ function ReportTab({ projects, projectId }: { projects: PmProject[] | undefined;
           className="pm-btn sm"
           type="button"
           onClick={exportCsv}
-          disabled={!report || report.rows.length === 0 || exporting}
+          disabled={!valid || !report || report.rows.length === 0 || exporting}
         >
           <Download size={13} aria-hidden />
           {exporting ? "Exporting…" : "Export CSV"}
@@ -346,14 +356,14 @@ function ReportTab({ projects, projectId }: { projects: PmProject[] | undefined;
         <div className="pm-surface">
           <EmptyBlock
             icon="cal"
-            heading="Pick a start date no later than the end date."
-            body="The report covers whole days, up to a year."
+            heading="Pick a valid date range."
+            body={`Choose dates from 2000 through 2100, with the start no later than the end and at most ${MAX_REPORT_DAYS} days.`}
           />
         </div>
       ) : isLoading && !report ? (
         <TableSkeleton />
       ) : error && !report ? (
-        <LoadError onRetry={() => void mutate()} />
+        <LoadError error={error} onRetry={() => void mutate()} />
       ) : report && report.rows.length === 0 ? (
         <div className="pm-surface">
           <EmptyBlock

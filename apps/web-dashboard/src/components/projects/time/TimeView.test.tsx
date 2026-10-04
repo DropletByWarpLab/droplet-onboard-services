@@ -94,7 +94,7 @@ const lastQuery = (prefix: string): URLSearchParams => {
 
 beforeEach(() => {
   toast.mockReset();
-  fake = createFakeTimeApi({ timesheet: SHEET, report: REPORT });
+  fake = createFakeTimeApi({ timesheet: SHEET, report: REPORT, projects: PROJECTS });
   api.handler = fake.handler;
 });
 
@@ -282,9 +282,47 @@ describe("TimeView — report", () => {
     const before = gets("/api/pm/time/report").length;
     fireEvent.change(screen.getByLabelText("From"), { target: { value: addDays(today(), 3) } });
     fireEvent.change(screen.getByLabelText("To"), { target: { value: today() } });
-    expect(await screen.findByText("Pick a start date no later than the end date.")).toBeInTheDocument();
+    expect(await screen.findByText("Pick a valid date range.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Export CSV" })).toBeDisabled();
     expect(gets("/api/pm/time/report").length).toBe(before);
+  });
+
+  it("allows 366 calendar days, then blocks a 367-day range without a request or export", async () => {
+    await openReport();
+    // Clear first so neither intermediate edit makes an unrelated request.
+    fireEvent.change(screen.getByLabelText("To"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2024-01-01" } });
+    fireEvent.change(screen.getByLabelText("To"), { target: { value: "2024-12-31" } });
+    await waitFor(() => expect(lastQuery("/api/pm/time/report").get("to")).toBe("2024-12-31"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Export CSV" })).not.toBeDisabled());
+    const before = gets("/api/pm/time/report").length;
+    fireEvent.change(screen.getByLabelText("To"), { target: { value: "2025-01-01" } });
+    expect(await screen.findByText("Pick a valid date range.")).toBeInTheDocument();
+    expect(screen.getByText(/at most 366 days/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export CSV" })).toBeDisabled();
+    expect(gets("/api/pm/time/report")).toHaveLength(before);
+    expect(screen.queryByText(/appliance connection/)).toBeNull();
+  });
+
+  it("includes archived projects in historical reports and requests the selected project", async () => {
+    fake.state.projects = [...PROJECTS, { ...PROJECTS[0], id: "p-old", name: "Finished", archived: true }];
+    await openReport();
+    expect(await screen.findByRole("option", { name: "Finished (archived)" })).toBeInTheDocument();
+    expect(lastQuery("/api/pm/projects").get("archived")).toBe("1");
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: "p-old" } });
+    await waitFor(() => expect(lastQuery("/api/pm/time/report").get("projectId")).toBe("p-old"));
+  });
+
+  it.each([
+    ["invalid_range", "That date range isn't valid."],
+    ["invalid_timezone", "That time zone isn't one this Droplet knows."],
+  ])("explains a server %s refusal without calling it a connection failure", async (code, copy) => {
+    fake.state.failures = [{ match: /\/time\/report$/, method: "GET", status: 400, error: code }];
+    renderView();
+    fireEvent.click(await screen.findByRole("tab", { name: /Report/ }));
+    expect(await screen.findByText(new RegExp(copy))).toBeInTheDocument();
+    expect(screen.queryByText(/appliance connection/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Export CSV" })).toBeDisabled();
   });
 
   it("says plainly when the range holds no time, and offers nothing to export", async () => {

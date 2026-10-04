@@ -3286,6 +3286,10 @@ model ScimGroup {
   // The local Role this group grants. Explicit column (not recomputed from
   // displayName on every read) so an operator override survives re-sync.
   mappedRole  Role     @default(family)
+  // WARP-3631: local User.ids in the group as of the last push, so a person
+  // dropped from a push can be demoted (the group's grant is recomputed from
+  // the groups they remain in).
+  memberUserIds String[] @default([])
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -6032,6 +6036,11 @@ enum PmActivityVerb {
   /// WARP-3526 (ADR-069 WS-10): a worklog was written — by hand, or by stopping
   /// a timer. `newValue` is the minutes. A timer START writes no row: a running
   /// timer is one person's transient state, not a change to the item.
+  ///
+  /// The three time verbs share one `field` encoding: `worklog` when a person
+  /// acts on their own entry, `worklog:<userId>` when an owner or admin acts on
+  /// SOMEBODY ELSE'S (the entry's owner after the colon; `actorId` stays who did
+  /// it). That is what tells "Sam removed 90m" from "Sam removed Mia's 90m".
   time_logged
   /// WARP-3526: a worklog's minutes, start or note changed. `oldValue` /
   /// `newValue` are the minutes before and after.

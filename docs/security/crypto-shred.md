@@ -4,8 +4,8 @@ Two granularities share the destroy-the-key principle:
 
 - **Per-document (WARP-242):** deleting a brain document (chat attachment)
   destroys its per-document DEK alongside its rows and files, making the
-  document's chunk ciphertext unrecoverable — including from off-box restic
-  snapshots, because the wrapping doc-KEK keyfile
+  document's chunk ciphertext unrecoverable — including from restic
+  snapshots (and from any copy of them taken off the box), because the wrapping doc-KEK keyfile
   (`data/secrets/doc-kek.key`) is excluded from the backup set. Full design,
   key hierarchy, and the on-box-restore caveat:
   `docs/security/at-rest-encryption.md` §"Per-document chunk encryption".
@@ -18,7 +18,9 @@ Two granularities share the destroy-the-key principle:
 `scripts/host/droplet-crypto-shred.sh` decommissions an appliance by destroying
 the **keys**, not the ciphertext. This is fast (seconds, not a multi-pass wipe
 of TBs) and mathematically complete: with every unlock key gone, the data LV,
-every enrolled USB drive, and every off-box backup are ciphertext forever.
+every enrolled USB drive, and every restic backup are ciphertext forever. (The
+restic repository defaults to a local path on the same box; a repository
+configured off-device is covered by the same key loss.)
 
 > DESTRUCTIVE AND IRREVERSIBLE. Double-gated: `--yes-destroy-everything` **and**
 > a typed `CONFIRM` prompt.
@@ -35,7 +37,7 @@ The key-destruction chain — each link orphans a class of data:
 | 4 | `scripts/factory-reset.sh` | The app-level purge (docker volumes, `data/secrets` dir). Since WARP-2629 it also overwrite-then-unlinks the live `/data` secrets itself — see below. |
 
 Because the restic repository password is `HKDF(DEVICE_SECRET_KEY)` (WARP-254),
-shredding `.env` in step 3 orphans the off-box backups at the same instant it
+shredding `.env` in step 3 orphans the backups, wherever the repository lives, at the same instant it
 orphans the on-disk keys — there is no window where the backup outlives the box.
 
 ## What a plain `factory-reset.sh` guarantees on its own (WARP-2629)

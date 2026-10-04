@@ -166,6 +166,10 @@ function EntryForm({
       durationRef.current?.focus();
       return;
     }
+    if (!date) {
+      setError("Pick a date.");
+      return;
+    }
     if (date > today) {
       setError("Time can't start in the future.");
       return;

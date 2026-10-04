@@ -76,6 +76,7 @@ export function useTimesheet(userId: string | null, weekStart: string, tz: strin
   const { data, error, isLoading, mutate } = useSWR(
     userId ? timesheetUrl(userId, weekStart, tz) : null,
     (u: string) => getJson<{ timesheet: PmTimesheet }>(u),
+    { shouldRetryOnError: retryTimeRead },
   );
   return { timesheet: data?.timesheet, error, isLoading, mutate };
 }
@@ -91,8 +92,14 @@ export function useTimeReport(q: ReportQuery | null) {
   const { data, error, isLoading, mutate } = useSWR(
     q ? reportUrl(q) : null,
     (u: string) => getJson<{ report: PmTimeReport }>(u),
+    { shouldRetryOnError: retryTimeRead },
   );
   return { report: data?.report, error, isLoading, mutate };
+}
+
+// Retrying an unchanged invalid range or time zone cannot make it valid.
+function retryTimeRead(error: unknown): boolean {
+  return !(error instanceof PmRequestError && error.status >= 400 && error.status < 500);
 }
 
 /** A clock that ticks every `intervalMs`, or stands still when it is null. */

@@ -16,6 +16,8 @@ import { describe, it, expect } from "vitest";
 import {
   FUTURE_START_SKEW_MS,
   MAX_REPORT_DAYS,
+  MAX_TIME_YEAR,
+  MIN_TIME_YEAR,
   WORKLOG_MAX_MINUTES,
   WORKLOG_MIN_MINUTES,
   dayIndex,
@@ -187,6 +189,52 @@ describe("resolveRange — an inclusive calendar range in the zone", () => {
     expect(MAX_REPORT_DAYS).toBe(366);
     expect(() => resolveRange("2025-01-01", "2026-01-02", "UTC")).toThrow("invalid_range"); // 367 days
     expect(resolveRange("2025-01-01", "2026-01-01", "UTC").days).toBe(366);
+  });
+});
+
+describe("the years a week or a range may be asked about (WARP-3526 review S4)", () => {
+  // `YYYY-MM-DD` with four digits is all the route's schema checks, so 9999-12-27
+  // reached `zonedDateMinuteToUtc("10000-…")`, whose bare RangeError was a 500,
+  // and 0001-01-01 was read as 1901 by `Date.UTC`'s two-digit-year rule — an
+  // empty week instead of an error.
+  it("is 2000 to 2100", () => {
+    expect([MIN_TIME_YEAR, MAX_TIME_YEAR]).toEqual([2000, 2100]);
+  });
+
+  it.each(["9999-12-27", "9999-12-31", "0001-01-01", "0099-12-31", "1999-12-31", "2101-01-01"])(
+    "refuses the week of %s as invalid_week_start — a 400, not a crash and not a quietly wrong week",
+    (day) => {
+      expect(() => resolveWeek(day, "UTC", new Date())).toThrow("invalid_week_start");
+    },
+  );
+
+  it("accepts the first and last years, and snapping a first-year date back into the year before is fine", () => {
+    expect(resolveWeek("2000-01-01", "UTC", new Date()).weekStart).toBe("1999-12-27");
+    const last = resolveWeek("2100-12-31", "UTC", new Date());
+    expect(last.weekStart).toBe("2100-12-27");
+    expect(last.to.toISOString()).toBe("2101-01-03T00:00:00.000Z");
+  });
+
+  it("does not hold the box's own clock to it: a default week is whatever 'now' is", () => {
+    // A box that has not yet synced its clock reports 1970; that is a clock
+    // problem, not a bad request, and the caller sent no date to be refused.
+    expect(resolveWeek(undefined, "UTC", new Date("1970-01-07T12:00:00.000Z")).weekStart).toBe("1970-01-05");
+  });
+
+  it.each([
+    ["9999-12-30", "9999-12-31"],
+    ["0001-01-01", "0001-01-02"],
+    ["0099-06-01", "0099-06-02"],
+    ["1999-12-31", "2000-01-02"],
+    ["2100-12-31", "2101-01-01"],
+    ["2026-01-01", "9999-12-31"],
+  ])("refuses the range %s to %s as invalid_range", (from, to) => {
+    expect(() => resolveRange(from, to, "UTC")).toThrow("invalid_range");
+  });
+
+  it("accepts a range inside the years", () => {
+    expect(resolveRange("2000-01-01", "2000-01-02", "UTC").days).toBe(2);
+    expect(resolveRange("2100-12-30", "2100-12-31", "UTC").days).toBe(2);
   });
 });
 

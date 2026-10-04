@@ -216,6 +216,17 @@ describe("TimeSection — logging time", () => {
     },
   );
 
+  it("asks for a date when the date field is cleared, preserving the form and sending nothing", async () => {
+    renderSection();
+    await fill("30m", "kept");
+    fireEvent.change(screen.getByLabelText("Date"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Log time" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Pick a date.");
+    expect(screen.getByLabelText("Time spent")).toHaveValue("30m");
+    expect(screen.getByLabelText("Note (optional)")).toHaveValue("kept");
+    expect(posts("/worklogs")).toHaveLength(0);
+  });
+
   it("refuses a date after today without asking the box", async () => {
     renderSection();
     await fill("30m");

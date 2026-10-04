@@ -734,7 +734,7 @@ export async function ncTransferOwnership(args: {
 }): Promise<{ folder: string | null }> {
   const log = args.logger ?? defaultLog;
   if (!NC_USER_ID_RE.test(args.from) || !NC_USER_ID_RE.test(args.to)) {
-    throw new NcTransferError("A Nextcloud account name has characters the hand-over can't accept.");
+    throw new NcTransferError("A File Store account name has characters the hand-over can't accept.");
   }
   if (args.from === args.to) {
     throw new NcTransferError("The recipient can't be the person being deleted.");
