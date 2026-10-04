@@ -8,9 +8,26 @@
  *   - NotificationLog  — delivery log for reminders/events/system/ai
  *
  * `purgeAuditLogs` deletes rows older than `olderThanDays` (driven by
- * `DROPLET_AUDIT_RETENTION_DAYS`, default 90) from all three, called
- * from the daily 03:00 cron in `index.ts`. Returns per-table deleted
- * counts so the cron logs one summary line.
+ * `DROPLET_AUDIT_RETENTION_DAYS`, default 365, minimum 90 — WARP-3639) from
+ * all three, called from the daily 03:00 cron in `index.ts`. Returns
+ * per-table deleted counts so the cron logs one summary line.
+ *
+ * ── WARP-3628: ActivityRow is insert-only at the database ──
+ * A trigger rejects UPDATE, DELETE and TRUNCATE on ActivityRow. The purge's
+ * ActivityRow deletes therefore go through `droplet_purge_activity_rows(ids)`
+ * (migration 20261003140000_warp_3628_activity_row_insert_only), the one
+ * sanctioned path, and each run that removed rows appends an "Audit log
+ * purged" row to the chain so the deletion is itself in the audit trail. The
+ * trigger is a guard against mistakes and simple injected statements, not
+ * against a database superuser (WARP-3590 owns the role separation).
+ *
+ * ── Table growth (WARP-3639) ──
+ * The cap below (`MAX_ROWS_PER_TABLE` per table per night) still bounds the
+ * work of a run, and the table still reaches its window and stays there as
+ * long as the steady-state daily row volume is under that cap. At a 365 day
+ * window the table holds roughly four times what the old 90 day window held:
+ * size small appliances accordingly. Rows a box already purged under the old
+ * window cannot be recovered.
  *
  * `olderThanDays <= 0` is the explicit "keep forever" / disabled state
  * (NOT a sentinel guessed from a missing column — same posture as the
@@ -97,6 +114,7 @@
  * (still batched + capped for Finding 2).
  */
 import type { PrismaClient } from "@prisma/client";
+import { recordActivity } from "./activity.singleton.js";
 
 export interface AuditPurgeResult {
   activityDeleted: number;
@@ -169,6 +187,27 @@ export async function purgeAuditLogs(
     maxRowsPerTable,
   );
 
+  // WARP-3628: the purge is a deletion of audit rows, so it leaves a row in the
+  // chain itself (a no-op before the recorder is initialised, and it never
+  // throws). Recorded after the delete so it chains from the surviving tail.
+  if (activityDeleted > 0) {
+    await recordActivity({
+      kind: "system",
+      severity: "info",
+      sourceIcon: "shield",
+      what: "Audit log purged",
+      sub: `${activityDeleted} activity rows older than ${olderThanDays} days`,
+      actor: { type: "system" },
+      refs: {
+        action: "audit.retention_purge",
+        activityDeleted,
+        commandAuditDeleted,
+        notificationDeleted,
+        retentionDays: olderThanDays,
+      },
+    });
+  }
+
   return {
     activityDeleted,
     commandAuditDeleted,
@@ -233,11 +272,14 @@ async function purgeActivityRowPrefix(
       select: { id: true },
     });
     if (batch.length === 0) break;
-    const ids = batch.map((r) => r.id);
-    const res = await prisma.activityRow.deleteMany({
-      where: { id: { in: ids } },
-    });
-    deleted += res.count;
+    // WARP-3628: the trigger refuses a plain DELETE; this function is the
+    // sanctioned path. Ids travel as text and are cast, because the driver
+    // does not bind a bigint[] parameter reliably.
+    const res = await prisma.$queryRawUnsafe<Array<{ n: bigint | number }>>(
+      "SELECT droplet_purge_activity_rows($1::text[]::bigint[]) AS n",
+      batch.map((r) => r.id.toString()),
+    );
+    deleted += Number(res[0]?.n ?? 0);
     // Short final batch means we've reached the boundary — done.
     if (batch.length < take) break;
   }

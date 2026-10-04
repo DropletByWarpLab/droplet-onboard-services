@@ -62,9 +62,12 @@ describe.skipIf(!RUN)(
     });
 
     beforeEach(async () => {
-      await prisma.$executeRawUnsafe(
-        'TRUNCATE TABLE "ActivityRow" RESTART IDENTITY',
-      );
+      // WARP-3628: ActivityRow's trigger refuses TRUNCATE unless the
+      // transaction opens the purge gate (a test-only reset, never app code).
+      await prisma.$transaction([
+        prisma.$executeRawUnsafe("SELECT set_config('droplet.activity_purge', 'on', true)"),
+        prisma.$executeRawUnsafe('TRUNCATE TABLE "ActivityRow" RESTART IDENTITY'),
+      ]);
     });
 
     it("25 concurrent record() calls never fork the chain", async () => {
@@ -229,6 +232,50 @@ describe.skipIf(!RUN)(
       expect(rows[0]!.t).toBe("2026-09-23 12:34:56.789");
     });
 
+    // ── WARP-3628: the table is insert-only at the database ───────────────
+
+    it("UPDATE, DELETE and TRUNCATE on ActivityRow are refused; the purge function still deletes", async () => {
+      const recorder = createActivityRecorder({ prisma, signer });
+      const row = await recorder.record({
+        kind: "system",
+        severity: "info",
+        sourceIcon: "shield",
+        what: "insert-only probe",
+        actor: { type: "system" },
+      });
+      const id = row.id;
+
+      await expect(
+        prisma.$executeRawUnsafe('UPDATE "ActivityRow" SET "what" = \'tampered\' WHERE "id" = $1', id),
+      ).rejects.toThrow(/insert-only/);
+      await expect(
+        prisma.$executeRawUnsafe('DELETE FROM "ActivityRow" WHERE "id" = $1', id),
+      ).rejects.toThrow(/insert-only/);
+      await expect(prisma.activityRow.deleteMany({})).rejects.toThrow(/insert-only/);
+      await expect(
+        prisma.$executeRawUnsafe('TRUNCATE TABLE "ActivityRow"'),
+      ).rejects.toThrow(/insert-only/);
+      expect(await prisma.activityRow.count()).toBe(1);
+
+      // The gate does not leak: after the purge function ran, a plain DELETE is refused again.
+      const res = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+        "SELECT droplet_purge_activity_rows($1::text[]::bigint[]) AS n",
+        [id.toString()],
+      );
+      expect(Number(res[0].n)).toBe(1);
+      expect(await prisma.activityRow.count()).toBe(0);
+      await recorder.record({
+        kind: "system",
+        severity: "info",
+        sourceIcon: "shield",
+        what: "second",
+        actor: { type: "system" },
+      });
+      await expect(
+        prisma.$executeRawUnsafe('DELETE FROM "ActivityRow"'),
+      ).rejects.toThrow(/insert-only/);
+    });
+
     // ── WARP-2977 P2b: the in-transaction append (one code path) ──────────
 
     const AT = new Date("2026-09-24T09:00:00.000Z");
@@ -258,7 +305,11 @@ describe.skipIf(!RUN)(
       // Back to an empty chain by deleting exactly those rows (this file's
       // beforeEach started it empty), never a second TRUNCATE: the in-tx rows
       // then start from the same genesis. Only the ids differ.
-      await prisma.activityRow.deleteMany({ where: { id: { in: viaRecord.map((r) => r.id) } } });
+      // WARP-3628: through the sanctioned purge function; a plain DELETE is refused.
+      await prisma.$queryRawUnsafe(
+        "SELECT droplet_purge_activity_rows($1::text[]::bigint[])",
+        viaRecord.map((r) => r.id.toString()),
+      );
       for (const p of CHAIN) {
         await prisma.$transaction((tx) => appendActivityRowInTx(tx, signer, p));
       }
