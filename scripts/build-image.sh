@@ -12,7 +12,7 @@
 # top-level path for CI + muscle memory.
 #
 # Usage:
-#   ./scripts/build-image.sh [--shape single-box] [--version X.Y.Z]
+#   ./scripts/build-image.sh --ref <release-tag|commit-sha> [--shape single-box] [--version X.Y.Z]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,13 +20,15 @@ BUILD_ISO="$SCRIPT_DIR/image/build-iso.sh"
 
 SHAPE="single-box"
 VERSION=""
+REF=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --shape)   SHAPE="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
+    --ref)     REF="${2:-}"; shift 2 ;;
     -h|--help)
       cat <<'EOF'
-Usage: ./scripts/build-image.sh [--shape single-box] [--version X.Y.Z]
+Usage: ./scripts/build-image.sh --ref <release-tag|commit-sha> [--shape single-box] [--version X.Y.Z]
 
 Builds the appliance autoinstall ISO (delegates to scripts/image/build-iso.sh).
 Defaults: --shape single-box, --version from the root package.json.
@@ -40,4 +42,4 @@ done
 
 [ -f "$BUILD_ISO" ] || { echo "build-image: builder not found: $BUILD_ISO" >&2; exit 1; }
 
-exec bash "$BUILD_ISO" --shape "$SHAPE" ${VERSION:+--version "$VERSION"}
+exec bash "$BUILD_ISO" --shape "$SHAPE" ${REF:+--ref "$REF"} ${VERSION:+--version "$VERSION"}

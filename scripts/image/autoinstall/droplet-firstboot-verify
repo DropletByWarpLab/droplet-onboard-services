@@ -1,0 +1,32 @@
+#!/bin/sh
+# droplet-firstboot-verify - WARP-3599. Run as ExecStartPre= of
+# droplet-firstboot.service, BEFORE setup.sh. Refuses (non-zero exit, so the
+# unit never starts setup.sh) unless the platform tree on disk is exactly the
+# commit this image was built to install.
+#
+# The pinned commit is baked in at image-build time: scripts/image/pin-seed.sh
+# replaces the placeholder below with the 40-hex commit that --ref resolved to
+# (build-iso.sh requires --ref). The installer copies this file to
+# /usr/local/sbin as root, so the droplet user cannot edit the pin. An
+# unrendered or malformed pin fails closed.
+#
+# Usage: droplet-firstboot-verify [tree-dir]   (default /home/droplet/edge-platform)
+set -eu
+
+PINNED="__DROPLET_COMMIT__"
+DIR="${1:-/home/droplet/edge-platform}"
+
+fail() { echo "droplet-firstboot-verify: FATAL: $*" >&2; exit 1; }
+
+case "$PINNED" in
+  ????????????????????????????????????????) ;;
+  *) fail "this image carries no valid pinned commit - refusing to run setup.sh" ;;
+esac
+case "$PINNED" in
+  *[!0-9a-f]*) fail "this image carries no valid pinned commit - refusing to run setup.sh" ;;
+esac
+
+head="$(git -C "$DIR" rev-parse HEAD 2>/dev/null)" || fail "$DIR is not a git tree"
+[ "$head" = "$PINNED" ] || fail "tree is at $head but this image pins $PINNED - refusing to run setup.sh"
+git -C "$DIR" diff --quiet HEAD -- || fail "tracked files in $DIR differ from the pinned commit - refusing to run setup.sh"
+echo "droplet-firstboot-verify: tree is the pinned commit $PINNED"

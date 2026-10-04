@@ -44,7 +44,7 @@ droplet-image <subcommand> [flags]
 
 | Subcommand | Does | Key flags |
 |---|---|---|
-| `build` | Build the appliance ISO for a shape at a version. Emits `output/droplet-<shape>-<version>.iso` (+ a sidecar `.sha256`). | `--shape` (default `single-box`), `--version` (default: root `package.json`) |
+| `build` | Build the appliance ISO for a shape at a version. Emits `output/droplet-<shape>-<version>.iso` (+ a sidecar `.sha256`). | `--ref` (**required**: release tag or commit that first boot installs), `--shape` (default `single-box`), `--version` (default: root `package.json`) |
 | `manifest` | Add/refresh this build's entry in `scripts/image/manifest.json` (hashes the built artifact). | `--version` (req), `--shape`, `--file`, `--url`, `--min-disk-gib` |
 | `sign` | Detached **ECDSA-P256** signature over the manifest. Private key path from `$DROPLET_RELEASE_SIGNING_KEY` (never a flag, never committed). | `--manifest`, `--sig` |
 | `verify` | Verify the manifest signature **and** each local asset's sha256. **Fail-closed.** | `--manifest`, `--sig`, `--pubkey`, `--assets-dir` |
@@ -56,7 +56,11 @@ droplet-image <subcommand> [flags]
 
 ```bash
 # 1. Build the ISO (pinned + SHA256-verified Ubuntu base; dockerized xorriso).
-./scripts/droplet-image build --version 0.2.0
+# --ref is required (WARP-3599): the release tag (or full commit) that first boot
+# installs. The commit it resolves to is baked into the ISO; first boot fetches
+# exactly that commit, fails the install on any other, and droplet-firstboot-verify
+# re-checks the tree before setup.sh runs. Branch names are refused.
+./scripts/droplet-image build --version 0.2.0 --ref v0.2.0
 
 # 2. Catalogue it in the signed manifest.
 ./scripts/droplet-image manifest --version 0.2.0

@@ -41,6 +41,7 @@ else
   _GREEN=''; _RED=''; _YELLOW=''; _RESET=''
 fi
 
+skip() { printf "  - %s (skipped)\n" "$1"; }
 pass() { TESTS=$((TESTS + 1)); printf "  ${_GREEN}✓${_RESET} %s\n" "$1"; }
 fail() {
   TESTS=$((TESTS + 1)); FAILURES=$((FAILURES + 1))
@@ -600,6 +601,146 @@ else
       fail "seed packages missing $pkg — cryptenroll dies 'TPM2 support is not installed' on healthy TPM hardware (WARP-2101)"
     fi
   done
+fi
+
+# =============================================================================
+# (g) WARP-3599 - first boot installs ONE pinned, verified commit, and the
+#     temporary passwordless sudo is removed on every exit.
+# =============================================================================
+echo "--- (g) WARP-3599: pinned first-boot source + unconditional sudoers removal ---"
+
+BUILD_ISO="$REPO_ROOT_REAL/scripts/image/build-iso.sh"
+PIN_SEED="$REPO_ROOT_REAL/scripts/image/pin-seed.sh"
+VERIFY_SRC="$REPO_ROOT_REAL/scripts/image/autoinstall/droplet-firstboot-verify"
+UD99="$REPO_ROOT_REAL/scripts/image/autoinstall/user-data"
+G_TMP="$(mktemp -d)"
+trap 'rm -rf "$WORK" "$G_TMP"' EXIT
+
+# 1. The ISO build refuses to produce an unpinned image (before any download).
+out="$(bash "$BUILD_ISO" 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q -- '--ref'; then
+  pass "build-iso refuses to build without --ref"
+else
+  fail "build-iso built (or failed unclearly) without a pinned ref (rc=$rc)" "$out"
+fi
+out="$(bash "$BUILD_ISO" --ref main 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && pass "build-iso refuses a branch name as the ref" \
+  || fail "build-iso accepted a branch name as the pinned ref" "$out"
+out="$(bash "$BUILD_ISO" --ref v0.0.0-no-such-tag 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && pass "build-iso refuses an unknown tag" \
+  || fail "build-iso accepted an unknown tag" "$out"
+
+# 2. pin-seed renders the exact commit into the seed and the verify script.
+if git -C "$REPO_ROOT_REAL" rev-parse HEAD >/dev/null 2>&1; then
+  head_sha="$(git -C "$REPO_ROOT_REAL" rev-parse HEAD)"
+  if bash "$PIN_SEED" --ref "$head_sha" --out "$G_TMP/seed" >/dev/null 2>&1; then
+    pass "pin-seed renders the seed for a full commit"
+  else
+    fail "pin-seed failed for the HEAD commit"
+  fi
+  if [ "$(grep -c "$head_sha" "$G_TMP/seed/user-data" 2>/dev/null)" -ge 2 ] \
+     && grep -q "PINNED=\"$head_sha\"" "$G_TMP/seed/droplet-firstboot-verify" 2>/dev/null; then
+    pass "the commit is baked into user-data (fetch + check) and the verify script"
+  else
+    fail "rendered seed does not carry the pinned commit"
+  fi
+  if grep -rq '__DROPLET_' "$G_TMP/seed" 2>/dev/null; then
+    fail "rendered seed still has a placeholder"
+  else
+    pass "rendered seed has no placeholder left"
+  fi
+  python3 -c "import yaml; yaml.safe_load(open('$G_TMP/seed/user-data'))" 2>/dev/null \
+    && pass "rendered user-data is valid YAML" || fail "rendered user-data is not valid YAML"
+else
+  skip "pin-seed render checks (not a git checkout)"
+fi
+
+# 3. The seed fetches by exact commit and no longer clones the default branch.
+if grep -q 'fetch -q --depth 1 origin __DROPLET_COMMIT__' "$UD99" \
+   && ! grep -vE '^[[:space:]]*#' "$UD99" | grep -q 'git clone'; then
+  pass "seed fetches the pinned commit; no unpinned git clone"
+else
+  fail "seed still clones the default branch (or lost the pinned fetch)"
+fi
+
+# 4. droplet-firstboot-verify: accepts the pinned tree, rejects everything else.
+G_REPO="$G_TMP/tree"; mkdir -p "$G_REPO"
+git -C "$G_REPO" init -q
+git -C "$G_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m one
+echo a > "$G_REPO/f"; git -C "$G_REPO" add f
+git -C "$G_REPO" -c user.email=t@t -c user.name=t commit -q -m two
+pinned="$(git -C "$G_REPO" rev-parse HEAD)"
+sed "s/__DROPLET_COMMIT__/$pinned/" "$VERIFY_SRC" > "$G_TMP/verify-ok"
+if sh "$G_TMP/verify-ok" "$G_REPO" >/dev/null 2>&1; then
+  pass "verify accepts the pinned commit"
+else
+  fail "verify rejected the pinned commit"
+fi
+git -C "$G_REPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m three
+if sh "$G_TMP/verify-ok" "$G_REPO" >/dev/null 2>&1; then
+  fail "verify accepted a tree at a different commit"
+else
+  pass "verify rejects a tree at a different commit"
+fi
+git -C "$G_REPO" reset -q --hard "$pinned"
+echo tampered > "$G_REPO/f"
+if sh "$G_TMP/verify-ok" "$G_REPO" >/dev/null 2>&1; then
+  fail "verify accepted a tree with a modified tracked file"
+else
+  pass "verify rejects a modified tracked file"
+fi
+if sh "$VERIFY_SRC" "$G_REPO" >/dev/null 2>&1; then
+  fail "verify ran with an unrendered pin"
+else
+  pass "verify fails closed when the pin was never rendered"
+fi
+
+# 5. The unit: verify BEFORE setup.sh, and a root ExecStopPost removes the sudo
+#    grant on every exit. Run the real late-command through a stub curtin so the
+#    heredoc/quoting is exercised, then read back the unit it writes.
+if python3 -c 'import yaml' 2>/dev/null; then
+  python3 - "$UD99" "$G_TMP/unit-cmd.sh" "$G_TMP/units" <<'PY'
+import sys, yaml
+ud = yaml.safe_load(open(sys.argv[1]))
+cmds = [c for c in ud["autoinstall"]["late-commands"] if isinstance(c, str) and "droplet-firstboot.service <<" in c]
+assert len(cmds) == 1
+open(sys.argv[2], "w").write(cmds[0].replace("/etc/systemd/system/", sys.argv[3] + "/"))
+PY
+  mkdir -p "$G_TMP/units" "$G_TMP/bin"
+  printf '#!/bin/sh\nshift 3\nexec "$@"\n' > "$G_TMP/bin/curtin"; chmod +x "$G_TMP/bin/curtin"
+  PATH="$G_TMP/bin:$PATH" bash "$G_TMP/unit-cmd.sh" >/dev/null 2>&1
+  UNIT="$G_TMP/units/droplet-firstboot.service"
+  if [ -f "$UNIT" ]; then
+    pre_verify="$(grep -n '^ExecStartPre=/usr/local/sbin/droplet-firstboot-verify$' "$UNIT" | cut -d: -f1)"
+    start_line="$(grep -n '^ExecStart=' "$UNIT" | cut -d: -f1)"
+    if [ -n "$pre_verify" ] && [ -n "$start_line" ] && [ "$pre_verify" -lt "$start_line" ]; then
+      pass "unit runs droplet-firstboot-verify before setup.sh (a failed pin check blocks it)"
+    else
+      fail "unit does not gate setup.sh on droplet-firstboot-verify"
+    fi
+    stop_line="$(grep '^ExecStopPost=' "$UNIT")"
+    if [ "$stop_line" = "ExecStopPost=+/bin/rm -f /etc/sudoers.d/droplet-firstboot" ]; then
+      pass "unit removes the sudoers grant in a root ExecStopPost (runs on failure too)"
+    else
+      fail "unit lacks the root ExecStopPost sudoers removal: ${stop_line:-<none>}"
+    fi
+    # Simulated setup.sh failure: the stop command, rerooted, leaves no grant.
+    mkdir -p "$G_TMP/etc/sudoers.d"; : > "$G_TMP/etc/sudoers.d/droplet-firstboot"
+    stop_cmd="${stop_line#ExecStopPost=+}"
+    bash -c "${stop_cmd//\/etc\/sudoers.d/$G_TMP/etc/sudoers.d}"
+    [ ! -e "$G_TMP/etc/sudoers.d/droplet-firstboot" ] \
+      && pass "after a failed run the ExecStopPost leaves no /etc/sudoers.d/droplet-firstboot" \
+      || fail "ExecStopPost left the sudoers grant in place"
+    if grep -q '^ExecStartPre=-+/bin/bash -c "echo \\"droplet ALL=(ALL) NOPASSWD: ALL\\" > /etc/sudoers.d/droplet-firstboot && chmod 440 /etc/sudoers.d/droplet-firstboot"$' "$UNIT"; then
+      pass "a retry on the next boot re-creates the grant (so removal on failure cannot strand a box)"
+    else
+      fail "unit lost the best-effort re-grant line"
+    fi
+  else
+    fail "could not render the firstboot unit from the seed's late-command"
+  fi
+else
+  skip "firstboot unit rendering checks (no PyYAML)"
 fi
 
 # =============================================================================

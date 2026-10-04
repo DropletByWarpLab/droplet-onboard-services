@@ -32,6 +32,7 @@ Subcommands:
   build      Build the appliance image.
                --shape <single-box>   (default: single-box)
                --version <X.Y.Z>      (default: root package.json version)
+               --ref <tag|sha>        (REQUIRED: the platform release first boot installs)
              Emits output/droplet-<shape>-<version>.iso.
 
   manifest   Add/refresh this build's entry in scripts/image/manifest.json.
