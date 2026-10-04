@@ -1,10 +1,9 @@
 /**
  * BUG-3 / ADR-019 — Storage safety-tier classification.
  *
- * Every pool mutation is DATA-DESTROYING, so there is no Tier-1 or Tier-2
- * storage write: all writes are Tier-3-class (owner-only, AI-blocked, confirm
- * required). Reads are not classified here — they don't pass through the
- * safety service at all.
+ * Pool mutations are Tier 3. Recording allocation changes are Tier 2: they
+ * require an owner/admin confirmation but do not erase data. Reads are not
+ * classified here — they don't pass through the safety service at all.
  *
  * Mirrors network-safety-rules.ts / safety-rules.ts.
  */
@@ -28,7 +27,15 @@ export const STORAGE_TIER_3_OPERATIONS = new Set([
   // WARP-1048: reclaim a pool-member disk — detach it from its md array then
   // adopt it. Equally destructive; same owner-only / AI-blocked / confirm gate.
   "drive_reclaim",
+  "recordings_old_footage_delete",
 ]);
+
+/** Writes that need an explicit owner/admin confirmation but do not erase data. */
+export const STORAGE_TIER_2_OPERATIONS = new Set(["recordings_set"]);
+
+export function endpointMismatchReason(service: string): string {
+  return `A '${service}' confirmation cannot be executed at this endpoint`;
+}
 
 /** Confirm token expiry — short, like the network/smart-home tokens. */
 export const STORAGE_CONFIRMATION_TOKEN_EXPIRY_MS = 60_000;
@@ -42,12 +49,14 @@ export const STORAGE_MAX_PENDING_CONFIRMATIONS = 200;
  * benefit of the doubt. (There is no legitimate Tier-1 storage write.)
  */
 export function classifyStorageCommand(operation: string): TierClassification {
-  // Every storage mutation is data-destroying → Tier 3.
-  const known = STORAGE_TIER_3_OPERATIONS.has(operation);
+  const tier2 = STORAGE_TIER_2_OPERATIONS.has(operation);
+  const known = tier2 || STORAGE_TIER_3_OPERATIONS.has(operation);
   return {
-    tier: 3,
+    tier: tier2 ? 2 : 3,
     requiresConfirmation: true,
-    reason: known
+    reason: tier2
+      ? `'${operation}' changes where camera recordings are stored and requires owner/admin confirmation`
+      : known
       ? `'${operation}' permanently erases data on the target disks and is owner-only`
       : `'${operation}' is an unrecognised storage operation and is refused`,
   };
