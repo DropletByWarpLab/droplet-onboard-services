@@ -53,7 +53,13 @@ export interface SummaryField {
 export interface PendingCall {
   tool: string;
   args: Record<string, unknown>;
-  summary: { tool: string; fields: SummaryField[]; truncatedFields: number };
+  summary: {
+    tool: string;
+    fields: SummaryField[];
+    truncatedFields: number;
+    /** WARP-3569 — decisive values (recipient, path, target), display text only. */
+    shown?: { key: string; text: string }[];
+  };
   parkedAt: string | null;
   decision: "approved" | "denied" | null;
   decidedAt: string | null;

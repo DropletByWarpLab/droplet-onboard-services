@@ -245,7 +245,7 @@ describe("runAgent — repetition guard after a failed call (WARP-3287)", () => 
   it.each([
     ["UPSTREAM_UNAVAILABLE", failure("UPSTREAM_UNAVAILABLE")],
     ["HANDLER_THREW with a network cause", failure("HANDLER_THREW", "fetch failed; cause: read ECONNRESET")],
-    ["an upstream 503", failure("READ_FAILED", "nextcloud returned 503")],
+    ["an upstream 503", failure("READ_FAILED", "the File Store returned 503")],
     ["a bare string error with a network cause", { isError: true, content: [{ type: "text", text: '{"error":"socket hang up"}' }] }],
     ["unreadable output (WARP-3284)", { isError: false, content: [{ type: "text", text: '{"hits": [{"id": "SUP-' }] }],
   ])("retries after %s", async (_label, first) => {

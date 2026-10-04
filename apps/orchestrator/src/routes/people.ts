@@ -39,6 +39,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
+import { createRequireAdminStepUp } from "../middleware/require-credential-step-up.js";
 import { requireScope, type ScopeLoader } from "../middleware/scope.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
@@ -339,6 +340,8 @@ export function createPeopleRouter(
   sendOptions: SendOptions = {},
 ): Router {
   const router = Router();
+  // WARP-3630 — fresh credential step-up while REQUIRE_ADMIN_TWO_STEP is on.
+  const requireAdminStepUp = createRequireAdminStepUp(prisma);
 
   // ── GET /api/people ─────────────────────────────────────────
   // Returns every row in the local directory. owner + admin only —
@@ -389,6 +392,7 @@ export function createPeopleRouter(
   router.post(
     "/people/invite",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const parsed = inviteSchema.safeParse(req.body);
@@ -565,6 +569,7 @@ export function createPeopleRouter(
   router.patch(
     "/people/:id/role",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     // Scope axis (WARP-455): runs AFTER requireRole per scope.ts module
     // comment. owner/admin short-circuit before the loader, so today this
     // is defense-in-depth + makes the axis live; it bites if the role
@@ -702,6 +707,7 @@ export function createPeopleRouter(
   router.patch(
     "/people/:id/scope",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     // Scope axis (WARP-455) — second guard, see PATCH /people/:id/role.
     requireScope("exec_only", loadUserScopes),
     async (req: Request, res: Response, next: NextFunction) => {
@@ -809,6 +815,7 @@ export function createPeopleRouter(
   router.delete(
     "/people/:id",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     // Scope axis (WARP-455) — second guard, see PATCH /people/:id/role.
     requireScope("exec_only", loadUserScopes),
     async (req: Request, res: Response, next: NextFunction) => {
@@ -1017,6 +1024,7 @@ export function createPeopleRouter(
   router.patch(
     "/people/:id/access",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         // Rail 2 first — the shipped placement (see PATCH /people/:id/role).
@@ -1196,6 +1204,7 @@ export function createPeopleRouter(
   router.put(
     "/people/:id/access-exceptions",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         assertNotSelf(req.user?.id, req.params.id);

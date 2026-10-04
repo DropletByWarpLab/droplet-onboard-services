@@ -704,6 +704,11 @@ describe("WARP-2016 — SCIM active-state writes run the role-mutation rails", (
 });
 
 describe("POST /scim/v2/Groups — group + role mapping", () => {
+  beforeEach(() => {
+    // WARP-3631 — groups elevate only when the operator names them.
+    mockConfig.SCIM_GROUP_ROLE_MAP = JSON.stringify({ "id:okta-grp-1": "admin", "id:okta-grp-owner": "owner" });
+  });
+
   it("creates a group, maps the role, raises a member to admin (201)", async () => {
     const member: UserRow = {
       id: "u-mem", username: "mem", displayName: "Mem Ber", email: "mem@acme.test",

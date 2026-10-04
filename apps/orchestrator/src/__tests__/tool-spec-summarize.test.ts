@@ -342,7 +342,7 @@ describe("optional steps — one unreadable source does not kill the narrative",
     const summarizer: Summarizer = { summarize: vi.fn(async () => "prose") };
     const dispatcher: StepDispatcher = {
       call: vi.fn(async (tool: string) => {
-        if (tool === "list_recent_files") throw new Error("nextcloud returned 503");
+        if (tool === "list_recent_files") throw new Error("the File Store returned 503");
         return { ok: true };
       }),
     };
