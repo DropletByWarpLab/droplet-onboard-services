@@ -871,3 +871,24 @@ for pv in PNG JPEG GIF BMP XBitmap MP3 TXT MarkDown OpenDocument Krita TIFF HEIC
   pv_i=$((pv_i + 1))
 done
 echo "[droplet] WARP-1686: preview providers set (defaults + TIFF/HEIC/SVG)"
+
+# ── WARP-3586 — public-link expiry enforced by Nextcloud itself ──
+#
+# The orchestrator's POST/PUT /files/share route applies a 30-day default and a
+# 90-day ceiling (apps/orchestrator/src/services/share-policy.ts), but
+# Nextcloud's own web UI and OCS endpoints are reachable too, so the same
+# ceiling is set here, re-applied on every start and upgrade (config:app:set
+# is idempotent). With enforce=yes `shareapi_expire_after_n_days` is both the
+# default for a link created without a date and the maximum. 90 matches the
+# route's ceiling; the route's tighter 30-day default applies on its path.
+# Deliberately NOT set here: shareapi_allow_public_upload (it would also stop
+# an owner/admin's folder upload link) and shareapi_enforce_links_password
+# (the assistant tool and dashboard create passwordless links by design today).
+for kv in \
+  "shareapi_default_expire_date=yes" \
+  "shareapi_enforce_expire_date=yes" \
+  "shareapi_expire_after_n_days=90"; do
+  occ_www config:app:set core "${kv%%=*}" --value="${kv#*=}" >/dev/null \
+    || echo "nextcloud-init: could not set ${kv%%=*} — reconciles on the next boot" >&2
+done
+echo "[droplet] WARP-3586: public-link expiry enforced (default on, max 90 days)"

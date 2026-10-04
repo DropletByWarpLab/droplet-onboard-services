@@ -951,6 +951,23 @@ else
 fi
 
 # =============================================================================
+# Test 22c: WARP-3586 — Nextcloud enforces a public-link expiry on every start
+# =============================================================================
+# The orchestrator route caps links at 90 days, but Nextcloud's own endpoints
+# are reachable too; nextcloud-init.sh (run on every start) sets the same
+# ceiling. MUTATION: delete any of the three settings and this goes red.
+_NC_INIT_SHARE="$REPO_ROOT/docker/nextcloud-init.sh"
+_share_missing=""
+for _kv in shareapi_default_expire_date=yes shareapi_enforce_expire_date=yes shareapi_expire_after_n_days=90; do
+  grep -qF "\"$_kv\"" "$_NC_INIT_SHARE" || _share_missing+="$_kv "
+done
+if [ -z "$_share_missing" ]; then
+  pass "nextcloud-init.sh sets the public-link expiry policy on every start (WARP-3586)"
+else
+  fail "nextcloud-init.sh is missing share expiry settings (WARP-3586): $_share_missing"
+fi
+
+# =============================================================================
 # Test 23: WARP-3193 SEC-DATA-12 — secrets stay off process command lines
 # =============================================================================
 # /proc/<pid>/cmdline is world-readable, container processes included when

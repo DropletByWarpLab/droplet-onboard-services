@@ -104,3 +104,103 @@ export const PUBLIC_LINK_REFUSAL = {
   message:
     "Only an owner or admin can create or change a public link to company files, or let others re-share them. You can still share with people in the company.",
 } as const;
+
+// ── WARP-3586 — what a public link may be, whoever asks ───────────────────
+//
+// WARP-3053 above decides WHO may publish a link. These rules decide WHAT a
+// link may be, and apply to every caller of the share routes (dashboard, Mac,
+// iOS, the assistant's share_file tool): an expiry always (30 days when none is
+// given, never beyond 90), a password of at least 8 characters when one is set,
+// and no anonymous edit/upload/delete for a member on a folder. Nextcloud gets
+// the same expiry ceiling from docker/nextcloud-init.sh.
+
+/** OCS share types that mint a token URL anyone holding it can open: link (3) and email (4). */
+const PUBLIC_LINK_SHARE_TYPES: ReadonlySet<number> = new Set([3, 4]);
+
+export const PUBLIC_LINK_DEFAULT_EXPIRY_DAYS = 30;
+export const PUBLIC_LINK_MAX_EXPIRY_DAYS = 90;
+export const PUBLIC_LINK_MIN_PASSWORD_LENGTH = 8;
+
+/** OCS permission bits that let an anonymous holder change data. */
+export const PERM_UPDATE = 2;
+export const PERM_CREATE = 4;
+export const PERM_DELETE = 8;
+
+export function isPublicLinkType(shareType: number): boolean {
+  return PUBLIC_LINK_SHARE_TYPES.has(shareType);
+}
+
+function ymdPlusDays(days: number, now: Date): string {
+  return new Date(now.getTime() + days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+/** YYYY-MM-DD, the 30-day default a link gets when the caller sends no expiry. */
+export function defaultPublicLinkExpiry(now: Date = new Date()): string {
+  return ymdPlusDays(PUBLIC_LINK_DEFAULT_EXPIRY_DAYS, now);
+}
+
+export interface PublicLinkViolation {
+  error: string;
+  message: string;
+}
+
+/**
+ * Null when `expireDate` is an acceptable public-link expiry. Empty/missing is
+ * a violation here: callers that mean "default" substitute `defaultPublicLinkExpiry`
+ * first; a PUT that sends "" is trying to remove the expiry.
+ */
+export function publicLinkExpiryViolation(
+  expireDate: string | undefined,
+  now: Date = new Date(),
+): PublicLinkViolation | null {
+  if (!expireDate || !/^\d{4}-\d{2}-\d{2}$/.test(expireDate)) {
+    return {
+      error: "public_link_expiry_required",
+      message: "A public link must expire. Send an expiry date as YYYY-MM-DD.",
+    };
+  }
+  // ISO dates compare correctly as strings.
+  if (expireDate > ymdPlusDays(PUBLIC_LINK_MAX_EXPIRY_DAYS, now)) {
+    return {
+      error: "public_link_expiry_too_far",
+      message: `A public link can last at most ${PUBLIC_LINK_MAX_EXPIRY_DAYS} days.`,
+    };
+  }
+  return null;
+}
+
+/** Null when there is no password or it meets the minimum length. Never echoes the value. */
+export function publicLinkPasswordViolation(password: string | undefined): PublicLinkViolation | null {
+  if (password === undefined) return null;
+  if (password.length < PUBLIC_LINK_MIN_PASSWORD_LENGTH) {
+    return {
+      error: "public_link_password_too_short",
+      message: `A public link password must be at least ${PUBLIC_LINK_MIN_PASSWORD_LENGTH} characters.`,
+    };
+  }
+  return null;
+}
+
+/** Only an owner or admin may hand an anonymous link holder write access to a folder. */
+export const PUBLIC_LINK_EDIT_REFUSAL = {
+  error: "public_link_edit_admin_only",
+  message:
+    "Only an owner or admin can let people with a public link edit, upload to or delete from a folder. A view-only link is available.",
+} as const;
+
+/**
+ * True when `permissions` on a public link would let an anonymous holder write,
+ * and a member may not grant it. Create and delete only exist on folders, so
+ * they are refused outright; update is refused when the target is a folder
+ * (`isFolder`), and allowed on a single file (the dashboard's "can edit" level).
+ * Owner/admin are never capped here.
+ */
+export function memberPublicLinkWriteRefused(
+  role: string | undefined,
+  permissions: number,
+  isFolder: boolean,
+): boolean {
+  if (role === "owner" || role === "admin") return false;
+  if ((permissions & (PERM_CREATE | PERM_DELETE)) !== 0) return true;
+  return (permissions & PERM_UPDATE) !== 0 && isFolder;
+}
