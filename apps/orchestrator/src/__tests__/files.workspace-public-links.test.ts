@@ -149,10 +149,11 @@ describe("WARP-3053 — POST /files/share public links on company data", () => {
     expect(ncMock.ncCreateShareV2).not.toHaveBeenCalled();
   });
 
+  // Types 5 and 6 (and 2, 7) no longer reach the policy: the request schema
+  // refuses them with 400 first (WARP-3622; files.test.ts), so the allowlist
+  // below only ever sees the offered types.
   it.each([
     ["email (4)", 4],
-    ["federated (6)", 6],
-    ["an unknown type (5)", 5],
     ["a group share with re-share (1 + bit 16)", 1],
   ])("member, %s on a Workspace item: 403 (allowlist, not denylist)", async (_label, shareType) => {
     const res = await request(app(MEMBER))
@@ -358,10 +359,12 @@ describe("WARP-3053 — PUT/DELETE /files/share/:id on company data", () => {
     expect(ncMock.ncUpdateShare).toHaveBeenCalledWith("session-token", 7, "note", "hi");
   });
 
-  it("admin editing a Workspace public link: allowed, no lookup needed", async () => {
+  it("admin editing a Workspace public link: allowed, no policy lookup needed", async () => {
     const res = await request(app(ADMIN)).put("/api/files/share/7").send({ note: "hi" });
     expect(res.status).toBe(200);
-    expect(ncMock.ncGetShare).not.toHaveBeenCalled();
+    // The one lookup is the audit row's path (WARP-3587), made after the policy
+    // check; the policy itself needs none for an admin.
+    expect(ncMock.ncGetShare).toHaveBeenCalledTimes(1);
   });
 
   it("member revoking a Workspace public link stays allowed", async () => {

@@ -1572,6 +1572,17 @@ describe("File Operations (Nextcloud-backed routes)", () => {
   });
 
   describe("Shares v2", () => {
+    it.each([2, 5, 6, 7])(
+      "POST /api/files/share refuses share type %i (federated and unoffered types) with 400",
+      async (shareType) => {
+        const res = await request(app)
+          .post("/api/files/share")
+          .send({ path: "/a.txt", shareType, shareWith: "someone@internal.example:8443" });
+        expect(res.status).toBe(400);
+        expect(ncMock.ncCreateShareV2).not.toHaveBeenCalled();
+      },
+    );
+
     it("POST /api/files/share creates with full options", async () => {
       ncMock.ncCreateShareV2.mockResolvedValue({
         id: 7,

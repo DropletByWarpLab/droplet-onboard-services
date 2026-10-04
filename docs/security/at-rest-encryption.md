@@ -51,10 +51,20 @@ source of truth).
 | Redis `cache` AOF (session records, refresh denylist, lockout counters, **Nextcloud app-passwords in plaintext**, WARP-1401) | docker volume `cache-data` under `/data/docker`; wiped by factory reset, never backed up |
 | file-indexer / brain pgvector | docker volume under `/data/docker` |
 | Brain chunk text (chat attachments) | **column-level** AES-256-GCM under per-document DEKs (WARP-242, below) — on top of the LUKS layer |
+| Nextcloud-derived chunk text (`FileContentChunk`, `source='nextcloud'`) | **disk encryption only** (LUKS data LV, restic repo key). No column encryption; see the scope decision below |
+| Mailbox content (`EmailMessage.bodyText` / `bodyHtml`, `EmailAttachment.data`, `EmailDraft`) | **disk encryption only** (LUKS data LV, restic repo key). No column encryption and no per-mailbox key, so disconnecting a mailbox deletes the rows but is not a crypto-shred (WARP-3622) |
+| Mailbox credentials (`EmailAccount.passwordEnc`) | column-level AES-256-GCM (`encryptSecret`) — on top of the LUKS layer |
+| Persisted AI chats, notes, calendar events and reminders | **disk encryption only** (LUKS data LV, restic repo key). Calendar source credentials are stored encrypted |
 | `.env` (carries `DEVICE_SECRET_KEY`) | `/data/droplet/env/.env` (symlinked) |
 | `data/secrets` (audit signing key, doc-KEK keyfile) | `/data/droplet/secrets` (symlinked) |
 | Hot-plugged USB drives | per-drive LUKS2 under `/mnt/droplet/<usb>` |
 | Backups | restic repo, per-customer key = HKDF(`DEVICE_SECRET_KEY`) (WARP-254). **Default location is a local path on the same box** (`DROPLET_BACKUP_TARGET`, default `/var/lib/droplet/restic-repo`), so it is a restore point, not off-box protection; off-device targets are planned. Retention is 7 daily, 4 weekly and 6 monthly snapshots. |
+
+Any table not listed above that holds customer content (mail, chats, notes,
+file text) is protected by the LUKS layer and the encrypted backup repository
+only. Column-level encryption covers brain chunks, credentials and the user
+email address. Whether mailbox content should gain a per-mailbox key (shredded
+on disconnect, decrypt-on-read in search) is an open decision on WARP-3622.
 
 The `.env` relocation is what makes the AC "disk removed + mounted elsewhere
 yields no readable data" hold for the *derivation inputs*: `DEVICE_SECRET_KEY`
