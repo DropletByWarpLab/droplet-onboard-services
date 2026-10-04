@@ -22,6 +22,7 @@ const ago = (h: number) => new Date(NOW.getTime() - h * H).toISOString();
 function status(p: Partial<HostBackupStatus>): HostBackupStatus {
   return {
     state: "ok",
+    repositoryLocation: "unknown",
     reason: "",
     since: ago(24 * 30),
     lastAttemptAt: ago(9),
@@ -119,6 +120,17 @@ describe("parseHostStatus — off-contract input is not_reporting, never a guess
   "repository": "/var/lib/droplet/restic-repo"
 }`;
     expect(parseHostStatus(raw)).toMatchObject({ state: "key_mismatch", lastRekeyAt: null, lastSuccessAt: "2026-07-03T03:15:00Z" });
+  });
+
+  it("reads repositoryLocation (WARP-3610); absent or off-enum is unknown, never safe", () => {
+    const base = '"state":"ok","reason":""';
+    for (const loc of ["same_disk", "off_device", "unknown"]) {
+      expect(parseHostStatus(`{${base},"repositoryLocation":"${loc}"}`)?.repositoryLocation).toBe(loc);
+    }
+    expect(parseHostStatus(`{${base}}`)?.repositoryLocation).toBe("unknown");
+    expect(parseHostStatus(`{${base},"repositoryLocation":"cloud"}`)?.repositoryLocation).toBe("unknown");
+    expect(backupHealth(status({ repositoryLocation: "same_disk" }), NOW).repositoryLocation).toBe("same_disk");
+    expect(backupHealth(null, NOW).repositoryLocation).toBe("unknown");
   });
 
   it("unknown state or garbage → null", () => {

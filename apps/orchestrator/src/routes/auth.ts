@@ -122,6 +122,7 @@ import {
   clearPasswordChangeRateState,
 } from "../services/password-change-throttle.service.js";
 import {
+  createRequireAdminStepUp,
   createRequireCredentialStepUp,
   passCredentialStepUp,
 } from "../middleware/require-credential-step-up.js";
@@ -144,6 +145,7 @@ import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { revokeDeviceClientsForUser } from "../services/device-client-revoke.service.js";
 import { verifyClaimCodePresence } from "../services/setup-claim.service.js";
+import { isClaimed } from "../services/claim-code.service.js";
 import {
   passwordZod,
   baseUserIdFromEmail,
@@ -868,6 +870,26 @@ export function createPublicAuthRouter(
         }
       }
 
+      // WARP-3589: the physical claim is a PREREQUISITE for the first owner,
+      // independent of DROPLET_CLAIM_GATE_ENABLED. The wizard claims the box
+      // (welcome → claim → account) before it ever reaches this route, so a
+      // legitimate setup always arrives on a claimed box. Placed AFTER the N1
+      // owner-exists guard so a dropped-response retry still gets the benign
+      // 409 OWNER_EXISTS, and AFTER the code checks above so a wrong code on
+      // a gated box keeps answering CLAIM_CODE_INVALID.
+      if (!(await isClaimed(prisma))) {
+        logger.warn(
+          { email },
+          "setup: rejected — the appliance has not been claimed with its front-panel code (WARP-3589)",
+        );
+        res.status(403).json({
+          error:
+            "Claim this appliance with the code from its front panel before creating the owner account.",
+          code: "CLAIM_CODE_REQUIRED",
+        });
+        return;
+      }
+
       // Romain PR #279 round 2: order matters here because the two
       // calls have very different recovery profiles.
       //
@@ -898,24 +920,53 @@ export function createPublicAuthRouter(
       // `email` is guaranteed present + normalized (N2 makes it required on
       // this path; emailField trim+lowercased it). Write it directly so the
       // stored login key matches the case-insensitive /auth/login lookup.
-      await prisma.user.upsert({
-        where: { nextcloudUsername: username },
-        update: {
-          displayName: displayName || username,
-          passwordHash,
-          // WARP-233: dcv1 ciphertext + blind index (the login key lives on
-          // emailLookupHash; findUserByEmail resolves it case-insensitively).
-          ...emailWriteData(email),
-        },
-        create: {
-          username,
-          displayName: displayName || username,
-          ...emailWriteData(email),
-          nextcloudUsername: username,
-          passwordHash,
-          role: "owner" as any,
-        },
-      });
+      //
+      // WARP-3589: the owner-exists check and the owner write are ONE
+      // SERIALIZABLE transaction. The count at the top of this handler is only
+      // a cheap early exit (before hashing); on its own it is check-then-act,
+      // so two concurrent first-owner POSTs could both pass it. Under
+      // SERIALIZABLE the loser aborts (P2034) and answers the same benign 409
+      // as a retry. `created` is false only when the in-transaction re-check
+      // found an owner another request had just committed.
+      let created: boolean;
+      try {
+        created = await prisma.$transaction(async (tx) => {
+          if ((await tx.user.count({ where: { role: "owner" } })) > 0) return false;
+          await tx.user.upsert({
+            where: { nextcloudUsername: username },
+            update: {
+              displayName: displayName || username,
+              passwordHash,
+              // WARP-233: dcv1 ciphertext + blind index (the login key lives on
+              // emailLookupHash; findUserByEmail resolves it case-insensitively).
+              ...emailWriteData(email),
+            },
+            create: {
+              username,
+              displayName: displayName || username,
+              ...emailWriteData(email),
+              nextcloudUsername: username,
+              passwordHash,
+              role: "owner" as any,
+            },
+          });
+          return true;
+        }, SERIALIZABLE_TX);
+      } catch (txErr) {
+        if (!isConcurrencyConflict(txErr)) throw txErr;
+        created = false;
+      }
+      if (!created) {
+        logger.warn(
+          { email },
+          "setup: refused — an owner was created concurrently (WARP-3589 serializable owner check)",
+        );
+        res.status(409).json({
+          error: "Setup has already been completed for this appliance.",
+          code: "OWNER_EXISTS",
+        });
+        return;
+      }
 
       // WARP-883: the owner must join the household group too, otherwise the
       // shared "Household" groupfolder never mounts for the primary user and
@@ -2264,6 +2315,8 @@ export function createProtectedAuthRouter(
   sendOptions: import("../services/email-channel.service.js").SendOptions = {},
 ): Router {
   const router = Router();
+  // WARP-3630 — fresh credential step-up while REQUIRE_ADMIN_TWO_STEP is on.
+  const requireAdminStepUp = createRequireAdminStepUp(prisma);
 
   // ── Get current user info ──
   router.get("/auth/me", async (req, res, next) => {
@@ -2951,7 +3004,7 @@ export function createProtectedAuthRouter(
 
   // ── Create user (admin only) ──
   // WARP-171: per-route guard. owner + admin only.
-  router.post("/auth/users", requireRole("owner", "admin"), async (req, res, next) => {
+  router.post("/auth/users", requireRole("owner", "admin"), requireAdminStepUp, async (req, res, next) => {
     try {
       const parsed = createUserSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -3157,7 +3210,7 @@ export function createProtectedAuthRouter(
   // applies them one OCS PUT at a time. Each field is independent so a
   // partial failure leaves the previously-applied fields in place.
   // WARP-171: per-route guard. owner + admin only.
-  router.put("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
+  router.put("/auth/users/:username", requireRole("owner", "admin"), requireAdminStepUp, async (req, res, next) => {
     try {
       // WARP-2993 — provisioning_api needs NC instance admin, which only the
       // box service account holds. The caller's own NC credential is never
@@ -3466,6 +3519,7 @@ export function createProtectedAuthRouter(
   router.post(
     "/auth/users/:username/disable",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req, res, next) => {
       try {
         // WARP-2993 — provisioning_api needs NC instance admin, which only the
@@ -3572,7 +3626,7 @@ export function createProtectedAuthRouter(
             ...(ncMirror === "failed"
               ? {
                   warning:
-                    "Access to this Droplet is revoked, but Nextcloud could not be reached — their file access will be cut off automatically when it is back.",
+                    "Access to this Droplet is revoked, but the File Store could not be reached — their file access will be cut off automatically when it is back.",
                 }
               : {}),
           });
@@ -3622,6 +3676,7 @@ export function createProtectedAuthRouter(
   router.post(
     "/auth/users/:username/enable",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req, res, next) => {
       try {
         // WARP-2993 — provisioning_api needs NC instance admin, which only the
@@ -3758,6 +3813,7 @@ export function createProtectedAuthRouter(
   router.post(
     "/auth/users/:username/revoke-sessions",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req, res, next) => {
       try {
         if (!prisma) {
@@ -3846,7 +3902,7 @@ export function createProtectedAuthRouter(
   // defaulted, so the choice is recorded rather than guessed. An unknown
   // disposition is still a 400.
   // WARP-171: per-route guard. owner + admin only.
-  router.delete("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
+  router.delete("/auth/users/:username", requireRole("owner", "admin"), requireAdminStepUp, async (req, res, next) => {
     try {
       const parsed = deleteDispositionSchema.safeParse(req.body ?? {});
       if (!parsed.success) {
@@ -3923,6 +3979,7 @@ export function createProtectedAuthRouter(
   router.post(
     "/auth/users/:username/cancel-deletion",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req, res, next) => {
       try {
         const row = prisma
@@ -3979,7 +4036,7 @@ export function createProtectedAuthRouter(
   // pre-WARP-171 inline `isAdmin(req)` check; the guard runs as
   // middleware ahead of the handler so the 403 short-circuits before
   // any handler-local validation.
-  router.post("/auth/invites", requireRole("owner", "admin"), async (req, res, next) => {
+  router.post("/auth/invites", requireRole("owner", "admin"), requireAdminStepUp, async (req, res, next) => {
     try {
       if (!prisma) {
         res.status(500).json({ error: "Invite store unavailable" });
@@ -4270,6 +4327,7 @@ export function createProtectedAuthRouter(
   router.delete(
     "/auth/invites/:token",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req, res, next) => {
       try {
         if (!prisma) {

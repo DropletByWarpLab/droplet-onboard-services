@@ -366,11 +366,11 @@ app sources, not probed on a live box.
 Left open on purpose, for the reasons in the table. Three things the audit
 found that are NOT OCS and are NOT closed here, for a follow-up:
 
-- **Photos public albums** (and CalDAV `publish-calendar`) mint a public URL
-  from a DAV request (`PROPPATCH`/`POST` under `remote.php/dav/…`), not from
-  OCS. Not confirmed on the pinned image. Options: deny
-  `/nextcloud/remote.php/dav/photos/`, or disable `photos` in
-  `nextcloud-init.sh` the way `disable_hub_apps` does.
+- **Photos public albums** mint a public URL from a DAV request
+  (`PROPPATCH`/`POST` under `remote.php/dav/photos/…`), not from OCS. Closed
+  (WARP-3606): `nextcloud-init.sh` disables the `photos` app on every start via
+  `disable_hub_apps`. CalDAV `publish-calendar` is a separate route in the
+  `dav` app and is still open.
 - **richdocuments' non-OCS routes still mint WOPI `access_token` URLs**, and
   they are reachable through BOTH spellings: the `/nextcloud/` leg
   (`/nextcloud/index.php/apps/richdocuments/…`) and the root

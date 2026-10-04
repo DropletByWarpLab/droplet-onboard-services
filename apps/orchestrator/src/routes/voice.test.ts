@@ -1023,3 +1023,27 @@ describe("voice routes RBAC (owner/admin only — service principals denied)", (
     }
   }
 });
+
+// WARP-3625 — voice-io fails closed without a shared bearer; the proxy sends it.
+describe("voice-io service bearer (WARP-3625)", () => {
+  afterEach(() => {
+    delete process.env.VOICE_IO_SERVICE_TOKEN;
+  });
+
+  it("sends Authorization: Bearer <VOICE_IO_SERVICE_TOKEN> upstream", async () => {
+    process.env.VOICE_IO_SERVICE_TOKEN = "voice-io-secret";
+    fetchSpy.mockResolvedValue(upstreamJson(200, { state: "listening" }));
+    await request(buildApp(mkUser("owner"))).get("/api/voice/status");
+    const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+    expect((init.headers as Record<string, string>).Authorization).toBe(
+      "Bearer voice-io-secret",
+    );
+  });
+
+  it("sends no Authorization header when the token is unset", async () => {
+    fetchSpy.mockResolvedValue(upstreamJson(200, { state: "listening" }));
+    await request(buildApp(mkUser("owner"))).get("/api/voice/status");
+    const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+    expect((init.headers as Record<string, string>).Authorization).toBeUndefined();
+  });
+});
