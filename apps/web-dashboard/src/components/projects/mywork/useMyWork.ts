@@ -5,6 +5,13 @@
 // `today` is the VIEWER's calendar day — the server decides "overdue" and "due
 // this week" from it, never from its own clock or zone — and is part of the key,
 // so the lists refetch when local midnight passes.
+//
+// Freshness. SWR's focus / reconnect / remount revalidation re-requests the FIRST
+// page of a list (its items and all four counts); pages loaded after it are
+// re-requested by `mutate()` — the Refresh button and any edit made in the drawer
+// — which revalidates every loaded page. Do not turn `revalidateFirstPage` off to
+// save a request on "Load more": a loaded page is then never refetched by focus
+// at all, and the lists go stale until something calls `mutate()`.
 
 import { useMemo } from "react";
 import useSWRInfinite from "swr/infinite";
@@ -26,9 +33,6 @@ export function useMyWork(section: PmMyWorkSection, today: DateOnly) {
       return myWorkUrl(section, today, index === 0 ? 0 : (previous?.nextOffset ?? index * MY_WORK_PAGE_SIZE));
     },
     (url: string) => pmGet<PmMyWorkPage>(url),
-    // Loading page N must not re-request page 0: its counts are refreshed by
-    // `mutate()` (after an edit) and by SWR's own focus revalidation.
-    { revalidateFirstPage: false },
   );
 
   const view = useMemo(() => {
@@ -51,6 +55,8 @@ export function useMyWork(section: PmMyWorkSection, today: DateOnly) {
     ...view,
     error,
     isLoading,
+    /** A request is in flight — the initial load, a refresh, or another page. */
+    isValidating,
     isLoadingMore: isValidating && size > (data?.length ?? 0),
     loadMore: () => {
       void setSize((n) => n + 1);

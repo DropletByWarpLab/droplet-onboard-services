@@ -17,6 +17,7 @@ const state = {
   hasMore: false,
   error: undefined as unknown,
   isLoading: false,
+  isValidating: false,
   isLoadingMore: false,
   loadMore: vi.fn(),
   mutate: vi.fn(),
@@ -79,7 +80,11 @@ function item(projectId: string, over: Partial<PmWorkItem> = {}): PmWorkItem {
 }
 
 function load(items: PmWorkItem[], projects: PmMyWorkProject[], over: Partial<typeof state> = {}) {
-  Object.assign(state, { items, projects, counts: COUNTS, total: items.length, hasMore: false, error: undefined, isLoading: false, isLoadingMore: false }, over);
+  Object.assign(
+    state,
+    { items, projects, counts: COUNTS, total: items.length, hasMore: false, error: undefined, isLoading: false, isValidating: false, isLoadingMore: false },
+    over,
+  );
 }
 
 beforeEach(() => {
@@ -92,6 +97,7 @@ beforeEach(() => {
   state.hasMore = false;
   state.error = undefined;
   state.isLoading = false;
+  state.isValidating = false;
   state.isLoadingMore = false;
   state.loadMore = vi.fn();
   state.mutate = vi.fn();
@@ -126,10 +132,41 @@ describe("sections", () => {
     expect(screen.getByText(/Assigned to you and due Oct 3 – Oct 9\./)).toBeInTheDocument();
   });
 
+  it("keeps the last counts while another section's first page loads, instead of flashing to dashes", () => {
+    load([item("p1")], [A]);
+    const { rerender } = render(<MyWorkView />);
+    fireEvent.click(screen.getByRole("button", { name: /^Overdue/ }));
+    // The newly selected section has no data yet: counts are undefined for a moment.
+    load([], [], { counts: undefined, isLoading: true });
+    rerender(<MyWorkView />);
+    const chips = within(screen.getByRole("group", { name: "My work sections" })).getAllByRole("button");
+    expect(chips.map((c) => c.textContent)).toEqual(["Assigned12", "Created4", "Overdue3", "Due this week5"]);
+  });
+
   it("shows a dash instead of a number until the counts have loaded", () => {
     load([], [], { counts: undefined, isLoading: true });
     render(<MyWorkView />);
     expect(within(screen.getByRole("group", { name: "My work sections" })).getAllByRole("button")[0].textContent).toBe("Assigned–");
+  });
+});
+
+describe("refresh", () => {
+  it("has its own Refresh, which revalidates this view's lists", () => {
+    load([item("p1")], [A]);
+    render(<MyWorkView />);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(state.mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("is there when the list is empty or failed too, and shows a busy state while a request is in flight", () => {
+    load([], [], { counts: { assigned: 0, created: 0, overdue: 0, dueThisWeek: 0 } });
+    const { rerender } = render(<MyWorkView />);
+    expect(screen.getByRole("button", { name: "Refresh" })).not.toHaveAttribute("aria-busy");
+    load([], [], { error: new Error("down"), counts: undefined, isValidating: true });
+    rerender(<MyWorkView />);
+    const refresh = screen.getByRole("button", { name: "Refresh" });
+    expect(refresh).toHaveAttribute("aria-busy", "true");
+    expect(refresh).toHaveClass("spinning");
   });
 });
 

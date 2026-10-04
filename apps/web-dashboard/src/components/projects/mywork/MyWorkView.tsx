@@ -9,7 +9,7 @@
 // page's single-project board data is not the right thing to revalidate.
 
 import "./mywork.css";
-import { useMemo, useState, type CSSProperties, type JSX } from "react";
+import { useMemo, useRef, useState, type CSSProperties, type JSX } from "react";
 import { PmIcon } from "../icons";
 import { EmptyBlock, Skel } from "../bits";
 import { ListRow } from "../board";
@@ -17,7 +17,7 @@ import { DetailDrawer } from "../detail";
 import type { PmWorkItem } from "../types";
 import { addDays, formatDay } from "../calendar/dateOnly";
 import { useToday } from "../calendar/useToday";
-import type { PmMyWorkProject, PmMyWorkSection } from "./types";
+import type { PmMyWorkCounts, PmMyWorkProject, PmMyWorkSection } from "./types";
 import { useMyWork } from "./useMyWork";
 
 const SECTIONS: ReadonlyArray<{
@@ -61,7 +61,16 @@ export function MyWorkView(): JSX.Element {
   const today = useToday();
   const [section, setSection] = useState<PmMyWorkSection>("assigned");
   const [drawer, setDrawer] = useState<PmWorkItem | null>(null);
-  const { items, projects, counts, total, hasMore, error, isLoading, isLoadingMore, loadMore, mutate } = useMyWork(section, today);
+  const { items, projects, counts, total, hasMore, error, isLoading, isValidating, isLoadingMore, loadMore, mutate } = useMyWork(
+    section,
+    today,
+  );
+  // The four counts are the same whichever section is selected, so while another
+  // section's first page loads the chips keep the last numbers rather than
+  // flashing to dashes.
+  const lastCounts = useRef<PmMyWorkCounts | undefined>(undefined);
+  if (counts) lastCounts.current = counts;
+  const shownCounts = counts ?? lastCounts.current;
 
   const spec = SECTIONS.find((s) => s.id === section) ?? SECTIONS[0];
   const groups = useMemo(() => {
@@ -161,19 +170,32 @@ export function MyWorkView(): JSX.Element {
 
   return (
     <div className="pm-mw">
-      <div className="pm-row" style={{ gap: 8, flexWrap: "wrap" }} role="group" aria-label="My work sections">
-        {SECTIONS.map((s) => (
-          <button
-            key={s.id}
-            type="button"
-            className={"pm-chip" + (section === s.id ? " on" : "")}
-            aria-current={section === s.id ? "true" : undefined}
-            onClick={() => setSection(s.id)}
-          >
-            {s.label}
-            <span className="n">{counts ? counts[s.count] : "–"}</span>
-          </button>
-        ))}
+      <div className="pm-row" style={{ gap: 8, flexWrap: "wrap" }}>
+        <div className="pm-row" style={{ gap: 8, flexWrap: "wrap", flex: "1 1 auto" }} role="group" aria-label="My work sections">
+          {SECTIONS.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              className={"pm-chip" + (section === s.id ? " on" : "")}
+              aria-current={section === s.id ? "true" : undefined}
+              onClick={() => setSection(s.id)}
+            >
+              {s.label}
+              <span className="n">{shownCounts ? shownCounts[s.count] : "–"}</span>
+            </button>
+          ))}
+        </div>
+        {/* The page header's Refresh is for the open project; this view revalidates its own lists. */}
+        <button
+          type="button"
+          className={"pm-iconbtn pm-mw-refresh" + (isValidating ? " spinning" : "")}
+          aria-label="Refresh"
+          title="Refresh"
+          aria-busy={isValidating || undefined}
+          onClick={() => void mutate()}
+        >
+          <PmIcon name="refresh" size={15} />
+        </button>
       </div>
       <p className="pm-mw-hint">
         <PmIcon name="user" size={13} />

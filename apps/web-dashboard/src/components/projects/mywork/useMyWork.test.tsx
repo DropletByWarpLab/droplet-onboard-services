@@ -10,8 +10,10 @@ vi.mock("../calendar/pmGet", () => ({ pmGet: (url: string) => pmGet(url) }));
 
 import { MY_WORK_PAGE_SIZE, myWorkUrl, useMyWork } from "./useMyWork";
 
+// `focusThrottleInterval: 0`: SWR ignores a focus within 5s of the last revalidation
+// (a real tab regains focus later than that); a test cannot wait that long.
 const wrapper = ({ children }: { children: ReactNode }) => (
-  <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>{children}</SWRConfig>
+  <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0, focusThrottleInterval: 0 }}>{children}</SWRConfig>
 );
 
 function item(n: number, projectId: string): PmWorkItem {
@@ -89,8 +91,9 @@ describe("useMyWork", () => {
     expect(result.current.items.map((i) => i.id)).toEqual(["w1", "w2", "w3", "w4", "w5"]);
     expect(result.current.projects.map((p) => p.id)).toEqual(["p1", "p2"]);
     expect(result.current.total).toBe(5);
-    // Page 0 was fetched once; loading later pages did not re-request it.
-    expect(pmGet.mock.calls.filter(([u]) => String(u).endsWith("offset=0"))).toHaveLength(1);
+    // Loading a later page also re-requests the first (SWR's revalidateFirstPage), which is
+    // what keeps the counts and the head of the list fresh while someone pages through.
+    expect(pmGet.mock.calls.filter(([u]) => String(u).endsWith("offset=0")).length).toBeGreaterThanOrEqual(2);
   });
 
   it("a different day is a different request, so the lists follow local midnight", async () => {
@@ -104,6 +107,77 @@ describe("useMyWork", () => {
     await waitFor(() =>
       expect(pmGet).toHaveBeenCalledWith("/api/pm/my-work?section=overdue&today=2026-10-04&limit=100&offset=0"),
     );
+  });
+
+  it("refetches the first page when the window regains focus, so new work shows up without a reload", async () => {
+    pmGet.mockResolvedValueOnce(
+      page({ items: [item(1, "p1")], projects: [P1], total: 1, counts: { ...COUNTS, assigned: 1 }, nextOffset: null }),
+    );
+    const { result } = renderHook(() => useMyWork("assigned", "2026-10-03"), { wrapper });
+    await waitFor(() => expect(result.current.items).toHaveLength(1));
+    expect(pmGet).toHaveBeenCalledTimes(1);
+
+    // A teammate assigns two more items while this tab is open.
+    pmGet.mockResolvedValue(
+      page({
+        items: [item(1, "p1"), item(2, "p1"), item(3, "p1")],
+        projects: [P1],
+        total: 3,
+        counts: { ...COUNTS, assigned: 3 },
+        nextOffset: null,
+      }),
+    );
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await waitFor(() => expect(result.current.items).toHaveLength(3));
+    expect(result.current.counts?.assigned).toBe(3);
+    expect(pmGet).toHaveBeenCalledTimes(2);
+  });
+
+  it("a section that is opened again shows what it had, then refreshes it", async () => {
+    const cache = new Map();
+    const shared = ({ children }: { children: ReactNode }) => (
+      <SWRConfig value={{ provider: () => cache, dedupingInterval: 0 }}>{children}</SWRConfig>
+    );
+    pmGet.mockResolvedValueOnce(page({ items: [item(1, "p1")], projects: [P1], total: 1, counts: COUNTS }));
+    const first = renderHook(() => useMyWork("assigned", "2026-10-03"), { wrapper: shared });
+    await waitFor(() => expect(first.result.current.items).toHaveLength(1));
+    first.unmount();
+
+    pmGet.mockResolvedValue(
+      page({ items: [item(1, "p1"), item(2, "p1"), item(3, "p1")], projects: [P1], total: 3, counts: COUNTS }),
+    );
+    const second = renderHook(() => useMyWork("assigned", "2026-10-03"), { wrapper: shared });
+    expect(second.result.current.items).toHaveLength(1); // the cache, instantly
+    await waitFor(() => expect(second.result.current.items).toHaveLength(3)); // then the truth
+    expect(pmGet).toHaveBeenCalledTimes(2);
+  });
+
+  it("mutate() — Refresh, or an edit in the drawer — re-requests EVERY loaded page", async () => {
+    const hits: Record<string, number> = {};
+    const pages: Record<string, PmMyWorkPage> = {
+      "0": page({ items: [item(1, "p1"), item(2, "p1")], projects: [P1], total: 3, counts: COUNTS, nextOffset: 2 }),
+      "2": page({ items: [item(3, "p1")], projects: [P1], total: 3, counts: COUNTS, offset: 2, nextOffset: null }),
+    };
+    pmGet.mockImplementation(async (url: string) => {
+      const offset = new URL(url, "http://x").searchParams.get("offset") ?? "0";
+      hits[offset] = (hits[offset] ?? 0) + 1;
+      return pages[offset];
+    });
+    const { result } = renderHook(() => useMyWork("assigned", "2026-10-03"), { wrapper });
+    await waitFor(() => expect(result.current.items).toHaveLength(2));
+    await act(async () => {
+      result.current.loadMore();
+    });
+    await waitFor(() => expect(result.current.items).toHaveLength(3));
+    const before = { ...hits };
+
+    await act(async () => {
+      await result.current.mutate();
+    });
+    expect(hits["0"]).toBeGreaterThan(before["0"]);
+    expect(hits["2"]).toBeGreaterThan(before["2"]);
   });
 
   it("surfaces a failed first page as an error with no items", async () => {
