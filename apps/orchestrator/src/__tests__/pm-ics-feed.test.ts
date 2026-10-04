@@ -563,6 +563,58 @@ describe("WARP-3533 — the gates the route bypasses, re-checked inside it", () 
   });
 });
 
+describe("WARP-3533 — a hostile name cannot put a line of its own into a colleague's feed", () => {
+  // Item, project and state names are free text any member (or any pm:write
+  // token) can set, and they land in ANOTHER person's calendar. Every character
+  // a strict line reader splits on is tried, in all three places a name appears.
+  const NUL = String.fromCharCode(0);
+  const LS = String.fromCharCode(0x2028);
+  const PS = String.fromCharCode(0x2029);
+  const NEL = String.fromCharCode(0x85);
+  const SEPARATORS = ["\r", "\u000B", "\u000C", NEL, LS, PS, NUL];
+  const splitLikePython = (doc: string) => doc.split(new RegExp("\\r\\n|[\\n\\r\\v\\f\\x1c-\\x1e\\x85" + LS + PS + "]"));
+
+  for (const label of ["my work", "a project"]) {
+    it(`${label}: every separator in an item, project and state name becomes a space and starts no line`, async () => {
+      const db = makeDb();
+      for (const ch of SEPARATORS) {
+        db.projects.push({ id: `p-h${db.projects.length}`, identifier: "HOS", name: `Proj${ch}BEGIN:VALARM${ch}ACTION:DISPLAY`, isArchived: false });
+        const project = db.projects[db.projects.length - 1];
+        db.addItem({
+          projectId: project.id,
+          name: `Standup${ch}ATTENDEE:mailto:evil@x.test${ch}URL:https://evil.test/`,
+          assignees: ["u-alice"],
+          state: { name: `Todo${ch}X-EVIL:1`, group: "unstarted" },
+        });
+      }
+      const target: FeedTarget =
+        label === "my work" ? { scope: "pm_my_work" } : { scope: "pm_project", projectId: db.projects[db.projects.length - 1].id };
+      const l = await link(db, "u-alice", target);
+      const res = await fetchFeed(db, l, freshIp());
+      expect(res.status).toBe(200);
+
+      // none of the characters survives (the CRLF line ends are the only CRs)
+      const stripped = res.text.replace(/\r\n/g, "");
+      for (const ch of SEPARATORS) expect(stripped.includes(ch), `U+${ch.charCodeAt(0).toString(16)}`).toBe(false);
+
+      // and no reader, however it splits, finds a property or component the person did not get
+      const lines = splitLikePython(res.text).filter(Boolean);
+      for (const forbidden of ["BEGIN:VALARM", "END:VALARM", "ACTION:", "ATTENDEE", "X-EVIL", "URL:https://evil"]) {
+        expect(lines.filter((x) => x.startsWith(forbidden)), forbidden).toEqual([]);
+      }
+      const eventCount = label === "my work" ? SEPARATORS.length : 1;
+      expect(lines.filter((x) => x === "BEGIN:VEVENT")).toHaveLength(eventCount);
+      expect(lines.filter((x) => x.startsWith("SUMMARY:"))).toHaveLength(eventCount);
+      expect(lines.filter((x) => x.startsWith("URL:"))).toHaveLength(eventCount);
+
+      // the words survive, joined by a space
+      expect(res.text).toContain("Standup ATTENDEE:mailto:evil@x.test URL:https://evil.test/");
+      expect(res.text).toContain("State: Todo X-EVIL:1");
+      expect(events(res.text)).toHaveLength(eventCount);
+    });
+  }
+});
+
 describe("WARP-3533 — the feed routes are rate limited, and never log the link", () => {
   it("the calendar feed and both work feeds share one budget per client, then 429", async () => {
     const db = makeDb();

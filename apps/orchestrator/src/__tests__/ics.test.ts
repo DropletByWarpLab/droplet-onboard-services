@@ -330,6 +330,91 @@ describe("serializeIcs — STATUS (WARP-3533)", () => {
   });
 });
 
+// ── WARP-3533: nothing a caller types may end a content line ──
+//
+// RFC 5545 ends a content line at CRLF, but consumers built on `str.splitlines()`
+// (and any Unicode-aware line reader) also split on a bare CR, VT, FF, the
+// 0x1C-0x1E separators, NEL, LS and PS. A work-item name is free text one person
+// writes and a colleague's calendar app reads, so each of them must become a
+// space. One case per character, through every text-typed and URI-typed field.
+describe("serializeIcs — content-line injection (WARP-3533)", () => {
+  /** Python's str.splitlines() boundaries: the strictest common reader. */
+  const splitLikePython = (doc: string) => doc.split(/\r\n|[\n\r\u000B\u000C\u001C-\u001E\u0085\u{2028}\u{2029}]/u);
+
+  const BREAKERS: Array<[string, string]> = [
+    ["NUL", "\u0000"],
+    ["bare CR", "\r"],
+    ["VT", "\u000B"],
+    ["FF", "\u000C"],
+    ["FS (0x1C)", "\u001C"],
+    ["US (0x1F)", "\u001F"],
+    ["DEL", "\u007F"],
+    ["NEL (U+0085)", "\u0085"],
+    ["LS (U+2028)", String.fromCharCode(0x2028)],
+    ["PS (U+2029)", String.fromCharCode(0x2029)],
+  ];
+
+  const base = {
+    startsAt: new Date("2026-10-05T00:00:00Z"),
+    endsAt: new Date("2026-10-06T00:00:00Z"),
+    allDay: true,
+  };
+
+  it.each(BREAKERS)("%s in a name, description, place, link, calendar name or uid becomes a space and starts no line", (_name, ch) => {
+    const out = serializeIcs(
+      [
+        {
+          ...base,
+          uid: `pm-1@droplet${ch}ATTENDEE:mailto:uid@x.test`,
+          summary: `Standup${ch}BEGIN:VALARM${ch}ACTION:DISPLAY${ch}END:VALARM`,
+          description: `Notes${ch}ATTENDEE:mailto:desc@x.test`,
+          location: `Room${ch}ORGANIZER:mailto:loc@x.test`,
+          meetingUrl: `https://box.test/projects?p=ABC${ch}URL:https://evil.test/`,
+        },
+      ],
+      `Droplet${ch}X-EVIL:1`,
+    );
+
+    // The character itself is gone from the document (the CRLF line ends are the
+    // only CRs there should be)…
+    expect(out.replace(/\r\n/g, "")).not.toContain(ch);
+    // …replaced by a space, in every field…
+    expect(out).toContain("SUMMARY:Standup BEGIN:VALARM ACTION:DISPLAY END:VALARM\r\n");
+    expect(out).toContain("DESCRIPTION:Notes ATTENDEE:mailto:desc@x.test\r\n");
+    expect(out).toContain("LOCATION:Room ORGANIZER:mailto:loc@x.test\r\n");
+    expect(out).toContain("URL:https://box.test/projects?p=ABC URL:https://evil.test/\r\n");
+    expect(out).toContain("X-WR-CALNAME:Droplet X-EVIL:1\r\n");
+    expect(out).toContain("UID:pm-1@droplet ATTENDEE:mailto:uid@x.test\r\n");
+    // …so no reader, however it splits, finds a property or component the caller did not get.
+    const lines = splitLikePython(out).filter(Boolean);
+    expect(lines.filter((l) => l.startsWith("BEGIN:VALARM") || l.startsWith("END:VALARM"))).toEqual([]);
+    for (const injected of ["ACTION:", "ATTENDEE", "ORGANIZER", "X-EVIL", "URL:https://evil"]) {
+      expect(lines.filter((l) => l.startsWith(injected)), injected).toEqual([]);
+    }
+    expect(lines.filter((l) => l === "BEGIN:VEVENT")).toHaveLength(1);
+    expect(lines.filter((l) => l.startsWith("UID:"))).toHaveLength(1);
+    expect(lines.filter((l) => l.startsWith("URL:"))).toHaveLength(1);
+  });
+
+  it("still escapes a real line feed (CRLF or LF) as the \\n escape, and keeps a TAB", () => {
+    const out = serializeIcs([{ ...base, uid: "a@droplet", summary: "one\r\ntwo\nthree\tfour", description: "x\r\ny" }]);
+    expect(out).toContain("SUMMARY:one\\ntwo\\nthree\tfour\r\n");
+    expect(out).toContain("DESCRIPTION:x\\ny\r\n");
+  });
+
+  it("a UID is one token: LF and TAB in it become spaces too", () => {
+    const out = serializeIcs([{ ...base, uid: "a@droplet\nATTENDEE:mailto:x@y\tz", summary: "s" }]);
+    expect(out).toContain("UID:a@droplet ATTENDEE:mailto:x@y z\r\n");
+    expect(splitLikePython(out).some((l) => l.startsWith("ATTENDEE"))).toBe(false);
+  });
+
+  it("leaves ordinary text, Unicode and punctuation alone", () => {
+    const out = serializeIcs([{ ...base, uid: "u@droplet", summary: "Café – naïve ✓ 日本語", description: "a; b, c \\ d" }]);
+    expect(out).toContain("SUMMARY:Café – naïve ✓ 日本語\r\n");
+    expect(out).toContain("DESCRIPTION:a\\; b\\, c \\\\ d\r\n");
+  });
+});
+
 // ── WARP-2763: nested components must not leak into the parent VEVENT ──
 //
 // 🔴 Every fixture here puts the nested component AFTER the event's own
