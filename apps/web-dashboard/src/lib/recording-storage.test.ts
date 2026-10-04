@@ -8,14 +8,19 @@
  * build has never heard of — and never crash on any of them.
  */
 import { describe, it, expect } from "vitest";
+import type { RecordingStorage } from "./types";
 import {
   RECORDING_STORAGE_HREF,
   SETTINGS_STORAGE_HREF,
   cameraNeedShares,
+  MIGRATION_RETRY_COPY,
   describeWarning,
+  effectiveRecordingStatus,
   formatRate,
   friendlyRecordingStorageError,
+  isWholeDriveBlockedByFiles,
   normalizeRecordingStorage,
+  oldFootagePlace,
   recordingStatusView,
   recordingsDriveName,
 } from "./recording-storage";
@@ -513,5 +518,140 @@ describe("link targets", () => {
   it("points at the Settings → Storage page and the system-page card anchor", () => {
     expect(SETTINGS_STORAGE_HREF).toBe("/settings/storage");
     expect(RECORDING_STORAGE_HREF).toBe("/cameras/system#recording-storage");
+  });
+});
+
+describe("effectiveRecordingStatus — missing > migrating > degraded > on_system_disk > pending > active > no_eligible_drive", () => {
+  const migrating = { state: "running" as const, progressPct: 5, bytesCopied: 0, bytesTotal: 0, startedAt: null, error: null };
+  const idle = { state: "idle" as const, progressPct: 0, bytesCopied: 0, bytesTotal: 0, startedAt: null, error: null };
+  const eff = (
+    status: Parameters<typeof effectiveRecordingStatus>[0]["status"],
+    codes: string[] = [],
+    migration: RecordingStorage["migration"] = idle,
+  ) =>
+    effectiveRecordingStatus({
+      status,
+      warnings: codes.map((code) => ({ code, message: "" })),
+      migration,
+    });
+
+  it("trusts the status when nothing contradicts it", () => {
+    for (const s of ["missing", "migrating", "degraded", "on_system_disk", "pending", "active", "no_eligible_drive"] as const) {
+      expect(eff(s)).toBe(s);
+    }
+  });
+
+  it("a missing drive outranks everything else", () => {
+    expect(eff("active", ["drive_missing"])).toBe("missing");
+    expect(eff("migrating", ["drive_missing"])).toBe("missing");
+    expect(eff("degraded", ["drive_missing"], migrating)).toBe("missing");
+  });
+
+  it("a move in flight outranks degraded, on-the-system-drive, pending and active", () => {
+    expect(eff("active", [], migrating)).toBe("migrating");
+    expect(eff("pending", [], migrating)).toBe("migrating");
+    expect(eff("degraded", [], migrating)).toBe("migrating");
+    expect(eff("on_system_disk", [], migrating)).toBe("migrating");
+  });
+
+  it("a failing drive (read-only, SMART, cannot grow) is degraded even when the status says active", () => {
+    expect(eff("active", ["read_only"])).toBe("degraded");
+    expect(eff("active", ["smart_failed"])).toBe("degraded");
+    expect(eff("pending", ["cannot_grow"])).toBe("degraded");
+    expect(eff("on_system_disk", ["read_only"])).toBe("degraded");
+  });
+
+  it("near-full alone does not change the status (it is a warning, not a state)", () => {
+    expect(eff("active", ["near_full"])).toBe("active");
+  });
+
+  it("on the system drive outranks pending, active and no-eligible-drive", () => {
+    expect(eff("pending", ["on_system_disk"])).toBe("on_system_disk");
+    expect(eff("active", ["on_system_disk"])).toBe("on_system_disk");
+    expect(eff("no_eligible_drive", ["on_system_disk"])).toBe("on_system_disk");
+  });
+
+  it("an unrecognised status yields to any recognised signal, and stays unknown otherwise", () => {
+    expect(eff("unknown")).toBe("unknown");
+    expect(eff("unknown", ["drive_missing"])).toBe("missing");
+    expect(eff("unknown", [], migrating)).toBe("migrating");
+  });
+});
+
+describe("isWholeDriveBlockedByFiles — Whole drive is only allowed on a drive whose files/ is empty", () => {
+  const err = (status: number, message: string, code?: string) =>
+    Object.assign(new Error(message), { status, ...(code ? { code } : {}) });
+
+  it.each(["files_not_empty", "drive_has_files", "files_present"])("recognises the code %s", (code) => {
+    expect(isWholeDriveBlockedByFiles(err(409, "x", code))).toBe(true);
+  });
+
+  it.each([
+    "files/ is not empty",
+    "The drive still holds files",
+    "drive has files in files/",
+    "Cannot use the whole drive: files present",
+  ])("recognises 409 prose: %s", (message) => {
+    expect(isWholeDriveBlockedByFiles(err(409, message))).toBe(true);
+  });
+
+  it.each([
+    err(409, "migration running"),
+    err(409, "drive busy"),
+    err(500, "files/ is not empty"),
+    err(403, "no"),
+    new Error("files/ is not empty"),
+    null,
+    "files_not_empty",
+  ])("is false for %o", (value) => {
+    expect(isWholeDriveBlockedByFiles(value)).toBe(false);
+  });
+
+  it("friendlyRecordingStorageError explains it, and says where the files are", () => {
+    const text = friendlyRecordingStorageError(err(409, "files/ is not empty"), "mode");
+    expect(text).toMatch(/holds no files|no files on it/i);
+    expect(text).toMatch(/move your files off/i);
+  });
+});
+
+describe("friendlyRecordingStorageError — regenerate", () => {
+  const err = (status: number) => Object.assign(new Error("raw"), { status });
+
+  it("403 is an owner-only matter", () => {
+    expect(friendlyRecordingStorageError(err(403), "regenerate")).toMatch(/only the droplet's owner/i);
+  });
+
+  it("409 says now is not the moment", () => {
+    expect(friendlyRecordingStorageError(err(409), "regenerate")).toMatch(/right now/i);
+  });
+
+  it("404 says it is not available yet", () => {
+    expect(friendlyRecordingStorageError(err(404), "regenerate")).toMatch(/isn.t available/i);
+  });
+});
+
+describe("MIGRATION_RETRY_COPY — the failed-move retry schedule", () => {
+  it("names the 1 h / 6 h / 24 h schedule, in order", () => {
+    expect(MIGRATION_RETRY_COPY).toMatch(/1 hour.*6 hours.*24 hours/);
+  });
+});
+
+describe("oldFootagePlace — where the old recordings are", () => {
+  it("the system drive, for the usual first move", () => {
+    expect(oldFootagePlace("system_disk")).toEqual({
+      where: "the system drive",
+      action: "Delete old recordings from system drive",
+      summary: "system drive",
+    });
+  });
+
+  it("the previous recording drive, when a move left them on a bay drive", () => {
+    for (const location of ["bay_drive", "fs-uuid-9", "Bay 3"]) {
+      expect(oldFootagePlace(location)).toEqual({
+        where: "the previous recording drive",
+        action: "Delete old recordings from previous drive",
+        summary: "previous drive",
+      });
+    }
   });
 });

@@ -12,15 +12,18 @@
  * the render/interaction layer directly (the same shape DrivesPanel.test uses).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within, cleanup } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { RecordingStorage } from "@/lib/types";
 import type { UseRecordingStorage } from "@/lib/hooks/useRecordingStorage";
 
-const hook = vi.hoisted(() => ({ value: undefined as unknown }));
+const hook = vi.hoisted(() => ({ value: undefined as unknown, args: [] as unknown[] }));
 vi.mock("@/lib/hooks/useRecordingStorage", () => ({
-  useRecordingStorage: () => hook.value,
+  useRecordingStorage: (...args: unknown[]) => {
+    hook.args = args;
+    return hook.value;
+  },
 }));
 
 const auth = vi.hoisted(() => ({ role: "owner" as string }));
@@ -238,7 +241,7 @@ describe("RecordingStorageCard — pending and migrating", () => {
     );
     const block = screen.getByTestId("recording-migration");
     expect(block).toHaveTextContent(/didn't finish/i);
-    expect(block).toHaveTextContent(/kept where they were/i);
+    expect(block).toHaveTextContent(/nothing was lost/i);
     expect(document.body.textContent).not.toMatch(/rsync|sdb1/);
   });
 });
@@ -374,7 +377,7 @@ describe("RecordingStorageCard — switching mode is a tier-2 confirm", () => {
 
     const dialog = screen.getByRole("dialog");
     expect(within(dialog).getByRole("heading", { name: /use the whole drive for recordings/i })).toBeInTheDocument();
-    expect(dialog).toHaveTextContent(/less room for files/i);
+    expect(dialog).toHaveTextContent(/no longer show up in files/i);
     expect(dialog).toHaveTextContent(/write · confirm to apply/i);
     expect(updateMock).not.toHaveBeenCalled();
     // The radios are controlled by the server's mode, so nothing flipped.
@@ -433,15 +436,6 @@ describe("RecordingStorageCard — roles", () => {
   it("an admin can change mode", () => {
     setup(makeRecording(), { role: "admin" });
     for (const radio of screen.getAllByRole("radio")) expect(radio).toBeEnabled();
-  });
-
-  it("a family member sees the state but cannot change it — and is told why", () => {
-    setup(makeRecording({ oldFootage: { present: true, bytes: 5 * GIB, location: "system_disk" } }), {
-      role: "family",
-    });
-    for (const radio of screen.getAllByRole("radio")) expect(radio).toBeDisabled();
-    expect(screen.getByText(/only the owner or an admin can change this/i)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /delete old recordings/i })).not.toBeInTheDocument();
   });
 });
 
@@ -718,6 +712,219 @@ describe("RecordingStorageCard — accessibility", () => {
   });
 });
 
+describe("RecordingStorageCard — a family account never sees it (403 on the route)", () => {
+  it("renders nothing for a family account, even if data were somehow supplied", () => {
+    setup(makeRecording(), { role: "family" });
+    expect(screen.queryByTestId("recording-storage-card")).not.toBeInTheDocument();
+  });
+
+  it("does not even ask: the hook is disabled for roles that would get a 403", () => {
+    setup(makeRecording(), { role: "family" });
+    expect(hook.args[0]).toEqual({ enabled: false });
+    cleanup();
+    setup(makeRecording(), { role: "guest" });
+    expect(hook.args[0]).toEqual({ enabled: false });
+    cleanup();
+    setup(makeRecording(), { role: "owner" });
+    expect(hook.args[0]).toEqual({ enabled: true });
+    cleanup();
+    setup(makeRecording(), { role: "admin" });
+    expect(hook.args[0]).toEqual({ enabled: true });
+  });
+});
+
+describe("RecordingStorageCard — status precedence: missing > migrating > degraded > on_system_disk > pending > active > no_eligible_drive", () => {
+  const running = {
+    state: "running" as const,
+    progressPct: 40,
+    bytesCopied: 4 * GIB,
+    bytesTotal: 10 * GIB,
+    startedAt: null,
+    error: null,
+  };
+
+  it("a drive_missing warning beats an 'active' status: the headline is Drive missing and stale numbers are not shown", () => {
+    setup(makeRecording({ status: "active", warnings: [{ code: "drive_missing", message: "" }] }));
+    expect(screen.getByText("Drive missing")).toBeInTheDocument();
+    expect(screen.queryByText("Active")).not.toBeInTheDocument();
+    expect(screen.queryByRole("meter")).not.toBeInTheDocument();
+    expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+  });
+
+  it("a running move beats 'pending' and 'degraded'", () => {
+    setup(makeRecording({ status: "pending", migration: running }));
+    expect(screen.getByText("Moving recordings")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: /moving recordings/i })).toBeInTheDocument();
+    cleanup();
+    setup(makeRecording({ status: "degraded", migration: running }));
+    expect(screen.getByText("Moving recordings")).toBeInTheDocument();
+  });
+
+  it("a failing drive beats 'active': Needs attention", () => {
+    setup(makeRecording({ status: "active", warnings: [{ code: "smart_failed", message: "" }] }));
+    expect(screen.getByText("Needs attention")).toBeInTheDocument();
+  });
+
+  it("recordings on the system drive beat 'pending'", () => {
+    setup(
+      makeRecording({
+        status: "pending",
+        mode: null,
+        drive: null,
+        warnings: [{ code: "on_system_disk", message: "" }],
+      }),
+    );
+    expect(screen.getByText("On the system drive")).toBeInTheDocument();
+  });
+
+  it("near-full alone does not change the headline", () => {
+    setup(makeRecording({ status: "active", warnings: [{ code: "near_full", message: "" }] }));
+    expect(screen.getByText("Active")).toBeInTheDocument();
+  });
+});
+
+describe("RecordingStorageCard — a move that did not finish", () => {
+  const failed = () =>
+    makeRecording({
+      migration: {
+        state: "failed",
+        progressPct: 12,
+        bytesCopied: 1,
+        bytesTotal: 10,
+        startedAt: null,
+        error: "rsync exited 23 at /dev/sdb1",
+      },
+    });
+
+  it("says nothing was lost and cameras are still recording where they were", () => {
+    setup(failed());
+    const block = screen.getByTestId("recording-migration");
+    expect(block).toHaveTextContent(/still recording (to|where)/i);
+    expect(block).toHaveTextContent(/nothing was lost/i);
+  });
+
+  it("names the automatic retry schedule — 1 hour, then 6, then 24 — and that you will be told", () => {
+    setup(failed());
+    const block = screen.getByTestId("recording-migration");
+    expect(block).toHaveTextContent(/1 hour/i);
+    expect(block).toHaveTextContent(/6 hours/i);
+    expect(block).toHaveTextContent(/24 hours/i);
+    expect(block).toHaveTextContent(/tells you if it still can't finish/i);
+  });
+
+  it("is announced to assistive tech", () => {
+    setup(failed());
+    expect(screen.getByTestId("recording-migration")).toHaveAttribute("role", "alert");
+  });
+});
+
+describe("RecordingStorageCard — Whole drive removes the drive from Files, and is refused while files/ is not empty", () => {
+  const filesRefusal = () =>
+    Object.assign(new Error("files/ is not empty"), { status: 409, code: "files_not_empty" });
+
+  async function tryWholeDrive() {
+    fireEvent.click(screen.getByRole("radio", { name: /whole drive/i }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /use whole drive/i }));
+  }
+
+  it("says in the option itself that the drive is removed from Files", () => {
+    setup(makeRecording());
+    expect(screen.getByRole("radio", { name: /whole drive/i })).toHaveAccessibleName(/removed from files/i);
+  });
+
+  it("says it again in the confirm, before anything is applied", () => {
+    setup(makeRecording());
+    fireEvent.click(screen.getByRole("radio", { name: /whole drive/i }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent(/no longer show up in Files/i);
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
+  it("when the box refuses because the drive still holds files: says why, closes the confirm, and locks the option with the reason", async () => {
+    updateMock.mockRejectedValueOnce(filesRefusal());
+    setup(makeRecording());
+    await tryWholeDrive();
+
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith(expect.stringMatching(/holds no files/i), "error"),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    expect(screen.getByRole("radio", { name: /whole drive/i })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: /auto-sized/i })).toBeChecked();
+    expect(screen.getByTestId("whole-drive-blocked")).toHaveTextContent(/no files on it/i);
+    expect(screen.getByTestId("whole-drive-blocked")).toHaveTextContent(/move your files off/i);
+  });
+
+  it("'Check again' lifts the lock so the owner can retry once the files are gone", async () => {
+    updateMock.mockRejectedValueOnce(filesRefusal());
+    setup(makeRecording());
+    await tryWholeDrive();
+    await screen.findByTestId("whole-drive-blocked");
+
+    fireEvent.click(screen.getByRole("button", { name: /check again/i }));
+
+    expect(screen.queryByTestId("whole-drive-blocked")).not.toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /whole drive/i })).toBeEnabled();
+  });
+
+  it("any OTHER 409 (a move already running) is not mistaken for the files refusal", async () => {
+    updateMock.mockRejectedValueOnce(Object.assign(new Error("migration running"), { status: 409 }));
+    setup(makeRecording());
+    await tryWholeDrive();
+    await waitFor(() => expect(toastMock).toHaveBeenCalled());
+    expect(toastMock.mock.calls[0]![0]).toMatch(/right now|already|moving/i);
+    expect(screen.queryByTestId("whole-drive-blocked")).not.toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /whole drive/i })).toBeEnabled();
+  });
+
+  it("the lock belongs to the drive it was learned on", () => {
+    // A different recording drive starts unlocked (state is keyed by fsUuid, not
+    // remembered for the page).
+    updateMock.mockRejectedValueOnce(filesRefusal());
+    const { rerender } = setup(makeRecording());
+    fireEvent.click(screen.getByRole("radio", { name: /whole drive/i }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /use whole drive/i }));
+    return waitFor(() => expect(screen.getByRole("radio", { name: /whole drive/i })).toBeDisabled()).then(() => {
+      hook.value = {
+        state: "ready",
+        refresh,
+        recording: makeRecording({
+          drive: { fsUuid: "fs-OTHER", label: "Bay 3", model: "", sizeBytes: 1000 * GIB, encrypted: true, mountPath: "" },
+        }),
+      } satisfies UseRecordingStorage;
+      rerender(<RecordingStorageCard />);
+      expect(screen.getByRole("radio", { name: /whole drive/i })).toBeEnabled();
+    });
+  });
+});
+
+describe("RecordingStorageCard — old recordings left on a bay drive", () => {
+  const onBayDrive = () =>
+    makeRecording({
+      oldFootage: { present: true, bytes: 12 * GIB, location: "fs-uuid-of-the-previous-drive" },
+      migration: { state: "done", progressPct: 100, bytesCopied: 12 * GIB, bytesTotal: 12 * GIB, startedAt: null, error: null },
+    });
+
+  it("says the previous recording drive, not the system drive", () => {
+    setup(onBayDrive());
+    const block = screen.getByTestId("recording-old-footage");
+    expect(block).toHaveTextContent(/still on the previous recording drive/i);
+    expect(block).not.toHaveTextContent(/system drive/i);
+    expect(within(block).getByRole("button", { name: /delete old recordings from previous drive/i })).toBeInTheDocument();
+  });
+
+  it("the tier-3 confirm names that place too", async () => {
+    deleteMock.mockResolvedValueOnce(undefined);
+    setup(onBayDrive());
+    fireEvent.click(screen.getByRole("button", { name: /delete old recordings from previous drive/i }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent(/previous recording drive/i);
+    expect(dialog).toHaveTextContent(/previous drive/i);
+    expect(dialog).not.toHaveTextContent(/system drive/i);
+  });
+});
+
 /**
  * jsdom never loads the stylesheet, so the colour contract is pinned the way the
  * shell's other CSS contracts are (cameras.page-rhythm.test.tsx): read the file.
@@ -731,8 +938,8 @@ describe("recording-storage.css — tokens only", () => {
   });
 
   it("carries no raw colour literals", () => {
-    expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}/);
-    expect(css).not.toMatch(/rgba?\(/);
+    expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+    expect(css).not.toMatch(/\brgba?\(/);
   });
 
   it("has a phone layer at the shell's 720px breakpoint that stacks the table and mode switch", () => {

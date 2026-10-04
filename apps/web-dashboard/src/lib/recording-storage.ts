@@ -271,6 +271,79 @@ export function cameraNeedShares(
   }));
 }
 
+// ─── Which state wins ─────────────────────────────────────────────────────
+
+/**
+ * The orchestrator's own precedence for a drive that is in more than one
+ * condition at once (WARP-3512, "Decisions settled 2026-10-04"): a missing drive
+ * is the headline whatever else is true, then a move in flight, then a degraded
+ * drive, then recordings on the system drive, then a pending set-up, then plain
+ * active, with "no eligible drive" the quietest. `unknown` (a status this build
+ * does not recognise) yields to any recognised signal.
+ */
+const STATUS_PRECEDENCE: readonly RecordingStorageStatus[] = [
+  "missing",
+  "migrating",
+  "degraded",
+  "on_system_disk",
+  "pending",
+  "active",
+  "no_eligible_drive",
+  "unknown",
+];
+
+/**
+ * The status the card renders. The API sends one `status`, already ordered by the
+ * precedence above — but the rest of the payload can say more (a `drive_missing`
+ * warning beside `active`, a running migration beside `pending`), and a card
+ * that headlines "Active" over a missing drive would be telling the owner
+ * something false. So the structured signals are folded in and the highest
+ * precedence wins. `near_full` alone is a warning, not a state.
+ */
+export function effectiveRecordingStatus(
+  r: Pick<RecordingStorage, "status" | "warnings" | "migration">,
+): RecordingStorageStatus {
+  const codes = new Set(r.warnings.map((w) => w.code));
+  const candidates: RecordingStorageStatus[] = [r.status];
+  if (codes.has("drive_missing")) candidates.push("missing");
+  if (r.migration.state === "running") candidates.push("migrating");
+  if (codes.has("read_only") || codes.has("smart_failed") || codes.has("cannot_grow")) {
+    candidates.push("degraded");
+  }
+  if (codes.has("on_system_disk")) candidates.push("on_system_disk");
+  return candidates.reduce((best, c) =>
+    STATUS_PRECEDENCE.indexOf(c) < STATUS_PRECEDENCE.indexOf(best) ? c : best,
+  );
+}
+
+/** What the card says about a move that did not finish. The orchestrator puts
+ *  Frigate back on the OLD source before it reports `failed`, so nothing is
+ *  lost and cameras keep recording where they were; it retries on its own at
+ *  1 h / 6 h / 24 h, then goes back to pending with a warning and a
+ *  notification. */
+export const MIGRATION_RETRY_COPY =
+  "Droplet tries again on its own — in about 1 hour, then 6 hours, then 24 hours — and tells you if it still can't finish.";
+
+/** Where the recordings left behind by a move are, in words. `system_disk` is
+ *  the usual first move; anything else is a bay drive the recordings moved off. */
+export function oldFootagePlace(location: string): {
+  where: string;
+  action: string;
+  summary: string;
+} {
+  return location === "system_disk"
+    ? {
+        where: "the system drive",
+        action: "Delete old recordings from system drive",
+        summary: "system drive",
+      }
+    : {
+        where: "the previous recording drive",
+        action: "Delete old recordings from previous drive",
+        summary: "previous drive",
+      };
+}
+
 // ─── Warnings → copy + the fix ────────────────────────────────────────────
 
 /** What the owner can do about a warning, from where they stand. */
@@ -398,7 +471,42 @@ export function describeWarning(w: RecordingWarning, ctx: WarningContext): Warni
 
 // ─── Errors ───────────────────────────────────────────────────────────────
 
-export type RecordingStorageAction = "mode" | "drive" | "delete-old" | "recovery-key";
+export type RecordingStorageAction =
+  | "mode"
+  | "drive"
+  | "delete-old"
+  | "recovery-key"
+  | "regenerate";
+
+const FILES_BLOCK_CODES: ReadonlySet<string> = new Set([
+  "files_not_empty",
+  "drive_has_files",
+  "files_present",
+]);
+
+/**
+ * "Whole drive" is only allowed on a drive whose `files/` is empty (the drive is
+ * then removed from Files). The refusal is a 409; this tells it apart from the
+ * other 409s (a move already running, a busy drive), by its code or, failing
+ * that, by prose that talks about files being present. Never true for a
+ * non-409: a 500 that happens to mention files is not a refusal.
+ */
+export function isWholeDriveBlockedByFiles(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const { status, code, message } = err as {
+    status?: unknown;
+    code?: unknown;
+    message?: unknown;
+  };
+  if (status !== 409) return false;
+  if (typeof code === "string" && FILES_BLOCK_CODES.has(code)) return true;
+  return (
+    typeof message === "string" &&
+    /not empty|\b(holds?|has|have|contains?|present)\b[^.]{0,30}\bfiles?\b|\bfiles?\b[^.]{0,30}\b(present|in use|exist)/i.test(
+      message,
+    )
+  );
+}
 
 /**
  * A failed recording-storage call → calm, honest, home-user copy. The server's
@@ -417,7 +525,8 @@ export function friendlyRecordingStorageError(
     err && typeof err === "object" && typeof (err as { status?: unknown }).status === "number"
       ? (err as { status: number }).status
       : undefined;
-  const ownerOnly = action === "delete-old" || action === "recovery-key";
+  const ownerOnly = action === "delete-old" || action === "recovery-key" || action === "regenerate";
+  const keyAction = action === "recovery-key" || action === "regenerate";
 
   switch (status) {
     case 403:
@@ -425,11 +534,20 @@ export function friendlyRecordingStorageError(
         ? "Only the Droplet's owner can do that."
         : "Only the Droplet's owner or an admin can change recording storage.";
     case 404:
-      return "Recording storage isn't available on this Droplet yet.";
+      return keyAction
+        ? "That isn't available on this Droplet yet."
+        : "Recording storage isn't available on this Droplet yet.";
     case 409:
-      return action === "delete-old"
-        ? "Old recordings can't be deleted until the move to the new drive has finished."
-        : "Recording storage can't be changed right now — recordings are already being moved, or the drive is busy. Try again in a few minutes.";
+      if (action === "delete-old") {
+        return "Old recordings can't be deleted until the move to the new drive has finished.";
+      }
+      if (action === "regenerate") {
+        return "A new recovery key can't be generated right now. Try again in a few minutes.";
+      }
+      if (isWholeDriveBlockedByFiles(err)) {
+        return "Whole drive can only be used on a drive that holds no files, and this one still has some. Move your files off it first, then try again.";
+      }
+      return "Recording storage can't be changed right now — recordings are already being moved, or the drive is busy. Try again in a few minutes.";
     case 503:
       return "The storage service isn't reachable right now. Try again in a moment.";
     default:

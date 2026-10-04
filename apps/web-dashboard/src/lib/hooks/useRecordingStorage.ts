@@ -41,11 +41,18 @@ const IDLE_REFRESH_MS = 30_000;
 /**
  * GET /api/storage/recordings, shared by every surface that shows it (the
  * Recording storage card on /cameras/system, the per-camera settings note).
- * One SWR key, so they share a single request.
+ * One SWR key, so they share a single request. Pass `{ enabled: false }` for a
+ * role that may not read it (see the note on the key below).
  */
-export function useRecordingStorage(): UseRecordingStorage {
+export function useRecordingStorage(
+  { enabled = true }: { enabled?: boolean } = {},
+): UseRecordingStorage {
+  // `enabled: false` is for a role that is known to get a 403 (a family account:
+  // the route and its writes are owner/admin only). SWR with a null key never
+  // fetches, so that role never provokes the 403 at all, and the surface sees the
+  // same `forbidden` it would have after one.
   const { data, error, mutate } = useSWR<RecordingStorageResult>(
-    "/api/storage/recordings",
+    enabled ? "/api/storage/recordings" : null,
     fetchRecordingStorage,
     {
       refreshInterval: (latest) =>
@@ -54,6 +61,8 @@ export function useRecordingStorage(): UseRecordingStorage {
           : IDLE_REFRESH_MS,
     },
   );
+
+  if (!enabled) return { state: "forbidden", recording: null, refresh: mutate };
 
   // Stale-while-error: SWR keeps the last good `data` when a refetch fails, and
   // a card that still has numbers to show should show them.

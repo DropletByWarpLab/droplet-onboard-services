@@ -16,17 +16,25 @@ import { useAuth } from "@/lib/auth";
 import { useRecordingStorage } from "@/lib/hooks/useRecordingStorage";
 import { formatBinaryBytes } from "@/lib/format-bytes";
 import {
+  MIGRATION_RETRY_COPY,
   RECORDING_STORAGE_ANCHOR,
   SETTINGS_STORAGE_HREF,
   cameraNeedShares,
   describeWarning,
+  effectiveRecordingStatus,
   formatRate,
   friendlyRecordingStorageError,
+  isWholeDriveBlockedByFiles,
+  oldFootagePlace,
   recordingStatusView,
   recordingsDriveName,
   type WarningFix,
 } from "@/lib/recording-storage";
-import type { RecordingStorage, RecordingStorageMode } from "@/lib/types";
+import type {
+  RecordingStorage,
+  RecordingStorageMode,
+  RecordingStorageStatus,
+} from "@/lib/types";
 import { useToast } from "@/components/Toast";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { DestructiveConfirm } from "@/components/settings/DestructiveConfirm";
@@ -55,15 +63,18 @@ import "./recording-storage.css";
  * every number it prints is derived from the normalised `RecordingStorage`.
  */
 export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) {
-  const { state, recording, refresh } = useRecordingStorage();
   const { user } = useAuth();
+  // GET /storage/recordings and every write on it are owner + admin only; a
+  // family account gets a 403. Such a role never even issues the request (the
+  // hook is disabled) and sees no card — not an error, not an empty frame.
+  const canManage = user?.role === "owner" || user?.role === "admin";
+  const { state, recording, refresh } = useRecordingStorage({ enabled: canManage });
   const { toast } = useToast();
   const headingId = useId();
   const pickerRef = useRef<HTMLSelectElement | null>(null);
 
-  // The writes: PUT /storage/recordings is owner/admin; the old-footage delete
-  // is owner-only. The server enforces both — this only decides what to offer.
-  const canManage = user?.role === "owner" || user?.role === "admin";
+  // The old-footage delete and the recovery key are owner-only; the server
+  // enforces both — this only decides what to offer.
   const isOwner = user?.role === "owner";
 
   // What the tier-2 confirm is currently asking about (null = no dialog).
@@ -81,11 +92,23 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
+  // "Whole drive" needs a drive whose files/ is empty (and then removes the drive
+  // from Files). The recordings payload does not say whether files/ is empty, so
+  // the owner learns it from the refusal; remember it FOR THAT DRIVE so the option
+  // stays locked, with the reason, instead of offering what will be refused again.
+  const [wholeBlockedFor, setWholeBlockedFor] = useState<string | null>(null);
 
   // A role that may not read it sees nothing at all — not an empty frame.
-  if (state === "forbidden") return null;
+  if (!canManage || state === "forbidden") return null;
 
-  const status = recording ? recordingStatusView(recording.status) : null;
+  // The orchestrator's own precedence (missing > migrating > degraded >
+  // on_system_disk > pending > active > no_eligible_drive), with the structured
+  // signals in the rest of the payload folded in — see effectiveRecordingStatus.
+  const effective = recording ? effectiveRecordingStatus(recording) : null;
+  const status = effective ? recordingStatusView(effective) : null;
+  const wholeBlocked =
+    wholeBlockedFor !== null && wholeBlockedFor === (recording?.drive?.fsUuid ?? "");
+  const place = oldFootagePlace(recording?.oldFootage.location ?? "system_disk");
 
   async function applyMode(mode: RecordingStorageMode) {
     try {
@@ -99,6 +122,12 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
       void refresh();
     } catch (err) {
       toast(friendlyRecordingStorageError(err, "mode"), "error");
+      if (mode === "full" && isWholeDriveBlockedByFiles(err)) {
+        // Not a transient failure: retrying from the same dialog would be refused
+        // the same way. Lock the option with its reason and let the confirm close.
+        setWholeBlockedFor(recording?.drive?.fsUuid ?? "");
+        return;
+      }
       // ConfirmDialog stays open on a rejection, so the owner can retry or back out.
       throw err;
     }
@@ -120,7 +149,7 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
       await deleteOldRecordings();
       setDeleteOpen(false);
       setDeleteError(null);
-      toast("Old recordings deleted from the system drive.", "success");
+      toast(`Old recordings deleted from ${place.where}.`, "success");
       void refresh();
     } catch (err) {
       // DestructiveConfirm shows this inline and stays open for a retry.
@@ -176,9 +205,12 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
         </p>
       )}
 
-      {state === "ready" && recording && (
+      {state === "ready" && recording && effective && (
         <Body
           r={recording}
+          status={effective}
+          wholeBlocked={wholeBlocked}
+          onClearWholeBlocked={() => setWholeBlockedFor(null)}
           driveName={driveName}
           canManage={canManage}
           isOwner={isOwner}
@@ -210,7 +242,7 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
             description={
               asked?.kind === "mode" && asked.mode === "auto_reserved"
                 ? `Droplet will cap recordings at the space your cameras need — about ${formatBinaryBytes(recording.needBytes)} for ${Math.round(recording.retentionDays)} days, plus some headroom — and leave the rest of ${driveName} free. Recordings already using more than that are never deleted early.`
-                : `Recordings will be allowed to use all ${formatBinaryBytes(recording.drive?.sizeBytes ?? recording.reservedBytes)} of ${driveName}, not just the space your cameras need. Older recordings are still deleted after ${Math.round(recording.retentionDays)} days. That can leave less room for files stored on this drive.`
+                : `Recordings will be allowed to use all ${formatBinaryBytes(recording.drive?.sizeBytes ?? recording.reservedBytes)} of ${driveName}, not just the space your cameras need. The drive will no longer show up in Files — Droplet stops sharing it there. Older recordings are still deleted after ${Math.round(recording.retentionDays)} days.`
             }
             confirmLabel={
               asked?.kind === "mode" && asked.mode === "auto_reserved"
@@ -241,8 +273,8 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
             onCancel={() => setDeleteOpen(false)}
             onConfirm={applyDelete}
             title="Delete the old recordings?"
-            consequence={`This permanently deletes ${formatBinaryBytes(recording.oldFootage.bytes)} of recordings left on the system drive from before the move. Your recordings on ${driveName} aren't touched. This can't be undone.`}
-            affectedSummary={`Old recordings · ${formatBinaryBytes(recording.oldFootage.bytes)} · system drive`}
+            consequence={`This permanently deletes ${formatBinaryBytes(recording.oldFootage.bytes)} of recordings left on ${place.where} from before the move. Your recordings on ${driveName} aren't touched. This can't be undone.`}
+            affectedSummary={`Old recordings · ${formatBinaryBytes(recording.oldFootage.bytes)} · ${place.summary}`}
             confirmPhrase={DELETE_PHRASE}
             confirmLabel="Delete old recordings"
             progressMessage="Deleting — this can take a moment. Keep this open until it finishes."
@@ -261,6 +293,9 @@ const DELETE_PHRASE = "delete old recordings";
 
 function Body({
   r,
+  status,
+  wholeBlocked,
+  onClearWholeBlocked,
   driveName,
   canManage,
   isOwner,
@@ -271,6 +306,10 @@ function Body({
   onRequestDelete,
 }: {
   r: RecordingStorage;
+  /** The effective status (see effectiveRecordingStatus), not the raw one. */
+  status: RecordingStorageStatus;
+  wholeBlocked: boolean;
+  onClearWholeBlocked: () => void;
   driveName: string;
   canManage: boolean;
   isOwner: boolean;
@@ -280,10 +319,10 @@ function Body({
   onPickDrive: (fsUuid: string, name: string) => void;
   onRequestDelete: () => void;
 }) {
-  const moving = r.status === "migrating" || r.migration.state === "running";
+  const moving = status === "migrating";
   const hasDrive = r.drive !== null;
-  const noDrive = r.status === "no_eligible_drive";
-  const missing = r.status === "missing";
+  const noDrive = status === "no_eligible_drive";
+  const missing = status === "missing";
   // Numbers about a drive that is not there (or not chosen) would read as
   // current; show them only when there is a live drive behind them.
   const live = hasDrive && !noDrive && !missing;
@@ -357,7 +396,7 @@ function Body({
         <DriveRow r={r} name={driveName} missing={missing} />
       )}
 
-      {r.status === "pending" && (
+      {status === "pending" && (
         <p className="rs-note flex items-center gap-2">
           <Loader2 size={14} className="motion-safe:animate-spin" aria-hidden="true" />
           Setting up recording storage on {driveName}…
@@ -373,7 +412,9 @@ function Body({
           mode={r.mode}
           drive={r}
           canManage={canManage}
-          locked={moving || r.status === "pending"}
+          locked={moving || status === "pending"}
+          wholeBlocked={wholeBlocked}
+          onClearWholeBlocked={onClearWholeBlocked}
           onPick={onPickMode}
         />
       )}
@@ -394,6 +435,7 @@ function Body({
 
       {r.oldFootage.present && (
         <OldFootage
+          place={oldFootagePlace(r.oldFootage.location)}
           bytes={r.oldFootage.bytes}
           moving={moving}
           isOwner={isOwner}
@@ -453,12 +495,17 @@ function ModeSwitch({
   drive,
   canManage,
   locked,
+  wholeBlocked,
+  onClearWholeBlocked,
   onPick,
 }: {
   mode: RecordingStorageMode;
   drive: RecordingStorage;
   canManage: boolean;
   locked: boolean;
+  /** The box refused Whole drive because this drive's files/ is not empty. */
+  wholeBlocked: boolean;
+  onClearWholeBlocked: () => void;
   onPick: (mode: RecordingStorageMode) => void;
 }) {
   const labelId = useId();
@@ -474,10 +521,12 @@ function ModeSwitch({
     {
       value: "full",
       title: "Whole drive",
+      // Whole drive deregisters the drive's files/ from Files (and is only allowed
+      // when that folder is empty) — say so where the choice is made.
       hint:
-        size > 0
+        (size > 0
           ? `Recordings can use all ${formatBinaryBytes(size)}.`
-          : "Recordings can use the whole drive.",
+          : "Recordings can use the whole drive.") + " The drive is removed from Files.",
     },
   ];
   return (
@@ -493,7 +542,7 @@ function ModeSwitch({
               name={name}
               value={o.value}
               checked={mode === o.value}
-              disabled={disabled}
+              disabled={disabled || (o.value === "full" && wholeBlocked)}
               // Controlled by the SERVER's mode: picking the other one only asks
               // (tier-2 confirm); the radio flips when the orchestrator says so.
               onChange={() => onPick(o.value)}
@@ -508,6 +557,16 @@ function ModeSwitch({
       )}
       {canManage && locked && (
         <p className="rs-hint">Available again once recordings finish moving.</p>
+      )}
+      {canManage && !locked && wholeBlocked && mode !== "full" && (
+        <p className="rs-hint" data-testid="whole-drive-blocked">
+          Whole drive needs a drive with no files on it, and this one still holds some.
+          Move your files off it, then{" "}
+          <button type="button" className="rs-link" onClick={onClearWholeBlocked}>
+            check again
+          </button>
+          .
+        </p>
       )}
     </div>
   );
@@ -576,17 +635,20 @@ function Migration({
 }) {
   const m = r.migration;
   if (!moving) {
-    // A failed move: calm, and honest that nothing was lost. The raw error
+    // A failed move: calm, and honest that nothing was lost. The orchestrator
+    // puts the camera service back on the OLD source before it reports `failed`,
+    // so recording never stopped; it retries on its own (1 h / 6 h / 24 h), then
+    // goes back to pending with a warning and a notification. The raw error
     // (rsync output, paths) is deliberately never shown.
     return (
-      <div className="rs-migration" data-testid="recording-migration">
+      <div className="rs-migration" data-testid="recording-migration" role="alert">
         <p className="rs-migration-t">
           <AlertTriangle size={15} aria-hidden="true" />
           The move to {driveName} didn&apos;t finish
         </p>
         <p className="rs-migration-d">
-          Your existing recordings were kept where they were. Check the drive in Settings
-          › Storage, or choose a drive again below to try once more.
+          Your cameras are still recording where they were before, and nothing was lost.{" "}
+          {MIGRATION_RETRY_COPY}
         </p>
       </div>
     );
@@ -713,12 +775,14 @@ function CameraTable({ r }: { r: RecordingStorage }) {
 }
 
 function OldFootage({
+  place,
   bytes,
   moving,
   isOwner,
   triggerRef,
   onRequestDelete,
 }: {
+  place: ReturnType<typeof oldFootagePlace>;
   bytes: number;
   moving: boolean;
   isOwner: boolean;
@@ -727,10 +791,10 @@ function OldFootage({
 }) {
   return (
     <div className="rs-old" data-testid="recording-old-footage">
-      <p className="rs-old-t">Old recordings are still on the system drive</p>
+      <p className="rs-old-t">Old recordings are still on {place.where}</p>
       <p className="rs-old-d">
-        {formatBinaryBytes(bytes)} from before the move is still on the drive your Droplet
-        runs on. It stays there until you delete it.
+        {formatBinaryBytes(bytes)} from before the move is still there. It stays until
+        you delete it.
         {moving && " You can delete it once the move finishes."}
         {!moving && !isOwner && " Ask the owner to delete it."}
       </p>
@@ -742,7 +806,7 @@ function OldFootage({
           onClick={onRequestDelete}
         >
           <Trash2 size={14} aria-hidden="true" />
-          Delete old recordings from system drive
+          {place.action}
         </button>
       )}
     </div>
