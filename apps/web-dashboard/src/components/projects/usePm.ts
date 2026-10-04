@@ -139,14 +139,15 @@ export function useProjectLabels(projectId: string | null) {
  *  getting heavy. */
 export const PAGE_SIZE = 200;
 
-/** One page of a work-item list, exactly as the orchestrator sends it. */
-interface WorkItemsPage {
-  work_items: PmWorkItem[];
-  /** Null on the last page. */
-  nextCursor: string | null;
-  /** The exact size of the whole list, never of this page. */
-  total: number;
-}
+/** The most pages a walk of `total` rows may take: the pages those rows fill,
+ *  plus two. Any more means the server's cursor is not advancing, and the walk
+ *  ends rather than become a request loop. */
+const maxPages = (total: number): number => Math.ceil(total / PAGE_SIZE) + 2;
+
+/** One page of a PM list, exactly as the orchestrator sends it: the rows under a
+ *  key that names them (`work_items`, `comments`, `activity`), `nextCursor`
+ *  (null on the last page) and the exact `total` of the whole list. */
+type ListPage = { nextCursor: string | null; total: number } & Record<string, unknown>;
 
 /** A tab that regains focus re-reads the list, but never more often than this:
  *  a re-read walks every page, so it is not free on a big project. */
@@ -180,34 +181,37 @@ function useRefreshOnFocus(enabled: boolean, busy: boolean, mutate: () => Promis
 }
 
 /**
- * WARP-3371 — EVERY page of a work-item list, loaded progressively.
+ * WARP-3371 — EVERY page of a PM list (work items, comments, activity), loaded
+ * progressively.
  *
  * The board used to read one page of 100 and stop, with nothing on screen to say
  * so. This follows `nextCursor` page after page until it is null: the first page
  * paints as soon as it lands, `total` is the server's exact count (so the view
- * can say "100 of 250"), and the loop is bounded by the data — a stuck cursor is
- * impossible because the server only ever hands back a cursor that moves
- * forward.
+ * can say "100 of 250"), and the walk is bounded twice over — by the cursor
+ * itself, and by a page count derived from `total`, so a server that ever failed
+ * to advance its cursor ends the walk instead of becoming a request loop. Rows
+ * are de-duplicated by id for the same reason.
  *
  * A page after the first that fails does NOT discard the pages already in hand:
- * `loadError` carries it while `items` keeps rendering, and SWR retries the
+ * `loadError` carries it while `rows` keeps rendering, and SWR retries the
  * failed page on its own backoff. `error` is only the failure of the FIRST page,
  * i.e. "there is nothing to show".
  */
-function useWorkItemPages(url: string | null) {
+function usePages<T extends { id: string }>(url: string | null, field: string) {
   const getKey = useCallback(
-    (index: number, previous: WorkItemsPage | null): string | null => {
+    (index: number, previous: ListPage | null): string | null => {
       if (!url) return null;
       const sep = url.includes("?") ? "&" : "?";
       if (index === 0) return `${url}${sep}limit=${PAGE_SIZE}`;
       if (!previous?.nextCursor) return null; // the last page has been read
+      if (index >= maxPages(previous.total)) return null; // the cursor is not advancing
       return `${url}${sep}limit=${PAGE_SIZE}&cursor=${encodeURIComponent(previous.nextCursor)}`;
     },
     [url],
   );
-  const { data, error, isLoading, isValidating, setSize, mutate } = useSWRInfinite<WorkItemsPage>(
+  const { data, error, isLoading, isValidating, setSize, mutate } = useSWRInfinite<ListPage>(
     getKey,
-    (u: string) => getJson<WorkItemsPage>(u),
+    (u: string) => getJson<ListPage>(u),
     {
       // The chain is walked ONE page per `setSize` below. SWR's default re-reads
       // the first page on every step, which would fetch it once more for each
@@ -224,7 +228,9 @@ function useWorkItemPages(url: string | null) {
 
   const pages = data ?? [];
   const last = pages[pages.length - 1];
-  const hasMore = Boolean(last?.nextCursor);
+  // "More is coming" only while the walk is allowed to continue (see `maxPages`),
+  // so a cursor that never advances reads as "done", not as loading forever.
+  const hasMore = Boolean(last?.nextCursor && pages.length < maxPages(last.total));
 
   // Pull the next page the moment the previous one has landed.
   useEffect(() => {
@@ -233,16 +239,25 @@ function useWorkItemPages(url: string | null) {
 
   useRefreshOnFocus(url !== null, isValidating, mutate);
 
-  const items = useMemo(() => (data ? data.flatMap((p) => p.work_items) : undefined), [data]);
+  const flatten = useCallback(
+    (all: ListPage[]): T[] => {
+      const seen = new Set<string>();
+      return all
+        .flatMap((p) => (p[field] as T[] | undefined) ?? [])
+        .filter((row) => (seen.has(row.id) ? false : (seen.add(row.id), true)));
+    },
+    [field],
+  );
+  const rows = useMemo(() => (data ? flatten(data) : undefined), [data, flatten]);
 
-  /** Revalidate every page; resolves to the fresh, flattened list. */
-  const refresh = useCallback(async (): Promise<{ work_items: PmWorkItem[] } | undefined> => {
+  /** Revalidate every page; resolves to the fresh, flattened rows. */
+  const refresh = useCallback(async (): Promise<T[] | undefined> => {
     const fresh = await mutate();
-    return fresh ? { work_items: fresh.flatMap((p) => p.work_items) } : undefined;
-  }, [mutate]);
+    return fresh ? flatten(fresh) : undefined;
+  }, [mutate, flatten]);
 
   return {
-    items,
+    rows,
     total: last?.total,
     /** More pages are still on the way. */
     hasMore,
@@ -255,32 +270,46 @@ function useWorkItemPages(url: string | null) {
 
 export function useProjectItems(projectId: string | null) {
   const url = projectId ? `/api/pm/projects/${projectId}/work-items` : null;
-  return { ...useWorkItemPages(url), key: url };
+  const { rows, mutate, ...rest } = usePages<PmWorkItem>(url, "work_items");
+  return {
+    ...rest,
+    items: rows,
+    key: url,
+    /** Revalidate every page; resolves to the fresh list as `{ work_items }`. */
+    mutate: async (): Promise<{ work_items: PmWorkItem[] } | undefined> => {
+      const fresh = await mutate();
+      return fresh ? { work_items: fresh } : undefined;
+    },
+  };
 }
 
 export function useSubIssues(projectId: string | null, parentId: string | null) {
-  const { items } = useWorkItemPages(
+  const { rows } = usePages<PmWorkItem>(
     projectId && parentId
       ? `/api/pm/projects/${projectId}/work-items?parent=${encodeURIComponent(parentId)}`
       : null,
+    "work_items",
   );
-  return { subIssues: items };
+  return { subIssues: rows };
 }
 
+// WARP-3371 — comments and the activity feed are pages too (the API caps a
+// request at 500), so a long thread is read to the end instead of stopping at
+// whatever the first response held.
 export function useComments(workItemId: string | null) {
-  const { data, mutate } = useSWR(
+  const { rows, mutate } = usePages<PmComment>(
     workItemId ? `/api/pm/work-items/${workItemId}/comments` : null,
-    (u: string) => getJson<{ comments: PmComment[] }>(u),
+    "comments",
   );
-  return { comments: data?.comments, mutate };
+  return { comments: rows, mutate };
 }
 
 export function useActivity(workItemId: string | null) {
-  const { data, mutate } = useSWR(
+  const { rows, mutate } = usePages<PmActivity>(
     workItemId ? `/api/pm/work-items/${workItemId}/activity` : null,
-    (url: string) => getJson<{ activity: PmActivity[] }>(url),
+    "activity",
   );
-  return { activity: data?.activity, mutate };
+  return { activity: rows, mutate };
 }
 
 

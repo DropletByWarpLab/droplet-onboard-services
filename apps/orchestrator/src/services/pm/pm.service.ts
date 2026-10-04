@@ -37,8 +37,10 @@ import {
 import { dateToDateOnly, parseDateInput, todayDateOnly } from "./pm-dates.js";
 import {
   INVALID_CURSOR,
+  ORDER_ACTIVITY,
   ORDER_ASSIGNED,
   ORDER_BOARD,
+  ORDER_COMMENTS,
   ORDER_SEARCH,
   clampLimit,
   decodeCursor,
@@ -77,6 +79,14 @@ export const PM_ERRORS = {
   PROJECT_NOT_ARCHIVED: "project_not_archived",
   /** WARP-3370 — the identifier typed to confirm a hard delete is not the project's. 422. */
   IDENTIFIER_MISMATCH: "identifier_mismatch",
+  /** WARP-3371 — a re-parent that would make an item its own ancestor. 422. */
+  PARENT_CYCLE: "parent_cycle",
+  /** WARP-3371 — a work item keeps a state; PATCH state_id:null is refused. 422. */
+  STATE_REQUIRED: "state_required",
+  /** WARP-3371 — a label id that is unknown or belongs to another project. 422, with the ids. */
+  INVALID_LABEL: "invalid_label",
+  /** WARP-3371 — an assignee id that is not an active person. 422, with the ids. */
+  INVALID_ASSIGNEE: "invalid_assignee",
   // ADR-045 §5.3 — the department dimension's codes live beside its rules in
   // pm-department.ts and are folded in here so `mapServiceError` keeps ONE
   // vocabulary to switch on.
@@ -424,6 +434,107 @@ async function loadWorkItem(
   return mapWorkItem(row, identifier, projectDepartment);
 }
 
+// ── Reference validation (WARP-3371) ─────────────────────────────────────────
+
+/** A reference id the caller sent that points at nothing usable. `ids` names
+ *  every offender, so the 422 can say WHICH ones, not just that one was wrong. */
+export class PmRefError extends Error {
+  constructor(
+    message: string,
+    readonly ids: string[],
+  ) {
+    super(message);
+    this.name = "PmRefError";
+  }
+}
+
+const uniq = (ids: readonly string[]): string[] => [...new Set(ids)];
+
+/** The roles a person on this box can hold and still be named on, or assigned,
+ *  PM work — everyone but the machines. `listPeople` and assignee validation
+ *  share it: who can be shown is who can be assigned. */
+const PM_PERSON_ROLES = ["owner", "admin", "family", "guest"] as const;
+
+/**
+ * Every label id must EXIST and belong to THIS project. An unknown id used to
+ * pass this check (only the ids that came back were inspected), reach the
+ * insert, trip the foreign key and surface as `invalid_parent` or a 500. Scoping
+ * the lookup to the project makes "unknown" and "another project's" the same
+ * answer — missing — and every offender is named. Duplicates are folded: the
+ * join table is unique per (item, label) and a repeated id would be a P2002.
+ */
+async function assertLabelsInProject(
+  db: Db,
+  projectId: string,
+  labelIds: readonly string[],
+): Promise<string[]> {
+  const wanted = uniq(labelIds);
+  if (wanted.length === 0) return wanted;
+  const found = await db.pmLabel.findMany({
+    where: { id: { in: wanted }, projectId },
+    select: { id: true },
+  });
+  const have = new Set(found.map((l) => l.id));
+  const missing = wanted.filter((id) => !have.has(id));
+  if (missing.length > 0) throw new PmRefError(PM_ERRORS.INVALID_LABEL, missing);
+  return wanted;
+}
+
+/**
+ * Every assignee id must be a person who exists and is ACTIVE (never a service
+ * principal, never someone deactivated). Assignee ids are plain strings, not a
+ * foreign key, so nothing else would notice `"Bob"` or a leaver's id: the item
+ * would carry it and the board would render "Former member" for a person who
+ * was never one.
+ */
+async function assertAssignable(db: Db, userIds: readonly string[]): Promise<void> {
+  const wanted = uniq(userIds);
+  if (wanted.length === 0) return;
+  const found = await db.user.findMany({
+    where: { id: { in: wanted }, directoryStatus: "ACTIVE", role: { in: [...PM_PERSON_ROLES] } },
+    select: { id: true },
+  });
+  const have = new Set(found.map((u) => u.id));
+  const missing = wanted.filter((id) => !have.has(id));
+  if (missing.length > 0) throw new PmRefError(PM_ERRORS.INVALID_ASSIGNEE, missing);
+}
+
+/** Levels the parent walk climbs before it refuses — the relations BFS's bound
+ *  (RELATION_SCAN_MAX_DEPTH), restated here because pm-relations imports this file. */
+const PARENT_WALK_MAX_DEPTH = 32;
+
+/**
+ * Would making `parentId` the parent of `itemId` close a loop? Walk UP from the
+ * proposed parent: if the chain reaches the item, the item is that parent's
+ * ancestor and the move would make it its own. One query per level, bounded.
+ *
+ * Fails CLOSED: a chain that revisits a node (a loop already in the data — only
+ * self-parenting used to be refused) or is deeper than the bound is refused
+ * rather than extended; walking on could not end, or would only guess.
+ */
+async function assertNoParentCycle(db: Db, itemId: string, parentId: string): Promise<void> {
+  const seen = new Set<string>();
+  let cursor: string | null = parentId;
+  for (let depth = 0; cursor !== null; depth += 1) {
+    if (cursor === itemId || depth >= PARENT_WALK_MAX_DEPTH || seen.has(cursor)) {
+      throw new Error(PM_ERRORS.PARENT_CYCLE);
+    }
+    seen.add(cursor);
+    const row: { parentId: string | null } | null = await db.pmWorkItem.findUnique({
+      where: { id: cursor },
+      select: { parentId: true },
+    });
+    cursor = row?.parentId ?? null;
+  }
+}
+
+/** The SERIALIZABLE loser of a re-parent (P2034): nothing was applied; the
+ *  route answers 409 and the client retries. */
+function rethrowSerializationLoser(err: unknown): never {
+  if (isPrismaCode(err, "P2034")) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
+  throw err;
+}
+
 // ── Workspaces ───────────────────────────────────────────────────────────────
 
 /** Idempotently ensure the single `home` workspace exists. Returns its row. */
@@ -477,7 +588,7 @@ export interface ApiPerson {
  */
 export async function listPeople(prisma: PrismaClient): Promise<ApiPerson[]> {
   const rows = await prisma.user.findMany({
-    where: { directoryStatus: "ACTIVE", role: { in: ["owner", "admin", "family", "guest"] } },
+    where: { directoryStatus: "ACTIVE", role: { in: [...PM_PERSON_ROLES] } },
     select: { id: true, displayName: true },
     orderBy: [{ displayName: "asc" }, { id: "asc" }],
   });
@@ -515,8 +626,7 @@ export async function listProjects(
         ? null
         : { in: await expandDepartmentScope(prisma, opts.departmentId) };
   }
-  const take =
-    opts.perPage !== undefined ? Math.max(1, Math.min(200, opts.perPage)) : undefined;
+  const take = opts.perPage !== undefined ? clampLimit(opts.perPage) : undefined;
   const rows = await prisma.pmProject.findMany({
     where,
     include: PROJECT_INCLUDE,
@@ -1416,17 +1526,12 @@ export async function createWorkItem(
     if (state.projectId !== projectId) throw new Error(PM_ERRORS.INVALID_STATE);
   }
 
-  // Labels must belong to THIS project — same cross-project isolation invariant
-  // as parentId and stateId.
-  if (input.labelIds?.length) {
-    const labels = await prisma.pmLabel.findMany({
-      where: { id: { in: input.labelIds } },
-      select: { id: true, projectId: true },
-    });
-    for (const label of labels) {
-      if (label.projectId !== projectId) throw new Error("invalid_label");
-    }
-  }
+  // Labels must exist AND belong to THIS project — same cross-project isolation
+  // invariant as parentId and stateId — and assignees must be active people.
+  // Both answer 422 naming the offending ids (WARP-3371).
+  const labelIds = await assertLabelsInProject(prisma, projectId, input.labelIds ?? []);
+  const assignees = uniq(input.assignees ?? []);
+  await assertAssignable(prisma, assignees);
 
   // ADR-045 §5.3 — same shape as the guards above: refuse before the write, not
   // after. Refuses HOUSEHOLD (it is the unit everyone is already in, so routing
@@ -1504,12 +1609,8 @@ export async function createWorkItem(
           sortOrder: sequenceId,
           isCompleted: initialIsCompleted,
           completedAt: initialCompletedAt,
-          assignees: input.assignees?.length
-            ? { create: input.assignees.map((userId) => ({ userId })) }
-            : undefined,
-          labels: input.labelIds?.length
-            ? { create: input.labelIds.map((labelId) => ({ labelId })) }
-            : undefined,
+          assignees: assignees.length ? { create: assignees.map((userId) => ({ userId })) } : undefined,
+          labels: labelIds.length ? { create: labelIds.map((labelId) => ({ labelId })) } : undefined,
         },
       });
       await writeActivity(tx, { workItemId: item.id, actorId, verb: "created" });
@@ -1518,7 +1619,7 @@ export async function createWorkItem(
       // sweep sees the same shape whether the assignment happened at create
       // time or in a later PATCH. `actorId` is on the row, so somebody who
       // creates an item assigned to themselves is never notified about it.
-      for (const userId of input.assignees ?? []) {
+      for (const userId of assignees) {
         await writeActivity(tx, {
           workItemId: item.id,
           actorId,
@@ -1582,8 +1683,10 @@ export async function updateWorkItem(
   let isCompleted: boolean | undefined;
   if (fields.stateId !== undefined && fields.stateId !== existing.stateId) {
     if (fields.stateId === null) {
-      completedAt = null;
-      isCompleted = false;
+      // WARP-3371 — a work item keeps its state: with none, the board has no
+      // column for it and the card silently disappears. (An item that already
+      // has none and is sent null again is not a change, so it never gets here.)
+      throw new Error(PM_ERRORS.STATE_REQUIRED);
     } else {
       // The target state must belong to THIS work item's project. Distinguish
       // "no such state" (404) from "state belongs to another project" (422) so
@@ -1607,15 +1710,19 @@ export async function updateWorkItem(
     if (parent.projectId !== existing.projectId) throw new Error(PM_ERRORS.INVALID_PARENT);
   }
 
-  // Labels must belong to THIS project before the transaction mutates them.
-  if (fields.labelIds?.length) {
-    const labels = await prisma.pmLabel.findMany({
-      where: { id: { in: fields.labelIds } },
-      select: { id: true, projectId: true },
-    });
-    for (const label of labels) {
-      if (label.projectId !== existing.projectId) throw new Error("invalid_label");
-    }
+  // Labels must exist AND belong to THIS project before the transaction mutates
+  // them, and a person ADDED as an assignee must exist and be active; both name
+  // the offending ids (WARP-3371). Only the assignees this update ADDS are
+  // checked: re-sending a set that still holds someone who has since left must
+  // not block editing the item, and removing them must always work.
+  const labelIds =
+    fields.labelIds === undefined
+      ? undefined
+      : await assertLabelsInProject(prisma, existing.projectId, fields.labelIds);
+  const assignees = fields.assignees === undefined ? undefined : uniq(fields.assignees);
+  if (assignees) {
+    const current = new Set(existing.assignees.map((a) => a.userId));
+    await assertAssignable(prisma, assignees.filter((u) => !current.has(u)));
   }
 
   // ADR-045 §5.3 — guard before the transaction, like every check above.
@@ -1625,7 +1732,14 @@ export async function updateWorkItem(
     await assertAssignableDepartment(prisma, fields.departmentId);
   }
 
+  // WARP-3371 — re-parenting reads a chain and then writes: two concurrent moves
+  // (A under B, B under A) each pass the walk against a graph without the other
+  // and together close a loop. SERIALIZABLE makes one of them lose (P2034 → 409),
+  // as pm-relations does for BLOCKS cycles; only a real re-parent pays for it.
+  const reparentTo = fields.parentId && fields.parentId !== existing.parentId ? fields.parentId : null;
+
   await prisma.$transaction(async (tx) => {
+    if (reparentTo) await assertNoParentCycle(tx, id, reparentTo);
     const data: Prisma.PmWorkItemUpdateInput = {};
     if (fields.name !== undefined) data.name = fields.name;
     if (fields.descriptionHtml !== undefined) {
@@ -1655,19 +1769,19 @@ export async function updateWorkItem(
     await tx.pmWorkItem.update({ where: { id }, data });
 
     // Assignees / labels are full-set replacements (delete-all + re-create).
-    if (fields.assignees !== undefined) {
+    if (assignees !== undefined) {
       await tx.pmWorkItemAssignee.deleteMany({ where: { workItemId: id } });
-      if (fields.assignees.length) {
+      if (assignees.length) {
         await tx.pmWorkItemAssignee.createMany({
-          data: fields.assignees.map((userId) => ({ workItemId: id, userId })),
+          data: assignees.map((userId) => ({ workItemId: id, userId })),
         });
       }
     }
-    if (fields.labelIds !== undefined) {
+    if (labelIds !== undefined) {
       await tx.pmWorkItemLabel.deleteMany({ where: { workItemId: id } });
-      if (fields.labelIds.length) {
+      if (labelIds.length) {
         await tx.pmWorkItemLabel.createMany({
-          data: fields.labelIds.map((labelId) => ({ workItemId: id, labelId })),
+          data: labelIds.map((labelId) => ({ workItemId: id, labelId })),
         });
       }
     }
@@ -1733,8 +1847,8 @@ export async function updateWorkItem(
     // history feed and unnotifiable by anything downstream. The identity-PATCH
     // guard is preserved — `setChanged` still gates the whole block, so
     // re-sending the same assignee set writes nothing.
-    if (setChanged(fields.assignees, existingAssignees)) {
-      const next = new Set(fields.assignees ?? []);
+    if (setChanged(assignees, existingAssignees)) {
+      const next = new Set(assignees ?? []);
       const before = new Set(existingAssignees);
       for (const userId of next) {
         if (before.has(userId)) continue;
@@ -1783,11 +1897,11 @@ export async function updateWorkItem(
       (fields.descriptionHtml !== undefined && fields.descriptionHtml !== existing.descriptionHtml) ||
       (fields.startDate !== undefined &&
         fields.startDate?.toISOString() !== existing.startDate?.toISOString()) ||
-      setChanged(fields.labelIds, existingLabelIds);
+      setChanged(labelIds, existingLabelIds);
     if (scalarChanged) {
       await writeActivity(tx, { workItemId: id, actorId, verb: "updated", field: "fields" });
     }
-  });
+  }, reparentTo ? SERIALIZABLE_TX : undefined).catch(rethrowSerializationLoser);
 
   return loadWorkItem(prisma, id, project.identifier, project.department);
 }
@@ -1872,14 +1986,36 @@ export async function deleteWorkItem(
 
 // ── Comments ─────────────────────────────────────────────────────────────────
 
-export async function listComments(prisma: PrismaClient, workItemId: string): Promise<ApiComment[]> {
+/**
+ * A work item's comments, oldest to newest — a PAGE (WARP-3371), like every PM
+ * list: `limit` (default 100, max 500), the previous page's opaque `cursor`, and
+ * an exact `total`. A caller that sends nothing gets the first page and a
+ * `nextCursor` that says whether there is more; it used to get every row, so a
+ * thread of any length was one unbounded response.
+ */
+export async function listComments(
+  prisma: PrismaClient,
+  workItemId: string,
+  opts: { limit?: number; cursor?: string; page?: number } = {},
+): Promise<Page<ApiComment>> {
+  const after = opts.cursor ? decodeCursor(ORDER_COMMENTS, opts.cursor) : null;
   const item = await prisma.pmWorkItem.findUnique({ where: { id: workItemId } });
   if (!item) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
-  const rows = await prisma.pmComment.findMany({
-    where: { workItemId },
-    orderBy: { createdAt: "asc" },
-  });
-  return rows.map(mapComment);
+  const limit = clampLimit(opts.limit);
+  const where: Prisma.PmCommentWhereInput = { workItemId };
+  const skip = after ? 0 : (Math.max(1, opts.page ?? 1) - 1) * limit;
+  const [total, rows] = await Promise.all([
+    prisma.pmComment.count({ where }),
+    prisma.pmComment.findMany({
+      where: after ? { ...where, ...(keysetAfter("createdAt", "asc", after) as Prisma.PmCommentWhereInput) } : where,
+      // `id` closes the tie: two comments can share a millisecond.
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      ...(skip > 0 ? { skip } : {}),
+      take: limit + 1,
+    }),
+  ]);
+  const { items, nextCursor } = sliceToPage(rows, limit, (r) => encodeCursor(ORDER_COMMENTS, r.createdAt, r.id));
+  return { items: items.map(mapComment), nextCursor, total };
 }
 
 export async function addComment(
@@ -1916,25 +2052,41 @@ export interface ApiActivity {
   createdAt: string;
 }
 
-/** Append-only activity for a work item, oldest to newest (timeline order). */
+/** Append-only activity for a work item, oldest to newest (timeline order) — a
+ *  PAGE (WARP-3371), under the same rules as `listComments`. */
 export async function listActivity(
   prisma: PrismaClient,
   workItemId: string,
-): Promise<ApiActivity[]> {
+  opts: { limit?: number; cursor?: string; page?: number } = {},
+): Promise<Page<ApiActivity>> {
+  const after = opts.cursor ? decodeCursor(ORDER_ACTIVITY, opts.cursor) : null;
   const item = await prisma.pmWorkItem.findUnique({ where: { id: workItemId } });
   if (!item) throw new Error("work_item_not_found");
-  const rows = await prisma.pmActivity.findMany({
-    where: { workItemId },
-    orderBy: { createdAt: "asc" },
-  });
-  return rows.map((r) => ({
-    id: r.id,
-    workItemId: r.workItemId,
-    actorId: r.actorId,
-    verb: r.verb,
-    field: r.field,
-    oldValue: r.oldValue,
-    newValue: r.newValue,
-    createdAt: r.createdAt.toISOString(),
-  }));
+  const limit = clampLimit(opts.limit);
+  const where: Prisma.PmActivityWhereInput = { workItemId };
+  const skip = after ? 0 : (Math.max(1, opts.page ?? 1) - 1) * limit;
+  const [total, rows] = await Promise.all([
+    prisma.pmActivity.count({ where }),
+    prisma.pmActivity.findMany({
+      where: after ? { ...where, ...(keysetAfter("createdAt", "asc", after) as Prisma.PmActivityWhereInput) } : where,
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      ...(skip > 0 ? { skip } : {}),
+      take: limit + 1,
+    }),
+  ]);
+  const { items, nextCursor } = sliceToPage(rows, limit, (r) => encodeCursor(ORDER_ACTIVITY, r.createdAt, r.id));
+  return {
+    items: items.map((r) => ({
+      id: r.id,
+      workItemId: r.workItemId,
+      actorId: r.actorId,
+      verb: r.verb,
+      field: r.field,
+      oldValue: r.oldValue,
+      newValue: r.newValue,
+      createdAt: r.createdAt.toISOString(),
+    })),
+    nextCursor,
+    total,
+  };
 }

@@ -278,7 +278,7 @@ describe.skipIf(!RUN)("PM department dimension (ADR-045 §5.3)", () => {
       name: "adr045h-ticket-activity",
     });
     await pm.updateWorkItem(prisma, null, item.id, { departmentId: dept.id });
-    const feed = await pm.listActivity(prisma, item.id);
+    const feed = (await pm.listActivity(prisma, item.id)).items;
     const row = feed.find((a) => a.field === "department");
     expect(row).toBeDefined();
     expect(row?.oldValue).toBeNull();

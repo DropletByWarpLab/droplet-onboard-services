@@ -9,7 +9,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import type { ReactNode } from "react";
-import { PAGE_SIZE, useProjectItems, useSubIssues } from "./usePm";
+import { PAGE_SIZE, useActivity, useComments, useProjectItems, useSubIssues } from "./usePm";
 
 let TOTAL = 250;
 
@@ -19,6 +19,8 @@ const wire = (n: number) => ({ id: `wi-${n}`, key: `INBOX-${n}`, name: `Item ${n
 const requested: string[] = [];
 let failPage: ((url: string) => boolean) | null = null;
 let delayPage: ((url: string) => number) | null = null;
+/** When set, the server's cursor never advances: every page claims there is more. */
+let neverAdvance = false;
 
 /** A tiny server: pages of `limit` over TOTAL items, cursor = last id seen. */
 function serve(url: string) {
@@ -29,7 +31,10 @@ function serve(url: string) {
   const after = cursor ? Number(cursor.replace("after-", "")) : 0;
   const rows = Array.from({ length: Math.min(limit, TOTAL - after) }, (_, i) => wire(after + i + 1));
   const last = after + rows.length;
-  return { work_items: rows, nextCursor: last < TOTAL ? `after-${last}` : null, total: TOTAL };
+  // The list the URL names: comments and activity are paged like work items.
+  const key = u.pathname.endsWith("/comments") ? "comments" : u.pathname.endsWith("/activity") ? "activity" : "work_items";
+  const nextCursor = neverAdvance ? `after-${after}` : last < TOTAL ? `after-${last}` : null;
+  return { [key]: rows, nextCursor, total: TOTAL };
 }
 
 vi.mock("@/lib/auth", () => ({
@@ -56,6 +61,7 @@ function sharedCacheWrapper() {
 }
 
 beforeEach(() => {
+  neverAdvance = false;
   TOTAL = 250;
   requested.length = 0;
   failPage = null;
@@ -193,5 +199,57 @@ describe("useSubIssues — a parent's children are paged the same way", () => {
     await waitFor(() => expect(result.current.subIssues).toHaveLength(TOTAL));
     expect(requested[0]).toBe(`/api/pm/projects/p1/work-items?parent=parent-1&limit=200`);
     expect(requested[1]).toBe(`/api/pm/projects/p1/work-items?parent=parent-1&limit=200&cursor=after-200`);
+  });
+});
+
+describe("comments and activity are read to the end too (WARP-3371)", () => {
+  it("a thread of 250 comments is all 250, oldest first, from two requests", async () => {
+    const { result } = renderHook(() => useComments("w1"), { wrapper });
+    await waitFor(() => expect(result.current.comments).toHaveLength(TOTAL));
+    expect(result.current.comments!.map((c) => c.id).slice(0, 3)).toEqual(["wi-1", "wi-2", "wi-3"]);
+    expect(requested).toEqual([
+      "/api/pm/work-items/w1/comments?limit=200",
+      "/api/pm/work-items/w1/comments?limit=200&cursor=after-200",
+    ]);
+  });
+
+  it("the activity feed is read to the end as well", async () => {
+    const { result } = renderHook(() => useActivity("w1"), { wrapper });
+    await waitFor(() => expect(result.current.activity).toHaveLength(TOTAL));
+    expect(requested[1]).toBe("/api/pm/work-items/w1/activity?limit=200&cursor=after-200");
+  });
+
+  it("mutate() re-reads the whole thread (a posted comment lands at the END of a long one)", async () => {
+    const { result } = renderHook(() => useComments("w1"), { wrapper });
+    await waitFor(() => expect(result.current.comments).toHaveLength(TOTAL));
+    const before = requested.length;
+    TOTAL = 251; // somebody added a comment
+    await result.current.mutate();
+    await waitFor(() => expect(result.current.comments).toHaveLength(251));
+    expect(requested.length).toBeGreaterThan(before);
+  });
+
+  it("makes no request without a work item", async () => {
+    renderHook(() => useComments(null), { wrapper });
+    renderHook(() => useActivity(null), { wrapper });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(requested).toEqual([]);
+  });
+});
+
+describe("a server whose cursor never advances ends the walk — it does not become a request loop", () => {
+  it("stops after at most ceil(total / PAGE_SIZE) + 2 pages and shows no row twice", async () => {
+    neverAdvance = true;
+    const { result } = renderHook(() => useProjectItems("p1"), { wrapper });
+    await waitFor(() => expect(result.current.items).toBeDefined());
+    // let any runaway loop show itself
+    await new Promise((r) => setTimeout(r, 150));
+    const pagesRequested = requested.length;
+    await new Promise((r) => setTimeout(r, 150));
+    expect(requested.length).toBe(pagesRequested); // it has stopped asking
+    expect(pagesRequested).toBeLessThanOrEqual(Math.ceil(TOTAL / PAGE_SIZE) + 2);
+    // every page held the same rows: the list shows each once
+    const ids = result.current.items!.map((i) => i.id);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });

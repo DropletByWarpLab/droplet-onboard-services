@@ -170,11 +170,22 @@ function makeFake(hooks: Hooks = {}) {
     // WARP-3372 — `where` / `orderBy` are interpreted, so the roster's filter
     // (ACTIVE humans only) is what is under test, not a stub that ignores it.
     user: {
-      findMany: async ({ where, orderBy }: { where?: Row; orderBy?: unknown } = {}) =>
-        sortRows(
-          db.users.filter((u) => matchesWhere(u, where, db.assignees)),
+      findMany: async ({ where, orderBy }: { where?: Row; orderBy?: unknown } = {}) => {
+        // `id: { in }` is the assignee check (WARP-3371). A person is known if
+        // seeded; an id that is not a `ghost-` one is treated as an ordinary
+        // active member, so a test that only NAMES a user need not seed one. The
+        // remaining `where` (ACTIVE, not a service principal) is still applied.
+        const ids = (where?.id as { in?: string[] } | undefined)?.in;
+        const pool: Row[] = ids
+          ? ids
+              .filter((i) => db.users.some((u) => u.id === i) || !i.startsWith("ghost-"))
+              .map((i) => db.users.find((u) => u.id === i) ?? { id: i, role: "family", directoryStatus: "ACTIVE" })
+          : db.users;
+        return sortRows(
+          pool.filter((u) => matchesWhere(u, where, db.assignees)),
           orderBy,
-        ),
+        );
+      },
       findUnique: async ({ where }: { where: Row }) => db.users.find((u) => u.id === where.id) ?? null,
     },
 
@@ -207,11 +218,13 @@ function makeFake(hooks: Hooks = {}) {
         if (include?.states) out.states = db.states.filter((s) => s.projectId === p!.id);
         return out;
       },
-      findMany: async ({ include }: { include?: Row } = {}) =>
-        db.projects.map((p) => ({
-          ...p,
-          ...(include?.workspace ? { workspace: db.workspaces.find((w) => w.id === p.workspaceId) } : {}),
-        })),
+      findMany: async ({ include, take }: { include?: Row; take?: number } = {}) =>
+        db.projects
+          .map((p) => ({
+            ...p,
+            ...(include?.workspace ? { workspace: db.workspaces.find((w) => w.id === p.workspaceId) } : {}),
+          }))
+          .slice(0, take),
       create: async ({ data, include }: { data: Row; include?: Row }) => {
         fire("pmProject.create");
         const p: Row = {
@@ -321,7 +334,9 @@ function makeFake(hooks: Hooks = {}) {
     },
 
     pmLabel: {
-      findMany: async ({ where }: { where: Row }) => db.labels.filter((l) => l.projectId === where.projectId),
+      // `where` is interpreted (`id: { in }` + `projectId`): the label check scopes
+      // its lookup to the project, and that scoping is what is under test.
+      findMany: async ({ where }: { where: Row }) => db.labels.filter((l) => matchesWhere(l, where, db.assignees)),
       findUnique: async ({ where }: { where: Row }) => db.labels.find((l) => l.id === where.id) ?? null,
       create: async ({ data }: { data: Row }) => {
         const l = { id: uid("lb"), color: null, ...data };
@@ -476,7 +491,15 @@ function makeFake(hooks: Hooks = {}) {
     },
 
     pmComment: {
-      findMany: async ({ where }: { where: Row }) => db.comments.filter((c) => c.workItemId === where.workItemId),
+      findMany: async ({ where, orderBy, skip, take }: { where: Row; orderBy?: unknown; skip?: number; take?: number }) => {
+        let rows = sortRows(
+          db.comments.filter((c) => matchesWhere(c, where, db.assignees)),
+          orderBy,
+        );
+        if (skip) rows = rows.slice(skip);
+        return take === undefined ? rows : rows.slice(0, take);
+      },
+      count: async ({ where }: { where: Row }) => db.comments.filter((c) => matchesWhere(c, where, db.assignees)).length,
       create: async ({ data }: { data: Row }) => {
         const c = { id: uid("cm"), authorId: null, createdAt: new Date(), updatedAt: new Date(), ...data };
         db.comments.push(c);
@@ -485,6 +508,15 @@ function makeFake(hooks: Hooks = {}) {
     },
 
     pmActivity: {
+      findMany: async ({ where, orderBy, skip, take }: { where: Row; orderBy?: unknown; skip?: number; take?: number }) => {
+        let rows = sortRows(
+          db.activity.filter((a) => matchesWhere(a, where, db.assignees)),
+          orderBy,
+        );
+        if (skip) rows = rows.slice(skip);
+        return take === undefined ? rows : rows.slice(0, take);
+      },
+      count: async ({ where }: { where: Row }) => db.activity.filter((a) => matchesWhere(a, where, db.assignees)).length,
       create: async ({ data }: { data: Row }) => {
         const a = { id: uid("ac"), createdAt: new Date(), ...data };
         db.activity.push(a);
@@ -1923,6 +1955,351 @@ describe("native PM routes — archive, restore and hard delete (WARP-3370)", ()
       audit.recordActivityInTx.mockRejectedValueOnce(new Error("activity recorder not initialised"));
       const res = await hardDelete(owner, { confirm_identifier: "RENO" });
       expect(res.status).toBe(500);
+    });
+  });
+});
+
+// ── WARP-3371 — the work-item API refuses what it used to swallow ───────────
+
+describe("native PM routes — input validation (WARP-3371)", () => {
+  let fake: ReturnType<typeof makeFake>;
+  let app: ReturnType<typeof makeApp>;
+  let pid: string;
+
+  beforeEach(async () => {
+    id = 0;
+    fake = makeFake();
+    app = makeApp(fake.prisma, OWNER);
+    pid = (await request(app).post("/api/pm/projects").send({ name: "Inbox" })).body.project.id;
+  });
+
+  const makeItem = async (body: Row = {}) =>
+    (await request(app).post(`/api/pm/projects/${pid}/work-items`).send({ name: "Item", ...body })).body.work_item;
+  const patch = (itemId: string, body: Row) => request(app).patch(`/api/pm/work-items/${itemId}`).send(body);
+  const stateOf = (group: string) => fake.db.states.find((s) => s.projectId === pid && s.group === group)!.id as string;
+
+  describe("paging params on every list are validated, not coerced to NaN", () => {
+    it.each([
+      ["/api/pm/projects?per_page=abc"],
+      ["/api/pm/projects?per_page=0"],
+      ["/api/pm/projects?per_page=501"],
+      ["/api/pm/projects?limit=2.5"],
+      ["/api/pm/work-items?q=x&per_page=abc"],
+      ["/api/pm/work-items?q=x&limit=-1"],
+      ["/api/pm/assigned-to-me?limit=abc"],
+    ])("%s is a 400, never a 500", async (url) => {
+      const res = await request(app).get(url);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("invalid_request");
+    });
+
+    it("a valid per_page on /pm/projects is honoured", async () => {
+      for (const name of ["A", "B", "C"]) await request(app).post("/api/pm/projects").send({ name });
+      const res = await request(app).get("/api/pm/projects?per_page=2");
+      expect(res.status).toBe(200);
+      expect(res.body.projects.length).toBeLessThanOrEqual(2);
+    });
+  });
+
+  describe("parent cycles", () => {
+    it("a parent that is a DESCENDANT of the item is a 422 parent_cycle — child, grandchild, any depth", async () => {
+      const a = await makeItem({ name: "A" });
+      const b = await makeItem({ name: "B", parent_id: a.id });
+      const c = await makeItem({ name: "C", parent_id: b.id });
+
+      const underChild = await patch(a.id, { parent_id: b.id });
+      expect(underChild.status).toBe(422);
+      expect(underChild.body).toEqual({ error: "parent_cycle" });
+      expect((await patch(a.id, { parent_id: c.id })).body.error).toBe("parent_cycle");
+      expect((await patch(b.id, { parent_id: c.id })).body.error).toBe("parent_cycle");
+      // nothing moved
+      expect(fake.db.items.find((i) => i.id === a.id)!.parentId).toBeNull();
+    });
+
+    it("moves that do NOT close a loop still work: to an ancestor, to a sibling, to nothing", async () => {
+      const a = await makeItem({ name: "A" });
+      const b = await makeItem({ name: "B", parent_id: a.id });
+      const c = await makeItem({ name: "C", parent_id: b.id });
+      const d = await makeItem({ name: "D" });
+      expect((await patch(c.id, { parent_id: a.id })).status).toBe(200); // up to a grandparent
+      expect((await patch(b.id, { parent_id: d.id })).status).toBe(200); // across
+      expect((await patch(b.id, { parent_id: null })).status).toBe(200); // detach
+      // re-sending the parent it already has is not a move and is never walked
+      expect((await patch(c.id, { parent_id: a.id })).status).toBe(200);
+    });
+
+    it("self-parenting is still invalid_parent (its own code, unchanged)", async () => {
+      const a = await makeItem({ name: "A" });
+      const res = await patch(a.id, { parent_id: a.id });
+      expect(res.status).toBe(422);
+      expect(res.body.error).toBe("invalid_parent");
+    });
+
+    it("fails CLOSED on a loop already in the data (only self-parenting used to be refused)", async () => {
+      const a = await makeItem({ name: "A" });
+      const b = await makeItem({ name: "B" });
+      const d = await makeItem({ name: "D" });
+      // an older write left A <-> B pointing at each other
+      fake.db.items.find((i) => i.id === a.id)!.parentId = b.id;
+      fake.db.items.find((i) => i.id === b.id)!.parentId = a.id;
+      const res = await patch(d.id, { parent_id: a.id });
+      expect(res.status).toBe(422);
+      expect(res.body.error).toBe("parent_cycle");
+    });
+
+    it("fails CLOSED on a chain deeper than the walk's bound", async () => {
+      let parent: string | null = null;
+      let leaf = "";
+      for (let n = 0; n < 40; n += 1) {
+        leaf = (await makeItem({ name: `L${n}`, ...(parent ? { parent_id: parent } : {}) })).id;
+        parent = leaf;
+      }
+      const loose = await makeItem({ name: "Loose" });
+      const res = await patch(loose.id, { parent_id: leaf });
+      expect(res.status).toBe(422);
+      expect(res.body.error).toBe("parent_cycle");
+    });
+  });
+
+  describe("an item keeps its state", () => {
+    it("state_id:null on an item that has one is a 422 state_required, and nothing changes", async () => {
+      const a = await makeItem({ name: "A" });
+      const before = fake.db.items.find((i) => i.id === a.id)!.stateId;
+      expect(before).toBeTruthy();
+      const res = await patch(a.id, { state_id: null });
+      expect(res.status).toBe(422);
+      expect(res.body).toEqual({ error: "state_required" });
+      expect(fake.db.items.find((i) => i.id === a.id)!.stateId).toBe(before);
+      expect(fake.db.activity.filter((x) => x.verb === "state_changed")).toHaveLength(0);
+    });
+
+    it("an item that already has none, sent null again, is not a change (an identity PATCH never fails)", async () => {
+      const a = await makeItem({ name: "A" });
+      fake.db.items.find((i) => i.id === a.id)!.stateId = null;
+      expect((await patch(a.id, { state_id: null, name: "Renamed" })).status).toBe(200);
+    });
+
+    it("a real state change still works", async () => {
+      const a = await makeItem({ name: "A" });
+      const res = await patch(a.id, { state_id: stateOf("completed") });
+      expect(res.status).toBe(200);
+      expect(res.body.work_item.state.group).toBe("completed");
+    });
+  });
+
+  describe("label ids", () => {
+    it("an unknown id is a 422 invalid_label naming it — it used to surface as invalid_parent or a 500", async () => {
+      const res = await request(app)
+        .post(`/api/pm/projects/${pid}/work-items`)
+        .send({ name: "X", label_ids: ["ghost-label"] });
+      expect(res.status).toBe(422);
+      expect(res.body).toEqual({ error: "invalid_label", ids: ["ghost-label"] });
+      expect(fake.db.items).toHaveLength(0);
+    });
+
+    it("names EVERY offender — unknown and another project's — and only those", async () => {
+      const mine = (await request(app).post(`/api/pm/projects/${pid}/labels`).send({ name: "bug" })).body.label;
+      const otherProject = (await request(app).post("/api/pm/projects").send({ name: "Other" })).body.project.id;
+      const theirs = (await request(app).post(`/api/pm/projects/${otherProject}/labels`).send({ name: "foreign" })).body.label;
+      const a = await makeItem({ name: "A" });
+      const res = await patch(a.id, { label_ids: [mine.id, "ghost-1", theirs.id] });
+      expect(res.status).toBe(422);
+      expect(res.body.error).toBe("invalid_label");
+      expect(res.body.ids).toEqual(["ghost-1", theirs.id]);
+    });
+
+    it("a repeated id is folded, not a unique-violation", async () => {
+      const mine = (await request(app).post(`/api/pm/projects/${pid}/labels`).send({ name: "bug" })).body.label;
+      const res = await request(app)
+        .post(`/api/pm/projects/${pid}/work-items`)
+        .send({ name: "X", label_ids: [mine.id, mine.id] });
+      expect(res.status).toBe(201);
+      expect(res.body.work_item.labels).toHaveLength(1);
+    });
+  });
+
+  describe("assignee ids", () => {
+    beforeEach(() => {
+      fake.db.users.push(
+        { id: "u-ana", displayName: "Ana", role: "family", directoryStatus: "ACTIVE" },
+        { id: "u-gus", displayName: "Gus", role: "guest", directoryStatus: "ACTIVE" },
+        { id: "u-old", displayName: "Olga", role: "family", directoryStatus: "DEACTIVATED" },
+        { id: "_service:mcp", displayName: "MCP", role: "service", directoryStatus: "ACTIVE" },
+      );
+    });
+
+    it("an id that is not a person is a 422 invalid_assignee naming every such id", async () => {
+      const res = await request(app)
+        .post(`/api/pm/projects/${pid}/work-items`)
+        .send({ name: "X", assignees: ["ghost-1", "u-ana", "ghost-2"] });
+      expect(res.status).toBe(422);
+      expect(res.body).toEqual({ error: "invalid_assignee", ids: ["ghost-1", "ghost-2"] });
+      expect(fake.db.items).toHaveLength(0);
+    });
+
+    it("a deactivated person and a service principal are not assignable; an external guest is", async () => {
+      const bad = await request(app)
+        .post(`/api/pm/projects/${pid}/work-items`)
+        .send({ name: "X", assignees: ["u-old", "_service:mcp"] });
+      expect(bad.status).toBe(422);
+      expect(bad.body.ids).toEqual(["u-old", "_service:mcp"]);
+      const ok = await request(app)
+        .post(`/api/pm/projects/${pid}/work-items`)
+        .send({ name: "X", assignees: ["u-gus"] });
+      expect(ok.status).toBe(201);
+      expect(ok.body.work_item.assignees).toEqual(["u-gus"]);
+    });
+
+    it("a repeated id is folded, not a unique-violation", async () => {
+      const res = await request(app)
+        .post(`/api/pm/projects/${pid}/work-items`)
+        .send({ name: "X", assignees: ["u-ana", "u-ana"] });
+      expect(res.status).toBe(201);
+      expect(res.body.work_item.assignees).toEqual(["u-ana"]);
+    });
+
+    it("PATCH checks only who it ADDS: a set that still holds a leaver is editable, and the leaver can always be removed", async () => {
+      const a = await makeItem({ name: "A", assignees: ["u-ana"] });
+      // the assignee leaves after the item was assigned
+      fake.db.users.find((u) => u.id === "u-ana")!.directoryStatus = "DEACTIVATED";
+      // re-sending the same set (an identity PATCH) works…
+      expect((await patch(a.id, { assignees: ["u-ana"], name: "Renamed" })).status).toBe(200);
+      // …adding a ghost does not…
+      const add = await patch(a.id, { assignees: ["u-ana", "ghost-9"] });
+      expect(add.status).toBe(422);
+      expect(add.body).toEqual({ error: "invalid_assignee", ids: ["ghost-9"] });
+      // …and removing the leaver does.
+      const gus = await patch(a.id, { assignees: ["u-gus"] });
+      expect(gus.status).toBe(200);
+      expect(gus.body.work_item.assignees).toEqual(["u-gus"]);
+    });
+  });
+
+  describe("sortOrder is a Float", () => {
+    it.each([2.5, 1e-7, -3.25, 0.1 + 0.2, 123456.789])("PATCH sortOrder %s is stored exactly", async (value) => {
+      const a = await makeItem({ name: "A" });
+      const res = await patch(a.id, { sortOrder: value });
+      expect(res.status).toBe(200);
+      expect(res.body.work_item.sortOrder).toBe(value);
+      expect(fake.db.items.find((i) => i.id === a.id)!.sortOrder).toBe(value);
+    });
+
+    it.each(["Infinity", "NaN", "2.5", null])("still refuses %j", async (value) => {
+      const a = await makeItem({ name: "A" });
+      expect((await patch(a.id, { sortOrder: value })).status).toBe(400);
+    });
+  });
+
+  describe("comments and activity are pages (default 100, max 500)", () => {
+    let itemId: string;
+    const seedComments = (n: number) => {
+      for (let i = 1; i <= n; i += 1) {
+        fake.db.comments.push({
+          id: `cm-seed-${String(i).padStart(4, "0")}`,
+          workItemId: itemId,
+          authorId: null,
+          commentHtml: `<p>${i}</p>`,
+          createdAt: new Date(2026, 0, 1, 0, 0, i),
+          updatedAt: new Date(2026, 0, 1, 0, 0, i),
+        });
+      }
+    };
+    const seedActivity = (n: number) => {
+      for (let i = 1; i <= n; i += 1) {
+        fake.db.activity.push({
+          id: `ac-seed-${String(i).padStart(4, "0")}`,
+          workItemId: itemId,
+          actorId: null,
+          verb: "updated",
+          field: "fields",
+          oldValue: null,
+          newValue: null,
+          createdAt: new Date(2026, 0, 2, 0, 0, i),
+        });
+      }
+    };
+    const walk = async (url: string, key: "comments" | "activity") => {
+      const ids: string[] = [];
+      let cursor: string | null = null;
+      let pages = 0;
+      do {
+        const res: { status: number; body: Row } = await request(app).get(
+          `${url}?limit=60${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+        );
+        expect(res.status).toBe(200);
+        ids.push(...(res.body[key] as Array<{ id: string }>).map((r) => r.id));
+        cursor = res.body.nextCursor as string | null;
+        pages += 1;
+        expect(pages).toBeLessThan(20);
+      } while (cursor);
+      return ids;
+    };
+
+    beforeEach(async () => {
+      itemId = (await makeItem({ name: "Threaded" })).id;
+      fake.db.activity.length = 0; // the item's own `created` row is not under test
+    });
+
+    it("a caller that sends nothing gets the first 100, a cursor and the exact total — never an unbounded array", async () => {
+      seedComments(250);
+      const res = await request(app).get(`/api/pm/work-items/${itemId}/comments`);
+      expect(res.status).toBe(200);
+      expect(res.body.comments).toHaveLength(100);
+      expect(res.body.total).toBe(250);
+      expect(res.body.nextCursor).toEqual(expect.any(String));
+      expect(res.body.comments[0].id).toBe("cm-seed-0001"); // oldest first, as before
+    });
+
+    it("a short thread is returned whole with a null cursor — what an old caller always got", async () => {
+      seedComments(3);
+      const res = await request(app).get(`/api/pm/work-items/${itemId}/comments`);
+      expect(res.body.comments.map((c: { id: string }) => c.id)).toEqual(["cm-seed-0001", "cm-seed-0002", "cm-seed-0003"]);
+      expect(res.body.nextCursor).toBeNull();
+      expect(res.body.total).toBe(3);
+    });
+
+    it("the cursor walks every comment exactly once, oldest to newest", async () => {
+      seedComments(250);
+      const ids = await walk(`/api/pm/work-items/${itemId}/comments`, "comments");
+      expect(ids).toHaveLength(250);
+      expect(ids).toEqual(Array.from({ length: 250 }, (_, i) => `cm-seed-${String(i + 1).padStart(4, "0")}`));
+    });
+
+    it("the activity feed is paged the same way", async () => {
+      seedActivity(130);
+      const first = await request(app).get(`/api/pm/work-items/${itemId}/activity`);
+      expect(first.body.activity).toHaveLength(100);
+      expect(first.body.total).toBe(130);
+      const ids = await walk(`/api/pm/work-items/${itemId}/activity`, "activity");
+      expect(ids).toHaveLength(130);
+      expect(new Set(ids).size).toBe(130);
+    });
+
+    it("limit tops out at 500", async () => {
+      seedComments(120);
+      expect((await request(app).get(`/api/pm/work-items/${itemId}/comments?limit=500`)).body.comments).toHaveLength(120);
+      expect((await request(app).get(`/api/pm/work-items/${itemId}/comments?limit=501`)).status).toBe(400);
+    });
+
+    it.each(["limit=abc", "limit=0", "cursor=", "page=0"])("?%s is a 400 on both", async (query) => {
+      expect((await request(app).get(`/api/pm/work-items/${itemId}/comments?${query}`)).status).toBe(400);
+      expect((await request(app).get(`/api/pm/work-items/${itemId}/activity?${query}`)).status).toBe(400);
+    });
+
+    it("a cursor from another list is a 400 invalid_cursor", async () => {
+      seedComments(5);
+      seedActivity(5);
+      const c = await request(app).get(`/api/pm/work-items/${itemId}/comments?limit=2`);
+      const wrong = await request(app).get(
+        `/api/pm/work-items/${itemId}/activity?cursor=${encodeURIComponent(c.body.nextCursor)}`,
+      );
+      expect(wrong.status).toBe(400);
+      expect(wrong.body).toEqual({ error: "invalid_cursor" });
+    });
+
+    it("a missing work item is still a 404", async () => {
+      expect((await request(app).get("/api/pm/work-items/nope/comments")).status).toBe(404);
+      expect((await request(app).get("/api/pm/work-items/nope/activity")).status).toBe(404);
     });
   });
 });

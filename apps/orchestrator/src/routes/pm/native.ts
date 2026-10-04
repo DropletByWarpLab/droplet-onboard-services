@@ -54,7 +54,11 @@ function mapServiceError(err: unknown, res: Response): boolean {
       return true;
     case "invalid_parent":
     case "invalid_state":
-    case "invalid_label":
+    // WARP-3371 — a re-parent that would close a loop, and a PATCH that would
+    // strip a work item of its state. Well-formed requests whose CHOICE is not
+    // processable: the same class as invalid_state.
+    case "parent_cycle":
+    case "state_required":
     // ADR-045 §5.3 — the HOUSEHOLD refusal. The referenced row exists and the
     // request is well-formed; it is the CHOICE that is not processable, which
     // is the same shape as invalid_state above.
@@ -84,6 +88,12 @@ function mapServiceError(err: unknown, res: Response): boolean {
         message:
           "Another request changed this work item at the same time. Nothing was applied — try again.",
       });
+      return true;
+    // WARP-3371 — a label / assignee id that is not usable. The 422 names EVERY
+    // offending id, so the caller can fix the request instead of guessing which.
+    case "invalid_label":
+    case "invalid_assignee":
+      res.status(422).json({ error: msg, ids: err instanceof pm.PmRefError ? err.ids : [] });
       return true;
     case "invalid_cursor":
       // WARP-3371 — a `cursor` this list did not mint. The caller's mistake,
@@ -224,11 +234,13 @@ const workItemPatchSchema = z.object({
     department_id: z.string().min(1).max(64).nullable().optional(),
   start_date: dateField.nullable().optional(),
   due_date: dateField.nullable().optional(),
-  // .int() already rejects floats and (via Number.isInteger) NaN/Infinity;
-  // .finite() makes the NaN/Infinity rejection explicit and self-documenting so
-  // a non-finite sortOrder can never reach Prisma's Int column (review finding:
-  // sortOrder admits NaN/Infinity).
-  sortOrder: z.number().int().finite().optional(),
+  // `sortOrder` is a Float column: a kanban drag inserts BETWEEN two cards
+  // (2.5 between 2 and 3) without renumbering the column. `.int()` here made the
+  // API refuse the very values the column exists for. `.finite()` still keeps
+  // NaN and ±Infinity out of Prisma (review finding: sortOrder admits
+  // NaN/Infinity) — JSON cannot carry them, but a client-built string or a future
+  // coercion could.
+  sortOrder: z.number().finite().optional(),
 });
 
 const transitionSchema = z.object({ state_id: z.string().min(1).max(64) });
@@ -343,11 +355,13 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
   // ── Projects ──
   router.get("/pm/projects", async (req, res, next) => {
     try {
-      const perPage = req.query.per_page ? Number(req.query.per_page) : undefined;
+      // 🔴 `?per_page=abc` used to reach `take` as NaN here and answer 500.
+      const pageParsed = parsePaging(req.query);
+      if (!pageParsed.success) return badRequest(res, pageParsed);
       const projects = await pm.listProjects(prisma, {
         workspaceSlug: req.query.workspace ? String(req.query.workspace) : undefined,
         includeArchived: req.query.archived === "1" || req.query.archived === "true",
-        perPage,
+        perPage: pageParsed.data.limit,
         // WARP-2719 — `?department=` takes an id, a slug or a NAME, and
         // `none` for "owned by nobody". Resolved here rather than left to the
         // caller because the assistant cannot look a name up: the department
@@ -784,7 +798,10 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
   // ── Comments ──
   router.get("/pm/work-items/:id/comments", sharedItem, async (req, res, next) => {
     try {
-      res.json({ comments: await pm.listComments(prisma, req.params.id) });
+      const pageParsed = parsePaging(req.query);
+      if (!pageParsed.success) return badRequest(res, pageParsed);
+      const page = await pm.listComments(prisma, req.params.id, pageParsed.data);
+      res.json({ comments: page.items, nextCursor: page.nextCursor, total: page.total });
     } catch (err) {
       if (mapServiceError(err, res)) return;
       next(err);
@@ -794,7 +811,10 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
   // Activity feed (read-only timeline).
   router.get("/pm/work-items/:id/activity", async (req, res, next) => {
     try {
-      res.json({ activity: await pm.listActivity(prisma, req.params.id) });
+      const pageParsed = parsePaging(req.query);
+      if (!pageParsed.success) return badRequest(res, pageParsed);
+      const page = await pm.listActivity(prisma, req.params.id, pageParsed.data);
+      res.json({ activity: page.items, nextCursor: page.nextCursor, total: page.total });
     } catch (err) {
       if (mapServiceError(err, res)) return;
       next(err);
