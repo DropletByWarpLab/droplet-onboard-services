@@ -86,5 +86,12 @@ jobs:
       # repository would run attacker code in this repo's workflows with the
       # workflow's token and secrets. A 40-hex commit SHA cannot move; this
       # fails the PR when any `uses:` under .github is not one.
+      #
+      # The gate parses fail-closed (flow mappings, quoted keys, `uses :`, `..`
+      # in local paths, composite actions outside .github are all rejected or
+      # scanned), and tests/check-actions-pinned.test.sh pins one fixture per
+      # bypass form so a loosened pattern turns this step red.
       - name: Actions pinned by commit SHA
-        run: bash scripts/check-actions-pinned.sh
+        run: |
+          bash scripts/check-actions-pinned.sh
+          bash tests/check-actions-pinned.test.sh
