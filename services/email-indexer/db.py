@@ -85,6 +85,7 @@ async def list_queued_drafts() -> list[DraftToSend]:
         SELECT d.id, d."accountId", d."toAddrs", d."ccAddrs",
                d."bccAddrs", d.subject, d.body,
                d."threadId", d."attachmentIds",
+               d."messageId", d."autoSubmitted",
                a."address" AS from_addr,
                a."smtpHost", a."smtpPort", a."smtpTls",
                a."username", a."passwordEnc"
@@ -150,6 +151,10 @@ async def list_queued_drafts() -> list[DraftToSend]:
                 thread_message_ids=thread_ids,
                 attachments=attachments,
                 attachments_missing=len(attachments) != len(set(wanted)),
+                # WARP-3529 — the desk chose this draft's Message-ID and says
+                # whether it is an automatic acknowledgement.
+                message_id=r["messageId"],
+                auto_submitted=bool(r["autoSubmitted"]),
             )
         )
     return out

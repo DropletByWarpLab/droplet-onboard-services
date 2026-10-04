@@ -23,6 +23,16 @@ WARP-3267:
     bugs, and every client shows text/plain. A forward carries the original's
     attachments, picked by id (`EmailDraft.attachmentIds`), as
     `multipart/mixed`.
+
+WARP-3529 (the service desk):
+  - The orchestrator generates the Message-ID of a desk reply, stores it on the
+    draft (`EmailDraft.messageId`) and this module sends exactly that, so the
+    desk knows the id a customer's reply will carry in `In-Reply-To` /
+    `References` before anything leaves the box. A draft with none — every
+    draft the mail screen and the assistant create — still gets one made here.
+  - A draft the desk marks `autoSubmitted` (its automatic acknowledgement) goes
+    out as `Auto-Submitted: auto-replied` (RFC 3834) so no other responder, and
+    not this box's own intake, answers it.
 """
 from __future__ import annotations
 
@@ -62,12 +72,22 @@ class DraftToSend:
     #: gone). Sending without it would send something the owner did not
     #: approve, so the draft fails instead.
     attachments_missing: bool = False
+    #: WARP-3529 — the RFC 5322 Message-ID (no brackets) the orchestrator chose.
+    #: None for a draft nothing chose one for; `build_message` makes its own.
+    message_id: Optional[str] = None
+    #: WARP-3529 — an automatic reply (the desk's acknowledgement), not a
+    #: person's: sent with `Auto-Submitted: auto-replied`.
+    auto_submitted: bool = False
 
 
 #: A Message-ID we are willing to echo into a header. They come from inbound
 #: mail, so anything with whitespace or brackets (a header-injection attempt,
 #: or just junk) is left out rather than failing the whole send.
 _MSGID_RE = re.compile(r"[^\s<>]{1,900}")
+#: The ids the orchestrator generates are `<hex>@<domain>`. Anything outside this
+#: dot-atom alphabet is not echoed into a header — the draft row is data this
+#: process did not write, and a CR/LF in it would be a header injection.
+_OWN_MSGID_RE = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,200}@[A-Za-z0-9.-]{1,255}")
 _CTYPE_RE = re.compile(r"([a-z0-9][a-z0-9.+-]*)/([a-z0-9][a-z0-9.+-]*)")
 _UNSAFE_NAME_RE = re.compile(
     "[\x00-\x1f\x7f\u200e\u200f\u202a-\u202e\u2066-\u2069\"<>:|?*/\\\\]"
@@ -105,7 +125,14 @@ def build_message(draft: DraftToSend) -> EmailMessage:
     msg["Subject"] = draft.subject
     msg["Date"] = email.utils.formatdate(usegmt=True)
     domain = draft.from_addr.rpartition("@")[2] or None
-    msg["Message-ID"] = email.utils.make_msgid(domain=domain)
+    if draft.message_id and _OWN_MSGID_RE.fullmatch(draft.message_id):
+        msg["Message-ID"] = f"<{draft.message_id}>"
+    else:
+        msg["Message-ID"] = email.utils.make_msgid(domain=domain)
+    if draft.auto_submitted:
+        msg["Auto-Submitted"] = "auto-replied"
+        # Exchange's own "do not auto-respond to this" marker; harmless elsewhere.
+        msg["X-Auto-Response-Suppress"] = "All"
     in_reply_to, references = _thread_headers(draft.thread_message_ids)
     if in_reply_to:
         msg["In-Reply-To"] = in_reply_to
