@@ -116,9 +116,11 @@ def test_compose_file_is_readable():
     services = _services_with_env_file_and_environment()
     assert len(services) > 20, f"only parsed {len(services)} services — parser drifted"
     assert "rag-eval" in services, "rag-eval service not found — parser drifted"
+    # WARP-3588: rag-eval no longer loads ../.env (it gets an explicit
+    # `environment:` list); the parser must still see the orchestrator's.
     assert any(
-        p.endswith("../.env") for p in services["rag-eval"]["env_file"]
-    ), "rag-eval lost its `env_file: ../.env`"
+        p.endswith("../.env") for p in services["orchestrator"]["env_file"]
+    ), "orchestrator lost its `env_file: ../.env` — parser drifted"
     assert (
         len(services["rag-eval"]["environment"]) > 5
     ), "rag-eval environment entries not parsed — parser drifted"
@@ -150,16 +152,22 @@ def test_compose_sh_still_links_docker_env_to_the_root_env():
     )
 
 
-def test_rag_eval_user_reaches_the_container_via_env_file_only():
-    """The specific WARP-1908 regression, named so a re-introduction is obvious."""
+def test_rag_eval_user_is_a_bare_name_not_a_self_reference():
+    """The specific WARP-1908 regression, named so a re-introduction is obvious.
+
+    WARP-3588 took rag-eval off `env_file`, so RAGAS_EVAL_USER now arrives as a
+    BARE `- RAGAS_EVAL_USER` entry (value from .env, unset when absent). The
+    shape that broke twice is `RAGAS_EVAL_USER=${RAGAS_EVAL_USER:-}`: it hands
+    the runner "" on a box that has not set it, the runner then omits ?user=,
+    and every retrieval-eval search 400s on eval_user_required.
+    """
     rag_eval = _services_with_env_file_and_environment()["rag-eval"]
     declared = [k for k, _ in rag_eval["environment"]]
     assert "RAGAS_EVAL_USER" not in declared, (
-        "rag-eval re-declared RAGAS_EVAL_USER in `environment:`. That shadows "
-        "the operator's value from `env_file: ../.env` with \"\", the runner "
-        "then omits ?user=, and every retrieval-eval search 400s on "
-        "eval_user_required (WARP-1908)."
+        "rag-eval declared RAGAS_EVAL_USER as KEY=value in `environment:`. "
+        "Keep it a bare name so an unset key stays unset (WARP-1908)."
     )
+    assert rag_eval["env_file"] == [], "rag-eval regained env_file (WARP-3588)"
 
 
 # --- the other half: what let the two env files diverge --------------------
