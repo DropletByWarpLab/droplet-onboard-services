@@ -679,7 +679,7 @@ async def probe_rtsp_with_credentials(ip: str, port: int
     credentials = get_credentials()
     state = _ladder.setdefault(ip, _LadderState())
     if _clock() < state.quiet_until:
-        logger.debug("Default-credential probing of %s is standing down", ip)
+        logger.debug("Automatic probing of %s is standing down", ip)
         return None
     if state.next_credential >= len(credentials):
         state.next_credential = 0  # a whole pass was rejected and its cooldown is over
