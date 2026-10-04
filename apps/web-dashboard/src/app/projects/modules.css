@@ -1,0 +1,36 @@
+/* Modules (milestones) and the drawer's module chips — WARP-3521. Shares the
+ * list / detail layout in cycles.css. Scoped under `.pm-scope`; tokens only. */
+
+.pm-scope .pm-module-lead { gap: 8px; }
+
+/* The "add work items" picker: a scrolling list of checkable rows. */
+.pm-scope .pm-module-picklist {
+  max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-canvas); padding: 2px 10px;
+}
+.pm-scope .pm-module-pick {
+  display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 6px 2px;
+  border-bottom: 1px solid var(--border); cursor: pointer;
+}
+.pm-scope .pm-module-pick:last-child { border-bottom: none; }
+.pm-scope .pm-module-pick input[type="checkbox"] { width: 16px; height: 16px; flex: none; accent-color: var(--accent); }
+.pm-scope .pm-module-pick:focus-within { background: var(--bg-hover); border-radius: 6px; }
+.pm-scope .pm-backlog-name-text {
+  flex: 1; min-width: 0; font-size: 13.5px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Remove-from-module affordance inside a chip: the glyph is small, the hit area
+ * is not (brief §5.3 — at least 24 x 24). */
+.pm-scope .pm-tag-x {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; margin: -4px -6px -4px 0; padding: 0; flex: none;
+  background: transparent; border: none; border-radius: 999px; color: var(--text-3); cursor: pointer;
+}
+.pm-scope .pm-tag-x:hover { background: var(--bg-hover); color: var(--text); }
+.pm-scope .pm-tag-x:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+.pm-scope .pm-tag-x:disabled { opacity: 0.5; cursor: not-allowed; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pm-scope .pm-tag-x { transition: none !important; }
+}

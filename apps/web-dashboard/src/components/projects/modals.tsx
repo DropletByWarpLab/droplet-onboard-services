@@ -65,10 +65,13 @@ export function NewItemModal({
   project,
   onClose,
   onCreated,
+  cycleId,
 }: {
   project: PmProject;
   onClose: () => void;
   onCreated: () => void;
+  /** WARP-3521 — plan the new item into this cycle as it is created. */
+  cycleId?: string;
 }): JSX.Element {
   const titleId = useId();
   const { toast } = useToast();
@@ -92,6 +95,7 @@ export function NewItemModal({
         state_id: stateId || undefined,
         priority,
         due_date: dueDate ? new Date(dueDate).toISOString() : undefined,
+        cycle_id: cycleId,
       });
       toast("Item created", "success");
       onCreated();
