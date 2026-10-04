@@ -57,6 +57,7 @@ import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createPmWebhooksRouter } from "./routes/pm/webhooks.js";
+import { createPmPresenceRouter } from "./routes/pm/presence.js";
 import { createCrmRouter } from "./routes/crm.js";
 import { createMoneyRouter } from "./routes/money.js";
 import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
@@ -561,6 +562,10 @@ export function createApp(
   // and admin only. `/pm/webhooks` is a literal second segment and no PM router
   // above owns a `/pm/:param`, so neither shadows the other.
   app.use("/api", createPmWebhooksRouter(prisma));
+  // WARP-3536 (WS-19) — "Also viewing": the drawer's heartbeat and the list of
+  // other viewers. The `projects` module gate and the guest tier floor come
+  // from the `/api/pm` prefix above; the longer paths here shadow nothing.
+  app.use("/api", createPmPresenceRouter(prisma));
   // WARP-2117 — the CRM, which lives inside the Projects surface. Mounted
   // AFTER the PM router but on a disjoint prefix (`/api/crm`), so neither
   // shadows the other; the `crm` module gate comes from the registry.
