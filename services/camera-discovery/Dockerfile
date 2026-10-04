@@ -24,11 +24,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       openssl ca-certificates
 
 WORKDIR /app
-COPY services/camera-discovery/requirements.txt .
+COPY services/camera-discovery/requirements.lock .
 # WARP-1065: persistent pip wheel/http cache (replaces --no-cache-dir; the
 # cache lives in the mount, not the image).
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt && \
+    pip install --require-hashes --no-deps -r requirements.lock && \
     apt-get purge -y --auto-remove gcc libc-dev python3-dev
 COPY services/camera-discovery/ .
 
