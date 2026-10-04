@@ -9,7 +9,7 @@
  * all.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import type { ReactNode } from "react";
 import type { RecordingStorage } from "../types";
@@ -67,10 +67,33 @@ describe("useRecordingStorage", () => {
     expect(result.current.recording).toBeNull();
   });
 
+  it("keeps cached facts marked stale after refresh fails, then clears stale after recovery", async () => {
+    fetchMock
+      .mockResolvedValueOnce({ available: true, data })
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({ available: true, data });
+    const { result } = renderHook(() => useRecordingStorage(), { wrapper });
+    await waitFor(() => expect(result.current.state).toBe("ready"));
+    expect(result.current.stale).toBe(false);
+
+    await act(async () => {
+      await result.current.refresh().catch(() => undefined);
+    });
+    await waitFor(() => expect(result.current.stale).toBe(true));
+    expect(result.current.recording).toBe(data);
+
+    await act(async () => {
+      await result.current.refresh().catch(() => undefined);
+    });
+    await waitFor(() => expect(result.current.stale).toBe(false));
+    expect(result.current.recording).toBe(data);
+  });
+
   it("with `enabled: false` it is `forbidden` and never fetches (a family account's 403 is never provoked)", async () => {
     const { result } = renderHook(() => useRecordingStorage({ enabled: false }), { wrapper });
     expect(result.current.state).toBe("forbidden");
     expect(result.current.recording).toBeNull();
+    expect(result.current.stale).toBe(false);
     // Give any stray request a chance to fire.
     await new Promise((r) => setTimeout(r, 30));
     expect(fetchMock).not.toHaveBeenCalled();

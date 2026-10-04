@@ -30,8 +30,8 @@ import "./recording-storage.css";
  * missing.
  */
 export function CameraRecordingNote({ camera }: { camera: string }) {
-  const { state, recording } = useRecordingStorage();
-  if (state !== "ready" || !recording) return null;
+  const { state, recording, stale } = useRecordingStorage();
+  if (state !== "ready" || stale || !recording) return null;
 
   const drive = recordingsDriveName(recording.drive);
   const row = recording.cameras.find((c) => c.name === camera);

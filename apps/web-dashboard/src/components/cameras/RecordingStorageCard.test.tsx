@@ -104,10 +104,11 @@ function setup(
   {
     role = "owner",
     state = recording ? "ready" : "loading",
-  }: { role?: string; state?: UseRecordingStorage["state"] } = {},
+    stale = false,
+  }: { role?: string; state?: UseRecordingStorage["state"]; stale?: boolean } = {},
 ) {
   auth.role = role;
-  hook.value = { state, recording, refresh } satisfies UseRecordingStorage;
+  hook.value = { state, recording, stale, refresh } satisfies UseRecordingStorage;
   return render(<RecordingStorageCard />);
 }
 
@@ -150,6 +151,36 @@ describe("RecordingStorageCard — not-there-yet and not-ready states", () => {
   it("renders nothing at all for a role that may not read it", () => {
     setup(null, { state: "forbidden" });
     expect(screen.queryByTestId("recording-storage-card")).not.toBeInTheDocument();
+  });
+});
+
+describe("RecordingStorageCard — cached data after a failed refresh", () => {
+  it("labels cached facts, pauses writes, and re-enables them after a successful retry", async () => {
+    const recording = makeRecording({
+      oldFootage: { present: true, bytes: 12 * GIB, location: "system_disk" },
+      eligibleDrives: [
+        { fsUuid: "fs-2", label: "Bay 3", sizeBytes: 2000 * GIB, freeBytes: 1900 * GIB, encrypted: true },
+      ],
+    });
+    const { rerender } = setup(recording, { stale: true });
+
+    expect(screen.getByTestId("recording-storage-stale")).toHaveTextContent(/last known storage details/i);
+    expect(screen.getByRole("heading", { name: /recording storage/i })).toBeInTheDocument();
+    for (const radio of screen.getAllByRole("radio")) expect(radio).toBeDisabled();
+    expect(screen.queryByRole("combobox", { name: /move recordings to/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /delete old recordings from system drive/i })).not.toBeInTheDocument();
+
+    refresh.mockImplementationOnce(async () => {
+      hook.value = { state: "ready", recording, stale: false, refresh } satisfies UseRecordingStorage;
+    });
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+    await waitFor(() => {
+      rerender(<RecordingStorageCard />);
+      expect(screen.queryByTestId("recording-storage-stale")).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("radio", { name: /whole drive/i })).toBeEnabled();
+    expect(screen.getByRole("combobox", { name: /move recordings to/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /delete old recordings from system drive/i })).toBeInTheDocument();
   });
 });
 
@@ -462,6 +493,26 @@ describe("RecordingStorageCard — warnings, each with its fix", () => {
     );
   });
 
+  it("a read-only drive disables mode changes and sends the near-full fix to Storage", () => {
+    setup(
+      makeRecording({
+        status: "degraded",
+        warnings: [
+          { code: "read_only", message: "" },
+          { code: "near_full", message: "" },
+        ],
+      }),
+    );
+    for (const radio of screen.getAllByRole("radio")) expect(radio).toBeDisabled();
+    expect(screen.getByText(/mode changes are unavailable while the recording drive is read-only/i)).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("recording-warning-near_full")).getByRole("link", { name: /open storage/i }),
+    ).toHaveAttribute("href", "/settings/storage");
+    expect(
+      within(screen.getByTestId("recording-warning-near_full")).queryByRole("button", { name: /use the whole drive/i }),
+    ).not.toBeInTheDocument();
+  });
+
   it("cannot_grow: says the reservation cannot grow, fix = Storage", () => {
     setup(withWarning("cannot_grow", { status: "degraded" }));
     const warning = screen.getByTestId("recording-warning-cannot_grow");
@@ -578,6 +629,18 @@ describe("RecordingStorageCard — choosing a different drive (tier 2)", () => {
   it("is not offered when there is nothing else to choose", () => {
     setup(makeRecording());
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+  });
+
+  it("does not offer an unencrypted or too-small drive", () => {
+    setup(
+      makeRecording({
+        eligibleDrives: [
+          { fsUuid: "plain-1", label: "Plain disk", sizeBytes: 2000 * GIB, freeBytes: 1900 * GIB, encrypted: false },
+          { fsUuid: "small-1", label: "Small disk", sizeBytes: 10 * GIB, freeBytes: 10 * GIB, encrypted: true },
+        ],
+      }),
+    );
+    expect(screen.queryByRole("combobox", { name: /move recordings to/i })).not.toBeInTheDocument();
   });
 
   it("'Use this drive' stays disabled until one is chosen", () => {
@@ -697,7 +760,7 @@ describe("RecordingStorageCard — accessibility", () => {
     setup(
       makeRecording({
         eligibleDrives: [
-          { fsUuid: "fs-2", label: "Bay 3", sizeBytes: 1, freeBytes: 1, encrypted: true },
+          { fsUuid: "fs-3", label: "Bay 3", sizeBytes: 2000 * GIB, freeBytes: 1900 * GIB, encrypted: true },
         ],
         warnings: [{ code: "near_full", message: "" }],
         oldFootage: { present: true, bytes: 1, location: "system_disk" },
@@ -889,6 +952,7 @@ describe("RecordingStorageCard — Whole drive removes the drive from Files, and
       hook.value = {
         state: "ready",
         refresh,
+        stale: false,
         recording: makeRecording({
           drive: { fsUuid: "fs-OTHER", label: "Bay 3", model: "", sizeBytes: 1000 * GIB, encrypted: true, mountPath: "" },
         }),

@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useId, useRef, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -68,7 +68,7 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
   // family account gets a 403. Such a role never even issues the request (the
   // hook is disabled) and sees no card — not an error, not an empty frame.
   const canManage = user?.role === "owner" || user?.role === "admin";
-  const { state, recording, refresh } = useRecordingStorage({ enabled: canManage });
+  const { state, recording, refresh, stale } = useRecordingStorage({ enabled: canManage });
   const { toast } = useToast();
   const headingId = useId();
   const pickerRef = useRef<HTMLSelectElement | null>(null);
@@ -97,6 +97,14 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
   // the owner learns it from the refusal; remember it FOR THAT DRIVE so the option
   // stays locked, with the reason, instead of offering what will be refused again.
   const [wholeBlockedFor, setWholeBlockedFor] = useState<string | null>(null);
+  const staleMessage = "Refresh recording storage before making a change.";
+
+  useEffect(() => {
+    if (!stale) return;
+    setPending(null);
+    setDeleteOpen(false);
+    setDeleteError(null);
+  }, [stale]);
 
   // A role that may not read it sees nothing at all — not an empty frame.
   if (!canManage || state === "forbidden") return null;
@@ -111,6 +119,10 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
   const place = oldFootagePlace(recording?.oldFootage.location ?? "system_disk");
 
   async function applyMode(mode: RecordingStorageMode) {
+    if (stale) {
+      toast(staleMessage, "error");
+      throw new Error(staleMessage);
+    }
     try {
       await updateRecordingStorage({ mode });
       toast(
@@ -119,7 +131,7 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
           : "Recordings are back to an auto-sized slice.",
         "success",
       );
-      void refresh();
+      void refresh().catch(() => {});
     } catch (err) {
       toast(friendlyRecordingStorageError(err, "mode"), "error");
       if (mode === "full" && isWholeDriveBlockedByFiles(err)) {
@@ -134,10 +146,14 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
   }
 
   async function applyDrive(fsUuid: string, name: string) {
+    if (stale) {
+      toast(staleMessage, "error");
+      throw new Error(staleMessage);
+    }
     try {
       await updateRecordingStorage({ fsUuid });
       toast(`Moving your recordings to ${name}.`, "success");
-      void refresh();
+      void refresh().catch(() => {});
     } catch (err) {
       toast(friendlyRecordingStorageError(err, "drive"), "error");
       throw err;
@@ -145,12 +161,16 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
   }
 
   async function applyDelete() {
+    if (stale) {
+      setDeleteError(staleMessage);
+      throw new Error(staleMessage);
+    }
     try {
       await deleteOldRecordings();
       setDeleteOpen(false);
       setDeleteError(null);
       toast(`Old recordings deleted from ${place.where}.`, "success");
-      void refresh();
+      void refresh().catch(() => {});
     } catch (err) {
       // DestructiveConfirm shows this inline and stays open for a retry.
       setDeleteError(friendlyRecordingStorageError(err, "delete-old"));
@@ -179,6 +199,15 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
         {status && <Badge kind={status.kind}>{status.label}</Badge>}
       </div>
 
+      {stale && (
+        <div className="rs-note" role="status" data-testid="recording-storage-stale">
+          <p>These are the last known storage details. Refresh failed, so changes are paused.</p>
+          <button type="button" className="btn sm" onClick={() => void refresh().catch(() => {})}>
+            Try again
+          </button>
+        </div>
+      )}
+
       {state === "loading" && (
         <div aria-hidden="true" className="flex flex-col gap-3 motion-safe:animate-pulse">
           <div className="rs-skel" />
@@ -191,7 +220,7 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
           <p className="rs-note">
             Couldn&apos;t load recording storage. Your recordings aren&apos;t affected.
           </p>
-          <button type="button" className="btn sm" onClick={() => void refresh()}>
+          <button type="button" className="btn sm" onClick={() => void refresh().catch(() => {})}>
             Try again
           </button>
         </div>
@@ -209,6 +238,7 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
         <Body
           r={recording}
           status={effective}
+          stale={stale}
           wholeBlocked={wholeBlocked}
           onClearWholeBlocked={() => setWholeBlockedFor(null)}
           driveName={driveName}
@@ -288,12 +318,14 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
 
 /** What the owner types to unlock the tier-3 delete. */
 const DELETE_PHRASE = "delete old recordings";
+const MIN_RECORDING_DRIVE_FREE_BYTES = 20 * 1024 ** 3;
 
 // ─── The ready body ───────────────────────────────────────────────────────
 
 function Body({
   r,
   status,
+  stale,
   wholeBlocked,
   onClearWholeBlocked,
   driveName,
@@ -308,6 +340,7 @@ function Body({
   r: RecordingStorage;
   /** The effective status (see effectiveRecordingStatus), not the raw one. */
   status: RecordingStorageStatus;
+  stale: boolean;
   wholeBlocked: boolean;
   onClearWholeBlocked: () => void;
   driveName: string;
@@ -320,21 +353,39 @@ function Body({
   onRequestDelete: () => void;
 }) {
   const moving = status === "migrating";
+  const readOnly = r.warnings.some((w) => w.code === "read_only");
   const hasDrive = r.drive !== null;
   const noDrive = status === "no_eligible_drive";
   const missing = status === "missing";
   // Numbers about a drive that is not there (or not chosen) would read as
   // current; show them only when there is a live drive behind them.
   const live = hasDrive && !noDrive && !missing;
-  const candidates = r.eligibleDrives.filter((d) => d.fsUuid !== r.drive?.fsUuid);
+  const candidates = r.eligibleDrives.filter(
+    (d) =>
+      d.encrypted &&
+      d.freeBytes >= MIN_RECORDING_DRIVE_FREE_BYTES &&
+      d.fsUuid !== r.drive?.fsUuid,
+  );
 
-  const warnings = r.warnings.map((w) =>
-    describeWarning(w, {
+  const warnings = r.warnings.map((w) => {
+    const described = describeWarning(w, {
       mode: r.mode,
       eligibleCount: candidates.length,
       retentionDays: Math.round(r.retentionDays),
-    }),
-  );
+    });
+    // A near-full fix changes the quota. A read-only drive cannot apply that
+    // write, so direct the owner to Storage instead of opening a doomed confirm.
+    if (readOnly && described.fix?.kind === "whole_drive") {
+      return {
+        ...described,
+        fix: { kind: "link" as const, label: "Open Storage", href: SETTINGS_STORAGE_HREF },
+      };
+    }
+    if (stale && described.fix && described.fix.kind !== "link") {
+      return { ...described, fix: null };
+    }
+    return described;
+  });
 
   function runFix(fix: WarningFix) {
     if (fix.kind === "whole_drive") onPickMode("full");
@@ -412,7 +463,14 @@ function Body({
           mode={r.mode}
           drive={r}
           canManage={canManage}
-          locked={moving || status === "pending"}
+          locked={moving || status === "pending" || readOnly || stale}
+          lockedMessage={
+            stale && !moving && status !== "pending"
+              ? "Changes are unavailable until recording storage refreshes."
+              : readOnly && !moving && status !== "pending"
+              ? "Mode changes are unavailable while the recording drive is read-only."
+              : undefined
+          }
           wholeBlocked={wholeBlocked}
           onClearWholeBlocked={onClearWholeBlocked}
           onPick={onPickMode}
@@ -423,7 +481,7 @@ function Body({
 
       {live && <Facts r={r} />}
 
-      {canManage && !moving && candidates.length > 0 && (
+      {canManage && !stale && !moving && candidates.length > 0 && (
         <DrivePicker
           candidates={candidates}
           selectRef={pickerRef}
@@ -439,6 +497,7 @@ function Body({
           bytes={r.oldFootage.bytes}
           moving={moving}
           isOwner={isOwner}
+          stale={stale}
           triggerRef={deleteTriggerRef}
           onRequestDelete={onRequestDelete}
         />
@@ -495,6 +554,7 @@ function ModeSwitch({
   drive,
   canManage,
   locked,
+  lockedMessage,
   wholeBlocked,
   onClearWholeBlocked,
   onPick,
@@ -503,6 +563,7 @@ function ModeSwitch({
   drive: RecordingStorage;
   canManage: boolean;
   locked: boolean;
+  lockedMessage?: string;
   /** The box refused Whole drive because this drive's files/ is not empty. */
   wholeBlocked: boolean;
   onClearWholeBlocked: () => void;
@@ -556,7 +617,9 @@ function ModeSwitch({
         <p className="rs-hint">Only the owner or an admin can change this.</p>
       )}
       {canManage && locked && (
-        <p className="rs-hint">Available again once recordings finish moving.</p>
+        <p className="rs-hint">
+          {lockedMessage ?? "Available again once recordings finish moving."}
+        </p>
       )}
       {canManage && !locked && wholeBlocked && mode !== "full" && (
         <p className="rs-hint" data-testid="whole-drive-blocked">
@@ -779,6 +842,7 @@ function OldFootage({
   bytes,
   moving,
   isOwner,
+  stale,
   triggerRef,
   onRequestDelete,
 }: {
@@ -786,6 +850,7 @@ function OldFootage({
   bytes: number;
   moving: boolean;
   isOwner: boolean;
+  stale: boolean;
   triggerRef: React.RefObject<HTMLButtonElement | null>;
   onRequestDelete: () => void;
 }) {
@@ -793,12 +858,13 @@ function OldFootage({
     <div className="rs-old" data-testid="recording-old-footage">
       <p className="rs-old-t">Old recordings are still on {place.where}</p>
       <p className="rs-old-d">
-        {formatBinaryBytes(bytes)} from before the move is still there. It stays until
-        you delete it.
+        {formatBinaryBytes(bytes)} from before the move is still there.
+        {stale ? " This is the last known amount." : " It stays until you delete it."}
         {moving && " You can delete it once the move finishes."}
-        {!moving && !isOwner && " Ask the owner to delete it."}
+        {!stale && !moving && !isOwner && " Ask the owner to delete it."}
+        {stale && " Refresh before deciding whether to delete it."}
       </p>
-      {isOwner && !moving && (
+      {isOwner && !moving && !stale && (
         <button
           ref={triggerRef}
           type="button"

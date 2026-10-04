@@ -29,6 +29,8 @@ export interface UseRecordingStorage {
   state: RecordingStorageState;
   /** Non-null exactly when `state === "ready"`. */
   recording: RecordingStorage | null;
+  /** True when these facts are cached from the last good response after refresh failed. */
+  stale: boolean;
   /** Re-fetch now (e.g. after a mode change or a "Try again"). */
   refresh: () => Promise<unknown>;
 }
@@ -62,16 +64,16 @@ export function useRecordingStorage(
     },
   );
 
-  if (!enabled) return { state: "forbidden", recording: null, refresh: mutate };
+  if (!enabled) return { state: "forbidden", recording: null, stale: false, refresh: mutate };
 
-  // Stale-while-error: SWR keeps the last good `data` when a refetch fails, and
-  // a card that still has numbers to show should show them.
+  // Keep the last good facts visible after a refetch fails, but surface `stale`
+  // so surfaces can label them and suppress actions that depend on freshness.
   if (data?.available) {
-    return { state: "ready", recording: data.data, refresh: mutate };
+    return { state: "ready", recording: data.data, stale: Boolean(error), refresh: mutate };
   }
   if (data && !data.available) {
-    return { state: data.reason, recording: null, refresh: mutate };
+    return { state: data.reason, recording: null, stale: false, refresh: mutate };
   }
-  if (error) return { state: "error", recording: null, refresh: mutate };
-  return { state: "loading", recording: null, refresh: mutate };
+  if (error) return { state: "error", recording: null, stale: false, refresh: mutate };
+  return { state: "loading", recording: null, stale: false, refresh: mutate };
 }

@@ -1378,12 +1378,17 @@ export async function fetchRecordingStorage(): Promise<RecordingStorageResult> {
  * handshake is completed here by echoing the token back through the storage
  * confirm — the one wire path every other storage write uses
  * (`POST /api/storage/command/confirm`, the `rebootRouter` / `disableCamera`
- * pattern). A reply with no token means the write was accepted as-is.
+ * pattern). These are confirmation-gated writes: any successful reply without
+ * the expected token is a protocol error, never a silent success.
  *
  * A refusal throws with the HTTP status attached (`storageWriteError`) so the UI
  * can choose its copy (403 role, 409 move-in-progress, 404 not-there-yet).
  */
-async function finishStorageWrite(res: Response, fallback: string): Promise<void> {
+async function finishStorageWrite(
+  res: Response,
+  fallback: string,
+  expected: { service: string; resourceId: string },
+): Promise<void> {
   const body = (await res.json().catch(() => ({}))) as {
     confirmationToken?: unknown;
     service?: unknown;
@@ -1392,16 +1397,17 @@ async function finishStorageWrite(res: Response, fallback: string): Promise<void
     code?: unknown;
   };
   if (!res.ok) throw storageWriteError(body, res.status, fallback);
-  if (typeof body.confirmationToken === "string" && body.confirmationToken) {
-    if (typeof body.service !== "string" || typeof body.resourceId !== "string") {
-      throw new Error("Unexpected 202 response: missing service or resourceId");
-    }
-    await confirmStorageCommand({
-      confirmationToken: body.confirmationToken,
-      service: body.service,
-      resourceId: body.resourceId,
-    });
+  if (res.status !== 202 || typeof body.confirmationToken !== "string" || !body.confirmationToken) {
+    throw new Error("Unexpected storage response: confirmation token was not issued");
   }
+  if (body.service !== expected.service || body.resourceId !== expected.resourceId) {
+    throw new Error("Unexpected storage confirmation: operation or resource did not match");
+  }
+  await confirmStorageCommand({
+    confirmationToken: body.confirmationToken,
+    service: expected.service,
+    resourceId: expected.resourceId,
+  });
 }
 
 /**
@@ -1417,7 +1423,10 @@ export async function updateRecordingStorage(change: RecordingStorageChange): Pr
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(change),
   });
-  await finishStorageWrite(res, "Failed to update recording storage");
+  await finishStorageWrite(res, "Failed to update recording storage", {
+    service: "recordings_set",
+    resourceId: "recordings",
+  });
 }
 
 /**
@@ -1431,7 +1440,10 @@ export async function deleteOldRecordings(): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
   });
-  await finishStorageWrite(res, "Failed to delete the old recordings");
+  await finishStorageWrite(res, "Failed to delete the old recordings", {
+    service: "recordings_old_footage_delete",
+    resourceId: "recordings",
+  });
 }
 
 /**
@@ -1564,7 +1576,10 @@ export async function regenerateRecoveryKey(driveId: string): Promise<void> {
       cache: "no-store",
     },
   );
-  await finishStorageWrite(res, "Failed to generate a new recovery key");
+  await finishStorageWrite(res, "Failed to generate a new recovery key", {
+    service: "recovery_key_regenerate",
+    resourceId: driveId,
+  });
 }
 
 // --- Health ---

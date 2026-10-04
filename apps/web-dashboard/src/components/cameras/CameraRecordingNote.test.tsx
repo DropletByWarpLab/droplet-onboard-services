@@ -55,8 +55,9 @@ function setup(
   recording: RecordingStorage | null,
   state: UseRecordingStorage["state"] = recording ? "ready" : "loading",
   camera = "front_door",
+  stale = false,
 ) {
-  hook.value = { state, recording, refresh: vi.fn() } satisfies UseRecordingStorage;
+  hook.value = { state, recording, stale, refresh: vi.fn() } satisfies UseRecordingStorage;
   return render(<CameraRecordingNote camera={camera} />);
 }
 
@@ -102,6 +103,11 @@ describe("CameraRecordingNote — the drive and this camera's numbers", () => {
     expect(note).toHaveTextContent(/hasn't been measured yet/i);
     expect(note).toHaveTextContent("Recording drive: Bay 2");
     expect(document.body.textContent).not.toMatch(/NaN|undefined|0 GB a day/);
+  });
+
+  it("does not present cached storage facts as current after a failed refresh", () => {
+    setup(makeRecording(), "ready", "front_door", true);
+    expect(screen.queryByRole("group", { name: /where this camera records/i })).not.toBeInTheDocument();
   });
 
   it("links to the Recording storage card", () => {

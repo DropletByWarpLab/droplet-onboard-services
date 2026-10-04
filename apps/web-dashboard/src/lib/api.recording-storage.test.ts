@@ -54,7 +54,7 @@ const TOKEN = {
   status: "confirmation_required",
   confirmationToken: "tok-1",
   service: "recordings_set",
-  resourceId: "fs-uuid-2",
+  resourceId: "recordings",
   tier: 2,
   expiresIn: 60,
 };
@@ -168,20 +168,23 @@ describe("updateRecordingStorage — PUT /api/storage/recordings (tier-2)", () =
     expect(JSON.parse((confirmInit as RequestInit).body as string)).toEqual({
       confirmationToken: "tok-1",
       service: "recordings_set",
-      resourceId: "fs-uuid-2",
+      resourceId: "recordings",
     });
   });
 
   it("sends the chosen drive as fsUuid", async () => {
-    authFetchMock.mockResolvedValueOnce(res({ status: 202, json: { status: "accepted" } }));
+    authFetchMock
+      .mockResolvedValueOnce(res({ status: 202, json: TOKEN }))
+      .mockResolvedValueOnce(res({ status: 200, json: { ok: true } }));
     await updateRecordingStorage({ fsUuid: "fs-uuid-2" });
     const [, init] = authFetchMock.mock.calls[0]!;
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({ fsUuid: "fs-uuid-2" });
+    expect(authFetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("accepts a 202/200 with NO token as already applied (no confirm call)", async () => {
-    authFetchMock.mockResolvedValueOnce(res({ status: 202, json: { status: "accepted" } }));
-    await expect(updateRecordingStorage({ mode: "auto_reserved" })).resolves.toBeUndefined();
+  it.each([200, 202])("rejects a %d success response without the required confirmation token", async (status) => {
+    authFetchMock.mockResolvedValueOnce(res({ status, json: { status: "accepted" } }));
+    await expect(updateRecordingStorage({ mode: "auto_reserved" })).rejects.toThrow(/confirmation token/i);
     expect(authFetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -209,7 +212,18 @@ describe("updateRecordingStorage — PUT /api/storage/recordings (tier-2)", () =
     authFetchMock.mockResolvedValueOnce(
       res({ status: 202, json: { confirmationToken: "tok-1" } }),
     );
-    await expect(updateRecordingStorage({ mode: "full" })).rejects.toThrow(/unexpected 202/i);
+    await expect(updateRecordingStorage({ mode: "full" })).rejects.toThrow(/operation or resource/i);
+    expect(authFetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { service: "pool_destroy", resourceId: "md0" },
+    { service: "recordings_set", resourceId: "fs-uuid-2" },
+  ])("rejects a token for a different operation or resource ($service / $resourceId)", async (target) => {
+    authFetchMock.mockResolvedValueOnce(
+      res({ status: 202, json: { ...TOKEN, ...target } }),
+    );
+    await expect(updateRecordingStorage({ mode: "full" })).rejects.toThrow(/operation or resource/i);
     expect(authFetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -225,7 +239,15 @@ describe("deleteOldRecordings — POST /api/storage/recordings/old-footage/delet
   it("POSTs, then echoes the 202 token through the storage confirm", async () => {
     authFetchMock
       .mockResolvedValueOnce(
-        res({ status: 202, json: { ...TOKEN, service: "recordings_old_delete", tier: 3 } }),
+        res({
+          status: 202,
+          json: {
+            ...TOKEN,
+            service: "recordings_old_footage_delete",
+            resourceId: "recordings",
+            tier: 3,
+          },
+        }),
       )
       .mockResolvedValueOnce(res({ status: 200, json: { ok: true } }));
 
@@ -238,7 +260,8 @@ describe("deleteOldRecordings — POST /api/storage/recordings/old-footage/delet
     expect(String(confirmUrl)).toContain("/api/storage/command/confirm");
     expect(JSON.parse((confirmInit as RequestInit).body as string)).toMatchObject({
       confirmationToken: "tok-1",
-      service: "recordings_old_delete",
+      service: "recordings_old_footage_delete",
+      resourceId: "recordings",
     });
   });
 
