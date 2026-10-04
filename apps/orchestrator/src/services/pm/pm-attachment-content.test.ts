@@ -93,6 +93,34 @@ describe("sanitizeAttachmentFileName", () => {
   });
 });
 
+describe("cost — the name is attacker-sized (busboy allows ~16 KiB of header)", () => {
+  // Names built to make a regex restart at every position. A linear scan does
+  // each in well under a millisecond; the old regexes took ~120 ms at this size.
+  const hostile: Record<string, string> = {
+    "colons then a dot": `${":".repeat(16_000)}.`,
+    "dots then a letter": `${".".repeat(16_000)}x`,
+    "dot-space pairs then a letter": `${". ".repeat(8_000)}x`,
+    "a letter then dots": `x${".".repeat(16_000)}`,
+    "colons and dots alternating": ":.".repeat(8_000),
+    "stream-like": `${"a.b".repeat(4_000)}:${"c:".repeat(1_500)}`,
+    "a plain long name with an extension": `${"a".repeat(16_000)}.exe`,
+  };
+
+  it.each(Object.entries(hostile))("%s (16k) is handled in linear time", (_n, name) => {
+    // The best of five: a loaded CI box can stall one run, never all of them,
+    // and the quadratic version cannot get under 100 ms on any of them.
+    const best = Math.min(
+      ...Array.from({ length: 5 }, () => {
+        const t0 = performance.now();
+        sanitizeAttachmentFileName(name);
+        evaluateAttachment({ fileName: name, claimedMime: undefined, head: TEXT });
+        return performance.now() - t0;
+      }),
+    );
+    expect(best).toBeLessThan(5);
+  });
+});
+
 describe("contentDisposition", () => {
   it("quotes a hostile name so it stays ONE parameter", () => {
     const h = contentDisposition("attachment", 'x"; filename=evil.exe; foo="bar.txt');
@@ -204,9 +232,50 @@ describe("evaluateAttachment — refused", () => {
     expect(verdict(name, TEXT)).toEqual({ ok: false, reason: "blocked" });
   });
 
+  it.each([
+    ".bat", ".cmd", ".exe", ".scr", ".hta", ".vbs", ".lnk", ".msi", ".com", ".jar",
+    " .bat", "..bat", "a..bat", ".BAT", ".bat.", ".bat ", ".bat:x", ".exe:Zone.Identifier",
+  ])("a name that is only an extension is still that extension: %j", (name) => {
+    expect(verdict(name, TEXT)).toEqual({ ok: false, reason: "blocked" });
+  });
+
+  it.each([
+    "run.exe:Zone.Identifier",
+    "run.exe:a.txt",
+    "run.bat:Zone.Identifier:$DATA",
+    "x.cmd:s.txt",
+    "setup.msi:payload.png",
+    "run.exe. :a.txt",
+    "RUN.EXE:ZONE.IDENTIFIER",
+  ])("a dotted NTFS stream name is the file it is a stream of: %j", (name) => {
+    expect(verdict(name, TEXT)).toEqual({ ok: false, reason: "blocked" });
+  });
+
+  it("sees the extension through the bidi spoof that sanitising removes", () => {
+    const stored = sanitizeAttachmentFileName("\u202e.bat");
+    expect(stored).toBe(".bat");
+    expect(verdict(stored, TEXT)).toEqual({ ok: false, reason: "blocked" });
+  });
+
+  it("is not defeated by a long run of dots after the extension — the name is never clamped", () => {
+    const hostile = `run.exe${".".repeat(5000)}`;
+    expect(verdict(hostile, TEXT)).toEqual({ ok: false, reason: "blocked" });
+    // ...nor once the display name has been truncated to 255 characters
+    const stored = sanitizeAttachmentFileName(hostile);
+    expect(Array.from(stored).length).toBeLessThanOrEqual(255);
+    expect(verdict(stored, TEXT)).toEqual({ ok: false, reason: "blocked" });
+  });
+
   it("leaves an ordinary colon alone (it is not a stream suffix)", () => {
     expect(verdict("Q3: final.pdf", PDF).ok).toBe(true);
     expect(verdict("meeting 10:30.png", PNG).ok).toBe(true);
+    expect(verdict("a:b.txt", TEXT).ok).toBe(true);
+  });
+
+  it("leaves dot-led names that are not blocked kinds alone", () => {
+    for (const name of [".env", ".gitignore", ".htaccess", ".bashrc"]) {
+      expect(verdict(name, TEXT).ok, name).toBe(true);
+    }
   });
 
   it("does NOT treat text scripts as executables — they cannot run from a download", () => {

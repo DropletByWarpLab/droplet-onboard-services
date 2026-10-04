@@ -71,20 +71,51 @@ export function sanitizeAttachmentFileName(raw: string): string {
   return points.slice(0, MAX_NAME_CODEPOINTS - Array.from(suffix).length).join("") + suffix;
 }
 
-/** Lower-case extension without the dot, or "" when the name has none that
- *  looks like one (letters/digits, at most 12).
- *
- *  Windows saves `run.bat.`, `run.bat ` and `run.bat::$DATA` as `run.bat`, so a
- *  trailing run of dots/spaces and an NTFS stream suffix are not part of the
- *  name for this purpose — otherwise they would walk a script past the
- *  blocked-extension list. (A colon with more after it, as in `Q3: final.pdf`,
- *  is an ordinary character and stays.) */
+// Everything below runs on the name as the client sent it, which busboy lets be
+// ~16 KiB. It is therefore LINEAR by construction: scans from the end by index
+// and the engine's own `lastIndexOf`/`indexOf`, never a regex that can restart
+// at every position (an earlier version did, and cost 120 ms at 16 K characters)
+// — and it is never clamped, because a clamped tail would let `run.exe` plus
+// 5,000 dots past the blocked list.
+
+/** Where the name ends once Windows has dropped a trailing run of dots and
+ *  spaces: `run.bat.` and `run.bat ` are `run.bat` there. A scan from `end`. */
+function keptEnd(s: string, end: number): number {
+  let i = end;
+  while (i > 0) {
+    const c = s.charCodeAt(i - 1);
+    if (c !== 0x2e /* . */ && c !== 0x20 /* space */) break;
+    i -= 1;
+  }
+  return i;
+}
+
+/** Extension of `s[0, end)`: lower-case, no dot, or "" when it has none that
+ *  looks like one (letters/digits, at most 12). A name whose only dot is its
+ *  first (`.bat`) HAS an extension: Windows runs it. */
+function extensionBefore(s: string, end: number): string {
+  const t = keptEnd(s, end);
+  if (t === 0) return "";
+  const dot = s.lastIndexOf(".", t - 1);
+  const len = t - dot - 1;
+  if (dot < 0 || len < 1 || len > 12) return "";
+  const ext = s.slice(dot + 1, t).toLowerCase();
+  return /^[a-z0-9]+$/.test(ext) ? ext : "";
+}
+
 function extensionOf(fileName: string): string {
-  const name = fileName.replace(/:[a-z0-9_$:]*$/i, "").replace(/[. ]+$/, "");
-  const dot = name.lastIndexOf(".");
-  if (dot <= 0 || dot === name.length - 1) return "";
-  const ext = name.slice(dot + 1).toLowerCase();
-  return /^[a-z0-9]{1,12}$/.test(ext) ? ext : "";
+  return extensionBefore(fileName, fileName.length);
+}
+
+/** Would Windows run this name as one of the blocked kinds? Its own extension
+ *  (trailing dots and spaces dropped) — or, for an NTFS stream name, the file it
+ *  is a stream of: `run.exe:Zone.Identifier` and `run.bat::$DATA` are `run.exe`
+ *  and `run.bat`, so the part before the FIRST colon counts too. A colon later
+ *  on, as in `Q3: final.pdf`, leaves the name's own extension alone. */
+function hasBlockedExtension(fileName: string): boolean {
+  if (BLOCKED_EXTENSIONS.has(extensionOf(fileName))) return true;
+  const colon = fileName.indexOf(":");
+  return colon > 0 && BLOCKED_EXTENSIONS.has(extensionBefore(fileName, colon));
 }
 
 /**
@@ -353,7 +384,7 @@ export function evaluateAttachment(input: {
 
   // ── refuse ────────────────────────────────────────────────────────────────
   if (sniffed?.family === "executable") return { ok: false, reason: "blocked" };
-  if (BLOCKED_EXTENSIONS.has(ext)) return { ok: false, reason: "blocked" };
+  if (hasBlockedExtension(input.fileName)) return { ok: false, reason: "blocked" };
   if (BLOCKED_MIMES.has(claimed)) return { ok: false, reason: "blocked" };
 
   // ── the name, the claim and the bytes must agree wherever they can be compared ──
