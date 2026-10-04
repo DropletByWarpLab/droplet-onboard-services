@@ -392,3 +392,61 @@ def test_discovery_collapses_through_the_shared_helper(monkeypatch, tmp_path):
     rows, _complete = bridge._os_disk_filesystems({}, "nvme0n1")
     assert seen, "_os_disk_filesystems deduplicated on its own"
     assert len(rows) == 3
+
+
+# --- WARP-3608: the data volume's at-rest encryption state, as an enum --------
+
+def _tree(data_chain):
+    """One disk whose only branch is `data_chain`, a list of (name, type,
+    mountpoint) outermost first, nested into children."""
+    node = None
+    for name, typ, mp in reversed(data_chain):
+        n = {"name": name, "type": typ, "mountpoint": mp}
+        if node:
+            n["children"] = [node]
+        node = n
+    return {"blockdevices": [node]}
+
+
+_PLAIN = _tree([("nvme0n1", "disk", None), ("nvme0n1p2", "part", None),
+                ("vg-data", "lvm", "/data")])
+_CRYPT = _tree([("nvme0n1", "disk", None), ("nvme0n1p2", "part", None),
+                ("vg-data", "lvm", None), ("droplet-data-crypt", "crypt", "/data")])
+_TPM_TAB = "droplet-data-crypt /dev/vg/data none tpm2-device=auto,luks,discard,nofail\n"
+_KEY_TAB = "droplet-data-crypt /dev/vg/data none luks,discard,nofail\n"
+
+
+def test_encryption_not_encrypted_without_a_crypt_layer(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    assert bridge.data_encryption_state(_PLAIN, _TPM_TAB) == "not_encrypted"
+
+
+def test_encryption_tpm_sealed_when_crypttab_unlocks_via_tpm(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    assert bridge.data_encryption_state(_CRYPT, _TPM_TAB) == "tpm_sealed"
+
+
+def test_encryption_recovery_key_only_without_a_tpm_token(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    assert bridge.data_encryption_state(_CRYPT, _KEY_TAB) == "recovery_key_only"
+
+
+def test_encryption_unknown_when_it_cannot_be_read_never_guessed(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    assert bridge.data_encryption_state(_CRYPT, None) == "unknown"
+    assert bridge.data_encryption_state(None, _TPM_TAB) == "unknown"
+    assert bridge.data_encryption_state({"blockdevices": []}, _TPM_TAB) == "unknown"
+
+
+def test_encryption_falls_back_to_root_when_there_is_no_data_mount(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    root = _tree([("sda", "disk", None), ("sda2", "part", "/")])
+    assert bridge.data_encryption_state(root, "") == "not_encrypted"
+
+
+def test_system_disk_carries_the_encryption_enum(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    sys_disk = bridge.system_disk_info(_LSBLK, "nvme0n1", _OS_FILESYSTEMS,
+                                       crypttab_text=_TPM_TAB)
+    # _LSBLK has no mounted /data or / node, so the state is honest, not guessed.
+    assert sys_disk["encryption"] == "unknown"

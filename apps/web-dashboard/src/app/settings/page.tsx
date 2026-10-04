@@ -30,6 +30,7 @@ import { PlaceLookupSwitch } from "@/components/settings/PlaceLookupSwitch";
 import { LogsSection } from "@/components/settings/LogsSection";
 import { CertificateRows } from "@/components/settings/CertificateRows";
 import { BackupRows } from "@/components/settings/BackupRows";
+import { DiskEncryptionRow } from "@/components/settings/DiskEncryptionRow";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasswordRulesChecklist } from "@/components/auth/PasswordRulesChecklist";
 import { validatePassword, isValidEmail } from "@droplet/auth-policy";
@@ -549,6 +550,9 @@ export default function SettingsPage() {
             {/* WARP-1405 — backup health: last success, and the reason
                 when backups have stopped. Owner/admin only. */}
             <BackupRows />
+            {/* WARP-3608 — whether the data disk is encrypted at rest, from
+                the box's explicit state. Owner/admin only. */}
+            <DiskEncryptionRow />
           </div>
         </div>
 
