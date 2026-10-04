@@ -91,4 +91,33 @@ describe("list_clips", () => {
     if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("CLIPS_FAILED");
   });
+
+  // WARP-3691 - clips play inline in the chat.
+  it("adds a camera_clip media descriptor per clip (capped)", async () => {
+    const clips = Array.from({ length: 9 }, (_, i) => ({ ...CLIP, id: `e${i}` }));
+    const get = vi.fn().mockResolvedValue(new Response(JSON.stringify({ clips }), { status: 200 }));
+    const r = await listClips.handler({}, ctxWith(get));
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const media = (r.data as { media: Array<Record<string, unknown>> }).media;
+      expect(media).toHaveLength(6);
+      expect(media[0]).toMatchObject({
+        kind: "camera_clip",
+        camera: "front",
+        eventId: "e0",
+        clipUrl: "/api/cameras/clips/event/e0",
+        thumbnailUrl: "/api/cameras/events/e0/thumbnail",
+        startTime: 1,
+        endTime: 2,
+      });
+    }
+  });
+
+  it("skips clips whose id is not a valid event id", async () => {
+    const get = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ clips: [{ ...CLIP, id: "../x" }] }), { status: 200 }),
+    );
+    const r = await listClips.handler({}, ctxWith(get));
+    expect(r.ok && "media" in (r.data as object)).toBe(false);
+  });
 });

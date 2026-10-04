@@ -52,6 +52,7 @@ import {
   LEAVER_DELETION_LOCK_KEY,
 } from "./services/leaver-deletion.service.js";
 import { createCronRuntime } from "./services/cron-runtime.service.js";
+import { warnLegacyScimRoleMapping } from "./services/scim.service.js";
 import { recordRotationFoundAtBoot } from "./services/audit-key-rotation.service.js";
 import {
   AGENT_RUN_LOCK_KEY,
@@ -289,6 +290,10 @@ async function main() {
   // first new-key row, before the start-up row below.
   await recordRotationFoundAtBoot(prisma).catch((err) =>
     logger.error({ err }, "audit key rotation check at boot failed"),
+  );
+  // WARP-3631: tell the operator which SCIM groups stopped granting admin by name.
+  await warnLegacyScimRoleMapping(prisma).catch((err) =>
+    logger.error({ err }, "SCIM role mapping upgrade check failed"),
   );
   // Genesis-or-restart event so the first row of every container's
   // lifetime is always a `system` start-up. Makes the chain easier to
@@ -1142,7 +1147,7 @@ async function main() {
       const dnsBlockDeleted = await purgeDnsBlockSamples(prisma, 30);
       // WARP-586: retention purge for the append-only audit/log tables
       // (ActivityRow, CommandAuditLog, NotificationLog). Window is
-      // operator-tunable via DROPLET_AUDIT_RETENTION_DAYS (default 90);
+      // operator-tunable via DROPLET_AUDIT_RETENTION_DAYS (default 365, minimum 90);
       // <= 0 disables the purge. ActivityRow is hash-chained, so this is
       // an id-contiguous oldest-prefix seal-and-truncate, not a mid-chain
       // delete — see audit-retention-purge.service.ts for the integrity

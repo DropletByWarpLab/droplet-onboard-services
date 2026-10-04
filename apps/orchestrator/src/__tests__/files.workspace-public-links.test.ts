@@ -22,6 +22,7 @@ vi.mock("../services/nextcloud.client.js", async () => {
     ncUpdateShare: vi.fn(),
     ncDeleteShare: vi.fn(),
     ncGetShare: vi.fn(),
+    ncIsDirectory: vi.fn(),
   };
 });
 
@@ -50,10 +51,14 @@ vi.mock("../config.js", () => ({
 import { createFilesRouter } from "../routes/files.js";
 import * as nc from "../services/nextcloud.client.js";
 import {
+  defaultPublicLinkExpiry,
   exposesOutside,
   isWorkspacePath,
   libraryOfHomePath,
   mayCreatePublicLink,
+  memberPublicLinkWriteRefused,
+  publicLinkExpiryViolation,
+  publicLinkPasswordViolation,
 } from "../services/share-policy.js";
 
 const ncMock = nc as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -407,5 +412,208 @@ describe("WARP-3053 — share-policy", () => {
     expect(exposesOutside(1, 1)).toBe(false);
     expect(exposesOutside(0, 19)).toBe(true);
     for (const t of [3, 4, 6, 7, 9, 10, 12, 15, 42]) expect(exposesOutside(t, 1)).toBe(true);
+  });
+});
+
+// ── WARP-3586 — what a public link may be, for every caller ───────────────
+const inDays = (n: number) => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10);
+
+describe("WARP-3586 — POST /files/share public-link hygiene", () => {
+  it("no expireDate on a link: the 30-day default is sent to Nextcloud", async () => {
+    const res = await request(app(MEMBER)).post("/api/files/share").send({ path: "/Documents/a.pdf" });
+    expect(res.status).toBe(200);
+    expect(ncMock.ncCreateShareV2).toHaveBeenCalledWith(
+      "session-token",
+      "/Documents/a.pdf",
+      expect.objectContaining({ shareType: 3, expireDate: defaultPublicLinkExpiry() }),
+    );
+  });
+
+  it("an email link (4) gets the default expiry too", async () => {
+    const res = await request(app(ADMIN))
+      .post("/api/files/share")
+      .send({ path: "/Documents/a.pdf", shareType: 4, shareWith: "x@example.com" });
+    expect(res.status).toBe(200);
+    expect(ncMock.ncCreateShareV2).toHaveBeenCalledWith(
+      expect.any(String),
+      "/Documents/a.pdf",
+      expect.objectContaining({ expireDate: defaultPublicLinkExpiry() }),
+    );
+  });
+
+  it("an internal share (user) keeps no forced expiry", async () => {
+    const res = await request(app(MEMBER))
+      .post("/api/files/share")
+      .send({ path: "/Documents/a.pdf", shareType: 0, shareWith: "ada", permissions: 1 });
+    expect(res.status).toBe(200);
+    expect(ncMock.ncCreateShareV2.mock.calls[0][2].expireDate).toBeUndefined();
+  });
+
+  it.each([
+    ["member", MEMBER],
+    ["admin", ADMIN],
+    ["owner", OWNER],
+  ])("%s: an expireDate beyond 90 days is rejected, nothing created", async (_l, who) => {
+    const res = await request(app(who))
+      .post("/api/files/share")
+      .send({ path: "/Documents/a.pdf", expireDate: inDays(120) });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("public_link_expiry_too_far");
+    expect(ncMock.ncCreateShareV2).not.toHaveBeenCalled();
+  });
+
+  it("an expireDate inside the ceiling passes through unchanged", async () => {
+    const d = inDays(45);
+    const res = await request(app(MEMBER)).post("/api/files/share").send({ path: "/Documents/a.pdf", expireDate: d });
+    expect(res.status).toBe(200);
+    expect(ncMock.ncCreateShareV2).toHaveBeenCalledWith(
+      "session-token",
+      "/Documents/a.pdf",
+      expect.objectContaining({ expireDate: d }),
+    );
+  });
+
+  it("a one-character password is rejected and never echoed", async () => {
+    const res = await request(app(MEMBER))
+      .post("/api/files/share")
+      .send({ path: "/Documents/a.pdf", password: "x" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("public_link_password_too_short");
+    expect(JSON.stringify(res.body)).not.toContain('"x"');
+    expect(ncMock.ncCreateShareV2).not.toHaveBeenCalled();
+  });
+
+  it("an 8-character password is accepted", async () => {
+    const res = await request(app(MEMBER))
+      .post("/api/files/share")
+      .send({ path: "/Documents/a.pdf", password: "12345678" });
+    expect(res.status).toBe(200);
+  });
+
+  it.each([
+    ["create+read on a folder (5)", 5],
+    ["delete+read (9)", 9],
+    ["full folder edit (15)", 15],
+  ])("member: public link with %s is refused without a folder lookup", async (_l, permissions) => {
+    const res = await request(app(MEMBER))
+      .post("/api/files/share")
+      .send({ path: "/Documents/Reports", permissions });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("public_link_edit_admin_only");
+    expect(ncMock.ncCreateShareV2).not.toHaveBeenCalled();
+  });
+
+  it("member: update bit (3) on a FOLDER is refused", async () => {
+    ncMock.ncIsDirectory.mockResolvedValue(true);
+    const res = await request(app(MEMBER))
+      .post("/api/files/share")
+      .send({ path: "/Documents/Reports", permissions: 3 });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("public_link_edit_admin_only");
+    expect(ncMock.ncCreateShareV2).not.toHaveBeenCalled();
+  });
+
+  it("member: update bit (3) on a single FILE stays allowed (the 'can edit' level)", async () => {
+    ncMock.ncIsDirectory.mockResolvedValue(false);
+    const res = await request(app(MEMBER))
+      .post("/api/files/share")
+      .send({ path: "/Documents/a.docx", permissions: 3 });
+    expect(res.status).toBe(200);
+  });
+
+  it("member: an unanswerable folder lookup fails closed", async () => {
+    ncMock.ncIsDirectory.mockRejectedValue(new Error("PROPFIND failed: 500"));
+    const res = await request(app(MEMBER))
+      .post("/api/files/share")
+      .send({ path: "/Documents/a.docx", permissions: 3 });
+    expect(res.status).toBe(403);
+    expect(ncMock.ncCreateShareV2).not.toHaveBeenCalled();
+  });
+
+  it("admin: a writable folder link is still allowed", async () => {
+    const res = await request(app(ADMIN))
+      .post("/api/files/share")
+      .send({ path: "/Documents/Reports", permissions: 15 });
+    expect(res.status).toBe(200);
+    expect(ncMock.ncIsDirectory).not.toHaveBeenCalled();
+  });
+});
+
+describe("WARP-3586 — PUT /files/share/:id keeps the rules", () => {
+  it("clearing the expiry of a public link is rejected", async () => {
+    ncMock.ncGetShare.mockResolvedValue({ ...created, path: "/Documents/a.pdf" });
+    const res = await request(app(MEMBER)).put("/api/files/share/7").send({ expireDate: "" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("public_link_expiry_required");
+    expect(ncMock.ncUpdateShare).not.toHaveBeenCalled();
+  });
+
+  it("pushing the expiry beyond 90 days is rejected, even for an admin", async () => {
+    ncMock.ncGetShare.mockResolvedValue({ ...created, path: "/Documents/a.pdf" });
+    const res = await request(app(ADMIN)).put("/api/files/share/7").send({ expireDate: inDays(400) });
+    expect(res.status).toBe(400);
+    expect(ncMock.ncUpdateShare).not.toHaveBeenCalled();
+  });
+
+  it("a short replacement password is rejected", async () => {
+    ncMock.ncGetShare.mockResolvedValue({ ...created, path: "/Documents/a.pdf" });
+    const res = await request(app(MEMBER)).put("/api/files/share/7").send({ password: "short" });
+    expect(res.status).toBe(400);
+    expect(ncMock.ncUpdateShare).not.toHaveBeenCalled();
+  });
+
+  it("member raising a personal link to folder write access is refused", async () => {
+    ncMock.ncGetShare.mockResolvedValue({ ...created, path: "/Documents/Reports" });
+    const res = await request(app(MEMBER)).put("/api/files/share/7").send({ permissions: 15 });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("public_link_edit_admin_only");
+    expect(ncMock.ncUpdateShare).not.toHaveBeenCalled();
+  });
+
+  it("a valid expiry and password update goes through", async () => {
+    ncMock.ncGetShare.mockResolvedValue({ ...created, path: "/Documents/a.pdf" });
+    const d = inDays(10);
+    const res = await request(app(MEMBER)).put("/api/files/share/7").send({ expireDate: d, password: "longenough" });
+    expect(res.status).toBe(200);
+    expect(ncMock.ncUpdateShare).toHaveBeenCalledWith("session-token", 7, "expireDate", d);
+  });
+
+  it("an internal share's fields are not policed as a public link", async () => {
+    ncMock.ncGetShare.mockResolvedValue({ ...created, shareType: 0, path: "/Documents/a.pdf" });
+    const res = await request(app(MEMBER)).put("/api/files/share/7").send({ expireDate: "" });
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("WARP-3586 — share-policy public-link rules", () => {
+  const now = new Date("2026-10-03T12:00:00Z");
+
+  it("expiry: the ceiling is day 90 inclusive; missing, malformed and empty are violations", () => {
+    expect(publicLinkExpiryViolation("2027-01-01", now)).toBeNull(); // day 90
+    expect(publicLinkExpiryViolation("2027-01-02", now)?.error).toBe("public_link_expiry_too_far");
+    expect(publicLinkExpiryViolation("", now)?.error).toBe("public_link_expiry_required");
+    expect(publicLinkExpiryViolation(undefined, now)?.error).toBe("public_link_expiry_required");
+    expect(publicLinkExpiryViolation("next week", now)?.error).toBe("public_link_expiry_required");
+  });
+
+  it("default expiry is 30 days out", () => {
+    expect(defaultPublicLinkExpiry(now)).toBe("2026-11-02");
+  });
+
+  it("password: optional, 8+ when present", () => {
+    expect(publicLinkPasswordViolation(undefined)).toBeNull();
+    expect(publicLinkPasswordViolation("1234567")?.error).toBe("public_link_password_too_short");
+    expect(publicLinkPasswordViolation("12345678")).toBeNull();
+  });
+
+  it("member write cap: create/delete always, update only on a folder; owner/admin never", () => {
+    expect(memberPublicLinkWriteRefused("family", 1, true)).toBe(false);
+    expect(memberPublicLinkWriteRefused("family", 3, false)).toBe(false);
+    expect(memberPublicLinkWriteRefused("family", 3, true)).toBe(true);
+    expect(memberPublicLinkWriteRefused("family", 5, false)).toBe(true);
+    expect(memberPublicLinkWriteRefused("family", 9, false)).toBe(true);
+    expect(memberPublicLinkWriteRefused(undefined, 15, true)).toBe(true);
+    expect(memberPublicLinkWriteRefused("admin", 15, true)).toBe(false);
+    expect(memberPublicLinkWriteRefused("owner", 15, true)).toBe(false);
   });
 });

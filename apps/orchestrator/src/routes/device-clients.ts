@@ -407,11 +407,11 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
       if (!minted.ok) {
         if (minted.reason === "no_session") {
           res.status(401).json({
-            error: "Nextcloud session unavailable — please log in again",
+            error: "File Store session unavailable — please log in again",
           });
         } else {
           res.status(502).json({
-            error: "Failed to generate device credentials from Nextcloud",
+            error: "Failed to generate device credentials from the File Store",
           });
         }
         return;
@@ -579,7 +579,7 @@ export function createDeviceClientsRouter(prisma: PrismaClient): Router {
             res.status(409).json({ error: "nc_credential_unavailable" });
           } else {
             res.status(502).json({
-              error: "Failed to generate drive credentials from Nextcloud",
+              error: "Failed to generate drive credentials from the File Store",
             });
           }
           return;

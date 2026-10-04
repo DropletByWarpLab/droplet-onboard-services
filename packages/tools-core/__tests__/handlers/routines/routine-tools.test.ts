@@ -267,7 +267,7 @@ describe("routine_run (WARP-2894)", () => {
     ).toBe('Ran "daily-report": 2 steps completed, 1 with gaps.');
     expect(
       await message([
-        { idx: 0, tool: "list_recent_files", ok: false, error: "nextcloud returned 503" },
+        { idx: 0, tool: "list_recent_files", ok: false, error: "the File Store returned 503" },
         { idx: 1, tool: "(summarize)", ok: true, result: "prose", truncated: true },
       ]),
     ).toBe('Ran "daily-report": 2 steps completed, 2 with gaps.');
