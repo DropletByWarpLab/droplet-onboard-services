@@ -51,10 +51,20 @@ source of truth).
 | Redis `cache` AOF (session records, refresh denylist, lockout counters, **Nextcloud app-passwords in plaintext**, WARP-1401) | docker volume `cache-data` under `/data/docker`; wiped by factory reset, never backed up |
 | file-indexer / brain pgvector | docker volume under `/data/docker` |
 | Brain chunk text (chat attachments) | **column-level** AES-256-GCM under per-document DEKs (WARP-242, below) — on top of the LUKS layer |
+| Nextcloud-derived chunk text (`FileContentChunk`, `source='nextcloud'`) | **disk encryption only** (LUKS data LV, restic repo key). No column encryption; see the scope decision below |
+| Mailbox content (`EmailMessage.bodyText` / `bodyHtml`, `EmailAttachment.data`, `EmailDraft`) | **disk encryption only** (LUKS data LV, restic repo key). No column encryption and no per-mailbox key, so disconnecting a mailbox deletes the rows but is not a crypto-shred (WARP-3622) |
+| Mailbox credentials (`EmailAccount.passwordEnc`) | column-level AES-256-GCM (`encryptSecret`) — on top of the LUKS layer |
+| Persisted AI chats, notes, calendar events and reminders | **disk encryption only** (LUKS data LV, restic repo key). Calendar source credentials are stored encrypted |
 | `.env` (carries `DEVICE_SECRET_KEY`) | `/data/droplet/env/.env` (symlinked) |
 | `data/secrets` (audit signing key, doc-KEK keyfile) | `/data/droplet/secrets` (symlinked) |
 | Hot-plugged USB drives | per-drive LUKS2 under `/mnt/droplet/<usb>` |
-| Off-box backups | restic repo, per-customer key = HKDF(`DEVICE_SECRET_KEY`) (WARP-254) |
+| Backups | restic repo, per-customer key = HKDF(`DEVICE_SECRET_KEY`) (WARP-254). **Default location is a local path on the same box** (`DROPLET_BACKUP_TARGET`, default `/var/lib/droplet/restic-repo`), so it is a restore point, not off-box protection; off-device targets are planned. Retention is 7 daily, 4 weekly and 6 monthly snapshots. |
+
+Any table not listed above that holds customer content (mail, chats, notes,
+file text) is protected by the LUKS layer and the encrypted backup repository
+only. Column-level encryption covers brain chunks, credentials and the user
+email address. Whether mailbox content should gain a per-mailbox key (shredded
+on disconnect, decrypt-on-read in search) is an open decision on WARP-3622.
 
 The `.env` relocation is what makes the AC "disk removed + mounted elsewhere
 yields no readable data" hold for the *derivation inputs*: `DEVICE_SECRET_KEY`
@@ -118,7 +128,10 @@ chunks stay plaintext-in-Postgres (inside LUKS). Their source files ship in
 the same snapshots via the `nextcloud-data` volume tar, so chunk-level shred
 could never deliver right-to-delete for them — deleting a Nextcloud file
 already deletes its chunks (`delete_chunks_for_file`), and its recoverability
-window is governed by backup retention, same as the file itself. Brain
+window is governed by backup retention, same as the file itself: such data
+stays in restic snapshots until the last snapshot containing it ages out of
+the 7 daily / 4 weekly / 6 monthly retention, up to about six months. Showing
+this window in the delete and offboarding flows is planned (WARP-3663). Brain
 content is different: its ONLY backup copy is the pg_dump, so per-document
 shred is real there. Full lexical (BM25) search is preserved for the
 Nextcloud corpus; encrypted brain chunks are vector-search-only (their
@@ -157,7 +170,8 @@ the TPM refuses to release the key. The box lands in a degraded state with
    ```
    An **unexplained** mismatch is potential boot-chain tampering — capture the
    journal and investigate before unlocking.
-2. Unlock once with the OFFLINE recovery key (printed once at provision time):
+2. Unlock once with the OFFLINE recovery key (delivered to the owner once at
+   provision time; see "Recovery key delivery" below):
    ```
    sudo cryptsetup open /dev/ubuntu-vg/droplet-data droplet-data-crypt
    # paste the recovery key when prompted
@@ -169,6 +183,60 @@ the TPM refuses to release the key. The box lands in a degraded state with
      --tpm2-pcrs=0+2+4+7 /dev/ubuntu-vg/droplet-data
    ```
 4. Reboot → clean TPM unlock, docker starts.
+
+## Recovery key delivery and rotation (WARP-3572)
+
+The recovery key is the only way back in after a TPM failure, so it must reach
+the owner exactly once, and it must never sit in a log. The root filesystem is
+not encrypted, so anything written to the journal, `.data/setup.log` or a
+support bundle is readable by someone holding the disk.
+
+- **Interactive console** (a person is running `droplet-luks-provision.sh` on a
+  terminal): the key is printed to that terminal and nothing else.
+- **Unattended install** (`droplet-firstboot.service`, stdout is not a terminal):
+  the key is never printed. It is staged root-only (file `0400`, directory
+  `0700`) at `/run/droplet/recovery/recovery-key.pending`, then moved onto the
+  encrypted volume at `/data/droplet/recovery/recovery-key.pending` once `/data`
+  is mounted, so it survives the post-install reboot. The log line says only
+  where it is staged.
+- **Retrieval:** on a console or SSH session, `sudo droplet-luks-provision.sh
+  show-recovery-key` shows the key and asks the owner to type `stored` after
+  recording it offline. Only then is the staged file shredded and
+  `/var/lib/droplet/recovery-key-acknowledged` (a timestamp) written. The command
+  refuses to run when stdin or stdout is not a terminal.
+- **Redaction (defence in depth only; the primary control is that the key never
+  reaches an unattended service's output):** a recovery-key line (64 modhex
+  characters from `cbdefghijklnrtuv`, as eight dash-separated groups of eight,
+  dash-less or upper case also matched) is scrubbed from support bundles by both
+  `scripts/host/droplet-collect-logs.sh` and
+  `apps/orchestrator/src/lib/log-redaction.ts`.
+
+Limits to know: until the owner runs `show-recovery-key`, the key exists only on
+the encrypted volume, so a TPM failure before pickup leaves it unreadable. The
+setup wizard and front panel do not yet read the staged file or surface the
+acknowledgement (tracked as a product decision on WARP-3572).
+
+### Rotating recovery keys on boxes already in the field
+
+Boxes provisioned before this change may have the old key in the journal of the
+provisioning boot. On each such box, as root, with the data volume unlocked:
+
+```
+journalctl --rotate && journalctl --vacuum-time=1s        # drop archived provisioning-boot journals
+shred -u /home/droplet/edge-platform/.data/setup.log 2>/dev/null || true
+umask 077
+systemd-cryptenroll --unlock-tpm2-device=auto --wipe-slot=recovery /dev/ubuntu-vg/droplet-data
+systemd-cryptenroll --unlock-tpm2-device=auto --recovery-key /dev/ubuntu-vg/droplet-data > /run/droplet/new-key
+# record it offline from a terminal, then:
+shred -u /run/droplet/new-key
+```
+
+`--wipe-slot=recovery` invalidates the old key, so the old journal copy no
+longer unlocks anything. Run the enroll from an interactive shell and write the
+output to a `0600` file under `/run/droplet`, never to a service's stdout. If
+the journal is persistent (`/var/log/journal` exists), also vacuum it as above;
+the plain filesystem can still hold deleted journal blocks, so wiping the slot
+is the control that matters.
 
 ## USB enrollment flow (AC: "USB enrollment flow documented")
 
@@ -236,7 +304,7 @@ image) or a manual migration. On boxes with an existing `/var/lib/docker`,
 
 ## Cross-references
 
-- `scripts/host/droplet-luks-provision.sh` — data-LV create + LUKS2 + TPM enroll.
+- `scripts/host/droplet-luks-provision.sh` — data-LV create + LUKS2 + TPM enroll + recovery-key delivery (`show-recovery-key`).
 - `scripts/host/droplet-usb-enroll.sh` — USB encrypt-and-format + derivation.
 - `scripts/host/droplet-tpm-lib.sh` — the shared PCR set (0+2+4+7) both tickets seal to.
 - `docs/security/crypto-shred.md` — decommissioning / destroy-the-key runbook.

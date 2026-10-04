@@ -51,6 +51,7 @@ import {
   NOTE_NOT_VISION,
   NOTE_OFF_LAN,
   NOTE_OVER_CAP,
+  TOOL_IMAGE_FETCH_TIMEOUT_MS,
   createToolVision,
   selectImageRefs,
   serializedMessageChars,
@@ -374,7 +375,10 @@ describe("userToolVisionPorts — fetches AS THE REQUESTING USER", () => {
     expect(await p.fileId("/a.jpg")).toBe(7);
     expect(mocks.ncGetFileId).toHaveBeenCalledWith("tok", "sam", "/a.jpg");
     await p.fileThumbnail(7, 1024);
-    expect(mocks.ncFetchThumbnail).toHaveBeenCalledWith("tok", 7, 1024, 1024);
+    expect(mocks.ncFetchThumbnail).toHaveBeenCalledWith("tok", 7, 1024, 1024, {
+      maxBytes: MAX_TOOL_IMAGE_BYTES,
+      timeoutMs: TOOL_IMAGE_FETCH_TIMEOUT_MS,
+    });
   });
 
   it("no Nextcloud credential → no file access (and nothing is dialled)", async () => {

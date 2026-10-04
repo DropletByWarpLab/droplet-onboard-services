@@ -434,7 +434,10 @@ export function userToolVisionPorts(args: {
     },
     async fileThumbnail(fileId, edge) {
       if (!ncToken) return null;
-      return ncFetchThumbnail(ncToken, fileId, edge, edge);
+      return ncFetchThumbnail(ncToken, fileId, edge, edge, {
+        maxBytes: MAX_TOOL_IMAGE_BYTES,
+        timeoutMs: TOOL_IMAGE_FETCH_TIMEOUT_MS,
+      });
     },
     async brainImage(itemId) {
       // Owner-only, ready, has a vision render: buildImageBlocks' own query.

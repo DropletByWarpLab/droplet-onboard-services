@@ -72,11 +72,14 @@ GRUB_CFG="${BUILD_DIR}/grub-autoinstall.cfg"
 # ---------------------------------------------------------------------------
 SHAPE="single-box"
 VERSION=""
+REF=""
 ALLOW_BLANK_DOWNLOADS=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --shape)   SHAPE="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
+    # WARP-3599. The platform release (tag or full commit) first boot installs.
+    --ref)     REF="${2:-}"; shift 2 ;;
     # WARP-2666. Build an image whose /downloads page will be empty for one or
     # more platforms. Requires that every such platform is declared `blocked`
     # WITH a ticket in data/app-downloads/EXPECTED — this flag waives a
@@ -91,6 +94,18 @@ if [ "$SHAPE" != "single-box" ]; then
   echo "build-iso: unsupported --shape '$SHAPE' (Phase 1 builds single-box only)" >&2
   exit 64
 fi
+
+# WARP-3599: refuse an unpinned image BEFORE any download or docker work.
+# pin-seed.sh resolves --ref (a release tag or a full commit; branch names are
+# refused) and renders the seed with that exact commit baked in, so first boot
+# installs a known tree instead of the default branch's head.
+if [ -z "$REF" ]; then
+  echo "ERROR: --ref <release-tag|commit-sha> is required: refusing to build an image" >&2
+  echo "       whose first boot installs an unpinned tree. (WARP-3599)" >&2
+  exit 64
+fi
+SEED_RENDERED="${BUILD_DIR}/.build/seed"
+bash "${BUILD_DIR}/pin-seed.sh" --ref "$REF" --out "$SEED_RENDERED"
 
 # Single source of version truth: root package.json (ADR-020 §D4).
 if [ -z "$VERSION" ]; then
@@ -108,6 +123,7 @@ echo "============================================="
 echo " Droplet appliance ISO builder"
 echo " Shape:   ${SHAPE}"
 echo " Version: ${VERSION}"
+echo " Ref:     ${REF}"
 echo " Base:    ${UBUNTU_ISO}"
 echo "============================================="
 echo ""
@@ -216,6 +232,7 @@ echo ""
 REQUIRED_OVERLAY=(
   "${AUTOINSTALL_DIR}/user-data"
   "${AUTOINSTALL_DIR}/meta-data"
+  "${AUTOINSTALL_DIR}/droplet-firstboot-verify"
   "${GRUB_CFG}"
 )
 echo "[1/5] Validating autoinstall overlay..."
@@ -283,7 +300,7 @@ echo "[4/5] Injecting the autoinstall seed (dockerized xorriso, boot replay)..."
 # targets (/work, /seed, /out, …) into Windows paths. No-op on a Linux host.
 MSYS_NO_PATHCONV=1 docker run --rm \
   -v "${WORK_DIR}:/work" \
-  -v "${AUTOINSTALL_DIR}:/seed:ro" \
+  -v "${SEED_RENDERED}:/seed:ro" \
   -v "${APP_DOWNLOADS_ROOT}:/app-downloads:ro" \
   -v "${GRUB_CFG}:/grub-autoinstall.cfg:ro" \
   -v "${OUTPUT_DIR}:/out" \
@@ -313,6 +330,7 @@ MSYS_NO_PATHCONV=1 docker run --rm \
       -overwrite on \
       -map /seed/user-data /server/user-data \
       -map /seed/meta-data /server/meta-data \
+      -map /seed/droplet-firstboot-verify /server/droplet-firstboot-verify \
       -map /app-downloads /server/app-downloads \
       -map /grub-autoinstall.cfg /boot/grub/grub.cfg \
       -commit -end
