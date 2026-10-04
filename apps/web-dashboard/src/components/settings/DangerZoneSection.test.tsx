@@ -46,12 +46,14 @@ const adoptDrive = vi.fn();
 const confirmStorageCommand = vi.fn();
 const getResetStatus = vi.fn();
 const triggerFactoryReset = vi.fn();
+const downloadResetReceipt = vi.fn();
 vi.mock("@/lib/api", () => ({
   fetchDrives: (...a: unknown[]) => fetchDrives(...a),
   adoptDrive: (...a: unknown[]) => adoptDrive(...a),
   confirmStorageCommand: (...a: unknown[]) => confirmStorageCommand(...a),
   getResetStatus: (...a: unknown[]) => getResetStatus(...a),
   triggerFactoryReset: (...a: unknown[]) => triggerFactoryReset(...a),
+  downloadResetReceipt: (...a: unknown[]) => downloadResetReceipt(...a),
 }));
 
 import { DangerZoneSection } from "./DangerZoneSection";
@@ -111,6 +113,7 @@ beforeEach(() => {
   // The API returns only a MASKED hint of the device name (2026-06-09 sweep)
   // — the owner types the real name from Settings → Device information.
   getResetStatus.mockResolvedValue({ targetHint: "d••••••e", job: null });
+  downloadResetReceipt.mockResolvedValue(undefined);
   triggerFactoryReset.mockResolvedValue({
     status: "dispatched",
     id: "job-1",
@@ -356,6 +359,34 @@ describe("DangerZoneSection — reset flow (WARP-825)", () => {
     await waitFor(() => expect(triggerFactoryReset).toHaveBeenCalledWith("droplet-home"));
     // Progress state mentions the box returning to first-run setup.
     await waitFor(() => expect(screen.getByText(/under way/i)).toBeInTheDocument());
+  });
+
+  it("saves the activity-log receipt BEFORE dispatching the reset (WARP-3640)", async () => {
+    const order: string[] = [];
+    downloadResetReceipt.mockImplementation(async () => { order.push("receipt"); });
+    triggerFactoryReset.mockImplementation(async () => {
+      order.push("reset");
+      return { status: "dispatched", id: "job-1", targetName: "droplet-home" };
+    });
+    render(<DangerZoneSection />);
+    await openModal();
+    fireEvent.change(await screen.findByLabelText(/type .* to confirm/i), {
+      target: { value: "droplet-home" },
+    });
+    fireEvent.click(modalActionButton());
+    await waitFor(() => expect(order).toEqual(["receipt", "reset"]));
+  });
+
+  it("does not start the reset when the receipt cannot be saved (WARP-3640)", async () => {
+    downloadResetReceipt.mockRejectedValueOnce(new Error("We couldn't save a receipt of this Droplet's activity log"));
+    render(<DangerZoneSection />);
+    await openModal();
+    fireEvent.change(await screen.findByLabelText(/type .* to confirm/i), {
+      target: { value: "droplet-home" },
+    });
+    fireEvent.click(modalActionButton());
+    expect(await screen.findByText(/couldn't save a receipt/i)).toBeInTheDocument();
+    expect(triggerFactoryReset).not.toHaveBeenCalled();
   });
 
   it("never renders an exact copy/paste-able confirm phrase — only the masked hint", async () => {

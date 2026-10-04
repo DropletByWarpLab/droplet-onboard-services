@@ -7881,6 +7881,35 @@ export async function getResetStatus(): Promise<ResetStatusResponse> {
 }
 
 /**
+ * WARP-3640 -- the factory reset's receipt. A reset destroys the audit chain
+ * and the key that signs it, so before dispatching one the owner's browser
+ * saves a sealed export of the activity log (the existing
+ * POST /api/activity/export bundle, verifiable offline per
+ * docs/security/audit-bundle-verification.md). Throws when the bundle cannot be
+ * produced or sealed: the reset must not proceed without the receipt.
+ */
+export async function downloadResetReceipt(): Promise<void> {
+  const res = await authFetch(`${BASE}/api/activity/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) {
+    throw new Error(
+      "We couldn't save a receipt of this Droplet's activity log, so the reset was not started. Try again, or contact Droplet support.",
+    );
+  }
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `droplet-reset-receipt-${new Date().toISOString().slice(0, 10)}.jsonl`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/**
  * Trigger the factory reset. `confirm` is the device name the owner typed; it is
  * re-validated SERVER-side (the client gate is not the authority). Resolves to
  * the dispatched job; throws with the orchestrator's friendly message on a
