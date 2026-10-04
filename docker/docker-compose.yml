@@ -2408,6 +2408,9 @@ services:
       - CAMERA_DEFAULT_USERNAME
       - CAMERA_DEFAULT_PASSWORD
       - CAMERA_CREDENTIALS_JSON
+      # WARP-3597: camera IPs (comma-separated) allowed to be answered with RTSP
+      # Basic auth. Empty = Digest only.
+      - CAMERA_RTSP_BASIC_ALLOW_IPS
       - ONVIF_WS_DISCOVERY_ENABLED
       - DROPLET_INTERNAL_TLS
       - DROPLET_TLS_CERT

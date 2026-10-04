@@ -49,7 +49,7 @@ from _shared.internal_tls import base_url as _internal_base_url, httpx_client_kw
 from driver_checker import full_driver_report, auto_fix_drivers
 from frigate_client import FrigateClient
 from onvif_scanner import discover_cameras, probe_onvif_device
-from rtsp_prober import probe_camera, verify_stream
+from rtsp_prober import probe_camera, redact_rtsp_url, verify_stream
 from vendor_init import check_status as vendor_status_check
 from vendor_init import initialize_camera as vendor_initialize
 
@@ -252,12 +252,27 @@ def _connect_mqtt() -> mqtt.Client:
     return client
 
 
+def public_camera(camera: dict) -> dict:
+    """Copy of a camera record that is safe to publish or return: the RTSP URL
+    loses its ``user:pass@`` and ``has_credentials`` says whether it had one.
+    Frigate (frigate.add_camera) still gets the full URL from the internal record."""
+    out = dict(camera)
+    url = out.get("rtsp_url")
+    if url:
+        out["rtsp_url"] = redact_rtsp_url(url)
+        out["has_credentials"] = out["rtsp_url"] != url
+    return out
+
+
 def publish_discovery(camera_info: dict) -> None:
-    """Publish camera discovery event to MQTT."""
+    """Publish camera discovery event to MQTT (never with credentials in a URL)."""
     if mqtt_client:
+        payload = dict(camera_info)
+        if isinstance(payload.get("camera"), dict):
+            payload["camera"] = public_camera(payload["camera"])
         mqtt_client.publish(
             "droplet/cameras/discovered",
-            json.dumps(camera_info),
+            json.dumps(payload),
             qos=1,
         )
 
@@ -696,7 +711,7 @@ async def scan_and_discover() -> None:
         # Validate RTSP URL before sending to Frigate
         rtsp_url = camera_info.get("rtsp_url")
         if rtsp_url and not is_safe_rtsp_url(rtsp_url):
-            logger.warning("Rejecting unsafe RTSP URL from %s: %s", ip, rtsp_url)
+            logger.warning("Rejecting unsafe RTSP URL from %s: %s", ip, redact_rtsp_url(rtsp_url))
             rtsp_url = None
             camera_info["rtsp_url"] = None
 
@@ -945,7 +960,7 @@ async def get_discovered(request: Request):
     reconnaissance-grade data that must not be readable by any LAN peer.
     """
     _require_auth(request)
-    return list(pending_cameras.values())
+    return [public_camera(c) for c in pending_cameras.values()]
 
 
 @app.get("/cameras/known")
@@ -956,7 +971,7 @@ async def get_known(request: Request):
     (may embed ``user:pass@``), MACs and models otherwise.
     """
     _require_auth(request)
-    return list(known_cameras.values())
+    return [public_camera(c) for c in known_cameras.values()]
 
 
 @app.post("/cameras/discovered/{mac}/accept")
@@ -1014,7 +1029,7 @@ async def accept_camera(mac: str, request: Request):
             camera["status"] = "active"
             known_cameras[mac] = camera
             publish_discovery({"event": "camera_accepted", "camera": camera})
-            return {"status": "accepted", "camera": camera}
+            return {"status": "accepted", "camera": public_camera(camera)}
 
         # Still in pending (peeked, not popped) — just surface the failure.
         raise HTTPException(status_code=500, detail="Failed to add camera to Frigate")

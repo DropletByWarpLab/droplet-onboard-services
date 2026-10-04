@@ -13,6 +13,7 @@ import asyncio
 import base64
 import hashlib
 import logging
+import os
 import secrets
 import socket
 from urllib.parse import quote, unquote, urlsplit
@@ -43,6 +44,36 @@ RTSP_PORTS = [554, 8554, 8080]
 # decode. `:` is deliberately excluded: a literal one would split user from
 # password on the wrong boundary.
 RTSP_USERINFO_SAFE = "!$&'()*+,;="
+
+
+def basic_auth_allowed(ip: str) -> bool:
+    """True only for a camera the operator explicitly listed as Basic-only.
+
+    HTTP-style Basic puts ``user:password`` on the wire in clear, so the prober
+    answers a Basic challenge only for hosts named in
+    ``CAMERA_RTSP_BASIC_ALLOW_IPS`` (comma-separated). Everything else that
+    merely answered on the camera subnet gets Digest or nothing. Read per call
+    so a config change needs no re-import.
+    """
+    allowed = {i.strip() for i in os.getenv("CAMERA_RTSP_BASIC_ALLOW_IPS", "").split(",")}
+    return ip in allowed
+
+
+def redact_rtsp_url(url: str | None) -> str | None:
+    """``rtsp://user:pw@host:554/p`` -> ``rtsp://host:554/p`` (no-op without userinfo).
+
+    Splits on the LAST ``@`` of the authority, so a password that contains ``@``
+    cannot leave a fragment behind. Used for MQTT payloads, API responses and logs.
+    """
+    if not url:
+        return url
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        return url
+    authority, slash, tail = rest.partition("/")
+    if "@" not in authority:
+        return url
+    return f"{scheme}://{authority.rsplit('@', 1)[1]}{slash}{tail}"
 
 # Common RTSP stream paths by manufacturer/convention.
 # Paths are ordered by observed hit rate; Hanwha Wisenet lives near the
@@ -394,14 +425,25 @@ async def _try_credentials_once(ip: str, port: int, path: str,
         _close_rtsp(writer)
         return False  # 404 / 501 / etc — path doesn't exist here
 
-    auth_line = ""
-    for ln in resp1.split("\r\n"):
-        if ln.lower().startswith("www-authenticate:"):
-            auth_line = ln.split(":", 1)[1].strip()
-            break
-    auth_info = _parse_www_authenticate(auth_line)
+    # A host may offer several schemes (one WWW-Authenticate line each); Digest
+    # wins over Basic when both are offered.
+    challenges = [
+        _parse_www_authenticate(ln.split(":", 1)[1].strip())
+        for ln in resp1.split("\r\n")
+        if ln.lower().startswith("www-authenticate:")
+    ]
+    auth_info = next((c for c in challenges if c["scheme"] == "digest"),
+                     challenges[0] if challenges else _parse_www_authenticate(""))
 
     if auth_info["scheme"] == "basic":
+        if not basic_auth_allowed(ip):
+            # Never send the password in clear to a host that has not been
+            # listed as Basic-only (WARP-3597).
+            logger.warning(
+                "%s:%d offered only Basic auth; not sending credentials "
+                "(list it in CAMERA_RTSP_BASIC_ALLOW_IPS to allow)", ip, port)
+            _close_rtsp(writer)
+            return False
         token = base64.b64encode(f"{user}:{pw}".encode()).decode()
         auth_header = f"Basic {token}"
     elif auth_info["scheme"] == "digest":
