@@ -1646,6 +1646,23 @@ entries:
     review_by: 2027-09-18
     code_refs: [services/erp-connector/src/rest/vendors/github.ts]
 
+  # WARP-3535 — the same trap, twice more. The development panel's commit field
+  # map reads a commit's author name and committer date off a GitHub `/commits`
+  # row, and `.name` and `.date` are both real ICANN TLDs. A plain object key has
+  # no bracket spelling (see `ref-github-repository-id-path` above), so the
+  # honest answer is the same one: state the true fact — these tokens appear in
+  # source as paths into a response body, and the box never dials them.
+  - id: ref-github-commit-field-paths
+    kind: reference
+    service: erp-connector
+    destination:
+      hosts: [commit.author.name, commit.committer.date]
+    purpose: the dotted JSON paths `commit.author.name` and `commit.committer.date` in the GitHub REST profile's development commit field map (a commit's author name and committer date on a `/commits` row) — paths into a response body that parse as hostnames under the `.name` and `.date` TLDs, never a connection the box makes
+    ticket: WARP-3535
+    added: 2026-10-04
+    review_by: 2027-10-04
+    code_refs: [services/erp-connector/src/rest/vendors/github.ts]
+
   - id: github-api
     kind: egress
     service: erp-connector
