@@ -11,7 +11,10 @@
 --      that already holds work.
 --
 --   2. PmWorkItem.estimate — story points, DOUBLE PRECISION, NULL = "not
---      estimated" (which is not 0). The CHECK keeps it in 0..1000 whoever
+--      estimated" (which is not 0). Added with ADD COLUMN IF NOT EXISTS because
+--      WARP-3521 declares the same nullable, default-less column idempotently
+--      (this slice owns the field and its API; that one reads it), so the two
+--      can land in either order. The CHECK keeps it in 0..1000 whoever
 --      writes it: the route validates the same bounds, but a fix-up script or a
 --      future importer does not go through the route. NaN is refused too —
 --      Postgres orders NaN above every number, so `<= 1000` rejects it.
@@ -32,9 +35,12 @@
 CREATE TYPE "PmWorkItemType" AS ENUM ('task', 'bug', 'feature', 'improvement', 'question', 'incident');
 
 -- ── PmWorkItem.type / .estimate ─────────────────────────────────────────────
-ALTER TABLE "PmWorkItem"
-  ADD COLUMN "type" "PmWorkItemType" NOT NULL DEFAULT 'task',
-  ADD COLUMN "estimate" DOUBLE PRECISION;
+ALTER TABLE "PmWorkItem" ADD COLUMN "type" "PmWorkItemType" NOT NULL DEFAULT 'task';
+
+-- IF NOT EXISTS on purpose: WARP-3521 (cycles / modules) reads the estimate and
+-- declares the very same column the very same way, so whichever of the two
+-- migrations runs first creates it and the other is a no-op.
+ALTER TABLE "PmWorkItem" ADD COLUMN IF NOT EXISTS "estimate" DOUBLE PRECISION;
 
 ALTER TABLE "PmWorkItem"
   ADD CONSTRAINT "PmWorkItem_estimate_range"

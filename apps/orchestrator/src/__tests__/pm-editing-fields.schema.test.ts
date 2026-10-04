@@ -40,9 +40,20 @@ describe("PmWorkItem type + estimate migration (WARP-3520)", () => {
     expect(/type\s+PmWorkItemType\s+@default\(task\)/.test(SCHEMA)).toBe(true);
   });
 
-  it("adds estimate as a NULLABLE double — NULL means not estimated, which is not 0", () => {
-    expect(/ADD COLUMN "estimate" DOUBLE PRECISION(?!\s+NOT NULL)/.test(SQL)).toBe(true);
+  it("adds estimate as a NULLABLE, default-less double — NULL means not estimated, which is not 0", () => {
+    // The `;` straight after the type is the assertion: no NOT NULL, no DEFAULT.
+    expect(/ADD COLUMN IF NOT EXISTS "estimate" DOUBLE PRECISION;/.test(SQL)).toBe(true);
     expect(/estimate\s+Float\?/.test(SCHEMA)).toBe(true);
+  });
+
+  it("declares estimate idempotently and exactly as WARP-3521 does, so the two slices land in either order", () => {
+    // WARP-3521 (cycles / modules) reads this column and declares it with the same
+    // IF NOT EXISTS statement and the same schema line. A plain ADD COLUMN here
+    // would fail on a database that ran that migration first; a differently
+    // aligned or differently placed schema line would merge into a duplicate field.
+    expect(/ADD COLUMN "estimate"/.test(SQL), "a plain ADD COLUMN would fail when the column exists").toBe(false);
+    expect(/^ {2}estimate {8}Float\?$/m.test(SCHEMA)).toBe(true);
+    expect(SCHEMA.match(/^ {2}estimate\s+Float\?$/gm)).toHaveLength(1);
   });
 
   it("bounds estimate with a CHECK, so a non-route writer cannot store a negative or absurd size", () => {

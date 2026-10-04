@@ -5624,10 +5624,6 @@ model PmWorkItem {
   priority        PmPriority   @default(none)
   /// WARP-3520 — see `PmWorkItemType`.
   type            PmWorkItemType @default(task)
-  /// WARP-3520 — size in story points; NULL means "not estimated" (which is not
-  /// the same thing as 0). The CHECK `PmWorkItem_estimate_range` keeps it in
-  /// 0..1000 whoever writes it (migration SQL — Prisma cannot express it).
-  estimate        Float?
   parentId        String?
   parent          PmWorkItem?  @relation("PmSubIssues", fields: [parentId], references: [id], onDelete: SetNull)
   children        PmWorkItem[] @relation("PmSubIssues")
@@ -5643,6 +5639,10 @@ model PmWorkItem {
   createdById     String?
   startDate       DateTime?
   dueDate         DateTime?
+  /// Size of the item, in points (WARP-3520 owns the field and its API; WARP-3521
+  /// reads it for cycle / module progress and the burndown). Declared in both
+  /// slices' migrations as `ADD COLUMN IF NOT EXISTS` so either lands first.
+  estimate        Float?
   sortOrder       Float        @default(0)
   /// Canonical "is done" signal (WARP-884) — explicit column, not derived
   /// from `completedAt IS NOT NULL`. Kept in sync with the state's group by
