@@ -58,6 +58,7 @@ import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createPmQueryRouter } from "./routes/pm/query.js";
 import { createPmViewsRouter } from "./routes/pm/views.js";
+import { createPmBulkRouter } from "./routes/pm/bulk.js";
 import { createCrmRouter } from "./routes/crm.js";
 import { createMoneyRouter } from "./routes/money.js";
 import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
@@ -558,6 +559,9 @@ export function createApp(
   // by, or shadow, a native one; the order is the cheap guarantee.
   app.use("/api", createPmQueryRouter(prisma));
   app.use("/api", createPmViewsRouter(prisma));
+  // WARP-3537 — `POST /pm/work-items/bulk`: the same literal-under-`:id` case as
+  // `/pm/work-items/query` above, so the same rule: before the native router.
+  app.use("/api", createPmBulkRouter(prisma));
   // ADR-026 — native PM (projects, work-items, states, labels, comments).
   // The Droplet-owned project-management surface: state in the orchestrator's
   // own Postgres, dashboard session is the auth, no embedded third-party stack.

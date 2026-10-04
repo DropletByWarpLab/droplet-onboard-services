@@ -366,30 +366,45 @@ export function isPrismaCode(
   return typeof err === "object" && err !== null && (err as { code?: unknown }).code === code;
 }
 
-async function writeActivity(
-  db: Db,
-  input: {
-    workItemId: string;
-    actorId: string | null;
-    // PmActivity.verb is the PmActivityVerb enum (schema), so type the helper
-    // to the generated enum rather than a bare string — keeps the call sites
-    // honest and satisfies the Prisma create input.
-    verb: Prisma.PmActivityCreateManyInput["verb"];
-    field?: string | null;
-    oldValue?: string | null;
-    newValue?: string | null;
-  },
-): Promise<void> {
-  await db.pmActivity.create({
-    data: {
-      workItemId: input.workItemId,
-      actorId: input.actorId ?? null,
-      verb: input.verb,
-      field: input.field ?? null,
-      oldValue: input.oldValue ?? null,
-      newValue: input.newValue ?? null,
-    },
-  });
+export interface ActivityInput {
+  workItemId: string;
+  actorId: string | null;
+  // PmActivity.verb is the PmActivityVerb enum (schema), so type the helper
+  // to the generated enum rather than a bare string — keeps the call sites
+  // honest and satisfies the Prisma create input.
+  verb: Prisma.PmActivityCreateManyInput["verb"];
+  field?: string | null;
+  oldValue?: string | null;
+  newValue?: string | null;
+}
+
+function activityData(input: ActivityInput) {
+  return {
+    workItemId: input.workItemId,
+    actorId: input.actorId ?? null,
+    verb: input.verb,
+    field: input.field ?? null,
+    oldValue: input.oldValue ?? null,
+    newValue: input.newValue ?? null,
+  };
+}
+
+/**
+ * The one way an activity row is written. Exported (WARP-3537) so a writer that
+ * lives in another file — the bulk edit — appends through the same mapper inside
+ * its own transaction instead of growing a second way to shape a row.
+ *
+ * An ARRAY is one INSERT. A 500-item bulk edit writes thousands of rows, and a
+ * round trip per row inside an open transaction is how a batch outlives Prisma's
+ * 5 s transaction budget; one statement is the same rows, the same mapper.
+ */
+export async function writeActivity(db: Db, input: ActivityInput | ActivityInput[]): Promise<void> {
+  if (Array.isArray(input)) {
+    if (input.length === 0) return;
+    await db.pmActivity.createMany({ data: input.map(activityData) });
+    return;
+  }
+  await db.pmActivity.create({ data: activityData(input) });
 }
 
 /** Re-fetch a work item with all includes and map it. Throws if it vanished
