@@ -239,6 +239,46 @@ export function CountMeta({ item }: { item: PmWorkItem }): JSX.Element | null {
   );
 }
 
+// ── Progressive-load status (WARP-3371) ─────────────────────────────────────
+/** "How many of how many" while a list is still arriving, and the honest failure
+ *  when a later page did not. Rendered ONLY while `shown < total`: a list that
+ *  is whole says nothing, and a list that is not never stays silent about it. */
+export function ListProgress({
+  shown,
+  total,
+  failed,
+  onRetry,
+}: {
+  shown: number;
+  total: number;
+  failed: boolean;
+  onRetry: () => void;
+}): JSX.Element {
+  return (
+    <div
+      className="pm-row"
+      role="status"
+      aria-live="polite"
+      style={{ gap: 10, flexWrap: "wrap", fontSize: 12.5, color: "var(--text-3)" }}
+    >
+      {failed ? (
+        <>
+          <span>
+            Showing {shown} of {total} work items. Couldn&apos;t load the rest.
+          </span>
+          <button className="pm-btn ghost sm" type="button" onClick={onRetry}>
+            Retry
+          </button>
+        </>
+      ) : (
+        <span>
+          Showing {shown} of {total} work items — loading the rest…
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ── Empty / error block + skeleton ──────────────────────────────────────────
 export function EmptyBlock({
   icon = "inbox",

@@ -34,6 +34,18 @@ import {
   type DepartmentRefRow,
   type PmDepartmentRef,
 } from "./pm-department.js";
+import {
+  INVALID_CURSOR,
+  ORDER_ASSIGNED,
+  ORDER_BOARD,
+  ORDER_SEARCH,
+  clampLimit,
+  decodeCursor,
+  encodeCursor,
+  keysetAfter,
+  sliceToPage,
+  type Page,
+} from "./pm-paging.js";
 
 // ── Stable error codes ────────────────────────────────────────────────────────
 // Shared so catch sites import the same string literals the throw sites emit;
@@ -58,6 +70,8 @@ export const PM_ERRORS = {
    *  A guest is admitted to the ONE work item assigned to them, never to a
    *  project, so "project lead" names a role they cannot hold. */
   LEAD_IS_GUEST: "lead_is_guest",
+  /** WARP-3371 — a `cursor` this list did not mint. The route answers 400. */
+  INVALID_CURSOR,
   // ADR-045 §5.3 — the department dimension's codes live beside its rules in
   // pm-department.ts and are folded in here so `mapServiceError` keeps ONE
   // vocabulary to switch on.
@@ -999,10 +1013,17 @@ export async function listWorkItems(
      *  Mirrors `parentId`'s explicit three-way encoding directly above. */
     departmentId?: string | null;
     q?: string;
-    perPage?: number;
+    /** Page size, `1..PM_PAGE_MAX`, default `PM_PAGE_DEFAULT`. */
+    limit?: number;
+    /** WARP-3371 — the previous page's `nextCursor`. Wins over `page`. */
+    cursor?: string;
+    /** Legacy 1-based offset page, kept for callers that predate the cursor. */
     page?: number;
   } = {},
-): Promise<ApiWorkItem[]> {
+): Promise<Page<ApiWorkItem>> {
+  // Decoded before any read: a malformed cursor is the caller's 400, and it
+  // should not cost a query (or be hidden behind a 404 on the project).
+  const after = filters.cursor ? decodeCursor(ORDER_BOARD, filters.cursor) : null;
   const project = await prisma.pmProject.findUnique({
     where: { id: projectId },
     include: { department: { select: DEPARTMENT_SELECT } },
@@ -1020,12 +1041,13 @@ export async function listWorkItems(
   // `where.OR` directly, so putting this there would replace it and turn
   // "items in Clinical matching 'sterilise'" into "items in Clinical". Prisma
   // ANDs the two keys together, which is exactly the intent.
+  const and: Prisma.PmWorkItemWhereInput[] = [];
   if (filters.departmentId !== undefined) {
     const scope =
       filters.departmentId === null
         ? null
         : await expandDepartmentScope(prisma, filters.departmentId);
-    where.AND = [departmentWorkItemWhere(scope)];
+    and.push(departmentWorkItemWhere(scope));
   }
   if (filters.q && filters.q.trim().length > 0) {
     const q = filters.q.trim();
@@ -1034,17 +1056,38 @@ export async function listWorkItems(
       { descriptionHtml: { contains: q, mode: "insensitive" } },
     ];
   }
+  if (and.length > 0) where.AND = and;
 
-  const perPage = Math.max(1, Math.min(200, filters.perPage ?? 100));
-  const page = Math.max(1, filters.page ?? 1);
-  const rows = await prisma.pmWorkItem.findMany({
-    where,
-    include: WORK_ITEM_INCLUDE,
-    orderBy: [{ sortOrder: "asc" }, { sequenceId: "asc" }],
-    skip: (page - 1) * perPage,
-    take: perPage,
-  });
-  return rows.map((r) => mapWorkItem(r, project.identifier, project.department));
+  // WARP-3371 — a page, never a silent ceiling. `total` is counted over the
+  // FILTERED set without the cursor, so it is the same number on every page and
+  // the view can say "100 of 250". The page itself asks for one row more than
+  // it returns: that extra row is the only proof there is a next page.
+  const limit = clampLimit(filters.limit);
+  const pageWhere: Prisma.PmWorkItemWhereInput = after
+    ? { ...where, AND: [...and, keysetAfter("sortOrder", "asc", after) as Prisma.PmWorkItemWhereInput] }
+    : where;
+  const skip = after ? 0 : (Math.max(1, filters.page ?? 1) - 1) * limit;
+  const [total, rows] = await Promise.all([
+    prisma.pmWorkItem.count({ where }),
+    prisma.pmWorkItem.findMany({
+      where: pageWhere,
+      include: WORK_ITEM_INCLUDE,
+      // `id` closes the tie: `sortOrder` is not unique (a PATCH can set two
+      // rows to the same value), and a cursor over a non-unique key would skip
+      // or repeat the rows that share it.
+      orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
+      ...(skip > 0 ? { skip } : {}),
+      take: limit + 1,
+    }),
+  ]);
+  const { items, nextCursor } = sliceToPage(rows, limit, (r) =>
+    encodeCursor(ORDER_BOARD, r.sortOrder, r.id),
+  );
+  return {
+    items: items.map((r) => mapWorkItem(r, project.identifier, project.department)),
+    nextCursor,
+    total,
+  };
 }
 
 export async function getWorkItem(prisma: PrismaClient, id: string): Promise<ApiWorkItem> {
@@ -1065,20 +1108,26 @@ export async function searchWorkItems(
   opts: {
     workspaceSlug?: string;
     q: string;
-    perPage?: number;
     /** WARP-2719 — same three-way encoding as `listWorkItems`, and the same
      *  override rule: an item's own department wins, and an item with none
      *  inherits its project's. */
     departmentId?: string | null;
+    /** Page size, `1..PM_PAGE_MAX`, default `PM_PAGE_DEFAULT`. */
+    limit?: number;
+    /** WARP-3371 — the previous page's `nextCursor`. */
+    cursor?: string;
   },
-): Promise<ApiWorkItem[]> {
+): Promise<Page<ApiWorkItem>> {
+  const after = opts.cursor ? decodeCursor(ORDER_SEARCH, opts.cursor) : null;
   const q = opts.q.trim();
   // 🔴 An empty `q` used to be an unconditional empty list, which was right
   // while free text was the only filter this reader had. It is now the answer
   // to "what is Front Desk working on?" — a question with no search term in it
   // at all — so the short-circuit narrows to "no filter of any kind".
-  if (q.length === 0 && opts.departmentId === undefined) return [];
-  const perPage = Math.max(1, Math.min(200, opts.perPage ?? 100));
+  if (q.length === 0 && opts.departmentId === undefined) {
+    return { items: [], nextCursor: null, total: 0 };
+  }
+  const limit = clampLimit(opts.limit);
   // 🔴 The free-text `OR` is added CONDITIONALLY, and it did not used to be:
   // it was an unconditional member of this literal, safe only because the
   // guard above made an empty `q` unreachable. With that guard relaxed, an
@@ -1095,31 +1144,48 @@ export async function searchWorkItems(
   // `departmentWorkItemWhere` returns a bare-`OR` fragment for exactly this
   // reason. Writing it to `where.OR` would turn "items in Front Desk matching
   // X" into "items in Front Desk".
+  const and: Prisma.PmWorkItemWhereInput[] = [];
   if (opts.departmentId !== undefined) {
     const scope =
       opts.departmentId === null
         ? null
         : await expandDepartmentScope(prisma, opts.departmentId);
-    where.AND = [departmentWorkItemWhere(scope)];
+    and.push(departmentWorkItemWhere(scope));
   }
+  if (and.length > 0) where.AND = and;
   if (opts.workspaceSlug) where.project = { workspace: { slug: opts.workspaceSlug } };
-  const rows = await prisma.pmWorkItem.findMany({
-    where,
-    // ADR-045 §5.3 — this is the only reader whose rows span projects, so it
-    // joins the project per row. The whole include is respelled rather than
-    // spread-and-overridden: `{ ...WORK_ITEM_INCLUDE, project: ... }` would be
-    // fine today but a later `project` key inside WORK_ITEM_INCLUDE would be
-    // silently clobbered by the later spread member.
-    include: {
-      ...WORK_ITEM_INCLUDE,
-      project: {
-        select: { identifier: true, department: { select: DEPARTMENT_SELECT } },
+  const pageWhere: Prisma.PmWorkItemWhereInput = after
+    ? { ...where, AND: [...and, keysetAfter("updatedAt", "desc", after) as Prisma.PmWorkItemWhereInput] }
+    : where;
+  const [total, rows] = await Promise.all([
+    prisma.pmWorkItem.count({ where }),
+    prisma.pmWorkItem.findMany({
+      where: pageWhere,
+      // ADR-045 §5.3 — this is the only reader whose rows span projects, so it
+      // joins the project per row. The whole include is respelled rather than
+      // spread-and-overridden: `{ ...WORK_ITEM_INCLUDE, project: ... }` would be
+      // fine today but a later `project` key inside WORK_ITEM_INCLUDE would be
+      // silently clobbered by the later spread member.
+      include: {
+        ...WORK_ITEM_INCLUDE,
+        project: {
+          select: { identifier: true, department: { select: DEPARTMENT_SELECT } },
+        },
       },
-    },
-    orderBy: { updatedAt: "desc" },
-    take: perPage,
-  });
-  return rows.map((r) => mapWorkItem(r, r.project.identifier, r.project.department));
+      // Newest change first, `id` closing the tie (two rows can share a
+      // millisecond), so the cursor below names exactly one position.
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      take: limit + 1,
+    }),
+  ]);
+  const { items, nextCursor } = sliceToPage(rows, limit, (r) =>
+    encodeCursor(ORDER_SEARCH, r.updatedAt, r.id),
+  );
+  return {
+    items: items.map((r) => mapWorkItem(r, r.project.identifier, r.project.department)),
+    nextCursor,
+    total,
+  };
 }
 
 /** WARP-3407 — the work items assigned to ONE person, across projects, newest
@@ -1129,24 +1195,45 @@ export async function searchWorkItems(
 export async function listAssignedWorkItems(
   prisma: PrismaClient,
   userId: string,
-  opts: { perPage?: number; page?: number } = {},
-): Promise<ApiWorkItem[]> {
-  const perPage = Math.max(1, Math.min(200, opts.perPage ?? 100));
-  const page = Math.max(1, opts.page ?? 1);
-  const rows = await prisma.pmWorkItem.findMany({
-    where: { isArchived: false, assignees: { some: { userId } } },
-    // Spans projects, so it joins the project per row (searchWorkItems' rule).
-    include: {
-      ...WORK_ITEM_INCLUDE,
-      project: {
-        select: { identifier: true, department: { select: DEPARTMENT_SELECT } },
+  opts: {
+    /** Page size, `1..PM_PAGE_MAX`, default `PM_PAGE_DEFAULT`. */
+    limit?: number;
+    /** WARP-3371 — the previous page's `nextCursor`. Wins over `page`. */
+    cursor?: string;
+    /** Legacy 1-based offset page, kept for callers that predate the cursor. */
+    page?: number;
+  } = {},
+): Promise<Page<ApiWorkItem>> {
+  const after = opts.cursor ? decodeCursor(ORDER_ASSIGNED, opts.cursor) : null;
+  const limit = clampLimit(opts.limit);
+  const where: Prisma.PmWorkItemWhereInput = { isArchived: false, assignees: { some: { userId } } };
+  const skip = after ? 0 : (Math.max(1, opts.page ?? 1) - 1) * limit;
+  const [total, rows] = await Promise.all([
+    prisma.pmWorkItem.count({ where }),
+    prisma.pmWorkItem.findMany({
+      where: after
+        ? { ...where, AND: [keysetAfter("updatedAt", "desc", after) as Prisma.PmWorkItemWhereInput] }
+        : where,
+      // Spans projects, so it joins the project per row (searchWorkItems' rule).
+      include: {
+        ...WORK_ITEM_INCLUDE,
+        project: {
+          select: { identifier: true, department: { select: DEPARTMENT_SELECT } },
+        },
       },
-    },
-    orderBy: { updatedAt: "desc" },
-    skip: (page - 1) * perPage,
-    take: perPage,
-  });
-  return rows.map((r) => mapWorkItem(r, r.project.identifier, r.project.department));
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      ...(skip > 0 ? { skip } : {}),
+      take: limit + 1,
+    }),
+  ]);
+  const { items, nextCursor } = sliceToPage(rows, limit, (r) =>
+    encodeCursor(ORDER_ASSIGNED, r.updatedAt, r.id),
+  );
+  return {
+    items: items.map((r) => mapWorkItem(r, r.project.identifier, r.project.department)),
+    nextCursor,
+    total,
+  };
 }
 
 export async function createWorkItem(

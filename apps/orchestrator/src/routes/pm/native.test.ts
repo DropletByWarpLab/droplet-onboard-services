@@ -40,6 +40,66 @@ function prismaError(code: string, fieldName?: string): Error & { code: string }
   return e;
 }
 
+/**
+ * WARP-3371 — a small interpreter for the `where` / `orderBy` shapes the PM
+ * lists build: scalar equality, `{ gt | lt | in | contains }`, `assignees.some`,
+ * and `AND` / `OR`. A key the row does not carry (`project`, `department`, …)
+ * is treated as satisfied — the same "returns what it can" stance this fake has
+ * always taken — so the department clauses, which have their own suites, stay
+ * inert here. It exists so a route test can drive a REAL cursor walk (limit,
+ * keyset, total) instead of asserting against a stub that ignores `take`.
+ */
+function cmp(a: unknown, b: unknown): number {
+  const x = a instanceof Date ? a.getTime() : (a as number | string);
+  const y = b instanceof Date ? b.getTime() : (b as number | string);
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+function matchesWhere(row: Row, where: Row | undefined, assignees: Row[]): boolean {
+  if (!where) return true;
+  for (const [key, cond] of Object.entries(where)) {
+    if (cond === undefined) continue;
+    if (key === "AND") {
+      if (!(cond as Row[]).every((w) => matchesWhere(row, w, assignees))) return false;
+      continue;
+    }
+    if (key === "OR") {
+      if (!(cond as Row[]).some((w) => matchesWhere(row, w, assignees))) return false;
+      continue;
+    }
+    if (key === "assignees") {
+      const some = (cond as { some?: { userId?: string } }).some;
+      if (some?.userId && !assignees.some((a) => a.workItemId === row.id && a.userId === some.userId)) return false;
+      continue;
+    }
+    if (!(key in row)) continue;
+    const value = row[key];
+    if (cond !== null && typeof cond === "object" && !(cond instanceof Date)) {
+      const c = cond as { gt?: unknown; lt?: unknown; in?: unknown[]; contains?: string; mode?: string };
+      if (c.gt !== undefined && !(cmp(value, c.gt) > 0)) return false;
+      if (c.lt !== undefined && !(cmp(value, c.lt) < 0)) return false;
+      if (c.in !== undefined && !c.in.includes(value)) return false;
+      if (c.contains !== undefined && !String(value ?? "").toLowerCase().includes(c.contains.toLowerCase())) return false;
+      continue;
+    }
+    if (cond instanceof Date ? cmp(value, cond) !== 0 : value !== cond) return false;
+  }
+  return true;
+}
+
+function sortRows(rows: Row[], orderBy: unknown): Row[] {
+  const keys = (Array.isArray(orderBy) ? orderBy : orderBy ? [orderBy] : []) as Array<Record<string, "asc" | "desc">>;
+  if (keys.length === 0) return rows;
+  return [...rows].sort((a, b) => {
+    for (const k of keys) {
+      const [field, dir] = Object.entries(k)[0];
+      const c = cmp(a[field], b[field]);
+      if (c !== 0) return dir === "desc" ? -c : c;
+    }
+    return 0;
+  });
+}
+
 /** Per-operation throw hooks: set `hooks["<op>"] = "<P-code>"` to make the next
  *  matching write throw that Prisma error. Cleared after it fires (one-shot). */
 type Hooks = Record<string, string | undefined>;
@@ -252,16 +312,27 @@ function makeFake(hooks: Hooks = {}) {
         db.items.find(
           (i) => i.id === where.id && (!where.projectId || i.projectId === where.projectId),
         ) ?? null,
-      findMany: async ({ where, include }: { where: Row; include?: Row }) => {
-        let rows = db.items;
-        if (where.projectId !== undefined) rows = rows.filter((i) => i.projectId === where.projectId);
-        if (where.stateId !== undefined) rows = rows.filter((i) => i.stateId === where.stateId);
-        if (where.parentId !== undefined) rows = rows.filter((i) => i.parentId === where.parentId);
-        // WARP-3407 — `assignees: { some: { userId } }` (the own-assignments list, and `?assignee=`).
-        const some = (where.assignees as { some?: { userId?: string } } | undefined)?.some;
-        if (some?.userId) {
-          rows = rows.filter((i) => db.assignees.some((a) => a.workItemId === i.id && a.userId === some.userId));
-        }
+      findMany: async ({
+        where,
+        include,
+        orderBy,
+        skip,
+        take,
+      }: {
+        where: Row;
+        include?: Row;
+        orderBy?: unknown;
+        skip?: number;
+        take?: number;
+      }) => {
+        // WARP-3407 — `assignees: { some: { userId } }` (the own-assignments
+        // list, and `?assignee=`) is interpreted by `matchesWhere`.
+        let rows = sortRows(
+          db.items.filter((i) => matchesWhere(i, where, db.assignees)),
+          orderBy,
+        );
+        if (skip) rows = rows.slice(skip);
+        if (take !== undefined) rows = rows.slice(0, take);
         return rows.map((i) => {
           const out = resolveItem(i, include);
           // The cross-project readers join the project per row.
@@ -272,6 +343,9 @@ function makeFake(hooks: Hooks = {}) {
           return out;
         });
       },
+      // WARP-3371 — every list counts the filtered set for its `total`.
+      count: async ({ where }: { where: Row }) =>
+        db.items.filter((i) => matchesWhere(i, where, db.assignees)).length,
       create: async ({ data }: { data: Row }) => {
         fire("pmWorkItem.create");
         const it: Row = {
@@ -1170,5 +1244,228 @@ describe("native PM routes — a work item assigned to an external guest is shar
     expect(refused422.body).toEqual({ error: "lead_is_guest" });
     const ok = await request(owner).patch(`/api/pm/projects/${pid}`).send({ leadId: "user-family" });
     expect(ok.status).toBe(200);
+  });
+});
+
+// ── WARP-3371 — every work-item list is a PAGE ───────────────────────────────
+
+describe("native PM routes — work-item lists are pages, never a silent ceiling (WARP-3371)", () => {
+  let prisma: unknown;
+  let db: ReturnType<typeof makeFake>["db"];
+  let pid: string;
+  let app: ReturnType<typeof makeApp>;
+
+  beforeEach(async () => {
+    id = 0;
+    const fake = makeFake();
+    prisma = fake.prisma;
+    db = fake.db;
+    app = makeApp(prisma, OWNER);
+    const proj = await request(app).post("/api/pm/projects").send({ name: "Inbox" });
+    pid = proj.body.project.id;
+  });
+
+  /** Seed rows straight into the fake: 250 POSTs buy nothing a loop of rows does not. */
+  function seed(n: number, over: (i: number) => Row = () => ({})): void {
+    const stateId = db.states.find((s) => s.projectId === pid && s.isDefault)!.id;
+    for (let i = 1; i <= n; i += 1) {
+      db.items.push({
+        id: `wi-seed-${String(i).padStart(4, "0")}`,
+        projectId: pid,
+        sequenceId: i,
+        name: `Item ${i}`,
+        descriptionHtml: null,
+        stateId,
+        priority: "none",
+        parentId: null,
+        cycleId: null,
+        departmentId: null,
+        createdById: null,
+        startDate: null,
+        dueDate: null,
+        sortOrder: i,
+        isCompleted: false,
+        completedAt: null,
+        isArchived: false,
+        archivedAt: null,
+        createdAt: new Date(2026, 0, 1, 0, 0, i),
+        updatedAt: new Date(2026, 0, 1, 0, 0, i),
+        ...over(i),
+      });
+    }
+  }
+
+  const seedId = (n: number) => `wi-seed-${String(n).padStart(4, "0")}`;
+
+  type PageBody = { work_items: Array<{ id: string }>; nextCursor: string | null; total: number };
+
+  /** Follow `nextCursor` until it is null, the way the board does. */
+  async function walk(base: string, query = ""): Promise<{ pages: PageBody[]; ids: string[] }> {
+    const pages: PageBody[] = [];
+    let cursor: string | null = null;
+    do {
+      const params = [query, cursor ? `cursor=${encodeURIComponent(cursor)}` : ""].filter(Boolean).join("&");
+      const url: string = params ? `${base}${base.includes("?") ? "&" : "?"}${params}` : base;
+      const res = await request(app).get(url);
+      expect(res.status, url).toBe(200);
+      const body = res.body as PageBody;
+      pages.push(body);
+      cursor = body.nextCursor;
+      expect(pages.length).toBeLessThan(50); // a stuck cursor must fail, not hang
+    } while (cursor);
+    return { pages, ids: pages.flatMap((p) => p.work_items.map((w) => w.id)) };
+  }
+
+  const LIST = () => `/api/pm/projects/${pid}/work-items`;
+
+  it("250 items: the default page is 100 of 250, and the cursor reaches every one exactly once, in order", async () => {
+    seed(250);
+    const first = await request(app).get(LIST());
+    expect(first.status).toBe(200);
+    expect(first.body.work_items).toHaveLength(100);
+    expect(first.body.total).toBe(250);
+    expect(first.body.nextCursor).toEqual(expect.any(String));
+
+    const { pages, ids } = await walk(LIST());
+    expect(pages.map((p) => p.work_items.length)).toEqual([100, 100, 50]);
+    expect(pages.map((p) => p.total)).toEqual([250, 250, 250]);
+    expect(pages[2].nextCursor).toBeNull();
+    expect(ids).toHaveLength(250);
+    expect(new Set(ids).size).toBe(250);
+    expect(ids).toEqual(Array.from({ length: 250 }, (_, i) => seedId(i + 1)));
+  });
+
+  it("`limit` up to 500 is honoured and nextCursor is null exactly when nothing remains", async () => {
+    seed(120);
+    const all = await request(app).get(`${LIST()}?limit=500`);
+    expect(all.body.work_items).toHaveLength(120);
+    expect(all.body.nextCursor).toBeNull();
+    expect(all.body.total).toBe(120);
+
+    // The page that ends EXACTLY at the last row is the last page: the extra
+    // row the query fetches is the only proof of more, and there is none.
+    const exact = await request(app).get(`${LIST()}?limit=120`);
+    expect(exact.body.work_items).toHaveLength(120);
+    expect(exact.body.nextCursor).toBeNull();
+  });
+
+  it("`per_page` still works as the old name for `limit`", async () => {
+    seed(30);
+    const res = await request(app).get(`${LIST()}?per_page=7`);
+    expect(res.body.work_items).toHaveLength(7);
+    expect(res.body.total).toBe(30);
+    const both = await request(app).get(`${LIST()}?limit=3&per_page=9`);
+    expect(both.body.work_items).toHaveLength(3); // `limit` wins
+  });
+
+  it("a legacy `page` still addresses an offset, and the cursor it returns continues from there", async () => {
+    seed(10);
+    const p2 = await request(app).get(`${LIST()}?limit=4&page=2`);
+    expect(p2.body.work_items.map((w: { id: string }) => w.id)).toEqual([5, 6, 7, 8].map(seedId));
+    const next = await request(app).get(`${LIST()}?limit=4&cursor=${encodeURIComponent(p2.body.nextCursor)}`);
+    expect(next.body.work_items.map((w: { id: string }) => w.id)).toEqual([9, 10].map(seedId));
+  });
+
+  it("rows that share a sortOrder neither repeat nor vanish across a page boundary (id closes the tie)", async () => {
+    seed(7, () => ({ sortOrder: 5 }));
+    const { ids } = await walk(LIST(), "limit=2");
+    expect(ids).toHaveLength(7);
+    expect(new Set(ids).size).toBe(7);
+  });
+
+  it("a row deleted between two pages does not shift or lose the next page — even the row the cursor points at", async () => {
+    seed(10);
+    const first = await request(app).get(`${LIST()}?limit=3`);
+    const seen = first.body.work_items.map((w: { id: string }) => w.id);
+    // The cursor names the LAST row of page 1; delete that very row.
+    db.items = db.items.filter((i) => i.id !== seen[2]);
+    const rest = await request(app).get(`${LIST()}?limit=100&cursor=${encodeURIComponent(first.body.nextCursor)}`);
+    expect(rest.status).toBe(200);
+    expect(rest.body.work_items.map((w: { id: string }) => w.id)).toEqual([4, 5, 6, 7, 8, 9, 10].map(seedId));
+  });
+
+  it("`total` counts the FILTERED set, not the page and not the project", async () => {
+    seed(20, (i) => ({ priority: i % 4 === 0 ? "high" : "none" }));
+    const res = await request(app).get(`${LIST()}?limit=2&priority=high`);
+    expect(res.body.total).toBe(5);
+    expect(res.body.work_items).toHaveLength(2);
+    expect(res.body.nextCursor).toEqual(expect.any(String));
+  });
+
+  it.each([
+    ["limit=0"],
+    ["limit=501"],
+    ["limit=abc"],
+    ["limit=2.5"],
+    ["limit="],
+    ["per_page=0"],
+    ["per_page=-3"],
+    ["page=0"],
+    ["page=abc"],
+    ["page=100001"],
+    ["cursor="],
+    ["limit=1&limit=2"],
+  ])("rejects out-of-range or non-numeric paging with 400, never a 500: ?%s", async (query) => {
+    const res = await request(app).get(`${LIST()}?${query}`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("invalid_request");
+  });
+
+  it("a cursor and a page together are a 400, not a guess", async () => {
+    seed(5);
+    const first = await request(app).get(`${LIST()}?limit=2`);
+    const res = await request(app).get(`${LIST()}?page=2&cursor=${encodeURIComponent(first.body.nextCursor)}`);
+    expect(res.status).toBe(400);
+  });
+
+  it("a cursor this list did not mint is a 400 invalid_cursor (garbage, and another list's)", async () => {
+    seed(5);
+    const garbage = await request(app).get(`${LIST()}?cursor=not-a-cursor`);
+    expect(garbage.status).toBe(400);
+    expect(garbage.body).toEqual({ error: "invalid_cursor" });
+
+    // A search cursor (an `updatedAt` keyset) handed to the board (a `sortOrder` keyset).
+    const search = await request(app).get(`/api/pm/work-items?q=Item&limit=2`);
+    expect(search.body.nextCursor).toEqual(expect.any(String));
+    const wrong = await request(app).get(`${LIST()}?cursor=${encodeURIComponent(search.body.nextCursor)}`);
+    expect(wrong.status).toBe(400);
+    expect(wrong.body.error).toBe("invalid_cursor");
+  });
+
+  it("the workspace search is a page too: newest change first, cursor-walkable, total exact", async () => {
+    seed(25);
+    const { pages, ids } = await walk(`/api/pm/work-items?q=Item`, "limit=10");
+    expect(pages.map((p) => p.work_items.length)).toEqual([10, 10, 5]);
+    expect(pages.every((p) => p.total === 25)).toBe(true);
+    expect(new Set(ids).size).toBe(25);
+    // newest `updatedAt` first
+    expect(ids[0]).toBe(seedId(25));
+    expect(ids[24]).toBe(seedId(1));
+  });
+
+  it("the search answers 400, not 500, for `?per_page=abc` (it used to reach `take` as NaN)", async () => {
+    const res = await request(app).get(`/api/pm/work-items?q=x&per_page=abc`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("invalid_request");
+  });
+
+  it("an empty search with no filter is an empty last page, with a total of zero", async () => {
+    seed(3);
+    const res = await request(app).get(`/api/pm/work-items?q=`);
+    expect(res.body).toEqual({ work_items: [], nextCursor: null, total: 0 });
+  });
+
+  it("assigned-to-me is a page too, and walks to the end", async () => {
+    seed(12);
+    for (let i = 1; i <= 12; i += 1) {
+      db.assignees.push({ id: `as-${i}`, workItemId: seedId(i), userId: OWNER.id });
+    }
+    const { pages, ids } = await walk(`/api/pm/assigned-to-me`, "limit=5");
+    expect(pages.map((p) => p.work_items.length)).toEqual([5, 5, 2]);
+    expect(pages.every((p) => p.total === 12)).toBe(true);
+    expect(new Set(ids).size).toBe(12);
+    const bad = await request(app).get(`/api/pm/assigned-to-me?cursor=nope`);
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe("invalid_cursor");
   });
 });

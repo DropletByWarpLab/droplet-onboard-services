@@ -18,7 +18,7 @@ import { translateError } from "@/lib/friendly-errors";
 import "./projects.css";
 
 import { PmIcon } from "@/components/projects/icons";
-import { PeopleContext } from "@/components/projects/bits";
+import { ListProgress, PeopleContext } from "@/components/projects/bits";
 import { ProjectsDisabled } from "@/components/projects/ProjectsDisabled";
 import { stageRecordPinHandoff } from "@/lib/pin-handoff";
 import { canWrite, type PmProject, type PmWorkItem } from "@/components/projects/types";
@@ -104,7 +104,15 @@ function ProjectsWorkspace(): JSX.Element {
   // ProjectsWorkspace only mounts behind the `projects` capability gate above.
   const { summary, mutate: mutateSummary } = useSummary(true);
   const { states } = useProjectStates(projectId);
-  const { items, error: itemsErr, isLoading: itemsLoading, mutate: mutateItems } = useProjectItems(projectId);
+  const {
+    items,
+    total,
+    hasMore,
+    loadError,
+    error: itemsErr,
+    isLoading: itemsLoading,
+    mutate: mutateItems,
+  } = useProjectItems(projectId);
   const { departments } = useDepartments();
 
   const project = useMemo(() => projects?.find((p) => p.id === projectId) ?? null, [projects, projectId]);
@@ -126,15 +134,20 @@ function ProjectsWorkspace(): JSX.Element {
     return applySavedView(list, savedView, user?.id);
   }, [allItems, q, department, deptOptions, savedView, user?.id]);
 
+  // WARP-3371 — the pages arrive one after another, so for a moment the view
+  // holds fewer items than the project has. `partial` is that moment, and while
+  // it lasts `all` is the SERVER's exact total (never the length of what has
+  // arrived) and every other count is marked as a floor.
+  const partial = hasMore && total !== undefined && allItems.length < total;
   const counts: Record<SavedView, number> = useMemo(
     () => ({
-      all: allItems.length,
+      all: partial ? (total ?? allItems.length) : allItems.length,
       mine: applySavedView(allItems, "mine", user?.id).length,
       active: applySavedView(allItems, "active", user?.id).length,
       overdue: applySavedView(allItems, "overdue", user?.id).length,
       noassignee: applySavedView(allItems, "noassignee", user?.id).length,
     }),
-    [allItems, user?.id],
+    [allItems, partial, total, user?.id],
   );
 
   const filterActive =
@@ -143,11 +156,15 @@ function ProjectsWorkspace(): JSX.Element {
     ? "loading"
     : itemsErr
       ? "error"
-      : allItems.length === 0
+      : allItems.length === 0 && !partial
         ? "empty"
-        : filtered.length === 0 && filterActive
+        : filtered.length === 0 && filterActive && !partial
           ? "filtered"
-          : "populated";
+          : filtered.length === 0 && partial
+            ? // Nothing in hand matches yet, but more is still on its way: the
+              // honest answer is "still looking", not "no matches".
+              "loading"
+            : "populated";
 
   const refreshAll = () => {
     void mutateProjects();
@@ -267,7 +284,15 @@ function ProjectsWorkspace(): JSX.Element {
                     onDepartment={setDepartment}
                   />
                 </div>
-                <SavedViews active={savedView} onPick={setSavedView} counts={counts} />
+                <SavedViews active={savedView} onPick={setSavedView} counts={counts} partial={partial} />
+                {(partial || loadError) && total !== undefined && (
+                  <ListProgress
+                    shown={allItems.length}
+                    total={total}
+                    failed={Boolean(loadError)}
+                    onRetry={() => void mutateItems()}
+                  />
+                )}
               </div>
             )}
             {(view === "cycles" || view === "modules") && (
@@ -299,13 +324,14 @@ function ProjectsWorkspace(): JSX.Element {
                   items={filtered}
                   domain={boardDomain}
                   readOnly={readOnly}
+                  partial={partial}
                   onOpen={setDrawer}
                   onTransition={onTransition}
                   onNewItem={() => setModal("newitem")}
                 />
               )}
               {view === "list" && (
-                <ListView states={states ?? []} items={filtered} domain={boardDomain} onOpen={setDrawer} />
+                <ListView states={states ?? []} items={filtered} domain={boardDomain} partial={partial} onOpen={setDrawer} />
               )}
               {view === "cycles" && <PlaceholderView kind="cycles" />}
               {view === "modules" && <PlaceholderView kind="modules" />}

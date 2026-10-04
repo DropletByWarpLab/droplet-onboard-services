@@ -31,6 +31,7 @@ import * as pm from "../../services/pm/pm.service.js";
 import { actorOf } from "./actor.js";
 import { listRelationsFor } from "../../services/pm/pm-relations.service.js";
 import { resolveDepartmentFilter } from "../../services/pm/pm-department.js";
+import { parsePaging } from "./paging.js";
 
 
 /** Map a service error code to an HTTP response. Returns true if handled. */
@@ -80,6 +81,11 @@ function mapServiceError(err: unknown, res: Response): boolean {
         message:
           "Another request changed this work item at the same time. Nothing was applied — try again.",
       });
+      return true;
+    case "invalid_cursor":
+      // WARP-3371 — a `cursor` this list did not mint. The caller's mistake,
+      // not a missing row, so 400 rather than a 404 or an empty page.
+      res.status(400).json({ error: msg });
       return true;
     default:
       return false;
@@ -191,16 +197,6 @@ const workItemPatchSchema = z.object({
 
 const transitionSchema = z.object({ state_id: z.string().min(1).max(64) });
 const commentCreateSchema = z.object({ comment_html: z.string().min(1).max(100000) });
-
-// Pagination query params: a non-numeric `per_page` / `page` (e.g. `?per_page=abc`)
-// would coerce to NaN and reach Prisma's `skip`/`take` as NaN → a driver-level
-// crash surfacing as 500. Reject them at the route layer → 400 (review finding:
-// NaN pagination → Prisma crash). `z.coerce.number` turns the query string into
-// a number; `.int().positive()` rejects NaN, floats, and non-positive values.
-const paginationQuerySchema = z.object({
-  per_page: z.coerce.number().int().positive().max(200).optional(),
-  page: z.coerce.number().int().positive().optional(),
-});
 
 const WRITE = ["owner", "admin", "family"] as const;
 
@@ -440,14 +436,11 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
     try {
       const q = req.query;
       // Validate pagination before anything reaches the service/Prisma so a
-      // non-numeric per_page/page returns a clean 400 instead of NaN → 500.
-      const pageParsed = paginationQuerySchema.safeParse({
-        per_page: q.per_page,
-        page: q.page,
-      });
+      // non-numeric limit/page returns a clean 400 instead of NaN → 500.
+      const pageParsed = parsePaging(q);
       if (!pageParsed.success) return badRequest(res, pageParsed);
       const parentRaw = q.parent;
-      const work_items = await pm.listWorkItems(prisma, req.params.id, {
+      const page = await pm.listWorkItems(prisma, req.params.id, {
         stateId: q.state ? String(q.state) : undefined,
         assignee: q.assignee ? String(q.assignee) : undefined,
         labelId: q.label ? String(q.label) : undefined,
@@ -471,10 +464,14 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
           q.department === undefined ? undefined : String(q.department),
         ),
         q: q.q ? String(q.q) : undefined,
-        perPage: pageParsed.data.per_page,
+        limit: pageParsed.data.limit,
+        cursor: pageParsed.data.cursor,
         page: pageParsed.data.page,
       });
-      res.json({ work_items });
+      // WARP-3371 — a page, not a bare array: `nextCursor` is null on the last
+      // page and `total` is the exact size of the filtered set, so a caller can
+      // always tell "that is all of it" from "that is the first 100 of 250".
+      res.json({ work_items: page.items, nextCursor: page.nextCursor, total: page.total });
     } catch (err) {
       if (mapServiceError(err, res)) return;
       next(err);
@@ -516,16 +513,14 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
   // and nothing in the query can change whose items are listed.
   router.get("/pm/assigned-to-me", ownAssignments(), async (req, res, next) => {
     try {
-      const pageParsed = paginationQuerySchema.safeParse({
-        per_page: req.query.per_page,
-        page: req.query.page,
-      });
+      const pageParsed = parsePaging(req.query);
       if (!pageParsed.success) return badRequest(res, pageParsed);
-      const work_items = await pm.listAssignedWorkItems(prisma, String(res.locals.assigneeId), {
-        perPage: pageParsed.data.per_page,
+      const page = await pm.listAssignedWorkItems(prisma, String(res.locals.assigneeId), {
+        limit: pageParsed.data.limit,
+        cursor: pageParsed.data.cursor,
         page: pageParsed.data.page,
       });
-      res.json({ work_items });
+      res.json({ work_items: page.items, nextCursor: page.nextCursor, total: page.total });
     } catch (err) {
       if (mapServiceError(err, res)) return;
       next(err);
@@ -536,10 +531,14 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
   // /:id route — distinct path, no conflict.
   router.get("/pm/work-items", async (req, res, next) => {
     try {
-      const work_items = await pm.searchWorkItems(prisma, {
+      // 🔴 `?per_page=abc` used to reach `take` as NaN here and answer 500.
+      const pageParsed = parsePaging(req.query);
+      if (!pageParsed.success) return badRequest(res, pageParsed);
+      const page = await pm.searchWorkItems(prisma, {
         workspaceSlug: req.query.workspace ? String(req.query.workspace) : undefined,
         q: req.query.q ? String(req.query.q) : "",
-        perPage: req.query.per_page ? Number(req.query.per_page) : undefined,
+        limit: pageParsed.data.limit,
+        cursor: pageParsed.data.cursor,
         // WARP-2719 — this reader is the one that answers "what is Front Desk
         // working on?", a question carrying no search term, so an empty `q`
         // alongside a department is now a real query rather than an empty list.
@@ -550,7 +549,7 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
             : String(req.query.department),
         ),
       });
-      res.json({ work_items });
+      res.json({ work_items: page.items, nextCursor: page.nextCursor, total: page.total });
     } catch (err) {
       // WARP-2719 — see GET /pm/projects. Was a bare `next(err)`.
       if (mapServiceError(err, res)) return;

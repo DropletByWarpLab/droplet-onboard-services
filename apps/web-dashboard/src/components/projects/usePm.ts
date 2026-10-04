@@ -2,7 +2,8 @@
 // against the orchestrator /api/pm/* API, plus people resolution.
 
 import useSWR from "swr";
-import { useCallback, useMemo } from "react";
+import useSWRInfinite from "swr/infinite";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { authFetch } from "@/lib/auth";
 import type { Department } from "@/lib/types";
 import { makePerson } from "./config";
@@ -128,22 +129,137 @@ export function useProjectLabels(projectId: string | null) {
   return { labels: data?.labels };
 }
 
+/** Rows asked for per request. The server's own default is 100 and its ceiling
+ *  500; 200 keeps a 250-item project to two requests without any one response
+ *  getting heavy. */
+export const PAGE_SIZE = 200;
+
+/** One page of a work-item list, exactly as the orchestrator sends it. */
+interface WorkItemsPage {
+  work_items: PmWorkItem[];
+  /** Null on the last page. */
+  nextCursor: string | null;
+  /** The exact size of the whole list, never of this page. */
+  total: number;
+}
+
+/** A tab that regains focus re-reads the list, but never more often than this:
+ *  a re-read walks every page, so it is not free on a big project. */
+const FOCUS_REFRESH_MIN_MS = 30_000;
+
+/**
+ * Re-read the whole chain when the tab regains focus — what `revalidateOnFocus`
+ * did for the single-page list, so a board left open still catches up with what
+ * the rest of the team did. `mutate()` with no argument revalidates EVERY page.
+ */
+function useRefreshOnFocus(enabled: boolean, busy: boolean, mutate: () => Promise<unknown>): void {
+  const lastLoadAt = useRef(Date.now());
+  useEffect(() => {
+    if (!busy) lastLoadAt.current = Date.now();
+  }, [busy]);
+  useEffect(() => {
+    if (!enabled) return;
+    const refresh = () => {
+      if (document.visibilityState === "hidden") return;
+      if (Date.now() - lastLoadAt.current < FOCUS_REFRESH_MIN_MS) return;
+      lastLoadAt.current = Date.now();
+      void mutate();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [enabled, mutate]);
+}
+
+/**
+ * WARP-3371 — EVERY page of a work-item list, loaded progressively.
+ *
+ * The board used to read one page of 100 and stop, with nothing on screen to say
+ * so. This follows `nextCursor` page after page until it is null: the first page
+ * paints as soon as it lands, `total` is the server's exact count (so the view
+ * can say "100 of 250"), and the loop is bounded by the data — a stuck cursor is
+ * impossible because the server only ever hands back a cursor that moves
+ * forward.
+ *
+ * A page after the first that fails does NOT discard the pages already in hand:
+ * `loadError` carries it while `items` keeps rendering, and SWR retries the
+ * failed page on its own backoff. `error` is only the failure of the FIRST page,
+ * i.e. "there is nothing to show".
+ */
+function useWorkItemPages(url: string | null) {
+  const getKey = useCallback(
+    (index: number, previous: WorkItemsPage | null): string | null => {
+      if (!url) return null;
+      const sep = url.includes("?") ? "&" : "?";
+      if (index === 0) return `${url}${sep}limit=${PAGE_SIZE}`;
+      if (!previous?.nextCursor) return null; // the last page has been read
+      return `${url}${sep}limit=${PAGE_SIZE}&cursor=${encodeURIComponent(previous.nextCursor)}`;
+    },
+    [url],
+  );
+  const { data, error, isLoading, isValidating, setSize, mutate } = useSWRInfinite<WorkItemsPage>(
+    getKey,
+    (u: string) => getJson<WorkItemsPage>(u),
+    {
+      // The chain is walked ONE page per `setSize` below. SWR's default re-reads
+      // the first page on every step, which would fetch it once more for each
+      // page that follows it.
+      revalidateFirstPage: false,
+      // …but a chain that is already cached must still be re-read when the
+      // board is opened again.
+      revalidateOnMount: true,
+      // With nothing re-read implicitly any more the stock focus revalidation
+      // would be a no-op; `useRefreshOnFocus` below is the real one.
+      revalidateOnFocus: false,
+    },
+  );
+
+  const pages = data ?? [];
+  const last = pages[pages.length - 1];
+  const hasMore = Boolean(last?.nextCursor);
+
+  // Pull the next page the moment the previous one has landed.
+  useEffect(() => {
+    if (hasMore && !isValidating && !error) void setSize(pages.length + 1);
+  }, [hasMore, isValidating, error, pages.length, setSize]);
+
+  useRefreshOnFocus(url !== null, isValidating, mutate);
+
+  const items = useMemo(() => (data ? data.flatMap((p) => p.work_items) : undefined), [data]);
+
+  /** Revalidate every page; resolves to the fresh, flattened list. */
+  const refresh = useCallback(async (): Promise<{ work_items: PmWorkItem[] } | undefined> => {
+    const fresh = await mutate();
+    return fresh ? { work_items: fresh.flatMap((p) => p.work_items) } : undefined;
+  }, [mutate]);
+
+  return {
+    items,
+    total: last?.total,
+    /** More pages are still on the way. */
+    hasMore,
+    loadError: pages.length > 0 ? (error as Error | undefined) : undefined,
+    error: pages.length === 0 ? error : undefined,
+    isLoading,
+    mutate: refresh,
+  };
+}
+
 export function useProjectItems(projectId: string | null) {
   const url = projectId ? `/api/pm/projects/${projectId}/work-items` : null;
-  const { data, error, isLoading, mutate } = useSWR(url, (u: string) =>
-    getJson<{ work_items: PmWorkItem[] }>(u),
-  );
-  return { items: data?.work_items, error, isLoading, mutate, key: url };
+  return { ...useWorkItemPages(url), key: url };
 }
 
 export function useSubIssues(projectId: string | null, parentId: string | null) {
-  const { data } = useSWR(
+  const { items } = useWorkItemPages(
     projectId && parentId
       ? `/api/pm/projects/${projectId}/work-items?parent=${encodeURIComponent(parentId)}`
       : null,
-    (u: string) => getJson<{ work_items: PmWorkItem[] }>(u),
   );
-  return { subIssues: data?.work_items };
+  return { subIssues: items };
 }
 
 export function useComments(workItemId: string | null) {
