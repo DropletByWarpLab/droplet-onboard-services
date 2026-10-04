@@ -162,6 +162,13 @@ describe("POST /api/cameras/clips/share — first (unconfirmed) call", () => {
       .send({ nc_path: "/Clips/../../etc/passwd" });
     expect(res.status).toBe(400);
   });
+
+  it("rejects a path outside the clips folder before minting any token (400)", async () => {
+    for (const nc_path of ["/Documents/payroll.pdf", "/Clipsy/x.mp4", "/Clips"]) {
+      const res = await request(buildApp(owner)).post("/api/cameras/clips/share").send({ nc_path });
+      expect(res.status, nc_path).toBe(400);
+    }
+  });
 });
 
 describe("POST /api/cameras/clips/share — confirmation re-issue", () => {

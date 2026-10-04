@@ -43,6 +43,9 @@ import { ViewSwitcher, SavedViews, FilterBar, type ProjectView, type SavedView }
 import { DetailDrawer } from "@/components/projects/detail";
 import { InsightsView } from "@/components/projects/insights/InsightsView";
 import { useInsightsDeepLink, useSyncInsightsParam } from "@/components/projects/insights/deepLink";
+import { CalendarView } from "@/components/projects/calendar/CalendarView";
+import { TimelineView } from "@/components/projects/timeline/TimelineView";
+import { MyWorkView } from "@/components/projects/mywork/MyWorkView";
 import { NewItemModal, NewProjectModal } from "@/components/projects/modals";
 
 function matchQuery(item: PmWorkItem, q: string): boolean {
@@ -94,7 +97,8 @@ function ProjectsWorkspace(): JSX.Element {
 
   // WARP-3524 — `/projects?view=insights` opens the workspace-level Insights.
   const insightsLink = useInsightsDeepLink();
-  const [view, setView] = useState<ProjectView | "index">(insightsLink ? "insights" : "index");
+  // `my-work` is cross-project (WARP-3523), so it is not a ProjectView tab.
+  const [view, setView] = useState<ProjectView | "index" | "my-work">(insightsLink ? "insights" : "index");
   const [projectId, setProjectId] = useState<string | null>(null);
   const [savedView, setSavedView] = useState<SavedView>("all");
   const [q, setQ] = useState("");
@@ -160,6 +164,23 @@ function ProjectsWorkspace(): JSX.Element {
           ? "filtered"
           : "populated";
 
+  // WARP-3523 — what the timeline needs from the page's filters: the ids they
+  // admit (null = no filter, show everything it returns), and a revision that
+  // changes when the board data does, so an edit in the drawer reaches it.
+  const visibleIds = useMemo(
+    () => (filterActive ? new Set(filtered.map((i) => i.id)) : null),
+    [filtered, filterActive],
+  );
+  const itemsRevision = useMemo(
+    () => `${allItems.length}:${allItems.reduce((m, i) => (i.updatedAt > m ? i.updatedAt : m), "")}`,
+    [allItems],
+  );
+  const refreshAfterSchedule = async () => {
+    await mutateItems();
+    void mutateProjects();
+    void mutateSummary();
+  };
+
   const refreshAll = () => {
     void mutateProjects();
     void mutateSummary();
@@ -201,18 +222,20 @@ function ProjectsWorkspace(): JSX.Element {
     }
   };
 
-  const isProjectView = view === "board" || view === "list";
+  const isProjectView = view === "board" || view === "list" || view === "calendar" || view === "timeline";
 
   const headerTitle =
-    view === "index" ? "Projects" : project?.name ?? "Projects";
+    view === "index" ? "Projects" : view === "my-work" ? "My work" : project?.name ?? "Projects";
   const headerSub =
     view === "index"
       ? `${summary?.activeProjects ?? projects?.filter((p) => !p.archived).length ?? 0} projects · ${summary?.itemsOpen ?? 0} items open`
-      : project
-        ? `${project.openCount} open · ${project.doneCount} done`
-        : view === "insights"
+      : view === "my-work"
+        ? "Your open work across every project"
+        : view === "insights" && !project
           ? "Insights across all projects"
-          : undefined;
+          : project
+            ? `${project.openCount} open · ${project.doneCount} done`
+            : undefined;
 
   const actions = view === "index" ? (
       <>
@@ -223,6 +246,9 @@ function ProjectsWorkspace(): JSX.Element {
         )}
         <button className="btn" type="button" onClick={openInsights}>
           <PmIcon name="chart" size={14} /> Insights
+        </button>
+        <button className="btn" type="button" onClick={() => setView("my-work")}>
+          <PmIcon name="user" size={14} /> My work
         </button>
         <button className="btn" type="button" onClick={refreshAll} aria-label="Refresh">
           <PmIcon name="refresh" size={15} />
@@ -259,9 +285,11 @@ function ProjectsWorkspace(): JSX.Element {
             <PmIcon name="plus" size={14} /> New item
           </button>
         )}
-        <button className="btn" type="button" onClick={refreshAll} aria-label="Refresh">
-          <PmIcon name="refresh" size={15} />
-        </button>
+        {view !== "my-work" && (
+          <button className="btn" type="button" onClick={refreshAll} aria-label="Refresh">
+            <PmIcon name="refresh" size={15} />
+          </button>
+        )}
       </>
     );
 
@@ -328,6 +356,29 @@ function ProjectsWorkspace(): JSX.Element {
               {view === "list" && (
                 <ListView states={states ?? []} items={filtered} domain={boardDomain} onOpen={setDrawer} />
               )}
+              {view === "calendar" && (
+                <CalendarView
+                  items={filtered}
+                  domain={boardDomain}
+                  readOnly={readOnly}
+                  onOpen={setDrawer}
+                  onChanged={refreshAfterSchedule}
+                  onNewItem={() => setModal("newitem")}
+                />
+              )}
+              {view === "timeline" && project && (
+                <TimelineView
+                  projectId={project.id}
+                  visibleIds={visibleIds}
+                  revision={itemsRevision}
+                  domain={boardDomain}
+                  readOnly={readOnly}
+                  onOpen={setDrawer}
+                  onChanged={refreshAfterSchedule}
+                  onNewItem={() => setModal("newitem")}
+                />
+              )}
+              {view === "my-work" && <MyWorkView />}
               {view === "cycles" && <PlaceholderView kind="cycles" />}
               {view === "modules" && <PlaceholderView kind="modules" />}
               {view === "insights" && <InsightsView projectId={projectId} />}

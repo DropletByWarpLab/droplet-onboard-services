@@ -23,10 +23,10 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import { isCalendarYmd } from "../../lib/zoned-time.js";
 import { PM_ERRORS } from "../../services/pm/pm.service.js";
 import {
   getInsights,
+  isInsightsDate,
   INSIGHTS_ERRORS,
   INSIGHTS_GROUP_BY,
 } from "../../services/pm/pm-insights.service.js";
@@ -35,7 +35,7 @@ import {
 const ymd = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/)
-  .refine(isCalendarYmd, "not a calendar date");
+  .refine(isInsightsDate, "date is outside the supported range");
 
 // Every field is a bare string. Express hands `?from=a&from=b` over as an
 // array, which fails `z.string()` and so is a 400 rather than a coerced guess.

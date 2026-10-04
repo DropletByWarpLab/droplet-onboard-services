@@ -88,6 +88,15 @@ describe("resolveInsightsRange (WARP-3524)", () => {
       INSIGHTS_ERRORS.INVALID_RANGE,
     );
   });
+
+  it("refuses years Date.UTC would remap into 1900–1999", () => {
+    expect(() => resolveInsightsRange({ from: "0001-01-01", groupBy: "day" }, TODAY)).toThrow(
+      INSIGHTS_ERRORS.INVALID_RANGE,
+    );
+    expect(() => resolveInsightsRange({ from: "0099-12-31", groupBy: "day" }, TODAY)).toThrow(
+      INSIGHTS_ERRORS.INVALID_RANGE,
+    );
+  });
 });
 
 describe("resolveInsightsZone (WARP-3524)", () => {
@@ -106,7 +115,10 @@ describe("resolveInsightsZone (WARP-3524)", () => {
   it("falls back to UTC, and UTC's day, when Postgres does not recognise the zone", async () => {
     // Node and Postgres ship their own time zone tables, and Workspace.tz is stored unchecked.
     const prisma = prismaWhere(async () => {
-      throw new Error('time zone "America/Coyhaique" not recognized');
+      throw Object.assign(new Error('Raw query failed. Code: `22023`. Message: `time zone "America/Coyhaique" not recognized`'), {
+        code: "P2010",
+        meta: { code: "22023" },
+      });
     });
     expect(await resolveInsightsZone(prisma, NOW, "America/Los_Angeles")).toEqual({
       zone: "UTC",
@@ -119,5 +131,19 @@ describe("resolveInsightsZone (WARP-3524)", () => {
       throw new Error("must not be called");
     });
     expect(await resolveInsightsZone(prisma, NOW, "UTC")).toEqual({ zone: "UTC", today: "2026-10-04" });
+  });
+
+  it("does not pass offset strings through ICU/Postgres with different meanings", async () => {
+    const prisma = prismaWhere(async () => [{}]);
+    const result = await resolveInsightsZone(prisma, NOW, "+05:30");
+    expect(result.zone).not.toBe("+05:30");
+    expect(result.today).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it("only falls back when Postgres rejects the time zone itself", async () => {
+    const transient = prismaWhere(async () => {
+      throw Object.assign(new Error("pool timeout"), { code: "P2010", meta: { code: "57014" } });
+    });
+    await expect(resolveInsightsZone(transient, NOW, "America/Los_Angeles")).rejects.toThrow("pool timeout");
   });
 });

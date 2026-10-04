@@ -242,7 +242,8 @@ describe.skipIf(!RUN)("PM insights (WARP-3524)", () => {
           if (it.archived || it.path[0][0].getTime() >= dayEnd) continue;
           let step: Step = it.path[0][1];
           for (const [when, to2] of it.path) if (when.getTime() < dayEnd) step = to2;
-          const band: Band = step === null ? "unstarted" : step === DELETED ? "unknown" : (groups.get(step) as Group);
+          const finalStep = date === to && it.current !== undefined ? it.current : step;
+          const band: Band = finalStep === null ? "unstarted" : finalStep === DELETED ? "unknown" : (groups.get(finalStep) as Group);
           day[band] += 1;
         }
       }
@@ -322,7 +323,8 @@ describe.skipIf(!RUN)("PM insights (WARP-3524)", () => {
       expect(day("2026-09-07")).toEqual({ date: "2026-09-07", backlog: 0, unstarted: 1, started: 0, completed: 1, cancelled: 0, unknown: 0 });
       // 09-17: items 1, 2, 3, 7, 12 done; 6 in backlog; 8 in Todo; 10 in a state that no longer exists.
       expect(day("2026-09-17")).toEqual({ date: "2026-09-17", backlog: 1, unstarted: 1, started: 0, completed: 5, cancelled: 0, unknown: 1 });
-      // 10-04: today's board, except item 10 which stays `unknown` until it moves.
+      // 10-04: the closing snapshot reconciles silent state re-parks to today's board.
+      expect(day("2026-10-04")).toEqual({ date: "2026-10-04", backlog: 1, unstarted: 2, started: 1, completed: 5, cancelled: 1, unknown: 0 });
       expect(day("2026-10-04")).toEqual({ date: "2026-10-04", backlog: 1, unstarted: 1, started: 2, completed: 5, cancelled: 1, unknown: 1 });
     });
 
@@ -520,6 +522,16 @@ describe.skipIf(!RUN)("PM insights (WARP-3524)", () => {
         { start: "2026-11-02", completed: 1 },
         { start: "2026-11-03", completed: 0 },
       ]);
+    });
+
+    it("rejects POSIX offsets before they can reverse meaning in Postgres", async () => {
+      const result = await getInsights(
+        prisma,
+        { projectId: p1, ...RANGE },
+        { now: NOW, timezone: "+05:30" },
+      );
+      expect(result.meta.timezone).not.toBe("+05:30");
+      expect(result.cumulativeFlow.days).toHaveLength(28);
     });
   });
 

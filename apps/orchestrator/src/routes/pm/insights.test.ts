@@ -90,6 +90,7 @@ describe("GET /api/pm/insights", () => {
     ["an unknown bucket size", { groupBy: "year" }],
     ["a malformed date", { from: "07/09/2026" }],
     ["a date that is not on the calendar", { to: "2026-02-30" }],
+    ["a date before the supported year range", { from: "0001-01-01" }],
     ["an empty project id", { projectId: "" }],
     ["a project id over 64 characters", { projectId: "x".repeat(65) }],
   ])("answers 400 for %s, before the service runs", async (_label, query) => {

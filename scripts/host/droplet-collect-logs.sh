@@ -112,9 +112,19 @@ redact() {
   # token replaced, so the line still says what was requested.
   # Mirrors the `richdocuments-direct-token` rule in log-redaction.ts — keep
   # the two in sync.
+  # WARP-3572 (defence in depth; the primary control is that the key never
+  # reaches an unattended service's stdout): a systemd LUKS recovery key is 64
+  # modhex chars from `cbdefghijklnrtuv` (systemd src/shared/recovery-key.c),
+  # printed as eight dash-separated groups of eight, also accepted dash-less
+  # and in upper case. Boundaries are explicit (start/end of line or a
+  # character outside the alphabet) because `\b` is a GNU extension and treats
+  # `_`/digits as word characters. The `:rk`/`trk` loop re-runs the
+  # substitution so two keys sharing one boundary character both go. Mirrors
+  # the `luks-recovery-key` rule in log-redaction.ts - keep the two in sync.
   sed -E \
     -e '/-----BEGIN [A-Z ]*PRIVATE KEY-----/,/-----END [A-Z ]*PRIVATE KEY-----/c\'"$REDACT_PLACEHOLDER (private key)" \
     -e 's@((/index\.php)?/apps/richdocuments/direct/)[^[:space:]"'"'"'?#]+@\1'"$REDACT_PLACEHOLDER"'@gI' \
+    -e ':rk' -e 's/(^|[^cbdefghijklnrtuvCBDEFGHIJKLNRTUV])([cbdefghijklnrtuvCBDEFGHIJKLNRTUV]{8}(-?[cbdefghijklnrtuvCBDEFGHIJKLNRTUV]{8}){7})([^cbdefghijklnrtuvCBDEFGHIJKLNRTUV]|$)/\1'"$REDACT_PLACEHOLDER"'\4/' -e 'trk' \
     -e 's/(\bBearer[[:space:]]+)[A-Za-z0-9._+/=-]{8,}/\1'"$REDACT_PLACEHOLDER"'/g' \
     -e 's/((X-Droplet-Auth|X-Nextcloud-Token|Authorization|X-Api-Key|X-Auth-Token|Proxy-Authorization)[[:space:]]*[:=][[:space:]]*)((Basic|Bearer|Token)[[:space:]]+[^[:space:]",;]+|[^[:space:]",;]{6,})/\1'"$REDACT_PLACEHOLDER"'/gI' \
     -e 's/(([A-Za-z][A-Za-z0-9+.-]*):\/\/[^[:space:]:\/@]*:)[^[:space:]@\/]+(@)/\1'"$REDACT_PLACEHOLDER"'\3/g' \

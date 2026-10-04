@@ -170,6 +170,7 @@ const PM_ROUTES = [
   ["get", "/api/pm/workspaces"],
   ["get", "/api/pm/workspaces/default"],
   ["get", "/api/pm/summary"],
+  ["get", "/api/pm/insights"],
   ["patch", "/api/pm/states/s1"],
   ["patch", "/api/pm/labels/l1"],
   // routes/mobile/pm.ts — the same pm.service.ts reads behind a role check,

@@ -129,6 +129,27 @@ dev-only escape hatch so `uvicorn main:app` starts against a bare repo
 (set `OPS_TOKEN` yourself to get a usable bearer); on a real device
 `./scripts/setup.sh` always provisions a stable value.
 
+### Support window expiry (WARP-3641)
+
+Set `OPS_ACCESS_EXPIRES_AT` (ISO-8601, e.g. `2026-10-04T18:00:00Z`; no zone
+means UTC) when enabling the `ops` profile for an engagement. After that
+moment every `/ops/*` request gets `403 Support access window has ended`, even
+with the right token, until the value is changed and the container is
+recreated (`docker compose up -d --force-recreate ops-console`; a plain
+restart does not re-read the compose environment). Empty or unset means no
+expiry. A value that does not parse closes the window instead of leaving it
+open. Each container start writes a `START` line to the audit log naming the
+deadline it runs under.
+
+Not done yet, by design (see WARP-3641): per-operator identity (every audit
+line still says `support`), rotating `OPS_TOKEN` at the end of a session,
+writing "support session opened/closed" rows into the customer's activity
+chain, shipping this audit file off the box, and replacing the raw
+`docker.sock` mount with a socket proxy that allows only list, inspect, logs
+and restart for labelled containers. The socket cannot simply be mounted
+read-only: restarting a container is a POST to the Docker API, and a `:ro`
+bind mount of a Unix socket does not restrict the API anyway.
+
 ## Audit log
 
 Every `/ops/*` request is recorded as one JSONL line in

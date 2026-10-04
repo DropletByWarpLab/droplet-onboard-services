@@ -35,15 +35,16 @@
  *  `state_changed` rows store the OLD and NEW state ids, and `created` rows
  *  store nothing about the landing state. So an item's timeline is: the state it
  *  was created in (the old value of its FIRST state change, or its current state
- *  if it never changed), then each state change's new value in time order. Each
- *  stretch between two changes puts the item in exactly one group, so every item
- *  is in exactly one band every day and the bands always add up.
+ *  if it never changed), then each state change's new value in time order. When
+ *  that replay disagrees with the live row, a closing step at `now` reconciles
+ *  today's snapshot; earlier history remains as recorded. Each stretch between
+ *  two steps puts the item in exactly one group, so the bands always add up.
  *
  *  What that cannot know, stated rather than guessed:
  *   - A state that has since been deleted no longer resolves to a group. Its
- *     stretch is reported as `unknown`. `deleteState` re-parents the items to the
- *     default state without writing an activity row, so an item that was parked
- *     in a deleted state stays `unknown` until its next real move.
+ *     recorded stretch is reported as `unknown`. `deleteState` re-parents items
+ *     without writing an activity row, so the closing snapshot can reconcile the
+ *     current state but cannot reconstruct which earlier day that re-parent happened.
  *   - A state whose group was edited is read through its CURRENT group; history
  *     is not re-interpreted as it was at the time.
  *   - Items that were hard-deleted take their activity with them and are absent
@@ -66,7 +67,9 @@
 
 import type { PrismaClient } from "@prisma/client";
 import {
+  canonicalZone,
   isCalendarYmd,
+  isValidIanaZone,
   isoWeekdayOf,
   parseYmd,
   ymdAddDays,
@@ -90,6 +93,8 @@ export const INSIGHTS_ERRORS = {
 export const INSIGHTS_DEFAULT_DAYS = 84;
 /** The longest range accepted (days). The cumulative flow is one point per day. */
 export const INSIGHTS_MAX_DAYS = 366;
+/** Date.UTC maps years 1–99 onto 1901–1999, so Insights refuses those labels. */
+export const INSIGHTS_MIN_YEAR = 100;
 export const INSIGHTS_CACHE_TTL_MS = 5 * 60 * 1000;
 const INSIGHTS_CACHE_MAX_ENTRIES = 64;
 /** Histogram edges for cycle and lead time, in days: under 1, 1–2, 2–4, 4–7, 7–14, 14–30, 30 or more. */
@@ -219,7 +224,7 @@ export function resolveInsightsRange(
   today: string,
 ): { from: string; to: string } {
   for (const ymd of [input.from, input.to]) {
-    if (ymd !== undefined && !isCalendarYmd(ymd)) throw new Error(INSIGHTS_ERRORS.INVALID_RANGE);
+    if (ymd !== undefined && (!isInsightsDate(ymd))) throw new Error(INSIGHTS_ERRORS.INVALID_RANGE);
   }
   let to = input.to ?? today;
   if (to > today) to = today;
@@ -229,6 +234,10 @@ export function resolveInsightsRange(
     throw new Error(INSIGHTS_ERRORS.INVALID_RANGE);
   }
   return { from: bucketStart(requestedFrom, input.groupBy), to };
+}
+
+export function isInsightsDate(ymd: string): boolean {
+  return isCalendarYmd(ymd) && Number(ymd.slice(0, 4)) >= INSIGHTS_MIN_YEAR;
 }
 
 // ── Row shapes of the raw queries ───────────────────────────────────────────
@@ -298,18 +307,23 @@ async function resolveScope(
  * The zone the buckets are cut in, and that zone's calendar day. Postgres does the
  * bucketing, so it has to understand the zone as well as Node does. They ship their
  * own time zone tables, and `Workspace.tz` is whatever setup stored (any string up
- * to 64 characters, checked against neither), so a zone one knows and the other does
- * not is possible. That is not worth a 500 on a charts page: fall back to UTC, which
- * `meta.timezone` then reports.
+ * to 64 characters, checked against neither). Normalize only ICU-accepted IANA
+ * names before passing one to PostgreSQL; raw offsets and abbreviations can mean
+ * different instants there. A zone missing from PostgreSQL falls back to UTC.
  */
 export async function resolveInsightsZone(
   prisma: PrismaClient,
   now: Date,
   preferred: string | null,
 ): Promise<{ zone: string; today: string }> {
-  const wanted = localDayInZone(now, preferred);
-  if (wanted.zone === "UTC" || (await databaseKnowsZone(prisma, wanted.zone))) {
-    return { zone: wanted.zone, today: wanted.date };
+  // PostgreSQL accepts POSIX offsets and abbreviations whose meanings differ
+  // from ICU. Only pass canonical IANA names into its time-zone tables.
+  const candidate = isValidIanaZone(preferred) ? canonicalZone(preferred) : null;
+  const wanted = localDayInZone(now, candidate);
+  const zone = isValidIanaZone(wanted.zone) ? canonicalZone(wanted.zone) : "UTC";
+  const today = localDayInZone(now, zone).date;
+  if (zone === "UTC" || (await databaseKnowsZone(prisma, zone))) {
+    return { zone, today };
   }
   return { zone: "UTC", today: localDayInZone(now, "UTC").date };
 }
@@ -318,10 +332,12 @@ async function databaseKnowsZone(prisma: PrismaClient, zone: string): Promise<bo
   try {
     await prisma.$queryRaw`SELECT now() AT TIME ZONE ${zone}`;
     return true;
-  } catch {
-    // Postgres raises `time zone "…" not recognized`. Any other failure (the
-    // connection) is raised again, properly, by the queries that follow.
-    return false;
+  } catch (error) {
+    const failure = error as { meta?: { code?: unknown }; message?: unknown };
+    if (failure.meta?.code === "22023" || /time zone .* not recognized/i.test(String(failure.message ?? ""))) {
+      return false;
+    }
+    throw error;
   }
 }
 
@@ -416,13 +432,27 @@ async function computeInsights(
           UNION ALL
           SELECT item, ts, rn AS ord, new_state FROM changes
         ),
+        last_state AS (
+          SELECT DISTINCT ON (item) item, state_id
+            FROM steps
+           ORDER BY item, ts DESC, ord DESC
+        ),
+        reconciled_steps AS (
+          SELECT item, ts, ord, state_id FROM steps
+          UNION ALL
+          SELECT i.id AS item, ${now.toISOString()}::timestamp AS ts,
+                 2147483647 AS ord, i."stateId" AS state_id
+            FROM items i
+            JOIN last_state ls ON ls.item = i.id
+           WHERE ls.state_id IS DISTINCT FROM i."stateId"
+        ),
         segments AS (
           SELECT s.item, s.ts AS seg_start,
                  lead(s.ts) OVER (PARTITION BY s.item ORDER BY s.ts, s.ord) AS seg_end,
                  CASE WHEN s.state_id IS NULL THEN 'unstarted'
                       WHEN st.id IS NULL THEN 'unknown'
                       ELSE st."group"::text END AS grp
-            FROM steps s
+            FROM reconciled_steps s
             LEFT JOIN "PmState" st ON st.id = s.state_id
         ),
         events AS (
