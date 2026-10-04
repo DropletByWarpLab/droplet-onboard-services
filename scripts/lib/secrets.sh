@@ -484,6 +484,13 @@ generate_env() {
   # WARP-234: per-service Redis ACL identities (least privilege; the shared
   # REDIS_PASSWORD becomes the ping-only `default` user for health probes).
   local redis_orchestrator_password redis_ai_gateway_password redis_mcp_password
+  # WARP-3605: the Nextcloud ACL user gets its own value. Sharing REDIS_PASSWORD
+  # gave the ping-only `default` user and the keyspace-wide `nextcloud` user the
+  # same password, so anyone holding the default credential could AUTH as nextcloud.
+  # Alphanumeric via _gen_password: it is interpolated into PHP's
+  # session.save_path (docs/security/redis-tls-acl.md).
+  local redis_nextcloud_password
+  redis_nextcloud_password=$(_gen_password 24)
   redis_orchestrator_password=$(_gen_password 24)
   redis_ai_gateway_password=$(_gen_password 24)
   redis_mcp_password=$(_gen_password 24)
@@ -774,8 +781,9 @@ REDIS_URL=rediss://:${redis_password}@cache:6380
 REDIS_PASSWORD_ORCHESTRATOR=$redis_orchestrator_password
 REDIS_PASSWORD_AI_GATEWAY=$redis_ai_gateway_password
 REDIS_PASSWORD_MCP=$redis_mcp_password
-# Nextcloud expects this name for the Redis password (ACL user \`nextcloud\`)
-REDIS_HOST_PASSWORD=$redis_password
+# Nextcloud expects this name for the Redis password (ACL user \`nextcloud\`).
+# Distinct from REDIS_PASSWORD on purpose (WARP-3605).
+REDIS_HOST_PASSWORD=$redis_nextcloud_password
 
 # --- MQTT (WARP-235: mTLS, no shared password — identity = client cert CN) ---
 MQTT_BROKER=mqtts://broker:8883
@@ -1521,6 +1529,24 @@ migrate_env() {
   _migrate_ensure_key REDIS_PASSWORD_ORCHESTRATOR "$(_gen_password 24)"
   _migrate_ensure_key REDIS_PASSWORD_AI_GATEWAY "$(_gen_password 24)"
   _migrate_ensure_key REDIS_PASSWORD_MCP "$(_gen_password 24)"
+  # WARP-3605: REDIS_HOST_PASSWORD (ACL user `nextcloud`) used to be written
+  # equal to REDIS_PASSWORD (ACL user `default`, ping-only), so the default
+  # credential could AUTH as nextcloud. Give any box that still shares them a
+  # distinct value; a distinct (or operator-set) value is never touched. The
+  # regenerated users.acl + the new nextcloud env only take effect on a
+  # recreate of `cache` and `nextcloud` (docs/security/redis-tls-acl.md); the
+  # Redis keyspace (sessions) is AOF-persisted and keyed independently of this
+  # password, so sessions survive the rotation.
+  local _rhp_now _rp_now
+  _rhp_now="$(grep -E '^REDIS_HOST_PASSWORD=' "$stage" | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+  _rp_now="$(grep -E '^REDIS_PASSWORD=' "$stage" | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+  if [ -n "$_rp_now" ] && [ "$_rhp_now" = "$_rp_now" ]; then
+    { grep -vE '^REDIS_HOST_PASSWORD=' "$stage" || true; } > "$stage.rhp"
+    chmod 600 "$stage.rhp"
+    mv "$stage.rhp" "$stage"
+    log_info "Migrated .env: REDIS_HOST_PASSWORD no longer shares REDIS_PASSWORD (WARP-3605); recreate cache + nextcloud to apply"
+  fi
+  _migrate_ensure_key REDIS_HOST_PASSWORD "$(_gen_password 24)"
   # Upgrade the exact legacy plaintext REDIS_URL shape to the TLS listener.
   # Only the default-user URL is rewritten (operators with custom URLs keep
   # theirs); real clients get per-service URLs from docker-compose.yml.
@@ -1943,17 +1969,33 @@ _generate_redis_acl() {
     return 0
   fi
   # Pre-WARP-234 .env (fresh generate_env always sets these; migrate_env
-  # backfills on upgrade). Nextcloud reuses REDIS_HOST_PASSWORD.
+  # backfills on upgrade). Nextcloud uses REDIS_HOST_PASSWORD.
   local orch_pw="${REDIS_PASSWORD_ORCHESTRATOR:-}"
   local aigw_pw="${REDIS_PASSWORD_AI_GATEWAY:-}"
   local mcp_pw="${REDIS_PASSWORD_MCP:-}"
-  local nc_pw="${REDIS_HOST_PASSWORD:-$REDIS_PASSWORD}"
-  if [ -z "$orch_pw" ] || [ -z "$aigw_pw" ] || [ -z "$mcp_pw" ]; then
+  local nc_pw="${REDIS_HOST_PASSWORD:-}"
+  if [ -z "$orch_pw" ] || [ -z "$aigw_pw" ] || [ -z "$mcp_pw" ] || [ -z "$nc_pw" ]; then
     log_warn "Per-service Redis passwords missing from .env — skipping ACL generation (run setup.sh to migrate .env first)"
     return 0
   fi
 
   _redis_sha() { printf '%s' "$1" | openssl dgst -sha256 -hex | sed 's/^.*= //'; }
+
+  # WARP-3605: Redis authenticates each username/password pair on its own, so
+  # two users sharing a password share a hash and either password opens both
+  # accounts. Refuse to write an ACL where any two users collide.
+  local _acl_hashes _dup
+  _acl_hashes="$(printf '%s\n' \
+    "default $(_redis_sha "$REDIS_PASSWORD")" \
+    "orchestrator $(_redis_sha "$orch_pw")" \
+    "ai-gateway $(_redis_sha "$aigw_pw")" \
+    "mcp-server $(_redis_sha "$mcp_pw")" \
+    "nextcloud $(_redis_sha "$nc_pw")")"
+  _dup="$(printf '%s\n' "$_acl_hashes" | awk '{ if ($2 in seen) print seen[$2] " and " $1; else seen[$2] = $1 }')"
+  if [ -n "$_dup" ]; then
+    log_error "Redis ACL users share a password (hash collision: $_dup) — each ACL user needs its own .env password; refusing to write users.acl"
+    return 1
+  fi
 
   mkdir -p "$acl_dir"
   chmod 700 "$REPO_ROOT/data/secrets" "$acl_dir" 2>/dev/null || true

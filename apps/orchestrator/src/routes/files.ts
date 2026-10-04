@@ -38,6 +38,7 @@ import {
   ncListMyShares,
   ncGetShare,
   ncDirExists,
+  ncIsDirectory,
   ncCommitUpload,
   ncDiscardUpload,
   type NcWriteOutcome,
@@ -68,11 +69,17 @@ import {
 import { readUserEmail } from "../services/user-directory.service.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import {
+  defaultPublicLinkExpiry,
   exposesOutside,
+  isPublicLinkType,
   isWorkspacePath,
   libraryOfHomePath,
   mayCreatePublicLink,
+  memberPublicLinkWriteRefused,
+  PUBLIC_LINK_EDIT_REFUSAL,
   PUBLIC_LINK_REFUSAL,
+  publicLinkExpiryViolation,
+  publicLinkPasswordViolation,
   WORKSPACE_SHARE_REFUSAL,
   type ShareLibrary,
 } from "../services/share-policy.js";
@@ -3066,6 +3073,27 @@ export function createFilesRouter(
     res.status(403).json(WORKSPACE_SHARE_REFUSAL);
   }
 
+  /**
+   * WARP-3586: the member write cap on a public link. A folder is looked up
+   * only when the update bit is set (create/delete are refused outright), and
+   * an unanswerable lookup is treated as a folder: fail closed.
+   */
+  async function memberLinkWriteRefused(
+    req: Request,
+    role: string | undefined,
+    token: string,
+    path: string,
+    permissions: number,
+  ): Promise<boolean> {
+    if (memberPublicLinkWriteRefused(role, permissions, false)) return true;
+    if (!memberPublicLinkWriteRefused(role, permissions, true)) return false;
+    try {
+      return await ncIsDirectory(token, await getUser(req, prisma), path);
+    } catch {
+      return true;
+    }
+  }
+
   // ── Create a share link ──
   //
   // Accepts the full ShareCreateOptions surface (shareType / permissions /
@@ -3159,10 +3187,30 @@ export function createFilesRouter(
         }
       }
 
+      // WARP-3586: what a public link may be, for every caller. Always an
+      // expiry (30 days when none is sent, never beyond 90), a password of 8+
+      // characters when one is set, and no member write access for anonymous
+      // holders of a folder link.
+      let expireDate = parsed.data.expireDate;
+      if (isPublicLinkType(parsed.data.shareType)) {
+        expireDate ??= defaultPublicLinkExpiry();
+        const violation =
+          publicLinkExpiryViolation(expireDate) ?? publicLinkPasswordViolation(parsed.data.password);
+        if (violation) {
+          res.status(400).json(violation);
+          return;
+        }
+        if (await memberLinkWriteRefused(req, role, shareToken, targetPath, parsed.data.permissions)) {
+          recordAccessDenied(req, "public-link-member-write");
+          res.status(403).json(PUBLIC_LINK_EDIT_REFUSAL);
+          return;
+        }
+      }
+
       const share = await ncCreateShareV2(shareToken, targetPath, {
         shareType: parsed.data.shareType,
         permissions: parsed.data.permissions,
-        expireDate: parsed.data.expireDate,
+        expireDate,
         password: parsed.data.password,
         note: parsed.data.note,
         shareWith: parsed.data.shareWith,
@@ -3193,7 +3241,7 @@ export function createFilesRouter(
           shareType: parsed.data.shareType,
           permissions: parsed.data.permissions,
           shareWith: parsed.data.shareWith ?? null,
-          expireDate: parsed.data.expireDate ?? null,
+          expireDate: expireDate ?? null,
           passwordProtected: parsed.data.password !== undefined,
           departmentId: departmentId ?? null,
         },
@@ -4222,6 +4270,43 @@ export function createFilesRouter(
         ) {
           refusePublicLink(req, res);
           return;
+        }
+      }
+
+      // WARP-3586: the create-time public-link rules hold on update too, or a
+      // compliant link could be edited into a permanent, passwordless or
+      // writable one. Only fetched when a policed field is being changed.
+      if (
+        parsed.data.permissions !== undefined ||
+        parsed.data.password !== undefined ||
+        parsed.data.expireDate !== undefined
+      ) {
+        const current = await ncGetShare(token, shareId);
+        const linkType = auth.deptRow?.shareType ?? current?.shareType;
+        if (linkType !== undefined && isPublicLinkType(linkType)) {
+          const violation =
+            (parsed.data.expireDate !== undefined
+              ? publicLinkExpiryViolation(parsed.data.expireDate)
+              : null) ?? publicLinkPasswordViolation(parsed.data.password);
+          if (violation) {
+            res.status(400).json(violation);
+            return;
+          }
+          if (
+            parsed.data.permissions !== undefined &&
+            current &&
+            (await memberLinkWriteRefused(
+              req,
+              req.user?.role,
+              token,
+              current.path,
+              parsed.data.permissions,
+            ))
+          ) {
+            recordAccessDenied(req, "public-link-member-write");
+            res.status(403).json(PUBLIC_LINK_EDIT_REFUSAL);
+            return;
+          }
         }
       }
 

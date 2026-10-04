@@ -140,11 +140,13 @@ DROPLET_OTA_APPLY_SCRIPT @docker/ota/apply-update.sh
 #     (macOS vs Linux) that setup decides. Tokens ARE merged into an existing
 #     COMPOSE_PROFILES below.
 #   SMB_PASSWORD - paired with the platform-gated SMB_ENABLED.
-#   OPENWRT_PASSWORD, REDIS_PASSWORD_* - materialized into secret / ACL files
-#     by setup. A key with no matching file breaks the service.
+#   OPENWRT_PASSWORD, REDIS_PASSWORD_*, REDIS_HOST_PASSWORD - materialized into
+#     secret / ACL files by setup. A key with no matching file breaks the
+#     service. (REDIS_HOST_PASSWORD, WARP-3605: setup also rotates a value that
+#     still equals REDIS_PASSWORD; the OTA path never rewrites it.)
 #   DROPLET_DEVICE_ID - derived from hardware, bound to an HQ registration.
 # shellcheck disable=SC2034  # read by the drift test, not here
-SETUP_ONLY_KEYS='ROUTING_MODE SMB_ENABLED COMPOSE_PROFILES SMB_PASSWORD OPENWRT_PASSWORD REDIS_PASSWORD_ORCHESTRATOR REDIS_PASSWORD_AI_GATEWAY REDIS_PASSWORD_MCP DROPLET_DEVICE_ID'
+SETUP_ONLY_KEYS='ROUTING_MODE SMB_ENABLED COMPOSE_PROFILES SMB_PASSWORD OPENWRT_PASSWORD REDIS_PASSWORD_ORCHESTRATOR REDIS_PASSWORD_AI_GATEWAY REDIS_PASSWORD_MCP REDIS_HOST_PASSWORD DROPLET_DEVICE_ID'
 # Tokens migrate_env appends to an existing COMPOSE_PROFILES.
 ENSURE_PROFILES='email'
 

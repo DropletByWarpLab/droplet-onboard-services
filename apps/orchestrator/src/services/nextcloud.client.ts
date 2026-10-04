@@ -1987,6 +1987,27 @@ export async function ncDirExists(
   throw new Error(`WebDAV PROPFIND failed for ${path}: ${resp.status}`);
 }
 
+/**
+ * WARP-3586 — is this path in the user's WebDAV home a folder? A Depth:0
+ * PROPFIND for `resourcetype`: a collection answers `<d:collection/>`, a file
+ * answers an empty `<d:resourcetype/>`. 404 is "no such item" (false; the
+ * share call will report it). Any other failure THROWS so the caller can fail
+ * closed rather than treat an unknown as a file.
+ */
+export async function ncIsDirectory(token: string, user: string, path: string): Promise<boolean> {
+  const url = webdavUrl(user, path);
+  const resp = await fetch(url, {
+    method: "PROPFIND",
+    headers: { ...davHeaders(token), "Content-Type": "application/xml", Depth: "0" },
+    body: `<?xml version="1.0" encoding="UTF-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>`,
+  });
+  if (resp.status === 404) return false;
+  if (!resp.ok && resp.status !== 207) {
+    throw new Error(`WebDAV PROPFIND failed for ${path}: ${resp.status}`);
+  }
+  return /<(?:[A-Za-z][\w-]*:)?collection\b/.test(await resp.text());
+}
+
 // ── Trash ──
 
 // CodeQL js/request-forgery (#127–#130): `user` is raw request input — for

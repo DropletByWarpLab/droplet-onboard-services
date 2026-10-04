@@ -12,9 +12,10 @@
  * `confirmed: true` — after the user explicitly approves — mints the
  * share.
  *
- * Guardrails baked into the tool (deliberately tighter than the route):
- *   • expiry is ALWAYS set — 1..90 days, default 7 (the route would
- *     accept a never-expiring link; this tool never mints one);
+ * Guardrails baked into the tool (tighter than the route, which since
+ * WARP-3586 also always sets an expiry — 30-day default, 90-day ceiling —
+ * and requires 8+ characters for a password):
+ *   • expiry is ALWAYS set — 1..90 days, default 7;
  *   • optional password must be 8..64 chars;
  *   • permissions are pinned to the dashboard ShareDialog's presets:
  *     view = 1 (read), edit = 3 (read|update — file-safe, no
