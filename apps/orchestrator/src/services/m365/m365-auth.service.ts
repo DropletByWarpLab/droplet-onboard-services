@@ -33,6 +33,7 @@ import type { PrismaClient } from "@prisma/client";
 
 import { recordActivity } from "../activity.singleton.js";
 import { purgeCursorsForUser } from "./delta-cursor.service.js";
+import { scopesForRefresh, scopesForSignIn } from "./scopes.js";
 import {
   sealPendingFlow,
   sealTokenCache,
@@ -89,13 +90,25 @@ export interface EntraClient {
    */
   getAuthCodeUrl(
     app: EntraAppRegistration,
-    opts: { redirectUri: string; state: string; nonce: string; codeChallenge: string },
+    opts: {
+      redirectUri: string;
+      state: string;
+      nonce: string;
+      codeChallenge: string;
+      /** WARP-3538 — what this sign-in asks Microsoft for; see `scopes.ts`. */
+      scopes: readonly string[];
+    },
   ): Promise<string>;
 
-  /** Redeem the code the callback received, with the verifier kept server-side. */
+  /**
+   * Redeem the code the callback received, with the verifier kept server-side.
+   * `scopes` are the ones the authorize leg asked for (sealed with the flow),
+   * never re-derived: Entra wants the redemption's scopes equal to, or a subset
+   * of, the authorize leg's.
+   */
   acquireByAuthorizationCode(
     app: EntraAppRegistration,
-    opts: { code: string; redirectUri: string; codeVerifier: string; nonce: string },
+    opts: { code: string; redirectUri: string; codeVerifier: string; nonce: string; scopes: readonly string[] },
   ): Promise<EntraAuthResult>;
 
   /**
@@ -105,14 +118,19 @@ export interface EntraClient {
    */
   acquireByDeviceCode(
     app: EntraAppRegistration,
-    opts: { onCode: (info: DeviceCodeInfo) => void },
+    opts: { onCode: (info: DeviceCodeInfo) => void; scopes: readonly string[] },
   ): Promise<EntraAuthResult>;
 
-  /** Refresh silently from a stored cache. */
+  /**
+   * Refresh silently from a stored cache. `scopes` are ONLY what the connection
+   * already holds (`scopesForRefresh`): a refresh that asks for a scope never
+   * consented fails into NEEDS_RECONNECT.
+   */
   acquireSilent(
     app: EntraAppRegistration,
     serializedCache: string,
     homeAccountId: string,
+    scopes: readonly string[],
   ): Promise<EntraAuthResult>;
 }
 
@@ -183,6 +201,8 @@ interface ConnectionRow {
   tokenCacheEnc: string | null;
   appClientId?: string | null;
   appTenantId?: string | null;
+  /** WARP-3538 — the person's explicit SharePoint opt-in. Absent reads as OFF. */
+  sharePointEnabled?: boolean;
   pendingStateHash?: string | null;
   pendingFlowEnc?: string | null;
   cursorLinkHash?: string | null;
@@ -345,19 +365,31 @@ export interface ConnectOptions {
   app?: EntraAppRegistration;
 }
 
-/** The app a new sign-in uses: the one asked for, else the stored one. */
-async function resolveApp(
+/**
+ * What a new sign-in is made of, off the person's row (read ONCE): the app it
+ * signs in through — the one asked for, else the stored one — and whether the
+ * person has opted in to SharePoint, which decides the scopes it asks for
+ * (WARP-3538).
+ *
+ * `=== true`, not truthiness: an absent or malformed flag is OFF. A first-time
+ * connect has no row and is therefore OFF — a person cannot opt in to SharePoint
+ * before they are connected, and one who has not asked for it is never asked for
+ * its scope (see `scopes.ts` for why a tenant that has not approved it would
+ * otherwise fail the whole sign-in).
+ */
+async function resolveConnect(
   prisma: PrismaClient,
   userId: string,
   requested: EntraAppRegistration | undefined,
-): Promise<EntraAppRegistration> {
-  if (requested) return requested;
+): Promise<{ app: EntraAppRegistration; sharePointEnabled: boolean }> {
   const row = (await prisma.m365Connection.findUnique({
     where: { userId },
   })) as ConnectionRow | null;
+  const sharePointEnabled = row?.sharePointEnabled === true;
+  if (requested) return { app: requested, sharePointEnabled };
   const stored = storedApp(row);
   if (!stored) throw new M365AppRequiredError();
-  return stored;
+  return { app: stored, sharePointEnabled };
 }
 
 /** 32 random bytes, base64url — the RFC 7636 verifier shape (43 chars). */
@@ -405,7 +437,10 @@ export async function beginAuthCodeConnect(
   },
   now: Date = new Date(),
 ): Promise<{ authorizeUrl: string; state: string; expiresAt: Date }> {
-  const app = await resolveApp(prisma, userId, opts.app);
+  const { app, sharePointEnabled } = await resolveConnect(prisma, userId, opts.app);
+  // Decided now, from the row as it is NOW, and sealed with the flow below: the
+  // callback redeems with these exact scopes however the row changes meanwhile.
+  const scopes = scopesForSignIn(sharePointEnabled);
 
   const state = randomToken();
   const nonce = randomToken();
@@ -417,6 +452,7 @@ export async function beginAuthCodeConnect(
     state,
     nonce,
     codeChallenge,
+    scopes,
   });
 
   const expiresAt = new Date(now.getTime() + PENDING_FLOW_TTL_MS);
@@ -430,6 +466,7 @@ export async function beginAuthCodeConnect(
       codeVerifier,
       nonce,
       redirectUri: opts.redirectUri,
+      scopes,
     }),
     pendingFlowExpiresAt: expiresAt,
     lastError: null,
@@ -526,6 +563,9 @@ export async function completeAuthCodeConnect(
       redirectUri: flow.redirectUri,
       codeVerifier: flow.codeVerifier,
       nonce: flow.nonce,
+      // The scopes the authorize leg asked for — sealed with the flow, never
+      // re-read from the row, which the person may have changed since.
+      scopes: flow.scopes,
     });
   } catch (err) {
     return await settleConnectFailure(prisma, userId, err);
@@ -594,7 +634,8 @@ export async function beginDeviceCodeConnect(
   opts: ConnectOptions = {},
   now: Date = new Date(),
 ): Promise<DeviceCodeInfo> {
-  const app = await resolveApp(prisma, userId, opts.app);
+  const { app, sharePointEnabled } = await resolveConnect(prisma, userId, opts.app);
+  const scopes = scopesForSignIn(sharePointEnabled);
   const expiresAt = new Date(now.getTime() + PENDING_FLOW_TTL_MS);
 
   // An authorization-code attempt left open in another tab is superseded:
@@ -620,6 +661,7 @@ export async function beginDeviceCodeConnect(
     let handedBack = false;
 
     const completion = entra.acquireByDeviceCode(app, {
+      scopes,
       onCode: (info) => {
         handedBack = true;
         resolve(info);
@@ -946,7 +988,11 @@ export async function getAccessToken(
 
   let result: EntraAuthResult;
   try {
-    result = await entra.acquireSilent(app, cache, row.homeAccountId);
+    // 🔴 Only what this connection already HOLDS (WARP-3538, see `scopes.ts`): a
+    // person who turned SharePoint on after connecting has not consented to
+    // Sites.Read.All yet, and a refresh that asked for it would fail into
+    // NEEDS_RECONNECT — a healthy connection broken by a switch.
+    result = await entra.acquireSilent(app, cache, row.homeAccountId, scopesForRefresh(row.grantedScopes));
   } catch (err) {
     await persistFailure(prisma, userId, err);
     throw err;

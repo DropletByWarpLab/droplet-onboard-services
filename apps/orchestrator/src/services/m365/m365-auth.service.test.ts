@@ -22,6 +22,7 @@ import { __setColumnCryptoKeyForTest } from "../column-crypto.service.js";
 import { createHash } from "node:crypto";
 
 import { sealPendingFlow, sealTokenCache, unsealPendingFlow } from "./token-cache.js";
+import { M365_BASE_SCOPES } from "./scopes.js";
 import {
   beginAuthCodeConnect,
   beginDeviceCodeConnect,
@@ -669,6 +670,7 @@ describe("completeAuthCodeConnect (WARP-2704)", () => {
       redirectUri: REDIRECT,
       codeVerifier: flow.codeVerifier,
       nonce: flow.nonce,
+      scopes: [...M365_BASE_SCOPES],
     });
     const row = prisma.__row() as any;
     expect(row).toMatchObject({ state: "CONNECTED", accountUpn: "sam@practice.com", ...APP_COLUMNS });
@@ -835,6 +837,7 @@ describe("completeAuthCodeConnect (WARP-2704)", () => {
       codeVerifier: "v",
       nonce: "n",
       redirectUri: REDIRECT,
+      scopes: [...M365_BASE_SCOPES],
     });
     const outcome = await completeAuthCodeConnect(prisma as never, entra, {
       state,
@@ -978,7 +981,7 @@ describe("a reconnect leaves no credential of the old link behind (#2344 review)
       ...connectedRow(),
       state: "PENDING_CONSENT",
       pendingStateHash: sha256(state),
-      pendingFlowEnc: sealPendingFlow(USER, { codeVerifier: "v", nonce: "n", redirectUri: REDIRECT }),
+      pendingFlowEnc: sealPendingFlow(USER, { codeVerifier: "v", nonce: "n", redirectUri: REDIRECT, scopes: [...M365_BASE_SCOPES] }),
       pendingFlowExpiresAt: new Date(Date.now() + 60_000),
     });
 
@@ -1213,5 +1216,154 @@ describe("a reconnect as someone else starts their sync from nothing (#2347 revi
 
     expect(prisma.__row()).toMatchObject({ state: "CONNECTED", accountUpn: A.accountUpn });
     expect(prisma.__cursors()).toHaveLength(2);
+  });
+});
+
+// --- WARP-3538: which scopes a sign-in and a refresh ask for -----------------
+
+describe("the scopes a sign-in asks for follow the person's SharePoint opt-in (WARP-3538)", () => {
+  /** A connected person whose row carries the given opt-in value. */
+  const rowWith = (sharePointEnabled: unknown) => ({
+    id: "row-1",
+    userId: USER,
+    state: "DISCONNECTED",
+    ...APP_COLUMNS,
+    ...(sharePointEnabled === undefined ? {} : { sharePointEnabled }),
+  });
+  const authCodeScopes = (entra: EntraClient) => vi.mocked(entra.getAuthCodeUrl).mock.calls[0]![1].scopes;
+
+  it.each([
+    ["off", false],
+    ["absent", undefined],
+    ["not a boolean (explicit state — never inferred)", "true"],
+  ])("asks for the base set only when the flag is %s", async (_label, flag) => {
+    // 🔴 A tenant that has not approved Sites.Read.All fails the WHOLE sign-in
+    // ("Need admin approval") for a scope the person never asked for — mail and
+    // calendar included. (Mutation: always add the SharePoint scope and this
+    // goes red.)
+    const prisma = fakePrisma(rowWith(flag));
+    const { entra } = await started(prisma);
+    expect(authCodeScopes(entra)).toEqual([...M365_BASE_SCOPES]);
+    expect(authCodeScopes(entra)).not.toContain("Sites.Read.All");
+  });
+
+  it("asks for Sites.Read.All too when the person has opted in", async () => {
+    const prisma = fakePrisma(rowWith(true));
+    const { entra } = await started(prisma);
+    expect(authCodeScopes(entra)).toEqual([...M365_BASE_SCOPES, "Sites.Read.All"]);
+  });
+
+  it("a first-time connect has no row, and so asks for the base set", async () => {
+    const prisma = fakePrisma(null);
+    const { entra } = await started(prisma);
+    expect(authCodeScopes(entra)).toEqual([...M365_BASE_SCOPES]);
+  });
+
+  it("the device-code fallback follows the same rule", async () => {
+    for (const [flag, expected] of [
+      [false, [...M365_BASE_SCOPES]],
+      [true, [...M365_BASE_SCOPES, "Sites.Read.All"]],
+    ] as const) {
+      const prisma = fakePrisma(rowWith(flag));
+      const entra = fakeEntra();
+      await beginDeviceCodeConnect(prisma as never, entra, USER, { app: APP });
+      expect(vi.mocked(entra.acquireByDeviceCode).mock.calls[0]![1].scopes).toEqual(expected);
+      await vi.waitFor(() => expect((prisma.__row() as any).state).toBe("CONNECTED"));
+    }
+  });
+
+  it("seals the scopes into the pending flow, so the callback redeems with the ones it was issued for", async () => {
+    const prisma = fakePrisma(rowWith(true));
+    await started(prisma);
+    const flow = unsealPendingFlow(USER, (prisma.__row() as any).pendingFlowEnc);
+    expect(flow.scopes).toEqual([...M365_BASE_SCOPES, "Sites.Read.All"]);
+  });
+
+  it.each([
+    ["turned ON", false, true, [...M365_BASE_SCOPES]],
+    ["turned OFF", true, false, [...M365_BASE_SCOPES, "Sites.Read.All"]],
+  ])("redeems with the scopes the authorize leg used even if the person %s SharePoint while they were on Microsoft's page", async (_label, before, after, expected) => {
+    // Entra wants the redemption's scopes equal to, or a subset of, the
+    // authorize leg's. Re-reading the row at the callback would redeem a code
+    // issued for one set with another. (Mutation: read the flag again in
+    // completeAuthCodeConnect and both cases go red.)
+    const prisma = fakePrisma(rowWith(before));
+    const { state, entra } = await started(prisma);
+    await prisma.m365Connection.update({ where: { userId: USER }, data: { sharePointEnabled: after } } as never);
+
+    expect(await completeAuthCodeConnect(prisma as never, entra, { state, browserState: state, code: "c" })).toBe("connected");
+    expect(vi.mocked(entra.acquireByAuthorizationCode).mock.calls[0]![1].scopes).toEqual(expected);
+  });
+
+  it("redeems a flow sealed by the build before this one with the base set — it asked for nothing else", async () => {
+    // The person was on Microsoft's page when the box updated; their 15-minute
+    // window is still open and the sealed flow has no `scopes`.
+    const prisma = fakePrisma(rowWith(true));
+    const { state, entra } = await started(prisma);
+    const flow = unsealPendingFlow(USER, (prisma.__row() as any).pendingFlowEnc);
+    const { scopes: _omitted, ...legacy } = flow;
+    (prisma.__row() as any).pendingFlowEnc = sealPendingFlow(USER, legacy as never);
+
+    expect(await completeAuthCodeConnect(prisma as never, entra, { state, browserState: state, code: "c" })).toBe("connected");
+    expect(vi.mocked(entra.acquireByAuthorizationCode).mock.calls[0]![1].scopes).toEqual([...M365_BASE_SCOPES]);
+  });
+});
+
+describe("a silent refresh asks only for what the connection already holds (WARP-3538)", () => {
+  const BASE_GRANT = "Mail.ReadWrite Files.ReadWrite.All Calendars.ReadWrite Contacts.ReadWrite Mail.Send User.Read profile openid email";
+  const connectedWith = (over: Record<string, unknown>) => ({
+    id: "row-1",
+    userId: USER,
+    state: "CONNECTED",
+    homeAccountId: "uid.utid",
+    tokenCacheEnc: sealTokenCache(USER, CACHE),
+    ...APP_COLUMNS,
+    ...over,
+  });
+  const refreshScopes = (entra: EntraClient) => vi.mocked(entra.acquireSilent).mock.calls[0]![3];
+
+  it("a connection granted only the base set refreshes with the base set, even after the person turned SharePoint on", async () => {
+    // 🔴 They flipped the switch but have not signed in again, so Microsoft has
+    // never been asked for Sites.Read.All. A refresh that asked for it now would
+    // fail with a consent error and push a healthy connection into
+    // NEEDS_RECONNECT. (Mutation: pass [...M365_BASE_SCOPES, "Sites.Read.All"]
+    // whenever the flag is on and this goes red.)
+    const prisma = fakePrisma(connectedWith({ sharePointEnabled: true, grantedScopes: BASE_GRANT }));
+    const entra = fakeEntra();
+
+    await getAccessToken(prisma as never, entra, USER);
+
+    expect(refreshScopes(entra)).toEqual([...M365_BASE_SCOPES]);
+    expect(refreshScopes(entra)).not.toContain("Sites.Read.All");
+    expect((prisma.__row() as any).state).toBe("CONNECTED");
+  });
+
+  it("a connection that DOES hold Sites.Read.All keeps asking for it — also after the person switches SharePoint off", async () => {
+    // What a refresh returns is stored over `grantedScopes`: asking for less would
+    // silently shrink what the grant is recorded as holding, and turning
+    // SharePoint back on would then look like it needs consent again.
+    for (const flag of [true, false]) {
+      const prisma = fakePrisma(connectedWith({ sharePointEnabled: flag, grantedScopes: `${BASE_GRANT} Sites.Read.All` }));
+      const entra = fakeEntra();
+      await getAccessToken(prisma as never, entra, USER);
+      expect(refreshScopes(entra)).toEqual([...M365_BASE_SCOPES, "Sites.Read.All"]);
+    }
+  });
+
+  it.each([
+    ["null (a legacy row)", null],
+    ["empty", ""],
+  ])("a connection with %s grantedScopes refreshes with the base set", async (_label, grantedScopes) => {
+    const prisma = fakePrisma(connectedWith({ grantedScopes }));
+    const entra = fakeEntra();
+    await getAccessToken(prisma as never, entra, USER);
+    expect(refreshScopes(entra)).toEqual([...M365_BASE_SCOPES]);
+  });
+
+  it("stores back what Microsoft returned, as it always has", async () => {
+    const prisma = fakePrisma(connectedWith({ grantedScopes: BASE_GRANT }));
+    const entra = fakeEntra({ acquireSilent: vi.fn(async () => ({ ...authResult({ grantedScopes: "Mail.ReadWrite User.Read" }), accessToken: "tok" })) });
+    await getAccessToken(prisma as never, entra, USER);
+    expect((prisma.__row() as any).grantedScopes).toBe("Mail.ReadWrite User.Read");
   });
 });
