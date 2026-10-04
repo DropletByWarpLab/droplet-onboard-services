@@ -338,6 +338,8 @@ describe("submitLiveCandidateCredentials (WARP-3505)", () => {
     [504, "timeout"],
     [400, "invalid_credentials"],
     [400, "unsupported_password"],
+    [400, "unsupported_stream_address"],
+    [422, "basic_auth_only"],
   ])("carries upstream %i / %s through as a structured failure", async (status, code) => {
     internalFetch.mockResolvedValue(
       new Response(JSON.stringify({ detail: "Operator-facing prose.", code }), { status }),

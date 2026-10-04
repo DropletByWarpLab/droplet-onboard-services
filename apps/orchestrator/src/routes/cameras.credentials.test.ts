@@ -305,18 +305,20 @@ describe("POST /api/cameras/discovered/:id/credentials", () => {
     },
   );
 
-  it("passes a camera-discovery 400 through with its code", async () => {
+  it.each([[400, "unsupported_password"], [400, "unsupported_stream_address"], [422, "basic_auth_only"]] as const)(
+    "passes camera-discovery %i / %s through with its code", async (status, code) => {
     submitLiveCandidateCredentials.mockResolvedValue({
       ok: false,
-      status: 400,
-      code: "unsupported_password",
-      message: "password cannot contain spaces or curly braces for this camera account",
+      status,
+      code,
+      message: "This camera sign-in cannot be used.",
     });
     const res = await request(makeApp(makePrisma()))
       .post(`/api/cameras/discovered/${HANWHA_ID}/credentials`)
       .send({ username: "john.doe", password: SECRET_PW });
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe("unsupported_password");
+    expect(res.status).toBe(status);
+    expect(res.body.code).toBe(code);
+    expect(JSON.stringify(res.body)).not.toContain(SECRET_PW);
   });
 
   it("refuses a non-live id — only camera-discovery can probe, so a DB row has nothing to verify against", async () => {
@@ -430,6 +432,20 @@ describe("POST /api/cameras — optional username/password merged server-side", 
     expect(res.body.code).toBe("unsupported_password");
     expect(addCamera).not.toHaveBeenCalled();
   });
+
+  it.each(["/a@b", "/live?token=a@b"])(
+    "refuses a stream address Frigate would send the credentials away from: %s", async (tail) => {
+      const prisma = makePrisma();
+      const res = await request(makeApp(prisma))
+        .post("/api/cameras")
+        .send({ name: "cam", rtspUrl: `rtsp://192.168.9.60${tail}`, username: "admin", password: SECRET_PW });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("unsupported_stream_address");
+      expect(JSON.stringify(res.body)).not.toContain(SECRET_PW);
+      expect(addCamera).not.toHaveBeenCalled();
+      expect(prisma.camera.upsert).not.toHaveBeenCalled();
+    },
+  );
 
   it("leaves a URL that already embeds credentials alone when no username is sent (back-compat)", async () => {
     addCamera.mockResolvedValue(true);

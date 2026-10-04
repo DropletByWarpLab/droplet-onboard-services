@@ -89,6 +89,8 @@ interface DiscoveryRecord {
   manufacturer?: string | null;
   model?: string | null;
   rtsp_url?: string | null;
+  /** WARP-3597: camera-discovery strips `user:pass@` from `rtsp_url` and says so here. */
+  has_credentials?: boolean;
   status?: string;
   detection_method?: string | null;
   discovered_at?: string;
@@ -189,7 +191,7 @@ function toCandidate(record: DiscoveryRecord): CameraCandidate | null {
     status: deriveCandidateStatus(record),
     detectionMethod: record.detection_method ?? null,
     rtspUrl: redacted.rtspUrl,
-    hasCredentials: redacted.hasCredentials,
+    hasCredentials: record.has_credentials ?? redacted.hasCredentials,
     discoveredAt: record.discovered_at ?? null,
     source: "live",
   };

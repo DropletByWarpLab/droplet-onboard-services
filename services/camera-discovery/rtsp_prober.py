@@ -3,8 +3,9 @@
 Checks common RTSP ports on a given IP address and attempts to find
 valid stream paths by issuing RTSP OPTIONS/DESCRIBE requests. When an
 unauthenticated DESCRIBE is refused (401), the prober iterates the
-default-credential list in ``default_credentials.py`` and retries with
-Basic / Digest auth before giving up.
+default-credential list in ``default_credentials.py`` and retries with Digest
+auth. Basic credentials are sent only to IPs explicitly listed in
+``CAMERA_RTSP_BASIC_ALLOW_IPS``; a Basic-only challenge otherwise stops the probe.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import asyncio
 import base64
 import hashlib
 import logging
+import os
 import re
 import secrets
 import socket
@@ -45,6 +47,36 @@ RTSP_PORTS = [554, 8554, 8080]
 # whole chain. (An earlier version of this comment said ffmpeg does not decode
 # userinfo; it does, once, and that misreading is how `%40` got stored.)
 RTSP_USERINFO_SAFE = INTERNAL_USERINFO_SAFE
+
+
+def basic_auth_allowed(ip: str) -> bool:
+    """True only for a camera the operator explicitly listed as Basic-only.
+
+    HTTP-style Basic puts ``user:password`` on the wire in clear, so the prober
+    answers a Basic challenge only for hosts named in
+    ``CAMERA_RTSP_BASIC_ALLOW_IPS`` (comma-separated). Everything else that
+    merely answered on the camera subnet gets Digest or nothing. Read per call
+    so a config change needs no re-import.
+    """
+    allowed = {i.strip() for i in os.getenv("CAMERA_RTSP_BASIC_ALLOW_IPS", "").split(",")}
+    return ip in allowed
+
+
+def redact_rtsp_url(url: str | None) -> str | None:
+    """``rtsp://user:pw@host:554/p`` -> ``rtsp://host:554/p`` (no-op without userinfo).
+
+    Splits on the LAST ``@`` of the authority, so a password that contains ``@``
+    cannot leave a fragment behind. Used for MQTT payloads, API responses and logs.
+    """
+    if not url:
+        return url
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        return url
+    authority, slash, tail = rest.partition("/")
+    if "@" not in authority:
+        return url
+    return f"{scheme}://{authority.rsplit('@', 1)[1]}{slash}{tail}"
 
 # Common RTSP stream paths by manufacturer/convention.
 # Paths are ordered by observed hit rate; Hanwha Wisenet lives near the
@@ -374,6 +406,9 @@ def _is_rtsp_200(resp: str) -> bool:
 OUTCOME_OK = "ok"                    # 200 — stream answers with these credentials
 OUTCOME_AUTH_FAILED = "auth_failed"  # path exists, credentials rejected (401/403)
 OUTCOME_LOCKED = "locked"            # vendor account lockout (Hanwha 490)
+# Camera asks for clear-text Basic and is not listed in CAMERA_RTSP_BASIC_ALLOW_IPS
+# (WARP-3597): nothing was sent, so the password is neither right nor wrong.
+OUTCOME_BASIC_ONLY = "basic_only"
 OUTCOME_NO_PATH = "no_path"          # camera reachable but this path isn't a stream
 OUTCOME_UNREACHABLE = "unreachable"  # TCP connect / first reply failed
 _MAX_SILENT_PATHS = 3
@@ -440,14 +475,25 @@ async def describe_outcome(ip: str, port: int, path: str,
         _close_rtsp(writer)
         return OUTCOME_NO_PATH  # 404 / 400 / 501 / etc — path doesn't exist here
 
-    auth_line = ""
-    for ln in resp1.split("\r\n"):
-        if ln.lower().startswith("www-authenticate:"):
-            auth_line = ln.split(":", 1)[1].strip()
-            break
-    auth_info = _parse_www_authenticate(auth_line)
+    # A host may offer several schemes (one WWW-Authenticate line each); Digest
+    # wins over Basic when both are offered.
+    challenges = [
+        _parse_www_authenticate(ln.split(":", 1)[1].strip())
+        for ln in resp1.split("\r\n")
+        if ln.lower().startswith("www-authenticate:")
+    ]
+    auth_info = next((c for c in challenges if c["scheme"] == "digest"),
+                     challenges[0] if challenges else _parse_www_authenticate(""))
 
     if auth_info["scheme"] == "basic":
+        if not basic_auth_allowed(ip):
+            # Never send the password in clear to a host that has not been
+            # listed as Basic-only (WARP-3597).
+            logger.warning(
+                "%s:%d offered only Basic auth; not sending credentials "
+                "(list it in CAMERA_RTSP_BASIC_ALLOW_IPS to allow)", ip, port)
+            _close_rtsp(writer)
+            return OUTCOME_BASIC_ONLY
         token = base64.b64encode(f"{user}:{pw}".encode()).decode()
         auth_header = f"Basic {token}"
     elif auth_info["scheme"] == "digest":
@@ -512,8 +558,11 @@ async def probe_with_credentials(ip: str, port: int, user: str, pw: str,
     challenge for credentials is authoritative: if the credentials are refused
     there we stop at once with ``auth_failed``/``locked`` rather than repeating
     the bad password on every remaining path — Hanwha, Axis and some Hikvision
-    firmwares lock the account after ~5 failures. ``unreachable`` is returned
-    only when no path got a usable reply at all.
+    firmwares lock the account after ~5 failures. A camera that challenges for
+    clear-text Basic and is not on CAMERA_RTSP_BASIC_ALLOW_IPS (WARP-3597) stops
+    the walk the same way, as ``basic_only``: nothing was sent, and every other
+    path would be refused alike. ``unreachable`` is returned only when no path
+    got a usable reply at all.
 
     ``max_seconds`` bounds the whole walk. A slow camera could otherwise spend a
     connect + read timeout on each of ~15 paths; the caller's own wait (the
@@ -542,7 +591,7 @@ async def probe_with_credentials(ip: str, port: int, user: str, pw: str,
             # reconnaissance for anyone who can read the log bundle.
             logger.debug("Operator credential authenticated at %s:%d%s", ip, port, path)
             return OUTCOME_OK, path
-        if outcome in (OUTCOME_AUTH_FAILED, OUTCOME_LOCKED):
+        if outcome in (OUTCOME_AUTH_FAILED, OUTCOME_LOCKED, OUTCOME_BASIC_ONLY):
             return outcome, None
         if outcome == OUTCOME_NO_PATH:
             reached = True

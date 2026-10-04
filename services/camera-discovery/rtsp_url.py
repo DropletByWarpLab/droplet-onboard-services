@@ -163,15 +163,25 @@ def to_frigate_url(url: str) -> str:
         host = f"[{host}]"
     hostport = host if port is None else f"{host}:{port}"
     rest = f"{hostport}{parts.path}" + (f"?{parts.query}" if parts.query else "")
-    if FRIGATE_USERNAME_RE.fullmatch(user) and pw and pw in rest:
+    if FRIGATE_USERNAME_RE.fullmatch(user) and "@" in rest:
+        # Frigate's greedy match ends at the LAST '@', including one in the
+        # stream path/query. It would encode the camera host as password text
+        # and send the credentials to the host left after that final '@'.
+        raise UnsafeStreamUrl(
+            "address", "stream address cannot contain an at sign for this camera account"
+        )
+    stored = f"{parts.scheme}://{userinfo}@{rest}"
+    if FRIGATE_USERNAME_RE.fullmatch(user) and pw:
         # Frigate does path.replace(pw, quote_plus(pw)) over the WHOLE string, so a
-        # password that also occurs in the address would be rewritten there too.
-        # Only matters when quote_plus would change it.
-        if quote_plus(pw) != pw:
+        # password occurrence outside its field (even across the field boundary)
+        # would change the username, scheme or camera address too.
+        escaped_pw = quote_plus(pw)
+        expected = f"{parts.scheme}://{user}:{escaped_pw}@{rest}"
+        if escaped_pw != pw and stored.replace(pw, escaped_pw) != expected:
             raise UnsafeStreamUrl(
-                "password", "password cannot also appear in the camera's stream address"
+                "password", "password cannot also appear elsewhere in the camera's stream URL"
             )
-    return f"{parts.scheme}://{userinfo}@{rest}"
+    return stored
 
 
 def scrub_credentials(text: str) -> str:

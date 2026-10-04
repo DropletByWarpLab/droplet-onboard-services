@@ -41,6 +41,7 @@ import pytest
 
 import rtsp_prober
 from tests.test_rtsp_digest_qop import REALM, FakeDigestServer, _auth_params, _md5
+from tests.test_rtsp_basic_auth_refused import BASIC, StubServer
 
 SECRET = "pytest-fake-secret"
 USER, PW = "admin", "s3cret!"
@@ -403,6 +404,18 @@ async def test_the_record_keeps_a_url_that_parses_and_can_be_redacted(monkeypatc
         parts = urlsplit(url)
         assert (unquote(parts.username), unquote(parts.password)) == (USER, tricky)
         assert parts.hostname == "127.0.0.1" and parts.path == GOOD_PATH
+
+
+@pytest.mark.asyncio
+async def test_the_known_record_does_not_carry_the_account_out(monkeypatch):
+    """GET /cameras/known lists these records (WARP-3597 redacts the URL). Nothing reads
+    the username back after the add, so it is not kept to be listed."""
+    async with _Server() as srv:
+        main, _, _ = _fresh_main(monkeypatch, srv.port)
+        await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+    wire = json.dumps(await main.get_known(_Req({})))
+    assert MAC in wire  # it IS listed
+    assert USER not in wire and PW not in wire
 
 
 @pytest.mark.asyncio
@@ -1038,3 +1051,48 @@ async def test_password_never_in_response_logs_or_mqtt(monkeypatch, caplog, scen
     assert "rtsp_url" not in wire
     if scenario == "success":
         assert PW in added[0][1]
+
+
+# --- WARP-3597 x WARP-3505: a camera that only offers clear-text Basic ----------
+
+
+class TestBasicOnlyCamera:
+    """The prober never sends a password in clear (WARP-3597): a camera that asks for
+    Basic and is not on CAMERA_RTSP_BASIC_ALLOW_IPS is sent nothing. That is neither a
+    wrong password nor an unreachable camera, and the operator has to be told which."""
+
+    @pytest.fixture(autouse=True)
+    def _no_allow_list(self, monkeypatch):
+        monkeypatch.delenv("CAMERA_RTSP_BASIC_ALLOW_IPS", raising=False)
+
+    @pytest.mark.asyncio
+    async def test_the_outcome_is_basic_only_and_nothing_is_sent(self):
+        async with StubServer(BASIC) as srv:
+            outcome = await rtsp_prober.describe_outcome("127.0.0.1", srv.port, "/live", USER, PW)
+        assert outcome == rtsp_prober.OUTCOME_BASIC_ONLY
+        assert not srv.sent_authorization
+
+    @pytest.mark.asyncio
+    async def test_the_walk_stops_at_the_first_path(self):
+        async with StubServer(BASIC) as srv:
+            outcome, path = await rtsp_prober.probe_with_credentials("127.0.0.1", srv.port, USER, PW)
+        assert (outcome, path) == ("basic_only", None)
+        assert len(srv.seen) == 1  # every other path would be refused the same way
+
+    @pytest.mark.asyncio
+    async def test_the_route_says_so_rather_than_unreachable(self, monkeypatch):
+        async with StubServer(BASIC) as srv:
+            main, added, _ = _fresh_main(monkeypatch, srv.port)
+            resp = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+        assert resp.status_code == 422 and _body(resp)["code"] == "basic_auth_only"
+        assert PW not in resp.body.decode()
+        assert not srv.sent_authorization and PW not in "".join(srv.seen)
+        assert added == [] and MAC in main.pending_cameras and not main.accepting_macs
+
+    @pytest.mark.asyncio
+    async def test_a_camera_the_operator_listed_is_still_answered_with_basic(self, monkeypatch):
+        monkeypatch.setenv("CAMERA_RTSP_BASIC_ALLOW_IPS", "127.0.0.1")
+        async with StubServer(BASIC) as srv:
+            main, added, _ = _fresh_main(monkeypatch, srv.port)
+            out = await main.submit_camera_credentials(MAC, _Req({"username": USER, "password": PW}))
+        assert out["status"] == "accepted" and len(added) == 1

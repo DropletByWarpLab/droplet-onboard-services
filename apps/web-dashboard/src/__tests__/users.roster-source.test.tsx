@@ -1,6 +1,6 @@
 /**
  * WARP-2984 — the roster lists every account (local, SSO, SCIM,
- * Nextcloud-only), tagged by source, and actions that don't apply to a
+ * File Store-only), tagged by source, and actions that don't apply to a
  * source are replaced by the reason rather than left to 409.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";

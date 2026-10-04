@@ -46,7 +46,7 @@ const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[
 /** Never legal in a RAW password: braces (Frigate str.format), whitespace (its \S+), controls. */
 const RAW_UNSAFE = /[{}\s\x00-\x1f\x7f]/;
 
-export type CredentialCode = "invalid_credentials" | "unsupported_password";
+export type CredentialCode = "invalid_credentials" | "unsupported_password" | "unsupported_stream_address";
 
 export type CredentialValidation = { ok: true } | { ok: false; error: string; code: CredentialCode };
 
@@ -56,7 +56,7 @@ export type CredentialValidation = { ok: true } | { ok: false; error: string; co
  */
 export class UnsafeCredentialsError extends Error {
   constructor(
-    readonly field: "username" | "password",
+    readonly field: "username" | "password" | "address",
     readonly code: CredentialCode,
     message: string,
   ) {
@@ -167,21 +167,32 @@ export function embedRtspCredentials(
   password: string | undefined | null,
 ): string {
   if (!username) return rtspUrl;
-  const m = /^(rtsps?:\/\/)(?:[^/]*@)?(.*)$/i.exec(rtspUrl);
+  const m = /^(rtsps?:\/\/)(?:[^/?#]*@)?(.*)$/i.exec(rtspUrl);
   if (!m) return rtspUrl;
   const pw = password ?? "";
   const userinfo = frigateUserinfo(username, pw);
   const rest = m[2]!;
-  if (FRIGATE_USERNAME.test(username) && pw && rest.includes(pw) && quotePlus(pw) !== pw) {
+  if (FRIGATE_USERNAME.test(username) && rest.includes("@")) {
+    throw new UnsafeCredentialsError(
+      "address",
+      "unsupported_stream_address",
+      "stream address cannot contain an at sign for this camera account",
+    );
+  }
+  const stored = `${m[1]}${userinfo}@${rest}`;
+  const escapedPw = quotePlus(pw);
+  if (FRIGATE_USERNAME.test(username) && pw && escapedPw !== pw &&
+      stored.split(pw).join(escapedPw) !== `${m[1]}${username}:${escapedPw}@${rest}`) {
     // Frigate does path.replace(pw, quote_plus(pw)) over the WHOLE string, so a
-    // password that also occurs in the address would be rewritten there too.
+    // password occurrence outside its field (even across the field boundary)
+    // would change the username, scheme or camera address too.
     throw new UnsafeCredentialsError(
       "password",
       "unsupported_password",
-      "password cannot also appear in the camera's stream address",
+      "password cannot also appear elsewhere in the camera's stream URL",
     );
   }
-  return `${m[1]}${userinfo}@${rest}`;
+  return stored;
 }
 
 /**

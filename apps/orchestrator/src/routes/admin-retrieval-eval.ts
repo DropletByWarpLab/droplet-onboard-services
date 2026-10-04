@@ -4,21 +4,26 @@
  * hybrid) directly so it can compute NDCG@10 per-pipeline.
  *
  * Mount policy: this endpoint is admin-grade scaffolding for an
- * offline gate, NOT a public surface. It returns `404 not_found` when
- * `NODE_ENV === "production"` so the live appliance never exposes it.
+ * offline gate, NOT a public surface. It returns `404 not_found` unless
+ * `RAG_EVAL_ENABLED` is explicitly on (WARP-3609) — an explicit positive flag
+ * written for boxes that run the rag-eval profile, NOT `NODE_ENV`, which the
+ * orchestrator container never sets and which WARP-2551 will arm for every
+ * box (the old gate was both dead today and would have 404'd the scheduled
+ * eval the day it armed).
  *
  * Auth: WARP-449 — previously piggybacked on `authMiddleware` alone (any
  * authenticated user could hit the endpoint, scoped to their own userId
  * via the per-arm `WHERE userId = $1` filter). The route name and mount
  * point live under `/admin/*`, so per ADR-004 §3 / WARP-449 AC #4 it now
  * carries the same owner/admin posture as the other `admin-*` route files —
- * this is dev/eval-only tooling (404s in production) and every sibling
+ * this is eval-only tooling (404s unless RAG_EVAL_ENABLED) and every sibling
  * admin router already gates on role. RAGAS eval-runner auth additionally
  * admits the `_service:rag-eval` service principal (the rag-eval
  * container's ragas_runner.py), which must name its eval target user via
- * `?user=` — see the handler comment below.
+ * `?user=` — and may name ONLY the one configured eval account
+ * (`RAGAS_EVAL_USER`), see `resolveEvalAccess` below.
  */
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import { PrismaClient } from "@prisma/client";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
@@ -38,9 +43,55 @@ interface SearchResultWire {
    * score faithfulness / context-relevance against the actual retrieved
    * text, not just metadata. Kept on the same admin-only endpoint
    * because exposing chunk text via a public surface would bypass the
-   * per-user RBAC story; this endpoint is already 404 in production.
+   * per-user RBAC story; this endpoint is already 404 unless RAG_EVAL_ENABLED.
    */
   snippet: string;
+}
+
+/**
+ * WARP-3609 — the gate shared by every route here. Writes the error response
+ * and returns null when the request must not proceed; otherwise returns the
+ * username whose corpus the request may read.
+ *
+ *   1. `RAG_EVAL_ENABLED` off → 404, before anything else is revealed.
+ *   2. Human owner/admin → their OWN username; `?user=` is ignored entirely,
+ *      so this never becomes a way to search someone else's files.
+ *   3. The `_service:rag-eval` principal owns no corpus, so it names its
+ *      target via `?user=` (EXPLICIT config, never guessed → 400 when absent)
+ *      and may name ONLY the one configured eval account `RAGAS_EVAL_USER`.
+ *      Any other name — or no configured account at all — is a 403, so a
+ *      holder of the service token cannot read an employee's private
+ *      Nextcloud or brain-memory chunks by naming them.
+ *
+ * Resolved BEFORE the heavy lazy imports in the handlers, so a misconfigured
+ * runner gets a crisp 4xx instead of a 500 from half-initialised retrieval.
+ */
+function resolveEvalAccess(req: Request, res: Response): string | null {
+  if (!config.RAG_EVAL_ENABLED) {
+    res.status(404).json({ error: "not_found" });
+    return null;
+  }
+  const user = req.user;
+  if (!user) {
+    res.status(401).json({ error: "auth_required" });
+    return null;
+  }
+  if (user.id !== "_service:rag-eval") return user.username;
+  const requested = String(req.query.user ?? "").trim();
+  if (!requested) {
+    res.status(400).json({ error: "eval_user_required" });
+    return null;
+  }
+  const allowed = (config.RAGAS_EVAL_USER ?? "").trim();
+  if (!allowed || requested !== allowed) {
+    logger.warn(
+      { requested },
+      "retrieval-eval: rag-eval principal named a user other than RAGAS_EVAL_USER — refused (WARP-3609)",
+    );
+    res.status(403).json({ error: "eval_user_forbidden" });
+    return null;
+  }
+  return allowed;
 }
 
 export function createAdminRetrievalEvalRouter(prisma: PrismaClient): Router {
@@ -50,33 +101,8 @@ export function createAdminRetrievalEvalRouter(prisma: PrismaClient): Router {
     "/admin/retrieval-eval/search",
     requireRoleOrService("_service:rag-eval", "owner", "admin"),
     async (req, res) => {
-    if (process.env.NODE_ENV === "production") {
-      res.status(404).json({ error: "not_found" });
-      return;
-    }
-    const user = req.user;
-    if (!user) {
-      res.status(401).json({ error: "auth_required" });
-      return;
-    }
-    // RAGAS eval-runner auth: the `_service:rag-eval` principal owns no
-    // corpus of its own — every retrieval arm scopes to a username, and a
-    // service id matches no user rows, so every eval search would come back
-    // empty. The eval target user is therefore EXPLICIT configuration
-    // (RAGAS_EVAL_USER on the rag-eval container, forwarded as `?user=`),
-    // never guessed. Human callers keep today's behavior — their own
-    // corpus — and `?user=` is ignored entirely, so this endpoint never
-    // becomes a way for an admin to search someone else's files. Resolved
-    // HERE, before the heavy lazy imports below, so a misconfigured runner
-    // gets a crisp 400 instead of a 500 from half-initialised retrieval.
-    let evalUsername = user.username;
-    if (user.id === "_service:rag-eval") {
-      evalUsername = String(req.query.user ?? "").trim();
-      if (!evalUsername) {
-        res.status(400).json({ error: "eval_user_required" });
-        return;
-      }
-    }
+    const evalUsername = resolveEvalAccess(req, res);
+    if (evalUsername === null) return;
     const variant = String(req.query.variant ?? "hybrid") as
       | "vector"
       | "rrf"
@@ -277,8 +303,8 @@ export function createAdminRetrievalEvalRouter(prisma: PrismaClient): Router {
    * row is newer), and a pure delete moves `chunks`, so the pair covers the
    * cases that actually occur on an appliance.
    *
-   * Scoped exactly like /search above — same auth, same production 404, same
-   * explicit `?user=` for the service principal, which owns no corpus. One
+   * Scoped exactly like /search above — same auth, same RAG_EVAL_ENABLED 404,
+   * same pinned `?user=` for the service principal, which owns no corpus. One
    * table covers both retrieval sources: FileContentChunk carries brain items
    * too (`source` column), so a new brain memory moves the fingerprint.
    */
@@ -286,23 +312,8 @@ export function createAdminRetrievalEvalRouter(prisma: PrismaClient): Router {
     "/admin/retrieval-eval/corpus-fingerprint",
     requireRoleOrService("_service:rag-eval", "owner", "admin"),
     async (req, res) => {
-      if (process.env.NODE_ENV === "production") {
-        res.status(404).json({ error: "not_found" });
-        return;
-      }
-      const user = req.user;
-      if (!user) {
-        res.status(401).json({ error: "auth_required" });
-        return;
-      }
-      let evalUsername = user.username;
-      if (user.id === "_service:rag-eval") {
-        evalUsername = String(req.query.user ?? "").trim();
-        if (!evalUsername) {
-          res.status(400).json({ error: "eval_user_required" });
-          return;
-        }
-      }
+      const evalUsername = resolveEvalAccess(req, res);
+      if (evalUsername === null) return;
 
       try {
         // Aggregate rather than fetching rows: the corpus is tens of

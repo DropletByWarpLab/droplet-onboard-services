@@ -24,7 +24,7 @@ import pytest
 
 import rtsp_url
 from frigate_client import FrigateClient
-from tests.frigate_emulator import camera_receives
+from tests.frigate_emulator import camera_connects_to, camera_receives
 from tests.test_camera_credentials import MAC, _Req, _Server, _fresh_main
 
 IP = "192.168.9.5"
@@ -139,6 +139,48 @@ class TestBoundary:
         assert added is False
         assert fake.puts() == []  # a broken config would stop Frigate starting
         assert pw not in caplog.text
+
+
+class TestAtSignInTheAddress:
+    """QA-N1, at the Frigate boundary: what the camera receives AND where ffmpeg dials.
+
+    For a username Frigate's pattern matches, an '@' in the path or query makes it
+    treat the host as part of the password, and ffmpeg then connects to whatever
+    follows that '@' — with the account's credentials. Refused rather than written."""
+
+    TAILS = ["/a@b", "/stream?token=a@b", "/@evil.lan"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tail", TAILS)
+    async def test_a_username_frigate_matches_is_refused_not_written(self, tail, caplog):
+        caplog.set_level(logging.DEBUG)
+        fake = FakeFrigate()
+        added = await frigate_with(fake).add_camera(
+            "front", rtsp_url.internal_url("admin", "C@mera!2024", IP, 554, tail)
+        )
+        assert added is False
+        assert fake.puts() == []
+        assert "mera!2024" not in caplog.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("pw", PASSWORDS)
+    @pytest.mark.parametrize("tail", TAILS)
+    async def test_any_other_username_reaches_the_camera_and_only_the_camera(self, tail, pw):
+        fake = FakeFrigate()
+        added = await frigate_with(fake).add_camera(
+            "front", rtsp_url.internal_url("john.doe", pw, IP, 554, tail)
+        )
+        assert added is True
+        (stored,) = fake.stored_paths()
+        assert camera_receives(stored) == ("john.doe", pw)
+        assert camera_connects_to(stored) == f"{IP}:554"
+
+    @pytest.mark.asyncio
+    async def test_a_url_with_no_sign_in_may_carry_an_at_sign(self):
+        fake = FakeFrigate()
+        url = f"rtsp://{IP}:554/a@b"
+        assert await frigate_with(fake).add_camera("front", url) is True
+        assert fake.stored_paths() == [url]
 
 
 class TestNoCredentialsInLogs:
@@ -272,3 +314,49 @@ class TestEndToEnd:
         assert ei.value.status_code == 500
         assert "mera!2024" not in caplog.text
         assert pw not in str(ei.value.detail)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("pw", PASSWORDS)
+    async def test_an_onvif_path_with_an_at_sign_reaches_the_camera_for_another_username(self, monkeypatch, pw):
+        """The stream path is the DEVICE's to name; the host it dials must stay the camera's."""
+        user = "john.doe"
+        async with _Server(good_paths=("/cam@b",), username=user, password=pw) as srv:
+            main, _, _ = _fresh_main(monkeypatch, srv.port)
+            fake = FakeFrigate()
+            monkeypatch.setattr(main, "frigate", frigate_with(fake))
+
+            async def onvif(ip, port, username, password):
+                return ("ok", f"rtsp://{ip}:{srv.port}/cam@b")
+
+            monkeypatch.setattr(main, "onvif_stream_uri", onvif)
+            out = await main.submit_camera_credentials(MAC, _Req({"username": user, "password": pw}))
+
+        assert out["status"] == "accepted"
+        (stored,) = fake.stored_paths()
+        assert camera_receives(stored) == (user, pw)
+        assert camera_connects_to(stored) == f"127.0.0.1:{srv.port}"
+
+    @pytest.mark.asyncio
+    async def test_an_onvif_path_with_an_at_sign_is_refused_for_a_username_frigate_would_misread(self, monkeypatch):
+        pw = "C@mera!2024"
+        async with _Server(good_paths=("/cam@evil.lan",), password=pw) as srv:
+            main, _, _ = _fresh_main(monkeypatch, srv.port)
+            fake = FakeFrigate()
+            monkeypatch.setattr(main, "frigate", frigate_with(fake))
+
+            async def onvif(ip, port, username, password):
+                return ("ok", f"rtsp://{ip}:{srv.port}/cam@evil.lan")
+
+            monkeypatch.setattr(main, "onvif_stream_uri", onvif)
+            with pytest.raises(main.CredentialsRejected) as rejected:
+                await main.submit_camera_credentials(MAC, _Req({"username": "admin", "password": pw}))
+
+        assert rejected.value.status_code == 400
+        assert rejected.value.code == "unsupported_stream_address"
+        resp = await main._credentials_rejected_handler(_Req({}), rejected.value)
+        assert resp.status_code == 400
+        assert json.loads(resp.body)["code"] == "unsupported_stream_address"
+        assert pw not in resp.body.decode()
+        assert fake.puts() == []  # nothing was written for Frigate to misread
+        assert MAC in main.pending_cameras and MAC not in main.known_cameras
+        assert not main.accepting_macs  # the in-flight claim was released

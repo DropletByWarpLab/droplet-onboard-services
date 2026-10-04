@@ -270,6 +270,7 @@ export function AddCameraModal({
   const problemRef = useRef<HTMLDivElement | null>(null);
   const listChipRef = useRef<HTMLButtonElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
   /** Where focus goes once a failed submit re-enables the form. */
   const failureFocus = useRef<"password" | "problem" | null>(null);
 
@@ -411,6 +412,12 @@ export function AddCameraModal({
       problemRef.current?.focus();
     }
   }, [shownProblem, inflightKey]);
+
+  // A disabled fieldset cannot hold keyboard focus. Keep the operator on the
+  // enabled Close button while the camera is being checked.
+  useEffect(() => {
+    if (navLocked) closeRef.current?.focus();
+  }, [navLocked]);
 
   // ── Lockout cooldown ─────────────────────────────────────────────────────
   // Timestamp-based, not decrement-per-tick: a throttled background tab must not
@@ -561,7 +568,7 @@ export function AddCameraModal({
           style={{ color: "var(--danger-ink)", background: "rgba(239,68,68,0.1)" }}
         >
           {lock.message}
-          <span className="tabular-nums block mt-1">You can try again in {formatCountdown(lockLeft)}.</span>
+          <span className="tabular-nums block mt-1">You can check again in {formatCountdown(lockLeft)}. The camera may stay locked longer.</span>
         </div>
       ) : (
         shownProblem && (
@@ -604,7 +611,7 @@ export function AddCameraModal({
           <h2 id={TITLE_ID} className="type-title-3" style={{ color: "var(--text)" }}>
             Add camera
           </h2>
-          <button onClick={onClose} className="icon-btn" aria-label="Close" type="button">
+          <button ref={closeRef} onClick={onClose} className="icon-btn" aria-label="Close" type="button">
             <X size={20} />
           </button>
         </div>

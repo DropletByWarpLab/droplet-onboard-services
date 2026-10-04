@@ -107,8 +107,38 @@ describe("embedRtspCredentials — the camera receives exactly what was typed", 
     );
   });
 
-  it("is not fooled by an @ in the path", () => {
-    expect(embedRtspCredentials("rtsp://10.0.0.5/a@b", "admin", "pw")).toBe("rtsp://admin:pw@10.0.0.5/a@b");
+  it.each(["/a@b", "/stream?token=a@b", "/a@b?x=1", "/a?x=@", "/@", "/p/@host"])(
+    "refuses an @ after the host for a raw-password account: %s",
+    (tail) => {
+      for (const user of MATCHING_USERS) {
+        try {
+          embedRtspCredentials(`rtsp://10.0.0.5${tail}`, user, "s3cret!");
+          expect.fail("Frigate would swallow the host into the password");
+        } catch (err) {
+          expect(err).toBeInstanceOf(UnsafeCredentialsError);
+          expect(err).toMatchObject({ field: "address", code: "unsupported_stream_address" });
+          expect((err as Error).message).not.toContain("s3cret!");
+          expect((err as Error).message).not.toContain(tail);
+        }
+      }
+    },
+  );
+
+  it.each(["/a@b", "/stream?token=a@b", "/a?x=@"])(
+    "preserves an @ after the host when Frigate leaves encoded credentials alone: %s",
+    (tail) => {
+      for (const user of OTHER_USERS) {
+        const stored = embedRtspCredentials(`rtsp://10.0.0.5${tail}`, user, "C@mera!2024");
+        expect(frigateEscape(stored)).toBe(stored);
+        expect(stored.endsWith(`@10.0.0.5${tail}`)).toBe(true);
+        expect(cameraReceives(stored)).toEqual({ user, password: "C@mera!2024" });
+      }
+    },
+  );
+
+  it("does not discard the authority when a query contains an @", () => {
+    const stored = embedRtspCredentials("rtsp://old:pw@10.0.0.5?token=a@b", "john.doe", "new!");
+    expect(stored).toBe("rtsp://john.doe:new%21@10.0.0.5?token=a@b");
   });
 
   it("supports rtsps and an empty password", () => {
@@ -142,6 +172,17 @@ describe("embedRtspCredentials — the camera receives exactly what was typed", 
     expect(cameraReceives(embedRtspCredentials("rtsp://192.168.9.219:554/profile2", "admin", "profile2")).password).toBe(
       "profile2",
     );
+  });
+
+  it.each(["@", ":", "/", "//", "min:", "min:min"])(
+    "refuses a password that Frigate would also replace in the scheme or separator: %s",
+    (pw) => {
+      expect(() => embedRtspCredentials("rtsp://192.168.9.219", "admin", pw)).toThrow(UnsafeCredentialsError);
+    },
+  );
+
+  it("accepts punctuation that only occurs inside the password field", () => {
+    expect(cameraReceives(embedRtspCredentials(BASE, "admin", ":@"))).toEqual({ user: "admin", password: ":@" });
   });
 });
 

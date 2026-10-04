@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 
 import rtsp_url
-from tests.frigate_emulator import camera_receives, frigate_escape
+from tests.frigate_emulator import camera_connects_to, camera_receives, frigate_escape
 
 IP, PORT, PATH = "192.168.9.219", 554, "/profile2/media.smp"
 
@@ -139,6 +139,24 @@ class TestRefusals:
         assert frigate_escape(stored).endswith(f"@{IP}:{PORT}{PATH}")
 
     @pytest.mark.parametrize(
+        "url",
+        [
+            f"rtsp://admin:%40@{IP}:{PORT}{PATH}",  # '@' is the separator after the password too
+            f"rtsp://admin:%3A@{IP}",  # ':' is in "rtsp:" and "admin:", and there is no port
+            f"rtsp://admin:%2F@{IP}",  # '/' is in "://", and there is no path
+            f"rtsp://admin:%2F%2F@{IP}",
+            f"rtsp://admin:min%3A@{IP}",  # 'min:' also ends the username and its separator
+            f"rtsp://admin:min%3Amin@{IP}",  # an occurrence crosses from username into password
+        ],
+    )
+    def test_a_password_that_is_a_fragment_of_the_url_outside_the_address_is_refused_too(self, url):
+        """The same whole-string replace: Frigate would rewrite "rtsp://" or the '@' that ends
+        the userinfo, not just the password."""
+        with pytest.raises(rtsp_url.UnsafeStreamUrl) as err:
+            rtsp_url.to_frigate_url(url)
+        assert err.value.field == "password"
+
+    @pytest.mark.parametrize(
         "path",
         ["/{FRIGATE_CAMERA_X_PASSWORD}", "/a b", "/a\tb", "/x\r\nCSeq: 9", "/}"],
     )
@@ -155,6 +173,51 @@ class TestRefusals:
     def test_a_bad_port_is_refused_not_crashed_on(self):
         with pytest.raises(rtsp_url.UnsafeStreamUrl):
             rtsp_url.to_frigate_url("rtsp://192.168.9.219:99999/x")
+
+
+# Where an '@' can sit after the host: path, query, both, bare.
+AT_TAILS = ["/a@b", "/stream?token=a@b", "/a@b?x=1", "/a?x=@", "/@", "/p/@host"]
+
+
+class TestAtSignAfterTheAddress:
+    """QA-N1 — Frigate's pattern runs to the LAST '@' of the whole string, not of the
+    authority. For a username it matches, an '@' in the stream path or query pulls
+    the HOST into the password; ffmpeg then reads the authority up to the first '/'
+    or '?', finds whatever Frigate left behind, and sends the credentials THERE. An
+    ONVIF device names its own stream path, so that host is the device's to choose."""
+
+    def test_the_failure_reproduced(self):
+        stored = f"rtsp://admin:pw@{IP}:{PORT}/a@b"
+        assert camera_receives(stored) == ("admin", f"pw@{IP}:{PORT}/a")  # not "pw"
+        assert camera_connects_to(stored) == "b"  # not the camera
+
+    @pytest.mark.parametrize("tail", AT_TAILS)
+    @pytest.mark.parametrize("user", MATCHING_USERS)
+    def test_a_username_stored_as_typed_is_refused_an_at_sign_in_the_address(self, user, tail):
+        with pytest.raises(rtsp_url.UnsafeStreamUrl) as err:
+            rtsp_url.to_frigate_url(rtsp_url.internal_url(user, "pw", IP, PORT, tail))
+        assert err.value.field == "address"
+        assert "pw" not in str(err.value)
+
+    @pytest.mark.parametrize("tail", AT_TAILS)
+    @pytest.mark.parametrize("user", OTHER_USERS)
+    def test_every_other_username_reaches_the_right_host_with_the_typed_password(self, user, tail):
+        """Frigate's pattern does not match these, so nothing re-reads the string; ffmpeg
+        ends the authority at the first '/' or '?'."""
+        stored = rtsp_url.to_frigate_url(rtsp_url.internal_url(user, "C@mera!2024", IP, PORT, tail))
+        assert camera_receives(stored) == (user, "C@mera!2024")
+        assert camera_connects_to(stored) == f"{IP}:{PORT}"
+        assert stored.endswith(f"@{IP}:{PORT}{tail}")
+
+    @pytest.mark.parametrize("pw", ["x@y@z", "@@", ":@"])
+    def test_an_at_sign_in_the_PASSWORD_is_not_one_in_the_address(self, pw):
+        stored = stored_path("admin", pw)
+        assert camera_receives(stored) == ("admin", pw)
+        assert camera_connects_to(stored) == f"{IP}:{PORT}"
+
+    def test_a_url_with_no_sign_in_is_not_touched(self):
+        url = f"rtsp://{IP}:{PORT}/a@b"
+        assert rtsp_url.to_frigate_url(url) == url
 
 
 class TestToFrigateUrl:

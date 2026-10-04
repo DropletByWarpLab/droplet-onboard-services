@@ -249,6 +249,15 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside.",
     public_link_company_data:
       "Only an owner or admin can create or change a public link to company files, or let others re-share them. You can still share with people in the company.",
+    // WARP-3586 — the box's public-link rules (share-policy.ts).
+    public_link_expiry_required:
+      "A public link has to expire. Pick an expiry date and try again.",
+    public_link_expiry_too_far:
+      "A public link can last at most 90 days. Pick an earlier expiry date.",
+    public_link_password_too_short:
+      "A public link password needs at least 8 characters.",
+    public_link_edit_admin_only:
+      "Only an owner or admin can let people with a public link edit, upload to or delete from a folder. A view-only link is available.",
     // WARP-1658 — every 403 a share write can draw is a DETERMINISTIC policy
     // rejection: role denial (requireRole), guest read-only, or insufficient
     // rights on a household/department space (requireSpaceAccess). Without this
@@ -333,6 +342,15 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside.",
     public_link_company_data:
       "Only an owner or admin can create or change a public link to company files, or let others re-share them. You can still share with people in the company.",
+    // WARP-3586 — the box's public-link rules (share-policy.ts).
+    public_link_expiry_required:
+      "A public link has to expire. Pick an expiry date and try again.",
+    public_link_expiry_too_far:
+      "A public link can last at most 90 days. Pick an earlier expiry date.",
+    public_link_password_too_short:
+      "A public link password needs at least 8 characters.",
+    public_link_edit_admin_only:
+      "Only an owner or admin can let people with a public link edit, upload to or delete from a folder. A view-only link is available.",
     "403":
       "You don't have permission to share this item. Sign out and back in if your access changed recently, or ask the Droplet's owner or an admin to share it.",
     NOT_FOUND:
@@ -525,14 +543,17 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     // sending the operator to retry blind with a password that may be right.
     TIMEOUT:
       "The camera took too long to answer. If it was added, it will appear in your cameras shortly; otherwise check it's powered on and try again.",
-    // Refused by the server BEFORE the camera was touched, so nothing was spent
-    // on it. UNSUPPORTED_PASSWORD: the camera account is fine, but a password with
-    // a space or a curly brace cannot be written into the stream address
-    // Frigate is given, and there is no workaround on this side.
+    // Invalid input is refused before touching the camera. An unsupported
+    // password may also be found once discovery supplies the stream address:
+    // Frigate cannot store it safely, even if the camera accepted it.
     INVALID_CREDENTIALS:
       "Check the username and password — one of them has a character that can't be used — and try again.",
     UNSUPPORTED_PASSWORD:
-      "Droplet can't pass a password with a space or a curly brace { } to the camera's video stream. Change the camera's password to one without them, then try again.",
+      "Droplet can't safely pass this password to the camera's video stream. Change the camera's password to a longer one without spaces or curly braces { }, then try again.",
+    UNSUPPORTED_STREAM_ADDRESS:
+      "Droplet can't safely use this camera's stream address with its account. Check the camera's stream settings or use a different camera account.",
+    BASIC_AUTH_ONLY:
+      "Droplet didn't send your password because this camera only offers an unprotected sign-in. Switch its stream sign-in to Digest, or ask an administrator to allow this camera.",
   },
   device: {
     NETWORK:

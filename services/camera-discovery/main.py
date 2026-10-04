@@ -53,6 +53,7 @@ from rtsp_prober import (
     RTSP_PORTS,
     probe_camera,
     probe_with_credentials,
+    redact_rtsp_url,
     scan_ports,
     verify_stream,
 )
@@ -301,12 +302,27 @@ def _connect_mqtt() -> mqtt.Client:
     return client
 
 
+def public_camera(camera: dict) -> dict:
+    """Copy of a camera record that is safe to publish or return: the RTSP URL
+    loses its ``user:pass@`` and ``has_credentials`` says whether it had one.
+    Frigate (frigate.add_camera) still gets the full URL from the internal record."""
+    out = dict(camera)
+    url = out.get("rtsp_url")
+    if url:
+        out["rtsp_url"] = redact_rtsp_url(url)
+        out["has_credentials"] = out["rtsp_url"] != url
+    return out
+
+
 def publish_discovery(camera_info: dict) -> None:
-    """Publish camera discovery event to MQTT."""
+    """Publish camera discovery event to MQTT (never with credentials in a URL)."""
     if mqtt_client:
+        payload = dict(camera_info)
+        if isinstance(payload.get("camera"), dict):
+            payload["camera"] = public_camera(payload["camera"])
         mqtt_client.publish(
             "droplet/cameras/discovered",
-            json.dumps(camera_info),
+            json.dumps(payload),
             qos=1,
         )
 
@@ -994,7 +1010,7 @@ async def get_discovered(request: Request):
     reconnaissance-grade data that must not be readable by any LAN peer.
     """
     _require_auth(request)
-    return list(pending_cameras.values())
+    return [public_camera(c) for c in pending_cameras.values()]
 
 
 @app.get("/cameras/known")
@@ -1005,7 +1021,7 @@ async def get_known(request: Request):
     (may embed ``user:pass@``), MACs and models otherwise.
     """
     _require_auth(request)
-    return list(known_cameras.values())
+    return [public_camera(c) for c in known_cameras.values()]
 
 
 @app.post("/cameras/discovered/{mac}/accept")
@@ -1063,7 +1079,7 @@ async def accept_camera(mac: str, request: Request):
             camera["status"] = "active"
             known_cameras[mac] = camera
             publish_discovery({"event": "camera_accepted", "camera": camera})
-            return {"status": "accepted", "camera": camera}
+            return {"status": "accepted", "camera": public_camera(camera)}
 
         # Still in pending (peeked, not popped) — just surface the failure.
         raise HTTPException(status_code=500, detail="Failed to add camera to Frigate")
@@ -1104,6 +1120,13 @@ _CREDENTIAL_FAILURES: dict[str, tuple[int, str, str]] = {
         "The camera has temporarily locked its account after too many failed "
         "sign-ins. Wait a few minutes before trying again.",
     ),
+    "basic_only": (
+        422,
+        "basic_auth_only",
+        "This camera only offers a sign-in that sends its password without "
+        "protection, so Droplet will not use it. Switch the camera to a secure "
+        "sign-in (Digest), or ask an administrator to allow this camera.",
+    ),
     "no_path": (
         422,
         "no_stream_path",
@@ -1135,12 +1158,24 @@ class CredentialsRejected(HTTPException):
     ``invalid_credentials`` — malformed (type, size, control characters, a colon in
     the username); ``unsupported_password`` — well-formed, but cannot be written
     into a Frigate stream URL for this account (spaces or curly braces in a raw
-    password, see rtsp_url.py). Raised BEFORE any attempt is spent on the camera.
+    password, see rtsp_url.py); ``unsupported_stream_address`` — the camera's own
+    stream address cannot be written next to this account (an ``@`` after the host,
+    see rtsp_url.py). Raised BEFORE any attempt is spent on the camera, except the
+    last, which is only known once the camera has named its stream.
     """
 
     def __init__(self, code: str, detail: str):
         super().__init__(status_code=400, detail=detail)
         self.code = code
+
+    @classmethod
+    def for_unsafe(cls, exc: UnsafeStreamUrl) -> "CredentialsRejected":
+        """The rejection that says which part of ``exc``'s stream URL is the problem."""
+        code = {
+            "password": "unsupported_password",
+            "address": "unsupported_stream_address",
+        }.get(exc.field, "invalid_credentials")
+        return cls(code, exc.message)
 
 
 @app.exception_handler(CredentialsRejected)
@@ -1177,10 +1212,7 @@ def _validated_credentials(body: object) -> tuple[str, str]:
     try:
         frigate_userinfo(username, password)
     except UnsafeStreamUrl as exc:
-        raise CredentialsRejected(
-            "unsupported_password" if exc.field == "password" else "invalid_credentials",
-            exc.message,
-        ) from None
+        raise CredentialsRejected.for_unsafe(exc) from None
     return username, password
 
 
@@ -1273,7 +1305,7 @@ async def _probe_credentials(
         outcome, path = await probe_with_credentials(
             ip, candidate, username, password, max_seconds=_CRED_RTSP_BUDGET_S
         )
-        if outcome in ("ok", "auth_failed", "locked"):
+        if outcome in ("ok", "auth_failed", "locked", "basic_only"):
             return outcome, candidate, path
         if outcome == "no_path" and not reachable:
             reachable, port = True, candidate
@@ -1307,7 +1339,7 @@ async def _probe_credentials(
     )
     if outcome == "ok":
         return "ok", probe_port, path
-    if outcome in ("auth_failed", "locked"):
+    if outcome in ("auth_failed", "locked", "basic_only"):
         return outcome, probe_port, None
     return "no_path", port, None
 
@@ -1325,10 +1357,13 @@ async def submit_camera_credentials(mac: str, request: Request):
     that is not the same string.
 
     Failure modes are distinct so the dashboard can say what is wrong:
-    422 ``auth_failed`` / 422 ``no_stream_path`` / 423 ``locked`` /
-    502 ``unreachable`` / 504 ``timeout``, and 400 ``invalid_credentials`` /
-    ``unsupported_password`` for input that cannot be used (nothing was tried on
-    the camera).
+    422 ``auth_failed`` / 422 ``no_stream_path`` / 422 ``basic_auth_only`` (the
+    camera only offers clear-text Basic and is not on CAMERA_RTSP_BASIC_ALLOW_IPS,
+    so nothing was sent) / 423 ``locked`` / 502 ``unreachable`` / 504 ``timeout``,
+    and 400 ``invalid_credentials`` / ``unsupported_password`` for input that
+    cannot be used (nothing was tried on the camera) or
+    ``unsupported_stream_address`` for a stream path that cannot be stored next to
+    this account (an ``@`` after the host — see rtsp_url.py).
 
     NET-05: gated by DEVICE_SECRET; the password is never logged, never put on
     MQTT, and the response carries no RTSP URL.
@@ -1384,10 +1419,7 @@ async def submit_camera_credentials(mac: str, request: Request):
         try:
             to_frigate_url(rtsp_url)  # the rule add_camera applies; say so BEFORE it fails there
         except UnsafeStreamUrl as exc:
-            raise CredentialsRejected(
-                "unsupported_password" if exc.field == "password" else "invalid_credentials",
-                exc.message,
-            ) from None
+            raise CredentialsRejected.for_unsafe(exc) from None
 
         name = camera.get("name", _sanitize_camera_name(camera.get("hostname", ""), ip))
         if not await frigate.add_camera(name, rtsp_url):
@@ -1397,7 +1429,6 @@ async def submit_camera_credentials(mac: str, request: Request):
 
         pending_cameras.pop(mac, None)
         camera["rtsp_url"] = rtsp_url
-        camera["username"] = username
         camera["port"] = port
         camera["detection_method"] = "operator_credentials"
         camera["status"] = "active"

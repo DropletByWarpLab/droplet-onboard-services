@@ -64,6 +64,23 @@ def ffmpeg_credentials(url: str) -> tuple[str, str]:
     return user, password
 
 
+def ffmpeg_host(url: str) -> str:
+    """The ``host[:port]`` ffmpeg connects to: what follows the LAST '@' of the authority.
+
+    The password is not the only thing Frigate's greedy pattern can misplace — a
+    stored URL whose '@' sits in the path moves this too, and the credentials then
+    go to whatever host that leaves.
+    """
+    rest = url.split("://", 1)[1]
+    authority = re.split(r"[/?#]", rest, maxsplit=1)[0]
+    return authority.rpartition("@")[2]
+
+
 def camera_receives(stored_path: str) -> tuple[str, str]:
     """The credentials the camera sees for a path stored in Frigate's config."""
     return ffmpeg_credentials(frigate_escape(stored_path))
+
+
+def camera_connects_to(stored_path: str) -> str:
+    """The ``host[:port]`` ffmpeg dials for a path stored in Frigate's config."""
+    return ffmpeg_host(frigate_escape(stored_path))

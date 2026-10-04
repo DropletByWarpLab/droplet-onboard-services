@@ -867,6 +867,23 @@ describe("errors are tied to the fields (F9)", () => {
 
 // ── F7 ──────────────────────────────────────────────────────────────────────
 describe("probing feedback (F7)", () => {
+  it("keeps focus on Close while the fieldset is disabled and traps both Tab directions", async () => {
+    const d = deferred();
+    addDiscoveredCameraWithCredentials.mockReturnValue(d.promise);
+    renderCredentials();
+    typeCreds("admin", "s3cret!");
+    screen.getByRole("button", { name: /Add camera/ }).focus();
+    submitCredentials();
+
+    const close = screen.getByRole("button", { name: "Close" });
+    await waitFor(() => expect(close).toHaveFocus());
+    fireEvent.keyDown(close, { key: "Tab" });
+    expect(close).toHaveFocus();
+    fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+    expect(close).toHaveFocus();
+    await act(async () => d.reject(coded("UNREACHABLE")));
+  });
+
   it("disables the whole form while probing and says what is happening and how long", async () => {
     const d = deferred();
     addDiscoveredCameraWithCredentials.mockReturnValue(d.promise);
@@ -995,24 +1012,25 @@ describe("lockout cooldown (F10)", () => {
     const add = screen.getByRole("button", { name: /Add camera/ });
     expect(add).toBeDisabled();
     expect(screen.getByText(/The camera has locked its account\./)).toBeTruthy();
-    expect(screen.getByText(/try again in 1:00/)).toBeTruthy();
+    expect(screen.getByText(/check again in 1:00/)).toBeTruthy();
+    expect(screen.getByText(/The camera may stay locked longer/)).toBeTruthy();
 
     act(() => {
       vi.advanceTimersByTime(15_000);
     });
-    expect(screen.getByText(/try again in 0:45/)).toBeTruthy();
+    expect(screen.getByText(/check again in 0:45/)).toBeTruthy();
     expect(add).toBeDisabled();
 
     act(() => {
       vi.advanceTimersByTime(44_000);
     });
-    expect(screen.getByText(/try again in 0:01/)).toBeTruthy();
+    expect(screen.getByText(/check again in 0:01/)).toBeTruthy();
     expect(add).toBeDisabled();
 
     act(() => {
       vi.advanceTimersByTime(1_000);
     });
-    expect(screen.queryByText(/try again in/)).toBeNull();
+    expect(screen.queryByText(/check again in/)).toBeNull();
     expect(screen.queryByText(/The camera has locked its account\./)).toBeNull();
     expect(screen.getByRole("button", { name: /Add camera/ })).toBeEnabled();
   });
@@ -1039,7 +1057,7 @@ describe("lockout cooldown (F10)", () => {
 
   it("the visible countdown is not itself a live region (it would re-announce every second)", async () => {
     await lockTheCamera();
-    const countdown = screen.getByText(/try again in 1:00/);
+    const countdown = screen.getByText(/check again in 1:00/);
     expect(countdown.closest("[aria-live]")).toBeNull();
     expect(countdown.closest("[role=alert]")).toBeNull();
   });
@@ -1050,7 +1068,7 @@ describe("lockout cooldown (F10)", () => {
     clickSetUp("Lobby");
     typeCreds("admin", "another");
     expect(screen.getByRole("button", { name: /Add camera/ })).toBeEnabled();
-    expect(screen.queryByText(/try again in/)).toBeNull();
+    expect(screen.queryByText(/check again in/)).toBeNull();
   });
 
   it("still holds the SAME camera if the operator leaves and comes back inside the minute", async () => {
@@ -1062,7 +1080,7 @@ describe("lockout cooldown (F10)", () => {
     clickSetUp("XNV C8083R");
     typeCreds("admin", "s3cret!");
     expect(screen.getByRole("button", { name: /Add camera/ })).toBeDisabled();
-    expect(screen.getByText(/try again in 0:40/)).toBeTruthy();
+    expect(screen.getByText(/check again in 0:40/)).toBeTruthy();
   });
 });
 

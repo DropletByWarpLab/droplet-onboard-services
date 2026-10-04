@@ -88,6 +88,20 @@ describe("camera credentials failures — copy per reason", () => {
     expect(copy).toMatch(/Check the username and password/);
   });
 
+  it("basic_auth_only explains that no password was sent and asks for Digest", async () => {
+    const copy = await copyFor(422, { error: "s3cret!", code: "basic_auth_only" });
+    expect(copy).toMatch(/didn't send your password/);
+    expect(copy).toMatch(/Digest/);
+    expect(copy).toMatch(/administrator/);
+    expect(copy).not.toContain("s3cret!");
+  });
+
+  it("unsupported_stream_address asks for camera stream settings instead of retyping the password", async () => {
+    const copy = await copyFor(400, { error: "s3cret!", code: "unsupported_stream_address" });
+    expect(copy).toMatch(/stream settings/);
+    expect(copy).not.toContain("s3cret!");
+  });
+
   it("the manual form's add explains an unsupported password the same way", async () => {
     authFetchMock.mockResolvedValue(failure(400, { error: "password cannot contain spaces", code: "unsupported_password" }));
     const err = await addCameraManual("cam", "rtsp://192.168.9.5/live", undefined, undefined, "admin", "has space").catch((e) => e);
@@ -105,6 +119,8 @@ describe("camera credentials failures — copy per reason", () => {
         "timeout",
         "invalid_credentials",
         "unsupported_password",
+        "basic_auth_only",
+        "unsupported_stream_address",
       ].map((code) =>
         copyFor(422, { error: "x", code }),
       ),

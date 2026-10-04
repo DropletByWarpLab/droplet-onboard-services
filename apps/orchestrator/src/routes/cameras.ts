@@ -667,6 +667,11 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!pathValid.ok) {
         return res.status(400).json({ error: pathValid.error });
       }
+      // WARP-3642 — only recorded clips are shareable: the path must sit under
+      // the clips folder, not anywhere in the person's Nextcloud.
+      if (!pathValid.path.startsWith(CLIPS_SHARE_PREFIX)) {
+        return res.status(400).json({ error: "nc_path must be inside the clips folder" });
+      }
 
       // Post-confirmation re-issue: the caller echoes the token from the 202.
       // The MCP principal is BARRED from confirming (mirrors the human-only
@@ -1995,17 +2000,18 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   //
   // A found camera whose password isn't a factory default sits at
   // `needs_credentials` forever: the discovery ladder only tries defaults and
-  // the dashboard had no field for the real ones. camera-discovery re-runs ONVIF
-  // GetStreamUri + the RTSP probe with these credentials and adds the camera
-  // itself on success (it holds the pending record and the probed path).
+  // the dashboard had no field for the real ones. camera-discovery probes RTSP
+  // with these credentials, asks ONVIF GetStreamUri only if no RTSP path was
+  // found, and adds the camera itself on success (it holds the pending record).
   //
   // Live (`mac:`) candidates only — a DB row has no probed stream to verify
   // against. NET-05: the body is forwarded to the internal service and nowhere
   // else — not logged, not stored, not echoed; failures return camera-discovery's
   // prose + a `code` (auth_failed | locked | no_stream_path | unreachable |
-  // timeout), and credentials that cannot be used at all are a 400 with
+  // timeout | basic_auth_only), and credentials that cannot be used at all are a 400 with
   // invalid_credentials | unsupported_password — refused before camera-discovery
-  // is asked, so no sign-in is spent on the camera.
+  // is asked, so no sign-in is spent on the camera. A discovered stream address
+  // that Frigate cannot safely store returns 400 unsupported_stream_address.
   router.post("/cameras/discovered/:id/credentials", sensitiveRateLimit, requireRole(...CAMERA_ADMIN_ROLES), async (req, res, next) => {
     try {
       const mac = macFromCandidateId(req.params.id);
@@ -3583,6 +3589,10 @@ function parseRecordingRange(req: import("express").Request):
   }
   return { after: a, before: Math.min(b, nowSec) };
 }
+
+/** WARP-3642 — the folder exportClip writes to (clips.service.ts CLIPS_NC_ROOT);
+ *  the only place a share link may point. */
+const CLIPS_SHARE_PREFIX = "/Clips/";
 
 /** Defense-in-depth path validation mirroring PR #1's validateNcPath
  *  logic. Reject traversal markers (raw and percent-decoded) so a caller
