@@ -129,7 +129,7 @@ const TURNS: Turn[] = [
   {
     label: "files / a Microsoft 365 file asked for by where it lives",
     message: "did anyone put the new staff roster on SharePoint yet?",
-    requires: "search_m365_files",
+    requires: "search_cloud_files",
   },
   {
     label: "cameras / the sentence a household actually types",

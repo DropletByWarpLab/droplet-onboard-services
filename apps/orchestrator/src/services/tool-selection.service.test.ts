@@ -1340,7 +1340,7 @@ describe("WARP-2896 — a workshop run's binding admits the workspace domain; no
  * WARP-3538 — OneDrive and SharePoint are asked after by PLACE, not by
  * container.
  *
- * `search_m365_files` lives in `files`, and nobody who wants it types one of
+ * `search_cloud_files` lives in `files`, and nobody who wants it types one of
  * that rule's nouns: "what did Dana change in the SharePoint this week" holds
  * no file, document, folder or pdf. It advertised the core four and not the one
  * tool that can answer it — a tool registered, budgeted and advertised on no
@@ -1353,11 +1353,11 @@ describe("WARP-2896 — a workshop run's binding admits the workspace domain; no
  * green. MUTATION: delete the rule and every positive goes red; drop either
  * product name from it and that name's sentences go red.
  */
-describe("WARP-3538 — OneDrive and SharePoint reach search_m365_files from a fresh turn", () => {
-  const M365_POOL = [...POOL, "search_m365_files", "list_recent_files"];
+describe("WARP-3538 — OneDrive and SharePoint reach search_cloud_files from a fresh turn", () => {
+  const CLOUD_FILES_POOL = [...POOL, "search_cloud_files", "list_recent_files"];
 
   const advertisedFor = (userMessage: string, conversationToolNames: string[] = []) =>
-    selectAdvertisedTools({ mode: "domains", userMessage, pool: M365_POOL, conversationToolNames }).advertised;
+    selectAdvertisedTools({ mode: "domains", userMessage, pool: CLOUD_FILES_POOL, conversationToolNames }).advertised;
 
   describe("positives — how a person asks after a file by where it lives", () => {
     it.each([
@@ -1369,7 +1369,7 @@ describe("WARP-3538 — OneDrive and SharePoint reach search_m365_files from a f
       "check my One-Drive for the roofer's paperwork",
     ])("%s", (message) => {
       const advertised = advertisedFor(message);
-      expect(advertised).toContain("search_m365_files");
+      expect(advertised).toContain("search_cloud_files");
       // The domain is admitted whole: its siblings come with it.
       expect(advertised).toContain("list_recent_files");
     });
@@ -1386,14 +1386,19 @@ describe("WARP-3538 — OneDrive and SharePoint reach search_m365_files from a f
       // files, and `microsoft 365` in a calendar question must not buy `files`.
       "is my Microsoft 365 calendar syncing properly?",
       "I would like to share a point about the budget at the meeting",
+      // The tool is provider-agnostic, but the word "cloud" is not claimed: this
+      // product's customers type it about backups, cameras and privacy as often
+      // as about files, and each would buy the whole domain.
+      "is any of my camera footage being sent to the cloud?",
+      "should the Droplet back itself up to the cloud overnight?",
     ])("%s does not advertise the files domain", (message) => {
-      expect(advertisedFor(message)).not.toContain("search_m365_files");
+      expect(advertisedFor(message)).not.toContain("search_cloud_files");
     });
   });
 
-  it("a conversation that already searched Microsoft 365 keeps the files domain on a bare follow-up", () => {
+  it("a conversation that already searched cloud files keeps the files domain on a bare follow-up", () => {
     // "and the one before that?" names nothing; continuity carries it.
-    expect(advertisedFor("and the one before that?", ["search_m365_files"])).toContain("list_recent_files");
+    expect(advertisedFor("and the one before that?", ["search_cloud_files"])).toContain("list_recent_files");
     expect(advertisedFor("and the one before that?")).not.toContain("list_recent_files");
   });
 });

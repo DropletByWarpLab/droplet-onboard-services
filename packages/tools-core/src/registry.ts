@@ -65,11 +65,12 @@ import createSpreadsheet from "./handlers/files/create-spreadsheet.js";
 import analyzeFileCleanup from "./handlers/files/analyze-file-cleanup.js";
 import organizeFiles from "./handlers/files/organize-files.js";
 import deleteFiles from "./handlers/files/delete-files.js";
-// WARP-3538 — the person's own OneDrive and SharePoint file lists (metadata
-// only), landed by the Microsoft 365 connector and read through the
-// orchestrator. In `files` because it answers "where is my file", on the
-// vocabulary that domain's selection rule already carries.
-import searchM365Files from "./handlers/files/search-m365-files.js";
+// WARP-3538 — the person's own cloud-drive file lists (metadata only; OneDrive
+// and SharePoint today, Google Drive and Dropbox into the same store later),
+// landed by the connectors and read through the orchestrator. In `files`
+// because it answers "where is my file", on the vocabulary that domain's
+// selection rule already carries.
+import searchCloudFiles from "./handlers/files/search-cloud-files.js";
 
 // smart-home
 import listSmartHomeDevices from "./handlers/smart-home/list-smart-home-devices.js";
@@ -316,9 +317,9 @@ const allTools: Tool[] = [
   analyzeFileCleanup,
   organizeFiles,
   deleteFiles,
-  // WARP-3538: OneDrive + SharePoint file search (Tier-1 read, acting person's
-  // rows only, never contents)
-  searchM365Files,
+  // WARP-3538: cloud-drive file search — OneDrive + SharePoint today (Tier-1
+  // read, acting person's rows only, never contents)
+  searchCloudFiles,
   // smart-home
   listSmartHomeDevices,
   getSmartHomeDevice,
