@@ -15,8 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY services/oled-display/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY services/oled-display/requirements.lock .
+RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements.lock
 COPY services/oled-display/ .
 
 # WARP-229: ship the FIPS-provider OpenSSL config + shared self-test
