@@ -1147,7 +1147,7 @@ async function main() {
       const dnsBlockDeleted = await purgeDnsBlockSamples(prisma, 30);
       // WARP-586: retention purge for the append-only audit/log tables
       // (ActivityRow, CommandAuditLog, NotificationLog). Window is
-      // operator-tunable via DROPLET_AUDIT_RETENTION_DAYS (default 90);
+      // operator-tunable via DROPLET_AUDIT_RETENTION_DAYS (default 365, minimum 90);
       // <= 0 disables the purge. ActivityRow is hash-chained, so this is
       // an id-contiguous oldest-prefix seal-and-truncate, not a mid-chain
       // delete — see audit-retention-purge.service.ts for the integrity

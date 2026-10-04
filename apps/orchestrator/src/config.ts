@@ -61,6 +61,31 @@ export function resolveAgentIterLimits(
   return { defaultIter, capIter };
 }
 
+/** WARP-3639: shortest audit/log retention window the box accepts, in days.
+ *  0 (keep forever) is exempt. Exported for tests and docs. */
+export const AUDIT_RETENTION_MIN_DAYS = 90;
+
+/** Raise a configured audit retention window below the floor up to it, with a
+ *  structured warning, instead of crashing boot or silently purging early.
+ *  0 passes through: it disables the purge. Exported for tests. */
+export function resolveAuditRetentionDays(
+  days: number,
+  warn: (msg: string) => void = (msg) => {
+    void import("./lib/logger.js").then(({ createLogger }) =>
+      createLogger("config").warn(msg),
+    );
+  },
+): number {
+  if (days > 0 && days < AUDIT_RETENTION_MIN_DAYS) {
+    warn(
+      `config: DROPLET_AUDIT_RETENTION_DAYS (${days}) is below the ` +
+        `${AUDIT_RETENTION_MIN_DAYS}-day minimum; raising it to ${AUDIT_RETENTION_MIN_DAYS}`,
+    );
+    return AUDIT_RETENTION_MIN_DAYS;
+  }
+  return days;
+}
+
 /**
  * WARP-2177 — the durable-run worker's knobs, resolved once.
  *
@@ -936,17 +961,22 @@ const envSchema = z.object({
     .default("0")
     .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
 
-  // WARP-586: retention window (days) for the append-only audit/log tables
-  // ActivityRow, CommandAuditLog, NotificationLog. The daily 03:00 cron
-  // (index.ts) deletes rows older than this. 90 days balances "enough
-  // history for the dashboard's activity feed + an incident look-back"
-  // against unbounded table growth. Set 0 to disable the purge entirely —
-  // the safe "keep forever" stance, NOT a sentinel: 0 parses here and
-  // audit-retention-purge.service.ts treats <= 0 as "skip" (defense in
-  // depth). A negative window is nonsensical input, so the schema rejects
-  // it at startup (fail fast) rather than silently treating it as disable;
-  // .int() rejects sub-day floats and .finite() rejects Infinity.
-  DROPLET_AUDIT_RETENTION_DAYS: z.coerce.number().int().min(0).finite().default(90),
+  // WARP-586 / WARP-3639: retention window (days) for the append-only
+  // audit/log tables ActivityRow, CommandAuditLog, NotificationLog. The daily
+  // 03:00 cron (index.ts) deletes rows older than this. Default 365 days: SOC 2
+  // Type II observation windows and ISO/IEC 27001 A.8.15 expect about twelve
+  // months of retrievable security logs (the default was 90 before WARP-3639).
+  // Rows a box already purged under the old window are gone and cannot be
+  // recovered by raising this. Lower values are raised to
+  // AUDIT_RETENTION_MIN_DAYS (90) at startup with a warning (see
+  // resolveAuditRetentionDays), so a stale override cannot quietly erase the
+  // security trail; 0 is the only way below that, the explicit "keep forever"
+  // stance, NOT a sentinel: 0 parses here and audit-retention-purge.service.ts
+  // treats <= 0 as "skip" (defense in depth). A negative window is nonsensical
+  // input, so the schema rejects it at startup (fail fast) rather than silently
+  // treating it as disable; .int() rejects sub-day floats and .finite()
+  // rejects Infinity.
+  DROPLET_AUDIT_RETENTION_DAYS: z.coerce.number().int().min(0).finite().default(365),
 
   // WARP-2463: retention window (days) for ErpDriftRecord — the reconciliation
   // sweep's stored drift report. Its own 03:30 cron leg trims rows older than
@@ -1759,6 +1789,10 @@ export const config = {
   // fail-closed posture (resolved from the literal env string). Production
   // always resolves to true; non-production honours an explicit opt-out only.
   AUTH_ENABLED: resolveAuthEnabled(process.env.AUTH_ENABLED, parsed.NODE_ENV),
+  // WARP-3639 — effective window, floored; see resolveAuditRetentionDays.
+  DROPLET_AUDIT_RETENTION_DAYS: resolveAuditRetentionDays(
+    parsed.DROPLET_AUDIT_RETENTION_DAYS,
+  ),
   corsAllowedOrigins: resolveCorsAllowedOrigins(
     parsed.CORS_ALLOWED_ORIGINS,
     parsed.NODE_ENV,

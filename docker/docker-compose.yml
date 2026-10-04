@@ -2940,6 +2940,11 @@ services:
       # hex string to .env; if missing the container generates an
       # ephemeral one and logs only its sha256 fingerprint (NOT for production).
       - OPS_TOKEN=${OPS_TOKEN:-}
+      # WARP-3641: end of the support window, ISO-8601 (e.g.
+      # 2026-10-04T18:00:00Z). After it every /ops/* request is refused even
+      # with the right token. Empty = no expiry. An unparseable value closes
+      # the window. Whoever enables the `ops` profile for an engagement sets it.
+      - OPS_ACCESS_EXPIRES_AT=${OPS_ACCESS_EXPIRES_AT:-}
       # Per-service probe URLs. Defaults verified live on the single-box 2026-05-15.
       # Empty default = container exists but exposes no HTTP /health
       # endpoint; surfaces as `unknown` (relies on /ops/containers for
