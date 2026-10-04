@@ -6,8 +6,9 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SafetyChip } from "@/components/integrations/SafetyChip";
 import { useToast } from "@/components/Toast";
 import { fetchRetentionBackfillPlan, runRetentionBackfill } from "@/lib/api";
+import { describeRepairWindows } from "@/lib/camera-recording";
 import { isCamerasUnavailableError } from "@/lib/files-unavailable";
-import type { CameraInfo } from "@/lib/types";
+import type { CameraInfo, RetentionBackfillDefaults } from "@/lib/types";
 
 /**
  * WARP-3511 — the repair for a camera that is "Live · not saving".
@@ -45,6 +46,8 @@ export function RetentionFixButton({
   const { toast } = useToast();
   const [checking, setChecking] = useState(false);
   const [targets, setTargets] = useState<string[] | null>(null);
+  // What the repair will write, from the box. Never a figure of our own.
+  const [willKeep, setWillKeep] = useState<RetentionBackfillDefaults | undefined>(undefined);
 
   const nameOf = (key: string) =>
     cameras.find((c) => c.name === key)?.displayName ?? key.replace(/_/g, " ");
@@ -60,7 +63,7 @@ export function RetentionFixButton({
     if (checking) return;
     setChecking(true);
     try {
-      const plan = await fetchRetentionBackfillPlan();
+      const { plan, defaults } = await fetchRetentionBackfillPlan();
       const willWrite = plan.filter((p) => p.willWrite).map((p) => p.camera);
       if (!willWrite.includes(cameraName)) {
         toast(
@@ -69,6 +72,7 @@ export function RetentionFixButton({
         );
         return;
       }
+      setWillKeep(defaults);
       setTargets(willWrite);
     } catch (e) {
       toast(failure(e), "error");
@@ -117,7 +121,9 @@ export function RetentionFixButton({
         title="Start saving footage?"
         description={`This gives ${(targets ?? []).map(nameOf).join(", ")} the retention a new camera gets, so ${
           (targets ?? []).length === 1 ? "it starts" : "they start"
-        } saving footage. It restarts the camera service, so every camera drops for a few seconds.`}
+        } saving footage.${
+          describeRepairWindows(willKeep) ? ` It keeps ${describeRepairWindows(willKeep)}.` : ""
+        } It restarts the camera service, so every camera drops for a few seconds.`}
         confirmLabel="Fix"
         variant="neutral"
         accessory={<SafetyChip variant="write" />}

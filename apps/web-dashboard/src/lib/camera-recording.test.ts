@@ -24,6 +24,7 @@ import {
   isServiceDegraded,
   maxRetentionDays,
   modeTooltip,
+  describeRepairWindows,
   statusLabel,
   summarizeStoredFootage,
 } from "./camera-recording";
@@ -145,6 +146,27 @@ describe("retention", () => {
     expect(formatDays(1)).toBe("1 day");
     expect(formatDays(3)).toBe("3 days");
     expect(formatDays(0.5)).toBe("0.5 days");
+  });
+});
+
+describe("describeRepairWindows — what the repair would keep, from the box's own figures", () => {
+  it("names each open window with the days the box reported", () => {
+    expect(
+      describeRepairWindows({ continuousDays: 13, motionDays: 17, alertsRetainDays: 23, detectionsRetainDays: 29 }),
+    ).toBe("24/7 footage: 13 days · Motion footage: 17 days · Alert clips: 23 days · Other detections: 29 days");
+  });
+
+  it("leaves a closed window out", () => {
+    expect(
+      describeRepairWindows({ continuousDays: 0, motionDays: 7, alertsRetainDays: 0, detectionsRetainDays: 0 }),
+    ).toBe("Motion footage: 7 days");
+  });
+
+  it("is empty when the box reported no figures, or all windows are closed", () => {
+    expect(describeRepairWindows(undefined)).toBe("");
+    expect(
+      describeRepairWindows({ continuousDays: 0, motionDays: 0, alertsRetainDays: 0, detectionsRetainDays: 0 }),
+    ).toBe("");
   });
 });
 

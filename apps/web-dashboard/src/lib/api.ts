@@ -35,7 +35,7 @@ import type {
   PtzCapabilities,
   RecordingDay,
   RecordingSegment,
-  RetentionBackfillPlanEntry,
+  RetentionBackfillPreview,
   RetentionBackfillResult,
   ReviewFilter,
   FilteredReviewsResult,
@@ -2904,14 +2904,15 @@ function cameraServiceDown(res: Response): boolean {
 
 /**
  * WARP-3511 — dry run of the retention repair: which cameras have no retention
- * authored at all and would be given the standard windows. A camera whose
- * windows were set to zero on purpose is not in the repair's reach.
+ * authored at all and would be given the standard windows, and what those
+ * windows are on this box. A camera whose windows were set to zero on purpose
+ * is not in the repair's reach.
  */
-export async function fetchRetentionBackfillPlan(): Promise<RetentionBackfillPlanEntry[]> {
+export async function fetchRetentionBackfillPlan(): Promise<RetentionBackfillPreview> {
   const res = await authFetch(`${BASE}/api/cameras/retention/backfill`);
   if (!res.ok) throw await cameraActionError(res, `Failed to check retention: ${res.status}`);
-  const body = (await res.json()) as { plan?: RetentionBackfillPlanEntry[] };
-  return body.plan ?? [];
+  const body = (await res.json()) as Partial<RetentionBackfillPreview>;
+  return { plan: body.plan ?? [], defaults: body.defaults };
 }
 
 /**

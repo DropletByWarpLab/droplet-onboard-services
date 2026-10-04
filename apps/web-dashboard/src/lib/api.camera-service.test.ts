@@ -166,11 +166,23 @@ describe("disable — the confirm step is where the write happens", () => {
 });
 
 describe("retention repair", () => {
-  it("reads the dry-run plan", async () => {
+  it("reads the dry-run plan and the windows the repair would write", async () => {
+    const plan = [{ camera: "front_door", reason: "no_retention_authored", willWrite: true }];
+    const defaults = { continuousDays: 13, motionDays: 17, alertsRetainDays: 23, detectionsRetainDays: 29 };
+    authFetchMock.mockResolvedValue(res(200, { plan, defaults }));
+    await expect(fetchRetentionBackfillPlan()).resolves.toEqual({ plan, defaults });
+    expect(String(authFetchMock.mock.calls[0][0])).toContain("/api/cameras/retention/backfill");
+  });
+
+  it("a box that sends no defaults still gives the plan, and says nothing about figures", async () => {
     const plan = [{ camera: "front_door", reason: "no_retention_authored", willWrite: true }];
     authFetchMock.mockResolvedValue(res(200, { plan }));
-    await expect(fetchRetentionBackfillPlan()).resolves.toEqual(plan);
-    expect(String(authFetchMock.mock.calls[0][0])).toContain("/api/cameras/retention/backfill");
+    await expect(fetchRetentionBackfillPlan()).resolves.toEqual({ plan, defaults: undefined });
+  });
+
+  it("a body with no plan is an empty plan", async () => {
+    authFetchMock.mockResolvedValue(res(200, {}));
+    await expect(fetchRetentionBackfillPlan()).resolves.toEqual({ plan: [], defaults: undefined });
   });
 
   it("applies it with a POST and returns what was written", async () => {

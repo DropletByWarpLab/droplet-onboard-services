@@ -31,6 +31,10 @@ const cameras = [
   { name: "garage", displayName: "Garage" },
 ];
 
+// Deliberately unlike any shipped default: any figure in the dialog that is not
+// one of these was written into the copy.
+const DEFAULTS = { continuousDays: 13, motionDays: 17, alertsRetainDays: 23, detectionsRetainDays: 29 };
+
 const entry = (camera: string, willWrite: boolean) => ({
   camera,
   willWrite,
@@ -51,7 +55,7 @@ afterEach(cleanup);
 
 describe("when the repair can help this camera", () => {
   it("asks first, naming every camera it will touch, and says it restarts the service", async () => {
-    h.plan.mockResolvedValue([entry("front_door", true), entry("garage", true)]);
+    h.plan.mockResolvedValue({ plan: [entry("front_door", true), entry("garage", true)], defaults: DEFAULTS });
     renderFix();
 
     clickFix();
@@ -64,16 +68,37 @@ describe("when the repair can help this camera", () => {
     expect(h.run).not.toHaveBeenCalled();
   });
 
-  it("does not hard-code any retention figure into the confirm", async () => {
-    h.plan.mockResolvedValue([entry("front_door", true)]);
+  it("states what it will keep using the BOX's figures, so the person knows what they are agreeing to", async () => {
+    h.plan.mockResolvedValue({ plan: [entry("front_door", true)], defaults: DEFAULTS });
+    renderFix();
+    clickFix();
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain(
+      "24/7 footage: 13 days · Motion footage: 17 days · Alert clips: 23 days · Other detections: 29 days",
+    );
+  });
+
+  it("never writes a retention figure into the copy itself: every day count is the box's", async () => {
+    h.plan.mockResolvedValue({ plan: [entry("front_door", true)], defaults: DEFAULTS });
+    renderFix();
+    clickFix();
+    const dialog = await screen.findByRole("dialog");
+    const counts = [...(dialog.textContent ?? "").matchAll(/(\d+(?:\.\d+)?)\s+days?/g)].map((m) => Number(m[1]));
+    expect(counts.length).toBeGreaterThan(0);
+    for (const n of counts) expect([13, 17, 23, 29]).toContain(n);
+  });
+
+  it("says no figure at all when the box reported none — it does not guess", async () => {
+    h.plan.mockResolvedValue({ plan: [entry("front_door", true)], defaults: undefined });
     renderFix();
     clickFix();
     const dialog = await screen.findByRole("dialog");
     expect(dialog.textContent).not.toMatch(/\d+\s*days?/i);
+    expect(dialog.textContent).toMatch(/starts saving footage/);
   });
 
   it("applies it on confirm, tells the household, and lets the page refresh", async () => {
-    h.plan.mockResolvedValue([entry("front_door", true)]);
+    h.plan.mockResolvedValue({ plan: [entry("front_door", true)], defaults: DEFAULTS });
     h.run.mockResolvedValue({ planned: [], written: ["front_door"], noop: false });
     const { onDone } = renderFix();
 
@@ -87,7 +112,7 @@ describe("when the repair can help this camera", () => {
   });
 
   it("cancelling changes nothing", async () => {
-    h.plan.mockResolvedValue([entry("front_door", true)]);
+    h.plan.mockResolvedValue({ plan: [entry("front_door", true)], defaults: DEFAULTS });
     renderFix();
     clickFix();
     await screen.findByRole("dialog");
@@ -97,7 +122,7 @@ describe("when the repair can help this camera", () => {
   });
 
   it("a failed repair is said, and the dialog stays so it can be tried again", async () => {
-    h.plan.mockResolvedValue([entry("front_door", true)]);
+    h.plan.mockResolvedValue({ plan: [entry("front_door", true)], defaults: DEFAULTS });
     h.run.mockRejectedValue(new Error("The camera service refused the change (400)"));
     const { onDone } = renderFix();
 
@@ -115,7 +140,7 @@ describe("when the repair can help this camera", () => {
 
 describe("when the repair cannot help this camera", () => {
   it("a camera switched off on purpose is pointed at Settings — the box is NOT restarted for nothing", async () => {
-    h.plan.mockResolvedValue([entry("front_door", false), entry("garage", true)]);
+    h.plan.mockResolvedValue({ plan: [entry("front_door", false), entry("garage", true)], defaults: DEFAULTS });
     renderFix();
 
     clickFix();
@@ -129,7 +154,7 @@ describe("when the repair cannot help this camera", () => {
   });
 
   it("a camera missing from the plan is treated the same", async () => {
-    h.plan.mockResolvedValue([entry("garage", true)]);
+    h.plan.mockResolvedValue({ plan: [entry("garage", true)], defaults: DEFAULTS });
     renderFix();
     clickFix();
     await waitFor(() => expect(h.toast).toHaveBeenCalled());
@@ -164,7 +189,7 @@ describe("the button", () => {
     renderFix();
     clickFix();
     expect((screen.getByRole("button", { name: /^Fix:/ }) as HTMLButtonElement).disabled).toBe(true);
-    release([entry("front_door", false)]);
+    release({ plan: [entry("front_door", false)], defaults: DEFAULTS });
     await waitFor(() => expect(h.toast).toHaveBeenCalled());
     expect(h.plan).toHaveBeenCalledTimes(1);
   });

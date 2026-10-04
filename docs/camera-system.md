@@ -325,8 +325,11 @@ they write the persisted `detect.enabled` setting (Frigate 0.17 has no
 
 A camera that is "Live · not saving" can be repaired from its own screen with **Fix**,
 which runs the retention backfill (`GET`/`POST /api/cameras/retention/backfill`, owner
-and admin). It checks first and names every camera it will touch, and for a camera
-whose retention was switched off on purpose it points at Settings instead.
+and admin). It checks first and names every camera it will touch, and states what it
+will keep: the `GET` dry run returns the repair's effective defaults next to the plan
+(the same `resolveRetentionDefaults()` the `POST` applies, set per box through the
+`NVR_DEFAULT_*` variables), so no figure is written into the dashboard's copy. For a
+camera whose retention was switched off on purpose it points at Settings instead.
 
 ### Notifications
 

@@ -24,6 +24,7 @@ import type {
   CameraRecordingState,
   RecordingDay,
   RecordingMode,
+  RetentionBackfillDefaults,
   RetentionWindows,
 } from "./types";
 
@@ -117,6 +118,25 @@ export function describeRetention(
     label: WINDOW_LABEL[key],
     days: windows[key],
   }));
+}
+
+/**
+ * What the retention repair would keep, as one line, from the box's own
+ * figures: "24/7 footage: 7 days · Motion footage: 30 days · …". Empty when the
+ * box reported none (an older box) or every window is closed, so the caller says
+ * nothing rather than guessing a number.
+ */
+export function describeRepairWindows(defaults: RetentionBackfillDefaults | null | undefined): string {
+  if (!defaults) return "";
+  const windows: RetentionWindows = {
+    continuous: defaults.continuousDays,
+    motion: defaults.motionDays,
+    alerts: defaults.alertsRetainDays,
+    detections: defaults.detectionsRetainDays,
+  };
+  return WINDOW_ORDER.filter((key) => windows[key] > 0)
+    .map((key) => `${WINDOW_LABEL[key]}: ${formatDays(windows[key])}`)
+    .join(" · ");
 }
 
 /** The longest open window: how far back anything might be. 0 when nothing is kept or known. */

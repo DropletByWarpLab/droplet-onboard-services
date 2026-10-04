@@ -2674,6 +2674,25 @@ export interface RetentionBackfillPlanEntry {
   willWrite: boolean;
 }
 
+/**
+ * The windows the retention repair would write, as the box reports them. They
+ * are the box's own effective defaults (configurable, and changing by
+ * release), so they are shown from here and never written into copy.
+ */
+export interface RetentionBackfillDefaults {
+  continuousDays: number;
+  motionDays: number;
+  alertsRetainDays: number;
+  detectionsRetainDays: number;
+}
+
+/** The repair's dry run: who it would touch, and what it would write. */
+export interface RetentionBackfillPreview {
+  plan: RetentionBackfillPlanEntry[];
+  /** Absent on a box older than the field; say no figure rather than guess one. */
+  defaults?: RetentionBackfillDefaults;
+}
+
 export interface RetentionBackfillResult {
   planned: RetentionBackfillPlanEntry[];
   written: string[];
