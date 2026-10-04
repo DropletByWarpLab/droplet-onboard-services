@@ -240,6 +240,25 @@ describe("finalizeUpload", () => {
     expect(f.db.activity).toEqual([]);
   });
 
+  it("an ambiguous commit error AFTER the READY flip leaves the published file alone", async () => {
+    const f = makeFake();
+    const ticket = await startUpload(f);
+    // The flip commits, then the connection dies before the client hears about it.
+    const db = f.prisma as unknown as { $transaction: (fn: (tx: unknown) => Promise<unknown>) => Promise<unknown> };
+    const commit = db.$transaction.bind(db);
+    db.$transaction = async (fn) => {
+      await commit(fn);
+      throw new Error("connection lost at commit");
+    };
+
+    await expect(
+      finalizeUpload(f.prisma, { ticket, workItemId: "wi-1", actorId: "u-1", file: file(), root }),
+    ).rejects.toThrow("connection lost at commit");
+
+    expect(f.db.attachments[0].status).toBe("READY"); // it DID publish...
+    expect(blobExists(ticket.storageKey)).toBe(true); // ...so its file must still be there
+  });
+
   it("never flips a row that is not UPLOADING (a sweep already claimed it)", async () => {
     const f = makeFake();
     const ticket = await startUpload(f);
@@ -270,23 +289,42 @@ describe("abortUpload", () => {
     await expect(abortUpload(f.prisma, ticket, root)).resolves.toBeUndefined();
   });
 
-  it("never throws, and still removes the blob, when the database is down — the sweep owns the row", async () => {
+  it("never throws when the database is down — and touches NOTHING: the row's state is unknown, and the sweep reaps it", async () => {
     const f = makeFake();
     const ticket = await startUpload(f);
     f.hooks.updateManyError = new Error("db down");
     await expect(abortUpload(f.prisma, ticket, root)).resolves.toBeUndefined();
-    expect(blobExists(ticket.storageKey)).toBe(false);
-    expect(f.db.attachments).toHaveLength(1); // still UPLOADING: the sweep reaps it after an hour
+    // It cannot tell UPLOADING from "published a moment ago", so the blob stays:
+    // the row is still UPLOADING and the sweep takes both after an hour.
+    expect(blobExists(ticket.storageKey)).toBe(true);
+    expect(f.db.attachments).toHaveLength(1);
     expect(f.db.attachments[0].status).toBe("UPLOADING");
   });
 
-  it("does not delete a READY row (a late abort cannot take a published file)", async () => {
+  it("NEVER deletes a READY row or its blob (a late abort cannot take a published file)", async () => {
     const f = makeFake();
     const ticket = await startUpload(f);
     f.db.attachments[0].status = "READY";
     await abortUpload(f.prisma, ticket, root);
     expect(f.db.attachments).toHaveLength(1);
     expect(f.db.attachments[0].status).toBe("READY");
+    expect(blobExists(ticket.storageKey)).toBe(true); // the file a download will ask for
+  });
+
+  it("still removes the blob when the row is already gone (the cascade took it)", async () => {
+    const f = makeFake();
+    const ticket = await startUpload(f);
+    f.db.attachments = [];
+    await abortUpload(f.prisma, ticket, root);
+    expect(blobExists(ticket.storageKey)).toBe(false);
+  });
+
+  it.each(["FAILED", "DELETED"])("still removes the blob of a row that is already %s (garbage the sweep would take)", async (status) => {
+    const f = makeFake();
+    const ticket = await startUpload(f);
+    f.db.attachments[0].status = status;
+    await abortUpload(f.prisma, ticket, root);
+    expect(blobExists(ticket.storageKey)).toBe(false);
   });
 });
 

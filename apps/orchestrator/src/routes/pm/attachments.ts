@@ -233,6 +233,14 @@ export function createPmAttachmentsRouter(
         commentId: query.data.comment_id,
       });
 
+      // The client may have hung up while the database was busy. multer attaches
+      // its own close/aborted listeners only when it runs, just below, so an upload
+      // that is already dead would otherwise wait out the hour-long sweep.
+      if (req.destroyed || req.socket?.destroyed) {
+        await abortUpload(prisma, ticket, root);
+        return;
+      }
+
       const parse = multer({
         storage: createAttachmentStorage(root, ticket.storageKey),
         // The same two parser settings routes/files.ts uses: UTF-8 names, and the
@@ -261,6 +269,10 @@ export function createPmAttachmentsRouter(
       // finalizeUpload cleans up after its own failures; everything earlier (the
       // parse, the cap, a client that went away) is cleaned up here. Idempotent.
       if (ticket) await abortUpload(prisma, ticket, root);
+      // A client that left cannot be answered, and multer's "Request aborted" is
+      // not a server error worth a stack trace (the drawer aborts in-flight
+      // uploads when it closes, by design).
+      if (req.socket?.destroyed) return;
       if (mapAttachmentError(err, res, maxBytes)) return;
       next(err);
     }

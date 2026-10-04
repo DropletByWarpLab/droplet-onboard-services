@@ -84,6 +84,7 @@ export function makeAttachmentFake() {
         return take === undefined ? rows : rows.slice(0, take);
       },
       findFirst: async ({ where }: { where: Row }) => db.attachments.find((a) => matches(a, where)) ?? null,
+      findUnique: async ({ where }: { where: Row }) => db.attachments.find((a) => a.id === where.id) ?? null,
       findUniqueOrThrow: async ({ where }: { where: Row }) => {
         const row = db.attachments.find((a) => a.id === where.id);
         if (!row) throw new Error("not found");

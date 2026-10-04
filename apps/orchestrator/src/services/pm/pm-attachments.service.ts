@@ -207,7 +207,14 @@ export async function beginUpload(
  * throws: it runs on the failure path of something else, and whatever it cannot
  * finish (database down, unlink refused) is exactly what the sweep is for.
  *
- * FAILED first, so the row is the sweep's even if the rest does not happen.
+ * It NEVER unlinks the blob of a READY row. This runs on the error path of
+ * `finalizeUpload`, and an error after the READY flip (an ambiguous commit, a
+ * throw once the upload is published) must not turn a published file into a row
+ * whose download 404s forever. So the blob goes only when the conditional flip to
+ * FAILED just claimed the row, or the row is already gone / already garbage. If
+ * the row's state cannot be read at all (the database is down), nothing is
+ * touched: the row stays UPLOADING and the sweep reaps it, blob included, after
+ * an hour — safe whichever way the commit went.
  */
 export async function abortUpload(
   prisma: PrismaClient,
@@ -215,14 +222,18 @@ export async function abortUpload(
   root: string = config.PM_ATTACHMENTS_DIR,
 ): Promise<void> {
   try {
-    await prisma.pmAttachment.updateMany({
+    const flipped = await prisma.pmAttachment.updateMany({
       where: { id: ticket.id, status: "UPLOADING" },
       data: { status: "FAILED" },
     });
-  } catch (err) {
-    logger.warn({ err, attachmentId: ticket.id }, "could not mark an aborted upload FAILED");
-  }
-  try {
+    if (flipped.count === 0) {
+      // Not UPLOADING any more: published, already garbage, or gone.
+      const row = await prisma.pmAttachment.findUnique({
+        where: { id: ticket.id },
+        select: { status: true },
+      });
+      if (row?.status === "READY") return;
+    }
     await removeBlob(root, ticket.storageKey);
     await prisma.pmAttachment.deleteMany({ where: { id: ticket.id, status: "FAILED" } });
   } catch (err) {

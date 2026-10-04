@@ -14,6 +14,7 @@ import request from "supertest";
 import type { NextFunction, Request, Response } from "express";
 import { createHash, randomUUID } from "node:crypto";
 import http from "node:http";
+import net from "node:net";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -506,6 +507,100 @@ describe("limits that protect the box (review: a stolen session must not be able
       expect((await request(json).post("/api/pm/work-items/wi-1/attachments").send({})).status).toBe(400);
       expect(asked).toBe(0);
     });
+  });
+});
+
+describe("a client that hangs up", () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  /** The router with its error handler observable: a client that left is not a server error. */
+  function observed(fake: ReturnType<typeof makeAttachmentFake>) {
+    const errors: string[] = [];
+    const app = express();
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      req.user = { id: "u-alice", username: "alice", displayName: "alice", role: "family" } as AuthUser;
+      next();
+    });
+    app.use("/api", createPmAttachmentsRouter(fake.prisma, { root, maxBytes: 1_000_000 }));
+    app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+      errors.push(err.message);
+      if (!res.headersSent) res.status(500).end();
+    });
+    return { app, errors };
+  }
+
+  /** Start a multipart upload on a raw socket and hang up `afterMs` later, body unfinished. */
+  function hangUpAfter(server: http.Server, afterMs: number): Promise<void> {
+    const { port } = server.address() as { port: number };
+    const boundary = "----leaves";
+    return new Promise((resolve) => {
+      const sock = net.connect(port, "127.0.0.1", () => {
+        sock.write(
+          `POST /api/pm/work-items/wi-1/attachments HTTP/1.1\r\nHost: x\r\n` +
+            `Content-Type: multipart/form-data; boundary=${boundary}\r\nContent-Length: 500000\r\n\r\n` +
+            `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="e.bin"\r\n` +
+            `Content-Type: application/octet-stream\r\n\r\n`,
+        );
+        sock.write(Buffer.alloc(5_000, 1));
+        setTimeout(() => {
+          sock.destroy();
+          resolve();
+        }, afterMs);
+      });
+    });
+  }
+
+  async function until(check: () => boolean, ms = 3000): Promise<boolean> {
+    for (let waited = 0; waited < ms; waited += 25) {
+      if (check()) return true;
+      await sleep(25);
+    }
+    return check();
+  }
+
+  it("while beginUpload is still waiting on the database: the handler settles and the row is marked FAILED, not left UPLOADING for an hour", async () => {
+    const fake = makeAttachmentFake();
+    const prisma = fake.prisma as unknown as {
+      pmWorkItem: { findUnique: (a: unknown) => Promise<unknown> };
+      pmAttachment: { updateMany: (a: { data: { status?: string } }) => Promise<unknown> };
+    };
+    // a loaded database: the client leaves before the lookup comes back
+    const lookup = prisma.pmWorkItem.findUnique.bind(prisma.pmWorkItem);
+    prisma.pmWorkItem.findUnique = async (a) => {
+      await sleep(400);
+      return lookup(a);
+    };
+    const flips: string[] = [];
+    const flip = prisma.pmAttachment.updateMany.bind(prisma.pmAttachment);
+    prisma.pmAttachment.updateMany = async (a) => {
+      if (a.data.status) flips.push(a.data.status);
+      return flip(a);
+    };
+    const { app, errors } = observed(fake);
+    const server = app.listen(0);
+    try {
+      await hangUpAfter(server, 80);
+      expect(await until(() => fake.db.attachments.length === 0 && flips.includes("FAILED"))).toBe(true);
+      expect(fake.db.attachments.filter((r) => r.status === "UPLOADING")).toEqual([]);
+      expect(filesUnder(root)).toEqual([]);
+      expect(errors).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("mid-body: row and partial file are gone, and it is not logged as an unhandled server error", async () => {
+    const fake = makeAttachmentFake();
+    const { app, errors } = observed(fake);
+    const server = app.listen(0);
+    try {
+      await hangUpAfter(server, 100);
+      expect(await until(() => fake.db.attachments.length === 0 && filesUnder(root).length === 0)).toBe(true);
+      await sleep(100); // let a late error handler call show up, if there were one
+      expect(errors).toEqual([]);
+    } finally {
+      server.close();
+    }
   });
 });
 
