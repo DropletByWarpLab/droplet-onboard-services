@@ -759,13 +759,13 @@ export function requireRoleOrService(
   ...allowed: Role[]
 ): (req: Request, res: Response, next: NextFunction) => void {
   const base = requireRole(...allowed);
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return markAsRoleGuard((req: Request, res: Response, next: NextFunction): void => {
     if (req.user?.id === serviceId && req.user.role === "service") {
       next();
       return;
     }
     base(req, res, next);
-  };
+  });
 }
 
 /**

@@ -31,6 +31,7 @@ import {
   requireRoleOrMcpService,
   requireRoleOrService,
 } from "../middleware/auth.js";
+import { requireNetworkMember } from "./network-status.routes.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("network-wifi-routes");
@@ -127,7 +128,7 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
     },
   );
 
-  router.get("/network/wifi/scan", async (_req, res, next) => {
+  router.get("/network/wifi/scan", requireNetworkMember, async (_req, res, next) => {
     try {
       const results = await scanWifiNetworks();
       res.json({ results });
@@ -140,7 +141,7 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
   // one combined hostapd radio that can't be toggled independently, so the
   // service returns an honesty envelope (supported:false/hostRadio:true) and
   // only the iwinfo fields it can actually read.
-  router.get("/network/wifi/radio", async (_req, res, next) => {
+  router.get("/network/wifi/radio", requireNetworkMember, async (_req, res, next) => {
     try {
       const radio = await getRadioDetail();
       res.json(radio);
@@ -351,7 +352,7 @@ export function registerWifiRoutes(router: Router, deps: WifiDeps): void {
   // WARP-1703: band-steering read — no RBAC, matches GET /network/wifi/radio.
   // The honesty envelope ({supported:false, enabled:false} when no approved
   // Droplet AP is online) comes from the service, never inferred here.
-  router.get("/network/wifi/band-steering", async (_req, res, next) => {
+  router.get("/network/wifi/band-steering", requireNetworkMember, async (_req, res, next) => {
     try {
       res.json(await getBandSteering(prisma));
     } catch (err) {

@@ -116,8 +116,14 @@ const ROUTER_PORT_RE = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,30}$/;
  * than by flooring `network` view in access-catalog.ts: that floor gates the
  * whole /api/network prefix, the Network nav entry and the network tool
  * domain, which would also take status/summary away from guests.
- * The MCP principal is admitted so `list_network_devices` still dispatches;
- * the acting-user tool-domain gate is what keeps guests off that path.
+ * The MCP principal is admitted so the network read tools still dispatch. It
+ * is admitted BEFORE any role check, and the acting-user tool-domain gate does
+ * not cover the `network` domain, so each network read tool checks `ctx.role`
+ * itself (tools-core handlers/network/role-gate.ts); WARP-3632's parity test
+ * keeps a tool's floor equal to its route's.
+ *
+ * WARP-3632 — every other /network, /switch and /aps read takes this floor
+ * too; only status, summary and throughput stay open to guests.
  */
 export const requireNetworkMember = requireRoleOrMcpService("owner", "admin", "family");
 
@@ -202,7 +208,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   // --- Interfaces (full enumeration, read-only) ---
   // Every configured interface (name/device/proto/address/zone/status), not
   // just lan/wan. Kept on its own service read (not the overview hot path).
-  router.get("/network/interfaces", async (_req, res, next) => {
+  router.get("/network/interfaces", requireNetworkMember, async (_req, res, next) => {
     try {
       const interfaces = await getAllInterfaces();
       res.json({ interfaces });
@@ -229,7 +235,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   // roster) is a 200 — it's an answer. Only an unreachable router is an error,
   // and it must stay one so the panel says "offline" instead of drawing every
   // jack dark.
-  router.get("/network/ports", async (_req, res, next) => {
+  router.get("/network/ports", requireNetworkMember, async (_req, res, next) => {
     try {
       res.json(await getRouterPorts());
     } catch (err) {
@@ -385,7 +391,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   // routing /dhcp/hostnames endpoints have full read/write/delete; these front
   // them. Reads are open to any authed user; writes are owner/admin and run
   // through the safety evaluator (set/delete_dns_hostname classify Tier 1).
-  router.get("/network/dhcp/hostnames", async (_req, res, next) => {
+  router.get("/network/dhcp/hostnames", requireNetworkMember, async (_req, res, next) => {
     try {
       const entries = await getDnsHostnames();
       res.json({ entries });
@@ -397,7 +403,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   // --- DHCP pool (range + lease time) ---
   // Read is unguarded; the write is Tier 2 (a LAN address-map change that can
   // strand clients) → 202 + token → /network/command/confirm dispatches it.
-  router.get("/network/dhcp/pool", async (_req, res, next) => {
+  router.get("/network/dhcp/pool", requireNetworkMember, async (_req, res, next) => {
     try {
       const pool = await getDhcpPool();
       res.json(pool);
@@ -528,7 +534,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   // like /network/status — informs the dashboard's topology badge. A genuine
   // ubus fault propagates so the dashboard can drop the badge rather than
   // assert a posture.
-  router.get("/network/topology", async (_req, res, next) => {
+  router.get("/network/topology", requireNetworkMember, async (_req, res, next) => {
     try {
       const topology = await getTopology();
       res.json(topology);
@@ -538,7 +544,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   });
 
   // --- System ---
-  router.get("/network/system", async (_req, res, next) => {
+  router.get("/network/system", requireNetworkMember, async (_req, res, next) => {
     try {
       const info = await getSystemInfo();
       res.json(info);
@@ -551,7 +557,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   // Read carries the honest gates (statusLed.supported / country.editable are
   // forced false on the single-box shape in the service). Hostname is Tier 2
   // (re-keys mDNS/.local → confirm); NTP is Tier 1 (applies immediately).
-  router.get("/network/system/controls", async (_req, res, next) => {
+  router.get("/network/system/controls", requireNetworkMember, async (_req, res, next) => {
     try {
       const controls = await getSystemControls();
       res.json(controls);
@@ -707,7 +713,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
 
   // Read-only version compare (AC 4). Safe on any shape — NOT gated. The pinned
   // image (and thus the comparison) comes from config.ROUTER_FIRMWARE_IMAGE.
-  router.get("/network/system/firmware-check", async (_req, res, next) => {
+  router.get("/network/system/firmware-check", requireNetworkMember, async (_req, res, next) => {
     try {
       const check = await getFirmwareCheck();
       res.json(check);
@@ -814,7 +820,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   // case — they're honest-gated (disabled) in the UI until a coordinated on-box
   // secret refresh exists (the routing service IS the droplet-ai user, so a
   // desynced rotate self-locks-out the whole Network tab).
-  router.get("/network/ai-access", async (_req, res, next) => {
+  router.get("/network/ai-access", requireNetworkMember, async (_req, res, next) => {
     try {
       const access = await getAiNetworkAccess();
       res.json(access);
@@ -1106,7 +1112,7 @@ export function registerStatusRoutes(router: Router, deps: StatusDeps): void {
   // --- Operation status (WARP-40) ---
   // Dashboard polls this after any Tier 2 confirm or direct write to learn
   // whether the router accepted the change or rolled it back.
-  router.get("/network/operations/:id", async (req, res, next) => {
+  router.get("/network/operations/:id", requireNetworkMember, async (req, res, next) => {
     try {
       const { id } = req.params;
       if (!id || id.length > 64) {

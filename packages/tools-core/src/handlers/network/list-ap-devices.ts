@@ -1,4 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { refuseBelowNetworkMember } from "./role-gate.js";
 
 // WARP-446: read-only tool that surfaces the ApDevice registry so the
 // LLM agent can answer questions like "is the upstairs AP still
@@ -16,6 +17,8 @@ const inputSchema = {
 } as const;
 
 async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  const denied = refuseBelowNetworkMember(ctx);
+  if (denied) return denied;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const aps = await (ctx.prisma as any).apDevice.findMany({
     select: {

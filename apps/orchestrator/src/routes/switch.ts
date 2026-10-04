@@ -25,6 +25,7 @@ import {
   confirmNetworkCommand,
 } from "../services/network-safety.service.js";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
+import { requireNetworkMember } from "./network-status.routes.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("switch-routes");
@@ -184,7 +185,7 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
   // =====================================================================
 
   // §7 GET /api/switch/status — aggregated system-info + poe + provision-config.
-  router.get("/switch/status", async (_req, res, next) => {
+  router.get("/switch/status", requireNetworkMember, async (_req, res, next) => {
     try {
       res.json(await fetchSwitchStatus());
     } catch (err) {
@@ -196,7 +197,7 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
   // contract). Joins port_status (link/speed) + vlan_port_stat + membership +
   // poe + provision-config (role/status). Distinct from the raw
   // /switch/ports/:port passthrough below.
-  router.get("/switch/ports", async (_req, res, next) => {
+  router.get("/switch/ports", requireNetworkMember, async (_req, res, next) => {
     try {
       res.json(await fetchSwitchPorts());
     } catch (err) {
@@ -204,7 +205,7 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.get("/switch/ports/:port", async (req, res, next) => {
+  router.get("/switch/ports/:port", requireNetworkMember, async (req, res, next) => {
     try {
       const port = parseInt(req.params.port);
       if (isNaN(port) || port < 1 || port > 10) {
@@ -219,7 +220,7 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
 
   // §7 GET /api/switch/vlans — aggregated {vlan_id,name,isolated,ports[]} (bare
   // array). `isolated` reflects the camera VLAN under the segmented profile.
-  router.get("/switch/vlans", async (_req, res, next) => {
+  router.get("/switch/vlans", requireNetworkMember, async (_req, res, next) => {
     try {
       res.json(await fetchSwitchVlans());
     } catch (err) {
@@ -227,7 +228,7 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.get("/switch/vlans/:vlanId/membership", async (req, res, next) => {
+  router.get("/switch/vlans/:vlanId/membership", requireNetworkMember, async (req, res, next) => {
     try {
       const vlanId = parseInt(req.params.vlanId);
       const data = await switchClient.fetchVlanMembership(vlanId);
@@ -237,7 +238,7 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.get("/switch/poe", async (_req, res, next) => {
+  router.get("/switch/poe", requireNetworkMember, async (_req, res, next) => {
     try {
       const ports = await switchClient.fetchPoeStatus();
       res.json({ ports });
@@ -246,7 +247,7 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.get("/switch/poe/:port", async (req, res, next) => {
+  router.get("/switch/poe/:port", requireNetworkMember, async (req, res, next) => {
     try {
       const port = parseInt(req.params.port);
       if (isNaN(port) || port < 1 || port > 8) {
@@ -259,7 +260,7 @@ export function createSwitchRouter(prisma: PrismaClient): Router {
     }
   });
 
-  router.get("/switch/system", async (_req, res, next) => {
+  router.get("/switch/system", requireNetworkMember, async (_req, res, next) => {
     try {
       const info = await switchClient.fetchSystemInfo();
       res.json(info);

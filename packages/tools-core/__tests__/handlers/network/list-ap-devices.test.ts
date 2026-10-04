@@ -12,6 +12,7 @@ function ctxWith(rows: unknown[]): ToolContext {
     http: {} as ToolContext["http"],
     matter: {} as ToolContext["matter"],
     signal: new AbortController().signal,
+    role: "owner", // WARP-3632: the tool checks the caller role itself
   };
 }
 

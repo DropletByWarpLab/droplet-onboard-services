@@ -16,17 +16,15 @@
  * than watching it disappear, which is exactly the property the reconciler's
  * never-delete rule buys.
  *
- * **Auth**: no per-route role gate, matching every other network READ
- * (`/network/status`, `/network/interfaces`, `/network/topology`, and
- * `/api/aps`) — those are open to any authenticated principal so the LLM
- * agent's network tools work under the `service` role. That posture is safe
- * only because `app.ts` mounts the global `authMiddleware` BEFORE
- * `createNetworkRouter`, so an unauthenticated request never reaches here;
- * `network-fabric.routes.test.ts` mounts the production middleware and
- * pins that 401.
+ * **Auth**: `requireNetworkMember` (owner/admin/member, plus the MCP
+ * principal), like every network read except status and summary (WARP-3632).
+ * `app.ts` mounts the global `authMiddleware` BEFORE `createNetworkRouter`, so
+ * an unauthenticated request never reaches here; `network-fabric.routes.test.ts`
+ * mounts the production middleware and pins that 401.
  */
 import type { Router } from "express";
 import type { PrismaClient } from "@prisma/client";
+import { requireNetworkMember } from "./network-status.routes.js";
 
 export interface FabricDeps {
   prisma: PrismaClient;
@@ -35,7 +33,7 @@ export interface FabricDeps {
 export function registerFabricRoutes(router: Router, deps: FabricDeps): void {
   const { prisma } = deps;
 
-  router.get("/network/fabric/members", async (_req, res, next) => {
+  router.get("/network/fabric/members", requireNetworkMember, async (_req, res, next) => {
     try {
       // Most-recently-seen first: the fabric's live members lead, anything
       // that has gone quiet sinks to the bottom where its `lastSeen` reads

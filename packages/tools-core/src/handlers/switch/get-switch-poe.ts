@@ -1,4 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { refuseBelowNetworkMember } from "../network/role-gate.js";
 
 /**
  * WARP-1462 (phantom-target class): route through the orchestrator's
@@ -12,6 +13,8 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
  * `{ ports: [...] }` (the per-port mW rows), so `data` is unchanged.
  */
 async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  const denied = refuseBelowNetworkMember(ctx);
+  if (denied) return denied;
   const res = await ctx.http.orchestrator.get("/api/switch/poe", { headers: { Accept: "application/json" } });
   if (!res.ok) {
     return {

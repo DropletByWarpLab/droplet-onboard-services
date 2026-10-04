@@ -163,7 +163,7 @@ const MATRIX: GuardedRoute[] = [
   // mount in app.ts had no requireRole wrapper, and the in-handler
   // `evalSwitchCommand` is a WARP-76 safety/confirmation tier, not authz),
   // letting a guest/family session disable PoE/ports/VLANs. Status GETs
-  // (`/api/switch/*`) stay open to every auth role.
+  // (`/api/switch/*`) take the member floor (WARP-3632): never a guest.
   { method: "post", path: "/api/switch/ports/3/enable", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/switch/ports/3/disable", allowed: ["owner", "admin"] },
   { method: "post", path: "/api/switch/vlans", allowed: ["owner", "admin"] },

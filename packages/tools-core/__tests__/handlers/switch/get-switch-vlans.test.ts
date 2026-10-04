@@ -18,6 +18,7 @@ function ctxWithGet(get: Mock): ToolContext {
     prisma: {} as ToolContext["prisma"],
     matter: {} as ToolContext["matter"],
     signal: new AbortController().signal,
+    role: "owner", // WARP-3632: the tool checks the caller role itself
   };
 }
 
