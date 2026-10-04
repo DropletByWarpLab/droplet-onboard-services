@@ -28,6 +28,7 @@ import { createBusinessOnboardingRouter } from "./routes/business-onboarding.js"
 import { createIntegrationsRouter } from "./routes/integrations.js";
 import { createSaasCredentialsRouter } from "./routes/saas-credentials.js";
 import { createErpDriftRouter } from "./routes/erp-drift.js";
+import { createCloudFilesRouter } from "./routes/cloud-files.js";
 import { createM365CallbackRouter, createM365Router } from "./routes/m365.js";
 import { createErpRouter } from "./routes/erp.js";
 import { createSttRouter } from "./routes/stt.js";
@@ -521,6 +522,12 @@ export function createApp(
   // Every route is scoped to the requester's OWN link — no :userId parameter,
   // because delegated authorization makes a person's mailbox connection theirs.
   app.use("/api", createM365Router(prisma));
+  // WARP-3538 (D13) — ONE search over every cloud a person has connected: their
+  // OneDrive, their SharePoint libraries and, as those connectors land, Google
+  // Drive and Dropbox. Self-scoped like the connection routes above, and also
+  // the assistant's `search_cloud_files` tool (`_service:mcp` acting for the
+  // person in X-Nextcloud-User). Not under /m365: it is not one cloud's route.
+  app.use("/api", createCloudFilesRouter(prisma));
   // WARP-844 — chat voice input (Wyoming STT proxy). 503s gracefully when
   // the whisper sidecar isn't deployed (macOS dev / non-linux profile).
   app.use("/api", createSttRouter());
