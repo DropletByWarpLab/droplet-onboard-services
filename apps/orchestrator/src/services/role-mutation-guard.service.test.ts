@@ -72,6 +72,10 @@ const revokeModelAccessTokensForUserMock = vi.hoisted(() => vi.fn().mockResolved
 vi.mock("./model-access-token.service.js", () => ({
   revokeModelAccessTokensForUser: revokeModelAccessTokensForUserMock,
 }));
+const revokePmApiTokensForUserMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock("./pm/pm-api-token.service.js", () => ({
+  revokePmApiTokensForUser: revokePmApiTokensForUserMock,
+}));
 const revokeDeviceClientsForUserMock = vi.hoisted(() =>
   vi.fn().mockResolvedValue({ revoked: 2, appPasswordsNotDeleted: 1, failed: 0 }),
 );
@@ -1229,6 +1233,42 @@ describe("rail 6 — coding-tool tokens (WARP-3452)", () => {
     await runRoleChangePostEffects({ target, previousRole: "family", nextRole: "admin", actorUsername: "admin", actor, devices: null });
     await runRoleChangePostEffects({ target, previousRole: "guest", nextRole: "guest", actorUsername: "admin", actor, devices: null });
     expect(revokeModelAccessTokensForUserMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── WARP-3533 — personal API tokens act as their holder, so they end with the holder ──
+describe("rail 6 — personal API tokens (WARP-3533)", () => {
+  const actor = { type: "user" as const, id: "admin-1" };
+  const target = { id: "u-bob", username: "bob", nextcloudUsername: null };
+
+  it("a disable revokes the person's API tokens as user_deactivated", async () => {
+    revokePmApiTokensForUserMock.mockClear();
+    await runDisablePostEffects({ targetUserId: "u-bob", username: "bob", actor, devices: null });
+    expect(revokePmApiTokensForUserMock).toHaveBeenCalledWith("u-bob", "user_deactivated", actor);
+  });
+
+  it("a legacy disable with no local row has no API tokens to revoke", async () => {
+    revokePmApiTokensForUserMock.mockClear();
+    await runDisablePostEffects({ targetUserId: null, username: "legacy", actor, devices: null });
+    expect(revokePmApiTokensForUserMock).not.toHaveBeenCalled();
+  });
+
+  it("ANY change of role revokes them as role_changed: a promotion, a demotion and a demotion to guest", async () => {
+    for (const [previousRole, nextRole] of [
+      ["family", "admin"],
+      ["admin", "family"],
+      ["family", "guest"],
+    ] as const) {
+      revokePmApiTokensForUserMock.mockClear();
+      await runRoleChangePostEffects({ target, previousRole, nextRole, actorUsername: "admin", actor, devices: null });
+      expect(revokePmApiTokensForUserMock, `${previousRole} -> ${nextRole}`).toHaveBeenCalledWith("u-bob", "role_changed", actor);
+    }
+  });
+
+  it("a role written to itself changes nothing, so it revokes nothing", async () => {
+    revokePmApiTokensForUserMock.mockClear();
+    await runRoleChangePostEffects({ target, previousRole: "family", nextRole: "family", actorUsername: "admin", actor, devices: null });
+    expect(revokePmApiTokensForUserMock).not.toHaveBeenCalled();
   });
 });
 

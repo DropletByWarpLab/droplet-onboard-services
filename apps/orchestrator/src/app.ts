@@ -66,6 +66,8 @@ import { createAgentRunsRouter } from "./routes/agent-runs.js";
 import { createWorkspaceRouter } from "./routes/workspace.js";
 import { createExtensionsRouter } from "./routes/extensions.js";
 import { extensionPrincipalGuard } from "./middleware/extension-principal-guard.js";
+import { pmApiTokenRateLimit, pmApiTokenScopeGuard } from "./middleware/pm-api-token-guard.js";
+import { bindPmApiTokenPrisma } from "./services/pm/pm-api-token.service.js";
 import { createExtensionAttacher, lazyExtensionAttachPort } from "./services/extension-attach.service.js";
 import { bindExtensionPrincipalPrisma } from "./services/extension-principal.js";
 import { createExtensionSandboxClient } from "./services/extension-sandbox.client.js";
@@ -316,6 +318,13 @@ export function createApp(
   // request; unbound, every extension bearer is a 401.
   bindExtensionPrincipalPrisma(prisma);
 
+  // WARP-3533 — the `dpm_` API-token lookup in authMiddleware, and the revoke
+  // hooks in role-mutation-guard.service.ts, read the PmApiToken table through
+  // this one binding (the same shape as the extension bearer above). Bound
+  // before the first request; unbound, every API token is a 401 and no revoke
+  // can run.
+  bindPmApiTokenPrisma(prisma);
+
   // WARP-1527 / ADR-032 §3 — bind the effective-access resolver beside the
   // scope loader (same singleton discipline, same reason): layer-2
   // per-person access resolution (features / tools / cloud / connectors /
@@ -353,6 +362,14 @@ export function createApp(
   // router, so a route with no requireRole of its own is not reachable by
   // an extension either.
   app.use(extensionPrincipalGuard);
+
+  // WARP-3533 — a personal API token (`dpm_…`) authenticates as its holder, so
+  // like the extension principal above it is confined here, right after
+  // authMiddleware and before any router: a per-token rate limit first (so the
+  // denial rows below are bounded by it), then `/api/pm` + `/api/support` only,
+  // narrowed to the token's scopes. Both are no-ops for every other request.
+  app.use(pmApiTokenRateLimit);
+  app.use(pmApiTokenScopeGuard);
 
   // WARP-824 — forced-password-change gate. Mounts AFTER authMiddleware (so
   // req.user is populated) and BEFORE every protected router so an

@@ -1,3 +1,4 @@
+import type { Request } from "express";
 import {
   ipKeyGenerator,
   rateLimit,
@@ -42,10 +43,19 @@ import {
 
 const RATE_LIMIT_MESSAGE = { error: "Too many requests, slow down" } as const;
 
+/** Keying and skipping for a limiter whose budget is not "per client IP". */
+interface PresetOptions {
+  /** Bucket key. Return `undefined` and the request falls back to the IP key. */
+  key?: (req: Request) => string | undefined;
+  /** True = the request does not count against this limiter at all. */
+  skip?: (req: Request) => boolean;
+}
+
 function preset(
   name: string,
   windowMs: number,
   limit: number,
+  opts: PresetOptions = {},
 ): RateLimitRequestHandler {
   return rateLimit({
     windowMs,
@@ -58,7 +68,9 @@ function preset(
     // headers that TypeError turns into a 500 instead of a pass-through.
     // Fall back to the socket address, then a shared bucket.
     keyGenerator: (req) =>
+      opts.key?.(req) ??
       ipKeyGenerator(req.ip ?? req.socket?.remoteAddress ?? "unknown"),
+    ...(opts.skip ? { skip: opts.skip } : {}),
     // One counter per preset, not per route: a client hammering login *and*
     // MFA shares the auth budget, which is the point.
     identifier: `droplet-${name}`,
@@ -88,7 +100,7 @@ export const standardRateLimit: RateLimitRequestHandler = preset(
  */
 export function createRateLimit(
   name: string,
-  opts: { windowMs: number; limit: number },
+  opts: { windowMs: number; limit: number } & PresetOptions,
 ): RateLimitRequestHandler {
-  return preset(name, opts.windowMs, opts.limit);
+  return preset(name, opts.windowMs, opts.limit, { key: opts.key, skip: opts.skip });
 }
