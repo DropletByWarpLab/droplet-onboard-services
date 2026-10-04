@@ -240,6 +240,19 @@ const CATALOG_WARP_2707 = [
     availability: "available",
     setupGuideHref: "/help/integrations/gocardless",
   },
+  {
+    // WARP-3698 — the REST track's eighth vendor, at catalog.order 20. The copy
+    // states the omission on the card itself: Capsule keeps people and
+    // organisations behind one list the track cannot route, so the tile must not
+    // read as "your whole Capsule".
+    id: "capsule",
+    name: "Capsule CRM",
+    category: "CRM",
+    description:
+      "Opportunities with their milestone and value, and tasks with their owner and dates — read from Capsule CRM. People and organisations are not read.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/capsule",
+  },
 ];
 
 describe("the derived catalog is byte-identical to the hand-written one", () => {
@@ -305,6 +318,7 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
     const allowed: ConnectorId[] = [
       "brevo",
       "calcom",
+      "capsule",
       "dentrix",
       "eaglesoft",
       "github",
@@ -529,8 +543,9 @@ describe("the setup guide travels with the card", () => {
     // …the third, WARP-2917…
     expect(covered).toContain("gitlab");
     expect(covered).toContain("todoist");
-    // …and WARP-3697's GoCardless, the first wave-3 card.
+    // …and WARP-3697's GoCardless, the first wave-3 card, and WARP-3698's Capsule.
     expect(covered).toContain("gocardless");
+    expect(covered).toContain("capsule");
     // …and a cloud card, so a set that had SWAPPED one track for the other
     // rather than widening would still be caught.
     expect(covered).toContain("stripe");

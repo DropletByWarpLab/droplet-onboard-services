@@ -200,6 +200,11 @@ const REST_PROVIDERS_WARP_2919 = ["loyverse"] as const;
  * is pinned separately, in the hub-order test below.
  */
 const REST_PROVIDERS_WARP_3697 = ["gocardless"] as const;
+/**
+ * WARP-3698 — Capsule CRM, the second free-integrations wave-3 vendor. Its own
+ * const, in build order, for the reason the one above gives.
+ */
+const REST_PROVIDERS_WARP_3698 = ["capsule"] as const;
 const REST_PROVIDERS = [
   ...REST_PROVIDERS_WARP_2707,
   ...REST_PROVIDERS_WARP_2916,
@@ -207,6 +212,7 @@ const REST_PROVIDERS = [
   ...REST_PROVIDERS_WARP_2918,
   ...REST_PROVIDERS_WARP_2919,
   ...REST_PROVIDERS_WARP_3697,
+  ...REST_PROVIDERS_WARP_3698,
 ] as const;
 
 afterEach(() => {
@@ -435,6 +441,10 @@ describe("the descriptor set covers exactly the providers that shipped before", 
     // rows existed, until `RestWatermark.complete` has a reader. They are
     // reached on demand through `runRead` and nowhere else; the card still
     // reads CONNECTED, which is why the omission is recorded here.
+    // WARP-3698 — Capsule appears nowhere here: `deal` and `task` each have an
+    // `ERP_SYNC_ENTITIES` row, the `deal` watermark (`since`) is declared complete
+    // and the `task` watermark is null, a declared full scan — neither is a
+    // scheduled-but-incomplete watermark, which the test above refuses.
     expect(unscheduled).toEqual({
       square: ["charge", "refund", "payout"],
       gocardless: ["charge", "refund", "payout"],
@@ -1164,8 +1174,9 @@ describe("the hub catalog is derived from the same descriptors", () => {
       // WARP-3697..3702 — free-integrations wave 3, at `catalog.order` 18..23 in
       // RANK order (Keap 18, GoCardless 19, Capsule 20, Squarespace 21,
       // JobNimbus 22, Wrike 23), which is NOT the order they were built in.
-      // GoCardless, at 19, is the first to land.
+      // GoCardless, at 19, is the first to land; Capsule CRM, at 20, is the second.
       "gocardless",
+      "capsule",
     ]);
   });
 

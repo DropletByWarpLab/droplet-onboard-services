@@ -33,6 +33,8 @@ import type { PrismaClient, User } from "@prisma/client";
 import { findUserByEmail, emailWriteData } from "./user-directory.service.js";
 import {
   effectiveRoleForGroupNames,
+  highestRole,
+  matchedLegacyElevationRule,
   roleForScimGroupName,
   ROLE_PRIVILEGE,
   SCIM_ROLE_CEILING,
@@ -386,64 +388,71 @@ export interface ScimGroupResult {
 /**
  * Upsert a SCIM group and apply its role mapping to listed members.
  *
- * The group's `mappedRole` is resolved from its display name by the explicit
- * policy (scim-role-mapping.service), capped at SCIM_ROLE_CEILING — `admin`
- * is the most privileged role an Okta group can grant, and `owner` is not
- * assignable from a directory at all (WARP-1568). Each member's role is then
- * RAISED to at least that role (highest-privilege-wins floor) — a member of
- * "Admins" becomes admin; a higher-privileged member added to a lower group
- * is NOT demoted. This keeps role mapping idempotent (re-applying is a no-op)
- * without standing up the gated Team-membership UI. Every one of those role
- * writes goes through the role-mutation guard (see `raiseUserRoleTo`).
+ * The group's `mappedRole` comes from the operator-configured map
+ * (`SCIM_GROUP_ROLE_MAP`, exact group id or name; `family` when unlisted —
+ * WARP-3631), capped at SCIM_ROLE_CEILING — `admin` is the most privileged
+ * role an Okta group can grant, and `owner` is not assignable from a
+ * directory at all (WARP-1568). Each member's role is RAISED to at least that
+ * role (highest-privilege-wins floor); a higher-privileged member added to a
+ * lower group is NOT demoted. Every role write goes through the role-mutation
+ * guard (see `writeScimRole`).
  *
- * NB (documented simplification): without a persisted SCIM membership table,
- * removing a user from a group does NOT auto-lower their role here. Role
- * elevation is sticky until an explicit People-surface change. This matches
- * the AC ("respect the EXISTING role model; do NOT build the gated Team UI")
- * and is called out in the PR handoff.
+ * WARP-3631: the push's member list is persisted on the group. A person who
+ * was in the previous push and is absent from this one is recomputed from the
+ * groups they remain in (`lowerRoleAfterRemoval`) and lowered when the group
+ * is what had granted their role. The same applies to everyone the group
+ * previously raised when the configured mapping for it is lowered. Only
+ * SCIM-provisioned people are touched, and the same guard rails apply (owner
+ * immutability, last operator).
  */
 export async function provisionGroup(
   prisma: PrismaClient,
   input: ProvisionGroupInput,
 ): Promise<ScimGroupResult> {
-  const mappedRole: DirectoryRole = roleForScimGroupName(input.displayName);
+  const mappedRole: DirectoryRole = roleForScimGroupName(input.displayName, input.externalId);
+  const memberUserIds = [...new Set(input.memberUserIds)];
 
   // Upsert by externalId OR displayName (both unique) so Okta retries
   // converge to one row.
   const or: Array<Record<string, string>> = [{ displayName: input.displayName }];
   if (input.externalId) or.unshift({ externalId: input.externalId });
   const existing = await prisma.scimGroup.findFirst({ where: { OR: or } });
+  const previousMembers: string[] = existing?.memberUserIds ?? [];
+  const previousRole = (existing?.mappedRole as DirectoryRole | undefined) ?? mappedRole;
 
   let groupRow;
   if (existing) {
     groupRow = await prisma.scimGroup.update({
       where: { id: existing.id },
-      data: { displayName: input.displayName, externalId: input.externalId ?? existing.externalId, mappedRole },
+      data: {
+        displayName: input.displayName,
+        externalId: input.externalId ?? existing.externalId,
+        mappedRole,
+        memberUserIds,
+      },
     });
   } else {
     groupRow = await prisma.scimGroup.create({
-      data: { displayName: input.displayName, externalId: input.externalId ?? null, mappedRole },
+      data: { displayName: input.displayName, externalId: input.externalId ?? null, mappedRole, memberUserIds },
     });
   }
 
-  // Raise each member's role to at least the group's mapped role.
-  //
-  // WARP-1568: a rail refusal is PER MEMBER, not per request. The refusal
+  // A rail refusal is PER MEMBER, not per request (WARP-1568). The refusal
   // already IS the safe outcome (that member's role is left untouched), and
   // SCIM has no per-member error channel in this minimal Group surface — so
   // failing the whole push would only stop the group and its other members
   // from converging, and would 4xx-loop Okta's retry forever. Logged at warn
   // with the machine-readable rail code; never swallowed silently.
-  for (const userId of input.memberUserIds) {
+  const perMember = async (userId: string, apply: () => Promise<void>): Promise<void> => {
     try {
-      await raiseUserRoleTo(prisma, userId, mappedRole);
+      await apply();
     } catch (err) {
       if (err instanceof RoleMutationRefusedError) {
         logger.warn(
           { userId, code: err.code, mappedRole, group: input.displayName },
           "SCIM group role mapping refused by the role-mutation guard; member's role left unchanged",
         );
-        continue;
+        return;
       }
       // Nothing was applied (SERIALIZABLE loser / optimistic-write miss);
       // Okta's next push re-converges this member.
@@ -452,13 +461,81 @@ export async function provisionGroup(
           { userId, mappedRole, group: input.displayName },
           "SCIM group role mapping lost a write race; retry converges",
         );
-        continue;
+        return;
       }
       throw err;
     }
+  };
+
+  // Raise each member's role to at least the group's mapped role.
+  for (const userId of memberUserIds) {
+    await perMember(userId, () => raiseUserRoleTo(prisma, userId, mappedRole));
+  }
+  // WARP-3631 — lower anyone this push dropped from the group, and, when the
+  // operator lowered the group's mapping, everyone the old mapping had raised.
+  const recompute =
+    ROLE_PRIVILEGE[previousRole] > ROLE_PRIVILEGE[mappedRole]
+      ? previousMembers
+      : previousMembers.filter((id) => !memberUserIds.includes(id));
+  for (const userId of recompute) {
+    await perMember(userId, () => lowerRoleAfterRemoval(prisma, userId, previousRole));
   }
 
   return { id: groupRow.id, displayName: groupRow.displayName, mappedRole: groupRow.mappedRole };
+}
+
+/**
+ * WARP-3631 upgrade notice. Group names no longer elevate by substring, so a
+ * box that relied on a directory group called "Admins" or "Managers" stops
+ * granting admin to its members until the operator names the group's SCIM id
+ * in `SCIM_GROUP_ROLE_MAP`. Nothing is granted automatically: this logs, at
+ * every start, each stored group that used to elevate and no longer does, with
+ * the exact entry that would restore it.
+ */
+export async function warnLegacyScimRoleMapping(prisma: PrismaClient): Promise<void> {
+  const groups = await prisma.scimGroup.findMany({
+    select: { displayName: true, externalId: true, mappedRole: true },
+  });
+  for (const g of groups) {
+    const wasElevated =
+      ROLE_PRIVILEGE[g.mappedRole as DirectoryRole] > ROLE_PRIVILEGE.family || matchedLegacyElevationRule(g.displayName);
+    const now = roleForScimGroupName(g.displayName, g.externalId);
+    if (!wasElevated || ROLE_PRIVILEGE[now] > ROLE_PRIVILEGE.family) continue;
+    logger.warn(
+      {
+        group: g.displayName,
+        restoreWith: g.externalId
+          ? { variable: "SCIM_GROUP_ROLE_MAP", entry: { [`id:${g.externalId}`]: "admin" } }
+          : "no SCIM group id on record; the directory must send externalId for this group before it can be mapped",
+      },
+      "SCIM group no longer grants admin by name (WARP-3631); its members keep their current role but are not raised again. Add the entry shown to SCIM_GROUP_ROLE_MAP to restore it.",
+    );
+  }
+}
+
+/**
+ * WARP-3631 — a person left a group. Recompute their role from the groups they
+ * still belong to (family when none) and lower them to it, but only when:
+ *   - they are SCIM-provisioned (a local or SSO person's role is not the IdP's), and
+ *   - their current role is no higher than what the removed group granted (so a
+ *     role an owner set by hand above the group's grant is left alone).
+ */
+async function lowerRoleAfterRemoval(
+  prisma: PrismaClient,
+  userId: string,
+  removedGroupRole: DirectoryRole,
+): Promise<void> {
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user || user.provisionSource !== "SCIM") return;
+  const remaining = await prisma.scimGroup.findMany({
+    where: { memberUserIds: { has: userId } },
+    select: { mappedRole: true },
+  });
+  const target = highestRole(remaining.map((g) => g.mappedRole as DirectoryRole));
+  await writeScimRole(prisma, userId, target, (current) => {
+    const rank = ROLE_PRIVILEGE[current as DirectoryRole];
+    return rank !== undefined && rank > ROLE_PRIVILEGE[target] && rank <= ROLE_PRIVILEGE[removedGroupRole];
+  });
 }
 
 /**
@@ -487,24 +564,35 @@ export async function provisionGroup(
  *     cascade, and the "Role changed" Activity row — byte-identical to the
  *     interactive surfaces, attributed to the SCIM principal.
  *
- * NOTE on the in-transaction re-read: because the raise-only rule is
- * re-evaluated against the FRESH row, a concurrent promotion turns this into
- * a no-op rather than a demotion. That is why rails 4/5 cannot currently fire
- * from this path — every write SCIM performs raises within, or into, the
- * operator tier, and neither invariant is concerned with those. They are
- * wired anyway (and asserted in the suite) so that the day SCIM group
- * membership becomes authoritative — i.e. leaving a group lowers a role —
- * the invariant that stops an IdP from stranding the box with zero operators
- * is already in the path rather than something the next author must remember.
+ * NOTE on the in-transaction re-read: the direction rule is re-evaluated
+ * against the FRESH row, so a concurrent change turns the write into a no-op.
+ * Since WARP-3631 a person leaving a group CAN be lowered, so rails 4 + 5
+ * (the last-operator invariant) are live on this path: an Okta push cannot
+ * leave the box with nobody able to manage access.
  */
 async function raiseUserRoleTo(prisma: PrismaClient, userId: string, target: DirectoryRole): Promise<void> {
+  await writeScimRole(prisma, userId, target, (current) => outranksCurrent(target, current));
+}
+
+/**
+ * The ONE guarded SCIM role write, shared by the raise and the WARP-3631
+ * lower. `applies` is the direction rule ("is this still a raise / a lower
+ * for the row as it is now?"); it runs on the snapshot and again on the
+ * in-transaction row so a racing writer turns the write into a no-op.
+ */
+async function writeScimRole(
+  prisma: PrismaClient,
+  userId: string,
+  target: DirectoryRole,
+  applies: (currentRole: string) => boolean,
+): Promise<void> {
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) return;
   // Read off the snapshot ONCE: `previousRole` is what the audit row states
   // happened, so it must be the value the decision was made on, never a
   // re-read of a row the write has already moved.
   const previousRole = user.role as Role;
-  if (!outranksCurrent(target, previousRole)) return;
+  if (!applies(previousRole)) return;
 
   // Rails 1 → 2 → 3 → 7 (WARP-1526). Rail 3 is what stops `owner` even if a
   // future mapping rule forgets the ceiling; rail 7 refuses it again.
@@ -518,10 +606,10 @@ async function raiseUserRoleTo(prisma: PrismaClient, userId: string, target: Dir
   const applied = await prisma.$transaction(async (tx) => {
     const fresh = await readGuardTargetTx(tx, userId);
     if (!fresh) throw RoleMutationRefusedError.concurrentMutation();
-    // Re-evaluate the raise-only rule on the in-transaction row: a promotion
-    // that landed since the snapshot must make this a no-op, never a
-    // demotion (SCIM raises, it never lowers).
-    if (!outranksCurrent(target, fresh.role)) return false;
+    // Re-evaluate the direction rule on the in-transaction row: a change that
+    // landed since the snapshot makes this a no-op, never a write that
+    // contradicts it.
+    if (!applies(fresh.role)) return false;
     await assertRoleChangeInvariantsTx(tx, { target: fresh, requestedRole: target });
     await tx.user.update({
       where: { id: userId, role: fresh.role },

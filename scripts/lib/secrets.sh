@@ -484,6 +484,13 @@ generate_env() {
   # WARP-234: per-service Redis ACL identities (least privilege; the shared
   # REDIS_PASSWORD becomes the ping-only `default` user for health probes).
   local redis_orchestrator_password redis_ai_gateway_password redis_mcp_password
+  # WARP-3605: the Nextcloud ACL user gets its own value. Sharing REDIS_PASSWORD
+  # gave the ping-only `default` user and the keyspace-wide `nextcloud` user the
+  # same password, so anyone holding the default credential could AUTH as nextcloud.
+  # Alphanumeric via _gen_password: it is interpolated into PHP's
+  # session.save_path (docs/security/redis-tls-acl.md).
+  local redis_nextcloud_password
+  redis_nextcloud_password=$(_gen_password 24)
   redis_orchestrator_password=$(_gen_password 24)
   redis_ai_gateway_password=$(_gen_password 24)
   redis_mcp_password=$(_gen_password 24)
@@ -519,6 +526,13 @@ generate_env() {
   # + device-bridge.py's BRIDGE_AUTH_TOKEN MUST read the same value;
   # compose wires both ends to ${SERVICE_TOKEN_DISPLAY}.
   service_token_display=$(openssl rand -hex 32)
+  # WARP-3595: the device-bridge's destructive routes (factory reset, pool
+  # operations, Wi-Fi AP, TLS, box name) accept only this token. The orchestrator
+  # sends it as SERVICE_TOKEN_BRIDGE; the host bridge reads it as
+  # BRIDGE_ADMIN_TOKEN (install-device-bridge.sh mirrors it). It is never wired
+  # into the oled-display container, which holds only SERVICE_TOKEN_DISPLAY.
+  local service_token_bridge
+  service_token_bridge=$(openssl rand -hex 32)
   # Shared bearer for orchestrator → switch service HTTP calls (/ports,
   # /vlans, /poe, /provision/*). Same WARP-165 rationale as the display
   # token: the switch container's SERVICE_SECRET previously reused
@@ -620,6 +634,17 @@ generate_env() {
   # profile and gets a service that 503s every route with nothing in the logs
   # pointing at a missing secret. Both ends fail CLOSED when it is empty.
   mcp_bridge_service_token=$(openssl rand -hex 32)
+  # >>> WARP-3625 inbound bearers (voice-io, rag-eval, file-indexer) >>>
+  # The orchestrator presents these to three internal APIs that used to rely on
+  # network position alone. Each service fails CLOSED (503 on every
+  # non-/health route) when its side is empty. Kept in its own delimited block
+  # in all three places below (here, the .env heredoc, migrate_env) so it merges
+  # cleanly beside the other token additions.
+  local voice_io_service_token rag_eval_service_token file_indexer_service_token
+  voice_io_service_token=$(openssl rand -hex 32)
+  rag_eval_service_token=$(openssl rand -hex 32)
+  file_indexer_service_token=$(openssl rand -hex 32)
+  # <<< WARP-3625 inbound bearers <<<
   # WARP-468 + WARP-470: bearer the routing service's egress_meter and
   # throughput sampler present on POST /api/network/{off-lan,throughput}-sample-*.
   # Compose wires ORCHESTRATOR_SAMPLER_TOKEN to ${ORCHESTRATOR_SAMPLER_TOKEN}.
@@ -774,8 +799,9 @@ REDIS_URL=rediss://:${redis_password}@cache:6380
 REDIS_PASSWORD_ORCHESTRATOR=$redis_orchestrator_password
 REDIS_PASSWORD_AI_GATEWAY=$redis_ai_gateway_password
 REDIS_PASSWORD_MCP=$redis_mcp_password
-# Nextcloud expects this name for the Redis password (ACL user \`nextcloud\`)
-REDIS_HOST_PASSWORD=$redis_password
+# Nextcloud expects this name for the Redis password (ACL user \`nextcloud\`).
+# Distinct from REDIS_PASSWORD on purpose (WARP-3605).
+REDIS_HOST_PASSWORD=$redis_nextcloud_password
 
 # --- MQTT (WARP-235: mTLS, no shared password — identity = client cert CN) ---
 MQTT_BROKER=mqtts://broker:8883
@@ -876,6 +902,11 @@ SERVICE_TOKEN_VOICE=$service_token_voice
 # value; compose wires all three to \${SERVICE_TOKEN_DISPLAY}.
 SERVICE_TOKEN_DISPLAY=$service_token_display
 
+# --- Device-bridge destructive-route bearer (orchestrator → host bridge) ---
+# WARP-3595. Distinct from SERVICE_TOKEN_DISPLAY on purpose: the display
+# container holds that one and the bridge refuses it on destructive routes.
+SERVICE_TOKEN_BRIDGE=$service_token_bridge
+
 # --- Switch service bearer (orchestrator → switch service HTTP) ---
 # Used by switch.client.ts to authenticate to the switch service's
 # /ports, /vlans, /poe, /provision/* endpoints. Replaces the prior
@@ -954,6 +985,12 @@ SERVICE_TOKEN_RAG_EVAL=$service_token_rag_eval
 # gate skips every scheduled slot (0 chunks), so the default never scores
 # an empty corpus. Was hand-set config before, and every re-image lost it.
 RAGAS_EVAL_USER=eval-fixtures
+# WARP-3609: explicit positive gate for /api/admin/retrieval-eval/* (the route
+# the rag-eval container scores through). Off in the orchestrator unless this
+# is 1; written on because the `eval` profile is in the default
+# COMPOSE_PROFILES above. The service principal can name only RAGAS_EVAL_USER.
+# Set to 0 (and drop `eval` from COMPOSE_PROFILES) to take the route down.
+RAG_EVAL_ENABLED=1
 
 # --- Document renderer bearer (orchestrator → doc-render) ---
 # WARP-2211. The orchestrator presents this on POST /render to the
@@ -981,6 +1018,17 @@ SANDBOX_SERVICE_TOKEN=$sandbox_service_token
 # every non-/health route) when its side is empty, and the orchestrator refuses
 # without dialling when its side is.
 MCP_BRIDGE_SERVICE_TOKEN=$mcp_bridge_service_token
+
+# >>> WARP-3625 inbound bearers (voice-io, rag-eval, file-indexer) >>>
+# Orchestrator -> voice-io / rag-eval / file-indexer. Each service reads its
+# own key; the orchestrator (env_file) reads all three. voice-io and rag-eval
+# receive theirs by compose substitution; file-indexer via env_file. Rotate in
+# lockstep: change here, then force-recreate the orchestrator and that service.
+# Every one fails CLOSED (503 on non-/health routes) when empty.
+VOICE_IO_SERVICE_TOKEN=$voice_io_service_token
+RAG_EVAL_SERVICE_TOKEN=$rag_eval_service_token
+FILE_INDEXER_SERVICE_TOKEN=$file_indexer_service_token
+# <<< WARP-3625 inbound bearers <<<
 
 # --- Routing sampler bearers ---
 # WARP-468 (egress meter) + WARP-470 (throughput sampler): the routing
@@ -1301,6 +1349,14 @@ migrate_env() {
   # WARP-2627: same backfill for the outbound MCP bridge's bearer. Only-when-
   # missing, so an operator who already set one keeps it.
   _migrate_ensure_key MCP_BRIDGE_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  # >>> WARP-3625 inbound bearers (voice-io, rag-eval, file-indexer) >>>
+  # An existing box has none of these, and the three services fail closed
+  # without them (503), so backfill only-when-missing. docker/ota/env-reconcile.sh
+  # carries the same three for OTA-only boxes.
+  _migrate_ensure_key VOICE_IO_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  _migrate_ensure_key RAG_EVAL_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  _migrate_ensure_key FILE_INDEXER_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  # <<< WARP-3625 inbound bearers <<<
   # INFERENCE_RUNTIME on an EXISTING box backfills to `ollama`, NOT to the
   # fresh-install default of `dmr` (WARP-1870).
   #
@@ -1351,6 +1407,9 @@ migrate_env() {
   # display bearer; without this key the orchestrator → oled-display path
   # falls back to the empty-string bearer and 401s on every health probe.
   _migrate_ensure_key SERVICE_TOKEN_DISPLAY "$(openssl rand -hex 32)"
+  # WARP-3595 backfill: destructive device-bridge routes need their own token.
+  # Absent-only, so an existing value is never rotated under a running bridge.
+  _migrate_ensure_key SERVICE_TOKEN_BRIDGE "$(openssl rand -hex 32)"
   # Switch-bearer backfill: existing installs wired the switch container's
   # SERVICE_SECRET to DEVICE_SECRET_KEY while the orchestrator side sent no
   # bearer at all — so any install with a DEVICE_SECRET_KEY in .env had the
@@ -1438,6 +1497,11 @@ migrate_env() {
   # installer, so every re-imaged box lost it and every scheduled RAGAS
   # slot 400'd eval_user_required. Same default as the fresh-install heredoc.
   _migrate_ensure_key RAGAS_EVAL_USER "eval-fixtures"
+  # WARP-3609 backfill: the retrieval-eval route is now gated on this explicit
+  # flag instead of NODE_ENV (which the orchestrator never set). Existing boxes
+  # already run the scheduled eval (the `eval` profile is a default), so keep
+  # it working: only-when-missing, an operator's explicit 0 survives.
+  _migrate_ensure_key RAG_EVAL_ENABLED 1
   # WARP-339 backfill: existing installs predate the mcp service-token
   # path; without this key mcp-server's outbound calls to orchestrator
   # /api/matter/* will 401 when AUTH_ENABLED=true.
@@ -1521,6 +1585,24 @@ migrate_env() {
   _migrate_ensure_key REDIS_PASSWORD_ORCHESTRATOR "$(_gen_password 24)"
   _migrate_ensure_key REDIS_PASSWORD_AI_GATEWAY "$(_gen_password 24)"
   _migrate_ensure_key REDIS_PASSWORD_MCP "$(_gen_password 24)"
+  # WARP-3605: REDIS_HOST_PASSWORD (ACL user `nextcloud`) used to be written
+  # equal to REDIS_PASSWORD (ACL user `default`, ping-only), so the default
+  # credential could AUTH as nextcloud. Give any box that still shares them a
+  # distinct value; a distinct (or operator-set) value is never touched. The
+  # regenerated users.acl + the new nextcloud env only take effect on a
+  # recreate of `cache` and `nextcloud` (docs/security/redis-tls-acl.md); the
+  # Redis keyspace (sessions) is AOF-persisted and keyed independently of this
+  # password, so sessions survive the rotation.
+  local _rhp_now _rp_now
+  _rhp_now="$(grep -E '^REDIS_HOST_PASSWORD=' "$stage" | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+  _rp_now="$(grep -E '^REDIS_PASSWORD=' "$stage" | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
+  if [ -n "$_rp_now" ] && [ "$_rhp_now" = "$_rp_now" ]; then
+    { grep -vE '^REDIS_HOST_PASSWORD=' "$stage" || true; } > "$stage.rhp"
+    chmod 600 "$stage.rhp"
+    mv "$stage.rhp" "$stage"
+    log_info "Migrated .env: REDIS_HOST_PASSWORD no longer shares REDIS_PASSWORD (WARP-3605); recreate cache + nextcloud to apply"
+  fi
+  _migrate_ensure_key REDIS_HOST_PASSWORD "$(_gen_password 24)"
   # Upgrade the exact legacy plaintext REDIS_URL shape to the TLS listener.
   # Only the default-user URL is rewritten (operators with custom URLs keep
   # theirs); real clients get per-service URLs from docker-compose.yml.
@@ -1943,17 +2025,33 @@ _generate_redis_acl() {
     return 0
   fi
   # Pre-WARP-234 .env (fresh generate_env always sets these; migrate_env
-  # backfills on upgrade). Nextcloud reuses REDIS_HOST_PASSWORD.
+  # backfills on upgrade). Nextcloud uses REDIS_HOST_PASSWORD.
   local orch_pw="${REDIS_PASSWORD_ORCHESTRATOR:-}"
   local aigw_pw="${REDIS_PASSWORD_AI_GATEWAY:-}"
   local mcp_pw="${REDIS_PASSWORD_MCP:-}"
-  local nc_pw="${REDIS_HOST_PASSWORD:-$REDIS_PASSWORD}"
-  if [ -z "$orch_pw" ] || [ -z "$aigw_pw" ] || [ -z "$mcp_pw" ]; then
+  local nc_pw="${REDIS_HOST_PASSWORD:-}"
+  if [ -z "$orch_pw" ] || [ -z "$aigw_pw" ] || [ -z "$mcp_pw" ] || [ -z "$nc_pw" ]; then
     log_warn "Per-service Redis passwords missing from .env — skipping ACL generation (run setup.sh to migrate .env first)"
     return 0
   fi
 
   _redis_sha() { printf '%s' "$1" | openssl dgst -sha256 -hex | sed 's/^.*= //'; }
+
+  # WARP-3605: Redis authenticates each username/password pair on its own, so
+  # two users sharing a password share a hash and either password opens both
+  # accounts. Refuse to write an ACL where any two users collide.
+  local _acl_hashes _dup
+  _acl_hashes="$(printf '%s\n' \
+    "default $(_redis_sha "$REDIS_PASSWORD")" \
+    "orchestrator $(_redis_sha "$orch_pw")" \
+    "ai-gateway $(_redis_sha "$aigw_pw")" \
+    "mcp-server $(_redis_sha "$mcp_pw")" \
+    "nextcloud $(_redis_sha "$nc_pw")")"
+  _dup="$(printf '%s\n' "$_acl_hashes" | awk '{ if ($2 in seen) print seen[$2] " and " $1; else seen[$2] = $1 }')"
+  if [ -n "$_dup" ]; then
+    log_error "Redis ACL users share a password (hash collision: $_dup) — each ACL user needs its own .env password; refusing to write users.acl"
+    return 1
+  fi
 
   mkdir -p "$acl_dir"
   chmod 700 "$REPO_ROOT/data/secrets" "$acl_dir" 2>/dev/null || true

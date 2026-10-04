@@ -32,7 +32,7 @@
  * is the one thing that would reintroduce the drift the catalog exists to
  * prevent.
  */
-import { TOOL_CATALOG, type ToolDomain } from "@droplet/tools-core";
+import { TOOL_CATALOG, TOOL_DOMAINS, type ToolDomain } from "@droplet/tools-core";
 
 /**
  * The domains whose tools read the customer's own stored material.
@@ -55,12 +55,20 @@ import { TOOL_CATALOG, type ToolDomain } from "@droplet/tools-core";
  *    from what it already allowed, so a business tool reaches a turn only if
  *    both say yes — on a cloud turn, never.
  *
- * DELIBERATELY NOT WIDENED HERE: `erp`, `email`, `calendar`, and `team_chat`
- * also carry customer content — `erp` most acutely, since it is literally the
- * practice-management PHI surface with its own `PHI_READ_ROLES` floor. They
- * are out of THIS ticket's scope (which is the Drive) and adding them
- * silently would be a scope change disguised as a constant. They want their
- * own ticket and their own product decision about what a cloud model is for.
+ *  - `email`, `calendar`, `team_chat`, `cameras`, `cloud`, `money`, `erp`,
+ *    `crm`, `pm` — WARP-3570. These carry customer correspondence, schedules,
+ *    member-to-member messages, camera events, connected SaaS data, ledger
+ *    documents and, for `erp`, the practice-management PHI surface. The
+ *    first version of this gate (WARP-1983) left them out as a scope
+ *    decision about the Drive; no product decision to keep them on a cloud
+ *    turn was ever recorded, and a result they return is sent to the cloud
+ *    provider on the next model call, so they are withheld too.
+ *
+ * DEFAULT-DENY. The set is written the other way round: the domains that MAY
+ * be advertised to a cloud model are listed in {@link OFF_LAN_PERMITTED_DOMAINS},
+ * and every other domain in `TOOL_DOMAINS` is withheld. A domain added to the
+ * catalog later is therefore withheld until a person decides, in the test
+ * that pins both sets, that it is safe to send off-box.
  *
  * DECIDED, NOT WITHHELD: `workspace` (WARP-2896, Stefan 2026-09-23). A
  * workshop run's repository is code its owner is writing, not stored
@@ -70,11 +78,35 @@ import { TOOL_CATALOG, type ToolDomain } from "@droplet/tools-core";
  * provider. Withholding the domain would leave a cloud workshop run with no
  * tools at all: a run that can only fail, not a privacy boundary.
  */
-export const OFF_LAN_WITHHELD_DOMAINS: ReadonlySet<ToolDomain> = new Set<ToolDomain>([
-  "files",
-  "memory",
-  "business",
+/**
+ * The domains a cloud model is allowed to see tools for. Everything here is
+ * either static computation, box or network health, device control or the
+ * workshop. Adding a domain is a product decision about what a cloud model
+ * is for; `stored-content-egress.catalog.test.ts` pins this set.
+ *
+ * Open decisions, recorded on WARP-3570: `network` and `smart-home` return
+ * device names and hostnames, `reminders` and `notifications` return text
+ * people wrote, `system` includes `get_audit_log`, and `agent_runs` lists
+ * run results. They stay permitted here because the finding scoped the
+ * minimum fix to the seven domains above.
+ */
+export const OFF_LAN_PERMITTED_DOMAINS: ReadonlySet<ToolDomain> = new Set<ToolDomain>([
+  "network",
+  "switch",
+  "smart-home",
+  "reminders",
+  "notifications",
+  "system",
+  "data",
+  "agent_runs",
+  "routines",
+  "workspace",
 ]);
+
+/** Every catalog domain that is not permitted off-LAN. */
+export const OFF_LAN_WITHHELD_DOMAINS: ReadonlySet<ToolDomain> = new Set<ToolDomain>(
+  TOOL_DOMAINS.filter((domain) => !OFF_LAN_PERMITTED_DOMAINS.has(domain)),
+);
 
 /**
  * Tool names withheld from an off-LAN turn. Computed once at module load —
@@ -116,7 +148,8 @@ export const OFF_LAN_WITHHELD_NOTICE =
   "You are running on a cloud model, off this appliance. The user's stored " +
   "files, their contents, their filenames, and any attachments are NOT " +
   "available to you on this turn, and no file, memory or business-record " +
-  "tools are offered. " +
+  "tools are offered, and neither are email, calendar, team chat, camera, " +
+  "cloud-account, accounting or practice-management tools. " +
   "Stored content was also left out of these instructions: the facts the " +
   "user asked you to remember, the business profile, what the Droplet has " +
   "learned about the business, and any pinned items. This is a deliberate " +

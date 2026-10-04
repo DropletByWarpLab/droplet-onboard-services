@@ -734,6 +734,7 @@ export {
 } from "./rest/read-semantics.js";
 export {
   CALCOM_PROVIDER,
+  CAPSULE_PROVIDER,
   GITHUB_PROVIDER,
   GITLAB_PROVIDER,
   GOCARDLESS_PROVIDER,

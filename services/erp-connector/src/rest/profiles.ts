@@ -18,6 +18,7 @@
  */
 import { assertValidRestProfile, type RestVendorProfile } from "./profile.js";
 import { CALCOM_PROFILE, CALCOM_PROVIDER } from "./vendors/calcom.js";
+import { CAPSULE_PROFILE, CAPSULE_PROVIDER } from "./vendors/capsule.js";
 import { GITHUB_PROFILE, GITHUB_PROVIDER } from "./vendors/github.js";
 import { GITLAB_PROFILE, GITLAB_PROVIDER } from "./vendors/gitlab.js";
 import { GOCARDLESS_PROFILE, GOCARDLESS_PROVIDER } from "./vendors/gocardless.js";
@@ -34,6 +35,7 @@ import { TODOIST_PROFILE, TODOIST_PROVIDER } from "./vendors/todoist.js";
  */
 export const REST_VENDOR_PROFILES: readonly RestVendorProfile[] = [
   CALCOM_PROFILE,
+  CAPSULE_PROFILE,
   GITHUB_PROFILE,
   GITLAB_PROFILE,
   GOCARDLESS_PROFILE,
@@ -66,6 +68,7 @@ export function restProviderIds(): readonly string[] {
 
 export {
   CALCOM_PROVIDER,
+  CAPSULE_PROVIDER,
   GITHUB_PROVIDER,
   GITLAB_PROVIDER,
   GOCARDLESS_PROVIDER,

@@ -13,6 +13,10 @@
 #      only), nextcloud (~* with +keys carve-out for cache clear()).
 #   4. idempotent: same inputs → byte-identical file; a password change
 #      regenerates the matching hash.
+#   5. WARP-3605: no two ACL users may share a password hash (the generator
+#      refuses), generate_env writes a REDIS_HOST_PASSWORD distinct from
+#      REDIS_PASSWORD, and migrate_env rotates a box that still shares them
+#      while leaving a distinct value alone.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -90,5 +94,57 @@ _generate_redis_acl || fail "second run failed"
 REDIS_PASSWORD_MCP="mcp-pw-2" _generate_redis_acl || fail "rotation run failed"
 grep -q "#$(_sha "mcp-pw-2")" "$ACL" || fail "rotated mcp hash not applied"
 grep -q "#$(_sha "mcp-pw-1")" "$ACL" && fail "stale mcp hash left behind"
+
+# 5a. WARP-3605: two users sharing a password => the generator refuses and
+# leaves the previous file untouched (a shared hash lets either password AUTH
+# as either user).
+before="$(cksum < "$ACL")"
+REDIS_HOST_PASSWORD="$REDIS_PASSWORD" _generate_redis_acl >/dev/null 2>&1 \
+  && fail "nextcloud sharing the default password was accepted"
+[ "$(cksum < "$ACL")" = "$before" ] || fail "users.acl changed despite a shared-hash refusal"
+REDIS_PASSWORD_MCP="$REDIS_PASSWORD_ORCHESTRATOR" _generate_redis_acl >/dev/null 2>&1 \
+  && fail "two per-service users sharing a password were accepted"
+REDIS_HOST_PASSWORD="" _generate_redis_acl >/dev/null 2>&1 \
+  || fail "a missing REDIS_HOST_PASSWORD must skip (warn), not fail or fall back to the default password"
+[ "$(cksum < "$ACL")" = "$before" ] || fail "users.acl changed when REDIS_HOST_PASSWORD was empty"
+
+# 5b. generate_env: distinct nextcloud password. 5c. migrate_env: rotate a shared one.
+GEN="$WORK/gen"; mkdir -p "$GEN/.data"
+cp "$REPO_ROOT_REAL/.env.example" "$GEN/.env.example"
+ENVF="$GEN/.env"
+envval() { grep -E "^$1=" "$ENVF" | tail -1 | cut -d= -f2-; }
+(
+  REPO_ROOT="$GEN"; LOG_FILE="$GEN/.data/setup.log"
+  generate_env >/dev/null 2>&1
+) || true
+[ -f "$ENVF" ] || fail "generate_env did not write .env"
+rp="$(envval REDIS_PASSWORD)"; rhp="$(envval REDIS_HOST_PASSWORD)"
+[ -n "$rp" ] && [ -n "$rhp" ] || fail "generate_env wrote no REDIS_PASSWORD/REDIS_HOST_PASSWORD"
+[ "$rp" != "$rhp" ] || fail "generate_env wrote REDIS_HOST_PASSWORD equal to REDIS_PASSWORD"
+case "$rhp" in *[!A-Za-z0-9]*) fail "REDIS_HOST_PASSWORD must be alphanumeric (PHP session.save_path)";; esac
+
+# Old box: REDIS_HOST_PASSWORD == REDIS_PASSWORD.
+{ grep -vE '^REDIS_HOST_PASSWORD=' "$ENVF"; printf 'REDIS_HOST_PASSWORD=%s\n' "$rp"; } > "$ENVF.t" && mv "$ENVF.t" "$ENVF"
+(
+  REPO_ROOT="$GEN"; LOG_FILE="$GEN/.data/setup.log"
+  migrate_env >/dev/null 2>&1
+)
+[ "$(envval REDIS_PASSWORD)" = "$rp" ] || fail "migrate_env changed REDIS_PASSWORD"
+new="$(envval REDIS_HOST_PASSWORD)"
+[ -n "$new" ] && [ "$new" != "$rp" ] || fail "migrate_env did not rotate a shared REDIS_HOST_PASSWORD"
+[ "$(grep -cE '^REDIS_HOST_PASSWORD=' "$ENVF")" = "1" ] || fail "REDIS_HOST_PASSWORD present on more than one line"
+case "$new" in *[!A-Za-z0-9]*) fail "rotated REDIS_HOST_PASSWORD must be alphanumeric";; esac
+cp "$ENVF" "$WORK/env.after"
+(
+  REPO_ROOT="$GEN"; LOG_FILE="$GEN/.data/setup.log"
+  migrate_env >/dev/null 2>&1
+)
+cmp -s "$ENVF" "$WORK/env.after" || fail "second migrate_env changed a distinct REDIS_HOST_PASSWORD (not idempotent)"
+# The migrated .env yields a valid ACL (no shared hash).
+(
+  set -a; . "$ENVF"; set +a
+  REPO_ROOT="$GEN"; LOG_FILE="$GEN/.data/setup.log"
+  _generate_redis_acl >/dev/null 2>&1
+) || fail "ACL generation failed from a migrated .env"
 
 echo "PASS tests/redis-acl.test.sh"

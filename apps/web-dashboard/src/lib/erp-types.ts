@@ -83,7 +83,10 @@ export type ConnectorId =
   | "loyverse"
   // WARP-3697 — GoCardless, the seventh declarative REST vendor and the first
   // wave-3 card (free-integrations wave 3). Same hand-widening, same reason.
-  | "gocardless";
+  | "gocardless"
+  // WARP-3698 — Capsule CRM, the eighth declarative REST vendor. Same
+  // hand-widening, same reason.
+  | "capsule";
 
 export type ConnectorAvailability = "available" | "coming-soon";
 

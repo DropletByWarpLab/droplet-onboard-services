@@ -107,12 +107,12 @@ fi
 # compose always mounts the volume at the default path.
 DROPLET_SHARE_DIR="${DROPLET_SHARE_DIR:-/droplet-share}"
 if [ -d "$DROPLET_SHARE_DIR" ]; then
-  # Fresh named volumes materialize root-owned; Nextcloud (and smbd via
-  # `force user` uid 33) writes as www-data. Non-recursive on purpose — only
-  # the root dir's ownership matters for a local mount, and a recursive chown
-  # over a populated share would stall every boot. `|| true`: already-correct
-  # ownership or an unprivileged re-run must not abort the hook.
-  chown www-data:www-data "$DROPLET_SHARE_DIR" 2>/dev/null || true
+  # The share root's ownership is set by the compose `nextcloud` entrypoint
+  # (chown 33:33 as root, non-recursive: a recursive chown over a populated
+  # share would stall every boot), NOT here. A fresh named volume is root:root
+  # 755 and this hook runs as www-data (the stock entrypoint's run_as() su's
+  # before-starting hooks), so a chown from here can never take ownership of
+  # it — it was a silent EPERM that left the SMB drive read-only (WARP-3693).
   if EXT_LIST="$($OCC files_external:list --output=json 2>/dev/null)"; then
     EXT_ID="$(printf '%s' "$EXT_LIST" | php -r '
         $j = json_decode(stream_get_contents(STDIN), true) ?: [];
@@ -539,6 +539,11 @@ reconcile_overwrite_protocol() {
 #     not apply on its own schedule — the box updates as a unit.
 #   * `support` advertises Nextcloud Enterprise; `weather_status` calls an
 #     external weather API from the user menu; `recommendations` is noise.
+#   * `photos` (WARP-3606) can publish a public album from a plain DAV request
+#     (PROPPATCH under remote.php/dav/photos), a route that mints a
+#     credential-free URL without the owner/admin publish rule or an audit
+#     row. Nothing here uses it: the dashboard reads files and previews
+#     through core, and the mobile apps' auto-upload is plain WebDAV.
 #
 # NOT `dashboard` and NOT `activity`, deliberately. `dashboard` is Nextcloud's
 # default landing app — disabling it changes what the bare /nextcloud/ route
@@ -552,7 +557,7 @@ reconcile_overwrite_protocol() {
 disable_hub_apps() {
   hub_disabled=""
   for hub_app in firstrunwizard updatenotification nextcloud_announcements \
-                 survey_client support weather_status recommendations; do
+                 survey_client support weather_status recommendations photos; do
     # Match the app NAME in the Enabled block, not anywhere in occ's output:
     # every one of these also appears under "Disabled:" once it is off, and a
     # loose grep would retry the disable on every single boot forever.
@@ -871,3 +876,24 @@ for pv in PNG JPEG GIF BMP XBitmap MP3 TXT MarkDown OpenDocument Krita TIFF HEIC
   pv_i=$((pv_i + 1))
 done
 echo "[droplet] WARP-1686: preview providers set (defaults + TIFF/HEIC/SVG)"
+
+# ── WARP-3586 — public-link expiry enforced by Nextcloud itself ──
+#
+# The orchestrator's POST/PUT /files/share route applies a 30-day default and a
+# 90-day ceiling (apps/orchestrator/src/services/share-policy.ts), but
+# Nextcloud's own web UI and OCS endpoints are reachable too, so the same
+# ceiling is set here, re-applied on every start and upgrade (config:app:set
+# is idempotent). With enforce=yes `shareapi_expire_after_n_days` is both the
+# default for a link created without a date and the maximum. 90 matches the
+# route's ceiling; the route's tighter 30-day default applies on its path.
+# Deliberately NOT set here: shareapi_allow_public_upload (it would also stop
+# an owner/admin's folder upload link) and shareapi_enforce_links_password
+# (the assistant tool and dashboard create passwordless links by design today).
+for kv in \
+  "shareapi_default_expire_date=yes" \
+  "shareapi_enforce_expire_date=yes" \
+  "shareapi_expire_after_n_days=90"; do
+  occ_www config:app:set core "${kv%%=*}" --value="${kv#*=}" >/dev/null \
+    || echo "nextcloud-init: could not set ${kv%%=*} — reconciles on the next boot" >&2
+done
+echo "[droplet] WARP-3586: public-link expiry enforced (default on, max 90 days)"

@@ -99,7 +99,8 @@ SHARED_PAGE="$DOCS_DIR/credential-handling.md"
 # WARP-2918 — `todoist` is the fifth REST-track vendor; same obligation.
 # WARP-2919 — `loyverse`, the sixth REST-track vendor, for the same reason.
 # WARP-3697 — `gocardless`, the first wave-3 vendor (free-integrations wave 3).
-CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive square calcom github gitlab todoist loyverse gocardless"
+# WARP-3698 — `capsule`, the second.
+CLOUD_PROVIDERS="stripe hubspot mailchimp shopify xero atlassian brevo klaviyo pipedrive square calcom github gitlab todoist loyverse gocardless capsule"
 
 # The six sections every vendor guide must carry, as exact H2 headings.
 # Dropping any one of them is the mutation this list exists to catch.
@@ -333,6 +334,18 @@ fact_pins() {
       #    revoke it (GoCardless's own article). Softening that to "may stay
       #    active" turns an offboarding checklist into a standing credential.
       printf '%s\n' 'Developers' 'API settings' 'Create access token' 'read-only' 'does not revoke'
+      ;;
+    capsule)
+      # Two facts a customer acts on, as four pins (WARP-3698, ADR-042 §2 row):
+      #  - 'My Preferences' and 'API Authentication' are the screens that hold the
+      #    token, and 'Generate new API token' is the button; softening them to
+      #    "your account settings" sends the owner looking for a page that is not
+      #    called that.
+      #  - '4,000 requests' an hour is the per-USER allowance, shared with every
+      #    other tool using that user's tokens. A guide that drops it hides why a
+      #    busy hour can slow the box down, and why a full re-read of the tasks
+      #    list has a cost.
+      printf '%s\n' 'My Preferences' 'API Authentication' 'Generate new API token' '4,000 requests'
       ;;
     *)
       : # no pins declared for this provider

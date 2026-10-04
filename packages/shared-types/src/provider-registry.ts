@@ -1489,6 +1489,57 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       order: 19,
     },
   },
+  // WARP-3698 — the eighth REST profile, and a pipeline CRM whose `deal` LANDS
+  // in the box CRM beside a read-through `task` list.
+  {
+    id: "capsule",
+    displayName: "Capsule CRM",
+    category: "CRM",
+    track: "rest",
+    credentialFields: [
+      {
+        name: "token",
+        label: "Capsule personal access token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // NO `pattern`, for the Brevo / Square / Cal.com reason: Capsule documents
+        // no token format, so a regex would be a guess that refuses valid tokens.
+        // Pinned absent by `capsule-profile.test.ts`.
+        //
+        // The scope picker is UNVERIFIED (the support article says to restrict the
+        // token to what is required but does not show the choice), so the help
+        // says "if Capsule offers the choice". No host in the help: the egress
+        // scanner reads descriptor strings.
+        help:
+          "In Capsule: click your name (top menu bar) → My Preferences → API Authentication → " +
+          "Generate new API token. Restrict it to read access if Capsule offers the choice, then copy it.",
+      },
+    ],
+    // ONE FIXED HOST. The owner's browser host, the developer-docs host and the
+    // OAuth / MCP hosts are never dialled and never registered.
+    egressHosts: ["api.capsulecrm.com"],
+    // `deal` from `GET /opportunities` (a complete `since` watermark; LANDS in
+    // the box CRM) and `task` from `GET /tasks` (a declared full scan; read-through).
+    // `contact` and `company` are NOT served: both live behind one `/parties`
+    // list with no type filter, which the track cannot route by row value. The
+    // reasons are in `rest/vendors/capsule.ts`.
+    datasets: ["deal", "task"],
+    // "4,000 requests per hour when using Bearer Token Authentication" — per
+    // USER, shared with every other tool using that user's tokens.
+    rateLimit: { callCeiling: 4_000, periodMs: 3_600_000 },
+    catalog: {
+      id: "capsule",
+      name: "Capsule CRM",
+      category: "CRM",
+      description:
+        "Opportunities with their milestone and value, and tasks with their owner and dates — read from Capsule CRM. People and organisations are not read.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/capsule",
+      order: 20,
+    },
+  },
 ] as const satisfies readonly ProviderDescriptor[];
 
 /**

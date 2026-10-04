@@ -49,6 +49,7 @@ import addAProvider from "../../../../docs/integrations/ADD-A-PROVIDER.md?raw";
 import atlassian from "../../../../docs/integrations/atlassian.md?raw";
 import brevo from "../../../../docs/integrations/brevo.md?raw";
 import calcom from "../../../../docs/integrations/calcom.md?raw";
+import capsule from "../../../../docs/integrations/capsule.md?raw";
 import credentialHandling from "../../../../docs/integrations/credential-handling.md?raw";
 import eaglesoft from "../../../../docs/integrations/eaglesoft.md?raw";
 import exportDrop from "../../../../docs/integrations/export-drop.md?raw";
@@ -87,6 +88,7 @@ export const INTEGRATION_GUIDES: Readonly<Record<string, string>> = {
   atlassian,
   brevo,
   calcom,
+  capsule,
   "credential-handling": credentialHandling,
   eaglesoft,
   "export-drop": exportDrop,
