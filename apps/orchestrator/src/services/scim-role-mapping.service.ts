@@ -5,15 +5,16 @@
  *   owner | admin | family | guest | service
  *
  * SCIM (Okta) pushes groups with arbitrary display names. This module is the
- * single, explicit, introspectable policy that maps a group display name to
- * the local Role it grants, and resolves a user's EFFECTIVE role as the
- * highest-privilege role across every group they belong to.
+ * single, explicit, introspectable policy that maps a group to the local Role
+ * it grants, and resolves a user's EFFECTIVE role as the highest-privilege
+ * role across every group they belong to.
  *
  * Three hard rules (security):
- *   1. LEAST PRIVILEGE BY DEFAULT. An unrecognized group → `family`. SCIM can
- *      never accidentally hand out owner/admin because a customer named a
- *      group "Admin Assistants" — only an exact (normalized) keyword match
- *      elevates. The default floor is `family`, never owner.
+ *   1. LEAST PRIVILEGE BY DEFAULT. An unconfigured group → `family`. WARP-3631:
+ *      a group elevates ONLY when the operator names it (exact display name or
+ *      exact SCIM group id) in `SCIM_GROUP_ROLE_MAP`. Never by substring: a
+ *      group called "Store Managers" or "Badminton Club" grants nothing. The
+ *      default floor is `family`, never owner.
  *   2. `service` IS NOT ASSIGNABLE FROM SCIM. It's the inbound-service-
  *      principal role (voice / mcp / email tokens). A directory user must
  *      never be minted with it — that would confuse the privilege shape RBAC
@@ -26,6 +27,10 @@
  * external group list to a local Role" idiom — but for the SCIM vocabulary.
  */
 import type { Role } from "./jwt.service.js";
+import { config } from "../config.js";
+import { createLogger } from "../lib/logger.js";
+
+const logger = createLogger("scim-role-mapping");
 
 /**
  * Roles a SCIM-provisioned directory user may hold, in ascending privilege.
@@ -77,26 +82,35 @@ export const DEFAULT_DIRECTORY_ROLE: DirectoryRole = "family";
 export const SCIM_ROLE_CEILING: DirectoryRole = "admin";
 
 /**
- * Keyword → role rules, checked in DESCENDING privilege order so the most
- * privileged matching keyword wins within a single group name (e.g. a group
- * literally named "Owners and Admins" resolves to the owner arm — then the
- * ceiling clamps it to `admin`). Each rule matches when the normalized
- * (trim + lowercase) group name CONTAINS the keyword.
- *
- * Deliberately conservative: only explicit role vocabulary elevates. Adding a
- * customer-specific synonym is a one-line edit here (the single source of
- * truth), not a scatter of string checks across the SCIM handlers.
+ * WARP-3631 — the operator-configured group → role map, from the JSON object in
+ * `SCIM_GROUP_ROLE_MAP`: `{"<exact group name or SCIM group id>": "<role>"}`.
+ * Keys are matched whole (trimmed, case-insensitive), never as substrings.
+ * Unparseable JSON or an unknown role value is ignored with a warning, so a
+ * typo leaves the safe default (`family`) rather than granting anything.
  */
-const KEYWORD_RULES: ReadonlyArray<{ keyword: string; role: DirectoryRole }> = [
-  // The "owner" arm is kept so an owner-named group still resolves to the TOP
-  // of the ladder rather than falling through to `family` — but the mapper
-  // clamps it to SCIM_ROLE_CEILING (`admin`) on the way out (WARP-1568). It is
-  // the ladder position that is meaningful here, not the literal role.
-  { keyword: "owner", role: "owner" },
-  { keyword: "admin", role: "admin" },
-  { keyword: "manager", role: "admin" },
-  { keyword: "guest", role: "guest" },
-];
+function configuredRoleMap(): Map<string, DirectoryRole> {
+  const out = new Map<string, DirectoryRole>();
+  const raw = (config.SCIM_GROUP_ROLE_MAP ?? "").trim();
+  if (!raw) return out;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error("not an object");
+    }
+    for (const [key, value] of Object.entries(parsed)) {
+      const k = normalize(key);
+      if (k && typeof value === "string" && Object.hasOwn(ROLE_PRIVILEGE, value)) {
+        out.set(k, value as DirectoryRole);
+      } else {
+        logger.warn({ key }, "SCIM_GROUP_ROLE_MAP entry ignored (empty key or unknown role)");
+      }
+    }
+  } catch {
+    logger.warn("SCIM_GROUP_ROLE_MAP is not a JSON object; every SCIM group maps to the default role");
+    return new Map();
+  }
+  return out;
+}
 
 function normalize(name: string): string {
   return name.trim().toLowerCase();
@@ -110,21 +124,20 @@ function clampToCeiling(role: DirectoryRole): DirectoryRole {
 }
 
 /**
- * Map a single SCIM group display name to the local Role it grants. Returns
- * the least-privilege default (`family`) for any name without a recognized
- * role keyword. Never returns `service`, and never returns anything above
- * SCIM_ROLE_CEILING (WARP-1568) — this is the single name → role boundary
+ * Map a SCIM group to the local Role it grants: the configured entry for its
+ * SCIM group id, else for its exact display name, else the least-privilege
+ * default (`family`). Never returns `service`, and never anything above
+ * SCIM_ROLE_CEILING (WARP-1568) — this is the single group → role boundary
  * the whole SCIM surface goes through, so the clamp lives here rather than at
  * each caller.
  */
-export function roleForScimGroupName(displayName: string): DirectoryRole {
-  const n = normalize(displayName);
-  for (const rule of KEYWORD_RULES) {
-    if (n.includes(rule.keyword)) {
-      return clampToCeiling(rule.role);
-    }
-  }
-  return DEFAULT_DIRECTORY_ROLE;
+export function roleForScimGroupName(displayName: string, externalId?: string | null): DirectoryRole {
+  const map = configuredRoleMap();
+  const role =
+    (externalId ? map.get(normalize(externalId)) : undefined) ??
+    map.get(normalize(displayName)) ??
+    DEFAULT_DIRECTORY_ROLE;
+  return clampToCeiling(role);
 }
 
 /**

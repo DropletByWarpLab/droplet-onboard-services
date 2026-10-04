@@ -18,7 +18,8 @@
  *     rewritten below, deliberately: they documented the vulnerable
  *     behaviour, not a requirement.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
+import { config } from "../config.js";
 import {
   roleForScimGroupName,
   highestRole,
@@ -27,15 +28,16 @@ import {
   SCIM_ROLE_CEILING,
 } from "./scim-role-mapping.service.js";
 
-describe("roleForScimGroupName — explicit, least-privilege-default policy", () => {
-  it("CLAMPS owner-flavored group names to the ceiling — SCIM can never grant owner", () => {
-    // WARP-1568. "Droplet Owners" is the exact shape of the escalation: a
-    // customer names an Okta group after ownership and the box hands the IdP
-    // its root of trust. The name still resolves to the top of the ladder —
-    // just the top of the SCIM-assignable ladder.
+const setMap = (m: Record<string, string> | string) =>
+  ((config as { SCIM_GROUP_ROLE_MAP: string }).SCIM_GROUP_ROLE_MAP = typeof m === "string" ? m : JSON.stringify(m));
+
+beforeEach(() => {
+  setMap({ "Droplet Owners": "owner", "Droplet Admins": "admin", Guests: "guest" });
+});
+
+describe("roleForScimGroupName — explicit, least-privilege-default policy (WARP-3631)", () => {
+  it("CLAMPS a group the operator maps to owner to the ceiling — SCIM can never grant owner", () => {
     expect(roleForScimGroupName("Droplet Owners")).toBe("admin");
-    expect(roleForScimGroupName("owners")).toBe("admin");
-    expect(roleForScimGroupName("Business Owners")).toBe("admin");
     expect(roleForScimGroupName("Droplet Owners")).toBe(SCIM_ROLE_CEILING);
   });
 
@@ -43,46 +45,48 @@ describe("roleForScimGroupName — explicit, least-privilege-default policy", ()
     expect(SCIM_ROLE_CEILING).toBe("admin");
   });
 
-  it("maps manager/admin group names to admin", () => {
+  it("maps a configured group by its whole name", () => {
     expect(roleForScimGroupName("Droplet Admins")).toBe("admin");
-    expect(roleForScimGroupName("Administrators")).toBe("admin");
-    expect(roleForScimGroupName("Managers")).toBe("admin");
-  });
-
-  it("maps guest group names to guest", () => {
     expect(roleForScimGroupName("Guests")).toBe("guest");
-    expect(roleForScimGroupName("Droplet Guest")).toBe("guest");
   });
 
-  it("defaults ANY unrecognized group to least-privilege family", () => {
+  it("never matches a substring: names containing admin, manager, owner or guest map to family", () => {
+    for (const name of [
+      "Sales Managers", "Store Managers", "Project Managers", "Administrators", "Administrative Assistants",
+      "Badminton Club", "Homeowners Association", "Guest Services", "Droplet Admins Extra",
+    ]) {
+      expect(roleForScimGroupName(name), name).toBe("family");
+    }
+  });
+
+  it("matches a configured SCIM group id ahead of the name", () => {
+    setMap({ "00g1abc": "admin", Contractors: "guest" });
+    expect(roleForScimGroupName("Contractors", "00g1abc")).toBe("admin");
+    expect(roleForScimGroupName("Contractors", "other")).toBe("guest");
+  });
+
+  it("defaults ANY unconfigured group to least-privilege family, and so does an empty or bad map", () => {
     expect(roleForScimGroupName("Everyone")).toBe("family");
-    expect(roleForScimGroupName("Sales Team")).toBe("family");
     expect(roleForScimGroupName("")).toBe("family");
+    setMap("");
+    expect(roleForScimGroupName("Droplet Admins")).toBe("family");
+    setMap("not json");
+    expect(roleForScimGroupName("Droplet Admins")).toBe("family");
+    setMap({ "Droplet Admins": "superuser", Svc: "service" });
+    expect(roleForScimGroupName("Droplet Admins")).toBe("family");
+    expect(roleForScimGroupName("Svc")).toBe("family");
   });
 
   it("is case-insensitive and trims surrounding whitespace", () => {
     expect(roleForScimGroupName("  DROPLET ADMINS  ")).toBe("admin");
-    expect(roleForScimGroupName("oWnErS")).toBe("admin"); // clamped, WARP-1568
   });
 
-  it("NEVER maps any group to the internal `service` role", () => {
-    // `service` is reserved for inbound service principals; SCIM must not be
-    // able to mint one (privilege-shape confusion).
-    expect(roleForScimGroupName("service")).not.toBe("service");
-    expect(roleForScimGroupName("Service Accounts")).not.toBe("service");
-  });
-
-  it("NEVER maps ANY group name to `owner`, whatever it is called", () => {
-    // The sweep, not just the known keywords: no name the mapper accepts may
-    // resolve above the ceiling.
-    const names = [
-      "Droplet Owners", "owner", "OWNER", "co-owners", "Owners and Admins",
-      "Admins", "Managers", "Guests", "Everyone", "Sales Team", "",
-      "service", "Homeowners Association",
-    ];
-    for (const name of names) {
+  it("NEVER maps ANY group name to `owner` or `service`, whatever the map says", () => {
+    setMap({ A: "owner", B: "service", C: "admin" });
+    for (const name of ["A", "B", "C", "D", ""]) {
       const role = roleForScimGroupName(name);
       expect(role, `"${name}" mapped to ${role}`).not.toBe("owner");
+      expect(role).not.toBe("service");
       expect(ROLE_PRIVILEGE[role]).toBeLessThanOrEqual(ROLE_PRIVILEGE[SCIM_ROLE_CEILING]);
     }
   });

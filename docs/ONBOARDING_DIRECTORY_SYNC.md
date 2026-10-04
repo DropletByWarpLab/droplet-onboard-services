@@ -94,11 +94,16 @@ for a `DEACTIVATED` user (wire-indistinguishable from unknown-email at login).
 
 ### Role mapping
 
-`scim-role-mapping.service.ts` maps a SCIM group display name → local `Role`
-(explicit keyword policy, least-privilege `family` default; `service` is NEVER
+`scim-role-mapping.service.ts` maps a SCIM group → local `Role` from the
+operator-configured `SCIM_GROUP_ROLE_MAP` (WARP-3631): a JSON object of exact
+group name or SCIM group id → role, e.g. `{"Droplet Admins":"admin","Guests":"guest"}`.
+Matching is whole-string and case-insensitive, never a substring; any group not
+listed maps to the least-privilege `family` role (`service` is NEVER
 assignable). `POST /scim/v2/Groups` RAISES each member's role to at least the
-group's mapped role (highest-privilege-wins floor; no demotion). The gated
-Team-membership UI is **NOT** built here (AC).
+group's mapped role (highest-privilege-wins floor) and remembers the push's
+member list, so a person dropped from a later push is lowered to the highest
+role of the groups they remain in. The gated Team-membership UI is **NOT**
+built here (AC).
 
 > **Ceiling: `admin` (WARP-1568).** `owner` is **not** an Okta-assignable
 > role. A group whose name says "owner" is clamped to `SCIM_ROLE_CEILING`
@@ -112,9 +117,13 @@ Team-membership UI is **NOT** built here (AC).
 > scim:okta`). A refusal is per-member: it is logged, that member's role is
 > left unchanged, and the rest of the group still converges.
 
-> **Documented simplification:** without a persisted SCIM membership table,
-> removing a user from a group does not auto-lower their role — elevation is
-> sticky until an explicit People-surface change. In scope per the AC.
+> **Demotion scope (WARP-3631):** only SCIM-provisioned people are lowered, and
+> only when their current role is no higher than what the removed group granted,
+> so a role an owner set by hand is left alone. Membership is remembered from the
+> first push after upgrade (`ScimGroup.memberUserIds`), so someone already
+> raised before that push is lowered only after they appear in, and then drop
+> out of, a push. Lowering the configured mapping for a group lowers the people
+> it had raised on its next push.
 
 ## Data model (Prisma)
 

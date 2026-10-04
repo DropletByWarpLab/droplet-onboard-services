@@ -1281,6 +1281,13 @@ const envSchema = z.object({
     .default("0")
     .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
 
+  // WARP-3631 — SCIM group → role map: a JSON object of exact group name (or
+  // SCIM group id) → role, e.g. {"Droplet Admins":"admin","Guests":"guest"}.
+  // Empty (default) means every SCIM group maps to the member role (`family`);
+  // matching is whole-string, never a substring, and `admin` is the ceiling.
+  // Parsed (and bad JSON rejected, fail-safe) in scim-role-mapping.service.ts.
+  SCIM_GROUP_ROLE_MAP: z.string().default(""),
+
   // WARP-3630 — privileged-account two-step policy. On, (1) an owner or admin
   // with no confirmed second factor (TOTP or passkey) can reach only the
   // enrolment surface until they enrol (403 MFA_ENROLLMENT_REQUIRED, see
