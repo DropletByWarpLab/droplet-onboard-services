@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { parseIcs, serializeIcs } from "../services/ics.js";
+import { describe, it, expect, vi } from "vitest";
+import { parseIcs, serializeIcs, type IcsStatus } from "../services/ics.js";
 
 const SAMPLE = `BEGIN:VCALENDAR
 VERSION:2.0
@@ -270,6 +270,63 @@ describe("serializeIcs", () => {
     expect(parsed[0].location).toBe("Earth");
     expect(parsed[0].startsAt.toISOString()).toBe("2026-04-23T14:00:00.000Z");
     expect(parsed[0].endsAt.toISOString()).toBe("2026-04-23T15:30:00.000Z");
+  });
+});
+
+// ── WARP-3533: the optional STATUS property ──
+describe("serializeIcs — STATUS (WARP-3533)", () => {
+  const base = {
+    uid: "pm-1@droplet",
+    summary: "ABC-1 Ship it",
+    startsAt: new Date("2026-10-05T00:00:00Z"),
+    endsAt: new Date("2026-10-06T00:00:00Z"),
+    allDay: true,
+  };
+
+  it("writes STATUS for each value in the closed vocabulary, as its own CRLF-terminated line", () => {
+    const vocabulary: readonly IcsStatus[] = ["TENTATIVE", "CONFIRMED", "CANCELLED", "COMPLETED"];
+    // @ts-expect-error — a status outside the vocabulary does not type-check
+    const outside: IcsStatus = "DONE";
+    expect(vocabulary).not.toContain(outside);
+    for (const status of vocabulary) {
+      const out = serializeIcs([{ ...base, status }]);
+      expect(out, status).toContain(`\r\nSTATUS:${status}\r\n`);
+    }
+  });
+
+  it("writes nothing when there is no status, so every existing caller's output is unchanged", () => {
+    const withUndefined = serializeIcs([{ ...base, status: undefined }]);
+    expect(withUndefined).not.toContain("STATUS");
+    // Byte-identical to a call that never mentions the field (DTSTAMP is the clock, so pin it).
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-04T12:00:00Z"));
+    try {
+      expect(serializeIcs([{ ...base, status: undefined }])).toBe(serializeIcs([{ ...base }]));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("puts STATUS inside the VEVENT, once per event, and only on the events that have one", () => {
+    const out = serializeIcs([
+      { ...base, uid: "a@droplet", status: "COMPLETED" },
+      { ...base, uid: "b@droplet" },
+      { ...base, uid: "c@droplet", status: "CANCELLED" },
+    ]);
+    const events = out.split("BEGIN:VEVENT").slice(1);
+    expect(events).toHaveLength(3);
+    expect(events[0]).toContain("STATUS:COMPLETED");
+    expect(events[1]).not.toContain("STATUS");
+    expect(events[2]).toContain("STATUS:CANCELLED");
+    expect(out.match(/STATUS:/g)).toHaveLength(2);
+    // Before END:VEVENT of its own event, not after it.
+    expect(events[0].indexOf("STATUS:COMPLETED")).toBeLessThan(events[0].indexOf("END:VEVENT"));
+  });
+
+  it("round-trips through parseIcs", () => {
+    const parsed = parseIcs(serializeIcs([{ ...base, status: "COMPLETED" }, { ...base, uid: "n@droplet" }]));
+    expect(parsed.find((e) => e.uid === "pm-1@droplet")?.status).toBe("COMPLETED");
+    expect(parsed.find((e) => e.uid === "n@droplet")?.status).toBeUndefined();
   });
 });
 

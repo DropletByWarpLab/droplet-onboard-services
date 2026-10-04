@@ -436,6 +436,15 @@ function fmtIcsDateTime(d: Date, allDay: boolean): string {
   return d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
 }
 
+/**
+ * WARP-3533 — the STATUS values `serializeIcs` writes. The first three are the
+ * RFC 5545 VEVENT values (§3.8.1.11). `COMPLETED` is that section's VTODO
+ * value, written on a VEVENT because the work-item feeds are all-day events
+ * that must say "done" (ADR-069 / WS-17): a client that does not know it shows
+ * the item as an ordinary all-day event, which is the harmless way to fail.
+ */
+export type IcsStatus = "TENTATIVE" | "CONFIRMED" | "CANCELLED" | "COMPLETED";
+
 export interface SerializeInput {
   uid: string;
   summary: string;
@@ -444,6 +453,9 @@ export interface SerializeInput {
   /** WARP-1874 — video-call link, emitted as the RFC 5545 URL property.
    *  Separate from `location`: an event can have both a room and a call. */
   meetingUrl?: string | null;
+  /** WARP-3533 — the RFC 5545 STATUS property. Omitted when absent, so every
+   *  existing caller's output is unchanged. */
+  status?: IcsStatus;
   startsAt: Date;
   endsAt: Date;
   allDay: boolean;
@@ -477,6 +489,9 @@ export function serializeIcs(
       lines.push(`DTEND:${fmtIcsDateTime(ev.endsAt, false)}`);
     }
     lines.push(`SUMMARY:${escapeText(ev.summary)}`);
+    // A closed vocabulary (the type above), so the value needs no escaping and
+    // nothing a caller types can become a content line of its own.
+    if (ev.status) lines.push(`STATUS:${ev.status}`);
     if (ev.description) lines.push(`DESCRIPTION:${escapeText(ev.description)}`);
     if (ev.location) lines.push(`LOCATION:${escapeText(ev.location)}`);
     // URL is what Apple Calendar and Outlook render as a join target, and a

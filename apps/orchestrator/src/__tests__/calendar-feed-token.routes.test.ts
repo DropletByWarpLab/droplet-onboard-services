@@ -41,6 +41,9 @@ interface TokenRow {
   userId: string;
   secretHash: string;
   state: "active" | "rotated" | "revoked" | "expired";
+  // WARP-3533 — the columns the database defaults (scope = calendar, no project).
+  scope: "calendar" | "pm_my_work" | "pm_project";
+  projectId: string | null;
   createdAt: Date;
   expiresAt: Date;
   endedAt: Date | null;
@@ -48,14 +51,15 @@ interface TokenRow {
 interface UserRow {
   id: string;
   username: string;
+  role: string;
   directoryStatus: "ACTIVE" | "DEACTIVATED";
 }
 
 /** In-memory stand-in for the slice of PrismaClient the calendar routes use. */
 function makeDb() {
   const users = new Map<string, UserRow>([
-    ["u-alice", { id: "u-alice", username: "alice", directoryStatus: "ACTIVE" }],
-    ["u-bob", { id: "u-bob", username: "bob", directoryStatus: "ACTIVE" }],
+    ["u-alice", { id: "u-alice", username: "alice", role: "family", directoryStatus: "ACTIVE" }],
+    ["u-bob", { id: "u-bob", username: "bob", role: "family", directoryStatus: "ACTIVE" }],
   ]);
   const tokens: TokenRow[] = [];
   let n = 0;
@@ -94,7 +98,7 @@ function makeDb() {
         const u = users.get(r.userId);
         // FK cascade: a deleted user has no token rows.
         if (!u) return null;
-        return { ...r, user: { username: u.username, directoryStatus: u.directoryStatus } };
+        return { ...r, user: { username: u.username, directoryStatus: u.directoryStatus, role: u.role } };
       }),
       updateMany: vi.fn(async ({ where, data }: { where: Partial<TokenRow>; data: Partial<TokenRow> }) => {
         let count = 0;
@@ -102,7 +106,7 @@ function makeDb() {
         return { count };
       }),
       create: vi.fn(async ({ data }: { data: Pick<TokenRow, "userId" | "secretHash" | "expiresAt"> }) => {
-        const r: TokenRow = { id: `tok-${++n}`, state: "active", createdAt: new Date(), endedAt: null, ...data };
+        const r: TokenRow = { id: `tok-${++n}`, state: "active", scope: "calendar", projectId: null, createdAt: new Date(), endedAt: null, ...data };
         tokens.push(r);
         return r;
       }),
@@ -236,7 +240,7 @@ describe("WARP-2767 — calendar feed token lifecycle", () => {
 
     // De-provisioned, then a NEW account takes the name "alice".
     db.users.delete("u-alice");
-    db.users.set("u-alice2", { id: "u-alice2", username: "alice", directoryStatus: "ACTIVE" });
+    db.users.set("u-alice2", { id: "u-alice2", username: "alice", role: "family", directoryStatus: "ACTIVE" });
     expect((await feed(db, link.path, link.token)).status).toBe(403);
   });
 
