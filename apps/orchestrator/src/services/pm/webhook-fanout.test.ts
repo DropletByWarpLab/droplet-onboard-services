@@ -153,6 +153,18 @@ describe("fanOutActivity", () => {
     expect(prisma.deliveries).toHaveLength(1);
   });
 
+  it("wakes the delivery worker when it queued something, and only then", async () => {
+    const onQueued = vi.fn();
+    const prisma = makePrisma([hook()]);
+    await fanOutActivity(prisma as never, activity(), { ...deps, onQueued });
+    expect(onQueued).toHaveBeenCalledTimes(1);
+    // A replay queues nothing, so there is nothing to wake it for.
+    await fanOutActivity(prisma as never, activity(), { ...deps, onQueued });
+    // Nobody subscribed: nothing queued, nobody woken.
+    await fanOutActivity(makePrisma([]) as never, activity(), { ...deps, onQueued });
+    expect(onQueued).toHaveBeenCalledTimes(1);
+  });
+
   it("does the cheap thing first: with nobody subscribed it never loads the work item", async () => {
     const prisma = makePrisma([hook({ events: ["work_item.created"] }), hook({ id: "off", enabled: false })]);
     expect(await fanOutActivity(prisma as never, activity(), deps)).toBe(0);

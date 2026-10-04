@@ -110,6 +110,9 @@ export interface FanOutDeps {
   now?: () => Date;
   /** Seam for the deep-link origin. */
   origin?: () => Promise<string>;
+  /** Called after deliveries were queued, so the delivery worker can run now
+   *  instead of waiting out its interval. Must not throw. */
+  onQueued?: () => void;
 }
 
 /**
@@ -188,7 +191,7 @@ export async function fanOutActivity(
     stateNames: new Map(states.map((s) => [s.id, s.name])),
   });
 
-  return createDeliveries(
+  const queued = await createDeliveries(
     prisma,
     matched.map((c) => c.id),
     event,
@@ -196,6 +199,8 @@ export async function fanOutActivity(
     `activity:${row.id}`,
     (deps.now ?? (() => new Date()))(),
   );
+  if (queued > 0) deps.onQueued?.();
+  return queued;
 }
 
 /** The `webhooks` outbox consumer; index.ts registers it. */

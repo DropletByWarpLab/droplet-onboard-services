@@ -51,7 +51,7 @@ import {
   releaseStaleHandovers,
   LEAVER_DELETION_LOCK_KEY,
 } from "./services/leaver-deletion.service.js";
-import { createCronRuntime } from "./services/cron-runtime.service.js";
+import { createCronRuntime, type CronJobHandle } from "./services/cron-runtime.service.js";
 import { recordRotationFoundAtBoot } from "./services/audit-key-rotation.service.js";
 import {
   AGENT_RUN_LOCK_KEY,
@@ -1588,10 +1588,16 @@ async function main() {
   //     (`droplet:pm-outbox:webhooks`) and cursor (SystemFlag `pm-outbox:webhooks`)
   //     are derived from the name by the framework. WS-9 and WS-19 register
   //     their consumers beside it.
-  registerOutboxConsumer(createWebhookFanOutConsumer(prisma), { prisma, cronRuntime });
+  //     When it queues something it wakes the delivery worker (below) instead of
+  //     leaving the delivery to wait out the worker's interval.
+  let webhookDeliveryJob: CronJobHandle | undefined;
+  registerOutboxConsumer(
+    createWebhookFanOutConsumer(prisma, { onQueued: () => webhookDeliveryJob?.runNow() }),
+    { prisma, cronRuntime },
+  );
   //  2. The delivery worker. The delivery table is the queue; this drains it. Its
   //     retry ladder lives on the rows, so a restart loses nothing.
-  cronRuntime.scheduleInterval(
+  webhookDeliveryJob = cronRuntime.scheduleInterval(
     10_000,
     async () => {
       const result = await runWebhookDeliveries(prisma);

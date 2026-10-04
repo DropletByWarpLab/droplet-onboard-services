@@ -54,7 +54,14 @@ describe("the webhook machinery is scheduled (index.ts) and mounted (app.ts)", (
   const index = code(read("index.ts"));
 
   it("registers the `webhooks` outbox consumer on the shared cron runtime", () => {
-    expect(index).toMatch(/registerOutboxConsumer\(createWebhookFanOutConsumer\(prisma\), \{ prisma, cronRuntime \}\)/);
+    expect(index).toMatch(
+      /registerOutboxConsumer\(\s*createWebhookFanOutConsumer\(prisma, \{[^}]*\}\),\s*\{ prisma, cronRuntime \},?\s*\)/,
+    );
+  });
+
+  it("wakes the delivery worker when the fan-out queues something, instead of waiting out its interval", () => {
+    expect(index).toMatch(/onQueued: \(\) => webhookDeliveryJob\?\.runNow\(\)/);
+    expect(index).toMatch(/webhookDeliveryJob = cronRuntime\.scheduleInterval\(/);
   });
 
   it("schedules the delivery worker and the retention prune, each under its own advisory lock", () => {
