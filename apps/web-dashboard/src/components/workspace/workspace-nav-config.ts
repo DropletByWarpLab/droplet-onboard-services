@@ -179,6 +179,7 @@ export const SPACES: SpaceDef[] = [
       "/settings",
       "/admin/audit",
       "/trust",
+      "/settings/telemetry",
       "/admin/rag-eval",
       "/downloads",
       "/help",

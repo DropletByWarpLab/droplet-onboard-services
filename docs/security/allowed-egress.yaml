@@ -112,33 +112,16 @@ entries:
         The older name of the same redirect target; the Location header names
         it, no Droplet source does.
 
-  - id: ota-image-registry
-    kind: egress
-    service: orchestrator
-    destination:
-      hosts: [ghcr.io, pkg-containers.githubusercontent.com]
-      ports: [443]
-      protocol: https
-    phase: runtime
-    data_class: none
-    purpose: >-
-      OTA release image pulls by digest and the cosign signature-bundle fetch
-      that gates them (WARP-244), run by docker/ota/apply-update.sh on the
-      host. Anonymous since WARP-3430: the first-party images are public and
-      no registry credential is provisioned on a box (ADR-045). A registry
-      that still refuses auth is reported as `registry-auth:`, never as a
-      signature failure. GHCR redirects blob downloads to
-      pkg-containers.githubusercontent.com. Registered at phase `runtime`
-      beside `build-container-registries`, which covers the same ghcr.io for
-      image builds.
-    ticket: WARP-3430
-    added: 2026-10-01
-    review_by: 2027-10-01
-    code_refs: [docker/ota/apply-update.sh, docker/docker-compose.yml]
-    no_code_literal:
-      pkg-containers.githubusercontent.com: >-
-        GHCR's blob redirect target, dialled by the docker daemon on a pull;
-        no Droplet source names it.
+  # WARP-3503 (ADR-068) — `ota-image-registry` (ghcr.io and
+  # pkg-containers.githubusercontent.com, runtime, added by WARP-3430) is
+  # DROPPED. The release images are private and a box pulls and
+  # cosign-verifies them from the HQ registry, which is the `fleet-hq-issuance`
+  # host below (the `/v2/` registry and the `/v1/device/` token paths); no
+  # customer box dials GHCR any more. The lab-only fallback in
+  # docker/ota/apply-update.sh (DROPLET_OTA_GITHUB_TOKEN, ghcr.io refs, never
+  # provisioned on an appliance: ADR-045) keeps its `ghcr.io` literal under
+  # `build-container-registries`; `pkg-containers.githubusercontent.com`, its
+  # blob redirect, is deliberately not registered.
 
   # WARP-3433 — Warp Lab's own engineering dashboard (/admin/claude-activity,
   # WARP-279). Two entries, one per host, because the two have different
@@ -190,7 +173,42 @@ entries:
     review_by: 2027-10-02
     code_refs: [apps/orchestrator/src/services/claude-activity/jira-adapter.ts]
 
+  # WARP-3504 (ADR-068) — the orchestrator's box telemetry sender is now the
+  # live dialer of the portal: always on for an enrolled box, authenticated with
+  # the short-lived HQ device token. The runtime audit matches on (service,
+  # host), so the registered service is `orchestrator`. The older fleet-agent
+  # keeps its own row below (it dials the same host when its profile is on).
   - id: fleet-telemetry-portal
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [analytics.warp-lab.ai]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: operational-telemetry
+    purpose: >-
+      Operator-portal telemetry from the box telemetry sender (ADR-068), three
+      POST endpoints under `/api/v1/telemetry/` (`heartbeat`, `events`,
+      `logs`) with `Authorization: Bearer <HQ device JWT>`. Sent, from a
+      closed allowlist that is validated against strict schemas before it
+      leaves: the release tag, sha and channel; kernel and distro; uptime;
+      compose service names with state, health and restart counts; CPU, memory,
+      disk and GPU percentages and temperature; network byte counters; counts
+      of assistant messages, background runs, active members and OTA steps (no
+      content, no identities); error counts by class; and warn/error/fatal log
+      records, each a stable code plus a message masked on the box (emails,
+      IPv4/IPv6, MACs, paths, URLs, host names and long tokens) and cut to 500
+      characters. Never sent: prompts or responses, file names, paths or
+      contents, member or guest names, emails or ids, customer-chosen
+      hostnames, LAN IPs, MACs or device lists, camera data, business data. The
+      owner sees the last payload of each kind in Settings.
+    ticket: WARP-3504
+    added: 2026-07-04
+    review_by: 2027-10-03
+    code_refs: [apps/orchestrator/src/config.ts, apps/orchestrator/src/services/box-telemetry/sender.ts, apps/orchestrator/src/services/box-telemetry/contract.ts]
+
+  - id: fleet-telemetry-portal-legacy
     kind: egress
     service: fleet-agent
     destination:
@@ -200,8 +218,11 @@ entries:
     phase: runtime
     data_class: operational-telemetry
     purpose: >-
-      Fleet health/telemetry portal (ADR-028) — device metrics and update
-      status only; never file contents, camera frames, chat, or credentials.
+      Legacy fleet-agent telemetry (ADR-028): double-gated (compose profile
+      `telemetry` plus DROPLET_TELEMETRY_ENABLED), off by default, superseded
+      for enrolled boxes by the orchestrator sender above (WARP-3504). Device
+      metrics and update status only; never file contents, camera frames, chat,
+      or credentials.
     ticket: WARP-961
     added: 2026-07-04
     review_by: 2027-07-04
@@ -1052,8 +1073,15 @@ entries:
     phase: runtime
     data_class: none
     purpose: >-
-      Fleet HQ TLS issuance API (ADR-023 public-CA-per-device via HQ DNS-01);
-      CSR/cert material only. Now baked as the default HQ_ISSUANCE_URL in
+      Fleet HQ (one Worker origin, HQ_ISSUANCE_URL). TLS issuance API (ADR-023
+      public-CA-per-device via HQ DNS-01), CSR/cert material only. Since
+      WARP-3503 (ADR-068) also the device-token service (`/v1/device/challenge`
+      and `/v1/device/token`: the box sends its key fingerprint, a nonce and
+      a signature, nothing else) and the read-only private image registry
+      (`/v2/`: the OTA release images by digest and their cosign signatures,
+      pulled by docker/ota/apply-update.sh with the short-lived `registry:pull`
+      token and verified by cosign). None carries customer data. Now baked as
+      the default HQ_ISSUANCE_URL in
       .env.example + scripts/lib/secrets.sh (WARP-978) so a reflash
       self-provisions its publicly-trusted cert with zero hand-patching;
       still operator-overridable via HQ_ISSUANCE_URL. Was kind: dynamic
@@ -1067,7 +1095,7 @@ entries:
     ticket: WARP-243
     added: 2026-07-04
     review_by: 2027-07-04
-    code_refs: [apps/orchestrator/src/services/tls-issuance.adapters.ts, scripts/lib/secrets.sh, .env.example]
+    code_refs: [apps/orchestrator/src/services/tls-issuance.adapters.ts, apps/orchestrator/src/services/hq-token.service.ts, docker/ota/apply-update.sh, scripts/lib/secrets.sh, .env.example]
 
   - id: user-mail-servers
     kind: dynamic

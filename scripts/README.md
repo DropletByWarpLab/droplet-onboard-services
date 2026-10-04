@@ -568,6 +568,8 @@ scripts/
 ├── factory-reset.sh       Wipe all data and start fresh
 ├── verify.sh              Standalone smoke test
 ├── camera-drivers.sh      Camera driver check/install/scan/fix tool
+├── hq-enroll.sh           Enroll the box's device key with fleet HQ, once, so it can
+│                          get the device tokens private OTA pulls need (WARP-3503)
 ├── README.md              This file
 └── lib/
     ├── logging.sh         Colored output, log file, spinner

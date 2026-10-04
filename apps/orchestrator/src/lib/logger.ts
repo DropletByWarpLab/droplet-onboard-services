@@ -1,5 +1,6 @@
 import pino from "pino";
 import { getRequestId } from "./request-context.js";
+import { stdoutWithLogTap } from "./log-tap.js";
 
 /**
  * Canonical orchestrator logger factory. The `mixin` runs on every log call
@@ -46,5 +47,9 @@ export function createLogger(
       return { requestId: getRequestId() ?? "no-request-context" };
     },
   };
-  return dest ? pino(opts, dest as pino.DestinationStream) : pino(opts);
+  // WARP-3504: stdout as before, and every warn+ record also goes to the
+  // telemetry log tap (lib/log-tap.ts). A plain stream object, not
+  // pino.multistream, so the many tests that stub the `pino` default export
+  // keep working.
+  return pino(opts, (dest ?? stdoutWithLogTap) as pino.DestinationStream);
 }

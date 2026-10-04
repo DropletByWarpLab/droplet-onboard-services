@@ -31,6 +31,7 @@ import path from "node:path";
 import type pino from "pino";
 import { createLogger } from "../../lib/logger.js";
 import type { ApplyRunner } from "./apply.js";
+import type { HqTokenService } from "../hq-token.service.js";
 import { createHostComposeRunner, type ExecFn } from "./host-compose-runner.js";
 
 const defaultLog = createLogger("update-agent");
@@ -135,8 +136,11 @@ export async function resolveHostExecContext(opts: {
 
 /**
  * The host ExecFn. `file` is the helper's HOST path; `env` (per call) is
- * added to the fixed allowlist — the runner uses it for the registry token on
- * pull-images only, so the token never sits in any other container's config.
+ * added to the fixed allowlist — the runner uses it for the registry token
+ * (HQ device token, or the lab-only GitHub token) on pull-images only, so the
+ * token never sits in any other container's config. It is an env var, never
+ * argv: the one-shot is removed in `finally`, and the docker socket that could
+ * inspect it is already host root.
  */
 export function createHostExec(opts: {
   request: DockerRequest;
@@ -234,6 +238,8 @@ export async function initOtaHost(opts: {
   /** WARP-3120 — this process's read-only view of the staged /downloads. */
   appDownloadsDir?: string;
   githubToken?: string;
+  /** WARP-3503 — HQ device tokens for the private HQ registry (see HostComposeRunnerOptions). */
+  hqToken?: Pick<HqTokenService, "host" | "getToken">;
   request?: DockerRequest;
   logger?: pino.Logger;
 }): Promise<OtaHost | null> {
@@ -259,6 +265,7 @@ export async function initOtaHost(opts: {
       helperUpdatesDir: context.hostUpdatesDir,
       appDownloadsDir: opts.appDownloadsDir,
       githubToken: opts.githubToken,
+      hqToken: opts.hqToken,
       exec,
       logger: log,
     });

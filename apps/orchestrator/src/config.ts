@@ -788,6 +788,20 @@ const envSchema = z.object({
   //   device-identity sidecar reads (docker-compose.yml). Defaults to the
   //   hostname-derived `droplet` placeholder (matches scripts/lib/secrets.sh).
   DROPLET_DEVICE_ID: z.string().default("droplet"),
+  // DROPLET_TELEMETRY_PORTAL_URL — origin of the operator portal the box
+  //   telemetry sender posts to (WARP-3504, ADR-068). The sender appends
+  //   `/api/v1/telemetry/*`. A value that still ends in `/api/v1` (the
+  //   fleet-agent's older convention for this same variable) is accepted and
+  //   normalised, so the two readers of one name cannot disagree.
+  DROPLET_TELEMETRY_PORTAL_URL: z.string().default("https://analytics.warp-lab.ai"),
+  // DROPLET_TELEMETRY_DISABLED — LAB / DEV ONLY kill switch for that sender.
+  //   Telemetry is part of the managed lease and always on for an enrolled
+  //   box; this is not a customer setting and is deliberately not in the UI.
+  //   Explicit string->bool (same idiom as ANALYTICS_ENABLED): only "1"/"true".
+  DROPLET_TELEMETRY_DISABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
 
   // --- Direct-punch remote-access overlay (ADR-030 / WARP-1385) ---
   // OVERLAY_CONNECT_ENABLED — the box overlay connect agent (WARP-1767).
@@ -969,10 +983,13 @@ const envSchema = z.object({
   //   assets at `<base>/<tag>/<name>`. Default is the canonical publisher
   //   (publish-release.yml); set it only for a mirror. RELEASES_URL above is
   //   now the FALLBACK discovery path, used only while no pointer exists.
-  // GITHUB_TOKEN — bearer for the private releases repo. LAB/DEV ONLY: it is
-  //   NOT provisioned on appliances (ADR-045), and nothing on the anonymous
-  //   path needs it. Empty = send no Authorization header (the default, and
-  //   the test fake). Never hardcoded.
+  // GITHUB_TOKEN — bearer for the private releases repo, and for ghcr.io image
+  //   refs. LAB/DEV ONLY: it is NOT provisioned on appliances (ADR-045), and
+  //   nothing on the release-download path needs it. Since WARP-3503 (ADR-068)
+  //   the images are private and a box pulls them from the HQ registry with a
+  //   short-lived HQ device token (hq-token.service.ts), never this token.
+  //   Empty = send no Authorization header (the default, and the test fake).
+  //   Never hardcoded.
   // POLL_INTERVAL — seconds between checks. 900 (15 min) per the design;
   //   floor of 60 keeps a typo'd "0" from hot-looping the GitHub API.
   DROPLET_OTA_RELEASES_URL: z
