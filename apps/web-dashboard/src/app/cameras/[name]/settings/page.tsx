@@ -103,7 +103,8 @@ export default function CameraSettingsPage() {
       revalidateOnFocus: false,
       onErrorRetry: (err, _key, _config, revalidate, { retryCount }) => {
         const restarting = isCamerasUnavailableError(err);
-        if (retryCount >= (restarting ? 12 : 2)) return;
+        // SWR numbers the first retry 1, so `>` gives exactly 12 and 2.
+        if (retryCount > (restarting ? 12 : 2)) return;
         setTimeout(() => revalidate({ retryCount }), restarting ? 5_000 : 3_000);
       },
     },

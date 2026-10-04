@@ -14,7 +14,7 @@
  *    waits, instead of a red error that never clears.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, cleanup, act } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import type { CameraBudget, CameraInfo, CameraRecordingState, CameraSettings } from "@/lib/types";
 
@@ -276,6 +276,50 @@ describe("saving restarts the camera service — for every camera", () => {
 
     await waitFor(() => expect(h.patchSettings).toHaveBeenCalledWith("front_door", { detectEnabled: false }));
     expect(await screen.findByText("Saved. Camera service restarting…")).toBeTruthy();
+  });
+});
+
+describe("a failed settings read is retried a bounded number of times", () => {
+  // It used to be retried forever: SWR's default, against a camera service that
+  // might be down for hours or a request that can never succeed.
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const settle = async (ms: number) => {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  };
+
+  it("an ordinary failure: the read plus two quick retries, then it stops and shows the error", async () => {
+    h.fetchSettings.mockRejectedValue(new Error("boom"));
+    renderPage();
+    await settle(60_000);
+    expect(h.fetchSettings).toHaveBeenCalledTimes(3);
+    expect(screen.getByText(/Couldn't load settings: boom/)).toBeTruthy();
+  });
+
+  it("a restarting service: keeps asking for about a minute, then stops", async () => {
+    h.fetchSettings.mockRejectedValue(new CamerasUnavailableError());
+    renderPage();
+    await settle(300_000);
+    // the read plus twelve retries, five seconds apart
+    expect(h.fetchSettings).toHaveBeenCalledTimes(13);
+  });
+
+  it("and recovers by itself when the service comes back", async () => {
+    h.fetchSettings
+      .mockRejectedValueOnce(new CamerasUnavailableError())
+      .mockRejectedValueOnce(new CamerasUnavailableError())
+      .mockResolvedValue(structuredClone(SETTINGS));
+    renderPage();
+    await settle(15_000);
+    expect(h.fetchSettings).toHaveBeenCalledTimes(3);
+    expect(screen.getAllByRole("slider").length).toBeGreaterThan(0);
   });
 });
 
