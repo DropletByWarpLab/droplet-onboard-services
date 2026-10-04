@@ -1396,7 +1396,7 @@ export const ROSTER_SOURCE_LABEL: Record<RosterSource, string> = {
   local: "Local",
   sso: "SSO",
   scim: "SCIM",
-  nextcloud: "Nextcloud only",
+  nextcloud: "File Store only",
 };
 
 /** WARP-2984 / WARP-2858 — the IdP owns the credential: the box refuses to set

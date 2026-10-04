@@ -24,14 +24,14 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     "X-Nextcloud-User": ctx.userId,
   };
   const res = await ctx.http.nextcloud.post("/mkdir", { path: v.path }, { headers });
-  if (!res.ok) return err("MKDIR_FAILED", `nextcloud returned ${res.status}`);
+  if (!res.ok) return err("MKDIR_FAILED", `the File Store returned ${res.status}`);
   return { ok: true, data: { created: v.path } };
 }
 
 const tool: Tool = {
   name: "create_directory",
   description:
-    "Create a directory in the user's Nextcloud. No-op if the directory already exists. Parent directories are NOT auto-created.",
+    "Create a directory in the user's File Store. No-op if the directory already exists. Parent directories are NOT auto-created.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

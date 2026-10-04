@@ -94,8 +94,8 @@ describe("renderFacts", () => {
 
   it("renders any other error CODE as could-not-read with its message — Nextcloud down is news", () => {
     expect(
-      renderFacts([failed("list_recent_files", toolError("RECENT_FAILED", "nextcloud returned 503"))]),
-    ).toBe("- list_recent_files: COULD NOT BE READ (nextcloud returned 503)");
+      renderFacts([failed("list_recent_files", toolError("RECENT_FAILED", "the File Store returned 503"))]),
+    ).toBe("- list_recent_files: COULD NOT BE READ (the File Store returned 503)");
   });
 
   it("keeps failures alongside successes rather than filtering them out", () => {
@@ -196,7 +196,7 @@ describe("fallbackSummary (WARP-3409) — the write-up when the model could not 
     const out = fallbackSummary(
       [
         ok("get_system_health", { components: [{ name: "redis", status: "ok" }, { name: "nextcloud", status: "down" }] }),
-        failed("list_recent_files", envelope("RECENT_FAILED", "nextcloud returned 503")),
+        failed("list_recent_files", envelope("RECENT_FAILED", "the File Store returned 503")),
         ok("get_camera_health", { system: { cameraCount: 3, camerasLive: 2 } }),
         ok("list_events", { count: 1 }),
       ],

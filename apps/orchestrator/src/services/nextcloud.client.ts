@@ -527,12 +527,12 @@ export async function ncInstallAndCreateAdmin(
     headers: { Accept: "application/json" },
   });
   if (!statusResp.ok) {
-    throw new Error(`Nextcloud is not reachable: ${statusResp.status}`);
+    throw new Error(`The File Store is not reachable: ${statusResp.status}`);
   }
   const status = await statusResp.json();
   if (!status.installed) {
     throw new Error(
-      "Nextcloud is not installed yet. Please wait for the initial setup to complete and try again."
+      "The File Store is not installed yet. Please wait for the initial setup to complete and try again."
     );
   }
 
@@ -551,14 +551,14 @@ export async function ncInstallAndCreateAdmin(
   );
 
   if (!resp.ok) {
-    throw new Error(`Cannot reach Nextcloud OCS API: ${resp.status}`);
+    throw new Error(`Cannot reach the File Store API: ${resp.status}`);
   }
 
   const contentType = resp.headers.get("content-type") || "";
   if (!contentType.includes("json") && !contentType.includes("xml")) {
     // HTML response = Nextcloud not installed / redirect to setup
     throw new Error(
-      "Nextcloud returned an unexpected response. It may still be initializing."
+      "The File Store returned an unexpected response. It may still be initializing."
     );
   }
 
@@ -588,7 +588,7 @@ export async function ncInstallAndCreateAdmin(
     try {
       createData = JSON.parse(createBody);
     } catch {
-      throw new Error(`Nextcloud returned invalid response: ${createBody.substring(0, 200)}`);
+      throw new Error(`The File Store returned invalid response: ${createBody.substring(0, 200)}`);
     }
 
     const ocsStatus = createData?.ocs?.meta?.statuscode;
@@ -661,7 +661,7 @@ export async function ncEnsureGroup(groupName: string): Promise<void> {
   try {
     data = JSON.parse(body);
   } catch {
-    throw new Error(`Nextcloud returned invalid response: ${body.substring(0, 200)}`);
+    throw new Error(`The File Store returned invalid response: ${body.substring(0, 200)}`);
   }
 
   const ocsStatus = data?.ocs?.meta?.statuscode;
