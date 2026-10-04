@@ -39,8 +39,10 @@ import {
   __resetNearFullState,
   NEAR_FULL_RATIO,
 } from "./camera-storage.service.js";
+import { GROW_TRIGGER_RATIO } from "./recordings-sizing.js";
 
 const MIB = 1024 * 1024;
+const GIB = 1024 * MIB;
 
 /** 1000 GiB volume, 100 GiB used. Frigate reports MiB. */
 function stats(usedMib = 100 * 1024, totalMib = 1000 * 1024) {
@@ -281,5 +283,144 @@ describe("near-full warning is edge-triggered", () => {
     }));
     const recovered = await checkStorageNearFull();
     expect(recovered.warned).toBe(true);
+  });
+});
+
+/**
+ * WARP-3514 / ADR-070 — near-full against the RECORDINGS RESERVATION.
+ *
+ * With the allocation in place Frigate's own `volume.totalBytes` already equals
+ * the project quota (the slice looks like a smaller drive), so a quota'd box
+ * agrees with the plain check. The reservation matters while the quota is not
+ * live yet (the row is PENDING/MIGRATING and Frigate still sees the whole
+ * filesystem) and as a ceiling that can never be LOWER than reality: the
+ * capacity is `min(reserved, volume total)`. With no reservation supplied the
+ * behaviour above is untouched — those tests are the byte-identical guarantee.
+ */
+describe("near-full against the recordings reservation (WARP-3514)", () => {
+  /** The 1000 GiB volume with `gib` GiB used. */
+  function usedGib(gib: number) {
+    fetchStatsMock.mockImplementation(async () => stats(gib * 1024));
+  }
+
+  it("the near-full threshold is the allocator's own 85 % grow trigger — one number, two meanings", () => {
+    expect(NEAR_FULL_RATIO).toBe(GROW_TRIGGER_RATIO);
+  });
+
+  it("with no reservation the summary is exactly what it always was", async () => {
+    usedGib(900);
+    const plain = await getCameraStorage();
+    expect(plain.nearFull).toBe(true);
+    expect(await getCameraStorage({})).toEqual(plain);
+    expect(await getCameraStorage({ reservedBytes: null })).toEqual(plain);
+    expect(await getCameraStorage({ reservedBytes: undefined })).toEqual(plain);
+  });
+
+  it("a reservation smaller than the volume is the denominator: 100 GiB of a 110 GiB slice is near full", async () => {
+    usedGib(100); // 10 % of the 1000 GiB volume — not near full on its own
+    expect((await getCameraStorage()).nearFull).toBe(false);
+    expect((await getCameraStorage({ reservedBytes: 110 * GIB })).nearFull).toBe(true); // 90.9 % of the slice
+  });
+
+  it("plenty of reserved headroom is not near full", async () => {
+    usedGib(100);
+    expect((await getCameraStorage({ reservedBytes: 500 * GIB })).nearFull).toBe(false); // 20 %
+  });
+
+  it("the 85 % boundary is inclusive, measured on the reservation", async () => {
+    usedGib(85);
+    expect((await getCameraStorage({ reservedBytes: 100 * GIB })).nearFull).toBe(true);
+    usedGib(84);
+    expect((await getCameraStorage({ reservedBytes: 100 * GIB })).nearFull).toBe(false);
+  });
+
+  it("a reservation LARGER than the volume cannot raise the capacity: min() keeps the volume total", async () => {
+    usedGib(900);
+    expect((await getCameraStorage({ reservedBytes: 5000 * GIB })).nearFull).toBe(true);
+    usedGib(100);
+    expect((await getCameraStorage({ reservedBytes: 5000 * GIB })).nearFull).toBe(false);
+  });
+
+  it("a zero or negative reservation is 'no reservation'", async () => {
+    usedGib(900);
+    expect((await getCameraStorage({ reservedBytes: 0 })).nearFull).toBe(true);
+    expect((await getCameraStorage({ reservedBytes: -1 })).nearFull).toBe(true);
+    usedGib(100);
+    expect((await getCameraStorage({ reservedBytes: 0 })).nearFull).toBe(false);
+  });
+
+  it("no volume reported: still not near full — never guessed from the reservation alone", async () => {
+    fetchStatsMock.mockImplementation(async () => ({ service: { storage: {} } }));
+    const s = await getCameraStorage({ reservedBytes: 10 * GIB });
+    expect(s.volume).toBeNull();
+    expect(s.nearFull).toBe(false);
+  });
+
+  it("the volume figures themselves are Frigate's, untouched by the reservation", async () => {
+    usedGib(100);
+    const plain = await getCameraStorage();
+    const withReservation = await getCameraStorage({ reservedBytes: 110 * GIB });
+    expect(withReservation.volume).toEqual(plain.volume);
+    expect(withReservation.cameras).toEqual(plain.cameras);
+  });
+
+  describe("checkStorageNearFull passes the reservation through", () => {
+    it("warns once when the slice crosses 85 %, even though the whole volume is only 10 % used", async () => {
+      usedGib(100);
+
+      const first = await checkStorageNearFull({ reservedBytes: 110 * GIB });
+      expect(first).toEqual({ nearFull: true, warned: true });
+      expect(recordActivityMock).toHaveBeenCalledTimes(1);
+
+      // Still full on the next ticks: edge-triggered, no repeat.
+      await checkStorageNearFull({ reservedBytes: 110 * GIB });
+      await checkStorageNearFull({ reservedBytes: 110 * GIB });
+      expect(recordActivityMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("reports the percentage that actually triggered the warning (of the reservation), not the volume's", async () => {
+      usedGib(100);
+      await checkStorageNearFull({ reservedBytes: 110 * GIB });
+
+      const row = recordActivityMock.mock.calls[0][0];
+      expect(row.refs.usedPercent).toBe(90.9);
+      expect(row.sub).toBe("90.9% of the recording drive is in use");
+      expect(row.severity).toBe("warn");
+    });
+
+    it("without a reservation the same usage does not warn (unchanged behaviour)", async () => {
+      usedGib(100);
+      const r = await checkStorageNearFull();
+      expect(r).toEqual({ nearFull: false, warned: false });
+      expect(recordActivityMock).not.toHaveBeenCalled();
+    });
+
+    it("without a reservation the wording and figures are exactly the volume's", async () => {
+      usedGib(900);
+      await checkStorageNearFull();
+      const row = recordActivityMock.mock.calls[0][0];
+      expect(row.refs.usedPercent).toBe(90);
+      expect(row.sub).toBe("90% of the recording drive is in use");
+    });
+
+    it("re-arms after the slice recovers, and warns again on the next crossing", async () => {
+      usedGib(100);
+      await checkStorageNearFull({ reservedBytes: 110 * GIB });
+      usedGib(20);
+      await checkStorageNearFull({ reservedBytes: 110 * GIB });
+      usedGib(100);
+      const again = await checkStorageNearFull({ reservedBytes: 110 * GIB });
+      expect(again.warned).toBe(true);
+      expect(recordActivityMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("an unreachable Frigate still throws (the cron canary) and does not consume the crossing", async () => {
+      usedGib(100);
+      fetchRecordingsStorageMock.mockImplementation(async () => {
+        throw new Error("Frigate recordings storage: 502");
+      });
+      await expect(checkStorageNearFull({ reservedBytes: 110 * GIB })).rejects.toThrow(/502/);
+      expect(recordActivityMock).not.toHaveBeenCalled();
+    });
   });
 });

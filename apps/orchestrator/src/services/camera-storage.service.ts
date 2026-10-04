@@ -23,6 +23,7 @@
 
 import { fetchStats, fetchRecordingsStorage, fetchConfig } from "./frigate.client.js";
 import { extractStorage, recordingsOnBootDisk } from "./camera-system.service.js";
+import { effectiveCapacityBytes } from "./recordings-capacity.js";
 import { recordActivity } from "./activity.singleton.js";
 import { createLogger } from "../lib/logger.js";
 
@@ -165,6 +166,40 @@ function extractVolume(
 }
 
 /**
+ * WARP-3514 / ADR-070 — what the near-full check is measured against.
+ *
+ * `reservedBytes` is the recordings allocation's reservation, when one exists.
+ * With it, "full" means 85 % of `min(reserved, volume total)` rather than of the
+ * whole volume: Frigate's own `volume.totalBytes` already equals the project
+ * quota once the quota is live, so a quota'd box agrees with the plain check,
+ * and while the quota is not live yet (the allocation is still PENDING or
+ * MIGRATING and Frigate sees the whole filesystem) the reservation caps it.
+ * Omitted, null or non-positive: behaviour is exactly what it was before.
+ */
+export interface CameraStorageOptions {
+  reservedBytes?: number | null;
+}
+
+/**
+ * Percent of the recordings capacity in use, one decimal place — or null when
+ * Frigate reports no volume (never guessed from the reservation alone).
+ *
+ * When the reservation is not the binding limit this IS Frigate's own
+ * `usedPercent`, untouched, so a call without a reservation is byte-identical
+ * to what it was before the allocation existed.
+ */
+function usedPercentOfCapacity(
+  volume: CameraStorageSummary["volume"],
+  reservedBytes: number | null | undefined,
+): number | null {
+  if (!volume) return null;
+  const capacity = effectiveCapacityBytes(reservedBytes, volume.totalBytes);
+  if (capacity === null) return null;
+  if (capacity === volume.totalBytes) return volume.usedPercent;
+  return Math.round((volume.usedBytes / capacity) * 1000) / 10;
+}
+
+/**
  * Read the current storage picture.
  *
  * Throws if Frigate is unreachable — callers must surface that as a degraded
@@ -172,7 +207,7 @@ function extractVolume(
  * from "nothing is using disk", which is exactly the misreading that let
  * WARP-1849's dead purge look healthy for its entire life.
  */
-export async function getCameraStorage(): Promise<CameraStorageSummary> {
+export async function getCameraStorage(opts: CameraStorageOptions = {}): Promise<CameraStorageSummary> {
   const [stats, usage, keyToCamera] = await Promise.all([
     fetchStats(),
     fetchRecordingsStorage(),
@@ -228,10 +263,12 @@ export async function getCameraStorage(): Promise<CameraStorageSummary> {
     extractStorage((stats.service ?? {}) as Record<string, unknown>),
   );
 
+  const usedPercent = usedPercentOfCapacity(volume, opts.reservedBytes);
+
   return {
     volume,
     cameras,
-    nearFull: volume ? volume.usedPercent >= NEAR_FULL_RATIO * 100 : false,
+    nearFull: usedPercent !== null && usedPercent >= NEAR_FULL_RATIO * 100,
     recordingsOnBootDisk: onBootDisk,
     totalBytesPerHour,
   };
@@ -267,14 +304,16 @@ export interface NearFullCheck {
 
 /**
  * One near-full check. Records an ActivityRow only on the transition into
- * the near-full state.
+ * the near-full state. `opts` goes straight to `getCameraStorage` — the cron
+ * passes the recordings allocation's reservation, so the warning means "the
+ * slice is nearly full" (WARP-3514).
  *
  * Frigate being unreachable is NOT reported as "fine" — the tick throws so
  * the cron canary counts it, and the edge state is left untouched so a
  * transient outage can't silently consume the crossing.
  */
-export async function checkStorageNearFull(): Promise<NearFullCheck> {
-  const summary = await getCameraStorage();
+export async function checkStorageNearFull(opts: CameraStorageOptions = {}): Promise<NearFullCheck> {
+  const summary = await getCameraStorage(opts);
   const { nearFull, volume } = summary;
 
   const crossed = nearFull && lastNearFull !== true;
@@ -282,6 +321,9 @@ export async function checkStorageNearFull(): Promise<NearFullCheck> {
 
   if (!crossed) return { nearFull, warned: false };
 
+  // The percentage that actually tripped the warning: of the reservation when it
+  // binds, Frigate's own figure otherwise (WARP-3514).
+  const usedPercent = usedPercentOfCapacity(volume, opts.reservedBytes);
   const biggest = summary.cameras.find((c) => c.usedBytes !== null);
   await recordActivity({
     kind: "camera",
@@ -289,11 +331,12 @@ export async function checkStorageNearFull(): Promise<NearFullCheck> {
     sourceIcon: "video",
     what: "Camera storage is nearly full",
     actor: { type: "system" },
-    sub: volume
-      ? `${volume.usedPercent}% of the recording drive is in use`
-      : "recording drive is nearly full",
+    sub:
+      usedPercent !== null
+        ? `${usedPercent}% of the recording drive is in use`
+        : "recording drive is nearly full",
     refs: {
-      usedPercent: volume?.usedPercent ?? null,
+      usedPercent,
       freeBytes: volume?.freeBytes ?? null,
       thresholdPercent: NEAR_FULL_RATIO * 100,
       largestCamera: biggest?.camera ?? null,
