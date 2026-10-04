@@ -452,12 +452,12 @@ export async function updateProperty(
       const existing = await lockProperty(tx, propertyId, "UPDATE");
       if (!existing) throw new Error(PM_PROPERTY_ERRORS.PROPERTY_NOT_FOUND);
 
-      let nextOptions: ApiPropertyOption[] | null = null;
+      let replacementOptions: ApiPropertyOption[] | null = null;
       let removed: ApiPropertyOption[] = [];
       if (patch.options !== undefined) {
         if (!hasOptions(existing.type)) throw new Error(PM_PROPERTY_ERRORS.INVALID_OPTIONS);
-        nextOptions = validateOptions(patch.options, existing.options ?? []);
-        const keep = new Set(nextOptions.map((o) => o.id));
+        replacementOptions = validateOptions(patch.options, existing.options ?? []);
+        const keep = new Set(replacementOptions.map((o) => o.id));
         removed = (existing.options ?? []).filter((o) => !keep.has(o.id));
       }
 
@@ -466,12 +466,12 @@ export async function updateProperty(
         data: {
           ...(patch.name !== undefined ? { name: patch.name } : {}),
           ...(patch.sortOrder !== undefined ? { sortOrder: patch.sortOrder } : {}),
-          ...(nextOptions !== null ? { options: nextOptions as unknown as Prisma.InputJsonValue } : {}),
+          ...(replacementOptions !== null ? { options: replacementOptions as unknown as Prisma.InputJsonValue } : {}),
         },
       });
 
       if (removed.length > 0) {
-        await clearRemovedOptions(tx, actorId, existing, nextOptions ?? [], removed);
+        await clearRemovedOptions(tx, actorId, existing, replacementOptions ?? [], removed);
       }
       return mapProperty(row);
     });
@@ -509,18 +509,18 @@ async function clearRemovedOptions(
         : [];
     const kept = ids.filter((id) => !gone.has(id));
     if (kept.length === ids.length) continue;
-    const nextValue: PropertyValue = { optionIds: kept };
+    const trimmedValue: PropertyValue = { optionIds: kept };
     if (kept.length === 0) {
       deleteIds.push(row.id);
     } else {
-      await tx.pmWorkItemPropertyValue.update({ where: { id: row.id }, data: { value: nextValue } });
+      await tx.pmWorkItemPropertyValue.update({ where: { id: row.id }, data: { value: trimmedValue } });
     }
     activity.push({
       workItemId: row.workItemId,
       field: property.name,
       // Old labels come from the options as they WERE; new from what remains.
       oldValue: displayValue(property, v),
-      newValue: kept.length === 0 ? null : displayValue({ type: property.type, options: remaining }, nextValue),
+      newValue: kept.length === 0 ? null : displayValue({ type: property.type, options: remaining }, trimmedValue),
     });
   }
   if (deleteIds.length > 0) await tx.pmWorkItemPropertyValue.deleteMany({ where: { id: { in: deleteIds } } });
