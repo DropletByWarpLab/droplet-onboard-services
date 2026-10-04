@@ -919,6 +919,14 @@ const envSchema = z.object({
   // their own box; existing setups stay back-compatible. Flip on only once the
   // panel CLAIM screen and the dashboard /setup code field both ship.
   //
+  // WARP-3589: this flag now only controls whether the CODE must also be
+  // re-sent on the owner request. That the box has been claimed at all
+  // (`isClaimed`) is required by POST /auth/setup regardless of this flag.
+  // Do NOT turn it on by default yet: the wizard claims the box first, after
+  // which the panel stops showing the code, so the Account step has no code
+  // left to type. Carry the claimed code from the Claim step into the Account
+  // request first.
+  //
   // EXPLICIT string→bool, NOT z.coerce.boolean(): coerce runs Boolean(...), so
   // the non-empty strings "0"/"false" would BOTH coerce to true and could
   // silently ENABLE the gate (a lockout foot-gun). Only "1"/"true" enable it;
