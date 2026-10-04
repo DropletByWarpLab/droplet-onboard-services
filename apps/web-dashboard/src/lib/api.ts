@@ -3422,6 +3422,9 @@ export async function confirmCameraCommand(
     body: JSON.stringify({ confirmationToken, operation }),
   });
   if (!res.ok) {
+    // WARP-3511: the confirm is where a disable is actually written, so a
+    // camera service that is restarting surfaces here as well.
+    if (cameraServiceDown(res)) throw new CamerasUnavailableError();
     const body = await res.json().catch(() => ({}));
     throw new Error((body as { error?: string }).error || `Confirm failed: ${res.status}`);
   }

@@ -143,6 +143,28 @@ describe("enableCamera / disableCamera — a failure says why", () => {
   });
 });
 
+describe("disable — the confirm step is where the write happens", () => {
+  const tier2 = () => res(202, { status: "confirmation_required", confirmationToken: "tok-1" });
+
+  it("an unreachable camera service at the confirm step is 'cameras unavailable'", async () => {
+    authFetchMock.mockResolvedValueOnce(tier2()).mockResolvedValueOnce(res(503, { degraded: true }, DOWN));
+    const err = await disableCamera("front_door").catch((e) => e);
+    expect(isCamerasUnavailableError(err)).toBe(true);
+  });
+
+  it("a refused confirm keeps its reason", async () => {
+    authFetchMock
+      .mockResolvedValueOnce(tier2())
+      .mockResolvedValueOnce(res(400, { error: "That confirmation has expired.", code: "TOKEN_EXPIRED" }));
+    await expect(disableCamera("front_door")).rejects.toThrow("That confirmation has expired.");
+  });
+
+  it("falls back to a status line when the confirm says nothing", async () => {
+    authFetchMock.mockResolvedValueOnce(tier2()).mockResolvedValueOnce(new Response("", { status: 500 }));
+    await expect(disableCamera("front_door")).rejects.toThrow("Confirm failed: 500");
+  });
+});
+
 describe("retention repair", () => {
   it("reads the dry-run plan", async () => {
     const plan = [{ camera: "front_door", reason: "no_retention_authored", willWrite: true }];
