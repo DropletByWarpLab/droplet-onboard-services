@@ -5644,6 +5644,8 @@ model PmWorkItem {
   activity       PmActivity[]
   modules        PmModuleWorkItem[]
   propertyValues PmWorkItemPropertyValue[]
+  /// WARP-3519 — who hears about this item. See PmWorkItemWatcher.
+  watchers       PmWorkItemWatcher[]
 
   /// WARP-2117 — CRM timeline entries that POINT AT this work item (the task
   /// raised off a customer conversation).
@@ -5779,16 +5781,100 @@ model PmWorkItemLabel {
 }
 
 /// A comment on a work item. `authorId` null = system / LLM-authored.
+///
+/// WARP-3519 (WS-2): comments can be edited by their author and deleted by their
+/// author or an owner/admin. A delete is SOFT — the row stays as a tombstone with
+/// the body cleared — so the thread keeps its shape and the activity trail keeps
+/// an anchor. `isDeleted` is the canonical signal (explicit column, not derived
+/// from `deletedAt IS NOT NULL` — the WARP-884 split); `deletedAt`/`deletedById`
+/// are the audit pair, pinned to it by `PmComment_deleted_matches_flag`, and a
+/// tombstone carries no content (`PmComment_tombstone_has_no_body`). Both CHECKs
+/// live in the WARP-3519 migration (Prisma cannot express them) and are proven
+/// against a real Postgres in pm-collaboration.pg.test.ts.
 model PmComment {
   id          String     @id @default(uuid())
   workItemId  String
   workItem    PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
   authorId    String?
   commentHtml String
+  /// When the AUTHOR last changed the body; null = never edited.
+  editedAt    DateTime?
+  isDeleted   Boolean    @default(false)
+  deletedAt   DateTime?
+  /// A User.id string, not an FK — the convention every PM attribution column
+  /// follows (see the note at the head of this section).
+  deletedById String?
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @default(now()) @updatedAt
 
+  reactions PmCommentReaction[]
+  mentions  PmCommentMention[]
+
   @@index([workItemId, createdAt])
+}
+
+/// WARP-3519 — one person's reaction to one comment. The emoji is checked
+/// against a closed server-side allowlist (`PM_REACTION_EMOJI` in
+/// @droplet/shared-types, also what the dashboard renders) at the write
+/// boundary; the unique key makes adding the same reaction twice a no-op rather
+/// than a count of two. The key's leading `commentId` serves "reactions on this
+/// comment" — no second index.
+model PmCommentReaction {
+  id        String    @id @default(uuid())
+  commentId String
+  comment   PmComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  /// A User.id string, not an FK (PM attribution convention).
+  userId    String
+  emoji     String
+  createdAt DateTime  @default(now())
+
+  @@unique([commentId, userId, emoji])
+}
+
+/// WARP-3519 — why somebody is on an item's watch list. Informational (it is
+/// what the person was doing when they were subscribed); the notification
+/// decision never reads it.
+enum PmWatchReason {
+  CREATOR
+  ASSIGNEE
+  COMMENTER
+  MENTIONED
+  MANUAL
+}
+
+/// WARP-3519 — a person who hears about an item. Written two ways: automatically
+/// when somebody creates the item, is assigned to it, comments on it or is
+/// mentioned in it (reason says which), and by hand (MANUAL). The activity notify
+/// sweep reads this table (alongside the assignees) to decide who is told about a
+/// comment, a state change or an assignment — it is the same pipeline, not a
+/// second one. The row outlives an unassignment on purpose: being taken off an
+/// item does not mean you stopped caring about it.
+model PmWorkItemWatcher {
+  id         String        @id @default(uuid())
+  workItemId String
+  workItem   PmWorkItem    @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  /// A User.id string, not an FK (PM attribution convention).
+  userId     String
+  reason     PmWatchReason
+  createdAt  DateTime      @default(now())
+
+  @@unique([workItemId, userId])
+  @@index([userId])
+}
+
+/// WARP-3519 — a person @mentioned in a comment. Never taken from the client:
+/// the rows are derived by the server from the SANITIZED comment html
+/// (`<span data-mention-id>` spans) and only for users who can read the item.
+model PmCommentMention {
+  id        String    @id @default(uuid())
+  commentId String
+  comment   PmComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  /// A User.id string, not an FK (PM attribution convention).
+  userId    String
+  createdAt DateTime  @default(now())
+
+  @@unique([commentId, userId])
+  @@index([userId])
 }
 
 /// Cycle / sprint — a time-boxed set of work items.
@@ -5959,6 +6045,16 @@ enum PmActivityVerb {
   /// mirroring what parent_removed does for orphaned sub-issues.
   relation_added
   relation_removed
+  /// WARP-3519 (WS-2): the comment lifecycle beyond `commented`, the watch list,
+  /// and the mention event. `mentioned` is the notification queue entry for ONE
+  /// newly mentioned person (`newValue` = their User.id) — the mention is visible
+  /// in the comment itself, so the timeline does not repeat it (the way GitHub's
+  /// event stream carries `mentioned` that its UI never shows).
+  comment_edited
+  comment_deleted
+  watcher_added
+  watcher_removed
+  mentioned
 }
 
 /// WARP-2587 (ADR-045 slice I) — the notification claim on an activity row.
