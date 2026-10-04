@@ -139,7 +139,7 @@ describe("the tree is four groups (WARP-2967)", () => {
 describe("every tucked destination has a way back in (WARP-2967)", () => {
   const tucked = everyItem().filter((i) => i.hidden);
 
-  it("tucks the sixteen admin surfaces the tree no longer carries", () => {
+  it("tucks the admin surfaces the tree no longer carries", () => {
     expect(tucked.map((i) => i.href).sort()).toEqual(
       [
         "/admin",
@@ -159,6 +159,7 @@ describe("every tucked destination has a way back in (WARP-2967)", () => {
         "/models",
         "/routines",
         "/settings/coding-tools",
+        "/settings/developer",
         "/tools",
         "/trust",
         "/users",
