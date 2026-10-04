@@ -32,11 +32,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       openssl ca-certificates
 
 WORKDIR /app
-COPY services/ai-gateway/requirements.txt .
+# WARP-3670: hash-locked. requirements.lock pins what `pip install -r requirements.txt`
+# resolves to today: pip ignores the per-line `--index-url` on the torch line, so torch
+# comes from PyPI, and the lock keeps exactly that. Compile recipe: docs/SECURITY.md.
+COPY services/ai-gateway/requirements.lock .
 # WARP-1065: persistent pip wheel/http cache (replaces --no-cache-dir; the
 # cache lives in the mount, not the image).
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    pip install --require-hashes --no-deps -r requirements.lock
 COPY services/ai-gateway/ .
 
 # WARP-229/WARP-967: ship the FIPS-provider OpenSSL config + shared
