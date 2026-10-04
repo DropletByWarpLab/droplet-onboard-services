@@ -134,6 +134,7 @@ import { createTlsCertificateRouter } from "./routes/tls-certificate.js";
 import { createBackupStatusRouter } from "./routes/backup-status.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createUpdatesRouter } from "./routes/updates.js";
+import { createTelemetryRouter } from "./routes/telemetry.js";
 import { createEmailRouter, EMAIL_INGEST_PATH, wireEmailAnalysis } from "./routes/email.js";
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
 import { resolveActiveModel } from "./services/active-model.service.js";
@@ -825,6 +826,10 @@ export function createApp(
   // Owner+admin only (reads included, voice-proxy posture); every mutation
   // writes an activity row via recordActivity.
   app.use("/api", createUpdatesRouter(prisma));
+
+  // WARP-3504 (ADR-068): what this box sends to Warp — GET /api/telemetry/last,
+  // the last payload of each kind. Owner + admin only, read-only.
+  app.use("/api", createTelemetryRouter());
 
   // WARP-472: F4 hardware contract endpoint (admin/owner only).
   app.use("/api", createHardwareRouter(prisma));

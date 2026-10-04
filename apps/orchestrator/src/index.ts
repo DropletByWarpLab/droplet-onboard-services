@@ -115,6 +115,7 @@ import {
 } from "./services/update-agent/apply.js";
 import { getOtaHost, initOtaHost } from "./services/update-agent/host-exec.js";
 import { initHqTokenService } from "./services/hq-token.service.js";
+import { startBoxTelemetry } from "./services/box-telemetry/index.js";
 import { purgeUpdateBackups } from "./services/update-agent/purge-update-backups.js";
 import { purgeSelfSwapHelpers } from "./services/update-agent/purge-self-swap-helpers.js";
 import { createTlsIssuanceService } from "./services/tls-issuance.service.js";
@@ -1528,6 +1529,10 @@ async function main() {
         identity: createDeviceIdentityClient(),
       })
     : null;
+  // WARP-3504 (ADR-068) — operational telemetry to the operator portal with the
+  // `telemetry:ingest` token from the same client. Always on for an enrolled
+  // box; idle (no sends) while HQ issues it no token.
+  await startBoxTelemetry({ prisma, cron: cronRuntime, hqTokens });
   // WARP-3007 — DROPLET_OTA_APPLY_SCRIPT is the enable flag; the helper is
   // always the release-shipped docker/ota/apply-update.sh, run ON THE HOST
   // (host-exec.ts). A box whose host context can't be resolved keeps apply off.

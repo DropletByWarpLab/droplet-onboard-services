@@ -173,7 +173,42 @@ entries:
     review_by: 2027-10-02
     code_refs: [apps/orchestrator/src/services/claude-activity/jira-adapter.ts]
 
+  # WARP-3504 (ADR-068) — the orchestrator's box telemetry sender is now the
+  # live dialer of the portal: always on for an enrolled box, authenticated with
+  # the short-lived HQ device token. The runtime audit matches on (service,
+  # host), so the registered service is `orchestrator`. The older fleet-agent
+  # keeps its own row below (it dials the same host when its profile is on).
   - id: fleet-telemetry-portal
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [analytics.warp-lab.ai]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: operational-telemetry
+    purpose: >-
+      Operator-portal telemetry from the box telemetry sender (ADR-068), three
+      POST endpoints under `/api/v1/telemetry/` (`heartbeat`, `events`,
+      `logs`) with `Authorization: Bearer <HQ device JWT>`. Sent, from a
+      closed allowlist that is validated against strict schemas before it
+      leaves: the release tag, sha and channel; kernel and distro; uptime;
+      compose service names with state, health and restart counts; CPU, memory,
+      disk and GPU percentages and temperature; network byte counters; counts
+      of assistant messages, background runs, active members and OTA steps (no
+      content, no identities); error counts by class; and warn/error/fatal log
+      records, each a stable code plus a message masked on the box (emails,
+      IPv4/IPv6, MACs, paths, URLs, host names and long tokens) and cut to 500
+      characters. Never sent: prompts or responses, file names, paths or
+      contents, member or guest names, emails or ids, customer-chosen
+      hostnames, LAN IPs, MACs or device lists, camera data, business data. The
+      owner sees the last payload of each kind in Settings.
+    ticket: WARP-3504
+    added: 2026-07-04
+    review_by: 2027-10-03
+    code_refs: [apps/orchestrator/src/config.ts, apps/orchestrator/src/services/box-telemetry/sender.ts, apps/orchestrator/src/services/box-telemetry/contract.ts]
+
+  - id: fleet-telemetry-portal-legacy
     kind: egress
     service: fleet-agent
     destination:
@@ -183,8 +218,11 @@ entries:
     phase: runtime
     data_class: operational-telemetry
     purpose: >-
-      Fleet health/telemetry portal (ADR-028) — device metrics and update
-      status only; never file contents, camera frames, chat, or credentials.
+      Legacy fleet-agent telemetry (ADR-028): double-gated (compose profile
+      `telemetry` plus DROPLET_TELEMETRY_ENABLED), off by default, superseded
+      for enrolled boxes by the orchestrator sender above (WARP-3504). Device
+      metrics and update status only; never file contents, camera frames, chat,
+      or credentials.
     ticket: WARP-961
     added: 2026-07-04
     review_by: 2027-07-04
