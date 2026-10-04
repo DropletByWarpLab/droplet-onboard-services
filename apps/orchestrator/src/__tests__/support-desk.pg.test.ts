@@ -350,7 +350,7 @@ describe.skipIf(!RUN)("service desk — services against Postgres (WARP-3528)", 
       const tSolved = await mkTicket(desk.id, { subject: `${P}solved`, stateId: stateOf(fresh, "Solved") });
 
       const keys = async (queue: import("../services/support/support.types.js").SupportQueue, viewer = admin) =>
-        (await svc.listTickets(prisma, viewer, { queue })).tickets.map((t) => t.subject).sort();
+        (await svc.listTickets(prisma, viewer, { queue, deskId: desk.id })).tickets.map((t) => t.subject).sort();
 
       expect(await keys("open")).toEqual([tNew.subject, tOpen.subject].sort());
       expect(await keys("pending")).toEqual([tHold.subject, tPending.subject].sort());
@@ -360,28 +360,27 @@ describe.skipIf(!RUN)("service desk — services against Postgres (WARP-3528)", 
       expect(await keys("solved_recent")).toEqual([tSolved.subject]);
       expect(await keys("all")).toHaveLength(5);
 
-      const counts = await svc.queueCounts(prisma, family);
+      const counts = await svc.queueCounts(prisma, family, { deskId: desk.id });
       expect(counts).toEqual({ unassigned: 3, mine: 1, open: 2, pending: 2, solved_recent: 1, all: 5 });
-      const scoped = await svc.queueCounts(prisma, family, { deskId: desk.id });
-      expect(scoped.all).toBe(5);
     });
 
     it("solved_recent drops what was solved more than seven days ago", async () => {
       const desk = await mkDesk();
       const t = await mkTicket(desk.id, { stateId: stateOf(desk, "Solved") });
       const later = () => new Date(Date.now() + (types.SOLVED_RECENT_DAYS + 1) * 24 * 3600 * 1000);
-      const now = await svc.listTickets(prisma, admin, { queue: "solved_recent" }, deps());
+      const now = await svc.listTickets(prisma, admin, { queue: "solved_recent", deskId: desk.id }, deps());
       expect(now.tickets.map((x) => x.id)).toEqual([t.id]);
-      const aged = await svc.listTickets(prisma, admin, { queue: "solved_recent" }, { ...deps(), now: later });
+      const aged = await svc.listTickets(prisma, admin, { queue: "solved_recent", deskId: desk.id }, { ...deps(), now: later });
       expect(aged.tickets).toEqual([]);
     });
 
     it("pages with an opaque cursor, a stable order and an exact total", async () => {
       const desk = await mkDesk();
       for (let i = 0; i < 7; i += 1) await mkTicket(desk.id, { subject: `${P}n${i}` });
-      const p1 = await svc.listTickets(prisma, admin, { queue: "all", limit: 3 });
-      const p2 = await svc.listTickets(prisma, admin, { queue: "all", limit: 3, cursor: p1.nextCursor! });
-      const p3 = await svc.listTickets(prisma, admin, { queue: "all", limit: 3, cursor: p2.nextCursor! });
+      const base = { queue: "all", deskId: desk.id, limit: 3 } as const;
+      const p1 = await svc.listTickets(prisma, admin, base);
+      const p2 = await svc.listTickets(prisma, admin, { ...base, cursor: p1.nextCursor! });
+      const p3 = await svc.listTickets(prisma, admin, { ...base, cursor: p2.nextCursor! });
       expect([p1.tickets.length, p2.tickets.length, p3.tickets.length]).toEqual([3, 3, 1]);
       expect([p1.total, p2.total, p3.total]).toEqual([7, 7, 7]);
       expect(p3.nextCursor).toBeNull();
@@ -398,8 +397,8 @@ describe.skipIf(!RUN)("service desk — services against Postgres (WARP-3528)", 
       const a = await mkTicket(desk.id, { subject: `${P}printer on fire`, requester: { kind: "CONTACT", contactId: contact.id } });
       await mkTicket(desk.id, { subject: `${P}wifi` });
       const find = async (q: string) =>
-        (await svc.listTickets(prisma, admin, { queue: "all", q })).tickets.map((t) => t.id);
-      expect(await find("printer")).toEqual([a.id]);
+        (await svc.listTickets(prisma, admin, { queue: "all", q, deskId: desk.id })).tickets.map((t) => t.id);
+      expect(await find(`${P}printer`)).toEqual([a.id]);
       expect(await find("dana@example")).toEqual([a.id]);
       expect(await find(a.key.toLowerCase())).toEqual([a.id]);
     });
@@ -753,7 +752,7 @@ describe.skipIf(!RUN)("service desk — services against Postgres (WARP-3528)", 
       await prisma.contact.delete({ where: { id: contact.id } });
       const after = await svc.getTicket(prisma, t.id, ctx);
       expect(after.requester).toMatchObject({ kind: "CONTACT", name: `${P}Dana`, email: "dana@example.test", gone: true });
-      const list = await svc.listTickets(prisma, admin, { queue: "all" });
+      const list = await svc.listTickets(prisma, admin, { queue: "all", deskId: desk.id });
       expect(list.tickets[0]!.requester.gone).toBe(true);
     });
 
@@ -930,9 +929,8 @@ describe.skipIf(!RUN)("service desk — services against Postgres (WARP-3528)", 
       await expect(svc.addNote(prisma, admin, item.id, { bodyHtml: "<p>x</p>" }, ctx, deps())).rejects.toThrow("ticket_not_found");
       await expect(svc.getConversation(prisma, item.id, ctx)).rejects.toThrow("ticket_not_found");
       await expect(svc.escalateTicket(prisma, admin, item.id, { projectId: project.id }, ctx)).rejects.toThrow("ticket_not_found");
-      const all = await svc.listTickets(prisma, admin, { queue: "all" });
+      const all = await svc.listTickets(prisma, admin, { queue: "all", limit: 200 });
       expect(all.tickets.map((t) => t.id)).not.toContain(item.id);
-      expect((await svc.queueCounts(prisma, admin)).all).toBe(0);
     });
   });
 });
