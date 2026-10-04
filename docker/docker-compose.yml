@@ -1088,7 +1088,7 @@ services:
   # deploy.resources (silently ignored outside Swarm; scripts/test-security.sh
   # Test 14 / WARP-569 fails it).
   docserver:
-    image: ${DOCS_ENGINE_IMAGE:-collabora/code:26.04.2.4.1}
+    image: ${DOCS_ENGINE_IMAGE:-collabora/code:26.04.2.4.1@sha256:1f864ce3f0c49e867787b6dd303bd6ba989542d3023f6809df558eafd04c1b97}
     profiles: ["docs"]
     depends_on:
       nextcloud:
@@ -1135,7 +1135,7 @@ services:
     # pgvector/pgvector:pg16 = official postgres 16 image + pgvector extension
     # pre-installed. The 20260412000000_add_file_content_index migration
     # needs `CREATE EXTENSION vector`, which plain postgres:16-alpine lacks.
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg16@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
     # WARP-233: TLS 1.3 + SCRAM enforced via server flags (equivalent to
     # postgresql.conf edits; the stock image config stays untouched). The
     # bash -c wrapper stages the key with postgres-uid ownership BEFORE
@@ -1190,7 +1190,7 @@ services:
     pids_limit: ${DB_PIDS_LIMIT:-1024}
 
   cache:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     env_file:
       - path: ../.env
         required: false
@@ -1262,7 +1262,7 @@ services:
     pids_limit: ${CONTAINER_PIDS_LIMIT:-512}
 
   broker:
-    image: eclipse-mosquitto:2
+    image: eclipse-mosquitto:2@sha256:38c0da4f2ef84284d47b3b3eeea1cb3bdeabe81ee10caf0cd5c5ff61ee3ea408
     ports:
       # WARP-235: host-LOOPBACK TLS listener for host-network clients
       # (camera-discovery). Never bound on LAN interfaces. Also fixes the
@@ -1966,7 +1966,7 @@ services:
   # FRIGATE_RUNTIME lets the GPU-host scripts set `nvidia` without forcing
   # macOS / Docker Desktop (which has no nvidia runtime) to fail validation.
   frigate:
-    image: ${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:0.17.1}
+    image: ${FRIGATE_IMAGE:-ghcr.io/blakeblackshear/frigate:0.17.1@sha256:1724960349dad0bd2ae8ec884171a6fd5755a4dc242a0e66cadbda9c0e85c99b}
     runtime: ${FRIGATE_RUNTIME:-runc}
     profiles: ["linux"]
     shm_size: "256mb"
@@ -2734,7 +2734,7 @@ services:
     # STT clients. Both in-repo clients (voice-io stt.py, orchestrator
     # stt.client.ts) parse BOTH formats, but the pin keeps upgrades
     # deliberate. 3.1.0 == today's `latest`.
-    image: rhasspy/wyoming-whisper:${WHISPER_IMAGE_TAG:-3.1.0}
+    image: rhasspy/wyoming-whisper:${WHISPER_IMAGE_TAG:-3.1.0@sha256:9501d2659eee83b6eead98d53842193e5fed011eda6c5b1c3ad36f3146b28fed}
     # Profile gate matches voice-io — same Linux-only audio
     # stack. On macOS dev installs the whole voice path is skipped.
     profiles: ["linux"]
@@ -2783,7 +2783,7 @@ services:
   wyoming-piper:
     # Pinned (WARP-590): match the whisper sidecar's deliberate-upgrade
     # posture instead of floating on `latest`. 2.2.2 == today's `latest`.
-    image: rhasspy/wyoming-piper:${PIPER_IMAGE_TAG:-2.2.2}
+    image: rhasspy/wyoming-piper:${PIPER_IMAGE_TAG:-2.2.2@sha256:c874e4a04657ae3381332ee5d0c8c70a310dae6722892840f530ac0890b44eb3}
     profiles: ["linux"]
     expose:
       - "10200"
@@ -3022,7 +3022,7 @@ services:
     # release, so a routine pull could swap the inference runtime under the
     # box. 0.30.8-rocm == today's `rocm`; it still natively supports gfx1200
     # (RDNA4), so the no-HSA_OVERRIDE note above still holds.
-    image: ollama/ollama:0.30.8-rocm
+    image: ollama/ollama:0.30.8-rocm@sha256:19e10c4d7f5aa09cbc6f562cd975e2488f9e210aadeb3a3c77e3e708b9ec230e
     container_name: droplet-ollama
     # Its OWN profile, deliberately not `single-box`.
     #
@@ -3139,7 +3139,7 @@ services:
     # would swap the inference runtime under the box on a routine pull. The
     # `-rocm` variant is the AMD build; bare `v1.2.6` is CPU-only and presents
     # as a catastrophic-looking perf regression rather than as an error.
-    image: ${DMR_IMAGE:-docker/model-runner:v1.2.6-rocm}
+    image: ${DMR_IMAGE:-docker/model-runner:v1.2.6-rocm@sha256:cd6a1a25ad992d71e661d11010c206cb735652eb1d7079b7c7acaeebb3e3f70e}
     container_name: droplet-dmr
     profiles: ["dmr"]
     restart: unless-stopped
@@ -3270,7 +3270,7 @@ services:
     # check, and a `return 1` there aborted setup.sh mid-run on precisely the box
     # the guard existed to repair. Opt out with DMR_IMAGE_CPU_OPT_IN=1; an absent
     # DMR_IMAGE is left absent, so this default stays the source of truth.
-    image: ${DMR_IMAGE:-docker/model-runner:v1.2.6-cuda}
+    image: ${DMR_IMAGE:-docker/model-runner:v1.2.6-cuda@sha256:bd94095bbc1ddc4266c3a88f582a92562c6b63eceb175572c9a60045663727c9}
     container_name: droplet-dmr
     profiles: ["dmr-cuda"]
     restart: unless-stopped
