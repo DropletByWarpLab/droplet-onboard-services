@@ -125,6 +125,9 @@ export function attachWsBridge(server: HttpServer): WebSocketServer {
       // WARP-3485: team-chat (Messages) events, IDs and a kind only, from
       // team-chat-events.service.ts, for the conversations this user is in.
       `droplet/team-chat/${user.username}`,
+      // WARP-3536: Projects live updates, IDs and a kind only, from
+      // services/pm/pm-live.ts, for the work items this user can read.
+      `droplet/pm/${user.username}`,
     ];
 
     const unsubscribes = topics.map((t) =>

@@ -24,6 +24,15 @@ export function recordMqttState(next: MqttConnectionState, error?: string): void
   else if (error) lastError = error;
 }
 
+/**
+ * True while the broker connection is up. For a publisher that would rather
+ * skip the work than ask `publish()` to log a warning per message while the
+ * broker is down (WARP-3536: one frame per reader per change adds up).
+ */
+export function mqttConnected(): boolean {
+  return state === "connected";
+}
+
 /** Health probe: resolves true when connected, else throws with the reason. */
 export async function mqttHealth(): Promise<boolean> {
   if (state === "connected") return true;

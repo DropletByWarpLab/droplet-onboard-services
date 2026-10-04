@@ -159,6 +159,9 @@ import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.
 import { runActivityNotifySweep } from "./services/activity-notify.service.js";
 import { registerOutboxConsumer, stopOutbox } from "./services/pm/pm-outbox.js";
 import { createWebhookFanOutConsumer } from "./services/pm/webhook-fanout.js";
+import { createPmLiveConsumer } from "./services/pm/pm-live.js";
+import { createPmLiveAudience } from "./services/pm/pm-live-audience.js";
+import { getEffectiveModuleIds } from "./services/modules.service.js";
 import {
   pruneWebhookDeliveries,
   runWebhookDeliveries,
@@ -2139,6 +2142,25 @@ async function main() {
     logger.info("API server listening on port %d", config.PORT);
     markListening();
   });
+
+  // WARP-3536 (ADR-069 §7, WS-19) — live updates: the `pm-live` consumer on the
+  // PmActivity outbox tells everyone who can read a work item, on their own
+  // `droplet/pm/<username>` topic, that it changed (ids and a kind only; the
+  // browser re-reads through the authorized API). Registered here, after
+  // createApp(), rather than beside the webhooks consumer: its audience is the §3
+  // access resolver, which createApp() initialises, and a consumer runs once the
+  // moment it is registered. A tick with MQTT down costs a cursor move and
+  // nothing else (pm-live.ts, "Failure").
+  registerOutboxConsumer(
+    createPmLiveConsumer({
+      prisma,
+      audience: createPmLiveAudience({
+        prisma,
+        boxModuleIds: () => getEffectiveModuleIds(prisma, config),
+      }),
+    }),
+    { prisma, cronRuntime },
+  );
 
   // Graceful shutdown. `exitCode` defaults to 0 so SIGTERM/SIGINT keep their
   // clean-exit semantics; the uncaughtException path (WARP-572) passes 1 so
