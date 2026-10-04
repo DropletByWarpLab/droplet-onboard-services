@@ -29,9 +29,13 @@ export function matches(row: Row, where: Row): boolean {
 export function makeAttachmentFake() {
   const db = {
     items: [{ id: "wi-1" }, { id: "wi-2" }] as Row[],
+    // c-1 is alice's, c-bob bob's (both on wi-1), c-ai has no author (the assistant's);
+    // c-2 is bob's on ANOTHER item.
     comments: [
-      { id: "c-1", workItemId: "wi-1" },
-      { id: "c-2", workItemId: "wi-2" },
+      { id: "c-1", workItemId: "wi-1", authorId: "u-alice" },
+      { id: "c-bob", workItemId: "wi-1", authorId: "u-bob" },
+      { id: "c-ai", workItemId: "wi-1", authorId: null },
+      { id: "c-2", workItemId: "wi-2", authorId: "u-bob" },
     ] as Row[],
     attachments: [] as Row[],
     activity: [] as Row[],

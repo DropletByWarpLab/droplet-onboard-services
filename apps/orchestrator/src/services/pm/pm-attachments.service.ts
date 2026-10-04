@@ -150,7 +150,8 @@ export interface UploadTicket {
 }
 
 /**
- * Step one of an upload: check the target and record the intent. The row exists
+ * Step one of an upload: check the target (and, for a comment, that the caller
+ * may attach to it) and record the intent. The row exists
  * BEFORE the first byte streams, so a crash mid-upload leaves an UPLOADING row
  * the sweep can see, instead of a blob nothing remembers.
  *
@@ -160,7 +161,13 @@ export interface UploadTicket {
  */
 export async function beginUpload(
   prisma: PrismaClient,
-  input: { actorId: string | null; workItemId: string; commentId?: string | null },
+  input: {
+    actorId: string | null;
+    /** Owner or admin. Only they may attach to a comment somebody else wrote. */
+    isAdmin?: boolean;
+    workItemId: string;
+    commentId?: string | null;
+  },
 ): Promise<UploadTicket> {
   const item = await prisma.pmWorkItem.findUnique({
     where: { id: input.workItemId },
@@ -172,9 +179,15 @@ export async function beginUpload(
     // file hang off the wrong thread.
     const comment = await prisma.pmComment.findFirst({
       where: { id: input.commentId, workItemId: input.workItemId },
-      select: { id: true },
+      select: { id: true, authorId: true },
     });
     if (!comment) throw new Error(PM_ATTACHMENT_ERRORS.COMMENT_NOT_FOUND);
+    // A file attached through a comment renders INSIDE it, as the author's own, so
+    // only the author — or an owner or admin — may add one to an existing comment
+    // (the comment's edit rights, WS-2, are author-only too). A comment with no
+    // author (the assistant's) takes files from an owner or admin alone.
+    const isAuthor = input.actorId !== null && comment.authorId === input.actorId;
+    if (!isAuthor && input.isAdmin !== true) throw new Error(PM_ATTACHMENT_ERRORS.FORBIDDEN);
   }
 
   const storageKey = randomUUID();

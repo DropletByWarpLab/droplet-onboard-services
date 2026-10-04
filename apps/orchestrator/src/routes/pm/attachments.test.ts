@@ -155,6 +155,27 @@ describe("POST /api/pm/work-items/:id/attachments", () => {
     expect(res.body.attachment.commentId).toBe("c-1");
   });
 
+  it("refuses another member's comment with 403 attachment_forbidden — no row, no file", async () => {
+    const fake = makeAttachmentFake();
+    const res = await request(makeApp(fake, ALICE))
+      .post("/api/pm/work-items/wi-1/attachments?comment_id=c-bob")
+      .attach("file", PNG, "p.png");
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("attachment_forbidden");
+    expect(fake.stats.creates).toBe(0);
+    expect(filesUnder(root)).toEqual([]);
+  });
+
+  it.each([OWNER, ADMIN])("lets $role attach to a comment somebody else wrote", async (user) => {
+    const fake = makeAttachmentFake();
+    const res = await request(makeApp(fake, user))
+      .post("/api/pm/work-items/wi-1/attachments?comment_id=c-bob")
+      .attach("file", PNG, "p.png");
+    expect(res.status).toBe(201);
+    expect(res.body.attachment.commentId).toBe("c-bob");
+    expect(res.body.attachment.uploadedById).toBe(user.id);
+  });
+
   it("404s a comment of ANOTHER item, without creating a row or a file", async () => {
     const fake = makeAttachmentFake();
     const res = await request(makeApp(fake, ALICE))

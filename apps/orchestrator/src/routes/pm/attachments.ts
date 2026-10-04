@@ -229,6 +229,7 @@ export function createPmAttachmentsRouter(
       const actorId = actorOf(req);
       ticket = await beginUpload(prisma, {
         actorId,
+        isAdmin: ADMIN_ROLES.has(req.user?.role ?? ""),
         workItemId: req.params.id,
         commentId: query.data.comment_id,
       });

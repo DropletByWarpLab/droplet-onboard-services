@@ -93,8 +93,8 @@ describe.skipIf(!RUN)("PmAttachment — the database's own guarantees and the fi
 
   const item = (projectId = projectA) =>
     prisma.pmWorkItem.create({ data: { projectId, sequenceId: ++seq, name: `warp1505-item-${seq}` } });
-  const comment = (workItemId: string) =>
-    prisma.pmComment.create({ data: { workItemId, authorId: "u-1", commentHtml: "<p>hi</p>" } });
+  const comment = (workItemId: string, authorId = "u-1") =>
+    prisma.pmComment.create({ data: { workItemId, authorId, commentHtml: "<p>hi</p>" } });
 
   /** A row of the given state, with a blob on disk for it. */
   async function row(
@@ -374,10 +374,22 @@ describe.skipIf(!RUN)("PmAttachment — the database's own guarantees and the fi
       const res = await request(app(ALICE)).post(`/api/pm/work-items/${it1.id}/attachments?comment_id=${c2.id}`).attach("file", PNG, "p.png");
       expect(res.status).toBe(404);
       expect(res.body.error).toBe("comment_not_found");
-      const own = await comment(it1.id);
+      const own = await comment(it1.id, ALICE.id);
       const ok = await request(app(ALICE)).post(`/api/pm/work-items/${it1.id}/attachments?comment_id=${own.id}`).attach("file", PNG, "p.png");
       expect(ok.status).toBe(201);
       expect(ok.body.attachment.commentId).toBe(own.id);
+    });
+
+    it("only the comment's author, or an owner/admin, may attach to an existing comment", async () => {
+      const it1 = await item();
+      const alices = await comment(it1.id, ALICE.id);
+      const refused = await request(app(BOB)).post(`/api/pm/work-items/${it1.id}/attachments?comment_id=${alices.id}`).attach("file", PNG, "p.png");
+      expect(refused.status).toBe(403);
+      expect(refused.body.error).toBe("attachment_forbidden");
+      expect(await prisma.pmAttachment.count({ where: { workItemId: it1.id } })).toBe(0);
+      expect(filesOnDisk()).toEqual([]);
+      const owner = await request(app(OWNER)).post(`/api/pm/work-items/${it1.id}/attachments?comment_id=${alices.id}`).attach("file", PNG, "p.png");
+      expect(owner.status).toBe(201);
     });
 
     it("delete: the uploader removes it — row and file gone, history written; another member is refused", async () => {

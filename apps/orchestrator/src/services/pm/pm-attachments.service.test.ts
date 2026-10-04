@@ -99,10 +99,52 @@ describe("beginUpload", () => {
     expect(f.db.activity).toEqual([]); // nothing is "added" until it is READY
   });
 
-  it("attaches to a comment of the SAME item", async () => {
+  it("attaches to a comment of the SAME item — the author's own", async () => {
     const f = makeFake();
-    await beginUpload(f.prisma, { actorId: "u-1", workItemId: "wi-1", commentId: "c-1" });
+    await beginUpload(f.prisma, { actorId: "u-alice", workItemId: "wi-1", commentId: "c-1" });
     expect(f.db.attachments[0].commentId).toBe("c-1");
+    expect(f.db.attachments[0].uploadedById).toBe("u-alice");
+  });
+
+  describe("attaching to a comment somebody else wrote", () => {
+    it("is refused for another member — no row is made", async () => {
+      const f = makeFake();
+      await expect(
+        beginUpload(f.prisma, { actorId: "u-bob", workItemId: "wi-1", commentId: "c-1" }),
+      ).rejects.toThrow(E.FORBIDDEN);
+      expect(f.db.attachments).toEqual([]);
+    });
+
+    it("is allowed for an owner or admin", async () => {
+      const f = makeFake();
+      await beginUpload(f.prisma, { actorId: "u-admin", isAdmin: true, workItemId: "wi-1", commentId: "c-1" });
+      expect(f.db.attachments).toHaveLength(1);
+    });
+
+    it("a comment with no author (the assistant's) takes files from an owner or admin alone", async () => {
+      const f = makeFake();
+      await expect(
+        beginUpload(f.prisma, { actorId: "u-alice", workItemId: "wi-1", commentId: "c-ai" }),
+      ).rejects.toThrow(E.FORBIDDEN);
+      await expect(
+        beginUpload(f.prisma, { actorId: null, workItemId: "wi-1", commentId: "c-ai" }),
+      ).rejects.toThrow(E.FORBIDDEN);
+      await beginUpload(f.prisma, { actorId: "u-admin", isAdmin: true, workItemId: "wi-1", commentId: "c-ai" });
+      expect(f.db.attachments).toHaveLength(1);
+    });
+
+    it("'not on this item' is still answered before 'not yours' — a stranger's comment id reveals nothing", async () => {
+      const f = makeFake();
+      await expect(
+        beginUpload(f.prisma, { actorId: "u-alice", workItemId: "wi-1", commentId: "c-2" }),
+      ).rejects.toThrow(E.COMMENT_NOT_FOUND);
+    });
+  });
+
+  it("attaching to the work item itself needs no comment authorship", async () => {
+    const f = makeFake();
+    await beginUpload(f.prisma, { actorId: "u-bob", workItemId: "wi-1" });
+    expect(f.db.attachments).toHaveLength(1);
   });
 
   it("refuses a comment that belongs to another work item", async () => {
