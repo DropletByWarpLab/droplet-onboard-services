@@ -997,7 +997,7 @@ MCP_BRIDGE_SERVICE_TOKEN=$mcp_bridge_service_token
 # Orchestrator -> voice-io / rag-eval / file-indexer. Each service reads its
 # own key; the orchestrator (env_file) reads all three. voice-io and rag-eval
 # receive theirs by compose substitution; file-indexer via env_file. Rotate in
-# lockstep: change here, then `up -d --force-recreate orchestrator <service>`.
+# lockstep: change here, then force-recreate the orchestrator and that service.
 # Every one fails CLOSED (503 on non-/health routes) when empty.
 VOICE_IO_SERVICE_TOKEN=$voice_io_service_token
 RAG_EVAL_SERVICE_TOKEN=$rag_eval_service_token
