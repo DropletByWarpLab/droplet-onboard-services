@@ -25,6 +25,7 @@ import type { GraphPage } from "./graph-client.js";
 import type { DueCursor } from "./delta-cursor.service.js";
 import type { PageContext } from "./m365-sync.service.js";
 import {
+  LibrarySourceMissingError,
   OneDriveSourceMissingError,
   createDriveLandingHandler,
   readDriveEntry,
@@ -174,10 +175,18 @@ const LAST = { fullEnumeration: true, isFirstPage: false, isLastPage: true } sat
 const ONLY = { fullEnumeration: true, isFirstPage: true, isLastPage: true } satisfies PageContext;
 const INCREMENTAL = { fullEnumeration: false, isFirstPage: true, isLastPage: true } satisfies PageContext;
 
-function setup(opts: { oneDrive?: boolean } = {}) {
+/**
+ * The person has registered their OneDrive and one SharePoint library — the state
+ * discovery leaves them in, and the only one a page can land in. Either can be
+ * left out to test a page that arrives with nowhere to go.
+ */
+function setup(opts: { oneDrive?: boolean; library?: boolean } = {}) {
   const db = makeFakeCloudFileDb();
   if (opts.oneDrive !== false) {
     db.seedSource({ userId: USER, provider: "M365", kind: "ONEDRIVE", sourceId: OD, nameEnc: "dcv1:x" });
+  }
+  if (opts.library !== false) {
+    db.seedSource({ userId: USER, provider: "M365", kind: "SHAREPOINT_LIBRARY", sourceId: LIB, nameEnc: "dcv1:x" });
   }
   const handle = createDriveLandingHandler(db as unknown as CloudFileDb);
   return { db, handle };
@@ -215,6 +224,57 @@ describe("createDriveLandingHandler — what lands, and where", () => {
     const { db, handle } = setup({ oneDrive: false });
     await expect(handle(filesCursor(), pageOf([file("o1")]), INCREMENTAL)).rejects.toBeInstanceOf(OneDriveSourceMissingError);
     expect(db.items).toEqual([]);
+  });
+
+  describe("a library that is no longer registered lands nothing", () => {
+    // A library is removed while a page of it is still being handled — the person
+    // switched SharePoint off, or a complete discovery pruned it. The rows have no
+    // foreign key, so without this check the page would write them under a source
+    // that no longer exists, where nothing lists them and nothing deletes them: a
+    // list the person was told was deleted, still there.
+    it("refuses the page with a retryable error — the engine does not advance a cursor past a page that landed nowhere", async () => {
+      const { db, handle } = setup({ library: false });
+      await expect(handle(cursor(), pageOf([file("f1")]), INCREMENTAL)).rejects.toBeInstanceOf(LibrarySourceMissingError);
+      expect(db.items).toEqual([]);
+      expect(db.cloudFileItem.upsert).not.toHaveBeenCalled();
+    });
+
+    it("refuses a deletion and a sweep too — nothing at all is written for an unregistered library", async () => {
+      const { db, handle } = setup({ library: false });
+      seed(db, "leftover");
+      await expect(handle(cursor(), pageOf([deleted("leftover")]), ONLY)).rejects.toBeInstanceOf(LibrarySourceMissingError);
+      expect(db.cloudFileItem.updateMany).not.toHaveBeenCalled();
+      expect(db.cloudFileItem.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it("lands the first page and refuses the next when the library is removed in between", async () => {
+      const { db, handle } = setup();
+      await handle(cursor(), pageOf([file("f1")]), FIRST);
+      db.sources.splice(0, db.sources.length, ...db.sources.filter((r) => r.sourceId !== LIB));
+      await expect(handle(cursor(), pageOf([file("f2")]), MIDDLE)).rejects.toBeInstanceOf(LibrarySourceMissingError);
+      expect(stored(db)).toEqual(["f1"]);
+    });
+
+    it("is not satisfied by a OneDrive that happens to have the library's id, nor by another person's library", async () => {
+      const a = setup({ library: false });
+      a.db.seedSource({ userId: USER, provider: "M365", kind: "ONEDRIVE", sourceId: LIB, nameEnc: "dcv1:x" });
+      await expect(a.handle(cursor(), pageOf([file("f1")]), INCREMENTAL)).rejects.toBeInstanceOf(LibrarySourceMissingError);
+
+      const b = setup({ library: false });
+      b.db.seedSource({ userId: OTHER, provider: "M365", kind: "SHAREPOINT_LIBRARY", sourceId: LIB, nameEnc: "dcv1:x" });
+      await expect(b.handle(cursor(), pageOf([file("f1")]), INCREMENTAL)).rejects.toBeInstanceOf(LibrarySourceMissingError);
+      expect(b.db.items).toEqual([]);
+    });
+
+    it("does not make OneDrive's pages depend on a library, nor a library's depend on OneDrive", async () => {
+      const od = setup({ library: false });
+      await od.handle(filesCursor(), pageOf([file("o1")]), INCREMENTAL);
+      expect(stored(od.db, USER, OD)).toEqual(["o1"]);
+
+      const lib = setup({ oneDrive: false });
+      await lib.handle(cursor(), pageOf([file("f1")]), INCREMENTAL);
+      expect(stored(lib.db)).toEqual(["f1"]);
+    });
   });
 
   it("lands OneDrive under THIS person's source, never another person's", async () => {
@@ -420,6 +480,7 @@ describe("createDriveLandingHandler — logging", () => {
     // A file name in a practice carries a patient's. The handler takes its logger
     // as a parameter so this can read exactly what would be written.
     const db = makeFakeCloudFileDb();
+    db.seedSource({ userId: USER, provider: "M365", kind: "SHAREPOINT_LIBRARY", sourceId: LIB, nameEnc: "dcv1:x" });
     const warn = vi.fn();
     const handle = createDriveLandingHandler(db as unknown as CloudFileDb, { warn });
 
@@ -442,6 +503,7 @@ describe("createDriveLandingHandler — logging", () => {
 
   it("is silent when every entry landed", async () => {
     const db = makeFakeCloudFileDb();
+    db.seedSource({ userId: USER, provider: "M365", kind: "SHAREPOINT_LIBRARY", sourceId: LIB, nameEnc: "dcv1:x" });
     const warn = vi.fn();
     await createDriveLandingHandler(db as unknown as CloudFileDb, { warn })(cursor(), pageOf([file("f1"), deleted("f2")]), INCREMENTAL);
     expect(warn).not.toHaveBeenCalled();

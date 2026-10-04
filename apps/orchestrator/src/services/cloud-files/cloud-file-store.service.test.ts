@@ -22,6 +22,7 @@ import {
   deleteSources,
   ensureSource,
   findSourceId,
+  hasSource,
   listSourceIds,
   markSourceForSweep,
   purgeProviderForUser,
@@ -351,6 +352,28 @@ describe("sources", () => {
 
     expect(await findSourceId(asDb(db), { userId: USER, provider: "M365", kind: "ONEDRIVE" })).toBe("newer");
     expect(await findSourceId(asDb(db), { userId: OTHER, provider: "M365", kind: "SHAREPOINT_LIBRARY" })).toBeNull();
+  });
+
+  it("hasSource is true only for THAT person's source of THAT kind, in THAT cloud", async () => {
+    // What a landing handler asks before it writes a file: is the place this
+    // file would sit one this person still has? Mutation: drop `userId`,
+    // `provider` or `kind` from the lookup and a library somebody else has, a
+    // OneDrive passing for a library, or another cloud's container with the same
+    // id would let a page land under a source the person does not have.
+    const db = makeFakeCloudFileDb();
+    db.seedSource({ userId: USER, provider: "M365", kind: "SHAREPOINT_LIBRARY", sourceId: "lib", nameEnc: "x" });
+    db.seedSource({ userId: USER, provider: "M365", kind: "ONEDRIVE", sourceId: "od", nameEnc: "x" });
+    db.seedSource({ userId: OTHER, provider: "M365", kind: "SHAREPOINT_LIBRARY", sourceId: "theirs", nameEnc: "x" });
+    db.seedSource({ userId: USER, provider: "GOOGLE", kind: "SHAREPOINT_LIBRARY", sourceId: "elsewhere", nameEnc: "x" });
+    const has = (over: Record<string, unknown>) =>
+      hasSource(asDb(db), { userId: USER, provider: "M365", kind: "SHAREPOINT_LIBRARY", sourceId: "lib", ...over } as never);
+
+    expect(await has({})).toBe(true);
+    expect(await has({ sourceId: "nope" })).toBe(false);
+    expect(await has({ sourceId: "od" })).toBe(false); // it is a OneDrive, not a library
+    expect(await has({ sourceId: "od", kind: "ONEDRIVE" })).toBe(true);
+    expect(await has({ sourceId: "theirs" })).toBe(false); // somebody else's
+    expect(await has({ sourceId: "elsewhere" })).toBe(false); // another cloud's
   });
 
   it("listSourceIds is the person's sources of that kind", async () => {

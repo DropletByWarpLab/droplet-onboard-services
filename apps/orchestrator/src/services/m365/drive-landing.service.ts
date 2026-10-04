@@ -40,7 +40,9 @@
  *
  * ## Which source an item belongs to
  *
- *   - `sharepoint`: the cursor's resource id — the library's drive id.
+ *   - `sharepoint`: the cursor's resource id — the library's drive id — and only
+ *     while that library is still REGISTERED for the person: a page for one that was
+ *     removed mid-run lands nothing (`LibrarySourceMissingError`).
  *   - `files`: the id of the person's OneDrive SOURCE, registered by discovery
  *     from `GET /me/drive`. The OneDrive cursor's own resource is the singleton
  *     `-`, so it cannot name the drive; and the id is read from the registered
@@ -67,6 +69,7 @@ import { createLogger } from "../../lib/logger.js";
 import {
   deleteItemTree,
   findSourceId,
+  hasSource,
   markSourceForSweep,
   sweepSource,
   upsertItem,
@@ -96,6 +99,29 @@ export class OneDriveSourceMissingError extends Error {
   constructor() {
     super("this person's OneDrive has not been registered yet, so its files have nowhere to land");
     this.name = "OneDriveSourceMissingError";
+  }
+}
+
+/**
+ * A `sharepoint` page arrived for a library this person no longer has registered,
+ * so there is nowhere for its files to land.
+ *
+ * The same refusal as {@link OneDriveSourceMissingError}, for the opposite
+ * reason. Here the usual cause is a LIBRARY THAT WAS REMOVED while a page of it was
+ * still being handled: the person switched SharePoint off, or a complete discovery
+ * pruned it. The cursor, the source and the landed rows are deleted together, but
+ * a sync run that was already holding the cursor carries on, and the rows it would
+ * write have no foreign key to stop them. They would sit under a source that no
+ * longer exists, where nothing lists them and nothing deletes them — a list the
+ * person was told was deleted, still there. So the page is refused and writes
+ * NOTHING. The engine records it as a failed page against a cursor that is by now
+ * gone (a no-op) or, for a cursor a crash left without its source row, backs it
+ * off until the next discovery writes the row.
+ */
+export class LibrarySourceMissingError extends Error {
+  constructor() {
+    super("this SharePoint library is not registered, so its files have nowhere to land");
+    this.name = "LibrarySourceMissingError";
   }
 }
 
@@ -209,7 +235,12 @@ async function targetFor(
   cursor: { readonly userId: string; readonly workload: string; readonly resourceId: string },
 ): Promise<CloudFileSourceScope | null> {
   if (cursor.workload === "sharepoint") {
-    return { userId: cursor.userId, provider: PROVIDER, sourceId: cursor.resourceId };
+    const scope = { userId: cursor.userId, provider: PROVIDER, sourceId: cursor.resourceId };
+    // Checked on EVERY page, before anything is written — see
+    // {@link LibrarySourceMissingError}. One indexed lookup per page of up to a
+    // couple of hundred entries.
+    if (!(await hasSource(db, { ...scope, kind: "SHAREPOINT_LIBRARY" }))) throw new LibrarySourceMissingError();
+    return scope;
   }
   if (cursor.workload === "files") {
     const sourceId = await findSourceId(db, { userId: cursor.userId, provider: PROVIDER, kind: "ONEDRIVE" });

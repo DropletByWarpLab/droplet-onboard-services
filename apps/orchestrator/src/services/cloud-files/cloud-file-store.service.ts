@@ -303,6 +303,26 @@ export async function findSourceId(
   return row?.sourceId ?? null;
 }
 
+/**
+ * Does this person have THIS source — this container, of this kind, in this cloud?
+ *
+ * What a landing handler asks before it writes a file: is the place the file would
+ * sit one the person still has? A library can be removed while a page of it is
+ * still being handled (the person switched SharePoint off, or a complete discovery
+ * pruned it), and the rows that page would write have no foreign key to stop them:
+ * they would sit under a source that no longer exists, where nothing lists them and
+ * nothing deletes them. The kind is part of the question, so a OneDrive's id cannot
+ * stand in for a library's.
+ */
+export async function hasSource(
+  db: CloudFileDb,
+  scope: CloudFileSourceScope & { readonly kind: CloudFileSourceKind },
+): Promise<boolean> {
+  const { userId, provider, sourceId, kind } = scope;
+  const row = await db.cloudFileSource.findFirst({ where: { userId, provider, sourceId, kind }, select: { id: true } });
+  return row !== null;
+}
+
 /** Every `sourceId` this person has of a kind. */
 export async function listSourceIds(
   db: CloudFileDb,
