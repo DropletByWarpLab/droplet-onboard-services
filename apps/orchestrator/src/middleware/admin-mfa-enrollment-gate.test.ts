@@ -11,15 +11,14 @@ vi.mock("../config.js", () => ({ config: cfg }));
 
 import { requireAdminMfaEnrollmentGate } from "./admin-mfa-enrollment-gate.js";
 
-function prismaWith(o: { source?: string; totp?: boolean; passkeys?: number; row?: boolean; fail?: boolean }) {
+function prismaWith(o: { totp?: boolean; passkeys?: number; fail?: boolean }) {
   return {
-    user: {
+    totpCredential: {
       findUnique: vi.fn(async () => {
         if (o.fail) throw new Error("db down");
-        return o.row === false ? null : { provisionSource: o.source ?? "LOCAL" };
+        return o.totp ? { confirmedAt: new Date() } : null;
       }),
     },
-    totpCredential: { findUnique: vi.fn(async () => (o.totp ? { confirmedAt: new Date() } : null)) },
     webAuthnCredential: { count: vi.fn(async () => o.passkeys ?? 0) },
   } as any;
 }
@@ -73,10 +72,10 @@ describe("admin MFA enrolment gate (WARP-3630)", () => {
     }
   });
 
-  it("exempts SSO and SCIM accounts (the identity provider owns the factor)", async () => {
-    for (const source of ["SSO", "SCIM"]) {
-      expect((await request(app(prismaWith({ source }))).get("/api/people")).status).toBe(200);
-    }
+  it("does not treat a pending (unconfirmed) TOTP credential as a factor", async () => {
+    const prisma = prismaWith({});
+    prisma.totpCredential.findUnique = vi.fn(async () => ({ confirmedAt: null }));
+    expect((await request(app(prisma)).get("/api/people")).status).toBe(403);
   });
 
   it("is a pass-through when the policy is off", async () => {

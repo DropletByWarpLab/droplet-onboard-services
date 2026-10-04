@@ -707,6 +707,7 @@ export function createPeopleRouter(
   router.patch(
     "/people/:id/scope",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     // Scope axis (WARP-455) — second guard, see PATCH /people/:id/role.
     requireScope("exec_only", loadUserScopes),
     async (req: Request, res: Response, next: NextFunction) => {

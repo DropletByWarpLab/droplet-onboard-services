@@ -133,9 +133,12 @@ export function createExtensionsRouter(prisma: PrismaClient, deps: ExtensionsRou
     lifecycle,
     confirmations: createPromoteConfirmationStore(),
   };
-  // WARP-3630 (WARP-2923's open decision) — signing is the crown-jewel
-  // operation, so promote needs a fresh credential step-up whenever the
-  // privileged-account two-step policy (REQUIRE_ADMIN_TWO_STEP) is on.
+  // TODO(WARP-2923): DECISION PENDING (Romain) — should promote ALWAYS require a
+  // recent second factor, as POST /api/admin/device-identity/reseal does? The
+  // recommendation on the ticket is yes: signing is the crown-jewel operation.
+  // WARP-3630 does NOT settle that: it only ties promote to the privileged-
+  // account two-step policy (REQUIRE_ADMIN_TWO_STEP, off by default), so with
+  // the policy off promote still needs no recent second factor.
   const promoteMfaGate = createRequireAdminStepUp(prisma);
 
   const ownerOrAdmin = requireRole("owner", "admin");

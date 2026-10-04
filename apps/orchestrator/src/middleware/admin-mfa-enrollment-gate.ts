@@ -8,9 +8,10 @@
  * requirePasswordChangeGate (WARP-824): mounted after authMiddleware, state
  * read fresh from the database, exact allowed paths.
  *
- * Exempt: a request with no human session (service principals, extensions),
- * the AUTH_ENABLED=false dev principal, and SSO / SCIM-provisioned accounts,
- * whose second factor belongs to the identity provider.
+ * Exempt: a request with no human session (service principals, extensions)
+ * and the AUTH_ENABLED=false dev principal. SSO and SCIM accounts are NOT
+ * exempt: they enrol a Droplet factor like anyone else (their step-up on the
+ * admin routes needs one).
  *
  * Unlike the password gate this FAILS CLOSED (503) on a database error: it is
  * a security control, not a convenience.
@@ -35,8 +36,22 @@ const ENROLLMENT_ALLOWED_PATHS: ReadonlySet<string> = new Set([
   "/api/auth/webauthn/credentials",
 ]);
 
+/**
+ * Does this person have a second factor: a CONFIRMED TOTP credential (explicit
+ * `confirmedAt`) or at least one passkey? Throws on a database error; callers
+ * must treat that as a denial.
+ */
+export async function hasSecondFactor(
+  prisma: Pick<PrismaClient, "totpCredential" | "webAuthnCredential">,
+  userId: string,
+): Promise<boolean> {
+  const totp = await prisma.totpCredential.findUnique({ where: { userId } });
+  if (totp?.confirmedAt) return true;
+  return (await prisma.webAuthnCredential.count({ where: { userId } })) > 0;
+}
+
 export function requireAdminMfaEnrollmentGate(
-  prisma: Pick<PrismaClient, "user" | "totpCredential" | "webAuthnCredential">,
+  prisma: Pick<PrismaClient, "totpCredential" | "webAuthnCredential">,
 ): (req: Request, res: Response, next: NextFunction) => Promise<void> {
   return async (req, res, next) => {
     const user = req.user;
@@ -52,16 +67,7 @@ export function requireAdminMfaEnrollmentGate(
     if (ENROLLMENT_ALLOWED_PATHS.has(path)) return next();
 
     try {
-      const row = await prisma.user.findUnique({
-        where: { id: user.id },
-        select: { provisionSource: true },
-      });
-      // No directory row (nothing to enrol) or an IdP-owned account.
-      if (!row || row.provisionSource === "SSO" || row.provisionSource === "SCIM") return next();
-
-      const totp = await prisma.totpCredential.findUnique({ where: { userId: user.id } });
-      if (totp?.confirmedAt) return next();
-      if ((await prisma.webAuthnCredential.count({ where: { userId: user.id } })) > 0) return next();
+      if (await hasSecondFactor(prisma, user.id)) return next();
 
       res.status(403).json({
         error: "Set up two-step sign-in to continue.",

@@ -3469,6 +3469,7 @@ export function createProtectedAuthRouter(
   router.post(
     "/auth/users/:username/disable",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req, res, next) => {
       try {
         // WARP-2993 — provisioning_api needs NC instance admin, which only the
@@ -3625,6 +3626,7 @@ export function createProtectedAuthRouter(
   router.post(
     "/auth/users/:username/enable",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req, res, next) => {
       try {
         // WARP-2993 — provisioning_api needs NC instance admin, which only the
@@ -3761,6 +3763,7 @@ export function createProtectedAuthRouter(
   router.post(
     "/auth/users/:username/revoke-sessions",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req, res, next) => {
       try {
         if (!prisma) {
@@ -3926,6 +3929,7 @@ export function createProtectedAuthRouter(
   router.post(
     "/auth/users/:username/cancel-deletion",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req, res, next) => {
       try {
         const row = prisma
@@ -4273,6 +4277,7 @@ export function createProtectedAuthRouter(
   router.delete(
     "/auth/invites/:token",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req, res, next) => {
       try {
         if (!prisma) {
