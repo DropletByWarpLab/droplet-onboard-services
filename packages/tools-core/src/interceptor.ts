@@ -129,26 +129,26 @@ export function createRuntimeDenyTier(): RuntimeDenyTier {
 }
 
 /**
- * ADR-055 §11.5 — tool namespaces the assistant may only READ.
+ * Tool namespaces (name prefixes) the assistant may only READ.
  *
- * "The assistant may never open a door, issue a credential, or change a grant.
- * There is no confirmation-token flow that makes it acceptable." And the rule
- * is enforced "at dispatch, not by filtering a catalogue, so an unlock tool
- * that does not exist cannot be reached by a model that has guessed its name."
+ * A generic structural guard with no namespace registered: the list ships
+ * empty, and reserving one is a single entry here. The rule is then enforced
+ * at dispatch, not by filtering a catalogue, so a writing tool that does not
+ * exist cannot be reached by a model that has guessed its name.
  *
- * So this is not a rule in the runtime deny tier (which anything can `clear()`
- * and which ships empty by design — membership there is a human decision): it
- * is a structural check `intercept` makes on every call, first, for every tool
- * in the namespace — a compiled tool, an `additionalTools` arrival, anything.
+ * It is not a rule in the runtime deny tier (which anything can `clear()` and
+ * which ships empty by design — membership there is a human decision): it is a
+ * structural check `intercept` makes on every call, first, for every tool in a
+ * reserved namespace — a compiled tool, an `additionalTools` arrival, anything.
  * Read-only has to be AFFIRMATIVE: `requiresWrite` and `requiresConfirmation`
  * both `false`. A tool that declares neither is refused, because "did not say
  * it writes" is how a remote tool would arrive.
  *
  * It refuses a confirming tool too, and a token does not change that. The
- * point is the opposite of the two-phase flow: no human approval turns a
- * `doors_*` call from the assistant into an unlock.
+ * point is the opposite of the two-phase flow: no human approval turns a call
+ * in a reserved namespace into a write.
  */
-export const READ_ONLY_TOOL_NAMESPACES = ["doors_"] as const;
+export const READ_ONLY_TOOL_NAMESPACES: readonly string[] = [];
 
 /** A reason to refuse, or `null` when the tool is outside every read-only namespace or is a read. */
 export function readOnlyNamespaceBreach(tool: InterceptableTool): DenyReason | null {
@@ -159,8 +159,8 @@ export function readOnlyNamespaceBreach(tool: InterceptableTool): DenyReason | n
   return {
     code: "read_only_namespace",
     message:
-      `'${tool.name}' is in the read-only '${namespace}' namespace, and the assistant never ` +
-      "opens, locks or unlocks a door, issues a credential, or changes who may enter. " +
+      `'${tool.name}' is in the read-only '${namespace}' namespace, and the assistant only ` +
+      "reads there: it never writes or asks for a confirmation. " +
       "Nothing about this call was attempted, and no approval changes that.",
   };
 }
@@ -229,8 +229,8 @@ export function createToolCallInterceptor(opts?: {
     tokens,
     denyTier,
     intercept(tool, args, meta, now = Date.now()) {
-      // 0. ADR-055 §11.5 — the read-only namespaces. Before the deny tier and
-      //    beyond its reach: nothing registered at runtime can remove it.
+      // 0. The read-only namespaces. Before the deny tier and beyond its
+      //    reach: nothing registered at runtime can remove it.
       const breach = readOnlyNamespaceBreach(tool);
       if (breach) return { kind: "denied", reason: breach };
 

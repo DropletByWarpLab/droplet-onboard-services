@@ -29,6 +29,30 @@ import * as path from "node:path";
 const MIGRATIONS_DIR = path.resolve(__dirname, "../../prisma/migrations");
 const STAMPED = /^(\d{14})_(.+)$/;
 
+/** WARP-3474 — the folders deleted with the Security command center and doors modules. */
+const REMOVED_BY_WARP_3474: readonly string[] = [
+  "20260923010000_warp_2977_module_security",
+  "20260923010100_warp_2977_security_event",
+  "20260924000000_warp_2977_security_mode_event_values",
+  "20260924000100_warp_2977_security_zones_hours_mode",
+  "20260925010000_warp_2980_security_baselines",
+  "20260925030000_warp_2978_security_incidents",
+  "20260925030100_warp_2978_security_event_ongoing_value",
+  "20260925030200_warp_2978_security_event_ongoing_shape",
+  "20260925050000_warp_2977_security_lock_values",
+  "20260925050100_warp_2977_security_lock_rows",
+  "20260925060000_warp_2980_security_pattern_codes",
+  "20260925060100_warp_2980_security_patterns_verdicts",
+  "20260926000000_warp_2979_security_ai_values",
+  "20260926000100_warp_2979_security_ai",
+  "20261001095900_warp_2977_security_lock_baseline_backfill",
+  "20261001100000_warp_2977_security_lock_baseline",
+  "20261002110000_adr_055_module_doors",
+  "20261002110100_adr_055_doors_enums",
+  "20261002110200_adr_055_doors_tables",
+  "20261002110300_adr_055_door_position_source_since",
+];
+
 function migrationFolders(): string[] {
   return readdirSync(MIGRATIONS_DIR).filter((name) => statSync(path.join(MIGRATIONS_DIR, name)).isDirectory());
 }
@@ -83,21 +107,25 @@ describe("migration folder names (WARP-2896)", () => {
     expect(folders).toContain("20260924030000_warp_2900_extensions");
   });
 
-  it("the WARP-2977 lock migrations exist once, re-stamped after stage's newest and the other ADR-059 branches' stamps", () => {
-    // Written as 20260925000000 / 20260925000100, which sort before
-    // 20260925010000_warp_2980_security_baselines (#2352), now on stage.
-    // Re-stamped past it, past 20260925020000, and past the stamps the open
-    // ADR-059 branches hold (…030000, …030100, …030200, …040000). Values
-    // first: an enum value cannot be used in the transaction that adds it.
+  it("the WARP-3474 cleanup migration exists once, sorts after the previous newest folder, and the 20 removed folders stay gone", () => {
+    // The Security command center and doors migrations (WARP-2977 … WARP-2980,
+    // ADR-055) are maintained outside this repository (enterprise-functionality);
+    // their 20 folders were deleted and ONE forward migration drops what a box
+    // that already ran them still holds. It is stamped after
+    // 20261002130000_warp_3452_model_access_tokens, the newest folder when it
+    // was written, so a box that applied everything before it runs it last.
+    // A removed folder coming back (a squash or cherry-pick from an older
+    // branch, a bad conflict resolution) would re-create tables schema.prisma
+    // no longer declares, and the cleanup would have to run again.
     const folders = migrationFolders();
-    expect(folders).toContain("20260925050000_warp_2977_security_lock_values");
-    expect(folders).toContain("20260925050100_warp_2977_security_lock_rows");
-    expect(folders).not.toContain("20260925000000_warp_2977_security_lock_values");
-    expect(folders).not.toContain("20260925000100_warp_2977_security_lock_rows");
-    expect(folders).toContain("20260925010000_warp_2980_security_baselines");
-    // The explicit `baseline` column (#2513 review) is its own folder, after
-    // stage's newest when written, not an edit to the rows migration that dev
-    // boxes may already have applied.
-    expect(folders).toContain("20261001100000_warp_2977_security_lock_baseline");
+    const cleanup = folders.filter((name) => name.endsWith("_warp_3474_remove_security_doors_modules"));
+    expect(cleanup).toHaveLength(1);
+    expect(cleanup[0]!.slice(0, 14) > "20261002130000").toBe(true);
+    expect(folders).toContain("20261002130000_warp_3452_model_access_tokens");
+    expect(folders.filter((name) => REMOVED_BY_WARP_3474.includes(name))).toEqual([]);
+    // The department migrations stay: the department feature is not part of
+    // the removal, only its `security` template is.
+    expect(folders).toContain("20260922160000_warp_2976_department_profile");
+    expect(folders).toContain("20260925040000_warp_2981_active_department_choice");
   });
 });

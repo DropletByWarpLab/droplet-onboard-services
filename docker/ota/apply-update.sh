@@ -41,8 +41,8 @@
 #     recreate-services); nothing is eval'd;
 #   - the one-shot container has no network. The only networked step is
 #     pull-images' cosign verify (a nested `docker run --rm` of the same
-#     pinned image, WARP-244), which must reach ghcr.io exactly as it did
-#     from inside the orchestrator.
+#     pinned image, WARP-244), which must reach the image registry (the HQ
+#     registry, ADR-068) exactly as it did from inside the orchestrator.
 # Security review of the host-execution model: WARP-2924.
 #
 # ── PER-TARGET DIGEST PINNING (why recreates ride a compose OVERRIDE) ──
@@ -73,7 +73,16 @@
 #   DROPLET_OTA_CONFIG_ROOT   repo root (default: two levels above compose).
 #   DROPLET_OTA_HOST_IMAGE    the pinned image the one-shot runs off; reused
 #                             for the detached self-swap and for cosign.
-#   DROPLET_OTA_GITHUB_TOKEN  pull-images only (private GHCR, pre-GA).
+#   DROPLET_OTA_REGISTRY_TOKEN  pull-images only (WARP-3503, ADR-068). The
+#   DROPLET_OTA_REGISTRY_HOST   short-lived HQ `registry:pull` device token the
+#                             orchestrator minted, and the one registry host
+#                             (the HQ origin) it may be sent to. Written, as a
+#                             `registrytoken`, only under that host and only
+#                             when a pinned ref names it. Never in argv, never
+#                             logged. Passed per call, by an env var.
+#   DROPLET_OTA_GITHUB_TOKEN  pull-images only. LAB/DEV ONLY: a GitHub token
+#                             for ghcr.io refs. ADR-045 forbids one on an
+#                             appliance, so it is unset on every shipped box.
 #   DROPLET_OTA_SELF_HEALTH_{ATTEMPTS,INTERVAL_SECONDS}  self-swap wait.
 #
 # ── SUBCOMMANDS (the ApplyRunner port contract) ──
@@ -84,7 +93,11 @@
 #       DIR (the runner has already written previous-refs.json, manifest.json
 #       and the per-target overrides + services.txt one level up).
 #   pull-images         --images REF [REF ...]
-#       cosign-verify, then `docker pull`, every pinned image ref (by digest).
+#       cosign-verify, then `docker pull`, every pinned image ref (by digest),
+#       with the HQ device token (WARP-3503). Fails with one of two canonical
+#       stderr prefixes the orchestrator classifies: `image-verify:` (cosign
+#       refused the image — rejected) or `registry-auth:` (the registry
+#       refused AUTH: no, expired or rejected token — retried, never rejected).
 #   stage-configs       --update-id ID --configs-tar PATH
 #       Unpack the (already sha256-verified) configs tarball over the host
 #       config tree; the pre-image lives in the backup dir from `snapshot`.
@@ -202,8 +215,8 @@ run_capture() {
 # ── WARP-244: pull-time image signature verification ─────────────────────────
 # Only images keyless-signed by THIS repo's publish-release workflow, running
 # on a RELEASE BRANCH, may be pulled. cosign fetches the signature bundle from
-# ghcr.io (the same
-# registry the pull itself needs) and verifies it OFFLINE against the trust
+# the image's registry (the same one the pull itself needs) and verifies it
+# OFFLINE against the trust
 # root embedded in the vendored, checksum-pinned binary (orchestrator
 # Dockerfile, WARP-537) — no Rekor/TUF egress at verify time.
 #
@@ -222,22 +235,56 @@ run_capture() {
 COSIGN_IDENTITY_REGEXP='^https://github\.com/DropletByWarpLab/droplet-onboard-services/\.github/workflows/publish-release\.yml@refs/heads/(main|stage)$'
 COSIGN_OIDC_ISSUER='https://token.actions.githubusercontent.com'
 
-# Ephemeral registry auth for BOTH cosign (in-process HTTPS to ghcr.io) and
-# `docker pull` (the CLI forwards credentials from DOCKER_CONFIG to the
-# daemon per pull): GHCR packages are private pre-GA. No token env → no-op
-# (anonymous works if/when the packages go public).
+# Ephemeral registry auth for BOTH cosign (in-process HTTPS to the registry)
+# and `docker pull` (the CLI forwards credentials from DOCKER_CONFIG to the
+# daemon per pull). One entry per registry host the pinned refs name:
+#   * the HQ registry — WARP-3503, ADR-068: the images are private, and the
+#     box pulls with the short-lived HQ device token the orchestrator minted
+#     (DROPLET_OTA_REGISTRY_TOKEN), written as
+#     {"auths":{"<hq-host>":{"registrytoken":"<JWT>"}}}; docker and cosign
+#     then send it as a bearer directly. Only DROPLET_OTA_REGISTRY_HOST (the
+#     HQ origin) ever gets it, whatever host a ref names.
+#   * ghcr.io — LAB/DEV ONLY: DROPLET_OTA_GITHUB_TOKEN. ADR-045 forbids a
+#     GitHub token on a customer box, so a shipped box never has one.
+# No credential for any named host → no-op, and the pull runs unauthenticated.
+# The token is validated, written to a 0600 file in a 0700 dir, and never
+# echoed, logged or put in argv.
 REGISTRY_AUTH_DIR=""
 cleanup_registry_auth() {
   [ -n "$REGISTRY_AUTH_DIR" ] && rm -rf "$REGISTRY_AUTH_DIR"
 }
 setup_registry_auth() {
-  [ -n "${DROPLET_OTA_GITHUB_TOKEN:-}" ] || return 0
+  local reg_token="${DROPLET_OTA_REGISTRY_TOKEN:-}" reg_host="${DROPLET_OTA_REGISTRY_HOST:-}"
+  local gh_token="${DROPLET_OTA_GITHUB_TOKEN:-}"
+  local entries="" seen=" " img host
+  [ -n "$reg_token$gh_token" ] || return 0
+  if [ -n "$reg_token" ]; then
+    # A JWT is base64url + dots; it goes into JSON verbatim, so nothing else.
+    case "$reg_token" in
+      *[!A-Za-z0-9._-]*) die "invalid DROPLET_OTA_REGISTRY_TOKEN (not a JWT)" ;;
+    esac
+    case "$reg_host" in
+      '' | *[!A-Za-z0-9.:-]*) die "DROPLET_OTA_REGISTRY_TOKEN needs a valid DROPLET_OTA_REGISTRY_HOST" ;;
+    esac
+  fi
+  for img in "${IMAGES[@]}"; do
+    host="${img%%/*}"
+    case "$host" in
+      '' | *[!A-Za-z0-9.:-]*) die "invalid registry host in image ref: $img" ;;
+    esac
+    case "$seen" in *" $host "*) continue ;; esac
+    seen="$seen$host "
+    if [ -n "$reg_token" ] && [ "$host" = "$reg_host" ]; then
+      entries="${entries:+$entries,}\"$host\":{\"registrytoken\":\"$reg_token\"}"
+    elif [ -n "$gh_token" ] && [ "$host" = "ghcr.io" ]; then
+      entries="${entries:+$entries,}\"$host\":{\"auth\":\"$(printf 'x-access-token:%s' "$gh_token" | base64 | tr -d '\n')\"}"
+    fi
+  done
+  [ -n "$entries" ] || return 0
   REGISTRY_AUTH_DIR="$(mktemp -d)"
   chmod 0700 "$REGISTRY_AUTH_DIR"
   trap cleanup_registry_auth EXIT
-  printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' \
-    "$(printf 'x-access-token:%s' "$DROPLET_OTA_GITHUB_TOKEN" | base64 | tr -d '\n')" \
-    > "$REGISTRY_AUTH_DIR/config.json"
+  printf '{"auths":{%s}}\n' "$entries" > "$REGISTRY_AUTH_DIR/config.json"
   chmod 0600 "$REGISTRY_AUTH_DIR/config.json"
   export DOCKER_CONFIG="$REGISTRY_AUTH_DIR"
 }
@@ -245,8 +292,8 @@ setup_registry_auth() {
 # The cosign argv prefix. The host has no cosign; the orchestrator image
 # vendors a checksum-pinned one (WARP-537), so run THAT in a throwaway
 # container off the same pinned image. It is the one networked step (the
-# signature bundle lives on ghcr.io). DROPLET_COSIGN_BIN (tests, dev) runs a
-# local binary instead.
+# signature bundle lives on the image registry). DROPLET_COSIGN_BIN (tests,
+# dev) runs a local binary instead.
 COSIGN=()
 cosign_cmd() {
   if [ -n "${DROPLET_COSIGN_BIN:-}" ]; then
@@ -259,6 +306,39 @@ cosign_cmd() {
     COSIGN+=(-v "$REGISTRY_AUTH_DIR:/ota-registry-auth:ro" -e DOCKER_CONFIG=/ota-registry-auth)
   fi
   COSIGN+=("$HOST_IMAGE")
+}
+
+# WARP-3430 — a registry that refuses AUTH is not a bad signature. The images
+# are private (ADR-068): cosign's signature fetch and `docker pull` carry the
+# box's HQ device token, and a registry that finds it missing, expired or
+# rejected answers 401 / UNAUTHORIZED / "authentication required" / DENIED —
+# before any signature exists to judge. Reporting that
+# as `image-verify:` would make apply.ts REJECT a good update for good; it
+# gets its own canonical `registry-auth:` prefix, which apply.ts retries and
+# logs as update.registry_auth_failed. The match is on the registry's own
+# error text, so the worst a spoofed message can do is turn a refusal into a
+# RETRY: verification still dies before the pull, so nothing unverified is
+# ever fetched either way.
+#
+# The scan is deliberately NOT a bare `401` / `denied` grep. A digest is hex, so
+# `a401b…` has `401` between two non-digits, and cosign echoes the image ref
+# (and its digest) in a REAL signature failure ("no matching signatures for
+# <ref>"): that must stay `image-verify:`. So the image ref and any sha256
+# digest are stripped from the text first, and what is left must carry a
+# registry error token or an explicit HTTP/status 401.
+registry_refused_auth() {
+  # $1 = a file holding the failed command's stderr, $2 = the image ref.
+  local text
+  text="$(<"$1")"
+  text="${text//"$2"/}"
+  # Into a variable, not a pipe into `grep -q`: under pipefail a grep that
+  # exits on its first match can SIGPIPE the writer and flip the verdict.
+  text="$(printf '%s\n' "$text" | sed -E 's/sha256:[0-9a-fA-F]{64}//g')"
+  grep -Eiq 'unauthorized|authentication required|denied:|: denied|(http|status)( code)?[ :=]+401([^0-9]|$)' <<<"$text"
+}
+
+die_registry_auth() {
+  die "registry-auth: the registry refused authentication for $1 — the image is private and the box's registry credential (the HQ device token, ADR-068) was missing, expired or rejected"
 }
 
 verify_image_signature() {
@@ -275,13 +355,49 @@ verify_image_signature() {
       "$img"
     return 0
   fi
-  if ! run "${COSIGN[@]}" verify \
+  # stderr is replayed untouched AND scanned, to tell a registry that refused
+  # auth from a signature that did not verify.
+  local err rc=0
+  err="$(mktemp)"
+  run "${COSIGN[@]}" verify \
       --certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP" \
       --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
       --offline=true \
-      "$img" >/dev/null; then
+      "$img" >/dev/null 2>"$err" || rc=$?
+  cat "$err" >&2
+  if [ "$rc" -ne 0 ]; then
+    if registry_refused_auth "$err" "$img"; then
+      rm -f "$err"
+      die_registry_auth "$img"
+    fi
+    rm -f "$err"
     die "image-verify: cosign rejected $img — only images signed by the publish-release workflow may be pulled (WARP-244, docs/SECURITY.md)"
   fi
+  rm -f "$err"
+}
+
+# `docker pull` with the same registry-auth classification as the verify above.
+# A failure that is NOT an auth refusal keeps its old shape: docker's own
+# stderr, then the script exits with docker's status.
+pull_image() {
+  local img="$1"
+  if [ -n "$DRY_RUN" ]; then
+    run docker pull "$img"
+    return 0
+  fi
+  local err rc=0
+  err="$(mktemp)"
+  run docker pull "$img" 2>"$err" || rc=$?
+  cat "$err" >&2
+  if [ "$rc" -ne 0 ]; then
+    if registry_refused_auth "$err" "$img"; then
+      rm -f "$err"
+      die_registry_auth "$img"
+    fi
+    rm -f "$err"
+    exit "$rc"
+  fi
+  rm -f "$err"
 }
 
 # The image the host-exec one-shot runs off (host-exec.ts pins it by image
@@ -538,7 +654,7 @@ cmd_pull_images() {
     # are the same content by construction.
     verify_image_signature "$img"
     log "pull $img"
-    run docker pull "$img"
+    pull_image "$img"
   done
 }
 

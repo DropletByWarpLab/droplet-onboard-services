@@ -54,6 +54,7 @@ vi.mock("../config.js", () => ({
     SERVICE_TOKEN_MCP: "test-mcp-token-32chars-padding-1234a",
     JWT_SECRET: "test-secret-32-bytes-long-aaaaaaaa",
     DROPLET_OTA_RELEASES_URL: "https://releases.test/latest",
+    DROPLET_OTA_DOWNLOAD_BASE: "https://downloads.test/releases/download",
     DROPLET_OTA_GITHUB_TOKEN: "",
     DROPLET_OTA_APPLY_SCRIPT: "",
     DROPLET_OTA_COMPOSE_FILE: "/opt/droplet/docker/docker-compose.yml",

@@ -16,6 +16,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 import express, { Request, Response, NextFunction } from "express";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 vi.mock("../config.js", () => ({
   config: { AUTH_ENABLED: false, agentMaxIter: { defaultIter: 5, capIter: 10 } },
@@ -258,5 +260,16 @@ describe("POST /api/security/egress-anomaly — per-IP rate limit (WARP-1062)", 
     const bumped = mockCacheSet.mock.calls.map((c) => c[0]);
     expect(bumped).toContain("ratelimit:egress-anomaly:::ffff:127.0.0.1");
     expect(bumped.some((k) => String(k).includes("6.6.6.6"))).toBe(false);
+  });
+});
+
+describe("where app.ts mounts the collector's route", () => {
+  it("mounts the egress router BEFORE mountModuleGates — host plumbing never sits behind a dashboard toggle", () => {
+    const src = readFileSync(join(__dirname, "..", "app.ts"), "utf8");
+    const egress = src.indexOf('app.use("/api", createEgressAuditRouter())');
+    const gates = src.indexOf("mountModuleGates(app, moduleGate)");
+    expect(egress).toBeGreaterThan(-1);
+    expect(gates).toBeGreaterThan(-1);
+    expect(egress).toBeLessThan(gates);
   });
 });

@@ -327,7 +327,7 @@ export function createToolsRouter(
    * inference backend, the same reason `dispatcher` is a parameter. Defaults
    * to the on-box summarizer; a spec with no summarize step never calls it.
    */
-  // WARP-2979 (#2420 review 2b) — a summary of a withheld domain's results (security, files, memory, business)
+  // WARP-2979 (#2420 review 2b) — a summary of a withheld domain's results (files, memory, business)
   // is written on the LOCAL model only: the filing worker's local-only resolver, never the active (maybe cloud) one.
   summarizer: Summarizer = createToolSpecSummarizer(
     () => resolveActiveModel(prisma),

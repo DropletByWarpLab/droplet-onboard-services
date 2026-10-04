@@ -81,7 +81,7 @@ const TEMPERATURE = 0;
  * Which model will do the reading — and whether it is allowed to.
  *
  * WARP-2979: the resolver moved, verbatim, to services/local-background-model.ts
- * so Droplet's incident summaries ask the same local-only question; filing
+ * so every unattended caller asks the same local-only question; filing
  * keeps its name for it. See that file for the rules (catalogue-first, a
  * degraded listing is unreachable, `resolveOffLanProvider` as a second check).
  */

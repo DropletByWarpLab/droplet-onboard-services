@@ -61,6 +61,31 @@ export function resolveAgentIterLimits(
   return { defaultIter, capIter };
 }
 
+/** WARP-3639: shortest audit/log retention window the box accepts, in days.
+ *  0 (keep forever) is exempt. Exported for tests and docs. */
+export const AUDIT_RETENTION_MIN_DAYS = 90;
+
+/** Raise a configured audit retention window below the floor up to it, with a
+ *  structured warning, instead of crashing boot or silently purging early.
+ *  0 passes through: it disables the purge. Exported for tests. */
+export function resolveAuditRetentionDays(
+  days: number,
+  warn: (msg: string) => void = (msg) => {
+    void import("./lib/logger.js").then(({ createLogger }) =>
+      createLogger("config").warn(msg),
+    );
+  },
+): number {
+  if (days > 0 && days < AUDIT_RETENTION_MIN_DAYS) {
+    warn(
+      `config: DROPLET_AUDIT_RETENTION_DAYS (${days}) is below the ` +
+        `${AUDIT_RETENTION_MIN_DAYS}-day minimum; raising it to ${AUDIT_RETENTION_MIN_DAYS}`,
+    );
+    return AUDIT_RETENTION_MIN_DAYS;
+  }
+  return days;
+}
+
 /**
  * WARP-2177 — the durable-run worker's knobs, resolved once.
  *
@@ -118,7 +143,6 @@ export const PRODUCTION_REQUIRED_SECRET_KEYS: readonly string[] = [
   "DEVICE_SECRET_KEY",
   "DEVICE_SECRET",
   "SERVICE_TOKEN_SWITCH",
-  "SERVICE_TOKEN_DEVICE_GATEWAY",
   "SERVICE_TOKEN_AI_GATEWAY",
   "SERVICE_TOKEN_VOICE",
   "SERVICE_TOKEN_MCP",
@@ -789,6 +813,20 @@ const envSchema = z.object({
   //   device-identity sidecar reads (docker-compose.yml). Defaults to the
   //   hostname-derived `droplet` placeholder (matches scripts/lib/secrets.sh).
   DROPLET_DEVICE_ID: z.string().default("droplet"),
+  // DROPLET_TELEMETRY_PORTAL_URL — origin of the operator portal the box
+  //   telemetry sender posts to (WARP-3504, ADR-068). The sender appends
+  //   `/api/v1/telemetry/*`. A value that still ends in `/api/v1` (the
+  //   fleet-agent's older convention for this same variable) is accepted and
+  //   normalised, so the two readers of one name cannot disagree.
+  DROPLET_TELEMETRY_PORTAL_URL: z.string().default("https://analytics.warp-lab.ai"),
+  // DROPLET_TELEMETRY_DISABLED — LAB / DEV ONLY kill switch for that sender.
+  //   Telemetry is part of the managed lease and always on for an enrolled
+  //   box; this is not a customer setting and is deliberately not in the UI.
+  //   Explicit string->bool (same idiom as ANALYTICS_ENABLED): only "1"/"true".
+  DROPLET_TELEMETRY_DISABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
 
   // --- Direct-punch remote-access overlay (ADR-030 / WARP-1385) ---
   // OVERLAY_CONNECT_ENABLED — the box overlay connect agent (WARP-1767).
@@ -906,6 +944,14 @@ const envSchema = z.object({
   // their own box; existing setups stay back-compatible. Flip on only once the
   // panel CLAIM screen and the dashboard /setup code field both ship.
   //
+  // WARP-3589: this flag now only controls whether the CODE must also be
+  // re-sent on the owner request. That the box has been claimed at all
+  // (`isClaimed`) is required by POST /auth/setup regardless of this flag.
+  // Do NOT turn it on by default yet: the wizard claims the box first, after
+  // which the panel stops showing the code, so the Account step has no code
+  // left to type. Carry the claimed code from the Claim step into the Account
+  // request first.
+  //
   // EXPLICIT string→bool, NOT z.coerce.boolean(): coerce runs Boolean(...), so
   // the non-empty strings "0"/"false" would BOTH coerce to true and could
   // silently ENABLE the gate (a lockout foot-gun). Only "1"/"true" enable it;
@@ -915,17 +961,22 @@ const envSchema = z.object({
     .default("0")
     .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
 
-  // WARP-586: retention window (days) for the append-only audit/log tables
-  // ActivityRow, CommandAuditLog, NotificationLog. The daily 03:00 cron
-  // (index.ts) deletes rows older than this. 90 days balances "enough
-  // history for the dashboard's activity feed + an incident look-back"
-  // against unbounded table growth. Set 0 to disable the purge entirely —
-  // the safe "keep forever" stance, NOT a sentinel: 0 parses here and
-  // audit-retention-purge.service.ts treats <= 0 as "skip" (defense in
-  // depth). A negative window is nonsensical input, so the schema rejects
-  // it at startup (fail fast) rather than silently treating it as disable;
-  // .int() rejects sub-day floats and .finite() rejects Infinity.
-  DROPLET_AUDIT_RETENTION_DAYS: z.coerce.number().int().min(0).finite().default(90),
+  // WARP-586 / WARP-3639: retention window (days) for the append-only
+  // audit/log tables ActivityRow, CommandAuditLog, NotificationLog. The daily
+  // 03:00 cron (index.ts) deletes rows older than this. Default 365 days: SOC 2
+  // Type II observation windows and ISO/IEC 27001 A.8.15 expect about twelve
+  // months of retrievable security logs (the default was 90 before WARP-3639).
+  // Rows a box already purged under the old window are gone and cannot be
+  // recovered by raising this. Lower values are raised to
+  // AUDIT_RETENTION_MIN_DAYS (90) at startup with a warning (see
+  // resolveAuditRetentionDays), so a stale override cannot quietly erase the
+  // security trail; 0 is the only way below that, the explicit "keep forever"
+  // stance, NOT a sentinel: 0 parses here and audit-retention-purge.service.ts
+  // treats <= 0 as "skip" (defense in depth). A negative window is nonsensical
+  // input, so the schema rejects it at startup (fail fast) rather than silently
+  // treating it as disable; .int() rejects sub-day floats and .finite()
+  // rejects Infinity.
+  DROPLET_AUDIT_RETENTION_DAYS: z.coerce.number().int().min(0).finite().default(365),
 
   // WARP-2463: retention window (days) for ErpDriftRecord — the reconciliation
   // sweep's stored drift report. Its own 03:30 cron leg trims rows older than
@@ -962,9 +1013,21 @@ const envSchema = z.object({
   //   polls for cosign-signed OTA release manifests. Default is the
   //   canonical publisher (this repo's publish-release.yml); overridable
   //   for forks/mirrors and for the file-served fake in integration tests.
-  // GITHUB_TOKEN — bearer for the private releases repo. Empty = send no
-  //   Authorization header (public repos / the test fake). Injected via
-  //   .env by setup.sh when fleet provisioning lands; never hardcoded.
+  // DOWNLOAD_BASE — WARP-3430: where a box downloads its release, anonymously
+  //   and without the GitHub REST API (60 unauthenticated requests/hour per IP
+  //   breaks at ~15 boxes behind one NAT, and ADR-045 forbids a token on an
+  //   appliance): the signed channel pointer at
+  //   `<base>/ota-index/channel-<channel>.json(.sig)` and each release's
+  //   assets at `<base>/<tag>/<name>`. Default is the canonical publisher
+  //   (publish-release.yml); set it only for a mirror. RELEASES_URL above is
+  //   now the FALLBACK discovery path, used only while no pointer exists.
+  // GITHUB_TOKEN — bearer for the private releases repo, and for ghcr.io image
+  //   refs. LAB/DEV ONLY: it is NOT provisioned on appliances (ADR-045), and
+  //   nothing on the release-download path needs it. Since WARP-3503 (ADR-068)
+  //   the images are private and a box pulls them from the HQ registry with a
+  //   short-lived HQ device token (hq-token.service.ts), never this token.
+  //   Empty = send no Authorization header (the default, and the test fake).
+  //   Never hardcoded.
   // POLL_INTERVAL — seconds between checks. 900 (15 min) per the design;
   //   floor of 60 keeps a typo'd "0" from hot-looping the GitHub API.
   DROPLET_OTA_RELEASES_URL: z
@@ -972,6 +1035,12 @@ const envSchema = z.object({
     .url()
     .default(
       "https://api.github.com/repos/DropletByWarpLab/droplet-onboard-services/releases/latest",
+    ),
+  DROPLET_OTA_DOWNLOAD_BASE: z
+    .string()
+    .url()
+    .default(
+      "https://github.com/DropletByWarpLab/droplet-onboard-services/releases/download",
     ),
   DROPLET_OTA_GITHUB_TOKEN: z.string().default(""),
   DROPLET_OTA_POLL_INTERVAL: z.coerce.number().int().min(60).finite().default(900),
@@ -1095,33 +1164,6 @@ const envSchema = z.object({
   //   enough for a real editing session" against "short enough that a leaked
   //   token expires".
   DOCS_ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(1800),
-  // DOORS_ENABLED — ADR-055 (P4a). EXPLICIT switch for the `doors` module,
-  //   the same idiom and the same reason as DOCS_ENABLED above: it is NOT
-  //   derived from any other variable's emptiness, and z.coerce.boolean()
-  //   would read "0"/"false" as true and switch a dark module ON. Defaults OFF
-  //   — the module ships dark. Only "1"/"true" enable it; anything else,
-  //   including an empty string from compose's `${DOORS_ENABLED:-}`, is OFF.
-  //   OFF means ABSENT, not empty: the module registry's `available` reads
-  //   this (as `cameras` reads FRIGATE_URL), so /api/doors 404s. There is no
-  //   `doors` tool domain yet (the read-only chat tools are P4b's, and claim
-  //   it then); when it lands, this same flag gates it. The retention job
-  //   still runs with it off: rows already written identify people, and their
-  //   clock does not stop because the surface was switched off.
-  DOORS_ENABLED: z
-    .string()
-    .default("0")
-    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
-  // DOORS_EVENT_RETENTION_DAYS — how long AccessEvent rows are kept, counted
-  //   from when the box RECEIVED them. Default 365 (Stefan, 2026-09-29). There
-  //   is deliberately no "0 = keep forever": access logs identify people
-  //   entering places at times (ADR-055 §10 GDPR), so the schema rejects 0, a
-  //   negative, a fraction and anything over ten years at startup rather than
-  //   reading a typo as "delete now" or "never delete". A BLANK value is the
-  //   default — compose's `${VAR:-}` would otherwise coerce "" to 0.
-  DOORS_EVENT_RETENTION_DAYS: z.preprocess(
-    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
-    z.coerce.number().int().min(1).max(3650).default(365),
-  ),
   // ONLYOFFICE_JWT_SECRET — shared HS256 secret the Document Server, the
   //   Nextcloud connector, AND this orchestrator all verify. Generated by
   //   scripts/setup.sh into .env; lives ONLY there (never tracked), never
@@ -1277,6 +1319,45 @@ const envSchema = z.object({
     .default("0")
     .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
 
+  // WARP-3631 — SCIM group → role map: a JSON object with two key namespaces,
+  // e.g. {"id:00g1abc":"admin","name:Contractors":"guest"}. `id:` keys match a
+  // group's stable SCIM id and may grant up to `admin`; `name:` keys match the
+  // display name (NFKC + case folded) and may only name `guest`. Empty (default)
+  // means every SCIM group maps to the member role (`family`) except groups
+  // named "guest", which stay `guest`. Parsed (bad JSON ignored, fail-safe) in
+  // scim-role-mapping.service.ts.
+  SCIM_GROUP_ROLE_MAP: z.string().default(""),
+
+  // WARP-3630 — privileged-account two-step policy. On, (1) an owner or admin
+  // with no confirmed second factor (TOTP or passkey) can reach only the
+  // enrolment surface until they enrol (403 MFA_ENROLLMENT_REQUIRED, see
+  // middleware/admin-mfa-enrollment-gate.ts) and (2) the high-impact admin
+  // routes (user, role and access changes, invites, factory reset, extension
+  // promote, update settings) need a fresh credential step-up
+  // (createRequireAdminStepUp; unenrolled people are denied too). OFF by default: turning it on changes sign-in
+  // for owners and admins already using the box, and the dashboard does not yet
+  // route them into enrolment or prompt for step-up on those screens, so the
+  // switch is an operator decision, not a silent upgrade side effect. With the
+  // default (off) the high-impact routes have no step-up, exactly as before.
+  //
+  // Parsing: same explicit string-to-bool idiom as DROPLET_CLAIM_GATE_ENABLED
+  // ("1"/"true" on, "0"/"false"/unset off), but any OTHER value (a typo such as
+  // "ture" or "yes") is a startup error rather than a silent "off": a security
+  // switch must never read as disabled by accident.
+  REQUIRE_ADMIN_TWO_STEP: z
+    .string()
+    .default("0")
+    .transform((v, ctx) => {
+      const t = v.trim().toLowerCase();
+      if (t === "1" || t === "true") return true;
+      if (t === "" || t === "0" || t === "false") return false;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `REQUIRE_ADMIN_TWO_STEP must be 1/true or 0/false, got "${v}"`,
+      });
+      return z.NEVER;
+    }),
+
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
   CAMERA_DISCOVERY_URL: z.string().default("http://localhost:8085"),
@@ -1286,11 +1367,6 @@ const envSchema = z.object({
   // `network_mode: host`, so the bridged orchestrator must reach it via
   // the host gateway.
   SWITCH_SERVICE_URL: z.string().default("http://host.docker.internal:8081"),
-
-  // --- Device gateway (BACnet/IP, Modbus TCP, SNMP, KNX/IP) ---
-  // services/device-gateway runs `network_mode: host` on :8084 (BACnet Who-Is
-  // and KNX routing are broadcast/multicast), so same host-gateway rationale.
-  DEVICE_GATEWAY_URL: z.string().default("http://host.docker.internal:8084"),
 
   // --- OLED / TFT Display ---
   // Same rationale again: the display service runs with `network_mode: host`
@@ -1327,11 +1403,6 @@ const envSchema = z.object({
   // falls back to SERVICE_SECRET so installs that pinned the legacy shared
   // secret keep working until setup.sh re-mints.
   SERVICE_TOKEN_SWITCH: z.string().default(""),
-
-  // SERVICE_TOKEN_DEVICE_GATEWAY — outbound bearer for device-gateway.client.ts
-  // → device gateway. Compose wires the gateway container's SERVICE_SECRET to
-  // the same value; the gateway fails CLOSED (403) without it.
-  SERVICE_TOKEN_DEVICE_GATEWAY: z.string().default(""),
 
   // SERVICE_TOKEN_AI_GATEWAY — WARP-560. Dedicated outbound bearer for
   // ai-gateway.client.ts → ai-gateway, which previously had NO inbound auth
@@ -1447,11 +1518,30 @@ const envSchema = z.object({
   // secrets.sh-generated value). authMiddleware's matchServiceToken sets
   // `_service:rag-eval`. Empty default = principal disabled (same posture
   // as SERVICE_TOKEN_EMAIL); deliberately NOT in
-  // PRODUCTION_REQUIRED_SECRET_KEYS — the eval endpoint 404s in production,
-  // so a box without the rag-eval profile must still boot. To rotate:
-  // change here AND in the rag-eval container's compose env
+  // PRODUCTION_REQUIRED_SECRET_KEYS — the eval endpoint 404s unless
+  // RAG_EVAL_ENABLED is on, so a box without the rag-eval profile must still
+  // boot. To rotate: change here AND in the rag-eval container's compose env
   // (ORCHESTRATOR_SERVICE_TOKEN).
   SERVICE_TOKEN_RAG_EVAL: z.string().default(""),
+
+  // WARP-3609 — explicit positive gate for /api/admin/retrieval-eval/*. OFF
+  // unless "1"/"true" (same string→bool idiom as DROPLET_CLAIM_GATE_ENABLED:
+  // z.coerce.boolean() would read "0"/"false" as true). Replaces the old
+  // `NODE_ENV === "production"` check, which the orchestrator container never
+  // satisfied (so the route was live on every box) and which would have
+  // 404'd the scheduled eval the day WARP-2551 arms NODE_ENV. secrets.sh
+  // writes it for boxes that run the rag-eval profile.
+  RAG_EVAL_ENABLED: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
+
+  // WARP-3609 — the ONE account the `_service:rag-eval` principal may name via
+  // `?user=` on those routes. The same RAGAS_EVAL_USER the rag-eval container
+  // reads (both receive it through env_file ../.env; never re-declare it in a
+  // compose `environment:` block — WARP-1908). Empty = the principal can name
+  // nobody (403), so a missing value fails closed.
+  RAGAS_EVAL_USER: z.string().default(""),
 
   // SERVICE_TOKEN_DISPLAY — WARP-165 wired this orchestrator → oled-display.
   // WARP-1800 uses the SAME token for the reverse leg: device-bridge presents
@@ -1481,7 +1571,7 @@ const envSchema = z.object({
   //   dashboard (/admin/claude-activity) is NOT a customer feature: it reads the
   //   AI engineer's session notes, the lab's GitHub PRs and CI, WARP Jira
   //   tickets with staff names, and calls api.github.com / atlassian.net. So it
-  //   ships DARK and dark means ABSENT, the same idiom as DOORS_ENABLED: an
+  //   ships DARK and dark means ABSENT: an
   //   EXPLICIT developer switch, default OFF, never derived from a token being
   //   present. Only "1"/"true" enable it; anything else, including an empty
   //   string, is OFF. OFF: the router is not mounted (404), the `claudeActivity`
@@ -1586,16 +1676,23 @@ const envForParse: NodeJS.ProcessEnv = {
     process.env.DEVICE_BRIDGE_URL,
     process.env.BRIDGE_URL,
   ),
-  // WARP-2758 — same rescue, and this key needs it most: it is the schema's
-  // ONLY `.url()`, so a bare `DROPLET_OTA_RELEASES_URL=` is a defined-but-empty
-  // value that `.default()` never replaces and `.url()` rejects, killing the
-  // hard `.parse()` below and the whole boot. The key is documented as an
-  // operator knob for fleet-agent (services/fleet-agent/README.md), whose
-  // config.py:157 treats blank as "use the canonical publisher" — and the
-  // orchestrator inherits the same root `.env` via `env_file:`. Without this,
-  // one blank line in `.env` bricks the orchestrator and not fleet-agent.
+  // WARP-2758 — same rescue, and this key needs it most: it is one of the
+  // schema's `.url()`s, so a bare `DROPLET_OTA_RELEASES_URL=` is a
+  // defined-but-empty value that `.default()` never replaces and `.url()`
+  // rejects, killing the hard `.parse()` below and the whole boot. The key is
+  // documented as an operator knob for fleet-agent (services/fleet-agent/
+  // README.md), whose config.py:157 treats blank as "use the canonical
+  // publisher" — and the orchestrator inherits the same root `.env` via
+  // `env_file:`. Without this, one blank line in `.env` bricks the
+  // orchestrator and not fleet-agent.
   DROPLET_OTA_RELEASES_URL: firstNonEmpty(
     process.env.DROPLET_OTA_RELEASES_URL,
+  ),
+  // WARP-3430 — the same trap, doubly: docker-compose.yml hands the
+  // orchestrator `${DROPLET_OTA_DOWNLOAD_BASE:-}`, which is a defined-but-empty
+  // string on EVERY box that never set it — i.e. the whole fleet.
+  DROPLET_OTA_DOWNLOAD_BASE: firstNonEmpty(
+    process.env.DROPLET_OTA_DOWNLOAD_BASE,
   ),
 };
 
@@ -1692,6 +1789,10 @@ export const config = {
   // fail-closed posture (resolved from the literal env string). Production
   // always resolves to true; non-production honours an explicit opt-out only.
   AUTH_ENABLED: resolveAuthEnabled(process.env.AUTH_ENABLED, parsed.NODE_ENV),
+  // WARP-3639 — effective window, floored; see resolveAuditRetentionDays.
+  DROPLET_AUDIT_RETENTION_DAYS: resolveAuditRetentionDays(
+    parsed.DROPLET_AUDIT_RETENTION_DAYS,
+  ),
   corsAllowedOrigins: resolveCorsAllowedOrigins(
     parsed.CORS_ALLOWED_ORIGINS,
     parsed.NODE_ENV,

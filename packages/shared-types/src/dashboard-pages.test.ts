@@ -10,7 +10,7 @@ const page = (href: string) => ({ href, label: "Page" });
 
 describe("dashboardPageSchema", () => {
   it("accepts app paths", () => {
-    for (const href of ["/", "/voice", "/files/trash", "/admin/rag-eval", "/security/settings"]) {
+    for (const href of ["/", "/voice", "/files/trash", "/admin/rag-eval", "/settings/storage"]) {
       expect(dashboardPageSchema.safeParse(page(href)).success).toBe(true);
     }
   });

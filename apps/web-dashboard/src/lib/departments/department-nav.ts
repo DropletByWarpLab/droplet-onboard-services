@@ -12,7 +12,7 @@
  * `hidden` cleared, and a listed child, shown as itself with its parent's
  * gates folded in (see `departmentRow`) — and the caller still runs
  * `visibleItems` / `passesGates` over the result exactly as it does for the
- * whole-business nav. So a `/cameras` href in a Security profile is still gone
+ * whole-business nav. So a `/cameras` href in an IT profile is still gone
  * for a person whose cameras module is off, and a profile can never surface a
  * route the person could not already reach. The switcher SHOWS; it never
  * GRANTS (§2.5).

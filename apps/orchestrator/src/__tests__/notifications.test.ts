@@ -723,11 +723,11 @@ describe("WARP-2804 — deliverNotification(prisma, id)", () => {
     expect(prisma._created[0]!.error).toBe("delivery: invalid_tag");
   });
 
-  it("a per-incident tag (`incident/42`) is a valid collapse key and reaches the push", async () => {
+  it("a hierarchical tag (`thread/42`) is a valid collapse key and reaches the push", async () => {
     const prisma = makePushingPrismaStub();
-    await sendNotification(prisma, { ...PARKED, tag: "incident/42" });
+    await sendNotification(prisma, { ...PARKED, tag: "thread/42" });
     const push = JSON.parse(String((webpushSend.mock.calls[0] as unknown[])[1]));
-    expect(push.tag).toBe("incident/42");
+    expect(push.tag).toBe("thread/42");
     expect(prisma._created[0]!.error).toBeNull();
   });
 
@@ -740,29 +740,29 @@ describe("WARP-2804 — deliverNotification(prisma, id)", () => {
     },
   );
 
-  it("accepts a priority (WARP-2978 honours it — see the priority block below)", async () => {
+  it("accepts a priority (honoured — see the priority block below)", async () => {
     const prisma = makePrismaStub();
     const { id } = await recordNotification(prisma, { username: "alice", kind: "event", title: "x" });
     await expect(deliverNotification(prisma, id, { priority: "alert" })).resolves.toMatchObject({ id });
   });
 });
 
-// ── WARP-2978 (ADR-059 P3 §6.7, D37): an alert is long-lived and urgent ─────
+// ── an alert is long-lived and urgent ───────────────────────────────────────
 
-describe("WARP-2978 priority: 'alert'", () => {
+describe("priority: 'alert'", () => {
   const ALERT = {
     username: "maria",
     kind: "event" as const,
-    title: "Person in Stock room after hours",
-    body: "Back camera saw someone at 2:14 AM. The site was closed.",
-    url: "/security/incidents/0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4",
-    data: { incidentId: "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4" },
+    title: "Water detected in the stock room",
+    body: "The stock room sensor reported water at 2:14 AM.",
+    url: "/devices",
+    data: { deviceId: "0b7c9d1e-2f3a-4b5c-8d6e-7f8091a2b3c4" },
   };
 
   it("dials web push with TTL 3600 s and urgency high, and the push and toast payloads carry the priority", async () => {
     const prisma = makePushingPrismaStub();
     const { id } = await recordNotification(prisma, ALERT);
-    await deliverNotification(prisma, id, { tag: "security-incident-0b7c9d1e", priority: "alert" });
+    await deliverNotification(prisma, id, { tag: "device-alert-0b7c9d1e", priority: "alert" });
     expect(webpushSend).toHaveBeenCalledTimes(1);
     const [, body, opts] = webpushSend.mock.calls[0] as unknown as [unknown, string, Record<string, unknown>];
     expect(opts).toMatchObject({ TTL: 3600, urgency: "high" });
@@ -781,7 +781,7 @@ describe("WARP-2978 priority: 'alert'", () => {
   it("without a priority the dial is unchanged: TTL 60, no urgency, no priority key anywhere", async () => {
     const prisma = makePushingPrismaStub();
     const { id } = await recordNotification(prisma, ALERT);
-    await deliverNotification(prisma, id, { tag: "security-incident-0b7c9d1e" });
+    await deliverNotification(prisma, id, { tag: "device-alert-0b7c9d1e" });
     const [, body, opts] = webpushSend.mock.calls[0] as unknown as [unknown, string, Record<string, unknown>];
     expect(opts).toMatchObject({ TTL: 60 });
     expect(opts).not.toHaveProperty("urgency");

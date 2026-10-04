@@ -1130,8 +1130,8 @@ function NavLink({
                     key={sub.href}
                     href={sub.href}
                     aria-current={subActive ? "page" : undefined}
-                    // WARP-2978 — a child named for whose it is ("Security settings")
-                    // keeps that name; otherwise the collapsed rail names it by its label.
+                    // A child with its own accessible name (`ariaLabel`) keeps that name;
+                    // otherwise the collapsed rail names it by its label.
                     aria-label={sub.ariaLabel ?? (collapsed ? sub.label : undefined)}
                     title={collapsed ? sub.label : undefined}
                     className={`

@@ -71,7 +71,7 @@ is read-only.
    WorkspaceSetting (the Models page writes it through
    `PATCH /api/models/active`, which also logs the change and unloads other
    models). A withheld domain's write-up runs on the local model even when a
-   cloud model is active (WARP-2979). The orchestrator's warn lines name the
+   cloud model is active. The orchestrator's warn lines name the
    model.
 2. **What the logs already tell you.** In `droplet-orchestrator-1`:
    - `tool-spec-summarizer` "summarizer returned empty content…", with the

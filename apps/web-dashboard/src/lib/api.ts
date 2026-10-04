@@ -151,45 +151,9 @@ import type {
   RoutineSchedule,
   ContextPinKind,
   ContextPinTarget,
-  SecurityEventKind,
-  SecurityEventsPage,
-  SecurityHealthRow,
-  SecurityHoursBody,
-  SecurityHoursExceptionBody,
-  SecurityHoursView,
-  SecurityHoursWriteResult,
-  SecurityPatternCells,
-  SecurityPatternsOverview,
-  SecuritySuppressionCreateBody,
-  SecuritySuppressionList,
-  SecuritySuppressionView,
-  SecurityModeAction,
-  SecurityModeActionResult,
-  SecurityModeView,
-  SecuritySourcesView,
-  SecurityZoneCreateBody,
-  SecurityZoneCreated,
-  SecurityZoneLinksBody,
-  SecurityZonePatchBody,
-  SecurityZonesResponse,
-  SecurityZoneWriteResult,
-  SecurityAiSettingsBody,
-  SecurityAiSettingsView,
-  SecurityAiSettingsWriteResult,
-  SecurityLinkDecisionResult,
-  SecurityLinkProposalsView,
   NotificationAckAllResult,
   NotificationAckResult,
   NotificationsPage,
-  AlertRoutingPerson,
-  AlertRoutingSetBody,
-  AlertRoutingView,
-  IncidentActionResult,
-  IncidentDetail,
-  IncidentNarrativeView,
-  IncidentVerdict,
-  IncidentsPage,
-  IncidentsSummary,
 } from "./types";
 import { DEFAULT_API_FETCH_TIMEOUT_MS, apiFetch, type TypedError } from "./hooks/apiFetch";
 import type { RouterPortDisableGuard } from "@/lib/types/router-ports";
@@ -1497,6 +1461,8 @@ export interface BackupStatus {
   lastAttemptAt: string | null;
   lastRekeyAt: string | null;
   windowHours: number;
+  /** WARP-3610: decided on the host; "unknown" is never presented as safe. */
+  repositoryLocation: "same_disk" | "off_device" | "unknown";
 }
 
 export async function fetchBackupStatus(): Promise<BackupStatus> {
@@ -7919,6 +7885,35 @@ export async function getResetStatus(): Promise<ResetStatusResponse> {
 }
 
 /**
+ * WARP-3640 -- the factory reset's receipt. A reset destroys the audit chain
+ * and the key that signs it, so before dispatching one the owner's browser
+ * saves a sealed export of the activity log (the existing
+ * POST /api/activity/export bundle, verifiable offline per
+ * docs/security/audit-bundle-verification.md). Throws when the bundle cannot be
+ * produced or sealed: the reset must not proceed without the receipt.
+ */
+export async function downloadResetReceipt(): Promise<void> {
+  const res = await authFetch(`${BASE}/api/activity/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) {
+    throw new Error(
+      "We couldn't save a receipt of this Droplet's activity log, so the reset was not started. Try again, or contact Droplet support.",
+    );
+  }
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `droplet-reset-receipt-${new Date().toISOString().slice(0, 10)}.jsonl`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/**
  * Trigger the factory reset. `confirm` is the device name the owner typed; it is
  * re-validated SERVER-side (the client gate is not the authority). Resolves to
  * the dispatched job; throws with the orchestrator's friendly message on a
@@ -8177,6 +8172,8 @@ export type CheckNowOutcome =
   | "verify_failed"
   | "channel_mismatch"
   | "already_known"
+  /** WARP-3430 — a verified release not strictly newer than the installed one. */
+  | "not_newer"
   | "pending_created";
 
 export interface CheckNowResult {
@@ -9376,7 +9373,7 @@ export interface CloudHistorySummary {
   unaskedOnBoxAnswers: number;
   userMessages: number;
   drewOn: string[];
-  /** WARP-2979 — sources whose answers are never sent to a cloud model, whatever is chosen (e.g. "Security"). */
+  /** Sources whose answers are never sent to a cloud model, whatever is chosen. */
   neverSent?: string[];
 }
 
@@ -9404,67 +9401,20 @@ export async function setCloudHistoryConsent(
   if (!res.ok) throw new Error(`Failed to record the choice: ${res.status}`);
 }
 
-// ── WARP-2977 (ADR-059 P2): the Security command center ──
-// Read-only in P2. A 503 is an outage, never an empty feed — the page renders
-// it as "not reporting", because an empty list reads as a quiet site.
-
-export interface SecurityEventsQuery {
-  cursor?: string | null;
-  limit?: number;
-  kinds?: SecurityEventKind[];
-  camera?: string;
-  includeLow?: boolean;
-  /** WARP-2977 P2b — an area id. A hidden or missing area answers an empty page, never an error. */
-  zone?: string;
-}
-
-export function securityEventsPath(q: SecurityEventsQuery = {}): string {
-  const p = new URLSearchParams();
-  if (q.limit) p.set("limit", String(q.limit));
-  if (q.cursor) p.set("cursor", q.cursor);
-  if (q.kinds && q.kinds.length > 0) p.set("kind", q.kinds.join(","));
-  if (q.camera) p.set("camera", q.camera);
-  if (q.includeLow) p.set("includeLow", "true");
-  if (q.zone) p.set("zone", q.zone);
-  const qs = p.toString();
-  return `/api/security/events${qs ? `?${qs}` : ""}`;
-}
-
-export async function getSecurityEvents(q: SecurityEventsQuery = {}): Promise<SecurityEventsPage> {
-  const res = await authFetch(`${BASE}${securityEventsPath(q)}`);
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to load security events: ${res.status}`);
-  }
-  return res.json();
-}
-
-export async function getSecurityHealth(): Promise<{ sources: SecurityHealthRow[] }> {
-  const res = await authFetch(`${BASE}/api/security/health`);
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Failed to load security health: ${res.status}`);
-  }
-  return res.json();
-}
-
-// ── WARP-2977 P2b (ADR-059 §3.4, §3.6): areas, opening hours, the site mode ──
-// Routes 3–15. Every call goes through `securityFetch`, so a failure throws with
-// `.code` (the server's `error.code`) and `.status` — render it with
-// `translateError(err, "security")`, never `err.message`. Reads are view-level
-// for every household role; writes are act (mode) or manage (areas, hours) and
-// the server 404s a person below that level, so the UI hides those controls.
+// ── The typed-error transport ──
+// The notification and active-department routes below go through `typedAuthFetch`,
+// so a failure throws with `.code` (the server's `error.code`) and `.status` —
+// render it with `translateError(err, <domain>)`, never `err.message`.
 
 /**
- * The P2b transport: `authFetch`, like the P2a feed and health helpers, so an
- * expired 15-minute access token is refreshed and the request retried (and a
- * session that really ended goes to /login) — `apiFetch` never refreshes, so a
- * backgrounded /security tab came back to "can't tell the mode" and a save
- * answered "session expired" while the session was fine. With `apiFetch`'s
- * typed errors: `.code` (the server's `error.code`), `.status`, `.body`,
- * `.requestId`; TIMEOUT / NETWORK_ERROR for a request that never answered.
+ * `authFetch`, so an expired 15-minute access token is refreshed and the request
+ * retried (and a session that really ended goes to /login) — `apiFetch` never
+ * refreshes, so a backgrounded tab came back to "session expired" while the
+ * session was fine. With `apiFetch`'s typed errors: `.code` (the server's
+ * `error.code`), `.status`, `.body`, `.requestId`; TIMEOUT / NETWORK_ERROR for a
+ * request that never answered.
  */
-async function securityFetch<T>(path: string, init?: RequestInit): Promise<T> {
+async function typedAuthFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const timeout = AbortSignal.timeout(DEFAULT_API_FETCH_TIMEOUT_MS);
   let r: Response;
   try {
@@ -9491,353 +9441,15 @@ async function securityFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export const SECURITY_ZONES_PATH = "/api/security/zones";
-export const SECURITY_SOURCES_PATH = "/api/security/sources";
-export const SECURITY_MODE_PATH = "/api/security/mode";
-export const SECURITY_HOURS_PATH = "/api/security/hours";
-
 const jsonBody = (method: string, body: unknown): RequestInit => ({
   method,
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(body),
 });
 
-/** 3 — visible areas with their visible links. `includeArchived` only takes effect at manage. */
-export function getSecurityZones(opts: { includeArchived?: boolean } = {}): Promise<SecurityZonesResponse> {
-  return securityFetch<SecurityZonesResponse>(
-    `${BASE}${SECURITY_ZONES_PATH}${opts.includeArchived ? "?include=archived" : ""}`,
-  );
-}
-
-/** 4 — cameras and their parts to link, plus each link's present/missing/unknown status. */
-export function getSecuritySources(): Promise<SecuritySourcesView> {
-  return securityFetch<SecuritySourcesView>(`${BASE}${SECURITY_SOURCES_PATH}`);
-}
-
-/** 5 — the effective site mode. */
-export function getSecurityMode(): Promise<SecurityModeView> {
-  return securityFetch<SecurityModeView>(`${BASE}${SECURITY_MODE_PATH}`);
-}
-
-/** 6 — the opening hours, special days, a 7-day preview and the timezone hint. */
-export function getSecurityHours(): Promise<SecurityHoursView> {
-  return securityFetch<SecurityHoursView>(`${BASE}${SECURITY_HOURS_PATH}`);
-}
-
-/** 7 (act) — Close up / Open up / Away / Back to opening hours. */
-export function postSecurityMode(action: SecurityModeAction): Promise<SecurityModeActionResult> {
-  return securityFetch<SecurityModeActionResult>(`${BASE}${SECURITY_MODE_PATH}`, jsonBody("POST", action));
-}
-
-/** 8 (manage) — 201. */
-export function createSecurityZone(body: SecurityZoneCreateBody): Promise<SecurityZoneCreated> {
-  return securityFetch<SecurityZoneCreated>(`${BASE}${SECURITY_ZONES_PATH}`, jsonBody("POST", body));
-}
-
-/** 9 (manage). */
-export function patchSecurityZone(id: string, body: SecurityZonePatchBody): Promise<SecurityZoneWriteResult> {
-  return securityFetch<SecurityZoneWriteResult>(
-    `${BASE}${SECURITY_ZONES_PATH}/${encodeURIComponent(id)}`,
-    jsonBody("PATCH", body),
-  );
-}
-
-/** 10 (manage) — "Remove area". Areas are archived, never deleted; their events stay in the feed. */
-export function archiveSecurityZone(id: string, expectedVersion: number): Promise<SecurityZoneWriteResult> {
-  return securityFetch<SecurityZoneWriteResult>(
-    `${BASE}${SECURITY_ZONES_PATH}/${encodeURIComponent(id)}/archive`,
-    jsonBody("POST", { expectedVersion }),
-  );
-}
-
-/** 11 (manage) — "Restore". */
-export function unarchiveSecurityZone(id: string, expectedVersion: number): Promise<SecurityZoneWriteResult> {
-  return securityFetch<SecurityZoneWriteResult>(
-    `${BASE}${SECURITY_ZONES_PATH}/${encodeURIComponent(id)}/unarchive`,
-    jsonBody("POST", { expectedVersion }),
-  );
-}
-
-/** 12 (manage) — replace the area's link set. */
-export function putSecurityZoneLinks(id: string, body: SecurityZoneLinksBody): Promise<SecurityZoneWriteResult> {
-  return securityFetch<SecurityZoneWriteResult>(
-    `${BASE}${SECURITY_ZONES_PATH}/${encodeURIComponent(id)}/links`,
-    jsonBody("PUT", body),
-  );
-}
-
-// ── WARP-2979 (ADR-059 P4 §7 routes 23–27): Droplet's links and its AI settings ──
-
-export const SECURITY_LINK_PROPOSALS_PATH = "/api/security/link-proposals";
-export const SECURITY_LINKS_PATH = "/api/security/links";
-export const SECURITY_AI_SETTINGS_PATH = "/api/security/ai-settings";
-
-/** 23 (view; the list is filled only at manage) — Droplet's open suggestions. */
-export function getSecurityLinkProposals(): Promise<SecurityLinkProposalsView> {
-  return securityFetch<SecurityLinkProposalsView>(`${BASE}${SECURITY_LINK_PROPOSALS_PATH}`);
-}
-
-/** 24 (manage) — add Droplet's suggestion, or Keep a link Droplet made. */
-export function acceptSecurityLink(linkId: string): Promise<SecurityLinkDecisionResult> {
-  return securityFetch<SecurityLinkDecisionResult>(
-    `${BASE}${SECURITY_LINKS_PATH}/${encodeURIComponent(linkId)}/accept`,
-    jsonBody("POST", {}),
-  );
-}
-
-/** 25 (manage) — Not this (a suggestion), or Undo (a link Droplet made). Final: Droplet never suggests it again. */
-export function rejectSecurityLink(linkId: string): Promise<SecurityLinkDecisionResult> {
-  return securityFetch<SecurityLinkDecisionResult>(
-    `${BASE}${SECURITY_LINKS_PATH}/${encodeURIComponent(linkId)}/reject`,
-    jsonBody("POST", {}),
-  );
-}
-
-/** 26 (view) — what Droplet's AI may do in Security. */
-export function getSecurityAiSettings(): Promise<SecurityAiSettingsView> {
-  return securityFetch<SecurityAiSettingsView>(`${BASE}${SECURITY_AI_SETTINGS_PATH}`);
-}
-
-/** 27 (manage) — change it; `expectedVersion` from the last read (409 VERSION_CONFLICT otherwise). */
-export function putSecurityAiSettings(body: SecurityAiSettingsBody): Promise<SecurityAiSettingsWriteResult> {
-  return securityFetch<SecurityAiSettingsWriteResult>(`${BASE}${SECURITY_AI_SETTINGS_PATH}`, jsonBody("PUT", body));
-}
-
-/** 13 (manage) — set or clear the weekly hours. */
-export function putSecurityHours(body: SecurityHoursBody): Promise<SecurityHoursWriteResult> {
-  return securityFetch<SecurityHoursWriteResult>(`${BASE}${SECURITY_HOURS_PATH}`, jsonBody("PUT", body));
-}
-
-/** 14 (manage) — add or replace one special day ('YYYY-MM-DD', site-local). */
-export function putSecurityHoursException(
-  date: string,
-  body: SecurityHoursExceptionBody,
-): Promise<SecurityHoursWriteResult> {
-  return securityFetch<SecurityHoursWriteResult>(
-    `${BASE}${SECURITY_HOURS_PATH}/exceptions/${encodeURIComponent(date)}`,
-    jsonBody("PUT", body),
-  );
-}
-
-// ── WARP-2980 (ADR-059 P5 PR-A): what normal looks like — routes 29–30 ──
-// View-level, read-only, through `securityFetch` (typed `.code`); a failure is
-// rendered with `translateError(err, "security")`.
-
-export const SECURITY_PATTERNS_PATH = "/api/security/patterns";
-
-/** 29 — the learning list, the keys the viewer may see, and the release of each flag. */
-export function getSecurityPatterns(): Promise<SecurityPatternsOverview> {
-  return securityFetch<SecurityPatternsOverview>(`${BASE}${SECURITY_PATTERNS_PATH}`);
-}
-
-/** 30 — one key's 48 hour cells for one label. 404 PATTERN_NOT_FOUND when missing or hidden. */
-export function getSecurityPatternCells(key: string, label: string): Promise<SecurityPatternCells> {
-  const qs = new URLSearchParams({ key, label }).toString();
-  return securityFetch<SecurityPatternCells>(`${BASE}${SECURITY_PATTERNS_PATH}/cells?${qs}`);
-}
-
-// ── WARP-2980 (ADR-059 P5 PR-B): expected activity (routes 32–34) ──
-// Through `securityFetch` (typed `.code`); a failure is rendered with
-// `translateError(err, "security")`. The list is view-level; add and remove
-// are manage (the page offers them only when the list's `canManage` says so).
-
-export const SECURITY_SUPPRESSIONS_PATH = "/api/security/suppressions";
-
-/** Route 32. */
-export function getSecuritySuppressions(): Promise<SecuritySuppressionList> {
-  return securityFetch<SecuritySuppressionList>(`${BASE}${SECURITY_SUPPRESSIONS_PATH}`);
-}
-
-/** Route 33. */
-export function createSecuritySuppression(body: SecuritySuppressionCreateBody): Promise<{ suppression: SecuritySuppressionView }> {
-  return securityFetch<{ suppression: SecuritySuppressionView }>(`${BASE}${SECURITY_SUPPRESSIONS_PATH}`, jsonBody("POST", body));
-}
-
-/** Route 34. The route takes no body; `{}` is sent so the JSON parser has one. */
-export function removeSecuritySuppression(id: string): Promise<{ changed: boolean }> {
-  return securityFetch<{ changed: boolean }>(`${BASE}${SECURITY_SUPPRESSIONS_PATH}/${encodeURIComponent(id)}/remove`, jsonBody("POST", {}));
-}
-
-/** 15 (manage) — 204. `version` is the hours version the page read. */
-export async function deleteSecurityHoursException(date: string, version: number): Promise<void> {
-  await securityFetch<unknown>(
-    `${BASE}${SECURITY_HOURS_PATH}/exceptions/${encodeURIComponent(date)}?version=${encodeURIComponent(String(version))}`,
-    { method: "DELETE" },
-  );
-}
-
-// ── WARP-2978 (ADR-059 P3 §7 routes 16–22): incidents and who is told about alerts ──
-// Every call goes through `securityFetch`: a failure throws with `.code` (the
-// server's `error.code`) and `.status` — render it with
-// `translateError(err, "security")`, never `err.message`. Reads are view-level
-// for every role in the business and never produce a feature-gate denial (the threat
-// mirror would show one as a threat); acknowledge/resolve are act, the routing
-// PUT is manage, and the page renders those controls only at that level.
-// Everything a read returns is already projected for the viewer (DS-005).
-
-export const SECURITY_INCIDENTS_PATH = "/api/security/incidents";
-export const SECURITY_INCIDENT_SUMMARY_PATH = "/api/security/incidents/summary";
-export const SECURITY_ALERT_ROUTING_PATH = "/api/security/alert-routing";
-
-export interface SecurityIncidentsQuery {
-  /** `attention` = open incidents nobody is on yet (visible codes only). The box defaults to `all`. */
-  state?: "attention" | "open" | "acknowledged" | "resolved" | "activity" | "all";
-  severity?: "alert" | "notice";
-  /** An area id. A hidden or missing area answers an empty page, never an error. */
-  zone?: string;
-  /** 1–100; the box defaults to 30. */
-  limit?: number;
-  /** `nextCursor` from the previous page. */
-  cursor?: string | null;
-}
-
-export function securityIncidentsPath(q: SecurityIncidentsQuery = {}): string {
-  const p = new URLSearchParams();
-  if (q.state) p.set("state", q.state);
-  if (q.severity) p.set("severity", q.severity);
-  if (q.zone) p.set("zone", q.zone);
-  if (q.limit) p.set("limit", String(q.limit));
-  if (q.cursor) p.set("cursor", q.cursor);
-  const qs = p.toString();
-  return `${SECURITY_INCIDENTS_PATH}${qs ? `?${qs}` : ""}`;
-}
-
-/** 16 — a page of incidents, newest activity first. A 503 is an outage, never an empty list. */
-export function getSecurityIncidents(q: SecurityIncidentsQuery = {}): Promise<IncidentsPage> {
-  return securityFetch<IncidentsPage>(`${BASE}${securityIncidentsPath(q)}`);
-}
-
-/** 17 — open alerts / notices for this viewer, the latest three, and whether alerts can fire. */
-export function getSecurityIncidentSummary(): Promise<IncidentsSummary> {
-  return securityFetch<IncidentsSummary>(`${BASE}${SECURITY_INCIDENT_SUMMARY_PATH}`);
-}
-
-/** 18 — one incident. 404 INCIDENT_NOT_FOUND answers a missing AND a hidden incident alike. */
-export function getSecurityIncident(id: string): Promise<IncidentDetail> {
-  return securityFetch<IncidentDetail>(`${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}`);
-}
-
-/**
- * 19 (act) — "someone is on it". `notificationId` is the alert notification
- * the page was opened from (`?n=`); the box records it only when it is this
- * person's own notice for this incident, and otherwise drops it.
- */
-export function acknowledgeSecurityIncident(
-  id: string,
-  opts: { notificationId?: string | null } = {},
-): Promise<IncidentActionResult> {
-  return securityFetch<IncidentActionResult>(
-    `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/acknowledge`,
-    jsonBody("POST", opts.notificationId ? { notificationId: opts.notificationId } : {}),
-  );
-}
-
-/**
- * 28 (act) — WARP-2979 P4 PR-2: "Summarise now" / "Regenerate". 202 {narrative}
- * in state `pending`; 409 NARRATIVE_COOLDOWN, NARRATIVE_TOO_OLD, SUMMARIES_OFF or NOT_ACTIONABLE;
- * 404 INCIDENT_NOT_FOUND. The body is strict and empty.
- */
-export function requestSecurityIncidentNarrative(id: string): Promise<{ narrative: IncidentNarrativeView }> {
-  return securityFetch<{ narrative: IncidentNarrativeView }>(
-    `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/narrative`,
-    jsonBody("POST", {}),
-  );
-}
-
-/** 20 (act) — done, with an optional note of at most 280 characters. The body is strict: no empty note is sent. */
-export function resolveSecurityIncident(id: string, opts: { note?: string } = {}): Promise<IncidentActionResult> {
-  const note = (opts.note ?? "").trim();
-  return securityFetch<IncidentActionResult>(
-    `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/resolve`,
-    jsonBody("POST", note ? { note } : {}),
-  );
-}
-
-/**
- * 35 (act, owner/admin — WARP-2980 P5) — Expected / Not expected. The body is
- * exactly `{verdict}` (strict on the box). It never acknowledges, resolves or
- * changes who is told; 409 NOT_JUDGEABLE when there is nothing this viewer
- * can mark (or their view is partial), 409 INCIDENT_CONFLICT on a lost race.
- */
-export function setSecurityIncidentVerdict(id: string, verdict: IncidentVerdict): Promise<IncidentActionResult> {
-  return securityFetch<IncidentActionResult>(
-    `${BASE}${SECURITY_INCIDENTS_PATH}/${encodeURIComponent(id)}/verdict`,
-    jsonBody("POST", { verdict }),
-  );
-}
-
-/** 21 — who is told: everyone at manage, the viewer's own line below it (a filter, not a gate). */
-export function getAlertRouting(): Promise<AlertRoutingView> {
-  return securityFetch<AlertRoutingView>(`${BASE}${SECURITY_ALERT_ROUTING_PATH}`);
-}
-
-/** 22 (manage) — tell or stop telling one person. 409 NO_RECIPIENT when it would leave nobody who can be told. */
-export function putAlertRouting(userId: string, body: AlertRoutingSetBody): Promise<{ person: AlertRoutingPerson }> {
-  return securityFetch<{ person: AlertRoutingPerson }>(
-    `${BASE}${SECURITY_ALERT_ROUTING_PATH}/${encodeURIComponent(userId)}`,
-    jsonBody("PUT", body),
-  );
-}
-
-// ── ADR-055 P4b: the doors page (P4a routes 1–5) ──
-// Reads are owner/admin; writes are the owner's alone. The transport is
-// `securityFetch` above (its name is historical: authFetch's token refresh
-// plus typed errors, `.code` and `.status`), so a 403 is distinguishable from
-// an outage. Render a failure with `translateError(err, "doors")`.
-// No route deletes a door: retiring one keeps its events.
-
-import type {
-  DoorCreateBody,
-  DoorEventsPage,
-  DoorPatchBody,
-  DoorView,
-  DoorsResponse,
-} from "./types";
-
-export const DOORS_PATH = "/api/doors";
-
-/** 1 — the doors, each with its newest position report. Retired doors only when asked. */
-export function getDoors(opts: { includeRetired?: boolean } = {}): Promise<DoorsResponse> {
-  return securityFetch<DoorsResponse>(`${BASE}${DOORS_PATH}${opts.includeRetired ? "?include=retired" : ""}`);
-}
-
-export interface DoorEventsQuery {
-  cursor?: string | null;
-  /** 1–200; the box defaults to 50. */
-  limit?: number;
-}
-
-export function doorEventsPath(q: DoorEventsQuery = {}): string {
-  const p = new URLSearchParams();
-  if (q.limit) p.set("limit", String(q.limit));
-  if (q.cursor) p.set("cursor", q.cursor);
-  const qs = p.toString();
-  return `${DOORS_PATH}/events${qs ? `?${qs}` : ""}`;
-}
-
-/** 2 — what happened at them, newest first, cursor-paged. */
-export function getDoorEvents(q: DoorEventsQuery = {}): Promise<DoorEventsPage> {
-  return securityFetch<DoorEventsPage>(`${BASE}${doorEventsPath(q)}`);
-}
-
-/** 3 (owner) — 201. */
-export function createDoor(body: DoorCreateBody): Promise<{ door: DoorView }> {
-  return securityFetch<{ door: DoorView }>(`${BASE}${DOORS_PATH}`, jsonBody("POST", body));
-}
-
-/** 4 (owner). 409 DOOR_RETIRED on a retired door. */
-export function patchDoor(id: string, body: DoorPatchBody): Promise<{ door: DoorView }> {
-  return securityFetch<{ door: DoorView }>(`${BASE}${DOORS_PATH}/${encodeURIComponent(id)}`, jsonBody("PATCH", body));
-}
-
-/** 5 (owner) — retiring twice is not an error. There is no way back from the dashboard. */
-export function retireDoor(id: string): Promise<{ door: DoorView }> {
-  return securityFetch<{ door: DoorView }>(`${BASE}${DOORS_PATH}/${encodeURIComponent(id)}/retire`, jsonBody("POST", {}));
-}
-
 // ── WARP-2804: notification acknowledgement (routes N1–N4) ──
 // A person reads and acknowledges their OWN notifications. The transport is
-// `securityFetch` above — authFetch (token refresh, the session cookie) with
+// `typedAuthFetch` above — authFetch (token refresh, the session cookie) with
 // typed errors (`.code` = the server's `error.code`, `.status`) — so a 404
 // NOTIFICATION_NOT_FOUND is distinguishable from a network failure. The box
 // records the sign-in that acked and what the client said it was; neither
@@ -9861,12 +9473,12 @@ export function getNotifications(q: NotificationsQuery = {}): Promise<Notificati
   if (q.cursor) p.set("cursor", q.cursor);
   if (q.state) p.set("state", q.state);
   const qs = p.toString();
-  return securityFetch<NotificationsPage>(`${BASE}${NOTIFICATIONS_PATH}${qs ? `?${qs}` : ""}`);
+  return typedAuthFetch<NotificationsPage>(`${BASE}${NOTIFICATIONS_PATH}${qs ? `?${qs}` : ""}`);
 }
 
 /** N2 — the badge. */
 export async function getUnreadNotificationCount(): Promise<number> {
-  const { unread } = await securityFetch<{ unread: number }>(`${BASE}${NOTIFICATIONS_PATH}/unread-count`);
+  const { unread } = await typedAuthFetch<{ unread: number }>(`${BASE}${NOTIFICATIONS_PATH}/unread-count`);
   return unread;
 }
 
@@ -9876,7 +9488,7 @@ export async function getUnreadNotificationCount(): Promise<number> {
  * ack stands and a repeat answers `changed: false`.
  */
 export function ackNotification(id: string, opts: { via?: "inbox" | "opened" } = {}): Promise<NotificationAckResult> {
-  return securityFetch<NotificationAckResult>(
+  return typedAuthFetch<NotificationAckResult>(
     `${BASE}${NOTIFICATIONS_PATH}/${encodeURIComponent(id)}/ack`,
     jsonBody("POST", opts.via ? { via: opts.via } : {}),
   );
@@ -9889,12 +9501,12 @@ export function ackNotification(id: string, opts: { via?: "inbox" | "opened" } =
  * that are not the person's are simply not counted.
  */
 export function ackAllNotifications(ids: readonly string[]): Promise<NotificationAckAllResult> {
-  return securityFetch<NotificationAckAllResult>(`${BASE}${NOTIFICATIONS_PATH}/ack-all`, jsonBody("POST", { ids }));
+  return typedAuthFetch<NotificationAckAllResult>(`${BASE}${NOTIFICATIONS_PATH}/ack-all`, jsonBody("POST", { ids }));
 }
 
 // ── WARP-2981 (ADR-059 P6, DS-003): the active department, on the server ──
 // The department a person's shell is arranged around follows them to every
-// device. Same transport as above (`securityFetch`: authFetch + typed errors),
+// device. Same transport as above (`typedAuthFetch`: authFetch + typed errors),
 // so a refusal is told apart from a missing route: a PUT the box refuses is a
 // 404 with `.code === "DEPARTMENT_NOT_AVAILABLE"`; a 404 with any other code
 // is an orchestrator older than this route.
@@ -9904,170 +9516,23 @@ export const ACTIVE_DEPARTMENT_PATH = "/api/me/active-department";
 /** P6-1 — the caller's choice, re-checked by the box now. `scope: "unset"` is
  *  "never chosen", which is not the same answer as a chosen Whole business. */
 export function getActiveDepartment(): Promise<ActiveDepartmentResponse> {
-  return securityFetch<ActiveDepartmentResponse>(`${BASE}${ACTIVE_DEPARTMENT_PATH}`);
+  return typedAuthFetch<ActiveDepartmentResponse>(`${BASE}${ACTIVE_DEPARTMENT_PATH}`);
 }
 
 /** P6-2 — choose a department by id, or Whole business with null. */
 export function putActiveDepartment(departmentId: string | null): Promise<ActiveDepartmentResponse> {
-  return securityFetch<ActiveDepartmentResponse>(
+  return typedAuthFetch<ActiveDepartmentResponse>(
     `${BASE}${ACTIVE_DEPARTMENT_PATH}`,
     jsonBody("PUT", { departmentId }),
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Device control — building systems over the device gateway (BACnet/IP,
-// Modbus TCP, SNMP, KNX/IP). Orchestrator: routes/building.ts.
-// ─────────────────────────────────────────────────────────────────────────────
-
-export type BuildingProtocol = "bacnet" | "modbus" | "snmp" | "knx";
-export type BuildingValue = boolean | number | string;
-
-export interface BuildingPoint {
-  id: string;
-  name: string;
-  kind: "number" | "boolean" | "text";
-  unit?: string | null;
-  writable: boolean;
-  min?: number | null;
-  max?: number | null;
-  [k: string]: unknown;
-}
-
-export interface BuildingDevice {
-  id: string;
-  name: string;
-  protocol: BuildingProtocol;
-  address: string;
-  room?: string | null;
-  template?: string | null;
-  points: BuildingPoint[];
-  [k: string]: unknown;
-}
-
-export interface BuildingReading {
-  value: BuildingValue | null;
-  error: string | null;
-}
-
-export interface BuildingWriteResult {
-  applied: boolean;
-  live_writes: boolean;
-  readback?: BuildingReading | null;
-}
-
-async function buildingJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await authFetch(`${BASE}/api/building${path}`, {
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-  });
-  if (res.status === 204) return undefined as T;
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(
-      data.error || data.message || `Device gateway request failed (${res.status})`,
-    ) as Error & { code?: string; status?: number };
-    err.code = data.code;
-    err.status = res.status;
-    throw err;
-  }
-  return data as T;
-}
-
-export async function listBuildingDevices(): Promise<BuildingDevice[]> {
-  return (await buildingJson<{ devices: BuildingDevice[] }>("/devices")).devices;
-}
-
-export async function readBuildingValues(
-  id: string,
-): Promise<{ read_at: string; values: Record<string, BuildingReading> }> {
-  return buildingJson(`/devices/${encodeURIComponent(id)}/values`);
-}
-
-export async function writeBuildingPoint(
-  id: string,
-  pointId: string,
-  value: BuildingValue,
-): Promise<BuildingWriteResult> {
-  return buildingJson(
-    `/devices/${encodeURIComponent(id)}/points/${encodeURIComponent(pointId)}/write`,
-    { method: "POST", body: JSON.stringify({ value }) },
-  );
-}
-
-export async function saveBuildingDevice(
-  id: string,
-  device: Record<string, unknown>,
-): Promise<BuildingDevice> {
-  return buildingJson(`/devices/${encodeURIComponent(id)}`, {
-    method: "PUT",
-    body: JSON.stringify(device),
-  });
-}
-
-export async function deleteBuildingDevice(id: string): Promise<void> {
-  await buildingJson(`/devices/${encodeURIComponent(id)}`, { method: "DELETE" });
-}
-
-export async function discoverBuildingDevices(
-  protocol: "bacnet" | "knx",
-): Promise<Record<string, unknown>[]> {
-  return (
-    await buildingJson<{ found: Record<string, unknown>[] }>("/discover", {
-      method: "POST",
-      body: JSON.stringify({ protocol }),
-    })
-  ).found;
-}
-
-// ── WARP-2981 (ADR-059 P6, §3.8): the Security wall ──
-// /security/wall reads only what /security already shows this viewer — each
-// read their own DS-005 projection, view level, never a write — and every read
-// has a 20 s timeout and a typed `.status` (`securityFetch`; the camera
-// pictures, which are not JSON, the same by hand), so a request that never
-// answers fails and is retried instead of stalling its SWR key for the TV's
-// lifetime. The rack panel's box-wide count is for the panel's service
-// principal alone and is never read from here (pinned by the wall's page test).
-import type { SecurityIncidentCounts } from "./types";
-import type { ModulesView } from "./hooks/useModuleGate";
-
-/** Route 17. A local literal: PR-C defines its own constant, and the two fold together once both land. */
-const WALL_INCIDENT_SUMMARY_PATH = "/api/security/incidents/summary";
-
-/** A count the wall may draw: a non-negative safe integer — never a string, a negative or a missing 0. */
-const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
-
-function unreadable(what: string): TypedError {
-  const e: TypedError = new Error(`${what} isn't in a shape Droplet understands.`);
-  e.code = "BAD_RESPONSE";
-  e.status = 200;
-  return e;
-}
-
-/**
- * Route 17's two counts, validated: anything but two non-negative safe
- * integers throws, so the wall never draws a number it was not given.
- * `latest` is dropped here — the wall names no incident.
- */
-export async function getSecurityIncidentCounts(): Promise<SecurityIncidentCounts> {
-  const body = await securityFetch<unknown>(`${BASE}${WALL_INCIDENT_SUMMARY_PATH}`);
-  const b = (body && typeof body === "object" ? body : {}) as { openAlerts?: unknown; openNotices?: unknown };
-  if (!isCount(b.openAlerts) || !isCount(b.openNotices)) throw unreadable("The incident counts");
-  return { openAlerts: b.openAlerts, openNotices: b.openNotices };
-}
-
-/** The P2a health read through `securityFetch` (the header's `getSecurityHealth` keeps its callers and its lack of a timeout). */
-export async function getSecurityWallHealth(): Promise<{ sources: SecurityHealthRow[] }> {
-  const body = await securityFetch<unknown>(`${BASE}/api/security/health`);
-  const sources = body && typeof body === "object" ? (body as { sources?: unknown }).sources : undefined;
-  if (!Array.isArray(sources)) throw unreadable("What Security listens to");
-  return { sources: sources as SecurityHealthRow[] };
-}
+// ── The sign-in's own end ──
 
 /**
  * `session.endsAt` of an /auth/me body when it is a string `Date.parse`
- * accepts, else null. It is the LATEST the sign-in can last (P6-A), so it is
- * shown as "by … at the latest"; absent, null or anything else shows nothing.
+ * accepts, else null. It is the LATEST the sign-in can last, so it is shown as
+ * "by … at the latest"; absent, null or anything else shows nothing.
  */
 export function signInEndsAtOf(body: unknown): string | null {
   if (!body || typeof body !== "object") return null;
@@ -10083,74 +9548,5 @@ export function signInEndsAtOf(body: unknown): string | null {
  * old one.
  */
 export async function getSignInEndsAt(): Promise<string | null> {
-  return signInEndsAtOf(await securityFetch<unknown>(`${BASE}/api/auth/me`));
-}
-
-/**
- * The wall's own read of GET /api/modules (the nav gate's endpoint). The nav
- * gate's shared read has no timeout and stops polling after one error, which a
- * TV left for hours cannot afford; the wall mirrors each answer into that
- * shared key (useSecurityWall).
- */
-export async function getWallModules(): Promise<ModulesView> {
-  const body = await securityFetch<unknown>(`${BASE}/api/modules`);
-  if (!body || typeof body !== "object" || !Array.isArray((body as { modules?: unknown }).modules)) {
-    throw unreadable("Which features are on");
-  }
-  return body as ModulesView;
-}
-
-/**
- * The cameras this viewer may see — GET /api/cameras, which the server
- * already narrows to their grants (`filterVisibleCameras`, WARP-1962; owner
- * and admin see all). The wall draws a tile for each and for nothing else
- * (DS-005). Through `securityFetch` (20 s): a hung list fails and is retried.
- * `_status: "disconnected"` (the camera system isn't reachable) comes with an
- * empty list that does NOT mean "no cameras", so it throws instead.
- */
-export async function getWallCameras(): Promise<CameraInfo[]> {
-  const body = await securityFetch<unknown>(`${BASE}/api/cameras`);
-  const b = (body && typeof body === "object" ? body : {}) as { cameras?: unknown; _status?: unknown };
-  if (b._status === "disconnected") {
-    const e: TypedError = new Error("Droplet can't reach the camera system right now.");
-    e.code = "CAMERAS_DISCONNECTED";
-    e.status = 200;
-    throw e;
-  }
-  if (!Array.isArray(b.cameras) || !b.cameras.every((c) => c && typeof c === "object" && typeof (c as { name?: unknown }).name === "string")) {
-    throw unreadable("The camera list");
-  }
-  return b.cameras as CameraInfo[];
-}
-
-/** The height the wall asks each camera's latest picture at: large enough for a quarter of a 1080p TV. */
-export const WALL_SNAPSHOT_HEIGHT = 720;
-
-/**
- * One camera's latest picture (GET /api/cameras/:name/snapshot, which checks
- * this viewer's grant), as a Blob for an object URL. Through `authFetch`, so
- * an expiring access cookie is refreshed (an `<img src>` cannot), with a 20 s
- * timeout, and `no-store`: the route allows 5 s of HTTP caching, and a
- * cached picture must never be drawn as a new one. Rejects with the status on
- * anything but 2xx.
- */
-export async function getWallCameraSnapshot(name: string): Promise<Blob> {
-  const path = `${getCameraSnapshotUrl(name)}?h=${WALL_SNAPSHOT_HEIGHT}`;
-  const timeout = AbortSignal.timeout(DEFAULT_API_FETCH_TIMEOUT_MS);
-  try {
-    const r = await authFetch(path, { signal: timeout, cache: "no-store" });
-    if (!r.ok) {
-      const e: TypedError = new Error(`HTTP ${r.status}`);
-      e.code = "SNAPSHOT_FAILED";
-      e.status = r.status;
-      throw e;
-    }
-    return await r.blob();
-  } catch (err) {
-    if ((err as TypedError).code === "SNAPSHOT_FAILED") throw err;
-    const e: TypedError = new Error(timeout.aborted ? `Request timed out: ${path}` : err instanceof Error ? err.message : "Network error");
-    e.code = timeout.aborted ? "TIMEOUT" : "NETWORK_ERROR";
-    e.status = 0;
-    throw e;
-  }
+  return signInEndsAtOf(await typedAuthFetch<unknown>(`${BASE}/api/auth/me`));
 }

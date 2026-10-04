@@ -76,6 +76,53 @@ entries:
     review_by: 2027-07-04
     code_refs: [apps/orchestrator/src/config.ts]
 
+  # WARP-3430 — `github.com` and the two release-asset CDN hosts are ALSO
+  # registered above under `ota-github-releases`, which is now the FALLBACK
+  # discovery path (the REST API, used only while no channel pointer is
+  # published). Separate rows on purpose, as with `github-api`: this is the
+  # path every box takes, it needs no token and never touches api.github.com,
+  # and retiring the API fallback must not un-register it.
+  - id: ota-release-downloads
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [github.com, release-assets.githubusercontent.com, objects.githubusercontent.com]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: none
+    purpose: >-
+      Anonymous, token-free OTA discovery and download (WARP-3430): the
+      cosign-signed channel pointer (ota-index/channel-<channel>.json), each
+      release's release.json and signature, configs.tar.gz and the client
+      installers, all plain file downloads under releases/download. GitHub
+      answers with a redirect to its release-asset CDN, so the two
+      githubusercontent.com hosts are dialled on the same requests. Carries no
+      credential (ADR-045: none on an appliance) and nothing from the box
+      beyond what an HTTPS GET itself reveals.
+    ticket: WARP-3430
+    added: 2026-10-01
+    review_by: 2027-10-01
+    code_refs: [apps/orchestrator/src/config.ts]
+    no_code_literal:
+      release-assets.githubusercontent.com: >-
+        GitHub's redirect target for a release download; the Location header
+        names it, no Droplet source does.
+      objects.githubusercontent.com: >-
+        The older name of the same redirect target; the Location header names
+        it, no Droplet source does.
+
+  # WARP-3503 (ADR-068) — `ota-image-registry` (ghcr.io and
+  # pkg-containers.githubusercontent.com, runtime, added by WARP-3430) is
+  # DROPPED. The release images are private and a box pulls and
+  # cosign-verifies them from the HQ registry, which is the `fleet-hq-issuance`
+  # host below (the `/v2/` registry and the `/v1/device/` token paths); no
+  # customer box dials GHCR any more. The lab-only fallback in
+  # docker/ota/apply-update.sh (DROPLET_OTA_GITHUB_TOKEN, ghcr.io refs, never
+  # provisioned on an appliance: ADR-045) keeps its `ghcr.io` literal under
+  # `build-container-registries`; `pkg-containers.githubusercontent.com`, its
+  # blob redirect, is deliberately not registered.
+
   # WARP-3433 — Warp Lab's own engineering dashboard (/admin/claude-activity,
   # WARP-279). Two entries, one per host, because the two have different
   # credentials and neither is the OTA fetch above or the customer-connector
@@ -126,7 +173,42 @@ entries:
     review_by: 2027-10-02
     code_refs: [apps/orchestrator/src/services/claude-activity/jira-adapter.ts]
 
+  # WARP-3504 (ADR-068) — the orchestrator's box telemetry sender is now the
+  # live dialer of the portal: always on for an enrolled box, authenticated with
+  # the short-lived HQ device token. The runtime audit matches on (service,
+  # host), so the registered service is `orchestrator`. The older fleet-agent
+  # keeps its own row below (it dials the same host when its profile is on).
   - id: fleet-telemetry-portal
+    kind: egress
+    service: orchestrator
+    destination:
+      hosts: [analytics.warp-lab.ai]
+      ports: [443]
+      protocol: https
+    phase: runtime
+    data_class: operational-telemetry
+    purpose: >-
+      Operator-portal telemetry from the box telemetry sender (ADR-068), three
+      POST endpoints under `/api/v1/telemetry/` (`heartbeat`, `events`,
+      `logs`) with `Authorization: Bearer <HQ device JWT>`. Sent, from a
+      closed allowlist that is validated against strict schemas before it
+      leaves: the release tag, sha and channel; kernel and distro; uptime;
+      compose service names with state, health and restart counts; CPU, memory,
+      disk and GPU percentages and temperature; network byte counters; counts
+      of assistant messages, background runs, active members and OTA steps (no
+      content, no identities); error counts by class; and warn/error/fatal log
+      records, each a stable code plus a message masked on the box (emails,
+      IPv4/IPv6, MACs, paths, URLs, host names and long tokens) and cut to 500
+      characters. Never sent: prompts or responses, file names, paths or
+      contents, member or guest names, emails or ids, customer-chosen
+      hostnames, LAN IPs, MACs or device lists, camera data, business data. The
+      owner sees the last payload of each kind in Settings.
+    ticket: WARP-3504
+    added: 2026-07-04
+    review_by: 2027-10-03
+    code_refs: [apps/orchestrator/src/config.ts, apps/orchestrator/src/services/box-telemetry/sender.ts, apps/orchestrator/src/services/box-telemetry/contract.ts]
+
+  - id: fleet-telemetry-portal-legacy
     kind: egress
     service: fleet-agent
     destination:
@@ -136,8 +218,11 @@ entries:
     phase: runtime
     data_class: operational-telemetry
     purpose: >-
-      Fleet health/telemetry portal (ADR-028) — device metrics and update
-      status only; never file contents, camera frames, chat, or credentials.
+      Legacy fleet-agent telemetry (ADR-028): double-gated (compose profile
+      `telemetry` plus DROPLET_TELEMETRY_ENABLED), off by default, superseded
+      for enrolled boxes by the orchestrator sender above (WARP-3504). Device
+      metrics and update status only; never file contents, camera frames, chat,
+      or credentials.
     ticket: WARP-961
     added: 2026-07-04
     review_by: 2027-07-04
@@ -988,8 +1073,15 @@ entries:
     phase: runtime
     data_class: none
     purpose: >-
-      Fleet HQ TLS issuance API (ADR-023 public-CA-per-device via HQ DNS-01);
-      CSR/cert material only. Now baked as the default HQ_ISSUANCE_URL in
+      Fleet HQ (one Worker origin, HQ_ISSUANCE_URL). TLS issuance API (ADR-023
+      public-CA-per-device via HQ DNS-01), CSR/cert material only. Since
+      WARP-3503 (ADR-068) also the device-token service (`/v1/device/challenge`
+      and `/v1/device/token`: the box sends its key fingerprint, a nonce and
+      a signature, nothing else) and the read-only private image registry
+      (`/v2/`: the OTA release images by digest and their cosign signatures,
+      pulled by docker/ota/apply-update.sh with the short-lived `registry:pull`
+      token and verified by cosign). None carries customer data. Now baked as
+      the default HQ_ISSUANCE_URL in
       .env.example + scripts/lib/secrets.sh (WARP-978) so a reflash
       self-provisions its publicly-trusted cert with zero hand-patching;
       still operator-overridable via HQ_ISSUANCE_URL. Was kind: dynamic
@@ -1003,7 +1095,7 @@ entries:
     ticket: WARP-243
     added: 2026-07-04
     review_by: 2027-07-04
-    code_refs: [apps/orchestrator/src/services/tls-issuance.adapters.ts, scripts/lib/secrets.sh, .env.example]
+    code_refs: [apps/orchestrator/src/services/tls-issuance.adapters.ts, apps/orchestrator/src/services/hq-token.service.ts, docker/ota/apply-update.sh, scripts/lib/secrets.sh, .env.example]
 
   - id: user-mail-servers
     kind: dynamic
@@ -1697,6 +1789,21 @@ entries:
     review_by: 2027-07-04
     code_refs: [docker/docker-compose.yml]
 
+  - id: build-ota-r2-mirror
+    kind: egress
+    service: repo
+    destination:
+      hosts: [r2.cloudflarestorage.com]
+      ports: [443]
+      protocol: https
+    phase: build
+    data_class: none
+    purpose: publish-release.yml copies signed release images and their cosign signatures (by digest) from private GHCR into the fleet HQ R2 bucket the read-only registry serves; CI-only, never from a box (ADR-068)
+    ticket: WARP-3502
+    added: 2026-10-03
+    review_by: 2027-10-03
+    code_refs: [scripts/release/mirror-to-r2.py]
+
   - id: build-openssl-fips-source
     kind: egress
     service: repo
@@ -1911,36 +2018,27 @@ entries:
     review_by: 2027-09-02
     code_refs: [services/erp-connector/src/xero/connector.ts]
 
-  - id: ref-security-audit-identifiers
+  - id: ref-prisma-transaction-symbol
     kind: reference
     service: orchestrator
     destination:
-      # NOT destinations. Two dotted identifiers whose last label is a
-      # delegated TLD (.open, .id), the same false positive that
-      # ref-dotted-identifier-keys describes:
-      #   * mode.open is a Security audit ACTION NAME: the `refs.action`
-      #     stored on the ActivityRow when a person switches the Security
-      #     mode to open (SecurityAuditAction in security-audit.ts, and
-      #     ACTION_AUDIT in security-mode.service.ts).
-      #   * prisma.client.transaction.id is a Symbol.for KEY: the
-      #     well-known symbol Prisma sets on an interactive-transaction
-      #     client, which the in-transaction chain append reads to refuse
-      #     a bare client and to serialise appends per transaction.
-      # Neither is ever resolved or dialled. Registered by EXACT name, so a
-      # real host under .open or .id is still denied.
-      hosts: [mode.open, prisma.client.transaction.id]
+      # NOT a destination. A dotted identifier whose last label is a
+      # delegated TLD (.id), the same false positive that
+      # ref-dotted-identifier-keys describes: prisma.client.transaction.id is
+      # a Symbol.for KEY, the well-known symbol Prisma sets on an
+      # interactive-transaction client, which the in-transaction chain append
+      # reads to refuse a bare client and to serialise appends per
+      # transaction. It is never resolved or dialled. Registered by EXACT
+      # name, so a real host under .id is still denied.
+      hosts: [prisma.client.transaction.id]
     purpose: >-
-      Two orchestrator identifiers that parse as hostnames: the Security
-      audit action name mode.open and the Symbol.for key
-      prisma.client.transaction.id that Prisma's interactive-transaction
-      client carries. Neither is a destination, and the box never
-      resolves either.
-    ticket: WARP-2977
-    added: 2026-09-23
-    review_by: 2027-09-23
-    code_refs: [apps/orchestrator/src/services/security-audit.ts,
-                apps/orchestrator/src/services/security-mode.service.ts,
-                apps/orchestrator/src/services/activity.service.ts]
+      The Symbol.for key prisma.client.transaction.id that Prisma's
+      interactive-transaction client carries. It parses as a hostname, but it
+      is not a destination, and the box never resolves it.
+    ticket: WARP-3474
+    added: 2026-10-02
+    review_by: 2027-10-02
+    code_refs: [apps/orchestrator/src/services/activity.service.ts]
 
   - id: ref-xml-namespaces
     kind: reference

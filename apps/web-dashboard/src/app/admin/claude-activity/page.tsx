@@ -2,7 +2,7 @@
  * WARP-279 — /admin/claude-activity page.
  *
  * WARP-3433: this is Warp Lab's own engineering dashboard, not a customer
- * feature. It SHIPS DARK, and dark means ABSENT (the `/doors` pattern): the
+ * feature. It SHIPS DARK, and dark means ABSENT: the
  * `claudeActivity` capability is on only when the box runs with the developer
  * flag DROPLET_DEV_ENGINEERING_DASHBOARD, so the page renders NOTHING until the
  * capability probe has answered, and is a plain 404 (`notFound()`) when it is
@@ -139,7 +139,7 @@ function ClaudeActivitySurface() {
             <span className="eh">Admin access required</span>
             <span>
               This dashboard is only visible to <code>admin</code> / <code>owner</code> roles. Ask an
-              admin to grant you the <code>admin</code> Nextcloud group membership.
+              admin to grant you the <code>admin</code> group membership.
             </span>
           </div>
         </div>

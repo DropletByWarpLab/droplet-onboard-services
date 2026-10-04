@@ -211,3 +211,51 @@ class TestClients:
                                extra_args=["--clients", str(cj)])
         assert proc.returncode != 0
         assert not out.exists()
+
+
+class TestRegistryHost:
+    """WARP-3502 — `--registry-host` points the signed image refs at the fleet
+    HQ registry (private images, device-authenticated pulls). publish-release.yml
+    passes the OTA_REGISTRY_HOST repo variable, empty until HQ is live, so the
+    stage channel keeps pulling from ghcr.io in the meantime."""
+
+    HOST = "droplet-fleet-hq.rjouffret.workers.dev"
+    DIGESTS = {"orchestrator": "sha256:" + "b" * 64, "openwrt": "sha256:" + "c" * 64}
+
+    def test_host_set_points_every_image_at_the_hq_registry(self, tmp_path):
+        proc, out, _ = run_gen(tmp_path, [ORCH, OPENWRT], self.DIGESTS,
+                               extra_args=["--registry-host", self.HOST])
+        assert proc.returncode == 0, proc.stderr
+        services = json.loads(out.read_text())["services"]
+        assert len(services) == 2
+        for s in services:
+            # Only the host changes: repo name and digest are the contract.
+            assert s["image"] == f"{self.HOST}/droplet-{s['name']}@{self.DIGESTS[s['name']]}"
+            assert s["digest"] == self.DIGESTS[s["name"]]
+            assert "ghcr.io" not in s["image"]
+
+    def test_host_with_port_is_allowed(self, tmp_path):
+        proc, out, _ = run_gen(tmp_path, [ORCH], {"orchestrator": self.DIGESTS["orchestrator"]},
+                               extra_args=["--registry-host", "hq.example.test:8443"])
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(out.read_text())["services"][0]["image"] == (
+            "hq.example.test:8443/droplet-orchestrator@" + self.DIGESTS["orchestrator"])
+
+    @pytest.mark.parametrize("extra", [[], ["--registry-host", ""]])
+    def test_host_unset_or_empty_keeps_ghcr(self, tmp_path, extra):
+        proc, out, _ = run_gen(tmp_path, [ORCH], {"orchestrator": self.DIGESTS["orchestrator"]},
+                               extra_args=extra)
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(out.read_text())["services"][0]["image"] == (
+            "ghcr.io/dropletbywarplab/droplet-orchestrator@" + self.DIGESTS["orchestrator"])
+
+    @pytest.mark.parametrize("bad", [
+        "https://hq.example.test", "hq.example.test/path", "HQ.Example.test",
+        "hq.example.test:", "-hq.example.test", "ghcr.io/dropletbywarplab", "hq example",
+    ])
+    def test_malformed_host_fails_and_writes_nothing(self, tmp_path, bad):
+        proc, out, _ = run_gen(tmp_path, [ORCH], {"orchestrator": self.DIGESTS["orchestrator"]},
+                               extra_args=["--registry-host", bad])
+        assert proc.returncode != 0
+        assert "--registry-host" in proc.stderr
+        assert not out.exists()

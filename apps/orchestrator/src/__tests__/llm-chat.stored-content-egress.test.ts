@@ -79,9 +79,6 @@ const LIVE_TOOLS = [
   // WARP-2990 — the business profile / CRM / brain-findings door.
   { name: "business_profile_get" },
   { name: "business_find" },
-  // WARP-2979 — Security: presence and location data (ADR-059 DS-007).
-  { name: "security_list_incidents" },
-  { name: "security_zone_status" },
   { name: "get_network_status" },
   { name: "list_smart_home_devices" },
 ];
@@ -301,15 +298,11 @@ describe("the withheld set is DERIVED from the tool catalog", () => {
     }
   });
 
-  it("WARP-2979: withholds every Security tool, and the notice says Security stays on the Droplet", () => {
-    expect(OFF_LAN_WITHHELD_DOMAINS.has("security")).toBe(true);
-    // WARP-2980 — the fifth, security_explain_pattern, is withheld by its domain like the four.
-    for (const name of ["security_list_incidents", "security_get_incident", "security_search_events", "security_zone_status", "security_explain_pattern"]) {
-      expect(OFF_LAN_WITHHELD_TOOLS.has(name), name).toBe(true);
-    }
-    expect(withholdStoredContentTools(["security_search_events", "get_network_status"])).toEqual(["get_network_status"]);
-    expect(OFF_LAN_WITHHELD_NOTICE).toMatch(/Security tools are offered/);
-    expect(OFF_LAN_WITHHELD_NOTICE).toMatch(/Security events/);
+  it("the notice says what is withheld and that it stays on the Droplet", () => {
+    expect(OFF_LAN_WITHHELD_NOTICE).toMatch(/no file, memory or business-record tools are offered/);
+    // WARP-3570 — the notice names the other withheld surfaces too.
+    expect(OFF_LAN_WITHHELD_NOTICE).toMatch(/email, calendar, team chat, camera/);
+    expect(OFF_LAN_WITHHELD_NOTICE).toMatch(/it stays on the Droplet/);
   });
 
   it("leaves unrelated domains alone — it subtracts, it does not empty", () => {
@@ -362,9 +355,6 @@ describe("POST /api/llm/chat — a cloud turn carries no stored content", () => 
     expect(allowed).not.toContain("memory_recall");
     expect(allowed).not.toContain("business_profile_get");
     expect(allowed).not.toContain("business_find");
-    // WARP-2979 — Security never goes to a cloud model.
-    expect(allowed).not.toContain("security_list_incidents");
-    expect(allowed).not.toContain("security_zone_status");
     // The other half of the contract: it subtracted, it didn't nuke.
     expect(allowed).toContain("get_network_status");
   });
@@ -390,8 +380,6 @@ describe("POST /api/llm/chat — a cloud turn carries no stored content", () => 
     expect(allowed).toContain("memory_recall");
     expect(allowed).toContain("business_profile_get");
     expect(allowed).toContain("business_find");
-    expect(allowed).toContain("security_list_incidents");
-    expect(allowed).toContain("security_zone_status");
   });
 
   it("withholds them from the OWNER too — the role most likely to be on a cloud model", async () => {

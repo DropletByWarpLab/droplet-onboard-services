@@ -1,10 +1,10 @@
 /**
- * WARP-2979 (ADR-059 P4 §6.9.2, D17) — how the box knows chat is busy.
+ * WARP-2979 — how the box knows chat is busy.
  *
  * An in-flight counter on the two interactive LLM routes, `POST
  * /api/llm/chat` (typed chat and voice) and `POST /api/llm/complete`,
  * mounted in app.ts immediately before the LLM router. Background model work
- * — Droplet's incident summaries first of all — reads it and yields:
+ * reads it and yields:
  *
  *   · `interactiveInferenceIdle(now)`: nothing in flight AND the last
  *     interactive request ended at least 30 s ago (people ask follow-ups);

@@ -339,9 +339,9 @@ const LOCAL_PROVIDER = "local";
 const DOMAIN_OF: ReadonlyMap<string, ToolDomain> = new Map(TOOL_CATALOG.map((e) => [e.name, e.domain]));
 
 /**
- * WARP-2979 (#2420 review 2b; ADR-059 P4 §6.13) — whether the facts include a
- * step from a domain that never goes to a cloud model (files, memory,
- * business, security: OFF_LAN_WITHHELD_DOMAINS, the chat rule). A failed
+ * WARP-2979 (#2420 review 2b) — whether the facts include a
+ * step from a domain that never goes to a cloud model
+ * (OFF_LAN_WITHHELD_DOMAINS, the chat rule). A failed
  * step counts too: its error text reaches the prompt as well.
  */
 export function factsNeedLocalModel(facts: readonly RunStepTrace[]): boolean {

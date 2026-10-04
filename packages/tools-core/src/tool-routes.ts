@@ -160,6 +160,8 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   // ── files (nextcloud client → orchestrator /api/files) ──────────────────
   { tool: "list_files", client: "nextcloud", hops: [admit("get", "/api/files")] },
   { tool: "read_file", client: "nextcloud", hops: [admit("get", "/api/files/download")] },
+  // WARP-3691: stats via the parent listing (path) or the brain manifest (itemId); no bytes.
+  { tool: "show_file", client: "nextcloud", hops: [admit("get", "/api/files"), admit("get", "/api/files/brain/:itemId")] },
   { tool: "search_files", client: "nextcloud", hops: [admit("get", "/api/files/search")] },
   none("search_content"), // ctx.searchHybrid shim (no ctx.http hop)
   none("read_document_text"), // ctx.readDocumentText shim (no ctx.http hop)
@@ -221,15 +223,6 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
     admit("get", "/api/matter/rooms"),
     admit("post", "/api/matter/rooms"),
     admit("patch", "/api/matter/devices/:nodeId/alias"),
-  ] },
-  { tool: "get_building_devices", client: "orchestrator", hops: [
-    admit("get", "/api/building/devices"),
-    admit("get", "/api/building/devices/:id"),
-    admit("get", "/api/building/devices/:id/values"),
-  ] },
-  { tool: "set_building_point", client: "orchestrator", hops: [
-    admit("get", "/api/building/devices/:id"),
-    admit("post", "/api/building/devices/:id/points/:pointId/write"),
   ] },
 
   // ── cameras ─────────────────────────────────────────────────────────────
@@ -366,14 +359,6 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
     client: "orchestrator",
     hops: [admit("get", "/api/money/documents")],
   },
-
-  // ── doors (ADR-055 P4b) ─────────────────────────────────────────────────
-  // Two reads, and only reads (§11.5). Both routes admit the mcp principal
-  // (`requireRoleOrMcpService`) and are narrowed by the acting user's scope,
-  // tier and `doors` grant (MCP_ACTING_USER_GATED_DOMAINS). No write hop exists
-  // to list.
-  { tool: "doors_list", client: "orchestrator", hops: [admit("get", "/api/doors")] },
-  { tool: "doors_recent_events", client: "orchestrator", hops: [admit("get", "/api/doors/events")] },
 
   // ── cloud (WARP-2497) ───────────────────────────────────────────────────
   // Lives under /api/erp/* because the cloud connectors reuse the ERP
@@ -546,14 +531,4 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   { tool: "workspace_commit", client: "orchestrator", hops: [admit("post", "/api/workspace/:id/commit")] },
   { tool: "workspace_run", client: "orchestrator", hops: [admit("post", "/api/workspace/:id/run")] },
   { tool: "workspace_propose", client: "orchestrator", hops: [admit("post", "/api/workspace/:id/propose")] },
-  // WARP-2979 (ADR-059 P4 §6.12.2) — the Security assistant router admits
-  // ONLY the mcp principal (`requireRoleOrService("_service:mcp")`, no human
-  // role) and resolves the acting person from X-Nextcloud-User. GET only: no
-  // act or manage route is any tool's hop.
-  { tool: "security_list_incidents", client: "orchestrator", hops: [admit("get", "/api/security/assistant/incidents")] },
-  { tool: "security_get_incident", client: "orchestrator", hops: [admit("get", "/api/security/assistant/incidents/:id")] },
-  { tool: "security_search_events", client: "orchestrator", hops: [admit("get", "/api/security/assistant/events")] },
-  { tool: "security_zone_status", client: "orchestrator", hops: [admit("get", "/api/security/assistant/areas")] },
-  // WARP-2980 (ADR-059 P5 PR-E) — A5, the same router and the same two guards.
-  { tool: "security_explain_pattern", client: "orchestrator", hops: [admit("get", "/api/security/assistant/patterns")] },
 ];

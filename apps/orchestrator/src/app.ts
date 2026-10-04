@@ -10,6 +10,7 @@ import {
   authMiddleware,
   requirePasswordChangeGate,
 } from "./middleware/auth.js";
+import { requireAdminMfaEnrollmentGate } from "./middleware/admin-mfa-enrollment-gate.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { createRateLimit } from "./middleware/rate-limit.js";
 import { createHealthRouter } from "./routes/health.js";
@@ -77,19 +78,10 @@ import { createNetworkRouter } from "./routes/network.js";
 import { createNetworkThroughputRouter } from "./routes/network-throughput.js";
 import { createOffLanNetworkRouter } from "./routes/off-lan-network.js";
 import { createEgressAuditRouter } from "./routes/egress-audit.js";
-import { createPanelSecurityRouter } from "./routes/panel-security.js";
 import { createWebRouter } from "./routes/web.js";
 import { createCamerasRouter, createCameraSharePublicRouter } from "./routes/cameras.js";
 import { createSignedSegmentRouter } from "./services/segment-url-signing.service.js";
-import { createSecurityRouter } from "./routes/security.js";
-import { createSecurityZonesRouter } from "./routes/security-zones.js";
-import { createSecuritySiteRouter } from "./routes/security-site.js";
-import { createSecurityIncidentsRouter } from "./routes/security-incidents.js";
-import { createSecurityPatternsRouter } from "./routes/security-patterns.js";
-import { createSecurityAssistantRouter } from "./routes/security-assistant.js";
-import { createDoorsRouter } from "./routes/doors.js";
 import { createSwitchRouter } from "./routes/switch.js";
-import { createBuildingRouter } from "./routes/building.js";
 import { createDisplayRouter } from "./routes/display.js";
 import { createCalendarRouter, createCalendarPublicRouter } from "./routes/calendar.js";
 import { createNotesRouter } from "./routes/notes.js";
@@ -132,8 +124,10 @@ import { initToolModuleVerdict } from "./services/tool-module-verdict.service.js
 import { createSettingsRouter } from "./routes/settings.js";
 import { createTlsCertificateRouter } from "./routes/tls-certificate.js";
 import { createBackupStatusRouter } from "./routes/backup-status.js";
+import { createBackupKeyRouter } from "./routes/backup-key.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createUpdatesRouter } from "./routes/updates.js";
+import { createTelemetryRouter } from "./routes/telemetry.js";
 import { createEmailRouter, EMAIL_INGEST_PATH, wireEmailAnalysis } from "./routes/email.js";
 import { createEmailAnalysisFn } from "./services/email-analysis.service.js";
 import { resolveActiveModel } from "./services/active-model.service.js";
@@ -370,6 +364,9 @@ export function createApp(
   // one. Reads the explicit `User.mustChangePassword` flag FRESH from the
   // DB on every request — server enforcement, not a client-trusted redirect.
   app.use(requirePasswordChangeGate(prisma));
+  // WARP-3630 — owners and admins with no second factor can only enrol while
+  // REQUIRE_ADMIN_TWO_STEP is on (pass-through otherwise).
+  app.use(requireAdminMfaEnrollmentGate(prisma));
 
   // Protected routes — auth middleware has populated req.user
   app.use("/api", createProtectedAuthRouter(prisma));
@@ -397,22 +394,11 @@ export function createApp(
   // allowlist-unavailable anomalies here (service-principal only) → signed
   // activity log → /admin/audit.
   //
-  // Mounted BEFORE the module gates, on purpose (WARP-2977 review). Its path,
-  // POST /api/security/egress-anomaly, sits under the `security` module's
-  // prefix, and that module is off by default: behind the gate, every box
-  // without Security switched on would 404 the collector, the collector's
-  // sink suppresses repeats, and the egress audit — one of the threat
-  // mirror's own sources — would go silent. This is host plumbing that must
-  // never depend on a dashboard toggle. Pinned by
-  // src/__tests__/security-prefix-composition.test.ts.
+  // Mounted BEFORE the module gates, on purpose: this is host plumbing that
+  // must never depend on a dashboard toggle, and its path
+  // (POST /api/security/egress-anomaly) is a contract with the host collector.
+  // Pinned by src/__tests__/egress-audit.routes.test.ts.
   app.use("/api", createEgressAuditRouter());
-  // WARP-2981 (ADR-059 P6) — the rack panel's Security count, GET
-  // /api/panel/security: host plumbing like the collector above, for the
-  // panel's own service principal only. Outside every module prefix and
-  // before the gates so it can answer `off` — behind the gate a switched-off
-  // Security and a toggle that could not be read are the same 404. Pinned by
-  // the same test file and security-level-invariant.test.ts.
-  app.use("/api", createPanelSecurityRouter(prisma));
 
   const moduleGate = createModuleGate(prisma, config);
   mountModuleGates(app, moduleGate);
@@ -465,11 +451,10 @@ export function createApp(
   // `/llm/:param` route there can ever shadow it; the `chat` module gate
   // (`/api/llm`) covers it like /api/llm/chat.
   app.use("/api", createLlmWarmRouter(prisma));
-  // WARP-2979 (ADR-059 P4 §6.9.2) — the in-flight counter on the two
-  // interactive LLM routes (typed chat, voice, /llm/complete). Background
-  // model work (Droplet's incident summaries) waits for it to be idle and
-  // aborts when a chat starts. Before the router, after auth: a refused
-  // request still ends, so it counts down again.
+  // WARP-2979 — the in-flight counter on the two interactive LLM routes
+  // (typed chat, voice, /llm/complete). Background model work waits for it to
+  // be idle and aborts when a chat starts. Before the router, after auth: a
+  // refused request still ends, so it counts down again.
   app.use(["/api/llm/chat", "/api/llm/complete"], trackInteractiveInference);
   app.use("/api", createLlmRouter(prisma));
   // WARP-1683 — team chat (member-to-member Messages). Humans only; the
@@ -662,43 +647,7 @@ export function createApp(
   // proxies the services/web-fetch allowlisted fetcher.
   app.use("/api", createWebRouter(prisma));
   app.use("/api", createCamerasRouter(prisma));
-  // WARP-2977 (ADR-059 P2) — the Security command center's feed. The
-  // `security` module gate (toggle + per-person view) is mounted above by
-  // mountModuleGates off the registry prefix /api/security.
-  app.use("/api", createSecurityRouter(prisma));
-  // WARP-2977 P2b — areas (routes/security-zones.ts) and the site mode +
-  // opening hours (routes/security-site.ts). Separate routers, not nested,
-  // under the same /api/security module gate; their act/manage write routes
-  // add requireFeatureAccess at the route.
-  app.use("/api", createSecurityZonesRouter(prisma));
-  app.use("/api", createSecuritySiteRouter(prisma));
-  // WARP-2978 (ADR-059 P3) — incidents, acknowledgement and alert routing
-  // (routes 16–22), after the site router, under the same module gate; the
-  // act/manage write routes add requireFeatureAccess at the route. Literal
-  // paths (`/incidents/summary`) are declared before `/incidents/:id`.
-  app.use("/api", createSecurityIncidentsRouter(prisma));
-  // WARP-2980 (ADR-059 P5) — "what normal looks like", read-only (routes
-  // 29–31). Same /api/security module gate.
-  app.use("/api", createSecurityPatternsRouter(prisma));
-  // WARP-2979 (ADR-059 P4 §6.12) — what the read-only `security` chat tools
-  // read (A1–A4): GET only, the `_service:mcp` principal only, for the person
-  // X-Nextcloud-User names. Same /api/security module gate, and the WARP-2988
-  // acting-user gate above (`security` is in MCP_ACTING_USER_GATED_DOMAINS).
-  // The last Security router: every path is under the literal /assistant/.
-  app.use("/api", createSecurityAssistantRouter(prisma));
-  // ADR-055 (P4a) — the doors control-plane spine. Mounted unconditionally: the
-  // `doors` module gate (toggle + per-person view) that mountModuleGates put in
-  // front of /api/doors ABOVE is what makes it absent — DOORS_ENABLED off means
-  // `available: false`, so every route here answers 404 module_disabled.
-  // Registered before any catch-all path param (there is none at this level),
-  // which the boot assertion (services/doors-wiring.ts) checks on every boot.
-  // The two GETs also admit `_service:mcp` (the P4b `doors_*` tools), behind the
-  // WARP-2988 acting-user gate above (`doors` is in MCP_ACTING_USER_GATED_DOMAINS,
-  // so the acting person's tier, tool scope and `doors` grant all apply).
-  app.use("/api", createDoorsRouter(prisma));
   app.use("/api", createSwitchRouter(prisma));
-  // Device control over BACnet/Modbus/SNMP/KNX (services/device-gateway).
-  app.use("/api", createBuildingRouter(prisma));
   app.use("/api", createDisplayRouter(prisma));
   app.use("/api", createCalendarRouter(prisma));
   app.use("/api", createNotesRouter(prisma));
@@ -710,7 +659,7 @@ export function createApp(
   // WARP-279: meta-observability dashboard for admin/owner roles. Aggregates
   // session-state.json + GitHub + Jira + compliance-progress.md.
   // WARP-3433: Warp Lab's own engineering dashboard, not a customer feature —
-  // ships dark and dark means ABSENT (as DOORS_ENABLED): not mounted, so
+  // ships dark and dark means ABSENT: not mounted, so
   // /api/admin/claude-activity is a plain 404, unless a developer sets
   // DROPLET_DEV_ENGINEERING_DASHBOARD=1. setup.sh and compose never do.
   if (config.DROPLET_DEV_ENGINEERING_DASHBOARD) {
@@ -819,12 +768,18 @@ export function createApp(
   // WARP-1405: backup health for Settings → Device information (last success,
   // last failure, reason, overdue / key-mismatch). Owner + admin, read-only.
   app.use("/api", createBackupStatusRouter());
+  // WARP-3610: the owner takes the backup repository key off the box, once.
+  app.use("/api", createBackupKeyRouter(prisma));
 
   // WARP-540: OTA update operator surface (/api/updates/*) — status,
   // history, check-now, apply-now, skip, and the WARP-538 settings knobs.
   // Owner+admin only (reads included, voice-proxy posture); every mutation
   // writes an activity row via recordActivity.
   app.use("/api", createUpdatesRouter(prisma));
+
+  // WARP-3504 (ADR-068): what this box sends to Warp — GET /api/telemetry/last,
+  // the last payload of each kind. Owner + admin only, read-only.
+  app.use("/api", createTelemetryRouter());
 
   // WARP-472: F4 hardware contract endpoint (admin/owner only).
   app.use("/api", createHardwareRouter(prisma));

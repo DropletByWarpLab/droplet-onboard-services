@@ -114,7 +114,7 @@ removes them.
 | `PYPORTAL_BAUD` | `115200` | PyPortal serial baud rate |
 | `DISPLAY_TIMEZONE` | `America/Los_Angeles` | Timezone for the wall-clock pushed to the PyPortal |
 | `SERVICE_SECRET` | _(empty)_ | Bearer token required on all non-`/health` routes |
-| `BRIDGE_AUTH_TOKEN` | falls back to `SERVICE_SECRET` | Token the container sends to `device-bridge` when calling `POST /openwrt/wifi/rotate` |
+| `BRIDGE_AUTH_TOKEN` | falls back to `SERVICE_SECRET` | Panel token the container sends to `device-bridge` for reads and the panel's own writes (`POST /openwrt/wifi/rotate`, `/wifi/connect`, `/panel/console`). The bridge refuses it on destructive routes (WARP-3595); those need `BRIDGE_ADMIN_TOKEN`, which this container never holds |
 | `DROPLET_AP_MODE` | `uci` | Pairing-QR creds source: `uci` (multi-box, read SSID/PSK over SSH), `hostapd` (single-box, read from env / `/etc/hostapd.conf`), or `auto` |
 | `DROPLET_AP_SSID` | _(empty)_ | hostapd-mode AP SSID. When set, used directly (and forces `auto` to hostapd) |
 | `DROPLET_AP_PSK` | _(empty)_ | hostapd-mode AP passphrase (paired with `DROPLET_AP_SSID`) |
@@ -127,8 +127,8 @@ removes them.
 | `PANEL_RAIL_WIFI_SECONDS` | `45` | How long the rail's Wi-Fi face stays up before reverting on its own |
 | `PANEL_RAIL_FINGERPRINT` | `1` | Rack panel only. `0` removes the rail's certificate-fingerprint face — see below |
 | `PANEL_RAIL_FINGERPRINT_SECONDS` | `120` | How long the fingerprint face stays up before reverting to the QR |
-| `PANEL_ORCHESTRATOR_URL` | `http://127.0.0.1` | Rack panel only. Orchestrator origin behind the loopback gateway, read for the STORAGE cell (WARP-2668), the certificate footer (WARP-2944) and the Security chip (WARP-2981). Distinct from the bridge's own `ORCHESTRATOR_URL`, which defaults to `:3000` |
-| `STORAGE_REFRESH_SECONDS` | `60` | How often those reads happen. Slow on purpose — a capacity total is not a hot-plug event. The Security chip goes back to `—` after three missed reads |
+| `PANEL_ORCHESTRATOR_URL` | `http://127.0.0.1` | Rack panel only. Orchestrator origin behind the loopback gateway, read for the STORAGE cell (WARP-2668) and the certificate footer (WARP-2944). Distinct from the bridge's own `ORCHESTRATOR_URL`, which defaults to `:3000` |
+| `STORAGE_REFRESH_SECONDS` | `60` | How often those reads happen. Slow on purpose — a capacity total is not a hot-plug event |
 
 ## The rail's certificate-fingerprint face (WARP-3414)
 
@@ -188,41 +188,6 @@ disabled or unreachable, or when the payload exceeds the ~62-byte budget that
 keeps the code above the 4 px/module scan floor (a 32-char SSID plus a 16-char
 passphrase clears it). A rail that stays on the dashboard is the honest
 failure; a card nobody can scan is the one the brief calls worse than no QR.
-
-## The Security count (WARP-2981)
-
-ADR-059 §3.8 gives the rack panel one Security figure: *"a single count cell
-at most, showing Security: 1 open. Never images, never names."* It is a chip in
-band A, right of the state pill, in the pill's own type and tokens:
-
-| Chip | When |
-|---|---|
-| *(none)* | the panel has not heard yet, or the box does not use Security (it is off by default — "SECURITY OFF" on a rack would read as "unprotected") |
-| `SECURITY: 0 OPEN`, muted | nothing needs attention |
-| `SECURITY: 3 OPEN`, muted | only notices are open (a camera went offline, a sign-in warning) |
-| `SECURITY: 2 OPEN`, orange | at least one alert is open |
-| `… · MAY BE BEHIND`, orange | Droplet is not sorting new events, or camera events or network and sign-in warnings are not getting through: the number may be missing incidents |
-| `SECURITY: —`, muted | the answer could not be read, or is older than three reads |
-
-"Open" means nobody has acknowledged it yet; acknowledged and resolved
-incidents never count. The number is the whole box, as an owner sees it
-(threats included), so it can differ from what a family member's own
-`/security` shows; `99+` above 99. Nothing but the two counts and the flag
-reaches the glass: no area, camera, name, time or incident id (rack brief §8).
-It is not a tap target, and it never moves the pill, which stays box health.
-
-It comes from the orchestrator's `GET /api/panel/security` (P6-3), which only
-this panel's `_service:display` bearer may call — no person can — and which
-says `off` when the Security module is switched off. `display.py` reads it on
-the storage cadence, with a 3 s timeout, wide panels only. The chip is not
-drawn where band A has no room for it — the longest text needs a panel about
-1230 px wide, `SECURITY: 2 OPEN` about 1090 (both shipped panels have room) —
-and one warning in the log says so.
-
-A box that switches Security on after running with it off shows everything
-that was grouped meanwhile (incidents are kept a year and are grouped whether
-or not the module is on), so the first number can be large. Notices keep the
-chip muted; triage them on `/security`.
 
 ## Wi-Fi QR (static password, default)
 

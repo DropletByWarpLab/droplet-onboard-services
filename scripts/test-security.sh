@@ -865,6 +865,25 @@ else
 fi
 
 # =============================================================================
+# Test 21b: WARP-3588 / WARP-3625 / WARP-3656 — compose secret distribution
+# =============================================================================
+# scripts/check-compose-hardening.py: services converted off `env_file` do not
+# regain it and still render their required secrets; DEVICE_SECRET_KEY,
+# JWT_SECRET and the database credentials have an explicit recipient allowlist;
+# voice-io / rag-eval / file-indexer keep their bearer dependency; the services
+# hardened with no-new-privileges keep it. It also mutates the compose model to
+# prove the guard fails when it should.
+# MUTATION: add `env_file: [../.env]` to cache, or `- JWT_SECRET` to web-fetch.
+_hard_exit=0
+_hard_output=$(python3 "$REPO_ROOT/scripts/check-compose-hardening.py" 2>&1) || _hard_exit=$?
+if [ "$_hard_exit" -eq 0 ]; then
+  pass "compose secret distribution, bearer wiring and no-new-privileges guards hold (WARP-3588/3625/3656)"
+else
+  fail "compose secret distribution / hardening guard failed (WARP-3588/3625/3656)"
+  printf "${_RED}%s${_RESET}\n" "$_hard_output" >&2
+fi
+
+# =============================================================================
 # Test 22: WARP-3193 SEC-DATA-1 — `env_file: ../.env` only on an allowlist
 # =============================================================================
 # The root .env carries JWT_SECRET, DEVICE_SECRET_KEY, POSTGRES_PASSWORD and
@@ -873,7 +892,8 @@ fi
 # `environment:` list instead — one parser RCE there must not yield the key an
 # owner JWT is forged from. Adding a service here is a security decision:
 # say in the PR why it needs the whole file.
-# MUTATION: add `env_file: [../.env]` to web-fetch and this goes red.
+# MUTATION: add `env_file: [../.env]` to web-fetch or nextcloud and this goes red.
+# (nextcloud left the allowlist in WARP-3585; Test 22b pins its variable list.)
 _envfile_exit=0
 _envfile_output=$(python3 - "$COMPOSE_FILE" <<'PYEOF' 2>&1
 import sys, yaml
@@ -881,7 +901,7 @@ import sys, yaml
 ALLOWED = {
     "ai-gateway", "cache", "db", "device-identity-svc", "erp-sql-bridge",
     "file-indexer", "fleet-agent", "inference-manager", "mcp-bridge",
-    "mcp-server", "nextcloud", "orchestrator", "rag-eval", "voice-io",
+    "mcp-server", "orchestrator", "rag-eval", "voice-io",
 }
 
 with open(sys.argv[1], encoding="utf-8") as f:
@@ -907,6 +927,63 @@ if [ "$_envfile_exit" -eq 0 ]; then
 else
   fail "docker-compose.yml: env_file ../.env on a non-allowlisted service (SEC-DATA-1)"
   printf "${_RED}%s${_RESET}\n" "$_envfile_output" >&2
+fi
+
+# =============================================================================
+# Test 22b: WARP-3585 — the nextcloud container receives only the variables it reads
+# =============================================================================
+# With env_file gone, the `environment:` list IS the allowlist. A key added
+# here must be read by the Nextcloud image entrypoint, docker/nextcloud-init.sh
+# or docker/nextcloud/*; a box secret that none of them read must not appear.
+# MUTATION: add `JWT_SECRET=${JWT_SECRET}` to nextcloud's environment -> red.
+_ncenv_exit=0
+_ncenv_output=$(python3 - "$COMPOSE_FILE" <<'PYEOF' 2>&1
+import sys, yaml
+
+EXPECTED = {
+    "POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD",
+    "NEXTCLOUD_ADMIN_USER", "NEXTCLOUD_ADMIN_PASSWORD",
+    "DOCS_ENABLED", "DOCS_ENGINE", "ONLYOFFICE_JWT_SECRET",
+    "PGSSLMODE", "REDIS_HOST", "REDIS_HOST_PORT", "REDIS_HOST_USER",
+    "REDIS_HOST_PASSWORD", "REDIS_TLS_SCHEME", "REDIS_TLS_CAFILE",
+    "NEXTCLOUD_TRUSTED_DOMAINS", "OVERWRITEPROTOCOL",
+    "DROPLET_SHARED_FOLDER_NAME", "DROPLET_SHARED_FOLDER_QUOTA",
+}
+with open(sys.argv[1], encoding="utf-8") as f:
+    svc = yaml.safe_load(f)["services"]["nextcloud"]
+env = svc.get("environment") or []
+keys = set(env) if isinstance(env, dict) else {e.split("=", 1)[0] for e in env}
+if svc.get("env_file") is not None:
+    print("nextcloud declares env_file", file=sys.stderr)
+    sys.exit(1)
+if keys != EXPECTED:
+    print("nextcloud environment drifted: unexpected=%s missing=%s" % (
+        sorted(keys - EXPECTED), sorted(EXPECTED - keys)), file=sys.stderr)
+    sys.exit(1)
+PYEOF
+) || _ncenv_exit=$?
+if [ "$_ncenv_exit" -eq 0 ]; then
+  pass "docker-compose.yml: nextcloud has no env_file and exactly the allowlisted environment (WARP-3585)"
+else
+  fail "docker-compose.yml: nextcloud environment is not the allowlist (WARP-3585)"
+  printf "${_RED}%s${_RESET}\n" "$_ncenv_output" >&2
+fi
+
+# =============================================================================
+# Test 22c: WARP-3586 — Nextcloud enforces a public-link expiry on every start
+# =============================================================================
+# The orchestrator route caps links at 90 days, but Nextcloud's own endpoints
+# are reachable too; nextcloud-init.sh (run on every start) sets the same
+# ceiling. MUTATION: delete any of the three settings and this goes red.
+_NC_INIT_SHARE="$REPO_ROOT/docker/nextcloud-init.sh"
+_share_missing=""
+for _kv in shareapi_default_expire_date=yes shareapi_enforce_expire_date=yes shareapi_expire_after_n_days=90; do
+  grep -qF "\"$_kv\"" "$_NC_INIT_SHARE" || _share_missing+="$_kv "
+done
+if [ -z "$_share_missing" ]; then
+  pass "nextcloud-init.sh sets the public-link expiry policy on every start (WARP-3586)"
+else
+  fail "nextcloud-init.sh is missing share expiry settings (WARP-3586): $_share_missing"
 fi
 
 # =============================================================================
@@ -951,6 +1028,45 @@ if [ -z "$_psk_bad" ]; then
   pass "openwrt overlay: every AP ships disabled with no static PSK (SEC-DATA-14)"
 else
   fail "openwrt overlay ships a static/enabled Wi-Fi AP (SEC-DATA-14): $(printf '%s' "$_psk_bad" | tr '\n' ';')"
+fi
+
+# =============================================================================
+# Test 25: WARP-3516 — the samba share never maps unknown logins to guest
+# =============================================================================
+# The servercontainers/samba entrypoint defaults `map to guest = Bad User`
+# when SAMBA_CONF_MAP_TO_GUEST is unset, so Windows' first logon (the PC's own
+# account, unknown to Samba) got a GUEST session. Windows 11 24H2+ refuses an
+# unsigned guest session and gives up without prompting for the `droplet`
+# password; `Never` returns LOGON_FAILURE instead, which makes it prompt.
+# MUTATION: delete SAMBA_CONF_MAP_TO_GUEST from the samba service (or set it
+# to `Bad User`) and this goes red.
+_samba_exit=0
+_samba_output=$(python3 - "$COMPOSE_FILE" <<'PYEOF' 2>&1
+import sys, yaml
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = yaml.safe_load(f)
+
+samba = (data.get("services") or {}).get("samba")
+if not isinstance(samba, dict):
+    print("services.samba is missing")
+    sys.exit(1)
+
+env = samba.get("environment") or []
+if isinstance(env, list):
+    env = dict(str(e).split("=", 1) for e in env if "=" in str(e))
+got = env.get("SAMBA_CONF_MAP_TO_GUEST")
+if got != "Never":
+    print(f"samba must set SAMBA_CONF_MAP_TO_GUEST=Never, got {got!r}")
+    sys.exit(1)
+PYEOF
+) || _samba_exit=$?
+
+if [ "$_samba_exit" -eq 0 ]; then
+  pass "docker-compose.yml: samba never maps unknown logins to guest (WARP-3516)"
+else
+  fail "docker-compose.yml: samba must set SAMBA_CONF_MAP_TO_GUEST=Never (WARP-3516)"
+  printf "${_RED}%s${_RESET}\n" "$_samba_output" >&2
 fi
 
 # =============================================================================

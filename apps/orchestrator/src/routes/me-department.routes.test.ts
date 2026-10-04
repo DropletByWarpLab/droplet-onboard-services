@@ -45,7 +45,7 @@ type Dept = {
   profile: { template: string; icon: string } | null;
 };
 const D = {
-  security: { id: "11111111-1111-4111-8111-111111111111", slug: "security", name: "Security", kind: "DEPARTMENT", state: "active", profile: { template: "security", icon: "shield" } },
+  security: { id: "11111111-1111-4111-8111-111111111111", slug: "security", name: "Security", kind: "DEPARTMENT", state: "active", profile: { template: "operations", icon: "shield" } },
   sales: { id: "22222222-2222-4222-8222-222222222222", slug: "sales", name: "Sales", kind: "DEPARTMENT", state: "active", profile: null },
   archived: { id: "33333333-3333-4333-8333-333333333333", slug: "old-records", name: "Old records", kind: "DEPARTMENT", state: "archived", profile: null },
   archiving: { id: "44444444-4444-4444-8444-444444444444", slug: "leaving", name: "Leaving soon", kind: "DEPARTMENT", state: "archiving", profile: null },
@@ -221,7 +221,7 @@ describe("GET /api/me/active-department", () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       scope: "department",
-      department: { id: D.security.id, slug: "security", name: "Security", profile: { template: "security", icon: "shield" } },
+      department: { id: D.security.id, slug: "security", name: "Security", profile: { template: "operations", icon: "shield" } },
     });
   });
 
@@ -276,7 +276,7 @@ describe("PUT /api/me/active-department", () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({
       scope: "department",
-      department: { id: D.security.id, slug: "security", name: "Security", profile: { template: "security", icon: "shield" } },
+      department: { id: D.security.id, slug: "security", name: "Security", profile: { template: "operations", icon: "shield" } },
     });
     expect(db.choices.get(PEOPLE.maria!.id)).toMatchObject({ scope: "department", departmentId: D.security.id });
     // …and it is what the next GET says.

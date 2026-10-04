@@ -9,14 +9,14 @@
  * refuses a confirming tool and mints a token bound to that exact call;
  * this component is what a human uses to release it.
  *
- * WHAT IT DELIBERATELY DOES NOT SHOW: argument values. The summary is
- * built server-side by `confirmation-summary.ts` and carries an
- * argument's key, kind and size only — tool arguments routinely hold
- * customer content and, on the ERP/health surfaces, PHI, and this prompt
- * is rendered into a chat transcript that is persisted and re-read. The
- * trade-off (you see "path — 25 characters", not the path) is stated in
- * that module; loosening it needs a per-tool allowlist, not a change
- * here.
+ * WHAT IT SHOWS, AND WHAT IT DOES NOT: the summary is built server-side
+ * by `confirmation-summary.ts`. Every argument appears by key, kind and
+ * size; only the allowlisted DECISIVE ones (WARP-3569: recipient, path,
+ * share target, device or network target) also arrive as `summary.shown`,
+ * already scrubbed, sanitised and length-capped. Bodies, subjects and
+ * record contents never do. This component renders `summary.shown` and
+ * nothing else from the call: it must not read `call.args`, so the
+ * allowlist stays the one place that decides what a person sees.
  *
  * WHAT IT DOES NOT HOLD: the token. The client has an opaque
  * `challengeId`; approval happens on `POST /api/llm/confirm/:id`, which
@@ -38,16 +38,13 @@ export interface ToolApprovalPromptProps {
   onRerequest?: () => void;
 }
 
-/**
- * WARP-3303 — the per-tool allowlist the header asks for. Starting a
- * background run is approved on WHAT the run will do, so its title and
- * deliverable are shown as written; both are the task the person just asked
- * for in this chat, not content read from their files. Every other
- * argument, and every other tool, stays shape-only.
- */
-const SHOWN_VALUES: Record<string, readonly string[]> = {
-  start_agent_run: ["title", "deliverable"],
+/** Labels for shown keys whose raw name reads badly; the rest are de-snake-cased. */
+const SHOWN_LABELS: Record<string, string> = {
+  title: "Task",
+  deliverable: "Delivers",
 };
+
+const shownLabel = (key: string): string => SHOWN_LABELS[key] ?? key.replace(/_/g, " ");
 
 /** Background-run bounds (AGENT_RUN_MAX_ITER, AGENT_RUN_MAX_WALL_MS). */
 const RUN_BOUNDS = "Runs in the background for up to 30 steps and 40 minutes. Changes it wants to make still ask you first.";
@@ -88,10 +85,8 @@ export function ToolApprovalPrompt({
   const settled = isExpired || isDenied || isApproved;
 
   const toolName = confirmation.tool ?? call.name;
-  const shownKeys = SHOWN_VALUES[toolName] ?? [];
-  const shown = shownKeys
-    .map((k) => [k, call.args?.[k]] as const)
-    .filter((e): e is readonly [string, string] => typeof e[1] === "string" && e[1].trim() !== "");
+  const shown = confirmation.summary?.shown ?? [];
+  const shownKeys = shown.map((v) => v.key);
   const fields = (confirmation.summary?.fields ?? []).filter((f) => !shownKeys.includes(f.key));
   const truncated = confirmation.summary?.truncatedFields ?? 0;
 
@@ -133,10 +128,10 @@ export function ToolApprovalPrompt({
 
       {shown.length > 0 && (
         <dl className="mt-1.5 space-y-0.5" data-testid="approval-shown-values">
-          {shown.map(([k, v]) => (
-            <div key={k}>
-              <dt className="inline font-medium">{k === "title" ? "Task" : k === "deliverable" ? "Delivers" : k}: </dt>
-              <dd className="inline">{v}</dd>
+          {shown.map((v) => (
+            <div key={v.key}>
+              <dt className="inline font-medium">{shownLabel(v.key)}: </dt>
+              <dd className="inline break-words">{v.text}</dd>
             </div>
           ))}
         </dl>

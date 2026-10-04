@@ -140,12 +140,8 @@ export const SPACES: SpaceDef[] = [
     // WARP-2967 then tucked both behind Settings in the sidebar; rule 2 keeps
     // them chips here, with their owner/admin gate untouched.
     hrefs: [
-      "/security",
       "/cameras",
       "/events",
-      // ADR-055 (P4b). Gated exactly as the sidebar gates it: the `doors`
-      // module (absent, not just off, until DOORS_ENABLED) and owner/admin.
-      "/doors",
       "/network",
       "/devices",
       "/voice",
@@ -183,6 +179,7 @@ export const SPACES: SpaceDef[] = [
       "/settings",
       "/admin/audit",
       "/trust",
+      "/settings/telemetry",
       "/admin/rag-eval",
       "/downloads",
       "/help",

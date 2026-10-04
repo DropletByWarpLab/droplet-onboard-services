@@ -296,10 +296,6 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // quietly.
   { pattern: /\b(leases?|agreements?|contracts?|statements?|warrant(y|ies)|quotes?|estimates?|reports?|manuals?|certificates?|licen[cs]es?|permits?|insurance|tax returns?)\b/i, domains: ["files"] },
   { pattern: /\b(lights?|lamps?|scenes?|thermostat|plugs?|sockets?|outlets?|switch(es)?|heating|cooling|air-?con(ditioning)?|fans?|temperature|dim|brightness|blinds?|curtains?|locks?|unlock|routines?|turn (on|off))\b/i, domains: ["smart-home"] },
-  // Device gateway (BACnet/IP, Modbus TCP, SNMP, KNX/IP): the building plant
-  // and office equipment a business asks about. Meters are named with what
-  // they meter — a bare "meter" would fire on every unit conversion.
-  { pattern: /\b(hvac|set-?points?|air[- ]?handl(ers?|ing)|ahus?|chillers?|boilers?|rooftop units?|rtus?|vavs?|ventilation|bacnet|modbus|knx|snmp|bms|building (systems?|management|controls?)|(energy|power|electric(ity)?|gas|water) meters?|meter readings?|kwh|printers?|toner|paper jams?|ups|battery backup|generators?|pumps?|compressors?)\b/i, domains: ["smart-home"] },
   { pattern: /\b(wi-?fi|network|internet|router|dhcp|firewall|ssid|block(ed|s)?|unblock|bandwidth|devices?|online|offline|connected|guest|ethernet|vpn|slow)\b/i, domains: ["network"] },
   // The places a household points cameras, and the things it looks for —
   // NOT just the word "camera". See the WARP-1921 note above. Rename verbs
@@ -307,31 +303,6 @@ const DOMAIN_RULES: ReadonlyArray<{ pattern: RegExp; domains: ToolDomain[] }> = 
   // camera by display name alone, so without the verb the turn would never
   // advertise rename_camera.
   { pattern: /\b(cameras?|clips?|recordings?|footage|motion|doorbell|snapshots?|surveillance|nvr|frigate|live view|people|person|someone|somebody|anybody|anyone|intruders?|visitors?|packages?|parcels?|deliver(y|ies)|driveway|porch|doorstep|front door|back door|garage|yard|gate|who (was|were|came|is|has been)|renam(e[sd]?|ing)|re-?label(s|l?ed|l?ing)?)\b/i, domains: ["cameras"] },
-  // WARP-2979 (ADR-059 P4 §6.12.6) — Security questions. The camera words
-  // (person, someone, back door, who was…) already pull `cameras`; this rule is
-  // what brings in incidents, areas and the site mode for "anything odd last
-  // night?". A word in two rules brings in both domains, and a false-positive
-  // domain is cheap (see the rule comment above). Never core: four schemas on
-  // every turn would pay for a question most turns never ask.
-  // Review #2420: `alerts?`, `offline` and "(anyone|anybody|someone) in/at the …" — the tools' own examples
-  // ("any alerts this week?", "is any camera offline?", "was anyone in the stock room after 9?"), pinned by a
-  // test that reads every quoted example out of the security descriptions.
-  // WARP-2980 (ADR-059 P5 PR-E) — "is it normal…?" / "what's usual…?": the
-  // question security_explain_pattern answers. The spec's own box-proof
-  // sentence, "is it normal for someone to be in the stock room at 2 AM?",
-  // matched none of the words above.
-  { pattern: /\b(security|incidents?|flagged|after[- ]hours|overnight|last night|while (we|i) (were|was) (out|away|closed)|break[- ]?ins?|intruders?|suspicious|unusual|anything (odd|strange|weird|unusual)|out of place|tamper(ed|ing)?|went (dark|offline)|areas?|cover(ed|age)|acknowledg(e|ed|ement)|closed up|site mode|opening hours|alerts?|offline|(anyone|anybody|someone) (in|at) the|(is|was) (it|that|this) (normal|usual)|what(['’]?s| is) (normal|usual))\b/i, domains: ["security"] },
-  // ADR-055 P4b (WARP-3438) — Doors: what each door last reported, and what
-  // happened at them. The words people use for the door itself and for a door
-  // that is not shut. "front door" / "back door" already pull `cameras` (the
-  // WARP-1921 places) and "who came in" pulls it too: a word in two rules brings
-  // in both domains, and a false-positive domain is cheap (see the rule comment
-  // above). Whole words only: `outdoor` / `indoor` are not doors, and `doorbell`
-  // is the camera rule's. Never core: two schemas on every turn would pay for a
-  // question most turns never ask, and on a box with no doors module the tools
-  // are not in the pool at all (WARP-2972), so this rule then matches a domain
-  // with nothing to advertise, like any rule whose module is off.
-  { pattern: /\b(doors?|doorways?|ajar|(forced|held|left|propped|stuck) open)\b/i, domains: ["doors"] },
   { pattern: /\b(calendar|meetings?|appointments?|events?|schedule|agenda|busy|free time|what'?s on)\b/i, domains: ["calendar"] },
   // WARP-2454 — AVAILABILITY, BOUNDED TO A TEMPORAL CUE.
   //

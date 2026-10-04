@@ -78,6 +78,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { ModuleId, PrismaClient, Prisma } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
+import { createRequireAdminStepUp } from "../middleware/require-credential-step-up.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import {
@@ -263,7 +264,7 @@ function normalizeGrants(args: {
   mayOperateLocks: boolean;
 }): NormalizedGrants {
   // `null` from the clamp = this starting point may hold NO grant on the module
-  // (security below family, doors below admin): the row is not written, exactly
+  // (crm, projects and money below family): the row is not written, exactly
   // as an unheldable connector grant is not (below).
   const featureGrants = args.featureGrants.flatMap((g) => {
     const level = clampLevel(args.startingPoint, g.moduleId, g.level);
@@ -330,7 +331,7 @@ function serializeAccessRole(row: RoleWithMeta, layers: ToolLayers) {
     peopleCount: row._count.users,
     // The same clamp `normalizeGrants` applies at write time, and the resolver at
     // read time (effective-access.service): a row saved before a floor existed
-    // (a Guest-based role's security:view) is inert, so the list must not show it
+    // (a Guest-based role's crm:view) is inert, so the list must not show it
     // as reach. Nothing is rewritten; `null` = the tier may hold no grant.
     // The tier here is the role's `startingPoint`; the resolver clamps by the
     // PERSON's tier. They agree only because assigning a role writes
@@ -523,6 +524,8 @@ export function createAccessRouter(
   } = {},
 ): Router {
   const router = Router();
+  // WARP-3630 — fresh credential step-up while REQUIRE_ADMIN_TWO_STEP is on.
+  const requireAdminStepUp = createRequireAdminStepUp(prisma);
   const loadLayers = opts.loadLayers ?? (() => loadToolLayers(prisma));
 
   const loadRole = (id: string) =>
@@ -634,6 +637,7 @@ export function createAccessRouter(
   router.post(
     "/access/roles",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const actorId = req.user?.id ?? "unknown";
@@ -849,6 +853,7 @@ export function createAccessRouter(
   router.patch(
     "/access/roles/:id",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const parsed = rolePatchSchema.safeParse(req.body);
@@ -1134,6 +1139,7 @@ export function createAccessRouter(
   router.delete(
     "/access/roles/:id",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const existing = await loadRole(req.params.id);
@@ -1228,6 +1234,7 @@ export function createAccessRouter(
   router.post(
     "/access/roles/:id/assign",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
         const parsed = assignSchema.safeParse(req.body);

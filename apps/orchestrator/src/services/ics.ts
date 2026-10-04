@@ -132,7 +132,7 @@ function parseLine(
 
 // The RFC 5545 wall-clock converter (`zoneFormatter`, `timeZoneOffsetMs`,
 // `zonedWallClockToUtc`) moved VERBATIM to lib/zoned-time.ts (WARP-2977 P2b)
-// so the Security opening hours resolve wall clocks through the SAME code this
+// so every caller resolves wall clocks through the SAME code this
 // parser does. Its RFC 5545 §3.3.5 rationale lives there now; this file's
 // tests (src/__tests__/ics.test.ts) still pin it.
 

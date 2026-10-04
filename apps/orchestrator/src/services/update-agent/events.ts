@@ -25,9 +25,13 @@ export const UPDATE_EVENTS = {
   "update.no_release": "poller",
   /** warn — the releases endpoint/asset fetch failed (transient). */
   "update.check_failed": "poller",
-  /** warn — cosign REFUSED the manifest signature. No row written. */
+  /** debug — WARP-3430: no signed channel pointer is published yet (HTTP 404);
+   *  discovery fell back to the GitHub releases API. */
+  "update.pointer_unavailable": "poller",
+  /** warn — cosign REFUSED the manifest (or channel pointer) signature. No row written. */
   "update.signature_failed": "poller",
-  /** warn — the manifest failed schema/parse gates. No row written. */
+  /** warn — the manifest (or channel pointer) failed schema/parse gates, or the
+   *  pointer and the manifest it names disagree. No row written. */
   "update.verify_failed": "poller",
   /** debug — the WARP-537 trust chain passed for the served release. */
   "update.manifest_verified": "poller",
@@ -35,6 +39,10 @@ export const UPDATE_EVENTS = {
   "update.channel_mismatch": "poller",
   /** debug — the served release is already tracked (append-only: one row per release). */
   "update.already_known": "poller",
+  /** debug — WARP-3430: the verified release is not strictly newer (signed builtAt)
+   *  than the installed one. No row written. Debug because it repeats every
+   *  tick for as long as the channel's pointer is behind what the box runs. */
+  "update.not_newer": "poller",
   /** info — new release verified; `pending` DeviceUpdate row created. */
   "update.pending_created": "poller",
   /** info — WARP-538 window stub (unwired since WARP-539 replaced it). */
@@ -57,6 +65,13 @@ export const UPDATE_EVENTS = {
   "update.rejected": "apply",
   /** warn — transient failure; row stays `verifying` for the next window. */
   "update.apply_retry": "apply",
+  /** warn — WARP-3430: a pending/verifying row went stale before it could apply
+   *  (not newer than what is installed, or for another channel than this box's
+   *  now): retired to `superseded`, nothing touched. Once per row. */
+  "update.stale_superseded": "apply",
+  /** warn — WARP-3430: the registry refused AUTH at pull time (the package is
+   *  private) — transient and retried, NOT an image-signature rejection. */
+  "update.registry_auth_failed": "apply",
   /** info — step 1 done: previous digests + configs + schema snapshotted. */
   "update.snapshot_taken": "apply",
   /** info — step 2 done: every release image pulled by digest. */

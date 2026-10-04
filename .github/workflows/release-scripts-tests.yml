@@ -1,8 +1,10 @@
 name: release-scripts-tests
 
 # WARP-1062 (audit item D, WARP-245 follow-up) — PR-lane coverage for the
-# release scripts: the SBOM aggregator (aggregate-sboms.py) and the release
-# manifest generator (gen-release-manifest.py). Their pytest suites previously
+# release scripts: the SBOM aggregator (aggregate-sboms.py), the release
+# manifest generator (gen-release-manifest.py) and, since WARP-3429, the image
+# secret scan (scan-ghcr-secrets.py) and the channel-pointer generator
+# (gen-channel-pointer.py). Their pytest suites previously
 # ran ONLY inside publish-release.yml, which triggers on push to main — so a
 # PR that broke SBOM aggregation merged green and the breakage surfaced at
 # release time. This runs the exact same command as the publish gate
@@ -37,7 +39,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - name: Run release-script tests (SBOM aggregate + manifest generator)
+      - name: Run release-script tests (SBOM, manifest, secret scan, channel pointer)
         run: |
           python3 -m pip install --upgrade pip pytest pyyaml
           python3 -m pytest scripts/release/ -q

@@ -5,19 +5,20 @@
  * Sign-out is a CLIENT-SIDE navigation (`logout()` then `router.push("/login")`
  * in the Sidebar, the Workspace shell and the change-password screen), so the
  * JS heap outlives the session. Every page reads through `useSWR` with keys
- * that name a resource and never a person (`/api/security/health`, the
- * Security feed's pages), all in SWR's one default cache. So on a shared tab
- * the next person to sign in got the previous person's camera and door-lock
- * rows on their FIRST render, and revalidation only replaced them afterwards.
+ * that name a resource and never a person (`/api/cameras/pins`, the events
+ * pages), all in SWR's one default cache. So on a shared tab the next person
+ * to sign in got the previous person's camera events and pinned cameras on
+ * their FIRST render, and revalidation only replaced them afterwards.
  *
- * These tests run the real AuthProvider, the real Security hooks, the real
- * default SWR cache and the real toast stack. Only the network is faked: a
- * one-box server whose session is whoever signed in last.
+ * These tests run the real AuthProvider, the real `useEvents` and
+ * `useCameraPins` hooks, the real default SWR cache and the real toast stack.
+ * Only the network is faked: a one-box server whose session is whoever signed
+ * in last.
  *
  *   1. A signs out with a poll of A's page on the wire, its answers land
  *      after the sign-out, and B signs in on the same React tree: none of B's
- *      renders, and nothing left in the cache, shows A's feed rows or source
- *      health. The feed is a `useSWRInfinite` key: SWR's key-filter
+ *      renders, and nothing left in the cache, shows A's events or pinned
+ *      cameras. The events are a `useSWRInfinite` key: SWR's key-filter
  *      `mutate(() => true, …)` does not reach it, and its page answers are
  *      written past the per-key markers a plain `useSWR` answer is checked
  *      against — only SWR's `unload()` discards them. Sign-out then asks the
@@ -37,11 +38,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import { SWRConfig, mutate, unload } from "swr";
 import { AuthProvider, authFetch, useAuth, type AuthUser } from "@/lib/auth";
-import { useSecurityFeed, useSecurityHealth, type SecurityFeedFilter } from "@/lib/hooks/useSecurity";
+import { useEvents } from "@/lib/hooks/useEvents";
+import { useCameraPins } from "@/lib/hooks/useCameraPins";
 import { ToastProvider, useToast } from "@/components/Toast";
 import { NotificationToaster } from "@/components/NotificationToaster";
 import { PENDING_COMPOSER_KEY, PENDING_PROMPT_KEY } from "@/lib/types";
-import type { SecurityEvent, SecurityEventsPage, SecurityHealthRow } from "@/lib/types";
+import type { CameraPinInfo, EventDetail, EventFilter, FilteredEventsResult } from "@/lib/types";
 
 // ── the fake box ────────────────────────────────────────────────────────────
 
@@ -53,39 +55,41 @@ type Who = keyof typeof USERS;
 /** lib/auth.tsx's cached-profile key (not exported); localStorage, so shared by every tab. */
 const USER_KEY = "droplet-auth-user";
 
-const ALICE_ROW = "Alice's front door unlocked";
-const ALICE_SOURCE = "Alice's cameras reporting";
+const ALICE_ROW = "Alice's driveway person";
+const ALICE_PIN = "Alice's driveway camera";
 const BOB_ROW = "Bob's garage motion";
-const BOB_SOURCE = "Bob's cameras reporting";
+const BOB_PIN = "Bob's garage camera";
 
-function event(summary: string): SecurityEvent {
+function event(description: string): EventDetail {
   return {
-    id: summary,
-    source: "frigate",
-    kind: "detection",
-    severity: "notice",
+    id: description,
     camera: "front",
-    labels: [],
-    cameraZones: [],
-    score: null,
-    startedAt: "2026-09-24T08:00:00.000Z",
-    endedAt: null,
-    summary,
-    frigateEventId: null,
+    label: "person",
+    score: 0.9,
+    startTime: 1_790_236_800, // 2026-09-24T08:00:00Z
+    endTime: null,
+    thumbnail: "",
+    hasClip: false,
+    hasSnapshot: false,
+    subLabel: null,
+    subLabelScore: null,
     zones: [],
-    observed: "live",
+    retainIndefinitely: false,
+    clipUrl: null,
+    snapshotUrl: null,
+    description,
   };
 }
-const FEED: Record<Who, SecurityEventsPage> = {
+const FEED: Record<Who, FilteredEventsResult> = {
   alice: { events: [event(ALICE_ROW)], nextCursor: null },
   bob: { events: [event(BOB_ROW)], nextCursor: null },
 };
-function health(detail: string): { sources: SecurityHealthRow[] } {
-  return { sources: [{ id: "camera_ingest", state: "ok", detail, lastSeenAt: null }] };
+function pins(cameraName: string): { pins: CameraPinInfo[] } {
+  return { pins: [{ cameraName, sortOrder: 0, createdAt: "2026-09-24T08:00:00.000Z" }] };
 }
-const HEALTH: Record<Who, { sources: SecurityHealthRow[] }> = {
-  alice: health(ALICE_SOURCE),
-  bob: health(BOB_SOURCE),
+const PINS: Record<Who, { pins: CameraPinInfo[] }> = {
+  alice: pins(ALICE_PIN),
+  bob: pins(BOB_PIN),
 };
 
 function json(body: unknown, status = 200): Response {
@@ -122,43 +126,43 @@ async function box(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
     session = who;
     return json({ user: USERS[who] });
   }
-  if (url.startsWith("/api/security/events") || url === "/api/security/health") {
+  if (url.startsWith("/api/cameras/events") || url === "/api/cameras/pins") {
     const who = session;
     if (!who) return json({ error: "unauthenticated" }, 401);
     const hold = who === "bob" ? holdBob : holdAlice;
     if (hold) await hold;
-    return json(url === "/api/security/health" ? HEALTH[who] : FEED[who]);
+    return json(url === "/api/cameras/pins" ? PINS[who] : FEED[who]);
   }
   return json({ error: "not found" }, 404);
 }
 
 // ── the tab ─────────────────────────────────────────────────────────────────
 
-/** Stable identity: `useSecurityFeed` keys its pages on it. */
-const FEED_FILTER: SecurityFeedFilter = { limit: 50 };
+/** Stable identity: `useEvents` keys its pages on it. */
+const FEED_FILTER: EventFilter = { limit: 50 };
 
-/** Every render of the Security page, tagged with who was signed in. */
-let renders: { viewer: string; rows: string[]; sources: string[] | null }[] = [];
+/** Every render of the page, tagged with who was signed in. */
+let renders: { viewer: string; rows: string[]; pins: string[] }[] = [];
 
-function SecurityPage({ viewer }: { viewer: string }) {
-  const feed = useSecurityFeed(FEED_FILTER);
-  const sourceHealth = useSecurityHealth();
-  const rows = feed.events.map((e) => e.summary);
-  const sources = sourceHealth.sources?.map((s) => s.detail) ?? null;
-  renders.push({ viewer, rows, sources });
+function FeedPage({ viewer }: { viewer: string }) {
+  const feed = useEvents(FEED_FILTER);
+  const pinned = useCameraPins();
+  const rows = feed.events.map((e) => e.description ?? e.label);
+  const pins = pinned.pins.map((p) => p.cameraName);
+  renders.push({ viewer, rows, pins });
   return (
-    <section aria-label="security">
+    <section aria-label="feed">
       <ul>{rows.map((r) => <li key={r}>{r}</li>)}</ul>
-      <p>{sources?.join(", ")}</p>
-      <button onClick={() => { feed.refresh(); sourceHealth.refresh(); }}>refresh</button>
+      <p>{pins.join(", ")}</p>
+      <button onClick={() => { feed.refresh(); pinned.refresh(); }}>refresh</button>
     </section>
   );
 }
 
 /** A read mounted outside the signed-in gate. Nothing in the dashboard is today: AuthGate unmounts every page on sign-out. */
-function HealthLine() {
-  const { sources } = useSecurityHealth();
-  return <p aria-label="left mounted">{sources?.map((s) => s.detail).join(", ")}</p>;
+function PinsLine() {
+  const { pins } = useCameraPins();
+  return <p aria-label="left mounted">{pins.map((p) => p.cameraName).join(", ")}</p>;
 }
 
 function Tab({ leftMounted = false }: { leftMounted?: boolean }) {
@@ -168,8 +172,8 @@ function Tab({ leftMounted = false }: { leftMounted?: boolean }) {
   return (
     <>
       {/* AuthGate's effect on sign-out: the page goes, /login shows. */}
-      {user ? <SecurityPage viewer={user.username} /> : <p>signed out</p>}
-      {leftMounted && <HealthLine />}
+      {user ? <FeedPage viewer={user.username} /> : <p>signed out</p>}
+      {leftMounted && <PinsLine />}
       <button onClick={() => void logout()}>sign out</button>
       <button onClick={() => void login("alice", "correct horse")}>sign A back in</button>
       <button onClick={() => void login("bob", "correct horse")}>sign in as bob</button>
@@ -241,21 +245,21 @@ afterEach(() => {
 });
 
 describe("WARP-2992 — the next person to sign in never sees the last one's data", () => {
-  it("B never renders A's Security rows or source health — not even an answer A's page asked for that lands after A signed out", async () => {
+  it("B never renders A's events or pinned cameras — not even an answer A's page asked for that lands after A signed out", async () => {
     renderTab();
     expect(await screen.findByText(ALICE_ROW)).toBeInTheDocument();
-    expect(await screen.findByText(ALICE_SOURCE)).toBeInTheDocument();
+    expect(await screen.findByText(ALICE_PIN)).toBeInTheDocument();
 
-    // A's page polls the feed and the health line every 15 s. Catch a poll on
-    // the wire — both reads held — as A signs out.
+    // A's page polls the events and the pins on a timer. Catch a poll on the
+    // wire — both reads held — as A signs out.
     let releaseAlice!: () => void;
     holdAlice = new Promise<void>((r) => (releaseAlice = r));
     const polled = asked.length;
     fireEvent.click(screen.getByText("refresh"));
     await waitFor(() => {
       const onTheWire = asked.slice(polled);
-      expect(onTheWire.some((url) => url.startsWith("/api/security/events"))).toBe(true);
-      expect(onTheWire).toContain("/api/security/health");
+      expect(onTheWire.some((url) => url.startsWith("/api/cameras/events"))).toBe(true);
+      expect(onTheWire).toContain("/api/cameras/pins");
     });
 
     fireEvent.click(screen.getByText("sign out"));
@@ -267,7 +271,7 @@ describe("WARP-2992 — the next person to sign in never sees the last one's dat
     expect(asked.slice(asked.lastIndexOf("/api/auth/logout") + 1)).toEqual([]);
 
     // The box answers A's held poll now, after the sign-out: A's rows, A's
-    // sources. Nothing of them may be written back into the tab.
+    // pins. Nothing of them may be written back into the tab.
     await act(async () => {
       releaseAlice();
       await new Promise((r) => setTimeout(r, 50));
@@ -279,16 +283,16 @@ describe("WARP-2992 — the next person to sign in never sees the last one's dat
     let releaseBob!: () => void;
     holdBob = new Promise<void>((r) => (releaseBob = r));
     fireEvent.click(screen.getByText("sign in as bob"));
-    await screen.findByRole("region", { name: "security" });
+    await screen.findByRole("region", { name: "feed" });
 
     const beforeBobsData = renders.filter((r) => r.viewer === "bob");
     expect(beforeBobsData.length).toBeGreaterThan(0);
-    expect(beforeBobsData[0]).toEqual({ viewer: "bob", rows: [], sources: null });
+    expect(beforeBobsData[0]).toEqual({ viewer: "bob", rows: [], pins: [] });
     expect(JSON.stringify(beforeBobsData)).not.toContain("Alice");
 
     await act(async () => releaseBob());
     expect(await screen.findByText(BOB_ROW)).toBeInTheDocument();
-    expect(await screen.findByText(BOB_SOURCE)).toBeInTheDocument();
+    expect(await screen.findByText(BOB_PIN)).toBeInTheDocument();
     expect(JSON.stringify(renders.filter((r) => r.viewer === "bob"))).not.toContain("Alice");
     expect(cachedData()).not.toContain("Alice");
   });
@@ -301,11 +305,11 @@ describe("WARP-2992 — the next person to sign in never sees the last one's dat
     Object.defineProperty(window, "location", {
       configurable: true,
       writable: true,
-      value: { ...realLocation, pathname: "/security", search: "", assign },
+      value: { ...realLocation, pathname: "/events", search: "", assign },
     });
     renderTab({ leftMounted: true });
     expect(await screen.findByText(ALICE_ROW)).toBeInTheDocument();
-    expect(screen.getByLabelText("left mounted").textContent).toBe(ALICE_SOURCE);
+    expect(screen.getByLabelText("left mounted").textContent).toBe(ALICE_PIN);
 
     fireEvent.click(screen.getByText("sign out"));
     expect(await screen.findByText("signed out")).toBeInTheDocument();
@@ -331,23 +335,23 @@ describe("WARP-2992 — the next person to sign in never sees the last one's dat
     Object.defineProperty(window, "location", {
       configurable: true,
       writable: true,
-      value: { ...realLocation, pathname: "/security", search: "", assign },
+      value: { ...realLocation, pathname: "/events", search: "", assign },
     });
     const polled = asked.length;
     fireEvent.click(screen.getByText("refresh"));
 
-    await waitFor(() => expect(assign).toHaveBeenCalledWith("/login?next=%2Fsecurity"));
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("/login?next=%2Fevents"));
     expect(cachedData()).not.toContain("Alice");
     await waitFor(() => expect(screen.queryByText(ALICE_ROW)).not.toBeInTheDocument());
-    expect(screen.queryByText(ALICE_SOURCE)).not.toBeInTheDocument();
+    expect(screen.queryByText(ALICE_PIN)).not.toBeInTheDocument();
 
     // Emptying the cache refetched nothing. A's page is still up until the
     // bounce lands, and a read now could only be one more 401 on the way.
     await act(async () => {
       await new Promise((r) => setTimeout(r, 50));
     });
-    const reads = asked.slice(polled).filter((url) => url.startsWith("/api/security"));
-    expect(reads.map((url) => url.split("?")[0]).sort()).toEqual(["/api/security/events", "/api/security/health"]);
+    const reads = asked.slice(polled).filter((url) => url.startsWith("/api/cameras"));
+    expect(reads.map((url) => url.split("?")[0]).sort()).toEqual(["/api/cameras/events", "/api/cameras/pins"]);
   });
 
   it("A's chat hand-offs do not survive A signing out", async () => {
@@ -380,11 +384,11 @@ describe("WARP-2992 — the next person to sign in never sees the last one's dat
     Object.defineProperty(window, "location", {
       configurable: true,
       writable: true,
-      value: { ...realLocation, pathname: "/security", search: "", assign },
+      value: { ...realLocation, pathname: "/events", search: "", assign },
     });
     fireEvent.click(screen.getByText("refresh"));
 
-    await waitFor(() => expect(assign).toHaveBeenCalledWith("/login?next=%2Fsecurity"));
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("/login?next=%2Fevents"));
     expect(sessionStorage.getItem(PENDING_PROMPT_KEY)).toBeNull();
     expect(sessionStorage.getItem(PENDING_COMPOSER_KEY)).toBeNull();
   });
@@ -400,7 +404,7 @@ describe("WARP-2992 — the next person to sign in never sees the last one's dat
     // What the first-run wizard has read so far.
     await mutate("/api/setup/network", { uplink: "wizard's uplink answer" }, { revalidate: false });
 
-    const res = await authFetch("/api/security/health");
+    const res = await authFetch("/api/cameras/pins");
 
     expect(res.status).toBe(401);
     // It reached the confirmed-dead verdict (the refresh had no cookie)...
@@ -445,7 +449,7 @@ describe("WARP-2992 — the next person to sign in never sees the last one's dat
   ])("B signing in %s empties the cache before B renders", async (_how, button, cachedProfile) => {
     renderTab();
     expect(await screen.findByText(ALICE_ROW)).toBeInTheDocument();
-    expect(await screen.findByText(ALICE_SOURCE)).toBeInTheDocument();
+    expect(await screen.findByText(ALICE_PIN)).toBeInTheDocument();
 
     // A's session ended where this tab's sign-out never ran, so the cache
     // still holds what was read as A when B signs in over A's profile.
@@ -459,7 +463,7 @@ describe("WARP-2992 — the next person to sign in never sees the last one's dat
 
     await act(async () => releaseBob());
     expect(await screen.findByText(BOB_ROW)).toBeInTheDocument();
-    expect(await screen.findByText(BOB_SOURCE)).toBeInTheDocument();
+    expect(await screen.findByText(BOB_PIN)).toBeInTheDocument();
     expect(JSON.stringify(renders.filter((r) => r.viewer === "bob"))).not.toContain("Alice");
   });
 

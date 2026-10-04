@@ -1,11 +1,11 @@
 /**
- * WARP-2979 (ADR-059 P4 §6.10, D19) — which model unattended work may use,
- * when that work must never leave the box: the ONE local-only resolver.
+ * WARP-2979 — which model unattended work may use, when that work must never
+ * leave the box: the ONE local-only resolver.
  *
  * Moved verbatim from services/filing/extract.ts (WARP-2730's
- * `resolveFilingModel`, which filing keeps as a re-export), so filing's
- * pre-flight and Droplet's incident summaries (security-narrator.service.ts)
- * ask the same question the same way. Nothing here sends a request.
+ * `resolveFilingModel`, which filing keeps as a re-export), so every
+ * unattended caller asks the same question the same way. Nothing here sends a
+ * request.
  *
  * 🔴 THE CLOUD REFUSAL IS NOT A PREFERENCE. A background job has no person
  * behind it, and the per-turn cloud decision answers "allowed" for exactly
@@ -43,8 +43,7 @@ export type ResolvedModel =
  * production and 404'd upstream, which turned every analysis into a silent
  * default. A worker that writes must fail loudly.
  *
- * `refuseCloudActive` (WARP-2979, the incident narrator's opt-in; filing
- * never sets it): when the owner's ACTIVE chat model is one the catalogue
+ * `refuseCloudActive` (an opt-in; filing never sets it): when the owner's ACTIVE chat model is one the catalogue
  * lists under a cloud provider, answer `cloud_model_refused` instead of
  * falling back to a local model. With a cloud model active the box's one
  * local model may not be loaded (WARP-3047's one-model rule), so background

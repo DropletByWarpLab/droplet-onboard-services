@@ -11,14 +11,10 @@
  *
  *   WORK      Overview · Ask AI · Files · Messages · Email · Calendar · Workshop
  *   BUSINESS  Insights [Brief, Reports] · Customers · Projects [Money] · Practice
- *   SYSTEMS   Security · Cameras [Events] · Doors · Network [Voice, Remote access] · Devices
+ *   SYSTEMS   Cameras [Events] · Network [Voice, Remote access] · Devices
  *
- * Security (WARP-2977, ADR-059) landed on stage after this tree was cut and is
- * its own module, so it is a fifteenth row rather than a child of Cameras.
- * Workshop (WARP-3063) is the sixteenth, and only owner/admin see it: the
+ * Workshop (WARP-3063) is the fifteenth row, and only owner/admin see it: the
  * tuck behind Settings had removed it from the product.
- * Doors (ADR-055 P4b) is the seventeenth, owner/admin only, and in no box's
- * nav until DOORS_ENABLED is set.
  *   ADMIN     Settings
  *
  * Everything else keeps its route and moves behind Settings as the WARP-1807
@@ -68,18 +64,17 @@ describe("the tree is four groups (WARP-2967)", () => {
     ]);
   });
 
-  it("renders at most seventeen top-level rows with everything switched on", () => {
-    // The ticket's ≤ 14, plus WARP-2977's Security row, plus WARP-3063's
-    // Workshop row, plus ADR-055 P4b's Doors row. Workshop's owner/admin gate
-    // is pinned in workshop.nav.test.ts, Doors' in doors.module-gate.test.tsx.
+  it("renders at most fifteen top-level rows with everything switched on", () => {
+    // The ticket's ≤ 14, plus WARP-3063's Workshop row. Workshop's owner/admin
+    // gate is pinned in workshop.nav.test.ts.
     const rows = NAV_GROUPS.flatMap((g) => visible(g.label)).length;
-    expect(rows).toBeLessThanOrEqual(17);
+    expect(rows).toBeLessThanOrEqual(15);
   });
 
   it.each([
     ["Work", ["/", "/chat", "/files", "/messages", "/email", "/calendar", "/workshop"]],
     ["Business", ["/business", "/customers", "/projects", "/practice"]],
-    ["Systems", ["/security", "/cameras", "/doors", "/network", "/devices"]],
+    ["Systems", ["/cameras", "/network", "/devices"]],
     ["Admin", ["/settings"]],
   ])("%s shows exactly %j", (label, hrefs) => {
     expect(visible(label).map((i) => i.href)).toEqual(hrefs);
@@ -118,7 +113,7 @@ describe("the tree is four groups (WARP-2967)", () => {
   it("promotes nothing without a module of its own, and never past a role gate", () => {
     // Events is part of Cameras (no module), Remote access shares Network's.
     const sys = visible("Systems", "owner", (id) => id !== "cameras" && id !== "network");
-    expect(sys.map((i) => i.href)).toEqual(["/security", "/doors", "/voice", "/devices"]);
+    expect(sys.map((i) => i.href)).toEqual(["/voice", "/devices"]);
     // Insights is role-gated: a guest gets neither it nor its children.
     const biz = visible("Business", "guest").map((i) => i.href);
     expect(biz).not.toContain("/reports");
@@ -164,6 +159,7 @@ describe("every tucked destination has a way back in (WARP-2967)", () => {
         "/models",
         "/routines",
         "/settings/coding-tools",
+        "/settings/telemetry",
         "/tools",
         "/trust",
         "/users",

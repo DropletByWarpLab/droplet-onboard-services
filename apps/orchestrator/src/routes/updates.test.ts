@@ -28,6 +28,7 @@ vi.mock("../config.js", () => ({
   config: {
     AUTH_ENABLED: false,
     DROPLET_OTA_RELEASES_URL: "https://releases.test/latest",
+    DROPLET_OTA_DOWNLOAD_BASE: "https://downloads.test/releases/download",
     DROPLET_OTA_GITHUB_TOKEN: "",
     DROPLET_OTA_APPLY_SCRIPT: "",
     DROPLET_OTA_COMPOSE_FILE: "/opt/droplet/docker/docker-compose.yml",
@@ -395,6 +396,7 @@ describe("POST /api/updates/check-now", () => {
     expect(checkForUpdateMock).toHaveBeenCalledWith(
       expect.objectContaining({
         releasesLatestUrl: "https://releases.test/latest",
+        downloadBase: "https://downloads.test/releases/download",
         githubToken: undefined,
       }),
     );
@@ -473,7 +475,7 @@ describe("POST /api/updates/apply-now", () => {
     expect(res.status).toBe(202);
     expect(res.body).toEqual({ started: true, deviceUpdateId: "du-pending" });
     expect(applyPendingUpdateMock).toHaveBeenCalledWith(
-      expect.objectContaining({ runner, releasesLatestUrl: "https://releases.test/latest" }),
+      expect.objectContaining({ runner, downloadBase: "https://downloads.test/releases/download" }),
     );
     expect(recordActivityMock).toHaveBeenCalledWith(
       expect.objectContaining({

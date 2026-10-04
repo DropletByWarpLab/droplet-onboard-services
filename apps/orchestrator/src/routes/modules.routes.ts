@@ -104,12 +104,7 @@ export function createModulesRouter(
     try {
       if (!userId(req)) { res.status(401).json({ error: "auth_required" }); return; }
       const view = await getModulesView(prisma, cfg);
-      // Never name a module the view leaves out (ADR-055: an unavailable module
-      // that is not listed is ABSENT). The §3 resolver's owner bypass lists every
-      // gateable id, so without this an owner's payload would still carry `doors`
-      // on a box that has it switched off at the deploy level.
-      const listed = new Set(view.modules.map((m) => m.id));
-      const effectiveForUser = (await resolveEffectiveForUser(req))?.filter((f) => listed.has(f.moduleId)) ?? null;
+      const effectiveForUser = (await resolveEffectiveForUser(req)) ?? null;
       // `?.length`, not a bare truthiness check: `[]` is truthy, so the bare
       // form SENT an empty array while the client's contract says the field is
       // omitted when unresolvable. The resolver's always-on floor now makes a

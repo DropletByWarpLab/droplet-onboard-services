@@ -143,9 +143,9 @@ export function createServer(
       };
     }
 
-    // WARP-2979 (§6.13) — a withheld domain is refused off the box before any
-    // role check or handler: a client that calls it by name without listing
-    // it first gets nothing from it.
+    // A domain withheld off the box is refused before any role check or
+    // handler: a client that calls it by name without listing it first gets
+    // nothing from it.
     if (!trustedPrincipal && isWithheldOffBox(tool)) {
       return {
         content: [

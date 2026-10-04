@@ -134,6 +134,13 @@ case "${1:-}" in
     esac
     exit 0
     ;;
+  pull)
+    # WARP-3503: what `docker pull` would read as its registry credentials.
+    [ -z "${DOCKER_CONFIG:-}" ] || cp "$DOCKER_CONFIG/config.json" "$DOCKER_STUB_DIR/pull-config.json" 2>/dev/null || true
+    # WARP-3430: scripted `docker pull` failure — stderr text + exit code.
+    [ -z "${DOCKER_STUB_PULL_STDERR:-}" ] || printf '%s\n' "$DOCKER_STUB_PULL_STDERR" >&2
+    exit "${DOCKER_STUB_PULL_EXIT:-0}"
+    ;;
   run)
     case "$*" in
       # WARP-2995 reconcile-env: scripted host report + exit code.
@@ -154,7 +161,17 @@ cat > "$STUB_BIN/cosign" <<EOF
 #!/usr/bin/env bash
 # Fake cosign for apply-update.test.sh (WARP-244): records the argv into the
 # shared calls.log and obeys COSIGN_STUB_EXIT so tests drive both verdicts.
+# COSIGN_STUB_STDERR (WARP-3430) scripts what a refusal says on stderr, so the
+# registry-auth vs image-verify classification can be driven both ways.
 printf 'cosign %s\n' "\$*" >> "$STUB_DIR/calls.log"
+# WARP-3503: record the registry credentials config the helper handed cosign
+# (its content, its directory, its mode) so tests can pin the shape.
+if [ -n "\${DOCKER_CONFIG:-}" ] && [ -f "\$DOCKER_CONFIG/config.json" ]; then
+  cp "\$DOCKER_CONFIG/config.json" "$STUB_DIR/cosign-config.json"
+  printf '%s\n' "\$DOCKER_CONFIG" > "$STUB_DIR/cosign-config-dir"
+  ls -l "\$DOCKER_CONFIG/config.json" | cut -c1-10 > "$STUB_DIR/cosign-config-mode"
+fi
+[ -z "\${COSIGN_STUB_STDERR:-}" ] || printf '%s\n' "\$COSIGN_STUB_STDERR" >&2
 exit "\${COSIGN_STUB_EXIT:-0}"
 EOF
 chmod +x "$STUB_BIN/cosign"
@@ -178,6 +195,9 @@ run_apply() {
   DOCKER_STUB_RUN_OUT="${DOCKER_STUB_RUN_OUT:-}" \
   DOCKER_STUB_RUN_EXIT="${DOCKER_STUB_RUN_EXIT:-0}" \
   COSIGN_STUB_EXIT="${COSIGN_STUB_EXIT:-0}" \
+  COSIGN_STUB_STDERR="${COSIGN_STUB_STDERR:-}" \
+  DOCKER_STUB_PULL_EXIT="${DOCKER_STUB_PULL_EXIT:-0}" \
+  DOCKER_STUB_PULL_STDERR="${DOCKER_STUB_PULL_STDERR:-}" \
   DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
   DROPLET_OTA_CONFIG_ROOT="${DROPLET_OTA_CONFIG_ROOT:-}" \
   DROPLET_OTA_HOST_IMAGE="${DROPLET_OTA_HOST_IMAGE-$HOST_IMG}" \
@@ -903,6 +923,258 @@ if DROPLET_OTA_APPLY_DRY_RUN=1 DROPLET_OTA_UPDATES_DIR="$UPDATES_DIR" \
   fail "pull-images must refuse when neither cosign nor a pinned host image is available"
 else
   pass "pull-images refuses without a pinned host image to run cosign from"
+fi
+
+# 5e. WARP-3430: a registry that refuses AUTH (the package is still private)
+#     is NOT a bad signature. Each refusal wording GHCR/docker use gets the
+#     distinct `registry-auth:` prefix naming the image — never `image-verify:`
+#     (apply.ts rejects on that one and would never retry) — and no pull ran.
+for AUTH_TEXT in \
+  "UNAUTHORIZED: authentication required" \
+  "GET https://ghcr.io/v2/token: DENIED: denied" \
+  "error: getting signature bundle: unexpected status 401 Unauthorized"; do
+  stub_reset
+  AUTH_OUT="$(COSIGN_STUB_EXIT=1 COSIGN_STUB_STDERR="$AUTH_TEXT" run_apply pull-images --images "$REL_ORCH" 2>&1)"
+  AUTH_RC=$?
+  if [ "$AUTH_RC" -ne 0 ] \
+     && printf '%s' "$AUTH_OUT" | grep -q "registry-auth:.*$REL_ORCH.*private" \
+     && ! printf '%s' "$AUTH_OUT" | grep -q "image-verify:" \
+     && ! grep -q "^pull " "$STUB_DIR/calls.log" 2>/dev/null; then
+    pass "cosign auth refusal ($AUTH_TEXT) → registry-auth: naming the image, not image-verify:, no pull"
+  else
+    fail "cosign auth refusal ($AUTH_TEXT) misclassified (rc=$AUTH_RC, out: $AUTH_OUT)"
+  fi
+done
+
+# 5f. A genuine signature failure that merely mentions a registry stays
+#     `image-verify:` — the auth classification must not swallow real refusals.
+stub_reset
+SIG_OUT="$(COSIGN_STUB_EXIT=1 COSIGN_STUB_STDERR="Error: no matching signatures: none of the expected identities matched ghcr.io/x/y" \
+  run_apply pull-images --images "$REL_ORCH" 2>&1)"
+SIG_RC=$?
+if [ "$SIG_RC" -ne 0 ] && printf '%s' "$SIG_OUT" | grep -q "image-verify:" \
+   && ! printf '%s' "$SIG_OUT" | grep -q "registry-auth:"; then
+  pass "a real signature failure stays image-verify: (not reclassified as registry-auth)"
+else
+  fail "signature failure misclassified (rc=$SIG_RC, out: $SIG_OUT)"
+fi
+
+# 5g. The pull itself refused auth (cosign passed): registry-auth:, non-zero.
+stub_reset
+PULL_AUTH_OUT="$(DOCKER_STUB_PULL_EXIT=1 \
+  DOCKER_STUB_PULL_STDERR="Error response from daemon: pull access denied for ${REL_ORCH%@*}, repository does not exist or may require 'docker login': denied: requested access to the resource is denied" \
+  run_apply pull-images --images "$REL_ORCH" 2>&1)"
+PULL_AUTH_RC=$?
+if [ "$PULL_AUTH_RC" -ne 0 ] \
+   && printf '%s' "$PULL_AUTH_OUT" | grep -q "registry-auth:.*$REL_ORCH.*private" \
+   && ! printf '%s' "$PULL_AUTH_OUT" | grep -q "image-verify:"; then
+  pass "docker pull access denied → registry-auth: naming the image"
+else
+  fail "docker pull auth refusal misclassified (rc=$PULL_AUTH_RC, out: $PULL_AUTH_OUT)"
+fi
+
+# 5h. Any other pull failure keeps its old shape: docker's own stderr and
+#     docker's exit status, with neither canonical marker (apply.ts retries it
+#     as a plain transient error).
+stub_reset
+PULL_NET_OUT="$(DOCKER_STUB_PULL_EXIT=7 \
+  DOCKER_STUB_PULL_STDERR="Error response from daemon: Get \"https://ghcr.io/v2/\": dial tcp: lookup ghcr.io: no such host" \
+  run_apply pull-images --images "$REL_ORCH" 2>&1)"
+PULL_NET_RC=$?
+if [ "$PULL_NET_RC" -eq 7 ] \
+   && printf '%s' "$PULL_NET_OUT" | grep -q "no such host" \
+   && ! printf '%s' "$PULL_NET_OUT" | grep -q "registry-auth:\|image-verify:"; then
+  pass "a non-auth pull failure keeps docker's stderr and exit status, no canonical marker"
+else
+  fail "non-auth pull failure changed shape (rc=$PULL_NET_RC, out: $PULL_NET_OUT)"
+fi
+
+# 5i. The auth scan must not read the IMAGE REF as an error. A digest is hex,
+#     so `a401b…` has `401` between two non-digits — a bare `401` grep took
+#     that for an HTTP status, and cosign echoes the ref in a REAL signature
+#     failure, which would have been retried forever instead of rejected.
+HEX_401="a401b$(printf 'c%.0s' $(seq 59))"
+REL_401="ghcr.io/dropletbywarplab/orchestrator@sha256:$HEX_401"
+
+# A real signature failure naming the ref (and, separately, only its digest)
+# stays image-verify:.
+for SIG_TEXT in \
+  "Error: no matching signatures for $REL_401: none of the expected identities matched" \
+  "Error: no matching signatures: digest sha256:$HEX_401 has no signature by the expected identity"; do
+  stub_reset
+  SIG401_OUT="$(COSIGN_STUB_EXIT=1 COSIGN_STUB_STDERR="$SIG_TEXT" run_apply pull-images --images "$REL_401" 2>&1)"
+  SIG401_RC=$?
+  if [ "$SIG401_RC" -ne 0 ] && printf '%s' "$SIG401_OUT" | grep -q "image-verify:" \
+     && ! printf '%s' "$SIG401_OUT" | grep -q "registry-auth:"; then
+    pass "a signature failure echoing a digest that contains 401 stays image-verify:"
+  else
+    fail "digest containing 401 misread as registry-auth (rc=$SIG401_RC, out: $SIG401_OUT)"
+  fi
+done
+
+# A non-auth pull failure echoing that ref keeps docker's status, no marker.
+stub_reset
+NET401_OUT="$(DOCKER_STUB_PULL_EXIT=7 \
+  DOCKER_STUB_PULL_STDERR="Error response from daemon: error pulling image $REL_401: connection refused" \
+  run_apply pull-images --images "$REL_401" 2>&1)"
+NET401_RC=$?
+if [ "$NET401_RC" -eq 7 ] && ! printf '%s' "$NET401_OUT" | grep -q "registry-auth:\|image-verify:"; then
+  pass "a network pull failure echoing a digest that contains 401 is not registry-auth"
+else
+  fail "digest containing 401 misread on pull (rc=$NET401_RC, out: $NET401_OUT)"
+fi
+
+# A real auth refusal for that same ref is still registry-auth:, by its token
+# or by an explicit status 401 (no other token on the line).
+for AUTH401_TEXT in \
+  "UNAUTHORIZED: authentication required for $REL_401" \
+  "GET https://ghcr.io/v2/dropletbywarplab/orchestrator/manifests/sha256:$HEX_401: unexpected status code 401 (HEAD responses have no body, use GET for details)"; do
+  stub_reset
+  AUTH401_OUT="$(COSIGN_STUB_EXIT=1 COSIGN_STUB_STDERR="$AUTH401_TEXT" run_apply pull-images --images "$REL_401" 2>&1)"
+  AUTH401_RC=$?
+  if [ "$AUTH401_RC" -ne 0 ] && printf '%s' "$AUTH401_OUT" | grep -q "registry-auth:.*$REL_401" \
+     && ! printf '%s' "$AUTH401_OUT" | grep -q "image-verify:"; then
+    pass "a real auth refusal for a ref containing 401 is still registry-auth: ($AUTH401_TEXT)"
+  else
+    fail "auth refusal for a ref containing 401 misclassified (rc=$AUTH401_RC, out: $AUTH401_OUT)"
+  fi
+done
+
+# 5j. WARP-3503 (ADR-068): the images are private. The orchestrator hands
+#     pull-images a short-lived HQ device token and the HQ host in the env; the
+#     helper writes {"auths":{"<hq-host>":{"registrytoken":"<JWT>"}}} into its
+#     ephemeral DOCKER_CONFIG, which cosign and `docker pull` both read.
+HQ_HOST="registry.hq.example"
+HQ_JWT="eyJhbGciOiJFUzI1NiIsImtpZCI6ImsxIn0.eyJzdWIiOiJ4In0.c2lnbmF0dXJl"
+HQ_ORCH="$HQ_HOST/droplet-orchestrator@sha256:$HEX_A"
+HQ_DASH="$HQ_HOST/droplet-web-dashboard@sha256:$HEX_B"
+
+stub_reset
+HQ_OUT="$(DROPLET_OTA_REGISTRY_TOKEN="$HQ_JWT" DROPLET_OTA_REGISTRY_HOST="$HQ_HOST" \
+  run_apply pull-images --images "$HQ_ORCH" "$HQ_DASH" 2>&1)"
+HQ_RC=$?
+HQ_CFG_WANT="$(printf '{"auths":{"%s":{"registrytoken":"%s"}}}' "$HQ_HOST" "$HQ_JWT")"
+if [ "$HQ_RC" -eq 0 ] && [ "$(cat "$STUB_DIR/cosign-config.json" 2>/dev/null)" = "$HQ_CFG_WANT" ]; then
+  pass "HQ token → DOCKER_CONFIG is {auths:{<hq-host>:{registrytoken:<JWT>}}} when cosign runs"
+else
+  fail "HQ DOCKER_CONFIG shape wrong (rc=$HQ_RC, got: $(cat "$STUB_DIR/cosign-config.json" 2>/dev/null))"
+fi
+if [ "$(cat "$STUB_DIR/pull-config.json" 2>/dev/null)" = "$HQ_CFG_WANT" ]; then
+  pass "docker pull reads the same credentials (one entry for two images on one host)"
+else
+  fail "docker pull did not see the HQ config (got: $(cat "$STUB_DIR/pull-config.json" 2>/dev/null))"
+fi
+if [ "$(cat "$STUB_DIR/cosign-config-mode" 2>/dev/null)" = "-rw-------" ]; then
+  pass "the credentials file is 0600"
+else
+  fail "credentials file mode is $(cat "$STUB_DIR/cosign-config-mode" 2>/dev/null), want -rw-------"
+fi
+HQ_CFG_DIR="$(cat "$STUB_DIR/cosign-config-dir" 2>/dev/null)"
+if [ -n "$HQ_CFG_DIR" ] && [ ! -e "$HQ_CFG_DIR" ]; then
+  pass "the ephemeral credentials dir is removed when the helper exits"
+else
+  fail "credentials dir $HQ_CFG_DIR still exists after the helper exited"
+fi
+if [ "$(grep -c '^cosign verify' "$STUB_DIR/calls.log")" -eq 2 ] && [ "$(grep -c '^pull ' "$STUB_DIR/calls.log")" -eq 2 ] \
+   && grep -q "^pull $HQ_ORCH$" "$STUB_DIR/calls.log" && grep -q "^pull $HQ_DASH$" "$STUB_DIR/calls.log"; then
+  pass "both HQ-host refs are verified and pulled by digest (the host rewrite)"
+else
+  fail "HQ refs not verified/pulled as given (calls: $(cat "$STUB_DIR/calls.log"))"
+fi
+if printf '%s' "$HQ_OUT" | grep -q "$HQ_JWT" || grep -q "$HQ_JWT" "$STUB_DIR/calls.log"; then
+  fail "the HQ token leaked into the helper's output or a command line"
+else
+  pass "the HQ token is in no output and no argv (calls.log)"
+fi
+
+# The token goes to the HQ host and nowhere else: a ref naming another host
+# (a manifest pointing elsewhere) gets no credential at all.
+stub_reset
+OTHER_OUT="$(DROPLET_OTA_REGISTRY_TOKEN="$HQ_JWT" DROPLET_OTA_REGISTRY_HOST="$HQ_HOST" \
+  run_apply pull-images --images "other.example/droplet-orchestrator@sha256:$HEX_A" 2>&1)"
+if [ ! -e "$STUB_DIR/cosign-config.json" ] && [ ! -e "$STUB_DIR/pull-config.json" ] \
+   && ! printf '%s' "$OTHER_OUT" | grep -q "$HQ_JWT"; then
+  pass "a ref on another host gets no HQ token (no credentials file at all)"
+else
+  fail "the HQ token was written for a host that is not DROPLET_OTA_REGISTRY_HOST"
+fi
+
+# ...and never to ghcr.io, even beside the HQ host. Lab fallback: the GitHub
+# token covers ghcr.io refs only.
+stub_reset
+DROPLET_OTA_REGISTRY_TOKEN="$HQ_JWT" DROPLET_OTA_REGISTRY_HOST="$HQ_HOST" DROPLET_OTA_GITHUB_TOKEN=labtok \
+  run_apply pull-images --images "$HQ_ORCH" "$REL_DASH" >/dev/null 2>&1
+GH_AUTH="$(printf 'x-access-token:labtok' | base64 | tr -d '\n')"
+MIXED_WANT="$(printf '{"auths":{"%s":{"registrytoken":"%s"},"ghcr.io":{"auth":"%s"}}}' "$HQ_HOST" "$HQ_JWT" "$GH_AUTH")"
+if [ "$(cat "$STUB_DIR/cosign-config.json" 2>/dev/null)" = "$MIXED_WANT" ]; then
+  pass "mixed refs: registrytoken for the HQ host, the lab token for ghcr.io, each only for its own host"
+else
+  fail "mixed config wrong (got: $(cat "$STUB_DIR/cosign-config.json" 2>/dev/null))"
+fi
+
+stub_reset
+DROPLET_OTA_GITHUB_TOKEN=labtok run_apply pull-images --images "$REL_ORCH" >/dev/null 2>&1
+LAB_WANT="$(printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$GH_AUTH")"
+if [ "$(cat "$STUB_DIR/cosign-config.json" 2>/dev/null)" = "$LAB_WANT" ]; then
+  pass "lab fallback: DROPLET_OTA_GITHUB_TOKEN still authenticates ghcr.io refs"
+else
+  fail "lab ghcr.io config wrong (got: $(cat "$STUB_DIR/cosign-config.json" 2>/dev/null))"
+fi
+
+stub_reset
+DROPLET_OTA_REGISTRY_TOKEN="$HQ_JWT" DROPLET_OTA_REGISTRY_HOST="$HQ_HOST" \
+  run_apply pull-images --images "$REL_ORCH" >/dev/null 2>&1
+if [ ! -e "$STUB_DIR/cosign-config.json" ]; then
+  pass "the HQ token is never sent to ghcr.io (a ghcr.io ref with only an HQ token runs unauthenticated)"
+else
+  fail "an HQ token was written for a ghcr.io ref: $(cat "$STUB_DIR/cosign-config.json")"
+fi
+
+# No credentials at all: no DOCKER_CONFIG, unchanged behaviour.
+stub_reset
+run_apply pull-images --images "$HQ_ORCH" >/dev/null 2>&1
+if [ ! -e "$STUB_DIR/cosign-config.json" ] && [ ! -e "$STUB_DIR/pull-config.json" ]; then
+  pass "no token env → no credentials file, the pull runs unauthenticated"
+else
+  fail "a credentials file appeared with no token configured"
+fi
+
+# A token that is not a JWT-shaped string, or with no host to pin it to, is
+# refused before anything runs — and the refusal never echoes the token.
+for BAD in 'a"b' 'tok en' '{"x":1}'; do
+  stub_reset
+  BAD_OUT="$(DROPLET_OTA_REGISTRY_TOKEN="$BAD" DROPLET_OTA_REGISTRY_HOST="$HQ_HOST" \
+    run_apply pull-images --images "$HQ_ORCH" 2>&1)"
+  BAD_RC=$?
+  if [ "$BAD_RC" -ne 0 ] && printf '%s' "$BAD_OUT" | grep -q "invalid DROPLET_OTA_REGISTRY_TOKEN" \
+     && ! printf '%s' "$BAD_OUT" | grep -qF -- "$BAD" && ! grep -q "^cosign\|^pull " "$STUB_DIR/calls.log" 2>/dev/null; then
+    pass "a malformed HQ token is refused without being echoed or used"
+  else
+    fail "malformed HQ token handled wrong (rc=$BAD_RC, out: $BAD_OUT)"
+  fi
+done
+stub_reset
+NOHOST_OUT="$(DROPLET_OTA_REGISTRY_TOKEN="$HQ_JWT" run_apply pull-images --images "$HQ_ORCH" 2>&1)"
+NOHOST_RC=$?
+if [ "$NOHOST_RC" -ne 0 ] && printf '%s' "$NOHOST_OUT" | grep -q "needs a valid DROPLET_OTA_REGISTRY_HOST" \
+   && ! printf '%s' "$NOHOST_OUT" | grep -q "$HQ_JWT"; then
+  pass "an HQ token with no DROPLET_OTA_REGISTRY_HOST is refused"
+else
+  fail "token without a host handled wrong (rc=$NOHOST_RC, out: $NOHOST_OUT)"
+fi
+
+# A registry that rejects the HQ token is still the retryable registry-auth:
+# refusal (apply.ts keeps the current release), now naming the HQ device token.
+stub_reset
+HQ401_OUT="$(DROPLET_OTA_REGISTRY_TOKEN="$HQ_JWT" DROPLET_OTA_REGISTRY_HOST="$HQ_HOST" \
+  COSIGN_STUB_EXIT=1 COSIGN_STUB_STDERR="GET https://$HQ_HOST/v2/: UNAUTHORIZED: authentication required" \
+  run_apply pull-images --images "$HQ_ORCH" 2>&1)"
+HQ401_RC=$?
+if [ "$HQ401_RC" -ne 0 ] && printf '%s' "$HQ401_OUT" | grep -q "registry-auth:.*$HQ_ORCH.*HQ device token" \
+   && ! printf '%s' "$HQ401_OUT" | grep -q "image-verify:" && ! printf '%s' "$HQ401_OUT" | grep -q "$HQ_JWT"; then
+  pass "HQ registry refusing the token → registry-auth: (retryable), token not echoed"
+else
+  fail "HQ 401 misclassified (rc=$HQ401_RC, out: $HQ401_OUT)"
 fi
 
 # =============================================================================

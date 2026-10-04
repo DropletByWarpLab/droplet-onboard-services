@@ -30,7 +30,7 @@ describe("list_recent_files", () => {
   // WARP-1012 — regression. The `_service:mcp` principal must assert the
   // acting user via X-Nextcloud-User on every files-API call; the route's
   // getUser() hard-rejects the service principal without it (the live
-  // "nextcloud returned 401"). Token alone is NOT enough.
+  // "the File Store returned 401"). Token alone is NOT enough.
   it("calls /recents?limit=30 with BOTH per-user headers", async () => {
     const get = vi.fn().mockResolvedValue(new Response("[]", { status: 200 }));
     await listRecentFiles.handler({}, ctxWith(get, "tok"));
@@ -51,7 +51,7 @@ describe("list_recent_files", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.error.code).toBe("RECENT_FAILED");
-      expect(r.error.message).toBe("nextcloud returned 401");
+      expect(r.error.message).toBe("the File Store returned 401");
     }
   });
 });

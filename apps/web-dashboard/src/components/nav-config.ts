@@ -22,7 +22,6 @@ import {
   ChartColumn,
   Repeat,
   Cpu,
-  DoorOpen,
   Download,
   Film,
   FlaskConical,
@@ -38,17 +37,15 @@ import {
   Lightbulb,
   LayoutDashboard,
   Mail,
-  MapPin,
   MessageSquare,
   MessagesSquare,
   Mic,
   Network,
+  Radio,
   KeyRound,
   ScrollText,
   Settings,
-  Shield,
   ShieldCheck,
-  SlidersHorizontal,
   Sparkles,
   Stethoscope,
   Terminal,
@@ -85,10 +82,10 @@ export type NavItem = {
   href: string;
   label: string;
   /**
-   * WARP-2978 — the accessible name, when the visible label alone would
-   * collide out of context (Security's "Settings" child beside the app's own
-   * Settings link in the mobile drawer). Must CONTAIN the visible label
-   * (WCAG 2.5.3). Default: the label is the name.
+   * The accessible name, when the visible label alone would collide out of
+   * context (a child's "Settings" beside the app's own Settings link in the
+   * mobile drawer). Must CONTAIN the visible label (WCAG 2.5.3). Default: the
+   * label is the name.
    */
   ariaLabel?: string;
   icon: LucideIcon;
@@ -227,11 +224,11 @@ export type NavGroup = {
 
      WORK      Overview · Ask AI · Files · Messages · Email · Calendar · Workshop
      BUSINESS  Insights [Brief, Reports] · Customers · Projects [Money] · Practice
-     SYSTEMS   Security · Cameras [Events] · Network [Voice, Remote access] · Devices
+     SYSTEMS   Cameras [Events] · Network [Voice, Remote access] · Devices
      ADMIN     Settings
 
-   16 rows all-on for an owner: the ticket's ~14, plus Security (WARP-2977)
-   and Workshop (WARP-3063, owner/admin only). Everything else keeps its route and
+   15 rows all-on for an owner: the ticket's ~14, plus Workshop (WARP-3063,
+   owner/admin only). Everything else keeps its route and
    moves behind Settings as the WARP-1807 tuck — `hidden: true` plus a
    `settingsSection`, which is what `settingsGroups()` below renders from.
 
@@ -532,38 +529,6 @@ export const NAV_GROUPS: NavGroup[] = [
       // index; its default prefix match keeps it lit on /cameras and the
       // /cameras/[name] detail pages, but NOT on the /events sibling (which
       // owns its own active state).
-      //
-      // WARP-2977 (ADR-059) — Security sits ABOVE Cameras: it is the one
-      // place camera detections, camera health and network warnings land,
-      // and Cameras is one of its sources. Its own module, so a person can
-      // hold it without holding cameras (and vice versa).
-      //
-      // WARP-2977 P2b — Areas and Settings are part of the Security
-      // section: they inherit its module gate (moduleForPath), carry no
-      // `roles` (both pages are readable at view — manage only adds
-      // controls), and live under /security, never /settings (ALWAYS_ON,
-      // which would escape ModuleRouteGuard). Not destinations in SPACES, so
-      // the Workspace shell shows them as the view pills
-      // "Security · Areas · Patterns · Settings".
-      //
-      // WARP-2980 (P5) — Patterns: what normal looks like for each area and
-      // camera. Read-only at view, like Areas.
-      //
-      // WARP-2978 (ADR-059 P3 D33): the settings page holds the opening hours
-      // AND who is told about alerts, so its label is Settings. Incident pages
-      // (/security/incidents/<id>) are details, not nav entries; the /security
-      // prefix gates them.
-      {
-        href: "/security",
-        label: "Security",
-        icon: Shield,
-        requiresModule: "security",
-        children: [
-          { href: "/security/zones", label: "Areas", icon: MapPin },
-          { href: "/security/patterns", label: "Patterns", icon: Activity },
-          { href: "/security/settings", label: "Settings", ariaLabel: "Security settings", icon: SlidersHorizontal },
-        ],
-      },
       {
         href: "/cameras",
         label: "Cameras",
@@ -581,29 +546,6 @@ export const NAV_GROUPS: NavGroup[] = [
             keywords: ["clips", "recordings", "footage", "detections"],
           },
         ],
-      },
-      // ADR-055 (P4b) — Doors: the doors this box knows about, what each last
-      // reported and when, and the log of what happened at them. Its own
-      // module (`doors`), which SHIPS DARK: DOORS_ENABLED is off by default and
-      // the module is then ABSENT from GET /api/modules rather than listed as
-      // off, so `isModuleEffective` treats "absent" as off for it and fails
-      // CLOSED while the probe is unresolved (see `ABSENT_UNLESS_LISTED` in
-      // lib/dark-modules.ts); the page is a plain 404 when off. Owner/admin only, mirroring
-      // the API's read floor (`DOORS_READ_ROLES`, services/doors-access.ts): the module's
-      // own grant is the only narrowing until door groups exist, and a page
-      // that would 403 for everyone else is not offered to them. The owner
-      // alone adds, changes and retires doors; the page shows those controls
-      // to no one else.
-      //
-      // The seventeenth top-level row, and the four-groups test's cap moves to
-      // 17 with it (WARP-2967's ≤ 14, plus Security, Workshop and this). It
-      // shows on no box until the flag is set.
-      {
-        href: "/doors",
-        label: "Doors",
-        icon: DoorOpen,
-        roles: ["owner", "admin"],
-        requiresModule: "doors",
       },
       {
         href: "/network",
@@ -827,6 +769,21 @@ export const NAV_GROUPS: NavGroup[] = [
         hidden: true,
         settingsSection: "System",
         settingsBlurb: "How this box handles your data, in plain terms",
+      },
+      // WARP-3504 (ADR-068): the owner's view of what this Droplet sends to Warp —
+      // the operational telemetry, the last payload of each kind, what is never
+      // sent. Owner/admin, mirroring the server-side requireRole("owner","admin")
+      // on GET /api/telemetry/last. No module gate: telemetry is part of the
+      // managed lease, not a feature a business switches off.
+      {
+        href: "/settings/telemetry",
+        label: "What this Droplet sends",
+        icon: Radio,
+        roles: ["owner", "admin"],
+        keywords: ["telemetry", "privacy", "logs", "data", "warp", "usage"],
+        hidden: true,
+        settingsSection: "System",
+        settingsBlurb: "What this Droplet sends to Warp, and what it never does",
       },
       // WARP-174: customer-facing manual + "How Droplet works" replay modal.
       {

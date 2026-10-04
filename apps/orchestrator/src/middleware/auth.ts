@@ -61,8 +61,8 @@ declare global {
        * comes from the signed token, so it names the right sign-in; but the
        * live check is skipped when the store is unreachable (fail open, below),
        * on sid-less grace tokens, for service principals and with auth off.
-       * Anything that records "done from this sign-in" (a notification ack,
-       * WARP-2978's incident ack) records this beside the sid.
+       * Anything that records "done from this sign-in" (a notification ack)
+       * records this beside the sid.
        */
       sessionChecked?: boolean;
     }
@@ -411,7 +411,12 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
 /**
  * Validate a session token outside the Express pipeline (WebSocket upgrade).
  */
-export async function validateTokenForWs(token: string | null): Promise<AuthUser | null> {
+export async function validateTokenForWs(
+  token: string | null,
+  // WARP-3612 — the periodic re-check of an open socket must not slide the
+  // session's idle window (a keepalive is not user activity).
+  opts: { touch?: boolean } = {},
+): Promise<AuthUser | null> {
   if (!config.AUTH_ENABLED) {
     return { id: "dev", username: "dev", displayName: "Developer", role: "owner" };
   }
@@ -428,7 +433,7 @@ export async function validateTokenForWs(token: string | null): Promise<AuthUser
     // Fails open on Redis error (isUserDenied → false), same as the HTTP path.
     if (await isUserDenied(jwtPayload.sub)) return null;
     if (jwtPayload.sid) {
-      const result = await checkSession(jwtPayload.sid);
+      const result = await checkSession(jwtPayload.sid, opts);
       if (result.kind !== "ok" && result.kind !== "error") return null;
     }
     return {
@@ -567,11 +572,6 @@ const SERVICE_PRINCIPALS: readonly ServicePrincipalDef[] = [
     // and the pin above is a statement about join-code, not an allowlist. If
     // the panel's reach ever needs to be BOUNDED rather than described, that is
     // a per-route guard on the routes themselves, not an edit to this comment.
-    //
-    // WARP-2981 (ADR-059 P6) adds a THIRD, display.py again: GET
-    // /api/panel/security, the Security count for band A. Pinned to this
-    // principal by id like join-code, and to it ALONE — no person may call it
-    // (routes/panel-security.ts says why).
     //
     // Same token as the orchestrator → oled-display leg (WARP-165); compose
     // already gives both ends the value, so this adds a direction, not a
@@ -764,13 +764,13 @@ export function requireRoleOrService(
   ...allowed: Role[]
 ): (req: Request, res: Response, next: NextFunction) => void {
   const base = requireRole(...allowed);
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return markAsRoleGuard((req: Request, res: Response, next: NextFunction): void => {
     if (req.user?.id === serviceId && req.user.role === "service") {
       next();
       return;
     }
     base(req, res, next);
-  };
+  });
 }
 
 /**

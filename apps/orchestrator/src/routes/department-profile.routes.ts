@@ -34,7 +34,6 @@ import { actorFromRequest } from "../services/activity.service.js";
 import { departmentManagerOrAdmin } from "../services/department-membership.service.js";
 
 export const DEPARTMENT_TEMPLATES = [
-  "security",
   "sales",
   "finance",
   "operations",

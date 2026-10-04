@@ -1,9 +1,9 @@
 /**
- * WARP-2979 (ADR-059 P4 §6.10, D19) — the ONE resolver for unattended model
- * work that must stay on the box: filing's pre-flight (WARP-2730), moved here
- * verbatim so Droplet's incident summaries use the same answer. Filing keeps
- * its name for it through a re-export (filing-loop.test.ts still runs its
- * own cases through `resolveFilingModel`, unchanged).
+ * WARP-2979 — the ONE resolver for unattended model work that must stay on
+ * the box: filing's pre-flight (WARP-2730), moved here verbatim so every
+ * unattended caller uses the same answer. Filing keeps its name for it
+ * through a re-export (filing-loop.test.ts still runs its own cases through
+ * `resolveFilingModel`, unchanged).
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -48,7 +48,7 @@ describe("resolveLocalBackgroundModel", () => {
     expect(r.ok === true && r.model === "claude-sonnet-4").toBe(false);
   });
 
-  it("refuseCloudActive (the narrator's opt-in): a CATALOGUED cloud active model pauses the work instead of falling back to a local one", async () => {
+  it("refuseCloudActive (an opt-in; filing never sets it): a CATALOGUED cloud active model pauses the work instead of falling back to a local one", async () => {
     gw.listModels.mockResolvedValue({
       models: [
         { id: "claude-sonnet-4", name: "Claude Sonnet 4", provider: "anthropic" },
@@ -57,7 +57,7 @@ describe("resolveLocalBackgroundModel", () => {
     });
     // Filing's behaviour is unchanged: the box's own fallback, a local model.
     expect(await resolveLocalBackgroundModel(prismaWith("claude-sonnet-4"))).toEqual({ ok: true, model: "gpt-oss:20b" });
-    // The narrator's: the owner chose a cloud model for chat, so the local runtime may not hold one — Paused.
+    // With the opt-in: the owner chose a cloud model for chat, so the local runtime may not hold one — Paused.
     expect(await resolveLocalBackgroundModel(prismaWith("claude-sonnet-4"), { refuseCloudActive: true })).toEqual({
       ok: false,
       reason: "cloud_model_refused",

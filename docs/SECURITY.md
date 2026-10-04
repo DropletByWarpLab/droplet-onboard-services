@@ -337,11 +337,11 @@ app sources, not probed on a live box.
 Left open on purpose, for the reasons in the table. Three things the audit
 found that are NOT OCS and are NOT closed here, for a follow-up:
 
-- **Photos public albums** (and CalDAV `publish-calendar`) mint a public URL
-  from a DAV request (`PROPPATCH`/`POST` under `remote.php/dav/…`), not from
-  OCS. Not confirmed on the pinned image. Options: deny
-  `/nextcloud/remote.php/dav/photos/`, or disable `photos` in
-  `nextcloud-init.sh` the way `disable_hub_apps` does.
+- **Photos public albums** mint a public URL from a DAV request
+  (`PROPPATCH`/`POST` under `remote.php/dav/photos/…`), not from OCS. Closed
+  (WARP-3606): `nextcloud-init.sh` disables the `photos` app on every start via
+  `disable_hub_apps`. CalDAV `publish-calendar` is a separate route in the
+  `dav` app and is still open.
 - **richdocuments' non-OCS routes still mint WOPI `access_token` URLs**, and
   they are reachable through BOTH spellings: the `/nextcloud/` leg
   (`/nextcloud/index.php/apps/richdocuments/…`) and the root
@@ -441,20 +441,141 @@ cosign verify \
 - **Fail closed.** Any non-verification refuses the pull; the update row
   records `failureReason: image_signature_failed`. There is **no bypass
   environment variable**.
+- **Credential (WARP-3503, ADR-068).** The images are private. The box pulls
+  them from the fleet HQ registry with a short-lived (10 min) HQ device token:
+  the orchestrator proves possession of the device key to HQ (nonce challenge,
+  signature through device-identity-svc) and gets a `registry:pull` JWT. It
+  reaches the helper as an env var for one `pull-images` call, is written as
+  `{"auths":{"<hq-host>":{"registrytoken":"<JWT>"}}}` into the helper's
+  ephemeral `DOCKER_CONFIG` (0600, removed on exit) that both cosign and
+  `docker pull` read, and is never in argv or a log. It is sent only to the
+  HQ host. A box HQ will not serve (unreachable, not enrolled, revoked) gets
+  no token: the apply logs `update.registry_auth_failed` with the reason,
+  keeps its current release and retries next window. A GitHub token for
+  `ghcr.io` refs (`DROPLET_OTA_GITHUB_TOKEN`) remains as a lab-only fallback
+  and is never provisioned on an appliance (ADR-045).
 - **Why fail closed is safe on an offline appliance:** verification runs
-  only when pulling, and pulling already requires ghcr.io reachability. An
+  only when pulling, and pulling already requires the HQ registry to be reachable. An
   offline box never reaches the verifier — it simply has no update to
   apply. Rollback recreates from images already on the box (`--pull
   never`) and never re-pulls, so a refusal can block an update but never
   the running stack.
 - **No new egress:** `--offline=true` verifies the signature bundle
-  (stored in GHCR alongside the image) against the trust root embedded in
+  (stored in the registry alongside the image) against the trust root embedded in
   the checksum-pinned cosign binary vendored in the orchestrator image.
   No Rekor or TUF endpoints are contacted from the appliance.
 - **Break-glass:** a human with host shell access can `docker pull` and
   recreate manually. That action is outside the orchestrator's OTA
   surface on purpose — it requires the same physical/SSH trust as any
   other host-level intervention.
+
+## Image packages: pre-push secret scan {#public-packages}
+
+The first-party packages `ghcr.io/dropletbywarplab/droplet-*` stay **private**
+(Romain, 2026-10-03). A box carries no GitHub token (ADR-045), so box pulls are
+to become device-authenticated instead (WARP-3423; ADR-066's anonymous-delivery
+decision is to be superseded). Whatever the transport, an image must never
+carry a secret, so `publish-release.yml` scans it before it is pushed
+(WARP-3429):
+
+- **Secret scan before the push.** Each image is built, exported with
+  `docker save`, and scanned with the pinned gitleaks (v8.30.1, same as
+  `ci.yml`) before `docker push`: the image config (Env, history — where
+  build args land) and every layer on its own, so a secret deleted by a later
+  layer is still found (`scripts/release/scan-ghcr-secrets.py --docker-save`).
+  Findings under vendor paths (`node_modules`, `site-packages`, `/usr/lib`, …)
+  are reported but do not block; any other finding that is not in the reviewed
+  baseline `scripts/release/image-secret-baseline.txt` fails the publish
+  before the image reaches the registry. The baseline is `<rule> <path>` per
+  line (no line number, no digest, so it survives a rebuild) and starts empty:
+  a real secret is never baselined — rotate it and fix the image; only a
+  reviewed false positive is. The failing step prints the exact lines to add.
+  The image config is split into one pseudo-file per key before scanning, so
+  its fingerprints name the key (`config.json#Env.<NAME>`,
+  `config.json#Labels.<label>`, `config.json#history.<hash>`): a baseline line
+  can never excuse a rule across a whole config.
+  gitleaks runs with `scripts/release/gitleaks-images.toml`: the default rules
+  plus one allowlist entry, the python base images' public `GPG_KEY`
+  fingerprint (exactly `GPG_KEY=` and 40 uppercase hex characters, matched on
+  the finding's match text, not the whole line). That is the only built-in
+  exception; do not baseline it.
+  `ghcr-secret-scan.yml` (WARP-3423) runs the same scanner and config over
+  every version already in the registry, on demand (dispatch only). Its inputs
+  `package`, `shards` and `digests` scan a single package, split it over N jobs
+  (`--shard K/N` scans `versions[K::N]`), or rescan only the versions whose
+  digest starts with the given prefixes.
+
+## R2 registry mirror (private images, WARP-3502) {#r2-registry-mirror}
+
+Because the packages stay private, a box pulls from the fleet HQ read-only
+registry (a Cloudflare Worker in front of an R2 bucket, device-authenticated;
+fleet contract v1 section 3), not from GHCR. CI is the only writer of that
+bucket. After the images are pushed, keyless-signed and self-verified, and
+before the GitHub Release exists, `publish-release.yml` runs
+`scripts/release/mirror-to-r2.py copy`, which for every image in the release:
+
+- reads the image by digest from GHCR with the pinned `crane`: the manifest (or
+  the index and each child manifest), the config blob and every layer blob;
+- reads the cosign signature artifact at tag `sha256-<hex>.sig` the same way
+  (the publish fails if an image has none, since a box could never verify it);
+- writes them with the pinned `aws` CLI to R2's S3 endpoint in the layout the
+  Worker serves: `oci/blobs/sha256/<hex>`, `oci/manifests/sha256/<hex>` with
+  `Content-Type` = the manifest media type, and
+  `oci/tags/droplet-<name>/sha256-<hex>.sig` = text `sha256:<manifest hex>`.
+
+Properties that matter for the trust model: the copy is by digest and every
+blob and manifest is re-hashed before it is stored, so R2 cannot hold bytes
+that do not match their name; blobs are written first, then manifests, then
+tags, so nothing in the bucket points at missing content; a copy failure fails
+the job before the Release exists, so no signed `release.json` can name a
+digest the registry cannot serve; and an object already present with the right
+size is skipped. Multipart uploads use one explicit 64MB part size because R2
+requires equal-sized parts.
+
+`release.json` names the HQ host (`<host>/droplet-<name>@sha256:…`, same
+digests) only when the `OTA_REGISTRY_HOST` repo variable is set; empty keeps
+`ghcr.io`. With no R2 secrets and no variable the mirror is skipped with a
+warning, with the variable set missing secrets fail the publish before the
+build. The secrets, the variable and the one-time setup are in
+`scripts/README.md` ("R2 registry mirror: one-time setup").
+
+## Signed channel index (`ota-index`) {#channel-index}
+
+After the Release exists, the workflow's `index` job publishes a **signed
+pointer** to the newest release of the channel, so a box can find it with one
+anonymous download instead of listing releases through the GitHub API. The
+pointers live on one rolling release, `ota-index`, at stable URLs:
+
+```
+https://github.com/DropletByWarpLab/droplet-onboard-services/releases/download/ota-index/channel-<stage|stable>.json
+https://github.com/DropletByWarpLab/droplet-onboard-services/releases/download/ota-index/channel-<stage|stable>.json.sig
+```
+
+`channel-<channel>.json` (`scripts/release/gen-channel-pointer.py`; compact
+JSON, fixed key order, UTF-8, trailing newline):
+
+```json
+{"schemaVersion":1,"kind":"droplet-ota-channel-pointer","channel":"stage","tag":"ota-stage-<run>-g<sha7>","gitSha":"<40 hex>","builtAt":"<release.builtAt, verbatim>","manifestSha256":"<sha256 of the uploaded release.json>","publishedAt":"<UTC ISO-8601>"}
+```
+
+- It is signed exactly like `release.json`: the same org cosign key,
+  `--tlog-upload=false`, `.sig` beside it; verify the same way
+  (`cosign verify-blob --key cosign.pub --signature channel-stage.json.sig
+  --insecure-ignore-tlog=true channel-stage.json`). `manifestSha256` is
+  computed over the `release.json` bytes GitHub serves for the release, so it
+  pins exactly the manifest a box will download.
+- **It is a hint and an integrity pin, never the trust decision.** The box
+  still verifies `release.json.sig` and re-checks the channel inside the
+  signed manifest before accepting anything (same rule as the release tag).
+- `ota-index` is a **prerelease, never `latest`**, and its tag does not start
+  with `ota-stage-` / `ota-stable-`, so neither `/releases/latest` (stable
+  boxes) nor the `ota-<channel>-` prefix match (older boxes) can ever select
+  it as a release. Do not delete it: it is created once and rewritten in
+  place (`--clobber`) on every publish.
+- A box that fetches between the `.json` and `.sig` uploads sees a pair that
+  fails verification and retries on its next poll. If the `index` job alone
+  fails, use **Re-run failed jobs**: it re-runs only that job, not the
+  two-hour build.
 
 ## Third-party images
 
