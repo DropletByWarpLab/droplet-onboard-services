@@ -42,18 +42,18 @@ WORKDIR /app
 # voice-io pytest tests/` works against the same image
 # that's running in production. Image size impact: tiny
 # (pytest + pluggy + iniconfig + packaging, ~3 MB).
-COPY services/voice-io/requirements.txt \
-     services/voice-io/requirements-dev.txt \
+COPY services/voice-io/requirements-dev.lock \
+     services/voice-io/requirements-openwakeword.lock \
      /app/
 # WARP-1065: persistent pip wheel/http cache (replaces --no-cache-dir; the
 # cache lives in the mount, not the image).
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r /app/requirements-dev.txt && \
+    pip install --require-hashes --no-deps -r /app/requirements-dev.lock && \
     # openWakeWord 0.6.0's setup.py pins `tflite-runtime` which has no
     # Python 3.12 wheel for x86_64. The ONNX-side deps are already pinned
     # in requirements.txt; here we install openwakeword itself with
     # --no-deps so pip doesn't try to resolve tflite-runtime.
-    pip install --no-deps openwakeword==0.6.0
+    pip install --require-hashes --no-deps -r /app/requirements-openwakeword.lock
 
 # Pre-warm the bundled model cache so the first /voice/status hit
 # doesn't pay the model-download tax. openWakeWord stashes models in
