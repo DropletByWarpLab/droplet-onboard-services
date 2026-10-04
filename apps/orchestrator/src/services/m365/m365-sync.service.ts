@@ -250,7 +250,18 @@ export async function syncCursor(
       // throttled request still spends the tenant's budget.
       const retryAfter = err instanceof GraphRequestError ? err.retryAfterHeader : null;
       await recordFailure(deps.prisma, cursor.id, shaped, retryAfter, now());
-      if (classifySyncFailure(shaped) === "AUTH") {
+      // 🔴 A 403 on a SHAREPOINT cursor is not a dead grant. Losing access to one
+      // library — a site's permissions changed, the library was locked or
+      // deleted, a policy applies to that one site — answers 403 for that
+      // library's drive while every other call with the same token succeeds.
+      // `markNeedsReconnect` would move the WHOLE connection (mail, calendar,
+      // OneDrive) to NEEDS_RECONNECT and stop its sync because one person lost
+      // one library. The cursor still records its own failure above and backs
+      // off; a COMPLETE discovery prunes the library once Microsoft stops listing
+      // it. A 401 is different: the token itself was refused, which no single
+      // library can cause, so it still reconnects.
+      const lostOneLibrary = cursor.workload === "sharepoint" && shaped.statusCode === 403;
+      if (classifySyncFailure(shaped) === "AUTH" && !lostOneLibrary) {
         // The token refreshed fine and Graph still refused it — resource
         // access revoked, a conditional-access policy, a tenant change. The
         // refresh path never sees this, so nothing else would ever move the

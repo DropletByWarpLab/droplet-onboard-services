@@ -220,6 +220,53 @@ describe("syncCursor — Graph refuses a token that refreshed fine", () => {
     expect(markNeedsReconnectMock).toHaveBeenCalledTimes(1);
   });
 
+  it("does NOT reconnect the connection on a 403 from a SharePoint library — one lost library is not a dead grant (WARP-3538)", async () => {
+    // A site's permissions changed, the library was locked or deleted: Graph
+    // answers 403 for THAT drive while every other call with the same token
+    // succeeds. Moving the whole connection to NEEDS_RECONNECT would stop the
+    // person's mail, calendar and OneDrive sync because they lost one library.
+    // (Mutation: drop the `lostOneLibrary` exemption and this goes red.)
+    const prisma = fakePrisma([row({ workload: "sharepoint", resourceId: "drive-9" })]);
+    const client = {
+      getPage: vi.fn(async () => {
+        throw new GraphRequestError({ statusCode: 403, code: "accessDenied", message: "no access to this library" });
+      }),
+    };
+    const res = await syncCursor(
+      deps(prisma, { client: client as never }),
+      due({ workload: "sharepoint", resourceId: "drive-9" }),
+    );
+
+    expect(res.completed).toBe(false);
+    expect(markNeedsReconnectMock).not.toHaveBeenCalled();
+    // The cursor still records its own failure and keeps its link: when access
+    // comes back it carries on, and when the library is gone a complete
+    // discovery prunes it.
+    expect(prisma.__first()).toMatchObject({ state: "BACKOFF", deltaLink: DELTA, consecutiveFailures: 1 });
+  });
+
+  it("still reconnects the connection on a 401 from a SharePoint library — the TOKEN was refused, which no library can cause", async () => {
+    const prisma = fakePrisma([row({ workload: "sharepoint", resourceId: "drive-9" })]);
+    const client = {
+      getPage: vi.fn(async () => {
+        throw new GraphRequestError({ statusCode: 401, code: "InvalidAuthenticationToken", message: "expired" });
+      }),
+    };
+    await syncCursor(deps(prisma, { client: client as never }), due({ workload: "sharepoint", resourceId: "drive-9" }));
+    expect(markNeedsReconnectMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("still reconnects the connection on a 403 from OneDrive — the exemption is for SharePoint libraries only", async () => {
+    const prisma = fakePrisma([row({ workload: "files", resourceId: "-" })]);
+    const client = {
+      getPage: vi.fn(async () => {
+        throw new GraphRequestError({ statusCode: 403, code: "accessDenied", message: "nope" });
+      }),
+    };
+    await syncCursor(deps(prisma, { client: client as never }), due({ workload: "files", resourceId: "-" }));
+    expect(markNeedsReconnectMock).toHaveBeenCalledTimes(1);
+  });
+
   it("leaves the connection alone on a throttle — 429 is not an auth verdict", async () => {
     const prisma = fakePrisma([row()]);
     const client = {
