@@ -2261,8 +2261,15 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
             return res.status(400).json({ error: "Invalid camera name in confirmed command" });
           }
           // WARP-3511: detection is the persisted `detect.enabled` setting.
-          // Frigate 0.17 has no `/detect/disable` route to call.
-          await updateCameraSettings(name, { detectEnabled: false });
+          // Frigate 0.17 has no `/detect/disable` route to call. This is the
+          // production disable path, so an unknown camera or an unreachable
+          // Frigate is answered here exactly as on /enable.
+          try {
+            await updateCameraSettings(name, { detectEnabled: false });
+          } catch (err) {
+            if (respondToConfigError(res, err)) return;
+            throw err;
+          }
           await prisma.camera.updateMany({ where: { name }, data: { enabled: false } });
           // WARP-1286 follow-up: disable_camera is Tier-2, so THIS confirm
           // handler is the production disable path (the direct /disable route

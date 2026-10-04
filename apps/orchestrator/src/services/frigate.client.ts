@@ -305,11 +305,12 @@ const NO_PTZ: Readonly<PtzCapabilities> = Object.freeze({
  * answers for that varies: `{}` on 0.17.2's source, but a 500 on the box
  * ("Unhandled error PTZ info: 500"). Only a 404 used to count as "no PTZ";
  * the 500 surfaced as an error the dashboard's SWR retried forever. A
- * camera with nothing to control is not a failure, so every non-2xx — and a
- * body that is not JSON — is the same normal answer.
+ * camera with nothing to control is not a failure, so a non-2xx — and a body
+ * that is not JSON — is the same normal answer.
  *
- * A transport failure (Frigate unreachable) still throws, so the route can
- * tell an outage from a genuine "no PTZ".
+ * The exception is what cannot be a statement about the camera: a transport
+ * failure (Frigate unreachable) and a 502/503/504 both throw, so the route can
+ * tell an outage from a genuine "no PTZ" and mark it for asking again.
  */
 export async function fetchPtzCapabilities(
   cameraName: string,
@@ -318,6 +319,12 @@ export async function fetchPtzCapabilities(
     `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/ptz/info`,
     { signal: timeout() },
   );
+  // 502/503/504 is Frigate (or what fronts it) being unwell, not this camera
+  // lacking PTZ. Reporting "no PTZ" for it would be remembered for a camera
+  // that has it, so it throws and the route marks the answer unknown.
+  if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
+    throw new Error(`PTZ info: ${resp.status}`);
+  }
   if (!resp.ok) {
     logger.debug(
       { camera: cameraName, status: resp.status },

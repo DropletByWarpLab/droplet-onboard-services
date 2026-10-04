@@ -26,6 +26,7 @@ const h = vi.hoisted(() => ({
   updateCameraSettings: vi.fn(),
   fetchPtzCapabilities: vi.fn(),
   evaluateNetworkCommand: vi.fn(),
+  confirmNetworkCommand: vi.fn(),
   invalidateCamerasCache: vi.fn(),
   cameraUpdateMany: vi.fn(),
 }));
@@ -93,7 +94,7 @@ vi.mock("../services/frigate.client.js", () => ({
 vi.mock("../services/camera-system.service.js", () => ({ getCameraSystemStatus: vi.fn() }));
 vi.mock("../services/network-safety.service.js", () => ({
   evaluateNetworkCommand: (...a: unknown[]) => h.evaluateNetworkCommand(...a),
-  confirmNetworkCommand: vi.fn(),
+  confirmNetworkCommand: (...a: unknown[]) => h.confirmNetworkCommand(...a),
 }));
 vi.mock("../services/clips.service.js", () => ({
   exportClip: vi.fn(),
@@ -241,6 +242,19 @@ describe("GET /api/cameras/:name/ptz", () => {
     expect(res.headers["x-droplet-degraded"]).toBe("frigate-unavailable");
   });
 
+  it("a gateway-class error on the probe is 'unknown', not a permanent 'no PTZ'", async () => {
+    // Frigate answering 502/503/504 is the service being sick, not this camera
+    // lacking PTZ: marking it degraded gets it asked again, instead of the
+    // dashboard caching "no PTZ" for a camera that has it.
+    for (const status of [502, 503, 504]) {
+      h.fetchPtzCapabilities.mockRejectedValue(new Error(`PTZ info: ${status}`));
+      const res = await request(makeApp()).get("/api/cameras/front_door/ptz");
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ ...NO_PTZ, degraded: true });
+      expect(res.headers["x-droplet-degraded"]).toBe("frigate-unavailable");
+    }
+  });
+
   it("a plain 'no PTZ' is NOT marked degraded", async () => {
     h.fetchPtzCapabilities.mockResolvedValue(NO_PTZ);
     const res = await request(makeApp()).get("/api/cameras/front_door/ptz");
@@ -356,5 +370,48 @@ describe("GET /api/cameras/:name — recent events must not turn an outage into 
     h.getCameras.mockResolvedValue([]);
     const res = await request(makeApp()).get("/api/cameras/ghost");
     expect(res.status).toBe(404);
+  });
+});
+
+describe("POST /api/cameras/command/confirm — the confirmed disable is the production path", () => {
+  const confirmDisable = () => {
+    h.confirmNetworkCommand.mockResolvedValue({
+      confirmed: true,
+      operation: "disable_camera",
+      params: { name: "front_door" },
+    });
+    return request(makeApp())
+      .post("/api/cameras/command/confirm")
+      .send({ confirmationToken: "tok", operation: "disable_camera" });
+  };
+
+  it("writes the persisted detect.enabled setting and records the camera as disabled", async () => {
+    h.updateCameraSettings.mockResolvedValue(SETTINGS);
+    const res = await confirmDisable();
+    expect(res.status).toBe(200);
+    expect(h.updateCameraSettings).toHaveBeenCalledWith("front_door", { detectEnabled: false });
+    expect(h.cameraUpdateMany).toHaveBeenCalledWith({ where: { name: "front_door" }, data: { enabled: false } });
+  });
+
+  it("503 with the degraded marker when Frigate is unreachable — not a 500", async () => {
+    h.updateCameraSettings.mockRejectedValue(frigateDown());
+    const res = await confirmDisable();
+    expect(res.status).toBe(503);
+    expect(res.headers["x-droplet-degraded"]).toBe("frigate-unavailable");
+    expect(h.cameraUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("an unknown camera is a 404", async () => {
+    h.updateCameraSettings.mockRejectedValue(new Error("camera front_door not found"));
+    const res = await confirmDisable();
+    expect(res.status).toBe(404);
+    expect(h.cameraUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("a real failure is still an error, not masked as an outage", async () => {
+    h.updateCameraSettings.mockRejectedValue(new Error("Frigate rejected the config: 400"));
+    const res = await confirmDisable();
+    expect(res.status).toBe(500);
+    expect(h.cameraUpdateMany).not.toHaveBeenCalled();
   });
 });

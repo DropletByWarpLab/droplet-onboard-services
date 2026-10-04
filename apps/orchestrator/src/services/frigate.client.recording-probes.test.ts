@@ -66,9 +66,17 @@ describe("fetchPtzCapabilities — anything that is not a usable answer is 'no P
   });
 
   it("any other non-2xx → no PTZ", async () => {
-    for (const status of [400, 401, 403, 502, 503]) {
+    for (const status of [400, 401, 403]) {
       stubFetch(() => new Response("nope", { status }));
       expect(await fetchPtzCapabilities("front_door")).toEqual(NO_PTZ);
+    }
+  });
+
+  it("a gateway-class answer (502, 503, 504) is the service being sick, not a camera without PTZ — it throws", async () => {
+    // Reporting "no PTZ" here would be remembered for a camera that has PTZ.
+    for (const status of [502, 503, 504]) {
+      stubFetch(() => new Response("bad gateway", { status }));
+      await expect(fetchPtzCapabilities("front_door")).rejects.toThrow(`PTZ info: ${status}`);
     }
   });
 
