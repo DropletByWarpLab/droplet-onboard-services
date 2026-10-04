@@ -20,6 +20,7 @@
 import { Router, Request, Response } from "express";
 import { createLogger } from "../lib/logger.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
+import { serviceBearerHeader, RAG_EVAL_TOKEN_ENV } from "../lib/service-bearer.js";
 import { recordAccessDenied } from "../middleware/auth.js";
 import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
 
@@ -63,7 +64,8 @@ async function proxy(
   try {
     const init: RequestInit = {
       method,
-      headers: { Accept: "application/json" },
+      // WARP-3625: rag-eval fails closed without the shared service bearer.
+      headers: { Accept: "application/json", ...serviceBearerHeader(RAG_EVAL_TOKEN_ENV) },
       signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
     };
     if (method === "POST") {

@@ -865,6 +865,25 @@ else
 fi
 
 # =============================================================================
+# Test 21b: WARP-3588 / WARP-3625 / WARP-3656 — compose secret distribution
+# =============================================================================
+# scripts/check-compose-hardening.py: services converted off `env_file` do not
+# regain it and still render their required secrets; DEVICE_SECRET_KEY,
+# JWT_SECRET and the database credentials have an explicit recipient allowlist;
+# voice-io / rag-eval / file-indexer keep their bearer dependency; the services
+# hardened with no-new-privileges keep it. It also mutates the compose model to
+# prove the guard fails when it should.
+# MUTATION: add `env_file: [../.env]` to cache, or `- JWT_SECRET` to web-fetch.
+_hard_exit=0
+_hard_output=$(python3 "$REPO_ROOT/scripts/check-compose-hardening.py" 2>&1) || _hard_exit=$?
+if [ "$_hard_exit" -eq 0 ]; then
+  pass "compose secret distribution, bearer wiring and no-new-privileges guards hold (WARP-3588/3625/3656)"
+else
+  fail "compose secret distribution / hardening guard failed (WARP-3588/3625/3656)"
+  printf "${_RED}%s${_RESET}\n" "$_hard_output" >&2
+fi
+
+# =============================================================================
 # Test 22: WARP-3193 SEC-DATA-1 — `env_file: ../.env` only on an allowlist
 # =============================================================================
 # The root .env carries JWT_SECRET, DEVICE_SECRET_KEY, POSTGRES_PASSWORD and

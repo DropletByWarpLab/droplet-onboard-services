@@ -1,8 +1,22 @@
 # Internal service-to-service mTLS (WARP-236) + MQTT mTLS (WARP-235)
 
-Every first-party internal HTTP/gRPC hop and the MQTT broker authenticate peers
-with X.509 client certificates issued by a compose-network-scoped internal CA.
-The single shared MQTT password is retired; MQTT identity is the client-cert CN.
+> **Default posture (read this first).** Internal mutual TLS for HTTP and gRPC is
+> **dormant by default**: `DROPLET_INTERNAL_TLS` ships as `0` (written by
+> `scripts/lib/secrets.sh`, defaulted `:-0` in `docker/docker-compose.yml`) and
+> nothing turns it on. On a box as shipped, only Mosquitto (client-cert CN
+> identity), Postgres (TLS 1.3 + SCRAM) and Redis (TLS-only + per-service ACLs)
+> are encrypted and authenticated by default. Every HTTP and gRPC hop between
+> the first-party services is plaintext on the compose bridge and relies on a
+> static per-service bearer token; `voice-io`, `rag-eval` and `file-indexer`
+> gained such a fail-closed bearer in WARP-3625 (before that they relied on
+> network position alone). The rest of this document describes the design and
+> the behaviour **when the flag is on**. Flipping the default is tracked in
+> WARP-2565 and needs live-box validation first.
+
+When `DROPLET_INTERNAL_TLS=1`, every first-party internal HTTP/gRPC hop and the
+MQTT broker authenticate peers with X.509 client certificates issued by a
+compose-network-scoped internal CA. The single shared MQTT password is retired;
+MQTT identity is the client-cert CN.
 
 ## Design summary
 

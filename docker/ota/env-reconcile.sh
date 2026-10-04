@@ -103,6 +103,9 @@ ROUTING_SERVICE_TOKEN hex32
 DOC_RENDER_SERVICE_TOKEN hex32
 SANDBOX_SERVICE_TOKEN hex32
 MCP_BRIDGE_SERVICE_TOKEN hex32
+VOICE_IO_SERVICE_TOKEN hex32
+RAG_EVAL_SERVICE_TOKEN hex32
+FILE_INDEXER_SERVICE_TOKEN hex32
 SERVICE_TOKEN_VOICE hex32
 SERVICE_TOKEN_DISPLAY hex32
 SERVICE_TOKEN_BRIDGE hex32
@@ -167,6 +170,21 @@ ENV_FILE="$ROOT/.env"
 TARGET="$ENV_FILE"
 [ -L "$ENV_FILE" ] && TARGET="$(readlink -f "$ENV_FILE")"
 [ -f "$TARGET" ] || die ".env symlink target missing: $TARGET"
+
+# WARP-3588: several services no longer load .env through env_file; compose
+# fills their secrets by interpolation, and the OTA apply path runs
+# `docker compose` WITHOUT --env-file, so the only source it has is
+# <root>/docker/.env. That file must be the symlink to ../.env (the invariant
+# scripts/lib/compose.sh sets up at provisioning). Re-assert it here, before any
+# container is swapped, so an OTA-only box whose link was lost or forked
+# (WARP-1908) never recreates a service with an empty secret. A regular file is
+# kept beside the link as .forked-<id>, as compose.sh does. Not part of the
+# report: it changes no key.
+LINK="$ROOT/docker/.env"
+if [ -d "$ROOT/docker" ] && [ ! -L "$LINK" ]; then
+  if [ -e "$LINK" ]; then cp -p "$LINK" "$LINK.forked-$TAG" || die "cannot back up $LINK"; fi
+  ln -sfn ../.env "$LINK" || die "cannot link $LINK -> ../.env"
+fi
 
 STAGE="$TARGET.ota-reconcile.$$"
 rm -f "$TARGET".ota-reconcile.* 2>/dev/null || true

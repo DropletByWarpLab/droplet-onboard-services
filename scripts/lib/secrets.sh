@@ -634,6 +634,17 @@ generate_env() {
   # profile and gets a service that 503s every route with nothing in the logs
   # pointing at a missing secret. Both ends fail CLOSED when it is empty.
   mcp_bridge_service_token=$(openssl rand -hex 32)
+  # >>> WARP-3625 inbound bearers (voice-io, rag-eval, file-indexer) >>>
+  # The orchestrator presents these to three internal APIs that used to rely on
+  # network position alone. Each service fails CLOSED (503 on every
+  # non-/health route) when its side is empty. Kept in its own delimited block
+  # in all three places below (here, the .env heredoc, migrate_env) so it merges
+  # cleanly beside the other token additions.
+  local voice_io_service_token rag_eval_service_token file_indexer_service_token
+  voice_io_service_token=$(openssl rand -hex 32)
+  rag_eval_service_token=$(openssl rand -hex 32)
+  file_indexer_service_token=$(openssl rand -hex 32)
+  # <<< WARP-3625 inbound bearers <<<
   # WARP-468 + WARP-470: bearer the routing service's egress_meter and
   # throughput sampler present on POST /api/network/{off-lan,throughput}-sample-*.
   # Compose wires ORCHESTRATOR_SAMPLER_TOKEN to ${ORCHESTRATOR_SAMPLER_TOKEN}.
@@ -1008,6 +1019,17 @@ SANDBOX_SERVICE_TOKEN=$sandbox_service_token
 # without dialling when its side is.
 MCP_BRIDGE_SERVICE_TOKEN=$mcp_bridge_service_token
 
+# >>> WARP-3625 inbound bearers (voice-io, rag-eval, file-indexer) >>>
+# Orchestrator -> voice-io / rag-eval / file-indexer. Each service reads its
+# own key; the orchestrator (env_file) reads all three. voice-io and rag-eval
+# receive theirs by compose substitution; file-indexer via env_file. Rotate in
+# lockstep: change here, then force-recreate the orchestrator and that service.
+# Every one fails CLOSED (503 on non-/health routes) when empty.
+VOICE_IO_SERVICE_TOKEN=$voice_io_service_token
+RAG_EVAL_SERVICE_TOKEN=$rag_eval_service_token
+FILE_INDEXER_SERVICE_TOKEN=$file_indexer_service_token
+# <<< WARP-3625 inbound bearers <<<
+
 # --- Routing sampler bearers ---
 # WARP-468 (egress meter) + WARP-470 (throughput sampler): the routing
 # service's apscheduler jobs present this token on POSTs to
@@ -1327,6 +1349,14 @@ migrate_env() {
   # WARP-2627: same backfill for the outbound MCP bridge's bearer. Only-when-
   # missing, so an operator who already set one keeps it.
   _migrate_ensure_key MCP_BRIDGE_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  # >>> WARP-3625 inbound bearers (voice-io, rag-eval, file-indexer) >>>
+  # An existing box has none of these, and the three services fail closed
+  # without them (503), so backfill only-when-missing. docker/ota/env-reconcile.sh
+  # carries the same three for OTA-only boxes.
+  _migrate_ensure_key VOICE_IO_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  _migrate_ensure_key RAG_EVAL_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  _migrate_ensure_key FILE_INDEXER_SERVICE_TOKEN "$(openssl rand -hex 32)"
+  # <<< WARP-3625 inbound bearers <<<
   # INFERENCE_RUNTIME on an EXISTING box backfills to `ollama`, NOT to the
   # fresh-install default of `dmr` (WARP-1870).
   #
