@@ -39,6 +39,7 @@ const EXPECTED_TOOL_NAMES = [
   "search_cloud_files",    // WARP-3538
   "search_content",
   "search_files",
+  "show_file",             // WARP-3691
   "write_file",
   // smart-home
   "accept_discovered_camera",

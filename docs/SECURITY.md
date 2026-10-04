@@ -337,11 +337,11 @@ app sources, not probed on a live box.
 Left open on purpose, for the reasons in the table. Three things the audit
 found that are NOT OCS and are NOT closed here, for a follow-up:
 
-- **Photos public albums** (and CalDAV `publish-calendar`) mint a public URL
-  from a DAV request (`PROPPATCH`/`POST` under `remote.php/dav/…`), not from
-  OCS. Not confirmed on the pinned image. Options: deny
-  `/nextcloud/remote.php/dav/photos/`, or disable `photos` in
-  `nextcloud-init.sh` the way `disable_hub_apps` does.
+- **Photos public albums** mint a public URL from a DAV request
+  (`PROPPATCH`/`POST` under `remote.php/dav/photos/…`), not from OCS. Closed
+  (WARP-3606): `nextcloud-init.sh` disables the `photos` app on every start via
+  `disable_hub_apps`. CalDAV `publish-calendar` is a separate route in the
+  `dav` app and is still open.
 - **richdocuments' non-OCS routes still mint WOPI `access_token` URLs**, and
   they are reachable through BOTH spellings: the `/nextcloud/` leg
   (`/nextcloud/index.php/apps/richdocuments/…`) and the root
@@ -441,14 +441,27 @@ cosign verify \
 - **Fail closed.** Any non-verification refuses the pull; the update row
   records `failureReason: image_signature_failed`. There is **no bypass
   environment variable**.
+- **Credential (WARP-3503, ADR-068).** The images are private. The box pulls
+  them from the fleet HQ registry with a short-lived (10 min) HQ device token:
+  the orchestrator proves possession of the device key to HQ (nonce challenge,
+  signature through device-identity-svc) and gets a `registry:pull` JWT. It
+  reaches the helper as an env var for one `pull-images` call, is written as
+  `{"auths":{"<hq-host>":{"registrytoken":"<JWT>"}}}` into the helper's
+  ephemeral `DOCKER_CONFIG` (0600, removed on exit) that both cosign and
+  `docker pull` read, and is never in argv or a log. It is sent only to the
+  HQ host. A box HQ will not serve (unreachable, not enrolled, revoked) gets
+  no token: the apply logs `update.registry_auth_failed` with the reason,
+  keeps its current release and retries next window. A GitHub token for
+  `ghcr.io` refs (`DROPLET_OTA_GITHUB_TOKEN`) remains as a lab-only fallback
+  and is never provisioned on an appliance (ADR-045).
 - **Why fail closed is safe on an offline appliance:** verification runs
-  only when pulling, and pulling already requires ghcr.io reachability. An
+  only when pulling, and pulling already requires the HQ registry to be reachable. An
   offline box never reaches the verifier — it simply has no update to
   apply. Rollback recreates from images already on the box (`--pull
   never`) and never re-pulls, so a refusal can block an update but never
   the running stack.
 - **No new egress:** `--offline=true` verifies the signature bundle
-  (stored in GHCR alongside the image) against the trust root embedded in
+  (stored in the registry alongside the image) against the trust root embedded in
   the checksum-pinned cosign binary vendored in the orchestrator image.
   No Rekor or TUF endpoints are contacted from the appliance.
 - **Break-glass:** a human with host shell access can `docker pull` and

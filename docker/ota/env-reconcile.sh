@@ -103,8 +103,12 @@ ROUTING_SERVICE_TOKEN hex32
 DOC_RENDER_SERVICE_TOKEN hex32
 SANDBOX_SERVICE_TOKEN hex32
 MCP_BRIDGE_SERVICE_TOKEN hex32
+VOICE_IO_SERVICE_TOKEN hex32
+RAG_EVAL_SERVICE_TOKEN hex32
+FILE_INDEXER_SERVICE_TOKEN hex32
 SERVICE_TOKEN_VOICE hex32
 SERVICE_TOKEN_DISPLAY hex32
+SERVICE_TOKEN_BRIDGE hex32
 SERVICE_TOKEN_SWITCH hex32
 INFERENCE_AUTH_TOKEN hex32
 SERVICE_TOKEN_AI_GATEWAY hex32
@@ -129,6 +133,7 @@ OVERLAY_CONNECT_ENABLED =true
 OVERLAY_CONNECT_POLL_SECONDS =15
 OVERLAY_PEER_IDLE_EXPIRY_HOURS =720
 RAGAS_EVAL_USER =eval-fixtures
+RAG_EVAL_ENABLED =1
 DROPLET_TPM_BACKEND =mock
 DROPLET_FIPS_MODE =0
 DROPLET_ENV =production
@@ -140,11 +145,13 @@ DROPLET_OTA_APPLY_SCRIPT @docker/ota/apply-update.sh
 #     (macOS vs Linux) that setup decides. Tokens ARE merged into an existing
 #     COMPOSE_PROFILES below.
 #   SMB_PASSWORD - paired with the platform-gated SMB_ENABLED.
-#   OPENWRT_PASSWORD, REDIS_PASSWORD_* - materialized into secret / ACL files
-#     by setup. A key with no matching file breaks the service.
+#   OPENWRT_PASSWORD, REDIS_PASSWORD_*, REDIS_HOST_PASSWORD - materialized into
+#     secret / ACL files by setup. A key with no matching file breaks the
+#     service. (REDIS_HOST_PASSWORD, WARP-3605: setup also rotates a value that
+#     still equals REDIS_PASSWORD; the OTA path never rewrites it.)
 #   DROPLET_DEVICE_ID - derived from hardware, bound to an HQ registration.
 # shellcheck disable=SC2034  # read by the drift test, not here
-SETUP_ONLY_KEYS='ROUTING_MODE SMB_ENABLED COMPOSE_PROFILES SMB_PASSWORD OPENWRT_PASSWORD REDIS_PASSWORD_ORCHESTRATOR REDIS_PASSWORD_AI_GATEWAY REDIS_PASSWORD_MCP DROPLET_DEVICE_ID'
+SETUP_ONLY_KEYS='ROUTING_MODE SMB_ENABLED COMPOSE_PROFILES SMB_PASSWORD OPENWRT_PASSWORD REDIS_PASSWORD_ORCHESTRATOR REDIS_PASSWORD_AI_GATEWAY REDIS_PASSWORD_MCP REDIS_HOST_PASSWORD DROPLET_DEVICE_ID'
 # Tokens migrate_env appends to an existing COMPOSE_PROFILES.
 ENSURE_PROFILES='email'
 
@@ -163,6 +170,21 @@ ENV_FILE="$ROOT/.env"
 TARGET="$ENV_FILE"
 [ -L "$ENV_FILE" ] && TARGET="$(readlink -f "$ENV_FILE")"
 [ -f "$TARGET" ] || die ".env symlink target missing: $TARGET"
+
+# WARP-3588: several services no longer load .env through env_file; compose
+# fills their secrets by interpolation, and the OTA apply path runs
+# `docker compose` WITHOUT --env-file, so the only source it has is
+# <root>/docker/.env. That file must be the symlink to ../.env (the invariant
+# scripts/lib/compose.sh sets up at provisioning). Re-assert it here, before any
+# container is swapped, so an OTA-only box whose link was lost or forked
+# (WARP-1908) never recreates a service with an empty secret. A regular file is
+# kept beside the link as .forked-<id>, as compose.sh does. Not part of the
+# report: it changes no key.
+LINK="$ROOT/docker/.env"
+if [ -d "$ROOT/docker" ] && [ ! -L "$LINK" ]; then
+  if [ -e "$LINK" ]; then cp -p "$LINK" "$LINK.forked-$TAG" || die "cannot back up $LINK"; fi
+  ln -sfn ../.env "$LINK" || die "cannot link $LINK -> ../.env"
+fi
 
 STAGE="$TARGET.ota-reconcile.$$"
 rm -f "$TARGET".ota-reconcile.* 2>/dev/null || true

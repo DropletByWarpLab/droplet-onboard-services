@@ -54,7 +54,7 @@ export function CompanyPublicLinks() {
       <p className="type-footnote" style={{ marginBottom: 10, maxWidth: "70ch" }}>
         Links to company files that reach people outside the company, made by someone who
         isn&apos;t an owner or admin. Only owners and admins can make these now; these are
-        older, or were made in Nextcloud directly. Nothing is removed automatically: ask the
+        older, or were made in the File Store directly. Nothing is removed automatically: ask the
         person, who can remove it from Shared by me.
       </p>
       <div className="card">

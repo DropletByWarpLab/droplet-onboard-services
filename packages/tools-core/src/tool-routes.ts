@@ -160,6 +160,8 @@ export const TOOL_ROUTES: ToolRouteEntry[] = [
   // ── files (nextcloud client → orchestrator /api/files) ──────────────────
   { tool: "list_files", client: "nextcloud", hops: [admit("get", "/api/files")] },
   { tool: "read_file", client: "nextcloud", hops: [admit("get", "/api/files/download")] },
+  // WARP-3691: stats via the parent listing (path) or the brain manifest (itemId); no bytes.
+  { tool: "show_file", client: "nextcloud", hops: [admit("get", "/api/files"), admit("get", "/api/files/brain/:itemId")] },
   { tool: "search_files", client: "nextcloud", hops: [admit("get", "/api/files/search")] },
   // WARP-3538 — the person's own cloud-drive file lists (OneDrive + SharePoint
   // today), through the orchestrator (the rows are per person and ciphertext at

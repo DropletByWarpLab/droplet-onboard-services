@@ -141,6 +141,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   files: [
     "list_files",
     "read_file",
+    "show_file",
     "search_files",
     "search_content",
     "read_document_text",
@@ -372,6 +373,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Files
   list_files: "Browse the files on your Droplet",
   read_file: "Open and read one of your files",
+  show_file: "Show you a file or picture right in the chat",
   search_files: "Find files by name",
   search_content: "Search inside your files for what you need",
   read_document_text: "Read a whole PDF or scanned document end to end",

@@ -45,6 +45,8 @@ export interface ToolConfirmationHandle {
     tool: string;
     fields: { key: string; kind: string; detail: string; value?: boolean }[];
     truncatedFields: number;
+    /** WARP-3569 — decisive values (recipient, path, target), display text only. */
+    shown?: { key: string; text: string }[];
   };
 }
 

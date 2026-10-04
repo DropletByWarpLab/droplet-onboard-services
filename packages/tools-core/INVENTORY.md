@@ -29,6 +29,7 @@ Authoritative inventory of every tool exposed by `@droplet/tools-core` after the
 | decommission_ap | network | Remove an extender AP from the household network. | true | true | WARP-446 |
 | list_files | files | List entries at a Nextcloud path. | false | false | both |
 | read_file | files | Read text content of a Nextcloud file, 10k characters per call, paged via `offset`/`next_offset` (`null` only when exhausted); binary rejected with a pointer at `read_document_text`. WARP-2194. | false | false | gateway |
+| show_file | files | Show a Nextcloud file (`path`) or chat attachment (`itemId`) inline in the chat. Existence check via the parent listing / brain manifest with the caller's own token; returns a `media` descriptor, never bytes. WARP-3691. | false | false | nextcloud |
 | search_files | files | Filename substring search across the user's Nextcloud. | false | false | both |
 | search_content | files | Semantic full-text search via gRPC embedder + pgvector. | false | false | orchestrator |
 | read_document_text | files | Full extracted text of one document in chunk order, paged via `next_chunk`; NOT_INDEXED when the file has no extracted text. Reads PDFs/scans `read_file` rejects. WARP-2057. | false | false | orchestrator |

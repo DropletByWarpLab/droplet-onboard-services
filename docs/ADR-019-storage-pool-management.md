@@ -1,6 +1,8 @@
 # ADR-019: Storage pool (software-RAID) management
 
-- **Status:** Accepted — shipped (status corrected 2026-07-27; see Status audit below)
+> **Partly superseded by [ADR-070](ADR-070-camera-recording-storage.md) (2026-10-03).** D2's "Nothing is ever automatic" no longer holds for camera recordings: the box now chooses, sizes and migrates the recordings slice on its own. Nothing else in D2, and nothing else in this ADR, changes.
+
+- **Status:** Accepted — shipped (status corrected 2026-07-27; see Status audit below). D2 is partly superseded by [ADR-070](ADR-070-camera-recording-storage.md), 2026-10-03, for camera recordings only.
 - **Date:** 2026-06-04
 - **Authors:** Stefan Cruceru
 - **Related tickets:** BUG-3 (drives page + RAID/drive-pool management)
