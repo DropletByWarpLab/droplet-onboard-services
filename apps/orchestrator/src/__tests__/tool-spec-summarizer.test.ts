@@ -422,10 +422,10 @@ describe("createToolSpecSummarizer", () => {
 
   it("sends the facts and the spec's prompt to the model", async () => {
     const s = createToolSpecSummarizer(activeModel);
-    await s.summarize("Focus on the money.", [ok("erp_get_ar_summary", { totalBalance: 10 })]);
+    await s.summarize("Focus on the money.", [ok("get_system_health", { totalBalance: 10 })]);
     const arg = completeOnceMock.mock.calls[0][0];
     expect(arg.text).toMatch(/Focus on the money\./);
-    expect(arg.text).toMatch(/erp_get_ar_summary/);
+    expect(arg.text).toMatch(/get_system_health/);
     expect(arg.text).toMatch(/totalBalance/);
   });
 
@@ -533,7 +533,7 @@ describe("summarize after a withheld domain's step: the local model only", () =>
 
   it("no withheld domain → the active model, as before; the local resolver is not even asked", async () => {
     const summarizer = createToolSpecSummarizer(activeModel, localModel);
-    await summarizer.summarize("Write it up.", [ok("get_system_health", { status: "ok" }), ok("list_cameras", { cameras: [] })]);
+    await summarizer.summarize("Write it up.", [ok("get_system_health", { status: "ok" }), ok("list_network_devices", { devices: [] })]);
     expect(completeOnceMock.mock.calls[0]![0].model).toBe("claude-sonnet-4");
     expect(Object.keys(completeOnceMock.mock.calls[0]![0])).not.toContain("provider");
     expect(localModel).not.toHaveBeenCalled();
