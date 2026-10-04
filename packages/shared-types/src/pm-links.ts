@@ -10,7 +10,8 @@
  *   item  the open work item's key; opens the drawer
  *   v     the active saved view — a row id, or a built-in slug (`mine`)
  *   f     the compact filter (`pm-filter.ts`); present only when the filter is
- *         not exactly the active view's own
+ *         not exactly the active view's own. `f=` (empty) is a real value:
+ *         the view with its filter cleared
  *
  * The dashboard reads and writes its state through {@link parsePmUrl} /
  * {@link buildPmPath}; the orchestrator builds notification links with
@@ -59,7 +60,11 @@ export function buildPmPath(state: PmUrlState): string {
   const parts: string[] = [];
   for (const name of PARAM_ORDER) {
     const value = state[name];
-    if (value === undefined || value === null || value === "") continue;
+    if (value === undefined || value === null) continue;
+    // An EMPTY `f` says something: "the active view, with no filter on it".
+    // An ABSENT `f` says "the view's own filter". Every other empty value is
+    // just absent.
+    if (value === "" && name !== "f") continue;
     parts.push(`${name}=${encodeParam(name, value)}`);
   }
   return parts.length === 0 ? PM_PROJECTS_PATH : `${PM_PROJECTS_PATH}?${parts.join("&")}`;

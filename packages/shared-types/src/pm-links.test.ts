@@ -23,7 +23,12 @@ describe("buildPmPath", () => {
   it("is the bare route when there is no state", () => {
     expect(buildPmPath({})).toBe(PM_PROJECTS_PATH);
     expect(buildPmPath({ p: null, view: null, item: null, v: null, f: null })).toBe("/projects");
-    expect(buildPmPath({ p: "", f: "" })).toBe("/projects");
+    expect(buildPmPath({ p: "", view: "", item: "", v: "" })).toBe("/projects");
+  });
+
+  it("writes an EMPTY filter, because 'no filter on this view' is not 'the view's filter'", () => {
+    expect(buildPmPath({ p: "INBOX", v: "mine", f: "" })).toBe("/projects?p=INBOX&v=mine&f=");
+    expect(buildPmPath({ f: "" })).toBe("/projects?f=");
   });
 
   it("writes the parameters in a fixed order", () => {
@@ -61,6 +66,12 @@ describe("parsePmUrl", () => {
       v: "mine",
       f: "priority.is:high",
     });
+  });
+
+  it("tells an empty `f=` from an absent one", () => {
+    expect(parsePmUrl(new URLSearchParams("p=INBOX&f=")).f).toBe("");
+    expect(parsePmUrl(new URLSearchParams("p=INBOX")).f).toBeNull();
+    expect(parsePmUrl(search(buildPmPath({ p: "INBOX", f: "" }))).f).toBe("");
   });
 
   it("reports an absent parameter as null", () => {
