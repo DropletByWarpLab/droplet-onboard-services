@@ -13,13 +13,14 @@
  * resolve and the proxy fetch fails (DNS / ECONNREFUSED) — we map that to
  * `503 { error: "rag_eval_unavailable" }` so the dashboard can render a
  * "enable the eval profile" banner instead of a generic 500. This route is
- * NOT production-gated (unlike admin-retrieval-eval) — operators may want
+ * NOT gated on RAG_EVAL_ENABLED (unlike admin-retrieval-eval) — operators may want
  * to trigger runs on a live appliance that carries the eval profile.
  */
 
 import { Router, Request, Response } from "express";
 import { createLogger } from "../lib/logger.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
+import { serviceBearerHeader, RAG_EVAL_TOKEN_ENV } from "../lib/service-bearer.js";
 import { recordAccessDenied } from "../middleware/auth.js";
 import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
 
@@ -63,7 +64,8 @@ async function proxy(
   try {
     const init: RequestInit = {
       method,
-      headers: { Accept: "application/json" },
+      // WARP-3625: rag-eval fails closed without the shared service bearer.
+      headers: { Accept: "application/json", ...serviceBearerHeader(RAG_EVAL_TOKEN_ENV) },
       signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
     };
     if (method === "POST") {
@@ -125,10 +127,11 @@ export function createAdminRagEvalRouter(): Router {
    * WARP-2732 (ADR-048) — fire the extraction canary that GATES auto mode.
    *
    * 🔴 On THIS router, deliberately, and not on `admin-retrieval-eval`. That
-   * one 404s whenever `NODE_ENV === "production"`, which is every real
-   * appliance — and this canary's entire purpose is to be run on a real
-   * appliance, against the model that box actually serves. A gate you cannot
-   * reach where it matters is not a gate.
+   * one 404s unless `RAG_EVAL_ENABLED` is on (WARP-3609; it used to key off
+   * `NODE_ENV === "production"`, which the orchestrator never set) — and this
+   * canary's entire purpose is to be run on a real appliance, against the
+   * model that box actually serves, whether or not the retrieval-eval search
+   * is enabled there. A gate you cannot reach where it matters is not a gate.
    *
    * The rag-eval container has no auth of its own (it binds the internal
    * Docker network only), so this route is the wall: owner/admin, via the

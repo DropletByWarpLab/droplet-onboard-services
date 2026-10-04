@@ -1,5 +1,18 @@
 # Device identity (WARP-230)
 
+> **Current state (corrected 2026-10-03, WARP-3626).** The device identity key
+> is **not hardware-rooted today.** Every box runs the `mock` backend: the key
+> is generated in software and stored as a file under `/var/lib/droplet/tpm/`
+> in the sidecar's storage volume, protected by the container boundary and file
+> mode, not by a TPM. The `real` (tpm2-pytss) backend is a scaffold whose
+> key-creation, sealing and signing methods are placeholders
+> (`services/device-identity-svc/backends/real.py`; `_tpm_sign` returns an empty
+> signature), and the sidecar refuses to start it unless
+> `DROPLET_TPM_ALLOW_SCAFFOLD` is set. The TPM-sealed behaviour described below
+> is the **Target design**, planned under WARP-1181.
+
+## Target design
+
 Every Droplet appliance generates a **non-extractable hardware-rooted
 identity key** on first boot, sealed to TPM 2.0 PCRs `[0, 2, 4, 7]`.
 The private key never leaves the TPM in plaintext.
@@ -32,12 +45,14 @@ the sidecar.
 
 | Backend | Selected when | Behavior |
 |---|---|---|
-| `real` | `DROPLET_TPM_BACKEND=real` (production appliance) | tpm2-pytss against `/dev/tpm0`; ECC P-256 key sealed to PCRs |
-| `mock` | `DROPLET_TPM_BACKEND=mock` (dev, CI) | Pure-Python in-memory; persists artifacts to `/var/lib/droplet/tpm/` for cross-process interchangeability |
+| `real` | `DROPLET_TPM_BACKEND=real` plus `DROPLET_TPM_ALLOW_SCAFFOLD=1` (explicit opt-in; scaffold, not for production) | Target: tpm2-pytss against `/dev/tpm0`, ECC P-256 key sealed to PCRs. Today: placeholder crypto, fails closed without the opt-in |
+| `mock` | `DROPLET_TPM_BACKEND=mock` (**the shipped default**) | Pure-Python software key; persists artifacts to `/var/lib/droplet/tpm/` for cross-process interchangeability |
 
-`scripts/lib/secrets.sh` picks the default at install time: `real` when
-`/dev/tpm0` exists on the host, `mock` otherwise. Operator can override
-in `.env`.
+`scripts/lib/secrets.sh` writes `DROPLET_TPM_BACKEND=mock` into `.env` on every
+box, including hosts that have `/dev/tpm0`, because the `real` backend is not
+finished (an existing `real` value without the scaffold opt-in is migrated back
+to `mock`). Auto-selecting `real` when a TPM is present is planned with
+WARP-1181.
 
 The orchestrator can't tell the difference — `getDeviceIdentityStatus()`
 returns the same shape from both. The `backend` field of the status
@@ -209,8 +224,9 @@ box key exists.
   hash.
 - **ECDSA** — FIPS-approved signature scheme.
 - **AES-256-GCM** (TPM-internal wrapping key, real backend) — FIPS-approved.
-- **TPM 2.0 hardware module** — FIPS 140-2 Level 2 on most Infineon
-  SLB 96xx series appliance TPM modules.
+- **TPM 2.0 hardware module** — not used for the device identity key today
+  (mock backend). Whether a given TPM part is validated depends on the part
+  fitted and is not asserted here.
 
 The sidecar Dockerfile uses the WARP-229 FIPS provider pattern:
 `/etc/ssl/openssl-fips.cnf` ships in the image, the runtime
@@ -234,9 +250,11 @@ FIPS module is layered on. The boot self-test is gated by
 
 ## Risk register
 
-- **Mock backend in production.** Sidecar logs a warning at startup if
-  `DROPLET_TPM_BACKEND=mock` + `DROPLET_ENV=production`. Operator must
-  set `real` explicitly when shipping.
+- **Mock backend in production.** This is the shipped state today. The sidecar
+  logs a warning at startup if `DROPLET_TPM_BACKEND=mock` +
+  `DROPLET_ENV=production`. Setting `real` is not a remedy until the scaffold
+  is finished (WARP-1181): it fails closed, or with the opt-in produces
+  placeholder signatures.
 - **PCR set drift between vendors.** PCRs `[0, 2, 4, 7]` are canonical
   for standard UEFI boot; some bootloaders may not match exactly. The sidecar
   detects actual PCR values during provisioning and persists the SET

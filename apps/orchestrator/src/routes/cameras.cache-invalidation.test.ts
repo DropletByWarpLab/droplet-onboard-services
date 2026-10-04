@@ -7,7 +7,7 @@
  *
  *   - POST /cameras/discovered/:id/reject — hard-deletes a row (resurrection
  *     mirror of the delete bug).
- *   - POST /cameras (manual add) — upserts a row (add-side: invisible for 5s).
+ *   - POST /cameras (manual add) — adopts/creates a row (add-side: invisible for 5s).
  *   - POST /cameras/:name/enable — flips `enabled` inline (stale flag).
  *   - disable_camera — flips `enabled`; Tier-2, so the REAL executor is
  *     POST /cameras/command/confirm -> case "disable_camera", NOT the direct
@@ -74,6 +74,10 @@ const h = vi.hoisted(() => {
     deleteCamera: vi.fn(async () => {}),
     addCamera: vi.fn(async () => true),
     syncCamerasFromDb: vi.fn(async () => []),
+    // WARP-3506/3510: the add holds Frigate's config lock and verifies the
+    // camera streams — neither matters to the cache contract.
+    withFrigateConfigLock: async (section: () => Promise<unknown>) => section(),
+    waitForCameraStreaming: vi.fn(async () => ({ streaming: true, fps: 5 })),
     // Network-safety evaluator — per-test overridable (a test may force the
     // inline-allowed shape). Broad return type so both the Tier-2 202 shape and
     // the `{ allowed: true }` override are assignable. Default: Tier-2 202.
@@ -127,6 +131,8 @@ vi.mock("../services/frigate.client.js", () => ({
   deleteCamera: h.deleteCamera,
   addCamera: h.addCamera,
   syncCamerasFromDb: h.syncCamerasFromDb,
+  withFrigateConfigLock: h.withFrigateConfigLock,
+  waitForCameraStreaming: h.waitForCameraStreaming,
   fetchEvents: vi.fn(),
   buildRecordingClipUrl: vi.fn(),
   buildVodMasterUrl: vi.fn(),
@@ -187,24 +193,23 @@ vi.mock("../services/camera-settings.service.js", () => ({
 import { createCamerasRouter } from "./cameras.js";
 
 function makePrisma() {
-  return {
+  const self = {
+    // The manual add adopts its row in a transaction (WARP-3510).
+    $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(self),
     camera: {
-      // reject: hard-delete a row by id.
-      delete: vi.fn(async ({ where }: { where: { id: string } }) => {
-        h.state.db = h.state.db.filter((c) => c.id !== where.id);
-        return {};
-      }),
-      // delete_camera confirm / direct DELETE: remove by name.
-      deleteMany: vi.fn(async ({ where }: { where: { name: string } }) => {
+      // delete_camera confirm / direct DELETE: remove by name. A reject by id
+      // (WARP-3510: `{ id, adoption: "CANDIDATE" }`) removes by id — every row
+      // in this fixture is a candidate or a camera the test does not reject.
+      deleteMany: vi.fn(async ({ where }: { where: { name?: string; id?: string } }) => {
         const before = h.state.db.length;
-        h.state.db = h.state.db.filter((c) => c.name !== where.name);
+        h.state.db = h.state.db.filter((c) =>
+          where.name !== undefined ? c.name !== where.name : c.id !== where.id,
+        );
         return { count: before - h.state.db.length };
       }),
-      // manual add: insert or update a row by name.
-      upsert: vi.fn(async ({ where, create }: { where: { name: string }; create: { name: string } }) => {
-        const found = h.state.db.find((c) => c.name === where.name);
-        if (found) return { id: found.id, name: found.name };
-        const row = { id: `id-${create.name}`, name: create.name, enabled: true };
+      // manual add: insert a row (adoptCameraRow creates when the device is new).
+      create: vi.fn(async ({ data }: { data: { name: string } }) => {
+        const row = { id: `id-${data.name}`, name: data.name, enabled: true };
         h.state.db.push(row);
         return { id: row.id, name: row.name };
       }),
@@ -237,10 +242,17 @@ function makePrisma() {
         if (row) row.enabled = data.enabled;
         return row ?? { name: "unknown" };
       }),
-      // reconcileFrigateCameras() reads the post-mutation DB.
-      findMany: vi.fn(async () => h.state.db.map((c) => ({ name: c.name }))),
+      // reconcileFrigateCameras() reads the post-mutation DB (names + adoption);
+      // adoptCameraRow() looks a device up by name/MAC/IP — nothing here matches
+      // on MAC or IP, so a name match is the only hit.
+      findMany: vi.fn(async (args?: { where?: { OR?: Array<{ name?: string }> } }) => {
+        const names = args?.where?.OR?.map((c) => c.name).filter((n): n is string => n !== undefined);
+        const rows = names ? h.state.db.filter((c) => names.includes(c.name)) : h.state.db;
+        return rows.map((c) => ({ ...c, adoption: "ADOPTED", macAddress: null, createdAt: new Date(0) }));
+      }),
     },
   };
+  return self;
 }
 
 function makeApp(prisma: ReturnType<typeof makePrisma>) {

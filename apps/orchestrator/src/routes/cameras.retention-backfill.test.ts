@@ -204,6 +204,15 @@ describe("POST /api/cameras/retention/backfill", () => {
     const res = await request(makeApp()).post("/api/cameras/retention/backfill");
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ planned: PLAN, written: ["front_door"], noop: false });
+    expect(h.invalidateCamerasCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not invalidate a healthy list when there was nothing to repair", async () => {
+    h.backfillCameraRetention.mockResolvedValue({ planned: PLAN, written: [], noop: true });
+    const res = await request(makeApp()).post("/api/cameras/retention/backfill");
+    expect(res.status).toBe(200);
+    expect(res.body.noop).toBe(true);
+    expect(h.invalidateCamerasCache).not.toHaveBeenCalled();
   });
 
   it("a Frigate outage is the same 503 degraded answer, not a 500", async () => {
@@ -213,6 +222,7 @@ describe("POST /api/cameras/retention/backfill", () => {
     const res = await request(makeApp()).post("/api/cameras/retention/backfill");
     expect(res.status).toBe(503);
     expect(res.headers["x-droplet-degraded"]).toBe("frigate-unavailable");
+    expect(h.invalidateCamerasCache).not.toHaveBeenCalled();
   });
 
   it("a refusal by the camera service stays a real error, with its reason", async () => {
@@ -220,5 +230,6 @@ describe("POST /api/cameras/retention/backfill", () => {
     const res = await request(makeApp()).post("/api/cameras/retention/backfill");
     expect(res.status).toBe(500);
     expect(res.headers["x-droplet-degraded"]).toBeUndefined();
+    expect(h.invalidateCamerasCache).not.toHaveBeenCalled();
   });
 });

@@ -240,6 +240,15 @@ describe("describeLastSaved — what the tile says about the newest write", () =
     });
   });
 
+  it("a failed last-save read is unavailable, rather than claiming no footage was saved", () => {
+    for (const mode of ["continuous", "motion", "events"] as const) {
+      expect(describeLastSaved(cam({ recording: rec({ mode, lastSegmentAt: null, lastSegmentReadFailed: true }) }), NOW)).toEqual({
+        text: "Last save unavailable",
+        tone: "muted",
+      });
+    }
+  });
+
   it("says nothing when the camera is not saving, is offline, is degraded, or has no block", () => {
     expect(describeLastSaved(cam({ recording: rec({ mode: "off" }) }), NOW)).toBeNull();
     expect(describeLastSaved(cam({ status: "offline" }), NOW)).toBeNull();

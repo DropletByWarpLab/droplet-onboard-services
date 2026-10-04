@@ -179,7 +179,7 @@ describe("buildRecordingState", () => {
   });
 
   it("ignores a non-finite or non-positive segment time", () => {
-    for (const bad of [Number.NaN, 0, -5]) {
+    for (const bad of [Number.NaN, 0, -5, 1e100]) {
       const state = buildRecordingState({ retention: retention({ continuousDays: 1 }), lastSegmentEnd: bad });
       expect(state.lastSegmentAt).toBeNull();
     }

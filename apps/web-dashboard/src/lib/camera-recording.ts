@@ -186,6 +186,7 @@ export function describeLastSaved(
   const rec = camera.recording;
   if (!rec || rec.degraded || rec.mode === null || rec.mode === "off") return null;
   if (camera.status === "offline") return null;
+  if (rec.lastSegmentReadFailed) return { text: "Last save unavailable", tone: "muted" };
 
   if (rec.lastSegmentAt) {
     const ageSec = (nowMs - Date.parse(rec.lastSegmentAt)) / 1000;

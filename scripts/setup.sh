@@ -575,6 +575,11 @@ main() {
   install_restic_backup \
     || log_warn "restic backup host integration had issues (continuing)"
 
+  # WARP-3653: daily host timer that renews internal CA leaf certificates
+  # before the 90-day expiry. Non-fatal, idempotent.
+  install_internal_cert_renewal \
+    || log_warn "internal certificate renewal timer had issues (continuing)"
+
   # --- Phase 5: Build ---
   log_step 5 $total_steps "Build"
   if [ "$SKIP_BUILD" = "true" ]; then
@@ -844,6 +849,25 @@ main() {
   printf "  ${_DIM}Offline / air-gapped fallback only: ./scripts/trust-droplet-cert.sh${_RESET}\n"
   printf "  ${_DIM}Windows: powershell -ExecutionPolicy Bypass -File scripts\\trust-droplet-cert.ps1${_RESET}\n"
   printf "\n"
+  # WARP-3414: the certificate's KEY fingerprint, printed HERE — on the box's
+  # own terminal — because this is a channel a person on the LAN cannot
+  # rewrite. A Droplet app that connects to a box using its own certificate
+  # (the Mac app, on a manual connect) shows this same value and asks the
+  # admin to compare; the dashboard also shows it, but over the connection
+  # being checked, so it proves nothing on its own. Same string as the
+  # front screen and `droplet-fingerprint` (scripts/host/usr-local-bin/).
+  # Best-effort: setup must never fail on a display line.
+  _fp_cli="$REPO_ROOT/scripts/host/usr-local-bin/droplet-fingerprint"
+  _fp="$("$_fp_cli" --file "$REPO_ROOT/docker/certs/droplet.crt" 2>/dev/null || true)"
+  if [ -n "$_fp" ]; then
+    printf "  ${_BOLD}Droplet fingerprint${_RESET} (SHA-256 of this Droplet's certificate key)\n"
+    printf '%s\n' "$_fp" | sed 's/^/    /'
+    printf "  Apps show this when they first connect to a Droplet that uses its own\n"
+    printf "  certificate. Compare it with what the app shows. This terminal, the\n"
+    printf "  Droplet's front screen and ${_BOLD}droplet-fingerprint${_RESET} are trustworthy for that;\n"
+    printf "  a web page the Droplet serves is not, by itself.\n"
+    printf "\n"
+  fi
   printf "  Open the dashboard to complete setup — a guided wizard\n"
   printf "  will walk you through creating your admin account.\n"
   printf "\n"

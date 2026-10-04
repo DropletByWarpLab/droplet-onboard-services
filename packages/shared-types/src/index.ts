@@ -1,6 +1,7 @@
 export * from "./anchor";
 export * from "./box-name";
 export * from "./camera-settings-limits";
+export * from "./chat-media";
 export * from "./dashboard-pages";
 export * from "./integration-status";
 export * from "./landed-records";

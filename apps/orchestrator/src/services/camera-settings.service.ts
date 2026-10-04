@@ -51,10 +51,12 @@
 
 import { parseDocument, isMap, isScalar, type Document } from "yaml";
 
+import { toFrigateKey } from "./camera-key.js";
 import {
   fetchConfig,
   fetchRawConfigYaml,
   saveRawConfig,
+  withFrigateConfigLock,
 } from "./frigate.client.js";
 import {
   CAMERA_DETECT_FPS_MAX,
@@ -164,7 +166,8 @@ export async function getCameraSettings(
   const cameras = (config as Record<string, unknown>).cameras as
     | Record<string, Record<string, unknown>>
     | undefined;
-  const camera = cameras?.[cameraName];
+  // Frigate files a camera under its canonical key (WARP-3506).
+  const camera = cameras?.[toFrigateKey(cameraName)];
   if (!camera) {
     throw new Error(`camera ${cameraName} not found`);
   }
@@ -350,13 +353,28 @@ function stripLegacyRetain(doc: Document): string[] {
  *
  * Validation is structural (type + range) and runs BEFORE any mutation, so
  * a rejected value can never leave a half-written camera block behind.
+ *
+ * WARP-3510 — a Frigate config write like any other: it holds the process-wide
+ * config lock across read → edit → save (frigate.client.ts), so it cannot
+ * overlap an add, delete or prune and have one of them silently undone, and
+ * the YAML it replaces is kept as a pre-image.
  */
-export async function updateCameraSettings(
+export function updateCameraSettings(
   cameraName: string,
   patch: CameraSettingsPatch,
 ): Promise<CameraSettings> {
-  const doc = parseDocument(await fetchRawConfigYaml());
-  if (doc.getIn(["cameras", cameraName]) === undefined) {
+  return withFrigateConfigLock(() => saveCameraSettings(cameraName, patch));
+}
+
+async function saveCameraSettings(
+  cameraName: string,
+  patch: CameraSettingsPatch,
+): Promise<CameraSettings> {
+  // The authored YAML files a camera under its canonical key (WARP-3506).
+  const key = toFrigateKey(cameraName);
+  const raw = await fetchRawConfigYaml();
+  const doc = parseDocument(raw);
+  if (doc.getIn(["cameras", key]) === undefined) {
     throw new Error(`camera ${cameraName} not found`);
   }
 
@@ -365,7 +383,7 @@ export async function updateCameraSettings(
   // end of this function), so this is what the returned projection builds on.
   const before = await getCameraSettings(cameraName);
 
-  const at = (...rest: string[]) => ["cameras", cameraName, ...rest];
+  const at = (...rest: string[]) => ["cameras", key, ...rest];
 
   // ── validate ─────────────────────────────────────────────────────────
   if (patch.detectFps !== undefined) {
@@ -592,7 +610,7 @@ export async function updateCameraSettings(
     );
   }
 
-  const resp = await saveRawConfig(String(doc));
+  const resp = await saveRawConfig(String(doc), raw);
   if (!resp.ok) {
     const errBody = await resp.text().catch(() => "");
     logger.warn(

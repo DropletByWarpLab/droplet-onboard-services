@@ -30,7 +30,11 @@ interface NetworkCameraListProps {
   onScan: () => void;
   onAccept: (camera: DiscoveredCamera) => Promise<void> | void;
   onReject: (camera: DiscoveredCamera) => Promise<void> | void;
-  /** Hand a camera we can't stream to the manual RTSP form, prefilled. */
+  /**
+   * Open "Add camera" for a camera we can't stream yet. A camera discovery still
+   * holds a live record for opens a username/password form (discovery re-probes
+   * with them — WARP-3505); anything else opens the manual RTSP form, prefilled.
+   */
   onEnterCredentials: (camera: DiscoveredCamera) => void;
 }
 
@@ -224,8 +228,9 @@ export function NetworkCameraList({
                     Add
                   </button>
                 ) : (
-                  // Not streamable yet: camera-discovery has no accept-with-
-                  // credentials API, so the honest next step is the manual form
+                  // Not streamable yet — it needs a sign-in. Set up opens the Add
+                  // camera form on this camera's username/password (WARP-3505);
+                  // a camera with no live discovery record gets the manual form
                   // with everything we already know filled in.
                   <button
                     onClick={() => onEnterCredentials(cam)}

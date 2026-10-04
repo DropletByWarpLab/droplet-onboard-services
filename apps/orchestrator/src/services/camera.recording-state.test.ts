@@ -195,8 +195,10 @@ describe("getCameras — when the last segment landed", () => {
     const cams = await getCameras(prismaWith([dbCam("a"), dbCam("b")]));
 
     expect(cams[0].recording.lastSegmentAt).toBeNull();
+    expect(cams[0].recording.lastSegmentReadFailed).toBe(true);
     expect(cams[0].recording.degraded).toBe(false);
     expect(cams[1].recording.lastSegmentAt).not.toBeNull();
+    expect(cams[1].recording.lastSegmentReadFailed).not.toBe(true);
   });
 
   it("a failed storage read leaves usage unknown — it does not degrade the block", async () => {

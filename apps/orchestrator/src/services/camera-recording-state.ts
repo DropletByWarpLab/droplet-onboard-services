@@ -120,11 +120,15 @@ export interface RecordingStateInputs {
   storage?: StorageBytes;
   /** Unix seconds the newest saved segment ended, or null when none was found. */
   lastSegmentEnd: number | null;
+  lastSegmentReadFailed?: boolean;
 }
 
 export function buildRecordingState(inputs: RecordingStateInputs): CameraRecordingState {
   const { retention, storage, lastSegmentEnd } = inputs;
   const bytesPerHour = storage?.bytesPerHour ?? null;
+  const segmentDate = lastSegmentEnd !== null && lastSegmentEnd > 0
+    ? new Date(lastSegmentEnd * 1000)
+    : null;
 
   return {
     degraded: false,
@@ -139,9 +143,10 @@ export function buildRecordingState(inputs: RecordingStateInputs): CameraRecordi
       detections: retention.detectionsRetainDays,
     },
     lastSegmentAt:
-      lastSegmentEnd !== null && Number.isFinite(lastSegmentEnd) && lastSegmentEnd > 0
-        ? new Date(lastSegmentEnd * 1000).toISOString()
+      segmentDate && Number.isFinite(segmentDate.getTime())
+        ? segmentDate.toISOString()
         : null,
+    ...(inputs.lastSegmentReadFailed ? { lastSegmentReadFailed: true } : {}),
     usedBytes: storage?.usedBytes ?? null,
     bytesPerDay: bytesPerHour === null ? null : Math.round(bytesPerHour * 24),
   };

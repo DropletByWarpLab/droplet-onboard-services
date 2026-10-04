@@ -73,10 +73,12 @@ export interface CameraRecordingState {
   retentionDays: CameraRetentionDays | null;
   /**
    * When the newest saved segment ended (ISO), looking back a short bounded
-   * window. Null when none was found in it — which is normal for a camera
+   * window. Null when the read failed or none was found in it — normal for a camera
    * that only keeps motion or events, and is not by itself a fault.
    */
   lastSegmentAt: string | null;
+  /** True when the recent-segment read failed, rather than finding no footage. */
+  lastSegmentReadFailed?: boolean;
   /** Bytes of footage on disk, or null when Frigate has no segments / no figure. */
   usedBytes: number | null;
   /** Measured write rate scaled to a day, or null when not yet measured. */

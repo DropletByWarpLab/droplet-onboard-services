@@ -108,7 +108,7 @@ describe("when the repair can help this camera", () => {
 
     await waitFor(() => expect(h.run).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
-    expect(h.toast).toHaveBeenCalledWith("Footage is now being saved for 1 camera.", "success");
+    expect(h.toast).toHaveBeenCalledWith("Recording settings updated for 1 camera. The camera service is restarting.", "success");
   });
 
   it("cancelling changes nothing", async () => {

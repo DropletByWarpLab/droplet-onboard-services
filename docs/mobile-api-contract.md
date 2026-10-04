@@ -340,6 +340,17 @@ Sign-in + optional enrollment sequence:
    leaf; unknown parameters are ignored by older clients. Reference
    implementation: the native Windows client's C# trust code in `droplet-windows`
    (a port of the retired Rust `trust.rs`, WARP-2953; WARP-3236).
+   **Manual connect (WARP-3414).** A client that is given only an address (no
+   scanned `spki`) and finds a box with its own certificate MAY show the key's
+   fingerprint and ask the admin to compare it. Format, shared by every channel:
+   the same SHA-256 as uppercase hex in 4-character groups separated by single
+   spaces, 16 groups (`F017 AFA8 6AD7 8BED …`). The reference must come from a
+   channel a LAN attacker cannot rewrite, so the box shows it on its own front
+   screen (the rail's `Droplet fingerprint` face), in the `setup.sh` output and
+   from `droplet-fingerprint` on the box. Settings → Device information and
+   Devices → Pair show it too (`fingerprint` on the owner/admin-only
+   `GET /api/tls/certificate`), but that is the same connection under
+   question, so the dashboard copy says it proves nothing on its own.
 2. App POSTs `/auth/login?return=body` → stores JWT pair + user. On
    `401 TOTP_REQUIRED`, prompt for `totp` and resubmit.
 3. (Optional) If a pair `code` is present, app POSTs `/devices/pair/claim`
@@ -389,7 +400,8 @@ never zero.
 |---|---|---|
 | `mode` | `continuous`, `motion`, `events`, `off`, or `null` | Named for the broadest open retention window: `continuous` keeps everything, `motion` keeps segments with motion, `events` keeps only footage that overlaps an alert or detection, `off` keeps nothing. `null` only when `degraded` |
 | `retentionDays` | `{ continuous, motion, alerts, detections }` or `null` | Days each window keeps footage, as configured (0 closes a window). Present even when `mode` is `off`. `null` only when `degraded` |
-| `lastSegmentAt` | ISO string or `null` | When the newest saved segment ended, from a short recent window. `null` means none was found there, which is normal for `motion` and `events` |
+| `lastSegmentAt` | ISO string or `null` | When the newest saved segment ended, from a short recent window. `null` means unread or none was found there; check `lastSegmentReadFailed` before claiming no recent footage |
+| `lastSegmentReadFailed` | optional boolean | `true` when the recent-segment read failed. Show "Last save unavailable", never "Nothing saved recently"; this does not invalidate the mode and retention readings |
 | `usedBytes` | number or `null` | Bytes of footage on disk. `null` means none yet, or not known, and is never 0 |
 | `bytesPerDay` | number or `null` | The measured write rate scaled to a day. `null` means not measured yet |
 | `degraded` | boolean | The camera service could not be read. Every other field, and `status`, is unknown: show "service unavailable", never a recording or "not saving" claim |

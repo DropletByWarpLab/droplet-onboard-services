@@ -87,7 +87,7 @@ export function RetentionFixButton({
       toast(
         result.noop
           ? "Nothing needed repairing."
-          : `Footage is now being saved for ${result.written.length} camera${result.written.length === 1 ? "" : "s"}.`,
+          : `Recording settings updated for ${result.written.length} camera${result.written.length === 1 ? "" : "s"}. The camera service is restarting.`,
         "success",
       );
       onDone?.();
