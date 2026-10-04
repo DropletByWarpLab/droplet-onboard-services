@@ -438,7 +438,7 @@ function fmtIcsDateTime(d: Date, allDay: boolean): string {
 
 /**
  * WARP-3533 — the STATUS values `serializeIcs` writes. The first three are the
- * RFC 5545 VEVENT values (§3.8.1.11). `COMPLETED` is that section's VTODO
+ * RFC 5545 VEVENT values (its STATUS section). `COMPLETED` is that section's VTODO
  * value, written on a VEVENT because the work-item feeds are all-day events
  * that must say "done" (ADR-069 / WS-17): a client that does not know it shows
  * the item as an ordinary all-day event, which is the harmless way to fail.
