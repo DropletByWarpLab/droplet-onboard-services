@@ -43,6 +43,7 @@ import {
   runSyncTick,
   syncCursor,
   type M365SyncDeps,
+  type PageContext,
 } from "./m365-sync.service.js";
 import { GraphRequestError, type GraphPage } from "./graph-client.js";
 import { M365NotConnectedError } from "./m365-auth.service.js";
@@ -475,6 +476,127 @@ describe("discoverResources — only what the grant covers (WARP-3059)", () => {
   });
 });
 
+// --- WARP-3538: where a page sits in its enumeration ------------------------
+
+describe("syncCursor — what the page handler is told about the enumeration (WARP-3538)", () => {
+  /**
+   * Graph, paginated: `pages` pages, the last carrying the deltaLink. A page
+   * listed in `empty` has no items — the final page of a long enumeration is
+   * often only the delta link.
+   */
+  function pagedClient(pages: number, empty: number[] = []) {
+    const getPage = vi.fn(async (url: string) => {
+      // An incremental run starts from the stored delta link, which names no page.
+      const n = Number(/p=(\d+)/.exec(url)?.[1] ?? 1);
+      return {
+        items: empty.includes(n) ? [] : [{ id: `i${n}` }],
+        links:
+          n < pages
+            ? { nextLink: `https://graph.microsoft.com/v1.0/me/drive/root/delta?p=${n + 1}`, deltaLink: null }
+            : { nextLink: null, deltaLink: `${DELTA}-after-${n}` },
+        raw: {},
+      } as unknown as GraphPage;
+    });
+    return { getPage } as unknown as M365SyncDeps["client"];
+  }
+  const start = () => "https://graph.microsoft.com/v1.0/me/drive/root/delta?p=1";
+
+  /** Run one cursor and return what its handler was told on each page. */
+  async function told(cursor: Partial<DueCursor>, pages: number, empty: number[] = [], failOn?: number) {
+    const seen: PageContext[] = [];
+    const prisma = fakePrisma([row({ workload: "files", resourceId: "-", ...cursor })]);
+    await syncCursor(
+      deps(prisma, {
+        client: pagedClient(pages, empty),
+        initialUrlFor: start,
+        handlePage: async (_cursor, _page, run) => {
+          seen.push(run);
+          if (failOn !== undefined && seen.length === failOn) throw new Error("storage hiccup");
+        },
+      }),
+      due({ workload: "files", resourceId: "-", ...cursor }),
+    );
+    return seen;
+  }
+
+  it("a first sync is a FULL enumeration: first page marks, last page sweeps, the pages between do neither", async () => {
+    expect(await told({ deltaLink: null }, 3)).toEqual([
+      { fullEnumeration: true, isFirstPage: true, isLastPage: false },
+      { fullEnumeration: true, isFirstPage: false, isLastPage: false },
+      { fullEnumeration: true, isFirstPage: false, isLastPage: true },
+    ]);
+  });
+
+  it("a one-page full enumeration is both the first page and the last", async () => {
+    expect(await told({ deltaLink: null }, 1)).toEqual([{ fullEnumeration: true, isFirstPage: true, isLastPage: true }]);
+  });
+
+  it("an incremental run is NOT a full enumeration — it must never be told to sweep", async () => {
+    // A sweep after an incremental run would delete every file the run did not
+    // happen to mention — that is, nearly all of them.
+    // (Mutation: derive fullEnumeration from anything but `deltaLink === null`.)
+    const seen = await told({ deltaLink: DELTA }, 3);
+    expect(seen.every((r) => r.fullEnumeration === false)).toBe(true);
+    expect(seen.map((r) => r.isFirstPage)).toEqual([true, false, false]);
+    expect(seen.map((r) => r.isLastPage)).toEqual([false, false, true]);
+  });
+
+  it("a tick that RESUMES a full enumeration is still full, and never sees its first page", async () => {
+    // The first page was read, and the rows marked, by an earlier tick. Marking
+    // again here would mark the rows that tick had already seen and un-marked,
+    // and the sweep would delete them. (Mutation: ignore resumeLink in `isFirstPage`.)
+    const seen = await told({ deltaLink: null, resumeLink: "https://graph.microsoft.com/v1.0/me/drive/root/delta?p=2" }, 3);
+    expect(seen).toEqual([
+      { fullEnumeration: true, isFirstPage: false, isLastPage: false },
+      { fullEnumeration: true, isFirstPage: false, isLastPage: true },
+    ]);
+  });
+
+  it("a tick that resumes an INCREMENTAL run is not a full enumeration", async () => {
+    const seen = await told({ deltaLink: DELTA, resumeLink: "https://graph.microsoft.com/v1.0/me/drive/root/delta?p=2" }, 3);
+    expect(seen.every((r) => r.fullEnumeration === false && r.isFirstPage === false)).toBe(true);
+  });
+
+  it("reports the last page even when it carries no items — the delta-link-only page", async () => {
+    // The sweep rides on this flag, not on the page having anything in it.
+    const seen = await told({ deltaLink: null }, 3, [3]);
+    expect(seen.at(-1)).toEqual({ fullEnumeration: true, isFirstPage: false, isLastPage: true });
+  });
+
+  it("tells a retried run the same thing it was told the first time", async () => {
+    // A page that failed to land leaves the cursor where it was, so the whole
+    // run repeats. Told the same thing, the handler's mark and sweep are
+    // idempotent; told anything else, a retry could skip the mark or sweep early.
+    const first = await told({ deltaLink: null }, 3, [], 2);
+    const second = await told({ deltaLink: null }, 3);
+    expect(first).toEqual(second.slice(0, 2));
+  });
+
+  it("a full enumeration spread over two ticks is marked once and swept once", async () => {
+    const TOTAL = MAX_PAGES_PER_TICK + 5;
+    const seen: PageContext[] = [];
+    const client = pagedClient(TOTAL);
+    const prisma = fakePrisma([row({ workload: "files", resourceId: "-", deltaLink: null })]);
+    const handlePage = async (_c: DueCursor, _p: GraphPage, run: PageContext) => {
+      seen.push(run);
+    };
+
+    await syncCursor(deps(prisma, { client, initialUrlFor: start, handlePage }), due({ workload: "files", resourceId: "-", deltaLink: null }));
+    const saved = prisma.__first()!;
+    await syncCursor(
+      deps(prisma, { client, initialUrlFor: start, handlePage }),
+      due({ workload: "files", resourceId: "-", deltaLink: saved.deltaLink, resumeLink: saved.resumeLink }),
+    );
+
+    expect(seen).toHaveLength(TOTAL);
+    expect(seen.every((r) => r.fullEnumeration)).toBe(true);
+    expect(seen.filter((r) => r.isFirstPage)).toHaveLength(1);
+    expect(seen.filter((r) => r.isLastPage)).toHaveLength(1);
+    expect(seen[0]!.isFirstPage).toBe(true);
+    expect(seen.at(-1)!.isLastPage).toBe(true);
+  });
+});
+
 // --- #2347 review: a disconnect during a tick -------------------------------
 
 describe("runSyncTick — a person disconnects while the tick holds their cursor (#2347 review)", () => {
@@ -583,6 +705,16 @@ describe("a grant that covers no workload says so (#2347 review)", () => {
   it("is false when the token could not be produced — that is reported as skipped, not as the grant", async () => {
     getAccessTokenMock.mockRejectedValue(new M365NotConnectedError("NEEDS_RECONNECT"));
     expect(grantCoversNoWorkload(await discover(null))).toBe(false);
+  });
+
+  it("index.ts wires the drive landing handler into the sync tick (WARP-3538)", () => {
+    // Without `handlePage` the engine reads every OneDrive and SharePoint page and
+    // discards it: the card says "synced", the file search is empty, and nothing
+    // fails. The same source pin as below — index.ts opens sockets on import.
+    const index = readFileSync(resolve(__dirname, "../../index.ts"), "utf8");
+    const deps = index.slice(index.indexOf("const m365Deps: M365SyncDeps = {"), index.indexOf("const m365TickMs"));
+    expect(deps.length).toBeGreaterThan(0);
+    expect(deps).toMatch(/handlePage:\s*createDriveLandingHandler\(/);
   });
 
   it("the scheduler logs it: index.ts is the only caller, and the unit lane cannot run it", () => {

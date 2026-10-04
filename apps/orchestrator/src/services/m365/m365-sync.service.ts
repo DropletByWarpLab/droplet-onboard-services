@@ -38,21 +38,28 @@
  * resync clears it with the delta link. Without this, a folder over the budget
  * re-read the same pages every tick and never produced a deltaLink.
  *
- * ## What it does with what it reads — nothing, on purpose
+ * ## What it does with what it reads — a decision per workload
  *
- * `handlePage` is injected and the shipped caller counts. This is not an
- * unfinished edge; it is ADR-041 §4 as amended by WARP-2549. That section
- * forbids becoming the first writer of `ErpEntityCache`, whose docstring
- * promises an at-rest encryption that **is not implemented** (WARP-2028) —
- * writing mail there would ship a lie about how the data is protected. The
- * narrow reading WARP-2549 settled permits landing into tables that make no
- * such claim, which is how HubSpot's companies and contacts land today.
+ * `handlePage` is injected, and the landing target is a separate decision per
+ * workload, taken where the schema for it exists. This is ADR-041 §4 as amended
+ * by WARP-2549: the engine must not become the first writer of
+ * `ErpEntityCache`, whose docstring promises an at-rest encryption that **is
+ * not implemented** (WARP-2028) — writing mail there would ship a lie about how
+ * the data is protected.
  *
- * So the engine is complete and the landing target is a separate decision per
- * workload, taken where the schema for it exists. Until then this runs the
- * cursors, proves the transport, and advances `lastSyncedAt` — which is the
- * column the hub renders as "last synced" and which, before WARP-2218, was
- * only ever written by `connect()`.
+ * Today the shipped caller lands exactly two workloads, `files` (OneDrive) and
+ * `sharepoint` (one cursor per document library), as METADATA into the
+ * provider-agnostic cloud-file store with its names encrypted
+ * (`drive-landing.service.ts`, WARP-3538). Every other workload is still
+ * counted and discarded: this runs its cursors, proves the transport, and
+ * advances `lastSyncedAt` — the column the hub renders as "last synced" and
+ * which, before WARP-2218, was only ever written by `connect()`.
+ *
+ * What the engine owes a handler that LANDS is the one fact it alone knows: where
+ * in an enumeration a page sits. A run that starts from scratch returns the
+ * current state and says nothing about what was deleted, so the handler sweeps —
+ * and it can only do that if it is told when a full enumeration starts and ends
+ * (`PageContext`).
  *
  * ## Concurrency
  *
@@ -135,10 +142,43 @@ export interface CursorSyncResult {
   error?: string;
 }
 
+/**
+ * Where a page sits in the enumeration it belongs to — the one fact only the
+ * engine knows, and the one a handler that LANDS needs to remove what is gone.
+ *
+ * A run that starts from scratch (a first sync, or a resync after Microsoft
+ * dropped the token) returns the CURRENT state and says nothing about what was
+ * deleted in between, so a handler must delete what such a run did not return.
+ * It can only do that if it is told when a full enumeration starts and when it
+ * ends — and "ends" is not "this tick ends": a big source takes many ticks, each
+ * resuming from a checkpoint (WARP-3059).
+ *
+ *   - `fullEnumeration` — the enumeration this page belongs to began from
+ *     scratch: the cursor had no delta link when it was claimed. True for a first
+ *     sync, a resync, and every tick that RESUMES one; false for an incremental
+ *     run (and for resuming one), which must never delete anything the feed did
+ *     not say was deleted.
+ *   - `isFirstPage` — the first page of the enumeration, read in THIS tick: a
+ *     tick that resumes from a checkpoint never sees it, because the first page
+ *     was read by an earlier tick.
+ *   - `isLastPage` — the page that carries the delta link, wherever in the
+ *     enumeration's ticks it falls. It may carry no items at all.
+ *
+ * Computed from the cursor as it was CLAIMED, never from what the run has done
+ * since: a page that fails and is retried is told the same thing it was told
+ * the first time, which is what makes a handler's mark and sweep idempotent.
+ */
+export interface PageContext {
+  readonly fullEnumeration: boolean;
+  readonly isFirstPage: boolean;
+  readonly isLastPage: boolean;
+}
+
 /** What a caller does with a page of changes. Injected — see the module header. */
 export type PageHandler = (
   cursor: DueCursor,
   page: GraphPage,
+  run: PageContext,
 ) => Promise<void> | void;
 
 export interface M365SyncDeps {
@@ -247,6 +287,12 @@ export async function syncCursor(
   let items = 0;
   let pages = 0;
 
+  // Read off the cursor as CLAIMED (see `PageContext`): a full enumeration is
+  // one that began with no delta link, and its first page is only ever read by a
+  // tick that did not start from a checkpoint.
+  const fullEnumeration = cursor.deltaLink === null;
+  const resuming = cursor.resumeLink !== null;
+
   while (url && pages < MAX_PAGES_PER_TICK) {
     let page: GraphPage;
     try {
@@ -301,7 +347,11 @@ export async function syncCursor(
       // but not stored, and advancing would drop it permanently. Treated as a
       // run failure so the whole run repeats from the last good deltaLink.
       try {
-        await deps.handlePage(cursor, page);
+        await deps.handlePage(cursor, page, {
+          fullEnumeration,
+          isFirstPage: pages === 1 && !resuming,
+          isLastPage: page.links.deltaLink !== null,
+        });
       } catch (err) {
         await recordFailure(
           deps.prisma,

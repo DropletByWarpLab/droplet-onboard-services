@@ -186,6 +186,7 @@ import {
 import { GraphClient } from "./services/m365/graph-client.js";
 import { initialUrlFor } from "./services/m365/graph-resources.js";
 import { createEntraClient } from "./services/m365/entra-client.js";
+import { createDriveLandingHandler } from "./services/m365/drive-landing.service.js";
 
 /**
  * Product version for the Graph `User-Agent` Microsoft asks integrators to
@@ -2010,6 +2011,12 @@ async function main() {
       client: new GraphClient({ version: ORCHESTRATOR_M365_UA_VERSION }),
       entra: createEntraClient(),
       initialUrlFor,
+      // WARP-3538 (ADR-041 §4) — what the engine does with a page. OneDrive and
+      // SharePoint pages land as encrypted METADATA in the cloud-file store; every
+      // other workload is still counted and discarded. Without this the engine
+      // reads every drive page and throws it away: the card says "synced", the
+      // file search is empty, and nothing fails.
+      handlePage: createDriveLandingHandler(prisma),
     };
 
     // Read at BOOT, never at module import — `docker restart` does not re-read
