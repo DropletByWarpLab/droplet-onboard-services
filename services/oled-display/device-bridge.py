@@ -2521,13 +2521,6 @@ def eject_drive(uuid):
     if not target:
         return False, "no hot-plug drive with that uuid"
     mp = (target.get("mount") or "").rstrip("/")
-    # WARP-3514: yanking the recordings drive out from under Frigate would fill
-    # the OS disk (or lose footage), so refuse before anything is synced or
-    # unmounted. Fails OPEN — an unreadable status never blocks an eject (the
-    # orchestrator layer is the fail-closed one).
-    refusal = _eject_recordings_refusal(target, mp)
-    if refusal is not None:
-        return False, refusal
     # Bus-agnostic (ADR-011): any hot-plug drive the automounter placed under
     # /mnt/droplet/ is ejectable — USB, external NVMe, SD, SATA dock, etc.
     # System/boot disks are never in the automount state, so membership + the
@@ -2559,6 +2552,13 @@ def eject_drive(uuid):
         and os.path.realpath(actual_dev) not in {os.path.realpath(d) for d in accepted}
     ):
         return False, "mount/device mismatch — refusing to eject"
+    # WARP-3514: validate the local mount/device first, then refuse the active
+    # recordings drive before anything is synced or unmounted. A malformed
+    # entry must not even reach the status subprocess. An unreadable recordings
+    # status does not block an otherwise valid eject.
+    refusal = _eject_recordings_refusal(target, real_mp)
+    if refusal is not None:
+        return False, refusal
     _run(["sync"], timeout=10)
     rc, _out, err = _run(["umount", real_mp], timeout=20)
     if rc != 0:

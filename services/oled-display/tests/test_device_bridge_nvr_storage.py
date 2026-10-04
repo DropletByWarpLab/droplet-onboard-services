@@ -1341,8 +1341,11 @@ _POOL_PARAMS = {
 
 
 def test_every_pool_op_has_a_guard_test_case(nvr):
-    # If a new op is added to _POOL_OPS the guard must be extended and tested.
-    assert set(_POOL_PARAMS) == set(nvr.bridge._POOL_OPS)
+    # Device-changing operations all have active-recordings guard cases.
+    # Recovery custody is UUID-only and has the separate cases below.
+    assert nvr.bridge._POOL_OPS_UUID_ONLY == {
+        "recovery_key_reveal", "recovery_key_regenerate"}
+    assert set(_POOL_PARAMS) | nvr.bridge._POOL_OPS_UUID_ONLY == set(nvr.bridge._POOL_OPS)
 
 
 @pytest.mark.parametrize("operation", sorted(_POOL_PARAMS))
@@ -1463,12 +1466,13 @@ def test_extended_pool_command_keeps_the_active_recordings_refusal(nvr, monkeypa
     assert called == []
 
 
-def test_recovery_key_operation_keeps_uuid_only_params_and_skips_the_disk_guard(nvr, monkeypatch):
+@pytest.mark.parametrize("operation", ["recovery_key_reveal", "recovery_key_regenerate"])
+def test_recovery_key_operation_keeps_uuid_only_params_and_skips_the_disk_guard(nvr, monkeypatch, operation):
     called = _stub_executor(nvr, monkeypatch)
     ok, _info, code = nvr.bridge.run_pool_command_ex(
-        "recovery_key_regenerate", {"uuid": _BAY_UUID, "device": "sdb"})
+        operation, {"uuid": _BAY_UUID, "device": "sdb"})
     assert ok is True and code == ""
-    assert called == [("recovery_key_regenerate", {"uuid": _BAY_UUID})]
+    assert called == [(operation, {"uuid": _BAY_UUID})]
     assert nvr.host.calls == []
 
 

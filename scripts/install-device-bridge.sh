@@ -10,9 +10,6 @@
 #   /etc/systemd/system/droplet-nvr-*.service|.timer   (camera-recordings
 #                                              allocation: two on-demand root
 #                                              units + the boot guard — WARP-3514)
-  fi
-fi
-
 #   /etc/systemd/system/droplet-bay-recovery-expiry.{service,timer}   (WARP-3513)
 #   /etc/droplet/device-bridge.env            (0600, root:root)
 #
@@ -56,9 +53,6 @@ for unit in droplet-device-bridge.service \
             droplet-nvr-guard.service \
             droplet-nvr-guard-release.service \
             droplet-nvr-guard-release.timer \
-  fi
-fi
-
             droplet-bay-recovery-expiry.service \
             droplet-bay-recovery-expiry.timer \
             droplet-panel-claim.service \
