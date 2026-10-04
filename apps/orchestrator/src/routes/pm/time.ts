@@ -154,11 +154,16 @@ function mapTimeError(err: unknown, res: Response): boolean {
   }
 }
 
-/** The caller as the service sees them. Only reached behind `requireRole(...WRITE)`,
- *  so a person is present; the guard is for the type, not for a case that exists. */
+/**
+ * The caller as the service sees them. Only reached behind `requireRole(...WRITE)`,
+ * which answers 403 when there is no user, so a person is always present. There is
+ * deliberately NO fallback id: a route mounted without its guard would otherwise
+ * log time for an owner called "", and a loud 500 is the better way to find that.
+ */
 function timeActor(req: Request): time.TimeActor {
-  const role = req.user?.role;
-  return { id: req.user?.id ?? "", canManageAll: role === "owner" || role === "admin" };
+  const user = req.user;
+  if (!user) throw new Error("time write reached without a signed-in user");
+  return { id: user.id, canManageAll: user.role === "owner" || user.role === "admin" };
 }
 
 /** Roughly how much CSV is buffered before a write; keeps memory flat on a long report. */
