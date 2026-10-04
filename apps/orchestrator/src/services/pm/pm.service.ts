@@ -364,7 +364,9 @@ export function isPrismaCode(
   return typeof err === "object" && err !== null && (err as { code?: unknown }).code === code;
 }
 
-async function writeActivity(
+/** The one place a PM activity row is written. Exported (WARP-3526) so a sibling
+ *  service writes its rows through it instead of re-spelling the insert. */
+export async function writeActivity(
   db: Db,
   input: {
     workItemId: string;
