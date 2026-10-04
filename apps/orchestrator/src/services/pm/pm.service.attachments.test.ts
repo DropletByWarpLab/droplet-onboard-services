@@ -9,7 +9,8 @@
  *   - the keys read are the right ones (the item's, the project's);
  *   - the unlink happens only AFTER a successful delete — a delete that fails
  *     (race, serialization loser, anything) must not have destroyed the files;
- *   - for an item, the read is INSIDE the SERIALIZABLE transaction;
+ *   - for an item AND for a project, the read is INSIDE a SERIALIZABLE
+ *     transaction, and its loser is `concurrent_mutation`, never a lost blob;
  *   - a blob that will not unlink never turns a committed delete into an error.
  *
  * The same behaviour against a real Postgres and real files is in
@@ -103,9 +104,8 @@ describe("deleteWorkItem unlinks the item's attachment files (WARP-1505)", () =>
 describe("deleteProject unlinks every attachment file under the project (WARP-1505)", () => {
   function setup(opts: { keys?: string[]; deleteError?: unknown; order?: string[] } = {}) {
     const order = opts.order ?? [];
-    const prisma = {
+    const tx = {
       pmProject: {
-        findUnique: async () => ({ id: "p-1" }),
         delete: async () => {
           order.push("delete");
           if (opts.deleteError) throw opts.deleteError;
@@ -121,19 +121,30 @@ describe("deleteProject unlinks every attachment file under the project (WARP-15
           return (opts.keys ?? []).map((storageKey) => ({ storageKey }));
         },
       },
-    } as never;
+    };
+    const seam = createTransactionSeam({ client: () => tx });
+    const prisma = { pmProject: { findUnique: async () => ({ id: "p-1" }) }, $transaction: seam.$transaction } as never;
     removeAttachmentBlobs.mockImplementation(async () => {
       order.push("unlink");
       return { removed: 0, failed: 0 };
     });
-    return { prisma, order };
+    return { prisma, seam, order };
   }
 
-  it("reads the keys before the delete and unlinks them after it", async () => {
-    const { prisma, order } = setup({ keys: ["k1", "k2", "k3"] });
+  it("reads the keys inside a SERIALIZABLE transaction and unlinks them after the delete", async () => {
+    const { prisma, seam, order } = setup({ keys: ["k1", "k2", "k3"] });
     await deleteProject(prisma, "p-1");
     expect(order).toEqual(["read-keys", "delete", "unlink"]);
     expect(removeAttachmentBlobs).toHaveBeenCalledWith(["k1", "k2", "k3"]);
+    // An upload committing between the key read and the delete must abort the
+    // delete (review probe C: it used to be cascaded with its blob left on disk).
+    expectAllTransactionsAt(seam, SERIALIZABLE_TX);
+  });
+
+  it("the SERIALIZABLE loser is concurrent_mutation, and nothing is unlinked", async () => {
+    const { prisma } = setup({ keys: ["k1"], deleteError: Object.assign(new Error("ssi"), { code: "P2034" }) });
+    await expect(deleteProject(prisma, "p-1")).rejects.toThrow("concurrent_mutation");
+    expect(removeAttachmentBlobs).not.toHaveBeenCalled();
   });
 
   it("does not unlink anything when the delete fails", async () => {

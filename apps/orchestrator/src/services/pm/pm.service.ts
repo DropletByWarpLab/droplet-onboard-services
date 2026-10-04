@@ -781,22 +781,32 @@ export async function deleteProject(prisma: PrismaClient, projectId: string): Pr
   const existing = await prisma.pmProject.findUnique({ where: { id: projectId } });
   if (!existing) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   // WARP-1505: the cascade below drops every PmAttachment ROW under this project,
-  // and the files are on a volume the database cannot reach. Read the keys first,
-  // unlink after the delete has committed (never before: a delete that then
-  // fails must not have already destroyed the files).
-  const blobKeys = (
-    await prisma.pmAttachment.findMany({
-      where: { workItem: { projectId } },
-      select: { storageKey: true },
-    })
-  ).map((a) => a.storageKey);
+  // and the files are on a volume the database cannot reach. The keys are read
+  // INSIDE the transaction, which runs SERIALIZABLE exactly as deleteWorkItem's
+  // does: an upload that commits between the read and the delete — or is in flight
+  // while it runs — aborts the delete (P2034, answered 409 concurrent_mutation,
+  // retry) instead of being cascaded with its blob forgotten. The files go after
+  // the commit, never before: a delete that then fails must not have already
+  // destroyed them. (Run non-serializable, this left an orphan blob.)
+  let blobKeys: string[] = [];
   // findUnique + delete is two round-trips: a concurrent delete between them
   // makes this delete throw Prisma P2025. Map it to the same 404 the existence
   // check would have raised (review finding: delete-helper TOCTOU → P2025).
   try {
-    await prisma.pmProject.delete({ where: { id: projectId } });
+    await prisma.$transaction(async (tx) => {
+      blobKeys = (
+        await tx.pmAttachment.findMany({
+          where: { workItem: { projectId } },
+          select: { storageKey: true },
+        })
+      ).map((a) => a.storageKey);
+      await tx.pmProject.delete({ where: { id: projectId } });
+    }, SERIALIZABLE_TX);
   } catch (err) {
     if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+    // The SERIALIZABLE loser: nothing was applied; the route answers 409 and the
+    // client retries.
+    if (isPrismaCode(err, "P2034")) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
     throw err;
   }
   await removeAttachmentBlobs(blobKeys);

@@ -308,6 +308,160 @@ describe.skipIf(!RUN)("PmAttachment — the database's own guarantees and the fi
     });
   });
 
+  // ── hard delete vs an upload racing it ─────────────────────────────────────
+  // Review probes A, B and C, made permanent. The invariant: whatever the
+  // interleaving, never a blob on disk that no row refers to.
+
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+  function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => (resolve = r));
+    return { promise, resolve };
+  }
+  const plantBlob = (key: string) => {
+    mkdirSync(join(ROOT, key.slice(0, 2)), { recursive: true });
+    writeFileSync(storage.blobPath(ROOT, key), "bytes");
+  };
+
+  /**
+   * The client pm.service is given, with its delete PARKED: `afterRead` fires
+   * once the attachment keys have been read, and the delete itself waits for
+   * `gate`. That is the window an upload has to land in.
+   */
+  function parkedDelete(model: "pmWorkItem" | "pmProject", gate: Promise<void>, afterRead: () => void) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const wrapModel = (delegate: any, name: string) =>
+      new Proxy(delegate, {
+        get(t, m) {
+          const v = t[m];
+          if (typeof v !== "function") return v;
+          if (name === "pmAttachment" && m === "findMany") {
+            return async (...a: unknown[]) => {
+              const r = await v.apply(t, a);
+              afterRead();
+              return r;
+            };
+          }
+          if (name === model && m === "delete") {
+            return async (...a: unknown[]) => {
+              await gate;
+              return v.apply(t, a);
+            };
+          }
+          return v.bind(t);
+        },
+      });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const txClient = (tx: any) =>
+      new Proxy(tx, {
+        get(t, p) {
+          if (p === "pmAttachment" || p === model) return wrapModel(t[p], String(p));
+          const v = t[p];
+          return typeof v === "function" ? v.bind(t) : v;
+        },
+      });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return new Proxy(prisma as any, {
+      get(t, p) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        if (p === "$transaction") return (fn: any, o: unknown) => t.$transaction((tx: unknown) => fn(txClient(tx)), o);
+        const v = t[p];
+        return typeof v === "function" ? v.bind(t) : v;
+      },
+    });
+  }
+
+  describe.each([
+    ["work item", "pmWorkItem"],
+    ["project", "pmProject"],
+  ] as const)("hard delete of a %s racing an upload", (_label, model) => {
+    /** A target with one work item in it, and how to delete it and see whether it survived. */
+    async function target() {
+      if (model === "pmWorkItem") {
+        const it1 = await item();
+        return {
+          workItemId: it1.id,
+          remove: (db: unknown) => pm.deleteWorkItem(db as never, "u1", it1.id),
+          survives: async () => (await prisma.pmWorkItem.count({ where: { id: it1.id } })) === 1,
+        };
+      }
+      const base = await prisma.pmProject.findUniqueOrThrow({ where: { id: projectA } });
+      const proj = await prisma.pmProject.create({
+        data: { workspaceId: base.workspaceId, name: `warp1505-race-${++seq}`, identifier: `W15R${seq}` },
+      });
+      const it1 = await prisma.pmWorkItem.create({ data: { projectId: proj.id, sequenceId: 1, name: `warp1505-race-item-${seq}` } });
+      return {
+        workItemId: it1.id,
+        remove: (db: unknown) => pm.deleteProject(db as never, proj.id),
+        survives: async () => (await prisma.pmProject.count({ where: { id: proj.id } })) === 1,
+      };
+    }
+
+    it("an upload that COMMITS between the key read and the delete aborts the delete — nothing is lost, nothing is orphaned", async () => {
+      const t = await target();
+      const gate = deferred();
+      const read = deferred();
+      const outcome = t
+        .remove(parkedDelete(model, gate.promise, read.resolve))
+        .then(() => "deleted", (e: Error) => `rejected:${e.message}`);
+      await read.promise;
+
+      const upload = await svc.beginUpload(prisma, { actorId: "u2", workItemId: t.workItemId }); // commits
+      plantBlob(upload.storageKey);
+      gate.resolve();
+
+      expect(await outcome).toBe("rejected:concurrent_mutation");
+      expect(await t.survives()).toBe(true);
+      expect(await prisma.pmAttachment.count({ where: { id: upload.id } })).toBe(1);
+      expect(blob(upload.storageKey)).toBe(true);
+    });
+
+    it("an upload row INSERTED but not yet committed when the delete runs never leaves a blob without a row", async () => {
+      const t = await target();
+      const gate = deferred();
+      const read = deferred();
+      const outcome = t
+        .remove(parkedDelete(model, gate.promise, read.resolve))
+        .then(() => "deleted", (e: Error) => `rejected:${e.message}`);
+      await read.promise;
+
+      // an upload's begin: the row is inserted, and the transaction is held open
+      const commit = deferred();
+      const inserted = deferred();
+      const key = randomUUID();
+      const upload = prisma.$transaction(async (tx) => {
+        const row = await tx.pmAttachment.create({
+          data: {
+            workItemId: t.workItemId,
+            fileName: "",
+            mimeType: "application/octet-stream",
+            sizeBytes: BigInt(0),
+            sha256: "",
+            storageKey: key,
+            status: "UPLOADING",
+            uploadedById: "u2",
+          },
+        });
+        inserted.resolve();
+        await commit.promise;
+        return row;
+      });
+      await inserted.promise;
+      plantBlob(key);
+      gate.resolve(); // the delete now runs, and has to wait on the uncommitted insert
+      await sleep(600);
+      commit.resolve();
+      const row = await upload;
+      const result = await outcome;
+
+      const rowAfter = await prisma.pmAttachment.count({ where: { id: row.id } });
+      const blobAfter = blob(key);
+      expect(blobAfter && rowAfter === 0, "an orphan blob: on disk, with no row").toBe(false);
+      if (result === "deleted") expect(blobAfter).toBe(false);
+      else expect(result).toBe("rejected:concurrent_mutation");
+    });
+  });
+
   // ── the real routes, real rows, real files ─────────────────────────────────
 
   describe("the routes against a real database and a real directory", () => {
