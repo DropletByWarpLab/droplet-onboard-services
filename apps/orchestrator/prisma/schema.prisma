@@ -5141,6 +5141,11 @@ enum ModuleId {
   /// module because a box that keeps its books elsewhere should have no
   /// /money surface at all, rather than an empty one.
   money
+  /// WARP-3528 (ADR-069) — the service desk: tickets, requesters, public
+  /// replies and internal notes, at /support. Its own module because a front
+  /// desk that answers customers needs no project tracker, and the surface has
+  /// its own API prefix (/api/support).
+  support
 }
 
 /// Module-toggles feature — per-install runtime enablement of a module. ONE row
@@ -5455,6 +5460,13 @@ model PmProject {
   icon         String?
   color        String?
   leadId       String?
+  /// WARP-3528 (ADR-069 §1) — which surface owns this container. An explicit
+  /// enum, never inferred from the presence of a `PmTicket` row. `/api/pm/*`
+  /// and the dashboard's /projects read PROJECT only; `/api/support/*` reads
+  /// SERVICE_DESK only. A service-desk work item fetched through a PM route is
+  /// a 404, so the `projects` grant is never a back door into customer
+  /// conversations. Set once at creation and never changed.
+  kind         PmProjectKind @default(PROJECT)
   /// ADR-045 §5.3 — the department that owns this project's work. NULLABLE and
   /// SetNull: `Department` is a Nextcloud groupfolder (ADR-029), so deleting
   /// one must never delete work, and a project with no department reads as
@@ -5548,6 +5560,11 @@ model PmState {
   color     String?
   sortOrder Int          @default(0)
   isDefault Boolean      @default(false)
+  /// WARP-3528 (ADR-069 §5) — what being in this state does to a ticket's SLA
+  /// clock. A column, not a rule derived from the group or the name, so a desk
+  /// can rename "Pending" without breaking its SLAs. Meaningful on service-desk
+  /// states only; every project state carries the default and nothing reads it.
+  slaClock  PmSlaClock   @default(RUNNING)
   createdAt DateTime     @default(now())
   updatedAt DateTime     @default(now()) @updatedAt
   workItems PmWorkItem[]
@@ -5667,6 +5684,11 @@ model PmWorkItem {
   /// pointer at a file that lives in /files and stays there.
   fileLinks EntityLink[]
 
+  /// WARP-3528 (ADR-069 §1) — the desk-only columns of a ticket. Present
+  /// exactly when the item lives in a SERVICE_DESK project (a trigger holds
+  /// that); a project work item never has one.
+  ticket PmTicket?
+
   @@unique([projectId, sequenceId])
   @@index([projectId, stateId, sortOrder])
   @@index([projectId, updatedAt(sort: Desc)])
@@ -5779,14 +5801,32 @@ model PmWorkItemLabel {
 }
 
 /// A comment on a work item. `authorId` null = system / LLM-authored.
+///
+/// WARP-3528 (ADR-069 §3) — one comment stream carries both halves of a ticket's
+/// conversation. `visibility` says who may see it: INTERNAL (the default, so
+/// every existing comment stays internal) is for the team; PUBLIC is the reply
+/// the requester receives. Only a PUBLIC comment on a ticket is ever delivered
+/// to the requester, and a project work item never has one — a trigger
+/// (`pmcomment_public_only_on_tickets`) holds that, because the service is not
+/// the only writer a future automation or importer will bring.
+/// `authorKind` says what kind of party wrote it; `contactId` names the
+/// requester when that party is a CONTACT.
 model PmComment {
-  id          String     @id @default(uuid())
+  id          String              @id @default(uuid())
   workItemId  String
-  workItem    PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  workItem    PmWorkItem          @relation(fields: [workItemId], references: [id], onDelete: Cascade)
   authorId    String?
   commentHtml String
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @default(now()) @updatedAt
+  visibility  PmCommentVisibility @default(INTERNAL)
+  authorKind  PmAuthorKind        @default(USER)
+  /// A plain `Contact.id`, like every other PM reference to a person (`authorId`
+  /// is a plain `User.id`): a comment outlives the address-book row it names.
+  /// Contact rows are owner-scoped and disappear by cascade when an address-book
+  /// source is removed or a connector is purged, and none of those paths may be
+  /// blocked by — or silently eat — a customer's conversation.
+  contactId   String?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @default(now()) @updatedAt
 
   @@index([workItemId, createdAt])
 }
@@ -6003,6 +6043,153 @@ model PmActivity {
 
   @@index([workItemId, createdAt])
   @@index([notifyStatus, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Service desk (ADR-069, WARP-3528)
+//
+// A ticket is a `PmWorkItem` in a project whose `kind` is SERVICE_DESK, plus one
+// `PmTicket` row for the columns only a desk needs. Everything a work item
+// already has — state, priority, assignees, labels, department, relations,
+// activity, comments — a ticket has for free, and escalating one to engineering
+// is an ordinary `PmWorkItemRelation` across projects. Every enum below is
+// UPPERCASE, like `PmRelationKind` and the CRM enums: they are wire values the
+// service and a CHECK constraint quote verbatim.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Which surface owns a `PmProject`. See `PmProject.kind`.
+enum PmProjectKind {
+  PROJECT
+  SERVICE_DESK
+}
+
+/// What a state does to a ticket's SLA time. See `PmState.slaClock`. RUNNING
+/// counts business time, PAUSED holds it (waiting on the customer or a third
+/// party), STOPPED ends it (solved or closed).
+enum PmSlaClock {
+  RUNNING
+  PAUSED
+  STOPPED
+}
+
+/// Who may see a comment. See `PmComment.visibility`.
+enum PmCommentVisibility {
+  INTERNAL
+  PUBLIC
+}
+
+/// What kind of party wrote a comment. See `PmComment.authorKind`.
+enum PmAuthorKind {
+  USER
+  CONTACT
+  SYSTEM
+  AUTOMATION
+}
+
+/// Whether a ticket's requester is an external person or a member of staff.
+/// See `PmTicket.requesterKind`.
+enum PmRequesterKind {
+  CONTACT
+  USER
+}
+
+/// Where a ticket came from. `INTERNAL` is a member of staff filing from the
+/// dashboard; `PHONE` is the same person logging a call; the rest are reserved
+/// for the paths that produce them (email intake, the assistant, an API token).
+enum PmTicketChannel {
+  EMAIL
+  INTERNAL
+  WEB_FORM
+  CHAT
+  API
+  PHONE
+}
+
+/// Where a ticket stands against its SLA. `NONE` until a policy applies.
+enum PmSlaStatus {
+  NONE
+  ON_TRACK
+  AT_RISK
+  BREACHED
+  MET
+  PAUSED
+}
+
+/// The requester's own verdict on a solved ticket. Three levels because that
+/// is what a reply of "good", "bad" or a 1-5 number reduces to without losing
+/// the middle; written by the CSAT slice, read by the support insights.
+enum PmSatisfaction {
+  GOOD
+  NEUTRAL
+  BAD
+}
+
+/// The desk-only half of a ticket: who asked, where it came from, and the
+/// clocks. One row per ticket work item, keyed by it.
+///
+/// 🔴 INVARIANTS THE SCHEMA LANGUAGE CANNOT EXPRESS, all in raw migration SQL
+/// (20261004120000_warp_3528_service_desk_core) and proven against a real
+/// Postgres in `pm-ticket.pg.test.ts`:
+///
+///   * `PmTicket_requester_matches_kind` — CHECK: exactly the requester id that
+///     matches `requesterKind` is set (CONTACT → `requesterContactId`, USER →
+///     `requesterUserId`), and never both, never neither.
+///   * `pmticket_item_in_service_desk` — trigger: a ticket row may only hang off
+///     a work item whose project is SERVICE_DESK.
+///
+/// 🔴 NEITHER REQUESTER COLUMN IS A FOREIGN KEY, deliberately. `requesterUserId`
+/// is a plain `User.id` like every PM reference to a person. `requesterContactId`
+/// would be the one FK from PM to the address book, and a `Contact` is
+/// owner-scoped and deleted by paths that must not be blocked by a customer's
+/// ticket — an address-book source's cascade, the connector purge walker, the
+/// filing undo. A Restrict FK would turn each of those into a raw 500; a SetNull
+/// one cannot sit inside the CHECK above (the trap `CrmCompany.proposalId`
+/// documents). So the ticket carries `requesterName` / `requesterEmail`: who
+/// asked, as of intake. The live Contact or User is preferred for display while
+/// it exists; once it is gone the snapshot is still the answer, and the reader
+/// says so rather than inventing a person.
+model PmTicket {
+  workItemId String     @id
+  workItem   PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+
+  /// Explicit, never inferred from which id happens to be non-null.
+  requesterKind      PmRequesterKind
+  requesterContactId String?
+  requesterUserId    String?
+  /// Snapshot of who asked, as of intake — see the model comment.
+  requesterName      String
+  requesterEmail     String?
+
+  /// The customer the requester belongs to. Set at intake only when the contact
+  /// has exactly one company, and otherwise left for a human — never guessed.
+  /// SetNull: deleting a customer must not delete the conversations with them.
+  companyId String?
+  company   CrmCompany? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  channel PmTicketChannel
+
+  /// The first PUBLIC comment from a staff member. Stamped by a compare-and-set
+  /// (`WHERE "firstRespondedAt" IS NULL`), so two simultaneous first replies
+  /// leave one timestamp, not the later of two.
+  firstRespondedAt     DateTime?
+  /// When the ticket last entered a completed state. Cleared on reopen.
+  solvedAt             DateTime?
+  reopenCount          Int         @default(0)
+  lastPublicActivityAt DateTime?
+
+  slaStatus    PmSlaStatus     @default(NONE)
+  satisfaction PmSatisfaction?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  /// "Other tickets from this requester".
+  @@index([requesterContactId])
+  @@index([requesterUserId])
+  /// WARP-845 — the ON DELETE SET NULL scan index.
+  @@index([companyId])
+  /// The "solved recently" queue.
+  @@index([solvedAt])
 }
 
 /// KAN-6 — internal, operator-invisible one-shot markers for data migrations
@@ -8354,6 +8541,9 @@ model CrmCompany {
   /// these are the four things the customer record reads.
   projects     PmProject[]
   partyLinks   PartyLink[]
+  /// WARP-3528 — the tickets raised by this customer's people. SetNull on the
+  /// ticket side: the conversation outlives the customer record.
+  pmTickets    PmTicket[]
 
   /// WARP-2581 — money owed by or to this customer, when a document matched.
   documents ErpDocument[]
