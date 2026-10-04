@@ -962,6 +962,12 @@ SERVICE_TOKEN_RAG_EVAL=$service_token_rag_eval
 # gate skips every scheduled slot (0 chunks), so the default never scores
 # an empty corpus. Was hand-set config before, and every re-image lost it.
 RAGAS_EVAL_USER=eval-fixtures
+# WARP-3609: explicit positive gate for /api/admin/retrieval-eval/* (the route
+# the rag-eval container scores through). Off in the orchestrator unless this
+# is 1; written on because the `eval` profile is in the default
+# COMPOSE_PROFILES above. The service principal can name only RAGAS_EVAL_USER.
+# Set to 0 (and drop `eval` from COMPOSE_PROFILES) to take the route down.
+RAG_EVAL_ENABLED=1
 
 # --- Document renderer bearer (orchestrator → doc-render) ---
 # WARP-2211. The orchestrator presents this on POST /render to the
@@ -1446,6 +1452,11 @@ migrate_env() {
   # installer, so every re-imaged box lost it and every scheduled RAGAS
   # slot 400'd eval_user_required. Same default as the fresh-install heredoc.
   _migrate_ensure_key RAGAS_EVAL_USER "eval-fixtures"
+  # WARP-3609 backfill: the retrieval-eval route is now gated on this explicit
+  # flag instead of NODE_ENV (which the orchestrator never set). Existing boxes
+  # already run the scheduled eval (the `eval` profile is a default), so keep
+  # it working: only-when-missing, an operator's explicit 0 survives.
+  _migrate_ensure_key RAG_EVAL_ENABLED 1
   # WARP-339 backfill: existing installs predate the mcp service-token
   # path; without this key mcp-server's outbound calls to orchestrator
   # /api/matter/* will 401 when AUTH_ENABLED=true.

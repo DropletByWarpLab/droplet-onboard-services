@@ -145,6 +145,7 @@ import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { revokeDeviceClientsForUser } from "../services/device-client-revoke.service.js";
 import { verifyClaimCodePresence } from "../services/setup-claim.service.js";
+import { isClaimed } from "../services/claim-code.service.js";
 import {
   passwordZod,
   baseUserIdFromEmail,
@@ -869,6 +870,26 @@ export function createPublicAuthRouter(
         }
       }
 
+      // WARP-3589: the physical claim is a PREREQUISITE for the first owner,
+      // independent of DROPLET_CLAIM_GATE_ENABLED. The wizard claims the box
+      // (welcome → claim → account) before it ever reaches this route, so a
+      // legitimate setup always arrives on a claimed box. Placed AFTER the N1
+      // owner-exists guard so a dropped-response retry still gets the benign
+      // 409 OWNER_EXISTS, and AFTER the code checks above so a wrong code on
+      // a gated box keeps answering CLAIM_CODE_INVALID.
+      if (!(await isClaimed(prisma))) {
+        logger.warn(
+          { email },
+          "setup: rejected — the appliance has not been claimed with its front-panel code (WARP-3589)",
+        );
+        res.status(403).json({
+          error:
+            "Claim this appliance with the code from its front panel before creating the owner account.",
+          code: "CLAIM_CODE_REQUIRED",
+        });
+        return;
+      }
+
       // Romain PR #279 round 2: order matters here because the two
       // calls have very different recovery profiles.
       //
@@ -899,24 +920,53 @@ export function createPublicAuthRouter(
       // `email` is guaranteed present + normalized (N2 makes it required on
       // this path; emailField trim+lowercased it). Write it directly so the
       // stored login key matches the case-insensitive /auth/login lookup.
-      await prisma.user.upsert({
-        where: { nextcloudUsername: username },
-        update: {
-          displayName: displayName || username,
-          passwordHash,
-          // WARP-233: dcv1 ciphertext + blind index (the login key lives on
-          // emailLookupHash; findUserByEmail resolves it case-insensitively).
-          ...emailWriteData(email),
-        },
-        create: {
-          username,
-          displayName: displayName || username,
-          ...emailWriteData(email),
-          nextcloudUsername: username,
-          passwordHash,
-          role: "owner" as any,
-        },
-      });
+      //
+      // WARP-3589: the owner-exists check and the owner write are ONE
+      // SERIALIZABLE transaction. The count at the top of this handler is only
+      // a cheap early exit (before hashing); on its own it is check-then-act,
+      // so two concurrent first-owner POSTs could both pass it. Under
+      // SERIALIZABLE the loser aborts (P2034) and answers the same benign 409
+      // as a retry. `created` is false only when the in-transaction re-check
+      // found an owner another request had just committed.
+      let created: boolean;
+      try {
+        created = await prisma.$transaction(async (tx) => {
+          if ((await tx.user.count({ where: { role: "owner" } })) > 0) return false;
+          await tx.user.upsert({
+            where: { nextcloudUsername: username },
+            update: {
+              displayName: displayName || username,
+              passwordHash,
+              // WARP-233: dcv1 ciphertext + blind index (the login key lives on
+              // emailLookupHash; findUserByEmail resolves it case-insensitively).
+              ...emailWriteData(email),
+            },
+            create: {
+              username,
+              displayName: displayName || username,
+              ...emailWriteData(email),
+              nextcloudUsername: username,
+              passwordHash,
+              role: "owner" as any,
+            },
+          });
+          return true;
+        }, SERIALIZABLE_TX);
+      } catch (txErr) {
+        if (!isConcurrencyConflict(txErr)) throw txErr;
+        created = false;
+      }
+      if (!created) {
+        logger.warn(
+          { email },
+          "setup: refused — an owner was created concurrently (WARP-3589 serializable owner check)",
+        );
+        res.status(409).json({
+          error: "Setup has already been completed for this appliance.",
+          code: "OWNER_EXISTS",
+        });
+        return;
+      }
 
       // WARP-883: the owner must join the household group too, otherwise the
       // shared "Household" groupfolder never mounts for the primary user and
