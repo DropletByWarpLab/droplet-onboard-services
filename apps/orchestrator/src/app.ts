@@ -56,6 +56,7 @@ import { createMatterRouter } from "./routes/matter.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
+import { createSupportRouter } from "./routes/support/support.routes.js";
 import { createCrmRouter } from "./routes/crm.js";
 import { createMoneyRouter } from "./routes/money.js";
 import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
@@ -556,6 +557,13 @@ export function createApp(
   // (blocks / relates / duplicates). Its own router on the same prefix; the
   // paths are disjoint from the native router's, so neither shadows the other.
   app.use("/api", createPmRelationsRouter(prisma));
+  // WARP-3528 (ADR-069) — the service desk. Its own disjoint prefix
+  // (`/api/support`), so neither PM router shadows it, and its own `support`
+  // module: `mountModuleGates` above already guards the prefix from the registry
+  // (box toggle, the tier floor that refuses an external guest, and the
+  // per-person grant), so nothing here re-implements a gate. Tickets are
+  // PmWorkItem rows in SERVICE_DESK projects that /api/pm answers 404 for.
+  app.use("/api", createSupportRouter(prisma));
   // WARP-2117 — the CRM, which lives inside the Projects surface. Mounted
   // AFTER the PM router but on a disjoint prefix (`/api/crm`), so neither
   // shadows the other; the `crm` module gate comes from the registry.
