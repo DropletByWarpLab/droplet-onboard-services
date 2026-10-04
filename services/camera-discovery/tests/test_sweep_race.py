@@ -293,7 +293,7 @@ class TestTheSweepsOwnAddHoldsTheClaim:
     @pytest.mark.asyncio
     async def test_the_claim_is_released_when_frigate_refuses(self, monkeypatch):
         main = _main()
-        world = _World(
+        _World(  # wires the sweep's collaborators; the add is replaced just below
             monkeypatch, main, [_lease(MAC_A, IP_A)],
             detection_method="rtsp_default_credentials", hold_onvif=False,
         )
