@@ -89,7 +89,7 @@ function TooltipBody({
   const row = payload[0].payload;
   return (
     <div className="pm-surface pm-burndown-tip">
-      <div className="pm-mono" style={{ fontSize: 11, color: "var(--text-3)", marginBottom: 4 }}>
+      <div className="pm-mono" style={{ fontSize: 11, color: "var(--text-2)", marginBottom: 4 }}>
         {row.label}
       </div>
       <div>
@@ -102,7 +102,7 @@ function TooltipBody({
         Ideal · <strong>{row.ideal}</strong>
       </div>
       {(row.added ?? 0) > 0 || (row.removed ?? 0) > 0 ? (
-        <div style={{ color: "var(--text-3)", marginTop: 4 }}>
+        <div style={{ color: "var(--text-2)", marginTop: 4 }}>
           {(row.added ?? 0) > 0 ? `+${row.added} added` : ""}
           {(row.added ?? 0) > 0 && (row.removed ?? 0) > 0 ? " · " : ""}
           {(row.removed ?? 0) > 0 ? `−${row.removed} removed` : ""}
@@ -150,7 +150,7 @@ export function BurndownChart({
             <XAxis
               dataKey="label"
               interval="preserveStartEnd"
-              tick={{ fontSize: 11, fill: "var(--text-4)" }}
+              tick={{ fontSize: 11, fill: "var(--text-2)" }}
               tickLine={false}
               axisLine={{ stroke: "var(--border)" }}
             />
@@ -158,18 +158,18 @@ export function BurndownChart({
               width={32}
               allowDecimals={mode === "estimate"}
               domain={[0, "auto"]}
-              tick={{ fontSize: 11, fill: "var(--text-4)" }}
+              tick={{ fontSize: 11, fill: "var(--text-2)" }}
               tickLine={false}
               axisLine={false}
             />
             <Tooltip content={<TooltipBody unit={unit} />} />
             {burndown.status === "active" && through && (
-              <ReferenceLine x={through} stroke="var(--text-4)" strokeDasharray="2 3" />
+              <ReferenceLine x={through} stroke="var(--text-2)" strokeDasharray="2 3" />
             )}
             <Line
               type="stepAfter"
               dataKey="scope"
-              stroke="var(--text-3)"
+              stroke="var(--text-2)"
               strokeWidth={1.5}
               dot={false}
               connectNulls={false}
@@ -178,7 +178,7 @@ export function BurndownChart({
             <Line
               type="linear"
               dataKey="ideal"
-              stroke="var(--text-4)"
+              stroke="var(--text-2)"
               strokeWidth={1.5}
               strokeDasharray="5 4"
               dot={false}

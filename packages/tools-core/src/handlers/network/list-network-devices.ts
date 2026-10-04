@@ -1,4 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { refuseBelowNetworkMember } from "./role-gate.js";
 
 const inputSchema = {
   type: "object",
@@ -9,6 +10,8 @@ const inputSchema = {
 const MAX_DEVICES = 200;
 
 async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  const denied = refuseBelowNetworkMember(ctx);
+  if (denied) return denied;
   // WARP-106: `isBlocked` is no longer a stored column. Select the two
   // authored block fields and expose a computed, always-boolean
   // `isBlocked = (lastAppliedBlocked ?? manualBlock)` — `lastAppliedBlocked`

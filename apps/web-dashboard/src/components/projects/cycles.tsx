@@ -29,6 +29,7 @@ import {
   type ProgressMode,
 } from "./planning-bits";
 import { dayDiff, daysLeftLabel, fmtRange } from "./date-only";
+import { useFocusAfterRemoval } from "./focus-after-removal";
 import {
   pmActions,
   useBacklog,
@@ -370,7 +371,7 @@ function CycleCard({ cycle, onOpen }: { cycle: PmCycle; onOpen: (c: PmCycle) => 
       <ProgressBar progress={progress} label={cycle.name} tone={done ? "ok" : "accent"} />
       <div className="pm-cycle-figures" id={`${metaId}-progress`}>
         <span>{progressText(progress)}</span>
-        {cycle.progress.totalEstimate > 0 && <span className="pm-mono">{progressText(progress, "estimate")}</span>}
+        {!done && cycle.progress.totalEstimate > 0 && <span className="pm-mono">{progressText(progress, "estimate")}</span>}
       </div>
       {done && (
         <div className="pm-cycle-meta">
@@ -494,9 +495,11 @@ function BacklogPanel({
   onDragEnd: () => void;
 }): JSX.Element {
   const list = items ?? [];
+  // Adding an item removes its row; keyboard focus must not fall to <body> with it.
+  const focus = useFocusAfterRemoval(list, busyIds);
   return (
     <section className="pm-surface pm-cycle-panel" aria-label="Backlog">
-      <div className="pm-sect" style={{ marginBottom: 4 }}>
+      <div className="pm-sect pm-focus-target" tabIndex={-1} ref={focus.headingRef} style={{ marginBottom: 4 }}>
         Backlog <span className="sx">{total ?? list.length}</span>
       </div>
       {!readOnly && (
@@ -551,9 +554,13 @@ function BacklogPanel({
                   <button
                     type="button"
                     className="pm-btn sm"
+                    ref={focus.rowRef(item.id)}
                     disabled={busy}
                     aria-label={`Add ${item.key} to ${cycle.name}`}
-                    onClick={() => onAdd(item)}
+                    onClick={(e) => {
+                      focus.arm(item.id, e.currentTarget);
+                      onAdd(item);
+                    }}
                   >
                     {busy ? "Adding…" : "Add to cycle"}
                   </button>
@@ -851,7 +858,7 @@ function CycleDetail({
         onCancel={() => setDialog(null)}
         onConfirm={remove}
         title="Delete this cycle?"
-        description="Its work items go back to the backlog. This can't be undone."
+        description="Unfinished work goes back to the backlog. Completed items keep their status and lose the cycle association. This can't be undone."
         confirmLabel="Delete cycle"
       />
     </div>

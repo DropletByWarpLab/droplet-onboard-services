@@ -21,6 +21,7 @@ import {
   progressText,
 } from "./planning-bits";
 import { dayDiff, fmtDay, localToday } from "./date-only";
+import { useFocusAfterRemoval } from "./focus-after-removal";
 import {
   pmActions,
   useModuleItems,
@@ -32,6 +33,8 @@ import type { ModuleStatus, PmModule, PmProject, PmWorkItem } from "./types";
 
 /** The most items one "Add" call may carry — the API's own bound. */
 export const MAX_ADD = 200;
+/** The project-items route defaults to its first 100 rows until WS-1 pagination. */
+const PROJECT_ITEMS_PAGE_CAP = 100;
 
 // ── Pure helpers (exported for tests) ────────────────────────────────────────
 
@@ -284,6 +287,7 @@ function AddItemsDialog({
   const searchId = useId();
   const { toast } = useToast();
   const { items, isLoading, error } = useProjectItems(project.id);
+  const reachedPageCap = (items?.length ?? 0) >= PROJECT_ITEMS_PAGE_CAP;
   const [q, setQ] = useState("");
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
   const [busy, setBusy] = useState(false);
@@ -341,16 +345,23 @@ function AddItemsDialog({
             <Skel w="100%" h={120} r={8} />
           ) : candidates.length === 0 ? (
             <p className="pm-cycle-hint" style={{ padding: "14px 4px" }}>
-              {q.trim() ? "No work items match that search." : "Every work item in this project is already in this module."}
+              {q.trim()
+                ? "No work items match that search."
+                : reachedPageCap
+                  ? `Showing the first ${PROJECT_ITEMS_PAGE_CAP} work items. All shown items are already in this module.`
+                  : "Every work item in this project is already in this module."}
             </p>
           ) : (
-            candidates.map((i) => (
-              <label key={i.id} className="pm-module-pick">
-                <input type="checkbox" checked={picked.has(i.id)} onChange={() => toggle(i.id)} />
-                <span className="pm-mono pm-backlog-key">{i.key}</span>
-                <span className="pm-backlog-name-text">{i.name}</span>
-              </label>
-            ))
+            <>
+              {candidates.map((i) => (
+                <label key={i.id} className="pm-module-pick">
+                  <input type="checkbox" checked={picked.has(i.id)} onChange={() => toggle(i.id)} />
+                  <span className="pm-mono pm-backlog-key">{i.key}</span>
+                  <span className="pm-backlog-name-text">{i.name}</span>
+                </label>
+              ))}
+              {reachedPageCap && <p className="pm-cycle-hint">Showing the first {PROJECT_ITEMS_PAGE_CAP} work items.</p>}
+            </>
           )}
         </div>
         {picked.size >= MAX_ADD && <p className="pm-cycle-hint">You can add up to {MAX_ADD} items at a time.</p>}
@@ -405,7 +416,7 @@ function ModuleCard({ module: m, onOpen }: { module: PmModule; onOpen: (m: PmMod
         )}
       </div>
       {m.targetDate && (
-        <div className="pm-cycle-meta" style={overdue ? { color: "var(--warn)" } : undefined}>
+        <div className="pm-cycle-meta" style={overdue ? { color: "var(--text-2)" } : undefined}>
           <span className="pm-mono">Target {fmtDay(m.targetDate)}</span>
           {overdue ? " · Past target" : ""}
         </div>
@@ -447,6 +458,8 @@ function ModuleDetail({
   const items = itemsQ.items;
   const existingIds = useMemo(() => new Set((items ?? []).map((i) => i.id)), [items]);
   const overdue = isModuleOverdue(m);
+  // Removing an item removes its row; keyboard focus must not fall to <body> with it.
+  const focus = useFocusAfterRemoval(items ?? [], busyIds);
 
   const refreshAll = async () => {
     await Promise.all([itemsQ.mutate(), refreshModules()]);
@@ -505,7 +518,7 @@ function ModuleDetail({
             ) : (
               <span>No lead</span>
             )}
-            <span className="pm-mono" style={overdue ? { color: "var(--warn)" } : undefined}>
+            <span className="pm-mono" style={overdue ? { color: "var(--text-2)" } : undefined}>
               {" · "}
               {moduleDates(m.startDate, m.targetDate)}
               {overdue ? " · Past target" : ""}
@@ -534,7 +547,7 @@ function ModuleDetail({
       </div>
 
       <section className="pm-surface pm-cycle-panel" aria-label="Work items in this module">
-        <div className="pm-sect" style={{ marginBottom: 6 }}>
+        <div className="pm-sect pm-focus-target" tabIndex={-1} ref={focus.headingRef} style={{ marginBottom: 6 }}>
           Work items <span className="sx">{itemsQ.total ?? items?.length ?? 0}</span>
         </div>
         {itemsQ.error && !items ? (
@@ -579,10 +592,14 @@ function ModuleDetail({
                   <button
                     type="button"
                     className="pm-iconbtn"
+                    ref={focus.rowRef(item.id)}
                     disabled={busyIds.has(item.id)}
                     aria-label={`Remove ${item.key} from ${m.name}`}
                     title="Remove from module"
-                    onClick={() => void removeItem(item)}
+                    onClick={(e) => {
+                      focus.arm(item.id, e.currentTarget);
+                      void removeItem(item);
+                    }}
                   >
                     <PmIcon name="x" size={14} />
                   </button>

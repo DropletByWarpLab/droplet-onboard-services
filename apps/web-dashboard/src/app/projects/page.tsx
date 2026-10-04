@@ -47,6 +47,9 @@ import { CyclesView } from "@/components/projects/cycles";
 import { ModulesView } from "@/components/projects/modules";
 import { ViewSwitcher, SavedViews, FilterBar, type ProjectView, type SavedView } from "@/components/projects/chrome";
 import { DetailDrawer } from "@/components/projects/detail";
+import { CalendarView } from "@/components/projects/calendar/CalendarView";
+import { TimelineView } from "@/components/projects/timeline/TimelineView";
+import { MyWorkView } from "@/components/projects/mywork/MyWorkView";
 import { NewItemModal, NewProjectModal } from "@/components/projects/modals";
 
 function matchQuery(item: PmWorkItem, q: string): boolean {
@@ -90,7 +93,8 @@ function ProjectsWorkspace(): JSX.Element {
   const { toast } = useToast();
   const { person } = usePeople();
 
-  const [view, setView] = useState<ProjectView | "index">("index");
+  // `my-work` is cross-project (WARP-3523), so it is not a ProjectView tab.
+  const [view, setView] = useState<ProjectView | "index" | "my-work">("index");
   const [projectId, setProjectId] = useState<string | null>(null);
   const [savedView, setSavedView] = useState<SavedView>("all");
   const [q, setQ] = useState("");
@@ -158,6 +162,23 @@ function ProjectsWorkspace(): JSX.Element {
           ? "filtered"
           : "populated";
 
+  // WARP-3523 — what the timeline needs from the page's filters: the ids they
+  // admit (null = no filter, show everything it returns), and a revision that
+  // changes when the board data does, so an edit in the drawer reaches it.
+  const visibleIds = useMemo(
+    () => (filterActive ? new Set(filtered.map((i) => i.id)) : null),
+    [filtered, filterActive],
+  );
+  const itemsRevision = useMemo(
+    () => `${allItems.length}:${allItems.reduce((m, i) => (i.updatedAt > m ? i.updatedAt : m), "")}`,
+    [allItems],
+  );
+  const refreshAfterSchedule = async () => {
+    await mutateItems();
+    void mutateProjects();
+    void mutateSummary();
+  };
+
   const refreshAll = () => {
     void mutateProjects();
     void mutateSummary();
@@ -197,14 +218,16 @@ function ProjectsWorkspace(): JSX.Element {
     }
   };
 
-  const isProjectView = view === "board" || view === "list";
+  const isProjectView = view === "board" || view === "list" || view === "calendar" || view === "timeline";
 
   const headerTitle =
-    view === "index" ? "Projects" : project?.name ?? "Projects";
+    view === "index" ? "Projects" : view === "my-work" ? "My work" : project?.name ?? "Projects";
   const headerSub =
     view === "index"
       ? `${summary?.activeProjects ?? projects?.filter((p) => !p.archived).length ?? 0} projects · ${summary?.itemsOpen ?? 0} items open`
-      : project
+      : view === "my-work"
+        ? "Your open work across every project"
+        : project
         ? `${project.openCount} open · ${project.doneCount} done`
         : undefined;
 
@@ -215,6 +238,9 @@ function ProjectsWorkspace(): JSX.Element {
             <FolderKanban size={14} /> New project
           </button>
         )}
+        <button className="btn" type="button" onClick={() => setView("my-work")}>
+          <PmIcon name="user" size={14} /> My work
+        </button>
         <button className="btn" type="button" onClick={refreshAll} aria-label="Refresh">
           <PmIcon name="refresh" size={15} />
         </button>
@@ -250,9 +276,11 @@ function ProjectsWorkspace(): JSX.Element {
             <PmIcon name="plus" size={14} /> New item
           </button>
         )}
-        <button className="btn" type="button" onClick={refreshAll} aria-label="Refresh">
-          <PmIcon name="refresh" size={15} />
-        </button>
+        {view !== "my-work" && (
+          <button className="btn" type="button" onClick={refreshAll} aria-label="Refresh">
+            <PmIcon name="refresh" size={15} />
+          </button>
+        )}
       </>
     );
 
@@ -338,6 +366,29 @@ function ProjectsWorkspace(): JSX.Element {
               {view === "modules" && project && (
                 <ModulesView project={project} readOnly={readOnly} onOpenItem={setDrawer} onChanged={refreshAll} />
               )}
+              {view === "calendar" && (
+                <CalendarView
+                  items={filtered}
+                  domain={boardDomain}
+                  readOnly={readOnly}
+                  onOpen={setDrawer}
+                  onChanged={refreshAfterSchedule}
+                  onNewItem={() => setModal("newitem")}
+                />
+              )}
+              {view === "timeline" && project && (
+                <TimelineView
+                  projectId={project.id}
+                  visibleIds={visibleIds}
+                  revision={itemsRevision}
+                  domain={boardDomain}
+                  readOnly={readOnly}
+                  onOpen={setDrawer}
+                  onChanged={refreshAfterSchedule}
+                  onNewItem={() => setModal("newitem")}
+                />
+              )}
+              {view === "my-work" && <MyWorkView />}
             </div>
           </div>
         </div>

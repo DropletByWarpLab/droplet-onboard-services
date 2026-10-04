@@ -127,6 +127,13 @@ function makeFake() {
         const row = addItem({ ...data });
         return row;
       },
+      updateMany: async ({ where, data }: { where: { id: string; cycleId: string | null }; data: { cycleId: string | null } }) => {
+        calls.push("pmWorkItem.updateMany(cycle)");
+        const it = items.find((i) => i.id === where.id);
+        if (!it || it.cycleId !== where.cycleId) return { count: 0 };
+        it.cycleId = data.cycleId;
+        return { count: 1 };
+      },
       update: async ({ where, data }: { where: { id: string }; data: Row }) => {
         calls.push("pmWorkItem.update");
         const it = items.find((i) => i.id === where.id)!;
@@ -307,6 +314,32 @@ describe("updateWorkItem with a cycle", () => {
     await updateWorkItem(f.prisma, "u1", it.id as string, { cycleId: "cy-active" });
     // truth in the tx was cy-other-active, so planning it into cy-active IS a change
     expect(cycleRows(f)).toEqual([
+      expect.objectContaining({ verb: "cycle_added", oldValue: "cy-other-active", newValue: "cy-active" }),
+    ]);
+  });
+
+  it("re-reads and retries a stale cycle compare-and-set so concurrent moves chain their history", async () => {
+    const f = makeFake();
+    const it = f.addItem();
+    const cycle = f.prisma as unknown as { pmCycle: { updateMany: (args: Row) => Promise<{ count: number }> } };
+    const original = cycle.pmCycle.updateMany;
+    let raced = false;
+    cycle.pmCycle.updateMany = async (args: Row) => {
+      const result = await original(args);
+      if (!raced) {
+        raced = true;
+        // A concurrent move commits after our transaction read the old cycle.
+        it.cycleId = "cy-other-active";
+        f.activity.push({ verb: "cycle_added", oldValue: null, newValue: "cy-other-active" });
+      }
+      return result;
+    };
+
+    await updateWorkItem(f.prisma, "u1", it.id as string, { cycleId: "cy-active" });
+
+    expect(it.cycleId).toBe("cy-active");
+    expect(cycleRows(f)).toEqual([
+      expect.objectContaining({ verb: "cycle_added", oldValue: null, newValue: "cy-other-active" }),
       expect.objectContaining({ verb: "cycle_added", oldValue: "cy-other-active", newValue: "cy-active" }),
     ]);
   });

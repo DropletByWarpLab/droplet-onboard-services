@@ -198,6 +198,24 @@ describe("cycle routes", () => {
     expect(res.status).toBe(400);
   });
 
+  it("PATCH {} is not a request error: it reaches the service and answers the cycle (review S3)", async () => {
+    // The same body on a module is a no-op too; the service owns the "nothing to
+    // change" answer so a direct caller gets it as well.
+    fn(cycles.updateCycle).mockResolvedValue({ id: "c1", name: "Same" } as never);
+    fn(modules.updateModule).mockResolvedValue({ id: "m1", name: "Same" } as never);
+    const cycle = await request(makeApp(OWNER)).patch("/api/pm/cycles/c1").send({});
+    expect(cycle.status).toBe(200);
+    expect(cycle.body).toEqual({ cycle: { id: "c1", name: "Same" } });
+    expect(cycles.updateCycle).toHaveBeenCalledWith(expect.anything(), "c1", {
+      name: undefined,
+      description: undefined,
+      startDate: undefined,
+      endDate: undefined,
+    });
+    const mod = await request(makeApp(OWNER)).patch("/api/pm/modules/m1").send({});
+    expect(mod.status).toBe(200);
+  });
+
   it("DELETE answers { deleted } and attributes the audit rows to the caller", async () => {
     fn(cycles.deleteCycle).mockResolvedValue(undefined);
     const res = await request(makeApp(ADMIN)).delete("/api/pm/cycles/c1");

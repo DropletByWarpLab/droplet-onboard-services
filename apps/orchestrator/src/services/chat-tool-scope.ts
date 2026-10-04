@@ -219,11 +219,10 @@ export const EXCLUDED_FROM_CHAT_TOOLS: ReadonlySet<string> = new Set([
   "list_ap_devices",
   "approve_ap",
   "decommission_ap",
-  // camera fleet admin + clip deletion
+  // camera fleet admin + clip deletion (get_camera_live_url stays IN chat: WARP-3691 renders it as a live card)
   "list_discovered_cameras",
   "scan_for_cameras",
   "accept_discovered_camera",
-  "get_camera_live_url",
   "delete_clip",
   // smart-home commissioning/config internals
   "commission_device",

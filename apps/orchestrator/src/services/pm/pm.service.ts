@@ -96,7 +96,7 @@ export const DEFAULT_STATES: ReadonlyArray<{
 
 // ── Prisma include shapes + row types ────────────────────────────────────────
 
-const WORK_ITEM_INCLUDE = {
+export const WORK_ITEM_INCLUDE = {
   state: true,
   assignees: true,
   labels: { include: { label: true } },
@@ -279,7 +279,7 @@ function mapLabel(row: LabelRow): ApiLabel {
   return { id: row.id, projectId: row.projectId, name: row.name, color: row.color };
 }
 
-function mapWorkItem(
+export function mapWorkItem(
   row: WorkItemRow,
   identifier: string,
   // ADR-045 §5.3 — the OWNING PROJECT's department, so the override can be
@@ -1511,11 +1511,36 @@ export async function updateWorkItem(
         if (fields.cycleId !== null) {
           await lockAttachableCycle(tx, fields.cycleId, existing.projectId);
         }
-        data.cycle = fields.cycleId ? { connect: { id: fields.cycleId } } : { disconnect: true };
-        previousCycleId = current.cycleId;
+        // Compare-and-set the foreign key so overlapping moves cannot both
+        // write history from the same stale `oldValue`. The target cycle is
+        // locked first (the same cycle→item order as completeCycle), so an
+        // attach cannot slip into a cycle as it completes.
+        let oldCycleId = current.cycleId;
+        let moved = await tx.pmWorkItem.updateMany({
+          where: { id, cycleId: oldCycleId },
+          data: { cycleId: fields.cycleId },
+        });
+        if (moved.count === 0) {
+          const latest = await tx.pmWorkItem.findUnique({ where: { id }, select: { cycleId: true } });
+          if (!latest) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+          oldCycleId = latest.cycleId;
+          // Another request may already have moved it to this destination. In
+          // that case this request is a no-op; otherwise retry once against the
+          // value that now owns the row.
+          if (oldCycleId !== fields.cycleId) {
+            moved = await tx.pmWorkItem.updateMany({
+              where: { id, cycleId: oldCycleId },
+              data: { cycleId: fields.cycleId },
+            });
+            if (moved.count !== 1) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
+            previousCycleId = oldCycleId;
+          }
+        } else {
+          previousCycleId = oldCycleId;
+        }
       }
     }
-    await tx.pmWorkItem.update({ where: { id }, data });
+    if (Object.keys(data).length > 0) await tx.pmWorkItem.update({ where: { id }, data });
 
     // Assignees / labels are full-set replacements (delete-all + re-create).
     if (fields.assignees !== undefined) {

@@ -460,7 +460,7 @@ describe.skipIf(!RUN)("cycles and modules — the database's own guarantees (WAR
       expect(await cycleOf(s.cancelled.id)).toBe(s.c.id);
       expect(await cycleOf(s.bystander.id)).toBeNull();
       expect(out.moved).toEqual({ count: 3, to: null });
-      expect(out.cycle).toMatchObject({ status: "completed", carriedOverCount: 3 });
+      expect(out.cycle).toMatchObject({ status: "completed", carriedOverCount: 2 });
       expect(out.cycle.completedAt).not.toBeNull();
       expect(out.cycle.progress).toMatchObject({ total: 2, completed: 1, cancelled: 1 });
     });
@@ -630,6 +630,64 @@ describe.skipIf(!RUN)("cycles and modules — the database's own guarantees (WAR
         ["cycle_added", null, a.id],
         ["cycle_added", a.id, b.id],
         ["cycle_removed", b.id, null],
+      ]);
+    });
+
+    it("serializes overlapping cycle moves so each audit row starts at the value it actually replaced", async () => {
+      const a = await cycle(projectA, { name: "cas-a", status: "active" });
+      const b = await cycle(projectA, { name: "cas-b" });
+      const c = await cycle(projectA, { name: "cas-c" });
+      const it = await item(projectA, { name: "cas-item", cycleId: a.id });
+
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => (release = resolve));
+      let movedToB!: () => void;
+      const bApplied = new Promise<void>((resolve) => (movedToB = resolve));
+      const firstMove = prisma.$transaction(async (tx) => {
+        await tx.pmWorkItem.update({ where: { id: it.id }, data: { cycleId: b.id } });
+        await tx.pmActivity.create({
+          data: {
+            workItemId: it.id,
+            actorId: "u1",
+            verb: "cycle_added",
+            field: "cycle",
+            oldValue: a.id,
+            newValue: b.id,
+          },
+        });
+        movedToB();
+        await hold;
+      }, { maxWait: 10_000, timeout: 60_000 });
+      await bApplied;
+
+      // The service has read A and is waiting on the row locked by firstMove.
+      // Commit B while it waits; its compare-and-set must then observe B and
+      // retry from there instead of recording the stale A -> C transition.
+      const secondMove = pm.updateWorkItem(prisma, "u2", it.id, { cycleId: c.id });
+      secondMove.catch(() => undefined);
+      const blocked = async () => {
+        const rows = await prisma.$queryRaw<Array<{ n: number }>>`
+          SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query ILIKE '%UPDATE%PmWorkItem%'
+        `;
+        return rows[0].n > 0;
+      };
+      for (let i = 0; i < 400 && !(await blocked()); i += 1) await new Promise((r) => setTimeout(r, 25));
+      expect(await blocked(), "the second cycle move should wait on the item's row lock").toBe(true);
+
+      release();
+      await firstMove;
+      await expect(secondMove).resolves.toBeTruthy();
+
+      expect((await prisma.pmWorkItem.findUnique({ where: { id: it.id } }))!.cycleId).toBe(c.id);
+      const rows = await prisma.pmActivity.findMany({
+        where: { workItemId: it.id, verb: "cycle_added" },
+        orderBy: { createdAt: "asc" },
+      });
+      expect(rows.map((row) => [row.oldValue, row.newValue])).toEqual([
+        [a.id, b.id],
+        [b.id, c.id],
       ]);
     });
 

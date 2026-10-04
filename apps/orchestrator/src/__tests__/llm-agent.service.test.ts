@@ -1072,7 +1072,7 @@ describe("runAgent", () => {
             text: JSON.stringify({
               ok: false,
               status: "error",
-              error: { code: "SEARCH_FAILED", message: "nextcloud returned 400" },
+              error: { code: "SEARCH_FAILED", message: "the File Store returned 400" },
             }),
           },
         ],

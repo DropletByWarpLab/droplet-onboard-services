@@ -604,7 +604,7 @@ describe("CyclesView — delete", () => {
     await openCycle("Sprint 13");
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     expect(await screen.findByText("Delete this cycle?")).toBeInTheDocument();
-    expect(screen.getByText("Its work items go back to the backlog. This can't be undone.")).toBeInTheDocument();
+    expect(screen.getByText("Unfinished work goes back to the backlog. Completed items keep their status and lose the cycle association. This can't be undone.")).toBeInTheDocument();
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "Delete cycle" }));
     await waitFor(() => expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/cycles/c2"))).toBe(true));
@@ -683,13 +683,16 @@ describe("CyclesView — backlog planning", () => {
   it("the Add to cycle button plans the item and says so in a live region", async () => {
     const { onChanged } = renderCycles();
     await openCycle("Sprint 12");
-    fireEvent.click(await screen.findByRole("button", { name: "Add INBOX-7 to Sprint 12" }));
+    const addFirst = await screen.findByRole("button", { name: "Add INBOX-7 to Sprint 12" });
+    addFirst.focus();
+    fireEvent.click(addFirst);
     await waitFor(() => expect(calls.some((c) => c.method === "PATCH" && c.url.endsWith("/work-items/b1"))).toBe(true));
     expect(calls.find((c) => c.method === "PATCH" && c.url.endsWith("/work-items/b1"))!.body).toEqual({ cycle_id: "c1" });
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Added INBOX-7 to Sprint 12."));
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
     // it left the backlog and joined the cycle
     await waitFor(() => expect(screen.queryByRole("button", { name: "Add INBOX-7 to Sprint 12" })).toBeNull());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add INBOX-8 to Sprint 12" })).toHaveFocus());
   });
 
   it("dragging a backlog row into the cycle does the same thing", async () => {

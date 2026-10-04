@@ -396,11 +396,27 @@ describe("ModulesView — detail", () => {
   it("removing an item is one request, announced, and the list follows", async () => {
     const { onChanged } = renderModules();
     await openModule("Spring launch");
-    fireEvent.click(await screen.findByRole("button", { name: "Remove INBOX-1 from Spring launch" }));
+    const removeFirst = await screen.findByRole("button", { name: "Remove INBOX-1 from Spring launch" });
+    removeFirst.focus();
+    fireEvent.click(removeFirst);
     await waitFor(() => expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith("/modules/m1/work-items/w1"))).toBe(true));
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Removed INBOX-1 from Spring launch."));
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
     await waitFor(() => expect(screen.queryByText("INBOX-1")).toBeNull());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Remove INBOX-2 from Spring launch" })).toHaveFocus());
+  });
+
+  it("hands focus to the panel heading when removing the last item", async () => {
+    world.moduleItems = [item("w1", "INBOX-1")];
+    const { onChanged } = renderModules();
+    await openModule("Spring launch");
+    const remove = await screen.findByRole("button", { name: "Remove INBOX-1 from Spring launch" });
+    remove.focus();
+    fireEvent.click(remove);
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Remove INBOX-1 from Spring launch" })).toBeNull());
+    const heading = screen.getByText(/^Work items/).closest(".pm-focus-target");
+    expect(heading).toHaveFocus();
   });
 
   it("adding: offers only items not already in the module, filters by search, and posts the chosen ids", async () => {
@@ -445,6 +461,17 @@ describe("ModulesView — detail", () => {
     await screen.findByRole("group", { name: "Work items" });
     fireEvent.change(screen.getByLabelText("Search work items"), { target: { value: "zzz" } });
     expect(screen.getByText("No work items match that search.")).toBeInTheDocument();
+  });
+
+  it("does not claim the whole project is in the module when the picker hit its 100-item page cap", async () => {
+    world.projectItems = Array.from({ length: 100 }, (_, i) => item(`cap-${i}`, `CAP-${i}`));
+    world.moduleItems = [...world.projectItems];
+    renderModules();
+    await openModule("Spring launch");
+    fireEvent.click(await screen.findByRole("button", { name: /Add work items/ }));
+    expect(
+      await screen.findByText("Showing the first 100 work items. All shown items are already in this module."),
+    ).toBeInTheDocument();
   });
 
   it("an empty module says how to start it", async () => {

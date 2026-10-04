@@ -883,7 +883,7 @@ async function sweepMemberships(
           where: { id: row.id },
           data: {
             syncState: "failed",
-            syncError: "user has no Nextcloud account provisioned yet",
+            syncError: "user has no File Store account provisioned yet",
           },
         });
         failed += 1;
@@ -1197,7 +1197,7 @@ async function sweepNcInstanceAdminGroup(
         kind: "system",
         severity: "warn",
         sourceIcon: "shield-alert",
-        what: "Removed a person from Nextcloud instance admin (only the box service account holds it)",
+        what: "Removed a person from File Store instance admin (only the box service account holds it)",
         sub: `${member.id} · ${NC_INSTANCE_ADMIN_GROUP}`,
         refs: { ncUsername: member.id, group: NC_INSTANCE_ADMIN_GROUP },
         actor: { type: "system" },

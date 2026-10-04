@@ -286,7 +286,7 @@ export function BoardView({
   );
 }
 
-function ListRow({
+export function ListRow({
   item,
   onOpen,
   cycles,

@@ -14,7 +14,7 @@ import { CYCLE_STATUS_LABEL } from "./planning-bits";
 import { pmActions, useProjectCycles, useProjectModules, useWorkItemModules } from "./usePm";
 import type { PmWorkItem } from "./types";
 
-const MUTED = { fontSize: 12.5, color: "var(--text-4)" } as const;
+const MUTED = { fontSize: 12.5, color: "var(--text-2)" } as const;
 
 /** Which cycle (if any) this item is planned into. A completed cycle is shown
  *  when it is the item's own, but is not offered as a destination — it takes no

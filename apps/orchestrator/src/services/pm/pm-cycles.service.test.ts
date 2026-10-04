@@ -199,6 +199,9 @@ function makeFake() {
       },
       updateMany: async ({ where, data }: { where: Row; data: Partial<CycleRow> }) => {
         calls.push("pmCycle.updateMany");
+        // Real Prisma issues no UPDATE for an empty `data` and answers count 0 —
+        // indistinguishable from "no row matched" (WS-5 review S3).
+        if (Object.keys(data).length === 0) return { count: 0 };
         const hits = cycles.filter((x) => matches(x as unknown as Row, where));
         for (const c of hits) {
           if (data.status) assertSingleActive(c, data.status);
@@ -374,6 +377,30 @@ describe("updateCycle", () => {
   it("cycle_not_found for an unknown cycle", async () => {
     const f = makeFake();
     await expect(updateCycle(f.prisma, "nope", { name: "x" })).rejects.toThrow("cycle_not_found");
+    // an empty patch on an unknown cycle is still a 404, not a quiet success
+    await expect(updateCycle(f.prisma, "nope", {})).rejects.toThrow("cycle_not_found");
+  });
+
+  it("an empty patch is a no-op that answers the cycle, not a 409 (review S3)", async () => {
+    const f = makeFake();
+    const c = f.addCycle({ name: "Same", description: "keep", status: "active" });
+    const before = { ...f.cycles[0] };
+    const got = await updateCycle(f.prisma, c.id, {});
+    expect(got).toMatchObject({ id: c.id, name: "Same", description: "keep", status: "active" });
+    // nothing was written: no UPDATE, and the row (updatedAt included) is untouched
+    expect(f.calls).not.toContain("pmCycle.updateMany");
+    expect(f.calls).not.toContain("pmCycle.update");
+    expect(f.cycles[0]).toEqual(before);
+    // fields that are all `undefined` are the same thing as no fields
+    await expect(
+      updateCycle(f.prisma, c.id, { name: undefined, description: undefined, startDate: undefined, endDate: undefined }),
+    ).resolves.toMatchObject({ name: "Same" });
+  });
+
+  it("an empty patch on a completed cycle is also a no-op (it touches no date)", async () => {
+    const f = makeFake();
+    const c = f.addCycle({ status: "completed", completedAt: new Date() });
+    await expect(updateCycle(f.prisma, c.id, {})).resolves.toMatchObject({ status: "completed" });
   });
 
   it("an edit that loses a race with a start or a completion applies NOTHING and says concurrent_mutation", async () => {
@@ -514,7 +541,7 @@ describe("completeCycle", () => {
     expect(elsewhere.cycleId).toBeNull();
 
     expect(result.moved).toEqual({ count: 3, to: null });
-    expect(result.cycle).toMatchObject({ status: "completed", carriedOverCount: 3 });
+    expect(result.cycle).toMatchObject({ status: "completed", carriedOverCount: 2 });
     expect(result.cycle.completedAt).toEqual(expect.any(String));
     // AC: never an incomplete item left attached to the completed cycle
     expect(f.items.filter((i) => i.cycleId === cycle.id && !i.isCompleted)).toEqual([]);

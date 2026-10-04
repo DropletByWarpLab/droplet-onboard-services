@@ -274,6 +274,22 @@ export async function updateCycle(
   fields: CycleFields,
 ): Promise<ApiCycle> {
   const existing = await loadCycleRow(prisma, cycleId);
+
+  const data: Prisma.PmCycleUpdateManyMutationInput = {};
+  if (fields.name !== undefined) data.name = fields.name;
+  if (fields.description !== undefined) data.description = fields.description;
+  if (fields.startDate !== undefined) data.startDate = fields.startDate;
+  if (fields.endDate !== undefined) data.endDate = fields.endDate;
+
+  // Nothing to change: answer the cycle as it is. The write below is an
+  // `updateMany`, and Prisma issues no UPDATE for an empty `data` and reports
+  // `count: 0` — the same figure as "lost the race", so `PATCH {}` on an
+  // untouched cycle used to answer 409 concurrent_mutation (WS-5 review S3).
+  // `updateModule` is a no-op for `{}` as well; the two now agree. This also
+  // runs before the date rules so an empty patch cannot be refused on the
+  // strength of data it does not touch.
+  if (Object.keys(data).length === 0) return getCycle(prisma, cycleId);
+
   const touchesDates = fields.startDate !== undefined || fields.endDate !== undefined;
 
   // A completed cycle's dates are history: the burndown and every "which sprint
@@ -289,12 +305,6 @@ export async function updateCycle(
     throw new Error(PM_PLANNING_ERRORS.CYCLE_DATES_REQUIRED);
   }
   assertDates(startDate, endDate);
-
-  const data: Prisma.PmCycleUpdateManyMutationInput = {};
-  if (fields.name !== undefined) data.name = fields.name;
-  if (fields.description !== undefined) data.description = fields.description;
-  if (fields.startDate !== undefined) data.startDate = fields.startDate;
-  if (fields.endDate !== undefined) data.endDate = fields.endDate;
 
   // The rules above were decided on the `status` just read; the write is
   // conditioned on it still being that status. Otherwise a cycle that was started
@@ -435,7 +445,7 @@ export async function completeCycle(
 
       const unfinished = await tx.pmWorkItem.findMany({
         where: { cycleId, isCompleted: false },
-        select: { id: true },
+        select: { id: true, isArchived: true },
       });
       if (unfinished.length > 0) {
         await tx.pmWorkItem.updateMany({
@@ -455,7 +465,10 @@ export async function completeCycle(
       }
       await tx.pmCycle.update({
         where: { id: cycleId },
-        data: { carriedOverCount: unfinished.length },
+        // The cycle card's visible progress excludes archived items, so its
+        // denominator must count only visible work carried forward. All
+        // unfinished items (including archived ones) are still moved above.
+        data: { carriedOverCount: unfinished.filter((item) => !item.isArchived).length },
       });
       return unfinished.length;
     }, SERIALIZABLE_TX);

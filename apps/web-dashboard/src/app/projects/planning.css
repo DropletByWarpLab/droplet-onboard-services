@@ -41,6 +41,16 @@
   border: 0;
 }
 
+/* A panel heading that focus is handed to when the row that had it is gone
+ * (focus-after-removal.ts). tabindex="-1": reachable by script, not by Tab. */
+.pm-scope .pm-focus-target {
+  border-radius: 6px;
+}
+.pm-scope .pm-focus-target:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
 /* A long cycle name must not stretch a board card. */
 .pm-scope .pm-cycle-tag-name {
   max-width: 14ch;
@@ -54,7 +64,7 @@
  * fill, the same pair the base chip already uses. */
 .pm-scope .pm-statechip.backlog {
   background: var(--bg-sunken);
-  color: var(--text-3);
+  color: var(--text-2);
 }
 
 @media (prefers-reduced-motion: reduce) {

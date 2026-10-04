@@ -572,14 +572,40 @@ def _render_rail_pager(draw, cx: int, y: int, faces: int, active: int) -> None:
                      fill=d.V3_ACCENT if i == active else d.V3_LABEL4)
 
 
+def _render_fingerprint_card(draw, x: int, y: int, card: int,
+                             groups: List[str]) -> None:
+    """The certificate key fingerprint inside the rail card (WARP-3414): the
+    16 four-character groups, four to a line, in full.
+
+    Never truncated and never re-cased: the string is the Droplet Mac app's
+    confirmation-screen format, and a person compares it group by group, so a
+    short prefix (which an impostor could grind out) is not an option. The
+    face steps DOWN until the widest line fits the card rather than shortening
+    anything. Dark ink on the white card, like the QR it replaces."""
+    d = _d()
+    lines = [" ".join(groups[i:i + 4]) for i in range(0, len(groups), 4)]
+    font = _fit_font(draw, max(lines, key=len), card - 20, 17, floor=11,
+                     weight="bold")
+    pitch = card // (len(lines) + 1)
+    top = y + (card - pitch * len(lines)) // 2
+    cx = x + card // 2
+    for i, line in enumerate(lines):
+        d._v3_text(draw, line, cx, top + i * pitch, font=font,
+                   fill=(0x20, 0x20, 0x28), anchor="ma")
+
+
 def render_rail(disp, draw: ImageDraw.ImageDraw, img: Image.Image, *,
                 payload: str, caption: str, headline: str,
                 fallback: str, ecc: str = "M",
-                faces: int = 0, face_index: int = 0) -> None:
+                faces: int = 0, face_index: int = 0,
+                fingerprint: Optional[List[str]] = None) -> None:
     """The fixed right-hand action rail: QR card + caption + typed fallback.
 
     `faces` > 1 draws the pager dots; 0 or 1 leaves the top strip empty, which
     is what the screens with a single, non-tappable rail want.
+
+    `fingerprint` (WARP-3414), when given, puts the certificate key
+    fingerprint in the card instead of a QR; `payload` is then unused.
     """
     d = _d()
     g = geom()
@@ -634,22 +660,25 @@ def render_rail(disp, draw: ImageDraw.ImageDraw, img: Image.Image, *,
         card_x = g.rail_x + (g.rail_w - card) // 2
         d._rrect(draw, card_x, card_y, card, card, 14, fill=d.V3_WHITE)
 
-        qr_img, module_px = render_qr(payload, card=card, ecc=ecc)
-        if qr_img is not None:
-            px = card_x + (card - qr_img.width) // 2
-            py = card_y + (card - qr_img.height) // 2
-            img.paste(qr_img, (px, py))
-            # A 22px mark over a ~164px code occludes <2% of the area; ECC M
-            # tolerates ~15%. ECC L has no headroom to spare, so skip it there.
-            if ecc != "L":
-                d.draw_droplet_mark(draw, card_x + card // 2 - 11,
-                                    card_y + card // 2 - 11, 22,
-                                    primary=d.V3_ACCENT,
-                                    highlight=d.V3_ACCENT_INK)
+        if fingerprint:
+            _render_fingerprint_card(draw, card_x, card_y, card, fingerprint)
         else:
-            d._v3_text(draw, "SEE ADDRESS BELOW", card_x + card // 2,
-                       card_y + card // 2, font=d._get_font(11, weight="bold"),
-                       fill=(0x40, 0x40, 0x48), anchor="mm")
+            qr_img, module_px = render_qr(payload, card=card, ecc=ecc)
+            if qr_img is not None:
+                px = card_x + (card - qr_img.width) // 2
+                py = card_y + (card - qr_img.height) // 2
+                img.paste(qr_img, (px, py))
+                # A 22px mark over a ~164px code occludes <2% of the area; ECC M
+                # tolerates ~15%. ECC L has no headroom to spare, so skip it there.
+                if ecc != "L":
+                    d.draw_droplet_mark(draw, card_x + card // 2 - 11,
+                                        card_y + card // 2 - 11, 22,
+                                        primary=d.V3_ACCENT,
+                                        highlight=d.V3_ACCENT_INK)
+            else:
+                d._v3_text(draw, "SEE ADDRESS BELOW", card_x + card // 2,
+                           card_y + card // 2, font=d._get_font(11, weight="bold"),
+                           fill=(0x40, 0x40, 0x48), anchor="mm")
 
     d._v3_text(draw, caption, cx, cap_y, font=d._get_font(11, weight="bold"),
                fill=d.V3_ACCENT, anchor="ma", tracking=1.6)
@@ -1311,9 +1340,25 @@ def _rail_content(disp, v: dict) -> dict:
     d = _d()
     host = str(v.get("public_host") or v.get("hostname") or "droplet")
     wifi_payload = disp.wifi_qr_payload()
-    faces = 2 if (d.RAIL_WIFI_QR and wifi_payload) else 1
+    # WARP-3414: the certificate fingerprint is a third face when the bridge
+    # has vouched for one; the pager counts every face the tap can reach.
+    fingerprint = disp.cert_fingerprint_groups() if d.RAIL_FINGERPRINT else []
+    faces = (1 + (1 if (d.RAIL_WIFI_QR and wifi_payload) else 0)
+             + (1 if fingerprint else 0))
+    face = disp.rail_face()
 
-    if faces == 1 or disp.rail_face() != "wifi":
+    if face == "fingerprint":
+        # The box's own key, as text, in the form the Droplet apps show: what an
+        # admin compares against an app's "confirm this Droplet" screen. This
+        # local panel is the channel that makes that comparison mean something
+        # — a LAN attacker can rewrite the dashboard, not the glass. The
+        # headline names it; the typed line says how to leave.
+        return dict(payload="", fingerprint=fingerprint,
+                    caption="COMPARE IN THE APP", headline="Droplet fingerprint",
+                    fallback="SHA-256 · tap to go back", faces=faces,
+                    face_index=faces - 1)
+
+    if face != "wifi":
         # WARP-2954 / ADR-058: once the bridge has vouched for the box's
         # certificate key, the default face is the APP-PAIRING link — the
         # box's own key, from the one channel no network attacker can reach.
@@ -1336,8 +1381,13 @@ def _rail_content(disp, v: dict) -> dict:
                     fallback=host, faces=faces, face_index=0)
 
     ssid = str((v.get("wifi") or {}).get("ssid") or "Wi-Fi")
+    # The next tap leaves this face for the fingerprint whenever one is on
+    # offer (display._tap_rail_qr), so the line names where the tap goes: it
+    # is the on-glass instruction and must not point at the wrong face.
     return dict(payload=wifi_payload, caption="JOIN WI-FI", headline=ssid,
-                fallback="TAP FOR DASHBOARD", faces=faces, face_index=1)
+                fallback=("TAP FOR FINGERPRINT" if fingerprint
+                          else "TAP FOR DASHBOARD"),
+                faces=faces, face_index=1)
 
 
 def _bind_cell_regions(disp) -> None:
