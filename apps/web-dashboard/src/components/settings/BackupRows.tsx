@@ -45,6 +45,14 @@ export function backupCopy(b: BackupStatus): { value: string; warning: string | 
   }
 }
 
+/** WARP-3610 — a backup on the Droplet's own disk does not survive that disk
+ *  failing, being stolen, or a factory reset. Said plainly, not as an alarm. */
+export function backupLocationNote(b: BackupStatus): string | null {
+  return b.repositoryLocation === "same_disk"
+    ? "Backups are stored on this Droplet's own disk. They do not protect against a disk failure, theft or a factory reset."
+    : null;
+}
+
 export function BackupRows() {
   const { user } = useAuth();
   const isAdmin = user?.role === "owner" || user?.role === "admin";
@@ -77,6 +85,11 @@ export function BackupRows() {
         </span>
         <span className="rmeta mono">{copy ? copy.value : failed ? "—" : "Loading..."}</span>
       </div>
+      {status && backupLocationNote(status) && (
+        <div data-testid="backup-location-note" className="mx-4 mb-3 p-2 rounded type-caption-1 text-text-muted">
+          {backupLocationNote(status)}
+        </div>
+      )}
       {copy?.warning && (
         <div
           role="alert"

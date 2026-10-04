@@ -1457,6 +1457,8 @@ export interface BackupStatus {
   lastAttemptAt: string | null;
   lastRekeyAt: string | null;
   windowHours: number;
+  /** WARP-3610: decided on the host; "unknown" is never presented as safe. */
+  repositoryLocation: "same_disk" | "off_device" | "unknown";
 }
 
 export async function fetchBackupStatus(): Promise<BackupStatus> {

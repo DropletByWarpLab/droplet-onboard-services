@@ -48,8 +48,15 @@ export const BACKUP_STOPPED_TITLE = "Your Droplet's backups have stopped";
 const HOST_STATES = ["ok", "failed", "key_mismatch", "pending"] as const;
 export type HostBackupState = (typeof HOST_STATES)[number];
 
+/** WARP-3610 -- where the repository lives relative to the data it protects,
+ *  decided on the host. "unknown" (also what an older host that does not write
+ *  the field reads as) is never shown as safe. */
+const REPOSITORY_LOCATIONS = ["same_disk", "off_device", "unknown"] as const;
+export type RepositoryLocation = (typeof REPOSITORY_LOCATIONS)[number];
+
 export interface HostBackupStatus {
   state: HostBackupState;
+  repositoryLocation: RepositoryLocation;
   reason: string;
   since: string | null;
   lastAttemptAt: string | null;
@@ -70,6 +77,7 @@ export interface BackupHealthView {
   lastAttemptAt: string | null;
   lastRekeyAt: string | null;
   windowHours: number;
+  repositoryLocation: RepositoryLocation;
 }
 
 /** Parse the host file. Anything unreadable or off-contract is `null`
@@ -88,6 +96,9 @@ export function parseHostStatus(raw: string): HostBackupStatus | null {
   };
   return {
     state: j.state as HostBackupState,
+    repositoryLocation: REPOSITORY_LOCATIONS.includes(j.repositoryLocation as RepositoryLocation)
+      ? (j.repositoryLocation as RepositoryLocation)
+      : "unknown",
     reason: typeof j.reason === "string" ? j.reason : "",
     since: ts("since"),
     lastAttemptAt: ts("lastAttemptAt"),
@@ -114,6 +125,7 @@ export function backupHealth(s: HostBackupStatus | null, now: Date = new Date())
     lastAttemptAt: s?.lastAttemptAt ?? null,
     lastRekeyAt: s?.lastRekeyAt ?? null,
     windowHours: BACKUP_WINDOW_HOURS,
+    repositoryLocation: s?.repositoryLocation ?? ("unknown" as RepositoryLocation),
   };
   if (!s) return { ...base, health: "not_reporting", alerting: false };
   if (s.state === "key_mismatch") return { ...base, health: "key_mismatch", alerting: true };
