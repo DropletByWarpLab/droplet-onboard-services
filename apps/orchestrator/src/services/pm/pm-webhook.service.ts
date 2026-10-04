@@ -24,6 +24,7 @@ import type {
 import { assertLanOrPublicUrl, isOutboundUrlBlocked } from "../../lib/outbound-url-guard.js";
 import { ensureHomeWorkspace } from "./pm.service.js";
 import {
+  DELIVERY_LEASE_MS,
   attemptDelivery,
   resolveDeliveryDeps,
   type DeliveryDeps,
@@ -375,7 +376,14 @@ export async function sendTestDelivery(
       webhookId: hook.id,
       event: WEBHOOK_TEST_EVENT,
       payload: payload as unknown as Prisma.InputJsonValue,
-      nextAttemptAt: now,
+      // Born LEASED. The worker's claim takes any PENDING row whose
+      // `nextAttemptAt` has passed, and between this INSERT and the settle below
+      // (DNS, connect, up to 10 s) this row is exactly that — a tick landing there
+      // dialled it a second time, ran it as an ordinary delivery (a paused webhook
+      // gave it up as "turned off"; a failing one counted against its streak of
+      // 20) and made the admin's Send test lie. One lease from now it is not due,
+      // so only this call ever dials it; `settle` writes the real outcome.
+      nextAttemptAt: new Date(now.getTime() + DELIVERY_LEASE_MS),
     },
   });
   const delivery: DeliveryWithWebhook = { ...created, webhook: hook };

@@ -216,6 +216,54 @@ describe.skipIf(!RUN)("work webhooks, end to end (WARP-3532)", () => {
     expect(JSON.parse(received[0]!.body)).toMatchObject({ version: 1, event: "webhook.test", workItem: null });
   });
 
+  it("a test in flight is not claimed by the worker: one POST however the sweep lands (review of WARP-3532)", async () => {
+    const { webhook, secret } = await makeWebhook();
+    const { pinnedFetch } = await import("../lib/outbound-pinned-fetch.js");
+
+    // Hold the test's own dial open — the window in which a worker tick used to
+    // find the row PENDING and due, and dial it a second time.
+    let release!: () => void;
+    let dialling!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const started = new Promise<void>((r) => (dialling = r));
+    const heldSend: NonNullable<import("../services/pm/webhook-delivery.service.js").DeliveryDeps["send"]> = async (dest, req) => {
+      dialling();
+      await gate;
+      return pinnedFetch(dest, req);
+    };
+
+    const testing = service.sendTestDelivery(prisma, webhook.id, { id: "warp3532-actor", name: null }, { ...dial(), send: heldSend });
+    await started;
+
+    const [testRow] = await prisma.pmWebhookDelivery.findMany({ where: { webhookId: webhook.id } });
+    expect(testRow).toMatchObject({ event: "webhook.test", status: "PENDING" });
+
+    // A worker sweep right now: it takes nothing of this webhook's…
+    const workerSends: string[] = [];
+    const sweep = await worker.runWebhookDeliveries(prisma, {
+      ...dial(),
+      send: (async (dest: unknown, req: { headers: Record<string, string> }) => {
+        workerSends.push(req.headers["x-droplet-delivery"] ?? "");
+        return pinnedFetch(dest as never, req as never);
+      }) as never,
+    });
+    expect(workerSends).not.toContain(testRow!.id);
+    // …and the claim itself, asked directly, agrees (the shared database may hold
+    // other suites' due rows; only this webhook's matter).
+    const claimedNow = await worker.claimDueDeliveries(prisma, new Date(), 100);
+    expect(claimedNow.filter((d) => d.webhookId === webhook.id)).toEqual([]);
+    expect(sweep.claimed).toBeGreaterThanOrEqual(0);
+
+    release();
+    const result = await testing;
+
+    expect(result).toMatchObject({ event: "webhook.test", status: "DELIVERED", lastStatusCode: 204 });
+    // Exactly one POST reached the receiver, and the webhook's failure streak is untouched.
+    expect(received).toHaveLength(1);
+    expect(verify(secret, received[0]!.body, String(received[0]!.headers["x-droplet-signature"]), Math.floor(Date.now() / 1000))).toBe(true);
+    expect((await prisma.pmWebhook.findUniqueOrThrow({ where: { id: webhook.id } })).consecutiveFailures).toBe(0);
+  });
+
   it("rotating the secret takes effect for the very next delivery", async () => {
     const { webhook, secret } = await makeWebhook();
     const rotated = await service.rotateWebhookSecret(prisma, webhook.id);

@@ -20,7 +20,7 @@ import {
   updateWebhook,
 } from "./pm-webhook.service.js";
 import { openWebhookSecret } from "./webhook-secret.js";
-import type { DeliveryDeps } from "./webhook-delivery.service.js";
+import { DELIVERY_LEASE_MS, type DeliveryDeps } from "./webhook-delivery.service.js";
 
 const KEY = Buffer.alloc(32, 5).toString("base64");
 const T0 = new Date("2026-10-04T12:00:00.000Z");
@@ -428,5 +428,30 @@ describe("sendTestDelivery", () => {
     const { webhook } = await createWebhook(prisma as never, null, good);
     const result = await sendTestDelivery(prisma as never, webhook.id, { id: null, name: null }, okDeps({ send: (async () => ({ status: 404 })) as never }));
     expect(result).toMatchObject({ status: "GIVEN_UP", attempts: 1, lastStatusCode: 404, lastError: "HTTP 404" });
+  });
+});
+
+describe("sendTestDelivery and the delivery worker (review of WARP-3532)", () => {
+  it("creates the test row already leased, so the worker's claim cannot take it while the test is in flight", async () => {
+    const prisma = makePrisma();
+    const { webhook } = await createWebhook(prisma as never, null, good);
+    await sendTestDelivery(prisma as never, webhook.id, { id: null, name: null }, {
+      now: () => T0,
+      resolveDestination: async () => ({
+        url: new URL("https://hooks.example.com/x"),
+        hostname: "hooks.example.com",
+        addresses: [{ address: "93.184.216.34", family: 4 }],
+        scope: "public",
+      }),
+      send: (async () => ({ status: 200 })) as never,
+      gate: async () => true,
+      notifyAdmins: async () => undefined,
+      logger: { warn: vi.fn(), error: vi.fn() },
+    });
+    // The claim selects `nextAttemptAt <= now`: a row due "now" is claimable, a row
+    // due one lease from now is not. Read what the insert asked for — the settle
+    // that follows rewrites the field.
+    const asked = prisma.pmWebhookDelivery.create.mock.calls[0]![0] as { data: { nextAttemptAt: Date } };
+    expect(asked.data.nextAttemptAt).toEqual(new Date(T0.getTime() + DELIVERY_LEASE_MS));
   });
 });
