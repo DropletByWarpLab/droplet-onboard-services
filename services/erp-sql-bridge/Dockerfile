@@ -22,9 +22,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       openssl ca-certificates
 
 WORKDIR /app
-COPY services/erp-sql-bridge/requirements.txt .
+COPY services/erp-sql-bridge/requirements.lock .
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt && \
+    pip install --require-hashes --no-deps -r requirements.lock && \
     apt-get purge -y --auto-remove gcc libc-dev
 
 # ---------------------------------------------------------------------------
