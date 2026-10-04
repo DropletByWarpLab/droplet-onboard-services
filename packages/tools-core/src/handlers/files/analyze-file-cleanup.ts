@@ -136,7 +136,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   if (walk.rootUnavailable) return filesUnavailable();
   if (walk.rootStatus === 404) return err("NOT_FOUND", `folder not found: ${v.path}`);
   if (walk.rootStatus < 200 || walk.rootStatus >= 300) {
-    return err("LIST_FAILED", `nextcloud returned ${walk.rootStatus}`);
+    return err("LIST_FAILED", `the File Store returned ${walk.rootStatus}`);
   }
 
   const files = walk.entries.filter((e) => !e.isDirectory);

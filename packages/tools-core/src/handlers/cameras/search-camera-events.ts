@@ -21,6 +21,7 @@
  * `SEMANTIC_SEARCH_DISABLED` so the agent can tell the user how to
  * turn the feature on. Tier-1 read — no writes, no confirmation.
  */
+import { eventsMedia } from "@droplet/shared-types";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
 const MAX_QUERY_CHARS = 300;
@@ -157,6 +158,7 @@ async function handler(
   }
 
   const events = Array.isArray(payload.events) ? payload.events : [];
+  const media = eventsMedia(events);
   return {
     ok: true,
     data: {
@@ -164,6 +166,8 @@ async function handler(
       query,
       events,
       count: events.length,
+      // WARP-3691: best matches shown inline in the chat.
+      ...(media.length > 0 ? { media } : {}),
     },
   };
 }

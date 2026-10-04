@@ -21,6 +21,7 @@ import { useCameras } from "@/lib/hooks/useCameras";
 import { useCameraEvents } from "@/lib/hooks/useCameraEvents";
 import { useCameraGroups } from "@/lib/hooks/useCameraGroups";
 import { useCameraPins } from "@/lib/hooks/useCameraPins";
+import { cameraLabeler } from "@/lib/camera-display";
 import { CameraGrid } from "@/components/cameras/CameraGrid";
 import { CameraEvents } from "@/components/cameras/CameraEvents";
 import { NetworkCameraList } from "@/components/cameras/NetworkCameraList";
@@ -50,6 +51,7 @@ export default function CamerasPage() {
     acceptCamera,
     rejectCamera,
   } = useCameras();
+  const cameraLabel = useMemo(() => cameraLabeler(cameras), [cameras]);
 
   const { notifications, dismissNotification } = useCameraEvents();
 
@@ -70,7 +72,8 @@ export default function CamerasPage() {
   // failed sweep and a clean sweep that found nothing looked identical (both:
   // nothing happened). Track the outcome and show it.
   const [lastScan, setLastScan] = useState<{ at: number; found: number } | null>(null);
-  // Camera we found but can't stream — hands off to the manual form prefilled.
+  // Camera we found but can't stream — hands off to the Add camera form: its
+  // username/password (a live discovery record) or the manual form, prefilled.
   const [credentialTarget, setCredentialTarget] = useState<DiscoveredCamera | null>(null);
 
   // Camera-group state. Selected pill drives the grid filter; null = "All
@@ -418,7 +421,7 @@ export default function CamerasPage() {
       )}
 
       {/* Recent events */}
-      {recentEvents.length > 0 && <CameraEvents events={recentEvents} />}
+      {recentEvents.length > 0 && <CameraEvents events={recentEvents} cameraLabel={cameraLabel} />}
 
       {/* Add Camera Modal — opens on the discovered list when there is one, so
           "Add camera" answers "which camera?" before asking for an RTSP URL. */}
@@ -493,6 +496,7 @@ export default function CamerasPage() {
       <CameraNotificationToast
         notifications={notifications}
         onDismiss={dismissNotification}
+        cameraLabel={cameraLabel}
       />
     </ShellPage>
   );

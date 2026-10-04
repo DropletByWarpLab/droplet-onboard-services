@@ -59,6 +59,12 @@ function EventClipPlayer({ event, cameraDisplay }: { event: EventDetail; cameraD
   // `src` or `onError` changes identity, which would restart the clip from the
   // beginning on every re-render of the modal.
   const handlePlayerError = useCallback(() => setFailed(true), []);
+  // Retry asks for the playlist again under a new url (the same trick Refresh
+  // plays), so the player is built afresh rather than handed the one that failed.
+  const retry = () => {
+    setFailed(false);
+    setRefresh((n) => n + 1);
+  };
 
   const inProgress = event.endTime === null;
 
@@ -95,9 +101,18 @@ function EventClipPlayer({ event, cameraDisplay }: { event: EventDetail; cameraD
         iconSize={40}
       />
       {event.clipUrl && failed && (
-        <p role="status" className="px-3 py-2 type-footnote" style={{ color: "var(--text-muted)" }}>
-          {PLAY_FAILED_NOTICE}
-        </p>
+        <div className="flex items-center justify-between gap-3 px-3 py-2">
+          {/* Something the person was waiting on failed: an alert, in the error
+              ink (--danger-ink clears 4.5:1 in both themes). The copy says "try
+              again", so there is a control that does. */}
+          <p role="alert" className="type-footnote text-[color:var(--danger-ink)]">
+            {PLAY_FAILED_NOTICE}
+          </p>
+          <button type="button" className="btn ghost sm" onClick={retry}>
+            <RefreshCw size={12} />
+            Retry
+          </button>
+        </div>
       )}
     </>
   );
@@ -275,9 +290,12 @@ export function EventClipModal({ event, cameraName, onClose, onToggleRetain }: P
           </div>
         )}
 
-        {/* Metadata + actions */}
+        {/* Metadata + actions. The details ask for 16rem before anything may sit
+            beside them: an owner's four actions would otherwise squeeze the details
+            to a ~37px column on a phone (and ~66px at any width, with their labels),
+            so on a row too narrow for both the actions wrap below. */}
         <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 flex-1 basis-[16rem]">
             <p className="type-subheadline" style={{ color: "var(--text-muted)" }}>
               {cameraDisplay} · {startedAt.toLocaleString()} ·{" "}
               {Math.round(event.score * 100)}% confidence
@@ -312,7 +330,7 @@ export function EventClipModal({ event, cameraName, onClose, onToggleRetain }: P
                 aria-pressed={retained}
                 className={`btn ${
                   retained
-                    ? "!bg-system-orange/15 !text-system-orange !border-transparent hover:!bg-system-orange/25"
+                    ? "!bg-system-yellow !text-black !border-transparent hover:brightness-95"
                     : ""
                 } ${retainBusy ? "opacity-60 cursor-wait" : ""}`}
                 title={retained ? "Unsave (allow normal retention)" : "Save (retain indefinitely)"}

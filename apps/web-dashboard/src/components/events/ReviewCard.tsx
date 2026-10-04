@@ -14,25 +14,35 @@ interface Props {
   onClick: (review: ReviewItem) => void;
 }
 
+/**
+ * The badge sits on the thumbnail, so it carries its own contrast: an OPAQUE
+ * fill, with the ink that clears 4.5:1 on it in both themes — white on the
+ * shell's `--danger` (6.5:1 light, 10:1 dark), black on the system orange
+ * (9.5:1), white on a black scrim for plain motion. These were `bg-system-red/90`
+ * and friends: Tailwind cannot put an alpha on a colour that is a CSS variable,
+ * so it emitted nothing, and the badge was transparent with a white label on the
+ * light placeholder (~1.08:1). events-surfaces.contrast.test.ts measures the
+ * pairs; tailwind-var-alpha.guard.test.ts keeps the alpha from coming back.
+ */
 const SEVERITY_BADGE: Record<
   ReviewItem["severity"],
   { label: string; bg: string; text: string; icon: typeof AlertTriangle }
 > = {
   alert: {
     label: "Alert",
-    bg: "bg-system-red/90",
+    bg: "bg-[var(--danger)]",
     text: "text-white",
     icon: AlertTriangle,
   },
   detection: {
     label: "Detection",
-    bg: "bg-system-orange/90",
-    text: "text-white",
+    bg: "bg-system-orange",
+    text: "text-black",
     icon: Eye,
   },
   significant_motion: {
     label: "Motion",
-    bg: "bg-label-secondary/90",
+    bg: "bg-black/60",
     text: "text-white",
     icon: Layers,
   },
@@ -91,6 +101,7 @@ export function ReviewCard({ review, cameraName, onClick }: Props) {
           alt={`${review.severity} on ${cameraDisplay}`}
           className="w-full h-full object-cover transition-transform group-hover:scale-105"
           loading="lazy"
+          retryKey={review.endTime}
         />
 
         {/* Top-left: severity badge */}

@@ -194,6 +194,59 @@ describe("EventClipModal clip playback (WARP-3509)", () => {
     expect(screen.queryByText(/segment/i)).toBeNull();
   });
 
+  it("the failure notice is an alert in the shell's error ink, not a quiet status line (WARP-3509)", () => {
+    render(<EventClipModal event={withClip()} onClose={vi.fn()} />);
+
+    act(() => h.player.props!.onError!("x"));
+
+    // Something the person was waiting on just failed: announce it, and paint
+    // it as the problem it is (--danger-ink clears 4.5:1 in both themes).
+    const notice = screen.getByRole("alert");
+    expect(notice.textContent).toBe(PLAY_FAILED);
+    expect(notice.className).toContain("text-[color:var(--danger-ink)]");
+    // The in-progress line, which is information, stays a status.
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("the failure notice says 'try again', so it offers Retry, which asks for the playlist again", () => {
+    render(<EventClipModal event={withClip()} onClose={vi.fn()} />);
+    act(() => h.player.props!.onError!("x"));
+    expect(screen.queryByTestId("hls-player")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
+
+    // A new url, so a player that tears down on a changed `src` really does
+    // load the playlist again; and the notice is gone while it does.
+    expect(screen.getByTestId("hls-player").getAttribute("data-src")).toBe(`${HLS}?refresh=1`);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
+  });
+
+  it("a second failure offers Retry again, with yet another playlist request", () => {
+    render(<EventClipModal event={withClip()} onClose={vi.fn()} />);
+    act(() => h.player.props!.onError!("x"));
+    fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
+    act(() => h.player.props!.onError!("x"));
+
+    fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
+
+    expect(screen.getByTestId("hls-player").getAttribute("data-src")).toBe(`${HLS}?refresh=2`);
+  });
+
+  it("offers no Retry for an event with no clip: there is nothing to try", () => {
+    render(<EventClipModal event={makeEvent()} onClose={vi.fn()} />);
+
+    expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("the in-progress line is a status, not an alert: it is information, not a failure", () => {
+    render(<EventClipModal event={withClip({ endTime: null })} onClose={vi.fn()} />);
+
+    expect(screen.getByRole("status").textContent).toBe(IN_PROGRESS);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("an unrelated state change does not restart playback", () => {
     render(<EventClipModal event={withClip()} onClose={vi.fn()} />);
     const onErrorBefore = h.player.props!.onError;
@@ -255,5 +308,33 @@ describe("EventClipModal Download (WARP-3103, WARP-3509)", () => {
     expect(screen.getByRole("link", { name: /Download/ }).getAttribute("href")).toBe(
       `/api/cameras/clips/event/${ID}?download=1`,
     );
+  });
+});
+
+describe("EventClipModal layout (WARP-3509)", () => {
+  it("lets the actions wrap below the details when there is no room beside them, so the details never collapse to a sliver", () => {
+    // jsdom has no layout, so this pins the mechanism. The row wraps; the
+    // details ask for 16rem before anything may sit beside them. An owner's four
+    // actions (Tag person, Save, Open camera, Download) are ~29rem with their
+    // labels and ~11rem as bare icons: beside a 16rem column neither fits in the
+    // 34rem body, and before this the details were left a ~37px column of text.
+    render(<EventClipModal event={withClip({ zones: ["porch"] })} onClose={vi.fn()} />);
+
+    const details = screen.getByText(/Warp Lab Office ·/).parentElement!;
+    const row = details.parentElement!;
+    expect(row.className).toContain("flex-wrap");
+    expect(details.className).toContain("basis-[16rem]");
+    expect(details.className).toContain("flex-1");
+    // And on a screen narrower than 16rem it can still give way rather than overflow.
+    expect(details.className).toContain("min-w-0");
+  });
+
+  it("keeps every action in one group, so they wrap together", () => {
+    render(<EventClipModal event={withClip()} onClose={vi.fn()} />);
+
+    const actions = screen.getByRole("link", { name: /Open camera/ }).parentElement!;
+    expect(actions.contains(screen.getByRole("link", { name: /Download/ }))).toBe(true);
+    expect(actions.contains(screen.getByRole("button", { name: /Tag person/ }))).toBe(true);
+    expect(actions.className).toContain("flex-wrap");
   });
 });

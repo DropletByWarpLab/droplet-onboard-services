@@ -88,3 +88,53 @@ describe("ThumbImage", () => {
     expect(container.querySelector("[data-testid='thumb-fallback']")).toBeNull();
   });
 });
+
+describe("ThumbImage retryKey", () => {
+  // Frigate writes an event's thumbnail some time after the event begins, so the
+  // first request for an event in progress can 404 and a later one succeed, at
+  // the SAME url. A card that remembered the failure for good never showed it.
+
+  it("tries the same url again when the retry key changes", () => {
+    const { container, rerender } = render(<ThumbImage src="/t.webp" alt="x" retryKey={null} />);
+    fireEvent.error(container.querySelector("img")!);
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("[data-testid='thumb-fallback']")).not.toBeNull();
+
+    // The event ended: its end time is the new key.
+    rerender(<ThumbImage src="/t.webp" alt="x" retryKey={1_800_000_060} />);
+
+    expect(container.querySelector("img")!.getAttribute("src")).toBe("/t.webp");
+    expect(container.querySelector("[data-testid='thumb-fallback']")).toBeNull();
+  });
+
+  it("does not try again while the key is unchanged: a re-render is not a new chance", () => {
+    const { container, rerender } = render(<ThumbImage src="/t.webp" alt="x" retryKey={1_800_000_060} />);
+    fireEvent.error(container.querySelector("img")!);
+
+    rerender(<ThumbImage src="/t.webp" alt="x" className="other" retryKey={1_800_000_060} />);
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("[data-testid='thumb-fallback']")).not.toBeNull();
+  });
+
+  it("a failure after a retry is remembered against the new key, not retried in a loop", () => {
+    const { container, rerender } = render(<ThumbImage src="/t.webp" alt="x" retryKey={null} />);
+    fireEvent.error(container.querySelector("img")!);
+    rerender(<ThumbImage src="/t.webp" alt="x" retryKey={5} />);
+    fireEvent.error(container.querySelector("img")!);
+
+    rerender(<ThumbImage src="/t.webp" alt="x" retryKey={5} />);
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("[data-testid='thumb-fallback']")).not.toBeNull();
+  });
+
+  it("is optional: without one, a failure holds until the src changes", () => {
+    const { container, rerender } = render(<ThumbImage src="/t.webp" alt="x" />);
+    fireEvent.error(container.querySelector("img")!);
+
+    rerender(<ThumbImage src="/t.webp" alt="x" />);
+
+    expect(container.querySelector("img")).toBeNull();
+  });
+});

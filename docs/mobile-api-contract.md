@@ -340,6 +340,17 @@ Sign-in + optional enrollment sequence:
    leaf; unknown parameters are ignored by older clients. Reference
    implementation: the native Windows client's C# trust code in `droplet-windows`
    (a port of the retired Rust `trust.rs`, WARP-2953; WARP-3236).
+   **Manual connect (WARP-3414).** A client that is given only an address (no
+   scanned `spki`) and finds a box with its own certificate MAY show the key's
+   fingerprint and ask the admin to compare it. Format, shared by every channel:
+   the same SHA-256 as uppercase hex in 4-character groups separated by single
+   spaces, 16 groups (`F017 AFA8 6AD7 8BED …`). The reference must come from a
+   channel a LAN attacker cannot rewrite, so the box shows it on its own front
+   screen (the rail's `Droplet fingerprint` face), in the `setup.sh` output and
+   from `droplet-fingerprint` on the box. Settings → Device information and
+   Devices → Pair show it too (`fingerprint` on the owner/admin-only
+   `GET /api/tls/certificate`), but that is the same connection under
+   question, so the dashboard copy says it proves nothing on its own.
 2. App POSTs `/auth/login?return=body` → stores JWT pair + user. On
    `401 TOTP_REQUIRED`, prompt for `totp` and resubmit.
 3. (Optional) If a pair `code` is present, app POSTs `/devices/pair/claim`

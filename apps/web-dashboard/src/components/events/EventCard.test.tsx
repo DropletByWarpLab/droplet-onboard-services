@@ -71,3 +71,60 @@ describe("EventCard thumbnail failure", () => {
     expect(container.textContent).not.toContain("person on Warp Lab Office");
   });
 });
+
+describe("EventCard in-progress event (WARP-3509)", () => {
+  it("says 'In progress' on an event that has not ended, so a live event is not a finished one", () => {
+    render(<EventCard event={makeEvent({ endTime: null })} onClick={vi.fn()} />);
+
+    expect(screen.getByText("In progress")).toBeInTheDocument();
+  });
+
+  it("says it even before Frigate has a clip for it", () => {
+    render(<EventCard event={makeEvent({ endTime: null, hasClip: false, clipUrl: null })} onClick={vi.fn()} />);
+
+    expect(screen.getByText("In progress")).toBeInTheDocument();
+  });
+
+  it("shows the duration, and not 'In progress', once it has ended", () => {
+    render(<EventCard event={makeEvent({ startTime: 1_800_000_000, endTime: 1_800_000_060 })} onClick={vi.fn()} />);
+
+    expect(screen.getByText("1m 0s")).toBeInTheDocument();
+    expect(screen.queryByText("In progress")).toBeNull();
+  });
+
+  it("tries a thumbnail again once the event has ended: it may only be written then", () => {
+    const { container, rerender } = render(<EventCard event={makeEvent({ endTime: null })} onClick={vi.fn()} />);
+    fireEvent.error(container.querySelector("img")!);
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("[data-testid='thumb-fallback']")).not.toBeNull();
+
+    rerender(<EventCard event={makeEvent({ endTime: 1_800_000_060 })} onClick={vi.fn()} />);
+
+    expect(container.querySelector("img")).not.toBeNull();
+    expect(container.querySelector("[data-testid='thumb-fallback']")).toBeNull();
+  });
+
+  it("does not keep retrying a thumbnail that still fails while nothing has changed", () => {
+    const { container, rerender } = render(<EventCard event={makeEvent({ endTime: null })} onClick={vi.fn()} />);
+    fireEvent.error(container.querySelector("img")!);
+
+    // The page re-renders the grid on every poll; same event, same end time.
+    rerender(<EventCard event={makeEvent({ endTime: null })} onClick={vi.fn()} />);
+
+    expect(container.querySelector("img")).toBeNull();
+  });
+});
+
+describe("EventCard badges (WARP-3509)", () => {
+  it("the Saved badge has a solid fill, not an alpha the stylesheet cannot make", () => {
+    render(<EventCard event={makeEvent({ retainIndefinitely: true })} onClick={vi.fn()} />);
+
+    // `bg-system-yellow/90` is a utility Tailwind cannot generate for a colour
+    // that is a CSS variable: the badge had no fill at all. Black ink is read
+    // against the yellow itself (13.9:1), so the fill has to be there.
+    const badge = screen.getByText("Saved").parentElement!;
+    expect(badge.className).toMatch(/(^| )bg-system-yellow( |$)/);
+    expect(badge.className).not.toMatch(/bg-system-yellow\//);
+    expect(badge.className).toContain("text-black");
+  });
+});

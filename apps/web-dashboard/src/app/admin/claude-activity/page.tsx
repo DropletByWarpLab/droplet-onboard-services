@@ -139,7 +139,7 @@ function ClaudeActivitySurface() {
             <span className="eh">Admin access required</span>
             <span>
               This dashboard is only visible to <code>admin</code> / <code>owner</code> roles. Ask an
-              admin to grant you the <code>admin</code> Nextcloud group membership.
+              admin to grant you the <code>admin</code> group membership.
             </span>
           </div>
         </div>

@@ -130,3 +130,91 @@ describe("Toast action (WARP-1912)", () => {
     expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
   });
 });
+
+describe("Toast surface (WARP-3509)", () => {
+  // `bg-system-red/10 border-system-red/25` are utilities Tailwind cannot
+  // generate for a colour that is a CSS variable, so a toast had no tint and no
+  // border — text laid straight over whatever page was behind it. The surface is
+  // now an opaque mix of the status colour into the elevated surface, in tokens
+  // only. (Their contrast is measured in events-surfaces.contrast.test.ts.)
+  function Fire({ type, message }: { type: "error" | "success" | "info"; message: string }) {
+    const { toast } = useToast();
+    return (
+      <button type="button" onClick={() => toast(message, type)}>
+        fire
+      </button>
+    );
+  }
+
+  function toastFor(type: "error" | "success" | "info"): HTMLElement {
+    cleanup();
+    render(
+      <ToastProvider>
+        <Fire type={type} message="Something happened." />
+      </ToastProvider>,
+    );
+    fireEvent.click(screen.getByText("fire"));
+    return screen.getByText("Something happened.").closest("[data-toast]") as HTMLElement;
+  }
+
+  it.each(["error", "success", "info"] as const)(
+    "a %s toast is painted on an opaque tint of its status colour, with a border to match",
+    (type) => {
+      const el = toastFor(type);
+
+      expect(el.className).toMatch(/bg-\[color:color-mix\(in_srgb,var\(--color-[\w-]+\)_\d+%,var\(--color-surface-elevated\)\)\]/);
+      expect(el.className).toMatch(/border-\[color:color-mix\(in_srgb,var\(--color-[\w-]+\)_\d+%,/);
+      // No alpha on a variable colour left on it.
+      expect(el.className).not.toMatch(/(bg|border|text)-(system|accent|label|surface)[a-z-]*\/\d+/);
+    },
+  );
+
+  it("an error toast's text is the error-text token, which clears 4.5:1 on the tint, not the vivid red", () => {
+    const el = toastFor("error");
+
+    expect(el.className).toContain("text-[color:var(--color-system-red-text)]");
+    expect(el.className.split(/\s+/)).not.toContain("text-system-red");
+  });
+
+  it("success and info toasts read in the primary text colour, not their own status colour", () => {
+    // The vivid green and indigo are ~1.9:1 and ~4:1 on their own tint.
+    for (const type of ["success", "info"] as const) {
+      expect(toastFor(type).className.split(/\s+/)).toContain("text-label-primary");
+    }
+  });
+
+  it("keeps the status colour as the icon's", () => {
+    const el = toastFor("success");
+
+    expect(el.querySelector("svg.text-system-green")).not.toBeNull();
+  });
+
+  it("the Dismiss all button has a surface of its own", () => {
+    function Three() {
+      const { toast } = useToast();
+      return (
+        <button
+          type="button"
+          onClick={() => {
+            toast("One.", "success");
+            toast("Two.", "success");
+            toast("Three.", "success");
+          }}
+        >
+          fire3
+        </button>
+      );
+    }
+    cleanup();
+    render(
+      <ToastProvider>
+        <Three />
+      </ToastProvider>,
+    );
+    fireEvent.click(screen.getByText("fire3"));
+
+    const dismissAll = screen.getByRole("button", { name: "Dismiss all" });
+    expect(dismissAll.className).toContain("color-mix(in_srgb,var(--color-surface-secondary)");
+    expect(dismissAll.className).not.toMatch(/bg-surface-secondary\/\d+/);
+  });
+});

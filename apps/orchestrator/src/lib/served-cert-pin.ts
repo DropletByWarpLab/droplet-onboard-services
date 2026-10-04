@@ -88,6 +88,28 @@ export function servedCertPin(certsDir: string = DEFAULT_CERTS_DIR): string | nu
   }
 }
 
+/**
+ * WARP-3414 — the same key, as a person reads it: the SHA-256 of the DER
+ * SubjectPublicKeyInfo as uppercase hex in 4-character groups separated by
+ * single spaces (16 groups, 79 characters). EXACTLY the form the Droplet Mac
+ * app shows when it asks an admin to confirm a box's certificate on a manual
+ * connect; the rack panel (device-bridge.py `format_key_fingerprint`), the
+ * installer output and `droplet-fingerprint` print the same string, so two
+ * copies can be compared by eye — or by `===`.
+ */
+export function formatKeyFingerprint(pinBase64: string): string {
+  const bytes = Buffer.from(pinBase64, "base64");
+  if (bytes.length !== 32) throw new Error("a SHA-256 key pin is 32 bytes");
+  return (bytes.toString("hex").toUpperCase().match(/.{4}/g) as string[]).join(" ");
+}
+
+/** The served leaf's key fingerprint in reading form, or `null` exactly when
+ *  `servedCertPin` is. Public data; never throws. */
+export function servedCertFingerprint(certsDir?: string): string | null {
+  const pin = servedCertPin(certsDir);
+  return pin ? formatKeyFingerprint(pin) : null;
+}
+
 /** Test hook: drop the mtime cache. */
 export function _resetServedCertPinCacheForTests(): void {
   cache = null;

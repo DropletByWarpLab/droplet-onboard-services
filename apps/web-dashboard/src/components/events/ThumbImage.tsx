@@ -13,6 +13,14 @@ interface Props {
   loading?: "lazy" | "eager";
   /** Pixel size of the placeholder glyph. */
   iconSize?: number;
+  /**
+   * Change this to give a failed picture another chance at the SAME url. Frigate
+   * writes an event's thumbnail some time after the event begins, so the first
+   * request for one still in progress can 404 and a later request succeed — the
+   * cards pass the item's `endTime`, which changes exactly when it ends. Left
+   * out, a failure holds until `src` changes.
+   */
+  retryKey?: string | number | null;
 }
 
 /**
@@ -26,9 +34,11 @@ interface Props {
  * `var(--inset)` on the container), so there is no text left to overlay
  * anything.
  *
- * Keyed on the failed `src`, not a boolean: a new url is a new chance — the
- * modal moving to another review, say — with no frame of placeholder first.
- * The same url is not retried until the component remounts.
+ * Keyed on the failed `src` (and `retryKey`), not a boolean: a new url is a new
+ * chance — the modal moving to another review, say — with no frame of
+ * placeholder first. The same url and key are not retried until the component
+ * remounts, so a poll that re-renders the grid does not re-request a picture
+ * that is still not there.
  */
 export function ThumbImage({
   src,
@@ -37,10 +47,13 @@ export function ThumbImage({
   placeholderClassName = "w-full h-full",
   loading,
   iconSize = 28,
+  retryKey = null,
 }: Props) {
-  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  // What failed, as a single key: the picture AND the chance it had.
+  const [failedKey, setFailedKey] = useState<string | null>(null);
+  const attemptKey = `${retryKey ?? ""}\u0000${src}`;
 
-  if (failedSrc === src) {
+  if (failedKey === attemptKey) {
     return (
       <div
         data-testid="thumb-fallback"
@@ -58,7 +71,7 @@ export function ThumbImage({
       alt={alt}
       className={className}
       loading={loading}
-      onError={() => setFailedSrc(src)}
+      onError={() => setFailedKey(attemptKey)}
     />
   );
 }

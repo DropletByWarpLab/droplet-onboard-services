@@ -94,16 +94,29 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     [],
   );
 
+  // The status colour is the icon's; the words read in an ink that clears 4.5:1
+  // on the tint (the vivid green and indigo are ~1.9:1 and ~4:1 on theirs).
   const icons = {
-    error: <AlertCircle size={16} />,
-    success: <CheckCircle2 size={16} />,
-    info: <Info size={16} />,
+    error: <AlertCircle size={16} className="text-system-red" />,
+    success: <CheckCircle2 size={16} className="text-system-green" />,
+    info: <Info size={16} className="text-accent" />,
   };
 
+  // WARP-3509 — an OPAQUE tint: the status colour mixed 12% into the elevated
+  // surface, with a border of the same colour mixed 40% in. These were
+  // `bg-system-red/10 border-system-red/25`; Tailwind cannot put an alpha on a
+  // colour that is a CSS variable, so it emitted nothing and a toast had no tint
+  // and no border — its text sat straight on whatever page was behind it. Written
+  // out whole (Tailwind reads class names from source, it cannot assemble them).
+  // The error text is `--color-system-red-text`, the red that clears 4.5:1 on its
+  // own tint (WARP-633). events-surfaces.contrast.test.ts measures all three in
+  // both themes; tailwind-var-alpha.guard.test.ts keeps the alpha from coming back.
   const colors = {
-    error: "bg-system-red/10 border-system-red/25 text-system-red",
-    success: "bg-system-green/10 border-system-green/25 text-system-green",
-    info: "bg-accent-subtle border-accent/25 text-accent",
+    error:
+      "bg-[color:color-mix(in_srgb,var(--color-system-red)_12%,var(--color-surface-elevated))] border-[color:color-mix(in_srgb,var(--color-system-red)_40%,var(--color-surface-elevated))] text-[color:var(--color-system-red-text)]",
+    success:
+      "bg-[color:color-mix(in_srgb,var(--color-system-green)_12%,var(--color-surface-elevated))] border-[color:color-mix(in_srgb,var(--color-system-green)_40%,var(--color-surface-elevated))] text-label-primary",
+    info: "bg-[color:color-mix(in_srgb,var(--color-accent)_12%,var(--color-surface-elevated))] border-[color:color-mix(in_srgb,var(--color-accent)_40%,var(--color-surface-elevated))] text-label-primary",
   };
 
   return (
@@ -131,7 +144,8 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
               type="button"
               onClick={dismissAll}
               className="type-footnote px-2.5 py-1 rounded-md border border-separator
-                bg-surface-secondary/80 backdrop-blur-xl text-label-secondary
+                bg-[color:color-mix(in_srgb,var(--color-surface-secondary)_80%,transparent)]
+                backdrop-blur-xl text-label-secondary
                 hover:text-label-primary transition-colors"
             >
               Dismiss all

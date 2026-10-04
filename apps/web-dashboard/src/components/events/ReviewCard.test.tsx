@@ -143,3 +143,46 @@ describe("ReviewCard in-progress state (WARP-3509)", () => {
     expect(screen.queryByText("In progress")).toBeNull();
   });
 });
+
+describe("ReviewCard severity badge (WARP-3509)", () => {
+  // The badge sits on the thumbnail, so the badge — not what is behind it —
+  // has to carry its own contrast. These were `bg-system-red/90` and friends:
+  // utilities Tailwind cannot generate for a colour that is a CSS variable, so
+  // the badge was transparent and its white label read ~1.08:1 on the light
+  // placeholder. Each fill is opaque, with the ink that clears 4.5:1 on it in
+  // both themes (events-surfaces.contrast.test.ts measures the pairs).
+  const badgeOf = (label: string) => screen.getByText(label).parentElement!;
+
+  it.each([
+    ["alert", "Alert", "bg-[var(--danger)]", "text-white"],
+    ["detection", "Detection", "bg-system-orange", "text-black"],
+    ["significant_motion", "Motion", "bg-black/60", "text-white"],
+  ] as const)("%s has a solid fill and its own ink", (severity, label, fill, ink) => {
+    render(<ReviewCard review={makeReview({ severity })} onClick={vi.fn()} />);
+
+    const badge = badgeOf(label);
+    expect(badge.className.split(/\s+/)).toContain(fill);
+    expect(badge.className.split(/\s+/)).toContain(ink);
+    // No alpha on a variable colour left on it.
+    expect(badge.className).not.toMatch(/bg-(system|label|surface|accent)[a-z-]*\/\d+/);
+  });
+
+  it("tries a thumbnail again once the review has ended: it may only be written then", () => {
+    const { container, rerender } = render(<ReviewCard review={makeReview({ endTime: null })} onClick={vi.fn()} />);
+    fireEvent.error(container.querySelector("img")!);
+    expect(container.querySelector("img")).toBeNull();
+
+    rerender(<ReviewCard review={makeReview({ endTime: 1_800_000_060 })} onClick={vi.fn()} />);
+
+    expect(container.querySelector("img")).not.toBeNull();
+  });
+
+  it("does not keep retrying a thumbnail that still fails while nothing has changed", () => {
+    const { container, rerender } = render(<ReviewCard review={makeReview({ endTime: null })} onClick={vi.fn()} />);
+    fireEvent.error(container.querySelector("img")!);
+
+    rerender(<ReviewCard review={makeReview({ endTime: null })} onClick={vi.fn()} />);
+
+    expect(container.querySelector("img")).toBeNull();
+  });
+});

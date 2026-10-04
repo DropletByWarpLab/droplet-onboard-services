@@ -480,6 +480,7 @@ describe("WARP-2982: routes that name NO camera are per-camera guarded too", () 
     "GET /cameras/discovered": "unadopted candidates, no grants can exist yet",
     "POST /cameras/discovered/:id/accept": "adoption",
     "POST /cameras/discovered/:id/reject": "adoption",
+    "POST /cameras/discovered/:id/credentials": "adoption",
     "GET /cameras/drivers": "appliance health",
     "POST /cameras/drivers/fix": "owner/admin appliance action",
     "GET /cameras/subnet": "network config",
