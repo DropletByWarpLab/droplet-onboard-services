@@ -157,7 +157,7 @@ describe.skipIf(!RUN)("cloud files — real Postgres (WARP-3538)", () => {
       expect(dir).toMatchObject({ isFolder: true, sizeBytes: null });
       // The human-readable columns are ciphertext in the table.
       expect(big.nameEnc.startsWith("dcv1:")).toBe(true);
-      expect(JSON.stringify(big)).not.toContain("Smith");
+      expect(JSON.stringify(big, (_key, value) => typeof value === "bigint" ? value.toString() : value)).not.toContain("Smith");
     });
 
     it("rejects a provider the schema does not have — a later connector adds its value with its writer", async () => {
