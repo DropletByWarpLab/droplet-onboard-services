@@ -30,7 +30,7 @@
 #
 # Usage:
 #   scripts/check-pinned-images.sh              # check the tracked compose files
-#   scripts/check-pinned-images.sh --self-test  # prove the gate itself
+#   scripts/check-pinned-images.sh --selfcheck  # prove the gate itself
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -69,7 +69,7 @@ check_file() { # $1=compose file; prints FAIL lines, returns the failure count
   return "$bad"
 }
 
-if [ "${1:-}" = "--self-test" ]; then
+if [ "${1:-}" = "--selfcheck" ]; then
   t="$(mktemp)"; trap 'rm -f "$t"' EXIT
   D=$(printf 'a%.0s' $(seq 1 64))
   run() { check_file "$t" >/dev/null 2>&1 && echo ok || echo bad; }

@@ -26,7 +26,7 @@
 #
 # Usage:
 #   scripts/check-vuln-exceptions.sh              # check the tracked files
-#   scripts/check-vuln-exceptions.sh --self-test  # prove the gate itself
+#   scripts/check-vuln-exceptions.sh --selfcheck  # prove the gate itself
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -88,7 +88,7 @@ run_checks() {
   return "$bad"
 }
 
-if [ "${1:-}" = "--self-test" ]; then
+if [ "${1:-}" = "--selfcheck" ]; then
   d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
   mk() { # $1=trivyignore body $2=osv body $3=pin date
     printf '%s\n' "$1" > "$d/ti"; printf '%s\n' "$2" > "$d/osv"

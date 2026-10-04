@@ -124,7 +124,9 @@ jobs:
       # resolves to whatever the registry serves that day". Locally built
       # services (those with `build:`) are exempt by construction.
       - name: Third-party images are pinned by digest
-        run: bash scripts/check-pinned-images.sh
+        run: |
+          bash scripts/check-pinned-images.sh --selfcheck
+          bash scripts/check-pinned-images.sh
 
       # WARP-3667 — vulnerability exceptions are time-bound. Fails when a
       # .trivyignore entry or osv-scanner.toml ignore has no expiry or is past
@@ -133,7 +135,9 @@ jobs:
       # baseline and the DB pin are what make the scans deterministic, so
       # both must be re-reviewed on a clock. Same placement as above.
       - name: Vulnerability exceptions have expiries and the Trivy DB pin is fresh
-        run: bash scripts/check-vuln-exceptions.sh
+        run: |
+          bash scripts/check-vuln-exceptions.sh --selfcheck
+          bash scripts/check-vuln-exceptions.sh
 
       - name: Map changed paths to affected legs
         if: github.event_name == 'pull_request'
