@@ -28,8 +28,8 @@ const { recordActivityMock } = vi.hoisted(() => ({ recordActivityMock: vi.fn().m
 vi.mock("../activity.singleton.js", () => ({ recordActivity: recordActivityMock }));
 
 import { __setColumnCryptoKeyForTest } from "../column-crypto.service.js";
-import { makeFakeCloudFileDb } from "../../__tests__/helpers/fake-cloud-files.js";
-import { makeFakeTable, matchesWhere, type Row } from "../../__tests__/helpers/fake-table.js";
+import { makeFakeM365World } from "../../__tests__/helpers/fake-m365-world.js";
+import type { Row } from "../../__tests__/helpers/fake-table.js";
 import { setSharePointEnabled } from "./m365-auth.service.js";
 
 const USER = "user-1";
@@ -44,90 +44,10 @@ beforeEach(() => {
 });
 afterEach(() => __setColumnCryptoKeyForTest(null));
 
-type Via = "client" | "tx";
-interface Call {
-  via: Via;
-  op: string;
-  inTransaction: boolean;
-}
-
-/** The whole world: connections, cursors and the two cloud-file tables, behind a client and a transaction handle. */
+/** The world, with the helpers these tests read it by. */
 function world(rows: Row[] = []) {
-  const connections: Row[] = rows.map((r) => ({ ...r }));
-  const cursors = makeFakeTable(() => ({}));
-  const cloud = makeFakeCloudFileDb();
-  let inTransaction = false;
-  const calls: Call[] = [];
-
-  const connection = {
-    findUnique: async ({ where }: { where: Row }) => {
-      const hit = connections.find((r) => matchesWhere(r, where));
-      return hit ? { ...hit } : null;
-    },
-    updateMany: async ({ where, data }: { where: Row; data: Row }) => {
-      const hit = connections.filter((r) => matchesWhere(r, where));
-      for (const r of hit) Object.assign(r, data);
-      return { count: hit.length };
-    },
-  };
-
-  /** Every method of a delegate, recorded with the handle it was called through. */
-  const through = <T extends Record<string, (...a: never[]) => unknown>>(via: Via, name: string, delegate: T): T =>
-    Object.fromEntries(
-      Object.entries(delegate).map(([method, fn]) => [
-        method,
-        (...args: never[]) => {
-          calls.push({ via, op: `${name}.${method}`, inTransaction });
-          return fn(...args);
-        },
-      ]),
-    ) as T;
-
-  const handle = (via: Via) => ({
-    m365Connection: through(via, "m365Connection", connection),
-    m365DeltaCursor: through(via, "m365DeltaCursor", cursors.delegate as never),
-    cloudFileItem: through(via, "cloudFileItem", cloud.cloudFileItem as never),
-    cloudFileSource: through(via, "cloudFileSource", cloud.cloudFileSource as never),
-  });
-
-  const tables = [connections, cursors.rows, cloud.items, cloud.sources];
-  const tx = handle("tx");
-  const prisma = {
-    ...handle("client"),
-    $transaction: vi.fn(async <T>(fn: (t: typeof tx) => Promise<T>): Promise<T> => {
-      const before = tables.map((t) => t.map((r) => ({ ...r })));
-      inTransaction = true;
-      try {
-        return await fn(tx);
-      } catch (err) {
-        // A real transaction leaves nothing behind when it fails.
-        tables.forEach((t, i) => t.splice(0, t.length, ...before[i]!));
-        throw err;
-      } finally {
-        inTransaction = false;
-      }
-    }),
-  };
-
-  return {
-    prisma: prisma as never,
-    $transaction: prisma.$transaction,
-    calls,
-    connection: (userId = USER) => connections.find((r) => r.userId === userId) ?? null,
-    connections,
-    cursor: (userId: string, workload: string, resourceId: string) => cursors.seed({ userId, workload, resourceId }),
-    cursorKeys: (userId: string) =>
-      cursors.rows.filter((r) => r.userId === userId).map((r) => `${r.workload}:${r.resourceId}`).sort(),
-    library: (userId: string, sourceId: string) =>
-      cloud.seedSource({ userId, provider: "M365", kind: "SHAREPOINT_LIBRARY", sourceId, nameEnc: "dcv1:x" }),
-    oneDrive: (userId: string, sourceId: string) =>
-      cloud.seedSource({ userId, provider: "M365", kind: "ONEDRIVE", sourceId, nameEnc: "dcv1:x" }),
-    item: (userId: string, sourceId: string, externalId: string) =>
-      cloud.seedItem({ userId, provider: "M365", sourceId, externalId, isFolder: false, nameEnc: "dcv1:x" }),
-    items: (userId: string) => cloud.items.filter((r) => r.userId === userId).map((r) => r.externalId as string).sort(),
-    sources: (userId: string) => cloud.sources.filter((r) => r.userId === userId).map((r) => r.sourceId as string).sort(),
-    cloud,
-  };
+  const w = makeFakeM365World(rows);
+  return { ...w, connection: (userId = USER) => w.connection(userId) };
 }
 
 const connected = (over: Row = {}): Row => ({

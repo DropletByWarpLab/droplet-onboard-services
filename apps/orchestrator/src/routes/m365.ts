@@ -6,6 +6,24 @@
  *                                        granted scopes, last refresh — and the
  *                                        redirect URI their app registration
  *                                        must list. Never any token material.
+ *                                        WARP-3538: plus `sharePoint { enabled,
+ *                                        granted, needsConsent }` — what the
+ *                                        person chose, whether Microsoft has
+ *                                        allowed it, whether they must act.
+ *   PUT    /api/m365/sharepoint          `{ enabled }` — the person's own
+ *                                        SharePoint switch (WARP-3538). ON
+ *                                        records the choice on a CONNECTED
+ *                                        link (409 otherwise) and asks
+ *                                        Microsoft for nothing; OFF deletes the
+ *                                        list of SharePoint files the box kept,
+ *                                        in one transaction. Answers with the
+ *                                        connection view.
+ *   GET    /api/m365/sync-status         How far the box has got reading the
+ *                                        person's Microsoft 365 (WARP-3538):
+ *                                        per workload, their OneDrive, and each
+ *                                        SharePoint library — file counts, last
+ *                                        read, state. Names decrypted here; never
+ *                                        a token or a delta link.
  *   POST   /api/m365/connect             Begin an authorization-code sign-in
  *                                        (WARP-2704, the primary path). Returns
  *                                        Microsoft's sign-in URL for the
@@ -37,12 +55,14 @@
  */
 import { Router, type Request, type Response } from "express";
 import type { PrismaClient } from "@prisma/client";
+import { z } from "zod";
 
 import { requireRole } from "../middleware/auth.js";
-import { authRateLimit, sensitiveRateLimit } from "../middleware/rate-limit.js";
+import { authRateLimit, sensitiveRateLimit, standardRateLimit } from "../middleware/rate-limit.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { trustedOriginUrl } from "../lib/trusted-origin.js";
+import { createLogger } from "../lib/logger.js";
 import {
   beginAuthCodeConnect,
   beginDeviceCodeConnect,
@@ -50,9 +70,11 @@ import {
   disconnect,
   getConnectionView,
   M365AppRequiredError,
+  setSharePointEnabled,
   type EntraAppRegistration,
   type EntraClient,
 } from "../services/m365/m365-auth.service.js";
+import { getSyncStatus } from "../services/m365/sync-status.service.js";
 import { createEntraClient } from "../services/m365/entra-client.js";
 import {
   classifyAuthFailure,
@@ -60,6 +82,8 @@ import {
   redactAuthError,
   PENDING_FLOW_TTL_MS,
 } from "../services/m365/state.js";
+
+const logger = createLogger("m365-route");
 
 type AuthedRequest = {
   user?: { id?: string; username?: string; role?: string };
@@ -101,6 +125,14 @@ function appFromBody(
   const parsed = parseAppRegistration({ clientId, tenantId });
   return parsed.ok ? parsed : { ok: false, field: parsed.field, message: parsed.reason };
 }
+
+/**
+ * WARP-3538 — the body of `PUT /m365/sharepoint`. STRICT: a key this route does
+ * not know is refused, not ignored. The person is the session — there is no
+ * `userId` here to honour, and a body that tries to name one is a request this
+ * route does not understand rather than one to quietly act on half of.
+ */
+const sharePointBodySchema = z.object({ enabled: z.boolean() }).strict();
 
 /** 400 for a sign-in the device cannot start without the owner's app. */
 function appRequired(res: Response, err: M365AppRequiredError) {
@@ -166,6 +198,62 @@ export function createM365Router(
         // Without this an async rejection leaves the request hanging rather
         // than answering — the connection card would spin forever.
         return res.status(500).json({ error: "m365_status_unavailable" });
+      }
+    },
+  );
+
+  router.put(
+    "/m365/sharepoint",
+    // CodeQL js/missing-rate-limiting — a mutation that, switched off, deletes
+    // rows; sensitive preset, as the connect routes.
+    sensitiveRateLimit,
+    requireRole(...CONNECT_ROLES),
+    async (req, res) => {
+      const userId = (req as AuthedRequest).user?.id;
+      if (!userId) return res.status(401).json({ error: "unauthenticated" });
+
+      const body = sharePointBodySchema.safeParse(req.body);
+      if (!body.success) {
+        return res.status(400).json({ error: "invalid_request", details: body.error.flatten() });
+      }
+
+      try {
+        const result = await setSharePointEnabled(prisma, userId, body.data.enabled);
+        if (!result.ok) {
+          // There is no live Microsoft account to ask for the scope on. The
+          // switch is offered once the person is connected, so this is a stale
+          // card or a hand-made request — answered, and nothing written.
+          return res.status(409).json({
+            error: "m365_not_connected",
+            message: "Connect Microsoft 365 first, then turn on SharePoint.",
+          });
+        }
+        return res.json(result.view);
+      } catch (err) {
+        // The transaction rolled back, so nothing is half-done; the person can
+        // press it again. Answered rather than left to hang, and the error is
+        // logged here, never echoed — a database error names hosts and queries.
+        logger.error({ err, userId }, "m365 sharepoint switch failed");
+        return res.status(500).json({ error: "m365_sharepoint_failed" });
+      }
+    },
+  );
+
+  router.get(
+    "/m365/sync-status",
+    standardRateLimit,
+    requireRole(...CONNECT_ROLES),
+    async (req, res) => {
+      const userId = (req as AuthedRequest).user?.id;
+      if (!userId) return res.status(401).json({ error: "unauthenticated" });
+
+      try {
+        return res.json(await getSyncStatus(prisma, userId));
+      } catch (err) {
+        // Without this an async rejection leaves the request hanging — the card's
+        // status poll would never settle.
+        logger.error({ err, userId }, "m365 sync status failed");
+        return res.status(500).json({ error: "m365_sync_status_unavailable" });
       }
     },
   );
