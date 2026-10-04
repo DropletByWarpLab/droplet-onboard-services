@@ -26,15 +26,22 @@ concurrency:
   group: shared-types-tests-${{ github.ref }}
   cancel-in-progress: true
 
+# WARP-3677: least privilege. Every job here only checks out the repo and
+# runs tests (no step uses the token for anything else), so read is all the
+# GITHUB_TOKEN needs. Stated explicitly so a new job cannot inherit a wider
+# repository default by omission.
+permissions:
+  contents: read
+
 jobs:
   vitest:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "20"
           cache: npm

@@ -205,7 +205,7 @@ jobs:
     # lives in setup-e2e.yml. 15 min is a very wide ceiling here.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Run setup unit tests
         run: bash tests/setup.test.sh
       - name: Run mosquitto mTLS conf/ACL unit tests
