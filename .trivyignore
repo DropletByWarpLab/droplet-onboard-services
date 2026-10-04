@@ -20,7 +20,7 @@
 #      (proof: tests/probe/trivy-newcve.md).
 #
 # HOW IT WAS GENERATED: every CI image was built + scanned against the pinned
-# DB (sha256:a8a1af880ecae3a9e4fe74c0351c921b33bc083ed439ff25c9aaac0aa5d6945a)
+# DB (the digest in .github/trivy-db-version; first populated against sha256:a8a1af88…, re-baselined against sha256:09425fb5…)
 # with `trivy image --severity HIGH,CRITICAL --ignore-unfixed --scanners vuln`;
 # entries are the union of fixable IDs (both build arches — some findings live
 # in arch-specific prebuilt Go binaries), grouped by package with fix version.
@@ -34,7 +34,13 @@
 # libssl3), and as bundled Go release binaries are rebuilt (stdlib, x/crypto,
 # grpc, otel, sigstore in cosign/syft). Owner: Romain.
 #
-# Snapshot: 2026-07-05.  Total: 89 entries.
+# Snapshot: 2026-10-04 (re-baselined; 115 entries from the 2026-07-05 snapshot plus 57 from 2026-10-04).
+#
+# EXPIRY (WARP-3667): every entry is `<id> exp:YYYY-MM-DD`. Trivy stops ignoring
+# an entry on that date, so the finding fails the build again until it is fixed
+# or deliberately re-triaged by editing the date in a reviewed PR. Never delete
+# an entry to make a scan pass. scripts/check-vuln-exceptions.sh fails CI on an
+# entry with no `exp:` or a past-due one. Owner of all entries: Romain.
 # =============================================================================
 
 # stdlib: 17 fixable HIGH/CRITICAL [orchestrator]; fix→ 1.21.9, 1.22.2. Burn-down: WARP-243-D3.
@@ -248,3 +254,110 @@ CVE-2023-31484 exp:2027-01-02
 # only, no auth surface. Burn-down: retire when the eval harness moves to a
 # ragas that supports langchain-core 1.x (re-baseline run required).
 CVE-2026-34070 exp:2027-01-02
+
+# =============================================================================
+# Re-baseline at the 2026-10-04 Trivy DB snapshot (WARP-3667). The refreshed DB
+# surfaced these fixable HIGH/CRITICAL findings in the images and lockfiles;
+# each is accepted for 90 days (exp:2027-01-02), after which it fails the build
+# again unless fixed or re-triaged. Grouped by package family; images in [...].
+# Owner: Romain (security triage). Adjust per-entry dates as findings are fixed.
+# =============================================================================
+
+# brace-expansion: 5 fixable HIGH/CRITICAL [matter-controller, mcp-server, orchestrator, sandbox, web-dashboard].
+CVE-2026-102276 exp:2027-01-02
+CVE-2026-102278 exp:2027-01-02
+CVE-2026-13149 exp:2027-01-02
+CVE-2026-14257 exp:2027-01-02
+CVE-2026-69152 exp:2027-01-02
+
+# curl / libcurl4: 1 fixable HIGH/CRITICAL [gateway].
+CVE-2026-5773 exp:2027-01-02
+
+# fast-uri: 5 fixable HIGH/CRITICAL [mcp-server, orchestrator].
+CVE-2026-75899 exp:2027-01-02
+CVE-2026-75931 exp:2027-01-02
+CVE-2026-75975 exp:2027-01-02
+CVE-2026-76172 exp:2027-01-02
+CVE-2026-84292 exp:2027-01-02
+
+# golang.org/x/crypto: 2 fixable HIGH/CRITICAL [orchestrator].
+CVE-2026-39831 exp:2027-01-02
+CVE-2026-56854 exp:2027-01-02
+
+# golang.org/x/mod: 2 fixable HIGH/CRITICAL [orchestrator].
+CVE-2026-56864 exp:2027-01-02
+CVE-2026-56865 exp:2027-01-02
+
+# golang.org/x/net: 1 fixable HIGH/CRITICAL [orchestrator].
+CVE-2026-46600 exp:2027-01-02
+
+# golang.org/x/text: 1 fixable HIGH/CRITICAL [orchestrator].
+CVE-2026-56852 exp:2027-01-02
+
+# google.golang.org/grpc: 3 fixable HIGH/CRITICAL [orchestrator].
+CVE-2026-84304 exp:2027-01-02
+CVE-2026-84445 exp:2027-01-02
+GHSA-hrxh-6v49-42gf exp:2027-01-02
+
+# ip-address: 1 fixable HIGH/CRITICAL [matter-controller, mcp-server, orchestrator, sandbox, web-dashboard].
+CVE-2026-69192 exp:2027-01-02
+
+# krb5 (libkrb5-3, libgssapi-krb5-2, libk5crypto3, libkrb5support0): 2 fixable HIGH/CRITICAL [gateway].
+CVE-2026-40355 exp:2027-01-02
+CVE-2026-40356 exp:2027-01-02
+
+# libaom3: 4 fixable HIGH/CRITICAL [gateway].
+CVE-2026-56208 exp:2027-01-02
+CVE-2026-56209 exp:2027-01-02
+CVE-2026-56210 exp:2027-01-02
+CVE-2026-56211 exp:2027-01-02
+
+# libde265-0: 1 fixable HIGH/CRITICAL [gateway].
+CVE-2026-33164 exp:2027-01-02
+
+# libexpat1: 7 fixable HIGH/CRITICAL [gateway].
+CVE-2024-28757 exp:2027-01-02
+CVE-2025-59375 exp:2027-01-02
+CVE-2026-25210 exp:2027-01-02
+CVE-2026-45186 exp:2027-01-02
+CVE-2026-66046 exp:2027-01-02
+CVE-2026-76957 exp:2027-01-02
+CVE-2026-93990 exp:2027-01-02
+
+# libgd3: 1 fixable HIGH/CRITICAL [gateway].
+CVE-2026-9672 exp:2027-01-02
+
+# libpcre2-8-0: 4 fixable HIGH/CRITICAL [ai-gateway, camera-discovery, device-identity-svc, doc-render, email-indexer, file-indexer, gateway, matter-controller, mcp-server, orchestrator, rag-eval, routing, sandbox, switch, web-dashboard].
+CVE-2026-103111 exp:2027-01-02
+CVE-2026-86145 exp:2027-01-02
+CVE-2026-89157 exp:2027-01-02
+CVE-2026-89161 exp:2027-01-02
+
+# libssh2-1: 2 fixable HIGH/CRITICAL [gateway].
+CVE-2026-58050 exp:2027-01-02
+CVE-2026-7598 exp:2027-01-02
+
+# pacote: 1 fixable HIGH/CRITICAL [matter-controller, mcp-server, orchestrator, sandbox, web-dashboard].
+CVE-2026-9496 exp:2027-01-02
+
+# sharp: 2 fixable HIGH/CRITICAL [web-dashboard].
+GHSA-f88m-g3jw-g9cj exp:2027-01-02
+GHSA-rgj7-g3m4-5g8c exp:2027-01-02
+
+# stdlib: 7 fixable HIGH/CRITICAL [orchestrator].
+CVE-2026-33818 exp:2027-01-02
+CVE-2026-39822 exp:2027-01-02
+CVE-2026-56853 exp:2027-01-02
+CVE-2026-56858 exp:2027-01-02
+CVE-2026-56859 exp:2027-01-02
+CVE-2026-56860 exp:2027-01-02
+CVE-2026-56862 exp:2027-01-02
+
+# tar: 3 fixable HIGH/CRITICAL [matter-controller, mcp-server, orchestrator, sandbox, web-dashboard].
+CVE-2026-59873 exp:2027-01-02
+CVE-2026-59874 exp:2027-01-02
+CVE-2026-73566 exp:2027-01-02
+
+# transformers: 2 fixable HIGH/CRITICAL [ai-gateway].
+CVE-2026-5241 exp:2027-01-02
+CVE-2026-9856 exp:2027-01-02
