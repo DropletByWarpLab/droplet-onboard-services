@@ -227,6 +227,19 @@ const CATALOG_WARP_2707 = [
     availability: "available",
     setupGuideHref: "/help/integrations/loyverse",
   },
+  {
+    // WARP-3697 — the REST track's seventh vendor, at catalog.order 19. Wave 3
+    // numbers its cards by RANK (Keap is 18), not by build order, and the
+    // derived catalog sorts by that number, so each later wave-3 card is
+    // inserted at its rank here rather than appended.
+    id: "gocardless",
+    name: "GoCardless",
+    category: "Payments",
+    description:
+      "Direct Debit payments, refunds and payouts — read from GoCardless. Payers, mandates and subscriptions are not read.",
+    availability: "available",
+    setupGuideHref: "/help/integrations/gocardless",
+  },
 ];
 
 describe("the derived catalog is byte-identical to the hand-written one", () => {
@@ -296,6 +309,7 @@ describe("the derived catalog is byte-identical to the hand-written one", () => 
       "eaglesoft",
       "github",
       "gitlab",
+      "gocardless",
       "hubspot",
       "klaviyo",
       "loyverse",
@@ -515,6 +529,8 @@ describe("the setup guide travels with the card", () => {
     // …the third, WARP-2917…
     expect(covered).toContain("gitlab");
     expect(covered).toContain("todoist");
+    // …and WARP-3697's GoCardless, the first wave-3 card.
+    expect(covered).toContain("gocardless");
     // …and a cloud card, so a set that had SWAPPED one track for the other
     // rather than widening would still be caught.
     expect(covered).toContain("stripe");

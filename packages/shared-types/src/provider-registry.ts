@@ -1421,6 +1421,74 @@ export const BUILT_IN_PROVIDER_DESCRIPTORS = [
       order: 17,
     },
   },
+  // ── WARP-3697..3702 — free-integrations wave 3 ────────────────────────────
+  //
+  // Six vendors that fit the declarative REST track with ZERO widening. `order`
+  // follows the research spec's RANK (segment value first, readiness second),
+  // not the build order below — Keap is 18 and is declared fourth — and
+  // `catalogDescriptors()` sorts by it, so the hub reads in rank order.
+  //
+  // 🔴 EVERY dataset a wave-3 vendor declares is ALREADY served by an earlier
+  // provider, and `cloud_query_dataset` resolves a dataset to ONE connected
+  // provider — the lowest `catalog.order` (`erp.service.ts`
+  // `cloudRowForDataset`, WARP-2833). Orders 18..23 sort AFTER every provider
+  // that shipped before, so on a box that also has an earlier provider
+  // connected, the new vendor answers NOTHING through that tool for the shared
+  // dataset. Recorded in ADR-046's wave-3 implementation record; deliberately
+  // not changed here.
+
+  // WARP-3697 — the seventh REST profile, and the first DIRECT-DEBIT vendor.
+  {
+    id: "gocardless",
+    displayName: "GoCardless",
+    category: "Payments",
+    track: "rest",
+    credentialFields: [
+      {
+        name: "accessToken",
+        label: "GoCardless access token",
+        type: "string",
+        required: true,
+        secret: true,
+        storage: "encrypted",
+        // NO `pattern`, for the Brevo / Square / Cal.com reason. The `live_` and
+        // `sandbox_` prefixes are community-reported only — no official page
+        // states a token shape — so a regex would be a guess that refuses valid
+        // tokens. What narrows this token is its SCOPE, chosen at creation, and
+        // the help asks for the read-only one. Pinned absent by
+        // `gocardless-profile.test.ts`.
+        //
+        // No host in the help: the egress scanner reads descriptor strings, and a
+        // dashboard address here would be a destination nobody registered.
+        help:
+          "In GoCardless (your live dashboard, not the sandbox): Developers → API settings → Create → " +
+          "Access token. Name it, choose the read-only scope and click Create access token, then copy it " +
+          "now — GoCardless shows it once. Only a GoCardless admin can create one.",
+      },
+    ],
+    // ONE FIXED HOST for live accounts. The sandbox host is never dialled and
+    // never registered.
+    egressHosts: ["api.gocardless.com"],
+    // `charge`, `refund` and `payout`, as a read-through trio (the Square
+    // pattern): none has an `ERP_SYNC_ENTITIES` row, and all three watermarks
+    // are `complete: false` — a creation-time filter. Payers, mandates and
+    // subscriptions are not served; the reasons are in `rest/vendors/gocardless.ts`.
+    datasets: ["charge", "refund", "payout"],
+    // The LOWER of GoCardless's two published figures: its limits table says
+    // 1,600 requests a minute, its own header example and a performance note say
+    // 1,000. Paced at ceil(60,000 / 1,000) = 60 ms.
+    rateLimit: { callCeiling: 1_000, periodMs: 60_000 },
+    catalog: {
+      id: "gocardless",
+      name: "GoCardless",
+      category: "Payments",
+      description:
+        "Direct Debit payments, refunds and payouts — read from GoCardless. Payers, mandates and subscriptions are not read.",
+      availability: "available",
+      setupGuideHref: "/help/integrations/gocardless",
+      order: 19,
+    },
+  },
 ] as const satisfies readonly ProviderDescriptor[];
 
 /**

@@ -591,6 +591,9 @@ describe("entries are the union of the catalog and the response", () => {
       // Payments
       "Stripe",
       "Square",
+      // WARP-3697 — GoCardless, at `catalog.order` 19, joins the Payments
+      // group Stripe and Square already opened.
+      "GoCardless",
       // CRM
       "HubSpot",
       "Pipedrive",
@@ -654,6 +657,9 @@ describe("entries are the union of the catalog and the response", () => {
       // Payments
       "Stripe",
       "Square",
+      // WARP-3697 — GoCardless, at `catalog.order` 19, joins the Payments
+      // group Stripe and Square already opened.
+      "GoCardless",
       // CRM
       "HubSpot",
       "Pipedrive",
@@ -709,14 +715,14 @@ describe("entries are the union of the catalog and the response", () => {
     const { container } = renderHub();
     await waitFor(() => expect(renderedNames(container)).toContain("M365"));
 
-    // Eighteen catalog tiles (four original, the five WARP-2214 vendors — Xero
+    // Nineteen catalog tiles (four original, the five WARP-2214 vendors — Xero
     // included — the three wave-1 vendors, the two WARP-2707 REST vendors,
     // the WARP-2916 GitHub one, the WARP-2917 GitLab one, WARP-2918's
-    // Todoist and the WARP-2919 Loyverse card) absorb four of the rows; the
-    // two the catalog knows nothing about each get their own. WARP-2659 adds
-    // the MCP-track tile, which this fixture reports no row for — it renders
-    // from the registry regardless, which is the point.
-    expect(tiles(container)).toHaveLength(21);
+    // Todoist, the WARP-2919 Loyverse card and WARP-3697's GoCardless) absorb
+    // four of the rows; the two the catalog knows nothing about each get their
+    // own. WARP-2659 adds the MCP-track tile, which this fixture reports no row
+    // for — it renders from the registry regardless, which is the point.
+    expect(tiles(container)).toHaveLength(22);
     for (const name of [
       "Eaglesoft",
       "Dentrix",
@@ -745,6 +751,8 @@ describe("entries are the union of the catalog and the response", () => {
       "Todoist",
       // WARP-2919 — the sixth REST card, at `catalog.order` 17.
       "Loyverse",
+      // WARP-3697 — the seventh REST card, at `catalog.order` 19.
+      "GoCardless",
       "Atlassian (Jira & Confluence)",
       "M365",
       "Something Nobody Wrote A Tile For",

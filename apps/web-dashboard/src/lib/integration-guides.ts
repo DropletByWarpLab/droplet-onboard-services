@@ -54,6 +54,7 @@ import eaglesoft from "../../../../docs/integrations/eaglesoft.md?raw";
 import exportDrop from "../../../../docs/integrations/export-drop.md?raw";
 import github from "../../../../docs/integrations/github.md?raw";
 import gitlab from "../../../../docs/integrations/gitlab.md?raw";
+import gocardless from "../../../../docs/integrations/gocardless.md?raw";
 import hubspot from "../../../../docs/integrations/hubspot.md?raw";
 import klaviyo from "../../../../docs/integrations/klaviyo.md?raw";
 import loyverse from "../../../../docs/integrations/loyverse.md?raw";
@@ -91,6 +92,7 @@ export const INTEGRATION_GUIDES: Readonly<Record<string, string>> = {
   "export-drop": exportDrop,
   github,
   gitlab,
+  gocardless,
   hubspot,
   klaviyo,
   loyverse,
