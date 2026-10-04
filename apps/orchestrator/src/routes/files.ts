@@ -2776,7 +2776,8 @@ export function createFilesRouter(
 
         await invalidateListing(req, user, { space, path: targetPath });
         await auditFileChange(
-          req, prisma, "File uploaded", results.map((r) => r.path).join(", "),
+          req, prisma, "File uploaded",
+          results.length === 1 ? results[0].path : `${results.length} files`,
           { paths: results.map((r) => r.path), space, count: results.length },
           "upload",
         );
