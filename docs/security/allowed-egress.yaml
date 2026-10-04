@@ -1117,6 +1117,45 @@ entries:
       - apps/orchestrator/src/services/caldav.client.ts
       - apps/orchestrator/src/services/calendar.service.ts
 
+  - id: work-webhooks
+    kind: dynamic
+    service: orchestrator
+    config_key: PmWebhook.url (per webhook row, registered by an owner or admin)
+    phase: runtime
+    data_class: user-content-on-request
+    purpose: >-
+      The webhook and chat-app destinations an owner or admin registers under
+      Settings, Integrations, Work notifications (WARP-3532, ADR-069 §9): an
+      HTTPS or HTTP endpoint on the LAN or the internet, or a Slack, Teams,
+      Discord or Google Chat incoming-webhook address. Each delivery carries one
+      work event: the work item's key, title, state, priority, due date, the
+      names of the people involved and a link back to the box. Comment text,
+      descriptions and email addresses are not sent. Same shape as
+      user-calendar-servers: the destination is a row, so no hostname can be
+      written down here and no static entry could cover it.
+
+      THE ENFORCEMENT IS IN CODE. Off-LAN delivery is OFF by default behind the
+      owner-only `work_integrations` off-LAN channel (OffLanChannelKey), read
+      fail-closed by workIntegrationsGate immediately before every dial; with it
+      off such deliveries stay queued with "Blocked by egress setting" and
+      nothing leaves. A destination on the box's own LAN (RFC 1918 or IPv6 ULA)
+      needs no switch but always passes lib/outbound-url-guard.ts: resolve once,
+      refuse loopback, link-local, multicast, unspecified, cloud-metadata
+      addresses, this box's own addresses and the compose networks, and connect
+      to the vetted address only (lib/outbound-pinned-fetch.ts) with the original
+      Host and SNI, certificate verification on, and no redirects followed.
+      Every request is signed with HMAC-SHA256 under a per-webhook secret held
+      encrypted at rest. WS-18's GitHub and GitLab poll is the other consumer of
+      this channel.
+    ticket: WARP-3532
+    added: 2026-10-04
+    review_by: 2027-10-04
+    code_refs:
+      - apps/orchestrator/src/lib/outbound-url-guard.ts
+      - apps/orchestrator/src/lib/outbound-pinned-fetch.ts
+      - apps/orchestrator/src/services/pm/webhook-delivery.service.ts
+      - apps/orchestrator/src/services/off-lan-gate.service.ts
+
   - id: web-push-services
     kind: egress
     service: orchestrator
