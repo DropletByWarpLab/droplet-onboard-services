@@ -30,11 +30,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       gcc python3-dev pkg-config \
       libtss2-dev tpm2-tools
 
-COPY services/device-identity-svc/requirements.txt .
+COPY services/device-identity-svc/requirements.lock .
 # WARP-1065: persistent pip wheel/http cache (replaces --no-cache-dir; the
 # cache lives in the mount, not the image).
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    pip install --require-hashes --no-deps -r requirements.lock
 
 # Copy proto + generate gRPC stubs at build time so the image stays in
 # sync with proto/ even if the in-tree generated files drift.
