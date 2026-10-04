@@ -10,3 +10,4 @@ export * from "./provider-descriptor";
 export * from "./provider-registry";
 export * from "./saas-connection-state";
 export * from "./ssh-login";
+export * from "./pm-collaboration";
