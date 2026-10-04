@@ -137,7 +137,7 @@ log "installed $TPM_LIB_DST"
 # --- 1c-bis) Install the storage-pool ROOT executor (ADR-019 follow-up) ---
 # The bridge sandbox (User=droplet + ProtectSystem=strict + NoNewPrivileges)
 # cannot run mdadm/mkfs/mount, so the bridge spools the owner-confirmed pool
-# request into its StateDirectory and polkit-starts
+# request into its /run RuntimeDirectory (tmpfs) and polkit-starts
 # droplet-storage-pool-apply.service (unit installed in step 1; polkit grant
 # in 1d-bis), whose ExecStart is this script — it consumes the spooled request
 # as root, runs droplet-storage-pool.sh, and writes the result back for the

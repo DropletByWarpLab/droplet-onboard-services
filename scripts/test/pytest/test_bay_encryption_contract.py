@@ -32,6 +32,9 @@ EXPIRY_SERVICE = (
 )
 EXPIRY_TIMER = REPO / "services" / "oled-display" / "droplet-bay-recovery-expiry.timer"
 BRIDGE = REPO / "services" / "oled-display" / "device-bridge.py"
+BRIDGE_UNIT = REPO / "services" / "oled-display" / "droplet-device-bridge.service"
+POOL_APPLY = REPO / "scripts" / "host" / "droplet-storage-pool-apply.sh"
+POOL_APPLY_UNIT = REPO / "services" / "oled-display" / "droplet-storage-pool-apply.service"
 STORAGE_ROUTE = REPO / "apps" / "orchestrator" / "src" / "routes" / "storage.ts"
 SAFETY_RULES = (
     REPO / "apps" / "orchestrator" / "src" / "config" / "storage-safety-rules.ts"
@@ -63,7 +66,7 @@ def _text(path: Path) -> str:
 def test_every_copy_of_the_contract_exists():
     for p in (POOL_SCRIPT, LUKS_PROVISION, AUTOMOUNT, STORAGE_WIPE, SECRETS_WIPE,
               FACTORY_RESET, INSTALL_BRIDGE, EXPIRY_SERVICE, EXPIRY_TIMER, BRIDGE,
-              STORAGE_ROUTE, SAFETY_RULES):
+              STORAGE_ROUTE, SAFETY_RULES, BRIDGE_UNIT, POOL_APPLY, POOL_APPLY_UNIT):
         assert p.is_file(), f"{p.relative_to(REPO)} is gone -- update this contract test"
 
 
@@ -154,6 +157,21 @@ def test_recovery_escrow_is_on_the_encrypted_data_volume_and_only_there():
         "recovery key would survive a reset"
     )
     assert "/var/lib/droplet-storage" not in _text(STORAGE_WIPE)
+
+
+def test_recovery_key_spool_and_capture_stay_on_volatile_run_tmpfs():
+    bridge = _text(BRIDGE)
+    apply = _text(POOL_APPLY)
+    unit = _text(BRIDGE_UNIT)
+    apply_unit = _text(POOL_APPLY_UNIT)
+    assert '"/run/droplet-bridge-pool-spool"' in bridge
+    assert ':-/run/droplet-bridge-pool-spool' in apply
+    assert "RuntimeDirectory=droplet-bridge-pool-spool" in unit
+    assert "RuntimeDirectoryMode=0700" in unit
+    assert "/run/droplet-bridge-pool-spool/request.json" in apply_unit
+    assert 'CAPTURE_FS="$(findmnt -n -o FSTYPE --target "$CAPTURE_DIR"' in apply
+    assert '[ "$CAPTURE_FS" = "tmpfs" ]' in apply
+    assert "refusing to write the key to persistent storage" in apply
 
 
 def test_prepare_has_no_no_tpm_override():

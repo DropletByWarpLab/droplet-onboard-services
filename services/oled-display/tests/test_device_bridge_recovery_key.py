@@ -14,8 +14,8 @@ What the bridge owes that path (and what this file pins):
   * `params.uuid` is validated BEFORE anything is spooled;
   * the key is NEVER logged — not on success, not when the script misbehaves,
     not by the HTTP layer — and never echoed in an error message;
-  * the key lives nowhere but the spool result file the executor already
-    creates, and the bridge deletes that file right after reading it.
+  * the key lives nowhere but the /run tmpfs spool result file the executor
+    already creates, and the bridge deletes that file right after reading it.
 
 Test keys here are obviously fake. NEVER put a real key in this file.
 """

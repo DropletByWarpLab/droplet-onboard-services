@@ -16,7 +16,7 @@
 #   bridge (droplet, sandboxed)                 this script (root)
 #   ─────────────────────────────               ─────────────────────────────
 #   writes pool-spool/request.json      ──►     reads the ONE spooled request
-#   into its own StateDirectory                 runs droplet-storage-pool.sh
+#   into a shared /run RuntimeDirectory         runs droplet-storage-pool.sh
 #   `systemctl start                            (whose hard pre-flight is the
 #    droplet-storage-pool-apply.service`        last safety gate — and whose
 #   (authorized by the narrowly-scoped          blkid/findmnt/lsblk probes now
@@ -29,8 +29,8 @@
 # 50-droplet-device-bridge.rules) and which the bridge only starts after its
 # auth-gated POST /pools/command — itself reachable only via an owner session
 # + a single-use confirm token at the orchestrator. The AI can never reach
-# this. The spool directory lives inside the bridge's 0700 droplet-owned
-# StateDirectory, so only the bridge (or root) can place a request there.
+# this. The spool directory lives in the bridge's 0700 RuntimeDirectory under
+# /run (tmpfs), so key-bearing results never reach persistent OS storage.
 #
 # Exit-code contract:
 #   0        — a request was consumed and a result was written, REGARDLESS of
@@ -46,7 +46,7 @@
 #
 # Test/dev hooks (so this is unit-testable without root or systemd):
 #   DROPLET_POOL_SPOOL_DIR=...   override the spool dir
-#                                (default /var/lib/droplet-bridge/pool-spool)
+#                                (default /run/droplet-bridge-pool-spool)
 #   DROPLET_POOL_SCRIPT=...      override the pool script path
 #                                (default /usr/local/sbin/droplet-storage-pool.sh)
 #   DROPLET_POOL_TMPDIR=...      directory for the stdout/stderr capture files
@@ -54,7 +54,7 @@
 # =============================================================================
 set -euo pipefail
 
-SPOOL_DIR="${DROPLET_POOL_SPOOL_DIR:-/var/lib/droplet-bridge/pool-spool}"
+SPOOL_DIR="${DROPLET_POOL_SPOOL_DIR:-/run/droplet-bridge-pool-spool}"
 POOL_SCRIPT="${DROPLET_POOL_SCRIPT:-/usr/local/sbin/droplet-storage-pool.sh}"
 REQ="$SPOOL_DIR/request.json"
 RES="$SPOOL_DIR/result.json"
@@ -102,12 +102,19 @@ PARAMS_JSON="$(parse_request params)"
 # reveal (recovery_key_reveal) travels. Hold the capture files on tmpfs (/run,
 # root-only) instead of mktemp's default /tmp — the root LV is not encrypted,
 # so a secret written there would leave remnants on the plain disk.
-# DROPLET_POOL_TMPDIR overrides the directory (tests only); a missing or
-# unwritable one falls back to mktemp's default rather than failing.
+# DROPLET_POOL_TMPDIR overrides the directory (tests only). For key reveal the
+# default must be a writable tmpfs; there is deliberately no persistent fallback.
 CAPTURE_DIR="${DROPLET_POOL_TMPDIR:-/run}"
+if [ "$OPERATION" = "recovery_key_reveal" ] && [ -z "${DROPLET_POOL_TMPDIR:-}" ]; then
+  CAPTURE_FS="$(findmnt -n -o FSTYPE --target "$CAPTURE_DIR" 2>/dev/null || true)"
+  [ "$CAPTURE_FS" = "tmpfs" ] \
+    || die "recovery-key output requires a tmpfs capture directory — refusing to write the key to persistent storage"
+fi
 if [ -d "$CAPTURE_DIR" ] && [ -w "$CAPTURE_DIR" ]; then
   OUT_FILE="$(mktemp -p "$CAPTURE_DIR")"
   ERR_FILE="$(mktemp -p "$CAPTURE_DIR")"
+elif [ "$OPERATION" = "recovery_key_reveal" ]; then
+  die "recovery-key output capture directory is unavailable — refusing to write the key to persistent storage"
 else
   OUT_FILE="$(mktemp)"
   ERR_FILE="$(mktemp)"

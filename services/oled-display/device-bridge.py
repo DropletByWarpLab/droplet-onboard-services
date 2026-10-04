@@ -3106,8 +3106,8 @@ _POOL_REFUSAL_CODES = {
 # recovery key. For these the host script's stdout/stderr and the parsed result
 # are never logged, and a failure is reported with a fixed message rather than
 # the script's own output (which, in a half-failed run, could hold the key).
-# The key may live only in the spool result file the executor creates, which
-# _run_pool_via_executor deletes the moment it has been read.
+# The key may live only in the tmpfs spool result file the executor creates,
+# which _run_pool_via_executor deletes after reading.
 _POOL_OPS_SECRET_RESULT = frozenset({"recovery_key_reveal"})
 
 # WARP-3513: ops that read or consume state but never change which drives are
@@ -3129,13 +3129,13 @@ _RECOVERY_UUID_RE = re.compile(r"[A-Fa-f0-9-]{8,64}")
 # prints nothing, and the guard passes). Verified on the shipping box. So,
 # same posture as the WARP-808 hostapd Wi-Fi write but with a different
 # split (mdadm is a direct binary — there is no unit to polkit-restart):
-# the bridge writes the owner-confirmed request into a spool inside its own
-# StateDirectory, then `systemctl start`s a root oneshot
+# the bridge writes the owner-confirmed request into a shared RuntimeDirectory
+# under /run (tmpfs), then `systemctl start`s a root oneshot
 # (droplet-storage-pool-apply.service — authorized for the droplet user by
 # 50-droplet-device-bridge.rules, start verb only) which runs the pool
 # script as root and writes a result file back into the spool.
 POOL_SPOOL_DIR = os.environ.get(
-    "DROPLET_POOL_SPOOL_DIR", "/var/lib/droplet-bridge/pool-spool").strip()
+    "DROPLET_POOL_SPOOL_DIR", "/run/droplet-bridge-pool-spool").strip()
 POOL_APPLY_UNIT = os.environ.get(
     "DROPLET_POOL_APPLY_UNIT", "droplet-storage-pool-apply.service").strip()
 
@@ -4941,7 +4941,7 @@ class Handler(BaseHTTPRequestHandler):
             # /drives/:uuid/eject. The orchestrator only reaches here after an
             # owner session + a valid single-use confirm-token; the bridge
             # requires its own auth token on top, and run_pool_command() hands
-            # the op to the root executor unit via the StateDirectory spool
+            # the op to the root executor unit via the /run RuntimeDirectory spool
             # (the host script's hard pre-flight is the last safety gate) —
             # it never runs mdadm/mkfs itself.
             if not self._authed():
