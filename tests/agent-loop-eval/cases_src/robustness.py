@@ -375,7 +375,9 @@ def cases(case):
 
     # 023 -- the tool rejects the format, fix it ------------------------------------------------------------------------
     add("rob-023", "error_recovery", "Put a 30-minute meeting called 'Vendor review' on my calendar on {{today+5}} at 2:30pm.",
-        {"min_calls": {"create_event": 2}, "no_repeat_calls": True, "allowed_writes": ["create_event"],
+        # No no_repeat_calls: the fault fires on the first call whatever its args, so a model
+        # whose first call was already valid may legitimately resend the same args.
+        {"min_calls": {"create_event": 2}, "allowed_writes": ["create_event"],
          "tool_args": {"create_event": [{"title": {"contains": "vendor review"},
                                          "starts_at": {"regex": FULL_ISO}, "ends_at": {"regex": FULL_ISO}}]},
          "world": {"events_titled": {"Vendor review": 1}}},
