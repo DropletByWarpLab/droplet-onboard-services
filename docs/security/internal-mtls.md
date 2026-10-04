@@ -1,8 +1,21 @@
 # Internal service-to-service mTLS (WARP-236) + MQTT mTLS (WARP-235)
 
-Every first-party internal HTTP/gRPC hop and the MQTT broker authenticate peers
-with X.509 client certificates issued by a compose-network-scoped internal CA.
-The single shared MQTT password is retired; MQTT identity is the client-cert CN.
+> **Current state (corrected 2026-10-03, WARP-3626, WARP-3663).** The MQTT broker
+> requires client certificates today (the shared MQTT password is retired; MQTT
+> identity is the client-cert CN). **Internal HTTP/gRPC mTLS is wired but off by
+> default**: it is enforced only when `DROPLET_INTERNAL_TLS=1`, and the shipped
+> default is `0`, so first-party service-to-service hops are plaintext with
+> bearer tokens unless an operator enables the flag. The host-side device bridge
+> binds all interfaces (`BRIDGE_BIND=0.0.0.0` in the shipped systemd unit) and is
+> gated by its own bearer token; it is not loopback-only. Making mTLS the
+> default is planned work, not part of the current posture.
+
+## Target design
+
+With `DROPLET_INTERNAL_TLS=1`, every first-party internal HTTP/gRPC hop and the
+MQTT broker authenticate peers with X.509 client certificates issued by a
+compose-network-scoped internal CA. The single shared MQTT password is retired;
+MQTT identity is the client-cert CN.
 
 ## Design summary
 
@@ -66,11 +79,13 @@ device-identity-svc issuance. Rationale:
 5. WARP-235 removes the password listener entirely (single mTLS listener :8883).
    The dev compose stack keeps its own anonymous 1883 broker — untouched.
 
-## Enforcement matrix (implemented — WARP-1061)
+## Enforcement matrix (implemented but off by default — WARP-1061)
 
 Every row below is wired end-to-end (client presents its bundle AND the
 server requires a CA-signed client cert) and gated on `DROPLET_INTERNAL_TLS`
-(default `0` = plaintext, byte-identical to the pre-mTLS posture). "impl."
+(default `0` = plaintext, byte-identical to the pre-mTLS posture). The "Flag
+on" column describes the Target posture; the shipped default is the "Flag
+off" column. "impl."
 notes which ticket landed the last missing half.
 
 | # | Client → Server | Transport | Flag off | Flag on | impl. |
@@ -112,7 +127,7 @@ flag is off.
 | ops-console inbound :8087 | loopback-published for the operator's tunneled BROWSER, which cannot present internal client certs; bearer token + 127.0.0.1 bind + reverse tunnel are the gate. It IS an mTLS *client* for its mesh probes (row 15) — the probe rewrite is scoped to the mesh registry names so exempt targets are never probed over TLS. |
 | mcp-server inbound :9090 | JWT-gated surface for OFF-stack consumers (droplet-local-LLM, Claude Desktop) that hold no internal identity. It is an mTLS *client* toward the orchestrator/routing/switch (rows 5, 12). |
 | nginx → web-dashboard :3001 / nextcloud / docserver | user plane; holds no service secrets — the browser is the real client and the gateway terminates the public TLS. |
-| device-bridge inbound :9090 (host) | loopback-bound host listener (BRIDGE_BIND=127.0.0.1) with its own bearer; a host python stdlib server with no TLS listener support worth adding. Orchestrator → bridge calls stay plain http on the host-gateway leg. Loopback-only ⇒ acceptable per the WARP-1061 host-caller policy. |
+| device-bridge inbound :9090 (host) | host listener with its own bearer token; a host python stdlib server with no TLS listener support worth adding. The in-code default bind is `127.0.0.1`, but the shipped `droplet-device-bridge.service` sets `BRIDGE_BIND=0.0.0.0` so the orchestrator container can reach it through the host-gateway leg, which stays plain http. Every mutating endpoint and credential-bearing read requires the bearer token, and the bridge refuses to start without it. Narrowing the bind or adding transport protection for this leg is planned work. |
 | orchestrator → frigate :5000, device-bridge :9090, nextcloud WebDAV, HQ issuance | third-party / host / WAN surfaces outside the compose mesh (frigate is loopback-published; HQ is public TLS). |
 | ai-gateway → the inference runtime (dmr :12434 default / ollama :11434 opt-in), ollama-manager; voice-io → wyoming STT/TTS | third-party engines: bridge-internal or raw-TCP protocols with no/immaterial TLS support. |
 | orchestrator → device-identity-svc | Unix socket, filesystem-scoped — no network hop to encrypt. |
@@ -137,7 +152,9 @@ the mesh. Three host identities are issued by `internal_ca_issue_all` into
 
 - **Live everywhere:** the internal CA + per-service bundle
   issuance/rotation, Postgres TLS (WARP-233), Redis TLS (WARP-234), MQTT
-  mTLS :8883 (WARP-235, scheme-gated, always on).
+  mTLS :8883 (WARP-235, scheme-gated, always on). Postgres and Redis use TLS
+  with password or ACL authentication; they do not require client certificates
+  (`--tls-auth-clients no` on Redis).
 - **Wired and flag-gated (everything in the matrix):** flipping
   `DROPLET_INTERNAL_TLS=1` + recreating the stack turns every row on
   together. `scripts/setup.sh` writes the knob (default `0`) into fresh

@@ -28,6 +28,18 @@ evidence: `scripts/host/droplet-verify-encryption.sh` checks
 
 Every user carries `resetchannels` (no pub/sub) and starts from `-@all`.
 
+> **Current state (2026-10-03, WARP-3663, fix tracked in WARP-3605).** The
+> orchestrator, ai-gateway and mcp-server users each have a distinct generated
+> password. The `nextcloud` user does not: the generated `.env` sets
+> `REDIS_HOST_PASSWORD` to the same value as `REDIS_PASSWORD`
+> (`scripts/lib/secrets.sh`, and `_generate_redis_acl` falls back to
+> `REDIS_PASSWORD` when `REDIS_HOST_PASSWORD` is unset), so the `default` and
+> `nextcloud` users share one password. A holder of that value can authenticate
+> as `nextcloud` and use its wider key and command set, so the `default` user's
+> `+ping` restriction is not a privilege boundary until WARP-3605 gives
+> `nextcloud` its own password. A distinct password for each of the five
+> users, as the password column above shows, is the Target.
+
 ## Client wiring
 
 - **orchestrator / mcp-server (ioredis):** compose sets
@@ -73,8 +85,10 @@ Every user carries `resetchannels` (no pub/sub) and starts from `-@all`.
   context, which is the only way to pin the internal CA for the session
   socket. Re-verify these against `redis_session.c` if the image pin moves.
 - The `.env` `REDIS_URL` (default user) is ping-only by design — anything
-  still using it for data fails loudly with NOPERM instead of silently
-  riding a shared credential.
+  still using it for data fails loudly with NOPERM. Note the `default` and
+  `nextcloud` users currently share a password (see the current-state note
+  above; WARP-3605), so the ping-only restriction does not stop a holder of
+  that password from authenticating as `nextcloud`.
 - Dev (`docker-compose.dev.yml`) keeps its separate no-auth plaintext cache.
 
 ## Rotation runbook
