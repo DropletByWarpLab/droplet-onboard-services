@@ -7981,53 +7981,139 @@ model M365DeltaCursor {
   @@index([userId])
 }
 
-/// WARP-3538 — one file or folder in a person's OneDrive (`files`) or in a
-/// SharePoint document library they can open (`sharepoint`), as the Graph
-/// delta feed reports it. The first thing the M365 sync engine LANDS (ADR-041
-/// §4): until this table every page was counted and discarded.
+/// WARP-3538 (ADR-041 §4) — which cloud a landed file, and the source it sits in,
+/// came from. One value today. Google Drive and Dropbox add theirs
+/// (`ALTER TYPE ... ADD VALUE`, additive) in the changes that build their
+/// connectors, together with the writer that needs each one: a value here that
+/// nothing writes is a promise nothing keeps.
+enum CloudFileProvider {
+  M365
+}
+
+/// WARP-3538 — what KIND of container a `CloudFileSource` is. A person's own
+/// drive and a shared library are different things to say to them ("OneDrive"
+/// versus "Front desk › Documents") and to read (one implicit cursor versus one
+/// per library), so the kind is an explicit column — never inferred from a null
+/// `siteId`, and never from which cursor happens to reference the source. Later
+/// providers add their own kinds additively.
+enum CloudFileSourceKind {
+  ONEDRIVE
+  SHAREPOINT_LIBRARY
+}
+
+/// WARP-3538 — a container a person's cloud-file sync reads: their OneDrive, one
+/// SharePoint document library, and (in the changes that follow) a Google Drive
+/// or a Dropbox account. It is the identity and the display names of what a sync
+/// cursor addresses by a bare id — Microsoft's cursor knows only a drive id, and
+/// this is what the card and the file search show for it ("Front desk ›
+/// Documents").
+///
+/// PROVIDER-AGNOSTIC on purpose (WARP-3538 D13). Google Drive and Dropbox are
+/// built right after this and must land into the SAME store and be found by the
+/// SAME search tool, so a person asks once and gets every cloud. Three concrete
+/// providers in the same programme is not a premature abstraction. `sourceId` is
+/// the provider's own container id (M365: the Graph DRIVE id) and `siteId` is the
+/// one column that is M365's alone.
+///
+/// The names and the URL are `dcv1:` blobs under the `cloud-file-metadata` key
+/// (cloud-file-crypto.ts), AAD-bound to (provider, userId, sourceId, column): a
+/// site or library name can carry a patient or a matter. Not a foreign key, like
+/// every cloud-connector table — disconnect, a leaver's deletion and switching
+/// SharePoint off delete these rows by hand, and a COMPLETE discovery prunes the
+/// libraries that are gone.
+model CloudFileSource {
+  id String @id @default(uuid())
+
+  /// The Droplet user whose connection reads this source. Every query is scoped
+  /// to it — a person only ever sees their own rows.
+  userId String
+
+  provider CloudFileProvider
+  kind     CloudFileSourceKind
+
+  /// The provider's id for the container. M365: the Graph DRIVE id, which is the
+  /// `sharepoint` cursor's `resourceId` (and, for OneDrive, the id `GET
+  /// /me/drive` returns, since the OneDrive cursor's own resource is the
+  /// singleton `-`). Never a path and never a name.
+  sourceId String
+
+  /// M365 SharePoint: Graph's composite site id (`hostname,siteCollectionId,webId`).
+  /// Null for OneDrive, which sits under no site.
+  siteId String?
+
+  /// `dcv1:` blob of the site's display name. Null where there is no site.
+  siteNameEnc String?
+
+  /// `dcv1:` blob of the container's name — a library's name; for OneDrive, the
+  /// drive's own name.
+  nameEnc String
+
+  /// `dcv1:` blob of the container's browser URL, when the provider sent one.
+  webUrlEnc String?
+
+  /// True when the person FOLLOWS the site, false when it was found by search
+  /// alone. Explicit, because the order libraries are registered in (and so
+  /// which survive the per-person cap) depends on it.
+  followed Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// One row per container per provider per person — the upsert key.
+  @@unique([userId, provider, sourceId])
+  @@index([userId])
+}
+
+/// WARP-3538 — one file or folder, as a cloud provider's change feed reports it.
+/// The first thing the Microsoft 365 sync engine LANDS (ADR-041 §4): until this
+/// table every page it read was counted and discarded.
 ///
 /// METADATA ONLY — never content. A file's bytes are a 302 to a per-tenant host
 /// no `allowed-egress.yaml` entry can name, so nothing here is ever fetched.
 ///
 /// The human-readable columns (`nameEnc`, `webUrlEnc`, `lastModifiedByEnc`) are
-/// `dcv1:` blobs under their OWN column-crypto label (`m365-drive-metadata`).
-/// A file name in a practice routinely carries a patient's name, and ADR-041 §4
-/// requires synced content be encrypted at rest. WARP-2549's narrow reading
-/// would have allowed plaintext here (this table makes no encryption promise)
-/// — encrypted anyway, because this table claims only what it implements and
-/// what it implements is the stronger thing. The AAD is an unambiguous encoding
-/// of (userId, driveId, itemId, column) — see drive-metadata.ts — so a
-/// ciphertext cannot be moved between rows, people or columns.
+/// `dcv1:` blobs under their OWN column-crypto label (`cloud-file-metadata`). A
+/// file name in a practice routinely carries a patient's name, and ADR-041 §4
+/// requires synced content be encrypted at rest. WARP-2549's narrow reading would
+/// have allowed plaintext here (this table makes no encryption promise to break)
+/// — encrypted anyway, because a table should claim only what it implements and
+/// what this one implements is the stronger thing. The AAD is an unambiguous
+/// encoding of (provider, userId, sourceId, externalId, column) — see
+/// cloud-file-crypto.ts — so a ciphertext cannot be moved between rows, people or
+/// columns.
 ///
 /// Not encrypted, on purpose: ids, the folder flag, MIME type, size and the
 /// timestamps. They are what the table is filtered, ordered and swept by.
 ///
-/// Items are tracked by ID, never by path: delta returns no
-/// `parentReference.path`, and a rename would silently orphan a path-keyed row.
-/// `userId` is not a foreign key (like every M365 table): nothing cascades, so
-/// disconnect, a leaver's deletion, switching SharePoint off and a reconnect as
-/// a different account all delete these rows by hand.
-model M365DriveItem {
+/// Items are tracked by ID, never by path: a provider's change feed may carry no
+/// path at all (Graph's delta returns no `parentReference.path`), and a rename
+/// would silently orphan a path-keyed row. `userId` is not a foreign key (like
+/// every cloud-connector table): nothing cascades, so disconnect, a leaver's
+/// deletion, switching SharePoint off and a reconnect as a different account all
+/// delete these rows by hand.
+model CloudFileItem {
   id String @id @default(uuid())
 
-  /// The Droplet user whose connection read this item. Every query is scoped
-  /// to it — a person only ever sees their own rows.
+  /// The Droplet user whose connection read this item. Every query is scoped to
+  /// it — a person only ever sees their own rows.
   userId String
 
-  /// `files` | `sharepoint`. Free text; the landing handler is the gate.
-  workload String
+  provider CloudFileProvider
 
-  /// The Graph drive this item lives in. For `sharepoint` it is the cursor's
-  /// resource id (the library); for `files` it is the item's own
-  /// `parentReference.driveId`, because OneDrive's cursor is the singleton `-`.
-  driveId String
+  /// The `CloudFileSource.sourceId` this item sits in. M365: for `sharepoint`
+  /// the cursor's resource id (the library's drive id); for OneDrive the id of
+  /// the person's OneDrive source, because that cursor's own resource is the
+  /// singleton `-`.
+  sourceId String
 
-  /// Graph's driveItem id, stable across renames and moves.
-  itemId String
+  /// The provider's own item id — M365: Graph's driveItem id, stable across
+  /// renames and moves.
+  externalId String
 
-  /// The containing folder's item id — the chain a path is rebuilt from. Null
-  /// for an item directly under the drive root, which is not stored.
-  parentItemId String?
+  /// The containing folder's `externalId` — the chain a path is rebuilt from, and
+  /// how a deleted folder's descendants are found. Null for an item directly
+  /// under the source's root, which is not stored.
+  parentExternalId String?
 
   isFolder Boolean
 
@@ -8035,72 +8121,42 @@ model M365DriveItem {
   /// landed.
   nameEnc String
 
-  /// `dcv1:` blob of the browser URL, when Graph sent one.
+  /// `dcv1:` blob of the browser URL, when the provider sent one.
   webUrlEnc String?
 
-  /// `dcv1:` blob of the last modifier's display name, when Graph sent one.
+  /// `dcv1:` blob of the last modifier's display name, when the provider sent one.
   lastModifiedByEnc String?
 
   mimeType String?
 
-  /// A FILE's size. Null for a folder (Graph reports a folder's cumulative size,
-  /// which is not what anyone asks for), and BigInt because a file can pass 2 GiB.
+  /// A FILE's size. Null for a folder (a provider reports a folder's cumulative
+  /// size, which is not what anyone asks for), and BigInt because a file can pass
+  /// 2 GiB. It reaches the wire as a JS number — exact below 2^53 bytes (8 PiB),
+  /// which no file approaches.
   sizeBytes BigInt?
 
-  /// Graph's own created / modified times — not when this row was written.
-  createdAtRemote      DateTime?
-  lastModifiedAtRemote DateTime?
+  /// The provider's own created / modified times — not when this row was written.
+  remoteCreatedAt  DateTime?
+  remoteModifiedAt DateTime?
 
   /// The state of a FULL enumeration's sweep, explicit and durable across the
-  /// ticks a big drive takes: a run that starts from scratch marks every row of
-  /// the drive `true`, every item it sees sets it back to `false`, and when the
-  /// run reaches its deltaLink the rows still `true` were not returned — they
-  /// are gone upstream — and are deleted. Incremental runs never touch it.
+  /// ticks a big source takes: a run that starts from scratch marks every row of
+  /// the source `true`, every item it sees sets it back to `false`, and when the
+  /// run reaches its end the rows still `true` were not returned — they are gone
+  /// upstream — and are deleted. Incremental runs never touch it.
   sweepPending Boolean @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  /// One row per item per drive per person — the upsert key.
-  @@unique([userId, driveId, itemId])
-  @@index([userId, workload])
-  @@index([userId, lastModifiedAtRemote])
-}
-
-/// WARP-3538 — the identity and display names of a SharePoint document library
-/// a person's `sharepoint` cursor reads. The cursor knows only a drive id; this
-/// is what the card and the file search show for it ("Front desk › Documents").
-///
-/// The names and the URL are `dcv1:` blobs under the same `m365-drive-metadata`
-/// label as `M365DriveItem`, AAD-bound to (userId, driveId, column): a site or
-/// library name can carry a patient or a matter. Not an FK, like every M365 table
-/// — disconnect, a leaver's deletion and switching SharePoint off delete these
-/// rows by hand, and a COMPLETE discovery prunes the libraries that are gone.
-model M365SharePointLibrary {
-  id String @id @default(uuid())
-
-  userId String
-
-  /// The library's drive id — the `sharepoint` cursor's `resourceId`.
-  driveId String
-
-  /// Graph's composite site id (`hostname,siteCollectionId,webId`).
-  siteId String
-
-  siteNameEnc    String
-  libraryNameEnc String
-  webUrlEnc      String
-
-  /// True when the person FOLLOWS the site, false when it was found by search
-  /// alone. Explicit, because the order libraries are registered in (and so
-  /// which survive the per-person cap) depends on it.
-  followed Boolean
-
-  discoveredAt DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  @@unique([userId, driveId])
-  @@index([userId])
+  /// One row per item per source per provider per person — the upsert key. Its
+  /// (userId, provider, sourceId) prefix also serves every "all of this source"
+  /// statement: counting, marking, sweeping, pruning.
+  @@unique([userId, provider, sourceId, externalId])
+  /// Finding a deleted folder's children: a provider may report the folder as
+  /// gone without listing what was in it.
+  @@index([userId, provider, sourceId, parentExternalId])
+  @@index([userId, remoteModifiedAt])
 }
 
 // ============================================================================

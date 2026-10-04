@@ -1,6 +1,6 @@
 /**
- * WARP-3538 — `deriveM365DriveMetadataKey()`, the key the landed drive
- * metadata (file, site and library names) is sealed under.
+ * WARP-3538 — `deriveCloudFileMetadataKey()`, the key the landed cloud-file
+ * metadata (file, site and library names, for every provider) is sealed under.
  *
  * One promise is under test, and it fails silently: **purpose separation.** The
  * key must differ from every other column key on the box. Aliasing it onto
@@ -15,15 +15,17 @@
  * data is a cache of Microsoft's and re-syncs (see the m365-auth unreadable-cache
  * test, which makes that re-sync actually happen).
  */
+import { hkdfSync } from "node:crypto";
+
 import { describe, it, expect, beforeEach } from "vitest";
 
 import {
   __setColumnCryptoKeyForTest,
   decryptColumn,
+  deriveCloudFileMetadataKey,
   deriveEmailColumnKey,
   deriveEmailIndexKey,
   deriveErpCloudTokenKey,
-  deriveM365DriveMetadataKey,
   deriveM365TokenCacheKey,
   deriveSaasCredentialKey,
   encryptColumn,
@@ -36,11 +38,11 @@ beforeEach(() => {
   __setColumnCryptoKeyForTest(TEST_KEY);
 });
 
-describe("deriveM365DriveMetadataKey", () => {
+describe("deriveCloudFileMetadataKey", () => {
   it("is its own key, distinct from every other column purpose", () => {
-    const key = deriveM365DriveMetadataKey();
+    const key = deriveCloudFileMetadataKey();
 
-    // Mutation: `export const deriveM365DriveMetadataKey = deriveM365TokenCacheKey`
+    // Mutation: `export const deriveCloudFileMetadataKey = deriveM365TokenCacheKey`
     // (or any other existing derivation) turns every line below red.
     expect(key.equals(deriveM365TokenCacheKey())).toBe(false);
     expect(key.equals(deriveEmailColumnKey())).toBe(false);
@@ -49,15 +51,33 @@ describe("deriveM365DriveMetadataKey", () => {
     expect(key.equals(deriveSaasCredentialKey())).toBe(false);
   });
 
+  it("is HKDF over the device secret with the info label \"cloud-file-metadata\" — the label is a stored-data contract", () => {
+    // Every landed name is sealed under this key. Renaming the label (or the
+    // salt it is derived with) would compile, pass every round-trip test, and
+    // strand every row already on a box: they would all fail to open and the
+    // person's file search would go quietly empty until a full resync. A label
+    // change is a migration, so it must be a deliberate edit of THIS line.
+    const expected = Buffer.from(
+      hkdfSync(
+        "sha256",
+        Buffer.from(TEST_KEY, "base64"),
+        Buffer.from("droplet-column-crypto-v1"),
+        Buffer.from("cloud-file-metadata"),
+        32,
+      ),
+    );
+    expect(deriveCloudFileMetadataKey().equals(expected)).toBe(true);
+  });
+
   it("is a 256-bit key, deterministic for a given device secret", () => {
-    expect(deriveM365DriveMetadataKey()).toHaveLength(32);
-    expect(deriveM365DriveMetadataKey().equals(deriveM365DriveMetadataKey())).toBe(true);
+    expect(deriveCloudFileMetadataKey()).toHaveLength(32);
+    expect(deriveCloudFileMetadataKey().equals(deriveCloudFileMetadataKey())).toBe(true);
   });
 
   it("changes with the device secret, so a factory reset crypto-shreds what was landed", () => {
-    const before = deriveM365DriveMetadataKey();
+    const before = deriveCloudFileMetadataKey();
     __setColumnCryptoKeyForTest(Buffer.alloc(32, 8).toString("base64"));
-    expect(deriveM365DriveMetadataKey().equals(before)).toBe(false);
+    expect(deriveCloudFileMetadataKey().equals(before)).toBe(false);
   });
 
   it("does not open a blob sealed under the token-cache key, even with the right AAD", () => {
@@ -65,11 +85,11 @@ describe("deriveM365DriveMetadataKey", () => {
     // reach a refresh token.
     const sealedAsToken = encryptColumn(deriveM365TokenCacheKey(), "refresh-token", "user-1");
     expect(sealedAsToken.startsWith(ENC_PREFIX)).toBe(true);
-    expect(() => decryptColumn(deriveM365DriveMetadataKey(), sealedAsToken, "user-1")).toThrow();
+    expect(() => decryptColumn(deriveCloudFileMetadataKey(), sealedAsToken, "user-1")).toThrow();
   });
 
   it("and a blob sealed under it is not opened by the token-cache key", () => {
-    const sealed = encryptColumn(deriveM365DriveMetadataKey(), "Smith, John — crown.pdf", "user-1");
+    const sealed = encryptColumn(deriveCloudFileMetadataKey(), "Smith, John — crown.pdf", "user-1");
     expect(() => decryptColumn(deriveM365TokenCacheKey(), sealed, "user-1")).toThrow();
   });
 });
