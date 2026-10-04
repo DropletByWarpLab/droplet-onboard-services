@@ -100,6 +100,10 @@ describe("GET /api/pm/projects/:id/timeline", () => {
     ["a malformed date", "?from=10/01/2026&to=10/31/2026"],
     ["from after to", "?from=2026-10-31&to=2026-10-01"],
     ["a window over 1100 days", "?from=2026-01-01&to=2029-01-05"],
+    // These used to reach the database: past year 9999 a date cannot even be converted (a 500).
+    ["a year past the calendar", "?from=9999-12-01&to=9999-12-31"],
+    ["a year before 1900", "?from=0002-10-01&to=0002-10-31"],
+    ["the last day of year 9999", "?from=2026-10-01&to=9999-12-31"],
     ["a repeated parameter", "?from=2026-10-01&from=2026-10-02&to=2026-10-31"],
   ])("400 invalid_request for %s", async (_label, qs) => {
     const res = await request(makeApp(OWNER)).get(`/api/pm/projects/p-1/timeline${qs}`);
@@ -180,6 +184,10 @@ describe("GET /api/pm/my-work", () => {
     ["a limit over the cap", "?section=assigned&limit=501"],
     ["a negative offset", "?section=assigned&offset=-1"],
     ["a fractional offset", "?section=assigned&offset=1.5"],
+    ["an offset past any list", "?section=assigned&offset=1000001"],
+    ["an offset the database cannot hold", "?section=assigned&offset=1e21"],
+    ["a today past the calendar", "?section=assigned&today=9999-12-31"],
+    ["a today before 1900", "?section=assigned&today=0002-10-20"],
     ["a non-numeric offset", "?section=assigned&offset=abc"],
   ])("400 invalid_request for %s", async (_label, qs) => {
     const res = await request(makeApp(OWNER)).get(`/api/pm/my-work${qs}`);
@@ -188,10 +196,12 @@ describe("GET /api/pm/my-work", () => {
     expect(getMyWork).not.toHaveBeenCalled();
   });
 
-  it("accepts the largest page", async () => {
-    getMyWork.mockResolvedValueOnce(ok);
-    const res = await request(makeApp(OWNER)).get("/api/pm/my-work?section=assigned&limit=500");
-    expect(res.status).toBe(200);
+  it("accepts the largest page and the deepest offset", async () => {
+    getMyWork.mockResolvedValue(ok);
+    const app = makeApp(OWNER);
+    expect((await request(app).get("/api/pm/my-work?section=assigned&limit=500")).status).toBe(200);
+    expect((await request(app).get("/api/pm/my-work?section=assigned&offset=1000000")).status).toBe(200);
+    expect((await request(app).get("/api/pm/my-work?section=assigned&today=2200-12-31")).status).toBe(200);
   });
 
   it("answers the module-gate 404 when there is no session user", async () => {

@@ -23,7 +23,7 @@
  * Errors are plain `Error(code)` like pm.service.ts; the route maps them.
  */
 
-import type { Prisma, PrismaClient } from "@prisma/client";
+import type { Prisma, PmModuleStatus, PrismaClient } from "@prisma/client";
 import { DEPARTMENT_SELECT } from "./pm-department.js";
 import { PM_ERRORS, WORK_ITEM_INCLUDE, mapWorkItem, type ApiWorkItem } from "./pm.service.js";
 
@@ -34,6 +34,16 @@ export const TIMELINE_ITEM_LIMIT = 2000;
 export const TIMELINE_RELATION_LIMIT = 5000;
 export const MY_WORK_DEFAULT_LIMIT = 200;
 export const MY_WORK_MAX_LIMIT = 500;
+/** No list is a million rows deep; past this an `offset` is a typo or an attack, and a 400 beats a driver error. */
+export const MY_WORK_MAX_OFFSET = 1_000_000;
+/**
+ * The years a date parameter may name. `YYYY` alone admits 0000-9999, and a
+ * date past 9999 (`addDaysUtc` of `9999-12-31` is `+010000-01-01`) cannot be
+ * stored or converted at all — that was a 500 from a query string. 1900-2200 is
+ * the span a work tracker can mean.
+ */
+export const MIN_YEAR = 1900;
+export const MAX_YEAR = 2200;
 
 export const MY_WORK_SECTIONS = ["assigned", "created", "overdue", "due_this_week"] as const;
 export type MyWorkSection = (typeof MY_WORK_SECTIONS)[number];
@@ -42,11 +52,12 @@ export type MyWorkSection = (typeof MY_WORK_SECTIONS)[number];
 
 const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
-/** True for a real calendar date (`2026-02-30` is not one). */
+/** True for a real calendar date (`2026-02-30` is not one) in a year a tracker can mean. */
 export function isRealDateOnly(value: string): boolean {
   const m = DATE_ONLY_RE.exec(value);
   if (!m) return false;
   const year = Number(m[1]);
+  if (year < MIN_YEAR || year > MAX_YEAR) return false;
   const month = Number(m[2]);
   const day = Number(m[3]);
   if (month < 1 || month > 12 || day < 1) return false;
@@ -88,7 +99,7 @@ export interface ApiTimelineRelation {
 export interface ApiTimelineMilestone {
   id: string;
   name: string;
-  status: Prisma.PmModuleCreateManyInput["status"];
+  status: PmModuleStatus;
   /** `YYYY-MM-DD` */
   targetDate: string;
 }

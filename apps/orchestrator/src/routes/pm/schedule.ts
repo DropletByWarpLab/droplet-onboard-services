@@ -28,6 +28,7 @@ import type { PrismaClient } from "@prisma/client";
 import { PM_ERRORS } from "../../services/pm/pm.service.js";
 import {
   MY_WORK_MAX_LIMIT,
+  MY_WORK_MAX_OFFSET,
   MY_WORK_SECTIONS,
   TIMELINE_MAX_RANGE_DAYS,
   diffDaysUtc,
@@ -56,7 +57,7 @@ const myWorkQuerySchema = z.object({
   section: z.enum(MY_WORK_SECTIONS),
   today: dateOnly.optional(),
   limit: z.coerce.number().int().positive().max(MY_WORK_MAX_LIMIT).optional(),
-  offset: z.coerce.number().int().min(0).optional(),
+  offset: z.coerce.number().int().min(0).max(MY_WORK_MAX_OFFSET).optional(),
 });
 
 function badRequest(res: Response, parsed: { error: z.ZodError }): void {

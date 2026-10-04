@@ -93,6 +93,15 @@ describe("date-only helpers (UTC, never local time)", () => {
     expect(isRealDateOnly("tomorrow")).toBe(false);
   });
 
+  it("bounds the year to 1900-2200: past 9999 a date cannot be converted, and 0002 is a typo", () => {
+    expect(isRealDateOnly("1900-01-01")).toBe(true);
+    expect(isRealDateOnly("2200-12-31")).toBe(true);
+    expect(isRealDateOnly("1899-12-31")).toBe(false);
+    expect(isRealDateOnly("2201-01-01")).toBe(false);
+    expect(isRealDateOnly("0002-10-20")).toBe(false);
+    expect(isRealDateOnly("9999-12-31")).toBe(false);
+  });
+
   it("utcMidnight is exactly the stored 00:00:00Z", () => {
     expect(utcMidnight("2026-10-03").toISOString()).toBe("2026-10-03T00:00:00.000Z");
   });
