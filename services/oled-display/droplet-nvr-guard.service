@@ -1,0 +1,46 @@
+[Unit]
+Description=Droplet NVR boot guard — keep Frigate off the OS disk until the recordings bay is mounted (WARP-3514)
+Documentation=https://warp-lab.atlassian.net/browse/WARP-3514
+# The reboot scenario (WARP-3514 / ADR-070). Camera recordings live on the
+# encrypted recordings bay: NVR_MEDIA_SOURCE=/mnt/droplet/<label>-<uuid8>/nvr is
+# bind-mounted into Frigate. After a reboot that bay is mounted by
+# droplet-automount@, which is ordered After=docker.service — so Docker, and
+# Frigate with `restart: always`, start BEFORE the bay exists. The bind source is
+# then missing, Docker silently creates it on the ROOT filesystem, and Frigate
+# records 24/7 video onto the OS disk until the box falls over.
+#
+# This unit runs `droplet-nvr-guard.sh arm` BEFORE Docker. If the bay is not
+# mounted yet it leaves an immutable, EMPTY placeholder directory at that path on
+# the root filesystem, so Frigate gets EPERM instead of silently filling `/`. The
+# real bay then mounts over its parent directory and hides the placeholder; the
+# droplet-nvr-guard-release.timer notices, restarts Frigate once so it re-binds
+# the real directory, and disarms. If the bay is already mounted (or the target
+# is not a bay path at all) arm does nothing.
+#
+# Ordering only, never a dependency (handbook P6): Before= puts this ahead of
+# docker.service, but there is deliberately NO Requires=/Wants=/BindsTo= to or
+# from it — a hard coupling would cascade a Docker restart into this unit, and a
+# failed or slow guard must never keep Docker (and the whole stack) from
+# starting. The script itself never fails a boot (every error is logged and
+# exits 0) and TimeoutStartSec bounds a hung probe. Kept deliberately minimal:
+# this is a boot-critical unit and the script validates its own untrusted input.
+
+After=local-fs.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/droplet-nvr-guard.sh arm
+# The script reads NVR_MEDIA_SOURCE from <repo>/.env; the installer substitutes
+# this checkout's path for the placeholder, exactly as for
+# droplet-device-bridge.service.
+Environment=REPO_ROOT=@REPO_ROOT@
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Never hold boot: arm is a few stat/mkdir/chattr calls. If one hangs (a wedged
+# mount), systemd kills it after this long and Docker proceeds unguarded rather
+# than not at all.
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

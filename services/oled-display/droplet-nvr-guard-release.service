@@ -1,0 +1,28 @@
+[Unit]
+Description=Droplet NVR boot guard — restart Frigate once the recordings bay has mounted (WARP-3514)
+Documentation=https://warp-lab.atlassian.net/browse/WARP-3514
+# The reboot scenario (WARP-3514 / ADR-070). After a reboot Docker and Frigate
+# start before droplet-automount@ has mounted the encrypted recordings bay (it is
+# ordered After=docker.service), so droplet-nvr-guard.service parked an immutable
+# empty placeholder at NVR_MEDIA_SOURCE on the root filesystem to stop Frigate
+# filling the OS disk. Triggered every ~30 s by droplet-nvr-guard-release.timer,
+# `droplet-nvr-guard.sh release` is a no-op until the guard is armed AND the bay
+# has mounted with <source> present on it; then it restarts Frigate ONCE so the
+# container re-binds the real directory (a mount over the parent does not move a
+# running container's bind), and disarms. It is also a no-op while a recordings
+# migration job is running, which stops and starts Frigate itself.
+#
+# After=docker.service orders the run behind Docker at boot. It is deliberately
+# NOT Requires=/Wants= (handbook P6): a hard coupling would cascade a Docker
+# restart into this unit, and a soft Wants= from a unit that a 30 s timer fires
+# would pull Docker back up every tick after an operator stopped it for
+# maintenance. If Docker is down the script just stays armed and retries.
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/droplet-nvr-guard.sh release
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# A oneshot has NO start timeout by default. Bound it so a hung docker CLI cannot
+# wedge the timer: while a run is still active the timer will not fire again.
+TimeoutStartSec=120
