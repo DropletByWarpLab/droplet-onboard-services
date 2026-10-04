@@ -78,10 +78,10 @@ export function CameraRecordingSummary({
       }
     : {
         root: "card space-y-3 lg:col-span-2",
-        heading: "type-headline text-label-primary",
-        label: "type-caption-1 text-label-tertiary",
-        value: "type-subheadline text-label-primary",
-        muted: "type-subheadline text-label-tertiary",
+        heading: "type-headline text-[var(--text)]",
+        label: "type-caption-1 text-[var(--text-muted)]",
+        value: "type-subheadline text-[var(--text)]",
+        muted: "type-subheadline text-[var(--text-muted)]",
       };
 
   // Orange text is only legible on the page's own tint (the shell darkens it
@@ -167,7 +167,7 @@ export function CameraRecordingSummary({
         <h2 className={cls.heading}>{title}</h2>
       ) : (
         <div className="flex items-center gap-2">
-          <Shield size={16} className="text-accent" aria-hidden="true" />
+          <Shield size={16} className="text-[var(--brand)]" aria-hidden="true" />
           <h2 className={cls.heading}>{title}</h2>
         </div>
       )}
@@ -189,7 +189,7 @@ export function CameraRecordingSummary({
 
       {notSaving && (
         <div className="flex flex-wrap items-center gap-2" data-testid="recording-not-saving">
-          <span className={rail ? "type-caption-1 text-white/80" : "type-caption-1 text-label-secondary"}>
+          <span className={rail ? "type-caption-1 text-white/80" : "type-caption-1 text-[var(--text-muted)]"}>
             {canManage
               ? "Nothing is being saved, so there will be nothing to look back at."
               : "Nothing is being saved. Ask an owner or admin to turn recording on."}
