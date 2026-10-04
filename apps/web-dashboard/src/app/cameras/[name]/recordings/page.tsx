@@ -256,7 +256,7 @@ export default function RecordingsPage() {
         throw new Error((body as { error?: string }).error || `Failed: ${res.status}`);
       }
       const body = (await res.json()) as { ncPath?: string };
-      setExportMsg(body.ncPath ? `Saved to ${body.ncPath}` : "Saved to Nextcloud");
+      setExportMsg(body.ncPath ? `Saved to ${body.ncPath}` : "Saved to File Store");
     } catch (e) {
       setExportMsg(e instanceof Error ? e.message : "Export failed");
     } finally {
@@ -469,7 +469,7 @@ export default function RecordingsPage() {
               {exportSpanLabel ? (
                 <>
                   Saves <span className="font-mono">{exportSpanLabel}</span> to
-                  your Nextcloud under <span className="font-mono">/Clips</span>.
+                  your File Store under <span className="font-mono">/Clips</span>.
                 </>
               ) : (
                 <>Pick an hour or drag a range on the timeline first.</>
@@ -488,7 +488,7 @@ export default function RecordingsPage() {
                 <Download size={14} />
               )}
               <span className="type-subheadline">
-                {exporting ? "Exporting…" : "Save to Nextcloud"}
+                {exporting ? "Exporting…" : "Save to File Store"}
               </span>
             </button>
             {exportMsg && (

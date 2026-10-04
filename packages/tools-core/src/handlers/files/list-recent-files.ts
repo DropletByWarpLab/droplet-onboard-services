@@ -14,7 +14,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
   // WARP-1012: the `_service:mcp` principal must assert the acting user
   // via X-Nextcloud-User on every files-API call (same pair list_files
   // sends) — the orchestrator route's getUser() hard-rejects the service
-  // principal without it, which surfaced live as "nextcloud returned 401".
+  // principal without it, which surfaced live as "the File Store returned 401".
   const headers: Record<string, string> = {
     "X-Nextcloud-Token": ctx.ncToken,
     "X-Nextcloud-User": ctx.userId,
@@ -24,7 +24,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
     return {
       ok: false,
       status: "error",
-      error: { code: "RECENT_FAILED", message: `nextcloud returned ${res.status}` },
+      error: { code: "RECENT_FAILED", message: `the File Store returned ${res.status}` },
     };
   }
   if (isFilesDegraded(res)) return filesUnavailable();
@@ -34,7 +34,7 @@ async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promis
 
 const tool: Tool = {
   name: "list_recent_files",
-  description: "List the 30 most recently modified files across the user's Nextcloud.",
+  description: "List the 30 most recently modified files across the user's File Store.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

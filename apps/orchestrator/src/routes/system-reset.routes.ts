@@ -29,6 +29,7 @@
 import { Router } from "express";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole } from "../middleware/auth.js";
+import { createRequireAdminStepUp } from "../middleware/require-credential-step-up.js";
 import { boxDisplayName } from "../lib/box-identity.js";
 import {
   requestFactoryReset,
@@ -91,6 +92,7 @@ function statusForResetError(code: ResetErrorCode): number {
 
 export function createSystemResetRouter(prisma: PrismaClient): Router {
   const router = Router();
+  const requireAdminStepUp = createRequireAdminStepUp(prisma);
 
   // GET status — owner-only (the whole Danger Zone surface is owner-gated).
   // Only a MASKED hint of the target name leaves the API; the job row's
@@ -109,7 +111,7 @@ export function createSystemResetRouter(prisma: PrismaClient): Router {
   });
 
   // POST reset — owner-only, server-side friction, dispatched via host executor.
-  router.post("/system/reset", requireRole("owner"), async (req, res, next) => {
+  router.post("/system/reset", requireRole("owner"), requireAdminStepUp, async (req, res, next) => {
     const confirm = typeof req.body?.confirm === "string" ? req.body.confirm : "";
     if (!confirm) {
       return res.status(400).json({

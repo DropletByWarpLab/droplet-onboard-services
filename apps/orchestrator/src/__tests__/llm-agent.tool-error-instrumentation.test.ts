@@ -240,7 +240,7 @@ describe("agent_tool_error — what it must NOT log", () => {
       buildDeps(
         [{ id: "call_1", name: "read_file", args: '{"path":"/a.md"}' }],
         wire(
-          '{"status":"error","error":{"code":"READ_FAILED","message":"nextcloud returned 500"}}',
+          '{"status":"error","error":{"code":"READ_FAILED","message":"the File Store returned 500"}}',
         ),
       ),
       REQ,

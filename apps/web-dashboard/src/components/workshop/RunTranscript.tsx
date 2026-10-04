@@ -176,14 +176,22 @@ export function RunTranscript({ detail, busy, workspaceName, onApprove, onDeclin
             It wants to run <code className="ws-mono">{detail.pending.tool}</code>
             {detail.pending.parkedAt ? ` — parked ${when(detail.pending.parkedAt)}` : ""}. Nothing has been done yet.
           </p>
-          {detail.pending.summary.fields.length > 0 && (
-            <dl className="ws-facts">
-              {detail.pending.summary.fields.map((f) => (
-                <div key={f.key} className="contents">
-                  <dt>{f.key}</dt>
-                  <dd>{f.detail}</dd>
+          {(detail.pending.summary.fields.length > 0 || (detail.pending.summary.shown ?? []).length > 0) && (
+            <dl className="ws-facts" data-testid="run-pending-summary">
+              {(detail.pending.summary.shown ?? []).map((v) => (
+                <div key={`shown-${v.key}`} className="contents">
+                  <dt>{v.key}</dt>
+                  <dd className="break-words">{v.text}</dd>
                 </div>
               ))}
+              {detail.pending.summary.fields
+                .filter((f) => !(detail.pending!.summary.shown ?? []).some((v) => v.key === f.key))
+                .map((f) => (
+                  <div key={f.key} className="contents">
+                    <dt>{f.key}</dt>
+                    <dd>{f.detail}</dd>
+                  </div>
+                ))}
               {detail.pending.summary.truncatedFields > 0 && (
                 <div className="contents">
                   <dt>…</dt>

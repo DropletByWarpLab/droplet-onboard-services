@@ -76,7 +76,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   // loudly, not ask the user to approve it) and BEFORE any HTTP.
   if (args.confirmed !== true) {
     return confirmationRequired(
-      `I'd like to restore "${path}" to version ${version}. This will replace the file's current content with that version — Nextcloud keeps the current content as the newest version, so it stays recoverable. ` +
+      `I'd like to restore "${path}" to version ${version}. This will replace the file's current content with that version — the File Store keeps the current content as the newest version, so it stays recoverable. ` +
         "Ask the user to approve, then re-issue this call with confirmed: true. " +
         "Do NOT set confirmed: true without an explicit yes from the user.",
       { type: "restore_file_version", path, version },
@@ -98,7 +98,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     return err("NOT_FOUND", `file not found: ${path}`);
   }
   if (!res.ok) {
-    return err("RESTORE_FAILED", `nextcloud returned ${res.status}`);
+    return err("RESTORE_FAILED", `the File Store returned ${res.status}`);
   }
   return { ok: true, data: { type: "restore_file_version", path, version, restored: true } };
 }
@@ -106,7 +106,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "restore_file_version",
   description:
-    "Roll a file on the Droplet's Nextcloud back to a previous version (versionId from list_file_versions). The current content is replaced but Nextcloud keeps it as the newest version, so the restore is reversible. Two-step: the first call returns confirmation_required naming the file and version — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Roll a file on the Droplet's File Store back to a previous version (versionId from list_file_versions). The current content is replaced but the File Store keeps it as the newest version, so the restore is reversible. Two-step: the first call returns confirmation_required naming the file and version — relay it to the user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

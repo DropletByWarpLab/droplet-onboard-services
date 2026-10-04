@@ -19,6 +19,7 @@ import {
   supersedeUnclaimedVerifyingUpdates,
   installedRelease,
   recordCommittedOutcome,
+  onDeviceUpdateTransition,
 } from "./transitions.js";
 
 interface Row {
@@ -26,6 +27,7 @@ interface Row {
   status: string;
   failureReason: string | null;
   outcome?: string;
+  releaseTag?: string | null;
   /** WARP-3193 PERF-3 — only the parked-row sweep reads it. */
   applyClaim?: string;
 }
@@ -260,5 +262,57 @@ describe("DeviceUpdate outcome (WARP-3007)", () => {
       "services_start_failed",
       "rolled_back",
     ]);
+  });
+});
+
+describe("onDeviceUpdateTransition (WARP-3504)", () => {
+  it("tells every observer about a status write AFTER it landed, with the release tag", async () => {
+    const rows: Row[] = [{ id: "du-1", status: "applying", failureReason: null, releaseTag: "ota-stage-9-gabc1234" }];
+    const prisma = asPrisma(createPrismaStub(rows));
+    const seen = vi.fn();
+    const off = onDeviceUpdateTransition((t) => {
+      // The write is already visible to the observer.
+      seen({ ...t, rowStatus: rows[0]!.status });
+    });
+
+    await transitionDeviceUpdate(prisma, { id: "du-1", to: "rolled_back", failureReason: "health_gate_failed" });
+    off();
+
+    expect(seen).toHaveBeenCalledWith({
+      id: "du-1",
+      from: "applying",
+      to: "rolled_back",
+      failureReason: "health_gate_failed",
+      releaseTag: "ota-stage-9-gabc1234",
+      rowStatus: "rolled_back",
+    });
+  });
+
+  it("an observer that throws cannot fail the status write, and an unsubscribed one is silent", async () => {
+    const rows: Row[] = [{ id: "du-1", status: "pending", failureReason: null }];
+    const prisma = asPrisma(createPrismaStub(rows));
+    const gone = vi.fn();
+    onDeviceUpdateTransition(gone)();
+    const off = onDeviceUpdateTransition(() => {
+      throw new Error("consumer bug");
+    });
+
+    await expect(transitionDeviceUpdate(prisma, { id: "du-1", to: "verifying" })).resolves.toBeUndefined();
+    off();
+
+    expect(rows[0]!.status).toBe("verifying");
+    expect(gone).not.toHaveBeenCalled();
+  });
+
+  it("is not told about a refused transition", async () => {
+    const rows: Row[] = [{ id: "du-1", status: "committed", failureReason: null }];
+    const prisma = asPrisma(createPrismaStub(rows));
+    const seen = vi.fn();
+    const off = onDeviceUpdateTransition(seen);
+
+    await expect(transitionDeviceUpdate(prisma, { id: "du-1", to: "applying" })).rejects.toThrow(/advance-only/);
+    off();
+
+    expect(seen).not.toHaveBeenCalled();
   });
 });
