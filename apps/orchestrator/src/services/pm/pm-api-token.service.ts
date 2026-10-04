@@ -25,9 +25,10 @@
  * The box-wide switch (`workspace.api_tokens_enabled`, seeded OFF) makes every
  * token answer 401 without deleting any of them.
  *
- * The secret never leaves the response that mints it: nothing here logs, audits
- * or stores a token, a prefix of it, or anything but its hash. The row id is the
- * non-secret handle every log line and audit row uses.
+ * The secret never leaves the response that mints it: nothing here logs or
+ * audits a token or any part of it, and the only forms stored are its sha256
+ * and the 8-character display prefix. The row id is the non-secret handle every
+ * log line and audit row uses.
  *
  * This module imports nothing heavier than the activity recorder, because
  * role-mutation-guard.service.ts calls `revokePmApiTokensForUser` from every
@@ -37,7 +38,7 @@ import crypto from "node:crypto";
 import type { PrismaClient } from "@prisma/client";
 import { recordActivity } from "../activity.singleton.js";
 import type { ActivityActor } from "../activity.service.js";
-import type { AuthUser } from "../../middleware/auth.js";
+import type { Role } from "../jwt.service.js";
 import { normalizeGatePath, pathIsUnder } from "../../modules/module-registry.js";
 import { createLogger } from "../../lib/logger.js";
 
@@ -269,10 +270,23 @@ export async function revokePmApiToken(
 
 // ── Authentication (every request, no cache) ────────────────────────────────
 
+/**
+ * Who a token resolves to: the holder, as `authMiddleware` puts them on
+ * `req.user`. Declared here and not borrowed from middleware/auth.ts, which
+ * imports this module: a type import back would be an import cycle
+ * (import-cycles.test.ts, WARP-3193 ARCH-1).
+ */
+export interface PmApiTokenPrincipal {
+  id: string;
+  username: string;
+  displayName: string;
+  role: Role;
+}
+
 export type PmApiTokenFailure = "TOKEN_INVALID" | "TOKEN_REVOKED" | "TOKEN_EXPIRED" | "TOKEN_DISABLED";
 
 export type PmApiTokenAuth =
-  | { ok: true; principal: AuthUser; tokenId: string; scopes: PmApiTokenScope[] }
+  | { ok: true; principal: PmApiTokenPrincipal; tokenId: string; scopes: PmApiTokenScope[] }
   | { ok: false; code: PmApiTokenFailure };
 
 const INVALID: PmApiTokenAuth = { ok: false, code: "TOKEN_INVALID" };
@@ -349,7 +363,7 @@ export async function authenticatePmApiToken(
       id: row.user.id,
       username: row.user.username,
       displayName: row.user.displayName,
-      role: row.user.role as AuthUser["role"],
+      role: row.user.role as Role,
     },
   };
 }

@@ -95,14 +95,16 @@ export async function listActivePmFeedLinks(
     where: { userId, state: "active", expiresAt: { gt: new Date() }, scope: { in: ["pm_my_work", "pm_project"] } },
     orderBy: { createdAt: "desc" },
   });
-  return rows.flatMap((r) => {
+  const links: Array<{ target: FeedTarget; createdAt: Date; expiresAt: Date }> = [];
+  for (const r of rows) {
     if (r.scope === "pm_project") {
-      return r.projectId
-        ? [{ target: { scope: "pm_project" as const, projectId: r.projectId }, createdAt: r.createdAt, expiresAt: r.expiresAt }]
-        : [];
+      // CalendarFeedToken_project_scope_coherent makes the id present; the guard is the type's.
+      if (r.projectId) links.push({ target: { scope: "pm_project", projectId: r.projectId }, createdAt: r.createdAt, expiresAt: r.expiresAt });
+    } else {
+      links.push({ target: { scope: "pm_my_work" }, createdAt: r.createdAt, expiresAt: r.expiresAt });
     }
-    return [{ target: { scope: "pm_my_work" as const }, createdAt: r.createdAt, expiresAt: r.expiresAt }];
-  });
+  }
+  return links;
 }
 
 /**
