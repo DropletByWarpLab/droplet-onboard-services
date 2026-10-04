@@ -3,9 +3,9 @@
  *
  * Owners + admins can approve / decommission per ADR-004 §3 and the
  * matrix in `__tests__/rbac.test.ts`. Reads (`GET /api/aps`,
- * `GET /api/aps/discovered`, `GET /api/aps/:mac`) are open to every
- * authenticated principal so the LLM agent's `list_ap_devices` tool
- * works under the `service` role.
+ * `GET /api/aps/discovered`, `GET /api/aps/:mac`) take the member floor
+ * (`requireNetworkMember`, WARP-3632: never an external guest) and admit the
+ * MCP principal; `list_ap_devices` checks the caller's role itself.
  *
  * The state machine itself lives in `services/ap-onboard.service.ts`;
  * this file is thin RBAC + validation + dispatch.
@@ -15,6 +15,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
+import { requireNetworkMember } from "./network-status.routes.js";
 import {
   approveAp,
   decommissionAp,
@@ -59,9 +60,9 @@ export function createApsRouter(prisma: PrismaClient): Router {
 
   // ── GET /api/aps ─────────────────────────────────────────────
   // Full list of every AP the orchestrator knows about, ordered by
-  // most-recently-seen. Open to every auth role — the dashboard's
+  // most-recently-seen. Owner/admin/member (WARP-3632) — the dashboard's
   // Coverage Extenders panel reads this on every page load.
-  router.get("/aps", async (_req: Request, res: Response, next: NextFunction) => {
+  router.get("/aps", requireNetworkMember, async (_req: Request, res: Response, next: NextFunction) => {
     try {
       const aps = await prisma.apDevice.findMany({
         orderBy: { lastSeen: "desc" },
@@ -90,7 +91,7 @@ export function createApsRouter(prisma: PrismaClient): Router {
   //
   // Defined BEFORE `/aps/:mac` so the literal "discovered" doesn't
   // get caught as a MAC param.
-  router.get("/aps/discovered", async (_req: Request, res: Response, next: NextFunction) => {
+  router.get("/aps/discovered", requireNetworkMember, async (_req: Request, res: Response, next: NextFunction) => {
     try {
       const discovered = await prisma.apDevice.findMany({
         where: {
@@ -138,7 +139,7 @@ export function createApsRouter(prisma: PrismaClient): Router {
   );
 
   // ── GET /api/aps/:mac ────────────────────────────────────────
-  router.get("/aps/:mac", async (req: Request, res: Response, next: NextFunction) => {
+  router.get("/aps/:mac", requireNetworkMember, async (req: Request, res: Response, next: NextFunction) => {
     try {
       const mac = macFromParam(req);
       const row = await prisma.apDevice.findUnique({ where: { mac } });

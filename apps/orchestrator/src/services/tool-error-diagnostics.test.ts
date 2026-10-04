@@ -204,11 +204,11 @@ describe("describeToolError — message_class works with the excerpt flag OFF", 
     ['{"error":"Unknown tool: whatever"}', "unknown_tool"],
     // `read_file`'s own READ_FAILED literal — the class WARP-1480 most needs.
     [
-      '{"status":"error","error":{"code":"READ_FAILED","message":"nextcloud returned 504"}}',
+      '{"status":"error","error":{"code":"READ_FAILED","message":"the File Store returned 504"}}',
       "nextcloud_504",
     ],
     [
-      '{"status":"error","error":{"code":"READ_FAILED","message":"nextcloud returned 418"}}',
+      '{"status":"error","error":{"code":"READ_FAILED","message":"the File Store returned 418"}}',
       "nextcloud_http_error",
     ],
   ];
