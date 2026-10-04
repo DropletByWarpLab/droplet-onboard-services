@@ -1,3 +1,4 @@
+// add-llm-tool:not-a-gate — storage safety policy, not an add-a-tool wiring site.
 /**
  * BUG-3 / ADR-019: tools-core storage-pool surface.
  *
