@@ -122,6 +122,7 @@ import {
   clearPasswordChangeRateState,
 } from "../services/password-change-throttle.service.js";
 import {
+  createRequireAdminStepUp,
   createRequireCredentialStepUp,
   passCredentialStepUp,
 } from "../middleware/require-credential-step-up.js";
@@ -2264,6 +2265,8 @@ export function createProtectedAuthRouter(
   sendOptions: import("../services/email-channel.service.js").SendOptions = {},
 ): Router {
   const router = Router();
+  // WARP-3630 — fresh credential step-up while REQUIRE_ADMIN_TWO_STEP is on.
+  const requireAdminStepUp = createRequireAdminStepUp(prisma);
 
   // ── Get current user info ──
   router.get("/auth/me", async (req, res, next) => {
@@ -2951,7 +2954,7 @@ export function createProtectedAuthRouter(
 
   // ── Create user (admin only) ──
   // WARP-171: per-route guard. owner + admin only.
-  router.post("/auth/users", requireRole("owner", "admin"), async (req, res, next) => {
+  router.post("/auth/users", requireRole("owner", "admin"), requireAdminStepUp, async (req, res, next) => {
     try {
       const parsed = createUserSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -3157,7 +3160,7 @@ export function createProtectedAuthRouter(
   // applies them one OCS PUT at a time. Each field is independent so a
   // partial failure leaves the previously-applied fields in place.
   // WARP-171: per-route guard. owner + admin only.
-  router.put("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
+  router.put("/auth/users/:username", requireRole("owner", "admin"), requireAdminStepUp, async (req, res, next) => {
     try {
       // WARP-2993 — provisioning_api needs NC instance admin, which only the
       // box service account holds. The caller's own NC credential is never
@@ -3466,6 +3469,7 @@ export function createProtectedAuthRouter(
   router.post(
     "/auth/users/:username/disable",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req, res, next) => {
       try {
         // WARP-2993 — provisioning_api needs NC instance admin, which only the
@@ -3622,6 +3626,7 @@ export function createProtectedAuthRouter(
   router.post(
     "/auth/users/:username/enable",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req, res, next) => {
       try {
         // WARP-2993 — provisioning_api needs NC instance admin, which only the
@@ -3758,6 +3763,7 @@ export function createProtectedAuthRouter(
   router.post(
     "/auth/users/:username/revoke-sessions",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req, res, next) => {
       try {
         if (!prisma) {
@@ -3846,7 +3852,7 @@ export function createProtectedAuthRouter(
   // defaulted, so the choice is recorded rather than guessed. An unknown
   // disposition is still a 400.
   // WARP-171: per-route guard. owner + admin only.
-  router.delete("/auth/users/:username", requireRole("owner", "admin"), async (req, res, next) => {
+  router.delete("/auth/users/:username", requireRole("owner", "admin"), requireAdminStepUp, async (req, res, next) => {
     try {
       const parsed = deleteDispositionSchema.safeParse(req.body ?? {});
       if (!parsed.success) {
@@ -3923,6 +3929,7 @@ export function createProtectedAuthRouter(
   router.post(
     "/auth/users/:username/cancel-deletion",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req, res, next) => {
       try {
         const row = prisma
@@ -3979,7 +3986,7 @@ export function createProtectedAuthRouter(
   // pre-WARP-171 inline `isAdmin(req)` check; the guard runs as
   // middleware ahead of the handler so the 403 short-circuits before
   // any handler-local validation.
-  router.post("/auth/invites", requireRole("owner", "admin"), async (req, res, next) => {
+  router.post("/auth/invites", requireRole("owner", "admin"), requireAdminStepUp, async (req, res, next) => {
     try {
       if (!prisma) {
         res.status(500).json({ error: "Invite store unavailable" });
@@ -4270,6 +4277,7 @@ export function createProtectedAuthRouter(
   router.delete(
     "/auth/invites/:token",
     requireRole("owner", "admin"),
+    requireAdminStepUp,
     async (req, res, next) => {
       try {
         if (!prisma) {

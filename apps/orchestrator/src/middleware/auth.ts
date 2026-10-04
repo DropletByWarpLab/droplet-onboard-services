@@ -411,7 +411,12 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
 /**
  * Validate a session token outside the Express pipeline (WebSocket upgrade).
  */
-export async function validateTokenForWs(token: string | null): Promise<AuthUser | null> {
+export async function validateTokenForWs(
+  token: string | null,
+  // WARP-3612 — the periodic re-check of an open socket must not slide the
+  // session's idle window (a keepalive is not user activity).
+  opts: { touch?: boolean } = {},
+): Promise<AuthUser | null> {
   if (!config.AUTH_ENABLED) {
     return { id: "dev", username: "dev", displayName: "Developer", role: "owner" };
   }
@@ -428,7 +433,7 @@ export async function validateTokenForWs(token: string | null): Promise<AuthUser
     // Fails open on Redis error (isUserDenied → false), same as the HTTP path.
     if (await isUserDenied(jwtPayload.sub)) return null;
     if (jwtPayload.sid) {
-      const result = await checkSession(jwtPayload.sid);
+      const result = await checkSession(jwtPayload.sid, opts);
       if (result.kind !== "ok" && result.kind !== "error") return null;
     }
     return {

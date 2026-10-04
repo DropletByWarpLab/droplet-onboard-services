@@ -1281,6 +1281,45 @@ const envSchema = z.object({
     .default("0")
     .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
 
+  // WARP-3631 — SCIM group → role map: a JSON object with two key namespaces,
+  // e.g. {"id:00g1abc":"admin","name:Contractors":"guest"}. `id:` keys match a
+  // group's stable SCIM id and may grant up to `admin`; `name:` keys match the
+  // display name (NFKC + case folded) and may only name `guest`. Empty (default)
+  // means every SCIM group maps to the member role (`family`) except groups
+  // named "guest", which stay `guest`. Parsed (bad JSON ignored, fail-safe) in
+  // scim-role-mapping.service.ts.
+  SCIM_GROUP_ROLE_MAP: z.string().default(""),
+
+  // WARP-3630 — privileged-account two-step policy. On, (1) an owner or admin
+  // with no confirmed second factor (TOTP or passkey) can reach only the
+  // enrolment surface until they enrol (403 MFA_ENROLLMENT_REQUIRED, see
+  // middleware/admin-mfa-enrollment-gate.ts) and (2) the high-impact admin
+  // routes (user, role and access changes, invites, factory reset, extension
+  // promote, update settings) need a fresh credential step-up
+  // (createRequireAdminStepUp; unenrolled people are denied too). OFF by default: turning it on changes sign-in
+  // for owners and admins already using the box, and the dashboard does not yet
+  // route them into enrolment or prompt for step-up on those screens, so the
+  // switch is an operator decision, not a silent upgrade side effect. With the
+  // default (off) the high-impact routes have no step-up, exactly as before.
+  //
+  // Parsing: same explicit string-to-bool idiom as DROPLET_CLAIM_GATE_ENABLED
+  // ("1"/"true" on, "0"/"false"/unset off), but any OTHER value (a typo such as
+  // "ture" or "yes") is a startup error rather than a silent "off": a security
+  // switch must never read as disabled by accident.
+  REQUIRE_ADMIN_TWO_STEP: z
+    .string()
+    .default("0")
+    .transform((v, ctx) => {
+      const t = v.trim().toLowerCase();
+      if (t === "1" || t === "true") return true;
+      if (t === "" || t === "0" || t === "false") return false;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `REQUIRE_ADMIN_TWO_STEP must be 1/true or 0/false, got "${v}"`,
+      });
+      return z.NEVER;
+    }),
+
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
   CAMERA_DISCOVERY_URL: z.string().default("http://localhost:8085"),
