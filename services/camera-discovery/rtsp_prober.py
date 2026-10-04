@@ -587,9 +587,8 @@ async def probe_with_credentials(ip: str, port: int, user: str, pw: str,
             break
         outcome = await describe_outcome(ip, port, path, user, pw, timeout)
         if outcome == OUTCOME_OK:
-            # DEBUG, and without the username: an account name in an INFO log is
-            # reconnaissance for anyone who can read the log bundle.
-            logger.debug("Operator credential authenticated at %s:%d%s", ip, port, path)
+            # Do not include the account or stream path in diagnostic bundles.
+            logger.debug("Operator RTSP sign-in succeeded at %s:%d", ip, port)
             return OUTCOME_OK, path
         if outcome in (OUTCOME_AUTH_FAILED, OUTCOME_LOCKED, OUTCOME_BASIC_ONLY):
             return outcome, None
@@ -622,7 +621,7 @@ async def probe_rtsp_with_credentials(ip: str, port: int
     for path in STREAM_PATHS:
         for user, pw in credentials:
             if await _try_credentials_once(ip, port, path, user, pw):
-                logger.debug("Default credential authenticated at %s:%d%s", ip, port, path)
+                logger.debug("Default RTSP sign-in succeeded at %s:%d", ip, port)
                 return path, user, pw
     return None
 
