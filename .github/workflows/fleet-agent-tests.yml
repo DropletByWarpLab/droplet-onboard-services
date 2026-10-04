@@ -32,17 +32,17 @@ jobs:
       run:
         working-directory: services/fleet-agent
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # WARP-1025: the release_verify/update_poll suites exec the REAL
       # cosign binary over the WARP-537 golden fixtures — genuine
       # cryptographic accept/reject, mirroring orchestrator-tests.yml. A
       # missing binary FAILS those tests loudly, never skips.
       - name: Install cosign (release_verify suite)
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           cache: pip

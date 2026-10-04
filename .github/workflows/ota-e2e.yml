@@ -82,7 +82,7 @@ jobs:
       RELEASES_URL: ${{ inputs.releases_url }}
       BAD_RELEASES_URL: ${{ inputs.bad_releases_url }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Every step re-resolves container ids by compose-service label:
       # the apply RECREATES containers (orchestrator included), so ids
@@ -232,7 +232,7 @@ jobs:
           done
           ls -la ota-e2e-artifacts/
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: ota-e2e-logs

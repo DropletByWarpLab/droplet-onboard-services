@@ -61,7 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Run CI coverage audit
         # Two audits, one step, one job name — the job name `ci-coverage` is a
         # branch-protection wire contract, so nothing here may be renamed or
@@ -77,3 +77,14 @@ jobs:
         run: |
           bash scripts/check-ci-coverage.sh
           bash scripts/check-test-wiring.sh
+
+      # WARP-3671 — supply-chain pin gate. Deliberately a STEP of the existing
+      # always-on `ci-coverage` job (every PR, not path-filtered), not a new
+      # job or workflow: no new trigger, no new check name, ~1 s of a job that
+      # already runs. What it closes: an action referenced by a tag or branch
+      # (`@v4`, `@main`) is a pointer its owner can move, so a hijacked action
+      # repository would run attacker code in this repo's workflows with the
+      # workflow's token and secrets. A 40-hex commit SHA cannot move; this
+      # fails the PR when any `uses:` under .github is not one.
+      - name: Actions pinned by commit SHA
+        run: bash scripts/check-actions-pinned.sh
