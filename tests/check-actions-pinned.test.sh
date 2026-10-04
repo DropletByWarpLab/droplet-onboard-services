@@ -39,6 +39,21 @@ expect() {
   else bad "$label (wanted $want, exit $rc)"; fi
 }
 
+# Tree-based cases, for fixtures that need several files or symlinks:
+#   root=$(newroot); put "$root" <rel> <body>; link "$root" <rel> <target>
+#   verdict <pass|fail> <label> "$root"
+newroot() { mktemp -d "$tmp/tree.XXXXXX"; }
+put()  { mkdir -p "$1/$(dirname "$2")"; printf 'jobs:\n  a:\n    steps:\n%s\n' "$3" >"$1/$2"; }
+link() { mkdir -p "$1/$(dirname "$2")"; ln -s "$3" "$1/$2"; }
+verdict() {
+  local want="$1" label="$2" root="$3" rc
+  bash "$GATE" "$root" >/dev/null 2>&1
+  rc=$?
+  if [ "$want" = pass ] && [ "$rc" -eq 0 ]; then ok "$label"
+  elif [ "$want" = fail ] && [ "$rc" -ne 0 ]; then ok "$label"
+  else bad "$label (wanted $want, exit $rc)"; fi
+}
+
 W=.github/workflows/w.yml
 printf '\n=== WARP-3671: check-actions-pinned.sh fixtures ===\n\n'
 
@@ -47,7 +62,6 @@ expect pass "40-hex SHA"                       $W "      - uses: actions/checkou
 expect pass "40-hex SHA with trailing comment" $W "      - uses: actions/checkout@$SHA # v7"
 expect pass "sub-path action at a SHA"         $W "      - uses: github/codeql-action/init@$SHA # v4"
 expect pass "docker digest"                    $W "      - uses: docker://alpine@$DIG"
-expect pass "local ./ action"                  $W "      - uses: ./.github/actions/x"
 expect pass "a trailing comment naming uses: is only a comment" $W "      - uses: actions/checkout@$SHA # was uses: actions/checkout@v7"
 expect pass "commented-out tag is ignored"     $W "      # - uses: actions/checkout@v7"
 expect pass "no uses at all"                   $W "      - run: echo hi"
@@ -82,6 +96,57 @@ expect fail "unpinned in action.yaml"          tools/x/action.yaml "      - uses
 expect pass "pinned in a composite action"     tools/x/action.yml "      - uses: actions/checkout@$SHA # v7"
 expect fail "unpinned in a .github/actions composite" .github/actions/x/action.yml "      - uses: actions/checkout@v7"
 expect pass "unpinned under node_modules is skipped" node_modules/p/action.yml "      - uses: actions/checkout@v7"
+
+# ---- scope follows the references (a ./ value is only as safe as the file it names)
+r=$(newroot); put "$r" $W "      - uses: ./.github/actions/x"; put "$r" .github/actions/x/action.yml "      - uses: actions/checkout@$SHA # v7"
+verdict pass "local ./ action that resolves and is itself pinned" "$r"
+
+r=$(newroot); put "$r" $W "      - uses: ./vendor/x"; put "$r" vendor/x/action.yml "      - uses: actions/checkout@v7"
+verdict fail "./ reference into a pruned directory is still scanned (unpinned inside)" "$r"
+
+r=$(newroot); put "$r" $W "      - uses: ./vendor/x"; put "$r" vendor/x/action.yml "      - uses: actions/checkout@$SHA # v7"
+verdict pass "./ reference into a pruned directory, pinned inside" "$r"
+
+r=$(newroot); put "$r" $W "      - uses: ./tools/a"; put "$r" tools/a/action.yml "      - uses: ./tools/b"; put "$r" tools/b/action.yml "      - uses: actions/checkout@v7"
+verdict fail "composite action referencing another local action is followed" "$r"
+
+r=$(newroot); put "$r" $W "      - uses: ./does/not/exist"
+verdict fail "dangling ./ reference" "$r"
+
+r=$(newroot); put "$r" $W "      - uses: ./tools/empty"; mkdir -p "$r/tools/empty"
+verdict fail "./ directory with no action.yml" "$r"
+
+r=$(newroot); put "$r" $W "      - uses: ./.github/workflows/reuse.yml"; put "$r" .github/workflows/reuse.yml "      - uses: actions/checkout@$SHA # v7"
+verdict pass "./ reusable workflow file that resolves" "$r"
+
+# ---- symlinks are reported, never followed or ignored
+r=$(newroot); put "$r" real/action.yml "      - uses: actions/checkout@$SHA # v7"; link "$r" tools/x/action.yml "$r/real/action.yml"
+verdict fail "symlinked action.yml is reported" "$r"
+
+r=$(newroot); put "$r" $W "      - uses: ./.github/actions/link"; put "$r" .github/actions/real/action.yml "      - uses: actions/checkout@$SHA # v7"; link "$r" .github/actions/link real
+verdict fail "./ reference through a symlinked directory (also a symlink under .github)" "$r"
+
+r=$(newroot); mkdir -p "$r/outside" "$r/in"; put "$r" outside/action.yml "      - uses: actions/checkout@$SHA # v7"
+put "$r" in/.github/workflows/w.yml "      - uses: ./out"; link "$r" in/out "$r/outside"
+verdict fail "./ reference whose real path leaves the repository" "$r/in"
+
+r=$(newroot); put "$r" $W "      - uses: ./tools/x"; put "$r" real/action.yml "      - uses: actions/checkout@$SHA # v7"; link "$r" tools/x real
+verdict fail "./ reference to a symlinked directory outside .github" "$r"
+
+r=$(newroot); put "$r" $W "      - uses: ./tools/../tools/x"
+verdict fail "./ reference containing .." "$r"
+
+# ---- spellings that hide the key from a plain grep
+expect fail "double-quoted key with an escape"        $W '      - "u\x73es": actions/checkout@v7'
+expect fail "double-quoted key with a unicode escape" $W '      - "\u0075ses": actions/checkout@v7'
+expect fail "explicit complex key"                    $W $'      - ? uses\n        : actions/checkout@v7'
+expect fail "complex key on its own line"             $W $'      ? uses\n      : actions/checkout@v7'
+expect fail "uses with empty remainder, value below"  $W $'      - uses:\n          actions/checkout@v7'
+expect fail "merge key"                               $W $'      - <<: *base\n        name: x'
+expect fail "anchor on a step"                        $W $'      - &base\n        name: x'
+expect fail "alias as a whole step"                   $W $'      - *base'
+expect fail "anchored mapping value"                  $W $'      - name: x\n        with: &w\n          a: b'
+expect pass "commented-out merge key is ignored"      $W $'      # - <<: *base\n      - run: echo hi'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
