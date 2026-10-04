@@ -467,6 +467,8 @@ check "login: grants sudo" $? "cmds=[$CMDS]"
 check "login: hands chpasswd -e exactly user:hash" $? "chpasswd.in=[$(cat "$WORK/chpasswd.in" 2>/dev/null)]"
 grep -q '^Match Group droplet-ssh$' "$DROPLET_SSHD_CONFIG" && grep -q '^    PasswordAuthentication yes$' "$DROPLET_SSHD_CONFIG"
 check "login: appends the Match block to the main sshd config" $? "config=[$(cat "$DROPLET_SSHD_CONFIG")]"
+grep -q '^    MaxAuthTries 3$' "$DROPLET_SSHD_CONFIG"
+check "login: the Match block limits auth attempts per connection (WARP-3603)" $? "config=[$(cat "$DROPLET_SSHD_CONFIG")]"
 [ "$(grep -c '^# >>> droplet-ssh-access' "$DROPLET_SSHD_CONFIG")" = "1" ]
 check "login: exactly one sentinel block" $?
 head -1 "$DROPLET_SSHD_CONFIG" | grep -q '^Include '

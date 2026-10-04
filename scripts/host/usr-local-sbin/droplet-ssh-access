@@ -152,6 +152,7 @@ install_sshd_match() {
       printf '# Password login for the owner-set troubleshooting account only.\n'
       printf 'Match Group %s\n' "$SSH_GROUP"
       printf '    PasswordAuthentication yes\n'
+      printf '    MaxAuthTries 3\n'
       printf '# <<< droplet-ssh-access\n'
     } >>"$_tmp" || { rm -f "$_tmp"; return 1; }
     mv -f "$_tmp" "$SSHD_CONFIG" || return 1
