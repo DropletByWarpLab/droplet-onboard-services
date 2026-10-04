@@ -27,6 +27,10 @@ import {
 } from "@/lib/api";
 import { ZoneEditor } from "@/components/settings/ZoneEditor";
 import { MotionMaskEditor } from "@/components/settings/MotionMaskEditor";
+import {
+  CameraRecordingNote,
+  OverAllocationNote,
+} from "@/components/cameras/CameraRecordingNote";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { useAuth } from "@/lib/auth";
 import type {
@@ -519,6 +523,13 @@ export default function CameraSettingsPage() {
               fit, then give the days back if usage drops. Recording modes you
               have switched off stay off.
             </p>
+            {/* WARP-3515 — where this camera records and what it needs there,
+                with a link to the Recording storage card; and the budget
+                route's overAllocation advisory (the type never carried it, so
+                nothing rendered it). Both render nothing when there is nothing
+                to say. */}
+            <CameraRecordingNote camera={name} />
+            <OverAllocationNote overAllocation={budget?.overAllocation} />
             <label className="flex items-center gap-2">
               <input
                 type="number"

@@ -249,6 +249,14 @@ export function recordingsDriveName(
   return drive?.label?.trim() || drive?.model?.trim() || "Drive";
 }
 
+/** MB/h and GB/day: whole numbers from 100, otherwise one trimmed decimal. A
+ *  real-but-tiny rate reads "<0.1", never "0"; nothing measured reads "0". */
+export function formatRate(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  if (n < 0.1) return "<0.1";
+  return n >= 100 ? String(Math.round(n)) : String(Number(n.toFixed(1)));
+}
+
 /** One camera's share of the whole recording need — the "Share" column. It is a
  *  share of NEED (what each camera is expected to take for the retention
  *  window), which is what makes the columns around it add up: GB/day → need →

@@ -13,6 +13,7 @@ import {
   SETTINGS_STORAGE_HREF,
   cameraNeedShares,
   describeWarning,
+  formatRate,
   friendlyRecordingStorageError,
   normalizeRecordingStorage,
   recordingStatusView,
@@ -355,6 +356,24 @@ describe("cameraNeedShares", () => {
 
   it("returns an empty list for no cameras", () => {
     expect(cameraNeedShares([])).toEqual([]);
+  });
+});
+
+describe("formatRate — MB/h and GB/day", () => {
+  it.each([
+    [1500, "1500"],
+    [1500.4, "1500"],
+    [100, "100"],
+    [36, "36"],
+    [16.84, "16.8"],
+    [0.5, "0.5"],
+    [0.04, "<0.1"],
+    [0, "0"],
+    [-3, "0"],
+    [Number.NaN, "0"],
+    [Infinity, "0"],
+  ])("%s -> %s", (n, expected) => {
+    expect(formatRate(n)).toBe(expected);
   });
 });
 

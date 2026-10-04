@@ -144,6 +144,34 @@
 .droplet-shell .rs-old-d { font-size: 12.5px; color: var(--text-muted); margin: 0; }
 .droplet-shell .rs-old .btn { align-self: flex-start; }
 
+/* ── Per-camera settings: where THIS camera records ───────── */
+.droplet-shell .rs-camera-note {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 12px 14px; border-radius: 12px; background: var(--inset);
+}
+.droplet-shell .rs-camera-note-t { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: var(--text-muted); }
+.droplet-shell .rs-camera-note-t b { color: var(--text); font-weight: 600; }
+.droplet-shell .rs-camera-note-d { margin: 0; font-size: 12.5px; color: var(--text-muted); }
+.droplet-shell .rs-camera-note-d b { color: var(--text); font-weight: 600; }
+.droplet-shell .rs-camera-note-link {
+  align-self: flex-start; display: inline-flex; align-items: center; gap: 4px;
+  margin-top: 4px; min-height: 24px; font-size: 12.5px; font-weight: 500;
+  color: var(--brand); text-decoration: underline; text-underline-offset: 2px;
+  border-radius: var(--radius-input);
+}
+.droplet-shell .rs-camera-note-link:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+/* The budgets summed against the volume (WARP-1851's overAllocation). Amber is a
+   decorative tint/icon only; the words stay --text. */
+.droplet-shell .rs-over {
+  display: flex; align-items: flex-start; gap: 8px; margin: 0;
+  padding: 10px 12px; border-radius: 10px; font-size: 12.5px; color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--color-system-orange) 45%, var(--card-bd));
+  background: color-mix(in srgb, var(--color-system-orange) 9%, transparent);
+}
+.droplet-shell .rs-over b { font-weight: 600; }
+.droplet-shell .rs-over-ic { flex-shrink: 0; margin-top: 1px; color: var(--color-system-orange); }
+
 /* ── Phone layer (the shell's own 720px breakpoint) ──────── */
 @media (max-width: 720px) {
   .droplet-shell .rs-seg { grid-template-columns: 1fr; }
@@ -151,6 +179,7 @@
   /* iOS Safari zooms on focus for any control under 16px and never zooms back
      (droplet-shell.css §5). Match the 44px target the shell gives `.btn`. */
   .droplet-shell .rs-select { height: 44px; font-size: 16px; }
+  .droplet-shell .rs-camera-note-link { min-height: 44px; }
 
   /* One stacked card per camera instead of a five-column table: at 375px the
      card's content box is ~300px, which a five-column table cannot fit without

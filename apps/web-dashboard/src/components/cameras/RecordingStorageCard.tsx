@@ -20,6 +20,7 @@ import {
   SETTINGS_STORAGE_HREF,
   cameraNeedShares,
   describeWarning,
+  formatRate,
   friendlyRecordingStorageError,
   recordingStatusView,
   recordingsDriveName,
@@ -759,14 +760,6 @@ function formatDays(n: number): string {
   if (n < 1) return "Under a day";
   const v = Number(n.toFixed(1));
   return `${v} ${v === 1 ? "day" : "days"}`;
-}
-
-/** MB/h and GB/day: whole numbers from 100, otherwise one trimmed decimal. A
- *  real-but-tiny rate reads "<0.1", not "0". */
-function formatRate(n: number): string {
-  if (n <= 0) return "0";
-  if (n < 0.1) return "<0.1";
-  return n >= 100 ? String(Math.round(n)) : String(Number(n.toFixed(1)));
 }
 
 /** A camera's share of the total need. */
