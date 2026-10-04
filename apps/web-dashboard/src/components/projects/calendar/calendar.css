@@ -15,7 +15,7 @@
 .pm-scope .pm-cal-hint { margin: 0; font-size: 12.5px; color: var(--text-2); }
 
 /* ── grid ───────────────────────────────────────────────────────────────── */
-.pm-scope .pm-cal-grid { background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.pm-scope .pm-cal-grid { isolation: isolate; background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
 .pm-scope .pm-cal-dow,
 .pm-scope .pm-cal-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
 .pm-scope .pm-cal-dow { background: var(--bg-tint); border-bottom: 1px solid var(--border); }

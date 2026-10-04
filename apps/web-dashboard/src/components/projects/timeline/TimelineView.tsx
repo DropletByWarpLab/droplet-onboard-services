@@ -173,7 +173,6 @@ export function TimelineView({
     [preview],
   );
 
-  const keyById = useMemo(() => new Map(items.map((i) => [i.id, i.key])), [items]);
   const rowIndexById = useMemo(() => new Map(itemRows.map((r) => [r.item.id, r.index])), [itemRows]);
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items]);
 
@@ -184,12 +183,16 @@ export function TimelineView({
   const { blocksKeys, blockedByKeys } = useMemo(() => {
     const blocks = new Map<string, string[]>();
     const blockedBy = new Map<string, string[]>();
+    // `relations` was filtered to edges whose BOTH ends are drawn, so both lookups
+    // succeed; a miss here is a bug to surface, not a blank to paper over.
     for (const r of relations) {
-      blocks.set(r.fromId, [...(blocks.get(r.fromId) ?? []), keyById.get(r.toId) ?? ""]);
-      blockedBy.set(r.toId, [...(blockedBy.get(r.toId) ?? []), keyById.get(r.fromId) ?? ""]);
+      const from = itemById.get(r.fromId)!;
+      const to = itemById.get(r.toId)!;
+      blocks.set(r.fromId, [...(blocks.get(r.fromId) ?? []), to.key]);
+      blockedBy.set(r.toId, [...(blockedBy.get(r.toId) ?? []), from.key]);
     }
     return { blocksKeys: blocks, blockedByKeys: blockedBy };
-  }, [relations, keyById]);
+  }, [relations, itemById]);
 
   // ── scrolling ────────────────────────────────────────────────────────────────
 

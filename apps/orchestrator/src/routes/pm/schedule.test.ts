@@ -25,6 +25,7 @@ vi.mock("../../services/pm/pm-schedule.service.js", async (importOriginal) => ({
 }));
 
 import { createPmScheduleRouter } from "./schedule.js";
+import { isGuestShared } from "../../modules/guest-shares.js";
 
 function makeApp(user: { id: string; role: string } | null) {
   const app = express();
@@ -204,5 +205,17 @@ describe("GET /api/pm/my-work", () => {
     getMyWork.mockRejectedValueOnce(new Error("db down"));
     const res = await request(makeApp(OWNER)).get("/api/pm/my-work?section=assigned");
     expect(res.status).toBe(500);
+  });
+});
+
+describe("external guests", () => {
+  it("neither read is a guest share, so the projects module floor answers a guest 404 before the route runs", () => {
+    // modules/guest-shares.ts lists the ONLY requests a guest may make inside
+    // Projects (the one item shared with them). A window of a project's schedule
+    // and a cross-project list are not that, and must stay closed by default.
+    expect(isGuestShared("projects", "GET", "/api/pm/projects/p-1/timeline")).toBe(false);
+    expect(isGuestShared("projects", "GET", "/api/pm/my-work")).toBe(false);
+    // Control: the one list a guest does get is still recognised, so the check above can fail.
+    expect(isGuestShared("projects", "GET", "/api/pm/assigned-to-me")).toBe(true);
   });
 });
