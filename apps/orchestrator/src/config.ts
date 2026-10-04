@@ -1281,6 +1281,24 @@ const envSchema = z.object({
     .default("0")
     .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
 
+  // WARP-3630 — privileged-account two-step policy. On, (1) an owner or admin
+  // with no confirmed second factor (TOTP or passkey) can reach only the
+  // enrolment surface until they enrol (403 MFA_ENROLLMENT_REQUIRED, see
+  // middleware/admin-mfa-enrollment-gate.ts) and (2) the high-impact admin
+  // routes (user, role and access changes, invites, factory reset, extension
+  // promote, update settings) need a fresh credential step-up
+  // (createRequireAdminStepUp). OFF by default: turning it on changes sign-in
+  // for owners and admins already using the box, and the dashboard does not yet
+  // route them into enrolment or prompt for step-up on those screens, so the
+  // switch is an operator decision, not a silent upgrade side effect. Accounts
+  // provisioned by SSO or SCIM are exempt (the identity provider owns their
+  // second factor). String + transform, not z.coerce.boolean: "false" must
+  // stay false.
+  REQUIRE_ADMIN_TWO_STEP: z
+    .string()
+    .default("0")
+    .transform((v) => v === "1" || v.trim().toLowerCase() === "true"),
+
   // --- Frigate NVR ---
   FRIGATE_URL: z.string().default("http://localhost:5000"),
   CAMERA_DISCOVERY_URL: z.string().default("http://localhost:8085"),

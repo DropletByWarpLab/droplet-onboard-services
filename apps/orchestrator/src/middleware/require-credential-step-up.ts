@@ -22,6 +22,7 @@ import type { PrismaClient } from "@prisma/client";
 import { createRequireRecentMfa } from "./require-recent-mfa.js";
 import { verifyPassword } from "../services/password.service.js";
 import { throttledCredentialCheck } from "../services/throttled-credential-check.js";
+import { config } from "../config.js";
 
 /** How recent the MFA stamp must be to enrol a credential. */
 export const CREDENTIAL_STEP_UP_WINDOW_SEC = 300;
@@ -109,5 +110,22 @@ export function createRequireCredentialStepUp(
     } catch (err) {
       next(err);
     }
+  };
+}
+
+/**
+ * WARP-3630 — the credential step-up on a high-impact admin route, applied only
+ * while the privileged-account two-step policy (`REQUIRE_ADMIN_TWO_STEP`) is
+ * on; a pass-through otherwise. Mount AFTER the route's `requireRole`. The
+ * flag is read per request so the policy takes effect without re-mounting.
+ */
+export function createRequireAdminStepUp(
+  prisma?: StepUpPrisma,
+): (req: Request, res: Response, next: NextFunction) => Promise<void> {
+  const stepUp = createRequireCredentialStepUp(prisma);
+  // Named so a route-table test can find it in a router's handler stack.
+  return async function requireAdminStepUp(req, res, next) {
+    if (!config.REQUIRE_ADMIN_TWO_STEP) return next();
+    return stepUp(req, res, next);
   };
 }

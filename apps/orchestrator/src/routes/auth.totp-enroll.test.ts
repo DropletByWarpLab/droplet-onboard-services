@@ -90,6 +90,8 @@ vi.mock("../services/recovery.service.js", async (importOriginal) => ({
 const stepUp = vi.fn();
 vi.mock("../middleware/require-credential-step-up.js", () => ({
   passCredentialStepUp: (...a: unknown[]) => stepUp(...a),
+  // WARP-3630 — policy-gated step-up on admin routes; pass-through here.
+  createRequireAdminStepUp: () => (_req: unknown, _res: unknown, next: () => void) => next(),
   createRequireCredentialStepUp:
     (prisma: unknown) => async (req: unknown, res: unknown, next: () => void) => {
       if (await stepUp(prisma, req, res)) next();
