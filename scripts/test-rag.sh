@@ -14,6 +14,14 @@
 # Idempotent — re-running cleans up the previous run before starting.
 # Safe to run repeatedly.
 #
+# WARP-3672: this is a DEVELOPMENT / CI tool. It refuses to run on a
+# provisioned appliance (a relocated .env symlink, the encrypted /data mount,
+# or the device-identity provisioned marker), before it touches anything, and
+# it NEVER edits .env: authentication is switched off for the test stack only
+# by docker/docker-compose.test.override.yml (orchestrator `environment:`
+# beats the base file's `env_file:`), and the script verifies the effective
+# value in the running container before the suite starts.
+#
 # Flags:
 #   --help        Print usage and exit 0.
 #   --dry-run     Print the commands that would run, don't execute.
@@ -114,6 +122,34 @@ run() {
   fi
 }
 
+# WARP-3672: refuse on a provisioned appliance. MUST stay above the EXIT trap
+# below: cleanup() runs `compose down -v`, which on a real box would delete the
+# live stack's volumes. Nothing has been started or changed when this fires.
+# Each marker has an env override so the refusal path is testable in a sandbox.
+appliance_marker() {
+  local data_mount="${DROPLET_DATA_MOUNT:-/data}"
+  local mapper="${DROPLET_LUKS_MAPPER:-droplet-data-crypt}"
+  local di_storage="${TPM_STORAGE:-${DROPLET_DI_STORAGE:-/var/lib/droplet/tpm}}"
+  local src
+  # .env relocated onto the encrypted /data (secrets.sh relocate_secrets_to_data).
+  if [[ -L "${REPO_ROOT}/.env" ]]; then
+    echo "${REPO_ROOT}/.env is a symlink onto the encrypted data volume"; return 0
+  fi
+  src="$(findmnt -n -o SOURCE "${data_mount}" 2>/dev/null || true)"
+  if [[ "${src}" == *"${mapper}"* ]]; then
+    echo "${data_mount} is the encrypted data mount"; return 0
+  fi
+  if [[ -f "${di_storage}/provisioned.json" ]]; then
+    echo "${di_storage}/provisioned.json exists (device identity is provisioned)"; return 0
+  fi
+  return 1
+}
+if marker="$(appliance_marker)"; then
+  err "Refusing to run on a provisioned Droplet appliance: ${marker}."
+  err "This script is for development machines and CI runners only. Nothing was changed."
+  exit 77  # EX_NOPERM
+fi
+
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM
@@ -155,22 +191,11 @@ if [[ ! -f "${REPO_ROOT}/.env" ]]; then
   run "${REPO_ROOT}/scripts/setup.sh" --skip-docker --skip-drivers --skip-start
 fi
 
-# WARP-227 R3: setup.sh writes AUTH_ENABLED=true (production default), but
-# the test lane needs AUTH_ENABLED=false. The test override's
-# `environment:` block is *supposed* to win over the base file's
-# `env_file:`, but Compose's interaction is unreliable across versions.
-# Force it in .env directly. Same fix the rag-tests workflow applies.
-if grep -qE '^AUTH_ENABLED=' "${REPO_ROOT}/.env"; then
-  if [[ "${DRY_RUN}" != "1" ]]; then
-    sed -i.bak 's/^AUTH_ENABLED=.*/AUTH_ENABLED=false/' "${REPO_ROOT}/.env" \
-      && rm -f "${REPO_ROOT}/.env.bak"
-  fi
-else
-  if [[ "${DRY_RUN}" != "1" ]]; then
-    echo "AUTH_ENABLED=false" >> "${REPO_ROOT}/.env"
-  fi
-fi
-log "Test lane: AUTH_ENABLED=false enforced in .env (WARP-227 R3)."
+# WARP-227 R3 / WARP-3672: setup.sh writes AUTH_ENABLED=true (production
+# default) into .env, but the test lane needs auth off. The test override's
+# `environment: AUTH_ENABLED=false` wins over the base file's `env_file:` (the
+# Compose precedence rule), so .env is left exactly as it is; the effective
+# value is verified in the running orchestrator below.
 
 # ─── boot ─────────────────────────────────────────────────────────────
 log "Bringing up Compose stack: ${SERVICES[*]}"
@@ -193,6 +218,19 @@ if [[ "${DRY_RUN}" != "1" ]]; then
     "${COMPOSE[@]}" logs orchestrator | tail -50 >&2 || true
     exit 1
   fi
+fi
+
+# WARP-3672: prove the override took effect without touching .env. A stack
+# that came up with auth on would fail every test with a 401 that looks like a
+# product bug; fail here with the real cause instead.
+if [[ "${DRY_RUN}" != "1" ]]; then
+  effective_auth="$("${COMPOSE[@]}" exec -T orchestrator printenv AUTH_ENABLED 2>/dev/null | tr -d '\r' || true)"
+  if [[ "${effective_auth}" != "false" ]]; then
+    err "orchestrator AUTH_ENABLED is '${effective_auth}', expected 'false' from docker-compose.test.override.yml."
+    err ".env was not modified. Check that the override file is layered (COMPOSE_OVERRIDE) and Compose is >= 2."
+    exit 1
+  fi
+  log "Test lane: orchestrator runs with AUTH_ENABLED=false from the compose override (.env untouched)."
 fi
 
 # Nextcloud bootstrap — slow on cold. Don't block the suite if a
