@@ -108,3 +108,60 @@ class TestRequireToken:
         assert auth_mod._OPS_TOKEN not in text
         fingerprint = hashlib.sha256(auth_mod._OPS_TOKEN.encode()).hexdigest()[:8]
         assert fingerprint in text
+
+
+class TestSupportWindowExpiry:
+    """WARP-3641: OPS_ACCESS_EXPIRES_AT ends the support window."""
+
+    @staticmethod
+    def _client(monkeypatch, expires: str | None, now_iso: str = "2026-10-03T12:00:00+00:00"):
+        from datetime import datetime
+        monkeypatch.delenv("OPS_ACCESS_EXPIRES_AT", raising=False)
+        if expires is not None:
+            monkeypatch.setenv("OPS_ACCESS_EXPIRES_AT", expires)
+        c = _app("good-token")
+        from ops import auth as auth_mod
+        monkeypatch.setattr(auth_mod, "_now", lambda: datetime.fromisoformat(now_iso))
+        return c, auth_mod
+
+    def test_no_expiry_configured_keeps_working(self, monkeypatch):
+        c, auth_mod = self._client(monkeypatch, None, "2099-01-01T00:00:00+00:00")
+        assert auth_mod.window_description() == "support window: no expiry configured"
+        assert c.get("/probe", headers={"Authorization": "Bearer good-token"}).status_code == 200
+
+    def test_before_deadline_works(self, monkeypatch):
+        c, _ = self._client(monkeypatch, "2026-10-03T18:00:00Z")
+        assert c.get("/probe", headers={"Authorization": "Bearer good-token"}).status_code == 200
+
+    def test_after_deadline_refuses_even_the_right_token(self, monkeypatch):
+        c, _ = self._client(monkeypatch, "2026-10-03T11:00:00Z")
+        r = c.get("/probe", headers={"Authorization": "Bearer good-token"})
+        assert r.status_code == 403
+        assert "window has ended" in r.json()["detail"]
+
+    def test_deadline_is_checked_per_request(self, monkeypatch):
+        from datetime import datetime
+        c, auth_mod = self._client(monkeypatch, "2026-10-03T12:30:00Z")
+        h = {"Authorization": "Bearer good-token"}
+        assert c.get("/probe", headers=h).status_code == 200
+        monkeypatch.setattr(
+            auth_mod, "_now", lambda: datetime.fromisoformat("2026-10-03T12:30:01+00:00")
+        )
+        assert c.get("/probe", headers=h).status_code == 403
+
+    def test_naive_timestamp_means_utc(self, monkeypatch):
+        c, _ = self._client(monkeypatch, "2026-10-03T11:00:00")
+        assert c.get("/probe", headers={"Authorization": "Bearer good-token"}).status_code == 403
+
+    def test_unparseable_value_fails_closed(self, monkeypatch):
+        c, _ = self._client(monkeypatch, "tomorrow-ish")
+        assert c.get("/probe", headers={"Authorization": "Bearer good-token"}).status_code == 403
+
+
+class TestTokenComparison:
+    def test_non_ascii_token_is_refused_not_a_server_error(self):
+        # compare_digest on two str values raises TypeError for non-ASCII
+        # input, which would surface as a 500 to an unauthenticated caller.
+        c = _app("good-token")
+        r = c.get("/probe", headers={"Authorization": "Bearer caf\u00e9".encode("latin-1")})
+        assert r.status_code == 403

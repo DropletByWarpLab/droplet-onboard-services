@@ -1,3 +1,4 @@
+import { eventsMedia } from "@droplet/shared-types";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
 const inputSchema = {
@@ -36,7 +37,12 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     };
   }
   const data = await res.json();
-  return { ok: true, data };
+  // WARP-3691: show the newest events with a clip or still inline in chat.
+  const media = eventsMedia((data as { events?: unknown } | null)?.events);
+  return {
+    ok: true,
+    data: media.length > 0 && data && typeof data === "object" ? { ...(data as object), media } : data,
+  };
 }
 
 const tool: Tool = {

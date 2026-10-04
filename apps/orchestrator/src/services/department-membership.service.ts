@@ -210,7 +210,7 @@ async function pushAdd(
       await markSyncFailed(
         prisma,
         membershipId,
-        "user has no Nextcloud account provisioned yet",
+        "user has no File Store account provisioned yet",
       );
       return;
     }
@@ -278,7 +278,7 @@ async function pushRightTransition(
       await markSyncFailed(
         prisma,
         membershipId,
-        "user has no Nextcloud account provisioned yet",
+        "user has no File Store account provisioned yet",
       );
       return;
     }

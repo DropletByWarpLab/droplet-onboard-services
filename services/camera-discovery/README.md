@@ -25,6 +25,7 @@ ONVIF WS-Discovery ─────┘      │
 - **IP validation** — only probes RFC 1918 private addresses (10.x, 172.16-31.x, 192.168.x). Rejects loopback, link-local, multicast, and public IPs.
 - **Subnet filtering** — when `CAMERA_SUBNET` is set (default: `192.168.100.0/24`), only scans that subnet. Prevents probing devices on the main LAN. `CAMERA_SUBNET=auto` (WARP-1805, the single-box provisioning default) resolves the network from the edge router at scan time via the routing service's `/network/interfaces`, so the filter follows the LAN that actually hands cameras their DHCP leases instead of a provision-time constant that goes stale when the fabric moves. While auto is unresolved (routing service unreachable), the sweep stays off and candidates are gated to private (RFC 1918) IPs only — discovery degrades, never widens.
 - **RTSP URL validation** — validates scheme (`rtsp://`/`rtsps://`) and host before passing to Frigate.
+- **No clear-text camera passwords (WARP-3597)** — a camera that asks for RTSP Basic auth gets no credentials; Digest is used where offered (preferred when both are). A Basic-only camera must be listed in `CAMERA_RTSP_BASIC_ALLOW_IPS`. Discovery MQTT events and `/cameras/*` responses carry the RTSP URL without `user:pass@` (plus `has_credentials`); the full URL stays internal and is written to Frigate.
 - **Driver fix auth** — the `/drivers/fix` endpoint (which runs `modprobe`) requires `DEVICE_SECRET` bearer token.
 - **ONVIF probes are read-only** — only calls `GetDeviceInformation` and `GetStreamUri`, never modifies camera config.
 
@@ -36,6 +37,7 @@ ONVIF WS-Discovery ─────┘      │
 | GET | `/cameras/discovered` | Pending cameras (not yet in Frigate) |
 | GET | `/cameras/known` | Active cameras (configured in Frigate) |
 | POST | `/cameras/discovered/{mac}/accept` | Accept camera into Frigate |
+| POST | `/cameras/discovered/{mac}/credentials` | Add a discovered camera with operator-supplied `{username, password}` (probes RTSP first, ONVIF only if RTSP found no path; 422 `auth_failed`/`no_stream_path`/`basic_auth_only`, 423 `locked`, 502 `unreachable`, 504 `timeout`, 400 `invalid_credentials`/`unsupported_password`/`unsupported_stream_address`) |
 | POST | `/cameras/discovered/{mac}/reject` | Reject camera (won't rediscover) |
 | POST | `/scan` | Manually trigger a discovery scan |
 | GET | `/subnet/status` | Which subnet is being scanned |
@@ -53,6 +55,7 @@ ONVIF WS-Discovery ─────┘      │
 | `CAMERA_SUBNET` | `192.168.100.0/24` | Subnet to scan (empty = all private; `auto` = resolve from the edge router at scan time) |
 | `CAMERA_INIT_CA_CERT` | (unset) | Path to a CA bundle/cert for TLS verification of the camera first-run (vendor-init) HTTPS clients (WARP-583). When set, httpx verifies the camera cert against it; a set-but-missing path fails closed rather than silently downgrading. When unset, verification is disabled — cameras ship per-device self-signed certs on first run, so pinning is not always feasible — and a warning is logged once per process. Residual risk while unpinned: an on-LAN MITM between this service and the camera VLAN can intercept the first-run admin-password set. Pinning also verifies the hostname/IP against the cert's SANs, so a device cert without the camera's IP in its SANs will fail verification against raw-IP targets — fail-closed, by design; provision a cert carrying the device IP in its SANs, or fall back to unpinned. Mirrors the switch service's `SWITCH_CA_CERT`. |
 | `DEVICE_SECRET` | (empty) | Auth token for `/drivers/fix` |
+| `CAMERA_RTSP_BASIC_ALLOW_IPS` | (empty) | Comma-separated camera IPs the prober may answer with RTSP Basic auth (clear-text password). Empty = Digest only |
 
 ## Files
 

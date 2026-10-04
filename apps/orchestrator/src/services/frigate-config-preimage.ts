@@ -2,7 +2,7 @@
  * WARP-3510 — a pre-image of Frigate's authored config before every overwrite.
  *
  * Every Frigate config writer (add, delete, the reconcile prune, a settings
- * save, the retention backfill) saves the WHOLE authored YAML back. When one of
+ * save, the retention backfill) can overwrite existing camera fields. When one of
  * them got it wrong — a prune that took a live camera — the previous file
  * existed nowhere else and the camera's stream URL, credentials included, was
  * simply gone (the Camera row stores none of it). The pre-image is the way back.

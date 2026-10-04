@@ -166,7 +166,7 @@ describe("POST /api/cameras against a Frigate that behaves like 0.17.1", () => {
 
     await request(app()).post("/api/cameras").send({ name: "front_door", rtspUrl: URL_OK });
 
-    const writes = fake.calls.filter((c) => !c.startsWith("GET /api/stats"));
+    const writes = fake.calls.filter((c) => !c.startsWith("GET "));
     expect(writes[0]).toBe("PUT /api/config/set");
     expect(writes[1]).toBe("POST /api/restart");
     expect(fake.calls.filter((c) => c.startsWith("GET /api/stats")).length).toBeGreaterThanOrEqual(1);

@@ -10,6 +10,7 @@ import { parseDocument, isMap, isScalar } from "yaml";
 
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
+import { scrubUrlCredentials } from "../lib/rtsp-credentials.js";
 import { FrigateNotFoundError } from "../types/frigate-error.js";
 import { toFrigateKey } from "./camera-key.js";
 import {
@@ -1003,7 +1004,7 @@ export async function deleteCamera(cameraName: string): Promise<void> {
     if (!resp.ok) {
       const errBody = await resp.text().catch(() => "");
       logger.warn(
-        { status: resp.status, camera: key, body: errBody.slice(0, 200) },
+        { status: resp.status, camera: key, body: scrubUrlCredentials(errBody).slice(0, 200) },
         "Frigate config/save rejected while deleting camera",
       );
       throw new Error(`Delete camera: ${resp.status}`);
@@ -1032,6 +1033,13 @@ export async function addCamera(
   }
 
   return withFrigateConfigLock(async () => {
+    // config/set overwrites existing fields too when the operator corrects a
+    // camera. Keep the authored config before that write, as for config/save.
+    try {
+      await writeConfigPreImage(await fetchRawConfigYaml());
+    } catch {
+      logger.warn({ camera: safeName }, "Could not read Frigate's config before adding a camera; no pre-image saved");
+    }
     // Frigate 0.17 replaced POST /api/config/set (405) with a PUT that takes a
     // {config_data, requires_restart} envelope and deep-MERGES config_data into
     // the config file — so we send only the new camera block and existing
@@ -1074,7 +1082,7 @@ export async function addCamera(
     if (!resp.ok) {
       const errBody = await resp.text().catch(() => "");
       logger.warn(
-        { status: resp.status, camera: safeName, body: errBody.slice(0, 200) },
+        { status: resp.status, camera: safeName, body: scrubUrlCredentials(errBody).slice(0, 200) },
         "Frigate config/set rejected while adding camera",
       );
       return false;
@@ -1248,7 +1256,7 @@ export async function syncCamerasFromDb(
     if (!resp.ok) {
       const errBody = await resp.text().catch(() => "");
       logger.warn(
-        { status: resp.status, removed, body: errBody.slice(0, 200) },
+        { status: resp.status, removed, body: scrubUrlCredentials(errBody).slice(0, 200) },
         "Frigate config/save rejected during camera sync",
       );
       throw new Error(`Frigate rejected the config: ${resp.status}`);

@@ -1,3 +1,4 @@
+import { cameraLiveMedia } from "@droplet/shared-types";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
 const inputSchema = {
@@ -23,6 +24,8 @@ async function handler(args: Record<string, unknown>, _ctx: ToolContext): Promis
     data: {
       live_url: `/cameras/${encodeURIComponent(name)}`,
       snapshot_url: `/api/cameras/${encodeURIComponent(name)}/snapshot`,
+      // WARP-3691: the chat renders this as a live feed card.
+      media: cameraLiveMedia(name),
     },
   };
 }
@@ -30,7 +33,7 @@ async function handler(args: Record<string, unknown>, _ctx: ToolContext): Promis
 const tool: Tool = {
   name: "get_camera_live_url",
   description:
-    "Return the dashboard URL for a live camera view. The user opens this in their browser and playback uses their existing session.",
+    "Show the user a LIVE view of a camera. The live feed appears inline in the chat (it starts when the user clicks play), so use this when the user asks to watch a camera live - and do not paste the URL in your reply.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

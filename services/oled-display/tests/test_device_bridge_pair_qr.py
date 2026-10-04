@@ -51,6 +51,15 @@ uSd9DJAIdEt6/CNInKDHBh7j
 #   openssl x509 -pubkey -noout | openssl pkey -pubin -outform DER \
 #     | openssl dgst -sha256 -binary | base64
 LEAF_PIN = "8BevqGrXi+1KveZGkPBbe42742sm6cj0EOU2ph498lw="
+# WARP-3414 — the same key in READING form, derived independently of the code
+# under test from the certificate above:
+#   openssl x509 -pubkey -noout | openssl pkey -pubin -outform DER \
+#     | openssl dgst -sha256 -binary | xxd -p -c 64 | tr a-f A-F   (grouped in 4s)
+# The Droplet Mac app's confirmation-screen format: uppercase hex, 4-char
+# groups, single spaces, 16 groups. The orchestrator, the installer output and
+# `droplet-fingerprint` pin the very same string against this certificate.
+LEAF_FINGERPRINT = ("F017 AFA8 6AD7 8BED 4ABD E646 90F0 5B7B "
+                    "8DBB E36B 26E9 C8F4 10E5 36A6 1E3D F25C")
 
 pytestmark = pytest.mark.skipif(shutil.which("openssl") is None,
                                 reason="openssl CLI not on PATH")
@@ -164,7 +173,38 @@ def test_snapshot_carries_the_link_when_both_halves_exist(monkeypatch, leaf):
         "server": "https://192.168.9.195",
         "spki": LEAF_PIN,
         "payload": bridge.pair_link(LEAF_PIN),
+        # WARP-3414: the reading form of the same pin, for the rail's
+        # "Droplet fingerprint" face.
+        "fingerprint": LEAF_FINGERPRINT,
     }
+
+
+def test_the_fingerprint_is_the_mac_apps_format_for_the_known_certificate(monkeypatch, leaf):
+    """WARP-3414: uppercase hex, 4-character groups, single spaces, 16 groups —
+    exactly what the Mac app shows — pinned against a known certificate."""
+    import re
+    bridge = _load_bridge(monkeypatch, leaf)
+    assert bridge.format_key_fingerprint(LEAF_PIN) == LEAF_FINGERPRINT
+    assert re.fullmatch(r"[0-9A-F]{4}( [0-9A-F]{4}){15}", LEAF_FINGERPRINT)
+    # Recomputed with the openssl recipe, so the constant is not just copied.
+    pub = subprocess.run(["openssl", "x509", "-in", str(leaf), "-pubkey", "-noout"],
+                         capture_output=True, check=True).stdout
+    der = subprocess.run(["openssl", "pkey", "-pubin", "-outform", "DER"],
+                         input=pub, capture_output=True, check=True).stdout
+    import hashlib
+    h = hashlib.sha256(der).hexdigest().upper()
+    assert " ".join(h[i:i + 4] for i in range(0, 64, 4)) == LEAF_FINGERPRINT
+
+
+def test_a_malformed_pin_never_becomes_a_fingerprint(monkeypatch, leaf):
+    """A shortened value must never reach the glass: a short prefix can be
+    ground out by an impostor."""
+    import base64
+    bridge = _load_bridge(monkeypatch, leaf)
+    for bad in ("", "not base64 !!", base64.b64encode(b"\x00" * 8).decode(),
+                base64.b64encode(b"\x00" * 33).decode()):
+        with pytest.raises(Exception):
+            bridge.format_key_fingerprint(bad)
 
 
 def test_the_route_is_gated_like_openwrt_qr(monkeypatch, leaf):

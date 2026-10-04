@@ -35,6 +35,7 @@ import {
   macFromCandidateId,
   mutateLiveCandidate,
   redactRtspCredentials,
+  submitLiveCandidateCredentials,
 } from "./camera-candidates.service.js";
 
 type DbRow = {
@@ -345,5 +346,118 @@ describe("mutateLiveCandidate", () => {
       status: 422,
       message: "Camera stream did not verify",
     });
+  });
+});
+
+describe("submitLiveCandidateCredentials (WARP-3505)", () => {
+  it("POSTs the credentials to camera-discovery's credentials route, keyed by lower-case MAC, with the device secret", async () => {
+    process.env.DEVICE_SECRET = "test-secret";
+    internalFetch.mockResolvedValue(new Response(JSON.stringify({ status: "accepted" }), { status: 200 }));
+
+    const r = await submitLiveCandidateCredentials("E4:30:22:50:2A:FD", "admin", "s3cret!");
+
+    expect(r).toEqual({ ok: true, status: 200 });
+    const [url, init] = internalFetch.mock.calls[0];
+    expect(url).toBe(
+      "http://camera-discovery.test:8085/cameras/discovered/e4%3A30%3A22%3A50%3A2a%3Afd/credentials",
+    );
+    expect(init.method).toBe("POST");
+    expect(init.headers.Authorization).toBe("Bearer test-secret");
+    expect(init.headers["Content-Type"]).toBe("application/json");
+    expect(JSON.parse(init.body)).toEqual({ username: "admin", password: "s3cret!" });
+    delete process.env.DEVICE_SECRET;
+  });
+
+  it("carries which camera was added (and only that — never a stream URL) so the caller can match its DB row", async () => {
+    internalFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          status: "accepted",
+          camera: {
+            name: "xnv_c8083r",
+            ip: "192.168.9.219",
+            mac: "e4:30:22:50:2a:fd",
+            status: "active",
+            rtsp_url: "rtsp://admin:s3cret%21@192.168.9.219:554/profile2/media.smp",
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    const r = await submitLiveCandidateCredentials("E4:30:22:50:2A:FD", "admin", "s3cret!");
+    expect(r).toEqual({
+      ok: true,
+      status: 200,
+      camera: { name: "xnv_c8083r", ip: "192.168.9.219", mac: "e4:30:22:50:2a:fd" },
+    });
+    expect(JSON.stringify(r)).not.toContain("rtsp");
+    expect(JSON.stringify(r)).not.toContain("s3cret");
+  });
+
+  it.each([
+    ["E4:30:22:50:2A:FD", "e4%3A30%3A22%3A50%3A2a%3Afd"],
+    [" E4:30:22:50:2A:FD ", "e4%3A30%3A22%3A50%3A2a%3Afd"], // surrounding whitespace is not part of the key
+    ["IP:192.168.9.77", "ip%3A192.168.9.77"], // synthetic keys discovery mints for a camera with no lease
+    ["ONVIF_192_168_9_77", "onvif_192_168_9_77"],
+  ])("files %j under the key camera-discovery uses (lower-case, trimmed): %s", async (mac, wire) => {
+    // The same normalisation accept/reject use (WARP-3508's discoveryKey): one
+    // way of talking to camera-discovery about a camera, not one per call.
+    internalFetch.mockResolvedValue(new Response("{}", { status: 200 }));
+    await submitLiveCandidateCredentials(mac, "admin", "s3cret!");
+    expect(String(internalFetch.mock.calls[0][0])).toBe(
+      `http://camera-discovery.test:8085/cameras/discovered/${wire}/credentials`,
+    );
+  });
+
+  it.each([
+    [422, "auth_failed"],
+    [423, "locked"],
+    [422, "no_stream_path"],
+    [502, "unreachable"],
+    [504, "timeout"],
+    [400, "invalid_credentials"],
+    [400, "unsupported_password"],
+    [400, "unsupported_stream_address"],
+    [422, "basic_auth_only"],
+  ])("carries upstream %i / %s through as a structured failure", async (status, code) => {
+    internalFetch.mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Operator-facing prose.", code }), { status }),
+    );
+    const r = await submitLiveCandidateCredentials("AA:BB", "admin", "s3cret!");
+    expect(r).toEqual({ ok: false, status, code, message: "Operator-facing prose." });
+  });
+
+  it("never reflects the password in a failure result", async () => {
+    internalFetch.mockResolvedValue(
+      new Response(JSON.stringify({ detail: "The camera rejected that username and password.", code: "auth_failed" }), {
+        status: 422,
+      }),
+    );
+    const r = await submitLiveCandidateCredentials("AA:BB", "admin", "s3cret!");
+    expect(JSON.stringify(r)).not.toContain("s3cret");
+  });
+
+  it("tells a timeout apart from camera-discovery being down", async () => {
+    // The wait is 60 s; camera-discovery bounds its own work to ~52 s worst
+    // case, so this means it hung, not that it is not running. Calling that
+    // "Camera discovery isn't running" would send the operator off to fix the
+    // wrong thing, and the camera may in fact have been added.
+    internalFetch.mockRejectedValue(
+      Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" }),
+    );
+    const r = await submitLiveCandidateCredentials("AA:BB", "admin", "s3cret!");
+    expect(r.ok).toBe(false);
+    expect(r.code).toBe("timeout");
+    expect(r.message).toMatch(/too long/);
+    expect(JSON.stringify(r)).not.toContain("s3cret");
+  });
+
+  it("reports camera-discovery being down as a 502 unreachable, not a thrown error", async () => {
+    internalFetch.mockRejectedValue(new Error("ECONNREFUSED"));
+    const r = await submitLiveCandidateCredentials("AA:BB", "admin", "s3cret!");
+    expect(r.ok).toBe(false);
+    expect(r.status).toBe(502);
+    expect(r.code).toBe("discovery_unavailable");
+    expect(JSON.stringify(r)).not.toContain("s3cret");
   });
 });

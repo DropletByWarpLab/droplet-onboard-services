@@ -1433,6 +1433,10 @@ export interface TlsCertificate {
   expiringSoon: boolean;
   hqConfigured: boolean;
   checkedAt: string | null;
+  /** WARP-3414: SHA-256 of the served leaf's DER SPKI, uppercase hex in 16
+   *  groups of 4 — what the Droplet apps show. Owner/admin only; null when
+   *  the leaf is unreadable. NOT proof when read over this connection. */
+  fingerprint: string | null;
 }
 
 export async function fetchTlsCertificate(): Promise<TlsCertificate> {
@@ -1457,6 +1461,8 @@ export interface BackupStatus {
   lastAttemptAt: string | null;
   lastRekeyAt: string | null;
   windowHours: number;
+  /** WARP-3610: decided on the host; "unknown" is never presented as safe. */
+  repositoryLocation: "same_disk" | "off_device" | "unknown";
 }
 
 export async function fetchBackupStatus(): Promise<BackupStatus> {
@@ -3342,6 +3348,33 @@ export async function acceptDiscoveredCamera(id: string): Promise<void> {
   }
 }
 
+/**
+ * Add a camera we found on the network by typing its username and password
+ * (WARP-3505). The orchestrator hands them to camera-discovery, which re-probes
+ * the camera with them and adds it. The password travels only in the POST body.
+ *
+ * Failures throw an Error whose `code` is one of AUTH_FAILED, LOCKED,
+ * NO_STREAM_PATH, BASIC_AUTH_ONLY, UNREACHABLE, DISCOVERY_UNAVAILABLE, TIMEOUT,
+ * INVALID_CREDENTIALS, UNSUPPORTED_PASSWORD or UNSUPPORTED_STREAM_ADDRESS so
+ * `translateError` can show the matching next step. The error's own message
+ * never contains the password.
+ */
+export async function addDiscoveredCameraWithCredentials(
+  id: string,
+  username: string,
+  password: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${BASE}/api/cameras/discovered/${encodeURIComponent(id)}/credentials`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    },
+  );
+  if (!res.ok) throw await cameraApiError(res, `Failed to add camera: ${res.status}`);
+}
+
 export async function rejectDiscoveredCamera(id: string): Promise<void> {
   const res = await authFetch(`${BASE}/api/cameras/discovered/${encodeURIComponent(id)}/reject`, {
     method: "POST",
@@ -3582,6 +3615,23 @@ export async function reorderCameraPins(
 }
 
 /**
+ * An Error for a failed camera call that carries the server's machine `code`
+ * (upper-cased, so it indexes friendly-errors' camera table) and the HTTP status.
+ * The message is the server's sentence and is never shown as written — the
+ * translator maps the code to copy — and never contains a credential.
+ */
+async function cameraApiError(
+  res: Response,
+  fallback: string,
+): Promise<Error & { code?: string; status?: number }> {
+  const data = await res.json().catch(() => ({}));
+  const err = new Error(data.error || fallback) as Error & { code?: string; status?: number };
+  err.status = res.status;
+  if (typeof data.code === "string") err.code = data.code.toUpperCase();
+  return err;
+}
+
+/**
  * `added_no_stream` (WARP-3506): the camera IS added, but Frigate is not
  * receiving video from it yet — a wrong address or password, or a camera that
  * did not start. `reason` is operator-facing prose.
@@ -3595,17 +3645,25 @@ export async function addCameraManual(
   name: string,
   rtspUrl: string,
   manufacturer?: string,
-  model?: string
+  model?: string,
+  username?: string,
+  password?: string
 ): Promise<AddCameraResult> {
   const res = await authFetch(`${BASE}/api/cameras`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, rtspUrl, manufacturer, model }),
+    // WARP-3505: the orchestrator merges username/password into the stream URL
+    // server-side. Left out entirely when blank so a URL that already embeds
+    // credentials keeps working untouched.
+    body: JSON.stringify({
+      name,
+      rtspUrl,
+      manufacturer,
+      model,
+      ...(username ? { username, password: password ?? "" } : {}),
+    }),
   });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Failed to add camera: ${res.status}`);
-  }
+  if (!res.ok) throw await cameraApiError(res, `Failed to add camera: ${res.status}`);
   const data = await res.json().catch(() => ({}));
   return data?.status === "added_no_stream"
     ? { status: "added_no_stream", reason: typeof data.reason === "string" ? data.reason : undefined }
@@ -7890,6 +7948,35 @@ export async function getResetStatus(): Promise<ResetStatusResponse> {
   const res = await authFetch(`${BASE}/api/system/reset`);
   if (!res.ok) throw new Error(`Failed to load reset status: ${res.status}`);
   return res.json();
+}
+
+/**
+ * WARP-3640 -- the factory reset's receipt. A reset destroys the audit chain
+ * and the key that signs it, so before dispatching one the owner's browser
+ * saves a sealed export of the activity log (the existing
+ * POST /api/activity/export bundle, verifiable offline per
+ * docs/security/audit-bundle-verification.md). Throws when the bundle cannot be
+ * produced or sealed: the reset must not proceed without the receipt.
+ */
+export async function downloadResetReceipt(): Promise<void> {
+  const res = await authFetch(`${BASE}/api/activity/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) {
+    throw new Error(
+      "We couldn't save a receipt of this Droplet's activity log, so the reset was not started. Try again, or contact Droplet support.",
+    );
+  }
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `droplet-reset-receipt-${new Date().toISOString().slice(0, 10)}.jsonl`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 /**

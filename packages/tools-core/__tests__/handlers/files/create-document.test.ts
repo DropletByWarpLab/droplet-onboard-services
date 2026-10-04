@@ -306,7 +306,7 @@ describe("create_document — write failure mapping", () => {
     expect(res.ok).toBe(false);
     if (!res.ok) {
       expect(res.error.code).toBe("WRITE_FAILED");
-      expect(res.error.message).toBe("nextcloud returned 502");
+      expect(res.error.message).toBe("the File Store returned 502");
     }
   });
 });

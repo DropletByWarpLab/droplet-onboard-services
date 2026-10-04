@@ -43,7 +43,7 @@ import { isExtensionPrincipal } from "../middleware/extension-principal-guard.js
 import type { McpClientPort } from "../services/mcp-client.port.js";
 import { resolveAttributedToolAccess, toolAllowedForPrincipal } from "../services/tool-access.service.js";
 import { EXTENSION_BEARER_STATUSES } from "../services/extension-token.js";
-import { createRequireRecentMfa } from "../middleware/require-recent-mfa.js";
+import { createRequireAdminStepUp } from "../middleware/require-credential-step-up.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { createDeviceIdentityClient } from "../services/device-identity.client.js";
 import {
@@ -77,16 +77,6 @@ import { extensionSelfCallRefusal } from "../services/extension-self-call.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("extensions-route");
-
-/**
- * TODO(WARP-2923): DECISION PENDING (Romain) — does promote also require a
- * recent MFA challenge (createRequireRecentMfa, 60 s window), as
- * POST /api/admin/device-identity/reseal does? The recommendation on the
- * ticket is yes: signing is the crown-jewel operation. Until the decision is
- * recorded this stays false and the hook below is a pass-through; flipping it
- * is this one line (and a route test for the 401 mfa_required path).
- */
-const PROMOTE_REQUIRES_RECENT_MFA = false;
 
 const phase2Schema = z
   .object({
@@ -143,9 +133,13 @@ export function createExtensionsRouter(prisma: PrismaClient, deps: ExtensionsRou
     lifecycle,
     confirmations: createPromoteConfirmationStore(),
   };
-  const promoteMfaGate = PROMOTE_REQUIRES_RECENT_MFA
-    ? createRequireRecentMfa()
-    : (_req: Request, _res: Response, next: NextFunction) => next();
+  // TODO(WARP-2923): DECISION PENDING (Romain) — should promote ALWAYS require a
+  // recent second factor, as POST /api/admin/device-identity/reseal does? The
+  // recommendation on the ticket is yes: signing is the crown-jewel operation.
+  // WARP-3630 does NOT settle that: it only ties promote to the privileged-
+  // account two-step policy (REQUIRE_ADMIN_TWO_STEP, off by default), so with
+  // the policy off promote still needs no recent second factor.
+  const promoteMfaGate = createRequireAdminStepUp(prisma);
 
   const ownerOrAdmin = requireRole("owner", "admin");
   const ownerOnly = requireRole("owner");

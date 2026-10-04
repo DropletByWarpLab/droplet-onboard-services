@@ -24,12 +24,17 @@ vi.mock("../config.js", () => ({
 import { addCamera } from "./frigate.client.js";
 import { makeFakeFrigate } from "../__tests__/helpers/fake-frigate.js";
 
+const preImage = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock("./frigate-config-preimage.js", () => ({ writeConfigPreImage: preImage }));
+const OLD_CONFIG = "cameras:\n  existing:\n    ffmpeg:\n      inputs: []\n";
+
 /**
  * config/set PUT returns {success:true}; /api/restart 200s; anything else is
  * unexpected. `restartStatus` makes the restart call fail.
  */
 function stubSet(response: Record<string, unknown> = { success: true }, status = 200, restartStatus = 200) {
   const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
+    if (url.includes("/api/config/raw")) return new Response(OLD_CONFIG);
     if (url.includes("/api/config/set")) {
       return new Response(JSON.stringify(response), { status });
     }
@@ -52,19 +57,27 @@ function sequence(fetchMock: ReturnType<typeof stubSet>): string[] {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  preImage.mockClear();
 });
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
 describe("addCamera", () => {
+  it("keeps the exact previous authored YAML before a camera can overwrite its fields", async () => {
+    const fetchMock = stubSet();
+    await addCamera("existing", "rtsp://192.168.9.60/new_path");
+    expect(preImage).toHaveBeenCalledWith(OLD_CONFIG);
+    expect(preImage.mock.invocationCallOrder[0]).toBeLessThan(fetchMock.mock.invocationCallOrder[1]);
+  });
+
   it("PUTs a merge envelope to /api/config/set with only the new camera block", async () => {
     const fetchMock = stubSet();
 
     const ok = await addCamera("Front Door", "rtsp://192.168.100.101:554/stream1");
     expect(ok).toBe(true);
 
-    const [url, init] = fetchMock.mock.calls[0];
+    const [url, init] = fetchMock.mock.calls[1];
     expect(String(url)).toBe("http://frigate:5000/api/config/set");
     // PUT with the 0.17 envelope — NOT the removed POST, NOT config/save.
     expect((init as RequestInit).method).toBe("PUT");
@@ -90,7 +103,7 @@ describe("addCamera", () => {
     const fetchMock = stubSet();
     await addCamera("Front Door", "rtsp://192.168.100.101:554/stream1");
 
-    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    const body = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string);
     const record = body.config_data.cameras.front_door.record;
 
     // `record.enabled: true` on its own is the bug, not the fix: Frigate
@@ -111,7 +124,7 @@ describe("addCamera", () => {
   it("honors detect=false", async () => {
     const fetchMock = stubSet();
     await addCamera("doorbell", "rtsp://10.0.0.9/s", false);
-    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    const body = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string);
     expect(body.config_data.cameras.doorbell.detect.enabled).toBe(false);
   });
 
@@ -144,7 +157,7 @@ describe("addCamera — one canonical key (WARP-3506)", () => {
 
     await addCamera(typed, "rtsp://10.0.0.9/s");
 
-    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    const body = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string);
     expect(Object.keys(body.config_data.cameras)).toEqual([key]);
   });
 
@@ -165,7 +178,7 @@ describe("addCamera — applies the write (WARP-3506)", () => {
     const ok = await addCamera("front_door", "rtsp://10.0.0.9/s");
 
     expect(ok).toBe(true);
-    expect(sequence(fetchMock)).toEqual(["PUT /api/config/set", "POST /api/restart"]);
+    expect(sequence(fetchMock)).toEqual(["GET /api/config/raw", "PUT /api/config/set", "POST /api/restart"]);
   });
 
   it("does not restart when Frigate refused the config (nothing changed)", async () => {
@@ -173,7 +186,7 @@ describe("addCamera — applies the write (WARP-3506)", () => {
 
     await addCamera("front_door", "rtsp://10.0.0.9/s");
 
-    expect(sequence(fetchMock)).toEqual(["PUT /api/config/set"]);
+    expect(sequence(fetchMock)).toEqual(["GET /api/config/raw", "PUT /api/config/set"]);
   });
 
   it("still reports the add when the restart call itself fails — verification is the arbiter", async () => {

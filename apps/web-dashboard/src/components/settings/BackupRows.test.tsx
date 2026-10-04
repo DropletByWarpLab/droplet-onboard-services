@@ -16,7 +16,7 @@ vi.mock("@/lib/auth", () => ({
   useAuth: () => ({ user: { id: "u1", username: "stefan", role: mockRole } }),
 }));
 
-import { BackupRows, BACKUP_ACTION, backupCopy } from "./BackupRows";
+import { BackupRows, BACKUP_ACTION, backupCopy, backupLocationNote } from "./BackupRows";
 import type { BackupStatus } from "@/lib/api";
 
 function st(over: Partial<BackupStatus> = {}): BackupStatus {
@@ -29,6 +29,7 @@ function st(over: Partial<BackupStatus> = {}): BackupStatus {
     lastAttemptAt: "2026-09-22T03:20:00.000Z",
     lastRekeyAt: null,
     windowHours: 48,
+    repositoryLocation: "unknown",
     ...over,
   };
 }
@@ -36,6 +37,14 @@ function st(over: Partial<BackupStatus> = {}): BackupStatus {
 beforeEach(() => {
   fetchBackupStatus.mockReset();
   mockRole = "owner";
+});
+
+describe("backupLocationNote (WARP-3610)", () => {
+  it("only a same-disk repository gets the note; off_device and unknown do not", () => {
+    expect(backupLocationNote(st({ repositoryLocation: "same_disk" }))).toMatch(/own disk/);
+    expect(backupLocationNote(st({ repositoryLocation: "off_device" }))).toBeNull();
+    expect(backupLocationNote(st({ repositoryLocation: "unknown" }))).toBeNull();
+  });
 });
 
 describe("backupCopy", () => {

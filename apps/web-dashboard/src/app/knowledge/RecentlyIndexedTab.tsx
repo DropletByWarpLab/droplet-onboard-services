@@ -206,7 +206,7 @@ export function RecentlyIndexedTab({ source }: Props) {
                         `}
                       >
                         <SourceIcon size={10} />
-                        {item.source === "brain" ? "Brain" : "Nextcloud"}
+                        {item.source === "brain" ? "Brain" : "File Store"}
                       </span>
                     </div>
                     <p
@@ -286,7 +286,7 @@ function EmptyKnowledgeState() {
       <Clock size={28} className="text-label-quaternary mx-auto mb-3" />
       <p className="type-subheadline text-label-primary">No files indexed yet.</p>
       <p className="type-footnote text-label-tertiary mt-1">
-        Drop a file in chat or upload to your Droplet&apos;s Nextcloud at{" "}
+        Drop a file in chat or upload to your Droplet&apos;s File Store at{" "}
         <a href="/files" className="text-accent hover:underline">
           /files
         </a>
