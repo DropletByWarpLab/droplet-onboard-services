@@ -36,6 +36,7 @@ import {
   Laptop,
   Lightbulb,
   LayoutDashboard,
+  LifeBuoy,
   Mail,
   MessageSquare,
   MessagesSquare,
@@ -222,7 +223,7 @@ export type NavGroup = {
    WARP-2967 — four groups and a Settings front door:
 
      WORK      Overview · Ask AI · Files · Messages · Email · Calendar · Workshop
-     BUSINESS  Insights [Brief, Reports] · Customers · Projects [Money] · Practice
+     BUSINESS  Insights [Brief, Reports] · Customers [Support] · Projects [Money] · Practice
      SYSTEMS   Cameras [Events] · Network [Voice, Remote access] · Devices
      ADMIN     Settings
 
@@ -471,6 +472,29 @@ export const NAV_GROUPS: NavGroup[] = [
         icon: Building2,
         roles: ["owner", "admin", "family"],
         requiresModule: "crm",
+        children: [
+          // WARP-3528 (ADR-069 §1) — the service desk: customer requests, the
+          // replies and the internal notes behind them. Filed under Customers
+          // as the other half of the same relationship, and a child rather than
+          // a fifth row because an owner already sees fifteen (the four-groups
+          // cap).
+          //
+          // Nesting is filing, not a gate. Support keeps its own `support`
+          // module gate and there is no `requires` edge to projects, so with
+          // CRM off `visibleItems` promotes it into Customers' slot
+          // (`passesParentGate`), as it does Money under Projects. Role-gated
+          // like its parent: the box refuses `/api/support` below the member
+          // floor (`refuseBelowFloor`), so a guest is never offered it, promoted
+          // or not.
+          {
+            href: "/support",
+            label: "Support",
+            icon: LifeBuoy,
+            roles: ["owner", "admin", "family"],
+            requiresModule: "support",
+            keywords: ["tickets", "help desk", "service desk", "requests"],
+          },
+        ],
       },
       // ADR-026: native PM surface, rendered off /api/pm/* under the dashboard
       // session — no embedded stack, no second login. WARP-1154/1155: hidden
