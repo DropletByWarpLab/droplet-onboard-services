@@ -9,8 +9,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY services/doc-render/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY services/doc-render/requirements.lock .
+RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements.lock
 COPY services/doc-render/ .
 
 # Sibling shape (web-fetch/routing/camera-discovery): ship the FIPS-provider
