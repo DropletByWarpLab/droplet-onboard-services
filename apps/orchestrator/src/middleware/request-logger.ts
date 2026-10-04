@@ -31,6 +31,51 @@ function scrubReq(req: { url?: string; query?: Record<string, unknown> } & Recor
   return out;
 }
 
+/**
+ * The pino `redact` paths of the request logger. Exported so a test can prove
+ * each one is a valid, effective path on a bare logger (pino-http's own
+ * serializers drop `req.body` / `res.body` before redaction runs, so the body
+ * entries are defence in depth that no end-to-end request can exercise).
+ */
+export const REQUEST_LOG_REDACT_PATHS: readonly string[] = [
+  "req.headers.authorization",
+  "req.headers.cookie",
+  'res.headers["set-cookie"]',
+  // WARP-1474: the overlay QR link token is a bearer-equivalent secret —
+  // it's returned to the owner ONCE and only its sha256 hash is persisted.
+  // Redact it (and the client sign-key PEM) on any request/response body
+  // that a future serializer or a `req.log.info({ req/res })` call might
+  // emit, so a token can never ride out of the box in a log bundle.
+  "req.body.token",
+  // AC2 defense-in-depth: a client that passes the redeem token as a
+  // query param (?token=…) lands it under `req.query.token`, which the
+  // default pino req serializer DOES emit — redact it alongside the body
+  // copy so neither shape rides out in a log bundle. (The raw `req.url`
+  // is unaffected; the routes take the token in the JSON body, not the
+  // query string.)
+  "req.query.token",
+  // WARP-3122: the signed-segment signature (see SECRET_QUERY_PARAMS,
+  // which the req serializer also scrubs from `req.query`).
+  "req.query.sig",
+  "req.body.sign_public_key_pem",
+  'req.headers["x-overlay-pop"]',
+  // WARP-3193 SEC-DATA-2: the user's Nextcloud app-password rides on
+  // every file tool call; the other two carry service credentials.
+  'req.headers["x-nextcloud-token"]',
+  'req.headers["x-droplet-auth"]',
+  'req.headers["x-api-key"]',
+  "res.body.token",
+  // WARP-3513: a bay drive's recovery key is the master secret for the drive's
+  // data. POST /storage/command/confirm returns it ONCE (the confirm that runs the
+  // one-time reveal) as `{ recoveryKey }` (the host calls it `recovery_key`);
+  // redact both spellings on any request/response body a future serializer might
+  // emit, so the key can never ride out of the box in a log bundle.
+  "res.body.recoveryKey",
+  "res.body.recovery_key",
+  "req.body.recoveryKey",
+  "req.body.recovery_key",
+];
+
 // Dedicated pino-http base logger. Its `mixin` emits `requestId` ONLY while a
 // request context is live — covering in-handler `req.log.*` lines. It must NOT
 // emit the `no-request-context` marker: pino serialises a child logger's
@@ -57,35 +102,7 @@ export function createRequestLogger(opts: {
     // the device). Redaction must live on THIS base logger — pino-http only
     // applies its own `redact` option when it creates the logger itself.
     redact: {
-      paths: [
-        "req.headers.authorization",
-        "req.headers.cookie",
-        'res.headers["set-cookie"]',
-        // WARP-1474: the overlay QR link token is a bearer-equivalent secret —
-        // it's returned to the owner ONCE and only its sha256 hash is persisted.
-        // Redact it (and the client sign-key PEM) on any request/response body
-        // that a future serializer or a `req.log.info({ req/res })` call might
-        // emit, so a token can never ride out of the box in a log bundle.
-        "req.body.token",
-        // AC2 defense-in-depth: a client that passes the redeem token as a
-        // query param (?token=…) lands it under `req.query.token`, which the
-        // default pino req serializer DOES emit — redact it alongside the body
-        // copy so neither shape rides out in a log bundle. (The raw `req.url`
-        // is unaffected; the routes take the token in the JSON body, not the
-        // query string.)
-        "req.query.token",
-        // WARP-3122: the signed-segment signature (see SECRET_QUERY_PARAMS,
-        // which the req serializer also scrubs from `req.query`).
-        "req.query.sig",
-        "req.body.sign_public_key_pem",
-        'req.headers["x-overlay-pop"]',
-        // WARP-3193 SEC-DATA-2: the user's Nextcloud app-password rides on
-        // every file tool call; the other two carry service credentials.
-        'req.headers["x-nextcloud-token"]',
-        'req.headers["x-droplet-auth"]',
-        'req.headers["x-api-key"]',
-        "res.body.token",
-      ],
+      paths: [...REQUEST_LOG_REDACT_PATHS],
     },
     mixin() {
       const id = getRequestId();

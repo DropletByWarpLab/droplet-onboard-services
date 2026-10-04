@@ -49,6 +49,8 @@
 #                                (default /var/lib/droplet-bridge/pool-spool)
 #   DROPLET_POOL_SCRIPT=...      override the pool script path
 #                                (default /usr/local/sbin/droplet-storage-pool.sh)
+#   DROPLET_POOL_TMPDIR=...      directory for the stdout/stderr capture files
+#                                (default /run — tmpfs; WARP-3513)
 # =============================================================================
 set -euo pipefail
 
@@ -95,8 +97,21 @@ PARAMS_JSON="$(parse_request params)"
 # The pool script's own allow-list + hard pre-flight (typed double-confirm,
 # refuse mounted / has-data / OS-disk) is the real gate — running as root here
 # is precisely what makes those blkid/findmnt probes trustworthy.
-OUT_FILE="$(mktemp)"
-ERR_FILE="$(mktemp)"
+#
+# WARP-3513: the pool script's stdout is where the ONE-TIME LUKS recovery-key
+# reveal (recovery_key_reveal) travels. Hold the capture files on tmpfs (/run,
+# root-only) instead of mktemp's default /tmp — the root LV is not encrypted,
+# so a secret written there would leave remnants on the plain disk.
+# DROPLET_POOL_TMPDIR overrides the directory (tests only); a missing or
+# unwritable one falls back to mktemp's default rather than failing.
+CAPTURE_DIR="${DROPLET_POOL_TMPDIR:-/run}"
+if [ -d "$CAPTURE_DIR" ] && [ -w "$CAPTURE_DIR" ]; then
+  OUT_FILE="$(mktemp -p "$CAPTURE_DIR")"
+  ERR_FILE="$(mktemp -p "$CAPTURE_DIR")"
+else
+  OUT_FILE="$(mktemp)"
+  ERR_FILE="$(mktemp)"
+fi
 trap 'rm -f "$OUT_FILE" "$ERR_FILE"' EXIT
 set +e
 "$POOL_SCRIPT" "$OPERATION" "$PARAMS_JSON" >"$OUT_FILE" 2>"$ERR_FILE"
