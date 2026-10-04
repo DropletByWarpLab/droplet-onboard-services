@@ -1,14 +1,17 @@
 # Internal service-to-service mTLS (WARP-236) + MQTT mTLS (WARP-235)
 
-> **Current state (corrected 2026-10-03, WARP-3626, WARP-3663).** The MQTT broker
-> requires client certificates today (the shared MQTT password is retired; MQTT
-> identity is the client-cert CN). **Internal HTTP/gRPC mTLS is wired but off by
-> default**: it is enforced only when `DROPLET_INTERNAL_TLS=1`, and the shipped
-> default is `0`, so first-party service-to-service hops are plaintext with
-> bearer tokens unless an operator enables the flag. The host-side device bridge
-> binds all interfaces (`BRIDGE_BIND=0.0.0.0` in the shipped systemd unit) and is
-> gated by its own bearer token; it is not loopback-only. Making mTLS the
-> default is planned work, not part of the current posture.
+> **Default posture (read this first).** Internal mutual TLS for HTTP and gRPC is
+> **dormant by default**: `DROPLET_INTERNAL_TLS` ships as `0` (written by
+> `scripts/lib/secrets.sh`, defaulted `:-0` in `docker/docker-compose.yml`) and
+> nothing turns it on. On a box as shipped, only Mosquitto (client-cert CN
+> identity), Postgres (TLS 1.3 + SCRAM) and Redis (TLS-only + per-service ACLs)
+> are encrypted and authenticated by default. Every HTTP and gRPC hop between
+> the first-party services is plaintext on the compose bridge and relies on a
+> static per-service bearer token; `voice-io`, `rag-eval` and `file-indexer`
+> gained such a fail-closed bearer in WARP-3625 (before that they relied on
+> network position alone). The rest of this document describes the design and
+> the behaviour **when the flag is on**. Flipping the default is tracked in
+> WARP-2565 and needs live-box validation first.
 
 ## Target design
 
@@ -127,7 +130,7 @@ flag is off.
 | ops-console inbound :8087 | loopback-published for the operator's tunneled BROWSER, which cannot present internal client certs; bearer token + 127.0.0.1 bind + reverse tunnel are the gate. It IS an mTLS *client* for its mesh probes (row 15) — the probe rewrite is scoped to the mesh registry names so exempt targets are never probed over TLS. |
 | mcp-server inbound :9090 | JWT-gated surface for OFF-stack consumers (droplet-local-LLM, Claude Desktop) that hold no internal identity. It is an mTLS *client* toward the orchestrator/routing/switch (rows 5, 12). |
 | nginx → web-dashboard :3001 / nextcloud / docserver | user plane; holds no service secrets — the browser is the real client and the gateway terminates the public TLS. |
-| device-bridge inbound :9090 (host) | host listener with its own bearer token; a host python stdlib server with no TLS listener support worth adding. The in-code default bind is `127.0.0.1`, but the shipped `droplet-device-bridge.service` sets `BRIDGE_BIND=0.0.0.0` so the orchestrator container can reach it through the host-gateway leg, which stays plain http. Every mutating endpoint and credential-bearing read requires the bearer token, and the bridge refuses to start without it. Narrowing the bind or adding transport protection for this leg is planned work. |
+| device-bridge inbound :9090 (host) | host listener bound `BRIDGE_BIND=0.0.0.0` by `droplet-device-bridge.service` (the in-code default is 127.0.0.1, the unit overrides it): the orchestrator container reaches it at the `droplet_default` gateway IP while host callers use 127.0.0.1, which one bind address cannot serve. Protected by its own bearer on every route except `/health`; a host python stdlib server with no TLS listener support worth adding, so orchestrator → bridge calls stay plain http on the host-gateway leg. **Not loopback-only**: it is reachable from the LAN and uplink until the host input firewall (WARP-3574, `docs/security/host-input-firewall.md`) is enabled, which is why plaintext on this leg is an accepted risk, not a closed one. |
 | orchestrator → frigate :5000, device-bridge :9090, nextcloud WebDAV, HQ issuance | third-party / host / WAN surfaces outside the compose mesh (frigate is loopback-published; HQ is public TLS). |
 | ai-gateway → the inference runtime (dmr :12434 default / ollama :11434 opt-in), ollama-manager; voice-io → wyoming STT/TTS | third-party engines: bridge-internal or raw-TCP protocols with no/immaterial TLS support. |
 | orchestrator → device-identity-svc | Unix socket, filesystem-scoped — no network hop to encrypt. |

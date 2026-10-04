@@ -153,7 +153,7 @@ async function handler(
 const tool: Tool = {
   name: "search_content",
   description:
-    "Hybrid (BM25 + vector + cross-encoder reranker) search across the user's Nextcloud documents and uploaded brain items. Returns the most relevant text snippets ranked by reranker score, each with source / path / chunk-index / optional page-number / score.",
+    "Hybrid (BM25 + vector + cross-encoder reranker) search across the user's File Store documents and uploaded brain items. Returns the most relevant text snippets ranked by reranker score, each with source / path / chunk-index / optional page-number / score.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

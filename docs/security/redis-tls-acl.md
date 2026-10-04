@@ -28,17 +28,14 @@ evidence: `scripts/host/droplet-verify-encryption.sh` checks
 
 Every user carries `resetchannels` (no pub/sub) and starts from `-@all`.
 
-> **Current state (2026-10-03, WARP-3663, fix tracked in WARP-3605).** The
-> orchestrator, ai-gateway and mcp-server users each have a distinct generated
-> password. The `nextcloud` user does not: the generated `.env` sets
-> `REDIS_HOST_PASSWORD` to the same value as `REDIS_PASSWORD`
-> (`scripts/lib/secrets.sh`, and `_generate_redis_acl` falls back to
-> `REDIS_PASSWORD` when `REDIS_HOST_PASSWORD` is unset), so the `default` and
-> `nextcloud` users share one password. A holder of that value can authenticate
-> as `nextcloud` and use its wider key and command set, so the `default` user's
-> `+ping` restriction is not a privilege boundary until WARP-3605 gives
-> `nextcloud` its own password. A distinct password for each of the five
-> users, as the password column above shows, is the Target.
+**Every ACL user has its own password (WARP-3605).** Redis checks each
+username/password pair independently, so two users that share a password share a
+hash and either password opens both accounts. `generate_env` therefore writes a
+separate random value for each of `REDIS_PASSWORD`, `REDIS_PASSWORD_*` and
+`REDIS_HOST_PASSWORD`, and `_generate_redis_acl` refuses to write `users.acl`
+(setup fails with the colliding user names) if any two users hash the same.
+Before this change `REDIS_HOST_PASSWORD` was written equal to `REDIS_PASSWORD`,
+which let the default (ping-only) credential authenticate as `nextcloud`.
 
 ## Client wiring
 
@@ -85,10 +82,9 @@ Every user carries `resetchannels` (no pub/sub) and starts from `-@all`.
   context, which is the only way to pin the internal CA for the session
   socket. Re-verify these against `redis_session.c` if the image pin moves.
 - The `.env` `REDIS_URL` (default user) is ping-only by design — anything
-  still using it for data fails loudly with NOPERM. Note the `default` and
-  `nextcloud` users currently share a password (see the current-state note
-  above; WARP-3605), so the ping-only restriction does not stop a holder of
-  that password from authenticating as `nextcloud`.
+  still using it for data fails loudly with NOPERM instead of silently
+  riding a shared credential. That only holds because no other ACL user
+  shares its password (see above); the generator enforces it.
 - Dev (`docker-compose.dev.yml`) keeps its separate no-auth plaintext cache.
 
 ## Rotation runbook
@@ -102,8 +98,12 @@ Every user carries `resetchannels` (no pub/sub) and starts from `-@all`.
 - **ACL passwords:** rotate the value(s) in `.env`
   (`REDIS_PASSWORD*`, `REDIS_HOST_PASSWORD`), re-run
   `./setup.sh --sync-secrets` (regenerates `data/secrets/redis/users.acl`
-  from the new values — idempotent, hash-only), then
-  `docker compose … restart cache <affected clients>`.
+  from the new values — idempotent, hash-only), then recreate the cache and
+  its affected clients so they pick up the new ACL file and the new
+  environment: `docker compose … up -d --force-recreate cache <affected clients>`
+  (a bare `restart` does not re-read the environment). The Redis keyspace is
+  AOF-persisted and keyed independently of the passwords, so sessions
+  survive.
   **Keep `REDIS_HOST_PASSWORD` alphanumeric.** Since WARP-1607 it is
   interpolated into a URL (PHP's `session.save_path`), and phpredis splits
   that on whitespace/commas then URL-decodes each value — so a space, comma,
@@ -112,8 +112,13 @@ Every user carries `resetchannels` (no pub/sub) and starts from `-@all`.
   `setup.sh`'s generator only emits `[A-Za-z0-9]`; hand-rotation must match.
   Follow-up: teach `_generate_redis_acl` to reject an unsafe value outright.
 - **Upgrade path for existing boxes:** `migrate_env` backfills the three
-  per-service passwords and rewrites the legacy plaintext `REDIS_URL`;
-  `materialize_artifacts` writes the ACL file on every setup run.
+  per-service passwords, gives `REDIS_HOST_PASSWORD` its own value when it
+  still equals `REDIS_PASSWORD` (a distinct value is never touched), and
+  rewrites the legacy plaintext `REDIS_URL`; `materialize_artifacts` writes
+  the ACL file on every setup run. `setup.sh` followed by the normal stack
+  `up -d` recreates `cache` and `nextcloud` together (both see changed
+  configuration); after `--sync-secrets` alone, run
+  `docker compose … up -d --force-recreate cache nextcloud`.
 
 ## Verification
 

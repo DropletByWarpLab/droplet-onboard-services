@@ -65,7 +65,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   };
   const res = await ctx.http.nextcloud.get(`/download?path=${encodeURIComponent(path)}`, { headers });
   if (!res.ok) {
-    return err("READ_FAILED", `nextcloud returned ${res.status}`);
+    return err("READ_FAILED", `the File Store returned ${res.status}`);
   }
   const contentType = res.headers.get("content-type") ?? "";
   let content: string | null = null;
@@ -129,7 +129,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "summarize_file",
   description:
-    "Read a file on the Droplet's Nextcloud and return a concise summary of its contents, optionally focused on a given topic. Very large files are summarized from their first portion only. Binary files cannot be summarized.",
+    "Read a file on the Droplet's File Store and return a concise summary of its contents, optionally focused on a given topic. Very large files are summarized from their first portion only. Binary files cannot be summarized.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

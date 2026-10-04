@@ -120,6 +120,9 @@ async function drainStage(_t: string, _u: string, uploadId: string, body: AsyncI
   staged.set(uploadId, Buffer.concat(chunks));
 }
 
+/** YYYY-MM-DD `n` days from now (WARP-3586: public-link expiry is capped at 90 days). */
+const inDays = (n: number) => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10);
+
 describe("File Operations (Nextcloud-backed routes)", () => {
   let app: ReturnType<typeof createApp>;
   // The mocked @prisma/client (setup.ts) returns the SAME singleton object
@@ -1593,8 +1596,8 @@ describe("File Operations (Nextcloud-backed routes)", () => {
           path: "/a.txt",
           shareType: 3,
           permissions: 1,
-          expireDate: "2027-12-31",
-          password: "s3cret",
+          expireDate: inDays(60),
+          password: "s3cret-passphrase",
           note: "please review",
         });
       expect(res.status).toBe(200);
@@ -1605,8 +1608,8 @@ describe("File Operations (Nextcloud-backed routes)", () => {
         expect.objectContaining({
           shareType: 3,
           permissions: 1,
-          expireDate: "2027-12-31",
-          password: "s3cret",
+          expireDate: inDays(60),
+          password: "s3cret-passphrase",
           note: "please review",
         })
       );
