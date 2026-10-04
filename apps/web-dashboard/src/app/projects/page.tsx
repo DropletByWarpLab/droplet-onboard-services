@@ -42,6 +42,7 @@ import { BoardView, ListView, PlaceholderView, type Domain } from "@/components/
 import { ViewSwitcher, SavedViews, FilterBar, type ProjectView, type SavedView } from "@/components/projects/chrome";
 import { DetailDrawer } from "@/components/projects/detail";
 import { NewItemModal, NewProjectModal } from "@/components/projects/modals";
+import { ProjectMenu } from "@/components/projects/settings/ProjectMenu";
 
 function matchQuery(item: PmWorkItem, q: string): boolean {
   const needle = q.toLowerCase();
@@ -238,6 +239,19 @@ function ProjectsWorkspace(): JSX.Element {
             <PmIcon name="plus" size={14} /> New item
           </button>
         )}
+        {/* WARP-3520 — Project settings (states, labels, fields, details) and the
+            archived items. Field definitions are owner / admin / the project's lead;
+            deleting an archived item for good is owner / admin. */}
+        {project && (
+          <ProjectMenu
+            project={project}
+            readOnly={readOnly}
+            canDeleteItems={role === "owner" || role === "admin"}
+            canManageFields={role === "owner" || role === "admin" || (!!user?.id && project.leadId === user.id)}
+            onProjectChanged={() => void mutateProjects()}
+            onItemsChanged={refreshAll}
+          />
+        )}
         <button className="btn" type="button" onClick={refreshAll} aria-label="Refresh">
           <PmIcon name="refresh" size={15} />
         </button>
@@ -317,6 +331,8 @@ function ProjectsWorkspace(): JSX.Element {
       {drawer && (
         <DetailDrawer
           item={drawer}
+          readOnly={readOnly}
+          canDelete={role === "owner" || role === "admin"}
           onClose={() => setDrawer(null)}
           onChanged={async () => {
             const fresh = await mutateItems();

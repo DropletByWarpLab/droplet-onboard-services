@@ -36,6 +36,7 @@ export function MenuButton({
   icon = "more",
   align = "right",
   className = "pm-iconbtn",
+  buttonRef,
 }: {
   /** Accessible name of the trigger, e.g. "Item actions". */
   label: string;
@@ -45,6 +46,10 @@ export function MenuButton({
   align?: "left" | "right";
   /** Class of the trigger button. */
   className?: string;
+  /** The trigger, for a caller that must put focus back on it itself (a dialog
+   *  the menu opened is unmounted rather than closed, so the Dialog primitive's
+   *  own focus restore never runs). */
+  buttonRef?: { current: HTMLButtonElement | null };
 }): JSX.Element | null {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLSpanElement>(null);
@@ -122,7 +127,10 @@ export function MenuButton({
     // panel's `--bg-canvas` / `--border` tokens are defined there.
     <span className="pm-menu-wrap pm-scope" ref={wrapRef}>
       <button
-        ref={triggerRef}
+        ref={(el) => {
+          triggerRef.current = el;
+          if (buttonRef) buttonRef.current = el;
+        }}
         type="button"
         className={className}
         aria-label={label}
@@ -151,7 +159,10 @@ export function MenuButton({
               tabIndex={-1}
               className={"pm-menu-item" + (item.danger ? " danger" : "")}
               onClick={() => {
-                setOpen(false);
+                // Focus goes back to the trigger BEFORE the action runs: an action
+                // that opens a dialog records the focused element as the place to
+                // return to, and a removed menu item is not one.
+                close();
                 item.onSelect();
               }}
             >

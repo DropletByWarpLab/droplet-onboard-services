@@ -30,6 +30,7 @@ export function DraftInput({
   step,
   maxLength,
   disabled,
+  required,
   validate,
   onCommit,
 }: {
@@ -41,6 +42,8 @@ export function DraftInput({
   step?: string;
   maxLength?: number;
   disabled?: boolean;
+  /** A name that cannot be cleared: an empty draft reverts instead of committing. */
+  required?: boolean;
   validate?: (text: string) => string | null;
   /** Called with the trimmed text when it differs from `value`; `""` means clear. */
   onCommit: (text: string) => void;
@@ -55,7 +58,7 @@ export function DraftInput({
 
   const commit = () => {
     const text = draft.trim();
-    if (text === value) {
+    if (text === value || (text === "" && required)) {
       setDraft(value);
       setError(null);
       return;
