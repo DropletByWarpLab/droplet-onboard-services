@@ -10,8 +10,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY services/routing/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY services/routing/requirements.lock .
+RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements.lock
 COPY services/routing/ .
 
 # WARP-229: ship the FIPS-provider OpenSSL config + shared self-test
