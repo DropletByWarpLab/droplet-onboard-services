@@ -13,10 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Install deps before copying source so re-edits don't bust the layer.
-COPY services/ops-console/requirements.txt \
-     services/ops-console/requirements-dev.txt \
+COPY services/ops-console/requirements-dev.lock /app/
      /app/
-RUN pip install --no-cache-dir -r /app/requirements-dev.txt
+RUN pip install --no-cache-dir --require-hashes --no-deps -r /app/requirements-dev.lock
 
 COPY services/ops-console/ /app/
 
