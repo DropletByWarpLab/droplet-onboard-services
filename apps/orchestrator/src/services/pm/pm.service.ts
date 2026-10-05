@@ -1984,6 +1984,7 @@ export async function createWorkItem(
           field: "cycle",
           oldValue: null,
           newValue: input.cycleId,
+          ...(imp ? { notifyStatus: "not_needed" as const } : {}),
         });
       }
       // WARP-2587: a create WITH assignees is an assignment, and `created`
@@ -2253,7 +2254,7 @@ export async function updateWorkItem(
     // `cycle_added` row {A -> B}; the burndown reads such a row as a leave for A
     // and a join for B, so the verb only has to say which side is non-null.
     if (previousCycleId !== undefined) {
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: fields.cycleId ? "cycle_added" : "cycle_removed",
