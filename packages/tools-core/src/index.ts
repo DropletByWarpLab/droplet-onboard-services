@@ -35,6 +35,8 @@ export {
   maxAclVersion,
 } from "./corpus-scope.js";
 export type { VisibleDept, CorpusCaller } from "./corpus-scope.js";
+export { SHARED_DRIVE_INDEX_USER, isSharedDrivePath, authorizeSharedDriveHits } from "./shared-drive-access.js";
+export type { SharedDriveHit } from "./shared-drive-access.js";
 // WARP-2305 — generic enforcement of `requiresConfirmation` at dispatch,
 // plus the runtime deny tier. `docs/tool-confirmation-contract.md`.
 export {

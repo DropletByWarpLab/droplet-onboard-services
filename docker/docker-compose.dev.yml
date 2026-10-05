@@ -34,7 +34,7 @@ services:
 
   # ─── Postgres (with pgvector for the orchestrator's embeddings) ──
   db:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg16@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
     container_name: droplet-dev-db
     restart: unless-stopped
     environment:
@@ -59,7 +59,7 @@ services:
 
   # ─── Redis (sessions, BullMQ queues) ─────────────────────────────
   cache:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     container_name: droplet-dev-cache
     restart: unless-stopped
     # No password in dev — production sets one via REDIS_PASSWORD.
@@ -76,7 +76,7 @@ services:
 
   # ─── MQTT broker (camera events, smart-home state, chat signals) ─
   broker:
-    image: eclipse-mosquitto:2
+    image: eclipse-mosquitto:2@sha256:38c0da4f2ef84284d47b3b3eeea1cb3bdeabe81ee10caf0cd5c5ff61ee3ea408
     container_name: droplet-dev-broker
     restart: unless-stopped
     # Anonymous allowed for dev — production runs the WARP-235 mTLS-only
@@ -100,7 +100,7 @@ services:
 
   # ─── Nextcloud (Files surface — dashboard's /files tab) ──────────
   nextcloud:
-    image: nextcloud:29-apache
+    image: nextcloud:29-apache@sha256:a7fbfcd4759bdd19b8fb8b1044b47ee3a9471d2e2c8bc68d56a2e671f86cebd2
     container_name: droplet-dev-nextcloud
     restart: unless-stopped
     depends_on:

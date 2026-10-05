@@ -526,7 +526,7 @@ describe("(d) groupfolder-id reassignment simulation", () => {
     const beforeRes = await request(app).get("/api/files/search/content?q=q1&mode=keyword");
     expect(beforeRes.status).toBe(200);
     const beforeParams = searchByLexicalMock.mock.calls.at(-1)![1] as { additionalUserIds: string[] };
-    expect(beforeParams.additionalUserIds).toEqual([`__dept_${DEPT_ID}__`]);
+    expect(beforeParams.additionalUserIds).toEqual([`__dept_${DEPT_ID}__`, "__droplet_share__"]);
 
     // Simulate an NC reinstall: the OLD groupfolder id (7) is gone; the
     // SAME mount point ("Finance") now lives under a NEW id (55) — exactly
@@ -553,7 +553,7 @@ describe("(d) groupfolder-id reassignment simulation", () => {
     const afterRes = await request(app).get("/api/files/search/content?q=q1&mode=keyword");
     expect(afterRes.status).toBe(200);
     const afterParams = searchByLexicalMock.mock.calls.at(-1)![1] as { additionalUserIds: string[] };
-    expect(afterParams.additionalUserIds).toEqual([`__dept_${DEPT_ID}__`]);
+    expect(afterParams.additionalUserIds).toEqual([`__dept_${DEPT_ID}__`, "__droplet_share__"]);
     expect(afterParams.additionalUserIds).toEqual(beforeParams.additionalUserIds);
   });
 });

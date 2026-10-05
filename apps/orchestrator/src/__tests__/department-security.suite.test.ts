@@ -396,7 +396,7 @@ describe("(a) revocation end-to-end", () => {
     const beforeParams = searchByLexicalMock.mock.calls.at(-1)![1] as {
       additionalUserIds: string[];
     };
-    expect(beforeParams.additionalUserIds).toEqual([`__dept_${dept.id}__`]);
+    expect(beforeParams.additionalUserIds).toEqual([`__dept_${dept.id}__`, "__droplet_share__"]);
 
     // ACT: remove the membership through the real service function — the
     // same one routes/departments.ts's DELETE /members/:userId calls.
@@ -416,7 +416,9 @@ describe("(a) revocation end-to-end", () => {
     const afterParams = searchByLexicalMock.mock.calls.at(-1)![1] as {
       additionalUserIds: string[];
     };
-    expect(afterParams.additionalUserIds).toEqual([]);
+    // SMB candidates still require the caller's live per-file WebDAV access;
+    // removing department membership removes only that department's corpus.
+    expect(afterParams.additionalUserIds).toEqual(["__droplet_share__"]);
 
     // AFTER (3): the metadata gate (checkSpaceAccess) now denies — the row
     // is gone entirely (NC push succeeded synchronously in this scenario).

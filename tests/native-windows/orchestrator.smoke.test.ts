@@ -76,7 +76,17 @@ vi.mock("../../apps/orchestrator/src/services/session.service.js", () => ({
     return record ? { endsAt: new Date((record.createdAt + 43_200) * 1000) } : null;
   },
   deleteSession: async (sid: string) => { fixture.sessions.delete(sid); },
-  revokeAllSessions: async () => 0,
+  listUserSessions: async (userId: string) => [...fixture.sessions.entries()]
+    .filter(([, record]) => record.userId === userId).map(([sid, record]) => ({ sid, ...record })),
+  idleLimitSecondsForRole: () => 1800,
+  absoluteLimitSecondsForRole: () => 43_200,
+  revokeAllSessions: async (userId: string, options?: { exceptSid?: string }) => {
+    let revoked = 0;
+    for (const [sid, record] of fixture.sessions) {
+      if (record.userId === userId && sid !== options?.exceptSid) { fixture.sessions.delete(sid); revoked++; }
+    }
+    return revoked;
+  },
 }));
 vi.mock("../../apps/orchestrator/src/services/password.service.js", () => ({
   hashPassword: async () => "$argon2id$native-smoke",
@@ -288,6 +298,8 @@ describe("native Windows → orchestrator over pinned HTTPS (opt-in)", () => {
       app.use(middleware.requirePasswordChangeGate(prisma));
       app.use(requireAdminMfaEnrollmentGate(prisma));
       app.use("/api", auth.createProtectedAuthRouter(prisma));
+      const { createStepUpRouter } = await import(`${orch}routes/auth-step-up.js`);
+      app.use("/api", createStepUpRouter(prisma));
       const gate = moduleGate.createModuleGate(prisma, fixture.config);
       mounts.mountModuleGates(app, gate);
       app.use("/api", home.createHomeRouter(prisma));
@@ -324,12 +336,16 @@ describe("native Windows → orchestrator over pinned HTTPS (opt-in)", () => {
         } else {
           expect(request.valid, `${request.method} ${request.path}: real JWT required`).toBe(true);
         }
-        if (["/api/auth/login", "/api/auth/refresh"].includes(request.path)) expect(request.cookiesSet).toBe(false);
+        if (["/api/auth/login", "/api/auth/refresh", "/api/auth/step-up"].includes(request.path)) expect(request.cookiesSet).toBe(false);
       }
       expect(traffic.filter((request) => request.path === "/api/auth/refresh" && request.status === 200)).toHaveLength(1);
       expect(traffic.filter((request) => request.path === "/api/auth/me" && request.bearer && !request.valid && request.status === 401)).toHaveLength(1);
       expect(traffic.some((request) => request.path === "/api/auth/me" && request.valid && request.status === 200)).toBe(true);
       expect(traffic.some((request) => request.path === "/api/orchestrator/health" && request.status === 503)).toBe(true);
+      expect(traffic.some((request) => request.path === "/api/auth/security" && request.status === 200)).toBe(true);
+      expect(traffic.some((request) => request.path === "/api/auth/sessions/mine" && request.status === 200)).toBe(true);
+      expect(traffic.some((request) => request.path === "/api/auth/sessions/revoke-others" && request.status === 200)).toBe(true);
+      expect(traffic.some((request) => request.path === "/api/auth/step-up" && request.status === 409)).toBe(true);
       expect(db.pair.status).toBe("claimed");
       expect(db.clients).toHaveLength(1);
       expect(fixture.sessions.size, "refresh must continue the original session").toBe(1);

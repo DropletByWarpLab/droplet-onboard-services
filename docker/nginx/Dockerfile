@@ -19,13 +19,13 @@
 # incremental build cost is near-zero.
 
 # --- FIPS provider build stage (byte-identical to the service images) --------
-FROM debian:bookworm-slim AS fips-builder
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS fips-builder
 COPY docker/fips/build-openssl-fips.sh /tmp/build-openssl-fips.sh
 RUN sh /tmp/build-openssl-fips.sh /out
 
 # --- Runtime: Debian-packaged nginx (links the SYSTEM OpenSSL 3, so
 #     OPENSSL_CONF alone activates FIPS — same as the Python images) ----------
-FROM nginx:1.27-bookworm
+FROM nginx:1.27-bookworm@sha256:6784fb0834aa7dbbe12e3d7471e69c290df3e6ba810dc38b34ae33d3c1c05f7d
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends openssl ca-certificates && \

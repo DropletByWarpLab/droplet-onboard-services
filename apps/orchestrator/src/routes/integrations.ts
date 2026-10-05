@@ -46,7 +46,7 @@
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
-import { providerDescriptor } from "@droplet/shared-types";
+import { providerDescriptor, providerDescriptors, isProbedOnConnect, setupGuideHrefFor } from "@droplet/shared-types";
 import { requireRole } from "../middleware/auth.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import {
@@ -192,6 +192,40 @@ export function createIntegrationsRouter(
 ): Router {
   const router = Router();
   const svc = createIntegrationsService(prisma, deps);
+
+  // Native clients cannot import the TypeScript registry. This is a projection
+  // of static setup metadata only: never connection rows, credential values,
+  // generated passwords, tokens, or persisted providerConfig.
+  router.get("/integrations/catalog", requireRole("owner", "admin"), (_req, res) => {
+    res.json({ providers: providerDescriptors().map((descriptor) => {
+      const lan = descriptor.lanProvisioning;
+      const probed = isProbedOnConnect(descriptor);
+      // The legacy LAN REST route is still the only implemented admission for
+      // this track. Keep this server routing fact out of native vendor logic.
+      const lanApi = descriptor.id === "eaglesoft-api";
+      const connectInput = lan ? "lan" : lanApi ? "lan_api" : probed ? "credentials" : null;
+      const path = lanApi ? "/api/integrations/eaglesoft" : `/api/integrations/${descriptor.id}`;
+      return {
+        provider: descriptor.id,
+        displayName: descriptor.displayName,
+        category: descriptor.category,
+        track: descriptor.track,
+        description: descriptor.track === "mcp" ? descriptor.description : descriptor.catalog?.description ?? null,
+        availability: descriptor.catalog?.availability ?? "available",
+        setupGuideHref: setupGuideHrefFor(descriptor) ?? null,
+        // Base fields remain separate from variants. A client combines the
+        // selected variant with these, matching credentialFieldsFor.
+        credentialFields: descriptor.credentialFields,
+        credentialVariants: descriptor.credentialVariants ?? [],
+        lanProvisioning: lan ?? null,
+        probedOnConnect: probed,
+        canEnableWrites: descriptor.track === "lan" || descriptor.track === "cloud",
+        connectPath: connectInput ? `${path}/connect` : null,
+        testPath: lan || lanApi ? `${path}/test` : null,
+        connectInput,
+      };
+    }) });
+  });
 
   router.get(
     "/integrations",
