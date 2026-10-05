@@ -128,6 +128,8 @@ Cloud setups fail for reasons that have nothing to do with Droplet, and several 
 | **The token sees everything its owner sees** — every project and group they belong to, confidential issues included — and it **expires within a year** on a date GitLab makes you choose. Self-managed GitLab cannot connect yet, only gitlab.com. | GitLab | [`gitlab.md`](gitlab.md) |
 | **Rotating the token signs you out of every device.** Todoist has one token per account, and issuing a new one is also how it logs you out everywhere — so a rotation is a moment to plan, not a click. Also: the box reads **active** tasks only; a completed task disappears from the feed rather than arriving as done. | Todoist | [`todoist.md`](todoist.md) |
 | **The token you make can *write* to your account** — there is no read-only kind — so set an expiry on it. And **your sales are not read yet**: a Loyverse receipt carries no currency, and the box will not store an amount without one. Customers and items are read; connecting is free. | Loyverse | [`loyverse.md`](loyverse.md) |
+| **The token can be read-write — choose read-only when you make it.** GoCardless lets you pick a scope at creation, and the box only needs read-only. Also: **disabling the admin who made a token does not revoke it**, and a *sandbox* token will not work, because the box only ever talks to the live service. Payments, refunds and payouts are read; your payers, mandates and subscriptions are not. | GoCardless | [`gocardless.md`](gocardless.md) |
+| **The token's default scope is read-write — ask for `read`.** Also: Capsule's *Won* and *Lost* milestones arrive in the box as **open** deals (the box only marks the stage keys it knows from other CRMs), your people and organisations are **not** read, and task statuses keep Capsule's upper-case words, so asking for `open` finds nothing where `OPEN` does. | Capsule CRM | [`capsule.md`](capsule.md) |
 
 ### 3.3 The per-vendor setup guides
 
@@ -150,6 +152,8 @@ Each guide is written for the person who owns the vendor account, and each cover
 | **GitLab** | A personal access token (`glpat-…`) from your own **Edit profile → Access**, scoped `read_api` | [`gitlab.md`](gitlab.md) |
 | **Todoist** | Your personal API token, copied from **Settings → Integrations → Developer** | [`todoist.md`](todoist.md) |
 | **Loyverse** | A personal access token from your own Back Office, **Integrations → Access tokens** | [`loyverse.md`](loyverse.md) |
+| **GoCardless** | An **access token** an admin creates under **Developers → API settings**, with the read-only scope | [`gocardless.md`](gocardless.md) |
+| **Capsule CRM** | A personal access token from your own **My Preferences → API Authentication**, scoped `read` | [`capsule.md`](capsule.md) |
 
 > Microsoft 365 is also a cloud connector, but it uses the older sign-in-with-Microsoft flow rather than a pasted credential, so it has no guide in this set.
 
