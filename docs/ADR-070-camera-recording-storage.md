@@ -157,7 +157,7 @@ Notes:
   "status": "active|pending|migrating|degraded|missing|no_eligible_drive|on_system_disk",
   "mode": "auto_reserved|full|null",
   "drive": { "fsUuid": "", "label": "", "model": "", "sizeBytes": 0, "encrypted": true, "mountPath": "" },
-  "reservedBytes": 0, "usedBytes": 0, "freeBytes": 0, "needBytes": 0, "retentionDays": 7,
+  "reservedBytes": 0, "usedBytes": 0, "freeBytes": 0, "retentionKnown": true, "needBytes": 0, "retentionDays": 7,
   "daysStored": 0,
   "cameras": [{ "name": "", "displayName": "", "mbPerHour": 0, "gbPerDay": 0, "needBytes": 0, "usedBytes": 0 }],
   "migration": { "state": "idle|running|done|failed", "progressPct": 0, "bytesCopied": 0, "bytesTotal": 0,
@@ -169,7 +169,9 @@ Notes:
 }
 ```
 
-`needBytes` is the sizing total from §5, and each camera's `needBytes` is its share of it. `eligibleDrives` lists the drives that meet the eligibility rule in §5. §6.2 defines `status`, and §7 defines the warning codes.
+`retentionKnown` is an additive boolean. When false, Frigate's resolved retention could not be verified: `needBytes`, `retentionDays`, and each camera's `needBytes` are 0 as the existing numeric unknown sentinel, not a claim of no required space. The dashboard says the estimate is unavailable while waiting for Frigate retention. `usedBytes`, `reservedBytes`, `freeBytes`, and `daysStored` continue to report measured values. Older clients may ignore the flag; older servers omit it and retain their previous interpretation.
+
+When `retentionKnown` is true, `needBytes` is the sizing total from §5, and each camera's `needBytes` is its share of it. `eligibleDrives` lists the drives that meet the eligibility rule in §5. §6.2 defines `status`, and §7 defines the warning codes.
 
 | Route | Who | Behaviour |
 |---|---|---|
@@ -198,16 +200,18 @@ The migration directory sorts after `20261003000000_warp_3474_remove_security_do
 **Formula.**
 
 ```
-need(camera) = max( p95(mbPerHour over the last 72 h), latest mbPerHour ) × 24 × retentionDays × 1.25
+need(camera) = max( p95(mbPerHour over the last 72 h), latest mbPerHour ) × 24 × retentionDays(camera) × 1.25
                (+2% for snapshots and clips)
 needTotal    = sum of need(camera), with a floor of 20 GiB
 ```
 
-A camera with no history yet uses its first measurement × 1.5 as the rate.
+A camera with no history yet uses its first measurement × 1.5 as the rate. `retentionDays(camera)` is the longest of that camera's four retention windows in Frigate's resolved config, including inherited defaults.
 
 Worked example, from the live camera at about 1,000 MB/h: 24,000 MB a day, 168,000 MB over 7 days, 210,000 MB with the 1.25 headroom, and about 214,000 MB with the 2%. That is roughly 210 GB, matching the estimate on the ticket.
 
-**Why the 7-day windows matter here.** The rate term assumes the camera records around the clock, and the formula covers `retentionDays` of that. Frigate keeps a segment while any retention window still covers it, so a longer motion or alert window would outlive the estimate, and today's 30-day motion window would. With all five windows at 7 days, the formula stays an upper bound.
+The rate term assumes the camera records around the clock. Frigate keeps a segment while any of its four retention windows still covers it, so sizing uses the longest effective window independently for each camera. A camera with a custom 90-day window is sized for 90 days even if the other cameras keep 7 days.
+
+If Frigate's resolved config or a camera's four effective windows cannot be read and verified, automatic allocation, AUTO_RESERVED growth, and automatic migration starts wait for verified retention. The 20 GiB minimum remains the floor when retention is known; it does not replace unknown retention with a guessed default.
 
 **Allocator.** An hourly job, scheduled with `scheduleCron` and never a `while True` loop, runs the allocator. It also runs after any drive is prepared.
 
@@ -284,6 +288,8 @@ The copy is path-preserving, and the container path stays `/media/frigate`, so t
 **Guards (WARP-3514).**
 
 - **Active drive.** Eject, adopt, reclaim and reformat of the drive that holds the active recordings allocation answer `409` with the reason. The check is in both the bridge and `routes/storage.ts`.
+- **Topology changes are serialized.** Root pool operations and recording-storage writers share `/run/droplet-storage-ops/recordings-topology.lock` with bridge eject. The installer provisions the directory as `root:droplet` `0750` and the lock inode as `root:droplet` `0660`. The root executor repeats the recordings guard while holding that lock through the operation; eject holds it from its final status read through unmount and state update. Missing, untrusted or held locks refuse a write; read-only status and recovery-key custody do not acquire this topology lock. A path status is verified only with a normalized absolute source inside its non-root mount, a valid filesystem UUID and a complete, valid physical/backing-device chain. Custom mount bases remain supported.
+- **Unavailable status.** A storage mutation needs fresh, verifiable recording status. An unreadable or malformed status answers `503 recordings_status_unavailable` before ejecting or changing a drive. A verified named-volume source with no bay allocation permits unrelated drive operations; unavailable status never proves that a drive is safe. Local mount/path/device preflight still precedes the bridge's status check.
 - **Target validation.** `POST /host/nvr-storage` refuses a target on the OS disk, or one that is not mounted, not read-write or not LUKS-backed (§4.3).
 - **Boot guard.** Frigate must not start writing to the OS disk because a bay mounted late. The automount units are `After=docker.service`, so Docker and Frigate (`restart: always`) can come up before the bay does, and a short-syntax bind with a missing source makes Docker create that directory on the OS disk. WARP-3514 chooses one of two mechanisms from its scope: a compose bind with `create_host_path: false`, or an immutable unmounted mountpoint plus an automount hook that restarts Frigate once the bay is mounted. It proves the choice with a reboot test.
 

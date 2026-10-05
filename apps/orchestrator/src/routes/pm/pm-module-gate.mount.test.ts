@@ -58,9 +58,10 @@ import type { AuthUser } from "../../middleware/auth.js";
 import { packagePath } from "../../__tests__/helpers/test-paths.js";
 import { createPmNativeRouter } from "./native.js";
 import { createPmRelationsRouter } from "./relations.js";
-import { createPmPlanningRouter } from "./planning.js";
-import { createPmTimeRouter } from "./time.js";
 import { createPmImportExportRouter } from "./import-export.js";
+import { createPmPlanningRouter } from "./planning.js";
+import { createPmInsightsRouter } from "./insights.js";
+import { createPmTimeRouter } from "./time.js";
 import { createPmWebhooksRouter } from "./webhooks.js";
 import { createPmScheduleRouter } from "./schedule.js";
 import { createPmOpenApiRouter } from "./openapi.js";
@@ -166,6 +167,12 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     router: createPmRelationsRouter(PRISMA),
   },
   {
+    factory: "createPmImportExportRouter",
+    base: "/api",
+    file: "routes/pm/import-export.ts",
+    router: createPmImportExportRouter(PRISMA),
+  },
+  {
     factory: "createPmPlanningRouter",
     base: "/api",
     file: "routes/pm/planning.ts",
@@ -178,12 +185,6 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     router: createPmTimeRouter(PRISMA),
   },
   {
-    factory: "createPmImportExportRouter",
-    base: "/api",
-    file: "routes/pm/import-export.ts",
-    router: createPmImportExportRouter(PRISMA),
-  },
-  {
     factory: "createPmWebhooksRouter",
     base: "/api",
     file: "routes/pm/webhooks.ts",
@@ -194,6 +195,12 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     base: "/api",
     file: "routes/pm/schedule.ts",
     router: createPmScheduleRouter(PRISMA),
+  },
+  {
+    factory: "createPmInsightsRouter",
+    base: "/api",
+    file: "routes/pm/insights.ts",
+    router: createPmInsightsRouter(PRISMA),
   },
   {
     factory: "createPmMobileRouter",

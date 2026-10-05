@@ -2,9 +2,11 @@
 
 import { Clock, User, Car, Dog } from "lucide-react";
 import type { DetectionEvent } from "@/lib/types";
+import { prettifyCameraKey } from "@/lib/camera-display";
 
 interface CameraEventsProps {
   events: DetectionEvent[];
+  cameraLabel?: (key: string) => string;
 }
 
 const LABEL_ICONS: Record<string, typeof User> = {
@@ -26,7 +28,7 @@ function formatTimeAgo(timestamp: number): string {
  * direct children of `.page-inner` and pick up the page-rhythm rule rather
  * than a hand-rolled `space-y-3` + `type-headline` of their own (WARP-2961).
  */
-export function CameraEvents({ events }: CameraEventsProps) {
+export function CameraEvents({ events, cameraLabel = prettifyCameraKey }: CameraEventsProps) {
   if (events.length === 0) return null;
 
   return (
@@ -78,7 +80,7 @@ export function CameraEvents({ events }: CameraEventsProps) {
                     className="type-caption-1 truncate mt-0.5"
                     style={{ color: "var(--text-muted)" }}
                   >
-                    {event.camera.replace(/_/g, " ")}
+                    {cameraLabel(event.camera)}
                   </p>
                 </div>
 
