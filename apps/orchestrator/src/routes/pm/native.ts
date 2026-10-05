@@ -382,6 +382,8 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
     try {
       res.json({ states: await pm.listStates(prisma, req.params.id) });
     } catch (err) {
+      // WARP-3528 — a service desk's id is project_not_found (404), not a 500.
+      if (mapServiceError(err, res)) return;
       next(err);
     }
   });
@@ -442,6 +444,8 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
     try {
       res.json({ labels: await pm.listLabels(prisma, req.params.id) });
     } catch (err) {
+      // WARP-3528 — as for the state list.
+      if (mapServiceError(err, res)) return;
       next(err);
     }
   });

@@ -53,7 +53,7 @@
 
 import { randomUUID } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
-import { PM_ERRORS, getWorkItem, type ApiWorkItem } from "./pm.service.js";
+import { PM_ERRORS, getWorkItem, isServiceDesk, type ApiWorkItem } from "./pm.service.js";
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -379,15 +379,18 @@ async function lockProperty(
   if (locked.length === 0) return null;
   // Re-read AFTER the lock: under READ COMMITTED this sees whatever the
   // transaction that held the lock before us committed.
-  const row = await tx.pmCustomProperty.findUnique({ where: { id: propertyId } });
-  return row ? mapProperty(row) : null;
+  const row = await tx.pmCustomProperty.findUnique({
+    where: { id: propertyId },
+    include: { project: { select: { kind: true } } },
+  });
+  return row && !isServiceDesk(row.project) ? mapProperty(row) : null;
 }
 
 // ── Definitions ──────────────────────────────────────────────────────────────
 
 export async function listProperties(prisma: PrismaClient, projectId: string): Promise<ApiProperty[]> {
-  const project = await prisma.pmProject.findUnique({ where: { id: projectId }, select: { id: true } });
-  if (!project) throw new Error(PM_PROPERTY_ERRORS.PROJECT_NOT_FOUND);
+  const project = await prisma.pmProject.findUnique({ where: { id: projectId }, select: { id: true, kind: true } });
+  if (!project || isServiceDesk(project)) throw new Error(PM_PROPERTY_ERRORS.PROJECT_NOT_FOUND);
   const rows = await prisma.pmCustomProperty.findMany({
     where: { projectId },
     orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
@@ -417,10 +420,10 @@ export async function createProperty(
       // Serialize definition creation for this project. Without the parent-row
       // lock, two requests at 29 fields can both pass the cap check and choose
       // the same next sortOrder before either insert commits.
-      const project = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT "id" FROM "PmProject" WHERE "id" = ${projectId} FOR UPDATE
+      const project = await tx.$queryRaw<Array<{ id: string; kind: "PROJECT" | "SERVICE_DESK" }>>`
+        SELECT "id", "kind" FROM "PmProject" WHERE "id" = ${projectId} FOR UPDATE
       `;
-      if (project.length === 0) throw new Error(PM_PROPERTY_ERRORS.PROJECT_NOT_FOUND);
+      if (project.length === 0 || isServiceDesk(project[0])) throw new Error(PM_PROPERTY_ERRORS.PROJECT_NOT_FOUND);
 
       const count = await tx.pmCustomProperty.count({ where: { projectId } });
       if (count >= PROPERTIES_PER_PROJECT_LIMIT) throw new Error(PM_PROPERTY_ERRORS.PROPERTY_LIMIT_REACHED);
@@ -568,8 +571,8 @@ export async function reorderProperties(
   projectId: string,
   propertyIds: readonly string[],
 ): Promise<ApiProperty[]> {
-  const project = await prisma.pmProject.findUnique({ where: { id: projectId }, select: { id: true } });
-  if (!project) throw new Error(PM_PROPERTY_ERRORS.PROJECT_NOT_FOUND);
+  const project = await prisma.pmProject.findUnique({ where: { id: projectId }, select: { id: true, kind: true } });
+  if (!project || isServiceDesk(project)) throw new Error(PM_PROPERTY_ERRORS.PROJECT_NOT_FOUND);
   const current = await prisma.pmCustomProperty.findMany({ where: { projectId }, select: { id: true } });
   const have = new Set(current.map((p) => p.id));
   if (
@@ -591,8 +594,11 @@ export async function reorderProperties(
 
 /** The project of a work item, or WORK_ITEM_NOT_FOUND. */
 async function itemProject(db: Db, itemId: string): Promise<string> {
-  const item = await db.pmWorkItem.findUnique({ where: { id: itemId }, select: { projectId: true } });
-  if (!item) throw new Error(PM_PROPERTY_ERRORS.WORK_ITEM_NOT_FOUND);
+  const item = await db.pmWorkItem.findUnique({
+    where: { id: itemId },
+    select: { projectId: true, project: { select: { kind: true } } },
+  });
+  if (!item || isServiceDesk(item.project)) throw new Error(PM_PROPERTY_ERRORS.WORK_ITEM_NOT_FOUND);
   return item.projectId;
 }
 

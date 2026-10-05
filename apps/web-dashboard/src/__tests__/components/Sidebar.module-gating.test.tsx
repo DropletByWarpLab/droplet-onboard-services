@@ -195,3 +195,70 @@ describe("<Sidebar> Files module gating covers the sub-views (WARP-1554)", () =>
     expect(document.querySelectorAll("a[href^='/files']")).toHaveLength(0);
   });
 });
+
+/**
+ * WARP-3528 (ADR-069) — Support is filed under Customers. A child is reachable
+ * on a phone only because the More drawer renders it beneath its parent, and it
+ * follows its OWN gate, not the parent's: with the CRM off it takes Customers'
+ * slot (`passesParentGate`), and with the support module off it is gone.
+ */
+describe("<Sidebar> Support is filed under Customers (WARP-3528)", () => {
+  beforeEach(() => {
+    modulesRef.current = { projects: true };
+  });
+
+  function openMoreDrawer(): HTMLElement {
+    const bottomNav = screen.getByRole("navigation", {
+      name: /bottom navigation/i,
+    });
+    fireEvent.click(within(bottomNav).getByRole("button", { name: /more/i }));
+    return screen.getByRole("dialog");
+  }
+
+  it("opens from Customers' chevron on the desktop rail", () => {
+    render(<Sidebar />);
+    const aside = desktopAside();
+    // Closed, so nothing in the accessibility tree links into it yet.
+    expect(within(aside).queryByRole("link", { name: "Support" })).toBeNull();
+    fireEvent.click(within(aside).getByRole("button", { name: "Show Customers pages" }));
+    expect(within(aside).getByRole("link", { name: "Support" })).toHaveAttribute(
+      "href",
+      "/support",
+    );
+  });
+
+  it("is reachable from the mobile More drawer, beneath Customers", () => {
+    render(<Sidebar />);
+    const dialog = openMoreDrawer();
+    const customers = within(dialog).getByRole("link", { name: "Customers" });
+    const support = within(dialog).getByRole("link", { name: "Support" });
+    expect(support).toHaveAttribute("href", "/support");
+    expect(
+      customers.compareDocumentPosition(support) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("takes Customers' slot on every surface when only the CRM is off", () => {
+    modulesRef.current = { projects: true, crm: false };
+    render(<Sidebar />);
+    // A top-level row in the rail: no chevron to open first.
+    expect(within(desktopAside()).getByRole("link", { name: "Support" })).toHaveAttribute(
+      "href",
+      "/support",
+    );
+    const dialog = openMoreDrawer();
+    expect(within(dialog).getByRole("link", { name: "Support" })).toHaveAttribute(
+      "href",
+      "/support",
+    );
+    expect(document.querySelector("a[href='/customers']")).toBeNull();
+  });
+
+  it("is gone from every surface when the support module is off, Customers intact", () => {
+    modulesRef.current = { projects: true, support: false };
+    render(<Sidebar />);
+    openMoreDrawer();
+    expect(document.querySelector("a[href='/support']")).toBeNull();
+    expect(document.querySelector("a[href='/customers']")).not.toBeNull();
+  });
+});
