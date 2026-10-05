@@ -242,7 +242,27 @@ check ".env exists (chmod 600)" \
 # (Compose errors with "bind source path does not exist"). Re-run:
 #   ./scripts/setup.sh --sync-secrets
 check "Docker secret: openwrt_password" \
-  bash -c '[ -f "'"$REPO_ROOT/docker/secrets/openwrt_password"'" ]' || true
+  bash -c '[ -s "'"$REPO_ROOT/docker/secrets/openwrt_password"'" ]' || true
+
+# WARP-3835: the secret FILE existing says nothing about whether routing can
+# log in to the router with it (the lab box ran unpaired and setup said "ok").
+# Require routing's own /health to report connected:true; on failure print its
+# `error` field, which names ROUTER_AUTH (wrong password) vs unreachable.
+# Skip under the same ROUTING_MODE guard as lib/local-dns.sh.
+_routing_health() { curl -sf --max-time 5 "${ROUTING_SERVICE_URL:-http://localhost:8080}/health"; }
+_routing_connected() { _routing_health | grep -Eq '"connected" *: *true'; }
+_router_auth() {
+  wait_for "routing router auth" 60 _routing_connected && return 0
+  local body err
+  body="$(_routing_health 2>/dev/null || true)"
+  err="$(printf '%s' "$body" | sed -n 's/.*"error" *: *"\([^"]*\)".*/\1/p')"
+  echo "routing is not connected to the router: ${err:-no /health response from ${ROUTING_SERVICE_URL:-http://localhost:8080}}"
+  return 1
+}
+case "${ROUTING_MODE:-real}" in
+  mock|disabled) ;;
+  *) check "Routing → router auth" _router_auth || true ;;
+esac
 
 check "TLS certificate" \
   bash -c '[ -f "'"$REPO_ROOT/docker/certs/droplet.crt"'" ] && [ -f "'"$REPO_ROOT/docker/certs/droplet.key"'" ]' || true

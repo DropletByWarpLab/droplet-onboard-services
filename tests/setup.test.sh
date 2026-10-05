@@ -2396,6 +2396,119 @@ else
 fi
 
 # =============================================================================
+# Phase 13: WARP-3835 — --edge-router flag + fatal verify
+# =============================================================================
+echo "--- Phase 13: edge-router flag and verify gate (WARP-3835) ---"
+
+P13_ENV="$TMP_ROOT/p13.env"
+p13_get() { grep -E "^$1=" "$P13_ENV" | tail -1 | cut -d= -f2-; }
+
+# (1) the flag writes the three keys; port defaults to 80
+printf 'FOO=bar\n' > "$P13_ENV"
+ENV_FILE="$P13_ENV" configure_edge_router 192.168.9.1 >/dev/null
+if [ "$(p13_get OPENWRT_HOST)|$(p13_get OPENWRT_PORT)|$(p13_get OPENWRT_USERNAME)" = "192.168.9.1|80|droplet-ai" ]; then
+  pass "--edge-router HOST writes OPENWRT_HOST/PORT=80/USERNAME=droplet-ai"
+else
+  fail "--edge-router HOST wrote wrong keys: $(grep OPENWRT "$P13_ENV" | tr '\n' ' ')"
+fi
+
+# (2) HOST:PORT, and idempotent (one line per key after re-running)
+ENV_FILE="$P13_ENV" configure_edge_router 10.0.0.1:8080 >/dev/null
+ENV_FILE="$P13_ENV" configure_edge_router 10.0.0.1:8080 >/dev/null
+if [ "$(p13_get OPENWRT_HOST)|$(p13_get OPENWRT_PORT)" = "10.0.0.1|8080" ] \
+   && [ "$(grep -c '^OPENWRT_' "$P13_ENV")" = "3" ] && grep -q '^FOO=bar$' "$P13_ENV"; then
+  pass "--edge-router HOST:PORT is idempotent and leaves other keys alone"
+else
+  fail "--edge-router not idempotent: $(cat "$P13_ENV" | tr '\n' ' ')"
+fi
+
+# (3) refuses empty and loopback, and writes nothing
+before="$(cat "$P13_ENV")"
+p13_ok=true
+for bad in '' 127.0.0.1 localhost ::1 127.0.0.1:80 ':80' 'h:notaport'; do
+  if ENV_FILE="$P13_ENV" configure_edge_router "$bad" >/dev/null 2>&1; then p13_ok=false; fi
+done
+if $p13_ok && [ "$before" = "$(cat "$P13_ENV")" ]; then
+  pass "--edge-router refuses empty, loopback and bad ports without touching .env"
+else
+  fail "--edge-router accepted an empty/loopback/bad-port host or modified .env"
+fi
+
+# (4) a re-run WITHOUT the flag keeps the host: setup only writes when the flag
+# was passed, and the flag is written before both readers of OPENWRT_HOST.
+P13_SETUP="$REPO_ROOT_REAL/scripts/setup.sh"
+if grep -q 'if \[ -n "${EDGE_ROUTER+x}" \]; then' "$P13_SETUP" \
+   && ! grep -qE '^EDGE_ROUTER=' "$P13_SETUP"; then
+  pass "setup.sh only touches the router when --edge-router was passed (EDGE_ROUTER unset by default)"
+else
+  fail "setup.sh may rewrite OPENWRT_HOST without --edge-router"
+fi
+p13_call="$(grep -n 'configure_edge_router "\$EDGE_ROUTER"' "$P13_SETUP" | head -1 | cut -d: -f1)"
+p13_mat="$(grep -n '^  materialize_artifacts' "$P13_SETUP" | tail -1 | cut -d: -f1)"
+p13_sb="$(grep -n '^    configure_single_box_env' "$P13_SETUP" | head -1 | cut -d: -f1)"
+if [ -n "$p13_call" ] && [ "$p13_call" -lt "$p13_mat" ] && [ "$p13_mat" -lt "$p13_sb" ]; then
+  pass "--edge-router is written before materialize_artifacts and configure_single_box_env"
+else
+  fail "--edge-router write is not ordered before its two readers (call=$p13_call mat=$p13_mat sb=$p13_sb)"
+fi
+
+# (5) verify.sh carries the router-auth check, skips mock/disabled, and the
+# secret check demands a non-empty file.
+P13_VERIFY="$REPO_ROOT_REAL/scripts/verify.sh"
+if grep -q 'check "Routing → router auth" _router_auth' "$P13_VERIFY" \
+   && grep -q '"connected" \*: \*true' "$P13_VERIFY" \
+   && awk '/^case "\$\{ROUTING_MODE:-real\}" in/,/^esac/' "$P13_VERIFY" | grep -q 'mock|disabled) ;;'; then
+  pass "verify.sh checks routing /health connected:true and skips mock/disabled"
+else
+  fail "verify.sh is missing the router-auth check or its ROUTING_MODE skip"
+fi
+if grep -q '\[ -s .*openwrt_password' "$P13_VERIFY"; then
+  pass "verify.sh requires a NON-EMPTY openwrt_password secret"
+else
+  fail "verify.sh still only checks that the openwrt_password file exists"
+fi
+
+# (6) a failing verify.sh fails setup (exit 1) and the gate precedes the SSH
+# window close; a passing / skipped verify does not fail.
+eval "$(awk '/^run_verify_gate\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$P13_SETUP")"
+P13_DIR="$TMP_ROOT/p13"; mkdir -p "$P13_DIR"
+printf '#!/bin/sh\nexit 1\n' > "$P13_DIR/verify.sh"; chmod +x "$P13_DIR/verify.sh"
+set +e
+( SCRIPT_DIR="$P13_DIR" SKIP_START=false; close_install_mode_ssh_window() { echo CLOSED; }
+  run_verify_gate; close_install_mode_ssh_window ) > "$P13_DIR/out" 2>&1
+p13_rc=$?
+set -e
+if [ "$p13_rc" = "1" ] && grep -q 'FAILED checks' "$P13_DIR/out" && ! grep -q CLOSED "$P13_DIR/out"; then
+  pass "failing verify.sh: setup exits 1 with the FAILED banner, SSH window not closed"
+else
+  fail "failing verify.sh did not exit 1 / reached close_install_mode_ssh_window (rc=$p13_rc)"
+fi
+printf '#!/bin/sh\nexit 0\n' > "$P13_DIR/verify.sh"
+if ( SCRIPT_DIR="$P13_DIR" SKIP_START=false; run_verify_gate ) >/dev/null 2>&1 \
+   && ( SCRIPT_DIR="$P13_DIR" SKIP_START=true; printf '#!/bin/sh\nexit 1\n' > "$P13_DIR/verify.sh"; run_verify_gate ) >/dev/null 2>&1; then
+  pass "passing verify.sh, and --skip-start with a failing one, do not fail setup"
+else
+  fail "verify gate fails when verify passes or is skipped"
+fi
+p13_gate="$(grep -n '^  run_verify_gate' "$P13_SETUP" | head -1 | cut -d: -f1)"
+p13_close="$(grep -n '^  close_install_mode_ssh_window' "$P13_SETUP" | head -1 | cut -d: -f1)"
+if [ -n "$p13_gate" ] && [ -n "$p13_close" ] && [ "$p13_gate" -lt "$p13_close" ]; then
+  pass "run_verify_gate runs before close_install_mode_ssh_window"
+else
+  fail "verify gate is not ordered before close_install_mode_ssh_window"
+fi
+
+# (7) warning counter feeds the banner
+LOG_WARN_COUNT=0; LOG_WARN_LIST=""
+log_warn "first thing" 2>/dev/null; log_warn "second thing" 2>/dev/null
+if [ "$LOG_WARN_COUNT" = "2" ] && [ "$(printf '%s' "$LOG_WARN_LIST" | wc -l | tr -d ' ')" = "2" ] \
+   && grep -q 'Complete with %d warnings' "$P13_SETUP"; then
+  pass "log_warn counts and lists warnings; the banner prints 'Complete with N warnings'"
+else
+  fail "warning counter/banner broken (count=$LOG_WARN_COUNT)"
+fi
+
+# =============================================================================
 # Results
 # =============================================================================
 echo ""

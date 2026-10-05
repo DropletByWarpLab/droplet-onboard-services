@@ -199,6 +199,29 @@ _upsert_env_kv() {
   mv "$stage" "$target"
 }
 
+# WARP-3835: `setup.sh --edge-router HOST[:PORT]` — point this box at an
+# EXTERNAL OpenWrt router. Writes the three keys the keep-the-host block in
+# single-box.sh and sync_openwrt_password_secret (WARP-3738) already key off, so
+# it must run before both (before materialize_artifacts). Returns 1 (and writes
+# nothing) on an empty or loopback host.
+configure_edge_router() {
+  local spec="$1" host port=80
+  host="${spec%%:*}"
+  case "$spec" in *:*) port="${spec#*:}" ;; esac
+  case "$host" in
+    ''|127.0.0.1|localhost|::1)
+      log_error "--edge-router needs a non-loopback router host (got '${spec}')"
+      return 1 ;;
+  esac
+  case "$port" in
+    ''|*[!0-9]*) log_error "--edge-router port must be a number (got '${port}')"; return 1 ;;
+  esac
+  _upsert_env_kv OPENWRT_HOST "$host"
+  _upsert_env_kv OPENWRT_PORT "$port"
+  _upsert_env_kv OPENWRT_USERNAME droplet-ai
+  log_info "Edge router: OPENWRT_HOST=$host OPENWRT_PORT=$port (password lives in docker/secrets/openwrt_password)"
+}
+
 # Remove a key from .env entirely (same atomicity/symlink discipline as
 # _upsert_env_kv). WARP-1063 needs this for OPENSSL_MODULES: an env var that
 # is PRESENT BUT EMPTY is not harmless there — OpenSSL treats an empty
