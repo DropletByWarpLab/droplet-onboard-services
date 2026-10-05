@@ -306,43 +306,6 @@ function respondToConfigError(res: Response, err: unknown): boolean {
 }
 
 /**
- * WARP-3511 — the same marker for a read or write that has NO honest empty
- * answer. An empty settings form served as a 200 would be saved straight back
- * over the camera's real configuration, so these answer 503 instead; the
- * dashboard shows a calm "camera service restarting" state and polls again
- * rather than retrying a 500 forever.
- */
-function sendFrigateUnavailable(res: Response): void {
-  res.setHeader("X-Droplet-Degraded", "frigate-unavailable");
-  res.status(503).json({
-    error: "frigate_unavailable",
-    degraded: true,
-    message: "The camera service isn't responding. It may be restarting. Try again in a moment.",
-  });
-}
-
-/**
- * The two failures every route that reads or writes a camera's Frigate config
- * can hit, answered once: an unknown camera (404) and an unreachable or
- * restarting Frigate (503, degraded). Returns false for anything else so the
- * caller keeps its own handling (a real Frigate refusal is a real error, not an
- * outage).
- */
-function respondToConfigError(res: Response, err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  if (msg.includes("not found")) {
-    res.status(404).json({ error: msg });
-    return true;
-  }
-  if (isUpstreamUnavailable(err)) {
-    logger.warn({ err }, "Frigate unreachable; camera configuration unavailable");
-    sendFrigateUnavailable(res);
-    return true;
-  }
-  return false;
-}
-
-/**
  * Empty CameraSystemStatus served when Frigate is unreachable — the dashboard's
  * System page renders "0 of 0 cameras live" rather than dead-ending on a 500
  * during a Frigate outage. Mirrors models-summary.service.ts's empty-payload
