@@ -283,8 +283,12 @@ export async function getCameraCandidates(
   // DB fallback / supplement. These rows carry no stream URL or detection
   // method, so they can only ever be reported as unverified — the live record
   // is the one that knows whether a stream answered.
+  //
+  // A candidate is a row whose `adoption` says so (WARP-3510). It used to be
+  // guessed from `enabled: false, autoDiscovered: true`, which also matched an
+  // operator-DISABLED live camera and offered it back as something to add.
   const dbRows = await prisma.camera.findMany({
-    where: { enabled: false, autoDiscovered: true },
+    where: { adoption: "CANDIDATE" },
     orderBy: { createdAt: "desc" },
   });
   for (const row of dbRows) {
@@ -325,24 +329,43 @@ export function macFromCandidateId(id: string): string | null {
   return isLiveCandidateId(id) ? id.slice("mac:".length) : null;
 }
 
+/**
+ * The camera an accept put into Frigate — what the caller needs to file the DB
+ * row under the key camera-discovery used. Deliberately NOT the stream URL:
+ * that can embed credentials (see NET-05 above) and the row never stores it.
+ */
+export interface AcceptedCamera {
+  /** The Frigate key camera-discovery added the camera under. */
+  name: string;
+  ip: string;
+  mac: string | null;
+  manufacturer: string | null;
+  model: string | null;
+}
+
 export interface DiscoveryMutationResult {
   ok: boolean;
   /** Upstream HTTP status, so the route can mirror a 404/409/422 faithfully. */
   status: number;
   /** Upstream `detail` text when it failed — operator-facing, already prose. */
   message?: string;
-  /**
-   * Machine-readable failure reason (credentials route only): auth_failed,
-   * locked, no_stream_path, unreachable, timeout, invalid_credentials,
-   * unsupported_password.
-   */
+  /** Machine-readable credentials refusal, never a credential value. */
   code?: string;
-  /**
-   * Which camera a successful credentials add put into Frigate (credentials route
-   * only). A static-IP camera has no MAC on its DB row, so the caller matches on
-   * these too. Never carries a stream URL.
-   */
-  camera?: { name?: string; ip?: string; mac?: string };
+  /** On a successful accept: the camera now in Frigate, when the service says which. */
+  camera?: AcceptedCamera;
+}
+
+function acceptedCameraFrom(body: unknown): AcceptedCamera | undefined {
+  const cam = (body as { camera?: Record<string, unknown> } | null)?.camera;
+  if (!cam || typeof cam.name !== "string" || typeof cam.ip !== "string") return undefined;
+  const text = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+  return {
+    name: cam.name,
+    ip: cam.ip,
+    mac: text(cam.mac),
+    manufacturer: text(cam.manufacturer),
+    model: text(cam.model),
+  };
 }
 
 /** POST accept/reject for a live candidate to camera-discovery, keyed by MAC. */
@@ -360,7 +383,10 @@ export async function mutateLiveCandidate(
       signal: AbortSignal.timeout(45_000),
     },
   );
-  if (resp.ok) return { ok: true, status: resp.status };
+  if (resp.ok) {
+    const camera = acceptedCameraFrom(await resp.json().catch(() => null));
+    return { ok: true, status: resp.status, ...(camera ? { camera } : {}) };
+  }
   const body = (await resp.json().catch(() => ({}))) as { detail?: unknown };
   const detail = typeof body.detail === "string" ? body.detail : undefined;
   return { ok: false, status: resp.status, message: detail };
@@ -378,11 +404,16 @@ export async function mutateLiveCandidate(
  * carries only camera-discovery's operator prose + a code, so a caller can't
  * accidentally echo it.
  */
+export interface CredentialMutationResult extends Omit<DiscoveryMutationResult, "camera"> {
+  /** Identifying fields only; older discovery services may omit them. */
+  camera?: { name?: string; ip?: string; mac?: string };
+}
+
 export async function submitLiveCandidateCredentials(
   mac: string,
   username: string,
   password: string,
-): Promise<DiscoveryMutationResult> {
+): Promise<CredentialMutationResult> {
   let resp: Response;
   try {
     resp = await internalFetch(

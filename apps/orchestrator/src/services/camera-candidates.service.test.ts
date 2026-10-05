@@ -10,6 +10,11 @@
  * Each test drives getCameraCandidates() with a faked camera-discovery so the
  * merge, the credential redaction, the status derivation and the degrade path
  * are all exercised through the real code path.
+ *
+ * WARP-3510 — "a candidate the DB knows about" is the explicit
+ * `adoption = CANDIDATE` column. The `enabled: false, autoDiscovered: true`
+ * guess above made an operator-disabled LIVE camera look like something still
+ * to be added.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -28,6 +33,7 @@ import {
   getCameraCandidates,
   isLiveCandidateId,
   macFromCandidateId,
+  mutateLiveCandidate,
   redactRtspCredentials,
   submitLiveCandidateCredentials,
 } from "./camera-candidates.service.js";
@@ -246,6 +252,18 @@ describe("getCameraCandidates", () => {
     expect(candidates.map((c) => c.source)).toEqual(["live", "database"]);
   });
 
+  it("reads the DB candidates by the explicit adoption column, never by enabled", async () => {
+    discovery({ pending: [] });
+    const prisma = makePrisma([dbRow()]);
+
+    await getCameraCandidates(prisma);
+
+    const findMany = (prisma as unknown as { camera: { findMany: ReturnType<typeof vi.fn> } }).camera.findMany;
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { adoption: "CANDIDATE" } }),
+    );
+  });
+
   it("sends the device secret to camera-discovery", async () => {
     // /cameras/discovered is gated behind DEVICE_SECRET (NET-05) — without the
     // header every call 403s and the list silently reads as empty.
@@ -267,6 +285,67 @@ describe("candidate id helpers", () => {
   it("treats a uuid as a database id", () => {
     expect(isLiveCandidateId("6f0c7f10-6e5b-4a1e-9a2f-1d3c5b7e9f11")).toBe(false);
     expect(macFromCandidateId("6f0c7f10-6e5b-4a1e-9a2f-1d3c5b7e9f11")).toBeNull();
+  });
+});
+
+describe("mutateLiveCandidate", () => {
+  it("returns the camera camera-discovery just put into Frigate, so the caller can file its row under that key", async () => {
+    internalFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          status: "accepted",
+          camera: {
+            name: "xnv_c8083r_e43022502afd",
+            ip: "192.168.9.219",
+            mac: "E4:30:22:50:2A:FD",
+            manufacturer: "Hanwha",
+            model: "XNV-C8083R",
+            rtsp_url: "rtsp://admin:s3cret%21@192.168.9.219:554/profile2/media.smp",
+            status: "active",
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await mutateLiveCandidate("E4:30:22:50:2A:FD", "accept");
+
+    // The stream URL — credentials included — is deliberately NOT carried back.
+    expect(result).toEqual({
+      ok: true,
+      status: 200,
+      camera: {
+        name: "xnv_c8083r_e43022502afd",
+        ip: "192.168.9.219",
+        mac: "E4:30:22:50:2A:FD",
+        manufacturer: "Hanwha",
+        model: "XNV-C8083R",
+      },
+    });
+  });
+
+  it("succeeds without a camera when the answer carries none", async () => {
+    internalFetch.mockResolvedValue(new Response(JSON.stringify({ status: "rejected", mac: "AA" }), { status: 200 }));
+
+    expect(await mutateLiveCandidate("AA", "reject")).toEqual({ ok: true, status: 200 });
+  });
+
+  it("succeeds without a camera when the body is not JSON", async () => {
+    internalFetch.mockResolvedValue(new Response("accepted", { status: 200 }));
+
+    expect(await mutateLiveCandidate("AA", "accept")).toEqual({ ok: true, status: 200 });
+  });
+
+  it("surfaces the upstream prose on a failure", async () => {
+    internalFetch.mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Camera stream did not verify" }), { status: 422 }),
+    );
+
+    expect(await mutateLiveCandidate("AA", "accept")).toEqual({
+      ok: false,
+      status: 422,
+      message: "Camera stream did not verify",
+    });
   });
 });
 
