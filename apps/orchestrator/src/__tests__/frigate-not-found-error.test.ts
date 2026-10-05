@@ -38,8 +38,14 @@ describe("FrigateNotFoundError", () => {
     expect((bare as { code?: unknown }).code).toBeUndefined();
   });
 
-  it("lists exactly the two Frigate not-found codes", () => {
-    expect([...FRIGATE_NOT_FOUND_CODES]).toEqual(["event_not_found", "thumbnail_not_found"]);
+  it("lists exactly the Frigate not-found codes", () => {
+    // review_not_found / preview_not_found: WARP-3509, the review media routes.
+    expect([...FRIGATE_NOT_FOUND_CODES]).toEqual([
+      "event_not_found",
+      "thumbnail_not_found",
+      "review_not_found",
+      "preview_not_found",
+    ]);
   });
 });
 
