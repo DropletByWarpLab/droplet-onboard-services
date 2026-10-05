@@ -157,6 +157,8 @@ jobs:
         # manifest row fails here, on the PR that adds it, rather than being
         # discovered months later on a box that never installed it.
         run: bash tests/host-artefacts.test.sh
+      - name: Run focused host DNS preservation regression
+        run: bash tests/host-dns-reapply.test.sh
 
       # WARP-2647: WARP-823's collector suite ran in NO workflow.
       # scripts/host/droplet-collect-logs.sh is the host executor behind the
