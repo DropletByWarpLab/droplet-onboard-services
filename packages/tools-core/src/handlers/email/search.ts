@@ -28,7 +28,12 @@ const inputSchema = {
   properties: {
     accountId: {
       type: "string",
-      description: "EmailAccount.id to search inside.",
+      description: "EmailAccount.id to search inside. Use email_accounts to find accessible mailbox IDs.",
+    },
+    query: {
+      type: "string",
+      maxLength: 200,
+      description: "Optional text to match locally in subjects, senders, snippets and message bodies. Omit to list threads in the selected tab.",
     },
     filter: {
       type: "string",
@@ -79,6 +84,14 @@ async function handler(
       error: { code: "INVALID_ARGS", message: "accountId is required" },
     };
   }
+  if (args.query !== undefined && (typeof args.query !== "string" || args.query.length > 200)) {
+    return {
+      ok: false,
+      status: "error",
+      error: { code: "INVALID_ARGS", message: "query must be a string of at most 200 characters" },
+    };
+  }
+  const query = typeof args.query === "string" ? args.query.trim() : "";
   const filter =
     typeof args.filter === "string" ? args.filter : "inbox";
   const limit =
@@ -86,6 +99,7 @@ async function handler(
       ? Math.max(1, Math.min(100, Math.floor(args.limit)))
       : 20;
   const params = new URLSearchParams({ filter, limit: String(limit) });
+  if (query) params.set("query", query);
   const res = await ctx.http.orchestrator.get(
     `/api/email/${encodeURIComponent(accountId)}/threads?${params.toString()}`,
     // WARP-1453: X-Droplet-User carries the acting human's username —
@@ -119,6 +133,7 @@ async function handler(
     data: {
       type: "email_search",
       filter: data.filter,
+      ...(query ? { query } : {}),
       threadCount: data.threads.length,
       threads: data.threads,
     },
@@ -128,7 +143,7 @@ async function handler(
 const tool: Tool = {
   name: "email_search",
   description:
-    "List email threads in a given account, filtered by triage tab (inbox / triaged / archived) or by `droplet` to find threads with Droplet-drafted replies. Returns thread id + subject + last-sender + snippet for each match.",
+    "Search locally stored email subjects, senders, snippets and message bodies using optional query, or list threads when query is omitted. Use email_accounts to discover accessible account IDs. Searches the selected triage tab (default inbox; triaged / archived / droplet also supported). Returns thread IDs, subjects, senders and snippets; use email_read for the full matching conversation. Includes imported Outlook and Gmail messages.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

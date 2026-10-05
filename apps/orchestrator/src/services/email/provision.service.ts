@@ -444,6 +444,17 @@ export async function disconnectMailbox(
     return { removed, address: existing.address };
   }
 
+  if (existing.authMode === "M365_GRAPH" && existing.userId) {
+    const { purgeMicrosoftMail } = await import("../m365/mail-settings.service.js");
+    const removed = await prisma.$transaction(async (tx) => {
+      const locked = await tx.m365Connection.updateMany({ where: { userId: existing.userId!, emailAccountId: accountId }, data: { mailEnabled: false } });
+      if (locked.count !== 1) return false;
+      await purgeMicrosoftMail(tx, existing.userId!);
+      return true;
+    });
+    return { removed, address: existing.address };
+  }
+
   const removed = await prisma.emailAccount.deleteMany({ where: { id: accountId } });
   if (removed.count === 1) {
     // WARP-2957 — the indexer stops the loop on its next scan; nudge it so

@@ -255,7 +255,7 @@ export class GraphClient {
    * `url` is validated on EVERY call, not once at construction: see the module
    * header. A delta link comes out of the database.
    */
-  async getPage(url: string, accessToken: string): Promise<GraphPage> {
+  async getPage(url: string, accessToken: string, options: { mail?: boolean } = {}): Promise<GraphPage> {
     const safe = assertSafeGraphUrl(url);
     const doFetch = this.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
     if (!doFetch) {
@@ -277,7 +277,7 @@ export class GraphClient {
           Authorization: `Bearer ${accessToken}`,
           Accept: "application/json",
           "User-Agent": this.userAgent,
-          Prefer: `odata.maxpagesize=${GRAPH_PREFERRED_PAGE_SIZE}`,
+          Prefer: `odata.maxpagesize=${GRAPH_PREFERRED_PAGE_SIZE}${options.mail ? ', IdType="ImmutableId", outlook.body-content-type="text"' : ""}`,
         },
         // Never follow a 3xx — see the module header.
         redirect: "manual",

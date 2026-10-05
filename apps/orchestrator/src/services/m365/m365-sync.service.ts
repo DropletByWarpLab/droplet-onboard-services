@@ -51,7 +51,8 @@
  * document library) as METADATA into the
  * provider-agnostic cloud-file store with its names encrypted
  * (`drive-landing.service.ts`, WARP-3538), and explicitly enabled `calendar`
- * events into the person's external calendar source. Every other workload is still
+ * events into the person's external calendar source, and explicitly enabled
+ * `mail` bodies into their local email archive. Every other workload is still
  * counted and discarded: this runs its cursors, proves the transport, and
  * advances `lastSyncedAt` — the column the hub renders as "last synced" and
  * which, before WARP-2218, was only ever written by `connect()`.
@@ -116,6 +117,7 @@ import {
 import { ensureSource, findSourceId, upsertSource } from "../cloud-files/cloud-file-store.service.js";
 import { pruneSharePointLibraries, purgeSharePointDataForUser } from "./drive-data.service.js";
 import { ensureMicrosoftCalendarCursor, recordMicrosoftCalendarFailure } from "./calendar-landing.service.js";
+import { ensureMicrosoftMailFolder, recordMicrosoftMailFailure, setMicrosoftMailEnabled } from "./mail-settings.service.js";
 
 /**
  * How many pages one cursor may walk in a single tick.
@@ -175,6 +177,9 @@ export interface PageContext {
   readonly fullEnumeration: boolean;
   readonly isFirstPage: boolean;
   readonly isLastPage: boolean;
+  /** Ephemeral handler credentials, never stored or logged. */
+  readonly accessToken?: string;
+  readonly grantGeneration?: M365GrantGeneration;
 }
 
 /** What a caller does with a page of changes. Injected — see the module header. */
@@ -206,8 +211,9 @@ export interface M365SyncDeps {
   initialUrlFor: (workload: string, resourceId: string) => string | null;
   handlePage?: PageHandler;
   now?: () => Date;
-  /** Workspace capability only gates calendar; other Microsoft workloads keep running. */
+  /** Workspace module choices stop the corresponding provider reads. */
   calendarModuleEnabled?: boolean;
+  mailModuleEnabled?: boolean;
 }
 
 /**
@@ -230,6 +236,14 @@ export async function syncCursor(
     pages: 0,
     completed: false,
   };
+
+  if (cursor.workload === "mail") {
+    if (deps.mailModuleEnabled === false) return { ...base, error: "Email capability is disabled." };
+    const connection = await deps.prisma.m365Connection.findUnique({ where: { userId: cursor.userId },
+      select: { state: true, mailEnabled: true, emailAccountId: true, grantedScopes: true } });
+    if (connection?.state !== "CONNECTED" || connection.mailEnabled !== true || !connection.emailAccountId) return { ...base, error: "Outlook email import is off." };
+    if (!grantCovers((connection.grantedScopes ?? "").split(/\s+/).filter(Boolean), GRAPH_RESOURCES.mail.leastPrivilegeScope)) return { ...base, error: "Outlook email permission needs reconnecting." };
+  }
 
   if (cursor.workload === "calendar") {
     if (deps.calendarModuleEnabled === false) return { ...base, error: "Calendar capability is disabled." };
@@ -303,6 +317,10 @@ export async function syncCursor(
   }
 
   if (generation && cursor.cursorLinkHash !== undefined && generation.cursorLinkHash !== cursor.cursorLinkHash) return { ...base, error: "The Microsoft connection changed." };
+  if (cursor.workload === "mail") {
+    const current = await deps.prisma.m365Connection.findUnique({ where: { userId: cursor.userId }, select: { state: true, mailEnabled: true, emailAccountId: true, grantedScopes: true } });
+    if (current?.state !== "CONNECTED" || !current.mailEnabled || !current.emailAccountId || !grantCovers((current.grantedScopes ?? "").split(/\s+/).filter(Boolean), GRAPH_RESOURCES.mail.leastPrivilegeScope)) return { ...base, error: "Outlook email import needs a connected mailbox and permission." };
+  }
   let items = 0;
   let pages = 0;
 
@@ -315,7 +333,7 @@ export async function syncCursor(
   while (url && pages < MAX_PAGES_PER_TICK) {
     let page: GraphPage;
     try {
-      page = await deps.client.getPage(url, accessToken);
+      page = await deps.client.getPage(url, accessToken, cursor.workload === "mail" ? { mail: true } : {});
     } catch (err) {
       const shaped =
         err instanceof GraphRequestError
@@ -327,6 +345,7 @@ export async function syncCursor(
       const retryAfter = err instanceof GraphRequestError ? err.retryAfterHeader : null;
       await recordFailure(deps.prisma, cursor.id, shaped, retryAfter, now());
       if (cursor.workload === "calendar") await recordMicrosoftCalendarFailure(deps.prisma, cursor.userId, classifySyncFailure(shaped) === "AUTH", generation);
+      if (cursor.workload === "mail") await recordMicrosoftMailFailure(deps.prisma, cursor.userId, classifySyncFailure(shaped) === "AUTH", generation);
       // 🔴 A 403 on a SHAREPOINT cursor is not a dead grant. Losing access to one
       // library — a site's permissions changed, the library was locked or
       // deleted, a policy applies to that one site — answers 403 for that
@@ -372,16 +391,25 @@ export async function syncCursor(
           fullEnumeration,
           isFirstPage: pages === 1 && !resuming,
           isLastPage: page.links.deltaLink !== null,
+          ...(cursor.workload === "mail" ? { accessToken, grantGeneration: generation } : {}),
         });
       } catch (err) {
+        const shaped = err instanceof GraphRequestError
+          ? { statusCode: err.statusCode, code: err.code, message: err.message }
+          : { statusCode: 0, code: HANDLER_FAILED_CODE, message: "page handling failed" };
         await recordFailure(
           deps.prisma,
           cursor.id,
-          { statusCode: 0, code: HANDLER_FAILED_CODE, message: "page handling failed" },
-          null,
+          shaped,
+          err instanceof GraphRequestError ? err.retryAfterHeader : null,
           now(),
         );
         if (cursor.workload === "calendar") await recordMicrosoftCalendarFailure(deps.prisma, cursor.userId, false, generation);
+        if (cursor.workload === "mail") {
+          const reconnect = classifySyncFailure(shaped) === "AUTH";
+          await recordMicrosoftMailFailure(deps.prisma, cursor.userId, reconnect, generation);
+          if (reconnect) await markNeedsReconnect(deps.prisma, cursor.userId, "Microsoft rejected access while importing email.", generation);
+        }
         return {
           ...base,
           items,
@@ -437,8 +465,8 @@ export async function runSyncTick(
   limit = 25,
 ): Promise<SyncTickResult> {
   const now = deps.now ?? (() => new Date());
-  const due = (await claimDueCursors(deps.prisma, limit, now(), deps.calendarModuleEnabled === false))
-    .filter((cursor) => deps.calendarModuleEnabled !== false || cursor.workload !== "calendar");
+  const due = (await claimDueCursors(deps.prisma, limit, now(), deps.calendarModuleEnabled === false, deps.mailModuleEnabled === false))
+    .filter((cursor) => (deps.calendarModuleEnabled !== false || cursor.workload !== "calendar") && (deps.mailModuleEnabled !== false || cursor.workload !== "mail"));
 
   const results: CursorSyncResult[] = [];
   for (const cursor of due) {
@@ -486,12 +514,19 @@ async function listFolders(
   deps: M365SyncDeps,
   url: string,
   accessToken: string,
+  mailOwner?: { userId: string; generation?: M365GrantGeneration },
 ): Promise<FoundFolder[]> {
   const found: FoundFolder[] = [];
   let next: string | null = url;
   let pages = 0;
 
   while (next && pages < MAX_PAGES_PER_TICK) {
+    if (mailOwner) {
+      const row = await deps.prisma.m365Connection.findUnique({ where: { userId: mailOwner.userId } });
+      if (row?.state !== "CONNECTED" || !row.mailEnabled || !row.emailAccountId ||
+          !grantCovers((row.grantedScopes ?? "").split(/\s+/).filter(Boolean), GRAPH_RESOURCES.mail.leastPrivilegeScope) ||
+          (mailOwner.generation && (row.tokenCacheEnc !== mailOwner.generation.tokenCacheEnc || row.cursorLinkHash !== mailOwner.generation.cursorLinkHash || row.emailAccountId !== mailOwner.generation.emailAccountId))) throw new Error("Outlook email import changed during folder discovery.");
+    }
     const page: GraphPage = await deps.client.getPage(next, accessToken);
     pages += 1;
     for (const item of page.items) {
@@ -553,8 +588,9 @@ export async function discoverResources(
   const now = deps.now ?? (() => new Date());
 
   let accessToken: string;
+  let generation: M365GrantGeneration | undefined;
   try {
-    accessToken = await getAccessToken(deps.prisma, deps.entra, userId, now());
+    accessToken = await getAccessToken(deps.prisma, deps.entra, userId, now(), (value) => { generation = value; });
   } catch {
     return { registered: 0, skipped: [...M365_WORKLOADS], notGranted: [], disabled: [], sharePoint: null };
   }
@@ -563,8 +599,8 @@ export async function discoverResources(
   // Microsoft granted this time, which may be narrower than last time.
   const connection = (await deps.prisma.m365Connection.findUnique({
     where: { userId },
-    select: { grantedScopes: true, sharePointEnabled: true, calendarEnabled: true },
-  })) as { grantedScopes: string | null; sharePointEnabled?: boolean; calendarEnabled?: boolean } | null;
+    select: { grantedScopes: true, sharePointEnabled: true, calendarEnabled: true, mailEnabled: true, emailAccountId: true },
+  })) as { grantedScopes: string | null; sharePointEnabled?: boolean; calendarEnabled?: boolean; mailEnabled?: boolean; emailAccountId?: string | null } | null;
   const granted = (connection?.grantedScopes ?? "").split(" ").filter(Boolean);
   // `=== true`, not truthiness: an absent or malformed flag is OFF. Explicit
   // state, never inferred (WARP-3538).
@@ -578,6 +614,18 @@ export async function discoverResources(
 
   for (const workload of M365_WORKLOADS) {
     const spec = GRAPH_RESOURCES[workload];
+
+    if (workload === "mail") {
+      if (deps.mailModuleEnabled === false || connection?.mailEnabled !== true) { disabled.push(workload); continue; }
+      if (!grantCovers(granted, spec.leastPrivilegeScope)) { notGranted.push(workload); continue; }
+      // A successful additive consent may still need its first local mailbox.
+      if (!connection.emailAccountId) {
+        try { if (!await setMicrosoftMailEnabled(deps.prisma, userId, true, deps.entra, deps.client)) { disabled.push(workload); continue; }
+          // Refresh above rotated the cache; folder registration must use that new generation.
+          accessToken = await getAccessToken(deps.prisma, deps.entra, userId, now(), (value) => { generation = value; });
+        } catch { skipped.push(workload); continue; }
+      }
+    }
 
     if (workload === "calendar") {
       if (deps.calendarModuleEnabled === false || connection?.calendarEnabled !== true) { disabled.push(workload); continue; }
@@ -660,7 +708,8 @@ export async function discoverResources(
       // Breadth-first, depth-bounded. Each level's children are fetched from
       // the child collection, which is the only documented way to see past the
       // root's immediate children.
-      let frontier = await listFolders(deps, discovery, accessToken);
+      const mailOwner = workload === "mail" ? { userId, generation } : undefined;
+      let frontier = await listFolders(deps, discovery, accessToken, mailOwner);
       let depth = 0;
 
       while (frontier.length > 0 && depth < MAX_FOLDER_DEPTH) {
@@ -673,12 +722,14 @@ export async function discoverResources(
         const deeperFolders: FoundFolder[] = [];
 
         for (const folder of frontier) {
-          await upsertCursor(deps.prisma, userId, workload, folder.id);
-          registered += 1;
+          if (workload === "mail") {
+            if (await ensureMicrosoftMailFolder(deps.prisma, userId, folder.id, generation)) registered += 1;
+            else throw new Error("Outlook email import changed during folder discovery.");
+          } else { await upsertCursor(deps.prisma, userId, workload, folder.id); registered += 1; }
 
           if (folder.hasChildren && spec.childCollectionPath) {
             const childUrl = `${GRAPH_API_BASE_URL}${spec.childCollectionPath(folder.id)}`;
-            deeperFolders.push(...(await listFolders(deps, childUrl, accessToken)));
+            deeperFolders.push(...(await listFolders(deps, childUrl, accessToken, mailOwner)));
           }
         }
 

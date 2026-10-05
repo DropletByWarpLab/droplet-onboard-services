@@ -254,7 +254,7 @@ describe("discoverResources — SharePoint is the person's choice (WARP-3538)", 
 
     const found = await discoverResources(depsFor(prisma, client), USER);
 
-    expect(found.disabled).toEqual(["calendar", "sharepoint"]);
+    expect(found.disabled).toEqual(["mail", "calendar", "sharepoint"]);
     expect(found.notGranted).toEqual(["todo"]);
     expect(found.skipped).toEqual([]);
     expect(found.sharePoint).toBeNull();
@@ -270,8 +270,8 @@ describe("discoverResources — SharePoint is the person's choice (WARP-3538)", 
       depsFor(fakePrisma({ grantedScopes: BASE_SCOPES, sharePointEnabled: false }), graphStub({}).client),
       USER,
     );
-    expect(withGrant.disabled).toEqual(["calendar", "sharepoint"]);
-    expect(noGrant.disabled).toEqual(["calendar", "sharepoint"]);
+    expect(withGrant.disabled).toEqual(["mail", "calendar", "sharepoint"]);
+    expect(noGrant.disabled).toEqual(["mail", "calendar", "sharepoint"]);
     expect(noGrant.notGranted).not.toContain("sharepoint");
   });
 
@@ -279,9 +279,9 @@ describe("discoverResources — SharePoint is the person's choice (WARP-3538)", 
     const prisma = fakePrisma({ grantedScopes: WITH_SITES });
     prisma.m365Connection.findUnique.mockResolvedValue({ grantedScopes: WITH_SITES } as never);
     const found = await discoverResources(depsFor(prisma, graphStub({}).client), USER);
-    expect(found.disabled).toEqual(["calendar", "sharepoint"]);
+    expect(found.disabled).toEqual(["mail", "calendar", "sharepoint"]);
     prisma.m365Connection.findUnique.mockResolvedValue({ grantedScopes: WITH_SITES, sharePointEnabled: "true" } as never);
-    expect((await discoverResources(depsFor(prisma, graphStub({}).client), USER)).disabled).toEqual(["calendar", "sharepoint"]);
+    expect((await discoverResources(depsFor(prisma, graphStub({}).client), USER)).disabled).toEqual(["mail", "calendar", "sharepoint"]);
   });
 
   it("reports an opted-in person whose grant lacks Sites.Read.All as notGranted, and reads nothing", async () => {
@@ -293,7 +293,7 @@ describe("discoverResources — SharePoint is the person's choice (WARP-3538)", 
     const found = await discoverResources(depsFor(prisma, client), USER);
 
     expect(found.notGranted).toEqual(["todo", "sharepoint"]);
-    expect(found.disabled).toEqual(["calendar"]);
+    expect(found.disabled).toEqual(["mail", "calendar"]);
     expect(found.skipped).toEqual([]);
     expect(siteRequests(requested)).toEqual([]);
     expect(spCursors(prisma)).toEqual([]);
@@ -481,7 +481,7 @@ describe("discoverResources — SharePoint libraries (WARP-3538)", () => {
     // "this person syncs nothing": the OneDrive singleton plus four libraries.
     expect(found.registered).toBe(5);
     expect(found.skipped).toEqual([]);
-    expect(found.disabled).toEqual(["calendar"]);
+    expect(found.disabled).toEqual(["mail", "calendar"]);
   });
 
   it("unions the sites by id, and marks a site the person follows as followed — even when search found it too", async () => {
@@ -950,6 +950,6 @@ describe("discoverResources — SharePoint failing is non-fatal and named (WARP-
     expect(spCursors(prisma)).toEqual([]);
     expect(libIds(prisma)).toEqual([]);
     expect(found.sharePoint).toBeNull();
-    expect(found.disabled).toEqual(["calendar", "sharepoint"]);
+    expect(found.disabled).toEqual(["mail", "calendar", "sharepoint"]);
   });
 });

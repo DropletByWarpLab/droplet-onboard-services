@@ -191,6 +191,17 @@ network. Host-published ports and host-network services are called out.
   username, as read-only external events. Google takes bounded snapshots;
   Microsoft uses its existing delta engine with durable enumeration marks.
   The five-minute jobs use `cron-runtime` and respect Calendar enablement.
+  Outlook mail import is per-person, opt-in and Email-module gated. Full
+  `Mail.Read` (also covered by the existing `Mail.ReadWrite` grant) lands
+  received/sent history with no date cutoff through
+  `services/m365/mail-landing.service.ts` and the canonical
+  `services/email/mail-ingest.service.ts`. Plain-text bodies are readable and
+  searchable locally; unsent Outlook drafts and attachment bytes are excluded.
+  `M365_GRAPH` mailboxes are read-only and excluded from IMAP/SMTP workers and
+  service-desk sends. Case-sensitive immutable provider IDs deduplicate the
+  archive; `M365MailFolder`/`M365MailMembership` track folder changes without
+  deleting archived messages after a remote move/delete. Turning mail import
+  off purges only that local mailbox and its drafts, preserving Calendar/files.
   No new service or public
   inbound listener is introduced. Setup guides: [Google](integrations/google-mail.md),
   [Microsoft](integrations/microsoft-365.md).
@@ -477,7 +488,7 @@ network. Host-published ports and host-network services are called out.
 
 ## services/email-indexer
 
-- **Purpose:** IMAP **IDLE** ingest (one async loop per `EmailAccount`, exponential
+- **Purpose:** IMAP **IDLE** ingest (one async loop per supported `EmailAccount`, exponential
   backoff) → posts canonical MIME to the orchestrator; drains the outbound SMTP
   queue (`EmailDraft.status='queued'`). All writes go through orchestrator REST
   (schema stays centralized), not direct DB writes. Account passwords are
@@ -489,6 +500,11 @@ network. Host-published ports and host-network services are called out.
   secrets stay encrypted in the orchestrator. Gmail hosts and TLS ports are
   fixed. Outgoing mail still requires the existing owner enablement and
   human-approved draft path.
+- **Transport selection:** database queries allow only `PASSWORD` and
+  `GOOGLE_OAUTH` for IMAP accounts and queued SMTP drafts. `M365_GRAPH` is a
+  read-only Graph archive populated by the orchestrator, with no mailbox
+  password or IMAP/SMTP connection. Shared ingestion preserves deduplication,
+  attachment limits and latest-thread ordering across providers.
 
 ## services/camera-discovery
 

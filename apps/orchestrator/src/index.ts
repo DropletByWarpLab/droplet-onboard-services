@@ -205,6 +205,7 @@ import { initialUrlFor } from "./services/m365/graph-resources.js";
 import { createEntraClient } from "./services/m365/entra-client.js";
 import { createDriveLandingHandler } from "./services/m365/drive-landing.service.js";
 import { createMicrosoftCalendarPageHandler } from "./services/m365/calendar-landing.service.js";
+import { createMicrosoftMailPageHandler } from "./services/m365/mail-landing.service.js";
 import { syncGoogleCalendars } from "./services/google/google-calendar-sync.service.js";
 import { getEffectiveModuleIds } from "./services/modules.service.js";
 
@@ -2172,20 +2173,23 @@ async function main() {
   {
     const driveLanding = createDriveLandingHandler(prisma);
     const calendarLanding = createMicrosoftCalendarPageHandler(prisma);
+    const graphClient = new GraphClient({ version: ORCHESTRATOR_M365_UA_VERSION });
+    const mailLanding = createMicrosoftMailPageHandler(prisma, graphClient);
     const m365Deps: M365SyncDeps = {
       prisma: prisma as never,
-      client: new GraphClient({ version: ORCHESTRATOR_M365_UA_VERSION }),
+      client: graphClient,
       entra: createEntraClient(),
       initialUrlFor,
       // WARP-3538 (ADR-041 §4) — what the engine does with a page. OneDrive and
       // SharePoint pages land as encrypted METADATA in the cloud-file store;
-      // opt-in calendar pages land in the existing read-only CalendarEvent store.
-      // Mail and contacts remain transport checks. Without this the engine
+      // Opt-in calendar and mail pages land in the existing per-person stores.
+      // Contacts remain transport checks. Without this the engine
       // reads every drive page and throws it away: the card says "synced", the
       // file search is empty, and nothing fails.
       handlePage: async (cursor, page, run) => {
         await driveLanding(cursor, page, run);
         await calendarLanding(cursor, page, run);
+        await mailLanding(cursor, page, run);
       },
     };
 
@@ -2197,7 +2201,9 @@ async function main() {
       jitteredPeriodMs(m365TickMs, `${config.DROPLET_DEVICE_ID}:m365`),
       async () => {
         // A disabled Calendar module stops its cloud reads as well as its UI.
-        m365Deps.calendarModuleEnabled = (await getEffectiveModuleIds(prisma, config)).has("calendar");
+        const enabledModules = await getEffectiveModuleIds(prisma, config);
+        m365Deps.calendarModuleEnabled = enabledModules.has("calendar");
+        m365Deps.mailModuleEnabled = enabledModules.has("email");
         // Only CONNECTED grants. A NEEDS_RECONNECT row has a dead refresh
         // token, and enumerating it every tick would hammer Entra to produce
         // the same failure the person already has to act on.

@@ -140,6 +140,21 @@ describe("GraphClient.getPage — a successful page", () => {
     expect(page.items).toEqual([]);
     expect(page.raw.id).toBe("primary-drive");
   });
+
+  it("uses immutable ids and full plain text on every mail page and hydration GET only", async () => {
+    const fetchImpl = vi.fn(async (_url: string, _init?: Record<string, unknown>) => jsonResponse({ value: [] }));
+    const client = new GraphClient({ fetchImpl });
+    for (const path of ["/me/mailFolders/inbox/messages/delta", "/me/mailFolders/inbox/messages/delta?$skiptoken=opaque",
+      "/me/mailFolders/inbox/messages/delta?$deltatoken=opaque", "/me/messages/immutable-id?$select=body,internetMessageHeaders"]) {
+      await client.getPage(`${GRAPH_API_BASE_URL}${path}`, "secret", { mail: true });
+    }
+    for (const [, init] of fetchImpl.mock.calls as unknown as [string, { headers: Record<string, string> }][]) {
+      expect(init.headers.Prefer).toBe('odata.maxpagesize=100, IdType="ImmutableId", outlook.body-content-type="text"');
+    }
+    await client.getPage(`${GRAPH_API_BASE_URL}/me/calendarView/delta`, "secret");
+    const last = fetchImpl.mock.calls.at(-1)?.[1] as unknown as { headers: Record<string, string> };
+    expect(last.headers.Prefer).toBe("odata.maxpagesize=100");
+  });
 });
 
 describe("GraphClient.getPage — failures are shaped for classifySyncFailure", () => {

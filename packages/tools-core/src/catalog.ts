@@ -225,6 +225,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   reminders: ["create_reminder", "list_reminders", "complete_reminder", "set_timer"],
   notifications: ["send_notification", "list_notifications"],
   email: [
+    "email_accounts",
     "email_search",
     "email_read",
     "email_summarize_thread",
@@ -466,6 +467,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   memory_extract_fact: "Remember a preference so your Droplet recalls it later",
   memory_forget: "Make your Droplet forget something it remembered",
   // Email
+  email_accounts: "List connected mailboxes you can read",
   email_search: "Search your email",
   email_read: "Open and read an email conversation",
   email_summarize_thread: "Get a quick summary of an email conversation",

@@ -98,6 +98,7 @@ function createPrismaMock(opts: {
     drafts,
     commentUpdates,
     emailAccount: {
+      updateMany: vi.fn(async () => ({ count: accountExists ? 1 : 0 })),
       findUnique: vi.fn(
         async ({ where }: { where: { id: string } }) => {
           void where;
@@ -148,13 +149,15 @@ function createPrismaMock(opts: {
           data,
         }: {
           where: { id: string };
-          data: { messageCount?: { increment: number } };
+          data: Partial<Omit<ThreadRow, "messageCount">> & { messageCount?: { increment: number } };
         }) => {
           for (const t of threads.values()) {
             if (t.id === where.id) {
               if (data.messageCount?.increment) {
                 t.messageCount += data.messageCount.increment;
               }
+              const { messageCount, ...metadata } = data;
+              Object.assign(t, metadata);
               return t;
             }
           }

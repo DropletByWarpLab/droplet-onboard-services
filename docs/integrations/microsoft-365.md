@@ -2,7 +2,7 @@
 
 > **Audience:** the owner or administrator whose organisation uses Microsoft 365, and whoever can sign in to its Microsoft admin centre. Set up the provider once in **Settings → Connected accounts → Account connection setup**. Each person can then select **Connect Outlook** without entering app IDs.
 
-Each person **signs in with Microsoft** and approves access as themselves. Droplet keeps OneDrive and optional SharePoint file metadata. People can also opt in to a read-only copy of their primary Outlook calendar. Mail and contacts are currently checked without being stored; this connection does not yet populate Droplet's local inbox or send Outlook replies. What your organisation sets up once is the **app** people sign in through.
+Each person **signs in with Microsoft** and approves access as themselves. Droplet keeps OneDrive and optional SharePoint file metadata. People can also opt in to read-only local copies of their received and sent Outlook emails and primary Outlook calendar. Imported emails can be read and searched in Droplet; Outlook sending is not available. Contacts are checked without being stored. What your organisation sets up once is the **app** people sign in through.
 
 ---
 
@@ -45,8 +45,8 @@ All **Delegated** — the app can only ever act as the person signed in, never a
 | --- | --- |
 | `offline_access` | Keeps the connection working without signing in again every hour |
 | `User.Read` | Shows which account is connected |
-| `Mail.ReadWrite` | Checks mailbox changes. Messages are not yet saved to Droplet's local inbox. Droplet does not change or delete mail. |
-| `Mail.Send` | Nothing yet. Requested for sending replies you approve in Droplet. |
+| `Mail.ReadWrite` | When **Import Outlook emails into Droplet** is enabled, reads full received and sent message bodies into the local inbox for reading and search. This existing scope covers the `Mail.Read` requirement; Droplet does not change or delete Outlook mail. |
+| `Mail.Send` | Nothing yet. Outlook sending from Droplet is not available. |
 | `Calendars.ReadWrite` | When **Show Outlook calendar in Droplet** is enabled, reads the primary calendar's events into Droplet's Calendar. Droplet does not create, change or delete events in Microsoft. |
 | `Contacts.ReadWrite` | Checks contact changes. Contacts are not yet saved locally. Droplet does not change them. |
 | `Files.ReadWrite.All` | Reads the list of files in your OneDrive and, if you turn on SharePoint, in the SharePoint document libraries you can open (names and dates, not contents). |
@@ -55,6 +55,16 @@ All **Delegated** — the app can only ever act as the person signed in, never a
 Droplet asks for every permission above except `Sites.Read.All` as one set, and Microsoft's consent screen shows all of them. `Sites.Read.All` is asked for only when a person turns SharePoint on (below), so someone who never does is never asked for it. The table says what each one is used for today, so what you approve and what Droplet actually does are both on record.
 
 Do not add **Tasks** permissions: Droplet does not read Microsoft To Do, and does not ask for them when you sign in.
+
+### Outlook email archive (optional)
+
+After connecting, switch on **Import Outlook emails into Droplet** on your Outlook card. The choice is per person and off by default. Enable Droplet's Email module to import and view messages. If a previous grant lacks full `Mail.Read` or `Mail.ReadWrite` access, the card asks you to **Reconnect Outlook email** before import starts. `Mail.ReadBasic` is insufficient because it excludes message bodies, as documented in [Microsoft's permission reference](https://learn.microsoft.com/en-us/graph/permissions-reference#mailreadbasic).
+
+Droplet imports the received and sent history available in your mailbox, including discovered nested and hidden folders, with no recent-date cutoff. Large mailboxes arrive in batches, so the first imported emails can appear while older history is still being read. Unsent Outlook drafts are excluded. The card shows the first import separately from account authorization, a message count and the last import time; **Open Outlook inbox** opens your local copy.
+
+Import is read-only. You can read and search full plain-text messages locally, but cannot send or reply through this Outlook connection, download its attachment files, or use it as a sending mailbox for a service desk. The local copy records whether attachments exist and any available attachment metadata; attachment bytes stay in Outlook. Droplet keeps a message's first imported content as an archive. Moving or deleting an email in Outlook updates its tracked folder membership and retains the local archived copy. Folder updates use [Microsoft's delta API](https://learn.microsoft.com/en-us/graph/api/message-delta?view=graph-rest-1.0).
+
+Turning import off asks for confirmation, stops further reads and deletes that mailbox's local messages, attachment metadata and Droplet drafts. It preserves your Microsoft account connection, calendar and file connections. Emails in Outlook stay there. Disconnecting the whole Microsoft account removes the local mail archive along with the other imported data.
 
 ### Outlook calendar (optional)
 
@@ -86,4 +96,4 @@ If Droplet shows **"Error"** instead, check the registered redirect URI, platfor
 
 ## Disconnecting
 
-**Settings → Connected accounts → Outlook (Microsoft 365) → Disconnect.** Droplet deletes the key Microsoft gave it for that person, their imported calendar events and their local cloud-file metadata straight away. Events and files in Microsoft stay there. To revoke access on Microsoft's side as well, an administrator can remove the permissions under **Enterprise applications → Droplet → Permissions** in the Entra admin centre, or delete the app registration, which disconnects everyone at once.
+**Settings → Connected accounts → Outlook (Microsoft 365) → Disconnect.** Droplet deletes the key Microsoft gave it for that person, their local Outlook mail archive and Droplet drafts, imported calendar events and local cloud-file metadata straight away. Emails, events and files in Microsoft stay there. To revoke access on Microsoft's side as well, an administrator can remove the permissions under **Enterprise applications → Droplet → Permissions** in the Entra admin centre, or delete the app registration, which disconnects everyone at once.

@@ -46,6 +46,7 @@ import { authFetch, useAuth } from "@/lib/auth";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Microsoft365Files, SYNC_POLL_MS, type M365SharePointView } from "./Microsoft365Files";
 import { Microsoft365Calendar, type MicrosoftCalendarView } from "./Microsoft365Calendar";
+import { Microsoft365Mail, type MicrosoftMailView } from "./Microsoft365Mail";
 
 type M365State = "DISCONNECTED" | "PENDING_CONSENT" | "CONNECTED" | "NEEDS_RECONNECT" | "ERROR";
 
@@ -67,6 +68,7 @@ export interface M365ConnectionView {
    *  Absent only from an orchestrator older than this card (a box mid-update). */
   sharePoint?: M365SharePointView;
   calendar?: MicrosoftCalendarView;
+  mail?: MicrosoftMailView;
 }
 
 /** The outcomes `/api/m365/callback` can land here with. A closed set: the
@@ -77,7 +79,7 @@ const OUTCOMES = {
   cancelled: { tone: "info", text: "Sign-in was cancelled. Nothing was connected." },
   expired: { tone: "error", text: "That sign-in took too long and expired. Start it again below." },
   failed: { tone: "error", text: "Microsoft 365 could not be connected." },
-  different_account: { tone: "error", text: "To connect a different Microsoft account, disconnect the current one first. Your existing local calendar copies were kept." },
+  different_account: { tone: "error", text: "To connect a different Microsoft account, disconnect the current one first. Your existing local copies were kept." },
   invalid: {
     tone: "error",
     text: "That sign-in did not start in this browser, so Droplet ignored it. Start it again below.",
@@ -159,6 +161,7 @@ export function Microsoft365Card({
   navigate = (url: string) => window.location.assign(url),
   syncPollMs = SYNC_POLL_MS,
   calendarPollMs = 5_000,
+  mailPollMs = 5_000,
 }: {
   /** Where the browser goes to sign in. Injected so tests can observe it. */
   navigate?: (url: string) => void;
@@ -166,6 +169,7 @@ export function Microsoft365Card({
    *  the first time. Injected so tests need not wait half a minute. */
   syncPollMs?: number;
   calendarPollMs?: number;
+  mailPollMs?: number;
 } = {}): JSX.Element | null {
   const { user } = useAuth();
   const role = user?.role;
@@ -224,6 +228,13 @@ export function Microsoft365Card({
     const timer = window.setInterval(() => void load(), calendarPollMs);
     return () => window.clearInterval(timer);
   }, [allowed, view?.calendar?.state, load, calendarPollMs]);
+
+  useEffect(() => {
+    // The calendar timer already reloads the entire connection while waiting.
+    if (!allowed || view?.mail?.state !== "WAITING" || view?.calendar?.state === "WAITING") return;
+    const timer = window.setInterval(() => void load(), mailPollMs);
+    return () => window.clearInterval(timer);
+  }, [allowed, view?.mail?.state, view?.calendar?.state, load, mailPollMs]);
 
   if (!allowed) return null;
 
@@ -293,9 +304,9 @@ export function Microsoft365Card({
       </div>
       <p className="type-caption-1">
         Connect your work or school Microsoft account. Approve access on Microsoft&apos;s website,
-        then return here. Choose whether to show your Outlook calendar in Droplet after connecting.
-        Droplet also checks mail and contacts and keeps OneDrive file lists.
-        Outlook messages do not yet appear in Droplet&apos;s local inbox.
+        then return here. Choose whether to import your received and sent Outlook emails or calendar into Droplet after connecting.
+        Imported emails can be read and searched locally; sending from Outlook in Droplet is not available.
+        Droplet also checks contacts and keeps OneDrive file lists.
       </p>
 
       {note && (
@@ -340,11 +351,13 @@ export function Microsoft365Card({
         </div>
       )}
 
-      {view && (connected || view.accountUpn || view.calendar?.enabled) && (
+      {view && (connected || view.accountUpn || view.calendar?.enabled || view.mail?.enabled) && (
         <button className="btn" disabled={busy} onClick={() => setConfirmingDisconnect(true)}>
           Disconnect
         </button>
       )}
+
+      {view?.mail && (connected || view.mail.enabled) && <Microsoft365Mail view={view.mail} accountAddress={view.accountUpn} connected={connected} onChanged={load} onReconnect={() => void signIn()} signInBusy={busy} />}
 
       {view?.calendar && (connected || view.calendar.enabled) && <Microsoft365Calendar view={view.calendar} accountAddress={view.accountUpn} connected={connected} onChanged={load} onReconnect={() => void signIn()} signInBusy={busy} />}
 
@@ -411,7 +424,7 @@ export function Microsoft365Card({
         title="Disconnect Microsoft 365?"
         description={
           "Droplet will forget the key Microsoft gave it for this account and stop reading its mail, " +
-          "calendar, contacts and files, and delete the calendar events copied locally. Nothing in your Microsoft 365 account changes. To revoke it " +
+          "calendar, contacts and files, and delete its local email archive, attachment metadata, Droplet drafts and imported calendar events. Nothing in your Microsoft 365 account changes. To revoke it " +
           "on Microsoft's side too, ask your Microsoft admin to remove Droplet's permissions."
         }
         confirmedIdentifier={view?.accountUpn ?? undefined}

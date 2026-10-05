@@ -50,7 +50,7 @@ function fixture(opts: { autoReply?: boolean; claimed?: boolean; rejectCommit?: 
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     pmSupportChannel: { findUnique: vi.fn().mockResolvedValue({
-      project, emailAccountId: "account", emailAccount: { address: "support@example.test" },
+      project, emailAccountId: "account", emailAccount: { address: "support@example.test", authMode: "PASSWORD" },
       contactOwnerUserId: "owner", enabled: true, enabledAt: new Date(0), autoAckEnabled: false,
     }) },
     $transaction: vi.fn(async (...[callback, options]: Parameters<typeof seam.$transaction>) =>
@@ -68,6 +68,16 @@ function fixture(opts: { autoReply?: boolean; claimed?: boolean; rejectCommit?: 
 beforeEach(() => vi.clearAllMocks());
 
 describe("email intake wakes the shared outbox after commit", () => {
+  it("does not create tickets or automatic replies for a legacy read-only Graph channel", async () => {
+    const f = fixture();
+    const channel = await f.prisma.pmSupportChannel.findUnique();
+    f.prisma.pmSupportChannel.findUnique.mockResolvedValueOnce({ ...channel, autoAckEnabled: true, emailAccount: { ...channel.emailAccount, authMode: "M365_GRAPH" } });
+    await intakeEmailMessage(f.prisma as never, "account", "m365:immutable-provider-id", NOW);
+    expect(f.prisma.$transaction).not.toHaveBeenCalled();
+    expect(f.tickets).toHaveLength(0);
+    expect(f.links).toHaveLength(0);
+  });
+
   it("wakes once after the ticket, message link and activity commit", async () => {
     const f = fixture();
     await intakeEmailMessage(f.prisma as never, "account", "customer@example.test", NOW);

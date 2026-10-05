@@ -51,7 +51,7 @@ async def close_pool() -> None:
 
 
 async def list_accounts() -> list[AccountConfig]:
-    """Return every EmailAccount as the IDLE loop's reduced shape."""
+    """Return mailboxes supported by this IMAP transport."""
     if _pool is None:
         return []
     rows = await _pool.fetch(
@@ -59,6 +59,7 @@ async def list_accounts() -> list[AccountConfig]:
         SELECT id, address, "imapHost", "imapPort", "imapTls",
                username, "passwordEnc", "authMode"
         FROM "EmailAccount"
+        WHERE "authMode" IN ('PASSWORD', 'GOOGLE_OAUTH')
         """,
     )
     return [
@@ -93,6 +94,7 @@ async def list_queued_drafts() -> list[DraftToSend]:
         FROM "EmailDraft" d
         JOIN "EmailAccount" a ON a.id = d."accountId"
         WHERE d.status = 'queued'
+          AND a."authMode" IN ('PASSWORD', 'GOOGLE_OAUTH')
         ORDER BY d."updatedAt" ASC
         LIMIT 32
         """,
