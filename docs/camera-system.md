@@ -359,9 +359,36 @@ the controller converges on, and the UI says so.
    row, and a Scan action that reports what it found. Doubles as the page's empty
    state when no cameras are set up yet, and carries distinct copy for
    "found nothing" vs "discovery isn't running"
-3. **Camera grid** — snapshot thumbnails (auto-refresh 10s), status badges, last detection
+3. **Camera grid** — snapshot thumbnails (auto-refresh 10s), status badges, last detection,
+   and a recording line on each tile: a mode chip (24/7, Motion, Events or Off, with the
+   camera's own retention on hover), when it last saved, and how much is stored.
+   Detecting is blue and "Live · not saving" is orange. Owners and admins get a settings
+   gear on each tile
 4. **Events timeline** — recent detections with thumbnails, confidence, time
 5. **Detail panel** — larger live view, enable/disable/remove controls, Frigate UI link
+
+### Recording state and the camera service restarting (WARP-3511)
+
+`CameraInfo.recording` (see `mobile-api-contract.md`) says what each camera keeps: its
+mode, the days each retention window keeps, when the newest segment ended, bytes used
+and a daily rate. The camera screen's rail and the top of each camera's settings page
+show it, with links between the camera's Recordings, Settings, Notifications and the
+Camera system page.
+
+Saving settings restarts the camera service for **every** camera, for a few seconds.
+While it cannot be read the grid and the camera screen show "Camera service
+restarting…" instead of "Offline" on every tile, and make no recording claim either
+way. Enable and Disable on the camera screen are confirmed first for the same reason;
+they write the persisted `detect.enabled` setting (Frigate 0.17 has no
+`/api/<camera>/detect/enable|disable` route).
+
+A camera that is "Live · not saving" can be repaired from its own screen with **Fix**,
+which runs the retention backfill (`GET`/`POST /api/cameras/retention/backfill`, owner
+and admin). It checks first and names every camera it will touch, and states what it
+will keep: the `GET` dry run returns the repair's effective defaults next to the plan
+(the same `resolveRetentionDefaults()` the `POST` applies, set per box through the
+`NVR_DEFAULT_*` variables), so no figure is written into the dashboard's copy. For a
+camera whose retention was switched off on purpose it points at Settings instead.
 
 ### Notifications
 

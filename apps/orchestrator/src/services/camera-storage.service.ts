@@ -25,6 +25,7 @@ import { fetchStats, fetchRecordingsStorage, fetchConfig } from "./frigate.clien
 import { extractStorage, recordingsOnBootDisk } from "./camera-system.service.js";
 import { effectiveCapacityBytes } from "./recordings-capacity.js";
 import { recordActivity } from "./activity.singleton.js";
+import { storageKeysFromConfig, toStorageBytes } from "./camera-recording-state.js";
 import { createLogger } from "../lib/logger.js";
 
 const logger = createLogger("camera-storage");
@@ -115,21 +116,18 @@ export interface CameraStorageSummary {
  * still gets usable rows keyed by whatever Frigate returned.
  */
 async function buildStorageKeyToCamera(): Promise<Map<string, string>> {
-  const map = new Map<string, string>();
   try {
     const config = (await fetchConfig()) as Record<string, unknown>;
-    const cameras = (config.cameras ?? {}) as Record<string, Record<string, unknown>>;
-    for (const [name, cam] of Object.entries(cameras)) {
-      const friendly = typeof cam?.friendly_name === "string" ? cam.friendly_name : null;
-      map.set(friendly || name, name);
-    }
+    // The rule itself (friendly_name, else the camera name) lives with the
+    // other consumer of this endpoint, the camera list's recording block.
+    return storageKeysFromConfig(config.cameras as Record<string, unknown> | undefined);
   } catch (err) {
     logger.warn(
       { err: (err as Error).message },
       "could not read Frigate config to resolve friendly names; using storage keys as-is",
     );
+    return new Map<string, string>();
   }
-  return map;
 }
 
 /** Pull the recordings mount out of Frigate's stats payload. */
@@ -219,17 +217,9 @@ export async function getCameraStorage(opts: CameraStorageOptions = {}): Promise
   const cameras: CameraStorageRow[] = Object.entries(usage).map(([key, raw]) => {
     const camera = keyToCamera.get(key) ?? key;
 
-    // `usage` is null for a camera with no segments — preserve that.
-    const usedMib =
-      raw?.usage === null || raw?.usage === undefined ? null : Number(raw.usage);
-    const usedBytes =
-      usedMib === null || !Number.isFinite(usedMib) ? null : Math.round(usedMib * MIB);
-
-    const bwMib = Number(raw?.bandwidth ?? 0);
-    // A rate of 0 means "not measured yet", not "uses no space" — Frigate
-    // seeds bandwidth to 0 before it has segments to average.
-    const bytesPerHour =
-      Number.isFinite(bwMib) && bwMib > 0 ? Math.round(bwMib * MIB) : null;
+    // Units, and null-is-not-zero for a camera with no segments / an
+    // unmeasured rate, are decided once in toStorageBytes.
+    const { usedBytes, bytesPerHour } = toStorageBytes(raw);
 
     const sharePercent =
       volume && usedBytes !== null && volume.totalBytes > 0

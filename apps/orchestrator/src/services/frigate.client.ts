@@ -209,12 +209,15 @@ export async function fetchStats(opts: { timeoutMs?: number } = {}): Promise<Rec
  * Returns `{}` when Frigate has no recording stats yet (fresh boot, no
  * cameras). Throws on transport/HTTP failure so callers can degrade
  * honestly rather than render zeros.
+ *
+ * `timeoutMs` — WARP-3511: the camera list reads this on every refresh and
+ * passes a short one, so a slow Frigate cannot stall the whole list.
  */
-export async function fetchRecordingsStorage(): Promise<
-  Record<string, { usage: number | null; bandwidth: number; usage_percent?: number }>
-> {
+export async function fetchRecordingsStorage(
+  opts: { timeoutMs?: number } = {},
+): Promise<Record<string, { usage: number | null; bandwidth: number; usage_percent?: number }>> {
   const resp = await fetch(`${FRIGATE_URL}/api/recordings/storage`, {
-    signal: timeout(),
+    signal: timeout(opts.timeoutMs),
   });
   if (!resp.ok) throw new Error(`Frigate recordings storage: ${resp.status}`);
   const body = await resp.json();
@@ -276,40 +279,81 @@ export async function ptzGoToPreset(
   if (!resp.ok) throw new Error(`PTZ preset: ${resp.status}`);
 }
 
-/** Look up which PTZ features the camera supports — Frigate exposes
- *  this on the per-camera config (`onvif.autotracking`, plus
- *  `support_*` flags Frigate computes from the ONVIF probe). */
-export async function fetchPtzCapabilities(
-  cameraName: string,
-): Promise<{
+/**
+ * What a camera's PTZ probe found. `supported` is the one the UI keys on:
+ * pan/tilt, zoom, or at least one preset.
+ */
+export interface PtzCapabilities {
+  supported: boolean;
   supportsPanTilt: boolean;
   supportsZoom: boolean;
   presets: string[];
-}> {
-  // The capabilities live under /api/config/cameras/<name>/onvif/info or
-  // similar in newer Frigate. The simpler probe is /api/<name>/ptz/info
-  // which returns { features: [...], presets: [...] } when supported.
+}
+
+const NO_PTZ: Readonly<PtzCapabilities> = Object.freeze({
+  supported: false,
+  supportsPanTilt: false,
+  supportsZoom: false,
+  presets: [],
+});
+
+/**
+ * Look up which PTZ features the camera supports — Frigate's ONVIF probe,
+ * `GET /api/<camera>/ptz/info`, which answers `{ features: [...], presets:
+ * [...] }` for a camera it could reach over ONVIF.
+ *
+ * WARP-3511 — anything that is not a usable answer means "no PTZ".
+ *
+ * No `onvif:` block is ever written when a camera is adopted, so every
+ * camera is a "no PTZ" camera until someone configures it, and what Frigate
+ * answers for that varies: `{}` on 0.17.2's source, but a 500 on the box
+ * ("Unhandled error PTZ info: 500"). Only a 404 used to count as "no PTZ";
+ * the 500 surfaced as an error the dashboard's SWR retried forever. A
+ * camera with nothing to control is not a failure, so a non-2xx — and a body
+ * that is not JSON — is the same normal answer.
+ *
+ * The exception is what cannot be a statement about the camera: a transport
+ * failure (Frigate unreachable) and a 502/503/504 both throw, so the route can
+ * tell an outage from a genuine "no PTZ" and mark it for asking again.
+ */
+export async function fetchPtzCapabilities(
+  cameraName: string,
+): Promise<PtzCapabilities> {
   const resp = await fetch(
     `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/ptz/info`,
     { signal: timeout() },
   );
-  if (!resp.ok) {
-    // 404 = no PTZ on this camera. That's a normal answer, not an error.
-    if (resp.status === 404) {
-      return { supportsPanTilt: false, supportsZoom: false, presets: [] };
-    }
+  // 502/503/504 is Frigate (or what fronts it) being unwell, not this camera
+  // lacking PTZ. Reporting "no PTZ" for it would be remembered for a camera
+  // that has it, so it throws and the route marks the answer unknown.
+  if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
     throw new Error(`PTZ info: ${resp.status}`);
   }
-  const data = (await resp.json()) as Record<string, unknown>;
-  const features = Array.isArray(data.features)
+  if (!resp.ok) {
+    logger.debug(
+      { camera: cameraName, status: resp.status },
+      "Frigate PTZ probe was not 2xx; treating the camera as having no PTZ",
+    );
+    return { ...NO_PTZ, presets: [] };
+  }
+  let data: Record<string, unknown>;
+  try {
+    data = (await resp.json()) as Record<string, unknown>;
+  } catch {
+    return { ...NO_PTZ, presets: [] };
+  }
+  const features = Array.isArray(data?.features)
     ? (data.features as unknown[]).map(String)
     : [];
-  const presets = Array.isArray(data.presets)
+  const presets = Array.isArray(data?.presets)
     ? (data.presets as unknown[]).map(String)
     : [];
+  const supportsPanTilt = features.includes("pt") || features.includes("pan-tilt");
+  const supportsZoom = features.includes("zoom");
   return {
-    supportsPanTilt: features.includes("pt") || features.includes("pan-tilt"),
-    supportsZoom: features.includes("zoom"),
+    supported: supportsPanTilt || supportsZoom || presets.length > 0,
+    supportsPanTilt,
+    supportsZoom,
     presets,
   };
 }
@@ -585,6 +629,56 @@ export async function fetchRecordings(
   );
   if (!resp.ok) throw new Error(`Frigate recordings: ${resp.status}`);
   return resp.json();
+}
+
+/**
+ * How far back the camera list looks for a camera's newest saved segment.
+ * Frigate cuts ~10 s segments, so this is at most ~60 small rows however the
+ * camera is configured.
+ */
+const LAST_SEGMENT_LOOKBACK_SEC = 600;
+
+/**
+ * WARP-3511 — when the newest saved segment for a camera ended (unix
+ * seconds), or null when nothing was saved inside the look-back window.
+ *
+ * Cheap enough to run per camera on every camera-list refresh: one
+ * `recordings?after&before` read over a short, bounded window — the same
+ * endpoint `fetchRecordings` uses, never the whole-history summary.
+ *
+ * ⚠ Both bounds are always sent. Frigate evaluates the endpoint's defaults
+ * once, at import, so omitting them would read a window that is frozen at the
+ * moment Frigate started.
+ *
+ * Null is "none found", which is normal for a camera that only keeps motion
+ * or events — it is not by itself a fault. A non-2xx answer throws, so the
+ * caller can leave the time unknown rather than guess.
+ */
+export async function fetchLastRecordingEnd(
+  cameraName: string,
+  opts: { lookbackSec?: number; timeoutMs?: number; nowSec?: number } = {},
+): Promise<number | null> {
+  const nowSec = opts.nowSec ?? Math.floor(Date.now() / 1000);
+  const params = new URLSearchParams({
+    after: String(nowSec - (opts.lookbackSec ?? LAST_SEGMENT_LOOKBACK_SEC)),
+    before: String(nowSec),
+  });
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/recordings?${params}`,
+    { signal: timeout(opts.timeoutMs) },
+  );
+  if (!resp.ok) throw new Error(`Frigate recordings: ${resp.status}`);
+  const rows = (await resp.json()) as unknown;
+  if (!Array.isArray(rows)) return null;
+
+  let latest: number | null = null;
+  for (const row of rows) {
+    const end = (row as { end_time?: unknown } | null)?.end_time;
+    if (typeof end === "number" && Number.isFinite(end) && (latest === null || end > latest)) {
+      latest = end;
+    }
+  }
+  return latest;
 }
 
 /**
@@ -883,22 +977,14 @@ export async function fetchHlsPlaylist(url: string): Promise<string> {
 }
 
 // --- Camera control ---
-
-export async function enableDetection(cameraName: string): Promise<void> {
-  const resp = await fetch(
-    `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/detect/enable`,
-    { method: "POST", signal: timeout() }
-  );
-  if (!resp.ok) throw new Error(`Enable detection: ${resp.status}`);
-}
-
-export async function disableDetection(cameraName: string): Promise<void> {
-  const resp = await fetch(
-    `${FRIGATE_URL}/api/${encodeURIComponent(cameraName)}/detect/disable`,
-    { method: "POST", signal: timeout() }
-  );
-  if (!resp.ok) throw new Error(`Disable detection: ${resp.status}`);
-}
+//
+// Turning detection on or off is NOT here. Frigate 0.17 has no
+// `/api/<camera>/detect/enable|disable` — its API source defines no such
+// route (detection is toggled over MQTT/websocket, or by editing the config),
+// so the calls that used to live here answered 404 every time. Detection is
+// the persisted `detect.enabled` setting; see `updateCameraSettings`
+// (camera-settings.service.ts), which `POST /cameras/:name/enable|disable` now
+// goes through. (WARP-3511)
 
 export async function enableRecording(cameraName: string): Promise<void> {
   const resp = await fetch(

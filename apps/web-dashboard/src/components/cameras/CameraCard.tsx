@@ -1,8 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Maximize2, Pin, PinOff, VideoOff, Circle } from "lucide-react";
+import { Maximize2, Pin, PinOff, Settings, VideoOff, Circle } from "lucide-react";
 import { getCameraLiveUrl, getCameraSnapshotUrl } from "@/lib/api";
+import {
+  MODE_CHIP_LABEL,
+  describeLastSaved,
+  formatStorageBytes,
+  isRecordingDegraded,
+  modeTooltip,
+  statusLabel,
+} from "@/lib/camera-recording";
 import type { CameraInfo } from "@/lib/types";
 
 interface CameraCardProps {
@@ -15,6 +23,9 @@ interface CameraCardProps {
   /** Toggle handler. Receives the camera so the page can dispatch
    *  add/remove without re-deriving from the click target. */
   onTogglePin?: (camera: CameraInfo) => void | Promise<void>;
+  /** WARP-3511: opens this camera's settings. Offered only to owners and
+   *  admins, so it is absent for everyone else and no gear is drawn. */
+  onOpenSettings?: (camera: CameraInfo) => void;
 }
 
 // Snapshot refresh interval. The previous 1 s bucket was too short — every
@@ -33,23 +44,33 @@ const SNAPSHOT_INTERVAL_MS = 2000;
 // motion in.
 const HOVER_LATENCY_DELAY_MS = 250;
 
+// The label words live in `statusLabel` (lib/camera-recording) so the tile and
+// the detail screen cannot drift; only the dot is decided here.
 const STATUS_CONFIG = {
-  recording: { label: "Recording", color: "var(--success)", pulse: false },
-  detecting: { label: "Detecting", color: "#d9a35c", pulse: true },
-  // WARP-1974: a healthy stream that keeps NOTHING. Amber rather than
-  // green, and named for what it is — the camera works, but nothing is
+  recording: { color: "var(--success)", pulse: false },
+  // WARP-3511: blue (info) — a healthy camera whose objects are being tracked.
+  // It shared amber with "not saving", so a camera that was working and one
+  // that was keeping nothing looked the same.
+  detecting: { color: "var(--color-system-blue)", pulse: true },
+  // WARP-1974: a healthy stream that keeps NOTHING. Orange (warning) rather
+  // than green, and named for what it is — the camera works, but nothing is
   // being saved, so there will be nothing to look back at. The old build
   // showed this exact state as a green "Recording".
-  live: { label: "Live · not saving", color: "#d9a35c", pulse: false },
-  idle: { label: "Idle", color: "var(--text-faint)", pulse: false },
-  offline: { label: "Offline", color: "var(--danger)", pulse: false },
+  live: { color: "var(--color-system-orange)", pulse: false },
+  idle: { color: "var(--text-faint)", pulse: false },
+  offline: { color: "var(--danger)", pulse: false },
 } as const;
+
+// Shown when the camera service could not be read: not "Offline" (the cameras
+// are probably fine) and not a recording claim either way.
+const UNAVAILABLE_DOT = { color: "var(--text-faint)", pulse: false } as const;
 
 export function CameraCard({
   camera,
   onClick,
   isPinned = false,
   onTogglePin,
+  onOpenSettings,
 }: CameraCardProps) {
   const [imgError, setImgError] = useState(false);
   const [hovering, setHovering] = useState(false);
@@ -60,7 +81,14 @@ export function CameraCard({
     `${getCameraSnapshotUrl(camera.name)}?t=${Math.floor(Date.now() / SNAPSHOT_INTERVAL_MS)}`,
   );
 
-  const statusCfg = STATUS_CONFIG[camera.status];
+  const degraded = isRecordingDegraded(camera);
+  const statusCfg = degraded ? UNAVAILABLE_DOT : STATUS_CONFIG[camera.status];
+  const rec = camera.recording;
+  const saved = describeLastSaved(camera);
+  const off = rec?.mode === "off";
+  // Orange text is only legible on its own tint (the shell darkens it there),
+  // so a warning is a pill, never bare orange on the card.
+  const warnPill = "text-system-orange bg-system-orange/10 px-1.5 py-0.5 rounded-full";
 
   // Slight pointer-enter delay so a quick mouse-over while scrolling doesn't
   // open MJPEG streams on every card the cursor passes through.
@@ -130,6 +158,11 @@ export function CameraCard({
     }
   };
 
+  const handleSettingsClick = (e: React.MouseEvent) => {
+    e.stopPropagation(); // don't open the detail view when opening settings
+    onOpenSettings?.(camera);
+  };
+
   const handlePinClick = async (e: React.MouseEvent) => {
     e.stopPropagation(); // don't open detail page when toggling pin
     if (!onTogglePin || pinBusy) return;
@@ -186,13 +219,16 @@ export function CameraCard({
         )}
 
         {/* Status badge */}
-        <div className="absolute top-2 right-2 flex items-center gap-1.5 px-2 py-1 rounded-full bg-black/60 backdrop-blur-sm">
+        <div
+          data-testid="status-badge"
+          className="absolute top-2 right-2 flex items-center gap-1.5 px-2 py-1 rounded-full bg-black/60 backdrop-blur-sm"
+        >
           <Circle
             size={8}
             className={`fill-current ${statusCfg.pulse ? "animate-pulse" : ""}`}
             style={{ color: statusCfg.color }}
           />
-          <span className="type-caption-2 text-white">{statusCfg.label}</span>
+          <span className="type-caption-2 text-white">{statusLabel(camera)}</span>
         </div>
 
         {/* Pin toggle — top-left. Always rendered (so the operator can pin
@@ -224,7 +260,7 @@ export function CameraCard({
             Sits to the right of the pin so they don't overlap. */}
         {useLive && (
           <div
-            className={`absolute top-2 flex items-center gap-1.5 px-2 py-1 rounded-full bg-[#ef4444] backdrop-blur-sm ${
+            className={`absolute top-2 flex items-center gap-1.5 px-2 py-1 rounded-full bg-system-red backdrop-blur-sm ${
               onTogglePin ? "left-12" : "left-2"
             }`}
           >
@@ -251,12 +287,29 @@ export function CameraCard({
 
       {/* Info */}
       <div className="p-3">
-        <h3
-          className="type-subheadline font-medium truncate"
-          style={{ color: "var(--text)" }}
-        >
-          {camera.displayName}
-        </h3>
+        <div className="flex items-center justify-between gap-2">
+          <h3
+            className="type-subheadline font-medium truncate"
+            style={{ color: "var(--text)" }}
+          >
+            {camera.displayName}
+          </h3>
+          {/* Owner / admin only (the page decides). A real button beside the
+              title, drawn at rest: a hover-only control is unreachable on
+              touch, and settings are where "not saving" gets fixed. */}
+          {onOpenSettings && (
+            <button
+              type="button"
+              onClick={handleSettingsClick}
+              aria-label={`Settings for ${camera.displayName}`}
+              title="Camera settings"
+              className="flex-shrink-0 -my-1 -mr-1.5 p-2 rounded-full transition-colors hover:bg-[var(--hover)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]"
+              style={{ color: "var(--text-muted)" }}
+            >
+              <Settings size={15} aria-hidden="true" />
+            </button>
+          )}
+        </div>
         <div className="flex items-center justify-between mt-1">
           <p
             className="type-caption-1 truncate"
@@ -275,6 +328,38 @@ export function CameraCard({
             </span>
           )}
         </div>
+
+        {/* WARP-3511 — is it keeping footage? Mode, the newest write, how much
+            is stored. Nothing here while the service is unreadable: the badge
+            says so, and a chip would be a claim with nothing behind it. */}
+        {rec && !degraded && rec.mode && (
+          <div
+            data-testid="recording-meta"
+            className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-2 type-caption-2"
+          >
+            <span
+              data-testid="recording-mode-chip"
+              title={modeTooltip(rec)}
+              className={off ? warnPill : "px-1.5 py-0.5 rounded-full"}
+              style={off ? undefined : { background: "var(--inset)", color: "var(--text)" }}
+            >
+              {MODE_CHIP_LABEL[rec.mode]}
+            </span>
+            {saved && (
+              <span
+                className={saved.tone === "warn" ? warnPill : ""}
+                style={saved.tone === "warn" ? undefined : { color: "var(--text-muted)" }}
+              >
+                {saved.text}
+              </span>
+            )}
+            {rec.usedBytes !== null && (
+              <span className="font-mono" style={{ color: "var(--text-muted)" }}>
+                {formatStorageBytes(rec.usedBytes)}
+              </span>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
