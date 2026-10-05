@@ -115,6 +115,31 @@ describe("external guests", () => {
     expect(await audience.usernamesForDeleted(["u-guest-a"])).not.toContain("gary");
   });
 
+  it("rechecks revoked grants and deactivated guests before deletion delivery, within the live roster TTL", async () => {
+    const users = USERS.map((user) => ({ ...user }));
+    const { audience } = make({}, makePrisma(users));
+    expect(await audience.usernamesFor("wi-1")).toContain("fiona");
+    expect(await audience.usernamesFor("wi-1")).toContain("gail");
+    HOLDS["u-fam"] = new Set(["files"] as ModuleId[]);
+    users.find((user) => user.id === "u-guest-a")!.directoryStatus = "DEACTIVATED";
+    try {
+      const names = await audience.usernamesForDeleted(["u-guest-a"]);
+      expect(names).not.toContain("fiona");
+      expect(names).not.toContain("gail");
+      expect(names.sort()).toEqual(["adam", "olga"]);
+    } finally {
+      HOLDS["u-fam"] = new Set(["projects"] as ModuleId[]);
+    }
+  });
+
+  it("rechecks the box module before deletion delivery instead of using a warm live roster", async () => {
+    let enabled = true;
+    const { audience } = make({ boxModuleIds: async () => new Set(enabled ? ["projects"] : []) });
+    expect(await audience.usernamesFor("wi-1")).toContain("olga");
+    enabled = false;
+    expect(await audience.usernamesForDeleted(["u-guest-a"])).toEqual([]);
+  });
+
   it("are not looked up at all when the box has no guests", async () => {
     const prisma = makePrisma(USERS.filter((u) => u.role !== "guest"));
     const { audience } = make({}, prisma);

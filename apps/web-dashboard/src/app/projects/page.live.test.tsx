@@ -87,14 +87,14 @@ vi.mock("@/lib/auth", () => ({
     const method = (init?.method ?? "GET").toUpperCase();
     if (method === "GET") gets.push(url);
     const json = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) } as Response);
-    if (url.startsWith("/api/pm/projects/p-1/work-items?parent=")) return json({ work_items: [] });
-    if (url === "/api/pm/projects/p-1/work-items") return json({ work_items: server.items });
+    if (url.startsWith("/api/pm/projects/p-1/work-items?parent=")) return json({ work_items: [], nextCursor: null, total: 0 });
+    if (url.startsWith("/api/pm/projects/p-1/work-items")) return json({ work_items: server.items, nextCursor: null, total: server.items.length });
     if (url === "/api/pm/projects/p-1/states") return json({ states: STATES });
     if (url === "/api/pm/projects/p-1/labels") return json({ labels: [] });
     if (url.startsWith("/api/pm/projects")) return json({ projects: [PROJECT] });
     if (url === "/api/pm/summary") return json({ summary: { activeProjects: 1, itemsOpen: 1, doneThisWeek: 0, overdue: 0 } });
-    if (url.endsWith("/comments")) return json({ comments: [] });
-    if (url.endsWith("/activity")) return json({ activity: [] });
+    if (url.includes("/comments")) return json({ comments: [], nextCursor: null, total: 0 });
+    if (url.includes("/activity")) return json({ activity: [], nextCursor: null, total: 0 });
     if (url.endsWith("/presence")) return json({ viewers: [] });
     if (url === "/api/departments") return json({ departments: [] });
     if (url === "/api/auth/users") return json({ users: [] });
@@ -104,7 +104,7 @@ vi.mock("@/lib/auth", () => ({
 
 import ProjectsPage from "./page";
 
-const boardReads = () => gets.filter((u) => u === "/api/pm/projects/p-1/work-items").length;
+const boardReads = () => gets.filter((u) => u.startsWith("/api/pm/projects/p-1/work-items") && !u.includes("parent=")).length;
 
 const FRAME = { type: "pm.changed", projectId: "p-1", workItemId: "w-1", verb: "updated" };
 const frame = (over: Partial<typeof FRAME> = {}) =>

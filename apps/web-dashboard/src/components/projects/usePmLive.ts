@@ -86,6 +86,18 @@ export function keyAffectedBy(key: unknown, e: Pick<PmChangedEvent, "projectId" 
 
 let holds = 0;
 const resumeListeners = new Set<() => void>();
+const pagedReads = new Set<{ key: string; refresh: () => Promise<unknown> }>();
+
+/** SWR Infinite owns an aggregate cache key; its mounted hook must revalidate
+ *  through its own mutate to refresh every page and update that aggregate. */
+export function usePmLivePagedRead(key: string | null, refresh: () => Promise<unknown>): void {
+  useEffect(() => {
+    if (!key) return;
+    const read = { key, refresh };
+    pagedReads.add(read);
+    return () => { pagedReads.delete(read); };
+  }, [key, refresh]);
+}
 
 /** Is a drag (or anything else that called `usePmLivePause`) holding refreshes back? */
 export function isPmLivePaused(): boolean {
@@ -129,6 +141,13 @@ export function usePmLive(): void {
       pending.clear();
       everything = false;
       if (!all && events.length === 0) return;
+      for (const read of pagedReads) {
+        if (all || events.some((event) => keyAffectedBy(read.key, event))) {
+          // SWR keeps each read's error/retry state; a failed read must not
+          // prevent the other mounted lists from refreshing.
+          void read.refresh().catch(() => undefined);
+        }
+      }
       void mutate(
         (key) =>
           typeof key === "string" &&

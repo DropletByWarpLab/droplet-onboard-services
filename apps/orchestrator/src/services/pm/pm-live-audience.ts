@@ -29,6 +29,8 @@
  * "something changed": the frame carries ids only and the client re-reads through the
  * authorized API, so the exposure of a stale roster is a timestamp, not data.
  * It matches the 5-10 s the module gate and the tool verdict already accept.
+ * Deletion delivery always rebuilds the roster, so a stale live-row roster
+ * cannot expose deleted IDs to a person who lost access or was deactivated.
  *
  * Service desk: `PmProject.kind` is checked by the consumer before this
  * audience is asked. Service-desk items and deletion tombstones never enter
@@ -135,7 +137,9 @@ export function createPmLiveAudience(deps: PmLiveAudienceDeps): PmLiveAudience {
       return [...readers, ...heardAsGuest];
     },
     async usernamesForDeleted(guestUserIds) {
-      const { readers, guests } = await roster();
+      // A tombstone's assignees are historical; access and directory status
+      // must be current when intersecting that snapshot with its audience.
+      const { readers, guests } = await build();
       const heardAsGuest = new Set<string>();
       for (const userId of guestUserIds) {
         const username = guests.get(userId);

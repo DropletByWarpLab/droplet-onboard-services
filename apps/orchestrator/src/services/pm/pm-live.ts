@@ -69,9 +69,6 @@ const PM_LIVE_INTERVAL_MS = 1_000;
 // still uncommitted.
 const PM_LIVE_SETTLE_MS = 6_000;
 
-/** Work item → project is remembered, bounded. A work item never changes project. */
-const MAX_REMEMBERED_ITEMS = 2_000;
-
 export const PM_LIVE_TOPIC = (username: string): string => `droplet/pm/${username}`;
 
 export interface PmChangedEvent {
@@ -128,7 +125,6 @@ export function createPmLiveConsumer(deps: PmLiveDeps): OutboxConsumer {
   const send = deps.send ?? publish;
   const log = deps.logger ?? defaultLogger;
 
-  const projectOf = new Map<string, string>();
   let brokerDown = false;
   let publishing = true;
 
@@ -178,22 +174,14 @@ export function createPmLiveConsumer(deps: PmLiveDeps): OutboxConsumer {
       // here as a fail-closed fallback for malformed legacy/manual rows.
       if (!row.workItemId) return;
 
-      let projectId = projectOf.get(row.workItemId);
-      if (projectId === undefined) {
-        const item = await deps.prisma.pmWorkItem.findUnique({
-          where: { id: row.workItemId },
-          select: { projectId: true, project: { select: { kind: true } } },
-        });
-        // Deleted since the write. Its activity rows go with it, so there is
-        // nothing left to announce (and a row we could not place is not cached).
-        if (!item) return;
-        // A SERVICE_DESK item has a separate Support audience; this consumer
-        // handles only Projects changes, and fails closed before roster lookup.
-        if (item.project.kind !== "PROJECT") return;
-        if (projectOf.size >= MAX_REMEMBERED_ITEMS) projectOf.clear();
-        projectOf.set(row.workItemId, item.projectId);
-        projectId = item.projectId;
-      }
+      // Check the current owning surface for every row before resolving its
+      // audience. An earlier Projects event cannot authorize a later event.
+      const item = await deps.prisma.pmWorkItem.findUnique({
+        where: { id: row.workItemId },
+        select: { projectId: true, project: { select: { kind: true } } },
+      });
+      if (!item || item.project.kind !== "PROJECT") return;
+      const projectId = item.projectId;
 
       const usernames = await deps.audience.usernamesFor(row.workItemId);
       if (usernames.length === 0) return;
