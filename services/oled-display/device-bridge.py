@@ -1311,7 +1311,8 @@ def _save_state(s):
             base = os.path.basename(d.rstrip("/"))
             if base and base not in ("tmp", "var", "run", ""):
                 try:
-                    os.chmod(d, 0o700)
+                    # Private directory: owner traversal is required; group/other access is forbidden.
+                    os.chmod(d, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
                 except Exception:
                     pass
         tmp = STATE_FILE + ".tmp"
@@ -3365,7 +3366,8 @@ def _run_pool_via_executor(operation, params, refusal=None):
         # directory already exists, so explicitly chmod it on every start to
         # close the window where a prior install left a looser umask (0755).
         os.makedirs(POOL_SPOOL_DIR, mode=0o700, exist_ok=True)
-        os.chmod(POOL_SPOOL_DIR, 0o700)
+        # Recovery-key spool directory: owner traversal only, never shared access.
+        os.chmod(POOL_SPOOL_DIR, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
         # Drop any stale pair from an interrupted earlier run so the executor
         # can never consume an old request and we never read an old result.
         # WARP-3513: a stale RESULT can be a recovery key the bridge never got
@@ -3794,7 +3796,8 @@ def _nvr_spool_prepare():
     # existing directory, so chmod explicitly every time to close the window
     # where an older install left it looser (same as the pool spool).
     os.makedirs(NVR_SPOOL_DIR, mode=0o700, exist_ok=True)
-    os.chmod(NVR_SPOOL_DIR, 0o700)
+    # Root-operation spool directory: owner traversal only, never shared access.
+    os.chmod(NVR_SPOOL_DIR, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
 
 
 def _nvr_spool_remove(name):
