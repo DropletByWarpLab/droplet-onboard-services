@@ -10,13 +10,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
+import { createTransactionSeam } from "./helpers/prisma-tx-harness.js";
 
 const mockGetEffectiveModuleIds = vi.fn();
 vi.mock("../services/modules.service.js", () => ({
   getEffectiveModuleIds: (...a: unknown[]) => mockGetEffectiveModuleIds(...a),
 }));
 
-import { isServiceDesk } from "../services/pm/pm.service.js";
+import { deleteProject, isServiceDesk, listActivity, listComments } from "../services/pm/pm.service.js";
+import type { PrismaClient } from "@prisma/client";
 import {
   checkBusinessPinTarget,
   resolveBusinessPinTargets,
@@ -32,6 +34,40 @@ describe("isServiceDesk — the one guard every PM reader shares", () => {
   it("is false for a row that is not there — absence is the caller's own 404, not this guard's", () => {
     expect(isServiceDesk(null)).toBe(false);
     expect(isServiceDesk(undefined)).toBe(false);
+  });
+});
+
+describe("the reliability service union retains the ticket boundary", () => {
+  it.each([
+    ["comments", listComments],
+    ["activity", listActivity],
+  ] as const)("refuses a ticket before reading %s rows or their total", async (_name, load) => {
+    const rows = { findMany: vi.fn(), count: vi.fn() };
+    const prisma = {
+      pmWorkItem: { findUnique: vi.fn().mockResolvedValue({ project: { kind: "SERVICE_DESK" } }) },
+      pmComment: rows,
+      pmActivity: rows,
+    };
+    await expect(load(prisma as unknown as PrismaClient, "ticket")).rejects.toThrow("work_item_not_found");
+    expect(rows.findMany).not.toHaveBeenCalled();
+    expect(rows.count).not.toHaveBeenCalled();
+  });
+
+  it("refuses an archived, correctly confirmed desk before delete or audit", async () => {
+    const audit = vi.fn();
+    const prisma = {
+      pmProject: { findUnique: vi.fn().mockResolvedValue({
+        id: "desk", name: "Private desk", identifier: "DESK", isArchived: true, kind: "SERVICE_DESK",
+      }) },
+    };
+    const transaction = createTransactionSeam({ client: () => prisma });
+    Object.assign(prisma, { $transaction: transaction.$transaction });
+    await expect(deleteProject(prisma as unknown as PrismaClient, "desk", {
+      confirmIdentifier: "DESK", audit,
+    })).rejects.toThrow("project_not_found");
+    expect(transaction.$transaction).not.toHaveBeenCalled();
+    expect(transaction.calls()).toEqual([]);
+    expect(audit).not.toHaveBeenCalled();
   });
 });
 

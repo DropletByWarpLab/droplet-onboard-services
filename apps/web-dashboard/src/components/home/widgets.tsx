@@ -86,6 +86,7 @@ import {
 import { useCameras } from "@/lib/hooks/useCameras";
 import { useSmartHome } from "@/lib/hooks/useSmartHome";
 import { useVoiceHealthSummary } from "@/lib/hooks/useVoice";
+import { useModuleGateState } from "@/lib/hooks/useModuleGate";
 import { useCalendarEvents } from "@/lib/hooks/useCalendar";
 import {
   useNotes,
@@ -700,21 +701,26 @@ function StatusWidget({ w, h }: WidgetProps) {
   const { user } = useAuth();
   const isAdmin = isAdminRole(user?.role);
   const isGuest = user?.role === "guest";
-  const { items: recents } = useRecents(50);
+  const filesModuleOn = useModuleGateState("files") === "on";
+  const camerasModuleOn = useModuleGateState("cameras") === "on";
+  const smartHomeModuleOn = useModuleGateState("smart_home") === "on";
+  const voiceModuleOn = useModuleGateState("voice") === "on";
+  const { items: recents } = useRecents(50, { enabled: filesModuleOn });
   const { models } = useModels();
   // WARP-3157 — no camera polls for a guest: every camera route 403s them
-  // and each 403 writes an audited "Access denied" row.
-  const { totalCameras } = useCameras({ enabled: !isGuest });
-  const { totalDevices } = useSmartHome();
+  // and each 403 writes an audited "Access denied" row. The workspace module
+  // gate also stops these polls until Cameras is positively enabled.
+  const { totalCameras } = useCameras({ enabled: camerasModuleOn && !isGuest });
+  const { totalDevices } = useSmartHome({ enabled: smartHomeModuleOn });
   // WARP-1055 — the Home surface's Voice status line lives inside this
   // existing system-health tile (design brief §2), not a new tile.
   // WARP-3157 — GET /api/voice/status is owner/admin only; a member or
   // guest polling it forever gets a 403 and the row read "— · checking…"
   // with no way to resolve. The hook still runs (rules of hooks) but with
-  // its poll disabled — each 403 would write an audited "Access denied"
-  // row — and the row below is dropped from `stats` for non-admins.
+  // its poll disabled for non-admins and while the Voice module is off or
+  // unresolved. The row is dropped unless both gates allow it.
   const { state: voiceState, unavailable: voiceUnavailable } =
-    useVoiceHealthSummary({ enabled: isAdmin });
+    useVoiceHealthSummary({ enabled: isAdmin && voiceModuleOn });
 
   const local = models.filter((m) => isLocalProvider(m.provider)).length;
   const cloud = models.length - local;
@@ -743,17 +749,21 @@ function StatusWidget({ w, h }: WidgetProps) {
                 : voice("—", "not calibrated yet", "var(--color-label-quaternary)");
 
   const stats: StatRow[] = [
-    { icon: Folder, label: "Files", value: recents.length ? String(recents.length) : "—", sub: "recent files", dot: "var(--success)", href: "/files" },
+    ...(filesModuleOn
+      ? [{ icon: Folder, label: "Files", value: recents.length ? String(recents.length) : "—", sub: "recent files", dot: "var(--success)", href: "/files" } satisfies StatRow]
+      : []),
     // WARP-3157 — every camera route refuses role `guest`; showing this stat
     // to a guest would report "none yet" as if the box had no cameras.
-    ...(isGuest
+    ...(isGuest || !camerasModuleOn
       ? []
       : [{ icon: Video, label: "Cameras", value: totalCameras ? String(totalCameras) : "—", sub: totalCameras ? "live feeds" : "none yet", dot: "var(--brand)", href: "/cameras" } satisfies StatRow]),
-    { icon: Network, label: "Devices", value: totalDevices ? String(totalDevices) : "—", sub: "devices online", dot: "var(--success)", href: "/devices" },
+    ...(smartHomeModuleOn
+      ? [{ icon: Network, label: "Devices", value: totalDevices ? String(totalDevices) : "—", sub: "devices online", dot: "var(--success)", href: "/devices" } satisfies StatRow]
+      : []),
     { icon: Cpu, label: "AI models", value: models.length ? String(models.length) : "—", sub: `${local} local · ${cloud} cloud`, dot: "var(--success)", href: "/models" },
     // WARP-3157 — GET /api/voice/status is owner/admin only; hide the row
     // for everyone else rather than a permanent "— · checking…".
-    ...(isAdmin ? [voiceRow] : []),
+    ...(isAdmin && voiceModuleOn ? [voiceRow] : []),
   ];
 
   if (w <= 2 || h <= 2) {
