@@ -384,6 +384,17 @@ describe("revealRecoveryKey — POST /api/storage/drives/:id/recovery-key/reveal
     expect(authFetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    { service: "drive_adopt", resourceId: "sdb" },
+    { service: "recovery_key_reveal", resourceId: "U-OTHER" },
+  ])("never confirms a reveal token for another operation or drive ($service / $resourceId)", async (target) => {
+    authFetchMock
+      .mockResolvedValueOnce(res({ status: 202, json: { ...REVEAL_TOKEN, ...target } }))
+      .mockResolvedValueOnce(res({ status: 200, json: { recoveryKey: "OTHER-DRIVE-KEY" } }));
+    await expect(revealRecoveryKey("U-1")).rejects.toThrow(/operation or drive did not match/i);
+    expect(authFetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("refuses an empty drive id without making a request", async () => {
     const err = await revealRecoveryKey("").catch((e) => e);
     expect(err).toBeInstanceOf(RecoveryKeyUnavailableError);

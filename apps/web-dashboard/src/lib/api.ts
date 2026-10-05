@@ -1507,6 +1507,9 @@ export async function revealRecoveryKey(driveId: string): Promise<string> {
   if (afterFirst.key) return afterFirst.key;
   if (!afterFirst.token) throw new Error("The recovery key response was empty.");
   const { confirmationToken, service, resourceId } = afterFirst.token;
+  if (service !== "recovery_key_reveal" || resourceId !== driveId) {
+    throw new Error("Unexpected recovery key confirmation: operation or drive did not match");
+  }
   const confirmed = await authFetch(`${BASE}/api/storage/command/confirm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

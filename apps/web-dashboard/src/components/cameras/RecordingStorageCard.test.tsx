@@ -259,6 +259,33 @@ describe("RecordingStorageCard — no eligible drive", () => {
 });
 
 describe("RecordingStorageCard — pending and migrating", () => {
+  it("a missing-drive headline never unlocks a move that is still running", () => {
+    setup(makeRecording({
+      status: "missing",
+      warnings: [{ code: "drive_missing", message: "" }, { code: "near_full", message: "" }],
+      migration: { state: "running", progressPct: 50, bytesCopied: 6 * GIB, bytesTotal: 12 * GIB, startedAt: null, error: null },
+      oldFootage: { present: true, bytes: 12 * GIB, location: "system_disk" },
+      eligibleDrives: [
+        { fsUuid: "fs-2", label: "Bay 3", sizeBytes: 2000 * GIB, freeBytes: 1900 * GIB, encrypted: true },
+      ],
+    }));
+    expect(screen.getByText("Drive missing")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: /moving recordings/i })).toHaveAttribute("aria-valuenow", "50");
+    expect(screen.queryByRole("combobox", { name: /move recordings to/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /delete old recordings/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /use the whole drive/i })).not.toBeInTheDocument();
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(deleteMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["pending", "migrating"] as const)("a near-full warning cannot bypass locked %s controls", (status) => {
+    setup(makeRecording({ status, warnings: [{ code: "near_full", message: "" }] }));
+    expect(screen.getByTestId("recording-warning-near_full")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /use the whole drive/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(updateMock).not.toHaveBeenCalled();
+  });
+
   it("pending: says it is being set up on the named drive", () => {
     setup(makeRecording({ status: "pending", mode: "auto_reserved" }));
     expect(screen.getByText("Setting up")).toBeInTheDocument();

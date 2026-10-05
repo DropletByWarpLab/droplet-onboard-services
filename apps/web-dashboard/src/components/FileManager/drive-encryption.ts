@@ -94,9 +94,9 @@ export function canPrepareDrive(
  * UUID (erasing a drive gives it a fresh one), so after the wipe the panel has
  * to find it in the refreshed list. Preference order:
  *
- *   1. an encrypted drive on the pool array or disk that was just prepared (the
+ *   1. one NEW encrypted drive on the pool array or disk that was just prepared (the
  *      orchestrator's `pool` annotation / the bridge's `parent_disk`);
- *   2. otherwise the ONE encrypted drive that was not in the list before. A
+ *   2. otherwise the ONE new encrypted drive with no source identity. A
  *      mapper node has no recognisable whole-disk name, so older bridges leave
  *      `parent_disk` unset.
  *
@@ -108,17 +108,19 @@ export function pickPreparedDrive(
   drives: readonly DriveInfo[],
   query: { diskName?: string; poolDevice?: string; knownUuids: ReadonlySet<string> },
 ): DriveInfo | undefined {
-  const candidates = drives.filter((d) => d.uuid && driveEncryptionState(d) === "encrypted");
-  if (query.poolDevice) {
-    const byPool = candidates.find((d) => drivePoolName(d) === query.poolDevice);
-    if (byPool) return byPool;
-  }
-  if (query.diskName) {
-    const byDisk = candidates.find((d) => d.parent_disk === query.diskName);
-    if (byDisk) return byDisk;
-  }
-  const fresh = candidates.filter((d) => !query.knownUuids.has(d.uuid));
-  return fresh.length === 1 ? fresh[0] : undefined;
+  const candidates = drives.filter(
+    (d) => d.uuid && !query.knownUuids.has(d.uuid) && driveEncryptionState(d) === "encrypted",
+  );
+  const matches = candidates.filter((d) =>
+    query.poolDevice
+      ? drivePoolName(d) === query.poolDevice
+      : query.diskName && !drivePoolName(d) && d.parent_disk === query.diskName,
+  );
+  if (matches.length > 0) return matches.length === 1 ? matches[0] : undefined;
+  // An explicit different identity must never become the fallback: its key
+  // belongs to another source even while the requested source's listing lags.
+  const unidentified = candidates.filter((d) => !drivePoolName(d) && !d.parent_disk);
+  return unidentified.length === 1 ? unidentified[0] : undefined;
 }
 
 /**

@@ -194,6 +194,51 @@ describe("pickPreparedDrive — finding the drive a Prepare just created", () =>
   it("returns undefined when nothing has appeared yet", () => {
     expect(pickPreparedDrive([], { diskName: "sdb", knownUuids: none })).toBeUndefined();
   });
+
+  it("never substitutes a newly attached drive that explicitly belongs to another disk", () => {
+    expect(
+      pickPreparedDrive([drive({ uuid: "U-OTHER", parent_disk: "sdc" })], {
+        diskName: "sdb",
+        knownUuids: none,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("never substitutes a filesystem from another pool", () => {
+    expect(
+      pickPreparedDrive([drive({ uuid: "U-OTHER", pool: "md126", device: "/dev/md126" })], {
+        poolDevice: "md127",
+        knownUuids: none,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("waits for the new filesystem when a stale exact-source UUID is still listed", () => {
+    expect(
+      pickPreparedDrive([drive({ uuid: "U-OLD", pool: "md127", device: "/dev/md127" })], {
+        poolDevice: "md127",
+        knownUuids: new Set(["U-OLD"]),
+      }),
+    ).toBeUndefined();
+  });
+
+  it("will not guess between two new filesystems that both identify the requested disk", () => {
+    expect(
+      pickPreparedDrive([
+        drive({ uuid: "U-A", parent_disk: "sdb" }),
+        drive({ uuid: "U-B", parent_disk: "sdb" }),
+      ], { diskName: "sdb", knownUuids: none }),
+    ).toBeUndefined();
+  });
+
+  it("does not treat an explicitly identified standalone disk as an unidentified pool result", () => {
+    expect(
+      pickPreparedDrive([drive({ uuid: "U-OTHER", parent_disk: "sdc" })], {
+        poolDevice: "md127",
+        knownUuids: none,
+      }),
+    ).toBeUndefined();
+  });
 });
 
 describe("resolveNewDriveId — the drive list can lag the host by a few seconds", () => {

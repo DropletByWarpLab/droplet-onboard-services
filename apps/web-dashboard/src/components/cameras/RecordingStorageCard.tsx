@@ -370,7 +370,9 @@ function Body({
   onPickDrive: (fsUuid: string, name: string) => void;
   onRequestDelete: () => void;
 }) {
-  const moving = status === "migrating";
+  // A missing-drive warning can win the headline while a move is still running.
+  // Its progress and write locks must follow the job, not just that headline.
+  const moving = r.migration.state === "running" || status === "migrating";
   const readOnly = r.warnings.some((w) => w.code === "read_only");
   const hasDrive = r.drive !== null;
   const noDrive = status === "no_eligible_drive";
@@ -400,7 +402,7 @@ function Body({
         fix: { kind: "link" as const, label: "Open Storage", href: SETTINGS_STORAGE_HREF },
       };
     }
-    if (stale && described.fix && described.fix.kind !== "link") {
+    if ((stale || moving || status === "pending") && described.fix && described.fix.kind !== "link") {
       return { ...described, fix: null };
     }
     return described;
