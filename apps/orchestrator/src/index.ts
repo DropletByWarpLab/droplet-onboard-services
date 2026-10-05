@@ -196,6 +196,7 @@ import {
 import { GraphClient } from "./services/m365/graph-client.js";
 import { initialUrlFor } from "./services/m365/graph-resources.js";
 import { createEntraClient } from "./services/m365/entra-client.js";
+import { createDriveLandingHandler } from "./services/m365/drive-landing.service.js";
 
 /**
  * Product version for the Graph `User-Agent` Microsoft asks integrators to
@@ -489,19 +490,20 @@ async function main() {
     logger.warn("MCP stdio child failed to start: %s", (err as Error).message);
   }
 
-  // WARP-2627 / ADR-043 §5: attach the OUTBOUND MCP session, if this box is
-  // entitled to one. On the shipping default (REMOTE_MCP_SERVER_ALLOWLIST
-  // empty) this constructs nothing and dials nothing — it returns
+  // WARP-2627 / ADR-043 §5: attach the OUTBOUND MCP sessions, if this box is
+  // entitled to any. On the shipping default (REMOTE_MCP_SERVER_ALLOWLIST
+  // empty) this constructs nothing and dials nothing — every server answers
   // `not_allowlisted` and the boot path is unchanged. Non-fatal either way: a
   // vendor session that cannot be opened must not stop the appliance booting.
   try {
-    const attached = await ensureRemoteMcpAttached(prisma);
-    if (!attached.attached) {
-      logger.info(
-        "Remote MCP not attached (%s): %s",
-        attached.reason,
-        attached.message,
-      );
+    for (const attached of await ensureRemoteMcpAttached(prisma)) {
+      if (!attached.attached) {
+        logger.info(
+          "Remote MCP not attached (%s): %s",
+          attached.reason,
+          attached.message,
+        );
+      }
     }
   } catch (err) {
     logger.warn("Remote MCP attach failed: %s", (err as Error).message);
@@ -2081,6 +2083,12 @@ async function main() {
       client: new GraphClient({ version: ORCHESTRATOR_M365_UA_VERSION }),
       entra: createEntraClient(),
       initialUrlFor,
+      // WARP-3538 (ADR-041 §4) — what the engine does with a page. OneDrive and
+      // SharePoint pages land as encrypted METADATA in the cloud-file store; every
+      // other workload is still counted and discarded. Without this the engine
+      // reads every drive page and throws it away: the card says "synced", the
+      // file search is empty, and nothing fails.
+      handlePage: createDriveLandingHandler(prisma),
     };
 
     // Read at BOOT, never at module import — `docker restart` does not re-read

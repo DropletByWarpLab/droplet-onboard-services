@@ -90,13 +90,20 @@ vi.mock("@azure/msal-node", () => {
   return { PublicClientApplication };
 });
 
-import { createEntraClient, M365_SCOPES } from "./entra-client.js";
+import { createEntraClient, M365_BASE_SCOPES, M365_SHAREPOINT_SCOPE } from "./entra-client.js";
 
 const APP = {
   clientId: "0f1e2d3c-4b5a-4968-8776-a5b4c3d2e1f0",
   tenantId: "9a8b7c6d-5e4f-4321-8fed-cba987654321",
 };
 const REDIRECT = "https://droplet-ai.local/api/m365/callback";
+/**
+ * Deliberately NOT the base set: a client that read a module constant instead of
+ * the scopes it is handed would pass every test that asked for the base set. The
+ * caller decides what to ask for (the person's SharePoint opt-in, what a refresh
+ * may hold); this client only passes it on.
+ */
+const SCOPES = ["offline_access", "Mail.ReadWrite", "Sites.Read.All"] as const;
 
 beforeEach(() => {
   instances.length = 0;
@@ -111,15 +118,17 @@ describe("the app every operation signs in through (WARP-2705)", () => {
       state: "s",
       nonce: "n",
       codeChallenge: "c",
+      scopes: SCOPES,
     });
     await entra.acquireByAuthorizationCode(APP, {
       code: "code",
       redirectUri: REDIRECT,
       codeVerifier: "v",
       nonce: "n",
+      scopes: SCOPES,
     });
-    await entra.acquireByDeviceCode(APP, { onCode: () => {} });
-    await entra.acquireSilent(APP, "CACHE", "uid.utid");
+    await entra.acquireByDeviceCode(APP, { onCode: () => {}, scopes: SCOPES });
+    await entra.acquireSilent(APP, "CACHE", "uid.utid", SCOPES);
 
     expect(instances).toHaveLength(4);
     for (const { config } of instances) {
@@ -135,6 +144,7 @@ describe("the app every operation signs in through (WARP-2705)", () => {
       state: "s",
       nonce: "n",
       codeChallenge: "c",
+      scopes: SCOPES,
     });
     const auth = instances[0]!.config.auth;
     expect(auth.clientSecret).toBeUndefined();
@@ -145,8 +155,8 @@ describe("the app every operation signs in through (WARP-2705)", () => {
   it("builds a separate client per connection, so two tenants never share one", async () => {
     const other = { clientId: "11111111-2222-4333-8444-555555555555", tenantId: "other.onmicrosoft.com" };
     const entra = createEntraClient();
-    await entra.acquireSilent(APP, "CACHE", "uid.utid");
-    await entra.acquireSilent(other, "CACHE", "uid.utid");
+    await entra.acquireSilent(APP, "CACHE", "uid.utid", SCOPES);
+    await entra.acquireSilent(other, "CACHE", "uid.utid", SCOPES);
 
     expect(instances.map((i) => i.config.auth.authority)).toEqual([
       `https://login.microsoftonline.com/${APP.tenantId}`,
@@ -163,6 +173,7 @@ describe("the authorization-code leg (WARP-2704)", () => {
       state: "state-1",
       nonce: "nonce-1",
       codeChallenge: "challenge-1",
+      scopes: SCOPES,
     });
 
     expect(url).toMatch(/^https:\/\/login\.microsoftonline\.com\//);
@@ -174,7 +185,7 @@ describe("the authorization-code leg (WARP-2704)", () => {
       codeChallenge: "challenge-1",
       codeChallengeMethod: "S256",
     });
-    expect(request.scopes).toEqual([...M365_SCOPES]);
+    expect(request.scopes).toEqual([...SCOPES]);
   });
 
   it("redeems the code with the verifier, against the same redirect URI and scopes", async () => {
@@ -183,6 +194,7 @@ describe("the authorization-code leg (WARP-2704)", () => {
       redirectUri: REDIRECT,
       codeVerifier: "the-verifier",
       nonce: "nonce-1",
+      scopes: SCOPES,
     });
 
     const { method, request } = instances[0]!.calls[0]!;
@@ -193,7 +205,7 @@ describe("the authorization-code leg (WARP-2704)", () => {
       codeVerifier: "the-verifier",
       nonce: "nonce-1",
     });
-    expect(request.scopes).toEqual([...M365_SCOPES]);
+    expect(request.scopes).toEqual([...SCOPES]);
 
     // The serialized cache is what gets sealed onto the row — it must be the
     // one MSAL wrote during this redemption, not the (empty) seed.
@@ -208,8 +220,34 @@ describe("the authorization-code leg (WARP-2704)", () => {
 describe("silent refresh", () => {
   it("shapes a vanished cached account like an interaction error, so it reads as reconnect", async () => {
     behaviour.account = null;
-    await expect(createEntraClient().acquireSilent(APP, "CACHE", "gone")).rejects.toMatchObject({
+    await expect(createEntraClient().acquireSilent(APP, "CACHE", "gone", SCOPES)).rejects.toMatchObject({
       errorCode: "interaction_required",
     });
+  });
+
+  it("asks Microsoft for exactly the scopes it is given — it holds no opinion of its own (WARP-3538)", async () => {
+    await createEntraClient().acquireSilent(APP, "CACHE", "uid.utid", SCOPES);
+    const { method, request } = instances[0]!.calls[0]!;
+    expect(method).toBe("acquireTokenSilent");
+    expect(request.scopes).toEqual([...SCOPES]);
+  });
+});
+
+describe("the scopes every operation asks for are the ones it is handed (WARP-3538)", () => {
+  it("the device-code leg asks for them too", async () => {
+    await createEntraClient().acquireByDeviceCode(APP, { onCode: () => {}, scopes: SCOPES });
+    expect(instances[0]!.calls[0]!.request.scopes).toEqual([...SCOPES]);
+  });
+
+  it("hands MSAL a copy, so nothing MSAL does to its request can edit the caller's list", async () => {
+    const mine = [...SCOPES];
+    await createEntraClient().getAuthCodeUrl(APP, { redirectUri: REDIRECT, state: "s", nonce: "n", codeChallenge: "c", scopes: mine });
+    expect(instances[0]!.calls[0]!.request.scopes).not.toBe(mine);
+  });
+
+  it("re-exports the two constants the caller builds its sets from", () => {
+    // entra-client.ts is where a reader looks for "what does the connector request".
+    expect(M365_BASE_SCOPES).not.toContain(M365_SHAREPOINT_SCOPE);
+    expect(M365_SHAREPOINT_SCOPE).toBe("Sites.Read.All");
   });
 });
