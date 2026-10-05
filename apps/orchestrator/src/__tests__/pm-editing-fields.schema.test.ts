@@ -21,7 +21,7 @@ const SQL = readFileSync(join(MIGRATIONS_DIR, DIR[0] ?? "missing", "migration.sq
 
 describe("PmWorkItem type + estimate migration (WARP-3520)", () => {
   it("ships exactly one migration folder, at the slice's reserved timestamp", () => {
-    expect(DIR).toEqual(["20261004130000_warp_3520_pm_editing_fields"]);
+    expect(DIR).toEqual(["20261005010000_warp_3520_pm_editing_fields"]);
   });
 
   it("creates PmWorkItemType with the six kinds, in the order the dashboard lists them", () => {

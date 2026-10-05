@@ -72,7 +72,7 @@ const inputSchema = {
       type: "string",
       enum: ["set", "clear", "list"],
       description:
-        "'list' reads the device's current schedule (no confirmation). 'set' creates or replaces the device's schedule with the given windows. 'clear' removes it entirely.",
+        "list reads without confirmation; set creates/replaces all windows; clear removes the schedule.",
     },
     device_mac: {
       type: "string",
@@ -83,7 +83,7 @@ const inputSchema = {
       minItems: 1,
       maxItems: 7,
       description:
-        "Required for 'set': the COMPLETE replacement set of weekly windows (max 7). The device's internet is BLOCKED during each window and allowed at all other times.",
+        "For set: COMPLETE replacement of weekly windows, max 7. Internet is BLOCKED during each window and allowed otherwise.",
       items: {
         type: "object",
         properties: {
@@ -434,13 +434,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "set_device_schedule",
   description:
-    "Manage a device's internet schedule (access hours). The device's internet is blocked during " +
-    "each weekly window and allowed at all other times. operation 'list' reads the current schedule " +
-    "(no confirmation); 'set' creates or wholesale-replaces the device's schedule with the given " +
-    "windows; 'clear' removes it. Windows take day names (monday..sunday) plus 24-hour HH:MM start/end; " +
-    "an end at or before the start wraps past midnight (e.g. 21:00-07:00). For set/clear this is " +
-    "two-step: the first call returns confirmation_required summarizing the change — relay it to the " +
-    "user, and only after they explicitly approve, re-issue the SAME call with confirmed: true.",
+    "Schedule device internet: blocked during weekly windows, allowed otherwise. list reads without confirmation; set replaces all windows; clear removes the schedule. Use day names and local 24-hour HH:MM; end <= start wraps overnight. For set/clear, relay confirmation_required to the user; only after explicit approval, repeat the SAME call with confirmed: true.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: true,

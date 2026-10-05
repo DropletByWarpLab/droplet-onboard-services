@@ -72,6 +72,13 @@ export const WORKSPACE_SETTING_DEFAULTS: readonly WorkspaceSettingDefault[] = [
   { key: "workspace.name", section: "workspace", type: "string", value: "Droplet Home" },
   { key: "workspace.locale", section: "workspace", type: "enum", value: "en-US" },
   { key: "workspace.default_scope", section: "workspace", type: "enum", value: "team" },
+  // WARP-3533 — the box-wide switch for personal API tokens (`dpm_…`), the
+  // credential a script uses on /api/pm and /api/support. Default OFF, like the
+  // coding-tool tokens (ADR-067): while it is off every token answers 401, and
+  // none is deleted. Written by PUT /api/developer/settings (owner/admin,
+  // audited); the generic /api/settings PATCH is the same authority and also
+  // audits it.
+  { key: "workspace.api_tokens_enabled", section: "workspace", type: "bool", value: false },
 
   // ── memory_privacy ──
   // Brain memory defaults — whether new memory items are pinned by
