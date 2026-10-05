@@ -108,6 +108,15 @@ RUN npm run -w @droplet/tools-core build
 RUN npm run -w @droplet/fips-selftest build
 RUN npm run -w @droplet/mcp-server build
 
+# Keep workspace-local dependencies when npm does not hoist them.
+RUN mkdir -p /workspace-node-modules && \
+    for workspace in services/mcp-server packages/tools-core packages/fips-selftest packages/shared-types; do \
+      if [ -d "$workspace/node_modules" ]; then \
+        mkdir -p "/workspace-node-modules/$workspace" && \
+        cp -a "$workspace/node_modules" "/workspace-node-modules/$workspace/"; \
+      fi; \
+    done
+
 # --- Run stage ---
 FROM node:20-bookworm-slim
 
@@ -174,6 +183,7 @@ WORKDIR /app
 # Preserve the workspace layout under /app so the symlinks in
 # node_modules/@droplet/* resolve correctly at runtime.
 COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /workspace-node-modules/ ./
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/packages/tools-core/package.json ./packages/tools-core/package.json
 COPY --from=builder /app/packages/tools-core/dist ./packages/tools-core/dist

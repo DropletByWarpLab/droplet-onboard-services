@@ -103,6 +103,17 @@ RUN npm run -w @droplet/fips-selftest build
 RUN npm run -w @droplet/mcp-server build
 RUN npm run -w @droplet/orchestrator build
 
+# npm may place direct dependencies inside a workspace instead of hoisting
+# them. Preserve those directories alongside the root dependency tree.
+RUN mkdir -p /workspace-node-modules && \
+    for workspace in apps/orchestrator services/mcp-server services/erp-connector \
+        packages/tools-core packages/fips-selftest packages/shared-types packages/auth-policy; do \
+      if [ -d "$workspace/node_modules" ]; then \
+        mkdir -p "/workspace-node-modules/$workspace" && \
+        cp -a "$workspace/node_modules" "/workspace-node-modules/$workspace/"; \
+      fi; \
+    done
+
 # --- Run stage ---
 FROM node:20-bookworm-slim
 
@@ -250,6 +261,7 @@ WORKDIR /app
 #     is `/app/services/mcp-server/dist/index.js` here), AND
 #   - MCP_SERVER_BIN env in docker-compose pins the path explicitly.
 COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /workspace-node-modules/ ./
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/packages/tools-core/package.json ./packages/tools-core/package.json
 COPY --from=builder /app/packages/tools-core/dist ./packages/tools-core/dist
