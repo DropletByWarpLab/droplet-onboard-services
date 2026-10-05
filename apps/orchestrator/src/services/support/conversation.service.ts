@@ -8,8 +8,12 @@
  * says so. The database refuses a PUBLIC comment on a project work item
  * (pmcomment_public_only_on_tickets), so the rule does not rest on this file.
  */
+import { randomUUID } from "node:crypto";
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { writeActivity } from "../pm/pm.service.js";
+import { outboundEmailGate } from "../off-lan-gate.service.js";
+import { htmlToPlainText, PLAIN_TEXT_MAX } from "./email-text.js";
+import { ticketSubjectFor } from "./email-headers.js";
 import {
   FORMER_MEMBER,
   loadPeople,
@@ -160,6 +164,8 @@ export async function getConversation(
         authorKind: c.authorKind,
         author,
         html: c.commentHtml,
+        deliveryStatus: c.deliveryStatus,
+        deliveryFailure: c.deliveryFailure,
         createdAt: c.createdAt.toISOString(),
       };
     }),
@@ -203,6 +209,36 @@ async function addComment(
   const target = input.stateId ? await pickState(prisma, desk, input.stateId) : null;
   const now = deps.now ? deps.now() : new Date();
 
+  const channel = visibility === "PUBLIC"
+    ? await prisma.pmSupportChannel.findFirst({ where: { projectId: row.projectId, enabled: true }, include: { emailAccount: { select: { address: true } } } })
+    : null;
+  let deliveryStatus: "NONE" | "PENDING" | "FAILED" = "NONE";
+  let deliveryFailure: "OUTBOUND_BLOCKED" | "EMAIL_UNAVAILABLE" | "NO_RECIPIENT" | "SEND_FAILED" | null = null;
+  if (channel) {
+    if (!row.ticket.requesterEmail) {
+      deliveryStatus = "FAILED"; deliveryFailure = "NO_RECIPIENT";
+    } else {
+      try {
+        if (await outboundEmailGate(prisma)) deliveryStatus = "PENDING";
+        else { deliveryStatus = "FAILED"; deliveryFailure = "OUTBOUND_BLOCKED"; }
+      } catch {
+        deliveryStatus = "FAILED"; deliveryFailure = "EMAIL_UNAVAILABLE";
+      }
+    }
+  }
+
+  const priorLink = deliveryStatus === "PENDING"
+    ? await prisma.pmTicketEmailLink.findFirst({ where: { workItemId: row.id }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], select: { emailThreadId: true } })
+    : null;
+  const messageId = deliveryStatus === "PENDING" && channel
+    ? `${randomUUID()}@${channel.emailAccount.address.split("@").at(-1) || "localhost"}`
+    : null;
+  const body = htmlToPlainText(html);
+  if (visibility === "PUBLIC" && body.length > PLAIN_TEXT_MAX) throw new Error("reply_too_long");
+  if (deliveryStatus === "PENDING" && body.length === 0) {
+    deliveryStatus = "FAILED"; deliveryFailure = "SEND_FAILED";
+  }
+
   const comment = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     // "Send and set to Pending": the move and the comment are one change.
     if (target && target.id !== row.stateId) {
@@ -215,6 +251,7 @@ async function addComment(
         authorKind: "USER",
         visibility,
         commentHtml: html,
+        ...(visibility === "PUBLIC" ? { deliveryStatus, deliveryFailure } : {}),
       },
     });
     if (visibility === "PUBLIC") {
@@ -237,6 +274,22 @@ async function addComment(
     });
     // The list's "last update" moves with the conversation, not just the fields.
     await tx.pmWorkItem.update({ where: { id: row.id }, data: { updatedAt: now } });
+    if (visibility === "PUBLIC" && channel && deliveryStatus === "PENDING" && messageId) {
+      const domain = channel.emailAccount.address.split("@").at(-1) || "localhost";
+      const draft = await tx.emailDraft.create({
+        data: {
+          accountId: channel.emailAccountId,
+          threadId: priorLink?.emailThreadId ?? null,
+          toAddrs: [row.ticket.requesterEmail!] as Prisma.InputJsonValue,
+          subject: ticketSubjectFor(`${row.project.identifier}-${row.sequenceId}`, row.name, true),
+          body,
+          draftedByDroplet: true,
+          status: "queued",
+          messageId: `${messageId.split("@")[0]}@${domain}`,
+        },
+      });
+      await tx.pmTicketEmailLink.create({ data: { workItemId: row.id, direction: "OUTBOUND", messageIdHeader: `${messageId.split("@")[0]}@${domain}`, emailThreadId: priorLink?.emailThreadId ?? null, emailDraftId: draft.id, commentId: created.id } });
+    }
     return created;
   });
 
@@ -248,6 +301,8 @@ async function addComment(
     authorKind: comment.authorKind,
     author: personOf(people, viewer.id),
     html: comment.commentHtml,
+    deliveryStatus: comment.deliveryStatus,
+    deliveryFailure: comment.deliveryFailure,
     createdAt: comment.createdAt.toISOString(),
   };
   return { entry, ticket: await getTicket(prisma, row.id, ctx) };
@@ -270,3 +325,50 @@ export const addNote = (
   ctx: SupportCtx,
   deps: SupportDeps = {},
 ) => addComment(prisma, viewer, ticketId, input, "INTERNAL", ctx, deps);
+
+/** Retry a failed public email reply with a fresh Message-ID and immutable
+ * draft. Only the owning ticket's PUBLIC comment is eligible. */
+export async function retryPublicReply(prisma: PrismaClient, ticketId: string, commentId: string) {
+  const ticket = await findTicketRow(prisma, ticketId);
+  const comment = await prisma.pmComment.findFirst({
+    where: { id: commentId, workItemId: ticket.id, visibility: "PUBLIC", deliveryStatus: "FAILED" },
+    select: { id: true, commentHtml: true },
+  });
+  if (!comment) throw new Error("reply_not_retryable");
+  const channel = await prisma.pmSupportChannel.findFirst({
+    where: { projectId: ticket.projectId, enabled: true },
+    include: { emailAccount: { select: { address: true } } },
+  });
+  if (!channel) throw new Error("email_channel_unavailable");
+  if (!ticket.ticket.requesterEmail) throw new Error("email_recipient_unavailable");
+  if (!(await outboundEmailGate(prisma))) throw new Error("outbound_email_blocked");
+  const previous = await prisma.pmTicketEmailLink.findFirst({
+    where: { workItemId: ticket.id }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], select: { emailThreadId: true },
+  });
+  const messageId = `${randomUUID()}@${channel.emailAccount.address.split("@").at(-1) || "localhost"}`;
+  const body = htmlToPlainText(comment.commentHtml);
+  if (!body || body.length > PLAIN_TEXT_MAX) throw new Error("reply_not_retryable");
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.pmComment.updateMany({
+      where: { id: comment.id, workItemId: ticket.id, deliveryStatus: "FAILED" },
+      data: { deliveryStatus: "PENDING", deliveryFailure: null },
+    });
+    if (updated.count !== 1) throw new Error("reply_not_retryable");
+    const draft = await tx.emailDraft.create({
+      data: {
+        accountId: channel.emailAccountId,
+        threadId: previous?.emailThreadId ?? null,
+        toAddrs: [ticket.ticket.requesterEmail!] as Prisma.InputJsonValue,
+        subject: ticketSubjectFor(`${ticket.project.identifier}-${ticket.sequenceId}`, ticket.name, true),
+        body,
+        draftedByDroplet: true,
+        status: "queued",
+        messageId,
+      },
+    });
+    await tx.pmTicketEmailLink.create({
+      data: { workItemId: ticket.id, direction: "OUTBOUND", messageIdHeader: messageId, emailThreadId: previous?.emailThreadId ?? null, emailDraftId: draft.id, commentId: comment.id },
+    });
+    return { status: "queued" as const };
+  });
+}

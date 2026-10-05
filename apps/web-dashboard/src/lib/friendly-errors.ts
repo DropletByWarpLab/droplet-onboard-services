@@ -255,6 +255,15 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside.",
     public_link_company_data:
       "Only an owner or admin can create or change a public link to company files, or let others re-share them. You can still share with people in the company.",
+    // WARP-3586 — the box's public-link rules (share-policy.ts).
+    public_link_expiry_required:
+      "A public link has to expire. Pick an expiry date and try again.",
+    public_link_expiry_too_far:
+      "A public link can last at most 90 days. Pick an earlier expiry date.",
+    public_link_password_too_short:
+      "A public link password needs at least 8 characters.",
+    public_link_edit_admin_only:
+      "Only an owner or admin can let people with a public link edit, upload to or delete from a folder. A view-only link is available.",
     // WARP-1658 — every 403 a share write can draw is a DETERMINISTIC policy
     // rejection: role denial (requireRole), guest read-only, or insufficient
     // rights on a household/department space (requireSpaceAccess). Without this
@@ -339,6 +348,15 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Workspace files are already shared with everyone in the company. Only an owner or admin can share them outside.",
     public_link_company_data:
       "Only an owner or admin can create or change a public link to company files, or let others re-share them. You can still share with people in the company.",
+    // WARP-3586 — the box's public-link rules (share-policy.ts).
+    public_link_expiry_required:
+      "A public link has to expire. Pick an expiry date and try again.",
+    public_link_expiry_too_far:
+      "A public link can last at most 90 days. Pick an earlier expiry date.",
+    public_link_password_too_short:
+      "A public link password needs at least 8 characters.",
+    public_link_edit_admin_only:
+      "Only an owner or admin can let people with a public link edit, upload to or delete from a folder. A view-only link is available.",
     "403":
       "You don't have permission to share this item. Sign out and back in if your access changed recently, or ask the Droplet's owner or an admin to share it.",
     NOT_FOUND:

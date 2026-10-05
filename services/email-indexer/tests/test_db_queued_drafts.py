@@ -97,3 +97,18 @@ async def test_the_query_asks_for_both_columns(db_module):
     drafts_sql = next(s for s in pool.sql if 'FROM "EmailDraft"' in s)
     assert 'd."messageId"' in drafts_sql
     assert 'd."autoSubmitted"' in drafts_sql
+
+
+async def test_reply_references_include_the_ticket_messages_the_indexer_did_not_send_itself(db_module):
+    pool = _Pool(
+        [_row(threadId="th1")],
+        [
+            {"messageId": "customer@x"},
+            {"messageId": "desk-reply@acme.example"},
+            {"messageId": "ack@acme.example"},
+        ],
+    )
+    db_module._pool = pool
+    [draft] = await db_module.list_queued_drafts()
+    assert draft.thread_message_ids == ["customer@x", "desk-reply@acme.example", "ack@acme.example"]
+    assert any('FROM "PmTicketEmailLink"' in sql for sql in pool.sql)

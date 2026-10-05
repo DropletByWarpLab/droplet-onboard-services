@@ -283,7 +283,7 @@ describe("organize_files", () => {
     expect(d.moved_count).toBe(2);
     expect(d.skipped).toContainEqual({
       path: "/Downloads/b.JPG",
-      reason: expect.stringMatching(/move failed \(nextcloud returned 500\)/),
+      reason: expect.stringMatching(/move failed \(the File Store returned 500\)/),
     });
   });
 
@@ -306,8 +306,8 @@ describe("organize_files", () => {
     expect(d.moved_count).toBe(2);
     expect(d.skipped).toEqual([
       { path: "/Downloads/.hidden", reason: "hidden file" },
-      { path: "/Downloads/Documents", reason: "could not be created (nextcloud returned 507)" },
-      { path: "/Downloads/a.pdf", reason: "destination /Downloads/Documents could not be created (nextcloud returned 507)" },
+      { path: "/Downloads/Documents", reason: "could not be created (the File Store returned 507)" },
+      { path: "/Downloads/a.pdf", reason: "destination /Downloads/Documents could not be created (the File Store returned 507)" },
     ]);
     // No move was fired at a folder that does not exist, and nothing blamed
     // a name clash for it.

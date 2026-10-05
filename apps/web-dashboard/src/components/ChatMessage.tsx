@@ -31,6 +31,8 @@ import { mimeFromPath } from "@/lib/mime-icons";
 import { ThinkingMessage } from "@/components/chat/ThinkingMessage";
 import { ToolApprovalPrompt } from "@/components/chat/ToolApprovalPrompt";
 import { RunCard, RunResultCard, runIdOf } from "@/components/chat/RunCard";
+import { splitMediaCalls } from "@/components/chat/media/media-split";
+import { ToolMediaCards } from "@/components/chat/media/ToolMediaCards";
 import { SAFE_MARKDOWN_COMPONENTS } from "@/components/chat/safe-markdown";
 import { splitReasoningSteps } from "@/components/chat/reasoning-trace";
 import "@/components/chat/thinking.css";
@@ -237,7 +239,12 @@ export const ChatMessage = memo(function ChatMessage({
   // WARP-3303 — a `start_agent_run` that produced a run is a card (below),
   // not a chip: the run outlives the turn and the card follows it.
   const runCalls = hasToolCalls ? toolCalls!.filter((c) => runIdOf(c) !== null) : [];
-  const chipCalls = hasToolCalls ? toolCalls!.filter((c) => runIdOf(c) === null) : [];
+  // WARP-3691 - a successful call whose result carries valid `media` (camera
+  // snapshot / live feed / clip, or a file) is a card under the message, not a
+  // chip. Calls with no media, and failed ones, keep their chip.
+  const { chipCalls, mediaCalls } = hasToolCalls
+    ? splitMediaCalls(toolCalls!, (c) => runIdOf(c) !== null)
+    : { chipCalls: [], mediaCalls: [] };
   const toolChipRow = chipCalls.length > 0 ? (
     <div className="flex flex-wrap gap-1.5" data-testid="tool-call-chips">
       {chipCalls.map((call) => (
@@ -372,6 +379,7 @@ export const ChatMessage = memo(function ChatMessage({
               <div className="mb-2">{toolChipRow}</div>
             ) : null}
             {runCards}
+            <ToolMediaCards calls={mediaCalls} />
             {/* WARP-2469 — a WARP-2305 interceptor challenge gets the real
                 approval prompt: Approve / Don't, a PHI-free argument
                 summary, and an expired state that offers a re-request.
