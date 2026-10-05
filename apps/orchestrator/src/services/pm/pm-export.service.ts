@@ -113,7 +113,8 @@ export async function* exportCsvChunks(
   yield CSV_BOM + csvLine(CSV_HEADERS);
 
   for (let page = 1; page <= MAX_PAGES; page += 1) {
-    const items = await pm.listWorkItems(prisma, projectId, { ...filters, perPage: EXPORT_PAGE, page });
+    const result = await pm.listWorkItems(prisma, projectId, { ...filters, limit: EXPORT_PAGE, page });
+    const items = result.items;
     if (items.length === 0) return;
     for (const it of items) keyById.set(it.id, it.key);
 
