@@ -6222,14 +6222,12 @@ enum PmWebhookDeliveryStatus {
   GIVEN_UP
 }
 
-/// A destination for work events. `url` is bearer-like for the chat apps (a
-/// Slack incoming-webhook URL IS the credential), so it is never written to a
-/// log, an audit row or a notification — only its host is. `secretEnc` is the
-/// HMAC signing secret, sealed with column-crypto's `deriveSaasCredentialKey()`
-/// and the AAD `pm-webhook-secret:<id>` (the same sealing
-/// `IntegrationConnection.providerTokensEnc` uses, under a different AAD so a
-/// blob cannot be opened as the other), and shown to the person once, on
-/// create and on rotate.
+/// A destination for work events. `urlEnc` is bearer-like for chat apps (a
+/// Slack incoming-webhook URL IS the credential), so the full URL is sealed at
+/// rest and never returned, logged, audited or sent in a notification. `urlEnc`
+/// and `secretEnc` use separate AAD labels under the SaaS credential key, so
+/// neither blob can be opened as the other. The URL's host is shown; its path
+/// remains write-only. The HMAC signing secret is shown once on create/rotate.
 model PmWebhook {
   id                  String          @id @default(uuid())
   workspaceId         String
@@ -6240,7 +6238,7 @@ model PmWebhook {
   projectId           String?
   project             PmProject?      @relation(fields: [projectId], references: [id], onDelete: Cascade)
   name                String
-  url                 String
+  urlEnc              String
   format              PmWebhookFormat @default(JSON)
   secretEnc           String
   /// Event names from `WORK_EVENT_NAMES` (services/pm/webhook-events.ts) — a
@@ -6301,6 +6299,16 @@ model PmWebhookDelivery {
   @@index([webhookId, createdAt(sort: Desc)])
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Service desk (ADR-069, WARP-3528)
+//
+// A ticket is a `PmWorkItem` in a project whose `kind` is SERVICE_DESK, plus one
+// `PmTicket` row for the columns only a desk needs. Everything a work item
+// already has — state, priority, assignees, labels, department, relations,
+// activity, comments — a ticket has for free, and escalating one to engineering
+// is an ordinary `PmWorkItemRelation` across projects. Every enum below is
+// UPPERCASE, like `PmRelationKind` and the CRM enums: they are wire values the
+// service and a CHECK constraint quote verbatim.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Which surface owns a `PmProject`. See `PmProject.kind`.

@@ -602,9 +602,8 @@ export function createApp(
   // and admin only. `/pm/webhooks` is a literal second segment and no PM router
   // above owns a `/pm/:param`, so neither shadows the other.
   app.use("/api", createPmWebhooksRouter(prisma));
-  // WARP-3536 (WS-19) — "Also viewing": the drawer's heartbeat and the list of
-  // other viewers. The `projects` module gate and the guest tier floor come
-  // from the `/api/pm` prefix above; the longer paths here shadow nothing.
+  // WARP-3536 (WS-19) — "Also viewing": the drawer heartbeat and other viewers.
+  // The `/api/pm` module gate and guest tier floor apply before these routes.
   app.use("/api", createPmPresenceRouter(prisma));
   // WARP-3528 (ADR-069) — the service desk. Its own disjoint prefix
   // (`/api/support`), so neither PM router shadows it, and its own `support`

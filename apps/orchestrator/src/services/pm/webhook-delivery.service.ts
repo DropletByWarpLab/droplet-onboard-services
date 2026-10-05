@@ -55,6 +55,7 @@ import { notifyOwnersAndAdmins } from "../notifications.service.js";
 import { renderWebhookBody } from "./webhook-formats.js";
 import type { WebhookPayloadV1 } from "./webhook-payload.js";
 import { openWebhookSecret } from "./webhook-secret.js";
+import { openWebhookUrl } from "./webhook-url.js";
 import { DELIVERY_HEADER, EVENT_HEADER, SIGNATURE_HEADER, signWebhookBody } from "./webhook-signature.js";
 
 const defaultLogger = createLogger("pm-webhook-delivery");
@@ -310,7 +311,7 @@ export async function attemptDelivery(
   // 2. the SSRF guard
   let dest: PinnedDestination;
   try {
-    dest = await deps.resolveDestination(hook.url);
+    dest = await deps.resolveDestination(openWebhookUrl(hook.id, hook.urlEnc));
   } catch (err) {
     return fail(describeFailure(err), null);
   }

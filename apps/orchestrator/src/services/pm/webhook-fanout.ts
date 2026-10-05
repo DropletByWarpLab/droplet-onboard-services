@@ -123,15 +123,14 @@ export async function fanOutActivity(
   row: PmActivity,
   deps: FanOutDeps = {},
 ): Promise<number> {
-  // Detached deletion tombstones belong only to pm-live; never turn one into
-  // a webhook event or try to load the deleted work item.
-  if (!row.workItemId) return 0;
+  // Detached deletion activities and private tickets have no Projects event.
+  if (row.workItemId === null) return 0;
   const event = eventForVerb(row.verb);
   const candidates = await subscribedTo(prisma, event);
   if (candidates.length === 0) return 0;
 
-  const item = await prisma.pmWorkItem.findUnique({
-    where: { id: row.workItemId },
+  const item = await prisma.pmWorkItem.findFirst({
+    where: { id: row.workItemId, project: { is: { kind: "PROJECT" } } },
     include: { project: { include: { workspace: true } }, state: true, assignees: true },
   });
   // Deleted between the write and now. Its activity rows cascade with it, so

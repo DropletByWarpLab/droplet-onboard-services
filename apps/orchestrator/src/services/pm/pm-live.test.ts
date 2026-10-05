@@ -160,11 +160,23 @@ describe("what is published", () => {
 });
 
 describe("the work item", () => {
-  it("is looked up once per item, not once per row (a work item never changes project)", async () => {
+  it("checks the current owning surface before the audience for every row", async () => {
     const { consumer, findUnique } = setup();
     await consumer.handle(row({ id: "a" }));
     await consumer.handle(row({ id: "b", verb: "commented" }));
-    expect(findUnique).toHaveBeenCalledTimes(1);
+    expect(findUnique).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not reuse a previous Projects lookup for a later private desk event", async () => {
+    const { consumer, findUnique, audience, sent } = setup();
+    await consumer.handle(row({ id: "project-event" }));
+    sent.length = 0;
+    findUnique.mockResolvedValueOnce({ projectId: "desk-1", project: { kind: "SERVICE_DESK" } });
+
+    await consumer.handle(row({ id: "desk-event" }));
+
+    expect(audience.usernamesFor).toHaveBeenCalledTimes(1);
+    expect(sent).toEqual([]);
   });
 
   it("deleted since the write: nothing to say, nothing thrown, and nothing cached", async () => {

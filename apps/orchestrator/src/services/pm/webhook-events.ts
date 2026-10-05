@@ -44,12 +44,9 @@ export type WorkItemEvent = (typeof WORK_ITEM_EVENTS)[number];
 export const SLA_EVENTS = ["sla.at_risk", "sla.breached"] as const;
 
 /**
- * RESERVED, not emitted. `PmProject.kind` does not exist on this branch, so there
- * is no such thing as a ticket yet; WS-12 (service desk core), WS-13 and WS-14
- * raise these. When `kind` lands, the work-item fan-out must also stop reporting
- * a SERVICE_DESK project's items as `work_item.*` (a desk item fetched through
- * the Projects surface is a 404 — ADR-069 §1 — and it must not leak out through
- * a webhook either).
+ * RESERVED, not emitted. WS-13 and WS-14 add these through the Support surface.
+ * The work-item fan-out and webhook management range only over PROJECT rows;
+ * SERVICE_DESK items never produce `work_item.*` events.
  */
 export const TICKET_EVENTS = ["ticket.created", "ticket.replied", "ticket.solved"] as const;
 
@@ -108,6 +105,7 @@ const VERB_EVENT: Record<PmActivityVerb, WorkItemEvent> = {
   module_removed: "work_item.updated",
   relation_added: "work_item.updated",
   relation_removed: "work_item.updated",
+  // Detached deletion rows are filtered out before webhook fan-out.
   deleted: "work_item.updated",
 };
 

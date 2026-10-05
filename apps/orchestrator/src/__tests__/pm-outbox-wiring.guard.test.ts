@@ -44,27 +44,21 @@ describe("every PmActivity writer wakes the outbox", () => {
     (_name, text) => {
       const sites = text.match(/\bpmActivity\.(create|createMany)\(/g)?.length ?? 0;
       const nudges = text.match(/\bnudgeOutbox\(\)/g)?.length ?? 0;
+      expect(text).toMatch(/import \{[^}]*\bnudgeOutbox\b[^}]*\} from "(?:\.\/pm-outbox\.js|\.\.\/pm\/pm-outbox\.js)"/);
       if (_name === "services/pm/pm.service.ts") {
-        expect(text).toMatch(/import \{[^}]*\bnudgeOutbox\b[^}]*\} from "\.\/pm-outbox\.js"/);
-        // `writeActivity` wakes once per ordinary committed write. Deletion is
-        // one logical transaction with three possible activity inserts
-        // (tombstone, child audit rows and relation audit rows), so it wakes
-        // once after commit rather than once per insert. Pin both paths instead
-        // of demanding a misleading one-nudge-per-insert count.
+        // Deletion batches its tombstone and related audit rows, then wakes
+        // once after commit. Ordinary writeActivity calls retain their nudge.
         expect(sites).toBe(3);
         expect(nudges).toBe(2);
         expect(text).toMatch(/if \(input\.nudge !== false\) nudgeOutbox\(\)/);
         expect(text).toMatch(/\}, \{ \.\.\.SERIALIZABLE_TX, timeout: 5_000 \}\);\s*nudgeOutbox\(\)/);
       } else if (_name === "services/support/escalation.service.ts") {
-        // Escalation batches a related PM item and two relation activity rows
-        // in one transaction. Its shared writeActivity call is the single
-        // wake-up for that transaction; per-insert nudges would be redundant.
-        expect(sites).toBe(1);
-        expect(nudges).toBe(0);
-        expect(text).toMatch(/import \{ writeActivity \} from "\.\.\/pm\/pm\.service\.js"/);
-        expect(text).toMatch(/await writeActivity\(tx,[\s\S]*?await tx\.pmActivity\.createMany\(/);
+        // Escalation writes the PM activity and both relation audit rows in one
+        // transaction. Suppress the helper wake-up and wake once after commit.
+        expect(nudges).toBe(1);
+        expect(text).toMatch(/await writeActivity\(tx,[\s\S]*?nudge: false[\s\S]*?await tx\.pmActivity\.createMany\(/);
+        expect(text).toMatch(/\}\);\s*nudgeOutbox\(\);/);
       } else {
-        expect(text).toMatch(/import \{[^}]*\bnudgeOutbox\b[^}]*\} from "\.\/pm-outbox\.js"/);
         expect(nudges).toBeGreaterThanOrEqual(sites);
       }
     },

@@ -9,8 +9,8 @@
  * What a read never returns: the signing secret, and the URL's path. A chat app's
  * incoming-webhook URL IS its credential (anyone holding it can post as the
  * integration), so the owner is shown the destination — scheme, host, port — and
- * the path is write-only, like the secret. Changing the address means pasting it
- * again; every other edit leaves it alone.
+ * the URL is encrypted at rest. Changing the address means pasting it again;
+ * every other edit leaves it alone.
  */
 import { randomUUID } from "node:crypto";
 import type {
@@ -24,6 +24,7 @@ import type {
 import { assertLanOrPublicUrl, isOutboundUrlBlocked } from "../../lib/outbound-url-guard.js";
 import { ensureHomeWorkspace } from "./pm.service.js";
 import {
+  DELIVERY_LEASE_MS,
   attemptDelivery,
   resolveDeliveryDeps,
   type DeliveryDeps,
@@ -32,6 +33,7 @@ import {
 import { WEBHOOK_TEST_EVENT, isSubscribableEvent } from "./webhook-events.js";
 import { buildTestPayload } from "./webhook-payload.js";
 import { sealWebhookSecret } from "./webhook-secret.js";
+import { openWebhookUrl, sealWebhookUrl } from "./webhook-url.js";
 import { generateWebhookSecret } from "./webhook-signature.js";
 
 export const PM_WEBHOOK_ERRORS = {
@@ -98,7 +100,7 @@ function toApi(row: PmWebhook, lastDelivery: ApiWebhook["lastDelivery"] = null):
     workspaceId: row.workspaceId,
     projectId: row.projectId,
     name: row.name,
-    destination: destinationOf(row.url),
+    destination: destinationOf(openWebhookUrl(row.id, row.urlEnc)),
     format: row.format,
     events: row.events,
     enabled: row.enabled,
@@ -153,15 +155,15 @@ function vetEvents(events: readonly string[]): string[] {
 }
 
 async function mustFind(prisma: WebhookPrisma, id: string): Promise<PmWebhook> {
-  const row = await prisma.pmWebhook.findUnique({ where: { id } });
+  const row = await prisma.pmWebhook.findFirst({ where: { id, OR: [{ projectId: null }, { project: { is: { kind: "PROJECT" } } }] } });
   if (!row) throw new Error(PM_WEBHOOK_ERRORS.NOT_FOUND);
   return row;
 }
 
 /** The project must exist; its workspace becomes the webhook's. */
 async function workspaceForProject(prisma: WebhookPrisma, projectId: string): Promise<string> {
-  const project = await prisma.pmProject.findUnique({
-    where: { id: projectId },
+  const project = await prisma.pmProject.findFirst({
+    where: { id: projectId, kind: "PROJECT" },
     select: { workspaceId: true },
   });
   if (!project) throw new Error(PM_WEBHOOK_ERRORS.PROJECT_NOT_FOUND);
@@ -171,7 +173,7 @@ async function workspaceForProject(prisma: WebhookPrisma, projectId: string): Pr
 // ── Reads ────────────────────────────────────────────────────────────────────
 
 export async function listWebhooks(prisma: WebhookPrisma): Promise<ApiWebhook[]> {
-  const rows = await prisma.pmWebhook.findMany({ orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
+  const rows = await prisma.pmWebhook.findMany({ where: { OR: [{ projectId: null }, { project: { is: { kind: "PROJECT" } } }] }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
   if (rows.length === 0) return [];
   // One query for every webhook's latest delivery, not one each.
   const latest = await prisma.$queryRaw<
@@ -214,7 +216,7 @@ export async function createWebhook(
   const workspaceId = input.projectId
     ? await workspaceForProject(prisma, input.projectId)
     : (await ensureHomeWorkspace(prisma)).id;
-  if ((await prisma.pmWebhook.count({ where: { workspaceId } })) >= PM_WEBHOOK_LIMIT) {
+  if ((await prisma.pmWebhook.count({ where: { workspaceId, OR: [{ projectId: null }, { project: { is: { kind: "PROJECT" } } }] } })) >= PM_WEBHOOK_LIMIT) {
     throw new Error(PM_WEBHOOK_ERRORS.LIMIT_REACHED);
   }
 
@@ -226,7 +228,7 @@ export async function createWebhook(
       workspaceId,
       projectId: input.projectId ?? null,
       name: input.name,
-      url,
+      urlEnc: sealWebhookUrl(id, url),
       format: input.format,
       events,
       secretEnc: sealWebhookSecret(id, secret),
@@ -255,7 +257,7 @@ export async function updateWebhook(
   const existing = await mustFind(prisma, id);
   const data: Prisma.PmWebhookUpdateInput = {};
   if (patch.name !== undefined) data.name = patch.name;
-  if (patch.url !== undefined) data.url = vetUrl(patch.url);
+  if (patch.url !== undefined) data.urlEnc = sealWebhookUrl(id, vetUrl(patch.url));
   if (patch.format !== undefined) data.format = patch.format;
   if (patch.events !== undefined) data.events = vetEvents(patch.events);
   if (patch.projectId !== undefined) {
@@ -375,7 +377,14 @@ export async function sendTestDelivery(
       webhookId: hook.id,
       event: WEBHOOK_TEST_EVENT,
       payload: payload as unknown as Prisma.InputJsonValue,
-      nextAttemptAt: now,
+      // Born LEASED. The worker's claim takes any PENDING row whose
+      // `nextAttemptAt` has passed, and between this INSERT and the settle below
+      // (DNS, connect, up to 10 s) this row is exactly that — a tick landing there
+      // dialled it a second time, ran it as an ordinary delivery (a paused webhook
+      // gave it up as "turned off"; a failing one counted against its streak of
+      // 20) and made the admin's Send test lie. One lease from now it is not due,
+      // so only this call ever dials it; `settle` writes the real outcome.
+      nextAttemptAt: new Date(now.getTime() + DELIVERY_LEASE_MS),
     },
   });
   const delivery: DeliveryWithWebhook = { ...created, webhook: hook };

@@ -1148,7 +1148,7 @@ entries:
   - id: work-webhooks
     kind: dynamic
     service: orchestrator
-    config_key: PmWebhook.url (per webhook row, registered by an owner or admin)
+    config_key: PmWebhook.urlEnc (encrypted per-webhook URL, registered by an owner or admin)
     phase: runtime
     data_class: user-content-on-request
     purpose: >-
@@ -1182,6 +1182,7 @@ entries:
       - apps/orchestrator/src/lib/outbound-url-guard.ts
       - apps/orchestrator/src/lib/outbound-pinned-fetch.ts
       - apps/orchestrator/src/services/pm/webhook-delivery.service.ts
+      - apps/orchestrator/src/services/pm/webhook-url.ts
       - apps/orchestrator/src/services/off-lan-gate.service.ts
 
   - id: web-push-services
