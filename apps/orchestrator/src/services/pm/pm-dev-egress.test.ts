@@ -24,7 +24,7 @@ import {
 import type { PinnedDestination } from "../../lib/outbound-url-guard.js";
 import { OutboundUrlBlockedError } from "../../lib/outbound-url-guard.js";
 import type { PinnedGetResponse } from "../../lib/outbound-pinned-fetch.js";
-import { createDevelopmentFetch, DevelopmentEgressBlockedError } from "./pm-dev-egress.js";
+import { createDevelopmentFetch, DevelopmentEgressBlockedError, DevelopmentConnectionChangedError } from "./pm-dev-egress.js";
 
 const PUBLIC: PinnedDestination = {
   url: new URL("https://api.github.com/user"),
@@ -60,6 +60,31 @@ function harness(over: { dest?: PinnedDestination; gate?: boolean | "throws"; re
 }
 
 describe("the owner's switch applies to every off-LAN dial", () => {
+  it.each([false, "throws"])("refuses changed/unreadable credentials immediately before dialing: %s", async (state) => {
+    const get = vi.fn(async () => ok("[]"));
+    const order: string[] = [];
+    const handle = createDevelopmentFetch({} as never, {
+      get: get as never,
+      resolveDestination: async () => { order.push("resolve"); return PUBLIC; },
+      gate: async () => { order.push("gate"); return true; },
+      connectionCurrent: async () => { order.push("credential"); if (state === "throws") throw new Error("unreadable"); return false; },
+    });
+    await expect(handle.fetch(PUBLIC.url.toString(), { headers: { authorization: "Bearer old-token" } })).rejects.toBeInstanceOf(DevelopmentConnectionChangedError);
+    expect(order).toEqual(["resolve", "gate", "credential"]);
+    expect(get).not.toHaveBeenCalled();
+    expect(handle.connectionChanged).toBe(true);
+  });
+
+  it("rechecks connection state on every page", async () => {
+    const get = vi.fn(async () => ok("[]"));
+    const current = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    const handle = createDevelopmentFetch({} as never, { get: get as never, resolveDestination: async () => PUBLIC, gate: async () => true, connectionCurrent: current });
+    await handle.fetch(PUBLIC.url.toString());
+    await expect(handle.fetch(PUBLIC.url.toString())).rejects.toBeInstanceOf(DevelopmentConnectionChangedError);
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(current).toHaveBeenCalledTimes(2);
+  });
+
   it("refuses an internet destination while work_integrations is off, and never opens a socket", async () => {
     const { handle, get, gate } = harness({ gate: false });
     await expect(handle.fetch("https://api.github.com/user")).rejects.toBeInstanceOf(DevelopmentEgressBlockedError);

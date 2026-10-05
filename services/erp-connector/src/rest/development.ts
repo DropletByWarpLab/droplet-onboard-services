@@ -163,7 +163,7 @@ export interface DevelopmentFeedRequest {
   readonly repo?: string;
   /** The repository's web URL — only the branch feed's `urlTemplate` reads it. */
   readonly repoWebUrl?: string;
-  /** The first page's ETag from the last pass. Sent as `If-None-Match`. */
+  /** The last complete single-page representation's ETag. Sent as `If-None-Match`. */
   readonly etag?: string | null;
   /** For a newest-first feed: rows older than this are dropped and the walk ends
    *  at the first page that reaches it. Ignored by every other feed. */
@@ -171,10 +171,10 @@ export interface DevelopmentFeedRequest {
 }
 
 export interface DevelopmentFeedResult {
-  /** `not_modified`: the first page's ETag still holds, so there is nothing to read. */
+  /** `not_modified`: the cached single-page representation is unchanged. */
   readonly status: "ok" | "not_modified";
   readonly items: DevelopmentItem[];
-  /** The FIRST page's ETag; the caller stores it for the next pass. */
+  /** A single-page representation's ETag, or null when more pages are advertised. */
   readonly etag: string | null;
   /** The page ceiling was reached with more pages behind it. */
   readonly truncated: boolean;

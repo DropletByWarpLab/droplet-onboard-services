@@ -3,7 +3,7 @@ import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { RestCredentialRejectedError, RestRateLimitedError } from "@droplet/erp-connector";
-import { DevelopmentEgressBlockedError } from "../../services/pm/pm-dev-egress.js";
+import { DevelopmentEgressBlockedError, DevelopmentConnectionChangedError } from "../../services/pm/pm-dev-egress.js";
 import { requireRole } from "../../middleware/auth.js";
 import { guestAssignedWorkItem } from "../../middleware/guest-share.js";
 import {
@@ -25,6 +25,7 @@ const mappingSchema = z.object({
 
 function fail(res: Response, err: unknown) {
   const code = err instanceof Error ? err.message : "development_sync_failed";
+  if (err instanceof DevelopmentConnectionChangedError) return res.status(409).json({ error: "integration_connection_changed" });
   if (err instanceof RestCredentialRejectedError && err.status === 401) return res.status(409).json({ error: "integration_needs_reconnect" });
   if (err instanceof RestCredentialRejectedError && err.status === 403) return res.status(403).json({ error: "repository_access_denied" });
   if (err instanceof RestRateLimitedError) return res.status(429).json({ error: "code_host_rate_limited", retryAfter: err.resetAt?.toISOString() ?? null });

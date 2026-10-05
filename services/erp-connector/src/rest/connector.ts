@@ -1046,8 +1046,8 @@ export class RestProfileConnector implements Connector {
    *
    *  - a CONDITIONAL first page. `If-None-Match` with the last pass's ETag turns
    *    "nothing changed" into a 304, which neither host counts against the
-   *    owner's allowance. Later pages are fetched only when the first changed,
-   *    so only the first carries a tag.
+   *    owner's allowance. A tag is retained only when that response has no
+   *    next page: a first-page validator cannot prove later pages unchanged.
    *  - an early stop. GitHub's `/pulls` has no `since` and ignores parameters it
    *    does not know, so a newest-first feed is walked until a page reaches the
    *    caller's cutoff and the rest is never requested.
@@ -1095,7 +1095,10 @@ export class RestProfileConnector implements Connector {
         this.lastReadAt = this.now();
         return { status: "not_modified", items: [], etag: req.etag ?? null, truncated: false, skipped: 0, rateLimit };
       }
-      if (page === 0) etag = res.headers.get("etag");
+      const next = spec.single === true ? "" : (nextLinkFrom(res.headers.get("link")) ?? "");
+      // Check before the cutoff can stop this walk. Even an unvisited next
+      // page makes the first response's validator unsafe for the whole feed.
+      if (page === 0) etag = next === "" ? res.headers.get("etag") : null;
 
       const rows = spec.single === true ? [res.body] : res.body;
       if (!Array.isArray(rows)) {
@@ -1121,7 +1124,6 @@ export class RestProfileConnector implements Connector {
       }
       if (reachedCutoff) break;
 
-      const next = spec.single === true ? "" : (nextLinkFrom(res.headers.get("link")) ?? "");
       if (next === "") break;
       if (page + 1 >= spec.maxPages) {
         truncated = true;

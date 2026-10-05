@@ -29,6 +29,7 @@ interface Reply {
   body?: unknown;
   status?: number;
   headers?: Record<string, string>;
+  notModifiedWhenTagMatches?: boolean;
 }
 
 /** Recording fetch. A reply with no `body` and status 304 makes `json()` THROW,
@@ -40,8 +41,9 @@ function stubFetch(replies: Reply[]) {
     calls.push({ url, headers: (init.headers ?? {}) as Record<string, string> });
     const reply = replies[Math.min(n, replies.length - 1)]!;
     n += 1;
-    const status = reply.status ?? 200;
     const headers = reply.headers ?? {};
+    const conditional = (init.headers as Record<string, string> | undefined)?.["If-None-Match"];
+    const status = reply.notModifiedWhenTagMatches && typeof conditional === "string" && conditional === headers.etag ? 304 : reply.status ?? 200;
     return {
       ok: status >= 200 && status < 300,
       status,
@@ -256,16 +258,37 @@ describe("the conditional first page", () => {
     expect(res.rateLimit?.remaining).toBe(4999);
   });
 
-  it("puts the ETag on the FIRST page only: a page that changed is followed by plain requests", async () => {
+  it("puts the conditional tag on the first request only and discards it when the answer spans pages", async () => {
     const { c, calls } = connector([
       { body: [pull(1, "2026-10-03T10:00:00Z")], headers: { ...LINK_NEXT("https://api.github.com/page2"), etag: 'W/"new"' } },
       { body: [pull(2, "2026-10-03T09:00:00Z")] },
     ]);
     const res = await c.readDevelopment({ feed: "pullRequestsOpen", repo: "acme/widgets", etag: 'W/"old"' });
     expect(calls.map((x) => x.headers["If-None-Match"])).toEqual(['W/"old"', undefined]);
-    // The tag handed back is the first page's, which is the one the next pass sends.
-    expect(res.etag).toBe('W/"new"');
+    // It validates page one, not the combined inventory returned to the caller.
+    expect(res.etag).toBeNull();
     expect(res.items).toHaveLength(2);
+  });
+
+  it("reads a changed later page on the next poll even when the first page's representation is unchanged", async () => {
+    const firstPage = { body: [pull(1, "2026-10-03T10:00:00Z")], headers: { ...LINK_NEXT("https://api.github.com/page2"), etag: 'W/"stable-first"' } };
+    const { c, calls } = connector([
+      firstPage,
+      { body: [pull(2, "2026-10-03T09:00:00Z", { title: "Before" })] },
+      // A real conditional server would answer 304 for this unchanged page.
+      // That must not prevent reading the update confined to its next page.
+      { ...firstPage, notModifiedWhenTagMatches: true },
+      { body: [pull(2, "2026-10-03T09:30:00Z", { title: "Changed later page" })] },
+    ]);
+    const first = await c.readDevelopment({ feed: "pullRequestsOpen", repo: "acme/widgets" });
+    expect(first.truncated).toBe(false);
+    expect(first.etag).toBeNull();
+    const second = await c.readDevelopment({ feed: "pullRequestsOpen", repo: "acme/widgets", etag: first.etag });
+    expect(calls).toHaveLength(4);
+    expect(calls.map((call) => call.headers["If-None-Match"])).toEqual([undefined, undefined, undefined, undefined]);
+    expect(second.status).toBe("ok");
+    expect(second.items).toContainEqual(expect.objectContaining({ type: "pull_request", number: 2, title: "Changed later page" }));
+    expect(second.etag).toBeNull();
   });
 
   it("sends no If-None-Match for an empty etag", async () => {
@@ -339,7 +362,7 @@ describe("newest-first feeds stop at the caller's cutoff", () => {
     const { c, calls } = connector([
       {
         body: [pull(3, "2026-10-04T10:00:00Z"), pull(2, "2026-10-03T10:00:00Z"), pull(1, "2026-10-01T10:00:00Z")],
-        headers: LINK_NEXT("https://api.github.com/page2"),
+        headers: { ...LINK_NEXT("https://api.github.com/page2"), etag: 'W/"cutoff-first"' },
       },
       { body: [pull(0, "2026-09-01T10:00:00Z")] },
     ]);
@@ -348,6 +371,7 @@ describe("newest-first feeds stop at the caller's cutoff", () => {
     expect(calls).toHaveLength(1);
     expect(res.items.map((i) => i.type === "pull_request" && i.number)).toEqual([3, 2]);
     expect(res.truncated).toBe(false);
+    expect(res.etag).toBeNull();
   });
 
   it("keeps walking while every row is newer than the cutoff", async () => {

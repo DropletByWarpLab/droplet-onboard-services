@@ -98,8 +98,8 @@ export default function DevelopmentSettingsPage() {
   return (
     <ShellPage icon={<GitBranch size={15} />} label="Integrations" title="Development links" sub="Choose code repositories and map them to Projects.">
       <div className="card" style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <label className="type-footnote text-label-secondary" htmlFor="development-provider">Code host</label>
-        <select id="development-provider" className="input" value={provider} onChange={(event) => { setProvider(event.target.value as Provider); setAvailable([]); }}>
+        <label className="type-footnote" htmlFor="development-provider">Code host</label>
+        <select id="development-provider" className="input" value={provider} disabled={loading || saving !== null} onChange={(event) => { setProvider(event.target.value as Provider); setAvailable([]); }}>
           <option value="github">GitHub</option><option value="gitlab">GitLab</option>
         </select>
         <button type="button" className="btn secondary" onClick={() => void discover()} disabled={loading}>
@@ -113,7 +113,7 @@ export default function DevelopmentSettingsPage() {
       {available.length > 0 && <>
         <Sect title="Available repositories" />
         <div className="card" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          <label htmlFor="new-repository-project" className="type-footnote text-label-secondary">Map new repositories to</label>
+          <label htmlFor="new-repository-project" className="type-footnote">Map new repositories to</label>
           <select id="new-repository-project" className="input" value={projectForNew} onChange={(event) => setProjectForNew(event.target.value)}>
             <option value="">Choose a project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.identifier} · {project.name}</option>)}
           </select>
@@ -127,7 +127,7 @@ export default function DevelopmentSettingsPage() {
       </>}
 
       <Sect title="Configured repositories" />
-      {configured.length === 0 ? <div className="card type-footnote text-label-secondary">No repositories configured yet.</div> : (
+      {configured.length === 0 ? <div className="card type-footnote">No repositories configured yet.</div> : (
         <div className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           {configured.map((repo) => <RepositoryCard key={repo.id} repo={repo} projects={projects} saving={saving} onAdd={addMapping} onRemove={remove} />)}
         </div>
@@ -147,7 +147,7 @@ function RepositoryCard({
   const unmapped = projects.filter((project) => !repo.projects.some((mapping) => mapping.projectId === project.id));
   return <section style={{ borderBottom: "1px solid var(--border)", paddingBottom: 12 }}>
     <div className="pm-row" style={{ justifyContent: "space-between", gap: 12 }}>
-      <div><strong>{repo.fullName}</strong><div className="type-footnote text-label-secondary">{repo.provider} · {repo.status.replaceAll("_", " ")}{repo.lastSyncedAt ? ` · synced ${new Date(repo.lastSyncedAt).toLocaleString()}` : " · never synced"}</div>
+      <div><strong>{repo.fullName}</strong><div className="type-footnote">{repo.provider} · {repo.status.replaceAll("_", " ")}{repo.lastSyncedAt ? ` · synced ${new Date(repo.lastSyncedAt).toLocaleString()}` : " · never synced"}</div>
         {repo.lastError && <div role="status" className="type-footnote" style={{ color: "var(--danger)", marginTop: 3 }}>{repo.lastError}</div>}
       </div>
       <a href={repo.webUrl} target="_blank" rel="noopener noreferrer" className="type-footnote">Open repository</a>
@@ -195,7 +195,7 @@ function ProjectMapping({
       setSaved(true);
     } catch (err) { setSaved(false); setSaveError(err instanceof Error ? err.message : "Could not save state rules."); }
   };
-  return <div style={{ display: "grid", gridTemplateColumns: "minmax(130px, 1fr) minmax(130px, 1fr) minmax(130px, 1fr) auto", gap: 8, alignItems: "center" }}>
+  return <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(130px, 100%), 1fr))", gap: 8, alignItems: "center" }}>
     <span className="type-footnote">{mapping.project.identifier} · {mapping.project.name}</span>
     <select className="input" aria-label={`${mapping.project.name} state when pull request opens`} value={opened} onChange={(event) => { setOpened(event.target.value); setSaved(false); }}>
       <option value="">On opened: no change</option>{states.map((state) => <option key={state.id} value={state.id}>{state.name}</option>)}

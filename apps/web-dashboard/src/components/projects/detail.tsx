@@ -350,9 +350,9 @@ function DetailBody({ item, onChanged }: { item: PmWorkItem; onChanged: () => vo
           </button>
         </div>
         {developmentLoading ? (
-          <div className="type-footnote text-label-secondary" role="status">Loading development links…</div>
+          <div className="type-footnote" role="status">Loading development links…</div>
         ) : developmentError ? (
-          <div className="type-footnote text-label-secondary" role="status">Development links are temporarily unavailable.</div>
+          <div className="type-footnote" role="status">Development links are temporarily unavailable.</div>
         ) : developmentLinks?.length ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
             {developmentLinks.map((link) => (
@@ -366,7 +366,7 @@ function DetailBody({ item, onChanged }: { item: PmWorkItem; onChanged: () => vo
             ))}
           </div>
         ) : (
-          <div className="type-footnote text-label-secondary">No linked pull requests, commits, or branches yet.</div>
+          <div className="type-footnote">No linked pull requests, commits, or branches yet.</div>
         )}
       </section>
 

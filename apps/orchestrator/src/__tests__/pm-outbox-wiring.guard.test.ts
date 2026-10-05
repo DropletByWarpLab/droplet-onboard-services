@@ -44,8 +44,16 @@ describe("every PmActivity writer wakes the outbox", () => {
     (_name, text) => {
       const sites = text.match(/\bpmActivity\.(create|createMany)\(/g)?.length ?? 0;
       const nudges = text.match(/\bnudgeOutbox\(\)/g)?.length ?? 0;
-      expect(text).toMatch(/import \{[^}]*\bnudgeOutbox\b[^}]*\} from "\.\/pm-outbox\.js"/);
-      expect(nudges).toBeGreaterThanOrEqual(sites);
+      expect(text).toMatch(/import \{[^}]*\bnudgeOutbox\b[^}]*\} from "(?:\.\/pm-outbox\.js|\.\.\/pm\/pm-outbox\.js)"/);
+      if (_name === "services/support/escalation.service.ts") {
+        // Escalation writes the PM activity and both relation audit rows in one
+        // transaction. Suppress the helper wake-up and wake once after commit.
+        expect(nudges).toBe(1);
+        expect(text).toMatch(/await writeActivity\(tx,[\s\S]*?nudge: false[\s\S]*?await tx\.pmActivity\.createMany\(/);
+        expect(text).toMatch(/\}\);\s*nudgeOutbox\(\);/);
+      } else {
+        expect(nudges).toBeGreaterThanOrEqual(sites);
+      }
     },
   );
 });

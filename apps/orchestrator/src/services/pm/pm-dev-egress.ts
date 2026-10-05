@@ -42,6 +42,9 @@ import { webhookLocalNetworkFacts } from "./webhook-local-network.js";
 
 /** Why a request was refused BEFORE it was dialled. */
 export type DevelopmentEgressBlock = "egress_switch_off" | "destination_not_allowed" | "unresolvable";
+export class DevelopmentConnectionChangedError extends Error {
+  constructor() { super("The integration changed before the request. Retry with its current connection."); }
+}
 
 const BLOCK_MESSAGE: Record<DevelopmentEgressBlock, string> = {
   egress_switch_off: "blocked by the work_integrations egress setting",
@@ -66,6 +69,8 @@ export interface DevelopmentFetchDeps {
   get?: typeof pinnedGet;
   /** `work_integrations`. Read before EVERY off-LAN dial. */
   gate?: () => Promise<boolean>;
+  /** Recheck the exact credential/configuration snapshot immediately before dialing. */
+  connectionCurrent?: () => Promise<boolean>;
 }
 
 export interface DevelopmentFetch {
@@ -78,6 +83,7 @@ export interface DevelopmentFetch {
    * owner's switch from the network.
    */
   readonly blocked: DevelopmentEgressBlock | null;
+  readonly connectionChanged: boolean;
 }
 
 /** `RequestInit.headers` in any of its three shapes, as a lowercase-keyed record
@@ -101,6 +107,7 @@ export function createDevelopmentFetch(
   const get = deps.get ?? pinnedGet;
   const gate = deps.gate ?? (() => workIntegrationsGate(prisma));
   let blocked: DevelopmentEgressBlock | null = null;
+  let connectionChanged = false;
 
   const refuse = (reason: DevelopmentEgressBlock): never => {
     blocked = reason;
@@ -135,6 +142,11 @@ export function createDevelopmentFetch(
       if (!open) return refuse("egress_switch_off");
     }
 
+    if (deps.connectionCurrent) {
+      let current = false;
+      try { current = await deps.connectionCurrent(); } catch { current = false; }
+      if (!current) { connectionChanged = true; throw new DevelopmentConnectionChangedError(); }
+    }
     const res = await get(dest, { headers: headersOf(init.headers), signal: init.signal ?? undefined });
     // Node's undici Web Stream is a standards-compliant Response body; the
     // workspace's DOM/Node stream declarations disagree on its generic
@@ -148,5 +160,6 @@ export function createDevelopmentFetch(
     get blocked() {
       return blocked;
     },
+    get connectionChanged() { return connectionChanged; },
   };
 }

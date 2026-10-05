@@ -12,6 +12,7 @@ vi.mock("../erp-provider.js", () => ({
 vi.mock("./pm-dev-egress.js", () => ({
   createDevelopmentFetch: vi.fn(() => ({ fetch: vi.fn(), get blocked() { return null; } })),
   DevelopmentEgressBlockedError: class DevelopmentEgressBlockedError extends Error { constructor() { super(); } },
+  DevelopmentConnectionChangedError: class DevelopmentConnectionChangedError extends Error { constructor() { super(); } },
 }));
 vi.mock("./pm.service.js", () => ({ writeActivity: activityMock }));
 
@@ -58,14 +59,15 @@ describe("WARP-3535 sync completeness", () => {
     await runDevelopmentSync(prisma as never);
     expect(prisma.pmExternalLink.findMany).not.toHaveBeenCalled();
     expect(prisma.pmExternalLink.update).not.toHaveBeenCalled();
+    expect(prisma.pmDevRepository.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ branchesEtag: null }) }));
   });
 
-  it("records a missing/disabled credential as reconnect-required without dialing", async () => {
+  it("records a missing/disabled connection as disconnected without dialing", async () => {
     const prisma = fixture({ connection: null });
     await runDevelopmentSync(prisma as never);
     expect(connectorMock.readDevelopment).not.toHaveBeenCalled();
     expect(prisma.pmDevRepository.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: "repo-1" }, data: expect.objectContaining({ status: "NEEDS_RECONNECT" }),
+      where: { id: "repo-1" }, data: expect.objectContaining({ status: "DISCONNECTED" }),
     }));
   });
 

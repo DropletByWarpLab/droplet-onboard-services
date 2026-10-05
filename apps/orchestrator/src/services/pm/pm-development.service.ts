@@ -10,7 +10,7 @@ import {
   type DevRepositoryItem,
 } from "@droplet/erp-connector";
 import { cloudMaterialFromRow, connectorForProvider, type CloudConnectionRow } from "../erp-provider.js";
-import { createDevelopmentFetch, DevelopmentEgressBlockedError } from "./pm-dev-egress.js";
+import { createDevelopmentFetch, DevelopmentEgressBlockedError, DevelopmentConnectionChangedError } from "./pm-dev-egress.js";
 import { matchedSequences } from "./pm-dev-match.js";
 import { writeActivity } from "./pm.service.js";
 import { POLLABLE_CONNECTION_STATUSES } from "../erp-sync/cursor.service.js";
@@ -59,7 +59,14 @@ async function connectionFor(prisma: PrismaClient, provider: Provider) {
 async function connectorFor(prisma: PrismaClient, provider: Provider): Promise<{ connector: DevConnector; seal: string; egress: ReturnType<typeof createDevelopmentFetch> }> {
   const row = await connectionFor(prisma, provider);
   if (!row?.providerTokensEnc) throw new Error("integration_not_connected");
-  const guardedFetch = createDevelopmentFetch(prisma);
+  const configuration = JSON.stringify(row.providerConfig);
+  const guardedFetch = createDevelopmentFetch(prisma, {
+    connectionCurrent: async () => {
+      const current = await prisma.integrationConnection.findUnique({ where: { id: row.id }, select: { provider: true, providerTokensEnc: true, providerConfig: true, status: true } });
+      return !!current && current.provider === provider && POLLABLE_CONNECTION_STATUSES.includes(current.status as typeof POLLABLE_CONNECTION_STATUSES[number])
+        && current.providerTokensEnc === row.providerTokensEnc && JSON.stringify(current.providerConfig) === configuration;
+    },
+  });
   const selector = {
     provider,
     host: provider === "github" ? "api.github.com" : "gitlab.com",
@@ -76,6 +83,7 @@ async function readDevelopment(
 ) {
   try { return await connector.readDevelopment(request); }
   catch (err) {
+    if (egress.connectionChanged) throw new DevelopmentConnectionChangedError();
     if (egress.blocked) throw new DevelopmentEgressBlockedError(egress.blocked);
     throw err;
   }
@@ -113,7 +121,8 @@ export async function connectDevelopmentRepository(
       },
       update: { apiRef: repo.apiRef, fullName: repo.fullName, webUrl: checkedUrl, defaultBranch: repo.defaultBranch, status: "PENDING", nextSyncAt: new Date() },
     });
-    await tx.pmDevRepositoryProject.deleteMany({ where: { repositoryId: row.id } });
+    // Adding a mapping must preserve any other project mappings and their
+    // optional state rules. Removal has its own explicit DELETE route.
     if (input.projectIds.length) await tx.pmDevRepositoryProject.createMany({
       data: [...new Set(input.projectIds)].map((projectId) => ({ repositoryId: row.id, projectId })),
       skipDuplicates: true,
@@ -200,27 +209,27 @@ async function upsertLink(
       ? (state === "OPEN" ? mapping?.onOpenedStateId : mapping?.onMergedStateId) : null;
     await prisma.$transaction(async (tx) => {
       const unique = { provider_kind_externalId_workItemId: { provider, kind, externalId, workItemId: workItem.id } };
-      const existing = await tx.pmExternalLink.findUnique({ where: unique, select: { id: true } });
+      const existing = await tx.pmExternalLink.findUnique({ where: unique, select: { id: true, state: true } });
       await tx.pmExternalLink.upsert({
         where: unique,
         create: { workItemId: workItem.id, repositoryId, provider, kind, externalId, url, title, state, author, ref, number, externalUpdatedAt: updatedAt },
         update: { repositoryId, url, title, state, author, ref, number, externalUpdatedAt: updatedAt },
       });
       if (!existing) await writeActivity(tx, { workItemId: workItem.id, actorId: null, verb: "external_link_added", field: provider.toLowerCase(), newValue: `${kind}:${title.slice(0, 180)}` });
-      if (targetState) {
-        const oldItem = await tx.pmWorkItem.findUnique({ where: { id: workItem.id }, select: { stateId: true, completedAt: true, isCompleted: true } });
+      if (targetState && (!existing || existing.state !== state)) {
+        const oldItem = await tx.pmWorkItem.findFirst({ where: { id: workItem.id, project: { kind: "PROJECT" } }, select: { stateId: true, completedAt: true, isCompleted: true } });
         const [oldState, newState] = oldItem?.stateId ? await Promise.all([
           tx.pmState.findUnique({ where: { id: oldItem.stateId }, select: { name: true } }),
-          tx.pmState.findUnique({ where: { id: targetState }, select: { name: true, group: true } }),
-        ]) : [null, await tx.pmState.findUnique({ where: { id: targetState }, select: { name: true, group: true } })];
+          tx.pmState.findFirst({ where: { id: targetState, projectId: project.id }, select: { name: true, group: true } }),
+        ]) : [null, await tx.pmState.findFirst({ where: { id: targetState, projectId: project.id }, select: { name: true, group: true } })];
         if (oldItem && newState && oldItem.stateId !== targetState) {
           const completed = newState.group === "completed" || newState.group === "cancelled";
-          await tx.pmWorkItem.update({ where: { id: workItem.id }, data: {
+          const changed = await tx.pmWorkItem.updateMany({ where: { id: workItem.id, stateId: oldItem.stateId, project: { kind: "PROJECT" } }, data: {
             stateId: targetState,
             isCompleted: completed,
             completedAt: completed ? (oldItem.completedAt ?? new Date()) : null,
           } });
-          await writeActivity(tx, { workItemId: workItem.id, actorId: null, verb: "state_changed", field: "state", oldValue: oldState?.name ?? oldItem.stateId, newValue: newState.name });
+          if (changed.count) await writeActivity(tx, { workItemId: workItem.id, actorId: null, verb: "state_changed", field: "state", oldValue: oldState?.name ?? oldItem.stateId, newValue: newState.name });
         }
       }
     });
@@ -291,10 +300,16 @@ async function syncOne(prisma: PrismaClient, row: Awaited<ReturnType<typeof pris
       ...base, status: rate ? "RATE_LIMITED" : "OK", lastSyncedAt: now, lastError: null,
       consecutiveFailures: 0, credentialSeal: attemptedSeal,
       nextSyncAt: rate?.resetAt ?? new Date(now.getTime() + (anyTruncated ? 2 * 60_000 : 5 * 60_000)),
-      openPrsEtag: openPrs.etag, recentPrsEtag: recentPrs.etag, commitsEtag: commits.etag, branchesEtag: branches.etag,
+      // A first-page ETag cannot prove a capped multi-page inventory unchanged.
+      openPrsEtag: openPrs.truncated ? null : openPrs.etag, recentPrsEtag: recentPrs.truncated ? null : recentPrs.etag,
+      commitsEtag: commits.truncated ? null : commits.etag, branchesEtag: branches.truncated ? null : branches.etag,
     } });
   } catch (err) {
     const latest = await connectionFor(prisma, provider).catch(() => null);
+    if (err instanceof DevelopmentConnectionChangedError) {
+      await prisma.pmDevRepository.update({ where: { id: row.id }, data: { ...base, status: latest?.providerTokensEnc ? "PENDING" : "DISCONNECTED", lastError: null, nextSyncAt: new Date(now.getTime() + 5 * 60_000) } });
+      return;
+    }
     if (latest?.providerTokensEnc && connectionSeal(latest.providerTokensEnc) !== seal) {
       await prisma.pmDevRepository.update({ where: { id: row.id }, data: { ...base, status: "PENDING", lastError: null, nextSyncAt: now } });
       return;
@@ -304,7 +319,7 @@ async function syncOne(prisma: PrismaClient, row: Awaited<ReturnType<typeof pris
     const isEgress = err instanceof DevelopmentEgressBlockedError || activeEgress?.blocked === "egress_switch_off";
     const isAuth = (err instanceof RestCredentialRejectedError && err.status === 401) || (err instanceof RestVendorError && err.status === 401);
     const isInaccessible = (err instanceof RestCredentialRejectedError && err.status === 403) || (err instanceof RestVendorError && err.status === 403 && !(err instanceof RestRateLimitedError));
-    const status = isEgress ? "EGRESS_BLOCKED" : isAuth ? "NEEDS_RECONNECT" : isInaccessible ? "INACCESSIBLE" : "ERROR";
+    const status = err instanceof RestRateLimitedError ? "RATE_LIMITED" : isEgress ? "EGRESS_BLOCKED" : isAuth ? "NEEDS_RECONNECT" : isInaccessible ? "INACCESSIBLE" : "ERROR";
     const lastError = isEgress ? "Blocked by the work_integrations egress setting." : isAuth ? ERROR_COPY.credential : isInaccessible ? ERROR_COPY.inaccessible : ERROR_COPY.transient;
     const retryAt = err instanceof RestRateLimitedError && err.resetAt ? err.resetAt : new Date(now.getTime() + Math.min(6 * 60 * 60_000, 30_000 * 2 ** Math.min(attempts - 1, 9)));
     await prisma.pmDevRepository.update({ where: { id: row.id }, data: { ...base, status, lastError, consecutiveFailures: attempts, credentialSeal: isAuth ? seal : row.credentialSeal, nextSyncAt: retryAt } });
