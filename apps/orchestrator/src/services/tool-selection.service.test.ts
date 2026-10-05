@@ -1336,6 +1336,73 @@ describe("WARP-2896 — a workshop run's binding admits the workspace domain; no
   });
 });
 
+/**
+ * WARP-3538 — OneDrive and SharePoint are asked after by PLACE, not by
+ * container.
+ *
+ * `search_cloud_files` lives in `files`, and nobody who wants it types one of
+ * that rule's nouns: "what did Dana change in the SharePoint this week" holds
+ * no file, document, folder or pdf. It advertised the core four and not the one
+ * tool that can answer it — a tool registered, budgeted and advertised on no
+ * relevant turn, the WARP-2058 / 2454 / 2497 / 2546 class again. The rule claims
+ * the two product names and nothing wider.
+ *
+ * Whole sentences, never a word lifted out of the pattern — and none of them
+ * carries a word the older `files` rules already claim (`document`, `upload`,
+ * `file`, …), or the new rule would be doing no work and deleting it would stay
+ * green. MUTATION: delete the rule and every positive goes red; drop either
+ * product name from it and that name's sentences go red.
+ */
+describe("WARP-3538 — OneDrive and SharePoint reach search_cloud_files from a fresh turn", () => {
+  const CLOUD_FILES_POOL = [...POOL, "search_cloud_files", "list_recent_files"];
+
+  const advertisedFor = (userMessage: string, conversationToolNames: string[] = []) =>
+    selectAdvertisedTools({ mode: "domains", userMessage, pool: CLOUD_FILES_POOL, conversationToolNames }).advertised;
+
+  describe("positives — how a person asks after a file by where it lives", () => {
+    it.each([
+      "what did Dana change in the SharePoint this week?",
+      "has the Front Desk site on SharePoint got the new price list yet?",
+      "ask SharePoint who touched the staff roster last",
+      "is the new staff handbook on OneDrive or only on the Droplet?",
+      "anything Sam edited in my OneDrive since Monday?",
+      "check my One-Drive for the roofer's paperwork",
+    ])("%s", (message) => {
+      const advertised = advertisedFor(message);
+      expect(advertised).toContain("search_cloud_files");
+      // The domain is admitted whole: its siblings come with it.
+      expect(advertised).toContain("list_recent_files");
+    });
+  });
+
+  describe("negatives — sentences that name neither product", () => {
+    // The files domain is the largest in the catalog, so each of these would
+    // buy ~4K tokens of schema on a turn that wanted none of it.
+    it.each([
+      // `one drive` with a space is a disk in an array, not a product. The
+      // storage question has its own domain; it must not pull `files` in too.
+      "one drive in the raid array has failed, is the storage ok?",
+      // Microsoft 365 alone is not claimed: it is mail and calendar as much as
+      // files, and `microsoft 365` in a calendar question must not buy `files`.
+      "is my Microsoft 365 calendar syncing properly?",
+      "I would like to share a point about the budget at the meeting",
+      // The tool is provider-agnostic, but the word "cloud" is not claimed: this
+      // product's customers type it about backups, cameras and privacy as often
+      // as about files, and each would buy the whole domain.
+      "is any of my camera footage being sent to the cloud?",
+      "should the Droplet back itself up to the cloud overnight?",
+    ])("%s does not advertise the files domain", (message) => {
+      expect(advertisedFor(message)).not.toContain("search_cloud_files");
+    });
+  });
+
+  it("a conversation that already searched cloud files keeps the files domain on a bare follow-up", () => {
+    // "and the one before that?" names nothing; continuity carries it.
+    expect(advertisedFor("and the one before that?", ["search_cloud_files"])).toContain("list_recent_files");
+    expect(advertisedFor("and the one before that?")).not.toContain("list_recent_files");
+  });
+});
+
 describe("WARP-3280 — contacts and the calculator are reachable from a fresh turn", () => {
   const CONTACTS_POOL = [...POOL, "search_contacts", "email_search"];
   const DATA_POOL = [...POOL, "calculate", "get_weather"];
@@ -1471,6 +1538,10 @@ describe("WARP-3280 — every domain rule runs in linear time on hostile input",
     ["send then spaces", "send" + " ".repeat(N) + "a message"],
     ["let run", "let ".repeat(N / 4)],
     ["tell a word run", "tell " + "a".repeat(N)],
+    // WARP-3538 — the OneDrive / SharePoint product names and their optional hyphens.
+    ["one-drive run", "one-".repeat(N / 4)],
+    ["share-point run", "share-".repeat(N / 6)],
+    ["onedrive then spaces", "onedrive" + " ".repeat(N) + "x"],
   ])("%s (%#) decides in under 50 ms", (_label, hostile) => {
     for (const pool of [POOL, NAV_POOL]) {
       const started = performance.now();

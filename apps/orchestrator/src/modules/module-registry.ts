@@ -259,6 +259,29 @@ export const MODULES: readonly ModuleDef[] = [
     available: () => true, // native to the orchestrator
   },
   {
+    id: "support", label: "Support",
+    description: "Handle customer requests as tickets: answer, assign and follow each one through to a resolution.",
+    // WARP-3528 (ADR-069 §1) — the service desk has a door of its own. Tickets
+    // ride the PM tables (`PmProject.kind = SERVICE_DESK`) but never the PM
+    // routes: /api/pm reads `kind = PROJECT` only, so a Projects grant is no way
+    // into a customer's conversation and /support is no way into Projects.
+    category: "workspace", routePrefixes: ["/api/support"],
+    navHrefs: ["/support"],
+    // No tool domain in this slice. The assistant reaches tickets through the
+    // existing `business` domain once WS-15 (WARP-3531) adds `ticket` as an
+    // entity; claiming `business` now would WIDEN it (any owning module passes
+    // the feature intersection) for a surface with no tool yet. Same as `docs`
+    // and `contacts`: nothing is claimed until the handlers exist.
+    toolDomains: [], core: false, defaultEnabled: false,
+    // No `requires`, by the bar ModuleDef.requires sets (and `crm` met in
+    // WARP-2558): the child must have no reachable surface without the parent.
+    // /support is its own surface, so a dental front desk runs Support with
+    // Projects off. Linking a ticket to engineering work needs both grants and
+    // degrades to "linked item (no access)" otherwise. Do not restore an edge
+    // without also taking /support away.
+    available: () => true, // native to the orchestrator
+  },
+  {
     id: "contacts", label: "Contacts",
     description: "The company address book: people you add, plus those brought in from your other accounts.",
     category: "workspace", routePrefixes: ["/api/contacts"],
@@ -522,22 +545,22 @@ export const BUSINESS_TYPES: readonly BusinessTypeDef[] = [
   {
     id: "professional_office", label: "Professional office",
     description: "An office — documents, email, projects, scheduling.",
-    modules: ["knowledge", "files", "docs", "email", "calendar", "projects", "network"],
+    modules: ["knowledge", "files", "docs", "email", "calendar", "projects", "support", "network"],
   },
   {
     id: "retail", label: "Retail",
     description: "A store — cameras, device control, network, managed switch.",
-    modules: ["knowledge", "files", "calendar", "cameras", "smart_home", "network", "managed_switch"],
+    modules: ["knowledge", "files", "calendar", "support", "cameras", "smart_home", "network", "managed_switch"],
   },
   {
     id: "clinic", label: "Clinic / practice",
     description: "A practice — documents, scheduling, projects, cameras.",
-    modules: ["knowledge", "files", "docs", "calendar", "projects", "cameras", "network"],
+    modules: ["knowledge", "files", "docs", "calendar", "projects", "support", "cameras", "network"],
   },
   {
     id: "hospitality", label: "Hospitality",
     description: "A hotel / venue — rooms, devices, voice, cameras.",
-    modules: ["knowledge", "files", "calendar", "voice", "cameras", "smart_home", "network", "managed_switch"],
+    modules: ["knowledge", "files", "calendar", "support", "voice", "cameras", "smart_home", "network", "managed_switch"],
   },
   {
     id: "custom", label: "Custom",
