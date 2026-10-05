@@ -883,6 +883,10 @@ ROUTING_SERVICE_TOKEN=$routing_service_token
 # \`sudo systemctl restart droplet-openwrt-attach.service\` (sets the container
 # root pw + restarts routing together) — NOT a bare \`docker compose restart
 # routing\`, which would present the new pw to a container still on the old one.
+# External edge router (OPENWRT_HOST not loopback): the router owns its own
+# password and sync keeps the operator-written secret file (WARP-3738).
+# External edge router (OPENWRT_HOST not loopback): the router owns its password;
+# sync keeps docker/secrets/openwrt_password as the operator wrote it (WARP-3738).
 OPENWRT_PASSWORD=$openwrt_password
 
 # --- Voice service bearer (voice-io → orchestrator /api/llm/chat) ---
@@ -1889,6 +1893,28 @@ sync_openwrt_password_secret() {
   if [ -z "$password" ] && [ -f "$REPO_ROOT/.env" ]; then
     password=$(grep -E '^OPENWRT_PASSWORD=' "$REPO_ROOT/.env" | head -n 1 | cut -d= -f2- || true)
   fi
+
+  # WARP-3738: an EXTERNAL edge router (OPENWRT_HOST not loopback) owns its own
+  # droplet-ai password, which the operator pastes into the secret file itself.
+  # Overwriting it with the box-generated .env value broke routing on the lab
+  # box (2026-10-05, "OpenWrt rejected the rpcd credentials"). Keep a non-empty
+  # file; an empty/missing one is still filled below (first install).
+  local openwrt_host="${OPENWRT_HOST:-}"
+  if [ -z "$openwrt_host" ] && [ -f "$REPO_ROOT/.env" ]; then
+    openwrt_host=$(grep -E '^OPENWRT_HOST=' "$REPO_ROOT/.env" | tail -1 | cut -d= -f2- || true)
+  fi
+  case "$openwrt_host" in
+    ''|127.0.0.1|localhost|::1) ;;
+    *)
+      if [ -s "$secret_file" ]; then
+        if [ "$(cat "$secret_file")" != "$password" ]; then
+          log_info "External router (OPENWRT_HOST=$openwrt_host): keeping its own password in $secret_file."
+          log_info "  To change it, write the new value into that file and run: docker compose up -d --no-deps --force-recreate routing"
+        fi
+        return 0
+      fi
+      ;;
+  esac
 
   mkdir -p "$secret_dir"
   chmod 700 "$secret_dir"
