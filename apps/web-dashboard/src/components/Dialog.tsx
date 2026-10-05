@@ -294,7 +294,7 @@ export function Dialog({
       const focusables = Array.from(
         root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
       ).filter(
-        (el) => !(el as HTMLButtonElement | HTMLInputElement).disabled,
+        (el) => !el.matches(":disabled"),
       );
       if (focusables.length === 0) return;
       const first = focusables[0];

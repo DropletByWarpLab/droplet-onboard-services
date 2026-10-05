@@ -37,6 +37,7 @@ ONVIF WS-Discovery ─────┘      │
 | GET | `/cameras/discovered` | Pending cameras (not yet in Frigate) |
 | GET | `/cameras/known` | Active cameras (configured in Frigate) |
 | POST | `/cameras/discovered/{mac}/accept` | Accept camera into Frigate |
+| POST | `/cameras/discovered/{mac}/credentials` | Add a discovered camera with operator-supplied `{username, password}` (probes RTSP first, ONVIF only if RTSP found no path; 422 `auth_failed`/`no_stream_path`/`basic_auth_only`, 423 `locked`, 502 `unreachable`, 504 `timeout`, 400 `invalid_credentials`/`unsupported_password`/`unsupported_stream_address`) |
 | POST | `/cameras/discovered/{mac}/reject` | Reject camera (won't rediscover) |
 | POST | `/scan` | Manually trigger a discovery scan |
 | GET | `/subnet/status` | Which subnet is being scanned |
