@@ -73,7 +73,7 @@
 
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
-import { isPrismaCode } from "./pm.service.js";
+import { isPrismaCode, isServiceDesk } from "./pm.service.js";
 import { PM_ERRORS } from "./pm.service.js";
 
 /** A Prisma client OR an interactive-transaction handle — helpers that run
@@ -140,6 +140,18 @@ const RELATION_INCLUDE = {
 } satisfies Prisma.PmWorkItemRelationInclude;
 
 type RelationRow = Prisma.PmWorkItemRelationGetPayload<{ include: typeof RELATION_INCLUDE }>;
+
+/**
+ * WARP-3528 (ADR-069 §1) — PM only ever sees an edge whose BOTH ends are PM
+ * items. The escalation link between a ticket and a PM item is the support
+ * service's: PM never lists it, walks it, or deletes it, and never learns the
+ * ticket's key. Filtering the QUERY rather than the page keeps the per-item cap
+ * counting only edges PM may see.
+ */
+const BOTH_ENDS_IN_PM = {
+  from: { project: { kind: "PROJECT" } },
+  to: { project: { kind: "PROJECT" } },
+} satisfies Prisma.PmWorkItemRelationWhereInput;
 
 // ── API shape ────────────────────────────────────────────────────────────────
 
@@ -238,7 +250,7 @@ async function blocksPathExists(db: Db, startId: string, targetId: string): Prom
     // walk would report "no cycle" because it never looked at the edge that
     // closed it.
     const edges = await db.pmWorkItemRelation.findMany({
-      where: { kind: "BLOCKS", fromId: { in: frontier } },
+      where: { kind: "BLOCKS", fromId: { in: frontier }, ...BOTH_ENDS_IN_PM },
       select: { toId: true },
       take: RELATION_SCAN_MAX_EDGES_PER_LEVEL + 1,
     });
@@ -310,13 +322,15 @@ export async function listRelationsFor(
   if (!opts.itemChecked) {
     const item = await db.pmWorkItem.findUnique({
       where: { id: workItemId },
-      select: { id: true },
+      select: { id: true, project: { select: { kind: true } } },
     });
-    if (!item) throw new Error(PM_RELATION_ERRORS.WORK_ITEM_NOT_FOUND);
+    if (!item || isServiceDesk(item.project)) {
+      throw new Error(PM_RELATION_ERRORS.WORK_ITEM_NOT_FOUND);
+    }
   }
 
   const rows = await db.pmWorkItemRelation.findMany({
-    where: { OR: [{ fromId: workItemId }, { toId: workItemId }] },
+    where: { OR: [{ fromId: workItemId }, { toId: workItemId }], ...BOTH_ENDS_IN_PM },
     include: RELATION_INCLUDE,
     orderBy: [{ kind: "asc" }, { createdAt: "asc" }],
     take: RELATIONS_PER_ITEM_LIMIT,
@@ -341,11 +355,11 @@ export async function createRelation(
 ): Promise<ApiWorkItemRelation> {
   if (input.fromId === input.toId) throw new Error(PM_RELATION_ERRORS.RELATION_SELF);
 
-  // Both ends must exist. One query, not two: a pair of ids either resolves to
-  // two rows or the request is a 404, and which one is missing does not change
-  // the answer.
+  // Both ends must exist AND be PM items (WARP-3528: a ticket is not found
+  // here). One query, not two: a pair of ids either resolves to two rows or the
+  // request is a 404, and which one is missing does not change the answer.
   const ends = await prisma.pmWorkItem.findMany({
-    where: { id: { in: [input.fromId, input.toId] } },
+    where: { id: { in: [input.fromId, input.toId] }, project: { kind: "PROJECT" } },
     select: { id: true },
   });
   if (ends.length !== 2) throw new Error(PM_RELATION_ERRORS.WORK_ITEM_NOT_FOUND);
@@ -411,8 +425,10 @@ export async function deleteRelation(
   actorId: string | null,
   relationId: string,
 ): Promise<void> {
+  // An edge with a ticket at either end is the support service's (WARP-3528):
+  // not found here, so PM cannot delete the escalation link.
   const existing = await prisma.pmWorkItemRelation.findUnique({
-    where: { id: relationId },
+    where: { id: relationId, ...BOTH_ENDS_IN_PM },
     select: { id: true, fromId: true, toId: true, kind: true },
   });
   if (!existing) throw new Error(PM_RELATION_ERRORS.RELATION_NOT_FOUND);

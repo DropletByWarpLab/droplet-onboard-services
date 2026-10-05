@@ -289,15 +289,15 @@ async function resolveScope(
   if (q.projectId) {
     const project = await prisma.pmProject.findUnique({
       where: { id: q.projectId },
-      select: { id: true },
+      select: { id: true, kind: true },
     });
-    if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+    if (!project || project.kind !== "PROJECT") throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
     return { scope: "project", projectId: project.id, projectIds: [project.id] };
   }
   // Archived projects are out of the workspace view, as they are out of the
   // summary strip. Naming one by id (above) still works.
   const projects = await prisma.pmProject.findMany({
-    where: { workspace: { slug: q.workspaceSlug ?? HOME_WORKSPACE_SLUG }, isArchived: false },
+    where: { workspace: { slug: q.workspaceSlug ?? HOME_WORKSPACE_SLUG }, isArchived: false, kind: "PROJECT" },
     select: { id: true },
   });
   return { scope: "workspace", projectId: null, projectIds: projects.map((p) => p.id) };

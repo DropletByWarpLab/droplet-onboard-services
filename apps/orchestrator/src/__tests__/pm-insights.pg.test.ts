@@ -397,6 +397,76 @@ describe.skipIf(!RUN)("PM insights (WARP-3524)", () => {
     });
   });
 
+  describe("service-desk boundary", () => {
+    it("rejects a desk by id and excludes its ticket from every workspace aggregate", async () => {
+      const ws = await prisma.pmWorkspace.create({
+        data: { slug: `ws8-service-${Date.now().toString(36)}`, name: "WS8 service boundary" },
+      });
+      const projectId = await buildProject(
+        ws.id,
+        "WSDP",
+        "WS8 project",
+        P2_STATES,
+        [{ seq: 1, path: [[at("09-20"), "Todo"]] }],
+        false,
+      );
+      const desk = await prisma.pmProject.create({
+        data: {
+          workspaceId: ws.id,
+          kind: "SERVICE_DESK",
+          name: "WS8 private desk",
+          identifier: "WSDX",
+        },
+      });
+      const state = await prisma.pmState.create({
+        data: { projectId: desk.id, name: "Doing", group: "started", isDefault: true },
+      });
+      const ticket = await prisma.pmWorkItem.create({
+        data: {
+          projectId: desk.id,
+          sequenceId: 1,
+          name: "PRIVATE-TICKET-SUBJECT",
+          stateId: state.id,
+          createdAt: at("09-20"),
+        },
+      });
+      await prisma.pmTicket.create({
+        data: {
+          workItemId: ticket.id,
+          requesterKind: "USER",
+          requesterUserId: "ws8-private-requester",
+          requesterName: "Private requester",
+          channel: "INTERNAL",
+        },
+      });
+      await prisma.pmActivity.create({
+        data: { workItemId: ticket.id, verb: "created", createdAt: at("09-20"), notifyStatus: "not_needed" },
+      });
+
+      await expect(
+        getInsights(prisma, { projectId: desk.id, ...RANGE }, { now: NOW, timezone: "UTC" }),
+      ).rejects.toThrow(PM_ERRORS.PROJECT_NOT_FOUND);
+      const insight = await getInsights(
+        prisma,
+        { workspaceSlug: ws.slug, ...RANGE },
+        { now: NOW, timezone: "UTC" },
+      );
+      expect(insight.meta).toMatchObject({ scope: "workspace", itemCount: 1 });
+      expect(insight.createdVsCompleted.created).toBe(1);
+      expect(insight.workload.assignees).toEqual([{ userId: null, openItems: 1 }]);
+      expect(insight.agingWip).toMatchObject({ total: 0, items: [] });
+      expect(JSON.stringify(insight)).not.toContain(ticket.id);
+      expect(JSON.stringify(insight)).not.toContain(ticket.name);
+      expect(JSON.stringify(insight)).not.toContain("WSDX-1");
+      const projectInsight = await getInsights(
+        prisma,
+        { projectId, ...RANGE },
+        { now: NOW, timezone: "UTC" },
+      );
+      expect(projectInsight.meta).toMatchObject({ scope: "project", projectId, itemCount: 1 });
+    });
+  });
+
   describe("workspace scope", () => {
     it("adds every live project of the workspace and leaves the archived one out", async () => {
       const r = await getInsights(prisma, { workspaceSlug: slug, ...RANGE }, { now: NOW, timezone: "UTC" });

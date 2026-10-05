@@ -451,7 +451,8 @@ async function processClaim(
   const projectNames = new Set(
     (
       await prisma.pmProject.findMany({
-        where: { isArchived: false },
+        // WARP-3528 — projects only; a desk's name is not the filing model's to see.
+        where: { isArchived: false, kind: "PROJECT" },
         select: { name: true },
         take: 500,
       })
