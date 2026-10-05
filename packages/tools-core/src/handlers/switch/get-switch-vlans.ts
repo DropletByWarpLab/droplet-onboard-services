@@ -1,4 +1,5 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { refuseBelowNetworkMember } from "../network/role-gate.js";
 
 /**
  * WARP-1462 (phantom-target class): route through the orchestrator's
@@ -13,6 +14,8 @@ import type { Tool, ToolContext, ToolResult } from "../../types.js";
  * `data` is now that array.
  */
 async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  const denied = refuseBelowNetworkMember(ctx);
+  if (denied) return denied;
   const res = await ctx.http.orchestrator.get("/api/switch/vlans", { headers: { Accept: "application/json" } });
   if (!res.ok) {
     return {

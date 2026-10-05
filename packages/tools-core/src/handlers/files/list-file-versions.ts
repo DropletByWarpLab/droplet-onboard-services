@@ -77,7 +77,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     return {
       ok: false,
       status: "error",
-      error: { code: "VERSIONS_UNAVAILABLE", message: `nextcloud returned ${res.status}` },
+      error: { code: "VERSIONS_UNAVAILABLE", message: `the File Store returned ${res.status}` },
     };
   }
   const body = (await res.json().catch(() => null)) as { versions?: VersionEntry[] } | null;
@@ -102,7 +102,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "list_file_versions",
   description:
-    "List the saved version history of a file on the Droplet's Nextcloud (most recent first). Each entry has a versionId, size, and modifiedAt timestamp; pass a versionId to restore_file_version to roll the file back. A file with no prior versions returns an empty list (count 0).",
+    "List the saved version history of a file on the Droplet's File Store (most recent first). Each entry has a versionId, size, and modifiedAt timestamp; pass a versionId to restore_file_version to roll the file back. A file with no prior versions returns an empty list (count 0).",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

@@ -4,7 +4,14 @@
 import useSWR from "swr";
 import useSWRInfinite from "swr/infinite";
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { serializePmFilter, type PmFilter, type PmSavedViewDto } from "@droplet/shared-types";
+import {
+  serializePmFilter,
+  type PmFilter,
+  type PmGroupByField,
+  type PmSavedViewDto,
+  type PmSortSpec,
+  type PmViewLayout,
+} from "@droplet/shared-types";
 import { authFetch } from "@/lib/auth";
 import type { Department } from "@/lib/types";
 import { makePerson } from "./config";
@@ -154,6 +161,10 @@ export interface WorkItemQueryArgs {
   filter: PmFilter;
   /** Named filters whose match counts come back on the first page (the saved-view chips). */
   counts?: Record<string, PmFilter>;
+  /** WARP-3537 — the table's ordering. Absent: the server's own (a project's manual order). */
+  sort?: PmSortSpec[];
+  /** WARP-3537 — exact per-group counts for the whole result, returned as `groups` on the first page. */
+  groupBy?: PmGroupByField;
 }
 
 /**
@@ -167,9 +178,12 @@ export interface WorkItemQueryArgs {
  * `refresh` revalidates every loaded page and resolves to the fresh items, which
  * is what the drawer needs to pick up its own item after an edit.
  */
-export function useWorkItemQuery({ enabled, projectId, filter, counts }: WorkItemQueryArgs) {
+export function useWorkItemQuery({ enabled, projectId, filter, counts, sort, groupBy }: WorkItemQueryArgs) {
   const tz = useMemo(browserTimeZone, []);
   const filterKey = serializePmFilter(filter);
+  // By value, so an equal sort in a new array is the same query. The server binds a
+  // page cursor to the sort it was issued under, so the sort is part of the key.
+  const sortKey = sort ? JSON.stringify(sort) : "";
   const countsKey = counts
     ? Object.entries(counts)
         .map(([name, f]) => name + "=" + serializePmFilter(f))
@@ -190,17 +204,20 @@ export function useWorkItemQuery({ enabled, projectId, filter, counts }: WorkIte
     (_index, prev: PmQueryPage | null) => {
       if (!enabled) return null;
       if (prev && prev.nextCursor === null) return null;
-      return ["pm-query", projectId ?? "*", filterKey, tz ?? "", countsKey, prev ? prev.nextCursor : null];
+      return ["pm-query", projectId ?? "*", filterKey, tz ?? "", countsKey, sortKey, groupBy ?? "", prev ? prev.nextCursor : null];
     },
     (key: unknown[]) => {
-      const cursor = key[5] as string | null;
+      const cursor = key[7] as string | null;
       return send<PmQueryPage>("/api/pm/work-items/query", "POST", {
         projectId,
         filter,
         tz,
         limit: QUERY_PAGE_SIZE,
         cursor,
+        ...(sort ? { sort } : {}),
+        // `counts` and `groups` are one answer for the whole result, not one per page.
         ...(cursor === null && counts ? { counts } : {}),
+        ...(cursor === null && groupBy ? { groupBy } : {}),
       });
     },
     { revalidateAll: true, revalidateFirstPage: true, parallel: false, keepPreviousData: sameScope },
@@ -236,6 +253,8 @@ export function useWorkItemQuery({ enabled, projectId, filter, counts }: WorkIte
     items,
     total: first?.total,
     counts: first?.counts,
+    /** WARP-3537 — exact per-group counts for the whole result (only when a group-by was asked for). */
+    groups: first?.groups,
     stale: first?.stale,
     effectiveFilter: first?.filter,
     /** More pages remain and are on their way. */
@@ -384,8 +403,12 @@ export interface SaveViewInput {
   projectId: string | null;
   scope: "PERSONAL" | "SHARED";
   name: string;
-  layout: "BOARD" | "LIST";
+  layout: PmViewLayout;
   filter: PmFilter;
+  /** WARP-3537 — what the table and list persist per view. `null` is "the layout's own default". */
+  groupBy?: PmGroupByField | null;
+  sortBy?: PmSortSpec[] | null;
+  columns?: string[] | null;
 }
 
 /** WARP-3522 — saved-view writes. Errors carry the orchestrator's stable codes
@@ -393,7 +416,17 @@ export interface SaveViewInput {
 export function viewActions() {
   return {
     create: (input: SaveViewInput) => send<{ view: PmSavedViewDto }>("/api/pm/views", "POST", input),
-    update: (id: string, patch: Partial<{ name: string; layout: "BOARD" | "LIST"; filter: PmFilter }>) =>
+    update: (
+      id: string,
+      patch: Partial<{
+        name: string;
+        layout: PmViewLayout;
+        filter: PmFilter;
+        groupBy: PmGroupByField | null;
+        sortBy: PmSortSpec[] | null;
+        columns: string[] | null;
+      }>,
+    ) =>
       send<{ view: PmSavedViewDto }>(`/api/pm/views/${encodeURIComponent(id)}`, "PATCH", patch),
     remove: (id: string) => send<{ deleted: string }>(`/api/pm/views/${encodeURIComponent(id)}`, "DELETE"),
   };

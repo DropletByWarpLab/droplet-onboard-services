@@ -1271,6 +1271,11 @@ BRIDGE_PAIR_OK = {
     # The compact pin-only form (base64url, no padding) — 63 bytes, the only
     # shape that encodes as a version-4 code on the rail card.
     "payload": "droplet://pair?spki=8BevqGrXi-1KveZGkPBbe42742sm6cj0EOU2ph498lw",
+    # WARP-3414: the reading form of the same key, as the bridge now sends it
+    # (device-bridge.py format_key_fingerprint; pinned against the known
+    # certificate in test_device_bridge_pair_qr.py).
+    "fingerprint": ("F017 AFA8 6AD7 8BED 4ABD E646 90F0 5B7B "
+                    "8DBB E36B 26E9 C8F4 10E5 36A6 1E3D F25C"),
 }
 
 
@@ -1342,3 +1347,166 @@ def test_only_a_well_shaped_pairing_link_reaches_the_glass(populated):
                     "droplet://pair?spki=" + "!" * 43, ""):
         populated._mirror_to_v3("pair", {"ok": True, "payload": payload})
         assert populated.pair_qr_payload() == "", payload
+
+
+# --- WARP-3414: the rail's certificate-fingerprint face ----------------------
+# A Droplet app asks an admin to confirm the box's certificate key on a manual
+# connect. The dashboard shows the same value over the connection being
+# checked, so it cannot be the reference; this panel can (a LAN attacker cannot
+# rewrite the glass). Pinned: the app's format, the full 16 groups (never a
+# prefix), the tap path, the self-revert, and that nothing malformed is drawn.
+
+KNOWN_FINGERPRINT = BRIDGE_PAIR_OK["fingerprint"]
+
+
+def test_a_bridge_with_no_fingerprint_offers_no_fingerprint_face(populated):
+    """A frame without the field (an older bridge) leaves the rail exactly as
+    it was: no extra face, no pager."""
+    pair = {k: v for k, v in BRIDGE_PAIR_OK.items() if k != "fingerprint"}
+    populated._mirror_to_v3("pair", pair)
+    assert populated.cert_fingerprint_groups() == []
+    assert lw._rail_content(populated, populated._v3)["faces"] == 1
+    assert _rail_dots(populated) == []
+    lw.render_status(populated)
+    _tap_rail(populated)
+    assert populated.rail_face() == "dashboard"
+
+
+def test_the_bridge_frame_makes_the_fingerprint_a_second_face(with_pair):
+    assert with_pair.cert_fingerprint_groups() == KNOWN_FINGERPRINT.split(" ")
+    assert len(with_pair.cert_fingerprint_groups()) == 16
+    c = lw._rail_content(with_pair, with_pair._v3)
+    assert c["faces"] == 2 and c["face_index"] == 0
+    assert len(_rail_dots(with_pair)) == 2
+
+
+def test_tapping_the_rail_shows_the_full_fingerprint_in_the_apps_format(with_pair):
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "fingerprint"
+    c = lw._rail_content(with_pair, with_pair._v3)
+    assert c["headline"] == "Droplet fingerprint"
+    assert c["fingerprint"] == KNOWN_FINGERPRINT.split(" ")
+    assert c["faces"] == 2 and c["face_index"] == 1
+    # All 16 groups are drawn, four to a line, none shortened.
+    drawn = _texts(with_pair)
+    for i in range(0, 16, 4):
+        line = " ".join(KNOWN_FINGERPRINT.split(" ")[i:i + 4])
+        assert line in drawn, f"{line!r} missing from the glass: {drawn!r}"
+
+
+def test_the_fingerprint_face_stays_inside_the_safe_area(with_pair):
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    g = lw.geom()
+    boxes = _rail_boxes(with_pair)
+    assert boxes
+    for box, text in boxes:
+        assert box[1] >= g.top, f"{text!r} above the safe area: {box}"
+        assert box[3] <= g.bottom, f"{text!r} below the safe area: {box}"
+        assert box[2] <= g.rail_x + g.rail_w, f"{text!r} overflows: {box}"
+
+
+def test_the_fingerprint_face_reverts_by_itself_and_on_a_second_tap(with_pair):
+    """A deadline, like the Wi-Fi face: the rail goes back to the scannable QR
+    with nothing running, and a tap leaves it at once."""
+    lw.render_status(with_pair)
+    before = time.time()
+    _tap_rail(with_pair)
+    assert (with_pair._rail_fp_until - before) == pytest.approx(
+        display_module.RAIL_FINGERPRINT_SECONDS, abs=1.0)
+    with_pair._rail_fp_until = time.time() - 0.001
+    assert with_pair.rail_face() == "dashboard"
+    assert lw._rail_content(with_pair, with_pair._v3)["payload"] == BRIDGE_PAIR_OK["payload"]
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "fingerprint"
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "dashboard"
+    assert with_pair._rail_fp_until == 0.0
+
+
+def test_the_tap_steps_pair_then_wifi_then_fingerprint_then_pair(with_pair):
+    with_pair._pyportal_send("qr", dict(BRIDGE_QR_OK))
+    lw.render_status(with_pair)
+    assert lw._rail_content(with_pair, with_pair._v3)["faces"] == 3
+    seen = []
+    for _ in range(4):
+        seen.append(with_pair.rail_face())
+        lw.render_status(with_pair)
+        _tap_rail(with_pair)
+    seen.append(with_pair.rail_face())
+    assert seen == ["dashboard", "wifi", "fingerprint", "dashboard", "wifi"]
+    # Leaving the Wi-Fi face clears its window whatever comes next.
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair._rail_wifi_until == 0.0
+
+
+def test_the_wifi_face_names_the_face_the_next_tap_opens(with_pair, monkeypatch):
+    """The Wi-Fi face's typed line is the on-glass instruction. With a
+    fingerprint on offer the next tap goes THERE, not to the dashboard; with
+    none (older bridge, or the face switched off) it still goes to the
+    dashboard."""
+    with_pair._pyportal_send("qr", dict(BRIDGE_QR_OK))
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "wifi"
+    c = lw._rail_content(with_pair, with_pair._v3)
+    assert c["fallback"] == "TAP FOR FINGERPRINT"
+    # The line is true: that tap really does land on the fingerprint.
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "fingerprint"
+    # No fingerprint to go to: the old instruction, and it is still true.
+    pair = {k: v for k, v in BRIDGE_PAIR_OK.items() if k != "fingerprint"}
+    with_pair._mirror_to_v3("pair", pair)
+    with_pair._rail_wifi_until = time.time() + 60
+    assert with_pair.rail_face() == "wifi"
+    assert lw._rail_content(with_pair, with_pair._v3)["fallback"] == "TAP FOR DASHBOARD"
+    # Face switched off: same.
+    with_pair._mirror_to_v3("pair", dict(BRIDGE_PAIR_OK))
+    monkeypatch.setattr(display_module, "RAIL_FINGERPRINT", False)
+    assert lw._rail_content(with_pair, with_pair._v3)["fallback"] == "TAP FOR DASHBOARD"
+
+
+def test_the_bridge_taking_the_fingerprint_back_takes_the_face_down(with_pair):
+    """`ok: False` (no LAN address, unreadable certificate) beats a previously
+    good frame — a merge would leave a stale key on the front of the rack."""
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "fingerprint"
+    with_pair._mirror_to_v3("pair", {"ok": False, "error": "served certificate not readable",
+                                     "fingerprint": KNOWN_FINGERPRINT})
+    assert with_pair.cert_fingerprint_groups() == []
+    assert with_pair.rail_face() == "dashboard"
+
+
+@pytest.mark.parametrize("bad", [
+    "",
+    KNOWN_FINGERPRINT.lower(),                       # not uppercase
+    " ".join(KNOWN_FINGERPRINT.split(" ")[:8]),      # a prefix: forgeable
+    KNOWN_FINGERPRINT.replace(" ", ""),              # not grouped
+    KNOWN_FINGERPRINT + " 0000",                     # 17 groups
+    KNOWN_FINGERPRINT.replace("F017", "G017"),       # not hex
+    KNOWN_FINGERPRINT.replace(" ", "  ", 1),         # odd spacing
+])
+def test_only_a_well_shaped_fingerprint_reaches_the_glass(populated, bad):
+    """The panel never composes the value and never trusts an odd one; a short
+    prefix is exactly what an impostor can grind out."""
+    populated._mirror_to_v3("pair", {**BRIDGE_PAIR_OK, "fingerprint": bad})
+    assert populated.cert_fingerprint_groups() == []
+    lw.render_status(populated)
+    _tap_rail(populated)
+    assert populated.rail_face() == "dashboard"
+
+
+def test_the_fingerprint_kill_switch_leaves_the_rail_as_it_was(with_pair, monkeypatch):
+    monkeypatch.setattr(display_module, "RAIL_FINGERPRINT", False)
+    lw.render_status(with_pair)
+    _tap_rail(with_pair)
+    assert with_pair.rail_face() == "dashboard"
+    c = lw._rail_content(with_pair, with_pair._v3)
+    assert c["faces"] == 1 and c["payload"] == BRIDGE_PAIR_OK["payload"]
+    assert _rail_dots(with_pair) == []

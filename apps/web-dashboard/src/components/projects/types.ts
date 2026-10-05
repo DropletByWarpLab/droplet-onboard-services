@@ -141,6 +141,12 @@ export interface PmStaleRef {
   value: string;
 }
 
+/** WARP-3537 — one group of a group-by: its id (a state, a person, a priority …; `null` is "none") and how many items. */
+export interface PmQueryGroup {
+  key: string | null;
+  count: number;
+}
+
 /** WARP-3522 — one page of `POST /api/pm/work-items/query`. */
 export interface PmQueryPage {
   work_items: PmWorkItem[];
@@ -149,6 +155,8 @@ export interface PmQueryPage {
   total: number;
   /** One number per named filter, on the first page only. */
   counts?: Record<string, number>;
+  /** WARP-3537 — exact per-group counts for the whole filter, on the first page, when a group-by was asked for. */
+  groups?: PmQueryGroup[];
   stale?: PmStaleRef[];
   /** Present with `stale`: the filter that was actually applied. */
   filter?: PmFilter;

@@ -207,9 +207,12 @@ if _docker ps --format '{{.Names}}' 2>/dev/null | grep -q 'voice-io-1$'; then
   check_warn "Voice orchestrator /health" \
     _docker exec droplet-voice-io-1 \
       curl -sf -o /dev/null --max-time 5 $ITLS_CONTAINER_ARGS "$ITLS_SCHEME://localhost:8086/health"
+  # WARP-3625: every route but /health needs the service bearer. It is read
+  # from the container's own environment and handed to curl on stdin (-K -), so
+  # the token never appears on a command line (SEC-DATA-12).
   check_warn "Voice orchestrator /audio/devices" \
-    _docker exec droplet-voice-io-1 \
-      curl -sf -o /dev/null --max-time 5 $ITLS_CONTAINER_ARGS "$ITLS_SCHEME://localhost:8086/audio/devices"
+    _docker exec droplet-voice-io-1 sh -c \
+      'printf "header = \"Authorization: Bearer %s\"\n" "$VOICE_IO_SERVICE_TOKEN" | curl -sf -o /dev/null --max-time 5 -K - '"$ITLS_CONTAINER_ARGS"' "'"$ITLS_SCHEME"'://localhost:8086/audio/devices"'
 fi
 
 # --- Status display service (oled-display) ---

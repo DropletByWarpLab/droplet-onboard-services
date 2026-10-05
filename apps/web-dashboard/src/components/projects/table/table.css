@@ -1,0 +1,110 @@
+/* WARP-3537 — the table layout, its in-place editors and the floating menu.
+ *
+ * Existing tokens only: the aliases at the top of app/projects/projects.css
+ * (--bg-canvas, --bg-tint, --bg-hover, --border, --text*, --accent, --warn, --err…)
+ * and `color-mix` over them. No hex literals, no new tokens. The menu's shadow is
+ * the card-hover one, repeated rather than invented (as the filter popover does). */
+
+/* ── the grid ───────────────────────────────────────────────────────────── */
+.pm-scope .pm-table-wrap { overflow: hidden; }
+.pm-scope .pm-table-scroller { overflow: auto; position: relative; max-height: clamp(360px, 72vh, 900px); }
+
+.pm-scope .pm-trow { display: grid; align-items: center; }
+.pm-scope .pm-thead {
+  position: sticky; top: 0; z-index: 3;
+  background: var(--bg-tint); border-bottom: 1px solid var(--border);
+  font-size: 12px; font-weight: 600; color: var(--text-3);
+}
+.pm-scope .pm-tbody { position: relative; }
+.pm-scope .pm-tbody .pm-trow {
+  position: absolute; left: 0; right: 0; background: var(--bg-canvas); border-bottom: 1px solid var(--border);
+}
+
+.pm-scope .pm-tcell {
+  display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0 12px; overflow: hidden;
+  font-size: 13px; color: var(--text);
+}
+.pm-scope .pm-tsel { justify-content: center; padding: 0; }
+.pm-scope .pm-tsel input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.pm-scope .pm-tsel input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* header sort buttons */
+.pm-scope .pm-th-btn {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 100%; min-height: 28px; padding: 0 6px; margin: 0 -6px;
+  border: 1px solid transparent; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; font: inherit;
+}
+.pm-scope .pm-th-btn:hover { background: var(--bg-hover); color: var(--text); }
+.pm-scope .pm-th-btn:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+.pm-scope .pm-th-mark { display: inline-flex; align-items: center; gap: 2px; color: var(--accent); font-size: 10px; }
+
+/* rows */
+.pm-scope .pm-titem { cursor: pointer; transition: background 120ms var(--ease); }
+.pm-scope .pm-titem:hover { background: var(--bg-hover); }
+.pm-scope .pm-titem.selected { background: color-mix(in srgb, var(--accent) 8%, var(--bg-canvas)); }
+.pm-scope .pm-titem.saving { opacity: 0.72; }
+.pm-scope .pm-titem:focus { outline: none; }
+.pm-scope .pm-titem:focus-visible { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent); }
+
+/* group headers */
+.pm-scope .pm-tgroup { display: flex; background: var(--bg-tint); border-bottom: 1px solid var(--border); }
+.pm-scope .pm-tbody .pm-tgroup { background: var(--bg-tint); }
+.pm-scope .pm-tgroupcell { flex: 1; display: flex; align-items: center; padding: 0 12px; min-width: 0; }
+.pm-scope .pm-tgroup-btn {
+  display: inline-flex; align-items: center; gap: 8px; height: 100%; padding: 0 6px; margin: 0 -6px;
+  border: none; background: transparent; cursor: pointer; font: inherit; font-size: 12.5px; font-weight: 600; color: var(--text);
+}
+.pm-scope .pm-tgroup-btn:focus-visible { outline: none; box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent); border-radius: 6px; }
+.pm-scope .pm-tgroup-count { color: var(--text-4); font-weight: 500; font-variant-numeric: tabular-nums; }
+
+/* cells */
+.pm-scope .pm-tkey { font-size: 11.5px; font-weight: 600; color: var(--text-4); }
+.pm-scope .pm-tname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.pm-scope .pm-tmuted { color: var(--text-4); font-size: 12px; }
+.pm-scope .pm-tproject { display: flex; align-items: center; gap: 6px; min-width: 0; }
+
+/* a control inside a cell */
+.pm-scope .pm-cellbtn {
+  display: inline-flex; align-items: center; gap: 4px; min-width: 24px; min-height: 28px; padding: 0 4px; margin: 0 -4px;
+  border: 1px solid transparent; border-radius: 8px; background: transparent; color: inherit; cursor: pointer; font: inherit;
+  transition: background 120ms var(--ease), border-color 120ms var(--ease);
+}
+.pm-scope .pm-cellbtn:hover { background: var(--bg-hover); border-color: var(--border); }
+.pm-scope .pm-cellbtn:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+.pm-scope .pm-cellbtn[aria-expanded="true"] { background: var(--bg-hover); border-color: var(--border-strong); }
+.pm-scope .pm-tedit-btn { flex: none; opacity: 0; padding: 0 5px; color: var(--text-3); }
+.pm-scope .pm-titem:hover .pm-tedit-btn,
+.pm-scope .pm-titem.active .pm-tedit-btn,
+.pm-scope .pm-tedit-btn:focus-visible { opacity: 1; }
+@media (hover: none) { .pm-scope .pm-tedit-btn { opacity: 1; } }
+
+/* the title editor */
+.pm-scope .pm-tedit { display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 2px; }
+.pm-scope .pm-tedit .pm-input { height: 30px; }
+.pm-scope .pm-terr { font-size: 11px; color: var(--err); }
+
+/* ── the floating menu (portal: carries pm-scope itself) ─────────────────── */
+.pm-fmenu {
+  z-index: 60; min-width: 200px; max-width: min(360px, calc(100vw - 16px)); max-height: min(360px, 70vh); overflow: auto;
+  padding: 8px; background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 14px 30px -16px rgba(30, 30, 60, 0.28), 0 0 0 1px rgba(99, 102, 241, 0.18);
+  font-family: inherit; color: var(--text);
+}
+.pm-fmenu .pm-fmenu-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.pm-fmenu .pm-fmenu-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 0 10px; border: none; border-radius: 6px;
+  background: transparent; color: var(--text); cursor: pointer; font: inherit; font-size: 13px; text-align: left;
+}
+.pm-fmenu .pm-fmenu-item:hover { background: var(--bg-hover); }
+.pm-fmenu .pm-fmenu-item:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+.pm-fmenu .pm-fmenu-item .grow { flex: 1; }
+.pm-fmenu .pm-field input[type="date"] { width: 100%; }
+
+@media (max-width: 720px) {
+  /* A menu pinned to a cell is unusable under a thumb: a sheet at the bottom, like the filter popover. */
+  .pm-fmenu { top: auto !important; left: 16px !important; right: 16px; bottom: 16px; max-width: none; max-height: 70vh; }
+  .pm-scope .pm-th-btn, .pm-scope .pm-cellbtn { min-height: 36px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pm-scope .pm-titem, .pm-scope .pm-cellbtn { transition: none; }
+}

@@ -183,7 +183,7 @@ describe("WARP-473 — extractCitedFilePaths", () => {
         mcpWirePayload({
           ok: false,
           status: "error",
-          error: { code: "LIST_FAILED", message: "nextcloud returned 500" },
+          error: { code: "LIST_FAILED", message: "the File Store returned 500" },
         }),
       ),
     ).toEqual([]);
