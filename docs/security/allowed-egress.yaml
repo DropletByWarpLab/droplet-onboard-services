@@ -1908,6 +1908,77 @@ entries:
     code_refs: [services/erp-connector/src/rest/vendors/capsule.ts]
 
   # ── build / setup / ci egress ───────────────────────────────────────────
+  - id: build-qwen-asr-source
+    kind: egress
+    service: qwen-stt
+    destination:
+      hosts: [codeload.github.com]
+      ports: [443]
+      protocol: https
+    phase: build
+    data_class: none
+    purpose: Immutable native CPU ASR source archive, verified by SHA-256 during image assembly; no appliance audio or customer data
+    ticket: WARP-3729
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [services/qwen-stt/Dockerfile]
+
+  - id: build-qwen-asr-model
+    kind: egress
+    service: qwen-stt
+    destination:
+      hosts: [huggingface.co]
+      ports: [443]
+      protocol: https
+    phase: build
+    data_class: none
+    purpose: Immutable Qwen3-ASR weights and tokenizer assets, individually SHA-256 verified and bundled in the image; no runtime download
+    ticket: WARP-3729
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [services/qwen-stt/download_model.py]
+
+  - id: build-kokoro-assets
+    kind: egress
+    service: kokoro-tts
+    destination:
+      hosts: [huggingface.co]
+      ports: [443]
+      protocol: https
+    phase: build
+    data_class: none
+    purpose: Immutable Kokoro ONNX model and English voice assets, individually SHA-256 verified and bundled in the image; no runtime download
+    ticket: WARP-3729
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [services/kokoro-tts/download_assets.py]
+
+  - id: ref-qwen-asr-attribution
+    kind: reference
+    service: qwen-stt
+    destination:
+      hosts: [huggingface.co]
+    phase: runtime
+    data_class: none
+    purpose: Model provenance URL returned as Wyoming attribution metadata; the speech server does not dial it
+    ticket: WARP-3729
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [services/qwen-stt/server.py]
+
+  - id: ref-kokoro-attribution
+    kind: reference
+    service: kokoro-tts
+    destination:
+      hosts: [huggingface.co]
+    phase: runtime
+    data_class: none
+    purpose: Model provenance URL returned as Wyoming attribution metadata; the speech server does not dial it
+    ticket: WARP-3729
+    added: 2026-10-05
+    review_by: 2027-10-05
+    code_refs: [services/kokoro-tts/server.py]
+
   - id: build-container-registries
     kind: egress
     service: repo
