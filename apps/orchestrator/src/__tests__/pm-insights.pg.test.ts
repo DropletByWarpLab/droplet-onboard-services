@@ -676,7 +676,7 @@ describe.skipIf(!RUN)("PM insights (WARP-3524)", () => {
 
   describe("summary: unassigned (ADR-044 follow-up)", () => {
     it("counts open work nobody owns, alongside the existing counts", async () => {
-      const s = await getSummary(prisma, slug, NOW);
+      const s = await getSummary(prisma, slug, "2026-10-04", NOW);
       expect(s).toEqual({
         activeProjects: 2, // the archived project is out
         itemsOpen: 6, // project 1: 5, 6, 7, 10, 11 (11 has no state); project 2: item 2
@@ -687,7 +687,7 @@ describe.skipIf(!RUN)("PM insights (WARP-3524)", () => {
     });
 
     it("is zero everywhere for a workspace with nothing in it", async () => {
-      expect(await getSummary(prisma, "ws8-does-not-exist", NOW)).toEqual({
+      expect(await getSummary(prisma, "ws8-does-not-exist", "2026-10-04", NOW)).toEqual({
         activeProjects: 0,
         itemsOpen: 0,
         doneThisWeek: 0,

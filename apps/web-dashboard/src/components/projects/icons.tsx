@@ -3,6 +3,8 @@
 // at the dashboard's standard stroke.
 
 import {
+  Archive,
+  ArchiveRestore,
   Plus,
   RefreshCw,
   MessageSquare,
@@ -49,6 +51,8 @@ import {
 import type { JSX } from "react";
 
 export const ICONS: Record<string, LucideIcon> = {
+  archive: Archive,
+  restore: ArchiveRestore,
   plus: Plus,
   refresh: RefreshCw,
   msg: MessageSquare,

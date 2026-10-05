@@ -462,7 +462,7 @@ export function AddCameraModal({
     setProblem(null);
     setShowPassword(false); // WARP-3135: every attempt re-masks
     try {
-      await addCameraManual(
+      const result = await addCameraManual(
         name,
         rtspUrl,
         manufacturer || undefined,
@@ -470,18 +470,21 @@ export function AddCameraModal({
         username.trim() || undefined,
         password || undefined,
       );
+      onAdded();
+      if (!isCurrent(token)) return;
+      setInflightKey(null);
+      if (result?.status === "added_no_stream") {
+        failureFocus.current = "problem";
+        setProblem({ key, message: result.reason ?? "The camera was added, but no video is coming from it yet." });
+        return;
+      }
+      onClose();
     } catch (err) {
       if (!isCurrent(token)) return;
       const code = codeOf(err);
       failureFocus.current = code && PASSWORD_FAULT_CODES.has(code) ? "password" : "problem";
       setInflightKey(null);
       setProblem({ key, message: translateError(err, "camera"), code });
-      return;
-    }
-    onAdded();
-    if (isCurrent(token)) {
-      setInflightKey(null);
-      onClose();
     }
   }
 

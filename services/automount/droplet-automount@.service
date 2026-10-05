@@ -7,7 +7,12 @@ Description=Droplet USB auto-mount for %I
 # and closes their LUKS mappers — and udev add events don't re-fire, so the drives
 # stay gone until replug/reboot. After= still orders us after Docker; Wants= won't cascade.
 Wants=docker.service
-After=docker.service local-fs.target
+# WARP-3513: After=cryptsetup.target so every /etc/crypttab unlock attempt —
+# the encrypted bay drives' `droplet-bay-<luks8>` entries, including their
+# x-systemd.device-timeout=30s waits — has finished before this unit looks for
+# a mapper. Ordering ONLY: no Requires=/Wants= on it — a bay that cannot unlock
+# is logged by the script and must never block or fail this unit (or boot).
+After=docker.service local-fs.target cryptsetup.target
 # We depend on udisks staying out of our way — but don't hard-require it
 # off, since many user-space apps want it running for other purposes.
 

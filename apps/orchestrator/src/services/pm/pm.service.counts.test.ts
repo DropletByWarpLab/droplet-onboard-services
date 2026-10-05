@@ -30,7 +30,7 @@ describe("getSummary count correctness", () => {
       },
     } as never;
 
-    const summary = await getSummary(prisma, "home", now);
+    const summary = await getSummary(prisma, "home", "2026-10-04", now);
 
     expect(summary).toEqual({ activeProjects: 2, itemsOpen: 11, overdue: 2, doneThisWeek: 5, unassigned: 3 });
     expect(wheres).toHaveLength(4);
@@ -41,7 +41,7 @@ describe("getSummary count correctness", () => {
     // Open = a started-ish group OR no state at all (finding 5: stateless counts as open).
     const open = { OR: [{ stateId: null }, { state: { group: { in: ["backlog", "unstarted", "started"] } } }] };
     expect(itemsOpen).toMatchObject(open);
-    expect(overdue).toMatchObject({ ...open, dueDate: { lt: now } });
+    expect(overdue).toMatchObject({ ...open, dueDate: { lt: new Date("2026-10-04T00:00:00.000Z") } });
     expect(unassigned).toMatchObject({ ...open, assignees: { none: {} } });
     // Done = isCompleted, whatever the group: cancelled counts (finding 6). No open filter here.
     expect(doneThisWeek).toMatchObject({ isCompleted: true, completedAt: { gte: weekAgo } });
@@ -56,7 +56,7 @@ describe("getSummary count correctness", () => {
       pmProject: { findMany: async () => [] },
       pmWorkItem: { count },
     } as never;
-    expect(await getSummary(prisma, "home", now)).toEqual({
+    expect(await getSummary(prisma, "home", "2026-10-04", now)).toEqual({
       activeProjects: 0,
       itemsOpen: 0,
       doneThisWeek: 0,
