@@ -58,6 +58,8 @@ source of truth).
 | `.env` (carries `DEVICE_SECRET_KEY`) | `/data/droplet/env/.env` (symlinked) |
 | `data/secrets` (audit signing key, doc-KEK keyfile) | `/data/droplet/secrets` (symlinked) |
 | Hot-plugged USB drives | per-drive LUKS2 under `/mnt/droplet/<usb>` |
+| Bay drives + storage pools (every drive prepared through the dashboard) | per-drive LUKS2 (over md for pools) under `/mnt/droplet/<label>-<fs-uuid8>`; Nextcloud sees only `files/` (WARP-3513) |
+| LUKS recovery keys of bay drives (until the owner retrieves them, at most 7 days) | root-only escrow in `/data/droplet/secrets/bay-recovery/` — encrypted `/data` only; never the unencrypted OS disk, DB, `.env`, or logs |
 | Backups | restic repo, per-customer key = HKDF(`DEVICE_SECRET_KEY`) (WARP-254). **Default location is a local path on the same box** (`DROPLET_BACKUP_TARGET`, default `/var/lib/droplet/restic-repo`), so it is a restore point, not off-box protection; off-device targets are planned. Retention is 7 daily, 4 weekly and 6 monthly snapshots. |
 
 Any table not listed above that holds customer content (mail, chats, notes,
@@ -237,6 +239,176 @@ output to a `0600` file under `/run/droplet`, never to a service's stdout. If
 the journal is persistent (`/var/log/journal` exists), also vacuum it as above;
 the plain filesystem can still hold deleted journal blocks, so wiping the slot
 is the control that matters.
+
+## Bay drives — always encrypted (WARP-3513)
+
+Owner decision (storage contract, ADR-070): **every data/bay drive is encrypted
+at rest, always.** Every drive the owner prepares from the dashboard ("Erase &
+adopt", reclaiming a pool member) and every storage pool the box formats goes
+through `scripts/host/droplet-storage-pool.sh` (root, via
+`droplet-storage-pool-apply.service`, ADR-019 D6.1) and comes out like this —
+there is no plain option:
+
+```
+whole disk (no partition table)   or   md array (a pool)
+└─ LUKS2/Argon2id container            tokens: systemd-tpm2 + systemd-recovery
+   └─ /dev/mapper/droplet-bay-<luks-uuid8>
+      └─ ext4 -O quota,project         mounted rw,nosuid,nodev,noatime,prjquota
+         │                             at /mnt/droplet/<label>-<fs-uuid8>
+         ├─ files/                     the ONLY folder registered in Nextcloud (project id 4097)
+         └─ nvr/                       camera-recordings slice (WARP-3514, project id 4096) — never exposed
+```
+
+It is the same scheme as `/data`: the tool seams, the cipher/PBKDF policy
+(`--type luks2 --pbkdf argon2id`) and the PCR set (`0+2+4+7`) come from
+`droplet-tpm-lib.sh` / `droplet-luks-provision.sh`, so the two cannot drift.
+`-O quota,project` + `prjquota` exist because the recordings slice is an ext4
+**project quota**, never a repartition: `files/` is created with project id
+**4097** (`chattr +P -p 4097`, inherited by everything created inside) so WARP-3514
+can give it — and `nvr/`, id 4096 — their own byte limits. Every place that mounts
+a bay (Prepare, the hot-plug `droplet-automount.sh`, the boot reconcile, the
+crypttab path at reboot) mounts it `prjquota`; the automount path checks the
+filesystem's `project` feature first and retries once without `prjquota` (with a
+warning) rather than leave a drive unmounted.
+
+**Prepare requires a TPM2 — there is no override.** An encrypted drive that is not
+TPM-sealed would not unlock itself at boot, and the owner decided Prepare needs
+one. Two machine-readable refusals happen **before anything is erased or changed**
+(`409`, with a fixed owner-facing sentence — the script's own words are never
+relayed):
+
+| `code` | When | Host exit code |
+|---|---|---|
+| `tpm_required` | no TPM2 device, or the tss2 userspace `systemd-cryptenroll` needs is unusable (the WARP-2101 class) | 75 |
+| `encrypted_data_required` | `/data` is not on an encrypted volume, so a recovery key could not be held safely | 76 |
+
+(The bridge turns the script's **exit code**, never a substring of its message,
+into the `code`.)
+
+**Prepare order** (and why):
+
+1. Refuse **before erasing anything** (above).
+2. Managed teardown: unmount, close any old `droplet-bay-*` mapper, drop that
+   container's stale crypttab line and recovery escrow, deregister the replaced
+   drive from Nextcloud, wipe. Closing every mapper happens before the first wipe,
+   so a refusal part-way through a pool cannot half-erase it.
+3. `luksFormat` with a temporary key that lives only on tmpfs (`/run/droplet`),
+   then the **recovery keyslot first**, then the TPM2 keyslot, then the temporary
+   keyslot is removed and its file shredded. If any later prepare step fails,
+   cleanup closes the mapper, crypto-erases the new LUKS keyslots, and removes
+   the LUKS signature; it does not leave a partial container with an inaccessible
+   recovery key.
+4. `mkfs.ext4 -I 256 -O quota,project` **inside** the container; the recovery key
+   is escrowed (below); the crypttab line is written; the filesystem is mounted
+   `prjquota` at the same `<label>-<fs-uuid8>` tail `droplet-automount.sh`
+   derives on reboot; `files/` is created (uid 33 = Nextcloud, `0770`, project id
+   4097 — a failure to set it is fatal, the drive is reported *not prepared*);
+   trusted.list is seeded; Nextcloud is registered at `<mount>/files` **only**.
+
+A failure at any step undoes what was done (mapper closed, crypttab line and
+escrow removed, key file shredded) — no half-built bay is left behind. The helper
+prints exactly one JSON line on stdout (all tool noise goes to stderr), because
+the bridge parses it.
+
+**Boot and hot-plug.** The crypttab line is the same shape as `/data`'s:
+
+```
+droplet-bay-<luks8> UUID=<luks-uuid> none tpm2-device=auto,luks,discard,nofail,headless=true,x-systemd.device-timeout=30s
+```
+
+`systemd-cryptsetup` unlocks bays at boot (before docker). `nofail` +
+`headless=true` + the 30 s device timeout mean a PCR mismatch or a missing bay
+is simply *absent*: it never blocks boot and never queues an ask-password
+prompt on a box with no console operator. `droplet-automount.sh` recognises a
+LUKS container with a `droplet-bay-*` crypttab line as a bay: it reuses the
+already-unlocked mapper (or does one bounded, non-interactive TPM attach for a
+hot-plugged / late bay), mounts it `prjquota`, and never `chown -R`s it. The boot
+reconcile retries bays that unlocked late.
+
+**Recovery-key custody.** `/data`'s recovery key is printed once on the
+provisioning console and never written to disk. A bay is prepared from the
+dashboard, where nobody is at a console, so the key waits in a **root-only
+escrow** until the owner retrieves it — the only deliberate deviation from
+`/data`:
+
+- generated by `systemd-cryptenroll --recovery-key` (token `systemd-recovery`);
+  held in a shell variable, then written `0600` into a `0700` directory:
+  `/data/droplet/secrets/bay-recovery/` — **on the LUKS-encrypted `/data` only**,
+  so a stolen OS disk reveals no pending key. Prepare refuses
+  (`encrypted_data_required`) on a box where `/data` is not encrypted; the key is
+  never held on the unencrypted root filesystem. File `<luks-uuid>__<fs-uuid>.key`;
+- never on a command line, in a log, in the result of any other operation, in the
+  database, in `.env` or in a tracked file; the root executor captures its
+  output on tmpfs (`/run`), not the unencrypted `/tmp`;
+- retrieved **once**, by the **owner only** (not an admin), through the existing
+  destructive-op handshake — a tier-2 confirmation, so a stray, replayed or
+  prefetched request can never spend the one retrieval. There is no GET:
+
+  ```
+  POST /api/storage/drives/<fs-uuid>/recovery-key/reveal
+         -> 202 {status:"confirmation_required", tier:2, confirmationToken, expiresIn:60}
+  POST /api/storage/command/confirm {confirmationToken}
+         -> 200 {recoveryKey}              first time only, Cache-Control: no-store
+         -> 410 recovery_key_already_retrieved
+         -> 410 recovery_key_expired       left unrevealed for 7 days (regenerate)
+         -> 404 recovery_key_not_found     no escrowed key for that drive
+  ```
+
+  Retrieval atomically claims a `.retrieved` tombstone (no secret) before
+  shredding the escrowed key, so two racing requests yield the key to exactly
+  one. The marker makes every later request `410 Gone`, including after a crash
+  between the claim and key removal. The confirm token is single-use, bound to
+  the operation, the drive and the user, and valid for 60 seconds. A response
+  that is lost in transit has still spent the retrieval — **regenerate** is the
+  way back;
+- an unretrieved key lives **7 days**: after that it is shredded (a
+  `.expired` tombstone remains) by the next reveal request or by
+  `droplet-bay-recovery-expiry.timer` (daily, root,
+  `droplet-storage-pool.sh recovery_key_expire`; the unit skips cleanly while no
+  drive has been prepared). **After the owner has retrieved it — or it has
+  expired — the box keeps no copy.** It is also dropped when the drive is
+  prepared again, its pool is destroyed, or the box is factory-reset;
+- **Regenerate recovery key** — `POST …/recovery-key/regenerate` (owner only,
+  tier 3, the same confirm handshake). For an owner who missed, lost or let the
+  7-day window pass: the host enrols a **new** recovery keyslot, escrows the new
+  key and wipes the old keyslot, so the key the owner holds stops working. The
+  reply carries **no** key (`{recoveryKeyPending: true}`); the owner fetches the
+  new one through the one-time reveal. Refusals: `404` unknown drive, `409
+  drive_not_present` (not plugged in), `409 tpm_required` /
+  `encrypted_data_required`, `422` with the host's actionable message (for
+  example "… run Regenerate again to retry" when the old keyslot could not be
+  wiped). The unlock for this operation is the TPM, so it works only while the
+  drive unlocks normally;
+- the AI can reach none of these: the operations are not in tools-core, and the
+  safety service hard-blocks every storage operation from the AI source.
+
+**PCR-mismatch recovery for a bay** (same story as `/data`, per drive):
+
+```
+sudo cryptsetup open /dev/sdX droplet-bay-<luks8>        # paste the recovery key
+sudo systemctl restart droplet-automount-reconcile.service   # mounts + registers it
+sudo systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=auto \
+  --tpm2-pcrs=0+2+4+7 /dev/sdX                           # re-seal to the current PCRs
+```
+
+**Drives adopted before WARP-3513** are plain ext4. They are reported
+`encryption: "none"` / `preparation: "needs_preparing"`, are never eligible for
+the recordings slice and are **never wiped automatically** — the owner prepares
+them (erase + encrypt) deliberately. A still-plain drive **keeps its drive-root
+Nextcloud registration until it is prepared**; there is no migration and nothing
+is re-pointed. Preparing wipes the drive, deregisters the old registration and
+registers `files/` only.
+
+**Factory reset** closes every bay mapper, crypto-erases each LUKS container
+(`luksErase` — `wipefs` alone only removes the magic bytes and leaves the
+keyslots), removes the `droplet-bay-*` crypttab lines and the escrow, and removes
+the expiry timer.
+
+**Dependencies.** The `quota` package (`setquota`/`repquota`, used by WARP-3514)
+is provisioned best-effort by `scripts/install-device-bridge.sh`, which also
+installs `droplet-tpm-lib.sh` next to the pool script and enables the expiry
+timer.
+
 
 ## USB enrollment flow (AC: "USB enrollment flow documented")
 

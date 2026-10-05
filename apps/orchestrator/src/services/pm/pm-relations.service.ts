@@ -299,6 +299,7 @@ async function writeRelationActivity(
       newValue: added ? `${input.kind}:${end.otherId}` : null,
     })),
   });
+  // WARP-3532 (ADR-069 §7) — wake the outbox consumers; see writeActivity.
   nudgeOutbox();
 }
 

@@ -146,9 +146,19 @@ export interface CronScheduleOpts {
   immediate?: boolean;
 }
 
-/** A scheduled interval's guarded entry point for an early run. */
+/**
+ * WARP-3532 — what `scheduleInterval` hands back. A registration can be run
+ * EARLY, through the exact path a tick takes: the advisory lock, the overlap
+ * guard and `safeRun`'s failure accounting. The PmActivity outbox uses it to
+ * wake a consumer right after a write instead of making the write wait out the
+ * interval, and gets no second lock or overlap implementation for it.
+ */
 export interface CronJobHandle {
-  /** Runs through the same lock, overlap and failure-accounting path as a tick. */
+  /**
+   * Run the handler now, as a tick would. If a run of this registration is
+   * already in flight the call is a no-op — skipped, never queued, like a tick
+   * that arrives mid-run. Never throws or rejects.
+   */
   runNow(): void;
 }
 

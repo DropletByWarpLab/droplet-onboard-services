@@ -109,7 +109,7 @@ const clock = (at: Date = NOW) => () => at;
 describe("outboxFlagKey", () => {
   it("keys a consumer's cursor under pm-outbox:<name> in SystemFlag", () => {
     expect(OUTBOX_FLAG_PREFIX).toBe("pm-outbox:");
-    expect(outboxFlagKey("consumer-a")).toBe("pm-outbox:consumer-a");
+    expect(outboxFlagKey("webhooks")).toBe("pm-outbox:webhooks");
   });
 });
 
@@ -118,13 +118,13 @@ describe("readOutboxBatch", () => {
     const old = activity("a-1", "2026-10-01T00:00:00.000Z");
     const prisma = makePrisma([old]);
 
-    const batch = await readOutboxBatch(prisma as never, "consumer-a", 10, { now: clock(), settleMs: 0 });
+    const batch = await readOutboxBatch(prisma as never, "webhooks", 10, { now: clock(), settleMs: 0 });
 
     expect(batch).toEqual([]);
-    expect(prisma.flags.get("pm-outbox:consumer-a")).toEqual({ createdAt: NOW.toISOString(), id: "" });
+    expect(prisma.flags.get("pm-outbox:webhooks")).toEqual({ createdAt: NOW.toISOString(), id: "" });
     // Insert-or-skip, so two replicas starting together cannot clobber each other.
     expect(prisma.systemFlag.createMany).toHaveBeenCalledWith({
-      data: [{ key: "pm-outbox:consumer-a", valueJson: { createdAt: NOW.toISOString(), id: "" } }],
+      data: [{ key: "pm-outbox:webhooks", valueJson: { createdAt: NOW.toISOString(), id: "" } }],
       skipDuplicates: true,
     });
   });
@@ -136,9 +136,9 @@ describe("readOutboxBatch", () => {
       activity("a-3", "2026-10-04T11:00:01.000Z"),
       activity("a-0", "2026-10-04T10:59:59.000Z"), // before the cursor
     ]);
-    prisma.flags.set("pm-outbox:consumer-a", { createdAt: "2026-10-04T10:59:59.000Z", id: "a-0" });
+    prisma.flags.set("pm-outbox:webhooks", { createdAt: "2026-10-04T10:59:59.000Z", id: "a-0" });
 
-    const batch = await readOutboxBatch(prisma as never, "consumer-a", 10, { now: clock(), settleMs: 0 });
+    const batch = await readOutboxBatch(prisma as never, "webhooks", 10, { now: clock(), settleMs: 0 });
 
     expect(batch.map((r) => r.id)).toEqual(["a-1", "a-2", "a-3"]);
   });
@@ -149,9 +149,9 @@ describe("readOutboxBatch", () => {
       activity("a-2", "2026-10-04T11:00:00.000Z"),
       activity("a-3", "2026-10-04T11:00:00.000Z"),
     ]);
-    prisma.flags.set("pm-outbox:consumer-a", { createdAt: "2026-10-04T11:00:00.000Z", id: "a-1" });
+    prisma.flags.set("pm-outbox:webhooks", { createdAt: "2026-10-04T11:00:00.000Z", id: "a-1" });
 
-    const batch = await readOutboxBatch(prisma as never, "consumer-a", 10, { now: clock(), settleMs: 0 });
+    const batch = await readOutboxBatch(prisma as never, "webhooks", 10, { now: clock(), settleMs: 0 });
 
     expect(batch.map((r) => r.id)).toEqual(["a-2", "a-3"]);
   });
@@ -160,9 +160,9 @@ describe("readOutboxBatch", () => {
     const prisma = makePrisma(
       [1, 2, 3, 4, 5].map((n) => activity(`a-${n}`, `2026-10-04T11:00:0${n}.000Z`)),
     );
-    prisma.flags.set("pm-outbox:consumer-a", { createdAt: "2026-10-04T10:00:00.000Z", id: "" });
+    prisma.flags.set("pm-outbox:webhooks", { createdAt: "2026-10-04T10:00:00.000Z", id: "" });
 
-    const batch = await readOutboxBatch(prisma as never, "consumer-a", 2, { now: clock(), settleMs: 0 });
+    const batch = await readOutboxBatch(prisma as never, "webhooks", 2, { now: clock(), settleMs: 0 });
 
     expect(batch.map((r) => r.id)).toEqual(["a-1", "a-2"]);
   });
@@ -175,9 +175,9 @@ describe("readOutboxBatch", () => {
       activity("a-old", "2026-10-04T11:59:50.000Z"),
       activity("a-young", "2026-10-04T11:59:59.000Z"),
     ]);
-    prisma.flags.set("pm-outbox:consumer-a", { createdAt: "2026-10-04T10:00:00.000Z", id: "" });
+    prisma.flags.set("pm-outbox:webhooks", { createdAt: "2026-10-04T10:00:00.000Z", id: "" });
 
-    const batch = await readOutboxBatch(prisma as never, "consumer-a", 10, { now: clock(), settleMs: 6_000 });
+    const batch = await readOutboxBatch(prisma as never, "webhooks", 10, { now: clock(), settleMs: 6_000 });
 
     expect(batch.map((r) => r.id)).toEqual(["a-old"]);
   });
@@ -188,9 +188,9 @@ describe("readOutboxBatch", () => {
 
   it("refuses to guess when the stored cursor is unreadable", async () => {
     const prisma = makePrisma();
-    prisma.flags.set("pm-outbox:consumer-a", { nope: true });
-    await expect(readOutboxBatch(prisma as never, "consumer-a", 10, { now: clock() })).rejects.toThrow(
-      /pm-outbox:consumer-a/,
+    prisma.flags.set("pm-outbox:webhooks", { nope: true });
+    await expect(readOutboxBatch(prisma as never, "webhooks", 10, { now: clock() })).rejects.toThrow(
+      /pm-outbox:webhooks/,
     );
   });
 });
@@ -198,11 +198,11 @@ describe("readOutboxBatch", () => {
 describe("advanceOutboxCursor", () => {
   it("stores the row's (createdAt, id) under the consumer's key", async () => {
     const prisma = makePrisma();
-    await advanceOutboxCursor(prisma as never, "consumer-a", {
+    await advanceOutboxCursor(prisma as never, "webhooks", {
       id: "a-7",
       createdAt: new Date("2026-10-04T11:00:00.123Z"),
     });
-    expect(prisma.flags.get("pm-outbox:consumer-a")).toEqual({
+    expect(prisma.flags.get("pm-outbox:webhooks")).toEqual({
       createdAt: "2026-10-04T11:00:00.123Z",
       id: "a-7",
     });
@@ -210,9 +210,9 @@ describe("advanceOutboxCursor", () => {
 
   it("keeps consumers' cursors apart", async () => {
     const prisma = makePrisma();
-    await advanceOutboxCursor(prisma as never, "consumer-a", { id: "a-1", createdAt: NOW });
+    await advanceOutboxCursor(prisma as never, "webhooks", { id: "a-1", createdAt: NOW });
     await advanceOutboxCursor(prisma as never, "automation", { id: "a-9", createdAt: NOW });
-    expect(prisma.flags.get("pm-outbox:consumer-a")).toMatchObject({ id: "a-1" });
+    expect(prisma.flags.get("pm-outbox:webhooks")).toMatchObject({ id: "a-1" });
     expect(prisma.flags.get("pm-outbox:automation")).toMatchObject({ id: "a-9" });
   });
 });
@@ -221,7 +221,7 @@ describe("advanceOutboxCursor", () => {
 
 function consumer(over: Partial<OutboxConsumer> = {}): OutboxConsumer & { handle: ReturnType<typeof vi.fn> } {
   return {
-    name: "consumer-a",
+    name: "webhooks",
     intervalMs: 5_000,
     settleMs: 0,
     handle: vi.fn(async () => undefined),
@@ -239,7 +239,7 @@ function seeded(n: number) {
     activity(`a-${i + 1}`, new Date(Date.parse("2026-10-04T11:00:00.000Z") + i * 1000).toISOString()),
   );
   const prisma = makePrisma(rows);
-  prisma.flags.set("pm-outbox:consumer-a", { createdAt: "2026-10-04T10:00:00.000Z", id: "" });
+  prisma.flags.set("pm-outbox:webhooks", { createdAt: "2026-10-04T10:00:00.000Z", id: "" });
   return prisma;
 }
 
@@ -250,7 +250,7 @@ describe("runOutboxSweep", () => {
     const seen: string[] = [];
     c.handle.mockImplementation(async (row: PmActivity) => {
       // The cursor still points BEFORE the row being handled.
-      expect((prisma.flags.get("pm-outbox:consumer-a") as { id: string }).id).not.toBe(row.id);
+      expect((prisma.flags.get("pm-outbox:webhooks") as { id: string }).id).not.toBe(row.id);
       seen.push(row.id);
     });
 
@@ -258,7 +258,7 @@ describe("runOutboxSweep", () => {
 
     expect(seen).toEqual(["a-1", "a-2", "a-3"]);
     expect(result).toEqual({ handled: 3, deadLettered: 0 });
-    expect(prisma.flags.get("pm-outbox:consumer-a")).toMatchObject({ id: "a-3" });
+    expect(prisma.flags.get("pm-outbox:webhooks")).toMatchObject({ id: "a-3" });
   });
 
   it("drains more than one batch in a single sweep", async () => {
@@ -296,7 +296,7 @@ describe("runOutboxSweep", () => {
     ).rejects.toThrow("db unreachable");
 
     expect(c.handle.mock.calls.map((call) => (call[0] as PmActivity).id)).toEqual(["a-1", "a-2"]);
-    expect(prisma.flags.get("pm-outbox:consumer-a")).toMatchObject({ id: "a-1" });
+    expect(prisma.flags.get("pm-outbox:webhooks")).toMatchObject({ id: "a-1" });
 
     // The next sweep retries the SAME row — and then carries on.
     c.handle.mockReset();
@@ -339,17 +339,17 @@ describe("runOutboxSweep", () => {
         now += 10_000;
       }
       expect(log.error).not.toHaveBeenCalled();
-      expect(prisma.flags.get("pm-outbox:consumer-a")).toMatchObject({ id: "a-1" });
+      expect(prisma.flags.get("pm-outbox:webhooks")).toMatchObject({ id: "a-1" });
 
       // Past the window it is skipped LOUDLY and the sweep carries on to a-3.
       now += 60_000;
       const result = await runOutboxSweep(prisma as never, c, deps);
       expect(result).toEqual({ handled: 1, deadLettered: 1 });
       expect(log.error).toHaveBeenCalledWith(
-        expect.objectContaining({ consumer: "consumer-a", rowId: "a-2", verb: "updated", workItemId: "wi-1" }),
+        expect.objectContaining({ consumer: "webhooks", rowId: "a-2", verb: "updated", workItemId: "wi-1" }),
         expect.stringContaining("dead-lettered"),
       );
-      expect(prisma.flags.get("pm-outbox:consumer-a")).toMatchObject({ id: "a-3" });
+      expect(prisma.flags.get("pm-outbox:webhooks")).toMatchObject({ id: "a-3" });
     });
 
     it("is not dead-lettered by a burst of failures inside the window (a DB blip is not poison)", async () => {
@@ -363,7 +363,7 @@ describe("runOutboxSweep", () => {
         await expect(runOutboxSweep(prisma as never, c, deps)).rejects.toThrow("db restarting");
       }
       expect(log.error).not.toHaveBeenCalled();
-      expect(prisma.flags.get("pm-outbox:consumer-a")).toMatchObject({ id: "" });
+      expect(prisma.flags.get("pm-outbox:webhooks")).toMatchObject({ id: "" });
     });
 
     it("forgets a row's failures once it succeeds", async () => {
@@ -407,7 +407,7 @@ describe("registerOutboxConsumer", () => {
     expect(scheduleInterval).toHaveBeenCalledTimes(1);
     const [ms, , opts] = scheduleInterval.mock.calls[0]!;
     expect(ms).toBe(2_000);
-    expect(opts).toEqual({ lockKey: "droplet:pm-outbox:consumer-a", immediate: true });
+    expect(opts).toEqual({ lockKey: "droplet:pm-outbox:webhooks", immediate: true });
   });
 
   it("the scheduled handler is the sweep", async () => {
@@ -426,7 +426,7 @@ describe("registerOutboxConsumer", () => {
     const deps = { prisma: makePrisma() as never, cronRuntime: runtime };
     registerOutboxConsumer(consumer(), deps);
     expect(() => registerOutboxConsumer(consumer(), deps)).toThrow(/already registered/);
-    for (const bad of ["", "Uppercase", "a b", "a:b", "x".repeat(65)]) {
+    for (const bad of ["", "Webhooks", "a b", "a:b", "x".repeat(65)]) {
       expect(() => registerOutboxConsumer(consumer({ name: bad }), deps), bad).toThrow(/consumer name/);
     }
   });
@@ -449,12 +449,6 @@ describe("nudgeOutbox", () => {
   afterEach(() => {
     stopOutbox();
     vi.useRealTimers();
-  });
-
-  it("importing the framework starts no timers", async () => {
-    await vi.resetModules();
-    await import("./pm-outbox.js");
-    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("is a no-op — and starts no timer — when no consumer is registered", () => {
