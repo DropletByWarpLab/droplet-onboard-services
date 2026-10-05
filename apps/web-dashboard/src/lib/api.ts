@@ -7884,6 +7884,10 @@ export interface AppCapabilities {
   crm: boolean;
   /** WARP-2038 — the /contacts surface. Ships false until that page exists. */
   contacts: boolean;
+  /** WARP-3528 (ADR-069) — the /support surface (the service desk). Read on its
+   *  own: there is no `requires` edge to `projects`, so a front desk can run
+   *  Support with Projects off. */
+  support: boolean;
 }
 
 /**

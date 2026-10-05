@@ -110,6 +110,7 @@ import {
   withholdStoredContentTools,
 } from "../services/stored-content-egress.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
+import { createToolVision, userToolVisionPorts } from "../services/tool-vision.service.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import {
   buildBaseSystemPrompt,
@@ -2465,6 +2466,38 @@ export function createLlmRouter(prisma: PrismaClient): Router {
         agentMessages = [baseSystemMessage, ...agentMessages];
       }
 
+      // WARP-3692 — let the model SEE the images its tools return (a camera
+      // snapshot, a photo opened with show_file). Only for a signed-in person:
+      // every byte is fetched as THAT person through the routes' own ACL
+      // functions, and a service principal (voice, MCP) has no ACL of its own
+      // to borrow, so it gets none. `offLan` is the SAME verdict that withholds
+      // attached images and the Drive tools (WARP-1983) — a cloud turn is told
+      // the image exists and is never sent it. The vision check reads
+      // `agentModel` when first needed, so the attachment auto-route above is
+      // honoured.
+      const toolVisionUser = (req as AuthedRequest).user;
+      const toolVision =
+        toolVisionUser?.id &&
+        toolVisionUser.username &&
+        toolVisionUser.role &&
+        toolVisionUser.role !== "service" &&
+        !toolVisionUser.id.startsWith("_service:")
+          ? createToolVision({
+              offLan: isOffLanTurn,
+              isVisionModel: async () =>
+                Boolean((await aiGateway.getModelCapabilities(agentModel))?.vision),
+              ports: userToolVisionPorts({
+                prisma,
+                user: {
+                  id: toolVisionUser.id,
+                  role: toolVisionUser.role,
+                  username: toolVisionUser.username,
+                },
+                ncToken,
+              }),
+            })
+          : undefined;
+
       // ── Streaming path ──
       if (chatReq.stream) {
         res.writeHead(200, {
@@ -2632,6 +2665,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
             moduleVerdict,
             tool_choice: chatReq.tool_choice,
             toolCallContext: turnToolCallContext,
+            toolVision,
             captureReasoning: chatReq.captureReasoning,
             citationContext,
             // WARP-329 — cancel inference + halt the loop on disconnect.
@@ -2737,6 +2771,7 @@ export function createLlmRouter(prisma: PrismaClient): Router {
           moduleVerdict,
           tool_choice: chatReq.tool_choice,
           toolCallContext: turnToolCallContext,
+          toolVision,
           captureReasoning: chatReq.captureReasoning,
           citationContext,
         });
