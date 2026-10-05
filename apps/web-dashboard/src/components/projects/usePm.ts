@@ -451,8 +451,8 @@ function usePages<T extends { id: string }>(url: string | null, field: string) {
   };
 }
 
-export function useProjectItems(projectId: string | null) {
-  const url = projectId ? `/api/pm/projects/${projectId}/work-items` : null;
+export function useProjectItems(projectId: string | null, opts: { archived?: boolean } = {}) {
+  const url = projectId ? `/api/pm/projects/${projectId}/work-items${opts.archived ? "?archived=only" : ""}` : null;
   const { rows, mutate, ...rest } = usePages<PmWorkItem>(url, "work_items");
   return {
     ...rest,
@@ -493,6 +493,28 @@ export function useActivity(workItemId: string | null) {
     "activity",
   );
   return { activity: rows, mutate };
+}
+
+export interface PmDevelopmentLink {
+  id: string;
+  provider: "GITHUB" | "GITLAB";
+  kind: "PULL_REQUEST" | "COMMIT" | "BRANCH";
+  url: string;
+  title: string;
+  state: "OPEN" | "MERGED" | "CLOSED" | "DRAFT";
+  author: string | null;
+  ref: string | null;
+  number: number | null;
+  externalUpdatedAt: string;
+  repository: { fullName: string };
+}
+
+export function useDevelopmentLinks(workItemId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    workItemId ? `/api/pm/work-items/${workItemId}/development` : null,
+    (url: string) => getJson<{ links: PmDevelopmentLink[] }>(url),
+  );
+  return { links: data?.links, error, isLoading, mutate };
 }
 
 // ── Cycles and modules (WARP-3521) ──────────────────────────────────────────
