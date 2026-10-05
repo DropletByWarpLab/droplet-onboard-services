@@ -25,6 +25,8 @@ const PROJECT_LABELS = [
 ];
 
 vi.mock("@/lib/auth", () => ({
+  // The drawer reads the role to decide whether to offer attachment writes (WARP-1505).
+  useAuth: () => ({ user: { id: "u1", username: "ada", displayName: "Ada", role: "owner" } }),
   authFetch: vi.fn((url: string, init?: RequestInit) => {
     const method = (init?.method ?? "GET").toUpperCase();
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
@@ -37,6 +39,11 @@ vi.mock("@/lib/auth", () => ({
     }
     if (url.includes("/comments")) return json({ comments: [], nextCursor: null, total: 0 });
     if (url.includes("/activity")) return json({ activity: [], nextCursor: null, total: 0 });
+    if (url.endsWith("/development")) return json({ links: [{
+      id: "dev-1", provider: "GITHUB", kind: "PULL_REQUEST", url: "https://github.com/acme/app/pull/4",
+      title: "INBOX-1 fix login", state: "OPEN", author: "octocat", ref: "inbox-1-fix-login",
+      number: 4, externalUpdatedAt: "2026-10-04T00:00:00.000Z", repository: { fullName: "acme/app" },
+    }] });
     if (url.includes("/work-items?parent=")) return json({ work_items: [] });
     if (url.endsWith("/labels")) return json({ labels: PROJECT_LABELS });
     if (url.match(/\/work-items\/[^/]+$/) && method === "PATCH") {
@@ -189,5 +196,18 @@ describe("DetailDrawer — Also viewing (WARP-3536)", () => {
     });
     expect(screen.queryByRole("group", { name: "Also viewing" })).toBeNull();
     expect(screen.queryByText(/Also viewing/)).toBeNull();
+  });
+});
+
+describe("DetailDrawer — Development links", () => {
+  it("renders linked changes and copies the canonical branch name", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    renderDrawer();
+    const link = await screen.findByRole("link", { name: /PR 4 INBOX-1 fix login open/i });
+    expect(link).toHaveAttribute("href", "https://github.com/acme/app/pull/4");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    fireEvent.click(screen.getByRole("button", { name: /copy development branch name/i }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("inbox-1-first-task"));
   });
 });

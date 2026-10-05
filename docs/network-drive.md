@@ -242,13 +242,26 @@ direct-editing links, direct-download links; audit in `docs/SECURITY.md`).
   **Remember my credentials**. Never enable insecure guest logons on the PC
   to get around it.
 - **SMB write not visible in the web UI** — the `/Droplet` external mount
-  re-stats on access (`filesystem_check_changes=1`); a hard refresh of the
-  Files page re-lists. If the mount is missing entirely, the next Nextcloud
-  container start reconciles it (`nextcloud-init.sh` is a boot-time
-  reconcile hook).
-- **Files created over SMB aren't searchable/brain-indexed** — known v1
-  limitation: `file-indexer` watches the Nextcloud data volume, and the
-  external-storage tree lives outside it. Indexing the share is a follow-up.
+  re-stats on access (`filesystem_check_changes=1`). Open **My Files →
+  Droplet** (or `/files?path=%2FDroplet`) to see `\\DROPLET\Droplet`'s
+  contents. The visible Files page refreshes the root and this subtree every
+  15 seconds. If the mount is missing entirely, the next Nextcloud container
+  start reconciles it (`nextcloud-init.sh` is a boot-time reconcile hook);
+  conflicting non-local mounts are reported and preserved for an administrator.
+- **SMB file absent from content search** — `file-indexer` watches the shared
+  volume read-only, including existing files at startup. Nextcloud must first
+  discover the file by browsing its folder; unresolved file IDs are retried
+  every 30 seconds. New nested folders must be opened too. Unsupported or
+  oversized files remain browsable even when extraction is skipped. Search
+  and assistant document reads check the requesting person's current WebDAV
+  access and matching file ID before returning shared snippets or text,
+  including cached results.
+
+The paired Windows app's selected-folder sync uses the person's WebDAV home,
+under **My Files → Computers → device → selected folder**, rather than the
+device-wide SMB share. Use **Files → Connect drive → Your drive** to browse
+that same personal tree in Explorer. The dashboard refreshes the Computers
+subtree while visible so direct sync writes appear without a dashboard upload.
 
 ## Port/footprint summary
 

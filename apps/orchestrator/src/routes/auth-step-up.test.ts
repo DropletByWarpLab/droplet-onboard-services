@@ -53,7 +53,10 @@ vi.mock("../services/activity.singleton.js", async (importActual) => ({
   recordActivity,
 }));
 const checkSession = vi.hoisted(() => vi.fn());
-vi.mock("../services/session.service.js", () => ({ checkSession }));
+const listUserSessions = vi.hoisted(() => vi.fn());
+const revokeAllSessions = vi.hoisted(() => vi.fn());
+vi.mock("../services/session.service.js", () => ({ checkSession, listUserSessions, revokeAllSessions,
+  idleLimitSecondsForRole: () => 1800, absoluteLimitSecondsForRole: () => 43200 }));
 vi.mock("../services/auth-denylist.service.js", () => ({ isUserDenied: vi.fn(async () => false) }));
 const resolveExtensionPrincipal = vi.hoisted(() => vi.fn());
 vi.mock("../services/extension-principal.js", () => ({ resolveExtensionPrincipal }));
@@ -63,6 +66,7 @@ import { createActivityRouter } from "./activity.js";
 import { authMiddleware, requirePasswordChangeGate } from "../middleware/auth.js";
 import { signAccessToken, verifyAccessToken, type Role } from "../services/jwt.service.js";
 import { encryptTotpSecret } from "../services/totp.service.js";
+import { errorHandler } from "../middleware/error-handler.js";
 
 const actualSecondFactor = async (...a: unknown[]) =>
   (
@@ -129,6 +133,7 @@ function app(id: string, role: Role, opts: { sid?: string | null; checked?: bool
     next();
   });
   a.use("/api", createStepUpRouter(prisma));
+  a.use(errorHandler);
   return a;
 }
 
@@ -139,6 +144,7 @@ function realApp() {
   a.use(authMiddleware);
   a.use(requirePasswordChangeGate(prisma));
   a.use("/api", createStepUpRouter(prisma));
+  a.use(errorHandler);
   return a;
 }
 const bearer = (id: string, role: Role) =>
@@ -161,12 +167,85 @@ beforeEach(() => {
   recordActivity.mockClear();
   checkSession.mockReset();
   checkSession.mockResolvedValue({ kind: "ok" });
+  listUserSessions.mockReset();
+  revokeAllSessions.mockReset();
+  revokeAllSessions.mockResolvedValue(2);
   resolveExtensionPrincipal.mockReset();
   cache.clear();
   for (const k of Object.keys(lastStep)) delete lastStep[k];
 });
 
+describe("self-service session routes", () => {
+  it("security status projects only the checked caller's confirmed factor, never its secret", async () => {
+    const res = await request(app("member1", "family")).get("/api/auth/security").query({ userId: "owner1" });
+    expect(res.status).toBe(200); expect(res.body).toEqual({ totpEnabled: true });
+    expect(prisma.totpCredential.findUnique).toHaveBeenCalledWith({ where: { userId: "member1" }, select: { confirmedAt: true } });
+    expect(JSON.stringify(res.body)).not.toContain(SECRET);
+  });
+  it("an unconfirmed enrollment is not enabled", async () => {
+    const res = await request(app("nototp", "owner")).get("/api/auth/security");
+    expect(res.status).toBe(200); expect(res.body).toEqual({ totpEnabled: false });
+  });
+  it("lists only the checked caller's sessions and never exposes session ids or another selected user", async () => {
+    listUserSessions.mockResolvedValue([{ role: "family", createdAt: 100, lastSeenAt: 200 }]);
+    const res = await request(app("member1", "family")).get("/api/auth/sessions/mine").query({ userId: "owner1", username: "owner1" });
+    expect(res.status).toBe(200); expect(listUserSessions).toHaveBeenCalledExactlyOnceWith("member1");
+    expect(res.body).toEqual({ sessions: [{ role: "family", createdAt: 100, lastSeenAt: 200, idleDeadline: 2000, absoluteDeadline: 43300 }] });
+    expect(JSON.stringify(res.body)).not.toContain("sid"); expect(res.headers["cache-control"]).toBe("no-store");
+  });
+  it("an unreadable session store is unavailable, never an empty success", async () => {
+    listUserSessions.mockResolvedValue(null);
+    const res = await request(app("member1", "family")).get("/api/auth/sessions/mine");
+    expect(res.status).toBe(503); expect(res.body.code).toBe("SESSIONS_UNAVAILABLE"); expect(res.body.sessions).toBeUndefined();
+  });
+  it("revoke keeps only the current caller's checked session", async () => {
+    const res = await request(app("member1", "family", { sid: "sid-member" })).post("/api/auth/sessions/revoke-others").send({});
+    expect(res.status).toBe(200); expect(res.body).toEqual({ revoked: 2 });
+    expect(revokeAllSessions).toHaveBeenCalledExactlyOnceWith("member1", { exceptSid: "sid-member" });
+    expect(res.headers["set-cookie"]).toBeUndefined();
+    expect(auditText()).not.toContain("sid-member");
+  });
+  it.each([{ userId: "owner1" }, { username: "owner1" }, { exceptSid: "sid-owner" }, { sid: "sid-owner" }])("never permits a caller-selected identity or preserved session %j", async (body) => {
+    const res = await request(app("member1", "family")).post("/api/auth/sessions/revoke-others").send(body);
+    expect(res.status).toBe(400); expect(revokeAllSessions).not.toHaveBeenCalled();
+  });
+  it.each([{ sid: null }, { checked: false }])("unconfirmed and sid-less sessions cannot read or revoke %j", async (options) => {
+    const a = app("member1", "family", options);
+    expect((await request(a).get("/api/auth/security")).status).toBe(401);
+    expect((await request(a).get("/api/auth/sessions/mine")).status).toBe(401);
+    expect((await request(a).post("/api/auth/sessions/revoke-others").send({})).status).toBe(401);
+    expect(listUserSessions).not.toHaveBeenCalled(); expect(revokeAllSessions).not.toHaveBeenCalled();
+  });
+  it("service principals cannot use self-service", async () => {
+    const a = app("_service:mcp", "service");
+    expect((await request(a).get("/api/auth/security")).status).toBe(401);
+    expect((await request(a).get("/api/auth/sessions/mine")).status).toBe(401);
+    expect((await request(a).post("/api/auth/sessions/revoke-others").send({})).status).toBe(401);
+    expect(listUserSessions).not.toHaveBeenCalled(); expect(revokeAllSessions).not.toHaveBeenCalled();
+  });
+  it("a failed revoke does not report that other sessions ended", async () => {
+    revokeAllSessions.mockRejectedValue(Object.assign(new Error("Session revocation unavailable"), { statusCode: 503, code: "SESSION_REVOCATION_UNAVAILABLE" }));
+    const res = await request(app("member1", "family")).post("/api/auth/sessions/revoke-others").send({});
+    expect(res.status).toBe(503); expect(res.body.revoked).toBeUndefined(); expect(recordActivity).not.toHaveBeenCalled();
+  });
+});
+
 describe("POST /api/auth/step-up", () => {
+  it.each(["body", "body=1"])("native %s returns the same-session access token without cookies or refresh rotation", async (mode) => {
+    verifyPassword.mockResolvedValue(true); secondFactor.mockResolvedValue("passed");
+    const res = await request(app("owner1", "owner", { sid: "sid-keep" })).post("/api/auth/step-up").query({ return: mode }).send({ password: "pw", totp: "123456" });
+    expect(res.status).toBe(200); expect(res.headers["set-cookie"]).toBeUndefined();
+    const token = verifyAccessToken(res.body.accessToken);
+    expect(token?.sub).toBe("owner1"); expect(token?.sid).toBe("sid-keep"); expect(token?.lastMfaAt).toBe(res.body.lastMfaAt);
+    expect(res.body.accessTokenExpiresAt).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    expect(res.body.refreshToken).toBeUndefined(); expect(res.body.user.id).toBe("owner1");
+    expect(auditText()).not.toContain(res.body.accessToken);
+  });
+  it.each(["Origin", "Referer", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest"])("%s keeps cookie-only step-up even with native opt-in", async (marker) => {
+    verifyPassword.mockResolvedValue(true); secondFactor.mockResolvedValue("passed");
+    const res = await request(app("owner1", "owner")).post("/api/auth/step-up?return=body").set(marker, "https://box.test").send({ password: "pw", totp: "123456" });
+    expect(res.status).toBe(200); expect(res.body.accessToken).toBeUndefined(); expect(tokenFrom(res).sub).toBe("owner1");
+  });
   it("stamps lastMfaAt on a token for the same user and session id", async () => {
     verifyPassword.mockResolvedValue(true);
     secondFactor.mockResolvedValue("passed");

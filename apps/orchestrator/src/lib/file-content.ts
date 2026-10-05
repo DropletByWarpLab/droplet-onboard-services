@@ -2,6 +2,17 @@
 // viewers). Kept dependency-free so they unit-test without the Nextcloud /
 // Prisma / fs glue the route wires them into.
 
+/**
+ * A Content-Disposition that survives a hostile or non-ASCII filename.
+ * The ASCII fallback cannot escape its quoted parameter; the real name is
+ * carried in RFC 5987 filename*, including punctuation outside attr-char.
+ */
+export function contentDispositionAttachment(filename: string, disposition: "attachment" | "inline" = "attachment"): string {
+  const ascii = filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  const encoded = encodeURIComponent(filename).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `${disposition}; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
 export type FileContentId =
   | { kind: "ncfile"; ncFileId: number }
   | { kind: "path"; path: string }

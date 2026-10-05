@@ -88,7 +88,7 @@ describe.skipIf(!RUN)("PM project lifecycle against Postgres (WARP-3370)", () =>
         comments: { create: [{ commentHtml: "<p>hi</p>" }] },
         activity: { create: [{ verb: "created" }] },
         attachments: {
-          create: [{ fileName: "f.txt", mimeType: "text/plain", sizeBytes: BigInt(1), storageKey: `warp3370-${uniq()}` }],
+          create: [{ fileName: "f.txt", mimeType: "text/plain", sizeBytes: BigInt(1), sha256: "0".repeat(64), storageKey: `warp3370-${uniq()}` }],
         },
       },
     });

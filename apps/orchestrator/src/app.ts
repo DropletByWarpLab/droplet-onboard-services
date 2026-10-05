@@ -59,6 +59,7 @@ import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createPmPresenceRouter } from "./routes/pm/presence.js";
+import { createPmAttachmentsRouter } from "./routes/pm/attachments.js";
 import { createPmQueryRouter } from "./routes/pm/query.js";
 import { createPmViewsRouter } from "./routes/pm/views.js";
 import { createPmBulkRouter } from "./routes/pm/bulk.js";
@@ -71,6 +72,7 @@ import { createPmOpenApiRouter } from "./routes/pm/openapi.js";
 import { createSupportRouter } from "./routes/support/support.routes.js";
 import { createPmInsightsRouter } from "./routes/pm/insights.js";
 import { createPmScheduleRouter } from "./routes/pm/schedule.js";
+import { createPmDevelopmentRouter } from "./routes/pm/development.js";
 import { createCrmRouter } from "./routes/crm.js";
 import { createMoneyRouter } from "./routes/money.js";
 import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
@@ -617,6 +619,10 @@ export function createApp(
   // (blocks / relates / duplicates). Its own router on the same prefix; the
   // paths are disjoint from the native router's, so neither shadows the other.
   app.use("/api", createPmRelationsRouter(prisma));
+  // WARP-1505 — files on work items and comments. Disjoint paths again
+  // (`/pm/work-items/:id/attachments`, `/pm/attachments/:id`); the `/pm/work-items/:id`
+  // route above takes one segment after `work-items`, so it cannot shadow these.
+  app.use("/api", createPmAttachmentsRouter(prisma));
   // WARP-3527 (ADR-069 WS-11) — project import (CSV / Trello JSON → background
   // job) and export (CSV / JSON, streamed). Its own router on the same prefix;
   // paths are `/pm/projects/:id/{import,export.*}` and `/pm/import-jobs/*`,
@@ -657,6 +663,10 @@ export function createApp(
   // router, disjoint paths (`/pm/projects/:id/timeline`, `/pm/my-work`); the
   // `projects` module gate covers it through the `/api/pm` prefix.
   app.use("/api", createPmScheduleRouter(prisma));
+  // WARP-3535 — code-host development links, under the same Projects module
+  // gate as every other /api/pm route. Item reads apply the guest assignment
+  // guard; repository administration is owner/admin only.
+  app.use("/api", createPmDevelopmentRouter(prisma));
   // WARP-3524 (WS-8) — Insights has its own disjoint `/pm/insights` path.
   // The `projects` module gate covers it through the `/api/pm` prefix.
   app.use("/api", createPmInsightsRouter(prisma));

@@ -89,6 +89,7 @@ function createPrismaMock(seed: SpecRow[] = []) {
   const tables = {
     specs,
     schedules,
+    toolRun: { create: vi.fn() },
     toolSpec: {
       findUnique: vi.fn(async ({ where }: { where: { slug?: string; id?: string } }) => {
         if (where.slug) return specs.get(where.slug) ?? null;
@@ -634,6 +635,32 @@ describe("WARP-2665 — run-now and scheduling trust the steps, not a stale colu
       .send({});
     expect(res.status).toBe(409);
     expect(res.body.writesSource).toBe("stored");
+  });
+
+  it.each(["", "?confirm=true"])("refuses a stale reviewed version before dispatch %s", async (suffix) => {
+    const prisma = createPrismaMock([mkSpec({ version: 2, writes: true, reversible: false })]);
+    const res = await request(buildApp(prisma, mkUser("owner")))
+      .post(`/api/tools/seeded/runs${suffix}`).send({ expectedVersion: 1 });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("routine_changed");
+    expect(prisma.toolRun.create).not.toHaveBeenCalled();
+  });
+
+  it.each([0, -1, 1.5, "2", null])("rejects a malformed reviewed version %s", async (expectedVersion) => {
+    const prisma = createPrismaMock([mkSpec()]);
+    const res = await request(buildApp(prisma, mkUser("owner")))
+      .post("/api/tools/seeded/runs?confirm=true").send({ expectedVersion });
+    expect(res.status).toBe(400);
+    expect(prisma.toolRun.create).not.toHaveBeenCalled();
+  });
+
+  it("still requires destructive confirmation when the reviewed version matches", async () => {
+    const prisma = createPrismaMock([mkSpec({ version: 2, writes: true, reversible: false })]);
+    const res = await request(buildApp(prisma, mkUser("owner")))
+      .post("/api/tools/seeded/runs").send({ expectedVersion: 2 });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("confirmation_required");
+    expect(prisma.toolRun.create).not.toHaveBeenCalled();
   });
 
   it("refuses to schedule a spec that is not live, the way run-now refuses to run one", async () => {
