@@ -883,8 +883,6 @@ ROUTING_SERVICE_TOKEN=$routing_service_token
 # \`sudo systemctl restart droplet-openwrt-attach.service\` (sets the container
 # root pw + restarts routing together) — NOT a bare \`docker compose restart
 # routing\`, which would present the new pw to a container still on the old one.
-# External edge router (OPENWRT_HOST not loopback): the router owns its own
-# password and sync keeps the operator-written secret file (WARP-3738).
 # External edge router (OPENWRT_HOST not loopback): the router owns its password;
 # sync keeps docker/secrets/openwrt_password as the operator wrote it (WARP-3738).
 OPENWRT_PASSWORD=$openwrt_password
