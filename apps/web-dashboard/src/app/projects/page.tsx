@@ -7,8 +7,9 @@
  * writes, and the same data the in-app AI reads/writes through the MCP tools.
  */
 
-import { useMemo, useState, type JSX } from "react";
+import { Suspense, useMemo, useState, type JSX } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { FolderKanban } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { useToast } from "@/components/Toast";
@@ -16,6 +17,9 @@ import { useAuth } from "@/lib/auth";
 import { useAppCapabilities } from "@/lib/hooks/useAppCapabilities";
 import { translateError } from "@/lib/friendly-errors";
 import "./projects.css";
+import "./planning.css";
+import "./cycles.css";
+import "./modules.css";
 
 import { PmIcon } from "@/components/projects/icons";
 import { ListProgress, PeopleContext } from "@/components/projects/bits";
@@ -30,6 +34,7 @@ import {
   useProjectItems,
   useDepartments,
   usePeople,
+  useProjectCycles,
   pmActions,
 } from "@/components/projects/usePm";
 import {
@@ -38,18 +43,27 @@ import {
   matchesDepartment,
 } from "@/components/projects/department";
 import { IndexView } from "@/components/projects/IndexView";
-import { BoardView, ListView, PlaceholderView, type Domain } from "@/components/projects/board";
+import { BoardView, ListView, type Domain } from "@/components/projects/board";
+import { CyclesView } from "@/components/projects/cycles";
+import { ModulesView } from "@/components/projects/modules";
 import { ViewSwitcher, SavedViews, FilterBar, type ProjectView, type SavedView } from "@/components/projects/chrome";
 import { DetailDrawer } from "@/components/projects/detail";
+import { InsightsView } from "@/components/projects/insights/InsightsView";
+import { useInsightsDeepLink, useSyncInsightsParam } from "@/components/projects/insights/deepLink";
 import { CalendarView } from "@/components/projects/calendar/CalendarView";
 import { TimelineView } from "@/components/projects/timeline/TimelineView";
 import { MyWorkView } from "@/components/projects/mywork/MyWorkView";
+import { ProjectMenu } from "@/components/projects/import/ProjectMenu";
+import { ImportWizard } from "@/components/projects/import/ImportWizard";
 import {
   ConfirmArchiveProject,
   ConfirmDeleteProject,
   NewItemModal,
   NewProjectModal,
 } from "@/components/projects/modals";
+import { TimeAccessProvider } from "@/components/projects/time/access";
+import { TimerChip } from "@/components/projects/time/TimerChip";
+import { TimeView } from "@/components/projects/time/TimeView";
 
 function matchQuery(item: PmWorkItem, q: string): boolean {
   const needle = q.toLowerCase();
@@ -82,7 +96,24 @@ export default function ProjectsPage(): JSX.Element {
   // else. It used to also read `crm` and render the CRM's sub-tabs, which is
   // why its header renamed itself when a module it does not own flipped. The
   // CRM lives at /customers now.
-  return <ProjectsWorkspace />;
+  // WARP-3524 — `useSearchParams` (the `?view=insights` deep link) has to sit
+  // under a Suspense boundary, or the route cannot be prerendered. Time has
+  // the same requirement and receives the current user through its provider.
+  return (
+    <Suspense fallback={null}>
+      <ProjectsWithTimeAccess />
+    </Suspense>
+  );
+}
+
+/** The session, handed to the time surface (see components/projects/time/access.tsx). */
+function ProjectsWithTimeAccess(): JSX.Element {
+  const { user } = useAuth();
+  return (
+    <TimeAccessProvider user={user}>
+      <ProjectsWorkspace />
+    </TimeAccessProvider>
+  );
 }
 
 function ProjectsWorkspace(): JSX.Element {
@@ -94,8 +125,15 @@ function ProjectsWorkspace(): JSX.Element {
   const { toast } = useToast();
   const { person } = usePeople();
 
+  // WARP-3524 — `/projects?view=insights` opens the workspace-level Insights.
+  const insightsLink = useInsightsDeepLink();
   // `my-work` is cross-project (WARP-3523), so it is not a ProjectView tab.
-  const [view, setView] = useState<ProjectView | "index" | "my-work">("index");
+  // WARP-3526 — the time view is also addressable as `/projects?view=time`.
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const [view, setView] = useState<ProjectView | "index" | "my-work">(
+    searchParams?.get("view") === "time" ? "time" : insightsLink ? "insights" : "index",
+  );
   const [projectId, setProjectId] = useState<string | null>(null);
   const [savedView, setSavedView] = useState<SavedView>("all");
   const [q, setQ] = useState("");
@@ -109,7 +147,8 @@ function ProjectsWorkspace(): JSX.Element {
   const [department, setDepartment] = useState<string>(DEPARTMENT_ANY);
   const [showArchived, setShowArchived] = useState(false);
   const [drawer, setDrawer] = useState<PmWorkItem | null>(null);
-  const [modal, setModal] = useState<"newitem" | "newproject" | "archive" | "delete" | null>(null);
+  const [modal, setModal] = useState<"newitem" | "newproject" | "import" | "archive" | "delete" | null>(null);
+  useSyncInsightsParam(view === "insights" && projectId === null);
 
   const { projects, error: projErr, isLoading: projLoading, mutate: mutateProjects } = useProjects(showArchived);
   // ProjectsWorkspace only mounts behind the `projects` capability gate above.
@@ -125,6 +164,9 @@ function ProjectsWorkspace(): JSX.Element {
     mutate: mutateItems,
   } = useProjectItems(projectId);
   const { departments } = useDepartments();
+  // WARP-3521 — the project's cycles, so a board card can name its cycle.
+  const { cycles, mutate: mutateCycles } = useProjectCycles(projectId);
+  const cyclesById = useMemo(() => new Map((cycles ?? []).map((c) => [c.id, c])), [cycles]);
 
   const project = useMemo(() => projects?.find((p) => p.id === projectId) ?? null, [projects, projectId]);
 
@@ -197,7 +239,10 @@ function ProjectsWorkspace(): JSX.Element {
   const refreshAll = () => {
     void mutateProjects();
     void mutateSummary();
-    if (projectId) void mutateItems();
+    if (projectId) {
+      void mutateItems();
+      void mutateCycles();
+    }
   };
 
   const openProject = (p: PmProject) => {
@@ -208,8 +253,20 @@ function ProjectsWorkspace(): JSX.Element {
     setDepartment(DEPARTMENT_ANY);
   };
 
+  const changeView = (next: ProjectView | "index") => {
+    if (next === "time" || view === "time") {
+      router.replace(next === "time" ? "/projects?view=time" : "/projects", { scroll: false });
+    }
+    setView(next);
+  };
+
   const backToIndex = () => {
-    setView("index");
+    changeView("index");
+    setProjectId(null);
+  };
+
+  const openInsights = () => {
+    setView("insights");
     setProjectId(null);
   };
 
@@ -251,25 +308,39 @@ function ProjectsWorkspace(): JSX.Element {
   };
 
   const isProjectView = view === "board" || view === "list" || view === "calendar" || view === "timeline";
+  // WARP-3527: the API also enforces owner/admin or the project's lead.
+  const canImport = role === "owner" || role === "admin" || (role === "family" && !!project && project.leadId === user?.id);
 
+  const timeOnly = view === "time" && !project;
   const headerTitle =
-    view === "index" ? "Projects" : view === "my-work" ? "My work" : project?.name ?? "Projects";
+    view === "index" ? "Projects" : view === "my-work" ? "My work" : timeOnly ? "Time" : project?.name ?? "Projects";
   const headerSub =
     view === "index"
       ? `${summary?.activeProjects ?? projects?.filter((p) => !p.archived).length ?? 0} projects · ${summary?.itemsOpen ?? 0} items open`
       : view === "my-work"
         ? "Your open work across every project"
-        : project
-        ? `${project.openCount} open · ${project.doneCount} done`
-        : undefined;
+        : view === "insights" && !project
+          ? "Insights across all projects"
+          : timeOnly
+            ? "Timesheet and report"
+            : project
+              ? `${project.openCount} open · ${project.doneCount} done`
+              : undefined;
 
   const actions = view === "index" ? (
       <>
+        <TimerChip />
+        <button className="btn" type="button" onClick={() => changeView("time")}>
+          <PmIcon name="clock" size={14} /> Time
+        </button>
         {!readOnly && (
           <button className="btn primary" type="button" onClick={() => setModal("newproject")}>
             <FolderKanban size={14} /> New project
           </button>
         )}
+        <button className="btn" type="button" onClick={openInsights}>
+          <PmIcon name="chart" size={14} /> Insights
+        </button>
         <button className="btn" type="button" onClick={() => setView("my-work")}>
           <PmIcon name="user" size={14} /> My work
         </button>
@@ -279,6 +350,7 @@ function ProjectsWorkspace(): JSX.Element {
       </>
     ) : (
       <>
+        <TimerChip />
         {/* WARP-2582 — record-scoped, and `project` is in hand here, so this
             hands over an identity instead of a bare navigation: the seed line
             names the project on turn 1 and the pin scopes every turn after.
@@ -313,6 +385,7 @@ function ProjectsWorkspace(): JSX.Element {
             <PmIcon name="refresh" size={15} />
           </button>
         )}
+        {project && <ProjectMenu projectId={project.id} canImport={canImport} onImport={() => setModal("import")} />}
       </>
     );
 
@@ -362,7 +435,7 @@ function ProjectsWorkspace(): JSX.Element {
             {isProjectView && (
               <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 14 }}>
                 <div className="pm-row" style={{ justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                  <ViewSwitcher view={view} onView={(v) => setView(v)} />
+                  <ViewSwitcher view={view} onView={changeView} />
                   <FilterBar
                     q={q}
                     onQ={setQ}
@@ -382,9 +455,9 @@ function ProjectsWorkspace(): JSX.Element {
                 )}
               </div>
             )}
-            {(view === "cycles" || view === "modules") && (
+            {(view === "cycles" || view === "modules" || (view === "insights" && projectId !== null) || (view === "time" && projectId !== null)) && (
               <div style={{ marginBottom: 14 }}>
-                <ViewSwitcher view={view} onView={(v) => setView(v)} />
+                <ViewSwitcher view={view} onView={changeView} />
               </div>
             )}
 
@@ -415,10 +488,30 @@ function ProjectsWorkspace(): JSX.Element {
                   onOpen={setDrawer}
                   onTransition={onTransition}
                   onNewItem={() => setModal("newitem")}
+                  cycles={cyclesById}
                 />
               )}
               {view === "list" && (
-                <ListView states={states ?? []} items={filtered} domain={boardDomain} partial={partial} onOpen={setDrawer} />
+                <ListView
+                  states={states ?? []}
+                  items={filtered}
+                  domain={boardDomain}
+                  partial={partial}
+                  onOpen={setDrawer}
+                  cycles={cyclesById}
+                />
+              )}
+              {view === "cycles" && project && (
+                <CyclesView
+                  project={project}
+                  states={states ?? []}
+                  readOnly={readOnly}
+                  onOpenItem={setDrawer}
+                  onChanged={refreshAll}
+                />
+              )}
+              {view === "modules" && project && (
+                <ModulesView project={project} readOnly={readOnly} onOpenItem={setDrawer} onChanged={refreshAll} />
               )}
               {view === "calendar" && (
                 <CalendarView
@@ -443,8 +536,8 @@ function ProjectsWorkspace(): JSX.Element {
                 />
               )}
               {view === "my-work" && <MyWorkView />}
-              {view === "cycles" && <PlaceholderView kind="cycles" />}
-              {view === "modules" && <PlaceholderView kind="modules" />}
+              {view === "insights" && <InsightsView projectId={projectId} />}
+              {view === "time" && <TimeView projects={projects} projectId={projectId} />}
             </div>
           </div>
         </div>
@@ -453,11 +546,13 @@ function ProjectsWorkspace(): JSX.Element {
       {drawer && (
         <DetailDrawer
           item={drawer}
+          readOnly={readOnly}
           onClose={() => setDrawer(null)}
           onChanged={async () => {
             const fresh = await mutateItems();
             void mutateProjects();
             void mutateSummary();
+            void mutateCycles();
             if (drawer && fresh) {
               const up = fresh.work_items.find((i) => i.id === drawer.id);
               if (up) setDrawer(up);
@@ -469,6 +564,7 @@ function ProjectsWorkspace(): JSX.Element {
         <NewItemModal project={project} onClose={() => setModal(null)} onCreated={refreshAll} />
       )}
       {modal === "newproject" && <NewProjectModal onClose={() => setModal(null)} onCreated={refreshAll} />}
+      {modal === "import" && project && <ImportWizard project={project} onClose={() => setModal(null)} onFinished={refreshAll} />}
       {modal === "archive" && project && (
         <ConfirmArchiveProject project={project} onClose={() => setModal(null)} onArchived={afterProjectGone} />
       )}

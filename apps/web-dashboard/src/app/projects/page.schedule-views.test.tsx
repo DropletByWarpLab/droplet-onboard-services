@@ -59,6 +59,7 @@ vi.mock("@/components/projects/usePm", () => ({
   useProjectItems: () => ({ items: ITEMS, error: undefined, isLoading: false, mutate: mutateItems, key: "k" }),
   usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", initials: "T", tone: 1 }), users: [] }),
   useDepartments: () => ({ departments: undefined }),
+  useProjectCycles: () => ({ cycles: [], mutate: vi.fn() }),
   pmActions: () => ({}),
   PmRequestError: class extends Error {},
 }));
@@ -109,7 +110,7 @@ describe("view switcher", () => {
   it("offers Calendar and Timeline between List and Cycles", () => {
     openProject();
     const tabs = within(screen.getByRole("tablist", { name: "View" })).getAllByRole("tab");
-    expect(tabs.map((t) => t.textContent)).toEqual(["Board", "List", "Calendar", "Timeline", "Cycles", "Modules"]);
+    expect(tabs.slice(0, 6).map((t) => t.textContent)).toEqual(["Board", "List", "Calendar", "Timeline", "Cycles", "Modules"]);
   });
 
   it("Calendar gets the page's filtered items, role and a revalidation that refreshes the board", async () => {

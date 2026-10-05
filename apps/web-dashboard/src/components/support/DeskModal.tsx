@@ -10,6 +10,7 @@ import { translateError } from "@/lib/friendly-errors";
 import { ErrorStrip, Field, ModalFooter } from "./form-bits";
 import { supportActions } from "./useSupport";
 import type { Desk } from "./types";
+import { EmailChannelSettings } from "./EmailChannelSettings";
 
 export function DeskModal({
   desk,
@@ -124,6 +125,7 @@ export function DeskModal({
             Archiving hides the desk and its tickets from the queues. You can restore it.
           </div>
         )}
+        {desk && <EmailChannelSettings desk={desk} />}
         <ModalFooter onClose={onClose} onSubmit={() => void submit()} submitLabel={desk ? "Save" : "Create desk"} busy={busy} />
       </div>
     </Dialog>
