@@ -419,8 +419,9 @@ describe.skipIf(!RUN)("PM work-item editing — the database's own guarantees (W
     it("names a rename once, without a residual `updated` row", async () => {
       const item = await make("old-name");
       await pm.updateWorkItem(prisma, null, item.id, { name: "warp3520a-new-name" });
-      expect(await activity(item.id)).toMatchObject([{ verb: "title_changed", field: "name", newValue: "warp3520a-new-name" }]);
-      expect(await activity(item.id)).toHaveLength(1);
+      const edits = (await activity(item.id)).filter((a) => a.verb !== "created");
+      expect(edits).toMatchObject([{ verb: "title_changed", field: "name", oldValue: "warp3520a-old-name", newValue: "warp3520a-new-name" }]);
+      expect(edits).toHaveLength(1);
     });
   });
 
