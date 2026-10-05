@@ -45,13 +45,21 @@ export function useProjectsUrl() {
 
   const go = useCallback(
     (patch: Partial<UrlState>, mode: NavMode) => {
-      const href = buildPmPath({ ...state, ...patch });
-      if (href === current) return;
+      const canonical = buildPmPath({ ...state, ...patch });
+      if (canonical === current) return;
+      // Insights already preserves parameters owned by other surfaces. Keep
+      // that contract while every PM parameter still uses the shared parser
+      // and canonical builder (including rejection of malformed PM values).
+      const other = new URLSearchParams(params?.toString() ?? "");
+      for (const name of Object.keys(state)) other.delete(name);
+      const suffix = other.toString();
+      const hash = typeof window === "undefined" ? "" : window.location.hash;
+      const href = canonical + (suffix ? `${canonical.includes("?") ? "&" : "?"}${suffix}` : "") + hash;
       // scroll:false — a filter edit, a drawer and a tab must not jump the page to the top.
       if (mode === "push") router.push(href, { scroll: false });
       else router.replace(href, { scroll: false });
     },
-    [state, current, router],
+    [state, current, router, params],
   );
 
   const openItem = useCallback(

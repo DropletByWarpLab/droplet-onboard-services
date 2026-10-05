@@ -1137,7 +1137,7 @@ describe("File Operations (Nextcloud-backed routes)", () => {
           "/api/files/download?path=/page.html&disposition=inline",
         );
         expect(res.status).toBe(200);
-        expect(res.headers["content-disposition"]).toBe('attachment; filename="page.html"');
+        expect(res.headers["content-disposition"]).toBe('attachment; filename="page.html"; filename*=UTF-8\'\'page.html');
       });
 
       it("inline PDF gets nosniff but NO sandbox CSP (Chromium's PDF viewer cannot run sandboxed)", async () => {
@@ -1146,7 +1146,7 @@ describe("File Operations (Nextcloud-backed routes)", () => {
         );
         expect(res.status).toBe(200);
         expect(res.headers["content-type"]).toBe("application/pdf");
-        expect(res.headers["content-disposition"]).toBe('inline; filename="report.pdf"');
+        expect(res.headers["content-disposition"]).toBe('inline; filename="report.pdf"; filename*=UTF-8\'\'report.pdf');
         expect(res.headers["x-content-type-options"]).toBe("nosniff");
         // App-level helmet() still contributes its baseline CSP on every
         // response — that one is harmless to the viewer. Only the `sandbox`
@@ -1160,12 +1160,12 @@ describe("File Operations (Nextcloud-backed routes)", () => {
           "/api/files/download?path=/notes.txt&disposition=inline",
         );
         expect(res.status).toBe(200);
-        expect(res.headers["content-disposition"]).toBe('inline; filename="notes.txt"');
+        expect(res.headers["content-disposition"]).toBe('inline; filename="notes.txt"; filename*=UTF-8\'\'notes.txt');
         expect(res.headers["x-content-type-options"]).toBe("nosniff");
         expect(res.headers["content-security-policy"]).toBe("sandbox");
       });
 
-      it("strips quotes/backslashes from the inline filename parameter", async () => {
+      it("keeps a quote out of the fallback and preserves it in the encoded filename", async () => {
         // A quote-only fixture: a backslash in the path is a separator under
         // win32 path.basename but a literal on Linux, so asserting on it would
         // make the test platform-dependent. The sanitizer regex covers both.
@@ -1173,13 +1173,13 @@ describe("File Operations (Nextcloud-backed routes)", () => {
           .get("/api/files/download")
           .query({ path: '/we"ird.pdf', disposition: "inline" });
         expect(res.status).toBe(200);
-        expect(res.headers["content-disposition"]).toBe('inline; filename="weird.pdf"');
+        expect(res.headers["content-disposition"]).toBe('inline; filename="we_ird.pdf"; filename*=UTF-8\'\'we%22ird.pdf');
       });
 
       it("no disposition param stays attachment (default unchanged)", async () => {
         const res = await request(app).get("/api/files/download?path=/report.pdf");
         expect(res.status).toBe(200);
-        expect(res.headers["content-disposition"]).toBe('attachment; filename="report.pdf"');
+        expect(res.headers["content-disposition"]).toBe('attachment; filename="report.pdf"; filename*=UTF-8\'\'report.pdf');
       });
     });
   });

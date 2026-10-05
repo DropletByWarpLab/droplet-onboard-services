@@ -1,0 +1,75 @@
+/* Insights (WARP-3524) — chart cards for the Projects surface.
+ *
+ * Scoped under `.pm-scope` like projects.css, and bound to the same aliases it
+ * defines (--accent, --ok, --warn, --err, --text-*, --bg-*, --border*). No hex
+ * literals and no new tokens: light and dark come from the aliases flipping.
+ */
+
+.pm-scope .pm-insights { display: flex; flex-direction: column; gap: 18px; }
+.pm-scope .pm-insights-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; }
+.pm-scope .pm-insights-asof { font-size: 12px; color: var(--text-3); }
+.pm-scope .pm-insights-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.pm-scope .pm-insights-grid .pm-chartcard.wide { grid-column: 1 / -1; }
+
+/* ── chart card ─────────────────────────────────────────────────────────── */
+.pm-scope .pm-chartcard {
+  position: relative; min-width: 0; display: flex; flex-direction: column; gap: 12px; padding: 16px;
+  background: var(--bg-canvas); border: 1px solid var(--border); border-radius: 14px;
+}
+.pm-scope .pm-chartcard-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.pm-scope .pm-chartcard h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--text); }
+.pm-scope .pm-chartcard .reading { margin: 3px 0 0; font-size: 13px; line-height: 1.45; color: var(--text-2); text-wrap: pretty; }
+.pm-scope .pm-chartcard-body { min-width: 0; }
+.pm-scope .pm-chartcard-body[hidden] { display: none; }
+.pm-scope .pm-chartcard .pm-empty-inline { padding: 28px 12px; text-align: center; font-size: 13px; color: var(--text-3); }
+.pm-scope .pm-chartcard .pm-caption { margin: 0; font-size: 12px; color: var(--text-3); }
+
+/* ── legend ─────────────────────────────────────────────────────────────── */
+.pm-scope .pm-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 8px 0 0; padding: 0; list-style: none; font-size: 12px; color: var(--text-2); }
+.pm-scope .pm-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.pm-scope .pm-legend .sw { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+
+/* ── percentile stats under the duration charts ─────────────────────────── */
+.pm-scope .pm-stats { display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 0; }
+.pm-scope .pm-stats > div { display: flex; flex-direction: column; gap: 2px; }
+.pm-scope .pm-stats dt { font-size: 11px; color: var(--text-3); }
+.pm-scope .pm-stats dd { margin: 0; font-size: 15px; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.pm-scope .pm-stats dt .pm-mono { margin-left: 5px; color: var(--text-4); }
+
+/* ── data table: the accessible alternative, and the ranked lists themselves ─ */
+.pm-scope .pm-sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+  clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+.pm-scope .pm-datatable-wrap { max-height: 280px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; }
+.pm-scope .pm-datatable-wrap:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+.pm-scope .pm-datatable { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.pm-scope .pm-datatable th, .pm-scope .pm-datatable td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; }
+.pm-scope .pm-datatable tbody tr:last-child th, .pm-scope .pm-datatable tbody tr:last-child td { border-bottom: none; }
+.pm-scope .pm-datatable thead th {
+  position: sticky; top: 0; background: var(--bg-canvas); z-index: 1;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-3);
+}
+.pm-scope .pm-datatable tbody th { font-weight: 500; color: var(--text); }
+.pm-scope .pm-datatable td { color: var(--text-2); }
+.pm-scope .pm-datatable td.pm-mono { text-align: right; }
+/* A numeric column's heading sits over its numbers, not at the other edge. */
+.pm-scope .pm-datatable-num thead th:not(:first-child), .pm-scope .pm-bartable thead th:nth-child(3) { text-align: right; }
+.pm-scope .pm-datatable th .pm-sub { display: block; font-size: 11.5px; font-weight: 400; color: var(--text-3); }
+.pm-scope .pm-datatable th .key { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-3); margin-right: 6px; }
+
+.pm-scope .pm-bartable-wrap { max-height: 360px; }
+.pm-scope .pm-bartable td:nth-child(2) { width: 44%; }
+.pm-scope .pm-barcell { display: flex; align-items: center; gap: 10px; }
+.pm-scope .pm-bar { position: relative; flex: 1; min-width: 40px; height: 8px; border-radius: 4px; background: var(--bg-sunken); }
+.pm-scope .pm-bar .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; }
+.pm-scope .pm-bar .mark { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--text-2); }
+.pm-scope .pm-barcell .n { min-width: 7ch; text-align: right; font-size: 12px; color: var(--text-2); }
+
+@media (max-width: 860px) {
+  .pm-scope .pm-insights-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 520px) {
+  .pm-scope .pm-chartcard-head { flex-direction: column; }
+  .pm-scope .pm-bartable td:nth-child(2) { width: auto; }
+}

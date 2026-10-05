@@ -157,7 +157,7 @@ describe("view switcher", () => {
   it("offers Calendar and Timeline between List and Cycles", () => {
     openProject();
     const tabs = within(screen.getByRole("tablist", { name: "View" })).getAllByRole("tab");
-    expect(tabs.map((t) => t.textContent)).toEqual(["Board", "List", "Calendar", "Timeline", "Cycles", "Modules", "Time"]);
+    expect(tabs.map((t) => t.textContent)).toEqual(["Board", "List", "Calendar", "Timeline", "Cycles", "Modules", "Insights", "Time"]);
   });
 
   it("Calendar gets the server query's items, role and an awaited revalidation", async () => {

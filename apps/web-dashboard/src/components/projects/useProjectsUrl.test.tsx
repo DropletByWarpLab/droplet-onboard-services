@@ -23,6 +23,7 @@ beforeEach(() => {
   push.mockClear();
   replace.mockClear();
   back.mockClear();
+  window.history.replaceState(null, "", "/projects");
 });
 
 describe("reading the URL", () => {
@@ -57,6 +58,18 @@ describe("reading the URL", () => {
 });
 
 describe("writing it", () => {
+  it("keeps unowned query parameters and the anchor through Insights navigation", () => {
+    search = "keep=1&keep=2&view=BOARD&p=not%20valid";
+    window.history.replaceState(null, "", `/projects?${search}#overview`);
+    const { result, rerender } = renderHook(() => useProjectsUrl());
+    result.current.go({ view: "insights" }, "push");
+    expect(push).toHaveBeenCalledWith("/projects?view=insights&keep=1&keep=2#overview", { scroll: false });
+    search = "view=insights&keep=1&keep=2";
+    rerender();
+    result.current.go({ p: null, view: null, item: null, v: null, f: null }, "push");
+    expect(push).toHaveBeenLastCalledWith("/projects?keep=1&keep=2#overview", { scroll: false });
+  });
+
   it("opens My work through a URL that the hook can read back", () => {
     const { result, rerender } = renderHook(() => useProjectsUrl());
     result.current.go({ view: "my-work" }, "push");
