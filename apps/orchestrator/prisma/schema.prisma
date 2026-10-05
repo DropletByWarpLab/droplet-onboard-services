@@ -2110,23 +2110,52 @@ enum CalendarFeedTokenState {
   expired
 }
 
+/// WARP-3533: which feed a link reads. One credential mechanism, three feeds.
+///   - calendar   — the person's own events, /api/calendar/publish/:user.ics.
+///                  Every link minted before PM feeds is this, by the column
+///                  default, so the existing links keep their meaning.
+///   - pm_my_work — the items assigned to the person that have a due date,
+///                  /api/calendar/publish/:user/my-work.ics.
+///   - pm_project — one project's items that have a due date,
+///                  /api/calendar/publish/:user/projects/:projectId.ics.
+/// A link reads ONLY its own feed: a leaked project link exposes that one
+/// project's due dates and not the person's calendar or anything else.
+enum CalendarFeedTokenScope {
+  calendar
+  pm_my_work
+  pm_project
+}
+
 /// WARP-2767: a bearer credential for the pre-auth ICS feed at
 /// /api/calendar/publish/:user.ics. The URL token is `<id>.<secret>`; only
 /// sha256(secret) is stored, so a database read never yields a working link.
 /// Bound to exactly one account by FK — the feed also requires the URL's
 /// username to be that account's current username.
+///
+/// WARP-3533: `scope` (+ `projectId` for a project feed) says which feed the
+/// link reads; rotating or revoking one feed's link leaves the others alone.
+/// INVARIANT NOT EXPRESSIBLE HERE: CalendarFeedToken_project_scope_coherent —
+/// CHECK (("scope" = 'pm_project') = ("projectId" IS NOT NULL)) lives in
+/// migration SQL and is proven in pm-api-token.pg.test.ts.
 model CalendarFeedToken {
   id         String                 @id @default(uuid())
   userId     String
   secretHash String
   state      CalendarFeedTokenState @default(active)
+  scope      CalendarFeedTokenScope @default(calendar)
+  /// Set exactly when `scope` is `pm_project`. Cascade: a link to a project
+  /// that no longer exists has nothing to read.
+  projectId  String?
   createdAt  DateTime               @default(now())
   expiresAt  DateTime
   /// Set when the row leaves `active` (rotated / revoked / expired).
   endedAt    DateTime?
   user       User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project    PmProject?             @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([userId, state])
+  /// WARP-845: the ON DELETE CASCADE scan index.
+  @@index([projectId])
 }
 
 /// WARP-3452: lifecycle of a coding-tool token. Explicit, never derived from
@@ -2191,6 +2220,70 @@ model ModelAccessTokenUsage {
   token            ModelAccessToken @relation(fields: [tokenId], references: [id], onDelete: Cascade)
 
   @@id([tokenId, day])
+}
+
+/// WARP-3533: lifecycle of a personal API token. Explicit, never derived from
+/// `revokedAt` / `expiresAt`. `expired` is stamped when a use or a listing
+/// finds `expiresAt` passed; `revoked` is terminal.
+enum PmApiTokenStatus {
+  active
+  revoked
+  expired
+}
+
+/// WARP-3533: why a token was revoked. `manual` = its holder or an owner/admin
+/// (see `revokedById`); the other two are the lifecycle hooks in
+/// role-mutation-guard.service.ts, and the same two are re-checked at every use.
+enum PmApiTokenRevokeReason {
+  manual
+  user_deactivated
+  role_changed
+}
+
+/// WARP-3533: a personal API token (`dpm_…`) that lets a script call
+/// `/api/pm/*` and `/api/support/*` as the person who created it. Only
+/// sha256(full token) is stored (unique), so a database read or a backup never
+/// yields a working token; `prefix` (the 8 characters after `dpm_`) is for
+/// display. The token authenticates as its holder through authMiddleware, so
+/// every role, module and feature gate runs unchanged; `scopes` only narrow it.
+///
+/// `issuedRole` is the holder's role when the token was minted. The token
+/// works only while the holder still has that role, so a promotion or a
+/// demotion ends it even when the revoke hook did not land.
+///
+/// INVARIANTS NOT EXPRESSIBLE HERE (migration SQL, proven in
+/// pm-api-token.pg.test.ts):
+///   PmApiToken_scopes_valid     — scopes is non-empty and a subset of
+///                                 pm:read | pm:write | support:read | support:write
+///   PmApiToken_role_may_hold    — issuedRole is owner | admin | family; an
+///                                 external guest or a service principal never
+///                                 holds a token
+///   PmApiToken_revoked_coherent — status = revoked exactly when revokedAt and
+///                                 revokedReason are both set
+model PmApiToken {
+  id               String                  @id @default(uuid())
+  userId           String
+  name             String                  @db.VarChar(64)
+  prefix           String
+  hash             String                  @unique
+  scopes           String[]
+  issuedRole       Role
+  status           PmApiTokenStatus        @default(active)
+  createdAt        DateTime                @default(now())
+  /// Null = the holder chose no expiry.
+  expiresAt        DateTime?
+  /// Written at most once a minute per token.
+  lastUsedAt       DateTime?
+  revokedAt        DateTime?
+  revokedReason    PmApiTokenRevokeReason?
+  /// Who revoked it by hand; null for the lifecycle hooks.
+  revokedById      String?
+  /// Last time a refused (revoked/expired) use wrote an ActivityRow — at most
+  /// one per token per hour.
+  refusalAuditedAt DateTime?
+  user             User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
 }
 
 model CalendarEvent {
@@ -3055,6 +3148,10 @@ model User {
   // WARP-3452: coding-tool tokens for the local model API (`/llm/`). Deleting
   // the user cascades them; deactivation revokes them (see ModelAccessToken).
   modelAccessTokens   ModelAccessToken[]
+  // WARP-3533: personal API tokens for /api/pm and /api/support (`dpm_…`).
+  // Deleting the user cascades them; deactivation and a role change revoke
+  // them (see PmApiToken).
+  pmApiTokens         PmApiToken[]
 
   // PR #375 — TOTP second factor (ADR-013 directory). One credential row
   // per user (the secret is encrypted at rest). `confirmedAt` is the
@@ -5573,6 +5670,10 @@ model PmProject {
   /// is a pointer with no independent meaning, where a deal is a commercial
   /// record that outlives the project.
   fileLinks EntityLink[]
+
+  /// WARP-3533 — ICS feed links for this project (see CalendarFeedToken).
+  /// Cascade: a feed of a deleted project reads nothing.
+  feedTokens CalendarFeedToken[]
 
   @@unique([workspaceId, identifier])
   @@index([workspaceId, sortOrder])
