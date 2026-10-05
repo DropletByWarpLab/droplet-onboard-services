@@ -43,7 +43,7 @@ case "$target" in
 esac
 '''
     shim.write_text(source, encoding="utf-8", newline="\n")
-    os.chmod(shim, 0o700)
+    os.chmod(shim, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions -- owner-only executable fixture in a private pytest temporary directory; subprocess execution requires the owner's execute bit
     return shim
 
 

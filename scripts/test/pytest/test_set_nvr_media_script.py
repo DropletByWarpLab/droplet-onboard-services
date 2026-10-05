@@ -334,11 +334,9 @@ def test_installer_installs_the_writer():
 def test_mutation_removing_the_root_device_guard_breaks_a_test(tmp_path):
     """Neuter the st_dev comparison; the root-filesystem case must stop being
     refused. A guard whose removal changes nothing is a guard that never ran."""
-    mutated = tmp_path / "mutated.sh"
-    src = SCRIPT.read_text(encoding="utf-8")
-    needle = 'if [ "$_root_dev" = "$_target_dev" ]; then'
-    assert needle in src, "guard shape changed — update this mutation test"
-    mutated.write_text(src.replace(needle, 'if false; then'), encoding="utf-8")
+    mutated = _mutant(tmp_path,
+                      'if [ "$_root_dev" = "$_target_dev" ]; then',
+                      'if false; then')
 
     env_file = tmp_path / ".env"
     target = tmp_path / "recordings"
@@ -355,6 +353,10 @@ def test_mutation_removing_the_root_device_guard_breaks_a_test(tmp_path):
         # canonical _upsert_env_kv writer resolves (WARP-2522).
         "REPO_ROOT": str(REPO_ROOT),
     })
+    lock_file = tmp_path / "recordings-topology.lock"
+    lock_file.touch()
+    env["DROPLET_STORAGE_TOPOLOGY_LOCK_FILE"] = str(lock_file)
+    env = add_trusted_stat_env(env, tmp_path / "topology-bin", lock_file)
     proc = subprocess.run([BASH, str(mutated), str(target)],
                           env=env, capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, (
@@ -388,9 +390,14 @@ def test_mutation_removing_the_existence_check_changes_the_diagnostic(tmp_path):
         # Same repo re-anchoring as the mutation test above (WARP-2522).
         "REPO_ROOT": str(REPO_ROOT),
     })
+    lock_file = tmp_path / "recordings-topology.lock"
+    lock_file.touch()
+    env["DROPLET_STORAGE_TOPOLOGY_LOCK_FILE"] = str(lock_file)
+    env = add_trusted_stat_env(env, tmp_path / "topology-bin", lock_file)
     missing = str(tmp_path / "does-not-exist")
     real = subprocess.run([BASH, str(SCRIPT), missing], env=env,
                           capture_output=True, text=True, timeout=60)
+    mutated = _mutant(tmp_path, '[ -d "$TARGET" ] || die', ': || die')
     mut = subprocess.run([BASH, str(mutated), missing], env=env,
                          capture_output=True, text=True, timeout=60)
     assert "does not exist" in real.stderr
@@ -704,13 +711,13 @@ class _World:
             stub = self.stubs / name
             stub.write_text("#!/usr/bin/env bash\n" + body.lstrip("\n"),
                             encoding="utf-8", newline="\n")
-            os.chmod(stub, 0o700)
+            os.chmod(stub, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions -- owner-only executable fixture in a private pytest temporary directory; subprocess execution requires the owner's execute bit
         # Pin the script's python3 to the interpreter running pytest (house
         # style: test_storage_pool_script.py).
         py = self.stubs / "python3"
         py.write_text('#!/usr/bin/env bash\nexec "%s" "$@"\n' % Path(sys.executable).as_posix(),
                       encoding="utf-8", newline="\n")
-        os.chmod(py, 0o700)
+        os.chmod(py, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions -- owner-only executable fixture in a private pytest temporary directory; subprocess execution requires the owner's execute bit
 
     def env(self, extra: dict | None = None) -> dict:
         env = {k: v for k, v in os.environ.items()
@@ -1290,7 +1297,7 @@ def test_apply_recurses_the_project_id_over_existing_content(tmp_path):
 def test_apply_tightens_a_loose_existing_recordings_dir(tmp_path):
     w = _make_world(tmp_path)
     w.nvr.mkdir()
-    os.chmod(w.nvr, 0o700)
+    os.chmod(w.nvr, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions -- owner-only executable fixture in a private pytest temporary directory; subprocess execution requires the owner's execute bit
     _applied(w)
     assert stat.S_IMODE(w.nvr.stat().st_mode) == 0o700
 
@@ -1473,7 +1480,7 @@ def test_apply_refuses_a_symlinked_recordings_dir(tmp_path):
     w = _make_world(tmp_path)
     victim = tmp_path / "victim-dir"
     victim.mkdir()
-    os.chmod(victim, 0o700)
+    os.chmod(victim, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions -- owner-only executable fixture in a private pytest temporary directory; subprocess execution requires the owner's execute bit
     w.nvr.symlink_to(victim)
     before = _snapshot(w)
     _refused(_run_writer(w, *_apply_args()), "bad_mount")
@@ -2366,7 +2373,11 @@ def test_mutation_removing_the_read_back_verification_accepts_an_invisible_cap(t
     real = _run_writer(_make_world(tmp_path / "real"), *_apply_args(),
                        extra_env={"FAKE_QUOTA_IGNORED": "1"})
     _refused(real, "quota_failed")
-    mutant = _mutant(tmp_path, 'if ! nvr_quota_visible "$limit"; then', "if false; then")
+    mutant = _mutant(
+        tmp_path,
+        'if ! nvr_quota_visible "$limit" "$projid" "$dir"; then',
+        "if false; then",
+    )
     mut = _run_writer(_make_world(tmp_path / "mut"), *_apply_args(), script=mutant,
                       extra_env={**_ANCHOR, "FAKE_QUOTA_IGNORED": "1"})
     assert mut.returncode == 0, (
