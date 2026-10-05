@@ -147,7 +147,7 @@ export interface CronScheduleOpts {
 }
 
 /**
- * What `scheduleInterval` hands back. A registration can be run
+ * WARP-3532 — what `scheduleInterval` hands back. A registration can be run
  * EARLY, through the exact path a tick takes: the advisory lock, the overlap
  * guard and `safeRun`'s failure accounting. The PmActivity outbox uses it to
  * wake a consumer right after a write instead of making the write wait out the
