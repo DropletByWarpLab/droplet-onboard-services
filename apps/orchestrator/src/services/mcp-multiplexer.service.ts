@@ -69,16 +69,23 @@ const logger = createLogger("mcp-multiplexer");
 export const REMOTE_TOOL_NAME_SEPARATOR = "__";
 
 /** A server id may not contain the separator's character at all, so the first
- *  `__` in a namespaced name is always the boundary. */
-const SERVER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
+ *  `__` in a namespaced name is always the boundary.
+ *
+ *  Exported (WARP-3703) so the classification-table invariants in
+ *  `remote-tool-tables.ts` check against THIS pattern rather than a copy. */
+export const SERVER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 /**
  * A wire tool name we are willing to namespace. Bounded to 64 characters
  * because the namespaced result is serialised into an OpenAI-style
  * `function.name`, and it may not contain the separator (see
  * {@link REMOTE_TOOL_NAME_SEPARATOR}).
+ *
+ * Exported (WARP-3703) for the same reason as {@link SERVER_ID_PATTERN}. Note
+ * that the bound is on the WIRE name only: `<serverId>__<wireName>` can be longer
+ * than 64, which is why a compiled table also asserts the namespaced length.
  */
-const WIRE_TOOL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+export const WIRE_TOOL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 
 /** Build the name the model sees for a remote tool. */
 export function namespacedToolName(serverId: string, wireName: string): string {

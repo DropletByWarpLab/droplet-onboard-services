@@ -1220,7 +1220,9 @@ export async function createDeal(
   await requireReferencedRows([
     {
       id: input.projectId,
-      exists: (id) => prisma.pmProject.findUnique({ where: { id }, select: { id: true } }),
+      // WARP-3528 — a service desk is not a project a deal can be filed under.
+      exists: (id) =>
+        prisma.pmProject.findUnique({ where: { id, kind: "PROJECT" }, select: { id: true } }),
       error: CRM_ERRORS.PROJECT_NOT_FOUND,
     },
   ]);
@@ -1314,7 +1316,8 @@ export async function updateDeal(
   await requireReferencedRows([
     {
       id: input.projectId,
-      exists: (pid) => prisma.pmProject.findUnique({ where: { id: pid }, select: { id: true } }),
+      exists: (pid) =>
+        prisma.pmProject.findUnique({ where: { id: pid, kind: "PROJECT" }, select: { id: true } }),
       error: CRM_ERRORS.PROJECT_NOT_FOUND,
     },
   ]);
@@ -1580,7 +1583,12 @@ export async function logActivity(
     },
     {
       id: input.workItemId,
-      exists: (id) => prisma.pmWorkItem.findUnique({ where: { id }, select: { id: true } }),
+      // WARP-3528 — nor is a ticket a work item an activity can point at.
+      exists: (id) =>
+        prisma.pmWorkItem.findUnique({
+          where: { id, project: { kind: "PROJECT" } },
+          select: { id: true },
+        }),
       error: CRM_ERRORS.WORK_ITEM_NOT_FOUND,
     },
   ]);

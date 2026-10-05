@@ -27,6 +27,10 @@ describe("landedRecords", () => {
     ["github", NOTHING],
     ["gitlab", NOTHING],
     ["todoist", NOTHING],
+    // WARP-3697 — charge / refund / payout: read on demand, never polled, never landed.
+    ["gocardless", NOTHING],
+    // WARP-3698 — Capsule's opportunities land as deals; its tasks are read through.
+    ["capsule", { crm: ["deal"], ledger: [] }],
     // PHI is read-through, whatever the track.
     ["eaglesoft", NOTHING],
     ["dentrix-ascend", NOTHING],
