@@ -69,6 +69,8 @@ def _fake_executor(spool: Path, *, rc: int = 0, stdout: str = "", stderr: str = 
     seen: dict = {"calls": 0}
 
     def fake_run(cmd, timeout=15):
+        if len(cmd) == 2 and cmd[1] == "--status":
+            return 0, json.dumps({"kind": "volume", "source": "nvrdata"}), ""
         if cmd and cmd[0] == "lsblk":
             return 1, "", "lsblk unavailable in tests"
         seen["calls"] += 1
@@ -98,6 +100,21 @@ def _reveal_stdout(status: str = "revealed", key: str = _FAKE_KEY,
     if status == "revealed":
         body["recovery_key"] = key
     return json.dumps(body)
+
+
+@pytest.mark.parametrize("rc,code", [
+    (77, "recordings_drive_active"), (78, "recordings_status_unavailable"),
+    (79, "storage_busy"),
+])
+def test_final_executor_recordings_refusals_preserve_codes_and_hide_host_diagnostics(monkeypatch, tmp_path, rc, code):
+    bridge, spool = _load_bridge_with_spool(monkeypatch, tmp_path)
+    fake_run, seen = _fake_executor(spool, rc=rc, stderr="internal /dev/sdb /mnt/private details")
+    monkeypatch.setattr(bridge, "_run", fake_run)
+    ok, info, actual_code = bridge.run_pool_command_ex("pool_destroy", {"device": "md0"})
+    assert ok is False and actual_code == code
+    assert "internal" not in info and "/dev/sdb" not in info and "/mnt/private" not in info
+    assert seen["calls"] == 1
+    assert not (spool / "result.json").exists()
 
 
 def _forbid_run(bridge, monkeypatch, why: str):

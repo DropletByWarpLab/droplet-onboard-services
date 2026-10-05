@@ -366,18 +366,19 @@ To GENERATE a code, the dashboard (already authenticated) POSTs
 
 | Method | Path | Auth | Returns / body |
 |---|---|---|---|
-| GET | `/cameras` | Bearer | `{ cameras }`, the cameras this person may see; `{ cameras: [], _status: "disconnected" }` when the camera service is down (that is not "no cameras") |
-| GET | `/cameras/:name` | Bearer | full `CameraInfo` |
+| GET | `/cameras` | Bearer | `{ cameras }`, the cameras this person may see; `{ cameras: [], _status: "disconnected" }` when the camera service is down (that is not "no cameras"). When the camera service could not be read the list carries `degraded: true` and the `X-Droplet-Degraded: frigate-unavailable` header, and every `status` is unknown rather than "offline" (see "Recording state" below) |
+| GET | `/cameras/:name` | Bearer | full `CameraInfo` plus `recentEvents`; `X-Droplet-Degraded` as above |
 | GET | `/cameras/:name/snapshot` | Bearer | current JPEG frame |
 | GET | `/cameras/:name/live` | Bearer | MJPEG stream (`multipart/x-mixed-replace`, `Cache-Control: no-store`) |
 | GET | `/cameras/:name/events` | Bearer | events for one camera |
 | GET | `/cameras/events?limit=` | Bearer | recent events, newest first |
 | GET | `/cameras/events/:eventId/thumbnail` | Bearer (owner, admin, family) | image bytes: Frigate's own `Content-Type` (`image/jpeg` when it sends none), `Cache-Control: private, no-store`. `:eventId` is a Frigate event id, `^[a-zA-Z0-9._-]{1,128}$`; errors below the table |
 | GET | `/cameras/events/:eventId/snapshot` | Bearer | event JPEG |
-| GET | `/cameras/reviews/:reviewId/thumbnail` | Bearer | review item image bytes |
+| GET | `/cameras/reviews/:reviewId/thumbnail` | Bearer | review item image bytes: `Content-Type: image/webp` (`image/jpeg` on an older Frigate), `Cache-Control: private, no-store`. 404 `{ "error": "review_not_found" }` or `{ "error": "thumbnail_not_found" }` when Frigate has no such review or no file for it (an in-progress review may not have one yet; key on the status). 503 `{ "error": "frigate_unavailable" }` with `X-Droplet-Degraded: frigate-unavailable` when Frigate is unreachable or answers with an error |
 | GET | `/cameras/events/sse` | Bearer | SSE stream of camera events (`data: {json}`; `: heartbeat` every 30 s; first frame `{ "type": "connected" }`) |
 | GET | `/cameras/clips?camera=&limit=` | Bearer | `{ clips: [{ id, camera, label, score, start_time, end_time, thumbnail_url, clip_url }] }` (`limit` default 50, max 200; only events that have a clip) |
-| GET | `/cameras/clips/event/:eventId` | Bearer | mp4 bytes |
+| GET | `/cameras/clips/event/:eventId` | Bearer | mp4 bytes: Frigate's `clip.mp4`, a **fragmented** mp4 streamed as it is made (no duration in its header, its index at the end, no `Content-Length`, `Range` ignored). Fine to save as a file (`?download=1`, owner and admin); a player cannot read its length or seek in it, so play an event with the route below |
+| GET | `/cameras/events/:eventId/playback.m3u8` | Bearer (owner, admin, family) | HLS playlist of the same footage, the way `/cameras/:name/playback.m3u8` serves a recording: segments and the fMP4 init map point at `/cameras/:name/playback.segment` and carry the same short-lived signature (WARP-3122). The box picks the window: the event's start and end plus the pre/post-capture padding (20 s each by default), up to now for an event still in progress, at most an hour. Request it again for an event in progress to reach further. 404 `{ "error": "event_not_found" }` or `{ "error": "no_recordings_in_range" }`; 503 `{ "error": "frigate_unavailable" }` with `X-Droplet-Degraded: frigate-unavailable` when Frigate cannot be asked |
 | POST | `/cameras/clips/share` | Bearer (custody roles) | share a clip |
 | GET | `/cameras/groups` | Bearer | `[{ id, name, members }]` |
 | GET | `/cameras/pins` | Bearer | `[{ cameraName, sortOrder }]` |
@@ -390,6 +391,30 @@ header; the stream is per-connection and never cached) and stills come from
 `snapshot`. Camera routes are scoped per person: a client only sees the cameras
 it is granted. A save or download asked by a role that is not owner or admin
 answers `403 { code: "CAMERA_CUSTODY_REQUIRED" }`.
+
+**Recording state (`CameraInfo.recording`, WARP-3511).** Every camera carries what
+it is keeping, from the same camera-service reading as `status`, so the two cannot
+disagree about whether anything is being saved. `null` always means "not known",
+never zero.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `mode` | `continuous`, `motion`, `events`, `off`, or `null` | Named for the broadest open retention window: `continuous` keeps everything, `motion` keeps segments with motion, `events` keeps only footage that overlaps an alert or detection, `off` keeps nothing. `null` only when `degraded` |
+| `retentionDays` | `{ continuous, motion, alerts, detections }` or `null` | Days each window keeps footage, as configured (0 closes a window). Present even when `mode` is `off`. `null` only when `degraded` |
+| `lastSegmentAt` | ISO string or `null` | When the newest saved segment ended, from a short recent window. `null` means unread or none was found there; check `lastSegmentReadFailed` before claiming no recent footage |
+| `lastSegmentReadFailed` | optional boolean | `true` when the recent-segment read failed. Show "Last save unavailable", never "Nothing saved recently"; this does not invalidate the mode and retention readings |
+| `usedBytes` | number or `null` | Bytes of footage on disk. `null` means none yet, or not known, and is never 0 |
+| `bytesPerDay` | number or `null` | The measured write rate scaled to a day. `null` means not measured yet |
+| `degraded` | boolean | The camera service could not be read. Every other field, and `status`, is unknown: show "service unavailable", never a recording or "not saving" claim |
+
+A degraded list is not cached, so it heals on the next poll. `GET` and `PATCH
+/cameras/:name/settings` answer `503 { error: "frigate_unavailable", degraded: true }`
+with the same header (an empty settings form served as 200 would be saved back over
+the real configuration), and `GET /cameras/:name/ptz` answers
+`{ supported: false, ... }`, adding `degraded: true` only when the camera service is
+unreachable. A camera with no PTZ is a normal answer, not an error. Retention
+windows and detection FPS have one set of limits for the service and the clients
+(`@droplet/shared-types`: detection FPS 1 to 30, every retention window 0 to 90 days).
 
 **Event still (`GET /cameras/events/:eventId/thumbnail`).** `:eventId` is a
 Frigate event id, and `thumbnail_url` on `/cameras/clips` points here. Its errors

@@ -95,6 +95,13 @@ import {
 } from "./services/department-reconciler.service.js";
 import { seedHouseholdDepartment } from "./services/household-seed.service.js";
 import { checkStorageNearFull } from "./services/camera-storage.service.js";
+import { sampleCameraBitrates } from "./services/camera-bitrate-sampler.service.js";
+import { getRecordingsReservedBytes } from "./services/recordings-capacity.js";
+import { createRecordingsBridge } from "./services/recordings-bridge.client.js";
+import { createFactsCollector } from "./services/recordings-facts.service.js";
+import { createRecordingsAllocator } from "./services/recordings-allocator.service.js";
+import { setRecordingsAllocator } from "./services/recordings-allocator.singleton.js";
+import { createRecordingsHealthCheck } from "./services/recordings-health.service.js";
 import { reconcileCameraBudgets } from "./services/camera-budget.service.js";
 import { reconcileStaleSending } from "./services/email-reconcile.service.js";
 import { checkForUpdate } from "./services/update-agent/poller.js";
@@ -160,6 +167,7 @@ import { createMcpStepDispatcher } from "./services/mcp-step-dispatcher.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
 import { runActivityNotifySweep } from "./services/activity-notify.service.js";
+import { runImportTick } from "./services/pm/import/runner.js";
 import { registerOutboxConsumer, stopOutbox } from "./services/pm/pm-outbox.js";
 import { createWebhookFanOutConsumer } from "./services/pm/webhook-fanout.js";
 import {
@@ -1604,6 +1612,28 @@ async function main() {
     { lockKey: "droplet:activity-notify" },
   );
 
+  // WARP-3527 (ADR-069 WS-11) — the Projects import runner's tick. A job is
+  // normally started by a `setImmediate` kick right after "Run"; THIS is what
+  // makes that safe to lose. Every 15 s it claims a PENDING job (the process
+  // died between Run and the kick), fails a RUNNING job whose heartbeat is
+  // stale (the process restarted mid-run — the file is kept and "Run again"
+  // resumes), and purges uploaded bytes nobody can use any more.
+  //
+  // The handler returns as soon as it has STARTED jobs — it never awaits one —
+  // so the advisory lock is held for milliseconds, not for an import. The claim
+  // itself is a guarded `updateMany`, atomic across replicas on its own; the
+  // lock only keeps two replicas from running the stale sweep at once.
+  cronRuntime.scheduleInterval(
+    15_000,
+    async () => {
+      const result = await runImportTick(prisma);
+      if (result.claimed > 0 || result.failedStale > 0 || result.purged > 0) {
+        logger.info(result, "pm import tick");
+      }
+    },
+    { lockKey: "droplet:pm-import-tick" },
+  );
+
   // WARP-3532 (ADR-069 §7, §9) — work webhooks. Three registrations, all on
   // cron-runtime, none a hand-rolled loop:
   //
@@ -1764,12 +1794,79 @@ async function main() {
   cronRuntime.scheduleCron(
     "20 * * * *",
     async () => {
-      const result = await checkStorageNearFull();
+      // WARP-3514: with a recordings allocation the 85 % threshold is measured against the
+      // slice (min(reserved, volume total)), not against a whole drive the slice does not own.
+      const result = await checkStorageNearFull({
+        reservedBytes: await getRecordingsReservedBytes(prisma),
+      });
       if (result.warned) {
         logger.warn(result, "camera storage near-full warning raised");
       }
     },
     { lockKey: "droplet:camera-storage-near-full" },
+  );
+
+  // WARP-3514 / ADR-070 — camera recordings never live on the OS disk, and Droplet sizes
+  // and allocates their slice of an encrypted bay drive itself. Four legs, each with its
+  // own lockKey (one replica per tick) and each letting errors propagate to cron-runtime's
+  // `safeRun` so the consecutive-failure canary sees an unreachable Frigate or bridge —
+  // the lesson of WARP-1849, where swallowed failures read as healthy for months.
+  //
+  //   :05  sample every camera's recording rate (the allocator's sizing input; 14 days kept)
+  //   :10  reconcile: create / grow / re-apply the allocation, start moves, mark a missing drive
+  //   every minute  advance a running migration (a no-op, with no bridge call, unless one is)
+  //   :40  health: ONE owner/admin notification per outage (missing, read-only, on the OS disk
+  //        — even with zero cameras —, near full, cannot grow, SMART failed, not encrypted)
+  //
+  // The allocator is also kicked right after a drive is prepared (routes/storage.ts) so a
+  // freshly encrypted drive is adopted without waiting for :10.
+  const recordingsBridge = createRecordingsBridge();
+  const collectRecordingsFacts = createFactsCollector({ prisma, bridge: recordingsBridge });
+  const notifyRecordingsOwners = (title: string, body: string) =>
+    notifyOwnersAndAdmins(prisma, title, body);
+  const recordingsAllocator = createRecordingsAllocator({
+    prisma,
+    bridge: recordingsBridge,
+    collectFacts: collectRecordingsFacts,
+    notifyOwners: notifyRecordingsOwners,
+  });
+  setRecordingsAllocator(recordingsAllocator);
+  const recordingsHealth = createRecordingsHealthCheck({
+    prisma,
+    collectFacts: collectRecordingsFacts,
+    notifyOwners: notifyRecordingsOwners,
+  });
+  cronRuntime.scheduleCron(
+    "5 * * * *",
+    async () => {
+      await sampleCameraBitrates(prisma);
+    },
+    { lockKey: "droplet:camera-bitrate-sample" },
+  );
+  cronRuntime.scheduleCron(
+    "10 * * * *",
+    async () => {
+      const outcome = await recordingsAllocator.reconcile({ reason: "cron" });
+      if (outcome.action !== "none") logger.info(outcome, "recordings allocator tick");
+    },
+    { lockKey: "droplet:recordings-allocator" },
+  );
+  cronRuntime.scheduleCron(
+    "* * * * *",
+    async () => {
+      await recordingsAllocator.pollMigration();
+    },
+    { lockKey: "droplet:recordings-migration-poll" },
+  );
+  cronRuntime.scheduleCron(
+    "40 * * * *",
+    async () => {
+      const result = await recordingsHealth.runOnce();
+      if (result.raised.length > 0 || result.cleared.length > 0) {
+        logger.info(result, "recordings health changed");
+      }
+    },
+    { lockKey: "droplet:recordings-health" },
   );
 
   // WARP-1851: re-derive budget-managed retention windows. Fires at 03:40,

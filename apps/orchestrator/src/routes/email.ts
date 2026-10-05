@@ -48,13 +48,15 @@
 import { createHash } from "node:crypto";
 import express, { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import { recordAccessDenied, requireRole, requireRoleOrMcpService } from "../middleware/auth.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { resolveAssertedUser } from "../services/asserted-user.service.js";
 import { reconcileStaleSending } from "../services/email-reconcile.service.js";
 import { deriveContacts } from "../services/email/contacts.service.js";
+import { EMAIL_HEADERS_SCHEMA } from "../services/support/email-headers.js";
+import { intakeEmailMessage } from "../services/support/email-intake.service.js";
 import {
   connectMailbox,
   disconnectMailbox,
@@ -1172,14 +1174,29 @@ export function createEmailRouter(
           });
           return;
         }
-        const updated = (await prisma.emailDraft.update({
-          where: { id: req.params.id },
-          data: {
-            status: parsed.data.status,
-            sentAt: parsed.data.status === "sent" ? new Date() : undefined,
-            error: parsed.data.status === "failed" ? (parsed.data.error ?? null) : null,
-          },
-        })) as unknown as DraftRow;
+        const updated = await prisma.$transaction(async (tx) => {
+          const saved = await tx.emailDraft.update({
+            where: { id: req.params.id },
+            data: {
+              status: parsed.data.status,
+              sentAt: parsed.data.status === "sent" ? new Date() : undefined,
+              error: parsed.data.status === "failed" ? (parsed.data.error ?? null) : null,
+            },
+          });
+          const ticketLink = await tx.pmTicketEmailLink.findUnique({
+            where: { emailDraftId: saved.id },
+            select: { commentId: true },
+          });
+          if (ticketLink?.commentId) {
+            await tx.pmComment.updateMany({
+              where: { id: ticketLink.commentId, visibility: "PUBLIC" },
+              data: parsed.data.status === "sent"
+                ? { deliveryStatus: "SENT", deliveryFailure: null }
+                : { deliveryStatus: "FAILED", deliveryFailure: "SEND_FAILED" },
+            });
+          }
+          return saved;
+        });
         res.json({ id: updated.id, status: updated.status });
       } catch (err) {
         next(err);
@@ -1242,7 +1259,7 @@ export function createEmailRouter(
   // POST /api/email/:accountId/messages-ingest
   // Body: { messageId, inReplyTo?, fromAddr, fromName?, toAddrs[],
   //          ccAddrs[]?, subject, bodyText?, bodyHtml?, receivedAt,
-  //          threadKey }
+  //          threadKey, headers? }
   //
   // The email-indexer service parses MIME, computes the threadKey
   // (root Message-ID or References chain), and POSTs each new
@@ -1265,6 +1282,10 @@ export function createEmailRouter(
     bodyHtml: z.string().max(2_000_000).nullable().optional(),
     receivedAt: z.string().datetime(),
     threadKey: z.string().min(1).max(998),
+    // WARP-3529 — authenticated service payload facts used for threading and
+    // loop protection. Optional only for an older indexer; absent means the
+    // desk cannot claim that automatic-mail headers were checked.
+    headers: EMAIL_HEADERS_SCHEMA.optional(),
     // WARP-3267 — `data` (base64) only when `status` is `stored`.
     attachments: z
       .array(
@@ -1376,6 +1397,11 @@ export function createEmailRouter(
           select: { threadId: true },
         })) as { threadId: string } | null;
         if (existing) {
+          // Covers a process crash after the mail row committed but before
+          // service-desk intake finished. The per-message ledger makes this a
+          // cheap no-op after a successful first pass.
+          try { await intakeEmailMessage(prisma, account.id, parsed.data.messageId); }
+          catch (err) { logger.warn({ err, accountId: account.id }, "service-desk email intake will need retry"); }
           res.json({ ok: true, threadId: existing.threadId, duplicate: true });
           return;
         }
@@ -1430,6 +1456,9 @@ export function createEmailRouter(
               bodyText: parsed.data.bodyText ?? null,
               bodyHtml: parsed.data.bodyHtml ?? null,
               receivedAt,
+              ...(parsed.data.headers
+                ? { headers: parsed.data.headers as Prisma.InputJsonValue }
+                : {}),
               // Created with the message, so a message is never stored
               // without the attachments it arrived with.
               ...(attachments.rows.length > 0
@@ -1441,6 +1470,11 @@ export function createEmailRouter(
             where: { id: thread.id },
             data: { messageCount: { increment: 1 } },
           });
+          // Intake is downstream of the committed EmailMessage. Failures are
+          // recorded in the desk ledger; they must not make the indexer replay
+          // a message that the mailbox already stored successfully.
+          try { await intakeEmailMessage(prisma, account.id, parsed.data.messageId); }
+          catch (err) { logger.warn({ err, accountId: account.id }, "service-desk email intake will need retry"); }
         } catch (err) {
           if ((err as { code?: string }).code === "P2002") {
             // Re-delivery of a message we've already stored. Idempotent

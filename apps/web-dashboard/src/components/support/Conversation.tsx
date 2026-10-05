@@ -55,7 +55,7 @@ const KIND_LABEL: Record<CommentEntry["authorKind"], string | null> = {
   AUTOMATION: "Automation",
 };
 
-function Comment({ entry }: { entry: CommentEntry }): JSX.Element {
+function Comment({ entry, onRetryDelivery }: { entry: CommentEntry; onRetryDelivery?: (id: string) => void }): JSX.Element {
   const note = entry.visibility === "INTERNAL";
   const kind = KIND_LABEL[entry.authorKind];
   return (
@@ -70,6 +70,14 @@ function Comment({ entry }: { entry: CommentEntry }): JSX.Element {
           <PmIcon name={note ? "pencil" : "send"} size={12} />
           {note ? "Internal note — not sent" : "Reply"}
         </span>
+        {!note && entry.deliveryStatus !== "NONE" && (
+          <span className="sp-visibility" aria-label={`Email ${entry.deliveryStatus.toLowerCase()}`}>
+            {entry.deliveryStatus === "PENDING" ? "Email queued" : entry.deliveryStatus === "SENT" ? "Email sent" : `Email failed${entry.deliveryFailure ? `: ${entry.deliveryFailure.toLowerCase().replaceAll("_", " ")}` : ""}`}
+          </span>
+        )}
+        {!note && entry.deliveryStatus === "FAILED" && onRetryDelivery && (
+          <button className="pm-btn ghost" type="button" onClick={() => onRetryDelivery(entry.id)}>Retry email</button>
+        )}
       </div>
       {/* Server-sanitized against the strict PM allowlist at the write boundary
           (support service `cleanHtml`), exactly as the Projects drawer renders
@@ -85,12 +93,14 @@ export function Conversation({
   loading,
   error,
   onRetry,
+  onRetryDelivery,
 }: {
   entries: ConversationEntry[] | undefined;
   truncated: boolean;
   loading: boolean;
   error: boolean;
   onRetry: () => void;
+  onRetryDelivery?: (id: string) => void;
 }): JSX.Element {
   if (loading && !entries) {
     return (
@@ -135,7 +145,7 @@ export function Conversation({
       <ol className="sp-convo" aria-label="Conversation">
         {list.map((e) =>
           e.type === "comment" ? (
-            <Comment key={e.id} entry={e} />
+            <Comment key={e.id} entry={e} onRetryDelivery={onRetryDelivery} />
           ) : (
             <li key={e.id} className="sp-activity">
               <span>{activitySentence(e)}</span>

@@ -24,17 +24,28 @@ import json
 import os
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "test" / "pytest"))
+from _topology_lock_test_support import add_trusted_stat_env
+
 SCRIPT = (
-    Path(__file__).resolve().parents[3]
-    / "scripts" / "host" / "droplet-storage-pool-apply.sh"
+    REPO_ROOT / "scripts" / "host" / "droplet-storage-pool-apply.sh"
 )
 BASH = shutil.which("bash")
 
-pytestmark = pytest.mark.skipif(BASH is None, reason="bash not available")
+pytestmark = [
+    pytest.mark.skipif(BASH is None, reason="bash not available"),
+    pytest.mark.skipif(
+        os.name == "nt",
+        reason="root executor tests require POSIX flock, /proc fd identity checks, and Unix shebang execution",
+    ),
+]
 
 
 def _write_stub(tmp_path: Path, body: str) -> Path:
@@ -58,16 +69,152 @@ def _spool_request(spool: Path, operation="pool_create", params=None,
     }), encoding="utf-8")
 
 
-def _run_apply(spool: Path, stub: Path):
+def _run_apply(spool: Path, stub: Path, **extra_env):
+    work = spool.parent
+    lock = work / "recordings-topology.lock"
+    lock.touch(exist_ok=True)
+    status_file = work / "nvr-status.json"
+    if not status_file.exists():
+        status_file.write_text(json.dumps({"kind": "volume", "source": "nvrdata"}),
+                               encoding="utf-8")
+    status_script = work / "nvr-status.sh"
+    status_script.write_text(
+        '#!/bin/sh\ncat "$DROPLET_TEST_NVR_STATUS_JSON_FILE"\n',
+        encoding="utf-8", newline="\n")
+    os.chmod(status_script, 0o755)
     env = dict(os.environ)
     env.update({
         "DROPLET_POOL_SPOOL_DIR": str(spool),
         "DROPLET_POOL_SCRIPT": str(stub),
+        "DROPLET_STORAGE_TOPOLOGY_LOCK_FILE": str(lock),
+        "DROPLET_NVR_STATUS_SCRIPT": str(status_script),
+        "DROPLET_TEST_NVR_STATUS_JSON_FILE": str(status_file),
     })
+    env.update({k: str(v) for k, v in extra_env.items()})
+    add_trusted_stat_env(env, work / "test-bin", lock)
     return subprocess.run(
         [BASH, str(SCRIPT)],
         env=env, capture_output=True, text=True, timeout=600,
     )
+
+
+def test_active_recordings_device_is_refused_by_root_recheck(tmp_path):
+    spool = tmp_path / "spool"
+    marker = tmp_path / "POOL_SCRIPT_RAN"
+    stub = _write_stub(tmp_path, f'touch "{marker}"\nexit 0\n')
+    _spool_request(spool, operation="drive_adopt", params={"device": "md0"})
+    status = {
+        "kind": "path", "source": "/mnt/droplet/bay/nvr", "mounted": True,
+        "fsUuid": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+        "mountPath": "/mnt/droplet/bay", "physicalDisk": "sdb,sdc",
+        "backingDevices": ["md0", "sdb", "sdc", "droplet-bay-ab12cd34"],
+    }
+    status_file = tmp_path / "nvr-status.json"
+    status_file.write_text(json.dumps(status), encoding="utf-8")
+    proc = _run_apply(spool, stub)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads((spool / "result.json").read_text())
+    assert result["rc"] == 77
+    assert "camera recordings" in result["stdout"]
+    assert not marker.exists()
+
+
+def test_unverified_recordings_status_fails_closed_before_pool_script(tmp_path):
+    spool = tmp_path / "spool"
+    marker = tmp_path / "POOL_SCRIPT_RAN"
+    stub = _write_stub(tmp_path, f'touch "{marker}"\nexit 0\n')
+    _spool_request(spool, operation="drive_adopt", params={"device": "sdb"})
+    status_file = tmp_path / "nvr-status.json"
+    status_file.write_text('{"kind":"path","source":"/mnt/droplet/bay/nvr",'
+                           '"mounted":true,"mountPath":"/",'
+                           '"backingDevices":["sdb"]}', encoding="utf-8")
+    proc = _run_apply(spool, stub)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads((spool / "result.json").read_text())["rc"] == 78
+    assert not marker.exists()
+
+
+def test_topology_lock_remains_held_through_pool_script(tmp_path):
+    spool = tmp_path / "spool"
+    stub = _write_stub(
+        tmp_path,
+        'if flock -n "$DROPLET_STORAGE_TOPOLOGY_LOCK_FILE" -c true; then exit 91; fi\n'
+        'printf \'{"lockHeld":true}\\n\'\nexit 0\n',
+    )
+    _spool_request(spool, operation="drive_adopt", params={"device": "sdb"})
+    proc = _run_apply(spool, stub)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads((spool / "result.json").read_text())
+    assert result["rc"] == 0
+    assert json.loads(result["stdout"])["lockHeld"] is True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX flock")
+def test_writer_and_pool_executor_serialize_on_the_same_lock_inode(tmp_path):
+    import fcntl
+
+    spool = tmp_path / "spool"
+    lock = tmp_path / "recordings-topology.lock"
+    lock.touch()
+    release = tmp_path / "release-writer.lock"
+    writer = subprocess.Popen(
+        [sys.executable, "-c",
+         "import fcntl,os,sys,time; fd=os.open(sys.argv[1],os.O_RDWR); "
+         "fcntl.flock(fd,fcntl.LOCK_EX); print('locked',flush=True); "
+         "\nwhile not os.path.exists(sys.argv[2]): time.sleep(.01)",
+         str(lock), str(release)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        assert writer.stdout is not None
+        assert writer.stdout.readline().strip() == "locked"
+        marker = tmp_path / "POOL_SCRIPT_RAN"
+        stub = _write_stub(tmp_path, f'touch "{marker}"\nexit 0\n')
+        _spool_request(spool, operation="drive_adopt", params={"device": "sdb"})
+        first = _run_apply(spool, stub)
+        assert first.returncode == 0, first.stderr
+        assert json.loads((spool / "result.json").read_text())["rc"] == 79
+
+        # The active device changes while the NVR-side writer still owns the
+        # shared lock. The pool operation must remain blocked until that writer
+        # releases; its next fresh attempt must then see the new active chain.
+        (tmp_path / "nvr-status.json").write_text(json.dumps({
+            "kind": "path", "source": "/mnt/droplet/bay/nvr", "mounted": True,
+            "fsUuid": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+            "mountPath": "/mnt/droplet/bay", "physicalDisk": "sdb",
+            "backingDevices": ["sdb", "sdb1", "droplet-bay-crypt"],
+        }), encoding="utf-8")
+        _spool_request(spool, operation="drive_adopt", params={"device": "sdb"})
+        second = _run_apply(spool, stub)
+        assert second.returncode == 0, second.stderr
+        assert json.loads((spool / "result.json").read_text())["rc"] == 79
+        assert not marker.exists()
+    finally:
+        release.touch()
+        writer.wait(timeout=10)
+        if writer.returncode != 0:
+            raise AssertionError(writer.stderr.read() if writer.stderr else "lock holder failed")
+
+    _spool_request(spool, operation="drive_adopt", params={"device": "sdb"})
+    third = _run_apply(spool, stub)
+    assert third.returncode == 0, third.stderr
+    assert json.loads((spool / "result.json").read_text())["rc"] == 77
+    assert not marker.exists()
+
+
+def test_recovery_custody_skips_topology_guard_and_lock(tmp_path):
+    spool = tmp_path / "spool"
+    stub = _write_stub(tmp_path, 'printf \'{"ok":true}\\n\'\nexit 0\n')
+    _spool_request(spool, operation="recovery_key_reveal",
+                   params={"uuid": "cafef00d-848"})
+    proc = _run_apply(
+        spool, stub,
+        DROPLET_STORAGE_TOPOLOGY_LOCK_FILE=str(tmp_path / "missing-lock"),
+        DROPLET_NVR_STATUS_SCRIPT=str(tmp_path / "missing-status-script"),
+        DROPLET_POOL_TMPDIR=str(tmp_path),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads((spool / "result.json").read_text())["rc"] == 0
 
 
 def test_script_exists_and_is_executable_bash():
@@ -177,6 +324,23 @@ def _run_apply_with_tmp(spool: Path, stub: Path, capture_dir: Path,
         # is available.
         "TMPDIR": str(plain_tmp).replace("\\", "/"),
     })
+    lock = spool.parent / "recordings-topology.lock"
+    lock.touch(exist_ok=True)
+    status_file = spool.parent / "nvr-status.json"
+    if not status_file.exists():
+        status_file.write_text(json.dumps({"kind": "volume", "source": "nvrdata"}),
+                               encoding="utf-8")
+    status_script = spool.parent / "nvr-status.sh"
+    status_script.write_text(
+        '#!/bin/sh\ncat "$DROPLET_TEST_NVR_STATUS_JSON_FILE"\n',
+        encoding="utf-8", newline="\n")
+    os.chmod(status_script, 0o755)
+    env.update({
+        "DROPLET_STORAGE_TOPOLOGY_LOCK_FILE": str(lock),
+        "DROPLET_NVR_STATUS_SCRIPT": str(status_script),
+        "DROPLET_TEST_NVR_STATUS_JSON_FILE": str(status_file),
+    })
+    add_trusted_stat_env(env, spool.parent / "test-bin", lock)
     return subprocess.run(
         [BASH, str(SCRIPT)],
         env=env, capture_output=True, text=True, timeout=600,
@@ -215,15 +379,11 @@ def test_stdout_capture_files_live_in_the_tmpfs_dir_not_the_default_tmp(tmp_path
 
 def test_an_unusable_capture_dir_falls_back_instead_of_failing(tmp_path):
     spool = tmp_path / "spool"
+    plain_tmp = tmp_path / "plain-tmp"
+    plain_tmp.mkdir()
     stub = _write_stub(tmp_path, "printf '{\"ok\": true}\n'\nexit 0\n")
     _spool_request(spool)
-    env = dict(os.environ)
-    env.update({
-        "DROPLET_POOL_SPOOL_DIR": str(spool),
-        "DROPLET_POOL_SCRIPT": str(stub),
-        "DROPLET_POOL_TMPDIR": str(tmp_path / "no-such-dir").replace("\\", "/"),
-    })
-    proc = subprocess.run([BASH, str(SCRIPT)], env=env, capture_output=True,
-                          text=True, timeout=600)
+    proc = _run_apply_with_tmp(spool, stub, tmp_path / "no-such-dir",
+                               plain_tmp)
     assert proc.returncode == 0, proc.stderr
     assert json.loads((spool / "result.json").read_text())["rc"] == 0

@@ -68,6 +68,14 @@ guaranteed_paths() {
   sed -nE 's/^LogsDirectory=(.*)$/\1/p'    "$unit" | tr ' ' '\n' | sed -E 's#^#/var/log/#'
   sed -nE 's/^CacheDirectory=(.*)$/\1/p'   "$unit" | tr ' ' '\n' | sed -E 's#^#/var/cache/#'
   sed -nE 's/^RuntimeDirectory=(.*)$/\1/p' "$unit" | tr ' ' '\n' | sed -E 's#^#/run/#'
+  # A shipped root-owned tmpfiles `d` entry is created by the installer and by
+  # systemd-tmpfiles-setup before services start. Unlike RuntimeDirectory= it
+  # preserves the shared lock's root ownership and inode across bridge restarts.
+  local tmpfiles
+  for tmpfiles in "$REPO_ROOT"/scripts/host/etc-tmpfiles.d/*.conf; do
+    [ -f "$tmpfiles" ] || continue
+    awk '$1 == "d" && $2 ~ /^\// { print $2 }' "$tmpfiles"
+  done
   # StandardOutput=append:/path and StandardError=append:/path open with O_CREAT
   # during exec_child, which runs before apply_mount_namespace().
   sed -nE 's/^Standard(Output|Error)=append:(.*)$/\2/p' "$unit"
@@ -117,7 +125,7 @@ while IFS= read -r u; do
     ok "$rel"
   else
     bad "$rel carves out uncreated path(s): $offenders"
-    echo "        fix: use StateDirectory=/LogsDirectory=, or prefix the path with '-'"
+    echo "        fix: provision the path via StateDirectory=/LogsDirectory=/tmpfiles, or prefix with '-'"
   fi
 done <<< "$UNITS"
 
@@ -182,6 +190,14 @@ EOF
 audit_unit "$TMP/ok-optional.service" >/dev/null \
   && ok "checker accepts '-' optional prefix" \
   || bad "checker rejected a '-'-prefixed optional path"
+
+cat > "$TMP/ok-tmpfiles.service" <<'EOF'
+[Service]
+ReadWritePaths=/run/droplet-storage-ops
+EOF
+audit_unit "$TMP/ok-tmpfiles.service" >/dev/null \
+  && ok "checker accepts the tmpfiles-provisioned root-owned shared lock directory" \
+  || bad "checker rejected a tmpfiles-provisioned lock directory"
 
 echo
 echo "passed: $PASS   failed: $FAIL"

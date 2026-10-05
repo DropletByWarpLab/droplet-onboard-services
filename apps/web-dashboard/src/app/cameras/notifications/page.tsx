@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
@@ -10,6 +11,7 @@ import {
   Loader2,
   RefreshCw,
   Save,
+  Server,
   User,
   Activity,
 } from "lucide-react";
@@ -178,6 +180,11 @@ export default function NotificationsPage() {
             <ArrowLeft size={15} />
             Cameras
           </button>
+          {/* WARP-3511: what the footage behind these alerts costs. */}
+          <Link href="/cameras/system" className="btn ghost">
+            <Server size={15} />
+            System
+          </Link>
           {actions}
         </>
       }

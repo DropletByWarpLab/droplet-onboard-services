@@ -67,9 +67,10 @@ const h = vi.hoisted(() => {
     invalidateCamerasCache: vi.fn(async () => {
       state.cache = null;
     }),
-    // Frigate client side-effects — irrelevant to the cache contract, no-ops.
-    enableDetection: vi.fn(async () => {}),
-    disableDetection: vi.fn(async () => {}),
+    // Frigate side-effects — irrelevant to the cache contract, no-ops.
+    // WARP-3511: detection is the persisted `detect.enabled` setting, so
+    // enable/disable go through the settings service, not a Frigate endpoint.
+    updateCameraSettings: vi.fn(async () => ({})),
     deleteCamera: vi.fn(async () => {}),
     addCamera: vi.fn(async () => true),
     syncCamerasFromDb: vi.fn(async () => []),
@@ -127,8 +128,6 @@ vi.mock("../services/frigate.client.js", () => ({
   tagEventAsFace: vi.fn(),
   openBirdseyeStream: vi.fn(),
   openMjpegStream: vi.fn(),
-  enableDetection: h.enableDetection,
-  disableDetection: h.disableDetection,
   deleteCamera: h.deleteCamera,
   addCamera: h.addCamera,
   syncCamerasFromDb: h.syncCamerasFromDb,
@@ -188,7 +187,7 @@ vi.mock("../services/camera-groups.service.js", () => ({
 vi.mock("../services/camera-pins.service.js", () => ({}));
 vi.mock("../services/camera-settings.service.js", () => ({
   getCameraSettings: vi.fn(),
-  updateCameraSettings: vi.fn(),
+  updateCameraSettings: h.updateCameraSettings,
 }));
 
 import { createCamerasRouter } from "./cameras.js";
@@ -369,6 +368,7 @@ describe("WARP-1286 follow-up — cameras:list invalidation on every camera muta
 
     const res = await request(app).post("/api/cameras/front_door/enable");
     expect(res.status).toBe(200);
+    expect(h.updateCameraSettings).toHaveBeenCalledWith("front_door", { detectEnabled: true });
     expect(h.invalidateCamerasCache).toHaveBeenCalled();
 
     expect(await getEnabled(app, "front_door")).toBe(true);
@@ -384,7 +384,7 @@ describe("WARP-1286 follow-up — cameras:list invalidation on every camera muta
     const gate = await request(app).post("/api/cameras/front_door/disable");
     expect(gate.status).toBe(202);
     expect(gate.body).toMatchObject({ status: "confirmation_required" });
-    expect(h.disableDetection).not.toHaveBeenCalled();
+    expect(h.updateCameraSettings).not.toHaveBeenCalled();
     expect(h.invalidateCamerasCache).not.toHaveBeenCalled();
     // Still true, and the cache is still warm from the GET above.
     expect(await getEnabled(app, "front_door")).toBe(true);
@@ -394,7 +394,7 @@ describe("WARP-1286 follow-up — cameras:list invalidation on every camera muta
       .post("/api/cameras/command/confirm")
       .send({ confirmationToken: "tok", operation: "disable_camera" });
     expect(confirm.status).toBe(200);
-    expect(h.disableDetection).toHaveBeenCalledWith("front_door");
+    expect(h.updateCameraSettings).toHaveBeenCalledWith("front_door", { detectEnabled: false });
     expect(h.invalidateCamerasCache).toHaveBeenCalled();
 
     expect(await getEnabled(app, "front_door")).toBe(false);
@@ -411,7 +411,7 @@ describe("WARP-1286 follow-up — cameras:list invalidation on every camera muta
     const res = await request(app).post("/api/cameras/front_door/disable");
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ status: "disabled" });
-    expect(h.disableDetection).toHaveBeenCalledWith("front_door");
+    expect(h.updateCameraSettings).toHaveBeenCalledWith("front_door", { detectEnabled: false });
     expect(h.invalidateCamerasCache).toHaveBeenCalled();
 
     expect(await getEnabled(app, "front_door")).toBe(false);
