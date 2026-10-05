@@ -19,6 +19,7 @@ import { fmtISODate, isOverdue } from "./config";
 import { useSubIssues, useProjectLabels, pmActions } from "./usePm";
 import { CycleField, ModulesField } from "./planning-pickers";
 import type { PmWorkItem } from "./types";
+import { TimeSection } from "./time/TimeSection";
 import { translateError } from "@/lib/friendly-errors";
 import { useAuth } from "@/lib/auth";
 import { ActivitySection } from "./timeline";
@@ -318,6 +319,7 @@ function DetailBody({
           same transaction as the comment; the section re-reads the merged
           timeline itself, and `onChanged` refreshes the board's comment counts. */}
       <ActivitySection itemId={item.id} viewerId={user?.id} role={user?.role} onChanged={onChanged} />
+      <TimeSection item={item} />
     </div>
   );
 }

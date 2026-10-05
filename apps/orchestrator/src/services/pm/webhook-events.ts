@@ -110,6 +110,9 @@ const VERB_EVENT: Record<PmActivityVerb, WorkItemEvent> = {
   watcher_added: "work_item.updated",
   watcher_removed: "work_item.updated",
   mentioned: "work_item.updated",
+  time_logged: "work_item.updated",
+  time_log_updated: "work_item.updated",
+  time_log_removed: "work_item.updated",
 };
 
 export function eventForVerb(verb: PmActivityVerb): WorkItemEvent {
