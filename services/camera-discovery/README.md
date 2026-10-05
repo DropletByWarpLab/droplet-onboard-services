@@ -20,6 +20,58 @@ ONVIF WS-Discovery ─────┘      │
 5. **Auto-configure** — push camera config to Frigate NVR via its API
 6. **Publish** discovery event on MQTT for the orchestrator to relay to clients
 
+### Cameras Frigate already has (WARP-3508)
+
+Frigate is the source of truth for "this host is a camera". Discovery reads
+`cameras.<name>.ffmpeg.inputs[].path` from Frigate's config and treats every IP it
+finds as *managed*: a managed IP is never probed (no ONVIF login, no
+default-credential ladder), never published, and any pending record sitting on it is
+dropped. This is what stops a camera added by hand — which never passes through
+this service — from lingering in the discovered list as "needs sign-in" and being
+re-probed every sweep; Hanwha locks the admin account after ~5 failed logins.
+
+The managed set is refreshed at startup, before an operator-triggered
+`POST /scan`, and every 10th scheduled sweep (~5 minutes at the default
+`SCAN_INTERVAL`). Each refresh *replaces* the set, so a camera removed from Frigate
+becomes discoverable again; if Frigate cannot be reached the previous set is kept.
+The refresh before `POST /scan` waits at most 5 s (`RECONCILE_TIMEOUT_SECONDS`): a
+Frigate that is restarting costs that refresh, never the scan.
+
+### Credential probing budget (WARP-3508)
+
+Hanwha, Axis and some Hikvision cameras lock the admin account after ~5 failed
+logins and answer `490 Account Blocked` for several minutes. A camera still waiting
+for the operator's password used to be re-probed every sweep — ONVIF as
+admin/blank, then up to ~14 default logins per stream path — and so sat in
+permanent lockout, the operator locked out with it. The default-credential ladder
+now keeps a per-IP budget (`LADDER_*` in `rtsp_prober.py`):
+
+- at most 2 rejected logins per run, then it stands down for 10 minutes; the ONVIF
+  admin/blank login stands down with it. The next run *resumes at the next
+  credential* rather than restarting at the first;
+- a `490` stops it at once, for an hour; so does a camera that has rejected every
+  credential (it needs the operator's password), before a new pass starts;
+- a stream path that does not exist, or does not challenge, costs one anonymous
+  request and no login.
+
+Anonymous probes (port scan, `OPTIONS`, the classifier's `DESCRIBE`) never spend a
+camera's lockout budget and keep running every sweep, so a camera that is standing
+down still appears in the list as needing credentials. The price is slower adoption
+of a camera whose factory default is not among the first few credentials — set
+`CAMERA_DEFAULT_USERNAME` / `CAMERA_DEFAULT_PASSWORD` and the site's real credential
+is the first one tried.
+
+### Decisions made while a sweep is probing
+
+A sweep spends seconds per candidate (ONVIF, RTSP, the credential ladder, Frigate).
+If the operator accepts, dismisses or hand-adds that camera in the meantime, the
+sweep drops what it found instead of writing it back — otherwise a camera already
+live in Frigate reappears as "needs credentials", and a dismissed one reappears at
+all. The check runs when the candidate list is built, before each candidate's
+probes, and again immediately before the sweep records a result or adds the camera
+to Frigate (`_already_decided` in `main.py`). The sweep's own Frigate add holds the
+same in-flight claim `accept` does, so a reject arriving during it gets a `409`.
+
 ## Security
 
 - **IP validation** — only probes RFC 1918 private addresses (10.x, 172.16-31.x, 192.168.x). Rejects loopback, link-local, multicast, and public IPs.
@@ -37,11 +89,18 @@ ONVIF WS-Discovery ─────┘      │
 | GET | `/cameras/discovered` | Pending cameras (not yet in Frigate) |
 | GET | `/cameras/known` | Active cameras (configured in Frigate) |
 | POST | `/cameras/discovered/{mac}/accept` | Accept camera into Frigate |
-| POST | `/cameras/discovered/{mac}/reject` | Reject camera (won't rediscover) |
+| POST | `/cameras/discovered/{mac}/credentials` | Add a discovered camera with operator-supplied `{username, password}` (probes RTSP first, ONVIF only if RTSP found no path; 422 `auth_failed`/`no_stream_path`/`basic_auth_only`, 423 `locked`, 502 `unreachable`, 504 `timeout`, 400 `invalid_credentials`/`unsupported_password`/`unsupported_stream_address`) |
+| POST | `/cameras/discovered/{mac}/reject` | Reject camera (won't rediscover — the dismissal survives a restart, see [State](#state)) |
 | POST | `/scan` | Manually trigger a discovery scan |
 | GET | `/subnet/status` | Which subnet is being scanned |
 | GET | `/drivers` | Camera driver status report (kernel modules, V4L2, USB) |
 | POST | `/drivers/fix` | Auto-fix driver issues (requires auth) |
+
+`{mac}` is the camera's key: its MAC, or `ip:<addr>` / `onvif_<addr_with_underscores>`
+for a camera found without a DHCP lease. It may be spelled in any case — it is
+lower-cased before use, because the pending list is keyed by the lower-case form
+(the orchestrator sends it lower-case, but nothing depends on that). Anything that
+cannot be a key is a `400`; a well-formed key that is not pending is a `404`.
 
 ## Configuration
 
@@ -55,6 +114,30 @@ ONVIF WS-Discovery ─────┘      │
 | `CAMERA_INIT_CA_CERT` | (unset) | Path to a CA bundle/cert for TLS verification of the camera first-run (vendor-init) HTTPS clients (WARP-583). When set, httpx verifies the camera cert against it; a set-but-missing path fails closed rather than silently downgrading. When unset, verification is disabled — cameras ship per-device self-signed certs on first run, so pinning is not always feasible — and a warning is logged once per process. Residual risk while unpinned: an on-LAN MITM between this service and the camera VLAN can intercept the first-run admin-password set. Pinning also verifies the hostname/IP against the cert's SANs, so a device cert without the camera's IP in its SANs will fail verification against raw-IP targets — fail-closed, by design; provision a cert carrying the device IP in its SANs, or fall back to unpinned. Mirrors the switch service's `SWITCH_CA_CERT`. |
 | `DEVICE_SECRET` | (empty) | Auth token for `/drivers/fix` |
 | `CAMERA_RTSP_BASIC_ALLOW_IPS` | (empty) | Comma-separated camera IPs the prober may answer with RTSP Basic auth (clear-text password). Empty = Digest only |
+| `CAMERA_DISCOVERY_STATE_DIR` | `/var/lib/droplet/camera-discovery` | Directory for the dismissed-camera list (`rejected-macs.json`). Compose mounts the `camera-discovery-state` named volume here; set it only to run the service outside the container (WARP-3508). |
+
+## State
+
+Camera-discovery keeps its working state in memory and re-derives it from the
+network and from Frigate on every start. The one exception is the list of cameras
+the operator **dismissed** (`POST .../reject`): that is a decision, not something
+discovery can re-derive, so it is written to `rejected-macs.json` under
+`CAMERA_DISCOVERY_STATE_DIR` and read back at startup.
+
+- The file is `{"rejected_macs": ["aa:bb:...", ...]}` — MACs only, no credentials.
+- Writes are atomic (temp file in the same directory, `fsync`, rename), so a crash
+  or full disk leaves the previous list intact.
+- Saving is best-effort: if the directory is unwritable the camera is still
+  dismissed for this run, the error is logged, and the reject response carries
+  `"persisted": false`.
+- A missing, corrupt or over-long file never stops the service from starting; the
+  list is capped at 1000 entries, as it is in memory.
+- There is no "un-reject" endpoint. To bring a dismissed camera back, delete its
+  entry from the file (or the file) and restart the service; a factory reset wipes
+  the volume.
+- `known_cameras` is deliberately **not** persisted: its records embed
+  `user:pass@` stream URLs, and what Frigate already manages is re-derived from
+  Frigate itself.
 
 ## Files
 

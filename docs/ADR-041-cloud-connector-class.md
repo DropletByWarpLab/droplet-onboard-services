@@ -106,3 +106,97 @@ What is reused rather than reinvented: the `IntegrationConnection` record and it
 - Build the at-rest encryption the synced-content store requires — **WARP-2028**; blocking for any persisted cloud sync.
 - Register each further provider's hosts on its own ticket: Salesforce (WARP-2116) needs `login.salesforce.com`, the customer's `*.my.salesforce.com` My Domain as a `kind: dynamic` entry, and `api.pubsub.salesforce.com` if the live feed ships.
 - Revisit if a future provider genuinely needs a native driver — that provider, not this class, would justify a sidecar.
+
+---
+
+## Implementation record — 2026-10-04 (WARP-3538)
+
+SharePoint document libraries joined OneDrive as the Microsoft 365 connector's first
+LANDED data. Until this change the sync engine (WARP-2118) read every page and threw it
+away: it advanced `lastSyncedAt`, proved the transport, and kept nothing. This is the
+first time the Microsoft 365 connector keeps what it reads (§4: "the local copy is the
+point"), so the decisions §4 left open for it are settled here.
+
+**One provider-agnostic store, not a Microsoft one.** Drive items land in
+`CloudFileItem`, the containers they sit in (a person's OneDrive, one SharePoint library)
+in `CloudFileSource`. Google Drive and Dropbox connectors are built right after this one
+and must land into the SAME store and be found by the SAME assistant tool, so a person
+asks once and gets every cloud; three concrete providers in one programme is not a
+premature abstraction. `CloudFileProvider` and `CloudFileSourceKind` are closed enums that
+each later connector extends with an additive `ALTER TYPE`, in the change that writes the
+value, and no column exists that no current code reads. It is not `ErpEntityCache` (still
+zero writers, and its encryption promise is still unkept) and not the CRM tables, which
+hold companies, contacts and deals, not files.
+
+**Metadata only, and that is an egress decision.** A file's bytes are a 302 to a
+per-tenant host that no static `allowed-egress.yaml` entry can name, so nothing reads
+`downloadUrl` and nothing asks for `/content`: names, folders, links, last modifier, size,
+MIME type and times. No new host is registered; `m365-graph-api` already covers every call.
+
+**Encrypted anyway, under the WARP-2549 reading.** The narrow reading would have allowed
+plaintext here: these tables make no encryption promise to break. They are encrypted
+regardless, because a file name in a practice routinely carries a patient's, and a table
+should claim only what it implements. Names, links, last modifier and source names are
+`dcv1:` blobs under their own HKDF label (`cloud-file-metadata`), AAD-bound to an
+unambiguous tuple of (table, provider, person, source, item, column), so a blob cannot be
+moved between rows, people, clouds or columns. Ids, the folder flag, size and times stay
+clear because the tables are filtered, ordered and swept by them. The key rides
+`DEVICE_SECRET_KEY`, so a factory reset shreds it; the data need not survive a restore,
+because it re-syncs. 🔴 That only holds if the re-sync actually happens: the key that failed
+to open the token is the key that sealed the file names, so an unreadable token cache also
+makes the connection forget which link its cursors belong to, the reconnect counts as a
+different account, and the purge plus a full re-enumeration follow. Without that the rows
+survive unreadable and the cursors land only what changes from then on.
+
+**SharePoint is the person's choice, and the scope follows the choice (§2, §5).** The switch
+is `M365Connection.sharePointEnabled`, an explicit boolean that defaults to false.
+Microsoft's default consent setting, "Let Microsoft manage your consent settings", does
+not let users consent to `Files.Read.All`, `Files.ReadWrite.All`, `Sites.Read.All`,
+`Sites.ReadWrite.All` or the mail, calendar and contacts scopes: an administrator must
+grant consent (manage-app-consent-policies, 2026-08-28). A sign-in that asks for a scope the
+administrator has not approved fails as a whole, mail and calendar included. So a sign-in
+requests `Sites.Read.All` only for a person who opted in, decided when Connect is pressed
+and sealed with the flow; a silent refresh requests only the scopes the connection already
+holds, so turning the switch on never pushes a healthy connection into `NEEDS_RECONNECT`.
+It reports `needsConsent` and the card offers "Sign in again". Disconnect resets the choice.
+
+**One cursor per library, and a 403 is not a dead grant.** A document library is a drive:
+the `sharepoint` workload is the OneDrive delta addressed by drive id, with the bare `token`
+continuation parameter. That parameter used to be derived as `workload === "files"`, correct
+only while OneDrive was the sole drive; it is now a required field of every workload's spec.
+Libraries are found through the union of site search and the followed sites, personal sites
+excluded, capped at 100 per person (SharePoint's throttling is per app per tenant, delta
+with a token costs 1 resource unit and without one 2), the cap's count kept so the card can
+say "N more not read". `GET /sites?search=*` is not in Microsoft's reference; it is named
+as an undocumented dependency in `graph-resources.ts`, covered by the followed list, and an
+empty answer is never trusted enough to prune on. A 403 on one library moves only that
+cursor to backoff: losing a library is not a dead grant, and a 401 still reconnects.
+`claimDueCursors` now serves the least recently synced first, so a person with more than
+25 due cursors cannot starve the same ones for ever.
+
+**Deletion is a real operation (§4).** The landed rows have no foreign key, so each way
+out is explicit and scoped by person and cloud: disconnect, a leaver's deletion, a
+reconnect as a different account, switching SharePoint off (one transaction: the flag, the
+cursors, the libraries and their files, and nothing of OneDrive's) and a library pruned by
+a COMPLETE discovery. A partial or failed listing prunes nothing: "Microsoft hiccuped" must
+never read as "the library is gone". The deletion cannot be undone by what is still in
+flight: the landing handler refuses a page for a library the person no longer has, and the
+search finds only files in a source the person has, in a cloud they have connected.
+
+**A full enumeration is bracketed by a mark and a sweep.** A run from scratch returns the
+current state and says nothing about what was deleted, so the first page marks every row of
+the source `sweepPending`, every item the run returns clears it, and the last page deletes
+what is still marked. The engine tells the handler where a page sits, from the cursor as it
+was claimed, so a retry is told what it was told the first time and a tick that resumes a
+checkpoint never re-marks. An incremental run never sweeps.
+
+🔴 **Existing OneDrive cursors start over.** They hold a `deltaLink` from days of
+count-and-discard; continuing one would land only future changes and never the files that
+exist. The migration sends each `files` cursor back to a fresh enumeration, guarded on "no
+Microsoft 365 rows landed for this person yet" so that a re-run cannot restart an
+enumeration that has begun.
+
+**Not decided here.** Reading file content (it needs a host the registry cannot name);
+`Sites.Selected` (per-site grants made with `Sites.FullControl.All`); landing the other
+workloads, each of which lands where its own schema exists; and whether `search=*` returns
+every site on a live tenant, which the WARP-3538 live-tenant run confirms.

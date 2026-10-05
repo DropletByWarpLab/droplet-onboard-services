@@ -6,7 +6,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { WebSocket } from "ws";
+import { WebSocket, type WebSocketServer } from "ws";
 
 const validateTokenForWs = vi.fn();
 vi.mock("../middleware/auth.js", () => ({
@@ -24,16 +24,25 @@ import { attachWsBridge } from "./ws-bridge.service.js";
 
 const USER = { id: "u1", username: "alice", displayName: "Alice", role: "family" };
 let server: Server | undefined;
+let bridge: WebSocketServer | undefined;
+const safetyTimers = new Set<ReturnType<typeof setTimeout>>();
 
 afterEach(async () => {
-  vi.clearAllMocks();
+  for (const timer of safetyTimers) clearTimeout(timer);
+  safetyTimers.clear();
+  // HTTP server.close does not wait for upgraded sockets. Finish the bridge
+  // teardown before clearing authentication calls for the next test.
+  for (const client of bridge?.clients ?? []) client.terminate();
+  await new Promise<void>((r) => (bridge ? bridge.close(() => r()) : r()));
+  bridge = undefined;
   await new Promise<void>((r) => (server ? server.close(() => r()) : r()));
   server = undefined;
+  vi.clearAllMocks();
 });
 
 async function connect(headers: Record<string, string>, protocol?: string) {
   server = createServer();
-  attachWsBridge(server, { pingIntervalMs: 50 });
+  bridge = attachWsBridge(server, { pingIntervalMs: 50 });
   await new Promise<void>((r) => server!.listen(0, "127.0.0.1", r));
   const { port } = server.address() as AddressInfo;
   return new Promise<{ status: number | "open"; closeCode?: number }>((resolve) => {
@@ -42,15 +51,25 @@ async function connect(headers: Record<string, string>, protocol?: string) {
       protocol ? [protocol] : [],
       { headers },
     );
-    ws.on("open", () => {
-      ws.on("close", (code) => resolve({ status: "open", closeCode: code }));
-      // Safety net: if the server never closes, end the test with no code.
-      setTimeout(() => {
-        ws.close();
-        resolve({ status: "open" });
-      }, 1000);
+    let safetyTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearSafetyTimer = () => {
+      if (safetyTimer === undefined) return;
+      clearTimeout(safetyTimer);
+      safetyTimers.delete(safetyTimer);
+    };
+    ws.on("close", (code) => {
+      clearSafetyTimer();
+      resolve({ status: "open", closeCode: code });
     });
-    ws.on("unexpected-response", (_req, res) => resolve({ status: res.statusCode ?? 0 }));
+    ws.on("open", () => {
+      // Resolve only after the actual close, including the bounded safety net.
+      safetyTimer = setTimeout(() => ws.terminate(), 1000);
+      safetyTimers.add(safetyTimer);
+    });
+    ws.on("unexpected-response", (_req, res) => {
+      clearSafetyTimer();
+      resolve({ status: res.statusCode ?? 0 });
+    });
     ws.on("error", () => undefined);
   });
 }

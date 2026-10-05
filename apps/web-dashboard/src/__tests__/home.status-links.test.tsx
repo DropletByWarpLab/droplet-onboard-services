@@ -16,9 +16,6 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: pushMock, replace: vi.fn() }),
 }));
 
-vi.mock("@/lib/hooks/useRecents", () => ({
-  useRecents: () => ({ items: [{ path: "/a.txt" }, { path: "/b.txt" }] }),
-}));
 vi.mock("@/lib/hooks/useModels", () => ({
   useModels: () => ({
     models: [{ id: "m1", provider: "ollama", name: "llama3.2" }],
@@ -31,6 +28,17 @@ vi.mock("@/lib/hooks/useModels", () => ({
 const hookOpts = vi.hoisted(() => ({
   cameras: undefined as { enabled?: boolean } | undefined,
   voice: undefined as { enabled?: boolean } | undefined,
+  files: undefined as { enabled?: boolean } | undefined,
+  smartHome: undefined as { enabled?: boolean } | undefined,
+  modules: {
+    files: "on" as "on" | "off" | "unresolved",
+    cameras: "on" as "on" | "off" | "unresolved",
+    smart_home: "on" as "on" | "off" | "unresolved",
+    voice: "on" as "on" | "off" | "unresolved",
+  },
+}));
+vi.mock("@/lib/hooks/useModuleGate", () => ({
+  useModuleGateState: (moduleId: string) => hookOpts.modules[moduleId as "files" | "cameras" | "smart_home" | "voice"],
 }));
 vi.mock("@/lib/hooks/useCameras", () => ({
   useCameras: (opts?: { enabled?: boolean }) => (hookOpts.cameras = opts, {
@@ -42,7 +50,14 @@ vi.mock("@/lib/hooks/useCameras", () => ({
   }),
 }));
 vi.mock("@/lib/hooks/useSmartHome", () => ({
-  useSmartHome: () => ({ totalDevices: 3 }),
+  useSmartHome: (opts?: { enabled?: boolean }) => (
+    (hookOpts.smartHome = opts), { totalDevices: 3 }
+  ),
+}));
+vi.mock("@/lib/hooks/useRecents", () => ({
+  useRecents: (_limit: number, opts?: { enabled?: boolean }) => (
+    (hookOpts.files = opts), { items: [{ path: "/a.txt" }, { path: "/b.txt" }] }
+  ),
 }));
 vi.mock("@/lib/hooks/useVoice", () => ({
   useVoiceHealthSummary: (opts?: { enabled?: boolean }) => (
@@ -78,6 +93,11 @@ beforeEach(() => {
   cleanup();
   pushMock.mockReset();
   authUser.current = { username: "stefan", role: "owner" };
+  hookOpts.modules = { files: "on", cameras: "on", smart_home: "on", voice: "on" };
+  hookOpts.files = undefined;
+  hookOpts.smartHome = undefined;
+  hookOpts.cameras = undefined;
+  hookOpts.voice = undefined;
 });
 
 describe("System status stats are links", () => {
@@ -143,6 +163,21 @@ describe("System status row gating (WARP-3157)", () => {
     render(<StatusTile w={4} h={4} />);
     expect(screen.getByText("recent files")).toBeInTheDocument();
     expect(screen.queryByText("recently indexed")).toBeNull();
+  });
+
+  it("stops each module poll and omits its link while the module is off or unresolved", () => {
+    hookOpts.modules = { files: "off", cameras: "unresolved", smart_home: "off", voice: "unresolved" };
+    render(<StatusTile w={4} h={4} />);
+
+    expect(hookOpts.files).toEqual({ enabled: false });
+    expect(hookOpts.cameras).toEqual({ enabled: false });
+    expect(hookOpts.smartHome).toEqual({ enabled: false });
+    expect(hookOpts.voice).toEqual({ enabled: false });
+    expect(screen.queryByRole("button", { name: "Open Files" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open Cameras" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open Devices" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open Voice" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Open AI models" })).toBeInTheDocument();
   });
 });
 

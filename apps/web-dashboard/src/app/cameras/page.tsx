@@ -70,7 +70,8 @@ export default function CamerasPage() {
   // failed sweep and a clean sweep that found nothing looked identical (both:
   // nothing happened). Track the outcome and show it.
   const [lastScan, setLastScan] = useState<{ at: number; found: number } | null>(null);
-  // Camera we found but can't stream — hands off to the manual form prefilled.
+  // Camera we found but can't stream — hands off to the Add camera form: its
+  // username/password (a live discovery record) or the manual form, prefilled.
   const [credentialTarget, setCredentialTarget] = useState<DiscoveredCamera | null>(null);
 
   // Camera-group state. Selected pill drives the grid filter; null = "All

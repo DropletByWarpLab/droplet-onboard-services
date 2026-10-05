@@ -401,6 +401,60 @@ verifies before pulling, and how anyone can verify independently.
 > identities use the current name. Ticket texts referencing the old name
 > refer to this repository.
 
+## Personal API tokens and calendar links (WARP-3533) {#personal-api-tokens}
+
+Two credentials let a tool outside the dashboard read Projects as a person: a
+personal API token (`dpm_…`) for scripts, and a calendar link (an ICS feed URL)
+for calendar apps. Both are bearer credentials, so both follow the
+`CalendarFeedToken` / `ModelAccessToken` (ADR-067) shape.
+
+| | API token | Calendar link |
+|---|---|---|
+| Format | `dpm_` + 32 random bytes, base64url | `<row id>.<32 random bytes>` in `?token=` |
+| Stored | sha256 of the whole token, unique; an 8-character display prefix | sha256 of the secret half |
+| Shown | once, when created | once, when created or rotated |
+| Reaches | `/api/pm/*` and `/api/support/*` only, with the holder's gates unchanged | one feed only: the person's calendar, "my work", or one project |
+| Narrowed by | scopes `pm:read` / `pm:write` / `support:read` / `support:write` (write implies read) | its feed |
+| Ends when | revoked, expired (optional), the holder is deactivated, or the holder's role changes | rotated, revoked, expired (180 days), or the holder is deactivated |
+| Switch | Settings -> Developer, owner/admin, **off by default**; off = every token 401, none deleted | none; the `projects` module must be on |
+
+How the API token is held to "its holder, with less":
+
+- `authMiddleware` resolves it to the holder's **current** row on every
+  request, so the role, module and feature gates run exactly as they do for the
+  holder's own session. The role it was issued under is stored; a promotion or a
+  demotion ends the token at its next use even when the revoke hook did not
+  land. A token never carries an MFA stamp, so a step-up route is out of its reach.
+- `middleware/pm-api-token-guard.ts`, mounted right after `authMiddleware`,
+  confines it to the two prefixes and to its scopes, and rate-limits it at 300 a
+  minute **per token**. Everywhere else, including `/api/developer` (so a token
+  cannot mint a token or a calendar link or flip the switch), a `dpm_` bearer is
+  a 403 before the database is asked, and that refusal writes **no audit row**: the
+  caller has not authenticated, so a row would let anyone append signed entries
+  of their own wording. Admin configuration under the two prefixes (webhooks,
+  project and desk settings: `SESSION_ONLY_ROUTES` in `pm-api-token.service.ts`)
+  is session-only too, so a leaked owner token cannot point a webhook anywhere.
+  A `dpm_` value in a cookie, or on a WebSocket, is refused.
+- A GET, HEAD or OPTIONS needs `<area>:read` and every other method
+  `<area>:write`, with one tiny exception: `READ_ONLY_POSTS` lists the POSTs that
+  only read (the work-item query, whose filter is too large for a query string).
+  A test checks that no parameterised write route can answer one of those URLs.
+- It is never logged: the request logger redacts `Authorization`, the query
+  scrubber redacts `token`, and every audit row (created, revoked, refused,
+  switch changed) carries the row id and nothing from the secret. The tests
+  plant a token and search every log line, audit row and response for it.
+
+Calendar links are served ahead of every gate (a phone subscribes with no
+session), so the handler re-checks what the gates would have: the `projects`
+module, the guest tier floor (the person's role read at that request), directory
+status, expiry and the username in the path. The items are found by `User.id`,
+never by the username in the URL.
+
+Not done here, and worth a follow-up: minting either credential needs only the
+signed-in session, with no step-up (`createRequireCredentialStepUp`), as with
+the ADR-067 tokens and the existing calendar link. A hijacked session can
+therefore mint a token that outlives it until someone revokes it.
+
 ## Two trust layers
 
 | Layer | What it authenticates | Key/identity | Where verified |

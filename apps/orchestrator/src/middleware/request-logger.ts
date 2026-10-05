@@ -4,6 +4,14 @@ import { getRequestId } from "../lib/request-context.js";
 
 const isTest = process.env.NODE_ENV === "test" || !!process.env.VITEST;
 
+/** Recovery-key fields are kept exported so focused custody tests can verify the exact redaction paths. */
+export const REQUEST_LOG_REDACT_PATHS: readonly string[] = [
+  "res.body.recoveryKey",
+  "res.body.recovery_key",
+  "req.body.recoveryKey",
+  "req.body.recovery_key",
+];
+
 /** pino-http req serializer (receives the std-serialized req). */
 function scrubReq(req: { url?: string } & Record<string, unknown>) {
   const out = { ...req };
@@ -54,6 +62,10 @@ export function createRequestLogger(opts: {
         // that a future serializer or a `req.log.info({ req/res })` call might
         // emit, so a token can never ride out of the box in a log bundle.
         "req.body.token",
+        // WARP-3532: chat-app webhook URLs carry posting credentials in their
+        // path. The current request serializer omits bodies, but keep this
+        // secret out if a future handler logs a parsed request object.
+        "req.body.url",
         // AC2 defense-in-depth: a client that passes the redeem token as a
         // query param (?token=…) lands it under `req.query.token`, which the
         // default pino req serializer DOES emit — redact it alongside the body
@@ -72,6 +84,7 @@ export function createRequestLogger(opts: {
         'req.headers["x-droplet-auth"]',
         'req.headers["x-api-key"]',
         "res.body.token",
+        ...REQUEST_LOG_REDACT_PATHS,
       ],
     },
     mixin() {

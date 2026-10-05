@@ -5,15 +5,19 @@
  * camera IPs and RTSP URLs are never exposed to external clients.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { parseDocument, isMap, isScalar } from "yaml";
 
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
+import { scrubUrlCredentials } from "../lib/rtsp-credentials.js";
 import { FrigateNotFoundError } from "../types/frigate-error.js";
+import { toFrigateKey } from "./camera-key.js";
 import {
   buildRecordBlock,
   buildSnapshotsBlock,
 } from "./camera-retention-defaults.js";
+import { writeConfigPreImage } from "./frigate-config-preimage.js";
 
 const logger = createLogger("frigate-client");
 
@@ -399,6 +403,21 @@ export async function fetchEventThumbnail(eventId: string): Promise<Response> {
   );
   if (resp.status === 404) throw new FrigateNotFoundError("thumbnail_not_found");
   if (!resp.ok) throw new Error(`Frigate thumbnail: ${resp.status}`);
+  return resp;
+}
+
+/**
+ * WARP-3692 — the saved still for an event, resized by Frigate (`height`) so
+ * the AI is handed a bounded image rather than a full-resolution frame. Any
+ * non-2xx (a pruned event included) throws; the one caller degrades to
+ * "could not view".
+ */
+export async function fetchEventSnapshot(eventId: string, height: number): Promise<Response> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/events/${encodeURIComponent(eventId)}/snapshot.jpg?height=${Math.trunc(height)}`,
+    { signal: timeout(SNAPSHOT_TIMEOUT) }
+  );
+  if (!resp.ok) throw new Error(`Frigate event snapshot: ${resp.status}`);
   return resp;
 }
 
@@ -935,8 +954,49 @@ export async function fetchRawConfigYaml(): Promise<string> {
   return text;
 }
 
-/** Persist authored YAML and reload Frigate. text/plain so safe_load parses it. */
-export async function saveRawConfig(yamlText: string): Promise<Response> {
+// --- Config write lock (WARP-3510) ---
+//
+// Every writer below is read-modify-write against Frigate's authored YAML (or
+// a config/set that Frigate merges into the same file): add, delete, the
+// reconcile prune, `updateCameraSettings`, the retention backfill. Two of them
+// in flight at once each read the same text and each write it back, so the
+// second save silently undoes the first — a deleted camera returns, a new one
+// vanishes. They queue behind one promise-chain lock instead.
+//
+// The reconcile also reads the DB. It reads it INSIDE the lock (see
+// `syncCamerasFromDb`), so it never prunes against a snapshot taken before an
+// add it queued behind.
+//
+// Process-wide, which is what there is: one orchestrator process owns Frigate.
+// Re-entrant for the async chain that holds it, so a section can call another
+// locked function (the add pipeline holds the lock across `addCamera` AND the
+// DB write that makes the new camera visible to a reconcile) without
+// deadlocking. A caller outside that chain queues as usual.
+
+let configLockTail: Promise<void> = Promise.resolve();
+const configLockHeld = new AsyncLocalStorage<true>();
+
+export function withFrigateConfigLock<T>(section: () => Promise<T>): Promise<T> {
+  if (configLockHeld.getStore()) return section();
+  const run = configLockTail.then(() => configLockHeld.run(true, section));
+  // The tail never rejects, so one failed section cannot wedge the queue.
+  configLockTail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+/**
+ * Persist authored YAML and reload Frigate. text/plain so safe_load parses it.
+ *
+ * `preImage` is the YAML this save replaces — the text the caller read and
+ * edited. It is written to disk first (best-effort, see
+ * frigate-config-preimage.ts), so a writer that got its edit wrong can be
+ * undone. Callers hold `withFrigateConfigLock` across read → edit → save.
+ */
+export async function saveRawConfig(yamlText: string, preImage?: string): Promise<Response> {
+  if (preImage !== undefined) await writeConfigPreImage(preImage);
   return fetch(`${FRIGATE_URL}/api/config/save?save_option=restart`, {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
@@ -946,73 +1006,192 @@ export async function saveRawConfig(yamlText: string): Promise<Response> {
 }
 
 export async function deleteCamera(cameraName: string): Promise<void> {
-  // DELETE /api/config/cameras/<name> is gone on Frigate 0.17 (404), and
-  // config/set only MERGES (it can't remove a key). Drop the camera from the
-  // authored YAML and save the whole thing back.
-  const doc = parseDocument(await fetchRawConfigYaml());
-  doc.deleteIn(["cameras", cameraName]);
-  const resp = await saveRawConfig(String(doc));
-  if (!resp.ok) {
-    const errBody = await resp.text().catch(() => "");
-    logger.warn(
-      { status: resp.status, camera: cameraName, body: errBody.slice(0, 200) },
-      "Frigate config/save rejected while deleting camera",
-    );
-    throw new Error(`Delete camera: ${resp.status}`);
-  }
+  const key = toFrigateKey(cameraName);
+  if (!key) throw new Error("Delete camera: no usable camera key");
+  await withFrigateConfigLock(async () => {
+    // DELETE /api/config/cameras/<name> is gone on Frigate 0.17 (404), and
+    // config/set only MERGES (it can't remove a key). Drop the camera from the
+    // authored YAML and save the whole thing back.
+    const raw = await fetchRawConfigYaml();
+    const doc = parseDocument(raw);
+    doc.deleteIn(["cameras", key]);
+    const resp = await saveRawConfig(String(doc), raw);
+    if (!resp.ok) {
+      const errBody = await resp.text().catch(() => "");
+      logger.warn(
+        { status: resp.status, camera: key, body: scrubUrlCredentials(errBody).slice(0, 200) },
+        "Frigate config/save rejected while deleting camera",
+      );
+      throw new Error(`Delete camera: ${resp.status}`);
+    }
+  });
 }
 
+/**
+ * Add a camera to Frigate and make it start. `true` means Frigate accepted the
+ * config and was asked to restart — NOT that the camera is streaming; that is
+ * `waitForCameraStreaming`'s answer.
+ *
+ * The camera is filed under `toFrigateKey(name)`, the same key the DB row
+ * carries (WARP-3506). A name with no letter or digit has no key: refused here
+ * rather than written as an empty one.
+ */
 export async function addCamera(
   name: string,
   rtspUrl: string,
   detect = true
 ): Promise<boolean> {
-  const safeName = name.toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/^_+|_+$/g, "");
-
-  // Frigate 0.17 replaced POST /api/config/set (405) with a PUT that takes a
-  // {config_data, requires_restart} envelope and deep-MERGES config_data into
-  // the running config — so we send only the new camera block and existing
-  // cameras are preserved. This is the same call the camera-discovery service
-  // uses to auto-adopt. requires_restart=1 persists to disk and reloads so the
-  // camera actually starts capturing.
-  //
-  // 🔴 `record` MUST carry the retention windows explicitly. This block used
-  // to be `{ enabled: true }`, which inherits `continuous: 0` / `motion: 0`
-  // from Frigate's own schema — the camera then keeps ONLY segments that
-  // overlap an alert or detection, while every surface reports "Recording"
-  // (WARP-1957). See camera-retention-defaults.ts for why the fix is here
-  // and not in docker/frigate/config.yml.
-  const resp = await fetch(`${FRIGATE_URL}/api/config/set`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      config_data: {
-        cameras: {
-          [safeName]: {
-            ffmpeg: { inputs: [{ path: rtspUrl, roles: ["detect", "record"] }] },
-            detect: { enabled: detect, width: 1280, height: 720, fps: 5 },
-            record: buildRecordBlock(),
-            snapshots: buildSnapshotsBlock(),
-          },
-        },
-      },
-      requires_restart: 1,
-    }),
-    signal: timeout(30_000),
-  });
-
-  if (!resp.ok) {
-    const errBody = await resp.text().catch(() => "");
-    logger.warn(
-      { status: resp.status, camera: safeName, body: errBody.slice(0, 200) },
-      "Frigate config/set rejected while adding camera",
-    );
+  const safeName = toFrigateKey(name);
+  if (!safeName) {
+    logger.warn({ name }, "refusing to add a camera whose name has no usable Frigate key");
     return false;
   }
-  // Frigate 0.17 always sets `success`; treat its absence as a response-shape
-  // change, not a silent success.
-  const body = (await resp.json().catch(() => ({}))) as { success?: boolean };
-  return body.success === true;
+
+  return withFrigateConfigLock(async () => {
+    // config/set overwrites existing fields too when the operator corrects a
+    // camera. Keep the authored config before that write, as for config/save.
+    try {
+      await writeConfigPreImage(await fetchRawConfigYaml());
+    } catch {
+      logger.warn({ camera: safeName }, "Could not read Frigate's config before adding a camera; no pre-image saved");
+    }
+    // Frigate 0.17 replaced POST /api/config/set (405) with a PUT that takes a
+    // {config_data, requires_restart} envelope and deep-MERGES config_data into
+    // the config file — so we send only the new camera block and existing
+    // cameras are preserved. This is the same call the camera-discovery service
+    // uses to auto-adopt.
+    //
+    // 🔴 requires_restart=1 does NOT reload anything. On 0.17 it only WRITES
+    // config.yml and answers "Config successfully updated, restart to apply";
+    // the camera is absent from /api/stats until something restarts Frigate
+    // (measured on a live 0.17.1 box, WARP-3506). The restart is therefore ours
+    // to do, below — exactly what camera-discovery's add does. (Frigate can
+    // also add a camera live with requires_restart=0 + an `update_topic` of
+    // `config/cameras/<key>/add`; the restart is the path proven on 0.17.1.)
+    //
+    // 🔴 `record` MUST carry the retention windows explicitly. This block used
+    // to be `{ enabled: true }`, which inherits `continuous: 0` / `motion: 0`
+    // from Frigate's own schema — the camera then keeps ONLY segments that
+    // overlap an alert or detection, while every surface reports "Recording"
+    // (WARP-1957). See camera-retention-defaults.ts for why the fix is here
+    // and not in docker/frigate/config.yml.
+    const resp = await fetch(`${FRIGATE_URL}/api/config/set`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        config_data: {
+          cameras: {
+            [safeName]: {
+              ffmpeg: { inputs: [{ path: rtspUrl, roles: ["detect", "record"] }] },
+              detect: { enabled: detect, width: 1280, height: 720, fps: 5 },
+              record: buildRecordBlock(),
+              snapshots: buildSnapshotsBlock(),
+            },
+          },
+        },
+        requires_restart: 1,
+      }),
+      signal: timeout(30_000),
+    });
+
+    if (!resp.ok) {
+      const errBody = await resp.text().catch(() => "");
+      logger.warn(
+        { status: resp.status, camera: safeName, body: scrubUrlCredentials(errBody).slice(0, 200) },
+        "Frigate config/set rejected while adding camera",
+      );
+      return false;
+    }
+    // Frigate 0.17 always sets `success`; treat its absence as a response-shape
+    // change, not a silent success.
+    const body = (await resp.json().catch(() => ({}))) as { success?: boolean };
+    if (body.success !== true) return false;
+
+    // Apply it. Best-effort: the config is already on disk, so a restart that
+    // fails (or whose connection drops because Frigate died before answering)
+    // only means the camera starts at the next restart — and
+    // waitForCameraStreaming reports that honestly instead of this call
+    // pretending the camera is up.
+    try {
+      await restartFrigate();
+    } catch (err) {
+      logger.warn(
+        { err, camera: safeName },
+        "Frigate restart after adding a camera failed; it starts at the next restart",
+      );
+    }
+    return true;
+  });
+}
+
+// --- Verifying an add (WARP-3506) ---
+
+/** How long an add waits for a frame before it reports "added, but no stream". */
+export const CAMERA_VERIFY_TIMEOUT_MS = 45_000;
+const CAMERA_VERIFY_INTERVAL_MS = 2_000;
+/** One /api/stats read; Frigate is mid-restart for the first seconds. */
+const CAMERA_VERIFY_READ_TIMEOUT_MS = 3_000;
+
+/** Why a camera that was written to Frigate is not producing frames. */
+export type CameraNoStreamReason =
+  /** Frigate never started the camera — it is absent from /api/stats. */
+  | "not_started"
+  /** Frigate started it, but no frame ever arrived: wrong address, path or credentials. */
+  | "no_frames"
+  /** Frigate itself did not answer for the whole window. */
+  | "frigate_unreachable";
+
+export type CameraStreamVerdict =
+  | { streaming: true; fps: number }
+  | { streaming: false; reason: CameraNoStreamReason };
+
+/**
+ * Poll `/api/stats` until `name`'s camera is there with `camera_fps > 0`, for
+ * at most `timeoutMs` (default ~45 s: a restart takes 5-15 s, plus the first
+ * frame). Connection errors are expected while Frigate restarts and are polled
+ * through. Never throws.
+ */
+export async function waitForCameraStreaming(
+  name: string,
+  opts: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<CameraStreamVerdict> {
+  const key = toFrigateKey(name);
+  const timeoutMs = opts.timeoutMs ?? CAMERA_VERIFY_TIMEOUT_MS;
+  const intervalMs = opts.intervalMs ?? CAMERA_VERIFY_INTERVAL_MS;
+  const deadline = Date.now() + timeoutMs;
+  let reachable = false;
+  let started = false;
+
+  for (;;) {
+    try {
+      const stats = await fetchStats({ timeoutMs: CAMERA_VERIFY_READ_TIMEOUT_MS });
+      reachable = true;
+      const entry = (stats.cameras as Record<string, { camera_fps?: unknown }> | undefined)?.[key];
+      if (entry) {
+        started = true;
+        const fps = Number(entry.camera_fps);
+        if (fps > 0) return { streaming: true, fps };
+      }
+    } catch {
+      /* Frigate is restarting — keep polling */
+    }
+    if (Date.now() + intervalMs > deadline) break;
+    await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  return { streaming: false, reason: !reachable ? "frigate_unreachable" : started ? "no_frames" : "not_started" };
+}
+
+/**
+ * What a reconcile needs to know about the DB, read INSIDE the config lock.
+ *
+ * `names` is every Camera row's name — the keys Frigate may keep. `adopted` is
+ * the subset the operator owns (Camera.adoption = ADOPTED): their keys are
+ * never pruned, whatever `names` says.
+ */
+export interface CameraKeySnapshot {
+  names: string[];
+  adopted: string[];
 }
 
 /**
@@ -1022,11 +1201,23 @@ export async function addCamera(
  * camera entries — e.g. `camera_192_168_20_176` — that the dashboard never
  * lists (the DB doesn't know them) and no DELETE can reach.
  *
- * Every Frigate camera whose name is NOT in `dbCameraNames` is dropped;
- * survivors keep their FULL existing block (ffmpeg inputs, detect, zones,
- * masks, per-camera settings) untouched. We do NOT rebuild survivors from the
- * DB — the Camera row doesn't persist the RTSP URL, so regenerating would
- * destroy working stream config.
+ * Every Frigate camera that no DB row names is dropped; survivors keep their
+ * FULL existing block (ffmpeg inputs, detect, zones, masks, per-camera
+ * settings) untouched. We do NOT rebuild survivors from the DB — the Camera row
+ * doesn't persist the RTSP URL, so regenerating would destroy working stream
+ * config.
+ *
+ * Keys are compared CANONICALLY (`toFrigateKey` on both sides): a row whose
+ * name differs from its Frigate key only by case or punctuation is not an
+ * orphan. (It was: `Warp_Lab_Office` was added and pruned in one request.)
+ *
+ * `source` is the DB's view — a list of names, or a function that reads it. The
+ * function form is the one callers use: it runs INSIDE the config lock, after
+ * any add it queued behind has finished, so the snapshot cannot predate a
+ * camera that is already in Frigate. It also says which rows are ADOPTED, and
+ * two rails hang off that (WARP-3510): a key an ADOPTED row owns is never
+ * pruned, and a prune that would leave `cameras` empty while ADOPTED rows exist
+ * is refused outright — both log an error and prune nothing they should not.
  *
  * Works off the AUTHORED YAML (fetchRawConfigYaml), the same round-trip
  * deleteCamera uses: the resolved /api/config isn't save-round-trippable on
@@ -1035,36 +1226,58 @@ export async function addCamera(
  * the names removed.
  */
 export async function syncCamerasFromDb(
-  dbCameraNames: string[],
+  source: string[] | (() => Promise<CameraKeySnapshot>),
 ): Promise<string[]> {
-  const wanted = new Set(dbCameraNames);
-  const doc = parseDocument(await fetchRawConfigYaml());
+  return withFrigateConfigLock(async () => {
+    const snapshot: CameraKeySnapshot =
+      typeof source === "function" ? await source() : { names: source, adopted: [] };
+    const wanted = new Set(snapshot.names.map(toFrigateKey));
+    const adopted = new Set(snapshot.adopted.map(toFrigateKey));
 
-  const camerasNode = doc.getIn(["cameras"]);
-  const current: string[] = [];
-  if (isMap(camerasNode)) {
-    for (const item of camerasNode.items) {
-      const key = item.key;
-      current.push(isScalar(key) ? String(key.value) : String(key));
+    const raw = await fetchRawConfigYaml();
+    const doc = parseDocument(raw);
+
+    const camerasNode = doc.getIn(["cameras"]);
+    const current: string[] = [];
+    if (isMap(camerasNode)) {
+      for (const item of camerasNode.items) {
+        const key = item.key;
+        current.push(isScalar(key) ? String(key.value) : String(key));
+      }
     }
-  }
 
-  const removed = current.filter((name) => !wanted.has(name));
-  if (removed.length === 0) {
-    return [];
-  }
-  for (const name of removed) doc.deleteIn(["cameras", name]);
+    const orphans = current.filter((name) => !wanted.has(toFrigateKey(name)));
+    const owned = orphans.filter((name) => adopted.has(toFrigateKey(name)));
+    if (owned.length > 0) {
+      logger.error(
+        { keys: owned },
+        "Refusing to prune Frigate cameras that an adopted camera row owns — the DB name list left them out",
+      );
+    }
+    const removed = orphans.filter((name) => !adopted.has(toFrigateKey(name)));
+    if (removed.length === 0) {
+      return [];
+    }
+    if (adopted.size > 0 && removed.length === current.length) {
+      logger.error(
+        { removed, adopted: [...adopted] },
+        "Refusing a Frigate config save that would leave no cameras while adopted camera rows exist",
+      );
+      return [];
+    }
+    for (const name of removed) doc.deleteIn(["cameras", name]);
 
-  const resp = await saveRawConfig(String(doc));
-  if (!resp.ok) {
-    const errBody = await resp.text().catch(() => "");
-    logger.warn(
-      { status: resp.status, removed, body: errBody.slice(0, 200) },
-      "Frigate config/save rejected during camera sync",
-    );
-    throw new Error(`Frigate rejected the config: ${resp.status}`);
-  }
+    const resp = await saveRawConfig(String(doc), raw);
+    if (!resp.ok) {
+      const errBody = await resp.text().catch(() => "");
+      logger.warn(
+        { status: resp.status, removed, body: scrubUrlCredentials(errBody).slice(0, 200) },
+        "Frigate config/save rejected during camera sync",
+      );
+      throw new Error(`Frigate rejected the config: ${resp.status}`);
+    }
 
-  logger.info({ removed }, "Pruned orphaned cameras from Frigate config");
-  return removed;
+    logger.info({ removed }, "Pruned orphaned cameras from Frigate config");
+    return removed;
+  });
 }

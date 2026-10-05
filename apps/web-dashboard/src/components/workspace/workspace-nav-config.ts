@@ -123,8 +123,9 @@ export const SPACES: SpaceDef[] = [
     id: "business",
     label: "Business",
     icon: Building2,
-    // The ADR-044 group, in its nav-config order.
-    hrefs: ["/business", "/brief", "/customers", "/projects", "/money", "/practice"],
+    // The ADR-044 group, in its nav-config order. WARP-3528: Support is a
+    // child of Customers in the sidebar and a chip beside it here (rule 2).
+    hrefs: ["/business", "/brief", "/customers", "/support", "/projects", "/money", "/practice"],
   },
   {
     id: "ops",
@@ -148,6 +149,7 @@ export const SPACES: SpaceDef[] = [
       "/remote-access",
       "/integrations",
       "/integrations/credentials",
+      "/integrations/work-notifications",
     ],
   },
   {
@@ -177,6 +179,8 @@ export const SPACES: SpaceDef[] = [
       "/users",
       "/admin/files",
       "/settings",
+      // WARP-3533 — API tokens and calendar links, a Settings page like the row above.
+      "/settings/developer",
       "/admin/audit",
       "/trust",
       "/settings/telemetry",

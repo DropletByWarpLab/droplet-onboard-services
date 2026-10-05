@@ -56,6 +56,10 @@ export type ErrorDomain =
   | "vpn"
   | "camera"
   | "projects"
+  // WARP-3528 (ADR-069) — the service desk. Its own domain: a failed ticket
+  // write must name tickets and requesters, not "that change", and its codes
+  // (invalid_assignee, contact_email_exists, desk_archived) mean nothing to PM.
+  | "support"
   // WARP-2734 — connecting a mailbox. Its own domain because every code here
   // is about somebody ELSE's mail server, and the remedy is always a field on
   // the form rather than something to do on this Droplet.
@@ -123,6 +127,8 @@ const FALLBACK: Record<ErrorDomain, string> = {
     "We couldn't reach that device right now. Check it's powered on and nearby, then try again.",
   projects:
     "We couldn't save that change right now. Try again in a moment.",
+  support:
+    "We couldn't save that change to the ticket right now. Try again in a moment.",
   // WARP-1141 — drive/pool rename + other storage settings writes. The files
   // fallback ("couldn't load those files") misdescribed a failed WRITE as a
   // load hiccup, which is exactly how the Drives-page rename bug went
@@ -510,6 +516,50 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
     AUTH_REQUIRED:
       "That camera needs a username and password. Check the credentials and try again.",
     NOT_FOUND: "We couldn't find that camera on your network.",
+    // WARP-3505 — status-only failures from the discovered-camera routes (no
+    // machine code on the wire). Without these both fell through to the generic
+    // "check it's powered on" fallback, which is wrong for a camera that has
+    // simply left the discovery list (404) and for the camera system itself
+    // failing rather than the camera (502).
+    "404":
+      "We couldn't find that camera on your network any more. Scan again, then pick it from the list.",
+    "502":
+      "Your Droplet's camera system didn't accept that camera. Try again in a moment.",
+    // WARP-3505 — typing a camera's username/password. The next step differs
+    // for each, so each gets its own copy; the form shows these inline.
+    //
+    // AUTH_FAILED carries the lockout warning: Hanwha, Axis and some Hikvision
+    // firmwares lock the account after ~5 bad passwords, and a person who just
+    // saw "didn't accept" will otherwise retype guesses in a row.
+    AUTH_FAILED:
+      "The camera didn't accept that username and password. Check them and try again. A few wrong tries in a row can lock the camera.",
+    LOCKED:
+      "The camera has locked its account after too many wrong sign-ins. Wait a few minutes, then try again.",
+    // Names the control the form actually shows ("Enter the stream address
+    // instead", under the Add button) — the "Enter details" tab is a different
+    // surface and is not reachable from where this message appears.
+    NO_STREAM_PATH:
+      "We reached the camera but couldn't find its video stream. Choose “Enter the stream address instead” and type the address from your camera's manual.",
+    UNREACHABLE:
+      "We couldn't reach the camera. Check it's powered on and on the same network, then try again.",
+    DISCOVERY_UNAVAILABLE:
+      "Camera discovery isn't running, so we couldn't check the camera. Try again in a moment.",
+    // Discovery was reachable but did not answer in time (the orchestrator's
+    // wait). The camera may in fact have been added, so say that instead of
+    // sending the operator to retry blind with a password that may be right.
+    TIMEOUT:
+      "The camera took too long to answer. If it was added, it will appear in your cameras shortly; otherwise check it's powered on and try again.",
+    // Invalid input is refused before touching the camera. An unsupported
+    // password may also be found once discovery supplies the stream address:
+    // Frigate cannot store it safely, even if the camera accepted it.
+    INVALID_CREDENTIALS:
+      "Check the username and password — one of them has a character that can't be used — and try again.",
+    UNSUPPORTED_PASSWORD:
+      "Droplet can't safely pass this password to the camera's video stream. Change the camera's password to a longer one without spaces or curly braces { }, then try again.",
+    UNSUPPORTED_STREAM_ADDRESS:
+      "Droplet can't safely use this camera's stream address with its account. Check the camera's stream settings or use a different camera account.",
+    BASIC_AUTH_ONLY:
+      "Droplet didn't send your password because this camera only offers an unprotected sign-in. Switch its stream sign-in to Digest, or ask an administrator to allow this camera.",
   },
   device: {
     NETWORK:
@@ -537,6 +587,66 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Couldn't reach the device in time. Put it into pairing mode again, make sure it's within a few feet of the Droplet, and retry.",
     "503":
       "The Droplet's smart-device service is still starting up. Give it a few seconds and try again.",
+  },
+  // WARP-3528 (ADR-069) — the service desk (/api/support/*). Codes are the
+  // stable snake_case strings its routes emit (SUPPORT_ERRORS in
+  // services/support/support.types.ts, plus the PM / department codes the
+  // shared helpers throw). Each says what happened and what to do, in the
+  // words of the front desk: ticket, customer, status, assignee — never
+  // requester, work item or compare-and-set.
+  support: {
+    // Emitted by BOTH the box-wide module gate and the per-person grant check
+    // (identical bodies by design), so it names neither as the reason.
+    module_disabled:
+      "Support isn't available. This feature is switched off for this Droplet, or it isn't part of your access. An owner or admin can turn it on.",
+    desk_not_found:
+      "We couldn't find that service desk anymore. It may have been removed.",
+    ticket_not_found:
+      "We couldn't find that ticket anymore. It may have been removed.",
+    contact_not_found:
+      "That customer isn't available anymore. Search for them again.",
+    project_not_found:
+      "That project isn't available anymore. Pick another one.",
+    state_not_found:
+      "That status isn't available anymore. Refresh the ticket and try again.",
+    invalid_state:
+      "That status isn't available anymore. Refresh the ticket and try again.",
+    label_not_found:
+      "That label isn't available anymore. Refresh the ticket and try again.",
+    invalid_label:
+      "That label isn't available anymore. Refresh the ticket and try again.",
+    company_not_found:
+      "That customer record isn't available anymore. Refresh and try again.",
+    department_not_found:
+      "That department isn't available anymore. Refresh and try again.",
+    department_not_assignable:
+      "That department can't take tickets. Pick another one.",
+    department_archived:
+      "That department has been archived. Pick another one.",
+    invalid_assignee:
+      "That person can't be given this ticket. They need access to Support — pick someone else.",
+    invalid_requester:
+      "That person isn't an active member, so they can't be the one asking. Pick someone else.",
+    invalid_channel:
+      "Tickets you file by hand arrive as added by the team or a phone call.",
+    desk_archived:
+      "That service desk is archived, so its tickets can't be changed. Restore the desk first.",
+    identifier_taken:
+      "That key is already taken — pick another.",
+    empty_body:
+      "Write something first — there's nothing to send.",
+    contact_needs_a_name:
+      "Add a name or an email address so we know who this is.",
+    contact_email_exists:
+      "That address is already in your contacts.",
+    invalid_cursor:
+      "We couldn't load the next page of tickets. Refresh the list.",
+    // A lost compare-and-set: another person changed the ticket first and
+    // nothing was applied. Not the user's fault, and retrying is the remedy.
+    concurrent_mutation:
+      "Someone changed this ticket at the same time, so nothing was applied. Refresh and try again.",
+    "403": "You don't have permission to do that on this ticket.",
+    "404": "We couldn't find that. It may have been removed.",
   },
   // WARP-1154/1155 — the native Projects (PM) surface. Codes are the stable
   // snake_case strings the orchestrator's /api/pm/* routes emit (PM_ERRORS in
@@ -566,6 +676,20 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "That parent item isn't available anymore. Refresh and try again.",
     identifier_taken:
       "That project ID is already in use. Pick a different one.",
+    // WARP-3371 — the work-item API now refuses what it used to swallow. Each
+    // says what is wrong in the owner's words (item, column, person — never
+    // cycle, state or assignee) and the one thing to do.
+    parent_cycle:
+      "That would make an item a sub-item of one of its own sub-items. Pick a different parent.",
+    state_required:
+      "A work item has to sit in a column. Pick one and try again.",
+    invalid_assignee:
+      "That person isn't available anymore. Refresh and pick someone else.",
+    // WARP-3370 — hard delete. Each says what is wrong and the one thing to do.
+    project_not_archived:
+      "Only an archived project can be deleted for good. Archive it first.",
+    identifier_mismatch:
+      "That doesn't match the project's ID. Type it exactly as shown.",
     // WARP-2730 (ADR-048) — the filing review surface, which lives inside the
     // CRM and therefore inside this domain. Each string says what happened and
     // what to do about it, in the owner's words: file, customer, look, undo —

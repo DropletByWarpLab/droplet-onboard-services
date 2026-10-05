@@ -3,6 +3,8 @@
 // at the dashboard's standard stroke.
 
 import {
+  Archive,
+  ArchiveRestore,
   Plus,
   RefreshCw,
   MessageSquare,
@@ -41,12 +43,15 @@ import {
   Building2,
   Briefcase,
   Handshake,
+  ChartGantt,
   type LucideIcon,
 } from "lucide-react";
 
 import type { JSX } from "react";
 
 export const ICONS: Record<string, LucideIcon> = {
+  archive: Archive,
+  restore: ArchiveRestore,
   plus: Plus,
   refresh: RefreshCw,
   msg: MessageSquare,
@@ -87,6 +92,8 @@ export const ICONS: Record<string, LucideIcon> = {
   building: Building2,
   briefcase: Briefcase,
   handshake: Handshake,
+  // WARP-3523 — the Timeline view tab.
+  gantt: ChartGantt,
 };
 
 export function PmIcon({

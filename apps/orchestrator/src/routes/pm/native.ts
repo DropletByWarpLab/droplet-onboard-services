@@ -31,6 +31,10 @@ import * as pm from "../../services/pm/pm.service.js";
 import { actorOf } from "./actor.js";
 import { listRelationsFor } from "../../services/pm/pm-relations.service.js";
 import { resolveDepartmentFilter } from "../../services/pm/pm-department.js";
+import { isDateOnly, parseDateInput } from "../../services/pm/pm-dates.js";
+import { recordActivity, recordActivityInTx } from "../../services/activity.singleton.js";
+import { actorFromRequest } from "../../services/activity.service.js";
+import { parsePaging } from "./paging.js";
 
 
 /** Map a service error code to an HTTP response. Returns true if handled. */
@@ -50,7 +54,11 @@ function mapServiceError(err: unknown, res: Response): boolean {
       return true;
     case "invalid_parent":
     case "invalid_state":
-    case "invalid_label":
+    // WARP-3371 — a re-parent that would close a loop, and a PATCH that would
+    // strip a work item of its state. Well-formed requests whose CHOICE is not
+    // processable: the same class as invalid_state.
+    case "parent_cycle":
+    case "state_required":
     // ADR-045 §5.3 — the HOUSEHOLD refusal. The referenced row exists and the
     // request is well-formed; it is the CHOICE that is not processable, which
     // is the same shape as invalid_state above.
@@ -80,6 +88,28 @@ function mapServiceError(err: unknown, res: Response): boolean {
         message:
           "Another request changed this work item at the same time. Nothing was applied — try again.",
       });
+      return true;
+    // WARP-3371 — a label / assignee id that is not usable. The 422 names EVERY
+    // offending id, so the caller can fix the request instead of guessing which.
+    case "invalid_label":
+    case "invalid_assignee":
+      res.status(422).json({ error: msg, ids: err instanceof pm.PmRefError ? err.ids : [] });
+      return true;
+    case "invalid_cursor":
+      // WARP-3371 — a `cursor` this list did not mint. The caller's mistake,
+      // not a missing row, so 400 rather than a 404 or an empty page.
+      res.status(400).json({ error: msg });
+      return true;
+    // WARP-3370 — a hard delete asked of a project that is not archived. The
+    // request is well-formed and the caller may delete; the project's CURRENT
+    // state is what forbids it (archive it first), the same class as
+    // state_is_last — a conflict, not a validation failure.
+    case "project_not_archived":
+      res.status(409).json({ error: msg });
+      return true;
+    // WARP-3370 — the identifier typed to confirm is not this project's.
+    case "identifier_mismatch":
+      res.status(422).json({ error: msg });
       return true;
     default:
       return false;
@@ -125,6 +155,10 @@ const projectPatchSchema = z.object({
   archived: z.boolean().optional(),
 });
 
+// WARP-3370 — hard delete is confirmed by typing the project's identifier. The
+// dashboard asks for it; the API asks too, so a script cannot skip the question.
+const projectDeleteSchema = z.object({ confirm_identifier: z.string().min(1).max(64) });
+
 const stateCreateSchema = z.object({
   name: z.string().min(1).max(100),
   group: STATE_GROUP,
@@ -149,6 +183,24 @@ const labelPatchSchema = z.object({
   color: z.string().max(32).nullable().optional(),
 });
 
+/**
+ * WARP-3372 — a date field is a CALENDAR DATE: `YYYY-MM-DD` (or, for a client
+ * that predates this, an ISO instant ending in `Z`, whose UTC date is taken).
+ * It parses to that day at 00:00:00Z — the value stored — so no zone is ever
+ * applied to it (pm-dates.ts). `2026-02-30` is a 400, not March.
+ */
+const dateField = z
+  .string()
+  .max(40)
+  .transform((s, ctx) => {
+    const d = parseDateInput(s);
+    if (!d) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "expected a calendar date, YYYY-MM-DD" });
+      return z.NEVER;
+    }
+    return d;
+  });
+
 const workItemCreateSchema = z.object({
   name: z.string().min(1).max(500),
   description_html: z.string().max(100000).optional(),
@@ -163,8 +215,8 @@ const workItemCreateSchema = z.object({
     // claiming "the zod schemas reject '' at the boundary" was true of
     // `company_id` and not of this one.
     department_id: z.string().min(1).max(64).optional(),
-  start_date: z.string().datetime().optional(),
-  due_date: z.string().datetime().optional(),
+  start_date: dateField.optional(),
+  due_date: dateField.optional(),
 });
 
 const workItemPatchSchema = z.object({
@@ -180,26 +232,26 @@ const workItemPatchSchema = z.object({
   // WARP-2724 — `.min(1)`, and `null` stays the way to CLEAR an
     // assignment. "" was neither: it skipped the guard and disconnected.
     department_id: z.string().min(1).max(64).nullable().optional(),
-  start_date: z.string().datetime().nullable().optional(),
-  due_date: z.string().datetime().nullable().optional(),
-  // .int() already rejects floats and (via Number.isInteger) NaN/Infinity;
-  // .finite() makes the NaN/Infinity rejection explicit and self-documenting so
-  // a non-finite sortOrder can never reach Prisma's Int column (review finding:
-  // sortOrder admits NaN/Infinity).
-  sortOrder: z.number().int().finite().optional(),
+  start_date: dateField.nullable().optional(),
+  due_date: dateField.nullable().optional(),
+  // `sortOrder` is a Float column: a kanban drag inserts BETWEEN two cards
+  // (2.5 between 2 and 3) without renumbering the column. `.int()` here made the
+  // API refuse the very values the column exists for. `.finite()` still keeps
+  // NaN and ±Infinity out of Prisma (review finding: sortOrder admits
+  // NaN/Infinity) — JSON cannot carry them, but a client-built string or a future
+  // coercion could.
+  sortOrder: z.number().finite().optional(),
 });
 
 const transitionSchema = z.object({ state_id: z.string().min(1).max(64) });
 const commentCreateSchema = z.object({ comment_html: z.string().min(1).max(100000) });
 
-// Pagination query params: a non-numeric `per_page` / `page` (e.g. `?per_page=abc`)
-// would coerce to NaN and reach Prisma's `skip`/`take` as NaN → a driver-level
-// crash surfacing as 500. Reject them at the route layer → 400 (review finding:
-// NaN pagination → Prisma crash). `z.coerce.number` turns the query string into
-// a number; `.int().positive()` rejects NaN, floats, and non-positive values.
-const paginationQuerySchema = z.object({
-  per_page: z.coerce.number().int().positive().max(200).optional(),
-  page: z.coerce.number().int().positive().optional(),
+const summaryQuerySchema = z.object({
+  // The caller's own calendar day; a date that does not exist is a 400.
+  today: z
+    .string()
+    .refine(isDateOnly, "expected a calendar date, YYYY-MM-DD")
+    .optional(),
 });
 
 const WRITE = ["owner", "admin", "family"] as const;
@@ -217,6 +269,34 @@ const WRITE_OR_ASSIGNED_GUEST = [...WRITE, "guest"] as const;
 
 function badRequest(res: Response, parsed: { error: z.ZodError }): void {
   res.status(400).json({ error: "invalid_request", details: parsed.error.flatten() });
+}
+
+/**
+ * WARP-3370 — the audit row for a project archive / restore, through the same
+ * recorder every other admin action on the box uses (`kind: "system"`, like a
+ * department restore or a workspace-location change). Best-effort and AFTER the
+ * commit, because both are reversible; the irreversible hard delete appends its
+ * row inside its own transaction instead.
+ */
+async function auditProjectLifecycle(
+  req: Request,
+  verb: "archived" | "restored",
+  project: pm.ApiProject,
+): Promise<void> {
+  await recordActivity({
+    kind: "system",
+    severity: "ok",
+    sourceIcon: verb === "archived" ? "archive" : "archive-restore",
+    what: verb === "archived" ? "Project archived" : "Project restored",
+    sub: `${project.name} (${project.identifier})`,
+    refs: {
+      actor: req.user?.username ?? null,
+      projectId: project.id,
+      projectName: project.name,
+      projectIdentifier: project.identifier,
+    },
+    actor: actorFromRequest(req),
+  });
 }
 
 export function createPmNativeRouter(prisma: PrismaClient): Router {
@@ -242,11 +322,31 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
     }
   });
 
-  // Index KPI strip.
+  // Index KPI strip. `?today=YYYY-MM-DD` is the caller's own calendar day, so
+  // "overdue" (due BEFORE today) means the same thing here as on the board
+  // (WARP-3372); absent, it is the UTC date.
   router.get("/pm/summary", async (req, res, next) => {
     try {
+      const parsed = summaryQuerySchema.safeParse(req.query);
+      if (!parsed.success) return badRequest(res, parsed);
       const slug = req.query.workspace ? String(req.query.workspace) : undefined;
-      res.json({ summary: await pm.getSummary(prisma, slug) });
+      res.json({ summary: await pm.getSummary(prisma, slug, parsed.data.today) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // WARP-3372 — who a PM user id names (lead, assignee, creator, author, actor).
+  // GET /auth/users is owner/admin-only, so a member saw "User 1a2b" for every
+  // colleague; this is the minimal {id, displayName, avatarUrl} projection of
+  // the ACTIVE people on the box, readable by every role that reads the board.
+  // Sits under /api/pm, so the `projects` module gate and the guest tier floor
+  // (404 for an external guest, who is not on the GUEST_SHARES list) already
+  // apply; the role guard here is the router being honest on its own, and keeps
+  // the MCP service principal — which has no use for a roster — out.
+  router.get("/pm/people", requireRole("owner", "admin", "family"), async (_req, res, next) => {
+    try {
+      res.json({ people: await pm.listPeople(prisma) });
     } catch (err) {
       next(err);
     }
@@ -255,11 +355,13 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
   // ── Projects ──
   router.get("/pm/projects", async (req, res, next) => {
     try {
-      const perPage = req.query.per_page ? Number(req.query.per_page) : undefined;
+      // 🔴 `?per_page=abc` used to reach `take` as NaN here and answer 500.
+      const pageParsed = parsePaging(req.query);
+      if (!pageParsed.success) return badRequest(res, pageParsed);
       const projects = await pm.listProjects(prisma, {
         workspaceSlug: req.query.workspace ? String(req.query.workspace) : undefined,
         includeArchived: req.query.archived === "1" || req.query.archived === "true",
-        perPage,
+        perPage: pageParsed.data.limit,
         // WARP-2719 — `?department=` takes an id, a slug or a NAME, and
         // `none` for "owned by nobody". Resolved here rather than left to the
         // caller because the assistant cannot look a name up: the department
@@ -327,23 +429,62 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
       // ADR-048 — `company_id` renames for the same reason `department_id`
       // does, and carries the same three-state meaning: absent leaves the
       // customer alone, `null` clears it, an id sets it.
-      const { department_id, company_id, ...rest } = parsed.data;
-      res.json({
-        project: await pm.updateProject(prisma, req.params.id, {
+      //
+      // WARP-3370 — `archived` is split out: archiving and restoring are audited
+      // transitions with their own function, not one more field of the update.
+      const { department_id, company_id, archived, ...rest } = parsed.data;
+      const hasFields = [...Object.values(rest), department_id, company_id].some((v) => v !== undefined);
+      let project: pm.ApiProject | null = null;
+      // An archive-only PATCH must not also rewrite the row for nothing.
+      if (hasFields || archived === undefined) {
+        project = await pm.updateProject(prisma, req.params.id, {
           ...rest,
           departmentId: department_id,
           companyId: company_id,
-        }),
-      });
+        });
+      }
+      if (archived !== undefined) {
+        const out = await pm.setProjectArchived(prisma, req.params.id, archived);
+        project = out.project;
+        // A transition is audited; asking for the state it is already in is not.
+        if (out.changed) await auditProjectLifecycle(req, archived ? "archived" : "restored", out.project);
+      }
+      res.json({ project });
     } catch (err) {
       if (mapServiceError(err, res)) return;
       next(err);
     }
   });
 
-  router.delete("/pm/projects/:id", requireRole(...WRITE), async (req, res, next) => {
+  // WARP-3370 — HARD delete. Not what "delete" meant before: it used to remove
+  // any project, with every work item, for any member, leaving no trace. Now it
+  // is owner/admin only, only for an ARCHIVED project, only with the identifier
+  // typed, and it writes its audit row in the same transaction as the delete.
+  // Members archive (PATCH `archived`); they cannot destroy. The MCP principal
+  // is not admitted — no tool deletes a project.
+  router.delete("/pm/projects/:id", requireRole("owner", "admin"), async (req, res, next) => {
     try {
-      await pm.deleteProject(prisma, req.params.id);
+      const parsed = projectDeleteSchema.safeParse(req.body);
+      if (!parsed.success) return badRequest(res, parsed);
+      await pm.deleteProject(prisma, req.params.id, {
+        confirmIdentifier: parsed.data.confirm_identifier,
+        audit: (tx, project) =>
+          recordActivityInTx(tx, {
+            kind: "system",
+            severity: "warn",
+            sourceIcon: "trash-2",
+            what: "Project deleted",
+            sub: `${project.name} (${project.identifier})`,
+            refs: {
+              actor: req.user?.username ?? null,
+              projectId: project.id,
+              projectName: project.name,
+              projectIdentifier: project.identifier,
+              workItemsDeleted: project.workItemCount,
+            },
+            actor: actorFromRequest(req),
+          }),
+      });
       res.json({ deleted: req.params.id });
     } catch (err) {
       if (mapServiceError(err, res)) return;
@@ -356,6 +497,8 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
     try {
       res.json({ states: await pm.listStates(prisma, req.params.id) });
     } catch (err) {
+      // WARP-3528 — a service desk's id is project_not_found (404), not a 500.
+      if (mapServiceError(err, res)) return;
       next(err);
     }
   });
@@ -398,6 +541,8 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
     try {
       res.json({ labels: await pm.listLabels(prisma, req.params.id) });
     } catch (err) {
+      // WARP-3528 — as for the state list.
+      if (mapServiceError(err, res)) return;
       next(err);
     }
   });
@@ -440,14 +585,11 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
     try {
       const q = req.query;
       // Validate pagination before anything reaches the service/Prisma so a
-      // non-numeric per_page/page returns a clean 400 instead of NaN → 500.
-      const pageParsed = paginationQuerySchema.safeParse({
-        per_page: q.per_page,
-        page: q.page,
-      });
+      // non-numeric limit/page returns a clean 400 instead of NaN → 500.
+      const pageParsed = parsePaging(q);
       if (!pageParsed.success) return badRequest(res, pageParsed);
       const parentRaw = q.parent;
-      const work_items = await pm.listWorkItems(prisma, req.params.id, {
+      const page = await pm.listWorkItems(prisma, req.params.id, {
         stateId: q.state ? String(q.state) : undefined,
         assignee: q.assignee ? String(q.assignee) : undefined,
         labelId: q.label ? String(q.label) : undefined,
@@ -471,10 +613,14 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
           q.department === undefined ? undefined : String(q.department),
         ),
         q: q.q ? String(q.q) : undefined,
-        perPage: pageParsed.data.per_page,
+        limit: pageParsed.data.limit,
+        cursor: pageParsed.data.cursor,
         page: pageParsed.data.page,
       });
-      res.json({ work_items });
+      // WARP-3371 — a page, not a bare array: `nextCursor` is null on the last
+      // page and `total` is the exact size of the filtered set, so a caller can
+      // always tell "that is all of it" from "that is the first 100 of 250".
+      res.json({ work_items: page.items, nextCursor: page.nextCursor, total: page.total });
     } catch (err) {
       if (mapServiceError(err, res)) return;
       next(err);
@@ -498,8 +644,8 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
           labelIds: d.label_ids,
           parentId: d.parent_id,
           departmentId: d.department_id,
-          startDate: d.start_date ? new Date(d.start_date) : undefined,
-          dueDate: d.due_date ? new Date(d.due_date) : undefined,
+          startDate: d.start_date,
+          dueDate: d.due_date,
         });
         res.status(201).json({ work_item });
       } catch (err) {
@@ -516,16 +662,14 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
   // and nothing in the query can change whose items are listed.
   router.get("/pm/assigned-to-me", ownAssignments(), async (req, res, next) => {
     try {
-      const pageParsed = paginationQuerySchema.safeParse({
-        per_page: req.query.per_page,
-        page: req.query.page,
-      });
+      const pageParsed = parsePaging(req.query);
       if (!pageParsed.success) return badRequest(res, pageParsed);
-      const work_items = await pm.listAssignedWorkItems(prisma, String(res.locals.assigneeId), {
-        perPage: pageParsed.data.per_page,
+      const page = await pm.listAssignedWorkItems(prisma, String(res.locals.assigneeId), {
+        limit: pageParsed.data.limit,
+        cursor: pageParsed.data.cursor,
         page: pageParsed.data.page,
       });
-      res.json({ work_items });
+      res.json({ work_items: page.items, nextCursor: page.nextCursor, total: page.total });
     } catch (err) {
       if (mapServiceError(err, res)) return;
       next(err);
@@ -536,10 +680,14 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
   // /:id route — distinct path, no conflict.
   router.get("/pm/work-items", async (req, res, next) => {
     try {
-      const work_items = await pm.searchWorkItems(prisma, {
+      // 🔴 `?per_page=abc` used to reach `take` as NaN here and answer 500.
+      const pageParsed = parsePaging(req.query);
+      if (!pageParsed.success) return badRequest(res, pageParsed);
+      const page = await pm.searchWorkItems(prisma, {
         workspaceSlug: req.query.workspace ? String(req.query.workspace) : undefined,
         q: req.query.q ? String(req.query.q) : "",
-        perPage: req.query.per_page ? Number(req.query.per_page) : undefined,
+        limit: pageParsed.data.limit,
+        cursor: pageParsed.data.cursor,
         // WARP-2719 — this reader is the one that answers "what is Front Desk
         // working on?", a question carrying no search term, so an empty `q`
         // alongside a department is now a real query rather than an empty list.
@@ -550,7 +698,7 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
             : String(req.query.department),
         ),
       });
-      res.json({ work_items });
+      res.json({ work_items: page.items, nextCursor: page.nextCursor, total: page.total });
     } catch (err) {
       // WARP-2719 — see GET /pm/projects. Was a bare `next(err)`.
       if (mapServiceError(err, res)) return;
@@ -606,8 +754,9 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
           labelIds: d.label_ids,
           parentId: d.parent_id,
           departmentId: d.department_id,
-          startDate: d.start_date === undefined ? undefined : d.start_date === null ? null : new Date(d.start_date),
-          dueDate: d.due_date === undefined ? undefined : d.due_date === null ? null : new Date(d.due_date),
+          // `undefined` leaves the date alone, `null` clears it.
+          startDate: d.start_date,
+          dueDate: d.due_date,
           sortOrder: d.sortOrder,
         });
         res.json({ work_item });
@@ -653,7 +802,10 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
   // ── Comments ──
   router.get("/pm/work-items/:id/comments", sharedItem, async (req, res, next) => {
     try {
-      res.json({ comments: await pm.listComments(prisma, req.params.id) });
+      const pageParsed = parsePaging(req.query);
+      if (!pageParsed.success) return badRequest(res, pageParsed);
+      const page = await pm.listComments(prisma, req.params.id, pageParsed.data);
+      res.json({ comments: page.items, nextCursor: page.nextCursor, total: page.total });
     } catch (err) {
       if (mapServiceError(err, res)) return;
       next(err);
@@ -663,7 +815,10 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
   // Activity feed (read-only timeline).
   router.get("/pm/work-items/:id/activity", async (req, res, next) => {
     try {
-      res.json({ activity: await pm.listActivity(prisma, req.params.id) });
+      const pageParsed = parsePaging(req.query);
+      if (!pageParsed.success) return badRequest(res, pageParsed);
+      const page = await pm.listActivity(prisma, req.params.id, pageParsed.data);
+      res.json({ activity: page.items, nextCursor: page.nextCursor, total: page.total });
     } catch (err) {
       if (mapServiceError(err, res)) return;
       next(err);

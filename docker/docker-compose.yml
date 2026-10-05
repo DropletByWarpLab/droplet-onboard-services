@@ -2507,6 +2507,10 @@ services:
       # WARP-235: this service's own TLS bundle (CN = "camera-discovery") for
       # the mqtts:// broker connection over the loopback :8883 publish.
       - ../data/secrets/service-tls/camera-discovery:/data/service-tls:ro
+      # WARP-3508: the cameras the operator dismissed (rejected-macs.json), so a
+      # restart or an update does not resurrect them. main.py writes to
+      # CAMERA_DISCOVERY_STATE_DIR (default /var/lib/droplet/camera-discovery).
+      - camera-discovery-state:/var/lib/droplet/camera-discovery
     environment:
       # WARP-317: no validated fips.so in this image — pin the FIPS boot
       # gate + OpenSSL config to the literal OFF posture (see the
@@ -4024,6 +4028,10 @@ volumes:
   piper-voices:
   # ADR-018 item 12: switch provision-state persistence (last_provisioned_at).
   switch-state:
+  # WARP-3508: camera-discovery's dismissed-camera list (a few hundred bytes of
+  # MACs, no credentials). Wiped by factory reset like all operator state; not
+  # backed up — re-dismissing a camera is cheap and the list is regenerated.
+  camera-discovery-state:
   # single-box profile (`COMPOSE_PROFILES=single-box`) — only used when the bundled
   # ollama + openwrt services are active. Declared unconditionally so
   # `docker volume ls` shows the names whether the profile is on or off;

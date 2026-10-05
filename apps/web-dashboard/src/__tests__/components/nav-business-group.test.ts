@@ -14,6 +14,7 @@
  *     drawer; WARP-290 measured four tabs at 360px and that stands.
  */
 import { describe, it, expect } from "vitest";
+import { LifeBuoy } from "lucide-react";
 import {
   NAV_GROUPS,
   MOBILE_PRIMARY_HREFS,
@@ -77,6 +78,7 @@ describe("the Business group (WARP-2558)", () => {
       "/brief",
       "/reports",
       "/customers",
+      "/support",
       "/projects",
       "/money",
       "/practice",
@@ -219,6 +221,7 @@ describe("Practice is gated by role, matching the server (WARP-2560)", () => {
       "/brief",
       "/reports",
       "/customers",
+      "/support",
       "/projects",
       "/money",
     ]);
@@ -241,7 +244,13 @@ describe("Practice is gated by role, matching the server (WARP-2560)", () => {
       .flatMap((i) => [i, ...(i.children ?? [])])
       .map((i) => i.href)
       .filter((href) => href.startsWith("/integrations"));
-    expect(reached).toEqual(["/integrations", "/integrations/credentials"]);
+    // WARP-3532 added Work notifications as a third sibling; like the other two it
+    // is plumbing (where work updates GO), not a practice data surface.
+    expect(reached).toEqual([
+      "/integrations",
+      "/integrations/credentials",
+      "/integrations/work-notifications",
+    ]);
   });
 });
 
@@ -312,6 +321,8 @@ describe("the mobile tab cap is not reopened (WARP-290)", () => {
     expect(MOBILE_PRIMARY_HREFS as readonly string[]).not.toContain("/customers");
     expect(MOBILE_PRIMARY_HREFS as readonly string[]).not.toContain("/projects");
     expect(MOBILE_PRIMARY_HREFS as readonly string[]).not.toContain("/money");
+    // WARP-3528 — Support rides the More drawer under Customers, not a tab.
+    expect(MOBILE_PRIMARY_HREFS as readonly string[]).not.toContain("/support");
   });
 });
 
@@ -335,5 +346,113 @@ describe("external guests are offered no Customers, Projects or Money (WARP-3365
 
   it.each(["family", "admin", "owner"] as const)("still offers all three to a %s", (role) => {
     expect(flatHrefs(role)).toEqual(expect.arrayContaining(["/customers", "/projects", "/money"]));
+  });
+});
+
+// WARP-3528 (ADR-069 §1) — Support, the service desk, is a CHILD of Customers
+// rather than a fifth Business row: an owner already sees fifteen top-level
+// rows (nav-config.four-groups.test.ts caps them there), and a ticket is the
+// other half of a customer relationship. Nesting is filing, not a gate. Support
+// keeps its own `support` module and its own role gate, and there is NO
+// `requires` edge to projects (a dental front desk runs Support with Projects
+// off), so it must survive Customers being off exactly as Money survives
+// Projects being off (`passesParentGate`).
+describe("Support is filed under Customers (WARP-3528)", () => {
+  const topLevel = (
+    role: Parameters<typeof visibleItems>[1],
+    isOn: (id: string) => boolean = () => true,
+  ) => visibleItems(businessItems(), role, openCapabilities, isOn);
+  const customers = () => businessItems().find((i) => i.href === "/customers");
+  const support = () => customers()?.children?.find((c) => c.href === "/support");
+
+  it("leaves the Business top level at four rows and nests Support in Customers", () => {
+    expect(businessItems().map((i) => i.href)).toEqual([
+      "/business",
+      "/customers",
+      "/projects",
+      "/practice",
+    ]);
+    const rows = topLevel("owner");
+    expect(rows.map((i) => i.href)).toEqual(["/business", "/customers", "/projects", "/practice"]);
+    expect(rows.find((i) => i.href === "/customers")?.children?.map((c) => c.href)).toEqual([
+      "/support",
+    ]);
+  });
+
+  it("is labelled Support with the LifeBuoy glyph, gated on its own module and the member roles", () => {
+    expect(support()).toMatchObject({
+      label: "Support",
+      icon: LifeBuoy,
+      requiresModule: "support",
+      roles: ["owner", "admin", "family"],
+    });
+    // For the assistant's page lookup: the words the label and path do not carry.
+    expect(support()?.keywords).toEqual(expect.arrayContaining(["tickets", "help desk", "requests"]));
+  });
+
+  it("is promoted into Customers' slot on a Support-on, CRM-off box", () => {
+    // CRM off fails only the parent's MODULE gate and Support names a module of
+    // its own, so it takes the slot rather than vanishing with its parent.
+    expect(topLevel("owner", (id) => id !== "crm").map((i) => i.href)).toEqual([
+      "/business",
+      "/support",
+      "/projects",
+      "/practice",
+    ]);
+    expect(flatHrefs("owner", openCapabilities, only("support"))).toEqual([
+      "/business",
+      "/brief",
+      "/reports",
+      "/support",
+      "/practice",
+    ]);
+  });
+
+  it("keeps Customers alone on a CRM-on, Support-off box, with nothing left beneath it", () => {
+    const rows = topLevel("owner", (id) => id !== "support");
+    expect(rows.map((i) => i.href)).toEqual(["/business", "/customers", "/projects", "/practice"]);
+    // `children: []` is no sub-nav: the Sidebar draws a chevron only for a
+    // parent that still has one.
+    expect(rows.find((i) => i.href === "/customers")?.children).toEqual([]);
+  });
+
+  it.each(["owner", "admin", "family", "guest"] as const)(
+    "shows a %s no Support row anywhere with the module off, whatever its neighbours say",
+    (role) => {
+      for (const isOn of [
+        (id: string) => id !== "support",
+        only("crm", "projects", "money"),
+        only(),
+      ]) {
+        expect(flatHrefs(role, openCapabilities, isOn)).not.toContain("/support");
+      }
+    },
+  );
+
+  it("offers an external guest neither Customers nor Support, even when Support would be promoted", () => {
+    // The role gate sits on the child as well as the parent: a promoted child
+    // never gets past it.
+    for (const isOn of [() => true, only("support")]) {
+      const hrefs = flatHrefs("guest", openCapabilities, isOn);
+      expect(hrefs).not.toContain("/customers");
+      expect(hrefs).not.toContain("/support");
+    }
+  });
+
+  it.each(["family", "admin", "owner"] as const)("still offers Support to a %s", (role) => {
+    expect(flatHrefs(role)).toContain("/support");
+    expect(flatHrefs(role, openCapabilities, only("support"))).toContain("/support");
+  });
+
+  it("gives /support to the support module — not to crm, whose child it is", () => {
+    const route = moduleForPath("/support");
+    expect(route?.moduleId).toBe("support");
+    expect(route?.label).toBe("Support");
+    expect(route?.icon).toBe(LifeBuoy);
+    // A deeper route is part of the same surface.
+    expect(moduleForPath("/support/some-ticket")?.moduleId).toBe("support");
+    // Customers keeps its own, and matching stays segment-aware.
+    expect(moduleForPath("/customers")?.moduleId).toBe("crm");
+    expect(moduleForPath("/supportdesk")).toBeNull();
   });
 });

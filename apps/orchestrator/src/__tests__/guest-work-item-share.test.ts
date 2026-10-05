@@ -40,6 +40,7 @@ import { MODULES, type AvailabilityConfig } from "../modules/module-registry.js"
 import { GUEST_SHARES } from "../modules/guest-shares.js";
 import { fullCatalogFeatures, type FeatureLevel } from "../services/access-catalog.js";
 import { createPmNativeRouter } from "../routes/pm/native.js";
+import { createPmScheduleRouter } from "../routes/pm/schedule.js";
 import { isGuestShareGuard } from "../middleware/guest-share.js";
 import type { AuthUser } from "../middleware/auth.js";
 import type { EffectiveAccessResult } from "../services/effective-access.service.js";
@@ -111,10 +112,11 @@ function scanRoutes(...file: string[]): RouteRow[] {
 const mountedAt = (path: string): string => (path.startsWith("/api/") ? path : `/api${path}`);
 const concrete = (path: string): string => mountedAt(path).replace(/:[A-Za-z]+/g, "x");
 
-/** Every route of the three PM routers: the native one, relations, and the mobile wrapper. */
+/** Every route of the PM routers: the native one, relations, schedule (WARP-3523), and the mobile wrapper. */
 const PM_ROUTES: RouteRow[] = [
   ...scanRoutes("routes", "pm", "native.ts"),
   ...scanRoutes("routes", "pm", "relations.ts"),
+  ...scanRoutes("routes", "pm", "schedule.ts"),
   ...scanRoutes("routes", "mobile", "pm.ts"),
 ];
 
@@ -133,7 +135,8 @@ const key = (r: RouteRow): string => `${r.method.toUpperCase()} ${r.path}`;
 
 const findFirst = vi.fn();
 const findMany = vi.fn();
-const prisma = { pmWorkItemAssignee: { findFirst }, pmWorkItem: { findMany } } as never;
+const count = vi.fn();
+const prisma = { pmWorkItemAssignee: { findFirst }, pmWorkItem: { findMany, count } } as never;
 
 function appAs(role: Role): Express {
   const app = express();
@@ -144,6 +147,9 @@ function appAs(role: Role): Express {
   });
   mountModuleGates(app, createModuleGate(ALL_ON, CFG, 0), async () => roleLess(role));
   app.use("/api", createPmNativeRouter(prisma));
+  // WARP-3523: the timeline window and My Work lists. Not guest shares — a guest
+  // must be refused by the gates before either handler runs.
+  app.use("/api", createPmScheduleRouter(prisma));
   // A handler that clears every gate and then meets a prisma double with no PM
   // models fails inside itself: anything but the gates' own 404 is "admitted".
   app.use((_err: unknown, _req: Request, res: Response, _next: NextFunction) => {
@@ -168,6 +174,8 @@ beforeEach(() => {
   findFirst.mockReset();
   findMany.mockReset();
   findMany.mockResolvedValue([]);
+  count.mockReset();
+  count.mockResolvedValue(0);
 });
 
 describe("the allowlist and the per-record guards cannot drift apart", () => {
@@ -269,9 +277,13 @@ describe("a guest to whom the item is NOT assigned: the same 404 on all five, ex
   it("the own list asks for the caller's id, whatever the query names (WARP-3407)", async () => {
     const res = await request(appAs("guest")).get("/api/pm/assigned-to-me?assignee=u-owner&userId=u-owner");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ work_items: [] });
+    expect(res.body).toEqual({ work_items: [], nextCursor: null, total: 0 });
     expect(findMany).toHaveBeenCalledTimes(1);
-    expect(findMany.mock.calls[0][0].where).toEqual({ isArchived: false, assignees: { some: { userId: "u-guest" } } });
+    expect(findMany.mock.calls[0][0].where).toEqual({ isArchived: false, assignees: { some: { userId: "u-guest" } }, project: { kind: "PROJECT" } });
+    // WARP-3371 — the `total` is counted over the SAME caller-pinned filter, so
+    // the count can never reveal how many items someone else was assigned.
+    expect(count).toHaveBeenCalledTimes(1);
+    expect(count.mock.calls[0][0].where).toEqual({ isArchived: false, assignees: { some: { userId: "u-guest" } }, project: { kind: "PROJECT" } });
   });
 
   it("asks for the item by the guest's id: the item routes by workItemId, the state list by the project", async () => {
