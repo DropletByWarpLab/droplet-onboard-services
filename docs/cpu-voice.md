@@ -36,7 +36,9 @@ Do not infer CPU speed or on-box quality from GPU benchmark throughput.
 
 `linux` enables `qwen-stt` and `kokoro-tts`. Both images bundle immutable
 upstream assets with SHA-256 verification at build time. Runtime downloads
-are disabled/absent, and both services join only the internal compose network.
+are disabled/absent, and both services join only the internal `droplet-speech`
+compose network, shared with their orchestrator/voice-io clients and isolated
+from the untrusted code sandbox's `droplet-internal` network.
 Their Wyoming ports are exposed internally, never published to the LAN.
 Both run as UID 10001, with read-only filesystems and all capabilities dropped.
 Kokoro uses a bounded executable `/tmp` tmpfs because phonemizer loads an

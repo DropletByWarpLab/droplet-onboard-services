@@ -230,6 +230,7 @@ services:
     networks:
       - default
       - droplet-internal
+      - droplet-speech
     environment:
       # Static config only — all secrets come from .env via env_file
       - PORT=3000
@@ -2859,7 +2860,7 @@ services:
       - "8086"
     networks:
       - default
-      - droplet-internal
+      - droplet-speech
     # Skip on macOS Docker Desktop (no /dev/snd).
     profiles: ["linux"]
     restart: always
@@ -2877,7 +2878,7 @@ services:
       dockerfile: services/qwen-stt/Dockerfile
     profiles: ["linux"]
     expose: ["10300"]
-    networks: [droplet-internal]
+    networks: [droplet-speech]
     environment:
       - QWEN_CPU_THREADS=${QWEN_CPU_THREADS:-4}
       - OPENBLAS_NUM_THREADS=${QWEN_CPU_THREADS:-4}
@@ -2898,7 +2899,7 @@ services:
       dockerfile: services/kokoro-tts/Dockerfile
     profiles: ["linux"]
     expose: ["10200"]
-    networks: [droplet-internal]
+    networks: [droplet-speech]
     environment:
       - KOKORO_CPU_THREADS=${KOKORO_CPU_THREADS:-2}
     read_only: true
@@ -3979,10 +3980,13 @@ services:
 # attached ONLY to it can reach the other members of this network and nothing
 # else — no LAN, no WAN, no host — while a container attached to both (the
 # orchestrator) bridges nothing: Docker does not route between a container's
-# networks. Sandbox and the CPU speech sidecars are internal-only members;
+# networks. Sandbox joins only droplet-internal; CPU speech sidecars join
+# only droplet-speech, keeping their Wyoming ports unreachable from sandbox.
 # voice-io and the orchestrator also retain their default-network links.
 networks:
   droplet-internal:
+    internal: true
+  droplet-speech:
     internal: true
 
 secrets:
