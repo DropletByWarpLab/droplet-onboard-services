@@ -347,6 +347,101 @@ describe("cron-runtime.service", () => {
     rt.stop();
   });
 
+  // WARP-3532 — `scheduleInterval` hands back a handle so a registration can be
+  // run EARLY (the PmActivity outbox wakes its consumers after a write) without
+  // growing a second lock/overlap path beside this one.
+  describe("scheduleInterval handle: runNow()", () => {
+    it("runs the handler now, without waiting for the interval", async () => {
+      const rt = createCronRuntime();
+      const handler = vi.fn(async () => {});
+      const job = rt.scheduleInterval(60_000, handler);
+      expect(handler).not.toHaveBeenCalled();
+      job.runNow();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handler).toHaveBeenCalledTimes(1);
+      rt.stop();
+    });
+
+    it("goes through the same advisory lock as a tick", async () => {
+      const prisma = makePrismaStub({ lockAcquired: true });
+      const rt = createCronRuntime(prisma, makeLogger());
+      const handler = vi.fn(async () => {});
+      const job = rt.scheduleInterval(60_000, handler, { lockKey: "test:run-now" });
+      job.runNow();
+      await vi.advanceTimersByTimeAsync(0);
+      const lockCalls = prisma.$queryRawUnsafe.mock.calls.filter((c) =>
+        String(c[0]).includes("pg_try_advisory_xact_lock"),
+      );
+      expect(lockCalls).toHaveLength(1);
+      expect(lockCalls[0]![1]).toBe("test:run-now");
+      expect(handler).toHaveBeenCalledTimes(1);
+      rt.stop();
+    });
+
+    it("is skipped when the lock is held elsewhere, like any tick", async () => {
+      const prisma = makePrismaStub({ lockAcquired: false });
+      const rt = createCronRuntime(prisma, makeLogger());
+      const handler = vi.fn(async () => {});
+      const job = rt.scheduleInterval(60_000, handler, { lockKey: "test:run-now-held" });
+      job.runNow();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handler).not.toHaveBeenCalled();
+      rt.stop();
+    });
+
+    it("never overlaps the run already in flight — an early run is skipped, not queued", async () => {
+      const rt = createCronRuntime();
+      let release!: () => void;
+      let running = 0;
+      let maxRunning = 0;
+      const handler = vi.fn(
+        () =>
+          new Promise<void>((r) => {
+            running += 1;
+            maxRunning = Math.max(maxRunning, running);
+            release = () => {
+              running -= 1;
+              r();
+            };
+          }),
+      );
+      const job = rt.scheduleInterval(1000, handler);
+      job.runNow();
+      await vi.advanceTimersByTimeAsync(0);
+      job.runNow();
+      job.runNow();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handler).toHaveBeenCalledTimes(1);
+
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      // The skipped early runs were NOT queued behind the first one.
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(maxRunning).toBe(1);
+      // A later one runs normally.
+      job.runNow();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(handler).toHaveBeenCalledTimes(2);
+      rt.stop();
+    });
+
+    it("contains and counts a failure like any tick", async () => {
+      const logger = makeLogger();
+      const rt = createCronRuntime(undefined, logger);
+      const handler = vi.fn(async () => {
+        throw new Error("boom");
+      });
+      const job = rt.scheduleInterval(60_000, handler);
+      job.runNow();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ consecutiveFailures: 1 }),
+        expect.any(String),
+      );
+      rt.stop();
+    });
+  });
+
   it("a locked handler that outlives 60 s keeps the advisory lock for its whole run", async () => {
     // Model Prisma's interactive-transaction timeout: when it expires the
     // transaction is rolled back and Postgres releases the xact lock, while

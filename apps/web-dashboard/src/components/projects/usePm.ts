@@ -2,10 +2,12 @@
 // against the orchestrator /api/pm/* API, plus people resolution.
 
 import useSWR from "swr";
-import { useCallback, useMemo } from "react";
+import useSWRInfinite from "swr/infinite";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { authFetch } from "@/lib/auth";
 import type { Department } from "@/lib/types";
 import { makePerson } from "./config";
+import { localToday } from "./date-only";
 import type {
   PmProject,
   PmState,
@@ -84,7 +86,11 @@ export function useProjects(includeArchived: boolean) {
  * /business mounts this hook on every box, and Projects is off by default.
  */
 export function useSummary(enabled: boolean) {
-  const { data, error, isLoading, mutate } = useSWR(enabled ? "/api/pm/summary" : null, (u: string) =>
+  // WARP-3372 — "overdue" is measured against the viewer's own calendar day, the
+  // same one the board's overdue chip uses, so the two cannot disagree. The day
+  // is part of the key: it rolls over with midnight, not with a stale cache.
+  const url = enabled ? `/api/pm/summary?today=${localToday()}` : null;
+  const { data, error, isLoading, mutate } = useSWR(url, (u: string) =>
     getJson<{ summary: PmSummary }>(u),
   );
   return { summary: data?.summary, error, isLoading, mutate };
@@ -128,75 +134,221 @@ export function useProjectLabels(projectId: string | null) {
   return { labels: data?.labels };
 }
 
+/** Rows asked for per request. The server's own default is 100 and its ceiling
+ *  500; 200 keeps a 250-item project to two requests without any one response
+ *  getting heavy. */
+export const PAGE_SIZE = 200;
+
+/** The most pages a walk of `total` rows may take: the pages those rows fill,
+ *  plus two. Any more means the server's cursor is not advancing, and the walk
+ *  ends rather than become a request loop. */
+const maxPages = (total: number): number => Math.ceil(total / PAGE_SIZE) + 2;
+
+/** One page of a PM list, exactly as the orchestrator sends it: the rows under a
+ *  key that names them (`work_items`, `comments`, `activity`), `nextCursor`
+ *  (null on the last page) and the exact `total` of the whole list. */
+type ListPage = { nextCursor: string | null; total: number } & Record<string, unknown>;
+
+/** A tab that regains focus re-reads the list, but never more often than this:
+ *  a re-read walks every page, so it is not free on a big project. */
+const FOCUS_REFRESH_MIN_MS = 30_000;
+
+/**
+ * Re-read the whole chain when the tab regains focus — what `revalidateOnFocus`
+ * did for the single-page list, so a board left open still catches up with what
+ * the rest of the team did. `mutate()` with no argument revalidates EVERY page.
+ */
+function useRefreshOnFocus(enabled: boolean, busy: boolean, mutate: () => Promise<unknown>): void {
+  const lastLoadAt = useRef(Date.now());
+  useEffect(() => {
+    if (!busy) lastLoadAt.current = Date.now();
+  }, [busy]);
+  useEffect(() => {
+    if (!enabled) return;
+    const refresh = () => {
+      if (document.visibilityState === "hidden") return;
+      if (Date.now() - lastLoadAt.current < FOCUS_REFRESH_MIN_MS) return;
+      lastLoadAt.current = Date.now();
+      void mutate();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [enabled, mutate]);
+}
+
+/**
+ * WARP-3371 — EVERY page of a PM list (work items, comments, activity), loaded
+ * progressively.
+ *
+ * The board used to read one page of 100 and stop, with nothing on screen to say
+ * so. This follows `nextCursor` page after page until it is null: the first page
+ * paints as soon as it lands, `total` is the server's exact count (so the view
+ * can say "100 of 250"), and the walk is bounded twice over — by the cursor
+ * itself, and by a page count derived from `total`, so a server that ever failed
+ * to advance its cursor ends the walk instead of becoming a request loop. Rows
+ * are de-duplicated by id for the same reason.
+ *
+ * A page after the first that fails does NOT discard the pages already in hand:
+ * `loadError` carries it while `rows` keeps rendering, and SWR retries the
+ * failed page on its own backoff. `error` is only the failure of the FIRST page,
+ * i.e. "there is nothing to show".
+ */
+function usePages<T extends { id: string }>(url: string | null, field: string) {
+  const getKey = useCallback(
+    (index: number, previous: ListPage | null): string | null => {
+      if (!url) return null;
+      const sep = url.includes("?") ? "&" : "?";
+      if (index === 0) return `${url}${sep}limit=${PAGE_SIZE}`;
+      if (!previous?.nextCursor) return null; // the last page has been read
+      if (index >= maxPages(previous.total)) return null; // the cursor is not advancing
+      return `${url}${sep}limit=${PAGE_SIZE}&cursor=${encodeURIComponent(previous.nextCursor)}`;
+    },
+    [url],
+  );
+  const { data, error, isLoading, isValidating, setSize, mutate } = useSWRInfinite<ListPage>(
+    getKey,
+    (u: string) => getJson<ListPage>(u),
+    {
+      // The chain is walked ONE page per `setSize` below. SWR's default re-reads
+      // the first page on every step, which would fetch it once more for each
+      // page that follows it.
+      revalidateFirstPage: false,
+      // …but a chain that is already cached must still be re-read when the
+      // board is opened again.
+      revalidateOnMount: true,
+      // With nothing re-read implicitly any more the stock focus revalidation
+      // would be a no-op; `useRefreshOnFocus` below is the real one.
+      revalidateOnFocus: false,
+    },
+  );
+
+  const pages = data ?? [];
+  const last = pages[pages.length - 1];
+  // "More is coming" only while the walk is allowed to continue (see `maxPages`),
+  // so a cursor that never advances reads as "done", not as loading forever.
+  const hasMore = Boolean(last?.nextCursor && pages.length < maxPages(last.total));
+
+  // Pull the next page the moment the previous one has landed.
+  useEffect(() => {
+    if (hasMore && !isValidating && !error) void setSize(pages.length + 1);
+  }, [hasMore, isValidating, error, pages.length, setSize]);
+
+  useRefreshOnFocus(url !== null, isValidating, mutate);
+
+  const flatten = useCallback(
+    (all: ListPage[]): T[] => {
+      const seen = new Set<string>();
+      return all
+        .flatMap((p) => (p[field] as T[] | undefined) ?? [])
+        .filter((row) => (seen.has(row.id) ? false : (seen.add(row.id), true)));
+    },
+    [field],
+  );
+  const rows = useMemo(() => (data ? flatten(data) : undefined), [data, flatten]);
+
+  /** Revalidate every page; resolves to the fresh, flattened rows. */
+  const refresh = useCallback(async (): Promise<T[] | undefined> => {
+    const fresh = await mutate();
+    return fresh ? flatten(fresh) : undefined;
+  }, [mutate, flatten]);
+
+  return {
+    rows,
+    total: last?.total,
+    /** More pages are still on the way. */
+    hasMore,
+    loadError: pages.length > 0 ? (error as Error | undefined) : undefined,
+    error: pages.length === 0 ? error : undefined,
+    isLoading,
+    mutate: refresh,
+  };
+}
+
 export function useProjectItems(projectId: string | null) {
   const url = projectId ? `/api/pm/projects/${projectId}/work-items` : null;
-  const { data, error, isLoading, mutate } = useSWR(url, (u: string) =>
-    getJson<{ work_items: PmWorkItem[] }>(u),
-  );
-  return { items: data?.work_items, error, isLoading, mutate, key: url };
+  const { rows, mutate, ...rest } = usePages<PmWorkItem>(url, "work_items");
+  return {
+    ...rest,
+    items: rows,
+    key: url,
+    /** Revalidate every page; resolves to the fresh list as `{ work_items }`. */
+    mutate: async (): Promise<{ work_items: PmWorkItem[] } | undefined> => {
+      const fresh = await mutate();
+      return fresh ? { work_items: fresh } : undefined;
+    },
+  };
 }
 
 export function useSubIssues(projectId: string | null, parentId: string | null) {
-  const { data } = useSWR(
+  const { rows } = usePages<PmWorkItem>(
     projectId && parentId
       ? `/api/pm/projects/${projectId}/work-items?parent=${encodeURIComponent(parentId)}`
       : null,
-    (u: string) => getJson<{ work_items: PmWorkItem[] }>(u),
+    "work_items",
   );
-  return { subIssues: data?.work_items };
+  return { subIssues: rows };
 }
 
+// WARP-3371 — comments and the activity feed are pages too (the API caps a
+// request at 500), so a long thread is read to the end instead of stopping at
+// whatever the first response held.
 export function useComments(workItemId: string | null) {
-  const { data, mutate } = useSWR(
+  const { rows, mutate } = usePages<PmComment>(
     workItemId ? `/api/pm/work-items/${workItemId}/comments` : null,
-    (u: string) => getJson<{ comments: PmComment[] }>(u),
+    "comments",
   );
-  return { comments: data?.comments, mutate };
+  return { comments: rows, mutate };
 }
 
 export function useActivity(workItemId: string | null) {
-  const { data, mutate } = useSWR(
+  const { rows, mutate } = usePages<PmActivity>(
     workItemId ? `/api/pm/work-items/${workItemId}/activity` : null,
-    (url: string) => getJson<{ activity: PmActivity[] }>(url),
+    "activity",
   );
-  return { activity: data?.activity, mutate };
+  return { activity: rows, mutate };
 }
 
 
-interface DirectoryUser {
+/** One entry of `GET /api/pm/people` — what Projects needs to show a person. */
+interface PmPerson {
   id: string;
-  // WARP-947: the local `User.id` UUID. PM attribution surfaces (activity feed,
-  // comment authors, assignees) reference this UUID — not the Nextcloud
-  // username in `id`. Optional/nullable: a directory user with no local row, or
-  // an older orchestrator that predates the field, yields null.
-  userId?: string | null;
-  username: string;
   displayName: string;
+  avatarUrl: string | null;
 }
 
-/** Resolve assignee/lead user ids → display names + avatar tone. Falls back to a
- *  short id stub when the directory hasn't loaded or the user is unknown. */
+/** An id the people list does not know, once the list HAS loaded: a leaver, or
+ *  a machine. Never a guess at who it was. */
+export const FORMER_MEMBER = "Former member";
+/** What an id shows before the list has answered (or if it cannot). Neutral on
+ *  purpose: "Former member" would be false for someone who is on the list. */
+const MEMBER_PENDING = "Team member";
+
+/**
+ * Resolve the user ids on PM rows (lead, assignee, creator, comment author,
+ * activity actor — all the local `User.id`) to a name and an avatar.
+ *
+ * WARP-3372 — this used to read `GET /api/auth/users`, which is owner/admin-only,
+ * so every member saw "User 1a2b" for every colleague. `/api/pm/people` is the
+ * PM-scoped projection every role that can read the board is allowed to read.
+ * A known id is its person; an unknown id is "Former member" once the list has
+ * loaded; before that (or if it fails) it is a neutral label — never the id.
+ */
 export function usePeople() {
-  const { data } = useSWR("/api/auth/users", (u: string) =>
-    getJson<{ users: DirectoryUser[] }>(u),
-  );
+  const { data } = useSWR("/api/pm/people", (u: string) => getJson<{ people: PmPerson[] }>(u));
   const map = useMemo(() => {
     const m = new Map<string, Person>();
-    for (const u of data?.users ?? []) {
-      const person = makePerson(u.id, u.displayName);
-      // PM ids (actorId, authorId, assignees) are the local User.id UUID, so the
-      // UUID is the primary resolution key. Also index the Nextcloud username so
-      // any username-keyed caller still resolves. (WARP-947)
-      if (u.userId) m.set(u.userId, person);
-      m.set(u.id, person);
-    }
+    for (const p of data?.people ?? []) m.set(p.id, makePerson(p.id, p.displayName, p.avatarUrl));
     return m;
   }, [data]);
   const person = useCallback(
-    (id: string): Person => map.get(id) ?? makePerson(id, `User ${id.slice(0, 4)}`),
-    [map],
+    (id: string): Person => map.get(id) ?? makePerson(id, data ? FORMER_MEMBER : MEMBER_PENDING),
+    [map, data],
   );
-  return { person, users: data?.users };
+  return { person, people: data?.people };
 }
 
 // ── Mutations ───────────────────────────────────────────────────────────────
@@ -231,6 +383,14 @@ export function pmActions() {
       send<{ comment: PmComment }>(`/api/pm/work-items/${itemId}/comments`, "POST", {
         comment_html: commentHtml,
       }),
-    deleteProject: (id: string) => send<{ deleted: string }>(`/api/pm/projects/${id}`, "DELETE"),
+    // WARP-3370 — archive / restore are PATCH `archived` (a member may); delete is
+    // for good, owner/admin only, archived projects only, and the API wants the
+    // identifier typed again.
+    archiveProject: (id: string) =>
+      send<{ project: PmProject }>(`/api/pm/projects/${id}`, "PATCH", { archived: true }),
+    restoreProject: (id: string) =>
+      send<{ project: PmProject }>(`/api/pm/projects/${id}`, "PATCH", { archived: false }),
+    deleteProject: (id: string, confirmIdentifier: string) =>
+      send<{ deleted: string }>(`/api/pm/projects/${id}`, "DELETE", { confirm_identifier: confirmIdentifier }),
   };
 }

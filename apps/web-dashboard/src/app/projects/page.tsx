@@ -19,10 +19,10 @@ import { translateError } from "@/lib/friendly-errors";
 import "./projects.css";
 
 import { PmIcon } from "@/components/projects/icons";
-import { PeopleContext } from "@/components/projects/bits";
+import { ListProgress, PeopleContext } from "@/components/projects/bits";
 import { ProjectsDisabled } from "@/components/projects/ProjectsDisabled";
 import { stageRecordPinHandoff } from "@/lib/pin-handoff";
-import { canWrite, type PmProject, type PmWorkItem } from "@/components/projects/types";
+import { canDeleteProject, canWrite, type PmProject, type PmWorkItem } from "@/components/projects/types";
 import { isOverdue } from "@/components/projects/config";
 import {
   useProjects,
@@ -45,7 +45,12 @@ import { DetailDrawer } from "@/components/projects/detail";
 import { CalendarView } from "@/components/projects/calendar/CalendarView";
 import { TimelineView } from "@/components/projects/timeline/TimelineView";
 import { MyWorkView } from "@/components/projects/mywork/MyWorkView";
-import { NewItemModal, NewProjectModal } from "@/components/projects/modals";
+import {
+  ConfirmArchiveProject,
+  ConfirmDeleteProject,
+  NewItemModal,
+  NewProjectModal,
+} from "@/components/projects/modals";
 import { TimeAccessProvider } from "@/components/projects/time/access";
 import { TimerChip } from "@/components/projects/time/TimerChip";
 import { TimeView } from "@/components/projects/time/TimeView";
@@ -105,6 +110,8 @@ function ProjectsWorkspace(): JSX.Element {
   const { user } = useAuth();
   const role = user?.role;
   const readOnly = !canWrite(role);
+  // WARP-3370 — members archive and restore; only owner/admin may delete for good.
+  const mayDelete = canDeleteProject(role);
   const { toast } = useToast();
   const { person } = usePeople();
 
@@ -128,13 +135,21 @@ function ProjectsWorkspace(): JSX.Element {
   const [department, setDepartment] = useState<string>(DEPARTMENT_ANY);
   const [showArchived, setShowArchived] = useState(false);
   const [drawer, setDrawer] = useState<PmWorkItem | null>(null);
-  const [modal, setModal] = useState<"newitem" | "newproject" | null>(null);
+  const [modal, setModal] = useState<"newitem" | "newproject" | "archive" | "delete" | null>(null);
 
   const { projects, error: projErr, isLoading: projLoading, mutate: mutateProjects } = useProjects(showArchived);
   // ProjectsWorkspace only mounts behind the `projects` capability gate above.
   const { summary, mutate: mutateSummary } = useSummary(true);
   const { states } = useProjectStates(projectId);
-  const { items, error: itemsErr, isLoading: itemsLoading, mutate: mutateItems } = useProjectItems(projectId);
+  const {
+    items,
+    total,
+    hasMore,
+    loadError,
+    error: itemsErr,
+    isLoading: itemsLoading,
+    mutate: mutateItems,
+  } = useProjectItems(projectId);
   const { departments } = useDepartments();
 
   const project = useMemo(() => projects?.find((p) => p.id === projectId) ?? null, [projects, projectId]);
@@ -156,15 +171,20 @@ function ProjectsWorkspace(): JSX.Element {
     return applySavedView(list, savedView, user?.id);
   }, [allItems, q, department, deptOptions, savedView, user?.id]);
 
+  // WARP-3371 — the pages arrive one after another, so for a moment the view
+  // holds fewer items than the project has. `partial` is that moment, and while
+  // it lasts `all` is the SERVER's exact total (never the length of what has
+  // arrived) and every other count is marked as a floor.
+  const partial = hasMore && total !== undefined && allItems.length < total;
   const counts: Record<SavedView, number> = useMemo(
     () => ({
-      all: allItems.length,
+      all: partial ? (total ?? allItems.length) : allItems.length,
       mine: applySavedView(allItems, "mine", user?.id).length,
       active: applySavedView(allItems, "active", user?.id).length,
       overdue: applySavedView(allItems, "overdue", user?.id).length,
       noassignee: applySavedView(allItems, "noassignee", user?.id).length,
     }),
-    [allItems, user?.id],
+    [allItems, partial, total, user?.id],
   );
 
   const filterActive =
@@ -173,11 +193,15 @@ function ProjectsWorkspace(): JSX.Element {
     ? "loading"
     : itemsErr
       ? "error"
-      : allItems.length === 0
+      : allItems.length === 0 && !partial
         ? "empty"
-        : filtered.length === 0 && filterActive
+        : filtered.length === 0 && filterActive && !partial
           ? "filtered"
-          : "populated";
+          : filtered.length === 0 && partial
+            ? // Nothing in hand matches yet, but more is still on its way: the
+              // honest answer is "still looking", not "no matches".
+              "loading"
+            : "populated";
 
   // WARP-3523 — what the timeline needs from the page's filters: the ids they
   // admit (null = no filter, show everything it returns), and a revision that
@@ -220,6 +244,26 @@ function ProjectsWorkspace(): JSX.Element {
   const backToIndex = () => {
     changeView("index");
     setProjectId(null);
+  };
+
+  // WARP-3370 — leaving a project for good (archived or deleted): back to the
+  // index, with the list and the KPIs re-read.
+  const afterProjectGone = () => {
+    backToIndex();
+    void mutateProjects();
+    void mutateSummary();
+  };
+
+  const onRestore = async () => {
+    if (!project) return;
+    try {
+      await pmActions().restoreProject(project.id);
+      toast("Project restored", "success");
+      void mutateProjects();
+      void mutateSummary();
+    } catch (e) {
+      toast(translateError(e, "projects"), "error");
+    }
   };
 
   const onTransition = async (item: PmWorkItem, stateId: string) => {
@@ -319,9 +363,41 @@ function ProjectsWorkspace(): JSX.Element {
         <div className="pm-scope">
           <div className="pm-page">
             {view !== "index" && (
-              <button className="pm-btn ghost sm" type="button" onClick={backToIndex} style={{ alignSelf: "flex-start", marginBottom: 14 }}>
-                <PmIcon name="chevL" size={14} /> All projects
-              </button>
+              <div className="pm-row" style={{ justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+                <button className="pm-btn ghost sm" type="button" onClick={backToIndex}>
+                  <PmIcon name="chevL" size={14} /> All projects
+                </button>
+                {!readOnly && project && !project.archived && (
+                  <button className="pm-btn ghost sm" type="button" onClick={() => setModal("archive")}>
+                    <PmIcon name="archive" size={14} /> Archive project
+                  </button>
+                )}
+              </div>
+            )}
+            {/* WARP-3370 — an archived project says so, and owns the two ways out:
+                put it back, or (owner/admin) delete it for good. */}
+            {view !== "index" && project?.archived && (
+              <div
+                className="pm-surface pm-row"
+                role="status"
+                style={{ justifyContent: "space-between", gap: 12, flexWrap: "wrap", padding: "12px 16px", marginBottom: 14 }}
+              >
+                <span style={{ fontSize: 13, color: "var(--text-2)" }}>
+                  This project is archived. It&apos;s hidden from your project list.
+                </span>
+                <span className="pm-row" style={{ gap: 8 }}>
+                  {!readOnly && (
+                    <button className="pm-btn sm" type="button" onClick={() => void onRestore()}>
+                      <PmIcon name="restore" size={14} /> Restore
+                    </button>
+                  )}
+                  {mayDelete && (
+                    <button className="pm-btn danger sm" type="button" onClick={() => setModal("delete")}>
+                      <PmIcon name="trash" size={14} /> Delete permanently
+                    </button>
+                  )}
+                </span>
+              </div>
             )}
 
             {isProjectView && (
@@ -336,7 +412,15 @@ function ProjectsWorkspace(): JSX.Element {
                     onDepartment={setDepartment}
                   />
                 </div>
-                <SavedViews active={savedView} onPick={setSavedView} counts={counts} />
+                <SavedViews active={savedView} onPick={setSavedView} counts={counts} partial={partial} />
+                {(partial || loadError) && total !== undefined && (
+                  <ListProgress
+                    shown={allItems.length}
+                    total={total}
+                    failed={Boolean(loadError)}
+                    onRetry={() => void mutateItems()}
+                  />
+                )}
               </div>
             )}
             {(view === "cycles" || view === "modules" || (view === "time" && projectId)) && (
@@ -368,13 +452,14 @@ function ProjectsWorkspace(): JSX.Element {
                   items={filtered}
                   domain={boardDomain}
                   readOnly={readOnly}
+                  partial={partial}
                   onOpen={setDrawer}
                   onTransition={onTransition}
                   onNewItem={() => setModal("newitem")}
                 />
               )}
               {view === "list" && (
-                <ListView states={states ?? []} items={filtered} domain={boardDomain} onOpen={setDrawer} />
+                <ListView states={states ?? []} items={filtered} domain={boardDomain} partial={partial} onOpen={setDrawer} />
               )}
               {view === "calendar" && (
                 <CalendarView
@@ -426,6 +511,12 @@ function ProjectsWorkspace(): JSX.Element {
         <NewItemModal project={project} onClose={() => setModal(null)} onCreated={refreshAll} />
       )}
       {modal === "newproject" && <NewProjectModal onClose={() => setModal(null)} onCreated={refreshAll} />}
+      {modal === "archive" && project && (
+        <ConfirmArchiveProject project={project} onClose={() => setModal(null)} onArchived={afterProjectGone} />
+      )}
+      {modal === "delete" && project && (
+        <ConfirmDeleteProject project={project} onClose={() => setModal(null)} onDeleted={afterProjectGone} />
+      )}
     </PeopleContext.Provider>
   );
 }

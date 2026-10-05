@@ -1,11 +1,11 @@
-fastapi==0.141.1
+fastapi==0.142.2
 # WARP-2734 — the provisioning endpoint's request model. FastAPI already pulls
 # pydantic transitively; it is pinned here because this service now DEPENDS on
 # it directly (`extra: forbid` is the allow-list that keeps a caller from
 # smuggling a field past the credential schema), and a transitive pin is one
 # somebody else's upgrade can move.
 pydantic==2.13.5
-uvicorn[standard]==0.53.0
+uvicorn[standard]==0.54.0
 # APScheduler owns the IDLE per-account loops + the outbound SMTP
 # poller. No `while True` per droplet-architecture-guard rule 9.
 APScheduler==3.11.3
@@ -13,7 +13,7 @@ APScheduler==3.11.3
 aioimaplib==2.0.1
 # Fernet decryption of EmailAccount.passwordEnc. Key lives at
 # /data/secrets/email.key (mode 0600, setup.sh-generated).
-cryptography==50.0.1
+cryptography==50.0.2
 # Service-principal POST to the orchestrator's ingest endpoint +
 # outbound SMTP status callback.
 httpx==0.28.1

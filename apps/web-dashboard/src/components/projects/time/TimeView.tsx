@@ -83,10 +83,10 @@ function LoadError({ error, onRetry }: { error: unknown; onRetry: () => void }):
 // ── Timesheet ───────────────────────────────────────────────────────────────
 
 function PersonSelect({ value, onChange }: { value: string; onChange: (id: string) => void }): JSX.Element {
-  const { users } = usePeople();
+  const { people } = usePeople();
   const access = useTimeAccess();
-  const listed = (users ?? []).filter((u) => typeof u.userId === "string" && u.userId.length > 0);
-  const hasSelf = listed.some((u) => u.userId === access.userId);
+  const listed = people ?? [];
+  const hasSelf = listed.some((u) => u.id === access.userId);
   return (
     <select
       className="pm-input"
@@ -97,9 +97,9 @@ function PersonSelect({ value, onChange }: { value: string; onChange: (id: strin
     >
       {!hasSelf && access.userId && <option value={access.userId}>Me</option>}
       {listed.map((u) => (
-        <option key={u.userId as string} value={u.userId as string}>
+        <option key={u.id} value={u.id}>
           {u.displayName}
-          {u.userId === access.userId ? " (you)" : ""}
+          {u.id === access.userId ? " (you)" : ""}
         </option>
       ))}
     </select>

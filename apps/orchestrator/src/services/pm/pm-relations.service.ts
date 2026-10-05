@@ -75,6 +75,7 @@ import type { Prisma, PrismaClient } from "@prisma/client";
 import { SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
 import { isPrismaCode, isServiceDesk } from "./pm.service.js";
 import { PM_ERRORS } from "./pm.service.js";
+import { nudgeOutbox } from "./pm-outbox.js";
 
 /** A Prisma client OR an interactive-transaction handle — helpers that run
  *  inside `$transaction` take this so callers compose them atomically. Mirrors
@@ -298,6 +299,8 @@ async function writeRelationActivity(
       newValue: added ? `${input.kind}:${end.otherId}` : null,
     })),
   });
+  // WARP-3532 (ADR-069 §7) — wake the outbox consumers; see writeActivity.
+  nudgeOutbox();
 }
 
 // ── Reads ────────────────────────────────────────────────────────────────────

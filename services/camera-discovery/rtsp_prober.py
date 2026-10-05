@@ -19,6 +19,7 @@ import re
 import secrets
 import socket
 import time
+from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
 
 from default_credentials import get_credentials
@@ -606,23 +607,123 @@ async def probe_with_credentials(ip: str, port: int, user: str, pw: str,
     return (OUTCOME_NO_PATH if reached else OUTCOME_UNREACHABLE), None
 
 
+# --- Failed-login budget for the credential ladder (WARP-3508) ---------------
+#
+# Every 30 s sweep used to re-run the whole ladder against any camera still
+# pending. Hanwha / Axis / some Hikvision firmware lock the admin account after
+# ~5 failed logins and answer 490 for several minutes (default_credentials.py,
+# WARP-1873), so a camera waiting for the operator's password was held in
+# permanent lockout by the service meant to adopt it — and the operator could not
+# sign in either. The budget is per IP (not per port: it is the camera's account
+# that locks).
+#
+#   * a run spends at most LADDER_FAILED_AUTH_BUDGET REJECTED logins, then stands
+#     down for LADDER_RETRY_SECONDS. Kept well under the ~5 lockout threshold, and
+#     the ONVIF admin/blank login that precedes each run counts toward it too.
+#   * the next run RESUMES at the next credential: restarting at the first would
+#     never reach the later defaults, or the operator's own (prepended to the list).
+#   * a 490 stops the run at once, for LADDER_COOLDOWN_SECONDS.
+#   * once every credential has been rejected the camera has a password we do not
+#     know and only the operator can supply it: wait LADDER_COOLDOWN_SECONDS before
+#     starting a new pass.
+#
+# The cost is slower adoption of a camera whose factory default is not among the
+# first few credentials — minutes instead of one sweep. Set CAMERA_DEFAULT_PASSWORD
+# on a deployed site and the right credential is the first one tried.
+LADDER_FAILED_AUTH_BUDGET = 2
+LADDER_RETRY_SECONDS = 600.0
+LADDER_COOLDOWN_SECONDS = 3600.0
+
+
+@dataclass
+class _LadderState:
+    """What the ladder remembers about one camera between sweeps."""
+
+    next_credential: int = 0  # how many leading credentials it has already rejected
+    quiet_until: float = 0.0  # monotonic deadline: the ladder stays off until then
+
+
+_ladder: dict[str, _LadderState] = {}
+
+
+def _clock() -> float:
+    """Monotonic seconds — a function so tests can move time without sleeping."""
+    return time.monotonic()
+
+
+def credential_probing_paused(ip: str) -> bool:
+    """True while the ladder is standing down on ``ip``.
+
+    Anything else that logs in to the camera on a sweep (the ONVIF admin/blank
+    probe) should stand down with it, or it would spend the camera's lockout
+    budget on its own.
+    """
+    state = _ladder.get(ip)
+    return state is not None and _clock() < state.quiet_until
+
+
 async def probe_rtsp_with_credentials(ip: str, port: int
                                       ) -> tuple[str, str, str] | None:
     """Find a (path, user, password) triple that authenticates on this
     camera. Returns the first match or None.
 
-    Loop order is paths OUTER, credentials INNER so a path the camera
-    doesn't expose short-circuits the whole credential list for that
-    path via _try_credentials_once() returning False on a non-401
-    non-200 status (typically 404). For a camera that accepts the third
-    credential on path /live that's ~13 DESCRIBEs instead of ~195.
+    Loop order is paths OUTER, credentials INNER. A path that does not exist, or
+    does not challenge, costs one anonymous DESCRIBE and no login: credentials
+    cannot change that, so the rest of the list is skipped for it (WARP-3508 — it
+    used to cost one DESCRIBE per credential). For a camera that accepts the third
+    credential on path /live that is ~3 logins instead of ~195.
+
+    The run is bounded by the failed-login budget above: it returns None when the
+    budget is spent, when the camera reports a lockout, or while it is standing down.
     """
     credentials = get_credentials()
+    state = _ladder.setdefault(ip, _LadderState())
+    if _clock() < state.quiet_until:
+        logger.debug("Automatic probing of %s is standing down", ip)
+        return None
+    if state.next_credential >= len(credentials):
+        state.next_credential = 0  # a whole pass was rejected and its cooldown is over
+    budget = LADDER_FAILED_AUTH_BUDGET
     for path in STREAM_PATHS:
-        for user, pw in credentials:
-            if await _try_credentials_once(ip, port, path, user, pw):
+        for index in range(state.next_credential, len(credentials)):
+            user, pw = credentials[index]
+            outcome = await describe_outcome(ip, port, path, user, pw)
+            if outcome == OUTCOME_OK:
                 logger.debug("Default RTSP sign-in succeeded at %s:%d", ip, port)
+                _ladder.pop(ip, None)
                 return path, user, pw
+            if outcome == OUTCOME_LOCKED:
+                state.quiet_until = _clock() + LADDER_COOLDOWN_SECONDS
+                logger.warning(
+                    "%s reports its account is locked out (RTSP 490) — "
+                    "no more logins for %d s",
+                    ip, LADDER_COOLDOWN_SECONDS,
+                )
+                return None
+            if outcome == OUTCOME_AUTH_FAILED:
+                state.next_credential = index + 1
+                budget -= 1
+                if state.next_credential >= len(credentials):
+                    state.quiet_until = _clock() + LADDER_COOLDOWN_SECONDS
+                    logger.info(
+                        "%s rejected every default credential — it needs its "
+                        "operator's password; no more logins for %d s",
+                        ip, LADDER_COOLDOWN_SECONDS,
+                    )
+                    return None
+                if budget <= 0:
+                    state.quiet_until = _clock() + LADDER_RETRY_SECONDS
+                    logger.info(
+                        "%s rejected %d login(s) — pausing credential probing for %d s",
+                        ip, LADDER_FAILED_AUTH_BUDGET, LADDER_RETRY_SECONDS,
+                    )
+                    return None
+            elif outcome == OUTCOME_BASIC_ONLY:
+                return None  # Nothing was sent; other paths cannot make Basic safe.
+            elif outcome == OUTCOME_UNREACHABLE:
+                return None  # no verdict on the credential and nothing spent: next sweep
+            else:
+                break  # NO_PATH: nothing to log in to on this path — next path
     return None
 
 

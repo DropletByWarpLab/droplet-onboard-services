@@ -18,21 +18,21 @@ import type {
 const DEVICES_KEY = "/api/matter/devices";
 const DISCOVERED_KEY = "/api/matter/discover";
 
-export function useSmartHome() {
+export function useSmartHome({ enabled = true }: { enabled?: boolean } = {}) {
   const {
     data: grouped,
     error,
     isLoading,
     isValidating,
     mutate: mutateDevices,
-  } = useSWR<MatterGrouped>(DEVICES_KEY, fetchMatterDevices, {
+  } = useSWR<MatterGrouped>(enabled ? DEVICES_KEY : null, fetchMatterDevices, {
     refreshInterval: 4000,
   });
 
   const { data: discoveryResult } = useSWR<{
     devices: MatterDiscoveredDevice[];
     count: number;
-  }>(DISCOVERED_KEY, discoverMatterDevices, {
+  }>(enabled ? DISCOVERED_KEY : null, discoverMatterDevices, {
     refreshInterval: 30000,
     // Discovery takes ~15s, don't error on slow requests
     errorRetryCount: 1,
