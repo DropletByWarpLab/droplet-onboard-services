@@ -452,6 +452,7 @@ describe.skipIf(!RUN)("PmAttachment — the database's own guarantees and the fi
       if (model === "pmWorkItem") {
         const it1 = await item();
         return {
+          projectId: projectA,
           workItemId: it1.id,
           remove: (db: unknown) => pm.deleteWorkItem(db as never, "u1", it1.id),
           survives: async () => (await prisma.pmWorkItem.count({ where: { id: it1.id } })) === 1,
@@ -463,13 +464,14 @@ describe.skipIf(!RUN)("PmAttachment — the database's own guarantees and the fi
       });
       const it1 = await prisma.pmWorkItem.create({ data: { projectId: proj.id, sequenceId: 1, name: `warp1505-race-item-${seq}` } });
       return {
+        projectId: proj.id,
         workItemId: it1.id,
         remove: (db: unknown) => pm.deleteProject(db as never, proj.id, { confirmIdentifier: proj.identifier, audit: async () => undefined }),
         survives: async () => (await prisma.pmProject.count({ where: { id: proj.id } })) === 1,
       };
     }
 
-    it("an upload that COMMITS between the key read and the delete aborts the delete — nothing is lost, nothing is orphaned", async () => {
+    it("an upload cannot cross the key read and cascade with its blob forgotten", async () => {
       const t = await target();
       const gate = deferred();
       const read = deferred();
@@ -477,6 +479,28 @@ describe.skipIf(!RUN)("PmAttachment — the database's own guarantees and the fi
         .remove(parkedDelete(model, gate.promise, read.resolve))
         .then(() => "deleted", (e: Error) => `rejected:${e.message}`);
       await read.promise;
+
+      if (model === "pmProject") {
+        let upload: Promise<unknown> | undefined;
+        try {
+          // FK insertion takes KEY SHARE; the parent's/item's UPDATE locks must
+          // refuse it while the deletion holds its attachment-key snapshot.
+          await expect(prisma.$queryRaw`SELECT "id" FROM "PmProject" WHERE "id" = ${t.projectId} FOR KEY SHARE NOWAIT`)
+            .rejects.toMatchObject({ code: "P2010", meta: { code: "55P03" } });
+          await expect(prisma.$queryRaw`SELECT "id" FROM "PmWorkItem" WHERE "id" = ${t.workItemId} FOR KEY SHARE NOWAIT`)
+            .rejects.toMatchObject({ code: "P2010", meta: { code: "55P03" } });
+          upload = svc.beginUpload(prisma, { actorId: "u2", workItemId: t.workItemId })
+            .then((ticket) => { plantBlob(ticket.storageKey); return "uploaded"; }, (e: Error) => e.message);
+        } finally {
+          gate.resolve();
+          await outcome;
+        }
+        expect(await outcome).toBe("deleted");
+        expect(await upload).toBe(svc.PM_ATTACHMENT_ERRORS.WORK_ITEM_NOT_FOUND);
+        expect(await t.survives()).toBe(false);
+        expect(await prisma.pmAttachment.count({ where: { workItemId: t.workItemId } })).toBe(0);
+        return;
+      }
 
       const upload = await svc.beginUpload(prisma, { actorId: "u2", workItemId: t.workItemId }); // commits
       plantBlob(upload.storageKey);
@@ -490,6 +514,34 @@ describe.skipIf(!RUN)("PmAttachment — the database's own guarantees and the fi
 
     it("an upload row INSERTED but not yet committed when the delete runs never leaves a blob without a row", async () => {
       const t = await target();
+      if (model === "pmProject") {
+        const commit = deferred();
+        const inserted = deferred();
+        const key = randomUUID();
+        const upload = prisma.$transaction(async (tx) => {
+          const row = await tx.pmAttachment.create({
+            data: {
+              workItemId: t.workItemId, fileName: "", mimeType: "application/octet-stream",
+              sizeBytes: BigInt(0), sha256: "", storageKey: key, status: "UPLOADING", uploadedById: "u2",
+            },
+          });
+          inserted.resolve();
+          await commit.promise;
+          return row;
+        });
+        await inserted.promise;
+        plantBlob(key);
+        const removed = t.remove(prisma);
+        // The item lock waits for the upload's FK lock; READ COMMITTED's later
+        // key read must include that upload when its transaction finishes.
+        commit.resolve();
+        const row = await upload;
+        await removed;
+        expect(await t.survives()).toBe(false);
+        expect(await prisma.pmAttachment.count({ where: { id: row.id } })).toBe(0);
+        expect(blob(key)).toBe(false);
+        return;
+      }
       const gate = deferred();
       const read = deferred();
       const outcome = t

@@ -9,8 +9,8 @@
  *   - the keys read are the right ones (the item's, the project's);
  *   - the unlink happens only AFTER a successful delete — a delete that fails
  *     (race, serialization loser, anything) must not have destroyed the files;
- *   - for an item AND for a project, the read is INSIDE a SERIALIZABLE
- *     transaction, and its loser is `concurrent_mutation`, never a lost blob;
+ *   - item deletion uses SERIALIZABLE; project deletion locks the project/items
+ *     before reading keys at READ COMMITTED, compatible with its audit chain;
  *   - a blob that will not unlink never turns a committed delete into an error.
  *
  * The same behaviour against a real Postgres and real files is in
@@ -26,7 +26,7 @@ vi.mock("./pm-attachment-storage.js", async (importOriginal) => ({
 }));
 
 import { deleteProject, deleteWorkItem } from "./pm.service.js";
-import { SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
+import { READ_COMMITTED_TX, SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
 import {
   createTransactionSeam,
   expectAllTransactionsAt,
@@ -139,6 +139,18 @@ describe("deleteProject unlinks every attachment file under the project (WARP-15
     const order = opts.order ?? [];
     const { flags, systemFlag } = cleanupFlags(order);
     const tx = {
+      $queryRaw: vi.fn(async (query: TemplateStringsArray, projectId: string) => {
+        expect(projectId).toBe("p-1");
+        const sql = query.join("?");
+        if (sql.includes('FROM "PmProject"')) order.push("lock-project");
+        else {
+          expect(sql).toContain('FROM "PmWorkItem"');
+          expect(sql).toContain('ORDER BY "id" FOR UPDATE');
+          order.push("lock-items");
+        }
+        expect(sql).toContain("FOR UPDATE");
+        return [];
+      }),
       systemFlag,
       pmWorkItem: { count: async () => 2 },
       pmProject: {
@@ -176,19 +188,19 @@ describe("deleteProject unlinks every attachment file under the project (WARP-15
     return { prisma, seam, order, flags, deletion };
   }
 
-  it("reads the keys inside a SERIALIZABLE transaction and unlinks them after the delete", async () => {
+  it("locks the project/items before reading keys and audits at READ COMMITTED before unlinking", async () => {
     const { prisma, seam, order, flags, deletion } = setup({ keys: [K1, K2, K3] });
     await deleteProject(prisma, "p-1", deletion);
-    expect(order).toEqual(["read-keys", "queue", "delete", "audit", "unlink", "unlink", "unlink"]);
+    expect(order).toEqual(["lock-project", "lock-items", "read-keys", "queue", "delete", "audit", "unlink", "unlink", "unlink"]);
     expect(removeAttachmentBlobs).toHaveBeenCalledTimes(3);
     for (const key of [K1, K2, K3]) expect(removeAttachmentBlobs).toHaveBeenCalledWith([key], expect.any(String));
     expect(flags.size).toBe(0);
-    // An upload committing between the key read and the delete must abort the
-    // delete (review probe C: it used to be cascaded with its blob left on disk).
-    expectAllTransactionsAt(seam, { ...SERIALIZABLE_TX, timeout: 60_000 });
+    // FK inserts cannot pass the locks until this transaction finishes, while
+    // the real audit recorder requires a fresh chain-tail snapshot after its lock.
+    expectAllTransactionsAt(seam, { ...READ_COMMITTED_TX, timeout: 60_000 });
   });
 
-  it("the SERIALIZABLE loser is concurrent_mutation, and nothing is unlinked", async () => {
+  it("a concurrent transaction failure is concurrent_mutation, and nothing is unlinked", async () => {
     const { prisma, flags, deletion } = setup({ keys: [K1], deleteError: Object.assign(new Error("ssi"), { code: "P2034" }) });
     await expect(deleteProject(prisma, "p-1", deletion)).rejects.toThrow("concurrent_mutation");
     expect(removeAttachmentBlobs).not.toHaveBeenCalled();

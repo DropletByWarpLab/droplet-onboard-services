@@ -1092,12 +1092,11 @@ export async function deleteProject(
 
   // WARP-1505: the cascade below drops every PmAttachment ROW under this project,
   // and the files are on a volume the database cannot reach. The keys are read
-  // INSIDE the transaction, which runs SERIALIZABLE exactly as deleteWorkItem's
-  // does: an upload that commits between the read and the delete — or is in flight
-  // while it runs — aborts the delete (P2034, answered 409 concurrent_mutation,
-  // retry) instead of being cascaded with its blob forgotten. The files go after
-  // the commit, never before: a delete that then fails must not have already
-  // destroyed them. (Run non-serializable, this left an orphan blob.)
+  // INSIDE a READ COMMITTED transaction, required by the audit chain append.
+  // Lock the project and its items BEFORE the key read: their FK key-share locks
+  // make new item/attachment inserts wait, and a prior upload must commit before
+  // this fresh read can proceed. No cascaded blob can be missed. The files go
+  // only after commit; audit failure rolls back both deletion and cleanup intent.
   let blobKeys: string[] = [];
   let cleanupKeys: string[] = [];
   // findUnique + delete is two round-trips: a concurrent delete between them
@@ -1106,6 +1105,8 @@ export async function deleteProject(
   try {
     await prisma.$transaction(
       async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "PmProject" WHERE "id" = ${projectId} FOR UPDATE`;
+        await tx.$queryRaw`SELECT "id" FROM "PmWorkItem" WHERE "projectId" = ${projectId} ORDER BY "id" FOR UPDATE`;
         blobKeys = (
           await tx.pmAttachment.findMany({
             where: { workItem: { projectId } },
@@ -1125,7 +1126,7 @@ export async function deleteProject(
           workItemCount,
         });
       },
-      { ...SERIALIZABLE_TX, timeout: DELETE_TX_TIMEOUT_MS },
+      { ...READ_COMMITTED_TX, timeout: DELETE_TX_TIMEOUT_MS },
     );
   } catch (err) {
     if (err instanceof Error && err.message === PM_ERRORS.PROJECT_NOT_ARCHIVED) {
@@ -1134,8 +1135,7 @@ export async function deleteProject(
       throw new Error(still ? PM_ERRORS.PROJECT_NOT_ARCHIVED : PM_ERRORS.PROJECT_NOT_FOUND);
     }
     if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
-    // The SERIALIZABLE loser: nothing was applied; the route answers 409 and the
-    // client retries.
+    // A concurrency failure applies nothing; the route answers 409 for retry.
     if (isPrismaCode(err, "P2034")) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
     throw err;
   }

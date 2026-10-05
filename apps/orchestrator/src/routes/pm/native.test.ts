@@ -172,6 +172,7 @@ function makeFake(hooks: Hooks = {}) {
 
   const prisma: Record<string, unknown> = {
     $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma),
+    $queryRaw: vi.fn(async () => []),
 
     // WARP-3372 — `where` / `orderBy` are interpreted, so the roster's filter
     // (ACTIVE humans only) is what is under test, not a stub that ignores it.
