@@ -365,7 +365,14 @@ describe.skipIf(!RUN)("PM import and export — the database's own guarantees (W
       // one row per change the service writes, plus ONE marker naming the job
       const acts = await prisma.pmActivity.findMany({ where: { workItemId: pay2.id } });
       expect(acts.filter((a) => a.verb === "state_changed")).toHaveLength(1);
-      expect(acts.filter((a) => a.verb === "updated" && a.field === "fields")).toHaveLength(1); // the new title
+      const titleChanges = acts.filter((a) => a.verb === "title_changed");
+      expect(titleChanges).toHaveLength(1);
+      expect(titleChanges[0]).toMatchObject({
+        field: "name",
+        oldValue: "Add Apple Pay",
+        newValue: "Add Apple and Google Pay",
+      });
+      expect(acts.filter((a) => a.verb === "updated" && a.field === "fields")).toHaveLength(0);
       expect(acts.filter((a) => a.verb === "updated" && a.field === "import")).toHaveLength(1);
       expect(acts.every((a) => a.notifyStatus === "not_needed")).toBe(true);
     });
