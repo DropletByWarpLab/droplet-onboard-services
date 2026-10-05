@@ -469,7 +469,9 @@ export function createSetupRouter(
           if (gate.reason === "session_expired") {
             res.status(401).json(SESSION_EXPIRED_BODY);
           } else {
-            res.status(gate.reason === "unauthenticated" && body.appliance !== "ready" ? 401 : 403).json({
+            // A missing or expired access cookie must allow authFetch to
+            // refresh the owner's session and retry the finish transition.
+            res.status(gate.reason === "unauthenticated" ? 401 : 403).json({
               error: "Continuing setup after account creation requires an authenticated owner session.",
               code: gate.reason === "unauthenticated"
                 ? body.appliance === "ready" ? "SETUP_CLAIM_FORBIDDEN" : "SETUP_AUTH_REQUIRED"

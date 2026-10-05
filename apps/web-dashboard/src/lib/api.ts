@@ -324,7 +324,12 @@ export async function patchSetupStep(
   options: { requireSuccess?: boolean } = {},
 ): Promise<void> {
   try {
-    const res = await fetch(`${BASE}/api/setup/state`, {
+    // Provider consent can start long after the access cookie expires. Renew
+    // the owner session before requiring a durable save; pre-account hints
+    // keep their public, best-effort fetch behavior.
+    const setupFetch = options.requireSuccess || !["welcome", "claim", "account"].includes(setupStep)
+      ? authFetch : fetch;
+    const res = await setupFetch(`${BASE}/api/setup/state`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
@@ -363,7 +368,7 @@ export async function patchSetupStep(
  * always safe.
  */
 export async function patchSetupReady(): Promise<void> {
-  const res = await fetch(`${BASE}/api/setup/state`, {
+  const res = await authFetch(`${BASE}/api/setup/state`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
@@ -384,16 +389,15 @@ export async function patchSetupReady(): Promise<void> {
  * move false → true). Once persisted, AuthGate's "ready + tour pending → tour"
  * branch stops firing and the owner passes through to the dashboard.
  *
- * Public endpoint, same as the other setup-state writes (the tour runs
- * immediately post-claim, before any session-refresh concerns), so the plain
- * `fetch` — no authFetch refresh dance. We swallow a transient network error:
+ * A ready appliance requires a session for tour writes, so renew an expired
+ * access cookie if the owner spends time in the tour. We swallow a transient network error:
  * the optimistic in-memory flip in `completeTour` already routed the owner
  * onward, and the next `/api/setup/state` GET re-syncs. Re-running the tour
  * later is an explicit Help-page action, never an accidental re-trap.
  */
 export async function patchTourCompleted(): Promise<void> {
   try {
-    await fetch(`${BASE}/api/setup/state`, {
+    await authFetch(`${BASE}/api/setup/state`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ user_tour_completed: true }),
@@ -497,13 +501,12 @@ export class OrgError extends Error {
 
 /**
  * PR #380 — name the single workspace + reserve droplet.local/<slug>. Org slots
- * AFTER account, but shares the wizard's public posture (the route is
- * allow-listed), so a bare `fetch` with same-origin credentials. On a taken
+ * AFTER account and requires the owner session, renewed if needed. On a taken
  * (409) or invalid (400) slug we throw an `OrgError` the step renders inline on
  * the URL field; the server validates the slug shape + uniqueness server-side.
  */
 export async function postOrg(input: OrgInput): Promise<OrgResult> {
-  const res = await fetch(`${BASE}/api/setup/org`, {
+  const res = await authFetch(`${BASE}/api/setup/org`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",

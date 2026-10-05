@@ -69,6 +69,9 @@ session renders a sign-in-only AccountStep with authenticator/recovery support.
 Signing in restores the saved step without creating another owner or resetting
 progress. Two-factor verification freezes wizard navigation until its recovery
 codes arrive, so enabling it cannot strand codes in an unmounted component.
+Protected workspace, consent-progress, finish, and tour writes renew an expired
+access cookie through the normal refresh flow before retrying. Authentication
+failures return 401; an authenticated caller without the required role gets 403.
 
 ## Provider handoff
 

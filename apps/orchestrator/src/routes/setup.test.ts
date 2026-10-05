@@ -44,6 +44,9 @@ vi.mock("../services/jwt.service.js", () => ({
         return { ...base, sub: "u1", role: "owner", sid: "sid-dead" };
       case "denied-owner-session":
         return { ...base, sub: "u-denied", role: "owner", sid: "sid-live" };
+      case "expired-owner-session":
+        // The real verifier returns null after the access JWT expires.
+        return null;
       default:
         return null;
     }
@@ -322,14 +325,14 @@ describe("PATCH /api/setup/state", () => {
 
 // ── M1 — the lifecycle-mutating `appliance:"ready"` claim is gated ──
 describe("PATCH /api/setup/state — claim (appliance:ready) auth gate", () => {
-  it("rejects an UNAUTHENTICATED ready transition on a pre-claim box (no admin) with 403", async () => {
+  it("rejects an UNAUTHENTICATED ready transition on a pre-claim box (no admin) with 401", async () => {
     // The takeover vector: a LAN caller with no session, before any admin
     // account exists, must NOT be able to flip the box ready.
     const prisma = createPrismaMock({ userCount: 0 });
     const res = await request(buildApp(prisma))
       .patch("/api/setup/state")
       .send({ appliance: "ready" });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(401);
     expect(res.body.code).toBe("SETUP_CLAIM_FORBIDDEN");
   });
 
@@ -360,7 +363,7 @@ describe("PATCH /api/setup/state — claim (appliance:ready) auth gate", () => {
     const res = await request(buildApp(prisma))
       .patch("/api/setup/state")
       .send({ appliance: "ready" });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(401);
     expect(res.body.code).toBe("SETUP_CLAIM_FORBIDDEN");
     expect((await request(buildApp(prisma)).get("/api/setup/state")).body.appliance).toBe("unclaimed");
   });
@@ -385,14 +388,32 @@ describe("PATCH /api/setup/state — claim (appliance:ready) auth gate", () => {
     expect((await request(app).get("/api/setup/state")).body.appliance).toBe("unclaimed");
   });
 
-  it("rejects an invalid session cookie on a pre-claim box with 403", async () => {
+  it("rejects an invalid session cookie on a pre-claim box with 401", async () => {
     const prisma = createPrismaMock({ userCount: 0 });
     const res = await request(buildApp(prisma))
       .patch("/api/setup/state")
       .set("Cookie", "droplet_session=garbage")
       .send({ appliance: "ready" });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(401);
     expect(res.body.code).toBe("SETUP_CLAIM_FORBIDDEN");
+  });
+
+  it("returns 401 for an expired owner access cookie without applying any finish fields", async () => {
+    const prisma = createPrismaMock({ userCount: 1 });
+    prisma._seed({ id: "singleton", state: "unclaimed", setupStep: "team", userTourCompleted: false });
+    const upsert = vi.spyOn(prisma.applianceSetup, "upsert");
+    const app = buildApp(prisma);
+
+    const res = await request(app).patch("/api/setup/state")
+      .set("Cookie", "droplet_session=expired-owner-session")
+      .send({ appliance: "ready", setup_step: "done", user_tour_completed: true });
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("SETUP_CLAIM_FORBIDDEN");
+    expect(upsert).not.toHaveBeenCalled();
+    expect((await request(app).get("/api/setup/state")).body).toEqual({
+      appliance: "unclaimed", setup_step: "team", user_tour_completed: false,
+    });
   });
 
   it("still allows PUBLIC account resumability with no auth", async () => {
