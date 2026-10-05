@@ -30,20 +30,27 @@ User=root
 # checkout without rebooting left host files (units, /usr/local/sbin scripts)
 # stale while this hook looked green. The heal gates on `droplet-host-units
 # audit`, so on an in-sync box it is a cheap no-op.
-# The `-` is deliberate: a box set up before the heal unit existed does not have
-# it yet (it arrives with the one-time `setup.sh --reapply-host-integration`),
-# and must still get its refresh. A heal that FAILS also must not skip the
-# refresh; the failure stays visible on the heal unit (`systemctl --failed`).
-# Ordered before `refresh` so the refresh sees the freshly installed unit files
-# and sources. No loop: the heal calls the droplet-host-units BINARY directly and
-# never starts this unit (which is also on the refresh deny-list).
-ExecStartPre=-/usr/bin/systemctl start droplet-host-integration.service
+# Runs the heal unit's own ExecStart as a child of this unit, NOT a nested
+# `systemctl start droplet-host-integration.service`: on drift the heal re-runs
+# the installer, which ends in `systemctl daemon-reexec` (single-box.sh). A
+# waiting `systemctl start` loses its PID1 connection there and returns early,
+# letting `refresh` race the still-running heal (no lock between the two).
+# systemd tracks an ExecStartPre process across a reexec, so `refresh` starts
+# only after the heal has finished.
+# The `-` is deliberate: a box set up before the heal existed has no wrapper
+# yet (it arrives with the one-time `setup.sh --reapply-host-integration`) and
+# must still get its refresh; a heal that FAILS must not skip it either. The
+# failure stays in this unit's journal, and the watchdog's host_artefacts check
+# keeps reporting the drift.
+# No loop: the heal calls the droplet-host-units BINARY directly and never
+# starts this unit (which is also on the refresh deny-list).
+ExecStartPre=-/usr/local/sbin/droplet-reapply-host-integration
 ExecStart=/usr/local/sbin/droplet-host-units refresh
 # Bounded by construction: the script makes ONE restart attempt per unit per
 # invocation and suspends any unit that does not come back, so it cannot sit
 # here retrying. This ceiling only covers a unit that hangs on start.
-# 900 = the heal unit's own 600 s ceiling (it runs inside this start job via
-# ExecStartPre) + the 300 s the refresh alone was allowed.
+# 900 = the 600 s droplet-host-integration.service allows the same heal (it runs
+# inside this start job via ExecStartPre) + the 300 s the refresh alone was allowed.
 TimeoutStartSec=900
 # Exit 1 means "a unit did not come back" — that must show as a failed unit in
 # `systemctl --failed`, not be swallowed. The journal carries the CRITICAL

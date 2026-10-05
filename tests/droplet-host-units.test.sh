@@ -297,13 +297,15 @@ else
   fail "unit file scripts/host/etc-systemd-system/droplet-host-units.service missing"
 fi
 # WARP-3740: the on-demand hook must run the host-integration heal first, with the
-# `-` prefix (a box without the heal unit still gets its refresh), before refresh.
+# `-` prefix (a box without the heal still gets its refresh), before refresh. It runs
+# the wrapper directly, not `systemctl start` (that would race refresh across the
+# heal's daemon-reexec).
 HU_UNIT="$REPO_ROOT_REAL/scripts/host/etc-systemd-system/droplet-host-units.service"
-if grep -qxF 'ExecStartPre=-/usr/bin/systemctl start droplet-host-integration.service' "$HU_UNIT" \
+if grep -qxF 'ExecStartPre=-/usr/local/sbin/droplet-reapply-host-integration' "$HU_UNIT" \
   && [ "$(grep -n '^ExecStartPre=' "$HU_UNIT" | head -1 | cut -d: -f1)" -lt "$(grep -n '^ExecStart=' "$HU_UNIT" | cut -d: -f1)" ]; then
-  pass "droplet-host-units.service starts the host-integration heal (ExecStartPre=-) before refresh"
+  pass "droplet-host-units.service runs the host-integration heal (ExecStartPre=-) before refresh"
 else
-  fail "droplet-host-units.service does not start the heal via ExecStartPre=- before ExecStart — deploys leave host files stale"
+  fail "droplet-host-units.service does not run the heal via ExecStartPre=- before ExecStart — deploys leave host files stale"
 fi
 # The detection check must also ride the existing supervisor's timer — no new
 # scheduler (rule 9), and the box reports staleness on its own.
