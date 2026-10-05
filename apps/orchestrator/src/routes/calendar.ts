@@ -18,9 +18,17 @@
  * expiring token (WARP-2767, services/calendar-feed-token.service.ts) that
  * the owner can rotate (POST /calendar/publish/rotate) or turn off
  * (POST /calendar/publish/revoke).
+ *
+ * WARP-3533 — the same mechanism serves two work-item feeds, each behind its
+ * own link (CalendarFeedToken.scope): `/calendar/publish/:user/my-work.ics`
+ * (items assigned to the person, with a due date) and
+ * `/calendar/publish/:user/projects/:projectId.ics` (one project's dated
+ * items). They are minted and rotated from Settings -> Developer
+ * (routes/developer.ts), not here: that router sits outside /api/pm, so an API
+ * token can never mint a link. All three feed routes share one rate limit.
  */
 
-import { Router, type Request } from "express";
+import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import {
@@ -38,10 +46,21 @@ import { serializeIcs } from "../services/ics.js";
 // WARP-2767 — stored, revocable, expiring feed credential.
 import {
   getFeedTokenStatus,
+  resolveFeedToken,
   revokeFeedTokens,
   rotateFeedToken,
   verifyFeedToken,
+  type FeedTarget,
 } from "../services/calendar-feed-token.service.js";
+import { createRateLimit } from "../middleware/rate-limit.js";
+import { resolveTrustedOriginUrl } from "../lib/trusted-origin.js";
+import { pmFeedAccessRefusal } from "../services/pm/pm-feed-access.js";
+import {
+  findFeedProject,
+  listMyWorkFeedItems,
+  listProjectFeedItems,
+  toIcsEvents,
+} from "../services/pm/pm-ics.service.js";
 import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { cacheGet, cacheSet } from "../services/cache.service.js";
@@ -147,13 +166,26 @@ const sourceCreateSchema = z.object({
  *  network-security control is an administrative act, not a household one. */
 const PRIVATE_HOST_ROLES = new Set(["owner", "admin"]);
 
-/** PUBLIC router — only the ICS publish endpoint. Mount BEFORE the auth
+/**
+ * WARP-3533 — the feed routes are mounted before every gate (and so before the
+ * app-wide per-IP limiter), so they carry their own. 60 a minute per client:
+ * a calendar app polls every few hours, an office behind one NAT with twenty
+ * subscribers is still an order of magnitude under it, and a scripted probe of
+ * the token is not. One limiter for all three feeds, and one for the process
+ * (module scope), as the app-wide one is.
+ */
+const calendarFeedRateLimit = createRateLimit("calendar-feed", { windowMs: 60_000, limit: 60 });
+
+/** A feed's file name: the username comes from the URL, so keep it to what a header may carry. */
+const fileSafe = (s: string): string => s.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80);
+
+/** PUBLIC router — only the ICS publish endpoints. Mount BEFORE the auth
  *  middleware in app.ts. Auth is by a stored feed token in the query string,
  *  NOT by session cookie, so phones can subscribe via webcal:// without a
  *  Droplet account on the device. */
 export function createCalendarPublicRouter(prisma: PrismaClient): Router {
   const router = Router();
-  router.get("/calendar/publish/:user.ics", async (req, res, next) => {
+  router.get("/calendar/publish/:user.ics", calendarFeedRateLimit, async (req, res, next) => {
     try {
       const user = req.params.user;
       // Defense in depth: usernames in this codebase are Nextcloud handles
@@ -198,6 +230,76 @@ export function createCalendarPublicRouter(prisma: PrismaClient): Router {
       next(err);
     }
   });
+
+  /**
+   * WARP-3533 — a work-item feed. The same checks as the calendar feed, then the
+   * two the route cannot inherit because it sits ahead of every gate: the
+   * `projects` module must be on for the workspace, and the person's role (read
+   * now, not carried in the link) must clear the module's tier floor. Anything
+   * wrong with the link is the one 403 `invalid_token`, whichever way it is wrong.
+   *
+   * Identity: the link resolves to a `User` row, and the items are looked up by
+   * that row's `id` (PM assignees are User.id). The `:user` in the path is only
+   * ever compared to the row's username, never used to find anyone.
+   */
+  async function servePmFeed(req: Request, res: Response, target: FeedTarget): Promise<void> {
+    const user = req.params.user;
+    if (!user || user.length > 200) {
+      res.status(400).json({ error: "invalid_user" });
+      return;
+    }
+    const token = req.query.token;
+    // `?token=a&token=b` arrives as an array; only a single string can be the link's token.
+    const principal = typeof token === "string" ? await resolveFeedToken(prisma, token, user, target) : null;
+    if (!principal) {
+      res.status(403).json({ error: "invalid_token" });
+      return;
+    }
+    const refusal = await pmFeedAccessRefusal(prisma, principal.role);
+    if (refusal) {
+      res.status(refusal.status).json(refusal.body);
+      return;
+    }
+    const now = new Date();
+    let items;
+    let calName: string;
+    let fileName: string;
+    if (target.scope === "pm_project") {
+      const project = await findFeedProject(prisma, target.projectId);
+      if (!project) {
+        res.status(404).json({ error: "project_not_found" });
+        return;
+      }
+      items = await listProjectFeedItems(prisma, project.id, now);
+      calName = `Droplet — ${project.name}`;
+      fileName = `droplet-${fileSafe(project.identifier)}.ics`;
+    } else {
+      items = await listMyWorkFeedItems(prisma, principal.userId, now);
+      calName = "Droplet — My work";
+      fileName = `droplet-${fileSafe(principal.username)}-my-work.ics`;
+    }
+    const origin = await resolveTrustedOriginUrl(req);
+    res.setHeader("Content-Type", "text/calendar; charset=utf-8");
+    res.setHeader("Content-Disposition", `inline; filename="${fileName}"`);
+    res.send(serializeIcs(toIcsEvents(items, origin), calName));
+  }
+
+  router.get("/calendar/publish/:user/my-work.ics", calendarFeedRateLimit, async (req, res, next) => {
+    try {
+      await servePmFeed(req, res, { scope: "pm_my_work" });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.get("/calendar/publish/:user/projects/:projectId.ics", calendarFeedRateLimit, async (req, res, next) => {
+    try {
+      await servePmFeed(req, res, { scope: "pm_project", projectId: req.params.projectId });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   return router;
 }
 
