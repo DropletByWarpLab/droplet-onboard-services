@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Prisma, PrismaClient } from "@prisma/client";
+import { createTransactionSeam } from "../../__tests__/helpers/prisma-tx-harness.js";
 import { archiveWorkItem, reorderStates, restoreWorkItem } from "./pm.service.js";
 import {
   clearPropertyValue, createProperty, deleteProperty, listProperties,
@@ -33,7 +34,7 @@ function deskClient() {
     $queryRaw: vi.fn().mockResolvedValue([{ id: "desk", kind: "SERVICE_DESK" }]),
     $transaction: vi.fn(),
   };
-  db.$transaction.mockImplementation(async (run: (tx: typeof db) => Promise<unknown>) => run(db));
+  db.$transaction = createTransactionSeam({ client: () => db }).$transaction;
   return db;
 }
 
