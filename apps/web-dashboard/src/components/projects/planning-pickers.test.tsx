@@ -34,6 +34,7 @@ function reply(body: unknown, status = 200): Promise<Response> {
 }
 
 vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ user: { id: "u1", role: "owner" } }),
   authFetch: vi.fn((url: string, init?: RequestInit) => {
     const method = (init?.method ?? "GET").toUpperCase();
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;

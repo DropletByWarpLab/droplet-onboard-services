@@ -17,6 +17,8 @@ import type {
   CreateDeskInput,
   CreateTicketInput,
   Desk,
+  DeskEmailAccount,
+  DeskEmailChannelSettings,
   Escalation,
   QueueCounts,
   SupportPerson,
@@ -224,5 +226,11 @@ export function supportActions() {
       send<Escalation>(`${API}/tickets/${id}/escalate`, "POST", body),
     createContact: (body: CreateContactInput) =>
       send<{ contact: ContactCandidate }>(`${API}/contacts`, "POST", body),
+    listEmailAccounts: () => getJson<{ accounts: DeskEmailAccount[] }>(`${API}/email/accounts`),
+    getEmailChannel: (deskId: string) => getJson<{ channel: DeskEmailChannelSettings | null }>(`${API}/desks/${deskId}/email-channel`),
+    saveEmailChannel: (deskId: string, body: { emailAccountId: string | null; contactOwnerUserId?: string; enabled?: boolean; autoAckEnabled?: boolean; autoAckTemplate?: string; reopenWindowDays?: number }) =>
+      send<{ channel: DeskEmailChannelSettings | null }>(`${API}/desks/${deskId}/email-channel`, "PUT", body),
+    retryReply: (ticketId: string, commentId: string) =>
+      send<{ status: "queued" }>(`${API}/tickets/${ticketId}/replies/${commentId}/retry`, "POST"),
   };
 }

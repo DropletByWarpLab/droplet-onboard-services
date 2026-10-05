@@ -114,6 +114,7 @@ vi.mock("@/components/projects/usePm", () => ({
   useSubIssues: () => ({ subIssues: [] }),
   useComments: () => ({ comments: [], mutate: vi.fn() }),
   useActivity: () => ({ activity: [], mutate: vi.fn() }),
+  useAttachments: () => ({ attachments: [], maxBytes: 26214400, ...idle }),
   pmActions: () => ({}),
   PmRequestError: class extends Error {},
 }));

@@ -39,6 +39,7 @@ vi.mock("@/lib/auth", () => ({
   useAuth: () => ({ user: net.user }),
   authFetch: vi.fn((url: string, init?: RequestInit) => {
     const method = (init?.method ?? "GET").toUpperCase();
+    const pathname = new URL(url, "http://localhost").pathname;
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     net.calls.push({ url, method, body });
     const reply = (status: number, resBody: unknown) =>
@@ -58,9 +59,9 @@ vi.mock("@/lib/auth", () => ({
         comment: { id: "c-new", workItemId: "w1", authorId: "u1", commentHtml: "<p>hi</p>", createdAt: "2026-06-22T21:16:00.000Z" },
       });
     }
-    if (url.endsWith("/comments")) return reply(200, { comments: net.comments });
-    if (url.endsWith("/activity")) return reply(200, { activity: net.activity });
-    if (url.includes("/work-items?parent=")) return reply(200, { work_items: [] });
+    if (pathname.endsWith("/comments")) return reply(200, { comments: net.comments, nextCursor: null, total: net.comments.length });
+    if (pathname.endsWith("/activity")) return reply(200, { activity: net.activity, nextCursor: null, total: net.activity.length });
+    if (url.includes("/work-items?parent=")) return reply(200, { work_items: [], nextCursor: null, total: 0 });
     if (url.endsWith("/labels")) return reply(200, { labels: [] });
     if (url.endsWith("/users")) return reply(200, { users: [] });
     return reply(200, {});
@@ -174,7 +175,7 @@ function renderDrawer({ strict = false, onClose = () => undefined } = {}) {
 
 const progress = (xhr: FakeXHR, loaded: number, total: number) => act(() => xhr.progress(loaded, total));
 const respond = (xhr: FakeXHR, status: number, json: unknown) => act(() => xhr.respond(status, json));
-const getsOf = (suffix: string) => net.calls.filter((c) => c.method === "GET" && c.url.endsWith(suffix)).length;
+const getsOf = (suffix: string) => net.calls.filter((c) => c.method === "GET" && new URL(c.url, "http://localhost").pathname.endsWith(suffix)).length;
 const section = () => screen.getByRole("group", { name: /^Attachments/ });
 /** The upload rows. The same sentence is also in a live region for screen readers. */
 const uploadRows = () => screen.findByRole("list", { name: "Uploads" });
