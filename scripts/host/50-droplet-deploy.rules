@@ -1,0 +1,17 @@
+// WARP-3841 — polkit rule: user `droplet` may START droplet-deploy.service.
+//
+// Start verb ONLY, this one unit ONLY (no stop/restart, no other unit). The
+// unit takes no argv, so the caller cannot influence what runs as root.
+// A sibling of services/oled-display/50-droplet-device-bridge.rules, installed
+// by install_single_box_host_integration (not install-device-bridge.sh) so the
+// reapply heal and the host-artefact audit cover it.
+polkit.addRule(function (action, subject) {
+  if (
+    action.id === "org.freedesktop.systemd1.manage-units" &&
+    action.lookup("unit") === "droplet-deploy.service" &&
+    action.lookup("verb") === "start" &&
+    subject.user === "droplet"
+  ) {
+    return polkit.Result.YES;
+  }
+});
