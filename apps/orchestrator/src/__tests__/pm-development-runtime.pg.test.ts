@@ -121,6 +121,9 @@ describe.skipIf(!RUN)("development polling and PM isolation (real PostgreSQL, WA
     await poll();
     expect((await state()).stateId).toBe(reviewId);
     expect(await activityCount("state_changed")).toBe(1);
+    expect(await prisma.pmActivity.findFirstOrThrow({ where: { workItemId: itemId, verb: "state_changed" } })).toMatchObject({
+      oldValue: initialId, newValue: reviewId,
+    });
 
     await prisma.pmWorkItem.update({ where: { id: itemId }, data: { stateId: manualId } });
     feeds.pullRequestsOpen = response("pullRequestsOpen", { items: [pullRequest({ title: "RT35-1 amended title", updatedAt: new Date(AT.getTime() + 60000) })] });
@@ -141,6 +144,9 @@ describe.skipIf(!RUN)("development polling and PM isolation (real PostgreSQL, WA
     await poll();
     expect(await state()).toMatchObject({ stateId: mergedId, isCompleted: true, completedAt: expect.any(Date) });
     expect(await activityCount("state_changed")).toBe(3);
+    expect(await prisma.pmActivity.findFirst({ where: {
+      workItemId: itemId, verb: "state_changed", oldValue: reviewId, newValue: mergedId,
+    } })).not.toBeNull();
     await prisma.pmWorkItem.update({ where: { id: itemId }, data: { stateId: manualId, isCompleted: false, completedAt: null } });
     await poll();
     expect(await state()).toMatchObject({ stateId: manualId, isCompleted: false, completedAt: null });

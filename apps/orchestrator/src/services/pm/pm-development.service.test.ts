@@ -48,6 +48,48 @@ function fixture(opts: { branchesTruncated?: boolean; connection?: object | null
 beforeEach(() => { vi.clearAllMocks(); });
 
 describe("WARP-3535 sync completeness", () => {
+  it.each(["OPEN", "MERGED"] as const)("records canonical state IDs for %s automation", async (state) => {
+    const prisma = fixture();
+    prisma.pmDevRepositoryProject.findMany.mockResolvedValue([{
+      projectId: "project-1", onOpenedStateId: "review-id", onMergedStateId: "completed-id",
+      project: { id: "project-1", identifier: "ABC", kind: "PROJECT" },
+    }]);
+    const targetStateId = state === "OPEN" ? "review-id" : "completed-id";
+    const tx = {
+      pmExternalLink: { findUnique: vi.fn().mockResolvedValue(null), upsert: vi.fn().mockResolvedValue({}) },
+      pmWorkItem: {
+        findFirst: vi.fn().mockResolvedValue({ stateId: "backlog-id", completedAt: null, isCompleted: false }),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      pmState: {
+        findUnique: vi.fn().mockResolvedValue({ name: "Backlog" }),
+        findFirst: vi.fn().mockResolvedValue({ name: state === "OPEN" ? "Review" : "Done", group: state === "OPEN" ? "started" : "completed" }),
+      },
+    };
+    connectorMock.readDevelopment.mockImplementation(async ({ feed }: { feed: string }) => output(feed, {
+      items: feed === "pullRequestsOpen" ? [{
+        type: "pull_request", externalId: "pr-42", number: 42, state,
+        url: "https://github.com/acme/widget/pull/42", title: "ABC-1 widget fix",
+        body: null, branch: "feature/ABC-1", author: "author", updatedAt: new Date(),
+      }] : [],
+    }));
+    await runDevelopmentSync({
+      ...prisma,
+      pmWorkItem: { findFirst: vi.fn().mockResolvedValue({ id: "item-1", stateId: "backlog-id" }) },
+      $transaction: vi.fn(async (callback: (client: typeof tx) => Promise<unknown>) => callback(tx)),
+    } as never);
+
+    expect(tx.pmWorkItem.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ stateId: targetStateId }),
+    }));
+    // Timeline, notifications and historical charts resolve these values as
+    // state IDs; human-readable names break that shared activity contract.
+    expect(activityMock).toHaveBeenCalledWith(tx, expect.objectContaining({
+      workItemId: "item-1", verb: "state_changed", field: "state",
+      oldValue: "backlog-id", newValue: targetStateId,
+    }));
+  });
+
   it("closes stale branches only after a complete inventory", async () => {
     const prisma = fixture();
     await runDevelopmentSync(prisma as never);
