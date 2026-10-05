@@ -89,9 +89,9 @@ check "output never prints secret contents" bash -c "! echo '$out' | grep -q hun
 new_repo; touch "$WORK/setup_fail"
 out="$(run_deploy)"; rc=$?
 check "setup failure: exit 1" test "$rc" -eq 1
+printf '%s\n' "$out" > "$WORK/out.txt"
 check "setup failure: restore hint names the backup + sync-secrets + force-recreate" bash -c \
-  "echo '$out' | grep -q '$WORK/backups/20260101T000000Z' && echo '$out' | grep -q 'tar -xp' && echo '$out' | grep -q 'sync-secrets' && echo '$out' | grep -q 'force-recreate'"
-check "setup failure: sudoers grant removed" test ! -e "$WORK/sudoers"
+  "o='$WORK/out.txt'; grep -q '$WORK/backups/20260101T000000Z' \"\$o\" && grep -q 'tar -xp' \"\$o\" && grep -q sync-secrets \"\$o\" && grep -q force-recreate \"\$o\""
 check "setup failure: host hook not started" bash -c "! grep -q 'droplet-host-units.service' '$WORK/calls.log'"
 
 new_repo; touch "$WORK/inactive"

@@ -38,11 +38,11 @@ KEEP=3
 # inactive). droplet.service is the RemainAfterExit compose unit.
 REQUIRED_UNITS="${DROPLET_DEPLOY_REQUIRED_UNITS:-droplet.service droplet-device-bridge.service droplet-watchdog.timer}"
 
-log()  { printf '[droplet-deploy] %s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 
 # One resolver, shared with the heal wrapper (sourcing does not run its main).
 # shellcheck source=/dev/null
-. "$REAPPLY_LIB" || { log "cannot source $REAPPLY_LIB (run droplet-reapply-host-integration once to install it)"; exit 1; }
+. "$REAPPLY_LIB" || { echo "[droplet-deploy] cannot source $REAPPLY_LIB (run droplet-reapply-host-integration once to install it)" >&2; exit 1; }
+log()  { printf '[droplet-deploy] %s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2; }
 HU="${HU_BIN:-/usr/local/sbin/droplet-host-units}"
 
 REPO="" ; BK=""
