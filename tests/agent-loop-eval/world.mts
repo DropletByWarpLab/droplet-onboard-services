@@ -799,11 +799,29 @@ function network(w: WorldState, tool: string, a: Record<string, any>, c: Ctx): T
       const mac = typeof a.mac === "string" ? a.mac.trim() : "";
       if (!mac) return err("INVALID_ARGS", "mac is required");
       if (!/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(mac)) return err("BLOCK_FAILED", "orchestrator returned 400");
-      const d = w.devices.find((x) => lc(x.mac) === lc(mac));
-      if (d) d.blocked = true;
-      return ok({ blocked: true, mac: mac.toUpperCase(), ...(typeof a.name === "string" ? { name: a.name } : {}) });
+      let pending = pendingDeviceBlocks.get(w);
+      if (!pending) { pending = new Map(); pendingDeviceBlocks.set(w, pending); }
+      pending.set(lc(mac), { blocked: true, mac: mac.toUpperCase(), ...(typeof a.name === "string" ? { name: a.name } : {}) });
+      return { ok: false, status: "confirmation_required", error: {
+        code: "CONFIRMATION_REQUIRED",
+        message: "Blocking this device requires confirmation in the Droplet dashboard. It has not been blocked.",
+        details: { mac: mac.toUpperCase(), confirmationOwner: "route" },
+      } };
     }
   }
+}
+
+// Route-owned approvals are out of band: tool arguments cannot redeem them.
+// The fixture dashboard (and its tests) may approve a pending request explicitly.
+const pendingDeviceBlocks = new WeakMap<WorldState, Map<string, Record<string, any>>>();
+export function approveDeviceBlock(w: WorldState, mac: string): ToolResult {
+  const pending = pendingDeviceBlocks.get(w);
+  const request = pending?.get(lc(mac));
+  if (!request) return err("NO_PENDING_APPROVAL", "No device block is awaiting dashboard approval");
+  pending!.delete(lc(mac));
+  const d = w.devices.find((x) => lc(x.mac) === lc(mac));
+  if (d) d.blocked = true;
+  return ok(request);
 }
 
 const CAMERA_NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;

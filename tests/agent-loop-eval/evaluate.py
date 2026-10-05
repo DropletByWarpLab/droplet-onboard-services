@@ -426,8 +426,8 @@ def evaluate(case, run, write_tools):
             fails.append("no_clarification")
     if exp.get("expect_confirmation") and not run.get("confirmations"):
         fails.append("no_confirmation_raised")
-    if "max_calls" in exp and len(d) > exp["max_calls"]:
-        fails.append(f"max_calls {len(d)}>{exp['max_calls']}")
+    if "max_calls" in exp and len(issued) > exp["max_calls"]:
+        fails.append(f"max_calls {len(issued)}>{exp['max_calls']}")
     for grp, cap in exp.get("max_attempts", {}).items():
         n = sum(1 for t in issued if t in grp.split("|"))
         if n > cap:

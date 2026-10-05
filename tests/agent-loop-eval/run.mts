@@ -177,7 +177,7 @@ function makePort(world: WorldState, faults: Record<string, Fault[]>, log: Dispa
       const f = pending[name]?.shift();
       if (f === "timeout_after") {
         const r = handle(world, name, args as Record<string, any>, who);
-        log.push({ tool: name, args, outcome: r?.ok ? "executed" : "refused", fault: f });
+        log.push({ tool: name, args, outcome: r?.ok ? "executed" : r?.status === "confirmation_required" ? "confirmation_required" : "refused", fault: f });
         const t = faultResult(f);
         return { content: [{ type: "text", text: t.text }], isError: t.isError };
       }
@@ -197,7 +197,7 @@ function makePort(world: WorldState, faults: Record<string, Fault[]>, log: Dispa
         result = { ok: true, data: { items: [], note: "No data." } };
       } else {
         // A handler refusal (NOT_FOUND, PARENT_REQUIRED) wrote nothing.
-        log.push({ tool: name, args, outcome: result.ok ? "executed" : "refused" });
+        log.push({ tool: name, args, outcome: result.ok ? "executed" : result.status === "confirmation_required" ? "confirmation_required" : "refused" });
       }
       return toolResultToContent(result);
     },
