@@ -2080,6 +2080,8 @@ export async function deleteWorkItem(
     }, { ...SERIALIZABLE_TX, timeout: 5_000 });
     // Wake only after the delete and its tombstone have committed. If the
     // transaction rolls back, no consumer is nudged for an event that vanished.
+    // This one post-commit wake also covers the surviving-end relation audit
+    // rows written directly with createMany above.
     nudgeOutbox();
   } catch (err) {
     if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);

@@ -1,6 +1,6 @@
 /**
- * WARP-3532 — `writeActivity` is the choke point every PM mutation goes through
- * (ADR-069 §7), and the one place the outbox consumers are woken.
+ * Shared PmActivity writers wake the outbox without moving audit rows outside
+ * their transaction.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -29,6 +29,35 @@ function prismaStub() {
   return { ...prisma, $transaction: seam.$transaction };
 }
 
+function relationDeleteStub(deleteWorkItemRow: () => Promise<unknown> = async () => ({})) {
+  let inTransaction = false;
+  const tx = {
+    pmWorkItem: {
+      findMany: vi.fn(async () => []),
+      delete: vi.fn(deleteWorkItemRow),
+    },
+    pmWorkItemRelation: {
+      findMany: vi.fn(async () => [{ fromId: "wi-1", toId: "wi-2", kind: "RELATES" }]),
+    },
+    pmActivity: { createMany: vi.fn(async () => ({ count: 1 })) },
+  };
+  const seam = createTransactionSeam({ client: () => tx });
+  const transaction = vi.fn(async (callback: (client: typeof tx) => Promise<unknown>, options?: unknown) => {
+    inTransaction = true;
+    try {
+      return await seam.$transaction(callback, options);
+    } finally {
+      inTransaction = false;
+    }
+  });
+  const prisma = {
+    tx,
+    $transaction: transaction,
+    pmWorkItem: { findUnique: vi.fn(async () => ({ id: "wi-1", project: { kind: "PROJECT" } })) },
+  };
+  return { prisma, tx, transaction, inTransaction: () => inTransaction };
+}
+
 beforeEach(() => vi.clearAllMocks());
 
 describe("writeActivity nudges the outbox", () => {
@@ -48,6 +77,30 @@ describe("writeActivity nudges the outbox", () => {
     const prisma = prismaStub();
     prisma.tx.pmActivity.create.mockRejectedValueOnce(new Error("boom"));
     await expect(addComment(prisma as never, "u-1", "wi-1", "<p>hi</p>")).rejects.toThrow("boom");
+    expect(nudgeOutbox).not.toHaveBeenCalled();
+  });
+
+  it("wakes for relation-removal audit rows only after delete commit", async () => {
+    const h = relationDeleteStub();
+    vi.mocked(nudgeOutbox).mockImplementation(() => {
+      expect(h.inTransaction()).toBe(false);
+    });
+
+    await deleteWorkItem(h.prisma as never, "u-1", "wi-1");
+
+    expect(h.tx.pmActivity.createMany).toHaveBeenCalledTimes(1);
+    expect(h.transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "Serializable", timeout: 5_000 });
+    expect(nudgeOutbox).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not wake when relation-removal audit rows roll back with the delete", async () => {
+    const h = relationDeleteStub(async () => {
+      throw new Error("delete failed");
+    });
+
+    await expect(deleteWorkItem(h.prisma as never, "u-1", "wi-1")).rejects.toThrow("delete failed");
+
+    expect(h.tx.pmActivity.createMany).toHaveBeenCalledTimes(1);
     expect(nudgeOutbox).not.toHaveBeenCalled();
   });
 });
