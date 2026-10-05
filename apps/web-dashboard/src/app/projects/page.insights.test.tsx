@@ -29,19 +29,21 @@ vi.mock("@/lib/auth", () => ({
 vi.mock("@/lib/hooks/useAppCapabilities", () => ({ useAppCapabilities: () => ({ projects: true }) }));
 
 const paramsRef = { current: new URLSearchParams() as URLSearchParams | null };
-const navigation = { rerender: (() => {}) as () => void };
-function navigate(href: string): void {
-  window.history.pushState(null, "", href);
+const listeners = new Set<() => void>();
+const navigate = (href: string, replace = false) => {
+  window.history[replace ? "replaceState" : "pushState"](null, "", href);
   paramsRef.current = new URLSearchParams(window.location.search);
-  navigation.rerender();
-}
+  for (const notify of listeners) notify();
+};
 vi.mock("next/navigation", () => ({
   useSearchParams: () => {
-    const [, rerender] = React.useReducer((n: number) => n + 1, 0);
-    navigation.rerender = rerender;
-    return paramsRef.current;
+    const search = React.useSyncExternalStore(
+      (notify) => { listeners.add(notify); return () => { listeners.delete(notify); }; },
+      () => paramsRef.current?.toString() ?? null,
+    );
+    return React.useMemo(() => search === null ? null : new URLSearchParams(search), [search]);
   },
-  useRouter: () => ({ replace: navigate, push: navigate, back: vi.fn() }),
+  useRouter: () => ({ replace: (href: string) => navigate(href, true), push: (href: string) => navigate(href), back: vi.fn() }),
 }));
 
 vi.mock("@/components/projects/insights/InsightsView", () => ({
@@ -50,19 +52,16 @@ vi.mock("@/components/projects/insights/InsightsView", () => ({
   ),
 }));
 
-const projects = { current: [] as any[] };
-const queries: Array<{ enabled: boolean; projectId: string | null }> = [];
+const projectsRef = { current: [] as { id: string; identifier: string; name: string; archived: boolean; openCount: number; doneCount: number }[] };
+const query = vi.fn((_args: unknown) => ({ items: [], error: undefined, isLoading: false, total: 0, counts: {}, refresh: vi.fn() }));
 vi.mock("@/components/projects/usePm", () => ({
-  useProjects: () => ({ projects: projects.current, error: undefined, isLoading: false, mutate: vi.fn() }),
+  useProjects: () => ({ projects: projectsRef.current, error: undefined, isLoading: false, mutate: vi.fn() }),
   useSummary: () => ({ summary: undefined, error: undefined, isLoading: false, mutate: vi.fn() }),
   useProjectStates: () => ({ states: undefined, error: undefined, isLoading: false }),
-  useProjectLabels: () => ({ labels: undefined }),
-  useWorkItemQuery: (args: { enabled: boolean; projectId: string | null }) => {
-    queries.push(args);
-    return { items: undefined, error: undefined, isLoading: false, total: 0, refresh: vi.fn() };
-  },
-  useWorkItemByKey: () => ({ item: undefined, mutate: vi.fn() }),
+  useWorkItemQuery: (args: unknown) => query(args),
+  useWorkItemByKey: () => ({ item: undefined, error: undefined, isLoading: false, mutate: vi.fn() }),
   useSavedViews: () => ({ views: [], error: undefined, isLoading: false, mutate: vi.fn() }),
+  useProjectLabels: () => ({ labels: [] }),
   usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", tone: 0 }), users: [] }),
   useDepartments: () => ({ departments: undefined }),
   useProjectCycles: () => ({ cycles: [], mutate: vi.fn() }),
@@ -75,24 +74,24 @@ import ProjectsPage from "./page";
 
 beforeEach(() => {
   paramsRef.current = new URLSearchParams();
-  projects.current = [];
-  queries.length = 0;
+  projectsRef.current = [];
+  query.mockClear();
   window.history.replaceState(null, "", "/projects");
 });
 
 describe("/projects?view=insights", () => {
   it("restores project Insights and follows a URL change back to the table", () => {
-    projects.current = [{ id: "p1", identifier: "INBOX", name: "Inbox", archived: false, openCount: 0, doneCount: 0 }];
+    projectsRef.current = [{ id: "p1", identifier: "INBOX", name: "Inbox", archived: false, openCount: 0, doneCount: 0 }];
     paramsRef.current = new URLSearchParams("p=INBOX&view=insights");
     const { rerender } = render(<ProjectsPage />);
     expect(screen.getByTestId("insights")).toHaveAttribute("data-project", "p1");
     expect(screen.getByRole("tab", { name: "Insights" })).toHaveAttribute("aria-selected", "true");
-    expect(queries.at(-1)).toMatchObject({ enabled: false, projectId: "p1" });
+    expect(query.mock.calls.at(-1)?.[0]).toMatchObject({ enabled: false, projectId: "p1" });
     paramsRef.current = new URLSearchParams("p=INBOX&view=table");
     rerender(<ProjectsPage />);
     expect(screen.queryByTestId("insights")).toBeNull();
     expect(screen.getByRole("tab", { name: "Table" })).toHaveAttribute("aria-selected", "true");
-    expect(queries.at(-1)).toMatchObject({ enabled: true, projectId: "p1" });
+    expect(query.mock.calls.at(-1)?.[0]).toMatchObject({ enabled: true, projectId: "p1" });
   });
 
   it("opens the workspace-level Insights straight from the deep link", () => {
@@ -125,8 +124,8 @@ describe("/projects?view=insights", () => {
   });
 
   it("leaves every other query parameter alone", () => {
-    paramsRef.current = new URLSearchParams("keep=1");
     window.history.replaceState(null, "", "/projects?keep=1");
+    paramsRef.current = new URLSearchParams("keep=1");
     render(<ProjectsPage />);
 
     fireEvent.click(screen.getByRole("button", { name: /insights/i }));
@@ -135,6 +134,24 @@ describe("/projects?view=insights", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /all projects/i }));
     expect(window.location.search).toBe("?keep=1");
+  });
+
+  it("opens project-scoped Insights from its URL without running the saved-filter query", () => {
+    projectsRef.current = [{ id: "p1", identifier: "INBOX", name: "Inbox", archived: false, openCount: 2, doneCount: 1 }];
+    paramsRef.current = new URLSearchParams("p=INBOX&view=insights&v=mine&f=priority.is%3Ahigh");
+    window.history.replaceState(null, "", `/projects?${paramsRef.current}`);
+    render(<ProjectsPage />);
+
+    expect(screen.getByTestId("insights")).toHaveAttribute("data-project", "p1");
+    expect(screen.getByRole("tab", { name: "Insights" })).toHaveAttribute("aria-selected", "true");
+    expect(query).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: false, projectId: "p1" }));
+    expect(screen.queryByLabelText("Filter work items")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Board" }));
+    expect(screen.queryByTestId("insights")).toBeNull();
+    expect(query).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: true, projectId: "p1" }));
+    expect(paramsRef.current?.get("view")).toBeNull();
+    expect(paramsRef.current?.get("v")).toBe("mine");
+    expect(paramsRef.current?.get("f")).toBe("priority.is:high");
   });
 
   it("does not claim `?view=insights` for a different view value", () => {
