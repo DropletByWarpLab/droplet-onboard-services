@@ -19,6 +19,10 @@ import { config } from "../config.js";
 import { bridgeAdminToken, bridgeAuthToken, isBridgeConnectionError } from "../lib/bridge-errors.js";
 import { createLogger } from "../lib/logger.js";
 import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
+import { getRecordingsAllocator } from "../services/recordings-allocator.singleton.js";
+import { guardRecordingsDrive, recordingsGuardRefusal } from "../services/recordings-drive-guard.service.js";
+import { RecordingsError, type SetAllocationRequest } from "../services/recordings.types.js";
+import { logStorageCommandAudit } from "../services/storage-safety.service.js";
 
 // Rescan / eject are owner+admin device-control actions. Family users can
 // still see drives via the existing GET routes; they just can't poke the
@@ -27,6 +31,16 @@ import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
 // denials there get the WARP-237 mandatory-emit ACL audit row — an on-box
 // blocked rename is diagnosable from the activity log instead of vanishing.)
 const logger = createLogger("storage-route");
+const RECORDINGS_SET = "recordings_set";
+const RECORDINGS_DELETE_OLD = "recordings_old_footage_delete";
+const RECORDINGS_RESOURCE = "recordings";
+const recordingsChangeSchema = z
+  .object({
+    mode: z.enum(["auto_reserved", "full"]).optional(),
+    fsUuid: z.string().regex(/^[A-Fa-f0-9-]{8,64}$/).optional(),
+  })
+  .strict()
+  .refine((body) => body.mode !== undefined || body.fsUuid !== undefined);
 
 /**
  * The device-bridge runs on the host and exposes auto-mounted USB drives at
@@ -435,6 +449,11 @@ const STORAGE_OPS = [
   RECOVERY_KEY_REGENERATE_OPERATION, // new recovery keyslot, old one wiped (owner, Tier 3)
 ] as const;
 type StorageOp = (typeof STORAGE_OPS)[number];
+const CONFIRMABLE_STORAGE_OPS: ReadonlySet<string> = new Set([
+  ...STORAGE_OPS,
+  RECORDINGS_SET,
+  RECORDINGS_DELETE_OLD,
+]);
 
 /** The executable ops as a set, for the confirm route's endpoint gate. */
 const STORAGE_OP_SET: ReadonlySet<string> = new Set<string>(STORAGE_OPS);
@@ -1263,6 +1282,8 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       });
     }
     try {
+      const refusal = await guardRecordingsDrive("eject", uuid);
+      if (refusal) return res.status(refusal.status).json({ ok: false, code: refusal.code, error: refusal.error });
       const ctrl = new AbortController();
       // The bridge's eject runs sync (≤10s) + umount (≤20s) = ~30s worst case,
       // so wait longer than that: aborting at 25s would 502 an eject the bridge
@@ -1274,8 +1295,10 @@ export function createStorageRouter(prisma: PrismaClient): Router {
         signal: ctrl.signal,
       });
       clearTimeout(timer);
-      const body = (await r.json().catch(() => ({}))) as { error?: string };
+      const body = (await r.json().catch(() => ({}))) as { error?: string; code?: unknown };
       if (!r.ok) {
+        const refusal = recordingsGuardRefusal(body.code);
+        if (refusal) return res.status(refusal.status).json({ ok: false, code: refusal.code, error: refusal.error });
         // Log the bridge's raw message server-side; only the 409 "busy" case is
         // actionable enough to surface (and bridge errors can carry mount
         // internals, so other statuses get a generic message).
@@ -1654,6 +1677,10 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     // must never take the generic path, which spreads the host's reply).
     if (service === RECOVERY_KEY_REVEAL_OPERATION) return revealRecoveryKey(res, resourceId);
     if (service === RECOVERY_KEY_REGENERATE_OPERATION) return regenerateRecoveryKey(res, resourceId);
+    const recordingRefusal = await guardRecordingsDrive("pool", resourceId, params);
+    if (recordingRefusal) return res.status(recordingRefusal.status).json({
+      ok: false, code: recordingRefusal.code, error: recordingRefusal.error,
+    });
     // WARP-1337: pool_create may carry the owner's chosen displayName in its
     // confirm-token params. It is orchestrator-side seeding only — the host
     // script has no such parameter — so split it off before the bridge call.
@@ -1671,6 +1698,10 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       // neither the response below nor the refusal log can ever relay it.
       const body = withoutRecoveryKey(reply.body);
       if (!ok) {
+        const recordingRefusal = recordingsGuardRefusal(body.code);
+        if (recordingRefusal) return res.status(recordingRefusal.status).json({
+          ok: false, code: recordingRefusal.code, error: recordingRefusal.error,
+        });
         // WARP-3513: a precondition the box does not meet (no TPM2 / /data not
         // encrypted): HTTP 409 + a machine code, nothing was erased.
         const refusal = preconditionRefusal(body);
@@ -1783,13 +1814,45 @@ export function createStorageRouter(prisma: PrismaClient): Router {
         if (!confirmationToken) {
           return res.status(400).json({ error: "Missing confirmationToken" });
         }
+        // Deleting the previous source is owner-only even though the shared
+        // storage confirm endpoint also serves admin-capable Tier-2 actions.
+        if (service === RECORDINGS_DELETE_OLD && req.user?.role !== "owner") {
+          return res.status(403).json({ error: "Only the owner can delete earlier recordings." });
+        }
+        const allowedServices = new Set(CONFIRMABLE_STORAGE_OPS);
+        if (req.user?.role !== "owner") allowedServices.delete(RECORDINGS_DELETE_OLD);
         const result = await confirmStorageCommand(prisma, confirmationToken, req.user?.id, {
           service,
           resourceId,
-          allowedServices: STORAGE_OP_SET,
+          allowedServices,
         });
         if (!result.confirmed) {
           return res.status(400).json({ error: result.reason, code: result.code });
+        }
+        if (result.service === RECORDINGS_SET || result.service === RECORDINGS_DELETE_OLD) {
+          if (result.resourceId !== RECORDINGS_RESOURCE) {
+            return res.status(400).json({ error: "Invalid recordings confirmation resource." });
+          }
+          const allocator = getRecordingsAllocator();
+          if (!allocator) return res.status(503).json({ error: "Recording storage is unavailable." });
+          try {
+            const actor = { type: "user" as const, id: req.user?.id ?? "" };
+            if (result.service === RECORDINGS_SET) {
+              await allocator.setAllocation((result.params ?? {}) as SetAllocationRequest, actor);
+            } else {
+              await allocator.deleteOldFootage(actor);
+            }
+            return res.status(202).json({ status: "accepted" });
+          } catch (err) {
+            if (err instanceof RecordingsError) {
+              const status =
+                err.code === "busy" || err.code === "no_old_footage" ? 409 :
+                err.code === "no_change" ? 400 :
+                err.code === "bridge_unavailable" ? 503 : 422;
+              return res.status(status).json(err.toJSON());
+            }
+            return next(err);
+          }
         }
         // allowedServices has already refused everything else; this narrows the
         // type for executeStorageOp and fails closed should the two ever drift.
@@ -1817,6 +1880,53 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       }
     },
   );
+
+  router.get("/storage/recordings", standardRateLimit, requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const allocator = getRecordingsAllocator();
+      if (!allocator) return res.status(503).json({ error: "Recording storage is unavailable." });
+      const overview = await allocator.getOverview();
+      res.json(overview);
+      // This successful read is a Tier-1 storage command. The shared audit
+      // helper swallows persistence failures so the view remains available.
+      void logStorageCommandAudit(prisma, {
+        userId: req.user?.id,
+        resourceId: RECORDINGS_RESOURCE,
+        service: "recordings_get",
+        tier: 1,
+        confirmed: true,
+        blocked: false,
+      });
+      return;
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.put("/storage/recordings", requireRole("owner", "admin"), async (req, res, next) => {
+    try {
+      const parsed = recordingsChangeSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: "Invalid recording storage change." });
+      return evalAndRespond(
+        res,
+        prisma,
+        RECORDINGS_SET,
+        RECORDINGS_RESOURCE,
+        { ...parsed.data },
+        req.user?.id,
+      );
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  router.post("/storage/recordings/old-footage/delete", requireRole("owner"), async (req, res, next) => {
+    try {
+      return evalAndRespond(res, prisma, RECORDINGS_DELETE_OLD, RECORDINGS_RESOURCE, {}, req.user?.id);
+    } catch (err) {
+      next(err);
+    }
+  });
 
   // ── Destructive routes: each EVALUATES (mints a confirm token), never
   //    executes directly. Owner/admin only. The AI never reaches these
@@ -1859,7 +1969,7 @@ export function createStorageRouter(prisma: PrismaClient): Router {
   function evalAndRespond(
     res: import("express").Response,
     prismaArg: PrismaClient,
-    service: StorageOp,
+    service: string,
     resourceId: string,
     params: Record<string, unknown>,
     userId?: string,

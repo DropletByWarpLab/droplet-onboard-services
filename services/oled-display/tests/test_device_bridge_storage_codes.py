@@ -65,7 +65,7 @@ def test_run_pool_command_keeps_its_two_element_contract(monkeypatch, tmp_path):
     assert result == (False, "refusing: no TPM2")
 
 
-@pytest.mark.parametrize("rc", [1, 2, 74, 77, 126])
+@pytest.mark.parametrize("rc", [1, 2, 74, 80, 126])
 def test_every_other_failure_has_no_code(rc, monkeypatch, tmp_path):
     bridge, spool = _load_bridge_with_spool(monkeypatch, tmp_path)
     fake_run, _ = _fake_executor(spool, rc=rc, stderr="refusing: /dev/sdb is mounted")
@@ -122,6 +122,21 @@ def test_http_keeps_422_for_an_ordinary_refusal(monkeypatch, tmp_path):
         "params": {"device": "sdb", "confirm_phrase": "ERASE sdb"}})
     assert status == 422
     assert body == {"ok": False, "error": "refusing: /dev/sdb is mounted"}
+
+
+@pytest.mark.parametrize("rc,code,status", [
+    (77, "recordings_drive_active", 409),
+    (78, "recordings_status_unavailable", 503),
+    (79, "storage_busy", 409),
+])
+def test_http_preserves_final_executor_topology_refusals(rc, code, status, monkeypatch, tmp_path):
+    bridge, spool = _load_bridge_with_spool(monkeypatch, tmp_path)
+    fake_run, _ = _fake_executor(spool, rc=rc, stderr="internal /dev/sdb mount diagnostics")
+    monkeypatch.setattr(bridge, "_run", fake_run)
+    actual_status, body, _raw = _http_post(bridge, {
+        "operation": "drive_adopt", "params": {"device": "sdb", "confirm_phrase": "ERASE sdb"}})
+    assert actual_status == status and body["code"] == code and body["ok"] is False
+    assert "internal" not in body["error"] and "/dev/sdb" not in body["error"]
 
 
 # --- recovery_key_regenerate --------------------------------------------------

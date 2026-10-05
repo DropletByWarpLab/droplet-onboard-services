@@ -187,6 +187,8 @@ export interface PmSummary {
   itemsOpen: number;
   doneThisWeek: number;
   overdue: number;
+  /** Open items with nobody assigned. Optional only so an older orchestrator still parses. */
+  unassigned?: number;
 }
 
 export interface Person {

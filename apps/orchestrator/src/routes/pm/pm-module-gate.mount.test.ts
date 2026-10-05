@@ -59,6 +59,7 @@ import { packagePath } from "../../__tests__/helpers/test-paths.js";
 import { createPmNativeRouter } from "./native.js";
 import { createPmRelationsRouter } from "./relations.js";
 import { createPmPlanningRouter } from "./planning.js";
+import { createPmInsightsRouter } from "./insights.js";
 import { createPmTimeRouter } from "./time.js";
 import { createPmFieldsRouter } from "./fields.js";
 import { createPmWebhooksRouter } from "./webhooks.js";
@@ -194,6 +195,12 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     base: "/api",
     file: "routes/pm/schedule.ts",
     router: createPmScheduleRouter(PRISMA),
+  },
+  {
+    factory: "createPmInsightsRouter",
+    base: "/api",
+    file: "routes/pm/insights.ts",
+    router: createPmInsightsRouter(PRISMA),
   },
   {
     factory: "createPmMobileRouter",
