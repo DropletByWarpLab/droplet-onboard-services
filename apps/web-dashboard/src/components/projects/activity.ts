@@ -122,6 +122,13 @@ const SENTENCES: Record<PmActivityVerbName, Describe> = {
       ? "stopped watching this"
       : `removed ${c.name(a.oldValue)} as a watcher`,
   mentioned: (a, c) => `mentioned ${c.name(a.newValue)}`,
+  time_logged: (a) => `logged ${a.newValue ?? "time"} minutes`,
+  time_log_updated: (a) =>
+    a.oldValue !== null && a.newValue !== null
+      ? `changed a worklog from ${a.oldValue} to ${a.newValue} minutes`
+      : "updated a worklog",
+  time_log_removed: (a) =>
+    a.oldValue !== null ? `removed a ${a.oldValue}-minute worklog` : "removed a worklog",
 };
 
 /** The sentence that follows the actor's name. An older client talking to a

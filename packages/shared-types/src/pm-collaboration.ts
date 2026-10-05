@@ -107,6 +107,9 @@ export const PM_ACTIVITY_VERBS = [
   "watcher_added",
   "watcher_removed",
   "mentioned",
+  "time_logged",
+  "time_log_updated",
+  "time_log_removed",
 ] as const;
 
 export type PmActivityVerbName = (typeof PM_ACTIVITY_VERBS)[number];

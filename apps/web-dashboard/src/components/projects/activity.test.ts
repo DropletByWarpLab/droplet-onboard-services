@@ -119,6 +119,9 @@ describe("describeActivity — one sentence per verb", () => {
     ["watcher_added · other", act("watcher_added", { newValue: "u2" }), "added Bea as a watcher"],
     ["watcher_removed · self", act("watcher_removed", { oldValue: "u1" }), "stopped watching this"],
     ["watcher_removed · other", act("watcher_removed", { oldValue: "u2" }), "removed Bea as a watcher"],
+    ["time_logged", act("time_logged", { newValue: "45" }), "logged 45 minutes"],
+    ["time_log_updated", act("time_log_updated", { oldValue: "30", newValue: "45" }), "changed a worklog from 30 to 45 minutes"],
+    ["time_log_removed", act("time_log_removed", { oldValue: "45" }), "removed a 45-minute worklog"],
   ];
 
   it.each(cases)("%s", (_label, activity, expected) => {
