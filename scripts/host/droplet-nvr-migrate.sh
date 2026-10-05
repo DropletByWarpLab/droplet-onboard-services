@@ -145,6 +145,10 @@ command -v python3 >/dev/null 2>&1 || die "python3 not found (needed to read the
 
 # --- Resolve the repo root, .env, compose file and the canonical .env writer --
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The migration also performs the legacy NVR_MEDIA_SOURCE flip and rollback.
+# Keep that transition under the same lock as pool writes and ejects.
+# shellcheck source=./droplet-storage-topology-lock.sh
+. "$SCRIPT_DIR/droplet-storage-topology-lock.sh"
 if [ -z "${REPO_ROOT:-}" ]; then
   if [ -f "$SCRIPT_DIR/../../docker/docker-compose.yml" ]; then
     REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -1315,6 +1319,27 @@ trap on_signal TERM INT HUP
 
 take_lock
 read_request
+set +e
+storage_topology_lock
+TOPOLOGY_LOCK_RC=$?
+set -e
+if [ "$TOPOLOGY_LOCK_RC" -ne 0 ]; then
+  S_JOB="$REQ_OP"
+  S_STATE=failed
+  S_PHASE=""
+  S_PCT=0
+  S_STARTED="$(now_iso)"
+  S_FINISHED="$S_STARTED"
+  if [ "$TOPOLOGY_LOCK_RC" -eq 1 ]; then
+    S_ERRCODE=busy
+    S_ERROR="another storage operation is in progress"
+  else
+    S_ERRCODE=internal
+    S_ERROR="recording storage could not be verified"
+  fi
+  write_state || true
+  exit 0
+fi
 case "$REQ_OP" in
   migrate) job_migrate ;;
   delete_old) job_delete_old ;;

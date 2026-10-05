@@ -36,6 +36,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from _topology_lock_test_support import add_trusted_stat_env
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "host" / "droplet-nvr-storage-apply.sh"
@@ -79,6 +80,8 @@ class Rig:
         self.writer.write_text(WRITER_STUB, encoding="utf-8", newline="\n")
         os.chmod(self.writer, 0o755)
         self.argv_log = tmp_path / "writer-argv.txt"
+        self.topology_lock = tmp_path / "recordings-topology.lock"
+        self.topology_lock.touch()
         # Created ONLY if an injected payload actually got executed.
         self.sentinel = tmp_path / "SENTINEL"
 
@@ -100,10 +103,11 @@ class Rig:
         env.update({
             "DROPLET_NVR_SPOOL_DIR": str(self.spool),
             "DROPLET_NVR_WRITER": str(self.writer),
+            "DROPLET_STORAGE_TOPOLOGY_LOCK_FILE": str(self.topology_lock),
             "WRITER_ARGV_LOG": str(self.argv_log),
         })
         env.update({k: str(v) for k, v in extra.items()})
-        return env
+        return add_trusted_stat_env(env, self.tmp / "bin", self.topology_lock)
 
     def run(self, script: Path = SCRIPT, **env_extra):
         return subprocess.run([BASH, str(script)], env=self.env(**env_extra),
@@ -204,6 +208,27 @@ def test_apply_reserved_builds_the_exact_writer_argv(tmp_path):
         "request_id": "req-test-1", "rc": 0,
         "stdout": '{"ok":true,"operation":"apply"}', "stderr": ""}
     # The request was consumed -- it must never be re-applied.
+    assert not rig.request_left()
+
+
+@posix_only
+def test_apply_refuses_while_shared_topology_lock_is_held(tmp_path):
+    import fcntl
+
+    rig = Rig(tmp_path)
+    rig.request("apply", {"fsUuid": FS_UUID, "mode": "full"})
+    fd = os.open(rig.topology_lock, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        proc = rig.run()
+    finally:
+        os.close(fd)
+
+    assert proc.returncode == 0, proc.stderr
+    result = rig.result()
+    assert result["rc"] == 1
+    assert json.loads(result["stdout"])["code"] == "busy"
+    assert rig.writer_args() is None, "writer ran while topology was locked"
     assert not rig.request_left()
 
 

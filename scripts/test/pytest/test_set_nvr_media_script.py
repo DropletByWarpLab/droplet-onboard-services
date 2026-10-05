@@ -39,6 +39,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _topology_lock_test_support import add_trusted_stat_env
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "host" / "droplet-set-nvr-media.sh"
@@ -607,6 +608,8 @@ class _World:
         self.state_dir = tmp_path / "spool"
         self.state_dir.mkdir(mode=0o700)
         self.root_state = tmp_path / "root-state"
+        self.topology_lock = tmp_path / "recordings-topology.lock"
+        self.topology_lock.touch()
         self.repo = tmp_path / "repo"
         self.repo.mkdir()
         self.env_file = self.repo / ".env"
@@ -714,6 +717,7 @@ class _World:
             "DROPLET_NVR_MEDIA_SKIP_RECREATE": "1",
             "DROPLET_NVR_STATE_DIR": str(self.state_dir),
             "DROPLET_NVR_ROOT_STATE_DIR": str(self.root_state),
+            "DROPLET_STORAGE_TOPOLOGY_LOCK_FILE": str(self.topology_lock),
             "DROPLET_NVR_MOUNT_BASE": str(self.base),
             "DROPLET_NVR_QUOTA_TOOL": str(self.stubs / "quota-tool"),
             "DROPLET_NVR_MEDIA_STATFS": str(self.stubs / "statfs"),
@@ -728,7 +732,7 @@ class _World:
         })
         if extra:
             env.update(extra)
-        return env
+        return add_trusted_stat_env(env, self.stubs, self.topology_lock)
 
 
 def _make_world(tmp_path: Path, env_text: str | None = "JWT_SECRET=keepme\nNVR_MEDIA_SOURCE=nvrdata\n"):

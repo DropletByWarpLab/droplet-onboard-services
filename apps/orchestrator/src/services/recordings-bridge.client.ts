@@ -157,6 +157,7 @@ async function call(method: "GET" | "POST", path: string, opts: CallOptions): Pr
   const code = isObj(body) && typeof body.code === "string" ? body.code : undefined;
   const message = isObj(body) && typeof body.error === "string" ? body.error : `the device-bridge returned ${res.status}`;
   if (res.status === 409) throw new RecordingsError("busy", message, code);
+  if (res.status === 503) throw new RecordingsError("bridge_unavailable", message, code);
   if (res.status === 422) throw new RecordingsError("host_refused", message, code);
   const err = new Error(`${path}: ${message} (${res.status})`);
   (err as { status?: number }).status = res.status;

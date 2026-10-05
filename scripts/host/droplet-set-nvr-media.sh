@@ -1028,9 +1028,40 @@ nvr_legacy_ancestry_check() {   # nvr_legacy_ancestry_check <resolved-path>
 # untouched.
 case "$MODE" in
   status) export LC_ALL=C; nvr_run_status "$@"; exit 0 ;;
-  apply)  export LC_ALL=C; nvr_run_apply "$@"; exit 0 ;;
-  resize) export LC_ALL=C; nvr_run_resize "$@"; exit 0 ;;
+  apply|resize)
+    if [ "${DROPLET_STORAGE_TOPOLOGY_LOCK_HELD:-}" != 1 ]; then
+      # shellcheck source=./droplet-storage-topology-lock.sh
+      . "$SCRIPT_DIR/droplet-storage-topology-lock.sh"
+      set +e
+      storage_topology_lock
+      LOCK_RC=$?
+      set -e
+      if [ "$LOCK_RC" -eq 1 ]; then
+        nvr_refuse busy "another storage operation is in progress"
+      elif [ "$LOCK_RC" -ne 0 ]; then
+        nvr_refuse recordings_status_unavailable "recording storage could not be verified"
+      fi
+    fi
+    export LC_ALL=C
+    if [ "$MODE" = apply ]; then nvr_run_apply "$@"; else nvr_run_resize "$@"; fi
+    exit 0
+    ;;
 esac
+
+# The positional compatibility path can still change NVR_MEDIA_SOURCE. Keep
+# that legacy source transition serialized as well; --status above is strictly
+# read-only and deliberately bypasses the lock.
+# shellcheck source=./droplet-storage-topology-lock.sh
+. "$SCRIPT_DIR/droplet-storage-topology-lock.sh"
+set +e
+storage_topology_lock
+LOCK_RC=$?
+set -e
+if [ "$LOCK_RC" -eq 1 ]; then
+  nvr_refuse busy "another storage operation is in progress"
+elif [ "$LOCK_RC" -ne 0 ]; then
+  nvr_refuse recordings_status_unavailable "recording storage could not be verified"
+fi
 
 [ -n "$TARGET" ] || die "no recordings target given"
 

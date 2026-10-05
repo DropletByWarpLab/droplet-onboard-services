@@ -25,6 +25,7 @@ import hmac
 import json
 import logging
 import os
+import posixpath
 import re
 import secrets
 import shlex
@@ -32,12 +33,19 @@ import re
 import shutil
 import socket
 import struct
+import stat
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib import request as urlrequest
 from urllib.parse import parse_qs, unquote, urlparse
+
+try:
+    import fcntl
+except ImportError:  # Non-POSIX development hosts cannot authorize a host eject.
+    fcntl = None
 
 logger = logging.getLogger("droplet.bridge")
 
@@ -2475,6 +2483,31 @@ def drives_snapshot(invalidate=False):
 # The automount state file eject_drive() reads (a module constant so a test can
 # point it at a scratch file; drives_snapshot() keeps its own literal).
 _AUTOMOUNT_STATE_PATH = "/var/lib/droplet-automount/mounts.json"
+_RECORDINGS_TOPOLOGY_LOCK_PATH = "/run/droplet-storage-ops/recordings-topology.lock"
+
+
+@contextmanager
+def _recordings_topology_lock():
+    """Share the root writers' lock across the final status check and eject.
+
+    The installer owns the directory and inode; never create or follow a lock
+    file here. A migration can last hours, so contention refuses immediately.
+    """
+    if fcntl is None:
+        raise OSError("recordings topology lock unavailable")
+    fd = os.open(_RECORDINGS_TOPOLOGY_LOCK_PATH,
+                 os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o007:
+            raise OSError("recordings topology lock is not trusted")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _device_at_mountpoint(mountpoint):
@@ -2534,8 +2567,25 @@ def eject_drive(uuid):
     real_mp = os.path.realpath(mp)
     if not real_mp.startswith("/mnt/droplet/") or real_mp == "/mnt/droplet":
         return False, "refusing to eject a non-/mnt/droplet mount"
+    refusal = _eject_mount_refusal(target, real_mp)
+    if refusal is not None:
+        return False, refusal
+    # WARP-3514: validate the local mount/device first, then refuse the active
+    # recordings drive before anything is synced or unmounted. A malformed
+    # entry must not even reach the status subprocess. Unreadable recordings
+    # status refuses the eject until the allocation can be verified.
+    try:
+        with _recordings_topology_lock():
+            return _eject_drive_locked(uuid, real_mp, state_path)
+    except OSError:
+        logger.warning("eject refused: recordings topology lock unavailable")
+        return False, _CodedRefusal(_RECORDINGS_STATUS_MESSAGE, _RECORDINGS_STATUS_UNAVAILABLE)
+
+
+def _eject_mount_refusal(target, real_mp):
+    """Pure local preflight, repeated after acquiring the shared host lock."""
     if not os.path.ismount(real_mp):
-        return False, "drive is not currently mounted"
+        return "drive is not currently mounted"
     # WARP-3513: a LUKS bay is mounted through its dm MAPPER, but the entry's
     # `device` is the BACKING device (/dev/sdb — the automounter records that so
     # a udev REMOVE matches, WARP-232) and the mapper rides in `mapper`. So the
@@ -2551,11 +2601,30 @@ def eject_drive(uuid):
         and actual_dev
         and os.path.realpath(actual_dev) not in {os.path.realpath(d) for d in accepted}
     ):
-        return False, "mount/device mismatch — refusing to eject"
-    # WARP-3514: validate the local mount/device first, then refuse the active
-    # recordings drive before anything is synced or unmounted. A malformed
-    # entry must not even reach the status subprocess. An unreadable recordings
-    # status does not block an otherwise valid eject.
+        return "mount/device mismatch — refusing to eject"
+    return None
+
+
+def _eject_drive_locked(uuid, real_mp, state_path):
+    """Called only while the shared recordings topology lock is held."""
+    # A pool write could complete between early preflight and lock acquisition.
+    # Read the latest state to preserve newly registered drives, and repeat the
+    # local mount/device check BEFORE the recordings status subprocess.
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+    except Exception as e:                                          # noqa: BLE001
+        return False, "automount state unreadable: {}".format(e)
+    mounts = state.get("mounts", [])
+    target = next((m for m in mounts if (m.get("uuid") or "") == uuid), None)
+    if target is None:
+        return False, "no hot-plug drive with that uuid"
+    mp = (target.get("mount") or "").rstrip("/")
+    if os.path.realpath(mp) != real_mp:
+        return False, "mount changed — refusing to eject; try again"
+    refusal = _eject_mount_refusal(target, real_mp)
+    if refusal is not None:
+        return False, refusal
     refusal = _eject_recordings_refusal(target, real_mp)
     if refusal is not None:
         return False, refusal
@@ -3259,6 +3328,9 @@ _POOL_OPS_UUID_ONLY = frozenset({"recovery_key_reveal", "recovery_key_regenerate
 _POOL_REFUSAL_CODES = {
     75: "tpm_required",
     76: "encrypted_data_required",
+    77: "recordings_drive_active",
+    78: "recordings_status_unavailable",
+    79: "storage_busy",
 }
 
 # WARP-3513: ops whose executor result carries SECRET material — the LUKS
@@ -3490,6 +3562,15 @@ def _run_pool_via_executor(operation, params, refusal=None):
         # encrypted): nothing was touched. The CODE is keyed on the exit code.
         refusal["code"] = _POOL_REFUSAL_CODES[script_rc]
     if script_rc is None or script_rc != 0:
+        # Host topology guards use fixed copy; never expose internal mount or
+        # device diagnostics through a typed refusal.
+        guard_code = _POOL_REFUSAL_CODES.get(script_rc)
+        if guard_code == "recordings_drive_active":
+            return False, _POOL_RECORDINGS_MESSAGE
+        if guard_code == "recordings_status_unavailable":
+            return False, _RECORDINGS_STATUS_MESSAGE
+        if guard_code == "storage_busy":
+            return False, "another storage operation is running — try again when it finishes"
         # A secret-bearing op's script output is never logged and never echoed —
         # in a half-failed run stdout/stderr could hold the recovery key.
         if secret:
@@ -3632,6 +3713,9 @@ _NVR_IDLE_STATE = {
 }
 
 _RECORDINGS_DRIVE_ACTIVE = "recordings_drive_active"
+_RECORDINGS_STATUS_UNAVAILABLE = "recordings_status_unavailable"
+_RECORDINGS_STATUS_MESSAGE = (
+    "recording storage could not be verified — nothing was changed; try again")
 _EJECT_RECORDINGS_MESSAGE = (
     "this drive holds your camera recordings — it cannot be ejected")
 _POOL_RECORDINGS_MESSAGE = (
@@ -3728,25 +3812,37 @@ def _nvr_device_name(value):
 
 
 def _nvr_recordings_drive():
-    """The drive the ACTIVE recordings live on, from the writer's `--status`:
-    {"mountPath": str, "backingDevices": set}, or None.
+    """Verified recordings topology, or None for a known named volume.
 
-    None whenever it cannot be established — status unreadable, the source is
-    the named volume (the OS disk), or the bay is not mounted — so every caller
-    FAILS OPEN. The orchestrator layer, which knows the allocation from its DB,
-    is the fail-closed one."""
+    Unknown/malformed status raises: callers refuse storage writes, rather
+    than guessing that a bay is safe to remove (ADR-070 section 7)."""
     data, _problem = _nvr_status_read(_NVR_GUARD_STATUS_TIMEOUT_S)
-    if (data is None or data.get("kind") != "path"
-            or data.get("mounted") is not True):
+    if data is None:
+        raise ValueError("recordings status unavailable")
+    source = data.get("source")
+    if data.get("kind") == "volume" and isinstance(source, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", source):
         return None
+    if data.get("kind") != "path" or data.get("mounted") is not True:
+        raise ValueError("recordings status unavailable")
     mount = data.get("mountPath")
-    mount = mount.rstrip("/") if isinstance(mount, str) and mount.startswith("/") else ""
     devices = data.get("backingDevices")
-    names = ({d for d in devices if isinstance(d, str) and d}
-             if isinstance(devices, list) else set())
-    if not mount and not names:
-        return None
-    return {"mountPath": mount, "backingDevices": names}
+    physical = data.get("physicalDisk")
+    def valid_path(value):
+        return (isinstance(value, str) and value.startswith("/") and value != "/"
+                and not re.search(r"[\x00-\x1f\x7f]", value)
+                and posixpath.normpath(value) == value and not value.startswith("//"))
+    def valid_device(value):
+        return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}", value) is not None
+    if (not valid_path(source) or not valid_path(mount)
+            or not (source == mount or source.startswith(mount + "/"))
+            or not _nvr_valid_fs_uuid(data.get("fsUuid"))
+            or not isinstance(devices, list) or not devices
+            or any(not valid_device(d) for d in devices) or len(set(devices)) != len(devices)
+            or not isinstance(physical, str)
+            or any(not valid_device(d) or d not in devices for d in physical.split(","))):
+        raise ValueError("recordings topology unavailable")
+    return {"mountPath": mount.rstrip("/"),
+            "backingDevices": {_nvr_device_name(d) for d in devices}}
 
 
 def _eject_recordings_refusal(target, mount):
@@ -3771,8 +3867,9 @@ def _eject_recordings_refusal(target, mount):
             logger.warning("eject refused: that drive holds the camera "
                            "recordings (mount=%s device=%s)", mount, device)
             return _CodedRefusal(_EJECT_RECORDINGS_MESSAGE, _RECORDINGS_DRIVE_ACTIVE)
-    except Exception as e:                                          # noqa: BLE001
-        logger.warning("eject: recordings guard unavailable (%s) — not blocking", e)
+    except Exception:                                               # noqa: BLE001
+        logger.warning("eject refused: recordings status could not be verified")
+        return _CodedRefusal(_RECORDINGS_STATUS_MESSAGE, _RECORDINGS_STATUS_UNAVAILABLE)
     return None
 
 
@@ -3804,9 +3901,9 @@ def _pool_recordings_refusal(params):
                        "the camera recordings (%s)",
                        ", ".join(sorted(names & active["backingDevices"])))
         return _CodedRefusal(_POOL_RECORDINGS_MESSAGE, _RECORDINGS_DRIVE_ACTIVE)
-    except Exception as e:                                          # noqa: BLE001
-        logger.warning("storage op: recordings guard unavailable (%s) — not "
-                       "blocking", e)
+    except Exception:                                               # noqa: BLE001
+        logger.warning("storage operation refused: recordings status could not be verified")
+        return _CodedRefusal(_RECORDINGS_STATUS_MESSAGE, _RECORDINGS_STATUS_UNAVAILABLE)
     return None
 
 
@@ -3896,6 +3993,10 @@ def _nvr_writer_outcome(operation, result, success_key):
     if parsed is not None and parsed.get("ok") is False:
         code = parsed.get("code")
         if isinstance(code, str) and _NVR_CODE_RE.fullmatch(code):
+            if code == "busy":
+                return _nvr_error(409, code, "another storage operation is in progress")
+            if code == _RECORDINGS_STATUS_UNAVAILABLE:
+                return _nvr_error(503, code, _RECORDINGS_STATUS_MESSAGE)
             message = parsed.get("message")
             if not isinstance(message, str) or not message.strip():
                 message = err.strip() or code
@@ -5757,7 +5858,7 @@ class Handler(BaseHTTPRequestHandler):
                 code = getattr(info, "code", None)
                 if code:
                     refusal["code"] = code
-                return self._send(409, refusal)
+                return self._send(503 if code == _RECORDINGS_STATUS_UNAVAILABLE else 409, refusal)
             return self._send(200, {"ok": True, **(info if isinstance(info, dict) else {})})
         if self.path == "/pools/command":
             # BUG-3 / ADR-019: destructive mdadm op. Auth-gated exactly like
@@ -5788,8 +5889,8 @@ class Handler(BaseHTTPRequestHandler):
                     # 409 — a PRECONDITION the box does not meet (Prepare needs a
                     # TPM2 and an encrypted /data); nothing was touched. `code`
                     # is the machine value the orchestrator branches on.
-                    return self._send(409, {"ok": False, "error": info,
-                                            "code": code})
+                    return self._send(503 if code == _RECORDINGS_STATUS_UNAVAILABLE else 409,
+                                      {"ok": False, "error": info, "code": code})
                 # 422 — the host-script pre-flight refused (mounted/has-data/
                 # OS-disk/bad confirm) or the op was outside the allow-list.
                 return self._send(422, {"ok": False, "error": info})

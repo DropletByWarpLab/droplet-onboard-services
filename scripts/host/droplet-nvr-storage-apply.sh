@@ -65,6 +65,12 @@
 # =============================================================================
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The NVR writer's final mount/quota/source checks and writes serialize with
+# pool mutations and the eject path.
+# shellcheck source=./droplet-storage-topology-lock.sh
+. "$SCRIPT_DIR/droplet-storage-topology-lock.sh"
+
 SPOOL_DIR="${DROPLET_NVR_SPOOL_DIR:-/var/lib/droplet-bridge/nvr-spool}"
 WRITER="${DROPLET_NVR_WRITER:-/usr/local/sbin/droplet-set-nvr-media.sh}"
 REQ="$SPOOL_DIR/request.json"
@@ -240,9 +246,24 @@ case "$PLAN_KIND" in
   OK)
     WRITER_ARGV=("${PLAN_LINES[@]:3}")
     set +e
-    "$WRITER" "${WRITER_ARGV[@]}" >"$OUT_FILE" 2>"$ERR_FILE" </dev/null
-    WRITER_RC=$?
+    storage_topology_lock
+    LOCK_RC=$?
     set -e
+    if [ "$LOCK_RC" -eq 0 ]; then
+      set +e
+      DROPLET_STORAGE_TOPOLOGY_LOCK_HELD=1 \
+        "$WRITER" "${WRITER_ARGV[@]}" >"$OUT_FILE" 2>"$ERR_FILE" </dev/null
+      WRITER_RC=$?
+      set -e
+    elif [ "$LOCK_RC" -eq 1 ]; then
+      WRITER_RC=1
+      printf '%s\n' '{"ok":false,"code":"busy","message":"another storage operation is in progress"}' >"$OUT_FILE"
+      printf '%s\n' "droplet-nvr-storage-apply: topology lock is busy" >"$ERR_FILE"
+    else
+      WRITER_RC=1
+      printf '%s\n' '{"ok":false,"code":"recordings_status_unavailable","message":"recording storage could not be verified"}' >"$OUT_FILE"
+      printf '%s\n' "droplet-nvr-storage-apply: topology lock is unavailable" >"$ERR_FILE"
+    fi
     ;;
   REFUSE)
     WRITER_RC=1

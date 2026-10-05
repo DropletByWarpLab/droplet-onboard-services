@@ -20,6 +20,7 @@ import { bridgeAdminToken, bridgeAuthToken, isBridgeConnectionError } from "../l
 import { createLogger } from "../lib/logger.js";
 import { isOwnerOrAdmin } from "../middleware/admin-tier.js";
 import { getRecordingsAllocator } from "../services/recordings-allocator.singleton.js";
+import { guardRecordingsDrive, recordingsGuardRefusal } from "../services/recordings-drive-guard.service.js";
 import { RecordingsError, type SetAllocationRequest } from "../services/recordings.types.js";
 import { logStorageCommandAudit } from "../services/storage-safety.service.js";
 
@@ -1281,6 +1282,8 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       });
     }
     try {
+      const refusal = await guardRecordingsDrive("eject", uuid);
+      if (refusal) return res.status(refusal.status).json({ ok: false, code: refusal.code, error: refusal.error });
       const ctrl = new AbortController();
       // The bridge's eject runs sync (≤10s) + umount (≤20s) = ~30s worst case,
       // so wait longer than that: aborting at 25s would 502 an eject the bridge
@@ -1292,8 +1295,10 @@ export function createStorageRouter(prisma: PrismaClient): Router {
         signal: ctrl.signal,
       });
       clearTimeout(timer);
-      const body = (await r.json().catch(() => ({}))) as { error?: string };
+      const body = (await r.json().catch(() => ({}))) as { error?: string; code?: unknown };
       if (!r.ok) {
+        const refusal = recordingsGuardRefusal(body.code);
+        if (refusal) return res.status(refusal.status).json({ ok: false, code: refusal.code, error: refusal.error });
         // Log the bridge's raw message server-side; only the 409 "busy" case is
         // actionable enough to surface (and bridge errors can carry mount
         // internals, so other statuses get a generic message).
@@ -1672,6 +1677,10 @@ export function createStorageRouter(prisma: PrismaClient): Router {
     // must never take the generic path, which spreads the host's reply).
     if (service === RECOVERY_KEY_REVEAL_OPERATION) return revealRecoveryKey(res, resourceId);
     if (service === RECOVERY_KEY_REGENERATE_OPERATION) return regenerateRecoveryKey(res, resourceId);
+    const recordingRefusal = await guardRecordingsDrive("pool", resourceId, params);
+    if (recordingRefusal) return res.status(recordingRefusal.status).json({
+      ok: false, code: recordingRefusal.code, error: recordingRefusal.error,
+    });
     // WARP-1337: pool_create may carry the owner's chosen displayName in its
     // confirm-token params. It is orchestrator-side seeding only — the host
     // script has no such parameter — so split it off before the bridge call.
@@ -1689,6 +1698,10 @@ export function createStorageRouter(prisma: PrismaClient): Router {
       // neither the response below nor the refusal log can ever relay it.
       const body = withoutRecoveryKey(reply.body);
       if (!ok) {
+        const recordingRefusal = recordingsGuardRefusal(body.code);
+        if (recordingRefusal) return res.status(recordingRefusal.status).json({
+          ok: false, code: recordingRefusal.code, error: recordingRefusal.error,
+        });
         // WARP-3513: a precondition the box does not meet (no TPM2 / /data not
         // encrypted): HTTP 409 + a machine code, nothing was erased.
         const refusal = preconditionRefusal(body);
