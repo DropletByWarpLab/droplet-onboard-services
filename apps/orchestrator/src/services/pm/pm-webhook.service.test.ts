@@ -3,6 +3,22 @@
  * what is returned exactly once. In-memory Prisma.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
+// Registration reads this process's interfaces. Model the appliance container
+// explicitly so a developer's attached LAN does not change the guard's result.
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return {
+    ...actual,
+    networkInterfaces: () => ({
+      eth0: [{
+        address: "172.18.0.5", netmask: "255.255.0.0", family: "IPv4",
+        mac: "02:00:00:00:00:05", internal: false, cidr: "172.18.0.5/16",
+      }],
+    }),
+  };
+});
+
 import type { PmWebhook, PmWebhookDelivery } from "@prisma/client";
 import { __setColumnCryptoKeyForTest } from "../column-crypto.service.js";
 import {
@@ -175,6 +191,8 @@ describe("createWebhook", () => {
     ["credentials in the URL", "https://user:pass@hooks.example.com/x"],
     ["not a URL", "hooks.example.com/x"],
     ["an .internal name", "http://metadata.google.internal/x"],
+    ["the container address", "http://172.18.0.5:3001/x"],
+    ["the attached compose network", "http://172.18.0.9:8080/x"],
   ])("refuses %s with one fixed code that names no rule", async (_label, url) => {
     const prisma = makePrisma();
     await expect(createWebhook(prisma as never, null, { ...good, url })).rejects.toThrow(

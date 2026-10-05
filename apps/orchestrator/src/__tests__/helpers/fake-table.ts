@@ -9,7 +9,7 @@
  * dropped predicate or a wrong key changes what the test sees.
  *
  * Deliberately small: equality (null included), `not`, `in`, `lt`/`lte`/`gt`/
- * `gte`, `contains` (+ `mode: "insensitive"`), `OR`/`AND`, `orderBy` (ASC puts
+ * `gte`, `equals` / `contains` (+ `mode: "insensitive"`), `OR`/`AND`, `orderBy` (ASC puts
  * NULLs last, DESC first — Postgres' default), `take`, and a flat `select`. An
  * operator or argument it does not know throws, so a query shape it cannot
  * evaluate is a loud test failure, never a silent match.
@@ -40,7 +40,11 @@ function matchValue(actual: unknown, cond: unknown): boolean {
       continue;
     }
     if (op === "not" && matchValue(actual, v)) return false;
-    if (op === "equals" && !matchValue(actual, v)) return false;
+    if (op === "equals") {
+      if (insensitive && typeof actual === "string" && typeof v === "string") {
+        if (actual.toLowerCase() !== v.toLowerCase()) return false;
+      } else if (!matchValue(actual, v)) return false;
+    }
     if (op === "in" && !(v as unknown[]).some((x) => scalar(actual) === scalar(x))) return false;
     if (op === "contains") {
       if (typeof actual !== "string") return false;

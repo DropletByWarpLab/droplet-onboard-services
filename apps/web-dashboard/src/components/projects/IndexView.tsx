@@ -231,7 +231,10 @@ export function IndexView({
     );
   }
 
-  const list = projects ?? [];
+  // WARP-3370 — Archived is a FILTER: off, the index is the live projects; on, it
+  // is the archived ones (where Restore and Delete permanently are reached, by
+  // opening the project). The server list holds both when the filter is on.
+  const list = (projects ?? []).filter((p) => (showArchived ? p.archived : !p.archived));
   const isEmpty = !loading && list.length === 0;
 
   return (
@@ -244,13 +247,22 @@ export function IndexView({
       </div>
 
       <div className="pm-row" style={{ gap: 8 }}>
-        <button className={"pm-chip" + (showArchived ? " on" : "")} type="button" onClick={onToggleArchived}>
-          <PmIcon name="eye" size={13} />
-          Show archived
+        <button
+          className={"pm-chip" + (showArchived ? " on" : "")}
+          type="button"
+          aria-pressed={showArchived}
+          onClick={onToggleArchived}
+        >
+          <PmIcon name="archive" size={13} />
+          Archived
         </button>
       </div>
 
-      {isEmpty ? (
+      {isEmpty && showArchived ? (
+        <div className="pm-surface" style={{ padding: 8 }}>
+          <EmptyBlock icon="archive" heading="No archived projects." body="A project you archive shows up here." />
+        </div>
+      ) : isEmpty ? (
         <div className="pm-surface" style={{ padding: 8 }}>
           <EmptyBlock
             icon="board"

@@ -4,6 +4,14 @@ import { getRequestId } from "../lib/request-context.js";
 
 const isTest = process.env.NODE_ENV === "test" || !!process.env.VITEST;
 
+/** Recovery-key fields are kept exported so focused custody tests can verify the exact redaction paths. */
+export const REQUEST_LOG_REDACT_PATHS: readonly string[] = [
+  "res.body.recoveryKey",
+  "res.body.recovery_key",
+  "req.body.recoveryKey",
+  "req.body.recovery_key",
+];
+
 /** pino-http req serializer (receives the std-serialized req). */
 function scrubReq(req: { url?: string } & Record<string, unknown>) {
   const out = { ...req };
@@ -76,6 +84,7 @@ export function createRequestLogger(opts: {
         'req.headers["x-droplet-auth"]',
         'req.headers["x-api-key"]',
         "res.body.token",
+        ...REQUEST_LOG_REDACT_PATHS,
       ],
     },
     mixin() {
