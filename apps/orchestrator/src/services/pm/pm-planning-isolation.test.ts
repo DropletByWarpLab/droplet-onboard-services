@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "@prisma/client";
+import { createTransactionSeam } from "../../__tests__/helpers/prisma-tx-harness.js";
 import {
   completeCycle, createCycle, deleteCycle, getCycle, getCycleBurndown,
   listBacklog, listCycles, listCycleWorkItems, startCycle, updateCycle,
@@ -29,7 +30,7 @@ function deskClient() {
     pmActivity: { createMany: vi.fn() },
     $transaction: vi.fn(),
   };
-  db.$transaction.mockImplementation(async (run: (tx: typeof db) => Promise<unknown>) => run(db));
+  db.$transaction = createTransactionSeam({ client: () => db }).$transaction;
   return db;
 }
 
