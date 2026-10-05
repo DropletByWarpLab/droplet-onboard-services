@@ -21,7 +21,8 @@ import {
 } from "./activity";
 import { RichTextEditor, type RichTextEditorHandle } from "./editor/RichTextEditor";
 import { pmActions } from "./usePm";
-import { canWrite, type PmComment, type PmReaction } from "./types";
+import { CommentAttachments } from "./attachments";
+import { canWrite, type PmAttachment, type PmComment, type PmReaction } from "./types";
 
 /** An Escape pressed inside `ref` is dealt with there and goes no further
  *  (`onEscape`, if given, runs for it).
@@ -103,11 +104,13 @@ function ReactionPicker({
  *  with a toast, if the server refuses. */
 function ReactionBar({
   comment,
+  attachments = [],
   viewerId,
   canReact,
   onChanged,
 }: {
   comment: PmComment;
+  attachments?: PmAttachment[];
   viewerId: string | undefined;
   canReact: boolean;
   onChanged: () => void | Promise<void>;
@@ -282,12 +285,14 @@ function EditForm({
 
 export function CommentCard({
   comment,
+  attachments = [],
   viewerId,
   role,
   mentionCandidates,
   onChanged,
 }: {
   comment: PmComment;
+  attachments?: PmAttachment[];
   viewerId: string | undefined;
   role: string | undefined;
   mentionCandidates: readonly MentionCandidateLike[] | undefined;
@@ -430,6 +435,7 @@ export function CommentCard({
               style={ai ? { padding: "9px 11px", borderRadius: 10 } : undefined}
               dangerouslySetInnerHTML={{ __html: comment.commentHtml }}
             />
+            <CommentAttachments files={attachments} />
             <ReactionBar comment={comment} viewerId={viewerId} canReact={writer} onChanged={onChanged} />
           </>
         )}

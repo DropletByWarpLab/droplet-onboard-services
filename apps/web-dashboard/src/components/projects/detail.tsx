@@ -82,8 +82,6 @@ function DetailBody({
   onChanged: () => void;
   readOnly: boolean;
 }): JSX.Element {
-  const person = usePerson();
-  const { user } = useAuth();
   // WARP-3520 -- every editor writes through this one optimistic layer; `item` is
   // the server's copy with in-flight and just-saved edits laid over it.
   const edit = useItemSave(serverItem, onChanged);
@@ -103,7 +101,6 @@ function DetailBody({
   const drop = useFileDrop((dropped) => void uploads.addFiles(dropped));
   usePreventStrayFileDrops();
   const subs = subIssues ?? [];
-  const files = att.attachments ?? [];
 
   return (
     <div
@@ -209,7 +206,7 @@ function DetailBody({
           @mentions, watchers. The server writes a `commented` activity row in the
           same transaction as the comment; the section re-reads the merged
           timeline itself, and `onChanged` refreshes the board's comment counts. */}
-      <ActivitySection itemId={item.id} viewerId={user?.id} role={user?.role} onChanged={onChanged} />
+      <ActivitySection itemId={item.id} viewerId={user?.id} role={user?.role} onChanged={() => { void att.mutate(); onChanged(); }} attachments={att.attachments ?? []} uploads={uploads} canAttach={writer} />
       <TimeSection item={item} />
     </div>
   );

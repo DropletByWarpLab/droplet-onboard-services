@@ -122,6 +122,13 @@ const SENTENCES: Record<PmActivityVerbName, Describe> = {
       ? "stopped watching this"
       : `removed ${c.name(a.oldValue)} as a watcher`,
   mentioned: (a, c) => `mentioned ${c.name(a.newValue)}`,
+  start_date_changed: (a) => a.newValue ? `set the start date to ${fmtISODate(a.newValue)}` : "removed the start date",
+  type_changed: (a) => a.newValue ? `changed the type to ${a.newValue}` : "changed the type",
+  estimate_changed: (a) => a.newValue ? `set the estimate to ${a.newValue}` : "removed the estimate",
+  property_changed: (a) => `changed ${a.field ?? "a custom field"}`,
+  attachment_added: (a) => a.newValue ? `added ${a.newValue}` : "added an attachment",
+  attachment_removed: (a) => a.oldValue ? `removed ${a.oldValue}` : "removed an attachment",
+  external_link_added: (a) => a.newValue ? `linked ${a.newValue}` : "added a development link",
   time_logged: (a) => `logged ${a.newValue ?? "time"} minutes`,
   time_log_updated: (a) =>
     a.oldValue !== null && a.newValue !== null

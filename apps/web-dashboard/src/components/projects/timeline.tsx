@@ -23,7 +23,8 @@ import {
 import { CommentCard } from "./comment";
 import { RichTextEditor, type RichTextEditorHandle } from "./editor/RichTextEditor";
 import { pmActions, usePeople, useTimeline } from "./usePm";
-import type { PmActivity, PmTimelineRefs } from "./types";
+import { StagedFiles, UploadRows, pastedFiles, useAttachmentUploads, useFileDrop, useFilePicker } from "./attachments";
+import type { PmActivity, PmTimelineRefs, PmAttachment } from "./types";
 
 /** One line of history: `<Actor> <sentence> · <when>`. A person's rows carry a
  *  quiet marker rather than a face — the comments are the loud part of the
@@ -52,9 +53,13 @@ function ActivityRow({ activity, refs }: { activity: PmActivity; refs: PmTimelin
 function Composer({
   itemId,
   mentionCandidates,
+  uploads,
+  canAttach = false,
   onSent,
 }: {
   itemId: string;
+  uploads?: ReturnType<typeof useAttachmentUploads>;
+  canAttach?: boolean;
   mentionCandidates: readonly MentionCandidateLike[] | undefined;
   /** The comment is on the server: re-read the thread and refresh the counts. */
   onSent: () => Promise<void>;
@@ -66,15 +71,26 @@ function Composer({
   const [empty, setEmpty] = useState(true);
   const [busy, setBusy] = useState(false);
   const sending = useRef(false);
+  const [files, setFiles] = useState<File[]>([]);
+  const stage = (picked: File[]) => setFiles((cur) => [...cur, ...picked]);
+  const picker = useFilePicker(stage, "Choose files to attach to the comment");
+  const drop = useFileDrop(stage, { nested: true });
 
   const submit = async () => {
     const handle = editor.current;
     // Two guards, on purpose: the button is disabled, but ⌘↵ reaches here too.
-    if (!handle || sending.current || handle.isEmpty()) return;
+    if (!handle || sending.current || (handle.isEmpty() && files.length === 0)) return;
     sending.current = true;
     setBusy(true);
     try {
-      await pmActions().addComment(itemId, handle.getHTML());
+      const { comment } = await pmActions().addComment(itemId, handle.isEmpty() ? "<p></p>" : handle.getHTML());
+      const staged = files;
+      setFiles([]);
+      if (staged.length && uploads) {
+        void uploads.addFiles(staged, { commentId: comment.id }).then((failed) => {
+          if (failed) toast(`Comment sent, but ${failed} ${failed === 1 ? "file" : "files"} couldn't be uploaded.`, "error");
+        });
+      }
     } catch (e) {
       // The draft stays in the editor; the person can simply send again.
       toast(translateError(e, "projects"), "error");
@@ -90,7 +106,15 @@ function Composer({
   };
 
   return (
-    <div className="pm-composer">
+    <div className={"pm-composer" + (drop.over ? " pm-drop-over" : "")}
+      {...(canAttach ? drop.dropProps : {})}
+      onPasteCapture={(e) => {
+        if (!canAttach) return;
+        const picked = pastedFiles(e);
+        if (!picked.length) return;
+        e.preventDefault(); e.stopPropagation(); stage(picked);
+      }}>
+      {canAttach && picker.input}
       <RichTextEditor
         ref={editor}
         ariaLabel="Write a comment"
@@ -99,13 +123,17 @@ function Composer({
         onChange={({ isEmpty }) => setEmpty(isEmpty)}
         onSubmit={() => void submit()}
       />
+      <StagedFiles files={files} onRemove={(i) => setFiles((cur) => cur.filter((_, j) => j !== i))} />
+      {uploads && <UploadRows rows={uploads.queue.filter((r) => r.commentId)} onDismiss={uploads.dismiss} />}
       <div className="pm-row" style={{ justifyContent: "space-between", marginTop: 8 }}>
         <SafetyChip tier="write" />
+        <span className="pm-row" style={{ gap: 6 }}>
+        {canAttach && <button type="button" className="pm-iconbtn" aria-label="Attach files" onClick={picker.open}><PmIcon name="attach" size={16} /></button>}
         <button
           className="pm-btn primary sm"
           type="button"
           onClick={() => void submit()}
-          disabled={busy || empty}
+          disabled={busy || (empty && files.length === 0)}
         >
           <PmIcon name="send" size={13} />
           {busy ? "Sending…" : "Send"}
@@ -113,6 +141,7 @@ function Composer({
             ⌘↵
           </span>
         </button>
+        </span>
       </div>
     </div>
   );
@@ -123,7 +152,13 @@ export function ActivitySection({
   viewerId,
   role,
   onChanged,
+  attachments = [],
+  uploads,
+  canAttach = false,
 }: {
+  attachments?: PmAttachment[];
+  uploads?: ReturnType<typeof useAttachmentUploads>;
+  canAttach?: boolean;
   itemId: string;
   viewerId: string | undefined;
   role: string | undefined;
@@ -194,6 +229,7 @@ export function ActivitySection({
               {entry.type === "comment" ? (
                 <CommentCard
                   comment={entry.comment}
+                  attachments={attachments.filter((file) => file.commentId === entry.comment.id)}
                   viewerId={viewerId}
                   role={role}
                   mentionCandidates={mentionCandidates}
@@ -213,7 +249,7 @@ export function ActivitySection({
         </p>
       )}
 
-      <Composer itemId={itemId} mentionCandidates={mentionCandidates} onSent={refresh} />
+      <Composer itemId={itemId} mentionCandidates={mentionCandidates} uploads={uploads} canAttach={canAttach} onSent={refresh} />
     </div>
   );
 }

@@ -43,10 +43,10 @@ export function makeAttachmentFake() {
     // c-1 is alice's, c-bob bob's (both on wi-1), c-ai has no author (the assistant's);
     // c-2 is bob's on ANOTHER item.
     comments: [
-      { id: "c-1", workItemId: "wi-1", authorId: "u-alice" },
-      { id: "c-bob", workItemId: "wi-1", authorId: "u-bob" },
-      { id: "c-ai", workItemId: "wi-1", authorId: null },
-      { id: "c-2", workItemId: "wi-2", authorId: "u-bob" },
+      { isDeleted: false, id: "c-1", workItemId: "wi-1", authorId: "u-alice" },
+      { isDeleted: false, id: "c-bob", workItemId: "wi-1", authorId: "u-bob" },
+      { isDeleted: false, id: "c-ai", workItemId: "wi-1", authorId: null },
+      { isDeleted: false, id: "c-2", workItemId: "wi-2", authorId: "u-bob" },
     ] as Row[],
     attachments: [] as Row[],
     activity: [] as Row[],
@@ -87,6 +87,11 @@ export function makeAttachmentFake() {
       findUnique: async ({ where }: { where: Row }) => db.projects.find((p) => p.id === where.id) ?? null,
     },
     pmComment: {
+      updateMany: async ({ where, data }: { where: Row; data: Row }) => {
+        const rows = db.comments.filter((c) => matches(c, where));
+        for (const row of rows) Object.assign(row, data);
+        return { count: rows.length };
+      },
       findFirst: async ({ where }: { where: Row }) => db.comments.find((c) => matches(c, where)) ?? null,
     },
     pmActivity: {

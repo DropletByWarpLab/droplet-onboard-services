@@ -1247,6 +1247,19 @@ describe.skipIf(!RUN)("PM collaboration — comments, mentions, reactions, watch
     // ── delete ───────────────────────────────────────────────────────────────
 
     describe("deleteComment", () => {
+      it("removes ready and in-flight comment attachments while preserving item attachments", async () => {
+        const c = await say(ann, item.id, para("with files"));
+        const data = (status: "READY" | "UPLOADING", commentId: string | null) => ({
+          workItemId: item.id, commentId, status, fileName: "note.txt", mimeType: "text/plain",
+          sizeBytes: BigInt(4), sha256: "a".repeat(64), storageKey: randomUUID(), uploadedById: ann.id,
+        });
+        await prisma.pmAttachment.create({ data: data("READY", c.id) });
+        await prisma.pmAttachment.create({ data: data("UPLOADING", c.id) });
+        const keep = await prisma.pmAttachment.create({ data: data("READY", null) });
+        await collab.deleteComment(prisma, actor(ann), c.id);
+        expect(await prisma.pmAttachment.count({ where: { commentId: c.id } })).toBe(0);
+        expect(await prisma.pmAttachment.findUnique({ where: { id: keep.id } })).not.toBeNull();
+      });
       // Defends: the tombstone shape (flag, timestamp, deleter, empty body) in
       // both the API and the row, with the author and the place in the thread
       // preserved so the conversation does not collapse.

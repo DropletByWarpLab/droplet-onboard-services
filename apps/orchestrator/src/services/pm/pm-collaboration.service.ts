@@ -35,6 +35,7 @@ import {
   retractCommentNotifications,
 } from "./pm-mentions.js";
 import { filterItemReaders } from "./pm-readers.js";
+import { queueAttachmentCleanup, finishQueuedAttachmentCleanup } from "./pm-attachment-cleanup.js";
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -157,6 +158,7 @@ export async function deleteComment(
   if (existing.isDeleted) return (await hydrateComments(prisma, [existing]))[0]!;
 
   let row;
+  let cleanupKeys: string[] = [];
   try {
     row = await prisma.$transaction(async (tx) => {
       const deleted = await tx.pmComment.updateMany({
@@ -166,6 +168,9 @@ export async function deleteComment(
       // count 0 = somebody else deleted it first: report their tombstone, and
       // do not write a second `comment_deleted`.
       if (deleted.count > 0) {
+        const files = await tx.pmAttachment.findMany({ where: { commentId }, select: { storageKey: true } });
+        cleanupKeys = await queueAttachmentCleanup(tx, files.map((file) => file.storageKey));
+        await tx.pmAttachment.deleteMany({ where: { commentId } });
         await tx.pmCommentReaction.deleteMany({ where: { commentId } });
         await tx.pmCommentMention.deleteMany({ where: { commentId } });
         await retractCommentNotifications(tx, existing.workItemId, commentId);
@@ -183,6 +188,7 @@ export async function deleteComment(
     if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.COMMENT_NOT_FOUND);
     throw err;
   }
+  await finishQueuedAttachmentCleanup(prisma, cleanupKeys);
   return (await hydrateComments(prisma, [row]))[0]!;
 }
 

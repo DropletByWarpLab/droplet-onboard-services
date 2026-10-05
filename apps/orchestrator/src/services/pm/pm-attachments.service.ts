@@ -194,7 +194,7 @@ export async function beginUpload(
     // "A comment of THIS item": a comment id from another item must not let a
     // file hang off the wrong thread.
     const comment = await prisma.pmComment.findFirst({
-      where: { id: input.commentId, workItemId: input.workItemId },
+      where: { id: input.commentId, workItemId: input.workItemId, isDeleted: false },
       select: { id: true, authorId: true },
     });
     if (!comment) throw new Error(PM_ATTACHMENT_ERRORS.COMMENT_NOT_FOUND);
@@ -307,6 +307,17 @@ export async function finalizeUpload(
     }
 
     const attachment = await prisma.$transaction(async (tx) => {
+      const pending = await tx.pmAttachment.findUnique({ where: { id: ticket.id }, select: { commentId: true } });
+      if (!pending) throw new Error(PM_ATTACHMENT_ERRORS.NOT_FOUND);
+      if (pending.commentId) {
+        // Serialize publication with comment deletion. The no-op update holds
+        // the comment row lock until the READY flip commits; deletion either
+        // removes that READY row or wins first and prevents publication.
+        const live = await tx.pmComment.updateMany({
+          where: { id: pending.commentId, isDeleted: false }, data: { isDeleted: false },
+        });
+        if (live.count !== 1) throw new Error(PM_ATTACHMENT_ERRORS.COMMENT_NOT_FOUND);
+      }
       const flipped = await tx.pmAttachment.updateMany({
         where: { id: ticket.id, status: "UPLOADING" },
         data: {
