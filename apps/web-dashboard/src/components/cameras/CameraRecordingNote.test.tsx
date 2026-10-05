@@ -90,7 +90,7 @@ describe("CameraRecordingNote — the drive and this camera's numbers", () => {
     const note = screen.getByRole("group");
     expect(note).toHaveTextContent(/about 36 GB a day/i);
     expect(note).toHaveTextContent("Recording space estimate unavailable");
-    expect(note).toHaveTextContent(/waiting for Frigate retention settings/i);
+    expect(note).toHaveTextContent(/waiting for recording retention settings/i);
     expect(note).not.toHaveTextContent(/75\.0 GiB|for 0 days|for 7 days/i);
   });
 

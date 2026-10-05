@@ -131,7 +131,7 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
     }
     if (mode === "auto_reserved" && recording?.retentionKnown === false) {
       setPending(null);
-      toast("Recording space estimate unavailable while waiting for Frigate retention settings.", "error");
+      toast("Recording space estimate unavailable while waiting for recording retention settings.", "error");
       return;
     }
     try {
@@ -163,7 +163,7 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
     }
     if (recording?.retentionKnown === false && recording.mode !== "full") {
       setPending(null);
-      toast("Recording space estimate unavailable while waiting for Frigate retention settings.", "error");
+      toast("Recording space estimate unavailable while waiting for recording retention settings.", "error");
       return;
     }
     try {
@@ -288,9 +288,9 @@ export function RecordingStorageCard({ style }: { style?: CSSProperties } = {}) 
             description={
               asked?.kind === "mode" && asked.mode === "auto_reserved"
                 ? recording.retentionKnown === false
-                  ? "Recording space estimate unavailable while waiting for Frigate retention settings. Droplet can auto-size the space when those settings are available."
+                  ? "Recording space estimate unavailable while waiting for recording retention settings. Droplet can auto-size the space when those settings are available."
                   : `Droplet will cap recordings at the space your cameras need — about ${formatBinaryBytes(recording.needBytes)} for their configured retention windows (up to ${Math.round(recording.retentionDays)} days), plus some headroom — and leave the rest of ${driveName} free. Recordings already using more than that are never deleted early.`
-                : `Recordings will be allowed to use all ${formatBinaryBytes(recording.drive?.sizeBytes ?? recording.reservedBytes)} of ${driveName}, not just the space your cameras need. The drive will no longer show up in Files — Droplet stops sharing it there. ${recording.retentionKnown === false ? "Recording space estimate unavailable while waiting for Frigate retention settings." : "Older recordings follow each camera's configured retention windows."}`
+                : `Recordings will be allowed to use all ${formatBinaryBytes(recording.drive?.sizeBytes ?? recording.reservedBytes)} of ${driveName}, not just the space your cameras need. The drive will no longer show up in Files — Droplet stops sharing it there. ${recording.retentionKnown === false ? "Recording space estimate unavailable while waiting for recording retention settings." : "Older recordings follow each camera's configured retention windows."}`
             }
             confirmLabel={
               asked?.kind === "mode" && asked.mode === "auto_reserved"
@@ -454,7 +454,7 @@ function Body({
             Add a drive in Settings › Storage and prepare it. Droplet encrypts it, then
             sets aside space for recordings on its own.
             {r.retentionKnown === false
-              ? " Recording space estimate unavailable while waiting for Frigate retention settings."
+              ? " Recording space estimate unavailable while waiting for recording retention settings."
               : r.needBytes > 0 &&
               ` Your cameras need about ${formatBinaryBytes(r.needBytes)} for their configured retention windows (up to ${Math.round(r.retentionDays)} days).`}
           </p>
@@ -604,7 +604,7 @@ function ModeSwitch({
       title: "Auto-sized",
       hint: retentionKnown
         ? "Droplet sets aside only what your cameras need."
-        : "Unavailable while waiting for Frigate retention settings.",
+        : "Unavailable while waiting for recording retention settings.",
     },
     {
       value: "full",
@@ -645,7 +645,7 @@ function ModeSwitch({
       )}
       {canManage && !locked && !retentionKnown && (
         <p className="rs-hint" data-testid="retention-settings-waiting">
-          Recording space estimate unavailable while waiting for Frigate retention settings. Whole-drive use remains available.
+          Recording space estimate unavailable while waiting for recording retention settings. Whole-drive use remains available.
         </p>
       )}
       {canManage && locked && (
@@ -706,7 +706,7 @@ function Facts({ r }: { r: RecordingStorage }) {
     <p className="rs-facts" data-testid="recording-facts">
       {r.retentionKnown === false ? (
         <span data-testid="recording-estimate-unavailable">
-          Recording space estimate unavailable while waiting for Frigate retention settings.
+          Recording space estimate unavailable while waiting for recording retention settings.
         </span>
       ) : (
         <span>
@@ -833,7 +833,7 @@ function DrivePicker({
       </div>
       {disabled && (
         <p className="rs-hint" data-testid="drive-move-waiting">
-          Waiting for Frigate retention settings before sizing a move to another drive.
+          Waiting for recording retention settings before sizing a move to another drive.
         </p>
       )}
     </div>

@@ -207,9 +207,9 @@ describe("RecordingStorageCard — no eligible drive", () => {
     expect(screen.getByText("No drive yet")).toBeInTheDocument();
   });
 
-  it("does not print a fallback retention estimate while Frigate retention is unavailable", () => {
+  it("does not print a fallback retention estimate while recording retention is unavailable", () => {
     setup(noDriveWithUnknownRetention());
-    expect(screen.getByText(/recording space estimate unavailable while waiting for frigate retention/i)).toBeInTheDocument();
+    expect(screen.getByText(/recording space estimate unavailable while waiting for recording retention/i)).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/7 days|0 days|need/i);
   });
 
@@ -394,7 +394,7 @@ describe("RecordingStorageCard — active, auto-sized", () => {
     setup(normalized!);
     const facts = screen.getByTestId("recording-facts");
     expect(facts).toHaveTextContent("Recording space estimate unavailable");
-    expect(facts).toHaveTextContent(/waiting for Frigate retention settings/i);
+    expect(facts).toHaveTextContent(/waiting for recording retention settings/i);
     expect(facts).toHaveTextContent(/3\.4 days stored so far/i);
     expect(facts).not.toHaveTextContent(/keeping 0 days|needs about/i);
     const table = screen.getByRole("table", { name: /recording needs by camera/i });

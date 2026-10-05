@@ -49,7 +49,7 @@ export function CameraRecordingNote({ camera }: { camera: string }) {
           <p className="rs-camera-note-d">
             About <b>{formatRate(row.gbPerDay)} GB</b> a day
             {recording.retentionKnown === false ? (
-              <> &middot; Recording space estimate unavailable while waiting for Frigate retention settings.</>
+              <> &middot; Recording space estimate unavailable while waiting for recording retention settings.</>
             ) : (
               <> &middot; needs about <b>{formatBinaryBytes(row.needBytes)}</b> for its retention window</>
             )}
@@ -57,7 +57,7 @@ export function CameraRecordingNote({ camera }: { camera: string }) {
         ) : (
           <p className="rs-camera-note-d">
             {recording.retentionKnown === false
-              ? "Recording space estimate unavailable while waiting for Frigate retention settings."
+              ? "Recording space estimate unavailable while waiting for recording retention settings."
               : "This camera hasn't been measured yet. Droplet sizes its space once it has recorded for a while."}
           </p>
         ))}

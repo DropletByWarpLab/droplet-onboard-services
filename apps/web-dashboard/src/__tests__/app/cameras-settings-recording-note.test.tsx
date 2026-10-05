@@ -171,7 +171,7 @@ describe("/cameras/[name]/settings — where this camera records", () => {
     const note = within(budgetCard()).getByRole("group", { name: /where this camera records/i });
     expect(note).toHaveTextContent("Recording drive: Bay 2");
     expect(note).toHaveTextContent(/about 36 GB a day/i);
-    expect(note).toHaveTextContent(/needs about 75\.0 GiB for 7 days/i);
+    expect(note).toHaveTextContent(/needs about 75\.0 GiB for its retention window/i);
   });
 
   it("links to the Recording storage card on the camera system page", () => {
