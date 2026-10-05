@@ -216,9 +216,9 @@ configure_edge_router() {
   case "$port" in
     ''|*[!0-9]*) log_error "--edge-router port must be a number (got '${port}')"; return 1 ;;
   esac
-  _upsert_env_kv OPENWRT_HOST "$host"
-  _upsert_env_kv OPENWRT_PORT "$port"
-  _upsert_env_kv OPENWRT_USERNAME droplet-ai
+  _upsert_env_kv OPENWRT_HOST "$host" || return 1
+  _upsert_env_kv OPENWRT_PORT "$port" || return 1
+  _upsert_env_kv OPENWRT_USERNAME droplet-ai || return 1
   log_info "Edge router: OPENWRT_HOST=$host OPENWRT_PORT=$port (password lives in docker/secrets/openwrt_password)"
 }
 

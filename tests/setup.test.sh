@@ -2443,6 +2443,28 @@ else
   fail "--edge-router accepted an empty/loopback/bad-port host or modified .env"
 fi
 
+# A write failure must escape the conditional call in setup.sh. Bash disables
+# errexit inside a function used with `||`, so each writer needs its own guard.
+for p13_failed_key in OPENWRT_HOST OPENWRT_PORT OPENWRT_USERNAME; do
+  if (
+    p13_calls=""
+    _upsert_env_kv() {
+      p13_calls="${p13_calls}${1} "
+      [ "$1" != "$p13_failed_key" ]
+    }
+    if configure_edge_router 192.168.9.1 >/dev/null 2>&1; then exit 1; fi
+    case "$p13_failed_key" in
+      OPENWRT_HOST) [ "$p13_calls" = 'OPENWRT_HOST ' ] ;;
+      OPENWRT_PORT) [ "$p13_calls" = 'OPENWRT_HOST OPENWRT_PORT ' ] ;;
+      OPENWRT_USERNAME) [ "$p13_calls" = 'OPENWRT_HOST OPENWRT_PORT OPENWRT_USERNAME ' ] ;;
+    esac
+  ); then
+    pass "--edge-router rejects a failed $p13_failed_key write and stops writing"
+  else
+    fail "--edge-router ignored a failed $p13_failed_key write or continued writing"
+  fi
+done
+
 # (4) a re-run WITHOUT the flag keeps the host: setup only writes when the flag
 # was passed, and the flag is written before both readers of OPENWRT_HOST.
 P13_SETUP="$REPO_ROOT_REAL/scripts/setup.sh"
