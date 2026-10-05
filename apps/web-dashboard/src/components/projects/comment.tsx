@@ -104,13 +104,11 @@ function ReactionPicker({
  *  with a toast, if the server refuses. */
 function ReactionBar({
   comment,
-  attachments = [],
   viewerId,
   canReact,
   onChanged,
 }: {
   comment: PmComment;
-  attachments?: PmAttachment[];
   viewerId: string | undefined;
   canReact: boolean;
   onChanged: () => void | Promise<void>;
