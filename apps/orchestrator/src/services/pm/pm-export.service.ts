@@ -70,7 +70,7 @@ export function htmlToText(html: string | null): string {
     .replace(/<\/(p|h[1-3]|blockquote|pre)>/gi, "\n\n")
     .replace(/<li[^>]*>/gi, "- ")
     .replace(/<\/li>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
+    .replace(/<[^>]*(?:>|$)/g, "")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
