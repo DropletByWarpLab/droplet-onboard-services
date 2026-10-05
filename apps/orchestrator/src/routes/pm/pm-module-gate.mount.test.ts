@@ -64,6 +64,7 @@ import { createPmImportExportRouter } from "./import-export.js";
 import { createPmPlanningRouter } from "./planning.js";
 import { createPmInsightsRouter } from "./insights.js";
 import { createPmTimeRouter } from "./time.js";
+import { createPmFieldsRouter } from "./fields.js";
 import { createPmWebhooksRouter } from "./webhooks.js";
 import { createPmScheduleRouter } from "./schedule.js";
 import { createPmDevelopmentRouter } from "./development.js";
@@ -204,6 +205,12 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     base: "/api",
     file: "routes/pm/time.ts",
     router: createPmTimeRouter(PRISMA),
+  },
+  {
+    factory: "createPmFieldsRouter",
+    base: "/api",
+    file: "routes/pm/fields.ts",
+    router: createPmFieldsRouter(PRISMA),
   },
   {
     factory: "createPmWebhooksRouter",

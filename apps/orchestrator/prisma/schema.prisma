@@ -5938,6 +5938,19 @@ enum PmPriority {
   none
 }
 
+/// WARP-3520 — what KIND of work an item is. An explicit enum column, never
+/// inferred from a label called "bug" (a label cannot be filtered, counted or
+/// defaulted by the engine, and one customer's "bug" is another's "defect").
+/// `task` is the default so every existing row keeps its meaning.
+enum PmWorkItemType {
+  task
+  bug
+  feature
+  improvement
+  question
+  incident
+}
+
 /// The work item (Plane "issue"). `sequenceId` + project.identifier forms the
 /// human key (INBOX-42). `sortOrder` is a float so a kanban drag can insert
 /// between two cards without renumbering the column. Sub-issues via the
@@ -5976,6 +5989,8 @@ model PmWorkItem {
   stateId         String?
   state           PmState?     @relation(fields: [stateId], references: [id], onDelete: SetNull)
   priority        PmPriority   @default(none)
+  /// WARP-3520 — see `PmWorkItemType`.
+  type            PmWorkItemType @default(task)
   parentId        String?
   parent          PmWorkItem?  @relation("PmSubIssues", fields: [parentId], references: [id], onDelete: SetNull)
   children        PmWorkItem[] @relation("PmSubIssues")
@@ -6329,7 +6344,8 @@ model PmModuleWorkItem {
 }
 
 /// Custom field definition on a project. `options` holds the choice list for
-/// select / multi_select types (array of {id,name,color}); null for scalars.
+/// select / multi_select types (array of {id,label,color}; WARP-3520 settled
+/// the key as `label`, matching the dashboard); null for every other type.
 enum PmPropertyType {
   text
   number
@@ -6356,8 +6372,12 @@ model PmCustomProperty {
   @@index([projectId, sortOrder])
 }
 
-/// A custom-field value on a work item. `value` is type-tagged JSON, e.g.
-/// {"text":"…"} | {"number":3} | {"optionIds":[…]} | {"userIds":[…]}.
+/// A custom-field value on a work item. `value` is type-tagged JSON, one shape
+/// per `PmPropertyType` (validated by pm-properties.service.ts, never trusted
+/// from the client): text → {"text":"…"}, number → {"number":3},
+/// date → {"date":"YYYY-MM-DD"}, boolean → {"boolean":true},
+/// select / multi_select → {"optionIds":[…]} (exactly one id for select),
+/// member → {"userIds":[…]} (exactly one id).
 model PmWorkItemPropertyValue {
   id         String           @id @default(uuid())
   workItemId String
@@ -6467,6 +6487,18 @@ enum PmActivityVerb {
   unassigned
   priority_changed
   due_date_changed
+  /// WARP-3520 — the other half of the date pair. `startDate` used to fall into
+  /// the generic `updated`/`fields` row; it now names itself, as `dueDate` does.
+  start_date_changed
+  /// WARP-3520 — an item's KIND (`PmWorkItemType`) changed.
+  type_changed
+  /// WARP-3520 — story-point estimate set, changed or cleared.
+  estimate_changed
+  /// WARP-3520 — a custom-field value (`PmWorkItemPropertyValue`) was set,
+  /// changed or cleared, or removed because its field/option was deleted.
+  /// `field` is the property NAME at the time, so the history stays readable
+  /// after a rename or delete.
+  property_changed
   title_changed
   description_changed
   label_added
