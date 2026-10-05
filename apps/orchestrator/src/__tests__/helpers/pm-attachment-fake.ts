@@ -17,18 +17,29 @@ export function matches(row: Row, where: Row): boolean {
   return Object.entries(where).every(([k, cond]) => {
     const v = row[k];
     if (cond !== null && typeof cond === "object" && !(cond instanceof Date)) {
-      const c = cond as { in?: unknown[]; lt?: unknown; gt?: unknown };
+      const c = cond as { in?: unknown[]; lt?: unknown; gt?: unknown; startsWith?: string };
+      if (c.startsWith !== undefined && (typeof v !== "string" || !v.startsWith(c.startsWith))) return false;
       if (c.in) return c.in.includes(v);
       if (c.lt !== undefined) return (v as Date | string) < (c.lt as Date | string);
       if (c.gt !== undefined) return (v as Date | string) > (c.gt as Date | string);
+      if (c.startsWith !== undefined) return true;
     }
     return v === cond;
   });
 }
 
 export function makeAttachmentFake() {
+  const item = (id: string, sequenceId: number): Row => ({
+    id, projectId: "p-1", sequenceId, name: `Item ${sequenceId}`,
+    descriptionHtml: null, stateId: null, state: null, priority: "none",
+    parentId: null, cycleId: null, department: null, assignees: [], labels: [],
+    startDate: null, dueDate: null, sortOrder: sequenceId, completedAt: null,
+    createdById: null, _count: { comments: 0, children: 0 },
+    createdAt: new Date("2026-10-04T10:00:00Z"), updatedAt: new Date("2026-10-04T10:00:00Z"),
+  });
   const db = {
-    items: [{ id: "wi-1" }, { id: "wi-2" }] as Row[],
+    items: [item("wi-1", 1), item("wi-2", 2)],
+    projects: [{ id: "p-1", identifier: "INBOX", department: null }] as Row[],
     // c-1 is alice's, c-bob bob's (both on wi-1), c-ai has no author (the assistant's);
     // c-2 is bob's on ANOTHER item.
     comments: [
@@ -39,16 +50,41 @@ export function makeAttachmentFake() {
     ] as Row[],
     attachments: [] as Row[],
     activity: [] as Row[],
+    flags: [] as Row[],
   };
-  const hooks: { createError?: unknown; updateManyError?: unknown } = {};
+  const hooks: { createError?: unknown; updateManyError?: unknown; itemReadError?: unknown } = {};
   /** How many times the service asked for a row — "refused before it cost a row". */
-  const stats = { creates: 0 };
+  const stats = { creates: 0, itemReads: 0, attachmentLists: 0 };
   let seq = 0;
 
   const prisma = {
     $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma),
+    systemFlag: {
+      createMany: async ({ data }: { data: Row[] }) => {
+        let count = 0;
+        for (const row of data) {
+          if (!db.flags.some((f) => f.key === row.key)) { db.flags.push(row); count += 1; }
+        }
+        return { count };
+      },
+      findUnique: async ({ where }: { where: Row }) => db.flags.find((f) => f.key === where.key) ?? null,
+      findMany: async ({ where, take }: { where: Row; take: number }) =>
+        db.flags.filter((f) => matches(f, where)).sort((a, b) => String(a.key).localeCompare(String(b.key))).slice(0, take),
+      deleteMany: async ({ where }: { where: Row }) => {
+        const before = db.flags.length;
+        db.flags = db.flags.filter((f) => !matches(f, where));
+        return { count: before - db.flags.length };
+      },
+    },
     pmWorkItem: {
-      findUnique: async ({ where }: { where: Row }) => db.items.find((i) => i.id === where.id) ?? null,
+      findUnique: async ({ where }: { where: Row }) => {
+        stats.itemReads += 1;
+        if (hooks.itemReadError) throw hooks.itemReadError;
+        return db.items.find((i) => i.id === where.id) ?? null;
+      },
+    },
+    pmProject: {
+      findUnique: async ({ where }: { where: Row }) => db.projects.find((p) => p.id === where.id) ?? null,
     },
     pmComment: {
       findFirst: async ({ where }: { where: Row }) => db.comments.find((c) => matches(c, where)) ?? null,
@@ -74,6 +110,7 @@ export function makeAttachmentFake() {
         return row;
       },
       findMany: async ({ where, orderBy, take }: { where: Row; orderBy?: Row | Row[]; take?: number }) => {
+        stats.attachmentLists += 1;
         let rows = db.attachments.filter((a) => matches(a, where));
         const order = Array.isArray(orderBy) ? orderBy : orderBy ? [orderBy] : [];
         for (const o of [...order].reverse()) {

@@ -95,7 +95,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "export_clip",
   description:
-    "Render a custom-range clip from a camera's recordings and save it to the user's Nextcloud at /Clips/<camera>/<timestamp>.mp4. Times are ISO-8601. Max 30 minutes per export.",
+    "Render a custom-range clip from a camera's recordings and save it to the user's File Store at /Clips/<camera>/<timestamp>.mp4. Times are ISO-8601. Max 30 minutes per export.",
   inputSchema,
   requiresWrite: true,
   requiresConfirmation: false,

@@ -16,7 +16,7 @@
  * at, because the row is always written first. The one exception is the
  * work-item / project hard delete, where the database cascade removes the rows
  * in the same transaction as the item — see `pm.service` and the note on
- * `removeAttachmentBlobs`.
+ * `pm-attachment-cleanup`'s durable intent.
  *
  * Every state flip is a conditional `updateMany` with the expected status in the
  * WHERE (the droplet-pr-review-patterns P1 shape), never find → check → update:
@@ -29,13 +29,14 @@ import type { Prisma, PrismaClient } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { config } from "../../config.js";
 import { createLogger } from "../../lib/logger.js";
-import { PM_ERRORS, isPrismaCode } from "./pm.service.js";
+import { PM_ERRORS, getWorkItem, isPrismaCode } from "./pm.service.js";
 import {
   evaluateAttachment,
   isPreviewableType,
   sanitizeAttachmentFileName,
 } from "./pm-attachment-content.js";
 import { isStorageKey, removeBlob, type StoredAttachmentFile } from "./pm-attachment-storage.js";
+import { sweepAttachmentCleanup } from "./pm-attachment-cleanup.js";
 
 const logger = createLogger("pm-attachments");
 
@@ -102,13 +103,30 @@ function mapAttachment(row: AttachmentRow): ApiAttachment {
 
 // ── reads ────────────────────────────────────────────────────────────────────
 
+/** Use the same project boundary as the item itself. Attachment-ID routes keep
+ *  their own missing-file vocabulary when the owning item is inaccessible. */
+async function requireAttachmentItem(
+  prisma: PrismaClient,
+  workItemId: string,
+  missingCode: string = PM_ATTACHMENT_ERRORS.WORK_ITEM_NOT_FOUND,
+): Promise<void> {
+  try {
+    await getWorkItem(prisma, workItemId);
+  } catch (err) {
+    if (err instanceof Error &&
+        (err.message === PM_ERRORS.WORK_ITEM_NOT_FOUND || err.message === PM_ERRORS.PROJECT_NOT_FOUND)) {
+      throw new Error(missingCode);
+    }
+    throw err;
+  }
+}
+
 /** READY attachments of a work item (item-level and comment-level), oldest first. */
 export async function listAttachments(
   prisma: PrismaClient,
   workItemId: string,
 ): Promise<ApiAttachment[]> {
-  const item = await prisma.pmWorkItem.findUnique({ where: { id: workItemId }, select: { id: true } });
-  if (!item) throw new Error(PM_ATTACHMENT_ERRORS.WORK_ITEM_NOT_FOUND);
+  await requireAttachmentItem(prisma, workItemId);
   const rows = await prisma.pmAttachment.findMany({
     where: { workItemId, status: "READY" },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
@@ -132,6 +150,7 @@ export async function getServableAttachment(
 ): Promise<ServableAttachment> {
   const row = await prisma.pmAttachment.findFirst({ where: { id, status: "READY" } });
   if (!row) throw new Error(PM_ATTACHMENT_ERRORS.NOT_FOUND);
+  await requireAttachmentItem(prisma, row.workItemId, PM_ATTACHMENT_ERRORS.NOT_FOUND);
   return {
     id: row.id,
     fileName: row.fileName,
@@ -169,11 +188,7 @@ export async function beginUpload(
     commentId?: string | null;
   },
 ): Promise<UploadTicket> {
-  const item = await prisma.pmWorkItem.findUnique({
-    where: { id: input.workItemId },
-    select: { id: true },
-  });
-  if (!item) throw new Error(PM_ATTACHMENT_ERRORS.WORK_ITEM_NOT_FOUND);
+  await requireAttachmentItem(prisma, input.workItemId);
   if (input.commentId) {
     // "A comment of THIS item": a comment id from another item must not let a
     // file hang off the wrong thread.
@@ -342,6 +357,7 @@ export async function deleteAttachment(
     select: { id: true, workItemId: true, fileName: true, storageKey: true, uploadedById: true },
   });
   if (!row) throw new Error(PM_ATTACHMENT_ERRORS.NOT_FOUND);
+  await requireAttachmentItem(prisma, row.workItemId, PM_ATTACHMENT_ERRORS.NOT_FOUND);
   const isUploader = actor.id !== null && row.uploadedById === actor.id;
   if (!actor.isAdmin && !isUploader) throw new Error(PM_ATTACHMENT_ERRORS.FORBIDDEN);
 
@@ -433,5 +449,6 @@ export async function sweepAttachments(
     after = rows[rows.length - 1].id;
     if (rows.length < SWEEP_BATCH) break;
   }
+  await sweepAttachmentCleanup(prisma, root);
   return { staleUploads: stale.count, reaped, failed };
 }

@@ -76,4 +76,28 @@ describe("list_camera_events", () => {
     if (r.ok) throw new Error(`expected a failed ToolResult, got ${JSON.stringify(r)}`);
     expect(r.error?.code).toBe("EVENTS_FAILED");
   });
+
+  // WARP-3691 - recent events with a clip/still show up inline in the chat.
+  it("adds media for events with a clip or snapshot and keeps the original events", async () => {
+    const events = [
+      { id: "a1", camera: "front", label: "person", hasClip: true, hasSnapshot: true, startTime: 5, endTime: 9 },
+      { id: "a2", camera: "garage", label: "car", hasClip: false, hasSnapshot: true },
+      { id: "a3", camera: "garage", label: "dog", hasClip: false, hasSnapshot: false },
+    ];
+    const get = vi.fn().mockResolvedValue(okEvents(events));
+    const r = await listCameraEvents.handler({}, ctxWith(get));
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const d = r.data as { events: unknown[]; media: Array<{ kind: string; snapshotUrl?: string }> };
+      expect(d.events).toEqual(events);
+      expect(d.media.map((m) => m.kind)).toEqual(["camera_clip", "camera_snapshot"]);
+      expect(d.media[1].snapshotUrl).toBe("/api/cameras/events/a2/snapshot");
+    }
+  });
+
+  it("omits media entirely when no event has a clip or snapshot", async () => {
+    const get = vi.fn().mockResolvedValue(okEvents([{ id: "z", camera: "x", hasClip: false, hasSnapshot: false }]));
+    const r = await listCameraEvents.handler({}, ctxWith(get));
+    expect(r.ok && "media" in (r.data as object)).toBe(false);
+  });
 });

@@ -105,7 +105,7 @@ describe("schema.prisma carries the same shape", () => {
     const att = model("PmAttachment");
     expect(att).toMatch(/commentId\s+String\?/);
     expect(att).toMatch(/comment\s+PmComment\?\s+@relation\(fields: \[commentId\], references: \[id\], onDelete: Cascade\)/);
-    expect(att).toMatch(/sha256\s+String\n/); // no default: the migration drops it
+    expect(att).toMatch(/sha256\s+String\r?\n/); // no default: the migration drops it
     expect(att).toMatch(/status\s+PmAttachmentStatus\s+@default\(UPLOADING\)/);
     expect(att).toMatch(/storageKey\s+String\s+@unique/);
     expect(att).toMatch(/@@index\(\[commentId\]\)/);

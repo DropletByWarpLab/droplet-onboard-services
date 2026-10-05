@@ -24,7 +24,7 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
 import { sanitizePmHtml } from "./sanitize-html.js";
-import { removeAttachmentBlobs } from "./pm-attachment-storage.js";
+import { finishQueuedAttachmentCleanup, queueAttachmentCleanup } from "./pm-attachment-cleanup.js";
 import {
   DEPARTMENT_SELECT,
   PM_DEPARTMENT_ERRORS,
@@ -91,7 +91,7 @@ export const DEFAULT_STATES: ReadonlyArray<{
 
 // ── Prisma include shapes + row types ────────────────────────────────────────
 
-const WORK_ITEM_INCLUDE = {
+export const WORK_ITEM_INCLUDE = {
   state: true,
   assignees: true,
   labels: { include: { label: true } },
@@ -274,7 +274,7 @@ function mapLabel(row: LabelRow): ApiLabel {
   return { id: row.id, projectId: row.projectId, name: row.name, color: row.color };
 }
 
-function mapWorkItem(
+export function mapWorkItem(
   row: WorkItemRow,
   identifier: string,
   // ADR-045 §5.3 — the OWNING PROJECT's department, so the override can be
@@ -789,6 +789,7 @@ export async function deleteProject(prisma: PrismaClient, projectId: string): Pr
   // the commit, never before: a delete that then fails must not have already
   // destroyed them. (Run non-serializable, this left an orphan blob.)
   let blobKeys: string[] = [];
+  let cleanupKeys: string[] = [];
   // findUnique + delete is two round-trips: a concurrent delete between them
   // makes this delete throw Prisma P2025. Map it to the same 404 the existence
   // check would have raised (review finding: delete-helper TOCTOU → P2025).
@@ -800,6 +801,7 @@ export async function deleteProject(prisma: PrismaClient, projectId: string): Pr
           select: { storageKey: true },
         })
       ).map((a) => a.storageKey);
+      cleanupKeys = await queueAttachmentCleanup(tx, blobKeys);
       await tx.pmProject.delete({ where: { id: projectId } });
     }, SERIALIZABLE_TX);
   } catch (err) {
@@ -809,7 +811,7 @@ export async function deleteProject(prisma: PrismaClient, projectId: string): Pr
     if (isPrismaCode(err, "P2034")) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
     throw err;
   }
-  await removeAttachmentBlobs(blobKeys);
+  await finishQueuedAttachmentCleanup(prisma, cleanupKeys);
 }
 
 // ── States ───────────────────────────────────────────────────────────────────
@@ -1605,6 +1607,7 @@ export async function deleteWorkItem(
   if (!existing) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
   // WARP-1505: filled inside the transaction, used after it commits.
   let blobKeys: string[] = [];
+  let cleanupKeys: string[] = [];
   try {
     await prisma.$transaction(async (tx) => {
       // WARP-1505: the cascade drops this item's PmAttachment rows (and its
@@ -1616,6 +1619,7 @@ export async function deleteWorkItem(
       blobKeys = (
         await tx.pmAttachment.findMany({ where: { workItemId: id }, select: { storageKey: true } })
       ).map((a) => a.storageKey);
+      cleanupKeys = await queueAttachmentCleanup(tx, blobKeys);
 
       // WARP-885: `parentId ON DELETE SET NULL` would otherwise silently
       // promote every sub-issue to a root item with zero audit trail the
@@ -1676,7 +1680,7 @@ export async function deleteWorkItem(
     throw err;
   }
   // Committed: the rows are gone, so the files are unreachable. Never throws.
-  await removeAttachmentBlobs(blobKeys);
+  await finishQueuedAttachmentCleanup(prisma, cleanupKeys);
 }
 
 // ── Comments ─────────────────────────────────────────────────────────────────

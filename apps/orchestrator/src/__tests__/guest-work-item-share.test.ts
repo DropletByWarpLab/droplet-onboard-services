@@ -41,6 +41,7 @@ import { GUEST_SHARES } from "../modules/guest-shares.js";
 import { fullCatalogFeatures, type FeatureLevel } from "../services/access-catalog.js";
 import { createPmNativeRouter } from "../routes/pm/native.js";
 import { createPmAttachmentsRouter } from "../routes/pm/attachments.js";
+import { createPmScheduleRouter } from "../routes/pm/schedule.js";
 import { isGuestShareGuard } from "../middleware/guest-share.js";
 import type { AuthUser } from "../middleware/auth.js";
 import type { EffectiveAccessResult } from "../services/effective-access.service.js";
@@ -112,11 +113,12 @@ function scanRoutes(...file: string[]): RouteRow[] {
 const mountedAt = (path: string): string => (path.startsWith("/api/") ? path : `/api${path}`);
 const concrete = (path: string): string => mountedAt(path).replace(/:[A-Za-z]+/g, "x");
 
-/** Every route of the PM routers: the native one, relations, attachments (WARP-1505), and the mobile wrapper. */
+/** Every route of the PM routers: native, relations, attachments, schedule, and mobile. */
 const PM_ROUTES: RouteRow[] = [
   ...scanRoutes("routes", "pm", "native.ts"),
   ...scanRoutes("routes", "pm", "relations.ts"),
   ...scanRoutes("routes", "pm", "attachments.ts"),
+  ...scanRoutes("routes", "pm", "schedule.ts"),
   ...scanRoutes("routes", "mobile", "pm.ts"),
 ];
 
@@ -150,6 +152,9 @@ function appAs(role: Role): Express {
   // floor answers a guest 404 for them; a file is never part of what assigning
   // a work item to a guest shares.
   app.use("/api", createPmAttachmentsRouter(prisma));
+  // Timeline and My Work are not guest shares either: the gates refuse them
+  // before a handler or database read runs.
+  app.use("/api", createPmScheduleRouter(prisma));
   // A handler that clears every gate and then meets a prisma double with no PM
   // models fails inside itself: anything but the gates' own 404 is "admitted".
   app.use((_err: unknown, _req: Request, res: Response, _next: NextFunction) => {

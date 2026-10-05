@@ -79,6 +79,44 @@ const file = (over: Partial<{ originalname: string; mimetype: string; size: numb
 
 // ── beginUpload ──────────────────────────────────────────────────────────────
 
+describe("the shared work-item boundary", () => {
+  it("list and upload refuse an item whose owning project the PM loader cannot resolve", async () => {
+    const f = makeFake();
+    f.db.projects = [];
+    await expect(listAttachments(f.prisma, "wi-1")).rejects.toThrow(E.WORK_ITEM_NOT_FOUND);
+    await expect(beginUpload(f.prisma, { actorId: "u-1", workItemId: "wi-1", commentId: "c-1" })).rejects.toThrow(E.WORK_ITEM_NOT_FOUND);
+    expect(f.stats.attachmentLists).toBe(0);
+    expect(f.stats.creates).toBe(0);
+    expect(f.db.activity).toEqual([]);
+  });
+
+  it.each(["missing-item", "missing-project"])("download and delete preserve attachment_not_found for %s", async (missing) => {
+    const f = makeFake();
+    const row = seedReady(f, { id: "a" });
+    writeBlob(row.storageKey as string);
+    if (missing === "missing-item") f.db.items = [];
+    else f.db.projects = [];
+    await expect(getServableAttachment(f.prisma, "a")).rejects.toThrow(E.NOT_FOUND);
+    await expect(deleteAttachment(f.prisma, { id: "u-1", isAdmin: true }, "a", root)).rejects.toThrow(E.NOT_FOUND);
+    expect(f.db.attachments[0].status).toBe("READY");
+    expect(blobExists(row.storageKey as string)).toBe(true);
+    expect(f.db.activity).toEqual([]);
+  });
+
+  it("does not disguise a failed parent lookup as a missing attachment or mutate its bytes", async () => {
+    const f = makeFake();
+    const row = seedReady(f, { id: "a" });
+    writeBlob(row.storageKey as string);
+    const unavailable = new Error("database unavailable");
+    f.hooks.itemReadError = unavailable;
+    await expect(getServableAttachment(f.prisma, "a")).rejects.toBe(unavailable);
+    await expect(deleteAttachment(f.prisma, { id: "u-1", isAdmin: true }, "a", root)).rejects.toBe(unavailable);
+    expect(f.db.attachments[0].status).toBe("READY");
+    expect(blobExists(row.storageKey as string)).toBe(true);
+    expect(f.db.activity).toEqual([]);
+  });
+});
+
 describe("beginUpload", () => {
   it("records the intent BEFORE any byte exists: an UPLOADING row with placeholders", async () => {
     const f = makeFake();

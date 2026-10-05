@@ -1,0 +1,154 @@
+/* Timeline (Gantt) layout of a project — WARP-3523.
+ *
+ * Scoped under `.pm-scope`; every colour is an existing alias of a dashboard
+ * token (or a `color-mix()` of two), so light and dark come for free and no hex
+ * literal or new token is introduced (brief §2). A bar's accent is the state's
+ * own `color` from the API, handed in as `--bar-accent` — data, not a token.
+ *
+ * Layout: ONE scroll container. The header is sticky to the top and each row's
+ * label is sticky to the left, so rows and bars stay aligned with no scroll
+ * syncing. Rows are absolutely positioned at `index * --tl-row-h` (they are
+ * windowed in TimelineView.tsx), and everything on the time axis is positioned
+ * in px from the window's left edge, offset by the label column. */
+
+.pm-scope .pm-tl { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.pm-scope .pm-tl-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pm-scope .pm-tl-range { margin-left: 4px; font-size: 12.5px; color: var(--text-2); }
+.pm-scope .pm-tl-spacer { flex: 1 1 auto; }
+.pm-scope .pm-tl-note { margin: 0; font-size: 12.5px; color: var(--text-2); }
+
+.pm-scope .pm-tl-scroll {
+  /* `isolate`: the z-indexes below are this chart's own, not the page's. */
+  position: relative; isolation: isolate; overflow: auto; max-height: 72vh; background: var(--bg-canvas);
+  border: 1px solid var(--border); border-radius: 12px;
+}
+.pm-scope .pm-tl-inner { position: relative; }
+
+/* ── header ─────────────────────────────────────────────────────────────── */
+.pm-scope .pm-tl-header { position: sticky; top: 0; z-index: 4; background: var(--bg-canvas); border-bottom: 1px solid var(--border); }
+.pm-scope .pm-tl-corner {
+  position: sticky; left: 0; z-index: 5; box-sizing: border-box; display: flex; align-items: center; justify-content: space-between;
+  padding: 0 14px; background: var(--bg-tint); border-right: 1px solid var(--border);
+  font-size: 12px; font-weight: 600; color: var(--text-2);
+}
+.pm-scope .pm-tl-count { font-weight: 500; font-variant-numeric: tabular-nums; }
+.pm-scope .pm-tl-ticks { position: absolute; top: 0; height: var(--tl-header-h); }
+.pm-scope .pm-tl-tickrow { position: absolute; left: 0; right: 0; }
+.pm-scope .pm-tl-tick {
+  position: absolute; top: 0; bottom: 0; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  overflow: hidden; white-space: nowrap; border-left: 1px solid var(--border); font-size: 11.5px; color: var(--text-2);
+}
+.pm-scope .pm-tl-tick.top { align-items: flex-start; padding-left: 8px; font-weight: 600; color: var(--text); background: var(--bg-tint); }
+.pm-scope .pm-tl-tick.weekend { background: var(--bg-tint); }
+.pm-scope .pm-tl-tick.today { color: var(--text); font-weight: 700; background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.pm-scope .pm-tl-tick .sub { font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; font-weight: 500; }
+
+.pm-scope .pm-tl-milestones { position: absolute; left: 0; right: 0; border-top: 1px solid var(--border); }
+.pm-scope .pm-tl-ms { position: absolute; top: 4px; display: flex; align-items: center; gap: 6px; height: 18px; }
+.pm-scope .pm-tl-ms-diamond { flex: none; width: 10px; height: 10px; transform: rotate(45deg); background: var(--accent); border-radius: 2px; }
+.pm-scope .pm-tl-ms.done .pm-tl-ms-diamond { background: var(--text-4); }
+.pm-scope .pm-tl-ms-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 600; color: var(--text-2); }
+
+/* ── body: background layer, connectors, rows ───────────────────────────── */
+.pm-scope .pm-tl-body { position: absolute; left: 0; width: 100%; }
+.pm-scope .pm-tl-bg { position: absolute; top: 0; bottom: 0; z-index: 0; pointer-events: none; }
+.pm-scope .pm-tl-gridline { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--border); opacity: 0.55; }
+.pm-scope .pm-tl-weekend { position: absolute; top: 0; bottom: 0; background: var(--bg-tint); }
+.pm-scope .pm-tl-msline { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed var(--accent); opacity: 0.7; }
+.pm-scope .pm-tl-today { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--accent); }
+
+.pm-scope .pm-tl-links { position: absolute; top: 0; z-index: 1; overflow: visible; pointer-events: none; }
+.pm-scope .pm-tl-link { fill: none; stroke: var(--text-3); stroke-width: 1.5; }
+.pm-scope .pm-tl-link.conflict { stroke: var(--warn); stroke-dasharray: 4 3; }
+.pm-scope .pm-tl-arrow { fill: var(--text-3); }
+.pm-scope .pm-tl-arrow.conflict { fill: var(--warn); }
+
+.pm-scope .pm-tl-row { position: absolute; left: 0; width: 100%; border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
+.pm-scope .pm-tl-row.group { background: var(--bg-tint); }
+.pm-scope .pm-tl-label {
+  position: sticky; left: 0; z-index: 3; box-sizing: border-box; display: flex; align-items: center; gap: 8px; height: 100%;
+  padding: 0 12px; background: var(--bg-canvas); border-right: 1px solid var(--border); cursor: pointer;
+}
+.pm-scope .pm-tl-label .key { flex: none; font-size: 11px; color: var(--text-2); }
+.pm-scope .pm-tl-label .ttl { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; color: var(--text); }
+.pm-scope .pm-tl-label .ttl.done { text-decoration: line-through; text-decoration-thickness: 1px; opacity: 0.7; }
+
+.pm-scope .pm-tl-grouphead {
+  position: sticky; left: 0; z-index: 3; box-sizing: border-box; display: flex; align-items: center; gap: 8px; width: var(--tl-label-w); height: 100%;
+  padding: 0 12px; background: var(--bg-tint); border: none; border-right: 1px solid var(--border);
+  font: inherit; font-size: 12.5px; font-weight: 600; color: var(--text); text-align: left; cursor: pointer;
+}
+.pm-scope .pm-tl-grouphead:focus-visible { outline: none; box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--accent) 38%, transparent); }
+.pm-scope .pm-tl-grouphead .chev { flex: none; transition: transform 150ms var(--ease); }
+.pm-scope .pm-tl-grouphead .chev.collapsed { transform: rotate(-90deg); }
+.pm-scope .pm-tl-grouphead .sx { font-size: 12px; font-weight: 500; color: var(--text-2); font-variant-numeric: tabular-nums; }
+
+.pm-scope .pm-tl-empty {
+  position: sticky; z-index: 2; display: flex; flex-direction: column; gap: 2px; width: max-content; max-width: 460px;
+  padding: 22px 24px; font-size: 13px; color: var(--text-2);
+}
+.pm-scope .pm-tl-empty strong { color: var(--text); font-weight: 600; }
+
+/* ── bars ───────────────────────────────────────────────────────────────── */
+.pm-scope .pm-tl-bar,
+.pm-scope .pm-tl-point {
+  --bar-accent: var(--text-4);
+  position: absolute; top: 6px; z-index: 1; box-sizing: border-box; display: flex; align-items: center; height: 24px;
+  color: var(--text); font-size: 12px; user-select: none; touch-action: pan-y; cursor: pointer;
+}
+.pm-scope .pm-tl-bar.writable,
+.pm-scope .pm-tl-point.writable { cursor: grab; }
+.pm-scope .pm-tl-bar.is-dragging,
+.pm-scope .pm-tl-point.is-dragging { cursor: grabbing; z-index: 2; box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); }
+.pm-scope .pm-tl-bar:focus-visible,
+.pm-scope .pm-tl-point:focus-visible { outline: none; z-index: 2; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 38%, transparent); }
+
+.pm-scope .pm-tl-bar {
+  padding: 0 8px; border-radius: 6px;
+  background: color-mix(in srgb, var(--bar-accent) 22%, var(--bg-canvas));
+  border: 1px solid color-mix(in srgb, var(--bar-accent) 60%, var(--border));
+}
+.pm-scope .pm-tl-bar.clip-start { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left-style: dashed; }
+.pm-scope .pm-tl-bar.clip-end { border-top-right-radius: 0; border-bottom-right-radius: 0; border-right-style: dashed; }
+.pm-scope .pm-tl-bar-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+
+/* A one-date item: a diamond on its day, with a 24px target. */
+.pm-scope .pm-tl-point { width: 24px; margin-left: -5px; justify-content: center; border-radius: 6px; }
+.pm-scope .pm-tl-diamond {
+  width: 12px; height: 12px; transform: rotate(45deg); border-radius: 2px;
+  background: color-mix(in srgb, var(--bar-accent) 70%, var(--bg-canvas)); border: 1px solid var(--bar-accent);
+}
+.pm-scope .pm-tl-outlabel {
+  position: absolute; left: calc(100% + 4px); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; font-weight: 500; color: var(--text); pointer-events: none;
+}
+.pm-scope .pm-tl-bar .pm-tl-outlabel { left: calc(100% + 6px); }
+
+/* Overdue is orange (never red) and also named in the accessible label and
+ * marked with an icon in the row label — colour is never the only signal. */
+.pm-scope .pm-tl-bar.overdue { background: var(--warn-soft); border-color: var(--warn); }
+.pm-scope .pm-tl-point.overdue .pm-tl-diamond { background: var(--warn-soft); border-color: var(--warn); }
+.pm-scope .pm-tl-bar.done,
+.pm-scope .pm-tl-point.done { opacity: 0.62; }
+
+/* A resize grip is a 24px-wide target (WCAG 2.5.8) centred on the bar's edge,
+ * so it reaches 12px past the bar into empty track; the visible mark sits just
+ * inside the bar. Bars narrower than MIN_RESIZABLE_PX get no grips at all. */
+.pm-scope .pm-tl-grip { position: absolute; top: 0; bottom: 0; z-index: 2; width: 24px; cursor: ew-resize; touch-action: none; }
+.pm-scope .pm-tl-grip.start { left: -12px; }
+.pm-scope .pm-tl-grip.end { right: -12px; }
+.pm-scope .pm-tl-grip::after {
+  content: ""; position: absolute; top: 6px; bottom: 6px; width: 2px; border-radius: 2px; opacity: 0;
+  background: color-mix(in srgb, var(--bar-accent) 80%, var(--text));
+}
+.pm-scope .pm-tl-grip.start::after { left: 14px; }
+.pm-scope .pm-tl-grip.end::after { right: 14px; }
+.pm-scope .pm-tl-bar:hover .pm-tl-grip::after,
+.pm-scope .pm-tl-bar:focus-visible .pm-tl-grip::after { opacity: 1; }
+@media (pointer: coarse) {
+  .pm-scope .pm-tl-grip::after { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pm-scope .pm-tl-grouphead .chev { transition: none; }
+}

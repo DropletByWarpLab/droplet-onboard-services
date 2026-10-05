@@ -22,8 +22,10 @@ import request from "supertest";
 import type { NextFunction, Request, Response } from "express";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SERIALIZABLE_TX } from "../lib/prisma-tx.js";
 
 // The global unit setup mocks @prisma/client so the DB-less lane never needs
 // Postgres. This file must talk to a REAL one.
@@ -53,11 +55,19 @@ describe.skipIf(!RUN)("PmAttachment — the database's own guarantees and the fi
   let pm: typeof import("../services/pm/pm.service.js");
   let svc: typeof import("../services/pm/pm-attachments.service.js");
   let storage: typeof import("../services/pm/pm-attachment-storage.js");
+  let cleanup: typeof import("../services/pm/pm-attachment-cleanup.js");
   let routerFactory: typeof import("../routes/pm/attachments.js").createPmAttachmentsRouter;
 
   let projectA = "";
   let projectB = "";
   let seq = 0;
+  const ownedStorageKeys = new Set<string>();
+  async function clearOwnedIntents() {
+    await prisma.systemFlag.deleteMany({
+      where: { key: { in: [...ownedStorageKeys].map((key) => cleanup.ATTACHMENT_CLEANUP_PREFIX + key) } },
+    });
+    ownedStorageKeys.clear();
+  }
 
   beforeAll(async () => {
     const { PrismaClient: RealPrismaClient } = await vi.importActual<typeof import("@prisma/client")>("@prisma/client");
@@ -66,23 +76,26 @@ describe.skipIf(!RUN)("PmAttachment — the database's own guarantees and the fi
     pm = await import("../services/pm/pm.service.js");
     svc = await import("../services/pm/pm-attachments.service.js");
     storage = await import("../services/pm/pm-attachment-storage.js");
+    cleanup = await import("../services/pm/pm-attachment-cleanup.js");
     routerFactory = (await import("../routes/pm/attachments.js")).createPmAttachmentsRouter;
     // The service graph (pm.service pulls in config and the storage engine) is a
     // cold import on a loaded machine; the default 10 s hook budget is not for it.
   }, 60_000);
 
   afterAll(async () => {
+    await clearOwnedIntents();
     await prisma.pmProject.deleteMany({ where: { name: OURS } });
     await prisma.pmWorkspace.deleteMany({ where: { slug: OURS } });
     await prisma.$disconnect();
-    rmSync(ROOT, { recursive: true, force: true });
+    await rm(ROOT, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
   });
 
   beforeEach(async () => {
+    await clearOwnedIntents();
     // FK-ordered and scoped: projects cascade to items, comments, attachments.
     await prisma.pmProject.deleteMany({ where: { name: OURS } });
     await prisma.pmWorkspace.deleteMany({ where: { slug: OURS } });
-    rmSync(ROOT, { recursive: true, force: true });
+    await rm(ROOT, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
     mkdirSync(ROOT, { recursive: true });
 
     const ws = await prisma.pmWorkspace.create({ data: { slug: `warp1505-ws-${Date.now()}`, name: "warp1505-ws" } });
@@ -103,6 +116,7 @@ describe.skipIf(!RUN)("PmAttachment — the database's own guarantees and the fi
   ) {
     const status = over.status ?? "READY";
     const storageKey = randomUUID();
+    ownedStorageKeys.add(storageKey);
     mkdirSync(join(ROOT, storageKey.slice(0, 2)), { recursive: true });
     writeFileSync(storage.blobPath(ROOT, storageKey), "bytes");
     return prisma.pmAttachment.create({
@@ -305,6 +319,60 @@ describe.skipIf(!RUN)("PmAttachment — the database's own guarantees and the fi
       expect(blob(elsewhere.storageKey)).toBe(true);
       expect(await prisma.pmAttachment.count({ where: { workItem: { projectId: projectA } } })).toBe(0);
       expect(await prisma.pmAttachment.count({ where: { id: elsewhere.id } })).toBe(1);
+    });
+  });
+
+  describe("durable cleanup after a hard cascade", () => {
+    it("recovers a cascade committed before the process could unlink its blobs", async () => {
+      const it1 = await item();
+      const gone = await row(it1.id);
+      const keep = await row((await item(projectB)).id);
+      await prisma.$transaction(async (tx) => {
+        await cleanup.queueAttachmentCleanup(tx, [gone.storageKey]);
+        await tx.pmWorkItem.delete({ where: { id: it1.id } });
+      }, SERIALIZABLE_TX);
+      // The crash window: the commit exists; no after-commit drain ran.
+      expect(await prisma.pmAttachment.count({ where: { id: gone.id } })).toBe(0);
+      expect(blob(gone.storageKey)).toBe(true);
+      await svc.sweepAttachments(prisma, { root: ROOT });
+      expect(blob(gone.storageKey)).toBe(false);
+      expect(blob(keep.storageKey)).toBe(true);
+      expect(await prisma.systemFlag.count({ where: { key: cleanup.ATTACHMENT_CLEANUP_PREFIX + gone.storageKey } })).toBe(0);
+    });
+
+    it("rolls the cleanup marker back with an aborted SERIALIZABLE cascade", async () => {
+      const it1 = await item();
+      const keep = await row(it1.id);
+      await expect(prisma.$transaction(async (tx) => {
+        await cleanup.queueAttachmentCleanup(tx, [keep.storageKey]);
+        await tx.pmWorkItem.delete({ where: { id: it1.id } });
+        throw new Error("abort cascade");
+      }, SERIALIZABLE_TX)).rejects.toThrow("abort cascade");
+      expect(await prisma.pmAttachment.count({ where: { id: keep.id } })).toBe(1);
+      expect(await prisma.systemFlag.count({ where: { key: cleanup.ATTACHMENT_CLEANUP_PREFIX + keep.storageKey } })).toBe(0);
+      await svc.sweepAttachments(prisma, { root: ROOT });
+      expect(blob(keep.storageKey)).toBe(true);
+    });
+
+    it.each(["item", "project"] as const)("a committed %s delete retains a failed unlink for the existing sweep", async (target) => {
+      const it1 = await item();
+      const stuck = await row(it1.id);
+      const keep = await row((await item(projectB)).id);
+      const path = storage.blobPath(ROOT, stuck.storageKey);
+      rmSync(path);
+      mkdirSync(path); // unlink refuses a directory on every platform
+      if (target === "item") await pm.deleteWorkItem(prisma, "u-1", it1.id);
+      else await pm.deleteProject(prisma, projectA);
+      expect(await prisma.pmAttachment.count({ where: { id: stuck.id } })).toBe(0);
+      const markerKey = cleanup.ATTACHMENT_CLEANUP_PREFIX + stuck.storageKey;
+      expect(await prisma.systemFlag.findUnique({ where: { key: markerKey } })).toMatchObject({ valueJson: { storageKey: stuck.storageKey } });
+      expect(blob(stuck.storageKey)).toBe(true);
+      rmSync(path, { recursive: true });
+      writeFileSync(path, "repaired file");
+      await svc.sweepAttachments(prisma, { root: ROOT });
+      expect(await prisma.systemFlag.count({ where: { key: markerKey } })).toBe(0);
+      expect(blob(stuck.storageKey)).toBe(false);
+      expect(blob(keep.storageKey)).toBe(true);
     });
   });
 

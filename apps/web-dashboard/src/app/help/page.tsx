@@ -560,7 +560,7 @@ const SECTIONS: Section[] = [
       <>
         <p>
           The Files page is your view into the Droplet&rsquo;s
-          Nextcloud-powered storage. Upload, download, share — all the
+          File Store. Upload, download, share — all the
           obvious stuff. Shares are encrypted-in-transit and can be set
           to expire.
         </p>

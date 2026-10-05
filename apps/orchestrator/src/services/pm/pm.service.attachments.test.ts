@@ -17,9 +17,11 @@
  * __tests__/pm-attachment.pg.test.ts.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { randomUUID } from "node:crypto";
 
 const removeAttachmentBlobs = vi.fn();
-vi.mock("./pm-attachment-storage.js", () => ({
+vi.mock("./pm-attachment-storage.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./pm-attachment-storage.js")>(),
   removeAttachmentBlobs: (...args: unknown[]) => removeAttachmentBlobs(...args),
 }));
 
@@ -31,6 +33,23 @@ import {
 } from "../../__tests__/helpers/prisma-tx-harness.js";
 
 type Row = Record<string, unknown>;
+const K1 = "11111111-1111-4111-8111-111111111111";
+const K2 = "22222222-2222-4222-8222-222222222222";
+const K3 = "33333333-3333-4333-8333-333333333333";
+
+function cleanupFlags(order: string[]) {
+  const flags = new Map<string, Row>();
+  const systemFlag = {
+    createMany: async ({ data }: { data: Array<{ key: string; valueJson: Row }> }) => {
+      order.push("queue");
+      for (const row of data) flags.set(row.key, row);
+      return { count: data.length };
+    },
+    findUnique: async ({ where }: { where: { key: string } }) => flags.get(where.key) ?? null,
+    deleteMany: async ({ where }: { where: { key: string } }) => ({ count: Number(flags.delete(where.key)) }),
+  };
+  return { flags, systemFlag };
+}
 
 beforeEach(() => {
   removeAttachmentBlobs.mockReset();
@@ -40,7 +59,9 @@ beforeEach(() => {
 describe("deleteWorkItem unlinks the item's attachment files (WARP-1505)", () => {
   function setup(opts: { keys?: string[]; deleteError?: unknown; order?: string[] } = {}) {
     const order = opts.order ?? [];
+    const { flags, systemFlag } = cleanupFlags(order);
     const tx = {
+      systemFlag,
       pmWorkItem: {
         findMany: async () => [],
         delete: async () => {
@@ -60,22 +81,24 @@ describe("deleteWorkItem unlinks the item's attachment files (WARP-1505)", () =>
         },
       },
     };
-    const seam = createTransactionSeam({ client: () => tx });
+    const seam = createTransactionSeam({ client: () => tx, stores: { flags } });
     removeAttachmentBlobs.mockImplementation(async () => {
       order.push("unlink");
       return { removed: 0, failed: 0 };
     });
-    const prisma = { pmWorkItem: { findUnique: async () => ({ id: "wi-1" }) }, $transaction: seam.$transaction } as never;
-    return { prisma, seam, order };
+    const prisma = { systemFlag, pmWorkItem: { findUnique: async () => ({ id: "wi-1" }) }, $transaction: seam.$transaction } as never;
+    return { prisma, seam, order, flags };
   }
 
   it("reads the keys inside the SERIALIZABLE transaction and unlinks them after the delete", async () => {
-    const { prisma, seam, order } = setup({ keys: ["k1", "k2"] });
+    const { prisma, seam, order, flags } = setup({ keys: [K1, K2] });
     await deleteWorkItem(prisma, "actor-1", "wi-1");
 
-    expect(order).toEqual(["read-keys", "delete", "unlink"]);
-    expect(removeAttachmentBlobs).toHaveBeenCalledTimes(1);
-    expect(removeAttachmentBlobs).toHaveBeenCalledWith(["k1", "k2"]);
+    expect(order).toEqual(["read-keys", "queue", "delete", "unlink", "unlink"]);
+    expect(removeAttachmentBlobs).toHaveBeenCalledTimes(2);
+    expect(removeAttachmentBlobs).toHaveBeenNthCalledWith(1, [K1], expect.any(String));
+    expect(removeAttachmentBlobs).toHaveBeenNthCalledWith(2, [K2], expect.any(String));
+    expect(flags.size).toBe(0);
     // An upload committing between the key read and the delete must abort the
     // delete, not slip through the cascade with its blob forgotten.
     expectAllTransactionsAt(seam, SERIALIZABLE_TX);
@@ -83,28 +106,40 @@ describe("deleteWorkItem unlinks the item's attachment files (WARP-1505)", () =>
 
   it("does not unlink anything when the delete fails", async () => {
     const lost = Object.assign(new Error("gone"), { code: "P2025" });
-    const { prisma } = setup({ keys: ["k1"], deleteError: lost });
+    const { prisma, flags } = setup({ keys: [K1], deleteError: lost });
     await expect(deleteWorkItem(prisma, null, "wi-1")).rejects.toThrow("work_item_not_found");
     expect(removeAttachmentBlobs).not.toHaveBeenCalled();
+    expect(flags.size).toBe(0);
   });
 
   it("does not unlink anything when the SERIALIZABLE loser aborts", async () => {
-    const { prisma } = setup({ keys: ["k1"], deleteError: Object.assign(new Error("ssi"), { code: "P2034" }) });
+    const { prisma, flags } = setup({ keys: [K1], deleteError: Object.assign(new Error("ssi"), { code: "P2034" }) });
     await expect(deleteWorkItem(prisma, null, "wi-1")).rejects.toThrow("concurrent_mutation");
     expect(removeAttachmentBlobs).not.toHaveBeenCalled();
+    expect(flags.size).toBe(0);
   });
 
-  it("an item with no attachments unlinks an empty set (and so does nothing)", async () => {
-    const { prisma } = setup({ keys: [] });
+  it("an item with no attachments creates no cleanup intent and unlinks nothing", async () => {
+    const { prisma, flags } = setup({ keys: [] });
     await deleteWorkItem(prisma, null, "wi-1");
-    expect(removeAttachmentBlobs).toHaveBeenCalledWith([]);
+    expect(removeAttachmentBlobs).not.toHaveBeenCalled();
+    expect(flags.size).toBe(0);
+  });
+
+  it("a failed unlink keeps its intent without turning a committed delete into an error", async () => {
+    const { prisma, flags } = setup({ keys: [K1] });
+    removeAttachmentBlobs.mockResolvedValue({ removed: 0, failed: 1 });
+    await expect(deleteWorkItem(prisma, null, "wi-1")).resolves.toBeUndefined();
+    expect([...flags.values()]).toEqual([{ key: `pm-attachments:cleanup:${K1}`, valueJson: { storageKey: K1 } }]);
   });
 });
 
 describe("deleteProject unlinks every attachment file under the project (WARP-1505)", () => {
   function setup(opts: { keys?: string[]; deleteError?: unknown; order?: string[] } = {}) {
     const order = opts.order ?? [];
+    const { flags, systemFlag } = cleanupFlags(order);
     const tx = {
+      systemFlag,
       pmProject: {
         delete: async () => {
           order.push("delete");
@@ -122,40 +157,53 @@ describe("deleteProject unlinks every attachment file under the project (WARP-15
         },
       },
     };
-    const seam = createTransactionSeam({ client: () => tx });
-    const prisma = { pmProject: { findUnique: async () => ({ id: "p-1" }) }, $transaction: seam.$transaction } as never;
+    const seam = createTransactionSeam({ client: () => tx, stores: { flags } });
+    const prisma = { systemFlag, pmProject: { findUnique: async () => ({ id: "p-1" }) }, $transaction: seam.$transaction } as never;
     removeAttachmentBlobs.mockImplementation(async () => {
       order.push("unlink");
       return { removed: 0, failed: 0 };
     });
-    return { prisma, seam, order };
+    return { prisma, seam, order, flags };
   }
 
   it("reads the keys inside a SERIALIZABLE transaction and unlinks them after the delete", async () => {
-    const { prisma, seam, order } = setup({ keys: ["k1", "k2", "k3"] });
+    const { prisma, seam, order, flags } = setup({ keys: [K1, K2, K3] });
     await deleteProject(prisma, "p-1");
-    expect(order).toEqual(["read-keys", "delete", "unlink"]);
-    expect(removeAttachmentBlobs).toHaveBeenCalledWith(["k1", "k2", "k3"]);
+    expect(order).toEqual(["read-keys", "queue", "delete", "unlink", "unlink", "unlink"]);
+    expect(removeAttachmentBlobs).toHaveBeenCalledTimes(3);
+    for (const key of [K1, K2, K3]) expect(removeAttachmentBlobs).toHaveBeenCalledWith([key], expect.any(String));
+    expect(flags.size).toBe(0);
     // An upload committing between the key read and the delete must abort the
     // delete (review probe C: it used to be cascaded with its blob left on disk).
     expectAllTransactionsAt(seam, SERIALIZABLE_TX);
   });
 
   it("the SERIALIZABLE loser is concurrent_mutation, and nothing is unlinked", async () => {
-    const { prisma } = setup({ keys: ["k1"], deleteError: Object.assign(new Error("ssi"), { code: "P2034" }) });
+    const { prisma, flags } = setup({ keys: [K1], deleteError: Object.assign(new Error("ssi"), { code: "P2034" }) });
     await expect(deleteProject(prisma, "p-1")).rejects.toThrow("concurrent_mutation");
     expect(removeAttachmentBlobs).not.toHaveBeenCalled();
+    expect(flags.size).toBe(0);
   });
 
   it("does not unlink anything when the delete fails", async () => {
-    const { prisma } = setup({ keys: ["k1"], deleteError: new Error("boom") });
+    const { prisma, flags } = setup({ keys: [K1], deleteError: new Error("boom") });
     await expect(deleteProject(prisma, "p-1")).rejects.toThrow("boom");
     expect(removeAttachmentBlobs).not.toHaveBeenCalled();
+    expect(flags.size).toBe(0);
   });
 
   it("does not unlink anything when the project was already deleted by someone else", async () => {
-    const { prisma } = setup({ keys: ["k1"], deleteError: Object.assign(new Error("gone"), { code: "P2025" }) });
+    const { prisma, flags } = setup({ keys: [K1], deleteError: Object.assign(new Error("gone"), { code: "P2025" }) });
     await expect(deleteProject(prisma, "p-1")).rejects.toThrow("project_not_found");
     expect(removeAttachmentBlobs).not.toHaveBeenCalled();
+    expect(flags.size).toBe(0);
+  });
+
+  it("bounds work in the delete request and leaves excess cleanup intents for the sweep", async () => {
+    const keys = Array.from({ length: 201 }, () => randomUUID());
+    const { prisma, flags } = setup({ keys });
+    await deleteProject(prisma, "p-1");
+    expect(removeAttachmentBlobs).toHaveBeenCalledTimes(200);
+    expect([...flags.values()]).toEqual([{ key: `pm-attachments:cleanup:${keys[200]}`, valueJson: { storageKey: keys[200] } }]);
   });
 });

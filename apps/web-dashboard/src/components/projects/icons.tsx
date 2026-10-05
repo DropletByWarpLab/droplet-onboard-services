@@ -42,6 +42,7 @@ import {
   Briefcase,
   Handshake,
   Paperclip,
+  ChartGantt,
   type LucideIcon,
 } from "lucide-react";
 
@@ -90,6 +91,8 @@ export const ICONS: Record<string, LucideIcon> = {
   handshake: Handshake,
   // WARP-1505 — attach a file to a comment.
   attach: Paperclip,
+  // WARP-3523 — the Timeline view tab.
+  gantt: ChartGantt,
 };
 
 export function PmIcon({

@@ -16,12 +16,17 @@ import { createHash, randomUUID } from "node:crypto";
 import http from "node:http";
 import net from "node:net";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AuthUser } from "../../middleware/auth.js";
 import { createPmAttachmentsRouter, type PmAttachmentsRouterOptions } from "./attachments.js";
 import { blobPath } from "../../services/pm/pm-attachment-storage.js";
 import { makeAttachmentFake } from "../../__tests__/helpers/pm-attachment-fake.js";
+import { config } from "../../config.js";
+import { mountModuleGates } from "../../modules/module-mounts.js";
+import { createModuleGate } from "../../middleware/module-gate.js";
+import { fullCatalogFeatures } from "../../services/access-catalog.js";
 
 type Row = Record<string, unknown>;
 
@@ -49,8 +54,10 @@ beforeEach(() => {
   root = join(parent, "pm-attachments");
   mkdirSync(root);
 });
-afterEach(() => {
-  rmSync(parent, { recursive: true, force: true });
+afterEach(async () => {
+  // A response can end before the download stream closes its file handle.
+  // Yield for that close and retry transient Windows sharing failures.
+  await rm(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
 });
 
 function makeApp(
@@ -58,6 +65,7 @@ function makeApp(
   user: { id: string; role: string } | null,
   maxBytes = MAX,
   routerOpts: Partial<PmAttachmentsRouterOptions> = {},
+  moduleGate?: { enabled: boolean },
 ) {
   const app = express();
   app.use(express.json());
@@ -68,6 +76,13 @@ function makeApp(
     }
     next();
   });
+  if (moduleGate) {
+    const settings = { moduleSetting: { findMany: async () => [{ moduleId: "projects", enabled: moduleGate.enabled }] } };
+    const tier = (user?.role ?? "guest") as AuthUser["role"];
+    mountModuleGates(app, createModuleGate(settings as never, config, 0), async () => ({
+      tier, features: fullCatalogFeatures(tier),
+    } as never));
+  }
   app.use("/api", createPmAttachmentsRouter(fake.prisma, { root, maxBytes, ...routerOpts }));
   app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
     res.status(500).json({ error: "internal", message: err.message });
@@ -114,6 +129,55 @@ function seedReady(
 }
 
 // ── POST /api/pm/work-items/:id/attachments ──────────────────────────────────
+
+describe("the owning item's boundary", () => {
+  it.each([
+    ["a guest", { id: "u-guest", role: "guest" }, true],
+    ["an owner with Projects disabled", OWNER, false],
+  ] as const)("reveals no attachment existence and touches no rows or files for %s", async (_name, user, enabled) => {
+    const fake = makeAttachmentFake();
+    const attachment = seedReady(fake, PDF);
+    const app = makeApp(fake, user, MAX, {}, { enabled });
+    const known = String(attachment.id);
+    for (const id of [known, "missing-attachment"]) {
+      for (const method of ["get", "delete"] as const) {
+        const response = await request(app)[method](`/api/pm/attachments/${id}`);
+        expect(response.status).toBe(404);
+        expect(response.body).toEqual({ error: "module_disabled", module: "projects" });
+      }
+    }
+    for (const workItemId of ["wi-1", "missing-item"]) {
+      const listed = await request(app).get(`/api/pm/work-items/${workItemId}/attachments`);
+      const uploaded = await request(app).post(`/api/pm/work-items/${workItemId}/attachments`).attach("file", PNG, "p.png");
+      expect(listed.status).toBe(404);
+      expect(uploaded.status).toBe(404);
+      expect(listed.body).toEqual({ error: "module_disabled", module: "projects" });
+      expect(uploaded.body).toEqual(listed.body);
+    }
+    expect(fake.stats.itemReads).toBe(0);
+    expect(fake.stats.creates).toBe(0);
+    expect(fake.stats.attachmentLists).toBe(0);
+    expect(fake.db.attachments[0].status).toBe("READY");
+    expect(readFileSync(blobPath(root, attachment.storageKey as string))).toEqual(PDF);
+    expect(fake.db.activity).toEqual([]);
+  });
+
+  it("never streams or deletes a READY file whose project the PM loader cannot resolve", async () => {
+    const fake = makeAttachmentFake();
+    const attachment = seedReady(fake, PDF);
+    fake.db.projects = [];
+    const app = makeApp(fake, OWNER);
+    const downloaded = await request(app).get(`/api/pm/attachments/${attachment.id}`);
+    expect(downloaded.status).toBe(404);
+    expect(downloaded.body).toEqual({ error: "attachment_not_found" });
+    const deleted = await request(app).delete(`/api/pm/attachments/${attachment.id}`);
+    expect(deleted.status).toBe(404);
+    expect(deleted.body).toEqual({ error: "attachment_not_found" });
+    expect(fake.db.attachments[0].status).toBe("READY");
+    expect(readFileSync(blobPath(root, attachment.storageKey as string))).toEqual(PDF);
+    expect(fake.db.activity).toEqual([]);
+  });
+});
 
 describe("POST /api/pm/work-items/:id/attachments", () => {
   it.each([OWNER, ADMIN, ALICE])("accepts a file from $role — stored under its opaque key, row READY, activity written", async (user) => {

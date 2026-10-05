@@ -1,3 +1,4 @@
+import { cameraSnapshotMedia } from "@droplet/shared-types";
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 
 const inputSchema = {
@@ -23,7 +24,9 @@ async function handler(args: Record<string, unknown>, _ctx: ToolContext): Promis
     data: {
       camera,
       snapshot_url: `/api/cameras/${encodeURIComponent(camera)}/snapshot`,
-      note: "Snapshot URL is accessible through the Droplet dashboard.",
+      note: "The dashboard shows this snapshot to the user inline in the chat.",
+      // WARP-3691: the chat renders this as a picture (with refresh + go-live).
+      media: cameraSnapshotMedia(camera),
     },
   };
 }

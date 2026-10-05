@@ -140,6 +140,10 @@ services:
         condition: service_started
       web-dashboard:
         condition: service_started
+    # WARP-3656: nothing in this container execs a setuid/setcap helper, so a
+    # compromised process gains nothing from blocking privilege escalation on exec.
+    security_opt:
+      - no-new-privileges:true
     restart: always
     <<: *default-logging
     mem_limit: ${GATEWAY_MEM_LIMIT:-128m}
@@ -181,6 +185,10 @@ services:
       timeout: 5s
       start_period: 30s
       retries: 3
+    # WARP-3656: nothing in this container execs a setuid/setcap helper, so a
+    # compromised process gains nothing from blocking privilege escalation on exec.
+    security_opt:
+      - no-new-privileges:true
     restart: always
     <<: *default-logging
     mem_limit: ${WEB_DASHBOARD_MEM_LIMIT:-384m}
@@ -584,8 +592,10 @@ services:
       #
       # A Docker socket is ROOT-EQUIVALENT on the host. It is granted here on a
       # deliberate, fenced basis:
-      #   * this is the ONLY service in the whole compose file that mounts it —
-      #     no sidecar, no gateway, no ai-gateway ever gets the socket;
+      #   * this is the only service in the default (customer) profile set that
+      #     mounts it — no sidecar, no gateway, no ai-gateway gets the socket.
+      #     The operator-only ops-console service (compose profile "ops", off
+      #     by default) also mounts it, read-write, further down this file;
       #   * exactly ONE module talks to the socket: host-exec.ts, and only to
       #     create/start/wait/log/remove the one-shot below. Every daemon op
       #     funnels through host-compose-runner.ts → the single audited host
@@ -646,20 +656,36 @@ services:
       context: ..
       dockerfile: services/device-identity-svc/Dockerfile
     container_name: droplet-device-identity-svc
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3588: NO env_file. This container holds the device identity key, so
+    # it must not carry the box's .env (JWT_SECRET, DEVICE_SECRET_KEY,
+    # POSTGRES_PASSWORD, every service token). It reads exactly the names below
+    # (services/device-identity-svc/{main.py,entrypoint.sh,backends/__init__.py},
+    # services/_shared/fips_selftest.py).
+    #
+    # HOW THE VALUES REACH A SERVICE WITHOUT env_file (read before copying this
+    # to another block): `${VAR:-}` and bare `- VAR` entries are resolved by
+    # COMPOSE, not by the container, from the --env-file it was given or, when
+    # none is given, from `docker/.env` (the compose project directory's
+    # .env). `docker/.env` is a different, untracked path from `../.env`; it is
+    # a SYMLINK to it that scripts/lib/compose.sh creates, and
+    # docker/ota/env-reconcile.sh re-creates on every OTA, because the OTA
+    # apply path runs `docker compose` without --env-file. Without the link a
+    # `${VAR:-}` renders EMPTY (WARP-1860 blanked a service token this way and
+    # 15 nightly runs returned 401; WARP-1908). Guards:
+    # scripts/test/pytest/test_compose_env_shadowing.py (link kept),
+    # scripts/test/ota-env-reconcile.test.sh (link restored on OTA) and
+    # scripts/check-compose-hardening.py (every converted service still
+    # receives its required secrets). Never write `KEY=${KEY:-}` for a key the
+    # same service also gets from env_file; there is no env_file here, so that
+    # shadowing cannot occur in the blocks converted by WARP-3588.
     environment:
       # WARP-317: this image ships the FIPS cnf + self-test helper but NOT
       # the validated fips.so module (only the five provider images +
-      # gateway carry it). The env_file above would leak a FIPS-on .env's
-      # DROPLET_FIPS_REQUIRED=true / OPENSSL_CONF=<fips cnf> straight into
-      # this container — boot self-test exit 1 (restart-loop) and, even
-      # with the gate off, a cnf-without-module libcrypto that fails at
-      # first crypto use. `environment:` beats env_file, so pin both to
-      # the literal OFF posture (identical to the pre-WARP-318 render).
-      DROPLET_FIPS_REQUIRED: "false"
-      OPENSSL_CONF: /etc/ssl/openssl.cnf
+      # gateway carry it). Pin both to the literal OFF posture (identical to
+      # the pre-WARP-318 render) so a FIPS-on box never boots a
+      # cnf-without-module libcrypto or a failing boot self-test here.
+      - DROPLET_FIPS_REQUIRED=false
+      - OPENSSL_CONF=/etc/ssl/openssl.cnf
       # Backend selection. The 'real' (tpm2-pytss) backend is an unfinished
       # scaffold (IDX-002) that device-identity-svc fails closed on unless
       # DROPLET_TPM_ALLOW_SCAFFOLD is set, so the default is 'mock' — a box
@@ -667,16 +693,23 @@ services:
       # scaffold. secrets.sh writes DROPLET_TPM_BACKEND=mock into .env; an
       # operator knowingly running the scaffold sets real + the opt-in by hand.
       # docker-compose.test.override.yml forces 'mock' for the test lane.
-      DROPLET_TPM_BACKEND: ${DROPLET_TPM_BACKEND:-mock}
-      DROPLET_DEVICE_ID: ${DROPLET_DEVICE_ID:-droplet}
+      - DROPLET_TPM_BACKEND=${DROPLET_TPM_BACKEND:-mock}
+      - DROPLET_DEVICE_ID=${DROPLET_DEVICE_ID:-droplet}
       # Auto-provision on first start: if /var/lib/droplet/tpm/ has no
       # provisioned.json, generate the EK / SRK / device-id key and
       # seal to the canonical PCR set. Idempotent — no-op on subsequent
       # starts.
-      DROPLET_AUTO_PROVISION: "1"
+      - DROPLET_AUTO_PROVISION=1
       # Sealing PCR set. Override per spec §Risk register when the
       # device's UEFI/cboot uses a different canonical set.
-      DROPLET_TPM_PCRS: "0,2,4,7"
+      - DROPLET_TPM_PCRS=0,2,4,7
+      # Bare names: value from .env, unset when absent. DROPLET_ENV arms the
+      # mock-backend warning on a shipping box; the rest are optional knobs.
+      - DROPLET_ENV
+      - DROPLET_TPM_ALLOW_SCAFFOLD
+      - DROPLET_DI_SOCKET
+      - DROPLET_DI_STORAGE
+      - LOG_LEVEL
     # /dev/tpm0 passthrough for the real backend. Docker silently
     # skips this entry on hosts where /dev/tpm0 doesn't exist (Mac,
     # CI), so the same compose file works everywhere. The test
@@ -722,6 +755,10 @@ services:
       # decrypts encrypted brain chunks in its search_content results
       # (see the orchestrator service's mount comment for the full story).
       - ../data/secrets/doc-kek.key:/data/secrets/doc-kek.key:ro
+    # WARP-3656: nothing in this container execs a setuid/setcap helper, so a
+    # compromised process gains nothing from blocking privilege escalation on exec.
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     <<: *default-logging
     env_file:
@@ -822,22 +859,44 @@ services:
     # auto-install runs with HOME=/root so libpq probes /root/.postgresql/
     # postgresql.crt -> EACCES. Chown config/ + set HOME=/var/www so the
     # client-cert probe is skipped. Validated live on .87.
+    # WARP-3693: the droplet-share volume root is root:root too, so the SMB
+    # network drive was read-only (smbd + www-data are uid 33). Chown it HERE,
+    # as root: hooks run as www-data via run_as(), so a hook's chown can't.
     entrypoint:
       - bash
       - -c
-      - 'export HOME=/var/www; chown 33:33 /var/www/html/config 2>/dev/null || true; exec /entrypoint.sh apache2-foreground'
+      - 'export HOME=/var/www; chown 33:33 /var/www/html/config 2>/dev/null || true; chown 33:33 /droplet-share 2>/dev/null || true; exec /entrypoint.sh apache2-foreground'
     depends_on:
       db:
         condition: service_healthy
       cache:
         condition: service_started
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3585: NO env_file. Nextcloud parses member uploads, serves public
+    # share pages and runs unpinned appstore apps, so it must not carry the
+    # box's .env (JWT_SECRET, DEVICE_SECRET_KEY, SERVICE_TOKEN_*, the other
+    # services' Redis passwords, ...). Every variable the image entrypoint,
+    # docker/nextcloud-init.sh and docker/nextcloud/* read is listed below,
+    # interpolated from .env by compose (--env-file); the allowlist is pinned
+    # by scripts/test-security.sh (Test 22). A new knob read by those files
+    # must be added here too.
     environment:
-      # Static Nextcloud config — passwords come from .env via env_file
+      # Image entrypoint auto-install (occ maintenance:install) — Postgres and
+      # the first admin. POSTGRES_* is the shared db role until a separate
+      # follow-up (a dedicated Nextcloud role) lands.
       - POSTGRES_HOST=db
       - POSTGRES_DB=nextcloud
+      - POSTGRES_USER=${POSTGRES_USER:-droplet}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
+      - NEXTCLOUD_ADMIN_USER=${NEXTCLOUD_ADMIN_USER:-admin}
+      - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD:-}
+      # nextcloud-init.sh document-engine connector (read only when the
+      # engine is wired; DOCS_ENGINE=onlyoffice needs the JWT secret).
+      - DOCS_ENABLED=${DOCS_ENABLED:-1}
+      - DOCS_ENGINE=${DOCS_ENGINE:-collabora}
+      - ONLYOFFICE_JWT_SECRET=${ONLYOFFICE_JWT_SECRET:-}
+      # Redis ACL user `nextcloud` secret — read by zz-redis-tls.config.php
+      # and zz-redis-session.ini.
+      - REDIS_HOST_PASSWORD=${REDIS_HOST_PASSWORD:-}
       # WARP-233: the db's pg_hba.conf is TLS-only (hostssl + reject plaintext),
       # so Nextcloud must speak TLS to Postgres or it can never reach
       # 'installed'. Nextcloud connects via PHP's PDO_pgsql/libpq, which honours
@@ -1039,6 +1098,10 @@ services:
       - NETBIOS_DISABLE=1
       - SAMBA_CONF_WORKGROUP=WORKGROUP
       - SAMBA_CONF_SERVER_STRING=Droplet
+      # Unknown logins must fail (LOGON_FAILURE), not map to guest (the image
+      # default is `Bad User`): Windows 11 24H2+ refuses unsigned guest
+      # sessions and then never prompts for the `droplet` login (WARP-3516).
+      - SAMBA_CONF_MAP_TO_GUEST=Never
       # Device-wide share credential, generated per-device by setup.sh
       # (scripts/lib/secrets.sh). Username is deliberately FIXED to `droplet`
       # — the dashboard dialog, the orchestrator endpoint, and this account
@@ -1076,7 +1139,7 @@ services:
   # ==========================================================================
   # The engine behind the Nextcloud connector app (WOPI-style handshake).
   # Mirrors the `nextcloud` block: default network, NO `ports:` (reached only
-  # via the gateway's `location /docs/` + sibling containers), env_file,
+  # via the gateway's `location /docs/` + sibling containers),
   # restart: always, shared logging.
   #
   # ENGINE-SELECTABLE (WARP-1686 / ADR-034): `DOCS_ENGINE` picks the engine;
@@ -1182,12 +1245,17 @@ services:
       - ../data/secrets/service-tls/db:/certs-src:ro
       - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
       - ./postgres/pg_hba.fips.conf:/etc/postgresql/pg_hba.fips.conf:ro
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3588: NO env_file. The postgres image reads only the POSTGRES_*
+    # initdb variables (first boot of an empty pgdata volume; ignored once the
+    # cluster exists), and the init script reads POSTGRES_USER. The healthcheck
+    # and every `docker exec db psql` use the local socket (pg_hba `trust`).
+    # The box's other secrets (JWT_SECRET, DEVICE_SECRET_KEY, service tokens,
+    # Redis passwords) are not needed here. Resolved by compose from .env
+    # through the docker/.env symlink (scripts/lib/compose.sh).
     environment:
       - POSTGRES_USER=droplet
       - POSTGRES_DB=droplet
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
     healthcheck:
       # `pg_isready` flips to "accepting connections" before Postgres
       # finishes internal recovery — clients that connect during that
@@ -1213,9 +1281,11 @@ services:
 
   cache:
     image: redis:7-alpine
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3588: NO env_file. redis-server and the stock entrypoint read no
+    # environment variable here; every setting is a command-line flag below,
+    # and the per-service passwords reach Redis only as sha256 hashes in
+    # users.acl (mounted file). Carrying the box's .env gave the data store
+    # every secret in it.
     # WARP-234: TLS-only (plaintext :6379 disabled via --port 0) with
     # per-service least-privilege ACLs (--aclfile, generated by
     # scripts/lib/secrets.sh into data/secrets/redis/users.acl — sha256
@@ -1549,9 +1619,15 @@ services:
     build:
       context: ..
       dockerfile: services/rag-eval/Dockerfile
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3588: NO env_file. The scheduled and ad-hoc evaluation runs execute
+    # a judge model and parse corpus text, so this container must not carry the
+    # box's .env (JWT_SECRET, DEVICE_SECRET_KEY, every other service token).
+    # It reads exactly the names listed here: services/rag-eval/{config,runner,
+    # corpus_fingerprint,server,main}.py, tests/retrieval-eval/ragas/
+    # ragas_runner.py, tests/extraction-eval/extraction_runner.py and
+    # services/_shared/internal_tls.py. DATABASE_URL stays (the extraction
+    # canary opens it); it is the shared database role until the per-service
+    # role work lands (WARP-3590, docs/security/postgres-per-service-roles.md).
     environment:
       - ORCHESTRATOR_URL=http://orchestrator:3000
       # SERVICE_TOKEN_RAG_EVAL is generated by scripts/lib/secrets.sh into
@@ -1560,29 +1636,9 @@ services:
       # call the orchestrator" — email-indexer precedent) and presents it
       # on /api/admin/retrieval-eval/search (WARP-449 role gate); the
       # orchestrator stores it as SERVICE_TOKEN_RAG_EVAL (TS convention
-      # SERVICE_TOKEN_<consumer>).
+      # SERVICE_TOKEN_<consumer>). The runner also falls back to the
+      # SERVICE_TOKEN_RAG_EVAL name itself (bare entry below).
       - ORCHESTRATOR_SERVICE_TOKEN=${SERVICE_TOKEN_RAG_EVAL:-}
-      # RAGAS_EVAL_USER — whose indexed corpus the eval measures. The runner
-      # passes it as ?user= on every search, because the service principal
-      # owns no files of its own. scripts/lib/secrets.sh writes it to .env
-      # (default eval-fixtures, backfilled on upgrade — WARP-2879: it was
-      # hand-set before and every re-image lost it). The corpus gate skips
-      # while that user has 0 chunks, so an unseeded box never scores an
-      # empty corpus; with the key blank the scheduler records one skipped
-      # slot naming it, and ad-hoc runs 400 eval_user_required.
-      #
-      # WARP-1908: deliberately NOT re-declared here — it arrives via the
-      # `env_file: ../.env` above. Re-declaring it as
-      # `RAGAS_EVAL_USER=${RAGAS_EVAL_USER:-}` resolved the substitution
-      # against docker/.env — a DIFFERENT file from that env_file — which
-      # does not carry the key. That yielded "", and because `environment:`
-      # outranks `env_file:`, the empty string shadowed the operator's real
-      # value. Every search then went out with no ?user= and 400'd on
-      # eval_user_required, so every run aborted at the third query. Exactly
-      # the WARP-1860 failure recorded in the orchestrator block above,
-      # arriving through the other variable. ORCHESTRATOR_SERVICE_TOKEN
-      # below keeps its ${...} because it genuinely renames the key — that
-      # is the only reason to use substitution in this block.
       # RAGAS_OLLAMA_URL points at the judge LLM's OpenAI-compat /v1
       # endpoint. The default suits mac/dev where Ollama runs ON the host
       # (host.docker.internal). It does NOT work on the single-box shape:
@@ -1606,17 +1662,49 @@ services:
       # (set on the orchestrator service). Keep in sync with the expose
       # below and EXPOSE in services/rag-eval/Dockerfile.
       - RAG_EVAL_HTTP_PORT=${RAG_EVAL_HTTP_PORT:-8090}
+      # Inbound bearer on the :8090 trigger server (WARP-3625). Shared with the
+      # orchestrator's RAG_EVAL_SERVICE_TOKEN. EMPTY fails CLOSED: every
+      # non-/health route answers 503.
+      - RAG_EVAL_SERVICE_TOKEN=${RAG_EVAL_SERVICE_TOKEN:-}
+      # WARP-3588: internal-TLS knob, explicit because there is no env_file.
+      - DROPLET_INTERNAL_TLS=${DROPLET_INTERNAL_TLS:-0}
+      # Bare names: value from .env, unset when absent (in-code defaults apply).
+      # SERVICE_TOKEN_RAG_EVAL and RAGAS_EVAL_USER MUST stay bare — written as
+      # `KEY=${KEY:-}` they would hand the runner an empty string (WARP-1860,
+      # WARP-1908).
+      - SERVICE_TOKEN_RAG_EVAL
+      - RAGAS_EVAL_USER
+      - DATABASE_URL
+      - LLM_MODEL
+      - FILING_CANARY_MODEL
+      - FILING_EVAL_FOLDER
+      - API_URL
+      - OPENAI_API_KEY
+      - RAGAS_CLOUD_JUDGE_MODEL
+      - RAGAS_SEARCH_TIMEOUT_SEC
+      - RAGAS_SEARCH_ABORT_AFTER
+      - RAGAS_JUDGE_ABORT_AFTER
+      - RAG_EVAL_KEEP_RUNS
+      - RAG_EVAL_RESULTS_DIR
+      - RAG_EVAL_HTTP_HOST
+      - RAG_EVAL_FINGERPRINT_TIMEOUT_SEC
+      - RAG_EVAL_CORPUS_GATE_DISABLED
+      - DROPLET_TLS_CERT
+      - DROPLET_TLS_KEY
+      - DROPLET_TLS_CA
+      - LOG_LEVEL
+      - TZ
     # WARP-519: internal-network only — no host publish. The orchestrator
-    # reaches this by service name (rag-eval:8090) and is the auth wall;
-    # the HTTP server itself has no auth.
+    # reaches this by service name (rag-eval:8090). WARP-3625: the HTTP server
+    # now requires the RAG_EVAL_SERVICE_TOKEN bearer on every route but /health.
     expose:
       - "8090"
     volumes:
       - rag-eval-data:/data/rag-eval
       # WARP-1061: this service's internal-CA bundle (CN = "rag-eval").
       # Server cert for the :8090 trigger server and client cert for the
-      # ragas runner's orchestrator search calls when DROPLET_INTERNAL_TLS=1
-      # (knob arrives via env_file); inert when 0.
+      # ragas runner's orchestrator search calls when DROPLET_INTERNAL_TLS=1;
+      # inert when 0.
       - ../data/secrets/service-tls/rag-eval:/data/service-tls:ro
     extra_hosts:
       # So RAGAS_OLLAMA_URL can resolve `host.docker.internal` on Linux
@@ -1627,6 +1715,10 @@ services:
       orchestrator:
         condition: service_started
     profiles: ["eval"]
+    # WARP-3656: nothing in this container execs a setuid/setcap helper, so a
+    # compromised process gains nothing from blocking privilege escalation on exec.
+    security_opt:
+      - no-new-privileges:true
     restart: always
     <<: *default-logging
     mem_limit: ${RAG_EVAL_MEM_LIMIT:-1g}
@@ -1881,6 +1973,10 @@ services:
       - db
       - broker
       - orchestrator
+    # WARP-3656: nothing in this container execs a setuid/setcap helper, so a
+    # compromised process gains nothing from blocking privilege escalation on exec.
+    security_opt:
+      - no-new-privileges:true
     restart: always
     <<: *default-logging
     # WARP-2970 — DEFAULT-ON, no `profiles:` key. WARP-2734 gated this on an
@@ -2145,13 +2241,15 @@ services:
       dockerfile: services/mcp-bridge/Dockerfile
     expose:
       - "9096"
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3588: NO env_file. This container talks to third-party MCP servers
+    # and holds a customer's vendor credential in memory, so it must not carry
+    # the box's .env (JWT_SECRET, DEVICE_SECRET_KEY, POSTGRES_PASSWORD, ...).
+    # services/mcp-bridge reads exactly MCP_BRIDGE_PORT and
+    # MCP_BRIDGE_SERVICE_TOKEN (src/server.ts); the base image sets NODE_ENV.
     environment:
       # Not one of the six FIPS provider-carrying images — pin the boot gate +
       # OpenSSL config to the literal OFF posture (see the device-identity-svc
-      # comment; `environment:` beats env_file).
+      # comment).
       - DROPLET_FIPS_REQUIRED=false
       - OPENSSL_CONF=/etc/ssl/openssl.cnf
       - MCP_BRIDGE_PORT=9096
@@ -2159,7 +2257,7 @@ services:
       # CLOSED at BOTH ends: this service 503s every non-/health route and the
       # orchestrator refuses without dialling. Rotate both sides in lockstep —
       # change .env, then `up -d --force-recreate orchestrator mcp-bridge`
-      # (`docker restart` does not re-read env_file).
+      # (`docker restart` does not re-read the environment).
       - MCP_BRIDGE_SERVICE_TOKEN=${MCP_BRIDGE_SERVICE_TOKEN:-}
     healthcheck:
       # /health is the one route served without a bearer, so the probe needs no
@@ -2172,6 +2270,14 @@ services:
       start_period: 15s
       retries: 3
     profiles: ["remote-mcp"]
+    # WARP-3656: nothing in this container execs a setuid/setcap helper, so a
+    # compromised process gains nothing from blocking privilege escalation on exec.
+    security_opt:
+      - no-new-privileges:true
+    # WARP-3656: Dockerfile already runs as the unprivileged `node` user on a
+    # high port with no volume; dropping the bounding set costs nothing.
+    cap_drop:
+      - ALL
     restart: unless-stopped
     <<: *default-logging
     mem_limit: ${MCP_BRIDGE_MEM_LIMIT:-256m}
@@ -2357,13 +2463,16 @@ services:
       dockerfile: services/erp-sql-bridge/Dockerfile
     expose:
       - "9095"
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3588: NO env_file. This container holds the practice's database
+    # credentials and runs statements against their system of record, so it
+    # must not also carry the box's .env (JWT_SECRET, DEVICE_SECRET_KEY,
+    # POSTGRES_PASSWORD, every other service token). It reads exactly the names
+    # listed here (services/erp-sql-bridge/{auth,db,main}.py,
+    # services/_shared/{fips_selftest,internal_tls}.py).
     environment:
       # Not one of the six FIPS provider-carrying images — pin the boot gate +
       # OpenSSL config to the literal OFF posture (see the device-identity-svc
-      # comment; `environment:` beats env_file).
+      # comment).
       - DROPLET_FIPS_REQUIRED=false
       - OPENSSL_CONF=/etc/ssl/openssl.cnf
       - ERP_DB_HOST=${ERP_DB_HOST:-}
@@ -2374,13 +2483,19 @@ services:
       - ERP_DB_RW_USER=${ERP_DB_RW_USER:-droplet_rw}
       - ERP_ODBC_DRIVER=${ERP_ODBC_DRIVER:-SQL Anywhere 17}
       - ERP_DB_ENCRYPTION=${ERP_DB_ENCRYPTION:-NONE}
-      # WARP-2590: the service bearer. NOT declared here as a `${VAR}`
-      # substitution on purpose — `env_file: ../.env` above already delivers
-      # SERVICE_TOKEN_ERP_BRIDGE, and re-declaring it would resolve against
-      # docker/.env (a different, untracked file) and, because `environment:`
-      # outranks `env_file:`, SHADOW the real value with "". That is exactly
-      # how SERVICE_TOKEN_RAG_EVAL got blanked and 401'd 15 nightly runs.
-      # The bridge fails CLOSED without it (503 BRIDGE_NOT_PROVISIONED).
+      # Bare names: value from .env, unset when absent. The write account is
+      # normally unset until a write capability is enabled; the bridge fails
+      # CLOSED without SERVICE_TOKEN_ERP_BRIDGE (503 BRIDGE_NOT_PROVISIONED).
+      - SERVICE_TOKEN_ERP_BRIDGE
+      - ERP_DB_RO_PASSWORD
+      - ERP_DB_RW_PASSWORD
+      - ERP_DB_POOL_MAX
+      - ERP_DB_TIMEOUT_S
+      - LOG_LEVEL
+      - DROPLET_INTERNAL_TLS
+      - DROPLET_TLS_CERT
+      - DROPLET_TLS_KEY
+      - DROPLET_TLS_CA
     healthcheck:
       # /health returns 200 with ok:false when the practice's DB is
       # unreachable — that is the honest answer, and it is deliberately NOT a
@@ -2392,6 +2507,10 @@ services:
       retries: 3
       start_period: 15s
     profiles: ["erp"]
+    # WARP-3656: nothing in this container execs a setuid/setcap helper, so a
+    # compromised process gains nothing from blocking privilege escalation on exec.
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     <<: *default-logging
     mem_limit: ${ERP_SQL_BRIDGE_MEM_LIMIT:-256m}
@@ -2430,6 +2549,9 @@ services:
       - CAMERA_DEFAULT_USERNAME
       - CAMERA_DEFAULT_PASSWORD
       - CAMERA_CREDENTIALS_JSON
+      # WARP-3597: camera IPs (comma-separated) allowed to be answered with RTSP
+      # Basic auth. Empty = Digest only.
+      - CAMERA_RTSP_BASIC_ALLOW_IPS
       - ONVIF_WS_DISCOVERY_ENABLED
       - DROPLET_INTERNAL_TLS
       - DROPLET_TLS_CERT
@@ -2579,9 +2701,12 @@ services:
     # match for /dev/snd's owner.
     group_add:
       - "29"
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3588: NO env_file. This container records the room and loads audio
+    # models, so it must not carry the box's .env (JWT_SECRET, DEVICE_SECRET_KEY,
+    # POSTGRES_PASSWORD, every other service token). It reads exactly the names
+    # listed here (services/voice-io/main.py and voice/*.py,
+    # services/_shared/internal_tls.py); the only secrets are its outbound
+    # ORCHESTRATOR_TOKEN and its inbound VOICE_IO_SERVICE_TOKEN (WARP-3625).
     environment:
       - VOICE_INPUT_DEVICE=${VOICE_INPUT_DEVICE:-}
       - VOICE_OUTPUT_DEVICE=${VOICE_OUTPUT_DEVICE:-}
@@ -2726,6 +2851,29 @@ services:
       - DROPLET_LOCATION=${DROPLET_LOCATION:-}
       - TZ=${TZ:-}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # WARP-3625: inbound bearer, shared with the orchestrator's voice proxy
+      # (VOICE_IO_SERVICE_TOKEN). EMPTY fails CLOSED: every non-/health route
+      # answers 503. Rotate both sides together: change .env, then
+      # `up -d --force-recreate orchestrator voice-io`.
+      - VOICE_IO_SERVICE_TOKEN=${VOICE_IO_SERVICE_TOKEN:-}
+      # Internal-TLS knob, explicit because there is no env_file.
+      - DROPLET_INTERNAL_TLS=${DROPLET_INTERNAL_TLS:-0}
+      # Remaining knobs the service reads. Bare names: value from .env, unset
+      # when absent (the in-code defaults apply).
+      - DROPLET_TLS_CERT
+      - DROPLET_TLS_KEY
+      - DROPLET_TLS_CA
+      - WAKE_DEBOUNCE_S
+      - WAKE_MODELS_DIR
+      - VOSK_MODEL_PATH
+      - POST_SPEAK_COOLDOWN_S
+      - PERSONA_PROMPT_TTL_S
+      - SPEAKER_MODEL_PATH
+      - VOICE_PROFILES_DIR
+      - VOICE_ENABLED_PATH
+      - VOICE_VOLUME_PATH
+      - GEO_URL
+      - GEO_TIMEOUT_S
     # Internal-only; orchestrator's /api/voice/* proxy is how the dashboard
     # reaches it. Port intentionally not published to the host.
     expose:
@@ -2846,7 +2994,9 @@ services:
       # FastAPI app inside this container and the host-side device-bridge
       # — verify the same value, wired below.
       - SERVICE_SECRET=${SERVICE_TOKEN_DISPLAY:-}
-      # Same token — the container talks to host-side device-bridge.
+      # Same token — the container talks to host-side device-bridge. The bridge
+      # accepts it for the panel's read and write routes only; destructive
+      # routes need a separate token this container is never given (WARP-3595).
       - BRIDGE_AUTH_TOKEN=${SERVICE_TOKEN_DISPLAY:-}
       - PORT=8082
       - DISPLAY_BACKEND=${DISPLAY_BACKEND:-auto}
@@ -2943,6 +3093,11 @@ services:
       # hex string to .env; if missing the container generates an
       # ephemeral one and logs only its sha256 fingerprint (NOT for production).
       - OPS_TOKEN=${OPS_TOKEN:-}
+      # WARP-3641: end of the support window, ISO-8601 (e.g.
+      # 2026-10-04T18:00:00Z). After it every /ops/* request is refused even
+      # with the right token. Empty = no expiry. An unparseable value closes
+      # the window. Whoever enables the `ops` profile for an engagement sets it.
+      - OPS_ACCESS_EXPIRES_AT=${OPS_ACCESS_EXPIRES_AT:-}
       # Per-service probe URLs. Defaults verified live on the single-box 2026-05-15.
       # Empty default = container exists but exposes no HTTP /health
       # endpoint; surfaces as `unknown` (relies on /ops/containers for
@@ -3732,14 +3887,16 @@ services:
     # pin the container hostname so the fallback is a stable, honest
     # name instead. Mirrors device-identity's DROPLET_DEVICE_ID default.
     hostname: ${DROPLET_HOSTNAME:-droplet}
-    env_file:
-      - path: ../.env
-        required: false
+    # WARP-3588: NO env_file. This is the one service with internet egress, so
+    # it must not carry the box's .env (JWT_SECRET, DEVICE_SECRET_KEY,
+    # POSTGRES_PASSWORD, service tokens, ...). It reads only what
+    # services/fleet-agent/config.py load_config() names, plus LOG_LEVEL
+    # (main.py), DROPLET_COSIGN_BIN (release_verify.py) and
+    # DROPLET_FIPS_REQUIRED (_shared/fips_selftest.py); all are listed below.
     environment:
       # WARP-317: no validated fips.so in this image — pin the FIPS boot
       # gate + OpenSSL config to the literal OFF posture so a FIPS-on .env
-      # inherited via env_file can't crash-loop it (see the
-      # device-identity-svc comment; `environment:` beats env_file).
+      # can't crash-loop it (see the device-identity-svc comment).
       - DROPLET_FIPS_REQUIRED=false
       - OPENSSL_CONF=/etc/ssl/openssl.cnf
       - DROPLET_TELEMETRY_ENABLED=${DROPLET_TELEMETRY_ENABLED:-0}
@@ -3759,11 +3916,29 @@ services:
       - DROPLET_UPDATE_POLL_SEC=${DROPLET_UPDATE_POLL_SEC:-300}
       - DROPLET_UPDATE_CHANNEL=${DROPLET_UPDATE_CHANNEL:-stable}
       - DROPLET_CUSTOMER=${DROPLET_CUSTOMER:-}
+      # Remaining config.py / main.py / release_verify.py knobs. Bare names:
+      # value from .env, unset when absent (so the in-code defaults apply).
+      - DROPLET_HARDWARE_REVISION
+      - DROPLET_TELEMETRY_STATE_DIR
+      - DROPLET_TELEMETRY_HEARTBEAT_SEC
+      - DROPLET_TELEMETRY_METRICS_SEC
+      - DROPLET_TELEMETRY_NETWORK_SEC
+      - DROPLET_TELEMETRY_COMMAND_POLL_SEC
+      - DROPLET_TELEMETRY_INVENTORY_SEC
+      - DROPLET_TELEMETRY_ERRORS_SEC
+      - DROPLET_TELEMETRY_SPOOL_MAX
+      - DROPLET_OTA_GITHUB_TOKEN
+      - DROPLET_COSIGN_BIN
+      - LOG_LEVEL
     volumes:
       # Ingest token + bounded heartbeat spool + verified update-candidate
       # record. Runtime-only, never tracked.
       - fleet-agent-state:/var/lib/droplet/fleet-agent
     profiles: ["telemetry"]
+    # WARP-3656: nothing in this container execs a setuid/setcap helper, so a
+    # compromised process gains nothing from blocking privilege escalation on exec.
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     <<: *default-logging
     mem_limit: ${FLEET_AGENT_MEM_LIMIT:-64m}

@@ -148,6 +148,12 @@ Phased, one PR per phase; the box stays bootable throughout and Plane is removed
   attachments (WARP-1505), which need a storage location and a size cap: `PM_ATTACHMENTS_DIR`
   (container path of the `pm-attachments` volume, default `/data/pm-attachments`) and
   `PM_ATTACHMENT_MAX_BYTES` (per-file cap, default 25 MiB).
+- Work-item/project cascades record `pm-attachments:cleanup:<storageKey>` in `SystemFlag` in
+  the same SERIALIZABLE transaction before deleting attachment rows. Each marker holds one
+  immutable blob UUID. After commit, a delete drains at most 200 markers; the existing attachment
+  sweep drains up to 2,000 per tick. A marker is removed only after confirmed unlink (or an already
+  absent blob), so crashes and filesystem failures remain retryable without reporting a committed
+  deletion as failed. Malformed or mismatched marker keys cannot select another blob.
 - MCP tool names are unchanged (`pm_list_projects`, `pm_create_work_item`, …) to preserve the contract.
 
 ### Tests to add

@@ -626,6 +626,21 @@ else
   else
     fail "first --check-key: rc=$rc state=$(cat "$KL/status/status.json" 2>/dev/null)"; sed 's/^/      /' "$KL/out"
   fi
+  # WARP-3610: the status says whether the repository shares a disk with the data.
+  grep -Eq '"repositoryLocation": "(same_disk|off_device|unknown)"' "$KL/status/status.json" \
+    && pass "status records repositoryLocation as an explicit enum" \
+    || fail "status.json has no valid repositoryLocation: $(cat "$KL/status/status.json" 2>/dev/null)"
+  loc() { bash -c "source '$LIB_SCRIPT' && droplet_backup_repository_location \"\$1\"" _ "$1"; }
+  [ "$(loc 'sftp:nas.example:/backups')" = "off_device" ] && pass "remote restic backend (sftp:) is off_device" \
+    || fail "sftp: target not reported off_device"
+  [ "$(loc 's3:https://s3.example/bucket')" = "off_device" ] && pass "remote restic backend (s3:) is off_device" \
+    || fail "s3: target not reported off_device"
+  [ "$(loc '')" = "unknown" ] && pass "no repository is unknown, not guessed" || fail "empty repository not unknown"
+  if command -v findmnt >/dev/null 2>&1; then
+    [ "$(DROPLET_BACKUP_DATA_PATH="$KL/src" loc "$KL/repo")" = "same_disk" ] \
+      && pass "a repository on the data's own filesystem is same_disk" \
+      || fail "repository beside the data not reported same_disk"
+  fi
   RESTIC_PASSWORD="$(derive "$K1")" restic -r "$KL/repo" backup -q "$KL/src" >/dev/null 2>&1
   [ "$(snap_count "$K1")" = "1" ] && pass "seeded one snapshot under K1" || fail "could not seed a snapshot"
 
