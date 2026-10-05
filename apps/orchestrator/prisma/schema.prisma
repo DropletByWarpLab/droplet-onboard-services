@@ -5900,6 +5900,10 @@ model PmWorkItem {
   /// pointer at a file that lives in /files and stays there.
   fileLinks EntityLink[]
 
+  /// WARP-3526 (ADR-069 WS-10) — time logged against this item, and the timers
+  /// currently running on it (at most one per person). Both cascade on delete.
+  worklogs PmWorklog[]
+  timers   PmTimer[]
   /// WARP-3528 (ADR-069 §1) — the desk-only columns of a ticket. Present
   /// exactly when the item lives in a SERVICE_DESK project (a trigger holds
   /// that); a project work item never has one.
@@ -6220,6 +6224,71 @@ model PmAttachment {
   @@index([workItemId])
 }
 
+/// WARP-3526 (ADR-069 WS-10) — one logged span of work on a work item.
+///
+/// `userId` is the person who SPENT the time (a `User.id` string, like every
+/// other PM attribution column), which is not always the person who typed the
+/// entry: an owner or admin may log or correct time for someone else, and the
+/// `time_logged` activity row records who actually did it.
+///
+/// `startedAt` is when the work began. A timesheet or report attributes the
+/// whole entry to the calendar day (in the reader's zone) that `startedAt` falls
+/// on — an entry is never split across midnight.
+///
+/// INVARIANT THE SCHEMA LANGUAGE CANNOT EXPRESS, in raw migration SQL and proven
+/// against a real Postgres in pm-time.pg.test.ts:
+///   * `PmWorklog_minutes_range` — CHECK ("minutes" BETWEEN 1 AND 1440). One
+///     entry is at least a minute and at most a day; longer work is several
+///     entries. The service and the route validate the same bounds, so this is
+///     the backstop for any writer that bypasses them.
+///
+/// Cascade, not SetNull: an entry with no work item has nothing to be reported
+/// against. `deleteWorkItem` runs SERIALIZABLE and needs no extra audit here —
+/// the item's own activity feed goes with it.
+model PmWorklog {
+  id         String     @id @default(uuid())
+  workItemId String
+  workItem   PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  userId     String
+  startedAt  DateTime
+  minutes    Int
+  /// Empty string means "no note" — not NULL, so there is exactly one way to
+  /// say it and clearing a note is an ordinary write.
+  note       String     @default("")
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @default(now()) @updatedAt
+
+  /// The drawer's entries, newest first.
+  @@index([workItemId, startedAt])
+  /// A person's week.
+  @@index([userId, startedAt])
+  /// A report over a window, any project, any person.
+  @@index([startedAt])
+}
+
+/// WARP-3526 — the one timer a person may have running.
+///
+/// The primary key IS the rule: `userId` is the whole key, so a second row for
+/// the same person is a unique violation no matter which writer attempts it.
+/// "Starting a second timer stops the first" is the service's job
+/// (pm-time.service.ts `startTimer`, serialised per person by an advisory lock);
+/// this table is what makes "one running timer per user" true even if it did
+/// not run. State is the presence of the row — there is no `status` to drift
+/// out of step with it. Stopping a timer deletes the row and writes a
+/// `PmWorklog` in the same transaction.
+///
+/// Cascade: a timer on a deleted work item (or on any item of a deleted
+/// project) disappears with it instead of pointing at nothing.
+model PmTimer {
+  userId     String     @id
+  workItemId String
+  workItem   PmWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  startedAt  DateTime   @default(now())
+
+  /// WARP-845 — the ON DELETE CASCADE scan index.
+  @@index([workItemId])
+}
+
 enum PmActivityVerb {
   created
   updated
@@ -6267,6 +6336,20 @@ enum PmActivityVerb {
   /// changes it made are their own rows (state_changed, updated/priority,
   /// assigned, label_added), written in the same transaction.
   macro_applied
+  /// WARP-3526 (ADR-069 WS-10): a worklog was written — by hand, or by stopping
+  /// a timer. `newValue` is the minutes. A timer START writes no row: a running
+  /// timer is one person's transient state, not a change to the item.
+  ///
+  /// The three time verbs share one `field` encoding: `worklog` when a person
+  /// acts on their own entry, `worklog:<userId>` when an owner or admin acts on
+  /// SOMEBODY ELSE'S (the entry's owner after the colon; `actorId` stays who did
+  /// it). That is what tells "Sam removed 90m" from "Sam removed Mia's 90m".
+  time_logged
+  /// WARP-3526: a worklog's minutes, start or note changed. `oldValue` /
+  /// `newValue` are the minutes before and after.
+  time_log_updated
+  /// WARP-3526: a worklog was deleted. `oldValue` is the minutes it held.
+  time_log_removed
 }
 
 /// WARP-2587 (ADR-045 slice I) — the notification claim on an activity row.

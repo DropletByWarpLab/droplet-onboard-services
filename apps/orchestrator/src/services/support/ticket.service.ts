@@ -225,6 +225,7 @@ export async function applyStateChange(
   actorId: string | null,
   now: Date,
   deps: SupportDeps = {},
+  opts: { nudge?: boolean } = {},
 ): Promise<void> {
   const toTerminal = isTerminalGroup(target.group);
   await lockTicketClock(tx, existing.id);
@@ -255,6 +256,7 @@ export async function applyStateChange(
     field: "state",
     oldValue: existing.stateId,
     newValue: target.id,
+    nudge: opts.nudge,
   });
   await syncTicketSla(tx, existing.id, now, "state", deps);
 }

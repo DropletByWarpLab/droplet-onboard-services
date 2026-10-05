@@ -110,6 +110,9 @@ const VERB_EVENT: Record<PmActivityVerb, WorkItemEvent> = {
   sla_at_risk: "work_item.updated",
   sla_breached: "work_item.updated",
   macro_applied: "work_item.updated",
+  time_logged: "work_item.updated",
+  time_log_updated: "work_item.updated",
+  time_log_removed: "work_item.updated",
 };
 
 export function eventForVerb(verb: PmActivityVerb): WorkItemEvent {

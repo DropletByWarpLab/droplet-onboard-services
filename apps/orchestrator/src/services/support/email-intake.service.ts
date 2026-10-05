@@ -6,6 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { writeActivity } from "../pm/pm.service.js";
+import { nudgeOutbox } from "../pm/pm-outbox.js";
 import { outboundEmailGate } from "../off-lan-gate.service.js";
 import { notifyOwnersAndAdmins } from "../notifications.service.js";
 import { classifyInbound, parseStoredHeaders, referenceCandidates, ticketTokens, cleanTicketSubject } from "./email-headers.js";
@@ -139,7 +140,7 @@ async function queueAutoAck(tx: Tx, channel: any, ticket: any, requester: any, m
   await tx.pmTicket.update({ where: { workItemId: ticket.id }, data: { lastPublicActivityAt: now } });
 }
 
-async function applyInbound(tx: Tx, message: any, channel: any, now: Date, deps: SupportDeps): Promise<boolean> {
+async function applyInbound(tx: Tx, message: any, channel: any, now: Date, deps: SupportDeps): Promise<{ notifyRateLimit: boolean; wroteActivity: boolean }> {
   const senderKey = `support-email:${message.accountId}:${message.fromAddr.trim().toLowerCase()}`;
   await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${senderKey}, 0))`);
   const ownChannels = await tx.pmSupportChannel.findMany({ select: { emailAccount: { select: { address: true } } } });
@@ -149,12 +150,12 @@ async function applyInbound(tx: Tx, message: any, channel: any, now: Date, deps:
   const verdict = classifyInbound({ fromAddr: message.fromAddr, headers, ownAddresses, isOwnOutbound: !!own });
   if (verdict.kind === "ignore") {
     await finish(tx, message.id, "IGNORED", verdict.reason, now);
-    return false;
+    return { notifyRateLimit: false, wroteActivity: false };
   }
 
   if (noReplyAddress(message.fromAddr)) {
     await finish(tx, message.id, "IGNORED", "BOUNCE", now);
-    return false;
+    return { notifyRateLimit: false, wroteActivity: false };
   }
   const since = new Date(message.receivedAt.getTime() - 3_600_000);
   const recent = await tx.emailMessage.count({
@@ -165,7 +166,7 @@ async function applyInbound(tx: Tx, message: any, channel: any, now: Date, deps:
       where: { accountId: message.accountId, fromAddr: { equals: message.fromAddr, mode: "insensitive" }, receivedAt: { gte: since, lte: message.receivedAt }, deskIntakeReason: "RATE_LIMITED" },
     });
     await finish(tx, message.id, "IGNORED", "RATE_LIMITED", now);
-    return alreadyNotified === 0;
+    return { notifyRateLimit: alreadyNotified === 0, wroteActivity: false };
   }
 
   let oldTicket = await matchedTicket(tx, {
@@ -184,6 +185,7 @@ async function applyInbound(tx: Tx, message: any, channel: any, now: Date, deps:
   const bodyHtml = inboundBodyHtml(message.bodyHtml, message.bodyText);
   let ticket = oldTicket;
   let followUp = false;
+  let wroteActivity = false;
   if (oldTicket) {
     if (oldTicket.state?.onCustomerReply === "FOLLOW_UP") followUp = true;
     if (oldTicket.state?.onCustomerReply === "REOPEN") {
@@ -192,7 +194,8 @@ async function applyInbound(tx: Tx, message: any, channel: any, now: Date, deps:
       else {
         const reopenState = await tx.pmState.findFirst({ where: { projectId: oldTicket.projectId, onCustomerReply: "REOPEN", group: "started" }, orderBy: [{ sortOrder: "asc" }, { id: "asc" }] });
         if (reopenState && reopenState.id !== oldTicket.stateId) {
-          await applyStateChange(tx, oldTicket, reopenState, null, message.receivedAt, deps);
+          await applyStateChange(tx, oldTicket, reopenState, null, message.receivedAt, deps, { nudge: false });
+          wroteActivity = true;
         }
       }
     }
@@ -224,13 +227,14 @@ async function applyInbound(tx: Tx, message: any, channel: any, now: Date, deps:
     // Retries must not grant more response time: the immutable inbound instant,
     // rather than the indexer's processing time, starts the promise.
     await syncTicketSla(tx, created.id, message.receivedAt, "create", deps);
-    await writeActivity(tx, { workItemId: created.id, actorId: null, verb: "created" });
+    await writeActivity(tx, { workItemId: created.id, actorId: null, verb: "created", nudge: false });
+    wroteActivity = true;
     ticket = await tx.pmWorkItem.findUniqueOrThrow({ where: { id: created.id }, include: { project: true, state: true, ticket: true } });
     if (oldTicket) {
       const [fromId, toId] = [oldTicket.id, ticket.id].sort();
       await tx.pmWorkItemRelation.create({ data: { fromId, toId, kind: "RELATES", createdById: null } });
-      await writeActivity(tx, { workItemId: oldTicket.id, actorId: null, verb: "relation_added", field: "relation", newValue: `RELATES:${ticket.id}` });
-      await writeActivity(tx, { workItemId: ticket.id, actorId: null, verb: "relation_added", field: "relation", newValue: `RELATES:${oldTicket.id}` });
+      await writeActivity(tx, { workItemId: oldTicket.id, actorId: null, verb: "relation_added", field: "relation", newValue: `RELATES:${ticket.id}`, nudge: false });
+      await writeActivity(tx, { workItemId: ticket.id, actorId: null, verb: "relation_added", field: "relation", newValue: `RELATES:${oldTicket.id}`, nudge: false });
     }
     if (bodyHtml) await tx.pmTicket.update({ where: { workItemId: ticket.id }, data: { lastPublicActivityAt: message.receivedAt } });
   } else if (bodyHtml) {
@@ -238,7 +242,8 @@ async function applyInbound(tx: Tx, message: any, channel: any, now: Date, deps:
     await tx.pmTicket.update({ where: { workItemId: ticket.id }, data: { lastPublicActivityAt: message.receivedAt } });
     await tx.pmWorkItem.update({ where: { id: ticket.id }, data: { updatedAt: message.receivedAt } });
     await syncTicketSla(tx, ticket.id, message.receivedAt, "requester", deps);
-    await writeActivity(tx, { workItemId: ticket.id, actorId: null, verb: "commented", field: "reply" });
+    await writeActivity(tx, { workItemId: ticket.id, actorId: null, verb: "commented", field: "reply", nudge: false });
+    wroteActivity = true;
     await tx.pmTicketEmailLink.create({ data: { workItemId: ticket.id, direction: "INBOUND", messageIdHeader: message.messageId, emailThreadId: message.threadId, emailMessageId: message.id, commentId: comment.id } });
   }
   if (!oldTicket || followUp || !bodyHtml) {
@@ -246,7 +251,7 @@ async function applyInbound(tx: Tx, message: any, channel: any, now: Date, deps:
   }
   await finish(tx, message.id, "DONE", null, now);
   if (!oldTicket || followUp) await queueAutoAck(tx, channel, ticket, requester, message, now, verdict.headersChecked);
-  return false;
+  return { notifyRateLimit: false, wroteActivity };
 }
 
 /** Process one committed message once. A channel bound later will only process
@@ -259,13 +264,13 @@ export async function intakeEmailMessage(prisma: PrismaClient, accountId: string
   let mayAutoAck = false;
   try { mayAutoAck = await outboundEmailGate(prisma); } catch { mayAutoAck = false; }
   try {
-    const notifyRateLimit = await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       if (message.deskIntakeStatus === "FAILED") {
         const reset = await tx.emailMessage.updateMany({
           where: { id: message.id, deskIntakeStatus: "FAILED", deskIntakeReason: "PROCESSING_ERROR" },
           data: { deskIntakeStatus: "PENDING", deskIntakeReason: null, deskIntakeAt: null },
         });
-        if (!reset.count) return false;
+        if (!reset.count) return { notifyRateLimit: false, wroteActivity: false };
       }
       // FAILED is used as a transaction-local claim marker. The row lock and
       // predicate recheck make a concurrent indexer retry a no-op; a rollback
@@ -274,10 +279,11 @@ export async function intakeEmailMessage(prisma: PrismaClient, accountId: string
         where: { id: message.id, deskIntakeStatus: "PENDING" },
         data: { deskIntakeAttempts: { increment: 1 }, deskIntakeStatus: "FAILED", deskIntakeReason: "PROCESSING_ERROR", deskIntakeAt: now },
       });
-      if (!claimed.count) return false;
+      if (!claimed.count) return { notifyRateLimit: false, wroteActivity: false };
       return applyInbound(tx, { ...message, headers: message.headers }, { ...channel, autoAckEnabled: channel.autoAckEnabled && mayAutoAck }, now, deps);
     });
-    if (notifyRateLimit) {
+    if (result.wroteActivity) nudgeOutbox();
+    if (result.notifyRateLimit) {
       await notifyOwnersAndAdmins(prisma, "Service desk email rate limited", "A sender exceeded the limit of 20 messages per hour. Further messages were ignored.");
     }
   } catch (error) {

@@ -59,6 +59,7 @@ import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createPmPlanningRouter } from "./routes/pm/planning.js";
+import { createPmTimeRouter } from "./routes/pm/time.js";
 import { createPmWebhooksRouter } from "./routes/pm/webhooks.js";
 import { createPmOpenApiRouter } from "./routes/pm/openapi.js";
 import { createSupportRouter } from "./routes/support/support.routes.js";
@@ -605,6 +606,12 @@ export function createApp(
   // Every path starts `/pm/`, so the `projects` module gate and the guest tier
   // floor already cover it.
   app.use("/api", createPmPlanningRouter(prisma));
+  // WARP-3526 (ADR-069 WS-10) — worklogs, the running timer, the weekly
+  // timesheet and the time report. Its own router, disjoint paths
+  // (`/pm/worklogs`, `/pm/timer`, `/pm/timesheet`, `/pm/time/...`, plus
+  // `/pm/work-items/:id/worklogs`), and the same `/api/pm` module gates as the
+  // routers above — no guest share, no MCP write principal; see its header.
+  app.use("/api", createPmTimeRouter(prisma));
   // WARP-3532 (ADR-069 §9) — work webhooks and chat-app notifications. Owner
   // and admin only. `/pm/webhooks` is a literal second segment and no PM router
   // above owns a `/pm/:param`, so neither shadows the other.
