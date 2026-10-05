@@ -2904,4 +2904,38 @@ describe.skipIf(!RUN)("PM collaboration — comments, mentions, reactions, watch
       expect(await changes(w.id)).toEqual(afterCreate);
     });
   });
+
+  describe("service-desk boundary", () => {
+    it("hides service-desk items and comments from collaboration APIs and relation refs", async () => {
+      const desk = await prisma.pmProject.create({
+        data: {
+          workspaceId,
+          name: `${PREFIX}desk`,
+          identifier: "W19D",
+          kind: "SERVICE_DESK",
+        },
+      });
+      const ticket = await rawItem({ name: "ticket", project: { id: desk.id, identifier: desk.identifier } });
+      const ticketComment = await prisma.pmComment.create({
+        data: { workItemId: ticket.id, authorId: ann.id, commentHtml: para("private ticket text") },
+      });
+
+      await rejectsWith(collab.getTimeline(prisma, ticket.id), "work_item_not_found");
+      await rejectsWith(collab.listWatchers(prisma, ticket.id), "work_item_not_found");
+      await rejectsWith(collab.addWatcher(prisma, actor(ann), ticket.id), "work_item_not_found");
+      await rejectsWith(collab.removeWatcher(prisma, actor(ann), ticket.id), "work_item_not_found");
+      await rejectsWith(collab.editComment(prisma, actor(ann), ticketComment.id, para("edited")), "comment_not_found");
+      await rejectsWith(collab.deleteComment(prisma, actor(ann), ticketComment.id), "comment_not_found");
+      await rejectsWith(collab.addReaction(prisma, actor(ann), ticketComment.id, THUMBS_UP), "comment_not_found");
+      await rejectsWith(collab.removeReaction(prisma, actor(ann), ticketComment.id, THUMBS_UP), "comment_not_found");
+
+      await seedActivity(item.id, 999, "relation_added", {
+        field: "relation",
+        newValue: `RELATES:${ticket.id}`,
+      });
+      const timeline = await collab.getTimeline(prisma, item.id, { limit: 500 });
+      expect(timeline.refs.workItems).not.toHaveProperty(ticket.id);
+      expect(JSON.stringify(timeline)).not.toContain(ticket.id);
+    });
+  });
 });

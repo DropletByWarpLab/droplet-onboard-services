@@ -89,6 +89,7 @@ export async function editComment(
     include: { mentions: { select: { userId: true } } },
   });
   if (!existing) throw new Error(PM_ERRORS.COMMENT_NOT_FOUND);
+  await requireProjectItem(prisma, existing.workItemId, PM_ERRORS.COMMENT_NOT_FOUND);
   if (actor.id === null || existing.authorId !== actor.id) {
     throw new Error(PM_COLLAB_ERRORS.COMMENT_FORBIDDEN);
   }
@@ -150,6 +151,7 @@ export async function deleteComment(
 ): Promise<ApiComment> {
   const existing = await prisma.pmComment.findUnique({ where: { id: commentId } });
   if (!existing) throw new Error(PM_ERRORS.COMMENT_NOT_FOUND);
+  await requireProjectItem(prisma, existing.workItemId, PM_ERRORS.COMMENT_NOT_FOUND);
   const isAuthor = actor.id !== null && existing.authorId === actor.id;
   if (!isAuthor && !isAdminRole(actor.role)) throw new Error(PM_COLLAB_ERRORS.COMMENT_FORBIDDEN);
   if (existing.isDeleted) return (await hydrateComments(prisma, [existing]))[0]!;
@@ -200,6 +202,7 @@ async function reactionTarget(
   if (actor.id === null) throw new Error(PM_COLLAB_ERRORS.COMMENT_FORBIDDEN);
   const comment = await prisma.pmComment.findUnique({ where: { id: commentId } });
   if (!comment) throw new Error(PM_ERRORS.COMMENT_NOT_FOUND);
+  await requireProjectItem(prisma, comment.workItemId, PM_ERRORS.COMMENT_NOT_FOUND);
   if (comment.isDeleted) throw new Error(PM_COLLAB_ERRORS.COMMENT_DELETED);
   return { emoji: canonical, userId: actor.id, comment };
 }
@@ -283,17 +286,21 @@ async function readWatchers(db: Db, workItemId: string): Promise<ApiWatcher[]> {
     .map((w) => ({ userId: w.userId, reason: w.reason, createdAt: w.createdAt.toISOString() }));
 }
 
-async function requireItem(db: Db, workItemId: string): Promise<{ id: string; projectId: string }> {
+async function requireProjectItem(
+  db: Db,
+  workItemId: string,
+  notFound: string = PM_ERRORS.WORK_ITEM_NOT_FOUND,
+): Promise<{ id: string; projectId: string }> {
   const item = await db.pmWorkItem.findUnique({
     where: { id: workItemId },
-    select: { id: true, projectId: true },
+    select: { id: true, projectId: true, project: { select: { kind: true } } },
   });
-  if (!item) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+  if (!item || item.project.kind !== "PROJECT") throw new Error(notFound);
   return item;
 }
 
 export async function listWatchers(prisma: PrismaClient, workItemId: string): Promise<ApiWatcher[]> {
-  await requireItem(prisma, workItemId);
+  await requireProjectItem(prisma, workItemId);
   return readWatchers(prisma, workItemId);
 }
 
@@ -320,7 +327,7 @@ export async function addWatcher(
   workItemId: string,
   targetUserId?: string,
 ): Promise<{ watchers: ApiWatcher[]; created: boolean }> {
-  const item = await requireItem(prisma, workItemId);
+  const item = await requireProjectItem(prisma, workItemId);
   if (actor.id === null) throw new Error(PM_COLLAB_ERRORS.WATCH_FORBIDDEN);
   const target = targetUserId ?? actor.id;
   if (target !== actor.id) {
@@ -360,7 +367,7 @@ export async function removeWatcher(
   workItemId: string,
   targetUserId?: string,
 ): Promise<{ watchers: ApiWatcher[] }> {
-  const item = await requireItem(prisma, workItemId);
+  const item = await requireProjectItem(prisma, workItemId);
   if (actor.id === null) throw new Error(PM_COLLAB_ERRORS.WATCH_FORBIDDEN);
   const target = targetUserId ?? actor.id;
   if (target !== actor.id) await assertCanManageOthers(prisma, actor, item);
@@ -503,7 +510,7 @@ export async function getTimeline(
   workItemId: string,
   opts: { limit?: number; cursor?: string | null } = {},
 ): Promise<ApiTimeline> {
-  await requireItem(prisma, workItemId);
+  await requireProjectItem(prisma, workItemId);
   const requested = Number.isFinite(opts.limit) ? Math.floor(opts.limit as number) : TIMELINE_DEFAULT_LIMIT;
   const limit = Math.max(1, Math.min(TIMELINE_MAX_LIMIT, requested));
   const offset = decodeCursor(opts.cursor);
@@ -573,16 +580,33 @@ export async function getTimeline(
     itemIds.size === 0
       ? []
       : prisma.pmWorkItem.findMany({
-          where: { id: { in: [...itemIds] } },
+          where: { id: { in: [...itemIds] }, project: { kind: "PROJECT" } },
           select: { id: true, name: true, sequenceId: true, project: { select: { identifier: true } } },
         }),
   ]);
+  const visibleWorkItemIds = new Set(items.map((i) => i.id));
+  const mapTimelineActivity = (row: ActivityRow): ApiActivity => {
+    const activity = mapActivity(row);
+    // The refs map is intentionally PROJECT-only. Redact the corresponding
+    // raw ids as well: returning an unresolved `RELATES:<ticket-id>` would
+    // still let a project reader discover a SERVICE_DESK ticket by id.
+    if (row.verb === "relation_added" && activity.newValue) {
+      const targetId = relationTargetId(activity.newValue);
+      if (targetId && !visibleWorkItemIds.has(targetId)) activity.newValue = null;
+    } else if (row.verb === "relation_removed" && activity.oldValue) {
+      const targetId = relationTargetId(activity.oldValue);
+      if (targetId && !visibleWorkItemIds.has(targetId)) activity.oldValue = null;
+    } else if (row.verb === "parent_removed" && activity.oldValue && !visibleWorkItemIds.has(activity.oldValue)) {
+      activity.oldValue = null;
+    }
+    return activity;
+  };
 
   return {
     timeline: page.map((e): ApiTimelineEntry =>
       e.type === "comment"
         ? { type: "comment", id: e.row.id, at: e.at.toISOString(), comment: hydrated.get(e.row.id)! }
-        : { type: "activity", id: e.row.id, at: e.at.toISOString(), activity: mapActivity(e.row) },
+        : { type: "activity", id: e.row.id, at: e.at.toISOString(), activity: mapTimelineActivity(e.row) },
     ),
     refs: {
       states: Object.fromEntries(states.map((s) => [s.id, s.name])),

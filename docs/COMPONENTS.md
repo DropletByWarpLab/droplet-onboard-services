@@ -166,6 +166,9 @@ network. Host-published ports and host-network services are called out.
   comment edit/delete, reactions, watchers and the merged activity timeline are
   `routes/pm/collaboration.ts`, WARP-3519 — their notifications ride the existing
   `activity-notify.service.ts` sweep, not a second dispatcher),
+  `support/` (the service desk — `/api/support/*`, ADR-069: tickets are work items in
+  `PmProject.kind = SERVICE_DESK` projects, behind the `support` module gate; `/api/pm/*`
+  and `/api/mobile/pm/*` answer 404 for a desk and everything under it),
   `activity` (signed audit log), `agent-runs` (durable background runs, owner/admin),
   `settings*`, `aps` (coverage-extender onboarding),
   `admin-*` (owner/admin-gated dashboards).
