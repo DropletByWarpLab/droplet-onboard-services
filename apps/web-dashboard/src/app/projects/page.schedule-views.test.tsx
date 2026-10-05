@@ -111,7 +111,7 @@ vi.mock("@/components/projects/usePm", () => ({
   },
   useWorkItemByKey: () => ({ item: undefined, error: undefined, mutate: vi.fn() }),
   useSavedViews: () => ({ views: queryState.savedViews, error: undefined, isLoading: false, mutate: vi.fn() }),
-  usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", initials: "T", tone: 1 }), users: [] }),
+  usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", initials: "T", tone: 1 }), people: [] }),
   useDepartments: () => ({ departments: undefined }),
   useProjectCycles: () => ({ cycles: [], mutate: vi.fn() }),
   pmActions: () => ({}),
@@ -185,7 +185,7 @@ describe("view switcher", () => {
   it("offers Calendar and Timeline between List and Cycles", () => {
     openProject();
     const tabs = within(screen.getByRole("tablist", { name: "View" })).getAllByRole("tab");
-    expect(tabs.map((t) => t.textContent)).toEqual(["Board", "List", "Table", "Calendar", "Timeline", "Cycles", "Modules"]);
+    expect(tabs.map((t) => t.textContent)).toEqual(["Board", "List", "Table", "Calendar", "Timeline", "Cycles", "Modules", "Time"]);
   });
 
   it("shows the table layout without rendering the list underneath it", () => {

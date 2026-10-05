@@ -90,10 +90,13 @@ import {
   NewItemModal,
   NewProjectModal,
 } from "@/components/projects/modals";
+import { TimeAccessProvider } from "@/components/projects/time/access";
+import { TimerChip } from "@/components/projects/time/TimerChip";
+import { TimeView } from "@/components/projects/time/TimeView";
 
 // ── URL ↔ page vocabulary ───────────────────────────────────────────────────
 
-const PROJECT_TABS: readonly ProjectView[] = ["board", "list", "table", "calendar", "timeline", "cycles", "modules"];
+const PROJECT_TABS: readonly ProjectView[] = ["board", "list", "table", "calendar", "timeline", "cycles", "modules", "time"];
 
 /** The tab a `view=` names; anything else is the board. */
 function tabOf(view: string | null): ProjectView {
@@ -161,12 +164,22 @@ export default function ProjectsPage(): JSX.Element {
   // why its header renamed itself when a module it does not own flipped. The
   // CRM lives at /customers now.
   //
-  // WARP-3522 — `useSearchParams` must be read under a Suspense boundary
-  // (Next app router), so the workspace lives inside one.
+  // WARP-3526 — `?view=time` is read with `useSearchParams`, which Next requires
+  // under a Suspense boundary; the time surface also needs to know who is asking.
   return (
     <Suspense fallback={<ProjectsFallback />}>
-      <ProjectsWorkspace />
+      <ProjectsWithTimeAccess />
     </Suspense>
+  );
+}
+
+/** The session, handed to the time surface (see components/projects/time/access.tsx). */
+function ProjectsWithTimeAccess(): JSX.Element {
+  const { user } = useAuth();
+  return (
+    <TimeAccessProvider user={user}>
+      <ProjectsWorkspace />
+    </TimeAccessProvider>
   );
 }
 
@@ -215,10 +228,12 @@ function ProjectsWorkspace(): JSX.Element {
     !url.p && url.v && !isPmBuiltinViewId(url.v)
       ? savedViews?.find((v) => v.id === url.v && v.projectId === null)
       : undefined;
-  type Mode = "index" | "views" | "workspace" | "project" | "my-work";
+  type Mode = "index" | "views" | "workspace" | "project" | "my-work" | "time";
   const mode: Mode = url.p
     ? "project"
-    : url.view === "my-work"
+    : url.view === "time"
+      ? "time"
+      : url.view === "my-work"
       ? "my-work"
     : url.view === "views"
       ? "views"
@@ -281,7 +296,7 @@ function ProjectsWorkspace(): JSX.Element {
     for (const v of scopedViews) named[v.id] = v.filter;
     return Object.fromEntries(Object.entries(named).slice(0, 32));
   }, [scopedViews]);
-  const queryEnabled = !viewPending && ((mode === "project" && !!project) || mode === "workspace");
+  const queryEnabled = !viewPending && ((mode === "project" && !!project && tab !== "time") || mode === "workspace");
   const tableScope: PmTableScope = mode === "workspace" ? "workspace" : "project";
   const tableLayout = tab === "table" ? "table" : "list";
   const tableDisplay = useTableDisplay({
@@ -366,7 +381,7 @@ function ProjectsWorkspace(): JSX.Element {
       departmentName: (ref) => deptOptions.find((d) => d.id === ref)?.name,
       projectName: (id) => projects?.find((p) => p.id === id)?.name,
     }),
-    [states, labels, users, deptOptions, projects],
+    [states, labels, roster, deptOptions, projects],
   );
   const editorOptions: EditorOptions = useMemo(
     () => ({
@@ -392,6 +407,7 @@ function ProjectsWorkspace(): JSX.Element {
   const openWorkspace = () => go({ p: null, view: "workspace", v: null, f: null, item: null }, "push");
   const openViewsIndex = () => go({ p: null, view: "views", v: null, f: null, item: null }, "push");
   const openMyWork = () => go({ p: null, view: "my-work", v: null, f: null, item: null }, "push");
+  const openTime = () => go({ p: null, view: "time", v: null, f: null, item: null }, "push");
   const switchTab = (next: ProjectView) => go({ view: next === "board" ? null : next }, "push");
   const pickView = (id: string) => {
     setNotice(null);
@@ -593,9 +609,10 @@ function ProjectsWorkspace(): JSX.Element {
   // ── what the body shows ──
   const loading = viewPending || (queryEnabled ? query.items === undefined && !query.error : true);
   const unfilteredTotal = query.counts?.all;
+  const partialFailure = !!query.partialError && allItems.length > 0;
   const boardDomain: Domain = loading
     ? "loading"
-    : query.error
+    : query.error && !partialFailure
       ? "error"
       : allItems.length === 0
         ? filterActive && (unfilteredTotal === undefined || unfilteredTotal > 0)
@@ -604,8 +621,10 @@ function ProjectsWorkspace(): JSX.Element {
         : "populated";
 
   const total = query.total;
-  const status = query.loadError
-    ? `Couldn't load the rest. Showing ${allItems.length} of ${total} work items.`
+  const status = query.error && !partialFailure
+    ? null
+    : partialFailure
+    ? `Showing ${allItems.length} of ${total} work items. Couldn't load the rest.`
     : query.truncated
     ? `Showing the first ${allItems.length} of ${total}. Narrow the filter to see the rest.`
     : query.loadingMore
@@ -615,12 +634,14 @@ function ProjectsWorkspace(): JSX.Element {
         : null;
 
   const headerTitle =
-    mode === "project" ? (project?.name ?? "Projects") : mode === "workspace" ? "All projects" : mode === "views" ? "Views" : mode === "my-work" ? "My work" : "Projects";
+    mode === "project" ? (project?.name ?? "Projects") : mode === "workspace" ? "All projects" : mode === "views" ? "Views" : mode === "my-work" ? "My work" : mode === "time" ? "Time" : "Projects";
   const headerSub =
     mode === "index"
       ? `${summary?.activeProjects ?? projects?.filter((p) => !p.archived).length ?? 0} projects · ${summary?.itemsOpen ?? 0} items open`
       : mode === "my-work"
         ? "Your open work across every project"
+        : mode === "time"
+          ? "Timesheet and report"
         : mode === "project"
         ? project
           ? `${project.openCount} open · ${project.doneCount} done`
@@ -637,6 +658,9 @@ function ProjectsWorkspace(): JSX.Element {
   const actions =
     mode === "index" ? (
       <>
+        <button className="btn" type="button" onClick={openTime}>
+          <PmIcon name="clock" size={14} /> Time
+        </button>
         {!readOnly && (
           <button className="btn primary" type="button" onClick={() => setModal("newproject")}>
             <FolderKanban size={14} /> New project
@@ -679,11 +703,6 @@ function ProjectsWorkspace(): JSX.Element {
         {!readOnly && project && (
           <button className="btn primary" type="button" onClick={() => setModal("newitem")}>
             <PmIcon name="plus" size={14} /> New item
-          </button>
-        )}
-        {!readOnly && project && !project.archived && (
-          <button className="btn" type="button" onClick={() => setModal("archive")}>
-            <PmIcon name="archive" size={14} /> Archive project
           </button>
         )}
         {refreshButton}
@@ -749,11 +768,7 @@ function ProjectsWorkspace(): JSX.Element {
             {status && (
               <div className="pm-status" role="status" aria-live="polite">
                 {status}
-                {query.loadError && (
-                  <button className="pm-btn ghost sm" type="button" onClick={() => void refreshAll()}>
-                    Retry
-                  </button>
-                )}
+                {partialFailure && <button className="pm-btn ghost sm" type="button" onClick={() => void refreshAll()}>Retry</button>}
               </div>
             )}
             {announcement && <div className="pm-status" role="status" aria-live="polite">{announcement}</div>}
@@ -775,6 +790,8 @@ function ProjectsWorkspace(): JSX.Element {
             onNewItem={() => setModal("newitem")}
             onRetry={() => void refreshAll()}
             onClearFilters={() => writeFilter(EMPTY_FILTER)}
+            partial={query.loadingMore || query.truncated}
+            cycles={cyclesById}
           />
         )}
         {tab === "list" && (mode === "project" || mode === "workspace") && (
@@ -788,6 +805,8 @@ function ProjectsWorkspace(): JSX.Element {
             projects={mode === "workspace" ? (projects ?? []) : undefined}
             onRetry={() => void refreshAll()}
             onClearFilters={() => writeFilter(EMPTY_FILTER)}
+            partial={query.loadingMore || query.truncated}
+            cycles={cyclesById}
           />
         )}
         {tab === "table" && (mode === "project" || mode === "workspace") && (
@@ -839,8 +858,13 @@ function ProjectsWorkspace(): JSX.Element {
             onNewItem={() => setModal("newitem")}
           />
         )}
-        {tab === "cycles" && mode === "project" && project && <CyclesView project={project} states={states ?? []} readOnly={readOnly} onOpenItem={(item) => openItem(item.key)} onChanged={refreshAll} />}
-        {tab === "modules" && mode === "project" && project && <ModulesView project={project} readOnly={readOnly} onOpenItem={(item) => openItem(item.key)} onChanged={refreshAll} />}
+        {tab === "time" && mode === "project" && project && <TimeView projects={projects} projectId={project.id} />}
+        {tab === "cycles" && mode === "project" && project && (
+          <CyclesView project={project} states={states ?? []} readOnly={readOnly} onOpenItem={(i) => openItem(i.key)} onChanged={refreshAll} />
+        )}
+        {tab === "modules" && mode === "project" && project && (
+          <ModulesView project={project} readOnly={readOnly} onOpenItem={(i) => openItem(i.key)} onChanged={refreshAll} />
+        )}
       </div>
       {tab === "table" && selection.count > 0 && !readOnly && (
         <BulkBar
@@ -872,7 +896,7 @@ function ProjectsWorkspace(): JSX.Element {
 
   return (
     <PeopleContext.Provider value={person}>
-      <ShellPage icon={<FolderKanban size={15} />} label="Projects" title={headerTitle} sub={headerSub} actions={actions}>
+      <ShellPage icon={<FolderKanban size={15} />} label="Projects" title={headerTitle} sub={headerSub} actions={<><TimerChip />{actions}</>}>
         <div className="pm-scope">
           <div className="pm-page">
             {mode !== "index" && (
@@ -880,10 +904,23 @@ function ProjectsWorkspace(): JSX.Element {
                 <PmIcon name="chevL" size={14} /> All projects
               </button>
             )}
+            {mode === "project" && project && !readOnly && !project.archived && (
+              <button className="pm-btn ghost sm" type="button" onClick={() => setModal("archive")} style={{ alignSelf: "flex-start", marginBottom: 14 }}>
+                <PmIcon name="archive" size={14} /> Archive project
+              </button>
+            )}
 
+            {/* WARP-3370 — an archived project says so, and owns the two ways out:
+                put it back, or (owner/admin) delete it for good. */}
             {mode === "project" && project?.archived && (
-              <div className="pm-surface pm-row" role="status" style={{ justifyContent: "space-between", gap: 12, flexWrap: "wrap", padding: "12px 16px", marginBottom: 14 }}>
-                <span>This project is archived.</span>
+              <div
+                className="pm-surface pm-row"
+                role="status"
+                style={{ justifyContent: "space-between", gap: 12, flexWrap: "wrap", padding: "12px 16px", marginBottom: 14 }}
+              >
+                <span style={{ fontSize: 13, color: "var(--text-2)" }}>
+                  This project is archived. It&apos;s hidden from your project list.
+                </span>
                 <span className="pm-row" style={{ gap: 8 }}>
                   {!readOnly && (
                     <button className="pm-btn sm" type="button" onClick={() => void onRestore()}>
@@ -968,6 +1005,7 @@ function ProjectsWorkspace(): JSX.Element {
               </div>
             )}
             {(mode === "workspace" || (mode === "project" && !projectMissing && (project || (!projErr && projLoading)))) && listing}
+            {mode === "time" && <TimeView projects={projects} projectId={null} />}
           </div>
         </div>
       </ShellPage>

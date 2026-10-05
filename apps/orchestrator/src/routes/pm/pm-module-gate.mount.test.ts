@@ -58,13 +58,14 @@ import type { AuthUser } from "../../middleware/auth.js";
 import { packagePath } from "../../__tests__/helpers/test-paths.js";
 import { createPmNativeRouter } from "./native.js";
 import { createPmRelationsRouter } from "./relations.js";
-import { createPmPlanningRouter } from "./planning.js";
-import { createPmScheduleRouter } from "./schedule.js";
-import { createPmOpenApiRouter } from "./openapi.js";
 import { createPmQueryRouter } from "./query.js";
 import { createPmViewsRouter } from "./views.js";
-import { createPmBulkRouter } from "./bulk.js";
+import { createPmPlanningRouter } from "./planning.js";
+import { createPmTimeRouter } from "./time.js";
 import { createPmWebhooksRouter } from "./webhooks.js";
+import { createPmScheduleRouter } from "./schedule.js";
+import { createPmOpenApiRouter } from "./openapi.js";
+import { createPmBulkRouter } from "./bulk.js";
 import { createPmMobileRouter } from "../mobile/pm.js";
 
 // ── the edges ───────────────────────────────────────────────────────────────
@@ -188,6 +189,12 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     base: "/api",
     file: "routes/pm/planning.ts",
     router: createPmPlanningRouter(PRISMA),
+  },
+  {
+    factory: "createPmTimeRouter",
+    base: "/api",
+    file: "routes/pm/time.ts",
+    router: createPmTimeRouter(PRISMA),
   },
   {
     factory: "createPmWebhooksRouter",

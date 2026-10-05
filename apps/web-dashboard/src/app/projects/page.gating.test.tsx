@@ -85,7 +85,7 @@ vi.mock("@/components/projects/usePm", () => ({
   useWorkItemByKey: () => ({ item: undefined, error: undefined, mutate: vi.fn() }),
   useSavedViews: () => ({ views: undefined, error: undefined, isLoading: false, mutate: vi.fn() }),
   viewActions: () => ({}),
-  usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", tone: 0 }), users: [] }),
+  usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", tone: 0 }), people: [] }),
   // WARP-2717 — the department filter reads this. Undefined is the honest
   // stub: the real hook returns `data?.departments`, so "not loaded yet" and
   // "this box has no departments" are the same shape, and the page has to

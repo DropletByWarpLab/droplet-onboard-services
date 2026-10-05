@@ -190,6 +190,7 @@ export interface WorkItemQueryArgs {
  */
 export function useWorkItemQuery({ enabled, projectId, filter, counts, sort, groupBy }: WorkItemQueryArgs) {
   const tz = useMemo(browserTimeZone, []);
+  const failedPage = useRef<{ error: unknown; cursor: string | null } | null>(null);
   const filterKey = serializePmFilter(filter);
   // By value, so an equal sort in a new array is the same query. The server binds a
   // page cursor to the sort it was issued under, so the sort is part of the key.
@@ -228,6 +229,9 @@ export function useWorkItemQuery({ enabled, projectId, filter, counts, sort, gro
         // `counts` and `groups` are one answer for the whole result, not one per page.
         ...(cursor === null && counts ? { counts } : {}),
         ...(cursor === null && groupBy ? { groupBy } : {}),
+      }).catch((error: unknown) => {
+        failedPage.current = { error, cursor };
+        throw error;
       });
     },
     { revalidateFirstPage: false, parallel: false, keepPreviousData: sameScope },
@@ -271,9 +275,10 @@ export function useWorkItemQuery({ enabled, projectId, filter, counts, sort, gro
     loadingMore: hasMore && size < QUERY_MAX_PAGES && !error,
     /** More pages remain and will not be fetched: the cap was reached. */
     truncated: hasMore && size >= QUERY_MAX_PAGES,
-    error: data && data.length > 0 ? undefined : error,
-    /** A later page failed; keep the rows already loaded and offer a retry. */
-    loadError: data && data.length > 0 ? error : undefined,
+    /** Distinguish a failed tail from a new filter whose first request failed. */
+    partialError: !!error && failedPage.current?.error === error && failedPage.current?.cursor !== null,
+    loadError: error && failedPage.current?.error === error && failedPage.current?.cursor !== null ? error : undefined,
+    error,
     isLoading,
     refresh,
   };

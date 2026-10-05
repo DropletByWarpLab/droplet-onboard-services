@@ -111,9 +111,10 @@ vi.mock("@/components/projects/usePm", () => ({
     mutate: vi.fn(),
   }),
   useDepartments: () => ({ departments: undefined }),
+  useProjectCycles: () => ({ cycles: [], mutate: vi.fn() }),
   usePeople: () => ({
     person: (id: string) => ({ id, name: "Tester", initials: "T", tone: 1 }),
-    users: [{ id: "ana", userId: "u1", username: "ana", displayName: "Ana" }],
+    people: [{ id: "u1", displayName: "Ana", avatarUrl: null }],
   }),
   pmActions: () => ({ transitionItem: vi.fn() }),
   viewActions: () => ({ create: h.create, update: h.update, remove: h.remove }),

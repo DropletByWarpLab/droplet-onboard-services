@@ -96,6 +96,7 @@ export async function createDesk(
             color: s.color,
             sortOrder: s.sortOrder,
             isDefault: s.isDefault,
+            onCustomerReply: s.onCustomerReply,
           })),
         },
         labels: { create: DESK_LABELS.map((l) => ({ name: l.name, color: l.color })) },
