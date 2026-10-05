@@ -221,11 +221,20 @@ else
   fail "sync_openwrt_password_secret did not rewrite the file for a loopback host"
 fi
 
-sync_case 192.168.9.1 ""
+for p13_init in "" NONE; do
+  sync_case 192.168.9.1 "$p13_init"
+  if [ -f "$SYNC_DIR/openwrt_password" ] && [ ! -s "$SYNC_DIR/openwrt_password" ] \
+     && grep -q "droplet-ai-password" "$SYNC_LOG" && ! grep -qF "$SYNC_PW" "$SYNC_LOG"; then
+    pass "sync_openwrt_password_secret leaves the secret empty + warns for an external host (initial: ${p13_init:-empty file})"
+  else
+    fail "sync_openwrt_password_secret seeded/skipped the secret for an external host (initial: ${p13_init:-empty file})"
+  fi
+done
+sync_case 127.0.0.1 ""
 if [ "$(cat "$SYNC_DIR/openwrt_password")" = "$SYNC_PW" ]; then
-  pass "sync_openwrt_password_secret fills an empty file for an external host"
+  pass "sync_openwrt_password_secret still fills an empty file for a loopback host"
 else
-  fail "sync_openwrt_password_secret left an empty file empty for an external host"
+  fail "sync_openwrt_password_secret no longer fills an empty file for a loopback host"
 fi
 
 # --- DROPLET_TPM_BACKEND scaffold guard (IDX-002) -------------------------
@@ -2462,7 +2471,7 @@ if grep -q 'check "Routing → router auth" _router_auth' "$P13_VERIFY" \
 else
   fail "verify.sh is missing the router-auth check or its ROUTING_MODE skip"
 fi
-if grep -q '\[ -s .*openwrt_password' "$P13_VERIFY"; then
+if grep -q '\[ -s .*openwrt_password' "$P13_VERIFY" && grep -q 'paste the router.s droplet-ai password' "$P13_VERIFY"; then
   pass "verify.sh requires a NON-EMPTY openwrt_password secret"
 else
   fail "verify.sh still only checks that the openwrt_password file exists"

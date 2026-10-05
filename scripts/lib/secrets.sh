@@ -1919,7 +1919,10 @@ sync_openwrt_password_secret() {
   # droplet-ai password, which the operator pastes into the secret file itself.
   # Overwriting it with the box-generated .env value broke routing on the lab
   # box (2026-10-05, "OpenWrt rejected the rpcd credentials"). Keep a non-empty
-  # file; an empty/missing one is still filled below (first install).
+  # file. WARP-3835: an empty/missing one is NOT seeded either (that value can
+  # never match a router that mints its own password; the ROUTER_AUTH it caused
+  # read like a rotation when the truth is "never paired") - write the empty
+  # placeholder compose needs and tell the operator what to paste.
   local openwrt_host="${OPENWRT_HOST:-}"
   if [ -z "$openwrt_host" ] && [ -f "$REPO_ROOT/.env" ]; then
     openwrt_host=$(grep -E '^OPENWRT_HOST=' "$REPO_ROOT/.env" | tail -1 | cut -d= -f2- || true)
@@ -1934,6 +1937,12 @@ sync_openwrt_password_secret() {
         fi
         return 0
       fi
+      mkdir -p "$secret_dir"
+      chmod 700 "$secret_dir"
+      : > "$secret_file"
+      chmod 600 "$secret_file"
+      log_warn "External router (OPENWRT_HOST=$openwrt_host) configured: put the router's /etc/droplet/droplet-ai-password into $secret_file and re-run ./scripts/setup.sh"
+      return 0
       ;;
   esac
 

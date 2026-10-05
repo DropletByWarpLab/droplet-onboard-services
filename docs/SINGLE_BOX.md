@@ -70,7 +70,7 @@ To put the box behind a real OpenWrt router instead of the bundled container:
 
 This writes `OPENWRT_HOST`, `OPENWRT_PORT` and `OPENWRT_USERNAME=droplet-ai` to
 `.env` before anything else reads them. Put the router's `droplet-ai` password in
-`docker/secrets/openwrt_password`; setup keeps a non-empty file (WARP-3738) and
+`docker/secrets/openwrt_password` (the router's `/etc/droplet/droplet-ai-password`); setup keeps a non-empty file (WARP-3738), never seeds an empty one with a box-generated value (it warns instead), and
 a re-run without the flag keeps the host. Setup then runs `verify.sh`, which
 requires routing's `/health` to report `connected: true`. If routing cannot log
 in, setup prints the `ROUTER_AUTH` error and **exits 1** (a failed verify now

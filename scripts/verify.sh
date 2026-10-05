@@ -241,8 +241,15 @@ check ".env exists (chmod 600)" \
 # missing on a started stack, the corresponding container failed to start
 # (Compose errors with "bind source path does not exist"). Re-run:
 #   ./scripts/setup.sh --sync-secrets
-check "Docker secret: openwrt_password" \
-  bash -c '[ -s "'"$REPO_ROOT/docker/secrets/openwrt_password"'" ]' || true
+_openwrt_secret() {
+  [ -s "$REPO_ROOT/docker/secrets/openwrt_password" ] && return 0
+  case "${OPENWRT_HOST:-}" in
+    ''|127.0.0.1|localhost|::1) ;;
+    *) echo "external router $OPENWRT_HOST: paste the router's droplet-ai password into docker/secrets/openwrt_password" ;;
+  esac
+  return 1
+}
+check "Docker secret: openwrt_password" _openwrt_secret || true
 
 # WARP-3835: the secret FILE existing says nothing about whether routing can
 # log in to the router with it (the lab box ran unpaired and setup said "ok").
