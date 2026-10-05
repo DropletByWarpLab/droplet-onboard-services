@@ -56,7 +56,7 @@ const probes: Probe[] = [
   // ── native router: a desk, or a row under one, is 404 ────────────────────
   { route: "GET /api/pm/projects/:id", kind: "desk", method: "get", url: (i) => `/api/pm/projects/${i.deskId}` },
   { route: "PATCH /api/pm/projects/:id", kind: "desk", method: "patch", url: (i) => `/api/pm/projects/${i.deskId}`, body: { name: "renamed" } },
-  { route: "DELETE /api/pm/projects/:id", kind: "desk", method: "delete", url: (i) => `/api/pm/projects/${i.deskId}` },
+  { route: "DELETE /api/pm/projects/:id", kind: "desk", method: "delete", url: (i) => `/api/pm/projects/${i.deskId}`, body: { confirm_identifier: "W28IZ" } },
   { route: "GET /api/pm/projects/:id/states", kind: "desk", method: "get", url: (i) => `/api/pm/projects/${i.deskId}/states` },
   { route: "POST /api/pm/projects/:id/states", kind: "desk", method: "post", url: (i) => `/api/pm/projects/${i.deskId}/states`, body: { name: "Extra", group: "started" } },
   { route: "PATCH /api/pm/states/:id", kind: "desk", method: "patch", url: (i) => `/api/pm/states/${i.deskStateId}`, body: { name: "Renamed" } },

@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
+import { createTransactionSeam } from "./helpers/prisma-tx-harness.js";
 
 const mockGetEffectiveModuleIds = vi.fn();
 vi.mock("../services/modules.service.js", () => ({
@@ -53,18 +54,19 @@ describe("the reliability service union retains the ticket boundary", () => {
   });
 
   it("refuses an archived, correctly confirmed desk before delete or audit", async () => {
-    const transaction = vi.fn();
     const audit = vi.fn();
     const prisma = {
       pmProject: { findUnique: vi.fn().mockResolvedValue({
         id: "desk", name: "Private desk", identifier: "DESK", isArchived: true, kind: "SERVICE_DESK",
       }) },
-      $transaction: transaction,
     };
+    const transaction = createTransactionSeam({ client: () => prisma });
+    Object.assign(prisma, { $transaction: transaction.$transaction });
     await expect(deleteProject(prisma as unknown as PrismaClient, "desk", {
       confirmIdentifier: "DESK", audit,
     })).rejects.toThrow("project_not_found");
-    expect(transaction).not.toHaveBeenCalled();
+    expect(transaction.$transaction).not.toHaveBeenCalled();
+    expect(transaction.calls()).toEqual([]);
     expect(audit).not.toHaveBeenCalled();
   });
 });
