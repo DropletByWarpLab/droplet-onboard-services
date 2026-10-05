@@ -708,6 +708,19 @@ const CODES: Record<ErrorDomain, Record<string, string>> = {
       "Someone else changed this at the same moment, so nothing was saved. Try again.",
     identifier_taken:
       "That project ID is already in use. Pick a different one.",
+    // WARP-3522 — saved views and the filter bar. Each says what to do next.
+    view_name_taken:
+      "A view with that name already exists. Pick another.",
+    view_limit_reached:
+      "You've reached the saved-view limit — delete one to add another.",
+    view_forbidden:
+      "You can't change this view. Save your own copy instead.",
+    view_not_found:
+      "That view isn't available anymore. Refresh and try again.",
+    view_is_builtin:
+      "The built-in views can't be changed.",
+    invalid_filter:
+      "That filter couldn't be applied. Clear it and try again.",
     // WARP-3371 — the work-item API now refuses what it used to swallow. Each
     // says what is wrong in the owner's words (item, column, person — never
     // cycle, state or assignee) and the one thing to do.
@@ -1004,4 +1017,24 @@ export function translateError(err: unknown, domain: ErrorDomain): string {
     if (inferred && domainCodes[inferred]) return domainCodes[inferred];
   }
   return FALLBACK[domain];
+}
+
+// ─── WARP-3515: a Droplet with no TPM cannot encrypt a drive ──────────────────
+
+/**
+ * ADR-070 / WARP-3512: Prepare (and a pool create or format, which must be LUKS
+ * too) seals the drive's unlock key to the TPM2. A box without one refuses with
+ * `409 tpm_required` and wipes nothing. The refusal can come back as the typed
+ * `code`, as the whole error text, or as prose, and on the request that mints a
+ * confirm token or on the confirm that executes it — so every drive flow asks
+ * this one question and shows this one sentence.
+ */
+export const TPM_REQUIRED_MESSAGE =
+  "This Droplet has no security chip (TPM); drives can't be encrypted.";
+
+export function isTpmRequired(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const { code, message } = err as { code?: unknown; message?: unknown };
+  if (code === "tpm_required") return true;
+  return typeof message === "string" && /\btpm_required\b|\btpm2?\b/i.test(message);
 }

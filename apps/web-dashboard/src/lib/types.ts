@@ -1942,6 +1942,40 @@ export interface DriveInfo {
    *  an anonymous GUID drive. Absent on an older orchestrator — callers fall
    *  back to the anchored md-device matcher (drivePoolName). */
   pool?: string | null;
+  /** WARP-3513 / ADR-070: at-rest encryption of this drive. Every data drive
+   *  is meant to be LUKS2; `none` is a plain drive that still has to be
+   *  prepared. ABSENT on an orchestrator that predates the field — the UI then
+   *  says nothing about encryption rather than guessing. */
+  encryption?: DriveEncryption;
+  /** WARP-3513: the explicit state the UI branches on (never re-derived from
+   *  `encryption`). `needs_preparing` = a data drive without LUKS2. */
+  preparation?: DrivePreparation;
+  /** WARP-3513 / WARP-3514: what the drive is used for. `role: "recordings"`
+   *  is the active camera-recordings drive; `reservedBytes` is the slice set
+   *  aside for it. */
+  usage?: DriveUsage | null;
+  /** WARP-3513: true when this is the install disk. Defence in depth — it never
+   *  appears in the data-drive list today, but a card that is handed one must
+   *  offer no destructive action. */
+  isSystemDisk?: boolean;
+}
+
+/** WARP-3513 / ADR-070: at-rest encryption of a drive. */
+export type DriveEncryption = "luks2" | "none" | "unknown";
+
+/** WARP-3513: `needs_preparing` = a data drive without LUKS2 (never used for
+ *  allocation, never auto-wiped); `prepared` = encrypted and ready. */
+export type DrivePreparation = "prepared" | "needs_preparing";
+
+/** WARP-3513 / WARP-3514: what a drive is used for. */
+export type DriveUsageRole = "recordings" | "files";
+
+export interface DriveUsage {
+  /** `null` = no Droplet-managed role (a drive that only holds files). */
+  role: DriveUsageRole | null;
+  /** Bytes set aside for the role (the recordings reservation). `null` when
+   *  there is no reservation. */
+  reservedBytes: number | null;
 }
 
 /** WARP-174: response shape for PATCH /api/storage/drives/:uuid. */
@@ -2086,6 +2120,136 @@ export interface PoolsResponse {
   snapshot_at?: string;
   error?: string;
   reason?: string;
+}
+
+// ─── Recording storage (WARP-3512 contract / ADR-070, consumed by WARP-3515) ──
+//
+// Decision record: docs/ADR-070-camera-recording-storage.md.
+//
+// GET /api/storage/recordings. Droplet measures, sizes and allocates the camera
+// recordings slice itself (a project-quota slice on an encrypted bay drive);
+// the dashboard shows it and offers the two owner choices (auto-sized vs whole
+// drive, and which eligible drive). Everything below is exactly the shape the
+// contract spells out — `normalizeRecordingStorage` (lib/recording-storage.ts)
+// is what turns the wire payload into these, defaulting every absent field, so
+// a component never has to guard a missing one.
+
+/** Where the allocation stands. `unknown` is a UI-only fallback for a status
+ *  string this build does not recognise — rendered neutrally, never crashed on. */
+export type RecordingStorageStatus =
+  | "active"
+  | "pending"
+  | "migrating"
+  | "degraded"
+  | "missing"
+  | "no_eligible_drive"
+  | "on_system_disk"
+  | "unknown";
+
+/** `auto_reserved` = a size-capped slice Droplet sizes itself; `full` = the
+ *  whole drive. `null` = no allocation yet. */
+export type RecordingStorageMode = "auto_reserved" | "full";
+
+export interface RecordingStorageDrive {
+  fsUuid: string;
+  label: string;
+  model: string;
+  sizeBytes: number;
+  encrypted: boolean;
+  mountPath: string;
+}
+
+export interface RecordingStorageCamera {
+  /** Frigate-side key (snake_case). */
+  name: string;
+  displayName: string;
+  mbPerHour: number;
+  gbPerDay: number;
+  /** Bytes this camera needs for the whole retention window (incl. headroom). */
+  needBytes: number;
+  usedBytes: number;
+}
+
+export type RecordingMigrationState = "idle" | "running" | "done" | "failed";
+
+export interface RecordingMigration {
+  state: RecordingMigrationState;
+  /** 0–100. */
+  progressPct: number;
+  bytesCopied: number;
+  bytesTotal: number;
+  startedAt: string | null;
+  error: string | null;
+}
+
+export interface RecordingOldFootage {
+  /** True when recordings from before the move are still on the previous
+   *  source (kept until the owner deletes them). */
+  present: boolean;
+  bytes: number;
+  location: string;
+}
+
+/** Warning codes the contract defines. An unrecognised code still renders (the
+ *  server's own message), so this stays an open string at the type level. */
+export type RecordingWarningCode =
+  | "drive_missing"
+  | "read_only"
+  | "near_full"
+  | "cannot_grow"
+  | "on_system_disk"
+  | "smart_failed"
+  | "not_encrypted";
+
+export interface RecordingWarning {
+  code: RecordingWarningCode | (string & {});
+  message: string;
+}
+
+/** A drive Droplet may put recordings on (prepared, encrypted, healthy, not the
+ *  OS disk). */
+export interface EligibleRecordingDrive {
+  fsUuid: string;
+  label: string;
+  sizeBytes: number;
+  freeBytes: number;
+  encrypted: boolean;
+}
+
+export interface RecordingStorage {
+  status: RecordingStorageStatus;
+  mode: RecordingStorageMode | null;
+  drive: RecordingStorageDrive | null;
+  reservedBytes: number;
+  usedBytes: number;
+  freeBytes: number;
+  /** False when Frigate's resolved retention could not be read; absent on older servers. */
+  retentionKnown?: boolean;
+  /** Total the cameras need for `retentionDays` (floor 20 GiB). */
+  needBytes: number;
+  retentionDays: number;
+  /** How many days of footage are on disk right now. */
+  daysStored: number;
+  cameras: RecordingStorageCamera[];
+  migration: RecordingMigration;
+  oldFootage: RecordingOldFootage;
+  warnings: RecordingWarning[];
+  eligibleDrives: EligibleRecordingDrive[];
+}
+
+/** What `fetchRecordingStorage` resolves to. `not_supported` = the endpoint is
+ *  absent (an orchestrator that predates WARP-3514 answers 404); `forbidden` =
+ *  the signed-in role may not read it (403). Neither is an error: the UI hides
+ *  the card or says "not available on this Droplet yet". A transport failure or
+ *  a 5xx still THROWS, so SWR's `error` is the signal for "couldn't load". */
+export type RecordingStorageResult =
+  | { available: true; data: RecordingStorage }
+  | { available: false; reason: "not_supported" | "forbidden" };
+
+/** PUT /api/storage/recordings body. At least one of the two is required. */
+export interface RecordingStorageChange {
+  mode?: RecordingStorageMode;
+  fsUuid?: string;
 }
 
 /** PR #373 — one subsystem descriptor in the onboarding Claim hardware card. */
@@ -2405,6 +2569,8 @@ export interface DetectionEvent {
 /** Richer event payload returned by GET /api/cameras/events for the
  *  dedicated Events page. Mirrors EventDetail in the orchestrator. */
 export interface EventDetail extends DetectionEvent {
+  /** null until a business-hours schedule has been saved. */
+  outsideBusinessHours?: boolean | null;
   subLabel: string | null;
   subLabelScore: number | null;
   zones: string[];
@@ -2422,6 +2588,7 @@ export interface EventDetail extends DetectionEvent {
  *  /api/cameras/events query string by `fetchEvents`. All fields
  *  optional; the rail starts empty (= "anything"). */
 export interface EventFilter {
+  businessHours?: "outside" | "inside";
   cameras?: string[];
   labels?: string[];
   /** [0, 1] */
@@ -2438,6 +2605,8 @@ export interface EventFilter {
 
 export interface FilteredEventsResult {
   events: EventDetail[];
+  scanLimitReached?: boolean;
+  searchLimitReached?: boolean;
   /** start_time of the oldest event returned, or null if no more pages. */
   nextCursor: number | null;
 }
@@ -2452,6 +2621,7 @@ export type ReviewSeverity = "alert" | "detection" | "significant_motion";
  * triage unit on the Events page's "Alerts" + "Detections" tabs.
  */
 export interface ReviewItem {
+  outsideBusinessHours?: boolean | null;
   id: string;
   camera: string;
   startTime: number;
@@ -2467,6 +2637,7 @@ export interface ReviewItem {
 }
 
 export interface ReviewFilter {
+  businessHours?: "outside" | "inside";
   cameras?: string[];
   severity?: ReviewSeverity[];
   before?: number;
@@ -2478,7 +2649,49 @@ export interface ReviewFilter {
 
 export interface FilteredReviewsResult {
   reviews: ReviewItem[];
+  scanLimitReached?: boolean;
   nextCursor: number | null;
+}
+
+export type BusinessDay = "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday";
+
+export interface CameraBusinessHours {
+  configured: boolean;
+  timezone: string;
+  /** null means closed. A close before open continues into the next day. */
+  days: Record<BusinessDay, { open: string; close: string } | null>;
+}
+
+/** Raw movement in retained recordings; independent of object reviews. */
+export interface MotionActivity {
+  id: string;
+  camera: string;
+  startTime: number;
+  endTime: number;
+  motion: number;
+  outsideBusinessHours: boolean | null;
+  playbackUrl: string;
+}
+
+export interface MotionFilter {
+  cameras?: string[];
+  after: number;
+  before: number;
+  businessHours?: "outside" | "inside";
+  limit?: number;
+  cursor?: number;
+}
+
+export interface MotionActivityResult {
+  activity: MotionActivity[];
+  nextCursor: number | null;
+  scanLimitReached?: boolean;
+  coverage: {
+    after: number;
+    before: number;
+    partial: boolean;
+    cameras: Array<{ camera: string; recordedSeconds: number | null; hasGaps: boolean; available: boolean }>;
+  };
 }
 
 // --- Recordings + timeline (Phase 3) ---
@@ -2646,6 +2859,16 @@ export interface RetentionWindows {
   motion: number;
   alerts: number;
   detections: number;
+}
+
+/** WARP-1851 — the budgets, summed, against the volume that has to hold them.
+ *  Mirrors the orchestrator's `OverAllocation` (camera-budget.service.ts). It is
+ *  an advisory — budgets are targets and the oldest footage is evicted first —
+ *  but a person who promised 3 TB on a 2 TB drive should be told. */
+export interface CameraOverAllocation {
+  allocatedBytes: number;
+  capacityBytes: number;
+  overAllocated: boolean;
 }
 
 /** WARP-1851 — a camera's current storage allocation. */

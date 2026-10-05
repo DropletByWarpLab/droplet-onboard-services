@@ -15,6 +15,25 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import React from "react";
+import { buildPmPath, parsePmUrl, type PmUrlState } from "@droplet/shared-types";
+
+// Model navigation landing through the canonical parser/builder; the real hook
+// is covered separately. These tests exercise the actual merged page and SWR.
+const navigation = { search: "", entries: [] as string[] };
+vi.mock("@/components/projects/useProjectsUrl", () => ({
+  useProjectsUrl: () => {
+    const [, rerender] = React.useState(0);
+    const state = parsePmUrl(new URLSearchParams(navigation.search));
+    const go = (patch: Partial<Required<PmUrlState>>, _mode: string) => {
+      const href = buildPmPath({ ...state, ...patch });
+      navigation.entries.push(href);
+      navigation.search = href.split("?")[1] ?? "";
+      rerender((n) => n + 1);
+    };
+    return { state, go, openItem: (key: string) => go({ item: key }, "push"), closeItem: () => go({ item: null }, "replace") };
+  },
+}));
+
 
 vi.mock("@/components/shell/ShellPage", () => ({
   ShellPage: ({ title, sub, children, actions }: any) => (
@@ -79,9 +98,12 @@ async function serve(url: string, init?: RequestInit) {
   const reply = (status: number, payload: unknown) =>
     ({ ok: status < 400, status, json: () => Promise.resolve(payload) }) as Response;
 
-  if (url.startsWith("/api/pm/projects/p1/work-items")) {
-    return reply(200, { work_items: [], nextCursor: null, total: 0 });
+  if (url === "/api/pm/work-items/query") {
+    expect(method).toBe("POST");
+    expect(body?.projectId).toBe("p1");
+    return reply(200, { work_items: [], nextCursor: null, total: 0, counts: { all: 0 } });
   }
+  if (url === "/api/pm/projects/p1/cycles") return reply(200, { cycles: [] });
   if (url === "/api/pm/projects/p1/states") return reply(200, { states: STATES });
   if (url === "/api/pm/projects/p1" && method === "PATCH") {
     projects = projects.map((p) => (p.id === "p1" ? { ...p, archived: Boolean(body?.archived) } : p));
@@ -118,6 +140,8 @@ const openProject = async () => fireEvent.click(await screen.findByRole("button"
 const openArchivedFilter = () => fireEvent.click(screen.getByRole("button", { name: "Archived" }));
 
 beforeEach(() => {
+  navigation.search = "";
+  navigation.entries = [];
   session.role = "owner";
   projects = [{ ...baseProject }];
   calls = [];

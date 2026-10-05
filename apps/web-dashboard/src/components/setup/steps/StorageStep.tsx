@@ -5,6 +5,7 @@ import { AlertCircle, HardDrive, Layers, ShieldCheck } from "lucide-react";
 import {
   fetchDrives,
   fetchPools,
+  fetchRecordingStorage,
   updateDriveLabel,
   requestCreatePool,
   confirmPoolCommand,
@@ -12,6 +13,7 @@ import {
   reclaimDrive,
 } from "@/lib/api";
 import type { DiskInfo, DiskState, DriveInfo, PoolInfo } from "@/lib/types";
+import { TPM_REQUIRED_MESSAGE, isTpmRequired } from "@/lib/friendly-errors";
 import { StepShell } from "@/components/setup/StepShell";
 import { LearnMoreCard } from "@/components/setup/LearnMoreCard";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -98,6 +100,11 @@ export function StorageStep({
   // silently ignored (the live box already had md127 and the step said
   // "No extra drives to set up").
   const [pools, setPools] = useState<PoolInfo[]>([]);
+  // WARP-3515 / ADR-070: does THIS Droplet allocate camera recordings itself?
+  // Only then does the step say that it will — the backend lands separately from
+  // the dashboard, and a promise about an orchestrator that cannot keep it would
+  // be worse than silence. Informational only: nothing in this step writes it.
+  const [recordingsAuto, setRecordingsAuto] = useState(false);
   const [names, setNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -175,6 +182,14 @@ export function StorageStep({
         existingPools = [];
       }
       setPools(existingPools);
+      // WARP-3515 — best-effort, like the pools fetch: a failed or absent check
+      // never blocks the step, it only leaves the note out.
+      try {
+        const rec = await fetchRecordingStorage();
+        setRecordingsAuto(rec?.available === true);
+      } catch {
+        setRecordingsAuto(false);
+      }
       // #5: with 2+ drives we can ACTUALLY pool — i.e. free physical disks —
       // default to pooling ON (a sensible level is pre-selected by the effect
       // below). A box whose drives are all in use by the Droplet has nothing
@@ -803,6 +818,33 @@ export function StorageStep({
           adoptError={adoptError}
         />
 
+        {/* WARP-3515 / ADR-070 — what Droplet does with the drives prepared here.
+            A note, not a control: the wizard takes no action on recordings (no
+            silent allocation, nothing to switch). The allocation is shown and
+            changed later on Camera system › Recording storage. */}
+        {recordingsAuto && (
+          <div
+            className="dp-card !p-4 mt-6 flex items-start gap-3"
+            data-testid="recordings-auto-note"
+          >
+            <span className="flex-none h-9 w-9 rounded-lg bg-accent/10 text-accent flex items-center justify-center">
+              <ShieldCheck size={18} aria-hidden="true" />
+            </span>
+            <div className="min-w-0">
+              <p className="type-subheadline text-label-primary">
+                Camera recordings use an encrypted drive
+              </p>
+              <p className="type-caption-1 text-label-tertiary mt-0.5">
+                Once a drive is prepared, Droplet will automatically use an encrypted
+                drive for camera recordings, and size the space to what your cameras
+                need. Recordings never go on the system drive. Nothing in this step
+                changes that — you can see it, and choose a different drive, anytime
+                in Camera system &rsaquo; Recording storage.
+              </p>
+            </div>
+          </div>
+        )}
+
         <LearnMoreCard helpAnchor="storage">
           <p>
             Each drive can hold a different kind of file. Name them however
@@ -1068,11 +1110,13 @@ function RaidSection({
  * — drives in use — gets a reassuring, actionable message; anything else gets
  * a calm generic fallback.
  */
-function friendlyCreateError(err: unknown): string {
+export function friendlyCreateError(err: unknown): string {
   const raw = err instanceof Error ? err.message.toLowerCase() : "";
   // Operator breadcrumb — full cause in DevTools, never on screen.
   // eslint-disable-next-line no-console
   console.error("[storage-step:create]", err);
+  // WARP-3515 / ADR-070: a pool must be encrypted, which needs a TPM.
+  if (isTpmRequired(err)) return TPM_REQUIRED_MESSAGE;
   if (
     /in use|mounted|filesystem|contains|has data|partition|busy|not empty/.test(
       raw,
@@ -1186,6 +1230,9 @@ export function friendlyAdoptError(err: unknown): string {
   const raw = err instanceof Error ? err.message.toLowerCase() : "";
   // eslint-disable-next-line no-console
   console.error("[storage-step:adopt]", err);
+  // WARP-3515 / ADR-070: every adopted drive is encrypted, which needs a TPM —
+  // and a box without one refuses before it wipes anything.
+  if (isTpmRequired(err)) return TPM_REQUIRED_MESSAGE;
   if (/system disk|never adoptable|os\/boot|backs the os|boot disk/.test(raw)) {
     return "That's the Droplet's system disk — it can't be erased or adopted.";
   }

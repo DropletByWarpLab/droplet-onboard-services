@@ -421,9 +421,11 @@ describe("GET /api/cameras/reviews/:reviewId/preview (WARP-3509)", () => {
     expect(res.headers["content-type"]).toBe("video/mp4");
     expect(res.headers["cache-control"]).toBe("private, no-store");
     expect(Buffer.from(res.body as Buffer).equals(Buffer.from(MP4))).toBe(true);
-    // One call, `?format=mp4`: not the legacy `/preview.mp4` (404 on 0.17) and
-    // not the bare `/preview`, which Frigate answers with the ~10 MB gif.
-    expect(callLog()).toEqual([`GET ${FRIGATE}/api/review/${REVIEW_ID}/preview?format=mp4`]);
+    // The media call uses `?format=mp4`, then the audit resolves its camera.
+    expect(callLog()).toEqual([
+      `GET ${FRIGATE}/api/review/${REVIEW_ID}/preview?format=mp4`,
+      `GET ${FRIGATE}/api/review/${REVIEW_ID}`,
+    ]);
   });
 
   it("404 preview_not_found while Frigate has no preview yet (an in-progress review)", async () => {

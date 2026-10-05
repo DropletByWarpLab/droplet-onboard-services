@@ -14,6 +14,7 @@
 
 import type { JSX, ReactNode } from "react";
 import Link from "next/link";
+import { buildPmPath } from "@droplet/shared-types";
 
 import { PmIcon } from "@/components/projects/icons";
 import {
@@ -105,7 +106,7 @@ export function Deals({
                   the deal side here and from the project side below, so the
                   reader meets it whichever way round they arrived. */}
               {project ? (
-                <Link className="cr-link" href={`/projects?project=${project.id}`}>
+                <Link className="cr-link" href={buildPmPath({ p: project.identifier })}>
                   → {project.identifier}
                 </Link>
               ) : null}
@@ -129,7 +130,7 @@ export function Projects({ projects }: { projects: RecordProject[] }): JSX.Eleme
       {projects.map((p) => (
         <li key={p.id} className="cr-row">
           <span className="cr-row-k">
-            <Link className="cr-link" href={`/projects?project=${p.id}`}>
+            <Link className="cr-link" href={buildPmPath({ p: p.identifier })}>
               {p.name}
             </Link>
           </span>

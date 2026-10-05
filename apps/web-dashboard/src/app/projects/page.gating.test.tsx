@@ -37,6 +37,14 @@ vi.mock("@/components/Toast", () => ({
   useToast: () => ({ toast: vi.fn() }),
 }));
 
+// WARP-3522 — the page's state is the URL, so it reads `useSearchParams` (and
+// writes through the router). A bare /projects is an empty query string.
+vi.mock("next/navigation", () => ({
+  useSearchParams: () => new URLSearchParams(""),
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
+  usePathname: () => "/projects",
+}));
+
 vi.mock("@/lib/auth", () => ({
   useAuth: () => ({
     user: { id: "u1", username: "ada", displayName: "Ada", role: "owner" },
@@ -60,14 +68,24 @@ vi.mock("@/components/projects/usePm", () => ({
   useProjects: (...args: unknown[]) => useProjectsMock(...(args as [])),
   useSummary: () => ({ summary: undefined, error: undefined, isLoading: false, mutate: vi.fn() }),
   useProjectStates: () => ({ states: undefined, error: undefined, isLoading: false }),
-  useProjectItems: () => ({
+  useProjectLabels: () => ({ labels: undefined }),
+  // WARP-3522 — the page reads through the query API and the saved-view list.
+  useWorkItemQuery: () => ({
     items: undefined,
+    total: undefined,
+    counts: undefined,
+    stale: undefined,
+    effectiveFilter: undefined,
+    loadingMore: false,
+    truncated: false,
     error: undefined,
     isLoading: false,
-    mutate: vi.fn(),
-    key: null,
+    refresh: vi.fn(),
   }),
-  usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", tone: 0 }), users: [] }),
+  useWorkItemByKey: () => ({ item: undefined, error: undefined, mutate: vi.fn() }),
+  useSavedViews: () => ({ views: undefined, error: undefined, isLoading: false, mutate: vi.fn() }),
+  viewActions: () => ({}),
+  usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", tone: 0 }), people: [] }),
   // WARP-2717 — the department filter reads this. Undefined is the honest
   // stub: the real hook returns `data?.departments`, so "not loaded yet" and
   // "this box has no departments" are the same shape, and the page has to
