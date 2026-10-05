@@ -123,6 +123,131 @@ enum ArrayLevel {
   jbod
 }
 
+/// WARP-3514 / ADR-070 — what an allocation on a bay drive holds.
+///
+/// One value today. It is an enum rather than a free string so a second role
+/// (the dashboard's `usage.role` also knows `files`) is a reviewed schema
+/// change, not a typo that quietly creates a row nothing reads.
+enum StorageRole {
+  RECORDINGS
+}
+
+/// WARP-3514 — how the recordings slice is sized.
+///
+///   AUTO_RESERVED — an ext4 PROJECT QUOTA on `<mount>/nvr`, sized from the
+///                   measured per-camera bitrate and grown by the hourly
+///                   allocator. `reservedBytes` is the quota hard limit.
+///   FULL          — "whole drive": the quota equals the filesystem size, so
+///                   Frigate may use all of it. `reservedBytes` is that size.
+enum AllocationMode {
+  AUTO_RESERVED
+  FULL
+}
+
+/// WARP-3514 — where an allocation is in its life. EXPLICIT (handbook rule 10):
+/// never derived from "no migration row" / "quota is zero" style absence.
+///
+///   PENDING    row exists; the host has not yet confirmed the target + quota.
+///   MIGRATING  target applied; existing footage is being moved off the
+///              previous source (Frigate keeps recording to it until the flip).
+///   ACTIVE     Frigate records onto the slice.
+///   DEGRADED   recording, but something needs the owner (read-only, SMART
+///              failure, the slice cannot grow to the measured need, a failed
+///              migration awaiting retry).
+///   MISSING    the drive is not mounted; footage is NOT being written to the
+///              system disk (the boot guard sees to that).
+enum AllocationStatus {
+  PENDING
+  MIGRATING
+  ACTIVE
+  DEGRADED
+  MISSING
+}
+
+/// WARP-3514 / ADR-070 — the slice of an encrypted bay drive that holds camera
+/// recordings. Supersedes ADR-019 D2 ("nothing auto-assigns storage") FOR
+/// CAMERA RECORDINGS ONLY: Droplet measures the cameras, sizes the slice and
+/// allocates it without asking. Erasing a drive or deleting footage still needs
+/// the owner's explicit confirmation.
+///
+/// At most one RECORDINGS row exists at a time (the allocator enforces it; the
+/// DB only guarantees one row per filesystem). Switching the recordings drive
+/// replaces the row — the old filesystem is no longer the recordings target.
+///
+/// `fsUuid` is the FILESYSTEM uuid (the same key as `Drive.uuid` and the
+/// device-bridge's `uuid`), so the row survives a reboot or re-plug.
+model StorageAllocation {
+  id            String           @id @default(uuid())
+  fsUuid        String           @unique
+  role          StorageRole      @default(RECORDINGS)
+  mode          AllocationMode   @default(AUTO_RESERVED)
+  /// Quota hard limit in bytes (AUTO_RESERVED) or the filesystem size (FULL).
+  /// BIGINT: a multi-TB drive overflows INT4.
+  reservedBytes BigInt
+  status        AllocationStatus @default(PENDING)
+  /// Failed moves of footage onto this drive since it was last confirmed. Drives
+  /// the auto-retry schedule (1 h, 6 h, 24 h, then the row stays PENDING and the
+  /// owner is told); reset to 0 by a success or by the owner's explicit retry.
+  migrationFailures Int          @default(0)
+  /// When the most recent failed move ended: the retry clock. Null until one failed.
+  lastFailureAt DateTime?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  @@index([role, status])
+}
+
+/// WARP-3514 — one hourly reading of a camera's recording rate, the input to
+/// the allocator's sizing (p95 over the last 72 h). Rows older than 14 days
+/// are pruned by the sampler itself.
+///
+/// `camera` is Frigate's camera name as a plain string, not a relation: a
+/// sample must outlive a camera that is deleted mid-window, and the sizer
+/// simply ignores names that are no longer configured.
+model CameraBitrateSample {
+  id        String   @id @default(uuid())
+  camera    String
+  sampledAt DateTime @default(now())
+  /// Frigate's measured rate in MiB/hour. Frigate reports MiB (not MB); the
+  /// column keeps the unit it was measured in so nothing downstream has to
+  /// remember a conversion.
+  mbPerHour Float
+
+  @@index([camera, sampledAt])
+  @@index([sampledAt])
+}
+
+/// WARP-3514 — the closed set of conditions the hourly recordings-health check
+/// can raise. Mirrors the API's `warnings[].code` (lower-case there).
+enum RecordingsAlertCode {
+  DRIVE_MISSING
+  READ_ONLY
+  ON_SYSTEM_DISK
+  NEAR_FULL
+  CANNOT_GROW
+  SMART_FAILED
+  NOT_ENCRYPTED
+}
+
+/// WARP-3514 — per-condition outage state, so the owner hears about an outage
+/// ONCE, not once per hourly tick.
+///
+/// Persisted (not in-process like camera-storage's near-full edge) because the
+/// conditions here — a missing drive, recordings on the OS disk — last for days
+/// and an orchestrator restart must not re-page the owner for each of them.
+/// `active` + `since` are explicit columns; "was it announced" is `notifiedAt`,
+/// never inferred from the absence of a NotificationLog row.
+model RecordingsAlertState {
+  code       RecordingsAlertCode @id
+  /// True while the condition currently holds.
+  active     Boolean             @default(false)
+  /// When the CURRENT outage began; null while healthy.
+  since      DateTime?
+  /// When owner/admin were told about the CURRENT outage; null = not yet.
+  notifiedAt DateTime?
+  updatedAt  DateTime            @updatedAt
+}
+
 /// WARP-304: per-user persistent chat sessions for the /chat page.
 /// `userId` is the Nextcloud username from the auth middleware. The dashboard
 /// only ever lists / reads sessions for the requesting user — owner/admin do
@@ -5678,6 +5803,9 @@ model PmProject {
   properties PmCustomProperty[]
   /// WARP-3532 — webhooks scoped to this project (cascade with it).
   webhooks   PmWebhook[]
+  /// WARP-3527 — the import runs filed against this project. Cascade: a job is
+  /// a record ABOUT the project, with no meaning once it is gone.
+  importJobs PmImportJob[]
   /// WARP-3529 — the channels a SERVICE_DESK takes requests through. Always
   /// empty for a PROJECT (a trigger holds that).
   supportChannels PmSupportChannel[]
@@ -5867,6 +5995,17 @@ model PmWorkItem {
   /// Canonical "is archived" signal (WARP-884) — mirrors PmProject.isArchived.
   isArchived      Boolean      @default(false)
   archivedAt      DateTime?
+  /// WARP-3527 (ADR-069 WS-11) — provenance for an IMPORTED item: which tracker
+  /// it came from ("jira" | "asana" | "trello" | "linear" | "github" | "csv")
+  /// and its id THERE. Together with `projectId` this is the idempotency key —
+  /// a re-import finds the item and updates it instead of creating a twin.
+  ///
+  /// Both set or both NULL, pinned by the CHECK `PmWorkItem_external_both_or_neither`
+  /// in the migration (Prisma cannot express it). NULL is every natively-created
+  /// item; Postgres treats NULLs as distinct in a unique index, so the unique
+  /// below never constrains them.
+  externalSystem  String?
+  externalId      String?
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @default(now()) @updatedAt
 
@@ -5910,6 +6049,8 @@ model PmWorkItem {
   ticket PmTicket?
 
   @@unique([projectId, sequenceId])
+  /// WARP-3527 — the import idempotency key (see `externalSystem`).
+  @@unique([projectId, externalSystem, externalId])
   @@index([projectId, stateId, sortOrder])
   @@index([projectId, updatedAt(sort: Desc)])
   @@index([parentId])
@@ -6523,6 +6664,96 @@ model PmWebhookDelivery {
   @@unique([webhookId, sourceKey])
   /// The delivery log: newest first, per webhook.
   @@index([webhookId, createdAt(sort: Desc)])
+}
+
+/// WARP-3527 (ADR-069 WS-11) — which tracker's export a file is.
+///
+/// UPPERCASE, like PmRelationKind: wire enum, quoted in the dashboard's source
+/// picker and in the migration's partial index. `CSV` is the generic preset
+/// (any spreadsheet); the others carry a column preset (see
+/// `services/pm/import/presets.ts`).
+enum PmImportSource {
+  CSV
+  JIRA_CSV
+  ASANA_CSV
+  TRELLO_JSON
+  LINEAR_CSV
+  GITHUB_CSV
+}
+
+/// WARP-3527 — lifecycle of one import. An explicit enum, never derived from
+/// `finishedAt IS NULL` (CLAUDE.md "No guessing").
+///
+///   PREVIEWED ──run──► PENDING ──claim──► RUNNING ──► SUCCEEDED
+///        │                │                  │   └──► FAILED ──run (resume)──► PENDING
+///        └────────────────┴──────cancel──────┴──────► CANCELLED
+///
+/// PREVIEWED: the file is uploaded and parsed, the owner is looking at the
+/// mapping. PENDING: the owner pressed Run and no runner has claimed it yet
+/// (the `setImmediate` kick, or the cron tick if the process died between the
+/// two). RUNNING: a runner holds it and heartbeats. FAILED keeps the file so a
+/// resume picks up at `stats.cursor`.
+///
+enum PmImportJobStatus {
+  PENDING
+  PREVIEWED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+/// INVARIANTS the schema language cannot express (migration SQL, proven by
+/// `pm-import-export.pg.test.ts`):
+///   * `PmImportJob_projectId_active_key` — UNIQUE ("projectId") WHERE status IN
+///     ('PENDING','RUNNING'). One import at a time per project, so two runs can
+///     never race the same sequence counter or each other's parent links.
+///   * `PmImportJob_finished_matches_status` — `finishedAt` is set exactly when
+///     the status is terminal (SUCCEEDED | FAILED | CANCELLED).
+model PmImportJob {
+  id          String            @id @default(uuid())
+  projectId   String
+  project     PmProject         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  source      PmImportSource
+  status      PmImportJobStatus @default(PREVIEWED)
+  /// The uploaded file's display name, for the summary. Never a path.
+  fileName    String
+  fileBytes   Int
+  /// sha256 of the upload. Namespaces the synthetic external id of a row that
+  /// carries no id column, so re-importing the SAME file is still idempotent.
+  fileSha256  String
+  /// The owner's choices (column bindings, status/priority/people overrides,
+  /// options). The auto-suggestions are NOT stored — they depend on the
+  /// project's states and users as they are when the job runs.
+  mapping     Json              @default("{}")
+  /// Progress while running, the summary once finished: counts, per-reason
+  /// skips, the first issues, unknown assignees, `cursor` for resume.
+  stats       Json              @default("{}")
+  error       String?
+  /// A User.id string, not an FK — the PM attribution convention.
+  createdById String
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @default(now()) @updatedAt
+  startedAt   DateTime?
+  /// Last proof of life from the runner; a RUNNING job whose heartbeat is
+  /// stale is presumed dead (process restart) and failed by the sweep.
+  heartbeatAt DateTime?
+  finishedAt  DateTime?
+  file        PmImportJobFile?
+
+  @@index([projectId, createdAt(sort: Desc)])
+  @@index([status, updatedAt])
+}
+
+/// WARP-3527 — the uploaded bytes, kept ONLY while the job can still use them
+/// (previewing, running, or failed-and-resumable). A separate 1:1 table so no
+/// status poll or job list ever drags a 10 MB blob over the wire by accident.
+/// Deleted when the job reaches SUCCEEDED / CANCELLED, and by the sweep for
+/// abandoned previews.
+model PmImportJobFile {
+  jobId String      @id
+  job   PmImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  bytes Bytes
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
