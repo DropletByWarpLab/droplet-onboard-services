@@ -3097,6 +3097,22 @@ export function getRecordingHlsUrl(
   return `${BASE}/api/cameras/${encodeURIComponent(cameraName)}/playback.m3u8?after=${after}&before=${before}`;
 }
 
+/**
+ * Returns the proxied HLS m3u8 URL for an event's clip (WARP-3509).
+ *
+ * The box works out the window — the event's start and end plus the
+ * pre/post-capture padding, up to now for an event still in progress — so the
+ * client names the event, not a time range. Frigate's own clip.mp4 is a
+ * fragmented mp4 that a <video src> cannot read a duration from or seek in; this
+ * plays the same footage the way the Recordings page does. `refresh` re-keys
+ * the URL so the player loads the playlist again (hls.js reloads only when its
+ * source string changes), which is how an event in progress plays further.
+ */
+export function getEventHlsUrl(eventId: string, refresh = 0): string {
+  const query = refresh > 0 ? `?refresh=${refresh}` : "";
+  return `${BASE}/api/cameras/events/${encodeURIComponent(eventId)}/playback.m3u8${query}`;
+}
+
 // --- Per-camera settings (Phase 4.1) ---
 
 export async function fetchCameraSettings(

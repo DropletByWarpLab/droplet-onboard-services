@@ -942,8 +942,10 @@ export async function getReviewsFiltered(
       audio,
       zones,
       detectionIds,
-      // Frigate serves preview clips at /api/review/<id>/preview.{mp4,gif}.
-      // We proxy through the orchestrator so camera/file URLs stay LAN-side.
+      // Frigate serves the preview clip at /api/review/<id>/preview?format=mp4|gif
+      // and the thumbnail as the /clips/review/ file named by the review's
+      // thumb_path (WARP-3509). We proxy both through the orchestrator so
+      // camera/file URLs stay LAN-side.
       previewUrl: `/api/cameras/reviews/${encodeURIComponent(id)}/preview`,
       thumbnailUrl: `/api/cameras/reviews/${encodeURIComponent(id)}/thumbnail`,
     };

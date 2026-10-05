@@ -50,6 +50,8 @@ function mapServiceError(err: unknown, res: Response): boolean {
     case "department_not_found":
     // ADR-048 — same shape: the referenced row is simply not there.
     case "company_not_found":
+    // WARP-3521 — a `cycle_id` that names no cycle.
+    case "cycle_not_found":
       res.status(404).json({ error: msg });
       return true;
     case "invalid_parent":
@@ -65,6 +67,9 @@ function mapServiceError(err: unknown, res: Response): boolean {
     case "department_not_assignable":
     // WARP-3365 — an external guest cannot lead a project.
     case "lead_is_guest":
+    // WARP-3521 — a `cycle_id` naming a cycle of ANOTHER project: the row exists
+    // and the request is well-formed, the CHOICE is not processable.
+    case "invalid_cycle":
       res.status(422).json({ error: msg });
       return true;
     case "identifier_taken":
@@ -74,6 +79,10 @@ function mapServiceError(err: unknown, res: Response): boolean {
     // it is on its way out. A conflict with the resource's current state, the
     // same class as state_is_last, not a validation failure.
     case "department_archived":
+    // WARP-3521 — the cycle is finished and takes no new work: the cycle's
+    // current state refuses an otherwise valid request, the same class as
+    // state_is_last.
+    case "cycle_completed":
       // A project must keep at least one state and its sole default landing
       // state — deleting the last/only-default one is a conflict (409), not a
       // missing resource.
@@ -215,6 +224,9 @@ const workItemCreateSchema = z.object({
     // claiming "the zod schemas reject '' at the boundary" was true of
     // `company_id` and not of this one.
     department_id: z.string().min(1).max(64).optional(),
+  // WARP-3521 — plan the new item into a cycle of this project. `.min(1)` for
+  // the reason department_id carries it: "" is a 400, not a falsy skip.
+  cycle_id: z.string().min(1).max(64).optional(),
   start_date: dateField.optional(),
   due_date: dateField.optional(),
 });
@@ -232,6 +244,9 @@ const workItemPatchSchema = z.object({
   // WARP-2724 — `.min(1)`, and `null` stays the way to CLEAR an
     // assignment. "" was neither: it skipped the guard and disconnected.
     department_id: z.string().min(1).max(64).nullable().optional(),
+  // WARP-3521 — `null` takes the item out of its cycle (back to the backlog),
+  // absent leaves it, an id plans it into that cycle.
+  cycle_id: z.string().min(1).max(64).nullable().optional(),
   start_date: dateField.nullable().optional(),
   due_date: dateField.nullable().optional(),
   // `sortOrder` is a Float column: a kanban drag inserts BETWEEN two cards
@@ -644,6 +659,7 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
           labelIds: d.label_ids,
           parentId: d.parent_id,
           departmentId: d.department_id,
+          cycleId: d.cycle_id,
           startDate: d.start_date,
           dueDate: d.due_date,
         });
@@ -754,6 +770,7 @@ export function createPmNativeRouter(prisma: PrismaClient): Router {
           labelIds: d.label_ids,
           parentId: d.parent_id,
           departmentId: d.department_id,
+          cycleId: d.cycle_id,
           // `undefined` leaves the date alone, `null` clears it.
           startDate: d.start_date,
           dueDate: d.due_date,
