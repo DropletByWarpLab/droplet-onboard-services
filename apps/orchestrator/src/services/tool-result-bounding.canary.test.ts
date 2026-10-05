@@ -97,6 +97,11 @@ const NOT_A_CURSOR: Record<string, string> = {
   nextStorage: "routes/access.ts — the storage target being switched TO",
   nextModel: "routes/models.ts — the model id being switched TO",
   nextEnabled: "routes/settings.ts — the boolean feature state being switched TO",
+  nextResponseMins: "support/sla-clock.service.ts — the numeric customer-response SLA target in minutes",
+  nextResponseStartedAt: "support/sla-clock.service.ts — when the current customer-response SLA clock started, an ISO timestamp",
+  nextResponsePausedMs: "support/sla-clock.service.ts — the accumulated paused duration at the customer-response clock's start, in milliseconds",
+  nextResponseDueAt: "support/sla-clock.service.ts — the customer-response promise's deadline, a timestamp or null",
+  nextResponse: "support/sla-engine.ts — a metric name in the finite firstResponse/nextResponse/resolution deadline map",
 };
 
 function tsFilesUnder(dir: string): string[] {

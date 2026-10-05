@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { syncTicketSla, sweepTicketSlas } from "./sla-clock.service.js";
+import { parseSlaTerms } from "./sla-engine.js";
 const at = (time: string) => new Date(`2026-10-05T${time}:00Z`);
 function fixture() {
   const ticket: any = { slaTargets: null, slaStatus: "NONE", firstRespondedAt: null, solvedAt: null, slaPausedMs: 0n, slaPausedAt: null };
@@ -73,6 +74,18 @@ describe("transactional ticket SLA materialisation", () => {
     await syncTicketSla(f.tx, "t1", at("10:00"), "requester");
     f.row.state.slaClock = "RUNNING"; await syncTicketSla(f.tx, "t1", at("11:00"), "state");
     expect(f.ticket.nextResponseDueAt.toISOString()).toBe("2026-10-05T11:30:00.000Z");
+  });
+  it("a late requester timestamp cannot subtract pause time from the next-response snapshot", async () => {
+    const f = fixture(); await syncTicketSla(f.tx, "t1", at("09:00"), "create");
+    f.ticket.firstRespondedAt = at("09:05"); await syncTicketSla(f.tx, "t1", at("09:05"), "reply");
+    f.row.state.slaClock = "PAUSED"; await syncTicketSla(f.tx, "t1", at("09:20"), "state");
+
+    await syncTicketSla(f.tx, "t1", at("09:10"), "requester");
+
+    const terms = parseSlaTerms(f.ticket.slaTargets);
+    expect(terms.nextResponseStartedAt).toBe("2026-10-05T09:10:00.000Z");
+    expect(terms.nextResponsePausedMs).toBe(0);
+    expect(f.ticket.nextResponseDueAt.toISOString()).toBe("2026-10-05T09:40:00.000Z");
   });
   it("applies a priority escalation exactly once and keeps the breached promise", async () => {
     const f = fixture(); f.policy.escalation = [{ on: "BREACHED", metric: "any", actions: [{ type: "raise_priority" }] }];

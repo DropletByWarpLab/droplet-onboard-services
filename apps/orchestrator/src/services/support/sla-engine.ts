@@ -36,13 +36,18 @@ export function parseSlaTerms(input: unknown): SlaTerms {
 export function evaluateSla(input: SlaClockInput): SlaClockResult {
   if (!Number.isSafeInteger(input.pausedMs) || input.pausedMs < 0 || !Number.isFinite(input.createdAt.getTime()) || !Number.isFinite(input.now.getTime())) throw new RangeError("invalid_sla_clock");
   const { terms, now } = input;
-  const accrued = input.pausedAt ? businessMsBetween(input.pausedAt, now, terms.calendar) : 0;
-  const pausedMs = input.pausedMs + (input.clock === "RUNNING" ? accrued : 0);
-  const pausedAt = input.clock === "RUNNING" ? null : input.pausedAt ?? now;
+  // A mapper can read a ticket clock using wall time while a transaction or
+  // fixture supplied a later pause instant. Future pause intervals earn no
+  // negative credit. Once stopped, the open pause ends at solvedAt and cannot
+  // keep accruing as later readers evaluate the settled ticket.
+  const pauseEnd = input.clock === "STOPPED" ? input.solvedAt ?? now : now;
+  const accrued = input.pausedAt ? Math.max(0, businessMsBetween(input.pausedAt, pauseEnd, terms.calendar)) : 0;
+  const pausedMs = input.pausedMs + (input.clock === "PAUSED" ? 0 : accrued);
+  const pausedAt = input.clock === "PAUSED" ? input.pausedAt ?? now : null;
   // While paused, the remaining working time is measured at the pause instant.
-  const at = input.pausedAt ?? now;
-  const effectiveAt = input.clock === "RUNNING" ? now : pausedAt!;
-  const deadlinePaused = pausedMs + (input.clock === "RUNNING" ? 0 : accrued);
+  const at = input.clock === "PAUSED" ? pausedAt! : input.clock === "STOPPED" ? input.solvedAt ?? now : now;
+  const effectiveAt = at;
+  const deadlinePaused = pausedMs + (input.clock === "PAUSED" ? accrued : 0);
   const targets: Array<[SlaMetric, Date, number, number, boolean]> = [
     ["firstResponse", input.createdAt, terms.firstResponseMins ?? 0, deadlinePaused, input.firstRespondedAt === null],
     ["nextResponse", new Date(terms.nextResponseStartedAt ?? input.createdAt), terms.nextResponseMins ?? 0, Math.max(0, deadlinePaused - terms.nextResponsePausedMs), terms.nextResponseStartedAt !== null],
@@ -64,7 +69,7 @@ export function evaluateSla(input: SlaClockInput): SlaClockResult {
     if (ranks[candidate] > ranks[status]) { status = candidate; metric = name; }
     if (active) {
       dues[name] = due;
-      const left = Math.max(0, mins * 60000 - Math.max(0, businessMsBetween(start, at, terms.calendar) - Math.max(0, input.pausedMs - (name === "nextResponse" ? terms.nextResponsePausedMs : 0))));
+      const left = Math.max(0, mins * 60000 - Math.max(0, businessMsBetween(start, at, terms.calendar) - Math.max(0, pausedMs - (name === "nextResponse" ? terms.nextResponsePausedMs : 0))));
       remaining = remaining === null ? left : Math.min(remaining, left);
     }
   }

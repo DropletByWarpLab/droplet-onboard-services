@@ -23,6 +23,38 @@ describe("SLA clock promises", () => {
     expect(resumed.firstResponseDueAt).toEqual(paused.firstResponseDueAt);
     expect(resumed.slaStatus).toBe("ON_TRACK");
   });
+  it("does not turn a future pause instant into negative pause credit", () => {
+    const result = evaluateSla(base({
+      now: date("2026-10-05T09:00:00Z"),
+      clock: "PAUSED",
+      pausedAt: date("2026-10-05T09:20:00Z"),
+    }));
+    expect(result.slaStatus).toBe("PAUSED");
+    expect(result.slaPausedMs).toBe(0n);
+    expect(result.firstResponseDueAt?.toISOString()).toBe("2026-10-05T10:00:00.000Z");
+  });
+  it("shifts an active metric through a long pause and freezes that pause when stopped", () => {
+    const pausedAt = date("2026-10-05T09:20:00Z");
+    const longPause = evaluateSla(base({
+      now: date("2026-11-04T09:20:00Z"),
+      clock: "PAUSED",
+      pausedAt,
+    }));
+    expect(longPause.slaStatus).toBe("PAUSED");
+    expect(longPause.remainingBusinessMs).toBe(40 * 60000);
+    expect(longPause.firstResponseDueAt?.toISOString()).toBe("2026-11-04T10:00:00.000Z");
+
+    const stopped = evaluateSla(base({
+      now: date("2026-10-10T12:00:00Z"),
+      clock: "STOPPED",
+      pausedAt,
+      solvedAt: date("2026-10-05T11:20:00Z"),
+    }));
+    expect(stopped.slaStatus).toBe("MET");
+    expect(stopped.slaPausedMs).toBe(120n * 60000n);
+    expect(stopped.slaPausedAt).toBeNull();
+    expect(stopped.firstResponseDueAt?.toISOString()).toBe("2026-10-05T12:00:00.000Z");
+  });
   it("a weekend Pending interval costs only its open business minutes", () => {
     const calendar = { timezone: "Europe/Bucharest", windows: [1,2,3,4,5].map((day) => ({ day, start: "09:00", end: "17:00" })), holidays: [] };
     const result = evaluateSla(base({ createdAt: date("2026-10-23T13:00:00Z"), pausedAt: date("2026-10-23T13:30:00Z"), now: date("2026-10-26T08:00:00Z"), terms: { ...terms, calendar } }));

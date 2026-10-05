@@ -51,7 +51,7 @@ export async function syncTicketSla(
   const beforeReply = event === "reply" ? evaluateSla(input) : null;
   if (event === "reply") terms = { ...terms, nextResponseStartedAt: null };
   if (event === "requester" && ticket.firstRespondedAt !== null && terms.nextResponseStartedAt === null) terms = { ...terms, nextResponseStartedAt: now.toISOString(),
-    nextResponsePausedMs: Number(ticket.slaPausedMs) + (ticket.slaPausedAt ? businessMsBetween(ticket.slaPausedAt, now, terms.calendar) : 0) };
+    nextResponsePausedMs: Number(ticket.slaPausedMs) + (ticket.slaPausedAt ? Math.max(0, businessMsBetween(ticket.slaPausedAt, now, terms.calendar)) : 0) };
   const result = evaluateSla({ ...input, terms });
   if (beforeReply?.slaStatus === "BREACHED") { result.slaStatus = "BREACHED"; result.metric = beforeReply.metric; }
   if (event === "reply" && result.slaStatus === "ON_TRACK") terms = { ...terms, notified: terms.notified?.filter((s) => s === "BREACHED") ?? [] };
