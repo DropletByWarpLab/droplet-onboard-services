@@ -156,6 +156,13 @@ def _run_hook(tmp_path: Path, extra_env: dict | None = None):
     slp.write_text("#!/usr/bin/env bash\nexit 0\n",
                    encoding="utf-8", newline="\n")
     os.chmod(slp, 0o755)
+    # occ_www probes su before falling back to the ordinary PHP runner.
+    # A real unprivileged Linux su consults PAM and delays every failed probe;
+    # it must never switch users or depend on the host's authentication here.
+    su = stub_dir / "su"
+    su.write_text("#!/usr/bin/env bash\nexit 1\n",
+                  encoding="utf-8", newline="\n")
+    os.chmod(su, 0o755)
 
     log = tmp_path / "cmd-log.txt"
     if not log.exists():
@@ -191,6 +198,25 @@ def test_hook_passes_bash_syntax_check():
     proc = subprocess.run([BASH, "-n", str(SCRIPT)],
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
+
+
+def test_hook_fixture_never_calls_host_su(tmp_path, monkeypatch):
+    host_bin = tmp_path / "host-bin"
+    host_bin.mkdir()
+    host_su_called = tmp_path / "host-su-called"
+    host_su = host_bin / "su"
+    host_su.write_text(
+        '#!/usr/bin/env bash\nprintf called > "$HOST_SU_CALLED"\nexit 1\n',
+        encoding="utf-8", newline="\n",
+    )
+    os.chmod(host_su, 0o755)
+    monkeypatch.setenv("PATH", str(host_bin) + os.pathsep + os.environ["PATH"])
+    proc, cmds = _run_hook(tmp_path, {"HOST_SU_CALLED": _posix(host_su_called)})
+    assert proc.returncode == 0, proc.stderr
+    # The hook still executes its ordinary-user fallback, while its fixture
+    # must not ask the host's su/PAM to switch users or wait for authentication.
+    assert any("app:install dicomviewer" in cmd for cmd in cmds)
+    assert not host_su_called.exists(), "hook fixture invoked the host's su"
 
 
 def test_hook_enables_files_external_next_to_groupfolders(tmp_path):
