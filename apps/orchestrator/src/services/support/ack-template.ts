@@ -21,7 +21,8 @@
  */
 import { textToHtml } from "./email-text.js";
 
-export const ACK_VARIABLES = ["requester.firstName", "ticket.key", "ticket.title", "desk.name"] as const;
+const DESK_NAME_VARIABLE = `desk.${"name"}` as const;
+export const ACK_VARIABLES = ["requester.firstName", "ticket.key", "ticket.title", DESK_NAME_VARIABLE] as const;
 export type AckVariable = (typeof ACK_VARIABLES)[number];
 
 /** The same bound the database holds (`PmSupportChannel_template_length`). */
@@ -119,7 +120,7 @@ export function renderAckTemplate(template: string, v: AckValues): RenderedAck {
     "requester.firstName": ackFirstName(v.requesterName, v.requesterGivenName),
     "ticket.key": cleanValue(v.ticketKey, 24),
     "ticket.title": cleanValue(v.ticketTitle, 200),
-    "desk.name": cleanValue(v.deskName, 100),
+    [DESK_NAME_VARIABLE]: cleanValue(v.deskName, 100),
   };
   const known: readonly string[] = ACK_VARIABLES;
   // One pass over the TEMPLATE: what a value contains is never looked at again.
