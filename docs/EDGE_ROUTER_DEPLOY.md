@@ -16,7 +16,8 @@ Checkout on the box: `/home/droplet/edge-platform`.
 | R0b box image | operator, Linux build host with Docker, any | `droplet-image flash` checks the image before writing |
 | R1 router flash | operator, laptop on router p2 | `/etc/droplet-build`; router `scripts/verify.sh` |
 | R2 cabling | operator, physical | router LAN port link up |
-| R3 box first boot | unattended, box, `droplet-firstboot.service` | `systemctl status droplet-firstboot.service` |
+| R3 box first boot | unattended, box, `droplet-firstboot.service` (against the bundled router container) | local console: `systemctl status droplet-firstboot.service` |
+| R3b SSH access | operator at the box console, then dashboard owner | `ssh droplet@192.168.9.10 true` |
 | R4 pair | operator, from a machine that can reach both | `setup.sh` exits 0 (exit 1 names the failure) |
 | R5 end-to-end | operator, box as `droplet` + router | checks listed below |
 | R6 later deploys | operator, box as `droplet` | `systemctl start droplet-deploy.service` exit 0 |
@@ -123,7 +124,7 @@ is not built: WARP-3869, WARP-3870, WARP-3871.
 ```bash
 # box, as droplet
 cd /home/droplet/edge-platform && ./scripts/verify.sh         # "Routing -> router auth" must pass
-sudo droplet-host-units audit                                  # exit 0
+sudo droplet-host-units audit                                  # exit 0 (unverified, check on the reflash: droplet may lack passwordless sudo outside a deploy)
 systemctl --failed                                             # no droplet-* units
 cat /var/lib/droplet/watchdog/status.json                      # router_auth: ok
 nslookup <box-fqdn> 192.168.9.1                                # resolves to the box (unverified: FQDN and answer are deployment-specific)
@@ -154,7 +155,7 @@ Follow droplet-edge-router `docs/OPERATIONS.md` (sysupgrade).
 - Without `-n`: `/etc/droplet` survives and the password is kept (requires
   droplet-edge-router #40, WARP-3837). No re-pair needed.
 - With `-n`: first boot mints a new password. Re-pair (R4).
-- Leaked password: on the router `sh /rom/etc/uci-defaults/99-droplet-edge-rpc --rotate`
+- Leaked password: on the router `sh /rom/etc/uci-defaults/99-droplet-edge-rpc --rotate` (unverified: no `--rotate` on router `main`; it comes with #40)
   (requires #40), then re-pair (R4).
 
 ## Troubleshooting
