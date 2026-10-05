@@ -1238,6 +1238,13 @@ the same with `"module": "crm"` / `"money"`, WARP-3365). The one exception
 assigned to them (the same 404 for any other item, existing or not). Clients hide
 the entry rather than show the error.
 
+**Service desk (WARP-3528, ADR-069).** A service desk is a project of kind
+`SERVICE_DESK` and a ticket is a work item in one, served by `/api/support/*` and
+never by these routes. Every `/api/mobile/pm/*` and `/api/pm/*` route treats a
+desk, its states and labels, its tickets, their comments, history and links as
+not existing (the same 404 as an unknown id), and no list or summary counts them.
+The contract below is unchanged.
+
 ### `GET /api/mobile/pm/workspaces`
 
 List workspaces visible to the caller. Used for `workspace_slug`
