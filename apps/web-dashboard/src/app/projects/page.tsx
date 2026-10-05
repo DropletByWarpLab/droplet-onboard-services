@@ -9,10 +9,9 @@
  * WARP-3522 — the page's state is the URL. Project, tab, saved view, filter and
  * the open drawer are all read from `?p=&view=&item=&v=&f=` and every change is
  * a navigation (`useProjectsUrl`), so a link opens exactly this screen and Back /
- * Forward walk it. And the page no longer filters what it holds: the board and
- * the list read through `POST /api/pm/work-items/query`, which runs the filter
- * (the shared DSL) on the server — the same filter a saved view stores and the
- * assistant will send.
+ * Forward walk it. The filter runs through `POST /api/pm/work-items/query` on
+ * the server; layouts consume its rows or admitted IDs — the same filter a
+ * saved view stores and the assistant will send.
  */
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react";
@@ -64,11 +63,14 @@ import { ViewsIndex } from "@/components/projects/ViewsIndex";
 import { EMPTY_FILTER, type ChipLookups } from "@/components/projects/filter-model";
 import { useProjectsUrl } from "@/components/projects/useProjectsUrl";
 import { DetailDrawer } from "@/components/projects/detail";
+import { CalendarView } from "@/components/projects/calendar/CalendarView";
+import { TimelineView } from "@/components/projects/timeline/TimelineView";
+import { MyWorkView } from "@/components/projects/mywork/MyWorkView";
 import { NewItemModal, NewProjectModal } from "@/components/projects/modals";
 
 // ── URL ↔ page vocabulary ───────────────────────────────────────────────────
 
-const PROJECT_TABS: readonly ProjectView[] = ["board", "list", "cycles", "modules"];
+const PROJECT_TABS: readonly ProjectView[] = ["board", "list", "calendar", "timeline", "cycles", "modules"];
 
 /** The tab a `view=` names; anything else is the board. */
 function tabOf(view: string | null): ProjectView {
@@ -76,14 +78,13 @@ function tabOf(view: string | null): ProjectView {
 }
 
 /** A tab that is a layout a view can be saved in. */
-function layoutOfTab(tab: ProjectView): "BOARD" | "LIST" | null {
-  return tab === "board" ? "BOARD" : tab === "list" ? "LIST" : null;
+function layoutOfTab(tab: ProjectView): PmViewLayout | null {
+  return tab === "board" ? "BOARD" : tab === "list" ? "LIST" : tab === "calendar" ? "CALENDAR" : tab === "timeline" ? "TIMELINE" : null;
 }
 
-/** The tab a saved layout opens in. TABLE, CALENDAR and TIMELINE are accepted
- *  and stored (WS-6b, WS-7 draw them) but cannot be drawn yet: they open as the list. */
-function tabOfLayout(layout: PmViewLayout): "board" | "list" {
-  return layout === "BOARD" ? "board" : "list";
+/** The tab a saved layout opens in. TABLE opens as the list until WS-6b. */
+function tabOfLayout(layout: PmViewLayout): ProjectView {
+  return layout === "BOARD" ? "board" : layout === "CALENDAR" ? "calendar" : layout === "TIMELINE" ? "timeline" : "list";
 }
 
 /** Brief §3.9, verbatim for one; counted for several. */
@@ -179,14 +180,16 @@ function ProjectsWorkspace(): JSX.Element {
     !url.p && url.v && !isPmBuiltinViewId(url.v)
       ? savedViews?.find((v) => v.id === url.v && v.projectId === null)
       : undefined;
-  type Mode = "index" | "views" | "workspace" | "project";
+  type Mode = "index" | "views" | "workspace" | "project" | "my-work";
   const mode: Mode = url.p
     ? "project"
-    : url.view === "views"
-      ? "views"
-      : url.view === "workspace" || crossViewInUrl
-        ? "workspace"
-        : "index";
+    : url.view === "my-work"
+      ? "my-work"
+      : url.view === "views"
+        ? "views"
+        : url.view === "workspace" || crossViewInUrl
+          ? "workspace"
+          : "index";
   const tab: ProjectView = mode === "project" ? tabOf(url.view) : "list";
 
   // ── the active view and the filter ──
@@ -327,6 +330,7 @@ function ProjectsWorkspace(): JSX.Element {
   };
   const openWorkspace = () => go({ p: null, view: "workspace", v: null, f: null, item: null }, "push");
   const openViewsIndex = () => go({ p: null, view: "views", v: null, f: null, item: null }, "push");
+  const openMyWork = () => go({ p: null, view: "my-work", v: null, f: null, item: null }, "push");
   const switchTab = (next: ProjectView) => go({ view: next === "board" ? null : next }, "push");
   const pickView = (id: string) => {
     setNotice(null);
@@ -340,6 +344,23 @@ function ProjectsWorkspace(): JSX.Element {
       },
       "replace",
     );
+  };
+
+  // The server query supplies the admitted IDs; schedule views never apply a
+  // second client filter. Include each row in the revision so a different
+  // result with the same size and newest timestamp still refreshes Timeline.
+  const visibleIds = useMemo(
+    () => (filterActive ? new Set(allItems.map((i) => i.id)) : null),
+    [allItems, filterActive],
+  );
+  const itemsRevision = useMemo(
+    () => JSON.stringify(allItems.map((i) => [i.id, i.updatedAt])),
+    [allItems],
+  );
+  const refreshAfterSchedule = async () => {
+    await query.refresh();
+    void mutateProjects();
+    void mutateSummary();
   };
 
   const refreshAll = async () => {
@@ -439,11 +460,13 @@ function ProjectsWorkspace(): JSX.Element {
         : null;
 
   const headerTitle =
-    mode === "project" ? (project?.name ?? "Projects") : mode === "workspace" ? "All projects" : mode === "views" ? "Views" : "Projects";
+    mode === "project" ? (project?.name ?? "Projects") : mode === "workspace" ? "All projects" : mode === "views" ? "Views" : mode === "my-work" ? "My work" : "Projects";
   const headerSub =
     mode === "index"
       ? `${summary?.activeProjects ?? projects?.filter((p) => !p.archived).length ?? 0} projects · ${summary?.itemsOpen ?? 0} items open`
-      : mode === "project"
+      : mode === "my-work"
+        ? "Your open work across every project"
+        : mode === "project"
         ? project
           ? `${project.openCount} open · ${project.doneCount} done`
           : undefined
@@ -466,6 +489,9 @@ function ProjectsWorkspace(): JSX.Element {
         )}
         <button className="btn" type="button" onClick={openViewsIndex}>
           <PmIcon name="filter" size={14} /> Views
+        </button>
+        <button className="btn" type="button" onClick={openMyWork}>
+          <PmIcon name="user" size={14} /> My work
         </button>
         {refreshButton}
       </>
@@ -502,7 +528,7 @@ function ProjectsWorkspace(): JSX.Element {
         )}
         {refreshButton}
       </>
-    ) : (
+    ) : mode === "my-work" ? null : (
       refreshButton
     );
 
@@ -511,11 +537,11 @@ function ProjectsWorkspace(): JSX.Element {
       <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 14 }}>
         <div className="pm-row" style={{ justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           {mode === "project" ? <ViewSwitcher view={tab} onView={switchTab} /> : <span className="pm-scope-label">Every project</span>}
-          {(mode === "workspace" || tab === "board" || tab === "list") && (
+          {(mode === "workspace" || layoutOfTab(tab) !== null) && (
             <FilterBar scope={editorOptions.scope} filter={filter} onChange={writeFilter} options={editorOptions} lookups={lookups} />
           )}
         </div>
-        {(mode === "workspace" || tab === "board" || tab === "list") && (
+        {(mode === "workspace" || layoutOfTab(tab) !== null) && (
           <>
             <ViewChips
               views={chipItems}
@@ -573,6 +599,28 @@ function ProjectsWorkspace(): JSX.Element {
             projects={mode === "workspace" ? (projects ?? []) : undefined}
             onRetry={() => void refreshAll()}
             onClearFilters={() => writeFilter(EMPTY_FILTER)}
+          />
+        )}
+        {tab === "calendar" && mode === "project" && (
+          <CalendarView
+            items={allItems}
+            domain={boardDomain}
+            readOnly={readOnly}
+            onOpen={(i) => openItem(i.key)}
+            onChanged={refreshAfterSchedule}
+            onNewItem={() => setModal("newitem")}
+          />
+        )}
+        {tab === "timeline" && mode === "project" && project && (
+          <TimelineView
+            projectId={project.id}
+            visibleIds={visibleIds}
+            revision={itemsRevision}
+            domain={boardDomain}
+            readOnly={readOnly}
+            onOpen={(i) => openItem(i.key)}
+            onChanged={refreshAfterSchedule}
+            onNewItem={() => setModal("newitem")}
           />
         )}
         {tab === "cycles" && mode === "project" && <PlaceholderView kind="cycles" />}
@@ -660,6 +708,7 @@ function ProjectsWorkspace(): JSX.Element {
               </div>
             )}
             {(mode === "workspace" || (mode === "project" && !projectMissing && (project || (!projErr && projLoading)))) && listing}
+            {mode === "my-work" && <MyWorkView />}
           </div>
         </div>
       </ShellPage>

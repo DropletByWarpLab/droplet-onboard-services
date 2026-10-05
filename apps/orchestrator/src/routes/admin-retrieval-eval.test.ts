@@ -16,7 +16,9 @@
  *     BEFORE the heavy lazy retrieval imports;
  *   - human callers keep today's behavior: their own username scopes the
  *     search and ?user= is ignored entirely;
- *   - the production 404 gate is unchanged and still runs first.
+ *   - WARP-3609: the route is gated on the explicit RAG_EVAL_ENABLED flag
+ *     (NOT NODE_ENV, which the orchestrator never sets) and the rag-eval
+ *     principal may name ONLY the configured RAGAS_EVAL_USER.
  *
  * Harness: req.user injected upstream of the router (same pattern as
  * egress-audit.routes.test.ts); the lazily-imported retrieval modules are
@@ -34,6 +36,10 @@ vi.mock("../config.js", () => ({
     AUTH_ENABLED: true,
     NEXTCLOUD_URL: "http://nextcloud.test",
     SERVICE_TOKEN_RAG_EVAL: "",
+    // WARP-3609 — mutable so the gate tests can flip them. Enabled + pinned
+    // to the seeded fixture account for the existing scenarios below.
+    RAG_EVAL_ENABLED: true,
+    RAGAS_EVAL_USER: "eval-fixtures",
     agentMaxIter: { defaultIter: 5, capIter: 10 },
   },
 }));
@@ -78,6 +84,7 @@ vi.mock("../services/reranker.client.js", () => ({
 }));
 
 import { createAdminRetrievalEvalRouter } from "./admin-retrieval-eval.js";
+import { config } from "../config.js";
 import type { AuthUser } from "../middleware/auth.js";
 
 function mkUser(role: AuthUser["role"], id = `user-${role}`, username = id): AuthUser {
@@ -98,6 +105,8 @@ function buildApp(user: AuthUser) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  (config as any).RAG_EVAL_ENABLED = true;
+  (config as any).RAGAS_EVAL_USER = "eval-fixtures";
   mockEmbed.mockResolvedValue([[0.1, 0.2, 0.3]]);
   mockSearchByVector.mockResolvedValue([]);
   mockSearchHybrid.mockResolvedValue([]);
@@ -161,7 +170,7 @@ describe("guard — requireRoleOrService('_service:rag-eval', 'owner', 'admin')"
 
   it("admits the _service:rag-eval principal (reaches the handler)", async () => {
     const res = await request(buildApp(RAG_EVAL)).get(
-      "/api/admin/retrieval-eval/search?q=test&variant=vector&user=alice",
+      "/api/admin/retrieval-eval/search?q=test&variant=vector&user=eval-fixtures",
     );
     expect(res.status).toBe(200);
   });
@@ -170,21 +179,21 @@ describe("guard — requireRoleOrService('_service:rag-eval', 'owner', 'admin')"
 describe("eval-user scoping", () => {
   it("scopes the rag-eval principal's search to the explicit ?user=", async () => {
     const res = await request(buildApp(RAG_EVAL)).get(
-      "/api/admin/retrieval-eval/search?q=test&variant=vector&user=alice",
+      "/api/admin/retrieval-eval/search?q=test&variant=vector&user=eval-fixtures",
     );
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ results: [] });
     expect(mockSearchByVector).toHaveBeenCalledTimes(1);
-    expect(mockSearchByVector.mock.calls[0][1]).toMatchObject({ userId: "alice" });
+    expect(mockSearchByVector.mock.calls[0][1]).toMatchObject({ userId: "eval-fixtures" });
   });
 
   it("scopes the rrf arm to the explicit ?user= too", async () => {
     const res = await request(buildApp(RAG_EVAL)).get(
-      "/api/admin/retrieval-eval/search?q=test&variant=rrf&user=alice",
+      "/api/admin/retrieval-eval/search?q=test&variant=rrf&user=eval-fixtures",
     );
     expect(res.status).toBe(200);
     expect(mockSearchHybrid).toHaveBeenCalledTimes(1);
-    expect(mockSearchHybrid.mock.calls[0][1]).toMatchObject({ userId: "alice" });
+    expect(mockSearchHybrid.mock.calls[0][1]).toMatchObject({ userId: "eval-fixtures" });
   });
 
   it("human admin keeps their OWN corpus — ?user= is ignored entirely", async () => {
@@ -208,14 +217,89 @@ describe("eval-user scoping", () => {
   });
 });
 
-describe("production 404 gate is unchanged", () => {
-  it("404s the rag-eval principal in production before any user resolution", async () => {
-    vi.stubEnv("NODE_ENV", "production");
+describe("WARP-3609 — RAG_EVAL_ENABLED gate (NODE_ENV is irrelevant)", () => {
+  it("404s the rag-eval principal when the flag is off, with NODE_ENV unset", async () => {
+    (config as any).RAG_EVAL_ENABLED = false;
+    vi.stubEnv("NODE_ENV", "");
     const res = await request(buildApp(RAG_EVAL)).get(
-      "/api/admin/retrieval-eval/search?q=test&user=alice",
+      "/api/admin/retrieval-eval/search?q=test&user=eval-fixtures",
     );
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: "not_found" });
+    expect(mockEmbed).not.toHaveBeenCalled();
+  });
+
+  it("404s an owner and an admin when the flag is off", async () => {
+    (config as any).RAG_EVAL_ENABLED = false;
+    for (const role of ["owner", "admin"] as const) {
+      const res = await request(buildApp(mkUser(role))).get(
+        "/api/admin/retrieval-eval/search?q=test",
+      );
+      expect(res.status).toBe(404);
+    }
+  });
+
+  it("still serves when NODE_ENV=production and the flag is on (WARP-2551 must not break the eval)", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const res = await request(buildApp(RAG_EVAL)).get(
+      "/api/admin/retrieval-eval/search?q=test&variant=vector&user=eval-fixtures",
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("404s the corpus-fingerprint route when the flag is off", async () => {
+    (config as any).RAG_EVAL_ENABLED = false;
+    const res = await request(
+      buildAppWithPrisma(RAG_EVAL, { fileContentChunk: { aggregate: vi.fn() } }),
+    ).get("/api/admin/retrieval-eval/corpus-fingerprint?user=eval-fixtures");
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("WARP-3609 — the rag-eval principal is pinned to RAGAS_EVAL_USER", () => {
+  it("403s any other real user on /search and never reaches retrieval", async () => {
+    const res = await request(buildApp(RAG_EVAL)).get(
+      "/api/admin/retrieval-eval/search?q=test&variant=vector&user=alice",
+    );
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: "eval_user_forbidden" });
+    expect(mockEmbed).not.toHaveBeenCalled();
+    expect(mockSearchByVector).not.toHaveBeenCalled();
+  });
+
+  it("403s every user when no eval account is configured (fails closed)", async () => {
+    (config as any).RAGAS_EVAL_USER = "";
+    const res = await request(buildApp(RAG_EVAL)).get(
+      "/api/admin/retrieval-eval/search?q=test&variant=vector&user=eval-fixtures",
+    );
+    expect(res.status).toBe(403);
+    expect(mockSearchByVector).not.toHaveBeenCalled();
+  });
+
+  it("403s on the corpus-fingerprint route too, without touching the database", async () => {
+    const prisma = { fileContentChunk: { aggregate: vi.fn() } };
+    const res = await request(buildAppWithPrisma(RAG_EVAL, prisma)).get(
+      "/api/admin/retrieval-eval/corpus-fingerprint?user=alice",
+    );
+    expect(res.status).toBe(403);
+    expect(prisma.fileContentChunk.aggregate).not.toHaveBeenCalled();
+  });
+
+  it("the configured eval user is accepted (surrounding whitespace tolerated)", async () => {
+    const res = await request(buildApp(RAG_EVAL)).get(
+      "/api/admin/retrieval-eval/search?q=test&variant=vector&user=%20eval-fixtures%20",
+    );
+    expect(res.status).toBe(200);
+    expect(mockSearchByVector.mock.calls[0][1]).toMatchObject({ userId: "eval-fixtures" });
+  });
+
+  it("does not match case-insensitively or by prefix", async () => {
+    for (const name of ["Eval-Fixtures", "eval-fixtures2", "eval"]) {
+      const res = await request(buildApp(RAG_EVAL)).get(
+        `/api/admin/retrieval-eval/search?q=test&variant=vector&user=${name}`,
+      );
+      expect(res.status).toBe(403);
+    }
   });
 });
 

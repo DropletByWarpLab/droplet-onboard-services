@@ -1,8 +1,11 @@
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
+import { refuseBelowNetworkMember } from "./role-gate.js";
 
 const inputSchema = { type: "object", properties: {}, additionalProperties: false } as const;
 
 async function handler(_args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  const denied = refuseBelowNetworkMember(ctx);
+  if (denied) return denied;
   const res = await ctx.http.orchestrator.get("/api/network/system", { headers: { Accept: "application/json" } });
   if (!res.ok) {
     return {

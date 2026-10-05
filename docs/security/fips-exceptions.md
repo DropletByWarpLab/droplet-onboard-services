@@ -39,10 +39,13 @@ exceptions:
       WireGuard's wire protocol mandates X25519 for handshake key agreement
       (and ChaCha20-Poly1305 for session encryption). Both are NIST-approved
       as of FIPS 186-5 / SP 800-186 but are not yet activated in the OpenSSL
-      3.0 FIPS provider build that ships with Debian Bookworm. Tunnel scope
-      is the WAN edge only — not intra-service traffic — so the practical
-      exposure is bounded by the operator's WireGuard peer key management,
-      which itself sits on top of TPM-sealed material (WARP-230).
+      3.0 FIPS provider build that ships with Debian Bookworm. The tunnels
+      carry per-employee remote-access traffic (the routing service
+      provisions per-user peers), not intra-service traffic, so file and
+      other Workspace data from remote staff crosses them. The practical
+      exposure is bounded by WireGuard peer key management on the box; the
+      device identity key is a software key under the default mock backend
+      (WARP-1181 tracks TPM sealing). Corrected 2026-10-03 (WARP-3657).
     review: annual
     owner: droplet-onboard-services / routing
     remove_by: null
@@ -101,7 +104,7 @@ exceptions:
 
 # FIPS 140-3 — Exceptions Registry
 
-This file is the **single source of truth** for protocol-mandated uses of non-FIPS-approved cryptographic primitives in the Droplet codebase. Every entry has:
+This file is the registry for protocol-mandated uses of non-FIPS-approved cryptographic primitives that the static lint can see. It is **not yet complete**: Argon2id password hashing, the SHA-512 crypt hash for the SSH login account, and the LUKS2 Argon2id key derivation are in use and are not registered; see "Known deviations not yet registered" below (WARP-3657). Every entry has:
 
 1. A stable `id` referenced from the source via a `fips:allowed: <id>` comment within ±2 lines of the call site.
 2. The protocol or RFC that mandates the non-FIPS use.
@@ -151,7 +154,7 @@ The routing service generates WireGuard keypairs for VPN configuration. WireGuar
 
 NIST published FIPS 186-5 in 2023 approving Curve25519 (X25519/Ed25519) for federal use. The OpenSSL 3.0 FIPS provider build that ships with Debian Bookworm does not yet activate it. We expect this exception to be retire-able when we rebase onto an OpenSSL 3.1+ FIPS provider build that includes Curve25519 activation; that depends on the upstream Debian package, which we don't control.
 
-**Risk acceptance:** WireGuard is only used at the WAN edge for operator remote-administration tunnels. Intra-cluster traffic uses mTLS with FIPS-approved cipher suites (WARP-236). No PHI/PII transits over WireGuard.
+**Risk acceptance (corrected 2026-10-03, WARP-3657; pending maintainer review):** WireGuard is used for remote access. The routing service provisions per-employee remote-access peers (`apps/orchestrator/src/routes/vpn.ts`), so file and other Workspace data from remote staff crosses these tunnels; the earlier text that limited it to operator administration with no personal data was inaccurate. Intra-cluster traffic is not carried over WireGuard. Intra-service mTLS with FIPS-approved cipher suites (WARP-236) is wired but off by default (`DROPLET_INTERNAL_TLS=0`, see `internal-mtls.md`), so it is not a current compensating control. The acceptance needs to be re-decided with the real scope.
 
 ---
 
@@ -200,6 +203,24 @@ The two Mailchimp test files also call `node:crypto` MD5, purely as the independ
 
 ---
 
+## Known deviations not yet registered
+
+The following uses of primitives outside the approved set are in the code and
+have no registry entry (WARP-3657). They are listed here so this file matches
+the code; they are not risk acceptances. The decision to register each with a
+rationale, or to move to an approved alternative when FIPS mode is on (for
+example PBKDF2-HMAC-SHA-256 for password hashing), is open.
+
+| Use | Location | Note |
+|---|---|---|
+| Argon2id password and TOTP recovery-code hashing | `apps/orchestrator/src/services/password.service.ts`, `recovery.service.ts` | Argon2id is not an approved KDF |
+| SHA-512 crypt (`$6$`) for the SSH login account | `apps/orchestrator/src/lib/sha512-crypt.ts`, `ssh-access.service.ts` | crypt(3) is not an approved KDF; PAM accepts only crypt formats |
+| LUKS2 Argon2id PBKDF | `docs/security/at-rest-encryption.md` | Passphrase and recovery slots; active on TPM hardware only |
+
+The static lint (`scripts/test-fips.sh`) does not currently scan for these, so
+adding them to its banned-or-excepted set is a code change that is left open
+under WARP-3657.
+
 ## Schema reference
 
 The YAML front-matter is parsed by `scripts/test-fips.sh`. Required fields per entry:
@@ -230,4 +251,4 @@ The YAML front-matter is parsed by `scripts/test-fips.sh`. Required fields per e
 
 ---
 
-*Living document. Update protocol: see "Adding a new exception" above. Last updated 2026-05-10 (WARP-229 initial publication).*
+*Living document. Update protocol: see "Adding a new exception" above. Last updated 2026-10-03 (WARP-3657 corrections to the WireGuard entry and the Known deviations section); first published 2026-05-10 (WARP-229).*

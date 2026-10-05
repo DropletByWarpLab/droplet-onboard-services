@@ -4,7 +4,7 @@
 import useSWR from "swr";
 import useSWRInfinite from "swr/infinite";
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { serializePmFilter, type PmFilter, type PmSavedViewDto } from "@droplet/shared-types";
+import { serializePmFilter, type PmFilter, type PmSavedViewDto, type PmViewLayout } from "@droplet/shared-types";
 import { authFetch } from "@/lib/auth";
 import type { Department } from "@/lib/types";
 import { makePerson } from "./config";
@@ -384,7 +384,7 @@ export interface SaveViewInput {
   projectId: string | null;
   scope: "PERSONAL" | "SHARED";
   name: string;
-  layout: "BOARD" | "LIST";
+  layout: PmViewLayout;
   filter: PmFilter;
 }
 
@@ -393,7 +393,7 @@ export interface SaveViewInput {
 export function viewActions() {
   return {
     create: (input: SaveViewInput) => send<{ view: PmSavedViewDto }>("/api/pm/views", "POST", input),
-    update: (id: string, patch: Partial<{ name: string; layout: "BOARD" | "LIST"; filter: PmFilter }>) =>
+    update: (id: string, patch: Partial<{ name: string; layout: PmViewLayout; filter: PmFilter }>) =>
       send<{ view: PmSavedViewDto }>(`/api/pm/views/${encodeURIComponent(id)}`, "PATCH", patch),
     remove: (id: string) => send<{ deleted: string }>(`/api/pm/views/${encodeURIComponent(id)}`, "DELETE"),
   };

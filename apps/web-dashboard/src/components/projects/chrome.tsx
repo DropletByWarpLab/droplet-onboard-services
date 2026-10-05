@@ -7,7 +7,7 @@ import { PmIcon } from "./icons";
 
 import type { JSX } from "react";
 
-export type ProjectView = "board" | "list" | "cycles" | "modules";
+export type ProjectView = "board" | "list" | "calendar" | "timeline" | "cycles" | "modules";
 
 export function ViewSwitcher({
   view,
@@ -19,6 +19,8 @@ export function ViewSwitcher({
   const tabs: Array<[ProjectView, string, string]> = [
     ["board", "Board", "board"],
     ["list", "List", "list"],
+    ["calendar", "Calendar", "cal"],
+    ["timeline", "Timeline", "gantt"],
     ["cycles", "Cycles", "target"],
     ["modules", "Modules", "layers"],
   ];

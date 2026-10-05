@@ -57,6 +57,17 @@ describe("buildPmPath", () => {
 });
 
 describe("parsePmUrl", () => {
+  it.each(["calendar", "timeline", "my-work"])("round-trips the %s schedule view", (view) => {
+    const state = { p: null, view, item: null, v: null, f: null };
+    expect(parsePmUrl(search(buildPmPath(state)))).toEqual(state);
+  });
+
+  it.each(["-my-work", "my-work-", "my--work", "my-work/../x", "My-work", "any-other-tab"])(
+    "rejects malformed or unrecognised hyphenated view %j", (view) => {
+      expect(parsePmUrl(new URLSearchParams({ view })).view).toBeNull();
+    },
+  );
+
   it("reads every parameter", () => {
     const sp = new URLSearchParams("p=INBOX&view=list&item=INBOX-42&v=mine&f=priority.is%3Ahigh");
     expect(parsePmUrl(sp)).toEqual({

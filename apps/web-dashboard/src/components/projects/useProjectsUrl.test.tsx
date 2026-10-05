@@ -57,6 +57,15 @@ describe("reading the URL", () => {
 });
 
 describe("writing it", () => {
+  it("opens My work through a URL that the hook can read back", () => {
+    const { result, rerender } = renderHook(() => useProjectsUrl());
+    result.current.go({ view: "my-work" }, "push");
+    expect(push).toHaveBeenCalledWith("/projects?view=my-work", { scroll: false });
+    search = "view=my-work";
+    rerender();
+    expect(result.current.state.view).toBe("my-work");
+  });
+
   it("pushes a navigation and does not scroll the page", () => {
     search = "p=INBOX";
     const { result } = renderHook(() => useProjectsUrl());

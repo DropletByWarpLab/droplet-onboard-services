@@ -22,6 +22,7 @@ import {
   parseEnvReconcileReport,
   type ExecFn,
 } from "./host-compose-runner.js";
+import { HqTokenError, type HqTokenService } from "../hq-token.service.js";
 import type { ReleaseManifest, ReleaseService } from "./manifest.js";
 
 const DIGEST = (c: string) => `sha256:${c.repeat(64)}`;
@@ -725,5 +726,160 @@ describe("ncTransferOwnership (WARP-3169 leaver hand-over)", () => {
     const e3 = await ncTransferOwnership({ ...base, exec: vi.fn().mockRejectedValue(occFailed), from: "tomas", to: "anna", logger }).catch((e) => e);
     expect(e3).toMatchObject({ mayBePartial: true, reason: "exited 1" });
     expect(JSON.stringify(logger.error.mock.calls)).not.toContain("secret.pdf");
+  });
+});
+
+describe("pullImages with the HQ registry (WARP-3503, ADR-068)", () => {
+  const HQ = "hq.example";
+  const JWT = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJl";
+  const GH = "ghp_labonlysecret";
+
+  /** The fixture manifest's services, repointed at the HQ registry host. */
+  const hqServices = (): ReleaseService[] =>
+    buildManifest().services.map((s) => ({ ...s, image: s.image.replace("ghcr.io", HQ) }));
+
+  function setup(opts: {
+    getToken?: HqTokenService["getToken"];
+    host?: string;
+    githubToken?: string;
+    noHq?: boolean;
+    execFails?: boolean;
+  }) {
+    const seen: Array<{ args: string[]; env?: Record<string, string> }> = [];
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const getToken = vi.fn<HqTokenService["getToken"]>(
+      opts.getToken ?? (async () => ({ token: JWT, expiresAt: Date.now() + 600_000 })),
+    );
+    const runner = createHostComposeRunner({
+      scriptPath: "/opt/droplet/docker/ota/apply-update.sh",
+      composeFile: "/opt/droplet/docker/docker-compose.yml",
+      updatesDir: workDir,
+      githubToken: opts.githubToken,
+      hqToken: opts.noHq ? undefined : { host: opts.host ?? HQ, getToken },
+      logger: logger as never,
+      exec: async (_file, args, callOpts) => {
+        seen.push({ args, env: callOpts?.env });
+        if (opts.execFails) {
+          throw Object.assign(new Error("Command failed"), {
+            stderr: "[apply-update] ERROR: registry-auth: the registry refused authentication\n",
+          });
+        }
+        return { stdout: "{}", stderr: "" };
+      },
+    });
+    return { runner, seen, logger, getToken };
+  }
+
+  it("pulls each HQ image in its own exec, token + host in the env, never in argv", async () => {
+    const { runner, seen, getToken } = setup({});
+    const services = hqServices();
+
+    await runner.pullImages(services);
+    await runner.migrateDeploy();
+
+    const pulls = seen.filter((c) => c.args[0] === "pull-images");
+    expect(pulls).toHaveLength(services.length);
+    pulls.forEach((c, i) => {
+      expect(c.args.slice(-2)).toEqual(["--images", services[i]!.image]);
+      expect(c.env).toEqual({ DROPLET_OTA_REGISTRY_HOST: HQ, DROPLET_OTA_REGISTRY_TOKEN: JWT });
+    });
+    // The token covers a whole image pull: HQ's token cache refreshes it before then.
+    expect(getToken).toHaveBeenCalledWith(["registry:pull"], { minRemainingMs: 300_000 });
+    expect(JSON.stringify(seen.map((c) => c.args))).not.toContain(JWT);
+    // …and it rides on pull-images ONLY.
+    expect(seen.find((c) => c.args[0] === "migrate-deploy")?.env).toBeUndefined();
+  });
+
+  it("ghcr.io refs never ask HQ: one exec, the lab GitHub token only", async () => {
+    const { runner, seen, getToken } = setup({ githubToken: GH });
+
+    await runner.pullImages(buildManifest().services);
+
+    expect(getToken).not.toHaveBeenCalled();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.env).toEqual({ DROPLET_OTA_GITHUB_TOKEN: GH });
+  });
+
+  it("HQ-host refs with no HQ client configured (HQ_ISSUANCE_URL empty) get no HQ credential", async () => {
+    const { runner, seen } = setup({ noHq: true });
+
+    await runner.pullImages(hqServices());
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.env).toBeUndefined();
+  });
+
+  it("a ref naming some other host never gets the HQ token", async () => {
+    const { runner, seen, getToken } = setup({ host: "some-other-hq.example" });
+
+    await runner.pullImages(hqServices());
+
+    expect(getToken).not.toHaveBeenCalled();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.env).toBeUndefined();
+  });
+
+  it("a mixed release: only the HQ-host image carries the HQ token; the lab token still rides along", async () => {
+    const { runner, seen } = setup({ githubToken: GH });
+    const [hqImage, other] = buildManifest().services;
+    const services = [{ ...hqImage!, image: hqImage!.image.replace("ghcr.io", HQ) }, other!];
+
+    await runner.pullImages(services);
+
+    expect(seen.map((c) => c.env)).toEqual([
+      { DROPLET_OTA_GITHUB_TOKEN: GH, DROPLET_OTA_REGISTRY_HOST: HQ, DROPLET_OTA_REGISTRY_TOKEN: JWT },
+      { DROPLET_OTA_GITHUB_TOKEN: GH },
+    ]);
+  });
+
+  it.each(["not_enrolled", "revoked", "unreachable", "bad_signature"] as const)(
+    "HQ refusing a token (%s) is a registry-auth: error carrying the reason; nothing is pulled",
+    async (reason) => {
+      const getToken = vi.fn(async () => {
+        throw new HqTokenError(reason, "/v1/device/token");
+      });
+      const { runner, seen } = setup({ getToken });
+
+      await expect(runner.pullImages(hqServices())).rejects.toThrow(
+        new RegExp(`^registry-auth: HQ issued no registry token \\(${reason}: /v1/device/token\\)`),
+      );
+      expect(seen).toHaveLength(0);
+    },
+  );
+
+  it("an unexpected failure of the token client is rethrown as itself, not dressed up as an auth refusal", async () => {
+    const getToken = vi.fn(async () => {
+      throw new TypeError("boom");
+    });
+    const { runner } = setup({ getToken });
+
+    const err = (await runner.pullImages(hqServices()).then(
+      () => null,
+      (e: unknown) => e,
+    )) as Error;
+
+    expect(err).toBeInstanceOf(TypeError);
+    expect(err.message).not.toContain("registry-auth:");
+  });
+
+  it("the token never reaches a log: success, helper failure, or HQ refusal", async () => {
+    const ok = setup({});
+    await ok.runner.pullImages(hqServices());
+
+    const failing = setup({ execFails: true });
+    await failing.runner.pullImages(hqServices()).catch(() => undefined);
+
+    const refused = setup({
+      getToken: vi.fn(async () => {
+        throw new HqTokenError("revoked", "/v1/device/token");
+      }),
+    });
+    await refused.runner.pullImages(hqServices()).catch(() => undefined);
+
+    const logged = [ok, failing, refused].flatMap((s) =>
+      Object.values(s.logger).flatMap((fn) => fn.mock.calls),
+    );
+    expect(failing.logger.error).toHaveBeenCalled(); // the failure WAS logged…
+    expect(JSON.stringify(logged)).not.toContain(JWT); // …without the token
   });
 });
