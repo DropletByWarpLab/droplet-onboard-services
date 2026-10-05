@@ -3,6 +3,10 @@
 // Real: agent loop, system prompt builder, tool catalog + schemas + domain
 // selection, interceptor (confirmation / deny), approval store, ai-gateway
 // client -> ai-gateway -> model. Scripted: tool handler I/O (world.mts).
+// A case's `role` (owner | admin | member | guest) picks the person the loop acts
+// for: the route's real role narrowing of the tool pool applies to anyone but an
+// owner or admin, and the scripted handlers apply the floors the real ones do
+// (README, "Roles").
 //
 // Usage, with this repo's orchestrator tsx (see README.md; bench-box.sh wraps it):
 //   AGENT_EVAL_GATEWAY_URL=http://ai-gateway:8000 AGENT_EVAL_GATEWAY_TOKEN=... \
@@ -12,7 +16,8 @@
 import { readFileSync, appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { defaultWorld, handle, faultResult, PURE_TOOLS, type Fault, type WorldState } from "./world.mts";
+import { defaultWorld, handle, faultResult, normalizeWorld, validateWorld, ctxFor, PRECHECKS, PURE_TOOLS, WIRE_ROLE, type Ctx, type Fault, type WorldState } from "./world.mts";
+import { expandDates, expandDeep } from "./dates.mts";
 
 const ORCH = process.env.ORCH ?? resolve(import.meta.dirname, "../../apps/orchestrator");
 // A box's orchestrator runs from apps/orchestrator and reads its identity block
@@ -87,6 +92,8 @@ const { localDayInZone } = await import(`${ORCH}/src/services/scene-schedule-tz-
 const { config } = await import(`${ORCH}/src/config.ts`);
 const tc = await import(PKG);
 const { toolResultToContent } = await import(`${ORCH}/../../services/mcp-server/src/server.ts`);
+// The route's own role narrowing (routes/llm.ts narrowAllowedToolsForRole is a thin wrapper over this).
+const { narrowToolNamesForPrincipal } = await import(`${ORCH}/src/services/tool-access.service.ts`);
 
 const TOOLS: Map<string, any> = tc.TOOLS instanceof Map ? tc.TOOLS : new Map(Object.entries(tc.TOOLS));
 const USER = "eval-owner";
@@ -107,19 +114,17 @@ if (listed.join() !== writeNames.join()) {
   throw new Error("write_tools.json is stale against @droplet/tools-core's write tools: run run.mts --write-tools and commit it");
 }
 
-// Dated prompts are relative to the run ({{today+3}} -> YYYY-MM-DD): the system
-// prompt carries today's date (WARP-3281), so a fixed date drifts past the
-// 7-day forecast and a correct refusal fails the case. `today` is the same
-// local day the prompt's date line shows (localDayInZone, the box zone).
-function expandDates(text: string, today: string): string {
-  const out = text.replace(/\{\{today\+(\d+)\}\}/g, (_, d) => new Date(Date.parse(`${today}T00:00:00Z`) + Number(d) * 864e5).toISOString().slice(0, 10));
-  if (out.includes("{{")) throw new Error(`unknown placeholder in case turn: ${out}`);
-  return out;
-}
+// Dated text is relative to the run ({{today+3}} -> YYYY-MM-DD; dates.mts has the other tokens): the
+// system prompt carries today's date (WARP-3281), so a fixed date drifts past the 7-day forecast and a
+// correct refusal fails the case. `today` is the same local day the prompt's date line shows
+// (localDayInZone, the box zone). Turns, the world and the faults are expanded here; evaluate.py
+// expands `expected` with the `today` recorded in the run.
 
 interface Case {
   id: string; kit_id?: string; category: string;
   turns: { role: "user" | "assistant"; content: string }[];
+  // The acting person: owner (default) | admin | member | guest. Their user id is eval-<role>.
+  role?: string;
   world?: Partial<WorldState>;
   faults?: Record<string, Fault[]>;
   approve?: "approve" | "deny" | "ignore";
@@ -136,7 +141,7 @@ interface Dispatch {
   fault?: Fault;
 }
 
-function makePort(world: WorldState, faults: Record<string, Fault[]>, log: Dispatch[]) {
+function makePort(world: WorldState, faults: Record<string, Fault[]>, log: Dispatch[], who: Ctx) {
   const interceptor = tc.createToolCallInterceptor();
   const pending = Object.fromEntries(Object.entries(faults).map(([k, v]) => [k, [...v]]));
   return {
@@ -149,6 +154,20 @@ function makePort(world: WorldState, faults: Record<string, Fault[]>, log: Dispa
       if (!tool) {
         return { content: [{ type: "text", text: JSON.stringify({ error: `Unknown tool: ${name}` }) }], isError: true };
       }
+      // A confirming tool's read-only `precheck` runs BEFORE the interceptor asks, and its refusal reaches the model
+      // instead of an approval card for a call that can never succeed (services/mcp-server/src/server.ts, WARP-3349).
+      // Only a call the interceptor is about to challenge runs it: no token, the interceptor owns the confirmation, not
+      // denied. PRECHECKS scripts each production precheck (the real one needs ctx.http); the catalog's `precheck` says
+      // production has one. The refusal wrote nothing, so it is logged `refused` like a handler's.
+      const precheck = PRECHECKS[name];
+      if (precheck && tool.precheck && !ctx?.confirmationToken && tool.requiresConfirmation
+          && tc.confirmationOwnerOf(tool) === "interceptor" && !interceptor.denyTier.evaluate(tool, args)) {
+        const early = precheck(world, args as Record<string, any>);
+        if (early && !early.ok) {
+          log.push({ tool: name, args, outcome: "refused" });
+          return toolResultToContent(early);
+        }
+      }
       const outcome = tc.interceptOutcomeToToolResult(tool, interceptor.intercept(tool, args, { confirmationToken: ctx?.confirmationToken }));
       if (outcome) {
         const code = (outcome as any).error?.details?.interceptor?.outcome ?? "denied";
@@ -157,8 +176,8 @@ function makePort(world: WorldState, faults: Record<string, Fault[]>, log: Dispa
       }
       const f = pending[name]?.shift();
       if (f === "timeout_after") {
-        const r = handle(world, name, args as Record<string, any>);
-        log.push({ tool: name, args, outcome: r?.ok ? "executed" : "refused", fault: f });
+        const r = handle(world, name, args as Record<string, any>, who);
+        log.push({ tool: name, args, outcome: r?.ok ? "executed" : r?.status === "confirmation_required" ? "confirmation_required" : "refused", fault: f });
         const t = faultResult(f);
         return { content: [{ type: "text", text: t.text }], isError: t.isError };
       }
@@ -171,14 +190,14 @@ function makePort(world: WorldState, faults: Record<string, Fault[]>, log: Dispa
       if (PURE_TOOLS.has(name)) {
         result = await tool.handler(args, {});
       } else {
-        result = handle(world, name, args as Record<string, any>);
+        result = handle(world, name, args as Record<string, any>, who);
       }
       if (result === undefined) {
         log.push({ tool: name, args, outcome: "unscripted" });
         result = { ok: true, data: { items: [], note: "No data." } };
       } else {
         // A handler refusal (NOT_FOUND, PARENT_REQUIRED) wrote nothing.
-        log.push({ tool: name, args, outcome: result.ok ? "executed" : "refused" });
+        log.push({ tool: name, args, outcome: result.ok ? "executed" : result.status === "confirmation_required" ? "confirmation_required" : "refused" });
       }
       return toolResultToContent(result);
     },
@@ -186,17 +205,34 @@ function makePort(world: WorldState, faults: Record<string, Fault[]>, log: Dispa
 }
 
 async function runCase(c: Case, repeat: number, window: number, script: any[] | null) {
-  const world: WorldState = { ...defaultWorld(), ...(structuredClone(c.world ?? {}) as object) } as WorldState;
+  const now = new Date();
+  const today = localDayInZone(now).date;
+  // WARP-3545: the acting person. A guest or member runs through the route's real role narrowing
+  // (see `allowed` below); what is real and what is simulated is in the README ("Roles").
+  const who = ctxFor(c.role, today);
+  const wireRole = WIRE_ROLE[who.role];
+  // The case's world overlays the default one key by key; a key the default world lacks is a typo.
+  const base = defaultWorld(today);
+  const overlay = expandDeep(structuredClone(c.world ?? {}), today) as Record<string, unknown>;
+  const unknownKeys = Object.keys(overlay).filter((k) => !(k in base));
+  if (unknownKeys.length) throw new Error(`case ${c.id}: unknown world key(s) ${unknownKeys.join(", ")} (known: ${Object.keys(base).join(", ")})`);
+  const world = normalizeWorld({ ...base, ...overlay } as WorldState);
+  validateWorld(world);
   const dispatches: Dispatch[] = [];
-  const mcp = makePort(world, c.faults ?? {}, dispatches);
+  const mcp = makePort(world, expandDeep(c.faults ?? {}, today) as Record<string, Fault[]>, dispatches, who);
   const approvals = createChatApprovalStore();
   const steps: any[] = [];
   const confirmations: any[] = [];
   const turns: any[] = [];
   const gwCalls: any[] = [];
-  const now = new Date();
-  const today = localDayInZone(now).date;
-  const messages: any[] = [{ role: "system", content: buildBaseSystemPrompt(undefined, "", "", todayLine(now)) }];
+  // Every call the model issued, including the ones the loop refused before dispatch (the trace).
+  const calls: any[] = [];
+  // Production gives an owner or admin no explicit list (the full chat scope); anyone else gets the
+  // whole registry minus every write tool (narrowAllowedToolsForRole). No AccessRole scope: that is
+  // null for every person on a box today (resolveToolAccessScope).
+  const privileged = who.role === "owner" || who.role === "admin";
+  const allowed: string[] | undefined = privileged ? undefined : narrowToolNamesForPrincipal([...TOOLS.keys()], wireRole, null);
+  const messages: any[] = [{ role: "system", content: buildBaseSystemPrompt(allowed, "", "", todayLine(now)) }];
   for (const t of c.turns) messages.push({ role: t.role, content: expandDates(t.content, today) });
 
   const t0 = Date.now();
@@ -251,8 +287,8 @@ async function runCase(c: Case, repeat: number, window: number, script: any[] | 
       model: opt.model!, messages, context_window: window,
       tool_selection_mode: opt.selection as "off" | "domains",
       prior_tool_names: priorToolNames,
-      allowed_tools: undefined, toolAccessScope: null,
-      toolCallContext: { userId: USER, userRole: "owner" },
+      allowed_tools: allowed, toolAccessScope: null,
+      toolCallContext: { userId: who.user, userRole: wireRole },
       // The eval world is a box with every module on. Without an explicit
       // verdict the loop resolves one for USER, which nothing wires here,
       // so it fails closed and withholds every module-owned tool (WARP-2972).
@@ -263,28 +299,34 @@ async function runCase(c: Case, repeat: number, window: number, script: any[] | 
     final = content;
     turns.push({ round, stop_reason: res.stop_reason, iterations: res.iterations, error: res.error, latency_ms: Date.now() - tt, answer: content, blankDiagnostics: (res as any).blankDiagnostics, pollutedDiagnostics: (res as any).pollutedDiagnostics, actionClaimCheck: (res as any).actionClaimCheck, reasoningSteps: (res as any).reasoningSteps, reasoning: (res.message as any)?.reasoning });
     priorToolNames = [...new Set([...priorToolNames, ...res.trace.map((x: any) => x.tool)])];
+    for (const x of res.trace as any[]) calls.push({ id: x.tool_call_id, tool: x.tool, args: x.args, round });
     messages.push({ role: "assistant", content });
 
     const decision = c.approve ?? "ignore";
     if (!pendingChallenge || decision === "ignore") break;
     if (decision === "approve") {
-      approvals.approve(pendingChallenge, USER);
+      approvals.approve(pendingChallenge, who.user);
       messages.push({ role: "user", content: "I approved that — go ahead." });
     } else {
-      approvals.deny(pendingChallenge, USER);
+      approvals.deny(pendingChallenge, who.user);
       messages.push({ role: "user", content: "I denied that. Don't do it." });
     }
   }
 
   return {
-    case_id: c.id, kit_id: c.kit_id, repeat, model: opt.model, selection: opt.selection,
+    case_id: c.id, kit_id: c.kit_id, repeat, model: opt.model, selection: opt.selection, role: who.role,
     today, turns_asked: messages.slice(1, 1 + c.turns.length).map((m) => m.content),
-    steps, dispatches, confirmations, turns, gwCalls,
+    steps, dispatches, calls, confirmations, turns, gwCalls,
     final_answer: final,
     stop_reason: turns.at(-1)?.stop_reason,
     iterations: turns.reduce((n, t) => n + (t.iterations ?? 0), 0),
     total_latency_ms: Date.now() - t0,
-    world_after: { files: Object.keys(world.files), workItems: world.workItems, memory: world.memory, runs: world.runs },
+    world_after: {
+      files: Object.keys(world.files), workItems: world.workItems, memory: world.memory, runs: world.runs,
+      // Times as written (a fixture's naive local time, or the model's own).
+      events: world.events.map((e) => ({ id: e.id, title: e.title, start: e.start, end: e.end })),
+      reminders: world.reminders, devices: world.devices, sent: world.sent,
+    },
   };
 }
 

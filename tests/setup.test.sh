@@ -221,11 +221,20 @@ else
   fail "sync_openwrt_password_secret did not rewrite the file for a loopback host"
 fi
 
-sync_case 192.168.9.1 ""
+for p13_init in "" NONE; do
+  sync_case 192.168.9.1 "$p13_init"
+  if [ -f "$SYNC_DIR/openwrt_password" ] && [ ! -s "$SYNC_DIR/openwrt_password" ] \
+     && grep -q "droplet-ai-password" "$SYNC_LOG" && ! grep -qF "$SYNC_PW" "$SYNC_LOG"; then
+    pass "sync_openwrt_password_secret leaves the secret empty + warns for an external host (initial: ${p13_init:-empty file})"
+  else
+    fail "sync_openwrt_password_secret seeded/skipped the secret for an external host (initial: ${p13_init:-empty file})"
+  fi
+done
+sync_case 127.0.0.1 ""
 if [ "$(cat "$SYNC_DIR/openwrt_password")" = "$SYNC_PW" ]; then
-  pass "sync_openwrt_password_secret fills an empty file for an external host"
+  pass "sync_openwrt_password_secret still fills an empty file for a loopback host"
 else
-  fail "sync_openwrt_password_secret left an empty file empty for an external host"
+  fail "sync_openwrt_password_secret no longer fills an empty file for a loopback host"
 fi
 
 # --- DROPLET_TPM_BACKEND scaffold guard (IDX-002) -------------------------
@@ -2393,6 +2402,190 @@ if printf '%s' "$P12_BUILD_BODY" | grep -qF '${CI:-}'; then
   pass "drift hard-fail is gated on CI (devices warn and continue provisioning)"
 else
   fail "drift guard has no CI gate — either devices hard-fail on drift or CI never does"
+fi
+
+# =============================================================================
+# Phase 13: WARP-3835 — --edge-router flag + fatal verify
+# =============================================================================
+echo "--- Phase 13: edge-router flag and verify gate (WARP-3835) ---"
+
+P13_ENV="$TMP_ROOT/p13.env"
+p13_get() { grep -E "^$1=" "$P13_ENV" | tail -1 | cut -d= -f2-; }
+
+# (1) the flag writes the three keys; port defaults to 80
+printf 'FOO=bar\n' > "$P13_ENV"
+ENV_FILE="$P13_ENV" configure_edge_router 192.168.9.1 >/dev/null
+if [ "$(p13_get OPENWRT_HOST)|$(p13_get OPENWRT_PORT)|$(p13_get OPENWRT_USERNAME)" = "192.168.9.1|80|droplet-ai" ]; then
+  pass "--edge-router HOST writes OPENWRT_HOST/PORT=80/USERNAME=droplet-ai"
+else
+  fail "--edge-router HOST wrote wrong keys: $(grep OPENWRT "$P13_ENV" | tr '\n' ' ')"
+fi
+
+# (2) HOST:PORT, and idempotent (one line per key after re-running)
+ENV_FILE="$P13_ENV" configure_edge_router 10.0.0.1:8080 >/dev/null
+ENV_FILE="$P13_ENV" configure_edge_router 10.0.0.1:8080 >/dev/null
+if [ "$(p13_get OPENWRT_HOST)|$(p13_get OPENWRT_PORT)" = "10.0.0.1|8080" ] \
+   && [ "$(grep -c '^OPENWRT_' "$P13_ENV")" = "3" ] && grep -q '^FOO=bar$' "$P13_ENV"; then
+  pass "--edge-router HOST:PORT is idempotent and leaves other keys alone"
+else
+  fail "--edge-router not idempotent: $(cat "$P13_ENV" | tr '\n' ' ')"
+fi
+
+# (3) refuses empty and loopback, and writes nothing
+before="$(cat "$P13_ENV")"
+p13_ok=true
+for bad in '' 127.0.0.1 localhost ::1 127.0.0.1:80 ':80' 'h:notaport'; do
+  if ENV_FILE="$P13_ENV" configure_edge_router "$bad" >/dev/null 2>&1; then p13_ok=false; fi
+done
+if $p13_ok && [ "$before" = "$(cat "$P13_ENV")" ]; then
+  pass "--edge-router refuses empty, loopback and bad ports without touching .env"
+else
+  fail "--edge-router accepted an empty/loopback/bad-port host or modified .env"
+fi
+
+# A write failure must escape the conditional call in setup.sh. Bash disables
+# errexit inside a function used with `||`, so each writer needs its own guard.
+for p13_failed_key in OPENWRT_HOST OPENWRT_PORT OPENWRT_USERNAME; do
+  if (
+    p13_calls=""
+    _upsert_env_kv() {
+      p13_calls="${p13_calls}${1} "
+      [ "$1" != "$p13_failed_key" ]
+    }
+    if configure_edge_router 192.168.9.1 >/dev/null 2>&1; then exit 1; fi
+    case "$p13_failed_key" in
+      OPENWRT_HOST) [ "$p13_calls" = 'OPENWRT_HOST ' ] ;;
+      OPENWRT_PORT) [ "$p13_calls" = 'OPENWRT_HOST OPENWRT_PORT ' ] ;;
+      OPENWRT_USERNAME) [ "$p13_calls" = 'OPENWRT_HOST OPENWRT_PORT OPENWRT_USERNAME ' ] ;;
+    esac
+  ); then
+    pass "--edge-router rejects a failed $p13_failed_key write and stops writing"
+  else
+    fail "--edge-router ignored a failed $p13_failed_key write or continued writing"
+  fi
+done
+
+# (4) a re-run WITHOUT the flag keeps the host: setup only writes when the flag
+# was passed, and the flag is written before both readers of OPENWRT_HOST.
+P13_SETUP="$REPO_ROOT_REAL/scripts/setup.sh"
+if grep -q 'if \[ -n "${EDGE_ROUTER+x}" \]; then' "$P13_SETUP" \
+   && ! grep -qE '^EDGE_ROUTER=' "$P13_SETUP"; then
+  pass "setup.sh only touches the router when --edge-router was passed (EDGE_ROUTER unset by default)"
+else
+  fail "setup.sh may rewrite OPENWRT_HOST without --edge-router"
+fi
+p13_call="$(grep -n 'configure_edge_router "\$EDGE_ROUTER"' "$P13_SETUP" | head -1 | cut -d: -f1)"
+p13_mat="$(grep -n '^  materialize_artifacts' "$P13_SETUP" | tail -1 | cut -d: -f1)"
+p13_sb="$(grep -n '^    configure_single_box_env' "$P13_SETUP" | head -1 | cut -d: -f1)"
+if [ -n "$p13_call" ] && [ "$p13_call" -lt "$p13_mat" ] && [ "$p13_mat" -lt "$p13_sb" ]; then
+  pass "--edge-router is written before materialize_artifacts and configure_single_box_env"
+else
+  fail "--edge-router write is not ordered before its two readers (call=$p13_call mat=$p13_mat sb=$p13_sb)"
+fi
+
+# (5) verify.sh carries the router-auth check, skips mock/disabled, and the
+# secret check demands a non-empty file.
+P13_VERIFY="$REPO_ROOT_REAL/scripts/verify.sh"
+if grep -q 'check "Routing → router auth" _router_auth' "$P13_VERIFY" \
+   && grep -q '"connected" \*: \*true' "$P13_VERIFY" \
+   && awk '/^case "\$\{ROUTING_MODE:-real\}" in/,/^esac/' "$P13_VERIFY" | grep -q 'mock|disabled) ;;'; then
+  pass "verify.sh checks routing /health connected:true and skips mock/disabled"
+else
+  fail "verify.sh is missing the router-auth check or its ROUTING_MODE skip"
+fi
+if grep -q '\[ -s .*openwrt_password' "$P13_VERIFY" && grep -q 'paste the router.s droplet-ai password' "$P13_VERIFY"; then
+  pass "verify.sh requires a NON-EMPTY openwrt_password secret"
+else
+  fail "verify.sh still only checks that the openwrt_password file exists"
+fi
+
+# Exercise the shipping probe without running verify.sh's other stack checks.
+# The curl stub refuses an HTTPS health request unless all three host-admin
+# paths arrive as intact arguments (the checkout path can contain spaces).
+p13_routing_probe() (
+  ITLS_SCHEME="$1" ROUTING_SERVICE_URL="$2"
+  _itls_host_bundle="$TMP_ROOT/host admin"
+  P13_CONNECTED="$3"
+  P13_PROBE_URL="$4"
+  curl() {
+    local ca="" cert="" key="" url=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --cacert) ca="$2"; shift ;;
+        --cert) cert="$2"; shift ;;
+        --key) key="$2"; shift ;;
+        http://*|https://*) url="$1" ;;
+      esac
+      shift
+    done
+    [ "$url" = "$P13_PROBE_URL" ] || return 1
+    if [ "$ITLS_SCHEME" = https ]; then
+      [ "$ca|$cert|$key" = "$_itls_host_bundle/ca.pem|$_itls_host_bundle/cert.pem|$_itls_host_bundle/key.pem" ] || return 1
+    else
+      [ -z "$ca$cert$key" ] || return 1
+    fi
+    printf '{"connected":%s}\n' "$P13_CONNECTED"
+  }
+  eval "$(awk '/^_routing_health\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$P13_VERIFY")"
+  eval "$(grep '^_routing_connected()' "$P13_VERIFY")"
+  _routing_connected
+)
+if p13_routing_probe http '' true http://localhost:8080/health \
+   && p13_routing_probe http http://192.168.50.10:18080/ true http://192.168.50.10:18080/health; then
+  pass "routing health: plain HTTP keeps the default or configured endpoint without client certificates"
+else
+  fail "routing health: plain HTTP endpoint or credential behavior changed"
+fi
+if p13_routing_probe https http://192.168.50.10:18080/ true https://192.168.50.10:18080/health \
+   && p13_routing_probe https https://localhost:8080 true https://localhost:8080/health; then
+  pass "routing health: TLS upgrades HTTP and sends the host-admin CA, certificate and key"
+else
+  fail "routing health: TLS URL or client certificate configuration missing"
+fi
+if ! p13_routing_probe https http://localhost:8080 false https://localhost:8080/health; then
+  pass "routing health: authenticated connected:false still fails router verification"
+else
+  fail "routing health: connected:false incorrectly passed router verification"
+fi
+
+# (6) a failing verify.sh fails setup (exit 1) and the gate precedes the SSH
+# window close; a passing / skipped verify does not fail.
+eval "$(awk '/^run_verify_gate\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$P13_SETUP")"
+P13_DIR="$TMP_ROOT/p13"; mkdir -p "$P13_DIR"
+printf '#!/bin/sh\nexit 1\n' > "$P13_DIR/verify.sh"; chmod +x "$P13_DIR/verify.sh"
+set +e
+( SCRIPT_DIR="$P13_DIR" SKIP_START=false; close_install_mode_ssh_window() { echo CLOSED; }
+  run_verify_gate; close_install_mode_ssh_window ) > "$P13_DIR/out" 2>&1
+p13_rc=$?
+set -e
+if [ "$p13_rc" = "1" ] && grep -q 'FAILED checks' "$P13_DIR/out" && ! grep -q CLOSED "$P13_DIR/out"; then
+  pass "failing verify.sh: setup exits 1 with the FAILED banner, SSH window not closed"
+else
+  fail "failing verify.sh did not exit 1 / reached close_install_mode_ssh_window (rc=$p13_rc)"
+fi
+printf '#!/bin/sh\nexit 0\n' > "$P13_DIR/verify.sh"
+if ( SCRIPT_DIR="$P13_DIR" SKIP_START=false; run_verify_gate ) >/dev/null 2>&1 \
+   && ( SCRIPT_DIR="$P13_DIR" SKIP_START=true; printf '#!/bin/sh\nexit 1\n' > "$P13_DIR/verify.sh"; run_verify_gate ) >/dev/null 2>&1; then
+  pass "passing verify.sh, and --skip-start with a failing one, do not fail setup"
+else
+  fail "verify gate fails when verify passes or is skipped"
+fi
+p13_gate="$(grep -n '^  run_verify_gate' "$P13_SETUP" | head -1 | cut -d: -f1)"
+p13_close="$(grep -n '^  close_install_mode_ssh_window' "$P13_SETUP" | head -1 | cut -d: -f1)"
+if [ -n "$p13_gate" ] && [ -n "$p13_close" ] && [ "$p13_gate" -lt "$p13_close" ]; then
+  pass "run_verify_gate runs before close_install_mode_ssh_window"
+else
+  fail "verify gate is not ordered before close_install_mode_ssh_window"
+fi
+
+# (7) warning counter feeds the banner
+LOG_WARN_COUNT=0; LOG_WARN_LIST=""
+log_warn "first thing" 2>/dev/null; log_warn "second thing" 2>/dev/null
+if [ "$LOG_WARN_COUNT" = "2" ] && [ "$(printf '%s' "$LOG_WARN_LIST" | wc -l | tr -d ' ')" = "2" ] \
+   && grep -q 'Complete with %d warnings' "$P13_SETUP"; then
+  pass "log_warn counts and lists warnings; the banner prints 'Complete with N warnings'"
+else
+  fail "warning counter/banner broken (count=$LOG_WARN_COUNT)"
 fi
 
 # =============================================================================
