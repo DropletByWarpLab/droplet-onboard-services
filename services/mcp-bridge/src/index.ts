@@ -24,6 +24,13 @@
  * that before `apps/orchestrator` could construct a session, which is why
  * nothing did until now.
  *
+ * WHAT WARP-3703 ADDED (ADR-043 TC-1.1): the open contract is per PROFILE. A
+ * registry entry is its factory plus the flat fields the wire must carry before
+ * it runs (`SessionProfile.requiredFields`), so a vendor that presents one
+ * static Bearer token no longer has to invent an email and a site. Atlassian's
+ * three fields are unchanged, and `SESSION_FACTORIES` survives as a view of
+ * `SESSION_PROFILES`.
+ *
  * WHAT IS STILL NOT HERE: persistence of any kind. Sessions live in memory for
  * the life of the container, deliberately — ADR-043 §4's kill switch tears
  * sessions down, and a component that could restore one from disk would not be
@@ -44,10 +51,14 @@ export {
 export { AUTH_EXEMPT_PATHS, checkBridgeBearer, type BridgeAuthVerdict } from "./http-auth.js";
 export { createBridgeServer, main, type BridgeServerOptions } from "./server.js";
 export {
+  BARE_FACTORY_REQUIRED_FIELDS,
   knownServerIds,
   SESSION_FACTORIES,
+  SESSION_PROFILES,
+  toSessionProfile,
   type OpenSessionInput,
   type SessionFactory,
+  type SessionProfile,
 } from "./session-profiles.js";
 export {
   ATLASSIAN_ALLOWED_MCP_HOSTS,
@@ -58,6 +69,7 @@ export {
   ATLASSIAN_MCP_HOST,
   ATLASSIAN_MCP_PROTOCOL_VERSION,
   ATLASSIAN_MCP_URL,
+  ATLASSIAN_REQUIRED_FIELDS,
   ATLASSIAN_SERVER_ID,
   ATLASSIAN_STRUCTURED_CONTENT_TOOLS,
   AtlassianStructuredContentUnavailableError,
