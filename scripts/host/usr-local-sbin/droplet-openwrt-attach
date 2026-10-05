@@ -564,6 +564,7 @@ done
 # (re)set it inside the container on every attach. Empty -> skip the set,
 # but log so the operator notices.
 # >>> root_pw (WARP-3839)
+ROOT_PW_FAIL=0
 OPENWRT_ROOT_PW=""
 if [ "$ROUTER_EXTERNAL" = 1 ]; then
   # WARP-3839: external router -> the secret file is the ROUTER's credential;
@@ -574,7 +575,11 @@ if [ "$ROUTER_EXTERNAL" = 1 ]; then
   fi
   case "$OPENWRT_ROOT_PW" in *[[:cntrl:]]*) OPENWRT_ROOT_PW="";; esac
   if [ -z "$OPENWRT_ROOT_PW" ]; then
-    echo "warn: OPENWRT_PASSWORD is empty or unset in the box .env — the bundled container root password stays unset (external router: not used by routing)"
+    # Fail closed: stock OpenWrt root has an EMPTY hash and rpcd accepts ANY
+    # password against it (WARP-834). Never fall back to the secret file; flag
+    # it so the unit is failed after the best-effort tail (EXEC_RC is set later).
+    ROOT_PW_FAIL=1
+    echo "${EXT_NOTE}droplet-openwrt-attach: ERROR: no box-owned OPENWRT_PASSWORD in .env; bundled container root left unprotected; run setup.sh --sync-secrets" >&2
   fi
 else
   if [ -r "$OPENWRT_PASSWORD_FILE" ]; then
@@ -1799,6 +1804,10 @@ fi
 echo "droplet-openwrt-attach: done (gateway=$GATEWAY_IP, ssid=$AP_SSID, domain=$AP_DOMAIN, ap_mode=$([ "$AP_BRIDGE" = 1 ] && echo bridged || echo routed))"
 if [ "$EXEC_RC" -ne 0 ]; then
   echo "${EXT_NOTE}droplet-openwrt-attach: WARN: container bring-up reported failure (rc=$EXEC_RC) — AP/package prerequisites did not satisfy; see errors above. Continuing host-side recovery, then failing the unit." >&2
+fi
+if [ "$ROOT_PW_FAIL" = 1 ]; then
+  echo "${EXT_NOTE}droplet-openwrt-attach: ERROR: failing the unit — external router but no box-owned OPENWRT_PASSWORD (see above)" >&2
+  EXEC_RC=1
 fi
 
 # Fresh-provision fix: install the droplet rpcd ACL so the routing service

@@ -71,6 +71,27 @@ case "$out" in
   *) fail "external host without OPENWRT_PASSWORD: got '$out'" ;;
 esac
 
+# Fail closed (WARP-834): external router + no box-owned OPENWRT_PASSWORD means
+# stock OpenWrt root has an empty hash. ERROR with the note, flag set, and the
+# secret file is NOT a fallback.
+printf '%s' $'OPENWRT_HOST=192.168.9.1\n' > "$WORK/.env"
+full="$(env -u OPENWRT_PASSWORD OPENWRT_HOST=192.168.9.1 REPO_ENV_FILE="$WORK/.env" OPENWRT_PASSWORD_FILE="$WORK/openwrt_password" \
+  bash -c '. "$1"; . "$2" 2>&1; printf "FLAG=%s PW=[%s]" "$ROOT_PW_FAIL" "$OPENWRT_ROOT_PW"' _ "$WORK/ext.sh" "$WORK/pw.sh" 2>&1)"
+case "$full" in *"ERROR: no box-owned OPENWRT_PASSWORD"*"Network tab"*|*"Network tab"*"ERROR: no box-owned OPENWRT_PASSWORD"*) pass "external + empty OPENWRT_PASSWORD: ERROR line with the external-router note" ;; *) fail "no prefixed ERROR: $full" ;; esac
+case "$full" in *"FLAG=1 PW=[]") pass "external + empty OPENWRT_PASSWORD: unit flagged failed, root pw empty" ;; *) fail "flag/pw wrong: $full" ;; esac
+case "$full" in *"$SECRET_VALUE"*) fail "secret file leaked on the fail-closed path" ;; *) pass "fail-closed path never reads the secret file" ;; esac
+# A readable-only-if-opened trap: a FIFO would hang a read; unreadable file proves no open.
+chmod 000 "$WORK/openwrt_password"
+out="$(run_pw 192.168.9.1 $'OPENWRT_HOST=192.168.9.1\n')"
+chmod 600 "$WORK/openwrt_password"
+case "$out" in "1||"*) pass "external + empty: same result with the secret file unreadable (never opened)" ;; *) fail "got '$out'" ;; esac
+# The flag must become a non-zero unit result AFTER the container exec resets EXEC_RC.
+if awk '/EXEC_RC=\$\?/{seen=1} seen && /ROOT_PW_FAIL" = 1/{f=1} f && /EXEC_RC=1/{ok=1} END{exit !ok}' "$ATTACH"; then
+  pass "ROOT_PW_FAIL sets EXEC_RC=1 after the container exec (unit shows failed)"
+else
+  fail "ROOT_PW_FAIL does not set EXEC_RC=1 after EXEC_RC=\$?"
+fi
+
 # Bundled container shapes keep the old behavior: secret file wins, no prefix.
 for h in "" 127.0.0.1 localhost ::1; do
   out="$(run_pw "$h" $'OPENWRT_PASSWORD=box-owned-pw\n')"
