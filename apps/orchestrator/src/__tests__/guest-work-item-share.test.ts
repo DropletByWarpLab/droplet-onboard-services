@@ -276,7 +276,11 @@ describe("a guest to whom the item is NOT assigned: the same 404 on all five, ex
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ work_items: [] });
     expect(findMany).toHaveBeenCalledTimes(1);
-    expect(findMany.mock.calls[0][0].where).toEqual({ isArchived: false, assignees: { some: { userId: "u-guest" } } });
+    expect(findMany.mock.calls[0][0].where).toEqual({
+      isArchived: false,
+      assignees: { some: { userId: "u-guest" } },
+      project: { kind: "PROJECT" },
+    });
   });
 
   it("asks for the item by the guest's id: the item routes by workItemId, the state list by the project", async () => {

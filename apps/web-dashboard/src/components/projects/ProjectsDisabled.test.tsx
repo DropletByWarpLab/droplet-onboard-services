@@ -102,6 +102,7 @@ describe("ProjectsDisabled — enable path (WARP-1306)", () => {
         projects: true,
         crm: false,
         contacts: false,
+        support: false,
       });
     },
   );
@@ -123,8 +124,8 @@ describe("ProjectsDisabled — enable path (WARP-1306)", () => {
       (prev: AppCapabilities | undefined) => AppCapabilities;
 
     expect(
-      update({ projects: false, crm: true, contacts: true }),
-    ).toEqual({ projects: true, crm: true, contacts: true });
+      update({ projects: false, crm: true, contacts: true, support: false }),
+    ).toEqual({ projects: true, crm: true, contacts: true, support: false });
   });
 
   it.each(["family", "guest"])(

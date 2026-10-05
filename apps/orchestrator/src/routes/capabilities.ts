@@ -62,6 +62,15 @@ export interface AppCapabilities {
   /** WARP-2038 — the /contacts surface. Off until that ticket builds it; the
    *  flag ships now so the CRM's people picker has one contract to read. */
   contacts: boolean;
+  /**
+   * WARP-3528 (ADR-069 §1) — the service desk's own surface at /support.
+   * Reported through the SAME effective-set read as `projects` and `crm`, and
+   * this route re-derives no edge: the registry's `support` entry declares no
+   * `requires`, so Support on with Projects off answers `support: true`
+   * (`capabilities.test.ts` pins it). An edge, if one is ever wanted, belongs
+   * in `module-registry.ts`, never in this file.
+   */
+  support: boolean;
 }
 
 export function createCapabilitiesRouter(
@@ -81,6 +90,7 @@ export function createCapabilitiesRouter(
     let projects = false;
     let crm = false;
     let contacts = false;
+    let support = false;
     try {
       const effective = await getEffectiveModuleIds(prisma, cfg);
       projects = effective.has("projects");
@@ -91,13 +101,14 @@ export function createCapabilitiesRouter(
       // AppCapabilities.crm.
       crm = effective.has("crm");
       contacts = effective.has("contacts");
+      support = effective.has("support");
     } catch (e) {
       // Fail closed — module-gate parity (see the posture note above). The
       // dashboard treats an explicit `false` as "module off", which is what
       // the gate would enforce for every PM request right now anyway.
       logger.error({ err: e }, "capabilities_enablement_read_failed");
     }
-    const body: AppCapabilities = { projects, crm, contacts };
+    const body: AppCapabilities = { projects, crm, contacts, support };
     res.json(body);
   });
 
