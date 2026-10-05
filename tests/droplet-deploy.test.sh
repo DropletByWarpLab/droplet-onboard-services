@@ -49,7 +49,7 @@ case "$t" in
   systemctl)
     [ "\$1" = is-active ] && [ -f "$WORK/inactive" ] && exit 3
     exit 0 ;;
-  id) [ "\$1" = -nG ] && { [ -f "'$WORK/nodocker'" ] && echo "droplet users" || echo "droplet users docker"; exit 0; }; exec /usr/bin/id "\$@" ;;
+  id) [ "\$1" = -nG ] && { [ -f "$WORK/nodocker" ] && echo "droplet users" || echo "droplet users docker"; exit 0; }; exec /usr/bin/id "\$@" ;;
   *) exit 0 ;;
 esac
 STUB
