@@ -18,6 +18,7 @@ import {
 } from "./bits";
 import { fmtISODate, isOverdue } from "./config";
 import { useActivity, useComments, useSubIssues, useProjectLabels, useDevelopmentLinks, pmActions } from "./usePm";
+import { CycleField, ModulesField } from "./planning-pickers";
 import type { PmWorkItem } from "./types";
 import { escapeHtml } from "@/lib/escape-html";
 import { formatRelativeTime } from "@/lib/relative-time";
@@ -292,7 +293,15 @@ function Composer({ itemId, onSent }: { itemId: string; onSent: () => void }): J
   );
 }
 
-function DetailBody({ item, onChanged }: { item: PmWorkItem; onChanged: () => void }): JSX.Element {
+function DetailBody({
+  item,
+  onChanged,
+  readOnly,
+}: {
+  item: PmWorkItem;
+  onChanged: () => void;
+  readOnly: boolean;
+}): JSX.Element {
   const person = usePerson();
   const { subIssues } = useSubIssues(item.projectId, item.id);
   const { comments, mutate: mutateComments } = useComments(item.id);
@@ -394,6 +403,14 @@ function DetailBody({ item, onChanged }: { item: PmWorkItem; onChanged: () => vo
         <PropRow icon="flag" label="Labels">
           <LabelsEditor item={item} onChanged={onChanged} />
         </PropRow>
+        {/* WARP-3521 — planning. Writers get the pickers; everyone else gets the
+            current value as text (brief §2.11: hide writes, don't disable them). */}
+        <PropRow icon="target" label="Cycle">
+          <CycleField item={item} readOnly={readOnly} onChanged={onChanged} />
+        </PropRow>
+        <PropRow icon="layers" label="Modules">
+          <ModulesField item={item} readOnly={readOnly} onChanged={onChanged} />
+        </PropRow>
         {/* ADR-045 §5.3 — the RESOLVED department, with where it came from.
             Read-only in this slice: the picker is a write, and a write on this
             panel owes the §8 safety-chip contract a design pass this slice has
@@ -494,10 +511,13 @@ export function DetailDrawer({
   item,
   onClose,
   onChanged,
+  readOnly = false,
 }: {
   item: PmWorkItem;
   onClose: () => void;
   onChanged: () => void;
+  /** WARP-3521 — hides the cycle / module pickers' writes for read-only roles. */
+  readOnly?: boolean;
 }): JSX.Element {
   const titleId = useId();
   return (
@@ -515,7 +535,7 @@ export function DetailDrawer({
             <PmIcon name="x" size={16} />
           </button>
         </div>
-        <DetailBody item={item} onChanged={onChanged} />
+        <DetailBody item={item} onChanged={onChanged} readOnly={readOnly} />
       </div>
     </Dialog>
   );
