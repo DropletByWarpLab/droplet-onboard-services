@@ -124,6 +124,23 @@ export const ATLASSIAN_MCP_CLIENT_INFO = {
 export const ATLASSIAN_SERVER_ID = "atlassian";
 
 /**
+ * WARP-3703 — the flat JSON fields `POST /sessions/atlassian/open` must carry
+ * before {@link createAtlassianMcpSession} is built: the three it has always
+ * read, and the ones the provider descriptor's required `credentialFields`
+ * declare under the same names (`adr-043-boundary.test.ts` gates the pair).
+ *
+ * In the order the route's 400 has always named a missing one, which is why it
+ * is not alphabetical. Frozen, because this array IS the contract: an element
+ * edited at runtime would change what the route accepts for a customer's
+ * credential.
+ */
+export const ATLASSIAN_REQUIRED_FIELDS: readonly string[] = Object.freeze([
+  "email",
+  "apiToken",
+  "cloudId",
+]);
+
+/**
  * The argument every Atlassian tool call carries.
  *
  * The API token is NOT bound to a site: one token reaches every site the
