@@ -84,6 +84,7 @@
  * org approval (it "will only be able to read public resources until it is
  * approved"). The setup guide names both; nothing in the profile can.
  */
+import type { RestDevelopmentSpec } from "../development.js";
 import type { RestVendorProfile } from "../profile.js";
 
 export const GITHUB_PROVIDER = "github";
@@ -138,6 +139,139 @@ export const GITHUB_USER_AGENT = "droplet-erp-connector";
  * (`rest/connector.ts`, `rest-track.test.ts`).
  */
 export const GITHUB_MIN_REQUEST_INTERVAL_MS = 720;
+
+/**
+ * WARP-3535 — what the development panel reads from GitHub. Every value below
+ * was read off GitHub's own REST reference for the endpoint it names; the
+ * facts a copy pass would round off are marked 🔴.
+ *
+ * Permissions the owner's fine-grained token needs for THIS (the descriptor's
+ * help text says the same): *Pull requests: Read-only* for `/pulls`, and
+ * *Contents: Read-only* for `/commits` and `/branches`. `/user/repos` and
+ * `/repos/{owner}/{repo}` need neither. A token without one of them answers 403
+ * "Resource not accessible by personal access token" for that repository, which
+ * the sync reports as "can't read this repository", never as a revoked token.
+ *
+ * 🔴 `/pulls` has NO `since` parameter (ADR-046, verified absent) and GitHub
+ * silently ignores parameters it does not know. So the recent list is
+ * `sort=updated&direction=desc` and the caller stops at its own cutoff
+ * (`newestFirst`); a guessed `since` would full-scan on every tick and report an
+ * incremental read.
+ *
+ * 🔴 A merged pull request is `state: closed` with `merged_at` set — the list
+ * carries no `merged` boolean (that exists only on the single-PR endpoint) — and
+ * a closed draft is still `draft: true`. Rule ORDER is the semantics: merged
+ * first, then closed, then draft, then open.
+ *
+ * 🔴 `GET /repos/{owner}/{repo}/branches` returns names and commits and NO URL,
+ * so a branch's page is built from the repository's own `html_url`.
+ *
+ * `{repo}` is `owner/name` taken verbatim into the path, so the pattern is
+ * strict (GitHub names: letters, digits, `-`, `_`, `.`) and the guard also
+ * refuses a `.` or `..` segment, which the pattern alone would let through.
+ */
+export const GITHUB_DEVELOPMENT: RestDevelopmentSpec = {
+  repoRef: { pattern: "^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$" },
+  webHosts: ["github.com"],
+  // Sent on EVERY response, a 304 included — which is why a conditional poll is
+  // free for the allowance but still tells the box how much is left.
+  rateLimit: { limit: "x-ratelimit-limit", remaining: "x-ratelimit-remaining", reset: "x-ratelimit-reset" },
+  repositories: {
+    path: "/user/repos",
+    query: {
+      per_page: "100",
+      sort: "pushed",
+      direction: "desc",
+      affiliation: "owner,collaborator,organization_member",
+    },
+    maxPages: 3,
+    fieldMap: {
+      externalId: "id",
+      apiRef: "full_name",
+      fullName: "full_name",
+      webUrl: "html_url",
+      defaultBranch: "default_branch",
+    },
+  },
+  repository: {
+    path: "/repos/{repo}",
+    single: true,
+    maxPages: 1,
+    fieldMap: {
+      externalId: "id",
+      apiRef: "full_name",
+      fullName: "full_name",
+      webUrl: "html_url",
+      defaultBranch: "default_branch",
+    },
+  },
+  pullRequestsOpen: {
+    path: "/repos/{repo}/pulls",
+    query: { state: "open", sort: "updated", direction: "desc", per_page: "100" },
+    maxPages: 3,
+    fieldMap: {
+      externalId: "id",
+      number: "number",
+      url: "html_url",
+      title: "title",
+      body: "body",
+      author: "user.login",
+      branch: "head.ref",
+      updatedAt: "updated_at",
+    },
+    stateRules: [
+      { when: { path: "merged_at", present: true }, state: "MERGED" },
+      { when: { path: "state", equals: "closed" }, state: "CLOSED" },
+      { when: { path: "draft", equals: true }, state: "DRAFT" },
+      { when: { path: "state", equals: "open" }, state: "OPEN" },
+    ],
+  },
+  pullRequestsRecent: {
+    path: "/repos/{repo}/pulls",
+    query: { state: "all", sort: "updated", direction: "desc", per_page: "100" },
+    maxPages: 3,
+    newestFirst: true,
+    fieldMap: {
+      externalId: "id",
+      number: "number",
+      url: "html_url",
+      title: "title",
+      body: "body",
+      author: "user.login",
+      branch: "head.ref",
+      updatedAt: "updated_at",
+    },
+    stateRules: [
+      { when: { path: "merged_at", present: true }, state: "MERGED" },
+      { when: { path: "state", equals: "closed" }, state: "CLOSED" },
+      { when: { path: "draft", equals: true }, state: "DRAFT" },
+      { when: { path: "state", equals: "open" }, state: "OPEN" },
+    ],
+  },
+  // The repository's default branch, newest first — what GitHub answers with no
+  // `sha` parameter. Two pages is 200 commits: a busy repository's last day or
+  // two, and a quiet one's last month.
+  commits: {
+    path: "/repos/{repo}/commits",
+    query: { per_page: "100" },
+    maxPages: 2,
+    newestFirst: true,
+    fieldMap: {
+      externalId: "sha",
+      url: "html_url",
+      message: "commit.message",
+      author: "commit.author.name",
+      committedAt: "commit.committer.date",
+    },
+  },
+  branches: {
+    path: "/repos/{repo}/branches",
+    query: { per_page: "100" },
+    maxPages: 3,
+    fieldMap: { name: "name" },
+    urlTemplate: "{webUrl}/tree/{name}",
+  },
+};
 
 export const GITHUB_PROFILE: RestVendorProfile = {
   provider: GITHUB_PROVIDER,
@@ -245,4 +379,5 @@ export const GITHUB_PROFILE: RestVendorProfile = {
       },
     },
   ],
+  development: GITHUB_DEVELOPMENT,
 };

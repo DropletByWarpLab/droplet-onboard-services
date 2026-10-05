@@ -14,7 +14,8 @@ import {
   AvatarStack,
   usePerson,
 } from "./bits";
-import { useActivity, useComments, useSubIssues, pmActions } from "./usePm";
+import { useActivity, useComments, useSubIssues, useDevelopmentLinks, pmActions } from "./usePm";
+import { ArrowUpRight, Copy } from "lucide-react";
 import { editActions } from "./useEditing";
 import { CycleField, ModulesField } from "./planning-pickers";
 import { PropRow } from "./detail/PropRow";
@@ -171,6 +172,8 @@ function DetailBody({
   const { subIssues } = useSubIssues(item.projectId, item.id);
   const { comments, mutate: mutateComments } = useComments(item.id);
   const { activity, mutate: mutateActivity } = useActivity(item.id);
+  const { links: developmentLinks, isLoading: developmentLoading, error: developmentError } = useDevelopmentLinks(item.id);
+  const { toast } = useToast();
   const subs = subIssues ?? [];
   const list = comments ?? [];
   const acts = activity ?? [];
@@ -204,6 +207,44 @@ function DetailBody({
           )
         }
       />
+
+      <section aria-labelledby="pm-development-heading">
+        <div className="pm-sect pm-row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+          <span id="pm-development-heading">Development</span>
+          <button
+            type="button"
+            className="pm-btn ghost sm"
+            aria-label="Copy development branch name"
+            onClick={() => {
+              const [identifier, sequence] = item.key.split("-");
+              const slug = item.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60).replace(/-+$/g, "");
+              const name = `${identifier.toLowerCase()}-${sequence}${slug ? `-${slug}` : ""}`;
+              void navigator.clipboard.writeText(name).then(() => toast("Branch name copied", "success"), () => toast("Couldn't copy the branch name", "error"));
+            }}
+          >
+            <Copy size={13} aria-hidden /> Copy branch
+          </button>
+        </div>
+        {developmentLoading ? (
+          <div className="type-footnote" role="status">Loading development links…</div>
+        ) : developmentError ? (
+          <div className="type-footnote" role="status">Development links are temporarily unavailable.</div>
+        ) : developmentLinks?.length ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+            {developmentLinks.map((link) => (
+              <a key={link.id} href={link.url} target="_blank" rel="noopener noreferrer" className="pm-surface"
+                style={{ padding: "9px 11px", display: "flex", alignItems: "center", gap: 8, color: "var(--text)", textDecoration: "none" }}>
+                <span className="pm-mono" style={{ color: "var(--text-4)", fontSize: 10.5, flex: "none" }}>{link.kind === "PULL_REQUEST" ? `PR ${link.number ?? ""}` : link.kind === "COMMIT" ? "Commit" : "Branch"}</span>
+                <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12.5 }}>{link.title}</span>
+                <span className="pm-chip" style={{ flex: "none", fontSize: 10 }}>{link.state.toLowerCase()}</span>
+                <ArrowUpRight size={13} aria-hidden style={{ color: "var(--text-4)", flex: "none" }} />
+              </a>
+            ))}
+          </div>
+        ) : (
+          <div className="type-footnote">No linked pull requests, commits, or branches yet.</div>
+        )}
+      </section>
 
       <PropertiesPanel edit={edit} readOnly={readOnly} onChanged={onChanged}>
         <PropRow icon="target" label="Cycle">

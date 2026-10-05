@@ -70,6 +70,7 @@ import { createPmOpenApiRouter } from "./routes/pm/openapi.js";
 import { createSupportRouter } from "./routes/support/support.routes.js";
 import { createPmInsightsRouter } from "./routes/pm/insights.js";
 import { createPmScheduleRouter } from "./routes/pm/schedule.js";
+import { createPmDevelopmentRouter } from "./routes/pm/development.js";
 import { createCrmRouter } from "./routes/crm.js";
 import { createMoneyRouter } from "./routes/money.js";
 import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
@@ -654,6 +655,10 @@ export function createApp(
   // router, disjoint paths (`/pm/projects/:id/timeline`, `/pm/my-work`); the
   // `projects` module gate covers it through the `/api/pm` prefix.
   app.use("/api", createPmScheduleRouter(prisma));
+  // WARP-3535 — code-host development links, under the same Projects module
+  // gate as every other /api/pm route. Item reads apply the guest assignment
+  // guard; repository administration is owner/admin only.
+  app.use("/api", createPmDevelopmentRouter(prisma));
   // WARP-3524 (WS-8) — Insights has its own disjoint `/pm/insights` path.
   // The `projects` module gate covers it through the `/api/pm` prefix.
   app.use("/api", createPmInsightsRouter(prisma));

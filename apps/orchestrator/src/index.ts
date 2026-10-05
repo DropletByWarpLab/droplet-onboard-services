@@ -169,6 +169,7 @@ import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.
 import { runActivityNotifySweep } from "./services/activity-notify.service.js";
 import { runImportTick } from "./services/pm/import/runner.js";
 import { registerOutboxConsumer, stopOutbox } from "./services/pm/pm-outbox.js";
+import { runDevelopmentSync } from "./services/pm/pm-development.service.js";
 import { createWebhookFanOutConsumer } from "./services/pm/webhook-fanout.js";
 import {
   pruneWebhookDeliveries,
@@ -1649,6 +1650,13 @@ async function main() {
     createWebhookFanOutConsumer(prisma, { onQueued: () => webhookDeliveryJob?.runNow() }),
     { prisma, cronRuntime },
   );
+  // WARP-3535 — refresh code-host links on the five-minute cadence documented
+  // by WS-18. A lock prevents two orchestrator instances polling the same
+  // repository; per-repository nextSyncAt is the durable backoff/cursor.
+  cronRuntime.scheduleInterval(5 * 60_000, async () => {
+    const result = await runDevelopmentSync(prisma);
+    if (result.checked > 0) logger.info(result, "PM development sync sweep");
+  }, { lockKey: "droplet:pm-development-sync", immediate: true });
   //  2. The delivery worker. The delivery table is the queue; this drains it. Its
   //     retry ladder lives on the rows, so a restart loses nothing.
   webhookDeliveryJob = cronRuntime.scheduleInterval(

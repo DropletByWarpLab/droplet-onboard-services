@@ -192,7 +192,7 @@ const CATALOG_WARP_2707 = [
     name: "GitHub",
     category: "Project management",
     description:
-      "Issues and pull requests across every repository your token can see — read from GitHub.",
+      "Issues and pull requests, plus linked development activity from repositories you choose — read from GitHub.",
     availability: "available",
     setupGuideHref: "/help/integrations/github",
   },
@@ -201,7 +201,7 @@ const CATALOG_WARP_2707 = [
     id: "gitlab",
     name: "GitLab",
     category: "Project management",
-    description: "Issues across every project you can see — their state, assignee and timing — read from gitlab.com.",
+    description: "Issues and linked development activity from projects you choose — read from gitlab.com.",
     availability: "available",
     setupGuideHref: "/help/integrations/gitlab",
   },
