@@ -33,8 +33,9 @@ import {
   Crosshair,
   X,
 } from "lucide-react";
-import { useAuth } from "@/lib/auth";
+import { authFetch, useAuth } from "@/lib/auth";
 import { useBoxAddress } from "@/lib/hooks/useBoxAddress";
+import { MODULE_GATE_KEY, useModuleGateState, type ModulesView } from "@/lib/hooks/useModuleGate";
 import { fetchSystemHealth, type SystemHealth } from "@/lib/api";
 import { resolveHealthCopy } from "./health-copy";
 import { BentoBoard } from "@/components/home/BentoBoard";
@@ -95,6 +96,21 @@ const ADD_SIZE: Record<string, { w: number; h: number }> = {
 
 const LS = "droplet-home-bento-v1-";
 const VALID_IDS = Object.keys(WIDGETS);
+const WIDGET_MODULES: Record<string, string> = {
+  calendar: "calendar",
+  files: "files",
+  cameras: "cameras",
+  remote: "network",
+  scenes: "smart_home",
+  // The optional Tasks tile is the Home surface for Projects.
+  tasks: "projects",
+};
+
+async function fetchModulesView(): Promise<ModulesView> {
+  const res = await authFetch(MODULE_GATE_KEY);
+  if (!res.ok) throw new Error(`Failed to fetch modules: ${res.status}`);
+  return res.json();
+}
 
 // The default layout, minus any widget not in the active registry (a
 // feature-flagged widget whose backend isn't built yet is absent from
@@ -263,6 +279,19 @@ function MobileBoard({ items }: { items: LayoutItem[] }) {
 export default function DashboardPage() {
   const { user } = useAuth();
   const isMobile = useIsMobile();
+  // Unlike the nav's convenience gate, Home waits for positive module state:
+  // a tile that polls a gated API must not briefly mount while the probe is
+  // unresolved. These states retain the existing per-person feature filtering.
+  const calendarState = useModuleGateState("calendar");
+  const filesState = useModuleGateState("files");
+  const camerasState = useModuleGateState("cameras");
+  const networkState = useModuleGateState("network");
+  const smartHomeState = useModuleGateState("smart_home");
+  // Projects intentionally has no per-person module gate. Its Home Tasks tile
+  // follows the workspace toggle directly, while tier/route checks stay where
+  // they already live.
+  const { data: modulesView } = useSWR<ModulesView>(MODULE_GATE_KEY, fetchModulesView);
+  const projectsOn = modulesView?.modules.find((m) => m.id === "projects")?.effective === true;
 
   const [dir, setDir] = useState<DensityKey>("balanced");
   const [editMode, setEditMode] = useState(false);
@@ -318,20 +347,54 @@ export default function DashboardPage() {
   }, [dir]);
 
   // WARP-3157 — every camera route refuses role `guest`; never render or
-  // offer the tile to one. Filtered at render time (not out of the WIDGETS
-  // registry) so an owner/admin/member's saved layout is unaffected.
+  // offer the tile to one. Module-owned widgets are likewise omitted until
+  // their resolved gates are on, so their polling components cannot mount.
   const isGuest = user?.role === "guest";
-  const items = isGuest ? layouts[dir].filter((it) => it.id !== "cameras") : layouts[dir];
   const cfg = DIRECTIONS[dir];
+  const widgetModuleOn = (id: string): boolean => {
+    const moduleId = WIDGET_MODULES[id];
+    if (!moduleId) return true;
+    if (moduleId === "projects") return projectsOn;
+    const states: Record<string, string> = {
+      calendar: calendarState,
+      files: filesState,
+      cameras: camerasState,
+      network: networkState,
+      smart_home: smartHomeState,
+    };
+    return states[moduleId] === "on";
+  };
+  const canShowWidget = (id: string): boolean =>
+    !(isGuest && id === "cameras") && widgetModuleOn(id);
+  const items = fillGaps(
+    layouts[dir].filter((it) => canShowWidget(it.id)),
+    cfg.cols,
+    WIDGETS,
+  );
 
   const persist = (edited: LayoutItem[]) => {
-    // WARP-3157 — the layout key is per browser, not per user: a guest's edit
-    // (which never contains the hidden cameras tile) must not strip it from
-    // the next owner/admin/member's board. Carry it through at the end.
-    const next =
-      isGuest && !edited.some((it) => it.id === "cameras")
-        ? [...edited, ...layouts[dir].filter((it) => it.id === "cameras")]
-        : edited;
+    // Layout storage is per browser. Keep role-hidden and module-hidden entries
+    // in their existing sequence while visible entries follow the user's edit.
+    // Bucket each hidden item by how many visible entries preceded it before
+    // the edit, then weave those buckets through the edited visible sequence.
+    const hiddenBuckets: LayoutItem[][] = [];
+    let visibleBefore = 0;
+    for (const item of layouts[dir]) {
+      if (canShowWidget(item.id)) {
+        visibleBefore++;
+      } else {
+        (hiddenBuckets[visibleBefore] ??= []).push(item);
+      }
+    }
+    const visibleEdited = edited.filter((it) => canShowWidget(it.id));
+    const next: LayoutItem[] = [];
+    for (let i = 0; i <= visibleEdited.length; i++) {
+      next.push(...(hiddenBuckets[i] ?? []));
+      if (i < visibleEdited.length) next.push(visibleEdited[i]!);
+    }
+    for (let i = visibleEdited.length + 1; i < hiddenBuckets.length; i++) {
+      next.push(...(hiddenBuckets[i] ?? []));
+    }
     setLayouts((L) => {
       const n = { ...L, [dir]: next };
       try {
@@ -352,9 +415,7 @@ export default function DashboardPage() {
   };
   const onReset = () => persist(defaultsFor(dir));
 
-  const hidden = CATALOG.filter(
-    (c) => !items.some((it) => it.id === c.id) && !(isGuest && c.id === "cameras"),
-  );
+  const hidden = CATALOG.filter((c) => canShowWidget(c.id) && !items.some((it) => it.id === c.id));
 
   const firstName = useMemo(() => {
     const raw = user?.displayName || user?.username || "";

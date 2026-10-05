@@ -65,7 +65,11 @@ vi.mock("../services/camera-candidates.service.js", async () => {
 
 const syncCamerasFromDb = vi.fn();
 const addCamera = vi.fn();
-vi.mock("../services/frigate.client.js", () => ({
+vi.mock("../services/frigate.client.js", async (importActual) => {
+  const actual = await importActual<typeof import("../services/frigate.client.js")>();
+  return {
+  withFrigateConfigLock: actual.withFrigateConfigLock,
+  waitForCameraStreaming: vi.fn().mockResolvedValue({ streaming: true, fps: 5 }),
   fetchSnapshot: vi.fn(),
   fetchEventThumbnail: vi.fn(),
   fetchKnownFaces: vi.fn(),
@@ -93,7 +97,8 @@ vi.mock("../services/frigate.client.js", () => ({
   ptzGoToPreset: vi.fn(),
   ptzMove: vi.fn(),
   restartFrigate: vi.fn(),
-}));
+  };
+});
 
 vi.mock("../services/camera.service.js", () => ({
   getCameras: vi.fn(),
@@ -143,20 +148,21 @@ vi.mock("../services/camera-settings.service.js", () => ({
 
 import { cameraReceives } from "../__tests__/frigate-credentials.fake.js";
 import { createCamerasRouter } from "./cameras.js";
+import { withFrigateConfigLock } from "../services/frigate.client.js";
+import { makeFakeTable } from "../__tests__/helpers/fake-table.js";
+import { createTransactionSeam } from "../__tests__/helpers/prisma-tx-harness.js";
 
 const HANWHA_ID = "mac:E4:30:22:50:2A:FD";
 
 function makePrisma() {
-  return {
-    camera: {
-      upsert: vi.fn().mockResolvedValue({}),
-      findMany: vi.fn().mockResolvedValue([{ name: "front_door" }]),
-      update: vi.fn().mockResolvedValue({ name: "old_cam" }),
-      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-      delete: vi.fn().mockResolvedValue({}),
-      deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
-    },
-  };
+  const table = makeFakeTable(() => ({
+    name: "", displayName: "", ipAddress: "", macAddress: null,
+    manufacturer: null, model: null, enabled: false, autoDiscovered: true,
+    adoption: "CANDIDATE",
+  }));
+  const client = { camera: table.delegate };
+  const seam = createTransactionSeam({ client: () => client, stores: { cameras: table.rows } });
+  return { ...client, table, $transaction: seam.$transaction };
 }
 
 function makeApp(prisma: ReturnType<typeof makePrisma>) {
@@ -191,45 +197,68 @@ describe("POST /api/cameras/discovered/:id/credentials", () => {
     expect(res.body).toEqual({ status: "accepted" });
     expect(submitLiveCandidateCredentials).toHaveBeenCalledWith("E4:30:22:50:2A:FD", "admin", SECRET_PW);
     expect(syncCamerasFromDb).toHaveBeenCalledTimes(1);
+    expect(prisma.table.rows).toHaveLength(1);
+    expect(prisma.table.rows[0]).toMatchObject({ name: "xnv_c8083r", adoption: "ADOPTED", enabled: true });
     expect(JSON.stringify(res.body)).not.toContain(SECRET_PW);
   });
 
-  it("enables the DB row by MAC, and by the name and address discovery returns — a static-IP camera has no MAC on its row (F6)", async () => {
+  it("keeps a queued reconcile behind the upstream add and the DB adoption", async () => {
+    let release!: () => void;
+    let reached!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { reached = resolve; });
+    submitLiveCandidateCredentials.mockImplementationOnce(async () => {
+      reached();
+      await gate;
+      return { ok: true, status: 200, camera: { name: "real_camera", ip: "192.168.9.219" } };
+    });
+    const prisma = makePrisma();
+    const placeholder = prisma.table.seed({ name: "old_placeholder", ipAddress: "192.168.9.219" });
+    const pending = request(makeApp(prisma))
+      .post(`/api/cameras/discovered/${HANWHA_ID}/credentials`)
+      .send({ username: "admin", password: SECRET_PW }).then((response) => response);
+    await entered;
+    const snapshot = withFrigateConfigLock(async () => prisma.table.rows.map((row) => ({ ...row })));
+    release();
+    expect((await pending).status).toBe(200);
+    expect(await snapshot).toEqual([expect.objectContaining({ id: placeholder.id, name: "real_camera", adoption: "ADOPTED" })]);
+  });
+
+  it("adopts and renames the existing static-IP placeholder without making another row", async () => {
     submitLiveCandidateCredentials.mockResolvedValue({
       ok: true,
       status: 200,
       camera: { name: "camera_192_168_9_5", ip: "192.168.9.5", mac: "ip:192.168.9.5" },
     });
     const prisma = makePrisma();
+    const placeholder = prisma.table.seed({ name: "old_placeholder", ipAddress: "192.168.9.5", macAddress: null });
 
     await request(makeApp(prisma))
       .post("/api/cameras/discovered/mac:IP:192.168.9.5/credentials")
       .send({ username: "admin", password: SECRET_PW });
 
-    expect(prisma.camera.updateMany).toHaveBeenCalledWith({
-      where: {
-        OR: [
-          { macAddress: { in: ["IP:192.168.9.5", "ip:192.168.9.5"] } },
-          { name: "camera_192_168_9_5" },
-          { ipAddress: "192.168.9.5" },
-        ],
-      },
-      data: { enabled: true },
+    expect(prisma.table.rows).toHaveLength(1);
+    expect(prisma.table.rows[0]).toMatchObject({
+      id: placeholder.id, name: "camera_192_168_9_5", macAddress: null,
+      adoption: "ADOPTED", enabled: true,
     });
   });
 
   it("falls back to the MAC alone when an older camera-discovery returns no camera", async () => {
     submitLiveCandidateCredentials.mockResolvedValue({ ok: true, status: 200 });
     const prisma = makePrisma();
+    prisma.table.seed({ name: "old_placeholder", macAddress: "e4:30:22:50:2a:fd" });
 
     await request(makeApp(prisma))
       .post(`/api/cameras/discovered/${HANWHA_ID}/credentials`)
       .send({ username: "admin", password: SECRET_PW });
 
     expect(prisma.camera.updateMany).toHaveBeenCalledWith({
-      where: { OR: [{ macAddress: { in: ["E4:30:22:50:2A:FD", "e4:30:22:50:2a:fd"] } }] },
-      data: { enabled: true },
+      where: { macAddress: { in: ["E4:30:22:50:2A:FD", "e4:30:22:50:2a:fd"] } },
+      data: { enabled: true, adoption: "ADOPTED" },
     });
+    expect(prisma.table.rows[0]).toMatchObject({ name: "old_placeholder", adoption: "ADOPTED" });
+    expect(syncCamerasFromDb).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -379,8 +408,8 @@ describe("POST /api/cameras — optional username/password merged server-side", 
     );
     expect(JSON.stringify(res.body)).not.toContain(SECRET_PW);
     // The DB row keeps the host only — no credentials.
-    expect(prisma.camera.upsert.mock.calls[0][0].create.ipAddress).toBe("192.168.9.219");
-    expect(JSON.stringify(prisma.camera.upsert.mock.calls)).not.toContain(SECRET_PW);
+    expect(prisma.table.rows[0].ipAddress).toBe("192.168.9.219");
+    expect(JSON.stringify(prisma.table.rows)).not.toContain(SECRET_PW);
   });
 
   it.each(["C@mera!2024", "Qa@2024#x", "p:ss/w?rd", "WarpLab123!", "100%sure"])(
@@ -398,7 +427,7 @@ describe("POST /api/cameras — optional username/password merged server-side", 
       expect(cameraReceives(stored)).toEqual({ user: "admin", password: pw });
       // The host came from the address as typed, NOT from a string with the raw
       // password merged in (a '/', '?', '#' or '@' in it moves where a parser ends the authority).
-      expect(prisma.camera.upsert.mock.calls[0][0].create.ipAddress).toBe("192.168.9.60");
+      expect(prisma.table.rows[0].ipAddress).toBe("192.168.9.60");
     },
   );
 
@@ -443,7 +472,7 @@ describe("POST /api/cameras — optional username/password merged server-side", 
       expect(res.body.code).toBe("unsupported_stream_address");
       expect(JSON.stringify(res.body)).not.toContain(SECRET_PW);
       expect(addCamera).not.toHaveBeenCalled();
-      expect(prisma.camera.upsert).not.toHaveBeenCalled();
+      expect(prisma.table.rows).toEqual([]);
     },
   );
 
