@@ -6437,7 +6437,6 @@ model PmTicket {
   @@index([solvedAt])
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 /// KAN-6 — internal, operator-invisible one-shot markers for data migrations
 /// that can't run as pure SQL (they need runtime-resolved values like the
 /// box's local IANA timezone). NOT a user-facing setting — no route reads or
