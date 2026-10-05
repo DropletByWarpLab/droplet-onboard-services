@@ -491,6 +491,12 @@ else
   else
     fail "user-data YAML broken"
   fi
+  # WARP-3840: the edge router pins `droplet-sys` to 192.168.9.10 (ADR-057).
+  if grep -qE '^[[:space:]]+hostname: droplet-sys$' "$UD"; then
+    pass "autoinstall hostname is droplet-sys (matches the edge router's pinned name)"
+  else
+    fail "autoinstall hostname must be droplet-sys (edge router FABRIC_ROLE_PINS, WARP-3840)"
+  fi
 fi
 
 echo "--- WARP-2143: boot-order assertion — installed disk boots first, stick can stay in ---"

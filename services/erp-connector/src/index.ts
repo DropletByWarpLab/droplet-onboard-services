@@ -688,8 +688,10 @@ export {
 // ---------------------------------------------------------------------------
 export {
   RestProfileConnector,
+  RestCredentialRejectedError,
   RestPaginationContractError,
   RestRateLimitedError,
+  RestUnreachableError,
   RestVendorError,
   REST_MAX_PAGES,
   REST_REQUEST_TIMEOUT_MS,
@@ -718,6 +720,22 @@ export {
   type WatermarkFormat,
   type WatermarkLocation,
 } from "./rest/profile.js";
+export {
+  DEVELOPMENT_FEED_NAMES,
+  MAX_MATCH_TEXT_CHARS,
+  isSafeRepoRef,
+  type DevBranchItem,
+  type DevCommitItem,
+  type DevItemState,
+  type DevPullRequestItem,
+  type DevRepositoryItem,
+  type DevelopmentFeedName,
+  type DevelopmentFeedRequest,
+  type DevelopmentFeedResult,
+  type DevelopmentItem,
+  type RateLimitSnapshot,
+  type RestDevelopmentSpec,
+} from "./rest/development.js";
 export {
   assertHostConfigValue,
   assertSafeFollowUrl,

@@ -32,6 +32,7 @@ function prismaStub() {
 function relationDeleteStub(deleteWorkItemRow: () => Promise<unknown> = async () => ({})) {
   let inTransaction = false;
   const tx = {
+    pmAttachment: { findMany: vi.fn(async () => []) },
     pmWorkItem: {
       findMany: vi.fn(async () => []),
       delete: vi.fn(deleteWorkItemRow),

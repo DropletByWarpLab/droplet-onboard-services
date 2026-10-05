@@ -1911,7 +1911,8 @@ export async function ncCopyFile(
 export async function ncGetFileId(
   token: string,
   user: string,
-  path: string
+  path: string,
+  signal?: AbortSignal,
 ): Promise<number | null> {
   const url = webdavUrl(user, path);
   const body = `<?xml version="1.0" encoding="UTF-8"?>
@@ -1922,6 +1923,7 @@ export async function ncGetFileId(
     method: "PROPFIND",
     headers: { ...davHeaders(token), "Content-Type": "application/xml", Depth: "0" },
     body,
+    signal,
   });
   if (!resp.ok) {
     if (resp.status === 404) return null;

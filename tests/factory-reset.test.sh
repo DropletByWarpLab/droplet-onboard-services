@@ -69,7 +69,8 @@ COMPOSE_PROJECT="${COMPOSE_PROJECT:-droplet}"
 # brain-memory-data + ops-audit are the customer-data volumes the wipe list used
 # to omit (they survived a reset); assert they are gone. `filedata` was a dead
 # legacy name that no compose volume ever created, so it always vacuously passed.
-for vol in pgdata brain-memory-data ops-audit nextcloud-data aikeys nvrdata; do
+# pm-attachments (WARP-1505, files attached to work items) is customer data too.
+for vol in pgdata brain-memory-data ops-audit nextcloud-data aikeys nvrdata pm-attachments; do
   full_name="${COMPOSE_PROJECT}_${vol}"
   if docker volume inspect "$full_name" >/dev/null 2>&1; then
     fail "Volume ${full_name} still exists"

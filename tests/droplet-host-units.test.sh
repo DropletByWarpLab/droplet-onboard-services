@@ -296,6 +296,17 @@ if [ -f "$REPO_ROOT_REAL/scripts/host/etc-systemd-system/droplet-host-units.serv
 else
   fail "unit file scripts/host/etc-systemd-system/droplet-host-units.service missing"
 fi
+# WARP-3740: the on-demand hook must run the host-integration heal first, with the
+# `-` prefix (a box without the heal still gets its refresh), before refresh. It runs
+# the wrapper directly, not `systemctl start` (that would race refresh across the
+# heal's daemon-reexec).
+HU_UNIT="$REPO_ROOT_REAL/scripts/host/etc-systemd-system/droplet-host-units.service"
+if grep -qxF 'ExecStartPre=-/usr/local/sbin/droplet-reapply-host-integration' "$HU_UNIT" \
+  && [ "$(grep -n '^ExecStartPre=' "$HU_UNIT" | head -1 | cut -d: -f1)" -lt "$(grep -n '^ExecStart=' "$HU_UNIT" | cut -d: -f1)" ]; then
+  pass "droplet-host-units.service runs the host-integration heal (ExecStartPre=-) before refresh"
+else
+  fail "droplet-host-units.service does not run the heal via ExecStartPre=- before ExecStart — deploys leave host files stale"
+fi
 # The detection check must also ride the existing supervisor's timer — no new
 # scheduler (rule 9), and the box reports staleness on its own.
 if grep -q 'host_unit_staleness' "$REPO_ROOT_REAL/scripts/host/droplet-watchdog.sh"; then
@@ -471,6 +482,13 @@ if actions | grep -q '^restart droplet-host-units.service$'; then
   fail "refresh restarted its own unit"
 else
   pass "refresh never restarts its own unit"
+fi
+# WARP-3841: the deploy runner is deny-listed by default (restarting it mid-deploy
+# would kill the deploy that is running).
+if grep -q 'DROPLET_HOST_UNITS_NEVER_RESTART:-[^}]*droplet-deploy.service' "$HOST_UNITS"; then
+  pass "droplet-deploy.service is in the default restart deny-list"
+else
+  fail "droplet-deploy.service missing from the default DROPLET_HOST_UNITS_NEVER_RESTART"
 fi
 
 # =============================================================================

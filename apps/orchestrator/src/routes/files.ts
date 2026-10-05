@@ -6,6 +6,7 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import multer, { MulterError } from "multer";
 import { z } from "zod";
+import { SHARED_DRIVE_INDEX_USER, authorizeSharedDriveHits, isSharedDrivePath } from "@droplet/tools-core";
 import { PrismaClient, type DepartmentRight, type FolderColor } from "@prisma/client";
 import pino from "pino";
 import {
@@ -105,6 +106,7 @@ import { storedUploadName } from "../lib/upload-file-name.js";
 import { isPathUnderUser } from "../services/brain-memory.service.js";
 import {
   classifyFileContentId,
+  contentDispositionAttachment,
   inlinePreviewContentType,
   parseRangeHeader,
 } from "../lib/file-content.js";
@@ -615,6 +617,8 @@ type FileSearchMode = (typeof FILE_SEARCH_MODES)[number];
  */
 const CHUNKS_PER_FILE_FACTOR = 5;
 
+type FileSearchResult = { path: string; score: number; text: string; externalFileId?: number };
+
 /**
  * Collapse the engine's per-chunk `SearchHit[]` to one result per file,
  * keeping the best chunk for each path. The service returns rows in score
@@ -624,15 +628,17 @@ const CHUNKS_PER_FILE_FACTOR = 5;
  * frontend already renders.
  */
 function dedupeHitsPerFile(
-  hits: Array<{ path: string; score: number; snippet: string }>,
+  hits: Array<{ path: string; score: number; snippet: string; externalFileId?: number }>,
   limit: number,
-): Array<{ path: string; score: number; text: string }> {
+): FileSearchResult[] {
   const seen = new Set<string>();
-  const out: Array<{ path: string; score: number; text: string }> = [];
+  const out: FileSearchResult[] = [];
   for (const hit of hits) {
     if (seen.has(hit.path)) continue;
     seen.add(hit.path);
-    out.push({ path: hit.path, score: hit.score, text: hit.snippet });
+    out.push({ path: hit.path, score: hit.score, text: hit.snippet,
+      ...(hit.externalFileId !== undefined ? { externalFileId: hit.externalFileId } : {}),
+    });
     if (out.length >= limit) break;
   }
   return out;
@@ -659,13 +665,14 @@ const KEYWORD_NAME_MATCH_SCORE = 0.01;
  */
 function nameHitsToResults(
   files: FileEntryInfo[],
-): Array<{ path: string; score: number; text: string }> {
+): FileSearchResult[] {
   return files
     .filter((f) => !f.isDirectory)
     .map((f) => ({
       path: f.path,
       score: KEYWORD_NAME_MATCH_SCORE,
       text: f.name,
+      ...(isSharedDrivePath(f.path) ? { externalFileId: f.ncFileId ?? undefined } : {}),
     }));
 }
 
@@ -675,10 +682,10 @@ function nameHitsToResults(
  * real snippet); name-only files are appended in order. Clamped to `limit`.
  */
 function unionContentAndNameHits(
-  contentResults: Array<{ path: string; score: number; text: string }>,
-  nameResults: Array<{ path: string; score: number; text: string }>,
+  contentResults: FileSearchResult[],
+  nameResults: FileSearchResult[],
   limit: number,
-): Array<{ path: string; score: number; text: string }> {
+): FileSearchResult[] {
   const seen = new Set(contentResults.map((r) => r.path));
   const out = [...contentResults];
   for (const nr of nameResults) {
@@ -1100,21 +1107,6 @@ function applyCitationContentHeaders(res: Response, filename: string): void {
   res.setHeader("Content-Disposition", contentDispositionAttachment(filename));
 }
 
-/**
- * A Content-Disposition that survives a hostile or non-ASCII filename.
- *
- * A bare `attachment; filename="${name}"` breaks on any name containing a
- * quote or backslash — the value stops being one quoted-string and the rest is
- * reparsed as disposition parameters. Node rejects CR/LF in a header value, so
- * response splitting is already off the table, but parameter smuggling is not.
- * The ASCII fallback is stripped to a conservative set, and the real name is
- * carried in RFC 5987 `filename*`, which every current browser prefers.
- */
-function contentDispositionAttachment(filename: string, disposition: "attachment" | "inline" = "attachment"): string {
-  const ascii = filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
-  const encoded = encodeURIComponent(filename).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
-  return `${disposition}; filename="${ascii}"; filename*=UTF-8''${encoded}`;
-}
 
 export function createFilesRouter(
   prisma: PrismaClient,
@@ -4627,6 +4619,29 @@ export function createFilesRouter(
   //  Phase 4 — Semantic content search (pgvector)
   // ────────────────────────────────────────────────────────────
 
+  // The MCP process owns no Nextcloud administrator credential. Its shared
+  // search and document reads ask this route to verify indexed file identities
+  // against the acting person's WebDAV access, on every request.
+  router.post("/files/shared-drive/access", standardRateLimit, async (req, res, next) => {
+    try {
+      const body = z.object({ files: z.array(z.object({
+        path: z.string().max(4096).refine(isSharedDrivePath),
+        externalFileId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      }).strict()).max(100) }).strict().safeParse(req.body);
+      if (!body.success) {
+        res.status(400).json({ error: "Invalid shared-drive file identities" });
+        return;
+      }
+      const token = await getToken(req);
+      const user = await getUser(req, prisma);
+      const signal = AbortSignal.timeout(5000);
+      const files = await authorizeSharedDriveHits(body.data.files, (filePath) => ncGetFileId(token, user, filePath, signal));
+      res.json({ files });
+    } catch (err) {
+      handleFileError(err, res, next);
+    }
+  });
+
   // ── GET /api/files/search/content?q=...&limit=20 ──
   //
   // Embeds the query string via the ai-gateway gRPC, then does a
@@ -4668,6 +4683,14 @@ export function createFilesRouter(
         prisma,
         user,
       );
+      // A sentinel only selects candidates; access is decided per file below.
+      // Personal/dept search keeps its existing behavior without an NC token.
+      const sharedToken = await getToken(req).catch(() => null);
+      if (sharedToken) searchUserIds.push(SHARED_DRIVE_INDEX_USER);
+      const authorize = <T extends { path: string; source?: string; externalFileId?: number }>(hits: T[]) => {
+        const signal = AbortSignal.timeout(5000);
+        return authorizeSharedDriveHits(hits, (filePath) => sharedToken ? ncGetFileId(sharedToken, user, filePath, signal) : Promise.resolve(null));
+      };
       const additionalUserIds = searchUserIds.slice(1);
 
       // Check Redis cache first (60s TTL on identical queries). The mode is
@@ -4677,9 +4700,9 @@ export function createFilesRouter(
       // membership change nor a rights change on an unchanged corpus set
       // can ever serve a stale cached result.
       const cacheKey = `filesearch:${mode}:v${aclVersion}:${searchUserIds.join(",")}:${q}:${limit}`;
-      const cached = await cacheGet<Array<{ path: string; score: number; text: string }>>(cacheKey);
+      const cached = await cacheGet<FileSearchResult[]>(cacheKey);
       if (cached) {
-        res.json({ results: cached });
+        res.json({ results: await authorize(cached) });
         return;
       }
 
@@ -4704,7 +4727,7 @@ export function createFilesRouter(
           limit: limit * CHUNKS_PER_FILE_FACTOR,
           source: "nextcloud",
         });
-        const contentResults = dedupeHitsPerFile(contentHits, limit);
+        const contentResults = dedupeHitsPerFile(await authorize(contentHits), limit);
 
         // Arm 2 is a best-effort enhancement. Skip it entirely when the
         // content arm already filled the page — the union would discard every
@@ -4719,7 +4742,7 @@ export function createFilesRouter(
         // MissingNcTokenError propagate (→ 401) instead of masking a re-login
         // prompt as a degraded 200.
         let nameDegraded = false;
-        let nameResults: Array<{ path: string; score: number; text: string }> =
+        let nameResults: FileSearchResult[] =
           [];
         if (contentResults.length < limit) {
           const token = await getToken(req); // auth failure → 401, not degrade
@@ -4731,7 +4754,7 @@ export function createFilesRouter(
               // directory-heavy match needs headroom to yield `limit` files.
               limit: limit * CHUNKS_PER_FILE_FACTOR,
             });
-            nameResults = nameHitsToResults(nameFiles);
+            nameResults = await authorize(nameHitsToResults(nameFiles));
           } catch (nameErr) {
             // Nextcloud unreachable on the name arm: log + degrade to
             // content-only, and flag so we DON'T persist the degraded union.
@@ -4827,7 +4850,7 @@ export function createFilesRouter(
           limit: limit * CHUNKS_PER_FILE_FACTOR,
           source: "nextcloud",
         });
-        const results = dedupeHitsPerFile(hits, limit);
+        const results = dedupeHitsPerFile(await authorize(hits), limit);
         await cacheSet(cacheKey, results, 60);
         res.json({ results });
         return;
@@ -4858,7 +4881,7 @@ export function createFilesRouter(
         minSimilarity: -1,
         source: "nextcloud",
       });
-      const results = dedupeHitsPerFile(hits, limit);
+      const results = dedupeHitsPerFile(await authorize(hits), limit);
 
       await cacheSet(cacheKey, results, 60);
       res.json({ results });

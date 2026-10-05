@@ -106,7 +106,7 @@ const patchJobSchema = z
   .strict()
   .refine((v) => v.source !== undefined || v.mapping !== undefined, "nothing to change");
 
-const runSchema = z.object({ mapping: mappingSchema.optional() }).strict();
+const runSchema = z.object({ mapping: mappingSchema.optional(), expectedUpdatedAt: z.string().datetime().optional() }).strict();
 
 const uploadFieldsSchema = z.object({ source: SOURCE.optional() });
 
@@ -128,6 +128,7 @@ function badRequest(res: Response, error: z.ZodError): void {
 const MESSAGES: Record<string, string> = {
   [PM_IMPORT_ERRORS.NOT_EDITABLE]: "This import has already started or finished, so its mapping can't change.",
   [PM_IMPORT_ERRORS.NOT_STARTABLE]: "This import can't be started from where it is.",
+  [PM_IMPORT_ERRORS.CHANGED]: "This import changed after your review. Refresh and review it again before running it.",
   [PM_IMPORT_ERRORS.IN_PROGRESS]: "Another import is already running for this project. Wait for it to finish or cancel it.",
   [PM_IMPORT_ERRORS.NOT_CANCELLABLE]: "This import has already finished.",
   [PM_IMPORT_ERRORS.FILE_EXPIRED]: "The uploaded file is no longer kept. Upload it again.",
@@ -151,6 +152,7 @@ function mapImportError(err: unknown, res: Response): boolean {
       return true;
     case PM_IMPORT_ERRORS.NOT_EDITABLE:
     case PM_IMPORT_ERRORS.NOT_STARTABLE:
+    case PM_IMPORT_ERRORS.CHANGED:
     case PM_IMPORT_ERRORS.IN_PROGRESS:
     case PM_IMPORT_ERRORS.NOT_CANCELLABLE:
       res.status(409).json({ error: msg, message: MESSAGES[msg] });
@@ -392,7 +394,10 @@ export function createPmImportExportRouter(prisma: PrismaClient): Router {
       if (!(await guardedJob(req, res))) return;
       // 202: accepted, not done. The runner takes it from here, outside this request.
       res.status(202).json({
-        job: await startImportJob(prisma, req.params.jobId, { mapping: parsed.data.mapping as never }),
+        job: await startImportJob(prisma, req.params.jobId, {
+          mapping: parsed.data.mapping as never,
+          ...(parsed.data.expectedUpdatedAt === undefined ? {} : { expectedUpdatedAt: parsed.data.expectedUpdatedAt }),
+        }),
       });
     } catch (err) {
       if (mapImportError(err, res)) return;

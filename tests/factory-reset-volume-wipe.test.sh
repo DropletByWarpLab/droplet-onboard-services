@@ -137,7 +137,10 @@ echo "--- Wipe list mirrors compose; customer-data volumes are not omitted ---"
 # (the audit trail) are customer/operator data device-backup.sh captures. Both
 # were once missing from the explicit wipe list, so a swallowed `down -v` left
 # them on the box after a "factory reset" — data remanence. Guard against it.
-for v in brain-memory-data ops-audit; do
+# pm-attachments (WARP-1505: the files customers attach to work items) is the
+# same class from the day it exists, so it is pinned here at introduction
+# rather than found surviving a reset later.
+for v in brain-memory-data ops-audit pm-attachments; do
   if grep -qE "\"$v\"" <<<"$CODE"; then
     pass "wipe list includes customer-data volume $v"
   else

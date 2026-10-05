@@ -108,9 +108,9 @@
 #      Rule 2 already excludes it; rule 3 and the deny-list below are belt
 #      and braces because the cost of being wrong is the whole appliance;
 #   4. we resolved at least one source file for it;
-#   5. it is not in DROPLET_HOST_UNITS_NEVER_RESTART (default: droplet.service
-#      and this script's own unit — a unit that restarts itself mid-run is a
-#      truncated run, not a refresh).
+#   5. it is not in DROPLET_HOST_UNITS_NEVER_RESTART (default: droplet.service,
+#      droplet-deploy.service (the deploy runner) and this script's own unit —
+#      a unit that restarts itself mid-run is a truncated run, not a refresh).
 #
 # Everything else is reported `skipped` WITH A REASON. Nothing is silently
 # absent from the report (architecture-guard: explicit enums, never inferred
@@ -234,7 +234,7 @@ set -uo pipefail
 # --- configuration (no host-specific defaults; everything overridable) -------
 HU_MATCH="${DROPLET_HOST_UNITS_MATCH:-droplet-*}"
 HU_STATE_DIR="${DROPLET_HOST_UNITS_STATE_DIR:-/var/lib/droplet/host-units}"
-HU_NEVER_RESTART="${DROPLET_HOST_UNITS_NEVER_RESTART:-droplet.service droplet-host-units.service}"
+HU_NEVER_RESTART="${DROPLET_HOST_UNITS_NEVER_RESTART:-droplet.service droplet-host-units.service droplet-deploy.service}"
 HU_RESTART_LAST="${DROPLET_HOST_UNITS_RESTART_LAST:-droplet-device-bridge.service}"
 HU_SETTLE="${DROPLET_HOST_UNITS_SETTLE_SECONDS:-3}"
 HU_PAYLOAD_ROOTS="${DROPLET_HOST_UNITS_PAYLOAD_ROOTS:-/usr/local/lib /usr/local/share /opt/droplet}"

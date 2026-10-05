@@ -50,6 +50,7 @@
  * is a shared guard here rather than a per-connector one.
  */
 import { CANONICAL_COLUMNS, REQUIRED_CANONICAL, type DatasetName } from "../export-drop/profiles.js";
+import { developmentSpecProblems, type RestDevelopmentSpec } from "./development.js";
 
 /**
  * How the credential is presented on every request.
@@ -441,6 +442,15 @@ export interface RestVendorProfile {
    * `ProviderRateLimit` on its descriptor.
    */
   readonly minRequestIntervalMs?: number;
+  /**
+   * WARP-3535 — the pull / merge requests, commits and branches this host serves,
+   * for the development panel. Absent for every vendor that has no such thing.
+   *
+   * A SECOND, typed output of the profile, not a dataset: `datasets` projects
+   * onto the canonical vocabulary and keeps no URL, number or branch. See
+   * `./development.ts` for what each field is for and the failure that admits it.
+   */
+  readonly development?: RestDevelopmentSpec;
 }
 
 /** Thrown when a profile is structurally impossible — at registration, not on
@@ -582,5 +592,12 @@ export function assertValidRestProfile(profile: RestVendorProfile): void {
         }
       }
     }
+  }
+
+  if (profile.development) {
+    // Decidable from the spec alone, so decided here — at registration, not on a
+    // customer's first sync.
+    const [problem] = developmentSpecProblems(profile.development);
+    if (problem !== undefined) fail(`development: ${problem}`);
   }
 }
