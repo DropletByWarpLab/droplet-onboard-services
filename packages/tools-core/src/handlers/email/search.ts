@@ -28,18 +28,18 @@ const inputSchema = {
   properties: {
     accountId: {
       type: "string",
-      description: "EmailAccount.id to search inside. Use email_accounts to find accessible mailbox IDs.",
+      description: "Mailbox ID from email_accounts.",
     },
     query: {
       type: "string",
       maxLength: 200,
-      description: "Optional text to match locally in subjects, senders, snippets and message bodies. Omit to list threads in the selected tab.",
+      description: "Local text search; omit to list threads.",
     },
     filter: {
       type: "string",
       enum: ["inbox", "triaged", "archived", "droplet"],
       description:
-        "Tab to filter by. `droplet` returns threads with at least one Droplet-drafted reply (regardless of triage status).",
+        "Triage tab; droplet selects threads with Droplet drafts in any tab.",
     },
     limit: {
       type: "integer",
@@ -143,7 +143,7 @@ async function handler(
 const tool: Tool = {
   name: "email_search",
   description:
-    "Search locally stored email subjects, senders, snippets and message bodies using optional query, or list threads when query is omitted. Use email_accounts to discover accessible account IDs. Searches the selected triage tab (default inbox; triaged / archived / droplet also supported). Returns thread IDs, subjects, senders and snippets; use email_read for the full matching conversation. Includes imported Outlook and Gmail messages.",
+    "Search local subjects, senders, snippets and bodies; omit query to list. Get accountId from email_accounts. Default inbox; returns thread summaries. email_read opens one.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

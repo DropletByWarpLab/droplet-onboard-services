@@ -39,7 +39,7 @@ import { GRAPH_RESOURCES, grantCovers } from "./graph-resources.js";
 import { scopesForRefresh, scopesForSignIn } from "./scopes.js";
 import { getMicrosoftApp } from "../account-provider-setup.service.js";
 import { microsoftCalendarViewOf, purgeMicrosoftCalendar, setMicrosoftCalendarEnabled, type MicrosoftCalendarView } from "./calendar-landing.service.js";
-import { microsoftMailViewOf, purgeMicrosoftMail, type MicrosoftMailView } from "./mail-settings.service.js";
+import { microsoftMailViewOf, purgeMicrosoftMail, type MicrosoftMailView } from "./mail-data.service.js";
 import type { M365GrantGeneration } from "./m365-contracts.js";
 export type { M365GrantGeneration } from "./m365-contracts.js";
 import {
