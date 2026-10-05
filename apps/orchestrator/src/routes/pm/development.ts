@@ -31,7 +31,7 @@ function fail(res: Response, err: unknown) {
   if (err instanceof RestRateLimitedError) return res.status(429).json({ error: "code_host_rate_limited", retryAfter: err.resetAt?.toISOString() ?? null });
   if (err instanceof DevelopmentEgressBlockedError) return res.status(403).json({ error: err.reason === "egress_switch_off" ? "work_integrations_egress_disabled" : "development_destination_blocked" });
   if (code === "provider_not_supported" || code === "unsafe_vendor_url") return res.status(422).json({ error: code });
-  if (code === "integration_not_connected" || code === "repository_not_found" || code === "project_not_found" || code === "state_not_found") return res.status(404).json({ error: code });
+  if (code === "integration_not_connected" || code === "repository_not_found" || code === "project_not_found" || code === "state_not_found" || code === "work_item_not_found") return res.status(404).json({ error: code });
   return res.status(500).json({ error: "development_sync_failed" });
 }
 

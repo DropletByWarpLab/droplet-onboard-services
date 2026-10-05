@@ -75,4 +75,11 @@ describe("WARP-3535 development routes", () => {
     expect((await request(server).post("/api/pm/development/repositories/github").send({})).status).toBe(400);
     expect(service.connectDevelopmentRepository).not.toHaveBeenCalled();
   });
+
+  it("returns 404 when the selected work item has no development scope", async () => {
+    vi.mocked(service.listWorkItemDevelopment).mockRejectedValue(new Error("work_item_not_found"));
+    const res = await request(app(MEMBER)).get("/api/pm/work-items/missing-item/development");
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: "work_item_not_found" });
+  });
 });
