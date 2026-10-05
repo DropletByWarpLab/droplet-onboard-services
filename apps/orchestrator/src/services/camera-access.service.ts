@@ -62,6 +62,14 @@ const UNRESTRICTED_ROLES: ReadonlySet<string> = new Set(["owner", "admin"]);
  * names nobody, names more than one person, or names a deactivated person
  * (WARP-3061) — a tool that cannot say who is asking gets nothing.
  */
+/**
+ * Roles that may view cameras at all (`guest` is deliberately absent: a guest
+ * account exists to use the appliance, not to watch the household). The
+ * routes' `requireRole` and the assistant's in-process image fetch
+ * (tool-vision.service.ts, WARP-3692) read the SAME list.
+ */
+export const CAMERA_VIEW_ROLES = ["owner", "admin", "family"] as const;
+
 const MCP_SERVICE_ID = "_service:mcp";
 
 export interface AccessPrincipal {
