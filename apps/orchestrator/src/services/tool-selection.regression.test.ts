@@ -123,6 +123,14 @@ const TURNS: Turn[] = [
     message: "what's cluttering my drive? get rid of the junk and the old copies",
     requires: "analyze_file_cleanup",
   },
+  // WARP-3538 — a file asked after by the PLACE it lives, which names no
+  // container word the `files` rule knew. The tool is reached only by the
+  // product-name rule; without it this turn advertised the core four.
+  {
+    label: "files / a Microsoft 365 file asked for by where it lives",
+    message: "did anyone put the new staff roster on SharePoint yet?",
+    requires: "search_cloud_files",
+  },
   {
     label: "cameras / the sentence a household actually types",
     message: "did anyone come to the house while we were out on Saturday?",
