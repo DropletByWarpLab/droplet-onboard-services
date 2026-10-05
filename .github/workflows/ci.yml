@@ -355,6 +355,8 @@ jobs:
               # to the rare PR that edits those two files, nothing else.
               - "scripts/check-dockerfile-base-pins.sh"
               - "tests/check-dockerfile-base-pins.test.sh"
+              - "scripts/check-dockerfile-hash-locks.sh"
+              - "tests/check-dockerfile-hash-locks.test.sh"
             # WARP-2455: the pre-PR gate's own sources. ship-check.sh is
             # mandated by the preflight skill but was executed by NO
             # workflow — all eight `ship-check` mentions under .github/ were
