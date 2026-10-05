@@ -33,6 +33,9 @@ import { useAuth } from "@/lib/auth";
 import { useAppCapabilities } from "@/lib/hooks/useAppCapabilities";
 import { translateError } from "@/lib/friendly-errors";
 import "./projects.css";
+import "./planning.css";
+import "./cycles.css";
+import "./modules.css";
 
 import { PmIcon } from "@/components/projects/icons";
 import { PeopleContext, EmptyBlock, Skel } from "@/components/projects/bits";
@@ -49,19 +52,22 @@ import {
   useSavedViews,
   useDepartments,
   usePeople,
+  useProjectCycles,
   pmActions,
   viewActions,
   type ViewsScope,
 } from "@/components/projects/usePm";
 import { departmentOptions } from "@/components/projects/department";
 import { IndexView } from "@/components/projects/IndexView";
-import { BoardView, ListView, PlaceholderView, type Domain } from "@/components/projects/board";
+import { BoardView, ListView, type Domain } from "@/components/projects/board";
 import { ViewSwitcher, type ProjectView } from "@/components/projects/chrome";
 import { FilterBar, FilterChips, type EditorOptions } from "@/components/projects/FilterBar";
 import { ViewChips, type ViewChipItem } from "@/components/projects/ViewChips";
 import { ViewsIndex } from "@/components/projects/ViewsIndex";
 import { EMPTY_FILTER, type ChipLookups } from "@/components/projects/filter-model";
 import { useProjectsUrl } from "@/components/projects/useProjectsUrl";
+import { CyclesView } from "@/components/projects/cycles";
+import { ModulesView } from "@/components/projects/modules";
 import { DetailDrawer } from "@/components/projects/detail";
 import { CalendarView } from "@/components/projects/calendar/CalendarView";
 import { TimelineView } from "@/components/projects/timeline/TimelineView";
@@ -304,6 +310,9 @@ function ProjectsWorkspace(): JSX.Element {
   const optimistic = useOptimisticRows();
   const visibleItems = optimistic.apply(allItems);
   const selection = useSelection();
+  // WARP-3521 — the project's cycles, so a board card can name its cycle.
+  const { cycles, mutate: mutateCycles } = useProjectCycles(projectId);
+  const cyclesById = useMemo(() => new Map((cycles ?? []).map((c) => [c.id, c])), [cycles]);
 
   // The server dropped something the filter named that no longer exists
   // (brief §3.9): say so once, and show the filter that was applied. The URL
@@ -420,6 +429,7 @@ function ProjectsWorkspace(): JSX.Element {
     void mutateViews();
     void byKey.mutate();
     await query.refresh();
+    if (projectId) void mutateCycles();
   };
 
   const afterProjectGone = () => {
@@ -826,8 +836,8 @@ function ProjectsWorkspace(): JSX.Element {
             onNewItem={() => setModal("newitem")}
           />
         )}
-        {tab === "cycles" && mode === "project" && <PlaceholderView kind="cycles" />}
-        {tab === "modules" && mode === "project" && <PlaceholderView kind="modules" />}
+        {tab === "cycles" && mode === "project" && project && <CyclesView project={project} states={states ?? []} readOnly={readOnly} onOpenItem={(item) => openItem(item.key)} onChanged={refreshAll} />}
+        {tab === "modules" && mode === "project" && project && <ModulesView project={project} readOnly={readOnly} onOpenItem={(item) => openItem(item.key)} onChanged={refreshAll} />}
       </div>
       {tab === "table" && selection.count > 0 && !readOnly && (
         <BulkBar

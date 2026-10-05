@@ -183,9 +183,10 @@ const SURFACES: ReadonlyArray<{ module: ModuleId; label: string; files: string[]
       ["routes", "pm", "views.ts"],
       // WARP-3537 — bulk edit.
       ["routes", "pm", "bulk.ts"],
+      ["routes", "pm", "planning.ts"],
       ["routes", "mobile", "pm.ts"],
     ],
-    atLeast: 30,
+    atLeast: 50,
   },
   // WARP-3365 review: what the business is owed and owes is the company's own.
   {
