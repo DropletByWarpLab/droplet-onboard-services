@@ -36,6 +36,7 @@ export const DESK_INCLUDE = {
   department: { select: DEPARTMENT_SELECT },
   states: { orderBy: { sortOrder: "asc" } },
   labels: { orderBy: { name: "asc" } },
+  supportChannels: { select: { id: true, kind: true, enabled: true } },
 } satisfies Prisma.PmProjectInclude;
 export type DeskRow = Prisma.PmProjectGetPayload<{ include: typeof DESK_INCLUDE }>;
 
@@ -114,7 +115,7 @@ export function mapDesk(row: DeskRow): ApiDesk {
     archived: row.isArchived,
     states: row.states.map(mapDeskState),
     labels: row.labels.map(mapDeskLabel),
-    channels: [],
+    channels: row.supportChannels.map((channel) => ({ id: channel.id, kind: channel.kind, enabled: channel.enabled })),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

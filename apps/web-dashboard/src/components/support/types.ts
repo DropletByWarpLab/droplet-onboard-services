@@ -58,6 +58,26 @@ export interface DeskChannel {
   enabled: boolean;
 }
 
+export interface DeskEmailAccount {
+  id: string;
+  address: string;
+  displayName: string;
+}
+
+export interface DeskEmailChannelSettings {
+  id: string;
+  projectId: string;
+  kind: "EMAIL";
+  emailAccountId: string;
+  enabled: boolean;
+  contactOwnerUserId: string;
+  autoAckEnabled: boolean;
+  autoAckTemplate: string;
+  reopenWindowDays: number;
+  enabledAt: string;
+  emailAccount: { address: string; displayName: string };
+}
+
 export interface Desk {
   id: string;
   name: string;
@@ -156,6 +176,8 @@ export type ConversationEntry =
       authorKind: AuthorKind;
       author: SupportPerson | null;
       html: string;
+      deliveryStatus: "NONE" | "PENDING" | "SENT" | "FAILED";
+      deliveryFailure: "OUTBOUND_BLOCKED" | "EMAIL_UNAVAILABLE" | "NO_RECIPIENT" | "SEND_FAILED" | null;
       createdAt: string;
     }
   | {

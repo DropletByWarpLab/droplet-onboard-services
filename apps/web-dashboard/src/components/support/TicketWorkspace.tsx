@@ -225,6 +225,9 @@ export function TicketWorkspace({
             loading={convo.isLoading}
             error={!!convo.error}
             onRetry={() => void convo.mutate()}
+            onRetryDelivery={(commentId) => {
+              void supportActions().retryReply(ticket.id, commentId).then(() => convo.mutate());
+            }}
           />
           {writable && desk && <MacroPicker ticket={ticket} desk={desk} agents={agents} onApplied={(text) => { setMacroDraft({ id: Date.now(), text }); void refresh(); }} />}
           {writable && <Composer ticket={ticket} desk={desk} onSent={() => void refresh()} macroDraft={macroDraft} onDraftUsed={() => setMacroDraft(null)} />}

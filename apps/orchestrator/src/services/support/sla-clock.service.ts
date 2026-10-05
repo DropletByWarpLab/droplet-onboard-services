@@ -12,7 +12,7 @@ export async function lockTicketClock(tx: Prisma.TransactionClient, id: string):
 }
 export async function syncTicketSla(
   tx: Prisma.TransactionClient, id: string, now: Date,
-  event: "tick" | "create" | "priority" | "state" | "reply" | "requester" = "tick",
+  event: "tick" | "create" | "priority" | "escalation_priority" | "state" | "reply" | "requester" = "tick",
   deps: SupportDeps = {},
 ): Promise<void> {
   await lockTicketClock(tx, id);
@@ -23,7 +23,7 @@ export async function syncTicketSla(
   const policy = policyRow?.enabled ? policySchema.parse({ enabled: policyRow.enabled, calendarId: policyRow.calendarId,
     targets: policyRow.targets, atRiskPercent: policyRow.atRiskPercent, escalation: policyRow.escalation }) : null;
   let terms = ticket.slaTargets === null ? null : parseSlaTerms(ticket.slaTargets);
-  if ((event === "create" && terms === null) || (event === "priority" && terms?.priority !== row.priority)) {
+  if ((event === "create" && terms === null) || ((event === "priority" || event === "escalation_priority") && terms?.priority !== row.priority)) {
     const target = policy?.targets[row.priority as keyof typeof policy.targets];
     terms = target && policy ? {
       priority: row.priority,
@@ -34,8 +34,9 @@ export async function syncTicketSla(
       calendar: terms ? terms.calendar : policyRow?.calendar ? validateCalendarForSave(policyRow.calendar) : null,
       nextResponseStartedAt: terms?.nextResponseStartedAt ?? null,
       nextResponsePausedMs: terms?.nextResponsePausedMs ?? 0,
-      // Retargeting starts a new risk window; a breached promise stays breached.
-      notified: terms?.notified?.filter((s) => s === "BREACHED") ?? [],
+      // A manual retarget starts a new risk window. An automatic escalation
+      // belongs to the transition already emitted, and must not emit it again.
+      notified: event === "escalation_priority" ? terms?.notified ?? [] : terms?.notified?.filter((s) => s === "BREACHED") ?? [],
     } : null;
   }
   if (!terms) {
@@ -94,7 +95,7 @@ export async function syncTicketSla(
       // notify uses this SLA activity's existing transactional notification claim.
     }
   }
-  if (raised) await syncTicketSla(tx, id, now, "priority", deps);
+  if (raised) await syncTicketSla(tx, id, now, "escalation_priority", deps);
 }
 
 /** Bounded cursor walk: a long-running desk cannot starve later tickets. */

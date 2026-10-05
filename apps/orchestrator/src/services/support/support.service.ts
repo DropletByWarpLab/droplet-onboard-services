@@ -14,8 +14,9 @@ export {
   queueCounts,
   updateTicket,
 } from "./ticket.service.js";
-export { addNote, addReply, getConversation, EMPTY_BODY } from "./conversation.service.js";
+export { addNote, addReply, getConversation, retryPublicReply, EMPTY_BODY } from "./conversation.service.js";
 export { escalateTicket } from "./escalation.service.js";
+export { bindDeskEmailChannel, getDeskEmailChannel, listDeskEmailAccounts, EMAIL_CHANNEL_ERRORS } from "./email-channel.service.js";
 export {
   SupportContactExistsError,
   createRequesterContact,

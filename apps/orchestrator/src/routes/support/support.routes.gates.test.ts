@@ -33,6 +33,7 @@ const svc = vi.hoisted(() => {
     "getConversation", "addReply", "addNote", "escalateTicket", "listRequesterTickets",
     "listBusinessCalendars", "saveBusinessCalendar", "deleteBusinessCalendar", "getDeskSla", "saveDeskSla",
     "listMacros", "saveMacro", "deleteMacro", "previewMacro", "applyMacro", "getSlaReport",
+    "retryPublicReply", "listDeskEmailAccounts", "getDeskEmailChannel", "bindDeskEmailChannel",
   ] as const;
   const out: Record<string, ReturnType<typeof vi.fn>> = {};
   for (const f of fns) out[f] = vi.fn().mockResolvedValue({});
@@ -43,7 +44,10 @@ const svc = vi.hoisted(() => {
     SupportContactExistsError: class extends Error {},
   };
 });
-vi.mock("../../services/support/support.service.js", () => svc);
+vi.mock("../../services/support/support.service.js", async () => ({
+  ...svc,
+  EMAIL_CHANNEL_ERRORS: (await import("../../services/support/email-channel.service.js")).EMAIL_CHANNEL_ERRORS,
+}));
 
 import { mountModuleGates } from "../../modules/module-mounts.js";
 import { createModuleGate } from "../../middleware/module-gate.js";

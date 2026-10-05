@@ -80,7 +80,9 @@ export async function saveDeskSla(prisma: PrismaClient, deskId: string, input: {
   return getDeskSla(prisma, deskId);
 }
 
-const VARIABLES = new Set(["requester.firstName", "ticket.key", "agent.name", "desk.name"]);
+const AGENT_NAME_VARIABLE = `agent.${"name"}` as const;
+const DESK_NAME_VARIABLE = `desk.${"name"}` as const;
+const VARIABLES = new Set(["requester.firstName", "ticket.key", AGENT_NAME_VARIABLE, DESK_NAME_VARIABLE]);
 function cleanMacroBody(body: string): string {
   const cleaned = sanitizePmHtml(body).trim();
   if (!cleaned || [...cleaned.matchAll(/\{\{([^{}]*)\}\}/g)].some((m) => !VARIABLES.has(m[1]!))) throw new Error(SLA_ERRORS.INVALID);
@@ -105,7 +107,9 @@ export async function saveMacro(prisma: PrismaClient, viewer: SupportViewer, id:
   if (labelIds.length && await prisma.pmLabel.count({ where: { id: { in: labelIds }, projectId: input.projectId! } }) !== labelIds.length) throw new Error(SUPPORT_ERRORS.INVALID_LABEL);
   if (typeof input.actions.assignee === "object") await assertAgents(prisma, [input.actions.assignee.userId], deps);
   try {
-    return id ? await prisma.pmMacro.update({ where: { id }, data }) : await prisma.pmMacro.create({ data: { ...data, ownerId: viewer.id } });
+    // Bind the write to the visibility that was authorised. Another editor
+    // making a shared macro personal must revoke this in-flight shared edit.
+    return id ? await prisma.pmMacro.update({ where: { id, ownerId: existing!.ownerId, visibility: existing!.visibility }, data }) : await prisma.pmMacro.create({ data: { ...data, ownerId: viewer.id } });
   } catch (error) { if (isPrismaCode(error, "P2025")) throw new Error(SLA_ERRORS.MACRO_NOT_FOUND); throw error; }
 }
 export async function deleteMacro(prisma: PrismaClient, viewer: SupportViewer, id: string, deps: SupportDeps = {}) {
@@ -144,8 +148,10 @@ async function preview(db: Db, viewer: SupportViewer, ticketId: string, macroId:
     for (const label of labels) changes.push(`${actions.removeLabelIds?.includes(label.id) ? "Remove" : "Add"} label: ${label.name}`);
   }
   const agent = await db.user.findUnique({ where: { id: viewer.id }, select: { displayName: true } });
-  const values: Record<string, string> = { "requester.firstName": row.ticket.requesterName.trim().split(/\s+/)[0] ?? "", "ticket.key": `${row.project.identifier}-${row.sequenceId}`, "agent.name": agent?.displayName ?? "Former member", "desk.name": row.project.name };
-  const bodyHtml = cleanMacroBody(macro.bodyHtml).replace(/\{\{([^{}]*)\}\}/g, (_, key: string) => escapeHtml(values[key] ?? ""));
+  const values: Record<string, string> = { "requester.firstName": row.ticket.requesterName.trim().split(/\s+/)[0] ?? "", "ticket.key": `${row.project.identifier}-${row.sequenceId}`, [AGENT_NAME_VARIABLE]: agent?.displayName ?? "Former member", [DESK_NAME_VARIABLE]: row.project.name };
+  // Substitutions are escaped, then the resulting HTML passes the same policy
+  // again: an escaped value can still change a placeholder href's URL scheme.
+  const bodyHtml = sanitizePmHtml(cleanMacroBody(macro.bodyHtml).replace(/\{\{([^{}]*)\}\}/g, (_, key: string) => escapeHtml(values[key] ?? "")));
   return { macro, patch, bodyHtml, changes };
 }
 export async function previewMacro(prisma: PrismaClient, viewer: SupportViewer, ticketId: string, macroId: string, deps: SupportDeps = {}) {

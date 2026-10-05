@@ -80,6 +80,17 @@ describe("transactional ticket SLA materialisation", () => {
     expect(f.row.priority).toBe("urgent"); expect(f.tx.pmWorkItem.update).toHaveBeenCalledTimes(1);
     expect(f.activities.filter((a) => a.verb === "sla_breached")).toHaveLength(1);
   });
+  it("an automatic priority raise does not notify the same risk transition again when the new target is also at risk", async () => {
+    const f = fixture();
+    f.policy.targets.urgent = { firstResponseMins: 60, nextResponseMins: 30, resolutionMins: 240 };
+    f.policy.escalation = [{ on: "AT_RISK", metric: "any", actions: [{ type: "raise_priority" }] }];
+    await syncTicketSla(f.tx, "t1", at("09:00"), "create");
+    await syncTicketSla(f.tx, "t1", at("09:45"));
+    await syncTicketSla(f.tx, "t1", at("09:46"));
+    expect(f.row.priority).toBe("urgent");
+    expect(f.tx.pmWorkItem.update).toHaveBeenCalledTimes(1);
+    expect(f.activities.filter((a) => a.verb === "sla_at_risk")).toHaveLength(1);
+  });
   it("never touches a native Project row", async () => {
     const f = fixture(); f.row.project.kind = "PROJECT"; await syncTicketSla(f.tx, "t1", at("09:00"), "create");
     expect(f.tx.pmTicket.update).not.toHaveBeenCalled(); expect(f.tx.pmSlaPolicy.findUnique).not.toHaveBeenCalled();

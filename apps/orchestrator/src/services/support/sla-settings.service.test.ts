@@ -53,14 +53,36 @@ describe("Support SLA settings boundary", () => {
     await expect(deleteMacro(f.db, admin, "m1", deps)).rejects.toThrow("macro_not_found");
     expect(f.db.pmMacro.update).not.toHaveBeenCalled(); expect(f.db.pmMacro.deleteMany).not.toHaveBeenCalled();
   });
+  it("refuses an in-flight shared edit if another editor has made that macro personal", async () => {
+    const f = fixture(); f.macro.visibility = "SHARED";
+    f.db.pmMacro.findUnique.mockImplementation(async () => ({ ...f.macro }));
+    f.db.pmMacro.update.mockImplementation(async ({ where, data }: { where: { visibility?: string }; data: Record<string, unknown> }) => {
+      f.macro.visibility = "PERSONAL"; // A competing authorised update commits first.
+      if (where.visibility !== f.macro.visibility) throw Object.assign(new Error("preimage changed"), { code: "P2025" });
+      Object.assign(f.macro, data);
+      return f.macro;
+    });
+    await expect(saveMacro(f.db, { id: "admin", role: "admin" }, "m1", { projectId: "desk", name: "Changed", bodyHtml: "New draft", actions: {}, visibility: "SHARED" }, { resolveAccess: async () => grants([["support", "manage"]]) })).rejects.toThrow("macro_not_found");
+    expect(f.macro.name).toBe("Greeting"); expect(f.macro.visibility).toBe("PERSONAL");
+    expect(f.db.pmMacro.update.mock.calls[0][0].where).toEqual({ id: "m1", ownerId: "agent", visibility: "SHARED" });
+  });
   it("escapes substituted person/desk data and keeps preview read-only", async () => {
     const f = fixture(); const result = await previewMacro(f.db, viewer, ticketId, "m1");
-    expect(result.bodyHtml).toContain("&lt;img/src=x/onerror=&quot;evil()&quot;&gt;");
-    expect(result.bodyHtml).toContain("Agent &quot;&lt;script&gt;&quot;");
+    expect(result.bodyHtml).toContain('&lt;img/src=x/onerror="evil()"&gt;');
+    expect(result.bodyHtml).toContain('Agent "&lt;script&gt;"');
     expect(result.bodyHtml).toContain("SUP-12 at Help &lt;desk&gt;");
     expect(result.bodyHtml).not.toMatch(/<img|<script/);
     expect(f.db.pmMacro.update).not.toHaveBeenCalled(); expect(f.db.$transaction).not.toHaveBeenCalled();
     expect(f.db.pmMacro.findFirst.mock.calls[0][0].where.AND[1]).toEqual({ OR: [{ ownerId: "agent" }, { visibility: "SHARED" }] });
+  });
+  it("revalidates links after substitution so a requester cannot supply an executable URL scheme", async () => {
+    const f = fixture();
+    f.row.ticket.requesterName = "javascript:alert(1)";
+    f.macro.bodyHtml = '<p><a href="{{requester.firstName}}">Read</a> <a href="https://support.example.test/help">Help</a></p>';
+    const result = await previewMacro(f.db, viewer, ticketId, "m1");
+    expect(result.bodyHtml).not.toContain("javascript:");
+    expect(result.bodyHtml).toContain("<a>Read</a>");
+    expect(result.bodyHtml).toContain('href="https://support.example.test/help"');
   });
   it("refuses unsupported variables and global desk-specific state actions on save", async () => {
     const f = fixture();
