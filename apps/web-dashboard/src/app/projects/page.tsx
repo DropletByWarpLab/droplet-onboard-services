@@ -48,9 +48,13 @@ import { CyclesView } from "@/components/projects/cycles";
 import { ModulesView } from "@/components/projects/modules";
 import { ViewSwitcher, SavedViews, FilterBar, type ProjectView, type SavedView } from "@/components/projects/chrome";
 import { DetailDrawer } from "@/components/projects/detail";
+import { InsightsView } from "@/components/projects/insights/InsightsView";
+import { useInsightsDeepLink, useSyncInsightsParam } from "@/components/projects/insights/deepLink";
 import { CalendarView } from "@/components/projects/calendar/CalendarView";
 import { TimelineView } from "@/components/projects/timeline/TimelineView";
 import { MyWorkView } from "@/components/projects/mywork/MyWorkView";
+import { ProjectMenu } from "@/components/projects/import/ProjectMenu";
+import { ImportWizard } from "@/components/projects/import/ImportWizard";
 import {
   ConfirmArchiveProject,
   ConfirmDeleteProject,
@@ -92,9 +96,9 @@ export default function ProjectsPage(): JSX.Element {
   // else. It used to also read `crm` and render the CRM's sub-tabs, which is
   // why its header renamed itself when a module it does not own flipped. The
   // CRM lives at /customers now.
-  //
-  // WARP-3526 — `?view=time` is read with `useSearchParams`, which Next requires
-  // under a Suspense boundary; the time surface also needs to know who is asking.
+  // WARP-3524 — `useSearchParams` (the `?view=insights` deep link) has to sit
+  // under a Suspense boundary, or the route cannot be prerendered. Time has
+  // the same requirement and receives the current user through its provider.
   return (
     <Suspense fallback={null}>
       <ProjectsWithTimeAccess />
@@ -121,12 +125,14 @@ function ProjectsWorkspace(): JSX.Element {
   const { toast } = useToast();
   const { person } = usePeople();
 
-  // WARP-3526 — the time view is addressable: `/projects?view=time`.
+  // WARP-3524 — `/projects?view=insights` opens the workspace-level Insights.
+  const insightsLink = useInsightsDeepLink();
+  // `my-work` is cross-project (WARP-3523), so it is not a ProjectView tab.
+  // WARP-3526 — the time view is also addressable as `/projects?view=time`.
   const router = useRouter();
   const searchParams = useSearchParams();
-  // `my-work` is cross-project (WARP-3523), so it is not a ProjectView tab.
   const [view, setView] = useState<ProjectView | "index" | "my-work">(
-    searchParams?.get("view") === "time" ? "time" : "index",
+    searchParams?.get("view") === "time" ? "time" : insightsLink ? "insights" : "index",
   );
   const [projectId, setProjectId] = useState<string | null>(null);
   const [savedView, setSavedView] = useState<SavedView>("all");
@@ -141,7 +147,8 @@ function ProjectsWorkspace(): JSX.Element {
   const [department, setDepartment] = useState<string>(DEPARTMENT_ANY);
   const [showArchived, setShowArchived] = useState(false);
   const [drawer, setDrawer] = useState<PmWorkItem | null>(null);
-  const [modal, setModal] = useState<"newitem" | "newproject" | "archive" | "delete" | null>(null);
+  const [modal, setModal] = useState<"newitem" | "newproject" | "import" | "archive" | "delete" | null>(null);
+  useSyncInsightsParam(view === "insights" && projectId === null);
 
   const { projects, error: projErr, isLoading: projLoading, mutate: mutateProjects } = useProjects(showArchived);
   // ProjectsWorkspace only mounts behind the `projects` capability gate above.
@@ -258,6 +265,11 @@ function ProjectsWorkspace(): JSX.Element {
     setProjectId(null);
   };
 
+  const openInsights = () => {
+    setView("insights");
+    setProjectId(null);
+  };
+
   // WARP-3370 — leaving a project for good (archived or deleted): back to the
   // index, with the list and the KPIs re-read.
   const afterProjectGone = () => {
@@ -296,6 +308,8 @@ function ProjectsWorkspace(): JSX.Element {
   };
 
   const isProjectView = view === "board" || view === "list" || view === "calendar" || view === "timeline";
+  // WARP-3527: the API also enforces owner/admin or the project's lead.
+  const canImport = role === "owner" || role === "admin" || (role === "family" && !!project && project.leadId === user?.id);
 
   const timeOnly = view === "time" && !project;
   const headerTitle =
@@ -305,11 +319,13 @@ function ProjectsWorkspace(): JSX.Element {
       ? `${summary?.activeProjects ?? projects?.filter((p) => !p.archived).length ?? 0} projects · ${summary?.itemsOpen ?? 0} items open`
       : view === "my-work"
         ? "Your open work across every project"
-        : timeOnly
-          ? "Timesheet and report"
-          : project
-            ? `${project.openCount} open · ${project.doneCount} done`
-            : undefined;
+        : view === "insights" && !project
+          ? "Insights across all projects"
+          : timeOnly
+            ? "Timesheet and report"
+            : project
+              ? `${project.openCount} open · ${project.doneCount} done`
+              : undefined;
 
   const actions = view === "index" ? (
       <>
@@ -322,6 +338,9 @@ function ProjectsWorkspace(): JSX.Element {
             <FolderKanban size={14} /> New project
           </button>
         )}
+        <button className="btn" type="button" onClick={openInsights}>
+          <PmIcon name="chart" size={14} /> Insights
+        </button>
         <button className="btn" type="button" onClick={() => setView("my-work")}>
           <PmIcon name="user" size={14} /> My work
         </button>
@@ -366,6 +385,7 @@ function ProjectsWorkspace(): JSX.Element {
             <PmIcon name="refresh" size={15} />
           </button>
         )}
+        {project && <ProjectMenu projectId={project.id} canImport={canImport} onImport={() => setModal("import")} />}
       </>
     );
 
@@ -435,7 +455,7 @@ function ProjectsWorkspace(): JSX.Element {
                 )}
               </div>
             )}
-            {(view === "cycles" || view === "modules" || (view === "time" && projectId)) && (
+            {(view === "cycles" || view === "modules" || (view === "insights" && projectId !== null) || (view === "time" && projectId !== null)) && (
               <div style={{ marginBottom: 14 }}>
                 <ViewSwitcher view={view} onView={changeView} />
               </div>
@@ -516,6 +536,7 @@ function ProjectsWorkspace(): JSX.Element {
                 />
               )}
               {view === "my-work" && <MyWorkView />}
+              {view === "insights" && <InsightsView projectId={projectId} />}
               {view === "time" && <TimeView projects={projects} projectId={projectId} />}
             </div>
           </div>
@@ -543,6 +564,7 @@ function ProjectsWorkspace(): JSX.Element {
         <NewItemModal project={project} onClose={() => setModal(null)} onCreated={refreshAll} />
       )}
       {modal === "newproject" && <NewProjectModal onClose={() => setModal(null)} onCreated={refreshAll} />}
+      {modal === "import" && project && <ImportWizard project={project} onClose={() => setModal(null)} onFinished={refreshAll} />}
       {modal === "archive" && project && (
         <ConfirmArchiveProject project={project} onClose={() => setModal(null)} onArchived={afterProjectGone} />
       )}

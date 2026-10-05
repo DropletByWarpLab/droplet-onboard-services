@@ -1,0 +1,22 @@
+[Unit]
+Description=Droplet NVR boot guard — poll every 30 s for the recordings bay to mount (WARP-3514)
+Documentation=https://warp-lab.atlassian.net/browse/WARP-3514
+# The reboot scenario (WARP-3514 / ADR-070): after a reboot Docker and Frigate
+# start before droplet-automount@ has mounted the encrypted recordings bay, so
+# droplet-nvr-guard.service parks an immutable empty placeholder where Frigate
+# would otherwise write to the OS disk. This timer drives
+# droplet-nvr-guard-release.service, which restarts Frigate once the bay has
+# mounted and then disarms; when nothing is armed every tick is a cheap no-op.
+
+[Timer]
+# Start polling shortly after boot — by then Docker is up and the automount
+# units have had their first chance — then every 30 s.
+OnBootSec=45s
+OnUnitActiveSec=30s
+# The systemd default AccuracySec is 1 min, which would stretch a 30 s cadence to
+# up to 90 s between ticks.
+AccuracySec=5s
+Unit=droplet-nvr-guard-release.service
+
+[Install]
+WantedBy=timers.target

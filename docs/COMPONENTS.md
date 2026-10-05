@@ -174,7 +174,9 @@ network. Host-published ports and host-network services are called out.
   `{id, displayName, avatarUrl}` roster that names the ids on PM rows. A project is archived
   with `PATCH {archived}` (members may, audited) and deleted for good only by owner/admin,
   archived-only, with its identifier retyped and its audit row written in the delete's
-  transaction — WARP-3370),
+  transaction — WARP-3370;
+  `GET /api/pm/insights` is its own router, `routes/pm/insights.ts`, counting in SQL in
+  `services/pm/pm-insights.service.ts` and cached in-process for five minutes),
   `support/` (the service desk — `/api/support/*`, ADR-069: tickets are work items in
   `PmProject.kind = SERVICE_DESK` projects, behind the `support` module gate; `/api/pm/*`
   and `/api/mobile/pm/*` answer 404 for a desk and everything under it),

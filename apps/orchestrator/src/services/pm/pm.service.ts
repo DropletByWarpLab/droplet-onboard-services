@@ -201,6 +201,8 @@ export interface ApiPmSummary {
   itemsOpen: number;
   doneThisWeek: number;
   overdue: number;
+  /** Open items with nobody assigned (ADR-044 follow-up, WARP-3524). */
+  unassigned: number;
 }
 
 type PmStateGroup = StateRow["group"];
@@ -505,6 +507,42 @@ export function isPrismaCode(
   return typeof err === "object" && err !== null && (err as { code?: unknown }).code === code;
 }
 
+/**
+ * WARP-3527 (ADR-069 WS-11) — what the IMPORT RUNNER supplies on a write, and
+ * nobody else: `services/pm/import/` builds it, the HTTP create/patch routes
+ * never do, so a client cannot forge provenance through them.
+ *
+ * Imports go through `createWorkItem` / `updateWorkItem` and not around them
+ * because everything those two guarantee is the point: the per-project
+ * sequence counter bumped under its row lock, the same-project parent guard,
+ * the isCompleted / completedAt sync, HTML sanitising, and one activity row per
+ * change. What an import adds on top is exactly this:
+ *   - the idempotency key (`externalSystem` + `externalId`, UNIQUE per project),
+ *   - the source's own timestamps, so lead/cycle-time insights are not zero for
+ *     every imported item,
+ *   - the history marker: the `created` row carries `field: "import"` and
+ *     `newValue: "<source>:<jobId>"`, and every activity row an import writes is
+ *     born `not_needed` for the notification sweep. A migration is history, not
+ *     news: without that, 3,000 imported issues would digest-notify every
+ *     assignee on every 60 s tick for as long as the import ran.
+ */
+export interface PmImportedWrite {
+  jobId: string;
+  /** `PmImportSource` — written into the history marker. */
+  source: string;
+  externalSystem: string;
+  externalId: string;
+  /** The source's reporter when it resolves to a user; otherwise the importing user. */
+  createdById?: string | null;
+  createdAt?: Date;
+  updatedAt?: Date;
+  /** Honoured only when the landing state is terminal. */
+  completedAt?: Date | null;
+}
+
+/** Input to {@link writeActivity}; named so `updateWorkItem`'s wrapper can reuse it. */
+type ActivityInput = Parameters<typeof writeActivity>[1];
+
 /** The one place a PM activity row is written. Exported (WARP-3526) so a sibling
  *  service writes its rows through it instead of re-spelling the insert. */
 export async function writeActivity(
@@ -519,6 +557,9 @@ export async function writeActivity(
     field?: string | null;
     oldValue?: string | null;
     newValue?: string | null;
+    /** WARP-3527 — `not_needed` for rows an import writes (see
+     *  {@link PmImportedWrite}). Omitted = the column default, `pending`. */
+    notifyStatus?: Prisma.PmActivityCreateManyInput["notifyStatus"];
     nudge?: boolean;
   },
 ): Promise<void> {
@@ -530,6 +571,7 @@ export async function writeActivity(
       field: input.field ?? null,
       oldValue: input.oldValue ?? null,
       newValue: input.newValue ?? null,
+      ...(input.notifyStatus ? { notifyStatus: input.notifyStatus } : {}),
     },
   });
   // WARP-3532 (ADR-069 §7) — wake the outbox consumers. Runs inside the caller's
@@ -780,18 +822,20 @@ export async function listProjects(
   return projects;
 }
 
-/** Index KPI strip: active projects, open items, done in the last 7 days, and
- *  overdue (open items due BEFORE `today`). One scan over the workspace.
+/** Index KPI strip: active projects, open items, done in the last 7 days,
+ *  overdue (open items past their due date) and unassigned (open items nobody
+ *  owns). Four counts in the database, not a scan of every row in JS — the
+ *  numbers must stay exact however many items the workspace holds.
  *
- *  WARP-3372 — a due date is a calendar day, so "overdue" starts the day AFTER
- *  it, not at 00:00Z on the day itself (which is the previous evening west of
- *  UTC). `today` is the viewer's own calendar day, `YYYY-MM-DD`, so the KPI and
- *  the board's overdue chip answer the same question for the same person; a
- *  caller that does not know it gets the UTC date. */
+ *  "Open" is the same rule as `listProjects`: a state in backlog / unstarted /
+ *  started, or no state at all (WARP-884 / finding #5). `doneThisWeek` counts
+ *  anything with `isCompleted` — cancelled included — which is what the strip
+ *  has always shown and what finding #6 pinned. `now` is injectable for tests. */
 export async function getSummary(
   prisma: PrismaClient,
   workspaceSlug: string = HOME_WORKSPACE_SLUG,
   today: string = todayDateOnly(),
+  now: Date = new Date(),
 ): Promise<ApiPmSummary> {
   const startOfToday = parseDateInput(today);
   // The route validates `today` at the boundary; a bad value here is a bug in a
@@ -802,37 +846,25 @@ export async function getSummary(
     select: { id: true },
   });
   if (projects.length === 0) {
-    return { activeProjects: 0, itemsOpen: 0, doneThisWeek: 0, overdue: 0 };
+    return { activeProjects: 0, itemsOpen: 0, doneThisWeek: 0, overdue: 0, unassigned: 0 };
   }
-  const items = await prisma.pmWorkItem.findMany({
-    where: { projectId: { in: projects.map((p) => p.id) }, isArchived: false },
-    select: {
-      dueDate: true,
-      completedAt: true,
-      isCompleted: true,
-      state: { select: { group: true } },
-    },
-  });
-  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-  let itemsOpen = 0;
-  let doneThisWeek = 0;
-  let overdue = 0;
-  for (const it of items) {
-    const g = it.state?.group;
-    // Stateless items are uncategorised-but-open (mirrors listProjects bucketing
-    // them as "unstarted"); count them in itemsOpen so the KPI strip isn't
-    // understated, not silently dropped (finding #5).
-    const open = g === undefined || g === "backlog" || g === "unstarted" || g === "started";
-    if (open) {
-      itemsOpen += 1;
-      if (it.dueDate && it.dueDate < startOfToday) overdue += 1;
-    }
-    // WARP-884: `isCompleted` is the canonical completion signal — no longer
-    // re-derived from `state.group` combined with a `completedAt` truthy
-    // check (the exact dual-signal split-brain this ticket closes).
-    if (it.isCompleted && it.completedAt && it.completedAt >= weekAgo) doneThisWeek += 1;
-  }
-  return { activeProjects: projects.length, itemsOpen, doneThisWeek, overdue };
+  const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const inScope: Prisma.PmWorkItemWhereInput = {
+    projectId: { in: projects.map((p) => p.id) },
+    isArchived: false,
+  };
+  const open: Prisma.PmWorkItemWhereInput = {
+    OR: [{ stateId: null }, { state: { group: { in: OPEN_GROUPS } } }],
+  };
+  const [itemsOpen, overdue, doneThisWeek, unassigned] = await Promise.all([
+    prisma.pmWorkItem.count({ where: { ...inScope, ...open } }),
+    prisma.pmWorkItem.count({ where: { ...inScope, ...open, dueDate: { lt: startOfToday } } }),
+    // WARP-884: `isCompleted` is the canonical completion signal — not
+    // re-derived from `state.group` plus a `completedAt` check.
+    prisma.pmWorkItem.count({ where: { ...inScope, isCompleted: true, completedAt: { gte: weekAgo } } }),
+    prisma.pmWorkItem.count({ where: { ...inScope, ...open, assignees: { none: {} } } }),
+  ]);
+  return { activeProjects: projects.length, itemsOpen, doneThisWeek, overdue, unassigned };
 }
 
 export async function getProject(prisma: PrismaClient, projectId: string): Promise<ApiProject> {
@@ -1697,6 +1729,8 @@ export async function createWorkItem(
     cycleId?: string;
     startDate?: Date;
     dueDate?: Date;
+    /** WARP-3527 — importer-only provenance; see {@link PmImportedWrite}. */
+    imported?: PmImportedWrite;
   },
 ): Promise<ApiWorkItem> {
   const project = await prisma.pmProject.findUnique({
@@ -1777,8 +1811,11 @@ export async function createWorkItem(
     : null;
   const initialIsCompleted =
     resolvedStateGroup === "completed" || resolvedStateGroup === "cancelled";
-  const initialCompletedAt = initialIsCompleted ? new Date() : null;
+  const initialCompletedAt = initialIsCompleted
+    ? (input.imported?.completedAt ?? new Date())
+    : null;
 
+  const imp = input.imported;
   let created;
   try {
     created = await prisma.$transaction(async (tx) => {
@@ -1814,17 +1851,34 @@ export async function createWorkItem(
           parentId: input.parentId ?? null,
           departmentId: input.departmentId ?? null,
           ...(input.cycleId !== undefined ? { cycleId: input.cycleId } : {}),
-          createdById: actorId,
+          createdById: imp?.createdById ?? actorId,
           startDate: input.startDate ?? null,
           dueDate: input.dueDate ?? null,
           sortOrder: sequenceId,
           isCompleted: initialIsCompleted,
           completedAt: initialCompletedAt,
+          // WARP-3527 — importer-only columns; absent (so untouched defaults)
+          // for every other caller.
+          ...(imp
+            ? {
+                externalSystem: imp.externalSystem,
+                externalId: imp.externalId,
+                ...(imp.createdAt ? { createdAt: imp.createdAt } : {}),
+                ...(imp.updatedAt ? { updatedAt: imp.updatedAt } : {}),
+              }
+            : {}),
           assignees: assignees.length ? { create: assignees.map((userId) => ({ userId })) } : undefined,
           labels: labelIds.length ? { create: labelIds.map((labelId) => ({ labelId })) } : undefined,
         },
       });
-      await writeActivity(tx, { workItemId: item.id, actorId, verb: "created" });
+      await writeActivity(tx, {
+        workItemId: item.id,
+        actorId,
+        verb: "created",
+        ...(imp
+          ? { field: "import", newValue: `${imp.source}:${imp.jobId}`, notifyStatus: "not_needed" as const }
+          : {}),
+      });
       // WARP-3521 — planned into a cycle at birth: the burndown reads this row.
       if (input.cycleId !== undefined) {
         await writeActivity(tx, {
@@ -1849,6 +1903,7 @@ export async function createWorkItem(
           field: "assignees",
           oldValue: null,
           newValue: userId,
+          ...(imp ? { notifyStatus: "not_needed" as const } : {}),
         });
       }
       // WARP-3519: the creator and every assignee hear about the item from now
@@ -1896,6 +1951,10 @@ export async function updateWorkItem(
     cycleId?: string | null;
     sortOrder?: number;
   },
+  /** WARP-3527 — set only by the import runner: every activity row this call
+   *  writes is born `not_needed`, and an effective change is followed by one
+   *  `updated` / `import` row naming the job. See {@link PmImportedWrite}. */
+  opts: { imported?: { jobId: string; source: string } } = {},
 ): Promise<ApiWorkItem> {
   const existing = await prisma.pmWorkItem.findUnique({
     where: { id },
@@ -1979,6 +2038,14 @@ export async function updateWorkItem(
   const reparentTo = fields.parentId && fields.parentId !== existing.parentId ? fields.parentId : null;
 
   await prisma.$transaction(async (tx) => {
+    // WARP-3527 — every activity row in this function goes through `write`, so
+    // the importer's `not_needed` flag cannot be forgotten at one call site and
+    // the "did anything change" count that gates the provenance row is exact.
+    let wrote = 0;
+    const write = (input: ActivityInput): Promise<void> => {
+      wrote += 1;
+      return writeActivity(tx, opts.imported ? { ...input, notifyStatus: "not_needed" } : input);
+    };
     if (reparentTo) await assertNoParentCycle(tx, id, reparentTo);
     const data: Prisma.PmWorkItemUpdateInput = {};
     if (fields.name !== undefined) data.name = fields.name;
@@ -2074,7 +2141,7 @@ export async function updateWorkItem(
 
     // One activity row per meaningful change.
     if (fields.stateId !== undefined && fields.stateId !== existing.stateId) {
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: "state_changed",
@@ -2088,7 +2155,7 @@ export async function updateWorkItem(
     // `cycle_added` row {A -> B}; the burndown reads such a row as a leave for A
     // and a join for B, so the verb only has to say which side is non-null.
     if (previousCycleId !== undefined) {
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: fields.cycleId ? "cycle_added" : "cycle_removed",
@@ -2106,7 +2173,7 @@ export async function updateWorkItem(
       fields.departmentId !== undefined &&
       fields.departmentId !== existing.departmentId
     ) {
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: "updated",
@@ -2116,7 +2183,7 @@ export async function updateWorkItem(
       });
     }
     if (fields.priority !== undefined && fields.priority !== existing.priority) {
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: "priority_changed",
@@ -2154,7 +2221,7 @@ export async function updateWorkItem(
       for (const userId of next) {
         if (before.has(userId)) continue;
         newlyAssigned.push(userId);
-        await writeActivity(tx, {
+        await write({
           workItemId: id,
           actorId,
           verb: "assigned",
@@ -2172,7 +2239,7 @@ export async function updateWorkItem(
       );
       for (const userId of before) {
         if (next.has(userId)) continue;
-        await writeActivity(tx, {
+        await write({
           workItemId: id,
           actorId,
           verb: "unassigned",
@@ -2186,7 +2253,7 @@ export async function updateWorkItem(
       fields.dueDate !== undefined &&
       fields.dueDate?.toISOString() !== existing.dueDate?.toISOString();
     if (dueDateChanged) {
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: "due_date_changed",
@@ -2205,7 +2272,7 @@ export async function updateWorkItem(
     // notifier ends up firing twice. None of these verbs is in the notify
     // sweep's cut (activity-notify.service.ts): board hygiene, visible here.
     if (fields.name !== undefined && fields.name !== existing.name) {
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: "title_changed",
@@ -2217,7 +2284,7 @@ export async function updateWorkItem(
     if (fields.descriptionHtml !== undefined && fields.descriptionHtml !== existing.descriptionHtml) {
       // No values: a description can be 100 KB, and the diff of a document is
       // not something to keep in a feed row.
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: "description_changed",
@@ -2230,7 +2297,7 @@ export async function updateWorkItem(
     ) {
       // PmActivityVerb has no `start_date_changed`; reuse `updated` with an
       // explicit field, exactly as `department` does above.
-      await writeActivity(tx, {
+      await write({
         workItemId: id,
         actorId,
         verb: "updated",
@@ -2244,7 +2311,7 @@ export async function updateWorkItem(
       const beforeLabels = new Set(existingLabelIds);
       for (const labelId of nextLabels) {
         if (beforeLabels.has(labelId)) continue;
-        await writeActivity(tx, {
+        await write({
           workItemId: id,
           actorId,
           verb: "label_added",
@@ -2255,7 +2322,7 @@ export async function updateWorkItem(
       }
       for (const labelId of beforeLabels) {
         if (nextLabels.has(labelId)) continue;
-        await writeActivity(tx, {
+        await write({
           workItemId: id,
           actorId,
           verb: "label_removed",
@@ -2264,6 +2331,18 @@ export async function updateWorkItem(
           newValue: null,
         });
       }
+    }
+    // WARP-3527 — one marker per effective import update, so the item's own
+    // history says which job changed it. Nothing changed, nothing written.
+    if (opts.imported && wrote > 0) {
+      await writeActivity(tx, {
+        workItemId: id,
+        actorId,
+        verb: "updated",
+        field: "import",
+        newValue: `${opts.imported.source}:${opts.imported.jobId}`,
+        notifyStatus: "not_needed",
+      });
     }
   }, reparentTo ? SERIALIZABLE_TX : undefined).catch(rethrowSerializationLoser);
 
