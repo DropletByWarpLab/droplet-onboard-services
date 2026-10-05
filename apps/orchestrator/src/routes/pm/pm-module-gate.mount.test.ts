@@ -60,6 +60,7 @@ import { createPmNativeRouter } from "./native.js";
 import { createPmRelationsRouter } from "./relations.js";
 import { createPmQueryRouter } from "./query.js";
 import { createPmViewsRouter } from "./views.js";
+import { createPmImportExportRouter } from "./import-export.js";
 import { createPmPlanningRouter } from "./planning.js";
 import { createPmInsightsRouter } from "./insights.js";
 import { createPmTimeRouter } from "./time.js";
@@ -184,6 +185,12 @@ const PM_ROUTER_MOUNTS: readonly PmRouterMount[] = [
     base: "/api",
     file: "routes/pm/relations.ts",
     router: createPmRelationsRouter(PRISMA),
+  },
+  {
+    factory: "createPmImportExportRouter",
+    base: "/api",
+    file: "routes/pm/import-export.ts",
+    router: createPmImportExportRouter(PRISMA),
   },
   {
     factory: "createPmPlanningRouter",
