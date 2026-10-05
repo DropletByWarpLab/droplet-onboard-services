@@ -4,6 +4,8 @@
 > after the wizard branch lands and end-to-end voice works on the
 > single-box deployment shape with a USB mic + speaker.
 
+> Current implementation (2026-10-05): English CPU Qwen3-ASR, Vosk **Hey Droplet**, and selectable Kokoro voices. See [cpu-voice.md](cpu-voice.md) for resource qualification and rollback. The original branch/commit plan below is historical.
+
 ## Goals (from Stefan)
 
 - Open-source. No licensing fees.
@@ -18,13 +20,13 @@
   voice for free (file ops, camera control, smart home, VPN
   management, etc.).
 
-## Stack (all MIT / Apache 2.0)
+## Current stack (free/open source; dependency licenses vary)
 
 | Layer | Component | Why |
 |---|---|---|
-| Wake word | [openWakeWord](https://github.com/dscripka/openWakeWord) (Apache 2.0) | Pure Python, CPU-only, ~10 MB models. Custom-trainable. |
-| Streaming STT | wyoming-faster-whisper (Apache 2.0) | Reuses the faster-whisper model `services/file-indexer` already loads for WARP-197. Same `small.en` weights, no duplicate disk footprint. |
-| TTS | [Piper](https://github.com/rhasspy/piper) (MIT) | Sub-second first-audio on CPU, ~50 MB voice models, multiple voices. |
+| Wake word | Vosk small English (Apache-2.0) | Exact configured Hey Droplet grammar; bundled at build time, CPU-only. |
+| Streaming STT | Qwen3-ASR 1.7B (Apache-2.0), native C/OpenBLAS runtime (MIT) | Full model on CPU/RAM, shared with dashboard dictation; pinned offline assets. |
+| TTS | Kokoro 82M (Apache-2.0), ONNX CPU runtime | Eight installed English voices with saved selection and temporary preview. Phonemizer/eSpeak carry GPL obligations. |
 | Protocol | Wyoming (Apache 2.0) | TCP-based. Lets each component be a separate container, swappable. Home Assistant Voice's protocol — biggest OSS ecosystem in this space. |
 | Audio I/O | sounddevice (MIT) + PortAudio | Cross-platform, clean shutdown, native numpy. Better API than PyAudio. |
 | Glue | New `services/voice-io/` (this branch) | Captures audio, runs the wake loop, chains the Wyoming services, posts to `/api/llm/chat` (streaming), pipes response through TTS. |

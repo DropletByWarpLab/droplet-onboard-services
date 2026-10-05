@@ -244,6 +244,10 @@ jobs:
               - "services/file-indexer/**"
             voice-io:
               - "services/voice-io/**"
+            qwen-stt:
+              - "services/qwen-stt/**"
+            kokoro-tts:
+              - "services/kokoro-tts/**"
             device-identity-svc:
               - "services/device-identity-svc/**"
               - "proto/**"
@@ -384,7 +388,7 @@ jobs:
           ALL_PYTHON: >-
             ["ai-gateway","routing","switch","camera-discovery",
             "email-indexer","ops-console","fleet-agent","file-indexer",
-            "voice-io","device-identity-svc","erp-sql-bridge",
+            "voice-io","qwen-stt","kokoro-tts","device-identity-svc","erp-sql-bridge",
             "inference-manager","doc-render","sandbox"]
           ALL_STORAGE: '["storage"]'
           ALL_FIPS: '["fips"]'

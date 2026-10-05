@@ -55,13 +55,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     # --no-deps so pip doesn't try to resolve tflite-runtime.
     pip install --no-deps openwakeword==0.6.0
 
-# Pre-warm the bundled model cache so the first /voice/status hit
-# doesn't pay the model-download tax. openWakeWord stashes models in
-# ~/.local/share/openwakeword/resources/models — bake them in. If the
-# download fails (no network at build time) we don't fail the build;
-# the runtime lazy-load will retry on first predict().
-RUN python -c "from openwakeword.utils import download_models; download_models(['hey_jarvis_v0.1', 'alexa_v0.1', 'hey_mycroft_v0.1'])" || \
-    echo "openwakeword model pre-fetch skipped (offline build OK; runtime will fetch)"
+# Do not bundle openWakeWord's noncommercial classifier weights. The
+# default uses the Apache-licensed Vosk model below. Explicit openWakeWord
+# installations must supply their own appropriately licensed model assets.
 
 # Bundle the Vosk small English model (Apache-2.0, ~40 MB) so the
 # default wake engine recognizes "hey droplet" — and any in-vocabulary
@@ -82,16 +78,12 @@ RUN python -c "from openwakeword.utils import download_models; download_models([
 #      outside /app/models (zip-slip). We do NOT use the stdlib's bare
 #      extractall(), which has no such guard.
 #
-# Offline-build tolerant ONLY for a genuine fetch failure (no network at
-# build time): if curl can't retrieve the archive we skip bundling and
-# the factory falls back to openWakeWord until the model is present at
-# runtime. A present-but-tampered artifact (checksum mismatch or
-# zip-slip) is a HARD failure — never swallowed by the fallback.
+# This default wake model is required. Fetch, checksum or extraction failures
+# abort the build rather than shipping a box that listens for another phrase.
 ARG VOSK_MODEL=vosk-model-small-en-us-0.15
 ARG VOSK_MODEL_SHA256=30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498
 COPY services/voice-io/scripts/fetch_vosk_model.py /tmp/fetch_vosk_model.py
-RUN ( curl -fsSL "https://alphacephei.com/vosk/models/${VOSK_MODEL}.zip" -o /tmp/vosk.zip \
-        || { echo "vosk model fetch skipped (offline build OK; runtime falls back to openWakeWord until the model is present)"; exit 0; } ) && \
+RUN curl -fsSL --retry 3 "https://alphacephei.com/vosk/models/${VOSK_MODEL}.zip" -o /tmp/vosk.zip && \
     python /tmp/fetch_vosk_model.py \
         --zip /tmp/vosk.zip \
         --sha256 "${VOSK_MODEL_SHA256}" \

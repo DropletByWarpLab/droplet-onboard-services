@@ -1099,6 +1099,19 @@ export interface VoiceSayResult {
   sample_rate?: number | null;
 }
 
+export interface SpeakingVoiceInfo {
+  available: boolean;
+  selectable: boolean;
+  voice: string | null;
+  voices: { id: string; label: string }[];
+  fault: string | null;
+}
+
+export interface SpeakingVoiceChange {
+  voice: string;
+  fault: string | null;
+}
+
 // --- WARP-1055: /voice surface — calibration + wizard measurements ---
 
 /**

@@ -289,6 +289,8 @@ jobs:
           - service: voice-io
             # portaudio/alsa import-time deps (mirrors voice-io-tests.yml)
             sysdeps: libportaudio2 alsa-utils
+          - service: qwen-stt
+          - service: kokoro-tts
           - service: device-identity-svc
             # tpm2-pytss builds against tss2-esapi headers
             # (mirrors device-identity-svc-tests.yml)
