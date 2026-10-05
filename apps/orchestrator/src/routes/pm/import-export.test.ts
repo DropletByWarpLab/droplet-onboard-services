@@ -286,6 +286,19 @@ describe("the job routes", () => {
     expect(svc.startImportJob).toHaveBeenCalledWith(prisma, "job-1", { mapping: { createMissingStates: false } });
   });
 
+  it("passes the reviewed timestamp to the guarded run and refuses malformed preconditions", async () => {
+    const expectedUpdatedAt = "2026-10-05T20:00:00.123Z";
+    const res = await request(app()).post("/api/pm/import-jobs/job-1/run").send({ expectedUpdatedAt });
+    expect(res.status).toBe(202);
+    expect(svc.startImportJob).toHaveBeenLastCalledWith(prisma, "job-1", { mapping: undefined, expectedUpdatedAt });
+    svc.startImportJob.mockClear();
+    for (const bad of [null, 42, "yesterday", "2026-10-05", "2026-10-05T20:00:00+02:00"]) {
+      const rejected = await request(app()).post("/api/pm/import-jobs/job-1/run").send({ expectedUpdatedAt: bad });
+      expect(rejected.status).toBe(400);
+    }
+    expect(svc.startImportJob).not.toHaveBeenCalled();
+  });
+
   it("cancel returns the cancelled job", async () => {
     const res = await request(app()).post("/api/pm/import-jobs/job-1/cancel").send({});
     expect(res.status).toBe(200);
@@ -302,6 +315,7 @@ describe("the job routes", () => {
     [PM_IMPORT_ERRORS.JOB_NOT_FOUND, 404],
     [PM_IMPORT_ERRORS.NOT_EDITABLE, 409],
     [PM_IMPORT_ERRORS.NOT_STARTABLE, 409],
+    [PM_IMPORT_ERRORS.CHANGED, 409],
     [PM_IMPORT_ERRORS.IN_PROGRESS, 409],
     [PM_IMPORT_ERRORS.NOT_CANCELLABLE, 409],
     [PM_IMPORT_ERRORS.FILE_EXPIRED, 410],

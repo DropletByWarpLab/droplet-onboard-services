@@ -105,6 +105,7 @@ import { storedUploadName } from "../lib/upload-file-name.js";
 import { isPathUnderUser } from "../services/brain-memory.service.js";
 import {
   classifyFileContentId,
+  contentDispositionAttachment,
   inlinePreviewContentType,
   parseRangeHeader,
 } from "../lib/file-content.js";
@@ -1100,21 +1101,6 @@ function applyCitationContentHeaders(res: Response, filename: string): void {
   res.setHeader("Content-Disposition", contentDispositionAttachment(filename));
 }
 
-/**
- * A Content-Disposition that survives a hostile or non-ASCII filename.
- *
- * A bare `attachment; filename="${name}"` breaks on any name containing a
- * quote or backslash — the value stops being one quoted-string and the rest is
- * reparsed as disposition parameters. Node rejects CR/LF in a header value, so
- * response splitting is already off the table, but parameter smuggling is not.
- * The ASCII fallback is stripped to a conservative set, and the real name is
- * carried in RFC 5987 `filename*`, which every current browser prefers.
- */
-function contentDispositionAttachment(filename: string, disposition: "attachment" | "inline" = "attachment"): string {
-  const ascii = filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
-  const encoded = encodeURIComponent(filename).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
-  return `${disposition}; filename="${ascii}"; filename*=UTF-8''${encoded}`;
-}
 
 export function createFilesRouter(
   prisma: PrismaClient,
