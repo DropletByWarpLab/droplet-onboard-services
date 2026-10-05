@@ -7,8 +7,9 @@
  * writes, and the same data the in-app AI reads/writes through the MCP tools.
  */
 
-import { useMemo, useState, type JSX } from "react";
+import { Suspense, useMemo, useState, type JSX } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { FolderKanban } from "lucide-react";
 import { ShellPage } from "@/components/shell/ShellPage";
 import { useToast } from "@/components/Toast";
@@ -57,6 +58,9 @@ import {
   NewProjectModal,
 } from "@/components/projects/modals";
 import { ProjectMenu } from "@/components/projects/settings/ProjectMenu";
+import { TimeAccessProvider } from "@/components/projects/time/access";
+import { TimerChip } from "@/components/projects/time/TimerChip";
+import { TimeView } from "@/components/projects/time/TimeView";
 
 function matchQuery(item: PmWorkItem, q: string): boolean {
   const needle = q.toLowerCase();
@@ -89,7 +93,24 @@ export default function ProjectsPage(): JSX.Element {
   // else. It used to also read `crm` and render the CRM's sub-tabs, which is
   // why its header renamed itself when a module it does not own flipped. The
   // CRM lives at /customers now.
-  return <ProjectsWorkspace />;
+  //
+  // WARP-3526 — `?view=time` is read with `useSearchParams`, which Next requires
+  // under a Suspense boundary; the time surface also needs to know who is asking.
+  return (
+    <Suspense fallback={null}>
+      <ProjectsWithTimeAccess />
+    </Suspense>
+  );
+}
+
+/** The session, handed to the time surface (see components/projects/time/access.tsx). */
+function ProjectsWithTimeAccess(): JSX.Element {
+  const { user } = useAuth();
+  return (
+    <TimeAccessProvider user={user}>
+      <ProjectsWorkspace />
+    </TimeAccessProvider>
+  );
 }
 
 function ProjectsWorkspace(): JSX.Element {
@@ -101,8 +122,13 @@ function ProjectsWorkspace(): JSX.Element {
   const { toast } = useToast();
   const { person } = usePeople();
 
+  // WARP-3526 — the time view is addressable: `/projects?view=time`.
+  const router = useRouter();
+  const searchParams = useSearchParams();
   // `my-work` is cross-project (WARP-3523), so it is not a ProjectView tab.
-  const [view, setView] = useState<ProjectView | "index" | "my-work">("index");
+  const [view, setView] = useState<ProjectView | "index" | "my-work">(
+    searchParams?.get("view") === "time" ? "time" : "index",
+  );
   const [projectId, setProjectId] = useState<string | null>(null);
   const [savedView, setSavedView] = useState<SavedView>("all");
   const [q, setQ] = useState("");
@@ -221,8 +247,15 @@ function ProjectsWorkspace(): JSX.Element {
     setDepartment(DEPARTMENT_ANY);
   };
 
+  const changeView = (next: ProjectView | "index") => {
+    if (next === "time" || view === "time") {
+      router.replace(next === "time" ? "/projects?view=time" : "/projects", { scroll: false });
+    }
+    setView(next);
+  };
+
   const backToIndex = () => {
-    setView("index");
+    changeView("index");
     setProjectId(null);
   };
 
@@ -265,19 +298,26 @@ function ProjectsWorkspace(): JSX.Element {
 
   const isProjectView = view === "board" || view === "list" || view === "calendar" || view === "timeline";
 
+  const timeOnly = view === "time" && !project;
   const headerTitle =
-    view === "index" ? "Projects" : view === "my-work" ? "My work" : project?.name ?? "Projects";
+    view === "index" ? "Projects" : view === "my-work" ? "My work" : timeOnly ? "Time" : project?.name ?? "Projects";
   const headerSub =
     view === "index"
       ? `${summary?.activeProjects ?? projects?.filter((p) => !p.archived).length ?? 0} projects · ${summary?.itemsOpen ?? 0} items open`
       : view === "my-work"
         ? "Your open work across every project"
-        : project
-        ? `${project.openCount} open · ${project.doneCount} done`
-        : undefined;
+        : timeOnly
+          ? "Timesheet and report"
+          : project
+            ? `${project.openCount} open · ${project.doneCount} done`
+            : undefined;
 
   const actions = view === "index" ? (
       <>
+        <TimerChip />
+        <button className="btn" type="button" onClick={() => changeView("time")}>
+          <PmIcon name="clock" size={14} /> Time
+        </button>
         {!readOnly && (
           <button className="btn primary" type="button" onClick={() => setModal("newproject")}>
             <FolderKanban size={14} /> New project
@@ -292,6 +332,7 @@ function ProjectsWorkspace(): JSX.Element {
       </>
     ) : (
       <>
+        <TimerChip />
         {/* WARP-2582 — record-scoped, and `project` is in hand here, so this
             hands over an identity instead of a bare navigation: the seed line
             names the project on turn 1 and the pin scopes every turn after.
@@ -388,7 +429,7 @@ function ProjectsWorkspace(): JSX.Element {
             {isProjectView && (
               <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 14 }}>
                 <div className="pm-row" style={{ justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                  <ViewSwitcher view={view} onView={(v) => setView(v)} />
+                  <ViewSwitcher view={view} onView={changeView} />
                   <FilterBar
                     q={q}
                     onQ={setQ}
@@ -408,9 +449,9 @@ function ProjectsWorkspace(): JSX.Element {
                 )}
               </div>
             )}
-            {(view === "cycles" || view === "modules") && (
+            {(view === "cycles" || view === "modules" || (view === "time" && projectId)) && (
               <div style={{ marginBottom: 14 }}>
-                <ViewSwitcher view={view} onView={(v) => setView(v)} />
+                <ViewSwitcher view={view} onView={changeView} />
               </div>
             )}
 
@@ -489,6 +530,7 @@ function ProjectsWorkspace(): JSX.Element {
                 />
               )}
               {view === "my-work" && <MyWorkView />}
+              {view === "time" && <TimeView projects={projects} projectId={projectId} />}
             </div>
           </div>
         </div>
