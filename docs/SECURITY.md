@@ -183,7 +183,9 @@ carries `exp:YYYY-MM-DD` (Trivy stops ignoring it that day, so the finding
 fails the build again), each `osv-scanner.toml` ignore carries `ignoreUntil`,
 and `scripts/check-vuln-exceptions.sh` (a `ci.yml` `detect` step) fails a PR
 when an entry has no expiry, is past due, or the pinned DB snapshot is more
-than 35 days old. Extend an exception by editing its date in a reviewed PR;
+than 35 days old. The same check runs in the release `gate-node` job before
+the dependency scan, so a quiet branch cannot publish with a stale DB pin.
+Extend an exception by editing its date in a reviewed PR;
 never delete one to make a scan pass. The initial dates are 2027-01-02 (90 days
 from 2026-10-04) for every entry, the conservative choice; owners shorten or
 extend per finding. The monthly refresh is a manual PR today; a scheduled job

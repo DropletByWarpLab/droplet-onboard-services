@@ -208,6 +208,9 @@ jobs:
       # whose baseline entry has expired), so a dispatch on a tree with a new
       # finding stops here, before `publish` builds, pushes or signs anything.
       # The pinned DB keeps the verdict reproducible for a given commit.
+      - name: Validate vulnerability exceptions and database freshness
+        run: bash scripts/check-vuln-exceptions.sh
+
       - name: Read pinned Trivy DB digest
         id: trivydb
         run: echo "ref=$(grep -v '^#' .github/trivy-db-version | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
