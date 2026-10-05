@@ -11,6 +11,13 @@ import { recordActivity } from "../services/activity.singleton.js";
 import { actorFromRequest } from "../services/activity.service.js";
 import { EXTENSION_TOKEN_PREFIX } from "../services/extension-token.js";
 import { resolveExtensionPrincipal } from "../services/extension-principal.js";
+import {
+  PM_API_PUBLIC_PREFIX,
+  resolveBoundPmApiPrincipal,
+  recordBoundPmApiTokenUse,
+  tokenAreaForPath,
+  type PmApiTokenScope,
+} from "../services/pm/pm-api-token.service.js";
 
 const logger = createLogger("auth");
 
@@ -65,6 +72,14 @@ declare global {
        * records this beside the sid.
        */
       sessionChecked?: boolean;
+      /**
+       * WARP-3533 — set only when THIS request authenticated with a personal API
+       * token (`dpm_…`): the token's row id and its scopes. `req.user` is then the
+       * holder, read fresh from the database; this is what
+       * `pm-api-token-guard.ts` confines to `/api/pm` and `/api/support` and
+       * narrows to the scopes. Absent on every other request.
+       */
+      apiToken?: { id: string; scopes: readonly PmApiTokenScope[] };
     }
   }
 }
@@ -237,6 +252,13 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     res.status(401).json({ error: "Missing or invalid authentication" });
     return;
   }
+  // WARP-3533 — the same for a personal API token: a header credential and
+  // nothing else. A cookie is ambient (the browser attaches it to any request a
+  // page makes), which is exactly what a script's token must never be.
+  if (cookieToken?.startsWith(PM_API_PUBLIC_PREFIX)) {
+    res.status(401).json({ error: "Missing or invalid authentication" });
+    return;
+  }
 
   // WARP-3122 — a recordings segment URL signed for a still-active person
   // (services/segment-url-signing.service.ts, the only writer of this
@@ -295,6 +317,53 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
       })
       .catch((err) => {
         logger.error({ err }, "Extension bearer lookup failed");
+        res.status(500).json({ error: "Authentication service error" });
+      });
+    return;
+  }
+
+  // WARP-3533 — a personal API token (`dpm_…`, services/pm/pm-api-token.service.ts).
+  // It resolves to its HOLDER (role and directory status read fresh from the
+  // row), so every role, module and feature gate after this runs unchanged, and
+  // `req.apiToken` carries what pm-api-token-guard.ts narrows it to. Only the
+  // two prefixes a token may call even reach the lookup: anywhere else it is
+  // refused before the database is asked, so a token cannot be used to probe
+  // routes it will never be allowed, and its validity is not an oracle there.
+  // A `dpm_` bearer that does not resolve is a 401 HERE: it never falls through
+  // to the JWT path. The token is never logged: the only thing that reaches the
+  // database or a log line is its sha256 and the row id.
+  if (headerToken?.startsWith(PM_API_PUBLIC_PREFIX)) {
+    if (!tokenAreaForPath(req.path)) {
+      // NO audit row here, deliberately. Nothing has been looked up, so the caller
+      // is anonymous: `Authorization: Bearer dpm_anything` needs no credential, and
+      // a row per request would let anyone append signed, hash-chained entries
+      // carrying a path of their choosing (and queue every other audit writer on
+      // the chain's lock). A 401 is not audited either. The guard's own refusal
+      // (pm-api-token-guard.ts) only ever sees a validated, rate-limited token,
+      // so that one can be.
+      logger.debug({ method: req.method }, "api token refused outside its routes");
+      res.status(403).json({
+        error: "Forbidden: an API token cannot call this route",
+        code: "TOKEN_ROUTE_FORBIDDEN",
+      });
+      return;
+    }
+    void resolveBoundPmApiPrincipal(headerToken)
+      .then((result) => {
+        if (!result.ok) {
+          res
+            .status(401)
+            .set("WWW-Authenticate", 'Bearer error="invalid_token"')
+            .json({ error: "Invalid or expired token", code: result.code });
+          return;
+        }
+        req.user = result.principal;
+        req.apiToken = { id: result.tokenId, scopes: result.scopes };
+        recordBoundPmApiTokenUse(result.tokenId);
+        next();
+      })
+      .catch((err) => {
+        logger.error({ err }, "API token lookup failed");
         res.status(500).json({ error: "Authentication service error" });
       });
     return;
@@ -411,13 +480,21 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
 /**
  * Validate a session token outside the Express pipeline (WebSocket upgrade).
  */
-export async function validateTokenForWs(token: string | null): Promise<AuthUser | null> {
+export async function validateTokenForWs(
+  token: string | null,
+  // WARP-3612 — the periodic re-check of an open socket must not slide the
+  // session's idle window (a keepalive is not user activity).
+  opts: { touch?: boolean } = {},
+): Promise<AuthUser | null> {
   if (!config.AUTH_ENABLED) {
     return { id: "dev", username: "dev", displayName: "Developer", role: "owner" };
   }
   if (!token) return null;
   // WARP-2900 — an extension never opens a WebSocket.
   if (token.startsWith(EXTENSION_TOKEN_PREFIX)) return null;
+  // WARP-3533 — nor does a personal API token: it reaches /api/pm and
+  // /api/support over HTTP and nothing else.
+  if (token.startsWith(PM_API_PUBLIC_PREFIX)) return null;
 
   // Try JWT first. WARP-247: a sid-carrying token must also present a live
   // session record — a WS upgrade is user activity, so the default sliding
@@ -428,7 +505,7 @@ export async function validateTokenForWs(token: string | null): Promise<AuthUser
     // Fails open on Redis error (isUserDenied → false), same as the HTTP path.
     if (await isUserDenied(jwtPayload.sub)) return null;
     if (jwtPayload.sid) {
-      const result = await checkSession(jwtPayload.sid);
+      const result = await checkSession(jwtPayload.sid, opts);
       if (result.kind !== "ok" && result.kind !== "error") return null;
     }
     return {
@@ -759,13 +836,13 @@ export function requireRoleOrService(
   ...allowed: Role[]
 ): (req: Request, res: Response, next: NextFunction) => void {
   const base = requireRole(...allowed);
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return markAsRoleGuard((req: Request, res: Response, next: NextFunction): void => {
     if (req.user?.id === serviceId && req.user.role === "service") {
       next();
       return;
     }
     base(req, res, next);
-  };
+  });
 }
 
 /**

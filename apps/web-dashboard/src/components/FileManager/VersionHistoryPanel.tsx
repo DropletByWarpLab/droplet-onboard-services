@@ -102,7 +102,7 @@ export function VersionHistoryPanel({ filePath, onRestored }: VersionHistoryPane
 
       {notSupported && (
         <p className="type-caption-1" style={{ color: "var(--text-muted)" }}>
-          Versions require the Nextcloud backend.
+          Versions require the File Store backend.
         </p>
       )}
 

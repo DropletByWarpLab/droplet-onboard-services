@@ -71,6 +71,17 @@ app = FastAPI(
 # noise.
 audit.install(app)
 
+# WARP-3641: leave a record of when the support window opens and when it ends,
+# so the audit file shows each container start and the deadline it ran under.
+audit.record(
+    method="START",
+    path="/ops",
+    status=0,
+    identity="ops-console",
+    latency_ms=0.0,
+    detail=auth.window_description(),
+)
+
 
 # ---------------------------------------------------------------------------
 # Unauth: /healthz for docker HEALTHCHECK

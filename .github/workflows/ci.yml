@@ -94,7 +94,7 @@ jobs:
       ship-check-suites: ${{ steps.plan.outputs.ship-check-suites }}
       mcp-bridge-suites: ${{ steps.plan.outputs.mcp-bridge-suites }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # WARP-2351 — customer setup-guide drift gate. Deliberately a STEP of
       # this job rather than a leg of its own: `detect` is the only job that
@@ -117,7 +117,7 @@ jobs:
 
       - name: Map changed paths to affected legs
         if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@v4
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: filter
         with:
           filters: |
@@ -497,7 +497,7 @@ jobs:
       matrix:
         suite: ${{ fromJSON(needs.detect.outputs.node-suites) }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Reused from docker-build.yml: strip preinstalled toolchains we don't
       # use so the ~14GB runner keeps headroom for npm ci + workspace builds.
@@ -520,7 +520,7 @@ jobs:
           df -h /
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "20"
           cache: npm
@@ -684,7 +684,9 @@ jobs:
       # #786's gate-node. Resolution is `cosign` on PATH (or DROPLET_COSIGN_BIN).
       - name: Install cosign (update-agent verify suite)
         if: matrix.suite == 'orchestrator'
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.6.1 # OTA consumers require the cosign v2 signature format.
 
       # WARP-1011: vitest transforms via esbuild and never typechecks, so
       # compile-time contracts (e.g. the activity log's required
@@ -908,7 +910,7 @@ jobs:
       run:
         working-directory: services/${{ matrix.service }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install system deps
         if: matrix.sysdeps != ''
@@ -922,10 +924,12 @@ jobs:
       # orchestrator leg above and fleet-agent-tests.yml).
       - name: Install cosign (fleet-agent release_verify suite)
         if: matrix.service == 'fleet-agent'
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.6.1 # OTA consumers require the cosign v2 signature format.
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           cache: pip
@@ -957,7 +961,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Run storage-pool unit tests
         run: bash tests/storage-pool-destroy-superblock.test.sh
@@ -1021,10 +1025,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "20"
           cache: npm
@@ -1079,7 +1083,7 @@ jobs:
     # a wide ceiling for a ~2 min suite.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Run lint script's own unit tests
         run: ./tests/test-fips-script/run.sh
@@ -1133,11 +1137,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0 # merge-base for --baseline-commit
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
@@ -1205,7 +1209,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0 # pass 2 scans the full PR commit range
 
@@ -1243,7 +1247,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install hadolint v2.14.0 (pinned, checksummed)
         run: |
@@ -1303,7 +1307,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # The runner's own bash (5.x) — the floor ship-check is written for.
       - name: Parse under the runner's bash 5

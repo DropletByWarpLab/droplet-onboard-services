@@ -3,9 +3,9 @@
  *
  * Two properties, and the second is the one the ticket calls out by name.
  *
- * 🔴 IT MUST NOT BE PRODUCTION-GATED. `admin-retrieval-eval` 404s whenever
- * `NODE_ENV === "production"`, which is every real appliance — and this
- * canary's whole purpose is to run on a real appliance, against the model that
+ * 🔴 IT MUST NOT BE PRODUCTION-GATED. `admin-retrieval-eval` 404s unless
+ * `RAG_EVAL_ENABLED` is on (it used to key off `NODE_ENV === "production"`) —
+ * and this canary's whole purpose is to run on a real appliance, against the model that
  * box actually serves. A gate you cannot reach where it matters is not a gate,
  * and the `auto` mode CHECK would then be unsatisfiable on any box that has
  * one. Copying the wrong sibling here is a one-line mistake with no symptom

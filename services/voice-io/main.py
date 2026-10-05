@@ -14,6 +14,7 @@ come in subsequent commits.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import os
 import threading
@@ -21,7 +22,8 @@ import time
 from typing import Literal, Optional
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Response
+from starlette.requests import HTTPConnection
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -68,7 +70,10 @@ from voice.speaker_id import (
     match_against,
 )
 from voice.devices import (
+    AudioDevice,
     DeviceResolution,
+    alsa_fingerprint,
+    is_xvf_device,
     resolve_devices,
 )
 from voice.dsp import DspRestartError, restart_dsp
@@ -90,6 +95,7 @@ from voice.pipeline import (
     DspRestartSkipped,
     MeasurementUnavailable,
     WakePipeline,
+    pcm_level_dbfs,
 )
 from voice.llm import LLMClient, build_llm_from_env
 from voice.persona import PersonaFetcher, build_persona_fetcher_from_env
@@ -204,7 +210,54 @@ VOICE_FLATLINE_DBFS = float(
     or str(DEFAULT_FLATLINE_DBFS),
 )
 
-app = FastAPI(title="voice-io", version="0.1.0")
+# WARP-3710 - hot-plug rescan. Seconds between the cheap ALSA-card
+# fingerprint checks that notice a USB mic array enumerating AFTER boot
+# (the README has documented this knob since day one; nothing read it).
+# 0 disables. Empty env = default (compose passthrough convention).
+DEVICE_RESCAN_INTERVAL = _env_float("DEVICE_RESCAN_INTERVAL", 5.0)
+
+# WARP-3710 - how long POST /voice/mic/restart waits for the replacement
+# capture stream, and the default / max length of POST /voice/mic/test.
+MIC_RESTART_WAIT_S = 15.0
+MIC_TEST_DEFAULT_S = 3.0
+
+# WARP-3625: inbound bearer, shared with the orchestrator's voice proxy
+# (VOICE_IO_SERVICE_TOKEN). Read at import; require_bearer looks the module
+# global up at call time so tests can monkeypatch it (web-fetch precedent).
+VOICE_IO_SERVICE_TOKEN = os.environ.get("VOICE_IO_SERVICE_TOKEN", "").strip()
+
+# /health stays reachable without a token (Docker healthcheck, ops-console).
+AUTH_EXEMPT_PATHS = frozenset({"/health"})
+
+
+def require_bearer(conn: HTTPConnection) -> None:
+    """Reject requests without a matching `Authorization: Bearer <token>`.
+
+    Fails CLOSED when no token is configured: an unset VOICE_IO_SERVICE_TOKEN
+    yields 503 on every non-/health route rather than leaving the box speaker,
+    the listening switch and the voiceprints open to any container on the
+    compose network. Same posture as web-fetch / erp-sql-bridge, deliberately
+    WITHOUT a dev escape hatch.
+    """
+    if conn.url.path in AUTH_EXEMPT_PATHS:
+        return
+    if not VOICE_IO_SERVICE_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="voice-io auth is not configured (VOICE_IO_SERVICE_TOKEN unset)",
+        )
+    header = conn.headers.get("authorization", "")
+    scheme, _, token = header.partition(" ")
+    # compare_digest raises on non-ASCII str; encode so a bad header is a 401.
+    if scheme.lower() != "bearer" or not hmac.compare_digest(
+        token.strip().encode("utf-8"), VOICE_IO_SERVICE_TOKEN.encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+app = FastAPI(
+    title="voice-io", version="0.1.0", dependencies=[Depends(require_bearer)]
+)
 
 # WARP-1055 — default capture window for /audio/measure when the
 # wizard doesn't specify one. Long enough for a stable noise-floor
@@ -315,7 +368,25 @@ def _reresolve_input_index() -> Optional[int]:
     except Exception:  # pragma: no cover — defensive; resolve is best-effort
         logger.exception("voice re-resolution failed")
         return None
+    # WARP-3710 - the speaker follows the same re-enumeration: PortAudio
+    # indices shift when cards come and go, and the pipeline only ever
+    # got a fresh INPUT index.
+    pipeline = _pipeline
+    if pipeline is not None and r.output_device is not None:
+        pipeline.set_output_device_index(r.output_device.index)
     return r.input_device.index if r.input_device else None
+
+
+def _active_input_device() -> Optional[AudioDevice]:
+    """The input the pipeline was last told to use (None = no mic)."""
+    r = _resolution
+    return r.input_device if r is not None else None
+
+
+def _active_input_is_xvf() -> bool:
+    """Whether the ACTIVE input is an XVF3800 - the pipeline's gate for
+    the `xvf_host` DSP reboot (WARP-3710)."""
+    return is_xvf_device(_active_input_device())
 
 
 def apply_stored_calibration(pipeline: WakePipeline) -> None:
@@ -553,6 +624,13 @@ def _build_and_start_pipeline() -> None:
             # _auto_restart_dsp) so the two never overlap.
             dsp_restart=_auto_restart_dsp,
             volume=_volume,
+            # WARP-3710 - self-heal: only reboot the DSP when the active
+            # input IS an XVF; otherwise re-pick. The rescan job notices a
+            # USB array that enumerated after us (sysfs fingerprint, no
+            # PortAudio poke under a live stream) and re-picks.
+            active_device_is_xvf=_active_input_is_xvf,
+            device_fingerprint=alsa_fingerprint,
+            device_rescan_interval_s=DEVICE_RESCAN_INTERVAL,
         )
         # WARP-1055 — a persisted calibration (named-volume JSON) wins
         # over the env-derived gain/threshold. Applied before start()
@@ -852,6 +930,13 @@ class VoiceStatusResponse(BaseModel):
     mic_fault: Optional[str] = None
     dsp_restart_attempts: int = 0
     dsp_last_restart_at: Optional[float] = None
+    # WARP-3710 - which mic is ACTUALLY in use. `input_device` is the
+    # picked device's name (null = no mic); `input_device_is_xvf` says
+    # whether the DSP reboot applies to it. Reported with or without a
+    # pipeline, like the output fields below.
+    input_device: Optional[str] = None
+    input_device_bus: Optional[str] = None
+    input_device_is_xvf: bool = False
     # Calibration mode (WARP-1059). True while the wizard's suppression
     # window is live — wakes are counted (last_wake_at still updates,
     # which the wizard's step-3 ticker rides) but not handled (no
@@ -1156,6 +1241,7 @@ def voice_status() -> VoiceStatusResponse:
             output_level=output.level,
             output_muted=output.muted,
             output_fault=output_fault,
+            **_input_device_fields(),
         )
     s = _pipeline.status()
     return VoiceStatusResponse(
@@ -1201,7 +1287,17 @@ def voice_status() -> VoiceStatusResponse:
         output_level=output.level,
         output_muted=output.muted,
         output_fault=output_fault,
+        **_input_device_fields(),
     )
+
+
+def _input_device_fields() -> dict:
+    device = _active_input_device()
+    return {
+        "input_device": device.name if device else None,
+        "input_device_bus": device.bus if device else None,
+        "input_device_is_xvf": is_xvf_device(device),
+    }
 
 
 @app.post("/voice/say", response_model=SayResponse)
@@ -1629,6 +1725,299 @@ def voice_restart_processor() -> RestartProcessorResponse:
     finally:
         _restart_lock.release()
     return RestartProcessorResponse(**result)
+
+
+# ────────────────────────────────────────────────────────────────────
+# WARP-3710 - mic recovery surface: devices / restart / test
+# ────────────────────────────────────────────────────────────────────
+#
+# Root cause: voice-io booted before the reSpeaker XVF3800 enumerated,
+# picked the silent onboard codec, then spent its bounded DSP-reboot
+# budget on `xvf_host REBOOT 1` against a device that is not an XVF
+# (exit 8) and latched `wedged_escalated` for days. The pipeline now
+# re-picks in-process (see WakePipeline.request_reopen); these endpoints
+# are the operator's handle on the same machinery.
+
+# One operator restart at a time (409 on overlap). Its own lock: it is
+# held for seconds while the stream swaps, and must never queue behind -
+# or hold up - a measurement on `_capture_lock`.
+_mic_restart_lock = threading.Lock()
+
+
+def _device_view(device: AudioDevice, *, kind: str, active: bool) -> dict:
+    out = device.to_dict()
+    out["is_xvf"] = is_xvf_device(device)
+    out["active"] = active
+    out["score"] = (
+        device.score_as_input if kind == "input" else device.score_as_output
+    )
+    return out
+
+
+class MicDeviceList(BaseModel):
+    """GET /voice/devices - everything PortAudio sees, plus what is in use.
+
+    `input` / `output` / `input_source` / `output_source` / `all` keep the
+    legacy /audio/devices shape so existing readers don't break."""
+
+    active: dict
+    inputs: list[dict]
+    outputs: list[dict]
+    input: Optional[dict] = None
+    output: Optional[dict] = None
+    input_source: str
+    output_source: str
+    all: list[dict]
+
+
+@app.get("/voice/devices", response_model=MicDeviceList)
+def voice_devices() -> MicDeviceList:
+    """Inputs + outputs with score/bus, best first, and the active pair.
+
+    Served from the cached resolution - never a PortAudio re-init, which
+    is unsafe while the wake loop holds the mic. The pipeline refreshes
+    the cache itself whenever it reopens; POST /voice/mic/restart forces
+    that."""
+    r = _resolve()
+    active_in = r.input_device.index if r.input_device else None
+    active_out = r.output_device.index if r.output_device else None
+    inputs = sorted(
+        (d for d in r.all_devices if d.max_input_channels > 0),
+        key=lambda d: (-d.score_as_input, d.index),
+    )
+    outputs = sorted(
+        (d for d in r.all_devices if d.max_output_channels > 0),
+        key=lambda d: (-d.score_as_output, d.index),
+    )
+    legacy = r.to_dict()
+    return MicDeviceList(
+        active={
+            "input": (
+                _device_view(r.input_device, kind="input", active=True)
+                if r.input_device else None
+            ),
+            "output": (
+                _device_view(r.output_device, kind="output", active=True)
+                if r.output_device else None
+            ),
+            "input_source": r.input_source,
+            "output_source": r.output_source,
+            "input_is_xvf": is_xvf_device(r.input_device),
+        },
+        inputs=[
+            _device_view(d, kind="input", active=d.index == active_in)
+            for d in inputs
+        ],
+        outputs=[
+            _device_view(d, kind="output", active=d.index == active_out)
+            for d in outputs
+        ],
+        input=legacy["input"],
+        output=legacy["output"],
+        input_source=r.input_source,
+        output_source=r.output_source,
+        all=legacy["all"],
+    )
+
+
+class MicRestartRequest(BaseModel):
+    """`dspReboot` (camelCase on the wire, like the dashboard's other
+    voice toggles) also reboots the XVF3800's DSP when one is active."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    dsp_reboot: StrictBool = Field(default=False, alias="dspReboot")
+
+
+class MicRestartResponse(BaseModel):
+    ok: bool
+    device: Optional[str] = None
+    device_is_xvf: bool = False
+    dsp_rebooted: bool = False
+    # Why a requested DSP reboot did not happen (not an XVF, tool missing,
+    # exit 8 ...). The re-pick still ran - the two are independent.
+    dsp_error: Optional[str] = None
+    state: Optional[str] = None
+    mic_fault: Optional[str] = None
+    restarted_at: float
+
+
+def _restart_via_cold_start() -> bool:
+    """No pipeline exists though voice is enabled (startup bailed with no
+    mic). Re-enumerate and build it from scratch - the same single place
+    that opens the mic at boot."""
+    global _resolution
+    if _pipeline is not None:
+        return True
+    try:
+        import sounddevice as _sd_mod  # type: ignore[import-not-found]
+
+        WakePipeline._default_sd_reinit(_sd_mod)
+    except Exception:  # noqa: BLE001 - best-effort; PortAudio may be absent
+        logger.debug("PortAudio re-init before cold start failed", exc_info=True)
+    _resolution = None
+    _build_and_start_pipeline()
+    return _pipeline is not None
+
+
+@app.post("/voice/mic/restart", response_model=MicRestartResponse)
+def voice_mic_restart(
+    req: Optional[MicRestartRequest] = None,
+) -> MicRestartResponse:
+    """Re-enumerate audio devices, re-pick the best input/output, reopen
+    the streams in-process and clear the mic fault + restart counters.
+
+    Safe while the wake pipeline runs: it asks the capture loop to swap its
+    own stream between frames (nothing is torn down from this thread).
+    Blocks until the replacement stream is listening (<= ~15 s) and
+    answers 503 if no microphone came back - the fault then stays visible
+    on /voice/status rather than being cleared by a restart that found
+    nothing to listen with.
+    """
+    req = req or MicRestartRequest()
+    _require_voice_on()
+    if not _mic_restart_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail="A microphone restart is already in progress - give it a few seconds.",
+        )
+    try:
+        dsp_rebooted = False
+        dsp_error: Optional[str] = None
+        if req.dsp_reboot:
+            if not _active_input_is_xvf():
+                dsp_error = (
+                    "The active microphone is not an XVF3800, so there is no "
+                    "DSP to reboot - re-picking the device instead."
+                )
+            elif not _restart_lock.acquire(blocking=False):
+                dsp_error = "A processor restart is already in progress."
+            else:
+                try:
+                    restart_dsp()
+                    dsp_rebooted = True
+                except DspRestartError as exc:
+                    dsp_error = exc.detail
+                finally:
+                    _restart_lock.release()
+
+        pipeline = _pipeline
+        if pipeline is None:
+            if not _restart_via_cold_start():
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "No microphone is available. Plug in a USB mic or "
+                        "check the onboard mic jack, then try again."
+                    ),
+                )
+            pipeline = _pipeline
+        else:
+            generation = pipeline.request_reopen(
+                "operator mic restart", reset_recovery=True,
+            )
+            came_back = pipeline.wait_for_session(generation, MIC_RESTART_WAIT_S)
+            if not came_back and dsp_rebooted:
+                # The DSP reboot drops the card off USB; the supervisor's
+                # own recovery may still be waiting on it. One more full
+                # re-pick once it has had time to re-enumerate.
+                generation = pipeline.request_reopen(
+                    "operator mic restart (after DSP reboot)",
+                    reset_recovery=True,
+                )
+                came_back = pipeline.wait_for_session(
+                    generation, MIC_RESTART_WAIT_S,
+                )
+            if not came_back:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "No microphone came back after the restart. Check "
+                        "the USB connection, then try again."
+                    ),
+                )
+        s = pipeline.status() if pipeline is not None else None
+        device = _active_input_device()
+        return MicRestartResponse(
+            ok=True,
+            device=device.name if device else None,
+            device_is_xvf=is_xvf_device(device),
+            dsp_rebooted=dsp_rebooted,
+            dsp_error=dsp_error,
+            state=s.state if s else None,
+            mic_fault=s.mic_fault if s else None,
+            restarted_at=time.time(),
+        )
+    finally:
+        _mic_restart_lock.release()
+
+
+class MicTestRequest(BaseModel):
+    playback: StrictBool = False
+    duration_s: Optional[float] = Field(default=None, ge=1.0, le=10.0)
+
+
+class MicTestResponse(BaseModel):
+    """ok = the mic delivered real signal (not flatlined). `played` is
+    only set when playback was requested."""
+
+    ok: bool
+    flatlined: bool
+    rms_dbfs: float
+    peak_dbfs: float
+    duration_s: float
+    device: Optional[str] = None
+    device_is_xvf: bool = False
+    played: Optional[bool] = None
+
+
+@app.post("/voice/mic/test", response_model=MicTestResponse)
+def voice_mic_test(req: Optional[MicTestRequest] = None) -> MicTestResponse:
+    """Capture ~3 s from the ACTIVE input and report its level.
+
+    Taps the wake pipeline's already-open stream (the mic is exclusive; a
+    second PortAudio stream would fail -9985 while it listens), so it is
+    safe to run with the assistant on and costs it no frames. `flatlined`
+    is the same digital-silence verdict the watchdog uses. With
+    `{"playback": true}` the clip is played back through the output."""
+    req = req or MicTestRequest()
+    _require_voice_on()
+    pipeline = _pipeline
+    if pipeline is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No microphone is capturing right now - try Restart mic first.",
+        )
+    seconds = req.duration_s if req.duration_s is not None else MIC_TEST_DEFAULT_S
+    if not _capture_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=_CAPTURE_BUSY_DETAIL)
+    try:
+        try:
+            pcm = pipeline.capture_input(seconds)
+        except MeasurementUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+        rms_dbfs, peak_dbfs = pcm_level_dbfs(pcm)
+        flatlined = peak_dbfs <= pipeline.flatline_gate_dbfs
+        played: Optional[bool] = None
+        if req.playback:
+            try:
+                played = pipeline.play_capture(pcm)
+            except Exception as exc:  # noqa: BLE001 - playback is advisory
+                logger.warning("mic test playback failed: %s", exc)
+                played = False
+    finally:
+        _capture_lock.release()
+    device = _active_input_device()
+    return MicTestResponse(
+        ok=not flatlined,
+        flatlined=flatlined,
+        rms_dbfs=rms_dbfs,
+        peak_dbfs=peak_dbfs,
+        duration_s=seconds,
+        device=device.name if device else None,
+        device_is_xvf=is_xvf_device(device),
+        played=played,
+    )
 
 
 # WARP-1599 — one kill-switch toggle at a time. A second concurrent

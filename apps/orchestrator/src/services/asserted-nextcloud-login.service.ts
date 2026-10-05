@@ -53,7 +53,7 @@ export function assertedNextcloudLoginRefusal(reason: AssertedNextcloudLoginFail
   if (reason === "no_nextcloud_account") {
     return {
       error: "no_nextcloud_account",
-      message: "The acting person has no Nextcloud account, so there are no files to act on.",
+      message: "The acting person has no File Store account, so there are no files to act on.",
     };
   }
   return {

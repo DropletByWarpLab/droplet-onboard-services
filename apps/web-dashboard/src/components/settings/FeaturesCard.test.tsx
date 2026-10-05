@@ -15,13 +15,21 @@
  * there was no UI anywhere to switch it on.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 const fetchAppModules = vi.fn();
 const setAppModuleEnabled = vi.fn();
+const fetchBusinessTypes = vi.fn();
+const applyBusinessType = vi.fn();
+const swrMutate = vi.fn();
 vi.mock("@/lib/api", () => ({
   fetchAppModules: (...a: unknown[]) => fetchAppModules(...a),
   setAppModuleEnabled: (...a: unknown[]) => setAppModuleEnabled(...a),
+  fetchBusinessTypes: (...a: unknown[]) => fetchBusinessTypes(...a),
+  applyBusinessType: (...a: unknown[]) => applyBusinessType(...a),
+}));
+vi.mock("swr", () => ({
+  useSWRConfig: () => ({ mutate: (...a: unknown[]) => swrMutate(...a) }),
 }));
 
 let mockRole: string | undefined = "owner";
@@ -53,7 +61,7 @@ function mod(over: Record<string, unknown> = {}) {
 }
 
 const VIEW = {
-  businessType: "dental",
+  businessType: "professional_office",
   modules: [
     mod({
       id: "chat",
@@ -72,14 +80,42 @@ const VIEW = {
       available: false,
     }),
     mod(),
+    mod({ id: "cameras", label: "Cameras", description: "Camera streams.", enabled: false, effective: false }),
   ],
 };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+const BUSINESS_TYPES = [
+  { id: "professional_office", label: "Professional office", description: "Office preset", modules: ["files"] },
+  { id: "clinic", label: "Clinic / practice", description: "Practice preset", modules: ["files", "cameras"] },
+  { id: "retail", label: "Retail", description: "Store preset", modules: ["cameras"] },
+  { id: "hospitality", label: "Hospitality", description: "Venue preset", modules: ["voice"] },
+  { id: "custom", label: "Custom", description: "Choose modules yourself", modules: [] },
+];
 
 beforeEach(() => {
   vi.clearAllMocks();
   mockRole = "owner";
   fetchAppModules.mockResolvedValue(structuredClone(VIEW));
+  fetchBusinessTypes.mockResolvedValue(structuredClone(BUSINESS_TYPES));
   setAppModuleEnabled.mockResolvedValue(undefined);
+  applyBusinessType.mockResolvedValue({
+    ...structuredClone(VIEW),
+    businessType: "clinic",
+    modules: VIEW.modules.map((item) => item.id === "smart_home"
+      ? { ...item, enabled: true, effective: true }
+      : item),
+  });
+  swrMutate.mockResolvedValue(undefined);
 });
 
 describe("FeaturesCard", () => {
@@ -96,6 +132,188 @@ describe("FeaturesCard", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Workspace")).toBeInTheDocument();
     expect(screen.getByText("Operations")).toBeInTheDocument();
+    expect(screen.getByLabelText("Business type preset")).toHaveValue("professional_office");
+  });
+
+  it("confirms a preset, revalidates the current view, saves, and renders returned effective modules", async () => {
+    fetchAppModules
+      .mockResolvedValueOnce(structuredClone(VIEW))
+      .mockResolvedValueOnce(structuredClone(VIEW))
+      .mockResolvedValueOnce({
+        ...structuredClone(VIEW),
+        businessType: "clinic",
+        modules: VIEW.modules.map((item) => item.id === "smart_home"
+          ? { ...item, enabled: true, effective: true }
+          : item),
+      });
+    render(<FeaturesCard />);
+    const picker = await screen.findByLabelText("Business type preset");
+    fireEvent.change(picker, { target: { value: "clinic" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    expect(await screen.findByRole("dialog")).toHaveTextContent("Apply the Clinic / practice preset?");
+    expect(screen.getByRole("switch", { name: "Devices" })).toBeDisabled();
+    expect(screen.getByRole("dialog")).toHaveTextContent(
+      "This turns modules on or off to match the preset.",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply preset" }));
+    await waitFor(() => expect(applyBusinessType).toHaveBeenCalledWith("clinic"));
+    expect(fetchAppModules).toHaveBeenCalledTimes(3);
+    await waitFor(() => expect(toast).toHaveBeenCalledWith("Business preset applied"));
+    expect(swrMutate).toHaveBeenCalledWith("/api/modules");
+    expect(await screen.findByLabelText("Business type preset")).toHaveValue("clinic");
+    expect(screen.getByRole("switch", { name: "Devices" })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("does not post a preset that became current before confirmation", async () => {
+    render(<FeaturesCard />);
+    fireEvent.change(await screen.findByLabelText("Business type preset"), {
+      target: { value: "clinic" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    fetchAppModules.mockResolvedValueOnce({ ...structuredClone(VIEW), businessType: "clinic" });
+    fireEvent.click(await screen.findByRole("button", { name: "Apply preset" }));
+    await waitFor(() => expect(fetchAppModules).toHaveBeenCalledTimes(2));
+    expect(applyBusinessType).not.toHaveBeenCalled();
+    await waitFor(() => expect(swrMutate).toHaveBeenCalledWith("/api/modules"));
+    expect(await screen.findByLabelText("Business type preset")).toHaveValue("clinic");
+  });
+
+  it("keeps a successful module toggle applied when status refresh fails, then retries refresh", async () => {
+    fetchAppModules
+      .mockResolvedValueOnce(structuredClone(VIEW))
+      .mockRejectedValueOnce(new Error("refresh unavailable"));
+    swrMutate.mockRejectedValueOnce(new Error("cache refresh unavailable"));
+    render(<FeaturesCard />);
+    const toggle = await screen.findByRole("switch", { name: "Devices" });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(setAppModuleEnabled).toHaveBeenCalledWith("smart_home", true));
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    expect(await screen.findByRole("status")).toHaveTextContent("Changes were applied");
+    expect(toast).toHaveBeenCalledWith("Devices turned on");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    fetchAppModules.mockRejectedValueOnce(new Error("retry still unavailable"));
+    swrMutate.mockRejectedValueOnce(new Error("cache retry unavailable"));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh now" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Changes were applied");
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+
+    fetchAppModules.mockResolvedValueOnce({
+      ...structuredClone(VIEW),
+      modules: VIEW.modules.map((item) => item.id === "smart_home"
+        ? { ...item, enabled: true, effective: true }
+        : item),
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh now" }));
+    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("serializes different module toggles through the active write and refresh", async () => {
+    const write = deferred<void>();
+    const refresh = deferred<typeof VIEW>();
+    setAppModuleEnabled.mockReturnValueOnce(write.promise);
+    fetchAppModules
+      .mockResolvedValueOnce(structuredClone(VIEW))
+      .mockReturnValueOnce(refresh.promise);
+    render(<FeaturesCard />);
+    const devices = await screen.findByRole("switch", { name: "Devices" });
+    const cameras = await screen.findByRole("switch", { name: "Cameras" });
+    fireEvent.click(devices);
+    expect(devices).toBeDisabled();
+    expect(cameras).toBeDisabled();
+
+    await act(async () => write.resolve(undefined));
+    await waitFor(() => expect(swrMutate).toHaveBeenCalledWith("/api/modules"));
+    expect(cameras).toBeDisabled();
+    fireEvent.click(cameras);
+    expect(setAppModuleEnabled).toHaveBeenCalledTimes(1);
+
+    await act(async () => refresh.resolve({
+      ...structuredClone(VIEW),
+      modules: VIEW.modules.map((item) => item.id === "smart_home"
+        ? { ...item, enabled: true, effective: true }
+        : item),
+    }));
+    await waitFor(() => expect(cameras).toBeEnabled());
+    fireEvent.click(cameras);
+    await waitFor(() => expect(setAppModuleEnabled).toHaveBeenCalledTimes(2));
+    expect(setAppModuleEnabled).toHaveBeenLastCalledWith("cameras", true);
+  });
+
+  it("blocks mutations while a manual refresh is pending", async () => {
+    const refresh = deferred<typeof VIEW>();
+    const cacheRefresh = deferred<void>();
+    fetchAppModules
+      .mockResolvedValueOnce(structuredClone(VIEW))
+      .mockRejectedValueOnce(new Error("first refresh failed"));
+    swrMutate.mockRejectedValueOnce(new Error("first cache refresh failed"));
+    render(<FeaturesCard />);
+    fireEvent.click(await screen.findByRole("switch", { name: "Devices" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Changes were applied");
+
+    fetchAppModules.mockReturnValueOnce(refresh.promise);
+    swrMutate.mockReturnValueOnce(cacheRefresh.promise);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh now" }));
+    const cameras = screen.getByRole("switch", { name: "Cameras" });
+    await waitFor(() => expect(cameras).toBeDisabled());
+    fireEvent.click(cameras);
+    expect(setAppModuleEnabled).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      refresh.resolve(structuredClone(VIEW));
+      cacheRefresh.resolve(undefined);
+    });
+    await waitFor(() => expect(cameras).toBeEnabled());
+    expect(setAppModuleEnabled).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a successful preset applied when status refresh fails and closes confirmation", async () => {
+    fetchAppModules
+      .mockResolvedValueOnce(structuredClone(VIEW))
+      .mockResolvedValueOnce(structuredClone(VIEW))
+      .mockRejectedValueOnce(new Error("refresh unavailable"));
+    swrMutate.mockRejectedValueOnce(new Error("cache refresh unavailable"));
+    render(<FeaturesCard />);
+    fireEvent.change(await screen.findByLabelText("Business type preset"), {
+      target: { value: "clinic" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Apply preset" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Changes were applied");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(await screen.findByLabelText("Business type preset")).toHaveValue("clinic");
+    expect(screen.getByRole("switch", { name: "Devices" })).toHaveAttribute("aria-checked", "true");
+    expect(toast).toHaveBeenCalledWith("Business preset applied");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("uses the server description and truthful confirmation for Custom", async () => {
+    render(<FeaturesCard />);
+    const picker = await screen.findByLabelText("Business type preset");
+    expect(screen.getByRole("option", { name: "Custom" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Custom \(0 modules\)/ })).not.toBeInTheDocument();
+    fireEvent.change(picker, { target: { value: "custom" } });
+    expect(screen.getByText("Choose modules yourself")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    expect(await screen.findByRole("dialog")).toHaveTextContent(
+      "The Custom option records this choice and keeps the current module settings.",
+    );
+  });
+
+  it("keeps the confirmation open and reports an apply error", async () => {
+    applyBusinessType.mockRejectedValueOnce(new Error("forbidden"));
+    render(<FeaturesCard />);
+    fireEvent.change(await screen.findByLabelText("Business type preset"), {
+      target: { value: "clinic" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Apply preset" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't apply that business preset");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(toast).not.toHaveBeenCalled();
   });
 
   it("pins core modules as always on with no switch", async () => {
@@ -132,6 +350,7 @@ describe("FeaturesCard", () => {
     await waitFor(() =>
       expect(setAppModuleEnabled).toHaveBeenCalledWith("smart_home", true),
     );
+    expect(swrMutate).toHaveBeenCalledWith("/api/modules");
     await waitFor(() => expect(toast).toHaveBeenCalledWith("Devices turned on"));
   });
 

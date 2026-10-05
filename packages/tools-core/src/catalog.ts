@@ -141,6 +141,7 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
   files: [
     "list_files",
     "read_file",
+    "show_file",
     "search_files",
     "search_content",
     "read_document_text",
@@ -166,6 +167,10 @@ const DOMAIN_GROUPS: Record<ToolDomain, string[]> = {
     "analyze_file_cleanup",
     "organize_files",
     "delete_files",
+    // WARP-3538 — the person's own cloud-drive file lists (OneDrive and
+    // SharePoint today), read through the orchestrator. Metadata only; the
+    // `files` module gates it with the rest of the file tools.
+    "search_cloud_files",
   ],
   "smart-home": [
     "list_smart_home_devices",
@@ -368,6 +373,7 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   // Files
   list_files: "Browse the files on your Droplet",
   read_file: "Open and read one of your files",
+  show_file: "Show you a file or picture right in the chat",
   search_files: "Find files by name",
   search_content: "Search inside your files for what you need",
   read_document_text: "Read a whole PDF or scanned document end to end",
@@ -391,6 +397,10 @@ export const HOME_DESCRIPTION_BY_NAME: Record<string, string> = {
   analyze_file_cleanup: "See what is cluttering a folder before anything is touched",
   organize_files: "Sort a folder's files into tidy subfolders",
   delete_files: "Clear out a list of files you have agreed to delete",
+  // WARP-3538 — says whose files and where from: this one is the person's own
+  // cloud drives, not the files on the Droplet. Names the two that exist today
+  // as examples ("like"), so a later drive does not make it untrue.
+  search_cloud_files: "Find files in your cloud drives, like OneDrive and SharePoint",
   // Device control
   list_smart_home_devices: "See all your connected devices",
   get_smart_home_device: "Check the status of one connected device",

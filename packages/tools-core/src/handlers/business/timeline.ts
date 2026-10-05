@@ -32,8 +32,9 @@
  * is documented "oldest to newest". A merge that trusted either promise would
  * interleave them wrongly, so `orderAndCap` re-sorts on `occurred_at` and
  * caps afterwards. `limit` is therefore applied to the MERGED feed, which is
- * also the only option on the PM side — neither `listActivity` nor
- * `listComments` paginates.
+ * also the only option on the PM side. `listActivity` and `listComments` page
+ * (WARP-3371), oldest first, so each feed is read to its end before the merge
+ * (`readFeed`) — the newest entries are on the LAST page.
  */
 import type { Tool, ToolContext, ToolResult } from "../../types.js";
 import {
@@ -47,6 +48,42 @@ import {
   TIMELINE_ENTITIES,
   type TimelineEntity,
 } from "./_graph.js";
+
+/** Rows per request when reading a work item's feeds: the route's maximum. */
+const FEED_PAGE = 500;
+/**
+ * Pages read per feed — 5000 rows, far past anything one chat turn can use. The
+ * bound exists so a feed that never ends cannot hold a tool call open; beyond it
+ * the oldest 5000 rows are what is merged.
+ */
+const FEED_MAX_PAGES = 10;
+
+/**
+ * Read one of a work item's PM feeds to its end.
+ *
+ * `/api/pm/work-items/:id/{activity,comments}` page — default 100, max 500,
+ * OLDEST first — and this tool answers "what happened lately", so the page it
+ * needs is the last one. Reading only the first would hand the model the oldest
+ * hundred and call it the timeline. A response without a `nextCursor` (an older
+ * orchestrator) is one page, which is what it always was.
+ */
+async function readFeed<T>(
+  readPage: (query: string) => Promise<Record<string, unknown>>,
+  key: "activity" | "comments",
+): Promise<T[]> {
+  const rows: T[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < FEED_MAX_PAGES; page += 1) {
+    const qs = new URLSearchParams({ limit: String(FEED_PAGE) });
+    if (cursor) qs.set("cursor", cursor);
+    const data = await readPage(qs.toString());
+    rows.push(...((data[key] as T[] | undefined) ?? []));
+    const next = data.nextCursor;
+    if (typeof next !== "string" || next.length === 0) break;
+    cursor = next;
+  }
+  return rows;
+}
 
 const inputSchema = {
   type: "object",
@@ -99,18 +136,16 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
   try {
     if (entity === "work_item") {
       const [activity, comments] = await Promise.all([
-        callOrch<{ activity?: Parameters<typeof mergePmFeed>[0] }>(
-          ctx,
-          "get",
-          `/api/pm/work-items/${id}/activity`,
+        readFeed<Parameters<typeof mergePmFeed>[0][number]>(
+          (query) => callOrch<Record<string, unknown>>(ctx, "get", `/api/pm/work-items/${id}/activity?${query}`),
+          "activity",
         ),
-        callOrch<{ comments?: Parameters<typeof mergePmFeed>[1] }>(
-          ctx,
-          "get",
-          `/api/pm/work-items/${id}/comments`,
+        readFeed<Parameters<typeof mergePmFeed>[1][number]>(
+          (query) => callOrch<Record<string, unknown>>(ctx, "get", `/api/pm/work-items/${id}/comments?${query}`),
+          "comments",
         ),
       ]);
-      const merged = mergePmFeed(activity.activity ?? [], comments.comments ?? []);
+      const merged = mergePmFeed(activity, comments);
       return {
         ok: true,
         data: { entity, timeline: orderAndCap(merged, limit) },

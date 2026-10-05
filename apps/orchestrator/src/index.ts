@@ -51,7 +51,8 @@ import {
   releaseStaleHandovers,
   LEAVER_DELETION_LOCK_KEY,
 } from "./services/leaver-deletion.service.js";
-import { createCronRuntime } from "./services/cron-runtime.service.js";
+import { createCronRuntime, type CronJobHandle } from "./services/cron-runtime.service.js";
+import { warnLegacyScimRoleMapping } from "./services/scim.service.js";
 import { recordRotationFoundAtBoot } from "./services/audit-key-rotation.service.js";
 import {
   AGENT_RUN_LOCK_KEY,
@@ -159,6 +160,12 @@ import { createMcpStepDispatcher } from "./services/mcp-step-dispatcher.js";
 import { mineToolCallPatterns } from "./services/pattern-miner.service.js";
 import { runTeamChatMeetingReminderSweep } from "./services/team-chat-reminders.service.js";
 import { runActivityNotifySweep } from "./services/activity-notify.service.js";
+import { registerOutboxConsumer, stopOutbox } from "./services/pm/pm-outbox.js";
+import { createWebhookFanOutConsumer } from "./services/pm/webhook-fanout.js";
+import {
+  pruneWebhookDeliveries,
+  runWebhookDeliveries,
+} from "./services/pm/webhook-delivery.service.js";
 import { runFilingTick } from "./services/filing/worker.js";
 import { runFilingReconcile } from "./services/filing/reconcile.js";
 import { runFilingMaintenance } from "./services/filing/maintenance.js";
@@ -188,6 +195,7 @@ import {
 import { GraphClient } from "./services/m365/graph-client.js";
 import { initialUrlFor } from "./services/m365/graph-resources.js";
 import { createEntraClient } from "./services/m365/entra-client.js";
+import { createDriveLandingHandler } from "./services/m365/drive-landing.service.js";
 
 /**
  * Product version for the Graph `User-Agent` Microsoft asks integrators to
@@ -289,6 +297,10 @@ async function main() {
   // first new-key row, before the start-up row below.
   await recordRotationFoundAtBoot(prisma).catch((err) =>
     logger.error({ err }, "audit key rotation check at boot failed"),
+  );
+  // WARP-3631: tell the operator which SCIM groups stopped granting admin by name.
+  await warnLegacyScimRoleMapping(prisma).catch((err) =>
+    logger.error({ err }, "SCIM role mapping upgrade check failed"),
   );
   // Genesis-or-restart event so the first row of every container's
   // lifetime is always a `system` start-up. Makes the chain easier to
@@ -477,19 +489,20 @@ async function main() {
     logger.warn("MCP stdio child failed to start: %s", (err as Error).message);
   }
 
-  // WARP-2627 / ADR-043 §5: attach the OUTBOUND MCP session, if this box is
-  // entitled to one. On the shipping default (REMOTE_MCP_SERVER_ALLOWLIST
-  // empty) this constructs nothing and dials nothing — it returns
+  // WARP-2627 / ADR-043 §5: attach the OUTBOUND MCP sessions, if this box is
+  // entitled to any. On the shipping default (REMOTE_MCP_SERVER_ALLOWLIST
+  // empty) this constructs nothing and dials nothing — every server answers
   // `not_allowlisted` and the boot path is unchanged. Non-fatal either way: a
   // vendor session that cannot be opened must not stop the appliance booting.
   try {
-    const attached = await ensureRemoteMcpAttached(prisma);
-    if (!attached.attached) {
-      logger.info(
-        "Remote MCP not attached (%s): %s",
-        attached.reason,
-        attached.message,
-      );
+    for (const attached of await ensureRemoteMcpAttached(prisma)) {
+      if (!attached.attached) {
+        logger.info(
+          "Remote MCP not attached (%s): %s",
+          attached.reason,
+          attached.message,
+        );
+      }
     }
   } catch (err) {
     logger.warn("Remote MCP attach failed: %s", (err as Error).message);
@@ -1142,7 +1155,7 @@ async function main() {
       const dnsBlockDeleted = await purgeDnsBlockSamples(prisma, 30);
       // WARP-586: retention purge for the append-only audit/log tables
       // (ActivityRow, CommandAuditLog, NotificationLog). Window is
-      // operator-tunable via DROPLET_AUDIT_RETENTION_DAYS (default 90);
+      // operator-tunable via DROPLET_AUDIT_RETENTION_DAYS (default 365, minimum 90);
       // <= 0 disables the purge. ActivityRow is hash-chained, so this is
       // an id-contiguous oldest-prefix seal-and-truncate, not a mid-chain
       // delete — see audit-retention-purge.service.ts for the integrity
@@ -1591,6 +1604,41 @@ async function main() {
     { lockKey: "droplet:activity-notify" },
   );
 
+  // WARP-3532 (ADR-069 §7, §9) — work webhooks. Three registrations, all on
+  // cron-runtime, none a hand-rolled loop:
+  //
+  //  1. The `webhooks` consumer on the PmActivity outbox: turns each activity row
+  //     into one PmWebhookDelivery per interested webhook. Its own advisory lock
+  //     (`droplet:pm-outbox:webhooks`) and cursor (SystemFlag `pm-outbox:webhooks`)
+  //     are derived from the name by the framework. WS-9 and WS-19 register
+  //     their consumers beside it.
+  //     When it queues something it wakes the delivery worker (below) instead of
+  //     leaving the delivery to wait out the worker's interval.
+  let webhookDeliveryJob: CronJobHandle | undefined;
+  registerOutboxConsumer(
+    createWebhookFanOutConsumer(prisma, { onQueued: () => webhookDeliveryJob?.runNow() }),
+    { prisma, cronRuntime },
+  );
+  //  2. The delivery worker. The delivery table is the queue; this drains it. Its
+  //     retry ladder lives on the rows, so a restart loses nothing.
+  webhookDeliveryJob = cronRuntime.scheduleInterval(
+    10_000,
+    async () => {
+      const result = await runWebhookDeliveries(prisma);
+      if (result.claimed > 0) logger.info(result, "webhook delivery sweep");
+    },
+    { lockKey: "droplet:pm-webhook-deliveries" },
+  );
+  //  3. The delivery log's retention: finished rows older than 30 days go.
+  cronRuntime.scheduleInterval(
+    6 * 60 * 60_000,
+    async () => {
+      const removed = await pruneWebhookDeliveries(prisma);
+      if (removed > 0) logger.info({ removed }, "webhook delivery log pruned");
+    },
+    { lockKey: "droplet:pm-webhook-delivery-prune" },
+  );
+
   // WARP-2730 (ADR-048) — auto-filing. Two registrations, split on purpose.
   //
   // 🔴 THE TICK CARRIES NO `lockKey`, AND THAT IS THE POINT. `lockKey` wraps
@@ -2027,6 +2075,12 @@ async function main() {
       client: new GraphClient({ version: ORCHESTRATOR_M365_UA_VERSION }),
       entra: createEntraClient(),
       initialUrlFor,
+      // WARP-3538 (ADR-041 §4) — what the engine does with a page. OneDrive and
+      // SharePoint pages land as encrypted METADATA in the cloud-file store; every
+      // other workload is still counted and discarded. Without this the engine
+      // reads every drive page and throws it away: the card says "synced", the
+      // file search is empty, and nothing fails.
+      handlePage: createDriveLandingHandler(prisma),
     };
 
     // Read at BOOT, never at module import — `docker restart` does not re-read
@@ -2121,6 +2175,8 @@ async function main() {
   // Docker's restart policy brings a fresh instance back.
   const shutdown = createShutdownRunner(logger, async () => {
     cronRuntime.stop();
+    // WARP-3532 — a pending outbox wake-up must not fire into a closing process.
+    stopOutbox();
     // WARP-2850 — a boot run that has not fired yet must not fire during
     // shutdown; `.unref()` keeps it from holding the process open, it does not
     // stop it running if something else does. Cleared SYNCHRONOUSLY, in the

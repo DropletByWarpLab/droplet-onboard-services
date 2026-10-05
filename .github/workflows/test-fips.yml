@@ -82,6 +82,11 @@ concurrency:
   group: test-fips-${{ github.ref }}
   cancel-in-progress: true
 
+# WARP-3677: least privilege. Top-level default is read-only; every job that
+# needs more (see the per-job `permissions:` blocks below) declares its own.
+permissions:
+  contents: read
+
 jobs:
   # WARP-316 deliberate-sabotage proof: builds one throwaway image, installs the
   # validated provider for real, deletes fips.so, and asserts the FIPS provider
@@ -108,13 +113,13 @@ jobs:
       contents: read
       pull-requests: read # dorny/paths-filter lists PR files via the API
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Keep this filter list in lockstep with fips-stack's below (same
       # rationale: only FIPS-option-path changes pay for a real build).
       - name: Detect FIPS-option-path changes
         if: github.event_name != 'workflow_dispatch'
-        uses: dorny/paths-filter@v4
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: gate
         with:
           # push events diff against the previous main commit by default.
@@ -159,11 +164,11 @@ jobs:
       packages: read # pull the GHCR BuildKit layer cache (buildcache:<image>)
       pull-requests: read # dorny/paths-filter lists PR files via the API
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Detect FIPS-option-path changes
         if: github.event_name != 'workflow_dispatch'
-        uses: dorny/paths-filter@v4
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: gate
         with:
           # push events diff against the previous main commit by default.
@@ -209,13 +214,13 @@ jobs:
 
       - name: Set up Docker Buildx
         if: github.event_name == 'workflow_dispatch' || steps.gate.outputs.fips == 'true'
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       # Read-only: import the BuildKit layer cache docker-build.yml refreshes
       # on every push to main. Best-effort — a cold cache only slows the run.
       - name: Log in to GHCR (layer cache, read-only)
         if: github.event_name == 'workflow_dispatch' || steps.gate.outputs.fips == 'true'
-        uses: docker/login-action@v4.6.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

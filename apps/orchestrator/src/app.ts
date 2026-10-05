@@ -10,6 +10,7 @@ import {
   authMiddleware,
   requirePasswordChangeGate,
 } from "./middleware/auth.js";
+import { requireAdminMfaEnrollmentGate } from "./middleware/admin-mfa-enrollment-gate.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { createRateLimit } from "./middleware/rate-limit.js";
 import { createHealthRouter } from "./routes/health.js";
@@ -28,6 +29,7 @@ import { createBusinessOnboardingRouter } from "./routes/business-onboarding.js"
 import { createIntegrationsRouter } from "./routes/integrations.js";
 import { createSaasCredentialsRouter } from "./routes/saas-credentials.js";
 import { createErpDriftRouter } from "./routes/erp-drift.js";
+import { createCloudFilesRouter } from "./routes/cloud-files.js";
 import { createM365CallbackRouter, createM365Router } from "./routes/m365.js";
 import { createErpRouter } from "./routes/erp.js";
 import { createSttRouter } from "./routes/stt.js";
@@ -56,6 +58,10 @@ import { createMatterRouter } from "./routes/matter.js";
 import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
+import { createPmWebhooksRouter } from "./routes/pm/webhooks.js";
+import { createPmOpenApiRouter } from "./routes/pm/openapi.js";
+import { createSupportRouter } from "./routes/support/support.routes.js";
+import { createPmScheduleRouter } from "./routes/pm/schedule.js";
 import { createCrmRouter } from "./routes/crm.js";
 import { createMoneyRouter } from "./routes/money.js";
 import { createCrmEntityLinksRouter } from "./routes/crm-entity-links.js";
@@ -66,6 +72,8 @@ import { createAgentRunsRouter } from "./routes/agent-runs.js";
 import { createWorkspaceRouter } from "./routes/workspace.js";
 import { createExtensionsRouter } from "./routes/extensions.js";
 import { extensionPrincipalGuard } from "./middleware/extension-principal-guard.js";
+import { pmApiTokenRateLimit, pmApiTokenScopeGuard } from "./middleware/pm-api-token-guard.js";
+import { bindPmApiTokenPrisma } from "./services/pm/pm-api-token.service.js";
 import { createExtensionAttacher, lazyExtensionAttachPort } from "./services/extension-attach.service.js";
 import { bindExtensionPrincipalPrisma } from "./services/extension-principal.js";
 import { createExtensionSandboxClient } from "./services/extension-sandbox.client.js";
@@ -123,6 +131,7 @@ import { initToolModuleVerdict } from "./services/tool-module-verdict.service.js
 import { createSettingsRouter } from "./routes/settings.js";
 import { createTlsCertificateRouter } from "./routes/tls-certificate.js";
 import { createBackupStatusRouter } from "./routes/backup-status.js";
+import { createBackupKeyRouter } from "./routes/backup-key.js";
 import { createSettingsEmailRouter } from "./routes/settings-email.js";
 import { createUpdatesRouter } from "./routes/updates.js";
 import { createTelemetryRouter } from "./routes/telemetry.js";
@@ -134,6 +143,7 @@ import { detachRemoteMcp, mcpClient, remoteCallPolicy } from "./services/mcp-cli
 import { stepResultValue, type StepDispatcher } from "./services/tool-spec-runner.service.js";
 import { createModelsRouter } from "./routes/models.js";
 import { createLlmAccessRouter, exemptLlmAccessInternalCalls } from "./routes/llm-access.js";
+import { createDeveloperRouter } from "./routes/developer.js";
 import { createHardwareRouter } from "./routes/hardware.js";
 import { createHomeRouter } from "./routes/home.js";
 import { createBriefingsRouter } from "./routes/briefings.js";
@@ -317,6 +327,13 @@ export function createApp(
   // request; unbound, every extension bearer is a 401.
   bindExtensionPrincipalPrisma(prisma);
 
+  // WARP-3533 — the `dpm_` API-token lookup in authMiddleware, and the revoke
+  // hooks in role-mutation-guard.service.ts, read the PmApiToken table through
+  // this one binding (the same shape as the extension bearer above). Bound
+  // before the first request; unbound, every API token is a 401 and no revoke
+  // can run.
+  bindPmApiTokenPrisma(prisma);
+
   // WARP-1527 / ADR-032 §3 — bind the effective-access resolver beside the
   // scope loader (same singleton discipline, same reason): layer-2
   // per-person access resolution (features / tools / cloud / connectors /
@@ -355,6 +372,14 @@ export function createApp(
   // an extension either.
   app.use(extensionPrincipalGuard);
 
+  // WARP-3533 — a personal API token (`dpm_…`) authenticates as its holder, so
+  // like the extension principal above it is confined here, right after
+  // authMiddleware and before any router: a per-token rate limit first (so the
+  // denial rows below are bounded by it), then `/api/pm` + `/api/support` only,
+  // narrowed to the token's scopes. Both are no-ops for every other request.
+  app.use(pmApiTokenRateLimit);
+  app.use(pmApiTokenScopeGuard);
+
   // WARP-824 — forced-password-change gate. Mounts AFTER authMiddleware (so
   // req.user is populated) and BEFORE every protected router so an
   // admin-created user holding a temporary password can only reach the
@@ -362,6 +387,9 @@ export function createApp(
   // one. Reads the explicit `User.mustChangePassword` flag FRESH from the
   // DB on every request — server enforcement, not a client-trusted redirect.
   app.use(requirePasswordChangeGate(prisma));
+  // WARP-3630 — owners and admins with no second factor can only enrol while
+  // REQUIRE_ADMIN_TWO_STEP is on (pass-through otherwise).
+  app.use(requireAdminMfaEnrollmentGate(prisma));
 
   // Protected routes — auth middleware has populated req.user
   app.use("/api", createProtectedAuthRouter(prisma));
@@ -522,6 +550,12 @@ export function createApp(
   // Every route is scoped to the requester's OWN link — no :userId parameter,
   // because delegated authorization makes a person's mailbox connection theirs.
   app.use("/api", createM365Router(prisma));
+  // WARP-3538 (D13) — ONE search over every cloud a person has connected: their
+  // OneDrive, their SharePoint libraries and, as those connectors land, Google
+  // Drive and Dropbox. Self-scoped like the connection routes above, and also
+  // the assistant's `search_cloud_files` tool (`_service:mcp` acting for the
+  // person in X-Nextcloud-User). Not under /m365: it is not one cloud's route.
+  app.use("/api", createCloudFilesRouter(prisma));
   // WARP-844 — chat voice input (Wyoming STT proxy). 503s gracefully when
   // the whisper sidecar isn't deployed (macOS dev / non-linux profile).
   app.use("/api", createSttRouter());
@@ -549,6 +583,12 @@ export function createApp(
   // factory-reset.sh).
   app.use("/api", createSystemResetRouter(prisma));
   app.use("/api", createMatterRouter(prisma));
+  // WARP-3533 — GET /api/pm/openapi.json, the OpenAPI 3.1 description of the PM
+  // API. First among the PM routers on purpose: a literal path goes ahead of the
+  // `/pm/<thing>/:id` routes below, so no parameterised sibling can ever shadow
+  // it. It sits under /api/pm, so the projects module gate, the tier floor and
+  // (for a token) the pm:read scope all apply to it.
+  app.use("/api", createPmOpenApiRouter());
   // ADR-026 — native PM (projects, work-items, states, labels, comments).
   // The Droplet-owned project-management surface: state in the orchestrator's
   // own Postgres, dashboard session is the auth, no embedded third-party stack.
@@ -557,6 +597,21 @@ export function createApp(
   // (blocks / relates / duplicates). Its own router on the same prefix; the
   // paths are disjoint from the native router's, so neither shadows the other.
   app.use("/api", createPmRelationsRouter(prisma));
+  // WARP-3532 (ADR-069 §9) — work webhooks and chat-app notifications. Owner
+  // and admin only. `/pm/webhooks` is a literal second segment and no PM router
+  // above owns a `/pm/:param`, so neither shadows the other.
+  app.use("/api", createPmWebhooksRouter(prisma));
+  // WARP-3528 (ADR-069) — the service desk. Its own disjoint prefix
+  // (`/api/support`), so neither PM router shadows it, and its own `support`
+  // module: `mountModuleGates` above already guards the prefix from the registry
+  // (box toggle, the tier floor that refuses an external guest, and the
+  // per-person grant), so nothing here re-implements a gate. Tickets are
+  // PmWorkItem rows in SERVICE_DESK projects that /api/pm answers 404 for.
+  app.use("/api", createSupportRouter(prisma));
+  // WARP-3523 (ADR-069 WS-7) — the Timeline window and the My Work lists. Own
+  // router, disjoint paths (`/pm/projects/:id/timeline`, `/pm/my-work`); the
+  // `projects` module gate covers it through the `/api/pm` prefix.
+  app.use("/api", createPmScheduleRouter(prisma));
   // WARP-2117 — the CRM, which lives inside the Projects surface. Mounted
   // AFTER the PM router but on a disjoint prefix (`/api/crm`), so neither
   // shadows the other; the `crm` module gate comes from the registry.
@@ -763,6 +818,8 @@ export function createApp(
   // WARP-1405: backup health for Settings → Device information (last success,
   // last failure, reason, overdue / key-mismatch). Owner + admin, read-only.
   app.use("/api", createBackupStatusRouter());
+  // WARP-3610: the owner takes the backup repository key off the box, once.
+  app.use("/api", createBackupKeyRouter(prisma));
 
   // WARP-540: OTA update operator surface (/api/updates/*) — status,
   // history, check-now, apply-now, skip, and the WARP-538 settings knobs.
@@ -816,6 +873,11 @@ export function createApp(
   // Settings page's routes, plus the two ai-gateway-only routes behind `/llm/`
   // (introspect on every request, usage after it). No module claims the prefix.
   app.use("/api", createLlmAccessRouter(prisma));
+  // WARP-3533: Settings -> Developer — personal API tokens, their switch, and
+  // the ICS feed links for "my work" and each project. Deliberately NOT under
+  // /api/pm: an API token is confined to /api/pm + /api/support by the guard
+  // above, so it can never mint a token, a feed link or flip the switch.
+  app.use("/api", createDeveloperRouter(prisma));
 
   // WARP-469: F1 home aggregation. Single round-trip backing
   // FEATURES.md §2.1 (greeting + tiles + timeline + suggestions).

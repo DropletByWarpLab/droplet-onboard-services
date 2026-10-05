@@ -340,6 +340,17 @@ Sign-in + optional enrollment sequence:
    leaf; unknown parameters are ignored by older clients. Reference
    implementation: the native Windows client's C# trust code in `droplet-windows`
    (a port of the retired Rust `trust.rs`, WARP-2953; WARP-3236).
+   **Manual connect (WARP-3414).** A client that is given only an address (no
+   scanned `spki`) and finds a box with its own certificate MAY show the key's
+   fingerprint and ask the admin to compare it. Format, shared by every channel:
+   the same SHA-256 as uppercase hex in 4-character groups separated by single
+   spaces, 16 groups (`F017 AFA8 6AD7 8BED …`). The reference must come from a
+   channel a LAN attacker cannot rewrite, so the box shows it on its own front
+   screen (the rail's `Droplet fingerprint` face), in the `setup.sh` output and
+   from `droplet-fingerprint` on the box. Settings → Device information and
+   Devices → Pair show it too (`fingerprint` on the owner/admin-only
+   `GET /api/tls/certificate`), but that is the same connection under
+   question, so the dashboard copy says it proves nothing on its own.
 2. App POSTs `/auth/login?return=body` → stores JWT pair + user. On
    `401 TOTP_REQUIRED`, prompt for `totp` and resubmit.
 3. (Optional) If a pair `code` is present, app POSTs `/devices/pair/claim`
@@ -399,12 +410,20 @@ Frigate event id, and `thumbnail_url` on `/cameras/clips` points here. Its error
 
 | Method | Path | Auth | Returns / body |
 |---|---|---|---|
-| GET | `/llm/models` | Bearer | `[{ id, name, provider, ... }]` |
+| GET | `/llm/models` | Bearer | `{ models: [{ id, name, provider, ... }], defaultModel?: string \| null, degraded?: boolean, degraded_providers?: string[] }` |
 | GET | `/llm/conversations` | Bearer | `[{ id, title, updatedAt, model }]` |
 | GET | `/llm/conversations/:id` | Bearer | `{ id, title, messages: [...] }` |
 | POST | `/llm/conversations` | Bearer | `{ title?, model? }` → `{ id }` |
 | POST | `/llm/chat` | Bearer | `{ model, messages: [{ role, content }], stream?: true, conversationId? }` → SSE stream OR JSON |
 | DELETE | `/llm/conversations/:id` | Bearer | `{ ok }` |
+
+`GET /llm/models` returns an object, including when its `models` array is
+empty. Decode `models` from that object; the response is never a bare array.
+`defaultModel` is the installed local model selected for chat, or `null` when
+none is selected. `degraded: true` means the local model list may be incomplete
+because the AI service is unreachable or reported a provider failure; an empty
+list in that state does not prove that no model is installed. The optional
+`degraded_providers` names the providers whose model listing failed.
 
 Each message carries `kind` (`message`, or `agent_run_result` for a background run reporting back, WARP-3300) and `meta` (`null`, or `{runId, status, title, summary, artifacts}` on an `agent_run_result`). Its `content` is plain assistant text either way, so a client that ignores `kind` still shows it.
 
@@ -1199,7 +1218,8 @@ Source: `apps/orchestrator/src/services/ws-bridge.service.ts`.
 > Backed by the native PM module owned by the orchestrator
 > ([ADR-026](ADR-026-native-pm-supersedes-plane.md), superseding the embedded
 > Plane stack). The mobile read contract below is unchanged — only the backend
-> behind it changed.
+> behind it changed. WARP-3371 only ever *adds* fields (`next_cursor`, `total`)
+> and an optional `cursor`/`limit` pair to the work-items list.
 
 V1 = read-only on mobile. The orchestrator serves PM from its own Postgres
 (`Pm*` Prisma models) via the native `/api/pm/*` routes and transforms the
@@ -1218,6 +1238,13 @@ the same with `"module": "crm"` / `"money"`, WARP-3365). The one exception
 `POST /work-items/:id/transition` and `GET /projects/:id/states` for an item
 assigned to them (the same 404 for any other item, existing or not). Clients hide
 the entry rather than show the error.
+
+**Service desk (WARP-3528, ADR-069).** A service desk is a project of kind
+`SERVICE_DESK` and a ticket is a work item in one, served by `/api/support/*` and
+never by these routes. Every `/api/mobile/pm/*` and `/api/pm/*` route treats a
+desk, its states and labels, its tickets, their comments, history and links as
+not existing (the same 404 as an unknown id), and no list or summary counts them.
+The contract below is unchanged.
 
 ### `GET /api/mobile/pm/workspaces`
 
@@ -1254,15 +1281,27 @@ Paginated list of projects under a workspace.
 }
 ```
 
-### `GET /api/mobile/pm/work-items?workspace=<slug>&project_id=<id>&state=<id>&assignee=<id>&per_page=<n>`
+### `GET /api/mobile/pm/work-items?workspace=<slug>&project_id=<id>&state=<id>&assignee=<id>&limit=<n>&cursor=<c>`
 
-Paginated list of work items (issues/tickets).
+Paginated list of work items (issues/tickets). Ordered by the board order
+(`sortOrder`, then `id`), which is stable across pages.
 
 **Query params:**
 - `workspace` (required), `project_id` (required).
 - `state` (optional) — filter by state. Accepts either the native `PmState` id (UUID) **or**, for backwards compatibility, the legacy Plane state name/slug (e.g. `in_progress` / `In Progress`), which is resolved to the matching state server-side (WARP-888). An unrecognised value yields an empty list rather than an error.
 - `assignee` (optional) — filter by assignee id.
-- `per_page` (optional) — 1..100, default 50.
+- `limit` (optional) — 1..100, **default 50**. `per_page` is the older name for
+  the same parameter and is still accepted; `limit` wins if both are sent.
+  A non-numeric or out-of-range value is clamped into `1..100` (it is not an
+  error), exactly as before.
+- `cursor` (optional, WARP-3371) — the `next_cursor` of the previous response.
+  Opaque: never parse or build one. A cursor the list did not issue answers
+  `400 { "code": "PM_INVALID_CURSOR" }`.
+
+A client that sends neither `limit`/`per_page` nor `cursor` gets the first 50
+items — the pre-cursor behaviour, byte for byte in `work_items` — plus the two
+additive fields below, which it may ignore. To read **every** item, repeat the
+request with `cursor=<next_cursor>` until `next_cursor` is `null`.
 
 **Response:**
 ```json
@@ -1277,9 +1316,15 @@ Paginated list of work items (issues/tickets).
       "created_at": "<iso8601>",
       "updated_at": "<iso8601>"
     }
-  ]
+  ],
+  "next_cursor": "<opaque>" | null,
+  "total": 0
 }
 ```
+
+`next_cursor` is `null` on the last page. `total` is the exact number of work
+items matching the filters — the size of the whole set, never of this page — so a
+client can say "50 of 250" instead of silently stopping at the first page.
 
 ### `GET /api/mobile/pm/work-items/{id}?workspace=<slug>&project_id=<id>`
 

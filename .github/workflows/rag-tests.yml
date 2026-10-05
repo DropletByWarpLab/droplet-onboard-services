@@ -25,6 +25,13 @@ concurrency:
   group: rag-tests-${{ github.ref }}
   cancel-in-progress: true
 
+# WARP-3677: least privilege. Every job here only checks out the repo and
+# runs tests (no step uses the token for anything else), so read is all the
+# GITHUB_TOKEN needs. Stated explicitly so a new job cannot inherit a wider
+# repository default by omission.
+permissions:
+  contents: read
+
 jobs:
   rag-tests:
     name: RAG integration suite
@@ -40,7 +47,7 @@ jobs:
       API_URL: http://localhost:3000
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # ubuntu-latest has ~14GB free. The Compose stack (file-indexer
       # alone pulls ~3GB of Tesseract + Pillow + pypdf + pgvector
@@ -65,7 +72,7 @@ jobs:
           sudo apt-get clean
           df -h /
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "20"
           cache: npm
@@ -99,7 +106,7 @@ jobs:
         run: npm run -w @droplet/orchestrator db:generate
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       # The integration suite needs a `.env` for compose to satisfy its
       # secret references. Use the same generator setup.sh uses but
@@ -239,7 +246,7 @@ jobs:
 
       - name: Upload logs artifact (on failure)
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: rag-tests-logs-${{ github.run_id }}
           path: /tmp/rag-logs

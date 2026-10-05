@@ -48,6 +48,18 @@ vi.mock("../services/setup-claim.service.js", () => ({
     verifyClaimCodePresence(...(args as [unknown, string])),
 }));
 
+// WARP-3589 — the physical claim is a prerequisite for the first owner,
+// independent of the gate flag. Defaults to CLAIMED so every pre-existing
+// /auth/setup test models the real wizard order (claim step → account step);
+// the WARP-3589 block below flips it.
+const isClaimed = vi.fn(async (_p: unknown) => true);
+vi.mock("../services/claim-code.service.js", async () => {
+  const actual = await vi.importActual<typeof import("../services/claim-code.service.js")>(
+    "../services/claim-code.service.js",
+  );
+  return { ...actual, isClaimed: (...args: unknown[]) => isClaimed(args[0]) };
+});
+
 vi.mock("../services/nextcloud.client.js", () => {
   class NextcloudOcsError extends Error {
     public readonly ocsStatus: number;
@@ -123,6 +135,11 @@ import * as nc from "../services/nextcloud.client.js";
 import { config } from "../config.js";
 import { readUserEmail } from "../services/user-directory.service.js";
 import { emailLookupHash } from "../services/column-crypto.service.js";
+import {
+  createTransactionSeam,
+  expectAllTransactionsAt,
+} from "../__tests__/helpers/prisma-tx-harness.js";
+import { SERIALIZABLE_TX } from "../lib/prisma-tx.js";
 
 function createPrismaMock(seed: any[] = []) {
   const users: any[] = [...seed];
@@ -188,6 +205,13 @@ function createPrismaMock(seed: any[] = []) {
       return { count: before - users.length };
     }),
   };
+  // WARP-3589 — the owner check + write run in one interactive transaction.
+  // The shared seam (WARP-1570) records the options argument and models
+  // rollback and the Serializable conflict rule; real behaviour is proven by
+  // the pg lane (__tests__/auth-setup-first-owner.pg.test.ts).
+  const txSeam = createTransactionSeam({ client: () => self, stores: { users } });
+  self.$transaction = txSeam.$transaction;
+  self._txSeam = txSeam;
   self._users = users;
   self._callOrder = callOrder;
   return self;
@@ -221,6 +245,7 @@ beforeEach(() => {
   // test can't leak its flag/stub into the un-gated suite above.
   (config as any).DROPLET_CLAIM_GATE_ENABLED = false;
   verifyClaimCodePresence.mockImplementation(async () => true);
+  isClaimed.mockImplementation(async () => true);
 });
 
 describe("ADR-013 — POST /auth/setup writes the argon2id hash to the directory", () => {
@@ -601,6 +626,143 @@ describe("WARP-165 — /auth/setup physical-presence claim gate", () => {
     // The original owner is untouched.
     expect(prisma._users).toHaveLength(1);
     expect(prisma._users[0].passwordHash).toBe("$argon2id$ORIGINAL-HASH");
+  });
+});
+
+/**
+ * WARP-3589 — the first owner requires the physical claim, whatever the gate
+ * flag says, and the owner-exists check + write are one SERIALIZABLE
+ * transaction.
+ */
+describe("WARP-3589 — /auth/setup requires the physical claim", () => {
+  it("unclaimed box, gate flag OFF, no code → 403 CLAIM_CODE_REQUIRED, no owner, no Nextcloud call", async () => {
+    isClaimed.mockImplementation(async () => false);
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ email: "owner@warp.test", password: "Claim-req-secret1" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("CLAIM_CODE_REQUIRED");
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.user.upsert).not.toHaveBeenCalled();
+    expect(nc.ncInstallAndCreateAdmin).not.toHaveBeenCalled();
+  });
+
+  it("unclaimed box, gate ON, no code → 403 CLAIM_CODE_REQUIRED", async () => {
+    (config as any).DROPLET_CLAIM_GATE_ENABLED = true;
+    isClaimed.mockImplementation(async () => false);
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ email: "owner@warp.test", password: "Claim-req-secret1" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("CLAIM_CODE_REQUIRED");
+    expect(prisma.user.upsert).not.toHaveBeenCalled();
+  });
+
+  it("unclaimed box, gate ON, a code that matches but was never claimed → still 403 (presence alone is not the claim)", async () => {
+    (config as any).DROPLET_CLAIM_GATE_ENABLED = true;
+    isClaimed.mockImplementation(async () => false);
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({
+        email: "owner@warp.test",
+        password: "Claim-req-secret1",
+        claimCode: "DRPL-7K2Q-9F4M",
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("CLAIM_CODE_REQUIRED");
+    expect(prisma.user.upsert).not.toHaveBeenCalled();
+  });
+
+  it("claimed box → setup succeeds once, then the next attempt is 409 OWNER_EXISTS", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+
+    const first = await request(app)
+      .post("/api/auth/setup")
+      .send({ email: "owner@warp.test", password: "Claim-req-secret1" });
+    expect(first.status).toBe(200);
+
+    const second = await request(app)
+      .post("/api/auth/setup")
+      .send({ email: "other@warp.test", password: "Claim-req-secret1" });
+    expect(second.status).toBe(409);
+    expect(second.body.code).toBe("OWNER_EXISTS");
+    expect(prisma._users).toHaveLength(1);
+  });
+
+  it("dropped-retry on an UNCLAIMED-looking box with an owner → 409 OWNER_EXISTS, claim never consulted", async () => {
+    isClaimed.mockImplementation(async () => false);
+    const prisma = createPrismaMock([
+      { id: "u-owner", username: "owner", nextcloudUsername: "owner", passwordHash: "x", role: "owner" },
+    ]);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ email: "owner@warp.test", password: "Claim-req-secret1" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("OWNER_EXISTS");
+    expect(isClaimed).not.toHaveBeenCalled();
+  });
+
+  it("opens the owner check + write as ONE SERIALIZABLE transaction", async () => {
+    const prisma = createPrismaMock();
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ email: "owner@warp.test", password: "Claim-req-secret1" });
+
+    expect(res.status).toBe(200);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expectAllTransactionsAt(prisma._txSeam, SERIALIZABLE_TX);
+  });
+
+  it("serialization conflict (a concurrent setup won) → 409 OWNER_EXISTS, Nextcloud untouched", async () => {
+    const prisma = createPrismaMock();
+    prisma.$transaction.mockRejectedValueOnce(
+      Object.assign(new Error("could not serialize access"), { code: "P2034" }),
+    );
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ email: "owner@warp.test", password: "Claim-req-secret1" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("OWNER_EXISTS");
+    expect(nc.ncInstallAndCreateAdmin).not.toHaveBeenCalled();
+  });
+
+  it("owner committed between the early check and the transaction → 409, no second owner", async () => {
+    const prisma = createPrismaMock();
+    // First count (early guard) sees none; the in-transaction re-check sees one.
+    prisma.user.count
+      .mockResolvedValueOnce(0)
+      .mockResolvedValueOnce(1);
+    const app = buildApp(prisma);
+
+    const res = await request(app)
+      .post("/api/auth/setup")
+      .send({ email: "owner@warp.test", password: "Claim-req-secret1" });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("OWNER_EXISTS");
+    expect(prisma.user.upsert).not.toHaveBeenCalled();
+    expect(nc.ncInstallAndCreateAdmin).not.toHaveBeenCalled();
   });
 });
 

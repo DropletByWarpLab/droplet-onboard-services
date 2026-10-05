@@ -43,7 +43,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
     return {
       ok: false,
       status: "error",
-      error: { code: "SEARCH_FAILED", message: `nextcloud returned ${res.status}` },
+      error: { code: "SEARCH_FAILED", message: `the File Store returned ${res.status}` },
     };
   }
   const data = await res.json();
@@ -53,7 +53,7 @@ async function handler(args: Record<string, unknown>, ctx: ToolContext): Promise
 const tool: Tool = {
   name: "search_files",
   description:
-    "Search Nextcloud by filename (substring, case-insensitive). For semantic full-text search across document content use search_content.",
+    "Search the File Store by filename (substring, case-insensitive). For semantic full-text search across document content use search_content.",
   inputSchema,
   requiresWrite: false,
   requiresConfirmation: false,

@@ -88,6 +88,7 @@ import {
 import { recordActivity } from "./activity.singleton.js";
 import type { ActivityActor } from "./activity.service.js";
 import { revokeModelAccessTokensForUser } from "./model-access-token.service.js";
+import { revokePmApiTokensForUser } from "./pm/pm-api-token.service.js";
 import {
   revokeDeviceClientsForUser,
   type DeviceClientSweepReason,
@@ -766,6 +767,12 @@ export async function runRoleChangePostEffects(args: {
   if (args.nextRole === "guest" && args.previousRole !== "guest") {
     await revokeModelAccessTokensForUser(args.target.id, "role_guest", args.actor);
   }
+  // WARP-3533: a personal API token acts as its holder, so ANY change of role
+  // ends it — a promotion as much as a demotion: it was minted for the person
+  // they were. Best-effort, never throws; every use re-checks the role anyway.
+  if (args.previousRole !== args.nextRole) {
+    await revokePmApiTokensForUser(args.target.id, "role_changed", args.actor);
+  }
   await syncAdminTierGroup({
     userId: args.target.id,
     nextcloudUsername: args.target.nextcloudUsername,
@@ -860,6 +867,8 @@ export async function runRemovalPostEffects(args: {
   actor: ActivityActor;
   /** WARP-3160: the person's VPN devices are revoked with the account (and, WARP-3384, their paired file-sync devices). */
   devices?: LeaverDevices;
+  /** WARP-3600: counts of what the final purge removed, recorded on the row. Counts and ids only. */
+  purged?: Record<string, unknown>;
 }): Promise<void> {
   let revokeError: { err: unknown } | null = null;
   if (args.targetUserId) {
@@ -881,6 +890,7 @@ export async function runRemovalPostEffects(args: {
       role: args.targetRole,
       ...(vpn ? { vpnDevicesRevoked: vpn.revoked, vpnDevicesFailed: vpn.failed } : {}),
       ...(revokeError ? { sessionRevoke: "failed" } : {}),
+      ...(args.purged && Object.keys(args.purged).length > 0 ? { purged: args.purged } : {}),
     },
     actor: args.actor,
   });
@@ -931,6 +941,8 @@ export async function runDisablePostEffects(args: {
   // WARP-3452: and their coding-tool tokens (best-effort, never throws).
   if (args.targetUserId) {
     await revokeModelAccessTokensForUser(args.targetUserId, "user_deactivated", args.actor);
+    // WARP-3533: and their personal API tokens (same: best-effort, never throws).
+    await revokePmApiTokensForUser(args.targetUserId, "user_deactivated", args.actor);
   }
   await recordActivity({
     kind: "auth",

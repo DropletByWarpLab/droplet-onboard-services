@@ -29,6 +29,13 @@ concurrency:
   group: security-tests-${{ github.ref }}
   cancel-in-progress: true
 
+# WARP-3677: least privilege. Every job here only checks out the repo and
+# runs tests (no step uses the token for anything else), so read is all the
+# GITHUB_TOKEN needs. Stated explicitly so a new job cannot inherit a wider
+# repository default by omission.
+permissions:
+  contents: read
+
 jobs:
   test-security:
     runs-on: ubuntu-latest
@@ -37,6 +44,6 @@ jobs:
     # ceiling for a sub-minute suite.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Run security regression suite
         run: ./scripts/test-security.sh

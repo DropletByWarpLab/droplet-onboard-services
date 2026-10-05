@@ -7,6 +7,7 @@
 #   /etc/systemd/system/droplet-device-bridge.service
 #   /etc/systemd/system/droplet-wifi-rotate.service
 #   /etc/systemd/system/droplet-wifi-rotate.timer
+#   /etc/systemd/system/droplet-bay-recovery-expiry.{service,timer}   (WARP-3513)
 #   /etc/droplet/device-bridge.env            (0600, root:root)
 #
 # Populates BRIDGE_AUTH_TOKEN, OPENWRT_PASS, ROUTING_SERVICE_TOKEN, and
@@ -44,6 +45,8 @@ for unit in droplet-device-bridge.service \
             droplet-wifi-rotate.timer \
             droplet-shutdown-screen.service \
             droplet-storage-pool-apply.service \
+            droplet-bay-recovery-expiry.service \
+            droplet-bay-recovery-expiry.timer \
             droplet-panel-claim.service \
             droplet-panel-console.service \
             droplet-panel-deadman.service \
@@ -116,10 +119,25 @@ fi
 install -m 0755 "$POOL_SCRIPT_SRC" "$POOL_SCRIPT_DST"
 log "installed $POOL_SCRIPT_DST"
 
+# WARP-3513: the pool script now prepares every drive ENCRYPTED (LUKS2 + a TPM2
+# keyslot + a recovery key) and sources droplet-tpm-lib.sh from its own
+# directory for the PCR set and the systemd-cryptenroll / cryptsetup seams the
+# rest of the at-rest-encryption family shares. setup.sh's LUKS step installs the
+# same file; installing it here as well keeps a box that only re-runs THIS
+# installer after a git pull consistent. 0644 - it is sourced, never executed.
+TPM_LIB_SRC="$REPO_ROOT/scripts/host/droplet-tpm-lib.sh"
+TPM_LIB_DST="/usr/local/sbin/droplet-tpm-lib.sh"
+if [[ ! -f "$TPM_LIB_SRC" ]]; then
+  log "missing source: $TPM_LIB_SRC"
+  exit 1
+fi
+install -m 0644 "$TPM_LIB_SRC" "$TPM_LIB_DST"
+log "installed $TPM_LIB_DST"
+
 # --- 1c-bis) Install the storage-pool ROOT executor (ADR-019 follow-up) ---
 # The bridge sandbox (User=droplet + ProtectSystem=strict + NoNewPrivileges)
 # cannot run mdadm/mkfs/mount, so the bridge spools the owner-confirmed pool
-# request into its StateDirectory and polkit-starts
+# request into its /run RuntimeDirectory (tmpfs) and polkit-starts
 # droplet-storage-pool-apply.service (unit installed in step 1; polkit grant
 # in 1d-bis), whose ExecStart is this script — it consumes the spooled request
 # as root, runs droplet-storage-pool.sh, and writes the result back for the
@@ -399,6 +417,27 @@ if [[ -f "$REPO_ENV" ]]; then
     set_env_if_blank "BRIDGE_AUTH_TOKEN" "$DEVICE_SECRET_KEY"
   fi
 
+  # WARP-3595: the bridge's destructive routes accept only BRIDGE_ADMIN_TOKEN,
+  # which is SERVICE_TOKEN_BRIDGE and never reaches the display container. Mirror
+  # it UNCONDITIONALLY (like DROPLET_INTERNAL_TLS below) so a rotation in the repo
+  # .env reaches the bridge on the next run, and refuse a value equal to the
+  # panel token: that would hand the display container the destructive routes.
+  if [[ -n "${SERVICE_TOKEN_BRIDGE:-}" ]]; then
+    panel_token=$(grep -E '^BRIDGE_AUTH_TOKEN=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- || true)
+    if [[ "$SERVICE_TOKEN_BRIDGE" = "$panel_token" ]]; then
+      log "ERROR: SERVICE_TOKEN_BRIDGE equals BRIDGE_AUTH_TOKEN; not writing BRIDGE_ADMIN_TOKEN (destructive bridge routes stay closed)"
+    else
+      if grep -qE '^#?[[:space:]]*BRIDGE_ADMIN_TOKEN=' "$ENV_FILE"; then
+        _set_env_kv "$ENV_FILE" "BRIDGE_ADMIN_TOKEN" "$SERVICE_TOKEN_BRIDGE"
+      else
+        printf '%s=%s\n' "BRIDGE_ADMIN_TOKEN" "$SERVICE_TOKEN_BRIDGE" >> "$ENV_FILE"
+      fi
+      log "set BRIDGE_ADMIN_TOKEN in $ENV_FILE (WARP-3595)"
+    fi
+  else
+    log "SERVICE_TOKEN_BRIDGE not in $REPO_ENV yet; run setup.sh, then re-run this script (destructive bridge routes stay closed until then)"
+  fi
+
   if [[ -n "${OPENWRT_PASSWORD:-}" ]]; then
     set_env_if_blank "OPENWRT_PASS" "$OPENWRT_PASSWORD"
   fi
@@ -529,6 +568,32 @@ else
   fi
 fi
 
+# --- 2c) Provision the ext4 project-quota tools (WARP-3513) ---
+# Every drive Droplet prepares is ext4 made with `-O quota,project` and mounted
+# prjquota: the camera-recording allocation (WARP-3514) caps the recordings
+# folder with a per-directory byte limit, set and reported with setquota /
+# repquota from the `quota` package. mkfs, chattr and mount need nothing beyond
+# e2fsprogs, so preparing and mounting a drive does NOT depend on this: like the
+# qrcode step above it is best-effort and must not abort the install if the
+# package index is briefly unreachable.
+if command -v setquota >/dev/null 2>&1; then
+  log "quota: setquota already installed"
+else
+  log "quota: installing the quota package (ext4 project-quota tools)"
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y quota; then
+    # Stale index on a fresh box - refresh once, then retry.
+    apt-get update -y >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y quota || true
+  fi
+  if command -v setquota >/dev/null 2>&1; then
+    log "quota: installed"
+  else
+    log "WARNING: setquota still not installed - drives still mount prjquota, but"
+    log "  per-directory byte limits cannot be set until it is. Remediate on the host with:"
+    log "    sudo apt-get install -y quota"
+  fi
+fi
+
 # --- 3) Activate ---
 systemctl daemon-reload
 
@@ -557,6 +622,16 @@ fi
 # starts it (ExecStart=/usr/bin/true reaches "active" immediately and its
 # ExecStop fires on the next shutdown). Idempotent. Independent of the bridge.
 systemctl enable --now droplet-shutdown-screen.service
+
+# WARP-3513: the daily sweep that shreds recovery keys the owner never revealed
+# (the 7-day escrow window - ADR-070). The unit skips cleanly while no drive has
+# been prepared (no escrow directory yet), so it is safe to enable everywhere.
+# Guarded: a transient failure here must not abort the rest of the install.
+if systemctl enable --now droplet-bay-recovery-expiry.timer; then
+  log "bay recovery keys: expiry sweep timer enabled (daily)"
+else
+  log "bay recovery keys: could not enable droplet-bay-recovery-expiry.timer - inspect 'systemctl status droplet-bay-recovery-expiry.timer'"
+fi
 
 # --- 4a-bis) Rack-panel console ownership + deadman (WARP-1639) --------------
 # Only wire these up on a box that actually HAS a framebuffer. A headless box

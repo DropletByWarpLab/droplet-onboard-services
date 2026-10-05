@@ -337,6 +337,59 @@ describe("module dependencies (WARP-1585)", () => {
   });
 });
 
+// WARP-3528 (ADR-069 §1) — the service desk. Its own surface at /support, its
+// own API prefix, its own grant ladder. The shape pinned here is the one the
+// ADR argues for; each assertion names the edit that must turn it red.
+describe("support — the service desk module (WARP-3528)", () => {
+  const support = MODULE_BY_ID.get("support");
+
+  it("is registered as a workspace module with its own prefix and its own page, off by default", () => {
+    // MUTATION: drop the entry → `support` is undefined and every case here goes red.
+    // MUTATION: `defaultEnabled: true` → a box that never opted in would serve
+    // customer conversations the day it updates.
+    expect(support).toMatchObject({
+      label: "Support",
+      category: "workspace",
+      routePrefixes: ["/api/support"],
+      navHrefs: ["/support"],
+      core: false,
+      defaultEnabled: false,
+    });
+  });
+
+  it("is native to the orchestrator: available on a minimal box", () => {
+    expect(support!.available(MINIMAL)).toBe(true);
+    expect(support!.available(ALL_AVAILABLE)).toBe(true);
+  });
+
+  it("owns NO tool domain in this slice — the assistant reaches tickets through `business` in WS-15", () => {
+    // MUTATION: `toolDomains: ["business"]` → this goes red, and so does the
+    // exact-set pin on shared domains in access-catalog.test.ts. Claiming
+    // `business` here WIDENS it (any owner passes it), so it is a decision for
+    // the slice that ships the ticket entity, not a rider on this one.
+    expect(support!.toolDomains).toEqual([]);
+  });
+
+  it("has NO `requires` edge, in either direction (ADR-069 §1, ADR-044's bar)", () => {
+    // The bar for a dependency is "the child has no reachable surface without
+    // the parent". /support is its own surface, so a dental front desk runs
+    // Support with Projects off. MUTATION: `requires: "projects"` → all four
+    // lines go red, and Support would vanish from a box that turns Projects off.
+    expect(support!.requires).toBeUndefined();
+    expect(MODULE_REQUIRES.has("support")).toBe(false);
+    expect([...MODULE_REQUIRES.values()]).not.toContain("support");
+    expect([...satisfiedModuleIds(new Set<ModuleId>(["support"]))]).toEqual(["support"]);
+  });
+
+  it("nests inside no other module's prefix and holds none of theirs, so its gate needs no path scoping", () => {
+    expect(foreignSubPrefixes("support", "/api/support")).toEqual([]);
+    expect(gateScopeFor(support!, "/api/support")).toBeNull();
+    // `/api/pm` is Projects': a ticket is never a /api/pm route.
+    expect(pathIsUnder("/api/support/tickets", "/api/pm")).toBe(false);
+    expect(pathIsUnder("/api/pm/work-items", "/api/support")).toBe(false);
+  });
+});
+
 describe("business-type presets", () => {
   it("every preset references valid, non-core module ids", () => {
     for (const bt of BUSINESS_TYPES) {
@@ -351,6 +404,23 @@ describe("business-type presets", () => {
 
   it("custom preset is an explicit no-op (empty set)", () => {
     expect(BUSINESS_TYPE_BY_ID.get("custom")!.modules).toEqual([]);
+  });
+
+  it("every business preset but `custom` turns Support on (WARP-3528)", () => {
+    // A box that picks a business type is a business with customers, and a
+    // service desk is where they ask. `custom` stays an empty no-op (above), so
+    // it never switches Support on or off. There is no `home` preset in code.
+    // MUTATION: drop `support` from any one preset → that preset's row goes red.
+    for (const id of ["professional_office", "retail", "clinic", "hospitality"] as const) {
+      expect(BUSINESS_TYPE_BY_ID.get(id)!.modules, id).toContain("support");
+    }
+    expect(BUSINESS_TYPES.map((b) => b.id).sort()).toEqual([
+      "clinic",
+      "custom",
+      "hospitality",
+      "professional_office",
+      "retail",
+    ]);
   });
 
   it("isBusinessType matches the catalog", () => {

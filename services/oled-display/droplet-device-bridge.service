@@ -73,6 +73,11 @@ Environment=BRIDGE_PORT=9090
 # _boot_banner). WARP-3193 SEC-DATA-6 gated the panel reads too (/wifi,
 # /files, /cameras, /pools, /services); only /health is open. The in-code default stays 127.0.0.1;
 # an operator can re-pin the bind via the env file below (loaded last).
+# WARP-3574: so :9090 is reachable from the LAN/uplink, NOT loopback-only
+# (docs/security/internal-mtls.md says the same). Host callers use 127.0.0.1 and
+# the orchestrator uses the gateway IP, so no single bind address can narrow it;
+# the exposure is to be closed by the host input firewall proposal
+# (docs/security/host-input-firewall.md), which is not enabled yet.
 Environment=BRIDGE_BIND=0.0.0.0
 Environment=BRIDGE_STATE_FILE=/var/lib/droplet-bridge/state.json
 # WARP-843: the customer Wi-Fi write (droplet-set-hostapd.sh, shelled by POST
@@ -130,6 +135,10 @@ StandardError=append:/var/log/droplet-device-bridge.log
 # keys never hit disk.
 StateDirectory=droplet-bridge
 StateDirectoryMode=0700
+# The storage-operation request/result spool can carry a one-time recovery key.
+# Keep it in volatile memory, shared with the root executor, never in /var/lib.
+RuntimeDirectory=droplet-bridge-pool-spool
+RuntimeDirectoryMode=0700
 # Lock down the filesystem view: readonly rootfs, private /tmp, mask
 # /proc so other users' details aren't visible.
 ProtectSystem=strict

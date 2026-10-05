@@ -252,16 +252,14 @@ updates:
         update-types: ["minor", "patch"]
     labels: ["dependencies"]
 
-  # The ten pip directories that share one ignore policy. ai-gateway and the
-  # two RAGAS directories are deliberately NOT here — each has a ceiling none
-  # of the others share; see the blocks after this one.
+  # The nine pip directories that share one ignore policy. file-indexer,
+  # ai-gateway and the two RAGAS directories have their own ceilings below.
   - package-ecosystem: pip
     target-branch: "stage"
     directories:
       - "/services/camera-discovery"
       - "/services/device-identity-svc"
       - "/services/email-indexer"
-      - "/services/file-indexer"
       - "/services/fleet-agent"
       - "/services/oled-display"
       - "/services/ops-console"
@@ -309,6 +307,46 @@ updates:
           - "huggingface_hub"          # as spelled in requirements.txt
           - "sounddevice"              # 0.5.x — voice-io
           - "vosk"                     # 0.3.x — voice-io
+    labels: ["dependencies"]
+
+  # file-indexer alone: tokenizers 0.23.2 requires huggingface-hub <2, while
+  # faster-whisper 1.2.1 requires tokenizers <1. #2671 could not resolve.
+  # A floor widening is not labelled semver-major; match target versions.
+  # Keep this local so voice-io's compatible Hub 2.x updates still flow.
+  # Recheck when a released tokenizers <1 supports Hub 2, then lift the ignore
+  # and requirements ceiling together after testing chunking and ASR loaders.
+  - package-ecosystem: pip
+    directory: "/services/file-indexer"
+    target-branch: "stage"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 10
+    groups:
+      pip-minor-and-patch:
+        update-types: ["minor", "patch"]
+        exclude-patterns:
+          - "fastapi"
+          - "uvicorn"
+          - "pgvector"
+          - "pdfplumber"
+          - "readability-lxml"
+          - "lxml-html-clean"
+          - "lxml_html_clean"
+          - "pytesseract"
+          - "extract-msg"
+          - "python-magic"
+          - "semantic-text-splitter"
+          - "tokenizers"
+          - "python-pptx"
+          - "huggingface-hub"
+          - "huggingface_hub"
+    ignore:
+      - dependency-name: "huggingface-hub"
+        versions: [">=2.0"]
+      - dependency-name: "huggingface_hub"
+        versions: [">=2.0"]
     labels: ["dependencies"]
 
   # The two RAGAS directories alone. They are the ONLY two requirements files in

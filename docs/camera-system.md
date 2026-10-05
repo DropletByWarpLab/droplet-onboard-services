@@ -74,7 +74,7 @@ the orchestrator's DB rows and labels each one:
 | Status | Means | Operator action |
 |--------|-------|-----------------|
 | `ready` | ONVIF stream URI, or default credentials answered a real `DESCRIBE` | **Add** — adopts it into Frigate |
-| `needs_credentials` | It's a camera, but the stream needs a username/password or a corrected path (includes the `rtsp_port_open` placeholder) | **Set up** — opens the manual form prefilled |
+| `needs_credentials` | It's a camera, but the stream needs a username/password or a corrected path (includes the `rtsp_port_open` placeholder) | **Set up** — asks for the camera's **Username** and **Password** (camera-discovery re-probes with them and adds the camera); a camera discovery holds no live record for opens the manual form prefilled |
 | `unverified` | Something answered on a camera port; no stream confirmed | Investigate, or ignore the device |
 
 The response is an envelope — `{ cameras, discoveryOnline }`. `discoveryOnline`
@@ -90,15 +90,87 @@ get a redacted URL plus a `hasCredentials` boolean.
 
 Accept/reject accept two id shapes: `mac:<MAC>` routes to camera-discovery (which
 verifies the stream before committing it to Frigate, answering 422 when it can't),
-and a uuid takes the DB path.
+and a uuid takes the DB path. The candidate id carries the upper-case MAC; the
+orchestrator lower-cases it before calling camera-discovery, which keys its pending
+list by the lower-case form (and itself accepts any case, so neither side depends on
+the other getting it right — WARP-3508).
+
+#### A camera you already have is not a candidate (WARP-3508)
+
+camera-discovery only learns about the adoptions it made itself, so a camera added by
+hand (`POST /api/cameras`) used to keep showing up here as "Needs sign-in" for good.
+`GET /api/cameras/discovered` now drops a candidate when any of these holds:
+
+- camera-discovery lists it as known (committed to Frigate by discovery);
+- a **managed** Camera row carries its MAC (any letter case) or its IP — managed
+  meaning `enabled`, or created by hand (`autoDiscovered = false`, even if switched
+  off); `isManagedCameraRow()` in `camera-candidates.service.ts` is the one place that
+  decides this;
+- a Frigate camera input pulls from its IP (`cameras.<name>.ffmpeg.inputs[].path`).
+
+A failed or slow (> 3 s) Frigate read costs only that last exclusion — never the
+list. Known gap: a camera discovery adopted and the operator later *disabled* reads
+as `enabled = false, autoDiscovered = true`, the same shape as a never-adopted
+candidate; the explicit adoption state (WARP-3506/3510) replaces that inference.
+camera-discovery applies the same Frigate rule on its side and stops probing those
+hosts (see its README).
+
+`POST /api/cameras/discovered/:id/credentials` (`mac:` ids only) takes
+`{ username, password }` for a `needs_credentials` camera. camera-discovery tries
+the RTSP stream paths with them — ONVIF is asked for a path only when RTSP found
+none, so a wrong password costs the camera one failed sign-in, not one per
+protocol (Hanwha locks the account after ~5) — and adds the camera on success.
+Failures carry a `code`: `auth_failed`, `locked`, `no_stream_path`, `unreachable`,
+`timeout`, and `invalid_credentials` / `unsupported_password` (nothing was tried
+on the camera). The password is never logged, published or returned.
+
+### Camera identity: key, label, adoption (WARP-3506, WARP-3510)
+
+A camera has ONE name that Frigate and the database share, and a separate label.
+
+- **`Camera.name` is the Frigate key** — always `toFrigateKey(name)`
+  (`apps/orchestrator/src/services/camera-key.ts`): lower case, `[a-z0-9_]` only.
+  Typing `Warp_Lab_Office` or `Front-Door` files the camera as `warp_lab_office` /
+  `front_door` in both Frigate and the DB. What the operator typed becomes
+  `displayName`. Everything that writes to or reads from Frigate's config (add,
+  delete, reconcile, settings, accept, the discovery merge) goes through that one
+  function; camera-discovery's Python `add_camera` applies the same rule.
+- **`Camera.adoption` is an explicit state** — `CANDIDATE` (a placeholder
+  discovery found, not yet in Frigate) or `ADOPTED` (a real camera). It is never
+  inferred from `enabled`, which is only the operator's detection toggle: a
+  disabled live camera is `enabled = false` and still `ADOPTED`.
+  - A discovery merge keeps the `ADOPTED` row (then the oldest), deletes only
+    `CANDIDATE` duplicates, and never renames an `ADOPTED` row. Two `ADOPTED` rows
+    on one device are both left alone and logged.
+  - **Add camera** and **accept** adopt the placeholder row for the device (found
+    by MAC, then IP) in place instead of minting a duplicate.
+  - A reconcile never prunes a Frigate key an `ADOPTED` row owns, and refuses a
+    save that would leave `cameras` empty while `ADOPTED` rows exist.
+
+Every Frigate config writer (add, delete, the reconcile prune, a settings save,
+the retention backfill) holds one process-wide lock across read → edit → save, and
+the reconcile reads the DB inside it. Before each save the YAML it replaces is
+written to `$FRIGATE_CONFIG_PREIMAGE_DIR` (default
+`/data/migration-snapshots/frigate-config/config-<timestamp>.yml`, newest 20 kept,
+mode 0600; skipped when that volume is absent). To undo a bad write, POST the file
+back as `text/plain` to Frigate's `/api/config/save?save_option=restart`.
 
 ### Manual Flow (Dashboard)
 
 1. Go to **Cameras** page in the dashboard
 2. Click **Add Camera** button
-3. Enter camera name and RTSP URL (e.g., `rtsp://192.168.100.101:554/stream1`)
-4. Optionally add manufacturer and model
-5. Click **Add Camera** — it's immediately configured in Frigate
+3. Enter the camera name and its RTSP stream address; the hint shows the detected manufacturer's usual path
+4. If it needs a sign-in, enter **Username** and **Password** in their own fields
+5. Optionally add manufacturer and model
+6. Click **Add Camera** — the camera is written to Frigate, Frigate is restarted
+   (on 0.17 `config/set` only writes `config.yml`; nothing starts until a restart),
+   and the dashboard waits up to ~45 s for the camera to produce a frame before it
+   says it worked
+
+If no frame arrives the camera is still added, but the API answers
+`202 { "status": "added_no_stream", "code", "reason" }` instead of `200 ok` and the
+dialog stays open with the reason — typically a wrong address, path or password.
+Re-adding under the same name updates that camera.
 
 ### Manual Flow (Frigate Config)
 
@@ -110,9 +182,19 @@ cameras:
   front_door:
     ffmpeg:
       inputs:
-        - path: rtsp://user:pass@192.168.100.101:554/stream1
+        - path: rtsp://user:pass@192.168.100.101:554/<your camera's stream path>
           roles: ["detect", "record"]
 ```
+
+Write the password **as typed** — never percent-encoded. For a username made of
+letters, digits, `_` and `-`, Frigate percent-encodes the password itself before
+ffmpeg decodes it once, so a pre-encoded `%40` is encoded again and the camera
+receives the literal `%40` (401, then a lockout). The dashboard and
+camera-discovery already do this; only a hand-written entry needs the care. A
+password written inline cannot contain spaces or curly braces (Frigate runs
+`str.format` over the file and its credential pattern stops at whitespace). The
+`{FRIGATE_CAMERA_FRONT_DOOR_PASSWORD}` placeholder from `.env`, as the baseline
+`docker/frigate/config.yml` shows, keeps the password out of the file.
 
 ### Scan Network
 
