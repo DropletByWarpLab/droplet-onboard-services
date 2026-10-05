@@ -69,6 +69,8 @@ function makeFake() {
         captured.workItemWhere = args.where;
         return [];
       },
+      // WARP-3371 — every list counts the filtered set for its `total`.
+      count: async () => 0,
       groupBy: async () => [],
     },
   };

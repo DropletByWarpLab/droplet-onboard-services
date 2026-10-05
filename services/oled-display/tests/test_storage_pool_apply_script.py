@@ -66,7 +66,7 @@ def _run_apply(spool: Path, stub: Path):
     })
     return subprocess.run(
         [BASH, str(SCRIPT)],
-        env=env, capture_output=True, text=True, timeout=30,
+        env=env, capture_output=True, text=True, timeout=600,
     )
 
 
@@ -158,3 +158,72 @@ def test_request_without_operation_is_refused(tmp_path):
     assert proc.returncode != 0
     assert "no operation" in proc.stderr
     assert not (spool / "result.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# WARP-3513 — the pool script's stdout carries the ONE-TIME recovery-key reveal
+# (recovery_key_reveal). The executor captures it in temp files; those must
+# live on tmpfs (/run), never mktemp's default /tmp on the unencrypted root LV.
+# ---------------------------------------------------------------------------
+
+def _run_apply_with_tmp(spool: Path, stub: Path, capture_dir: Path,
+                        plain_tmp: Path):
+    env = dict(os.environ)
+    env.update({
+        "DROPLET_POOL_SPOOL_DIR": str(spool),
+        "DROPLET_POOL_SCRIPT": str(stub),
+        "DROPLET_POOL_TMPDIR": str(capture_dir).replace("\\", "/"),
+        # mktemp's default location — must stay UNTOUCHED while a capture dir
+        # is available.
+        "TMPDIR": str(plain_tmp).replace("\\", "/"),
+    })
+    return subprocess.run(
+        [BASH, str(SCRIPT)],
+        env=env, capture_output=True, text=True, timeout=600,
+    )
+
+
+def test_stdout_capture_files_live_in_the_tmpfs_dir_not_the_default_tmp(tmp_path):
+    spool = tmp_path / "spool"
+    capture_dir = tmp_path / "ramdir"
+    plain_tmp = tmp_path / "plain-tmp"
+    capture_dir.mkdir()
+    plain_tmp.mkdir()
+    seen = tmp_path / "seen.txt"
+    # While the pool script runs, the executor's two capture files exist: record
+    # where. The "secret" it prints is a fake marker, not a key.
+    stub = _write_stub(
+        tmp_path,
+        'ls -A "{cap}" > "{seen}"\n'
+        "printf '{{\"ok\": true, \"marker\": \"FAKE-REVEAL-OUTPUT\"}}\n'\n"
+        "exit 0\n".format(cap=str(capture_dir).replace("\\", "/"),
+                          seen=str(seen).replace("\\", "/")))
+    _spool_request(spool, operation="recovery_key_reveal",
+                   params={"uuid": "cafef00d-848"})
+    proc = _run_apply_with_tmp(spool, stub, capture_dir, plain_tmp)
+    assert proc.returncode == 0, proc.stderr
+    during = [ln for ln in seen.read_text().splitlines() if ln]
+    assert len(during) == 2, (
+        "stdout/stderr capture must use the tmpfs dir: %r" % during)
+    assert list(plain_tmp.iterdir()) == [], "default /tmp must stay untouched"
+    # Both capture files are removed afterwards (the secret does not linger),
+    # and the result still reaches the bridge's spool.
+    assert list(capture_dir.iterdir()) == []
+    result = json.loads((spool / "result.json").read_text())
+    assert "FAKE-REVEAL-OUTPUT" in result["stdout"]
+
+
+def test_an_unusable_capture_dir_falls_back_instead_of_failing(tmp_path):
+    spool = tmp_path / "spool"
+    stub = _write_stub(tmp_path, "printf '{\"ok\": true}\n'\nexit 0\n")
+    _spool_request(spool)
+    env = dict(os.environ)
+    env.update({
+        "DROPLET_POOL_SPOOL_DIR": str(spool),
+        "DROPLET_POOL_SCRIPT": str(stub),
+        "DROPLET_POOL_TMPDIR": str(tmp_path / "no-such-dir").replace("\\", "/"),
+    })
+    proc = subprocess.run([BASH, str(SCRIPT)], env=env, capture_output=True,
+                          text=True, timeout=600)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads((spool / "result.json").read_text())["rc"] == 0

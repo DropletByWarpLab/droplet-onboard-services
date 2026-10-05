@@ -35,11 +35,14 @@ vi.mock("../config.js", () => ({
 const fetchConfigMock = vi.fn();
 const fetchRawConfigYamlMock = vi.fn();
 const saveRawConfigMock = vi.fn();
+const configLockMock = vi.fn();
 
 vi.mock("./frigate.client.js", () => ({
   fetchConfig: () => fetchConfigMock(),
   fetchRawConfigYaml: () => fetchRawConfigYamlMock(),
-  saveRawConfig: (yamlText: string) => saveRawConfigMock(yamlText),
+  saveRawConfig: (yamlText: string, preImage?: string) => saveRawConfigMock(yamlText, preImage),
+  // WARP-3510: a settings save is a Frigate config write, so it takes the lock.
+  withFrigateConfigLock: (section: () => Promise<unknown>) => configLockMock(section),
 }));
 
 import {
@@ -121,6 +124,7 @@ function saved(): any {
 }
 
 beforeEach(() => {
+  configLockMock.mockReset().mockImplementation((section: () => Promise<unknown>) => section());
   fetchConfigMock.mockReset().mockImplementation(async () => resolvedConfig());
   fetchRawConfigYamlMock.mockReset().mockImplementation(async () => AUTHORED_YAML);
   saveRawConfigMock
@@ -281,6 +285,55 @@ describe("zone + mask edits still round-trip", () => {
     ).rejects.toThrow(/at least 3/);
 
     expect(saveRawConfigMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("a settings save is a Frigate config write (WARP-3510)", () => {
+  it("holds the config lock across the whole read-modify-write", async () => {
+    // Without it a settings save and a camera add/delete/prune overlap, read
+    // the same YAML, and the later save undoes the earlier one.
+    let locked = false;
+    const order: string[] = [];
+    configLockMock.mockImplementation(async (section: () => Promise<unknown>) => {
+      locked = true;
+      try {
+        return await section();
+      } finally {
+        locked = false;
+      }
+    });
+    fetchRawConfigYamlMock.mockImplementation(async () => {
+      order.push(locked ? "read:locked" : "read:UNLOCKED");
+      return AUTHORED_YAML;
+    });
+    saveRawConfigMock.mockImplementation(async () => {
+      order.push(locked ? "save:locked" : "save:UNLOCKED");
+      return { ok: true, status: 200, text: async () => "" };
+    });
+
+    await updateCameraSettings("front_door", { detectFps: 8 });
+
+    expect(configLockMock).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["read:locked", "save:locked"]);
+  });
+
+  it("hands the YAML it replaces to saveRawConfig as the pre-image", async () => {
+    await updateCameraSettings("front_door", { detectFps: 8 });
+
+    expect(saveRawConfigMock.mock.calls.at(-1)![1]).toBe(AUTHORED_YAML);
+  });
+
+  it("addresses the camera by its canonical Frigate key", async () => {
+    await updateCameraSettings("Front_Door", { detectFps: 8 });
+
+    expect(saved().cameras.front_door.detect.fps).toBe(8);
+    expect(saved().cameras.Front_Door).toBeUndefined();
+  });
+
+  it("reads a camera's settings by its canonical key too", async () => {
+    const s = await getCameraSettings("Front_Door");
+
+    expect(s.continuousRetainDays).toBe(7);
   });
 });
 

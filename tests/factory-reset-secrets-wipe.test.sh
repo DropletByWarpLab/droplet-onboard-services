@@ -1310,6 +1310,144 @@ else
 fi
 
 # =============================================================================
+# Phase 11: escrowed bay recovery keys under the secrets dir (WARP-3513)
+# =============================================================================
+# Every drive prepared through the dashboard is LUKS2, and the host script
+# escrows its recovery key — root-only — at
+#   /data/droplet/secrets/bay-recovery/<luks-uuid>__<fs-uuid>.key
+# (plus a `.retrieved` tombstone once the owner has been shown it) whenever
+# /data is the encrypted volume. That directory sits INSIDE the secrets dir this
+# library wipes, so the wipe has to reach into it. It does — `find -type f`
+# recurses, exactly as it does for the nested/ file of the fixture — and these
+# tests pin that, because a recovery key is a decryption key for a customer's
+# drive and must not outlive the reset.
+#
+# One thing it must NOT do is re-create the directory empty "like the other
+# containers": secw_verify_wipe asserts the secrets dir has NO contents, so a
+# re-created bay-recovery/ would be a leftover and every reset would refuse to
+# report clean. The host script re-creates it 0700 on demand.
+#
+# (The bulk-storage wipe, scripts/lib/storage-wipe.sh, removes the same files
+# first on a reset that does not pass --keep-storage; this is the path that still
+# runs WITH --keep-storage, and the one that sweeps whatever it left.)
+echo ""
+echo "--- Phase 11: escrowed bay recovery keys are destroyed with the secrets dir ---"
+
+FIXTURE_BAY_KEY='FAKE-bay-recovery-key-warp3513-do-not-use'
+BAY11_LUKS_A="1a2b3c4d-1111-4222-8333-444444444444"
+BAY11_FS_A="ab12cd34-5555-4666-8777-888888888888"
+BAY11_LUKS_B="9f8e7d6c-1111-4222-8333-444444444444"
+BAY11_FS_B="0f1e2d3c-5555-4666-8777-888888888888"
+
+# make_bay_fixture — the relocated-box fixture plus two escrowed bays: a key the
+# owner has not retrieved yet, and one that was retrieved (key + tombstone).
+make_bay_fixture() {
+  make_fixture
+  BAY_DIR="$SECRETS_TARGET/bay-recovery"
+  mkdir -p "$BAY_DIR"
+  printf '%s\n' "$FIXTURE_BAY_KEY" > "$BAY_DIR/${BAY11_LUKS_A}__${BAY11_FS_A}.key"
+  printf '%s\n' "$FIXTURE_BAY_KEY" > "$BAY_DIR/${BAY11_LUKS_B}__${BAY11_FS_B}.key"
+  : > "$BAY_DIR/${BAY11_LUKS_B}__${BAY11_FS_B}.retrieved"
+  chmod 0600 "$BAY_DIR"/*
+  chmod 0700 "$BAY_DIR"
+}
+
+( make_bay_fixture
+  [ "$(find "$BAY_DIR" -type f | wc -l | tr -d ' ')" = "3" ] || exit 1   # premise
+  secw_wipe_live_secrets "$(resolve_env_target "$TMP/repo/.env")" \
+                         "$(resolve_env_target "$TMP/repo/data/secrets")" >/dev/null 2>&1
+  [ -z "$(find "$SECRETS_TARGET" -type f -print -quit)" ]
+) && pass "nested bay-recovery/<luks>__<fs>.key and .retrieved files are destroyed" \
+  || fail "an escrowed bay recovery key survived the secrets wipe"
+
+# The counters include them (3 fixture secrets + 3 escrowed files), and the
+# secrets dir is left present, EMPTY, 0750 — no bay-recovery/ conjured back.
+( make_bay_fixture
+  secw_wipe_live_secrets "$(resolve_env_target "$TMP/repo/.env")" \
+                         "$(resolve_env_target "$TMP/repo/data/secrets")" >/dev/null 2>&1
+  m="$(stat -c '%a' "$SECRETS_TARGET" 2>/dev/null || stat -f '%Lp' "$SECRETS_TARGET")"
+  [ "$SECW_WIPED_SECRETS" = "6" ] && [ "$SECW_FAILED_COUNT" = "0" ] \
+    && [ -d "$SECRETS_TARGET" ] && [ -z "$(find "$SECRETS_TARGET" -mindepth 1 -print -quit)" ] \
+    && [ ! -e "$SECRETS_TARGET/bay-recovery" ] && [ "$m" = "750" ]
+) && pass "6 secrets wiped (3 + the 3 escrow files); the dir is left empty, 0750, bay-recovery/ NOT re-created" \
+  || fail "the secrets dir is not left empty/0750 after wiping the escrowed keys"
+
+# ...which is what keeps the post-wipe gate green. A re-created bay-recovery/ (the
+# obvious 'recreate it like the other containers' change) would be named as a
+# leftover here, and every reset would refuse to report clean.
+( make_bay_fixture
+  full_wipe
+  secw_verify_wipe "$ENV_TARGET" "$SECRETS_TARGET" "$TMP/repo"
+  rc=$?
+  [ "$rc" = "0" ] && [ "$SECW_LEFTOVER_COUNT" = "0" ] && [ -z "$SECW_LEFTOVER_PATHS" ]
+) && pass "the post-wipe gate passes with escrowed keys wiped (and would red on a re-created dir)" \
+  || fail "the gate reds after a complete wipe of an escrowed-key tree"
+
+# The gate does re-scan INTO the escrow dir: a key that survived is named, with
+# the directory it sits in (a non-empty container is itself the finding).
+gate_names_only "escrowed bay recovery key under the secrets dir" \
+  "data/droplet/secrets/bay-recovery/${BAY11_LUKS_A}__${BAY11_FS_A}.key" 2
+
+# Rule 19: nothing it wipes is printed — a recovery key least of all.
+BAY_WIPE_OUT="$(
+  make_bay_fixture >/dev/null 2>&1
+  secw_wipe_live_secrets "$(resolve_env_target "$TMP/repo/.env")" \
+                         "$(resolve_env_target "$TMP/repo/data/secrets")" 2>&1 || true
+)"
+if printf '%s' "$BAY_WIPE_OUT" | grep -qF 'FAKE-bay-recovery-key-warp3513'; then
+  fail "an escrowed recovery key VALUE appeared in the wipe output (rule 19)"
+else
+  pass "no escrowed recovery key value in any output line (rule 19)"
+fi
+
+# Overwrite-then-unlink applies to them like every other key: with no usable
+# shred the dd fallback overwrites each file's own blocks first.
+( make_bay_fixture
+  cat > "$TMP/bin/shred" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+  cat > "$TMP/bin/dd" <<'STUB'
+#!/usr/bin/env bash
+printf 'dd %s\n' "$*" >> "$TMP/calls"
+exit 0
+STUB
+  chmod +x "$TMP/bin/shred" "$TMP/bin/dd"
+  PATH="$TMP/bin:$PATH"; export PATH; hash -r
+  secw_wipe_live_secrets "$ENV_TARGET" "$SECRETS_TARGET" >/dev/null 2>&1
+  grep -qF "of=$BAY_DIR/${BAY11_LUKS_A}__${BAY11_FS_A}.key " "$TMP/calls" \
+    && [ ! -e "$BAY_DIR/${BAY11_LUKS_A}__${BAY11_FS_A}.key" ]
+) && pass "an escrowed key is overwritten in place (dd conv=notrunc) before it is unlinked" \
+  || fail "the escrowed keys are unlinked without an overwrite pass"
+
+# The escrow dir is root-owned 0700, and the reset normally runs as the install
+# user: `find` as us cannot descend into it, so the per-file pass above never
+# sees those files. What removes them is the privileged sweep that follows
+# (`find ... -delete` under SECW_SUDO) — unlinked here, not overwritten (the
+# bulk-storage wipe is what overwrites them first). Same stand-in the Phase 10
+# unsearchable-dir drills use: search is granted for the one command and taken
+# back. chmod 000 does not lock root out, so as root this is reported skipped.
+_r=0
+( make_bay_fixture
+  LOCKED="$BAY_DIR"
+  printf '#!/usr/bin/env bash\nchmod 700 %q\n"$@"\nrc=$?\nchmod 000 %q 2>/dev/null\nexit "$rc"\n' \
+    "$LOCKED" "$LOCKED" > "$TMP/bin/sudo-working"
+  chmod +x "$TMP/bin/sudo-working"
+  SECW_SUDO="$TMP/bin/sudo-working"
+  chmod 000 "$LOCKED"
+  if [ -x "$LOCKED" ]; then
+    chmod 700 "$LOCKED"
+    exit 3
+  fi
+  secw_wipe_live_secrets "$ENV_TARGET" "$SECRETS_TARGET" >/dev/null 2>&1
+  [ ! -e "$LOCKED" ] && [ -z "$(find "$SECRETS_TARGET" -mindepth 1 -print -quit)" ] \
+    && secw_verify_wipe "$ENV_TARGET" "$SECRETS_TARGET" "$TMP/repo/.env.none-here"
+) || _r=$?
+locked_verdict "$_r" \
+  "a root-only (unsearchable) bay-recovery dir is removed through the privileged sweep, and the gate sees it gone" \
+  "an unsearchable bay-recovery dir survives the secrets wipe even with a working sudo"
+
+# =============================================================================
 # Results
 # =============================================================================
 echo ""
