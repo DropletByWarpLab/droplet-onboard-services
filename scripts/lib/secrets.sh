@@ -1126,22 +1126,10 @@ DROPLET_DEVICE_ID=$device_id
 #   serving TLS, and the FQDN becomes the canonical origin + a bootstrap-SAN
 #   entry once known.
 DROPLET_PUBLIC_FQDN=
-# HQ_ISSUANCE_URL: base URL of the fleet HQ issuance API. Defaults to the PUBLIC
-#   (non-secret) fleet-HQ Cloudflare Worker so a plain reflash / --single-box
-#   self-provisions its trusted droplet-us.com cert zero-touch — no SSH-in to
-#   hand-set this. Still overridable from the provisioning environment / manifest
-#   (${HQ_ISSUANCE_URL:-<default>}). Without a value, factory-reset wiped .env and
-#   the box permanently lost its droplet-us.com cert + FQDN → remote access
-#   dead-ends (WARP-978), which is exactly the reflash-self-signed regression the
-#   baked default fixes. Plain outbound HTTPS; no WG tunnel required.
-#   The default MUST be a hostname that exists: the intended vanity name
-#   fleet-hq.droplet-us.com was never bound in DNS (NXDOMAIN as of 2026-07-16),
-#   so every box that inherited it dead-ended issuance at DNS resolution and
-#   silently stayed on the self-signed bootstrap cert. Until the HQ production
-#   cutover binds the vanity name (droplet-fleet-hq HQ-CUTOVER-RUNBOOK), the
-#   default is the live HQ Worker URL; flip it back in the SAME commit that
-#   creates the DNS record.
-HQ_ISSUANCE_URL=${HQ_ISSUANCE_URL:-https://droplet-fleet-hq.rjouffret.workers.dev}
+# HQ_ISSUANCE_URL: optional fleet control-plane origin, explicitly provisioned.
+#   Local WireGuard and internal DNS work with this empty. No Cloudflare Worker
+#   is selected automatically on first boot or reflash.
+HQ_ISSUANCE_URL=${HQ_ISSUANCE_URL:-}
 # OVERLAY_CONNECT_ENABLED: the box half of customer remote access (WARP-1767 /
 #   ADR-031) — outbound long-poll to HQ signaling, STUN mapping discovery, and
 #   the wg0 peer install that lands a hole-punched session. ON by default: this
@@ -1396,14 +1384,9 @@ migrate_env() {
   # Writing it explicitly also immunises legacy boxes against ai-gateway's
   # import-time "ollama" default being mistaken for a deliberate choice.
   _migrate_ensure_key INFERENCE_RUNTIME "ollama"
-  # WARP-978: ensure the HQ issuance URL + relay tunnel token exist on re-run.
-  # HQ_ISSUANCE_URL is seeded from the provisioning environment or the baked
-  # PUBLIC fleet-HQ Worker default (non-secret) so a reflashed box self-provisions
-  # its droplet-us.com cert zero-touch; TUNNEL_TOKEN stays a secret (empty = relay
-  # off). Pairs with the seed-block defaults above. `_migrate_ensure_key` only
-  # appends when the key is ABSENT, so an existing (even intentionally-empty)
-  # value is never clobbered on re-run.
-  _migrate_ensure_key HQ_ISSUANCE_URL "${HQ_ISSUANCE_URL:-https://droplet-fleet-hq.rjouffret.workers.dev}"
+  # Preserve explicitly provisioned fleet settings. An absent HQ URL stays
+  # empty: local WireGuard and DNS have no fleet issuance prerequisite.
+  _migrate_ensure_key HQ_ISSUANCE_URL "${HQ_ISSUANCE_URL:-}"
   _migrate_ensure_key TUNNEL_TOKEN "${TUNNEL_TOKEN:-}"
   # WARP-1767: backfill the overlay connect agent onto boxes already in the field.
   # These installs predate the key entirely, so the orchestrator fell back to the

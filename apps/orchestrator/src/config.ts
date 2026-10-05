@@ -702,7 +702,7 @@ const envSchema = z.object({
   // reachable from outside the LAN — typically your home router's public IP
   // or another operator-set public DNS name. For inside-LAN testing you can
   // set this to the OpenWrt LAN IP (192.168.50.1). Empty default makes the orchestrator
-  // refuse to mint peers with a clear error rather than handing out unusable
+  // refuse away-mode peers with a clear error rather than handing out unusable
   // configs that point at "example.com" or similar.
   WIREGUARD_ENDPOINT_HOST: z.string().default(""),
   // VPN tunnel subnet. The server takes .1, peers get .2 through .254. Must
@@ -749,16 +749,8 @@ const envSchema = z.object({
   //   Parsed leniently per profile fetch (routes/vpn.ts): a bad value is
   //   logged and ignored rather than failing boot.
   WIREGUARD_PUBLIC_FORWARD: z.string().default(""),
-  // REMOTE_ACCESS_MODE — how a phone reaches this box from OUTSIDE the home
-  // LAN (WARP-993). Drives the honest `offLanReachable` boolean on
-  // /api/vpn/status so the dashboard never promises "from anywhere" it can't
-  // keep:
-  //   "fqdn"  (default) — the per-device FQDN resolves only via the box's own
-  //           split-horizon DNS (ADR-023 §3, no public A record). The minted
-  //           WireGuard conf works on the home LAN but is NOT reachable from
-  //           elsewhere.
-  //   "relay" — the ADR-025 HQ relay is live and the endpoint is publicly
-  //           routable. Flipping this is the relay rollout's job (WARP-974).
+  // Legacy values accepted for existing installs. Direct WireGuard
+  // reachability now depends only on WIREGUARD_ENDPOINT_HOST.
   REMOTE_ACCESS_MODE: z.enum(["fqdn", "relay"]).default("fqdn"),
 
   // --- Public-CA per-device TLS (ADR-023) ---

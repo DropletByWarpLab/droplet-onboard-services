@@ -170,27 +170,8 @@ async function resolveHomeEndpointHost(read?: NetworkSummaryRead): Promise<strin
   return pickHomeEndpoint({ envFallback, summary, bridgeIp, summaryOk });
 }
 
-/**
- * Resolve the WireGuard endpoint host for peer configs. Priority order mirrors
- * `lib/trusted-origin.ts` (FQDN first) so every surface agrees on the box's
- * address:
- *
- *   1. `config.DROPLET_PUBLIC_FQDN` — the per-device `<name>.droplet-us.com`
- *      publicly-trusted address the box learns AUTOMATICALLY from HQ (ADR-023).
- *      It's the single name that resolves at home and over the relay tunnel, so
- *      it's the endpoint host by default — no operator action needed.
- *   2. Else `config.WIREGUARD_ENDPOINT_HOST` — an explicit operator override.
- *   3. Else empty string — caller surfaces "not configured yet" to the dashboard.
- *
- * WARP-974: the inbound public hostname is no longer auto-derived from DuckDNS.
- * Remote access rides an outbound Cloudflare Tunnel relay + the named FQDN
- * (ADR-023/ADR-025); the FQDN doubles as the endpoint host so `endpointConfigured`
- * flips true on its own once the box has issued its cert — which is exactly what
- * the wizard/help/tour copy promises ("turns on automatically").
- */
+/** Direct UDP endpoint for away configs; internal web DNS is separate. */
 async function resolveEndpointHost(): Promise<string> {
-  const fqdn = (config.DROPLET_PUBLIC_FQDN ?? "").trim();
-  if (fqdn) return fqdn;
   return (config.WIREGUARD_ENDPOINT_HOST ?? "").trim();
 }
 
@@ -1777,20 +1758,12 @@ export function createVpnRouter(
       // POST /vpn/peers so the dashboard's "Add device" button enables
       // the moment WIREGUARD_ENDPOINT_HOST is configured.
       const endpointHost = await resolveEndpointHost();
-      const endpointConfigured = endpointHost !== "";
       const admin = isOwnerOrAdmin(req);
       const exposeEndpointHost = admin;
-      // ADR-023 (C4): the publicly-trusted per-device FQDN. Unlike endpointHost
-      // (which can leak the box's public reachability), the FQDN is already
-      // published to Certificate Transparency for everyone — it carries no PII
-      // and no A record — so it is safe to surface to any authenticated user so
-      // the Remote Access page can show the one address that works at home AND
-      // over the tunnel. Empty until the box learns it from HQ.
+      // Retain the legacy fleet web name for older clients. It is not used
+      // as a direct WireGuard endpoint or the dashboard's internal address.
       const publicFqdn = config.DROPLET_PUBLIC_FQDN || null;
-      // WARP-993: is the minted conf actually reachable from OUTSIDE the home
-      // LAN? FQDN-only is split-horizon (no public A record) → false until the
-      // ADR-025 relay lands. Deterministic env inspection — no DNS lookups.
-      // Every "from anywhere" surface in the dashboard gates on this.
+      // Reachability describes the explicit direct WireGuard endpoint.
       const offLanReachable = computeOffLanReachable();
       // Hybrid P1: the box's home-facing LAN IP a HOME-mode peer dials directly.
       // Discovered dynamically (DHCP — never hardcoded); null when it can't be
@@ -1800,12 +1773,19 @@ export function createVpnRouter(
       // handler (WARP-3156). The web widget and iOS gate the home-mode toggle
       // on it.
       const homeEndpointHost = await resolveHomeEndpointHost();
+      // Local WireGuard must not depend on fleet certificate issuance. The
+      // internal DNS name is registered by setup_router_dns, not learned from HQ.
+      const internalHostname = config.DROPLET_LAN_HOSTNAME || null;
+      const overlayEnrollmentAvailable = Boolean(config.HQ_ISSUANCE_URL);
+      const endpointConfigured = endpointHost !== "" || homeEndpointHost !== null;
       if (!status) {
         return res.json({
           configured: false,
           endpointConfigured,
           offLanReachable,
           homeEndpointHost,
+          internalHostname,
+          overlayEnrollmentAvailable,
           publicFqdn,
           message: "VPN not yet bootstrapped — POST /api/vpn/peers to start.",
         });
@@ -1816,6 +1796,8 @@ export function createVpnRouter(
         offLanReachable,
         endpointHost: exposeEndpointHost ? (endpointHost || null) : null,
         homeEndpointHost,
+        internalHostname,
+        overlayEnrollmentAvailable,
         publicFqdn,
         listenPort: status.listen_port,
         serverPublicKey: status.public_key,
@@ -1988,12 +1970,12 @@ export function createVpnRouter(
         }
         confEndpointHost = homeHost;
       } else {
-        // FQDN-first endpoint resolution. See resolveEndpointHost above.
+        // Away mode requires an explicit direct UDP endpoint.
         const endpointHost = await resolveEndpointHost();
         if (!endpointHost) {
           return res.status(503).json({
             error:
-              "The box hasn't learned its web address yet — remote access turns on automatically once it does. (Operators can set WIREGUARD_ENDPOINT_HOST in .env to override.)",
+              "A direct WireGuard endpoint is not configured for away access. Set WIREGUARD_ENDPOINT_HOST to a reachable host and allow the WireGuard UDP port, or use home mode on the office network.",
           });
         }
         confEndpointHost = endpointHost;
@@ -2114,7 +2096,7 @@ export function createVpnRouter(
         conf,
         // WARP-993: same honest reachability signal as GET /vpn/status, so the
         // QR step can gate its "from anywhere" copy without a second fetch.
-        offLanReachable: computeOffLanReachable(),
+        offLanReachable: mode === "away" && computeOffLanReachable(),
       });
     } catch (err) {
       // VpnIpExhaustedError → 507 (Insufficient Storage is the closest semantic)

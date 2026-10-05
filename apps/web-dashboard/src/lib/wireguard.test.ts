@@ -45,6 +45,11 @@ describe("dashboardIpFromConf", () => {
 // with a green padlock. dashboardUrlFromConf returns https://<fqdn> when the
 // box knows its FQDN, else the existing IP-from-conf URL.
 describe("dashboardUrlFromConf", () => {
+  it("uses the internal DNS hostname over the WireGuard tunnel", () => {
+    expect(dashboardUrlFromConf(conf("192.168.9.1"), "droplet-ai.lan")).toBe(
+      "https://droplet-ai.lan",
+    );
+  });
   it("returns https://<fqdn> when the FQDN is set", () => {
     expect(
       dashboardUrlFromConf(conf("192.168.20.1"), "d-abc123.devices.warp-lab.ai"),

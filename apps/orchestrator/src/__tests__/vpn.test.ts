@@ -15,6 +15,7 @@ vi.mock("../config.js", () => ({
     ROUTING_MODE: "real",
     WIREGUARD_ENDPOINT_HOST: "vpn.example.com",
     DROPLET_PUBLIC_FQDN: "",
+    DROPLET_LAN_HOSTNAME: "droplet-ai.lan",
     REMOTE_ACCESS_MODE: "fqdn",
     WIREGUARD_VPN_SUBNET: "10.13.13.0/24",
     WIREGUARD_LISTEN_PORT: 51820,
@@ -177,6 +178,28 @@ beforeEach(() => {
 });
 
 describe("GET /api/vpn/status", () => {
+  it("offers local WireGuard and internal DNS without a fleet FQDN or away endpoint", async () => {
+    (openwrt.vpnStatus as any).mockResolvedValue(null);
+    (openwrt.fetchNetworkSummary as any).mockResolvedValueOnce({
+      wan: { present: true, "ipv4-address": [{ address: "192.168.1.87", mask: 24 }] },
+    });
+    const origEndpoint = config.WIREGUARD_ENDPOINT_HOST;
+    (config as any).WIREGUARD_ENDPOINT_HOST = "";
+    try {
+      const res = await request(buildApp(createPrismaMock())).get("/api/vpn/status");
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        endpointConfigured: true,
+        homeEndpointHost: "192.168.1.87",
+        internalHostname: "droplet-ai.lan",
+        publicFqdn: null,
+        offLanReachable: false,
+        overlayEnrollmentAvailable: false,
+      });
+    } finally {
+      (config as any).WIREGUARD_ENDPOINT_HOST = origEndpoint;
+    }
+  });
   it("reports configured=false when the router has no wg interface", async () => {
     (openwrt.vpnStatus as any).mockResolvedValue(null);
     const app = buildApp(createPrismaMock());
@@ -188,10 +211,8 @@ describe("GET /api/vpn/status", () => {
     });
   });
 
-  // WARP-974: the named FQDN alone must make endpointConfigured true — the box
-  // learns DROPLET_PUBLIC_FQDN automatically from HQ, so remote access "turns on
-  // automatically" (as the wizard/help copy promises) with NO operator env set.
-  it("reports endpointConfigured=true from DROPLET_PUBLIC_FQDN alone (no WIREGUARD_ENDPOINT_HOST)", async () => {
+  // A web hostname is not a direct UDP endpoint.
+  it("does not treat a fleet FQDN as a WireGuard endpoint", async () => {
     (openwrt.vpnStatus as any).mockResolvedValue(null);
     const origEnv = config.WIREGUARD_ENDPOINT_HOST;
     const origFqdn = (config as any).DROPLET_PUBLIC_FQDN;
@@ -202,7 +223,9 @@ describe("GET /api/vpn/status", () => {
       const res = await request(app).get("/api/vpn/status");
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
-        endpointConfigured: true,
+        endpointConfigured: false,
+        internalHostname: "droplet-ai.lan",
+        overlayEnrollmentAvailable: false,
         publicFqdn: "home.droplet-us.com",
       });
     } finally {
@@ -211,10 +234,7 @@ describe("GET /api/vpn/status", () => {
     }
   });
 
-  // WARP-993: honest off-LAN reachability. The FQDN is split-horizon only
-  // (ADR-023 §3 — no public A record), so FQDN-only must report
-  // offLanReachable=false even though endpointConfigured=true; the dashboard
-  // gates every "from anywhere" promise on this boolean.
+  // Reachability follows the explicit direct WireGuard endpoint.
   describe("offLanReachable (WARP-993)", () => {
     it("reports true when the operator override is a publicly-routable host", async () => {
       (openwrt.vpnStatus as any).mockResolvedValue(null);
@@ -235,10 +255,9 @@ describe("GET /api/vpn/status", () => {
         const app = buildApp(createPrismaMock());
         const res = await request(app).get("/api/vpn/status");
         expect(res.status).toBe(200);
-        // endpointConfigured is true (a conf CAN be minted, it works on-LAN)
-        // but the endpoint is not routable from outside the home network.
+        // Neither a direct endpoint nor a local endpoint was discovered.
         expect(res.body).toMatchObject({
-          endpointConfigured: true,
+          endpointConfigured: false,
           offLanReachable: false,
         });
       } finally {
@@ -247,7 +266,7 @@ describe("GET /api/vpn/status", () => {
       }
     });
 
-    it("reports true in relay mode even when only the FQDN is configured (ADR-025)", async () => {
+    it("does not advertise a fleet FQDN as reachable with a legacy relay flag", async () => {
       (openwrt.vpnStatus as any).mockResolvedValue(null);
       const origEnv = config.WIREGUARD_ENDPOINT_HOST;
       const origFqdn = (config as any).DROPLET_PUBLIC_FQDN;
@@ -259,7 +278,7 @@ describe("GET /api/vpn/status", () => {
         const app = buildApp(createPrismaMock());
         const res = await request(app).get("/api/vpn/status");
         expect(res.status).toBe(200);
-        expect(res.body.offLanReachable).toBe(true);
+        expect(res.body.offLanReachable).toBe(false);
       } finally {
         (config as any).WIREGUARD_ENDPOINT_HOST = origEnv;
         (config as any).DROPLET_PUBLIC_FQDN = origFqdn;
@@ -597,6 +616,23 @@ describe("POST /api/vpn/peers", () => {
     expect(res.body.offLanReachable).toBe(true);
   });
 
+  it("mints against the direct endpoint even when a fleet web name is set", async () => {
+    setupHappyPath();
+    const savedFqdn = config.DROPLET_PUBLIC_FQDN;
+    (config as any).DROPLET_PUBLIC_FQDN = "old-fleet.droplet-us.com";
+    try {
+      const res = await request(buildApp(createPrismaMock()))
+        .post("/api/vpn/peers")
+        .send({ deviceLabel: "Away laptop", mode: "away" });
+      expect(res.status).toBe(201);
+      expect(res.body.conf).toContain("Endpoint = vpn.example.com:51820");
+      expect(res.body.conf).not.toContain("old-fleet.droplet-us.com");
+      expect(res.body.offLanReachable).toBe(true);
+    } finally {
+      (config as any).DROPLET_PUBLIC_FQDN = savedFqdn;
+    }
+  });
+
   it("allocates the next free IP, skipping reserved + active peers", async () => {
     setupHappyPath();
     const prisma = createPrismaMock();
@@ -730,6 +766,7 @@ describe("POST /api/vpn/peers — home mode (hybrid P1)", () => {
     expect(res.body.conf).not.toContain("192.168.50.0/24");
     // Mode persisted.
     expect(res.body.peer.mode).toBe("home");
+    expect(res.body.offLanReachable).toBe(false);
     expect(prisma.rows[0].mode).toBe("home");
   });
 

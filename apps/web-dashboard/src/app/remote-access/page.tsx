@@ -90,7 +90,7 @@ export default function RemoteAccessPage() {
     setError(null);
     try {
       const [s, p] = await Promise.all([
-        fetchVpnStatus().catch(() => null),
+        fetchVpnStatus(),
         fetchVpnPeers().catch(() => ({
           peers: [] as VpnPeerInfo[],
           // A failed fetch observed nothing, so the rows must not claim to
@@ -126,15 +126,9 @@ export default function RemoteAccessPage() {
   };
 
   const activePeers = peers.filter((p) => p.status === "active");
-  const endpointMissing = status && !status.endpointConfigured;
-  // WARP-1391: the "Add device" mint is HOME mode — Endpoint = the box's
-  // discovered home-facing LAN IP (resolveHomeEndpointHost), NOT the away-mode
-  // default's split-horizon public FQDN (that FQDN is public-NXDOMAIN by design
-  // — WARP-954 / ADR-023 — so an away conf shows keepalive but zero handshakes).
-  // When the box hasn't discovered that LAN IP yet (homeEndpointHost null/absent)
-  // a home mint 503s, so gate the affordance off rather than offer a dead mint.
-  // Missing field ⇒ treat as "not reachable at home yet" (never over-promise —
-  // the WARP-993 offLanReachable convention). Only surfaced once status loads.
+  const endpointMissing = status && !status.endpointConfigured && !status.homeEndpointHost;
+  // Office configs require a discovered local endpoint. Away configs require
+  // a configured direct endpoint; neither needs a fleet-issued web address.
   const homeMintBlocked = Boolean(status) && !status?.homeEndpointHost;
   // WARP-2689: the router holds a wg0 section but the kernel has no device —
   // it was flashed without WireGuard. `configured: true` alone would keep this
@@ -152,17 +146,18 @@ export default function RemoteAccessPage() {
       : homeMintBlocked
         ? "ra-home-guidance"
         : undefined;
-  // WARP-993: only promise "from anywhere" when the endpoint is actually
-  // routable from outside the home LAN. FQDN-only (split-horizon, no public
-  // A record — ADR-023 §3) reports false until the ADR-025 relay lands.
+  // This indicates a configured direct endpoint, not a measured handshake.
   // Missing field (older orchestrator) or status still loading ⇒ stay honest.
   const offLanReachable = status?.offLanReachable === true;
 
   const addAction = (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <button className="btn" onClick={() => void reload()} disabled={loading} type="button" aria-label="Refresh remote access">
+        <RefreshCw size={15} />
+      </button>
       {/* WARP-1475: owner/admin-only overlay QR-enroll — a device scans the
           code with the Droplet app, then the owner approves it below. */}
-      {isOwnerOrAdmin && (
+      {isOwnerOrAdmin && status && status.overlayEnrollmentAvailable !== false && (
         <button
           className="btn"
           onClick={() => setShowLink(true)}
@@ -178,7 +173,7 @@ export default function RemoteAccessPage() {
       <button
         className="btn primary"
         onClick={() => setShowAdd(true)}
-        disabled={routerUnsupported || endpointMissing === true || homeMintBlocked}
+        disabled={loading || !status || routerUnsupported || endpointMissing === true || (homeMintBlocked && !offLanReachable)}
         aria-describedby={disabledReasonId}
         type="button"
       >
@@ -195,8 +190,8 @@ export default function RemoteAccessPage() {
       title="Remote Access"
       sub={
         offLanReachable
-          ? "Connect your phone or laptop to your office network from anywhere. Add a device, scan the QR code in the WireGuard app, and you’re in."
-          : "Connect your phone or laptop to your Droplet over your office network. Add a device, scan the QR code in the WireGuard app, and you’re in. Away-from-office access arrives with the secure relay — coming soon."
+          ? "Connect through WireGuard and use your office’s internal DNS. Add a device and choose an office or away connection, then scan the QR code in the WireGuard app."
+          : "Connect through WireGuard and use your office’s internal DNS. Add a device, scan the QR code in the WireGuard app, then turn on the tunnel. Away access needs a reachable WireGuard endpoint."
       }
       actions={addAction}
     >
@@ -237,24 +232,21 @@ export default function RemoteAccessPage() {
           <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
             <AlertCircle size={16} style={{ color: "#d9a35c", flexShrink: 0, marginTop: 2 }} />
             <div>
-              <p style={{ fontWeight: 600, color: "var(--text)", fontSize: 13.5 }}>Web address not ready yet</p>
+              <p style={{ fontWeight: 600, color: "var(--text)", fontSize: 13.5 }}>WireGuard endpoint not ready yet</p>
               <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 2 }}>
-                Your box is still setting up its own web address. Remote access turns
-                on automatically once that’s ready — no settings to enter. If this
-                doesn’t clear on its own, restart the box.
+                Your Droplet’s local network address could not be read. Check the
+                router connection, then refresh this page. Your network administrator
+                can also configure a direct WireGuard endpoint for away access.
               </p>
             </div>
           </div>
         </div>
       )}
 
-      {/* WARP-1391: the box has its internet address but hasn't discovered its
-          home-network address yet, so a device can't be minted for home use
-          right now. Say so honestly (same calm tone as the endpoint card) and
-          keep "Add device" disabled until the address appears — no dead config,
-          no over-promise. Only shown when the endpoint itself IS ready, so this
-          never stacks with the "Web address not ready yet" card above. */}
-      {homeMintBlocked && !endpointMissing && (
+      {/* An older status response can report an endpoint without a usable
+          office address or direct away endpoint. Keep minting disabled until
+          one is available; avoid stacking this with the endpoint warning. */}
+      {homeMintBlocked && !endpointMissing && !offLanReachable && (
         <div id="ra-home-guidance" className="card" style={{ marginBottom: 14, borderColor: "rgba(217,163,92,0.3)" }}>
           <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
             <AlertCircle size={16} style={{ color: "#d9a35c", flexShrink: 0, marginTop: 2 }} />
@@ -274,7 +266,7 @@ export default function RemoteAccessPage() {
       {/* Server status card — small, only when configured */}
       {status?.configured && (
         <div className="card grid c4" style={{ marginBottom: 16 }}>
-          <Stat label="Endpoint" value={status.endpointHost ? `${status.endpointHost}:${status.listenPort}` : "—"} />
+          <Stat label="Office endpoint" value={status.homeEndpointHost ? `${status.homeEndpointHost}:${status.listenPort}` : "—"} />
           <Stat label="VPN subnet" value={status.addresses?.[0] ?? "—"} />
           <Stat label="Active devices" value={String(activePeers.length)} />
           <Stat label="Server key" value={status.serverPublicKey?.slice(0, 8) + "…"} />
@@ -284,7 +276,7 @@ export default function RemoteAccessPage() {
       {/* WARP-1475: overlay QR-enroll approval queue (owner/admin only). Sits
           above the peer list because approving here is the load-bearing gate
           that turns a scan into an enrolled device. */}
-      {isOwnerOrAdmin && <PendingEnrollments />}
+      {isOwnerOrAdmin && status && status.overlayEnrollmentAvailable !== false && <PendingEnrollments />}
 
       {/* Peer list */}
       <div className="card rows" style={{ padding: "4px 18px" }}>
@@ -333,7 +325,8 @@ export default function RemoteAccessPage() {
         <AddDeviceDialog
           onClose={() => setShowAdd(false)}
           onAdded={reload}
-          publicFqdn={status?.publicFqdn ?? null}
+          internalHostname={status?.internalHostname ?? null}
+          homeAvailable={Boolean(status?.homeEndpointHost)}
           offLanReachable={offLanReachable}
         />
       )}
@@ -355,50 +348,33 @@ export default function RemoteAccessPage() {
 
 // ─────────────────────── Remote address card ────────────────────────
 //
-// Read-only status for the new remote-access model (ADR-023 / ADR-025): the box
-// carries its own publicly-trusted web address and reaches you through an
-// outbound relay. There is nothing to configure — no dynamic DNS, no subdomain
-// or token. If the box hasn't learned its address from HQ yet, we describe it
-// generically. WARP-993: the "works at home AND away / turn on Connect" story
-// is only told when `offLanReachable` is true — until the ADR-025 relay lands,
-// the address only resolves on the home network and the copy says so.
+// Internal DNS is provisioned locally and remains independent of fleet TLS.
 
 function RemoteAddressCard({ status }: { status: VpnStatusInfo | null }) {
-  const address = status?.publicFqdn?.trim() || null;
+  const address = status?.internalHostname?.trim() || null;
   const offLanReachable = status?.offLanReachable === true;
 
   return (
     <div className="card" style={{ marginTop: 24 }}>
       <div style={{ marginBottom: 12 }}>
-        <h2 style={{ fontSize: 16, fontWeight: 600, color: "var(--text)" }}>Your box&rsquo;s web address</h2>
+        <h2 style={{ fontSize: 16, fontWeight: 600, color: "var(--text)" }}>Your Droplet&rsquo;s internal address</h2>
         <p style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 4, maxWidth: "34rem" }}>
-          {offLanReachable ? (
-            <>
-              Remote access is automatic. Your Droplet has its own secure web address — the same one
-              works in the office and away, with a padlock and nothing to install. When you&rsquo;re out,
-              open the Droplet app and turn on <strong>Connect</strong>, then open that address in your
-              browser. No dynamic DNS, no subdomain or token, and no changes to your office router.
-            </>
-          ) : (
-            <>
-              Your Droplet has its own secure web address — it works across your office network,
-              with a padlock and nothing to install. Away-from-office access arrives with the
-              secure relay — coming soon. No dynamic DNS, no subdomain or token, and no changes
-              to your office router.
-            </>
-          )}
+          Open this address on your office network, or after connecting through
+          WireGuard. The tunnel uses your office DNS to resolve the same internal
+          name. HTTPS uses your Droplet&rsquo;s certificate; your device may need
+          to trust it before your browser opens the page.
         </p>
       </div>
 
       {address ? (
         <div className="grid c2">
-          <Stat label="Web address" value={address} />
+          <Stat label="Internal web address" value={`https://${address}`} />
           <Stat
             label="Away from the office"
             value={
               offLanReachable
-                ? "Turn on Connect in the app"
-                : "Coming soon — secure relay"
+                ? "Direct WireGuard endpoint configured"
+                : "WireGuard endpoint needs configuration"
             }
           />
         </div>
@@ -418,8 +394,9 @@ function RemoteAddressCard({ status }: { status: VpnStatusInfo | null }) {
         >
           <Globe size={14} style={{ marginTop: 2, flexShrink: 0, color: "#d9a35c" }} />
           <span>
-            Your box is still setting up its web address. This appears automatically once it&rsquo;s
-            ready — nothing to do here.
+            {status
+              ? "Your internal DNS name is unavailable. Check the router DNS setup with your network administrator."
+              : "Loading your internal address…"}
           </span>
         </div>
       )}
@@ -527,17 +504,19 @@ function PeerRow({
 function AddDeviceDialog({
   onClose,
   onAdded,
-  publicFqdn,
+  internalHostname,
+  homeAvailable,
   offLanReachable,
 }: {
   onClose: () => void;
   onAdded: () => void;
-  publicFqdn: string | null;
-  /** WARP-993: gates the ready-step copy — no "from anywhere" promise while
-   *  the endpoint only resolves on the home network. */
+  internalHostname: string | null;
+  homeAvailable: boolean;
+  /** Whether an away config is available in addition to an office config. */
   offLanReachable: boolean;
 }) {
   const [step, setStep] = useState<"form" | "ready">("form");
+  const [mode, setMode] = useState<"home" | "away">(homeAvailable ? "home" : "away");
   const [deviceLabel, setDeviceLabel] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -557,12 +536,8 @@ function AddDeviceDialog({
     setSubmitting(true);
     setError(null);
     try {
-      // WARP-1391: mint HOME mode explicitly. The orchestrator route defaults to
-      // "away" (a byte-identical pre-hybrid compat contract, PR #897) which bakes
-      // the split-horizon public FQDN Endpoint — public-NXDOMAIN by design, so the
-      // conf shows keepalive but zero handshakes. Home bakes the box LAN IP and
-      // works today; the page gates this affordance on homeEndpointHost.
-      const result = await createVpnPeer(trimmed, "home");
+      // Home dials the discovered office IP; away dials the explicit UDP endpoint.
+      const result = await createVpnPeer(trimmed, mode);
       setCreated(result);
       setStep("ready");
       onAdded();
@@ -619,6 +594,19 @@ function AddDeviceDialog({
 
         {step === "form" && (
           <div className="p-5 space-y-4">
+            {offLanReachable && (
+              <label className="type-caption-1 text-label-tertiary block">
+                Connection
+                <select
+                  className="w-full mt-1.5 px-3 py-2.5 bg-[var(--surface)] text-[var(--text)] border border-[var(--border)] rounded"
+                  value={mode}
+                  onChange={(event) => setMode(event.target.value as "home" | "away")}
+                >
+                  {homeAvailable && <option value="home">Office network</option>}
+                  <option value="away">Away from the office</option>
+                </select>
+              </label>
+            )}
             <div>
               <label htmlFor={deviceLabelId} className="type-caption-1 text-label-tertiary mb-1.5 block">
                 Device name
@@ -690,43 +678,25 @@ function AddDeviceDialog({
               <li>
                 Activate the tunnel, then open{" "}
                 <strong className="font-mono break-all">
-                  {/* ADR-023: prefer the publicly-trusted per-device FQDN — the
-                      one address that works at home AND over the tunnel with a
-                      green padlock. Falls back to the box-side gateway IP from
-                      the conf's DNS line (parsed + IPv4-validated in
-                      lib/wireguard.ts) until the box learns its FQDN from HQ. */}
-                  {dashboardUrlFromConf(created.conf, publicFqdn ?? undefined)}
+                  {dashboardUrlFromConf(created.conf, internalHostname ?? undefined)}
                 </strong>{" "}
                 in the browser —{" "}
-                {offLanReachable
-                  ? "that’s your Droplet from anywhere."
+                {mode === "away"
+                  ? "that’s your Droplet over WireGuard."
                   : "that’s your Droplet on your office network."}
               </li>
             </ol>
             <p className="type-caption-1 text-label-tertiary">
-              {offLanReachable ? (
-                publicFqdn ? (
-                  <>
-                    This is the same address you use at the office — it works on
-                    your Wi-Fi <em>and</em> over the tunnel, with a secure padlock
-                    and nothing to install. (On this Droplet&rsquo;s own Wi-Fi the
-                    tunnel can&rsquo;t loop back, and you don&rsquo;t need it
-                    there.)
-                  </>
-                ) : (
-                  <>
-                    Test it away from the office (cellular works) — on this
-                    Droplet&rsquo;s own Wi-Fi the tunnel can&rsquo;t loop back, and
-                    you don&rsquo;t need it there. Names like{" "}
-                    <span className="font-mono">droplet.local</span> only work on
-                    the office network, not over the tunnel.
-                  </>
-                )
+              {mode === "away" ? (
+                <>
+                  Test this connection from cellular or another network. The
+                  WireGuard tunnel carries your office DNS and internal address.
+                </>
               ) : (
                 <>
-                  This works while you&rsquo;re on your office network.
-                  Away-from-office access arrives with the secure relay — coming
-                  soon; this device will be ready for it.
+                  This config connects on your office network. For an away
+                  connection, your administrator needs to configure a reachable
+                  WireGuard endpoint, then add a device for away access.
                 </>
               )}
             </p>

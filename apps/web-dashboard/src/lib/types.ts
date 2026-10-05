@@ -921,23 +921,24 @@ export interface VpnPeerInfo {
   lastHandshakeAt?: string | null;
 }
 
-/** Snapshot the dashboard polls before deciding whether to enable the
- *  "Add device" button. `endpointConfigured` is the most user-actionable
- *  signal — when false, the orchestrator will refuse to mint peers. */
+/** Snapshot before device creation. Either a local endpoint or an explicit
+ * away endpoint makes endpointConfigured true; the selected mode still
+ * requires its own endpoint. */
 export interface VpnStatusInfo {
   configured: boolean;
   endpointConfigured: boolean;
   endpointHost?: string | null;
+  /** Unicast name registered with the office DNS resolver; usable over WireGuard. */
+  internalHostname?: string | null;
+  /** Fleet-backed Droplet-app enrollment is unavailable without an HQ URL. */
+  overlayEnrollmentAvailable?: boolean;
   /** ADR-023: the publicly-trusted per-device FQDN `d-<hmac>.devices.warp-lab.ai`.
    *  The one address that works at home AND over the tunnel with a green padlock.
    *  Null until the box learns it from HQ. Safe to show to any user (it is
    *  published to Certificate Transparency anyway, carries no PII, has no A record). */
   publicFqdn?: string | null;
-  /** WARP-993: is the minted WireGuard conf actually reachable from OUTSIDE
-   *  the home LAN? False while the box is FQDN-only (split-horizon, no public
-   *  A record — ADR-023 §3) until the ADR-025 relay lands. Every
-   *  "from anywhere" surface gates its copy on this; missing ⇒ treat as false
-   *  (never over-promise against an older orchestrator). */
+  /** Whether an explicit non-LAN WireGuard endpoint is configured. This does
+   *  not probe live connectivity. Missing means unavailable to the UI. */
   offLanReachable?: boolean;
   /** WARP-1391: the box's discovered home-facing LAN IP — the Endpoint a
    *  HOME-mode peer dials directly. Discovered dynamically (DHCP, never

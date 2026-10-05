@@ -28,21 +28,13 @@ export function dashboardIpFromConf(conf: string): string {
 }
 
 /**
- * ADR-023 (C4): the dashboard URL to show a WireGuard client.
- *
- * When the box has a publicly-trusted per-device FQDN
- * (`d-<hmac>.devices.warp-lab.ai`), that is the ONE address that works at home
- * AND over the tunnel, with a green padlock and no per-client cert install — so
- * we return `https://<fqdn>`. Until the box learns its FQDN from HQ, fall back
- * to the existing `https://<ip-from-conf>` (the bare WG-gateway address, which
- * still works over the tunnel but shows a self-signed warning).
- *
- * `fqdn` is the dashboard's view of `DROPLET_PUBLIC_FQDN` (empty/undefined when
- * unset). Whitespace is trimmed so a stray space in the value can't produce a
- * dead `https:// d-...` link.
+ * Dashboard URL for a WireGuard client. Prefer the supplied DNS hostname;
+ * Remote Access supplies the locally registered DROPLET_LAN_HOSTNAME.
+ * Older callers may still supply a fleet web name. With no hostname,
+ * retain the gateway-IP fallback. Certificate trust is a separate concern.
  */
-export function dashboardUrlFromConf(conf: string, fqdn?: string): string {
-  const trimmed = (fqdn ?? "").trim();
+export function dashboardUrlFromConf(conf: string, hostname?: string): string {
+  const trimmed = (hostname ?? "").trim();
   if (trimmed) return `https://${trimmed}`;
   return `https://${dashboardIpFromConf(conf)}`;
 }
