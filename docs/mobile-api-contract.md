@@ -410,12 +410,20 @@ Frigate event id, and `thumbnail_url` on `/cameras/clips` points here. Its error
 
 | Method | Path | Auth | Returns / body |
 |---|---|---|---|
-| GET | `/llm/models` | Bearer | `[{ id, name, provider, ... }]` |
+| GET | `/llm/models` | Bearer | `{ models: [{ id, name, provider, ... }], defaultModel?: string \| null, degraded?: boolean, degraded_providers?: string[] }` |
 | GET | `/llm/conversations` | Bearer | `[{ id, title, updatedAt, model }]` |
 | GET | `/llm/conversations/:id` | Bearer | `{ id, title, messages: [...] }` |
 | POST | `/llm/conversations` | Bearer | `{ title?, model? }` → `{ id }` |
 | POST | `/llm/chat` | Bearer | `{ model, messages: [{ role, content }], stream?: true, conversationId? }` → SSE stream OR JSON |
 | DELETE | `/llm/conversations/:id` | Bearer | `{ ok }` |
+
+`GET /llm/models` returns an object, including when its `models` array is
+empty. Decode `models` from that object; the response is never a bare array.
+`defaultModel` is the installed local model selected for chat, or `null` when
+none is selected. `degraded: true` means the local model list may be incomplete
+because the AI service is unreachable or reported a provider failure; an empty
+list in that state does not prove that no model is installed. The optional
+`degraded_providers` names the providers whose model listing failed.
 
 Each message carries `kind` (`message`, or `agent_run_result` for a background run reporting back, WARP-3300) and `meta` (`null`, or `{runId, status, title, summary, artifacts}` on an `agent_run_result`). Its `content` is plain assistant text either way, so a client that ignores `kind` still shows it.
 

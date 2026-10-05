@@ -106,13 +106,21 @@ export class McpBridgeError extends Error {
   }
 }
 
-/** The credential handed to the bridge at open time. Never persisted here,
- *  never logged, never returned — it is read out of the ADR-042 seam, passed
- *  through, and dropped (rule 19). */
+/**
+ * The credential handed to the bridge at open time. Never persisted here,
+ * never logged, never returned — it is read out of the ADR-042 seam, passed
+ * through, and dropped (rule 19).
+ *
+ * WARP-3703 — the credential and identity fields are NAMED BY THE SERVER'S
+ * PROFILE, not fixed: Atlassian's are `email`, `apiToken` and `cloudId`, a
+ * bearer-only vendor's is a single token field whose name is that vendor's own.
+ * They stay the flat JSON keys the wire has always carried, so no caller needs a
+ * lockstep deploy. The attach path builds them from the provider descriptor's
+ * required `credentialFields`; the bridge refuses a body missing any field its
+ * profile declares; and `adr-043-boundary.test.ts` gates that the two agree.
+ */
 export interface McpBridgeOpenInput {
-  email: string;
-  apiToken: string;
-  cloudId: string;
+  readonly [field: string]: string | readonly string[] | undefined;
   /** Test-only override; the bridge screens it against its own host set. */
   url?: string;
   /**
