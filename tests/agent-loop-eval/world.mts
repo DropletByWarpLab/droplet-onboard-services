@@ -384,7 +384,8 @@ function email(w: WorldState, tool: string, a: Record<string, any>, c: Ctx): Too
     return ok({ type: "email_search", filter, threadCount: rows.length, threads: rows });
   }
   // accountId is not checked: nothing in the catalog tells the model which mailbox ids exist, so the
-  // one mailbox answers to any. A thread is found by its id or by the id of one of its messages.
+  // one mailbox answers to any. Production 404s an unknown id (WARP-3743); go strict once that lands.
+  // A thread is found by its id or by the id of one of its messages.
   const threadId = typeof a.threadId === "string" ? a.threadId : "";
   if (!threadId) return err("INVALID_ARGS", "accountId and threadId are required");
   const t = all.find((x) => x.id === threadId || x.msgs.some((m) => m.id === threadId));
