@@ -105,6 +105,7 @@
 #   DROPLET_WATCHDOG_DOCKER_DAEMON_JSON  daemon.json fixture
 #   DROPLET_WATCHDOG_HOST_UNITS_BIN      droplet-host-units stub
 #   DROPLET_WATCHDOG_ROUTING_URL         routing base URL (router_auth); curl is resolved via PATH
+#   DROPLET_ENV_FILE                    deployment .env (TLS flag + host-admin bundle root)
 #   (docker is resolved via PATH, so a stub earlier on PATH intercepts it)
 # =============================================================================
 # Deliberately NOT `set -e`: a supervisor must survive any single probe
@@ -164,6 +165,7 @@ WD_APP_DOWNLOADS_AUDIT="${DROPLET_WATCHDOG_APP_DOWNLOADS_AUDIT:-}"
 # WARP-3838 — router_auth reads routing's /health, as scripts/lib/local-dns.sh does.
 WD_ROUTING_URL="${DROPLET_WATCHDOG_ROUTING_URL:-${ROUTING_SERVICE_URL:-http://localhost:8080}}"
 WD_ROUTING_MODE="${ROUTING_MODE:-real}"
+WD_ENV_FILE="${DROPLET_ENV_FILE:-}"
 
 WD_ALL_CHECKS="wifi voice_dsp docker_dns container_crashloop host_unit_staleness host_artefacts relay_dns app_downloads router_auth"
 WD_STATUS_FILE="$WD_STATE_DIR/status.json"
@@ -867,7 +869,10 @@ wd_check_app_downloads() {
 # credentials, which a 3-minute timer must never guess at. not_applicable when
 # routing is unreachable (nothing to judge) or ROUTING_MODE is not `real`
 # (same gate as scripts/lib/local-dns.sh). ROUTING_MODE and ROUTING_SERVICE_URL
-# are read from this unit's environment (/etc/default/droplet-watchdog).
+# are read from this unit's environment (/etc/default/droplet-watchdog). The
+# installer also supplies DROPLET_ENV_FILE so the probe follows the deployed
+# internal TLS flag and uses the host-admin client bundle, without sourcing
+# the deployment .env as root.
 wd_check_router_auth() {
   if [ "$WD_ROUTING_MODE" != "real" ]; then
     CHECK_OUTCOME=not_applicable
@@ -875,10 +880,21 @@ wd_check_router_auth() {
     return 0
   fi
 
-  local body
-  if ! body="$(curl -s --max-time 5 "${WD_ROUTING_URL}/health" 2>/dev/null)" || [ -z "$body" ]; then
+  local body tls="${DROPLET_INTERNAL_TLS:-}" url="${WD_ROUTING_URL%/}" bundle
+  local -a tls_args=()
+  if [ -z "$tls" ] && [ -r "$WD_ENV_FILE" ]; then
+    tls="$(grep -E '^DROPLET_INTERNAL_TLS=' "$WD_ENV_FILE" | tail -1 | cut -d= -f2- | tr -d "\"'\r")"
+  fi
+  if [ "$tls" = "1" ]; then
+    url="${url/#http:\/\//https://}"
+    bundle="$(dirname "${WD_ENV_FILE:-.}")/data/secrets/service-tls/host-admin"
+    tls_args=(--cacert "${DROPLET_TLS_CA:-$bundle/ca.pem}"
+              --cert "${DROPLET_TLS_CERT:-$bundle/cert.pem}"
+              --key "${DROPLET_TLS_KEY:-$bundle/key.pem}")
+  fi
+  if ! body="$(curl -s --max-time 5 "${tls_args[@]}" "${url}/health" 2>/dev/null)" || [ -z "$body" ]; then
     CHECK_OUTCOME=not_applicable
-    CHECK_MESSAGE="routing service not responding at ${WD_ROUTING_URL}/health — no verdict"
+    CHECK_MESSAGE="routing service not responding at ${url}/health — no verdict"
     return 0
   fi
 
@@ -891,7 +907,7 @@ wd_check_router_auth() {
   local err
   err="$(printf '%s' "$body" | sed -n 's/.*"error"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -c 300)"
   CHECK_OUTCOME=heal_failed
-  CHECK_MESSAGE="routing is not connected to the router: ${err:-no error text in /health}. Detect-only: re-pair the router credentials (detail: curl ${WD_ROUTING_URL}/health)"
+  CHECK_MESSAGE="routing is not connected to the router: ${err:-no error text in /health}. Detect-only: re-pair the router credentials (detail: routing /health at ${url}/health)"
   return 0
 }
 

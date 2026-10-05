@@ -470,6 +470,13 @@ EOF
     sudo install -m 0644 "$host_src/etc-default/droplet-watchdog" \
       /etc/default/droplet-watchdog
   fi
+  # The oneshot does not inherit setup.sh's environment. Give it a pointer to
+  # the deployment so router_auth can read the TLS flag and host-admin bundle.
+  # Backfill existing tuning files without replacing any operator setting.
+  if ! sudo grep -q '^[[:space:]]*DROPLET_ENV_FILE[[:space:]]*=' /etc/default/droplet-watchdog; then
+    printf '\nDROPLET_ENV_FILE="%s/.env"\n' "$REPO_ROOT" \
+      | sudo tee -a /etc/default/droplet-watchdog >/dev/null
+  fi
   # Migration: the standalone WARP-869 timer is superseded — the unified
   # watchdog invokes the same helper, and two independent schedulers could
   # race a PCI remove/rescan. The helper script itself stays installed.

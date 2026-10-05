@@ -58,5 +58,10 @@
 # heal_failed with the health `error` text when routing cannot authenticate to
 # the router (never heals; re-pairing credentials is a human action).
 # not_applicable when routing does not answer or ROUTING_MODE is not `real`.
+# setup.sh adds DROPLET_ENV_FILE pointing at the deployment .env. The watchdog
+# reads its DROPLET_INTERNAL_TLS flag and, when enabled, uses HTTPS with the
+# deployment's data/secrets/service-tls/host-admin bundle. Explicit
+# DROPLET_INTERNAL_TLS and DROPLET_TLS_CA/CERT/KEY here override those defaults.
+#DROPLET_ENV_FILE=/path/to/droplet/.env
 #DROPLET_WATCHDOG_ROUTING_URL=http://localhost:8080
 #ROUTING_MODE=real
