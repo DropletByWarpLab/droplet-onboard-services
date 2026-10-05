@@ -15,7 +15,7 @@
  * there was no UI anywhere to switch it on.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 const fetchAppModules = vi.fn();
 const setAppModuleEnabled = vi.fn();
@@ -80,8 +80,19 @@ const VIEW = {
       available: false,
     }),
     mod(),
+    mod({ id: "cameras", label: "Cameras", description: "Camera streams.", enabled: false, effective: false }),
   ],
 };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 const BUSINESS_TYPES = [
   { id: "professional_office", label: "Professional office", description: "Office preset", modules: ["files"] },
@@ -197,6 +208,65 @@ describe("FeaturesCard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Refresh now" }));
     await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
     expect(toggle).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("serializes different module toggles through the active write and refresh", async () => {
+    const write = deferred<void>();
+    const refresh = deferred<typeof VIEW>();
+    setAppModuleEnabled.mockReturnValueOnce(write.promise);
+    fetchAppModules
+      .mockResolvedValueOnce(structuredClone(VIEW))
+      .mockReturnValueOnce(refresh.promise);
+    render(<FeaturesCard />);
+    const devices = await screen.findByRole("switch", { name: "Devices" });
+    const cameras = await screen.findByRole("switch", { name: "Cameras" });
+    fireEvent.click(devices);
+    expect(devices).toBeDisabled();
+    expect(cameras).toBeDisabled();
+
+    await act(async () => write.resolve(undefined));
+    await waitFor(() => expect(swrMutate).toHaveBeenCalledWith("/api/modules"));
+    expect(cameras).toBeDisabled();
+    fireEvent.click(cameras);
+    expect(setAppModuleEnabled).toHaveBeenCalledTimes(1);
+
+    await act(async () => refresh.resolve({
+      ...structuredClone(VIEW),
+      modules: VIEW.modules.map((item) => item.id === "smart_home"
+        ? { ...item, enabled: true, effective: true }
+        : item),
+    }));
+    await waitFor(() => expect(cameras).toBeEnabled());
+    fireEvent.click(cameras);
+    await waitFor(() => expect(setAppModuleEnabled).toHaveBeenCalledTimes(2));
+    expect(setAppModuleEnabled).toHaveBeenLastCalledWith("cameras", true);
+  });
+
+  it("blocks mutations while a manual refresh is pending", async () => {
+    const refresh = deferred<typeof VIEW>();
+    const cacheRefresh = deferred<void>();
+    fetchAppModules
+      .mockResolvedValueOnce(structuredClone(VIEW))
+      .mockRejectedValueOnce(new Error("first refresh failed"));
+    swrMutate.mockRejectedValueOnce(new Error("first cache refresh failed"));
+    render(<FeaturesCard />);
+    fireEvent.click(await screen.findByRole("switch", { name: "Devices" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Changes were applied");
+
+    fetchAppModules.mockReturnValueOnce(refresh.promise);
+    swrMutate.mockReturnValueOnce(cacheRefresh.promise);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh now" }));
+    const cameras = screen.getByRole("switch", { name: "Cameras" });
+    await waitFor(() => expect(cameras).toBeDisabled());
+    fireEvent.click(cameras);
+    expect(setAppModuleEnabled).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      refresh.resolve(structuredClone(VIEW));
+      cacheRefresh.resolve(undefined);
+    });
+    await waitFor(() => expect(cameras).toBeEnabled());
+    expect(setAppModuleEnabled).toHaveBeenCalledTimes(1);
   });
 
   it("keeps a successful preset applied when status refresh fails and closes confirmation", async () => {

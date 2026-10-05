@@ -134,7 +134,7 @@ export function FeaturesCard() {
   if (!isAdmin) return null;
 
   const handleToggle = async (mod: AppModuleState) => {
-    if (mod.core || !mod.available || applyingBusinessType || pendingBusinessType !== null || pending.has(mod.id)) return;
+    if (mod.core || !mod.available || applyingBusinessType || refreshPending || pendingBusinessType !== null || pending.size > 0) return;
     const next = !mod.enabled;
     setToggleError(null);
     setPending((p) => new Set(p).add(mod.id));
@@ -179,7 +179,7 @@ export function FeaturesCard() {
   };
 
   const handleApplyBusinessType = async () => {
-    if (!isAdmin || !pendingBusinessType || applyingBusinessType || pending.size > 0) return;
+    if (!isAdmin || !pendingBusinessType || applyingBusinessType || refreshPending || pending.size > 0) return;
     setApplyingBusinessType(true);
     setBusinessTypeError(null);
     try {
@@ -274,7 +274,7 @@ export function FeaturesCard() {
                 className="input"
                 value={selectedBusinessType}
                 onChange={(event) => setSelectedBusinessType(event.target.value)}
-                disabled={!businessTypes || applyingBusinessType || pending.size > 0 || pendingBusinessType !== null}
+                disabled={!businessTypes || applyingBusinessType || refreshPending || pending.size > 0 || pendingBusinessType !== null}
                 style={{ marginLeft: "auto", maxWidth: 250 }}
               >
                 <option value="">Choose a preset</option>
@@ -287,7 +287,7 @@ export function FeaturesCard() {
               <button
                 type="button"
                 className="btn"
-                disabled={!selectedBusinessType || selectedBusinessType === businessType || applyingBusinessType || pending.size > 0}
+                disabled={!selectedBusinessType || selectedBusinessType === businessType || applyingBusinessType || refreshPending || pending.size > 0}
                 onClick={() => {
                   setBusinessTypeError(null);
                   setPendingBusinessType(selectedBusinessType);
@@ -342,7 +342,7 @@ export function FeaturesCard() {
                         <ToggleSwitch
                           on={mod.enabled}
                           onToggle={() => void handleToggle(mod)}
-                          disabled={!mod.available || applyingBusinessType || pendingBusinessType !== null || pending.has(mod.id)}
+                          disabled={!mod.available || applyingBusinessType || refreshPending || pendingBusinessType !== null || pending.size > 0}
                           ariaLabel={mod.label}
                         />
                       )}
