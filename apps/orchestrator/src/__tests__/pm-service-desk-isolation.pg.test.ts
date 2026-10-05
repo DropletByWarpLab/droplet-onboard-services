@@ -19,6 +19,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import express, { type Router } from "express";
 import type { Server } from "node:http";
+import { tmpdir } from "node:os";
 import request from "supertest";
 import type { PrismaClient } from "@prisma/client";
 
@@ -52,6 +53,7 @@ interface Probe {
   method: Method;
   url: (ids: Ids) => string;
   body?: object;
+  uploadFile?: true;
 }
 
 const probes: Probe[] = [
@@ -81,6 +83,7 @@ const probes: Probe[] = [
   { route: "POST /api/pm/work-items/:id/relations", kind: "desk", method: "post", url: (i) => `/api/pm/work-items/${i.pmItemId}/relations`, body: { to_work_item_id: "DESK_ITEM", kind: "RELATES" } },
   { route: "DELETE /api/pm/relations/:relationId", kind: "desk", method: "delete", url: (i) => `/api/pm/relations/${i.relationId}` },
   { route: "GET /api/pm/work-items/:id/attachments", kind: "desk", method: "get", url: (i) => `/api/pm/work-items/${i.deskItemId}/attachments` },
+  { route: "POST /api/pm/work-items/:id/attachments", kind: "desk", method: "post", url: (i) => `/api/pm/work-items/${i.deskItemId}/attachments`, uploadFile: true },
   { route: "GET /api/pm/attachments/:id", kind: "desk", method: "get", url: (i) => `/api/pm/attachments/${i.deskAttachmentId}` },
   { route: "DELETE /api/pm/attachments/:id", kind: "desk", method: "delete", url: (i) => `/api/pm/attachments/${i.deskAttachmentId}` },
   // ── mobile router ────────────────────────────────────────────────────────
@@ -138,7 +141,12 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     const relations = createPmRelationsRouter(prisma);
     const mobile = createPmMobileRouter(prisma);
     const schedule = createPmScheduleRouter(prisma);
-    const attachments = createPmAttachmentsRouter(prisma);
+    const attachments = createPmAttachmentsRouter(prisma, {
+      // Upload refusal must exercise the real item loader, independently of the
+      // host attachment volume. The guarded request never reaches file storage.
+      root: tmpdir(),
+      statfs: async () => ({ bavail: 1_000_000, bsize: 4096, blocks: 1_000_000 }),
+    });
     routers = [
       { router: native, prefix: "/api" },
       { router: relations, prefix: "/api" },
@@ -310,6 +318,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
         ? undefined
         : JSON.parse(JSON.stringify(p.body).replace("DESK_ITEM", ids.deskItemId));
     const r = request(server)[p.method](url);
+    if (p.uploadFile) return r.attach("file", Buffer.from("test"), "upload.txt");
     return body === undefined ? r : r.send(body);
   };
 
@@ -324,7 +333,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       )
       .sort();
 
-  it("classifies EVERY route the four PM routers mount — a new route fails here until it is decided", () => {
+  it("classifies EVERY route the five PM routers mount — a new route fails here until it is decided", () => {
     expect(mountedRoutes()).toEqual(probes.map((p) => p.route).sort());
   });
 
@@ -335,6 +344,12 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       expect(res.status, JSON.stringify(res.body)).toBe(404);
       const text = JSON.stringify(res.body);
       for (const marker of DESK_MARKERS) expect(text).not.toContain(marker);
+      if (probe.uploadFile) {
+        expect(await prisma.pmAttachment.findMany({
+          where: { workItemId: ids.deskItemId },
+          select: { id: true, status: true },
+        })).toEqual([{ id: ids.deskAttachmentId, status: "READY" }]);
+      }
     },
   );
 
