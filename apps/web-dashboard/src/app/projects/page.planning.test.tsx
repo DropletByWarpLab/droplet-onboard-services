@@ -46,7 +46,12 @@ vi.mock("next/link", () => ({
 vi.mock("@/components/Toast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock("@/lib/auth", () => ({
   useAuth: () => ({ user: { id: "u1", username: "ada", displayName: "Ada", role: roleRef.current }, isLoading: false }),
-  authFetch: vi.fn(),
+  authFetch: vi.fn(async (url: string) => ({
+    ok: true,
+    json: async () => url.endsWith("/timer")
+      ? { timer: null }
+      : { worklogs: [], total_entries: 0, total_minutes: 0 },
+  })),
 }));
 vi.mock("@/lib/hooks/useAppCapabilities", () => ({ useAppCapabilities: () => ({ projects: true }) }));
 
@@ -217,7 +222,7 @@ describe("/projects — planning wiring", () => {
     expect(screen.queryByRole("button", { name: /New module/ })).toBeNull();
   });
 
-  it("a read-only role cannot edit planning fields in the item drawer", () => {
+  it("a read-only drawer preserves planning and Time while hiding their write controls", async () => {
     roleRef.current = "guest";
     openProject();
     fireEvent.click(screen.getByRole("tab", { name: /Cycles/ }));
@@ -228,6 +233,9 @@ describe("/projects — planning wiring", () => {
     expect(within(drawer).getByText("Sprint 12")).toBeInTheDocument();
     expect(within(drawer).queryByRole("combobox", { name: "Cycle" })).toBeNull();
     expect(within(drawer).queryByRole("combobox", { name: /module/i })).toBeNull();
+    expect(await within(drawer).findByText("No time logged yet.")).toBeInTheDocument();
+    expect(within(drawer).queryByRole("button", { name: "Log time" })).toBeNull();
+    expect(within(drawer).queryByRole("button", { name: "Start timer" })).toBeNull();
   });
 
   it("opening a cycle's item from the planning view opens the same drawer as the board", () => {

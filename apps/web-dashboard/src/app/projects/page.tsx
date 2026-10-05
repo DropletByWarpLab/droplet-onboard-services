@@ -799,8 +799,6 @@ function ProjectsWorkspace(): JSX.Element {
             onNewItem={() => setModal("newitem")}
             onRetry={() => void refreshAll()}
             onClearFilters={() => writeFilter(EMPTY_FILTER)}
-            partial={query.loadingMore || query.truncated}
-            cycles={cyclesById}
           />
         )}
         {tab === "list" && (mode === "project" || mode === "workspace") && (
@@ -814,8 +812,6 @@ function ProjectsWorkspace(): JSX.Element {
             projects={mode === "workspace" ? (projects ?? []) : undefined}
             onRetry={() => void refreshAll()}
             onClearFilters={() => writeFilter(EMPTY_FILTER)}
-            partial={query.loadingMore || query.truncated}
-            cycles={cyclesById}
           />
         )}
         {tab === "table" && (mode === "project" || mode === "workspace") && (

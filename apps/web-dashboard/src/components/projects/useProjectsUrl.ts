@@ -30,9 +30,22 @@ export function useProjectsUrl() {
   const router = useRouter();
   const params = useSearchParams();
   const state: UrlState = useMemo(() => parsePmUrl(params ?? new URLSearchParams()), [params]);
+  // Insights already preserved unrelated query parameters. Keep that contract
+  // when its navigation joins the same URL state as project tabs and views.
+  const extras = useMemo(() => {
+    const out: string[] = [];
+    params?.forEach((value, name) => {
+      if (!Object.hasOwn(state, name)) out.push(`${encodeURIComponent(name)}=${encodeURIComponent(value)}`);
+    });
+    return out.join("&");
+  }, [params, state]);
+  const withExtras = useCallback(
+    (href: string) => extras ? `${href}${href.includes("?") ? "&" : "?"}${extras}` : href,
+    [extras],
+  );
   // The canonical form of what is in the address bar (a parameter the contract
   // rejects is not part of it), so "no change" is recognised and not navigated.
-  const current = buildPmPath(state);
+  const current = withExtras(buildPmPath(state));
 
   /** Did THIS page push the open drawer's history entry? If so, closing it goes
    *  Back — the entry it added is the one it removes — instead of stacking a
@@ -45,13 +58,13 @@ export function useProjectsUrl() {
 
   const go = useCallback(
     (patch: Partial<UrlState>, mode: NavMode) => {
-      const href = buildPmPath({ ...state, ...patch });
+      const href = withExtras(buildPmPath({ ...state, ...patch }));
       if (href === current) return;
       // scroll:false — a filter edit, a drawer and a tab must not jump the page to the top.
       if (mode === "push") router.push(href, { scroll: false });
       else router.replace(href, { scroll: false });
     },
-    [state, current, router],
+    [state, current, router, withExtras],
   );
 
   const openItem = useCallback(

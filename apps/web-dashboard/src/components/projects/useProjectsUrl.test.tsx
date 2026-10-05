@@ -57,6 +57,18 @@ describe("reading the URL", () => {
 });
 
 describe("writing it", () => {
+  it("opens and leaves Insights while preserving unrelated query parameters", () => {
+    search = "keep=1";
+    const { result, rerender } = renderHook(() => useProjectsUrl());
+    result.current.go({ view: "insights" }, "push");
+    expect(push).toHaveBeenCalledWith("/projects?view=insights&keep=1", { scroll: false });
+    search = "view=insights&keep=1";
+    rerender();
+    expect(result.current.state.view).toBe("insights");
+    result.current.go({ view: null }, "push");
+    expect(push).toHaveBeenLastCalledWith("/projects?keep=1", { scroll: false });
+  });
+
   it("opens My work through a URL that the hook can read back", () => {
     const { result, rerender } = renderHook(() => useProjectsUrl());
     result.current.go({ view: "my-work" }, "push");

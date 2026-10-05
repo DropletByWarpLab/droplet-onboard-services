@@ -111,7 +111,6 @@ vi.mock("@/components/projects/usePm", () => ({
     mutate: vi.fn(),
   }),
   useDepartments: () => ({ departments: undefined }),
-  useProjectCycles: () => ({ cycles: [], mutate: vi.fn() }),
   usePeople: () => ({
     person: (id: string) => ({ id, name: "Tester", initials: "T", tone: 1 }),
     people: [{ id: "u1", displayName: "Ana", avatarUrl: null }],

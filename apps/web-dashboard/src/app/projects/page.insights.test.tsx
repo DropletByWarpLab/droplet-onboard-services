@@ -29,9 +29,19 @@ vi.mock("@/lib/auth", () => ({
 vi.mock("@/lib/hooks/useAppCapabilities", () => ({ useAppCapabilities: () => ({ projects: true }) }));
 
 const paramsRef = { current: new URLSearchParams() as URLSearchParams | null };
+const navigation = { rerender: (() => {}) as () => void };
+function navigate(href: string): void {
+  window.history.pushState(null, "", href);
+  paramsRef.current = new URLSearchParams(window.location.search);
+  navigation.rerender();
+}
 vi.mock("next/navigation", () => ({
-  useSearchParams: () => paramsRef.current,
-  useRouter: () => ({ replace: vi.fn(), push: vi.fn(), back: vi.fn() }),
+  useSearchParams: () => {
+    const [, rerender] = React.useReducer((n: number) => n + 1, 0);
+    navigation.rerender = rerender;
+    return paramsRef.current;
+  },
+  useRouter: () => ({ replace: navigate, push: navigate, back: vi.fn() }),
 }));
 
 vi.mock("@/components/projects/insights/InsightsView", () => ({
@@ -40,15 +50,24 @@ vi.mock("@/components/projects/insights/InsightsView", () => ({
   ),
 }));
 
+const projects = { current: [] as any[] };
+const queries: Array<{ enabled: boolean; projectId: string | null }> = [];
 vi.mock("@/components/projects/usePm", () => ({
-  useProjects: () => ({ projects: [], error: undefined, isLoading: false, mutate: vi.fn() }),
+  useProjects: () => ({ projects: projects.current, error: undefined, isLoading: false, mutate: vi.fn() }),
   useSummary: () => ({ summary: undefined, error: undefined, isLoading: false, mutate: vi.fn() }),
   useProjectStates: () => ({ states: undefined, error: undefined, isLoading: false }),
-  useProjectItems: () => ({ items: undefined, error: undefined, isLoading: false, mutate: vi.fn(), key: null }),
+  useProjectLabels: () => ({ labels: undefined }),
+  useWorkItemQuery: (args: { enabled: boolean; projectId: string | null }) => {
+    queries.push(args);
+    return { items: undefined, error: undefined, isLoading: false, total: 0, refresh: vi.fn() };
+  },
+  useWorkItemByKey: () => ({ item: undefined, mutate: vi.fn() }),
+  useSavedViews: () => ({ views: [], error: undefined, isLoading: false, mutate: vi.fn() }),
   usePeople: () => ({ person: (id: string) => ({ id, name: "Tester", tone: 0 }), users: [] }),
   useDepartments: () => ({ departments: undefined }),
   useProjectCycles: () => ({ cycles: [], mutate: vi.fn() }),
   pmActions: () => ({}),
+  viewActions: () => ({}),
   PmRequestError: class extends Error {},
 }));
 
@@ -56,10 +75,26 @@ import ProjectsPage from "./page";
 
 beforeEach(() => {
   paramsRef.current = new URLSearchParams();
+  projects.current = [];
+  queries.length = 0;
   window.history.replaceState(null, "", "/projects");
 });
 
 describe("/projects?view=insights", () => {
+  it("restores project Insights and follows a URL change back to the table", () => {
+    projects.current = [{ id: "p1", identifier: "INBOX", name: "Inbox", archived: false, openCount: 0, doneCount: 0 }];
+    paramsRef.current = new URLSearchParams("p=INBOX&view=insights");
+    const { rerender } = render(<ProjectsPage />);
+    expect(screen.getByTestId("insights")).toHaveAttribute("data-project", "p1");
+    expect(screen.getByRole("tab", { name: "Insights" })).toHaveAttribute("aria-selected", "true");
+    expect(queries.at(-1)).toMatchObject({ enabled: false, projectId: "p1" });
+    paramsRef.current = new URLSearchParams("p=INBOX&view=table");
+    rerender(<ProjectsPage />);
+    expect(screen.queryByTestId("insights")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Table" })).toHaveAttribute("aria-selected", "true");
+    expect(queries.at(-1)).toMatchObject({ enabled: true, projectId: "p1" });
+  });
+
   it("opens the workspace-level Insights straight from the deep link", () => {
     paramsRef.current = new URLSearchParams("view=insights");
     window.history.replaceState(null, "", "/projects?view=insights");
@@ -90,6 +125,7 @@ describe("/projects?view=insights", () => {
   });
 
   it("leaves every other query parameter alone", () => {
+    paramsRef.current = new URLSearchParams("keep=1");
     window.history.replaceState(null, "", "/projects?keep=1");
     render(<ProjectsPage />);
 
