@@ -155,7 +155,8 @@ sudo droplet-host-units check --json
 
 # The fix. Restarts exactly the stale units.
 sudo droplet-host-units refresh
-sudo systemctl start droplet-host-units.service   # same thing, journald-logged
+sudo systemctl start droplet-host-units.service   # journald-logged; since WARP-3740 it first runs the
+#   droplet-host-integration.service heal, so changed host files are installed too
 
 # The OTHER question — is the artefact even here? (WARP-2574, below)
 sudo droplet-host-units audit          # exit 1 = missing/drifted/not enabled
@@ -284,6 +285,10 @@ sudo ./scripts/setup.sh --reapply-host-integration      # or the underlying focu
 > `sudo ./scripts/setup.sh` (or `--reapply-host-integration`) run — after that it
 > is self-healing. A host-artefact-changing ticket is therefore "Done" only once
 > its target boxes have re-applied; see [docs/SINGLE_BOX.md](../../docs/SINGLE_BOX.md).
+>
+> `systemctl start droplet-host-units.service` also starts the heal unit first
+> (`ExecStartPre=-`, WARP-3740), but only once that unit is installed: a box set up
+> before it existed needs one `sudo <checkout>/scripts/setup.sh --reapply-host-integration`.
 
 ### What counts as a source
 
