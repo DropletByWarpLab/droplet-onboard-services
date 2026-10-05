@@ -276,6 +276,22 @@ describe("computeSizing — the whole box", () => {
     expect(sizing.needTotalBytes).toBe(336_907_468_800);
   });
 
+  it("sizes mixed cameras from each camera's longest resolved retention window", () => {
+    const sizing = computeSizing(
+      new Map([["archive", samples(1000)], ["standard", samples(500)]]),
+      NOW,
+      7,
+      ["archive", "standard"],
+      new Map([["archive", 90], ["standard", 7]]),
+    );
+    expect(sizing.retentionDays).toBe(90);
+    expect(sizing.cameras).toEqual([
+      { name: "archive", mbPerHour: 1000, needBytes: Math.ceil(1000 * MIB * 24 * 90 * HEADROOM * SNAPSHOT_CLIP_OVERHEAD), basis: "history" },
+      { name: "standard", mbPerHour: 500, needBytes: 112_302_489_600, basis: "history" },
+    ]);
+    expect(sizing.needTotalBytes).toBe(sizing.cameras.reduce((sum, camera) => sum + camera.needBytes, 0));
+  });
+
   it("no cameras at all: the total is the 20 GiB floor, the sum is 0", () => {
     const sizing = computeSizing(new Map(), NOW, 7);
     expect(sizing.cameras).toEqual([]);

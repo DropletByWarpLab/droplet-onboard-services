@@ -165,6 +165,31 @@ describe("recordings allocator (WARP-3514)", () => {
       expect(h.recordActivity).toHaveBeenCalledTimes(1);
     });
 
+    it("waits without creating or migrating while resolved Frigate retention is unknown", async () => {
+      const h = harness([], { sizing: { ...factsFor([]).sizing, retentionKnown: false } }, 90);
+      expect(await h.allocator.reconcile()).toEqual({
+        action: "none",
+        detail: "waiting for Frigate's resolved recording retention settings",
+      });
+      expect(h.rows).toHaveLength(0);
+      expect(h.bridge.applyNvrTarget).not.toHaveBeenCalled();
+      expect(h.bridge.startMigration).not.toHaveBeenCalled();
+    });
+
+    it("leaves an existing AUTO_RESERVED target pending until its retention is verified", async () => {
+      const h = harness(
+        [mkRow({ id: "r1", fsUuid: FS_A, status: "PENDING" })],
+        { sizing: { ...factsFor([]).sizing, retentionKnown: false } },
+      );
+      expect(await h.allocator.reconcile()).toEqual({
+        action: "none",
+        detail: "waiting for Frigate's resolved recording retention settings",
+      });
+      expect(h.rows[0]!.status).toBe("PENDING");
+      expect(h.bridge.applyNvrTarget).not.toHaveBeenCalled();
+      expect(h.bridge.startMigration).not.toHaveBeenCalled();
+    });
+
     it("the reservation never exceeds what the drive has free", async () => {
       const h = harness([], { drives: [drive(FS_A, { freeBytes: g(50) })] }, 80);
       await h.allocator.reconcile();
@@ -320,6 +345,18 @@ describe("recordings allocator (WARP-3514)", () => {
       expect(out.action).toBe("grew");
       expect(h.calls).toEqual([`resize ${Math.ceil(g(95) * 1.1)}`]);
       expect(h.rows[0]!.reservedBytes).toBe(BigInt(Math.ceil(g(95) * 1.1)));
+      expect(h.rows[0]!.status).toBe("ACTIVE");
+    });
+
+    it("does not grow an AUTO_RESERVED slice from fallback sizing while Frigate retention is unknown", async () => {
+      const h = harness(
+        live({ reservedBytes: BigInt(g(100)) }),
+        { ...bay({ usedBytes: g(40) }), sizing: { ...factsFor([]).sizing, retentionKnown: false } },
+        500,
+      );
+      expect(await h.allocator.reconcile()).toEqual({ action: "none" });
+      expect(h.calls).toEqual([]);
+      expect(h.rows[0]!.reservedBytes).toBe(BigInt(g(100)));
       expect(h.rows[0]!.status).toBe("ACTIVE");
     });
 

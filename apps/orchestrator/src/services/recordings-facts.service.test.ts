@@ -117,6 +117,34 @@ describe("collectRecordingsFacts (WARP-3514)", () => {
     expect(facts.sizing.retentionDays).toBe(7);
   });
 
+  it("sizes adopted cameras from their own resolved four-window retention settings", async () => {
+    const samples = [
+      { camera: "front", sampledAt: new Date(NOW.getTime() - 3_600_000), mbPerHour: 1000 },
+      { camera: "front", sampledAt: new Date(NOW.getTime() - 7_200_000), mbPerHour: 900 },
+      { camera: "garage", sampledAt: new Date(NOW.getTime() - 3_600_000), mbPerHour: 500 },
+      { camera: "garage", sampledAt: new Date(NOW.getTime() - 7_200_000), mbPerHour: 450 },
+    ];
+    const frigate: RecordingsFrigateFacts = {
+      volume: null,
+      cameras: [],
+      totalBytesPerHour: null,
+      recordingsOnBootDisk: null,
+      effectiveRetentionByCamera: {
+        front: { continuousDays: 90, motionDays: 0, alertsRetainDays: 0, detectionsRetainDays: 0 },
+        garage: { continuousDays: 0, motionDays: 7, alertsRetainDays: 0, detectionsRetainDays: 0 },
+      },
+    };
+    const facts = await createFactsCollector(deps({ samples, frigate }))();
+    expect(facts.sizing.retentionKnown).toBeUndefined();
+    expect(facts.sizing.retentionDays).toBe(90);
+    expect(facts.sizing.cameras.find((camera) => camera.name === "front")?.needBytes).toBe(
+      Math.ceil(1000 * MIB * 24 * 90 * 1.25 * 1.02),
+    );
+    expect(facts.sizing.cameras.find((camera) => camera.name === "garage")?.needBytes).toBe(
+      Math.ceil(500 * MIB * 24 * 7 * 1.25 * 1.02),
+    );
+  });
+
   it("a bridge outage is captured per source and NEVER thrown or defaulted", async () => {
     const facts = await createFactsCollector(
       deps({ host: new Error("status down"), migration: new Error("mig down"), snapshot: new Error("drives down") }),
@@ -153,6 +181,62 @@ describe("collectRecordingsFacts (WARP-3514)", () => {
   it("Frigate being unreachable is null in the facts, not a failure", async () => {
     const facts = await createFactsCollector(deps({ frigate: null }))();
     expect(facts.frigate).toBeNull();
+    expect(facts.sizing.retentionKnown).toBe(false);
+  });
+
+  it("a readable storage response with missing per-camera policy holds sizing decisions", async () => {
+    const facts = await createFactsCollector(deps({
+      samples: [{ camera: "front", sampledAt: NOW, mbPerHour: 500 }],
+      frigate: {
+        volume: null,
+        cameras: [],
+        totalBytesPerHour: null,
+        recordingsOnBootDisk: null,
+        effectiveRetentionByCamera: { garage: { continuousDays: 90, motionDays: 0, alertsRetainDays: 0, detectionsRetainDays: 0 } },
+      },
+    }))();
+    expect(facts.sizing.retentionKnown).toBe(false);
+    expect(facts.sizing.cameras.find((camera) => camera.name === "front")?.needBytes).toBe(
+      Math.ceil(500 * MIB * 24 * 7 * 1.5 * 1.02),
+    );
+  });
+
+  it("does not mistake an inherited toString property for validated retention", async () => {
+    const facts = await createFactsCollector(deps({
+      cameras: [{ name: "toString", displayName: "Legacy camera", adoption: "ADOPTED" }],
+      frigate: {
+        volume: null,
+        cameras: [],
+        totalBytesPerHour: null,
+        recordingsOnBootDisk: null,
+        // Injected callers can provide an ordinary object, unlike the null-prototype
+        // map produced by camera-storage.service.
+        effectiveRetentionByCamera: {},
+      },
+    }))();
+
+    expect(facts.sizing.retentionKnown).toBe(false);
+    expect(facts.cameraNames.toString).toBe("Legacy camera");
+  });
+
+  it("uses a validated own __proto__ retention policy for sizing", async () => {
+    const effectiveRetentionByCamera = Object.fromEntries([
+      ["__proto__", { continuousDays: 90, motionDays: 0, alertsRetainDays: 0, detectionsRetainDays: 0 }],
+    ]);
+    const facts = await createFactsCollector(deps({
+      cameras: [{ name: "__proto__", displayName: "Legacy camera", adoption: "ADOPTED" }],
+      frigate: {
+        volume: null,
+        cameras: [],
+        totalBytesPerHour: null,
+        recordingsOnBootDisk: null,
+        effectiveRetentionByCamera,
+      },
+    }))();
+
+    expect(facts.sizing.retentionKnown).toBeUndefined();
+    expect(facts.sizing.retentionDays).toBe(90);
+    expect(facts.cameraNames["__proto__"]).toBe("Legacy camera");
   });
 
   it("while a switch is in flight the TARGET row is the subject and both rows are listed", async () => {

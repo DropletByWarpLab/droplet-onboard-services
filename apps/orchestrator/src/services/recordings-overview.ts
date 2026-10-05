@@ -101,6 +101,9 @@ function cannotGrow(facts: RecordingsFacts, drive: RecordingsDriveCandidate | un
   if (!a) return false;
   const m = facts.migration;
   if (m !== null && m.state === "failed" && m.errorCode === "insufficient_space") return true;
+  // A recorded failure remains true when retention is unavailable; only the
+  // estimate-based growth decision below needs known retention settings.
+  if (facts.sizing.retentionKnown === false) return false;
   if (a.mode !== "AUTO_RESERVED") return false;
 
   const bay = mountedBayHost(facts.host);
@@ -248,6 +251,7 @@ export function buildRecordingsOverview(facts: RecordingsFacts): RecordingsOverv
 
   const totalBytesPerHour = facts.frigate?.totalBytesPerHour ?? 0;
   const daysStored = totalBytesPerHour > 0 ? round1(usedBytes / (totalBytesPerHour * 24)) : 0;
+  const retentionKnown = facts.sizing.retentionKnown !== false;
 
   // Every camera Frigate or the sizing knows about; the rate is Frigate's current one when it has it,
   // else the sizing's measured one, else 0 (never null/NaN — "unknown" reads as 0 in the contract).
@@ -264,7 +268,7 @@ export function buildRecordingsOverview(facts: RecordingsFacts): RecordingsOverv
         displayName: displayNameOf(facts.cameraNames, name),
         mbPerHour: round2(mbPerHour),
         gbPerDay: round2((mbPerHour * 24) / 1024),
-        needBytes: s?.needBytes ?? 0,
+        needBytes: retentionKnown ? (s?.needBytes ?? 0) : 0,
         usedBytes: f?.usedBytes ?? 0,
       };
     })
@@ -302,8 +306,9 @@ export function buildRecordingsOverview(facts: RecordingsFacts): RecordingsOverv
     reservedBytes,
     usedBytes,
     freeBytes,
-    needBytes: facts.sizing.needTotalBytes,
-    retentionDays: facts.sizing.retentionDays,
+    retentionKnown,
+    needBytes: retentionKnown ? facts.sizing.needTotalBytes : 0,
+    retentionDays: retentionKnown ? facts.sizing.retentionDays : 0,
     daysStored,
     cameras,
     migration,
