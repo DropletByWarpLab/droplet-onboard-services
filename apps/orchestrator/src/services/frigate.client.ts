@@ -956,7 +956,7 @@ export async function deleteCamera(cameraName: string): Promise<void> {
   if (!resp.ok) {
     const errBody = await resp.text().catch(() => "");
     logger.warn(
-      { status: resp.status, camera: cameraName, body: errBody.slice(0, 200) },
+      { status: resp.status, camera: cameraName, body: scrubUrlCredentials(errBody).slice(0, 200) },
       "Frigate config/save rejected while deleting camera",
     );
     throw new Error(`Delete camera: ${resp.status}`);
@@ -1062,7 +1062,7 @@ export async function syncCamerasFromDb(
   if (!resp.ok) {
     const errBody = await resp.text().catch(() => "");
     logger.warn(
-      { status: resp.status, removed, body: errBody.slice(0, 200) },
+      { status: resp.status, removed, body: scrubUrlCredentials(errBody).slice(0, 200) },
       "Frigate config/save rejected during camera sync",
     );
     throw new Error(`Frigate rejected the config: ${resp.status}`);
