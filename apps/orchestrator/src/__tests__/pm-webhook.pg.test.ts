@@ -261,15 +261,34 @@ describe.skipIf(!RUN)("PmWebhook / PmWebhookDelivery — the database's own guar
     });
 
     it("PmActivity_createdAt_id_idx serves the outbox cursor's read", async () => {
+      const [index] = await prisma.$queryRaw<Array<{ indexdef: string; valid: boolean; ready: boolean }>>`
+        SELECT pg_get_indexdef(indexrelid) AS indexdef, indisvalid AS valid, indisready AS ready
+        FROM pg_index
+        WHERE indexrelid = to_regclass('"PmActivity_createdAt_id_idx"')
+          AND indrelid = '"PmActivity"'::regclass`;
+      expect(index).toEqual({
+        indexdef: expect.stringMatching(/USING btree \("createdAt", id\)$/),
+        valid: true,
+        ready: true,
+      });
       const plan = await prisma.$transaction(async (tx) => {
+        // Prove the index can supply the cursor's ORDER BY without a sort.
+        // Tiny fixtures may otherwise favor a different index plus a cheap
+        // sort; that cost choice says nothing about the outbox index's support.
         await tx.$executeRawUnsafe("SET LOCAL enable_seqscan = off");
+        await tx.$executeRawUnsafe("SET LOCAL enable_sort = off");
+        await tx.$executeRawUnsafe("SET LOCAL enable_incremental_sort = off");
         return tx.$queryRawUnsafe<Array<{ "QUERY PLAN": string }>>(
           `EXPLAIN SELECT * FROM "PmActivity"
-           WHERE ("createdAt" > now() OR ("createdAt" = now() AND "id" > 'x')) AND "createdAt" <= now()
+           WHERE ("createdAt" > now() - interval '1 day'
+             OR ("createdAt" = now() - interval '1 day' AND "id" > 'x'))
+             AND "createdAt" <= now() - interval '6 seconds'
            ORDER BY "createdAt" ASC, "id" ASC LIMIT 100`,
         );
       });
-      expect(plan.map((r) => r["QUERY PLAN"]).join("\n")).toContain("PmActivity_createdAt_id_idx");
+      const explain = plan.map((r) => r["QUERY PLAN"]).join("\n");
+      expect(explain).toContain("PmActivity_createdAt_id_idx");
+      expect(explain).not.toMatch(/\bSort\b/);
     });
   });
 });
