@@ -391,14 +391,19 @@ describe("destructive pool routes — no execution without a valid confirm token
 });
 
 // WARP-1338 review — pool_format's fstype must be pinned to the SAME
-// allow-list adopt/reclaim already use (ext4/xfs/btrfs — every mkfs there
-// accepts `-L`). The old shape-only regex (/^[a-z0-9]{1,12}$/) admitted
-// fstypes whose mkfs doesn't take -L (vfat uses -n), and pool_format now
-// unconditionally runs `mkfs.$FSTYPE -L pool` — so a loose fstype that used
-// to format would now fail the op on the host. Reject at the edge instead.
+// allow-list adopt/reclaim already use. The old shape-only regex
+// (/^[a-z0-9]{1,12}$/) admitted fstypes whose mkfs doesn't take -L (vfat uses
+// -n), and pool_format now unconditionally runs `mkfs.$FSTYPE -L pool` — so a
+// loose fstype that used to format would now fail the op on the host. Reject at
+// the edge instead.
+//
+// WARP-3513 — that allow-list is now ext4 ALONE. Every prepared drive and every
+// formatted pool is LUKS2 with an ext4 filesystem inside (the recordings slice
+// is an ext4 project quota, which xfs/btrfs would not give), so the xfs/btrfs
+// this block used to accept are refused, with a message that says why.
 describe("POST /api/storage/pools/:device/format — pinned fstype allow-list", () => {
-  it("accepts the pinned fstypes (and an omitted fstype, defaulting downstream)", async () => {
-    for (const good of [undefined, "ext4", "xfs", "btrfs"]) {
+  it("accepts ext4 (and an omitted fstype, which defaults to ext4)", async () => {
+    for (const good of [undefined, "ext4"]) {
       const prisma = createPrismaMock();
       const app = makeApp(prisma, bridgePoolsResponse([]));
       const res = await request(app)
@@ -406,6 +411,44 @@ describe("POST /api/storage/pools/:device/format — pinned fstype allow-list", 
         .send({ ...(good ? { fstype: good } : {}), confirmPhrase: "ERASE md0" });
       expect(res.status, `fstype=${good}`).toBe(202);
       expect(res.body.confirmationToken).toBeTruthy();
+    }
+  });
+
+  it("tells the host ext4 EXPLICITLY, even when the client omitted it (no host-side default)", async () => {
+    for (const body of [{}, { fstype: "ext4" }]) {
+      const prisma = createPrismaMock();
+      const bridge = bridgePoolsResponse([]);
+      const app = makeApp(prisma, bridge);
+      const mint = await request(app)
+        .post("/api/storage/pools/md0/format")
+        .send({ ...body, confirmPhrase: "ERASE md0" });
+      await request(app)
+        .post("/api/storage/command/confirm")
+        .send({ confirmationToken: mint.body.confirmationToken, service: "pool_format", resourceId: "md0" });
+      const cmdCall = (bridge as any).mock.calls.find((c: any[]) =>
+        String(c[0]).endsWith("/pools/command"),
+      );
+      const sent = JSON.parse(cmdCall[1].body);
+      expect(sent.operation).toBe("pool_format");
+      expect(sent.params.fstype, JSON.stringify(body)).toBe("ext4");
+    }
+  });
+
+  it("rejects xfs and btrfs (the pre-WARP-3513 allow-list) and never mints a token", async () => {
+    for (const bad of ["xfs", "btrfs"]) {
+      const prisma = createPrismaMock();
+      const bridge = bridgePoolsResponse([]);
+      const app = makeApp(prisma, bridge);
+      const res = await request(app)
+        .post("/api/storage/pools/md0/format")
+        .send({ fstype: bad, confirmPhrase: "ERASE md0" });
+      expect(res.status, `fstype=${bad}`).toBe(400);
+      expect(res.body.error).toMatch(/ext4/i);
+      expect(res.body.confirmationToken).toBeUndefined();
+      const hit = (bridge as any).mock.calls.some((c: any[]) =>
+        String(c[0]).endsWith("/pools/command"),
+      );
+      expect(hit).toBe(false);
     }
   });
 
@@ -425,6 +468,60 @@ describe("POST /api/storage/pools/:device/format — pinned fstype allow-list", 
       expect(hit).toBe(false);
     }
   });
+});
+
+// WARP-3513 — Erase & adopt (drive_adopt) and reclaim (drive_reclaim) share the
+// same ext4-only rule: every prepared drive is encrypted, with ext4 inside.
+describe("POST /api/storage/drives/{adopt,reclaim} — ext4 only (WARP-3513)", () => {
+  const routes = [
+    { name: "adopt", path: "/api/storage/drives/adopt", extra: {} },
+    { name: "reclaim", path: "/api/storage/drives/reclaim", extra: { md: "md127" } },
+  ];
+
+  for (const route of routes) {
+    it(`${route.name}: rejects xfs and btrfs with a clear 400, never minting a token or touching the bridge`, async () => {
+      for (const bad of ["xfs", "btrfs", "vfat", "EXT4", "ext4; rm -rf /"]) {
+        const prisma = createPrismaMock();
+        const bridge = bridgePoolsResponse([]);
+        const app = makeApp(prisma, bridge);
+        const res = await request(app)
+          .post(route.path)
+          .send({ device: "sdb", fstype: bad, confirmPhrase: "ERASE sdb", ...route.extra });
+        expect(res.status, `fstype=${bad}`).toBe(400);
+        expect(res.body.error, `fstype=${bad}`).toMatch(/only ext4 is supported/i);
+        expect(res.body.error).toMatch(/encrypt/i);
+        expect(res.body.confirmationToken).toBeUndefined();
+        const hit = (bridge as any).mock.calls.some((c: any[]) =>
+          String(c[0]).endsWith("/pools/command"),
+        );
+        expect(hit).toBe(false);
+      }
+    });
+
+    it(`${route.name}: accepts an explicit ext4 and an omitted fstype, and the host is told ext4 explicitly`, async () => {
+      for (const body of [{ fstype: "ext4" }, {}]) {
+        const prisma = createPrismaMock();
+        const bridge = bridgePoolsResponse([]);
+        const app = makeApp(prisma, bridge);
+        const mint = await request(app)
+          .post(route.path)
+          .send({ device: "sdb", confirmPhrase: "ERASE sdb", ...route.extra, ...body });
+        expect(mint.status, JSON.stringify(body)).toBe(202);
+        const confirm = await request(app)
+          .post("/api/storage/command/confirm")
+          .send({
+            confirmationToken: mint.body.confirmationToken,
+            service: mint.body.service,
+            resourceId: "sdb",
+          });
+        expect(confirm.status).toBe(200);
+        const cmdCall = (bridge as any).mock.calls.find((c: any[]) =>
+          String(c[0]).endsWith("/pools/command"),
+        );
+        expect(JSON.parse(cmdCall[1].body).params.fstype).toBe("ext4");
+      }
+    });
+  }
 });
 
 // WARP-1337 — POST /api/storage/pools accepts an optional customer-facing

@@ -34,7 +34,12 @@
 
 import { parseDocument, isMap } from "yaml";
 import type { PrismaClient } from "@prisma/client";
-import { fetchRawConfigYaml, saveRawConfig } from "./frigate.client.js";
+import { toFrigateKey } from "./camera-key.js";
+import {
+  fetchRawConfigYaml,
+  saveRawConfig,
+  withFrigateConfigLock,
+} from "./frigate.client.js";
 import {
   resolveRetentionDefaults,
   type CameraRetentionDefaults,
@@ -97,10 +102,12 @@ export async function planRetentionBackfill(
   const cameras = doc.get("cameras", true);
 
   return dbCameras.map(({ name }): BackfillPlanEntry => {
-    if (!isMap(cameras) || !cameras.has(name)) {
+    // Frigate files a camera under its canonical key (WARP-3506).
+    const key = toFrigateKey(name);
+    if (!isMap(cameras) || !cameras.has(key)) {
       return { camera: name, reason: "not_in_config", willWrite: false };
     }
-    const block = cameras.get(name, true);
+    const block = cameras.get(key, true);
     if (hasAuthoredRetention(block)) {
       // Could be a real window or a deliberate zero — either way it is a
       // choice already made, and not ours to revise.
@@ -118,10 +125,22 @@ export async function planRetentionBackfill(
  * nothing. `noop` says so explicitly rather than leaving the caller to
  * infer it from an empty list — "nothing to do" and "it failed quietly"
  * must not look the same, which is the WARP-1849 anti-pattern.
+ *
+ * WARP-3510 — a Frigate config write like any other: the plan and the apply
+ * step both read the YAML, so the whole run holds the process-wide config lock
+ * (another writer landing between the two would be overwritten by this save),
+ * and the YAML it replaces is kept as a pre-image.
  */
-export async function backfillCameraRetention(
+export function backfillCameraRetention(
   prisma: PrismaClient,
   defaults: CameraRetentionDefaults = resolveRetentionDefaults(),
+): Promise<BackfillResult> {
+  return withFrigateConfigLock(() => applyRetentionBackfill(prisma, defaults));
+}
+
+async function applyRetentionBackfill(
+  prisma: PrismaClient,
+  defaults: CameraRetentionDefaults,
 ): Promise<BackfillResult> {
   const planned = await planRetentionBackfill(prisma);
   const targets = planned.filter((p) => p.willWrite).map((p) => p.camera);
@@ -134,8 +153,10 @@ export async function backfillCameraRetention(
   // Edit the AUTHORED yaml. The resolved tree is not save-round-trippable
   // on Frigate 0.17 — writing it back produces 42 validation errors, which
   // frigate.client.ts already learned the hard way.
-  const doc = parseDocument(await fetchRawConfigYaml());
-  for (const name of targets) {
+  const raw = await fetchRawConfigYaml();
+  const doc = parseDocument(raw);
+  for (const target of targets) {
+    const name = toFrigateKey(target);
     doc.setIn(["cameras", name, "record", "enabled"], true);
     doc.setIn(["cameras", name, "record", "continuous", "days"], defaults.continuousDays);
     doc.setIn(["cameras", name, "record", "motion", "days"], defaults.motionDays);
@@ -159,7 +180,7 @@ export async function backfillCameraRetention(
     );
   }
 
-  const resp = await saveRawConfig(String(doc));
+  const resp = await saveRawConfig(String(doc), raw);
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
     // Loud. A retention repair that fails silently leaves the operator
