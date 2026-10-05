@@ -1,4 +1,4 @@
-fastapi==0.141.1
+fastapi==0.142.2
 # WARP-2734 — the provisioning endpoint's request model. FastAPI already pulls
 # pydantic transitively; it is pinned here because this service now DEPENDS on
 # it directly (`extra: forbid` is the allow-list that keeps a caller from
