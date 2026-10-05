@@ -36,7 +36,7 @@ check "deploy script sources the reapply wrapper's resolver (no second resolver)
 echo "--- stubbed logic ---"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 BIN="$WORK/bin"; mkdir -p "$BIN"
-for t in systemctl runuser docker visudo id; do
+for t in systemctl runuser docker visudo id mountpoint; do
   cat > "$BIN/$t" <<STUB
 #!/usr/bin/env bash
 echo "$t \$*" >> "$WORK/calls.log"
@@ -53,6 +53,7 @@ case "$t" in
   systemctl)
     [ "\$1" = is-active ] && [ -f "$WORK/inactive" ] && exit 3
     exit 0 ;;
+  mountpoint) [ -f "$WORK/unmounted" ] && exit 1; exit 0 ;;
   id) [ "\$1" = -nG ] && { [ -f "$WORK/nodocker" ] && echo "droplet users" || echo "droplet users docker"; exit 0; }; exec /usr/bin/id "\$@" ;;
   *) exit 0 ;;
 esac
@@ -62,7 +63,7 @@ done
 printf '#!/usr/bin/env bash\nexit 0\n' > "$WORK/hu"; chmod +x "$WORK/hu"
 
 new_repo() {
-  rm -rf "$WORK/repo" "$WORK/backups" "$WORK/sudoers"* "$WORK/calls.log" "$WORK/setup_fail" "$WORK/inactive" "$WORK/nodocker" "$WORK/tar_fail"
+  rm -rf "$WORK/repo" "$WORK/backups" "$WORK/sudoers"* "$WORK/calls.log" "$WORK/setup_fail" "$WORK/inactive" "$WORK/nodocker" "$WORK/tar_fail" "$WORK/unmounted" "$WORK/data"
   mkdir -p "$WORK/repo/docker/secrets" "$WORK/repo/docker/certs" "$WORK/repo/data/secrets" "$WORK/repo/.data"
   ( cd "$WORK/repo" && git init -q && git config user.email t@t && git config user.name t
     echo 'name: droplet' > docker/docker-compose.yml
@@ -149,6 +150,32 @@ new_repo; touch "$WORK/nodocker"
 out="$(run_deploy)"; rc=$?; printf '%s\n' "$out" > "$WORK/out.txt"
 check "droplet not in docker: exit 1 naming WARP-2888, no sudoers ever written, nothing run" bash -c \
   "[ $rc -eq 1 ] && grep -q WARP-2888 '$WORK/out.txt' && [ ! -e '$WORK/sudoers' ] && [ ! -e '$WORK/sudoers.new' ] && [ ! -d '$WORK/backups' ] && ! grep -q setup.sh '$WORK/calls.log'"
+
+echo "--- backup location (encrypted /data) ---"
+# Same as run_deploy but WITHOUT the backup-dir override, so step 0b decides.
+run_deploy_auto() {
+  PATH="$BIN:$PATH" DROPLET_HOST_INTEGRATION_REPO_ROOT="$WORK/repo" \
+    DROPLET_DATA_MOUNT="$WORK/data" DROPLET_DEPLOY_SUDOERS="$WORK/sudoers" \
+    DROPLET_DEPLOY_TS=20260101T000000Z DROPLET_DEPLOY_REQUIRED_UNITS="droplet.service" \
+    HU_BIN="$WORK/hu" DROPLET_HOST_UNITS_BIN="$WORK/hu" bash "$DEPLOY" 2>&1
+}
+new_repo; mkdir -p "$WORK/data/droplet"
+out="$(run_deploy_auto)"; rc=$?
+check "relocated + mounted: backup lands under <data>/droplet/deploy-backups" bash -c \
+  "[ $rc -eq 0 ] && [ -s '$WORK/data/droplet/deploy-backups/20260101T000000Z/secrets.tar' ]"
+
+new_repo; mkdir -p "$WORK/data/droplet"; touch "$WORK/unmounted"
+out="$(run_deploy_auto)"; rc=$?; printf '%s\n' "$out" > "$WORK/out.txt"
+check "relocated + NOT mounted: exit 1 before any backup or sudoers write" bash -c \
+  "[ $rc -eq 1 ] && grep -q 'not mounted' '$WORK/out.txt' && [ ! -d '$WORK/data/droplet/deploy-backups' ] && [ ! -e '$WORK/sudoers' ] && [ ! -e '$WORK/sudoers.new' ] && ! grep -q setup.sh '$WORK/calls.log'"
+
+# Not relocated: the default is /var/lib/droplet/deploy-backups. Only the choice
+# is asserted (the script logs it before touching the dir). The checkout is made
+# dirty so preflight stops the run before it would create the real /var/lib dir.
+new_repo; mkdir -p "$WORK/data"; echo dirt > "$WORK/repo/untracked"
+out="$(run_deploy_auto)"; printf '%s\n' "$out" > "$WORK/out.txt"
+check "not relocated: backups go to /var/lib/droplet/deploy-backups" bash -c \
+  "grep -q 'backups: /var/lib/droplet/deploy-backups (not relocated' '$WORK/out.txt' && [ ! -d '$WORK/data/droplet' ]"
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then printf "  \033[32mAll %d tests passed\033[0m\n\n" "$TESTS"; exit 0; fi

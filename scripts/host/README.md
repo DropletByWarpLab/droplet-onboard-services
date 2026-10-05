@@ -252,7 +252,8 @@ journalctl -u droplet-deploy.service -n 80  # the log, incl. the backup path
 
 `/usr/local/sbin/droplet-deploy` (root, `scripts/host/droplet-deploy.sh`) runs, in
 order: preflight (checkout resolved like the heal wrapper; refuses a dirty tree or a
-held `.data/.setup.lock`) → backup under `/var/lib/droplet/deploy-backups/<UTC ts>/`
+held `.data/.setup.lock`) → backup under `/var/lib/droplet/deploy-backups/<UTC ts>/`, or under
+`/data/droplet/deploy-backups/` on a relocated (encrypted) box, where the deploy refuses to run if `/data` is not mounted
 (`db.sql.gz` + a 0600 `secrets.tar` of `.env`, `data/secrets`, `docker/secrets`,
 `docker/certs`, `docker/mosquitto.*`; last 3 kept) → a temporary sudoers grant for
 `droplet` (removed by `trap` and `ExecStopPost=+`) → `setup.sh --skip-docker

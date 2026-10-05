@@ -29,7 +29,8 @@
 # =============================================================================
 set -uo pipefail
 
-BACKUP_DIR="${DROPLET_DEPLOY_BACKUP_DIR:-/var/lib/droplet/deploy-backups}"
+BACKUP_DIR="${DROPLET_DEPLOY_BACKUP_DIR:-}"   # empty: chosen in step 0b
+DATA_MOUNT="${DROPLET_DATA_MOUNT:-/data}"       # same default as droplet-luks-provision.sh
 SUDOERS="${DROPLET_DEPLOY_SUDOERS:-/etc/sudoers.d/droplet-deploy}"
 REAPPLY_LIB="${DROPLET_DEPLOY_REAPPLY_LIB:-/usr/local/sbin/droplet-reapply-host-integration}"
 KEEP=3
@@ -74,6 +75,23 @@ git_repo() { runuser -u droplet -- git -C "$REPO" "$@"; }
 # (ADR-020 §D6: the trust boundary is "who can become droplet"). Fail safe.
 id -nG droplet 2>/dev/null | tr ' ' '\n' | grep -qx docker \
   || die "user droplet is not in the docker group. WARP-2888 deferred removing that membership; once droplet leaves the docker group the temporary NOPASSWD grant becomes a real privilege escalation, and this unit must be redesigned before it may run"
+
+# --- 0b. where backups may live (WARP-232) -----------------------------------
+# A relocated (encrypted) box keeps its secrets and db on the LUKS volume, so the
+# plaintext backup (secrets tar + full db dump) must live there too, never on the
+# unencrypted root fs. Writing under an UNMOUNTED mountpoint lands on the root
+# disk, so a relocated box with /data not mounted is refused.
+if [ -n "$BACKUP_DIR" ]; then
+  log "backups: $BACKUP_DIR (DROPLET_DEPLOY_BACKUP_DIR override)"
+elif [ -d "$DATA_MOUNT/droplet" ]; then
+  mountpoint -q "$DATA_MOUNT" \
+    || die "$DATA_MOUNT/droplet exists (relocated, encrypted box) but $DATA_MOUNT is not mounted; a backup would land on the unencrypted root disk"
+  BACKUP_DIR="$DATA_MOUNT/droplet/deploy-backups"
+  log "backups: $BACKUP_DIR (relocated box: secrets and db live on the encrypted volume)"
+else
+  BACKUP_DIR=/var/lib/droplet/deploy-backups
+  log "backups: $BACKUP_DIR (not relocated: secrets already live on the root fs)"
+fi
 
 # --- 1. preflight ------------------------------------------------------------
 REPO="$(resolve_checkout)" && [ -n "$REPO" ] || die "could not locate the checkout (set DROPLET_HOST_INTEGRATION_REPO_ROOT)"
