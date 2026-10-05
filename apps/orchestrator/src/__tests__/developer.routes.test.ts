@@ -108,9 +108,10 @@ function makeDb(opts: { projectsEnabled?: boolean } = {}) {
   const links: Link[] = [];
   const settings = new Map<string, unknown>();
   const projects = [
-    { id: "p-abc", name: "Alpha build", identifier: "ABC", isArchived: false },
-    { id: "p-xyz", name: "Xylophone", identifier: "XYZ", isArchived: false },
-    { id: "p-old", name: "Old stuff", isArchived: true, identifier: "OLD" },
+    { id: "p-abc", name: "Alpha build", identifier: "ABC", kind: "PROJECT", isArchived: false },
+    { id: "p-xyz", name: "Xylophone", identifier: "XYZ", kind: "PROJECT", isArchived: false },
+    { id: "p-old", name: "Old stuff", isArchived: true, identifier: "OLD", kind: "PROJECT" },
+    { id: "p-support", name: "Customer support", identifier: "SUP", kind: "SERVICE_DESK", isArchived: false },
   ];
   let n = 0;
   const db = {
@@ -495,6 +496,26 @@ describe("WARP-3533 — the ICS feed links", () => {
     }
     expect((await post({ kind: "project", projectId: "p-old" })).body).toEqual({ error: "project_not_found" });
     expect((await post({ kind: "project", projectId: "p-nope" })).status).toBe(404);
+    expect(db.links).toHaveLength(0);
+  });
+
+  it("keeps Service Desk projects out of feed discovery, rotation, and revocation", async () => {
+    const db = makeDb();
+    const listed = await request(api(db, P.member)).get("/api/developer/feeds");
+    expect(listed.status).toBe(200);
+    expect(listed.body.feeds.map((feed: { projectId: string | null }) => feed.projectId)).not.toContain("p-support");
+
+    const rotate = await request(api(db, P.member))
+      .post("/api/developer/feeds/rotate")
+      .send({ kind: "project", projectId: "p-support" });
+    expect(rotate.status).toBe(404);
+    expect(rotate.body).toEqual({ error: "project_not_found" });
+
+    const revoke = await request(api(db, P.member))
+      .post("/api/developer/feeds/revoke")
+      .send({ kind: "project", projectId: "p-support" });
+    expect(revoke.status).toBe(404);
+    expect(revoke.body).toEqual({ error: "project_not_found" });
     expect(db.links).toHaveLength(0);
   });
 
