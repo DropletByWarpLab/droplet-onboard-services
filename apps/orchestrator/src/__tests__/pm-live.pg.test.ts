@@ -160,7 +160,16 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
   it("an external guest hears about the item assigned to them, and about no other", async () => {
     const live = audience();
     const shared = ours(await live.usernamesFor(sharedItem));
-    expect(shared).toEqual(["warp3536-admin", "warp3536-family", "warp3536-guest-shared", "warp3536-owner"]);
+    // Projects is not per-person feature-gated: active family readers without
+    // individual grants receive the same event as the rest of the roster.
+    expect(shared).toEqual([
+      "warp3536-admin",
+      "warp3536-denied",
+      "warp3536-family",
+      "warp3536-guest-shared",
+      "warp3536-narrow",
+      "warp3536-owner",
+    ]);
     const plain = await live.usernamesFor(plainItem);
     expect(plain).not.toContain("warp3536-guest-shared");
     expect(plain).not.toContain("warp3536-guest-other");
@@ -218,11 +227,19 @@ describe.skipIf(!RUN)("pm-live — who hears about a change, over real rows (WAR
           .map((s) => s.topic)
           .filter((t) => t.startsWith("droplet/pm/warp3536-"))
           .sort();
-      expect(by(plainItem)).toEqual(["droplet/pm/warp3536-admin", "droplet/pm/warp3536-family", "droplet/pm/warp3536-owner"]);
+      expect(by(plainItem)).toEqual([
+        "droplet/pm/warp3536-admin",
+        "droplet/pm/warp3536-denied",
+        "droplet/pm/warp3536-family",
+        "droplet/pm/warp3536-narrow",
+        "droplet/pm/warp3536-owner",
+      ]);
       expect(by(sharedItem)).toEqual([
         "droplet/pm/warp3536-admin",
+        "droplet/pm/warp3536-denied",
         "droplet/pm/warp3536-family",
         "droplet/pm/warp3536-guest-shared",
+        "droplet/pm/warp3536-narrow",
         "droplet/pm/warp3536-owner",
       ]);
       for (const { payload } of sent) {
