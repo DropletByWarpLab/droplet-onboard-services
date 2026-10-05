@@ -191,7 +191,10 @@ interface StoredToken {
 }
 
 export function hashPmApiToken(token: string): string {
-  return crypto.createHash("sha256").update(token, "utf8").digest("hex");
+  // CodeQL's password-hash rule treats this credential as a human password.
+  // Stored tokens are exclusively minted as dpm_ + 32 CSPRNG bytes (256 bits);
+  // SHA-256 supports indexed lookup while offline guessing remains infeasible.
+  return crypto.createHash("sha256").update(token, "utf8").digest("hex"); // codeql[js/insufficient-password-hash]
 }
 
 function toRow(t: StoredToken): PmApiTokenRow {

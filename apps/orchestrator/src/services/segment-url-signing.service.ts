@@ -79,7 +79,9 @@ function segmentKey(): Buffer | null {
 }
 
 function mac(key: Buffer, fields: string[]): Buffer {
-  return createHmac("sha256", key).update(JSON.stringify(["v1", ...fields])).digest();
+  // HMAC uses the server-held DEVICE_SECRET-derived key; these fields are
+  // public camera/range/segment/user identifiers, never an API credential.
+  return createHmac("sha256", key).update(JSON.stringify(["v1", ...fields])).digest(); // codeql[js/insufficient-password-hash]
 }
 
 export interface SegmentSigFields {
