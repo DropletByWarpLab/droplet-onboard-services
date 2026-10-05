@@ -177,6 +177,10 @@ function isPrismaCode(err: unknown, code: "P2002" | "P2003" | "P2025"): boolean 
  * enforces the exactly-one shape; it cannot enforce that the id is real -- the
  * FK does that, but only as a 500-shaped driver error. This turns it into a
  * 404. (`crm.service.ts:logActivity` makes the same call for the same reason.)
+ *
+ * WARP-3528: a service desk, and a ticket in one, is not a subject -- a file link
+ * to it is refused as not found, so a customer conversation cannot be tied to a
+ * document through the PM surface.
  */
 async function assertSubjectExists(
   prisma: PrismaClient,
@@ -192,8 +196,11 @@ async function assertSubjectExists(
         : subjectType === "DEAL"
           ? await prisma.crmDeal.findUnique({ where: { id: subjectId }, select })
           : subjectType === "PROJECT"
-            ? await prisma.pmProject.findUnique({ where: { id: subjectId }, select })
-            : await prisma.pmWorkItem.findUnique({ where: { id: subjectId }, select });
+            ? await prisma.pmProject.findUnique({ where: { id: subjectId, kind: "PROJECT" }, select })
+            : await prisma.pmWorkItem.findUnique({
+                where: { id: subjectId, project: { kind: "PROJECT" } },
+                select,
+              });
   if (!found) throw new Error(ENTITY_LINK_ERRORS.SUBJECT_NOT_FOUND);
 }
 

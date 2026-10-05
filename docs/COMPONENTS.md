@@ -163,6 +163,9 @@ network. Host-published ports and host-network services are called out.
   (pairing), `files`/`files-knowledge` (Nextcloud + RAG), `cameras`, `network*`,
   `switch`, `matter`/`scenes`, `vpn`, `calendar`, `reminders`, `email`, `pm*`
   (native project management — `/api/pm/*`, ADR-026, behind `authMiddleware`/`requireRole`),
+  `support/` (the service desk — `/api/support/*`, ADR-069: tickets are work items in
+  `PmProject.kind = SERVICE_DESK` projects, behind the `support` module gate; `/api/pm/*`
+  and `/api/mobile/pm/*` answer 404 for a desk and everything under it),
   `activity` (signed audit log), `agent-runs` (durable background runs, owner/admin),
   `settings*`, `aps` (coverage-extender onboarding),
   `admin-*` (owner/admin-gated dashboards).
