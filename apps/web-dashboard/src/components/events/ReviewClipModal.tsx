@@ -30,16 +30,15 @@ const MARK_VIEWED_FAILED = "We couldn't mark that as viewed. Try again in a mome
 
 /**
  * Inline player for a Frigate review item. Plays the cluster preview
- * mp4 when Frigate has rendered one; falls back to the cluster
- * thumbnail otherwise. Calls `onMarkViewed` on mount so the unreviewed
+ * mp4 when Frigate has rendered one; falls back to the same activity's
+ * recordings, then its thumbnail. Calls `onMarkViewed` on mount so the unreviewed
  * accent ring drops off without operator action — viewing == triaging
  * in this UX.
  *
- * WARP-3509: a review that is still in progress shows its thumbnail and an
- * "In progress" notice instead of a video pointed at a clip that does not exist
- * yet; a clip that fails to load falls back the same way, with an alert and a
- * Retry; and a failed mark-viewed is a toast, not silence — it never blocks the
- * clip.
+ * A review that is still in progress plays recordings with an "In progress"
+ * notice instead of requesting a preview that does not exist yet. If both
+ * media paths fail, the thumbnail, alert and Retry remain available. A failed
+ * mark-viewed is a toast and never blocks playback.
  *
  * WARP-3509: built on the shared <Dialog>, like the event modal, so the ARIA
  * (role, aria-modal, label), the focus trap, the scroll lock and Escape come
