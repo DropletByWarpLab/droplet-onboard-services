@@ -880,7 +880,7 @@ wd_check_router_auth() {
     return 0
   fi
 
-  local body tls="${DROPLET_INTERNAL_TLS:-}" url="${WD_ROUTING_URL%/}" bundle
+  local body connected tls="${DROPLET_INTERNAL_TLS:-}" url="${WD_ROUTING_URL%/}" bundle
   local -a tls_args=()
   if [ -z "$tls" ] && [ -r "$WD_ENV_FILE" ]; then
     tls="$(grep -E '^DROPLET_INTERNAL_TLS=' "$WD_ENV_FILE" | tail -1 | cut -d= -f2- | tr -d "\"'\r")"
@@ -892,13 +892,31 @@ wd_check_router_auth() {
               --cert "${DROPLET_TLS_CERT:-$bundle/cert.pem}"
               --key "${DROPLET_TLS_KEY:-$bundle/key.pem}")
   fi
-  if ! body="$(curl -s --max-time 5 "${tls_args[@]}" "${url}/health" 2>/dev/null)" || [ -z "$body" ]; then
+  if ! body="$(curl -fsS --max-time 5 "${tls_args[@]}" "${url}/health" 2>/dev/null)" || [ -z "$body" ]; then
     CHECK_OUTCOME=not_applicable
     CHECK_MESSAGE="routing service not responding at ${url}/health — no verdict"
     return 0
   fi
 
-  if printf '%s' "$body" | grep -Eq '"connected"[[:space:]]*:[[:space:]]*true'; then
+  # A service/proxy error is not a router credential verdict. Parse the top
+  # level boolean instead of matching JSON-looking text (including HTML).
+  if ! connected="$(printf '%s' "$body" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    value = data.get("connected") if isinstance(data, dict) else None
+    if type(value) is not bool:
+        sys.exit(1)
+    print("true" if value else "false")
+except (ValueError, TypeError):
+    sys.exit(1)
+' 2>/dev/null)"; then
+    CHECK_OUTCOME=not_applicable
+    CHECK_MESSAGE="routing health response is invalid or cannot be parsed at ${url}/health — no verdict"
+    return 0
+  fi
+
+  if [ "$connected" = true ]; then
     CHECK_OUTCOME=ok
     CHECK_MESSAGE="routing is authenticated to the router"
     return 0

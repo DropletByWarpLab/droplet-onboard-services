@@ -1220,7 +1220,7 @@ if [ "$(wd_field router_auth status)" = "ok" ]; then
 else
   fail "expected ok, got $(wd_field router_auth status)"
 fi
-printf '%s\n' -s --max-time 5 http://127.0.0.1:1/health > "$WORK/curl_expected_args"
+printf '%s\n' -fsS --max-time 5 http://127.0.0.1:1/health > "$WORK/curl_expected_args"
 if cmp -s "$WORK/curl_expected_args" "$WORK/curl.args"; then
   pass "router_auth: plain deployment keeps HTTP and sends no TLS arguments"
 else
@@ -1261,6 +1261,28 @@ else
 fi
 
 reset_work
+# HTTP failure and structurally invalid bodies must never ask for credentials.
+rm -f "$WORK/curl_expected_args"
+for invalid in '<html>server error</html>' '{broken' '{}' '{"connected":"false"}' '{"nested":{"connected":true}}' '[{"connected":false}]'; do
+  rm -rf "$WORK/state"; mkdir -p "$WORK/state"; rm -f "$WORK/curl_exit"
+  printf '%s' "$invalid" > "$WORK/health_body"
+  run_wd "$RA" DROPLET_WATCHDOG_ROUTING_MODE=real DROPLET_WATCHDOG_ROUTING_URL=http://127.0.0.1:1 >/dev/null
+  if [ "$(wd_field router_auth status)" = not_applicable ]; then
+    pass "router_auth: invalid health body yields no verdict: $invalid"
+  else
+    fail "invalid health body became a router verdict: $invalid"
+  fi
+done
+rm -rf "$WORK/state"; mkdir -p "$WORK/state"
+printf '{"connected":false,"error":"proxy failure"}' > "$WORK/health_body"
+echo 22 > "$WORK/curl_exit"
+run_wd "$RA" DROPLET_WATCHDOG_ROUTING_MODE=real DROPLET_WATCHDOG_ROUTING_URL=http://127.0.0.1:1 >/dev/null
+if [ "$(wd_field router_auth status)" = not_applicable ] && grep -qx -- -fsS "$WORK/curl.args"; then
+  pass "router_auth: HTTP 500 (curl 22) yields no verdict and HTTP failure is checked"
+else
+  fail "HTTP failure became a credential verdict or curl lacks --fail"
+fi
+
 rm -f "$WORK/curl.log" "$WORK/curl_exit"
 mk_curl_stub
 printf '{"status":"disconnected","connected":false,"error":"x"}' > "$WORK/health_body"
@@ -1280,7 +1302,7 @@ TLS_REPO="$WORK/deployment with spaces"
 TLS_BUNDLE="$TLS_REPO/data/secrets/service-tls/host-admin"
 mkdir -p "$TLS_REPO"
 printf 'DROPLET_INTERNAL_TLS="1"\r\nUNRELATED=$(touch "%s")\n' "$WORK/env_executed" > "$TLS_REPO/.env"
-printf '%s\n' -s --max-time 5 \
+printf '%s\n' -fsS --max-time 5 \
   --cacert "$TLS_BUNDLE/ca.pem" --cert "$TLS_BUNDLE/cert.pem" --key "$TLS_BUNDLE/key.pem" \
   https://router.test:9443/prefix/health > "$WORK/curl_expected_args"
 printf '{"status":"ok","connected":true}' > "$WORK/health_body"
@@ -1321,7 +1343,7 @@ fi
 reset_work
 rm -f "$WORK/curl.log" "$WORK/curl_exit"
 mk_curl_stub
-printf '%s\n' -s --max-time 5 http://router.test:9080/health > "$WORK/curl_expected_args"
+printf '%s\n' -fsS --max-time 5 http://router.test:9080/health > "$WORK/curl_expected_args"
 printf '{"status":"ok","connected":true}' > "$WORK/health_body"
 run_wd "$RA" "DROPLET_ENV_FILE=$TLS_REPO/.env" DROPLET_INTERNAL_TLS=0 \
   DROPLET_WATCHDOG_ROUTING_URL= ROUTING_SERVICE_URL=http://router.test:9080/ >/dev/null || true
