@@ -63,6 +63,7 @@ import { createPmTimeRouter } from "./routes/pm/time.js";
 import { createPmWebhooksRouter } from "./routes/pm/webhooks.js";
 import { createPmOpenApiRouter } from "./routes/pm/openapi.js";
 import { createSupportRouter } from "./routes/support/support.routes.js";
+import { createPmInsightsRouter } from "./routes/pm/insights.js";
 import { createPmScheduleRouter } from "./routes/pm/schedule.js";
 import { createPmDevelopmentRouter } from "./routes/pm/development.js";
 import { createCrmRouter } from "./routes/crm.js";
@@ -632,6 +633,9 @@ export function createApp(
   // gate as every other /api/pm route. Item reads apply the guest assignment
   // guard; repository administration is owner/admin only.
   app.use("/api", createPmDevelopmentRouter(prisma));
+  // WARP-3524 (WS-8) — Insights has its own disjoint `/pm/insights` path.
+  // The `projects` module gate covers it through the `/api/pm` prefix.
+  app.use("/api", createPmInsightsRouter(prisma));
   // WARP-2117 — the CRM, which lives inside the Projects surface. Mounted
   // AFTER the PM router but on a disjoint prefix (`/api/crm`), so neither
   // shadows the other; the `crm` module gate comes from the registry.
