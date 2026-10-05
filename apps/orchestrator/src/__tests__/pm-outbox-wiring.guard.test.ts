@@ -45,7 +45,19 @@ describe("every PmActivity writer wakes the outbox", () => {
       const sites = text.match(/\bpmActivity\.(create|createMany)\(/g)?.length ?? 0;
       const nudges = text.match(/\bnudgeOutbox\(\)/g)?.length ?? 0;
       expect(text).toMatch(/import \{[^}]*\bnudgeOutbox\b[^}]*\} from "\.\/pm-outbox\.js"/);
-      expect(nudges).toBeGreaterThanOrEqual(sites);
+      if (_name === "services/pm/pm.service.ts") {
+        // `writeActivity` wakes once per ordinary committed write. Deletion is
+        // one logical transaction with three possible activity inserts
+        // (tombstone, child audit rows and relation audit rows), so it wakes
+        // once after commit rather than once per insert. Pin both paths instead
+        // of demanding a misleading one-nudge-per-insert count.
+        expect(sites).toBe(3);
+        expect(nudges).toBe(2);
+        expect(text).toMatch(/if \(input\.nudge !== false\) nudgeOutbox\(\)/);
+        expect(text).toMatch(/\}, \{ \.\.\.SERIALIZABLE_TX, timeout: 5_000 \}\);\s*nudgeOutbox\(\)/);
+      } else {
+        expect(nudges).toBeGreaterThanOrEqual(sites);
+      }
     },
   );
 });
