@@ -26,12 +26,13 @@ reference renders at the native 480×320.
   and an AM/PM suffix is drawn in accent. Auto-engages after 30 s of no
   touch; any tap (except the toggle) wakes to the System screen.
 - **System + Wi-Fi** — ONE combined screen (this replaces the old separate
-  Stats and QR screens). A header band (SYSTEM eyebrow left; clock + a green
-  `OK` pill or a red `!` alert badge right; hairline at y=32) sits over a
+  Stats and QR screens). A header band (SYSTEM eyebrow left; clock + watchdog
+  verdict or a red `!` alert badge right; hairline at y=32) sits over a
   two-column body split by a vertical divider at x=288. **Left** is system:
-  a `CPU LOAD` eyebrow + a 52px CPU hero + a 48-sample CPU sparkline (accent
-  polyline + filled area) + a 4-column tabular row (MEM / DISK / TEMP / CAM,
-  with CAM in green) + a detail line (`WAN … · UP … · LAN …`) + a
+  a `GPU LOAD` eyebrow + a large GPU hero + a 48-sample GPU sparkline (accent
+  polyline + filled area) + a 4-column tabular row (CPU / RAM / GPU T / CPU T,
+  temperatures in °C, orange at 70°C and red at 85°C) + a watchdog summary
+  + a detail line (`WAN … · UP … · LAN …`) + a
   `hostname · ip` strip. **Right** is Wi-Fi pairing: a `PAIR · WI-FI` accent
   eyebrow + a 132×132 white QR card with the droplet mark inset dead-centre +
   NETWORK/SSID + PASSWORD + a full-width **KEY rotate pill** (`KEY mm:ss`;

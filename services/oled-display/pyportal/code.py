@@ -16,7 +16,7 @@ coordinate/color below maps 1:1 to that 480x320 reference.
   system  ONE combined System + Wi-Fi screen (replaces the old separate
           stats + QR screens). Header band (SYSTEM eyebrow left; clock +
           status pill / alert badge right). Vertical divider at x=288.
-          LEFT = system: CPU hero + 48-sample sparkline + MEM/DISK/TEMP/CAM
+          LEFT = system: GPU hero + 48-sample sparkline + CPU/RAM/GPU T/CPU T
           tabular row + detail line + hostname·ip strip. RIGHT = Wi-Fi:
           PAIR·WI-FI eyebrow + white QR card with the droplet mark inset +
           NETWORK/SSID + PASSWORD + a full-width KEY rotate pill.
@@ -64,7 +64,8 @@ Host → display (one JSON per line, contract UNCHANGED for back-compat)
   {"mode":"claim",  "data":{code, setup_url, setup_qr_matrix,
                              wifi_qr_matrix, wifi_ssid, wifi_psk}}
         # onboarding claim code; matrices host-encoded, at most one per frame
-  {"mode":"stats",  "data":{cpu,mem,disk,temp,ip,hostname,uptime,now,date}}
+  {"mode":"stats",  "data":{gpu,cpu,mem,disk,temp,gpu_temp,watchdog,
+                              ip,hostname,uptime,now,date}}
   {"mode":"wifi",   "data":{networks, connected_to, adapter, state, ssid,
                              clients, channel, band, key_ttl_seconds, password}}
   {"mode":"cameras","data":{online, total, events:[...], source, error}}
@@ -398,7 +399,7 @@ _HERO_FONT_PATH = "/lib/fonts/Inter-Hero-66.bdf"
 # Glyphs actually drawn in the hero face, so load_glyphs preloads ONLY what
 # renders (WARP-638). Hero draw sites:
 #   * idle clock  — digits + ":" + " " (the colon blinks to a space)
-#   * CPU hero    — digits + "%"
+#   * GPU hero    — digits + "%"
 # The redesigned claim screen is terminalio-only (its 248px column can't fit
 # the 66px face), so A-Z and "-" are no longer hero glyphs — preloading them
 # pinned ~27 dead 66px bitmaps (~8-10 KB) in the cache for nothing. AM/PM
@@ -417,7 +418,7 @@ def _hero_font():
     BDF is never re-read or re-rasterised. ``_HERO_FONT_TRIED`` guards the
     load so a missing/corrupt asset is probed at most once and never raises
     into a render path. ``load_glyphs`` runs exactly once here over
-    ``_HERO_GLYPHS`` so the first idle/claim/CPU frame doesn't pay per-glyph
+    ``_HERO_GLYPHS`` so the first idle/claim/GPU frame doesn't pay per-glyph
     rasterisation cost mid-draw.
     """
     global _HERO_FONT, _HERO_FONT_TRIED
@@ -529,7 +530,9 @@ ACTIVE_BRIGHTNESS = 178              # 0..255 — 70 %
 
 state = {
     "screen": "idle",
-    "cpu": 0, "mem": 0, "disk": 0, "temp": 0,
+    "cpu": None, "mem": None, "disk": None, "temp": None,
+    "gpu": None, "gpu_temp": None,
+    "watchdog": None,
     "ip": "-", "uptime": "-", "hostname": "droplet", "now": "--:--",
     # Detail-line fields for the combined system screen.
     "wan_latency_ms": 0, "lan_clients": 0,
@@ -570,10 +573,11 @@ state = {
               "wifi_qr_matrix": None, "wifi_ssid": "", "wifi_psk": ""},
     # Rolling sparkline history for the gauges. Each list is a ring buffer
     # capped at _SPARK_LEN; _record_sparks appends on every stats push.
-    "sparks": {"cpu": [], "mem": [], "disk": [], "temp": []},
+    "sparks": {"gpu": [], "cpu": [], "mem": [], "disk": [], "temp": [],
+               "gpu_temp": []},
 }
 
-_SPARK_LEN = 48  # design_handoff §2: 48-sample CPU sparkline
+_SPARK_LEN = 48  # 48-sample GPU sparkline
 
 touch_regions = []
 _nav_debounce_until = 0.0
@@ -666,6 +670,47 @@ def _fmt_short_ttl(s):
     return "{}:{:02d}".format(s // 60, s % 60)
 
 
+def _metric_text(value, suffix):
+    if value is None:
+        return "--"
+    return "{}{}".format(int(value), suffix)
+
+
+def _temp_color(value):
+    if value is None:
+        return LABEL_3
+    return TEXT if value < 70 else ORANGE if value < 85 else RED
+
+
+def _watchdog_status():
+    watchdog = state.get("watchdog") or {}
+    if not watchdog.get("available"):
+        return "NO DATA", LABEL_3
+    return {
+        "ok": ("OK", GREEN),
+        "healed": ("HEALED", GREEN),
+        "heal_failed": ("FAULT", ORANGE),
+        "escalated": ("CRITICAL", RED),
+        "stale": ("STALE", ORANGE),
+    }.get(watchdog.get("overall"), ("NO DATA", LABEL_3))
+
+
+def _record_sparks():
+    sparks = state["sparks"]
+    for k in ("gpu", "cpu", "mem", "disk", "temp", "gpu_temp"):
+        value = state.get(k)
+        if value is None:
+            sparks[k] = []
+            continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        sparks[k].append(value)
+        if len(sparks[k]) > _SPARK_LEN:
+            del sparks[k][0:len(sparks[k]) - _SPARK_LEN]
+
+
 def _v3_sparkline(g, x, y, w, h, series, color, fill_color):
     """Polyline sparkline with a filled area below (design_handoff §2).
 
@@ -710,7 +755,7 @@ def _v3_sparkline(g, x, y, w, h, series, color, fill_color):
 def _v3_header(g, now=None):
     """System screen header band (design_handoff §2 header).
 
-    SYSTEM eyebrow left; clock right; status pill (green OK) or alert badge
+    SYSTEM eyebrow left; clock right; watchdog status or alert badge
     (red ! + count, opens the drawer) just left of the clock; hairline at
     y=32. Returns nothing — the caller draws the columns below.
     """
@@ -737,8 +782,9 @@ def _v3_header(g, now=None):
                 (r + 6) * 2, (r + 6) * 2, _open_alerts_drawer)
     else:
         sxs = DISPLAY_W - 20 - time_w - 14
-        g.append(_circle(sxs, 15, 4, GREEN))
-        g.append(_text("OK", x=sxs - 8, y=15, scale=1, color=GREEN,
+        status, color = _watchdog_status()
+        g.append(_circle(sxs, 15, 4, color))
+        g.append(_text(status, x=sxs - 8, y=15, scale=1, color=color,
                        anchor=(1.0, 0.5)))
     _hairline(g, 20, 32, DISPLAY_W - 40, SEPARATOR)
 
@@ -828,37 +874,42 @@ def render_system():
     g.append(_rect(DIV, 46, 1, DISPLAY_H - 46 - 24, SEPARATOR))
 
     # ===== LEFT: system =====
-    _tracked(g, "CPU LOAD", x=20, y=46, scale=1, color=LABEL_3, tracking=2)
-    # CPU hero — bitmap hero font if available, else terminalio scaled up.
+    _tracked(g, "GPU LOAD", x=20, y=46, scale=1, color=LABEL_3, tracking=2)
+    # GPU hero — unknown readings use terminalio's dash glyphs.
     hero = _hero_font()
-    cpu_str = "{}%".format(int(state.get("cpu") or 0))
-    if hero is not None:
-        g.append(_text(cpu_str, x=20, y=84, scale=1, color=TEXT, anchor=(0.0, 0.5),
+    gpu = state.get("gpu")
+    gpu_str = _metric_text(gpu, "%")
+    if hero is not None and gpu is not None:
+        g.append(_text(gpu_str, x=20, y=84, scale=1, color=TEXT, anchor=(0.0, 0.5),
                        font=hero))
     else:
-        g.append(_text(cpu_str, x=20, y=84, scale=5, color=TEXT,
+        g.append(_text(gpu_str, x=20, y=84, scale=5, color=TEXT,
                        anchor=(0.0, 0.5)))
 
-    # sparkline (48-sample CPU history).
-    sp = state.get("sparks", {}).get("cpu") or []
+    # sparkline (48-sample GPU history).
+    sp = state.get("sparks", {}).get("gpu") or []
     _v3_sparkline(g, 20, 120, INW, 40, sp, ACCENT, SPARK_FILL)
 
     _hairline(g, 20, 172, INW, SEPARATOR)
 
     # tabular metrics row.
-    cams = state.get("cameras") or {}
     cols = (
-        ("MEM", "{}%".format(int(state.get("mem") or 0)), TEXT),
-        ("DISK", "{}%".format(int(state.get("disk") or 0)), TEXT),
-        ("TEMP", "{}".format(int(state.get("temp") or 0)) + "°", TEXT),
-        ("CAM", "{}/{}".format(cams.get("online") or 0,
-                               cams.get("total") or 0), GREEN),
+        ("CPU", _metric_text(state.get("cpu"), "%"), TEXT),
+        ("RAM", _metric_text(state.get("mem"), "%"), TEXT),
+        ("GPU T", _metric_text(state.get("gpu_temp"), "°C"),
+         _temp_color(state.get("gpu_temp"))),
+        ("CPU T", _metric_text(state.get("temp"), "°C"),
+         _temp_color(state.get("temp"))),
     )
     col_w = INW // 4
     for i, (lbl, val, col) in enumerate(cols):
         cxx = 20 + i * col_w
         _tracked(g, lbl, x=cxx, y=182, scale=1, color=LABEL_3, tracking=1)
         g.append(_text(val, x=cxx, y=200, scale=2, color=col))
+
+    watchdog_status, watchdog_color = _watchdog_status()
+    g.append(_text("WATCHDOG " + watchdog_status,
+                   x=20, y=226, scale=1, color=watchdog_color))
 
     # detail line.
     g.append(_text("WAN {}ms  ·  UP {}  ·  LAN {}".format(
@@ -1819,21 +1870,13 @@ def handle(msg):
         return "OK"
 
     if mode == "stats":
-        for k in ("cpu", "mem", "disk", "temp", "ip", "uptime", "hostname",
-                  "now", "wan_latency_ms", "lan_clients"):
+        for k in ("gpu", "cpu", "mem", "disk", "temp", "gpu_temp", "watchdog"):
+            if k in data:
+                state[k] = data[k]
+        for k in ("ip", "uptime", "hostname", "now", "wan_latency_ms", "lan_clients"):
             if k in data and data[k] is not None:
                 state[k] = data[k]
-        # Append latest cpu/mem/disk/temp values to the sparkline rings (the
-        # combined screen draws the 48-sample CPU history).
-        sparks = state["sparks"]
-        for k in ("cpu", "mem", "disk", "temp"):
-            try:
-                v = float(state.get(k) or 0)
-            except (TypeError, ValueError):
-                continue
-            sparks[k].append(v)
-            if len(sparks[k]) > _SPARK_LEN:
-                del sparks[k][0:len(sparks[k]) - _SPARK_LEN]
+        _record_sparks()
         # Re-anchor the local clock whenever the host pushes a fresh "now"
         # so idle-screen seconds can tick between pushes without drift.
         # Optional "date" field feeds the idle-screen date line.
