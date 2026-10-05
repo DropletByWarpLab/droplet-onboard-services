@@ -47,12 +47,12 @@ import {
   tagEventAsFace,
   openBirdseyeStream,
   openMjpegStream,
-  enableDetection,
-  disableDetection,
   deleteCamera,
   deleteEvent,
   addCamera,
   syncCamerasFromDb,
+  waitForCameraStreaming,
+  withFrigateConfigLock,
   fetchEvents,
   buildRecordingClipUrl,
   buildVodMasterUrl,
@@ -64,8 +64,12 @@ import {
   restartFrigate,
   isValidIanaTimezone,
   NoRecordingsInRangeError,
+  type CameraNoStreamReason,
   type PtzAction,
 } from "../services/frigate.client.js";
+import { adoptCameraRow, readCameraKeySnapshot } from "../services/camera-adoption.service.js";
+import { toDisplayName, toFrigateKey } from "../services/camera-key.js";
+import { normalizeMac } from "../lib/mac.js";
 import { FrigateNotFoundError } from "../types/frigate-error.js";
 
 /**
@@ -164,6 +168,7 @@ import {
   type RetentionWindows,
 } from "../services/camera-budget.service.js";
 import { isUpstreamUnavailable } from "../lib/upstream-unavailable.js";
+import { resolveRetentionDefaults } from "../services/camera-retention-defaults.js";
 import { pipeUpstreamBody } from "../lib/pipe-upstream.js";
 import { config } from "../config.js";
 import { internalBaseUrl, internalFetch } from "../lib/internal-tls.js";
@@ -204,6 +209,43 @@ const logger = createLogger("cameras-routes");
 function sendFrigateDegraded(res: Response, body: unknown): void {
   res.setHeader("X-Droplet-Degraded", "frigate-unavailable");
   res.json(body);
+}
+
+/**
+ * WARP-3511 — the same marker for a read or write that has NO honest empty
+ * answer. An empty settings form served as a 200 would be saved straight back
+ * over the camera's real configuration, so these answer 503 instead; the
+ * dashboard shows a calm "camera service restarting" state and polls again
+ * rather than retrying a 500 forever.
+ */
+function sendFrigateUnavailable(res: Response): void {
+  res.setHeader("X-Droplet-Degraded", "frigate-unavailable");
+  res.status(503).json({
+    error: "frigate_unavailable",
+    degraded: true,
+    message: "The camera service isn't responding. It may be restarting. Try again in a moment.",
+  });
+}
+
+/**
+ * The two failures every route that reads or writes a camera's Frigate config
+ * can hit, answered once: an unknown camera (404) and an unreachable or
+ * restarting Frigate (503, degraded). Returns false for anything else so the
+ * caller keeps its own handling (a real Frigate refusal is a real error, not an
+ * outage).
+ */
+function respondToConfigError(res: Response, err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes("not found")) {
+    res.status(404).json({ error: msg });
+    return true;
+  }
+  if (isUpstreamUnavailable(err)) {
+    logger.warn({ err }, "Frigate unreachable; camera configuration unavailable");
+    sendFrigateUnavailable(res);
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -268,6 +310,20 @@ function isValidEventId(id: string): boolean {
   return EVENT_ID_RE.test(id);
 }
 
+/**
+ * WARP-3506 — what the dashboard shows when a camera was added but is not
+ * producing video. Operator-facing prose, one per reason `waitForCameraStreaming`
+ * can give.
+ */
+const NO_STREAM_MESSAGES: Record<CameraNoStreamReason, string> = {
+  no_frames:
+    "The camera was added, but no video is coming from it. Check the stream address and the camera account's username and password, then add it again with the corrected details.",
+  not_started:
+    "The camera was added, but the video system did not start it. Wait a minute and refresh; if it still has no video, restart the camera system.",
+  frigate_unreachable:
+    "The camera was added, but the video system is not responding yet, so we could not confirm it is working. Check back in a minute.",
+};
+
 export function createCamerasRouter(prisma: PrismaClient): Router {
   const router = Router();
 
@@ -299,8 +355,10 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     // invalidation, and `invalidateCamerasCache()` is itself non-throwing.
     await invalidateCamerasCache();
     try {
-      const all = await prisma.camera.findMany({ select: { name: true } });
-      const removed = await syncCamerasFromDb(all.map((c) => c.name));
+      // The DB snapshot is read INSIDE Frigate's config lock (WARP-3510): the
+      // sync hands us the lock, then asks for the rows, so it can never prune
+      // against a snapshot taken before an add it queued behind.
+      const removed = await syncCamerasFromDb(() => readCameraKeySnapshot(prisma));
       if (removed.length > 0) {
         logger.info({ removed }, "Reconciled Frigate cameras after DB change");
       }
@@ -1264,7 +1322,16 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       // A tile you cannot open is worse than no tile: the grid, the home
       // widget and the group rail all read this route, so it must agree
       // with what per-camera playback will actually allow.
-      res.json({ cameras: await filterVisibleCameras(prisma, principalFromRequest(req), cameras) });
+      const visible = await filterVisibleCameras(prisma, principalFromRequest(req), cameras);
+      // WARP-3511: when Frigate could not be read every camera's status is
+      // unknown, and "all offline" served as a plain 200 is the wrong answer.
+      // Say so, in the WARP-3105 marker clients already understand. (`?.`: a
+      // list cached by the build before this field existed has no block.)
+      if (visible.some((c) => c.recording?.degraded === true)) {
+        res.setHeader("X-Droplet-Degraded", "frigate-unavailable");
+        return res.json({ cameras: visible, degraded: true });
+      }
+      res.json({ cameras: visible });
     } catch (err) {
       next(err);
     }
@@ -1277,11 +1344,33 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // `{FRIGATE_*}` placeholders in the URL, so braces are refused, and the URL
   // is fully parsed BEFORE the Frigate write so a bad one cannot leave Frigate
   // configured with no DB row.
+  //
+  // WARP-3506 / WARP-3510 — the pipeline, in order:
+  //   1. ONE key. The name the operator typed becomes the camera's Frigate key
+  //      (`toFrigateKey`: `Warp_Lab_Office` -> `warp_lab_office`) and is what
+  //      BOTH Frigate and `Camera.name` carry; the typed text is the label. It
+  //      used to be stored verbatim, so the reconcile below pruned the camera
+  //      it had just added.
+  //   2. Frigate write + the camera's row, under ONE hold of Frigate's config
+  //      lock. The row is the existing discovery placeholder for the device
+  //      (found by MAC, then by the URL's address) adopted in place — not a
+  //      duplicate that the next discovery merge would keep while deleting the
+  //      live camera. Holding the lock across both means a reconcile can never
+  //      snapshot a DB that does not yet name a camera Frigate already has.
+  //   3. The best-effort reconcile (#11).
+  //   4. Verification: `ok` only once the camera is actually producing frames.
+  //      Frigate 0.17 does not start a camera until it restarts, and a wrong
+  //      password never produces a frame; either way the camera IS added, so
+  //      the answer is a distinct, non-error 202 the dashboard can show.
   router.post("/cameras", requireRole(...CAMERA_ADMIN_ROLES), async (req, res, next) => {
     try {
-      const { name, rtspUrl: rawRtspUrl, manufacturer, model, username, password } = req.body;
+      const { name, rtspUrl: rawRtspUrl, manufacturer, model, macAddress, username, password } = req.body;
       if (!name || typeof name !== "string" || !isValidCameraName(name)) {
         return res.status(400).json({ error: "Invalid camera name (alphanumeric + underscores/hyphens, 1-64 chars)" });
+      }
+      const key = toFrigateKey(name);
+      if (!key) {
+        return res.status(400).json({ error: "Invalid camera name (needs at least one letter or number)" });
       }
       if (!rawRtspUrl || typeof rawRtspUrl !== "string") {
         return res.status(400).json({ error: "Missing rtspUrl" });
@@ -1313,6 +1402,18 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!ipAddress) {
         return res.status(400).json({ error: "rtspUrl must name a host" });
       }
+      // Optional: the device's hardware address, so the add can find the
+      // discovery placeholder by MAC when the stream URL names a hostname or a
+      // different address (WARP-3510).
+      let mac: string | null = null;
+      if (macAddress !== undefined && macAddress !== null && macAddress !== "") {
+        try {
+          mac = normalizeMac(macAddress).toLowerCase();
+        } catch {
+          return res.status(400).json({ error: "macAddress must be a MAC address" });
+        }
+      }
+
       let rtspUrl: string;
       try {
         rtspUrl = embedRtspCredentials(rawRtspUrl, username, password);
@@ -1323,40 +1424,38 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         throw err;
       }
 
-      // Add to Frigate
-      const success = await addCamera(name, rtspUrl);
-      if (!success) {
+      const adopted = await withFrigateConfigLock(async () => {
+        // Add to Frigate (and restart it: config/set alone never starts a camera).
+        const success = await addCamera(key, rtspUrl);
+        if (!success) return null;
+        return adoptCameraRow(prisma, {
+          key,
+          // The label derives from what the operator TYPED (keeps `Front-Door`).
+          displayName: toDisplayName(name),
+          ipAddress,
+          macAddress: mac,
+          manufacturer: typeof manufacturer === "string" && manufacturer ? manufacturer : null,
+          model: typeof model === "string" && model ? model : null,
+        });
+      });
+      if (!adopted) {
         return res.status(500).json({ error: "Failed to add camera to Frigate" });
       }
-
-      // Upsert DB record
-      const displayName = name.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-      await prisma.camera.upsert({
-        where: { name },
-        create: {
-          name,
-          displayName,
-          manufacturer: manufacturer || null,
-          model: model || null,
-          ipAddress,
-          enabled: true,
-          autoDiscovered: false,
-          lastSeen: new Date(),
-        },
-        update: {
-          displayName,
-          manufacturer: manufacturer || undefined,
-          model: model || undefined,
-          enabled: true,
-          lastSeen: new Date(),
-        },
-      });
 
       // #11: same best-effort prune as accept/reject/delete — without it an
       // add-only operator keeps stale orphaned Frigate entries forever.
       await reconcileFrigateCameras();
 
-      res.json({ status: "ok", camera: name });
+      const verdict = await waitForCameraStreaming(key);
+      if (!verdict.streaming) {
+        return res.status(202).json({
+          status: "added_no_stream",
+          camera: key,
+          code: verdict.reason,
+          reason: NO_STREAM_MESSAGES[verdict.reason],
+        });
+      }
+      res.json({ status: "ok", camera: key });
     } catch (err) {
       next(err);
     }
@@ -1963,7 +2062,34 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     try {
       const mac = macFromCandidateId(req.params.id);
       if (mac) {
-        const result = await mutateLiveCandidate(mac, "accept");
+        // The accept is a Frigate config write by proxy — camera-discovery adds
+        // the camera — so it holds Frigate's config lock across that call AND
+        // the DB adoption below (WARP-3510): a reconcile queued meanwhile must
+        // not snapshot a DB that does not yet name the camera Frigate now has.
+        const result = await withFrigateConfigLock(async () => {
+          const accepted = await mutateLiveCandidate(mac, "accept");
+          if (accepted.ok && accepted.camera) {
+            // The camera is in Frigate now; keep the DB in step. The MQTT
+            // camera_accepted event upserts the row too, but that's
+            // asynchronous — doing it here means the very next GET /api/cameras
+            // reflects the add. The row is the placeholder discovery filed for
+            // this device (by MAC, then address), adopted in place under the key
+            // camera-discovery used — or a new ADOPTED row if there is none.
+            const key = toFrigateKey(accepted.camera.name);
+            if (key) {
+              await adoptCameraRow(prisma, {
+                key,
+                displayName: toDisplayName(accepted.camera.name),
+                ipAddress: accepted.camera.ip,
+                macAddress: accepted.camera.mac ?? mac,
+                manufacturer: accepted.camera.manufacturer,
+                model: accepted.camera.model,
+                autoDiscovered: true,
+              });
+            }
+          }
+          return accepted;
+        });
         if (!result.ok) {
           // Mirror the upstream status so a 422 ("stream did not verify — needs
           // credentials or a corrected path") reads as an actionable message
@@ -1974,20 +2100,24 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
             error: result.message ?? "Camera discovery could not add this camera",
           });
         }
-        // The camera is in Frigate now; keep the DB in step. The MQTT
-        // camera_accepted event upserts the row too, but that's asynchronous —
-        // doing it here means the very next GET /api/cameras reflects the add.
-        await prisma.camera.updateMany({
-          where: { macAddress: { in: [mac, mac.toLowerCase()] } },
-          data: { enabled: true },
-        });
-        await reconcileFrigateCameras();
+        if (result.camera) {
+          await reconcileFrigateCameras();
+        } else {
+          // Without the camera there is nothing to file a row under, and a
+          // prune now could remove a key no row owns yet; the MQTT
+          // camera_accepted event adopts the row when it arrives.
+          logger.warn({ mac }, "camera-discovery accepted a camera without naming it; skipping the reconcile");
+          await invalidateCamerasCache();
+        }
         return res.json({ status: "accepted" });
       }
 
+      // The legacy DB row. Adoption is the explicit column (WARP-3510); `enabled`
+      // alone no longer says it. NB: a DB-only candidate has no stream URL on
+      // file, so this adopts the row but writes nothing to Frigate.
       const camera = await prisma.camera.update({
         where: { id: req.params.id },
-        data: { enabled: true },
+        data: { enabled: true, adoption: "ADOPTED" },
       });
       await reconcileFrigateCameras();
       res.json({ status: "accepted", camera: camera.name });
@@ -2032,7 +2162,32 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         return res.status(400).json({ error: credCheck.error, code: credCheck.code });
       }
 
-      const result = await submitLiveCandidateCredentials(mac, username, password);
+      const result = await withFrigateConfigLock(async () => {
+        const accepted = await submitLiveCandidateCredentials(mac, username, password);
+        const camera = accepted.camera;
+        const key = camera?.name ? toFrigateKey(camera.name) : "";
+        if (accepted.ok && camera?.name && camera.ip && key) {
+          // Same adoption as plain accept: the placeholder becomes the camera
+          // now in Frigate. A reconcile cannot run between that write and this row.
+          await adoptCameraRow(prisma, {
+            key,
+            displayName: toDisplayName(camera.name),
+            ipAddress: camera.ip,
+            macAddress: camera.mac ?? mac,
+            autoDiscovered: true,
+          });
+          return { ...accepted, adopted: true };
+        }
+        if (accepted.ok) {
+          // Older services omit the key: keep a matching row, but do not prune
+          // Frigate against a DB that may still carry its placeholder name.
+          await prisma.camera.updateMany({
+            where: { macAddress: { in: [mac, mac.toLowerCase()] } },
+            data: { enabled: true, adoption: "ADOPTED" },
+          });
+        }
+        return { ...accepted, adopted: false };
+      });
       if (!result.ok) {
         const status = result.status >= 500 && result.status !== 502 ? 502 : result.status;
         return res.status(status).json({
@@ -2040,18 +2195,8 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
           ...(result.code ? { code: result.code } : {}),
         });
       }
-      // In Frigate now — keep the DB in step, same as the plain accept. By MAC
-      // AND by the name / address discovery says it added: a static-IP camera is
-      // keyed `ip:<addr>` there and its row has no macAddress, so a MAC-only match
-      // left `enabled` false and the camera out of the list it had just joined.
-      const matches: Prisma.CameraWhereInput[] = [{ macAddress: { in: [mac, mac.toLowerCase()] } }];
-      if (result.camera?.name) matches.push({ name: result.camera.name });
-      if (result.camera?.ip) matches.push({ ipAddress: result.camera.ip });
-      await prisma.camera.updateMany({
-        where: { OR: matches },
-        data: { enabled: true },
-      });
-      await reconcileFrigateCameras();
+      if (result.adopted) await reconcileFrigateCameras();
+      else await invalidateCamerasCache();
       res.json({ status: "accepted" });
     } catch (err) {
       next(err);
@@ -2072,19 +2217,27 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         }
         // Discovery remembers the rejected MAC, but a DB row for the same
         // camera would keep it in the fallback list — the rejection has to
-        // clear both or the camera reappears.
+        // clear both or the camera reappears. Only a CANDIDATE row goes: the
+        // status is in the delete's own WHERE (WARP-3510), so an ADOPTED camera
+        // that shares the MAC — a live one — is never removed by a reject.
         await prisma.camera.deleteMany({
           where: {
             macAddress: { in: [mac, mac.toLowerCase()] },
-            autoDiscovered: true,
-            enabled: false,
+            adoption: "CANDIDATE",
           },
         });
         await reconcileFrigateCameras();
         return res.json({ status: "rejected" });
       }
 
-      await prisma.camera.delete({ where: { id: req.params.id } });
+      // Same rule for a DB row addressed by id: a reject removes a candidate,
+      // never a camera.
+      const { count } = await prisma.camera.deleteMany({
+        where: { id: req.params.id, adoption: "CANDIDATE" },
+      });
+      if (count === 0) {
+        return res.status(404).json({ error: "Camera candidate not found" });
+      }
       await reconcileFrigateCameras();
       res.json({ status: "rejected" });
     } catch (err) {
@@ -2308,7 +2461,16 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
           if (!isValidCameraName(name)) {
             return res.status(400).json({ error: "Invalid camera name in confirmed command" });
           }
-          await disableDetection(name);
+          // WARP-3511: detection is the persisted `detect.enabled` setting.
+          // Frigate 0.17 has no `/detect/disable` route to call. This is the
+          // production disable path, so an unknown camera or an unreachable
+          // Frigate is answered here exactly as on /enable.
+          try {
+            await updateCameraSettings(name, { detectEnabled: false });
+          } catch (err) {
+            if (respondToConfigError(res, err)) return;
+            throw err;
+          }
           await prisma.camera.updateMany({ where: { name }, data: { enabled: false } });
           // WARP-1286 follow-up: disable_camera is Tier-2, so THIS confirm
           // handler is the production disable path (the direct /disable route
@@ -2382,7 +2544,19 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         return res.status(404).json({ error: "Camera not found" });
       }
 
-      const events = await getRecentEvents(cameraScopeOf(res), 5, req.params.name);
+      // WARP-3511: the camera comes from the (possibly degraded) list above;
+      // its recent events are a second Frigate read that must not turn an
+      // outage into a 500 for a camera we can still describe.
+      let events: Awaited<ReturnType<typeof getRecentEvents>> = [];
+      let degraded = camera.recording?.degraded === true;
+      try {
+        events = await getRecentEvents(cameraScopeOf(res), 5, req.params.name);
+      } catch (err) {
+        if (!isUpstreamUnavailable(err)) throw err;
+        logger.warn({ err }, "Frigate unreachable; serving camera without recent events");
+        degraded = true;
+      }
+      if (degraded) res.setHeader("X-Droplet-Degraded", "frigate-unavailable");
       res.json({ ...camera, recentEvents: events });
     } catch (err) {
       next(err);
@@ -2548,7 +2722,12 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (!isValidCameraName(req.params.name)) {
         return res.status(400).json({ error: "Invalid camera name" });
       }
-      await enableDetection(req.params.name);
+      // WARP-3511: detection is the persisted `detect.enabled` setting, the
+      // same one the settings page writes. Frigate 0.17 has no
+      // `/api/<camera>/detect/enable`, so the call this used to make answered
+      // 404 every time and "Enable" never did anything. The write restarts
+      // Frigate (briefly, every camera), exactly as a settings save does.
+      await updateCameraSettings(req.params.name, { detectEnabled: true });
       await prisma.camera.updateMany({
         where: { name: req.params.name },
         data: { enabled: true },
@@ -2558,6 +2737,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       await invalidateCamerasCache();
       res.json({ status: "enabled", camera: req.params.name });
     } catch (err) {
+      if (respondToConfigError(res, err)) return;
       next(err);
     }
   });
@@ -2587,7 +2767,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
         });
       }
 
-      await disableDetection(req.params.name);
+      await updateCameraSettings(req.params.name, { detectEnabled: false });
       await prisma.camera.updateMany({
         where: { name: req.params.name },
         data: { enabled: false },
@@ -2599,6 +2779,7 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       await invalidateCamerasCache();
       res.json({ status: "disabled", camera: req.params.name });
     } catch (err) {
+      if (respondToConfigError(res, err)) return;
       next(err);
     }
   });
@@ -3044,8 +3225,9 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const settings = await getCameraSettings(req.params.name);
       res.json({ settings });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("not found")) return void res.status(404).json({ error: msg });
+      // WARP-3511: an outage is a 503 the dashboard can wait out, not a 500.
+      // There is deliberately no empty-settings fallback (see sendFrigateUnavailable).
+      if (respondToConfigError(res, err)) return;
       next(err);
     }
   });
@@ -3274,10 +3456,17 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       if (msg.includes("not found")) return void res.status(404).json({ error: msg });
       // Surface range/threshold errors as 400 so the dashboard can
       // render them inline next to the offending control.
-      if (
-        msg.includes("must be between") ||
-        msg.includes("Frigate rejected")
-      ) {
+      if (msg.includes("must be between")) {
+        return void res.status(400).json({ error: msg });
+      }
+      // WARP-3511: Frigate unreachable, or answering 5xx while it restarts.
+      // Checked BEFORE "Frigate rejected", whose message carries the status
+      // and so would otherwise turn a restart into a 400 shown against a field.
+      if (isUpstreamUnavailable(err)) {
+        logger.warn({ err }, "Frigate unreachable; camera settings not saved");
+        return void sendFrigateUnavailable(res);
+      }
+      if (msg.includes("Frigate rejected")) {
         return void res.status(400).json({ error: msg });
       }
       next(err);
@@ -3396,7 +3585,14 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       const caps = await fetchPtzCapabilities(req.params.name);
       res.json(caps);
     } catch (err) {
-      next(err);
+      // WARP-3511: a camera whose PTZ probe fails has no PTZ controls to show.
+      // That is a normal answer, not a 500 the dashboard retries forever. Only
+      // an outage carries the degraded marker, so a client can tell "unknown"
+      // from a real "no PTZ" and ask again.
+      logger.debug({ err, camera: req.params.name }, "PTZ probe failed; reporting no PTZ");
+      const none = { supported: false, supportsPanTilt: false, supportsZoom: false, presets: [] };
+      if (isUpstreamUnavailable(err)) return void sendFrigateDegraded(res, { ...none, degraded: true });
+      res.json(none);
     }
   });
 
@@ -3476,8 +3672,23 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
     requireRole(...CAMERA_CUSTODY_ROLES),
     async (_req, res, next) => {
       try {
-        res.json({ plan: await planRetentionBackfill(prisma) });
+        // WARP-3511: the dry run also says WHAT the repair would write, so the
+        // dashboard's confirm can state it. These are the repair's own
+        // effective defaults (the POST below applies the same function's
+        // result); they are configurable per box, so they are read here and
+        // never written into copy. Only the four windows a person reads.
+        const d = resolveRetentionDefaults();
+        res.json({
+          plan: await planRetentionBackfill(prisma),
+          defaults: {
+            continuousDays: d.continuousDays,
+            motionDays: d.motionDays,
+            alertsRetainDays: d.alertsRetainDays,
+            detectionsRetainDays: d.detectionsRetainDays,
+          },
+        });
       } catch (err) {
+        if (respondToConfigError(res, err)) return;
         next(err);
       }
     },
@@ -3490,8 +3701,12 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       try {
         // `noop` travels in the payload: "nothing needed doing" and "it
         // failed quietly" must not look the same to the caller.
-        res.json(await backfillCameraRetention(prisma));
+          const result = await backfillCameraRetention(prisma);
+          if (!result.noop) await invalidateCamerasCache();
+          res.json(result);
       } catch (err) {
+        // WARP-3511: an unreachable camera service is the 503 degraded answer.
+        if (respondToConfigError(res, err)) return;
         next(err);
       }
     },

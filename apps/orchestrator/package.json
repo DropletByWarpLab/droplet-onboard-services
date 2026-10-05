@@ -13,6 +13,7 @@
     "upload-name-repair": "node dist/cli/upload-name-repair.js",
     "finetune-export": "node dist/cli/finetune-export.js",
     "test": "vitest run",
+    "test:native-windows": "vitest run --config vitest.native-windows.config.ts",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",

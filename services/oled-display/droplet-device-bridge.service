@@ -135,6 +135,10 @@ StandardError=append:/var/log/droplet-device-bridge.log
 # keys never hit disk.
 StateDirectory=droplet-bridge
 StateDirectoryMode=0700
+# The storage-operation request/result spool can carry a one-time recovery key.
+# Keep it in volatile memory, shared with the root executor, never in /var/lib.
+RuntimeDirectory=droplet-bridge-pool-spool
+RuntimeDirectoryMode=0700
 # Lock down the filesystem view: readonly rootfs, private /tmp, mask
 # /proc so other users' details aren't visible.
 ProtectSystem=strict
@@ -162,6 +166,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # units already hit exactly that: droplet-egress-audit and droplet-wifi-rotate.
 # If the path ever stops being auto-created, prefix it `-` to make it optional.
 ReadWritePaths=/var/log/droplet-device-bridge.log
+ReadWritePaths=/run/droplet-storage-ops
 # WARP-843: the customer Wi-Fi writes (droplet-set-hostapd.sh /
 # droplet-set-guest-wifi.sh) land in this unit's own StateDirectory
 # (/var/lib/droplet-bridge/openwrt-attach.env), which systemd already makes

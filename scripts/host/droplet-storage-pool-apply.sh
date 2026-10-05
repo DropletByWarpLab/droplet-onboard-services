@@ -16,7 +16,7 @@
 #   bridge (droplet, sandboxed)                 this script (root)
 #   ─────────────────────────────               ─────────────────────────────
 #   writes pool-spool/request.json      ──►     reads the ONE spooled request
-#   into its own StateDirectory                 runs droplet-storage-pool.sh
+#   into a shared /run RuntimeDirectory         runs droplet-storage-pool.sh
 #   `systemctl start                            (whose hard pre-flight is the
 #    droplet-storage-pool-apply.service`        last safety gate — and whose
 #   (authorized by the narrowly-scoped          blkid/findmnt/lsblk probes now
@@ -29,8 +29,8 @@
 # 50-droplet-device-bridge.rules) and which the bridge only starts after its
 # auth-gated POST /pools/command — itself reachable only via an owner session
 # + a single-use confirm token at the orchestrator. The AI can never reach
-# this. The spool directory lives inside the bridge's 0700 droplet-owned
-# StateDirectory, so only the bridge (or root) can place a request there.
+# this. The spool directory lives in the bridge's 0700 RuntimeDirectory under
+# /run (tmpfs), so key-bearing results never reach persistent OS storage.
 #
 # Exit-code contract:
 #   0        — a request was consumed and a result was written, REGARDLESS of
@@ -46,14 +46,17 @@
 #
 # Test/dev hooks (so this is unit-testable without root or systemd):
 #   DROPLET_POOL_SPOOL_DIR=...   override the spool dir
-#                                (default /var/lib/droplet-bridge/pool-spool)
+#                                (default /run/droplet-bridge-pool-spool)
 #   DROPLET_POOL_SCRIPT=...      override the pool script path
 #                                (default /usr/local/sbin/droplet-storage-pool.sh)
+#   DROPLET_POOL_TMPDIR=...      directory for the stdout/stderr capture files
+#                                (default /run — tmpfs; WARP-3513)
 # =============================================================================
 set -euo pipefail
 
-SPOOL_DIR="${DROPLET_POOL_SPOOL_DIR:-/var/lib/droplet-bridge/pool-spool}"
+SPOOL_DIR="${DROPLET_POOL_SPOOL_DIR:-/run/droplet-bridge-pool-spool}"
 POOL_SCRIPT="${DROPLET_POOL_SCRIPT:-/usr/local/sbin/droplet-storage-pool.sh}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REQ="$SPOOL_DIR/request.json"
 RES="$SPOOL_DIR/result.json"
 
@@ -90,18 +93,84 @@ fi
 OPERATION="$(parse_request operation)"
 PARAMS_JSON="$(parse_request params)"
 [ -n "$OPERATION" ] || die "spooled request has no operation"
+if [ "$OPERATION" = "recovery_key_reveal" ] && [ -z "${DROPLET_POOL_SPOOL_DIR:-}" ]; then
+  SPOOL_FS="$(findmnt -n -o FSTYPE --target "$SPOOL_DIR" 2>/dev/null || true)"
+  [ "$SPOOL_FS" = "tmpfs" ] \
+    || die "recovery-key result requires a tmpfs spool — refusing to write the key to persistent storage"
+fi
 
-# --- Run the pool script, capturing rc / stdout / stderr -----------------------
-# The pool script's own allow-list + hard pre-flight (typed double-confirm,
-# refuse mounted / has-data / OS-disk) is the real gate — running as root here
-# is precisely what makes those blkid/findmnt probes trustworthy.
-OUT_FILE="$(mktemp)"
-ERR_FILE="$(mktemp)"
+# WARP-3513: recovery-key results must remain in tmpfs. Set up the capture
+# files before a topology refusal may write into them.
+CAPTURE_DIR="${DROPLET_POOL_TMPDIR:-/run}"
+if [ "$OPERATION" = "recovery_key_reveal" ] && [ -z "${DROPLET_POOL_TMPDIR:-}" ]; then
+  CAPTURE_FS="$(findmnt -n -o FSTYPE --target "$CAPTURE_DIR" 2>/dev/null || true)"
+  [ "$CAPTURE_FS" = "tmpfs" ] \
+    || die "recovery-key output requires a tmpfs capture directory — refusing to write the key to persistent storage"
+fi
+if [ -d "$CAPTURE_DIR" ] && [ -w "$CAPTURE_DIR" ]; then
+  OUT_FILE="$(mktemp -p "$CAPTURE_DIR")"
+  ERR_FILE="$(mktemp -p "$CAPTURE_DIR")"
+elif [ "$OPERATION" = "recovery_key_reveal" ]; then
+  die "recovery-key output capture directory is unavailable — refusing to write the key to persistent storage"
+else
+  OUT_FILE="$(mktemp)"
+  ERR_FILE="$(mktemp)"
+fi
 trap 'rm -f "$OUT_FILE" "$ERR_FILE"' EXIT
-set +e
-"$POOL_SCRIPT" "$OPERATION" "$PARAMS_JSON" >"$OUT_FILE" 2>"$ERR_FILE"
-POOL_RC=$?
-set -e
+
+# Pool/device mutations share one root-owned topology lock with the NVR writer,
+# migration job, and bridge eject path. UUID-only recovery custody never takes
+# this lock: revealing or rotating a key does not change device topology. The
+# final status check runs HERE, under the lock, immediately before the host
+# script; the bridge's earlier read is only a fast refusal, never the last gate.
+TOPOLOGY_REFUSAL_RC=""
+case "$OPERATION" in
+  recovery_key_*) ;;
+  *)
+    # shellcheck source=./droplet-storage-topology-lock.sh
+    . "$SCRIPT_DIR/droplet-storage-topology-lock.sh"
+    set +e
+    storage_topology_lock
+    LOCK_RC=$?
+    set -e
+    if [ "$LOCK_RC" -eq 1 ]; then
+      TOPOLOGY_REFUSAL_RC=79
+      printf '%s\n' "another storage operation is in progress" >"$OUT_FILE"
+      printf '%s\n' "droplet-storage-pool-apply: topology lock is busy" >"$ERR_FILE"
+    elif [ "$LOCK_RC" -ne 0 ]; then
+      TOPOLOGY_REFUSAL_RC=78
+      printf '%s\n' "recording storage could not be verified" >"$OUT_FILE"
+      printf '%s\n' "droplet-storage-pool-apply: topology lock is unavailable" >"$ERR_FILE"
+    else
+      set +e
+      python3 "$SCRIPT_DIR/droplet-recordings-drive-check.py" "$PARAMS_JSON" \
+        >"$OUT_FILE" 2>"$ERR_FILE"
+      GUARD_RC=$?
+      set -e
+      case "$GUARD_RC" in
+        0) ;;
+        77|78) TOPOLOGY_REFUSAL_RC="$GUARD_RC" ;;
+        *)
+          TOPOLOGY_REFUSAL_RC=78
+          printf '%s\n' "recording storage could not be verified" >"$OUT_FILE"
+          printf '%s\n' "droplet-storage-pool-apply: topology check failed" >"$ERR_FILE"
+          ;;
+      esac
+    fi
+    ;;
+esac
+
+# The pool script's own allow-list + hard pre-flight (typed double-confirm,
+# refuse mounted / has-data / OS-disk) remains the last execution gate. Its
+# stdout may carry a one-time recovery key, so capture stays in tmpfs.
+if [ -n "$TOPOLOGY_REFUSAL_RC" ]; then
+  POOL_RC="$TOPOLOGY_REFUSAL_RC"
+else
+  set +e
+  "$POOL_SCRIPT" "$OPERATION" "$PARAMS_JSON" >"$OUT_FILE" 2>"$ERR_FILE"
+  POOL_RC=$?
+  set -e
+fi
 
 # --- Write the result where the sandboxed bridge can read it -------------------
 # Atomic (tmp + mv in the same dir) so the bridge never reads a half-written

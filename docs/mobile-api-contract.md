@@ -366,8 +366,8 @@ To GENERATE a code, the dashboard (already authenticated) POSTs
 
 | Method | Path | Auth | Returns / body |
 |---|---|---|---|
-| GET | `/cameras` | Bearer | `{ cameras }`, the cameras this person may see; `{ cameras: [], _status: "disconnected" }` when the camera service is down (that is not "no cameras") |
-| GET | `/cameras/:name` | Bearer | full `CameraInfo` |
+| GET | `/cameras` | Bearer | `{ cameras }`, the cameras this person may see; `{ cameras: [], _status: "disconnected" }` when the camera service is down (that is not "no cameras"). When the camera service could not be read the list carries `degraded: true` and the `X-Droplet-Degraded: frigate-unavailable` header, and every `status` is unknown rather than "offline" (see "Recording state" below) |
+| GET | `/cameras/:name` | Bearer | full `CameraInfo` plus `recentEvents`; `X-Droplet-Degraded` as above |
 | GET | `/cameras/:name/snapshot` | Bearer | current JPEG frame |
 | GET | `/cameras/:name/live` | Bearer | MJPEG stream (`multipart/x-mixed-replace`, `Cache-Control: no-store`) |
 | GET | `/cameras/:name/events` | Bearer | events for one camera |
@@ -390,6 +390,30 @@ header; the stream is per-connection and never cached) and stills come from
 `snapshot`. Camera routes are scoped per person: a client only sees the cameras
 it is granted. A save or download asked by a role that is not owner or admin
 answers `403 { code: "CAMERA_CUSTODY_REQUIRED" }`.
+
+**Recording state (`CameraInfo.recording`, WARP-3511).** Every camera carries what
+it is keeping, from the same camera-service reading as `status`, so the two cannot
+disagree about whether anything is being saved. `null` always means "not known",
+never zero.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `mode` | `continuous`, `motion`, `events`, `off`, or `null` | Named for the broadest open retention window: `continuous` keeps everything, `motion` keeps segments with motion, `events` keeps only footage that overlaps an alert or detection, `off` keeps nothing. `null` only when `degraded` |
+| `retentionDays` | `{ continuous, motion, alerts, detections }` or `null` | Days each window keeps footage, as configured (0 closes a window). Present even when `mode` is `off`. `null` only when `degraded` |
+| `lastSegmentAt` | ISO string or `null` | When the newest saved segment ended, from a short recent window. `null` means unread or none was found there; check `lastSegmentReadFailed` before claiming no recent footage |
+| `lastSegmentReadFailed` | optional boolean | `true` when the recent-segment read failed. Show "Last save unavailable", never "Nothing saved recently"; this does not invalidate the mode and retention readings |
+| `usedBytes` | number or `null` | Bytes of footage on disk. `null` means none yet, or not known, and is never 0 |
+| `bytesPerDay` | number or `null` | The measured write rate scaled to a day. `null` means not measured yet |
+| `degraded` | boolean | The camera service could not be read. Every other field, and `status`, is unknown: show "service unavailable", never a recording or "not saving" claim |
+
+A degraded list is not cached, so it heals on the next poll. `GET` and `PATCH
+/cameras/:name/settings` answer `503 { error: "frigate_unavailable", degraded: true }`
+with the same header (an empty settings form served as 200 would be saved back over
+the real configuration), and `GET /cameras/:name/ptz` answers
+`{ supported: false, ... }`, adding `degraded: true` only when the camera service is
+unreachable. A camera with no PTZ is a normal answer, not an error. Retention
+windows and detection FPS have one set of limits for the service and the clients
+(`@droplet/shared-types`: detection FPS 1 to 30, every retention window 0 to 90 days).
 
 **Event still (`GET /cameras/events/:eventId/thumbnail`).** `:eventId` is a
 Frigate event id, and `thumbnail_url` on `/cameras/clips` points here. Its errors
@@ -1218,7 +1242,8 @@ Source: `apps/orchestrator/src/services/ws-bridge.service.ts`.
 > Backed by the native PM module owned by the orchestrator
 > ([ADR-026](ADR-026-native-pm-supersedes-plane.md), superseding the embedded
 > Plane stack). The mobile read contract below is unchanged — only the backend
-> behind it changed.
+> behind it changed. WARP-3371 only ever *adds* fields (`next_cursor`, `total`)
+> and an optional `cursor`/`limit` pair to the work-items list.
 
 V1 = read-only on mobile. The orchestrator serves PM from its own Postgres
 (`Pm*` Prisma models) via the native `/api/pm/*` routes and transforms the
@@ -1280,15 +1305,27 @@ Paginated list of projects under a workspace.
 }
 ```
 
-### `GET /api/mobile/pm/work-items?workspace=<slug>&project_id=<id>&state=<id>&assignee=<id>&per_page=<n>`
+### `GET /api/mobile/pm/work-items?workspace=<slug>&project_id=<id>&state=<id>&assignee=<id>&limit=<n>&cursor=<c>`
 
-Paginated list of work items (issues/tickets).
+Paginated list of work items (issues/tickets). Ordered by the board order
+(`sortOrder`, then `id`), which is stable across pages.
 
 **Query params:**
 - `workspace` (required), `project_id` (required).
 - `state` (optional) — filter by state. Accepts either the native `PmState` id (UUID) **or**, for backwards compatibility, the legacy Plane state name/slug (e.g. `in_progress` / `In Progress`), which is resolved to the matching state server-side (WARP-888). An unrecognised value yields an empty list rather than an error.
 - `assignee` (optional) — filter by assignee id.
-- `per_page` (optional) — 1..100, default 50.
+- `limit` (optional) — 1..100, **default 50**. `per_page` is the older name for
+  the same parameter and is still accepted; `limit` wins if both are sent.
+  A non-numeric or out-of-range value is clamped into `1..100` (it is not an
+  error), exactly as before.
+- `cursor` (optional, WARP-3371) — the `next_cursor` of the previous response.
+  Opaque: never parse or build one. A cursor the list did not issue answers
+  `400 { "code": "PM_INVALID_CURSOR" }`.
+
+A client that sends neither `limit`/`per_page` nor `cursor` gets the first 50
+items — the pre-cursor behaviour, byte for byte in `work_items` — plus the two
+additive fields below, which it may ignore. To read **every** item, repeat the
+request with `cursor=<next_cursor>` until `next_cursor` is `null`.
 
 **Response:**
 ```json
@@ -1303,9 +1340,15 @@ Paginated list of work items (issues/tickets).
       "created_at": "<iso8601>",
       "updated_at": "<iso8601>"
     }
-  ]
+  ],
+  "next_cursor": "<opaque>" | null,
+  "total": 0
 }
 ```
+
+`next_cursor` is `null` on the last page. `total` is the exact number of work
+items matching the filters — the size of the whole set, never of this page — so a
+client can say "50 of 250" instead of silently stopping at the first page.
 
 ### `GET /api/mobile/pm/work-items/{id}?workspace=<slug>&project_id=<id>`
 

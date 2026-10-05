@@ -35,13 +35,21 @@ vi.mock("../config.js", () => ({
 const fetchConfigMock = vi.fn();
 const fetchRawConfigYamlMock = vi.fn();
 const saveRawConfigMock = vi.fn();
+const configLockMock = vi.fn();
 
 vi.mock("./frigate.client.js", () => ({
   fetchConfig: () => fetchConfigMock(),
   fetchRawConfigYaml: () => fetchRawConfigYamlMock(),
-  saveRawConfig: (yamlText: string) => saveRawConfigMock(yamlText),
+  saveRawConfig: (yamlText: string, preImage?: string) => saveRawConfigMock(yamlText, preImage),
+  // WARP-3510: a settings save is a Frigate config write, so it takes the lock.
+  withFrigateConfigLock: (section: () => Promise<unknown>) => configLockMock(section),
 }));
 
+import {
+  CAMERA_DETECT_FPS_MAX,
+  CAMERA_DETECT_FPS_MIN,
+  CAMERA_RETENTION_DAYS_MAX,
+} from "@droplet/shared-types";
 import {
   getCameraSettings,
   updateCameraSettings,
@@ -121,6 +129,7 @@ function saved(): any {
 }
 
 beforeEach(() => {
+  configLockMock.mockReset().mockImplementation((section: () => Promise<unknown>) => section());
   fetchConfigMock.mockReset().mockImplementation(async () => resolvedConfig());
   fetchRawConfigYamlMock.mockReset().mockImplementation(async () => AUTHORED_YAML);
   saveRawConfigMock
@@ -216,7 +225,7 @@ describe("retention writes target the keys Frigate 0.17 expires against", () => 
   it("rejects an out-of-range window without saving anything", async () => {
     await expect(
       updateCameraSettings("front_door", { continuousRetainDays: 400 }),
-    ).rejects.toThrow(/between 0 and 365/);
+    ).rejects.toThrow(/between 0 and 90/);
 
     expect(saveRawConfigMock).not.toHaveBeenCalled();
   });
@@ -231,6 +240,65 @@ describe("retention writes target the keys Frigate 0.17 expires against", () => 
     await expect(
       updateCameraSettings("front_door", { continuousRetainDays: 30 }),
     ).rejects.toThrow(/Frigate rejected the config: 400/);
+  });
+});
+
+/**
+ * WARP-3511 — the service and the dashboard's sliders drew their ranges from
+ * two sets of numbers (FPS 1–15 vs 1–30, retention 0–90 vs 0–365). Both now
+ * read `@droplet/shared-types`, and these pin the edges of what the service
+ * accepts: the largest value the slider can reach is accepted, one past it is
+ * refused.
+ */
+describe("settings ranges match what the dashboard can express", () => {
+  it("the shared limits are the documented ones", () => {
+    expect(CAMERA_DETECT_FPS_MIN).toBe(1);
+    expect(CAMERA_DETECT_FPS_MAX).toBe(30);
+    expect(CAMERA_RETENTION_DAYS_MAX).toBe(90);
+  });
+
+  it.each([
+    "continuousRetainDays",
+    "motionRetainDays",
+    "alertsRetainDays",
+    "detectionsRetainDays",
+    "snapshotRetainDays",
+  ] as const)("%s accepts 0 and 90 days", async (field) => {
+    await updateCameraSettings("front_door", { [field]: 0 });
+    await updateCameraSettings("front_door", { [field]: 90 });
+    expect(saveRawConfigMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    "continuousRetainDays",
+    "motionRetainDays",
+    "alertsRetainDays",
+    "detectionsRetainDays",
+    "snapshotRetainDays",
+  ] as const)("%s refuses 91 days and negative values, saving nothing", async (field) => {
+    await expect(updateCameraSettings("front_door", { [field]: 91 })).rejects.toThrow(
+      /between 0 and 90/,
+    );
+    await expect(updateCameraSettings("front_door", { [field]: -1 })).rejects.toThrow(
+      /between 0 and 90/,
+    );
+    expect(saveRawConfigMock).not.toHaveBeenCalled();
+  });
+
+  it("detection FPS accepts 1 and 30", async () => {
+    await updateCameraSettings("front_door", { detectFps: 1 });
+    await updateCameraSettings("front_door", { detectFps: 30 });
+    expect(saveRawConfigMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("detection FPS refuses 0 and 31, saving nothing", async () => {
+    await expect(updateCameraSettings("front_door", { detectFps: 0 })).rejects.toThrow(
+      /between 1 and 30/,
+    );
+    await expect(updateCameraSettings("front_door", { detectFps: 31 })).rejects.toThrow(
+      /between 1 and 30/,
+    );
+    expect(saveRawConfigMock).not.toHaveBeenCalled();
   });
 });
 
@@ -281,6 +349,55 @@ describe("zone + mask edits still round-trip", () => {
     ).rejects.toThrow(/at least 3/);
 
     expect(saveRawConfigMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("a settings save is a Frigate config write (WARP-3510)", () => {
+  it("holds the config lock across the whole read-modify-write", async () => {
+    // Without it a settings save and a camera add/delete/prune overlap, read
+    // the same YAML, and the later save undoes the earlier one.
+    let locked = false;
+    const order: string[] = [];
+    configLockMock.mockImplementation(async (section: () => Promise<unknown>) => {
+      locked = true;
+      try {
+        return await section();
+      } finally {
+        locked = false;
+      }
+    });
+    fetchRawConfigYamlMock.mockImplementation(async () => {
+      order.push(locked ? "read:locked" : "read:UNLOCKED");
+      return AUTHORED_YAML;
+    });
+    saveRawConfigMock.mockImplementation(async () => {
+      order.push(locked ? "save:locked" : "save:UNLOCKED");
+      return { ok: true, status: 200, text: async () => "" };
+    });
+
+    await updateCameraSettings("front_door", { detectFps: 8 });
+
+    expect(configLockMock).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["read:locked", "save:locked"]);
+  });
+
+  it("hands the YAML it replaces to saveRawConfig as the pre-image", async () => {
+    await updateCameraSettings("front_door", { detectFps: 8 });
+
+    expect(saveRawConfigMock.mock.calls.at(-1)![1]).toBe(AUTHORED_YAML);
+  });
+
+  it("addresses the camera by its canonical Frigate key", async () => {
+    await updateCameraSettings("Front_Door", { detectFps: 8 });
+
+    expect(saved().cameras.front_door.detect.fps).toBe(8);
+    expect(saved().cameras.Front_Door).toBeUndefined();
+  });
+
+  it("reads a camera's settings by its canonical key too", async () => {
+    const s = await getCameraSettings("Front_Door");
+
+    expect(s.continuousRetainDays).toBe(7);
   });
 });
 

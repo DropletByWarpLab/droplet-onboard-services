@@ -53,7 +53,7 @@ vi.mock("../services/frigate.client.js", () => ({
   fetchKnownPlates: vi.fn(), fetchFaceImage: vi.fn(), deleteKnownFace: vi.fn(),
   deleteFaceImage: vi.fn(), deleteKnownPlate: vi.fn(), nameKnownPlate: vi.fn(),
   regenerateEventDescription: vi.fn(), tagEventAsFace: vi.fn(), openBirdseyeStream: vi.fn(),
-  openMjpegStream: vi.fn(), enableDetection: vi.fn(), disableDetection: vi.fn(),
+  openMjpegStream: vi.fn(),
   deleteCamera: vi.fn(), addCamera: vi.fn(), syncCamerasFromDb: vi.fn().mockResolvedValue([]),
   fetchEvents: vi.fn(), buildRecordingClipUrl: vi.fn(), buildVodMasterUrl: vi.fn(),
   buildVodSegmentUrl: vi.fn(), fetchHlsPlaylist: vi.fn(), fetchPtzCapabilities: vi.fn(),
