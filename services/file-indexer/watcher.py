@@ -13,6 +13,10 @@ WARP-1264: a watched groupfolder id is resolved to its owning Department
 (zero reindex — see `_lookup_department_for_groupfolder`); any other kind
 emits `__dept_<uuid>__`. An unrecognized groupfolder id is skipped, never
 guessed into a corpus.
+
+The SMB share is watched separately at /data/droplet-share, under the
+__droplet_share__ sentinel and /Droplet/... display paths. Search readers
+must prove the caller's current Nextcloud access before exposing its text.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ import logging
 import mimetypes
 import os
 import re
+import stat
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -35,7 +40,13 @@ from watchdog.events import FileDeletedEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 from watchdog.observers.polling import PollingObserver
 
-from config import NEXTCLOUD_DATA_ROOT, SHARED_FOLDER_NAME, HOUSEHOLD_USER_ID
+from config import (
+    NEXTCLOUD_DATA_ROOT, SHARED_FOLDER_NAME, HOUSEHOLD_USER_ID,
+    DROPLET_SHARE_ROOT, DROPLET_SHARE_STORAGE_ID, DROPLET_SHARE_USER_ID,
+)
+from shared_file import (
+    shared_file_snapshot, UnsafeSharedFile, OversizedSharedFile, SharedFileChanged,
+)
 from extractors.registry import EXTRACTOR_CAPABILITY, dispatch
 from chunker import chunk_spans, format_chunk_with_header
 from embedder import embed_texts
@@ -164,14 +175,15 @@ class WatchTarget:
     """A watched file resolved to its index identity.
 
     - ``index_user``: FileContentChunk/FileIndexStatus owner — the Nextcloud
-      home user, or the ``__household__`` sentinel for groupfolder content.
+      home user, a groupfolder sentinel, or ``__droplet_share__`` for SMB.
     - ``stored_path``: display path persisted on the chunk rows —
       ``/<relpath>`` for home files, ``/<SHARED_FOLDER_NAME>/<relpath>`` for
       groupfolder files (the path household members see in their own home).
     - ``relpath``: path relative to the watched subtree (logging + MQTT).
     - ``cache_path``: the ``oc_filecache.path`` value used to resolve the
       Nextcloud numeric file id.
-    - ``home_user``: the NC home owner for home files; None for groupfolders.
+    - ``home_user``: the NC home owner for home files; None for shared trees.
+    - ``storage_id``: exact Nextcloud storage identity for external files.
     """
 
     index_user: str
@@ -179,12 +191,28 @@ class WatchTarget:
     relpath: str
     cache_path: str
     home_user: Optional[str]
+    storage_id: Optional[str] = None
 
 
 def _parse_watch_target(absolute_path: str) -> Optional[WatchTarget]:
     """Parse an absolute data-dir path into a WatchTarget (or None)."""
     try:
-        rel = os.path.relpath(absolute_path, NEXTCLOUD_DATA_ROOT)
+        shared_relative = Path(os.path.abspath(absolute_path)).relative_to(
+            Path(os.path.abspath(DROPLET_SHARE_ROOT))
+        ).as_posix()
+    except ValueError:
+        shared_relative = None
+    if shared_relative and shared_relative != ".":
+        return WatchTarget(
+            index_user=DROPLET_SHARE_USER_ID,
+            stored_path=f"/Droplet/{shared_relative}",
+            relpath=shared_relative,
+            cache_path=shared_relative,
+            home_user=None,
+            storage_id=DROPLET_SHARE_STORAGE_ID,
+        )
+    try:
+        rel = os.path.relpath(absolute_path, NEXTCLOUD_DATA_ROOT).replace(os.sep, "/")
     except ValueError:
         return None
     m = USER_FILES_PATTERN.match(rel)
@@ -402,9 +430,28 @@ def _resolve_gf_file_id(cache_path: str) -> int | None:
 
 def _resolve_file_id(target: WatchTarget) -> int | None:
     """Resolve the Nextcloud numeric file id for either watch layout."""
+    if target.storage_id is not None:
+        return _resolve_external_file_id(target.storage_id, target.cache_path)
     if target.home_user is not None:
         return _resolve_nc_file_id(target.home_user, target.relpath)
     return _resolve_gf_file_id(target.cache_path)
+
+
+def _resolve_external_file_id(storage_id: str, cache_path: str) -> int | None:
+    """Resolve only the configured external storage, never a same-name file."""
+    try:
+        with _get_nc_conn().cursor() as cur:
+            cur.execute(
+                "SELECT f.fileid FROM public.oc_filecache f "
+                "JOIN public.oc_storages s ON s.numeric_id = f.storage "
+                "WHERE s.id = %s AND f.path = %s",
+                (storage_id, cache_path),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+    except Exception as error:
+        logger.warning("Failed to resolve external fileId for %s: %s", cache_path, error)
+        return None
 
 
 # ── WARP-1139: explicit per-file index status (best-effort writes) ──
@@ -590,6 +637,40 @@ class IndexHandler(FileSystemEventHandler):
         target = _parse_watch_target(path)
         if not target:
             return
+        if _is_ignored_basename(os.path.basename(target.relpath)):
+            return
+
+        if target.index_user == DROPLET_SHARE_USER_ID:
+            try:
+                source_stat = os.lstat(path)
+            except OSError:
+                return
+            if stat.S_ISREG(source_stat.st_mode) and source_stat.st_size == 0:
+                delete_chunks_for_path(target.index_user, target.stored_path)
+                _set_status(target, "skipped", reason="empty_file")
+                return
+            # Nextcloud discovers out-of-band writes on access. The shared
+            # retry sweep resumes these files once their real IDs exist.
+            if not _resolve_file_id(target):
+                _set_status(target, "failed", reason="nc_file_id_unresolved")
+                return
+            try:
+                with shared_file_snapshot(DROPLET_SHARE_ROOT, target.relpath) as snapshot:
+                    self._index_target(snapshot, target)
+            except SharedFileChanged:
+                # A still-running SMB copy can outlast the debounce window.
+                # Retry the final bytes even if its last event was coalesced.
+                delete_chunks_for_path(target.index_user, target.stored_path)
+                _set_status(target, "failed", reason="shared_file_changed")
+            except (UnsafeSharedFile, OversizedSharedFile, OSError) as error:
+                delete_chunks_for_path(target.index_user, target.stored_path)
+                reason = "oversized" if isinstance(error, OversizedSharedFile) else "unsafe_shared_file"
+                _set_status(target, "skipped", reason=reason)
+            return
+
+        self._index_target(path, target)
+
+    def _index_target(self, path: str, target: WatchTarget) -> None:
 
         # Skip hidden files, part files (Nextcloud uploads in progress), and tiny files.
         basename = os.path.basename(target.relpath)
@@ -749,7 +830,7 @@ def _skip_verdict_is_stale(capability: Optional[str]) -> bool:
 
 def iter_watch_paths() -> Iterator[str]:
     """Yield the absolute path of every file in the watched subtrees:
-    ``{root}/{user}/files/**`` and ``{root}/__groupfolders/**``.
+    ``{root}/{user}/files/**``, ``{root}/__groupfolders/**``, and the SMB share.
 
     Walking only these subtrees (instead of the whole data dir) keeps the
     scan away from `appdata_*` previews and trash/version trees.
@@ -758,7 +839,7 @@ def iter_watch_paths() -> Iterator[str]:
     try:
         entries = sorted(os.listdir(root))
     except OSError:
-        return
+        entries = []
     for entry in entries:
         base = (
             os.path.join(root, entry)
@@ -770,6 +851,12 @@ def iter_watch_paths() -> Iterator[str]:
         for dirpath, _dirnames, filenames in os.walk(base):
             for fn in filenames:
                 yield os.path.join(dirpath, fn)
+    # Do not descend directory links; descriptor-based capture additionally
+    # refuses file links and protects against a link swapped after this walk.
+    for dirpath, dirnames, filenames in os.walk(DROPLET_SHARE_ROOT, followlinks=False):
+        dirnames[:] = [name for name in dirnames if not os.path.islink(os.path.join(dirpath, name))]
+        for filename in filenames:
+            yield os.path.join(dirpath, filename)
 
 
 def reconcile_index(handler: IndexHandler | None = None) -> dict:
@@ -901,6 +988,35 @@ def backfill_unseen(handler: IndexHandler) -> int:
     return queued
 
 
+def retry_shared_files(handler: IndexHandler) -> int:
+    """Retry shared files after Nextcloud discovers them; purge offline deletes."""
+    if not _startup_reconcile_done.is_set() or not os.path.isdir(DROPLET_SHARE_ROOT):
+        return 0
+    try:
+        status_map = fetch_index_status_map()
+    except Exception as error:
+        logger.warning("shared retry: cannot read FileIndexStatus: %s", error)
+        return 0
+    queued = 0
+    for (owner, stored_path), row in status_map.items():
+        if owner != DROPLET_SHARE_USER_ID or not stored_path.startswith("/Droplet/"):
+            continue
+        path = os.path.join(DROPLET_SHARE_ROOT, *stored_path[len("/Droplet/"):].split("/"))
+        target = _parse_watch_target(path)
+        if not target or target.stored_path != stored_path:
+            continue
+        if not os.path.lexists(path):
+            handler.on_deleted(FileDeletedEvent(path))
+            continue
+        if row[0] == "failed" and len(row) > 2 and row[2] in {
+            "nc_file_id_unresolved", "shared_file_changed",
+        }:
+            if _resolve_file_id(target):
+                handler._enqueue_index(path)
+                queued += 1
+    return queued
+
+
 def start_watcher() -> Observer:
     """Start watching the Nextcloud data root for file changes.
 
@@ -920,6 +1036,8 @@ def start_watcher() -> Observer:
     else:
         observer = Observer()
     observer.schedule(handler, NEXTCLOUD_DATA_ROOT, recursive=True)
+    if os.path.isdir(DROPLET_SHARE_ROOT):
+        observer.schedule(handler, DROPLET_SHARE_ROOT, recursive=True)
     observer.start()
     logger.info("Watching %s for file changes", NEXTCLOUD_DATA_ROOT)
     # WARP-3425: the never-seen backfill rides the debounce scheduler's default
@@ -931,6 +1049,14 @@ def start_watcher() -> Observer:
             minutes=BACKFILL_INTERVAL_MINUTES,
             args=(handler,),
             id="warp3425-backfill-unseen",
+            replace_existing=True,
+        )
+        _get_debounce_scheduler().add_job(
+            retry_shared_files,
+            trigger="interval",
+            seconds=30,
+            args=(handler,),
+            id="droplet-share-retry",
             replace_existing=True,
         )
     return observer
