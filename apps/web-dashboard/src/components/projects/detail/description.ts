@@ -37,7 +37,10 @@ export function descriptionToText(html: string | null): string {
     .replace(/<\/p>\s*/gi, "\n\n")
     .replace(/<li[^>]*>/gi, "- ")
     .replace(/<\/(li|ul|ol|h[1-6]|blockquote|pre)>\s*/gi, "\n")
-    .replace(/<[^>]+>/g, "")
+    // Drop incomplete trailing tags too. Entity decoding happens afterwards:
+    // literal angle brackets in user text remain plain editor text and are
+    // escaped again by textToDescriptionHtml before any HTML is stored.
+    .replace(/<[^>]*(?:>|$)/g, "")
     .replace(/&(amp|lt|gt|quot|nbsp|#39);/g, (m) => ENTITIES[m] ?? m)
     .replace(/\n{3,}/g, "\n\n")
     .trim();

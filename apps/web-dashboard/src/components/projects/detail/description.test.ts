@@ -44,6 +44,13 @@ describe("descriptionToText", () => {
       expect(descriptionToText(textToDescriptionHtml(text))).toBe(text);
     }
   });
+
+  it("drops unterminated tags while keeping encoded markup as plain editor text", () => {
+    expect(descriptionToText("<p>Kept</p><script")).toBe("Kept");
+    const plain = descriptionToText("<p>&lt;script&gt;literal&lt;/script&gt;</p>");
+    expect(plain).toBe("<script>literal</script>");
+    expect(textToDescriptionHtml(plain)).toBe("<p>&lt;script&gt;literal&lt;/script&gt;</p>");
+  });
 });
 
 describe("descriptionIsPlain", () => {
