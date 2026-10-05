@@ -15,6 +15,8 @@ cd edge-platform
 
 This single command provisions a fresh device (router host, inference host, or Linux dev machine) with everything needed to run the Droplet stack.
 
+Deploying behind an external RB5009 edge router (`setup.sh --edge-router`)? Follow [`docs/EDGE_ROUTER_DEPLOY.md`](../docs/EDGE_ROUTER_DEPLOY.md).
+
 ---
 
 ## What `setup.sh` does
