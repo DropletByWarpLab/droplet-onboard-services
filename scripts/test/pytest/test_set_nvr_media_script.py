@@ -53,17 +53,22 @@ pytestmark = pytest.mark.skipif(BASH is None, reason="bash not available")
 
 def _run(target, env_file: Path, *, compose: Path | None = None,
          root_dev: str | None = None, extra: dict | None = None):
+    lock_file = env_file.parent / "recordings-topology.lock"
+    lock_file.touch(exist_ok=True)
     env = dict(os.environ)
     env.update({
         "DROPLET_NVR_MEDIA_ENV_FILE": str(env_file),
         # Never let a test recreate a container.
         "DROPLET_NVR_MEDIA_SKIP_RECREATE": "1",
         "DROPLET_NVR_MEDIA_COMPOSE_FILE": str(compose if compose else COMPOSE),
+        "DROPLET_STORAGE_TOPOLOGY_LOCK_FILE": str(lock_file),
     })
     if root_dev is not None:
         env["DROPLET_NVR_MEDIA_ROOT_DEV"] = root_dev
     if extra:
         env.update(extra)
+    from _topology_lock_test_support import add_trusted_stat_env
+    env = add_trusted_stat_env(env, env_file.parent / "topology-bin", lock_file)
     argv = [BASH, str(SCRIPT)]
     if target is not None:
         argv.append(target)
@@ -699,13 +704,13 @@ class _World:
             stub = self.stubs / name
             stub.write_text("#!/usr/bin/env bash\n" + body.lstrip("\n"),
                             encoding="utf-8", newline="\n")
-            os.chmod(stub, 0o755)
+            os.chmod(stub, 0o700)
         # Pin the script's python3 to the interpreter running pytest (house
         # style: test_storage_pool_script.py).
         py = self.stubs / "python3"
         py.write_text('#!/usr/bin/env bash\nexec "%s" "$@"\n' % Path(sys.executable).as_posix(),
                       encoding="utf-8", newline="\n")
-        os.chmod(py, 0o755)
+        os.chmod(py, 0o700)
 
     def env(self, extra: dict | None = None) -> dict:
         env = {k: v for k, v in os.environ.items()
@@ -1285,7 +1290,7 @@ def test_apply_recurses_the_project_id_over_existing_content(tmp_path):
 def test_apply_tightens_a_loose_existing_recordings_dir(tmp_path):
     w = _make_world(tmp_path)
     w.nvr.mkdir()
-    os.chmod(w.nvr, 0o755)
+    os.chmod(w.nvr, 0o700)
     _applied(w)
     assert stat.S_IMODE(w.nvr.stat().st_mode) == 0o700
 
@@ -1468,12 +1473,12 @@ def test_apply_refuses_a_symlinked_recordings_dir(tmp_path):
     w = _make_world(tmp_path)
     victim = tmp_path / "victim-dir"
     victim.mkdir()
-    os.chmod(victim, 0o755)
+    os.chmod(victim, 0o700)
     w.nvr.symlink_to(victim)
     before = _snapshot(w)
     _refused(_run_writer(w, *_apply_args()), "bad_mount")
     assert _snapshot(w) == before
-    assert stat.S_IMODE(victim.stat().st_mode) == 0o755
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o700
     assert _calls(w, "chattr") == [] and _calls(w, "quota") == []
 
 
@@ -2296,6 +2301,9 @@ def _mutant(tmp_path: Path, needle: str, replacement: str) -> Path:
     assert src.count(needle) == 1, f"guard shape changed — update this mutation test: {needle!r}"
     mutated = tmp_path / "mutated.sh"
     mutated.write_text(src.replace(needle, replacement), encoding="utf-8", newline="\n")
+    (tmp_path / "droplet-storage-topology-lock.sh").write_text(
+        (REPO_ROOT / "scripts" / "host" / "droplet-storage-topology-lock.sh").read_text(
+            encoding="utf-8"), encoding="utf-8", newline="\n")
     return mutated
 
 

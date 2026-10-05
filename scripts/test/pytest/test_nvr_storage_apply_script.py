@@ -78,7 +78,7 @@ class Rig:
         self.spool.mkdir()
         self.writer = tmp_path / "writer-stub.sh"
         self.writer.write_text(WRITER_STUB, encoding="utf-8", newline="\n")
-        os.chmod(self.writer, 0o755)
+        os.chmod(self.writer, 0o700)
         self.argv_log = tmp_path / "writer-argv.txt"
         self.topology_lock = tmp_path / "recordings-topology.lock"
         self.topology_lock.touch()
@@ -699,6 +699,9 @@ def _mutant(tmp_path: Path, needle: str, replacement: str) -> Path:
     mutated = tmp_path / "mutated.sh"
     mutated.write_text(src.replace(needle, replacement), encoding="utf-8",
                        newline="\n")
+    (tmp_path / "droplet-storage-topology-lock.sh").write_text(
+        (REPO_ROOT / "scripts" / "host" / "droplet-storage-topology-lock.sh").read_text(
+            encoding="utf-8"), encoding="utf-8", newline="\n")
     return mutated
 
 

@@ -1189,8 +1189,8 @@ _EJECT_REFUSAL = "this drive holds your camera recordings — it cannot be eject
 
 
 @pytest.fixture
-def automount(nvr):
-    """A fake automount state file with the bay drive and an unrelated USB drive."""
+def automount(nvr, monkeypatch):
+    """Registered drives plus an independent model of their kernel mounts."""
     state = nvr.tmp / "mounts.json"
     state.write_text(json.dumps({"mounts": [
         {"uuid": _BAY_UUID, "mount": _BAY_MOUNT,
@@ -1200,6 +1200,17 @@ def automount(nvr):
     ]}))
     nvr.bridge._AUTOMOUNT_STATE_PATH = str(state)
     nvr.state_path = state
+    # Eject validates the kernel mount/device before querying NVR status. These
+    # tests never mount host drives; model that topology separately from the
+    # writable automount registry so a stale entry cannot validate itself.
+    nvr.mounted_devices = {
+        _BAY_MOUNT: "/dev/mapper/droplet-bay-ab12cd34",
+        "/mnt/droplet/usb-ffff0000": "/dev/sdc1",
+    }
+    monkeypatch.setattr(nvr.bridge.os.path, "ismount",
+                        lambda path: path in nvr.mounted_devices)
+    monkeypatch.setattr(nvr.bridge, "_device_at_mountpoint",
+                        lambda path: nvr.mounted_devices.get(path))
     return nvr
 
 
@@ -1238,6 +1249,7 @@ def test_eject_guard_also_matches_on_the_backing_device(automount):
     state = json.loads(nvr.state_path.read_text())
     state["mounts"][0]["mount"] = "/mnt/droplet/some-other-spelling"
     nvr.state_path.write_text(json.dumps(state))
+    nvr.mounted_devices["/mnt/droplet/some-other-spelling"] = "/dev/mapper/droplet-bay-ab12cd34"
     assert nvr.bridge.eject_drive(_BAY_UUID) == (False, _EJECT_REFUSAL)
 
 
