@@ -22,10 +22,13 @@ Wants=docker.service
 Type=simple
 ExecStart=/usr/local/sbin/droplet-openwrt-watch
 # The watcher exits when the docker events stream ends (dockerd restart) or
-# before docker is up at boot; always come back. 5s spacing keeps the boot
-# retry loop under systemd's default start-limit window.
+# before docker is up at boot; always come back. 30s spacing (WARP-3839): the
+# old 5s flooded the journal on a box with no running droplet-openwrt (external
+# edge router), where the stream ends over and over; the watcher only needs to be
+# back before the next container start, and 30s can never trip systemd's
+# default start-limit (5 starts / 10s).
 Restart=always
-RestartSec=5
+RestartSec=30
 
 # --- Hardening ---
 # Needs: the docker socket (AF_UNIX), systemctl to PID 1 (AF_UNIX), and nft

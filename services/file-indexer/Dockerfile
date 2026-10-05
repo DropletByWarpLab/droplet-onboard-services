@@ -6,11 +6,11 @@
 # (orchestrator, mcp-server, web-dashboard, file-indexer, ai-gateway)
 # so BuildKit resolves it to ONE compile per builder/arch instead of
 # five. Keep it in lockstep across those five Dockerfiles.
-FROM debian:bookworm-slim AS fips-builder
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS fips-builder
 COPY docker/fips/build-openssl-fips.sh /tmp/build-openssl-fips.sh
 RUN sh /tmp/build-openssl-fips.sh /out
 
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d
 
 # Build context is the monorepo root (see docker-compose.yml) so that
 # `proto/` is visible alongside `services/file-indexer/`. All COPY paths
@@ -50,11 +50,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       media-types \
       openssl ca-certificates
 
-COPY services/file-indexer/requirements.txt .
+COPY services/file-indexer/requirements.lock .
 # WARP-1065: persistent pip wheel/http cache (replaces --no-cache-dir; the
 # cache lives in the mount, not the image).
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    pip install --require-hashes --no-deps -r requirements.lock
 
 # WARP-3426 — bake every Hugging Face asset this service loads; the Hub is
 # off-limits at runtime. The appliance never phones home (and an air-gapped

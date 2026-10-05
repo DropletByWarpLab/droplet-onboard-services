@@ -96,6 +96,13 @@ mechanism, and it is why the leg list is not a style choice: `ci-summary` is
 only as honest as the surface it aggregates, and it fails closed — a leg may
 report `skipped` only when `detect` proved its suite list `[]`.
 
+**WARP-3665, 2026-10-04.** The `gitleaks` leg also carries the Trivy dependency
+scan (lockfiles and requirements files, pinned DB, `.trivyignore` baseline), so a
+new fixable HIGH/CRITICAL in a dependency blocks through `ci-summary` with no new
+context. The `detect` job also runs `scripts/check-pinned-images.sh` (WARP-3601)
+and `scripts/check-vuln-exceptions.sh` (WARP-3667) as steps. None of this changes
+the list of required contexts.
+
 `semgrep` and `gitleaks` are passed a hard-coded non-empty suite list, so
 "skipped" can never be read as "nothing to do" for them.
 

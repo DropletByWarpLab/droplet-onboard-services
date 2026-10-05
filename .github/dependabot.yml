@@ -2,10 +2,11 @@
 #
 # npm: the root lockfile covers all workspaces (apps/*, services/*,
 # packages/*); tests/ has its own lockfile. pip: every requirements*.txt
-# directory (13). github-actions keeps workflow pins fresh. The docker
-# ecosystem is intentionally OMITTED: base-image CVEs are gated by the
-# Trivy step in docker-build.yml, and 20 Dockerfile update PRs/week is
-# noise without that signal.
+# directory (13). github-actions keeps workflow pins fresh. docker keeps the
+# digest pins on every Dockerfile FROM fresh (WARP-3670): ONE grouped PR a
+# month. The old reason for omitting it (20 Dockerfile PRs a week of noise)
+# is answered by grouping and the cadence, and a digest pin nothing updates
+# is worse than a floating tag.
 #
 # NOTE: Dependabot ALERTS + SECURITY updates are separate one-time repo
 # settings — see docs/SECURITY.md#dependabot for the enable commands.
@@ -457,6 +458,37 @@ updates:
         versions: [">=1.0"]
       - dependency-name: "transformers"            # #1172, #1627
         versions: [">=5.0"]
+    labels: ["dependencies"]
+
+  # WARP-3670: every Dockerfile FROM (and the one COPY --from=<image>) is
+  # pinned tag@sha256:digest; scripts/check-dockerfile-base-pins.sh fails the
+  # hadolint leg of ci.yml on a bare tag. Pins only stay safe if something
+  # moves them, and this is that something. One grouped PR a month keeps the
+  # docker-build cost bounded (it rebuilds the affected images once, not once
+  # per base image). Major/minor runtime jumps are a deliberate migration, not
+  # a refresh: node stays on its current major until the Node 22 move (WARP-3654)
+  # lands, and python is 3.12 (the requirements files are resolved against it).
+  - package-ecosystem: docker
+    directories:
+      - "/apps/*"
+      - "/services/*"
+      - "/services/erp-connector/harness/*"
+      - "/docker/*"
+      - "/docker/dev"
+      - "/openwrt/*"
+      - "/tests"
+    target-branch: "stage"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 1
+    groups:
+      docker-base-images:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     labels: ["dependencies"]
 
   - package-ecosystem: github-actions
