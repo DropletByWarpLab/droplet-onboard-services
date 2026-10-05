@@ -54,7 +54,7 @@ import {
   PM_API_TOKEN_MAX_LIFETIME_MS,
   READ_ONLY_POSTS,
   SESSION_ONLY_ROUTES,
-  authenticatePmApiToken,
+  resolvePmApiTokenPrincipal,
   bindPmApiTokenPrisma,
   createPmApiToken,
   hashPmApiToken,
@@ -944,8 +944,8 @@ describe("WARP-3533 — AC: the token never appears in logs, audit rows or respo
     db.pmApiToken.findUnique.mockRejectedValueOnce(new Error("connection reset while running findUnique"));
     const failed = await hit(request(app).get("/api/pm/ping").set(bearer(token)));
     expect(failed.status).toBe(500);
-    // the same through authenticatePmApiToken directly
-    await authenticatePmApiToken(db as never, token);
+    // the same through resolvePmApiTokenPrincipal directly
+    await resolvePmApiTokenPrincipal(db as never, token);
 
     // The scope denial and the expired-token refusal: the rows the scan below is about. (A junk
     // bearer at a route a token may never call writes none: see the audit-flood describe.)

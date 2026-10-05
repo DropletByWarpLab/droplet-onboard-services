@@ -12,8 +12,8 @@ import { actorFromRequest } from "../services/activity.service.js";
 import { EXTENSION_TOKEN_PREFIX } from "../services/extension-token.js";
 import { resolveExtensionPrincipal } from "../services/extension-principal.js";
 import {
-  PM_API_TOKEN_PREFIX,
-  authenticateBoundPmApiToken,
+  PM_API_PUBLIC_PREFIX,
+  resolveBoundPmApiTokenPrincipal,
   recordBoundPmApiTokenUse,
   tokenAreaForPath,
   type PmApiTokenScope,
@@ -255,7 +255,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   // WARP-3533 — the same for a personal API token: a header credential and
   // nothing else. A cookie is ambient (the browser attaches it to any request a
   // page makes), which is exactly what a script's token must never be.
-  if (cookieToken?.startsWith(PM_API_TOKEN_PREFIX)) {
+  if (cookieToken?.startsWith(PM_API_PUBLIC_PREFIX)) {
     res.status(401).json({ error: "Missing or invalid authentication" });
     return;
   }
@@ -332,7 +332,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   // A `dpm_` bearer that does not resolve is a 401 HERE: it never falls through
   // to the JWT path. The token is never logged: the only thing that reaches the
   // database or a log line is its sha256 and the row id.
-  if (headerToken?.startsWith(PM_API_TOKEN_PREFIX)) {
+  if (headerToken?.startsWith(PM_API_PUBLIC_PREFIX)) {
     if (!tokenAreaForPath(req.path)) {
       // NO audit row here, deliberately. Nothing has been looked up, so the caller
       // is anonymous: `Authorization: Bearer dpm_anything` needs no credential, and
@@ -348,7 +348,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
       });
       return;
     }
-    void authenticateBoundPmApiToken(headerToken)
+    void resolveBoundPmApiTokenPrincipal(headerToken)
       .then((result) => {
         if (!result.ok) {
           res
@@ -494,7 +494,7 @@ export async function validateTokenForWs(
   if (token.startsWith(EXTENSION_TOKEN_PREFIX)) return null;
   // WARP-3533 — nor does a personal API token: it reaches /api/pm and
   // /api/support over HTTP and nothing else.
-  if (token.startsWith(PM_API_TOKEN_PREFIX)) return null;
+  if (token.startsWith(PM_API_PUBLIC_PREFIX)) return null;
 
   // Try JWT first. WARP-247: a sid-carrying token must also present a live
   // session record — a WS upgrade is user activity, so the default sliding

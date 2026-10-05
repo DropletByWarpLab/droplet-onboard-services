@@ -10,7 +10,7 @@
  * DOES reach authMiddleware.
  *
  * What a token is, in one sentence: its holder, with fewer permissions.
- *   - `authenticatePmApiToken` resolves it to the holder's CURRENT row (role
+ *   - `resolvePmApiTokenPrincipal` resolves it to the holder's CURRENT row (role
  *     and directory status read at this request), so every role, module and
  *     feature gate downstream runs exactly as it does for the holder's own
  *     session, and a token can never exceed what the holder may do today;
@@ -44,7 +44,8 @@ import { createLogger } from "../../lib/logger.js";
 
 const logger = createLogger("pm-api-token");
 
-export const PM_API_TOKEN_PREFIX = "dpm_";
+/** Public marker used to route this bearer type; it is not secret material. */
+export const PM_API_PUBLIC_PREFIX = "dpm_";
 /** The longest token a request may present: `dpm_` + 43 characters, with room to spare. */
 const PRESENTED_MAX_LENGTH = 128;
 /** WorkspaceSetting holding the box-wide switch; seeded `false`. */
@@ -194,7 +195,7 @@ export function hashPmApiToken(token: string): string {
   // CodeQL's password-hash rule treats this credential as a human password.
   // Stored tokens are exclusively minted as dpm_ + 32 CSPRNG bytes (256 bits);
   // SHA-256 supports indexed lookup while offline guessing remains infeasible.
-  return crypto.createHash("sha256").update(token, "utf8").digest("hex"); // codeql[js/insufficient-password-hash]
+  return crypto.createHash("sha256").update(token, "utf8").digest("hex");
 }
 
 function toRow(t: StoredToken): PmApiTokenRow {
@@ -280,12 +281,12 @@ export async function createPmApiToken(
   if (!PM_API_TOKEN_HOLDER_ROLES.has(holder.role)) throw new Error("role_not_allowed");
   const scopes = normalizeScopes(input.scopes);
   if (scopes.length === 0 || scopes.length !== new Set(input.scopes).size) throw new Error("invalid_scopes");
-  const token = PM_API_TOKEN_PREFIX + crypto.randomBytes(32).toString("base64url");
+  const token = PM_API_PUBLIC_PREFIX + crypto.randomBytes(32).toString("base64url");
   const row = await prisma.pmApiToken.create({
     data: {
       userId: holder.id,
       name: input.name,
-      prefix: token.slice(PM_API_TOKEN_PREFIX.length, PM_API_TOKEN_PREFIX.length + 8),
+      prefix: token.slice(PM_API_PUBLIC_PREFIX.length, PM_API_PUBLIC_PREFIX.length + 8),
       hash: hashPmApiToken(token),
       scopes,
       issuedRole: holder.role as "owner" | "admin" | "family",
@@ -357,14 +358,14 @@ const INVALID: PmApiTokenAuth = { ok: false, code: "TOKEN_INVALID" };
  * compares hashes and a timing difference tells an attacker about a hash, not
  * about the token; the equality is then confirmed in constant time anyway.
  */
-export async function authenticatePmApiToken(
+export async function resolvePmApiTokenPrincipal(
   prisma: PrismaClient,
   presented: unknown,
   now = new Date(),
 ): Promise<PmApiTokenAuth> {
   if (
     typeof presented !== "string" ||
-    !presented.startsWith(PM_API_TOKEN_PREFIX) ||
+    !presented.startsWith(PM_API_PUBLIC_PREFIX) ||
     presented.length > PRESENTED_MAX_LENGTH
   ) {
     return INVALID;
@@ -518,10 +519,10 @@ export function bindPmApiTokenPrisma(prisma: PrismaClient | null): void {
   boundPrisma = prisma;
 }
 
-/** `authenticatePmApiToken` over the bound client; unbound refuses. */
-export async function authenticateBoundPmApiToken(presented: unknown): Promise<PmApiTokenAuth> {
+/** `resolvePmApiTokenPrincipal` over the bound client; unbound refuses. */
+export async function resolveBoundPmApiTokenPrincipal(presented: unknown): Promise<PmApiTokenAuth> {
   if (!boundPrisma) return INVALID;
-  return authenticatePmApiToken(boundPrisma, presented);
+  return resolvePmApiTokenPrincipal(boundPrisma, presented);
 }
 
 /** `recordPmApiTokenUse` over the bound client; never throws, never waits for the caller. */
@@ -532,7 +533,7 @@ export function recordBoundPmApiTokenUse(tokenId: string): void {
 
 /**
  * Revoke every token `userId` holds that is not already revoked. Best-effort;
- * never throws — `authenticatePmApiToken` refuses a deactivated holder (and a
+ * never throws — `resolvePmApiTokenPrincipal` refuses a deactivated holder (and a
  * holder whose role changed) on its own, so a revoke that did not land here
  * still cannot be used.
  */

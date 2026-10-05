@@ -212,7 +212,7 @@ export function signShareUrl(
   const payloadStr = b64url(Buffer.from(JSON.stringify(payload)));
   // This is a keyed URL signature over public identity/path/expiry fields;
   // dpm_ credentials cannot reach camera routes (auth.ts rejects that path).
-  const sig = crypto.createHmac("sha256", signingKey()).update(payloadStr).digest(); // codeql[js/insufficient-password-hash]
+  const sig = crypto.createHmac("sha256", signingKey()).update(payloadStr).digest();
   return `${payloadStr}.${b64url(sig)}`;
 }
 

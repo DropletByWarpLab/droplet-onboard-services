@@ -22,7 +22,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vites
 import type { PrismaClient } from "@prisma/client";
 import {
   PM_API_TOKENS_ENABLED_KEY,
-  authenticatePmApiToken,
+  resolvePmApiTokenPrincipal,
   bindPmApiTokenPrisma,
   createPmApiToken,
   listPmApiTokens,
@@ -314,7 +314,7 @@ describe.skipIf(!RUN)("the token and feed-link services over real Postgres (WARP
 
   it("a minted token authenticates as its holder, carrying its scopes and the holder's current role", async () => {
     const { token, row } = await mint(["pm:write", "pm:read"]);
-    const auth = await authenticatePmApiToken(prisma, token);
+    const auth = await resolvePmApiTokenPrincipal(prisma, token);
     expect(auth).toMatchObject({ ok: true, tokenId: row.id, scopes: ["pm:read", "pm:write"] });
     if (auth.ok) expect(auth.principal).toMatchObject({ id: user.id, username: user.username, role: "family" });
     expect((await rowOf(row.id)).hash).not.toContain(token.slice(4));
@@ -324,34 +324,34 @@ describe.skipIf(!RUN)("the token and feed-link services over real Postgres (WARP
     // role change
     const a = await mint();
     await prisma.user.update({ where: { id: user.id }, data: { role: "admin" } });
-    expect(await authenticatePmApiToken(prisma, a.token)).toEqual({ ok: false, code: "TOKEN_REVOKED" });
+    expect(await resolvePmApiTokenPrincipal(prisma, a.token)).toEqual({ ok: false, code: "TOKEN_REVOKED" });
     expect(await rowOf(a.row.id)).toMatchObject({ status: "revoked", revokedReason: "role_changed" });
     expect((await rowOf(a.row.id)).revokedAt).toBeInstanceOf(Date);
     await prisma.user.update({ where: { id: user.id }, data: { role: "family" } });
     // back to the role it was issued under: still dead
-    expect(await authenticatePmApiToken(prisma, a.token)).toEqual({ ok: false, code: "TOKEN_REVOKED" });
+    expect(await resolvePmApiTokenPrincipal(prisma, a.token)).toEqual({ ok: false, code: "TOKEN_REVOKED" });
 
     // deactivation
     const b = await mint();
     await prisma.user.update({ where: { id: user.id }, data: { directoryStatus: "DEACTIVATED" } });
-    expect(await authenticatePmApiToken(prisma, b.token)).toEqual({ ok: false, code: "TOKEN_REVOKED" });
+    expect(await resolvePmApiTokenPrincipal(prisma, b.token)).toEqual({ ok: false, code: "TOKEN_REVOKED" });
     expect(await rowOf(b.row.id)).toMatchObject({ status: "revoked", revokedReason: "user_deactivated" });
     await prisma.user.update({ where: { id: user.id }, data: { directoryStatus: "ACTIVE" } });
 
     // expiry
     const c = await mint(["pm:read"], new Date(Date.now() + 60_000));
     await prisma.pmApiToken.update({ where: { id: c.row.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
-    expect(await authenticatePmApiToken(prisma, c.token)).toEqual({ ok: false, code: "TOKEN_EXPIRED" });
+    expect(await resolvePmApiTokenPrincipal(prisma, c.token)).toEqual({ ok: false, code: "TOKEN_EXPIRED" });
     expect(await rowOf(c.row.id)).toMatchObject({ status: "expired", revokedAt: null, revokedReason: null });
   });
 
   it("a refused use is audited once an hour: the claim is one conditional write", async () => {
     const { token, row } = await mint();
     await prisma.pmApiToken.update({ where: { id: row.id }, data: { status: "revoked", revokedAt: new Date(), revokedReason: "manual" } });
-    await authenticatePmApiToken(prisma, token);
+    await resolvePmApiTokenPrincipal(prisma, token);
     const first = (await rowOf(row.id)).refusalAuditedAt;
     expect(first).toBeInstanceOf(Date);
-    await authenticatePmApiToken(prisma, token);
+    await resolvePmApiTokenPrincipal(prisma, token);
     expect((await rowOf(row.id)).refusalAuditedAt).toEqual(first);
   });
 
