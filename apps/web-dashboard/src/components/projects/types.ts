@@ -203,6 +203,22 @@ export interface PmComment {
   reactions: PmReaction[];
 }
 
+/** WARP-1505 — a READY file on a work item, or on one of its comments. */
+export interface PmAttachment {
+  id: string;
+  workItemId: string;
+  /** null = attached to the item itself; otherwise the comment it came through. */
+  commentId: string | null;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  /** Server-verified raster image (png, jpeg, gif, webp). Never infer this from
+   *  `mimeType` or the extension — only a previewable file gets an inline thumbnail. */
+  previewable: boolean;
+  uploadedById: string | null;
+  createdAt: string;
+}
+
 export interface PmSummary {
   activeProjects: number;
   itemsOpen: number;

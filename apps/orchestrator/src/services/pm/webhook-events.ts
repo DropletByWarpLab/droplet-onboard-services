@@ -114,6 +114,8 @@ const VERB_EVENT: Record<PmActivityVerb, WorkItemEvent> = {
   watcher_added: "work_item.updated",
   watcher_removed: "work_item.updated",
   mentioned: "work_item.updated",
+  attachment_added: "work_item.updated",
+  attachment_removed: "work_item.updated",
   // WARP-3535 — a pull request, commit or branch was linked. Its `changes` entry
   // carries only the provider and `<kind>:<ref>` (`pull_request:#42`), never the
   // title or URL: those are the code host's text, not the work item's.

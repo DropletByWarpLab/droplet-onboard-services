@@ -27,7 +27,8 @@ const PROJECT_LABELS = [
 vi.mock("./editor/RichTextEditor", () => import("./fakeEditor"));
 
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ user: { id: "u1", role: "family" } }),
+  // The drawer reads the role to decide whether to offer attachment writes (WARP-1505).
+  useAuth: () => ({ user: { id: "u1", username: "ada", displayName: "Ada", role: "owner" } }),
   authFetch: vi.fn((url: string, init?: RequestInit) => {
     const method = (init?.method ?? "GET").toUpperCase();
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;

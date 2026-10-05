@@ -25,6 +25,7 @@ import type { Prisma, PrismaClient } from "@prisma/client";
 import { PM_REACTION_EMOJI } from "@droplet/shared-types";
 import { READ_COMMITTED_TX, SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
 import { sanitizePmHtml } from "./sanitize-html.js";
+import { finishQueuedAttachmentCleanup, queueAttachmentCleanup } from "./pm-attachment-cleanup.js";
 import { PM_PLANNING_ERRORS, lockAttachableCycle } from "./pm-planning.js";
 import { nudgeOutbox } from "./pm-outbox.js";
 import { recordMentions, resolveCommentMentions } from "./pm-mentions.js";
@@ -1238,9 +1239,30 @@ export async function deleteProject(
   if (!existing.isArchived) throw new Error(PM_ERRORS.PROJECT_NOT_ARCHIVED);
   if (opts.confirmIdentifier !== existing.identifier) throw new Error(PM_ERRORS.IDENTIFIER_MISMATCH);
 
+  // WARP-1505: the cascade below drops every PmAttachment ROW under this project,
+  // and the files are on a volume the database cannot reach. The keys are read
+  // INSIDE a READ COMMITTED transaction, required by the audit chain append.
+  // Lock the project and its items BEFORE the key read: their FK key-share locks
+  // make new item/attachment inserts wait, and a prior upload must commit before
+  // this fresh read can proceed. No cascaded blob can be missed. The files go
+  // only after commit; audit failure rolls back both deletion and cleanup intent.
+  let blobKeys: string[] = [];
+  let cleanupKeys: string[] = [];
+  // findUnique + delete is two round-trips: a concurrent delete between them
+  // makes this delete throw Prisma P2025. Map it to the same 404 the existence
+  // check would have raised (review finding: delete-helper TOCTOU → P2025).
   try {
     await prisma.$transaction(
       async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "PmProject" WHERE "id" = ${projectId} FOR UPDATE`;
+        await tx.$queryRaw`SELECT "id" FROM "PmWorkItem" WHERE "projectId" = ${projectId} ORDER BY "id" FOR UPDATE`;
+        blobKeys = (
+          await tx.pmAttachment.findMany({
+            where: { workItem: { projectId } },
+            select: { storageKey: true },
+          })
+        ).map((a) => a.storageKey);
+        cleanupKeys = await queueAttachmentCleanup(tx, blobKeys);
         const workItemCount = await tx.pmWorkItem.count({ where: { projectId } });
         const gone = await tx.pmProject.deleteMany({ where: { id: projectId, kind: "PROJECT", isArchived: true } });
         // Restored (or already deleted) between the read above and here. Throwing
@@ -1262,8 +1284,11 @@ export async function deleteProject(
       throw new Error(still ? PM_ERRORS.PROJECT_NOT_ARCHIVED : PM_ERRORS.PROJECT_NOT_FOUND);
     }
     if (isPrismaCode(err, "P2025")) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+    // A concurrency failure applies nothing; the route answers 409 for retry.
+    if (isPrismaCode(err, "P2034")) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
     throw err;
   }
+  await finishQueuedAttachmentCleanup(prisma, cleanupKeys);
 }
 
 // ── States ───────────────────────────────────────────────────────────────────
@@ -2630,8 +2655,22 @@ export async function deleteWorkItem(
     include: { project: { select: { kind: true } } },
   });
   if (!existing || isServiceDesk(existing.project)) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+  // WARP-1505: filled inside the transaction, used after it commits.
+  let blobKeys: string[] = [];
+  let cleanupKeys: string[] = [];
   try {
     await prisma.$transaction(async (tx) => {
+      // WARP-1505: the cascade drops this item's PmAttachment rows (and its
+      // comments' — they carry the same workItemId), but the bytes are files on
+      // a volume the database cannot reach. Read the keys here, inside the
+      // SERIALIZABLE transaction, so an upload that commits between this read and
+      // the delete aborts the delete (409, retry) instead of being cascaded with
+      // its blob forgotten; the files themselves go after the commit, below.
+      blobKeys = (
+        await tx.pmAttachment.findMany({ where: { workItemId: id }, select: { storageKey: true } })
+      ).map((a) => a.storageKey);
+      cleanupKeys = await queueAttachmentCleanup(tx, blobKeys);
+
       // WARP-885: `parentId ON DELETE SET NULL` would otherwise silently
       // promote every sub-issue to a root item with zero audit trail the
       // instant the parent is deleted. Emit one parent_removed activity row
@@ -2691,6 +2730,8 @@ export async function deleteWorkItem(
     if (isPrismaCode(err, "P2034")) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
     throw err;
   }
+  // Committed: the rows are gone, so the files are unreachable. Never throws.
+  await finishQueuedAttachmentCleanup(prisma, cleanupKeys);
 }
 
 // ── Comments ─────────────────────────────────────────────────────────────────

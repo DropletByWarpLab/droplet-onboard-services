@@ -14,12 +14,23 @@ import {
   AvatarStack,
   usePerson,
 } from "./bits";
-import { useTimeline, useSubIssues, useDevelopmentLinks, pmActions } from "./usePm";
+import { useTimeline, useAttachments, useSubIssues, useDevelopmentLinks, pmActions } from "./usePm";
+import {
+  AttachmentsSection,
+  CommentAttachments,
+  StagedFiles,
+  UploadRows,
+  pastedFiles,
+  useAttachmentUploads,
+  useFileDrop,
+  useFilePicker,
+  usePreventStrayFileDrops,
+} from "./attachments";
+import { canWrite, type PmAttachment, type PmWorkItem } from "./types";
+import { CycleField, ModulesField } from "./planning-pickers";
 import { ArrowUpRight, Copy } from "lucide-react";
 import { editActions } from "./useEditing";
-import { CycleField, ModulesField } from "./planning-pickers";
 import { PropRow } from "./detail/PropRow";
-import type { PmWorkItem } from "./types";
 import { TimeSection } from "./time/TimeSection";
 import { useAuth } from "@/lib/auth";
 import { ActivitySection } from "./timeline";
@@ -81,10 +92,29 @@ function DetailBody({
   const { mutate: mutateActivity } = useTimeline(item.id);
   const { links: developmentLinks, isLoading: developmentLoading, error: developmentError } = useDevelopmentLinks(item.id);
   const { toast } = useToast();
+  const { user } = useAuth();
+  const writer = !readOnly && canWrite(user?.role);
+  const att = useAttachments(item.id);
+  // A file landing or going changes the list and writes an activity row.
+  const refreshFiles = () => Promise.all([att.mutate(), mutateActivity()]);
+  const uploads = useAttachmentUploads(item.id, { maxBytes: att.maxBytes, onUploaded: refreshFiles });
+  // The whole body takes drops for the item (writers only; the composer takes
+  // its own for the comment).
+  const drop = useFileDrop((dropped) => void uploads.addFiles(dropped));
+  usePreventStrayFileDrops();
   const subs = subIssues ?? [];
+  const files = att.attachments ?? [];
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+    <div
+      style={{ display: "flex", flexDirection: "column", gap: 20, position: "relative" }}
+      {...(writer ? drop.dropProps : {})}
+    >
+      {writer && drop.over && (
+        <div className="pm-dropveil" aria-hidden="true">
+          <span>Drop files to attach</span>
+        </div>
+      )}
       <div>
         <div className="pm-row" style={{ gap: 10, marginBottom: 9 }}>
           <span className="pm-mono" style={{ fontSize: 12, color: "var(--text-4)" }}>{item.key}</span>
@@ -174,6 +204,7 @@ function DetailBody({
         )}
       </div>
 
+      <AttachmentsSection att={att} uploads={uploads} onChanged={refreshFiles} readOnly={readOnly} />
       {/* WARP-3519 — comments and history as one thread: edit/delete, reactions,
           @mentions, watchers. The server writes a `commented` activity row in the
           same transaction as the comment; the section re-reads the merged

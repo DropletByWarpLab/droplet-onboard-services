@@ -714,7 +714,7 @@ describe.skipIf(!RUN)("PM import and export — the database's own guarantees (W
       const rel = await import("../services/pm/pm-relations.service.js");
       await rel.createRelation(prisma, users.owner, { fromId: epic.id, toId: story.id, kind: "BLOCKS" });
       await prisma.pmAttachment.create({
-        data: { workItemId: epic.id, fileName: "design.png", mimeType: "image/png", sizeBytes: BigInt(1234), storageKey: `warp3527-${Date.now()}` },
+        data: { workItemId: epic.id, fileName: "design.png", mimeType: "image/png", sizeBytes: BigInt(1234), storageKey: `warp3527-${Date.now()}`, sha256: "a".repeat(64) },
       });
       const prop = await prisma.pmCustomProperty.create({ data: { projectId, name: "Region", type: "text" } });
       await prisma.pmWorkItemPropertyValue.create({ data: { workItemId: epic.id, propertyId: prop.id, value: { text: "EU" } } });

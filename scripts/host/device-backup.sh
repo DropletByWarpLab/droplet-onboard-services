@@ -12,6 +12,7 @@
 #   - brain-memory-data            volume (assistant memory)      tar
 #   - nvrdata                      volume (NVR recordings)        tar
 #   - ops-audit                    volume (WARP-337 audit trail)  tar
+#   - pm-attachments               volume (WARP-1505 attachments) tar
 #
 # The volume names above are the REAL top-level volumes in
 # docker/docker-compose.yml — kept in lock-step with the destructive wipe list
@@ -111,6 +112,9 @@ BACKUP_KEEP="${BACKUP_KEEP:-7}"
 # workspace-git (WARP-2896) is the workshop's bare git store — every workspace
 # commit is pushed there, so it alone is the customer's extension work; the
 # working checkouts are excluded below as rebuildable.
+# pm-attachments (WARP-1505) holds the files customers attached to work items;
+# the Postgres rows in the pg_dump carry only their metadata, so the two must
+# travel together or a restore pairs rows with files that are gone.
 DATA_VOLUMES=(
   nextcloud-data
   aikeys
@@ -119,6 +123,7 @@ DATA_VOLUMES=(
   nvrdata
   ops-audit
   workspace-git
+  pm-attachments
 )
 
 # Volumes that factory-reset's `down -v` ALSO wipes but that we deliberately do

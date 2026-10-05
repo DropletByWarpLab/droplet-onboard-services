@@ -59,6 +59,7 @@ import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createPmCollaborationRouter } from "./routes/pm/collaboration.js";
+import { createPmAttachmentsRouter } from "./routes/pm/attachments.js";
 import { createPmQueryRouter } from "./routes/pm/query.js";
 import { createPmViewsRouter } from "./routes/pm/views.js";
 import { createPmBulkRouter } from "./routes/pm/bulk.js";
@@ -624,6 +625,10 @@ export function createApp(
   // from the native router's, so neither shadows the other, and it sits after the
   // module gates and the MCP acting-user gate like every PM router.
   app.use("/api", createPmCollaborationRouter(prisma));
+  // WARP-1505 — files on work items and comments. Disjoint paths again
+  // (`/pm/work-items/:id/attachments`, `/pm/attachments/:id`); the `/pm/work-items/:id`
+  // route above takes one segment after `work-items`, so it cannot shadow these.
+  app.use("/api", createPmAttachmentsRouter(prisma));
   // WARP-3527 (ADR-069 WS-11) — project import (CSV / Trello JSON → background
   // job) and export (CSV / JSON, streamed). Its own router on the same prefix;
   // paths are `/pm/projects/:id/{import,export.*}` and `/pm/import-jobs/*`,

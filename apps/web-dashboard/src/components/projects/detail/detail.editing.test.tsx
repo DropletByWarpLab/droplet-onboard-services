@@ -22,6 +22,7 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ user: { id: "u1", role: "owner" } }),
   authFetch: vi.fn(async (url: string, init?: RequestInit) => {
     const call = {
       url,
@@ -120,6 +121,7 @@ const ITEM: PmWorkItem = {
 function defaults(c: Call): Reply {
   const { url, method, body } = c;
   if (method === "GET") {
+    if (url.endsWith("/attachments")) return { attachments: [], limits: { maxBytes: 26214400 } };
     if (url.endsWith("/states")) return { states: STATES };
     if (url.endsWith("/labels")) return { labels: [] };
     if (url.endsWith("/properties")) return { properties: PROPERTIES };

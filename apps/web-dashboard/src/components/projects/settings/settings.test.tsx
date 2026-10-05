@@ -439,7 +439,9 @@ describe("fields", () => {
     fireEvent.blur(name);
     await waitFor(() => expect(lastWrite()).toMatchObject({ url: "/api/pm/properties/f-text", method: "PATCH", body: { name: "Ref" } }));
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "Move Severity up" }));
+    const reorder = within(dialog).getByRole("button", { name: "Move Severity up" });
+    await waitFor(() => expect(reorder).toBeEnabled());
+    fireEvent.click(reorder);
     await waitFor(() =>
       expect(lastWrite()).toMatchObject({
         url: "/api/pm/projects/p1/properties/reorder",
@@ -449,6 +451,7 @@ describe("fields", () => {
 
     fireEvent.change(within(dialog).getByLabelText("New field name"), { target: { value: "Budget" } });
     fireEvent.change(within(dialog).getByLabelText("New field type"), { target: { value: "number" } });
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Add field" })).toBeEnabled());
     fireEvent.click(within(dialog).getByRole("button", { name: "Add field" }));
     await waitFor(() => expect(lastWrite()).toMatchObject({ url: "/api/pm/projects/p1/properties", method: "POST", body: { name: "Budget", type: "number" } }));
   });
