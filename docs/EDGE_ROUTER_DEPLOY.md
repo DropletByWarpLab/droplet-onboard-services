@@ -100,7 +100,7 @@ goes on argv, in `.env`, or in shell history:
 
 ```bash
 ssh -i $KEY root@192.168.9.1 'tr -d "\n" < /etc/droplet/droplet-ai-password' \
-  | ssh droplet@192.168.9.10 'cat > /home/droplet/edge-platform/docker/secrets/openwrt_password'
+  | ssh droplet@192.168.9.10 'umask 077; mkdir -p /home/droplet/edge-platform/docker/secrets; chmod 600 /home/droplet/edge-platform/docker/secrets/openwrt_password 2>/dev/null || :; cat > /home/droplet/edge-platform/docker/secrets/openwrt_password; chmod 600 /home/droplet/edge-platform/docker/secrets/openwrt_password'
 
 # on the box, as droplet
 cd /home/droplet/edge-platform
