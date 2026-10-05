@@ -91,8 +91,10 @@ export async function getCustomerRecord(
     // the rest: a warranty callout, a second phase, anything begun before the
     // CRM was switched on. Those are the projects a customer is most likely to
     // ask about, and they would be the ones missing.
+    // WARP-3528 — projects only: a service desk filed under a customer is the
+    // support surface's, and its name is not a PM project's to show.
     prisma.pmProject.findMany({
-      where: { companyId, isArchived: false },
+      where: { companyId, isArchived: false, kind: "PROJECT" },
       select: {
         id: true,
         name: true,

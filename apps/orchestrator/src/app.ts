@@ -58,6 +58,7 @@ import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createPmAttachmentsRouter } from "./routes/pm/attachments.js";
+import { createSupportRouter } from "./routes/support/support.routes.js";
 import { createPmScheduleRouter } from "./routes/pm/schedule.js";
 import { createCrmRouter } from "./routes/crm.js";
 import { createMoneyRouter } from "./routes/money.js";
@@ -569,6 +570,16 @@ export function createApp(
   // route above takes one segment after `work-items`, so it cannot shadow these.
   app.use("/api", createPmAttachmentsRouter(prisma));
   // WARP-3523 (ADR-069 WS-7) — the Timeline window and My Work lists.
+  // WARP-3528 (ADR-069) — the service desk. Its own disjoint prefix
+  // (`/api/support`), so neither PM router shadows it, and its own `support`
+  // module: `mountModuleGates` above already guards the prefix from the registry
+  // (box toggle, the tier floor that refuses an external guest, and the
+  // per-person grant), so nothing here re-implements a gate. Tickets are
+  // PmWorkItem rows in SERVICE_DESK projects that /api/pm answers 404 for.
+  app.use("/api", createSupportRouter(prisma));
+  // WARP-3523 (ADR-069 WS-7) — the Timeline window and the My Work lists. Own
+  // router, disjoint paths (`/pm/projects/:id/timeline`, `/pm/my-work`); the
+  // `projects` module gate covers it through the `/api/pm` prefix.
   app.use("/api", createPmScheduleRouter(prisma));
   // WARP-2117 — the CRM, which lives inside the Projects surface. Mounted
   // AFTER the PM router but on a disjoint prefix (`/api/crm`), so neither
