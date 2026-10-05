@@ -42,6 +42,7 @@
 #            Exit 0 = nothing stale, or everything restarted and verified.
 #            Exit 1 = at least one unit did not come back (CRITICAL logged).
 #
+#   install  Copy changed MANIFEST track files to their targets (WARP-3740).
 #   audit    Reconcile scripts/host/MANIFEST against what is actually on the
 #            box. Answers the question `check` structurally cannot (see the
 #            next section). Never touches anything — pure reads.
@@ -265,7 +266,7 @@ log_crit() { printf '[host-units] %s CRITICAL: %s\n' "$(now_iso)" "$*" >&2; }
 
 usage() {
   cat <<'USAGE'
-Usage: droplet-host-units <check|refresh|audit> [--json] [--force]
+Usage: droplet-host-units <check|refresh|audit|install> [--json] [--force] [--dry-run]
 
   check     Report every host systemd unit whose running process started
             BEFORE the sources it executes were last modified. Never touches
@@ -281,6 +282,13 @@ Usage: droplet-host-units <check|refresh|audit> [--json] [--force]
             Exit 0 = every artefact accounted for, 1 = at least one missing,
             drifted or not enabled, 2 = usage error, 4 = no manifest found
             (no verdict — NOT the same as "everything is fine").
+
+  install   Copy every MANIFEST `file` row with policy `track` from the checkout to
+            its target when it differs or is missing (atomic, MANIFEST mode),
+            then daemon-reload once if a unit file changed. Run as root,
+            BEFORE refresh. Never touches presence/skip/dir/unit rows, never
+            enables units. --dry-run lists what would change and writes
+            nothing. Exit 0 = ok, 1 = a row refused or failed. (WARP-3740)
 
   --json    Machine-readable report on stdout.
   --force   (refresh) Retry units suspended after a failed restart.
@@ -1027,6 +1035,93 @@ report_audit_json() {
 }
 
 # =============================================================================
+# install — copy changed `track` files from the checkout to their targets
+# =============================================================================
+# WARP-3740. `refresh` restarts a unit whose process is older than its sources,
+# and `audit` reports a file that differs, but NOTHING on the deploy path copied
+# the repo's file to its target: only `setup.sh --single-box` did. So a host-unit
+# fix merged to stage never reached an already-provisioned box (measured
+# 2026-10-05, lab box: droplet-host-net.service still the pre-WARP-2575 unit,
+# restarted ~64,000 times).
+#
+# Runs as root. Safety limits, each enforced per row:
+#   * ONLY `file` rows with policy `track`. `presence`, `skip`, `dir` and `unit`
+#     rows are never written (lan-dhcp.conf is rewritten at runtime;
+#     /etc/default/droplet-openwrt-attach holds a per-box PSK).
+#   * the target must sit under INSTALL_ROOTS and contain no `..`;
+#   * the source must be repo-relative, contain no `..` and not be a symlink;
+#   * a symlinked target, or a target whose parent dir does not exist, is
+#     skipped (a dir the full installer never made is not ours to create);
+#   * write is atomic: temp file in the target dir, then rename.
+# It never enables/disables units. Services are restarted by `refresh`, which
+# runs next; a changed .timer/.path is `try-restart`ed here (refresh only sees
+# services) so it is only restarted when already active.
+# `--dry-run` writes nothing and lists what WOULD be installed.
+INSTALL_ROOTS="/usr/local/sbin /usr/local/bin /etc/systemd/system /etc/systemd/system.conf.d /etc/default /etc/tmpfiles.d /etc/modules-load.d"
+INSTALLED=(); INSTALL_RELOAD=0
+
+install_target_allowed() { # <abs dst>
+  local d="$1" r
+  case "$d" in /*) ;; *) return 1 ;; esac
+  case "$d/" in */../*) return 1 ;; esac
+  for r in $INSTALL_ROOTS; do
+    case "$d" in "$r"/*) return 0 ;; esac
+  done
+  return 1
+}
+
+install_row() { # <src> <dst> <mode> <dry>
+  local src="$1" dst="$2" mode="$3" dry="$4"
+  local target="$HU_ROOT_PREFIX$dst" repo_src="$REPO_ROOT_RESOLVED/$src" tmp
+  if ! install_target_allowed "$dst"; then
+    log_crit "REFUSED $dst: outside the allowed install roots ($INSTALL_ROOTS)"; return 1
+  fi
+  case "$src" in /* | ../* | */../* | */.. | ..) log_crit "REFUSED $src: source escapes the repo"; return 1 ;; esac
+  case "$mode" in [0-7][0-7][0-7] | 0[0-7][0-7][0-7]) ;; *) log_crit "REFUSED $dst: bad mode '$mode'"; return 1 ;; esac
+  if [ -L "$repo_src" ] || [ ! -f "$repo_src" ]; then
+    log_crit "REFUSED $dst: source $src is missing or a symlink"; return 1
+  fi
+  if [ -L "$target" ] || [ ! -d "$(dirname "$target")" ]; then
+    log "skip $dst: target is a symlink or its directory does not exist (not provisioned; run setup.sh)"; return 0
+  fi
+  if [ -f "$target" ] && cmp -s "$repo_src" "$target" \
+     && [ "$(norm_mode "$(file_mode "$target")")" = "$(norm_mode "$mode")" ]; then
+    return 0
+  fi
+  if [ "$dry" = true ]; then
+    printf 'would install %s -> %s (%s)\n' "$src" "$dst" "$mode"
+  else
+    tmp="$(mktemp "$target.XXXXXX")" || { log_crit "cannot create temp file next to $dst"; return 1; }
+    if ! { install -m "$mode" "$repo_src" "$tmp" && mv -f "$tmp" "$target"; }; then
+      rm -f "$tmp"; log_crit "failed to install $dst"; return 1
+    fi
+    log "installed $src -> $dst ($mode)"
+  fi
+  INSTALLED+=("$dst")
+  case "$dst" in /etc/systemd/system/*) INSTALL_RELOAD=1 ;; esac
+  return 0
+}
+
+do_install() { # <dry>
+  local dry="$1" kind src dst mode policy note rc=0 u
+  while read -r kind src dst mode policy note; do
+    [ "$kind" = file ] && [ "$policy" = track ] || continue
+    install_row "$src" "$dst" "$mode" "$dry" || rc=1
+  done < "$AUDIT_MANIFEST_PATH"
+  printf 'host files %s: %d\n' "$([ "$dry" = true ] && echo "to install" || echo installed)" "${#INSTALLED[@]}"
+  [ "$dry" = true ] && return "$rc"
+  if [ "$INSTALL_RELOAD" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
+    log "unit file changed — systemctl daemon-reload"
+    systemctl daemon-reload || rc=1
+    for u in ${INSTALLED[@]+"${INSTALLED[@]}"}; do
+      case "$u" in /etc/systemd/system/*.timer | /etc/systemd/system/*.path)
+        systemctl try-restart "$(basename "$u")" || rc=1 ;; esac
+    done
+  fi
+  return "$rc"
+}
+
+# =============================================================================
 # refresh
 # =============================================================================
 
@@ -1123,10 +1218,12 @@ do_refresh() { # <force>
 SUBCOMMAND=""
 AS_JSON=false
 FORCE=false
+DRY_RUN=false
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    check | refresh | audit) SUBCOMMAND="$1"; shift ;;
+    check | refresh | audit | install) SUBCOMMAND="$1"; shift ;;
+    --dry-run) DRY_RUN=true; shift ;;
     --json)  AS_JSON=true; shift ;;
     --force) FORCE=true; shift ;;
     -h | --help) usage; exit 0 ;;
@@ -1167,6 +1264,16 @@ if [ "$SUBCOMMAND" = "audit" ]; then
     report_audit_human
   fi
   exit "$AUDIT_EXIT"
+fi
+
+# --- install (WARP-3740) ----------------------------------------------------
+if [ "$SUBCOMMAND" = "install" ]; then
+  audit_locate_manifest || exit 4
+  if [ -z "$REPO_ROOT_RESOLVED" ]; then
+    log_crit "install needs the checkout (DROPLET_HOST_UNITS_REPO_ROOT or a resolvable box checkout)"; exit 4
+  fi
+  do_install "$DRY_RUN"
+  exit $?
 fi
 
 if ! command -v systemctl >/dev/null 2>&1; then

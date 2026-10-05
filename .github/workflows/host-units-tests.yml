@@ -170,3 +170,10 @@ jobs:
       # can only pass on Linux, and CI is the only place it will ever be true.
       - name: Run log-bundle collector redaction tests
         run: bash tests/collect-logs.test.sh
+
+      # WARP-3740: `droplet-host-units install` copies changed MANIFEST `track`
+      # files to their targets on the deploy path. Unrooted (tmpdir prefix +
+      # PATH-stubbed systemctl), ~1 s. Its own paths: entry is deliberately not
+      # added: `scripts/host/**` already fires this lane for the script.
+      - name: Run host-file install tests
+        run: bash tests/host-units-install.test.sh
