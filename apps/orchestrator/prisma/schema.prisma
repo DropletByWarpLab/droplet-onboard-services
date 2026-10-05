@@ -5799,6 +5799,9 @@ model PmProject {
   cycles     PmCycle[]
   modules    PmModule[]
   properties PmCustomProperty[]
+  /// WARP-3527 — the import runs filed against this project. Cascade: a job is
+  /// a record ABOUT the project, with no meaning once it is gone.
+  importJobs PmImportJob[]
   /// WARP-3529 — the channels a SERVICE_DESK takes requests through. Always
   /// empty for a PROJECT (a trigger holds that).
   supportChannels PmSupportChannel[]
@@ -5987,6 +5990,17 @@ model PmWorkItem {
   /// Canonical "is archived" signal (WARP-884) — mirrors PmProject.isArchived.
   isArchived      Boolean      @default(false)
   archivedAt      DateTime?
+  /// WARP-3527 (ADR-069 WS-11) — provenance for an IMPORTED item: which tracker
+  /// it came from ("jira" | "asana" | "trello" | "linear" | "github" | "csv")
+  /// and its id THERE. Together with `projectId` this is the idempotency key —
+  /// a re-import finds the item and updates it instead of creating a twin.
+  ///
+  /// Both set or both NULL, pinned by the CHECK `PmWorkItem_external_both_or_neither`
+  /// in the migration (Prisma cannot express it). NULL is every natively-created
+  /// item; Postgres treats NULLs as distinct in a unique index, so the unique
+  /// below never constrains them.
+  externalSystem  String?
+  externalId      String?
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @default(now()) @updatedAt
 
@@ -6030,6 +6044,8 @@ model PmWorkItem {
   ticket PmTicket?
 
   @@unique([projectId, sequenceId])
+  /// WARP-3527 — the import idempotency key (see `externalSystem`).
+  @@unique([projectId, externalSystem, externalId])
   @@index([projectId, stateId, sortOrder])
   @@index([projectId, updatedAt(sort: Desc)])
   @@index([parentId])
@@ -6637,6 +6653,96 @@ model PmWebhookDelivery {
   @@unique([webhookId, sourceKey])
   /// The delivery log: newest first, per webhook.
   @@index([webhookId, createdAt(sort: Desc)])
+}
+
+/// WARP-3527 (ADR-069 WS-11) — which tracker's export a file is.
+///
+/// UPPERCASE, like PmRelationKind: wire enum, quoted in the dashboard's source
+/// picker and in the migration's partial index. `CSV` is the generic preset
+/// (any spreadsheet); the others carry a column preset (see
+/// `services/pm/import/presets.ts`).
+enum PmImportSource {
+  CSV
+  JIRA_CSV
+  ASANA_CSV
+  TRELLO_JSON
+  LINEAR_CSV
+  GITHUB_CSV
+}
+
+/// WARP-3527 — lifecycle of one import. An explicit enum, never derived from
+/// `finishedAt IS NULL` (CLAUDE.md "No guessing").
+///
+///   PREVIEWED ──run──► PENDING ──claim──► RUNNING ──► SUCCEEDED
+///        │                │                  │   └──► FAILED ──run (resume)──► PENDING
+///        └────────────────┴──────cancel──────┴──────► CANCELLED
+///
+/// PREVIEWED: the file is uploaded and parsed, the owner is looking at the
+/// mapping. PENDING: the owner pressed Run and no runner has claimed it yet
+/// (the `setImmediate` kick, or the cron tick if the process died between the
+/// two). RUNNING: a runner holds it and heartbeats. FAILED keeps the file so a
+/// resume picks up at `stats.cursor`.
+///
+enum PmImportJobStatus {
+  PENDING
+  PREVIEWED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+/// INVARIANTS the schema language cannot express (migration SQL, proven by
+/// `pm-import-export.pg.test.ts`):
+///   * `PmImportJob_projectId_active_key` — UNIQUE ("projectId") WHERE status IN
+///     ('PENDING','RUNNING'). One import at a time per project, so two runs can
+///     never race the same sequence counter or each other's parent links.
+///   * `PmImportJob_finished_matches_status` — `finishedAt` is set exactly when
+///     the status is terminal (SUCCEEDED | FAILED | CANCELLED).
+model PmImportJob {
+  id          String            @id @default(uuid())
+  projectId   String
+  project     PmProject         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  source      PmImportSource
+  status      PmImportJobStatus @default(PREVIEWED)
+  /// The uploaded file's display name, for the summary. Never a path.
+  fileName    String
+  fileBytes   Int
+  /// sha256 of the upload. Namespaces the synthetic external id of a row that
+  /// carries no id column, so re-importing the SAME file is still idempotent.
+  fileSha256  String
+  /// The owner's choices (column bindings, status/priority/people overrides,
+  /// options). The auto-suggestions are NOT stored — they depend on the
+  /// project's states and users as they are when the job runs.
+  mapping     Json              @default("{}")
+  /// Progress while running, the summary once finished: counts, per-reason
+  /// skips, the first issues, unknown assignees, `cursor` for resume.
+  stats       Json              @default("{}")
+  error       String?
+  /// A User.id string, not an FK — the PM attribution convention.
+  createdById String
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @default(now()) @updatedAt
+  startedAt   DateTime?
+  /// Last proof of life from the runner; a RUNNING job whose heartbeat is
+  /// stale is presumed dead (process restart) and failed by the sweep.
+  heartbeatAt DateTime?
+  finishedAt  DateTime?
+  file        PmImportJobFile?
+
+  @@index([projectId, createdAt(sort: Desc)])
+  @@index([status, updatedAt])
+}
+
+/// WARP-3527 — the uploaded bytes, kept ONLY while the job can still use them
+/// (previewing, running, or failed-and-resumable). A separate 1:1 table so no
+/// status poll or job list ever drags a 10 MB blob over the wire by accident.
+/// Deleted when the job reaches SUCCEEDED / CANCELLED, and by the sweep for
+/// abandoned previews.
+model PmImportJobFile {
+  jobId String      @id
+  job   PmImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  bytes Bytes
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
