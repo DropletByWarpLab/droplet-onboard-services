@@ -194,6 +194,7 @@ installs all three when single-box mode is active:
 > ```bash
 > sudo droplet-host-units check      # read-only; exit 1 if any unit runs stale code
 > sudo systemctl start droplet-host-units.service   # restart only what changed
+> # (also installs changed host files first, through the host-integration heal)
 > ```
 >
 > `setup.sh` runs the refresh itself as its last step, so a provision needs

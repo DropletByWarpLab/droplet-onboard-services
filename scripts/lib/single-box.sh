@@ -290,14 +290,15 @@ EOF
   sudo install -d -m 0755 /etc/droplet
 
   # --- /etc/droplet-host-net/ -----------------------------------------
-  # NOTE: this install is unconditional, so it OVERWRITES the live conf on
-  # every setup run. Anything a box needs beyond the static baseline has to be
-  # re-generated afterwards, not hand-edited here — see droplet-relay-dns
-  # below, and setup_local_dns() (scripts/lib/local-dns.sh), which runs later
-  # in the same pass and re-applies both managed blocks.
+  # Full setup replaces the baseline, then setup_local_dns() regenerates its
+  # managed host-record/listener blocks. Focused host re-apply exits before that
+  # step: preserve the existing presence-policy conf, including runtime blocks.
+  # A first install still needs the template in either mode.
   sudo install -d -m 0755 /etc/droplet-host-net
-  sudo install -m 0644 "$host_src/etc-droplet-host-net/lan-dhcp.conf" \
-    /etc/droplet-host-net/lan-dhcp.conf
+  if [ "${REAPPLY_HOST_INTEGRATION:-false}" != "true" ] || [ ! -f /etc/droplet-host-net/lan-dhcp.conf ]; then
+    sudo install -m 0644 "$host_src/etc-droplet-host-net/lan-dhcp.conf" \
+      /etc/droplet-host-net/lan-dhcp.conf
+  fi
 
   # --- relay DNS origin (WARP-2189) ---------------------------------------
   # The template above names ONE listen-address (the .20.1 LAN leg) and
