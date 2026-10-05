@@ -17,6 +17,7 @@ import {
   Activity,
   Blocks,
   BookOpen,
+  Braces,
   Building2,
   Calendar as CalendarIcon,
   ChartColumn,
@@ -762,6 +763,24 @@ export const NAV_GROUPS: NavGroup[] = [
         hidden: true,
         settingsSection: "System",
         settingsBlurb: "Use the box's model from Copilot and other coding tools",
+      },
+      // WARP-3533 — personal API tokens a script uses on the projects API, the
+      // OpenAPI document that describes it, and the calendar links for "my work"
+      // and each project. Filed under Automation: it is what lets other tools act
+      // for you. owner/admin/member mirrors the API: an external guest can never
+      // hold a token (GET /api/developer answers 403) and Projects refuses a
+      // guest, so the row is not offered to them. No `requiresModule`: the page
+      // explains an off module itself, and a Settings destination that vanishes
+      // when a module is switched off is one you cannot use to find out why.
+      {
+        href: "/settings/developer",
+        label: "Developer",
+        icon: Braces,
+        roles: ["owner", "admin", "family"],
+        keywords: ["api", "api token", "script", "openapi", "calendar link", "ics", "feed"],
+        hidden: true,
+        settingsSection: "Automation",
+        settingsBlurb: "API tokens for scripts, and calendar links for your due dates",
       },
       // PR #382: appliance/service health status page. Reads the existing
       // WARP-43 aggregate.
