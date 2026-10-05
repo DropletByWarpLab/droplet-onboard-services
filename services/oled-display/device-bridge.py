@@ -1704,38 +1704,171 @@ def _unescape_mount(path: str) -> str:
 # walk lists every WHOLE disk except the OS disk and <100MB devices, each with
 # an EXPLICIT state enum — the dashboard branches on the enum, never guesses:
 #   in_use      — the disk itself or a NON-md descendant (plain partition,
-#                 dm/LVM volume) is mounted. A mount on the md ARRAY a member
-#                 backs does NOT count (WARP-1336): that's the pool in use,
-#                 not the disk — the member stays pool_member so Reclaim
-#                 remains reachable on a healthy (mounted) pool.
+#                 dm/LVM volume, LUKS mapper on the disk) is mounted. A mount
+#                 on the md ARRAY a member backs — or on anything BENEATH that
+#                 array, e.g. the LUKS mapper of a pool (WARP-3513) — does NOT
+#                 count (WARP-1336): that's the pool in use, not the disk — the
+#                 member stays pool_member so Reclaim remains reachable on a
+#                 healthy (mounted) pool.
 #   pool_member — carries a linux_raid_member signature (md name + md_mounted
 #                 included)
-#   foreign     — has some fs/RAID/LVM signature but nothing mounted
+#   foreign     — has some fs/RAID/LVM signature but nothing mounted (a LOCKED
+#                 LUKS bay is foreign too — `encryption` tells it apart)
 #   available   — no signature at all
+# Every entry also carries `encryption` ("luks2" | "none" | "unknown", WARP-3513).
 # READ-ONLY. Rides the drives_snapshot 10s cache (and its /drives/changed
 # invalidation hook), so it costs one lsblk subprocess per cache refresh.
 
+# WARP-3513: FSVER is what tells a LUKS2 container from LUKS1 / an unknown
+# format — lsblk reports the on-disk format version there ("2" for LUKS2). The
+# orchestrator cannot see host block devices, so every encryption fact it shows
+# comes from this tree.
+_LSBLK_DISK_COLUMNS = "NAME,TYPE,SIZE,FSTYPE,FSVER,MOUNTPOINT,TRAN,MODEL,SERIAL"
+# The same list without FSVER, for a util-linux that predates the column.
+_LSBLK_DISK_COLUMNS_NO_FSVER = "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,TRAN,MODEL,SERIAL"
+
+
 def _lsblk_disks_json():
     """Raw `lsblk -J -b` device tree as a parsed dict, or None when lsblk is
-    unavailable / emits garbage. Isolated so tests feed canned topology."""
-    _rc, out, _e = _run(
-        ["lsblk", "-J", "-b", "-o",
-         "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,TRAN,MODEL,SERIAL"],
-        timeout=8,
-    )
-    try:
-        parsed = json.loads(out or "")
-        return parsed if isinstance(parsed, dict) else None
-    except (ValueError, TypeError):
+    unavailable / emits garbage. Isolated so tests feed canned topology.
+
+    An lsblk too old to know FSVER rejects the WHOLE -o list ("unknown column")
+    with a non-zero exit and no output, which would take the entire disks
+    inventory with it. So a non-zero exit retries ONCE without the column: the
+    inventory survives and LUKS then reads "unknown" (the version is missing),
+    never a wrongly-confident "luks2". A clean exit with unusable output is not
+    a column problem and is not retried — and the normal path is ONE subprocess.
+    """
+    for columns in (_LSBLK_DISK_COLUMNS, _LSBLK_DISK_COLUMNS_NO_FSVER):
+        rc, out, _e = _run(["lsblk", "-J", "-b", "-o", columns], timeout=8)
+        try:
+            parsed = json.loads(out or "")
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed
+        if rc == 0:
+            return None
+    return None
+
+
+# WARP-3513: an md array is named md<digits>. NOT "starts with md" — an LVM
+# volume called "mdbackup" is not an array.
+_MD_NAME_RE = re.compile(r"md\d+")
+
+
+def _is_md_name(name):
+    return isinstance(name, str) and _MD_NAME_RE.fullmatch(name) is not None
+
+
+def _walk_block_children(node, under_md=False):
+    """Yield (descendant, md_owned) for every descendant of an lsblk tree node
+    (partitions, md arrays, dm/LVM/crypt volumes), depth-first.
+
+    `md_owned` is True for an md array AND for everything beneath one (its crypt
+    child, an LVM volume on it, a partition of it): ownership follows ANCESTRY,
+    not the node's name. With LUKS in the middle of a pool the mounted node is
+    the crypt child of the array — "droplet-bay-xxxxxxxx" — whose name says
+    nothing about md."""
+    for child in node.get("children") or []:
+        md_owned = under_md or _is_md_name(child.get("name"))
+        yield child, md_owned
+        yield from _walk_block_children(child, md_owned)
+
+
+def _is_luks2_container(node):
+    """A crypto_LUKS node whose lsblk FSVER is exactly "2". LUKS1, a missing
+    version, anything else: not LUKS2 — never read as the prepared state."""
+    return str(node.get("fsver") or "").strip() == "2"
+
+
+def _block_device_name(device):
+    """lsblk NAME for a /dev path: its basename (the mapper name for a
+    /dev/mapper/ node). "" when `device` is not a usable path."""
+    if not isinstance(device, str):
+        return ""
+    return device.rsplit("/", 1)[-1]
+
+
+def _lsblk_lineage(lsblk_tree, name):
+    """[top-level device, ..., node] down to the FIRST node called `name`
+    (depth-first, document order), or None when there is no such node.
+
+    An md array is listed under EVERY member disk, each time with its own copy
+    of the subtree; the first occurrence decides, so the answer cannot depend on
+    how many members an array has. Tolerates a malformed tree (never raises)."""
+    if not name or not isinstance(lsblk_tree, dict):
         return None
 
+    def descend(nodes, trail):
+        if not isinstance(nodes, list):
+            return None
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            here = trail + [node]
+            if node.get("name") == name:
+                return here
+            found = descend(node.get("children"), here)
+            if found is not None:
+                return found
+        return None
 
-def _walk_block_children(node):
-    """Yield every descendant of an lsblk tree node (partitions, md arrays,
-    dm/LVM volumes), depth-first."""
-    for child in node.get("children") or []:
-        yield child
-        yield from _walk_block_children(child)
+    return descend(lsblk_tree.get("blockdevices"), [])
+
+
+def _luks_container_of(lineage):
+    """The crypto_LUKS node that lineage's LAST node IS, or sits on the plaintext
+    side of, else None: the node itself when it carries fstype crypto_LUKS (the
+    backing-device case), else the direct parent of the nearest `crypt` node in
+    the lineage when that parent carries crypto_LUKS (the unlocked-mapper case —
+    including anything stacked on it, LVM for instance)."""
+    if lineage[-1].get("fstype") == "crypto_LUKS":
+        return lineage[-1]
+    for i in range(len(lineage) - 1, 0, -1):
+        if (lineage[i].get("type") == "crypt"
+                and lineage[i - 1].get("fstype") == "crypto_LUKS"):
+            return lineage[i - 1]
+    return None
+
+
+def _encryption_for(lsblk_tree, device):
+    """WARP-3513: "luks2" | "none" | "unknown" for a block device, from the
+    lsblk tree. Pure — never raises.
+
+    `device` is whatever the caller has: the BACKING device (/dev/sdb, /dev/md127
+    — the automount state records this) or the unlocked MAPPER
+    (/dev/mapper/droplet-bay-1a2b3c4d — /proc/mounts shows this; lsblk NAME is
+    the mapper name). Encrypted means the node itself is a crypto_LUKS container,
+    or it (or an ancestor) is a dm-crypt `crypt` node on top of one. The container
+    format comes from that container's `fsver`: "2" is luks2; LUKS1 or a missing
+    version is "unknown" — only an explicit LUKS2 is the prepared state. A node
+    with no LUKS involvement is "none"; a node that is not in the tree (or no
+    tree at all) is "unknown": the honest answer when we could not look."""
+    try:
+        lineage = _lsblk_lineage(lsblk_tree, _block_device_name(device))
+        if lineage is None:
+            return "unknown"
+        container = _luks_container_of(lineage)
+        if container is None:
+            return "none"
+        return "luks2" if _is_luks2_container(container) else "unknown"
+    except Exception:                                               # noqa: BLE001
+        return "unknown"
+
+
+def _md_for(lsblk_tree, device):
+    """WARP-3513: the bare md array name ("md127") when `device` is an md node or
+    sits beneath one, else None. With nested arrays, the nearest one — the array
+    the filesystem actually lives on. Pure — never raises."""
+    try:
+        lineage = _lsblk_lineage(lsblk_tree, _block_device_name(device))
+        for node in reversed(lineage or []):
+            if _is_md_name(node.get("name")):
+                return node["name"]
+    except Exception:                                               # noqa: BLE001
+        pass
+    return None
 
 
 def _collapse_by_device(entries):
@@ -2033,6 +2166,19 @@ def system_disk_info(lsblk_tree, os_disk, os_filesystems,
     }
 
 
+def _luks_encryption(nodes):
+    """WARP-3513: "luks2" | "unknown" | "none" over a set of lsblk nodes (a disk
+    and its descendants). Any LUKS2 container wins; a crypto_LUKS container of
+    another or missing version is "unknown"; no container at all is "none"."""
+    legacy = False
+    for node in nodes:
+        if node.get("fstype") == "crypto_LUKS":
+            if _is_luks2_container(node):
+                return "luks2"
+            legacy = True
+    return "unknown" if legacy else "none"
+
+
 def classify_disks(lsblk_tree, os_disk):
     """Classify the lsblk -J tree into the WARP-936 `disks` list.
 
@@ -2056,7 +2202,8 @@ def classify_disks(lsblk_tree, os_disk):
             size = 0
         if size < _MIN_DRIVE_BYTES:
             continue
-        descendants = list(_walk_block_children(dev))
+        tagged = list(_walk_block_children(dev))
+        descendants = [d for d, _md_owned in tagged]
         # WARP-1336: split mounts by WHERE they sit. On a healthy box the
         # pool filesystem is mounted on the md array the members back, and
         # counting that mount against the member disk classified every
@@ -2065,18 +2212,25 @@ def classify_disks(lsblk_tree, os_disk):
         # the pool worked. A mount on an md descendant is the ARRAY in use;
         # only the disk node itself or a non-md descendant (plain partition,
         # dm/LVM volume) being mounted makes the DISK in_use.
+        #
+        # WARP-3513: "md descendant" is decided by ANCESTRY, not by name. Every
+        # pool is now LUKS over md, so the mounted node is the dm-crypt child of
+        # the array ("droplet-bay-xxxxxxxx") — a name that does not start with
+        # "md". The old name-prefix test flipped every member to in_use and
+        # dropped pool_member + md + md_mounted, the WARP-1336 regression. An md
+        # node, or anything beneath one, is the array; a mount on a descendant
+        # that is NOT under any md (a plain partition, a LUKS bay on the disk
+        # itself, LVM straight on the disk) is still the DISK in use.
         md_name = next(
-            (d.get("name") for d in descendants
-             if (d.get("name") or "").startswith("md")),
+            (d.get("name") for d, _md_owned in tagged
+             if _is_md_name(d.get("name"))),
             "",
         )
         md_mounted = any(
-            d.get("mountpoint") for d in descendants
-            if (d.get("name") or "").startswith("md")
+            d.get("mountpoint") for d, md_owned in tagged if md_owned
         )
         mounted = bool(dev.get("mountpoint")) or any(
-            d.get("mountpoint") for d in descendants
-            if not (d.get("name") or "").startswith("md")
+            d.get("mountpoint") for d, md_owned in tagged if not md_owned
         )
         signatures = [
             t for t in [dev.get("fstype")] + [d.get("fstype") for d in descendants]
@@ -2104,6 +2258,11 @@ def classify_disks(lsblk_tree, os_disk):
             "bus": (dev.get("tran") or "").lower(),
             "model": (dev.get("model") or "").strip(),
             "serial": (dev.get("serial") or "").strip(),
+            # WARP-3513: explicit enum, so the UI can tell a LOCKED bay (a
+            # crypto_LUKS disk nothing has unlocked — state `foreign`) from a
+            # random foreign disk. Self-or-descendant: the container may be the
+            # disk itself, a partition, or the md array above a pool member.
+            "encryption": _luks_encryption([dev] + descendants),
         }
         if md_name or state == "pool_member":
             # Name the array so the dashboard routes the member to Reclaim
@@ -2129,6 +2288,11 @@ def drives_snapshot(invalidate=False):
     inventory with explicit states (see classify_disks) — so unmounted disks
     are no longer invisible. Additive: older orchestrators ignore the field;
     the mounted `drives` semantics are unchanged.
+
+    WARP-3513: every drive entry also carries `encryption` ("luks2" | "none" |
+    "unknown") and `md` (the bare md array name, or None), and every `disks`
+    entry carries `encryption` — all read off the one lsblk tree. Additive
+    again: no key is removed or renamed.
     """
     now = time.time()
     if not invalidate and _drives_cache["snap"] and now - _drives_cache["at"] < 10:
@@ -2270,6 +2434,18 @@ def drives_snapshot(invalidate=False):
     # per snapshot.
     lsblk_tree = _lsblk_disks_json()
 
+    # WARP-3513: encryption facts on EVERY drive entry — automount-state and
+    # /proc/mounts alike — read off that same tree (no second lsblk). The
+    # orchestrator runs in a container that cannot see host block devices, so
+    # this is the only place that can say a bay is LUKS2 or which md array a
+    # pool sits on. `device` is the backing device for an automount entry and
+    # the dm mapper for a /proc/mounts one; both resolve in the tree.
+    # Additive: nothing else about an entry changes.
+    for entry in mounts:
+        device = entry.get("device") or ""
+        entry["encryption"] = _encryption_for(lsblk_tree, device)
+        entry["md"] = _md_for(lsblk_tree, device)
+
     snap = {
         "drives": mounts,
         "count": len(mounts),
@@ -2351,12 +2527,20 @@ def eject_drive(uuid):
         return False, "refusing to eject a non-/mnt/droplet mount"
     if not os.path.ismount(real_mp):
         return False, "drive is not currently mounted"
+    # WARP-3513: a LUKS bay is mounted through its dm MAPPER, but the entry's
+    # `device` is the BACKING device (/dev/sdb — the automounter records that so
+    # a udev REMOVE matches, WARP-232) and the mapper rides in `mapper`. So the
+    # kernel's device is acceptable when it is EITHER of the entry's own two.
+    # Nothing else is: a stale or poisoned entry still cannot point the umount
+    # at a mount point that now hosts some other device.
     expected_dev = target.get("device") or ""
+    expected_mapper = target.get("mapper") or ""
+    accepted = [d for d in (expected_dev, expected_mapper) if d]
     actual_dev = _device_at_mountpoint(real_mp)
     if (
-        expected_dev
+        accepted
         and actual_dev
-        and os.path.realpath(actual_dev) != os.path.realpath(expected_dev)
+        and os.path.realpath(actual_dev) not in {os.path.realpath(d) for d in accepted}
     ):
         return False, "mount/device mismatch — refusing to eject"
     _run(["sync"], timeout=10)
@@ -3012,10 +3196,11 @@ def host_topology_snapshot():
 
 # Destructive pool operations the bridge will forward to the host script.
 # This is an allow-list — anything else is refused before we shell out. These
-# are Tier-3-class (data-destroying); they are owner-only + confirm-token-gated
-# at the orchestrator and reach this bridge route only with the bridge auth
-# token. The bridge NEVER runs mdadm/mkfs itself; the host script does, behind
-# its own hard pre-flight.
+# are Tier-3-class (data-destroying — the one exception, WARP-3513's
+# recovery_key_reveal, is called out below); they are owner-only +
+# confirm-token-gated at the orchestrator and reach this bridge route only with
+# the bridge auth token. The bridge NEVER runs mdadm/mkfs itself; the host
+# script does, behind its own hard pre-flight.
 _POOL_OPS = frozenset({
     "pool_create",
     "pool_destroy",
@@ -3031,7 +3216,53 @@ _POOL_OPS = frozenset({
     # (mdadm --fail/--remove + --zero-superblock) then adopt it. Same posture;
     # the host script enforces the OS-disk refusal and requires the owning md.
     "drive_reclaim",
+    # WARP-3513: one-time retrieval of a bay drive's LUKS recovery key from the
+    # host-only escrow. The ONE op here that is read-and-consume, NOT
+    # data-destroying: it changes no drive/pool topology (so no cache
+    # invalidation) and its result carries the key itself (so it is never
+    # logged — see _POOL_OPS_SECRET_RESULT). params.uuid is validated before
+    # anything is spooled.
+    "recovery_key_reveal",
+    # WARP-3513: "Regenerate recovery key" — the host enrols a NEW recovery
+    # keyslot, wipes the old one and escrows the new key for the same one-time
+    # reveal. Owner + Tier 3 at the orchestrator. Like the reveal it changes no
+    # drive/pool topology and has its params.uuid validated before spooling; its
+    # reply carries NO key (the owner retrieves it through the reveal), so its
+    # human failure message ("... run Regenerate again to retry") is passed on.
+    "recovery_key_regenerate",
 })
+
+# WARP-3513: ops whose only parameter is the filesystem UUID of a bay drive.
+_POOL_OPS_UUID_ONLY = frozenset({"recovery_key_reveal", "recovery_key_regenerate"})
+
+# WARP-3513: the host script's machine-readable refusals. Prepare needs a TPM2
+# and an encrypted /data (to hold the recovery key); when it cannot proceed it
+# exits with one of these codes BEFORE touching anything, and the bridge turns
+# the exit code (never a substring of the human message) into a `code` the
+# orchestrator maps to HTTP 409.
+_POOL_REFUSAL_CODES = {
+    75: "tpm_required",
+    76: "encrypted_data_required",
+}
+
+# WARP-3513: ops whose executor result carries SECRET material — the LUKS
+# recovery key. For these the host script's stdout/stderr and the parsed result
+# are never logged, and a failure is reported with a fixed message rather than
+# the script's own output (which, in a half-failed run, could hold the key).
+# The key may live only in the tmpfs spool result file the executor creates,
+# which _run_pool_via_executor deletes after reading.
+_POOL_OPS_SECRET_RESULT = frozenset({"recovery_key_reveal"})
+
+# WARP-3513: ops that read or consume state but never change which drives are
+# free vs. in use or how a pool is assembled, so the pools/drives caches stay
+# warm (every other op invalidates both — see _run_pool_via_executor).
+_POOL_OPS_NO_TOPOLOGY_CHANGE = frozenset(
+    {"recovery_key_reveal", "recovery_key_regenerate"})
+
+# recovery_key_reveal's one parameter: the filesystem UUID (hex + dashes, any
+# case). Matched with fullmatch — NOT `^...$` via re.match, where `$` would also
+# accept a trailing newline.
+_RECOVERY_UUID_RE = re.compile(r"[A-Fa-f0-9-]{8,64}")
 
 # ADR-019 follow-up: the bridge CANNOT exec droplet-storage-pool.sh itself —
 # this process runs as User=droplet inside ProtectSystem=strict +
@@ -3041,13 +3272,13 @@ _POOL_OPS = frozenset({
 # prints nothing, and the guard passes). Verified on the shipping box. So,
 # same posture as the WARP-808 hostapd Wi-Fi write but with a different
 # split (mdadm is a direct binary — there is no unit to polkit-restart):
-# the bridge writes the owner-confirmed request into a spool inside its own
-# StateDirectory, then `systemctl start`s a root oneshot
+# the bridge writes the owner-confirmed request into a shared RuntimeDirectory
+# under /run (tmpfs), then `systemctl start`s a root oneshot
 # (droplet-storage-pool-apply.service — authorized for the droplet user by
 # 50-droplet-device-bridge.rules, start verb only) which runs the pool
 # script as root and writes a result file back into the spool.
 POOL_SPOOL_DIR = os.environ.get(
-    "DROPLET_POOL_SPOOL_DIR", "/var/lib/droplet-bridge/pool-spool").strip()
+    "DROPLET_POOL_SPOOL_DIR", "/run/droplet-bridge-pool-spool").strip()
 POOL_APPLY_UNIT = os.environ.get(
     "DROPLET_POOL_APPLY_UNIT", "droplet-storage-pool-apply.service").strip()
 
@@ -3071,27 +3302,91 @@ def run_pool_command(operation, params):
     carrying the script's rc/stdout/stderr. This function only (a) refuses
     operations outside the allow-list, (b) refuses a second in-flight write,
     and (c) surfaces the executor's result honestly. Returns (ok, info);
-    never raises — mirrors eject_drive()."""
+    never raises — mirrors eject_drive().
+
+    WARP-3513: `recovery_key_reveal` additionally has its params.uuid validated
+    HERE, before anything is spooled or the lock is taken — a malformed uuid
+    never reaches the root executor — and only that validated uuid is forwarded.
+    Its result carries the recovery key, so it is never logged or echoed (see
+    _POOL_OPS_SECRET_RESULT). `recovery_key_regenerate` gets the same uuid check
+    (its reply carries no key).
+
+    The (ok, info) contract is unchanged; run_pool_command_ex adds the host's
+    machine-readable refusal code for the HTTP layer."""
+    ok, info, _code = run_pool_command_ex(operation, params)
+    return ok, info
+
+
+def run_pool_command_ex(operation, params):
+    """run_pool_command plus a third element: the machine code of a host
+    refusal ("tpm_required", "encrypted_data_required" — see
+    _POOL_REFUSAL_CODES) or "" for success / any other failure. The code comes
+    from the script's EXIT CODE, never from its message. Returns
+    (ok, info, code); never raises."""
     if operation not in _POOL_OPS:
-        return False, "unknown pool operation: {}".format(operation)
+        return False, "unknown pool operation: {}".format(operation), ""
+    if operation in _POOL_OPS_UUID_ONLY:
+        fs_uuid = params.get("uuid") if isinstance(params, dict) else None
+        if not isinstance(fs_uuid, str) or not _RECOVERY_UUID_RE.fullmatch(fs_uuid):
+            # The offending value is neither logged nor echoed back.
+            logger.warning("pool command %s refused: params.uuid is missing "
+                           "or malformed", operation)
+            return False, "invalid uuid for {}".format(
+                operation.replace("_", " ")), ""
+        params = {"uuid": fs_uuid}
     if not _POOL_LOCK.acquire(blocking=False):
         logger.warning("pool command %s rejected: another storage operation "
                        "is already in progress", operation)
-        return False, "another storage operation is already in progress"
+        return False, "another storage operation is already in progress", ""
     try:
-        return _run_pool_via_executor(operation, params)
+        refusal = {}
+        ok, info = _run_pool_via_executor(operation, params, refusal)
+        return ok, info, refusal.get("code", "")
     finally:
         _POOL_LOCK.release()
 
 
-def _run_pool_via_executor(operation, params):
+def _wipe_file(path):
+    """Best-effort: overwrite a file's bytes with zeros and fsync it, so a secret
+    does not outlive its unlink in the freed blocks. The pool spool lives on the
+    OS disk, which is NOT encrypted — a recovery key left in a deleted
+    result.json would be recoverable from it. Opens with O_NOFOLLOW (a planted
+    symlink is never followed), never raises, and a missing file is a no-op.
+    Defence in depth only: the caller removes the file whether or not this
+    worked."""
+    flags = (os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_BINARY", 0))
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        remaining = os.fstat(fd).st_size
+        while remaining > 0:
+            written = os.write(fd, b"\0" * min(remaining, 65536))
+            if written <= 0:
+                break
+            remaining -= written
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _run_pool_via_executor(operation, params, refusal=None):
     """Spool the request, start the root apply unit, collect the result.
 
     Split out of run_pool_command so the lock handling above stays trivially
-    correct. Same (ok, info) contract; never raises."""
+    correct. Same (ok, info) contract; never raises. WARP-3513: when the host
+    script refuses with one of its machine-readable exit codes, `refusal` (a
+    dict the caller passes in) gets {"code": ...}."""
     request_id = secrets.token_hex(8)
     req_path = os.path.join(POOL_SPOOL_DIR, "request.json")
     res_path = os.path.join(POOL_SPOOL_DIR, "result.json")
+    # WARP-3513: a secret-bearing op's result (the recovery key) is never logged
+    # or echoed, and its spool file is zeroed before it is unlinked.
+    secret = operation in _POOL_OPS_SECRET_RESULT
     try:
         # 0700 like the StateDirectory it lives in — only the bridge user
         # (or root) may place a request. os.makedirs ignores `mode` when the
@@ -3101,6 +3396,9 @@ def _run_pool_via_executor(operation, params):
         os.chmod(POOL_SPOOL_DIR, 0o700)
         # Drop any stale pair from an interrupted earlier run so the executor
         # can never consume an old request and we never read an old result.
+        # WARP-3513: a stale RESULT can be a recovery key the bridge never got
+        # to read (it died mid-call) — whatever op it came from, zero it first.
+        _wipe_file(res_path)
         for stale in (req_path, res_path):
             try:
                 os.remove(stale)
@@ -3130,11 +3428,16 @@ def _run_pool_via_executor(operation, params):
     if rc != 0:
         # The unit never ran (polkit denied / not installed) or died at the
         # executor level (no/malformed request). Remove the unconsumed
-        # request so it can't be picked up by a later start.
-        try:
-            os.remove(req_path)
-        except OSError:
-            pass
+        # request so it can't be picked up by a later start — and any result
+        # the unit managed to write before dying (WARP-3513: that file can hold
+        # a recovery key; it must not wait around for the next op's stale sweep).
+        if secret:
+            _wipe_file(res_path)
+        for leftover in (req_path, res_path):
+            try:
+                os.remove(leftover)
+            except OSError:
+                pass
         msg = (err.strip() or out.strip() or "pool executor failed to start")
         logger.warning("pool command %s executor start failed (rc=%s): %s",
                        operation, rc, msg)
@@ -3147,6 +3450,8 @@ def _run_pool_via_executor(operation, params):
                        operation, e)
         return False, "pool executor returned no readable result"
     finally:
+        if secret:
+            _wipe_file(res_path)
         try:
             os.remove(res_path)
         except OSError:
@@ -3159,27 +3464,51 @@ def _run_pool_via_executor(operation, params):
     script_rc = result.get("rc")
     script_out = result.get("stdout") or ""
     script_err = result.get("stderr") or ""
+    if refusal is not None and isinstance(script_rc, int) \
+            and script_rc in _POOL_REFUSAL_CODES:
+        # A machine-readable precondition refusal (no TPM2 / /data not
+        # encrypted): nothing was touched. The CODE is keyed on the exit code.
+        refusal["code"] = _POOL_REFUSAL_CODES[script_rc]
     if script_rc is None or script_rc != 0:
+        # A secret-bearing op's script output is never logged and never echoed —
+        # in a half-failed run stdout/stderr could hold the recovery key.
+        if secret:
+            logger.warning("pool command %s refused/failed (rc=%s)",
+                           operation, script_rc)
+            return False, "{} failed on the host".format(operation)
         msg = (script_err.strip() or script_out.strip()
                or "host script refused")
         logger.warning("pool command %s refused/failed (rc=%s): %s",
                        operation, script_rc, msg)
         return False, msg
-    # Invalidate the pools cache so the next GET /pools reflects the change.
-    pools_snapshot(invalidate=True)
-    # Any pool op can change which drives are free vs. in-use (pool_create,
-    # pool_destroy, pool_format, pool_add_spare, pool_remove_disk all alter
-    # md membership; drive_adopt also mounts under /mnt/droplet). Invalidate
-    # drives unconditionally so the next GET /drives reflects the new state
-    # within the cache TTL. NB this deliberately BROADENS the previous
-    # behavior (main invalidated drives only for drive_adopt; pools_snapshot
-    # was the unconditional one) — every pool op changes free/in-use drive
-    # state, so they all deserve the invalidation.
-    drives_snapshot(invalidate=True)
+    if operation not in _POOL_OPS_NO_TOPOLOGY_CHANGE:
+        # Invalidate the pools cache so the next GET /pools reflects the change.
+        pools_snapshot(invalidate=True)
+        # Any pool op can change which drives are free vs. in-use (pool_create,
+        # pool_destroy, pool_format, pool_add_spare, pool_remove_disk all alter
+        # md membership; drive_adopt also mounts under /mnt/droplet). Invalidate
+        # drives unconditionally so the next GET /drives reflects the new state
+        # within the cache TTL. NB this deliberately BROADENS the previous
+        # behavior (main invalidated drives only for drive_adopt; pools_snapshot
+        # was the unconditional one) — every pool op changes free/in-use drive
+        # state, so they all deserve the invalidation. (WARP-3513: except the
+        # read-and-consume ops, which change none.)
+        drives_snapshot(invalidate=True)
     try:
-        return True, json.loads(script_out or "{}")
+        parsed = json.loads(script_out or "{}")
     except (ValueError, TypeError):
+        if secret:
+            # Fail closed: the fallback below would hand the raw stdout (a bare
+            # key, say) back to the caller as a "message".
+            logger.warning("pool command %s: host script returned an unreadable "
+                           "result", operation)
+            return False, "{} returned an unreadable result".format(operation)
         return True, {"message": script_out.strip()}
+    if secret and not isinstance(parsed, dict):
+        logger.warning("pool command %s: host script returned an unexpected "
+                       "result shape", operation)
+        return False, "{} returned an unreadable result".format(operation)
+    return True, parsed
 
 
 # ---------------------------------------------------------------------------
@@ -4759,7 +5088,7 @@ class Handler(BaseHTTPRequestHandler):
             # /drives/:uuid/eject. The orchestrator only reaches here after an
             # owner session + a valid single-use confirm-token; the bridge
             # requires its own auth token on top, and run_pool_command() hands
-            # the op to the root executor unit via the StateDirectory spool
+            # the op to the root executor unit via the /run RuntimeDirectory spool
             # (the host script's hard pre-flight is the last safety gate) —
             # it never runs mdadm/mkfs itself.
             if not self._authed():
@@ -4772,8 +5101,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"ok": False, "error": "bad json"})
             operation = j.get("operation", "")
             params = j.get("params", {})
-            ok, info = run_pool_command(operation, params)
+            ok, info, code = run_pool_command_ex(operation, params)
+            # WARP-3513: for operation == "recovery_key_reveal" the 200 body
+            # below carries the LUKS recovery key. NEVER log `info` or the
+            # response here (or in _send) — Handler.log_message is a deliberate
+            # no-op and tests/test_device_bridge_recovery_key.py pins that no
+            # log record or stderr line ever holds the key.
             if not ok:
+                if code:
+                    # 409 — a PRECONDITION the box does not meet (Prepare needs a
+                    # TPM2 and an encrypted /data); nothing was touched. `code`
+                    # is the machine value the orchestrator branches on.
+                    return self._send(409, {"ok": False, "error": info,
+                                            "code": code})
                 # 422 — the host-script pre-flight refused (mounted/has-data/
                 # OS-disk/bad confirm) or the op was outside the allow-list.
                 return self._send(422, {"ok": False, "error": info})

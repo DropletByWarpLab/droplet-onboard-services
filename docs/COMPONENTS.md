@@ -162,7 +162,16 @@ network. Host-published ports and host-network services are called out.
   Highlights: `llm` (chat / agent loop), `auth`, `devices`/`device-clients`
   (pairing), `files`/`files-knowledge` (Nextcloud + RAG), `cameras`, `network*`,
   `switch`, `matter`/`scenes`, `vpn`, `calendar`, `reminders`, `email`, `pm*`
-  (native project management — `/api/pm/*`, ADR-026, behind `authMiddleware`/`requireRole`),
+  (native project management — `/api/pm/*`, ADR-026, behind `authMiddleware`/`requireRole`;
+  every `/api/pm/*` and `/api/mobile/pm*` route sits behind the `projects` module gate, and
+  `routes/pm/pm-module-gate.mount.test.ts` enumerates the mounted routers so a new one cannot
+  ship outside it. Every PM list is a page: `limit` (default 100, max 500) + an opaque
+  `cursor`, answering `nextCursor` and an exact `total` — WARP-3371. Due and start dates are
+  calendar dates, `YYYY-MM-DD` on the wire. `GET /api/pm/people` is the member-readable
+  `{id, displayName, avatarUrl}` roster that names the ids on PM rows. A project is archived
+  with `PATCH {archived}` (members may, audited) and deleted for good only by owner/admin,
+  archived-only, with its identifier retyped and its audit row written in the delete's
+  transaction — WARP-3370),
   `support/` (the service desk — `/api/support/*`, ADR-069: tickets are work items in
   `PmProject.kind = SERVICE_DESK` projects, behind the `support` module gate; `/api/pm/*`
   and `/api/mobile/pm/*` answer 404 for a desk and everything under it),
@@ -460,7 +469,15 @@ network. Host-published ports and host-network services are called out.
 - **Gotchas:** fails closed if `DEVICE_SECRET` empty (`/drivers/fix` needs auth);
   subnet sweep is throttled (concurrency cap) to respect the inference host FD limit; RTSP
   URLs validated as RFC-1918 before reaching Frigate; `ONVIF_WS_DISCOVERY_ENABLED`
-  defaults off (FD leak on Python 3.12+).
+  defaults off (FD leak on Python 3.12+). WARP-3508: a host Frigate already pulls a
+  stream from is *managed* — never probed or published (re-read at startup, before
+  `/scan`, every 10th sweep); dismissed cameras persist in `rejected-macs.json` under
+  `CAMERA_DISCOVERY_STATE_DIR` (named volume `camera-discovery-state`; `known_cameras`
+  is deliberately not persisted — it embeds stream credentials); the default-credential
+  ladder has a per-IP failed-login budget because Hanwha-class cameras lock the admin
+  account after ~5 failures; `{mac}` routes take any letter case (pending is keyed
+  lower-case); a sweep re-checks `_already_decided` before writing so it never undoes an
+  accept/reject made while it was probing.
 
 ## services/erp-sql-bridge
 

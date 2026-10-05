@@ -23,7 +23,7 @@ APScheduler==3.11.3
 # `pip install -r requirements.txt` from a dev box still works.
 onnxruntime==1.30.0       # ONNX inference engine (openWakeWord's --inference-framework=onnx)
 scipy==1.18.1             # openWakeWord's audio preprocessor (mel-spectrogram, resampling)
-huggingface_hub==2.0.0   # First-run download of bundled models (hey_jarvis, alexa, etc.)
+huggingface_hub==2.1.1   # First-run download of bundled models (hey_jarvis, alexa, etc.)
 tqdm==4.70.1              # Progress bar during model download
 pyyaml==6.0.3             # openWakeWord parses model config from YAML
 requests==2.34.2          # huggingface_hub's HTTP layer

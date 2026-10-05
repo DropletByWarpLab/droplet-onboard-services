@@ -233,13 +233,13 @@ describe.skipIf(!RUN)("PM schedule reads against Postgres (WARP-3523)", () => {
       ]);
     });
 
-    it("emits the board's ApiWorkItem (key, state, assignees, ISO dates)", async () => {
+    it("emits the board's ApiWorkItem (key, state, assignees, calendar dates)", async () => {
       const res = await svc.getProjectTimeline(prisma, projectA, range);
       const span = res.items.find((i) => i.id === id["span-in"])!;
       expect(span).toMatchObject({
         projectId: projectA,
-        startDate: "2026-10-05T00:00:00.000Z",
-        dueDate: "2026-10-10T00:00:00.000Z",
+        startDate: "2026-10-05",
+        dueDate: "2026-10-10",
         priority: "none",
         assignees: [],
         labels: [],
