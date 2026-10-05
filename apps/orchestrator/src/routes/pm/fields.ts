@@ -28,6 +28,7 @@ import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { recordAccessDenied, requireRole } from "../../middleware/auth.js";
 import { actorOf } from "./actor.js";
+import { isServiceDesk } from "../../services/pm/pm.service.js";
 import {
   PM_PROPERTY_ERRORS,
   PropertyValueError,
@@ -160,17 +161,17 @@ export function createPmFieldsRouter(prisma: PrismaClient): Router {
   const leadOfProject = ownerAdminOrLead(async (req) => {
     const project = await prisma.pmProject.findUnique({
       where: { id: req.params.id },
-      select: { leadId: true },
+      select: { leadId: true, kind: true },
     });
-    return project ? project.leadId : undefined;
+    return project && !isServiceDesk(project) ? project.leadId : undefined;
   }, PM_PROPERTY_ERRORS.PROJECT_NOT_FOUND);
 
   const leadOfProperty = ownerAdminOrLead(async (req) => {
     const property = await prisma.pmCustomProperty.findUnique({
       where: { id: req.params.id },
-      select: { project: { select: { leadId: true } } },
+      select: { project: { select: { leadId: true, kind: true } } },
     });
-    return property ? property.project.leadId : undefined;
+    return property && !isServiceDesk(property.project) ? property.project.leadId : undefined;
   }, PM_PROPERTY_ERRORS.PROPERTY_NOT_FOUND);
 
   // ── Definitions ──

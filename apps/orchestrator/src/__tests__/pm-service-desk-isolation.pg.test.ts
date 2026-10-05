@@ -29,7 +29,7 @@ const RUN =
   typeof process.env.DATABASE_URL === "string" &&
   process.env.DATABASE_URL.length > 0;
 
-type Method = "get" | "post" | "patch" | "delete";
+type Method = "get" | "post" | "put" | "patch" | "delete";
 interface Ids {
   workspaceSlug: string;
   pmProjectId: string;
@@ -38,6 +38,7 @@ interface Ids {
   deskStateId: string;
   deskLabelId: string;
   deskItemId: string;
+  deskPropertyId: string;
   relationId: string;
   ownerId: string;
 }
@@ -61,6 +62,7 @@ const probes: Probe[] = [
   { route: "POST /api/pm/projects/:id/states", kind: "desk", method: "post", url: (i) => `/api/pm/projects/${i.deskId}/states`, body: { name: "Extra", group: "started" } },
   { route: "PATCH /api/pm/states/:id", kind: "desk", method: "patch", url: (i) => `/api/pm/states/${i.deskStateId}`, body: { name: "Renamed" } },
   { route: "DELETE /api/pm/states/:id", kind: "desk", method: "delete", url: (i) => `/api/pm/states/${i.deskStateId}` },
+  { route: "POST /api/pm/projects/:id/states/reorder", kind: "desk", method: "post", url: (i) => `/api/pm/projects/${i.deskId}/states/reorder`, body: { state_ids: ["DESK_STATE"] } },
   { route: "GET /api/pm/projects/:id/labels", kind: "desk", method: "get", url: (i) => `/api/pm/projects/${i.deskId}/labels` },
   { route: "POST /api/pm/projects/:id/labels", kind: "desk", method: "post", url: (i) => `/api/pm/projects/${i.deskId}/labels`, body: { name: "Extra" } },
   { route: "PATCH /api/pm/labels/:id", kind: "desk", method: "patch", url: (i) => `/api/pm/labels/${i.deskLabelId}`, body: { name: "Renamed" } },
@@ -71,6 +73,8 @@ const probes: Probe[] = [
   { route: "PATCH /api/pm/work-items/:id", kind: "desk", method: "patch", url: (i) => `/api/pm/work-items/${i.deskItemId}`, body: { name: "renamed" } },
   { route: "POST /api/pm/work-items/:id/transition", kind: "desk", method: "post", url: (i) => `/api/pm/work-items/${i.deskItemId}/transition`, body: { state_id: "anything" } },
   { route: "DELETE /api/pm/work-items/:id", kind: "desk", method: "delete", url: (i) => `/api/pm/work-items/${i.deskItemId}` },
+  { route: "POST /api/pm/work-items/:id/archive", kind: "desk", method: "post", url: (i) => `/api/pm/work-items/${i.deskItemId}/archive` },
+  { route: "POST /api/pm/work-items/:id/restore", kind: "desk", method: "post", url: (i) => `/api/pm/work-items/${i.deskItemId}/restore` },
   { route: "GET /api/pm/work-items/:id/comments", kind: "desk", method: "get", url: (i) => `/api/pm/work-items/${i.deskItemId}/comments` },
   { route: "POST /api/pm/work-items/:id/comments", kind: "desk", method: "post", url: (i) => `/api/pm/work-items/${i.deskItemId}/comments`, body: { comment_html: "<p>x</p>" } },
   { route: "GET /api/pm/work-items/:id/activity", kind: "desk", method: "get", url: (i) => `/api/pm/work-items/${i.deskItemId}/activity` },
@@ -78,6 +82,14 @@ const probes: Probe[] = [
   { route: "GET /api/pm/work-items/:id/relations", kind: "desk", method: "get", url: (i) => `/api/pm/work-items/${i.deskItemId}/relations` },
   { route: "POST /api/pm/work-items/:id/relations", kind: "desk", method: "post", url: (i) => `/api/pm/work-items/${i.pmItemId}/relations`, body: { to_work_item_id: "DESK_ITEM", kind: "RELATES" } },
   { route: "DELETE /api/pm/relations/:relationId", kind: "desk", method: "delete", url: (i) => `/api/pm/relations/${i.relationId}` },
+  // ── editing fields share the same project / desk boundary ────────────────
+  { route: "GET /api/pm/projects/:id/properties", kind: "desk", method: "get", url: (i) => `/api/pm/projects/${i.deskId}/properties` },
+  { route: "POST /api/pm/projects/:id/properties", kind: "desk", method: "post", url: (i) => `/api/pm/projects/${i.deskId}/properties`, body: { name: "Extra", type: "text" } },
+  { route: "POST /api/pm/projects/:id/properties/reorder", kind: "desk", method: "post", url: (i) => `/api/pm/projects/${i.deskId}/properties/reorder`, body: { property_ids: ["DESK_PROPERTY"] } },
+  { route: "PATCH /api/pm/properties/:id", kind: "desk", method: "patch", url: (i) => `/api/pm/properties/${i.deskPropertyId}`, body: { name: "Renamed" } },
+  { route: "DELETE /api/pm/properties/:id", kind: "desk", method: "delete", url: (i) => `/api/pm/properties/${i.deskPropertyId}` },
+  { route: "PUT /api/pm/work-items/:id/properties/:propertyId", kind: "desk", method: "put", url: (i) => `/api/pm/work-items/${i.deskItemId}/properties/${i.deskPropertyId}`, body: { value: { text: "Changed" } } },
+  { route: "DELETE /api/pm/work-items/:id/properties/:propertyId", kind: "desk", method: "delete", url: (i) => `/api/pm/work-items/${i.deskItemId}/properties/${i.deskPropertyId}` },
   // ── mobile router ────────────────────────────────────────────────────────
   { route: "GET /api/mobile/pm/work-items/:id", kind: "desk", method: "get", url: (i) => `/api/mobile/pm/work-items/${i.deskItemId}?workspace=${i.workspaceSlug}&project_id=${i.deskId}` },
   // ── schedule router: stage's Timeline and My Work need the same boundary ──
@@ -120,22 +132,25 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     );
     prisma = new RealPrismaClient();
     await prisma.$connect();
-    const [{ createPmNativeRouter }, { createPmRelationsRouter }, { createPmMobileRouter }, { createPmScheduleRouter }] =
+    const [{ createPmNativeRouter }, { createPmRelationsRouter }, { createPmMobileRouter }, { createPmScheduleRouter }, { createPmFieldsRouter }] =
       await Promise.all([
         import("../routes/pm/native.js"),
         import("../routes/pm/relations.js"),
         import("../routes/mobile/pm.js"),
         import("../routes/pm/schedule.js"),
+        import("../routes/pm/fields.js"),
       ]);
     const native = createPmNativeRouter(prisma);
     const relations = createPmRelationsRouter(prisma);
     const mobile = createPmMobileRouter(prisma);
     const schedule = createPmScheduleRouter(prisma);
+    const fields = createPmFieldsRouter(prisma);
     routers = [
       { router: native, prefix: "/api" },
       { router: relations, prefix: "/api" },
       { router: mobile, prefix: "" },
       { router: schedule, prefix: "/api" },
+      { router: fields, prefix: "/api" },
     ];
     const app = express();
     app.use(express.json());
@@ -147,6 +162,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     app.use("/api", relations);
     app.use(mobile);
     app.use("/api", schedule);
+    app.use("/api", fields);
     app.use(
       (err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
         res.status(500).json({ error: "unhandled", message: err.message });
@@ -244,6 +260,12 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       ],
     });
     await prisma.pmActivity.create({ data: { workItemId: deskItem.id, verb: "created" } });
+    const deskProperty = await prisma.pmCustomProperty.create({
+      data: { projectId: desk.id, name: "Private", type: "text" },
+    });
+    await prisma.pmWorkItemPropertyValue.create({
+      data: { workItemId: deskItem.id, propertyId: deskProperty.id, value: { text: "Private" } },
+    });
 
     // The escalation link, as the support service writes it: one symmetric row,
     // smaller id first.
@@ -261,6 +283,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       deskStateId: desk.states[0]!.id,
       deskLabelId: desk.labels[0]!.id,
       deskItemId: deskItem.id,
+      deskPropertyId: deskProperty.id,
       relationId: relation.id,
       ownerId: owner,
     };
@@ -271,7 +294,10 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
     const body =
       p.body === undefined
         ? undefined
-        : JSON.parse(JSON.stringify(p.body).replace("DESK_ITEM", ids.deskItemId));
+        : JSON.parse(JSON.stringify(p.body)
+          .replace("DESK_ITEM", ids.deskItemId)
+          .replace("DESK_STATE", ids.deskStateId)
+          .replace("DESK_PROPERTY", ids.deskPropertyId));
     const r = request(server)[p.method](url);
     return body === undefined ? r : r.send(body);
   };
@@ -287,7 +313,7 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       )
       .sort();
 
-  it("classifies EVERY route the four PM routers mount — a new route fails here until it is decided", () => {
+  it("classifies EVERY route the PM routers mount — a new route fails here until it is decided", () => {
     expect(mountedRoutes()).toEqual(probes.map((p) => p.route).sort());
   });
 
@@ -298,6 +324,13 @@ describe.skipIf(!RUN)("the PM surface answers 404 for a service desk and everyth
       expect(res.status, JSON.stringify(res.body)).toBe(404);
       const text = JSON.stringify(res.body);
       for (const marker of DESK_MARKERS) expect(text).not.toContain(marker);
+      // A final getWorkItem guard is too late if the write already committed.
+      expect(await prisma.pmWorkItem.findUnique({ where: { id: ids.deskItemId }, select: { isArchived: true } }))
+        .toEqual({ isArchived: false });
+      expect(await prisma.pmWorkItemPropertyValue.findUnique({
+        where: { workItemId_propertyId: { workItemId: ids.deskItemId, propertyId: ids.deskPropertyId } },
+        select: { value: true },
+      })).toEqual({ value: { text: "Private" } });
     },
   );
 

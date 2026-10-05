@@ -1082,8 +1082,8 @@ export async function reorderStates(
   projectId: string,
   stateIds: string[],
 ): Promise<ApiState[]> {
-  const project = await prisma.pmProject.findUnique({ where: { id: projectId }, select: { id: true } });
-  if (!project) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+  const project = await prisma.pmProject.findUnique({ where: { id: projectId }, select: { id: true, kind: true } });
+  if (!project || isServiceDesk(project)) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
   const current = await prisma.pmState.findMany({ where: { projectId }, select: { id: true } });
   const have = new Set(current.map((s) => s.id));
   if (
@@ -1901,7 +1901,7 @@ async function setArchived(
 ): Promise<ApiWorkItem> {
   const changed = await prisma.$transaction(async (tx) => {
     const res = await tx.pmWorkItem.updateMany({
-      where: { id, isArchived: !archived },
+      where: { id, isArchived: !archived, project: { kind: "PROJECT" } },
       // `archivedAt` is the audit timestamp written/cleared alongside the
       // canonical `isArchived` column, so the two never diverge (WARP-884).
       data: { isArchived: archived, archivedAt: archived ? new Date() : null },
@@ -1911,7 +1911,7 @@ async function setArchived(
     return true;
   });
   if (!changed) {
-    const existing = await prisma.pmWorkItem.findUnique({ where: { id }, select: { id: true } });
+    const existing = await prisma.pmWorkItem.findUnique({ where: { id, project: { kind: "PROJECT" } }, select: { id: true } });
     if (!existing) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
     throw new Error(archived ? PM_ERRORS.WORK_ITEM_ARCHIVED : PM_ERRORS.WORK_ITEM_NOT_ARCHIVED);
   }

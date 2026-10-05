@@ -166,6 +166,7 @@ describe("the PM OpenAPI document — structure", () => {
       "POST /api/pm/projects",
       "PATCH /api/pm/projects/{id}",
       "POST /api/pm/projects/{id}/states",
+      "POST /api/pm/projects/{id}/states/reorder",
       "PATCH /api/pm/states/{id}",
       "POST /api/pm/projects/{id}/labels",
       "PATCH /api/pm/labels/{id}",
