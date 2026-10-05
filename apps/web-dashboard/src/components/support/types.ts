@@ -100,6 +100,13 @@ export interface TicketSummary {
   labels: DeskLabel[];
   department: PmDepartmentRef | null;
   slaStatus: SlaStatus;
+  sla?: {
+    firstResponseDueAt: string | null;
+    nextResponseDueAt: string | null;
+    resolutionDueAt: string | null;
+    remainingBusinessMins: number | null;
+    paused: boolean;
+  } | null;
   firstRespondedAt: string | null;
   solvedAt: string | null;
   reopenCount: number;
