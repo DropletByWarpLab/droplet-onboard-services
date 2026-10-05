@@ -11,7 +11,7 @@ import { parseDocument, isMap, isScalar } from "yaml";
 import { config } from "../config.js";
 import { createLogger } from "../lib/logger.js";
 import { scrubUrlCredentials } from "../lib/rtsp-credentials.js";
-import { FrigateNotFoundError } from "../types/frigate-error.js";
+import { FrigateNotFoundError, FrigateUpstreamError } from "../types/frigate-error.js";
 import { toFrigateKey } from "./camera-key.js";
 import {
   buildRecordBlock,
@@ -422,6 +422,46 @@ export async function fetchEventCamera(eventId: string): Promise<string | null> 
   return typeof body.camera === "string" && body.camera ? body.camera : null;
 }
 
+export interface EventPlaybackSpan {
+  camera: string;
+  /** Unix seconds. */
+  startTime: number;
+  /** Unix seconds; null while Frigate is still tracking the event. */
+  endTime: number | null;
+}
+
+/**
+ * WARP-3509 — where and when an event happened, for building the window its
+ * clip plays over as HLS (`GET /api/events/<id>`, frigate/api/event.py).
+ *
+ * `FrigateNotFoundError("event_not_found")` when Frigate has no such event.
+ * Every other non-2xx, a body that is not JSON, and a row without a camera or
+ * a start time (a proxy's page, a Frigate that changed shape) is a
+ * `FrigateUpstreamError`: the caller cannot build a window from it.
+ */
+export async function fetchEventPlaybackSpan(eventId: string): Promise<EventPlaybackSpan> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/events/${encodeURIComponent(eventId)}`,
+    { signal: timeout() },
+  );
+  if (resp.status === 404) throw new FrigateNotFoundError("event_not_found");
+  if (!resp.ok) throw new FrigateUpstreamError("event lookup", resp.status);
+
+  let body: { camera?: unknown; start_time?: unknown; end_time?: unknown } | null;
+  try {
+    body = (await resp.json()) as typeof body;
+  } catch (err) {
+    throw new FrigateUpstreamError("event lookup", resp.status, "not JSON", err);
+  }
+
+  const { camera, start_time: start, end_time: end } = body ?? {};
+  const finite = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
+  if (typeof camera !== "string" || !camera || !finite(start) || !(end === null || end === undefined || finite(end))) {
+    throw new FrigateUpstreamError("event lookup", resp.status, "unexpected shape");
+  }
+  return { camera, startTime: start, endTime: end ?? null };
+}
+
 /** WARP-2982 — which camera does this review cluster belong to? */
 export async function fetchReviewCamera(reviewId: string): Promise<string | null> {
   const resp = await fetch(
@@ -553,17 +593,156 @@ export async function fetchReviews(
   return resp.json();
 }
 
+// WARP-3509 — review media and the viewed flag, on the Frigate 0.17.1 API
+// (frigate/api/review.py and frigate/api/media.py @ v0.17.1, and verified
+// against a live 0.17.1-416a9b7):
+//
+//   GET  /api/review/<id>                   the review row, including `thumb_path`
+//   GET  /clips/review/<file>               that thumbnail — a static file, not an API route
+//   GET  /api/review/<id>/preview?format=   `gif` is the DEFAULT (~10 MB); `mp4` is ~1.4 MB
+//   POST /api/reviews/viewed {"ids": […]}   mark viewed, in bulk
+//
+// What 0.17 does not have, and this file used to call: /api/review/<id>/thumbnail.jpg
+// and /api/review/<id>/preview.mp4 (both 404), and POST /api/review/<id>/viewed
+// (405: that path accepts only DELETE, which is "mark NOT viewed").
+
+/** Where Frigate writes review thumbnails — the only prefix a `thumb_path` may have. */
+const REVIEW_THUMB_DIR = "/media/frigate/clips/review/";
+
 /**
- * Mark a review item as viewed (Frigate's "I've looked at this"
- * state). Frigate uses `POST /api/review/<id>/viewed` for this.
- * Idempotent.
+ * One path segment in the characters Frigate's own names use (camera names are
+ * `[A-Za-z0-9_-]`, review ids `<epoch>.<fraction>-<6 chars>`) plus an image
+ * extension. No separators, no `%`, no `?`/`#`, no whitespace or control chars.
+ */
+const REVIEW_THUMB_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,200}\.(webp|jpe?g)$/;
+
+/** Frigate renders a preview clip on demand (ffmpeg over the preview frames). */
+const REVIEW_PREVIEW_TIMEOUT = 30_000;
+
+export interface ReviewThumbFile {
+  /** The bare file name under `/media/frigate/clips/review/`. */
+  name: string;
+  /** What to serve it as — taken from the extension, never from Frigate's header. */
+  contentType: "image/webp" | "image/jpeg";
+}
+
+/**
+ * The gate between a `thumb_path` Frigate hands us and a URL we dial on it.
+ *
+ * Accepts only `/media/frigate/clips/review/<one file name>` with an image
+ * extension; anything else — traversal, a different directory, a nested path,
+ * a query string, a non-string — is `null` and never becomes a request. The
+ * value comes out of Frigate's own database, but a path that reaches a URL is
+ * checked like the untrusted input it would be if that row were ever wrong.
+ */
+export function parseReviewThumbPath(thumbPath: unknown): ReviewThumbFile | null {
+  if (typeof thumbPath !== "string") return null;
+  if (thumbPath.includes("..")) return null;
+  if (!thumbPath.startsWith(REVIEW_THUMB_DIR)) return null;
+  const name = thumbPath.slice(REVIEW_THUMB_DIR.length);
+  const match = REVIEW_THUMB_FILE_RE.exec(name);
+  if (!match) return null;
+  return { name, contentType: match[1] === "webp" ? "image/webp" : "image/jpeg" };
+}
+
+export interface ReviewThumbnail {
+  /** The image, already read: a thumbnail is a few KB, and reading it here keeps a failed transfer inside the typed errors. */
+  bytes: Buffer;
+  /** Serve the bytes as this. Frigate's /clips/ location labels `.webp` `application/octet-stream`. */
+  contentType: ReviewThumbFile["contentType"];
+}
+
+/**
+ * A review's thumbnail: look the review up, then fetch the file its
+ * `thumb_path` names from `/clips/review/`.
+ *
+ * `FrigateNotFoundError("review_not_found")` when Frigate has no such review;
+ * `("thumbnail_not_found")` when the row has no usable `thumb_path` or the file
+ * is gone (an in-progress review has none until its first object frame, and a
+ * finished one outlives its file once Frigate prunes the directory). Every
+ * other non-2xx — an unreadable lookup, a body that dies mid-transfer — is a
+ * `FrigateUpstreamError`.
+ */
+export async function fetchReviewThumbnail(reviewId: string): Promise<ReviewThumbnail> {
+  const lookup = await fetch(`${FRIGATE_URL}/api/review/${encodeURIComponent(reviewId)}`, {
+    signal: timeout(),
+  });
+  if (lookup.status === 404) throw new FrigateNotFoundError("review_not_found");
+  if (!lookup.ok) throw new FrigateUpstreamError("review lookup", lookup.status);
+
+  let review: { thumb_path?: unknown } | null;
+  try {
+    review = (await lookup.json()) as { thumb_path?: unknown } | null;
+  } catch (err) {
+    throw new FrigateUpstreamError("review lookup", lookup.status, "not JSON", err);
+  }
+
+  const file = parseReviewThumbPath(review?.thumb_path);
+  if (!file) {
+    logger.warn(
+      { reviewId, thumbPath: review?.thumb_path },
+      "review thumb_path is not a file under /media/frigate/clips/review/; not fetching it",
+    );
+    throw new FrigateNotFoundError("thumbnail_not_found");
+  }
+
+  const resp = await fetch(`${FRIGATE_URL}/clips/review/${encodeURIComponent(file.name)}`, {
+    signal: timeout(SNAPSHOT_TIMEOUT),
+  });
+  if (resp.status === 404) throw new FrigateNotFoundError("thumbnail_not_found");
+  if (!resp.ok) throw new FrigateUpstreamError("review thumbnail", resp.status);
+
+  // Read here, not in the route: a connection that dies mid-body is Frigate
+  // failing to deliver, the same case as a 5xx, and is classified with it
+  // instead of reaching the route as a bare `TypeError: terminated`.
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(await resp.arrayBuffer());
+  } catch (err) {
+    throw new FrigateUpstreamError("review thumbnail", resp.status, "body read failed", err);
+  }
+  return { bytes, contentType: file.contentType };
+}
+
+/**
+ * A review's preview clip, as mp4. `format` defaults to `gif` on Frigate and a
+ * gif is ~10 MB against ~1.4 MB, so it is always asked for explicitly.
+ *
+ * Frigate answers 404 while it has nothing to render — the normal state of a
+ * review that is still open — which is `FrigateNotFoundError("preview_not_found")`.
+ *
+ * Unlike an event's `clip.mp4` (a fragmented mp4 streamed as ffmpeg makes it,
+ * which a <video> cannot read a length from or seek in — that plays as HLS, see
+ * `GET /cameras/events/:eventId/playback.m3u8`), this is a regular file:
+ * `preview_mp4` in frigate/api/media.py writes it with `-movflags +faststart`
+ * (both of its ffmpeg paths) and nginx serves it from disk through
+ * X-Accel-Redirect, with a Content-Length. It plays in a plain <video src> as is.
+ */
+export async function fetchReviewPreview(reviewId: string): Promise<Response> {
+  const resp = await fetch(
+    `${FRIGATE_URL}/api/review/${encodeURIComponent(reviewId)}/preview?format=mp4`,
+    { signal: timeout(REVIEW_PREVIEW_TIMEOUT) },
+  );
+  if (resp.status === 404) throw new FrigateNotFoundError("preview_not_found");
+  if (!resp.ok) throw new FrigateUpstreamError("review preview", resp.status);
+  return resp;
+}
+
+/**
+ * Mark a review item as viewed (Frigate's "I've looked at this" state).
+ * Frigate 0.17 takes the ids in bulk — `POST /api/reviews/viewed {"ids": […]}` —
+ * and the per-review `POST /api/review/<id>/viewed` this used to call is a 405
+ * there. Idempotent. Frigate answers 200 for an id it has no row for, so
+ * "does this review exist" is the caller's check, not this call's.
  */
 export async function markReviewViewed(reviewId: string): Promise<void> {
-  const resp = await fetch(
-    `${FRIGATE_URL}/api/review/${encodeURIComponent(reviewId)}/viewed`,
-    { method: "POST", signal: timeout() },
-  );
-  if (!resp.ok) throw new Error(`Frigate review viewed: ${resp.status}`);
+  const resp = await fetch(`${FRIGATE_URL}/api/reviews/viewed`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids: [reviewId] }),
+    signal: timeout(),
+  });
+  if (!resp.ok) throw new FrigateUpstreamError("review viewed", resp.status);
 }
 
 // --- Recordings + timeline (Phase 3) ---
@@ -985,7 +1164,7 @@ export class NoRecordingsInRangeError extends Error {
 }
 
 export async function fetchHlsPlaylist(url: string): Promise<string> {
-  const resp = await fetch(url, { signal: timeout(15_000) });
+  const resp = await fetch(url, { signal: timeout(15_000), redirect: "manual" });
   if (resp.status === 404) throw new NoRecordingsInRangeError();
   if (!resp.ok) throw new Error(`HLS playlist: ${resp.status}`);
   return resp.text();

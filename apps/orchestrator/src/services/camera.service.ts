@@ -62,6 +62,8 @@ import type {
 } from "../types/camera.js";
 import { createLogger } from "../lib/logger.js";
 import { retainsFootage } from "./camera-retention-defaults.js";
+import { retentionFromFrigateConfig } from "./camera-recording-state.js";
+export { retentionFromFrigateConfig } from "./camera-recording-state.js";
 import {
   buildRecordingState,
   degradedRecordingState,
@@ -559,43 +561,6 @@ export function subscribeCameraEvents(
 // --- Camera listing ---
 
 /**
- * Map a camera's RESOLVED Frigate config into the shape `retainsFootage`
- * expects.
- *
- * Reads the resolved tree deliberately: it is what Frigate will actually
- * enforce, inherited defaults included. The authored config is the right
- * source for WRITES (it round-trips; the resolved tree does not), but the
- * wrong one for asking "what is this camera really doing right now".
- *
- * Note the asymmetry in Frigate 0.17's schema — `continuous` and `motion`
- * carry `days` directly, while `alerts` and `detections` nest theirs under
- * `retain`. Reading the wrong depth yields `undefined`, which coerces to
- * "nothing retained" and would put every healthy camera in the warning
- * state. Hence the explicit reads rather than a generic walk.
- */
-export function retentionFromFrigateConfig(configEntry: unknown): {
-  enabled?: boolean;
-  continuousDays: number;
-  motionDays: number;
-  alertsRetainDays: number;
-  detectionsRetainDays: number;
-} {
-  const record = ((configEntry as Record<string, unknown> | undefined)?.record ??
-    {}) as Record<string, Record<string, Record<string, unknown>>>;
-  const num = (v: unknown): number => {
-    const n = Number(v ?? 0);
-    return Number.isFinite(n) && n > 0 ? n : 0;
-  };
-  return {
-    enabled: (record as unknown as { enabled?: boolean }).enabled,
-    continuousDays: num(record.continuous?.days),
-    motionDays: num(record.motion?.days),
-    alertsRetainDays: num(record.alerts?.retain?.days),
-    detectionsRetainDays: num(record.detections?.retain?.days),
-  };
-}
-
-/**
  * Per-call budget for the Frigate reads that only ENRICH the camera list
  * (storage usage, the newest segment). A slow Frigate must not hold the whole
  * list — and every tile behind it — for the default ten seconds.
@@ -977,8 +942,10 @@ export async function getReviewsFiltered(
       audio,
       zones,
       detectionIds,
-      // Frigate serves preview clips at /api/review/<id>/preview.{mp4,gif}.
-      // We proxy through the orchestrator so camera/file URLs stay LAN-side.
+      // Frigate serves the preview clip at /api/review/<id>/preview?format=mp4|gif
+      // and the thumbnail as the /clips/review/ file named by the review's
+      // thumb_path (WARP-3509). We proxy both through the orchestrator so
+      // camera/file URLs stay LAN-side.
       previewUrl: `/api/cameras/reviews/${encodeURIComponent(id)}/preview`,
       thumbnailUrl: `/api/cameras/reviews/${encodeURIComponent(id)}/thumbnail`,
     };

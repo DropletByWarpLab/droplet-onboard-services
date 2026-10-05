@@ -10,9 +10,18 @@ vi.mock("@/components/Toast", () => ({ useToast: () => ({ toast }) }));
 
 const createDesk = vi.fn();
 const updateDesk = vi.fn();
+const listEmailAccounts = vi.fn();
+const getEmailChannel = vi.fn();
+const saveEmailChannel = vi.fn();
+const revalidateSupport = vi.fn();
 vi.mock("./useSupport", async () => {
   const actual = await vi.importActual<typeof import("./useSupport")>("./useSupport");
-  return { ...actual, supportActions: () => ({ createDesk, updateDesk }) };
+  return {
+    ...actual,
+    supportActions: () => ({ createDesk, updateDesk, listEmailAccounts, getEmailChannel, saveEmailChannel }),
+    useAgents: () => ({ agents: [{ id: "u-1", displayName: "Ada" }] }),
+    useRevalidateSupport: () => revalidateSupport,
+  };
 });
 
 import { DeskModal } from "./DeskModal";
@@ -23,6 +32,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   createDesk.mockResolvedValue({ desk: makeDesk({ name: "Help" }) });
   updateDesk.mockResolvedValue({ desk: makeDesk() });
+  listEmailAccounts.mockResolvedValue({ accounts: [] });
+  getEmailChannel.mockResolvedValue({ channel: null });
+  saveEmailChannel.mockResolvedValue({ channel: null });
 });
 
 describe("setting up a desk", () => {

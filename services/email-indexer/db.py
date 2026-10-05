@@ -85,6 +85,7 @@ async def list_queued_drafts() -> list[DraftToSend]:
         SELECT d.id, d."accountId", d."toAddrs", d."ccAddrs",
                d."bccAddrs", d.subject, d.body,
                d."threadId", d."attachmentIds",
+               d."messageId", d."autoSubmitted",
                a."address" AS from_addr,
                a."smtpHost", a."smtpPort", a."smtpTls",
                a."username", a."passwordEnc"
@@ -108,9 +109,18 @@ async def list_queued_drafts() -> list[DraftToSend]:
                 m["messageId"]
                 for m in await _pool.fetch(
                     """
-                    SELECT "messageId" FROM "EmailMessage"
-                    WHERE "threadId" = $1 AND "accountId" = $2
-                    ORDER BY "createdAt" ASC, "receivedAt" ASC
+                    SELECT "messageId" FROM (
+                        SELECT m."messageId" AS "messageId", m."createdAt" AS happened_at
+                        FROM "EmailMessage" m
+                        WHERE m."threadId" = $1 AND m."accountId" = $2
+                        UNION ALL
+                        SELECT l."messageIdHeader" AS "messageId", l."createdAt" AS happened_at
+                        FROM "PmTicketEmailLink" l
+                        JOIN "EmailThread" t ON t.id = l."emailThreadId"
+                        WHERE t.id = $1 AND t."accountId" = $2 AND l.direction = 'OUTBOUND'
+                    ) ids
+                    GROUP BY "messageId"
+                    ORDER BY MIN(happened_at) ASC, "messageId" ASC
                     """,
                     r["threadId"], r["accountId"],
                 )
@@ -150,6 +160,10 @@ async def list_queued_drafts() -> list[DraftToSend]:
                 thread_message_ids=thread_ids,
                 attachments=attachments,
                 attachments_missing=len(attachments) != len(set(wanted)),
+                # WARP-3529 — the desk chose this draft's Message-ID and says
+                # whether it is an automatic acknowledgement.
+                message_id=r["messageId"],
+                auto_submitted=bool(r["autoSubmitted"]),
             )
         )
     return out

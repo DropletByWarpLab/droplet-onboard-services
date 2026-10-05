@@ -43,6 +43,53 @@ export interface FrigateRetention {
   detectionsRetainDays: number;
 }
 
+/** Parse one camera's RETAINED, resolved Frigate settings (inherited defaults included). */
+export function retentionFromFrigateConfig(configEntry: unknown): FrigateRetention {
+  const record = ((configEntry as Record<string, unknown> | undefined)?.record ??
+    {}) as Record<string, Record<string, Record<string, unknown>>>;
+  const num = (v: unknown): number => {
+    const n = Number(v ?? 0);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+  return {
+    enabled: (record as unknown as { enabled?: boolean }).enabled,
+    continuousDays: num(record.continuous?.days),
+    motionDays: num(record.motion?.days),
+    alertsRetainDays: num(record.alerts?.retain?.days),
+    detectionsRetainDays: num(record.detections?.retain?.days),
+  };
+}
+
+/** Only return allocation-grade retention when Frigate supplied all four resolved day counts. */
+export function verifiedRetentionFromFrigateConfig(configEntry: unknown): FrigateRetention | null {
+  if (typeof configEntry !== "object" || configEntry === null) return null;
+  const rawRecord = (configEntry as Record<string, unknown>).record;
+  if (typeof rawRecord !== "object" || rawRecord === null) return null;
+  const record = rawRecord as Record<string, unknown>;
+  const nestedDays = (name: string, nested: string): unknown => {
+    const section = record[name];
+    if (typeof section !== "object" || section === null) return undefined;
+    const retain = (section as Record<string, unknown>)[nested];
+    return typeof retain === "object" && retain !== null
+      ? (retain as Record<string, unknown>).days
+      : undefined;
+  };
+  const directDays = (name: string): unknown => {
+    const section = record[name];
+    return typeof section === "object" && section !== null
+      ? (section as Record<string, unknown>).days
+      : undefined;
+  };
+  const days = [
+    directDays("continuous"),
+    directDays("motion"),
+    nestedDays("alerts", "retain"),
+    nestedDays("detections", "retain"),
+  ];
+  if (days.some((day) => typeof day !== "number" || !Number.isFinite(day) || day < 0)) return null;
+  return retentionFromFrigateConfig(configEntry);
+}
+
 export function recordingModeOf(retention: FrigateRetention): RecordingMode {
   // Same predicate as the status badge, so the chip and the badge can never
   // disagree about whether anything is being kept.

@@ -251,6 +251,7 @@ All camera access works through the authenticated Nginx HTTPS gateway. The same 
 | Live snapshot | `GET /api/cameras/{name}/snapshot` | Session cookie or Bearer token |
 | Live MJPEG stream | `GET /api/cameras/{name}/live` | Session cookie or Bearer token |
 | HLS recording playback | `GET /api/cameras/{name}/playback.m3u8` | Session cookie or Bearer token |
+| HLS event clip playback | `GET /api/cameras/events/{id}/playback.m3u8` | Session cookie or Bearer token |
 | Detection events | `GET /api/cameras/events/recent` | Session cookie or Bearer token |
 | Real-time alerts | `GET /api/cameras/events/sse` | Session cookie or Bearer token |
 

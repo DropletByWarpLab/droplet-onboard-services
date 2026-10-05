@@ -13,6 +13,7 @@ import {
   recordingModeOf,
   storageKeysFromConfig,
   toStorageBytes,
+  verifiedRetentionFromFrigateConfig,
   type FrigateRetention,
 } from "./camera-recording-state.js";
 
@@ -25,6 +26,60 @@ const retention = (over: Partial<FrigateRetention> = {}): FrigateRetention => ({
   alertsRetainDays: 0,
   detectionsRetainDays: 0,
   ...over,
+});
+
+function resolvedConfig(days: [unknown, unknown, unknown, unknown], omitIndex?: number) {
+  const continuous: Record<string, unknown> = {};
+  const motion: Record<string, unknown> = {};
+  const alerts: Record<string, unknown> = {};
+  const detections: Record<string, unknown> = {};
+  if (omitIndex !== 0) continuous.days = days[0];
+  if (omitIndex !== 1) motion.days = days[1];
+  if (omitIndex !== 2) alerts.days = days[2];
+  if (omitIndex !== 3) detections.days = days[3];
+  return {
+    record: {
+      continuous,
+      motion,
+      alerts: { retain: alerts },
+      detections: { retain: detections },
+    },
+  };
+}
+
+describe("verifiedRetentionFromFrigateConfig — allocation requires all four resolved windows", () => {
+  it("accepts zero days and mixed zero/non-zero windows", () => {
+    expect(verifiedRetentionFromFrigateConfig(resolvedConfig([0, 0, 0, 0]))).toEqual(
+      retention({ enabled: undefined }),
+    );
+    expect(verifiedRetentionFromFrigateConfig(resolvedConfig([90, 0, 14, 0]))).toEqual(
+      retention({
+        enabled: undefined,
+        continuousDays: 90,
+        motionDays: 0,
+        alertsRetainDays: 14,
+        detectionsRetainDays: 0,
+      }),
+    );
+  });
+
+  it.each([
+    ["continuous NaN", [Number.NaN, 0, 0, 0]],
+    ["motion Infinity", [0, Number.POSITIVE_INFINITY, 0, 0]],
+    ["alerts negative", [0, 0, -1, 0]],
+    ["detections numeric string", [0, 0, 0, "14"]],
+  ] as const)("rejects %s", (_label, days) => {
+    expect(verifiedRetentionFromFrigateConfig(resolvedConfig([...days]))).toBeNull();
+  });
+
+  it.each([
+    ["continuous", 0],
+    ["motion", 1],
+    ["alerts", 2],
+    ["detections", 3],
+  ] as const)("rejects a missing %s day count", (_label, omitIndex) => {
+    expect(verifiedRetentionFromFrigateConfig(resolvedConfig([0, 0, 0, 0], omitIndex))).toBeNull();
+  });
 });
 
 describe("recordingModeOf — named for the broadest window that is open", () => {
