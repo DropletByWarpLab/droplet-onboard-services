@@ -77,8 +77,9 @@ import {
   M365NotConnectedError,
   markNeedsReconnect,
   type EntraClient,
-  type M365GrantGeneration,
 } from "./m365-auth.service.js";
+import type { M365GrantGeneration, PageHandler } from "./m365-contracts.js";
+export type { PageContext, PageHandler } from "./m365-contracts.js";
 import {
   classifySyncFailure,
   HANDLER_FAILED_CODE,
@@ -146,48 +147,6 @@ export interface CursorSyncResult {
   /** Set when the run failed; already redacted by `recordFailure`. */
   error?: string;
 }
-
-/**
- * Where a page sits in the enumeration it belongs to — the one fact only the
- * engine knows, and the one a handler that LANDS needs to remove what is gone.
- *
- * A run that starts from scratch (a first sync, or a resync after Microsoft
- * dropped the token) returns the CURRENT state and says nothing about what was
- * deleted in between, so a handler must delete what such a run did not return.
- * It can only do that if it is told when a full enumeration starts and when it
- * ends — and "ends" is not "this tick ends": a big source takes many ticks, each
- * resuming from a checkpoint (WARP-3059).
- *
- *   - `fullEnumeration` — the enumeration this page belongs to began from
- *     scratch: the cursor had no delta link when it was claimed. True for a first
- *     sync, a resync, and every tick that RESUMES one; false for an incremental
- *     run (and for resuming one), which must never delete anything the feed did
- *     not say was deleted.
- *   - `isFirstPage` — the first page of the enumeration, read in THIS tick: a
- *     tick that resumes from a checkpoint never sees it, because the first page
- *     was read by an earlier tick.
- *   - `isLastPage` — the page that carries the delta link, wherever in the
- *     enumeration's ticks it falls. It may carry no items at all.
- *
- * Computed from the cursor as it was CLAIMED, never from what the run has done
- * since: a page that fails and is retried is told the same thing it was told
- * the first time, which is what makes a handler's mark and sweep idempotent.
- */
-export interface PageContext {
-  readonly fullEnumeration: boolean;
-  readonly isFirstPage: boolean;
-  readonly isLastPage: boolean;
-  /** Ephemeral handler credentials, never stored or logged. */
-  readonly accessToken?: string;
-  readonly grantGeneration?: M365GrantGeneration;
-}
-
-/** What a caller does with a page of changes. Injected — see the module header. */
-export type PageHandler = (
-  cursor: DueCursor,
-  page: GraphPage,
-  run: PageContext,
-) => Promise<void> | void;
 
 export interface M365SyncDeps {
   prisma: PrismaClient;

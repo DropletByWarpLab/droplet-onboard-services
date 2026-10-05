@@ -40,6 +40,8 @@ import { scopesForRefresh, scopesForSignIn } from "./scopes.js";
 import { getMicrosoftApp } from "../account-provider-setup.service.js";
 import { microsoftCalendarViewOf, purgeMicrosoftCalendar, setMicrosoftCalendarEnabled, type MicrosoftCalendarView } from "./calendar-landing.service.js";
 import { microsoftMailViewOf, purgeMicrosoftMail, type MicrosoftMailView } from "./mail-settings.service.js";
+import type { M365GrantGeneration } from "./m365-contracts.js";
+export type { M365GrantGeneration } from "./m365-contracts.js";
 import {
   sealPendingFlow,
   sealTokenCache,
@@ -1189,17 +1191,6 @@ export async function purgeM365ForUser(
 }
 
 // --- Token acquisition ----------------------------------------------------
-
-/** Internal generation marker: a late Graph refusal can affect only this grant. */
-export interface M365GrantGeneration {
-  tokenCacheEnc: string | null;
-  cursorLinkHash?: string | null;
-  connectedAt?: Date | null;
-  calendarEnabled?: boolean;
-  calendarSourceId?: string | null;
-  mailEnabled?: boolean;
-  emailAccountId?: string | null;
-}
 
 function grantGenerationWhere(userId: string, generation: M365GrantGeneration): Prisma.M365ConnectionWhereInput {
   return { userId, state: "CONNECTED", tokenCacheEnc: generation.tokenCacheEnc,

@@ -3,7 +3,8 @@ import type { Prisma, PrismaClient } from "@prisma/client";
 import { z } from "zod";
 import { GRAPH_RESOURCES, grantCovers } from "./graph-resources.js";
 import { GRAPH_API_BASE_URL, GraphClient } from "./graph-client.js";
-import { getAccessToken, type EntraClient, type M365GrantGeneration } from "./m365-auth.service.js";
+import { getAccessToken, type EntraClient } from "./m365-auth.service.js";
+import type { M365GrantGeneration } from "./m365-contracts.js";
 
 type Db = PrismaClient | Prisma.TransactionClient;
 const MAIL_SETUP_ERROR = "Outlook email setup could not complete. Check the connection and try enabling email again.";
