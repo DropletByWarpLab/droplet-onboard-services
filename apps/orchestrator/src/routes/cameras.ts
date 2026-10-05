@@ -84,7 +84,6 @@ import { FrigateNotFoundError } from "../types/frigate-error.js";
  * not the bedroom") is WARP-1962 and needs a schema change; this ships
  * first precisely so the open door does not stay open waiting for it.
  */
-const CAMERA_VIEW_ROLES = ["owner", "admin", "family"] as const;
 
 /**
  * Who may take footage OFF the box or destroy it.
@@ -131,8 +130,14 @@ import {
   getCameraCandidates,
   macFromCandidateId,
   mutateLiveCandidate,
+  submitLiveCandidateCredentials,
 } from "../services/camera-candidates.service.js";
 import { getCameraStorage } from "../services/camera-storage.service.js";
+import {
+  embedRtspCredentials,
+  UnsafeCredentialsError,
+  validateCameraCredentials,
+} from "../lib/rtsp-credentials.js";
 import {
   backfillCameraRetention,
   planRetentionBackfill,
@@ -146,6 +151,7 @@ import {
   narrowCameraFilter,
   principalFromRequest,
   requireCameraAccess,
+  CAMERA_VIEW_ROLES,
   visibleCameraNames,
   setGrantsForUser,
 } from "../services/camera-access.service.js";
@@ -1273,29 +1279,48 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
   // configured with no DB row.
   router.post("/cameras", requireRole(...CAMERA_ADMIN_ROLES), async (req, res, next) => {
     try {
-      const { name, rtspUrl, manufacturer, model } = req.body;
+      const { name, rtspUrl: rawRtspUrl, manufacturer, model, username, password } = req.body;
       if (!name || typeof name !== "string" || !isValidCameraName(name)) {
         return res.status(400).json({ error: "Invalid camera name (alphanumeric + underscores/hyphens, 1-64 chars)" });
       }
-      if (!rtspUrl || typeof rtspUrl !== "string") {
+      if (!rawRtspUrl || typeof rawRtspUrl !== "string") {
         return res.status(400).json({ error: "Missing rtspUrl" });
       }
-      if (!/^rtsps?:\/\/[^/]/.test(rtspUrl)) {
+      if (!/^rtsps?:\/\/[^/]/.test(rawRtspUrl)) {
         return res.status(400).json({ error: "rtspUrl must start with rtsp:// or rtsps://" });
       }
-      if (/[{}\s]/.test(rtspUrl)) {
+      if (/[{}\s]/.test(rawRtspUrl)) {
         return res.status(400).json({ error: "rtspUrl must not contain braces or whitespace" });
       }
+      // WARP-3505: optional camera account, merged into the URL here so the
+      // password never has to be hand-typed into (or shown in) an address.
+      // Validated BEFORE the Frigate write; the error names the field only, and
+      // carries a code the dashboard turns into words.
+      const credCheck = validateCameraCredentials(username, password);
+      if (!credCheck.ok) {
+        return res.status(400).json({ error: credCheck.error, code: credCheck.code });
+      }
       // rtsp: is not a WHATWG "special" scheme, so its host is left opaque;
-      // parse it as http(s) to get a validated hostname.
+      // parse it as http(s) to get a validated hostname. From the address AS
+      // TYPED, before the account is merged in: a raw password may hold '/', '?',
+      // '#' or '@', which move where a parser ends the authority.
       let ipAddress: string;
       try {
-        ipAddress = new URL(rtspUrl.replace(/^rtsp:\/\//, "http://").replace(/^rtsps:\/\//, "https://")).hostname;
+        ipAddress = new URL(rawRtspUrl.replace(/^rtsp:\/\//, "http://").replace(/^rtsps:\/\//, "https://")).hostname;
       } catch {
         return res.status(400).json({ error: "rtspUrl is not a valid URL" });
       }
       if (!ipAddress) {
         return res.status(400).json({ error: "rtspUrl must name a host" });
+      }
+      let rtspUrl: string;
+      try {
+        rtspUrl = embedRtspCredentials(rawRtspUrl, username, password);
+      } catch (err) {
+        if (err instanceof UnsafeCredentialsError) {
+          return res.status(400).json({ error: err.message, code: err.code });
+        }
+        throw err;
       }
 
       // Add to Frigate
@@ -1966,6 +1991,68 @@ export function createCamerasRouter(prisma: PrismaClient): Router {
       });
       await reconcileFrigateCameras();
       res.json({ status: "accepted", camera: camera.name });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Add a discovered camera with credentials the operator typed (WARP-3505) ---
+  //
+  // A found camera whose password isn't a factory default sits at
+  // `needs_credentials` forever: the discovery ladder only tries defaults and
+  // the dashboard had no field for the real ones. camera-discovery probes RTSP
+  // with these credentials, asks ONVIF GetStreamUri only if no RTSP path was
+  // found, and adds the camera itself on success (it holds the pending record).
+  //
+  // Live (`mac:`) candidates only — a DB row has no probed stream to verify
+  // against. NET-05: the body is forwarded to the internal service and nowhere
+  // else — not logged, not stored, not echoed; failures return camera-discovery's
+  // prose + a `code` (auth_failed | locked | no_stream_path | unreachable |
+  // timeout | basic_auth_only), and credentials that cannot be used at all are a 400 with
+  // invalid_credentials | unsupported_password — refused before camera-discovery
+  // is asked, so no sign-in is spent on the camera. A discovered stream address
+  // that Frigate cannot safely store returns 400 unsupported_stream_address.
+  router.post("/cameras/discovered/:id/credentials", sensitiveRateLimit, requireRole(...CAMERA_ADMIN_ROLES), async (req, res, next) => {
+    try {
+      const mac = macFromCandidateId(req.params.id);
+      if (!mac) {
+        return res.status(400).json({
+          error: "Credentials can only be tested for a camera found on the network. Use Enter details instead.",
+        });
+      }
+      const { username, password } = (req.body ?? {}) as { username?: unknown; password?: unknown };
+      if (typeof username !== "string" || !username.trim()) {
+        return res.status(400).json({ error: "username is required", code: "invalid_credentials" });
+      }
+      if (typeof password !== "string" || !password) {
+        return res.status(400).json({ error: "password is required", code: "invalid_credentials" });
+      }
+      const credCheck = validateCameraCredentials(username, password);
+      if (!credCheck.ok) {
+        return res.status(400).json({ error: credCheck.error, code: credCheck.code });
+      }
+
+      const result = await submitLiveCandidateCredentials(mac, username, password);
+      if (!result.ok) {
+        const status = result.status >= 500 && result.status !== 502 ? 502 : result.status;
+        return res.status(status).json({
+          error: result.message ?? "Camera discovery could not add this camera",
+          ...(result.code ? { code: result.code } : {}),
+        });
+      }
+      // In Frigate now — keep the DB in step, same as the plain accept. By MAC
+      // AND by the name / address discovery says it added: a static-IP camera is
+      // keyed `ip:<addr>` there and its row has no macAddress, so a MAC-only match
+      // left `enabled` false and the camera out of the list it had just joined.
+      const matches: Prisma.CameraWhereInput[] = [{ macAddress: { in: [mac, mac.toLowerCase()] } }];
+      if (result.camera?.name) matches.push({ name: result.camera.name });
+      if (result.camera?.ip) matches.push({ ipAddress: result.camera.ip });
+      await prisma.camera.updateMany({
+        where: { OR: matches },
+        data: { enabled: true },
+      });
+      await reconcileFrigateCameras();
+      res.json({ status: "accepted" });
     } catch (err) {
       next(err);
     }
