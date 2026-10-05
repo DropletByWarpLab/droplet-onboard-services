@@ -7,7 +7,7 @@
  * disk, not on a mock. The database-level invariants (CHECK, cascades) are in
  * pm-attachment.pg.test.ts against a real Postgres.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -26,6 +26,10 @@ import {
 } from "./pm-attachments.service.js";
 import { blobPath } from "./pm-attachment-storage.js";
 import { makeAttachmentFake as makeFake } from "../../__tests__/helpers/pm-attachment-fake.js";
+import { createTransactionSeam } from "../../__tests__/helpers/prisma-tx-harness.js";
+import { nudgeOutbox } from "./pm-outbox.js";
+
+vi.mock("./pm-outbox.js", () => ({ nudgeOutbox: vi.fn() }));
 
 type Row = Record<string, unknown>;
 
@@ -42,6 +46,7 @@ const PE_HEAD = (() => {
 
 let root: string;
 beforeEach(() => {
+  vi.mocked(nudgeOutbox).mockReset();
   root = mkdtempSync(join(tmpdir(), "pm-attach-svc-"));
 });
 afterEach(() => {
@@ -221,6 +226,46 @@ describe("beginUpload", () => {
 // ── finalizeUpload ───────────────────────────────────────────────────────────
 
 describe("finalizeUpload", () => {
+  it("wakes only after the READY row and activity transaction has committed", async () => {
+    const f = makeFake();
+    const ticket = await startUpload(f);
+    const seam = createTransactionSeam({
+      client: () => f.prisma,
+      snapshot: () => structuredClone(f.db),
+      restore: (snapshot) => Object.assign(f.db, snapshot as typeof f.db),
+    });
+    let committed = false;
+    Object.assign(f.prisma, { $transaction: async (fn: (tx: any) => Promise<unknown>) => {
+      const result = await seam.$transaction(fn);
+      committed = true;
+      return result;
+    } });
+    vi.mocked(nudgeOutbox).mockImplementationOnce(() => {
+      expect(committed).toBe(true);
+      expect(f.db.attachments[0].status).toBe("READY");
+      expect(f.db.activity.map((row) => row.verb)).toEqual(["attachment_added"]);
+      expect(seam.calls()).toHaveLength(1);
+    });
+    await finalizeUpload(f.prisma, { ticket, workItemId: "wi-1", actorId: "u-1", file: file(), root });
+    expect(nudgeOutbox).toHaveBeenCalledTimes(1);
+  });
+
+  it("never wakes a transaction that fails after writing its activity", async () => {
+    const f = makeFake();
+    const ticket = await startUpload(f);
+    const seam = createTransactionSeam({
+      client: () => f.prisma,
+      snapshot: () => structuredClone(f.db),
+      restore: (snapshot) => Object.assign(f.db, snapshot as typeof f.db),
+    });
+    Object.assign(f.prisma, { $transaction: seam.$transaction });
+    Object.assign((f.prisma as any).pmAttachment, { findUniqueOrThrow: async () => { throw new Error("publication failed"); } });
+    await expect(finalizeUpload(f.prisma, { ticket, workItemId: "wi-1", actorId: "u-1", file: file(), root })).rejects.toThrow("publication failed");
+    expect(nudgeOutbox).not.toHaveBeenCalled();
+    expect(f.db.activity).toEqual([]);
+    expect(blobExists(ticket.storageKey)).toBe(false);
+  });
+
   it("publishes: UPLOADING -> READY with the VERIFIED type, and one attachment_added activity row", async () => {
     const f = makeFake();
     const ticket = await startUpload(f);
@@ -337,6 +382,7 @@ describe("finalizeUpload", () => {
 
     expect(f.db.attachments[0].status).toBe("READY"); // it DID publish...
     expect(blobExists(ticket.storageKey)).toBe(true); // ...so its file must still be there
+    expect(nudgeOutbox).not.toHaveBeenCalled(); // the commit was not acknowledged; the scheduled drain recovers it
   });
 
   it("never flips a row that is not UPLOADING (a sweep already claimed it)", async () => {
@@ -516,6 +562,7 @@ describe("deleteAttachment", () => {
         oldValue: "plan.pdf",
       }),
     ]);
+    expect(nudgeOutbox).toHaveBeenCalledTimes(1);
   });
 
   it("lets an owner or admin remove someone else's file", async () => {
@@ -532,6 +579,7 @@ describe("deleteAttachment", () => {
     expect(f.db.attachments[0].status).toBe("READY");
     expect(blobExists(row.storageKey as string)).toBe(true);
     expect(f.db.activity).toEqual([]);
+    expect(nudgeOutbox).not.toHaveBeenCalled();
   });
 
   it("refuses a non-admin when the file has no uploader on record", async () => {
@@ -556,6 +604,7 @@ describe("deleteAttachment", () => {
     ]);
     expect([a.status, b.status].sort()).toEqual(["fulfilled", "rejected"]);
     expect(f.db.activity.filter((r) => r.verb === "attachment_removed")).toHaveLength(1);
+    expect(nudgeOutbox).toHaveBeenCalledTimes(1);
   });
 
   it("when the blob will not unlink the user's delete still succeeds — the DELETED row is left for the sweep", async () => {

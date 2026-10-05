@@ -59,6 +59,7 @@ import { createPmMobileRouter } from "./routes/mobile/pm.js";
 import { createPmNativeRouter } from "./routes/pm/native.js";
 import { createPmRelationsRouter } from "./routes/pm/relations.js";
 import { createPmAttachmentsRouter } from "./routes/pm/attachments.js";
+import { createPmPlanningRouter } from "./routes/pm/planning.js";
 import { createPmWebhooksRouter } from "./routes/pm/webhooks.js";
 import { createPmOpenApiRouter } from "./routes/pm/openapi.js";
 import { createSupportRouter } from "./routes/support/support.routes.js";
@@ -602,7 +603,13 @@ export function createApp(
   // (`/pm/work-items/:id/attachments`, `/pm/attachments/:id`); the `/pm/work-items/:id`
   // route above takes one segment after `work-items`, so it cannot shadow these.
   app.use("/api", createPmAttachmentsRouter(prisma));
-  // WARP-3523 (ADR-069 WS-7) — the Timeline window and My Work lists.
+  // WARP-3521 (ADR-069 WS-5) — cycles (sprints) and modules (milestones). Its own
+  // router on the same prefix, for the same reason as relations: the paths are
+  // disjoint from the native router's (`/pm/cycles/*`, `/pm/modules/*`,
+  // `/pm/projects/:id/{cycles,modules,backlog}`, `/pm/work-items/:id/modules`).
+  // Every path starts `/pm/`, so the `projects` module gate and the guest tier
+  // floor already cover it.
+  app.use("/api", createPmPlanningRouter(prisma));
   // WARP-3532 (ADR-069 §9) — work webhooks and chat-app notifications. Owner
   // and admin only. `/pm/webhooks` is a literal second segment and no PM router
   // above owns a `/pm/:param`, so neither shadows the other.

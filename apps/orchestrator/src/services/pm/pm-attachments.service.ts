@@ -37,6 +37,7 @@ import {
 } from "./pm-attachment-content.js";
 import { isStorageKey, removeBlob, type StoredAttachmentFile } from "./pm-attachment-storage.js";
 import { sweepAttachmentCleanup } from "./pm-attachment-cleanup.js";
+import { nudgeOutbox } from "./pm-outbox.js";
 
 const logger = createLogger("pm-attachments");
 
@@ -305,7 +306,7 @@ export async function finalizeUpload(
       );
     }
 
-    return await prisma.$transaction(async (tx) => {
+    const attachment = await prisma.$transaction(async (tx) => {
       const flipped = await tx.pmAttachment.updateMany({
         where: { id: ticket.id, status: "UPLOADING" },
         data: {
@@ -330,6 +331,8 @@ export async function finalizeUpload(
       });
       return mapAttachment(await tx.pmAttachment.findUniqueOrThrow({ where: { id: ticket.id } }));
     });
+    nudgeOutbox();
+    return attachment;
   } catch (err) {
     await abortUpload(prisma, ticket, input.root);
     throw err;
@@ -379,6 +382,7 @@ export async function deleteAttachment(
     });
   });
 
+  nudgeOutbox();
   // The user's intent is recorded. What remains is housekeeping: any failure
   // below is the sweep's to finish, and must not turn a successful delete into
   // an error the user would retry.

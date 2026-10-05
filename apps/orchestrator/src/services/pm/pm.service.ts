@@ -25,6 +25,7 @@ import type { Prisma, PrismaClient } from "@prisma/client";
 import { READ_COMMITTED_TX, SERIALIZABLE_TX } from "../../lib/prisma-tx.js";
 import { sanitizePmHtml } from "./sanitize-html.js";
 import { finishQueuedAttachmentCleanup, queueAttachmentCleanup } from "./pm-attachment-cleanup.js";
+import { PM_PLANNING_ERRORS, lockAttachableCycle } from "./pm-planning.js";
 import { nudgeOutbox } from "./pm-outbox.js";
 import {
   DEPARTMENT_SELECT,
@@ -93,6 +94,11 @@ export const PM_ERRORS = {
   // pm-department.ts and are folded in here so `mapServiceError` keeps ONE
   // vocabulary to switch on.
   ...PM_DEPARTMENT_ERRORS,
+  // WARP-3521 — cycles and modules. Same arrangement: the codes live in the
+  // leaf both the cycle/module services and this file import, and are folded in
+  // here. `cycle_not_found` / `invalid_cycle` / `cycle_completed` are the ones
+  // createWorkItem / updateWorkItem can throw (planning an item into a cycle).
+  ...PM_PLANNING_ERRORS,
 } as const;
 
 // ── Default workspace + state set ────────────────────────────────────────────
@@ -1414,6 +1420,46 @@ export async function listWorkItems(
   };
 }
 
+/**
+ * WARP-3521 — a project's work items narrowed by one extra predicate, with the
+ * EXACT total beside them. Backs the cycle detail, the cycle backlog and the
+ * module detail: "this cycle's items" has to be a server-side question, because
+ * the board's own list is a capped page and a cycle's items can sit beyond it.
+ *
+ * It is a sibling of `listWorkItems`, not a parameter on it, so the board's list
+ * (and its callers — the mobile router, the assistant's tools) keep exactly the
+ * signature they have. Archived items are excluded, like every other list.
+ * `perPage` defaults to the 200 maximum: these are scoped sets (one sprint, one
+ * epic), and the caller that wants a smaller page asks for one.
+ */
+export async function listWorkItemsWhere(
+  prisma: PrismaClient,
+  projectId: string,
+  extra: Prisma.PmWorkItemWhereInput,
+  opts: { perPage?: number; page?: number } = {},
+): Promise<{ items: ApiWorkItem[]; total: number }> {
+  const project = await prisma.pmProject.findUnique({
+    where: { id: projectId },
+    include: { department: { select: DEPARTMENT_SELECT } },
+  });
+  if (!project || isServiceDesk(project)) throw new Error(PM_ERRORS.PROJECT_NOT_FOUND);
+
+  const where: Prisma.PmWorkItemWhereInput = { AND: [{ projectId, isArchived: false }, extra] };
+  const perPage = Math.max(1, Math.min(200, opts.perPage ?? 200));
+  const page = Math.max(1, opts.page ?? 1);
+  const [rows, total] = await Promise.all([
+    prisma.pmWorkItem.findMany({
+      where,
+      include: WORK_ITEM_INCLUDE,
+      orderBy: [{ sortOrder: "asc" }, { sequenceId: "asc" }],
+      skip: (page - 1) * perPage,
+      take: perPage,
+    }),
+    prisma.pmWorkItem.count({ where }),
+  ]);
+  return { items: rows.map((r) => mapWorkItem(r, project.identifier, project.department)), total };
+}
+
 export async function getWorkItem(prisma: PrismaClient, id: string): Promise<ApiWorkItem> {
   const row = await prisma.pmWorkItem.findUnique({ where: { id }, include: WORK_ITEM_INCLUDE });
   if (!row) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
@@ -1583,6 +1629,8 @@ export async function createWorkItem(
     parentId?: string;
     /** ADR-045 §5.3 — overrides the project's department for this item. */
     departmentId?: string;
+    /** WARP-3521 — plan the new item into a cycle of THIS project. */
+    cycleId?: string;
     startDate?: Date;
     dueDate?: Date;
   },
@@ -1675,6 +1723,12 @@ export async function createWorkItem(
       if (input.departmentId !== undefined) {
         await assertAssignableDepartment(tx, input.departmentId);
       }
+      // WARP-3521 — same place, same reason: the cycle that is checked (and
+      // row-locked, so a racing `completeCycle` cannot finish it under us) is
+      // the cycle the item is written against.
+      if (input.cycleId !== undefined) {
+        await lockAttachableCycle(tx, input.cycleId, projectId);
+      }
       // Bump the per-project counter atomically → the work item's number.
       const bumped = await tx.pmProject.update({
         where: { id: projectId },
@@ -1695,6 +1749,7 @@ export async function createWorkItem(
           priority: input.priority ?? "none",
           parentId: input.parentId ?? null,
           departmentId: input.departmentId ?? null,
+          ...(input.cycleId !== undefined ? { cycleId: input.cycleId } : {}),
           createdById: actorId,
           startDate: input.startDate ?? null,
           dueDate: input.dueDate ?? null,
@@ -1706,6 +1761,17 @@ export async function createWorkItem(
         },
       });
       await writeActivity(tx, { workItemId: item.id, actorId, verb: "created" });
+      // WARP-3521 — planned into a cycle at birth: the burndown reads this row.
+      if (input.cycleId !== undefined) {
+        await writeActivity(tx, {
+          workItemId: item.id,
+          actorId,
+          verb: "cycle_added",
+          field: "cycle",
+          oldValue: null,
+          newValue: input.cycleId,
+        });
+      }
       // WARP-2587: a create WITH assignees is an assignment, and `created`
       // does not say who. One `assigned` row per assignee, so the notify
       // sweep sees the same shape whether the assignment happened at create
@@ -1754,6 +1820,9 @@ export async function updateWorkItem(
      *  so the item inherits its project's department again (which may itself
      *  be none). */
     departmentId?: string | null;
+    /** WARP-3521 — `undefined` leaves the cycle alone; `null` takes the item out
+     *  of its cycle (back to the backlog); an id plans it into that cycle. */
+    cycleId?: string | null;
     sortOrder?: number;
   },
 ): Promise<ApiWorkItem> {
@@ -1866,7 +1935,53 @@ export async function updateWorkItem(
     if (fields.parentId !== undefined) {
       data.parent = fields.parentId ? { connect: { id: fields.parentId } } : { disconnect: true };
     }
-    await tx.pmWorkItem.update({ where: { id }, data });
+    // WARP-3521 — planning into / out of a cycle. The item's CURRENT cycle is
+    // re-read here, inside the transaction, rather than trusted from the read
+    // above: `completeCycle` moves items under a SERIALIZABLE transaction of its
+    // own, and an activity row whose `oldValue` names a cycle the item left a
+    // moment earlier would corrupt exactly the history the burndown is rebuilt
+    // from. `undefined` below means "no cycle change"; `null` is a real
+    // previous value (no cycle).
+    let previousCycleId: string | null | undefined;
+    if (fields.cycleId !== undefined) {
+      const current = await tx.pmWorkItem.findUnique({ where: { id }, select: { cycleId: true } });
+      if (!current) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+      if (current.cycleId !== fields.cycleId) {
+        // Only an attach is guarded. Taking an item OUT of a cycle (null) is
+        // always allowed, including out of a completed one.
+        if (fields.cycleId !== null) {
+          await lockAttachableCycle(tx, fields.cycleId, existing.projectId);
+        }
+        // Compare-and-set the foreign key so overlapping moves cannot both
+        // write history from the same stale `oldValue`. The target cycle is
+        // locked first (the same cycle→item order as completeCycle), so an
+        // attach cannot slip into a cycle as it completes.
+        let oldCycleId = current.cycleId;
+        let moved = await tx.pmWorkItem.updateMany({
+          where: { id, cycleId: oldCycleId },
+          data: { cycleId: fields.cycleId },
+        });
+        if (moved.count === 0) {
+          const latest = await tx.pmWorkItem.findUnique({ where: { id }, select: { cycleId: true } });
+          if (!latest) throw new Error(PM_ERRORS.WORK_ITEM_NOT_FOUND);
+          oldCycleId = latest.cycleId;
+          // Another request may already have moved it to this destination. In
+          // that case this request is a no-op; otherwise retry once against the
+          // value that now owns the row.
+          if (oldCycleId !== fields.cycleId) {
+            moved = await tx.pmWorkItem.updateMany({
+              where: { id, cycleId: oldCycleId },
+              data: { cycleId: fields.cycleId },
+            });
+            if (moved.count !== 1) throw new Error(PM_ERRORS.CONCURRENT_MUTATION);
+            previousCycleId = oldCycleId;
+          }
+        } else {
+          previousCycleId = oldCycleId;
+        }
+      }
+    }
+    if (Object.keys(data).length > 0) await tx.pmWorkItem.update({ where: { id }, data });
 
     // Assignees / labels are full-set replacements (delete-all + re-create).
     if (assignees !== undefined) {
@@ -1895,6 +2010,20 @@ export async function updateWorkItem(
         field: "state",
         oldValue: existing.stateId,
         newValue: fields.stateId,
+      });
+    }
+    // WARP-3521 — one row per cycle change, `oldValue` / `newValue` being the
+    // cycle left and the cycle joined (either may be null). A move A -> B is ONE
+    // `cycle_added` row {A -> B}; the burndown reads such a row as a leave for A
+    // and a join for B, so the verb only has to say which side is non-null.
+    if (previousCycleId !== undefined) {
+      await writeActivity(tx, {
+        workItemId: id,
+        actorId,
+        verb: fields.cycleId ? "cycle_added" : "cycle_removed",
+        field: "cycle",
+        oldValue: previousCycleId,
+        newValue: fields.cycleId ?? null,
       });
     }
     // ADR-045 §5.3 — re-routing work is a decision someone made about who owns

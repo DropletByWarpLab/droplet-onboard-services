@@ -17,6 +17,11 @@ import type {
   PmSummary,
   PmActivity,
   PmAttachment,
+  PmCycle,
+  PmModule,
+  PmModuleRef,
+  PmBurndown,
+  PmScopedItems,
   Person,
 } from "./types";
 
@@ -326,6 +331,68 @@ export function useAttachments(workItemId: string | null) {
   return { attachments: data?.attachments, maxBytes: data?.limits?.maxBytes, error, isLoading, mutate };
 }
 
+// ── Cycles and modules (WARP-3521) ──────────────────────────────────────────
+
+/** A project's cycles, active first, then upcoming, then completed (the server's order). */
+export function useProjectCycles(projectId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    projectId ? `/api/pm/projects/${projectId}/cycles` : null,
+    (u: string) => getJson<{ cycles: PmCycle[] }>(u),
+  );
+  return { cycles: data?.cycles, error, isLoading, mutate };
+}
+
+/** One cycle's own work items. Server-scoped: the board's project list is a capped page. */
+export function useCycleItems(cycleId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    cycleId ? `/api/pm/cycles/${cycleId}/work-items` : null,
+    (u: string) => getJson<PmScopedItems>(u),
+  );
+  return { items: data?.work_items, total: data?.total, error, isLoading, mutate };
+}
+
+/** The planning backlog: the project's unfinished work that is in no cycle. */
+export function useBacklog(projectId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    projectId ? `/api/pm/projects/${projectId}/backlog` : null,
+    (u: string) => getJson<PmScopedItems>(u),
+  );
+  return { items: data?.work_items, total: data?.total, error, isLoading, mutate };
+}
+
+export function useCycleBurndown(cycleId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    cycleId ? `/api/pm/cycles/${cycleId}/burndown` : null,
+    (u: string) => getJson<{ burndown: PmBurndown }>(u),
+  );
+  return { burndown: data?.burndown, error, isLoading, mutate };
+}
+
+export function useProjectModules(projectId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    projectId ? `/api/pm/projects/${projectId}/modules` : null,
+    (u: string) => getJson<{ modules: PmModule[] }>(u),
+  );
+  return { modules: data?.modules, error, isLoading, mutate };
+}
+
+/** One module's own work items. */
+export function useModuleItems(moduleId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    moduleId ? `/api/pm/modules/${moduleId}/work-items` : null,
+    (u: string) => getJson<PmScopedItems>(u),
+  );
+  return { items: data?.work_items, total: data?.total, error, isLoading, mutate };
+}
+
+/** The modules ONE work item is in — the drawer's picker. */
+export function useWorkItemModules(workItemId: string | null) {
+  const { data, error, isLoading, mutate } = useSWR(
+    workItemId ? `/api/pm/work-items/${workItemId}/modules` : null,
+    (u: string) => getJson<{ modules: PmModuleRef[] }>(u),
+  );
+  return { modules: data?.modules, error, isLoading, mutate };
+}
 
 /** One entry of `GET /api/pm/people` — what Projects needs to show a person. */
 interface PmPerson {
@@ -375,6 +442,8 @@ export interface CreateWorkItemInput {
   assignees?: string[];
   label_ids?: string[];
   due_date?: string;
+  /** WARP-3521 — plan the new item into a cycle of this project. */
+  cycle_id?: string;
 }
 
 export function pmActions() {
@@ -407,6 +476,62 @@ export function pmActions() {
     deleteProject: (id: string, confirmIdentifier: string) =>
       send<{ deleted: string }>(`/api/pm/projects/${id}`, "DELETE", { confirm_identifier: confirmIdentifier }),
     deleteAttachment: (id: string) => send<{ deleted: string }>(`/api/pm/attachments/${id}`, "DELETE"),
+
+    // ── Cycles (WARP-3521). Dates are `YYYY-MM-DD`; `null` clears one. ──
+    createCycle: (
+      projectId: string,
+      body: { name: string; description?: string | null; start_date?: string | null; end_date?: string | null },
+    ) => send<{ cycle: PmCycle }>(`/api/pm/projects/${projectId}/cycles`, "POST", body),
+    updateCycle: (
+      id: string,
+      patch: { name?: string; description?: string | null; start_date?: string | null; end_date?: string | null },
+    ) => send<{ cycle: PmCycle }>(`/api/pm/cycles/${id}`, "PATCH", patch),
+    deleteCycle: (id: string) => send<{ deleted: string }>(`/api/pm/cycles/${id}`, "DELETE"),
+    startCycle: (id: string) => send<{ cycle: PmCycle }>(`/api/pm/cycles/${id}/start`, "POST"),
+    /** `moveIncompleteTo` is a cycle id or the word "backlog" — required, never defaulted. */
+    completeCycle: (id: string, moveIncompleteTo: string) =>
+      send<{ cycle: PmCycle; moved: { count: number; to: string | null } }>(
+        `/api/pm/cycles/${id}/complete`,
+        "POST",
+        { moveIncompleteTo },
+      ),
+    /** Plan an item into a cycle, or (null) take it out. */
+    setItemCycle: (itemId: string, cycleId: string | null) =>
+      send<{ work_item: PmWorkItem }>(`/api/pm/work-items/${itemId}`, "PATCH", { cycle_id: cycleId }),
+
+    // ── Modules (WARP-3521) ──
+    createModule: (
+      projectId: string,
+      body: {
+        name: string;
+        description?: string | null;
+        lead_id?: string | null;
+        status?: string;
+        start_date?: string | null;
+        target_date?: string | null;
+      },
+    ) => send<{ module: PmModule }>(`/api/pm/projects/${projectId}/modules`, "POST", body),
+    updateModule: (
+      id: string,
+      patch: {
+        name?: string;
+        description?: string | null;
+        lead_id?: string | null;
+        status?: string;
+        start_date?: string | null;
+        target_date?: string | null;
+      },
+    ) => send<{ module: PmModule }>(`/api/pm/modules/${id}`, "PATCH", patch),
+    deleteModule: (id: string) => send<{ deleted: string }>(`/api/pm/modules/${id}`, "DELETE"),
+    addModuleItems: (moduleId: string, workItemIds: string[]) =>
+      send<{ added: number; module: PmModule }>(`/api/pm/modules/${moduleId}/work-items`, "POST", {
+        work_item_ids: workItemIds,
+      }),
+    removeModuleItem: (moduleId: string, workItemId: string) =>
+      send<{ removed: number; module: PmModule }>(
+        `/api/pm/modules/${moduleId}/work-items/${workItemId}`,
+        "DELETE",
+      ),
   };
 }
 

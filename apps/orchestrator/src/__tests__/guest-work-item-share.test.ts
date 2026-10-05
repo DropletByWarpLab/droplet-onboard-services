@@ -113,11 +113,12 @@ function scanRoutes(...file: string[]): RouteRow[] {
 const mountedAt = (path: string): string => (path.startsWith("/api/") ? path : `/api${path}`);
 const concrete = (path: string): string => mountedAt(path).replace(/:[A-Za-z]+/g, "x");
 
-/** Every route of the PM routers: native, relations, attachments, schedule, and mobile. */
+/** Every PM route family, including attachments, planning, schedule and mobile. */
 const PM_ROUTES: RouteRow[] = [
   ...scanRoutes("routes", "pm", "native.ts"),
   ...scanRoutes("routes", "pm", "relations.ts"),
   ...scanRoutes("routes", "pm", "attachments.ts"),
+  ...scanRoutes("routes", "pm", "planning.ts"),
   ...scanRoutes("routes", "pm", "schedule.ts"),
   ...scanRoutes("routes", "mobile", "pm.ts"),
 ];
